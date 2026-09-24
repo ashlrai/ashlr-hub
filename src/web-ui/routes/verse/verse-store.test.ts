@@ -9,6 +9,7 @@ import {
   formatTokens,
   getVerseSessionState,
   groupTranscriptItems,
+  lastTurnActivityAt,
   resetVerseStore,
   seedVerseSession,
   setVerseSession,
@@ -192,6 +193,15 @@ describe('formatTokens', () => {
     expect(formatTokens(1_250_000)).toBe('1.3M');
     expect(formatTokens(null)).toBe('—');
   });
+
+  it('chooses the unit after rounding, so nothing prints as "1000k" or "1000"', () => {
+    expect(formatTokens(999_499)).toBe('999k');
+    expect(formatTokens(999_500)).toBe('1M');
+    expect(formatTokens(999_999)).toBe('1M');
+    expect(formatTokens(1_000_000)).toBe('1M');
+    expect(formatTokens(999.4)).toBe('999');
+    expect(formatTokens(999.6)).toBe('1k');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -217,6 +227,18 @@ describe('verse store — V3.9 context events', () => {
     expect(usage.inputTokens).toBe(codex.usage.inputTokens);
   });
 
+  it('keeps the provenance a `context` event states — a mode switch\'s catalog budget is not a CLI reading', () => {
+    // The event setContextMode emits: turnId null, the new mode's CATALOG budget.
+    const codex = session({ engine: 'codex', seatId: 'codex-b', model: 'gpt-6-astra', usage: { ...session().usage, contextWindow: 258_400, autoCompactAt: 244_800, contextWindowSource: 'provider-catalog' } });
+    seedVerseSession('vs_1', codex, []);
+    applyVerseEvent('vs_1', ev(1, 'context', { turnId: null, contextTokens: 0, contextWindow: 828_400, exact: true, autoCompactAt: 784_800, contextWindowSource: 'provider-catalog' }));
+    const usage = getVerseSessionState('vs_1').session!.usage;
+    expect(usage).toMatchObject({ contextWindow: 828_400, autoCompactAt: 784_800, contextWindowSource: 'provider-catalog' });
+    // A value outside the known set is not stored; the pre-field default applies.
+    const odd = applyContextReading(codex, ev(2, 'context', { turnId: 't1', contextTokens: 1, contextWindow: 258_400, exact: true, contextWindowSource: 'guess' as never }) as Extract<ReturnType<typeof ev>, { type: 'context' }>);
+    expect(odd.contextWindowSource).toBe('runtime');
+  });
+
   it('reconciles the compaction point when an older server sends a new window without one', () => {
     const s = session({ engine: 'codex', usage: { ...session().usage, contextWindow: 258_400, autoCompactAt: 244_800 } });
     const next = applyContextReading(s, ev(1, 'context', { turnId: 't1', contextTokens: 10, contextWindow: 828_400, exact: true }) as Extract<ReturnType<typeof ev>, { type: 'context' }>);
@@ -225,6 +247,13 @@ describe('verse store — V3.9 context events', () => {
     // Same window, no point sent → the stored point stands.
     const same = applyContextReading(s, ev(2, 'context', { turnId: 't1', contextTokens: 10, contextWindow: 258_400, exact: true }) as Extract<ReturnType<typeof ev>, { type: 'context' }>);
     expect(same.autoCompactAt).toBe(244_800);
+  });
+
+  it('adopts a LOCAL window from a context event that names its source (the engine refreshed it before the turn)', () => {
+    const local = session({ engine: 'local', seatId: 'local:qwen3-coder', model: 'qwen3-coder', usage: { ...session().usage, contextWindow: 262_144, autoCompactAt: 229_144, contextWindowSource: 'provider-catalog' } });
+    seedVerseSession('vs_1', local, []);
+    applyVerseEvent('vs_1', ev(1, 'context', { turnId: null, contextTokens: 30_000, contextWindow: 65_536, exact: true, autoCompactAt: 32_536, contextWindowSource: 'runtime' }));
+    expect(getVerseSessionState('vs_1').session!.usage).toMatchObject({ contextWindow: 65_536, autoCompactAt: 32_536, contextWindowSource: 'runtime' });
   });
 
   it('never lets a reading move a LOCAL window: Verse sets that one itself', () => {
@@ -305,5 +334,22 @@ describe('verse-events — V3.9 frames', () => {
     // Older types keep the original seq/type-only check.
     expect(parseVerseEventFrame(JSON.stringify({ seq: 3, type: 'usage' }))).not.toBeNull();
     expect(parseVerseEventFrame('not json')).toBeNull();
+  });
+});
+
+describe('lastTurnActivityAt', () => {
+  it('is the newest provider round trip, ignoring a mode switch\'s turnless context event', () => {
+    const at = (seq: number, iso: string, type: Parameters<typeof ev>[1], fields: Record<string, unknown>) => ({ ...ev(seq, type, fields as never), at: iso });
+    expect(lastTurnActivityAt([])).toBeNull();
+    const log = [
+      at(1, '2026-09-23T09:00:00.000Z', 'user-message', { turnId: 't1', text: 'go' }),
+      at(2, '2026-09-23T09:01:00.000Z', 'usage', { turnId: 't1', usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0, contextTokens: 5, contextWindow: null } }),
+      at(3, '2026-09-23T09:02:00.000Z', 'turn-done', { turnId: 't1', ok: true, nativeSessionId: null, durationMs: 1 }),
+      // A mode switch two hours later: no provider saw anything.
+      at(4, '2026-09-23T11:00:00.000Z', 'context', { turnId: null, contextTokens: 5, contextWindow: 1_000_000, exact: true, autoCompactAt: 967_000 }),
+    ];
+    expect(lastTurnActivityAt(log)).toBe('2026-09-23T09:02:00.000Z');
+    const withReading = [...log, at(5, '2026-09-23T11:30:00.000Z', 'context', { turnId: 't2', contextTokens: 6, contextWindow: 1_000_000, exact: true })];
+    expect(lastTurnActivityAt(withReading)).toBe('2026-09-23T11:30:00.000Z');
   });
 });

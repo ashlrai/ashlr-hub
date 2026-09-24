@@ -360,6 +360,9 @@
   width: max-content;
   min-width: 280px;
   max-width: min(380px, calc(100vw - var(--space-6)));
+  /* ContextModeControl replaces this placement with a measured, viewport-
+     clamped position: fixed (modeMenuPlacement) whenever layout exists; this
+     absolute one is only the no-layout fallback. */
   padding: var(--space-1);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
@@ -396,6 +399,16 @@
 .modeMenuNote {
   padding: var(--space-1) var(--space-2);
   color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line, 1.4);
+}
+/* The one menu note that is NOT free: switching down past Standard's
+   compaction point compacts on the next turn. Warning ink, words carry it. */
+.modeMenuWarn {
+  margin: 0 var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-left: 2px solid var(--status-warning-fg, var(--accent-500));
+  color: var(--text-secondary);
   font-size: var(--text-xs-size);
   line-height: var(--text-xs-line, 1.4);
 }

@@ -52,6 +52,7 @@ import {
 import {
   VERSE_DEFAULT_CONTEXT_WINDOWS,
   type VerseContextBudget,
+  type VerseEngine,
   type VerseModelOption,
   type VerseWindowSource,
 } from './types.js';
@@ -621,4 +622,69 @@ export function localModelOption(tag: string, label: string, window: number, sou
     autoCompactAt: compactAt > 0 ? compactAt : null,
     windowSource: source,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Launch snapshots written before 3.9
+// ---------------------------------------------------------------------------
+
+/** Whether an option was built by the V3.9 catalog (it states its budgets), rather than read from an older launch snapshot. */
+function hasCatalogBudgets(option: VerseModelOption): boolean {
+  return option.autoCompactAt !== undefined || option.expansive !== undefined || option.windowSource !== undefined;
+}
+
+/** The documented V3.9 option for a model id on an engine, or null when this module has none. */
+function documentedOption(engine: VerseEngine, model: string): VerseModelOption | null {
+  const wanted = canonicalModelId(model);
+  switch (engine) {
+    case 'claude': {
+      const spec = claudeSpecFor(model);
+      return spec ? claudeOption(spec, null) : null;
+    }
+    case 'codex':
+      return codexModelOptions(null).find((m) => canonicalModelId(m.id) === wanted) ?? null;
+    case 'grok':
+      return grokModelOptions(null).find((m) => canonicalModelId(m.id) === wanted) ?? null;
+    default:
+      // Local windows are the runtime's allocation at discovery time, not a
+      // property of the tag; there is nothing documented to fall back to (the
+      // engine refreshes them from live discovery instead — `refreshLocalWindow`).
+      return null;
+  }
+}
+
+/**
+ * The option whose budgets govern a session, given the option its PINNED
+ * launch snapshot lists (`snapshot`, null when the snapshot no longer lists
+ * the model).
+ *
+ * Normally the snapshot's own option. The exception is a snapshot written
+ * before 3.9: its options carry one flat window and no budgets (claude: the
+ * CLI's 200k fallback for every model; codex: the RAW 272k window, which the
+ * CLI measures against 95% of; grok: the 500k default), so it can state
+ * neither a compaction point nor an expansive budget. For those, the model's
+ * DOCUMENTED option from this module supplies the budgets — the same builders
+ * the live seat lists are made from, so the web UI (which reads the live seat)
+ * and the engine and adapters (which read the snapshot) can never disagree
+ * about whether a mode exists or what it costs. The snapshot keeps its identity
+ * (id, label); only budgets are borrowed.
+ *
+ * ONE helper, used by the engine (`effectiveModelOption`) and by every adapter
+ * that turns a budget into CLI flags (claude `--autocompact`, codex
+ * `-c model_context_window`), because two copies of this rule would drift and
+ * the flag the CLI is given must be the budget the meter shows.
+ *
+ * A model this module does not know keeps its snapshot option (and, lacking an
+ * expansive budget, gets no expansive mode — absent, never faked). Local is
+ * never substituted.
+ */
+export function legacyModelOptionFallback(
+  engine: VerseEngine,
+  model: string,
+  snapshot: VerseModelOption | null,
+): VerseModelOption | null {
+  if (snapshot && hasCatalogBudgets(snapshot)) return snapshot;
+  const known = documentedOption(engine, snapshot?.id ?? model);
+  if (!known) return snapshot;
+  return { ...known, id: snapshot?.id ?? model, label: snapshot?.label ?? known.label, unavailableReason: null };
 }

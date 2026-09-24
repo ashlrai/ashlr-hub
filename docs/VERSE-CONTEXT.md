@@ -60,7 +60,11 @@ window, not a guess.
 
 **Local seats ignore runtime windows.** Verse sets a local seat's window itself (§1.5) and tells the
 CLI with `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, so the CLI's `modelUsage` only echoes Verse's own number back.
-Without that variable it would echo the CLI's 200k guess, which is wrong.
+Without that variable it would echo the CLI's 200k guess, which is wrong. The number the CLI is told
+and the number the meter draws are the **same** one — the session's stored `usage.contextWindow` —
+and before each local turn launches Verse re-resolves the seat's window from live discovery and
+corrects the stored value if it changed (§1.5), so a stale record cannot tell the CLI one window
+while the meter shows another.
 
 The last-resort fallbacks mirror what each CLI itself assumes for an id it does not know, so the meter
 never claims more than the CLI will allow: Claude 200,000 (Claude Code's default for an unrecognized
@@ -206,11 +210,14 @@ whatever the **runner** serves — and one resolver (`local-models.ts`) decides 
    65,536 (a 262,144 context split across 4 slots).
 2. **Ollama, `num_ctx` pinned in `/api/show` parameters:** `min(num_ctx, native context_length)`.
    `qwen3.8:27b-ctx64k` pins 65,536 and always loads at 65,536.
-3. **Ollama, not pinned:** `min(server default, native)`, where the server default is, in order:
-   the tag's `/api/ps` `context_length` when it is resident; `OLLAMA_CONTEXT_LENGTH` (> 0) in Verse's
-   own environment; the same variable as the **running** server printed it in its config line in
-   `~/.ollama/logs/server.log` (the macOS app does not share Verse's environment); the last
-   `vram-based default context … default_num_ctx=N` line in that log. With none of these, the native
+3. **Ollama, not pinned:** `min(server default, native)`. The **server default** — what an unpinned
+   request actually gets — wins over residency: `OLLAMA_CONTEXT_LENGTH` as the **running** server
+   printed it in its config line in `~/.ollama/logs/server.log` (the macOS app does not share Verse's
+   environment); the last `vram-based default context … default_num_ctx=N` line in that log; the same
+   variable (> 0) in Verse's own environment. Only when none of those is known does the tag's `/api/ps`
+   `context_length` count, because a resident runner may have been loaded by **another client** with
+   its own `num_ctx` (a summarizer asking for 8k would otherwise shrink the seat to 8k, while Ollama
+   reloads the tag at its default for Verse's own request). With none of these, the native
    (trained) length is used and marked `fallback`, because Ollama may allocate far less. A server
    default is only applied when the native length is known to cap it — a 262,144 VRAM default on an
    8k model would be a 32× overstatement. That default is **machine-dependent**:
@@ -231,9 +238,27 @@ session within the 200k it assumes. Local seats also pass `--exclude-dynamic-sys
 which moves per-machine prompt sections (cwd, env, git status) into the first user message so the
 system-prompt prefix is reusable across sessions.
 
+**The window is refreshed before every local turn.** A session stores the window it was created with,
+and the adapter passes exactly that stored `usage.contextWindow` as `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
+So a record can go stale — a chat created when a tag resolved to 262,144 that now serves 65,536 would
+tell the CLI 262,144 and overflow the runner again. Before each local turn launches, the engine
+re-resolves the seat's window from live discovery and, when it differs, rewrites the stored window and
+its compaction point (and emits a `context` event) first. The meter and the CLI therefore always use
+one number, and it is the current one. When discovery cannot resolve the tag at that moment, the
+stored window is kept rather than guessed.
+
+**Seats too small to work are listed, not offered.** Claude Code compacts at `W − 33,000`, and its fixed
+prompt on a local seat measured about 15k (14,695 and 14,942 context tokens for a one-word reply,
+with `--exclude-dynamic-system-prompt-sections`). A window under **56,000**
+(`LOCAL_MIN_USABLE_WINDOW` = 15k base prompt + 8k minimum working room + 20k output reserve + 13k
+buffer) would compact on every turn, so such a tag is listed **disabled, with the reason**
+(`unavailableReason`) instead of being offered — e.g. a 32,768-token `qwen2.5-coder` or a `-ctx32k`
+pin. Serve it with a larger `num_ctx` to use it. An existing local chat whose tag now resolves below that
+is refused at its next turn (409 `VERSE_MODEL_UNAVAILABLE`, with the reason) before any CLI starts.
+
 A 64k local seat is small on purpose — it is the free lane — and it is tight: the fixed prompt alone
-measured 17.8k–23.3k, leaving roughly 10–15k of working room before the first compaction. Use an
-unpinned or larger-`num_ctx` tag for long local sessions.
+takes about 15k of its 32,536-token compaction point, leaving roughly 17k of working room before the
+first compaction. Use an unpinned or larger-`num_ctx` tag for long local sessions.
 
 ### 1.6 The formulas (`context-math.ts`)
 
@@ -300,19 +325,38 @@ running total:
 
 | Mode | Claude 1M models | Claude 200k models | Codex (872k-capable) | Codex GPT-5.5 | Grok | Local |
 |---|---|---|---|---|---|---|
-| **standard** (default) | compacts at **367k** (`--autocompact 400000`) | compacts at 167k (no flag) | 258.4k / compacts at 244.8k (no flag) | same | 500k / compacts at 400k | resolved window |
+| **standard** (default for new chats) | compacts at **367k** (`--autocompact 400000`) | compacts at 167k (no flag) | 258.4k / compacts at 244.8k (no flag) | same | 500k / compacts at 400k | resolved window |
 | **expansive** (opt-in) | compacts at **967k** (`--autocompact auto`) | — | 828.4k / compacts at 784.8k (`-c` pair) | — | — | — |
 
-- The mode is **per session** (`session.contextMode`, absent = standard, which is how every older record
-  behaves). It changes between turns — `POST /api/verse/sessions/:id/context-mode`, refused with
-  `VERSE_SESSION_BUSY` while a turn runs — and applies from the next one. A mode the session's model
-  has no budget for is rejected (`VERSE_INVALID`), not approximated.
+- The mode is **per session** (`session.contextMode`). It changes between turns —
+  `POST /api/verse/sessions/:id/context-mode`, refused with `VERSE_SESSION_BUSY` while a turn runs —
+  and applies from the next one. A mode the session's model has no budget for is rejected
+  (`VERSE_INVALID`), not approximated.
 - New sessions take the **seat's preferred mode** from `~/.ashlr/verse/preferences.json`
-  ("Make default for this seat" in the new-chat dialog), else standard.
-- Switching mode changes **CLI flags, never prompt content**, so it does not invalidate the prompt
-  cache. For Claude this is by construction: the compaction window is a client-side threshold, not
-  part of the request.
-- Verse **never switches mode by itself.** It may *suggest* expansive (`expansiveAdvice`) — only for a
+  ("Make default for this seat" in the new-chat dialog), else standard, and **always record it** —
+  `contextMode: 'standard'` is written explicitly — so a record with no `contextMode` is reliably one
+  created before V3.9.
+- **Sessions from before V3.9 keep the window they ran with.** Verse 3.5–3.8 passed no
+  `--autocompact`, so an old Claude chat on a 1M model compacted near 967k. A Claude record with no
+  `contextMode` therefore resolves to **expansive** when its model has an expansive budget; the engine
+  writes `contextMode: 'expansive'` into the record the first time the session is loaded (engine
+  start, list, get or a turn), without bumping `updatedAt`, and the adapter passes `--autocompact auto` — exactly the old behaviour, so upgrading
+  compacts nothing. The operator can switch such a chat to Standard like any other (see the next
+  point for what that costs). Claude 200k models, Codex, Grok and local records with no `contextMode`
+  resolve to standard, which is what they already ran at. A pre-V3.9 launch record states no budgets;
+  the engine and the adapters borrow them from the same documented model table the live seat uses
+  (`legacyModelOptionFallback`), so an old Codex chat on GPT-6 / GPT-5.6 can switch to expansive like
+  a new one, and the mode the UI offers is always one the engine accepts.
+- Switching mode changes **CLI flags, never prompt content**. Standard → expansive is always free and
+  keeps the prompt cache: the compaction window is a client-side threshold, not part of the request.
+  **Expansive → standard is free only while the session is below the standard compaction point.**
+  Above it — a Claude chat at 600k switched to Standard (compacts ≈367k), or a Codex chat at 500k
+  switched back (the `-c` pair is dropped and compaction returns to 244.8k) — the CLI compacts on the
+  **next turn**: it reads the whole context to write a summary, which **spends usage on a paid seat**,
+  replaces early turns with that summary and starts a new prompt cache. The mode menu says so before
+  you switch.
+- Verse **never switches mode by itself.** (Recording `expansive` on a pre-V3.9 Claude record is not a
+  switch: it writes down the mode that session already ran in.) It may *suggest* expansive (`expansiveAdvice`) — only for a
   standard session whose model has a real expansive budget, and only on evidence: the session has
   already compacted at least twice, or the reachable code only fits the expansive budget (§5). The
   suggestion names its reason and states the usage cost.
@@ -372,6 +416,10 @@ subscription limits weight cache reads is not documented.**
   counts 2× against usage limits; GPT-6 Astra is reportedly exempt. Both claims rest on single
   secondary sources — check the usage meter. OpenAI attributed its own cut of Codex from 372k to 272k
   to cache reads growing with context. Standard mode never crosses 272k; expansive does by design.
+  So the token ratio the mode menu quotes for Codex (784.8k / 244.8k ≈ 3.2× the re-read near the
+  limit) is **not** a usage ceiling there: if the single-source 2× metering holds, a turn held near
+  785k counts roughly 6× a standard one against plan limits. The Codex copy says so, with the same
+  hedge.
 - **Grok:** above 200k every rate doubles for the whole request
   ([docs.x.ai pricing](https://docs.x.ai/developers/pricing)). That includes Grok's standard budget
   (compacting at 400k), which Verse cannot lower per invocation — the handoff banner (§4) is the lever.
@@ -412,8 +460,10 @@ and a divider in the transcript.
 
 - A compaction **is** a model call on the seat's account: the CLI reads the whole window and writes a
   summary. It happens inside a turn the operator started; Verse never triggers one on its own.
-- **Compact now.** On Claude and local sessions the operator can compact on demand: Verse sends
-  `/compact` as an ordinary turn, through the same `startTurn` gate as every turn. Headless `/compact`
+- **Compact now.** On **every** Claude and local session the operator can compact on demand, from the
+  chip beside the meter — the Standard / Expansive chip, or a chip reading **Context** on a model with
+  one budget (a local chat, Opus 4.5, Haiku 4.5), whose menu holds just this item; it is disabled until
+  the chat has had a turn — and from the handoff banner (§4) when that shows. Verse sends `/compact` as an ordinary turn, through the same `startTurn` gate as every turn. Headless `/compact`
   was verified on a local seat — the CLI emitted `compact_boundary` with trigger `manual`,
   14,988 → 1,750 tokens, in about 156 s on a 27B model over a 15k context — the divider reads
   "Compacted on request …" and the meter then shows the post-compaction figure. On a local seat it is free (but slow); **on a paid seat it spends
@@ -445,6 +495,11 @@ reads those signals (pure; nothing spends) and the UI shows a banner under the m
 | ≥ 80 % of the compaction point | suggest |
 | ≥ 2 compactions | suggest |
 | Idle ≥ 1 h with ≥ 100k tokens in context | suggest |
+
+The occupancy and idle signals need an **exact** reading. An upper bound (a codex figure drawn with
+"≤", §1.7) can sum every call in a turn — a median 29× the real prompt — so it never raises "past the
+window", "near compaction" or the idle warning; the meter's tone is `unknown` when such a bound passes
+the compaction point, and the advice waits for the rollout reading. The compaction count still counts.
 
 **What the handoff is.** A deterministic note built from the session's own event log
 (`session-handoff.ts`, `POST /api/verse/sessions/:id/handoff-preview`). It is a POST only because it
@@ -479,7 +534,12 @@ always produces the same note.
    a Claude session can continue on Codex, which no single-vendor CLI can do.
 2. **Ask *seat* to summarize first** (optional; the button names the seat) sends one ordinary turn to
    the *current* session — it spends, is labelled as such, and runs through the same gate as every
-   turn — then re-builds the preview with that reply included verbatim.
+   turn — then re-builds the preview with that reply included verbatim. The turn's text is the fixed
+   `VERSE_HANDOFF_SUMMARY_REQUEST` (`types.ts`), which asks for a note covering goal, decisions and
+   their reasons, state, files, verification commands and open risks, under 600 words, with no file
+   edits or commands. The handoff builder recognises that exact text — and the `/compact` turn that
+   **Compact now** sends — and leaves both out of the goal and "latest asks", so the new chat is told
+   to continue the work, not to write another handoff note.
 3. **Create** makes the new session with `handoffFromSessionId`. The server resolves the source's title
    itself and pins `handoffFrom`; the new transcript opens with "Continued from *title*". Creating
    is free.
@@ -504,8 +564,13 @@ path); an unknown or duplicated query parameter is a 400, and a root deleted sin
   extensions, at most 20,000 files and 5 s per root. `estTokens = bytes / 4` (the estimator is named in
   the response, `'bytes/4'`, so a better one can be introduced honestly). A root that hit a cap is
   marked `truncated` and its estimate is a floor. Results are cached for 60 s per root and HEAD commit.
-- `fitVerdict(workingSet, model)` adds a fixed 30,000-token session overhead and compares against the
-  **standard compaction point**:
+- `fitVerdict(workingSet, model, overhead)` adds the engine's fixed session overhead — the base
+  prompt a fresh session already occupies (`sessionOverheadTokens(engine)`): **local 15,000**
+  (measured, §1.5), **claude 25,000**, **codex 15,000**, **grok 20,000** — and compares against the
+  **standard compaction point**. Only the local figure is a measurement; the other three are
+  estimates (Claude from the same CLI measured without the dynamic-section flag, rounded up; Codex and
+  Grok report no base prompt), and the UI labels every verdict as an estimate. An unknown engine
+  uses 25,000:
 
 | Verdict | Condition | Meaning |
 |---|---|---|
@@ -516,8 +581,10 @@ path); an unknown or duplicated query parameter is a 400, and a root deleted sin
 
 The verdict is null when a model's budget is unknown — never guessed. It answers "could all the
 reachable code sit in one context", which is the question that decides expansive versus split for
-cross-cutting work; most tasks touch a fraction of it. On a 64k local seat nearly everything is
-*tight*, which is true.
+cross-cutting work; most tasks touch a fraction of it. On a 64k local seat (compacts at 32,536, no
+expansive) a working set **fits** up to about 4.5k tokens and is **tight** up to about 17.5k, so a
+handoff note (≤ 12,000 characters, ≈ 3k tokens) fits, while almost any real repository or workspace
+shows **split** — which is true: its code cannot all be in view at once there.
 
 ---
 
@@ -538,7 +605,8 @@ project one shared directory instead:
   memory lives; read `MEMORY.md` before substantial work; keep it a concise index (≤ 200 lines) of
   durable facts **with their reasons** (decisions, conventions, gotchas, plan status); update it at
   milestones; never store secrets — plus the current `MEMORY.md`, secrets scrubbed and truncated with
-  a marker, ≤ 6 KB in all. The **same bytes** are sent every turn, so the prompt prefix stays
+  a marker, ≤ 6 KB in all, with control characters (NUL above all) stripped so the block is always safe
+  to pass on a command line. The **same bytes** are sent every turn, so the prompt prefix stays
   cache-stable; agents read the live file from the directory. The snapshot is pinned in the launch
   record (`VerseSeatLaunch.memory`), like the roots.
 - **Per engine:**
@@ -549,6 +617,14 @@ project one shared directory instead:
 | Codex | read + write | `-c sandbox_workspace_write.writable_roots=[…]` grants the directory (the existing extra-roots override); `-c developer_instructions=<block>` carries the block. Both are `-c` overrides because `exec resume` accepts `-c` but not `--add-dir`, and turn 1 and turn N must launch with the same settings |
 | Grok | **read-only: the snapshot in the block** | `--rules=<block>` (Grok's "extra rules to append to the system prompt", alias `--append-system-prompt`; Grok wraps the text in a `<human_rules>` block appended to its default prompt). Grok's CLI can be granted nothing beyond `--cwd`, so the directory is never granted and the block says memory is read-only for this seat (`writable: false`) |
 
+- **What it costs.** Memory is not free on a paid seat. The block (≤ 6 KB, roughly 1.5k tokens) is
+  part of the system prompt of every turn of every new session on a memory-enabled project — Claude,
+  Codex and Grok alike; it is served from the prompt cache after the first turn, but cached tokens
+  still count. On writable seats the block also asks the agent to read `MEMORY.md` before
+  substantial work and update it at milestones, which is extra tool calls and output. On a local seat
+  it costs nothing but context room. To opt out, switch memory off for the project — or for every
+  project — in the Resources panel (`POST /api/verse/preferences` with `{projectPath, memoryEnabled}`
+  or `{memoryEnabled}`); existing sessions keep the setting they were created with.
 - **On by default**, with a per-project opt-out (`preferences.memory`). A session records whether memory
   was offered (`session.memoryEnabled`): every new session says `true` or `false` — `false` when
   memory is off for the project or could not be set up — and only records from before V3.9 lack the
@@ -560,6 +636,14 @@ project one shared directory instead:
   (`VERSE_MEMORY_MAX_BYTES`); that route alone accepts a request body of up to 2 × 64 KiB + 8 KiB
   (139,264 bytes), so a full-size file still fits after JSON escaping. Every other POST keeps the
   64 KiB body cap.
+- **The editor sees a sanitized view.** Every API response passes `sanitizePublicJson`, which rewrites
+  the home directory as `~` and replaces secret-shaped text with `[REDACTED]`. `GET` and `POST /memory`
+  therefore add `contentSanitized: true` whenever the content sent differs from the file on disk
+  (absent otherwise). A save whose content holds **more** `[REDACTED]` markers than the file on disk —
+  one that would write the placeholders over the real values — is refused with **409
+  `VERSE_MEMORY_REDACTED`**; edit `MEMORY.md` directly in that case. The `~` rewrite is not refused
+  (it names the same path for every reader), and a file that already contains the literal marker stays
+  editable.
 - **What it is not:** it is not the vendors' auto-memory and not a background consolidation job. Codex
   memories, Claude's auto-dream and Grok's memory all run extra model calls on their own schedule, which
   spends; Verse leaves them off.
@@ -588,14 +672,17 @@ Computed **client-side** from usage Verse already stores — no new server state
   and aggregated per seat in Usage. Null until something has been read.
 - **Average and peak context per turn**, and the **compaction count**.
 - **Idle-cache warning** once a session holding more than its fixed prompt has been idle past
-  `CACHE_IDLE_TTL_MS` (1 h): the next turn re-reads the whole context uncached.
+  `CACHE_IDLE_TTL_MS` (1 h): the next turn re-reads the whole context uncached. Idle is timed from the
+  last turn in the event log, not from `updatedAt`: a rename or a mode switch moves `updatedAt` but
+  sends nothing to the provider, so it does not warm the cache.
 - The window's **source** (§1.1), so an estimate is visibly an estimate.
 
 What breaks the prompt cache, so the numbers make sense: switching model; changing effort (except on
 Opus 5.5 and Fable 5.1); connecting or disconnecting MCP servers or plugins; a compaction; a CLI
 upgrade (a re-pin). Verse holds the rest constant by design: an empty, fixed MCP set, the memory block
 snapshotted at creation, and on local seats the dynamic prompt sections moved out of the system prompt.
-Switching context mode does not break it (§2.1).
+Switching to expansive does not break it; switching back to standard does only when the session is
+already past the standard compaction point, because the next turn then compacts (§2.1).
 
 ---
 
@@ -604,7 +691,8 @@ Switching context mode does not break it (§2.1).
 - **Null is unknown, never zero.** An unknown window shows `n/a`; an unknown compaction point draws no
   tick; an unknown budget gives no fit verdict.
 - **Every window carries its source.** `fallback` is marked as an estimate.
-- **An upper bound is labelled as one:** `contextTokensExact: false` draws "≤".
+- **An upper bound is labelled as one:** `contextTokensExact: false` draws "≤", and never claims more
+  than it knows — no "over the window" tone and no near-compaction or idle advice from a bound (§4).
 - **Readings are stored unclamped.** Over-window is a state the meter shows, not a number it hides.
 - **The runtime wins.** A CLI's own reading replaces any catalog value (except on local seats, where the
   CLI would only echo Verse's number).
@@ -638,9 +726,9 @@ Nothing in V3.9 adds a model call.
 | Compaction events and the dividers | "Ask *seat* to summarize first" — one ordinary turn |
 | Handoff preview (event log + `git diff --stat`) | A handoff's first turn in the new session |
 | Creating a session, including a handoff session | Expansive mode's larger re-read on every later turn |
-| Context fit (`git ls-files` + `stat`) | The memory block's ≤ 6 KB on every turn (cached after the first) |
-| Session search, memory read/write, preferences, efficiency stats | |
-| Switching mode (a flag; the cost lands on later turns) | |
+| Context fit (`git ls-files` + `stat`) | The memory block's ≤ 6 KB on every turn (cached after the first), plus the agent's `MEMORY.md` reads and updates — on by default; opt out per project or globally (§6) |
+| Session search, memory read/write, preferences, efficiency stats | Switching an expansive session to standard **above** the standard compaction point — the next turn compacts (§2.1) |
+| Switching mode below the standard compaction point (a flag; the cost lands on later turns) | |
 
 Local seats run on this machine and cost nothing at the margin.
 
@@ -651,9 +739,16 @@ Local seats run on this machine and cost nothing at the margin.
 - **Compact now on a paid seat** was not run for real (it would spend); headless `/compact` was
   verified on a local seat, which runs the same Claude Code binary. Its spend on a paid seat is not
   itemised per turn (§3).
-- **Codex `developer_instructions` on resume:** whether codex re-sends the memory block as a new
-  developer message on every `exec resume` (growing history by ≤ 6 KB a turn) is unverified without a
-  paid run. If a real session shows that growth, the block moves to turn 1 only.
+- **Codex `developer_instructions` on resume:** Verse sends the memory block on **every** `exec` and
+  `exec resume`, and must keep doing so. Codex diffs each turn's developer context against a baseline
+  it persists in the rollout, and in ~4,000 local rollouts an unchanged section was never re-emitted, so
+  an identical block should be a no-op — but no local rollout has yet carried a non-empty
+  `developer_instructions` or an `exec resume` thread, so that is unverified without a paid run. Sending
+  it on turn 1 only would be **wrong**: compaction rebuilds the developer context from the current
+  process's settings, so a resume launched without the key would lose the memory at its first
+  compaction. If a real multi-turn rollout ever shows the block repeating, the fix is upstream in
+  Codex, not turn-1-only (the reasoning is in the `memoryOverrides` comment in
+  `src/core/verse/adapters/codex.ts`).
 - **A codex seat with no catalog yet** runs on Verse's built-in list, which leads with GPT-6 Astra;
   an older binary (codex-a runs 0.136, whose bundled catalog has no GPT-6 or GPT-5.6) may reject that
   id on the first turn.

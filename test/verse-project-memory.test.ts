@@ -29,6 +29,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -40,6 +41,7 @@ import {
   projectMemoryDir,
   readProjectMemory,
   renderMemoryBlock,
+  stripUnsafeControlChars,
   writeProjectMemory,
 } from '../src/core/verse/project-memory.js';
 import { VerseServiceError, updateVersePreferences } from '../src/core/verse/preferences.js';
@@ -157,6 +159,17 @@ describe('prepareProjectMemory', () => {
     expect(a).toEqual(b);
   });
 
+  it('renders an argv-safe block from a MEMORY.md an agent wrote with a NUL in it', () => {
+    // Agents write the file directly (--add-dir / writable_roots), bypassing
+    // writeProjectMemory's NUL check; the pinned block must still launch.
+    const dir = projectMemoryDir(project, root);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, 'MEMORY.md'), 'decision: use webhooks v2\u0000\u0000 because retries\n', { mode: 0o600 });
+    const { block } = prepareProjectMemory(project, { writable: true, root });
+    expect(block).not.toContain('\u0000');
+    expect(block).toContain('decision: use webhooks v2 because retries');
+  });
+
   it('scrubs secrets from the snapshot', () => {
     writeProjectMemory(project, 'deploy key: sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345\npassword=hunter2hunter2', root);
     const { block } = prepareProjectMemory(project, { writable: true, root });
@@ -206,6 +219,29 @@ describe('renderMemoryBlock', () => {
     const a = renderMemoryBlock({ dir: '/m', projectName: 'p', content: 'a\r\nb\r\n\r\n', writable: true });
     const b = renderMemoryBlock({ dir: '/m', projectName: 'p', content: '\na\nb', writable: true });
     expect(a).toBe(b);
+  });
+
+  it('is argv-safe: NUL and other C0/C1 controls are stripped, tabs and newlines kept', () => {
+    const block = renderMemoryBlock({
+      dir: '/m',
+      projectName: 'p\u0000roj',
+      content: 'fact one\u0000fact two\n\tindented\u0007 \u001b[1mbold\u0085 end\r\n',
+      writable: true,
+    });
+    // eslint-disable-next-line no-control-regex
+    expect(block).not.toMatch(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/);
+    expect(block).toContain('"proj"');
+    expect(block).toContain('fact onefact two\n\tindented [1mbold end');
+    // What the claude adapter and grok actually do with it: an argv element.
+    // spawn throws ERR_INVALID_ARG_VALUE synchronously on a NUL; this must not.
+    const run = spawnSync(process.execPath, ['-e', '', '--', `--append-system-prompt=${block}`], { stdio: 'ignore' });
+    expect(run.error).toBeUndefined();
+    expect(run.status).toBe(0);
+  });
+
+  it('stripUnsafeControlChars normalises CRLF and removes every unsafe control', () => {
+    expect(stripUnsafeControlChars('a\r\nb\rc\u0000d\u007fe\u009ff\tg\nh')).toBe('a\nb\ncdef\tg\nh');
+    expect(stripUnsafeControlChars('plain — ünïcode ✓')).toBe('plain — ünïcode ✓');
   });
 
   it('never exceeds the cap even for a single enormous line of multibyte text', () => {

@@ -26,7 +26,7 @@
  * Every figure here is computed by context-math, the same module the server
  * uses, so "compacts ≈367k" cannot mean two different numbers in two places.
  */
-import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent } from 'react';
 import type { VerseContextMode, VerseEngine, VerseModelOption, VerseSession, VerseWindowSource } from '../../data/api-types.js';
 import {
   budgetFor,
@@ -40,7 +40,7 @@ import {
   type VerseHandoffAdvice,
   type VerseOccupancyTone,
 } from '../../../core/verse/context-math.js';
-import { WINDOW_SOURCE_TEXT, type SessionContextBudget } from './verse-model.js';
+import { CODEX_EXPANSIVE_METERING_NOTE, windowSourceText, type SessionContextBudget } from './verse-model.js';
 import { dismissVerseAdvice, isVerseAdviceDismissed } from './verse-ui-store.js';
 import { formatTokens } from './verse-store.js';
 import styles from './Workspace.module.css';
@@ -105,6 +105,10 @@ export function describeContext(props: Omit<ContextMeterProps, 'variant'>): {
     contextTokensExact: props.exact,
   });
   const bound = occ.exact ? '' : '≤';
+  // An upper bound past the compaction point proves nothing about the real
+  // prompt (occupancy() returns tone 'unknown' for it), so no sentence below
+  // may read it as "past" anything.
+  const boundPast = !occ.exact && occ.untilCompaction === 0;
   const label = `${bound}${formatTokens(occ.tokens)} / ${occ.window !== null ? formatTokens(occ.window) : 'n/a'}`;
   const compactLabel = occ.autoCompactAt !== null ? `compacts ≈${formatTokens(occ.autoCompactAt)}` : null;
   const percent = occ.ofWindow !== null ? Math.round(occ.ofWindow * 100) : null;
@@ -125,7 +129,12 @@ export function describeContext(props: Omit<ContextMeterProps, 'variant'>): {
   }
   const modeText = props.mode ? ` (${CONTEXT_MODE_LABEL[props.mode]} mode)` : '';
   if (occ.autoCompactAt !== null) {
-    lines.push(`Auto-compacts at ≈${exactFigure(occ.autoCompactAt)} tokens${modeText} — ${occ.untilCompaction === 0 ? 'at or past that point now' : `≈${exactFigure(occ.untilCompaction ?? 0)} left`}.`);
+    const left = boundPast
+      ? 'the upper bound is past that point, which does not mean the real prompt is'
+      : occ.untilCompaction === 0
+        ? 'at or past that point now'
+        : `${occ.exact ? '' : 'at least '}≈${exactFigure(occ.untilCompaction ?? 0)} left`;
+    lines.push(`Auto-compacts at ≈${exactFigure(occ.autoCompactAt)} tokens${modeText} — ${left}.`);
     const who = props.engine ? COMPACTOR[props.engine] : 'The CLI';
     lines.push(`When it compacts, ${who} replaces the earlier conversation with a summary and carries on; early detail then survives only as that summary.`);
   } else if (occ.window !== null) {
@@ -136,14 +145,14 @@ export function describeContext(props: Omit<ContextMeterProps, 'variant'>): {
     lines.push(`Compacted ${n} time${n === 1 ? '' : 's'} so far.`);
   }
   if (occ.window !== null) {
-    lines.push(`Window: ${props.source ? WINDOW_SOURCE_TEXT[props.source] : 'source not recorded (an older session)'}.`);
+    lines.push(`Window: ${props.source ? windowSourceText(props.source, props.engine) : 'source not recorded (an older session)'}.`);
   }
   return {
     tone: occ.tone,
     label,
     compactLabel,
     percent,
-    percentLabel: percent === null ? 'n/a' : `${percent}%`,
+    percentLabel: percent === null ? 'n/a' : `${bound}${percent}%`,
     tickPercent,
     fillPercent,
     title: lines.join('\n'),
@@ -205,14 +214,90 @@ function modeDetail(option: VerseModelOption | null | undefined, mode: VerseCont
   return `compacts ≈${formatTokens(point)} of ${formatTokens(b.contextWindow)}`;
 }
 
-/** The cost sentence both the mode menu and the suggestion chip say, word for word. */
-export function expansiveCostCopy(option: VerseModelOption | null | undefined): string {
+/**
+ * The cost sentence both the mode menu and the suggestion chip say, word for
+ * word. The ratio is SIZE alone. On codex the provider reportedly also meters
+ * requests above its standard window at about 2× against plan limits, so the
+ * size ratio is not the ceiling there: the copy says so, in the same
+ * sentence the new-chat dialog uses (verse-model CODEX_EXPANSIVE_METERING_NOTE),
+ * so the three places that price Expansive cannot disagree.
+ */
+export function expansiveCostCopy(option: VerseModelOption | null | undefined, engine?: VerseEngine | null): string {
   const ratio = expansiveCostRatio(option);
   const standard = budgetFor(option, 'standard');
   const point = standard ? formatTokens(standard.autoCompactAt ?? standard.contextWindow) : null;
-  return ratio !== null && point !== null
-    ? `Every turn re-sends the whole context, so once it grows past ≈${point} each turn costs more usage — up to ≈${ratio}× near the expansive limit — and recall of early detail weakens with length.`
+  const codex = engine === 'codex';
+  const base = ratio !== null && point !== null
+    ? `Every turn re-sends the whole context, so once it grows past ≈${point} each turn costs more usage — up to ≈${ratio}×${codex ? ' by size alone' : ''} near the expansive limit — and recall of early detail weakens with length.`
     : 'Every turn re-sends the whole context, so a larger budget means more usage per turn as it grows.';
+  return codex ? `${base} ${CODEX_EXPANSIVE_METERING_NOTE}` : base;
+}
+
+/**
+ * Switching DOWN to Standard while the chat already holds more than
+ * Standard's compaction point is not the free flag flip the rest of the menu
+ * describes: the CLI compacts on the very next turn (Claude Code checks its
+ * threshold before calling the model; codex falls back to its 244.8k limit),
+ * which rewrites the conversation, starts the prompt cache over and — on a
+ * paid seat — spends a summarization call. Null when switching is free.
+ * `definite` is false for an upper-bound reading: the real prompt MAY be under.
+ */
+export function standardSwitchCompacts(
+  option: VerseModelOption | null | undefined,
+  mode: VerseContextMode,
+  reading: Pick<SessionContextBudget, 'contextTokens' | 'exact'> | null | undefined,
+): { point: number; tokens: number; definite: boolean } | null {
+  if (mode !== 'expansive' || !reading) return null;
+  const standard = budgetFor(option, 'standard');
+  if (!standard) return null;
+  const point = standard.autoCompactAt ?? standard.contextWindow;
+  if (reading.contextTokens < point) return null;
+  return { point, tokens: reading.contextTokens, definite: reading.exact };
+}
+
+/**
+ * Where the open menu goes, in VIEWPORT coordinates (position: fixed).
+ *
+ * WHY FIXED, and computed: the chip sits in the right-pinned action cluster,
+ * ~119px from the pane's edge, and the menu is up to 380px wide — anchored
+ * `right: 0` it started at x = −95 on a 375px screen, and in the app the
+ * section's `overflow: hidden` cut it at the rail (x = 56), clipping every
+ * label ("rrent", "…of 1M"). Fixed placement escapes that clip; the three
+ * cases keep it inside the viewport with a gutter:
+ *
+ *  1. right-aligned to the chip (the desktop look) when there is room to its left;
+ *  2. left-aligned to the chip when there is room to its right instead;
+ *  3. otherwise the full width between the gutters (phone widths).
+ *
+ * Null when there is no layout to measure (a zero-size anchor — jsdom, a
+ * hidden header): the stylesheet's absolute placement stands.
+ */
+export const MODE_MENU_GUTTER = 12;
+export const MODE_MENU_MIN_WIDTH = 280;
+export const MODE_MENU_MAX_WIDTH = 380;
+const MODE_MENU_OFFSET = 8;
+
+export function modeMenuPlacement(
+  anchor: Pick<DOMRect, 'left' | 'right' | 'bottom'>,
+  viewport: { width: number; height: number },
+): CSSProperties | null {
+  if (!(viewport.width > 0) || !(anchor.right > anchor.left)) return null;
+  const top = Math.round(anchor.bottom + MODE_MENU_OFFSET);
+  const common: CSSProperties = {
+    position: 'fixed',
+    top,
+    maxHeight: Math.max(160, Math.round(viewport.height - top - MODE_MENU_GUTTER)),
+    overflowY: 'auto',
+  };
+  const roomLeft = anchor.right - MODE_MENU_GUTTER;
+  if (roomLeft >= MODE_MENU_MIN_WIDTH) {
+    return { ...common, left: 'auto', right: Math.round(viewport.width - anchor.right), maxWidth: Math.min(MODE_MENU_MAX_WIDTH, Math.floor(roomLeft)) };
+  }
+  const roomRight = viewport.width - MODE_MENU_GUTTER - anchor.left;
+  if (roomRight >= MODE_MENU_MIN_WIDTH) {
+    return { ...common, left: Math.round(anchor.left), right: 'auto', maxWidth: Math.min(MODE_MENU_MAX_WIDTH, Math.floor(roomRight)) };
+  }
+  return { ...common, left: MODE_MENU_GUTTER, right: MODE_MENU_GUTTER, width: 'auto', minWidth: 0, maxWidth: 'none' };
 }
 
 export interface ContextModeControlProps {
@@ -229,21 +314,42 @@ export interface ContextModeControlProps {
    * compact on request (`canCompactNow`); absent → no menu item.
    */
   onCompact?: () => void;
+  /** Why "Compact now…" cannot run yet (no turns), shown on the disabled item. */
+  compactUnavailableReason?: string | null;
+  /**
+   * False → this model has ONE budget (a 200k Claude model, a local seat): the
+   * chip reads "Context" and its menu carries only "Compact now…", so a manual
+   * compaction is reachable on demand on every engine that can do one, not
+   * only from the handoff banner once it appears. Default true.
+   */
+  modesAvailable?: boolean;
+  engine?: VerseEngine | null;
+  /** The session's current reading and budget — the downgrade warning and the one-budget summary read it. */
+  budget?: Pick<SessionContextBudget, 'contextTokens' | 'exact' | 'contextWindow' | 'autoCompactAt'> | null;
 }
 
 /**
- * The mode chip beside the meter and its menu. Rendered by the Workspace only
- * for a model with a real expansive budget (or a session already in
- * expansive, so it can always be switched back). Changing mode is an explicit
- * click — Verse never switches it on its own — and applies from the NEXT turn:
- * it changes CLI flags only, never prompt content, so the prompt cache holds.
+ * The context chip beside the meter and its menu. With a real expansive
+ * budget (or a session already in expansive, so it can always switch back)
+ * it is the Standard / Expansive control; for a claude/local chat without
+ * one it is a "Context" menu holding "Compact now…". Changing mode is an
+ * explicit click — Verse never switches it on its own — and applies from the
+ * NEXT turn: it changes CLI flags only, never prompt content, so the prompt
+ * cache holds — EXCEPT a switch down to Standard while the chat is already
+ * past Standard's compaction point, which compacts on the next turn and is
+ * said so in the menu (standardSwitchCompacts).
  */
-export function ContextModeControl({ mode, option, disabled = false, disabledReason = null, busy = false, error = null, onChange, onCompact }: ContextModeControlProps) {
+export function ContextModeControl({ mode, option, disabled = false, disabledReason = null, busy = false, error = null, onChange, onCompact,
+  compactUnavailableReason = null, modesAvailable = true, engine = null, budget = null }: ContextModeControlProps) {
   const [open, setOpen] = useState(false);
+  const [placement, setPlacement] = useState<CSSProperties | null>(null);
   const wrap = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
   const menuId = useId();
   const expansiveAvailable = hasExpansiveMode(option);
+  const downgrade = modesAvailable ? standardSwitchCompacts(option, mode, budget) : null;
+  const who = engine ? COMPACTOR[engine] : 'The CLI';
 
   // An error keeps the menu open so the operator sees why nothing changed.
   useEffect(() => {
@@ -277,8 +383,30 @@ export function ContextModeControl({ mode, option, disabled = false, disabledRea
     };
   }, [open]);
 
+  // Placed before paint (no flash at the clipped spot) and again on resize.
+  useLayoutEffect(() => {
+    if (!open) {
+      setPlacement(null);
+      return undefined;
+    }
+    const place = () => {
+      const rect = button.current?.getBoundingClientRect();
+      setPlacement(rect ? modeMenuPlacement(rect, { width: window.innerWidth, height: window.innerHeight }) : null);
+    };
+    place();
+    window.addEventListener('resize', place);
+    return () => window.removeEventListener('resize', place);
+  }, [open]);
+
   useEffect(() => {
-    if (open) wrap.current?.querySelector<HTMLButtonElement>('[role="menuitemradio"][aria-checked="true"]')?.focus();
+    if (!open) return;
+    // The current mode first; a one-budget menu has no radios, so its first
+    // enabled item; and when even that is disabled, the menu itself, so
+    // focus never falls to <body>.
+    const target = wrap.current?.querySelector<HTMLButtonElement>('[role="menuitemradio"][aria-checked="true"]')
+      ?? wrap.current?.querySelector<HTMLButtonElement>('[role="menuitemradio"]:not(:disabled), [role="menuitem"]:not(:disabled)')
+      ?? menu.current;
+    target?.focus();
   }, [open]);
 
   function onMenuKey(event: KeyboardEvent<HTMLDivElement>) {
@@ -300,41 +428,91 @@ export function ContextModeControl({ mode, option, disabled = false, disabledRea
     onChange(next);
   };
 
+  const compact = () => {
+    setOpen(false);
+    // Focus goes back to the chip BEFORE the panel opens: the panel takes it
+    // into its own field and, on close, hands it back to whatever held it —
+    // the chip — instead of both ending on <body> with the unmounted item.
+    button.current?.focus();
+    onCompact?.();
+  };
+
+  // What changes on a mode switch, per CLI: Claude Code takes one flag
+  // (--autocompact); codex takes a window AND a compaction limit.
+  const flagChange = engine === 'codex'
+    ? "The CLI's window and compaction settings change"
+    : "Only the CLI's compaction flag changes";
+  const oneBudgetPoint = budget?.autoCompactAt ?? null;
+  const chipLabel = modesAvailable ? CONTEXT_MODE_LABEL[mode] : 'Context';
+  const ariaLabel = modesAvailable ? `Context mode: ${CONTEXT_MODE_LABEL[mode]}` : 'Context actions';
+  const chipTitle = disabled && disabledReason
+    ? disabledReason
+    : modesAvailable
+      ? `Context mode: ${CONTEXT_MODE_LABEL[mode]} — ${modeDetail(option, mode)}`
+      : 'Context: this model has one budget — open to compact the chat now';
+
   return (
     <div ref={wrap} className={styles.modeWrap}>
-      <button ref={button} type="button" className={styles.modeChip} data-mode={mode}
+      <button ref={button} type="button" className={styles.modeChip} data-mode={modesAvailable ? mode : undefined}
         aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined}
-        aria-label={`Context mode: ${CONTEXT_MODE_LABEL[mode]}`} disabled={disabled}
-        title={disabled && disabledReason ? disabledReason : `Context mode: ${CONTEXT_MODE_LABEL[mode]} — ${modeDetail(option, mode)}`}
+        aria-label={ariaLabel} disabled={disabled} title={chipTitle}
         onClick={() => setOpen((v) => !v)}>
-        {busy ? 'Switching…' : CONTEXT_MODE_LABEL[mode]}
+        {busy ? 'Switching…' : chipLabel}
       </button>
       {open ? (
-        <div id={menuId} role="menu" aria-label="Context mode" className={styles.modeMenu} onKeyDown={onMenuKey}>
-          <p className={styles.modeMenuHeading}>How much context this chat may hold before the CLI compacts</p>
-          {(['standard', 'expansive'] as const).map((m) => {
-            const unavailable = m === 'expansive' && !expansiveAvailable;
-            return (
-              <button key={m} type="button" role="menuitemradio" aria-checked={mode === m} className={styles.modeItem}
-                disabled={unavailable || busy} onClick={() => choose(m)}>
-                <span className={styles.modeItemPrimary}>{CONTEXT_MODE_LABEL[m]}{mode === m ? ' · current' : ''}</span>
-                <span className={styles.modeItemSecondary}>
-                  {m === 'standard'
-                    ? `${modeDetail(option, 'standard')} · lower usage per turn, sharper recall`
-                    : unavailable ? 'not available for this model on this seat' : `${modeDetail(option, 'expansive')} · the full native window`}
-                </span>
-              </button>
-            );
-          })}
-          <p className={styles.modeMenuNote}>{expansiveCostCopy(option)}</p>
-          <p className={styles.modeMenuNote}>
-            Applies from the next turn. Only the CLI&apos;s compaction flag changes — the conversation and its prompt cache are kept.
-          </p>
+        <div ref={menu} id={menuId} role="menu" aria-label={modesAvailable ? 'Context mode' : 'Context'} className={styles.modeMenu}
+          style={placement ?? undefined} data-placement={placement ? 'fixed' : undefined} tabIndex={-1} onKeyDown={onMenuKey}>
+          {modesAvailable ? (
+            <>
+              <p className={styles.modeMenuHeading}>How much context this chat may hold before the CLI compacts</p>
+              {(['standard', 'expansive'] as const).map((m) => {
+                const unavailable = m === 'expansive' && !expansiveAvailable;
+                const compactsNext = m === 'standard' && downgrade !== null
+                  ? ` · ${downgrade.definite ? 'compacts' : 'may compact'} on the next turn`
+                  : '';
+                return (
+                  <button key={m} type="button" role="menuitemradio" aria-checked={mode === m} className={styles.modeItem}
+                    disabled={unavailable || busy} onClick={() => choose(m)}>
+                    <span className={styles.modeItemPrimary}>{CONTEXT_MODE_LABEL[m]}{mode === m ? ' · current' : ''}</span>
+                    <span className={styles.modeItemSecondary}>
+                      {m === 'standard'
+                        ? `${modeDetail(option, 'standard')} · lower usage per turn, sharper recall${compactsNext}`
+                        : unavailable ? 'not available for this model on this seat' : `${modeDetail(option, 'expansive')} · the full native window`}
+                    </span>
+                  </button>
+                );
+              })}
+              <p className={styles.modeMenuNote}>{expansiveCostCopy(option, engine)}</p>
+              {downgrade ? (
+                <>
+                  <p className={styles.modeMenuNote}>Applies from the next turn.</p>
+                  <p className={styles.modeMenuWarn} data-testid="standard-compacts">
+                    {downgrade.definite
+                      ? `This chat holds ≈${formatTokens(downgrade.tokens)} — past Standard's ≈${formatTokens(downgrade.point)} compaction point, so switching to Standard makes ${who} compact on the next turn`
+                      : `This chat holds up to ≈${formatTokens(downgrade.tokens)}. If the real prompt is past Standard's ≈${formatTokens(downgrade.point)} compaction point, switching to Standard makes ${who} compact on the next turn`}
+                    {engine === 'local' ? '' : ': one summarization call that spends usage on this seat'}. The conversation is replaced by a summary and its prompt cache starts over.
+                  </p>
+                </>
+              ) : (
+                <p className={styles.modeMenuNote}>
+                  Applies from the next turn. {flagChange} — the conversation and its prompt cache are kept.
+                </p>
+              )}
+            </>
+          ) : (
+            <p className={styles.modeMenuHeading}>
+              {oneBudgetPoint !== null
+                ? `${who} compacts this chat on its own at ≈${formatTokens(oneBudgetPoint)}${budget?.contextWindow ? ` of ${formatTokens(budget.contextWindow)}` : ''}. This model has one context budget.`
+                : 'This model has one context budget; the CLI compacts at its own point.'}
+            </p>
+          )}
           {onCompact ? (
-            <button type="button" role="menuitem" className={`${styles.modeItem} ${styles.modeItemAction}`} disabled={busy}
-              onClick={() => { setOpen(false); onCompact(); }}>
+            <button type="button" role="menuitem" className={`${styles.modeItem} ${modesAvailable ? styles.modeItemAction : ''}`}
+              disabled={busy || compactUnavailableReason !== null} onClick={compact}>
               <span className={styles.modeItemPrimary}>Compact now…</span>
-              <span className={styles.modeItemSecondary}>summarize the conversation so far instead of waiting for the CLI to</span>
+              <span className={styles.modeItemSecondary}>
+                {compactUnavailableReason ?? 'summarize the conversation so far instead of waiting for the CLI to'}
+              </span>
             </button>
           ) : null}
           {error ? <p role="alert" className={styles.modeMenuError}>{error}</p> : null}
@@ -367,11 +545,20 @@ function useNow(intervalMs: number, injected?: number): number {
   return now;
 }
 
-/** The handoff verdict for a session, from the SAME budget the meter draws. */
+/**
+ * The handoff verdict for a session, from the SAME budget the meter draws.
+ *
+ * `lastTurnAt` is the last time the chat talked to its provider (verse-store
+ * `lastTurnActivityAt`), NOT `session.updatedAt`: a rename or a mode switch
+ * bumps `updatedAt` without warming the provider's cache, and measuring idle
+ * time from it silenced "the prompt cache has likely expired" for another
+ * hour while the next turn still re-read everything uncached.
+ */
 export function sessionHandoffAdvice(
-  session: Pick<VerseSession, 'usage' | 'compactionCount' | 'updatedAt' | 'status'>,
+  session: Pick<VerseSession, 'usage' | 'compactionCount' | 'status'>,
   budget: SessionContextBudget,
   now: number,
+  lastTurnAt: string | null = null,
 ): VerseHandoffAdvice {
   return handoffAdvice({
     usage: {
@@ -383,7 +570,7 @@ export function sessionHandoffAdvice(
     },
     compactionCount: session.compactionCount ?? 0,
     // A running turn is activity: the cache is being refreshed right now.
-    lastActivityAt: session.status === 'running' ? null : session.updatedAt,
+    lastActivityAt: session.status === 'running' ? null : lastTurnAt,
     now,
   });
 }
@@ -399,6 +586,11 @@ export interface ContextAdviceProps {
   onSwitchExpansive: () => void;
   /** Opens the "Compact now" panel; passed only when `canCompactNow(engine)`. */
   onCompact?: () => void;
+  /**
+   * When the chat last talked to its provider (verse-store
+   * `lastTurnActivityAt`); null/absent → no idle-cache reason.
+   */
+  lastTurnAt?: string | null;
   /** Injectable clock for tests. */
   now?: number;
 }
@@ -416,10 +608,11 @@ export interface ContextAdviceProps {
  * not persisted: advice is evidence, and stale evidence must not outlive a
  * reload), and a note comes back when its evidence escalates.
  */
-export function ContextAdvice({ session, budget, modesAvailable, dispatchEnabled, modeBusy = false, onHandoff, onSwitchExpansive, onCompact, now: injectedNow }: ContextAdviceProps) {
+export function ContextAdvice({ session, budget, modesAvailable, dispatchEnabled, modeBusy = false, onHandoff, onSwitchExpansive, onCompact,
+  lastTurnAt = null, now: injectedNow }: ContextAdviceProps) {
   const now = useNow(ADVICE_TICK_MS, injectedNow);
   const [, bump] = useState(0);
-  const handoff = sessionHandoffAdvice(session, budget, now);
+  const handoff = sessionHandoffAdvice(session, budget, now, lastTurnAt);
   const expansive = modesAvailable
     ? expansiveAdvice({ session, option: budget.option })
     : { suggest: false, reason: null };
@@ -435,7 +628,7 @@ export function ContextAdvice({ session, budget, modesAvailable, dispatchEnabled
     dismissVerseAdvice(session.id, key);
     bump((n) => n + 1);
   };
-  const idleExpired = session.updatedAt ? now - Date.parse(session.updatedAt) >= CACHE_IDLE_TTL_MS : false;
+  const idleExpired = lastTurnAt && !running ? now - Date.parse(lastTurnAt) >= CACHE_IDLE_TTL_MS : false;
 
   return (
     <div className={styles.advice}>
@@ -474,7 +667,7 @@ export function ContextAdvice({ session, budget, modesAvailable, dispatchEnabled
         <section className={styles.adviceNote} data-level="suggest" data-kind="expansive" aria-label="Expansive mode suggestion">
           <div className={styles.adviceBody}>
             <p className={styles.adviceTitle}>Expansive mode could help</p>
-            <p className={styles.adviceFine}>{expansive.reason} {expansiveCostCopy(budget.option)}</p>
+            <p className={styles.adviceFine}>{expansive.reason} {expansiveCostCopy(budget.option, session.engine)}</p>
           </div>
           <div className={styles.adviceActions}>
             {/* Disabled mid-turn: the engine answers 409 to a mode change while a turn runs. */}
@@ -538,6 +731,13 @@ export interface CompactPanelProps {
   /** Sends the text through the chat's normal send path; true when it was accepted. */
   onSend: (text: string) => Promise<boolean>;
   onClose: () => void;
+  /**
+   * Take keyboard focus into the focus field on mount (default true: the
+   * panel only ever opens on a click or a menu choice). On unmount focus goes
+   * back to whatever held it before — the chip or the banner button — when
+   * nothing else has claimed it.
+   */
+  autoFocus?: boolean;
 }
 
 /**
@@ -550,10 +750,25 @@ export interface CompactPanelProps {
  * transcript entry and the engine's local-only chokepoint all apply exactly
  * as for a typed message. Nothing here is a new way to reach a model.
  */
-export function CompactPanel({ engine, budget, running, dispatchEnabled, empty, onSend, onClose }: CompactPanelProps) {
+export function CompactPanel({ engine, budget, running, dispatchEnabled, empty, onSend, onClose, autoFocus = true }: CompactPanelProps) {
   const [focus, setFocus] = useState('');
   const [sending, setSending] = useState(false);
   const focusId = useId();
+  const input = useRef<HTMLInputElement>(null);
+
+  // Opened from the mode menu, the focused menu item unmounts with the menu;
+  // without this, keyboard focus fell to <body> and a screen reader heard
+  // nothing about the panel that appeared.
+  useEffect(() => {
+    if (!autoFocus) return undefined;
+    const previous = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
+    input.current?.focus();
+    return () => {
+      const active = document.activeElement;
+      const stranded = active === null || active === document.body || !active.isConnected;
+      if (stranded && previous?.isConnected) previous.focus();
+    };
+  }, [autoFocus]);
   const who = COMPACTOR[engine];
   const tokensLabel = `${budget.exact ? '≈' : '≤'}${formatTokens(budget.contextTokens)}`;
   const blocked = running ? 'Available when the current turn finishes.'
@@ -584,7 +799,7 @@ export function CompactPanel({ engine, budget, running, dispatchEnabled, empty, 
           </p>
           <p className={styles.adviceFine}>{compactCostCopy(engine, tokensLabel)}</p>
           <label className={styles.compactLabel} htmlFor={focusId}>Keep in focus (optional)</label>
-          <input id={focusId} className={styles.compactInput} value={focus} maxLength={COMPACT_FOCUS_MAX}
+          <input ref={input} id={focusId} className={styles.compactInput} value={focus} maxLength={COMPACT_FOCUS_MAX}
             placeholder="e.g. the login fix and its open TODOs" onChange={(event) => setFocus(event.target.value)} />
           <p className={styles.adviceFine}>
             Sent as the message <code>{compactCommand(focus)}</code>, so it shows in the transcript like any turn.

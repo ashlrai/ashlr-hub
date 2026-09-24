@@ -417,13 +417,23 @@ describe('ResourcesPanel — this chat’s context and efficiency', () => {
     expect(stat('Avg context / turn')).toBe('—');
   });
 
+  /** The last provider contact is a turn's `turn-done`, not the record's updatedAt. */
+  const lastTurnAgo = (ms: number): VerseEvent[] => [
+    { seq: 1, at: new Date(Date.now() - ms).toISOString(), type: 'turn-done', turnId: 't1', ok: true, nativeSessionId: null, durationMs: 1 },
+  ];
+
   it('warns once the chat has sat idle past the prompt-cache lifetime', () => {
-    mountChat(chat({ updatedAt: new Date(Date.now() - 61 * 60_000).toISOString() }));
+    mountChat(chat({ updatedAt: new Date(Date.now() - 61 * 60_000).toISOString() }), lastTurnAgo(61 * 60_000));
     expect(within(panel()).getByRole('status')).toHaveTextContent(/Idle for 1h 1m, past the ~1 h prompt-cache lifetime: the next turn likely re-reads ~142k tokens uncached/);
   });
 
-  it('does not warn before the cache would have expired', () => {
-    mountChat(chat({ updatedAt: new Date(Date.now() - 30 * 60_000).toISOString() }));
+  it('times idleness from the last turn: a rename moments ago does not silence the warning', () => {
+    mountChat(chat({ updatedAt: new Date(Date.now() - 60_000).toISOString() }), lastTurnAgo(90 * 60_000));
+    expect(within(panel()).getByRole('status')).toHaveTextContent(/prompt-cache lifetime/);
+  });
+
+  it('does not warn before the cache would have expired, or when no turn has run', () => {
+    mountChat(chat({ updatedAt: new Date(Date.now() - 30 * 60_000).toISOString() }), lastTurnAgo(30 * 60_000));
     expect(within(panel()).queryByText(/prompt-cache lifetime/)).not.toBeInTheDocument();
   });
 
@@ -432,16 +442,24 @@ describe('ResourcesPanel — this chat’s context and efficiency', () => {
       seatId: LOCAL_CONTEXT_SEAT.id, engine: 'local', model: 'qwen3.8:27b-ctx64k',
       updatedAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
       usage: { inputTokens: 40_000, outputTokens: 1_000, cacheReadTokens: 0, cacheCreationTokens: 0, contextTokens: 40_000, contextWindow: 65_536 },
-    }));
+    }), lastTurnAgo(2 * 60 * 60_000));
     expect(within(panel()).getByText(/time, not spend/)).toBeInTheDocument();
   });
 
   it('says whether this chat was given shared memory, and mounts the project’s memory panel', () => {
     mountChat(chat({ memoryEnabled: true, turnCount: 7 }));
-    expect(within(panel()).getByText('Shared project memory was given to this chat’s agent when it started.')).toBeInTheDocument();
+    // A paid seat: the sentence says what memory adds to every turn, never that it is free.
+    const given = within(panel()).getByText(/^Shared project memory was given to this chat’s agent when it started:/);
+    expect(given).toHaveTextContent(/a block of up to 6 KB in its system prompt, re-sent every turn \(cached after the first\)/);
+    expect(given).toHaveTextContent(/this seat’s usage/);
     const memory = within(panel()).getByRole('region', { name: 'Project memory' });
     expect(memory).toHaveAttribute('data-project', '/Users/mason/dev/hub');
     expect(memory).toHaveAttribute('data-refresh', '7');
+  });
+
+  it('adds no usage caveat for memory on a local chat — it spends nothing there', () => {
+    mountChat(chat({ memoryEnabled: true, seatId: LOCAL_CONTEXT_SEAT.id, engine: 'local', model: 'qwen3.8:27b-ctx64k' }));
+    expect(within(panel()).getByText('Shared project memory was given to this chat’s agent when it started.')).toBeInTheDocument();
   });
 
   it('says so when a chat started without memory, and mounts the panel with no project when no chat is open', () => {

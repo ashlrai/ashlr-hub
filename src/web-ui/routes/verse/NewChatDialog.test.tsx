@@ -178,7 +178,7 @@ describe('NewChatDialog — context mode', () => {
 
     await user.click(screen.getByRole('radio', { name: 'Expansive' }));
     expect(screen.getByText(/Runs to about 967k before compacting/)).toBeInTheDocument();
-    expect(screen.getByText(/re-sends 2\.6× what one at 367k does/)).toBeInTheDocument();
+    expect(screen.getByText(/re-sends 2\.6× the tokens of one at 367k/)).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Make Expansive the default for Claude Max' }));
     expect(reasons).toHaveLength(1);
@@ -207,6 +207,32 @@ describe('NewChatDialog — context mode', () => {
     expect(screen.queryByText(/now start in/)).not.toBeInTheDocument();
     // Still offered: nothing was saved.
     expect(screen.getByRole('button', { name: 'Make Expansive the default for Claude Max' })).toBeEnabled();
+  });
+
+  it('never sticks on "Saving…" when the write fails after an unlock, and shows the server’s own words', async () => {
+    // ChatSection's guard, when no token is held, PARKS the action behind the
+    // token prompt and later runs `action().then(resolve)` — a rejection is
+    // never forwarded. This guard behaves the same way, so the dialog must
+    // settle the write itself.
+    const parked: RunMutation = (_reason, action) => new Promise((resolve) => { void action().then(resolve); });
+    queries.updatePreferences.mockRejectedValue(
+      new ApiError('POST /api/verse/preferences failed (HTTP 400).', 400, '/api/verse/preferences', 'claude-a has no expansive budget for that model.'),
+    );
+    const user = userEvent.setup();
+    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} runMutation={parked} />);
+    await screen.findByRole('radio', { name: 'Standard', checked: true });
+    await user.click(screen.getByRole('radio', { name: 'Expansive' }));
+    await user.click(screen.getByRole('button', { name: 'Make Expansive the default for Claude Max' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('claude-a has no expansive budget for that model.');
+    // Back to a usable button — not "Saving…" for the rest of the dialog.
+    expect(screen.getByRole('button', { name: 'Make Expansive the default for Claude Max' })).toBeEnabled();
+    expect(screen.queryByText('Saving…')).not.toBeInTheDocument();
+
+    // And a retry that succeeds through the same parked guard lands normally.
+    queries.updatePreferences.mockResolvedValue(prefs({ 'claude-a': { contextMode: 'expansive' } }));
+    await user.click(screen.getByRole('button', { name: 'Make Expansive the default for Claude Max' }));
+    expect(await screen.findByText('New chats on Claude Max now start in Expansive.')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('says to unlock when no mutation token is held', async () => {

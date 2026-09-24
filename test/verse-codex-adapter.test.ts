@@ -208,6 +208,17 @@ describe('buildLaunch', () => {
     expect(codexContextOverrides({ contextMode: 'expansive', model: 'gpt-unknown' }, launch())).toEqual([]);
   });
 
+  it('a 3.8 launch snapshot (flat raw window, no budgets) gets the documented expansive pair — the one the UI offered', () => {
+    // What 3.8 pinned: `{id, label, contextWindow: 272000}` and nothing else.
+    const legacy: VerseModelOption = { id: 'gpt-6-sol', label: 'GPT-6 Sol', contextWindow: 272_000 };
+    expect(codexContextOverrides({ contextMode: 'expansive', model: 'gpt-6-sol' }, launch({}, [legacy])))
+      .toEqual(['-c', 'model_context_window=872000', '-c', 'model_auto_compact_token_limit=784800']);
+    // gpt-5.5 has no larger window documented, and an undocumented slug keeps
+    // its (budget-less) snapshot: still never half a pair, never a guess.
+    expect(codexContextOverrides({ contextMode: 'expansive', model: 'gpt-5.5' }, launch({}, [{ id: 'gpt-5.5', label: 'GPT-5.5', contextWindow: 272_000 }]))).toEqual([]);
+    expect(codexContextOverrides({ contextMode: 'expansive', model: 'gpt-reserve' }, launch({}, [{ id: 'gpt-reserve', label: 'GPT-Reserve', contextWindow: 272_000 }]))).toEqual([]);
+  });
+
   it('derives the raw window from an effective-only budget and never lets the limit exceed it', () => {
     const effectiveOnly: VerseModelOption = { ...GPT6, expansive: { contextWindow: 828_400, autoCompactAt: null } };
     expect(codexContextOverrides({ contextMode: 'expansive', model: 'gpt-6-sol' }, launch({}, [effectiveOnly])))

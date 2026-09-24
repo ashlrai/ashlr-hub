@@ -123,7 +123,8 @@ export function seatOptionText(input: {
   workingSetTokens?: number | null;
   note: string | null;
 }): string {
-  const verdict = modelFit(input.workingSetTokens, input.model, input.mode);
+  // The seat's own engine: the fit adds THAT CLI's estimated fixed prompt.
+  const verdict = modelFit(input.workingSetTokens, input.model, input.mode, input.seat.engine);
   const fit = verdict === null ? '' : ` · ${FIT_SHORT[verdict]}`;
   const note = input.note === null ? '' : ` (${input.note})`;
   return `${input.seat.label} — ${input.model.label} · ${modelContextPhrase(input.model, input.mode)}${fit}${note}`;

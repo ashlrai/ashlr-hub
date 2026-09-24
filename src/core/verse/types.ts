@@ -530,10 +530,14 @@ export interface VerseSession {
   usage: VerseUsage;
   lastError: string | null;
   /**
-   * V3.9 ADDITIVE. The session's context budget. Absent = `standard`, which
-   * is exactly how every record written before modes existed behaves.
-   * Changeable mid-session (POST /sessions/:id/context-mode); it only changes
-   * CLI flags, never prompt content, so switching does not break the cache.
+   * V3.9 ADDITIVE. The session's context budget. Every record written by 3.9+
+   * carries it explicitly, so ABSENT means a pre-3.9 record: the engine
+   * materializes it on first touch — `expansive` for a Claude 1M model (that
+   * is the native ~967k compaction those chats always ran with, so upgrading
+   * never forces a paid compaction), `standard` otherwise (= native).
+   * Changeable mid-session (POST /sessions/:id/context-mode): it changes CLI
+   * flags, not prompt content — but switching DOWN below the current
+   * occupancy makes the CLI compact on its next turn.
    */
   contextMode?: VerseContextMode;
   /** V3.9 ADDITIVE. Native compactions observed so far (claude/grok compact_boundary, codex rollout `compacted`). */
@@ -595,6 +599,13 @@ export type VerseEvent =
     contextWindow: number | null;
     exact: boolean;
     autoCompactAt?: number | null;
+    /**
+     * Where `contextWindow` came from. A CLI reading is `runtime`; the event
+     * the engine writes after a MODE SWITCH carries the new budget's catalog
+     * source, so a client never relabels a catalog figure as a measurement.
+     * Absent on events from before this field existed (treat as `runtime`).
+     */
+    contextWindowSource?: VerseWindowSource;
   };
 
 export type VerseEventType = VerseEvent['type'];
@@ -806,6 +817,32 @@ export interface VerseHandoffPreview {
 
 export const VERSE_HANDOFF_MAX_CHARS = 12_000;
 
+/**
+ * The canned turn behind "Ask this seat to summarize first". Shared by the UI
+ * (which sends it as an ordinary turn through the normal spend chokepoint) and
+ * the handoff builder (which must NOT carry it into the new session as the
+ * operator's "latest ask" — the new chat would otherwise be told to write a
+ * handoff note instead of continuing the work).
+ *
+ * Written so the reply is useful as turn 1 of a session that has NONE of this
+ * context. It asks for no tool use on purpose: a summary that starts editing
+ * files is not a summary, and a read-only turn is also the cheapest one.
+ */
+export const VERSE_HANDOFF_SUMMARY_REQUEST = [
+  'This conversation is about to continue in a fresh session that has none of its context.',
+  'Write the handoff note that new session should start from. Do not edit files or run commands for this — only write the note.',
+  '',
+  'Cover, concretely:',
+  '- The goal, and what "done" looks like.',
+  '- Decisions made so far, each with the reason it was made.',
+  '- Current state: what is finished, what is half-done, what is untested.',
+  '- Files changed and anything not yet committed.',
+  '- How to verify the work (exact commands).',
+  '- Open questions, risks, and approaches already tried that did not work.',
+  '',
+  'Keep it under 600 words. Prefer file paths and commands over prose.',
+].join('\n');
+
 /** GET /api/verse/context-fit — how big the reachable code is, in tokens. */
 export interface VerseContextFitRoot {
   path: string;
@@ -881,3 +918,14 @@ export interface VerseProjectMemoryWrite {
 }
 
 export const VERSE_MEMORY_MAX_BYTES = 64 * 1024;
+
+/**
+ * POST /api/verse/memory's own JSON body cap: JSON escaping can double the
+ * content (every newline becomes `\\n`), plus room for the other fields. Every
+ * other route keeps the 64 KiB default. Shared so the browser's pre-check can
+ * never refuse a save the server would accept.
+ */
+export const VERSE_MEMORY_BODY_MAX_BYTES = 2 * VERSE_MEMORY_MAX_BYTES + 8 * 1024;
+
+/** Cap on the memory block appended to each session's system prompt. */
+export const VERSE_MEMORY_BLOCK_MAX_BYTES = 6 * 1024;

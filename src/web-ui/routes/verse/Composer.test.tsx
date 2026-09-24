@@ -3,7 +3,7 @@ import { cleanup as cleanupRender, render, screen, waitFor, within } from '@test
 import userEvent from '@testing-library/user-event';
 import { CLAUDE_1M_SEAT, CLAUDE_SEAT, CODEX_SEAT, LOCAL_SEAT } from './fixtures.test-support.js';
 import { Composer, costConsequence, type ComposerProps } from './Composer.js';
-import { costHint, saveDraft } from './chat/composer-state.js';
+import { clearComposerMemory, costHint, loadDraft, saveDraft } from './chat/composer-state.js';
 import type { VerseSeat } from '../../data/api-types.js';
 
 const SEATS = [CLAUDE_SEAT, CODEX_SEAT, LOCAL_SEAT];
@@ -241,6 +241,34 @@ describe('Composer — V3.9 cost hint on the compaction point', () => {
     await user.click(screen.getByRole('button', { name: 'Send message' }));
     await waitFor(() => expect(p.onSend).toHaveBeenCalledWith('Continuing “Old chat”. Goal: finish it.'));
     expect(screen.queryByText(/Handoff note drafted/)).toBeNull();
+  });
+
+  it('keeps a handoff note in memory when storage refuses the write, and the new chat still opens with it', async () => {
+    // Blocked or full storage: setItem throws. The note is the ONLY copy.
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('quota', 'QuotaExceededError');
+    });
+    try {
+      saveDraft('vs_blocked', 'Handoff note: keep going.');
+      expect(loadDraft('vs_blocked')).toBe('Handoff note: keep going.');
+      render(<Composer {...props({ sessionId: 'vs_blocked', handoffDraft: true })} />);
+      expect(screen.getByRole('textbox', { name: 'Message' })).toHaveValue('Handoff note: keep going.');
+      // A clear that also cannot be written must not resurrect the note.
+      saveDraft('vs_blocked', '');
+      expect(loadDraft('vs_blocked')).toBe('');
+    } finally {
+      setItem.mockRestore();
+      clearComposerMemory();
+    }
+    // Once storage accepts a write again, storage is the answer.
+    saveDraft('vs_blocked', 'stored');
+    expect(localStorage.getItem('ashlr.verse.drafts.v1')).toContain('stored');
+    expect(loadDraft('vs_blocked')).toBe('stored');
+  });
+
+  it('draws no cost warning from an upper bound past the compaction point', () => {
+    // A codex turn total, not the prompt: nothing honest to say about "past the window".
+    expect(costHint('x'.repeat(400), { contextTokens: 697_060, contextWindow: 258_400, autoCompactAt: 244_800, exact: false })).toBeNull();
   });
 
   it('never offers a model the seat cannot run in the new-chat menu', async () => {

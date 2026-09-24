@@ -46,14 +46,17 @@ function readMap<T>(key: string, parse: (value: unknown) => T | null): Record<st
   return out;
 }
 
-function writeMap(key: string, map: Record<string, unknown>): void {
+/** True when the write landed; false when storage refused it (blocked, over quota). */
+function writeMap(key: string, map: Record<string, unknown>): boolean {
   // Insertion order is recency order: every write deletes before re-inserting.
   const ids = Object.keys(map);
   for (const stale of ids.slice(0, Math.max(0, ids.length - SESSION_LIMIT))) delete map[stale];
   try {
     localStorage.setItem(key, JSON.stringify(map));
+    return true;
   } catch {
-    /* best-effort */
+    /* best-effort — the caller decides whether a refusal loses anything */
+    return false;
   }
 }
 
@@ -68,19 +71,41 @@ const asHistory = (value: unknown): string[] | null => {
   return list.length > 0 ? list : null;
 };
 
+/**
+ * Drafts whose last write storage REFUSED, held for the page's lifetime ('' =
+ * a clear that could not be written) and consulted BEFORE storage.
+ *
+ * WHY: `localStorage` writes fail silently (blocked storage, a full quota),
+ * and one draft is not a convenience but the only copy of something: the
+ * handoff note. The dialog hands it over with `saveDraft` and the new chat's
+ * Composer restores it with `loadDraft`; with storage refusing, the edited
+ * note — possibly written after a paid summary turn — simply vanished. An
+ * entry here is always newer than whatever storage holds for that chat, and a
+ * later write that lands removes it, so storage is the answer again.
+ */
+const unsavedDrafts = new Map<string, string>();
+
 /** The unsent draft for this chat, or `''`. */
 export function loadDraft(sessionId: string | null | undefined): string {
   if (!sessionId) return '';
+  const unsaved = unsavedDrafts.get(sessionId);
+  if (unsaved !== undefined) return unsaved;
   return readMap(DRAFT_KEY, asText)[sessionId] ?? '';
 }
 
 /** Persist (or clear, when empty) the draft for this chat. */
 export function saveDraft(sessionId: string | null | undefined, text: string): void {
   if (!sessionId) return;
+  const clean = text.trim().length > 0 ? text.slice(0, TEXT_LIMIT) : '';
   const map = readMap(DRAFT_KEY, asText);
   delete map[sessionId];
-  if (text.trim().length > 0) map[sessionId] = text.slice(0, TEXT_LIMIT);
-  writeMap(DRAFT_KEY, map);
+  if (clean) map[sessionId] = clean;
+  unsavedDrafts.delete(sessionId);
+  if (!writeMap(DRAFT_KEY, map)) {
+    unsavedDrafts.set(sessionId, clean);
+    // Bounded like storage: oldest refusals go first.
+    for (const stale of [...unsavedDrafts.keys()].slice(0, Math.max(0, unsavedDrafts.size - SESSION_LIMIT))) unsavedDrafts.delete(stale);
+  }
 }
 
 /** Messages sent in this chat, oldest first. */
@@ -110,6 +135,7 @@ export function pushHistory(sessionId: string | null | undefined, text: string):
  */
 export function forgetComposerMemory(sessionId: string | null | undefined): void {
   if (!sessionId) return;
+  unsavedDrafts.delete(sessionId);
   for (const [key, parse] of [
     [DRAFT_KEY, asText],
     [SENT_KEY, asHistory],
@@ -130,6 +156,7 @@ export function forgetComposerMemory(sessionId: string | null | undefined): void
  * the one thing that used to survive it.
  */
 export function clearComposerMemory(): void {
+  unsavedDrafts.clear();
   for (const key of [DRAFT_KEY, SENT_KEY]) {
     try {
       localStorage.removeItem(key);

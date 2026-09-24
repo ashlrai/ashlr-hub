@@ -3,8 +3,8 @@
  * panel and message search, pinned without a DOM.
  */
 import { describe, expect, it } from 'vitest';
-import type { VerseSearchHit } from '../../../../core/verse/types.js';
-import { SESSION_BASE_OVERHEAD_TOKENS } from '../../../../core/verse/context-math.js';
+import { VERSE_HANDOFF_SUMMARY_REQUEST, VERSE_MEMORY_MAX_BYTES, type VerseSearchHit } from '../../../../core/verse/types.js';
+import { fitVerdict, SESSION_BASE_OVERHEAD_BY_ENGINE, SESSION_BASE_OVERHEAD_TOKENS } from '../../../../core/verse/context-math.js';
 import {
   API_BODY_MAX_BYTES,
   budgetLine,
@@ -14,9 +14,11 @@ import {
   groupSearchHits,
   handoffFit,
   handoffTitle,
-  HANDOFF_SUMMARY_REQUEST,
   highlightSegments,
   jsonBodyBytes,
+  MEMORY_BLOCK_MAX_BYTES,
+  MEMORY_BODY_MAX_BYTES,
+  MEMORY_SPEND_NOTE,
   modelOption,
   offersExpansive,
   relativePhrase,
@@ -160,41 +162,50 @@ describe('budgetLine / offersExpansive', () => {
 });
 
 describe('handoffFit', () => {
-  it('fits a normal handoff on a 1M model and shows both halves of the sum', () => {
-    const fit = handoffFit(8_000, FABLE, 'standard');
+  it('fits a normal handoff on a 1M model and shows both halves of the sum, the fixed prompt as an estimate', () => {
+    const fit = handoffFit(8_000, FABLE, 'standard', 'claude');
     expect(fit.verdict).toBe('fits');
     expect(fit.tone).toBe('ok');
     expect(fit.handoffTokens).toBe(2_000);
-    expect(fit.needTokens).toBe(2_000 + SESSION_BASE_OVERHEAD_TOKENS);
-    expect(fit.text).toContain('~2k tokens of handoff + ~30k of fixed prompt');
+    expect(fit.overheadTokens).toBe(SESSION_BASE_OVERHEAD_BY_ENGINE.claude);
+    expect(fit.needTokens).toBe(2_000 + SESSION_BASE_OVERHEAD_BY_ENGINE.claude);
+    expect(fit.text).toContain('~2k tokens of handoff + an estimated ~25k of fixed prompt');
   });
 
-  it('is honest about a 64k local slot: the fixed prompt alone nearly fills it', () => {
-    // A 64k slot compacts at 32,536. A small note (2k) + 30k of fixed prompt
-    // squeezes in as "tight"; a full-size 12,000-char note (3k) does not.
-    expect(handoffFit(8_000, LOCAL_MODEL, 'standard').verdict).toBe('tight');
-    const fit = handoffFit(12_000, LOCAL_MODEL, 'standard');
-    expect(fit.verdict).toBe('split');
-    expect(fit.tone).toBe('danger');
-    expect(fit.text).toMatch(/Too big for one context/);
+  it('uses the TARGET engine’s fixed prompt: a full-size handoff fits a 64k local slot', () => {
+    // A 64k slot compacts at 32,536. With a flat 30k fixed prompt a full
+    // 12,000-char note (3k) was "Too big for one context"; local's measured
+    // ~15k makes it 18k — well inside.
+    expect(fitVerdict(3_000, LOCAL_MODEL, 30_000)).toBe('split');
+    const fit = handoffFit(12_000, LOCAL_MODEL, 'standard', 'local');
+    expect(fit.overheadTokens).toBe(SESSION_BASE_OVERHEAD_BY_ENGINE.local);
+    expect(fit.needTokens).toBe(3_000 + 15_000);
+    expect(fit.verdict).toBe('fits');
+    expect(fit.tone).toBe('ok');
+    expect(fit.text).toContain('an estimated ~15k of fixed prompt');
+  });
+
+  it('falls back to the largest estimate when the target engine is not known yet', () => {
+    const fit = handoffFit(8_000, FABLE, 'standard', null);
+    expect(fit.overheadTokens).toBe(SESSION_BASE_OVERHEAD_TOKENS);
   });
 
   it('says tight with the percentage of the compaction point', () => {
-    // 4k of handoff + 30k of fixed prompt = 34k against a 53k compaction point → 64%.
-    const roomy = { ...LOCAL_MODEL, contextWindow: 131_072, autoCompactAt: 53_000 };
-    const fit = handoffFit(4 * 4_000, roomy, 'standard');
+    // 4k of handoff + ~25k of claude fixed prompt = 29k against a 45k compaction point → 64%.
+    const roomy = { ...LOCAL_MODEL, contextWindow: 131_072, autoCompactAt: 45_000 };
+    const fit = handoffFit(4 * 4_000, roomy, 'standard', 'claude');
     expect(fit.verdict).toBe('tight');
     expect(fit.text).toMatch(/Tight: .* is 64% of where this model compacts/);
   });
 
   it('distinguishes "needs expansive" in standard from "fits expansive" in expansive', () => {
     const small = { ...FABLE, autoCompactAt: 20_000 };
-    expect(handoffFit(8_000, small, 'standard').text).toMatch(/Switch to Expansive/);
-    expect(handoffFit(8_000, small, 'expansive').text).toMatch(/Fits only the expansive budget/);
+    expect(handoffFit(8_000, small, 'standard', 'claude').text).toMatch(/Switch to Expansive/);
+    expect(handoffFit(8_000, small, 'expansive', 'claude').text).toMatch(/Fits only the expansive budget/);
   });
 
   it('claims nothing when the window is unknown', () => {
-    const fit = handoffFit(8_000, { id: 'x', label: 'x', contextWindow: null }, 'standard');
+    const fit = handoffFit(8_000, { id: 'x', label: 'x', contextWindow: null }, 'standard', 'local');
     expect(fit.verdict).toBeNull();
     expect(fit.tone).toBe('unknown');
   });
@@ -210,11 +221,11 @@ describe('turnCostSentence', () => {
   });
 });
 
-describe('the canned summary request', () => {
+describe('the canned summary request (shared with the handoff builder via types.ts)', () => {
   it('asks for a note, not for work', () => {
-    expect(HANDOFF_SUMMARY_REQUEST).toMatch(/Do not edit files or run commands/);
-    expect(HANDOFF_SUMMARY_REQUEST).toMatch(/reason/);
-    expect(new TextEncoder().encode(HANDOFF_SUMMARY_REQUEST).length).toBeLessThan(2_000);
+    expect(VERSE_HANDOFF_SUMMARY_REQUEST).toMatch(/Do not edit files or run commands/);
+    expect(VERSE_HANDOFF_SUMMARY_REQUEST).toMatch(/reason/);
+    expect(new TextEncoder().encode(VERSE_HANDOFF_SUMMARY_REQUEST).length).toBeLessThan(2_000);
   });
 });
 
@@ -231,6 +242,22 @@ describe('bytes', () => {
     // A line break and a quote each travel as two bytes.
     expect(jsonBodyBytes({ text: '\n"' })).toBe('{"text":"\\n\\""}'.length);
     expect(jsonBodyBytes({ content: 'x\n'.repeat(30_000) })).toBeGreaterThan(API_BODY_MAX_BYTES);
+  });
+
+  it('gives POST /memory the server’s own larger body cap, so a full 64 KB file can be saved', () => {
+    // verse-api VERSE_MEMORY_BODY_MAX_BYTES: 2 × 64 KiB + 8 KiB.
+    expect(MEMORY_BODY_MAX_BYTES).toBe(139_264);
+    // 64 KiB of content made only of line breaks escapes to 128 KiB — still under.
+    const worst = '\n'.repeat(VERSE_MEMORY_MAX_BYTES);
+    expect(jsonBodyBytes({ projectPath: '/Users/mason/dev/hub', content: worst })).toBeLessThanOrEqual(MEMORY_BODY_MAX_BYTES);
+  });
+
+  it('says memory costs usage on paid seats, not that it spends nothing', () => {
+    expect(MEMORY_BLOCK_MAX_BYTES).toBe(6 * 1024);
+    expect(MEMORY_SPEND_NOTE).toMatch(/up to 6 KB/);
+    expect(MEMORY_SPEND_NOTE).toMatch(/cached after the first/);
+    expect(MEMORY_SPEND_NOTE).toMatch(/paid seat/);
+    expect(MEMORY_SPEND_NOTE).not.toMatch(/^Nothing|spends no usage/);
   });
 
   it('formats bytes for a narrow panel', () => {

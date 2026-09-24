@@ -32,6 +32,7 @@ import {
   compareCliVersions,
   grokModelOptions,
   joinClaudeLabels,
+  legacyModelOptionFallback,
   localModelOption,
   newestInstalledClaudeVersion,
   readCodexCatalog,
@@ -470,5 +471,47 @@ describe('local model options', () => {
     expect(localModelOption('x', 'x', 32_768, 'fallback').autoCompactAt).toBeNull();
     expect(localModelOption('x', 'x', 4_096, 'fallback').autoCompactAt).toBeNull();
     expect(hasExpansiveMode(opt)).toBe(false);
+  });
+});
+
+describe('legacyModelOptionFallback — launch snapshots written before 3.9', () => {
+  it('returns a V3.9 option unchanged', () => {
+    const current = codexModelOptions(null).find((m) => m.id === 'gpt-6-sol')!;
+    expect(legacyModelOptionFallback('codex', 'gpt-6-sol', current)).toBe(current);
+    const local = localModelOption('qwen3.8:27b-ctx64k', 'qwen3.8', 65_536, 'runtime');
+    expect(legacyModelOptionFallback('local', local.id, local)).toBe(local);
+  });
+
+  it('claude: the verified table supplies the budgets; the snapshot keeps its identity', () => {
+    const snapshot = { id: 'claude-opus-5.5', label: 'Claude Opus 5.5 (old)', contextWindow: 200_000 };
+    const option = legacyModelOptionFallback('claude', snapshot.id, snapshot)!;
+    expect(option).toMatchObject({ id: 'claude-opus-5.5', label: 'Claude Opus 5.5 (old)', contextWindow: 1_000_000, autoCompactAt: 367_000, windowSource: 'cli-catalog', unavailableReason: null });
+    expect(budgetFor(option, 'expansive')).toEqual({ contextWindow: 1_000_000, autoCompactAt: 967_000 });
+    // A 200k model: standard only, exactly as the table says.
+    expect(hasExpansiveMode(legacyModelOptionFallback('claude', 'claude-haiku-4-5-20251001', null))).toBe(false);
+  });
+
+  it('codex: the documented option (95% effective window, expansive where the catalog max is larger)', () => {
+    const option = legacyModelOptionFallback('codex', 'gpt-6-sol', { id: 'gpt-6-sol', label: 'GPT-6 Sol', contextWindow: 272_000 })!;
+    expect(option).toMatchObject({ contextWindow: 258_400, autoCompactAt: 244_800, windowSource: 'documented' });
+    expect(budgetFor(option, 'expansive')).toEqual({ contextWindow: 828_400, autoCompactAt: 784_800, providerWindow: 872_000 });
+    // It is the SAME option the live documented seat lists — the UI's source.
+    const live = codexModelOptions(null).find((m) => m.id === 'gpt-6-sol')!;
+    expect(budgetFor(option, 'expansive')).toEqual(budgetFor(live, 'expansive'));
+    expect(hasExpansiveMode(legacyModelOptionFallback('codex', 'gpt-5.5', { id: 'gpt-5.5', label: 'GPT-5.5', contextWindow: 272_000 }))).toBe(false);
+  });
+
+  it('grok: the documented option (no expansive mode)', () => {
+    const option = legacyModelOptionFallback('grok', 'grok-4.7', { id: 'grok-4.7', label: 'Grok 4.7', contextWindow: 500_000 })!;
+    expect(option).toMatchObject({ id: 'grok-4.7', contextWindow: 500_000, autoCompactAt: 400_000, windowSource: 'documented' });
+    expect(hasExpansiveMode(option)).toBe(false);
+  });
+
+  it('an unknown model, and every local snapshot, keep what the snapshot said — never a guess', () => {
+    const odd = { id: 'gpt-reserve', label: 'GPT-Reserve', contextWindow: 272_000 };
+    expect(legacyModelOptionFallback('codex', odd.id, odd)).toBe(odd);
+    expect(legacyModelOptionFallback('claude', 'claude-mystery-9', null)).toBeNull();
+    const oldLocal = { id: 'qwen3-coder:30b-ctx64k', label: 'qwen3-coder', contextWindow: 262_144 };
+    expect(legacyModelOptionFallback('local', oldLocal.id, oldLocal)).toBe(oldLocal);
   });
 });

@@ -10,6 +10,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -249,13 +250,17 @@ describe('createSession', () => {
     // verified per-model table supplies Opus 5's standard budget: a 1M window
     // compacting at 400k - 20k reserve - 13k buffer.
     expect(claude.usage).toMatchObject({ contextWindow: 1_000_000, autoCompactAt: 367_000, contextWindowSource: 'cli-catalog' });
-    expect(claude.contextMode).toBeUndefined();
+    // Always recorded, even when defaulted: an absent key now means "created
+    // before 3.9" (see the legacy-record tests below).
+    expect(claude.contextMode).toBe('standard');
 
     const codex = engine.createSession({ projectPath: project, seatId: 'codex-a', title: '  my   codex  ' }, nativeLaunch(CODEX_SEAT));
     expect(codex.nativeSessionId).toBeNull();
     expect(codex.title).toBe('my codex');
-    // No window anywhere → codex's own figure for a 272k model: 95% effective, compacts at 90% of raw.
-    expect(codex.usage).toMatchObject({ contextWindow: 258_400, autoCompactAt: 244_800, contextWindowSource: 'fallback' });
+    // A budget-less option (a pre-3.9 snapshot shape) borrows the documented
+    // codex budget for its model — 95% effective, compacting at 90% of raw —
+    // the same option the live seat (and so the UI) lists.
+    expect(codex.usage).toMatchObject({ contextWindow: 258_400, autoCompactAt: 244_800, contextWindowSource: 'documented' });
 
     const local = engine.createSession({ projectPath: project, seatId: 'local:qwen3-coder' }, { seat: LOCAL_SEAT, launcher: null, ollamaBaseUrl: 'http://127.0.0.1:11434' });
     // A stated window with no stated compaction point: the point stays unknown, never invented.
@@ -846,10 +851,13 @@ describe('V3.9 createSession — budgets, modes, availability, provenance', () =
     expect(created.usage).toMatchObject({ contextWindow: 200_000, autoCompactAt: 167_000, contextWindowSource: 'fallback' });
   });
 
-  it('a pre-3.9 caller gets no new session keys and no memory in the launch record', () => {
+  it('a pre-3.9 caller gets an explicit standard mode, no other new session keys, and no memory in the launch record', () => {
     const created = engine.createSession({ projectPath: project, seatId: 'claude-max' }, nativeLaunch(CLAUDE_SEAT));
     const record = JSON.parse(readFileSync(join(root, 'sessions', `${created.id}.json`), 'utf8')) as Record<string, unknown>;
-    for (const key of ['contextMode', 'compactionCount', 'handoffFrom', 'memoryEnabled']) expect(key in record).toBe(false);
+    // The mode is written even when defaulted, so "no key" reliably means a
+    // record from before modes existed.
+    expect(record['contextMode']).toBe('standard');
+    for (const key of ['compactionCount', 'handoffFrom', 'memoryEnabled']) expect(key in record).toBe(false);
     const launch = JSON.parse(readFileSync(join(root, 'sessions', `${created.id}.launch.json`), 'utf8')) as Record<string, unknown>;
     expect('memory' in launch).toBe(false);
   });
@@ -931,7 +939,8 @@ describe('V3.9 setContextMode', () => {
     expect(expansive.usage).toMatchObject({ contextWindow: 1_000_000, autoCompactAt: 967_000 });
     const events = engine.getEvents(created.id);
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ type: 'context', turnId: null, contextTokens: 0, contextWindow: 1_000_000, exact: true, autoCompactAt: 967_000 });
+    // The event names the budget's source: a catalog figure, not a CLI reading.
+    expect(events[0]).toMatchObject({ type: 'context', turnId: null, contextTokens: 0, contextWindow: 1_000_000, exact: true, autoCompactAt: 967_000, contextWindowSource: 'cli-catalog' });
 
     expect(engine.setContextMode(created.id, 'expansive').contextMode).toBe('expansive');
     expect(engine.getEvents(created.id)).toHaveLength(1);
@@ -974,6 +983,8 @@ describe('V3.9 setContextMode', () => {
       expect(custom.getSession(claude.id)!.usage).toMatchObject({ contextWindow: 1_000_000, contextWindowSource: 'runtime', autoCompactAt: 367_000 });
       expect(custom.setContextMode(claude.id, 'expansive').usage)
         .toMatchObject({ contextWindow: 1_000_000, contextWindowSource: 'runtime', autoCompactAt: 967_000 });
+      // A measured window stays a measurement across the switch.
+      expect(custom.getEvents(claude.id).at(-1)).toMatchObject({ type: 'context', turnId: null, contextWindowSource: 'runtime' });
 
       const codex = custom.createSession({ projectPath: project, seatId: 'codex-b' }, nativeLaunch(catalogSeat('codex', 'codex-b', [GPT6])));
       custom.sendTurn(codex.id, 'measure me');
@@ -981,9 +992,252 @@ describe('V3.9 setContextMode', () => {
       expect(custom.getSession(codex.id)!.usage).toMatchObject({ contextWindow: 258_400, contextWindowSource: 'runtime', autoCompactAt: 244_800 });
       expect(custom.setContextMode(codex.id, 'expansive').usage)
         .toMatchObject({ contextWindow: 828_400, contextWindowSource: 'provider-catalog', autoCompactAt: 784_800 });
+      // Codex's window IS the mode, so the old runtime reading is dropped and
+      // the event says the new figure is the catalog's (a client must not
+      // relabel it "reported by the CLI").
+      expect(custom.getEvents(codex.id).at(-1))
+        .toMatchObject({ type: 'context', turnId: null, contextWindow: 828_400, contextWindowSource: 'provider-catalog' });
     } finally {
       custom.close();
     }
+  });
+});
+
+/**
+ * A seat exactly as 3.8 pinned it into a launch record: one flat window per
+ * model (claude: the CLI's 200k fallback for every model; codex: the RAW 272k),
+ * and none of the V3.9 budget keys.
+ */
+function legacySeat(engine: VerseSeat['engine'], id: string, models: string[], window: number): VerseSeat {
+  return {
+    id,
+    engine,
+    label: id,
+    accountId: id,
+    models: models.map((m) => ({ id: m, label: m, contextWindow: window })),
+    contextWindow: window,
+    health: { state: 'unknown', summary: null, windows: [], observedAt: null },
+  };
+}
+
+/**
+ * Write a session record + launch record in the exact shape 3.8 left on disk:
+ * no `contextMode`, no `contextWindowSource`/`autoCompactAt`, and occupancy
+ * CLAMPED at the old 200k catalog window.
+ */
+function writeLegacySession(
+  verseRoot: string,
+  launch: VerseSeatLaunch,
+  model: string,
+  usage: Partial<VerseUsage> = {},
+): string {
+  const id = randomUUID();
+  const sessionsDir = join(verseRoot, 'sessions');
+  mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
+  const engineId = launch.seat.engine;
+  const record = {
+    id,
+    title: 'Chat from 3.8',
+    projectPath: project,
+    engine: engineId,
+    accountId: launch.seat.accountId,
+    seatId: launch.seat.id,
+    model,
+    nativeSessionId: engineId === 'codex' ? 'thr_legacy' : randomUUID(),
+    createdAt: '2026-09-22T10:00:00.000Z',
+    updatedAt: '2026-09-22T11:00:00.000Z',
+    status: 'idle',
+    turnCount: 4,
+    usage: {
+      inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0, cacheCreationTokens: 0,
+      contextTokens: 200_000, contextWindow: launch.seat.contextWindow,
+      ...usage,
+    },
+    lastError: null,
+  };
+  writeFileSync(join(sessionsDir, `${id}.json`), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(join(sessionsDir, `${id}.launch.json`), `${JSON.stringify(launch)}\n`, { mode: 0o600 });
+  return id;
+}
+
+function readRecord(verseRoot: string, id: string): Record<string, unknown> & { usage: Record<string, unknown> } {
+  return JSON.parse(readFileSync(join(verseRoot, 'sessions', `${id}.json`), 'utf8')) as Record<string, unknown> & { usage: Record<string, unknown> };
+}
+
+describe('V3.9 records written before 3.9', () => {
+  const LEGACY_CLAUDE = () => legacySeat('claude', 'claude-max', ['claude-fable-5-1', 'claude-haiku-4-5-20251001'], 200_000);
+
+  it('a 3.8 claude chat on a 1M model keeps the native window: it becomes expansive, on disk, once', async () => {
+    const legacyRoot = join(work, 'verse-legacy');
+    const id = writeLegacySession(legacyRoot, nativeLaunch(LEGACY_CLAUDE()), 'claude-fable-5-1');
+    const custom = createVerseEngine({ root: legacyRoot, killGraceMs: 200 });
+    try {
+      // Materialised by the engine's load pass, before anyone asked for it.
+      const onDisk = readRecord(legacyRoot, id);
+      expect(onDisk['contextMode']).toBe('expansive');
+      // The meter now draws the compaction point 3.8's CLI actually used
+      // (1M − 20k reserve − 13k buffer), sourced from the verified table.
+      expect(onDisk.usage).toMatchObject({ contextWindow: 1_000_000, autoCompactAt: 967_000, contextWindowSource: 'cli-catalog' });
+      // A migration is not activity: the list order must not change.
+      expect(onDisk['updatedAt']).toBe('2026-09-22T11:00:00.000Z');
+      // Occupancy is left for the first turn's reading to replace.
+      expect(onDisk.usage['contextTokens']).toBe(200_000);
+      expect(custom.getSession(id)).toMatchObject({ contextMode: 'expansive', usage: { autoCompactAt: 967_000 } });
+
+      // The next turn runs with the CLI's own `auto` window — NOT
+      // `--autocompact 400000`, which would compact a 400k–967k chat on the
+      // spot (an unrequested, paid summarisation).
+      custom.sendTurn(id, 'carry on');
+      const events = await untilTurnDone(custom, id);
+      expect(events.at(-1)).toMatchObject({ type: 'turn-done', ok: true });
+      const [call] = readCalls(side);
+      expect(call.argv[call.argv.indexOf('--autocompact') + 1]).toBe('auto');
+      expect(call.argv).toEqual(expect.arrayContaining(['--resume']));
+
+      // From here it is an ordinary expansive session: switching to standard works and sticks.
+      const standard = custom.setContextMode(id, 'standard');
+      expect(standard).toMatchObject({ contextMode: 'standard', usage: { autoCompactAt: 367_000 } });
+      const reopened = createVerseEngine({ root: legacyRoot });
+      try {
+        expect(reopened.getSession(id)!.contextMode).toBe('standard');
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      custom.close();
+    }
+  });
+
+  it('materialises on first touch too (a record that appeared after the engine started)', () => {
+    // `engine` (from beforeEach) has already run its load pass over `root`.
+    const id = writeLegacySession(root, nativeLaunch(LEGACY_CLAUDE()), 'claude-fable-5-1');
+    expect(readRecord(root, id)['contextMode']).toBeUndefined();
+    expect(engine.getSession(id)!.contextMode).toBe('expansive');
+    expect(readRecord(root, id)['contextMode']).toBe('expansive');
+    expect(engine.listSessions().find((s) => s.id === id)!.contextMode).toBe('expansive');
+  });
+
+  it('leaves alone what 3.8 already ran natively: a 200k model, codex/grok, and 3.9-written records', async () => {
+    const legacyRoot = join(work, 'verse-legacy-other');
+    const haiku = writeLegacySession(legacyRoot, nativeLaunch(LEGACY_CLAUDE()), 'claude-haiku-4-5-20251001');
+    const codexLaunch = nativeLaunch(legacySeat('codex', 'codex-a', ['gpt-6-sol'], 272_000));
+    const codex = writeLegacySession(legacyRoot, codexLaunch, 'gpt-6-sol', { contextTokens: 50_000 });
+    const grok = writeLegacySession(legacyRoot, nativeLaunch(legacySeat('grok', 'grok', ['grok-4.7'], 500_000)), 'grok-4.7', { contextTokens: 50_000 });
+    // Written by 3.9 code before the mode key was always recorded: it has a
+    // window source, so its (standard) budget was a deliberate choice.
+    const wip = writeLegacySession(legacyRoot, nativeLaunch(LEGACY_CLAUDE()), 'claude-fable-5-1',
+      { contextWindow: 1_000_000, contextWindowSource: 'cli-catalog', autoCompactAt: 367_000 });
+    const custom = createVerseEngine({ root: legacyRoot, killGraceMs: 200 });
+    try {
+      for (const id of [haiku, codex, grok, wip]) {
+        expect('contextMode' in readRecord(legacyRoot, id)).toBe(false);
+        expect(custom.getSession(id)!.contextMode).toBeUndefined();
+      }
+      // A 200k claude model gets no flag at all, exactly as under 3.8.
+      custom.sendTurn(haiku, 'hi');
+      await untilTurnDone(custom, haiku);
+      expect(readCalls(side)[0]!.argv).not.toContain('--autocompact');
+    } finally {
+      custom.close();
+    }
+  });
+
+  it('a 3.8 codex chat can switch to the expansive mode the live seat offers, and the CLI is told it', async () => {
+    // The UI reads the LIVE codex seat, which lists expansive for gpt-6-sol;
+    // the engine and adapter read the pinned 3.8 snapshot, which has no
+    // budgets. Both must answer from the same documented option.
+    const legacyRoot = join(work, 'verse-legacy-codex');
+    const id = writeLegacySession(legacyRoot, nativeLaunch(legacySeat('codex', 'codex-a', ['gpt-6-sol'], 272_000)), 'gpt-6-sol', { contextTokens: 50_000 });
+    const custom = createVerseEngine({ root: legacyRoot, killGraceMs: 200 });
+    try {
+      const switched = custom.setContextMode(id, 'expansive');
+      expect(switched).toMatchObject({
+        contextMode: 'expansive',
+        usage: { contextWindow: 828_400, autoCompactAt: 784_800, contextWindowSource: 'documented' },
+      });
+      expect(custom.getEvents(id).at(-1)).toMatchObject({ type: 'context', turnId: null, contextWindow: 828_400, contextWindowSource: 'documented' });
+
+      custom.sendTurn(id, 'go wide');
+      await untilTurnDone(custom, id);
+      const [call] = readCalls(side);
+      expect(call.argv).toEqual(expect.arrayContaining(['-c', 'model_context_window=872000', '-c', 'model_auto_compact_token_limit=784800']));
+    } finally {
+      custom.close();
+    }
+  });
+});
+
+describe('V3.9 refreshLocalWindow', () => {
+  const Q8_LAUNCH = (): VerseSeatLaunch => ({
+    seat: catalogSeat('local', 'local:qwen3-coder:30b-ctx64k', [
+      { id: 'qwen3-coder:30b-ctx64k', label: 'qwen3-coder', contextWindow: 262_144, autoCompactAt: 229_144, windowSource: 'provider-catalog' },
+    ]),
+    launcher: null,
+    ollamaBaseUrl: 'http://127.0.0.1:11434',
+  });
+  const LIVE_64K: VerseModelOption = {
+    id: 'qwen3-coder:30b-ctx64k', label: 'qwen3-coder', contextWindow: 65_536, autoCompactAt: 32_536, windowSource: 'runtime',
+  };
+
+  it('replaces a stale stored window with the live one, so the CLI and the meter get the same number', async () => {
+    const created = engine.createSession({ projectPath: project, seatId: 'local:qwen3-coder:30b-ctx64k' }, Q8_LAUNCH());
+    expect(created.usage).toMatchObject({ contextWindow: 262_144, autoCompactAt: 229_144, contextWindowSource: 'provider-catalog' });
+
+    const refreshed = engine.refreshLocalWindow(created.id, LIVE_64K);
+    expect(refreshed.usage).toMatchObject({ contextWindow: 65_536, autoCompactAt: 32_536, contextWindowSource: 'runtime' });
+    expect(engine.getEvents(created.id).at(-1)).toMatchObject({
+      type: 'context', turnId: null, contextWindow: 65_536, autoCompactAt: 32_536, contextWindowSource: 'runtime',
+    });
+
+    engine.sendTurn(created.id, 'local hello');
+    await untilTurnDone(engine, created.id);
+    // What the CLI is told is exactly what was stored (and what the meter draws).
+    expect(readCalls(side)[0]!.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('65536');
+
+    // Unchanged → no write, no event.
+    const seq = engine.getEvents(created.id).at(-1)!.seq;
+    engine.refreshLocalWindow(created.id, LIVE_64K);
+    expect(engine.getEvents(created.id).at(-1)!.seq).toBe(seq);
+  });
+
+  it('corrects a pre-3.9 local record (no source) and stamps where the window came from', () => {
+    const legacyRoot = join(work, 'verse-legacy-local');
+    const legacy = Q8_LAUNCH();
+    legacy.seat = legacySeat('local', 'local:qwen3-coder:30b-ctx64k', ['qwen3-coder:30b-ctx64k'], 262_144);
+    const id = writeLegacySession(legacyRoot, legacy, 'qwen3-coder:30b-ctx64k', { contextTokens: 12_000 });
+    const custom = createVerseEngine({ root: legacyRoot });
+    try {
+      expect(custom.getSession(id)!.usage.contextWindowSource).toBeUndefined();
+      expect(custom.refreshLocalWindow(id, LIVE_64K).usage).toMatchObject({ contextWindow: 65_536, autoCompactAt: 32_536, contextWindowSource: 'runtime' });
+      expect(readRecord(legacyRoot, id).usage).toMatchObject({ contextWindow: 65_536, contextWindowSource: 'runtime' });
+    } finally {
+      custom.close();
+    }
+  });
+
+  it('is a no-op off local and for an option with no window; refuses another model, an unknown session, and a running turn', async () => {
+    const claude = engine.createSession({ projectPath: project, seatId: 'claude-a' }, nativeLaunch(catalogSeat('claude', 'claude-a', [OPUS_5])));
+    expect(engine.refreshLocalWindow(claude.id, { ...LIVE_64K, id: 'claude-opus-5' }).usage.contextWindow).toBe(1_000_000);
+    expect(engine.getEvents(claude.id)).toHaveLength(0);
+
+    const local = engine.createSession({ projectPath: project, seatId: 'local:qwen3-coder:30b-ctx64k' }, Q8_LAUNCH());
+    expect(engine.refreshLocalWindow(local.id, { ...LIVE_64K, contextWindow: null }).usage.contextWindow).toBe(262_144);
+    // An unknown source is recorded as a fallback — never written where the
+    // store's validator would reject the whole record on its next read.
+    const odd = engine.refreshLocalWindow(local.id, { ...LIVE_64K, contextWindow: 131_072, autoCompactAt: 98_072, windowSource: 'guess' as never });
+    expect(odd.usage).toMatchObject({ contextWindow: 131_072, contextWindowSource: 'fallback' });
+    expect(createVerseSessionStore(root).get(local.id)!.usage.contextWindow).toBe(131_072);
+    expect(() => engine.refreshLocalWindow(local.id, { ...LIVE_64K, id: 'llama3.2:3b' }))
+      .toThrow(expect.objectContaining({ code: 'VERSE_INVALID' }));
+    expect(() => engine.refreshLocalWindow('nope', LIVE_64K)).toThrow(expect.objectContaining({ code: 'VERSE_SESSION_NOT_FOUND' }));
+
+    engine.sendTurn(local.id, 'HANG here');
+    await waitFor(() => engine.getEvents(local.id).some((e) => e.type === 'turn-started'));
+    expect(() => engine.refreshLocalWindow(local.id, LIVE_64K)).toThrow(expect.objectContaining({ code: 'VERSE_SESSION_BUSY', status: 409 }));
+    const done = untilTurnDone(engine, local.id);
+    engine.cancelTurn(local.id);
+    await done;
+    expect(engine.refreshLocalWindow(local.id, LIVE_64K).usage.contextWindow).toBe(65_536);
   });
 });
 
@@ -1091,7 +1345,8 @@ describe('V3.9 readings — runtime windows, unclamped occupancy, context and co
       const contexts = events.filter((e) => e.type === 'context');
       // The NaN reading is dropped, never logged.
       expect(contexts).toHaveLength(1);
-      expect(contexts[0]).toMatchObject({ contextTokens: 42_000, contextWindow: 1_000_000, exact: true, autoCompactAt: 367_000 });
+      // The adapter reported no window, so the one in force is the catalog's — and the event says so.
+      expect(contexts[0]).toMatchObject({ contextTokens: 42_000, contextWindow: 1_000_000, exact: true, autoCompactAt: 367_000, contextWindowSource: 'cli-catalog' });
       expect(events[events.length - 1]).toMatchObject({ type: 'turn-done', ok: true });
 
       const after = custom.getSession(created.id)!;

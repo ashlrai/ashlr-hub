@@ -14,13 +14,14 @@ import type {
   VersePreferences,
   VerseSearchHit,
 } from '../../../../core/verse/types.js';
+import { VERSE_MEMORY_BLOCK_MAX_BYTES, VERSE_MEMORY_BODY_MAX_BYTES } from '../../../../core/verse/types.js';
 import {
   budgetFor,
   canonicalModelId,
   estimateTokensFromChars,
   fitVerdict,
   hasExpansiveMode,
-  SESSION_BASE_OVERHEAD_TOKENS,
+  sessionOverheadTokens,
 } from '../../../../core/verse/context-math.js';
 import { formatRelative } from '../verse-model.js';
 import { formatTokens } from '../verse-store.js';
@@ -29,32 +30,12 @@ import { formatTokens } from '../verse-store.js';
 // Handoff
 // ---------------------------------------------------------------------------
 
-/**
- * The canned turn behind "Ask this seat to summarize first". It is an
- * ordinary user turn on the CURRENT session — sent through `sendVerseTurn`,
- * so it passes the same spend chokepoint and local-only policy as any turn —
- * and the dialog then re-previews with `includeLastAssistant`, which puts the
- * seat's own reply into the handoff verbatim.
- *
- * Written so the reply is useful as turn 1 of a session that has NONE of this
- * context: concrete state, reasons for decisions, what is unverified. It asks
- * for no tool use on purpose — a summary that starts editing files is not a
- * summary, and a read-only turn is also the cheapest one.
- */
-export const HANDOFF_SUMMARY_REQUEST = [
-  'This conversation is about to continue in a fresh session that has none of its context.',
-  'Write the handoff note that new session should start from. Do not edit files or run commands for this — only write the note.',
-  '',
-  'Cover, concretely:',
-  '- The goal, and what "done" looks like.',
-  '- Decisions made so far, each with the reason it was made.',
-  '- Current state: what is finished, what is half-done, what is untested.',
-  '- Files changed and anything not yet committed.',
-  '- How to verify the work (exact commands).',
-  '- Open questions, risks, and approaches already tried that did not work.',
-  '',
-  'Keep it under 600 words. Prefer file paths and commands over prose.',
-].join('\n');
+// The canned "Ask this seat to summarize first" turn is
+// VERSE_HANDOFF_SUMMARY_REQUEST in core/verse/types.ts, not a copy here: the
+// handoff builder on the server matches that exact text to keep it OUT of the
+// new session's "latest requests" (otherwise the new chat is told to write
+// another handoff note). A local copy that drifted by one character would
+// silently defeat that filter.
 
 /** Mirrors session-engine's TITLE_MAX so a title we send is never cut by the server instead. */
 export const TITLE_MAX_CHARS = 120;
@@ -177,7 +158,9 @@ export interface HandoffFit {
   verdict: VerseFitVerdict | null;
   /** The handoff text's own estimate (chars / 4). */
   handoffTokens: number;
-  /** Handoff + the fixed prompt every fresh session starts with. */
+  /** The target engine's estimated fixed prompt (context-math `sessionOverheadTokens`). */
+  overheadTokens: number;
+  /** Handoff + that fixed prompt: what the new session holds before its first reply. */
   needTokens: number;
   /** One sentence for the dialog. */
   text: string;
@@ -187,36 +170,48 @@ export interface HandoffFit {
 /**
  * Will the new session START comfortably? The handoff is small by design
  * (≤ 12k chars ≈ 3k tokens), but every fresh session also carries the CLI's
- * fixed prompt — which alone is about half of a 64k local slot — so this is a
- * real question on small windows, and the sentence shows both halves of the
- * sum rather than a bare verdict.
+ * fixed prompt — a large share of a 64k local slot — so this is a real
+ * question on small windows, and the sentence shows both halves of the sum
+ * rather than a bare verdict.
+ *
+ * The fixed prompt is the TARGET seat's engine estimate (local ≈15k measured,
+ * claude ≈25k, …), not one flat figure: a flat 30k called every handoff to a
+ * 64k local seat "too big for one context" when the real sum was ~20k. It is
+ * still an estimate — no CLI reports its base prompt before the first turn —
+ * so the sentence says "estimated" rather than presenting it as a reading.
+ * `engine` null (target seat not known yet) falls back to the largest estimate.
  */
-export function handoffFit(textChars: number, option: VerseModelOption | null, mode: VerseContextMode): HandoffFit {
+export function handoffFit(
+  textChars: number,
+  option: VerseModelOption | null,
+  mode: VerseContextMode,
+  engine: VerseEngine | null,
+): HandoffFit {
   const handoffTokens = estimateTokensFromChars(textChars);
-  const needTokens = handoffTokens + SESSION_BASE_OVERHEAD_TOKENS;
-  const verdict = fitVerdict(handoffTokens, option);
-  const sum = `~${formatTokens(handoffTokens)} tokens of handoff + ~${formatTokens(SESSION_BASE_OVERHEAD_TOKENS)} of fixed prompt`;
+  const overheadTokens = sessionOverheadTokens(engine);
+  const needTokens = handoffTokens + overheadTokens;
+  const verdict = fitVerdict(handoffTokens, option, overheadTokens);
+  const sum = `~${formatTokens(handoffTokens)} tokens of handoff + an estimated ~${formatTokens(overheadTokens)} of fixed prompt`;
   const standard = budgetFor(option, 'standard');
   const standardCap = standard ? standard.autoCompactAt ?? standard.contextWindow : null;
+  const base = { verdict, handoffTokens, overheadTokens, needTokens };
   switch (verdict) {
     case 'fits':
-      return { verdict, handoffTokens, needTokens, tone: 'ok', text: `Fits: ${sum} leaves most of the budget before the first compaction.` };
+      return { ...base, tone: 'ok', text: `Fits: ${sum} leaves most of the budget before the first compaction.` };
     case 'tight':
       return {
-        verdict,
-        handoffTokens,
-        needTokens,
+        ...base,
         tone: 'warn',
         text: `Tight: ${sum} is ${Math.round((needTokens / (standardCap ?? needTokens)) * 100)}% of where this model compacts — the new chat will compact early.`,
       };
     case 'expansive':
       return mode === 'expansive'
-        ? { verdict, handoffTokens, needTokens, tone: 'warn', text: `Fits only the expansive budget: ${sum}.` }
-        : { verdict, handoffTokens, needTokens, tone: 'danger', text: `Too big for the standard budget (${sum}). Switch to Expansive, or trim the handoff.` };
+        ? { ...base, tone: 'warn', text: `Fits only the expansive budget: ${sum}.` }
+        : { ...base, tone: 'danger', text: `Too big for the standard budget (${sum}). Switch to Expansive, or trim the handoff.` };
     case 'split':
-      return { verdict, handoffTokens, needTokens, tone: 'danger', text: `Too big for one context on this model (${sum}). Trim the handoff or pick a seat with a larger window.` };
+      return { ...base, tone: 'danger', text: `Too big for one context on this model (${sum}). Trim the handoff or pick a seat with a larger window.` };
     default:
-      return { verdict: null, handoffTokens, needTokens, tone: 'unknown', text: 'This model’s window is not known, so there is no fit estimate.' };
+      return { ...base, verdict: null, tone: 'unknown', text: 'This model’s window is not known, so there is no fit estimate.' };
   }
 }
 
@@ -238,7 +233,7 @@ export function turnCostSentence(engine: VerseEngine, seatLabel: string): string
 
 const encoder = typeof TextEncoder === 'function' ? new TextEncoder() : null;
 
-/** UTF-8 byte length — the unit the server's caps (64 KB memory, 64 KB turn) are written in. */
+/** UTF-8 byte length — the unit the server's caps (64 KB memory content, 64 KB turn) are written in. */
 export function utf8Bytes(text: string): number {
   if (encoder) return encoder.encode(text).length;
   // Fallback for an environment with no TextEncoder: count code points by width.
@@ -251,14 +246,26 @@ export function utf8Bytes(text: string): number {
 }
 
 /**
- * The API's request-body cap: `readBody` in src/core/web/api.ts, which every
- * /api/verse POST shares. A write travels as JSON, so what must fit is the
- * ENCODED body — every `\n` and `"` escaped to two bytes — not the text alone.
- * A 60 KB MEMORY.md with a few thousand line breaks is under the 64 KB memory
- * cap and still over this one, and the server would answer "request body too
- * large"; the editors measure both so the refusal happens on screen instead.
+ * The API's default request-body cap: `readBody` in src/core/web/api.ts, which
+ * every /api/verse POST uses unless its route passes a larger one (only
+ * POST /memory does — see MEMORY_BODY_MAX_BYTES). A write travels as JSON, so what must fit is
+ * the ENCODED body — every `\n` and `"` escaped to two bytes — not the text
+ * alone; the editors measure it so a refusal happens on screen instead of as
+ * "request body too large".
  */
 export const API_BODY_MAX_BYTES = 65_536;
+
+/**
+ * POST /api/verse/memory's own body cap — mirrors `VERSE_MEMORY_BODY_MAX_BYTES`
+ * in src/core/verse/verse-api.ts (a server module the browser cannot import):
+ * room for 64 KiB of content in which EVERY byte escapes to two, plus the
+ * project path and the JSON around it. The server still holds the CONTENT to
+ * VERSE_MEMORY_MAX_BYTES after parsing. Guarding the memory editor with the
+ * 64 KiB default instead blocked saves the server accepts — a 60–64 KB
+ * MEMORY.md with ordinary line breaks could not be edited from the panel,
+ * which is the exact case the server's larger cap exists for.
+ */
+export const MEMORY_BODY_MAX_BYTES = VERSE_MEMORY_BODY_MAX_BYTES;
 
 /** UTF-8 size of `body` exactly as the client will send it. */
 export function jsonBodyBytes(body: unknown): number {
@@ -307,6 +314,26 @@ const SECRET_PATTERNS: ReadonlyArray<{ label: string; re: RegExp }> = [
   { label: 'a Google API key', re: /\bAIza[0-9A-Za-z_-]{35}\b/ },
   { label: 'a Stripe secret key', re: /\b(?:sk|rk)_live_[0-9A-Za-z]{20,}/ },
 ];
+
+/**
+ * Mirrors `VERSE_MEMORY_BLOCK_MAX_BYTES` in src/core/verse/project-memory.ts
+ * (a node module the browser cannot import): the most memory text a chat's
+ * instructions carry, however large MEMORY.md itself is.
+ */
+export const MEMORY_BLOCK_MAX_BYTES = VERSE_MEMORY_BLOCK_MAX_BYTES;
+
+/**
+ * What memory costs, in the one wording the memory panel and the resources
+ * panel share. Memory is ON by default and snapshotted into every new chat's
+ * system prompt (claude `--append-system-prompt`, codex `developer_instructions`,
+ * grok `--rules`), which re-rides every turn, and it asks writable seats to
+ * read and update MEMORY.md — tool calls and output. On a paid seat that is
+ * real (if small, mostly cached) usage, so "nothing here spends" would be
+ * false for exactly the operator deciding whether to leave it on near a limit.
+ * Reading and editing the file from the panel is still free.
+ */
+export const MEMORY_SPEND_NOTE =
+  `Reading and editing memory here spends nothing. On a paid seat it is not free to use: each new chat’s system prompt carries a memory block of up to ${MEMORY_BLOCK_MAX_BYTES / 1024} KB, re-sent every turn (cached after the first), and the agent reads and updates MEMORY.md as it works. Local seats spend nothing.`;
 
 /** The first credential shape found, as a phrase ("a GitHub token"), or null. */
 export function secretLike(text: string): string | null {

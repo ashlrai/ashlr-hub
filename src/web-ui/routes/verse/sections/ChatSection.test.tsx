@@ -25,7 +25,8 @@ import { CLAUDE_CONTEXT_SEAT } from '../seat-fixtures.test-support.js';
 import { resetVerseStore } from '../verse-store.js';
 import { resetVerseUi } from '../verse-ui-store.js';
 import { CHAT_PANEL_RANGES, CHAT_PANEL_SIZING_KEY, resetChatPanelSizing } from '../chat-panel-sizing.js';
-import { ChatSection } from './ChatSection.js';
+import { ApiError } from '../../../data/client.js';
+import { ChatSection, describeChatError } from './ChatSection.js';
 
 const TOKEN = 'b'.repeat(64);
 
@@ -243,6 +244,48 @@ describe('ChatSection sessions', () => {
     // Token never lands in storage.
     expect(Object.values(localStorage)).not.toContain(TOKEN);
     expect(Object.values(sessionStorage)).not.toContain(TOKEN);
+  });
+});
+
+describe('ChatSection refusals', () => {
+  const UNAVAILABLE = 'model claude-opus-5-5 cannot run on seat claude-a: needs Claude Code 2.1.280; this seat runs 2.1.257';
+
+  it('says why a 409 was refused instead of calling every 409 "a turn is already running"', () => {
+    const unavailable = new ApiError('POST … failed (HTTP 409).', 409, '/api/verse/sessions/vs_1/turns', UNAVAILABLE, 'VERSE_MODEL_UNAVAILABLE');
+    const text = describeChatError(unavailable);
+    expect(text).toContain(`${UNAVAILABLE}.`);
+    expect(text).toContain('Continue in a fresh chat');
+    expect(text).toContain('ashlr resources profile repin');
+    expect(text).not.toMatch(/already running/);
+    // The busy refusal — coded or from an older, codeless server — keeps its copy.
+    expect(describeChatError(new ApiError('x', 409, '/p', 'busy', 'VERSE_SESSION_BUSY'))).toBe('A turn is already running in this chat. Stop it first.');
+    expect(describeChatError(new ApiError('x', 409, '/p'))).toBe('A turn is already running in this chat. Stop it first.');
+    // Any other refusal: the route's own sentence, not the HTTP wrapper.
+    expect(describeChatError(new ApiError('POST /p failed (HTTP 400): bad.', 400, '/p', 'model x has no expansive context mode', 'VERSE_INVALID')))
+      .toBe('model x has no expansive context mode');
+  });
+
+  it('shows the model-unavailable reason when a send is refused, and leaves the chat idle', async () => {
+    const { fetch, state } = verseFetch();
+    const refusing = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = typeof input === 'string' ? input : input.toString();
+      if (path === '/api/verse/sessions/vs_1/turns' && init?.method === 'POST') {
+        state.calls.push({ path, method: 'POST', body: undefined, headers: {} });
+        return new Response(JSON.stringify({ code: 'VERSE_MODEL_UNAVAILABLE', error: UNAVAILABLE }), { status: 409, headers: { 'content-type': 'application/json' } });
+      }
+      return (fetch as unknown as typeof globalThis.fetch)(input, init);
+    });
+    vi.stubGlobal('fetch', refusing);
+    setMutationToken(TOKEN);
+    const user = userEvent.setup();
+    mount();
+    await user.click(await screen.findByRole('button', { name: /Fix the login bug/ }));
+    await user.type(await screen.findByRole('textbox', { name: 'Message' }), 'hello{Enter}');
+    expect(await screen.findByText(/needs Claude Code 2\.1\.280/)).toBeInTheDocument();
+    expect(screen.queryByText(/already running/)).toBeNull();
+    // Idle again: Send is back, not Stop.
+    await waitFor(() => expect(screen.getByRole('button', { name: /Send message/ })).toBeInTheDocument());
+    expect(state.calls.some((c) => c.path === '/api/verse/sessions/vs_1/turns')).toBe(true);
   });
 });
 

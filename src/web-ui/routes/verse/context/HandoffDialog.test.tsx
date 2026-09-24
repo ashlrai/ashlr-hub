@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { VerseEvent, VerseSession } from '../../../data/api-types.js';
-import type { VerseHandoffPreview, VersePreferences } from '../../../../core/verse/types.js';
+import { VERSE_HANDOFF_SUMMARY_REQUEST, type VerseHandoffPreview, type VersePreferences } from '../../../../core/verse/types.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { evictAll } from '../../../data/cache.js';
 import { applyVerseEvent, getVerseSessionState, resetVerseStore, seedVerseSession, setVerseStreamState } from '../verse-store.js';
@@ -28,7 +28,7 @@ import {
   SEATS,
   TEST_TOKEN,
 } from './context-fixtures.test-support.js';
-import { HANDOFF_SUMMARY_REQUEST } from './context-model.js';
+import { CODEX_EXPANSIVE_METERING_NOTE } from '../verse-model.js';
 
 const prefsHolder = vi.hoisted(() => ({ current: null as VersePreferences | null }));
 
@@ -235,6 +235,30 @@ describe('where it continues', () => {
     expect(screen.getByText(/200k window · compacts ≈167k/)).toBeInTheDocument();
   });
 
+  it('sizes the fit with the TARGET seat’s estimated fixed prompt, and says it is an estimate', async () => {
+    const user = userEvent.setup();
+    mount();
+    await waitFor(() => expect(handoffBox().value).toContain('Goal'));
+    expect(screen.getByText(/an estimated ~25k of fixed prompt/)).toBeInTheDocument();
+    const picker = screen.getByLabelText('Continue on') as HTMLSelectElement;
+    await user.selectOptions(picker, JSON.stringify([LOCAL_SEAT.id, LOCAL_SEAT.models[0]!.id]));
+    // A 64k local seat: the local CLI's ~15k, not a flat 30k that called every handoff "too big".
+    expect(screen.getByText(/an estimated ~15k of fixed prompt/)).toBeInTheDocument();
+    expect(screen.queryByText(/Too big for one context/)).toBeNull();
+  });
+
+  it('carries codex’s reported >272k metering on the Expansive hint, and only for codex', async () => {
+    const user = userEvent.setup();
+    mount();
+    await waitFor(() => expect(handoffBox().value).toContain('Goal'));
+    await user.click(within(screen.getByRole('radiogroup', { name: 'Context mode' })).getByRole('radio', { name: 'Expansive' }));
+    expect(screen.queryByText(/reportedly/)).toBeNull();
+
+    await user.selectOptions(screen.getByLabelText('Continue on') as HTMLSelectElement, JSON.stringify([CODEX_SEAT.id, CODEX_SEAT.models[0]!.id]));
+    await user.click(within(screen.getByRole('radiogroup', { name: 'Context mode' })).getByRole('radio', { name: 'Expansive' }));
+    expect(screen.getByText((text) => text.includes(CODEX_EXPANSIVE_METERING_NOTE))).toBeInTheDocument();
+  });
+
   it('keeps an expansive source expansive on the same model', async () => {
     mount({ session: contextSession({ contextMode: 'expansive' }) });
     await waitFor(() => expect(handoffBox().value).toContain('Goal'));
@@ -321,7 +345,7 @@ describe('ask this seat to summarize first', () => {
     expect(screen.getByText(/Sends one turn to Claude Max and spends from its usage/)).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Ask Claude Max to summarize first' }));
-    expect(turns.sendVerseTurn).toHaveBeenCalledWith('vs_src', HANDOFF_SUMMARY_REQUEST);
+    expect(turns.sendVerseTurn).toHaveBeenCalledWith('vs_src', VERSE_HANDOFF_SUMMARY_REQUEST);
     expect(await screen.findByText('Waiting for Claude Max to finish its summary…')).toBeInTheDocument();
     // Creating mid-summary would snapshot a handoff without it.
     expect(screen.getByRole('button', { name: 'Create chat' })).toBeDisabled();

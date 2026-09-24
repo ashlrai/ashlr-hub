@@ -347,6 +347,22 @@ numbers below were read from the pinned CLI binaries, each seat's own model
 catalog and every September Codex rollout on this machine; no paid model was
 prompted to produce them. `docs/VERSE-CONTEXT.md` is the new authority for all of it.
 
+### Behaviour change: new Claude chats compact at ≈367k, existing ones keep ≈967k
+
+- **New Claude chats on a 1M model start in Standard** and compact at ≈367k
+  (`--autocompact 400000`), not near 967k as every Claude chat did before.
+  Expansive — the old full window — is one click away, and can be a seat's default.
+- **Chats created before 3.9 keep the window they ran with.** A Claude chat with
+  no recorded mode is marked **Expansive** the first time 3.9 loads it and runs
+  with `--autocompact auto`, exactly as before, so upgrading compacts nothing and
+  spends nothing. Codex, Grok, local and 200k-Claude chats from before 3.9 stay
+  Standard, which is what they already ran at.
+- **Switching a chat to Standard above ≈367k compacts it on the next turn.** The
+  CLI then summarizes the whole context — on a paid seat that spends usage — and
+  early turns survive only as that summary. The same holds for a Codex chat
+  switched back from Expansive above 244.8k. Switching to Expansive is always
+  free. The mode menu warns before you switch.
+
 ### Windows read from the CLIs, not assumed
 
 - **Claude.** Six of the eight models run a **1M** window and compact near
@@ -385,8 +401,14 @@ prompted to produce them. `docs/VERSE-CONTEXT.md` is the new authority for all o
   seat never compacted before a 64k runner overflowed. Verse now tells it the
   real window (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`), resolves that window from what
   the runner actually serves (llama-server's per-slot window on that lane,
-  Ollama's VRAM-based default for unpinned tags), and parses `-ctx64k` tags,
-  which the old suffix pattern missed. The fleet's model catalog no longer
+  Ollama's own server default for unpinned tags — preferred over whatever
+  context a resident runner was loaded with, since another app may have loaded
+  it at 8k), and parses `-ctx64k` tags, which the old suffix pattern missed.
+  Before every local turn the chat's stored window is refreshed from live
+  discovery, so the window the CLI is told and the one the meter shows are the
+  same, current number. Tags under a 56k window are listed disabled with the
+  reason: after Claude Code's 33k reserve and its ~15k base prompt they would
+  compact on every turn. The fleet's model catalog no longer
   tags the 64k local coder `long-context` (a capability defined as ≥ 100k), which
   had routed long-context work to a model that would overflow.
 - Readings are stored **unclamped**: an overflow is information, and the old
@@ -402,7 +424,8 @@ compaction point and warns at 80 % / 95 % of **that point**. The old fixed
 70 / 90 % of the window turned red only after Grok and Codex had already
 compacted.
 
-**Compact now** (Claude and local sessions) sends `/compact` as an ordinary turn,
+**Compact now** — in the chip beside the meter on every Claude and local session
+(a "Context" chip where the model has no second mode), and in the handoff banner — sends `/compact` as an ordinary turn,
 through the same gate as every turn, and the divider reads "Compacted on
 request". It was verified headless on a local seat, where it is free but slow
 (about 2½ minutes for a 15k context on a 27B model). **On a paid seat it spends
@@ -410,8 +433,9 @@ usage**: the CLI reads the whole context to write its summary.
 
 ### Standard and expansive context
 
-Every Claude 1M model now compacts at ≈367k by default (`--autocompact 400000`)
-instead of ≈967k. Each turn re-sends the whole conversation, and long-context
+A new chat on any Claude 1M model now compacts at ≈367k by default
+(`--autocompact 400000`) instead of ≈967k (chats from before 3.9 keep ≈967k —
+above). Each turn re-sends the whole conversation, and long-context
 recall degrades with length on every published benchmark, so a session held
 near 900k re-reads about 2.3× what one held under 400k does. **Expansive** mode
 restores the full window — and on GPT-6 / GPT-5.6 raises Codex to its 872k
@@ -419,7 +443,11 @@ catalog maximum, passing `model_context_window` and
 `model_auto_compact_token_limit` together (one without the other breaks Codex's
 compaction). The mode is per session, applies from the next turn, can be a
 seat's default, and exists only where it is real. Verse may suggest it; it never
-switches it on.
+switches it on. The menu's cost note is the ratio of the two compaction points
+(≈2.6× on Claude, ≈3.2× on Codex). On Codex every Expansive surface also says
+that GPT-5.6 requests above 272k reportedly count about 2× against plan limits
+(one secondary source; GPT-6 Astra reportedly exempt) — if that holds, a turn
+near the expansive limit counts nearer 6× a standard one.
 
 ### Continue in a fresh chat
 
@@ -441,17 +469,27 @@ press send.
   `--append-system-prompt`; Codex through `-c` overrides (a writable root and
   `developer_instructions`), since `exec resume` takes no `--add-dir`. Grok, whose
   CLI can be granted nothing beyond its working directory, gets a read-only
-  snapshot through `--rules`.
+  snapshot through `--rules`. **It is not free on a paid seat:** the block (up
+  to 6 KB) rides in the system prompt of every turn of every new session —
+  cached after the first turn, but cached tokens still count — and it asks the
+  agent to read and update `MEMORY.md`, which is extra tool calls and output.
+  Turn it off per project, or for every project, in the Resources panel.
+  The editor shows the sanitized copy the API serves and says so; a save that
+  would write `[REDACTED]` placeholders over real values is refused.
 - **Context fit:** per-model verdicts — fits, tight, needs expansive, or split —
-  for a folder or workspace, from `git ls-files` sizes.
+  for a folder or workspace, from `git ls-files` sizes, plus each engine's base
+  prompt (local 15k, measured; Claude 25k, Codex 15k, Grok 20k, estimated), so
+  a handoff note fits the 64k local seat while a whole repository shows split.
 - **Session search** across past chats from the sidebar: a bounded keyword scan
   of Verse's own session store (newest 200 sessions, 20 MB of message text), with
   no index and no embeddings.
 - **Efficiency:** cache-hit ratio, context per turn, compactions and an
   idle-cache warning, computed in the browser.
 
-All of it is deterministic and spends nothing. The only model calls remain the
-turns you send, through the same local-only-gated chokepoint as before.
+Memory aside, all of it is deterministic and spends nothing: the handoff
+preview, context fit, search and the efficiency stats make no model call. The
+only model calls remain the turns you send, through the same local-only-gated
+chokepoint as before.
 
 ### Re-pin a seat to a newer CLI
 
@@ -481,9 +519,17 @@ source checkout.
 - The new GETs reject unknown or duplicated query parameters; `context-fit`
   takes `extraRoots` repeated once per root, because a comma is legal in a path.
 - `POST /memory` content is capped at 64 KiB; that route alone accepts a body
-  of up to 2 × 64 KiB + 8 KiB so a full-size file survives JSON escaping.
-- New persisted events `compaction` and `context`; the full additive contract is
-  in `docs/VERSE-CONTRACT-V1.md`.
+  of up to 2 × 64 KiB + 8 KiB so a full-size file survives JSON escaping. It
+  answers 409 `VERSE_MEMORY_REDACTED` when the content holds more `[REDACTED]`
+  placeholders than the file on disk, and `GET`/`POST /memory` responses carry
+  `contentSanitized: true` whenever the content sent is not the file's bytes.
+- New sessions always record `contextMode` (`'standard'` included); an absent
+  key marks a pre-3.9 record (resolved as above).
+- New persisted events `compaction` and `context`; `context` may carry
+  `contextWindowSource` (absent = `runtime`), so a catalog budget written after
+  a mode switch is not shown as a measurement. `VERSE_HANDOFF_SUMMARY_REQUEST`
+  (`types.ts`) is the fixed "summarize first" turn. The full additive contract
+  is in `docs/VERSE-CONTRACT-V1.md`.
 
 ### Hygiene
 

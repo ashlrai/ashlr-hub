@@ -67,7 +67,8 @@
  *     which is the single most expensive thing an idle long chat can do.
  *  8. The chat's project memory (MemoryPanel, its own section) is mounted
  *     under it, and "This chat" says whether THIS chat's agent was given that
- *     memory at creation (it is pinned per chat, like the roots).
+ *     memory at creation (it is pinned per chat, like the roots) — and, on a
+ *     paid seat, what it adds to every turn's prompt.
  */
 import { useEffect, useState } from 'react';
 import type { VerseBootstrap, VerseEngine, VerseEvent, VerseSeat, VerseSession } from '../../data/api-types.js';
@@ -76,6 +77,7 @@ import { SkeletonLine } from '../../components/primitives/Skeleton.js';
 import { StatusBadge } from '../../components/primitives/StatusBadge.js';
 import { Tooltip } from '../../components/primitives/Tooltip.js';
 import { useQuery, useRefresh } from '../../data/hooks.js';
+import { MEMORY_BLOCK_MAX_BYTES } from './context/context-model.js';
 import { MemoryPanel } from './context/MemoryPanel.js';
 import { CapacityChip, SeatWindowMeter } from './SeatCapacity.js';
 import { SessionRoots } from './SessionRoots.js';
@@ -101,9 +103,9 @@ import {
   sessionContext,
   turnContextStats,
 } from './usage/context-model.js';
-import { ENGINE_LABEL, WINDOW_SOURCE_TEXT, formatClock, formatElapsed, groupSeats, projectName } from './verse-model.js';
+import { ENGINE_LABEL, formatClock, formatElapsed, groupSeats, projectName, windowSourceText } from './verse-model.js';
 import { verseBootstrapQuery } from './verse-queries.js';
-import { formatTokens } from './verse-store.js';
+import { formatTokens, lastTurnActivityAt } from './verse-store.js';
 import styles from './ResourcesPanel.module.css';
 
 export interface ResourcesPanelProps {
@@ -316,7 +318,7 @@ function ChatUsage({
   // The record's count is the durable one (a long log may be truncated); the
   // log's own count stands in only when the record predates the field.
   const compactions = session.compactionCount ?? stats.compactions;
-  const idle = idleCacheWarning(session, ctx.tokens, now);
+  const idle = idleCacheWarning(session, ctx.tokens, now, lastTurnActivityAt(events ?? []));
   const bound = ctx.exact ? '' : '≤';
   const statBound = stats.exact ? '' : '≤';
 
@@ -361,18 +363,23 @@ function ChatUsage({
       </dl>
       <p className={styles.muted}>
         {ctx.source !== null
-          ? `Window ${WINDOW_SOURCE_TEXT[ctx.source]}.`
+          ? `Window ${windowSourceText(ctx.source, session.engine)}.`
           : ctx.window !== null
             ? 'Window as stored when this chat was created; how it was known was not recorded.'
             : 'Window unknown for this chat.'}
         {stats.turns > 0 && !stats.exact ? ' Figures marked ≤ are upper bounds: the CLI reported only turn totals.' : ''}
       </p>
       {/* Pinned per chat at creation, like its roots: the memory panel below
-          edits the PROJECT's file, not what this conversation was offered. */}
+          edits the PROJECT's file, not what this conversation was offered.
+          On a paid seat memory is not free — its block rides in the system
+          prompt of every turn — so the sentence says what it adds rather than
+          leaving the operator to assume it costs nothing. */}
       <p className={styles.muted}>
-        {session.memoryEnabled === true
-          ? 'Shared project memory was given to this chat’s agent when it started.'
-          : 'This chat started without shared project memory.'}
+        {session.memoryEnabled !== true
+          ? 'This chat started without shared project memory.'
+          : session.engine === 'local'
+            ? 'Shared project memory was given to this chat’s agent when it started.'
+            : `Shared project memory was given to this chat’s agent when it started: a block of up to ${MEMORY_BLOCK_MAX_BYTES / 1024} KB in its system prompt, re-sent every turn (cached after the first), plus the agent’s own reads and updates of MEMORY.md — a little of this seat’s usage.`}
       </p>
       {idle === null ? null : (
         <p role="status" className={styles.idleWarn}>

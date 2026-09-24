@@ -29,11 +29,11 @@
  */
 import {
   CACHE_IDLE_TTL_MS,
-  SESSION_BASE_OVERHEAD_TOKENS,
   budgetFor,
   cacheHitRatio,
   fitVerdict,
   hasExpansiveMode,
+  sessionOverheadTokens,
 } from '../../../../core/verse/context-math.js';
 import type {
   VerseContextBudget,
@@ -48,7 +48,7 @@ import type {
   VerseUsage,
   VerseWindowSource,
 } from '../../../../core/verse/types.js';
-import { WINDOW_SOURCE_TEXT, modelOptionFor, seatUnavailableReason, sessionContextBudget } from '../verse-model.js';
+import { CODEX_EXPANSIVE_METERING_NOTE, WINDOW_SOURCE_TEXT, modelOptionFor, seatUnavailableReason, sessionContextBudget } from '../verse-model.js';
 import { formatTokens } from '../verse-store.js';
 
 // ---------------------------------------------------------------------------
@@ -160,9 +160,41 @@ export function modelContextSentence(option: VerseModelOption): string {
 }
 
 /**
+ * The metering caveat an Expansive cost sentence must carry for this engine,
+ * or null when there is none. The wording is verse-model's
+ * CODEX_EXPANSIVE_METERING_NOTE — ONE sentence for the new-chat dialog, the
+ * handoff dialog, the in-chat mode menu and the "Expansive could help" chip.
+ * The ratio those surfaces quote (≈3.2× for a 785k vs 245k codex turn) counts
+ * re-sent TOKENS only; GPT-5.6-class requests above 272k reportedly also
+ * count about 2× against plan limits (docs/VERSE-CONTEXT.md §2.3, a single
+ * secondary source), so the note is worded as reported, never as a measured
+ * multiplier. Standard never crosses 272k; Expansive does by design.
+ */
+export function expansiveMeteringNote(engine: VerseEngine | null | undefined): string | null {
+  return engine === 'codex' ? CODEX_EXPANSIVE_METERING_NOTE : null;
+}
+
+/**
+ * "A turn at 967k re-sends 2.6× the tokens of one at 367k." — the only ratio
+ * any Expansive cost sentence quotes, and it is arithmetic on the model's own
+ * budgets. Null when either compaction point is unknown. It comes BEFORE the
+ * codex metering note, whose "twice that" refers to it.
+ */
+export function expansiveRatioSentence(option: VerseModelOption | null | undefined): string | null {
+  const standard = budgetFor(option, 'standard');
+  const expansive = budgetFor(option, 'expansive');
+  const stdCap = standard ? standard.autoCompactAt ?? standard.contextWindow : null;
+  const expCap = expansive ? expansive.autoCompactAt ?? expansive.contextWindow : null;
+  if (stdCap === null || expCap === null || stdCap <= 0) return null;
+  return `A turn at ${formatTokens(expCap)} re-sends ${(expCap / stdCap).toFixed(1)}× the tokens of one at ${formatTokens(stdCap)}.`;
+}
+
+/**
  * What each mode costs, in plain words, for the mode selector. Numbers come
  * from the model's own budgets; the only ratio quoted is arithmetic (every
- * turn re-sends everything held, so a turn at X re-sends X/Y of one at Y).
+ * turn re-sends everything held, so a turn at X re-sends X/Y of one at Y) —
+ * a token ratio, not a usage multiplier, which is why codex also carries the
+ * shared metering caveat.
  */
 export function contextModeDescription(engine: VerseEngine, option: VerseModelOption, mode: VerseContextMode): string {
   const standard = budgetFor(option, 'standard');
@@ -175,11 +207,9 @@ export function contextModeDescription(engine: VerseEngine, option: VerseModelOp
       ? `Compacts at about ${formatTokens(stdCap)}. Every turn re-sends the whole context, so holding it under this point keeps each turn cheaper and recall sharper.`
       : `Compacts at about ${formatTokens(stdCap)} — the CLI's own default budget for this model.`;
   }
-  const ratio = stdCap !== null && stdCap > 0 ? ` A turn at ${formatTokens(expCap)} re-sends ${(expCap / stdCap).toFixed(1)}× what one at ${formatTokens(stdCap)} does.` : '';
-  const codex = engine === 'codex'
-    ? ' OpenAI reportedly also meters requests above the standard window at a higher rate against plan limits.'
-    : '';
-  return `Runs to about ${formatTokens(expCap)} before compacting — for tightly coupled, cross-cutting work that needs everything in view at once. Each turn re-sends everything held, so a long expansive chat uses noticeably more of your plan per turn.${ratio}${codex}`;
+  const ratio = expansiveRatioSentence(option);
+  const metering = expansiveMeteringNote(engine);
+  return `Runs to about ${formatTokens(expCap)} before compacting — for tightly coupled, cross-cutting work that needs everything in view at once. Each turn re-sends everything held, so a long expansive chat uses noticeably more of your plan per turn.${ratio ? ` ${ratio}` : ''}${metering ? ` ${metering}` : ''}`;
 }
 
 /** Why a model offers no mode choice, for the one line where the selector would be. */
@@ -218,6 +248,12 @@ export function fitIsFloor(fit: VerseContextFit): boolean {
  * The verdict for a model IN THE MODE THE CHAT WOULD RUN IN, or null when its
  * budget is unknown (never guessed).
  *
+ * `engine` is the seat's engine: the fixed prompt added to the code is that
+ * CLI's estimate (context-math `sessionOverheadTokens` — ≈15k local, ≈25k
+ * claude), not one flat figure. With a flat 30k a 64k local seat (compacts
+ * ≈32.5k) called anything over ~2.5k tokens of code "too big — split". Null
+ * falls back to the largest estimate.
+ *
  * In Standard this is context-math's `fitVerdict` as is — including
  * "expansive", the suggestion that only the bigger budget holds the code. In
  * Expansive the bigger budget IS the budget, so the same thresholds are
@@ -228,14 +264,16 @@ export function fitIsFloor(fit: VerseContextFit): boolean {
 export function modelFit(
   tokens: number | null | undefined,
   option: VerseModelOption | null | undefined,
-  mode: VerseContextMode = 'standard',
+  mode: VerseContextMode,
+  engine: VerseEngine | null,
 ): VerseFitVerdict | null {
   if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens < 0) return null;
+  const overhead = sessionOverheadTokens(engine);
   if (resolveContextMode(option, mode) === 'expansive' && option) {
     const expansive = budgetFor(option, 'expansive')!;
-    return fitVerdict(tokens, { ...option, contextWindow: expansive.contextWindow, autoCompactAt: expansive.autoCompactAt, expansive: null });
+    return fitVerdict(tokens, { ...option, contextWindow: expansive.contextWindow, autoCompactAt: expansive.autoCompactAt, expansive: null }, overhead);
   }
-  return fitVerdict(tokens, option);
+  return fitVerdict(tokens, option, overhead);
 }
 
 /**
@@ -275,9 +313,15 @@ export function fitExplanation(input: {
   }
 }
 
-/** How the working-set figure is made — shown once, beside the badge. */
-export const FIT_METHOD_NOTE =
-  'Estimated from the size of tracked text files (bytes ÷ 4), plus the fixed prompt every chat starts with. An agent rarely reads everything, so this is a ceiling, not a forecast.';
+/**
+ * How the working-set figure is made — shown once, beside the badge. Names the
+ * fixed-prompt figure the verdict added, and calls it an estimate: no CLI
+ * reports its base prompt before a turn has run.
+ */
+export function fitMethodNote(engine: VerseEngine | null): string {
+  const cli = engine ? ` for ${ENGINE_CLI_NAME[engine]}` : '';
+  return `Estimated from the size of tracked text files (bytes ÷ 4), plus an estimated ~${formatTokens(sessionOverheadTokens(engine))} of fixed prompt${cli} that every chat starts with. An agent rarely reads everything, so this is a ceiling, not a forecast.`;
+}
 
 function capitalize(text: string): string {
   return text.length === 0 ? text : text.charAt(0).toUpperCase() + text.slice(1);
@@ -420,18 +464,25 @@ export interface IdleCacheWarning {
 /**
  * The next turn of an idle chat re-reads its whole context uncached once the
  * provider's prompt cache has expired (CACHE_IDLE_TTL_MS). Below the fixed
- * prompt every new chat pays anyway there is nothing worth warning about.
+ * prompt every new chat on this engine pays anyway (its estimate) there is
+ * nothing worth warning about.
  */
 export function idleCacheWarning(
-  session: Pick<VerseSession, 'status' | 'updatedAt' | 'engine'>,
+  session: Pick<VerseSession, 'status' | 'engine'>,
   tokens: number,
   now: number,
+  /**
+   * When the chat last TALKED to its provider (`lastTurnActivityAt(events)`),
+   * never `session.updatedAt`: a rename or mode switch moves that without
+   * warming the provider's cache. Null (no turn yet / log not loaded) → no warning.
+   */
+  lastActivityAt: string | null,
 ): IdleCacheWarning | null {
-  if (session.status === 'running') return null;
-  const last = Date.parse(session.updatedAt);
+  if (session.status === 'running' || lastActivityAt === null) return null;
+  const last = Date.parse(lastActivityAt);
   if (!Number.isFinite(last)) return null;
   const idleMs = now - last;
-  if (idleMs < CACHE_IDLE_TTL_MS || tokens < SESSION_BASE_OVERHEAD_TOKENS) return null;
+  if (idleMs < CACHE_IDLE_TTL_MS || tokens < sessionOverheadTokens(session.engine)) return null;
   return { idleMs, tokens, local: session.engine === 'local' };
 }
 
@@ -502,8 +553,11 @@ export function seatEfficiency(sessions: readonly VerseSession[], seats: readonl
       output += s.usage.outputTokens;
       turns += s.turnCount;
       compactions += s.compactionCount ?? 0;
-      if (s.contextMode === 'expansive') expansiveSessions += 1;
+      // The mode as the meter resolves it (verse-model sessionContextBudget),
+      // counted before the empty-reading skip: the mode is a fact about the
+      // chat, not about its reading.
       const view = sessionContext(s, seats);
+      if (view.mode === 'expansive') expansiveSessions += 1;
       if (view.tokens <= 0) continue;
       const candidate = { sessionId: s.id, title: s.title, tokens: view.tokens, window: view.window, exact: view.exact };
       if (fullest === null || fuller(candidate, fullest)) fullest = candidate;

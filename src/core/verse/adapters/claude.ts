@@ -42,7 +42,7 @@ import {
   claudeAutocompactFlag,
   hasExpansiveMode,
 } from '../context-math.js';
-import { claudeModelOptions } from '../model-windows.js';
+import { legacyModelOptionFallback } from '../model-windows.js';
 import {
   VERSE_DEFAULT_CONTEXT_WINDOWS,
   verseSessionRoots,
@@ -575,27 +575,24 @@ function seatModelOption(session: VerseSession, launch: VerseSeatLaunch): VerseM
   return models.find((m) => canonicalModelId(m.id) === wanted) ?? null;
 }
 
-/** Whether an option was built by the V3.9 catalog (it states its budgets) rather than read from an older launch snapshot. */
-function hasCatalogBudgets(option: VerseModelOption): boolean {
-  return option.autoCompactAt !== undefined || option.expansive !== undefined || option.windowSource !== undefined;
-}
-
 /**
  * The option whose budgets decide a CLAUDE seat's `--autocompact` flag.
  *
  * Normally the launch snapshot's own option. A snapshot written before 3.9
  * carries only the old flat 200k window and no budgets, so its model is looked
- * up in the verified per-model table (model-windows.ts) instead — the SAME
- * rule, over the same table, as the engine's `effectiveModelOption`, so the
- * compaction point the engine records is exactly the one this flag tells the
- * CLI. A model neither knows keeps its snapshot option (and so, lacking an
- * expansive budget, gets no flag: the CLI's own default applies).
+ * up in the verified per-model table (model-windows.ts) instead — through
+ * `legacyModelOptionFallback`, the SAME helper the engine's
+ * `effectiveModelOption` calls, so the compaction point the engine records is
+ * exactly the one this flag tells the CLI. A model neither knows keeps its
+ * snapshot option (and so, lacking an expansive budget, gets no flag: the
+ * CLI's own default applies).
+ *
+ * The MODE is the session's. A pre-3.9 record has none on disk; the engine
+ * materialises one (`expansive` for a 1M model — what 3.8 ran) before it ever
+ * builds a launch, so this adapter never has to guess what "absent" meant.
  */
 function claudeBudgetOption(session: VerseSession, launch: VerseSeatLaunch): VerseModelOption | null {
-  const option = seatModelOption(session, launch);
-  if (option && hasCatalogBudgets(option)) return option;
-  const wanted = canonicalModelId(option?.id ?? session.model);
-  return claudeModelOptions(null).find((m) => m.id === wanted) ?? option;
+  return legacyModelOptionFallback('claude', session.model, seatModelOption(session, launch));
 }
 
 /**

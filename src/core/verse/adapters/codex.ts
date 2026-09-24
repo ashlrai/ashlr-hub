@@ -53,6 +53,7 @@ import {
   type CodexTokenTotals,
   type CodexTurnTracker,
 } from '../codex-rollout.js';
+import { legacyModelOptionFallback } from '../model-windows.js';
 import { verseSessionRoots, type VerseModelOption, type VerseSession, type VerseTurnLaunch, type VerseUsage } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
 import type { VerseAdapter, VerseAdapterTurnContext, VerseParsedEvent, VerseTurnParser } from './index.js';
@@ -133,13 +134,19 @@ function positiveInt(value: unknown): number | null {
  * The seat option a session's model resolves to: the exact stored id first,
  * then its canonical form — the same lookup the engine uses, so the flags the
  * CLI is given and the budget the meter shows come from one option.
+ *
+ * A launch snapshot written before 3.9 lists `{id, label, contextWindow}` and
+ * no budgets, so it would deny an expansive mode the live seat (and so the
+ * UI) offers for the same model. `legacyModelOptionFallback` — the one rule the
+ * engine's `effectiveModelOption` also applies — borrows the documented
+ * budgets for such a snapshot, so a switch the engine accepts is a switch
+ * this adapter actually carries out.
  */
 function modelOptionFor(launch: VerseSeatLaunch, model: string): VerseModelOption | null {
   const models = Array.isArray(launch.seat?.models) ? launch.seat.models : [];
-  const exact = models.find((m) => m.id === model);
-  if (exact) return exact;
   const wanted = canonicalModelId(model);
-  return models.find((m) => canonicalModelId(m.id) === wanted) ?? null;
+  const snapshot = models.find((m) => m.id === model) ?? models.find((m) => canonicalModelId(m.id) === wanted) ?? null;
+  return legacyModelOptionFallback('codex', model, snapshot);
 }
 
 /**

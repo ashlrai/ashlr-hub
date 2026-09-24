@@ -99,6 +99,7 @@ import {
   type VerseContextMode,
   type VerseCreateSessionRequest,
   type VerseHandoffPreview,
+  type VerseModelOption,
   type VersePreferences,
   type VersePreferencesUpdate,
   type VerseProjectMemory,
@@ -113,6 +114,7 @@ import {
   type VerseWorkspace,
   type VerseWorkspacesResponse,
   verseSessionRoots,
+  VERSE_MEMORY_BODY_MAX_BYTES,
 } from './types.js';
 import { handleVerseEventsSse, VERSE_EVENTS_PATH_RE, VERSE_SESSION_ID_RE } from './verse-stream.js';
 
@@ -708,9 +710,12 @@ function resolveCreation(
 
   // 3. Context mode. An EXPLICIT mode the model has no budget for is refused;
   //    a PREFERRED one is only a default, so it quietly yields to `standard`
-  //    rather than failing a request that never named a mode. `standard` is
-  //    left absent so the record keeps its pre-3.9 shape. (Loading
-  //    preferences is total — a missing or mangled file reads as defaults.)
+  //    rather than failing a request that never named a mode. The mode is
+  //    ALWAYS passed explicitly, `standard` included, so every 3.9 record
+  //    states its mode and an ABSENT `contextMode` reliably means a pre-3.9
+  //    record (a legacy Claude session ran at the CLI's native window, which
+  //    the engine preserves as `expansive`). (Loading preferences is total —
+  //    a missing or mangled file reads as defaults.)
   const prefs = loadVersePreferences();
   if (request.contextMode !== undefined) {
     if (request.contextMode !== 'standard' && budgetFor(option, request.contextMode) === null) {
@@ -719,7 +724,7 @@ function resolveCreation(
     }
   } else {
     const preferred = seatDefaultMode(prefs, seat.id);
-    if (preferred !== 'standard' && budgetFor(option, preferred) !== null) request.contextMode = preferred;
+    request.contextMode = preferred !== 'standard' && budgetFor(option, preferred) !== null ? preferred : 'standard';
   }
 
   // 4. Shared project memory, snapshotted now and pinned for the session's
@@ -993,7 +998,7 @@ async function readMutationBody(
  * staying a bounded, small read. The CONTENT itself is still held to
  * VERSE_MEMORY_MAX_BYTES (413) after parsing.
  */
-export const VERSE_MEMORY_BODY_MAX_BYTES = 2 * VERSE_MEMORY_MAX_BYTES + 8 * 1024;
+export { VERSE_MEMORY_BODY_MAX_BYTES }; // defined in types.ts so the browser mirrors it exactly
 
 // ── Memory round-trip honesty ─────────────────────────────────────────────
 //
@@ -1278,8 +1283,9 @@ async function handleContextRoutes(
 // ---------------------------------------------------------------------------
 
 /**
- * Why the session's model cannot run on its seat RIGHT NOW, or null to let the
- * turn proceed.
+ * The session's model as its seat lists it RIGHT NOW: `reason` is why it
+ * cannot run (null lets the turn proceed), `option` the live catalog entry
+ * (null when discovery failed, the seat is gone or the model is not listed).
  *
  * Create refuses an unavailable model, but a session outlives the check: a
  * chat created on `claude-opus-5.5` before its seat was pinned to a CLI that
@@ -1294,20 +1300,27 @@ async function handleContextRoutes(
  * starts the turn and reports whatever happens — because this is a fail-fast
  * convenience, not a new gate, and a flaky discovery must never lock a chat.
  */
-async function unrunnableModelReason(cfg: AshlrConfig, session: VerseSession | null): Promise<string | null> {
-  if (!session) return null; // sendTurn owns the 404
+async function liveModelFor(
+  cfg: AshlrConfig,
+  session: VerseSession | null,
+): Promise<{ reason: string | null; option: VerseModelOption | null }> {
+  const none = { reason: null, option: null };
+  if (!session) return none; // sendTurn owns the 404
   let discovery: VerseSeatDiscovery;
   try {
     discovery = await cachedSeats(cfg);
   } catch {
-    return null;
+    return none;
   }
   const seat = discovery.seats.find((s) => s.id === session.seatId);
-  if (!seat) return null;
+  if (!seat) return none;
   const modelId = canonicalModelId(session.model);
-  const reason = seat.models.find((m) => m.id === modelId)?.unavailableReason?.trim();
-  if (!reason) return null;
-  return `model ${modelId} cannot run on seat ${seat.id}: ${reason}`;
+  const option = seat.models.find((m) => m.id === modelId) ?? null;
+  const reason = option?.unavailableReason?.trim();
+  return {
+    reason: reason ? `model ${modelId} cannot run on seat ${seat.id}: ${reason}` : null,
+    option,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1562,10 +1575,30 @@ export async function handleVerseApi(
           sendJson(res, 413, { code: 'VERSE_TOO_LARGE', error: `text exceeds ${VERSE_MAX_TURN_TEXT_BYTES} bytes` });
           return true;
         }
-        const unavailable = await unrunnableModelReason(ctx.cfg, engine.getSession(id));
-        if (unavailable !== null) {
-          sendJson(res, 409, { code: 'VERSE_MODEL_UNAVAILABLE', error: unavailable });
+        // Turn text rides on the CLI's argv (`-- <text>`), where a NUL makes
+        // spawn throw ERR_INVALID_ARG_VALUE after the turn was already recorded.
+        if (text.includes('\0')) {
+          sendInvalid(res, 'text must not contain NUL bytes');
           return true;
+        }
+        const current = engine.getSession(id);
+        const live = await liveModelFor(ctx.cfg, current);
+        if (live.reason !== null) {
+          // A distinct code, not VERSE_SESSION_BUSY's: the UI must be able to
+          // tell "a turn is running" from "this model cannot run on this seat".
+          sendJson(res, 409, { code: 'VERSE_MODEL_UNAVAILABLE', error: live.reason });
+          return true;
+        }
+        // Local windows are volatile (server default, dispatch lane, a re-pulled
+        // tag), and the SAME number must reach both the CLI
+        // (CLAUDE_CODE_MAX_CONTEXT_TOKENS) and the meter: the session's stored
+        // `usage.contextWindow`. Refresh it from live discovery before the CLI
+        // launches, so a stale record (a pre-3.9 262144 for a 64k tag) is
+        // corrected rather than told to the CLI turn after turn. No live option
+        // (Ollama down, tag gone) keeps the stored window: discovery failing
+        // must never rewrite a session.
+        if (current?.engine === 'local' && live.option !== null) {
+          engine.refreshLocalWindow(id, live.option);
         }
         const result: VerseTurnResponse = engine.sendTurn(id, text);
         sendJson(res, 202, result);

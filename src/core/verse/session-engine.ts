@@ -62,10 +62,12 @@ import {
   CODEX_EFFECTIVE_WINDOW_PERCENT,
   codexAutoCompactAt,
   grokAutoCompactAt,
+  hasExpansiveMode,
   reconcileAutoCompactAt,
 } from './context-math.js';
-import { claudeModelOptions } from './model-windows.js';
-import { createVerseSessionStore, type VerseSessionStore } from './session-store.js';
+import { legacyModelOptionFallback } from './model-windows.js';
+import { stripUnsafeControlChars } from './project-memory.js';
+import { createVerseSessionStore, isVerseWindowSource, type VerseSessionStore } from './session-store.js';
 import {
   VERSE_CONTEXT_MODES,
   VERSE_DEFAULT_CONTEXT_WINDOWS,
@@ -172,6 +174,24 @@ export interface VerseEngineHandle {
    * no budget for.
    */
   setContextMode(id: string, mode: VerseContextMode): VerseSession;
+  /**
+   * V3.9. Re-read a LOCAL session's window from the seat's LIVE option (the
+   * API calls this before each turn with the option discovery resolves now).
+   *
+   * Local windows are the runtime's allocation — the dispatch lane, the pinned
+   * `num_ctx`, what `/api/ps` has resident — and change after a chat is
+   * created; a pre-3.9 record may even hold a window the old discovery got
+   * wrong (262,144 stored for a `-ctx64k` tag that serves 65,536). The CLI is
+   * told `usage.contextWindow` (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`) and the meter
+   * draws the same field, so correcting it HERE, before the launch, keeps what
+   * the CLI compacts against and what the operator sees one number.
+   *
+   * Writes (and emits one `context` event) only when window, compaction point
+   * or source actually changed. A no-op for any other engine, and for an
+   * option with no window. Refused while a turn runs (its CLI was launched
+   * with the old window) and for an option naming a different model.
+   */
+  refreshLocalWindow(id: string, option: VerseModelOption): VerseSession;
   cancelTurn(id: string): boolean;
   deleteSession(id: string): void;
   renameSession(id: string, title: string): VerseSession;
@@ -430,33 +450,24 @@ function findModelOption(seat: VerseSeat, model: string): VerseModelOption | nul
   return seat.models.find((m) => canonicalModelId(m.id) === wanted) ?? null;
 }
 
-/** Whether an option was built by the V3.9 catalog (it states its budgets), rather than read from an older launch snapshot. */
-function hasCatalogBudgets(option: VerseModelOption): boolean {
-  return option.autoCompactAt !== undefined || option.expansive !== undefined || option.windowSource !== undefined;
-}
-
 /**
  * The option whose budgets govern a session's readings.
  *
- * Normally the seat's own option. The exception is a CLAUDE launch snapshot
- * written before 3.9: its options carry only the old flat 200k window and no
- * budgets, yet the claude adapter now launches those sessions with the budget
- * from the verified per-model table (model-windows.ts). The engine reads the
- * same table so the compaction point it records is the one the CLI was
- * actually told — two sources of truth for one flag would drift.
+ * Normally the seat's own option. The exception is a launch snapshot written
+ * before 3.9: its options carry one flat window and no budgets, yet the live
+ * seat the web UI reads (and the claude/codex adapters, which build the CLI
+ * flags) take that model's budgets from the documented builders in
+ * model-windows.ts. `legacyModelOptionFallback` is that ONE rule, shared with
+ * the adapters, so the mode the UI offers is the mode this engine accepts and
+ * the compaction point recorded is the one the CLI was told — two sources of
+ * truth for one flag would drift (it did: a 3.8 codex chat was offered
+ * Expansive and then refused it with a 400).
  *
- * Codex/grok/local older snapshots are left as they are: their windows come
- * from per-seat catalogs Verse cannot reconstruct after the fact, and the
- * first runtime reading corrects them anyway.
+ * Local snapshots are left as they are: a local window is the runtime's
+ * allocation, which `refreshLocalWindow` re-reads from live discovery.
  */
 function effectiveModelOption(seat: VerseSeat, model: string, engine: VerseEngine): VerseModelOption | null {
-  const option = findModelOption(seat, model);
-  if (engine !== 'claude' || (option && hasCatalogBudgets(option))) return option;
-  const wanted = canonicalModelId(option?.id ?? model);
-  const known = claudeModelOptions(null).find((m) => m.id === wanted);
-  if (!known) return option;
-  // Keep the snapshot's identity; take only the budgets from the table.
-  return { ...known, id: option?.id ?? model, label: option?.label ?? known.label, unavailableReason: null };
+  return legacyModelOptionFallback(engine, model, findModelOption(seat, model));
 }
 
 /**
@@ -687,7 +698,52 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     if (typeof id !== 'string') throw new VerseError('VERSE_SESSION_NOT_FOUND', 'session not found');
     const session = store.get(id);
     if (!session) throw new VerseError('VERSE_SESSION_NOT_FOUND', `session not found: ${id}`);
+    materializeLegacyMode(session);
     return session;
+  }
+
+  /**
+   * A CLAUDE record written before 3.9 has no `contextMode` and no
+   * `usage.contextWindowSource` (neither key existed). 3.8 launched it with no
+   * `--autocompact`, so on a 1M model the CLI ran its native window and
+   * compacted near 967k. Reading "absent" as `standard` would start passing
+   * `--autocompact 400000` on the first turn after the upgrade — and a chat
+   * already holding 400k–967k would be compacted by the CLI before it answered:
+   * an unrequested, paid summarisation of the whole context, with nothing on
+   * screen to warn about it (3.8 stored occupancy CLAMPED at its 200k catalog
+   * window, so the meter could not know either).
+   *
+   * So such a record keeps what it had: `expansive` (the CLI's `auto`) when its
+   * model has an expansive budget, with that budget recorded on `usage` so the
+   * meter draws the compaction point the CLI will actually use. It is written
+   * to disk ONCE, the first time the session is touched (engine load, get,
+   * list, a turn, a mode switch) — from then on it is an ordinary expansive
+   * session the operator can switch to standard like any other.
+   *
+   * Left alone: a model with no expansive budget (a 200k model's standard IS
+   * the CLI's `auto`), codex/grok/local (their standard is their native
+   * behaviour), a record that already names a mode, and a record carrying a
+   * window source (written by 3.9 code, which knew what it chose). The stored
+   * occupancy is NOT touched: it may be 3.8's clamped figure, but the first
+   * turn's reading replaces it, and with the native compaction point restored
+   * nothing compacts that would not have under 3.8.
+   *
+   * Written with `store.save`, not `save`: a migration is not activity, and
+   * bumping `updatedAt` would reorder every old chat to the top of the list.
+   */
+  function materializeLegacyMode(session: VerseSession): void {
+    if (session.engine !== 'claude' || session.contextMode !== undefined) return;
+    if (!isObject(session.usage) || session.usage.contextWindowSource !== undefined) return;
+    const launch = store.loadLaunch(session.id);
+    if (!isSeatLaunch(launch)) return;
+    const option = effectiveModelOption(launch.seat, session.model, session.engine);
+    if (!hasExpansiveMode(option)) return;
+    const budget = sessionBudgetFor(launch.seat, option, 'expansive', session.engine);
+    session.contextMode = 'expansive';
+    session.usage.contextWindow = budget.contextWindow;
+    session.usage.contextWindowSource = budget.source;
+    session.usage.autoCompactAt = budget.autoCompactAt;
+    store.save(session);
   }
 
   /**
@@ -766,6 +822,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
   }
 
   for (const session of store.list()) {
+    materializeLegacyMode(session);
     if (session.status === 'running') reconcileInterrupted(session);
   }
 
@@ -850,6 +907,26 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       budget: budgetFor(option, mode),
       autocompactWindow: session.engine === 'claude' ? claudeAutocompactFlag(option, mode) : null,
       maxOutputTokens: option?.maxOutputTokens ?? null,
+    });
+  }
+
+  /**
+   * One `context` event after the budget changed BETWEEN turns (a mode switch,
+   * a local window refreshed from discovery), so every open client redraws the
+   * meter against it; occupancy itself is unchanged. It names the budget's
+   * source: a catalog figure must never be drawn as a CLI measurement.
+   */
+  function emitBudgetChange(id: string, session: VerseSession): void {
+    emit(id, {
+      type: 'context',
+      turnId: null,
+      contextTokens: Math.max(0, Math.floor(session.usage.contextTokens || 0)),
+      contextWindow: session.usage.contextWindow,
+      exact: session.usage.contextTokensExact !== false,
+      autoCompactAt: session.usage.autoCompactAt ?? null,
+      ...(session.usage.contextWindowSource !== undefined
+        ? { contextWindowSource: session.usage.contextWindowSource }
+        : {}),
     });
   }
 
@@ -952,6 +1029,12 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
           contextWindow: session.usage.contextWindow,
           exact,
           autoCompactAt: session.usage.autoCompactAt ?? null,
+          // ...and WHERE that window came from. When the adapter reported
+          // none, the window in force is still the catalog's, and a client
+          // must not relabel it as a CLI measurement.
+          ...(session.usage.contextWindowSource !== undefined
+            ? { contextWindowSource: session.usage.contextWindowSource }
+            : {}),
         };
       }
       case 'compaction': {
@@ -1327,14 +1410,20 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
 
   return {
     listSessions(): VerseSession[] {
-      return store.list()
+      const sessions = store.list();
+      // Normally a no-op (the startup pass already ran); covers a record that
+      // reached the store after this engine started.
+      for (const session of sessions) materializeLegacyMode(session);
+      return sessions
         .map(cloneSession)
         .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
     },
 
     getSession(id: string): VerseSession | null {
       const session = typeof id === 'string' ? store.get(id) : null;
-      return session ? cloneSession(session) : null;
+      if (!session) return null;
+      materializeLegacyMode(session);
+      return cloneSession(session);
     },
 
     getEvents(id: string, fromSeq = 0): VerseEvent[] {
@@ -1380,11 +1469,10 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       }
       const model = option.id;
 
-      // Context mode. Absent = standard (and no key on the record, exactly
-      // like every record written before modes existed). Standard always
+      // Context mode. A request without one gets `standard`. Standard always
       // exists — it is the CLI's own behaviour, known or estimated — but a
       // mode the model has no budget for is refused, never faked.
-      let contextMode: VerseContextMode | undefined;
+      let contextMode: VerseContextMode = 'standard';
       if (req.contextMode !== undefined) {
         if (!isContextMode(req.contextMode)) {
           throw new VerseError('VERSE_INVALID', `contextMode must be one of: ${VERSE_CONTEXT_MODES.join(', ')}`);
@@ -1392,10 +1480,10 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         contextMode = req.contextMode;
       }
       const budgetOption = effectiveModelOption(seat, model, engine);
-      if (contextMode !== undefined && contextMode !== 'standard' && !budgetFor(budgetOption, contextMode)) {
+      if (contextMode !== 'standard' && !budgetFor(budgetOption, contextMode)) {
         throw new VerseError('VERSE_INVALID', `model ${model} has no ${contextMode} context mode on seat ${seat.id}`);
       }
-      const budget = sessionBudgetFor(seat, budgetOption, contextMode ?? 'standard', engine);
+      const budget = sessionBudgetFor(seat, budgetOption, contextMode, engine);
 
       if (req.title !== undefined && typeof req.title !== 'string') {
         throw new VerseError('VERSE_INVALID', 'title must be a string');
@@ -1449,7 +1537,11 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
           autoCompactAt: budget.autoCompactAt,
         },
         lastError: null,
-        ...(contextMode !== undefined ? { contextMode } : {}),
+        // ALWAYS written, even for `standard`: from 3.9 on, a record with no
+        // `contextMode` key is by definition one created before modes existed
+        // (see `materializeLegacyMode`), and that inference is only sound if
+        // no new record ever omits the key.
+        contextMode,
         ...(handoffFrom ? { handoffFrom } : {}),
         ...(memory !== undefined ? { memoryEnabled: memory !== null } : {}),
       };
@@ -1486,6 +1578,13 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       const launch = store.loadLaunch(id);
       if (!isSeatLaunch(launch)) {
         throw new VerseError('VERSE_INVALID', 'session launch record is missing or unreadable');
+      }
+      // A memory snapshot pinned before control characters were stripped can
+      // hold a NUL, which no OS accepts inside an argv entry — the session
+      // could never start again. Repair the in-memory copy for this launch;
+      // the pinned record stays as written (it is the provenance).
+      if (launch.memory && launch.memory.block !== stripUnsafeControlChars(launch.memory.block)) {
+        launch.memory = { ...launch.memory, block: stripUnsafeControlChars(launch.memory.block) };
       }
 
       const turnId = randomUUID();
@@ -1547,16 +1646,38 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         session.usage.autoCompactAt = budget.autoCompactAt;
       }
       save(session);
-      // One `context` event so every open client redraws the meter against the
-      // new budget; occupancy itself is unchanged.
-      emit(id, {
-        type: 'context',
-        turnId: null,
-        contextTokens: Math.max(0, Math.floor(session.usage.contextTokens || 0)),
-        contextWindow: session.usage.contextWindow,
-        exact: session.usage.contextTokensExact !== false,
-        autoCompactAt: session.usage.autoCompactAt ?? null,
-      });
+      emitBudgetChange(id, session);
+      return cloneSession(session);
+    },
+
+    refreshLocalWindow(id: string, option: VerseModelOption): VerseSession {
+      if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
+      const session = require(id);
+      if (session.engine !== 'local') return cloneSession(session);
+      if (running.has(id)) {
+        throw new VerseError('VERSE_SESSION_BUSY', 'the window can change between turns; wait for this turn to finish or stop it');
+      }
+      if (!isObject(option) || typeof option.id !== 'string' || canonicalModelId(option.id) !== canonicalModelId(session.model)) {
+        throw new VerseError('VERSE_INVALID', `live option does not describe model ${session.model}`);
+      }
+      // A live option with no usable window is "no reading" — keep the stored
+      // one rather than erase the only window the CLI can be told.
+      const budget = budgetFor(option, 'standard');
+      if (!budget) return cloneSession(session);
+      // The caller's option is data: an unknown source would make the record
+      // fail validation on its next read, so it is recorded as a fallback.
+      const source: VerseWindowSource = isVerseWindowSource(option.windowSource) ? option.windowSource : 'fallback';
+      const usage = session.usage;
+      if (usage.contextWindow === budget.contextWindow
+        && (usage.autoCompactAt ?? null) === budget.autoCompactAt
+        && usage.contextWindowSource === source) {
+        return cloneSession(session);
+      }
+      usage.contextWindow = budget.contextWindow;
+      usage.autoCompactAt = budget.autoCompactAt;
+      usage.contextWindowSource = source;
+      save(session);
+      emitBudgetChange(id, session);
       return cloneSession(session);
     },
 

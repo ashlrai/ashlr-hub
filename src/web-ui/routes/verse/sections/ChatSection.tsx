@@ -67,13 +67,29 @@ function loadSelected(): string | null {
   }
 }
 
-function describeError(err: unknown): string {
+/**
+ * Every chat-surface failure in one sentence, branching on the route's CODE
+ * before its status.
+ *
+ * A 409 is not always "busy": POST …/turns also answers 409
+ * VERSE_MODEL_UNAVAILABLE when the chat's model cannot run on its seat (e.g.
+ * an old `claude-opus-5.5` chat on a seat pinned below Claude Code 2.1.280).
+ * Mapping every 409 to "a turn is already running" told the operator to press
+ * a Stop that does nothing, on every retry, with the server's actual reason
+ * thrown away.
+ */
+export function describeChatError(err: unknown): string {
   if (err instanceof DispatchDisabledError) return 'This server was started without dispatch — run `ashlr verse` to chat.';
   if (err instanceof ApiError) {
-    if (err.status === 409) return 'A turn is already running in this chat. Stop it first.';
+    if (err.code === 'VERSE_MODEL_UNAVAILABLE') {
+      const why = err.detail ?? "This chat's model cannot run on its seat.";
+      return `${why.replace(/\.?$/, '.')} Continue in a fresh chat on a model this seat can run, or re-pin the seat's CLI (\`ashlr resources profile repin\`).`;
+    }
+    if (err.status === 409 && (err.code === null || err.code === 'VERSE_SESSION_BUSY')) return 'A turn is already running in this chat. Stop it first.';
     if (err.status === 413) return 'That message is too large (64 KB max).';
     if (err.status === 401) return 'Mutation token was rejected. Unlock again with the token ashlr verse printed.';
-    return err.message;
+    // Any other refusal: the sentence the route author wrote for a person.
+    return err.detail ?? err.message;
   }
   return err instanceof Error ? err.message : 'Something went wrong.';
 }
@@ -143,9 +159,11 @@ export function ChatSection() {
   // and runs it once unlocked. Resolves null when the dialog is dismissed.
   const withToken = useCallback(<T,>(reason: string, action: () => Promise<T>): Promise<T | null> => {
     if (hold.hasHold) return action();
-    return new Promise<T | null>((resolve) => {
+    return new Promise<T | null>((resolve, reject) => {
       pendingAction.current = {
-        run: () => { void action().then(resolve); },
+        // Pass rejections through: a parked action that fails after the token
+        // unlock must reach its caller's catch, not leave it awaiting forever.
+        run: () => { action().then(resolve, reject); },
         cancel: () => resolve(null),
       };
       setTokenPrompt({ open: true, reason });
@@ -154,7 +172,7 @@ export function ChatSection() {
 
   const fail = useCallback((err: unknown) => {
     if (err instanceof VerseMutationLockedError) return;
-    toast.show(describeError(err), 'danger');
+    toast.show(describeChatError(err), 'danger');
   }, [toast]);
 
   // ---- actions ------------------------------------------------------------
@@ -197,7 +215,7 @@ export function ChatSection() {
         setSelectedId(session.id);
         toast.show(`Started “${session.title}”`, 'success');
       } catch (err) {
-        setCreateError(describeError(err));
+        setCreateError(describeChatError(err));
       } finally {
         setCreating(false);
       }

@@ -80,6 +80,14 @@ function positive(value: number | null | undefined): number | null {
  *
  * Precedence (docs/VERSE-CONTEXT.md, "honesty rules"):
  *
+ *  0. LOCAL — the window STORED on the record, whatever its source. Verse
+ *     SETS a local seat's window: the claude adapter passes the stored
+ *     `usage.contextWindow` as `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, and the
+ *     engine refreshes that stored value from live discovery before each
+ *     turn. The seat's CURRENT option can differ (another dispatch lane,
+ *     another resident num_ctx), and drawing it measured the chat against a
+ *     window the CLI was never told — "past the 66k window" for a chat the
+ *     CLI compacts at 229k. The meter and the CLI must quote one number.
  *  1. RUNTIME — the CLI reported the window for this session's last turn
  *     (`usage.contextWindowSource === 'runtime'`). Nothing outranks what the
  *     CLI said it is actually running with (e.g. Claude Code clamping a 1M
@@ -99,6 +107,9 @@ export function sessionContextBudget(
   session: Pick<VerseSession, 'seatId' | 'model' | 'usage' | 'engine' | 'contextMode'>,
 ): SessionContextBudget {
   const usage = session.usage;
+  // No UI-side legacy rule: the engine materialises a pre-3.9 Claude
+  // record's mode (and its budget) on startup and on every touch, so every
+  // record reaching the browser already names the mode it runs in.
   const mode: VerseContextMode = session.contextMode ?? 'standard';
   const option = modelOptionFor(seats, session);
   const base = {
@@ -110,16 +121,19 @@ export function sessionContextBudget(
   const catalog = budgetFor(option, mode);
 
   const stored = positive(usage.contextWindow);
-  if (stored !== null && usage.contextWindowSource === 'runtime') {
+  if (stored !== null && (session.engine === 'local' || usage.contextWindowSource === 'runtime')) {
     const storedPoint = positive(usage.autoCompactAt ?? null);
     const autoCompactAt = storedPoint ?? reconcileAutoCompactAt({
       engine: session.engine,
       runtimeWindow: stored,
-      budget: catalog,
+      // A local window is the whole budget (no --autocompact); pairing it
+      // with the seat's current option would borrow another window's point.
+      budget: session.engine === 'local' ? null : catalog,
       autocompactWindow: session.engine === 'claude' ? claudeAutocompactFlag(option, mode) : null,
       maxOutputTokens: option?.maxOutputTokens ?? null,
     });
-    return { ...base, contextWindow: stored, autoCompactAt, source: 'runtime' };
+    const source = session.engine === 'local' ? usage.contextWindowSource ?? null : 'runtime';
+    return { ...base, contextWindow: stored, autoCompactAt, source };
   }
   if (catalog) {
     return { ...base, contextWindow: catalog.contextWindow, autoCompactAt: catalog.autoCompactAt, source: option?.windowSource ?? 'fallback' };
@@ -147,6 +161,33 @@ export const WINDOW_SOURCE_TEXT: Record<VerseWindowSource, string> = {
   documented: "from the provider's published model table",
   fallback: 'a default estimate — the CLI has not reported the real window yet',
 };
+
+/**
+ * The same provenance, per engine. On a LOCAL seat nothing is "reported by
+ * the CLI": Verse measures the window from the model server (llama-server
+ * slot, Ollama residency/defaults) and TELLS Claude Code to use it, so the
+ * sentence names both halves.
+ */
+export function windowSourceText(source: VerseWindowSource, engine: VerseEngine | null | undefined): string {
+  if (engine !== 'local') return WINDOW_SOURCE_TEXT[source];
+  const from = source === 'runtime' ? 'measured from the local model server'
+    : source === 'fallback' ? 'a default estimate — the model server did not report one'
+    : WINDOW_SOURCE_TEXT[source];
+  return `${from}; Verse passes this window to Claude Code for this chat`;
+}
+
+/**
+ * The one sentence about Codex's surcharge above its standard window, for
+ * every surface that prices Expansive on codex (the mode menu, the
+ * "Expansive could help" chip, the new-chat mode selector, the handoff
+ * dialog). Worded as REPORTED because that is all it is: the sources
+ * docs/VERSE-CONTEXT.md §2.3 cites say GPT-5.6-class requests above 272k
+ * count about 2× against plan limits, and Verse has no reading of its own
+ * that confirms the multiplier. It multiplies the size ratio the copy quotes
+ * (the ratio of the two compaction points), which is why it says "twice that".
+ */
+export const CODEX_EXPANSIVE_METERING_NOTE =
+  'OpenAI reportedly also counts requests above 272k tokens at about 2× against plan limits, so a turn near the expansive limit may cost roughly twice that.';
 
 /** The first model on a seat that can actually run (skips ones listed with an `unavailableReason`). */
 export function firstRunnableModel(seat: VerseSeat): VerseModelOption | null {

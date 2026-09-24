@@ -232,7 +232,12 @@ describe('claude adapter — buildLaunch', () => {
   it('a pre-3.9 launch snapshot (flat window, no budgets) takes its budget from the verified table', () => {
     const a = adapterFor('claude');
     // SEAT lists claude-opus-5 as a flat 200k option; the table knows it is 1M-native.
+    // (The adapter reads the MODE off the session. A pre-3.9 RECORD has none on
+    // disk; the engine materialises `expansive` for it before any launch — see
+    // test/verse-session-engine.test.ts "records written before 3.9" — so the
+    // absent-mode case below is only ever reached by a direct caller.)
     expect(valuesOf(a.buildLaunch(session(), 'hi', launch()).argv, '--autocompact')).toEqual(['400000']);
+    expect(valuesOf(a.buildLaunch(session({ contextMode: 'standard' }), 'hi', launch()).argv, '--autocompact')).toEqual(['400000']);
     expect(valuesOf(a.buildLaunch(session({ contextMode: 'expansive' }), 'hi', launch()).argv, '--autocompact')).toEqual(['auto']);
     // A model missing from the snapshot but known to the table.
     expect(valuesOf(a.buildLaunch(session({ model: 'claude-opus-4-8' }), 'hi', launch()).argv, '--autocompact')).toEqual(['400000']);

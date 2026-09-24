@@ -28,6 +28,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { VerseEvent, VerseSeat, VerseSession } from '../../../data/api-types.js';
 import {
   VERSE_HANDOFF_MAX_CHARS,
+  VERSE_HANDOFF_SUMMARY_REQUEST,
   VERSE_MAX_TURN_TEXT_BYTES,
   type VerseContextMode,
   type VerseHandoffPreview,
@@ -47,6 +48,7 @@ import {
   setVerseSessionStatus,
   subscribeVerseStore,
 } from '../verse-store.js';
+import { expansiveMeteringNote, expansiveRatioSentence } from '../usage/context-model.js';
 import { rememberVerseSeat } from '../verse-ui-store.js';
 import { extraRootsCaveat } from '../workspace-model.js';
 import {
@@ -55,7 +57,6 @@ import {
   defaultHandoffTarget,
   handoffFit,
   handoffTitle,
-  HANDOFF_SUMMARY_REQUEST,
   modelOption,
   offersExpansive,
   requestMode,
@@ -220,7 +221,11 @@ function HandoffDialogBody({ session, seats, onClose, onCreated }: HandoffDialog
   const mode: VerseContextMode = modeChoice !== null && requestMode(option, modeChoice) !== undefined ? modeChoice : defaultMode;
   const expansiveOffered = offersExpansive(option);
   const unavailable = targetUnavailableReason(targetSeat, option);
-  const fit = handoffFit(text.length, option, mode);
+  // The TARGET seat's engine: the new chat carries that CLI's fixed prompt, not the source's.
+  const fit = handoffFit(text.length, option, mode, targetSeat?.engine ?? null);
+  // Expansive's cost in the shared wording: the re-send ratio, then (codex
+  // only) the reported >272k metering that multiplies it.
+  const expansiveCost = [expansiveRatioSentence(option), expansiveMeteringNote(targetSeat?.engine)].filter(Boolean).join(' ');
   const rootCount = 1 + (session.extraRoots?.filter((r) => r && r !== session.projectPath).length ?? 0);
   const reachCaveat = extraRootsCaveat(targetSeat?.engine ?? null, rootCount);
 
@@ -250,7 +255,9 @@ function HandoffDialogBody({ session, seats, onClose, onCreated }: HandoffDialog
       const turnId = await gate.run(SUMMARY_REASON, async () => {
         setVerseSessionStatus(session.id, 'running');
         try {
-          const response = await sendVerseTurn(session.id, HANDOFF_SUMMARY_REQUEST);
+          // The SHARED constant, verbatim: the handoff builder recognises this
+          // exact text and keeps it out of the new chat's "latest requests".
+          const response = await sendVerseTurn(session.id, VERSE_HANDOFF_SUMMARY_REQUEST);
           // Same reconciliation ChatSection's send uses: the turn may already
           // have settled by the time the 202 is applied.
           setVerseSession(session.id, response.session, response.turnId);
@@ -510,7 +517,7 @@ function HandoffDialogBody({ session, seats, onClose, onCreated }: HandoffDialog
                   <p className={styles.hint}>
                     {budgetLine(option, mode)}.{' '}
                     {mode === 'expansive'
-                      ? 'Expansive keeps far more of the conversation before compacting, but every turn re-sends all of it — each turn costs more usage.'
+                      ? `Expansive keeps far more of the conversation before compacting, but every turn re-sends all of it — each turn costs more usage.${expansiveCost ? ` ${expansiveCost}` : ''}`
                       : 'Standard compacts sooner and keeps each turn cheaper. Expansive is one click away if the work needs it.'}
                   </p>
                 </>

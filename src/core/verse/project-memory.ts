@@ -32,6 +32,13 @@
  *  - The block is `scrubSecrets`'d and capped at VERSE_MEMORY_BLOCK_MAX_BYTES.
  *    The instructions tell agents never to store secrets; the scrub is the
  *    backstop, not the policy.
+ *  - The block is ARGV-SAFE: C0/C1 control characters (NUL above all) are
+ *    stripped. The block rides on argv (`--append-system-prompt=…`,
+ *    `--rules=…`) and Node's spawn throws ERR_INVALID_ARG_VALUE for any argv
+ *    element containing NUL. Agents write MEMORY.md directly (not through
+ *    `writeProjectMemory`'s NUL check), and the block is pinned into the
+ *    launch record — so one stray NUL would otherwise make every new chat in
+ *    the project unable to start, permanently.
  *
  * Spends nothing and starts no process.
  */
@@ -53,7 +60,7 @@ import {
   VerseServiceError,
   writePrivateFileAtomic,
 } from './preferences.js';
-import { VERSE_MEMORY_MAX_BYTES, type VerseProjectMemory } from './types.js';
+import { VERSE_MEMORY_BLOCK_MAX_BYTES, VERSE_MEMORY_MAX_BYTES, type VerseProjectMemory } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -62,7 +69,7 @@ import { VERSE_MEMORY_MAX_BYTES, type VerseProjectMemory } from './types.js';
 export const VERSE_MEMORY_DIRNAME = 'memory';
 export const VERSE_MEMORY_FILE = 'MEMORY.md';
 /** Hard cap on the system-prompt block, instructions included. */
-export const VERSE_MEMORY_BLOCK_MAX_BYTES = 6 * 1024;
+export { VERSE_MEMORY_BLOCK_MAX_BYTES }; // defined in types.ts so the browser mirrors it exactly
 /** Longest MEMORY.md the UI is shown; agents can outgrow the write cap, and a view must not truncate silently below it. */
 const MEMORY_READ_CAP_BYTES = 4 * VERSE_MEMORY_MAX_BYTES;
 /** Names listed from the memory directory. */
@@ -102,6 +109,25 @@ export function projectMemoryDir(projectPath: string, root: string = defaultVers
 // ---------------------------------------------------------------------------
 // The system-prompt block
 // ---------------------------------------------------------------------------
+
+/**
+ * Every C0 control except TAB (\x09) and LF (\x0A), plus DEL and the C1 range.
+ * CR is included: callers normalise CRLF to LF first, and a lone CR left in a
+ * system prompt only garbles how the text renders.
+ */
+// eslint-disable-next-line no-control-regex
+const UNSAFE_CONTROL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
+
+/**
+ * Text made safe to pass as (part of) an argv element and to show as prose:
+ * CRLF → LF, then every control character except `\n` and `\t` removed.
+ * Exported so the engine can repair a snapshot pinned before this existed
+ * (a launch record carrying a NUL must be healed, not rejected — rejecting it
+ * would brick the session it belongs to).
+ */
+export function stripUnsafeControlChars(text: string): string {
+  return text.replace(/\r\n?/g, '\n').replace(UNSAFE_CONTROL_CHARS, '');
+}
 
 function byteLength(text: string): number {
   return Buffer.byteLength(text, 'utf8');
@@ -155,8 +181,13 @@ function memoryInstructions(dir: string, projectName: string, writable: boolean)
  * cache-stable for the whole conversation.
  */
 export function renderMemoryBlock(input: { dir: string; projectName: string; content: string; writable: boolean }): string {
-  const head = memoryInstructions(input.dir, input.projectName, input.writable);
-  const body = scrubSecrets(input.content.replace(/\r\n?/g, '\n')).trim();
+  // The project name is a directory basename: legal on disk with control
+  // bytes in it, never legal on argv with a NUL. `dir` is a real path (no NUL
+  // possible) and must stay byte-exact, so it is left alone.
+  const head = memoryInstructions(input.dir, stripUnsafeControlChars(input.projectName), input.writable);
+  // Strip BEFORE scrubbing and trimming, so a control byte can neither split a
+  // secret the scrubber would have matched nor survive at an edge.
+  const body = scrubSecrets(stripUnsafeControlChars(input.content)).trim();
   if (body.length === 0) {
     return cutToBytes(`${head}(empty — nothing recorded yet)`, VERSE_MEMORY_BLOCK_MAX_BYTES);
   }

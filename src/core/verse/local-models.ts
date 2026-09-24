@@ -523,17 +523,22 @@ export function contextWindowFromTagSuffix(tag: string): number | null {
  * that figure came from. Null `contextLength` means none could be read.
  *
  * Ollama does not expose this over HTTP. It is, in order of authority:
- *  - `env`             — `OLLAMA_CONTEXT_LENGTH` (> 0) in this process's
- *                        environment (an `ollama serve` launched alongside us
- *                        inherits it);
- *  - `server-log-env`  — the same variable as the RUNNING server printed it in
- *                        its `server config` line (the macOS app does not share
- *                        our environment, so the log is its only witness);
+ *  - `server-log-env`  — `OLLAMA_CONTEXT_LENGTH` as the RUNNING server printed
+ *                        it in its `server config` line. This is the value the
+ *                        server actually runs with, so it outranks everything;
  *  - `server-log-vram` — the server's own `vram-based default context …
  *                        default_num_ctx=N`, which Ollama derives from GPU
  *                        memory (262144 on a 107 GiB machine, far less on a
  *                        small one — which is why the architecture maximum is
- *                        NOT a safe stand-in).
+ *                        NOT a safe stand-in);
+ *  - `env`             — `OLLAMA_CONTEXT_LENGTH` (> 0) in THIS process's
+ *                        environment. Last resort, used only when no server log
+ *                        is readable: on macOS Ollama.app does not inherit the
+ *                        shell that launched the hub, so a variable exported
+ *                        there for some other tool says nothing about the
+ *                        server — ranking it first let the hub's environment
+ *                        silently decide every unpinned tag's window (and the
+ *                        CLAUDE_CODE_MAX_CONTEXT_TOKENS a chat is launched with).
  */
 export interface VerseOllamaServerDefault {
   contextLength: number | null;
@@ -592,19 +597,23 @@ function readHead(path: string, maxBytes: number): string | null {
   }
 }
 
-/** Read Ollama's unpinned-request default. Never throws; unknown is `{null, null}`. */
+/**
+ * Read Ollama's unpinned-request default: the server's own log first, this
+ * process's environment only when the log says nothing (see
+ * {@link VerseOllamaServerDefault}). Never throws; unknown is `{null, null}`.
+ */
 export function readOllamaServerDefault(
   opts: { env?: NodeJS.ProcessEnv; logPath?: string } = {},
 ): VerseOllamaServerDefault {
-  const env = opts.env ?? process.env;
-  const fromEnv = Number((env['OLLAMA_CONTEXT_LENGTH'] ?? '').trim());
-  if (Number.isFinite(fromEnv) && fromEnv > 0) return { contextLength: Math.floor(fromEnv), source: 'env' };
   const text = readHead(opts.logPath ?? ollamaServerLogPath(), OLLAMA_LOG_HEAD_BYTES);
   if (text !== null) {
     const parsed = parseOllamaServerLog(text);
     if (parsed.contextLengthEnv !== null) return { contextLength: parsed.contextLengthEnv, source: 'server-log-env' };
     if (parsed.vramDefault !== null) return { contextLength: parsed.vramDefault, source: 'server-log-vram' };
   }
+  const env = opts.env ?? process.env;
+  const fromEnv = Number((env['OLLAMA_CONTEXT_LENGTH'] ?? '').trim());
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return { contextLength: Math.floor(fromEnv), source: 'env' };
   return { contextLength: null, source: null };
 }
 
@@ -674,7 +683,11 @@ export interface VerseLocalWindowInput {
   llamaSlotWindow?: number | null;
   /** `/api/show` for this tag; null when it failed. */
   detail: VerseOllamaModelDetail | null;
-  /** `/api/ps` `context_length` when this tag is resident. */
+  /**
+   * `/api/ps` `context_length` when this tag is resident. Consulted only when
+   * no server default is known: it describes whatever request LOADED the
+   * runner, which may have pinned its own `options.num_ctx`.
+   */
   residentContext?: number | null;
   serverDefault?: VerseOllamaServerDefault | null;
 }
@@ -686,15 +699,25 @@ export interface VerseLocalWindowInput {
  *     irrelevant there: llama-server allocates per slot.
  *  2. Ollama, `num_ctx` pinned — `min(num_ctx, native)` (`provider-catalog`:
  *     the runtime's own model record).
- *  3. Ollama, not pinned — `min(serverDefault, native)`, where serverDefault is
- *     the resident instance's `/api/ps` context (`runtime`), else Ollama's
- *     configured/VRAM default (`provider-catalog`). With neither, the trained
- *     maximum — marked `fallback`, because Ollama may allocate far less.
- *  4. `/api/show` said nothing usable — the tag suffix, then
+ *  3. Ollama, not pinned — `min(serverDefault, native)` (`provider-catalog`),
+ *     serverDefault being what the server would give an unpinned request
+ *     (its logged OLLAMA_CONTEXT_LENGTH, else its VRAM default, else this
+ *     process's env — {@link readOllamaServerDefault}).
+ *  4. Ollama, not pinned, no server default known — the resident instance's
+ *     `/api/ps` context (`runtime`), capped by native. Only here, because
+ *     residency describes the request that loaded the runner, and ANOTHER
+ *     client's `/api/chat` with `options.num_ctx=8192` loads it at 8192. Verse's
+ *     turns send no num_ctx, so Ollama reloads the tag at its default: letting
+ *     a foreign runner define the window told the CLI 8192 (every turn blocked)
+ *     or, with a larger foreign num_ctx, overstated it (overflow without
+ *     compaction). With neither, the trained maximum — marked `fallback`,
+ *     because Ollama may allocate far less.
+ *  5. `/api/show` said nothing usable — the tag suffix, then
  *     `VERSE_DEFAULT_CONTEXT_WINDOWS.local`, both `fallback`.
  *
  * A server default is never used WITHOUT a native length to cap it: a 262144
  * VRAM default applied to an 8k embedding model would be a 32× overstatement.
+ * (With no native length, residency — a real allocation — is the best fact.)
  */
 export function resolveLocalContextWindow(input: VerseLocalWindowInput): VerseLocalWindow {
   const slot = input.lane === 'llama-server' ? positive(input.llamaSlotWindow) : null;
@@ -708,17 +731,15 @@ export function resolveLocalContextWindow(input: VerseLocalWindowInput): VerseLo
   }
 
   if (detail !== null) {
+    const serverDefault = positive(input.serverDefault?.contextLength ?? null);
+    if (native !== null && serverDefault !== null) {
+      return { window: Math.min(serverDefault, native), source: 'provider-catalog', basis: 'server-default' };
+    }
     const resident = positive(input.residentContext ?? null);
     if (resident !== null) {
       return { window: native !== null ? Math.min(resident, native) : resident, source: 'runtime', basis: 'resident' };
     }
-    if (native !== null) {
-      const serverDefault = positive(input.serverDefault?.contextLength ?? null);
-      if (serverDefault !== null) {
-        return { window: Math.min(serverDefault, native), source: 'provider-catalog', basis: 'server-default' };
-      }
-      return { window: native, source: 'fallback', basis: 'native-estimate' };
-    }
+    if (native !== null) return { window: native, source: 'fallback', basis: 'native-estimate' };
   }
 
   const fromSuffix = contextWindowFromTagSuffix(input.tag);
@@ -779,10 +800,12 @@ async function collectOllama(
       placement: live ? placementOf(live.sizeBytes, sizeVramBytes) : 'unknown',
       gpuPercent: live && live.sizeBytes !== null ? percentOf(sizeVramBytes, live.sizeBytes) : null,
       expiresAt: live?.expiresAt ?? null,
-      // Resident: what the loaded instance was given. Otherwise what the next
-      // unpinned request WILL be given — the same resolver the seats use, so
-      // the Usage view and the seat picker can never disagree. Null only when
-      // `/api/show` itself failed: the tag-suffix guess is not a runtime fact.
+      // Resident: what the loaded instance was given — a fact about the runner
+      // in memory now (possibly loaded by another client's num_ctx, which is
+      // why the SEAT window does not trust it). Otherwise what the next
+      // unpinned request WILL be given — the same resolver the seats use. Null
+      // only when `/api/show` itself failed: the tag-suffix guess is not a
+      // runtime fact.
       contextLength: live?.contextLength ?? (detail !== null
         ? resolveLocalContextWindow({ tag: tag.tag, lane: 'ollama', detail, serverDefault }).window
         : null),

@@ -14,6 +14,7 @@
  * `tool-use` and `tool-result` pair up by toolUseId into one card.
  */
 import type { VerseEvent, VerseSession, VerseUsage } from '../../data/api-types.js';
+import type { VerseWindowSource } from '../../../core/verse/types.js';
 import { reconcileAutoCompactAt } from '../../../core/verse/context-math.js';
 
 export type VerseStreamState = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed';
@@ -244,12 +245,27 @@ export function applyUsageFrame(session: VerseSession, frame: VerseUsage): Verse
   return next;
 }
 
+/** The provenance values a frame may carry; anything else is ignored, never stored. */
+const WINDOW_SOURCES: ReadonlySet<string> = new Set<VerseWindowSource>(['runtime', 'provider-catalog', 'cli-catalog', 'documented', 'fallback']);
+
+function frameWindowSource(value: unknown): VerseWindowSource | null {
+  return typeof value === 'string' && WINDOW_SOURCES.has(value) ? (value as VerseWindowSource) : null;
+}
+
 /**
- * Apply a `context` reading: it REPLACES occupancy (never summed) and, when it
- * names a window, that window is a runtime measurement. The engine fills
- * `autoCompactAt` for the window in force; a frame without it (an older
- * server) is reconciled from the previous budget rather than left pointing at
- * a compaction point that belonged to a different window.
+ * Apply a `context` reading: it REPLACES occupancy (never summed). When it
+ * names a window, the window's provenance is the one the EVENT states
+ * (`contextWindowSource`, V3.9): the engine also emits a `context` event
+ * after a MODE SWITCH, carrying the new mode's CATALOG budget, and stamping
+ * that 'runtime' made the tooltip say "reported by the CLI on the last turn"
+ * for a number no CLI reported — and pinned it ahead of later catalog
+ * corrections (sessionContextBudget precedence 1). Only an event from a
+ * server that predates the field (no source at all) is taken as a runtime
+ * reading, which is what every such event was.
+ *
+ * The engine fills `autoCompactAt` for the window in force; a frame without
+ * it (an older server) is reconciled from the previous budget rather than
+ * left pointing at a compaction point that belonged to a different window.
  */
 export function applyContextReading(
   session: VerseSession,
@@ -262,13 +278,17 @@ export function applyContextReading(
     contextTokensExact: event.exact,
   };
   const window = typeof event.contextWindow === 'number' && event.contextWindow > 0 ? event.contextWindow : null;
-  // Local windows are set by Verse, not measured (see applyUsageFrame).
-  if (window === null || session.engine === 'local') {
+  const stated = frameWindowSource(event.contextWindowSource);
+  // Local windows are SET by Verse (CLAUDE_CODE_MAX_CONTEXT_TOKENS), not
+  // measured: a window without provenance is not allowed to move one (see
+  // applyUsageFrame). A V3.9 event that states its source is the engine's
+  // own record of the window it just launched with, so it is adopted.
+  if (window === null || (session.engine === 'local' && stated === null)) {
     if (event.autoCompactAt !== undefined && event.autoCompactAt !== null) next.autoCompactAt = event.autoCompactAt;
     return next;
   }
   next.contextWindow = window;
-  next.contextWindowSource = 'runtime';
+  next.contextWindowSource = stated ?? 'runtime';
   if (event.autoCompactAt !== undefined) {
     next.autoCompactAt = event.autoCompactAt;
   } else if (window !== prev.contextWindow) {
@@ -279,6 +299,28 @@ export function applyContextReading(
     });
   }
   return next;
+}
+
+/**
+ * When this chat last talked to its provider — the newest `usage`,
+ * `turn-done`, `cancelled` or TURN-attributed `context` event — or null when
+ * the log holds none (no turn yet, or the log is not loaded).
+ *
+ * WHY NOT `session.updatedAt`: the idle-cache advice ("the prompt cache has
+ * likely expired") asks how long the PROVIDER has gone without a request,
+ * and `updatedAt` moves on things that never reach a provider: a rename, a
+ * context-mode switch (whose `context` event has `turnId: null`), a reload's
+ * record save. Measured from `updatedAt`, one rename silenced the warning
+ * for another hour while the cache stayed cold.
+ */
+export function lastTurnActivityAt(events: readonly VerseEvent[]): string | null {
+  let latest: string | null = null;
+  for (const e of events) {
+    const turnActivity = e.type === 'usage' || e.type === 'turn-done' || e.type === 'cancelled' ||
+      (e.type === 'context' && e.turnId !== null);
+    if (turnActivity && typeof e.at === 'string' && (latest === null || e.at > latest)) latest = e.at;
+  }
+  return latest;
 }
 
 export function forgetVerseSession(sessionId: string): void {
@@ -544,10 +586,16 @@ function makeToolGroup(members: ToolGroupMember[]): ToolGroupItem {
   };
 }
 
-/** "123k" / "1.2M" — compact token counts for the meter and usage rows. */
+/**
+ * "123k" / "1.2M" — compact token counts for the meter and usage rows.
+ *
+ * The unit is chosen AFTER rounding: choosing it first printed 999,500–
+ * 999,999 as "1000k" (and 999.5–999.9 as "1000"), a band a 1M Claude chat in
+ * Expansive can actually reach.
+ */
 export function formatTokens(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return '—';
-  if (n < 1000) return String(Math.round(n));
-  if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
+  if (Math.round(n) < 1000) return String(Math.round(n));
+  if (Math.round(n / 1000) < 1000) return `${Math.round(n / 1000)}k`;
   return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
 }

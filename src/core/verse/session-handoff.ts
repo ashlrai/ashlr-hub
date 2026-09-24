@@ -26,7 +26,16 @@
  *   goal          the first user message (the original ask)
  *   latest-asks   the last three user messages after it
  *   state         the last assistant message, abridged (head + tail) — or
- *                 verbatim (capped) when `includeLastAssistant`
+ *                 verbatim (capped) when `includeLastAssistant`, in which
+ *                 case it is the reply to the canned summary request
+ *
+ * CONTROL TURNS ARE NOT ASKS. Two kinds of user message are Verse talking to
+ * the agent, not the operator stating work: the canned
+ * VERSE_HANDOFF_SUMMARY_REQUEST ("Ask this seat to summarize first") and the
+ * `/compact [focus]` that "Compact now" sends. Neither may become the goal or
+ * a latest request: the footer tells the next agent to "continue with the
+ * latest request", and a new chat told to continue with "Write the handoff
+ * note…" writes another handoff note instead of doing the work.
  *   files         files the agent read or edited, from tool inputs (≤ 60)
  *   commands      shell commands it ran (≤ 15, most recent)
  *   errors        failures it hit (≤ 5, most recent)
@@ -34,7 +43,9 @@
  *   compactions   how often the CLI compacted (early detail is summaries)
  *
  * Every section is `scrubSecrets`'d before it is measured, so the cap holds on
- * the text that is actually returned. Individual sections carry their own caps
+ * the text that is actually returned. Control characters (NUL above all) are
+ * stripped too: the note becomes the new chat's first turn, and turn text
+ * rides on the CLI's argv, where a NUL makes spawn throw. Individual sections carry their own caps
  * too (a 64 KB first message must not evict everything else).
  *
  * The note PREFERS PATHS TO CONTENTS (the rule `handoff.ts` enforces for the
@@ -51,8 +62,10 @@ import { estimateTokensFromChars } from './context-math.js';
 import { gitArgs } from './context-fit.js';
 import { isDirectoryPath } from './path-guard.js';
 import { VerseServiceError } from './preferences.js';
+import { stripUnsafeControlChars } from './project-memory.js';
 import {
   VERSE_HANDOFF_MAX_CHARS,
+  VERSE_HANDOFF_SUMMARY_REQUEST,
   verseSessionRoots,
   type VerseEvent,
   type VerseHandoffPreview,
@@ -142,6 +155,30 @@ function commandFromInput(input: unknown): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Control turns (see the module comment)
+// ---------------------------------------------------------------------------
+
+function normaliseTurnText(text: string): string {
+  return text.replace(/\r\n?/g, '\n').trim();
+}
+
+const SUMMARY_REQUEST = normaliseTurnText(VERSE_HANDOFF_SUMMARY_REQUEST);
+
+/** The canned "summarize first" turn, byte-for-byte (after CRLF/whitespace trim). */
+export function isHandoffSummaryRequest(text: string): boolean {
+  return normaliseTurnText(text) === SUMMARY_REQUEST;
+}
+
+/**
+ * A CLI control command Verse itself sends as a turn. Only `/compact` — the one
+ * verb "Compact now" emits — is recognised: a message merely STARTING with a
+ * slash ("/Users/me/app is broken") is an ordinary ask and must stay one.
+ */
+export function isControlCommandTurn(text: string): boolean {
+  return /^\/compact(?:\s|$)/.test(normaliseTurnText(text));
+}
+
+// ---------------------------------------------------------------------------
 // Text helpers
 // ---------------------------------------------------------------------------
 
@@ -191,8 +228,17 @@ function displayPath(raw: string, primary: string): string {
 // ---------------------------------------------------------------------------
 
 interface Extracted {
+  /** Operator asks only: control turns (summary request, `/compact`) are excluded. */
   userMessages: Array<{ seq: number; text: string }>;
+  /** Every non-empty user message, control turns included — the "N turns" in the header. */
+  turnCount: number;
   lastAssistant: string | null;
+  /**
+   * The last assistant text of the reply to the most recent summary request,
+   * or null when that request is not the latest user message (a later turn
+   * has superseded it) or produced no text.
+   */
+  summaryReply: string | null;
   edited: string[];
   read: string[];
   commands: string[];
@@ -203,7 +249,11 @@ interface Extracted {
 function extract(session: VerseSession, events: readonly VerseEvent[]): Extracted {
   const primary = session.projectPath;
   const userMessages: Extracted['userMessages'] = [];
+  let turnCount = 0;
   let lastAssistant: string | null = null;
+  // True while the most recent user message is the canned summary request.
+  let inSummaryReply = false;
+  let summaryReply: string | null = null;
   // Insertion-ordered sets; a file edited after being read counts as edited.
   const edited = new Map<string, true>();
   const read = new Map<string, true>();
@@ -229,11 +279,22 @@ function extract(session: VerseSession, events: readonly VerseEvent[]): Extracte
     switch (event.type) {
       case 'user-message':
         if (typeof event.text === 'string' && event.text.trim().length > 0) {
-          userMessages.push({ seq: event.seq, text: event.text });
+          turnCount += 1;
+          const summary = isHandoffSummaryRequest(event.text);
+          // A new user turn supersedes any earlier summary: only the reply to
+          // the LATEST message can describe where the session stands now.
+          inSummaryReply = summary;
+          summaryReply = null;
+          if (!summary && !isControlCommandTurn(event.text)) {
+            userMessages.push({ seq: event.seq, text: event.text });
+          }
         }
         break;
       case 'assistant-message':
-        if (typeof event.text === 'string' && event.text.trim().length > 0) lastAssistant = event.text;
+        if (typeof event.text === 'string' && event.text.trim().length > 0) {
+          lastAssistant = event.text;
+          if (inSummaryReply) summaryReply = event.text;
+        }
         break;
       case 'tool-use': {
         toolNames.set(event.toolUseId, event.name);
@@ -291,7 +352,9 @@ function extract(session: VerseSession, events: readonly VerseEvent[]): Extracte
 
   return {
     userMessages,
+    turnCount,
     lastAssistant,
+    summaryReply,
     edited: [...edited.keys()],
     read: [...read.keys()],
     commands: recentCommands,
@@ -397,7 +460,7 @@ export function buildHandoffPreview(
   }
   const gitDiffStat = opts.gitDiffStat ?? defaultGitDiffStat;
   const data = extract(session, events);
-  const turns = data.userMessages.length;
+  const turns = data.turnCount;
   const sections: Section[] = [];
 
   if (focusRaw.length > 0) {
@@ -420,11 +483,16 @@ export function buildHandoffPreview(
     sections.push({ name: 'latest-asks', text: lines.join('\n') });
   }
 
-  if (data.lastAssistant !== null) {
+  // With `includeLastAssistant` the operator asked the seat to summarise
+  // itself: the state section is THAT reply (the last text of the turn that
+  // answered the canned request). With no such reply on record — the request
+  // failed, or a later turn superseded it — it is the last reply, as before.
+  const stateText = opts.includeLastAssistant === true && data.summaryReply !== null ? data.summaryReply : data.lastAssistant;
+  if (stateText !== null) {
     const verbatim = opts.includeLastAssistant === true;
-    const body = verbatim ? capBlock(data.lastAssistant, STATE_VERBATIM_MAX_CHARS) : abridge(data.lastAssistant);
+    const body = verbatim ? capBlock(stateText, STATE_VERBATIM_MAX_CHARS) : abridge(stateText);
     // Say "abridged" only when something was actually left out.
-    const shortened = body !== data.lastAssistant.replace(/\r\n?/g, '\n').trim();
+    const shortened = body !== stateText.replace(/\r\n?/g, '\n').trim();
     const title = verbatim
       ? `## Where it stood (the previous agent's own summary, verbatim${shortened ? ', capped' : ''})`
       : `## Where it stood (the previous agent's last reply${shortened ? ', abridged' : ''})`;
@@ -507,9 +575,10 @@ export function buildHandoffPreview(
   }
 
   // Scrub every part BEFORE measuring, so the cap holds on what is returned.
-  const head = scrubSecrets(header(session, turns, events));
+  const clean = (text: string): string => scrubSecrets(stripUnsafeControlChars(text));
+  const head = clean(header(session, turns, events));
   const foot = FOOTER;
-  const scrubbed = sections.map((s) => ({ name: s.name, text: scrubSecrets(s.text) }));
+  const scrubbed = sections.map((s) => ({ name: s.name, text: clean(s.text) }));
   const separator = '\n\n';
   const total = (parts: readonly Section[]): number =>
     [head, ...parts.map((p) => p.text), foot].join(separator).length;
@@ -532,7 +601,7 @@ export function buildHandoffPreview(
 
   return {
     sourceSessionId: session.id,
-    sourceTitle: scrubSecrets(session.title),
+    sourceTitle: clean(session.title),
     text,
     stats: {
       chars: text.length,

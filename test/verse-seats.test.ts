@@ -29,6 +29,7 @@ import {
   VERSE_NATIVE_MODELS,
   VERSE_REPIN_COMMAND,
 } from '../src/core/verse/seats.js';
+import { DEFAULT_LOCAL_MODEL_TAG } from '../src/core/run/model-catalog.js';
 import { resetModelWindowCaches } from '../src/core/verse/model-windows.js';
 import { discoverProjects } from '../src/core/verse/projects.js';
 
@@ -769,7 +770,7 @@ describe('verse seats — local context windows (V3.9 precedence)', () => {
       accountsRoot: tmpRoot,
       claudeUsage: zeroUsage,
       ollamaBaseUrl: 'http://ollama.test',
-      ollamaServerDefault: { contextLength: 32_768, source: 'server-log-vram' },
+      ollamaServerDefault: { contextLength: 131_072, source: 'server-log-vram' },
       fetchImpl: ollamaFetch({
         'qwen3.8:27b-ctx64k': { parameters: 'num_ctx                        65536', native: 262_144 },
         'bigpin:latest': { parameters: 'num_ctx 300000', native: 262_144 },
@@ -786,19 +787,95 @@ describe('verse seats — local context windows (V3.9 precedence)', () => {
     // Ollama caps a pin above n_ctx_train itself.
     expect(win('bigpin:latest')).toEqual({ window: 262_144, source: 'provider-catalog', notes: undefined });
     // NOT the 262,144 architecture maximum: what Ollama actually allocates.
-    expect(win('qwen3.8:27b-q8_0')).toEqual({ window: 32_768, source: 'provider-catalog', notes: undefined });
-    // A resident instance says exactly what it was given.
-    expect(win('qwen-loaded:7b')).toEqual({ window: 16_384, source: 'runtime', notes: undefined });
+    expect(win('qwen3.8:27b-q8_0')).toEqual({ window: 131_072, source: 'provider-catalog', notes: undefined });
+    // A runner resident at 16k (another client's num_ctx) does NOT define the
+    // window: Verse's turns send no num_ctx, so Ollama gives them its default.
+    expect(win('qwen-loaded:7b')).toEqual({ window: 131_072, source: 'provider-catalog', notes: undefined });
     // …and a default above the trained length is capped by it.
     expect(win('tiny-coder:1b')).toEqual({ window: 8_192, source: 'provider-catalog', notes: undefined });
-    expect(calls.filter((c) => c === 'ps')).toHaveLength(1);
+    // With the server default known (and every native length known), /api/ps
+    // is not even asked.
+    expect(calls).not.toContain('ps');
 
-    // 64k: compacts at 65536 − 20k reserve − 13k buffer. 32k: the reserve and
+    // 64k: compacts at 65536 − 20k reserve − 13k buffer. 8k: the reserve and
     // buffer swallow the window, so there is no honest compaction point.
     const pinned = discovery.seats.find((s) => s.id === 'local:qwen3.8:27b-ctx64k')!;
     expect(pinned.models[0]!.autoCompactAt).toBe(32_536);
-    const q8 = discovery.seats.find((s) => s.id === 'local:qwen3.8:27b-q8_0')!;
-    expect(q8.models[0]!.autoCompactAt).toBeNull();
+    const tiny = discovery.seats.find((s) => s.id === 'local:tiny-coder:1b')!;
+    expect(tiny.models[0]!.autoCompactAt).toBeNull();
+  });
+
+  it('uses /api/ps residency only when no server default is known', async () => {
+    const calls: string[] = [];
+    const discovery = await discoverSeats(makeConfig(), {
+      accountsRoot: tmpRoot,
+      claudeUsage: zeroUsage,
+      ollamaBaseUrl: 'http://ollama.test',
+      ollamaServerDefault: { contextLength: null, source: null },
+      fetchImpl: ollamaFetch({
+        'qwen-loaded:7b': { native: 262_144 },
+        'qwen3.8:27b-q8_0': { native: 262_144 },
+      }, [{ name: 'qwen-loaded:7b', context_length: 98_304 }], calls),
+    });
+    const loaded = discovery.seats.find((s) => s.id === 'local:qwen-loaded:7b')!;
+    expect(loaded.contextWindow).toBe(98_304);
+    expect(loaded.models[0]!.windowSource).toBe('runtime');
+    const idle = discovery.seats.find((s) => s.id === 'local:qwen3.8:27b-q8_0')!;
+    expect(idle.contextWindow).toBe(262_144);
+    expect(idle.models[0]!.windowSource).toBe('fallback');
+    expect(calls.filter((c) => c === 'ps')).toHaveLength(1);
+  });
+
+  it('lists a seat whose window is too small for Claude Code with a reason, after the usable ones', async () => {
+    const discovery = await discoverSeats(makeConfig(), {
+      accountsRoot: tmpRoot,
+      claudeUsage: zeroUsage,
+      ollamaBaseUrl: 'http://ollama.test',
+      ollamaServerDefault: { contextLength: 32_768, source: 'server-log-vram' },
+      fetchImpl: ollamaFetch({
+        // Unpinned: gets the 32k server default — CLAUDE_CODE_MAX_CONTEXT_TOKENS
+        // would make the CLI compact at 0, below its own base prompt.
+        'qwen3.8:27b-q8_0': { native: 262_144 },
+        'qwen3.8:27b-ctx64k': { parameters: 'num_ctx 65536', native: 262_144 },
+        'qwen3.8:27b-ctx56k': { parameters: 'num_ctx 56000', native: 262_144 },
+        'qwen3.8:27b-ctx48k': { parameters: 'num_ctx 49152', native: 262_144 },
+      }),
+    });
+    // Discovery order put q8_0 first; the usable seats now lead.
+    expect(discovery.seats.map((s) => s.id)).toEqual([
+      'local:qwen3.8:27b-ctx64k',
+      'local:qwen3.8:27b-ctx56k',
+      'local:qwen3.8:27b-q8_0',
+      'local:qwen3.8:27b-ctx48k',
+    ]);
+    const option = (id: string) => discovery.seats.find((s) => s.id === id)!.models[0]!;
+    // A usable seat's wire shape is unchanged: no key at all.
+    expect(option('local:qwen3.8:27b-ctx64k')).not.toHaveProperty('unavailableReason');
+    // LOCAL_MIN_USABLE_WINDOW (56,000) itself is usable.
+    expect(option('local:qwen3.8:27b-ctx56k')).not.toHaveProperty('unavailableReason');
+    expect(option('local:qwen3.8:27b-q8_0').unavailableReason).toBe(
+      'Context window 32,768 is too small for Claude Code: it would compact at ≈0k tokens, with no real room above '
+      + 'its ~15k base prompt. Use a tag with a window of at least 56,000 tokens.',
+    );
+    expect(option('local:qwen3.8:27b-ctx48k').unavailableReason).toMatch(/49,152 is too small .* compact at ≈16k tokens/);
+    // Still listed with its true window (the operator sees what it is).
+    expect(discovery.seats.find((s) => s.id === 'local:qwen3.8:27b-q8_0')!.contextWindow).toBe(32_768);
+  });
+
+  it('a too-small preferred tag never becomes the default ahead of a usable one', async () => {
+    const discovery = await discoverSeats(makeConfig(), {
+      accountsRoot: tmpRoot,
+      claudeUsage: zeroUsage,
+      ollamaBaseUrl: 'http://ollama.test',
+      ollamaServerDefault: { contextLength: 32_768, source: 'server-log-vram' },
+      fetchImpl: ollamaFetch({
+        'other-coder:7b': { parameters: 'num_ctx 65536', native: 131_072 },
+        [DEFAULT_LOCAL_MODEL_TAG]: { parameters: 'num_ctx 32768', native: 262_144 },
+      }),
+    });
+    expect(discovery.seats[0]!.id).toBe('local:other-coder:7b');
+    expect(discovery.seats[1]!.id).toBe(`local:${DEFAULT_LOCAL_MODEL_TAG}`);
+    expect(discovery.seats[1]!.models[0]!.unavailableReason).toMatch(/too small for Claude Code/);
   });
 
   it('skips /api/ps entirely when every tag pins num_ctx', async () => {

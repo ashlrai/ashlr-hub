@@ -237,19 +237,37 @@ describe('editing', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
   });
 
-  it('refuses a file under the memory cap whose REQUEST would exceed the body cap once escaped', async () => {
+  it('lets a near-full file with ordinary line breaks be saved: /memory has the server’s larger body cap', async () => {
     const user = userEvent.setup();
     server({ memory: memoryRecord({ content: '' }) });
     render(<MemoryPanel projectPath={PROJECT} />);
     await user.click(await screen.findByRole('button', { name: 'Write it' }));
     const editor = screen.getByLabelText('Edit MEMORY.md') as HTMLTextAreaElement;
-    // 50 KB of text, but every line break travels as two bytes: ~75 KB on the wire.
+    // 64,000 bytes of text — under the 64 KiB content cap — that travels as
+    // ~96 KB once each line break is escaped. The old 64 KB guard blocked it;
+    // the server (VERSE_MEMORY_BODY_MAX_BYTES, 136 KB) accepts it.
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
-      setter.call(editor, 'a\n'.repeat(25_000));
+      setter.call(editor, 'a\n'.repeat(32_000));
       editor.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    expect(screen.getByText(/once line breaks and quotes are encoded for sending, over the 64 KB request limit/)).toBeInTheDocument();
+    expect(screen.queryByText(/request limit/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+  });
+
+  it('refuses a file under the memory cap whose REQUEST would exceed the /memory body cap once escaped', async () => {
+    const user = userEvent.setup();
+    server({ memory: memoryRecord({ content: '' }) });
+    render(<MemoryPanel projectPath={PROJECT} />);
+    await user.click(await screen.findByRole('button', { name: 'Write it' }));
+    const editor = screen.getByLabelText('Edit MEMORY.md') as HTMLTextAreaElement;
+    // 30 KB of control characters, each escaped to six bytes (\u0001): ~176 KB on the wire.
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+      setter.call(editor, '\u0001'.repeat(30_000));
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(screen.getByText(/once line breaks and quotes are encoded for sending, over the 136 KB request limit/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
   });
 
@@ -324,6 +342,9 @@ describe('on and off', () => {
     render(<MemoryPanel projectPath={PROJECT} />);
     await screen.findByLabelText('MEMORY.md for hub');
     await user.click(screen.getByText('How project memory works'));
+    // Memory is not free on a paid seat, and the explainer does not claim it is.
+    expect(screen.getByText(/each new chat’s system prompt carries a memory block of up to 6 KB/)).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing here spends usage/)).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Turn it off for every project' }));
     await waitFor(() => expect(srv.posts()[0]!.body).toEqual({ memoryEnabled: false }));
   });

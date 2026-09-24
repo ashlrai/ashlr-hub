@@ -40,6 +40,7 @@ import {
   VERSE_MAX_EVENTS_PER_SESSION,
   type VerseEvent,
   type VerseSession,
+  type VerseWindowSource,
 } from './types.js';
 
 /**
@@ -60,6 +61,15 @@ const VERSE_ENGINES = new Set(['claude', 'codex', 'grok', 'local']);
 const VERSE_CONTEXT_MODE_SET = new Set<string>(VERSE_CONTEXT_MODES);
 /** Mirrors `VerseWindowSource` in types.ts — the store is the gate that keeps a hand-edited record honest. */
 const VERSE_WINDOW_SOURCES = new Set(['runtime', 'provider-catalog', 'cli-catalog', 'documented', 'fallback']);
+
+/**
+ * The one list of window sources a record may carry. Exported so a writer can
+ * refuse an unknown source BEFORE saving it: a record with one fails `isSession`
+ * on the next read and would silently vanish from the store.
+ */
+export function isVerseWindowSource(value: unknown): value is VerseWindowSource {
+  return typeof value === 'string' && VERSE_WINDOW_SOURCES.has(value);
+}
 const VERSE_COMPACTION_TRIGGERS = new Set(['auto', 'manual']);
 
 export function isValidSessionId(id: string): boolean {

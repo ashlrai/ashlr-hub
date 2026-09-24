@@ -33,7 +33,9 @@
  * server refuses it (409 VERSE_MEMORY_REDACTED), and the editor says so first
  * and keeps Save off while any placeholder remains.
  *
- * Nothing here spends: memory is a file on this machine.
+ * The panel itself spends nothing (memory is a file on this machine), but
+ * USING memory does on paid seats — the block rides in every new chat's
+ * system prompt — and the panel says so (MEMORY_SPEND_NOTE).
  */
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { VERSE_MEMORY_MAX_BYTES } from '../../../../core/verse/types.js';
@@ -43,7 +45,17 @@ import { Switch } from '../../../components/primitives/Switch.js';
 import { ApiError } from '../../../data/client.js';
 import { useQuery, useRefresh } from '../../../data/hooks.js';
 import { projectName } from '../verse-model.js';
-import { API_BODY_MAX_BYTES, formatBytes, jsonBodyBytes, REDACTION_MARKER, redactionMarkers, relativePhrase, secretLike, utf8Bytes } from './context-model.js';
+import {
+  formatBytes,
+  jsonBodyBytes,
+  MEMORY_BODY_MAX_BYTES,
+  MEMORY_SPEND_NOTE,
+  REDACTION_MARKER,
+  redactionMarkers,
+  relativePhrase,
+  secretLike,
+  utf8Bytes,
+} from './context-model.js';
 import {
   fetchProjectMemory,
   updatePreferences,
@@ -141,9 +153,13 @@ function MemoryPanelBody({ projectPath, refreshKey }: { projectPath: string; ref
   const draftBytes = useMemo(() => utf8Bytes(draft), [draft]);
   const overCap = draftBytes > VERSE_MEMORY_MAX_BYTES;
   // Under the memory cap is not enough: the request that carries it must fit
-  // the API's body cap once JSON-escaped (see API_BODY_MAX_BYTES).
+  // POST /memory's body cap once JSON-escaped. That route's cap is sized for
+  // a full 64 KB file (MEMORY_BODY_MAX_BYTES, the server's own figure) — the
+  // 64 KB default every other POST uses would block saves the server accepts.
+  // In practice this only trips on text that escapes to more than 2 bytes a
+  // character (control characters), which the server would refuse too.
   const requestBytes = useMemo(() => jsonBodyBytes({ projectPath, content: draft }), [projectPath, draft]);
-  const overBody = !overCap && requestBytes > API_BODY_MAX_BYTES;
+  const overBody = !overCap && requestBytes > MEMORY_BODY_MAX_BYTES;
   const secret = mode === 'edit' ? secretLike(draft) : null;
   // Only a sanitized base makes a placeholder dangerous: in an unsanitized
   // file a literal "[REDACTED]" is just text the file already had.
@@ -287,7 +303,7 @@ function MemoryPanelBody({ projectPath, refreshKey }: { projectPath: string; ref
               <p id={counterId} className={`${styles.hint} ${styles.counter} ${overCap || overBody ? styles.counterOver : ''}`}>
                 {formatBytes(draftBytes)} of {formatBytes(VERSE_MEMORY_MAX_BYTES)}
                 {overCap ? ' — over the limit; trim it to save.' : ''}
-                {overBody ? ` — ${formatBytes(requestBytes)} once line breaks and quotes are encoded for sending, over the ${formatBytes(API_BODY_MAX_BYTES)} request limit; trim it to save.` : ''}
+                {overBody ? ` — ${formatBytes(requestBytes)} once line breaks and quotes are encoded for sending, over the ${formatBytes(MEMORY_BODY_MAX_BYTES)} request limit; trim it to save.` : ''}
               </p>
               {secret ? (
                 <p className={styles.warn} role="alert">
@@ -397,8 +413,9 @@ function MemoryPanelBody({ projectPath, refreshKey }: { projectPath: string; ref
               </p>
               <p className={styles.hint}>
                 It lives on this machine under <code>~/.ashlr/verse/memory</code>, readable only by you. It is sent to every
-                seat’s model, so never put secrets in it. Nothing here spends usage.
+                seat’s model, so never put secrets in it.
               </p>
+              <p className={styles.hint}>{MEMORY_SPEND_NOTE}</p>
               {globalOff ? null : (
                 <p className={styles.hint}>
                   Memory is on for every project unless switched off per project.{' '}

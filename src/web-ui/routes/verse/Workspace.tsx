@@ -15,8 +15,9 @@
  *     project path can shove the actions off the end.
  *  2. WHAT IS IT RUNNING ON — the seat pill, which is now seat · model ONLY.
  *     The project moved up into the lockup rather than being said twice.
- *  3. WHAT CAN I DO — stream state, context numbers, the context-mode chip
- *     (only for a model with a real expansive budget) and the destructive
+ *  3. WHAT CAN I DO — stream state, context numbers, the context chip
+ *     (Standard/Expansive for a model with a real expansive budget; a
+ *     "Context" menu with Compact now on other claude/local chats) and the destructive
  *     action, then a hairline, then the two pane toggles as a matched pair.
  *
  * UNDER THE STRIP (V3.9), never in it — the strip is one fixed-height row —
@@ -27,8 +28,12 @@
  * operator's Send is the first spend.
  *
  * "Compact now…" (claude and local engines only — see canCompactNow) opens a
- * confirm panel in the same place, reached from the mode menu and from the
- * handoff note. It sends `/compact [focus]` through `onSend`, the composer's
+ * confirm panel in the same place, reached from the context chip's menu and
+ * from the handoff note. The chip exists for EVERY claude/local chat — it is
+ * the Standard/Expansive control where the model has both, and a "Context"
+ * menu holding only "Compact now…" where it has one budget — so a manual
+ * compaction is on demand everywhere it is possible, not only once the
+ * handoff banner appears (and not gone again after "Not now"). It sends `/compact [focus]` through `onSend`, the composer's
  * own path, so it is an ordinary turn in every respect that matters: token
  * gate, running state, transcript entry, local-only chokepoint.
  *
@@ -64,7 +69,7 @@ import { CapacityChip } from './SeatCapacity.js';
 import { seatSubscription, seatSubscriptionSentence, worthFlagging } from './seat-subscription.js';
 import { projectName, seatById, seatPillLabel, sessionContextBudget } from './verse-model.js';
 import { invalidateVerseLists } from './verse-queries.js';
-import { setVerseSession } from './verse-store.js';
+import { lastTurnActivityAt, setVerseSession } from './verse-store.js';
 import { rememberVerseSeat } from './verse-ui-store.js';
 import { useSeatsRefresh } from './useSeatsRefresh.js';
 import type { VerseSessionView } from './useVerseSession.js';
@@ -261,6 +266,10 @@ export function Workspace(props: WorkspaceProps) {
   const modeDisabledReason = disabledReason ?? (running ? 'Available when the current turn finishes — the mode cannot change mid-turn.' : null);
   const compactable = session !== null && canCompactNow(session.engine);
   const openCompact = compactable ? () => { setHandoffCreated(null); setCompactOpen(true); } : undefined;
+  const compactUnavailableReason = session !== null && session.turnCount === 0 ? 'nothing to compact yet — this chat has no turns' : null;
+  // Idle-cache advice is timed from the last PROVIDER round trip in the log,
+  // never from `updatedAt`, which a rename or mode switch also moves.
+  const lastTurnAt = lastTurnActivityAt(view.events);
 
   return (
     <section className={styles.workspace} aria-labelledby={headingId}>
@@ -318,9 +327,11 @@ export function Workspace(props: WorkspaceProps) {
               exact={budget.exact} source={budget.source} mode={modesAvailable ? mode : null} engine={session.engine}
               compactionCount={session.compactionCount ?? 0} />
           ) : null}
-          {session && budget && modesAvailable ? (
+          {session && budget && (modesAvailable || compactable) ? (
             <ContextModeControl mode={mode} option={budget.option} busy={modeState.busy} error={modeState.error}
               disabled={!dispatchEnabled || running} disabledReason={modeDisabledReason}
+              modesAvailable={modesAvailable} engine={session.engine} budget={budget}
+              compactUnavailableReason={compactUnavailableReason}
               onChange={(next) => { void changeMode(next); }} onCompact={openCompact} />
           ) : null}
 
@@ -356,7 +367,7 @@ export function Workspace(props: WorkspaceProps) {
       {session && budget ? (
         <ContextAdvice session={session} budget={budget} modesAvailable={modesAvailable} dispatchEnabled={dispatchEnabled}
           modeBusy={modeState.busy} onHandoff={() => { setHandoffCreated(null); setHandoffOpen(true); }}
-          onSwitchExpansive={() => { void changeMode('expansive'); }} onCompact={openCompact} />
+          onSwitchExpansive={() => { void changeMode('expansive'); }} onCompact={openCompact} lastTurnAt={lastTurnAt} />
       ) : null}
       {session && budget && compactable && compactOpen ? (
         <div className={styles.advice}>

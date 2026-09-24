@@ -75,8 +75,47 @@ export const GROK_AUTO_COMPACT_PERCENT = 80;
  */
 export const CACHE_IDLE_TTL_MS = 60 * 60 * 1000;
 
-/** Fixed prompt overhead (system prompt + tools) a fresh coding session starts with. */
-export const SESSION_BASE_OVERHEAD_TOKENS = 30_000;
+/**
+ * Fixed prompt overhead (system prompt + tool definitions) a FRESH session
+ * already occupies before any work, per engine.
+ *
+ *  local  15k — measured: two real turns through Claude Code 2.1.280 against
+ *               Ollama with `--exclude-dynamic-system-prompt-sections`
+ *               reported 14,695 and 14,942 context tokens for a one-word reply.
+ *  claude 25k — the same CLI without that flag measured 17.8k–23.3k on local
+ *               seats; rounded up. An ESTIMATE, never shown as a measurement.
+ *  codex  15k / grok 20k — estimates; neither CLI reports its base prompt.
+ *
+ * Only used by the fit verdicts, which are labelled as estimates in the UI.
+ */
+export const SESSION_BASE_OVERHEAD_BY_ENGINE: Readonly<Record<VerseEngine, number>> = {
+  claude: 25_000,
+  codex: 15_000,
+  grok: 20_000,
+  local: 15_000,
+};
+
+/** Fallback overhead when the engine is unknown (the largest estimate). */
+export const SESSION_BASE_OVERHEAD_TOKENS = 25_000;
+
+export function sessionOverheadTokens(engine: VerseEngine | null | undefined): number {
+  return engine ? SESSION_BASE_OVERHEAD_BY_ENGINE[engine] ?? SESSION_BASE_OVERHEAD_TOKENS : SESSION_BASE_OVERHEAD_TOKENS;
+}
+
+/**
+ * Smallest local window worth offering as a seat. Local turns run Claude Code
+ * with `CLAUDE_CODE_MAX_CONTEXT_TOKENS=<window>`, which compacts at
+ * `window − 20k − 13k`; below this the compaction point leaves under 8k of
+ * working room above the ~15k base prompt, so every turn would compact.
+ */
+export const LOCAL_MIN_WORKING_TOKENS = 8_000;
+export const LOCAL_MIN_USABLE_WINDOW =
+  SESSION_BASE_OVERHEAD_BY_ENGINE.local + LOCAL_MIN_WORKING_TOKENS + CLAUDE_OUTPUT_RESERVE_CAP + CLAUDE_COMPACT_BUFFER;
+
+/** True when a local window leaves real working room under Claude Code's compaction rule. */
+export function localWindowUsable(window: number | null | undefined): boolean {
+  return typeof window === 'number' && Number.isFinite(window) && window >= LOCAL_MIN_USABLE_WINDOW;
+}
 
 /** chars → tokens estimator used everywhere a count is estimated rather than measured. */
 export const CHARS_PER_TOKEN = 4;
@@ -242,8 +281,14 @@ export function occupancy(usage: Pick<VerseUsage, 'contextTokens' | 'contextWind
   const ofWindow = window !== null ? tokens / window : null;
   const ofCompaction = compactAt !== null ? tokens / compactAt : null;
   const gauge = ofCompaction ?? ofWindow;
+  const exact = usage.contextTokensExact !== false;
   let tone: VerseOccupancyTone = 'unknown';
-  if (window !== null && tokens > window) tone = 'over';
+  if (!exact && gauge !== null && gauge >= 1) {
+    // An UPPER BOUND past the compaction point says nothing about the real
+    // prompt: codex's turn total sums every model call (median 29× the last
+    // one). Claiming "over the window" from it would be invented precision.
+    tone = 'unknown';
+  } else if (window !== null && tokens > window) tone = 'over';
   else if (gauge !== null) tone = gauge >= OCCUPANCY_DANGER ? 'danger' : gauge >= OCCUPANCY_WARN ? 'warn' : 'ok';
   return {
     tokens,
@@ -253,7 +298,7 @@ export function occupancy(usage: Pick<VerseUsage, 'contextTokens' | 'contextWind
     ofCompaction,
     untilCompaction: compactAt !== null ? Math.max(0, compactAt - tokens) : null,
     tone,
-    exact: usage.contextTokensExact !== false,
+    exact,
   };
 }
 
@@ -288,7 +333,8 @@ export function estimateTokensFromChars(chars: number): number {
  *  expansive — only the expansive budget holds it
  *  split     — no single context holds it; fan the work out instead
  *
- * Null when the model's budget is unknown (never guessed).
+ * Null when the model's budget is unknown (never guessed). Pass the engine's
+ * `sessionOverheadTokens(engine)`; the default is the largest estimate.
  */
 export function fitVerdict(
   workingSetTokens: number,
@@ -339,10 +385,13 @@ export function handoffAdvice(input: {
   const reasons: string[] = [];
   let level: VerseAdviceLevel = 'none';
   const bump = (to: VerseAdviceLevel): void => {
+    // (level only ever rises)
     if (to === 'urge' || (to === 'suggest' && level === 'none')) level = to;
   };
 
-  if (occ.tone === 'over') {
+  if (!occ.exact) {
+    // An upper bound cannot justify "you are near compaction"; wait for a reading.
+  } else if (occ.tone === 'over') {
     bump('urge');
     reasons.push(`Context (${compactTokens(occ.tokens)}) is past the ${compactTokens(occ.window ?? 0)} window.`);
   } else if (occ.ofCompaction !== null && occ.ofCompaction >= OCCUPANCY_WARN) {
@@ -358,7 +407,7 @@ export function handoffAdvice(input: {
 
   if (input.lastActivityAt) {
     const idle = input.now - Date.parse(input.lastActivityAt);
-    if (Number.isFinite(idle) && idle >= CACHE_IDLE_TTL_MS && occ.tokens >= HANDOFF_IDLE_MIN_TOKENS) {
+    if (occ.exact && Number.isFinite(idle) && idle >= CACHE_IDLE_TTL_MS && occ.tokens >= HANDOFF_IDLE_MIN_TOKENS) {
       bump('suggest');
       reasons.push(`Idle over an hour: the prompt cache has likely expired, so the next turn re-reads ~${compactTokens(occ.tokens)} tokens at full cost.`);
     }

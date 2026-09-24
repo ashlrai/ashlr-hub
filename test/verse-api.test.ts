@@ -26,6 +26,7 @@ import type {
   VerseContextMode,
   VerseCreateSessionRequest,
   VerseEvent,
+  VerseModelOption,
   VerseSession,
   VerseUsage,
 } from '../src/core/verse/types.js';
@@ -109,6 +110,12 @@ class FakeEngine implements VerseEngineHandle {
     if (session.status === 'running') throw new FakeVerseError('VERSE_SESSION_BUSY', 409, 'a turn is running');
     session.contextMode = mode;
     session.updatedAt = new Date().toISOString();
+    return session;
+  }
+  refreshLocalWindow(id: string, option: VerseModelOption): VerseSession {
+    const session = this.must(id);
+    if (session.engine !== 'local') return session;
+    session.usage.contextWindow = option.contextWindow;
     return session;
   }
   sendTurn(id: string, text: string): { turnId: string; session: VerseSession } {
@@ -491,7 +498,9 @@ describe('sessions lifecycle', () => {
     // by default, so the engine is handed a PRIVATE snapshot — writable on a
     // Claude seat — under the relocated ~/.ashlr/verse/memory.
     expect(engine.createRequests[0]).not.toHaveProperty('handoffFromSessionId');
-    expect(engine.createRequests[0]).not.toHaveProperty('contextMode');
+    // The mode is always stated (`standard` here): an ABSENT mode is reserved
+    // for pre-3.9 records, which the engine treats as legacy.
+    expect(engine.createRequests[0]?.contextMode).toBe('standard');
     const memory = engine.createOptions[0]?.memory;
     expect(memory?.writable).toBe(true);
     expect(memory?.dir.startsWith(path.join(tmpHome, '.ashlr', 'verse', 'memory') + path.sep)).toBe(true);

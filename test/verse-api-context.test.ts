@@ -119,6 +119,14 @@ const PINNED_OUT: VerseModelOption = {
   minCliVersion: '2.1.280',
   unavailableReason: 'needs Claude Code 2.1.280; this seat runs 2.1.257',
 };
+/** A local tag as discovery lists it (window re-read from Ollama on every discovery). */
+const LOCAL_64K: VerseModelOption = {
+  id: 'qwen3.8:27b-ctx64k',
+  label: 'Qwen3.8 27b-ctx64k',
+  contextWindow: 65_536,
+  autoCompactAt: claudeAutoCompactAt(65_536, null, null),
+  windowSource: 'provider-catalog',
+};
 const GROK_MODEL: VerseModelOption = {
   id: 'grok-4.7',
   label: 'Grok 4.7',
@@ -142,12 +150,14 @@ function seat(id: string, engine: VerseSeat['engine'], models: VerseModelOption[
 function buildDiscovery(): VerseSeatDiscovery {
   const claude = seat('claude-test', 'claude', [BIG, SMALL, PINNED_OUT]);
   const grok = seat('grok-test', 'grok', [GROK_MODEL]);
+  const local = seat(`local:${LOCAL_64K.id}`, 'local', [LOCAL_64K]);
   const launches = new Map<string, VerseSeatLaunch>([
     [claude.id, { seat: claude, launcher: LAUNCHER, ollamaBaseUrl: 'http://127.0.0.1:1' }],
     [grok.id, { seat: grok, launcher: GROK_LAUNCHER, ollamaBaseUrl: 'http://127.0.0.1:1' }],
+    [local.id, { seat: local, launcher: null, ollamaBaseUrl: 'http://127.0.0.1:1' }],
   ]);
   return {
-    seats: [claude, grok],
+    seats: [claude, grok, local],
     launches,
     localRuntime: { ollama: { reachable: false, baseUrl: 'http://127.0.0.1:1', models: [] } },
   };
@@ -180,6 +190,9 @@ class FakeEngine implements VerseEngineHandle {
   readonly createRequests: VerseCreateSessionRequest[] = [];
   readonly createOptions: Array<VerseCreateOptions | undefined> = [];
   readonly modeCalls: Array<{ id: string; mode: VerseContextMode }> = [];
+  readonly refreshCalls: Array<{ id: string; option: VerseModelOption }> = [];
+  /** `refresh:<id>` / `turn:<id>`, in call order — the refresh must precede the launch. */
+  readonly callOrder: string[] = [];
   private counter = 0;
   /** Monotonic clock so `updatedAt` orders sessions deterministically. */
   private tick = Date.parse('2026-09-20T12:00:00.000Z');
@@ -243,7 +256,19 @@ class FakeEngine implements VerseEngineHandle {
     session.updatedAt = this.stamp();
     return session;
   }
+  refreshLocalWindow(id: string, option: VerseModelOption): VerseSession {
+    this.refreshCalls.push({ id, option });
+    this.callOrder.push(`refresh:${id}`);
+    const session = this.must(id);
+    if (session.engine !== 'local') return session;
+    if (session.status === 'running') throw new FakeVerseError('VERSE_SESSION_BUSY', 'turn already running');
+    session.usage.contextWindow = option.contextWindow;
+    session.usage.autoCompactAt = option.autoCompactAt;
+    session.usage.contextWindowSource = option.windowSource ?? 'fallback';
+    return session;
+  }
   sendTurn(id: string, text: string): { turnId: string; session: VerseSession } {
+    this.callOrder.push(`turn:${id}`);
     const session = this.must(id);
     if (session.status === 'running') throw new FakeVerseError('VERSE_SESSION_BUSY', 'turn already running');
     const turnId = `t${++this.counter}`;
@@ -437,9 +462,9 @@ describe('POST /api/verse/sessions — context mode', () => {
     await create(port, mutate, { model: 'claude-big' });
     expect(engine.createRequests[0]?.contextMode).toBe('expansive');
 
-    // A default is not a demand: a 200k model simply runs standard.
+    // A default is not a demand: a 200k model simply runs standard — and says so.
     await create(port, mutate, { model: 'claude-small' });
-    expect(engine.createRequests[1]).not.toHaveProperty('contextMode');
+    expect(engine.createRequests[1]?.contextMode).toBe('standard');
 
     // An explicit choice beats the preference.
     await create(port, mutate, { model: 'claude-big', contextMode: 'standard' });
@@ -448,14 +473,17 @@ describe('POST /api/verse/sessions — context mode', () => {
     // Another seat's preference does not leak.
     const grok = await post(port, mutate, '/api/verse/sessions', { projectPath: repo, seatId: 'grok-test' });
     expect(grok.status).toBe(201);
-    expect(engine.createRequests[3]).not.toHaveProperty('contextMode');
+    expect(engine.createRequests[3]?.contextMode).toBe('standard');
   });
 
-  it('with no preference, a new session carries no mode at all (the record keeps its pre-3.9 shape)', async () => {
+  it('with no preference, a new session records `standard` explicitly (absent is reserved for pre-3.9 records)', async () => {
+    // An absent contextMode is how the engine recognises a legacy Claude
+    // session that ran at the CLI's native window; a 3.9 session must never
+    // look like one.
     const { port, mutate } = await boot();
     const session = await create(port, mutate, { model: 'claude-big' });
-    expect(engine.createRequests[0]).not.toHaveProperty('contextMode');
-    expect(session).not.toHaveProperty('contextMode');
+    expect(engine.createRequests[0]?.contextMode).toBe('standard');
+    expect(session.contextMode).toBe('standard');
   });
 });
 
@@ -560,7 +588,7 @@ describe('POST /api/verse/sessions/:id/turns — model availability at turn time
 
     rediscover((d) => {
       d.seats = d.seats.filter((x) => x.id !== 'claude-test');
-      d.launches.delete('claude-test');
+      (d.launches as Map<string, VerseSeatLaunch>).delete('claude-test');
     });
     const gone = await post(port, mutate, turnUrl(b.id), { text: 'hi' });
     expect(gone.status, gone.body).toBe(202);
@@ -570,6 +598,76 @@ describe('POST /api/verse/sessions/:id/turns — model availability at turn time
     expect(unlisted.status, unlisted.body).toBe(202);
 
     expect([a, b, c].map((x) => engine.getSession(x.id)?.turnCount)).toEqual([1, 1, 1]);
+  });
+
+  it('a local session\'s stored window is refreshed from the live option BEFORE the turn launches', async () => {
+    const { port, mutate } = await boot();
+    const session = await create(port, mutate, { seatId: `local:${LOCAL_64K.id}` });
+    // A stale record (the pre-3.9 262,144 for a -ctx64k tag).
+    engine.sessions.get(session.id)!.usage.contextWindow = 262_144;
+    const res = await post(port, mutate, turnUrl(session.id), { text: 'hi' });
+    expect(res.status, res.body).toBe(202);
+    expect(engine.refreshCalls).toEqual([{ id: session.id, option: LOCAL_64K }]);
+    expect(engine.callOrder).toEqual([`refresh:${session.id}`, `turn:${session.id}`]);
+    expect(engine.getSession(session.id)?.usage.contextWindow).toBe(65_536);
+  });
+
+  it('refreshes only local sessions, and only with a live option', async () => {
+    const { port, mutate } = await boot();
+    const claude = await create(port, mutate, { model: 'claude-big' });
+    expect((await post(port, mutate, turnUrl(claude.id), { text: 'hi' })).status).toBe(202);
+    expect(engine.refreshCalls).toEqual([]);
+
+    // Ollama down / tag gone: the stored window stands and the turn still starts.
+    const local = await create(port, mutate, { seatId: `local:${LOCAL_64K.id}` });
+    engine.sessions.get(local.id)!.usage.contextWindow = 65_536;
+    seatState.discovery = new Error('ollama exploded');
+    invalidateVerseSeatCache();
+    expect((await post(port, mutate, turnUrl(local.id), { text: 'hi' })).status).toBe(202);
+    expect(engine.refreshCalls).toEqual([]);
+    expect(engine.getSession(local.id)?.usage.contextWindow).toBe(65_536);
+  });
+
+  it('a local seat whose live window is too small answers 409 VERSE_MODEL_UNAVAILABLE without refreshing', async () => {
+    const { port, mutate } = await boot();
+    const session = await create(port, mutate, { seatId: `local:${LOCAL_64K.id}` });
+    const reason = 'Context window 32,768 is too small for Claude Code';
+    rediscover((d) => {
+      d.seats[2]!.models = [{ ...LOCAL_64K, contextWindow: 32_768, autoCompactAt: null, unavailableReason: reason }];
+    });
+    const res = await post(port, mutate, turnUrl(session.id), { text: 'hi' });
+    expect(res.status, res.body).toBe(409);
+    expect(res.json).toEqual({
+      code: 'VERSE_MODEL_UNAVAILABLE',
+      error: `model ${LOCAL_64K.id} cannot run on seat local:${LOCAL_64K.id}: ${reason}`,
+    });
+    expect(engine.callOrder).toEqual([]);
+  });
+
+  it('the model-unavailable 409 carries a code distinct from a busy session\'s', async () => {
+    const { port, mutate } = await boot();
+    const session = await create(port, mutate, { model: 'claude-big' });
+    expect((await post(port, mutate, turnUrl(session.id), { text: 'one' })).status).toBe(202);
+    const busy = await post(port, mutate, turnUrl(session.id), { text: 'two' });
+    expect(busy.status).toBe(409);
+    expect((busy.json as { code?: string }).code).toBe('VERSE_SESSION_BUSY');
+
+    engine.sessions.get(session.id)!.status = 'idle';
+    engine.sessions.get(session.id)!.model = 'claude-opus-5-5';
+    const unavailable = await post(port, mutate, turnUrl(session.id), { text: 'three' });
+    expect(unavailable.status).toBe(409);
+    expect((unavailable.json as { code?: string }).code).toBe('VERSE_MODEL_UNAVAILABLE');
+  });
+
+  it('refuses turn text containing NUL (it rides on argv) before anything is recorded', async () => {
+    const { port, mutate } = await boot();
+    const session = await create(port, mutate, { model: 'claude-big' });
+    const res = await post(port, mutate, turnUrl(session.id), { text: 'fact one\u0000fact two' });
+    expect(res.status, res.body).toBe(400);
+    expect((res.json as { code?: string }).code).toBe('VERSE_INVALID');
+    expect(errorOf(res)).toBe('text must not contain NUL bytes');
+    expect(engine.callOrder).toEqual([]);
+    expect(engine.getEvents(session.id)).toHaveLength(0);
   });
 
   it('a runnable model starts the turn; an unknown session is still the engine\'s 404', async () => {

@@ -12,11 +12,11 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { VerseSession } from '../../data/api-types.js';
+import type { VerseEvent, VerseSession } from '../../data/api-types.js';
 import { clearMutationToken, setMutationToken } from '../../data/auth-store.js';
 import { evictAll } from '../../data/cache.js';
 import { loadDraft } from './chat/composer-state.js';
-import { bootstrap, CLAUDE_1M_SEAT, CLAUDE_SEAT, CODEX_EXPANSIVE_SEAT, GROK_SEAT, LOCAL_SEAT, session, verseFetch } from './fixtures.test-support.js';
+import { bootstrap, CLAUDE_1M_SEAT, CLAUDE_SEAT, CODEX_EXPANSIVE_SEAT, ev, GROK_SEAT, LOCAL_SEAT, session, verseFetch } from './fixtures.test-support.js';
 import type { VerseSessionView } from './useVerseSession.js';
 import { getVerseSessionState, resetVerseStore, seedVerseSession } from './verse-store.js';
 import { lastVerseSeat, resetVerseUi } from './verse-ui-store.js';
@@ -45,11 +45,11 @@ vi.mock('./context/HandoffDialog.js', () => ({
 const TOKEN = 'c'.repeat(64);
 const SEATS = [CLAUDE_1M_SEAT, CLAUDE_SEAT, GROK_SEAT];
 
-function viewFor(s: VerseSession | null): VerseSessionView {
+function viewFor(s: VerseSession | null, events: VerseEvent[] = []): VerseSessionView {
   return {
     sessionId: s?.id ?? '',
     session: s,
-    events: [],
+    events,
     lastSeq: 0,
     loaded: true,
     loadError: null,
@@ -125,11 +125,29 @@ describe('Workspace — meter and mode chip', () => {
   it('offers no mode chip where no expansive budget exists (200k Claude, Grok)', () => {
     const { unmount } = render(<Workspace {...props({ view: viewFor(session()) })} />);
     expect(screen.queryByRole('button', { name: /Context mode/ })).toBeNull();
+    // …but a 200k Claude chat still gets the one-budget "Context" menu (Compact now).
+    expect(screen.getByRole('button', { name: 'Context actions' })).toBeInTheDocument();
     unmount();
     const grok = session({ id: 'vs_g', engine: 'grok', seatId: 'grok-a', model: 'build-fast', usage: { ...session().usage, contextWindow: 500_000 } });
     render(<Workspace {...props({ view: viewFor(grok) })} />);
     expect(screen.queryByRole('button', { name: /Context mode/ })).toBeNull();
+    // Grok can neither switch modes nor compact on request: no chip at all.
+    expect(screen.queryByRole('button', { name: 'Context actions' })).toBeNull();
     expect(screen.getByRole('meter')).toHaveTextContent('compacts ≈400k');
+  });
+
+  it('draws a local chat against the window the CLI was told, not the seat\'s current option', () => {
+    // Stored at creation on the Ollama lane; LOCAL_SEAT now lists the tag at 65,536.
+    const local = session({
+      id: 'vs_local', engine: 'local', seatId: LOCAL_SEAT.id, accountId: 'local', model: LOCAL_SEAT.models[0]!.id, updatedAt: new Date().toISOString(),
+      usage: { ...session().usage, contextTokens: 120_000, contextWindow: 262_144, contextWindowSource: 'provider-catalog', autoCompactAt: 229_144 },
+    });
+    render(<Workspace {...props({ view: viewFor(local), seats: [...SEATS, LOCAL_SEAT] })} />);
+    const meter = screen.getByRole('meter');
+    expect(meter).toHaveTextContent('120k / 262k');
+    expect(meter).not.toHaveAttribute('data-tone', 'over');
+    expect(meter.getAttribute('title')).toContain('Verse passes this window to Claude Code');
+    expect(screen.queryByRole('region', { name: 'Context advice' })).toBeNull();
   });
 
   it('switches mode through the API on a click and moves the meter with the answer', async () => {
@@ -196,6 +214,8 @@ describe('Workspace — compact now', () => {
     await user.click(screen.getByRole('menuitem', { name: /Compact now/ }));
 
     const panel = screen.getByRole('region', { name: 'Compact this chat' });
+    // Keyboard focus moved INTO the panel, not to <body> with the unmounted item.
+    expect(within(panel).getByLabelText('Keep in focus (optional)')).toHaveFocus();
     // Under the strip, like the advice — never in the fixed-height header.
     expect(panel.closest('header')).toBeNull();
     expect(panel).toHaveTextContent('Spends usage on this seat');
@@ -208,6 +228,42 @@ describe('Workspace — compact now', () => {
     expect(fetchState.calls.some((c) => c.path.endsWith('/context-mode'))).toBe(false);
   });
 
+  it('hands focus back to the chip when the panel is cancelled', async () => {
+    const user = userEvent.setup();
+    render(<Workspace {...props({ view: viewFor(nearSession()) })} />);
+    await user.click(screen.getByRole('button', { name: 'Context mode: Standard' }));
+    await user.keyboard('{ArrowDown}{ArrowDown}{Enter}');
+    const panel = screen.getByRole('region', { name: 'Compact this chat' });
+    expect(within(panel).getByLabelText('Keep in focus (optional)')).toHaveFocus();
+    await user.click(within(panel).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('region', { name: 'Compact this chat' })).toBeNull();
+    // The Cancel button held focus and unmounted; focus returns to where the operator came from.
+    expect(screen.getByRole('button', { name: 'Context mode: Standard' })).toHaveFocus();
+  });
+
+  it('is on demand for a local chat with no advice showing — from the "Context" chip', async () => {
+    const user = userEvent.setup();
+    const onSend = vi.fn(async () => true);
+    // 20k of a 32.5k compaction point: no handoff banner yet.
+    const local = session({
+      id: 'vs_local', engine: 'local', seatId: LOCAL_SEAT.id, accountId: 'local', model: 'qwen3-coder', updatedAt: new Date().toISOString(), turnCount: 3,
+      usage: { ...session().usage, contextTokens: 20_000, contextWindow: 65_536, contextWindowSource: 'runtime', autoCompactAt: 32_536 },
+    });
+    const view = render(<Workspace {...props({ view: viewFor(local), seats: [...SEATS, LOCAL_SEAT], onSend })} />);
+    expect(screen.queryByRole('region', { name: 'Context advice' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Context actions' }));
+    await user.click(screen.getByRole('menuitem', { name: /Compact now/ }));
+    await user.click(within(screen.getByRole('region', { name: 'Compact this chat' })).getByRole('button', { name: 'Compact now' }));
+    expect(onSend).toHaveBeenCalledWith('/compact');
+    view.unmount();
+
+    // A chat with no turns lists it, disabled, with the reason.
+    render(<Workspace {...props({ view: viewFor({ ...local, turnCount: 0 }), seats: [...SEATS, LOCAL_SEAT], onSend })} />);
+    await user.click(screen.getByRole('button', { name: 'Context actions' }));
+    expect(screen.getByRole('menuitem', { name: /Compact now/ })).toBeDisabled();
+    expect(screen.getByRole('menuitem', { name: /Compact now/ })).toHaveTextContent('nothing to compact yet');
+  });
+
   it('is reachable from the handoff note on a local chat, where it is free but slow', async () => {
     const user = userEvent.setup();
     const onSend = vi.fn(async () => true);
@@ -217,8 +273,9 @@ describe('Workspace — compact now', () => {
       usage: { ...session().usage, contextTokens: 30_000, contextWindow: 65_536, contextWindowSource: 'runtime', autoCompactAt: 32_536 },
     });
     render(<Workspace {...props({ view: viewFor(local), seats: [...SEATS, LOCAL_SEAT], onSend })} />);
-    // Local has no modes, so no chip — the note is the way in.
+    // Local has no modes: its chip is the one-budget "Context" menu, and the note is a second way in.
     expect(screen.queryByRole('button', { name: /Context mode/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Context actions' })).toBeInTheDocument();
     const note = screen.getByRole('region', { name: 'Context advice' });
     await user.click(within(note).getByRole('button', { name: 'Compact now…' }));
     const panel = screen.getByRole('region', { name: 'Compact this chat' });
@@ -257,6 +314,27 @@ describe('Workspace — compact now', () => {
     expect(within(panel).getByRole('button', { name: 'Compact now' })).toBeDisabled();
     expect(panel).toHaveTextContent('Available when the current turn finishes.');
     expect(onSend).not.toHaveBeenCalled();
+  });
+});
+
+describe('Workspace — idle-cache advice', () => {
+  it('times "idle over an hour" from the last turn in the log, so a rename or mode switch does not reset it', () => {
+    const lastTurn = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+    // 150k: under the 80% suggest line, so only the idle reason can raise a note.
+    // updatedAt is NOW — a rename a second ago bumped it.
+    const s = nearSession({ updatedAt: new Date().toISOString(), usage: { ...nearSession().usage, contextTokens: 150_000 } });
+    const log: VerseEvent[] = [
+      { ...ev(1, 'usage', { turnId: 't1', usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0, contextTokens: 150_000, contextWindow: null } }), at: lastTurn },
+      { ...ev(2, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: null, durationMs: 1 }), at: lastTurn },
+      // The mode switch's own event: turnless, and it must not count as activity.
+      { ...ev(3, 'context', { turnId: null, contextTokens: 150_000, contextWindow: 1_000_000, exact: true, autoCompactAt: 367_000 }), at: new Date().toISOString() },
+    ];
+    const view = render(<Workspace {...props({ view: viewFor(s, log) })} />);
+    expect(screen.getByRole('region', { name: 'Context advice' })).toHaveTextContent('Idle over an hour');
+    view.unmount();
+    // No turns in the log: nothing has gone cold.
+    render(<Workspace {...props({ view: viewFor(s) })} />);
+    expect(screen.queryByRole('region', { name: 'Context advice' })).toBeNull();
   });
 });
 

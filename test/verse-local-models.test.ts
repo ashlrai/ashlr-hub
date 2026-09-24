@@ -539,15 +539,34 @@ describe('resolveLocalContextWindow — precedence', () => {
     }).window).toBe(65_536);
   });
 
-  it('3. unpinned: resident context, then the server default, then the trained max as an estimate', () => {
+  it('3. unpinned: the server default, then residency (only when no default is known), then the trained max', () => {
     const unpinned = showDetail({ native: 262_144 });
+    // A runner another client loaded with options.num_ctx=8192 must not define
+    // Verse's window: Verse's turns send no num_ctx and get the server default.
     expect(resolveLocalContextWindow({
-      tag: 't', lane: 'ollama', detail: unpinned, residentContext: 32_768,
-      serverDefault: { contextLength: 4_096, source: 'server-log-vram' },
-    })).toEqual({ window: 32_768, source: 'runtime', basis: 'resident' });
+      tag: 't', lane: 'ollama', detail: unpinned, residentContext: 8_192,
+      serverDefault: { contextLength: 262_144, source: 'server-log-vram' },
+    })).toEqual({ window: 262_144, source: 'provider-catalog', basis: 'server-default' });
+    // …nor overstate it with a LARGER foreign num_ctx.
+    expect(resolveLocalContextWindow({
+      tag: 't', lane: 'ollama', detail: unpinned, residentContext: 131_072,
+      serverDefault: { contextLength: 65_536, source: 'server-log-env' },
+    })).toEqual({ window: 65_536, source: 'provider-catalog', basis: 'server-default' });
     expect(resolveLocalContextWindow({
       tag: 't', lane: 'ollama', detail: unpinned, serverDefault: { contextLength: 4_096, source: 'server-log-vram' },
     })).toEqual({ window: 4_096, source: 'provider-catalog', basis: 'server-default' });
+    // No server default known: residency is the best live fact, capped by native.
+    expect(resolveLocalContextWindow({
+      tag: 't', lane: 'ollama', detail: unpinned, residentContext: 32_768, serverDefault: { contextLength: null, source: null },
+    })).toEqual({ window: 32_768, source: 'runtime', basis: 'resident' });
+    expect(resolveLocalContextWindow({ tag: 't', lane: 'ollama', detail: unpinned, residentContext: 32_768 }))
+      .toEqual({ window: 32_768, source: 'runtime', basis: 'resident' });
+    // No native length: the default is never applied uncapped, so a resident
+    // allocation (a real one) is used before the named fallback.
+    expect(resolveLocalContextWindow({
+      tag: 't', lane: 'ollama', detail: showDetail({}), residentContext: 40_960,
+      serverDefault: { contextLength: 262_144, source: 'server-log-vram' },
+    })).toEqual({ window: 40_960, source: 'runtime', basis: 'resident' });
     // The default is capped by the trained length (an 8k model is never 256k).
     expect(resolveLocalContextWindow({
       tag: 't', lane: 'ollama', detail: showDetail({ native: 8_192 }), serverDefault: { contextLength: 262_144, source: 'env' },
@@ -598,28 +617,42 @@ describe('Ollama server default — env and server.log', () => {
     expect(parseOllamaServerLog('')).toEqual({ contextLengthEnv: null, vramDefault: null });
   });
 
-  it('prefers the environment, then the running server\'s own config, then its VRAM default', () => {
+  it('prefers the running server\'s own config, then its VRAM default, and our env only when the log is silent', () => {
     const logPath = path.join(isoHome, 'server.log');
     fs.writeFileSync(logPath, [CONFIG_LINE(0), VRAM_LINE(32_768)].join('\n'));
     expect(readOllamaServerDefault({ env: {}, logPath })).toEqual({ contextLength: 32_768, source: 'server-log-vram' });
+    // The hub's own environment (a shell export Ollama.app never saw) does NOT
+    // override what the server logged it runs with.
     expect(readOllamaServerDefault({ env: { OLLAMA_CONTEXT_LENGTH: '16384' }, logPath }))
-      .toEqual({ contextLength: 16_384, source: 'env' });
-    // `0` / junk in the environment is "unset", as Ollama itself reads it.
-    expect(readOllamaServerDefault({ env: { OLLAMA_CONTEXT_LENGTH: '0' }, logPath }).source).toBe('server-log-vram');
-    expect(readOllamaServerDefault({ env: { OLLAMA_CONTEXT_LENGTH: 'lots' }, logPath }).source).toBe('server-log-vram');
+      .toEqual({ contextLength: 32_768, source: 'server-log-vram' });
 
     fs.writeFileSync(logPath, [CONFIG_LINE(8_192), VRAM_LINE(262_144)].join('\n'));
     expect(readOllamaServerDefault({ env: {}, logPath })).toEqual({ contextLength: 8_192, source: 'server-log-env' });
+    expect(readOllamaServerDefault({ env: { OLLAMA_CONTEXT_LENGTH: '16384' }, logPath }))
+      .toEqual({ contextLength: 8_192, source: 'server-log-env' });
+
+    // No usable log line (or no log): the env is the last resort.
+    fs.writeFileSync(logPath, 'noise only\n');
+    expect(readOllamaServerDefault({ env: { OLLAMA_CONTEXT_LENGTH: '16384' }, logPath }))
+      .toEqual({ contextLength: 16_384, source: 'env' });
+    const missing = path.join(isoHome, 'no-such.log');
+    expect(readOllamaServerDefault({ env: { OLLAMA_CONTEXT_LENGTH: '16384' }, logPath: missing }))
+      .toEqual({ contextLength: 16_384, source: 'env' });
+    // `0` / junk in the environment is "unset", as Ollama itself reads it.
+    expect(readOllamaServerDefault({ env: { OLLAMA_CONTEXT_LENGTH: '0' }, logPath: missing }))
+      .toEqual({ contextLength: null, source: null });
+    expect(readOllamaServerDefault({ env: { OLLAMA_CONTEXT_LENGTH: 'lots' }, logPath: missing }))
+      .toEqual({ contextLength: null, source: null });
   });
 
   it('reads ~/.ollama/logs/server.log by default and reports unknown when it is absent', () => {
     expect(ollamaServerLogPath()).toBe(path.join(isoHome, '.ollama', 'logs', 'server.log'));
     expect(readOllamaServerDefault()).toEqual({ contextLength: null, source: null });
+    process.env.OLLAMA_CONTEXT_LENGTH = '12288';
+    expect(readOllamaServerDefault()).toEqual({ contextLength: 12_288, source: 'env' });
     fs.mkdirSync(path.join(isoHome, '.ollama', 'logs'), { recursive: true });
     fs.writeFileSync(ollamaServerLogPath(), VRAM_LINE(4_096));
     expect(readOllamaServerDefault()).toEqual({ contextLength: 4_096, source: 'server-log-vram' });
-    process.env.OLLAMA_CONTEXT_LENGTH = '12288';
-    expect(readOllamaServerDefault()).toEqual({ contextLength: 12_288, source: 'env' });
   });
 
   it('feeds the Usage view the same figure the seat picker shows', async () => {

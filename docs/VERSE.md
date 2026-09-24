@@ -117,8 +117,11 @@ rather than pinning at 100 %. `n/a` means the window is unknown, not zero.
   `Auto-compacted 967k → 19k in 1m 58s` (Codex too, from the readings either side
   of its compaction), or `Codex compacted its context` when there are no counts —
   so the meter's drop is never unexplained.
-- **Compact now** (Claude and local sessions) asks the CLI to compact on demand by
-  sending `/compact` as an ordinary turn; the divider reads `Compacted on request …`.
+- **Compact now** asks the CLI to compact on demand by sending `/compact` as an
+  ordinary turn; the divider reads `Compacted on request …`. Every Claude and local
+  session has it in the chip next to the meter — the Standard / Expansive chip, or
+  a chip reading **Context** on local chats and the 200k Claude models, which have
+  no mode to switch — once the chat has had a turn; the handoff banner offers it too.
   It is free on a local seat, though slow on a large model (about 2½ minutes for a
   15k context on a 27B tag). **On a paid seat it spends usage** — the CLI reads the
   whole context to write its summary. It is not offered on Codex or Grok.
@@ -126,7 +129,7 @@ rather than pinning at 100 %. `n/a` means the window is unknown, not zero.
 **Context mode.** Next to the meter, on models that have one, a chip switches
 the session between **Standard** and **Expansive**, from the next turn:
 
-| Engine | Standard (default) | Expansive |
+| Engine | Standard (default for new chats) | Expansive |
 |---|---|---|
 | Claude 1M models (Fable, Opus 5.x / 4.8, Sonnet 5) | compacts at ≈367k | compacts at ≈967k |
 | Codex GPT-6 / GPT-5.6 | 258.4k window, compacts at ≈245k | 828.4k window, compacts at ≈785k |
@@ -134,7 +137,24 @@ the session between **Standard** and **Expansive**, from the next turn:
 
 Expansive costs more usage on **every** later turn, because each turn re-sends
 the whole conversation; it pays off for coupled, cross-cutting work that needs a
-lot in view at once. Verse may suggest it — after repeated compactions, or when
+lot in view at once. The menu quotes the ratio of the two compaction points
+(≈2.6× on Claude, ≈3.2× on Codex). On Codex that is not the whole story: OpenAI
+reportedly counts GPT-5.6 requests above 272k at about 2× against plan limits (a
+single secondary source; GPT-6 Astra reportedly exempt), so a turn near the
+expansive limit may count about 6× a standard one — every Expansive prompt on
+Codex says so.
+
+**Chats from before 3.9 keep their full window.** Earlier versions let the
+Claude CLI compact near 967k. A Claude chat created before 3.9 on a 1M model is
+therefore recorded as **Expansive** the first time 3.9 loads it, and runs exactly
+as it did — upgrading compacts nothing. New Claude chats start in Standard.
+
+**Switching to Standard can compact.** Standard → Expansive is always free.
+Expansive → Standard is free while the session is below the Standard compaction
+point; above it (a Claude chat at 600k, a Codex chat at 500k) the CLI compacts on
+the **next turn** — a summary of the whole context that spends usage on a paid
+seat, replaces early turns and starts a new prompt cache. The menu warns before
+you switch. Verse may suggest it — after repeated compactions, or when
 the reachable code only fits expansive — but never switches it on for you. The
 new-chat dialog sets the mode for a new session and can make it the seat's
 default. Why the default is not the full window: `docs/VERSE-CONTEXT.md` §2.
@@ -147,7 +167,8 @@ files touched, commands, errors, each root's `git diff --stat` — with no model
 call. You can edit it, choose any seat, model and mode for the new session (a
 Claude chat can continue on Codex), and see whether the note fits. The optional
 **Ask *seat* to summarize first** button sends one ordinary — paid — turn to the
-current session and folds its reply in. Creating the new session is free: it opens with
+current session and folds its reply in (the request itself is not carried into
+the new chat as your latest ask). Creating the new session is free: it opens with
 "Continued from …", the note is waiting in the composer, and nothing is sent
 until you press send.
 
@@ -159,7 +180,12 @@ gotchas, plan status — and never secrets. Claude, Codex and local seats read
 and update the live file; Grok's CLI cannot be given the directory, so a Grok
 session sees the copy taken when the chat began and cannot change it. It is on
 by default; the Resources panel shows it and lets you edit, clear, or turn it
-off per project. A session keeps the memory setting it was created with.
+off per project or everywhere. A session keeps the memory setting it was created with.
+It is not free on a paid seat: its block (up to 6 KB) rides in the system prompt of
+every turn — cached after the first, but cached tokens still count — and the agent
+spends a little extra work reading and updating `MEMORY.md`. The editor shows a
+sanitized copy (secret-looking text as `[REDACTED]`, your home as `~`) and says so;
+a save that would write those placeholders over the real values is refused.
 
 The Resources panel also shows the current session's efficiency: cache-hit
 ratio, average and peak context per turn, compactions, and a warning once the
@@ -247,8 +273,10 @@ order (details and evidence in `docs/VERSE-CONTEXT.md` §1.5):
    says;
 2. a `num_ctx` pinned in the tag's Modelfile, capped at the model's trained
    length;
-3. otherwise Ollama's own default — the loaded context from `/api/ps`, else
-   `OLLAMA_CONTEXT_LENGTH`, else the VRAM-based default in Ollama's server log —
+3. otherwise Ollama's own default for an unpinned request — the
+   `OLLAMA_CONTEXT_LENGTH` or VRAM-based default the running server logged, else
+   `OLLAMA_CONTEXT_LENGTH` in Verse's environment, and only then the loaded
+   context from `/api/ps` (which another app may have loaded at its own size) —
    which depends on the machine, so a tag that serves 256k here may serve far
    less on a smaller Mac;
 4. only when `/api/show` fails, a `ctxNNk` suffix in the tag (`:ctx64k` or
@@ -257,8 +285,11 @@ order (details and evidence in `docs/VERSE-CONTEXT.md` §1.5):
 Verse passes that window to the CLI (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`), which
 otherwise assumes 200k for a model it does not know and never compacts before a
 64k runner overflows. With it, a 64k seat compacts at ≈32.5k — its fixed prompt
-already takes roughly 18–23k, so pick a larger-window tag for long local
-sessions.
+already takes about 15k, so pick a larger-window tag for long local sessions.
+Before each turn Verse re-checks the tag's window and updates the chat's stored
+one if it changed, so the CLI and the meter always use the same, current number.
+A tag whose window is under 56k is listed but disabled, with the reason: Claude
+Code would compact on every turn.
 
 Local seats run the plain `claude` binary with `ANTHROPIC_BASE_URL` pointed at
 Ollama's Anthropic-compatible endpoint — same transcript, tool cards and resume

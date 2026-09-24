@@ -116,7 +116,7 @@ Events omit `seq`/`at` (engine stamps them). Parsers must never throw on garbage
 - `POST /api/verse/sessions/:id/rename` `{ title }` → `VerseSession`
 - `GET  /api/verse/sessions/:id/events` → SSE; event name = `VerseEvent.type`, `id` = seq, data = the event JSON; honors `Last-Event-ID`;
   15s `: keepalive` comments; requires the read *session* (cookie) like `/api/events`.
-Errors: `{ error, code? }` via `sendJson`. Codes: `VERSE_SESSION_NOT_FOUND` 404, `VERSE_SESSION_BUSY` 409, `VERSE_INVALID` 400, `VERSE_TOO_LARGE` 413. V3.9 adds `VERSE_MODEL_UNAVAILABLE` 409 (a turn on a model the seat lists as unavailable).
+Errors: `{ error, code? }` via `sendJson`. Codes: `VERSE_SESSION_NOT_FOUND` 404, `VERSE_SESSION_BUSY` 409, `VERSE_INVALID` 400, `VERSE_TOO_LARGE` 413. V3.9 adds `VERSE_MODEL_UNAVAILABLE` 409 (a turn on a model the seat lists as unavailable) and `VERSE_MEMORY_REDACTED` 409 (`POST /memory` content carrying more `[REDACTED]` placeholders than the file on disk).
 Also add `verse` to the `/api/events` `emitUpdate` poll: emit `verse-sessions` (list digest) when it changes, so the sidebar refreshes.
 V3.9 adds context-mode, handoff-preview, preferences, context-fit, search and memory routes — listed in
 [the V3.9 section](#v39-additive-contract--context-orchestration).
@@ -169,7 +169,10 @@ context meter thresholds; dictation button fallback when no SpeechRecognition; s
 ## V3.9 additive contract — context orchestration
 
 Everything below is **optional and additive**: a record, fixture or client written before V3.9 keeps validating and behaves as
-before (absent `contextMode` = `standard`, absent `contextTokensExact` = exact, absent memory = off). New fields are spread onto
+before (absent `contextTokensExact` = exact, absent memory = off). Absent `contextMode` means a record from before V3.9, because
+every V3.9 create writes it explicitly (`'standard'` included): a Claude record whose model has an expansive budget resolves to
+`expansive` — the ~967k compaction it ran at before, since 3.5–3.8 passed no `--autocompact` — and the engine persists
+`contextMode: 'expansive'` the first time the session is loaded, read or sent a turn; every other absent `contextMode` is `standard`. New fields are spread onto
 records only when present, so an ordinary session's on-disk shape does not change. The GET `/api/verse/bootstrap` key set is
 unchanged. The authority for every number and rule is `docs/VERSE-CONTEXT.md`; the arithmetic lives in one browser-safe module,
 `src/core/verse/context-math.ts`, used by the server and the UI alike.
@@ -183,13 +186,16 @@ unchanged. The authority for every number and rule is `docs/VERSE-CONTEXT.md`; t
 | `VerseUsage` | `contextWindowSource`, `autoCompactAt`, `contextTokensExact` (false = upper bound). `contextTokens` is now stored **unclamped** |
 | `VerseSession` | `contextMode: 'standard' \| 'expansive'`, `compactionCount`, `handoffFrom: { sessionId, title }`, `memoryEnabled` |
 | `VerseCreateSessionRequest` | `contextMode` (absent → the seat's preferred mode, else standard), `handoffFromSessionId` (the server resolves the title) |
+| `VerseProjectMemory` | `contentSanitized: true` — present only when the `content` sent differs from the file's bytes (`sanitizePublicJson` rewrote the home path to `~` or replaced secret-shaped text with `[REDACTED]`) |
 | `VerseSeatLaunch` (private launch record, `session-engine.ts`) | `memory: { dir, block, writable }` — snapshotted at creation; the same block every turn |
 
 New types: `VerseWindowSource` (`runtime` · `provider-catalog` · `cli-catalog` · `documented` · `fallback`), `VerseContextMode` /
 `VERSE_CONTEXT_MODES`, `VerseContextBudget { contextWindow, autoCompactAt, providerWindow? }`, `VersePreferences`,
 `VersePreferencesUpdate`, `VerseContextModeRequest`, `VerseHandoffPreviewRequest`, `VerseHandoffPreview`, `VerseContextFit`,
 `VerseContextFitRoot`, `VerseFitVerdict`, `VerseSearchHit`, `VerseSearchResponse`, `VerseProjectMemory`,
-`VerseProjectMemoryWrite`. Constants: `VERSE_HANDOFF_MAX_CHARS = 12_000`, `VERSE_MEMORY_MAX_BYTES = 64 KiB`, and
+`VerseProjectMemoryWrite`. Constants: `VERSE_HANDOFF_MAX_CHARS = 12_000`, `VERSE_MEMORY_MAX_BYTES = 64 KiB`,
+`VERSE_HANDOFF_SUMMARY_REQUEST` (the fixed text of the "Ask *seat* to summarize first" turn: the UI sends it as an ordinary turn,
+and the handoff builder leaves that exact text out of the note's "latest asks"), and
 `VERSE_DEFAULT_CONTEXT_WINDOWS` = `{ claude: 200_000, codex: 258_400, grok: 500_000, local: 65_536 }` (last-resort fallbacks only;
 every known model carries its own window).
 
@@ -203,9 +209,12 @@ Both are persisted and flow through the normal emit / SSE path (event name = `ty
   first after it — and `durationMs` null; a codex event can arrive mid-turn from `pollTelemetry`). The comment on the frozen
   `types.ts` declaration still says codex counts are null; the codex adapter fills them when the readings exist, null otherwise.
   The engine increments `session.compactionCount`.
-- `context { turnId, contextTokens, contextWindow, exact, autoCompactAt? }` — an occupancy **reading** (codex rollout
-  `token_count`: `info.last_token_usage.total_tokens` against `info.model_context_window`), not a usage delta: it replaces `contextTokens` / the window and is never summed. The engine fills `autoCompactAt`
-  for the window in force.
+- `context { turnId, contextTokens, contextWindow, exact, autoCompactAt?, contextWindowSource? }` — an occupancy **reading**
+  (codex rollout `token_count`: `info.last_token_usage.total_tokens` against `info.model_context_window`), not a usage delta: it
+  replaces `contextTokens` / the window and is never summed. The engine fills `autoCompactAt` for the window in force.
+  `contextWindowSource` says where the window came from: a CLI reading is `runtime`; an event the engine writes itself after a
+  **mode switch** or a **local window refresh** carries the budget's catalog source, so a client never relabels a catalog figure as
+  a measurement. Absent on events from before the field existed — treat those as `runtime`.
 - `usage` is unchanged in shape; its `contextWindow` is now the CLI's runtime figure when the CLI reports one (claude/grok
   `result.modelUsage` — the window only: its token counts accumulate across `--resume`). Codex emits exactly one `usage` per turn
   from `afterTurn`, not the parser: `exec resume`'s printed `turn.completed` usage is thread-cumulative, so the figure comes from
@@ -228,9 +237,17 @@ Codex implements both (its rollout); claude and grok need neither.
   `session.usage` (`contextWindow`, `autoCompactAt`, `contextWindowSource`). `opts.memory` is always passed on V3.9 creates — a
   snapshot, or `null` when memory is off or could not be set up, which the engine records as `memoryEnabled: false`.
 - Turns: `POST /sessions/:id/turns` is refused with 409 `VERSE_MODEL_UNAVAILABLE` (the reason in the message) when the session's
-  seat currently lists its model as unavailable — e.g. a stored `claude-opus-5.5` session on a seat pinned below 2.1.280 — before
-  any CLI is spawned.
-- `setContextMode(id, mode): VerseSession` — new on `VerseEngineHandle`; applies from the next turn.
+  seat currently lists its model as unavailable — e.g. a stored `claude-opus-5.5` session on a seat pinned below 2.1.280, or a
+  local tag whose window now resolves below `LOCAL_MIN_USABLE_WINDOW` — before any CLI is spawned.
+- `createSession` always writes `contextMode` (`'standard'` included), so an absent key reliably marks a pre-V3.9 record (see the
+  preamble for how those resolve).
+- `setContextMode(id, mode): VerseSession` — new on `VerseEngineHandle`; applies from the next turn. Moving to `standard` while
+  occupancy is above the standard compaction point makes the CLI compact on that next turn (a paid summary call on a metered seat);
+  the engine does not refuse it, the UI warns.
+- Local sessions: before each turn launches, the engine re-resolves the seat's window from live discovery and, when it differs,
+  rewrites the stored `usage.contextWindow` / `autoCompactAt` (and emits a `context` event) — the adapter passes that stored window
+  as `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, so the CLI and the meter always use one number. A local window below
+  `LOCAL_MIN_USABLE_WINDOW` (56,000, `context-math.ts`) is listed with an `unavailableReason`.
 - Usage: a runtime window wins (source `runtime`, compaction point recomputed by `reconcileAutoCompactAt`) except on engine
   `local`, where Verse sets the window itself. Stored sessions whose model is an alias (`claude-opus-5.5`) keep their stored id.
 
@@ -250,8 +267,8 @@ carries an operator's **Compact now** (`/compact` as the turn text, claude and l
 | `POST /preferences` | `VersePreferencesUpdate` — exactly one of `{seatId, contextMode}`, `{memoryEnabled}`, `{projectPath, memoryEnabled}` | `VersePreferences` |
 | `GET /context-fit` | `?workspaceId=…` or `?projectPath=…[&extraRoots=…]…` — `extraRoots` repeats (a comma is legal in a path); never both forms; paths validated with the same rules as `createSession` | `VerseContextFit` |
 | `GET /search` | `?q=…&limit=…` (limit ≤ 50) | `VerseSearchResponse` |
-| `GET /memory` | `?projectPath=…` | `VerseProjectMemory` |
-| `POST /memory` | `VerseProjectMemoryWrite { projectPath, content }` (≤ `VERSE_MEMORY_MAX_BYTES`) | `VerseProjectMemory` |
+| `GET /memory` | `?projectPath=…` | `VerseProjectMemory`, with `contentSanitized: true` when the content shown is not the file's bytes |
+| `POST /memory` | `VerseProjectMemoryWrite { projectPath, content }` (≤ `VERSE_MEMORY_MAX_BYTES`, else 413 `VERSE_TOO_LARGE`) | `VerseProjectMemory` (+ `contentSanitized?`); 409 `VERSE_MEMORY_REDACTED` when `content` holds more `[REDACTED]` markers than the file on disk — a save that would overwrite real values with the sanitizer's placeholders (the `~` home rewrite is not refused) |
 
 ### Files
 

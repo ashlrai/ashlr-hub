@@ -42,6 +42,12 @@ import {
 } from './accounts.js';
 import { DEFAULT_LOCAL_MODEL_TAG } from '../run/model-catalog.js';
 import {
+  claudeAutoCompactAt,
+  LOCAL_MIN_USABLE_WINDOW,
+  localWindowUsable,
+  sessionOverheadTokens,
+} from './context-math.js';
+import {
   contextWindowFromTagSuffix,
   probeLlamaSlotContext,
   probeOllamaModelDetail,
@@ -844,6 +850,25 @@ export function localWindowNotes(resolved: VerseLocalWindow, lane: VerseLocalDis
 }
 
 /**
+ * Why a local window cannot host a Claude Code session, or null when it can.
+ *
+ * Local turns run Claude Code with `CLAUDE_CODE_MAX_CONTEXT_TOKENS=<window>`
+ * (the window must be stated: the CLI otherwise assumes 200k and overflows
+ * the runner). The CLI then reserves up to 20k for the reply and compacts
+ * 13k below that, so a 32,768 window compacts at 0 — below its own ~15k fixed
+ * prompt — and every turn is blocked or loops through compaction. Such a seat
+ * is LISTED with this reason (the operator learns why, and which tag would
+ * work) rather than offered as runnable or silently hidden.
+ */
+export function localWindowUnusableReason(window: number): string | null {
+  if (localWindowUsable(window)) return null;
+  const compactAt = claudeAutoCompactAt(window, null, null);
+  return `Context window ${formatWindow(window)} is too small for Claude Code: it would compact at `
+    + `≈${Math.round(compactAt / 1000)}k tokens, with no real room above its ~${Math.round(sessionOverheadTokens('local') / 1000)}k base prompt. `
+    + `Use a tag with a window of at least ${formatWindow(LOCAL_MIN_USABLE_WINDOW)} tokens.`;
+}
+
+/**
  * The per-slot window on the llama-server lane, or null. The origin is
  * llama-server's own (NOT the Anthropic proxy turns are dispatched to): the
  * proxy has no `/props`. The imports are lazy for the same reason as
@@ -923,23 +948,26 @@ async function discoverLocalSeats(
     if (localSeatIsSelectable(detail, tag)) selectable.push({ tag, detail });
   });
 
-  // Unpinned tags need what Ollama would ACTUALLY allocate them: the resident
-  // instance's context, else the server's default. Both reads are skipped
-  // when every tag pins num_ctx or the llama-server slot already answered.
+  // Unpinned tags need what Ollama would ACTUALLY allocate an unpinned request:
+  // the server's default (its log, else our env). `/api/ps` residency is read
+  // only when no default is known — a resident runner may have been loaded by
+  // another client's `options.num_ctx`, so it is not what Verse's turns get
+  // (local-models.ts `resolveLocalContextWindow`). Both reads are skipped when
+  // every tag pins num_ctx or the llama-server slot already answered.
   const needsServerFacts = slotWindow === null
     && selectable.some(({ detail }) => detail !== null && (detail.numCtx ?? null) === null);
-  const resident = needsServerFacts ? await probeOllamaResident(fetchImpl, baseUrl, OLLAMA_TIMEOUT_MS) : null;
-  const residentByTag = new Map((resident ?? []).map((row) => [row.tag, row.contextLength]));
   const serverDefault = needsServerFacts ? windows.serverDefault() : null;
-
-  // Preferred model first, then discovery order. `sort` is stable, so every
-  // tag that is not preferred keeps the order `/api/tags` reported it in.
-  selectable.sort(
-    (a, b) => localSeatPreferenceRank(a.tag, preferred) - localSeatPreferenceRank(b.tag, preferred),
+  // (A tag with no native length cannot use the default either — it is never
+  // applied uncapped — so residency is its best fact too.)
+  const needsResidency = needsServerFacts && (
+    (serverDefault?.contextLength ?? null) === null
+    || selectable.some(({ detail }) => detail !== null && (detail.numCtx ?? null) === null && (detail.nativeContextLength ?? null) === null)
   );
+  const resident = needsResidency ? await probeOllamaResident(fetchImpl, baseUrl, OLLAMA_TIMEOUT_MS) : null;
+  const residentByTag = new Map((resident ?? []).map((row) => [row.tag, row.contextLength]));
 
   const observedAt = new Date().toISOString();
-  selectable.forEach(({ tag, detail }) => {
+  const built = selectable.map(({ tag, detail }) => {
     const resolved = resolveLocalContextWindow({
       tag,
       lane: dispatch.lane,
@@ -950,16 +978,32 @@ async function discoverLocalSeats(
     });
     const notes = localWindowNotes(resolved, dispatch.lane, slotWindow !== null);
     const label = localSeatLabel(tag);
+    const unavailableReason = localWindowUnusableReason(resolved.window);
+    const option = localModelOption(tag, label.replace(/ \(local\)$/, ''), resolved.window, resolved.source);
     const seat: VerseSeat = {
       id: `local:${tag}`,
       engine: 'local',
       label,
       accountId: 'local',
-      models: [localModelOption(tag, label.replace(/ \(local\)$/, ''), resolved.window, resolved.source)],
+      // Present only when set, so a usable seat's wire shape is unchanged.
+      models: [unavailableReason !== null ? { ...option, unavailableReason } : option],
       contextWindow: resolved.window,
       health: { state: 'ready', summary: null, windows: [], observedAt },
       ...(notes.length > 0 ? { notes } : {}),
     };
+    return { tag, seat, usable: unavailableReason === null };
+  });
+
+  // Usable seats first, then preferred model first, then discovery order.
+  // `sort` is stable, so every tag that is not preferred keeps the order
+  // `/api/tags` reported it in — and a preferred tag whose window is too small
+  // never becomes the default ahead of one that can actually run.
+  built.sort((a, b) => {
+    if (a.usable !== b.usable) return a.usable ? -1 : 1;
+    return localSeatPreferenceRank(a.tag, preferred) - localSeatPreferenceRank(b.tag, preferred);
+  });
+
+  built.forEach(({ seat }) => {
     seats.push(seat);
     launches.set(seat.id, {
       seat,

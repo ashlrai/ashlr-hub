@@ -27,9 +27,16 @@ import {
   VERSE_HANDOFF_HEADER,
   buildHandoffPreview,
   defaultGitDiffStat,
+  isControlCommandTurn,
+  isHandoffSummaryRequest,
 } from '../src/core/verse/session-handoff.js';
 import { VerseServiceError } from '../src/core/verse/preferences.js';
-import { VERSE_HANDOFF_MAX_CHARS, type VerseEvent, type VerseSession } from '../src/core/verse/types.js';
+import {
+  VERSE_HANDOFF_MAX_CHARS,
+  VERSE_HANDOFF_SUMMARY_REQUEST,
+  type VerseEvent,
+  type VerseSession,
+} from '../src/core/verse/types.js';
 
 const PRIMARY = '/work/app';
 
@@ -277,6 +284,75 @@ describe('content', () => {
   });
 });
 
+describe('control turns (summarize-first, /compact)', () => {
+  /** The shape "Ask this seat to summarize first" leaves in the log. */
+  function summarised() {
+    return log()
+      .user('Migrate billing to the new webhooks API')
+      .user('Now update the webhooks handler')
+      .user('Add a regression test for the retry path')
+      .assistant('Handler updated; test pending.')
+      .user(VERSE_HANDOFF_SUMMARY_REQUEST)
+      .assistant('## Handoff\nGoal: billing on webhooks v2. Done: handler. Next: retry test.');
+  }
+
+  it('never lists the canned summary request as a request, and uses its reply as the summary', () => {
+    const preview = buildHandoffPreview(session(), summarised().events, { includeLastAssistant: true, gitDiffStat: noGit });
+    const text = preview.text;
+    expect(text).not.toContain('Write the handoff note');
+    expect(text).not.toContain('about to continue in a fresh session');
+    // The real latest ask is the latest request the footer points at.
+    expect(text).toMatch(/## Latest requests \(oldest first\)\n\n1\. Now update the webhooks handler\n2\. Add a regression test for the retry path\n\n/);
+    expect(text).toContain('## Where it stood (the previous agent\'s own summary, verbatim)\n\n> ## Handoff\n> Goal: billing on webhooks v2.');
+    expect(text).not.toContain('Handler updated; test pending.');
+    // The summary turn WAS a turn (it was spent), so the header counts it.
+    expect(preview.stats.turnsCovered).toBe(4);
+  });
+
+  it('does not let the summary request push a real ask out of the three-item window', () => {
+    const l = log().user('goal').user('ask 1').user('ask 2').user('ask 3')
+      .user(VERSE_HANDOFF_SUMMARY_REQUEST).assistant('summary');
+    const text = buildHandoffPreview(session(), l.events, { includeLastAssistant: true, gitDiffStat: noGit }).text;
+    expect(text).toMatch(/1\. ask 1\n2\. ask 2\n3\. ask 3/);
+    expect(text).not.toContain('earlier omitted');
+  });
+
+  it('recognises the request despite CRLF and surrounding whitespace, and never as the goal', () => {
+    const crlf = `  ${VERSE_HANDOFF_SUMMARY_REQUEST.replace(/\n/g, '\r\n')}\n`;
+    expect(isHandoffSummaryRequest(crlf)).toBe(true);
+    expect(isHandoffSummaryRequest(`${VERSE_HANDOFF_SUMMARY_REQUEST} and also fix the tests`)).toBe(false);
+    const l = log().user(crlf).assistant('summary').user('the real goal');
+    const text = buildHandoffPreview(session(), l.events, { gitDiffStat: noGit }).text;
+    expect(text).toContain('## Original goal\n\n> the real goal');
+    expect(text).not.toContain('Write the handoff note');
+  });
+
+  it('drops /compact turns from the goal and latest requests, but not asks that merely start with a slash', () => {
+    expect(isControlCommandTurn('/compact')).toBe(true);
+    expect(isControlCommandTurn('/compact keep the login fix')).toBe(true);
+    expect(isControlCommandTurn('/compaction is broken')).toBe(false);
+    expect(isControlCommandTurn('/Users/me/app/server.ts throws on start')).toBe(false);
+    const l = log().user('goal').user('/Users/me/app/server.ts throws on start').user('/compact the auth refactor')
+      .assistant('Compacted.');
+    const text = buildHandoffPreview(session(), l.events, { gitDiffStat: noGit }).text;
+    expect(text).toMatch(/## Latest requests \(oldest first\)\n\n1\. \/Users\/me\/app\/server\.ts throws on start\n\n/);
+    expect(text).not.toContain('/compact');
+  });
+
+  it('a later turn supersedes the summary: includeLastAssistant then shows the latest reply', () => {
+    const l = summarised().user('actually, first rename the table').assistant('Renamed billing_v1 to billing.');
+    const text = buildHandoffPreview(session(), l.events, { includeLastAssistant: true, gitDiffStat: noGit }).text;
+    expect(text).toContain('> Renamed billing_v1 to billing.');
+    expect(text).toMatch(/3\. actually, first rename the table\n\n/);
+  });
+
+  it('without includeLastAssistant the state is still the last reply (abridged when long)', () => {
+    const text = buildHandoffPreview(session(), summarised().events, { gitDiffStat: noGit }).text;
+    expect(text).toContain('## Where it stood (the previous agent\'s last reply)');
+    expect(text).toContain('> Goal: billing on webhooks v2.');
+  });
+});
+
 describe('the cap', () => {
   it('drops the lowest-priority sections first, whole, and names them', () => {
     const l = log().user(`goal ${'g'.repeat(5000)}`);
@@ -331,6 +407,20 @@ describe('determinism and safety', () => {
     expect(preview.text).not.toContain(key);
     expect(preview.sourceTitle).not.toContain(key);
     expect(preview.text).toContain('[REDACTED]');
+  });
+
+  it('strips NUL and other control characters (the note becomes argv) but keeps tabs and newlines', () => {
+    const l = log()
+      .user('goal with a NUL\u0000here and a bell\u0007')
+      .user('ask\twith tab\u001b[31m and escape')
+      .assistant('reply\u0085with C1\r\nand CRLF');
+    const preview = buildHandoffPreview(session({ title: 'title\u0000x' }), l.events, { focus: 'focus\u0001line', gitDiffStat: noGit });
+    // eslint-disable-next-line no-control-regex
+    expect(preview.text).not.toMatch(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/);
+    expect(preview.text).toContain('goal with a NULhere and a bell');
+    expect(preview.text).toContain('ask\twith tab[31m and escape');
+    expect(preview.text).toContain('focusline');
+    expect(preview.sourceTitle).toBe('titlex');
   });
 
   it('has no model path: imports nothing that can dispatch', () => {
