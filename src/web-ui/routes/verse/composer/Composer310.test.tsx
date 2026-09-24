@@ -13,8 +13,13 @@
  *   - paste / drop attach files (8 MB cap on the client too), the `@path`
  *     token lands in the text and leaves with the chip; grok refuses;
  *   - `@` fuzzy-finds files, `/` runs commands;
- *   - at 375px the footer folds its pickers into a bottom sheet.
+ *   - at 375px the footer folds its pickers into a bottom sheet;
+ *   - (3.10.1) the measured fold: mounts folded, re-measures on words and on
+ *     the capacity ring, folds from where it is on a width change, never
+ *     moves under an open sheet or menu, and keeps focus and Esc-to-stop
+ *     working across every fold change.
  */
+import { Profiler } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -27,6 +32,7 @@ import type {
 import { CLAUDE_SEAT, CODEX_SEAT, GROK_SEAT, LOCAL_SEAT } from '../fixtures.test-support.js';
 import { Composer, type ComposerProps } from '../Composer.js';
 import { ContextMeter } from '../ContextMeter.js';
+import { ControlMenu } from './ControlMenu.js';
 import { moduleDeclaration } from '../../../design/token-probe.test-support.js';
 import type { VerseSeat } from '../../../data/api-types.js';
 import { detectKeyPlatform } from '../shell/command-catalog.js';
@@ -650,12 +656,15 @@ describe('footer — whole words', () => {
     ['accept-edits', 'Accept edits', 'Accept edits'],
     ['auto', 'Auto', 'Auto'],
     ['bypass', 'Bypass', 'Bypass permissions'],
-  ] as const)('mode %s shows "%s" in full; its name and title carry "%s"', async (mode, shown, full) => {
+  ] as const)('mode %s shows "%s" in full; its name and tooltip carry "%s"', async (mode, shown, full) => {
     server = installServer({ controls: controlsView({ permissionMode: mode }) });
     await renderReady();
     const button = screen.getByRole('button', { name: `Permission mode: ${full}` });
     expect(button).toHaveTextContent(new RegExp(`^${shown}$`));
-    expect(button.getAttribute('title')).toMatch(new RegExp(`^Permission mode: ${full} \\(.+M\\)$`));
+    // The Tooltip primitive, not a native title (which never shows on keyboard focus).
+    expect(button).not.toHaveAttribute('title');
+    act(() => { button.focus(); });
+    expect(screen.getByRole('tooltip')).toHaveTextContent(new RegExp(`^Permission mode: ${full}.+M$`));
   });
 
   it('no footer label can ellipsize: no max-width, no text-overflow on the picker, chip or send text', () => {
@@ -729,42 +738,48 @@ describe('footer — context ring', () => {
 });
 
 describe('footer — folds instead of truncating', () => {
-  // jsdom lays nothing out: give the footer a width, and make its content as
-  // wide as its visible text, so the fold steps are exercised for real.
+  // jsdom lays nothing out: give every element the footer's width, and make
+  // an element's content as wide as its visible text — plus the seat chip's
+  // capacity ring, which has no text but takes room — so the fold steps are
+  // exercised for real. Spies on Element.prototype (where jsdom defines both
+  // getters), so the config's `restoreMocks` puts jsdom's own back after each test.
   const CHAR = 8;
+  const RING_CHARS = 3;
   let limitChars = 0;
-  let restore: () => void = () => {};
+  const observers = new Set<{ deliver(): void }>();
 
   beforeEach(() => {
-    const scroll = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollWidth');
-    const client = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
-    Object.defineProperty(HTMLElement.prototype, 'scrollWidth', {
-      configurable: true,
-      get(this: HTMLElement) {
-        // Visible text only: a screen-reader-only label takes no room.
-        let chars = (this.textContent ?? '').length;
-        this.querySelectorAll('.visually-hidden').forEach((hidden) => { chars -= (hidden.textContent ?? '').length; });
-        return chars * CHAR;
-      },
+    observers.clear();
+    vi.spyOn(Element.prototype, 'scrollWidth', 'get').mockImplementation(function scrollWidth(this: Element) {
+      // Visible text only: a screen-reader-only label takes no room.
+      let chars = (this.textContent ?? '').length;
+      this.querySelectorAll('.visually-hidden').forEach((hidden) => { chars -= (hidden.textContent ?? '').length; });
+      chars += this.querySelectorAll('svg[data-tone]').length * RING_CHARS;
+      return chars * CHAR;
     });
-    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get() { return limitChars * CHAR; } });
+    vi.spyOn(Element.prototype, 'clientWidth', 'get').mockImplementation(() => limitChars * CHAR);
+    // Reports only when the test moves the width: the first measurement must
+    // not wait for it (a real observer delivers after the first paint).
     vi.stubGlobal('ResizeObserver', class {
       constructor(private readonly callback: ResizeObserverCallback) {}
-      observe() { this.callback([{ contentRect: { width: limitChars * CHAR } } as ResizeObserverEntry], this as unknown as ResizeObserver); }
-      disconnect() {}
+      deliver() { this.callback([{ contentRect: { width: limitChars * CHAR } } as ResizeObserverEntry], this as unknown as ResizeObserver); }
+      observe() { observers.add(this); }
+      disconnect() { observers.delete(this); }
       unobserve() {}
     });
-    restore = () => {
-      if (scroll) Object.defineProperty(HTMLElement.prototype, 'scrollWidth', scroll);
-      if (client) Object.defineProperty(HTMLElement.prototype, 'clientWidth', client);
-    };
   });
-  afterEach(() => restore());
+
+  /** The chat column changes width (the dock or sidebar opens or closes, a drag). */
+  function resize(chars: number) {
+    limitChars = chars;
+    act(() => { for (const observer of observers) observer.deliver(); });
+  }
+
+  // Visible at fold 0: "Accept edits" "C" "Claude Max" ring "Opus 5" "Effort: High" "—" "Send⏎" = 50 chars;
+  // fold 1 drops "Effort: " (42), fold 2 "Claude Max" (32), fold 3 "Accept edits" (20); fold 4 is "C" ring "Send⏎" (9).
 
   it('drops "Effort:", then the seat name, then the mode word — names intact, nothing ellipsized', async () => {
     const user = userEvent.setup();
-    // Visible: "Accept edits" "C" "Claude Max" "Opus 5" "Effort: High" "—" "Send⏎" = 47 chars;
-    // fold 1 drops "Effort: " (39), fold 2 "Claude Max" (29), fold 3 "Accept edits" (17).
     limitChars = 25;
     server = installServer({ controls: controlsView({ effort: 'high' }) });
     render(<Composer {...props()} />);
@@ -791,5 +806,223 @@ describe('footer — folds instead of truncating', () => {
     const user = userEvent.setup();
     await user.click(more);
     expect(within(screen.getByRole('dialog', { name: 'Chat settings' })).getByRole('menu', { name: 'Model' })).toBeInTheDocument();
+  });
+
+  it('mounts already folded — on every chat switch — without waiting for a ResizeObserver delivery', async () => {
+    limitChars = 25;
+    server = installServer({ controls: controlsView({ effort: 'high' }) });
+    const view = render(<Composer key="vs_1" {...props()} />);
+    expect(await screen.findByRole('button', { name: 'Permission mode: Accept edits' })).toHaveTextContent(/^$/);
+    // Workspace keys Composer by chat: a switch mounts a new one.
+    view.rerender(<Composer key="vs_2" {...props({ sessionId: 'vs_2' })} />);
+    const mode = await screen.findByRole('button', { name: 'Permission mode: Accept edits' });
+    expect(mode).toHaveTextContent(/^$/);
+    expect(screen.getByRole('button', { name: 'Effort: High' })).toHaveTextContent(/^High$/);
+    expect(observers.size).toBe(1);
+  });
+
+  it('a width change folds from where it is: no render while the fold holds, one render to a new fold, never back through fold 0', async () => {
+    limitChars = 25;
+    server = installServer({ controls: controlsView({ effort: 'high' }) });
+    let commits = 0;
+    render(<Profiler id="composer" onRender={() => { commits += 1; }}><Composer {...props()} /></Profiler>);
+    const mode = await screen.findByRole('button', { name: 'Permission mode: Accept edits' });
+    await waitFor(() => expect(mode).toHaveTextContent(/^$/));
+    await act(async () => {});
+    const seatChip = screen.getByRole('button', { name: /^Seat: Claude Max,/ });
+
+    // A drag: a pixel at a time, the fold never changes — nothing renders.
+    commits = 0;
+    for (const chars of [24, 26, 28, 31, 30]) resize(chars);
+    expect(commits).toBe(0);
+    expect(mode).toHaveTextContent(/^$/);
+
+    // Room for fold 2 (32) but not fold 1 (42): ONE render, straight there.
+    resize(33);
+    expect(commits).toBe(1);
+    expect(mode).toHaveTextContent(/^Accept edits$/);
+    expect(seatChip).not.toHaveTextContent('Claude Max');
+    expect(screen.getByRole('button', { name: 'Effort: High' })).toHaveTextContent(/^High$/);
+
+    // Narrower again: one step up from here, not a climb from fold 0.
+    commits = 0;
+    resize(25);
+    expect(commits).toBe(1);
+    expect(mode).toHaveTextContent(/^$/);
+
+    // Room for every word: one render to fold 0.
+    commits = 0;
+    resize(60);
+    expect(commits).toBe(1);
+    expect(screen.getByRole('button', { name: 'Effort: High' })).toHaveTextContent(/^Effort: High$/);
+    expect(seatChip).toHaveTextContent('Claude Max');
+  });
+
+  it('measures again when the seat’s capacity ring appears or goes (it takes room without changing a word)', async () => {
+    const unread: VerseSeat = { ...CLAUDE_SEAT, health: { ...CLAUDE_SEAT.health, summary: null, windows: [] } };
+    // No ring: fold 2 is 29 chars and fits 30. With the ring it is 32 and does not.
+    limitChars = 30;
+    server = installServer({ controls: controlsView({ effort: 'high' }) });
+    const view = render(<Composer {...props({ seats: [unread, CODEX_SEAT, LOCAL_SEAT, GROK_SEAT] })} />);
+    const mode = await screen.findByRole('button', { name: 'Permission mode: Accept edits' });
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Seat: Claude Max,/ })).not.toHaveTextContent('Claude Max'));
+    expect(mode).toHaveTextContent(/^Accept edits$/);
+    expect(screen.getByRole('button', { name: /^Seat: Claude Max,/ }).querySelector('svg')).toBeNull();
+
+    // The next roster poll brings a reading: the ring appears, and the row folds one more step.
+    view.rerender(<Composer {...props()} />);
+    expect(screen.getByRole('button', { name: /^Seat: Claude Max,/ }).querySelector('svg')).not.toBeNull();
+    expect(mode).toHaveTextContent(/^$/);
+
+    // …and unfolds again when the reading goes.
+    view.rerender(<Composer {...props({ seats: [unread, CODEX_SEAT, LOCAL_SEAT, GROK_SEAT] })} />);
+    expect(mode).toHaveTextContent(/^Accept edits$/);
+  });
+
+  it('words that change while the footer has no size are measured when it gets one back, even at the same width', async () => {
+    const unread: VerseSeat = { ...CLAUDE_SEAT, health: { ...CLAUDE_SEAT.health, summary: null, windows: [] } };
+    // No ring: 47 chars, fits 48. With the ring: 50 — fold 1 (42).
+    limitChars = 48;
+    server = installServer({ controls: controlsView({ effort: 'high' }) });
+    const view = render(<Composer {...props({ seats: [unread, CODEX_SEAT, LOCAL_SEAT, GROK_SEAT] })} />);
+    const effort = await screen.findByRole('button', { name: 'Effort: High' });
+    expect(effort).toHaveTextContent(/^Effort: High$/);
+    resize(0); // the panel is hidden
+    view.rerender(<Composer {...props()} />);
+    resize(48); // shown again, at the width it had
+    expect(effort).toHaveTextContent(/^High$/);
+  });
+
+  it('the icon-only mode picker shows its words on keyboard focus (the Tooltip, not a hover-only title)', async () => {
+    const user = userEvent.setup();
+    limitChars = 25;
+    render(<Composer {...props()} />);
+    const mode = await screen.findByRole('button', { name: 'Permission mode: Accept edits' });
+    await waitFor(() => expect(mode).toHaveTextContent(/^$/));
+    expect(mode).not.toHaveAttribute('title');
+    screen.getByRole('textbox', { name: 'Message' }).focus();
+    for (let i = 0; i < 6 && document.activeElement !== mode; i++) await user.tab();
+    expect(mode).toHaveFocus();
+    expect(screen.getByRole('tooltip')).toHaveTextContent(/^Permission mode: Accept edits.+M$/);
+    expect(mode).toHaveAccessibleDescription(/^Permission mode: Accept edits/);
+    await user.tab();
+    expect(screen.queryByRole('tooltip', { name: /Permission mode/ })).toBeNull();
+  });
+
+  describe('the ⋯ sheet in a wide window with a narrow chat column', () => {
+    it('a pick in the sheet keeps the sheet and the focus where they are; Esc returns to ⋯', async () => {
+      const user = userEvent.setup();
+      limitChars = 10;
+      const p = props();
+      const view = render(<Composer {...p} />);
+      await user.click(await screen.findByRole('button', { name: /^Chat settings: Accept edits, Opus 5/ }));
+      const sheet = screen.getByRole('dialog', { name: 'Chat settings' });
+      // Done → the Permission list → the Model list.
+      await user.tab();
+      await user.tab();
+      const models = within(sheet).getByRole('menu', { name: 'Model' });
+      expect(within(models).getByRole('menuitemradio', { name: /^Opus 5/ })).toHaveFocus();
+      await user.keyboard('{ArrowDown}');
+      const sonnet = within(models).getByRole('menuitemradio', { name: /^Sonnet 5/ });
+      expect(sonnet).toHaveFocus();
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(server.posts(/session-controls/).at(-1)!.body).toEqual({ model: 'claude-sonnet-5' }));
+      await waitFor(() => expect(sonnet).toHaveAttribute('aria-checked', 'true'));
+      // New words in the row (the model's name): the sheet was not remounted and focus stayed on the pick.
+      expect(screen.getByRole('dialog', { name: 'Chat settings' })).toBe(sheet);
+      expect(sonnet).toHaveFocus();
+      // A turn starting under the open sheet changes the words again: still nothing moves.
+      view.rerender(<Composer {...p} running />);
+      expect(screen.getByRole('dialog', { name: 'Chat settings' })).toBe(sheet);
+      expect(sonnet).toHaveFocus();
+      // Esc: focus back on ⋯ (the one on screen now), never <body>.
+      await user.keyboard('{Escape}');
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(screen.getByRole('button', { name: /^Chat settings: Accept edits, Sonnet 5/ })).toHaveFocus();
+    });
+
+    it('widening under the open sheet leaves it open; closed, the row unfolds, focus lands in the box, and Esc stops the turn', async () => {
+      const user = userEvent.setup();
+      limitChars = 10;
+      const p = props({ running: true });
+      render(<Composer {...p} />);
+      await user.click(await screen.findByRole('button', { name: /^Chat settings/ }));
+      const sheet = screen.getByRole('dialog', { name: 'Chat settings' });
+      resize(200);
+      expect(screen.getByRole('dialog', { name: 'Chat settings' })).toBe(sheet);
+      expect(sheet).toContainElement(document.activeElement as HTMLElement);
+
+      await user.keyboard('{Escape}');
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Permission mode: Accept edits' })).toHaveTextContent(/^Accept edits$/);
+      const box = screen.getByRole('textbox', { name: 'Message' });
+      expect(box).toHaveFocus();
+      await user.keyboard('{Escape}');
+      expect(p.onStop).toHaveBeenCalledTimes(1);
+
+      // Narrow again: the row folds to ⋯, and the sheet does not come back by itself.
+      resize(10);
+      expect(screen.getByRole('button', { name: /^Chat settings/ })).toBeInTheDocument();
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
+
+    it('a picker menu open while the column narrows: nothing folds under it; closed, focus goes to ⋯ and Esc still stops the turn', async () => {
+      const user = userEvent.setup();
+      limitChars = 200;
+      const p = props({ running: true });
+      render(<Composer {...p} />);
+      await screen.findByRole('button', { name: /^Permission mode:/ });
+      await user.keyboard(chord('i'));
+      const menu = await screen.findByRole('menu', { name: 'Model' });
+      resize(10);
+      expect(menu).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^Chat settings/ })).toBeNull();
+
+      await user.keyboard('{Escape}');
+      expect(screen.queryByRole('menu')).toBeNull();
+      // The Model button folded into ⋯ as the menu closed: focus follows it there.
+      expect(screen.getByRole('button', { name: /^Chat settings/ })).toHaveFocus();
+      screen.getByRole('textbox', { name: 'Message' }).focus();
+      await user.keyboard('{Escape}');
+      expect(p.onStop).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+describe('ControlMenu', () => {
+  it('unmounted while open, it reports itself closed (else the composer’s Esc-to-stop stays disarmed)', async () => {
+    const user = userEvent.setup();
+    const onOpenChange = vi.fn();
+    const view = render(
+      <ControlMenu<string> label="Model" valueLabel="Opus 5" value="a" onChange={() => {}} onOpenChange={onOpenChange}
+        options={[{ id: 'a', label: 'Opus 5', available: true }, { id: 'b', label: 'Sonnet 5', available: true }]} />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Model: Opus 5' }));
+    expect(onOpenChange).toHaveBeenLastCalledWith(true);
+    view.unmount();
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('closed when unmounted, it reports nothing', () => {
+    const onOpenChange = vi.fn();
+    const view = render(
+      <ControlMenu<string> label="Model" valueLabel="Opus 5" value="a" onChange={() => {}} onOpenChange={onOpenChange}
+        options={[{ id: 'a', label: 'Opus 5', available: true }]} />,
+    );
+    view.unmount();
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('the fold tests’ width stubs', () => {
+  it('leave jsdom’s own widths in place for every later test', () => {
+    expect(Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollWidth')).toBeUndefined();
+    expect(Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')).toBeUndefined();
+    const probe = document.createElement('div');
+    probe.textContent = 'x'.repeat(40);
+    document.body.append(probe);
+    expect(probe.scrollWidth).toBe(0);
+    expect(probe.clientWidth).toBe(0);
+    probe.remove();
   });
 });
