@@ -14,14 +14,16 @@
  * Rows read like the drawer's (shell/needs-you-model needsYouRowView, one
  * copy): a "Patch · Claude run" label over a title that ends on a whole word
  * (two lines at most, the server's text as its tooltip), "2 files · +384 −0 ·
- * Test-and-repair loop" for a sandboxed run, the repo's short name, and
- * "38 days ago" with the exact local time on hover.
+ * Test-and-repair loop" for a sandboxed run, the repo's short name, the seat
+ * by its label ("Claude Max", the id on hover — never "claude-a"), and "38
+ * days ago" with the exact local time on hover.
  */
 import { Fragment, type ReactElement } from 'react';
 import type { NeedsYouAction, NeedsYouItem, VerseActivityResponse } from '../../../../core/verse/workbench-types.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { IconExternalLink } from '../../../components/primitives/icons.js';
 import { useNow } from '../autonomy/use-ticker.js';
+import { ENGINE_LABEL, isVerseEngine } from '../verse-model.js';
 import { rankNeedsYou, silentSources } from './command-model.js';
 import { anchorId, goToSection, openChat, openNeedsYou } from './nav.js';
 import { postNeedsYouAction } from './surface-data.js';
@@ -74,13 +76,35 @@ function targetLink(item: NeedsYouItem): { label: string; onOpen?: () => void; h
   }
 }
 
-/** "binshield · #81 · 38 days ago" — the short repo and the exact time ride in tooltips. */
-function Meta({ item, view }: { item: NeedsYouItem; view: NeedsYouRowView }) {
+/** Seat id → display label (command-model `seatNames`). */
+export type SeatNames = ReadonlyMap<string, string>;
+
+/**
+ * The row's kind label with its engine named the way every other surface
+ * names it (verse-model ENGINE_LABEL): the shared title reader
+ * (approvals-model `readableTitle`) keeps the wire's lower case for a
+ * PARTIAL run, so "Patch · Claude run" sat beside "Patch · Partial claude
+ * run". Only the trailing "<engine> run" eyebrow is touched.
+ */
+export function cardKindLabel(label: string | null): string | null {
+  if (label === null) return null;
+  return label.replace(/(^|· )(Partial )?([a-z][\w-]*) run$/, (_m, lead: string, partial: string | undefined, engine: string) => {
+    const name = isVerseEngine(engine) ? ENGINE_LABEL[engine] : `${engine.charAt(0).toUpperCase()}${engine.slice(1)}`;
+    return `${lead}${partial ?? ''}${name} run`;
+  });
+}
+
+/** "binshield · #81 · Claude Max · 38 days ago" — the full repo, the seat id and the exact time ride in tooltips. */
+function Meta({ item, view, seatNames }: { item: NeedsYouItem; view: NeedsYouRowView; seatNames: SeatNames | undefined }) {
   const s = item.subject;
   const parts: ReactElement[] = [];
   if (view.repo) parts.push(<span key="repo" className={styles.needsRepo} title={view.repoFull}>{view.repo}</span>);
   if (s.pr) parts.push(<span key="pr">#{s.pr}</span>);
-  if (s.seatId) parts.push(<span key="seat">{s.seatId}</span>);
+  if (s.seatId) {
+    // Unknown to both the roster and the budget route: the id is all there is.
+    const name = seatNames?.get(s.seatId) ?? s.seatId;
+    parts.push(<span key="seat" title={name === s.seatId ? undefined : s.seatId}>{name}</span>);
+  }
   parts.push(<span key="age" title={view.ageStamp}>{view.age}</span>);
   return (
     <span className={styles.needsMeta}>
@@ -94,15 +118,16 @@ function Meta({ item, view }: { item: NeedsYouItem; view: NeedsYouRowView }) {
   );
 }
 
-export function NeedsYouRow({ item, actions, now }: { item: NeedsYouItem; actions: SurfaceActions; now: number }) {
+export function NeedsYouRow({ item, actions, now, seatNames }: { item: NeedsYouItem; actions: SurfaceActions; now: number; seatNames?: SeatNames }) {
   const link = targetLink(item);
   const runnable = item.actions.filter((a) => a.request !== null);
   const view = needsYouRowView(item, now);
+  const kind = cardKindLabel(view.kindLabel);
   return (
     <li className={styles.needsRow} data-severity={item.severity} id={anchorId(item.id)}>
       <span className={styles.sevDot} data-severity={item.severity} aria-hidden="true" />
       <div className={styles.needsText}>
-        {view.kindLabel ? <span className={styles.needsKind}>{view.kindLabel}</span> : null}
+        {kind ? <span className={styles.needsKind}>{kind}</span> : null}
         {/* Two lines at most, ending on a whole word; the server's title is the tooltip. */}
         <span className={styles.needsTitle} title={view.fullTitle}>
           <span className="visually-hidden">{SEVERITY_WORD[item.severity]}: </span>
@@ -110,7 +135,7 @@ export function NeedsYouRow({ item, actions, now }: { item: NeedsYouItem; action
         </span>
         {view.run ? <NeedsYouRunFacts run={view.run} /> : null}
         {view.detail ? <span className={styles.needsDetail}>{view.detail}</span> : null}
-        <Meta item={item} view={view} />
+        <Meta item={item} view={view} seatNames={seatNames} />
       </div>
       <div className={styles.needsActions}>
         {runnable.map((action) => (
@@ -155,7 +180,18 @@ export function activityRead(state: ActivityState): { activity: VerseActivityRes
   return { activity: state.data, loading: false, reason: null, stale: state.status === 'stale' };
 }
 
-export function NeedsYouCard({ state, actions, fleetLine }: { state: ActivityState; actions: SurfaceActions; fleetLine: string }) {
+export function NeedsYouCard({
+  state,
+  actions,
+  fleetLine,
+  seatNames,
+}: {
+  state: ActivityState;
+  actions: SurfaceActions;
+  fleetLine: string;
+  /** Labels for the seats items name; an id neither source knows is shown as sent. */
+  seatNames?: SeatNames;
+}) {
   const { activity, loading, reason, stale } = activityRead(state);
   const now = useNow(AGE_TICK_MS);
   const items = activity ? rankNeedsYou(activity.needsYou) : [];
@@ -194,7 +230,7 @@ export function NeedsYouCard({ state, actions, fleetLine }: { state: ActivitySta
         <>
           <ul className={styles.needsList}>
             {shown.map((item) => (
-              <NeedsYouRow key={item.id} item={item} actions={actions} now={now} />
+              <NeedsYouRow key={item.id} item={item} actions={actions} now={now} seatNames={seatNames} />
             ))}
           </ul>
           {items.length > shown.length ? (

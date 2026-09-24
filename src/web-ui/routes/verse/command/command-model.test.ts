@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { VerseSeat } from '../../../../core/verse/types.js';
-import { bindingLine, bindingReset, bindingResetText, buildKpis, burnTimeFormat, formatSpan, mergeSeatHistory, rankNeedsYou, recordReading, resetInstantFromWords, resetWords, SEAT_READINGS_MAX, seatBurns, seriesKey, silentSources, sinceYouLooked, subscriptionUsage, windowSum } from './command-model.js';
+import { bindingLine, bindingReset, bindingResetText, buildKpis, burnTimeFormat, formatSpan, mergeSeatHistory, rankNeedsYou, reasonResetText, recordReading, resetInstantFromWords, resetWords, SEAT_READINGS_MAX, seatBurns, seatNames, seatReasons, seatReasonText, seriesKey, silentSources, sinceYouLooked, subscriptionUsage, windowSum } from './command-model.js';
 import { activitySnapshot, budgetView, fleetHistory, fleetLive, leaderState, learningState, needsYouItems, seatHistory } from './fixtures.test-support.js';
 import type { CapacityHistoryResponse } from '../../../../core/routing/capacity-history-types.js';
+import { reasonSentence } from '../../../../core/routing/seat-reasons.js';
+import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 
 const NOW = Date.parse('2026-09-24T15:00:00Z');
 
@@ -133,15 +135,59 @@ describe('recorded seat history (GET /api/verse/budget/history)', () => {
     v: 1, generatedAt: new Date(NOW).toISOString(), days: 8, since: new Date(NOW - 8 * DAY).toISOString(), oldestAt: null, series, truncated: false,
   });
 
-  it('merges the server\'s history under this page\'s readings: one per instant, oldest first, live wins a tie', () => {
-    const live = { [GROK]: [{ t: NOW - HOUR, used: 30 }, { t: NOW, used: 31 }] };
+  const at = (series: CapacityHistoryResponse['series'], generatedAt: number | string): CapacityHistoryResponse => ({
+    ...response(series),
+    generatedAt: typeof generatedAt === 'number' ? new Date(generatedAt).toISOString() : generatedAt,
+  });
+
+  it('draws the recorded history up to when the server answered, then only this page\'s later readings', () => {
+    // Live readings at or before generatedAt are the server's to record (at
+    // their observedAt); only the one after it extends the line.
+    const live = { [GROK]: [{ t: NOW - 2 * HOUR, used: 28 }, { t: NOW - HOUR, used: 30 }, { t: NOW + 30_000, used: 31 }] };
     const merged = mergeSeatHistory(live, response([
       { seatId: 'grok-a', window: 'weekly', points: [[NOW - 2 * DAY, 10], [NOW - DAY, 20], [NOW - HOUR, 29]], resetsAt: null, thinned: false },
     ]));
     expect(merged.readings[GROK]).toEqual([
-      { t: NOW - 2 * DAY, used: 10 }, { t: NOW - DAY, used: 20 }, { t: NOW - HOUR, used: 30 }, { t: NOW, used: 31 },
+      { t: NOW - 2 * DAY, used: 10 }, { t: NOW - DAY, used: 20 }, { t: NOW - HOUR, used: 29 }, { t: NOW + 30_000, used: 31 },
     ]);
     expect(merged.recorded.has(GROK)).toBe(true);
+  });
+
+  // Review 3.10.1: live readings are stamped when the budget route was ASKED
+  // (sampledAt), recorded rows when the provider was READ (observedAt). Mixed
+  // per instant, a poll that still served the pre-reset 85% sorted after the
+  // recorded post-reset 3% — a spike, and the reset cut then dropped the
+  // first real post-reset reading.
+  it('never interleaves the two clocks across a window reset', () => {
+    const t0 = NOW;
+    const merged = mergeSeatHistory(
+      { [GROK]: [{ t: t0 - 5 * 60_000 + 5_000, used: 85 }, { t: t0 + 12_000, used: 85 }, { t: t0 + 40_000, used: 3 }] },
+      at([{ seatId: 'grok-a', window: 'weekly', points: [[t0 - 5 * 60_000, 85], [t0 + 10_000, 3]], resetsAt: null, thinned: false }], t0 + 30_000),
+    );
+    const line = merged.readings[GROK]!;
+    // The line starts at the first post-reset reading the server recorded, and never climbs back to 85.
+    expect(line[0]).toEqual({ t: t0 + 10_000, used: 3 });
+    expect(line.map((r) => r.used)).toEqual([3, 3]);
+    expect(line.map((r) => r.t)).toEqual([t0 + 10_000, t0 + 40_000]);
+  });
+
+  it('never dips a rising line with a live reading of an older observation', () => {
+    const merged = mergeSeatHistory(
+      { [GROK]: [{ t: NOW + 12_000, used: 50 }, { t: NOW + 42_000, used: 52 }] },
+      at([{ seatId: 'grok-a', window: 'weekly', points: [[NOW - 5 * 60_000, 50], [NOW + 10_000, 52]], resetsAt: null, thinned: false }], NOW + 30_000),
+    );
+    const used = merged.readings[GROK]!.map((r) => r.used);
+    expect(used).toEqual([50, 52, 52]);
+    // Oldest first, every step up or level — one clock at a time.
+    for (let i = 1; i < used.length; i++) expect(used[i]!).toBeGreaterThanOrEqual(used[i - 1]!);
+  });
+
+  it('falls back to the newest recorded row when generatedAt is unreadable', () => {
+    const merged = mergeSeatHistory(
+      { [GROK]: [{ t: NOW - 2 * HOUR, used: 40 }, { t: NOW - 30 * 60_000, used: 44 }] },
+      at([{ seatId: 'grok-a', window: 'weekly', points: [[NOW - 3 * HOUR, 38], [NOW - HOUR, 42]], resetsAt: null, thinned: false }], 'not a time'),
+    );
+    expect(merged.readings[GROK]!.map((r) => r.used)).toEqual([38, 42, 44]);
   });
 
   it('starts after the last reset, collapses flat runs, and keeps live-only lines unrecorded', () => {
@@ -311,6 +357,83 @@ describe('seat burn-downs without a machine reset (Claude)', () => {
   });
 });
 
+// Review 3.10.1 (high): the budget route's reasons are the router's LOG
+// sentences — "… stops at 92% (resets 2026-09-26T03:46:56.000Z)." — and the
+// cards printed them verbatim: a UTC instant, nested parentheses for Claude,
+// and ".." once a period followed. Built here with the real producer.
+describe('seat reasons in words', () => {
+  const RESET_ISO = '2026-09-26T03:46:56.000Z';
+  const reserveText = 'The weekly window is 92% used; 8% is kept for you, so autonomy stops at 92%.';
+  const codexHeld = (reason: string) => {
+    const view = budgetView('live', NOW);
+    view.headroom[2] = { ...view.headroom[2]!, weeklyUsedPercent: 92, resetAt: RESET_ISO, reasons: [reason] };
+    view.effective['codex-a'] = { seatId: 'codex-a', enabled: true, reservePercent: 8 };
+    return seatBurns(view, recordReading({}, view)).find((b) => b.seatId === 'codex-a')!;
+  };
+
+  it('prints the sentence once, closed by one period, without the log\'s reset clause', () => {
+    const wire = reasonSentence({ kind: 'reserve', text: reserveText, resetsAt: RESET_ISO });
+    expect(wire).toBe(`The weekly window is 92% used; 8% is kept for you, so autonomy stops at 92% (resets ${RESET_ISO}).`);
+    const codex = codexHeld(wire);
+    // The chart already marks this reset ("Resets …" in local time), so the reason does not repeat it.
+    expect(codex.resetAt).toBe(Date.parse(RESET_ISO));
+    expect(codex.reason).toBe(reserveText);
+    expect(codex.reason).not.toMatch(/\d{4}-\d{2}-\d{2}T|\(resets|\.\./);
+  });
+
+  it('names another window\'s reset in the viewer\'s zone, never as UTC ISO', () => {
+    const other = '2026-09-24T19:10:00.000Z';
+    const codex = codexHeld(reasonSentence({ kind: 'spent', text: 'The 5-hour window is spent — limit reached.', resetsAt: other }));
+    expect(codex.reason).toBe(`The 5-hour window is spent — limit reached. Resets ${describeResetAt(other, Date.parse(budgetView('live', NOW).sampledAt))}.`);
+    expect(codex.reason).not.toMatch(/\d{4}-\d{2}-\d{2}T|\(resets/);
+  });
+
+  it('keeps Claude\'s words once — in the header — never as "(resets … (Zone))."', () => {
+    const words = 'Sep 25 at 7pm (America/New_York)';
+    const view = budgetView('live', NOW);
+    const text = 'The weekly window is 97% used; 40% is kept for you, so autonomy stops at 60%.';
+    view.headroom[0] = { ...view.headroom[0]!, bindingWindow: 'weekly', weeklyUsedPercent: 97, resetAt: null, reasons: [reasonSentence({ kind: 'reserve', text, resetDescription: words })] };
+    expect(view.headroom[0].reasons[0]).toBe(`${text.slice(0, -1)} (resets ${words}).`);
+    const roster = [{ id: 'claude-a', capacity: { windows: [{ id: 'seven_day', usedPercent: 97, resetsAt: null, resetDescription: words, limitReached: false, measured: true }] } }] as unknown as VerseSeat[];
+    for (const seats of [roster, null]) {
+      const claude = seatBurns(view, recordReading({}, view), seats).find((b) => b.seatId === 'claude-a')!;
+      expect(claude.reason).toBe(text);
+      // Without a roster the reason's own words place the reset — no "reset time not reported" beside it.
+      expect(claude.resetText).toBe(words);
+      expect(claude.resetFrom).toBe('words');
+    }
+  });
+
+  it('turns an instant inside the sentence into local time, and closes an unterminated one', () => {
+    const inside = '2026-09-24T19:10:00.000Z';
+    const reason = seatReasons([`Parked; the earliest known reopening is ${inside}`])[0];
+    expect(seatReasonText(reason, { resetAt: null, resetText: null }, NOW)).toBe(`Parked; the earliest known reopening is ${describeResetAt(inside, NOW)}.`);
+    expect(seatReasonText(undefined, { resetAt: null, resetText: null }, NOW)).toBeNull();
+    expect(seatReasons([7, '', '  ', 'Signed out — reconnect this account before anything can run on it.'] as unknown[]).map((r) => r.kind)).toEqual(['signed-out']);
+    expect(seatReasons(undefined)).toEqual([]);
+  });
+
+  it('takes reset words from reasons only where headroom.ts ties them to the binding window', () => {
+    const words = 'Sep 25 at 7pm (America/New_York)';
+    expect(reasonResetText(seatReasons([reasonSentence({ kind: 'reserve', text: reserveText, resetDescription: `resets ${words}` })]))).toBe(words);
+    expect(reasonResetText(seatReasons([reasonSentence({ kind: 'session-ceiling', text: 'The 5-hour window is 74% used; autonomy stops at 70% to protect your live session.', resetDescription: words })]))).toBe(words);
+    // A spent window may be the OTHER window; its words never place this chart's reset.
+    expect(reasonResetText(seatReasons([reasonSentence({ kind: 'spent', text: 'The 5-hour window is spent — limit reached.', resetDescription: words })]))).toBeNull();
+  });
+});
+
+describe('seatNames', () => {
+  it('names a seat by its roster label, else the budget route\'s, never inventing one', () => {
+    const view = budgetView('live', NOW);
+    const names = seatNames([{ id: 'claude-a', label: 'Claude Max' }, { id: 'blank', label: '  ' }], view);
+    expect(names.get('claude-a')).toBe('Claude Max');
+    expect(names.get('grok-a')).toBe('Grok (grok-a)');
+    expect(names.has('blank')).toBe(false);
+    expect(names.has('nobody')).toBe(false);
+    expect(seatNames(null, null).size).toBe(0);
+  });
+});
+
 // Review 3.10 c10: subscription runs' token-priced estimate is not metered spend.
 describe('metered spend KPI', () => {
   const policy = { spend: { meteredUsdPerDay: 0 } } as unknown as Parameters<typeof buildKpis>[0]['policy'];
@@ -377,9 +500,11 @@ describe('burnTimeFormat', () => {
   it('dates the weekly axis so start and reset differ', () => {
     const reset = Date.parse('2026-09-26T17:27:00Z');
     const fmt = burnTimeFormat('weekly');
+    // The viewer's local day (Sep 26 in New York, Sep 27 in Tokyo) — never a hard-coded one.
+    const day = (ms: number) => new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     expect(fmt(reset - 7 * 86_400_000)).not.toBe(fmt(reset));
-    expect(fmt(reset)).toMatch(/Sep 26/);
-    expect(fmt(reset - 7 * 86_400_000)).toMatch(/Sep 19/);
+    expect(fmt(reset)).toContain(day(reset));
+    expect(fmt(reset - 7 * 86_400_000)).toContain(day(reset - 7 * 86_400_000));
     // The date alone: a weekday beside it only widened labels that collided.
     expect(fmt(reset)).not.toMatch(/Mon|Tue|Wed|Thu|Fri|Sat|Sun/);
   });

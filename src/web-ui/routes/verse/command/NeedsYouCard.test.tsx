@@ -12,14 +12,14 @@ import { activity, approvalNeed } from '../shell/shell-fixtures.test-support.js'
 import type { ActivityState } from '../shell/useActivity.js';
 import type { ConfirmSpec, SurfaceActions } from './actions.js';
 import { needsYouItems } from './fixtures.test-support.js';
-import { NeedsYouCard } from './NeedsYouCard.js';
+import { cardKindLabel, NeedsYouCard, type SeatNames } from './NeedsYouCard.js';
 
 const DAY = 86_400_000;
 const RAW_TITLE = 'patch: claude run: Advance goal "Add a circuit breaker to binshield\'s worker scan pipeline so a deg';
 const RAW_DETAIL = 'TITRR claude:claude-fable-5 run produced 2 file(s) (+384/-0). Review before applying.';
 
 /** Renders the card with a recording `act`; returns the recorder (what was asked, never run). */
-function renderCard(needsYou: NeedsYouItem[]) {
+function renderCard(needsYou: NeedsYouItem[], seatNames?: SeatNames) {
   const act = vi.fn<(fn: () => Promise<unknown>, reason: string, options?: { confirm?: ConfirmSpec }) => void>();
   const actions: SurfaceActions = {
     act: (fn, reason, options) => act(fn, reason, options),
@@ -30,7 +30,7 @@ function renderCard(needsYou: NeedsYouItem[]) {
     dialogs: null,
   };
   const state: ActivityState = { status: 'ready', data: activity({ needsYou }), updatedAt: Date.now() };
-  render(<NeedsYouCard state={state} actions={actions} fleetLine="Fleet idle." />);
+  render(<NeedsYouCard state={state} actions={actions} fleetLine="Fleet idle." seatNames={seatNames} />);
   return act;
 }
 
@@ -114,5 +114,57 @@ describe('NeedsYouCard rows', () => {
       confirmLabel: 'Reject',
       destructive: false,
     });
+  });
+});
+
+// Review 3.10.1: the card named a seat by its raw id ("claude-a · 2 hours
+// ago") beside a burn-down titled "Claude Max", and a partial run's label
+// read "Partial claude run" beside "Claude run".
+describe('NeedsYouCard names seats and engines as every other surface does', () => {
+  function signedOut(seatId: string): NeedsYouItem {
+    return {
+      id: `accounts:reconnect:${seatId}`,
+      source: 'accounts',
+      kind: 'reconnect',
+      severity: 'high',
+      title: 'Claude Max is signed out',
+      detail: null,
+      since: new Date(Date.now() - 2 * 3_600_000).toISOString(),
+      expiresAt: null,
+      subject: { repo: null, pr: null, seatId, sessionId: null, engine: 'claude' },
+      target: { kind: 'seat', seatId },
+      actions: [],
+    };
+  }
+
+  it('shows the seat by its label, with the id only as the tooltip', () => {
+    renderCard([signedOut('claude-a')], new Map([['claude-a', 'Claude Max']]));
+    const row = screen.getByRole('listitem');
+    expect(within(row).getByText('Claude Max', { selector: 'span[title]' })).toHaveAttribute('title', 'claude-a');
+    expect(within(row).getByText('2 hours ago')).toBeInTheDocument();
+    expect(row.textContent).not.toContain('claude-a');
+  });
+
+  it('shows an id neither the roster nor the budget route knows as sent, with no tooltip', () => {
+    renderCard([signedOut('claude-z')], new Map([['claude-a', 'Claude Max']]));
+    const seat = within(screen.getByRole('listitem')).getByText('claude-z');
+    expect(seat).not.toHaveAttribute('title');
+  });
+
+  it('capitalises the engine of a partial run like a whole one', () => {
+    renderCard([runApproval({ title: `patch: [partial] claude run: ${RAW_TITLE.slice('patch: claude run: '.length)}` })]);
+    const row = screen.getByRole('listitem');
+    expect(within(row).getByText('Patch · Partial Claude run')).toBeInTheDocument();
+    expect(row.textContent).not.toMatch(/Partial claude/);
+  });
+
+  it('touches only the trailing engine eyebrow', () => {
+    expect(cardKindLabel('Patch · Partial claude run')).toBe('Patch · Partial Claude run');
+    expect(cardKindLabel('Partial grok run')).toBe('Partial Grok run');
+    expect(cardKindLabel('Partial ollama run')).toBe('Partial Ollama run');
+    expect(cardKindLabel('Patch · Claude run')).toBe('Patch · Claude run');
+    expect(cardKindLabel('Patch')).toBe('Patch');
+    expect(cardKindLabel('Dry run')).toBe('Dry run');
+    expect(cardKindLabel(null)).toBeNull();
   });
 });
