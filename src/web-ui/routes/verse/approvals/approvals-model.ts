@@ -9,6 +9,7 @@
  * standing between a click and a real pull request against a real remote.
  */
 import type { Proposal, ProposalKind } from '../../../data/api-types.js';
+import { ENGINE_LABEL } from '../verse-model.js';
 
 /** Pending first, then newest first within each group. Stable and total. */
 export function orderProposals(rows: readonly Proposal[]): Proposal[] {
@@ -133,6 +134,14 @@ function capitalize(word: string): string {
   return word.length === 0 ? word : word.charAt(0).toUpperCase() + word.slice(1);
 }
 
+/** The app's own display name for an engine ("Claude", "Codex"); any other engine capitalized ("Ollama"). */
+function engineDisplayName(engine: string): string {
+  const key = engine.toLowerCase();
+  return Object.prototype.hasOwnProperty.call(ENGINE_LABEL, key)
+    ? ENGINE_LABEL[key as keyof typeof ENGINE_LABEL]
+    : capitalize(key);
+}
+
 /** Close a quote the cut left open, so the title does not read as a stray mark. */
 function closeQuotes(text: string): string {
   let out = text;
@@ -153,7 +162,8 @@ export function readableTitle(title: string): ReadableTitle {
   const raw = typeof title === 'string' ? title.trim() : '';
   // Only the engines the sandboxed runner names — "Dry run: …" is a title, not an engine.
   const run = /^(\[partial\]\s*)?(claude|codex|grok|local|ollama|gemini|api[\w-]*) run:\s*(.*)$/is.exec(raw);
-  const eyebrow = run ? `${run[1] ? 'Partial ' : ''}${run[1] ? run[2]!.toLowerCase() : capitalize(run[2]!.toLowerCase())} run` : null;
+  // "Partial Claude run", never "Partial claude run": the engine is a name either way.
+  const eyebrow = run ? `${run[1] ? 'Partial ' : ''}${engineDisplayName(run[2]!)} run` : null;
   let text = run ? run[3]! : raw;
   // A title that already ends in an ellipsis right after a letter was cut mid-word upstream.
   const cutMidWord = /[\p{L}\p{N}](?:\u2026|\.\.\.)$/u.test(text);

@@ -124,6 +124,14 @@ describe('readable approval detail', () => {
     expect(readableTitle('Dry run: check the thing').eyebrow).toBeNull();
   });
 
+  it('names the engine the same way for a partial run: "Partial Claude run", never "Partial claude run"', () => {
+    expect(readableTitle('[partial] claude run: Add the breaker.').eyebrow).toBe('Partial Claude run');
+    expect(readableTitle('[Partial] CODEX run: Rename the flag.')).toEqual({ eyebrow: 'Partial Codex run', text: 'Rename the flag.', truncated: false });
+    expect(readableTitle('[partial] grok run: x').eyebrow).toBe('Partial Grok run');
+    expect(readableTitle('[partial] ollama run: x').eyebrow).toBe('Partial Ollama run');
+    expect(readableTitle('local run: x').eyebrow).toBe('Local run');
+  });
+
   it('takes the run summary apart: stats, plain-language source with the acronym in a hint, and the rest', () => {
     const facts = parseRunSummary(SUMMARY)!;
     expect(facts).toMatchObject({ partial: false, source: 'TITRR', model: 'claude:claude-fable-5', files: 2, insertions: 384, deletions: 0, rest: 'Review before applying.' });
@@ -159,7 +167,9 @@ describe('readable approval detail', () => {
     expect(longAgo('2026-09-24T11:59:40.000Z', now)).toBe('just now');
     expect(longAgo('2026-09-24T11:55:00.000Z', now)).toBe('5 minutes ago');
     expect(longAgo('2026-09-23T12:00:00.000Z', now)).toBe('yesterday');
-    expect(longAgo('2026-05-01T12:00:00.000Z', now)).toMatch(/^on May 1, 2026$/);
+    // Noon on May 1 LOCAL time — the date a viewer reads is their own calendar
+    // day, so a UTC-noon instant is May 2 from UTC+12 eastward.
+    expect(longAgo(new Date(2026, 4, 1, 12).toISOString(), now)).toMatch(/^on May 1, 2026$/);
     expect(longAgo('nope', now)).toBe('at an unknown time');
   });
 });

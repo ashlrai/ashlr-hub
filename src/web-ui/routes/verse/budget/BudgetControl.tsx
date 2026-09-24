@@ -33,7 +33,7 @@ import { Switch } from '../../../components/primitives/Switch.js';
 import { EngineMarker } from '../../../components/primitives/Tag.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { describeContextError, useTokenGate } from '../context/use-token-gate.js';
-import { tidyProse } from '../autonomy/format.js';
+import { percentText, tidyProse } from '../autonomy/format.js';
 import { readBudgetRows } from '../usage/capacity-strip-model.js';
 import {
   BUDGET_MODE_OPTIONS,
@@ -88,7 +88,8 @@ function HeadroomBar({ bar }: { bar: BudgetBar }) {
         {ceiling < 100 ? <div className={styles.ceiling} style={{ left: `${ceiling}%` }} /> : null}
       </div>
       <span className={styles.barValue}>
-        {usedPct}% used{ceiling < 100 ? ` · stops at ${ceiling}%` : ''}
+        {/* Words by the one percent rule; the bar geometry stays numeric. */}
+        {percentText(used)} used{ceiling < 100 ? ` · stops at ${ceiling}%` : ''}
       </span>
     </div>
   );

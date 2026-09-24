@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import type { BudgetView } from '../../../../core/routing/policy.js';
 import type { SeatDecision, SeatHeadroom } from '../../../../core/routing/types.js';
+import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { evictAll } from '../../../data/cache.js';
 import { installFetch, json, TEST_TOKEN } from '../context/context-fixtures.test-support.js';
@@ -10,6 +11,8 @@ import { BudgetControl, BudgetControlView, BUDGET_COMMIT_DELAY_MS } from './Budg
 import { buildBudgetRows, budgetSummary, clampPercent, readingAge } from './budget-model.js';
 
 const NOW = Date.parse('2026-09-24T12:00:00.000Z');
+/** Literal en-US words are pinned only under that default locale; elsewhere the formatter's own output is. */
+const EN_US = new Intl.DateTimeFormat().resolvedOptions().locale === 'en-US';
 
 function headroom(seatId: string, patch: Partial<SeatHeadroom> = {}): SeatHeadroom {
   return {
@@ -110,12 +113,15 @@ describe('budget-model', () => {
 
   it('prints the router\u2019s reasons verbatim except for a raw ISO instant and a ".;" join', () => {
     const at = new Date(2026, 8, 26, 23, 46); // local, so the words hold in any zone
+    const now = new Date(2026, 8, 25, 12, 0).getTime();
     const rows = buildBudgetRows(view({
       headroom: [headroom('claude', { reasons: [
         `Weekly window at 100% (resets ${at.toISOString()}).; Autonomy waits for the reset.`,
       ] })],
-    }), new Date(2026, 8, 25, 12, 0).getTime());
-    expect(rows[0]!.why).toBe('Weekly window at 100% (resets Sat 11:46 PM); Autonomy waits for the reset.');
+    }), now);
+    // The shared reset wording in the default locale — "Sat 11:46 PM" under en-US.
+    expect(rows[0]!.why).toBe(`Weekly window at 100% (resets ${describeResetAt(at.toISOString(), now)}); Autonomy waits for the reset.`);
+    if (EN_US) expect(rows[0]!.why).toBe('Weekly window at 100% (resets Sat 11:46 PM); Autonomy waits for the reset.');
     expect(rows[0]!.why).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
   });
 
@@ -133,14 +139,16 @@ describe('budget-model', () => {
 describe('BudgetControlView', () => {
   it('says a missing reading time plainly, localises the next-task reason, and gives a truncating name its tooltip', () => {
     const at = new Date(2026, 8, 26, 23, 46);
+    const nowMs = new Date(2026, 8, 25, 12, 0).getTime();
     renderView({
       view: view({ sampledAt: 'x' }),
       preview: { ...PREVIEW, why: `Claude is held back until ${at.toISOString()}.` },
-      nowMs: new Date(2026, 8, 25, 12, 0).getTime(),
+      nowMs,
     });
     expect(screen.getByText('Reading time not reported')).toBeInTheDocument();
     expect(screen.queryByText(/Readings unknown/)).not.toBeInTheDocument();
-    expect(screen.getByText('Claude is held back until Sat 11:46 PM.')).toBeInTheDocument();
+    expect(screen.getByText(`Claude is held back until ${describeResetAt(at.toISOString(), nowMs)}.`)).toBeInTheDocument();
+    if (EN_US) expect(describeResetAt(at.toISOString(), nowMs)).toBe('Sat 11:46 PM');
     expect(screen.getByText('Personal Codex')).toHaveAttribute('title', 'Personal Codex');
   });
 

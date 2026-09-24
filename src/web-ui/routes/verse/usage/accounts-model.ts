@@ -31,6 +31,7 @@
  * that).
  */
 import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
+import { percentText } from '../autonomy/format.js';
 import type { ControlSnapshot, VerseBootstrap, VerseEngine } from '../../../data/api-types.js';
 import type { FrontierUsage } from '../../../../core/usage/frontier-usage.js';
 import type { Account, AccountWindow, LocalModelsSnapshot } from './usage-contract.js';
@@ -337,7 +338,7 @@ export function accountVerdict(account: Account, binding: AccountWindow | null):
       headline: binding.limitReached ? 'Limit reached' : 'Window exhausted',
       detail: binding.limitReached
         ? `The provider flagged ${label} as rate-limited. That flag is a denial, not a measurement, so no percentage is shown.`
-        : `${label} is at ${Math.round(pct as number)}% — it is the binding constraint on this account.`,
+        : `${label} is at ${percentText(pct as number)} — it is the binding constraint on this account.`,
       code: null,
     };
   }
@@ -346,7 +347,7 @@ export function accountVerdict(account: Account, binding: AccountWindow | null):
     return {
       state: 'tight',
       headline: 'Running tight',
-      detail: `${label} is the binding constraint at ${Math.round(pct as number)}%.`,
+      detail: `${label} is the binding constraint at ${percentText(pct as number)}.`,
       code: null,
     };
   }
@@ -354,7 +355,7 @@ export function accountVerdict(account: Account, binding: AccountWindow | null):
   return {
     state: 'available',
     headline: 'Usable now',
-    detail: `${label} is the binding constraint at ${Math.round(pct as number)}%.`,
+    detail: `${label} is the binding constraint at ${percentText(pct as number)}.`,
     code: null,
   };
 }

@@ -10,6 +10,7 @@ import type { SeatConnection, SeatHealthReport } from '../../../../core/verse/he
 import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import type { VerseSeat } from '../../../data/api-types.js';
 import { tidyProse } from '../autonomy/format.js';
+import { seatReopensAt, seatSubscription } from '../seat-subscription.js';
 import { formatUntil } from '../usage/capacity-model.js';
 
 export type HealthTone = 'danger' | 'warning' | 'neutral' | 'success';
@@ -87,20 +88,27 @@ export function seatHealthIssues(
   seats: readonly VerseSeat[] = [],
   now: number = Date.now(),
 ): SeatHealthIssue[] {
-  const labels = new Map(seats.map((seat) => [seat.id, seat.label]));
+  const byId = new Map(seats.map((seat) => [seat.id, seat]));
   return reports
     .filter(needsAttention)
     .map((report) => {
-      const when = describeResetAt(report.resetAt, now);
+      // A spent seat is usable again when its LAST spent window resets, not
+      // when the sweep's binding window does (seatReopensAt) — the same instant
+      // Accounts and Fleet name. Without the seat's windows, the sweep's own.
+      const seat = byId.get(report.seatId);
+      const resetAt = report.connection === 'exhausted' && seat !== undefined
+        ? seatReopensAt(seatSubscription(seat, now), report.resetAt)
+        : report.resetAt;
+      const when = describeResetAt(resetAt, now);
       return {
         report,
-        label: labels.get(report.seatId) ?? report.seatId,
+        label: seat?.label ?? report.seatId,
         word: CONNECTION_WORD[report.connection],
         tone: CONNECTION_TONE[report.connection],
         // Server sentences may carry a raw ISO instant or a ".;" join; tidyProse fixes exactly those.
         detail: report.reasons[0] ? tidyProse(report.reasons[0], now) : null,
         reset: when === null ? null : `resets ${when}`,
-        usableAgain: report.connection === 'exhausted' ? usableAgainPhrase(report.resetAt, now) : null,
+        usableAgain: report.connection === 'exhausted' ? usableAgainPhrase(resetAt, now) : null,
       };
     })
     .sort((a, b) => SEVERITY[a.report.connection] - SEVERITY[b.report.connection]);

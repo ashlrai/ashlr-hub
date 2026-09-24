@@ -27,7 +27,7 @@
  * rather than cast: a field-name drift degrades to an honest "unknown" at
  * render time instead of throwing.
  */
-import { UNKNOWN, formatDuration } from './format.js';
+import { UNKNOWN, formatDuration, percentText } from './format.js';
 import type {
   FleetAgent,
   FleetAgentState,
@@ -478,6 +478,8 @@ export interface SlotUtilisation {
   total: number | null;
   /** 0–100, or null when either half is unknown. */
   percent: number | null;
+  /** The share in words, by the one percent rule ("<1%", "99%"); null when unknown. */
+  percentText: string | null;
   /** Every slot is taken: the next turn waits. */
   saturated: boolean;
   /** One line, safe to render on its own. */
@@ -497,6 +499,7 @@ export function slotUtilisation(busy: number | null, effectiveTotal: number | nu
       busy,
       total: effectiveTotal,
       percent: null,
+      percentText: null,
       saturated: false,
       label:
         busy === null
@@ -505,12 +508,14 @@ export function slotUtilisation(busy: number | null, effectiveTotal: number | nu
     };
   }
   const clamped = Math.min(busy, effectiveTotal);
-  const percent = Math.round((clamped / effectiveTotal) * 100);
+  const share = (clamped / effectiveTotal) * 100;
+  const percent = Math.round(share);
   const saturated = busy >= effectiveTotal;
   return {
     busy,
     total: effectiveTotal,
     percent,
+    percentText: percentText(share),
     saturated,
     label: saturated
       ? `All ${effectiveTotal} slot${effectiveTotal === 1 ? '' : 's'} busy — new turns wait for one to free up.`

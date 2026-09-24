@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { SeatHealthReport } from '../../../../core/verse/health-types.js';
+import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { evictAll } from '../../../data/cache.js';
 import { capacity, CLAUDE_TIGHT_SEAT, GROK_SEAT, LOCAL_SEAT_V2, nativeSeat, seatWindow } from '../seat-fixtures.test-support.js';
@@ -18,6 +19,8 @@ import { AccountsGroup, ACCOUNTS_EMPTY_TEXT } from './AccountsGroup.js';
 
 const TOKEN = 'test-token';
 const NOW = new Date(2026, 8, 25, 16, 34).getTime(); // Fri Sep 25, 4:34 PM local
+/** The literal en-US words are pinned only under that default locale; everywhere else the formatter's own output is. */
+const EN_US = new Intl.DateTimeFormat().resolvedOptions().locale === 'en-US';
 const RESET = new Date(2026, 8, 26, 23, 46).toISOString(); // Sat 11:46 PM local
 const CHECKED = new Date(NOW - 2 * 60_000).toISOString();
 
@@ -95,11 +98,15 @@ describe('AccountsGroup', () => {
     const cmp = rowOf(list, 'Cash Margin Partners');
     expect(within(cmp).getByText('Connected')).toBeInTheDocument();
     expect(within(cmp).getByText('· usable now')).toBeInTheDocument();
-    expect(within(cmp).getByText('checked 2m ago')).toHaveAttribute('title', expect.stringMatching(/^Last checked Fri, Sep 25/));
+    const checkedTitle = within(cmp).getByText('checked 2m ago').getAttribute('title') ?? '';
+    expect(checkedTitle.startsWith('Last checked ')).toBe(true);
+    if (EN_US) expect(checkedTitle).toMatch(/^Last checked Fri, Sep 25/);
 
     const personal = rowOf(list, 'Personal Codex');
     expect(within(personal).getByText('Spent')).toBeInTheDocument();
-    expect(within(personal).getByText('· resets Sat 11:46 PM')).toBeInTheDocument();
+    // The shared reset wording, built against the injected clock: "Sat 11:46 PM" under en-US.
+    expect(within(personal).getByText(`· resets ${describeResetAt(RESET, NOW)}`)).toBeInTheDocument();
+    if (EN_US) expect(describeResetAt(RESET, NOW)).toBe('Sat 11:46 PM');
     expect(within(personal).getByText('usable again in 1d 7h')).toBeInTheDocument();
     // The status already says it: no second "out of usage" word, and no ISO anywhere.
     expect(within(personal).queryByText('out of usage')).not.toBeInTheDocument();

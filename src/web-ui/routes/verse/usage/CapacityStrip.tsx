@@ -290,16 +290,21 @@ export function CapacityStrip({
   usePollWhileVisible(() => setTick(Date.now()), ACCOUNT_CLOCK_MS, { enabled: accounts !== undefined && accounts.now === undefined });
   const now = accounts?.now ?? tick;
   const healthRead = accounts?.healthRead ?? false;
+  const accountsMode = accounts !== undefined;
+  // Accounts mode words every window reset and reason against the SAME clock
+  // as its status line ("Spent · resets Sat 11:46 PM"), so the two never
+  // disagree about which day "today" is.
+  const rowsNow = accountsMode ? now : undefined;
   const built = useMemo(
     () => buildCapacityRows(seats, {
       health: health ?? null,
       budget: budget ?? null,
       ...(local ? { local } : {}),
       ...(seatIds ? { seatIds } : {}),
+      ...(rowsNow !== undefined ? { now: rowsNow } : {}),
     }),
-    [seats, health, budget, local, seatIds],
+    [seats, health, budget, local, seatIds, rowsNow],
   );
-  const accountsMode = accounts !== undefined;
   const rows = useMemo(
     () => (accountsMode ? orderAccountRows(built, { healthRead, now }) : built),
     [built, accountsMode, healthRead, now],

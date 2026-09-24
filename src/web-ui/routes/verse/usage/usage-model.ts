@@ -54,6 +54,8 @@
  */
 import type { ControlSnapshot, SourceQuality, VerseEngine, VerseSeat } from '../../../data/api-types.js';
 import type { FrontierEngineUsage } from '../../../../core/usage/frontier-usage.js';
+import { localDateKey } from '../autonomy/format.js';
+import { calendarDayStart } from '../growth/calendar-day.js';
 
 type SubscriptionEngineUsage = ControlSnapshot['subscriptionUsage'][number];
 type ControlLimit = ControlSnapshot['limits'][number];
@@ -368,7 +370,7 @@ export function buildLimitRows(
 // ---------------------------------------------------------------------------
 
 export interface SpendDay {
-  /** YYYY-MM-DD (UTC). */
+  /** YYYY-MM-DD — the viewer's LOCAL calendar day, the calendar the chart and table label in. */
   day: string;
   /** null = no tick retained for this day, NOT a measured zero. */
   usd: number | null;
@@ -406,7 +408,10 @@ export function buildDailySpendSeries(observation: DaemonObservation | undefined
   for (const t of ticks) {
     const ms = Date.parse(t.ts);
     if (Number.isNaN(ms)) continue;
-    const day = new Date(ms).toISOString().slice(0, 10);
+    // Bucketed by the viewer's LOCAL day — the same calendar every day axis
+    // uses (growth/calendar-day) — so a tick at 8 PM on the 23rd in Denver
+    // counts toward the 23rd, not the UTC 24th.
+    const day = localDateKey(new Date(ms));
     byDay.set(day, (byDay.get(day) ?? 0) + (Number.isFinite(t.spentUsd) ? t.spentUsd : 0));
   }
   if (byDay.size < 2) {
@@ -420,8 +425,10 @@ export function buildDailySpendSeries(observation: DaemonObservation | undefined
   const first = sorted[0] as string;
   const last = sorted[sorted.length - 1] as string;
   const days: SpendDay[] = [];
-  for (let ms = Date.parse(`${first}T00:00:00Z`); ms <= Date.parse(`${last}T00:00:00Z`); ms += 86_400_000) {
-    const day = new Date(ms).toISOString().slice(0, 10);
+  // Walk LOCAL calendar days (a DST day is 23 or 25 hours, never a skipped or doubled day).
+  const end = calendarDayStart(last);
+  for (let at = new Date(calendarDayStart(first)); at.getTime() <= end; at = new Date(at.getFullYear(), at.getMonth(), at.getDate() + 1)) {
+    const day = localDateKey(at);
     days.push({ day, usd: byDay.has(day) ? (byDay.get(day) as number) : null });
   }
   return {

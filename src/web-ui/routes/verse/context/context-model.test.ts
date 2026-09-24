@@ -2,7 +2,7 @@
  * context-model.test.ts — the pure rules behind the handoff dialog, the memory
  * panel and message search, pinned without a DOM.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { VERSE_HANDOFF_SUMMARY_REQUEST, VERSE_MEMORY_MAX_BYTES, type VerseSearchHit } from '../../../../core/verse/types.js';
 import { fitVerdict, SESSION_BASE_OVERHEAD_BY_ENGINE, SESSION_BASE_OVERHEAD_TOKENS } from '../../../../core/verse/context-math.js';
 import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
@@ -294,6 +294,20 @@ describe('relativePhrase', () => {
     expect(relativePhrase('2026-09-23T09:59:50.000Z', now)).toBe('just now');
     expect(relativePhrase('2026-09-23T09:55:00.000Z', now)).toBe('5m ago');
     expect(relativePhrase('2026-09-01T10:00:00.000Z', now)).toMatch(/^on /);
+    expect(relativePhrase('2026-09-01T10:00:00.000Z', now)).not.toMatch(/ago$/);
+    expect(relativePhrase('2026-09-21T10:00:00.000Z', now)).toBe('2d ago');
+    expect(relativePhrase('2026-09-23T07:00:00.000Z', now)).toBe('3h ago');
+  });
+
+  it('a date is "on <date>" in every locale — even one that prints the day first', () => {
+    // en-GB prints "1 Sept" and de "1. Sept.": both start with a digit, and
+    // once read as "1 Sept ago". The default locale is fixed per process, so
+    // stand in for it at the formatter.
+    for (const printed of ['1 Sept', '1. Sept.', 'Sep 1']) {
+      const spy = vi.spyOn(Date.prototype, 'toLocaleDateString').mockReturnValue(printed);
+      expect(relativePhrase('2026-09-01T10:00:00.000Z', now)).toBe(`on ${printed}`);
+      spy.mockRestore();
+    }
     expect(relativePhrase(null, now)).toBeNull();
     expect(relativePhrase('garbage', now)).toBeNull();
   });
