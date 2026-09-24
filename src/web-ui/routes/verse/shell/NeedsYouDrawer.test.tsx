@@ -15,7 +15,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from '../../../components/primitives/Toast.js';
 import { clearMutationToken, markCheckComplete, setMutationToken } from '../../../data/auth-store.js';
 import { evictAll } from '../../../data/cache.js';
-import { MockEventSource } from '../fixtures.test-support.js';
+import { bootstrap, MockEventSource } from '../fixtures.test-support.js';
+import { CLAUDE_CONTEXT_SEAT } from '../seat-fixtures.test-support.js';
 import { useVerseUi } from '../useVerseUi.js';
 import { getVerseUiState, openVerseNeedsYou, resetVerseUi } from '../verse-ui-store.js';
 import { GuardHost, resetGuard } from './guarded-action.js';
@@ -231,6 +232,48 @@ describe('NeedsYouDrawer', () => {
     const age = screen.getByText('5 minutes ago');
     expect(age.previousElementSibling).toHaveTextContent('Raised');
     expect(age.getAttribute('title')).toBeTruthy();
+  });
+
+  it('names the seat and the run’s model the way the pickers do — the raw ids only in tooltips', async () => {
+    const RUN = 'TITRR claude:claude-fable-5-1 run produced 2 file(s) (+384/-0). Review before applying.';
+    const quarantine = (id: string, seatId: string, detail: string) => vetoNeed({
+      id: `fleet:quarantine:${id}`,
+      source: 'fleet',
+      kind: 'quarantine',
+      title: `binshield quarantined (${id})`,
+      detail,
+      expiresAt: null,
+      subject: { repo: 'binshield', pr: null, seatId, sessionId: null, engine: 'claude' },
+      target: { kind: 'section', section: 'fleet', anchor: null },
+      actions: [],
+    });
+    net = shellFetch(
+      activity({ needsYou: [quarantine('known', 'claude-a', RUN), quarantine('unknown', 'claude-z', RUN.replace('fable-5-1', 'fable-9'))] }),
+      { bootstrap: bootstrap({ seats: [CLAUDE_CONTEXT_SEAT] }) },
+    );
+    vi.stubGlobal('fetch', net.fetch);
+    resetActivityForTest();
+    const user = userEvent.setup();
+    await openDrawer();
+    await screen.findByRole('listbox');
+
+    await user.keyboard('{Enter}');
+    const detail = await screen.findByLabelText('Item detail');
+    await waitFor(() => expect(within(detail).getByText('Claude Max')).toHaveAttribute('title', 'claude-a'));
+    expect(within(detail).getByText('Claude Max').previousElementSibling).toHaveTextContent('Seat');
+    const model = within(detail).getByText('Fable 5.1');
+    expect(model).toHaveAttribute('title', 'claude:claude-fable-5-1');
+    expect(model.previousElementSibling).toHaveTextContent('Model');
+    // Neither id reaches the page as text.
+    expect(detail.textContent).not.toMatch(/claude-a\b|claude:claude-fable/);
+
+    // An id the roster and the catalogs do not know is all there is: shown as sent.
+    await user.keyboard('{Escape}');
+    await user.keyboard('j');
+    await user.keyboard('{Enter}');
+    const other = await screen.findByLabelText('Item detail');
+    expect(await within(other).findByText('claude-z')).not.toHaveAttribute('title');
+    expect(within(other).getByText('claude:claude-fable-9')).not.toHaveAttribute('title');
   });
 
   it('says "All clear" only when every producer answered', async () => {

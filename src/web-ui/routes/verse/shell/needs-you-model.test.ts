@@ -10,10 +10,13 @@ import {
   itemsForSplit,
   needsYouRowView,
   readableItemTitle,
+  runModelDisplayName,
+  seatDisplayName,
   splitCounts,
   splitCoverage,
   until,
 } from './needs-you-model.js';
+import { CLAUDE_CONTEXT_SEAT, CODEX_CONTEXT_SEAT, LOCAL_SEAT_V2 } from '../seat-fixtures.test-support.js';
 import { canGoBack, canGoForward, cycleRecent, EMPTY_NAV_HISTORY, NAV_HISTORY_LIMIT, pushNav, stepNav } from './nav-history.js';
 import { activity, approvalNeed, chatFailedNeed, vetoNeed } from './shell-fixtures.test-support.js';
 
@@ -181,5 +184,32 @@ describe('nav history', () => {
   it('needs two chats to cycle', () => {
     expect(cycleRecent(['a'], null, 1, 0)).toBeNull();
     expect(cycleRecent(['a', 'b', 'c'], null, -1, 0)!.sessionId).toBe('c');
+  });
+});
+
+describe('seats and models by name (the drawer detail)', () => {
+  const seats = [CLAUDE_CONTEXT_SEAT, CODEX_CONTEXT_SEAT, LOCAL_SEAT_V2];
+
+  it('names a seat by its roster label, the id kept for the tooltip; an unknown id is shown as sent', () => {
+    expect(seatDisplayName(seats, 'claude-a')).toEqual({ text: 'Claude Max', raw: 'claude-a' });
+    expect(seatDisplayName(seats, 'claude-z')).toEqual({ text: 'claude-z', raw: undefined });
+    expect(seatDisplayName([], 'claude-a')).toEqual({ text: 'claude-a', raw: undefined });
+  });
+
+  it('names a run’s model by its catalog label — the item’s seat first, then any seat of the run’s engine', () => {
+    expect(runModelDisplayName(seats, 'claude:claude-fable-5-1', 'claude-a')).toEqual({ text: 'Fable 5.1', raw: 'claude:claude-fable-5-1' });
+    // No seat on the item, or a seat that does not list it: the engine's other seats do.
+    expect(runModelDisplayName(seats, 'claude:claude-haiku-4-5-20251001', null)).toEqual({ text: 'Haiku 4.5', raw: 'claude:claude-haiku-4-5-20251001' });
+    expect(runModelDisplayName(seats, 'codex:gpt-6-astra', 'claude-a')).toEqual({ text: 'GPT-6 Astra', raw: 'codex:gpt-6-astra' });
+    // A pre-alias id still finds its catalog entry (context-math canonical ids).
+    expect(runModelDisplayName(seats, 'claude:claude-opus-5.5', 'claude-a').text).toBe('Opus 5.5');
+    // A local tag keeps its colon.
+    expect(runModelDisplayName(seats, 'local:qwen3-coder', null)).toEqual({ text: 'qwen3-coder', raw: 'local:qwen3-coder' });
+  });
+
+  it('shows a model no catalog lists as sent — never another engine’s look-alike', () => {
+    expect(runModelDisplayName(seats, 'claude:claude-fable-9', 'claude-a')).toEqual({ text: 'claude:claude-fable-9', raw: undefined });
+    expect(runModelDisplayName(seats, 'grok:gpt-6-astra', null)).toEqual({ text: 'grok:gpt-6-astra', raw: undefined });
+    expect(runModelDisplayName([], 'claude:claude-fable-5-1', 'claude-a')).toEqual({ text: 'claude:claude-fable-5-1', raw: undefined });
   });
 });

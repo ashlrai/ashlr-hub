@@ -20,7 +20,7 @@ import { resetResolvedForTest } from './shell/needs-you-actions.js';
 import { activity, approvalNeed, shellFetch, vetoNeed, type ShellFetch } from './shell/shell-fixtures.test-support.js';
 import { refreshActivity, resetActivityForTest } from './shell/useActivity.js';
 import { mockCompactViewport, type ViewportMock } from './shell/viewport.test-support.js';
-import { MissingSection, prefetchAfterFirstPaint, SECTION_MODULES, VerseApp } from './VerseApp.js';
+import { MissingSection, SECTION_MODULES, VerseApp } from './VerseApp.js';
 import { resetVerseStore } from './verse-store.js';
 import {
   getVerseUiState,
@@ -187,6 +187,26 @@ describe('the rail', () => {
     const lit = rail().querySelectorAll('[aria-current], [data-active]');
     expect(lit).toHaveLength(1);
     expect(lit[0]).toHaveAttribute('data-gear');
+  });
+
+  it('exposes the lit gear to assistive tech: aria-current and the open page’s name on Settings, Apps and Usage', async () => {
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    const gear = () => rail().querySelector<HTMLElement>('[data-gear]')!;
+    expect(gear()).not.toHaveAttribute('aria-current');
+    expect(gear()).toHaveAccessibleName('Settings and more');
+    for (const [id, label] of [['settings', 'Settings'], ['apps', 'Apps & Accounts'], ['usage', 'Usage']] as const) {
+      act(() => setVerseSection(id));
+      expect(gear(), id).toHaveAttribute('aria-current', 'page');
+      expect(gear(), id).toHaveAttribute('data-active');
+      expect(within(rail()).getByRole('button', { name: `Settings and more (${label} open)` })).toBe(gear());
+      // Still exactly one current item in the rail.
+      expect(rail().querySelectorAll('[aria-current]'), id).toHaveLength(1);
+    }
+    act(() => setVerseSection('chat'));
+    expect(gear()).not.toHaveAttribute('aria-current');
+    expect(gear()).not.toHaveAttribute('data-active');
+    expect(gear()).toHaveAccessibleName('Settings and more');
   });
 
   it('keeps active styling keyed ONLY to aria-current / data-active in the stylesheet', () => {
@@ -448,64 +468,31 @@ describe('overlays and keys', () => {
   });
 });
 
-describe('idle prefetch after first paint', () => {
-  /** A hand-cranked requestIdleCallback on the jsdom window. */
-  function idleStub() {
-    const queue = new Map<number, () => void>();
-    let n = 0;
-    const request = vi.fn((cb: () => void) => {
-      n += 1;
-      queue.set(n, cb);
-      return n;
-    });
-    const cancel = vi.fn((id: number) => {
-      queue.delete(id);
-    });
-    vi.stubGlobal('requestIdleCallback', request);
-    vi.stubGlobal('cancelIdleCallback', cancel);
-    const flush = async () => {
-      const due = [...queue.values()];
-      queue.clear();
-      for (const cb of due) act(() => cb());
-      // Let the step's gap timer (0 ms here) queue the next idle callback.
-      await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
-    };
-    return { request, cancel, flush, queue };
-  }
+describe('the after-first-paint warm-up', () => {
+  // What it warms, the idle gate and the one-read concurrency are pinned in
+  // shell/warmup.test.tsx and shell/idle-prefetch.test.ts — and the "first
+  // visit paints without a skeleton" check lives there too, because this
+  // file visits Growth, Fleet and Mind first, which made it vacuous here.
+  // This file pins the WIRING: mount starts it, idle-gated; unmount stops it.
 
-  it('schedules the warm-up on idle after mount, and cancels whatever is pending on unmount', async () => {
-    const idle = idleStub();
+  it('starts on mount — nothing warmed before a quiet period — and is cancelled on unmount', async () => {
+    const added = vi.spyOn(document, 'addEventListener');
+    const removed = vi.spyOn(document, 'removeEventListener');
     const view = mount();
     await screen.findByRole('navigation', { name: 'Chats' });
-    expect(idle.request).toHaveBeenCalled();
-    const pending = [...idle.queue.keys()];
-    expect(pending.length).toBeGreaterThan(0);
-    view.unmount();
-    for (const id of pending) expect(idle.cancel).toHaveBeenCalledWith(id);
-    expect(idle.queue.size).toBe(0);
-  });
-
-  it('warms each surface not yet open — its chunk and its reads — so a first visit paints without a skeleton', async () => {
-    const idle = idleStub();
-    mount();
-    await screen.findByRole('navigation', { name: 'Chats' });
-    const before = net.fetch.mock.calls.length;
-    const cancel = prefetchAfterFirstPaint({ gapMs: 0 });
-    try {
-      for (let i = 0; i < 10 && idle.queue.size > 0; i += 1) await idle.flush();
-      const warmed = net.fetch.mock.calls.slice(before).map(([input]) => String(input));
-      // Growth's and Mind's opening reads went out before either was visited…
-      for (const path of ['/api/verse/fleet/history', '/api/verse/learning', '/api/models', '/api/verse/leader', '/api/reasoning/digest']) {
-        expect(warmed.some((u) => u.startsWith(path)), path).toBe(true);
-      }
-      // …and the chunk is in: the first visit mounts the surface directly.
-      for (const id of ['growth', 'mind', 'fleet'] as const) {
-        act(() => setVerseSection(id));
-        expect(surface(id)!.querySelector('[data-skeleton]'), id).toBeNull();
-      }
-    } finally {
-      cancel();
+    // The lazy warm-up chunk arrives and starts listening for the operator's input.
+    const onInput = await waitFor(() => {
+      const call = added.mock.calls.find(([type, , options]) => type === 'pointerdown' && typeof options === 'object' && options.capture === true);
+      expect(call).toBeDefined();
+      return call![1];
+    });
+    // Well inside the quiet period: not one surface read, however idle the page is.
+    const paths = net.fetch.mock.calls.map(([input]) => String(input));
+    for (const path of ['/api/verse/authority', '/api/verse/fleet/history', '/api/verse/budget/history', '/api/reasoning/digest', '/api/models']) {
+      expect(paths.some((u) => u.startsWith(path)), path).toBe(false);
     }
+    view.unmount();
+    expect(removed.mock.calls.some(([type, fn]) => type === 'pointerdown' && fn === onInput)).toBe(true);
   });
 });
 
