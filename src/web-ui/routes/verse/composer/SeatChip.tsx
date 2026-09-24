@@ -90,6 +90,15 @@ function ringTone(reading: VerseSeatWindow | null): 'unknown' | 'ok' | 'tight' |
   return 'ok';
 }
 
+/**
+ * Whether the chip draws its capacity ring: a seat with limits and a reading.
+ * The ring takes room in the footer (14px + a gap) and arrives with a later
+ * roster poll, so the composer folds on this as well as on the words.
+ */
+export function capacityRingShown(seat: VerseSeat | undefined, engine: VerseSeat['engine']): boolean {
+  return engine !== 'local' && ringTone(ringWindow(seat)) !== 'unknown';
+}
+
 export function CapacityRing({ window: reading, size = 14 }: { window: VerseSeatWindow | null; size?: number }) {
   const r = (size - 3) / 2;
   const c = 2 * Math.PI * r;
@@ -244,7 +253,7 @@ export function SeatChip({ seats, seat, engine, label, name = label, disabled = 
         onClick={() => { hideTip(); setOpen((v) => !v); }}>
         <span className={styles.monogram} aria-hidden="true">{ENGINE_MONOGRAM[engine]}</span>
         {compact ? null : <span className={styles.seatChipText}>{name}</span>}
-        {ringTone(ring) === 'unknown' ? null : <CapacityRing window={ring} />}
+        {capacityRingShown(current, engine) ? <CapacityRing window={ring} /> : null}
       </button>
       {tipOpen && !open ? (
         <span id={tipId} role="tooltip" className={styles.seatTip}>

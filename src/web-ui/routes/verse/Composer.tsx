@@ -14,11 +14,15 @@
  * where it runs and what it sends (seat, model, effort, context, send). The
  * seat chip names the ACCOUNT and the Model picker the model, so the model is
  * said once. Effort appears only where the seat can set it. Labels are short
- * and never ellipsized; the full words are each control's name and title.
- * When the row is too narrow it folds (composer/useFooterFold): "Effort:" →
- * an icon, the seat chip → its monogram, the mode → its icon, then the
- * pickers into the ⋯ sheet. Controls are 28px, 8px apart; typing never reflows the
- * row (while a turn runs, ■ and Queue sit there empty or not).
+ * and never ellipsized; the full words are each control's name and tooltip
+ * (shown on keyboard focus too). When the row is too narrow it folds
+ * (composer/useFooterFold): "Effort:" → an icon, the seat chip → its
+ * monogram, the mode → its icon, then the pickers into the ⋯ sheet. Nothing
+ * re-folds while the ⋯ sheet or a picker's menu is open, and when a fold
+ * takes away the control that had focus, focus lands on its replacement (⋯,
+ * or the box). Controls are 28px, 8px apart; typing never reflows the row
+ * (while a turn runs, ■ and Queue sit there empty or not; a send in flight
+ * keeps Send's width and says so with a busy style).
  *
  * ALWAYS EDITABLE. Enter while a turn runs QUEUES the message on the server
  * (at most 3); the queue sends each follow-up when the turn before it ends
@@ -70,7 +74,7 @@ import { ContextRing } from './composer/ContextRing.js';
 import { ControlMenu } from './composer/ControlMenu.js';
 import { ControlsSheet } from './composer/ControlsSheet.js';
 import { QueueRow } from './composer/QueueRow.js';
-import { SeatChip } from './composer/SeatChip.js';
+import { capacityRingShown, SeatChip } from './composer/SeatChip.js';
 import { SuggestMenu, suggestOptionId, type SuggestItem } from './composer/SuggestMenu.js';
 import { useAttachmentDrafts, useFollowUpQueue, useSessionControls } from './composer/useComposerData.js';
 import { FOOTER_FOLD_SHEET, useFooterFold } from './composer/useFooterFold.js';
@@ -225,6 +229,9 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   const textarea = useRef<HTMLTextAreaElement>(null);
   const form = useRef<HTMLFormElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const moreButton = useRef<HTMLButtonElement>(null);
+  /** The ⋯ sheet was closed by the operator: focus goes back to ⋯ — or to the box, if ⋯ has folded away. */
+  const sheetReturnFocus = useRef(false);
   const helpId = useId();
   const suggestId = useId();
   const [caret, setCaret] = useState<number | null>(null);
@@ -263,8 +270,29 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   const effortOn = view?.options.efforts.some((o) => o.available) === true;
   const effortName = view?.controls.effort ? labelOf(view.options.efforts, view.controls.effort) : 'Default';
   const footerRow = useRef<HTMLDivElement>(null);
+  // The seat chip's capacity ring (14px + a gap) arrives with a later roster
+  // poll and takes room, so its presence is part of what the fold measures;
+  // so is `phone`, which swaps the whole row for the compact one.
+  const ringShown = capacityRingShown(seats.find((s) => s.id === seat.seatId), effectiveEngine);
+  const pickerMenuOpen = Object.values(openMenus).some(Boolean);
   const fold = useFooterFold(footerRow, [seatName, modelName, effortOn && effortName, view?.controls.permissionMode,
-    running, queueAvailable, queueFull, locked, disabled].join('|'));
+    running, queueAvailable, queueFull, locked, disabled, ringShown, phone].join('|'), {
+    // Nothing folds under an open overlay: a re-measure could unmount ⋯ or
+    // the picker the overlay belongs to. What changed is measured on close.
+    hold: sheetOpen || pickerMenuOpen,
+    onSettle: (settled, focusBefore) => {
+      // A fold took away the control that had focus (the pickers left for ⋯,
+      // ⋯ left for the pickers, or new words passed the row through fold 0),
+      // or the operator closed the sheet: put focus on the replacement.
+      const active = document.activeElement;
+      const lost = active === null || active === document.body;
+      const returning = sheetReturnFocus.current;
+      sheetReturnFocus.current = false;
+      if (!lost || (!returning && (focusBefore === null || focusBefore.isConnected))) return;
+      const more = phone || settled >= FOOTER_FOLD_SHEET ? moreButton.current : null;
+      (more ?? textarea.current)?.focus();
+    },
+  });
   const compact = phone || fold >= FOOTER_FOLD_SHEET;
   const attachBlocked = effectiveEngine === 'grok'
     ? 'Grok can only open files inside the project folder, so it can’t read attachments.'
@@ -591,7 +619,11 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   }
 
   // ---- keys ----------------------------------------------------------------------
-  const anyOverlayOpen = suggestOpen || Object.values(openMenus).some(Boolean) || sheetOpen || bypassAsk || gate.dialog.open;
+  // What is actually on screen: the sheet renders whenever it is open (and
+  // there are pickers to show), and a picker menu reports itself closed when
+  // a fold unmounts it — so Esc-to-stop is never disarmed by an overlay that is gone.
+  const sheetShown = sheetOpen && view !== null;
+  const anyOverlayOpen = suggestOpen || pickerMenuOpen || sheetShown || bypassAsk || gate.dialog.open;
 
   const runCommand = useCallback((id: ComposerCommandId) => {
     switch (id) {
@@ -757,7 +789,9 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   }) : null;
   const wide = pickers?.('menu') ?? null;
 
-  // No "Sending…": a label that changes width on Enter would shift the row; the button is disabled + busy instead.
+  // No "Sending…": a label that changes width on Enter would shift the row. The button is disabled +
+  // aria-busy instead, which Composer.module.css draws as the accent, pulsing, with a progress cursor —
+  // never the quiet grey of an empty box (the text stays in the box until the send is accepted).
   const sendLabel = running ? (queueFull ? 'Queue full' : 'Queue') : locked ? 'Unlock & send' : 'Send';
   const returnKey = <span className={cstyles.sendKey} aria-hidden="true">⏎</span>;
 
@@ -828,7 +862,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
             {!compact && wide ? wide.effort : null}
             {!compact ? <ContextRing contextTokens={contextTokens} contextWindow={contextWindow} autoCompactAt={autoCompactAt} exact={contextExact} engine={effectiveEngine} /> : null}
             {compact && view ? (
-              <button type="button" className={`${cstyles.iconButton} ${bypassOn ? cstyles.iconButtonDanger : ''}`}
+              <button ref={moreButton} type="button" className={`${cstyles.iconButton} ${bypassOn ? cstyles.iconButtonDanger : ''}`}
                 aria-haspopup="dialog" aria-label={`Chat settings: ${labelOf(view.options.permissionModes, view.controls.permissionMode)}, ${modelName}`}
                 title="Chat settings" onClick={() => setSheetOpen(true)} disabled={disabled}>
                 {MORE_DOTS}
@@ -876,8 +910,11 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
                             ? <><kbd>Enter</kbd> sends · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>@</kbd> files · <kbd>/</kbd> commands · <kbd>↑</kbd> recalls</>
                             : null}
       </p>
-      {compact && pickers ? (
-        <ControlsSheet open={sheetOpen} onClose={() => setSheetOpen(false)}>
+      {/* Mounted whenever there are pickers, not only while the row is
+          compact: an open sheet must never be unmounted by a fold (it would
+          drop focus to <body> and leave `sheetOpen` set with nothing on screen). */}
+      {pickers ? (
+        <ControlsSheet open={sheetOpen} onClose={() => { sheetReturnFocus.current = true; setSheetOpen(false); }}>
           {(() => {
             const list = pickers('list');
             return <>{list.permission}{list.model}{list.effort}</>;
