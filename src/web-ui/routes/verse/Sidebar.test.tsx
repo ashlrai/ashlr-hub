@@ -512,6 +512,10 @@ describe('Sidebar — Disconnect from hub asks first', () => {
     const dialog = screen.getByRole('dialog', { name: 'Disconnect from this hub?' });
     expect(dialog).toHaveAttribute('aria-modal', 'true');
     expect(dialog).toHaveTextContent('Unsent drafts in open chats will be cleared.');
+    // Announced, not just drawn: focus opens on Cancel, so the warning is
+    // only heard because it is the dialog's description (3.10.1 review).
+    expect(dialog).toHaveAccessibleDescription(
+      'Unsent drafts in open chats will be cleared. Your chats stay on the hub; you will need the read token to reconnect.');
     expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus();
     expect(within(dialog).getByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
     expect(onDisconnect).not.toHaveBeenCalled();

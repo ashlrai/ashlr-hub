@@ -16,7 +16,8 @@
  *     (C/X/G/L, never a vendor logo), then Ready / Running / Last turn failed /
  *     Read-only, and a capacity chip only when the seat is tight or spent.
  *     3.10.1: the seat and model are NOT repeated here — the composer's seat
- *     chip names them, one step below; the chip's tooltip still says both.
+ *     chip names them, one step below; the chip's tooltip still says both,
+ *     and the chip is a tab stop so that tooltip opens on keyboard focus.
  *  3. WHAT DO I KNOW — C7's insight chip when an A7 insight cites this chat.
  *  4. WHAT CAN I DO — the context ring (its tooltip is the whole context
  *     story), then ⋯: context mode, compact, hand off, copy id, delete.
@@ -313,6 +314,8 @@ export function Workspace(props: WorkspaceProps) {
     (hasExpansiveMode(budget.option) || mode === 'expansive');
   const activeSeat = session ? seatById(seats, session.seatId) ?? null : null;
   const capacity = activeSeat === null ? null : seatSubscription(activeSeat);
+  /** The capacity worth a chip in the header: tight or spent, else none. */
+  const flagged = capacity !== null && worthFlagging(capacity.cls) ? capacity : null;
   // The status chip's tooltip: what the chat runs on (seat · model), then the
   // seat's capacity sentence without its repeated label. The project path is
   // the breadcrumb's tooltip, not this one's.
@@ -453,14 +456,19 @@ export function Workspace(props: WorkspaceProps) {
         {session ? (
           // The chat's STATE, not its seat: the composer's seat chip names
           // seat and model; this chip's tooltip keeps them one hover away.
+          // That tooltip is now the header's only copy of seat, model and the
+          // capacity sentence, so the chip takes focus (a tab stop, named for
+          // its state): the Tooltip primitive opens on focus and makes the
+          // sentence the chip's aria-describedby, as for every icon control.
           <Tooltip label={seatTitle} placement="bottom">
             <span className={`${styles.seatPill} ${styles[`engine-${session.engine}`] ?? ''}`} data-engine={session.engine}
+              tabIndex={0} role="group" aria-label={`Chat status: ${statusWord}${flagged ? `, ${flagged.word}` : ''}`}
               data-status={session.status} data-testid="chat-status"
-              data-seat-capacity={capacity !== null && worthFlagging(capacity.cls) ? capacity.cls : undefined}>
+              data-seat-capacity={flagged?.cls}>
               <span className={styles.engineTick} aria-hidden="true" />
               <span className={styles.monogram} aria-hidden="true">{ENGINE_MONOGRAM[session.engine]}</span>
               <span className={styles.seatText}>{statusWord}</span>
-              {capacity !== null && worthFlagging(capacity.cls) ? <CapacityChip view={capacity} /> : null}
+              {flagged ? <CapacityChip view={flagged} /> : null}
             </span>
           </Tooltip>
         ) : null}

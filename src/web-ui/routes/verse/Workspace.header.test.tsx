@@ -182,6 +182,38 @@ describe('Workspace header — a chat is open', () => {
     expect(await screen.findByRole('tooltip')).toHaveTextContent('Runs on Claude Max · Opus 5');
   });
 
+  // 3.10.1 review: seat, model and the capacity sentence moved from the chip's
+  // text into its tooltip — on a span that could not take focus, so keyboard
+  // and screen-reader users never reached them. The chip is a tab stop now.
+  it('reaches seat and model from the keyboard: the chip is a tab stop, its tooltip its description', async () => {
+    const user = userEvent.setup();
+    const view1 = render(<Workspace {...props({ view: opened() })} />);
+    const strip = header(view1.container);
+    const chip = within(strip).getByTestId('chat-status');
+
+    // In the tab order straight after the title, not skipped over.
+    within(strip).getByRole('button', { name: 'Fix the login bug' }).focus();
+    await user.tab();
+    expect(chip).toHaveFocus();
+    expect(chip).toHaveAccessibleName('Chat status: Ready');
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Runs on Claude Max · Opus 5');
+    expect(chip).toHaveAccessibleDescription(expect.stringContaining('Runs on Claude Max · Opus 5'));
+    // Escape dismisses the bubble; focus stays put (WCAG 1.4.13).
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    expect(chip).toHaveFocus();
+  });
+
+  it('names a tight seat in the chip and says why in its focus tooltip', async () => {
+    const tight = { ...CLAUDE_SEAT, health: { ...CLAUDE_SEAT.health, windows: [{ id: '7d', usedPercent: 92, resetsAt: null }] } };
+    render(<Workspace {...props({ view: opened(), seats: [tight, CODEX_SEAT, LOCAL_SEAT] })} />);
+    const chip = screen.getByTestId('chat-status');
+    expect(chip).toHaveAttribute('data-seat-capacity', 'tight');
+    expect(chip).toHaveAccessibleName('Chat status: Ready, tight');
+    chip.focus();
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(/Runs on Claude Max · Opus 5 — .*92%/);
+  });
+
   it('says the chat state in words: Running, Last turn failed, Read-only', () => {
     const running = render(<Workspace {...props({ view: opened({ status: 'running' }) })} />);
     expect(within(header(running.container)).getByTestId('chat-status')).toHaveTextContent('Running');

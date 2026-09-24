@@ -482,14 +482,19 @@ describe('Transcript — 3.10.1 polish', () => {
     expect(within(line).getByText('math.ts')).toHaveAttribute('title', `${SCRATCH}/math.ts`);
   });
 
-  it('falls back to a ~-abbreviated path for a file outside every root', () => {
+  it('keeps the hub’s ~ path for a file outside every root — and never guesses another home is ~', () => {
+    // The hub rewrites the operator's own home to `~` in every payload
+    // (sanitizePublicJson); a /Users/<x> that survives is someone else's.
     const outside = [
       ev(1, 'user-message', { turnId: 't1', text: 'check my settings' }),
-      ev(2, 'tool-use', { turnId: 't1', toolUseId: 'r1', name: 'Read', input: { file_path: '/Users/mason/.claude/settings.json' } }),
+      ev(2, 'tool-use', { turnId: 't1', toolUseId: 'r1', name: 'Read', input: { file_path: '~/.claude/settings.json' } }),
       ev(3, 'tool-result', { turnId: 't1', toolUseId: 'r1', output: '{}', isError: false }),
+      ev(4, 'tool-use', { turnId: 't1', toolUseId: 'r2', name: 'Read', input: { file_path: '/Users/Shared/hub/deploy.sh' } }),
+      ev(5, 'tool-result', { turnId: 't1', toolUseId: 'r2', output: '', isError: false }),
     ];
-    render(<Transcript transcript={buildTranscript(outside)} loaded loadError={null} projectRoots={['/Users/mason/dev/hub']} />);
+    render(<Transcript transcript={buildTranscript(outside)} loaded loadError={null} projectRoots={['~/hub']} />);
     expect(screen.getByRole('button', { name: 'read ~/.claude/settings.json' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'read /Users/Shared/hub/deploy.sh' })).toBeInTheDocument();
   });
 
   it('attaches the turn duration to the turn footer — no orphan duration line between turns', () => {
