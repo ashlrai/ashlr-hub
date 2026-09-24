@@ -339,7 +339,7 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
-## [3.9.0] — 2026-09-23 UTC — the context meter tells the truth, and long sessions have somewhere to go
+## [3.9.0] — 2026-09-24 UTC — the context meter tells the truth, and long sessions have somewhere to go
 
 The Verse context meter was wrong on every engine, in a different way each time,
 and a session that was filling up had nowhere to go but a cold new chat. The
