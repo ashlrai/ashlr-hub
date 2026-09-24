@@ -50,7 +50,7 @@ import {
   learningQuery,
   seatHistoryQuery,
 } from '../command/surface-data.js';
-import { darkSinceDay, darkSinceLabel, fleetDarkSince } from '../fleet/dark-since.js';
+import { darkSinceLabel, fleetDarkSince, fleetDarkStatus } from '../fleet/dark-since.js';
 import { laneRows, runTone } from '../fleet/live-model.js';
 import styles from '../command/command.module.css';
 
@@ -165,7 +165,7 @@ export function CommandSection() {
     : !live
       ? { kind: 'unknown', reason: fleet.data.reason ?? 'the live fleet view did not answer.' }
       : live.state === 'dark' && lanes.length === 0
-        ? { kind: 'dark', since: darkSinceDay(darkSince ?? live.generatedAt), detail: live.stateReason ?? undefined }
+        ? fleetDarkStatus(live)
         : lanes.length === 0
           ? { kind: 'empty', message: `No runs in the last ${windowH} hours.` }
           : { kind: 'ready' };
