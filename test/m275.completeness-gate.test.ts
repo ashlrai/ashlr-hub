@@ -22,8 +22,9 @@
  * which falls back to the direct-run path — still blocks on failure there.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import * as os from 'node:os';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AshlrConfig } from '../src/core/types.js';
 import type { VerifyCommand, VerifyCommandResult } from '../src/core/run/verify-commands.js';
@@ -49,12 +50,13 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-// Mock node:child_process spawnSync for git stash push/pop (M281 delta logic).
-vi.mock('node:child_process', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:child_process')>();
+// Mock the hardened git runner for stash push/pop (M281 delta logic; V3.10 R3a
+// routes the gate's `git stash` through sandbox/safe-git runSafeGitSync).
+vi.mock('../src/core/sandbox/safe-git.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/sandbox/safe-git.js')>();
   return {
     ...actual,
-    spawnSync: vi.fn(actual.spawnSync),
+    runSafeGitSync: vi.fn(),
   };
 });
 
@@ -62,7 +64,12 @@ vi.mock('node:child_process', async (importOriginal) => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const FAKE_WORKTREE = path.join(os.tmpdir(), 'm275-test-worktree');
+// A real directory holding a linked-worktree `.git` pointer: the gate reads
+// the pointer before handing git to safe-git (mocked above, so the pointer's
+// target is never verified or touched here).
+const FAKE_WORKTREE = fs.mkdtempSync(path.join(os.tmpdir(), 'm275-test-worktree-'));
+fs.writeFileSync(path.join(FAKE_WORKTREE, '.git'), 'gitdir: /nonexistent/.git/worktrees/m275\n');
+afterAll(() => { fs.rmSync(FAKE_WORKTREE, { recursive: true, force: true }); });
 
 function makeCfg(overrides: Partial<AshlrConfig['foundry'] & object> = {}): AshlrConfig {
   return {
@@ -103,29 +110,35 @@ async function getGate() {
 async function getMocks() {
   const vc = await import('../src/core/run/verify-commands.js');
   const fs = await import('node:fs');
-  const cp = await import('node:child_process');
+  const sg = await import('../src/core/sandbox/safe-git.js');
   return {
     detectVerifyCommands: vi.mocked(vc.detectVerifyCommands),
     runVerifyCommand: vi.mocked(vc.runVerifyCommand),
     runVerifyCommandAsync: vi.mocked(vc.runVerifyCommandAsync),
     existsSync: vi.mocked(fs.existsSync),
-    spawnSync: vi.mocked(cp.spawnSync),
+    stashGit: vi.mocked(sg.runSafeGitSync),
   };
 }
 
-/** Fake spawnSync return for "nothing to stash" — triggers direct-run fallback in delta logic. */
-function stashNoop(): ReturnType<typeof import('node:child_process').spawnSync> {
-  return { stdout: 'No local changes to stash', stderr: '', status: 0, error: undefined, pid: 1, output: [], signal: null } as ReturnType<typeof import('node:child_process').spawnSync>;
+type SafeGitResult = import('../src/core/sandbox/safe-git.js').SafeGitResult;
+
+function gitOk(stdout: string): SafeGitResult {
+  return { ok: true, code: 0, signal: null, stdout, stderr: '', timedOut: false };
 }
 
-/** Fake spawnSync return for successful stash push. */
-function stashSuccess(): ReturnType<typeof import('node:child_process').spawnSync> {
-  return { stdout: 'Saved working directory', stderr: '', status: 0, error: undefined, pid: 1, output: [], signal: null } as ReturnType<typeof import('node:child_process').spawnSync>;
+/** Fake stash result for "nothing to stash" — triggers direct-run fallback in delta logic. */
+function stashNoop(): SafeGitResult {
+  return gitOk('No local changes to save');
 }
 
-/** Fake spawnSync return for successful stash pop. */
-function stashPopOk(): ReturnType<typeof import('node:child_process').spawnSync> {
-  return { stdout: 'Dropped stash', stderr: '', status: 0, error: undefined, pid: 1, output: [], signal: null } as ReturnType<typeof import('node:child_process').spawnSync>;
+/** Fake stash result for successful stash push. */
+function stashSuccess(): SafeGitResult {
+  return gitOk('Saved working directory');
+}
+
+/** Fake stash result for successful stash pop. */
+function stashPopOk(): SafeGitResult {
+  return gitOk('Dropped stash');
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +152,7 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
 
   it('passes when typecheck + test both pass', async () => {
     const { runCompletenessGate } = await getGate();
-    const { detectVerifyCommands, runVerifyCommand, existsSync, spawnSync } = await getMocks();
+    const { detectVerifyCommands, runVerifyCommand, existsSync, stashGit } = await getMocks();
     const controller = new AbortController();
 
     existsSync.mockReturnValue(false); // no lockfile in repo
@@ -147,7 +160,7 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
     runVerifyCommand.mockReturnValueOnce(okResult(TYPECHECK_CMD)); // typecheck
 
     // Delta logic: stash succeeds, baseline passes, after passes
-    spawnSync
+    stashGit
       .mockReturnValueOnce(stashSuccess()) // stash push
       .mockReturnValueOnce(stashPopOk()); // stash pop
     runVerifyCommand
@@ -259,14 +272,14 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
 
   it('blocks when tests fail (stash-noop fallback path — direct run fails)', async () => {
     const { runCompletenessGate } = await getGate();
-    const { detectVerifyCommands, runVerifyCommand, existsSync, spawnSync } = await getMocks();
+    const { detectVerifyCommands, runVerifyCommand, existsSync, stashGit } = await getMocks();
 
     existsSync.mockReturnValue(false);
     detectVerifyCommands.mockReturnValue([TYPECHECK_CMD, TEST_CMD]);
     runVerifyCommand.mockReturnValueOnce(okResult(TYPECHECK_CMD));
 
     // Stash reports nothing to stash → fallback to direct run
-    spawnSync.mockReturnValueOnce(stashNoop());
+    stashGit.mockReturnValueOnce(stashNoop());
     runVerifyCommand.mockReturnValueOnce(failResult(TEST_CMD, 'FAIL src/core/run/foo.test.ts — 2 failed'));
 
     const result = await runCompletenessGate({

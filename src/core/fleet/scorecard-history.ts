@@ -35,6 +35,7 @@ import {
   type BigIntStats,
 } from 'node:fs';
 import type { FleetScorecard, ScorecardWindow } from './scorecard.js';
+import { bundledIntoSingleFileBinary } from '../resources/probe-helper-invocation.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -198,9 +199,32 @@ function openScorecardRoot(create: boolean): ScorecardDirectoryGuard | undefined
   };
 }
 
-const SCORECARD_HISTORY_WORKER = fileURLToPath(
-  new URL('../../../scripts/scorecard-history-worker.mjs', import.meta.url),
-);
+/**
+ * Operand-free re-entry flag for the scorecard-history custody helper inside
+ * the Bun single-file binary (review finding c13). MUST equal the flag
+ * scripts/build-sea.mjs bakes into the binary's entry shim
+ * (SCORECARD_HISTORY_HELPER_FLAG there; test/scorecard-history-sea-310.test.ts
+ * pins the two together).
+ */
+export const SCORECARD_HISTORY_HELPER_FLAG = '--_scorecard-history-helper';
+
+/**
+ * The argv (after the executable) that runs the one-shot history helper.
+ *
+ *   dev / tsx and npm dist → the on-disk scripts/scorecard-history-worker.mjs,
+ *     resolved relative to this module (both runtimes ship it on disk).
+ *   Bun single-file binary → import.meta.url lives in the virtual /$bunfs
+ *     root, so the sibling path resolves to a file that does not exist and the
+ *     binary would parse it as an unknown CLI command (exit 2 → every history
+ *     read `io-error`, every append false, trend charts permanently empty).
+ *     Instead the binary re-enters itself on the fixed flag above; its entry
+ *     shim dispatches that flag — and only that exact argv — to the SAME
+ *     worker script, compiled in. Same custody boundary, same stdin protocol.
+ */
+export function scorecardHistoryWorkerArgv(moduleUrl: string = import.meta.url): string[] {
+  if (bundledIntoSingleFileBinary(moduleUrl)) return [SCORECARD_HISTORY_HELPER_FLAG];
+  return [fileURLToPath(new URL('../../../scripts/scorecard-history-worker.mjs', moduleUrl))];
+}
 const SCORECARD_WORKER_TIMEOUT_MS = 30_000;
 const SCORECARD_WORKER_MAX_OUTPUT_BYTES = 260 * 1024 * 1024;
 
@@ -243,7 +267,7 @@ function runScorecardWorker(
     : productionMaxBuffer;
   const result = spawnSync(
     process.execPath,
-    [SCORECARD_HISTORY_WORKER],
+    scorecardHistoryWorkerArgv(),
     {
       cwd: directory.rootPath,
       input: JSON.stringify({

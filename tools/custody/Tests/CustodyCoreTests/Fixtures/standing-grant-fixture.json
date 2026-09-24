@@ -1,0 +1,158 @@
+{
+  "_comment": "Cross-language custody fixture (B-U2). canonical + digest come from TypeScript canonicalizeDaemonActivationValue(payload); nodeSigned is an ES256 signature by node:crypto over STANDING_GRANT_SIGNING_DOMAIN + canonical; swiftSigned is the same by a CryptoKit P-256 key. Both keys are throwaway test keys. Verified by tools/custody/Tests (Swift) and test/custody-helper-contract-310b.test.ts (TypeScript).",
+  "payload": {
+    "authoritySurfaceDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "conductorGoals": true,
+    "engines": [
+      "local",
+      "grok-cli",
+      "claude-cli",
+      "codex"
+    ],
+    "expiresAt": "2026-10-24T12:00:00.000Z",
+    "grantId": "0123456789abcdef0123456789abcdef",
+    "grantSeq": 1,
+    "hostBinding": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "issuedAt": "2026-09-24T12:00:00.000Z",
+    "keyId": "mason-se-2026-09",
+    "leader": {
+      "classes": [
+        "A",
+        "B"
+      ],
+      "vetoMinutes": 30
+    },
+    "merge": {
+      "maxFiles": 10,
+      "maxLines": 300,
+      "selfRepo": "merge-non-authority"
+    },
+    "repos": [
+      {
+        "enforcement": "server",
+        "maxMergesPerDay": 6,
+        "maxRisk": "low",
+        "nameWithOwner": "ashlrai/fleet-canary",
+        "stage": "merge"
+      },
+      {
+        "enforcement": "local",
+        "maxMergesPerDay": 4,
+        "maxRisk": "low",
+        "nameWithOwner": "ashlrai/measurably",
+        "stage": "merge"
+      },
+      {
+        "enforcement": "server",
+        "maxMergesPerDay": 24,
+        "maxRisk": "medium",
+        "nameWithOwner": "ashlrai/ashlrcode",
+        "stage": "propose"
+      }
+    ],
+    "rollout": {
+      "autoAdvance": true,
+      "stages": [
+        {
+          "criteria": {
+            "maxRevertRatePct": 0,
+            "maxSandboxViolations": 0,
+            "minHours": 12,
+            "minMerges": 5,
+            "minPostMergeGreenPct": 0,
+            "reserveBreaches": 0
+          },
+          "engines": [
+            "local",
+            "grok-cli"
+          ],
+          "id": "shadow",
+          "leaderClasses": [],
+          "maxFiles": 4,
+          "maxLines": 150,
+          "maxMergesPerRepoPerDay": 0,
+          "maxRisk": "low",
+          "repos": [
+            {
+              "nameWithOwner": "ashlrai/fleet-canary",
+              "stage": "propose"
+            }
+          ]
+        },
+        {
+          "criteria": {
+            "maxRevertRatePct": 10,
+            "maxSandboxViolations": 0,
+            "minHours": 8,
+            "minMerges": 3,
+            "minPostMergeGreenPct": 100,
+            "reserveBreaches": 0
+          },
+          "engines": [
+            "local",
+            "grok-cli"
+          ],
+          "id": "2a",
+          "leaderClasses": [
+            "A"
+          ],
+          "maxFiles": 4,
+          "maxLines": 150,
+          "maxMergesPerRepoPerDay": 6,
+          "maxRisk": "low",
+          "repos": [
+            {
+              "nameWithOwner": "ashlrai/fleet-canary",
+              "stage": "merge"
+            },
+            {
+              "nameWithOwner": "ashlrai/ashlrcode",
+              "stage": "propose"
+            }
+          ]
+        }
+      ]
+    },
+    "spend": {
+      "maxMode": "balanced",
+      "meteredUsdPerDay": 0,
+      "seats": {
+        "claude-a": {
+          "enabled": true,
+          "maxSessionWindowPercent": 70,
+          "reserveFloorPercent": 40,
+          "roles": [
+            "judge",
+            "leader"
+          ]
+        },
+        "codex-a": {
+          "enabled": false,
+          "reserveFloorPercent": 100,
+          "roles": []
+        },
+        "grok-a": {
+          "enabled": true,
+          "reserveFloorPercent": 0,
+          "roles": [
+            "producer",
+            "judge",
+            "leader"
+          ]
+        }
+      }
+    },
+    "v": 1
+  },
+  "canonical": "{\"authoritySurfaceDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"conductorGoals\":true,\"engines\":[\"local\",\"grok-cli\",\"claude-cli\",\"codex\"],\"expiresAt\":\"2026-10-24T12:00:00.000Z\",\"grantId\":\"0123456789abcdef0123456789abcdef\",\"grantSeq\":1,\"hostBinding\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"issuedAt\":\"2026-09-24T12:00:00.000Z\",\"keyId\":\"mason-se-2026-09\",\"leader\":{\"classes\":[\"A\",\"B\"],\"vetoMinutes\":30},\"merge\":{\"maxFiles\":10,\"maxLines\":300,\"selfRepo\":\"merge-non-authority\"},\"repos\":[{\"enforcement\":\"server\",\"maxMergesPerDay\":6,\"maxRisk\":\"low\",\"nameWithOwner\":\"ashlrai/fleet-canary\",\"stage\":\"merge\"},{\"enforcement\":\"local\",\"maxMergesPerDay\":4,\"maxRisk\":\"low\",\"nameWithOwner\":\"ashlrai/measurably\",\"stage\":\"merge\"},{\"enforcement\":\"server\",\"maxMergesPerDay\":24,\"maxRisk\":\"medium\",\"nameWithOwner\":\"ashlrai/ashlrcode\",\"stage\":\"propose\"}],\"rollout\":{\"autoAdvance\":true,\"stages\":[{\"criteria\":{\"maxRevertRatePct\":0,\"maxSandboxViolations\":0,\"minHours\":12,\"minMerges\":5,\"minPostMergeGreenPct\":0,\"reserveBreaches\":0},\"engines\":[\"local\",\"grok-cli\"],\"id\":\"shadow\",\"leaderClasses\":[],\"maxFiles\":4,\"maxLines\":150,\"maxMergesPerRepoPerDay\":0,\"maxRisk\":\"low\",\"repos\":[{\"nameWithOwner\":\"ashlrai/fleet-canary\",\"stage\":\"propose\"}]},{\"criteria\":{\"maxRevertRatePct\":10,\"maxSandboxViolations\":0,\"minHours\":8,\"minMerges\":3,\"minPostMergeGreenPct\":100,\"reserveBreaches\":0},\"engines\":[\"local\",\"grok-cli\"],\"id\":\"2a\",\"leaderClasses\":[\"A\"],\"maxFiles\":4,\"maxLines\":150,\"maxMergesPerRepoPerDay\":6,\"maxRisk\":\"low\",\"repos\":[{\"nameWithOwner\":\"ashlrai/fleet-canary\",\"stage\":\"merge\"},{\"nameWithOwner\":\"ashlrai/ashlrcode\",\"stage\":\"propose\"}]}]},\"spend\":{\"maxMode\":\"balanced\",\"meteredUsdPerDay\":0,\"seats\":{\"claude-a\":{\"enabled\":true,\"maxSessionWindowPercent\":70,\"reserveFloorPercent\":40,\"roles\":[\"judge\",\"leader\"]},\"codex-a\":{\"enabled\":false,\"reserveFloorPercent\":100,\"roles\":[]},\"grok-a\":{\"enabled\":true,\"reserveFloorPercent\":0,\"roles\":[\"producer\",\"judge\",\"leader\"]}}},\"v\":1}",
+  "digest": "bbec8930837bfca7c3ef5a0c6868a6ff5f0258749393922ab72c478f0a8729fa",
+  "nodeSigned": {
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZ06x42mW4xd+lFtACz8fBUP6sZai\n6JV0iF+Sq2XNofVeG63KrJ+EaKhHkIoVBRVnvuptkgDoXVIGedVKHPofmg==\n-----END PUBLIC KEY-----\n",
+    "signature": "lrHyn9bmzmUPny86zS9ue7/IPDAyYbNAY/Zawqnp/ZlUF0+jbci6hdDxep51ck6/Oi/Zp938wJs5GeHCVVUfow=="
+  },
+  "swiftSigned": {
+    "keyId": "se-p256-3e414a0d38f4bc50",
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEyX+ju4GgaLPTrjuAST8EUso/WPAs\n684RCVOX1vYYX5lV747u8qFamSPVo2JKc7ZApF83uq2TCJ+mx2QKj9zbYA==\n-----END PUBLIC KEY-----\n",
+    "signature": "g4ONvJNp43mioi+9b20TC3B+k/mcttPBiaG2ydvefJMSOuFL87CcZEVrgWig20JAXU2uLuOzc+6erSLosknAqA=="
+  }
+}

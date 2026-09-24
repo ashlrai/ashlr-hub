@@ -22,7 +22,7 @@
 
 import { readKillSwitch } from '../../sandbox/policy.js';
 import { launchAgentInstalled } from './launchd.js';
-import { argvMatchesRecord, findLlamaServersOnPort, processAlive, processArgv } from './process.js';
+import { argvMatchesRecord, findLlamaServersOnPortAsync, processAliveAsync, processArgvAsync } from './process.js';
 import { readOwnershipRecord } from './record.js';
 import { resolveLlamaServerBaseUrl } from './config.js';
 import type {
@@ -378,10 +378,17 @@ export async function probeLlamaRuntime(options: ProbeOptions = {}): Promise<Lla
   let ownershipVerified = false;
   let observedPid: number | null = null;
   if (record !== null && record.port === port) {
+    // V3.10 — ASYNC ONLY on this path. The probe runs inside request handlers
+    // (bootstrap, seats, the dispatcher), and the sync twins shell out to `ps`
+    // with execFileSync: a zombie check plus an argv read plus a full
+    // `ps -axww` table scan blocked the event loop well past the 20 ms budget
+    // on every poll. The async twins keep identical semantics (zombie = dead,
+    // untruncated argv, same full-table scan) — only the waiting moves off
+    // the loop. The CLI supervisor may stay sync; nothing awaits it.
     if (options.skipOwnershipCheck === true) {
       ownershipVerified = true;
-    } else if (processAlive(record.pid)) {
-      const argv = processArgv(record.pid);
+    } else if (await processAliveAsync(record.pid)) {
+      const argv = await processArgvAsync(record.pid);
       ownershipVerified = argv !== null && argvMatchesRecord(argv, record);
     }
     if (!ownershipVerified) {
@@ -397,8 +404,11 @@ export async function probeLlamaRuntime(options: ProbeOptions = {}): Promise<Lla
       // exactly one match is required, so an ambiguous port stays unmanaged.
       // This probe stays READ-ONLY — it is on the dispatcher's hot path and a
       // health check must never write to the ownership record.
-      const candidates = findLlamaServersOnPort(port)
-        .filter((found) => found.binPath === record.binPath && processAlive(found.pid));
+      const onPort = (await findLlamaServersOnPortAsync(port))
+        .filter((found) => found.binPath === record.binPath);
+      // Liveness checks run concurrently: each is an independent `ps` read.
+      const alive = await Promise.all(onPort.map((found) => processAliveAsync(found.pid)));
+      const candidates = onPort.filter((_, i) => alive[i] === true);
       if (candidates.length === 1) {
         ownershipVerified = true;
         observedPid = (candidates[0] as (typeof candidates)[number]).pid;

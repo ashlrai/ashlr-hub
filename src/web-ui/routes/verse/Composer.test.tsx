@@ -56,7 +56,7 @@ describe('Composer', () => {
     expect(screen.getByRole('button', { name: 'Send message' })).toBeInTheDocument();
   });
 
-  it('shows the bound seat as a read-only pill whose menu starts a new chat on another seat', async () => {
+  it('shows the bound seat as a chip whose menu starts a new chat on another seat', async () => {
     const user = userEvent.setup();
     const p = props();
     render(<Composer {...p} />);
@@ -170,7 +170,7 @@ describe('Composer — depth for a long day', () => {
     const view = render(<Composer {...p} />);
     await user.keyboard('{Meta>}.{/Meta}');
     expect(p.onStop).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('button', { name: /Stop the running turn/ })).toHaveAttribute('title', 'Stop the running turn (⌘.)');
+    expect(screen.getByRole('button', { name: /Stop the running turn/ })).toHaveAttribute('title', 'Stop the running turn (⌘. or Esc from an empty box)');
 
     // Never armed on an idle chat.
     view.rerender(<Composer {...props({ sessionId: 'vs_1', running: false, onStop: p.onStop })} />);
@@ -286,5 +286,43 @@ describe('Composer — V3.9 cost hint on the compaction point', () => {
     expect(item).not.toHaveTextContent('Opus 5.5');
     await user.click(item);
     expect(p.onSeatChange).toHaveBeenCalledWith({ seatId: 'claude-b', model: 'claude-opus-5' });
+  });
+});
+
+describe('Composer — V3.10 seat health block', () => {
+  const SIGNED_OUT: VerseSeat = {
+    ...CLAUDE_SEAT,
+    capacity: { planType: 'max', binding: null, windows: [], credits: null, usability: 'signed-out', observedAt: null, evidenceSource: 'collector', notes: [] },
+  };
+
+  beforeEach(() => {
+    // The block reads /api/verse/health; an empty report list leaves the
+    // seat's own capacity to decide, which is what these tests drive.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ checkedAt: new Date().toISOString(), seats: [] }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('says a signed-out seat cannot run the turn and offers a ready seat — above the box, before anything is typed', async () => {
+    const user = userEvent.setup();
+    const p = props({ seats: [SIGNED_OUT, LOCAL_SEAT] });
+    render(<Composer {...p} />);
+    const block = await screen.findByText(/Claude Max is signed out/);
+    const alert = block.closest('[role="alert"]') as HTMLElement;
+    expect(alert).toBeInTheDocument();
+    // Ahead of the message box in reading order.
+    expect(alert.compareDocumentPosition(screen.getByRole('textbox', { name: 'Message' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await user.click(within(alert).getByRole('button', { name: LOCAL_SEAT.label }));
+    expect(p.onSeatChange).toHaveBeenCalledWith({ seatId: LOCAL_SEAT.id, model: LOCAL_SEAT.models[0]!.id });
+  });
+
+  it('adds nothing for a ready seat, or on a read-only server', async () => {
+    const { rerender } = render(<Composer {...props()} />);
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    rerender(<Composer {...props({ seats: [SIGNED_OUT, LOCAL_SEAT], disabled: true, disabledReason: 'read-only' })} />);
+    await waitFor(() => expect(screen.queryByText(/is signed out/)).not.toBeInTheDocument());
   });
 });

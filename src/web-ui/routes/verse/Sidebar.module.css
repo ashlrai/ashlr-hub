@@ -274,8 +274,10 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+  background: var(--status-danger-bg);
   color: var(--status-danger-fg);
   font-size: var(--text-2xs-size, 11px);
   font-weight: var(--font-weight-bold);
@@ -293,7 +295,8 @@
   width: 12px;
   height: 12px;
   color: var(--status-danger-fg);
-  font-size: 9px;
+  /* 3.10: the 11px floor (SPEC-310C §6) — was 9px. */
+  font-size: var(--text-2xs-size);
   line-height: 1;
 }
 
@@ -349,3 +352,154 @@
   :root:not([data-motion="full"]) .running { animation: none; }
 }
 :root[data-motion="reduce"] .running { animation: none; }
+
+/* ---- 3.10: filter chips ------------------------------------------------- */
+.filters {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3) 0;
+}
+.filter {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-2xs-size);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.filter:hover { background: var(--bg-hover); color: var(--text-primary); }
+.filter[aria-checked='true'] {
+  border-color: var(--border-strong);
+  background: var(--bg-selected);
+  color: var(--text-primary);
+}
+.filter:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.filterCount {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+.filter[data-filter='running'] .filterCount { color: var(--status-running-fg); }
+.filter[data-filter='needs-you'] .filterCount { color: var(--status-danger-fg); }
+
+/* ---- 3.10: archived disclosure ------------------------------------------ */
+.groupToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+.groupToggle:hover { color: var(--text-secondary); }
+.groupToggle:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); border-radius: var(--radius-xs); }
+.twist {
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+.twist[data-open] { transform: rotate(90deg); }
+.list[hidden] { display: none; }
+
+/* ---- 3.10: row = session button + hover menu ----------------------------- */
+.row { position: relative; min-width: 0; }
+.row > span:not([role='tooltip']),
+.row > span > span:not([role='tooltip']) { display: block; width: 100%; min-width: 0; }
+.sessionBody {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: var(--space-1) 0;
+}
+.liveLine {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+}
+.session:hover .liveLine,
+.session[aria-current] .liveLine { color: var(--text-secondary); }
+
+.statusRunning {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.elapsed {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  font-variant-numeric: tabular-nums;
+  color: var(--status-running-fg);
+}
+.unread {
+  width: 8px;
+  height: 8px;
+  margin: 0 3px;
+  border-radius: var(--radius-full);
+  background: var(--status-info-solid);
+}
+
+/* The row's ⋯ appears on hover or keyboard focus, over the status column. */
+.rowMore {
+  position: absolute;
+  top: 50%;
+  right: var(--space-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-h-xs);
+  height: var(--control-h-xs);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface-raised);
+  color: var(--text-secondary);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+.row:hover .rowMore,
+.row:focus-within .rowMore { opacity: 1; pointer-events: auto; }
+.rowMore:hover { color: var(--text-primary); background: var(--bg-active); }
+@media (hover: none) {
+  .rowMore { opacity: 1; pointer-events: auto; background: transparent; }
+}
+
+.renameRow { padding: var(--space-1) var(--space-3); }
+.renameInput {
+  width: 100%;
+  height: var(--control-h-sm);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-focus);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .twist,
+  :root:not([data-motion="full"]) .rowMore { transition: none; }
+}

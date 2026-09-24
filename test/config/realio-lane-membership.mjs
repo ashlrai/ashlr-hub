@@ -402,6 +402,66 @@ export const REAL_IO_TEST_FILES = [
   'test/m567.agent-os-local-container-broker-journal.test.ts', // exact-private append-only lifecycle journal
   'test/m567.agent-os-local-container-broker.test.ts', // real journal/capacity I/O with injected fake Engine capability
 
+  // --- 3.10 (Tracks A/B/C). Each entry was either flagged by
+  // `node scripts/check-realio-lane-membership.mjs` or named by its building unit
+  // as real-io even though the guard cannot see it (the git/child-process work
+  // lives in a test/helpers/ file the marker grep does not follow). Files a unit
+  // named that turned out to be pure in-memory (perf-server-sse: a fake
+  // ServerResponse; local-fleet-lanecap-310b: a pure derivation) stay in the
+  // fast lane on purpose — this lane is serialized, so membership is a cost. ---
+  // Track A — performance, accounts, local runtime, health/history.
+  'test/perf-server-github.test.ts', // real `git init`/commits in a temp repo for the GitHub read cache
+  'test/perf-server-rollup.test.ts', // real temp git repos; asserts a new commit invalidates exactly one repo's rollup
+  'test/perf-server-private-storage.test.ts', // real /bin/chmod ACL grants and revocations on private dirs
+  'test/perf-server-static.test.ts', // real loopback HTTP server for immutable/compressed static assets
+  'test/perf-server-control.test.ts', // real read-projection worker thread; asserts a busy worker is never awaited (timing-sensitive under load)
+  'test/perf-server-claude-usage.test.ts', // real transcript appends/truncations and the async prime path on disk
+  'test/llama-process-async.test.ts', // spawns a real (harmless node timer) process standing in for llama-server
+  'test/local-eval-trace.test.ts', // real loopback HTTP server standing in for the local model endpoint
+  'test/local-eval-heldout.test.ts', // spawns real `node` held-out checkers, like local-eval.test.ts
+  'test/verse-accounts-limit-reached.test.ts', // private 0600/0700 ledger evidence files round-tripped in a tmp root (sibling of verse-accounts)
+  'test/verse-fleet-history.test.ts', // one real worker thread + an event-loop budget assertion over on-disk fixtures
+  'test/routing-budget-api.test.ts', // real web server bind for /api/verse/budget* under a relocated HOME
+  'test/setup/home-isolation-guard.test.ts', // spawns a nested real `vitest run` to prove the guard fails a leaking fixture
+  // Track A/C — Verse server surfaces.
+  'test/verse-activity-310.test.ts', // real web server bind for /api/verse/activity + a 300-chat warm-read latency bound
+  'test/verse-apps-310.test.ts', // real web server bind for /api/verse/apps
+  'test/verse-project-memory.test.ts', // spawns real `node` to prove a NUL-bearing argv cannot throw at spawn time
+  'test/verse-workspaces.test.ts', // real `git` in temp repos for multi-folder workspace roots
+  // (test/local-only-dispatch-paths.test.ts was listed here at INT8 as a marker
+  // false positive; it moved to scripts/realio-lane-known-fast-spawns.mjs, its
+  // better home — the `spawn(` it matches is inside a source-text scan.)
+  // Track B — autonomy core.
+  'test/host-merge-310b.test.ts', // real git through FakeGithub (test/helpers/fleet-github-310b.ts) — guard cannot see it
+  'test/standing-merge-pass-310b.test.ts', // real git rebase/squash through FakeGithub — guard cannot see it
+  'test/execution-leases-310b.test.ts', // cross-process lease cases via real tsx children (test/helpers/throughput-310b.ts)
+  'test/throughput-310b.test.ts', // real tsx children + h1 temp repos; only the model is faked
+  'test/mirrors-310b.test.ts', // real mirror clones/fetches in h1 temp repos via the throughput helper
+  'test/safe-git-310b.test.ts', // real `git init` mirrors to prove hooks/fsmonitor are forced off
+  'test/confine-autonomous-darwin-310b.test.ts', // real sandbox-exec children + a real net server as an egress target
+  'test/engines-judges-310b.test.ts', // execs the grok-cli launcher (fake pinned binary in a seat fixture) exactly as the fleet would, to inspect env scrubbing
+  'test/fleet-live-api-310b.test.ts', // real web server bind for /api/verse/fleet/live
+  'test/overnight-api-310b.test.ts', // real web server bind for /api/verse/overnight
+  'test/w1.post-merge-halt.test.ts', // real git in h1 fixture repos for the post-merge halt
+  // Added at the 3.10 protected-infra pass (R3e): two the guard flagged, one it cannot see.
+  'test/int4-confine-engines-310b.test.ts', // real git worktrees + real sandbox-exec children (1.2s slowest test, 5s file)
+  'test/post-merge-watch-suite-310b.test.ts', // real git mirror + worktree and the real verify commands the watch runs
+  'test/verify-confinement-310b.test.ts', // real sandbox-exec around verify commands via runVerifyCommandAsync — guard cannot see it
+  'test/completeness-gate-stash-hardening-310b.test.ts', // real git stash push/pop in temp repos with planted fsmonitor/filter programs (R3a)
+  // Added at the 3.10 fix pass (L2): none carries a marker the guard sees — the
+  // spawn/git lives behind a src/ or test/helpers/ call — so each is named here
+  // by what it really does, measured 2026-09-24 on this machine.
+  'test/verify-commands-confine-310b.test.ts', // real sandbox-exec + node children through runVerifyCommandAsync/runVerifyCommand (R3a)
+  'test/engines-stream-family-310b.test.ts', // real spawnEngine children (fake grok binary) raced against 200ms stall-grace timers — timing-sensitive under parallel load
+  'test/standing-wiring-loop-310b.test.ts', // real h1-fixture git repos driven through the daemon loop (3.4s slowest test, 10.8s file)
+  'test/tick-hooks-loop-310b.test.ts', // real h1-fixture git repos driven through the daemon loop (4.0s slowest test, 14.4s file)
+  // Added at the 3.10 fix pass (P5): the guard flagged it. Its darwin block runs
+  // a real `/usr/bin/log stream` probe and real sandbox-exec children, and waits
+  // on the log stream's readiness + barrier line — only ~50ms per test idle
+  // (2026-09-24), but a wait on another process's output is exactly what slips
+  // past 5s under parallel load, so it belongs in the serialized lane.
+  'test/sandbox-kernel-evidence-310.test.ts', // real log stream + sandbox-exec (d0 kernel evidence)
+
   // --- hermetic H-suite: every file spins up a real temp git repo + real fs by design.
   // Already forced fully serial via `npm run test:invariants` (--no-file-parallelism); folding
   // the whole family in here keeps that existing convention and this lane's membership in sync. ---

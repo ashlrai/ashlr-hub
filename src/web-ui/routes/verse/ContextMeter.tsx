@@ -78,8 +78,13 @@ export interface ContextMeterProps {
   mode?: VerseContextMode | null;
   engine?: VerseEngine | null;
   compactionCount?: number;
-  /** `inline` draws the track in flow (resources panel) instead of pinned. */
-  variant?: 'header' | 'inline';
+  /**
+   * `inline` draws the track in flow (the Context pane) instead of pinned.
+   * `ring` (3.10, the chat header) is a 16px occupancy ring plus the
+   * percentage — the same figures and the same tooltip, in the room the
+   * header has now that the title carries a breadcrumb.
+   */
+  variant?: 'header' | 'inline' | 'ring';
 }
 
 /** The meter's words, separated from its markup so the tooltip and the tests read one source. */
@@ -159,12 +164,36 @@ export function describeContext(props: Omit<ContextMeterProps, 'variant'>): {
   };
 }
 
+const RING_R = 6;
+const RING_C = 2 * Math.PI * RING_R;
+
 export function ContextMeter({ variant = 'header', ...props }: ContextMeterProps) {
   const d = describeContext(props);
   // aria-valuenow is bounded by aria-valuemax; the over state is carried by
   // the text and data-tone instead of an out-of-range value.
   const valueNow = d.percent === null ? undefined : Math.min(100, d.percent);
   const valueText = `${d.label} (${d.percentLabel})${d.compactLabel ? `, ${d.compactLabel.replace('≈', 'at about ')}` : ''}${d.tone === 'over' ? ', past the window' : ''}`;
+  if (variant === 'ring') {
+    // The compaction point is a tick on the ring, like on the line.
+    const tickAngle = d.tickPercent === null ? null : (d.tickPercent / 100) * 360 - 90;
+    return (
+      <div className={`${styles.ring} ${styles[`meter-${d.tone}`] ?? ''}`} role="meter" aria-label="Context window"
+        aria-valuemin={0} aria-valuemax={100} aria-valuenow={valueNow} aria-valuetext={valueText}
+        title={d.title} data-tone={d.tone} data-exact={props.exact === false ? 'false' : undefined}>
+        <svg className={styles.ringSvg} width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <circle className={styles.ringTrack} cx="8" cy="8" r={RING_R} />
+          <circle className={styles.ringFill} cx="8" cy="8" r={RING_R}
+            strokeDasharray={`${(d.fillPercent / 100) * RING_C} ${RING_C}`} transform="rotate(-90 8 8)" />
+          {tickAngle !== null ? (
+            <line className={styles.ringTick} data-testid="compaction-tick"
+              x1={8 + Math.cos((tickAngle * Math.PI) / 180) * (RING_R - 2.5)} y1={8 + Math.sin((tickAngle * Math.PI) / 180) * (RING_R - 2.5)}
+              x2={8 + Math.cos((tickAngle * Math.PI) / 180) * (RING_R + 1.5)} y2={8 + Math.sin((tickAngle * Math.PI) / 180) * (RING_R + 1.5)} />
+          ) : null}
+        </svg>
+        <span className={styles.ringText}>{d.percentLabel}</span>
+      </div>
+    );
+  }
   return (
     <div
       className={`${styles.meter} ${styles[`meter-${d.tone}`] ?? ''} ${variant === 'inline' ? styles.meterInline : ''}`}
@@ -575,6 +604,25 @@ export function sessionHandoffAdvice(
   });
 }
 
+/**
+ * Whether ContextAdvice would show anything — the SAME rules, without
+ * rendering. The notice slot (chat/NoticeSlot) needs to know before it picks
+ * which one notice to show.
+ */
+export function contextAdviceVisible(
+  session: VerseSession,
+  budget: SessionContextBudget,
+  modesAvailable: boolean,
+  now: number,
+  lastTurnAt: string | null = null,
+): boolean {
+  const handoff = sessionHandoffAdvice(session, budget, now, lastTurnAt);
+  const compactions = session.compactionCount ?? 0;
+  if (handoff.level !== 'none' && !isVerseAdviceDismissed(session.id, `handoff:${handoff.level}:${compactions}`)) return true;
+  if (!modesAvailable) return false;
+  return expansiveAdvice({ session, option: budget.option }).suggest && !isVerseAdviceDismissed(session.id, `expansive:${compactions}`);
+}
+
 export interface ContextAdviceProps {
   session: VerseSession;
   budget: SessionContextBudget;
@@ -593,6 +641,10 @@ export interface ContextAdviceProps {
   lastTurnAt?: string | null;
   /** Injectable clock for tests. */
   now?: number;
+  /** 3.10: rendered inside the notice slot, which owns the column and spacing. */
+  embedded?: boolean;
+  /** Called after "Not now" hides a note, so a parent that decides visibility re-checks. */
+  onDismiss?: () => void;
 }
 
 /**
@@ -609,7 +661,7 @@ export interface ContextAdviceProps {
  * reload), and a note comes back when its evidence escalates.
  */
 export function ContextAdvice({ session, budget, modesAvailable, dispatchEnabled, modeBusy = false, onHandoff, onSwitchExpansive, onCompact,
-  lastTurnAt = null, now: injectedNow }: ContextAdviceProps) {
+  lastTurnAt = null, now: injectedNow, embedded = false, onDismiss }: ContextAdviceProps) {
   const now = useNow(ADVICE_TICK_MS, injectedNow);
   const [, bump] = useState(0);
   const handoff = sessionHandoffAdvice(session, budget, now, lastTurnAt);
@@ -627,11 +679,12 @@ export function ContextAdvice({ session, budget, modesAvailable, dispatchEnabled
   const dismiss = (key: string) => {
     dismissVerseAdvice(session.id, key);
     bump((n) => n + 1);
+    onDismiss?.();
   };
   const idleExpired = lastTurnAt && !running ? now - Date.parse(lastTurnAt) >= CACHE_IDLE_TTL_MS : false;
 
   return (
-    <div className={styles.advice}>
+    <div className={embedded ? styles.adviceStack : styles.advice}>
       {showHandoff ? (
         <section className={styles.adviceNote} data-level={handoff.level} aria-label="Context advice">
           <div className={styles.adviceBody}>

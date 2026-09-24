@@ -31,7 +31,10 @@ import type { VerseControlErrorCode } from './control-types.js';
 import { discoverProjects } from './projects.js';
 import { expandHomePrefix, peekVerseEngine } from './verse-api.js';
 import { describeVersePrPlans, type VersePrPlanProposal } from './github-proposal.js';
-import { readVerseGithubSnapshot, type VerseGithubReadOptions } from './github-repo.js';
+import {
+  readVerseGithubSnapshotAsync,
+  type VerseGithubReadOptions,
+} from './github-repo.js';
 import type { VerseGithubPrPlanResponse, VerseGithubSnapshot } from './github-types.js';
 
 const VERSE_PREFIX = '/api/verse';
@@ -61,7 +64,14 @@ export interface VerseGithubApiContext {
 
 /** Test seam: the two readers this handler composes. */
 export interface VerseGithubApiDeps {
-  read?: typeof readVerseGithubSnapshot;
+  /**
+   * May be sync or async: the production default is the async reader, while
+   * existing tests hand in plain synchronous fakes. `await` accepts both.
+   */
+  read?: (
+    paths: readonly string[],
+    opts?: VerseGithubReadOptions,
+  ) => VerseGithubSnapshot | Promise<VerseGithubSnapshot>;
   describePlans?: typeof describeVersePrPlans;
   loadProposal?: (id: string) => VersePrPlanProposal | null;
   knownRoots?: () => string[];
@@ -131,7 +141,9 @@ export async function handleVerseGithubApi(
     }
 
     if (path === VERSE_GITHUB_ROUTE) {
-      handleRepos(req, res, deps);
+      // Awaited so a rejected read lands in the catch below (500) rather than
+      // escaping as an unhandled rejection with the response left open.
+      await handleRepos(req, res, deps);
       return true;
     }
 
@@ -155,16 +167,23 @@ export async function handleVerseGithubApi(
 // GET /api/verse/github[?repo=<absolute path>]
 // ---------------------------------------------------------------------------
 
-function handleRepos(req: IncomingMessage, res: ServerResponse, deps: VerseGithubApiDeps): void {
-  const read = deps.read ?? readVerseGithubSnapshot;
+async function handleRepos(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: VerseGithubApiDeps,
+): Promise<void> {
+  // The async reader: on a cold list cache the sync path spawned `gh` with an
+  // 8 s ceiling on the server's only thread (3.10 perf budget: no handler may
+  // block > 20 ms). The async path runs `gh` off-thread and yields between roots.
+  const read = deps.read ?? readVerseGithubSnapshotAsync;
   const known = (deps.knownRoots ?? defaultKnownRoots)();
 
   const requested = queryParam(req, 'repo');
   let roots: string[];
   // Without `?repo=`, this is the cheap index: identity and default branch per
-  // root, from local `git` reads only. `gh` is an 8 s-ceilinged synchronous
-  // subprocess on a single-threaded server, so a dozen roots' worth of list
-  // calls in one request is not something a UI mount may trigger. The panel
+  // root, from local `git` reads only. Even async, a dozen roots' worth of `gh`
+  // list calls (8 s ceiling each) in one request is not something a UI mount
+  // may trigger, so the index stays identity-only. The panel
   // fills in one root at a time with `?repo=`.
   let includeLists = false;
 
@@ -190,7 +209,7 @@ function handleRepos(req: IncomingMessage, res: ServerResponse, deps: VerseGithu
     roots = [resolved];
   }
 
-  const snapshot: VerseGithubSnapshot = read(roots, {
+  const snapshot: VerseGithubSnapshot = await read(roots, {
     includeLists,
     ...(deps.readOptions ?? {}),
   });

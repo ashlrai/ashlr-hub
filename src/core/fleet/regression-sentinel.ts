@@ -50,6 +50,7 @@ import { createProposal, loadProposal } from '../inbox/store.js';
 import { authenticatedRealizedMergeOf } from '../inbox/realized-merge.js';
 import { hashDiff, signProvenance } from '../foundry/provenance.js';
 import { killSwitchOn } from '../sandbox/policy.js';
+import { currentStandingPolicy } from '../authority/effective-config.js';
 import {
   acquireOutwardMutationFence,
   ownsOutwardMutationFence,
@@ -63,6 +64,33 @@ import {
 
 /** Marker embedded by the M47/M48 auto-merge path: `ashlr: auto-merge proposal <id>`. */
 const AUTO_MERGE_MARKER = 'ashlr: auto-merge';
+
+/**
+ * V3.10: a resident-fleet landing is a squash merge through the GitHub App
+ * whose message carries the `Ashlr-Grant: <grantId>` trailer (U3). Matched
+ * as a line so a subject that merely mentions the word is not a candidate.
+ */
+const FLEET_GRANT_TRAILER_GREP = '^Ashlr-Grant: ';
+
+/**
+ * WHY the sentinel stands down under a standing policy: while a standing
+ * grant is in force every fleet landing is watched individually by
+ * fleet/post-merge-watch.ts, which attributes red to the exact landing and
+ * reverts the fleet's own commit through the gates. A second, HEAD-scoped
+ * rollback reflex would bisect the same red and file a competing local revert
+ * proposal (and take the outward mutation fence the fleet's workers need).
+ * When the grant ends, the sentinel (still default-OFF) covers history again —
+ * including those fleet squash commits (FLEET_GRANT_TRAILER_GREP).
+ */
+function standingWatchOwnsReverts(): boolean {
+  try {
+    return currentStandingPolicy() !== null;
+  } catch {
+    // Unknown ⇒ stand down: the conservative answer for an actor that can
+    // take the mutation fence and file revert proposals.
+    return true;
+  }
+}
 
 /** Hard ceiling on candidate auto-merge commits a single bisect will consider. */
 const DEFAULT_MAX_CANDIDATES = 20;
@@ -351,6 +379,7 @@ export async function detectRegression(
   try {
     const sc = resolveCfg(cfg);
     if (!sc.enabled) return { regressed: false };
+    if (standingWatchOwnsReverts()) return { regressed: false };
 
     // (2) Pluggable explicit failing-signal — fire immediately if present.
     if (opts?.failSignal) {
@@ -470,7 +499,8 @@ export interface BisectResult {
 
 /**
  * List recent fleet auto-merge commits (newest-first), capped at maxCandidates.
- * Identified by the M48 commit-message marker `ashlr: auto-merge`.
+ * Identified by the M48 commit-message marker `ashlr: auto-merge`, or (V3.10)
+ * the resident fleet's `Ashlr-Grant:` trailer — git ORs multiple --grep.
  * Returns [] on any git failure.
  */
 function listAutoMergeCommits(git: GitRunner, maxCandidates: number): string[] {
@@ -478,6 +508,7 @@ function listAutoMergeCommits(git: GitRunner, maxCandidates: number): string[] {
     'log',
     `-n${maxCandidates}`,
     `--grep=${AUTO_MERGE_MARKER}`,
+    `--grep=${FLEET_GRANT_TRAILER_GREP}`,
     '--format=%H',
   ]);
   if (!out) return [];
@@ -560,7 +591,7 @@ function planRevertCapture(
  *
  * Bisect approach (bounded, restorable):
  *   - Candidate set = recent commits carrying the `ashlr: auto-merge` marker
- *     (newest-first, capped at maxCandidates). These are the only commits the
+ *     or the V3.10 `Ashlr-Grant:` trailer (newest-first, capped at maxCandidates). These are the only commits the
  *     sentinel will ever propose reverting — fleet merges, not human commits.
  *   - The known-green marker sha is the "good" boundary; HEAD is "bad".
  *   - For each candidate from newest→oldest within (good, bad], we test the
@@ -594,6 +625,9 @@ export async function bisectAndRevert(
   try {
     const sc = resolveCfg(cfg);
     if (!sc.enabled) return { reason: 'regression sentinel disabled' };
+    if (standingWatchOwnsReverts()) {
+      return { reason: 'a standing policy is live; the post-merge watch owns fleet reverts' };
+    }
 
     authority = acquireSentinelAuthority(opts);
     mutationFence = authority.fence;

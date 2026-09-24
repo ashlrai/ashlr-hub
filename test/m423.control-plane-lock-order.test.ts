@@ -61,7 +61,13 @@ vi.mock('../src/core/comms/director-prompt.js', () => ({
   renderDirectorPrompt: vi.fn(() => 'm423-user'),
 }));
 
-vi.mock('../src/core/run/model-catalog.js', () => ({
+// Partial mock: keep the real catalog's constants (e.g. DEFAULT_LOCAL_MODEL_TAG,
+// read at import time by modules in this graph) and override only the model
+// choice this test pins. A hand-listed factory broke whenever the catalog
+// gained an export a transitive importer needed. model-catalog.ts has only a
+// type import, so loading the original is side-effect free.
+vi.mock('../src/core/run/model-catalog.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/core/run/model-catalog.js')>()),
   defaultStrategistModel: vi.fn(() => 'm423-model'),
 }));
 

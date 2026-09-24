@@ -3,8 +3,9 @@
  *
  * Launch: one `claude -p --output-format stream-json --verbose
  * --include-partial-messages ... -- <text>` process per turn (`-p` is
- * boolean; the prompt is positional and goes last, behind `--`). Turn 1 mints the
- * conversation with `--session-id <uuid>`; later turns `--resume <uuid>`.
+ * boolean; the prompt is positional and goes last, behind `--`). The first turn
+ * mints the conversation with `--session-id <uuid>`; once the CLI holds a
+ * transcript for it, turns `--resume <uuid>` (V3.10 rule below).
  * For engine=local the plain `claude` binary is pointed via ANTHROPIC_BASE_URL
  * at whichever local Anthropic-compatible endpoint the seat's launch record
  * names: Ollama's by default, or — when the operator opted into the
@@ -35,24 +36,54 @@
  * messages arrive as `{type:'assistant'|'user', message:{content:[...]}}`,
  * followed by `{type:'result', ...}`. The wire-format machinery is shared with
  * the grok adapter, which emits the same events without the wrapper.
+ *
+ * V3.10 live reasoning + errors (docs: SPEC-310A §3 A4):
+ *  - `--thinking-display summarized` on CLAUDE seats (never local) while the
+ *    `thinkingDisplay` preference is on and the pinned binary is new enough
+ *    (`claudeThinkingDisplayArgs`). Without it the CLI leaves the display to
+ *    the API default, `omitted`, and 98% of Claude thinking blocks arrive as
+ *    a bare signature.
+ *  - the parser streams `thinking_delta` as transient `thinking-delta`,
+ *    rate-limits `system/thinking_tokens` into `thinking-progress` (≤ 4 Hz),
+ *    derives `progress` from block/tool transitions, turns `system/api_retry`
+ *    into a `status` notice, records a signature-only block as
+ *    `thinking {redacted:true}` instead of dropping it, and stamps `thinking`
+ *    with `durationMs` and `kind`.
+ *  - a failed `result` reports its `errors[]` text (it used to say only
+ *    `error_during_execution`) plus a machine `code` (`classifyVerseCliError`).
+ *  - `--session-id` vs `--resume` is chosen from the native transcript on disk
+ *    (`chooseNativeSession`), not from `turnCount`: a turn stopped before
+ *    its first parsed event left a transcript behind, and `--session-id` on it
+ *    fails forever with "Session ID … is already in use".
  */
 
+import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, normalize } from 'node:path';
+
+import { scrubSecrets } from '../../util/scrub.js';
 import {
   canonicalModelId,
   claudeAutocompactFlag,
   hasExpansiveMode,
 } from '../context-math.js';
-import { legacyModelOptionFallback } from '../model-windows.js';
+import { cliVersionFromExecutable, compareCliVersions, legacyModelOptionFallback } from '../model-windows.js';
+import { loadVersePreferences } from '../preferences.js';
 import {
   VERSE_DEFAULT_CONTEXT_WINDOWS,
   verseSessionRoots,
+  type VerseErrorCode,
   type VerseModelOption,
+  type VerseProgressPhase,
   type VerseSession,
+  type VerseThinkingKind,
   type VerseTurnLaunch,
   type VerseUsage,
 } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
+import { claudeEffortArgs, claudePermissionArgs } from '../session-controls.js';
 import type { VerseAdapter, VerseParsedEvent, VerseTurnParser } from './index.js';
+import { turnAttachmentDirs } from './turn-extras.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -86,6 +117,82 @@ export function parseJsonObjectLine(line: string): JsonObject | null {
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Error classification (V3.10)
+// ---------------------------------------------------------------------------
+
+/**
+ * The vendor sentences that mean "the conversation Verse asked to resume does
+ * not exist" and "the id Verse asked to CREATE is taken". Every pattern is a
+ * string captured from a real binary, not recalled:
+ *
+ *  - claude 2.1.257 + 2.1.280, `--resume <missing>`: stdout `result` with
+ *    `errors:["No conversation found with session ID: <uuid>"]`, exit 1
+ *    (reproduced 2026-09-23 against a scratch CLAUDE_CONFIG_DIR + Ollama).
+ *  - claude 2.1.257 + 2.1.280, `--session-id <existing>`: STDERR ONLY
+ *    `Error: Session ID <uuid> is already in use.`, exit 1, nothing on stdout.
+ *  - codex 0.155 `exec resume <missing>`: `Error: thread/resume: thread/resume
+ *    failed: no rollout found for thread id <uuid> (code -32600)`.
+ *  - grok 0.2.118 binary string `No session found with id …`; its docs say
+ *    `--session-id` "errors if … already in use under the target session
+ *    directory" (the exact sentence is behind sign-in, so the pattern is the
+ *    documented phrase).
+ */
+const NATIVE_THREAD_MISSING_RES: readonly RegExp[] = [
+  /no conversation found with session id/i,
+  /no rollout found for thread id/i,
+  /thread\/resume failed/i,
+  /no session found with id/i,
+];
+
+const SESSION_IN_USE_RES: readonly RegExp[] = [
+  /session id \S+ is already in use/i,
+  /session .{0,80}already (?:in use|exists)/i,
+];
+
+/**
+ * A stable `error.code` for CLI text Verse acts on (VERSE_ERROR_CODES), or
+ * null. Exported for the engine, which sees the stderr-only failures (claude's
+ * "already in use" never reaches stdout) that no parser can.
+ */
+export function classifyVerseCliError(text: unknown): VerseErrorCode | null {
+  if (typeof text !== 'string' || text.length === 0) return null;
+  const sample = text.length > 8_192 ? text.slice(0, 8_192) : text;
+  if (NATIVE_THREAD_MISSING_RES.some((re) => re.test(sample))) return 'native-thread-missing';
+  if (SESSION_IN_USE_RES.some((re) => re.test(sample))) return 'session-in-use';
+  return null;
+}
+
+/** Bounds on the vendor error text an `error` event carries. */
+const MAX_ERROR_ENTRIES = 5;
+const MAX_ERROR_ENTRY_CHARS = 1_000;
+
+/**
+ * `result.errors[]` → one line of text, or '' when absent. The CLI puts the
+ * REAL cause here ("No conversation found …", "Not signed in …") while
+ * `subtype` only says `error_during_execution`.
+ */
+function resultErrorsText(value: unknown): string {
+  if (!Array.isArray(value)) return '';
+  return value
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .slice(0, MAX_ERROR_ENTRIES)
+    .map((entry) => (entry.length > MAX_ERROR_ENTRY_CHARS ? `${entry.slice(0, MAX_ERROR_ENTRY_CHARS)}…` : entry))
+    .join('; ');
+}
+
+/**
+ * An `error` event from untrusted CLI text: secrets scrubbed (the text is
+ * persisted and served), plus a code when the sentence is one Verse acts on.
+ */
+export function cliErrorEvent(turnId: string, engineLabel: string, detail: string): Extract<VerseParsedEvent, { type: 'error' }> {
+  const code = classifyVerseCliError(detail);
+  const message = scrubSecrets(`${engineLabel}: ${detail}`);
+  return code ? { type: 'error', turnId, message, code } : { type: 'error', turnId, message };
 }
 
 /** Anthropic-style usage block → partial VerseUsage (fields missing → 0). */
@@ -243,6 +350,52 @@ interface OpenBlock {
   text: string;
   partialJson: string;
   input: unknown;
+  /** Clock reading when the block opened (thinking duration). */
+  startedAt: number;
+  /** Thinking signature, when the stream carried one (dedupes a text-less block). */
+  signature: string;
+}
+
+/** Options for the shared parser. `now` is the clock (a test seam). */
+export interface AnthropicStreamParserOptions {
+  now?: () => number;
+}
+
+/**
+ * `thinking-progress` is coalesced to at most one event per this interval
+ * (≤ 4 Hz). A local qwen turn sent 30 `thinking_tokens` frames in 11 s, a
+ * long Claude think sends thousands; the UI only needs a live counter.
+ */
+export const THINKING_PROGRESS_MIN_INTERVAL_MS = 250;
+
+/**
+ * Which kind of reasoning text a CLAUDE-CLI turn returns, from the model the
+ * CLI says it runs: Claude 4+ models never return raw chain of thought — any
+ * text is a vendor summary — while a local model behind the same CLI (an
+ * Ollama tag) streams its raw reasoning. Grok is left unknown (undefined): its
+ * API does not say which it sends, and an unknown kind is reported as unknown.
+ */
+function thinkingKindFor(engineLabel: string, model: string | null): VerseThinkingKind | undefined {
+  if (engineLabel !== 'claude' || !model) return undefined;
+  return /^claude-/i.test(model) ? 'summary' : 'raw';
+}
+
+/**
+ * `system/api_retry` → one sentence. Built only from numbers and a short
+ * word-shaped error tag, so nothing the network said is echoed verbatim.
+ */
+function apiRetryMessage(ev: JsonObject): string {
+  const attempt = positiveInt(ev['attempt']);
+  const max = positiveInt(ev['max_retries']);
+  const delayMs = nonNegativeInt(ev['retry_delay_ms']);
+  const status = positiveInt(ev['error_status']);
+  const tag = str(ev['error']);
+  const cause = status !== null
+    ? `HTTP ${status}`
+    : /^[A-Za-z0-9_. -]{1,40}$/.test(tag) && tag !== 'unknown' ? tag : 'unknown error';
+  const which = attempt !== null ? (max !== null ? `retry ${attempt} of ${max}` : `retry ${attempt}`) : 'retrying';
+  const when = delayMs !== null ? ` in ${(delayMs / 1000).toFixed(1)}s` : '';
+  return `Model API request failed (${cause}) — ${which}${when}`;
 }
 
 /**
@@ -253,11 +406,16 @@ interface OpenBlock {
  *   - claude's whole-message envelopes `assistant` / `user` and the terminal `result`
  *     (whose `modelUsage` carries the CLI's context window for the turn);
  *   - `system` (`init` captures session_id and model; `compact_boundary`
- *     becomes a `compaction` event).
+ *     becomes a `compaction` event; V3.10: `thinking_tokens` → a rate-limited
+ *     `thinking-progress`, `api_retry` → a `status` notice, `status` →
+ *     `progress {phase:'waiting'}`).
  *
  * A text/tool_use/thinking block can arrive twice — once via the streamed
  * content_block_* events and again inside an `assistant` envelope — so block
- * events are deduplicated by content within a turn.
+ * events are deduplicated by content within a turn. A thinking block with no
+ * text (Claude's default `omitted` display, or `redacted_thinking`) is kept as
+ * `thinking {text:'', redacted:true}` — the model DID think, and the UI says
+ * so — deduplicated by its signature, else once per API call.
  *
  * Usage is deduplicated the same way, by API call. With partial messages on,
  * ONE call is reported by `message_start` + `message_delta` AND by one
@@ -266,6 +424,14 @@ interface OpenBlock {
  * right because the terminal `result` replaced it. Each call is keyed by its
  * message id and its readings are merged, so the fallback total is right too
  * when a process dies before `result`.
+ *
+ * V3.10 transient events (never persisted; see VERSE_TRANSIENT_EVENT_TYPES):
+ * `thinking-delta` per streamed reasoning chunk, `thinking-progress`,
+ * `progress` on every phase/tool change (plus once per finished API call with
+ * its measured output rate), and `status`. They are emitted in stream order
+ * next to the persisted events, so a consumer that drops them sees exactly the
+ * persisted sequence this parser produced before 3.10 — plus the richer
+ * `thinking`/`error` fields.
  */
 /**
  * Shared by the claude/local and grok adapters — both speak the Anthropic wire
@@ -276,7 +442,10 @@ interface OpenBlock {
 export function createAnthropicStreamParser(
   turnId: string,
   engineLabel = 'claude',
+  options: AnthropicStreamParserOptions = {},
 ): VerseTurnParser {
+  const now = typeof options.now === 'function' ? options.now : Date.now;
+  const turnStartedAt = now();
   let nativeId: string | null = null;
   /** The model the CLI says it runs (`system/init.model`, else the latest assistant frame's). */
   let initModel: string | null = null;
@@ -286,6 +455,8 @@ export function createAnthropicStreamParser(
   const emittedThinking = new Set<string>();
   const emittedToolUse = new Set<string>();
   const emittedToolResult = new Set<string>();
+  /** Codes already reported from a non-JSON stdout line (one error per cause). */
+  const emittedPlainErrors = new Set<string>();
   /**
    * One entry per API call, in the order the calls STARTED (Map keeps first
    * insertion order on update), so the last entry is the latest call — whose
@@ -294,6 +465,8 @@ export function createAnthropicStreamParser(
   const calls = new Map<string, AnthropicUsage>();
   /** The call the wire stream is currently inside (set by `message_start`). */
   let currentCall: string | null = null;
+  /** When the current call's first content block opened (output-rate clock). */
+  let currentCallFirstBlockAt: number | null = null;
   let syntheticCalls = 0;
   let resultTotals: AnthropicUsage | null = null;
   let runtimeWindow: number | null = null;
@@ -305,6 +478,16 @@ export function createAnthropicStreamParser(
    */
   let postCompactionTokens: number | null = null;
   let usageEmitted = false;
+
+  // ---- live state (V3.10) --------------------------------------------------
+  let phase: VerseProgressPhase | null = null;
+  let phaseTool: string | null = null;
+  /** Output rate of the latest finished call, tokens/s; null until measured. */
+  let lastTokPerSec: number | null = null;
+  /** Latest `thinking_tokens` estimate, and the last one actually emitted. */
+  let thinkingTokens: number | null = null;
+  let emittedThinkingTokens: number | null = null;
+  let lastThinkingProgressAt = Number.NEGATIVE_INFINITY;
 
   function syntheticKey(kind: string): string {
     syntheticCalls += 1;
@@ -329,16 +512,81 @@ export function createAnthropicStreamParser(
     return totals;
   }
 
+  function progressEvent(): VerseParsedEvent {
+    const event: Extract<VerseParsedEvent, { type: 'progress' }> = {
+      type: 'progress',
+      turnId,
+      phase: phase ?? 'waiting',
+      elapsedMs: Math.max(0, Math.round(now() - turnStartedAt)),
+    };
+    if (phaseTool) event.tool = phaseTool;
+    // Only MEASURED figures: output tokens the API reported, and a rate over a
+    // finished call. Absent = not measured yet — never an estimate from chars.
+    const outTokens = callTotals().output;
+    if (outTokens > 0) event.outTokens = outTokens;
+    if (lastTokPerSec !== null) event.tokPerSec = lastTokPerSec;
+    return event;
+  }
+
+  /** Emit `progress` when the phase or the running tool changes. */
+  function setPhase(out: VerseParsedEvent[], next: VerseProgressPhase, tool: string | null = null): void {
+    if (phase === next && phaseTool === tool) return;
+    phase = next;
+    phaseTool = tool;
+    out.push(progressEvent());
+  }
+
+  function emitThinkingProgress(out: VerseParsedEvent[]): void {
+    if (thinkingTokens === null || thinkingTokens === emittedThinkingTokens) return;
+    emittedThinkingTokens = thinkingTokens;
+    lastThinkingProgressAt = now();
+    out.push({ type: 'thinking-progress', turnId, estimatedTokens: thinkingTokens });
+  }
+
+  /** The trailing estimate the rate limit held back, so the counter ends on the true figure. */
+  function flushThinkingProgress(out: VerseParsedEvent[]): void {
+    emitThinkingProgress(out);
+  }
+
   function emitText(out: VerseParsedEvent[], text: string): void {
     if (!text || emittedText.has(text)) return;
     emittedText.add(text);
     out.push({ type: 'assistant-message', turnId, text });
   }
 
-  function emitThinking(out: VerseParsedEvent[], text: string): void {
-    if (!text || emittedThinking.has(text)) return;
-    emittedThinking.add(text);
-    out.push({ type: 'thinking', turnId, text });
+  /**
+   * Persist one thinking block. `startedAt` is when its stream opened (null
+   * for an envelope-only block, whose duration is unknown and so omitted).
+   */
+  function emitThinking(out: VerseParsedEvent[], text: string, signature: string, startedAt: number | null): void {
+    const redacted = text.length === 0;
+    const callKey = `call:${currentCall ?? ''}`;
+    const key = redacted ? (signature ? `sig:${signature}` : callKey) : `text:${text}`;
+    if (emittedThinking.has(key)) return;
+    emittedThinking.add(key);
+    // A signed marker also claims its call, so a signature-less copy of the
+    // same block (an envelope that dropped it) is not shown twice.
+    if (redacted) emittedThinking.add(callKey);
+    flushThinkingProgress(out);
+    const event: Extract<VerseParsedEvent, { type: 'thinking' }> = { type: 'thinking', turnId, text };
+    if (redacted) event.redacted = true;
+    if (startedAt !== null) event.durationMs = Math.max(0, Math.round(now() - startedAt));
+    const kind = redacted ? undefined : thinkingKindFor(engineLabel, initModel ?? frameModel);
+    if (kind) event.kind = kind;
+    out.push(event);
+  }
+
+  /** An envelope's thinking block: borrow the clock of the streamed block it duplicates, if one is open. */
+  function emitEnvelopeThinking(out: VerseParsedEvent[], text: string, signature: string): void {
+    let startedAt: number | null = null;
+    for (const block of open.values()) {
+      if (block.type !== 'thinking' && block.type !== 'redacted_thinking') continue;
+      if ((text && block.text === text) || (!text && (!signature || block.signature === signature))) {
+        startedAt = block.startedAt;
+        break;
+      }
+    }
+    emitThinking(out, text, signature, startedAt);
   }
 
   function emitToolUse(out: VerseParsedEvent[], id: string, name: string, input: unknown): void {
@@ -346,6 +594,7 @@ export function createAnthropicStreamParser(
     if (emittedToolUse.has(key)) return;
     emittedToolUse.add(key);
     out.push({ type: 'tool-use', turnId, toolUseId: id, name, input });
+    if (name) setPhase(out, 'tool', name);
   }
 
   function emitToolResult(out: VerseParsedEvent[], id: string, output: string, isError: boolean): void {
@@ -353,12 +602,15 @@ export function createAnthropicStreamParser(
     if (emittedToolResult.has(key)) return;
     emittedToolResult.add(key);
     out.push({ type: 'tool-result', turnId, toolUseId: id, output, isError });
+    // The tool finished; the CLI now sends its result back to the model.
+    setPhase(out, 'waiting');
   }
 
   function emitBlock(out: VerseParsedEvent[], block: JsonObject): void {
     const type = str(block['type']);
     if (type === 'text') emitText(out, str(block['text']));
-    else if (type === 'thinking') emitThinking(out, str(block['thinking']));
+    else if (type === 'thinking') emitEnvelopeThinking(out, str(block['thinking']), str(block['signature']));
+    else if (type === 'redacted_thinking') emitEnvelopeThinking(out, '', str(block['data']));
     else if (type === 'tool_use') emitToolUse(out, str(block['id']), str(block['name']), block['input']);
     else if (type === 'tool_result') {
       emitToolResult(out, str(block['tool_use_id']), toolResultText(block['content']), block['is_error'] === true);
@@ -370,8 +622,9 @@ export function createAnthropicStreamParser(
     if (!block) return;
     open.delete(index);
     if (block.type === 'text') emitText(out, block.text);
-    else if (block.type === 'thinking') emitThinking(out, block.text);
-    else if (block.type === 'tool_use') {
+    else if (block.type === 'thinking' || block.type === 'redacted_thinking') {
+      emitThinking(out, block.type === 'thinking' ? block.text : '', block.signature, block.startedAt);
+    } else if (block.type === 'tool_use') {
       let input: unknown = block.input;
       if (block.partialJson) {
         try { input = JSON.parse(block.partialJson); } catch { input = block.partialJson; }
@@ -401,6 +654,7 @@ export function createAnthropicStreamParser(
       case 'message_start': {
         const message = isObject(ev['message']) ? ev['message'] : null;
         currentCall = str(message?.['id']) || syntheticKey('wire');
+        currentCallFirstBlockAt = null;
         if (typeof message?.['model'] === 'string' && message['model']) frameModel = message['model'];
         const usage = readAnthropicUsage(message?.['usage']);
         if (usage) recordCall(currentCall, usage);
@@ -410,14 +664,22 @@ export function createAnthropicStreamParser(
       case 'content_block_start': {
         const index = num(ev['index']);
         const cb = isObject(ev['content_block']) ? ev['content_block'] : {};
+        const blockType = str(cb['type']);
+        const startedAt = now();
+        if (currentCallFirstBlockAt === null) currentCallFirstBlockAt = startedAt;
         open.set(index, {
-          type: str(cb['type']),
+          type: blockType,
           id: str(cb['id']),
           name: str(cb['name']),
           text: str(cb['text']) || str(cb['thinking']),
           partialJson: '',
           input: cb['input'],
+          startedAt,
+          signature: str(cb['signature']) || (blockType === 'redacted_thinking' ? str(cb['data']) : ''),
         });
+        if (blockType === 'thinking' || blockType === 'redacted_thinking') setPhase(out, 'thinking');
+        else if (blockType === 'text') setPhase(out, 'writing');
+        else if (blockType === 'tool_use') setPhase(out, 'tool', str(cb['name']) || null);
         return;
       }
       case 'content_block_delta': {
@@ -427,17 +689,38 @@ export function createAnthropicStreamParser(
         let block = open.get(index);
         if (!block) {
           // Delta without a start (e.g. we joined mid-stream): open an implicit block.
-          block = { type: deltaType === 'thinking_delta' ? 'thinking' : 'text', id: '', name: '', text: '', partialJson: '', input: undefined };
+          const startedAt = now();
+          if (currentCallFirstBlockAt === null) currentCallFirstBlockAt = startedAt;
+          block = {
+            type: deltaType === 'thinking_delta' || deltaType === 'signature_delta' ? 'thinking' : 'text',
+            id: '',
+            name: '',
+            text: '',
+            partialJson: '',
+            input: undefined,
+            startedAt,
+            signature: '',
+          };
           open.set(index, block);
         }
         if (deltaType === 'text_delta') {
           const text = str(delta['text']);
           if (text) {
             block.text += text;
+            setPhase(out, 'writing');
             out.push({ type: 'text-delta', turnId, text });
           }
         } else if (deltaType === 'thinking_delta') {
-          block.text += str(delta['thinking']);
+          const text = str(delta['thinking']);
+          if (text) {
+            block.text += text;
+            setPhase(out, 'thinking');
+            // Transient: the whole block is persisted once as `thinking` when
+            // it closes, so the log never holds per-chunk reasoning.
+            out.push({ type: 'thinking-delta', turnId, text });
+          }
+        } else if (deltaType === 'signature_delta') {
+          block.signature += str(delta['signature']);
         } else if (deltaType === 'input_json_delta') {
           block.partialJson += str(delta['partial_json']);
         }
@@ -452,6 +735,16 @@ export function createAnthropicStreamParser(
         if (usage) {
           if (!currentCall) currentCall = syntheticKey('wire');
           recordCall(currentCall, usage);
+          // The call's output count is final here: measure its rate over the
+          // time its content streamed (from the first block, so the prompt's
+          // queue/prefill time is not counted as slow generation).
+          const callOutput = calls.get(currentCall)?.output ?? 0;
+          const since = currentCallFirstBlockAt;
+          const seconds = since === null ? 0 : (now() - since) / 1000;
+          if (callOutput > 0 && seconds >= 0.25) {
+            lastTokPerSec = Math.round((callOutput / seconds) * 10) / 10;
+            out.push(progressEvent());
+          }
         }
         return;
       }
@@ -466,19 +759,59 @@ export function createAnthropicStreamParser(
     }
   }
 
+  function handleSystem(out: VerseParsedEvent[], ev: JsonObject): void {
+    const subtype = ev['subtype'];
+    if (subtype === 'init') {
+      // Non-empty only: grok's signed-out init carries `session_id: ""`.
+      if (typeof ev['session_id'] === 'string' && ev['session_id']) nativeId = ev['session_id'];
+      if (typeof ev['model'] === 'string' && ev['model']) initModel = ev['model'];
+    } else if (subtype === 'compact_boundary') {
+      const compaction = compactionFrom(turnId, ev);
+      postCompactionTokens = compaction.postTokens;
+      out.push(compaction);
+    } else if (subtype === 'thinking_tokens') {
+      // Arrives even when the display omits the text (claude 2.1.280), so it
+      // is the one live signal a Claude think always has. Cumulative within
+      // the block; a bare delta is accumulated when the total is missing.
+      const total = nonNegativeInt(ev['estimated_tokens']);
+      const delta = nonNegativeInt(ev['estimated_tokens_delta']);
+      if (total !== null) thinkingTokens = total;
+      else if (delta !== null) thinkingTokens = (thinkingTokens ?? 0) + delta;
+      else return;
+      setPhase(out, 'thinking');
+      if (now() - lastThinkingProgressAt >= THINKING_PROGRESS_MIN_INTERVAL_MS) emitThinkingProgress(out);
+    } else if (subtype === 'api_retry') {
+      // Without this a dead endpoint looked like a silent spinner for minutes
+      // (10 retries with backoff, measured against a stopped Ollama).
+      out.push({ type: 'status', turnId, kind: 'retry', message: apiRetryMessage(ev) });
+      setPhase(out, 'waiting');
+    } else if (subtype === 'status') {
+      if (ev['status'] === 'requesting') setPhase(out, 'waiting');
+    }
+  }
+
+  function handleResult(out: VerseParsedEvent[], ev: JsonObject): void {
+    if (typeof ev['session_id'] === 'string' && ev['session_id']) nativeId = ev['session_id'];
+    const usage = readAnthropicUsage(ev['usage']);
+    if (usage) resultTotals = usage;
+    runtimeWindow = runtimeContextWindow(ev['modelUsage'], initModel ?? frameModel);
+    const subtype = str(ev['subtype']);
+    const errors = resultErrorsText(ev['errors']);
+    if (subtype && subtype !== 'success') {
+      // `errors[]` first: it holds the cause; `subtype` is only the category.
+      const detail = errors || str(ev['error']) || str(ev['result']) || subtype;
+      out.push(cliErrorEvent(turnId, engineLabel, detail));
+    } else if (ev['is_error'] === true) {
+      out.push(cliErrorEvent(turnId, engineLabel, errors || str(ev['result']) || 'result reported an error'));
+    }
+    emitUsage(out);
+  }
+
   function handleEnvelope(out: VerseParsedEvent[], ev: JsonObject): boolean {
     const type = str(ev['type']);
     switch (type) {
       case 'system': {
-        const subtype = ev['subtype'];
-        if (subtype === 'init') {
-          if (typeof ev['session_id'] === 'string') nativeId = ev['session_id'];
-          if (typeof ev['model'] === 'string' && ev['model']) initModel = ev['model'];
-        } else if (subtype === 'compact_boundary') {
-          const compaction = compactionFrom(turnId, ev);
-          postCompactionTokens = compaction.postTokens;
-          out.push(compaction);
-        }
+        handleSystem(out, ev);
         return true;
       }
       case 'stream_event': {
@@ -506,18 +839,7 @@ export function createAnthropicStreamParser(
         return true;
       }
       case 'result': {
-        if (typeof ev['session_id'] === 'string') nativeId = ev['session_id'];
-        const usage = readAnthropicUsage(ev['usage']);
-        if (usage) resultTotals = usage;
-        runtimeWindow = runtimeContextWindow(ev['modelUsage'], initModel ?? frameModel);
-        const subtype = str(ev['subtype']);
-        if (subtype && subtype !== 'success') {
-          const detail = str(ev['error']) || str(ev['result']) || subtype;
-          out.push({ type: 'error', turnId, message: `${engineLabel}: ${detail}` });
-        } else if (ev['is_error'] === true) {
-          out.push({ type: 'error', turnId, message: `${engineLabel}: ${str(ev['result']) || 'result reported an error'}` });
-        }
-        emitUsage(out);
+        handleResult(out, ev);
         return true;
       }
       default:
@@ -525,12 +847,27 @@ export function createAnthropicStreamParser(
     }
   }
 
+  /**
+   * A non-JSON stdout line is the CLI talking, never the model (model output
+   * is always inside a JSON frame). Only the sentences Verse acts on become an
+   * `error`; anything else stays dropped, as before.
+   */
+  function handlePlainLine(line: string): VerseParsedEvent[] {
+    const text = line.trim();
+    if (!text) return [];
+    const code = classifyVerseCliError(text);
+    if (!code || emittedPlainErrors.has(code)) return [];
+    emittedPlainErrors.add(code);
+    return [cliErrorEvent(turnId, engineLabel, text.replace(/^error:\s*/i, '').slice(0, MAX_ERROR_ENTRY_CHARS))];
+  }
+
   return {
     push(line: string): VerseParsedEvent[] {
+      if (typeof line !== 'string') return [];
       const ev = parseJsonObjectLine(line);
-      if (!ev) return [];
       const out: VerseParsedEvent[] = [];
       try {
+        if (!ev) return handlePlainLine(line);
         if (!handleEnvelope(out, ev)) handleWireEvent(out, ev);
       } catch {
         // Parsers never throw on odd input; drop the line.
@@ -540,9 +877,15 @@ export function createAnthropicStreamParser(
     finish(_exitCode: number | null): VerseParsedEvent[] {
       // Exit-code errors are the engine's to report (it also has the stderr tail).
       const out: VerseParsedEvent[] = [];
-      for (const index of [...open.keys()]) closeBlock(out, index);
-      emitUsage(out);
-      return out;
+      try {
+        for (const index of [...open.keys()]) closeBlock(out, index);
+        emitUsage(out);
+      } catch {
+        // never throw
+      }
+      // Transient events after the process is gone would only flicker a
+      // spinner that is about to disappear; the turn's end is the last word.
+      return out.filter((event) => event.type !== 'progress' && event.type !== 'thinking-progress');
     },
     nativeSessionId(): string | null {
       return nativeId;
@@ -635,6 +978,266 @@ function launchMemory(launch: VerseSeatLaunch): { dir: string; block: string; wr
   return { dir, block, writable: memory['writable'] === true };
 }
 
+// ---------------------------------------------------------------------------
+// V3.10 launch facts read from disk
+//
+// `buildLaunch` was pure. Two decisions now need one bounded look at the CLI's
+// own files — which binary the seat's profile pins (does it know
+// `--thinking-display`?) and whether the native transcript already exists
+// (`--session-id` or `--resume`?). Both are a handful of stat/small-file reads
+// (sub-millisecond), synchronous, never throw, and never read file CONTENTS
+// beyond the profile manifest. Nothing read here leaves the process: paths go
+// into no argv the adapter did not already emit.
+// ---------------------------------------------------------------------------
+
+/** Vendor ids are interpolated into file names, so anything but a UUID is refused. */
+const UUID_RE = /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
+
+const MAX_PROFILE_BYTES = 64 * 1024;
+
+export interface NativeProfileFacts {
+  /** The profile directory (`…/native-profiles/<account>`). */
+  directory: string;
+  /** The CLI's pinned home (CLAUDE_CONFIG_DIR / GROK_HOME / CODEX_HOME), when the manifest names one. */
+  nativeStatePath: string | null;
+  /** The one binary the launcher execs, when the manifest names one. */
+  executable: string | null;
+}
+
+function cleanAbsolute(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 1 && value.length <= 4096 && isAbsolute(value)
+    && !value.includes('\0') && normalize(value) === value ? value : null;
+}
+
+/**
+ * The native profile behind a launcher argv (`…/<profile>/launcher.mjs` ⇒ its
+ * `profile.json`) — the same derivation seats.ts `readSeatProfile` and
+ * codex-rollout `codexNativeStatePath` use. A manifest naming ANOTHER provider
+ * yields null (reading a codex home for a claude seat would be worse than
+ * reading none); an absent or unreadable manifest yields the directory alone.
+ */
+export function readNativeProfileFacts(
+  launcher: readonly string[] | null | undefined,
+  provider: 'claude' | 'codex' | 'grok',
+): NativeProfileFacts | null {
+  if (!Array.isArray(launcher)) return null;
+  const launcherPath = [...launcher].reverse().find((part) => cleanAbsolute(part) !== null && part.endsWith('/launcher.mjs'));
+  if (!launcherPath) return null;
+  const directory = dirname(launcherPath);
+  const facts: NativeProfileFacts = { directory, nativeStatePath: null, executable: null };
+  try {
+    const manifestPath = join(directory, 'profile.json');
+    const stat = statSync(manifestPath);
+    if (!stat.isFile() || stat.size > MAX_PROFILE_BYTES) return facts;
+    const manifest: unknown = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    if (!isObject(manifest)) return facts;
+    if (manifest['provider'] !== undefined && manifest['provider'] !== provider) return null;
+    facts.nativeStatePath = cleanAbsolute(manifest['nativeStatePath']);
+    facts.executable = cleanAbsolute(manifest['executable']);
+  } catch {
+    // No manifest: the launcher's sibling `native-state` is the pinned home.
+  }
+  return facts;
+}
+
+/**
+ * The CLI home a turn will run against, or null when it cannot be known.
+ * A launcher's profile pins it (`native-state` next to the launcher unless the
+ * manifest says otherwise); a launcher-less spawn inherits the server's HOME
+ * (the engine passes HOME but no CLAUDE_CONFIG_DIR/GROK_HOME through), so the
+ * CLI's own default applies.
+ */
+export function nativeStateDir(
+  launcher: readonly string[] | null | undefined,
+  provider: 'claude' | 'grok',
+  defaultDir: string,
+): string | null {
+  if (!launcher) return defaultDir;
+  const facts = readNativeProfileFacts(launcher, provider);
+  if (!facts) return null;
+  return facts.nativeStatePath ?? join(facts.directory, 'native-state');
+}
+
+function isDirectory(path: string): boolean {
+  try { return statSync(path).isDirectory(); } catch { return false; }
+}
+
+function pathExists(path: string): boolean {
+  try { statSync(path); return true; } catch { return false; }
+}
+
+/** The cwd as given and as the OS resolves it (`/tmp` → `/private/tmp`), deduplicated. */
+function cwdSpellings(projectPath: string): string[] {
+  const out = [projectPath];
+  try {
+    const physical = realpathSync.native(projectPath);
+    if (physical !== projectPath) out.push(physical);
+  } catch {
+    // A missing project dir has only the spelling we were given.
+  }
+  return out;
+}
+
+/** Java-style 32-bit string hash — claude's own (`AQ` in the 2.1.280 bundle). */
+function claudePathHash(value: string): number {
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) hash = ((hash << 5) - hash + value.charCodeAt(i)) | 0;
+  return hash;
+}
+
+/** Longest project directory name claude writes before it appends a hash (2.1.280: `gQ=200`). */
+const CLAUDE_PROJECT_SLUG_MAX = 200;
+
+/**
+ * The directory under `<CLAUDE_CONFIG_DIR>/projects` claude keeps a cwd's
+ * transcripts in. Transcribed from the 2.1.280 bundle (`kT`):
+ * every non-alphanumeric → `-`; past 200 chars, the first 200 plus
+ * `-<|hash(cwd)| base 36>`.
+ */
+export function claudeProjectSlug(cwd: string): string {
+  const slug = cwd.replace(/[^a-zA-Z0-9]/g, '-');
+  if (slug.length <= CLAUDE_PROJECT_SLUG_MAX) return slug;
+  return `${slug.slice(0, CLAUDE_PROJECT_SLUG_MAX)}-${Math.abs(claudePathHash(cwd)).toString(36)}`;
+}
+
+/** `present`/`absent` are facts read from disk; `unknown` means the CLI home itself could not be found. */
+export type NativeConversationState = 'present' | 'absent' | 'unknown';
+
+/**
+ * Does claude already hold a transcript for this session id in this cwd?
+ * Scoped to the cwd's own project directory because that is exactly where the
+ * CLI looks: measured on 2.1.280, a transcript planted under ANOTHER project
+ * directory did not trip "already in use", one under the cwd's did.
+ */
+export function claudeConversationState(configDir: string | null, projectPath: string, nativeId: string): NativeConversationState {
+  if (!configDir || !isDirectory(configDir) || !UUID_RE.test(nativeId)) return 'unknown';
+  for (const cwd of cwdSpellings(projectPath)) {
+    if (pathExists(join(configDir, 'projects', claudeProjectSlug(cwd), `${nativeId}.jsonl`))) return 'present';
+  }
+  return 'absent';
+}
+
+/**
+ * The same question for grok: `<GROK_HOME>/sessions/<encoded-cwd>/<id>/`
+ * (grok docs 17-sessions.md; the percent-encoded cwd was confirmed on this
+ * machine's grok-a home).
+ */
+export function grokConversationState(grokHome: string | null, projectPath: string, nativeId: string): NativeConversationState {
+  if (!grokHome || !isDirectory(grokHome) || !UUID_RE.test(nativeId)) return 'unknown';
+  for (const cwd of cwdSpellings(projectPath)) {
+    if (pathExists(join(grokHome, 'sessions', encodeURIComponent(cwd), nativeId))) return 'present';
+  }
+  return 'absent';
+}
+
+/**
+ * The engine's explicit instruction for THIS turn, when it gives one
+ * (read structurally: optional, absent on every launch record). The engine
+ * sets `new` when it deliberately starts a fresh native conversation — e.g.
+ * recovering a vanished thread with a handoff — and `resume` to retry after
+ * "already in use".
+ */
+export function nativeSessionOverride(launch: VerseSeatLaunch): 'new' | 'resume' | null {
+  const value = (launch as { nativeSession?: unknown }).nativeSession;
+  return value === 'new' || value === 'resume' ? value : null;
+}
+
+/** Did this chat ever complete a real model exchange? (Its totals are only ever non-zero after one.) */
+function hadVendorExchange(session: VerseSession): boolean {
+  const u = session.usage;
+  if (!u || typeof u !== 'object') return false;
+  return num(u.inputTokens) + num(u.outputTokens) + num(u.cacheReadTokens) + num(u.cacheCreationTokens) > 0;
+}
+
+/**
+ * Create (`new`) or continue (`resume`) the native conversation.
+ *
+ *  - override from the engine → as told;
+ *  - transcript present → resume. This is the turn-1 Stop fix: a turn
+ *    stopped (or a server restarted) before the first parsed event leaves
+ *    `turnCount` at 0 but the CLI already wrote the transcript at init, and
+ *    `--session-id` on it fails every later turn with "already in use";
+ *  - transcript absent on a conversation that has completed turns AND
+ *    exchanged tokens → resume anyway, on purpose: the vendor thread was lost
+ *    (claude prunes transcripts after 30 days), and quietly minting a blank
+ *    conversation under the same id would drop the whole context without a
+ *    word. `--resume` fails with a coded `native-thread-missing` error the
+ *    engine recovers from with a handoff;
+ *  - any other absent transcript → new: a turn 1 that died before init (e.g.
+ *    signed out) must not resume nothing, and the engine's recovery hands in
+ *    a fresh native id with `turnCount: 0` precisely to mint a conversation
+ *    (its session totals still carry the old tokens, so turnCount decides);
+ *  - home unknown (no readable profile) → the pre-3.10 rule, by turn count.
+ */
+export function chooseNativeSession(
+  session: VerseSession,
+  state: NativeConversationState,
+  override: 'new' | 'resume' | null,
+): 'new' | 'resume' {
+  if (override) return override;
+  if (state === 'present') return 'resume';
+  if (state === 'absent') return session.turnCount > 0 && hadVendorExchange(session) ? 'resume' : 'new';
+  return session.turnCount > 0 ? 'resume' : 'new';
+}
+
+/** `--session-id <id>` or `--resume <id>` for a claude/local turn. */
+export function claudeNativeSessionArgs(session: VerseSession, launch: VerseSeatLaunch): string[] {
+  const id = session.nativeSessionId ?? '';
+  const isLocal = session.engine === 'local';
+  const configDir = isLocal
+    ? join(homedir(), '.claude')
+    : nativeStateDir(launch.launcher, 'claude', join(homedir(), '.claude'));
+  const choice = chooseNativeSession(session, claudeConversationState(configDir, session.projectPath, id), nativeSessionOverride(launch));
+  return choice === 'resume' ? ['--resume', id] : ['--session-id', id];
+}
+
+/**
+ * The oldest pinned claude build verified to accept `--thinking-display
+ * summarized`: 2.1.243, 2.1.257 and 2.1.280 all define the (hidden) option
+ * with choices ["summarized","omitted"(,"highlights")] — read from each
+ * binary's own option table. An older or unknown build gets no flag: commander
+ * rejects unknown options, so guessing would fail EVERY turn, while omitting it
+ * only hides the reasoning text.
+ */
+export const CLAUDE_THINKING_DISPLAY_MIN_CLI = '2.1.243';
+
+/**
+ * Is live vendor reasoning on for this turn? The engine's per-turn value when
+ * it passes one (structural, optional), else the operator preference; absent
+ * everywhere = on (Mason's default). Never throws.
+ */
+export function thinkingDisplayEnabled(launch: VerseSeatLaunch): boolean {
+  const explicit = (launch as { thinkingDisplay?: unknown }).thinkingDisplay;
+  if (typeof explicit === 'boolean') return explicit;
+  try {
+    return loadVersePreferences().thinkingDisplay !== false;
+  } catch {
+    return true;
+  }
+}
+
+/** The claude build this seat will actually exec: its profile's pinned binary, else the launch snapshot's. */
+export function pinnedClaudeVersion(launch: VerseSeatLaunch): string | null {
+  const facts = launch.launcher ? readNativeProfileFacts(launch.launcher, 'claude') : null;
+  const fromProfile = facts?.executable ? cliVersionFromExecutable(facts.executable) : null;
+  if (fromProfile) return fromProfile;
+  const snapshot = launch.seat?.cliVersion;
+  return typeof snapshot === 'string' && snapshot.length > 0 ? snapshot : null;
+}
+
+/**
+ * `--thinking-display summarized` for a claude seat, or nothing. Never on a
+ * local seat: a local model streams its raw reasoning anyway, and the flag
+ * would ask a non-Anthropic endpoint for an Anthropic display mode.
+ */
+export function claudeThinkingDisplayArgs(session: Pick<VerseSession, 'engine'>, launch: VerseSeatLaunch): string[] {
+  if (session.engine !== 'claude') return [];
+  if (!thinkingDisplayEnabled(launch)) return [];
+  const version = pinnedClaudeVersion(launch);
+  if (version === null || compareCliVersions(version, CLAUDE_THINKING_DISPLAY_MIN_CLI) < 0) return [];
+  return ['--thinking-display', 'summarized'];
+}
+
 function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSeatLaunch): VerseTurnLaunch {
   if (!session.nativeSessionId) {
     throw new Error('claude session is missing its native session id');
@@ -650,6 +1253,12 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
   // has the file's contents in the appended block.
   const addDirs = [...extraRoots];
   if (memory?.writable && !addDirs.includes(memory.dir) && memory.dir !== session.projectPath) addDirs.push(memory.dir);
+  // V3.10 attachments: exactly the one directory this message's `@path`
+  // tokens name (the engine resolved them), so the CLI may read those files
+  // and nothing else of the store around them.
+  for (const dir of turnAttachmentDirs(launch)) {
+    if (!addDirs.includes(dir) && dir !== session.projectPath) addDirs.push(dir);
+  }
   // `-p` is boolean (`--print`); the prompt is the positional `[prompt]`. It
   // goes LAST, behind the end-of-options marker, so a message that starts
   // with `-` (a bullet list, or a literal `--dangerously-skip-permissions`)
@@ -663,7 +1272,12 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
     // Always the CANONICAL id: `claude-opus-5.5` (an id Verse once shipped) is
     // fuzzy-matched by the CLI to Opus 5, so a stored alias must never reach it.
     '--model', canonicalModelId(session.model),
-    '--permission-mode', 'acceptEdits',
+    // V3.10 per-chat permission mode (session-controls.ts); the default is
+    // `acceptEdits`, exactly the flag every turn carried before 3.10.
+    ...claudePermissionArgs(session),
+    // V3.10 per-chat effort — claude seats on a build that knows `--effort`
+    // only; nothing by default, so an untouched chat launches as before.
+    ...claudeEffortArgs(session, session.engine === 'claude' ? pinnedClaudeVersion(launch) : null),
     '--strict-mcp-config',
     '--mcp-config', '{"mcpServers":{}}',
     ...autocompactArgs(session, launch),
@@ -671,6 +1285,8 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
     // the system prompt so the local runner's prefix cache survives between
     // turns. Claude seats keep the CLI default.
     ...(isLocal ? ['--exclude-dynamic-system-prompt-sections'] : []),
+    // V3.10 live reasoning: summaries instead of the API's `omitted` default.
+    ...claudeThinkingDisplayArgs(session, launch),
     // VERIFIED against `claude --help` on 2.1.280:
     //   `--add-dir <directories...>  Additional directories to allow tool access to`
     // It is variadic, so it is spelled ONE DIRECTORY PER FLAG rather than
@@ -686,7 +1302,8 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
     // The `=` spelling binds the block to the flag whatever its first
     // character is — commander never re-reads it as an option.
     ...(memory ? [`--append-system-prompt=${memory.block}`] : []),
-    ...(session.turnCount > 0 ? ['--resume', session.nativeSessionId] : ['--session-id', session.nativeSessionId]),
+    // From the transcript on disk, not `turnCount` — see chooseNativeSession.
+    ...claudeNativeSessionArgs(session, launch),
     '--', text,
   ];
   const env: Record<string, string> = isLocal
@@ -708,5 +1325,5 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
 
 export const claudeAdapter: VerseAdapter = {
   buildLaunch: buildClaudeLaunch,
-  createParser: createAnthropicStreamParser,
+  createParser: (turnId: string) => createAnthropicStreamParser(turnId, 'claude'),
 };

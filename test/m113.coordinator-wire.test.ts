@@ -106,6 +106,7 @@ import {
   SharedWorkQueueCoordinator,
 } from '../src/core/seams/work-queue-coordinator.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
+import { writeCapacitySnapshot } from '../src/core/routing/budget-store.js';
 import { loadFleetQuota } from '../src/core/fleet/quota.js';
 import { readAudit } from '../src/core/sandbox/audit.js';
 import {
@@ -125,6 +126,32 @@ import {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * V3.10: the daemon tick is AUTONOMOUS, so its subscription gate fails closed
+ * on unknown Claude usage (Mason, 2026-09-24). Tests whose subject is a LATER
+ * gate on the claude path (queue fence, quota reservation) seed a fresh, low
+ * Claude reading into the tmp HOME's Verse capacity snapshot so the dispatch
+ * reaches that gate instead of stopping at 'subscription-throttle'.
+ */
+function seedFreshClaudeReading(): void {
+  const now = new Date();
+  writeCapacitySnapshot([{
+    seatId: 'claude',
+    engine: 'claude',
+    label: 'Claude Code',
+    free: false,
+    windows: [
+      { id: 'five_hour', usedPercent: 10, resetsAt: null, resetDescription: null, limitReached: false },
+      { id: 'seven_day', usedPercent: 10, resetsAt: null, resetDescription: null, limitReached: false },
+    ],
+    signedOut: false,
+    reachable: null,
+    contextWindow: 200_000,
+    observedAt: now.toISOString(),
+    spentTodayUsd: null,
+  }], now);
+}
 
 function makeCfg(overrides: Record<string, unknown> = {}): AshlrConfig {
   return {
@@ -745,6 +772,7 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
       mockLoadConfig.mockReturnValue(cfg);
       routeResult = { backend: 'claude', tier: 'frontier', reason: 'frontier test' };
       backlogItems = [makeItem('quota-fenced-1', tmpRepo, { score: 3 })];
+      seedFreshClaudeReading(); // reach the fence, not the V3.10 usage gate
 
       enroll(tmpRepo);
       const result = await tick(cfg, { dryRun: false });
@@ -776,6 +804,7 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
     mockLoadConfig.mockReturnValue(cfg);
     routeResult = { backend: 'claude', tier: 'frontier', reason: 'frontier test' };
     backlogItems = [makeItem('quota-invalid-1', tmpRepo, { score: 3 })];
+    seedFreshClaudeReading(); // reach the quota reservation, not the V3.10 usage gate
 
     enroll(tmpRepo);
     const result = await tick(cfg, { dryRun: false });

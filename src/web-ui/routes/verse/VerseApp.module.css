@@ -198,21 +198,16 @@
   left: calc(var(--space-2) * -1);
 }
 
-/* Pending approvals: a dot, paired with a count in the button's aria-label.
-   Positioned against .railIcon, so it reads the same in both rail states. */
-.railDot {
-  position: absolute;
-  top: -3px;
-  right: -3px;
-  width: 6px;
-  height: 6px;
-  border-radius: var(--radius-full);
-  background: var(--status-warning-solid);
-  box-shadow: 0 0 0 2px var(--bg-canvas);
-}
+/* Expanded, a count badge overhangs the 16px icon box: give the label room
+   so "5" never sits on the "C" of Command. */
+.rail[data-rail="expanded"] .railLabel { padding-left: var(--space-2); }
 
-/* ---- section slot ----------------------------------------------------- */
+/* The gear lights up while one of its tray sections is on screen. */
+.railButton[data-active] { color: var(--text-primary); }
+
+/* ---- the surfaces ----------------------------------------------------- */
 .section {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -220,45 +215,70 @@
   overflow: hidden;
   background: var(--bg-surface);
 }
-.section > * { min-height: 0; }
 
-.loading {
-  flex: 1;
+/* One per MOUNTED surface. Only the current one is visible; the others keep
+   their state behind it (`hidden` + `inert`, set by VerseApp). `[hidden]`
+   must be restated: an author `display` beats the UA's `display: none`. */
+.surface {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-secondary);
-  font-size: var(--text-sm-size);
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
 }
+.surface[hidden] { display: none; }
+.surface > * { min-height: 0; }
 
-.missing {
-  max-width: 56ch;
-  margin: clamp(32px, 12vh, 120px) auto 0;
-  padding: 0 var(--space-6);
-  display: grid;
-  gap: var(--space-3);
+/* ---- phone: the rail becomes a bottom bar ------------------------------
+   Five surfaces + Needs you + More, thumb-reachable, labels under icons.
+   The drag strip and the traffic-light clearance are desktop-only. */
+.shell[data-compact] {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
 }
-.missingTitle {
-  font-family: var(--font-display);
-  font-size: var(--text-xl-size);
-  line-height: var(--text-xl-line);
-  font-weight: var(--font-weight-medium);
-  letter-spacing: var(--tracking-display, -0.02em);
+.shell[data-compact] > .rail {
+  grid-row: 2;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0;
+  padding: 0 var(--space-1) env(safe-area-inset-bottom, 0px);
+  border-right: 0;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
 }
-.missingBody,
-.missingDetail {
-  color: var(--text-secondary);
-  font-size: var(--text-sm-size);
-  line-height: var(--text-sm-line);
+.shell[data-compact] > .section { grid-row: 1; }
+.shell[data-compact] .railDragStrip,
+.shell[data-compact] .mark { display: none; }
+.shell[data-compact] .railList,
+.shell[data-compact] .railFoot {
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0;
+  margin: 0;
 }
-.missingBody code { font-size: var(--text-xs-size); color: var(--text-primary); }
-.missingDetail {
-  padding-left: var(--space-3);
-  border-left: 2px solid var(--border-strong);
-  color: var(--text-tertiary);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs-size);
-  overflow-wrap: anywhere;
+.shell[data-compact] .railList { flex: 5; }
+.shell[data-compact] .railFoot { flex: 2; }
+.shell[data-compact] .railList > li { display: flex; flex: 1; }
+.shell[data-compact] .railFoot > * { flex: 1; }
+.shell[data-compact] .railButton {
+  flex: 1;
+  width: auto;
+  height: 56px;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-1) 0;
 }
-
-
+.shell[data-compact] .railLabel {
+  flex: none;
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  text-align: center;
+}
+/* The active bar moves from the left edge to the top edge. */
+.shell[data-compact] .railButton[aria-current]::before {
+  left: 50%;
+  top: -1px;
+  width: 24px;
+  height: 2px;
+  transform: translateX(-50%);
+}

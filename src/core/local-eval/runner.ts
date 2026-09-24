@@ -44,6 +44,58 @@ export interface RunTrialOptions {
    * tracing on and off, the instrument is the finding, not the model.
    */
   readonly trace?: boolean;
+  /**
+   * Text appended to the agent's system prompt (`--append-system-prompt`) —
+   * how a harness experiment's `prompts.producer` overlay reaches the agent.
+   * Absent or empty = no overlay, byte-identical argv to a plain run.
+   */
+  readonly appendSystemPrompt?: string;
+  /**
+   * `--effort` for the agent turn — a harness experiment's `effort.local`.
+   * Absent = the CLI's default. Passed with CLAUDE_CODE_ALWAYS_ENABLE_EFFORT
+   * so the CLI sends it to a model id it does not recognise (the local model
+   * behind the proxy); whether the local runtime honours it is exactly what
+   * the experiment measures.
+   */
+  readonly effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  /**
+   * Abort the trial: the agent's whole process group is killed and the trial
+   * resolves as a `harness-error` (the caller cancelled it — not a verdict on
+   * the model). Used when an experiment is cancelled mid-run.
+   */
+  readonly signal?: AbortSignal;
+}
+
+/** Effort levels `--effort` accepts (ultracode is deliberately excluded: it is not a level). */
+const EFFORT_LEVELS: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
+/**
+ * The agent CLI argv for one trial. Exported so tests can pin it: a harness
+ * overlay that silently failed to reach argv would make both arms of an
+ * experiment identical and report "no lift" for a change never applied.
+ */
+export function buildAgentArgs(opts: Pick<RunTrialOptions, 'task' | 'model' | 'appendSystemPrompt' | 'effort'>): string[] {
+  const args = [
+    '-p', opts.task.prompt,
+    // --bare keeps hooks, plugins, CLAUDE.md, auto-memory and keychain reads
+    // out of the measurement. Without it the harness would be scoring this
+    // machine's configuration as much as the model.
+    '--bare',
+    '--model', opts.model,
+    '--output-format', 'json',
+    '--permission-mode', 'bypassPermissions',
+    '--permission-prompts', 'none',
+    '--no-session-persistence',
+    '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+  ];
+  if (typeof opts.appendSystemPrompt === 'string' && opts.appendSystemPrompt.length > 0) {
+    args.push('--append-system-prompt', opts.appendSystemPrompt);
+  }
+  if (opts.effort !== undefined) {
+    if (!EFFORT_LEVELS.has(opts.effort)) throw new RangeError(`invalid effort level: ${String(opts.effort)}`);
+    args.push('--effort', opts.effort);
+  }
+  return args;
 }
 
 interface ChildOutcome {
@@ -51,6 +103,8 @@ interface ChildOutcome {
   readonly stdout: string;
   readonly stderr: string;
   readonly timedOut: boolean;
+  /** Killed because `signal` aborted. */
+  readonly aborted: boolean;
 }
 
 /**
@@ -78,9 +132,15 @@ function runChild(
      * connection is still up.
      */
     onTimeout?: () => void;
+    /** Kill the process group when this aborts (checked before spawning too). */
+    signal?: AbortSignal;
   },
 ): Promise<ChildOutcome> {
   return new Promise((resolve) => {
+    if (opts.signal?.aborted) {
+      resolve({ status: null, stdout: '', stderr: '', timedOut: false, aborted: true });
+      return;
+    }
     const child = spawn(cmd, [...args], {
       cwd: opts.cwd,
       env: opts.env ?? process.env,
@@ -93,6 +153,15 @@ function runChild(
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let aborted = false;
+    const killGroup = (): void => {
+      try { process.kill(-child.pid!, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+    };
+    const onAbort = (): void => {
+      aborted = true;
+      killGroup();
+    };
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout?.on('data', (c: Buffer) => { stdout += c.toString('utf8'); });
     child.stderr?.on('data', (c: Buffer) => { stderr += c.toString('utf8'); });
 
@@ -100,13 +169,14 @@ function runChild(
       ? setTimeout(() => {
           timedOut = true;
           try { opts.onTimeout?.(); } catch { /* forensics must never block the kill */ }
-          try { process.kill(-child.pid!, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+          killGroup();
         }, opts.timeoutMs)
       : null;
 
     const finish = (status: number | null): void => {
       if (timer) clearTimeout(timer);
-      resolve({ status, stdout, stderr, timedOut });
+      opts.signal?.removeEventListener('abort', onAbort);
+      resolve({ status, stdout, stderr, timedOut, aborted });
     };
     child.on('error', () => finish(null));
     child.on('close', (code) => finish(code));
@@ -220,19 +290,7 @@ export async function runTrial(opts: RunTrialOptions): Promise<TrialResult> {
   const work = await materialise(task, trialDir);
   const before = await snapshot(work);
 
-  const args = [
-    '-p', task.prompt,
-    // --bare keeps hooks, plugins, CLAUDE.md, auto-memory and keychain reads
-    // out of the measurement. Without it the harness would be scoring this
-    // machine's configuration as much as the model.
-    '--bare',
-    '--model', opts.model,
-    '--output-format', 'json',
-    '--permission-mode', 'bypassPermissions',
-    '--permission-prompts', 'none',
-    '--no-session-persistence',
-    '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-  ];
+  const args = buildAgentArgs(opts);
 
   // The agent talks to the tracer, and the tracer talks to whatever the run was
   // pointed at. A trial that produces no result JSON is otherwise a black box:
@@ -265,8 +323,10 @@ export async function runTrial(opts: RunTrialOptions): Promise<TrialResult> {
         ANTHROPIC_BASE_URL: agentBaseUrl,
         ANTHROPIC_API_KEY: 'local-eval',
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+        ...(opts.effort !== undefined ? { CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: '1' } : {}),
       },
       timeoutMs: opts.timeoutMs,
+      signal: opts.signal,
       onTimeout: () => { traceAtTimeout = trace?.snapshot() ?? null; },
     });
   } finally {
@@ -294,7 +354,7 @@ export async function runTrial(opts: RunTrialOptions): Promise<TrialResult> {
   // status is read from the child — never through a pipe.
   let verifyExit: number | null = null;
   let verifyOutput = '';
-  if (!agent.timedOut) {
+  if (!agent.timedOut && !agent.aborted) {
     // `verify` is a full argv INCLUDING the binary, so the head is the command
     // and the tail is its arguments. Passing the whole array as arguments ran
     // `node node check.mjs`, which fails with MODULE_NOT_FOUND — and scored a
@@ -310,7 +370,9 @@ export async function runTrial(opts: RunTrialOptions): Promise<TrialResult> {
   const verdict = classifyTrial({
     expectation: task.expectation,
     timedOut: agent.timedOut,
-    agentExit: agent.status,
+    // An aborted trial never finished: forced to a harness-error (a null exit
+    // with no result JSON), never scored as the model's pass or fail.
+    agentExit: agent.aborted ? null : agent.status,
     agentReportedError: parsed.isError,
     stopReason: parsed.stopReason,
     terminalReason: parsed.terminalReason,
@@ -337,7 +399,8 @@ export async function runTrial(opts: RunTrialOptions): Promise<TrialResult> {
     // A timeout's note is its diagnosis. "killed at the wall-clock budget"
     // restates the classification and explains nothing; the whole reason the
     // tracer exists is so this line names a thing to go and fix.
-    note: firstFailLine
+    note: (agent.aborted ? 'aborted by the caller before the trial finished' : '')
+      || firstFailLine
       || (agent.timedOut
         ? (timeoutDiagnosis ? `${timeoutDiagnosis.kind}: ${timeoutDiagnosis.detail}` : 'killed at the wall-clock budget (untraced)')
         : ''),

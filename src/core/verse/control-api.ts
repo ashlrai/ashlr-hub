@@ -60,14 +60,17 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { basename } from 'node:path';
+import { lstatSync, readdirSync } from 'node:fs';
+import { basename, join } from 'node:path';
 
 import type { AshlrConfig, AuditEntry, DaemonConfig } from '../types.js';
 import { loadConfigReadOnly, resolveSubscriptionMaxPercent, saveConfig } from '../config.js';
 import { passesMutationGate, readBody, sendJson } from '../web/api.js';
-import { buildControlSnapshot } from '../web/control.js';
+import { buildControlEssentials, type ControlEssentials } from '../web/control.js';
+import type { CachedFleetStatus } from '../web/fleet-status-cache.js';
+import type { ReadProjectionReader } from '../web/read-projections.js';
 import { getFrontierUsageSync } from '../usage/frontier-usage.js';
-import { pendingCount } from '../inbox/store.js';
+import { inboxDir, pendingCount } from '../inbox/store.js';
 import { readAudit, audit } from '../sandbox/audit.js';
 import {
   enroll,
@@ -84,7 +87,8 @@ import {
   resumeDaemon,
   type DaemonPauseReadResult,
 } from '../daemon/pause.js';
-import { buildRollup } from '../observability/rollup.js';
+import { getCachedRollup } from '../observability/rollup.js';
+import type { ActivityRollup } from '../types.js';
 import {
   checkGuardedPath,
   ENROLLMENT_PHRASING,
@@ -170,6 +174,12 @@ export interface VerseControlApiContext {
   token: string;
   allowDispatch: boolean;
   readSession?: { id: string; expiresAt: number };
+  /**
+   * PERF: the server's read-projection worker. When present, the fleet-status
+   * and rollup refreshes behind /control and /usage-series run on that worker
+   * thread instead of freezing this one for seconds.
+   */
+  readProjections?: ReadProjectionReader;
 }
 
 // ---------------------------------------------------------------------------
@@ -664,6 +674,32 @@ function freshConfig(fallback: AshlrConfig): AshlrConfig {
   }
 }
 
+let stableConfigMemo: { json: string; cfg: AshlrConfig } | null = null;
+
+/**
+ * freshConfig for READ paths, returning the SAME object while the file's
+ * content is unchanged.
+ *
+ * PERF (3.10): every cache below it (the shared fleet-status cache is a
+ * WeakMap keyed on the config object) missed on every request because
+ * freshConfig builds a new object each time — so /api/verse/control paid a
+ * full 2.4 s buildFleetStatus per call. Same-content ⇒ same identity keeps
+ * the "file is the truth" rule and lets those caches work. Never hand the
+ * returned object to code that mutates it; POST paths keep freshConfig.
+ */
+function stableReadConfig(fallback: AshlrConfig): AshlrConfig {
+  const next = freshConfig(fallback);
+  let json: string;
+  try {
+    json = JSON.stringify(next);
+  } catch {
+    return next;
+  }
+  if (stableConfigMemo && stableConfigMemo.json === json) return stableConfigMemo.cfg;
+  stableConfigMemo = { json, cfg: next };
+  return next;
+}
+
 // ---------------------------------------------------------------------------
 // Scope — enrollment registry
 // ---------------------------------------------------------------------------
@@ -1029,7 +1065,7 @@ export async function runVerseDaemonAction(
 // ---------------------------------------------------------------------------
 
 function projectFleetEssentials(
-  control: Awaited<ReturnType<typeof buildControlSnapshot>>,
+  control: ControlEssentials,
 ): VerseFleetEssentials {
   const service = control.daemon.service;
   return {
@@ -1051,6 +1087,172 @@ function projectFleetEssentials(
   };
 }
 
+// ---------------------------------------------------------------------------
+// PERF (3.10) read caches for the cockpit aggregate
+// ---------------------------------------------------------------------------
+
+let pendingMemo: { dirKey: string; signature: string; fullCheckedAt: number; count: number } | null = null;
+
+/**
+ * Re-verify the per-file fingerprint at least this often even when the
+ * directory itself looks unchanged — the one case the directory stamp cannot
+ * see is an in-place edit made outside the store (the store itself only ever
+ * writes a temp file and renames/links it in, which bumps the directory).
+ */
+const PENDING_FULL_CHECK_MS = 10_000;
+
+/** Inbox directory identity + nanosecond mtime: one lstat. */
+function inboxDirKey(): string | null {
+  try {
+    const st = lstatSync(inboxDir(), { bigint: true });
+    return `${st.dev}:${st.ino}:${st.mtimeNs}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fingerprint of the inbox: every proposal file's (name, ino, size, mtime).
+ * A proposal is created, rewritten, or removed only by touching its file, so
+ * an unchanged fingerprint means an unchanged pending count. ~700 lstat
+ * calls is ~4 ms; the parse it avoids is 235–490 ms (11 MB of JSON).
+ */
+function inboxSignature(): string | null {
+  try {
+    const dir = inboxDir();
+    const parts: string[] = [];
+    for (const name of readdirSync(dir).sort()) {
+      if (!name.endsWith('.json')) continue;
+      try {
+        const st = lstatSync(join(dir, name));
+        parts.push(`${name}:${st.ino}:${st.size}:${st.mtimeMs}`);
+      } catch {
+        parts.push(`${name}:-`);
+      }
+    }
+    return parts.join('|');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * pendingCount(), recomputed only when the inbox changes. Fast path: the
+ * directory stamp (every store write is a rename or link into it). Every
+ * PENDING_FULL_CHECK_MS the per-file fingerprint is re-taken as well.
+ */
+export function cachedPendingCount(): number {
+  const dirKey = inboxDirKey();
+  const now = Date.now();
+  if (dirKey !== null && pendingMemo && pendingMemo.dirKey === dirKey &&
+      now - pendingMemo.fullCheckedAt < PENDING_FULL_CHECK_MS) {
+    return pendingMemo.count;
+  }
+  const signature = inboxSignature();
+  if (dirKey !== null && signature !== null && pendingMemo?.signature === signature) {
+    pendingMemo = { ...pendingMemo, dirKey, fullCheckedAt: now };
+    return pendingMemo.count;
+  }
+  const count = pendingCount();
+  pendingMemo = dirKey === null || signature === null ? null : { dirKey, signature, fullCheckedAt: now, count };
+  return count;
+}
+
+/** Fresh window for the worker-backed fleet read; the worker has its own cache behind it. */
+const WORKER_FLEET_FRESH_MS = 5_000;
+/** Past this, wait for the worker rather than serve an old daemon picture. */
+const WORKER_FLEET_MAX_STALE_MS = 60_000;
+
+interface WorkerFleetEntry {
+  value: CachedFleetStatus | null;
+  receivedAt: number;
+  inFlight: Promise<CachedFleetStatus> | null;
+}
+
+const workerFleet = new WeakMap<ReadProjectionReader, WorkerFleetEntry>();
+
+/**
+ * Stale-while-revalidate over the worker's 'fleet' projection. The worker
+ * serialises its projections, so a slow one queued ahead of ours (a dashboard
+ * snapshot, say) must not stall the cockpit: after the first answer we serve
+ * the last value — with its TRUE age and `stale` — and refresh behind it.
+ */
+function fleetFromWorker(reader: ReadProjectionReader): Promise<CachedFleetStatus> {
+  let entry = workerFleet.get(reader);
+  if (!entry) {
+    entry = { value: null, receivedAt: 0, inFlight: null };
+    workerFleet.set(reader, entry);
+  }
+  const current = entry;
+  const now = Date.now();
+  const aged = (value: CachedFleetStatus, extraMs: number, stale: boolean): CachedFleetStatus => ({
+    status: value.status,
+    stale: value.stale || stale,
+    ageMs: value.ageMs + extraMs,
+  });
+  if (current.value && now - current.receivedAt < WORKER_FLEET_FRESH_MS) {
+    return Promise.resolve(aged(current.value, now - current.receivedAt, false));
+  }
+  if (!current.inFlight) {
+    current.inFlight = reader.read('fleet')
+      .then((value) => {
+        current.value = value;
+        current.receivedAt = Date.now();
+        return value;
+      })
+      .finally(() => {
+        current.inFlight = null;
+      });
+  }
+  if (current.value && now - current.receivedAt < WORKER_FLEET_MAX_STALE_MS) {
+    void current.inFlight.catch(() => { /* keep the last good value */ });
+    return Promise.resolve(aged(current.value, now - current.receivedAt, true));
+  }
+  return current.inFlight;
+}
+
+type LocalRuntimeSnapshot = Awaited<
+  ReturnType<typeof import('../local-runtime/llama/index.js')['statusLocalRuntime']>
+>;
+
+/**
+ * One live runtime probe shared by GET /runtime and GET /fleet for this long.
+ * The UI polls both every 4 s, back to back; each probe runs `ps -axww` and
+ * friends synchronously (~60 ms), so two per poll was ~120 ms of frozen server.
+ */
+const RUNTIME_PROBE_TTL_MS = 3_000;
+
+let runtimeProbe: {
+  cfg: AshlrConfig;
+  startedAt: number;
+  value: Promise<LocalRuntimeSnapshot>;
+} | null = null;
+
+/** Probe (or reuse the in-flight / < 3 s old probe of) the serving runtime. */
+async function sharedRuntimeStatus(cfg: AshlrConfig): Promise<LocalRuntimeSnapshot> {
+  const now = Date.now();
+  if (runtimeProbe && runtimeProbe.cfg === cfg && now - runtimeProbe.startedAt < RUNTIME_PROBE_TTL_MS) {
+    return runtimeProbe.value;
+  }
+  const { statusLocalRuntime } = await import('../local-runtime/llama/index.js');
+  const probe = {
+    cfg,
+    startedAt: now,
+    value: statusLocalRuntime({ cfg }),
+  };
+  runtimeProbe = probe;
+  // A failed probe must not be served to the next caller for 3 s.
+  probe.value.catch(() => {
+    if (runtimeProbe === probe) runtimeProbe = null;
+  });
+  return probe.value;
+}
+
+/** Drop the shared probe — after start/stop/restart the next read must be live. */
+function invalidateRuntimeProbe(): void {
+  runtimeProbe = null;
+}
+
 /**
  * Build the Autonomy view's single aggregate.
  *
@@ -1063,21 +1265,25 @@ function projectFleetEssentials(
  */
 export async function buildVerseControlSnapshot(
   cfg: AshlrConfig,
-  opts: { dispatchEnabled: boolean },
+  opts: { dispatchEnabled: boolean; readProjections?: ReadProjectionReader },
 ): Promise<VerseControlSnapshot> {
-  const config = freshConfig(cfg);
+  // PERF (3.10): a stable config identity (so the fleet-status cache hits),
+  // the fleet/daemon slice only (not the whole Mission Control snapshot with
+  // its 7-day rollup), and a fingerprinted pending count. Was 3.9–15.5 s.
+  const config = stableReadConfig(cfg);
   const caps = readVerseCaps(config);
 
-  let control: Awaited<ReturnType<typeof buildControlSnapshot>> | null = null;
+  let control: ControlEssentials | null = null;
   try {
-    control = await buildControlSnapshot(config);
+    const reader = opts.readProjections;
+    control = await buildControlEssentials(config, reader ? { fleet: () => fleetFromWorker(reader) } : {});
   } catch {
     control = null;
   }
 
   let pending = 0;
   try {
-    pending = pendingCount();
+    pending = cachedPendingCount();
   } catch {
     pending = 0;
   }
@@ -1181,6 +1387,7 @@ export async function handleVerseControlApi(
       }
       sendJson(res, 200, await buildVerseControlSnapshot(ctx.cfg, {
         dispatchEnabled: ctx.allowDispatch,
+        ...(ctx.readProjections ? { readProjections: ctx.readProjections } : {}),
       }));
       return true;
     }
@@ -1377,9 +1584,15 @@ export async function handleVerseControlApi(
         return true;
       }
       const window: '7d' | '30d' = raw === '30d' ? '30d' : '7d';
-      let byDay: ReturnType<typeof buildRollup>['byDay'] = [];
+      let byDay: ActivityRollup['byDay'] = [];
       try {
-        byDay = buildRollup(window, freshConfig(ctx.cfg)).byDay;
+        // PERF (3.10): served from the stale-while-revalidate rollup cache
+        // (was 1.3–2.5 s of synchronous git + transcript parsing per call);
+        // the refresh runs on the read-projection worker when there is one.
+        const reader = ctx.readProjections;
+        byDay = (await getCachedRollup(window, stableReadConfig(ctx.cfg), reader
+          ? { compute: () => reader.read('pulse', { window }) }
+          : {})).rollup.byDay;
       } catch {
         // Partial or unreadable usage data yields an empty series, never a throw.
         byDay = [];
@@ -1433,8 +1646,7 @@ export async function handleVerseControlApi(
     // on every boot.
     if (path === `${CONTROL_PREFIX}/runtime`) {
       if (method === 'GET') {
-        const { statusLocalRuntime } = await import('../local-runtime/llama/index.js');
-        const snapshot = await statusLocalRuntime({ cfg: freshConfig(ctx.cfg) });
+        const snapshot = await sharedRuntimeStatus(stableReadConfig(ctx.cfg));
         sendJson(res, 200, projectServingRuntime(snapshot));
         return true;
       }
@@ -1456,12 +1668,14 @@ export async function handleVerseControlApi(
         const verb: RuntimeAction = action;
         const runtimeCfg = { cfg: freshConfig(ctx.cfg) };
         const llama = await import('../local-runtime/llama/index.js');
+        invalidateRuntimeProbe();
         const lifecycle =
           verb === 'start'
             ? await llama.startLocalRuntime(runtimeCfg)
             : verb === 'stop'
               ? await llama.stopLocalRuntime(runtimeCfg)
               : await llama.restartLocalRuntime(runtimeCfg);
+        invalidateRuntimeProbe();
 
         // Audited like every other state-changing control on this plane. The
         // detail is the supervisor's own sentence; it never carries the argv,
@@ -1517,8 +1731,7 @@ export async function handleVerseControlApi(
 
       let runtime: ServingRuntimeSnapshot | null = null;
       try {
-        const { statusLocalRuntime } = await import('../local-runtime/llama/index.js');
-        runtime = projectServingRuntime(await statusLocalRuntime({ cfg: freshConfig(ctx.cfg) }));
+        runtime = projectServingRuntime(await sharedRuntimeStatus(stableReadConfig(ctx.cfg)));
       } catch {
         // A runtime probe that cannot even be attempted leaves the snapshot's
         // own numbers in place rather than blanking the panel.

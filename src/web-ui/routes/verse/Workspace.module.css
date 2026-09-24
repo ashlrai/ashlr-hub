@@ -99,6 +99,10 @@
      On the h1 the margin only shifts the item and its free-space contribution; the
      button keeps its full content width. Optical alignment is identical. */
   margin-left: calc(-1 * var(--space-2));
+  /* The pull-back makes the h1 --space-2 wider than the lockup's content box;
+     capped at 100% it lost exactly that much of the title to the ellipsis
+     (3.10 harness: "Fix the flaky login t…" beside 120px of free strip). */
+  max-width: calc(100% + var(--space-2));
 }
 .titleButton {
   display: block;
@@ -263,8 +267,11 @@
    9.08 / 8.35 dark. See design/tokens-contrast.test.ts, where the solids are
    given only a 1.8:1 "visible marker" floor precisely because they are dots
    and 2px rules, never type. */
-.meter {
-  --meter-color: var(--accent-500);
+.meter,
+.ring {
+  /* A quantity, so the quantity ramp — never the accent, which is for
+     interaction only (SPEC-310C §6). */
+  --meter-color: var(--data-seq-5);
   --meter-text: var(--text-secondary);
   flex-shrink: 0;
   display: inline-flex;
@@ -612,4 +619,145 @@
     var(--space-3),
     calc(var(--app-traffic-light-inset, 0px) - var(--rail-width, 56px) + var(--space-2))
   );
+}
+
+/* ---- 3.10: the header's context ring ------------------------------------ */
+.ring {
+  --meter-text: var(--text-secondary);
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  cursor: default;
+}
+.ringSvg { flex: none; overflow: visible; }
+.ringTrack { fill: none; stroke: var(--meter-track); stroke-width: 2; }
+.ringFill {
+  fill: none;
+  stroke: var(--meter-color);
+  stroke-width: 2;
+  stroke-linecap: round;
+  transition: stroke-dasharray var(--duration-base) var(--ease-standard);
+}
+.ringTick { stroke: var(--text-secondary); stroke-width: 1.25; stroke-linecap: round; }
+.ringText {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  font-variant-numeric: tabular-nums;
+  color: var(--meter-text);
+}
+/* An upper bound (≤) is drawn fainter: it is a ceiling, not a reading. */
+.ring[data-exact='false'] .ringFill { opacity: 0.55; }
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .ringFill { transition: none; }
+}
+
+/* The advice notes inside the notice slot: the slot owns the column. */
+.adviceStack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* ---- 3.10 header: breadcrumb, seat monogram ----------------------------- */
+.crumbSep { color: var(--text-tertiary); }
+.crumbBranch {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size);
+  color: var(--text-secondary);
+}
+/* Engine identity is a 2px tick plus the monogram — never a vendor logo
+   (SPEC-310C §6). The tick carries the engine colour; the letter is text. */
+.engineTick {
+  flex-shrink: 0;
+  width: 2px;
+  height: 12px;
+  border-radius: 1px;
+  background: var(--verse-engine, var(--text-tertiary));
+}
+.monogram {
+  flex-shrink: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-secondary);
+}
+.modeError {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-2xs-size);
+  color: var(--status-danger-fg);
+}
+
+/* ---- 3.10 live row: above the composer, on a 1px amber hairline --------- */
+/* The composer's "Queued turns" row, portalled here (notice → queued → live
+   → branch bar). Same gutters as the composer, so the row lines up with the
+   box; an empty host is not laid out at all. */
+.queueHost {
+  flex-shrink: 0;
+  box-sizing: border-box;
+  width: 100%;
+  padding: var(--space-2) var(--space-6) 0;
+}
+.queueHost:empty { display: none; }
+.queueHost > * { margin-bottom: 0; }
+/* Matches the composer's own narrower gutter (Composer.module.css). */
+@media (max-width: 900px) {
+  .queueHost { padding: var(--space-2) var(--space-4) 0; }
+}
+
+.liveRow {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  box-sizing: border-box;
+  width: 100%;
+  max-width: calc(var(--measure-read) + 2 * var(--space-6));
+  margin: 0 auto;
+  padding: var(--space-2) var(--space-6) 0;
+}
+.liveRow > :first-child { flex: 1; min-width: 0; }
+.liveRow[data-running] > :first-child {
+  padding-top: var(--space-1);
+  border-top: 1px solid var(--status-running-solid);
+}
+.liveSpacer { flex: 1; }
+
+/* The engine's own plumbing notice (retry / preflight / watchdog), in the notice slot. */
+.engineNotice {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--status-warning-solid);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--status-warning-bg);
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+.engineNotice[data-kind='watchdog'] { border-left-color: var(--status-running-solid); background: var(--status-running-bg); }
+.engineNoticeWord {
+  flex-shrink: 0;
+  font-weight: var(--font-weight-semibold);
+  color: var(--status-warning-fg);
+}
+.engineNotice[data-kind='watchdog'] .engineNoticeWord { color: var(--status-running-fg); }
+
+@media (max-width: 479.98px) {
+  .liveRow { padding: var(--space-2) var(--space-3) 0; }
+  .seatPill .seatText { display: none; }
+  /* A phone has room for the title: the Terminal / Preview / Review toggles
+     step aside (the dock toggle and its "+" still reach every pane, and ⌘K
+     runs them by name). */
+  .paneToggle { display: none; }
 }

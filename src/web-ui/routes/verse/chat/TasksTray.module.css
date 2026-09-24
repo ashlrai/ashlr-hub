@@ -1,0 +1,49 @@
+/**
+ * chat/TasksTray.module.css — the running-tasks chip. A dashed ring, not a
+ * spinner: it says "work is in flight", not "the UI is busy" (DESIGN §4).
+ */
+.tray {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard);
+}
+.tray:hover { color: var(--text-primary); background: var(--bg-hover); border-color: var(--border-default); }
+.tray:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.tray[aria-pressed='true'] { border-color: var(--border-strong); color: var(--text-primary); }
+
+.ring {
+  width: 10px;
+  height: 10px;
+  border: 1.5px dashed var(--status-running-solid);
+  border-radius: var(--radius-full);
+  animation: tray-turn calc(var(--duration-pulse) * 3) linear infinite;
+}
+.count {
+  font-family: var(--font-display);
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+@keyframes tray-turn { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .ring { animation: none; }
+}
+:root[data-motion='reduce'] .ring { animation: none; }
+
+@media (max-width: 479.98px) {
+  .word { display: none; }
+}

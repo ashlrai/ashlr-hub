@@ -3,18 +3,21 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { CLAUDE_SEAT, CODEX_SEAT, LOCAL_SEAT } from './fixtures.test-support.js';
 import {
+  CLAUDE_MAX_SEAT,
   CLAUDE_CONTEXT_SEAT,
   CLAUDE_SKEW_NOTE,
   CLAUDE_TIGHT_SEAT,
   CODEX_CONTEXT_SEAT,
   CODEX_CREDITS_SEAT,
   GROK_CONTEXT_SEAT,
+  GROK_SEAT,
   LOCAL_CONTEXT_SEAT,
   OPUS_55_REASON,
   UNKNOWN_WINDOW_SEAT,
   UNREAD_SEAT,
 } from './seat-fixtures.test-support.js';
-import { decodeSeatChoice, defaultSeatChoice, encodeSeatChoice, SeatSelector, seatOptionTitle } from './SeatSelector.js';
+import { decodeSeatChoice, defaultSeatChoice, encodeSeatChoice, SeatSelector, seatBlockedNote, seatOptionTitle } from './SeatSelector.js';
+import { healthReport } from './health/health.test-support.js';
 import { WINDOW_SOURCE_TEXT } from './verse-model.js';
 
 const SEATS = [LOCAL_SEAT, CODEX_SEAT, CLAUDE_SEAT];
@@ -210,5 +213,41 @@ describe('SeatSelector — context per model', () => {
     expect(defaultSeatChoice([skewFirst])).toEqual({ seatId: 'claude-a', model: 'claude-haiku-4-5-20251001' });
     const nothingRunnable = { ...CLAUDE_CONTEXT_SEAT, models: [CLAUDE_CONTEXT_SEAT.models[1]!] };
     expect(defaultSeatChoice([nothingRunnable, GROK_CONTEXT_SEAT])).toEqual({ seatId: 'grok-a', model: 'grok-4.7-build-fast' });
+  });
+});
+
+/**
+ * V3.10 — the engine now REFUSES a turn on a seat that is exhausted or signed
+ * out (core/verse/seat-readiness.ts). The picker uses the same rule, so it
+ * never offers a choice the first send would bounce.
+ */
+describe('SeatSelector — seats the engine would refuse', () => {
+  it('disables an exhausted seat and says when it resets and where to go instead', () => {
+    render(<SeatSelector seats={[CLAUDE_MAX_SEAT, GROK_SEAT]} value={null} onChange={() => {}} />);
+    const blocked = screen.getByRole('option', { name: /^Claude Max — Opus 5/ }) as HTMLOptionElement;
+    expect(blocked).toBeDisabled();
+    expect(blocked.textContent).toContain('unavailable: out of usage — resets Sep 25 at 7pm (America/New_York) · try Grok');
+    expect(screen.getByRole('option', { name: /^Grok — Opus 5/ })).not.toBeDisabled();
+  });
+
+  it('keeps a merely tight seat selectable (spent window, spendable credits)', () => {
+    render(<SeatSelector seats={[CODEX_CREDITS_SEAT]} value={null} onChange={() => {}} />);
+    expect(screen.getByRole('option', { name: /Personal Codex/ })).not.toBeDisabled();
+  });
+
+  it('disables a seat the health sweep found signed out', () => {
+    const reports = [healthReport('grok', { engine: 'grok', connection: 'signed-out', fix: { kind: 'reauth' } })];
+    render(<SeatSelector seats={[GROK_SEAT, CLAUDE_TIGHT_SEAT]} value={null} onChange={() => {}} healthReports={reports} />);
+    const grok = screen.getByRole('option', { name: /^Grok — Opus 5/ }) as HTMLOptionElement;
+    expect(grok).toBeDisabled();
+    expect(grok.textContent).toContain('unavailable: signed out — reconnect it · try Claude Max');
+    expect(seatBlockedNote(CLAUDE_TIGHT_SEAT, [GROK_SEAT, CLAUDE_TIGHT_SEAT], reports)).toBeNull();
+  });
+
+  it('never defaults to a refused seat', () => {
+    expect(defaultSeatChoice([CLAUDE_MAX_SEAT, GROK_SEAT])).toEqual({ seatId: 'grok', model: 'claude-opus-5' });
+    expect(defaultSeatChoice([CLAUDE_MAX_SEAT])).toBeNull();
+    const reports = [healthReport('grok', { connection: 'signed-out' })];
+    expect(defaultSeatChoice([GROK_SEAT, CLAUDE_TIGHT_SEAT], reports)).toEqual({ seatId: 'claude', model: 'claude-opus-5' });
   });
 });

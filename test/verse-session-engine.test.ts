@@ -10,14 +10,27 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { spawn as spawnProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { adapterFor, type VerseAdapter, type VerseAdapterTurnContext, type VerseParsedEvent } from '../src/core/verse/adapters/index.js';
-import { createVerseEngine, VerseError, buildTurnEnv, type VerseEngineHandle, type VerseSeatLaunch } from '../src/core/verse/session-engine.js';
+import { createVerseEngine, preflightLocalEndpoint, VerseError, buildTurnEnv, type VerseEngineHandle, type VerseEngineOptions, type VerseSeatLaunch } from '../src/core/verse/session-engine.js';
 import { createVerseSessionStore } from '../src/core/verse/session-store.js';
-import { VERSE_MAX_TURN_TEXT_BYTES, type VerseEngine, type VerseEvent, type VerseModelOption, type VerseSeat, type VerseUsage } from '../src/core/verse/types.js';
+import { isTransientVerseEvent, VERSE_MAX_TURN_TEXT_BYTES, type VerseEngine, type VerseEvent, type VerseModelOption, type VerseSeat, type VerseUsage } from '../src/core/verse/types.js';
+
+/**
+ * Every engine in this file runs with the V3.10 collaborators that reach
+ * OUTSIDE the tmp root switched off — account-health readiness, the reasoning
+ * tap, and the local-endpoint preflight (a real TCP connect whose answer
+ * depends on whether Ollama runs on this machine). Their behaviour is covered
+ * explicitly in test/verse-reliability.test.ts.
+ */
+function createEngine(opts: VerseEngineOptions = {}): VerseEngineHandle {
+  return createVerseEngine({ readiness: null, reasoningTap: null, preflight: null, ...opts });
+}
 
 // ---------------------------------------------------------------------------
 // Fake CLI
@@ -96,6 +109,14 @@ if (argv[0] === 'exec') {
   out({ type: 'system', subtype: 'init', session_id: sid, model: flag('--model') });
   if (prompt.includes('HANG')) return hang();
   if (prompt.includes('FAIL')) return fail();
+  // NOCONV: the vendor conversation is gone — exactly what claude prints when
+  // --resume names a deleted transcript. A retry seeded with the handoff note
+  // (V3.10 recovery) carries the note's header and gets a normal answer.
+  if (prompt.includes('NOCONV') && !prompt.includes('# Continuing from an earlier Verse session')) {
+    out({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: sid, errors: ['No conversation found with session ID: ' + sid] });
+    fs.writeSync(2, 'No conversation found with session ID: ' + sid + '\\n');
+    process.exit(1);
+  }
   if (prompt.includes('SLOW')) return setTimeout(answer, 600);
   if (prompt.trim() === '/compact') return compact(sid);
   answer();
@@ -152,6 +173,9 @@ function untilTurnDone(engine: VerseEngineHandle, id: string, fromSeq = 0, timeo
     const seen: VerseEvent[] = [];
     const timer = setTimeout(() => { off(); reject(new Error(`turn-done not seen within ${timeoutMs}ms; saw ${seen.map((e) => e.type).join(',')}`)); }, timeoutMs);
     const off = engine.subscribe(id, fromSeq, (event) => {
+      // Transient frames (progress, thinking-delta, status) carry the last
+      // persisted seq and are not part of the durable sequence under test.
+      if (isTransientVerseEvent(event)) return;
       seen.push(event);
       if (event.type === 'turn-done') {
         clearTimeout(timer);
@@ -214,7 +238,7 @@ beforeEach(() => {
   process.env.GITHUB_TOKEN = 'ghp_fake_not_real';
   process.env.SOME_VENDOR_API_KEY = 'sk_fake_not_real';
   process.env.DB_PASSWORD = 'nope';
-  engine = createVerseEngine({ root, killGraceMs: 200 });
+  engine = createEngine({ root, killGraceMs: 200 });
 });
 
 afterEach(() => {
@@ -442,10 +466,14 @@ describe('sendTurn — codex', () => {
     engine.sendTurn(created.id, 'second codex prompt');
     await untilTurnDone(engine, created.id, events[events.length - 1].seq);
     const [call1, call2] = readCalls(side);
-    expect(call1.argv.slice(0, 2)).toEqual(['exec', '--json']);
-    expect(call1.argv).toEqual(expect.arrayContaining(['--model', 'gpt-5.5', '--cd', project, '--sandbox', 'workspace-write', '-']));
+    // Exact flag order is the adapter's business (test/verse-codex-adapter.test.ts);
+    // the engine's is new-vs-resume and the prompt on stdin.
+    expect(call1.argv[0]).toBe('exec');
+    expect(call1.argv[1]).not.toBe('resume');
+    expect(call1.argv).toEqual(expect.arrayContaining(['--json', '--model', 'gpt-5.5', '--cd', project, '--sandbox', 'workspace-write', '-']));
     expect(call1.stdin).toBe('first codex prompt');
-    expect(call2.argv.slice(0, 5)).toEqual(['exec', 'resume', 'thr_fake_1', '--json', '-']);
+    expect(call2.argv.slice(0, 3)).toEqual(['exec', 'resume', 'thr_fake_1']);
+    expect(call2.argv).toEqual(expect.arrayContaining(['--json', '-']));
     expect(call2.stdin).toBe('second codex prompt');
     expect(engine.getSession(created.id)!.turnCount).toBe(2);
   });
@@ -499,7 +527,7 @@ describe('failures, busy, cancel, timeout', () => {
   });
 
   it('times out a stuck turn: error + turn-done ok:false', async () => {
-    const quick = createVerseEngine({ root: join(work, 'verse-timeout'), killGraceMs: 150, turnTimeoutMs: 300 });
+    const quick = createEngine({ root: join(work, 'verse-timeout'), killGraceMs: 150, turnTimeoutMs: 300 });
     try {
       const created = quick.createSession({ projectPath: project, seatId: 'grok' }, nativeLaunch(GROK_SEAT));
       quick.sendTurn(created.id, 'HANG');
@@ -587,7 +615,7 @@ process.exit(1);
     crashedStore.appendEvent(created.id, { type: 'user-message', turnId: 'orphan-turn', text: 'never finished' }, new Date().toISOString());
     crashedStore.appendEvent(created.id, { type: 'turn-started', turnId: 'orphan-turn', pid: 999_999 }, new Date().toISOString());
 
-    const restarted = createVerseEngine({ root, killGraceMs: 200 });
+    const restarted = createEngine({ root, killGraceMs: 200 });
     try {
       const events = restarted.getEvents(created.id);
       const types = events.map((e) => e.type);
@@ -626,8 +654,13 @@ describe('subscribe, rename, delete, persistence', () => {
     const lastSeq = first[first.length - 1].seq;
 
     const replayed: VerseEvent[] = [];
-    const off = engine.subscribe(created.id, 2, (e) => replayed.push(e));
-    expect(replayed.map((e) => e.seq)).toEqual(first.filter((e) => e.seq > 2).map((e) => e.seq));
+    const off = engine.subscribe(created.id, 2, (e) => { if (!isTransientVerseEvent(e)) replayed.push(e); });
+    // Replay serves the STORED log, which was compacted at turn end (the
+    // streamed deltas folded into the assistant message): seqs may have gaps.
+    const stored = engine.getEvents(created.id);
+    expect(stored.length).toBeLessThan(first.length);
+    expect(replayed.map((e) => e.seq)).toEqual(stored.filter((e) => e.seq > 2).map((e) => e.seq));
+    expect(replayed.at(-1)!.seq).toBe(lastSeq);
 
     engine.sendTurn(created.id, 'two');
     await untilTurnDone(engine, created.id, lastSeq);
@@ -650,7 +683,7 @@ describe('subscribe, rename, delete, persistence', () => {
     engine.sendTurn(created.id, 'persist me');
     await untilTurnDone(engine, created.id);
 
-    const reopened = createVerseEngine({ root });
+    const reopened = createEngine({ root });
     try {
       const again = reopened.getSession(created.id)!;
       expect(again.title).toBe('Renamed chat');
@@ -947,7 +980,7 @@ describe('V3.9 setContextMode', () => {
 
     expect(engine.setContextMode(created.id, 'standard').usage.autoCompactAt).toBe(367_000);
     // Persisted, not just returned.
-    expect(createVerseEngine({ root }).getSession(created.id)!.contextMode).toBe('standard');
+    expect(createEngine({ root }).getSession(created.id)!.contextMode).toBe('standard');
   });
 
   it('refuses unknown modes, modes the model lacks, unknown sessions, and a running turn', async () => {
@@ -968,7 +1001,7 @@ describe('V3.9 setContextMode', () => {
   });
 
   it('claude keeps a measured runtime window across a switch; codex shows the new mode’s budget', async () => {
-    const custom = createVerseEngine({
+    const custom = createEngine({
       root: join(work, 'verse-modes'),
       killGraceMs: 200,
       adapterFor: withAdapters({
@@ -1070,7 +1103,7 @@ describe('V3.9 records written before 3.9', () => {
   it('a 3.8 claude chat on a 1M model keeps the native window: it becomes expansive, on disk, once', async () => {
     const legacyRoot = join(work, 'verse-legacy');
     const id = writeLegacySession(legacyRoot, nativeLaunch(LEGACY_CLAUDE()), 'claude-fable-5-1');
-    const custom = createVerseEngine({ root: legacyRoot, killGraceMs: 200 });
+    const custom = createEngine({ root: legacyRoot, killGraceMs: 200 });
     try {
       // Materialised by the engine's load pass, before anyone asked for it.
       const onDisk = readRecord(legacyRoot, id);
@@ -1097,7 +1130,7 @@ describe('V3.9 records written before 3.9', () => {
       // From here it is an ordinary expansive session: switching to standard works and sticks.
       const standard = custom.setContextMode(id, 'standard');
       expect(standard).toMatchObject({ contextMode: 'standard', usage: { autoCompactAt: 367_000 } });
-      const reopened = createVerseEngine({ root: legacyRoot });
+      const reopened = createEngine({ root: legacyRoot });
       try {
         expect(reopened.getSession(id)!.contextMode).toBe('standard');
       } finally {
@@ -1127,7 +1160,7 @@ describe('V3.9 records written before 3.9', () => {
     // window source, so its (standard) budget was a deliberate choice.
     const wip = writeLegacySession(legacyRoot, nativeLaunch(LEGACY_CLAUDE()), 'claude-fable-5-1',
       { contextWindow: 1_000_000, contextWindowSource: 'cli-catalog', autoCompactAt: 367_000 });
-    const custom = createVerseEngine({ root: legacyRoot, killGraceMs: 200 });
+    const custom = createEngine({ root: legacyRoot, killGraceMs: 200 });
     try {
       for (const id of [haiku, codex, grok, wip]) {
         expect('contextMode' in readRecord(legacyRoot, id)).toBe(false);
@@ -1148,7 +1181,7 @@ describe('V3.9 records written before 3.9', () => {
     // budgets. Both must answer from the same documented option.
     const legacyRoot = join(work, 'verse-legacy-codex');
     const id = writeLegacySession(legacyRoot, nativeLaunch(legacySeat('codex', 'codex-a', ['gpt-6-sol'], 272_000)), 'gpt-6-sol', { contextTokens: 50_000 });
-    const custom = createVerseEngine({ root: legacyRoot, killGraceMs: 200 });
+    const custom = createEngine({ root: legacyRoot, killGraceMs: 200 });
     try {
       const switched = custom.setContextMode(id, 'expansive');
       expect(switched).toMatchObject({
@@ -1205,7 +1238,7 @@ describe('V3.9 refreshLocalWindow', () => {
     const legacy = Q8_LAUNCH();
     legacy.seat = legacySeat('local', 'local:qwen3-coder:30b-ctx64k', ['qwen3-coder:30b-ctx64k'], 262_144);
     const id = writeLegacySession(legacyRoot, legacy, 'qwen3-coder:30b-ctx64k', { contextTokens: 12_000 });
-    const custom = createVerseEngine({ root: legacyRoot });
+    const custom = createEngine({ root: legacyRoot });
     try {
       expect(custom.getSession(id)!.usage.contextWindowSource).toBeUndefined();
       expect(custom.refreshLocalWindow(id, LIVE_64K).usage).toMatchObject({ contextWindow: 65_536, autoCompactAt: 32_536, contextWindowSource: 'runtime' });
@@ -1243,7 +1276,7 @@ describe('V3.9 refreshLocalWindow', () => {
 
 describe('V3.9 readings — runtime windows, unclamped occupancy, context and compaction events', () => {
   it('a runtime window wins over the catalog, moves the compaction point, and occupancy is stored unclamped', async () => {
-    const custom = createVerseEngine({
+    const custom = createEngine({
       root: join(work, 'verse-runtime'),
       killGraceMs: 200,
       adapterFor: withAdapters({
@@ -1268,7 +1301,7 @@ describe('V3.9 readings — runtime windows, unclamped occupancy, context and co
   });
 
   it('local seats ignore a runtime window: Verse told that CLI its window', async () => {
-    const custom = createVerseEngine({
+    const custom = createEngine({
       root: join(work, 'verse-local'),
       killGraceMs: 200,
       adapterFor: withAdapters({ local: patched(adapterFor('local'), { map: reportUsage({ contextWindow: 200_000 }) }) }),
@@ -1285,7 +1318,7 @@ describe('V3.9 readings — runtime windows, unclamped occupancy, context and co
   });
 
   it('an upper-bound reading is flagged inexact until an exact context reading replaces it', async () => {
-    const custom = createVerseEngine({
+    const custom = createEngine({
       root: join(work, 'verse-exact'),
       killGraceMs: 200,
       adapterFor: withAdapters({
@@ -1319,7 +1352,7 @@ describe('V3.9 readings — runtime windows, unclamped occupancy, context and co
   });
 
   it('context and compaction events update the session, are normalised, and survive a restart', async () => {
-    const custom = createVerseEngine({
+    const custom = createEngine({
       root: join(work, 'verse-compact'),
       killGraceMs: 200,
       adapterFor: withAdapters({
@@ -1353,13 +1386,16 @@ describe('V3.9 readings — runtime windows, unclamped occupancy, context and co
       expect(after.compactionCount).toBe(2);
       expect(after.usage.contextTokens).toBe(42_000);
 
-      const reopened = createVerseEngine({ root: customRoot });
+      const reopened = createEngine({ root: customRoot });
       try {
         expect(reopened.getSession(created.id)!.compactionCount).toBe(2);
         const replayed = reopened.getEvents(created.id);
         expect(replayed.filter((e) => e.type === 'compaction')).toHaveLength(2);
         expect(replayed.filter((e) => e.type === 'context')).toHaveLength(1);
-        expect(replayed.map((e) => e.seq)).toEqual(replayed.map((_, i) => i + 1));
+        // Strictly increasing and unique; gaps are the folded deltas.
+        const seqs = replayed.map((e) => e.seq);
+        expect(seqs).toEqual([...new Set(seqs)].sort((a, b) => a - b));
+        expect(replayed.some((e) => e.type === 'text-delta')).toBe(false);
       } finally {
         reopened.close();
       }
@@ -1414,7 +1450,7 @@ describe('V3.9 readings — runtime windows, unclamped occupancy, context and co
     delete record.usage['autoCompactAt'];
     writeFileSync(recordPath, JSON.stringify(record), { mode: 0o600 });
     engine.close();
-    engine = createVerseEngine({ root, killGraceMs: 200 });
+    engine = createEngine({ root, killGraceMs: 200 });
     const fromSeq = engine.getEvents(created.id).at(-1)!.seq;
     engine.sendTurn(created.id, 'again');
     const later = await untilTurnDone(engine, created.id, fromSeq);
@@ -1425,7 +1461,7 @@ describe('V3.9 readings — runtime windows, unclamped occupancy, context and co
 
   it('a usage frame with NO occupancy reading keeps the previous one (zero would be an invented reading)', async () => {
     let dropReading = false;
-    const custom = createVerseEngine({
+    const custom = createEngine({
       root: join(work, 'verse-no-reading'),
       killGraceMs: 200,
       adapterFor: withAdapters({
@@ -1491,7 +1527,7 @@ describe('V3.9 telemetry hooks', () => {
         ];
       },
     });
-    const custom = createVerseEngine({ root: join(work, 'verse-hooks'), killGraceMs: 200, telemetryPollMs: 40, adapterFor: withAdapters({ claude: adapter }) });
+    const custom = createEngine({ root: join(work, 'verse-hooks'), killGraceMs: 200, telemetryPollMs: 40, adapterFor: withAdapters({ claude: adapter }) });
     try {
       const created = custom.createSession({ projectPath: project, seatId: 'claude-max' }, nativeLaunch(CLAUDE_SEAT));
       const { turnId } = custom.sendTurn(created.id, 'SLOW please');
@@ -1538,7 +1574,7 @@ describe('V3.9 telemetry hooks', () => {
     const throwingAfter = patched(adapterFor('codex'), {
       afterTurn: () => { throw new Error('boom'); },
     });
-    const custom = createVerseEngine({ root: join(work, 'verse-hooks-bad'), killGraceMs: 200, telemetryPollMs: 30, adapterFor: withAdapters({ claude: adapter, codex: throwingAfter }) });
+    const custom = createEngine({ root: join(work, 'verse-hooks-bad'), killGraceMs: 200, telemetryPollMs: 30, adapterFor: withAdapters({ claude: adapter, codex: throwingAfter }) });
     try {
       const created = custom.createSession({ projectPath: project, seatId: 'claude-max' }, nativeLaunch(CLAUDE_SEAT));
       custom.sendTurn(created.id, 'SLOW');
@@ -1564,7 +1600,7 @@ describe('V3.9 telemetry hooks', () => {
         return [{ type: 'compaction', turnId: ctx.turnId, trigger: 'auto', preTokens: null, postTokens: null, durationMs: null }];
       },
     });
-    const custom = createVerseEngine({ root: join(work, 'verse-hooks-cancel'), killGraceMs: 150, adapterFor: withAdapters({ claude: adapter }) });
+    const custom = createEngine({ root: join(work, 'verse-hooks-cancel'), killGraceMs: 150, adapterFor: withAdapters({ claude: adapter }) });
     try {
       const created = custom.createSession({ projectPath: project, seatId: 'claude-max' }, nativeLaunch(CLAUDE_SEAT));
       custom.sendTurn(created.id, 'HANG');
@@ -1590,7 +1626,7 @@ describe('V3.9 telemetry hooks', () => {
         pollTelemetry: () => { polls += 1; return []; },
         afterTurn: () => { afters += 1; return []; },
       });
-      const custom = createVerseEngine({
+      const custom = createEngine({
         root: join(work, `verse-leak-${ending}`),
         killGraceMs: 100,
         telemetryPollMs: 20,
@@ -1632,7 +1668,7 @@ describe('V3.9 telemetry hooks', () => {
         },
       });
       const customRoot = join(work, `verse-reentrant-${action}`);
-      const custom = createVerseEngine({ root: customRoot, killGraceMs: 100, telemetryPollMs: 20, adapterFor: withAdapters({ claude: adapter }) });
+      const custom = createEngine({ root: customRoot, killGraceMs: 100, telemetryPollMs: 20, adapterFor: withAdapters({ claude: adapter }) });
       try {
         const created = custom.createSession({ projectPath: project, seatId: 'claude-max' }, nativeLaunch(CLAUDE_SEAT));
         const seen: VerseEvent[] = [];
@@ -1655,7 +1691,7 @@ describe('V3.9 telemetry hooks', () => {
           expect(seen.at(-1)!.type).toBe('turn-done');
         } else {
           // close() drops subscribers, so read the durable log itself.
-          const reopened = createVerseEngine({ root: customRoot });
+          const reopened = createEngine({ root: customRoot });
           try {
             const types = reopened.getEvents(created.id).map((e) => e.type);
             expect(types.filter((t) => t === 'context')).toHaveLength(1);
@@ -1740,5 +1776,102 @@ describe('V3.9 store validation', () => {
     ];
     writeFileSync(join(store.sessionsDir, 'ev.events.jsonl'), `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`, { mode: 0o600 });
     expect(store.readEvents('ev').map((e) => e.seq)).toEqual([1, 2, 5, 6, 10, 11]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// V3.10 reliability against REAL processes (the fake-child suite is
+// test/verse-reliability.test.ts)
+// ---------------------------------------------------------------------------
+
+describe('V3.10 reliability — real processes', () => {
+  it('recovers a lost claude conversation end-to-end through the real adapter: new native id, handoff-seeded retry', async () => {
+    const created = engine.createSession({ projectPath: project, seatId: 'claude-max' }, nativeLaunch(CLAUDE_SEAT));
+    engine.sendTurn(created.id, 'build the parser');
+    const first = await untilTurnDone(engine, created.id);
+    const originalNative = engine.getSession(created.id)!.nativeSessionId;
+
+    engine.sendTurn(created.id, 'NOCONV now add tests');
+    const events = await untilTurnDone(engine, created.id, first.at(-1)!.seq);
+    const types = events.map((e) => e.type);
+    expect(types).toContain('recovered');
+    expect(events.find((e) => e.type === 'recovered')).toMatchObject({ how: 'handoff' });
+    expect(events.filter((e) => e.type === 'turn-started')).toHaveLength(2);
+    expect(events.at(-1)).toMatchObject({ type: 'turn-done', ok: true });
+    const after = engine.getSession(created.id)!;
+    expect(after.nativeSessionId).not.toBe(originalNative);
+    expect(after.status).toBe('idle');
+    const retry = readCalls(side).at(-1)!;
+    expect(retry.argv).toContain(after.nativeSessionId);
+    expect(retry.argv.at(-1)).toContain('# Continuing from an earlier Verse session');
+    expect(retry.argv.at(-1)!.endsWith('NOCONV now add tests')).toBe(true);
+  });
+
+  it('reaps a real orphaned process group left by a dead server — and only one whose identity matches', async () => {
+    const sleeperPath = join(work, 'orphan-sleeper.cjs');
+    writeFileSync(sleeperPath, 'setInterval(() => {}, 1000);\n', { mode: 0o700 });
+    const start = (): { pid: number; spawnedAt: number } => {
+      const child = spawnProcess(process.execPath, [sleeperPath], { detached: true, stdio: 'ignore' });
+      child.unref();
+      return { pid: child.pid!, spawnedAt: Date.now() };
+    };
+    const ours = start();
+    const stranger = start();
+    try {
+      mkdirSync(root, { recursive: true, mode: 0o700 });
+      const deadServer = 4_194_390; // above every pid_max: provably not running
+      const entry = (p: { pid: number; spawnedAt: number }, spawnedAt: number) => ({
+        sessionId: `s-${p.pid}`, turnId: 't', pid: p.pid, pgid: p.pid, markers: ['orphan-sleeper.cjs'],
+        spawnedAt, serverPid: deadServer, serverStartedAt: null,
+      });
+      writeFileSync(join(root, 'running.json'), JSON.stringify({ v: 1, entries: [
+        entry(ours, ours.spawnedAt),
+        // Same pid, but "launched" an hour earlier: a reused pid as far as the registry can tell.
+        entry(stranger, stranger.spawnedAt - 3_600_000),
+      ] }), { mode: 0o600 });
+      const restarted = createEngine({ root });
+      try {
+        await waitFor(() => !pidAlive(ours.pid), 6_000);
+        expect(pidAlive(stranger.pid)).toBe(true);
+        const log = readFileSync(join(root, 'verse.log'), 'utf8');
+        expect(log).toContain(`reaped orphaned turn process group ${ours.pid}`);
+        expect(log).toContain('was reused');
+        expect(JSON.parse(readFileSync(join(root, 'running.json'), 'utf8'))).toEqual({ v: 1, entries: [] });
+      } finally {
+        restarted.close();
+      }
+    } finally {
+      for (const p of [ours, stranger]) {
+        try { process.kill(-p.pid, 'SIGKILL'); } catch { /* gone */ }
+      }
+    }
+  });
+
+  it('a running turn is in running.json with its real pid and leaves it on settle', async () => {
+    const created = engine.createSession({ projectPath: project, seatId: 'claude-max' }, nativeLaunch(CLAUDE_SEAT));
+    engine.sendTurn(created.id, 'HANG');
+    await waitFor(() => engine.getEvents(created.id).some((e) => e.type === 'turn-started'));
+    const started = engine.getEvents(created.id).find((e) => e.type === 'turn-started') as { pid: number };
+    const registry = JSON.parse(readFileSync(join(root, 'running.json'), 'utf8')) as { entries: { pid: number; pgid: number; markers: string[] }[] };
+    expect(registry.entries).toEqual([expect.objectContaining({ pid: started.pid, pgid: started.pid, markers: ['launcher.cjs', 'claude'] })]);
+    engine.cancelTurn(created.id);
+    await waitFor(() => engine.getSession(created.id)!.status !== 'running', 6_000);
+    expect(JSON.parse(readFileSync(join(root, 'running.json'), 'utf8'))).toEqual({ v: 1, entries: [] });
+  });
+
+  it('preflightLocalEndpoint answers from a real socket in well under 100 ms', async () => {
+    const server = createServer((socket) => socket.destroy());
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const up = await preflightLocalEndpoint(`http://127.0.0.1:${port}/v1`);
+      expect(up.ok).toBe(true);
+      expect(up.ms).toBeLessThan(100);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    const down = await preflightLocalEndpoint(`http://127.0.0.1:${port}`);
+    expect(down).toMatchObject({ ok: false, reason: expect.stringContaining('ECONNREFUSED') });
+    expect(down.ms).toBeLessThan(100);
   });
 });

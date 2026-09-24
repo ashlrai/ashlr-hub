@@ -18,7 +18,7 @@ import { executeResourceWorker, validateResourceBindings, type ResourceBinding, 
 import { resourceUsageScopeForProvider, validResourceExecutionDuration, validResourceExecutionMeasurement, type ResourceExecutionMeasurement } from './performance.js';
 import { RESOURCE_NATIVE_PROCESS_SIGNALS, validResourceNativeProcessForReceipt, type ResourceNativeProcessDiagnostic } from './native-diagnostics.js';
 import { resourcePoolConfigSnapshot, validateResourcePoolConfigHistory } from './pool-evolution-policy.js';
-import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
+import { canonicalResourceLedgerJson } from './pool-ledger-json.js';
 import type { ResourcePoolConfigSnapshot } from './pool-evolution-types.js';
 export type { ResourcePoolConfigSnapshot } from './pool-evolution-types.js';
 
@@ -227,7 +227,11 @@ function checkedReceipt(value: unknown, stateDigest: string, bindings: ResourceB
 
 /** Pure strict epoch-aware decoder. Only the explicit offline migrator reads a pending barrier. */
 export function decodeResourcePoolState(value: unknown, pool: ResourcePool, bindings: ResourceBinding[], allowPendingEvolution = false): ResourcePoolState {
-  const serialized = canonicalEvidencePackJsonV3(value);
+  // Bounded by this ledger's own writer (MAX_STATE_BYTES incl. the trailing newline that
+  // writeState appends) and admission cap (MAX_ATTEMPTS receipts), not the 1 MiB / 16,384-value
+  // evidence-pack contract: anything writeState and requireResourcePoolSettlementHeadroom admit
+  // must decode, or the pool fails closed on its own history. See pool-ledger-json.ts.
+  const serialized = canonicalResourceLedgerJson(value, { maxBytes: MAX_STATE_BYTES, maxContainerEntries: MAX_ATTEMPTS });
   if (serialized === null || Buffer.byteLength(serialized) + 1 > MAX_STATE_BYTES) throw new Error('Invalid bounded resource ledger');
   value = JSON.parse(serialized) as unknown;
   const active = resourcePoolConfigSnapshot(pool, bindings); const poolDigest = active.poolDigest;

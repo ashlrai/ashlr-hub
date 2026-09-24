@@ -511,3 +511,121 @@ export function repinResourceNativeProfile(options: ResourceNativeProfileRepinOp
   } catch { throw new ResourceNativeProfileRepinError(launcherChanged ? 'failed-partial' : 'failed-unchanged'); }
   return report('repinned', backups);
 }
+
+// ---------------------------------------------------------------------------
+// V3.10: resolve a SEAT's launcher for headless fleet use (read-only)
+// ---------------------------------------------------------------------------
+//
+// Why this exists: the fleet's grok-cli engine (SPEC-310B §3) must run on the
+// grok-a SEAT — the same account, pinned binary and GROK_HOME that Verse and
+// the SeatRouter call `grok` — never the ambient `~/.grok` login. The seat's
+// identity is its row in `<accountsRoot>/connections.json` (id → launcher
+// command); the launcher is this module's generated `launcher.mjs`, which
+// execs exactly one pinned binary with a scrubbed env plus GROK_HOME.
+//
+// What it checks, and why each check fails closed:
+//  - the roster lives in an owned 0700 directory and is an owned 0600
+//    single-link file (the roster decides which launcher the daemon execs);
+//  - exactly one row matches (provider, and seat id when given) — two grok
+//    rows and no configured seat is ambiguous, not "pick the first";
+//  - the row's command is exactly `[node, <dir>/launcher.mjs]`, and that
+//    directory re-validates as an UNMODIFIED prepared profile of the same
+//    provider (inspectRepinTarget: every file owned 0600, every directory
+//    0700 with its recorded identity, launcher and manifest agreeing byte for
+//    byte), whose manifest command is the row's command;
+//  - the launcher and manifest name the same executable, so a repin torn
+//    between its two publishes is refused until it is finished.
+// Nothing is executed, no credential is read (native-state is never opened),
+// and a failure message never carries a private path.
+
+export type NativeSeatLaunchFailure =
+  | 'roster-unreadable'
+  | 'no-seat'
+  | 'ambiguous-seat'
+  | 'not-a-profile-launcher'
+  | 'profile-invalid';
+
+export interface NativeSeatLaunch {
+  /** The account id in connections.json — the SeatRouter's seat id. */
+  seatId: string;
+  provider: ResourceNativeProfileProvider;
+  /** `[nodeExecutable, launcherPath]` — PRIVATE locators; never put them in a payload or log. */
+  command: [string, string];
+  /** What the launcher sets as GROK_HOME / CODEX_HOME / CLAUDE_CONFIG_DIR. PRIVATE. */
+  nativeStatePath: string;
+  /** The one pinned native binary the launcher execs. PRIVATE. */
+  executable: string;
+}
+
+export type NativeSeatLaunchResult =
+  | { ok: true; launch: NativeSeatLaunch }
+  | { ok: false; reason: NativeSeatLaunchFailure; detail: string };
+
+// Fixed text: never a path, never an OS error string.
+const SEAT_LAUNCH_DETAIL: Record<NativeSeatLaunchFailure, string> = {
+  'roster-unreadable': 'the account roster (connections.json) is missing, not owner-private, or malformed',
+  'no-seat': 'no account in the roster matches this provider/seat',
+  'ambiguous-seat': 'more than one account matches this provider; configure the seat id explicitly',
+  'not-a-profile-launcher': 'the seat command is not a native-profile launcher ([node, <profile>/launcher.mjs])',
+  'profile-invalid': 'the seat profile is not an unmodified prepared profile of this provider (or a repin is unfinished)',
+};
+
+const ROSTER_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+function seatFailure(reason: NativeSeatLaunchFailure): NativeSeatLaunchResult {
+  return { ok: false, reason, detail: SEAT_LAUNCH_DETAIL[reason] };
+}
+
+/**
+ * Resolve one seat's launcher. Pure read; see the section comment for every
+ * check. `seatId` null/absent means "the only account of this provider".
+ */
+export function resolveNativeSeatLaunch(options: {
+  accountsRoot: string;
+  provider: ResourceNativeProfileProvider;
+  seatId?: string | null;
+}): NativeSeatLaunchResult {
+  const { accountsRoot, provider } = options;
+  const seatId = options.seatId ?? null;
+  let rows: Array<{ id: string; command: unknown }>;
+  try {
+    if (!path(accountsRoot)) throw new Error();
+    inspectPrivateDirectory(accountsRoot);
+    const roster: unknown = JSON.parse(readOwnedFile(join(accountsRoot, 'connections.json')).text);
+    if (!isRecord(roster) || roster['schemaVersion'] !== 1 || !Array.isArray(roster['accounts'])) throw new Error();
+    rows = roster['accounts'].flatMap((row: unknown) => {
+      if (!isRecord(row) || typeof row['id'] !== 'string' || !ROSTER_ID.test(row['id']) || row['provider'] !== provider) return [];
+      return [{ id: row['id'], command: row['command'] }];
+    });
+  } catch { return seatFailure('roster-unreadable'); }
+  const matches = seatId === null ? rows : rows.filter((row) => row.id === seatId);
+  if (matches.length === 0) return seatFailure('no-seat');
+  if (matches.length > 1) return seatFailure('ambiguous-seat');
+  const row = matches[0]!;
+  const command = row.command;
+  if (!isStringArray(command) || command.length !== 2 || !path(command[0]) || !path(command[1]) ||
+    basename(command[1]!) !== 'launcher.mjs') return seatFailure('not-a-profile-launcher');
+  let state: RepinInspection;
+  try { state = inspectRepinTarget(dirname(command[1]!)); } catch { return seatFailure('profile-invalid'); }
+  const manifestCommand = state.manifest['command'];
+  if (state.provider !== provider || state.launcherExecutable !== state.manifestExecutable ||
+    !isStringArray(manifestCommand) || manifestCommand.length !== 2 ||
+    manifestCommand[0] !== command[0] || manifestCommand[1] !== command[1]) return seatFailure('profile-invalid');
+  const nativeStatePath = state.manifest['nativeStatePath'];
+  if (typeof nativeStatePath !== 'string') return seatFailure('profile-invalid');
+  // The launcher is CODE the unattended daemon executes. inspectRepinTarget
+  // checks its landmark lines only (repin must accept older templates); a seat
+  // launch demands the WHOLE file be exactly what this template generates for
+  // this manifest and these recorded directories, so an appended or edited
+  // line is refused. A profile prepared by an older template fails here and
+  // must be re-prepared — the honest outcome for code this path cannot vouch for.
+  try {
+    const directoriesLine = state.launcherLines.find((line) => line.startsWith(LAUNCHER_DIRECTORIES_PREFIX))!;
+    const directories = exactJson(directoriesLine.slice(LAUNCHER_DIRECTORIES_PREFIX.length, -1), 0) as Array<{ path: string; dev: string; ino: string }>;
+    if (launcherSource(state.manifest as unknown as ResourceNativeProfile, directories) !== state.files.launcher.text) throw new Error();
+  } catch { return seatFailure('profile-invalid'); }
+  return {
+    ok: true,
+    launch: { seatId: row.id, provider, command: [command[0]!, command[1]!], nativeStatePath, executable: state.manifestExecutable },
+  };
+}

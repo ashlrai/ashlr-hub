@@ -61,4 +61,12 @@ export const KNOWN_FAST_SPAWN_FILES = [
   'test/m468.resident-service-readiness.test.ts', // <0.1s
   'test/m54.self-guard.test.ts', // <0.1s
   'test/m93.daemon-service-launchd-integration.test.ts', // 0s (native_launchd env-gated on this machine)
+  // 3.10: a marker false positive rather than a measured-cheap spawn — the
+  // `spawn(` the guard matches is text inside a source scan of
+  // verse/session-engine.ts; the file spawns nothing. 0.08s slowest test (2026-09-24).
+  'test/local-only-dispatch-paths.test.ts', // <0.1s
+  // 3.10 fix pass (P5): three `node <shim> --flag` children fed a small JSON
+  // request on stdin — no git, no network, no waiting on another process's
+  // output. 0.08s for the one test that spawns (2026-09-24).
+  'test/scorecard-history-sea-310.test.ts', // <0.1s
 ];

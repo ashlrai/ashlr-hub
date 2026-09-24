@@ -6,8 +6,10 @@
  *
  * All external I/O is mocked:
  *   - buildOversightSnapshot → vi.fn() (deterministic snapshot)
- *   - loadLatestBriefing     → vi.fn() (returns deterministic StrategicBriefing)
- *   - runStrategist          → vi.fn() (same briefing)
+ *   - loadLatestBriefing     → vi.fn() (legacy; the cycle no longer reaches it)
+ *   - runStrategist          → vi.fn() (legacy; the cycle no longer reaches it)
+ *   - leaderTick / buildLeaderState → vi.fn() (V3.10: ask-vision is the Leader
+ *     tick path; it posts the latest Leader memo under the 'elon-vision' wire kind)
  *   - judgeHealth            → vi.fn() (returns zeroed health)
  *   - runCommsCycle          → vi.fn() (returns {sent:1, resolved:0})
  *   - loadConfig             → vi.fn() (returns minimal cfgEnabled)
@@ -43,7 +45,11 @@ const {
   mockJudgeHealth,
   mockRunCommsCycle,
   mockLoadConfig,
+  mockLeaderTick,
+  mockBuildLeaderState,
 } = vi.hoisted(() => ({
+  mockLeaderTick: vi.fn(),
+  mockBuildLeaderState: vi.fn(),
   mockBuildOversightSnapshot: vi.fn(),
   mockLoadLatestBriefing: vi.fn(),
   mockRunStrategist: vi.fn(),
@@ -153,6 +159,15 @@ vi.mock('../src/core/vision/strategist.js', () => ({
   loadLatestBriefing: mockLoadLatestBriefing,
   runStrategist: mockRunStrategist,
   adoptBriefing: vi.fn().mockResolvedValue({ specId: 'eco', goalIds: [] }),
+}));
+
+// ---------------------------------------------------------------------------
+// Mock: the Leader (V3.10) — ask-vision is the Leader tick path now
+// ---------------------------------------------------------------------------
+vi.mock('../src/core/vision/leader.js', () => ({
+  loadDefaultLeaderRunDeps: vi.fn(async () => ({})),
+  leaderTick: mockLeaderTick,
+  buildLeaderState: mockBuildLeaderState,
 }));
 
 // ---------------------------------------------------------------------------
@@ -299,6 +314,14 @@ beforeEach(() => {
   mockJudgeHealth.mockResolvedValue(makeJudgeHealth());
   mockRunCommsCycle.mockResolvedValue({ sent: 1, resolved: 0 });
   mockLoadConfig.mockResolvedValue(cfgEnabled());
+  mockLeaderTick.mockResolvedValue({ applied: [], graded: [], due: { due: false }, started: false, run: null });
+  mockBuildLeaderState.mockReturnValue({
+    latest: {
+      id: 'lm-20260924063000-abcdef', at: '2026-09-24T06:30:00.000Z', status: 'ok', dryRun: true,
+      bottleneck: { statement: 'Too many goals', metric: 'active-goals', evidence: [] }, move: null,
+      killList: [], questionsForMason: [], actions: [],
+    },
+  });
 });
 
 afterEach(() => {
@@ -386,7 +409,7 @@ describe('cycle ask-vision cadence', () => {
     setCadence('last-digest', RECENT); // suppress digest
 
     await cmdComms(['cycle']);
-    expect(mockLoadLatestBriefing).toHaveBeenCalled();
+    expect(mockLeaderTick).toHaveBeenCalled();
     const queued = listRequests({ kind: 'elon-vision' });
     expect(queued.length).toBeGreaterThan(0);
     expect(mockRunCommsCycle).toHaveBeenCalledOnce();
@@ -397,7 +420,7 @@ describe('cycle ask-vision cadence', () => {
     setCadence('last-digest', RECENT);
 
     await cmdComms(['cycle']);
-    expect(mockLoadLatestBriefing).not.toHaveBeenCalled();
+    expect(mockLeaderTick).not.toHaveBeenCalled();
     expect(mockRunCommsCycle).toHaveBeenCalledOnce();
   });
 
@@ -405,7 +428,7 @@ describe('cycle ask-vision cadence', () => {
     setCadence('last-digest', RECENT); // suppress digest
 
     await cmdComms(['cycle']);
-    expect(mockLoadLatestBriefing).toHaveBeenCalled();
+    expect(mockLeaderTick).toHaveBeenCalled();
     const queued = listRequests({ kind: 'elon-vision' });
     expect(queued.length).toBeGreaterThan(0);
   });
@@ -469,7 +492,7 @@ describe('never-throws', () => {
 
   it('ask-vision error does not break the poll cycle', async () => {
     setCadence('last-digest', RECENT); // suppress digest
-    mockLoadLatestBriefing.mockImplementation(() => { throw new Error('briefing exploded'); });
+    mockLeaderTick.mockRejectedValue(new Error('leader exploded'));
 
     const exit = await cmdComms(['cycle']);
     expect(exit).toBe(0);
@@ -478,7 +501,7 @@ describe('never-throws', () => {
 
   it('both errors do not break the poll cycle', async () => {
     mockBuildOversightSnapshot.mockImplementation(() => { throw new Error('snap fail'); });
-    mockLoadLatestBriefing.mockImplementation(() => { throw new Error('briefing fail'); });
+    mockLeaderTick.mockRejectedValue(new Error('leader fail'));
 
     const exit = await cmdComms(['cycle']);
     expect(exit).toBe(0);
@@ -497,7 +520,7 @@ describe('comms disabled', () => {
     const exit = await cmdComms(['cycle']);
     expect(exit).toBe(0);
     expect(mockBuildOversightSnapshot).not.toHaveBeenCalled();
-    expect(mockLoadLatestBriefing).not.toHaveBeenCalled();
+    expect(mockLeaderTick).not.toHaveBeenCalled();
     // cycle still runs (registerCommsHandlers + runCommsCycle)
     expect(mockRunCommsCycle).toHaveBeenCalledOnce();
   });
@@ -515,7 +538,7 @@ describe('both stale', () => {
     await cmdComms(['cycle']);
 
     expect(mockBuildOversightSnapshot).toHaveBeenCalledOnce();
-    expect(mockLoadLatestBriefing).toHaveBeenCalled();
+    expect(mockLeaderTick).toHaveBeenCalled();
 
     const digests = listRequests({ kind: 'fleet-digest' });
     const visions = listRequests({ kind: 'elon-vision' });

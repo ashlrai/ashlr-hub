@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { createSeaCompileArgs, createSeaWorkerShim, createSeaEngineeringWorkerShim, createSeaEngineeringReadWorkerShim } from '../scripts/build-sea.mjs';
+import {
+  createSeaCompileArgs,
+  createSeaWorkerShim,
+  createSeaEngineeringWorkerShim,
+  createSeaEngineeringReadWorkerShim,
+  createSeaFleetHistoryWorkerShim,
+} from '../scripts/build-sea.mjs';
 
 describe('Bun sidecar read-worker packaging', () => {
   it('packages the independent journal reader with its trusted identity', () => {
@@ -12,6 +18,20 @@ describe('Bun sidecar read-worker packaging', () => {
       engineeringWorkerEntry: '/owned/engineering-background-worker.js', engineeringReadWorkerEntry: '/owned/engineering-successor-read-worker.js',
       outBin: '/owned/ashlr' })).toEqual(['build', '--compile', '/owned/_entry.js', '/owned/read-projection-worker.js',
       '/owned/engineering-background-worker.js', '/owned/engineering-successor-read-worker.js', '--outfile', '/owned/ashlr']);
+  });
+  it('packages the V3.10 fleet-history worker as a sibling entrypoint with the trusted identity', () => {
+    const identity = JSON.stringify({ schemaVersion: 1, revision: 'd'.repeat(40) });
+    const shim = createSeaFleetHistoryWorkerShim({ buildIdentityJson: identity });
+    expect(shim).toContain(JSON.stringify(identity));
+    // fleet-history.ts resolves `./fleet-history-worker.js` next to the main entry.
+    expect(shim).toContain("await import('../dist/core/verse/fleet-history-worker.js');");
+    expect(shim.indexOf('Reflect.set(')).toBeLessThan(shim.indexOf('await import('));
+    expect(shim).not.toContain('process.env');
+    expect(createSeaCompileArgs({ entry: '/owned/_entry.js', workerEntry: '/owned/read-projection-worker.js',
+      engineeringWorkerEntry: '/owned/engineering-background-worker.js', engineeringReadWorkerEntry: '/owned/engineering-successor-read-worker.js',
+      fleetHistoryWorkerEntry: '/owned/fleet-history-worker.js', outBin: '/owned/ashlr' })).toEqual(['build', '--compile',
+      '/owned/_entry.js', '/owned/read-projection-worker.js', '/owned/engineering-background-worker.js',
+      '/owned/engineering-successor-read-worker.js', '/owned/fleet-history-worker.js', '--outfile', '/owned/ashlr']);
   });
   it('explicitly compiles the sibling worker entry alongside the CLI shim', () => {
     expect(createSeaCompileArgs({

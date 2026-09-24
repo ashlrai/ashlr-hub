@@ -39,6 +39,14 @@
  *   - No repo mutation, no network call, no live model invocation.
  *   - Does not touch daemon/loop.ts (see snapshotScorecardIfDue doc comment
  *     for the recommended, NOT-applied, one-line call site).
+ *
+ * WIRING (V3.10): the Verse server's fleet-history service
+ * (core/verse/fleet-history.ts) drives {@link runScorecardHistoryMaintenance}
+ * from a worker thread, so snapshots are taken daily while Verse is open even
+ * though the resident daemon is dark, and the trend is served to the Growth
+ * charts. Both the snapshot (two full scorecards, ~0.5 s of synchronous reads
+ * on a real inbox) and the history read (a synchronous helper process) are
+ * kept OFF the HTTP event loop that way.
  */
 
 import { listProposalsDetailed } from '../inbox/store.js';
@@ -755,15 +763,27 @@ function toTrendPoint(record: ScorecardSnapshotRecord): ScorecardTrendPoint {
   };
 }
 
+/** Upper bound on trend points per window (a year of daily snapshots, plus slack). */
+const MAX_TREND_POINTS = 400;
+
 /**
  * Read persisted scorecard history for the given window, newest first,
  * bounded. Never throws.
+ *
+ * `limit` is the number of points FOR THIS WINDOW. Every snapshot appends one
+ * record per window (7d and 30d), so the underlying newest-first read asks for
+ * twice as many records; applying the limit before the window filter used to
+ * return only half the requested history.
  */
 export function readScorecardTrend(window: ScorecardWindow, opts: { limit?: number } = {}): ScorecardTrend {
   try {
-    const read = readScorecardHistory({ limit: opts.limit ?? 26 });
+    const requested = typeof opts.limit === 'number' && Number.isFinite(opts.limit) && opts.limit > 0
+      ? Math.min(MAX_TREND_POINTS, Math.floor(opts.limit))
+      : 26;
+    const read = readScorecardHistory({ limit: requested * 2 });
     const points = read.records
       .filter((r) => r.window === window)
+      .slice(0, requested)
       .map(toTrendPoint);
     return {
       sourceQuality: { sourceState: read.sourceState, complete: read.complete, reasons: [...read.stopReasons] },
@@ -787,18 +807,18 @@ const SNAPSHOT_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
  * IF the last persisted snapshot is missing or older than
  * SNAPSHOT_MIN_INTERVAL_MS. No-ops otherwise. Never throws.
  *
- * NOT WIRED IN. This codebase's only low-cadence periodic hook today is
- * daemon/loop.ts's setInterval tick (out of scope for this change — see
- * module doc / task report). The intended call site, once wired, is a
- * one-line addition alongside the existing sibling sweeps in loop.ts's tick
- * handler (next to `sweepRejectionLearning(liveCfg)` and
- * `sweepPostMergeCreditReleases()`):
+ * WIRED FROM VERSE (V3.10) through {@link runScorecardHistoryMaintenance},
+ * which the fleet-history service calls at most hourly while the Verse server
+ * is up. The daemon tick remains the better long-term home once the resident
+ * daemon runs again — a one-line addition alongside the existing sibling
+ * sweeps in loop.ts's tick handler (next to `sweepRejectionLearning(liveCfg)`
+ * and `sweepPostMergeCreditReleases()`):
  *
  *   const { snapshotScorecardIfDue } = await import('../fleet/scorecard.js');
  *   snapshotScorecardIfDue();
  *
- * Safe to call from anywhere else in the meantime (CLI, a cron script, a
- * future scheduler) — it is idempotent and self-throttling.
+ * Calling it from both places is safe: it is idempotent and self-throttling
+ * against the persisted history, not against in-process state.
  */
 export function snapshotScorecardIfDue(opts: { nowMs?: number } = {}): { wrote: boolean } {
   try {
@@ -826,4 +846,40 @@ export function snapshotScorecardIfDue(opts: { nowMs?: number } = {}): { wrote: 
   } catch {
     return { wrote: false };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Maintenance entry point (snapshot-if-due + both trends in one call)
+// ---------------------------------------------------------------------------
+
+export interface ScorecardHistoryMaintenanceResult {
+  /** Whether a snapshot was requested by the caller this time. */
+  snapshotAttempted: boolean;
+  /** True only when a due snapshot was durably appended for both windows. */
+  wrote: boolean;
+  /** Newest first, as readScorecardTrend returns them. */
+  trend7d: ScorecardTrend;
+  trend30d: ScorecardTrend;
+}
+
+/**
+ * One call that a background owner (the Verse fleet-history worker, or its
+ * inline fallback) makes: append a snapshot if one is due, then read both
+ * trend windows. Plain JSON in and out so it can cross a worker boundary.
+ * Never throws.
+ */
+export function runScorecardHistoryMaintenance(
+  opts: { snapshot: boolean; limit?: number; nowMs?: number },
+): ScorecardHistoryMaintenanceResult {
+  let wrote = false;
+  if (opts.snapshot) {
+    wrote = snapshotScorecardIfDue(opts.nowMs === undefined ? {} : { nowMs: opts.nowMs }).wrote;
+  }
+  const limit = opts.limit;
+  return {
+    snapshotAttempted: opts.snapshot,
+    wrote,
+    trend7d: readScorecardTrend('7d', limit === undefined ? {} : { limit }),
+    trend30d: readScorecardTrend('30d', limit === undefined ? {} : { limit }),
+  };
 }

@@ -3,7 +3,7 @@
  *
  * Subcommands:
  *   show [id]              Print the current EndStateSpec (default: ecosystem).
- *   review [--project P]   Run the Strategist → print strategic briefing.
+ *   review [--project P]   V3.10: alias of `ashlr leader tick --wait` (budget-gated Leader).
  *   preview                Compile the latest briefing into a read-only adoption plan.
  *   approve                adoptBriefing for the latest briefing → evolve spec + create goals.
  *   set --north-star "…"   Mason edits northStar directly (updatedBy:'mason').
@@ -93,75 +93,6 @@ function printSpec(spec: EndStateSpec): void {
   console.log('');
 }
 
-function printBriefing(b: import('../core/vision/strategist.js').StrategicBriefing): void {
-  console.log('');
-  console.log(bold('=== STRATEGIC BRIEFING ===') + dim(` ${b.generatedAt}${b.project ? ' | ' + b.project : ''}`));
-  console.log('');
-  console.log(bold('Current State'));
-  console.log('  ' + b.currentState);
-  console.log('');
-  console.log(bold('Gap to Vision'));
-  console.log('  ' + b.gapToVision);
-  console.log('');
-
-  if (b.recommendedDirection.length > 0) {
-    console.log(bold('Recommended Direction'));
-    b.recommendedDirection.forEach((d, i) => console.log(`  ${i + 1}. ${d}`));
-    console.log('');
-  }
-
-  if (b.newProblems.length > 0) {
-    console.log(bold('Newly Identified Problems'));
-    b.newProblems.forEach((p, i) => console.log(`  ${i + 1}. ${p}`));
-    console.log('');
-  }
-
-  if (b.questionsForMason.length > 0) {
-    console.log(bold(yellow('Questions for Mason')));
-    b.questionsForMason.forEach((q, i) => console.log(`  ${i + 1}. ${q}`));
-    console.log('');
-  }
-
-  if (b.proposedGoals.length > 0) {
-    console.log(bold('Proposed Goals'));
-    b.proposedGoals.forEach((g, i) => {
-      console.log(`  ${green(`${i + 1}.`)} ${bold(g.objective)}`);
-      if (g.rationale) console.log(`       ${dim(g.rationale)}`);
-      if (g.specPriority) console.log(`       ${dim('serves: ' + g.specPriority)}`);
-      if (g.targetRepo !== undefined) {
-        console.log(`       ${dim('target: ' + (g.targetRepo ?? 'ecosystem-wide (planning only)'))}`);
-      }
-      if (g.key) console.log(`       ${dim('mission node: ' + g.key)}`);
-      if (g.dependsOn?.length) console.log(`       ${dim('depends on: ' + g.dependsOn.join(', '))}`);
-      if (g.deliverable) console.log(`       ${dim('deliverable: ' + g.deliverable)}`);
-      if (g.acceptanceEvidence?.length) {
-        console.log(`       ${dim('acceptance evidence: ' + g.acceptanceEvidence.join(' · '))}`);
-      }
-      if (g.outcome?.desiredOutcome) console.log(`       ${dim('outcome: ' + g.outcome.desiredOutcome)}`);
-      if (g.outcome?.successSignals.length) {
-        console.log(`       ${dim('success signals: ' + g.outcome.successSignals.join(' · '))}`);
-      }
-      if (g.outcome?.guardrails.length) {
-        console.log(`       ${dim('guardrails: ' + g.outcome.guardrails.join(' · '))}`);
-      }
-      if (g.humanGate) console.log(`       ${yellow('human gate required')}`);
-    });
-    console.log('');
-  }
-
-  const hasEvolution = Object.keys(b.proposedEvolution).length > 0;
-  if (hasEvolution) {
-    console.log(bold('Proposed Spec Evolution'));
-    if (b.proposedEvolution.northStar) console.log(`  northStar: ${cyan(b.proposedEvolution.northStar)}`);
-    if (b.proposedEvolution.ambitionLevel !== undefined) console.log(`  ambitionLevel: ${b.proposedEvolution.ambitionLevel}/10`);
-    if (b.proposedEvolution.priorities?.length) console.log(`  priorities: ${b.proposedEvolution.priorities.length} updated`);
-    if (b.proposedEvolution.openProblems?.length) console.log(`  openProblems: ${b.proposedEvolution.openProblems.length} entries`);
-    console.log('');
-    console.log(dim('  Run `ashlr vision approve` to apply this evolution and create the proposed goals.'));
-    console.log('');
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Subcommand handlers
 // ---------------------------------------------------------------------------
@@ -177,22 +108,54 @@ async function cmdShow(args: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * V3.10: `ashlr vision review` is an alias of `ashlr leader tick --wait`.
+ *
+ * WHY: the legacy Strategist (`runStrategist`) resolves the Claude CLI FIRST
+ * and spends from Mason's Max window with no budget gate — the nightly
+ * oversight job ran this command every morning, outside BudgetPolicy. The
+ * Leader tick is the one budget-gated planning path: due class-B actions
+ * apply, due moves are graded, and a Leader run starts ONLY when one is due
+ * (06:30 cadence, merge/revert/seat-reset/insight triggers, at most 3 a day,
+ * skipped when the evidence is unchanged), on a seat the SeatRouter admits
+ * (reserve floors, budget mode, no cloud fallback; a dry run without a
+ * standing grant). `ashlr comms ask-vision` already takes the same path.
+ *
+ * This command therefore never imports strategist.ts. The Strategist's
+ * existing briefings stay readable by preview / shadow / approve / reconcile;
+ * new direction arrives as Leader memos (`ashlr leader show`), whose
+ * goal.create actions carry their own veto window. For an on-demand run use
+ * `ashlr leader run` (same router and daily cap).
+ *
+ * `--project P` is accepted so old scripts keep working, but the Leader
+ * reviews the whole portfolio; we say so instead of silently narrowing.
+ */
 async function cmdReview(args: string[]): Promise<number> {
+  const rest = [...args];
   let project: string | null = null;
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--project' && args[i + 1]) {
-      project = args[i + 1]!;
-      i++;
+  const at = rest.indexOf('--project');
+  if (at !== -1) {
+    const value = rest[at + 1];
+    if (value === undefined || value.startsWith('--')) {
+      console.error('usage: ashlr vision review [--project P]');
+      return 2;
     }
+    project = value;
+    rest.splice(at, 2);
+  }
+  if (rest.length > 0) {
+    console.error('usage: ashlr vision review [--project P]');
+    return 2;
   }
 
-  const cfg = loadConfig();
-  const { runStrategist } = await import('../core/vision/strategist.js');
-
-  console.log(dim('Running strategist... (this may take a moment)'));
-  const briefing = await runStrategist(cfg, { project });
-  printBriefing(briefing);
-  return 0;
+  console.log(dim('`ashlr vision review` runs the Leader tick (same as `ashlr leader tick --wait`): budget-gated, and a run starts only when one is due.'));
+  if (project !== null) {
+    // Control characters stripped: the value is echoed straight to a terminal.
+    const shown = [...project].filter((c) => c >= ' ' && c !== '\u007f').join('').slice(0, 120);
+    console.log(yellow(`--project ${shown}: the Leader reviews the whole portfolio, so this flag is not applied.`));
+  }
+  const { runLeaderCli } = await import('./leader.js');
+  return runLeaderCli(['tick', '--wait']);
 }
 
 async function cmdApprove(_args: string[]): Promise<number> {
@@ -206,7 +169,7 @@ async function cmdApprove(_args: string[]): Promise<number> {
   }
   const briefing = read.briefing;
   if (!briefing) {
-    console.error('vision: no briefing found. Run `ashlr vision review` first.');
+    console.error('vision: no Strategist briefing found. New direction now arrives as Leader memos — see `ashlr leader show`.');
     return 1;
   }
 
@@ -256,7 +219,7 @@ async function cmdReconcile(_args: string[]): Promise<number> {
   }
   const briefing = read.briefing;
   if (!briefing) {
-    console.error('vision: no briefing found. Run `ashlr vision review` first.');
+    console.error('vision: no Strategist briefing found. New direction now arrives as Leader memos — see `ashlr leader show`.');
     return 1;
   }
   const enrollment = policy.readEnrollmentRegistry();
@@ -305,7 +268,7 @@ async function cmdPreview(_args: string[]): Promise<number> {
   }
   const briefing = read.briefing;
   if (!briefing) {
-    console.error('vision: no briefing found. Run `ashlr vision review` first.');
+    console.error('vision: no Strategist briefing found. New direction now arrives as Leader memos — see `ashlr leader show`.');
     return 1;
   }
 
@@ -617,7 +580,7 @@ Usage: ashlr vision <subcommand> [options]
 
 Subcommands:
   show [id]              Print the EndStateSpec (default: ecosystem).
-  review [--project P]   Run the Strategist agent — state, gap, recommendations, proposed goals.
+  review [--project P]   Run the Leader tick (alias of 'ashlr leader tick --wait'; budget-gated).
   preview                Read-only compile: exact targets, dedupe, caps, and skip reasons.
   shadow [--json]        Record an evidence snapshot and show one zero-effect reconcile suggestion.
   approve                Apply the latest briefing: evolve spec + create goals.

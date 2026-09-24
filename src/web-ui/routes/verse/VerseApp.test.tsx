@@ -1,74 +1,64 @@
 /**
- * Shell tests: the rail in both of its widths, the lazily-mounted sections,
- * and the global shortcuts. The chat surface itself is covered in
- * sections/ChatSection.test.tsx — this file only asserts that the shell
- * mounts it and gets out of the way.
+ * The 3.10 workbench shell (unit C1): the rail, keep-alive, the global keys,
+ * the overlays, the badges and the native bridge. The chat surface itself is
+ * C2's (sections/ChatSection.test.tsx); this file only asserts that the shell
+ * mounts it, keeps it alive and gets out of its way.
  */
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from '../../components/primitives/Toast.js';
 import { clearMutationToken, markCheckComplete } from '../../data/auth-store.js';
 import { evictAll } from '../../data/cache.js';
-import { MockEventSource, verseFetch } from './fixtures.test-support.js';
+import { bootstrap, MockEventSource } from './fixtures.test-support.js';
+import { CLAUDE_TIGHT_SEAT, GROK_SEAT, UNREAD_SEAT } from './seat-fixtures.test-support.js';
+import { resetCommandBus } from './shell/command-bus.js';
+import { resetGuard } from './shell/guarded-action.js';
+import { resetResolvedForTest } from './shell/needs-you-actions.js';
+import { activity, approvalNeed, shellFetch, vetoNeed, type ShellFetch } from './shell/shell-fixtures.test-support.js';
+import { refreshActivity, resetActivityForTest } from './shell/useActivity.js';
+import { mockCompactViewport, type ViewportMock } from './shell/viewport.test-support.js';
 import { MissingSection, SECTION_MODULES, VerseApp } from './VerseApp.js';
 import { resetVerseStore } from './verse-store.js';
 import {
+  getVerseUiState,
+  landedModule,
+  RAIL_SECTIONS,
+  reloadVerseUiForTest,
   resetVerseUi,
-  setVersePendingApprovals,
   setVerseRailExpanded,
+  setVerseSection,
   VERSE_SECTIONS,
+  VERSE_UI_STORAGE_KEY,
+  VERSE_UI_STORAGE_KEY_V2,
 } from './verse-ui-store.js';
-
-/** verseFetch's mock is typed loosely; this is the shape we actually delegate to. */
-type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 function mount() {
   return render(<ToastProvider><VerseApp /></ToastProvider>);
 }
 
 /**
- * Resolve every lazily-imported section module BEFORE any test asserts that
- * one of them mounted.
- *
- * WHY THIS HOOK EXISTS — a real order dependence, not a convenience.
- *
- * The shell mounts sections through `React.lazy(sectionLoader(id))`, and
- * `sectionLoader` awaits the `import.meta.glob` importer. The first test to
- * mount the shell therefore pays, inside its own assertion window, the cost
- * of transforming and evaluating a whole section's module graph for the first
- * time in this worker — ChatSection plus everything it pulls in. Testing
- * Library's `findBy*` allows 1000ms for that, and a cold ChatSection does not
- * reliably fit: run this file on its own and the FIRST test times out waiting
- * for the Chats nav, while every test after it passes on the module the first
- * one just warmed.
- *
- * That made the file pass or fail depending on what ran before it. In a full
- * suite some earlier file had usually already imported the section modules,
- * so the race was won and nobody saw it; alone, or after a change to the file
- * order, it was lost. The failure looked like "Chat did not mount", which is
- * a real bug's signature — so the test was not just flaky, it was pointing at
- * the wrong thing.
- *
- * The fix is to establish the precondition the assertions depend on instead
- * of leaving it to whatever ran first. Awaiting the importers here resolves
- * them once, in a hook with its own generous budget, so every `React.lazy` in
- * every test below resolves from an already-evaluated module. The assertions
- * are untouched: the shell must still actually mount ChatSection and render
- * its nav, and if it does not, the test still fails.
- *
- * It walks `SECTION_MODULES` — the shell's own glob result, the same map the
- * registration test below walks — so it cannot warm a different set of
- * modules from the ones the shell will load.
+ * The catalog's ⌘ is "CmdOrCtrl": jsdom reports no platform, so the matcher
+ * runs its non-Mac branch and the modifier is Ctrl (command-catalog.ts).
+ */
+const key = (k: string, mods: Partial<Record<'metaKey' | 'shiftKey' | 'ctrlKey' | 'altKey', boolean>> = {}, code?: string) =>
+  act(() => { fireEvent.keyDown(document, { key: k, code, ctrlKey: true, ...mods }); });
+
+const rail = () => screen.getByRole('navigation', { name: 'Verse sections' });
+const surface = (id: string) => document.querySelector<HTMLElement>(`[data-surface="${id}"]`);
+
+/**
+ * Resolve every lazily-imported section module BEFORE any test asserts one
+ * mounted: a cold ChatSection does not reliably transform inside findBy's
+ * 1 s window when this file runs alone, and a timeout there reads exactly
+ * like "the shell did not mount Chat". Walks the shell's own glob.
  */
 beforeAll(async () => {
   await Promise.all(Object.values(SECTION_MODULES).map((load) => load()));
-  // An explicit budget rather than the default hook timeout: this hook does
-  // module loading, whose cost depends on the machine and on how cold the
-  // transform cache is, and inheriting a default is precisely how the race
-  // above went unnoticed. 30s is far more than the ~2s it takes warm, and it
-  // is a ceiling on setup — not on any assertion.
 }, 30_000);
+
+let net: ShellFetch;
+let viewport: ViewportMock | null = null;
 
 beforeEach(() => {
   window.history.replaceState(null, '', '/verse/');
@@ -76,358 +66,329 @@ beforeEach(() => {
   evictAll();
   resetVerseStore();
   resetVerseUi();
+  resetCommandBus();
+  resetGuard();
+  resetResolvedForTest();
   clearMutationToken();
   MockEventSource.reset();
   vi.stubGlobal('EventSource', MockEventSource);
-  vi.stubGlobal('fetch', verseFetch().fetch);
+  net = shellFetch(
+    activity({
+      needsYou: [approvalNeed('p-1'), vetoNeed()],
+      running: [{ sessionId: 'vs_1', title: 'Fix the login bug', engine: 'claude', seatId: 'claude-main', startedAt: new Date().toISOString(), live: null }],
+    }),
+  );
+  vi.stubGlobal('fetch', net.fetch);
+  resetActivityForTest();
   markCheckComplete(true);
 });
+
 afterEach(() => {
+  viewport?.restore();
+  viewport = null;
   act(() => markCheckComplete(false));
   vi.unstubAllGlobals();
+  resetActivityForTest();
   window.history.replaceState(null, '', '/');
 });
 
-describe('VerseApp shell', () => {
-  it('renders a rail button for every registered section and mounts Chat first', async () => {
+describe('the rail', () => {
+  it('shows the five surfaces in ⌘1–⌘5 order and mounts Chat first', async () => {
     mount();
-    const rail = screen.getByRole('navigation', { name: 'Verse sections' });
-    // Driven off VERSE_SECTIONS, not a hard-coded five: a section added to the
-    // list and given no rail button is the same bug as one with no module.
-    for (const label of VERSE_SECTIONS.map((s) => s.label)) {
-      expect(within(rail).getByRole('button', { name: label })).toBeInTheDocument();
+    const buttons = within(rail()).getAllByRole('button').filter((b) => b.hasAttribute('data-section'));
+    expect(buttons.map((b) => b.getAttribute('data-section'))).toEqual(RAIL_SECTIONS.map((s) => s.id));
+    expect(within(rail()).getByRole('button', { name: /^Chat/ })).toHaveAttribute('aria-current', 'page');
+    await screen.findByRole('navigation', { name: 'Chats' });
+  });
+
+  it('switches with ⌘1–⌘5 — a surface not in this build says so, with no source path', async () => {
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    key('1', {}, 'Digit1');
+    expect(getVerseUiState().section).toBe('command');
+    expect(within(rail()).getByRole('button', { name: /^Command/ })).toHaveAttribute('aria-current', 'page');
+    if (landedModule('command') === null) {
+      expect(await screen.findByText("Command isn't in this build yet")).toBeInTheDocument();
+      expect(surface('command')!.textContent).not.toMatch(/routes\/verse|\.tsx/);
     }
-    expect(within(rail).getByRole('button', { name: 'Chat' })).toHaveAttribute('aria-current', 'page');
-    // The Chat module exists, so it actually mounts (its own nav shows up).
-    await screen.findByRole('navigation', { name: 'Chats' });
+    key('5', {}, 'Digit5');
+    expect(getVerseUiState().section).toBe('chat');
   });
 
-  it('switches sections by click and by ⌘1–⌘5, mounting exactly one at a time', async () => {
-    const user = userEvent.setup();
-    const view = mount();
-    await screen.findByRole('navigation', { name: 'Chats' });
-    const slot = () => view.container.querySelector('[data-section]:not(button)')!;
-
-    await user.click(screen.getByRole('button', { name: 'Autonomy' }));
-    expect(screen.getByRole('button', { name: 'Autonomy' })).toHaveAttribute('aria-current', 'page');
-    expect(slot()).toHaveAttribute('data-section', 'autonomy');
-    // Chat is unmounted, not hidden — a section owns its own polling and streams.
-    expect(screen.queryByRole('navigation', { name: 'Chats' })).not.toBeInTheDocument();
-
-    act(() => { fireEvent.keyDown(document, { key: '4', metaKey: true }); });
-    expect(screen.getByRole('button', { name: 'Usage' })).toHaveAttribute('aria-current', 'page');
-    expect(slot()).toHaveAttribute('data-section', 'usage');
-
-    act(() => { fireEvent.keyDown(document, { key: '1', metaKey: true }); });
-    await screen.findByRole('navigation', { name: 'Chats' });
-  });
-
-  it('gives every section the one <main id="main-content"> the skip link targets', async () => {
-    // Regression: the landmark used to live inside ChatSection, so SkipToContent
-    // (which imperatively focuses #main-content) worked in Chat and silently did
-    // nothing in the other four — a keyboard user was left on <body> with the
-    // whole rail still ahead of them. The shell owns it now.
-    const view = mount();
-    await screen.findByRole('navigation', { name: 'Chats' });
-
-    const sections: Array<[string, string]> = [
-      ['1', 'chat'], ['2', 'autonomy'], ['3', 'approvals'], ['4', 'usage'], ['5', 'settings'],
-    ];
-    for (const [key, id] of sections) {
-      act(() => { fireEvent.keyDown(document, { key, metaKey: true }); });
-      const mains = view.container.querySelectorAll('main');
-      expect(mains, `section ${id} should have exactly one <main>`).toHaveLength(1);
-      const main = mains[0]!;
-      expect(main).toHaveAttribute('id', 'main-content');
-      expect(main).toHaveAttribute('data-section', id);
-      // Focusable, or main?.focus() from SkipToContent is a no-op.
-      expect(main.tabIndex).toBe(-1);
-    }
-  });
-
-  it('resolves EVERY registered section through the shell’s own glob', async () => {
-    // THE REGRESSION THIS PINS. A section is reachable only when it is BOTH in
-    // VERSE_SECTIONS and at `sections/<module>.tsx`, where the shell's
-    // `import.meta.glob` can see it. MCP satisfied neither for a whole release
-    // — a complete component with its own queries, contract, tests and two
-    // live server routes, invisible to the app, and nothing failed to say so.
-    //
-    // This walks SECTION_MODULES, the shell's actual glob result, so changing
-    // the pattern in VerseApp.tsx is covered too — a test carrying its own
-    // copy of the pattern would keep passing through exactly that change.
-    //
-    // Asserted here rather than by mounting each section and looking for
-    // MissingSection: when a lazy child re-suspends, React keeps the PREVIOUS
-    // section mounted (hidden) beside the fallback, so a DOM sweep reads stale
-    // content and passes on nothing. The end-to-end proof that the shell
-    // really mounts MCP is the next test, which fails if this breaks.
+  it('resolves EVERY section through the shell’s own glob — primary or declared fallback', async () => {
+    // A section is reachable only when its module (or a fallback) is at
+    // `sections/<module>.tsx`, where the glob sees it. MCP once shipped
+    // complete and unreachable for a release; this pins the whole table.
     for (const entry of VERSE_SECTIONS) {
-      const key = `./sections/${entry.module}.tsx`;
-      const importer = SECTION_MODULES[key];
-      expect(
-        importer,
-        `VERSE_SECTIONS lists ${entry.id} as ${key}, which the shell's glob cannot see`,
-      ).toBeTypeOf('function');
-
-      // The shell takes `mod[entry.module] ?? mod.default`; a module that
-      // loads but exports neither renders the missing state just the same.
+      const module = landedModule(entry.id);
+      if (module === null) continue; // not landed yet: the designed missing state covers it
+      const importer = SECTION_MODULES[`./sections/${module}.tsx`];
+      expect(importer, `${entry.id} → ${module}`).toBeTypeOf('function');
       const mod = (await importer!()) as Record<string, unknown>;
-      expect(
-        typeof (mod[entry.module] ?? mod.default),
-        `${key} must export a \`${entry.module}\` component`,
-      ).toBe('function');
+      expect(typeof (mod[module] ?? mod.default), `${module} must export a ${module} component`).toBe('function');
+    }
+    // The ones that always exist in this repo.
+    expect(landedModule('chat')).toBe('ChatSection');
+    expect(landedModule('settings')).toBe('SettingsSection');
+  });
+
+  it('renders the missing state directly', () => {
+    render(<MissingSection label="Growth" blurb="Is the fleet getting better?" />);
+    expect(screen.getByRole('status')).toHaveTextContent("Growth isn't in this build yet");
+    expect(screen.getByText('Is the fleet getting better?')).toBeInTheDocument();
+  });
+
+  it('carries the badges in the accessible names — Needs you, running chats, autonomy, capacity', async () => {
+    mount();
+    expect(await within(rail()).findByRole('button', { name: 'Command, 2 need you' })).toBeInTheDocument();
+    expect(within(rail()).getByRole('button', { name: 'Chat, 1 running' }).querySelector('[data-badge="pulse"]')).not.toBeNull();
+    expect(within(rail()).getByRole('button', { name: 'Fleet, Propose · 2 building' }).querySelector('[data-badge="autonomy"]')).not.toBeNull();
+    expect(within(rail()).getByRole('button', { name: 'Needs you, 2' })).toBeInTheDocument();
+  });
+
+  it('rings the scarcest seat from the shared capacity rows (C6), not a second description of it', async () => {
+    // Activity still carries its own capacity badge (62% Claude); the ring
+    // must ignore it and read the seat roster the capacity strip reads.
+    net = shellFetch(activity(), { bootstrap: bootstrap({ seats: [GROK_SEAT, CLAUDE_TIGHT_SEAT, UNREAD_SEAT] }) });
+    vi.stubGlobal('fetch', net.fetch);
+    const user = userEvent.setup();
+    mount();
+    const ring = await within(rail()).findByRole('button', { name: /^Capacity — Claude Max: .*92% used/ });
+    expect(ring).toHaveAttribute('data-capacity', '92');
+    expect(within(rail()).queryByRole('button', { name: /62% used/ })).not.toBeInTheDocument();
+    await user.click(ring);
+    expect(getVerseUiState().section).toBe('apps');
+  });
+
+  it('draws no ring when no seat has a reading — an empty ring would claim headroom nobody measured', async () => {
+    net = shellFetch(activity(), { bootstrap: bootstrap({ seats: [UNREAD_SEAT] }) });
+    vi.stubGlobal('fetch', net.fetch);
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    expect(within(rail()).queryByRole('button', { name: /^Capacity/ })).not.toBeInTheDocument();
+  });
+
+  it('draws no badge at all when activity is not in this build — never a false zero', async () => {
+    net.setActivity(404);
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    await waitFor(() => expect(within(rail()).getByRole('button', { name: 'Needs you' })).toBeInTheDocument());
+    expect(within(rail()).getByRole('button', { name: 'Command' })).toBeInTheDocument();
+    expect(rail().querySelector('[data-badge]')).toBeNull();
+  });
+
+  it('⌘⇧\\ toggles rail labels, and the choice persists in v3', async () => {
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    key('|', { shiftKey: true }, 'Backslash');
+    expect(rail()).toHaveAttribute('data-rail', 'expanded');
+    expect(within(rail()).getByRole('button', { name: /^Fleet/ })).toHaveTextContent('Fleet');
+    expect(JSON.parse(localStorage.getItem(VERSE_UI_STORAGE_KEY) ?? '{}')).toMatchObject({ railExpanded: true });
+  });
+
+  it('keeps the desktop drag strip as the rail’s first child in both widths', async () => {
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    for (const state of ['collapsed', 'expanded'] as const) {
+      act(() => setVerseRailExpanded(state === 'expanded'));
+      const strip = rail().querySelector('[data-app-region="drag"]');
+      expect(rail().firstElementChild, state).toBe(strip);
+      expect(strip).toHaveAttribute('aria-hidden', 'true');
     }
   });
 
-  it('reaches the MCP section by rail button and by ⌘6, with its real panel', async () => {
-    // Positive proof, not just "not missing": the heading below is rendered by
-    // sections/McpSection.tsx itself, so seeing it means the glob resolved the
-    // real module rather than the designed placeholder.
-    const user = userEvent.setup();
-    mount();
-    await screen.findByRole('navigation', { name: 'Chats' });
-
-    const rail = screen.getByRole('navigation', { name: 'Verse sections' });
-    await user.click(within(rail).getByRole('button', { name: 'MCP' }));
-    expect(await screen.findByRole('heading', { name: 'MCP and CLI' })).toBeInTheDocument();
-    expect(within(rail).getByRole('button', { name: 'MCP' })).toHaveAttribute('aria-current', 'page');
-
-    act(() => { fireEvent.keyDown(document, { key: '1', metaKey: true }); });
-    await screen.findByRole('navigation', { name: 'Chats' });
-    act(() => { fireEvent.keyDown(document, { key: '6', metaKey: true }); });
-    expect(await screen.findByRole('heading', { name: 'MCP and CLI' })).toBeInTheDocument();
-
-    // ⌘5 still means Settings — the new section extended the scheme rather
-    // than renumbering the five bindings people already have.
-    act(() => { fireEvent.keyDown(document, { key: '5', metaKey: true }); });
-    expect(within(rail).getByRole('button', { name: 'Settings' })).toHaveAttribute('aria-current', 'page');
-  });
-
-  it('explains a rail slot whose module has not landed instead of going blank', () => {
-    // Rendered directly: which sections exist changes as the other owners land
-    // theirs, so the state is tested on its own rather than through whichever
-    // module happens to be missing today.
-    render(<MissingSection label="Settings" moduleName="SettingsSection" detail="boom" />);
-    expect(screen.getByRole('status')).toHaveTextContent('Settings is not wired up yet');
-    expect(screen.getByText('routes/verse/sections/SettingsSection.tsx')).toBeInTheDocument();
-    expect(screen.getByText('boom')).toBeInTheDocument();
-  });
-
-  it('⌘, opens Settings and the active section survives a remount (ashlr.verse.ui.v2)', async () => {
+  it('becomes a bottom bar with labels at 375', async () => {
+    viewport = mockCompactViewport({ dark: true });
     const view = mount();
     await screen.findByRole('navigation', { name: 'Chats' });
-    act(() => { fireEvent.keyDown(document, { key: ',', metaKey: true }); });
-    expect(screen.getByRole('button', { name: 'Settings' })).toHaveAttribute('aria-current', 'page');
-    expect(JSON.parse(localStorage.getItem('ashlr.verse.ui.v2') ?? '{}')).toMatchObject({ section: 'settings' });
-
-    view.unmount();
-    mount();
-    expect(screen.getByRole('button', { name: 'Settings' })).toHaveAttribute('aria-current', 'page');
-  });
-
-  it('⌘N and ⌘K come back to Chat and reach the chat surface', async () => {
-    mount();
-    await screen.findByRole('navigation', { name: 'Chats' });
-    act(() => { fireEvent.keyDown(document, { key: '5', metaKey: true }); });
-    expect(screen.getByRole('button', { name: 'Settings' })).toHaveAttribute('aria-current', 'page');
-
-    act(() => { fireEvent.keyDown(document, { key: 'n', metaKey: true }); });
-    expect(await screen.findByRole('dialog', { name: 'New chat' })).toBeInTheDocument();
-
-    act(() => { fireEvent.keyDown(document, { key: 'k', metaKey: true }); });
-    expect(await screen.findByRole('dialog', { name: 'Switch chat' })).toBeInTheDocument();
-  });
-
-  it('publishes the pending-approval count from the shell, so the badge is right on any section', async () => {
-    // The badge exists to be seen while you are NOT in Approvals, so the
-    // count cannot come from ApprovalsSection's own mount. The shell reads
-    // /api/inbox itself, through the same QueryDef the section uses.
-    const base = verseFetch().fetch as unknown as FetchLike;
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const path = typeof input === 'string' ? input : input.toString();
-      if (path.startsWith('/api/inbox')) {
-        return new Response(JSON.stringify({ pending: 4, items: [] }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        });
-      }
-      return base(input, init);
-    }));
-
-    mount();
-
-    // Still on Chat — the badge is published anyway.
-    const rail = screen.getByRole('navigation', { name: 'Verse sections' });
-    expect(within(rail).getByRole('button', { name: 'Chat' })).toHaveAttribute('aria-current', 'page');
-    const flagged = await screen.findByRole('button', { name: 'Approvals, 4 pending' });
-    expect(flagged.querySelector('[data-pending="4"]')).not.toBeNull();
-  });
-
-  it('leaves the badge alone when the inbox read fails, rather than flashing a false all-clear', async () => {
-    act(() => setVersePendingApprovals(2));
-    const base = verseFetch().fetch as unknown as FetchLike;
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const path = typeof input === 'string' ? input : input.toString();
-      if (path.startsWith('/api/inbox')) return new Response('nope', { status: 500 });
-      return base(input, init);
-    }));
-
-    mount();
-    await screen.findByRole('navigation', { name: 'Chats' });
-
-    // A failed count must not be reported as zero pending.
-    expect(screen.getByRole('button', { name: 'Approvals, 2 pending' })).toBeInTheDocument();
-  });
-
-  it('shows a dot on Approvals only while a section reports pending items', async () => {
-    mount();
-    await screen.findByRole('navigation', { name: 'Chats' });
-    expect(screen.getByRole('button', { name: 'Approvals' })).toBeInTheDocument();
-
-    act(() => setVersePendingApprovals(3));
-    const flagged = screen.getByRole('button', { name: 'Approvals, 3 pending' });
-    expect(flagged.querySelector('[data-pending="3"]')).not.toBeNull();
-
-    act(() => setVersePendingApprovals(0));
-    expect(screen.getByRole('button', { name: 'Approvals' }).querySelector('[data-pending]')).toBeNull();
+    expect(view.container.firstElementChild).toHaveAttribute('data-compact', 'true');
+    expect(within(rail()).getByRole('button', { name: /^Command/ })).toHaveTextContent('Command');
+    expect(within(rail()).getByRole('button', { name: 'Settings and more' })).toHaveTextContent('More');
   });
 });
 
-describe('VerseApp rail', () => {
-  // The rail's job is navigation, and it has two ways of doing it. Collapsed,
-  // the name of each section lives in a tooltip; expanded, it is on screen.
-  // Exactly one of those is true at a time — a visible label with a bubble
-  // repeating it is noise, and an icon with neither is a guess.
-
-  it('starts collapsed: icons, no labels, and a Tooltip carrying name + ⌘-digit', async () => {
+describe('keep-alive', () => {
+  it('keeps a left surface mounted — hidden and inert — and brings back the very same DOM', async () => {
     const user = userEvent.setup();
     mount();
     await screen.findByRole('navigation', { name: 'Chats' });
-    const rail = screen.getByRole('navigation', { name: 'Verse sections' });
-    const usage = within(rail).getByRole('button', { name: 'Usage' });
+    const chatBefore = surface('chat')!.firstElementChild;
+    const search = within(surface('chat')!).queryByRole('searchbox') ?? within(surface('chat')!).queryByRole('textbox');
+    if (search) await user.type(search, 'login');
 
-    // No visible label text — the glyph is the whole control.
-    expect(usage).toHaveTextContent('');
-    // And crucially NOT the native tooltip. `title=` is what rendered as an
-    // unstyled grey box that overlapped the sidebar and got clipped.
-    expect(usage).not.toHaveAttribute('title');
-    expect(rail.querySelectorAll('[title]')).toHaveLength(0);
+    key(',', {}, 'Comma');
+    expect(getVerseUiState().section).toBe('settings');
+    expect(await screen.findByRole('heading', { name: 'Appearance' })).toBeInTheDocument();
+    const chat = surface('chat')!;
+    expect(chat).toHaveAttribute('hidden');
+    expect(chat.hasAttribute('inert')).toBe(true);
+    expect(surface('settings')).not.toHaveAttribute('hidden');
 
-    await user.hover(usage);
-    const tip = await screen.findByRole('tooltip');
-    expect(tip).toHaveTextContent('Usage');
-    expect(tip).toHaveTextContent('⌘4');
-    expect(usage).toHaveAttribute('aria-describedby', tip.id);
-    // Portalled out of the rail, which is the point: the rail is a flex column
-    // in a grid shell, so a bubble rendered inside it is cut off at its edge.
-    expect(rail).not.toContainElement(tip);
+    key('5', {}, 'Digit5');
+    expect(surface('chat')).not.toHaveAttribute('hidden');
+    expect(surface('chat')!.firstElementChild).toBe(chatBefore);
+    if (search) expect(search).toHaveValue('login');
+    // The one <main> the skip link targets holds every mounted surface.
+    expect(document.querySelectorAll('main')).toHaveLength(1);
+    expect(document.querySelector('main')).toHaveAttribute('id', 'main-content');
+  });
+});
+
+describe('overlays and keys', () => {
+  it('⌘K opens the palette WITHOUT switching surface', async () => {
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    key(',', {}, 'Comma');
+    key('k', {}, 'KeyK');
+    expect(await screen.findByRole('combobox', { name: 'Search commands' })).toHaveFocus();
+    expect(getVerseUiState().section).toBe('settings');
   });
 
-  it('expanded, shows every section label and suppresses the now-redundant tooltips', async () => {
+  it('⌘J toggles the Needs-you drawer; ⌘/ shows every key from the catalog', async () => {
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    key('j', {}, 'KeyJ');
+    expect(await screen.findByRole('dialog', { name: /Needs you/ })).toBeInTheDocument();
+    key('j', {}, 'KeyJ');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /Needs you/ })).not.toBeInTheDocument());
+
+    key('/', {}, 'Slash');
+    const overlay = await screen.findByRole('dialog', { name: 'Keyboard shortcuts' });
+    expect(within(overlay).getByText('Go to Command')).toBeInTheDocument();
+    expect(within(overlay).getByText('Approve')).toBeInTheDocument();
+    key('/', {}, 'Slash');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Keyboard shortcuts' })).not.toBeInTheDocument());
+  });
+
+  it('⌘[ and ⌘] step back and forward through surfaces', async () => {
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    key(',', {}, 'Comma');
+    key('2', {}, 'Digit2');
+    key('[', {}, 'BracketLeft');
+    expect(getVerseUiState().section).toBe('settings');
+    key('[', {}, 'BracketLeft');
+    expect(getVerseUiState().section).toBe('chat');
+    key(']', {}, 'BracketRight');
+    expect(getVerseUiState().section).toBe('settings');
+  });
+
+  it('the gear tray is a real menu: arrows move, Enter chooses', async () => {
     const user = userEvent.setup();
     mount();
     await screen.findByRole('navigation', { name: 'Chats' });
-    const rail = screen.getByRole('navigation', { name: 'Verse sections' });
-
-    await user.click(within(rail).getByRole('button', { name: 'Expand rail' }));
-
-    for (const entry of VERSE_SECTIONS) {
-      const button = within(rail).getByRole('button', { name: entry.label });
-      // The label is now ON the control, not in a bubble over it.
-      expect(button).toHaveTextContent(entry.label);
-    }
-
-    await user.hover(within(rail).getByRole('button', { name: 'Usage' }));
-    // Deliberately not `findByRole`: we are asserting nothing appears, and the
-    // open delay has to be allowed to elapse before that means anything.
-    await new Promise((resolve) => setTimeout(resolve, 350));
-    expect(screen.queryByRole('tooltip')).toBeNull();
+    await user.click(within(rail()).getByRole('button', { name: 'Settings and more' }));
+    const menu = await screen.findByRole('menu', { name: 'Settings and more' });
+    await waitFor(() => expect(within(menu).getByRole('menuitem', { name: /Settings/ })).toHaveFocus());
+    expect(within(menu).getByRole('menuitemradio', { name: 'Match system' })).toBeInTheDocument();
+    await user.keyboard('{ArrowDown}');
+    await user.keyboard('{ArrowDown}');
+    expect(within(menu).getByRole('menuitem', { name: /Usage/ })).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(getVerseUiState().section).toBe('usage');
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 
-  it('keeps the accessible name, aria-current and the pending dot across both widths', async () => {
-    const user = userEvent.setup();
+  it('marks every key it routes as taken (preventDefault), and leaves other keys alone', async () => {
     mount();
     await screen.findByRole('navigation', { name: 'Chats' });
-    const rail = () => screen.getByRole('navigation', { name: 'Verse sections' });
-
-    act(() => setVersePendingApprovals(3));
-    for (const state of ['collapsed', 'expanded'] as const) {
-      if (state === 'expanded') {
-        await user.click(within(rail()).getByRole('button', { name: 'Expand rail' }));
-      }
-      // The count rides the accessible NAME in both states, so it is announced
-      // rather than being a dot only sighted users get.
-      const approvals = within(rail()).getByRole('button', { name: 'Approvals, 3 pending' });
-      expect(approvals.querySelector('[data-pending="3"]'), state).not.toBeNull();
-      expect(within(rail()).getByRole('button', { name: 'Chat' }), state)
-        .toHaveAttribute('aria-current', 'page');
-    }
+    const routed = new KeyboardEvent('keydown', { key: '1', code: 'Digit1', ctrlKey: true, bubbles: true, cancelable: true });
+    act(() => { document.dispatchEvent(routed); });
+    expect(routed.defaultPrevented).toBe(true);
+    expect(getVerseUiState().section).toBe('command');
+    const plain = new KeyboardEvent('keydown', { key: 'x', code: 'KeyX', bubbles: true, cancelable: true });
+    act(() => { document.dispatchEvent(plain); });
+    expect(plain.defaultPrevented).toBe(false);
+    // A key someone downstream already took is never run twice.
+    const taken = new KeyboardEvent('keydown', { key: '5', code: 'Digit5', ctrlKey: true, bubbles: true, cancelable: true });
+    taken.preventDefault();
+    act(() => { document.dispatchEvent(taken); });
+    expect(getVerseUiState().section).toBe('command');
   });
 
-  it('⌘1–⌘6 still switch sections while the rail is expanded', async () => {
-    const user = userEvent.setup();
-    const view = mount();
-    await screen.findByRole('navigation', { name: 'Chats' });
-    const rail = screen.getByRole('navigation', { name: 'Verse sections' });
-    await user.click(within(rail).getByRole('button', { name: 'Expand rail' }));
-
-    const slot = () => view.container.querySelector('[data-section]:not(button)')!;
-    act(() => { fireEvent.keyDown(document, { key: '4', metaKey: true }); });
-    expect(slot()).toHaveAttribute('data-section', 'usage');
-    act(() => { fireEvent.keyDown(document, { key: '6', metaKey: true }); });
-    expect(slot()).toHaveAttribute('data-section', 'mcp');
-    act(() => { fireEvent.keyDown(document, { key: '1', metaKey: true }); });
-    await screen.findByRole('navigation', { name: 'Chats' });
-  });
-
-  it('⌘\\ toggles the rail, and the choice survives a remount', async () => {
-    const view = mount();
-    await screen.findByRole('navigation', { name: 'Chats' });
-    const rail = () => screen.getByRole('navigation', { name: 'Verse sections' });
-    expect(within(rail()).getByRole('button', { name: 'Expand rail' }))
-      .toHaveAttribute('aria-expanded', 'false');
-
-    act(() => { fireEvent.keyDown(document, { key: '\\', metaKey: true }); });
-    expect(within(rail()).getByRole('button', { name: 'Collapse rail' }))
-      .toHaveAttribute('aria-expanded', 'true');
-    // Same key, same storage path as every other layout preference.
-    expect(JSON.parse(localStorage.getItem('ashlr.verse.ui.v2') ?? '{}'))
-      .toMatchObject({ railExpanded: true });
-
-    view.unmount();
+  it('global keys stand down while a dialog the shell did not open is up', async () => {
     mount();
-    expect(within(rail()).getByRole('button', { name: 'Collapse rail' })).toBeInTheDocument();
-    expect(within(rail()).getByRole('button', { name: 'Chat' })).toHaveTextContent('Chat');
+    await screen.findByRole('navigation', { name: 'Chats' });
+    key('n', {}, 'KeyN');
+    expect(await screen.findByRole('dialog', { name: 'New chat' })).toBeInTheDocument();
+    key('2', {}, 'Digit2');
+    expect(getVerseUiState().section).toBe('chat');
+  });
+});
+
+describe('announcements and the native bridge', () => {
+  it('announces "Chat moved to ⌘5" once after a v2 migration', async () => {
+    localStorage.setItem(VERSE_UI_STORAGE_KEY_V2, JSON.stringify({ section: 'chat' }));
+    reloadVerseUiForTest({ landed: (m) => m === 'ChatSection' });
+    mount();
+    // ⌘5 on a Mac; jsdom has no platform, so the catalog prints Ctrl+5.
+    expect(await screen.findByText(/Chat moved to (⌘5|Ctrl\+5)/)).toBeInTheDocument();
+    expect(getVerseUiState().announceChatMoved).toBe(false);
   });
 
-  it('keeps the desktop drag strip and the traffic-light clearance in BOTH widths', async () => {
-    // THE REGRESSION THIS PINS. `--app-titlebar-height` is 0px in a browser and
-    // 48px in the Tauri window, where the OS paints the traffic lights over the
-    // rail's top-left corner. The rail clears that strip in CSS and this span
-    // makes the cleared space drag the window. The user has already been bitten
-    // once by traffic lights sitting on top of the UI; a rail that grows a
-    // second layout must not drop either half of the contract.
-    // See desktop/README.md → "Desktop shell contract".
-    const view = mount();
+  it('toasts a chat that finished while you were elsewhere', async () => {
+    let polls = 0;
+    net.setActivity(() => {
+      polls += 1;
+      return activity(polls > 1 ? { cursor: 'v1.aaaaaaaa.t.2', completions: [{ sessionId: 'vs_2', title: 'Write the docs', outcome: 'ok', at: new Date().toISOString(), durationMs: null }] } : {});
+    });
+    mount();
     await screen.findByRole('navigation', { name: 'Chats' });
+    await waitFor(() => expect(polls).toBeGreaterThanOrEqual(1));
+    await act(async () => { await refreshActivity(); });
+    expect(await screen.findByText('Finished: Write the docs')).toBeInTheDocument();
+  });
 
-    for (const state of ['collapsed', 'expanded'] as const) {
-      act(() => setVerseRailExpanded(state === 'expanded'));
-      const rail = screen.getByRole('navigation', { name: 'Verse sections' });
-      expect(rail, state).toHaveAttribute('data-rail', state);
+  it('runs native commands: Needs you, and opening a notified chat', async () => {
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    act(() => { window.dispatchEvent(new CustomEvent('ashlr:desktop-command', { detail: { command: 'open-needs-you' } })); });
+    expect(await screen.findByRole('dialog', { name: /Needs you/ })).toBeInTheDocument();
+    act(() => { window.dispatchEvent(new CustomEvent('ashlr:desktop-command', { detail: { command: 'open-session:vs_2' } })); });
+    await waitFor(() => expect(getVerseUiState().overlay).toBeNull());
+    expect(getVerseUiState()).toMatchObject({ section: 'chat', activeSessionId: 'vs_2' });
+    // Unknown commands are inert.
+    act(() => { window.dispatchEvent(new CustomEvent('ashlr:desktop-command', { detail: { command: 'rm -rf' } })); });
+    expect(getVerseUiState().section).toBe('chat');
+  });
 
-      const strip = rail.querySelector('[data-app-region="drag"]');
-      expect(strip, `${state}: the rail must keep its drag region`).not.toBeNull();
-      // It must be the rail's OWN first child, above every control, or it stops
-      // covering the corner the traffic lights are painted over.
-      expect(rail.firstElementChild, state).toBe(strip);
-      expect(strip, state).toHaveAttribute('aria-hidden', 'true');
+  it('the tray’s New chat and the hotkey land in Chat, closing an open palette first (C8)', async () => {
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    key(',', {}, 'Comma');
+    key('k', {}, 'KeyK');
+    expect(await screen.findByRole('combobox', { name: 'Search commands' })).toBeInTheDocument();
+    act(() => { window.dispatchEvent(new CustomEvent('ashlr:desktop-command', { detail: { command: 'new-chat' } })); });
+    expect(getVerseUiState().section).toBe('chat');
+    expect(await screen.findByRole('dialog', { name: 'New chat' })).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: 'Search commands' })).not.toBeInTheDocument();
+    await userEvent.setup().keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'New chat' })).not.toBeInTheDocument());
 
-      // The shell carries the state as a data attribute because the expanded
-      // width is applied by re-declaring --rail-width on it — the same token
-      // five other stylesheets subtract from --app-traffic-light-inset.
-      expect(view.container.querySelector('[data-rail]'), state)
-        .toHaveAttribute('data-rail', state);
-    }
+    key(',', {}, 'Comma');
+    key('/', {}, 'Slash');
+    expect(getVerseUiState().overlay).toBe('shortcuts');
+    act(() => { window.dispatchEvent(new CustomEvent('ashlr:desktop-command', { detail: { command: 'focus-composer' } })); });
+    expect(getVerseUiState()).toMatchObject({ section: 'chat', overlay: null });
+    // The chat consumed the one-shot hand-off.
+    await waitFor(() => expect(getVerseUiState().command).toBeNull());
+  });
+
+  it('reveals an anchor on the surface it names once that surface paints', async () => {
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    const scrolled = vi.fn();
+    act(() => { setVerseSection('settings', 'about'); });
+    // The settings surface is a lazy chunk: the anchor appears after the event.
+    const host = await waitFor(() => {
+      const el = surface('settings');
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    const target = document.createElement('div');
+    target.setAttribute('data-verse-anchor', 'about');
+    target.scrollIntoView = scrolled;
+    act(() => { host.appendChild(target); });
+    await waitFor(() => expect(scrolled).toHaveBeenCalledTimes(1));
   });
 });

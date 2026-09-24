@@ -121,6 +121,14 @@ export interface OvernightStatus {
   run: OvernightRun | null;
   /** How many enrolled repos the run works through. `null` = not reported. */
   repos: number | null;
+  /**
+   * The standing fleet's mirror clones (~/.ashlr/fleet/mirrors/…) the run
+   * works in, counted APART from `repos` — a mirror is a clone of a repo, not
+   * another repo, so the two never add (core/daemon/overnight-status.ts).
+   * `null` = the server did not record it for this run; ABSENT (`undefined`)
+   * = a server that predates the field, which the panel says nothing about.
+   */
+  mirrors?: number | null;
   gate: OvernightGate | null;
 }
 

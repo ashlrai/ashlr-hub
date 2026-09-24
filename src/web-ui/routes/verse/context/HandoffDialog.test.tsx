@@ -58,7 +58,7 @@ vi.mock('../verse-queries.js', async (importOriginal) => {
   return { ...actual, ...turns };
 });
 
-const { HandoffDialog, turnOutcome } = await import('./HandoffDialog.js');
+const { HandoffDialog, initialHandoffTarget, turnOutcome } = await import('./HandoffDialog.js');
 
 const SOURCE = contextSession();
 
@@ -292,6 +292,60 @@ describe('where it continues', () => {
     await waitFor(() => expect(handoffBox().value).toContain('Goal'));
     await user.selectOptions(screen.getByLabelText('Continue on'), JSON.stringify(['grok-a', 'grok-4.7']));
     expect(screen.getByText(/it will reach only the primary folder/)).toBeInTheDocument();
+  });
+});
+
+/**
+ * "Continue on ‹seat›" in the composer opens this dialog already pointed at
+ * the seat the operator named (Workspace passes `initialTarget`). Opening on
+ * "same seat" instead would make them pick again — or worse, create on the
+ * seat they just said not to use.
+ */
+describe('initialTarget — the seat "Continue on" named', () => {
+  it('opens on the named seat and model, and creates there', async () => {
+    const user = userEvent.setup();
+    const onCreated = vi.fn();
+    render(<HandoffDialog session={SOURCE} seats={SEATS} open onClose={() => {}} onCreated={onCreated}
+      initialTarget={{ seatId: CODEX_SEAT.id, model: CODEX_SEAT.models[0]!.id }} />);
+    await waitFor(() => expect(handoffBox().value).toContain('Goal'));
+    expect(JSON.parse((screen.getByLabelText('Continue on') as HTMLSelectElement).value)).toEqual([CODEX_SEAT.id, CODEX_SEAT.models[0]!.id]);
+    await user.click(screen.getByRole('button', { name: 'Create chat' }));
+    await waitFor(() => expect(queries.createHandoffSession).toHaveBeenCalled());
+    expect(queries.createHandoffSession.mock.calls[0]![0]).toMatchObject({ seatId: CODEX_SEAT.id, model: CODEX_SEAT.models[0]!.id });
+  });
+
+  it('a later pick inside the dialog wins over the prop (read once per open)', async () => {
+    const user = userEvent.setup();
+    const initial = { seatId: CODEX_SEAT.id, model: CODEX_SEAT.models[0]!.id };
+    const { rerender } = render(<HandoffDialog session={SOURCE} seats={SEATS} open onClose={() => {}} onCreated={() => {}} initialTarget={initial} />);
+    await waitFor(() => expect(handoffBox().value).toContain('Goal'));
+    const pick = [LOCAL_SEAT.id, LOCAL_SEAT.models[0]!.id];
+    await user.selectOptions(screen.getByLabelText('Continue on') as HTMLSelectElement, JSON.stringify(pick));
+    rerender(<HandoffDialog session={SOURCE} seats={[...SEATS]} open onClose={() => {}} onCreated={() => {}} initialTarget={{ ...initial }} />);
+    expect(JSON.parse((screen.getByLabelText('Continue on') as HTMLSelectElement).value)).toEqual(pick);
+  });
+
+  it('waits for a cold roster, then fills in the NAMED seat rather than the default', async () => {
+    const initial = { seatId: CODEX_SEAT.id, model: CODEX_SEAT.models[0]!.id };
+    const { rerender } = render(<HandoffDialog session={SOURCE} seats={[]} open onClose={() => {}} onCreated={() => {}} initialTarget={initial} />);
+    rerender(<HandoffDialog session={SOURCE} seats={SEATS} open onClose={() => {}} onCreated={() => {}} initialTarget={initial} />);
+    await waitFor(() => expect(JSON.parse((screen.getByLabelText('Continue on') as HTMLSelectElement).value)).toEqual([CODEX_SEAT.id, CODEX_SEAT.models[0]!.id]));
+  });
+
+  it('resolves a stale choice honestly', () => {
+    const source = { seatId: CLAUDE_SEAT.id, model: 'claude-fable-5-1' };
+    // No prop → the ordinary default.
+    expect(initialHandoffTarget(SEATS, source, undefined)).toEqual({ seatId: 'claude-a', model: 'claude-fable-5-1' });
+    // Cold roster → nothing yet (the effect retries).
+    expect(initialHandoffTarget([], source, { seatId: CODEX_SEAT.id, model: 'x' })).toBeNull();
+    // A seat that left the roster → the ordinary default, not an empty picker.
+    expect(initialHandoffTarget(SEATS, source, { seatId: 'gone', model: 'x' })).toEqual({ seatId: 'claude-a', model: 'claude-fable-5-1' });
+    // A model the seat no longer lists → the seat's first runnable model: the SEAT was the choice.
+    expect(initialHandoffTarget(SEATS, source, { seatId: CODEX_SEAT.id, model: 'renamed-away' }))
+      .toEqual({ seatId: CODEX_SEAT.id, model: CODEX_SEAT.models.find((m) => !m.unavailableReason)!.id });
+    // Nothing on the seat runs → keep the named model so the dialog can say why; never a different seat unasked.
+    const dead = { ...CODEX_SEAT, models: CODEX_SEAT.models.map((m) => ({ ...m, unavailableReason: 'needs a newer CLI' })) };
+    expect(initialHandoffTarget([CLAUDE_SEAT, dead], source, { seatId: dead.id, model: 'renamed-away' })).toEqual({ seatId: dead.id, model: 'renamed-away' });
   });
 });
 

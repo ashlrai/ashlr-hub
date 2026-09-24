@@ -1,0 +1,78 @@
+/* The ⚙ menu: a raised list beside the rail foot (above the bottom bar on a phone). */
+
+.menu {
+  position: fixed;
+  z-index: var(--z-dropdown);
+  min-width: 232px;
+  padding: var(--space-1);
+  background: var(--bg-surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-menu);
+  animation: pop var(--duration-fast) var(--ease-decelerate);
+}
+.menu[data-compact] { right: var(--space-2); }
+
+.item {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--space-2);
+  width: 100%;
+  min-height: var(--control-h);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  text-align: left;
+}
+.item:hover,
+.item:focus-visible { background: var(--bg-hover); outline: none; box-shadow: none; }
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+}
+
+.check {
+  width: 6px;
+  height: 10px;
+  margin-top: -2px;
+  border: solid var(--accent-500);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.key {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size);
+  color: var(--text-tertiary);
+}
+
+.separator {
+  margin: var(--space-1) var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.groupLabel {
+  display: block;
+  padding-top: var(--space-2);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+@keyframes pop { from { opacity: 0; transform: translateY(2px); } }
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .menu { animation: none; }
+}
+:root[data-motion='reduce'] .menu { animation: none; }

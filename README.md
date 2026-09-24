@@ -135,7 +135,7 @@ Most AI coding tools are request-response: you ask, the model answers. Ashlr's s
 
 ```
 End-State Spec (your vision)
-  → Elon Strategist (decomposes spec into strategic goals)
+  → Leader (budget-gated planning tick: memos, goals, vetoable actions)
     → Goals + milestone planner (concrete ordered work)
       → Fleet supervisor (24/7 dispatch to enrolled repos)
         → Backend router (routes each item to the right engine by tier)
@@ -336,16 +336,27 @@ ashlr goal "add one regression test" --project /tmp/ashlr-disposable/repo --dire
 `ashlr goal` rejects unknown, duplicate, missing-value, and conflicting options
 instead of silently ignoring them; this is an intentional fail-fast contract.
 
-The strategist and vision commands let you define the high-level direction:
+The Leader and vision commands let you define and steer the high-level direction:
 
 ```sh
+ashlr leader show         # latest Leader memo, its actions and hit-rate
+ashlr leader tick         # apply due class-B actions, grade moves, run only if due
+ashlr leader veto <id>    # undo one action (or --memo <id> for a whole memo)
 ashlr vision show         # current end-state spec
-ashlr vision review       # strategist → persisted strategic briefing
+ashlr vision review       # alias of `ashlr leader tick --wait` (no Strategist, no briefing)
 ashlr vision preview      # read-only exact targets, dependencies, and holds
 ashlr vision shadow       # authenticated receipt + zero-effect suggestion
 ashlr vision approve      # explicit planning adoption: evolve spec + goals
 ashlr vision reconcile    # create at most one dependency-ready goal
 ```
+
+In 3.10 `ashlr vision review` no longer runs the legacy Strategist, which went
+to the Claude CLI first with no budget gate. It runs the Leader tick, which
+starts a run only when one is due and only on a seat the budget mode admits.
+Preview, shadow, approve and reconcile still read the latest briefing already
+on disk. The nightly job that ran the old review is replaced by the plist that
+`ashlr leader oversight-plist --print` prints; you install it by hand
+([Authority](docs/AUTHORITY.md), "Nightly oversight").
 
 See the [Mission OS operator guide](docs/MISSION-OS.md) for exact effects,
 receipt privacy, Cortex/Locus boundaries, JSON output, and troubleshooting.

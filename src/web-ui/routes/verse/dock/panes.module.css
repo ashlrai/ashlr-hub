@@ -1,0 +1,171 @@
+/**
+ * dock/panes.module.css — the dock's own panes (Tasks, Context). Section
+ * grammar matches the rest of the chat surface: micro-label headings, 16px
+ * padding, hairline separators. Tokens only (style-scan-310).
+ */
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding-bottom: var(--space-6);
+}
+
+.section { padding: var(--space-4) var(--card-pad, var(--space-4)) 0; }
+.section + .section {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+.sectionTitle {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.count {
+  font-variant-numeric: tabular-nums;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-secondary);
+}
+.muted {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+.muted + .action,
+.action + .muted { margin-top: var(--space-2); }
+
+.action {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-h-sm);
+  margin-top: var(--space-2);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-sm-size);
+  cursor: pointer;
+}
+.action:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong); }
+.action:disabled { color: var(--text-disabled); cursor: not-allowed; }
+.action:focus-visible,
+.link:focus-visible,
+.task:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+
+.link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-link);
+  font: inherit;
+  font-size: var(--text-sm-size);
+  cursor: pointer;
+}
+.link:hover { text-decoration: underline; }
+
+/* ---- tasks ---------------------------------------------------------------- */
+.taskList {
+  display: flex;
+  flex-direction: column;
+  margin: 0 calc(-1 * var(--space-2));
+  padding: 0;
+  list-style: none;
+}
+.task {
+  display: grid;
+  grid-template-columns: minmax(12px, auto) auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--density-row-sm);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-sm-size);
+  text-align: left;
+  cursor: pointer;
+}
+.task:hover { background: var(--bg-hover); }
+.taskMark {
+  justify-self: center;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+}
+.taskMark[data-status='running'] {
+  background: var(--status-running-solid);
+  animation: pane-pulse var(--duration-pulse) ease-in-out infinite;
+}
+.taskMark[data-status='failed'] { border-radius: 1px; background: var(--status-danger-solid); }
+.taskName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 18ch;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  color: var(--text-secondary);
+}
+.taskDetail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+.task:hover .taskDetail { color: var(--text-secondary); }
+.taskTime {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.task[data-status='failed'] .taskTime { color: var(--status-danger-fg); }
+
+/* Engine identity: a 2px tick + monogram (SPEC-310C §6), never a logo. */
+.engineTick {
+  justify-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-secondary);
+}
+.engineTick::before {
+  content: '';
+  width: 2px;
+  height: 10px;
+  border-radius: 1px;
+  background: var(--text-tertiary);
+}
+.engineTick[data-engine='claude']::before { background: var(--engine-claude); }
+.engineTick[data-engine='codex']::before { background: var(--engine-codex); }
+.engineTick[data-engine='grok']::before { background: var(--engine-grok); }
+.engineTick[data-engine='local']::before { background: var(--engine-local); }
+
+@keyframes pane-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .taskMark { animation: none; }
+}
+:root[data-motion='reduce'] .taskMark { animation: none; }

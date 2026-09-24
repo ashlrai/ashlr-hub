@@ -18,6 +18,14 @@
  *
  * METADATA ONLY — proposals carry titles + rationale grounded in metrics; never
  * secret values, never raw payloads.
+ *
+ * V3.10 (U9): `harnessHypothesesFromTuning` turns the recurring-failure
+ * suggestions into typed HarnessHypothesis records — DATA, returned to the
+ * caller, still applying nothing. The only road from a hypothesis to a
+ * harness in force is learn/experiments.ts (a paired, held-out experiment)
+ * and then the adoption gate + canary in learn/harness-registry.ts. That is
+ * the difference from a tuning note: a note asks a human to judge a
+ * heuristic; a hypothesis is judged by a measurement.
  */
 
 import type {
@@ -26,6 +34,9 @@ import type {
   TuningProposal,
 } from '../types.js';
 import { createProposal } from '../inbox/store.js';
+import type { HarnessHypothesis, HarnessRole } from './harness-types.js';
+import { createHash } from 'node:crypto';
+import { scrubSecrets } from '../util/scrub.js';
 
 // ---------------------------------------------------------------------------
 // Bounds
@@ -232,5 +243,88 @@ export function emitTuningProposals(suggestions: TuningProposal[]): Proposal[] {
     return created;
   } catch {
     return created;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// V3.10 (U9): recurring failures -> testable harness hypotheses (pure)
+// ---------------------------------------------------------------------------
+
+/** At most this many hypotheses per reflection (the Leader's own memo cap is 3 too). */
+const MAX_TUNING_HYPOTHESES = 3;
+
+/** Longest failure label quoted into a prompt overlay. */
+const MAX_LABEL_CHARS = 120;
+
+/** The prompt-overlay byte cap a harness enforces (HARNESS_CONFIG_BOUNDS.maxPromptBytes). */
+const MAX_OVERLAY_BYTES = 4096;
+
+/**
+ * The lift a tuning hypothesis TARGETS on the held-out pass rate, in
+ * percentage points. The reflection heuristics carry no effect-size estimate,
+ * so this is the bar the experiment must clear to be worth adopting — not a
+ * forecast — and the statement says so.
+ */
+export const TUNING_HYPOTHESIS_TARGET_LIFT_PP = 10;
+
+/**
+ * Turn recurring-failure suggestions (area 'playbook', key
+ * `playbook.failure.*`) into prompt hypotheses for the producer role: a fixed,
+ * reviewed instruction that names the failure and requires the agent to
+ * re-run the task's own check before claiming success. Pure: no I/O, no model.
+ *
+ * `basePrompts` is the ACTIVE harness's prompt overlays. A patch replaces the
+ * whole `prompts` field, so the other roles' overlays are carried over and the
+ * producer overlay is extended, never silently dropped. A suggestion whose
+ * overlay would exceed the harness cap is skipped rather than truncated
+ * (a truncated instruction is not the one that would be tested).
+ *
+ * Other suggestion areas have no config-only, locally testable form yet
+ * (routing moves through the Leader's bounded router.tune; retry caps and
+ * budget flags are policy), so they produce nothing here.
+ */
+export function harnessHypothesesFromTuning(
+  suggestions: readonly TuningProposal[],
+  basePrompts: Readonly<Partial<Record<HarnessRole, string>>> = {},
+  now: Date = new Date(),
+): HarnessHypothesis[] {
+  const out: HarnessHypothesis[] = [];
+  try {
+    for (const s of suggestions ?? []) {
+      if (out.length >= MAX_TUNING_HYPOTHESES) break;
+      if (s.area !== 'playbook' || !s.key.startsWith('playbook.failure.')) continue;
+      const label = scrubSecrets(String(s.title).replace(/^Add a playbook for recurring failure:\s*/i, ''))
+        // eslint-disable-next-line no-control-regex -- stripping control characters is the point
+        .replace(/[\u0000-\u001f\u007f"`]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, MAX_LABEL_CHARS);
+      if (label.length === 0) continue;
+      const instruction =
+        `A failure that keeps recurring in this fleet: "${label}". Before you report the task as done, `
+        + 'run the check the task or project provides (its tests or the command it names) and confirm that '
+        + 'failure did not happen. If you cannot confirm it, say so plainly instead of claiming success.';
+      const existing = basePrompts.producer ?? '';
+      const producer = existing.length > 0 ? `${existing}\n\n${instruction}` : instruction;
+      if (Buffer.byteLength(producer, 'utf8') > MAX_OVERLAY_BYTES) continue;
+      const id = `tuning-${createHash('sha256').update(`${s.key}\0${label}`, 'utf8').digest('hex').slice(0, 16)}`;
+      out.push({
+        v: 1,
+        id,
+        source: { kind: 'insight', ref: s.key.slice(0, 128) },
+        target: 'prompt',
+        patch: { prompts: { ...basePrompts, producer } },
+        statement:
+          `Naming the recurring failure "${label}" in the producer prompt and requiring a re-check before `
+          + `claiming success raises the held-out pass rate (target: +${TUNING_HYPOTHESIS_TARGET_LIFT_PP} pp; `
+          + 'the reflection heuristic gives no effect-size estimate).',
+        metric: 'local-eval.heldout.pass-rate',
+        predictedDelta: TUNING_HYPOTHESIS_TARGET_LIFT_PP,
+        createdAt: now.toISOString(),
+      });
+    }
+    return out;
+  } catch {
+    return out;
   }
 }

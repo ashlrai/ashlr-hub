@@ -59,6 +59,7 @@ import type {
   RunEventSummary,
   RunProposalOutcome,
   SkillCard,
+  TuningProposal,
   WorkItem,
 } from '../types.js';
 import { resolveAutonomyControlMode, type FleetStatus } from '../fleet/status.js';
@@ -69,6 +70,7 @@ import {
   setKill,
   canonicalEnrollmentPath,
   recoverEnrollmentRegistry,
+  withEnrollmentScope,
 } from '../sandbox/policy.js';
 import {
   acquireOutwardMutationFence,
@@ -110,6 +112,7 @@ import {
 // contract (test/h4.proposal-only.test.ts 1.9) is untouched.
 import {
   recordPostMergeHalt,
+  resolvePostMergeHaltMode,
   runPostMergeGate,
   snapshotEnrolledHeads,
   type PostMergeGateResult,
@@ -118,11 +121,30 @@ import {
 // M-WINDOW: the engine half of GET /api/verse/overnight. A durable status
 // record the route reads; this file never imports a web module.
 import {
+  adoptOvernightRun,
   armOvernightRun,
   concludeOvernightRun,
+  pendingOvernightRun,
   recordOvernightActivity,
   recordOvernightIteration,
+  recordOvernightLedgerRows,
+  refuseOvernightRun,
 } from './overnight-status.js';
+// V3.10 Track B (U5): the tick seams. DEFAULT_TICK_HOOKS reproduce master's
+// tick exactly; a standing session installs fleet/tick-hooks-live.ts (loaded
+// lazily in runDaemon, so a run without a grant never loads it).
+import { DEFAULT_TICK_HOOKS, type BeforeTickResult, type TickHooks } from './tick-hooks.js';
+// Type-only: erased at compile time — loop.ts takes NO static edge into the
+// authority modules the live hooks import (tests mock activation-permit
+// partially; a static edge would break their module graph).
+import type { LiveTickHooks, StandingRun } from '../fleet/tick-hooks-live.js';
+import type { AutonomousBestOfNPlan } from '../run/best-of-n-policy.js';
+import type { DispatchOutcome } from '../fleet/fleet-types.js';
+import type { DaemonCapabilityKind } from '../authority/types.js';
+// Pure (routing + local-only policy only): which fleet lane a backend is.
+import { fleetLaneOf, routingRequestFor } from '../fleet/dispatch-router.js';
+import { routeSeat } from '../routing/router.js';
+import { engineOfSeatId } from '../routing/policy.js';
 // Type-only: erased at compile time, so this does NOT eagerly load
 // self-improve.js/post-merge-credit.js at module init (those are still
 // reached only via the lazy `await import(...)` calls in
@@ -168,7 +190,6 @@ import {
   generatedRepairCandidateAllowed,
   generatedRepairExecutionBackendAllowed,
   inspectGeneratedRepairRouteFeasibility,
-  routeBackend,
   type GeneratedRepairRouteFeasibility,
   type GeneratedRepairRouteReason,
 } from '../fleet/router.js';
@@ -181,7 +202,11 @@ import {
 } from '../fleet/quota.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import { resolveEngineSpec } from '../run/engine-registry.js';
-import { subscriptionAllows, isSubscriptionEngine } from '../fleet/subscription-usage.js'; // M80
+// The one authority for "does this engine run on this machine" (pool tiering).
+import { engineLocality } from '../policy/local-only.js';
+// M80. The window check itself is reached through hooks.seatAllows
+// (DEFAULT_TICK_HOOKS delegates to subscriptionAllows with the same arguments).
+import { isSubscriptionEngine } from '../fleet/subscription-usage.js';
 import { recommendRoute, recoverWithinBudget } from '../run/learned-router.js';
 import { decide as gatewayDecide } from '../fabric/gateway.js'; // M247: InferenceGateway
 import {
@@ -193,7 +218,7 @@ import {
 import { getResourceSnapshot } from '../fabric/resource-monitor.js'; // M255
 import { estimateRun } from '../observability/estimate.js';
 import { buildForecast } from '../observability/forecast.js';
-import { emitTuningProposals } from '../learn/tuning.js';
+import { emitTuningProposals, harnessHypothesesFromTuning } from '../learn/tuning.js';
 import { runAutoMergePass, type AutoMergePassResult } from '../fleet/automerge-pass.js';
 import {
   beginRejectedCaptureRecoveryDispatch,
@@ -1096,6 +1121,14 @@ const KILL_SWITCH_POLL_MS = 50;
  * twenty-lstat-per-second spin on the sentinel.
  */
 const DAEMON_PAUSE_PARK_MS = 1_000;
+/**
+ * V3.10 (U5): how long a resident standing loop parks when its tick
+ * capability cannot be minted (switch off, Stop, revoke, grant paused or
+ * expired, broken ledger). Longer than the pause park on purpose: each mint
+ * re-verifies the whole grant, and nothing can be minted until a person acts.
+ * KILL and SIGTERM still wake the park at once.
+ */
+const STANDING_WITHDRAWN_PARK_MS = 30_000;
 const pendingDaemonTickEffects = new WeakMap<DaemonTick, Set<Promise<void>>>();
 const durableAgentOsObserverTicks = new WeakSet<object>();
 
@@ -1163,7 +1196,106 @@ interface TickOptions {
   /** Resident ownership fence for asynchronous state callbacks. */
   ownerLock?: DaemonLock;
   onOwnershipLost?: () => void;
+  /**
+   * V3.10 (U5): the tick seams (daemon/tick-hooks.ts). Absent = DEFAULT_TICK_HOOKS,
+   * which reproduce master's tick exactly. runDaemon passes the live hooks only
+   * together with a `resident-standing` capability.
+   */
+  hooks?: TickHooks;
 }
+
+/**
+ * V3.10 (U7): the live hooks' best-of-N plan for an item a standing tick
+ * already routed; null when the hooks have none (default hooks, no context).
+ * Read structurally so loop.ts keeps no static edge to the live hooks module.
+ */
+function standingBestOfNPlan(hooks: TickHooks, item: WorkItem, maxPercent: number): AutonomousBestOfNPlan | null {
+  const live = hooks as Partial<Pick<LiveTickHooks, 'bestOfNPlan'>>;
+  if (typeof live.bestOfNPlan !== 'function') return null;
+  try {
+    return live.bestOfNPlan(item, { maxPercent });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * V3.10 (B-U9): append the active harness's producer prompt overlay to a
+ * standing dispatch's goal. The overlay is prose the harness registry
+ * validated (≤ 4 KB, scrubbed, diff markers refused) and only Mason or a
+ * vetoable Leader action adopts it. No overlay (baseline, default hooks) ⇒
+ * the goal is returned unchanged.
+ */
+export function withHarnessProducerPrompt(goal: string, hooks: TickHooks): string {
+  const live = hooks as Partial<Pick<LiveTickHooks, 'dispatchHarness'>>;
+  if (typeof live.dispatchHarness !== 'function') return goal;
+  let harness: ReturnType<LiveTickHooks['dispatchHarness']> = null;
+  try {
+    harness = live.dispatchHarness();
+  } catch {
+    return goal;
+  }
+  if (!harness?.producerPrompt) return goal;
+  return `${goal}\n\n## Fleet harness guidance (${harness.versionId ?? 'baseline'})\n${harness.producerPrompt.trim()}`;
+}
+
+/**
+ * V3.10 (B-U9): turn tuning suggestions into OPEN harness hypotheses next to
+ * their emission (`recordHypotheses(harnessHypothesesFromTuning(...))`). Pure
+ * derivation first — nothing is imported or written unless a hypothesis
+ * exists; recording never applies anything (experiments and adoption are
+ * separate, gated steps). Fire-and-forget: never fails or delays the tick.
+ */
+function recordTuningHypothesesInBackground(suggestions: TuningProposal[]): void {
+  void (async () => {
+    try {
+      const registry = await import('../learn/harness-registry.js');
+      const hypotheses = harnessHypothesesFromTuning(suggestions, registry.activeHarnessConfig().prompts);
+      if (hypotheses.length > 0) registry.recordHypotheses(hypotheses);
+    } catch { /* observation only */ }
+  })();
+}
+
+/** Seat-router shadows in flight (bounded: a slow disk must not pile them up). */
+let seatShadowInFlight = 0;
+const SEAT_SHADOW_MAX_IN_FLIGHT = 2;
+
+/**
+ * V3.10 (A9): log what A9's SeatRouter would have chosen for an item master's
+ * path is about to dispatch — the shadow log that lets routing move to the
+ * SeatRouter on evidence. Same decision function and log as budget-api's
+ * `routeSeatShadow`, over the PUBLISHED capacity snapshot rather than a live
+ * seat probe: the daemon must not walk Ollama and the CLIs per dispatch, and
+ * pulling budget-api's seat discovery into the daemon's import closure would
+ * make it Tier-1 code. No snapshot ⇒ no shadow (nothing honest to compare).
+ * `foundry.seatRouterShadow: false` turns it off. Never throws, never awaited.
+ */
+function shadowSeatRouteBeside(cfg: AshlrConfig, item: WorkItem, backend: string): void {
+  if ((cfg.foundry as Record<string, unknown> | undefined)?.['seatRouterShadow'] === false) return;
+  if (seatShadowInFlight >= SEAT_SHADOW_MAX_IN_FLIGHT) return;
+  seatShadowInFlight += 1;
+  void (async () => {
+    try {
+      const store = await import('../routing/budget-store.js');
+      const snapshot = store.readCapacitySnapshot();
+      if (!snapshot) return;
+      const request = routingRequestFor(item);
+      const decision = routeSeat(request, snapshot.seats, store.loadBudgetPolicy(), { nowMs: Date.now() });
+      store.recordShadowDecision({ source: 'daemon', request, decision, actual: { engine: backend, seatId: null } });
+    } catch {
+      // observation only
+    } finally {
+      seatShadowInFlight -= 1;
+    }
+  })();
+}
+
+/** What `beforeTick` imposes when nothing does (the default hooks' answer). */
+const NO_TICK_CONSTRAINTS: BeforeTickResult = Object.freeze({
+  pausedRepos: Object.freeze([]) as readonly string[],
+  laneCaps: Object.freeze({}),
+  holdProduction: null,
+});
 interface DaemonRunOptions extends TickOptions {
   once: boolean;
   maxCycles?: number;
@@ -3302,6 +3434,45 @@ function recordDispatchStartAgentAction(
   });
 }
 
+/**
+ * V3.10 (U5): why the standing tick capped the local lane, for the local
+ * fleet snapshot — the live hooks' own sentence (presence, Leader, grant)
+ * when they expose their tick state, else a plain statement of the fact.
+ */
+function localLaneCapReason(hooks: TickHooks): string {
+  const live = hooks as TickHooks & Partial<Pick<LiveTickHooks, 'lastTickState'>>;
+  try {
+    const lane = live.lastTickState?.()?.lanes.find((l) => l.lane === 'local');
+    if (lane?.capReason) return lane.capReason;
+  } catch {
+    // The reason is decoration; the cap itself still applies.
+  }
+  return 'the standing tick caps the local lane';
+}
+
+/**
+ * V3.10 (U5): the TickHooks.afterDispatch payload for one item outcome. The
+ * lane is computed only for a standing tick (`laneCfg` non-null).
+ */
+function dispatchOutcomeOf(value: TickItemOutcome, at: string, laneCfg: AshlrConfig | null): DispatchOutcome {
+  const trace = value.dispatch;
+  const backend = trace?.backend ?? null;
+  return {
+    itemId: value.item.id,
+    repoPath: value.item.repo,
+    backend: backend ?? '',
+    model: trace?.model ?? null,
+    seatId: null,
+    lane: laneCfg && backend ? fleetLaneOf(backend, laneCfg) : null,
+    dispatched: value.dispatched,
+    skipReason: value.dispatched ? null : trace?.skipReason ?? trace?.reason ?? null,
+    runId: trace?.runId ?? null,
+    proposalId: trace?.production?.proposalId ?? null,
+    spentUsd: Number.isFinite(value.spentUsd) ? value.spentUsd : 0,
+    at,
+  };
+}
+
 function dispatchesFromOutcomes(outcomes: PromiseSettledResult<TickItemOutcome>[]): DaemonDispatchTrace[] | undefined {
   const dispatches = outcomes.flatMap((outcome) =>
     outcome.status === 'fulfilled' && outcome.value.dispatch ? [outcome.value.dispatch] : [],
@@ -3436,13 +3607,31 @@ function poolTierOf(engineTier: import('../types.js').EngineTier): 'local' | 'cl
  * runtime would then hold up to `concurrency.cloud ?? 6` turns open, two of
  * them queueing inside llama-server with no signal.
  *
+ * BUT LOCAL MEANS BOTH: an id in LOCAL_ONLY_BACKENDS is only a claim about
+ * the DEFAULT registry entry. `cfg.foundry.engines` may re-point any of those
+ * ids at a cloud endpoint or promote it to `tier: 'frontier'`, and
+ * `opencode` is registered `tier: 'local'` while it reaches a vendor. Taking
+ * the id's word let frontier / cloud turns escape `concurrency.cloud`
+ * entirely — m201 B2: four frontier items ran at once under a cloud cap of 1.
+ * The cloud cap is the brake on paid and subscription concurrency, so the
+ * rule is fail-toward-cloud: a backend draws from the LOCAL pool only when it
+ * is not frontier-tier AND policy/local-only.ts classifies it as running on
+ * this machine. Misfiling a local engine as cloud costs throughput; misfiling
+ * a cloud engine as local spends windows past the cap.
+ *
  * Exported so a future tier change to the engine registry cannot silently
- * unbind the ceiling again without a test noticing.
+ * unbind either ceiling without a test noticing.
  */
 export function poolTierForBackend(
   backend: EngineId,
   engineTier: import('../types.js').EngineTier,
+  cfg?: AshlrConfig,
 ): 'local' | 'cloud' {
+  // A frontier-tier engine is a subscription frontier model by definition.
+  if (engineTier === 'frontier') return 'cloud';
+  // Locality is policy/local-only.ts's call (the one authority for "does this
+  // run on this machine"): an id re-pointed at a remote endpoint is cloud.
+  if (engineLocality(backend, cfg) === 'cloud') return 'cloud';
   return LOCAL_ONLY_BACKENDS.has(backend) ? 'local' : poolTierOf(engineTier);
 }
 
@@ -3481,31 +3670,49 @@ class TieredPool {
   private readonly _totalCap: number;
   private _localInFlight = 0;
   private _cloudInFlight = 0;
+  // V3.10 (U5): per-LANE caps from a standing tick's beforeTick (local 4 / 2
+  // while Mason is present, grok-cli 2, …). Empty for every other tick, which
+  // leaves the pool exactly as it was. A cap below 1 is clamped to 1 like the
+  // tier caps (a zero-slot lane's items are held by the router instead — a
+  // zero cap here could never start and would stall tieredBounded).
+  private readonly _laneCaps: ReadonlyMap<string, number>;
+  private readonly _laneInFlight = new Map<string, number>();
 
-  constructor(opts: { local: number; cloud: number; total: number }) {
+  constructor(opts: { local: number; cloud: number; total: number; laneCaps?: Readonly<Partial<Record<string, number>>> }) {
     this._localCap = Math.max(1, opts.local);
     this._cloudCap = Math.max(1, opts.cloud);
     this._totalCap = Math.max(1, opts.total);
+    const lanes = new Map<string, number>();
+    for (const [lane, cap] of Object.entries(opts.laneCaps ?? {})) {
+      if (typeof cap === 'number' && Number.isFinite(cap)) lanes.set(lane, Math.max(1, Math.floor(cap)));
+    }
+    this._laneCaps = lanes;
   }
 
   get totalInFlight(): number { return this._localInFlight + this._cloudInFlight; }
   get localInFlight(): number { return this._localInFlight; }
   get cloudInFlight(): number { return this._cloudInFlight; }
 
-  canStart(tier: 'local' | 'cloud'): boolean {
+  canStart(tier: 'local' | 'cloud', lane: string | null = null): boolean {
     if (this.totalInFlight >= this._totalCap) return false;
+    if (lane !== null) {
+      const cap = this._laneCaps.get(lane);
+      if (cap !== undefined && (this._laneInFlight.get(lane) ?? 0) >= cap) return false;
+    }
     if (tier === 'local') return this._localInFlight < this._localCap;
     return this._cloudInFlight < this._cloudCap;
   }
 
-  start(tier: 'local' | 'cloud'): void {
+  start(tier: 'local' | 'cloud', lane: string | null = null): void {
     if (tier === 'local') this._localInFlight++;
     else this._cloudInFlight++;
+    if (lane !== null) this._laneInFlight.set(lane, (this._laneInFlight.get(lane) ?? 0) + 1);
   }
 
-  finish(tier: 'local' | 'cloud'): void {
+  finish(tier: 'local' | 'cloud', lane: string | null = null): void {
     if (tier === 'local') this._localInFlight = Math.max(0, this._localInFlight - 1);
     else this._cloudInFlight = Math.max(0, this._cloudInFlight - 1);
+    if (lane !== null) this._laneInFlight.set(lane, Math.max(0, (this._laneInFlight.get(lane) ?? 0) - 1));
   }
 }
 
@@ -3551,7 +3758,7 @@ async function bounded<T>(
  * via the microtask queue, avoiding any lost-wake races.
  */
 async function tieredBounded<T>(
-  tasks: Array<{ tier: 'local' | 'cloud'; run: () => Promise<T> }>,
+  tasks: Array<{ tier: 'local' | 'cloud'; lane?: string | null; run: () => Promise<T> }>,
   pool: TieredPool,
 ): Promise<PromiseSettledResult<T>[]> {
   if (tasks.length === 0) return [];
@@ -3567,21 +3774,22 @@ async function tieredBounded<T>(
         const idx = nextIdx;
         const task = tasks[idx];
         if (task === undefined) break;
-        if (!pool.canStart(task.tier)) break; // pool full for this tier or total
+        const lane = task.lane ?? null;
+        if (!pool.canStart(task.tier, lane)) break; // pool full for this tier, lane or total
         nextIdx++;
-        pool.start(task.tier);
+        pool.start(task.tier, lane);
         const tier = task.tier;
         task.run().then(
           (value) => {
             results[idx] = { status: 'fulfilled', value };
-            pool.finish(tier);
+            pool.finish(tier, lane);
             completed++;
             if (completed === tasks.length) resolve(results);
             else drain(); // slot freed — try to start more
           },
           (reason) => {
             results[idx] = { status: 'rejected', reason };
-            pool.finish(tier);
+            pool.finish(tier, lane);
             completed++;
             if (completed === tasks.length) resolve(results);
             else drain();
@@ -3675,8 +3883,19 @@ export async function tick(
       reason: 'activation-refused',
     };
   }
+  // V3.10 (U5) capability-kind split. A `resident-standing` capability (minted
+  // per tick under a standing grant, authority/capability.ts) runs the full
+  // resident tick; EVERY other accepted capability stays proposal-only — fail
+  // safe for any kind this file does not know. Read through a string so the
+  // comparison compiles before and after DaemonActivationCapability['kind'] widens.
+  const capabilityKind: string | null = activationAccepted ? opts.activationCapability?.kind ?? null : null;
+  const standingTick = capabilityKind === 'resident-standing';
   const proposalOnlyActivation =
-    activationAccepted && opts.activationCapability !== undefined;
+    activationAccepted && opts.activationCapability !== undefined && !standingTick;
+  const hooks: TickHooks = opts.hooks ?? DEFAULT_TICK_HOOKS;
+  // Filled by hooks.beforeTick once the tick knows its state; the default hooks
+  // impose nothing, so every read below is a no-op on master's path.
+  let tickConstraints: BeforeTickResult = NO_TICK_CONSTRAINTS;
   let ownershipLost = false;
   const stillOwnsTick = (): boolean => {
     if (!opts.ownerLock) return true;
@@ -3713,7 +3932,10 @@ export async function tick(
   // before each tick and passes the fresh cfg in here), so on-disk daemon tuning
   // (budget/parallel/interval/cooldown) still takes effect without a restart
   // WITHOUT this function clobbering an explicitly-supplied cfg.
-  const liveCfg = applyProductionVelocityProfile(cfg);
+  // hooks.effectiveConfig is applied LAST so a standing overlay's tightening
+  // (claim integrity, confinement, clamped caps, the standing router) wins
+  // over the velocity profile. Default hooks: identity.
+  const liveCfg = hooks.effectiveConfig(applyProductionVelocityProfile(cfg));
   const dcfg = resolveCfg(liveCfg);
   let routingCfg = liveCfg;
   let directionPlan: ResourceStrategyDaemonPlan | null = null;
@@ -3858,7 +4080,12 @@ export async function tick(
     if (!ownershipAlreadyFenced && opts.ownerLock && !fence) return null;
     try {
       if (!stillOwnsTick()) return null;
-      const result = await runAutoMergePass(liveCfg);
+      // V3.10 (U3): the pass needs the tick's capability kind — a
+      // `resident-standing` tick takes ONLY the standing gates and never falls
+      // back to the legacy path (fail closed when the policy is unreadable).
+      const result = await runAutoMergePass(liveCfg, {
+        capabilityKind: capabilityKind as DaemonCapabilityKind | null,
+      });
       return stillOwnsTick() ? result : null;
     } catch (err) {
       console.warn('[ashlr] daemon:tick runAutoMergePass failed:', (err as Error)?.message ?? err);
@@ -4487,6 +4714,22 @@ export async function tick(
       }
     }
   };
+  /**
+   * V3.10 (U5): what beforeTick decided about THIS tick's backlog. A standing
+   * tick merges the fleet's own task queue (Leader dispatches, repairs,
+   * insights) into the scanned backlog; any tick drops repos beforeTick paused
+   * (holds, backpressure, outside the grant). Default hooks: identity.
+   */
+  const applyTickConstraints = (items: WorkItem[]): WorkItem[] => {
+    let out = items;
+    if (standingTick) {
+      const standingHooks = hooks as TickHooks & Partial<Pick<LiveTickHooks, 'standingBacklog'>>;
+      if (typeof standingHooks.standingBacklog === 'function') out = standingHooks.standingBacklog(out);
+    }
+    if (tickConstraints.pausedRepos.length === 0) return out;
+    const paused = new Set(tickConstraints.pausedRepos.map((path) => resolve(path)));
+    return out.filter((item) => !paused.has(resolve(item.repo)));
+  };
   const refreshBacklogForTick = async (): Promise<WorkItem[]> => {
     if (stopRequested()) return [];
     try {
@@ -4496,7 +4739,7 @@ export async function tick(
       const resolution = resolveDiagnosticResliceParents(backlog.items);
       diagnosticResliceParentsResolved = resolution.resolved;
       diagnosticResliceParentsMissing = resolution.missing;
-      return filterGeneratedRepairDispatch(resolution.dispatchable);
+      return applyTickConstraints(filterGeneratedRepairDispatch(resolution.dispatchable));
     } catch (err) {
       // buildBacklog never throws by contract; extra guard
       console.warn('[ashlr] daemon:tick buildBacklog guard caught:', (err as Error)?.message ?? err);
@@ -4567,6 +4810,29 @@ export async function tick(
   const initialSave = saveTickState(state);
   if (!initialSave.ok) {
     return persistenceRefusal(`tick refused: failed to persist daemon state before dispatch (${initialSave.error})`, 'error');
+  }
+
+  // V3.10 (U5): beforeTick — once per tick, BEFORE the budget check, so a
+  // standing tick advances its post-merge watch (a red merge is reverted)
+  // even on a day whose metered budget is spent. A hook that throws fails
+  // CLOSED: nothing new is produced this tick. Default hooks: no constraints.
+  try {
+    tickConstraints = await hooks.beforeTick({
+      nowMs: Date.now(),
+      cfg: liveCfg,
+      dryRun: opts.dryRun,
+      capabilityKind: capabilityKind as DaemonCapabilityKind | null,
+    });
+  } catch (err) {
+    tickConstraints = {
+      pausedRepos: [],
+      laneCaps: {},
+      holdProduction: `tick hooks failed before the tick (${boundedText(err instanceof Error ? err.message : String(err), 160)})`,
+    };
+  }
+  // Live hooks can take as long as a post-merge suite run: re-prove ownership.
+  if (hooks !== DEFAULT_TICK_HOOKS && !stillOwnsTick()) {
+    return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
   }
 
   const budgetDayPessimisticallyExhausted =
@@ -4697,6 +4963,42 @@ export async function tick(
   if (!directionPlan) {
     runRemoteHandoffReconciliation();
     remoteHandoff = remoteHandoffTickSummary(remoteHandoffReconcileResult);
+  }
+
+  // -------------------------------------------------------------------------
+  // 4b. V3.10 (U5): a production hold from beforeTick (backpressure, an
+  //     unreadable ledger / inbox / budget, a post-merge watch that could not
+  //     run). Nothing new is produced; verification and landing still run so
+  //     the queue drains — the same shape as a direction that disallows
+  //     dispatch above. Default hooks never hold.
+  // -------------------------------------------------------------------------
+  if (tickConstraints.holdProduction !== null) {
+    const autoMergePassResult = await runAutoMergeMaintenancePass();
+    const autoMerge = autoMergeTickSummary(autoMergePassResult);
+    const merged = autoMergePassResult?.merged ?? 0;
+    if (!stillOwnsTick()) {
+      return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
+    }
+    saveTickState(state);
+    audit({
+      action: 'daemon:tick',
+      repo: null,
+      sandboxId: null,
+      summary: `tick production held: ${tickConstraints.holdProduction}${merged > 0 ? `; auto-merged ${merged} proposal(s)` : ''}`,
+      result: 'ok',
+    });
+    return recordTick({
+      ts: now,
+      itemsConsidered: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'production-held',
+      directionReason: boundedText(tickConstraints.holdProduction, 220),
+      ...(directionMode ? { directionMode } : {}),
+      ...(autoMerge ? { autoMerge } : {}),
+      ...(remoteHandoff ? { remoteHandoff } : {}),
+      ...(merged > 0 ? { merged } : {}),
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -5067,7 +5369,8 @@ export async function tick(
     : [];
   const autoDrainEligibleItems = autoDrainAvailableItems.filter(isClaimEligible);
   const diagnosticRoute = (item: WorkItem): { backend: EngineId; tier: EngineTier | null } => {
-    const routed = routeBackend(item, routingCfg);
+    // V3.10 (U5) seam: hooks.route (default: routeBackend, same arguments).
+    const routed = hooks.route(item, routingCfg);
     let backend = enforceLocalBackend(routed.backend, directionPlan);
     const retryPolicy = effectiveGeneratedRepairRetryPolicy(item);
     if (retryPolicy.available && retryPolicy.requireAlternative &&
@@ -5725,12 +6028,22 @@ export async function tick(
   if (localFleet.enabled) {
     const capacity = await resolveServingCapacity(routingCfg, localFleet);
     fleetMonitor.setCapacity(capacity);
+    // V3.10 (U5 → U6): a standing tick's cap on the local lane (2 while Mason
+    // is present, a Leader decision, the grant) is folded in so the snapshot
+    // names the bound the dispatcher will actually use. Only a lane the hooks
+    // capped; master's path passes nothing.
+    const localLaneCap = tickConstraints.laneCaps.local;
     fleetConcurrency = deriveLocalFleetConcurrency(
       capacity,
       // null (not 2) when the operator configured nothing, so the runtime's own
       // slot count — not a stale default — becomes the parallelism.
       typeof liveCfg.daemon?.concurrency?.local === 'number' ? liveCfg.daemon.concurrency.local : null,
-      { fenceSerialized: FENCE_SERIALIZED_ENGINES.has(localFleet.engine) },
+      {
+        fenceSerialized: FENCE_SERIALIZED_ENGINES.has(localFleet.engine),
+        ...(typeof localLaneCap === 'number'
+          ? { laneCap: { limit: localLaneCap, reason: localLaneCapReason(hooks) } }
+          : {}),
+      },
     );
     fleetMonitor.setConcurrency(fleetConcurrency);
     const allowance = localFleetDispatchAllowed(localFleet);
@@ -5785,6 +6098,8 @@ export async function tick(
   // 'serving-slots', and 50% utilisation forever with nothing explaining it.
   const localCap = resolveLocalPoolCap(fleetConcurrency, baseLocalCap);
   const tierPool = new TieredPool({
+    // V3.10 (U5): the standing tick's lane caps; {} on master's path.
+    laneCaps: tickConstraints.laneCaps,
     local: localCap,
     // Arming the local fleet must not SILENTLY widen the cloud ceiling. A batch
     // daemon with `parallel: 2` and no concurrency block now takes the tiered
@@ -5802,8 +6117,12 @@ export async function tick(
   // tieredBounded dispatcher knows which slot to request. The planned backend
   // and model are kept alongside so an in-flight agent can say what it is
   // running on without re-routing.
+  // V3.10 (U5): per-lane caps from a standing tick's beforeTick; empty (and
+  // no lane computed) on every other tick.
+  const laneCapsActive = Object.keys(tickConstraints.laneCaps).length > 0;
   const itemRoutePlans = workedSet.map((item) => {
-    const routed = routeBackend(item, routingCfg);
+    // V3.10 (U5) seam: hooks.route (default: routeBackend, same arguments).
+    const routed = hooks.route(item, routingCfg);
     let backend = routed.backend;
     if (backend !== 'builtin' && !withinLimit(backend, routingCfg)) backend = 'builtin';
     const engineTier = engineTierOf(backend, routingCfg);
@@ -5815,8 +6134,9 @@ export async function tick(
     // daemon would hold up to `concurrency.cloud ?? 6` llama-server turns open,
     // two of them queueing inside llama-server with no signal: precisely the
     // invisible queue the whole derivation exists to prevent.
-    const tier: 'local' | 'cloud' = poolTierForBackend(backend, engineTier);
-    return { backend, model: routed.model ?? null, tier };
+    const tier: 'local' | 'cloud' = poolTierForBackend(backend, engineTier, routingCfg);
+    const lane: string | null = laneCapsActive ? fleetLaneOf(backend, routingCfg) : null;
+    return { backend, model: routed.model ?? null, tier, lane };
   });
   const itemTiers: Array<'local' | 'cloud'> = itemRoutePlans.map((plan) => plan.tier);
 
@@ -6095,7 +6415,7 @@ export async function tick(
     }
   };
 
-  const tasks: Array<{ tier: 'local' | 'cloud'; run: (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null) => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => {
+  const tasks: Array<{ tier: 'local' | 'cloud'; lane: string | null; run: (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null) => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => {
     const attemptId = attemptIds.get(item.id)!;
     const leaseController = leaseAbortControllers.get(item.id)!;
     // The hang watchdog gets its OWN controller, composed into the dispatch
@@ -6156,6 +6476,30 @@ export async function tick(
             runId: attemptId,
             trajectoryId: `run:${attemptId}`,
             skipReason: 'repair-authority-unavailable',
+          }),
+        };
+      }
+
+      // V3.10 (U5): under a standing grant the router's decision is taken ONCE
+      // per item here and its hold is honoured on every dispatch path —
+      // parked work waits for its seat, split work is never sent anywhere
+      // (in particular never to a local model instead).
+      const standingRoute = standingTick ? hooks.route(item, routingCfg) : null;
+      if (standingRoute?.hold) {
+        return {
+          item,
+          spentUsd: 0,
+          dispatched: false,
+          dispatch: dispatchTrace(item, {
+            backend: standingRoute.backend,
+            tier: standingRoute.tier,
+            model: standingRoute.model ?? null,
+            assignedBy: 'standing-router',
+            reason: boundedText(`held (${standingRoute.hold.kind}): ${standingRoute.hold.reason}`, 220),
+            dispatched: false,
+            runId: attemptId,
+            trajectoryId: `run:${attemptId}`,
+            skipReason: `route-${standingRoute.hold.kind}`,
           }),
         };
       }
@@ -6284,7 +6628,8 @@ export async function tick(
         selectedModel = assignedModel;
         assignmentReason = assignedReason ?? `concurrent planner assigned ${backend}`;
         assignedBy = 'concurrent-planner';
-      } else if (routingCfg.foundry?.fabric?.gateway === true) {
+      } else if (!standingTick && routingCfg.foundry?.fabric?.gateway === true) {
+        // (A standing tick never takes the gateway: it routes around hooks.route.)
         const forecast = buildForecast('7d', routingCfg);
         const gd = await gatewayDecide(item, routingCfg, {
           spentUsd: tickSpent + state.todaySpentUsd,
@@ -6378,7 +6723,8 @@ export async function tick(
         // 'builtin'. A frontier backend over its rolling rate quota falls back to
         // local so work keeps flowing without exceeding the subscription's limit.
         // M85: use liveCfg (reloaded per-tick) for routing + quota checks.
-        const routed = routeBackend(item, routingCfg);
+        // V3.10 (U5) seam: hooks.route (default: routeBackend, same arguments).
+        const routed = standingRoute ?? hooks.route(item, routingCfg);
         backend = routed.backend;
         backendTier = routed.tier;
         selectedModel = routed.model;
@@ -6400,7 +6746,8 @@ export async function tick(
           // (config.ts resolveSubscriptionMaxPercent) so this reader, the fleet
           // router, and the fabric gateway cannot drift apart.
           const maxPct = resolveSubscriptionMaxPercent(liveCfg);
-          const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
+          // V3.10 (U5) seam: hooks.seatAllows (default: subscriptionAllows, same arguments).
+          const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct });
           if (!subCheck.allowed) {
             // M334: shadow the BLOCKED legacy decision — a gateway that would
             // have dispatched here is the safety-relevant divergence class.
@@ -6569,9 +6916,53 @@ export async function tick(
           };
         }
       }
-      if (isSubscriptionEngine(backend)) {
+      // V3.10 (U5): a standing tick keeps the lane the router chose — a later
+      // fallback (quota, learned router, budget cascade, local-only direction,
+      // repair alternate) that moved the item to ANOTHER lane would bypass the
+      // router's fit and reserve decision, so it is refused, not dispatched.
+      if (standingTick) {
+        const routedLane = standingRoute ? fleetLaneOf(standingRoute.backend, routingCfg) : null;
+        const finalLane = fleetLaneOf(backend, routingCfg);
+        if (finalLane === null || finalLane !== routedLane) {
+          const reason = `standing lane changed after routing: ${standingRoute?.backend ?? 'unrouted'} (${routedLane ?? 'no lane'}) → ${backend} (${finalLane ?? 'no lane'})`;
+          audit({ action: 'daemon:tick', repo: item.repo, sandboxId: null, summary: reason, result: 'refused' });
+          return {
+            item,
+            spentUsd: 0,
+            dispatched: false,
+            dispatch: dispatchTrace(item, {
+              backend,
+              tier: backendTier,
+              model: selectedModel,
+              assignedBy: 'standing-lane-guard',
+              reason: boundedText(reason, 220),
+              dispatched: false,
+              runId: attemptId,
+              trajectoryId: `run:${attemptId}`,
+              skipReason: 'standing-lane-changed',
+            }),
+          };
+        }
+      }
+      // V3.10 (L1): the SeatRouter's codex seat, forwarded to the producer.
+      // Under a standing policy runEngineSandboxed builds codex's per-run
+      // CODEX_HOME from that seat's native profile and refuses a codex run with
+      // no seat (never Mason's own login), so dropping the router's choice made
+      // every standing codex dispatch fail. ONLY codex lanes: grok-cli resolves
+      // its seat from cfg.foundry.grokCli, and a seat of another engine must
+      // never reach a codex run (engineOfSeatId re-checks the pairing).
+      const standingCodexSeatId: string | undefined = (() => {
+        if (!standingTick || fleetLaneOf(backend, routingCfg) !== 'codex') return undefined;
+        const seatId = standingRoute?.seatDecision?.seatId;
+        return typeof seatId === 'string' && seatId.length > 0 && engineOfSeatId(seatId) === 'codex' ? seatId : undefined;
+      })();
+      // A standing tick asks the seat gate about EVERY engine (the live hook
+      // checks lane, grant role and seat headroom); master asks only for
+      // subscription engines, unchanged.
+      if (standingTick || isSubscriptionEngine(backend)) {
         const maxPct = resolveSubscriptionMaxPercent(routingCfg);
-        const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
+        // V3.10 (U5) seam: hooks.seatAllows (default: subscriptionAllows, same arguments).
+        const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct });
         if (!subCheck.allowed) {
           audit({
             action: 'daemon:tick',
@@ -6641,7 +7032,9 @@ export async function tick(
           });
         } catch { /* best effort — never block dispatch on receipt minting */ }
       }
-      const goal = buildItemGoal(item);
+      // V3.10 (B-U9): a standing tick's producers run with the active harness —
+      // its producer prompt overlay rides on the goal (baseline: none).
+      const goal = standingTick ? withHarnessProducerPrompt(buildItemGoal(item), hooks) : buildItemGoal(item);
       const dispatchCfg = dispatchConfigForItem(item, routingCfg);
       const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
       const workItemGenerationId = generatedRepairGenerationId(item) ?? undefined;
@@ -6656,6 +7049,12 @@ export async function tick(
           reason: assignmentReason,
         },
       });
+
+    // V3.10 (A9): what the SeatRouter would have chosen, beside master's real
+    // dispatch on every path (swarm, single, best-of-N). A standing tick
+    // already logs its own — it IS routed by the SeatRouter. Observe-only,
+    // never awaited, and skipped once a stop is requested.
+    if (!standingTick && !stopRequested()) shadowSeatRouteBeside(routingCfg, item, String(backend ?? 'builtin'));
 
     // Snapshot ASHLR_IN_SWARM and restore it after the call. The swarm runner
     // sets ASHLR_IN_SWARM=1 on THIS (long-lived) process and does not unwind it;
@@ -6837,11 +7236,22 @@ export async function tick(
         // M170: best-of-N dispatch — when cfg.foundry.bestOfN > 1, generate N
         // candidates and let the critic pick the winner. Flag-off: bestOfN absent
         // or 1 → single runGoal call, byte-identical to pre-M170 behavior.
+        // V3.10 (U7): a standing tick plans best-of-N itself — Grok plus two
+        // local candidates from different engines, only for hard or
+        // already-failed items (planAutonomousBestOfN over this tick's lanes,
+        // threshold from the harness / Leader routing weights). The config's
+        // own bestOfN / bestOfNCandidates never apply there: they were not
+        // written against the grant's lanes and reserves. No plan ⇒ one attempt.
+        const standingBonPlan = standingTick && !isTrustedGeneratedRepairItem(item)
+          ? standingBestOfNPlan(hooks, item, resolveSubscriptionMaxPercent(routingCfg))
+          : null;
         const bestOfN = proposalOnlyActivation
           ? 1
-          : resolveBestOfNCount(
-              (routingCfg.foundry as Record<string, unknown> | undefined)?.['bestOfN'],
-            );
+          : standingTick
+            ? (standingBonPlan?.run ? resolveBestOfNCount(standingBonPlan.candidates.length) : 1)
+            : resolveBestOfNCount(
+                (routingCfg.foundry as Record<string, unknown> | undefined)?.['bestOfN'],
+              );
 
         // M333: fan-out gating + multi-model candidate specs + full-cost
         // accounting. bestOfNMinItemScore (absent ⇒ every item, M170 behavior)
@@ -6853,14 +7263,19 @@ export async function tick(
         const fanOut =
           bestOfN > 1 &&
           !isTrustedGeneratedRepairItem(item) &&
-          (typeof _bonMinScore !== 'number' || (item.score ?? 0) >= _bonMinScore);
+          // A standing plan already decided the item is worth N attempts.
+          (standingTick || typeof _bonMinScore !== 'number' || (item.score ?? 0) >= _bonMinScore);
         let _bonCandidates: ReadonlyArray<{
           engine: string;
           model?: string | null;
           shadow?: { enabled: true; artifactDigest: string };
         }> | undefined;
         let _bonCandidateConfigRefusal: string | undefined;
-        if (fanOut && _bonCfg) {
+        if (fanOut && standingBonPlan?.run) {
+          _bonCandidates = Object.freeze(standingBonPlan.candidates
+            .slice(0, bestOfN)
+            .map((candidate) => ({ engine: String(candidate.engine), ...(candidate.model ? { model: candidate.model } : {}) })));
+        } else if (fanOut && _bonCfg && !standingTick) {
           try {
             const configured = Object.getOwnPropertyDescriptor(_bonCfg, 'bestOfNCandidates');
             if (configured !== undefined) {
@@ -6951,6 +7366,7 @@ export async function tick(
             beginQueueExecution();
             return runBestOfN(item, routingCfg, {
               n: bestOfN, engine: backend, model: selectedModel,
+              ...(standingCodexSeatId ? { seatId: standingCodexSeatId } : {}),
               budget: itemBudget,
               ...(_bonCandidates ? { candidates: _bonCandidates as never } : {}),
               ...(_bonCandidateConfigRefusal ? { candidateConfigRefusal: _bonCandidateConfigRefusal } : {}),
@@ -7098,6 +7514,7 @@ export async function tick(
               engine: backend, sandboxEngine: true, requireSandbox: true, cwd: item.repo,
               budget: itemBudget, tools: true, noMemory: false, runId: attemptId,
               ...(selectedModel ? { model: selectedModel } : {}),
+              ...(standingCodexSeatId ? { seatId: standingCodexSeatId } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,
               signal: dispatchSignal,
             });
@@ -7370,7 +7787,7 @@ export async function tick(
           });
           // File a TuningProposal describing the anomaly (proposal-only, never auto-applied).
           try {
-            emitTuningProposals([{
+            const anomalySuggestion: TuningProposal = {
               key: `anomaly.cost.${item.id.replace(/[^a-z0-9]/gi, '-').slice(0, 40)}`,
               area: 'policy',
               title: `Cost anomaly hold: "${item.title.slice(0, 60)}"`,
@@ -7379,7 +7796,11 @@ export async function tick(
                 `($${(anomalyK * p50).toFixed(4)}) for "${item.title}". ` +
                 `Proposal held PENDING for human review.`,
               confidence: Math.min(0.9, 0.5 + (swarmSpent / (anomalyK * p50) - 1) / 10),
-            }]);
+            };
+            emitTuningProposals([anomalySuggestion]);
+            // B-U9: the same suggestions, as open harness hypotheses (only the
+            // config-only, locally testable kinds produce any).
+            recordTuningHypothesesInBackground([anomalySuggestion]);
           } catch (err) {
             // Emission must never crash the tick.
             console.warn('[ashlr] daemon:tick emitTuningProposals failed:', (err as Error)?.message ?? err);
@@ -7391,9 +7812,10 @@ export async function tick(
 	    return { item, spentUsd: swarmSpent, dispatched, dispatch };
     }; // end runItem
 
-    const routePlan = itemRoutePlans[_taskIdx] ?? { backend: 'builtin' as EngineId, model: null };
+    const routePlan = itemRoutePlans[_taskIdx] ?? { backend: 'builtin' as EngineId, model: null, lane: null };
     return ({
       tier: itemTiers[_taskIdx] ?? 'local',
+      lane: routePlan.lane ?? null,
       run: (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null): Promise<ItemOutcome> =>
         superviseFleetTurn(
           item,
@@ -7417,7 +7839,9 @@ export async function tick(
   //
   // FLAG-OFF (default): falls through to the existing batch/tieredBounded paths —
   // byte-identical to pre-M255 behavior.
-  const useConcurrentDispatch = routingCfg.foundry?.fabric?.concurrentDispatch === true;
+  // V3.10 (U5): a standing tick never takes the M255 planner — it assigns
+  // backends itself, around hooks.route; the tiered pool carries the lanes.
+  const useConcurrentDispatch = !standingTick && routingCfg.foundry?.fabric?.concurrentDispatch === true;
 
   let outcomes: PromiseSettledResult<ItemOutcome>[];
   let dispatchManifest: DaemonTick['dispatchManifest'] | undefined;
@@ -7631,7 +8055,9 @@ export async function tick(
     // runtime's slot ceiling. When the local fleet is armed, take the tiered
     // pool — which does, and which above keeps the batch caps for the cloud and
     // total tiers so arming the fleet changes only the tier it governs.
-    const useBatchPool = !isContinuousMode && !explicitConcurrency && fleetConcurrency === null;
+    // V3.10 (U5): a standing tick always takes the tiered pool — the batch
+    // pool has no tier or lane awareness, so it could not hold a lane cap.
+    const useBatchPool = !standingTick && !isContinuousMode && !explicitConcurrency && fleetConcurrency === null;
     outcomes = useBatchPool
       ? await bounded(tasks.map((t) => t.run), dcfg.parallel)
       : await tieredBounded(tasks, tierPool);
@@ -7674,6 +8100,22 @@ export async function tick(
       );
     }
     fleetMonitor.publish();
+  }
+
+  // V3.10 (U5): every dispatch attempt — dispatched or skipped — goes to
+  // hooks.afterDispatch (the live hooks journal "why this seat", park held
+  // items and advance fleet tasks). A hook failure is logged and never fails
+  // the tick. Default hooks: no-op.
+  if (hooks !== DEFAULT_TICK_HOOKS) {
+    const at = new Date().toISOString();
+    for (const outcome of outcomes) {
+      if (outcome.status !== 'fulfilled') continue;
+      try {
+        await hooks.afterDispatch(dispatchOutcomeOf(outcome.value, at, standingTick ? routingCfg : null));
+      } catch (err) {
+        console.warn('[ashlr] daemon:tick afterDispatch hook failed:', (err as Error)?.message ?? err);
+      }
+    }
   }
 
   const postDispatchOwnershipLost = (): DaemonTick | null => {
@@ -8539,6 +8981,61 @@ async function runOwnedPulseSync(
 }
 
 // ---------------------------------------------------------------------------
+// V3.10 (U5): opening a standing run
+// ---------------------------------------------------------------------------
+
+/**
+ * Open a RESIDENT standing session for runDaemon, or null when none opens
+ * (no grant in force — the proposal-permit path then runs exactly as master).
+ *
+ * Both modules load LAZILY: a run without a grant never pulls the authority
+ * verifier or the live hooks into its module graph, and a test that mocks
+ * activation-permit partially keeps a loadable loop.ts. A module that fails
+ * to load is the same answer as "no grant" — with one exception: a grant
+ * that IS in force but whose fleet runtime (the live hooks) cannot load is a
+ * refusal. Running a standing tick on master's default hooks would bypass the
+ * router, the reserves and backpressure; not running is the only safe answer.
+ */
+async function openStandingRunForDaemon(cfg: AshlrConfig): Promise<StandingRun | { refused: string } | null> {
+  let capability: typeof import('../authority/capability.js');
+  try {
+    capability = await import('../authority/capability.js');
+  } catch {
+    return null;
+  }
+  let opened: ReturnType<typeof capability.openStandingSession>;
+  try {
+    opened = capability.openStandingSession(cfg);
+  } catch {
+    return null;
+  }
+  if (!opened.ok) return null;
+  try {
+    const live = await import('../fleet/tick-hooks-live.js');
+    const run = live.createStandingRun({
+      session: opened.session,
+      mint: capability.mintStandingTickCapability,
+      // B-U1: a mint refused as "unknown or closed standing session" opens a
+      // fresh session (re-verified from scratch) instead of parking forever.
+      reopen: () => {
+        const again = capability.openStandingSession(cfg);
+        return again.ok ? { ok: true as const, session: again.session } : { ok: false as const, reason: again.reason };
+      },
+      // Guarded: a partial module (an older build, a test double) may lack it.
+      ...(typeof capability.closeStandingSession === 'function' ? { close: capability.closeStandingSession } : {}),
+    });
+    // The restricted-judge credential source must be in place before the
+    // first tick can judge (see StandingRun.ready).
+    await run.ready();
+    return run;
+  } catch (err) {
+    return {
+      refused: `a standing grant is in force but the fleet runtime failed to load (${boundedText(err instanceof Error ? err.message : String(err), 160)})`,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // runDaemon — the operator loop
 // ---------------------------------------------------------------------------
 
@@ -8560,6 +9057,19 @@ async function runOwnedPulseSync(
  * Never throws.
  */
 export async function runDaemon(
+  cfg: AshlrConfig,
+  opts: DaemonRunOptions,
+): Promise<DaemonState> {
+  // 3.10 R3f: the whole run gets its own enrollment scope so a standing
+  // session can narrow it to the fleet's mirrors (below) without touching
+  // ~/.ashlr/enrollment.json — and without the narrowing reaching the caller
+  // (the goal conductor runs this in-process). See sandbox/policy.ts
+  // "Enrollment lens". With no standing session nothing narrows it and every
+  // read is the full registry, exactly as before.
+  return withEnrollmentScope(() => runDaemonInEnrollmentScope(cfg, opts));
+}
+
+async function runDaemonInEnrollmentScope(
   cfg: AshlrConfig,
   opts: DaemonRunOptions,
 ): Promise<DaemonState> {
@@ -8643,7 +9153,55 @@ export async function runDaemon(
     }
   }
 
-  const activation = consumeDaemonActivationPermit(cfg, opts);
+  // V3.10 (U5) — the session seam. A standing grant in force opens a RESIDENT
+  // session instead of consuming a one-shot proposal permit: every tick then
+  // mints its own single-use `resident-standing` capability (re-verified by
+  // authority/capability.ts) and runs with the live tick hooks. No session ⇒
+  // the permit path below, exactly as master. Dry runs need no authority.
+  const standingOpen = opts.dryRun ? null : await openStandingRunForDaemon(cfg);
+  if (standingOpen !== null && 'refused' in standingOpen) {
+    releaseDaemonLock(daemonLock);
+    audit({
+      action: 'daemon:activation-refused',
+      repo: null,
+      sandboxId: null,
+      summary: `daemon start refused: ${standingOpen.refused}`,
+      result: 'refused',
+    });
+    return refusedState('standing-runtime-unavailable');
+  }
+  const standing: StandingRun | null = standingOpen;
+  // 3.10 R3f — the autonomous lane. Under a standing grant the fleet works
+  // ONLY in its mirrors (SPEC-310B §2), so from here on every enrolled read
+  // this run makes — each tick's backlog and dispatch, self-heal, the
+  // post-merge gate's head snapshots, sandbox creation's assertMayMutate — sees
+  // the enrolled mirrors and nothing else. Mason's checkouts stay enrolled for
+  // his own tools; this daemon just cannot see them. Narrowing can fail only
+  // if the lane cannot be installed, and then the standing run does not start:
+  // running it over the full registry would put the fleet in his checkouts.
+  if (standing) {
+    let narrowed = false;
+    try {
+      narrowed = (await import('../fleet/mirrors.js')).narrowToAutonomousLane();
+    } catch {
+      narrowed = false;
+    }
+    if (!narrowed) {
+      standing.close();
+      releaseDaemonLock(daemonLock);
+      audit({
+        action: 'daemon:activation-refused',
+        repo: null,
+        sandboxId: null,
+        summary: 'daemon start refused: the autonomous lane (fleet mirrors only) could not be installed',
+        result: 'refused',
+      });
+      return refusedState('standing-lane-unavailable');
+    }
+  }
+  const activation: ReturnType<typeof consumeDaemonActivationPermit> = standing
+    ? { authorized: true, required: true, reason: `standing grant ${standing.grantId} (session ${standing.sessionId})` }
+    : consumeDaemonActivationPermit(cfg, opts);
   if (!activation.authorized) {
     releaseDaemonLock(daemonLock);
     audit({
@@ -8659,6 +9217,7 @@ export async function runDaemon(
   if (state.running === true && typeof state.pid === 'number' && state.pid !== process.pid) {
     const takeoverProof = staleResidentProof(state);
     if (!takeoverProof) {
+      standing?.close();
       releaseDaemonLock(daemonLock);
       return refusedState('persisted-resident-owner-not-stale');
     }
@@ -8673,6 +9232,7 @@ export async function runDaemon(
     state.pid = null;
     const recovered = saveResidentDaemonState(daemonLock, state);
     if (!recovered.ok) {
+      standing?.close();
       releaseDaemonLock(daemonLock);
       return refusedState('stale-resident-state-recovery-failed');
     }
@@ -8699,6 +9259,7 @@ export async function runDaemon(
   state.startedAt = new Date().toISOString();
   const startSave = saveResidentDaemonState(daemonLock, state);
   if (!startSave.ok) {
+    standing?.close();
     releaseDaemonLock(daemonLock);
     if (prevInDaemon === undefined) delete process.env['ASHLR_IN_DAEMON'];
     else process.env['ASHLR_IN_DAEMON'] = prevInDaemon;
@@ -8795,9 +9356,15 @@ export async function runDaemon(
     summary:
       `daemon started: once=${opts.once}, dryRun=${opts.dryRun}, budget=$${dcfg.dailyBudgetUsd}, ` +
       `intervalMs=${dcfg.intervalMs}${opts.drain ? `, drain=${opts.drain}` : ''}` +
-      `${opts.drainLimit ? `, drainLimit=${opts.drainLimit}` : ''}`,
+      `${opts.drainLimit ? `, drainLimit=${opts.drainLimit}` : ''}` +
+      `${standing ? `, standing grant=${standing.grantId}` : ''}`,
     result: 'ok',
   });
+
+  // 3.10 c8: seat headroom from the first tick, not the first standing pass.
+  // Stopped in the shutdown block below (see startResidentCapacityPublisher).
+  const residentPublisherRun = { dryRun: opts.dryRun, once: opts.once, standing: standing !== null };
+  await startResidentCapacityPublisher(activationCfg, residentPublisherRun);
 
   if (!opts.dryRun && !activation.capability) {
     reconcilePreparedGeneratedRepairReservations();
@@ -8895,17 +9462,33 @@ export async function runDaemon(
       // one-shot runs retain the established live-reload behavior.
       const liveCfg = activation.capability ? activationCfg : reloadLiveConfigForDaemon(cfg);
       if (killSwitchOn()) requestShutdown();
-      if (!shutdown.signal.aborted && ownsDaemonLock()) {
+      // V3.10 (U5): a standing one-shot mints its tick capability like any
+      // resident tick; a refusal means authority was withdrawn since start.
+      const onceStanding = standing ? standing.mint() : null;
+      if (onceStanding && !onceStanding.ok) {
+        terminalFailure = 'standing-capability-refused';
+        audit({
+          action: 'daemon:activation-refused',
+          repo: null,
+          sandboxId: null,
+          summary: `standing tick refused: ${onceStanding.reason}`,
+          result: 'refused',
+        });
+      }
+      if (!shutdown.signal.aborted && ownsDaemonLock() && (onceStanding === null || onceStanding.ok)) {
         transitionActivity('tick');
+        const headSeqBefore = standing ? standing.headSeq() : null;
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
           ...(activation.capability ? { activationCapability: activation.capability } : {}),
+          ...(onceStanding?.ok && standing ? { activationCapability: onceStanding.capability, hooks: standing.hooks } : {}),
           ...(opts.drain ? { drain: opts.drain } : {}),
           ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
           signal: shutdown.signal,
           ownerLock: daemonLock,
           onOwnershipLost: requestOwnershipLoss,
         });
+        if (standing) await standing.notifyLedgerRows(await standing.rowsSince(headSeqBefore));
         if (tickResult.reason === 'state-persistence-failed' &&
           tickResult.residentSafePersistenceFailure !== 'repair-treatment') {
           terminalFailure = 'daemon-state-persistence-failed';
@@ -8984,12 +9567,29 @@ export async function runDaemon(
         }
       }
       // Post-merge halt defaults ON for a bounded (i.e. unattended) run.
-      const postMergeHaltEnabled = opts.postMergeHalt ?? (runWindow !== null);
+      // V3.10 (U5) — the watch seam: under a standing session the local-head
+      // halt stands down and U4's per-landing post-merge watch takes over
+      // (driven from the live hooks' beforeTick / afterLanding) — see
+      // resolvePostMergeHaltMode for why. Re-evaluated when a run window is
+      // adopted mid-run.
+      const postMergeHaltFor = (): boolean => resolvePostMergeHaltMode({
+        explicit: opts.postMergeHalt,
+        runWindow: runWindow !== null,
+        standing: standing !== null,
+      }) === 'halt';
+      let postMergeHaltEnabled = postMergeHaltFor();
       // TICKS, not loop iterations. `cyclesLeft` above decrements before the
       // pause check, so a parked loop burns a "cycle" every second — that is
       // fine for its purpose but is NOT what "stop after N iterations" means
       // to an operator. This counts completed ticks only.
       let completedTicks = 0;
+      // V3.10 (U5): a window armed from the API is adopted mid-run; it counts
+      // its iterations from the tick it was adopted at, not from daemon start.
+      let windowTicksBase = 0;
+      const windowIterations = (): number => completedTicks - windowTicksBase;
+      // V3.10 (U5): why the standing capability could not be minted, so the
+      // park audits the transition once rather than every 30 s.
+      let standingWithdrawnReason: string | null = null;
 
       /**
        * End the run by PARKING, never by killing.
@@ -9023,7 +9623,7 @@ export async function runDaemon(
           if (nowMs >= wakeAtMs) return true;
           // Window over? Stop parking immediately and let the loop-top check
           // conclude the run — do not serve out the rest of the interval.
-          if (evaluateRunWindow(runWindow, { nowMs, iterations: completedTicks }).expired) return true;
+          if (evaluateRunWindow(runWindow, { nowMs, iterations: windowIterations() }).expired) return true;
           const chunkMs = runWindowParkMs(runWindow, wakeAtMs - nowMs, nowMs);
           if (chunkMs <= 0) return true;
           if (!(await sleep(chunkMs, shutdown.signal))) return false;
@@ -9060,8 +9660,44 @@ export async function runDaemon(
         // look, rather than serving out a timer armed eight hours ago. Checked
         // BEFORE the pause check below so an expired window concludes even if
         // the operator happened to pause first.
+        // ── V3.10 (U5): adopt a run armed from the API ─────────────────────
+        // `POST /api/verse/overnight {action:'arm'}` records a PENDING run; a
+        // resident loop (always running under launchd) takes it here. It then
+        // behaves exactly like `--until` / `--iterations`. A pending rule that
+        // no longer resolves (a stop time already past) is refused on the
+        // record, never run unbounded.
+        if (runWindow === null && !opts.dryRun) {
+          const pending = pendingOvernightRun();
+          if (pending?.stopRule) {
+            const resolved = resolveRunWindow(pending.stopRule);
+            if (!resolved.ok) {
+              refuseOvernightRun(resolved.reason);
+              audit({
+                action: 'daemon:run-window',
+                repo: null,
+                sandboxId: null,
+                summary: `armed run refused: ${resolved.reason}`,
+                result: 'refused',
+              });
+            } else {
+              runWindow = resolved.window;
+              windowTicksBase = completedTicks;
+              postMergeHaltEnabled = postMergeHaltFor();
+              adoptOvernightRun({ pid: process.pid });
+              audit({
+                action: 'daemon:run-window',
+                repo: null,
+                sandboxId: null,
+                summary: `run window adopted from the armed record — ${runWindow.describe}; it ends by PAUSING ` +
+                  `(~/.ashlr/daemon.paused), never by the kill switch`,
+                result: 'ok',
+              });
+            }
+          }
+        }
+
         if (runWindow !== null) {
-          const verdict = evaluateRunWindow(runWindow, { iterations: completedTicks });
+          const verdict = evaluateRunWindow(runWindow, { iterations: windowIterations() });
           if (verdict.expired) {
             concludeByParking(`run-window-${verdict.reason}`, verdict.detail);
             break;
@@ -9123,9 +9759,47 @@ export async function runDaemon(
           ? snapshotEnrolledHeads()
           : [];
 
+        // ── V3.10 (U5): this tick's standing capability ────────────────────
+        // Minted per tick; B-U1 re-verifies the whole grant each time. A
+        // refusal (switch off, Stop, revoke, paused / expired grant, broken
+        // ledger, no confinement) parks the loop — it stays resident so a
+        // re-approval resumes it without a restart.
+        let standingCapability: DaemonActivationCapability | undefined;
+        if (standing && !opts.dryRun) {
+          const minted = standing.mint();
+          if (!minted.ok) {
+            if (standingWithdrawnReason !== minted.reason) {
+              standingWithdrawnReason = minted.reason;
+              transitionActivity('idle');
+              audit({
+                action: 'daemon:tick',
+                repo: null,
+                sandboxId: null,
+                summary: `standing authority withdrawn: ${minted.reason}; loop parked (it resumes when authority returns)`,
+                result: 'refused',
+              });
+            }
+            if (!(await sleep(STANDING_WITHDRAWN_PARK_MS, shutdown.signal))) break;
+            continue;
+          }
+          if (standingWithdrawnReason !== null) {
+            standingWithdrawnReason = null;
+            audit({
+              action: 'daemon:tick',
+              repo: null,
+              sandboxId: null,
+              summary: 'standing authority restored; loop unparked',
+              result: 'ok',
+            });
+          }
+          standingCapability = minted.capability;
+        }
+        const standingHeadSeq = standing ? standing.headSeq() : null;
+
         transitionActivity('tick');
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
+          ...(standingCapability && standing ? { activationCapability: standingCapability, hooks: standing.hooks } : {}),
           ...(opts.drain ? { drain: opts.drain } : {}),
           ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
           signal: shutdown.signal,
@@ -9133,13 +9807,29 @@ export async function runDaemon(
           onOwnershipLost: requestOwnershipLoss,
         });
         completedTicks++;
+        // V3.10 (U5): landings this tick made go to hooks.afterLanding (the
+        // post-merge watch registers them), and — in a run window — into the
+        // overnight record with the gates' own sentences.
+        if (standing && standingCapability) {
+          const rows = await standing.rowsSince(standingHeadSeq);
+          // Landings → the post-merge watch; G3 verdicts → the harness canary.
+          await standing.notifyLedgerRows(rows);
+          if (runWindow !== null && rows.length > 0) {
+            try {
+              recordOvernightLedgerRows(rows, {
+                titleOf: (proposalId) => loadProposal(proposalId)?.title ?? null,
+                iterationsDone: windowIterations(),
+              });
+            } catch { /* observability only */ }
+          }
+        }
         if (runWindow !== null) {
           // Live progress for the cockpit. `iterationsDone` is a number the
           // engine genuinely knows, so it is never reported as null here.
           try {
             recordOvernightActivity({
-              iterationsDone: completedTicks,
-              activity: `tick ${completedTicks} finished: ${tickResult.reason}` +
+              iterationsDone: windowIterations(),
+              activity: `tick ${windowIterations()} finished: ${tickResult.reason}` +
                 (tickResult.proposalsCreated > 0 ? `, ${tickResult.proposalsCreated} proposal(s) created` : ''),
             });
           } catch { /* observability only */ }
@@ -9195,7 +9885,7 @@ export async function runDaemon(
           // write must never be the reason a run stops.
           if (runWindow !== null && postMerge.verdict !== 'no-landing') {
             try {
-              recordOvernightIteration(postMerge, { iterationsDone: completedTicks });
+              recordOvernightIteration(postMerge, { iterationsDone: windowIterations() });
             } catch { /* observability only */ }
           }
           if (postMerge.halt) {
@@ -9351,6 +10041,9 @@ export async function runDaemon(
   }
   transitionToStopping();
   clearInterval(killSwitchPoll);
+  // Also stops a publisher the standing pass started in a one-shot run:
+  // nothing publishes for a daemon that is no longer running.
+  if (!opts.dryRun && standing !== null) await stopResidentCapacityPublisher();
   await cancelDaemonPostTickChildren(
     scheduledResolutionObserver,
     scheduledCutoffCapture,
@@ -9396,6 +10089,8 @@ export async function runDaemon(
       result: 'ok',
     });
   }
+  // V3.10 (U5): the standing session ends with the process, on the record.
+  standing?.close();
 
   // Restore ASHLR_IN_DAEMON to its prior value so a fresh runDaemon can run
   // again in the same process (a CLI process exits anyway; this matters for
@@ -9407,6 +10102,68 @@ export async function runDaemon(
 
   const finalState = loadDaemonState();
   return terminalFailure ? { ...finalState, terminalFailure } : finalState;
+}
+
+/**
+ * 3.10 c8 follow-up: the daemon-side capacity publisher is owned by the
+ * RESIDENT run, not only by the standing merge pass. WHY: the pass starts it
+ * lazily on its first tick and nothing ever stopped it, so (a) seat headroom
+ * stayed cold until a pass happened to run, and (b) a daemon that stopped
+ * kept an interval (and possibly a short-lived collector holding the native
+ * metadata lease) alive in-process after runDaemon returned. The pass keeps
+ * calling `ensureDaemonCapacityPublisher` (idempotent), so this only moves
+ * the start earlier and adds the stop.
+ *
+ * Only for a resident (non-once, non-dry) run under a standing session: that
+ * is the only daemon whose paid-seat decisions read the snapshot. A one-shot
+ * run ends in one tick and would leave a mid-sample collector behind; the
+ * pass still covers it. The publisher itself refuses outside ASHLR_IN_DAEMON=1
+ * and under vitest, so this never spawns probes from a test.
+ *
+ * Lazy import: keeps capacity-publisher out of loop.ts's static closure, like
+ * every other routing read here. Never throws.
+ */
+export interface ResidentCapacityPublisherModule {
+  ensureDaemonCapacityPublisher(cfg: AshlrConfig): unknown;
+  resetDaemonCapacityPublisherForTest(): void;
+}
+
+const loadCapacityPublisher = async (): Promise<ResidentCapacityPublisherModule> =>
+  import('./capacity-publisher.js');
+
+export function residentCapacityPublisherWanted(run: { dryRun: boolean; once: boolean; standing: boolean }): boolean {
+  return !run.dryRun && !run.once && run.standing;
+}
+
+export async function startResidentCapacityPublisher(
+  cfg: AshlrConfig,
+  run: { dryRun: boolean; once: boolean; standing: boolean },
+  load: () => Promise<ResidentCapacityPublisherModule> = loadCapacityPublisher,
+): Promise<boolean> {
+  if (!residentCapacityPublisherWanted(run)) return false;
+  try {
+    const mod = await load();
+    mod.ensureDaemonCapacityPublisher(cfg);
+    return true;
+  } catch {
+    // Stays cold: readers of a stale snapshot fail closed, and the standing
+    // pass retries `ensureDaemonCapacityPublisher` every tick.
+    return false;
+  }
+}
+
+export async function stopResidentCapacityPublisher(
+  load: () => Promise<ResidentCapacityPublisherModule> = loadCapacityPublisher,
+): Promise<void> {
+  try {
+    // WHY the "ForTest" hook: it is the module's only stop-and-forget entry
+    // (stop the interval, drop the singleton so a later in-process runDaemon
+    // starts a fresh one). An in-flight sample sees `stopped`, stops waiting
+    // and closes its collector — releasing the lease — in its own finally.
+    (await load()).resetDaemonCapacityPublisherForTest();
+  } catch {
+    // Nothing started, or the module failed to load: nothing to stop.
+  }
 }
 
 export async function cancelResolutionObserverBeforeShutdown(

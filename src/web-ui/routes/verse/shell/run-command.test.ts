@@ -1,0 +1,103 @@
+/**
+ * run-command — the composer's commands reach the Composer through the
+ * `ashlr:command` window event (C3 cross-unit request), from the palette,
+ * the menu or a button, wherever the operator is.
+ *
+ * Pinned: a mounted composer gets the event at once (and the surface
+ * switches to Chat); a composer that mounts later gets it after it can be
+ * listening; none in time → dropped, never delivered late; a bus handler, if
+ * one is registered, outranks the event; non-composer ids are unaffected.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { WORKBENCH_COMMAND_EVENT } from '../composer/composer-keys.js';
+import { getVerseUiState, resetVerseUi, setVerseSection } from '../verse-ui-store.js';
+import { registerCommandHandler, resetCommandBus } from './command-bus.js';
+import { COMPOSER_LISTEN_GRACE_MS, executeCatalogCommand } from './run-command.js';
+
+let received: string[] = [];
+const listener = (event: Event) => { received.push(String((event as CustomEvent<{ id: unknown }>).detail.id)); };
+
+function chatSurfaceWithComposer(): HTMLElement {
+  const host = document.createElement('div');
+  host.setAttribute('data-surface', 'chat');
+  const box = document.createElement('textarea');
+  box.setAttribute('aria-label', 'Message');
+  host.appendChild(box);
+  return host;
+}
+
+beforeEach(() => {
+  received = [];
+  localStorage.clear();
+  resetVerseUi();
+  resetCommandBus();
+  window.addEventListener(WORKBENCH_COMMAND_EVENT, listener);
+});
+
+afterEach(() => {
+  window.removeEventListener(WORKBENCH_COMMAND_EVENT, listener);
+  document.body.innerHTML = '';
+  vi.useRealTimers();
+});
+
+describe('composer commands', () => {
+  it('reach a mounted composer at once, and bring Chat forward', () => {
+    document.body.appendChild(chatSurfaceWithComposer());
+    setVerseSection('fleet');
+    expect(executeCatalogCommand('composer.model', { via: 'palette' })).toBe(true);
+    expect(received).toEqual(['composer.model']);
+    expect(getVerseUiState().section).toBe('chat');
+  });
+
+  it('wait for a composer that mounts later, then give it a beat to start listening', async () => {
+    vi.useFakeTimers();
+    setVerseSection('growth');
+    executeCatalogCommand('composer.effort', { via: 'palette' });
+    expect(getVerseUiState().section).toBe('chat');
+    expect(received).toEqual([]);
+    document.body.appendChild(chatSurfaceWithComposer());
+    await vi.advanceTimersByTimeAsync(0); // the MutationObserver callback
+    expect(received).toEqual([]);
+    await vi.advanceTimersByTimeAsync(COMPOSER_LISTEN_GRACE_MS);
+    expect(received).toEqual(['composer.effort']);
+  });
+
+  it('are dropped — never delivered late — when no composer appears in time', async () => {
+    vi.useFakeTimers();
+    executeCatalogCommand('composer.attach', { via: 'palette' });
+    await vi.advanceTimersByTimeAsync(5_000);
+    document.body.appendChild(chatSurfaceWithComposer());
+    await vi.advanceTimersByTimeAsync(COMPOSER_LISTEN_GRACE_MS * 2);
+    expect(received).toEqual([]);
+  });
+
+  it('go to a bus handler first when one serves the id', () => {
+    const handler = vi.fn();
+    registerCommandHandler('composer.permission', handler);
+    document.body.appendChild(chatSurfaceWithComposer());
+    executeCatalogCommand('composer.permission', { via: 'palette' });
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(received).toEqual([]);
+  });
+
+  it('leave every other command on the bus', () => {
+    const handler = vi.fn();
+    registerCommandHandler('chat.sidebar', handler);
+    executeCatalogCommand('chat.sidebar', { via: 'palette' });
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(received).toEqual([]);
+  });
+});
+
+describe('the Stop toast', () => {
+  it('says what Stop could not promise — agents still draining, merges it could not revoke', async () => {
+    const { describeFleetStop } = await import('./run-command.js');
+    const plain = 'Fleet stopped. It stays stopped until you resume it.';
+    expect(describeFleetStop(null)).toBe(plain);
+    expect(describeFleetStop({ result: { stop: { quiesced: true, liveExecutionLeases: 0, mergeRevokeFailures: [] } } })).toBe(plain);
+    expect(describeFleetStop({ result: { stop: { quiesced: false, liveExecutionLeases: 2, mergeRevokeFailures: [] } } }))
+      .toBe(`${plain} 2 agents are still finishing work started before Stop.`);
+    expect(describeFleetStop({ result: { stop: { quiesced: false, liveExecutionLeases: 'x', mergeRevokeFailures: ['m-1'] } } }))
+      .toBe(`${plain} Agents already running are finishing. 1 armed merge could not be revoked; Stop still blocks it.`);
+  });
+});

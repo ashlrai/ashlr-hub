@@ -22,13 +22,16 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import type { SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
-import { existsSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { existsSync, lstatSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AshlrConfig } from '../types.js';
 import { renderToolText } from '../mcp-native.js';
+import { currentStandingPolicy } from '../authority/effective-config.js';
 import { audit } from '../sandbox/audit.js';
+import { prepareConfinedVerification, recordAutonomousViolations, type ConfinedVerification } from '../sandbox/autonomous-run.js';
+import { isSandboxTripwireKill, sandboxViolationsInOutput } from '../sandbox/confine.js';
 import { detectRepoExecutionProfile, verifyExecutablePathError } from './repo-profile.js';
 import { buildToolPath } from './tool-path.js';
 
@@ -173,8 +176,25 @@ export interface VerifySubprocessResult {
 export interface RunVerifyCommandAsyncOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
-  /** Hermetic test seam; production callers use runVerifySubprocessAsync. */
+  /**
+   * V3.10 G3: extra paths the command may READ while it runs confined under a
+   * standing policy (beyond the worktree and the node_modules it symlinks to,
+   * which are found automatically). Ignored when no standing policy is live.
+   */
+  confinementReadOnly?: readonly string[];
+  /**
+   * Hermetic test seam; production callers use runVerifySubprocessAsync.
+   * A caller that supplies its own runner OWNS the subprocess, confinement
+   * included (inbox/merge.ts and fleet/post-merge-watch.ts pass a runner that
+   * already prefixes sandbox-exec) — see runVerifyCommandAsync.
+   */
   _runSubprocess?: typeof runVerifySubprocessAsync;
+}
+
+export interface RunVerifyCommandOptions {
+  timeoutMs?: number;
+  /** As RunVerifyCommandAsyncOptions.confinementReadOnly. */
+  confinementReadOnly?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +383,184 @@ function makeIsolatedVerifyEnv(baseEnv: NodeJS.ProcessEnv): { env: NodeJS.Proces
   };
 }
 
+// ---------------------------------------------------------------------------
+// V3.10 G3 — confined verification at the chokepoint
+// ---------------------------------------------------------------------------
+//
+// WHY HERE. Verification EXECUTES the code under test: after an autonomous run
+// that is agent-authored code (its tests, its build scripts, its postinstall
+// hooks), run with whatever authority the verifier has — Mason's full user
+// account, ~/.ashlr/authority included. Every verification consumer (the
+// completeness gate, verify-to-green, run-tests, the regression sentinel,
+// self-heal, the detached post-merge runner, G3 itself) funnels through
+// runVerifyCommand / runVerifyCommandAsync, so wrapping HERE means no consumer
+// can forget. While a standing policy is live every command runs under the
+// same macOS sandbox as an agent (autonomousVerificationProfile: writes only
+// to the worktree and a private run dir, HOME read-jailed, no egress but
+// loopback, ~/.ashlr/{authority,activation,foundry} tripwired). With no
+// standing policy nothing below runs: legacy verification is unchanged.
+//
+// FAIL CLOSED. A live policy whose sandbox cannot be built is an `infra`
+// failure and the command never starts — never an unconfined run.
+
+/** Opens one run's confinement; swapped only by tests (see __setVerifyConfinementForTests). */
+type VerifyConfinementOpener = (input: {
+  worktree: string;
+  baseEnv: NodeJS.ProcessEnv;
+  readOnly: readonly string[];
+}) => ConfinedVerification;
+
+let verifyConfinementOpener: VerifyConfinementOpener = (input) => prepareConfinedVerification(input);
+
+/**
+ * Test seam: replace how a confined verification is opened (null restores the
+ * real sandbox). Lets platform-independent tests assert the argv/env wiring
+ * with a stand-in prefix; the darwin suites exercise the real sandbox-exec.
+ */
+export function __setVerifyConfinementForTests(opener: VerifyConfinementOpener | null): void {
+  verifyConfinementOpener = opener ?? ((input) => prepareConfinedVerification(input));
+}
+
+/**
+ * True while a standing policy is live. Unknown ⇒ live (confine): the rule
+ * sandbox/confine.ts applies to agents — an unreadable authority state must
+ * never be the reason agent code ran unconfined.
+ */
+function standingVerificationLive(): boolean {
+  try {
+    return currentStandingPolicy() !== null;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The directory a workspace's `node_modules` SYMLINK points at, when it is a
+ * repo's own install (`<repo>/node_modules`, `<repo>` holding `.git`) — what
+ * worktree.ts / merge.ts / post-merge-watch link into every sandbox and verify
+ * worktree. The confined suite must read it (its tsc/vitest live there) but it
+ * lies outside the worktree, so it is granted READ-ONLY (never writable: a
+ * planted package would outlive the run). Anything else a symlink named
+ * `node_modules` points at (e.g. an agent-planted link to ~/.ssh) is ignored;
+ * the sandbox then denies it and the suite fails closed. A real directory
+ * inside the worktree needs no grant.
+ */
+function linkedNodeModules(root: string): string | null {
+  const link = join(root, 'node_modules');
+  try {
+    if (!lstatSync(link).isSymbolicLink()) return null;
+    const target = realpathSync(link);
+    if (basename(target) !== 'node_modules' || !statSync(target).isDirectory()) return null;
+    if (!existsSync(join(dirname(target), '.git'))) return null;
+    return target;
+  } catch {
+    return null;
+  }
+}
+
+interface OpenedVerifyConfinement {
+  prefix: string[];
+  env: NodeJS.ProcessEnv;
+  home: string;
+  dispose: () => void;
+}
+
+/**
+ * Open the confinement for one command, or null when no standing policy is
+ * live. Throws when a policy is live and the sandbox cannot be built — the
+ * caller turns that into an `infra` failure without running anything.
+ *
+ * `env` is the command env the caller would otherwise have used (isolated
+ * HOME, workspace bins first); the overlay replaces HOME/XDG/caches with the
+ * run's private dirs, strips credentials and sanitizes PATH. The workspace
+ * `node_modules/.bin` entries (lexically inside the worktree; their symlink
+ * target is granted read-only above) go back in front, so `tsc`/`vitest`
+ * still resolve exactly as unconfined.
+ */
+function openVerifyConfinement(
+  workspaceRoot: string,
+  commandRoot: string,
+  env: NodeJS.ProcessEnv,
+  extraReadOnly: readonly string[],
+): OpenedVerifyConfinement | null {
+  if (!standingVerificationLive()) return null;
+  const readOnly: string[] = [];
+  for (const p of [linkedNodeModules(workspaceRoot), linkedNodeModules(commandRoot), ...extraReadOnly]) {
+    if (p && !readOnly.includes(p)) readOnly.push(p);
+  }
+  const confined = verifyConfinementOpener({ worktree: workspaceRoot, baseEnv: env, readOnly });
+  try {
+    if (!Array.isArray(confined.prefix) || confined.prefix.length === 0 || typeof confined.prefix[0] !== 'string') {
+      throw new Error('the sandbox returned no launcher');
+    }
+    const workspaceBins = [commandRoot, workspaceRoot]
+      .map((root) => resolve(root, 'node_modules', '.bin'))
+      .filter((bin, i, all) => all.indexOf(bin) === i && existsSync(bin));
+    const out: NodeJS.ProcessEnv = { ...confined.env };
+    out['PATH'] = [...workspaceBins, ...(out['PATH'] ?? '').split(delimiter).filter((p) => p && !workspaceBins.includes(p))].join(delimiter);
+    // The daemon's own ashlr state locations are meaningless (and denied)
+    // inside the jail; do not hand the suite a pointer to the real home.
+    delete out['ASHLR_REAL_HOME'];
+    let home: string;
+    try {
+      home = realpathSync(process.env['HOME'] ?? homedir());
+    } catch {
+      home = process.env['HOME'] ?? homedir();
+    }
+    return { prefix: [...confined.prefix], env: out, home, dispose: () => confined.dispose() };
+  } catch (error) {
+    confined.dispose();
+    throw error;
+  }
+}
+
+/**
+ * After a confined command: one `sandbox:violation` row per protected-path
+ * access or escape tool its output shows being denied, plus a tripwire kill
+ * (SIGKILL the verifier did not send). Any row regresses the rollout
+ * (authority/rollout.ts) — agent code that probes ~/.ashlr/authority from its
+ * test suite is exactly what the rollout must see. Best-effort, never throws.
+ */
+function reportVerifyViolations(input: {
+  workspaceRoot: string;
+  output: string;
+  home: string;
+  signal: NodeJS.Signals | null;
+  killedByVerifier: boolean;
+}): void {
+  try {
+    const operations = new Set(sandboxViolationsInOutput(input.output, input.home));
+    if (isSandboxTripwireKill({ signal: input.signal, killedByDaemon: input.killedByVerifier })) {
+      operations.add('signal SIGKILL (a protected-path tripwire killed the verification command)');
+    }
+    if (operations.size === 0) return;
+    void recordAutonomousViolations({
+      engine: 'verification',
+      sourceRepo: input.workspaceRoot,
+      runId: null,
+      operations: [...operations].sort(),
+    }).catch(() => { /* best effort */ });
+  } catch { /* best effort */ }
+}
+
+function confinementUnavailableResult(
+  vc: VerifyCommand,
+  command: string,
+  workspaceRoot: string,
+  error: unknown,
+): VerifyCommandResult {
+  const msg = error instanceof Error ? error.message : String(error);
+  const output = renderToolText(`${command}\n[verify-runner] verification confinement unavailable under the standing policy; not run (fail-closed): ${msg}`);
+  audit({
+    action: 'verify:command',
+    repo: workspaceRoot,
+    sandboxId: null,
+    summary: `${vc.kind}: ${command} → refused: standing policy live and confinement unavailable`,
+    result: 'refused',
+  });
+  return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'infra' };
+}
+
 export function spawnOptionsFor(
   workspaceRoot: string,
   timeout: number,
@@ -431,7 +629,7 @@ export function runVerifyCommand(
   vc: VerifyCommand,
   workspaceRoot: string,
   _cfg: AshlrConfig,
-  opts?: { timeoutMs?: number },
+  opts?: RunVerifyCommandOptions,
 ): VerifyCommandResult {
   const command = formatVerifyCommand(vc, workspaceRoot);
   const commandRoot = commandRootFor(vc, workspaceRoot);
@@ -492,17 +690,33 @@ export function runVerifyCommand(
       throw new Error('verification process-tree runner is unavailable');
     }
     const isolated = makeIsolatedVerifyEnv(baseOptions.env ?? process.env);
+    // V3.10 G3: under a standing policy the whole runner chain (node → the
+    // watchdog script → the verify command) runs inside the sandbox; the node
+    // binary and the runner script are granted read-only so the jail can
+    // exec them. No policy ⇒ null ⇒ the legacy spawn below, byte for byte.
+    let confinement: OpenedVerifyConfinement | null;
+    try {
+      confinement = openVerifyConfinement(workspaceRoot, commandRoot, isolated.env, [
+        runner,
+        process.execPath,
+        ...(opts?.confinementReadOnly ?? []),
+      ]);
+    } catch (error) {
+      isolated.cleanup();
+      return confinementUnavailableResult(vc, command, workspaceRoot, error);
+    }
+    const runnerArgs = [
+      runner,
+      String(timeout),
+      workspaceRoot,
+      commandRoot,
+      Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
+    ];
     const res = (() => {
       try {
         return spawnSync(
-          process.execPath,
-          [
-            runner,
-            String(timeout),
-            workspaceRoot,
-            commandRoot,
-            Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
-          ],
+          confinement ? confinement.prefix[0]! : process.execPath,
+          confinement ? [...confinement.prefix.slice(1), process.execPath, ...runnerArgs] : runnerArgs,
           {
             cwd: commandRoot,
             timeout: timeout + WRAPPER_TIMEOUT_GRACE_MS,
@@ -511,15 +725,26 @@ export function runVerifyCommand(
             shell: false,
             windowsHide: true,
             env: {
-              ...isolated.env,
+              ...(confinement ? confinement.env : isolated.env),
               ASHLR_VERIFY_SHELL: baseOptions.shell === true ? '1' : '0',
             },
           },
         );
       } finally {
         isolated.cleanup();
+        confinement?.dispose();
       }
     })();
+    if (confinement) {
+      reportVerifyViolations({
+        workspaceRoot,
+        output: `${res.stdout ?? ''}${res.stderr ?? ''}`,
+        home: confinement.home,
+        signal: res.signal,
+        // spawnSync's own timeout kill is SIGTERM; a SIGKILL is never ours.
+        killedByVerifier: false,
+      });
+    }
 
     const timedOut =
       res.status === 124 ||
@@ -1223,22 +1448,56 @@ export async function runVerifyCommandAsync(
           Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
         ]
       : vc.cmd;
+    // V3.10 G3: under a standing policy the command runs inside the sandbox
+    // (see openVerifyConfinement). A caller that brings its own runner owns
+    // the subprocess — inbox/merge.ts and fleet/post-merge-watch.ts pass one
+    // that ALREADY prefixes sandbox-exec, and macOS refuses a nested
+    // sandbox_apply, so wrapping again would fail every G3 run. Every other
+    // production caller passes no runner and is confined here.
+    let confinement: OpenedVerifyConfinement | null = null;
+    if (!opts?._runSubprocess) {
+      try {
+        confinement = openVerifyConfinement(workspaceRoot, commandRoot, isolated.env, opts?.confinementReadOnly ?? []);
+      } catch (error) {
+        isolated.cleanup();
+        isolated = null;
+        return confinementUnavailableResult(vc, command, workspaceRoot, error);
+      }
+    }
     const runSubprocess = opts?._runSubprocess ?? runVerifySubprocessAsync;
-    const subprocess = await runSubprocess(argv, {
-      cwd: commandRoot,
-      env: useWindowsWrapper
-        ? {
-            ...isolated.env,
-            ASHLR_VERIFY_SHELL: baseOptions.shell === true ? '1' : '0',
-          }
-        : isolated.env,
-      timeoutMs: useWindowsWrapper ? timeout + WRAPPER_TIMEOUT_GRACE_MS : timeout,
-      windowsShell: useWindowsWrapper ? false : baseOptions.shell === true,
-      verifyBoundary: { repoRoot: workspaceRoot, executable: bin },
-      ...(opts?.signal ? { signal: opts.signal } : {}),
-    });
+    const commandEnv = confinement ? confinement.env : isolated.env;
+    let subprocess: VerifySubprocessResult;
+    try {
+      subprocess = await runSubprocess(confinement ? [...confinement.prefix, ...argv] : argv, {
+        cwd: commandRoot,
+        env: useWindowsWrapper
+          ? {
+              ...commandEnv,
+              ASHLR_VERIFY_SHELL: baseOptions.shell === true ? '1' : '0',
+            }
+          : commandEnv,
+        timeoutMs: useWindowsWrapper ? timeout + WRAPPER_TIMEOUT_GRACE_MS : timeout,
+        windowsShell: useWindowsWrapper ? false : baseOptions.shell === true,
+        // The boundary names the VERIFY command's executable (bin), never the
+        // sandbox prefix: the containment check still applies to what runs.
+        verifyBoundary: { repoRoot: workspaceRoot, executable: bin },
+        ...(opts?.signal ? { signal: opts.signal } : {}),
+      });
+    } finally {
+      confinement?.dispose();
+    }
     isolated.cleanup();
     isolated = null;
+    if (confinement) {
+      reportVerifyViolations({
+        workspaceRoot,
+        output: `${subprocess.stdout}${subprocess.stderr}`,
+        home: confinement.home,
+        signal: subprocess.signal,
+        // Timeout / cancellation escalate to SIGKILL themselves.
+        killedByVerifier: subprocess.timedOut || subprocess.cancelled,
+      });
+    }
 
     const timedOut = subprocess.timedOut || subprocess.exitCode === 124;
     const capturedOutput = `${subprocess.stdout}${subprocess.stderr}`;

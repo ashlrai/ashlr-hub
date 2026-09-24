@@ -192,6 +192,137 @@ export type {
 } from '../../core/verse/types.js';
 
 /**
+ * Verse 3.10 — session controls (types.ts, additive) and the Track A
+ * contracts the workbench reads: seat health (A2), budget modes and the seat
+ * router (A9), the reasoning digest (A7). Type-only, like everything here.
+ */
+export type { VerseEffort, VersePermissionMode, VerseSessionControls } from '../../core/verse/types.js';
+export type {
+  SeatConnection,
+  SeatFixKind,
+  SeatHealthFix,
+  SeatHealthReport,
+  SeatNotReadyResponse,
+  SeatReadiness,
+  VerseHealthResponse,
+} from '../../core/verse/health-types.js';
+export type {
+  BudgetMode,
+  BudgetPolicy,
+  BudgetResponse,
+  BudgetUpdateRequest,
+  RoutingRequest,
+  SeatBudgetPolicy,
+  SeatDecision,
+  SeatExclusion,
+  SeatHeadroom,
+} from '../../core/routing/types.js';
+export type {
+  ReasoningDigest,
+  ReasoningInsight,
+  ReasoningInsightKind,
+  ReasoningSeverity,
+  ReasoningStepsResponse,
+  ReasoningStepV1,
+  ReasoningTrendDay,
+} from '../../core/reasoning/types.js';
+
+/**
+ * Verse 3.10 WORKBENCH (unit C0 — src/core/verse/workbench-types.ts): the
+ * wire shapes of every Track C route family, the Needs-you item Track B's
+ * producers export (R1), and the IA. Declared once in core so the server
+ * modules and the UI cannot disagree. The same file also exports a few
+ * browser-safe runtime helpers (isNeedsYouItem, migrateSectionId,
+ * isLoopbackPreviewUrl, the path constants) — import those from
+ * '../../core/verse/workbench-types.js' directly; this file stays type-only.
+ */
+export type {
+  NeedsYouAction,
+  NeedsYouActionKind,
+  NeedsYouCategory,
+  NeedsYouConfirm,
+  NeedsYouItem,
+  NeedsYouKind,
+  NeedsYouSeverity,
+  NeedsYouSource,
+  NeedsYouSubject,
+  NeedsYouTarget,
+  SectionMigration,
+  VerseActivityCompletion,
+  VerseActivityCounts,
+  VerseActivityLive,
+  VerseActivityResponse,
+  VerseActivityRunning,
+  VerseActivitySeenRequest,
+  VerseActivitySources,
+  VerseActivitySourceState,
+  VerseAppAction,
+  VerseAppActionKind,
+  VerseAppGroup,
+  VerseAppGroupId,
+  VerseAppHealth,
+  VerseAppHealthState,
+  VerseAppRow,
+  VerseAppsResponse,
+  VerseAppToggle,
+  VerseAppToggleRequest,
+  VerseAttachment,
+  VerseAttachmentUpload,
+  VerseAutonomyBadge,
+  VerseCapacityBadge,
+  VerseControlOption,
+  VerseFileMatch,
+  VerseFilesResponse,
+  VerseGitActionResponse,
+  VerseGitCommitRequest,
+  VerseGitDiffFile,
+  VerseGitDiffResponse,
+  VerseGitDiffScope,
+  VerseGitDiffstat,
+  VerseGitFileStatus,
+  VerseGitMergeRequest,
+  VerseGitPatch,
+  VerseGitPr,
+  VerseGitPrRequest,
+  VerseGitPushRequest,
+  VerseGitStatus,
+  VerseGitSuggestedAction,
+  VerseGitWorktreeRequest,
+  VerseGitWorktreeResponse,
+  VerseLiveStatus,
+  VerseMindBadge,
+  VersePrChecks,
+  VersePreviewArtifact,
+  VersePreviewArtifactKind,
+  VersePreviewDevServer,
+  VersePreviewDevServerSource,
+  VersePreviewTargetsResponse,
+  VersePrState,
+  VerseQueuedTurn,
+  VerseQueueRequest,
+  VerseQueueResponse,
+  VerseReviewScope,
+  VerseSessionControlDefaults,
+  VerseSessionControlDefaultsUpdate,
+  VerseSessionControlsResponse,
+  VerseSessionControlsUpdate,
+  VerseSessionMeta,
+  VerseSessionMetaResponse,
+  VerseSessionMetaUpdate,
+  VerseTerminalCreateRequest,
+  VerseTerminalFrame,
+  VerseTerminalInputRequest,
+  VerseTerminalListResponse,
+  VerseTerminalResizeRequest,
+  VerseTerminalTab,
+  VerseTurnOutcome,
+  WorkbenchSectionId,
+  WorkbenchSurfaceId,
+  WorkbenchTraySectionId,
+} from '../../core/verse/workbench-types.js';
+export type { AppCatalogEntry, AppCatalogGroup, AppDesktopToggle, AppRuntimeProbe } from '../../core/verse/apps-catalog.js';
+
+/**
  * Verse V2 control plane (routes/verse/autonomy, routes/verse/approvals).
  * `AuditEntry` is the append-only autonomous/sandbox action record behind
  * `GET /api/verse/audit` — the "what did it do while I was asleep" table.

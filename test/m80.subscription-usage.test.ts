@@ -5,8 +5,11 @@
  *
  *   subscriptionUsage(engine)    — codex: reads readCodexRateLimits (mocked);
  *                                   claude: always null (no local signal)
- *   subscriptionAllows(engine)   — false only when KNOWN usage >= maxPercent;
- *                                   true for unknown/under-cap/non-subscription
+ *   subscriptionAllows(engine)   — false when KNOWN usage >= maxPercent AND,
+ *                                   since V3.10, when usage is UNKNOWN (the
+ *                                   Claude fail-open is closed: unknown usage
+ *                                   is not headroom); true for under-cap and
+ *                                   non-subscription engines
  *   isSubscriptionEngine(engine) — true for claude/codex (frontier tier), false
  *                                   for builtin/ollama/etc
  *
@@ -17,7 +20,10 @@
  * never-throws guarantee with null / undefined / corrupt inputs.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { CodexRateLimits } from '../src/core/observability/codex-source.js';
 
 // ---------------------------------------------------------------------------
@@ -67,9 +73,30 @@ function makeRateLimits(
   };
 }
 
+// V3.10: subscriptionAllows now applies the operator budget (~/.ashlr/budget.json),
+// whose default keeps Codex OFF for autonomy. These M80 cases test the WINDOW
+// logic, so each runs under a fresh HOME whose budget switches Codex on with
+// no reserve — leaving maxPercent as the only gate, exactly as in M80.
+let testHome: string;
+let savedHome: string | undefined;
+
 beforeEach(() => {
   mockRateLimitsReturn = null;
   vi.clearAllMocks();
+  savedHome = process.env['HOME'];
+  testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m80-'));
+  process.env['HOME'] = testHome;
+  fs.mkdirSync(path.join(testHome, '.ashlr'), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(testHome, '.ashlr', 'budget.json'), JSON.stringify({
+    mode: 'balanced',
+    seats: { codex: { seatId: 'codex', enabled: true, reservePercent: 0 } },
+    updatedAt: '2026-09-24T00:00:00.000Z',
+  }), { mode: 0o600 });
+});
+
+afterEach(() => {
+  process.env['HOME'] = savedHome;
+  fs.rmSync(testHome, { recursive: true, force: true });
 });
 
 // ===========================================================================
@@ -209,25 +236,48 @@ describe('subscriptionAllows — boundary: exactly at maxPercent', () => {
 });
 
 describe('subscriptionAllows — codex with null rate limits (unknown)', () => {
-  it('returns allowed:true when readCodexRateLimits returns null', () => {
+  it('V3.10: returns allowed:FALSE when readCodexRateLimits returns null (unknown is not headroom)', () => {
     mockRateLimitsReturn = null;
     const result = subscriptionAllows('codex');
-    expect(result.allowed).toBe(true);
+    expect(result.allowed).toBe(false);
     expect(result.reason).toContain('unknown');
   });
 });
 
 describe('subscriptionAllows — claude (no local signal)', () => {
-  it('returns allowed:true for claude regardless of codex limits', () => {
-    // Claude has no local utilization signal — never block it proactively
-    mockRateLimitsReturn = makeRateLimits(99);
+  it('V3.10: the Claude fail-open is closed — no Verse reading means allowed:FALSE', () => {
+    mockRateLimitsReturn = makeRateLimits(10);
     const result = subscriptionAllows('claude');
-    expect(result.allowed).toBe(true);
+    expect(result.allowed).toBe(false);
   });
 
-  it('reason mentions unknown / no local signal', () => {
+  it('reason mentions unknown usage', () => {
     const result = subscriptionAllows('claude');
     expect(result.reason).toContain('unknown');
+  });
+});
+
+describe('subscriptionAllows — codex budget policy (V3.10)', () => {
+  it('Codex is OFF for autonomy by default: a known, under-cap reading is still refused', () => {
+    fs.rmSync(path.join(testHome, '.ashlr', 'budget.json'));
+    mockRateLimitsReturn = makeRateLimits(10);
+    const result = subscriptionAllows('codex');
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain('switched off');
+  });
+
+  it('a stored reserve lowers the ceiling below maxPercent', () => {
+    fs.writeFileSync(path.join(testHome, '.ashlr', 'budget.json'), JSON.stringify({
+      mode: 'balanced',
+      seats: { codex: { seatId: 'codex', enabled: true, reservePercent: 40 } },
+      updatedAt: '2026-09-24T00:00:00.000Z',
+    }));
+    mockRateLimitsReturn = makeRateLimits(65);
+    const blocked = subscriptionAllows('codex');
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.reason).toContain('autonomy stops at 60%');
+    mockRateLimitsReturn = makeRateLimits(55);
+    expect(subscriptionAllows('codex').allowed).toBe(true);
   });
 });
 

@@ -102,6 +102,7 @@ import { tick } from '../src/core/daemon/loop.js';
 import { reserveFleetQuotaUse } from '../src/core/fleet/quota.js';
 import { enroll, unenroll, setKill } from '../src/core/sandbox/policy.js';
 import { createProposal } from '../src/core/inbox/store.js';
+import { writeCapacitySnapshot } from '../src/core/routing/budget-store.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -118,6 +119,35 @@ function makeCfg(overrides?: Partial<AshlrConfig>): AshlrConfig {
     },
     ...overrides,
   } as AshlrConfig;
+}
+
+/**
+ * V3.10: the daemon tick is AUTONOMOUS, so its subscription gate fails closed
+ * when Claude usage is unknown (Mason, 2026-09-24: "unknown usage = NOT
+ * eligible for autonomy"). Tests that exercise the claude frontier path seed
+ * a FRESH, low Claude reading into the tmp HOME's Verse capacity snapshot —
+ * exactly what the Verse account collector writes — so they still test the
+ * routing/quota plumbing rather than the unknown-usage gate. Written after
+ * HOME is pointed at tmpHome, so it never touches the real ~/.ashlr.
+ */
+function seedFreshClaudeReading(observedAt: Date = new Date()): void {
+  writeCapacitySnapshot([
+    {
+      seatId: 'claude',
+      engine: 'claude',
+      label: 'Claude Code',
+      free: false,
+      windows: [
+        { id: 'five_hour', usedPercent: 10, resetsAt: null, resetDescription: null, limitReached: false },
+        { id: 'seven_day', usedPercent: 10, resetsAt: null, resetDescription: null, limitReached: false },
+      ],
+      signedOut: false,
+      reachable: null,
+      contextWindow: 200_000,
+      observedAt: observedAt.toISOString(),
+      spentTodayUsd: null,
+    },
+  ], observedAt);
 }
 
 function initBareGitDir(dir: string): void {
@@ -311,6 +341,7 @@ describe('M48 tick — DEFAULT routing (builtin)', () => {
 
 describe('M48 tick — FRONTIER routing (claude)', () => {
   beforeEach(() => {
+    seedFreshClaudeReading();
     enroll(tmpRepo);
     backlogItems = [makeItem('frontier-1', tmpRepo, { source: 'security', effort: 5, score: 9 })];
     routeResult = { backend: 'claude', tier: 'frontier', reason: 'senior → claude' };
@@ -346,6 +377,9 @@ describe('M48 tick — FRONTIER routing (claude)', () => {
 
 describe('M48 tick — QUOTA FALLBACK (frontier over rate cap → builtin)', () => {
   beforeEach(() => {
+    // Fresh reading so the fallback below is caused by the RATE CAP, not by
+    // the V3.10 unknown-usage gate (which would mask it).
+    seedFreshClaudeReading();
     enroll(tmpRepo);
     backlogItems = [makeItem('quota-1', tmpRepo, { source: 'security', effort: 5, score: 9 })];
     routeResult = { backend: 'claude', tier: 'frontier', reason: 'senior → claude' };
@@ -394,6 +428,34 @@ describe('M48 tick — QUOTA FALLBACK (frontier over rate cap → builtin)', () 
 });
 
 // ===========================================================================
+// 3b. V3.10 — autonomy fails CLOSED on unknown Claude usage
+// ===========================================================================
+
+describe('M48 tick — V3.10 unknown Claude usage (no fresh reading) → builtin', () => {
+  beforeEach(() => {
+    enroll(tmpRepo);
+    backlogItems = [makeItem('unknown-1', tmpRepo, { source: 'security', effort: 5, score: 9 })];
+    routeResult = { backend: 'claude', tier: 'frontier', reason: 'senior → claude' };
+  });
+
+  it('no capacity snapshot: the autonomous tick does NOT dispatch claude', async () => {
+    const cfg = makeCfg({ foundry: { limits: { claude: { window: '1h', max: 100 } } } } as Partial<AshlrConfig>);
+    const result = await tick(cfg, { dryRun: false });
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(result.backends?.['claude']).toBeUndefined();
+  });
+
+  it('a STALE reading (older than the 15-minute freshness window) is unknown, not headroom', async () => {
+    // Same low usage, but observed 20 minutes ago.
+    seedFreshClaudeReading(new Date(Date.now() - 20 * 60_000));
+
+    const cfg = makeCfg({ foundry: { limits: { claude: { window: '1h', max: 100 } } } } as Partial<AshlrConfig>);
+    await tick(cfg, { dryRun: false });
+    expect(mockRunGoal).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
 // 4. AUTO-MERGE PASS — tick.merged reflects the pass result
 // ===========================================================================
 
@@ -414,7 +476,10 @@ describe('M48 tick — AUTO-MERGE PASS plumbing', () => {
     autoMergeMerged = 2;
     const cfg = makeCfg();
     await tick(cfg, { dryRun: false });
-    expect(mockRunAutoMergePass).toHaveBeenCalledWith(cfg);
+    // 3.10: the pass also receives the tick's capability kind so a
+    // `resident-standing` tick takes only the standing gates (never legacy).
+    // This fixture has no activation, so the kind is null.
+    expect(mockRunAutoMergePass).toHaveBeenCalledWith(cfg, { capabilityKind: null });
   });
 
   it('tick has no `merged` field when the pass returns {merged:0}', async () => {

@@ -2,7 +2,20 @@
  * Durable host-merge cancellation protocol foundation.
  *
  * This module authenticates and serializes metadata-only state transitions. It
- * intentionally has no GitHub client, merge consumer, or operational authority.
+ * intentionally has no GitHub client, merge consumer, or operational authority
+ * of its own (every record says so: operationalAuthority / hostAutoMergeEnabled
+ * are literal false).
+ *
+ * V3.10 (unit U3): its one consumer is fleet/host-merge.ts, which runs every
+ * ashlr-fleet App merge as prepare → arm → final re-check → consume → the
+ * SHA-pinned `PUT /pulls/{n}/merge`. `consume` and `revoke` are the only two
+ * terminal transitions and they compare-and-swap on the same file-locked
+ * record, so a Stop in another process that revokes an armed authority
+ * (host-merge.ts revokeArmedHostMerges) is linearized against the merge: if
+ * the revoke lands first the consume is refused and the merge call is never
+ * sent. The identity binds the exact head / base SHAs, the gates digest, the
+ * required-check protection digest, the Stop sentinel's epoch and the policy
+ * epoch, so no receipt can be replayed for a different merge.
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';

@@ -550,6 +550,48 @@ export interface VerseSession {
    * writable directory because a preference moved underneath it.
    */
   memoryEnabled?: boolean;
+  /**
+   * V3.10 ADDITIVE (contract: unit C0; written by C3's engine). The operator's
+   * per-chat effort and permission choices, applied from the NEXT turn — a
+   * running turn keeps the argv it was launched with. Absent (every record
+   * before 3.10, and any key never set) = the engine default: permission mode
+   * `accept-edits`, effort = the CLI's own default.
+   *
+   * A MODEL change is deliberately NOT stored here: it rewrites `model` above,
+   * which every launch already reads — one field, one truth.
+   */
+  controls?: VerseSessionControls;
+}
+
+/**
+ * V3.10. Permission modes a chat can run in (SPEC-310C §0.6), in picker order.
+ *  - `plan`         — the CLI plans and edits nothing.
+ *  - `accept-edits` — the default: edits applied without asking.
+ *  - `auto`         — the CLI's own auto mode.
+ *  - `bypass`       — every check skipped. Shown red and confirmed PER CHAT:
+ *                     never a default, never inherited by a new chat.
+ * Adapters map these to each CLI's spelling (claude `acceptEdits` /
+ * `bypassPermissions`, grok `dontAsk`, …). An engine that cannot honour one
+ * reports it unavailable WITH a reason rather than approximating it. The
+ * in-page "Ask" mode (answering permission prompts in the UI) is 3.11.
+ */
+export const VERSE_PERMISSION_MODES = ['plan', 'accept-edits', 'auto', 'bypass'] as const;
+export type VersePermissionMode = (typeof VERSE_PERMISSION_MODES)[number];
+export const VERSE_DEFAULT_PERMISSION_MODE: VersePermissionMode = 'accept-edits';
+
+/**
+ * V3.10. Reasoning effort, the union across engines — claude `--effort`
+ * (low · medium · high · xhigh · max) and codex `model_reasoning_effort`
+ * (minimal · low · medium · high · xhigh). Each seat offers only the subset
+ * its CLI accepts; the rest come back unavailable with a reason.
+ */
+export const VERSE_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type VerseEffort = (typeof VERSE_EFFORTS)[number];
+
+/** V3.10. `VerseSession.controls` — absent key = engine default (see there). */
+export interface VerseSessionControls {
+  effort?: VerseEffort;
+  permissionMode?: VersePermissionMode;
 }
 
 /** Normalized event stream. `seq` is monotonic per session and is the SSE id. */
@@ -558,12 +600,33 @@ export type VerseEvent =
   | { seq: number; at: string; type: 'turn-started'; turnId: string; pid: number | null }
   | { seq: number; at: string; type: 'text-delta'; turnId: string; text: string }
   | { seq: number; at: string; type: 'assistant-message'; turnId: string; text: string }
-  | { seq: number; at: string; type: 'thinking'; turnId: string; text: string }
+  /**
+   * Reasoning the CLI chose to show. V3.10 ADDITIVE optional fields (absent on
+   * older records = unknown, never "false"/"0"):
+   *  - `redacted`   the CLI sent a signature-only / redacted block, so `text` is
+   *                 empty but the model DID think (the UI says "Thought 12s").
+   *  - `durationMs` wall time the block took to stream, when measured.
+   *  - `kind`       see VerseThinkingKind.
+   */
+  | {
+    seq: number;
+    at: string;
+    type: 'thinking';
+    turnId: string;
+    text: string;
+    redacted?: boolean;
+    durationMs?: number;
+    kind?: VerseThinkingKind;
+  }
   | { seq: number; at: string; type: 'tool-use'; turnId: string; toolUseId: string; name: string; input: unknown }
   | { seq: number; at: string; type: 'tool-result'; turnId: string; toolUseId: string; output: string; isError: boolean }
   | { seq: number; at: string; type: 'usage'; turnId: string; usage: VerseUsage }
   | { seq: number; at: string; type: 'turn-done'; turnId: string; ok: boolean; nativeSessionId: string | null; durationMs: number }
-  | { seq: number; at: string; type: 'error'; turnId: string | null; message: string }
+  /**
+   * `code` (V3.10 ADDITIVE, optional) is a stable machine key for errors the UI
+   * or engine acts on — see VERSE_ERROR_CODES. Absent = uncategorised.
+   */
+  | { seq: number; at: string; type: 'error'; turnId: string | null; message: string; code?: string }
   | { seq: number; at: string; type: 'cancelled'; turnId: string }
   /**
    * V3.9. The CLI compacted its own conversation. Token counts are the CLI's
@@ -606,9 +669,101 @@ export type VerseEvent =
      * Absent on events from before this field existed (treat as `runtime`).
      */
     contextWindowSource?: VerseWindowSource;
-  };
+  }
+  // ── V3.10 TRANSIENT events ────────────────────────────────────────────────
+  // Never written to the session log; fanned out to live SSE listeners only
+  // (see VERSE_TRANSIENT_EVENT_TYPES for the wire rules). A reload therefore
+  // never shows them — everything they convey is either ephemeral (a spinner)
+  // or re-stated by a persisted event at turn end (`thinking`, `usage`).
+  /** A chunk of streamed reasoning text for the in-flight thinking block. */
+  | { seq: number; at: string; type: 'thinking-delta'; turnId: string; text: string }
+  /**
+   * The CLI reports reasoning volume without text (claude
+   * `system/thinking_tokens`). An ESTIMATE, rate-limited by the adapter.
+   */
+  | { seq: number; at: string; type: 'thinking-progress'; turnId: string; estimatedTokens: number }
+  /**
+   * What the running turn is doing right now. `tool` names the running tool
+   * when phase is `tool`. `outTokens`/`tokPerSec` are absent when unmeasured.
+   */
+  | {
+    seq: number;
+    at: string;
+    type: 'progress';
+    turnId: string;
+    phase: VerseProgressPhase;
+    tool?: string;
+    elapsedMs: number;
+    outTokens?: number;
+    tokPerSec?: number;
+  }
+  /** A human-readable notice about the turn's plumbing (API retry, preflight, no-output watchdog). */
+  | { seq: number; at: string; type: 'status'; turnId: string | null; kind: VerseStatusKind; message: string }
+  // ── V3.10 PERSISTED events ────────────────────────────────────────────────
+  /**
+   * The engine recovered from a lost native conversation (e.g. the vendor
+   * thread vanished) by starting a new native session seeded with the handoff
+   * note (`how: 'handoff'`) or a bare new session (`new-native-session`).
+   */
+  | { seq: number; at: string; type: 'recovered'; turnId: string | null; how: VerseRecoveryHow; message: string }
+  /**
+   * The log hit its cap and events with `seq < droppedBefore` were dropped at
+   * a TURN boundary (never mid-turn). `turnId` is always null — it is present
+   * only so code reading `event.turnId` across the union keeps typechecking.
+   */
+  | { seq: number; at: string; type: 'history-truncated'; turnId: null; droppedBefore: number };
 
 export type VerseEventType = VerseEvent['type'];
+
+/** V3.10. `summary` = vendor-summarised reasoning, `raw` = verbatim, `progress` = a heading/placeholder only. */
+export type VerseThinkingKind = 'summary' | 'raw' | 'progress';
+
+/** V3.10. Phase of a running turn, carried by the transient `progress` event. */
+export type VerseProgressPhase = 'thinking' | 'tool' | 'writing' | 'waiting';
+
+/** V3.10. What a transient `status` notice is about. */
+export type VerseStatusKind = 'retry' | 'preflight' | 'watchdog';
+
+/** V3.10. How a `recovered` event restored the conversation. */
+export type VerseRecoveryHow = 'new-native-session' | 'handoff';
+
+/**
+ * V3.10. Known `error.code` values. `code` stays `string` on the wire so an
+ * older client never rejects a newer code; these are the ones Verse acts on.
+ *  - `native-thread-missing` — the vendor conversation to resume no longer exists.
+ *  - `session-in-use`        — the CLI refused because the native session id is locked.
+ */
+export const VERSE_ERROR_CODES = ['native-thread-missing', 'session-in-use'] as const;
+export type VerseErrorCode = (typeof VERSE_ERROR_CODES)[number];
+
+/**
+ * V3.10. Event types that are NEVER persisted — emitted to live SSE listeners
+ * only. Wire rules (A5 server, A6 client):
+ *  - a transient event carries `seq` = the session's LAST PERSISTED seq (the
+ *    counter does not advance), so the stored log stays gap-free and a server
+ *    restart can never reissue a seq a client already saw;
+ *  - its SSE frame has NO `id:` line, so the browser's Last-Event-ID resume
+ *    cursor only ever points at persisted events;
+ *  - clients must not dedupe, store or resume by a transient event's seq.
+ * Browser-safe (plain Set), imported by the web bundle.
+ */
+const TRANSIENT_EVENT_TYPE_LIST = [
+  'thinking-delta',
+  'thinking-progress',
+  'progress',
+  'status',
+] as const satisfies readonly VerseEventType[];
+
+export const VERSE_TRANSIENT_EVENT_TYPES: ReadonlySet<VerseEventType> = new Set<VerseEventType>(TRANSIENT_EVENT_TYPE_LIST);
+
+export type VerseTransientEventType = (typeof TRANSIENT_EVENT_TYPE_LIST)[number];
+export type VerseTransientEvent = Extract<VerseEvent, { type: VerseTransientEventType }>;
+export type VersePersistedEvent = Exclude<VerseEvent, { type: VerseTransientEventType }>;
+
+/** V3.10. Type guard over VERSE_TRANSIENT_EVENT_TYPES. */
+export function isTransientVerseEvent(event: VerseEvent): event is VerseTransientEvent {
+  return VERSE_TRANSIENT_EVENT_TYPES.has(event.type);
+}
 
 /**
  * Which endpoint a LOCAL seat sends its turns to.
@@ -771,6 +926,11 @@ export interface VersePreferences {
   seats: Record<string, { contextMode?: VerseContextMode }>;
   /** Shared project memory. On by default; listed canonical paths opt out. */
   memory: { enabled: boolean; disabledProjects: string[] };
+  /**
+   * V3.10 ADDITIVE. Stream vendor-summarised reasoning on non-local seats
+   * (claude `--thinking-display summarized`). Absent = on (Mason's default).
+   */
+  thinkingDisplay?: boolean;
 }
 
 /**

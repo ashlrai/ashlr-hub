@@ -1,233 +1,323 @@
 /**
- * routes/verse/VerseApp.tsx — the Verse shell (VERSE-CONTRACT-V2 "Shell
- * contract"): a rail down the left, and exactly one section module lazily
- * mounted beside it.
+ * routes/verse/VerseApp.tsx — the Verse 3.10 workbench shell (unit C1;
+ * SPEC-310C §1, SPEC-310B §6).
  *
- *   Chat · Autonomy · Approvals · Usage · Settings · MCP
- *   ⌘1–⌘6 switch · ⌘K quick switcher · ⌘N new chat · ⌘, Settings ·
- *   ⌘\ expand / collapse the rail
+ *   [rail] Command ⌘1 · Fleet ⌘2 · Growth ⌘3 · Mind ⌘4 · Chat ⌘5
+ *          foot: Needs you (⌘J) · the scarcest seat's capacity ring · ⚙ tray
+ *   [main] the current surface, with up to three recent surfaces (and Chat,
+ *          once visited) kept MOUNTED behind it — hidden + inert
+ *   overlays  ⌘K palette · ⌘J Needs-you drawer · ⌘/ shortcuts · the guard
  *
- * THE RAIL HAS TWO WIDTHS. Collapsed it is the 56px icon strip it has always
- * been; expanded it puts each section's LABEL beside its icon. Which one you
- * get is a persisted preference (`railExpanded`), not a responsive guess.
+ * KEEP-ALIVE. Switching surfaces used to unmount the one you left: the
+ * approvals selection, the autonomy scroll and the chat's streams were
+ * rebuilt every time. Now a left surface stays mounted, `hidden` (no paint,
+ * no layout) and `inert` (no focus, no clicks, out of the accessibility
+ * tree), inside a SectionVisibilityProvider that tells its polls to stop
+ * (C0's usePollWhileVisible). Coming back is instant and exactly where you
+ * were. The list is bounded (verse-ui-store KEEP_ALIVE_SURFACES).
  *
- * The two states divide the labelling work between them, and they must not
- * both do it: collapsed, every item carries a `Tooltip` with its name and
- * ⌘-digit, because the glyph alone is a guess; expanded, the name is already
- * on screen and a bubble repeating it is noise, so the tooltips are
- * suppressed. That is what `Tooltip`'s `disabled` prop is for here.
+ * KEYS come from C0's command catalog — the shell handles the GLOBAL ones
+ * (surfaces, palette, drawer, shortcuts, history, recent chats, rail labels,
+ * new chat, theme) through the command bus, so the palette, the native menu
+ * and a key press all run the same handler. Chat and composer keys belong to
+ * C2 / C3 and are never bound here. While the palette is open it owns every
+ * key; while a dialog the shell did not open is up (a confirmation, the
+ * token prompt, New chat), global keys stand down.
  *
- * Those tooltips replaced `title={...}`. The native tooltip was unstyled, slow
- * to appear, invisible to the keyboard, and — the reason it had to go —
- * CLIPPED: the rail is a flex column inside the shell grid, so the browser's
- * own box overlapped the sidebar beside it and got cut off. `Tooltip` portals
- * to <body>, so nothing in this tree can clip it.
+ * SECTIONS resolve through `shell/section-modules.ts`'s glob, one lazy chunk
+ * each; a surface whose module has not landed shows a designed "not in this
+ * build" state (no source paths), and Fleet falls back to the legacy Autonomy
+ * panels until C7 lands its own.
  *
- * The rail is driven entirely by `VERSE_SECTIONS`, including the number of
- * ⌘-digit bindings, so adding a section is one entry there plus a matching
- * `sections/<Module>.tsx` — never an edit here.
- *
- * Each section module exports a named component taking NO props and owns
- * its own data; the shell knows nothing about chat, caps or inboxes. That
- * is why the two chat shortcuts the rail owns (⌘N, ⌘K) are raised as
- * one-shot commands through verse-ui-store instead of being passed down.
- *
- * Section modules are resolved through `import.meta.glob` rather than a
- * static `import()` per section, for one deliberate reason: the non-chat
- * modules are written by other owners and land at different times.
- * A glob yields real per-section code splitting when a module is present
- * and a designed "not built yet" state when it is not, instead of a build
- * that cannot compile until every owner has finished.
- *
- * THE COST OF THAT CHOICE, paid once: a finished section whose file sits
- * outside `sections/` is invisible to the glob and therefore to the app, with
- * nothing failing to say so. MCP shipped that way — complete component,
- * queries, contract, tests and server routes, unreachable — because it lived
- * at `mcp/McpSection.tsx`. The fix was to move the file, not to add a second
- * mounting path; `VerseApp.test.tsx` now mounts every `VERSE_SECTIONS` entry
- * and fails if any of them falls back to `MissingSection`.
+ * NATIVE (C8). The desktop app's menu, tray, clicked notifications and the
+ * system-wide hotkey arrive through app/desktop-shell.ts
+ * `subscribeShellCommands` — the one web seam to the desktop app — already
+ * parsed by the catalog: `open-needs-you`, `new-chat`, `focus-composer`,
+ * `open-session:<id>` (and the 3.9 menu's two). Anchors ("go to that card")
+ * arrive as VERSE_ANCHOR_EVENT and are revealed by shell/reveal-anchor.ts.
  */
-import { Suspense, lazy, useEffect, useMemo, type ComponentType } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
+import { reportThemeToShell, subscribeShellCommands } from '../../app/desktop-shell.js';
 import { RouteErrorBoundary } from '../../components/primitives/RouteErrorBoundary.js';
 import { Tooltip } from '../../components/primitives/Tooltip.js';
-import { reportThemeToShell, subscribeDesktopCommands } from '../../app/desktop-shell.js';
-import { useQuery, useTheme } from '../../data/hooks.js';
-import { inboxListQuery } from '../../data/queries.js';
-import { RailToggleIcon, SECTION_ICON, VerseMark } from './verse-icons.js';
-import { OnboardingFlow } from './onboarding/OnboardingFlow.js';
+import { useToast } from '../../components/primitives/Toast.js';
+import { getMutationToken } from '../../data/auth-store.js';
+import { apiPost } from '../../data/client.js';
+import { useTheme } from '../../data/hooks.js';
+import { VERSE_ACTIVITY_SEEN_PATH, type VerseActivityCompletion } from '../../../core/verse/workbench-types.js';
+import { useOnboarding } from './onboarding/useOnboarding.js';
+import { detectKeyPlatform, findCommand, formatChord, matchCommand } from './shell/command-catalog.js';
+import { GuardHost } from './shell/guarded-action.js';
+import type { RailBadge } from './shell/RailStatus.js';
+import { subscribeAnchorRequests } from './shell/reveal-anchor.js';
+import { executeCatalogCommand, useShellCommands } from './shell/run-command.js';
+import { SectionVisibilityProvider } from './shell/section-visibility.js';
+import { SECTION_MODULES, sectionImporter } from './shell/section-modules.js';
+import { SurfaceNotInBuild, SurfaceSkeleton } from './shell/skeletons.js';
+import { onActivityCompletions, useActivity } from './shell/useActivity.js';
+import { useViewport } from './shell/viewport.js';
 import { useVerseUi } from './useVerseUi.js';
+import { GearIcon, NeedsYouIcon, SECTION_ICON, VerseMark } from './verse-icons.js';
 import {
-  requestVerseCommand,
+  acknowledgeChatMoved,
+  closeVerseOverlay,
+  getVerseUiState,
+  landedModule,
+  openVerseSession,
+  RAIL_SECTIONS,
+  sectionEntry,
   setVerseSection,
-  setVersePendingApprovals,
-  toggleVerseRail,
+  VERSE_ANCHOR_EVENT,
   VERSE_SECTIONS,
   type VerseSectionId,
 } from './verse-ui-store.js';
 import styles from './VerseApp.module.css';
 
-/**
- * Every `sections/*Section.tsx` that exists at build time, lazily. Vite
- * resolves this at build time (one chunk per match, `{}` when there are no
- * matches), so a module that has not been written yet is a missing key, not
- * an unresolved import.
- *
- * EXPORTED so the registration test can walk THIS map rather than re-typing
- * the glob pattern. A test with its own copy of the pattern still passes when
- * the pattern here changes, which is most of how a section goes unreachable.
- */
-export const SECTION_MODULES = import.meta.glob('./sections/*Section.tsx');
+export { SECTION_MODULES };
 
 /**
- * The designed state for a rail slot whose module has not landed (or failed
- * to load). Exported so it can be tested directly: which sections exist
- * changes as the other owners land theirs, and a test that depends on one
- * being absent would rot the day it arrives.
+ * The designed state for a surface whose module has not landed. Exported so
+ * it can be tested directly (which surfaces exist changes as owners land).
  */
-export function MissingSection({ label, moduleName, detail }: { label: string; moduleName: string; detail?: string }) {
-  return (
-    <div className={styles.missing} role="status">
-      <h1 className={styles.missingTitle}>{label} is not wired up yet</h1>
-      <p className={styles.missingBody}>
-        This build has no <code>routes/verse/sections/{moduleName}.tsx</code>. The rail keeps the slot so the
-        section appears the moment that module lands — nothing here is broken, and the other sections still work.
-      </p>
-      {detail ? <p className={styles.missingDetail}>{detail}</p> : null}
-    </div>
-  );
+export function MissingSection({ label, blurb }: { label: string; blurb?: string }) {
+  return <SurfaceNotInBuild label={label} blurb={blurb ?? ''} />;
 }
 
 /**
- * Resolve one rail section to a lazy component. A module that is absent, or
- * that throws while loading, resolves to the honest missing state rather
- * than tearing down the shell.
+ * Resolve one section to a lazy component: the primary module, else its
+ * fallback, else the designed missing state. A module that throws while
+ * loading is logged to the console (never printed to the operator: messages
+ * can carry paths) and shown as missing, never as a torn-down shell.
  */
 function sectionLoader(id: VerseSectionId): () => Promise<{ default: ComponentType }> {
-  const entry = VERSE_SECTIONS.find((s) => s.id === id)!;
-  const importer = SECTION_MODULES[`./sections/${entry.module}.tsx`];
+  const entry = sectionEntry(id);
   return async () => {
-    if (!importer) return { default: () => <MissingSection label={entry.label} moduleName={entry.module} /> };
+    const module = landedModule(id);
+    const importer = module ? sectionImporter(module) : undefined;
+    if (!module || !importer) return { default: () => <MissingSection label={entry.label} blurb={entry.blurb} /> };
     try {
       const mod = (await importer()) as Record<string, unknown>;
-      const exported = mod[entry.module] ?? mod.default;
-      if (typeof exported !== 'function') {
-        return {
-          default: () => (
-            <MissingSection label={entry.label} moduleName={entry.module}
-              detail={`The module loaded but exports no \`${entry.module}\` component.`} />
-          ),
-        };
-      }
-      return { default: exported as ComponentType };
+      const exported = mod[module] ?? mod.default;
+      if (typeof exported === 'function') return { default: exported as ComponentType };
+      console.error(`[verse] ${module} exports no ${module} component`);
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      return { default: () => <MissingSection label={entry.label} moduleName={entry.module} detail={detail} /> };
+      console.error(`[verse] ${entry.label} failed to load`, err);
     }
+    return { default: () => <MissingSection label={entry.label} blurb={entry.blurb} /> };
   };
 }
 
-/** One lazy component per section, created once for the life of the tab. */
+/** One lazy component per section, for the life of the tab. */
 const SECTION_COMPONENTS = new Map<VerseSectionId, ComponentType>(
   VERSE_SECTIONS.map((s) => [s.id, lazy(sectionLoader(s.id))] as const),
 );
 
-/**
- * The rail's Approvals badge has to be right whichever section is mounted —
- * that is the whole point of a badge — so the count is published from the
- * SHELL, not from ApprovalsSection. It rides the exact QueryDef the section
- * itself uses, so the two share one cache entry and one request rather than
- * each fetching the inbox.
- */
-/**
- * ⌘\ — the rail's own expand/collapse binding, written once because JSX
- * neither escapes attribute strings nor text: `shortcut="⌘\\"` renders TWO
- * backslashes, where this constant is a real JS string literal and renders
- * the one the key actually is.
- */
-const RAIL_SHORTCUT = '⌘\\';
+// ---------------------------------------------------------------------------
+// Off the first-paint path (review 3.10 d1)
+// ---------------------------------------------------------------------------
+//
+// WHY: every module this file imports statically is in the chunk a cold chat
+// paint must download and parse before anything shows (SPEC-310A §1: chat
+// critical JS ≤ 350 KB, SPEC-310C "xterm, the charts and the palette each load
+// as separate lazy chunks"). The overlays render only while open, onboarding
+// only on a first run, and the rail's badges and capacity ring only once the
+// activity / capacity reads answer — none of them can draw anything at first
+// paint, so none of them may cost first-paint bytes. Each is its own chunk,
+// fetched after first paint (the overlays on idle, below) so ⌘K still opens
+// without a visible wait.
 
-const PENDING_APPROVALS_QUERY = inboxListQuery({ status: 'pending', limit: 500 });
+const importPalette = () => import('./shell/CommandPalette.js');
+const importDrawer = () => import('./shell/NeedsYouDrawer.js');
+const importShortcuts = () => import('./shell/ShortcutsOverlay.js');
+const importGearTray = () => import('./shell/GearTray.js');
+const importOnboarding = () => import('./onboarding/OnboardingFlow.js');
+const importRailStatus = () => import('./shell/RailStatus.js');
+
+const CommandPalette = lazy(() => importPalette().then((m) => ({ default: m.CommandPalette })));
+const NeedsYouDrawer = lazy(() => importDrawer().then((m) => ({ default: m.NeedsYouDrawer })));
+const ShortcutsOverlay = lazy(() => importShortcuts().then((m) => ({ default: m.ShortcutsOverlay })));
+const GearTray = lazy(() => importGearTray().then((m) => ({ default: m.GearTray })));
+const OnboardingFlow = lazy(() => importOnboarding().then((m) => ({ default: m.OnboardingFlow })));
+
+/** Warm the overlay chunks once the first paint is done, so the first ⌘K / ⌘J never waits on the network. */
+function prefetchOverlays(): () => void {
+  const run = () => {
+    for (const load of [importPalette, importDrawer, importShortcuts]) void load().catch(() => undefined);
+  };
+  const w = window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number; cancelIdleCallback?: (id: number) => void };
+  if (typeof w.requestIdleCallback === 'function') {
+    const id = w.requestIdleCallback(run, { timeout: 3_000 });
+    return () => w.cancelIdleCallback?.(id);
+  }
+  const id = window.setTimeout(run, 1_500);
+  return () => window.clearTimeout(id);
+}
+
+type RailStatusModule = typeof import('./shell/RailStatus.js');
+let railStatusModule: RailStatusModule | null = null;
+
+/**
+ * The rail badge / capacity module, loaded after first paint. RailStatus
+ * pulls the usage contract and capacity-strip model (~30 KB) for the ring;
+ * the badges it draws depend on the activity read, which is not back at first
+ * paint either, so waiting for the module costs nothing visible. Null until
+ * loaded — the rail then draws no badge, which RailStatus already defines as
+ * "not known yet", never "zero".
+ */
+function useRailStatusModule(): RailStatusModule | null {
+  const [mod, setMod] = useState<RailStatusModule | null>(railStatusModule);
+  useEffect(() => {
+    if (mod) return undefined;
+    let alive = true;
+    void importRailStatus().then(
+      (m) => {
+        railStatusModule = m;
+        if (alive) setMod(m);
+      },
+      (err) => console.error('[verse] rail status failed to load', err),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [mod]);
+  return mod;
+}
+
+/** A dialog the shell did not open (a confirmation, the token prompt, New chat) is up. */
+function foreignModalOpen(): boolean {
+  return [...document.querySelectorAll('[aria-modal="true"]')].some(
+    (el) => !el.hasAttribute('data-verse-overlay') && !el.querySelector('[data-verse-overlay]'),
+  );
+}
+
+const COMPLETION_TOAST_LIMIT = 3;
 
 export function VerseApp() {
   const ui = useVerseUi();
   const theme = useTheme();
-  const Section = SECTION_COMPONENTS.get(ui.section)!;
+  const toast = useToast();
+  const activity = useActivity();
+  const { compact } = useViewport();
+  const platform = useMemo(() => detectKeyPlatform(), []);
+  const gearRef = useRef<HTMLButtonElement>(null);
+  const [trayOpen, setTrayOpen] = useState(false);
+  const data = activity.data;
+  const rail = useRailStatusModule();
+  const onboarding = useOnboarding();
 
-  const pendingApprovals = useQuery(PENDING_APPROVALS_QUERY);
-  const pendingCount = pendingApprovals.data?.pending;
+  useEffect(() => prefetchOverlays(), []);
+  // The gear tray is fetched right after mount (not on idle) and then stays
+  // MOUNTED closed, exactly as before it was split out: its open effect
+  // schedules the first item's focus on a frame, and mounting it only on the
+  // click shifted that frame behind the operator's first arrow key.
+  const [gearReady, setGearReady] = useState(false);
   useEffect(() => {
-    // Only publish an observed number. While the read is in flight or has
-    // failed the badge stays as it was rather than flashing to zero, which
-    // would read as "nothing is waiting for you" — a false all-clear.
-    if (typeof pendingCount === 'number') setVersePendingApprovals(pendingCount);
-  }, [pendingCount]);
+    let alive = true;
+    void importGearTray().then(
+      () => { if (alive) setGearReady(true); },
+      (err) => console.error('[verse] settings tray failed to load', err),
+    );
+    return () => { alive = false; };
+  }, []);
 
-  // ⌘1–⌘n sections (n = VERSE_SECTIONS.length) · ⌘K quick switcher ·
-  // ⌘N new chat · ⌘, Settings · ⌘\ expand/collapse the rail.
-  // Held at the document so they work wherever focus is, except inside a
-  // dialog's own text field where the browser's own editing shortcuts win.
+  // ── the global commands the shell serves, and run-command's toasts ─────
+  useShellCommands();
+
+  // ── global keys ─────────────────────────────────────────────────────────
   useEffect(() => {
-    function onKey(event: globalThis.KeyboardEvent) {
-      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
-      const index = Number.parseInt(event.key, 10);
-      if (Number.isInteger(index) && index >= 1 && index <= VERSE_SECTIONS.length) {
-        event.preventDefault();
-        setVerseSection(VERSE_SECTIONS[index - 1]!.id);
-        return;
-      }
-      switch (event.key.toLowerCase()) {
-        case 'k':
-          event.preventDefault();
-          requestVerseCommand('quick-switcher');
-          break;
-        case 'n':
-          event.preventDefault();
-          requestVerseCommand('new-chat');
-          break;
-        case ',':
-          event.preventDefault();
-          setVerseSection('settings');
-          break;
-        case '\\':
-          // Not claimed by the native menu bar (desktop/README.md §5 lists
-          // what is), so it reaches the page in the app as well as in a browser.
-          event.preventDefault();
-          toggleVerseRail();
-          break;
-        default:
-          break;
-      }
+    function onKey(event: KeyboardEvent) {
+      if (event.defaultPrevented) return;
+      if (getVerseUiState().overlay === 'palette') return;
+      if (foreignModalOpen()) return;
+      const command = matchCommand(event, ['global']);
+      if (!command) return;
+      // preventDefault BEFORE running: the chat's key fallback and the
+      // transcript's ⌥↑/⌥↓ skip default-prevented events (C2), which is what
+      // keeps one press from running two handlers. stopPropagation is not
+      // used — other listeners still see the event, they just know it is taken.
+      event.preventDefault();
+      executeCatalogCommand(command.id, { via: 'key' });
     }
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, []);
 
-  // Desktop shell: the native menu bar owns ⌘, and ⇧⌘L and forwards them as a
-  // window event rather than IPC, so this is inert in a browser. ⌘, is also
-  // bound above for the browser; the native menu swallows it in the app, which
-  // is why the menu has to hand it back.
-  useEffect(() => subscribeDesktopCommands((command) => {
-    if (command === 'open-settings') setVerseSection('settings');
-    else if (command === 'toggle-theme') theme.cycle();
-  }), [theme]);
-
-  // Report the PAINTED theme so the native window can pre-paint its background
+  // ── the desktop shell: menu, tray, notifications, hotkey ────────────────
+  useEffect(
+    () =>
+      subscribeShellCommands((command) => {
+        if (command.kind === 'open-session') {
+          closeVerseOverlay();
+          openVerseSession(command.sessionId);
+          return;
+        }
+        // The tray's "New chat" and the hotkey's "focus the composer" must
+        // land in the composer: an open palette or shortcuts sheet would keep
+        // focus (and every key) for itself. The drawer opener, the theme and
+        // Settings leave overlays alone — open-needs-you REPLACES the overlay.
+        if (command.name === 'new-chat' || command.name === 'focus-composer') closeVerseOverlay();
+        executeCatalogCommand(command.commandId, { via: 'menu' });
+      }),
+    [],
+  );
+  // "Go to that card": whoever raises it (drawer, Command, Mind), the shell reveals it.
+  useEffect(() => subscribeAnchorRequests(VERSE_ANCHOR_EVENT), []);
+  // Report the PAINTED theme so the native window pre-paints its background
   // on the next cold launch instead of flashing white. No-op in a browser.
   useEffect(() => { reportThemeToShell(theme.theme); }, [theme.theme]);
 
-  const themeTitle = useMemo(() => `Theme: ${theme.theme} — click to cycle`, [theme.theme]);
-  const expanded = ui.railExpanded;
-  const railToggleLabel = expanded ? 'Collapse rail' : 'Expand rail';
+  // ── one-time announcements ──────────────────────────────────────────────
+  useEffect(() => {
+    if (!ui.announceChatMoved) return;
+    const chat = findCommand('surface.chat')?.keys[0];
+    toast.show(`Chat moved to ${chat ? formatChord(chat, platform) : '⌘5'} — Command, Fleet, Growth and Mind come first now.`);
+    acknowledgeChatMoved();
+  }, [ui.announceChatMoved, toast, platform]);
+
+  // ── in-app "Finished / Failed" (the window is visible; C8 notifies when it is not) ─
+  useEffect(
+    () =>
+      onActivityCompletions((batch: VerseActivityCompletion[]) => {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+        const s = getVerseUiState();
+        const news = batch.filter((c) => !(s.section === 'chat' && s.activeSessionId === c.sessionId));
+        const failed = news.filter((c) => c.outcome === 'failed');
+        for (const c of failed.slice(0, COMPLETION_TOAST_LIMIT)) toast.show(`Failed: ${c.title}`, 'danger');
+        const done = news.filter((c) => c.outcome === 'ok');
+        if (done.length > COMPLETION_TOAST_LIMIT) toast.show(`${done.length} chats finished.`, 'success');
+        else for (const c of done) toast.show(`Finished: ${c.title}`, 'success');
+      }),
+    [toast],
+  );
+
+  // ── Mind's dot clears when Mind is opened ───────────────────────────────
+  const [mindSeenLocal, setMindSeenLocal] = useState<string | null>(null);
+  const latestMemoAt = data?.mind?.latestMemoAt ?? null;
+  useEffect(() => {
+    if (ui.section !== 'mind' || !data?.mind?.unseen || !latestMemoAt) return;
+    setMindSeenLocal(latestMemoAt);
+    // Best-effort on the server too (it needs a held token; reading Mind is
+    // not worth a token prompt — the local mark already clears the dot).
+    const token = getMutationToken();
+    if (token) void apiPost<unknown>(VERSE_ACTIVITY_SEEN_PATH, { surface: 'mind' }, token).catch(() => undefined);
+  }, [ui.section, data?.mind?.unseen, latestMemoAt]);
+
+  const expanded = ui.railExpanded && !compact;
+  const needsYouCount = data ? data.counts.needsYou : null;
+  const BadgeMark = rail?.RailBadgeMark ?? null;
+  const shortcut = (id: string) => {
+    const chord = findCommand(id)?.keys[0];
+    return chord ? formatChord(chord, platform) : undefined;
+  };
 
   return (
-    <div className={styles.shell} data-rail={expanded ? 'expanded' : 'collapsed'}>
+    <div className={styles.shell} data-rail={expanded ? 'expanded' : 'collapsed'} data-compact={compact || undefined}>
       <nav className={styles.rail} data-rail={expanded ? 'expanded' : 'collapsed'} aria-label="Verse sections">
         {/*
           Desktop shell: the window's top 48px is overlaid by the OS title bar
           and the traffic lights. The rail clears it in CSS; this strip makes
-          the cleared space drag the window. It is 0px tall in a browser, where
-          `--app-titlebar-height` is not set, so it is inert there.
-          See desktop/README.md → "Desktop shell contract".
+          the cleared space drag the window. 0px tall in a browser, where
+          `--app-titlebar-height` is not set. See desktop/README.md.
         */}
         <span className={styles.railDragStrip} data-app-region="drag" aria-hidden="true" />
         <Tooltip label="Ashlr Verse" placement="right" disabled={expanded}>
@@ -237,30 +327,32 @@ export function VerseApp() {
           </span>
         </Tooltip>
         <ul className={styles.railList}>
-          {VERSE_SECTIONS.map((entry, index) => {
+          {RAIL_SECTIONS.map((entry) => {
             const IconComponent = SECTION_ICON[entry.id];
-            const pending = entry.id === 'approvals' ? ui.pendingApprovals : 0;
+            // Mind's dot also clears on sight in THIS window, whether or not
+            // the server-side mark could be written (it needs a held token).
+            const mindSeenHere = entry.id === 'mind' && latestMemoAt !== null && mindSeenLocal === latestMemoAt;
+            const badge: RailBadge | null = mindSeenHere || !rail ? null : rail.railBadgeFor(entry.id, data);
             const active = ui.section === entry.id;
-            const shortcut = `⌘${index + 1}`;
+            const keys = shortcut(`surface.${entry.id}`);
             return (
               <li key={entry.id}>
-                {/*
-                  The accessible NAME stays on the button in both states: the
-                  tooltip is a description, never the only place the name
-                  exists, and the pending count rides that name so it is
-                  announced rather than being a dot only sighted users get.
-                */}
-                <Tooltip label={entry.label} shortcut={shortcut} placement="right" disabled={expanded}>
-                  <button type="button" className={styles.railButton} aria-current={active ? 'page' : undefined}
+                {/* The name stays on the button; badges ride it so they are announced, not just drawn. */}
+                <Tooltip label={entry.label} shortcut={keys} placement="right" disabled={expanded || compact}>
+                  <button
+                    type="button"
+                    className={styles.railButton}
+                    aria-current={active ? 'page' : undefined}
                     data-section={entry.id}
-                    aria-label={pending > 0 ? `${entry.label}, ${pending} pending` : entry.label}
-                    onClick={() => setVerseSection(entry.id)}>
+                    aria-label={`${entry.label}${badge?.spoken ?? ''}`}
+                    onClick={() => setVerseSection(entry.id)}
+                  >
                     <span className={styles.railIcon}>
                       <IconComponent />
-                      {pending > 0 ? <span className={styles.railDot} data-pending={pending} aria-hidden="true" /> : null}
+                      {badge && BadgeMark ? <BadgeMark badge={badge} /> : null}
                     </span>
-                    {expanded ? <span className={styles.railLabel}>{entry.label}</span> : null}
-                    {expanded ? <span className={styles.railKey} aria-hidden="true">{shortcut}</span> : null}
+                    {expanded || compact ? <span className={styles.railLabel}>{entry.label}</span> : null}
+                    {expanded && keys ? <span className={styles.railKey} aria-hidden="true">{keys}</span> : null}
                   </button>
                 </Tooltip>
               </li>
@@ -268,74 +360,115 @@ export function VerseApp() {
           })}
         </ul>
         <div className={styles.railFoot}>
-          <Tooltip label={railToggleLabel} shortcut={RAIL_SHORTCUT} placement="right" disabled={expanded}>
-            <button type="button" className={styles.railButton} onClick={toggleVerseRail}
-              aria-label={railToggleLabel} aria-expanded={expanded} data-rail-toggle={expanded ? 'expanded' : 'collapsed'}>
-              <span className={styles.railIcon}><RailToggleIcon expanded={expanded} /></span>
-              {expanded ? <span className={styles.railLabel}>{railToggleLabel}</span> : null}
-              {expanded ? <span className={styles.railKey} aria-hidden="true">{RAIL_SHORTCUT}</span> : null}
+          <Tooltip label="Needs you" shortcut={shortcut('needs-you.open')} placement="right" disabled={expanded || compact}>
+            <button
+              type="button"
+              className={styles.railButton}
+              aria-label={needsYouCount === null ? 'Needs you' : `Needs you, ${needsYouCount}`}
+              aria-expanded={ui.overlay === 'needs-you'}
+              data-needs-you={needsYouCount ?? undefined}
+              onClick={() => executeCatalogCommand('needs-you.open', { via: 'button' })}
+            >
+              <span className={styles.railIcon}>
+                <NeedsYouIcon />
+                {needsYouCount && BadgeMark ? <BadgeMark badge={{ kind: 'count', count: needsYouCount, spoken: '', tone: 'warning' }} /> : null}
+              </span>
+              {expanded || compact ? <span className={styles.railLabel}>{compact ? 'Inbox' : 'Needs you'}</span> : null}
             </button>
           </Tooltip>
-          <Tooltip label={themeTitle} placement="right" disabled={expanded}>
-            <button type="button" className={styles.railButton} onClick={theme.cycle}
-              aria-label={themeTitle} data-theme-toggle={theme.theme}>
-              <span className={styles.railIcon}><ThemeGlyph preference={theme.theme} /></span>
-              {/*
-                Short on screen, descriptive to a screen reader — and the
-                accessible name CONTAINS the visible text, which is what
-                WCAG 2.5.3 (Label in Name) asks for, so "click Theme system"
-                still hits this control by voice.
-              */}
-              {expanded ? <span className={styles.railLabel}>Theme: {theme.theme}</span> : null}
+          {rail && !compact ? <RailCapacityButton rail={rail} expanded={expanded} /> : null}
+          <Tooltip label="Settings and more" placement="right" disabled={expanded || compact || trayOpen}>
+            <button
+              ref={gearRef}
+              type="button"
+              className={styles.railButton}
+              aria-label="Settings and more"
+              aria-haspopup="menu"
+              aria-expanded={trayOpen}
+              data-gear
+              data-active={['settings', 'apps', 'usage'].includes(ui.section) || undefined}
+              onClick={() => setTrayOpen((v) => !v)}
+            >
+              <span className={styles.railIcon}><GearIcon /></span>
+              {expanded || compact ? <span className={styles.railLabel}>{compact ? 'More' : 'Settings'}</span> : null}
             </button>
           </Tooltip>
         </div>
       </nav>
+
       {/*
-        The ONE <main id="main-content"> for the whole Verse shell. SkipToContent
-        imperatively focuses that id, and it used to live inside ChatSection — so
-        "Skip to content" worked in Chat and silently did nothing in Autonomy,
-        Approvals, Usage and Settings, leaving the keyboard user on <body> with the
-        rail still ahead of them. Owning it here makes the landmark section-
-        independent: every lazy-mounted section inherits a real skip target, and
-        there is exactly one <main> on the page instead of zero or one.
+        The ONE <main id="main-content"> for the whole shell (SkipToContent
+        focuses it). Every mounted surface lives inside it; only the current
+        one is visible.
       */}
       <main className={styles.section} data-section={ui.section} id="main-content" tabIndex={-1}>
-        <RouteErrorBoundary resetKey={ui.section}>
-          <Suspense fallback={<SectionFallback />}>
-            <Section />
-          </Suspense>
-        </RouteErrorBoundary>
+        {ui.mounted.map((id) => (
+          <SurfaceHost key={id} id={id} active={id === ui.section} />
+        ))}
       </main>
+
+      {/* Lazy chunks (see "Off the first-paint path"); each mounts only while it can draw. */}
+      <Suspense fallback={null}>
+        {gearReady || trayOpen ? <GearTray open={trayOpen} anchorRef={gearRef} onClose={() => setTrayOpen(false)} compact={compact} /> : null}
+      </Suspense>
+      <Suspense fallback={null}>
+        {ui.overlay === 'palette' ? <CommandPalette /> : null}
+        {ui.overlay === 'needs-you' ? <NeedsYouDrawer /> : null}
+        {ui.overlay === 'shortcuts' ? <ShortcutsOverlay /> : null}
+      </Suspense>
+      <GuardHost />
       {/*
-        First run only, and OUTSIDE the error boundary's subtree on purpose:
-        it is a docked card, not a modal — no backdrop, no focus trap — so the
-        rail and the mounted section stay fully usable while it is open, and a
-        section that throws does not take the guidance down with it. It renders
-        nothing at all once the operator has skipped or finished it
-        (onboarding/onboarding-store.ts).
+        First run only, outside the surfaces: a docked card, not a modal, so
+        the rail and the surface stay usable while it is open.
       */}
-      <OnboardingFlow />
+      <Suspense fallback={null}>{onboarding.open ? <OnboardingFlow /> : null}</Suspense>
     </div>
   );
 }
 
 /**
- * Theme is a three-state preference, so the glyph says which — a half-moon
- * for the two explicit choices and a ring for "follow the system" (never
- * color alone, DESIGN §6).
+ * The rail foot's capacity ring for the scarcest seat. Its own component so
+ * `useRailCapacity` (a hook from the lazily loaded RailStatus module) is only
+ * called once that module is here, always in the same place.
  */
-function ThemeGlyph({ preference }: { preference: string }) {
+function RailCapacityButton({ rail, expanded }: { rail: RailStatusModule; expanded: boolean }) {
+  const capacity = rail.useRailCapacity();
+  if (!capacity) return null;
+  const { CapacityRing, describeRailCapacity } = rail;
   return (
-    <svg viewBox="0 0 16 16" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.4}
-      strokeLinejoin="round" strokeLinecap="round" aria-hidden="true" focusable="false">
-      <circle cx="8" cy="8" r="4.2" />
-      {preference === 'dark' ? <path d="M8 3.8a4.2 4.2 0 0 0 0 8.4Z" fill="currentColor" stroke="none" /> : null}
-      {preference === 'light' ? <path d="M8 1.6v1M8 13.4v1M14.4 8h-1M2.6 8h-1M12.5 3.5l-.7.7M4.2 11.8l-.7.7M12.5 12.5l-.7-.7M4.2 4.2l-.7-.7" /> : null}
-    </svg>
+    <Tooltip label={describeRailCapacity(capacity)} placement="right" disabled={expanded}>
+      <button
+        type="button"
+        className={styles.railButton}
+        aria-label={`Capacity — ${describeRailCapacity(capacity)}`}
+        data-capacity={Math.round(capacity.usedPercent)}
+        onClick={() => setVerseSection('apps', `seat:${capacity.seatId}`)}
+      >
+        <span className={styles.railIcon}>
+          <CapacityRing badge={capacity} />
+        </span>
+        {expanded ? (
+          <span className={styles.railLabel}>
+            {capacity.label} {capacity.limitReached ? 'limit' : `${Math.round(capacity.usedPercent)}%`}
+          </span>
+        ) : null}
+      </button>
+    </Tooltip>
   );
 }
 
-function SectionFallback() {
-  return <div className={styles.loading} role="status" aria-live="polite">Loading…</div>;
+function SurfaceHost({ id, active }: { id: VerseSectionId; active: boolean }) {
+  const Section = SECTION_COMPONENTS.get(id)!;
+  const entry = sectionEntry(id);
+  return (
+    <div className={styles.surface} data-surface={id} hidden={!active} inert={!active}>
+      <SectionVisibilityProvider visible={active}>
+        <RouteErrorBoundary resetKey={id}>
+          <Suspense fallback={<SurfaceSkeleton section={id} label={entry.label} />}>
+            <Section />
+          </Suspense>
+        </RouteErrorBoundary>
+      </SectionVisibilityProvider>
+    </div>
+  );
 }

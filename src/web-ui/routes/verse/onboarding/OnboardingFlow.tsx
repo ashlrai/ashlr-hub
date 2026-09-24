@@ -15,11 +15,11 @@
  *    open. Escape closes it, so does Skip, so does the close button, and any
  *    of those three silences it for good.
  *
- * 2. It never asserts more than it read. Steps 2 and 3 show real state from
- *    the same two routes the Usage section reads, through the same
- *    narrowers, with the same honesty rules — a 404 is "not reported", an
- *    unanswered probe is "no answer", and neither is a green check. All of
- *    that logic is in ./onboarding-model.ts, tested without a DOM.
+ * 2. It never asserts more than it read. Step 2 is C6's shared capacity
+ *    strip (no reading is "no reading", never zero); step 3 reads the same
+ *    local-models route Usage reads, through the same narrower — an
+ *    unanswered probe is "no answer", never a green check (logic in
+ *    ./onboarding-model.ts, tested without a DOM).
  *
  * 3. It costs no extra requests on the common path. Each data step mounts
  *    its own query only when the operator reaches it, and those queries are
@@ -28,7 +28,7 @@
  *    within the freshness window (data/hooks.ts DEFAULT_QUERY_FRESH_MS).
  */
 import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
-import { Button, Tag } from '../../../components/primitives/index.js';
+import { Button } from '../../../components/primitives/index.js';
 import {
   IconAlert,
   IconCheckCircle,
@@ -40,13 +40,13 @@ import {
 } from '../../../components/primitives/icons.js';
 import { useQuery } from '../../../data/hooks.js';
 import { SECTION_ICON } from '../verse-icons.js';
-import { requestVerseCommand, setVerseSection, VERSE_SECTIONS } from '../verse-ui-store.js';
-import { verseAccountsQuery, verseLocalModelsQuery } from '../usage/usage-queries.js';
-import { projectAccountsSnapshot, projectLocalModels } from '../usage/usage-contract.js';
+import { RAIL_SECTIONS, requestVerseCommand, setVerseSection } from '../verse-ui-store.js';
+import { LiveCapacityStrip } from '../usage/CapacityStrip.js';
+import { verseLocalModelsQuery } from '../usage/usage-queries.js';
+import { projectLocalModels } from '../usage/usage-contract.js';
 import {
   ONBOARDING_STEPS,
   STOP_CONTROLS,
-  buildAccountsFindings,
   buildLocalFinding,
   clampStep,
   type FindingTone,
@@ -81,15 +81,6 @@ function StepBody({ children }: { children: ReactNode }) {
 // Step 1 — what the rail is
 // ---------------------------------------------------------------------------
 
-const SECTION_BLURB: Record<string, string> = {
-  chat: 'Talk to a seat. Sessions are grouped by project and resume where they stopped.',
-  autonomy: 'The human-out-of-the-loop cockpit: the loop, its budget, its scope, and what it did while you were away.',
-  approvals: 'Everything the loop produced that is waiting on you. Approving a PR proposal pushes a branch.',
-  usage: 'Which account you can actually use right now, and what it costs.',
-  settings: 'Theme, accent, density, font — and this tour again whenever you want it.',
-  mcp: 'What each seat would actually load as an MCP server, and whether any provider CLI has drifted off its pin.',
-};
-
 function WelcomeStep() {
   return (
     <StepBody>
@@ -97,8 +88,13 @@ function WelcomeStep() {
         Verse is the desktop surface over this machine’s agentic fleet. Everything it shows comes from one local
         server — no session, token or artifact leaves this machine.
       </p>
+      {/*
+        The five rail surfaces, in ⌘1–⌘5 order, with the same one-line blurbs
+        the palette uses (VERSE_SECTIONS) — one description per surface, not
+        a second copy that drifts. Settings, Apps and Usage live in the gear.
+      */}
       <ul className={styles.sections}>
-        {VERSE_SECTIONS.map((entry, index) => {
+        {RAIL_SECTIONS.map((entry, index) => {
           const Icon = SECTION_ICON[entry.id];
           return (
             <li key={entry.id} className={styles.sectionRow}>
@@ -109,12 +105,16 @@ function WelcomeStep() {
                 <span className={styles.sectionName}>
                   {entry.label} <kbd className={styles.kbd}>⌘{index + 1}</kbd>
                 </span>
-                <span className={styles.sectionBlurb}>{SECTION_BLURB[entry.id]}</span>
+                <span className={styles.sectionBlurb}>{entry.blurb}</span>
               </span>
             </li>
           );
         })}
       </ul>
+      <p className={styles.sectionBlurb}>
+        <kbd className={styles.kbd}>⌘K</kbd> runs anything by name · <kbd className={styles.kbd}>⌘J</kbd> is everything
+        waiting on you · Settings, Apps &amp; Accounts and Usage are under the gear.
+      </p>
     </StepBody>
   );
 }
@@ -123,44 +123,36 @@ function WelcomeStep() {
 // Step 2 — seats
 // ---------------------------------------------------------------------------
 
+/**
+ * Step 2 mounts C6's shared LiveCapacityStrip — the SAME projection Apps &
+ * Accounts, Usage, the new-chat dialog and the rail's capacity ring read — so
+ * the tour can never describe a seat differently from the rest of the app
+ * (3.9 had its own accounts narrower here, which drifted from Usage). A seat
+ * that is signed out or out of usage shows the exact command that fixes it,
+ * straight from A2's health report; nothing is run from the tour.
+ */
 function AccountsStep() {
-  const read = useQuery(verseAccountsQuery);
-  const findings = useMemo(
-    () =>
-      buildAccountsFindings({
-        snapshot: read.data?.available ? projectAccountsSnapshot(read.data.raw) : null,
-        loading: read.data === undefined && read.status !== 'error',
-        unavailableReason: read.data?.reason ?? read.error?.message ?? null,
-      }),
-    [read.data, read.status, read.error],
-  );
-
   return (
     <StepBody>
-      <p className={styles.lead}>{findings.summary}</p>
-      {findings.findings === null ? null : (
-        <ul className={styles.findings}>
-          {findings.findings.map((finding) => (
-            <li key={finding.id} className={styles.finding}>
-              <div className={styles.findingHead}>
-                <Tag engine={finding.provider}>{finding.label}</Tag>
-                <ToneMark tone={finding.tone} label={finding.state} />
-              </div>
-              <p className={styles.findingDetail}>{finding.detail}</p>
-              {finding.fix ? (
-                <p className={styles.findingFix}>
-                  <span className={styles.fixLabel}>Fix</span>
-                  <code className={styles.code}>{finding.fix}</code>
-                </p>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      )}
-      {findings.caveat ? <p className={styles.caveat}>{findings.caveat}</p> : null}
+      <LiveCapacityStrip
+        density="compact"
+        headline
+        local="collapse"
+        // The step's own heading ("Your seats") names the strip: a second,
+        // hidden heading with the same words is noise to a screen reader.
+        labelledBy="verse-onboarding-title"
+        emptyText="No seats reported yet. Connect an account in Apps & Accounts, or start Ollama for local models."
+        renderActions={(row) =>
+          row.connection?.fixCommand ? (
+            <p className={styles.findingFix}>
+              <span className={styles.fixLabel}>Fix</span>
+              <code className={styles.code}>{row.connection.fixCommand.join(' ')}</code>
+            </p>
+          ) : null
+        }
+      />
       <p className={styles.aside}>
-        The full per-window picture — resets, credits, limits — lives in Usage{' '}
-        <kbd className={styles.kbd}>⌘4</kbd>.
+        Every window, reset and reserve lives in Apps &amp; Accounts, under the gear.
       </p>
     </StepBody>
   );
@@ -210,7 +202,7 @@ function StopsStep() {
   return (
     <StepBody>
       <p className={styles.lead}>
-        Autonomy <kbd className={styles.kbd}>⌘2</kbd> has three stop controls. They are not interchangeable, and the
+        Fleet <kbd className={styles.kbd}>⌘2</kbd> has three stop controls. They are not interchangeable, and the
         difference is the most important thing on this screen.
       </p>
       <ul className={styles.findings}>

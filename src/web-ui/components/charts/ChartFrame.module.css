@@ -1,0 +1,180 @@
+.frame {
+  margin: 0;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  /* V3.10: 16px (12px compact density) — the card-pad token follows density. */
+  padding: var(--card-pad, var(--space-4));
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-3);
+}
+
+.actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  margin-left: auto;
+}
+
+.menuWrap {
+  position: relative;
+  display: inline-flex;
+}
+
+/* The ⋯ button: quiet until hovered or focused, but always a real control. */
+.more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(var(--control-h-xs, 20px) + 4px);
+  height: calc(var(--control-h-xs, 20px) + 4px);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+
+.more:hover,
+.more[aria-expanded='true'] {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.more:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  z-index: var(--z-dropdown);
+  display: flex;
+  flex-direction: column;
+  min-width: 176px;
+  padding: var(--space-1);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-raised);
+  box-shadow: var(--shadow-menu);
+}
+
+.menuItem {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  text-align: left;
+  cursor: pointer;
+}
+
+.menuItem:hover,
+.menuItem:focus-visible {
+  background: var(--bg-hover);
+  outline: none;
+}
+
+.check {
+  width: 1em;
+  color: var(--text-secondary);
+}
+
+.hint {
+  margin-left: auto;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs, 3px);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size);
+}
+
+.heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.title {
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+
+.description {
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+
+.plot {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.table {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.caveat {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--status-unknown-bg);
+  color: var(--status-unknown-fg);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-sm-line);
+}
+
+.state {
+  margin: 0;
+  padding: var(--space-6) var(--space-3);
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: var(--text-sm-size);
+}
+
+.dark {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: center;
+}
+
+.darkTitle {
+  margin: 0;
+  color: var(--text-secondary);
+  font-weight: var(--font-weight-semibold);
+}
+
+.darkBody {
+  margin: 0;
+  font-size: var(--text-xs-size);
+  max-width: 44ch;
+}
+
+.unknown {
+  color: var(--status-unknown-fg);
+}

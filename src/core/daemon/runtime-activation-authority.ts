@@ -19,7 +19,13 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
-import { canonicalizeDaemonActivationValue } from './activation-permit.js';
+// WHY the leaf module and not activation-permit.js: activation-permit now asks
+// the standing policy whether live conductors may run, so importing it drags
+// in effective-config → config.js. The explicit `ashlr daemon activate` path
+// must stay read-only under a poisoned HOME and load no config at all
+// (test/daemon-cli-help-safety.test.ts). canonicalJson is the exact algorithm
+// activation-permit re-exports, so the signed bytes are unchanged.
+import { canonicalJson as canonicalizeDaemonActivationValue } from '../authority/canonical-json.js';
 import {
   parseRuntimeReleaseEvidenceEnvelope,
   parseRuntimeReleaseEvidenceTrustRoot,

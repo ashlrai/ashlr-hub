@@ -99,8 +99,12 @@ export function normalizeCodexResourceObservation(
       if (primary === undefined || secondary === undefined) return null;
       // 100 is a hard-denial sentinel when the provider classifies a reached
       // limit, not an invented measurement or a claim of remaining tokens.
+      // `limitReached` keeps that provenance: without it the sentinel is
+      // byte-identical to a MEASURED 100 (clamped above), and Verse's
+      // exhaustion rule cannot tell a provider denial from a full reading.
+      // Only the flag crosses, never the provider's free-text type string.
       if (reached !== undefined && reached !== null) {
-        windows.push({ id: primaryId, usedPercent: 100, resetsAt: primary?.resetsAt ?? null });
+        windows.push({ id: primaryId, usedPercent: 100, resetsAt: primary?.resetsAt ?? null, limitReached: true });
       } else if (primary) windows.push(primary);
       if (secondary) windows.push(secondary);
       if (!primary && !secondary && (reached === undefined || reached === null)) {

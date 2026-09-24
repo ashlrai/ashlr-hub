@@ -64,7 +64,8 @@ import {
   releaseProposalMutationLock,
   type ProposalMutationLock,
 } from '../inbox/proposal-mutation-lock.js';
-import { enroll, listEnrolled } from '../sandbox/policy.js';
+import { activeEnrollmentLenses, enroll, listEnrolled } from '../sandbox/policy.js';
+import { isMirrorPath } from '../fleet/mirrors.js';
 import { githubStatus } from '../integrations/github.js';
 import { audit } from '../sandbox/audit.js';
 import {
@@ -73,6 +74,32 @@ import {
   releaseOutwardMutationFence,
   type OutwardMutationFence,
 } from '../sandbox/mutation-fence.js';
+
+/**
+ * 3.10: drop the fleet's own mirror clones from a DEFAULT scan set. A standing
+ * grant enrolls ~/.ashlr/fleet/mirrors/<owner>__<repo> (src/core/fleet/mirrors.ts)
+ * next to the checkout Mason enrolled himself; outside an enrollment lens both
+ * show up here, so a scan would report every finding twice and spend a bounded
+ * repo slot on a copy that is reset to origin every tick. Inside a lens (the
+ * standing daemon's autonomous lane) the lens already chose the view: every
+ * entry there IS a mirror, and dropping them would blind the fleet, so nothing
+ * is filtered. Any failure keeps the list as it was (the pre-3.10 behaviour):
+ * a duplicate is a nuisance, an empty scan is an outage.
+ */
+function withoutFleetMirrors(enrolled: string[]): string[] {
+  try {
+    if (activeEnrollmentLenses().length > 0) return enrolled;
+    return enrolled.filter((repo) => {
+      try {
+        return !isMirrorPath(repo);
+      } catch {
+        return true;
+      }
+    });
+  } catch {
+    return enrolled;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Env bridge — let the spec's PULSE_URL / PULSE_FLEET_PAT gate this module
@@ -737,7 +764,7 @@ async function shipEnrolledRepoDepsWithAuthority(
   try {
     const xcfg = exporterConfig(cfg);
     if (authorityFailure(authority, signal)) return shipped;
-    const repos = listEnrolled().slice(0, MAX_DEP_REPOS_PER_TICK);
+    const repos = withoutFleetMirrors(listEnrolled()).slice(0, MAX_DEP_REPOS_PER_TICK);
     for (const repoPath of repos) {
       if (authorityFailure(authority, signal)) break;
       try {

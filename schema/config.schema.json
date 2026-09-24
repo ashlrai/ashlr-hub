@@ -1210,6 +1210,17 @@
       "type": "object",
       "description": "Ashlr Pulse (OTLP export) settings.",
       "additionalProperties": true
+    },
+    "reasoning": {
+      "type": "object",
+      "description": "V3.10 reasoning store (src/core/reasoning/). Stored reasoning is scrubbed, local-only, 0600, and never replayed into prompts.",
+      "additionalProperties": false,
+      "properties": {
+        "codexDesktop": {
+          "type": "boolean",
+          "description": "Also ingest interactive Codex Desktop rollouts, not just non-interactive `codex exec` ones. Default false (personal sessions need explicit opt-in); ASHLR_REASONING_CODEX_DESKTOP=1 also enables it."
+        }
+      }
     }
   },
   "definitions": {

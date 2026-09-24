@@ -24,7 +24,8 @@ import {
 } from '../fleet/status.js';
 import { getCachedFleetStatus, type CachedFleetStatus } from './fleet-status-cache.js';
 import { getProviderRegistry } from '../providers.js';
-import { buildRollup, modelToProviderKey, LOCAL_PROVIDER_KEYS } from '../observability/rollup.js';
+import { getCachedRollup, modelToProviderKey, LOCAL_PROVIDER_KEYS } from '../observability/rollup.js';
+import type { ActivityRollup } from '../types.js';
 import {
   readPublicDaemonObservation,
   type DaemonSourceQuality,
@@ -294,9 +295,19 @@ function fallbackUsage(): ControlUsage {
   };
 }
 
-function buildUsage(cfg: AshlrConfig): ControlUsage {
+/**
+ * PERF (3.10): the 7-day rollup is read through the shared stale-while-
+ * revalidate cache (observability/rollup.ts getCachedRollup) instead of being
+ * recomputed on every snapshot — it was ~3 s of synchronous git + transcript
+ * work per /api/control call. The caller may inject the rollup source (the
+ * read-projection worker) so the refresh runs off the request thread.
+ */
+async function buildUsage(
+  cfg: AshlrConfig,
+  rollupSource?: () => Promise<ActivityRollup>,
+): Promise<ControlUsage> {
   try {
-    const rollup = buildRollup('7d', cfg);
+    const { rollup } = await getCachedRollup('7d', cfg, rollupSource ? { compute: rollupSource } : {});
 
     // Aggregate byModel into byProvider buckets
     const totalCostUsd = rollup.totals.estCostUsd;
@@ -908,63 +919,109 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
 // Main export
 // ---------------------------------------------------------------------------
 
+/** Fleet status that could not be computed — explicit degraded provenance. */
+function unavailableFleetStatus(cfg: AshlrConfig, ts: string, err: unknown): CachedFleetStatus {
+  console.warn('[ashlr] control:buildControlSnapshot buildFleetStatus failed:', (err as Error)?.message ?? err);
+  return {
+    stale: false,
+    ageMs: 0,
+    status: {
+      generatedAt: ts,
+      daemon: {
+        running: false,
+        sourceQuality: {
+          sourceState: 'degraded',
+          complete: false,
+          reason: 'unavailable',
+        },
+        lastTickAt: null,
+        todaySpentUsd: 0,
+      },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      autonomyControlMode: resolveAutonomyControlMode(cfg),
+      guardHealth: {
+        generatedAt: ts,
+        blocked: true,
+        blocks: [],
+        sourceQuality: {
+          sourceState: 'degraded',
+          complete: false,
+          reasons: ['fleet-status-unavailable'],
+        },
+      },
+      killed: true,
+      killSwitch: {
+        state: 'unknown',
+        sourceState: 'degraded',
+        reason: 'unavailable',
+      },
+    } satisfies FleetStatus,
+  };
+}
+
+/** Where a snapshot reads its expensive inputs from. Defaults: in-process caches. */
+export interface ControlSnapshotSources {
+  /** Shared fleet-status read (the Verse server hands in its worker-backed cache). */
+  fleet?: () => Promise<CachedFleetStatus>;
+  /** 7-day rollup computation used to refresh the rollup cache. */
+  rollup?: () => Promise<ActivityRollup>;
+}
+
+/** The fleet/daemon slice every control view needs; nothing else. */
+export interface ControlEssentials {
+  fleet: FleetStatus;
+  fleetFreshness: { stale: boolean; ageMs: number };
+  daemon: ControlDaemon;
+  daemonObservation: PublicDaemonObservation;
+}
+
+/**
+ * PERF (3.10): the Verse cockpit (verse/control-api.ts) reads ONLY the
+ * daemon + fleet-freshness slice of the snapshot, yet used to pay for the
+ * whole thing — provider probes, a 7-day rollup (239 `git log` spawns), usage
+ * windows, security, logs. This builds exactly that slice. Never throws.
+ */
+export async function buildControlEssentials(
+  cfg: AshlrConfig,
+  sources: ControlSnapshotSources = {},
+): Promise<ControlEssentials> {
+  const ts = new Date().toISOString();
+  const readFleet = sources.fleet ?? (() => getCachedFleetStatus(cfg));
+  let cachedFleet: CachedFleetStatus;
+  try {
+    cachedFleet = await readFleet();
+  } catch (err) {
+    cachedFleet = unavailableFleetStatus(cfg, ts, err);
+  }
+  const fleet = cachedFleet.status;
+  const daemonObservation = readPublicDaemonObservation(fleet.daemon);
+  return {
+    fleet,
+    fleetFreshness: { stale: cachedFleet.stale, ageMs: cachedFleet.ageMs },
+    daemon: buildDaemon(cfg, daemonObservation),
+    daemonObservation,
+  };
+}
+
 /**
  * Assemble a full ControlSnapshot. Each section is independently guarded so a
  * broken subsystem never causes the whole snapshot to fail. Never throws.
  */
-export async function buildControlSnapshot(cfg: AshlrConfig): Promise<ControlSnapshot> {
+export async function buildControlSnapshot(
+  cfg: AshlrConfig,
+  sources: ControlSnapshotSources = {},
+): Promise<ControlSnapshot> {
   const ts = new Date().toISOString();
 
-  const [models, cachedFleet] = await Promise.all([
+  const [models, essentials, usage] = await Promise.all([
     buildModels(cfg),
-    getCachedFleetStatus(cfg).catch((err): CachedFleetStatus => {
-      console.warn('[ashlr] control:buildControlSnapshot buildFleetStatus failed:', (err as Error)?.message ?? err);
-      return {
-        stale: false,
-        ageMs: 0,
-        status: {
-          generatedAt: ts,
-          daemon: {
-            running: false,
-            sourceQuality: {
-              sourceState: 'degraded',
-              complete: false,
-              reason: 'unavailable',
-            },
-            lastTickAt: null,
-            todaySpentUsd: 0,
-          },
-          backends: [],
-          queue: { backlogItems: 0 },
-          proposals: { pending: 0, frontierPending: 0, applied: 0 },
-          merges: { recent: 0 },
-          autonomyControlMode: resolveAutonomyControlMode(cfg),
-          guardHealth: {
-            generatedAt: ts,
-            blocked: true,
-            blocks: [],
-            sourceQuality: {
-              sourceState: 'degraded',
-              complete: false,
-              reasons: ['fleet-status-unavailable'],
-            },
-          },
-          killed: true,
-          killSwitch: {
-            state: 'unknown',
-            sourceState: 'degraded',
-            reason: 'unavailable',
-          },
-        } satisfies FleetStatus,
-      };
-    }),
+    buildControlEssentials(cfg, sources),
+    buildUsage(cfg, sources.rollup),
   ]);
-  const fleet = cachedFleet.status;
-  const fleetFreshness = { stale: cachedFleet.stale, ageMs: cachedFleet.ageMs };
-
-  const daemonObservation = readPublicDaemonObservation(fleet.daemon);
-  const daemon = buildDaemon(cfg, daemonObservation);
-  const usage = buildUsage(cfg);
+  const { fleet, fleetFreshness, daemon, daemonObservation } = essentials;
   const limits = buildLimits(cfg);
   const subscriptionLimits = await buildSubscriptionLimits(cfg);
   const logs = buildLogs(daemonObservation, LOG_CAP);

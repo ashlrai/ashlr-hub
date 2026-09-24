@@ -317,7 +317,11 @@ describe('bounded Codex protocol and quota failures', () => {
   it('retains a native reached classification without fabricating measured headroom', async () => {
     const result = await probeCodexResourceAccount(options({ quota: { rateLimitsByLimitId: {
       codex: { limitId: 'codex', rateLimitReachedType: 'workspace_owner_credits_depleted' } } } }));
-    expect(result.observation?.windows).toEqual([{ id: 'codex_codex_primary', usedPercent: 100, resetsAt: null }]);
+    // 3.10: the provider's flag survives the child → parent trust boundary as
+    // `limitReached: true` (never the free-text type), so Verse can tell a
+    // denial from a measured 100.
+    expect(result.observation?.windows).toEqual([{ id: 'codex_codex_primary', usedPercent: 100, resetsAt: null, limitReached: true }]);
+    expect(JSON.stringify(result)).not.toContain('workspace_owner_credits_depleted');
   });
   it.each([{}, null, { rateLimitsByLimitId: null }, { rateLimitsByLimitId: { codex: { primary: { usedPercent: -1 } } } }])(
     'withholds malformed quota evidence %#', async (value) => {

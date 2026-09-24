@@ -222,6 +222,46 @@ export interface ResourceQuotaRefreshOwner {
   pending: { dev: string; ino: string; recordDigest: string };
 }
 
+// PERF (3.10): inspecting the owner used to spawn `/bin/ps -o lstart=` on
+// every read — once per seat-telemetry refresh and once per second from the
+// account collector's evidence heartbeat. The observed start of a pid is
+// remembered for a short window, keyed on the exact lock record it was
+// checked against (pid + token + the lock file's inode and ctime), so any new
+// lock — a new owner, a re-acquire, a rewrite — misses and re-verifies.
+//
+// The residual risk is pid reuse INSIDE the window: the owner exits and an
+// unrelated process receives the same pid within OWNER_START_TTL_MS while the
+// dead owner's lock file is still on disk. `process.kill(pid, 0)` still runs
+// on every call, and everything this gate protects (the shared evidence
+// witness) carries its own 5 s expiry, so a stale "alive" answer can at most
+// let a reader accept metadata that is itself at most one TTL old.
+const OWNER_START_TTL_MS = 5_000;
+const OWNER_START_MAX_ENTRIES = 64;
+const ownerStartCache = new Map<string, { epochSecond: number; checkedAt: number }>();
+
+function observedOwnerStart(pid: number, lockKey: string): number | undefined {
+  const key = `${pid}\0${lockKey}`;
+  const now = Date.now();
+  const hit = ownerStartCache.get(key);
+  if (hit && now - hit.checkedAt < OWNER_START_TTL_MS) return hit.epochSecond;
+  const observed = verifiedProcessStartIdentity(pid);
+  if (!observed) {
+    ownerStartCache.delete(key);
+    return undefined;
+  }
+  if (!ownerStartCache.has(key) && ownerStartCache.size >= OWNER_START_MAX_ENTRIES) {
+    const oldest = ownerStartCache.keys().next().value;
+    if (oldest !== undefined) ownerStartCache.delete(oldest);
+  }
+  ownerStartCache.set(key, { epochSecond: observed.epochSecond, checkedAt: now });
+  return observed.epochSecond;
+}
+
+/** Forget remembered owner start times (tests). */
+export function _clearOwnerStartCacheForTest(): void {
+  ownerStartCache.clear();
+}
+
 /** Inspect without acquiring/reclaiming a lease or contacting a provider. */
 export function inspectResourceQuotaRefreshOwner(root: string): ResourceQuotaRefreshOwner {
   try {
@@ -240,8 +280,9 @@ export function inspectResourceQuotaRefreshOwner(root: string): ResourceQuotaRef
       (marker.schemaVersion === 3 || marker.schemaVersion === 4) && marker.ownerPid !== lock.pid) throw new Error();
     process.kill(Number(lock.pid), 0);
     const recordedStart = canonicalStartEpochSecond(lock.startRef, lock.startRefSource);
-    const observedStart = verifiedProcessStartIdentity(Number(lock.pid));
-    if (recordedStart === undefined || !observedStart || Math.abs(recordedStart - observedStart.epochSecond) > 1) throw new Error();
+    const observedStart = observedOwnerStart(Number(lock.pid),
+      `${lock.token}\0${lockBefore.dev}:${lockBefore.ino}:${lockBefore.ctimeNs}\0${lock.startRef}`);
+    if (recordedStart === undefined || observedStart === undefined || Math.abs(recordedStart - observedStart) > 1) throw new Error();
     const lockAfter = lstatSync(lockPath, { bigint: true });
     const pendingAfter = lstatSync(pendingPath, { bigint: true });
     for (const [before, after] of [[lockBefore, lockAfter], [pendingBefore, pendingAfter]] as const) {

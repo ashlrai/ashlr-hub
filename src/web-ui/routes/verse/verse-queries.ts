@@ -22,8 +22,16 @@ import type {
   VerseWorkspacesResponse,
   VerseWorkspaceUpdateRequest,
 } from '../../data/api-types.js';
+import type {
+  VerseActivityResponse,
+  VerseActivitySeenRequest,
+  VerseSessionMeta,
+  VerseSessionMetaResponse,
+  VerseSessionMetaUpdate,
+} from '../../../core/verse/workbench-types.js';
+import { VERSE_ACTIVITY_PATH, VERSE_ACTIVITY_SEEN_PATH, VERSE_SESSION_META_PATH } from '../../../core/verse/workbench-types.js';
 import { getMutationToken, touchMutationHold } from '../../data/auth-store.js';
-import { apiGet, apiPost } from '../../data/client.js';
+import { ApiError, apiGet, apiPost } from '../../data/client.js';
 import { invalidate } from '../../data/cache.js';
 import type { QueryDef } from '../../data/queries.js';
 
@@ -163,4 +171,71 @@ export async function setVerseRootPriority(path: string, priority: VerseRootPrio
 export async function setVerseFocusSection(sectionId: string | null): Promise<void> {
   await post<unknown>('/api/verse/workspaces/focus', { sectionId });
   invalidateWorkspaces();
+}
+
+// ---------------------------------------------------------------------------
+// 3.10 — activity + per-chat meta (C1's routes; C2's sidebar reads them)
+// ---------------------------------------------------------------------------
+//
+// Both route families are mounted lazily (C0's mount table): on a build where
+// C1's module has not landed they answer a plain 404. That is "this server
+// has no activity yet", not an error the sidebar should paint red — so a 404
+// reads as `null` and every consumer falls back to what the session list
+// alone can say (running dot from `status`, no pins, no unread).
+
+export const VERSE_ACTIVITY_KEY = 'verse-activity';
+export const VERSE_SESSION_META_KEY = 'verse-session-meta';
+
+async function getOrNull<T>(path: string, signal?: AbortSignal): Promise<T | null> {
+  try {
+    return await apiGet<T>(path, signal);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+/**
+ * The poll-shaped read (no `since`): running chats with their live line and
+ * the Needs-you items. Completions are C1's concern (its cursor loop feeds
+ * the rail and the native notifications); the sidebar needs only the present.
+ */
+export const verseActivityQuery: QueryDef<VerseActivityResponse | null> = {
+  key: VERSE_ACTIVITY_KEY,
+  fetch: (signal) => getOrNull<VerseActivityResponse>(VERSE_ACTIVITY_PATH, signal),
+};
+
+export const verseSessionMetaQuery: QueryDef<VerseSessionMetaResponse | null> = {
+  key: VERSE_SESSION_META_KEY,
+  fetch: (signal) => getOrNull<VerseSessionMetaResponse>(VERSE_SESSION_META_PATH, signal),
+};
+
+/** Pin / archive one chat. Unknown keys are a 400 on the server, so only the two known ones are ever sent. */
+export async function setVerseSessionMeta(sessionId: string, update: VerseSessionMetaUpdate): Promise<VerseSessionMeta> {
+  const body: VerseSessionMetaUpdate = {};
+  if (typeof update.pinned === 'boolean') body.pinned = update.pinned;
+  if (typeof update.archived === 'boolean') body.archived = update.archived;
+  const meta = await post<VerseSessionMeta>(`${VERSE_SESSION_META_PATH}/${encodeURIComponent(sessionId)}`, body);
+  invalidate(VERSE_SESSION_META_KEY);
+  return meta;
+}
+
+/**
+ * "The operator has read this chat up to `turnCount`." Best-effort and SILENT:
+ * it runs only when a token is already held (opening a chat must never raise
+ * the token dialog), and a failure is swallowed — the sidebar keeps its own
+ * optimistic read state, so the unread dot clears either way.
+ */
+export async function markVerseSessionSeen(sessionId: string, turnCount: number): Promise<boolean> {
+  const token = getMutationToken();
+  if (!token) return false;
+  const body: VerseActivitySeenRequest = { sessionId, turnCount };
+  try {
+    // apiPost, not post(): reading a chat is not operator ACTIVITY, so it
+    // must not extend the mutation hold the way a real write does.
+    await apiPost<unknown>(VERSE_ACTIVITY_SEEN_PATH, body, token);
+    return true;
+  } catch {
+    return false;
+  }
 }

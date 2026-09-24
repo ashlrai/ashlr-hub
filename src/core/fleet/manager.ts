@@ -17,9 +17,10 @@
  *   - applyRejects=true: setStatus(id,'rejected',...) only for noise/harmful.
  */
 
-import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import type { AgentSemanticEventV1, AshlrConfig, Proposal, QualityMetrics } from '../types.js';
 import type { ProposalSourceQuality } from '../inbox/store.js';
 import { recordDecision } from './decisions-ledger.js';
@@ -31,8 +32,32 @@ import { measureAutoMergeDiffScopeForGate } from '../foundry/automerge-diff-scop
 import { computeQualityMetrics } from './quality-metrics.js';
 import { renderPlaybook } from '../vision/playbook.js';
 import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
+import {
+  buildGrokCliHeadlessCommand,
+  extractGrokStreamText,
+  grokCliDirectCommand,
+  isRestrictedClaudeCommand,
+  resolveGrokCliSeat,
+  restrictClaudeCommand,
+} from '../run/engine-registry.js';
+import { confinementProfileFor } from '../sandbox/confine.js';
+import {
+  engineResultTripwireKill,
+  finishAutonomousSpawn,
+  prepareAutonomousSpawn,
+  recordAutonomousViolations,
+} from '../sandbox/autonomous-run.js';
+import { recordSandboxEvidenceUnknown } from '../authority/rollout.js';
+import { withToolEnv } from '../env-bridge.js';
 import { peekBackendAvailability } from '../fabric/resource-monitor.js';
-import { CLAUDE5_FABLE_API_ID, DEFAULT_LOCAL_MODEL_TAG, fableEnabled } from '../run/model-catalog.js';
+import {
+  CLAUDE5_FABLE_API_ID,
+  DEFAULT_LOCAL_MODEL_TAG,
+  GROK_CLI_DEFAULT_MODEL,
+  fableEnabled,
+} from '../run/model-catalog.js';
+import type { EngineId } from '../types.js';
+import type { FleetEngine } from './fleet-types.js';
 import {
   agentSemanticSubjectRef,
   agentSemanticModelFamily,
@@ -41,11 +66,15 @@ import {
 import { causalMetadataFromProposal } from '../learning/causal.js';
 import {
   evaluateReviewerIndependence,
+  GROK_CLI_JUDGE_ENGINE,
+  isFrontierJudgeId,
+  judgeIdFor,
+  judgeLanePreference,
   producerModelFamily,
   reviewModelFamily,
   type ReviewModelFamily,
 } from './reviewer-independence.js';
-import { assertPermitted, endpointPermitted } from '../policy/local-only.js';
+import { assertPermitted, endpointPermitted, enginePermitted } from '../policy/local-only.js';
 
 // ---------------------------------------------------------------------------
 // Public types (defined here — not in types.ts per file ownership rules)
@@ -92,6 +121,12 @@ export interface ManagerVerdict {
   wouldMerge: boolean;
   /** Opaque metadata-only observations; never judge or merge authority. */
   semanticEvents?: AgentSemanticEventV1[];
+  /**
+   * V3.10: set when the rubric came from the in-process verdict cache — the
+   * SAME judge already answered this exact prompt for this exact diff, so no
+   * seat was spent. Non-enumerable like `considered` (CLI JSON unchanged).
+   */
+  cacheHit?: true;
 }
 
 export function managerSemanticEvents(
@@ -147,6 +182,11 @@ export interface JudgeProposalOptions {
   recordTrace?: boolean;
   /** Cancellation authority owned by the caller that requested this verdict. */
   signal?: AbortSignal;
+  /**
+   * V3.10: when false, neither read nor fill the verdict cache (a caller that
+   * must force a fresh judgment, e.g. a re-judge after a disputed verdict).
+   */
+  cache?: boolean;
 }
 
 type JudgeComplete = (
@@ -685,71 +725,30 @@ export async function judgeProposal(
     ? `${JUDGE_SYSTEM}\n\n${judgePlaybookCtx}`
     : JUDGE_SYSTEM;
 
-  let raw: string;
-  let fullReasoning = '';
-  try {
-    raw = await client.complete(
-      effectiveJudgeSystem,
-      buildJudgePrompt(proposal, specCtx),
-      options.signal,
-    );
-  } catch {
-    throwIfJudgeCancelled(options.signal);
-    return fallback('network');
+  // V3.10 verdict cache: the SAME judge answering the SAME rendered prompt for
+  // the SAME diff gives the same rubric, and every repeat costs seat usage.
+  const userPrompt = buildJudgePrompt(proposal, specCtx);
+  const judgeModelId = client.model ?? 'unknown';
+  const cacheKey = options.cache !== false && judgeModelId !== 'unknown'
+    ? judgeVerdictCacheKey(proposal, judgeModelId, effectiveJudgeSystem, userPrompt)
+    : null;
+  const clientStats = (client as { stats?: JudgeCallStats }).stats;
+  let rubric = cacheKey ? readJudgeVerdictCache(cacheKey) : null;
+  const cacheHit = rubric !== null;
+  if (rubric !== null && clientStats) {
+    // Record who ORIGINALLY answered (a Fable call that fell back reports
+    // Opus) and nothing else — a hit spent no tokens, time or money.
+    for (const key of Object.keys(clientStats) as Array<keyof JudgeCallStats>) delete clientStats[key];
+    if (rubric.answeredBy) clientStats.model = rubric.answeredBy;
   }
-
-  const parsed = parseJudgeResponse(raw);
-  let obj = parsed.obj;
-  let parseSource = parsed.source;
-  fullReasoning = parsed.fullReasoning;
-  // ONE-SHOT RETRY: malformed, reasoning-only, incomplete, or semantically
-  // contradictory rubrics all get one strict JSON recovery attempt.
-  if (!isCompleteStructuredRubric(obj, parseSource)) {
-    throwIfJudgeCancelled(options.signal);
-    try {
-      const retryPrompt = buildJudgePrompt(proposal, specCtx) + JUDGE_RETRY_SUFFIX;
-      const raw2 = await client.complete(effectiveJudgeSystem, retryPrompt, options.signal);
-      const retryParsed = parseJudgeResponse(raw2);
-      obj = retryParsed.obj;
-      parseSource = retryParsed.source;
-      fullReasoning = fullReasoning || retryParsed.fullReasoning;
-    } catch {
-      throwIfJudgeCancelled(options.signal);
-      /* retry failed — fall through to fallback */
-    }
+  if (rubric === null) {
+    const judged = await judgeRubricFromModel(client.complete, effectiveJudgeSystem, userPrompt, options.signal);
+    if (judged === 'network') return fallback('network');
+    if (judged === 'parse') return fallback('parse');
+    rubric = { ...judged, answeredBy: clientStats?.model ?? null };
+    if (cacheKey) writeJudgeVerdictCache(cacheKey, rubric);
   }
-  // M300d: parse scores/verdict from the structured <reasoning> prose
-  // (VALUE: N / CORRECTNESS: N / ... / VERDICT: x) as a robust fallback. Some
-  // engines (notably the codex CLI) reliably emit that reasoning block but NOT a
-  // strict trailing {"value":..} JSON, so extractJson found a non-verdict object
-  // and every field clamped to 1 (a parse artifact, not a real judgment). We use
-  // a reasoning-derived score whenever the JSON omitted that field.
-  const rprose = fullReasoning;
-  const rNum = (label: string): number | undefined => {
-    const m = rprose.match(new RegExp(label + '\\s*[:=]\\s*(\\d)', 'i'));
-    return m ? Number(m[1]) : undefined;
-  };
-  const rVerdictM = rprose.match(/VERDICT\s*[:=]\s*(ship|review|noise|harmful)\b/i);
-
-  if (!isCompleteStructuredRubric(obj, parseSource)) return fallback('parse');
-
-  const jsonVerdict = ciString(obj, 'verdict');
-  const reasoningVerdict = rVerdictM?.[1]?.toLowerCase();
-  const verdict: ManagerVerdict['verdict'] = jsonVerdict
-    ? (VALID_VERDICTS.has(jsonVerdict.toLowerCase())
-        ? (jsonVerdict.toLowerCase() as ManagerVerdict['verdict'])
-        : normaliseVerdict(jsonVerdict))
-    : ((reasoningVerdict as ManagerVerdict['verdict'] | undefined) ?? 'review');
-
-  const value = clamp(ciField(obj, 'value') ?? rNum('VALUE'), 1, 5);
-  const correctness = clamp(ciField(obj, 'correctness') ?? rNum('CORRECTNESS'), 1, 5);
-  const scope = clamp(ciField(obj, 'scope') ?? rNum('SCOPE'), 1, 5);
-  const alignment = clamp(ciField(obj, 'alignment') ?? rNum('ALIGNMENT'), 1, 5);
-  const rationaleField = ciString(obj, 'rationale');
-  const rationale =
-    rationaleField && rationaleField.length > 0
-      ? rationaleField.slice(0, 200)
-      : 'no rationale provided';
+  const { verdict, value, correctness, scope, alignment, rationale } = rubric;
 
   // Only a complete JSON rubric is a considered judgment. Reasoning prose,
   // score fragments, and partially structured JSON are useful diagnostics but
@@ -780,7 +779,7 @@ export async function judgeProposal(
   // Best-of-N
   // draft candidates opt out because their proposal ids are intentionally
   // ephemeral and will never receive real-world outcomes.
-  if (options.recordTrace !== false) {
+  if (options.recordTrace !== false && !cacheHit) {
     recordJudgeTrace({
       proposalId: proposal.id,
       judgeEngine: (client as { model?: string }).model ?? 'unknown',
@@ -807,7 +806,162 @@ export async function judgeProposal(
     configurable: false,
     writable: false,
   });
+  if (cacheHit) {
+    Object.defineProperty(result, 'cacheHit', { value: true, enumerable: false, configurable: false, writable: false });
+  }
   return result;
+}
+
+/** A considered rubric exactly as the judge model gave it (never wouldMerge — that is recomputed per config). */
+interface JudgeRubric {
+  verdict: ManagerVerdict['verdict'];
+  value: number;
+  correctness: number;
+  scope: number;
+  alignment: number;
+  rationale: string;
+  /** The model that actually answered, when the client reported it (Fable→Opus fallback); null = unreported. */
+  answeredBy: string | null;
+}
+
+/**
+ * Ask the judge model and parse a COMPLETE structured rubric (one strict
+ * retry), or say why there is none. Extracted from judgeProposal unchanged so
+ * the verdict cache can wrap it.
+ */
+async function judgeRubricFromModel(
+  complete: JudgeComplete,
+  system: string,
+  userPrompt: string,
+  signal?: AbortSignal,
+): Promise<Omit<JudgeRubric, 'answeredBy'> | 'network' | 'parse'> {
+  let raw: string;
+  let fullReasoning = '';
+  try {
+    raw = await complete(system, userPrompt, signal);
+  } catch {
+    throwIfJudgeCancelled(signal);
+    return 'network';
+  }
+
+  const parsed = parseJudgeResponse(raw);
+  let obj = parsed.obj;
+  let parseSource = parsed.source;
+  fullReasoning = parsed.fullReasoning;
+  // ONE-SHOT RETRY: malformed, reasoning-only, incomplete, or semantically
+  // contradictory rubrics all get one strict JSON recovery attempt.
+  if (!isCompleteStructuredRubric(obj, parseSource)) {
+    throwIfJudgeCancelled(signal);
+    try {
+      const retryPrompt = userPrompt + JUDGE_RETRY_SUFFIX;
+      const raw2 = await complete(system, retryPrompt, signal);
+      const retryParsed = parseJudgeResponse(raw2);
+      obj = retryParsed.obj;
+      parseSource = retryParsed.source;
+      fullReasoning = fullReasoning || retryParsed.fullReasoning;
+    } catch {
+      throwIfJudgeCancelled(signal);
+      /* retry failed — fall through to fallback */
+    }
+  }
+  // M300d: parse scores/verdict from the structured <reasoning> prose
+  // (VALUE: N / CORRECTNESS: N / ... / VERDICT: x) as a robust fallback. Some
+  // engines (notably the codex CLI) reliably emit that reasoning block but NOT a
+  // strict trailing {"value":..} JSON, so extractJson found a non-verdict object
+  // and every field clamped to 1 (a parse artifact, not a real judgment). We use
+  // a reasoning-derived score whenever the JSON omitted that field.
+  const rprose = fullReasoning;
+  const rNum = (label: string): number | undefined => {
+    const m = rprose.match(new RegExp(label + '\\s*[:=]\\s*(\\d)', 'i'));
+    return m ? Number(m[1]) : undefined;
+  };
+  const rVerdictM = rprose.match(/VERDICT\s*[:=]\s*(ship|review|noise|harmful)\b/i);
+
+  if (!isCompleteStructuredRubric(obj, parseSource)) return 'parse';
+
+  const jsonVerdict = ciString(obj, 'verdict');
+  const reasoningVerdict = rVerdictM?.[1]?.toLowerCase();
+  const verdict: ManagerVerdict['verdict'] = jsonVerdict
+    ? (VALID_VERDICTS.has(jsonVerdict.toLowerCase())
+        ? (jsonVerdict.toLowerCase() as ManagerVerdict['verdict'])
+        : normaliseVerdict(jsonVerdict))
+    : ((reasoningVerdict as ManagerVerdict['verdict'] | undefined) ?? 'review');
+
+  const value = clamp(ciField(obj, 'value') ?? rNum('VALUE'), 1, 5);
+  const correctness = clamp(ciField(obj, 'correctness') ?? rNum('CORRECTNESS'), 1, 5);
+  const scope = clamp(ciField(obj, 'scope') ?? rNum('SCOPE'), 1, 5);
+  const alignment = clamp(ciField(obj, 'alignment') ?? rNum('ALIGNMENT'), 1, 5);
+  const rationaleField = ciString(obj, 'rationale');
+  const rationale =
+    rationaleField && rationaleField.length > 0
+      ? rationaleField.slice(0, 200)
+      : 'no rationale provided';
+  return { verdict, value, correctness, scope, alignment, rationale };
+}
+
+// ---------------------------------------------------------------------------
+// V3.10: verdict cache — keyed by (proposalId, diffDigest, promptVersion)
+// ---------------------------------------------------------------------------
+//
+// promptVersion = the rubric template revision + a digest of the FULLY
+// rendered system + user prompt, so a change to the rubric, the ACE playbook,
+// the repo's vision spec or the diff each invalidate the entry on their own.
+// The judge model id is part of the key too: a verdict is only ever reused
+// for the judge that gave it, so attribution (and the frontier/independence
+// checks that read it) can never be laundered through the cache.
+//
+// IN-MEMORY ONLY, by design. A cached rubric re-enters judgeProposal as a
+// `considered` verdict, and a considered frontier `ship` is what the manager
+// signs into a merge attestation. A cache file on disk would be one more
+// unsigned input to that signature; a process-local Map is not reachable by
+// anything but this process. The resident daemon is long-lived, so the Map
+// still absorbs the tick-over-tick re-judging that costs seat usage.
+
+/** Bump when JUDGE_SYSTEM / the rubric contract changes meaning without changing text. */
+const JUDGE_RUBRIC_REVISION = 'judge-rubric-v1';
+/** The static half of promptVersion (rubric template + retry contract). */
+export const JUDGE_PROMPT_VERSION = `${JUDGE_RUBRIC_REVISION}:${createHash('sha256')
+  .update(JUDGE_SYSTEM).update('\0').update(JUDGE_RETRY_SUFFIX).digest('hex').slice(0, 16)}`;
+const JUDGE_VERDICT_CACHE_MAX = 512;
+const JUDGE_VERDICT_CACHE_TTL_MS = 7 * 24 * 60 * 60_000;
+const judgeVerdictCache = new Map<string, { at: number; rubric: JudgeRubric }>();
+
+/** The cache key for one judgment request. Exported for tests and diagnostics. */
+export function judgeVerdictCacheKey(
+  proposal: Pick<Proposal, 'id' | 'diff'>,
+  judgeModel: string,
+  system: string,
+  userPrompt: string,
+): string {
+  const diffDigest = hashDiff(proposal.diff ?? '');
+  const promptVersion = `${JUDGE_PROMPT_VERSION}:${createHash('sha256').update(system).update('\0').update(userPrompt).digest('hex')}`;
+  return JSON.stringify([proposal.id, diffDigest, promptVersion, judgeModel]);
+}
+
+function readJudgeVerdictCache(key: string, nowMs = Date.now()): JudgeRubric | null {
+  const entry = judgeVerdictCache.get(key);
+  if (!entry) return null;
+  if (nowMs - entry.at >= JUDGE_VERDICT_CACHE_TTL_MS || nowMs < entry.at) {
+    judgeVerdictCache.delete(key);
+    return null;
+  }
+  // LRU: re-insert so the most recently used entry is evicted last.
+  judgeVerdictCache.delete(key);
+  judgeVerdictCache.set(key, entry);
+  return { ...entry.rubric };
+}
+
+function writeJudgeVerdictCache(key: string, rubric: JudgeRubric, nowMs = Date.now()): void {
+  judgeVerdictCache.delete(key);
+  judgeVerdictCache.set(key, { at: nowMs, rubric: { ...rubric } });
+  while (judgeVerdictCache.size > JUDGE_VERDICT_CACHE_MAX) {
+    judgeVerdictCache.delete(judgeVerdictCache.keys().next().value!);
+  }
+}
+
+/** Test seam / operator reset: forget every cached verdict. */
+export function clearJudgeVerdictCache(): void {
+  judgeVerdictCache.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,10 +1171,19 @@ function buildClaudeCliCompleteSingle(
       }
       const t0 = Date.now();
       const combined = `${system}\n\n${user}`;
-      const cmd = buildEngineCommand('claude', combined, cfg, { model });
+      // V3.10: EVERY Claude judge call is restricted — no tools, no MCP, no
+      // settings-file hooks, no session persistence (engine-registry
+      // CLAUDE_RESTRICTED_ARGS). A judge reads a diff and answers JSON; it
+      // never needed tools, and with none there is nothing a credential or a
+      // prompt-injected diff could be exfiltrated with.
+      const base = buildEngineCommand('claude', combined, cfg, { model });
+      const cmd = base ? restrictClaudeCommand(base) : null;
       if (!cmd) return '';
-      const result = await spawnEngine(cmd, cfg, {
+      const env = await judgeCredentialEnv(cmd, cfg);
+      if (env === 'refused') return '';
+      const result = await spawnJudge('claude', cmd, cfg, {
         timeoutMs: 300_000,
+        ...(env ? { env } : {}),
         ...(signal ? { signal } : {}),
       }); // 5 min for frontier
       if (!result.ok || !result.output) return '';
@@ -1057,6 +1220,227 @@ function buildClaudeCliCompleteSingle(
   };
 }
 
+// ---------------------------------------------------------------------------
+// V3.10 (INT4 — B-U2 request to U7): judge calls are confined under a standing policy
+// ---------------------------------------------------------------------------
+
+type JudgeSpawnResult = Awaited<ReturnType<typeof spawnEngine>>;
+
+/**
+ * Spawn one judge CLI call. Without a standing policy: exactly the historical
+ * spawnEngine call. With one (confinementProfileFor forces the autonomous
+ * profile): the call runs like an agent — private run dir, ephemeral homes,
+ * credentials stripped, the hardened sandbox profile, a fresh empty cwd —
+ * and only then gets its credential:
+ *  - grok-cli execs the seat's pinned binary directly with a per-run
+ *    GROK_HOME copy (engine-registry grokCliDirectCommand; a refreshed
+ *    auth.json goes back only for the same account);
+ *  - claude gets CLAUDE_CODE_OAUTH_TOKEN (and nothing else) from the judge
+ *    credential source AFTER the overlay, per B-U2's order.
+ * WHY confine a tool-less call at all: the restriction flags are the CLI's
+ * promise; the sandbox is the OS's. A diff is attacker-authored input, and
+ * `--tools=` (grok) could not be proven to mean "none" without inference.
+ * Unconfinable ⇒ refused (an empty failed result → fail-closed 'review').
+ */
+async function spawnJudge(
+  engine: 'claude' | 'grok-cli' | 'codex',
+  cmd: import('../types.js').EngineCommand,
+  cfg: AshlrConfig,
+  opts: { timeoutMs: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal },
+): Promise<JudgeSpawnResult> {
+  let autonomous = false;
+  try { autonomous = confinementProfileFor(engine as EngineId, cfg).autonomous === true; } catch { autonomous = true; }
+  if (!autonomous) {
+    return spawnEngine(cmd, cfg, {
+      timeoutMs: opts.timeoutMs,
+      ...(opts.env ? { env: opts.env } : {}),
+      ...(opts.signal ? { signal: opts.signal } : {}),
+    });
+  }
+  const refused = (why: string): JudgeSpawnResult => ({ ok: false, output: '', error: `judge refused: ${why}` });
+  // The confined path execs a real path the local-only basename gate may not
+  // recognise; ask the policy by engine id instead (fail closed).
+  if (!enginePermitted(engine === 'grok-cli' ? GROK_CLI_JUDGE_ENGINE : engine, cfg).permitted) return refused('local-only');
+  // The call's own fresh temp cwd when it has one (the grok judge names it in
+  // `--cwd`, so it must be the dir the profile opens); else a new one here.
+  let ownedCwd: string | null = null;
+  try {
+    const cwd = cmd.cwd ? realpathSync(cmd.cwd) : (ownedCwd = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-judge-'))));
+    let target = cmd;
+    let seatId: string | null = null;
+    let nativeStatePath: string | null = null;
+    if (engine === 'grok-cli') {
+      const direct = grokCliDirectCommand(cmd, cfg);
+      if (!direct) return refused('grok-cli seat launcher did not resolve');
+      target = direct.cmd;
+      seatId = direct.seatId;
+      nativeStatePath = direct.nativeStatePath;
+    }
+    const spawn = prepareAutonomousSpawn({
+      engine,
+      worktree: cwd,
+      baseEnv: withToolEnv(cfg),
+      bin: target.bin,
+      seatId,
+      ...(nativeStatePath ? { nativeStatePath } : {}),
+      nodeToolchain: false,
+    });
+    const env: NodeJS.ProcessEnv = { ...spawn.env };
+    const token = opts.env?.['CLAUDE_CODE_OAUTH_TOKEN'];
+    if (engine === 'claude' && typeof token === 'string' && token.length > 0) env['CLAUDE_CODE_OAUTH_TOKEN'] = token;
+    let result: JudgeSpawnResult | null = null;
+    try {
+      result = await spawnEngine({ ...target, bin: spawn.bin, cwd }, cfg, {
+        timeoutMs: opts.timeoutMs,
+        env,
+        launcher: spawn.launcher,
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      });
+      return result;
+    } finally {
+      const finished = finishAutonomousSpawn(spawn, {
+        output: result ? `${result.output}\n${result.error ?? ''}` : '',
+        tripwireKill: result ? engineResultTripwireKill(result) : false,
+      });
+      if (finished.violations.length > 0) {
+        await recordAutonomousViolations({ engine, sourceRepo: null, runId: null, operations: finished.violations });
+      }
+      // d0: a judge run with incomplete kernel evidence holds the rollout
+      // (never advances or regresses it) — see authority/rollout.ts.
+      if (finished.violationsKnown !== true) {
+        await recordSandboxEvidenceUnknown({ engine, sourceRepo: null, runId: null, evidence: finished.kernelEvidence });
+      }
+    }
+  } catch (error) {
+    return refused(error instanceof Error ? error.message : String(error));
+  } finally {
+    if (ownedCwd) { try { rmSync(ownedCwd, { recursive: true, force: true }); } catch { /* temp dir; best effort */ } }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// V3.10: claude-a credential for restricted judge calls (SPEC-310B §1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Supplies the child-env credential for a restricted Claude judge call — in
+ * standing (autonomous) mode, `{ CLAUDE_CODE_OAUTH_TOKEN }` minted by
+ * `authority/custody-client.ts claudeToken()`. Registered by the resident
+ * daemon (fleet tick hooks); never registered ⇒ the pre-3.10 behaviour (the
+ * CLI's own login), which is what interactive `ashlr manager` runs use.
+ *
+ * Returning null means "no override for this call". Throwing, or returning a
+ * key outside JUDGE_CREDENTIAL_KEYS, REFUSES the call (the judge fails closed
+ * to a 'review' fallback) — once a source is registered, silently falling
+ * back to Mason's personal login would spend the reserve the grant protects.
+ */
+export type JudgeCredentialSource = (engine: 'claude') => Promise<Readonly<Record<string, string>> | null>;
+
+/** The only env keys a credential source may set. */
+const JUDGE_CREDENTIAL_KEYS: ReadonlySet<string> = new Set(['CLAUDE_CODE_OAUTH_TOKEN']);
+
+let judgeCredentialSource: JudgeCredentialSource | null = null;
+
+/** Register (or clear, with null) the restricted-judge credential source. */
+export function setJudgeCredentialSource(source: JudgeCredentialSource | null): void {
+  judgeCredentialSource = source;
+}
+
+/**
+ * The spawn env for one Claude judge command: undefined (default env), a
+ * credential-bearing env, or 'refused'. The credential is attached ONLY when
+ * isRestrictedClaudeCommand(cmd) holds — the structural guarantee that the
+ * claude-a token never reaches a call that has tools.
+ *
+ * EXPORTED (INT5 request) so the Leader's Claude transport
+ * (vision/leader-seat.ts loadJudgeCredentialHook, looked up by name) runs
+ * through this one rule instead of a second copy of it. Signature unchanged;
+ * exporting grants nothing new — the token still only reaches a command that
+ * isRestrictedClaudeCommand accepts, and only from the registered source.
+ */
+export async function judgeCredentialEnv(
+  cmd: import('../types.js').EngineCommand,
+  cfg: AshlrConfig,
+): Promise<NodeJS.ProcessEnv | undefined | 'refused'> {
+  const source = judgeCredentialSource;
+  if (!source) return undefined;
+  if (!isRestrictedClaudeCommand(cmd)) return 'refused';
+  let overlay: Readonly<Record<string, string>> | null;
+  try { overlay = await source('claude'); } catch { return 'refused'; }
+  if (overlay === null) return undefined;
+  const entries = Object.entries(overlay);
+  if (entries.length === 0 || entries.some(([key, value]) => !JUDGE_CREDENTIAL_KEYS.has(key) ||
+    typeof value !== 'string' || value.length === 0 || /[\r\n\0]/.test(value))) return 'refused';
+  return { ...withToolEnv(cfg), ...Object.fromEntries(entries) };
+}
+
+// ---------------------------------------------------------------------------
+// V3.10: grok-cli judge (SPEC-310B §3) — the grok-a seat, text only
+// ---------------------------------------------------------------------------
+
+/**
+ * The grok model the grok-cli judge asks for: cfg.foundry.grokCliJudgeModel,
+ * else the seat default. Only a grok model id is accepted; anything else falls
+ * back to the default rather than producing a judge id isFrontierJudgeId refuses.
+ */
+function grokJudgeModel(cfg: AshlrConfig): string {
+  const configured = (cfg.foundry as Record<string, unknown> | undefined)?.['grokCliJudgeModel'];
+  return typeof configured === 'string' && /^grok-\d+(?:\.\d+)*(?:-[a-z0-9]+)*$/.test(configured.trim())
+    ? configured.trim()
+    : GROK_CLI_DEFAULT_MODEL;
+}
+
+/**
+ * `complete(system, user)` over the grok-a seat: `node launcher.mjs` → pinned
+ * grok with GROK_HOME, no tools, no web, in a fresh empty 0700 temp cwd that is
+ * removed afterwards (grok can only reach `--cwd`, so an empty one bounds even
+ * a misread `--tools=`). The answer is the stream's final text.
+ *
+ * Records `grok-cli:<model>` as the answering judge — the ONLY spelling
+ * isFrontierJudgeId accepts for an xAI judge. Never throws: '' on any failure,
+ * which judgeProposal turns into a fail-closed 'review'.
+ */
+function buildGrokCliComplete(cfg: AshlrConfig, model: string, stats?: JudgeCallStats): JudgeComplete {
+  return async (system: string, user: string, signal?: AbortSignal): Promise<string> => {
+    if (stats) {
+      delete stats.model;
+      delete stats.durationMs;
+      delete stats.costUsd;
+      delete stats.tokensIn;
+      delete stats.tokensOut;
+    }
+    let cwd: string | null = null;
+    try {
+      // Re-checked per call: local-only may have been latched since resolution.
+      if (!enginePermitted(GROK_CLI_JUDGE_ENGINE, cfg).permitted) return '';
+      // realpath: macOS tmpdir is a /var → /private/var symlink; hand grok the canonical path.
+      cwd = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-judge-')));
+      const cmd = buildGrokCliHeadlessCommand(`${system}\n\n${user}`, cfg, { cwd, model });
+      if (!cmd) return '';
+      const t0 = Date.now();
+      const result = await spawnJudge('grok-cli', cmd, cfg, {
+        timeoutMs: 300_000,
+        ...(signal ? { signal } : {}),
+      });
+      if (!result.ok || !result.output) return '';
+      const parsed = extractGrokStreamText(result.output);
+      if (parsed.error !== null || !parsed.text) return '';
+      if (stats) {
+        stats.model = judgeIdFor(GROK_CLI_JUDGE_ENGINE, model);
+        stats.durationMs = Date.now() - t0;
+        if (parsed.tokensIn !== null) stats.tokensIn = parsed.tokensIn;
+        if (parsed.tokensOut !== null) stats.tokensOut = parsed.tokensOut;
+        // No costUsd: the seat is a subscription; per-token cost is not a fact here.
+      }
+      return parsed.text;
+    } catch {
+      return '';
+    } finally {
+      if (cwd) { try { rmSync(cwd, { recursive: true, force: true }); } catch { /* temp dir; best effort */ } }
+    }
+  };
+}
+
 /**
  * Build a `complete(system, user)` function that uses the Codex CLI
  * (`codex exec [--model M] --cd CWD --json "<combined prompt>"`).
@@ -1087,7 +1471,11 @@ function buildCodexCliComplete(
       const combined = `${system}\n\n${user}`;
       const cmd = buildEngineCommand('codex', combined, cfg, { model });
       if (!cmd) return '';
-      const result = await spawnEngine(cmd, cfg, {
+      // Under a standing policy a codex judge needs a seat's per-run
+      // CODEX_HOME copy, and none is configured for judging — spawnJudge
+      // refuses it (fail-closed 'review') rather than run it on Mason's own
+      // ~/.codex unconfined.
+      const result = await spawnJudge('codex', cmd, cfg, {
         timeoutMs: 300_000,
         ...(signal ? { signal } : {}),
       }); // 5 min for frontier
@@ -1153,9 +1541,37 @@ function resolveJudgeClient(
   const localAllowedForJudge = rawJudgeBackends
     ? rawJudgeBackends.includes('ollama') || rawJudgeBackends.includes('local')
     : true;
+  // V3.10: same oversight-role rule for the grok-a seat. It is reached only by
+  // an explicit managerJudgeEngine:'grok-cli' — which the independence search
+  // (resolveFrontierJudgeClient) sets for local work — never by 'auto', so no
+  // existing 'auto' configuration starts spending the Grok seat on its own.
+  const grokAllowedForJudge = rawJudgeBackends
+    ? rawJudgeBackends.includes(GROK_CLI_JUDGE_ENGINE)
+    : true;
 
   const wantClaude = managerJudgeEngine === 'auto' || managerJudgeEngine === 'claude';
   const wantCodex = managerJudgeEngine === 'codex';
+  const wantGrok = managerJudgeEngine === GROK_CLI_JUDGE_ENGINE;
+
+  // Step 0 (V3.10): the grok-cli seat judge, when asked for by name.
+  if (wantGrok) {
+    if (grokAllowedForJudge && resolveGrokCliSeat(cfg).ok && enginePermitted(GROK_CLI_JUDGE_ENGINE, cfg).permitted) {
+      let grokUnavailable = false;
+      try {
+        const availability = peekBackendAvailability(GROK_CLI_JUDGE_ENGINE as EngineId);
+        grokUnavailable = availability === 'exhausted' || availability === 'unreachable' || availability === 'throttled';
+      } catch { /* never throws — treat as available */ }
+      if (!grokUnavailable) {
+        const model = grokJudgeModel(cfg);
+        return { complete: buildGrokCliComplete(cfg, model, stats), judgeEngine: judgeIdFor(GROK_CLI_JUDGE_ENGINE, model), stats };
+      }
+    }
+    // An explicit grok-cli judge that cannot run is NOT silently replaced by
+    // the local model: the caller asked for a frontier judge from a specific
+    // family, and a local stand-in would only ever produce a non-attesting
+    // 'review'. Fail so the independence search can try the next family.
+    throw new Error('grok-cli judge unavailable');
+  }
 
   // M300: resource-aware judge — if cached Claude headroom says unavailable,
   // preserve it for operators and fall to Codex/local instead. This does not
@@ -1206,10 +1622,20 @@ function resolveJudgeClient(
   }
   const localBaseUrl = ollamaBaseUrl;
   const localModel = judgeModel;
+  // V3.10: a local judge must never be RECORDED under a frontier identity.
+  // managerJudgeModel is free text; when it names a frontier judge
+  // (e.g. 'claude-opus-4-8' or 'grok-cli:grok-4.7') but we fell through to
+  // Ollama, the recorded engine would have let a local model's verdict pass
+  // isFrontierJudge. Prefix it so it classifies as what it is: local.
+  const claimedFamily = agentSemanticModelFamily(localModel);
+  const localJudgeEngine = isFrontierJudgeId(localModel) ||
+    claimedFamily === 'claude' || claimedFamily === 'openai' || claimedFamily === 'xai'
+    ? `local:${localModel}`
+    : localModel;
   return {
     complete: (system: string, user: string, signal?: AbortSignal) =>
       ollamaDirectComplete(localBaseUrl, localModel, system, user, 512, 0, signal),
-    judgeEngine: localModel,
+    judgeEngine: localJudgeEngine,
     stats,
   };
 }
@@ -1233,12 +1659,19 @@ function resolveJudgeClient(
  * cfg.models.providerChain is ["ollama"].
  *
  * Returns { complete, model } in the shape judgeProposal expects. When
- * independence is required, only a known opposite-family Claude/Codex reviewer
- * is eligible; unavailable or correlated routes return null (never throws).
+ * independence is required, only a known opposite-family FRONTIER reviewer is
+ * eligible — Claude, Codex, or (V3.10) the grok-cli seat as `grok-cli:<model>`;
+ * unavailable or correlated routes return null (never throws).
  */
 export interface FrontierJudgeResolutionOptions {
   producerModel?: string;
   requireIndependent?: boolean;
+  /**
+   * V3.10: judge lanes the caller's SeatRouter currently admits (headroom,
+   * reserve floors, budget mode). Absent ⇒ every lane. A lane outside the list
+   * is never tried — the router, not this resolver, decides spend.
+   */
+  allowedJudgeEngines?: readonly FleetEngine[];
 }
 
 export interface FrontierJudgeClient {
@@ -1257,9 +1690,9 @@ export function resolveFrontierJudgeClient(
   // longer has would simply fail the judge call — and of the two, the judge is
   // the one that most wants a thinking model, which the 72b is not and Qwen3.8
   // is. `cfg.foundry.managerJudgeModel` still overrides. Judge independence is
-  // unaffected: `requireIndependent` only ever accepts a claude/openai-family
-  // reviewer, so a local model is reachable solely on the correlated path,
-  // exactly as before.
+  // unaffected: `requireIndependent` only ever accepts a frontier judge
+  // (isFrontierJudgeId: Claude, Codex, or the grok-cli seat), so a local model
+  // is reachable solely on the correlated path, exactly as before.
   const judgeModel =
     ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) ||
     DEFAULT_LOCAL_MODEL_TAG;
@@ -1273,26 +1706,48 @@ export function resolveFrontierJudgeClient(
       return null;
     }
   };
-  if (opts.requireIndependent !== true) return resolve(cfg);
-  if (producerModelFamily(opts.producerModel) === 'unknown') return null;
+  const allowed = opts.allowedJudgeEngines ? new Set<FleetEngine>(opts.allowedJudgeEngines) : null;
+  const laneOf = (model: string): FleetEngine | null => {
+    if (model.trim().toLowerCase().startsWith(`${GROK_CLI_JUDGE_ENGINE}:`)) return 'grok-cli';
+    const family = reviewModelFamily(model);
+    return family === 'claude' ? 'claude-cli' : family === 'openai' ? 'codex' : family === 'local' ? 'local' : null;
+  };
+  const laneAllowed = (resolved: FrontierJudgeClient): boolean => {
+    if (!allowed) return true;
+    const lane = laneOf(resolved.model);
+    return lane !== null && allowed.has(lane);
+  };
+  if (opts.requireIndependent !== true) {
+    const resolved = resolve(cfg);
+    return resolved && laneAllowed(resolved) ? resolved : null;
+  }
+  const producerFamily = producerModelFamily(opts.producerModel);
+  if (producerFamily === 'unknown') return null;
+  // V3.10: frontier (isFrontierJudgeId — the same rule the merge gate and the
+  // attestation signer apply) AND a different known family. This admits the
+  // grok-cli seat judge and nothing else new: a bare Grok id, the per-token
+  // grok API, or any local judge still never qualifies.
   const eligible = (resolved: FrontierJudgeClient | null): resolved is FrontierJudgeClient => {
-    if (!resolved) return false;
-    const reviewerFamily = reviewModelFamily(resolved.model);
-    return (reviewerFamily === 'claude' || reviewerFamily === 'openai') &&
+    if (!resolved || !laneAllowed(resolved)) return false;
+    return isFrontierJudgeId(resolved.model) &&
       evaluateReviewerIndependence(opts.producerModel, resolved.model).independent;
   };
 
-  const withEngine = (engine: 'claude' | 'codex'): AshlrConfig => ({
+  const withEngine = (engine: 'claude' | 'codex' | typeof GROK_CLI_JUDGE_ENGINE): AshlrConfig => ({
     ...cfg,
     foundry: {
       ...cfg.foundry,
       managerJudgeEngine: engine,
     } as AshlrConfig['foundry'],
   });
-  const producerFamily = producerModelFamily(opts.producerModel);
-  // `cfg` always goes first — this is where an explicit cfg.foundry.managerJudgeEngine
-  // (or 'auto') is actually honoured, via resolveJudgeClient reading it internally.
-  // The opposite-family candidate(s) are the fallback when that first try isn't
+  const laneConfig = (lane: FleetEngine): AshlrConfig | null =>
+    lane === 'grok-cli' ? withEngine(GROK_CLI_JUDGE_ENGINE)
+      : lane === 'claude-cli' ? withEngine('claude')
+        : lane === 'codex' ? withEngine('codex')
+          : null;
+  // An EXPLICIT cfg.foundry.managerJudgeEngine is honoured first (resolveJudgeClient
+  // reads it internally); the family preference (SPEC-310B G6: local work →
+  // grok-cli, Grok work → Claude, …) is the fallback when that pick is not
   // independent of the producer.
   //
   // Previously an EXPLICIT managerJudgeEngine short-circuited straight to null
@@ -1303,15 +1758,17 @@ export function resolveFrontierJudgeClient(
   // proposals) — those proposals never receive a 'judged' ledger entry, so
   // Gate 4b criterion 1 / Gate 7 (src/core/inbox/merge.ts) could never find
   // one and the proposal sat pending forever. Falling through here does NOT
-  // weaken the independence bar (`eligible` above is unchanged, still
-  // required) — it only widens which engine may be tried to satisfy it when
-  // the operator's specific pick cannot, exactly mirroring what 'auto' already
-  // did.
-  const candidates = producerFamily === 'claude'
-    ? [cfg, withEngine('codex')]
-    : producerFamily === 'openai'
-      ? [cfg, withEngine('claude')]
-      : [cfg, withEngine('claude'), withEngine('codex')];
+  // weaken the independence bar (`eligible` above is still required) — it only
+  // widens which engine may be tried to satisfy it.
+  //
+  // With 'auto' (the default) the family preference IS the order, so local
+  // work reaches the Grok seat before claude-a's reserved slice.
+  const configured = (cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeEngine'];
+  const explicit = typeof configured === 'string' && configured !== 'auto';
+  const preferred = judgeLanePreference(producerFamily)
+    .map(laneConfig)
+    .filter((candidate): candidate is AshlrConfig => candidate !== null);
+  const candidates = explicit ? [cfg, ...preferred] : preferred;
   const seen = new Set<string>();
   for (const candidate of candidates) {
     const resolved = resolve(candidate);
@@ -1511,6 +1968,8 @@ export async function runManager(
           const wrapped = wrapClient(rawClient);
           if (!wrapped || reviewModelFamily(wrapped.model) === 'unknown') return null;
           const reviewerFamily = reviewModelFamily(wrapped.model);
+          // API clients stay Claude/OpenAI only: the xAI route is the grok-cli
+          // SEAT, never a per-token API key (SPEC-310B §3).
           if ((reviewerFamily !== 'claude' && reviewerFamily !== 'openai') ||
             !evaluateReviewerIndependence(proposal, wrapped.model).independent) return null;
           return wrapped;
@@ -1583,10 +2042,10 @@ export async function runManager(
       // not merge-authority evidence.
       let judgeAttestation: string | undefined;
       const decisionTs = new Date().toISOString();
-      // M300: accept codex/gpt-5.5 frontier models in addition to claude-* (mirrors isFrontierJudge in merge.ts)
-      const isFrontierJudgeModel =
-        activeJudgeEngine.startsWith('claude') || activeJudgeEngine.includes('claude') ||
-        activeJudgeEngine.startsWith('gpt-5') || activeJudgeEngine.startsWith('codex-') || activeJudgeEngine === 'codex';
+      // V3.10: one rule for "frontier judge" (reviewer-independence
+      // isFrontierJudgeId): Claude, Codex/GPT-5, and an xAI judge ONLY as
+      // `grok-cli:<model>` — never a bare Grok id or a local stand-in.
+      const isFrontierJudgeModel = isFrontierJudgeId(activeJudgeEngine);
       const reviewerIndependent = evaluateReviewerIndependence(proposal, activeJudgeEngine).independent;
       if (verdict.considered === true && verdict.verdict === 'ship' && verdict.wouldMerge === true && isFrontierJudgeModel &&
         reviewerIndependent) {

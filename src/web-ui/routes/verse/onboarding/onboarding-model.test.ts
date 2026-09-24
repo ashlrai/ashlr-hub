@@ -8,39 +8,13 @@
  * "blocked".
  */
 import { describe, expect, it } from 'vitest';
-import type { Account, AccountsSnapshot, LocalModel, LocalModelsSnapshot } from '../usage/usage-contract.js';
+import type { LocalModel, LocalModelsSnapshot } from '../usage/usage-contract.js';
 import {
   ONBOARDING_STEPS,
   STOP_CONTROLS,
-  buildAccountsFindings,
   buildLocalFinding,
   clampStep,
 } from './onboarding-model.js';
-
-function account(patch: Partial<Account>): Account {
-  return {
-    id: 'claude',
-    label: 'Claude Max',
-    provider: 'claude',
-    state: 'observed',
-    authentication: 'signed-in',
-    health: null,
-    planType: 'max',
-    observedAt: null,
-    windows: [],
-    binding: null,
-    credits: null,
-    reason: null,
-    unsupported: null,
-    reconnectCommand: null,
-    notes: [],
-    ...patch,
-  };
-}
-
-function snapshot(accounts: Account[]): AccountsSnapshot {
-  return { sampledAt: null, refreshing: false, accounts, collectorNote: null };
-}
 
 function localSnapshot(patch: Partial<LocalModelsSnapshot>): LocalModelsSnapshot {
   return {
@@ -88,109 +62,6 @@ describe('onboarding steps', () => {
 
   it('covers the five things a first-time operator is blocked on', () => {
     expect(ONBOARDING_STEPS.map((s) => s.id)).toEqual(['welcome', 'accounts', 'local', 'stops', 'finish']);
-  });
-});
-
-describe('accounts findings', () => {
-  it('flags a signed-out seat and carries a concrete fix', () => {
-    const result = buildAccountsFindings({
-      snapshot: snapshot([
-        account({ id: 'grok', label: 'Grok', provider: 'grok', state: 'signed-out', authentication: 'signed-out' }),
-      ]),
-      loading: false,
-      unavailableReason: null,
-    });
-    expect(result.signedOutCount).toBe(1);
-    const finding = result.findings![0]!;
-    expect(finding.tone).toBe('attention');
-    expect(finding.state).toBe('signed out');
-    expect(finding.fix).toBe('Reconnect the Grok seat through `ashlr resources`.');
-  });
-
-  it('prefers the server’s own sanitized reconnect command over the generic one', () => {
-    const result = buildAccountsFindings({
-      snapshot: snapshot([account({ state: 'signed-out', authentication: 'signed-out', reconnectCommand: 'ashlr resources' })]),
-      loading: false,
-      unavailableReason: null,
-    });
-    expect(result.findings![0]!.fix).toBe('ashlr resources');
-  });
-
-  it('never calls a used-up window "blocked" when credits are spendable', () => {
-    const result = buildAccountsFindings({
-      snapshot: snapshot([
-        account({
-          id: 'codex-a',
-          label: 'Personal Codex',
-          provider: 'codex',
-          binding: { id: 'codex', label: null, usedPercent: 100, resetsAt: null, resetDescription: null, limitReached: true, measured: false },
-          credits: { hasCredits: true, unlimited: false, balance: '2048.41', balanceValue: 2048.41 },
-        }),
-      ]),
-      loading: false,
-      unavailableReason: null,
-    });
-    const finding = result.findings![0]!;
-    expect(finding.tone).toBe('ok');
-    expect(finding.state).toBe('usable on credits');
-    expect(finding.detail).toMatch(/still has a spendable balance/);
-  });
-
-  it('says "limit reached", never "100% used", when the sentinel was a flag', () => {
-    const result = buildAccountsFindings({
-      snapshot: snapshot([
-        account({
-          binding: { id: 'w', label: null, usedPercent: 100, resetsAt: null, resetDescription: null, limitReached: true, measured: false },
-        }),
-      ]),
-      loading: false,
-      unavailableReason: null,
-    });
-    expect(result.findings![0]!.state).toBe('limit reached');
-    expect(result.findings![0]!.detail).not.toMatch(/100%/);
-  });
-
-  it('renders an unmeasured percentage as no signal rather than a number', () => {
-    const result = buildAccountsFindings({
-      snapshot: snapshot([
-        account({
-          binding: { id: 'w', label: null, usedPercent: 47, resetsAt: null, resetDescription: null, limitReached: false, measured: false },
-        }),
-      ]),
-      loading: false,
-      unavailableReason: null,
-    });
-    expect(result.findings![0]!.detail).toMatch(/No local utilization signal/);
-    expect(result.findings![0]!.detail).not.toMatch(/47/);
-  });
-
-  it('turns an absent roster into "cannot say", not into an empty all-clear', () => {
-    const result = buildAccountsFindings({
-      snapshot: null,
-      loading: false,
-      unavailableReason: 'This server does not expose /api/verse/accounts yet, so this panel has no source.',
-    });
-    expect(result.findings).toBeNull();
-    expect(result.summary).toMatch(/did not report a per-account roster/);
-    expect(result.caveat).toMatch(/does not expose/);
-  });
-
-  it('distinguishes an empty roster from a roster it could not read', () => {
-    const result = buildAccountsFindings({ snapshot: snapshot([]), loading: false, unavailableReason: null });
-    expect(result.findings).toEqual([]);
-    expect(result.summary).toMatch(/No provider accounts are connected/);
-  });
-
-  it('names the version pin when a probe failed closed, and does not call the seat broken', () => {
-    const result = buildAccountsFindings({
-      snapshot: snapshot([account({ unsupported: { code: 'claude-usage-unsupported', pinnedVersion: '2.0.14' } })]),
-      loading: false,
-      unavailableReason: null,
-    });
-    const finding = result.findings![0]!;
-    expect(finding.state).toBe('probe blocked');
-    expect(finding.detail).toMatch(/2\.0\.14/);
-    expect(finding.detail).toMatch(/seat itself still works/);
   });
 });
 

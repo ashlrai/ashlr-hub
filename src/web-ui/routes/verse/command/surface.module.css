@@ -1,0 +1,162 @@
+/*
+ * routes/verse/command/surface.module.css — the shared chrome of the four
+ * 3.10 surfaces: strip, scroll region, 12-column grid, card frame. Tokens
+ * only (style-scan-310: no raw hex, no px font sizes).
+ */
+.surface {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  background: var(--bg-canvas);
+}
+
+.strip {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  height: var(--strip-height);
+  padding: 0 var(--space-5);
+  /* Desktop shell: only the traffic-light overlap past the rail is owed. */
+  padding-left: max(var(--space-5), calc(var(--app-traffic-light-inset, 0px) - var(--rail-width, 56px)));
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+/* Surface title: Grotesk 20/28, −0.02em (SPEC-310C §6). */
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-xl-size);
+  line-height: var(--text-xl-line);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-display);
+  color: var(--text-primary);
+}
+
+.stripActions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--surface-gap);
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-5) var(--space-16);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(var(--surface-columns), minmax(0, 1fr));
+  gap: var(--surface-gap);
+  align-items: start;
+}
+
+.cell {
+  min-width: 0;
+}
+
+.surface[data-viewport='compact'] .body {
+  padding: var(--space-4) var(--space-4) var(--space-12);
+}
+
+.surface[data-viewport='compact'] .strip {
+  padding: 0 var(--space-4);
+}
+
+/* Card frame — identical to ChartFrame so chart and non-chart cards read as one set. */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--card-pad);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+
+.card[data-tone='attention'] {
+  border-color: var(--border-default);
+  box-shadow: inset 0 1px 0 var(--hairline-lift, transparent);
+}
+
+.cardHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.cardHeading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* Card title 13/18, 600. */
+.cardTitle {
+  margin: 0;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+
+.cardCaption {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+}
+
+.cardActions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+}
+
+.note {
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line-relaxed);
+}
+
+.note[data-tone='unknown'] {
+  background: var(--status-unknown-bg);
+  color: var(--status-unknown-fg);
+}
+
+.note[data-tone='danger'] {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+
+/* Micro-label 11/14 uppercase (SPEC-310C §6). */
+.micro {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}

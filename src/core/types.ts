@@ -100,7 +100,12 @@ interface AgentSemanticEventBaseV1 {
   /** Parent-bound opaque durable id (`proposal:<id>`, `run:<id>`, or `trajectory:<id>`). */
   subjectRef: string;
   producerRole: 'manager' | 'agent' | 'verifier' | 'observer' | 'system';
-  producerModelFamily: 'claude' | 'openai' | 'local' | 'unknown';
+  /**
+   * V3.10 adds `xai`: Grok was filed under `local`, which let a Grok producer
+   * and a local judge count as the SAME family (and a Grok judge could never be
+   * independent of local work). xAI is its own provider family.
+   */
+  producerModelFamily: 'claude' | 'openai' | 'xai' | 'local' | 'unknown';
   producerVersion:
     | 'manager-semantic-v1'
     | 'agent-semantic-v1'
@@ -1650,6 +1655,20 @@ export interface AshlrConfig {
      */
     pulseOtlpUrl?: string;
   };
+  /**
+   * V3.10 reasoning store (src/core/reasoning/). Stored reasoning is scrubbed,
+   * local-only, 0600, and never replayed into prompts.
+   */
+  reasoning?: {
+    /**
+     * Also ingest Mason's INTERACTIVE Codex Desktop rollouts, not just
+     * non-interactive `codex exec` ones. Default false (unset): those are
+     * personal sessions, so they need explicit opt-in. The env var
+     * `ASHLR_REASONING_CODEX_DESKTOP=1` turns it on too
+     * (see reasoning/ingest-codex.ts).
+     */
+    codexDesktop?: boolean;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2085,6 +2104,17 @@ export interface ProviderInferenceQuotaSession {
 export interface RunOptions {
   /** Optional caller-owned cancellation signal for this run. */
   signal?: AbortSignal;
+  /**
+   * V3.10: the seat an AUTONOMOUS codex run executes on — the SeatRouter's
+   * choice (TickRouteDecision.seatDecision.seatId), forwarded unchanged to
+   * runEngineSandboxed's `seatId`. WHY IT IS THREADED: under a standing policy
+   * the sandboxed producer builds codex's per-run CODEX_HOME from that seat's
+   * native profile and refuses a codex run with no seat (never Mason's own
+   * login). Without this field the daemon's choice was dropped at runGoal and
+   * every standing codex dispatch was refused. Ignored by every other engine
+   * (grok-cli resolves its seat from cfg.foundry.grokCli).
+   */
+  seatId?: string;
   /** Partial budget overrides (merged over defaults). */
   budget?: Partial<RunBudget>;
   /** Max independent tasks to execute in parallel. */
@@ -2727,8 +2757,14 @@ export type EngineKind = 'builtin' | 'cli-agent' | 'api-model';
  * which are substituted (each as a SINGLE argv element — never shell-split, so a
  * goal containing '$CWD' or ';' is passed verbatim and never expanded). An
  * `{ optModel }` segment is emitted only when a concrete model is present.
+ *
+ * V3.10 `{ join }`: each part is substituted exactly as above, then the parts
+ * are concatenated into ONE argv element. It exists for clap value options such
+ * as grok's `--single=<goal>`: a leading-dash value is only accepted in the
+ * `--opt=value` spelling, so a goal that starts with `-` must travel glued to
+ * its flag rather than as the next element (where it would parse as a flag).
  */
-export type ArgvSeg = string | { optModel: string[] };
+export type ArgvSeg = string | { optModel: string[] } | { join: string[] };
 
 /**
  * M50 (v5): a declarative backend engine specification. The registry

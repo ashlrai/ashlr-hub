@@ -172,12 +172,12 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str, main_window_l
         ID_SETTINGS => {
             let _ = window.show();
             let _ = window.set_focus();
-            let _ = window.eval(&shell_contract::command_script(
+            let _ = window.eval(shell_contract::command_script(
                 shell_contract::COMMAND_OPEN_SETTINGS,
             ));
         }
         ID_TOGGLE_THEME => {
-            let _ = window.eval(&shell_contract::command_script(
+            let _ = window.eval(shell_contract::command_script(
                 shell_contract::COMMAND_TOGGLE_THEME,
             ));
         }

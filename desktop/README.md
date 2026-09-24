@@ -64,6 +64,11 @@ replacing the bundle — your config, seats and window state all survive.
 - Closing the Verse window hides it to the menu-bar (tray) item. **Quit** — from
   ⌘Q, the Ashlr menu, or the tray — kills the sidecar and exits. No resident
   daemon is started.
+- While the window is out of sight it keeps you informed (see
+  [While Verse is hidden](#while-verse-is-hidden)): a native banner when a chat
+  finishes or fails, or when something new needs you; `● N` in the menu bar
+  while chats run; a Dock badge counting Needs-you items; and an opt-in
+  ⌃⌥Space that brings the window forward from any app.
 - On first launch the app invokes `ashlr setup --yes`, but the current CLI
   refuses before config, discovery, enrollment, or service effects. The banner
   is not evidence of completed setup.
@@ -151,9 +156,16 @@ window.addEventListener('ashlr:desktop-command', (e) => {
 |---|---|
 | `open-settings` | **Ashlr → Settings…** (⌘,) |
 | `toggle-theme` | **View → Toggle Light / Dark** (⇧⌘L) |
+| `open-needs-you` | Tray **Needs you…**; a clicked "Needs you" or seat-health banner |
+| `new-chat` | Tray **New chat** |
+| `focus-composer` | The global hotkey ⌃⌥Space |
+| `open-session:<id>` | A running chat in the tray; a clicked "Finished" / "Failed" banner. `<id>` matches `^[A-Za-z0-9._-]{1,128}$` — Rust checks it before building the command. |
 
-`open-settings` is the ⌘, wiring the contract asks for. If the web UI does not
-listen, the menu item is simply inert — nothing breaks.
+The names are the command catalog's `DESKTOP_COMMAND_NAMES`
+(`src/web-ui/routes/verse/shell/command-catalog.ts`); `parseDesktopCommand`
+turns each into a catalog command, and `app/desktop-shell.ts` →
+`subscribeShellCommands` delivers them parsed. If the web UI does not listen,
+the item is simply inert — nothing breaks.
 
 ### 4. Theme reporting (page → native, optional but wanted)
 
@@ -179,7 +191,34 @@ Native claims ⌘, ⌘R ⌘+ ⌘− ⌘0 ⇧⌘L and the standard Edit/Window se
 and ⌘N are deliberately left unbound natively** so they reach the page, which
 owns them per `docs/VERSE-CONTRACT-V2.md`. A native accelerator would swallow
 them before the webview ever saw the keystroke — `app_menu.rs` has a test that
-fails if one is ever added.
+fails if one is ever added, and the web catalog's key test parses `app_menu.rs`
+for the same reason. The one system-wide key, ⌃⌥Space, is registered by the app
+(`hotkey.rs`), never by the page; a vitest checks it equals the catalog's
+`app.summon`.
+
+### 6. Desktop state (Settings ▸ Desktop)
+
+```ts
+import { useDesktopState, setDesktopPreference } from '../app/desktop-shell.js';
+
+const desktop = useDesktopState(); // null in a browser
+// desktop.hotkey        { enabled, registered, accelerator: '⌃⌥Space', error }
+// desktop.notifications { enabled, delivery: 'native' | 'script' }
+setDesktopPreference('globalHotkey', true); // false in a browser
+```
+
+- The page asks by emitting `shell-prefs` (`{ globalHotkey?: bool,
+  notifications?: bool }`) over the event permission it already has. Rust parses
+  it strictly — an object, those two keys, booleans only — persists it to
+  `~/.ashlr/desktop/prefs.json` (0600), applies it and answers with a new state.
+- **Render from the answer, not from what you asked for.** A hotkey another app
+  already holds comes back `enabled: true, registered: false` with an
+  operator-language `error`.
+- `delivery: 'script'` means an unsigned build: banners arrive through
+  `osascript` and show as Script Editor. Say so beside the toggle.
+- The init script carries the state from window creation; on load the page
+  also emits `shell-state-request` and gets the live one, so a reload after a
+  change is never stale.
 
 ---
 
@@ -285,16 +324,74 @@ lsof -ti tcp:7777                        # expect: no output
 
 | Item | Action |
 |------|--------|
+| Running › ‹chat› | One row per running chat (up to 8, then "N more running"): shows the window and opens that chat |
+| Needs you (N)… | Shows the window and opens the Needs-you drawer |
+| New chat | Shows the window and starts a chat |
+| Stop running chats… | A native confirm ("Stop every running chat?"), then cancels each running turn with the mutation token. Disabled when nothing runs, or when the window adopted a server Ashlr did not start (no mutation token). Queued follow-ups are held, not sent. |
 | Show Ashlr Verse | Show + focus the window |
 | Quit Ashlr | Kills the sidecar, exits |
 
-Left-clicking the tray icon toggles the window.
+The menu-bar title reads `● N` while N chats run and is empty otherwise.
+Left-clicking the tray icon toggles the window; clicking the Dock icon while
+the window is closed brings it back.
+
+The shell adopts the tray icon `tauri.conf.json` declares (`app.trayIcon`,
+id `main`) instead of building a second one — it used to build its own, which
+put two icons in the menu bar.
 
 Daemon start/stop and the kill switch are deliberately **not** here. The kill
 switch writes the global `~/.ashlr/KILL`, which is an emergency stop that also
 refuses the agent's own write tools — far too much blast radius for a menu item
-you can hit by accident. Both live in the console's Autonomy section behind a
-confirm step.
+you can hit by accident. Both live in the console behind a confirm step. The
+tray may stop **chats**; it never stops, starts or steers the fleet (a
+`tray.rs` test pins that no row names the fleet, the daemon, the kill switch or
+autonomy).
+
+### While Verse is hidden
+
+`activity_watch.rs` polls `GET /api/verse/activity?since=<cursor>` with the read
+token, through the same tiny loopback client as the health poll: every **5 s**,
+or every **30 s** while the window is hidden and nothing is running (and while
+the sidecar predates the route). One poll updates the tray, the Dock badge and
+— only while the window is **not in front** (hidden, minimized, or another app
+focused) and notifications are on — raises banners:
+
+| Banner | When |
+|---|---|
+| Finished: ‹chat title› — "Done in 2m 14s" | A turn ended cleanly |
+| Failed: ‹chat title› | A turn ended with an error |
+| Finished: N chats, M failed | More than two turns ended in one poll |
+| Needs you: N new — "2 approvals · 1 fleet decision" | New Needs-you items |
+| Seat health (signed out, expiring, out of usage) | From the 30 s health poll |
+
+- **Every word is a Rust template** (`notify.rs`). The only server text that can
+  appear is a chat title, stripped of control and bidi-override characters and
+  capped at 60 characters. Needs-you items are described by category counts,
+  never by their own text.
+- The first poll is a baseline: nothing that finished or was waiting before the
+  app started raises a banner. A cancelled turn (yours, or the tray's Stop) is
+  not news. A failure announced as "Failed" is not announced again when its
+  Needs-you item lands. At most 6 banners a minute.
+- **Clicks.** The notification plugin cannot report a click, so a banner arms
+  its target; if the window gains focus within 60 s, the page gets
+  `open-session:<id>` or `open-needs-you`. Focus regained for another reason
+  inside that minute also navigates — the accepted trade. Any tray action or
+  the hotkey clears the armed target first.
+- **Signing.** A Developer ID–signed bundle delivers through
+  `tauri-plugin-notification` (Ashlr's icon). Anything else — ad-hoc (every
+  local `cargo tauri build`), unsigned, `cargo run` — uses `osascript` with the
+  text as argv, because macOS can silently drop plugin banners from an app it
+  cannot identify. Those banners show as Script Editor, and clicking one opens
+  Script Editor rather than Ashlr; the tray and the Dock badge are the reliable
+  signal on such builds. `codesign -dv` decides once per launch, off the main
+  thread.
+- The "local server keeps stopping" alert is the one banner that ignores focus:
+  it is about the window itself.
+
+The Dock badge is the Needs-you count (cleared at zero). The global hotkey
+⌃⌥Space is **off by default** (it takes that chord from every other app);
+Settings ▸ Desktop turns it on, and it shows the window and focuses the
+composer from anywhere.
 
 ---
 
@@ -339,7 +436,14 @@ asks you to paste them:
 - **IPC granted to the remote page is exactly three commands**, in
   `capabilities/verse-remote.json`: `core:window:allow-start-dragging`,
   `core:window:allow-internal-toggle-maximize`, `core:event:allow-emit`. That is
-  what makes the drag region and `reportTheme` work. Every `shell:*` permission,
+  what makes the drag region, `reportTheme` and `setPreference` work. The
+  notification and global-shortcut plugins are driven from Rust only; neither is
+  granted to any window, so page code cannot raise a banner, choose its text, or
+  register a key.
+- The **mutation token** is held in Rust for one purpose: the tray's "Stop
+  running chats…" cancel POSTs, after a native confirm. Like the read token it
+  lives only in memory and in a request header, and is dropped whenever its
+  sidecar stops. Every `shell:*` permission,
   the updater, the filesystem, and app show/hide are **excluded**, so an XSS in
   the console cannot become command execution. Do not widen this list; put new
   native behaviour behind a window event evaluated from Rust instead
@@ -587,13 +691,19 @@ desktop/
 │   ├── src/
 │   │   ├── main.rs                # sidecar lifecycle, launch window, Verse window, tray, exit
 │   │   ├── shell_contract.rs      # the native→web contract (+ shell_contract.js)
-│   │   ├── shell_contract.js      # injected: tokens, CSS vars, drag regions, command bus
+│   │   ├── shell_contract.js      # injected: tokens, CSS vars, drag regions, command bus, desktop state
 │   │   ├── app_menu.rs            # macOS menu bar, zoom, menu routing
+│   │   ├── activity_watch.rs      # running chats / turn endings / Needs you → banners, tray, badge
+│   │   ├── notify.rs              # banner templates, title sanitizer, focus gate, click targets, delivery
+│   │   ├── tray.rs                # the tray menu as data, id routing, Stop copy
+│   │   ├── hotkey.rs              # ⌃⌥Space (opt-in)
+│   │   ├── desktop_prefs.rs       # Settings ▸ Desktop prefs + the state the page sees
+│   │   ├── health_watch.rs        # seat health poll + the tiny loopback HTTP client
 │   │   ├── launch_state.rs        # launch phases, failure copy, diagnostic redaction
 │   │   ├── window_state.rs        # geometry + theme persistence, monitor clamping
 │   │   ├── lib.rs                 # native-only foundations, not wired into the UI
 │   │   └── native_launchd_broker.rs
-│   ├── Cargo.toml                 # tauri v2, tauri-plugin-shell, tauri-plugin-updater
+│   ├── Cargo.toml                 # tauri v2 + shell, updater, dialog, notification, global-shortcut plugins
 │   ├── tauri.conf.json            # windows (main + launch), CSP, bundle targets, externalBin
 │   ├── capabilities/
 │   │   ├── main.json              # local grants for the main window
@@ -635,7 +745,15 @@ desktop/
 cd desktop/src-tauri && cargo test
 ```
 
-55 tests. They cover the startup-record parser and the guarantee that the token
+146 tests in the app plus 27 in the `lib` crate, and two `#[ignore]`d live checks
+(`cargo test -- --ignored live_`) that poll a real, HOME-isolated sidecar for
+seat health and activity and send the tray's cancel POST to a session that does
+not exist (404 = the mutation gate passed; a wrong token is 401). They cover the notification
+templates, the title sanitizer, the "only while unfocused" gate, the 60 s
+click window and the `open-session:<id>` shape; the activity fold (baseline,
+coalescing, de-duplication, cursor handling, poll rate); the tray's rows, id
+routing and "never the fleet" rule; the hotkey chord; strict preference
+parsing and 0600 persistence; the startup-record parser and the guarantee that the token
 line is never forwarded, the shell contract's origin gate and JSON encoding,
 drag-region mapping, launch-state copy and redaction, launch-window sizing,
 window-state clamping across monitor changes, zoom stepping, the assertion that
@@ -644,8 +762,9 @@ decision — including that a live sibling app's sidecar is never killed, that a
 recycled pid can never be mistaken for ours, and that the ownership record has
 no field a token could hide in.
 
-Nothing here spawns a server, binds a port, or reads `~/.ashlr`: every test is a
-pure decision function or a JSON round-trip.
+Nothing here spawns a server or reads `~/.ashlr`: every test is a pure decision
+function, a JSON round-trip, a file round-trip under the OS temp dir, or a
+one-shot loopback socket on an ephemeral port.
 
 ---
 

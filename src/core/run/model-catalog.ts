@@ -63,6 +63,16 @@ export type ModelCapability =
  */
 export const DEFAULT_LOCAL_MODEL_TAG = 'qwen3.8:27b-ctx64k';
 
+/**
+ * V3.10: the grok-cli seat engine's default model. `grok-4.7` is the first
+ * entry in the grok-a seat's own catalog (`<GROK_HOME>/models_cache.json`,
+ * grok 0.2.118, read 2026-09-24): grok-4.7, grok-4.7-build-fast, grok-4.6,
+ * grok-4.5. Read by `run/engine-registry.ts` (`grok-cli.defaultModel`).
+ */
+export const GROK_CLI_DEFAULT_MODEL = 'grok-4.7';
+/** The seat's faster sibling, for low-difficulty grok-cli work. */
+export const GROK_CLI_FAST_MODEL = 'grok-4.7-build-fast';
+
 // ---------------------------------------------------------------------------
 // Catalog entry
 // ---------------------------------------------------------------------------
@@ -103,6 +113,15 @@ export interface ModelEntry {
    * pickModel preferStrong sort (quality policy). Absent ⇒ derived from tier.
    */
   qualityRank?: number;
+  /**
+   * V3.10: the model runs on a SUBSCRIPTION SEAT whose admission is decided by
+   * the SeatRouter (routing/router.ts `routeSeat`, budget modes, reserve
+   * floors) — not by a per-token price. Such an entry is invisible to
+   * pickModel's capability sort unless the caller names its engine: its
+   * per-token price is 0 (nothing is metered per token), and letting a 0 cost
+   * win the cheapest-first sort would silently route work onto a paid seat.
+   */
+  seatRouted?: true;
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +382,37 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
     capabilities: ['reasoning', 'long-context'],
     minEffort: 2,
   },
+
+  // =========================================================================
+  // V3.10: grok-cli — the SuperGrok seat (grok-a) as a fleet engine
+  // =========================================================================
+  //
+  // NOT the per-token xAI API (`grok` api-model in engine-registry, which stays
+  // out of allowedBackends). These run through the grok-a native profile on
+  // the seat's subscription, so per-token cost is 0 and spend is governed by
+  // the SeatRouter's headroom / budget mode — hence `seatRouted` (see
+  // ModelEntry). Ids and the 500k window are from the seat's own catalog.
+  // Placed last so no existing pickModel tie-break changes.
+  {
+    id: `grok-cli:${GROK_CLI_DEFAULT_MODEL}`,
+    engine: 'grok-cli' as EngineId,
+    tier: 'large',
+    costPerMTokIn: 0,
+    costPerMTokOut: 0,
+    capabilities: ['general', 'coder', 'reasoning', 'long-context'],
+    minEffort: 2,
+    seatRouted: true,
+  },
+  {
+    id: `grok-cli:${GROK_CLI_FAST_MODEL}`,
+    engine: 'grok-cli' as EngineId,
+    tier: 'mid',
+    costPerMTokIn: 0,
+    costPerMTokOut: 0,
+    capabilities: ['fast', 'coder', 'long-context'],
+    minEffort: 1,
+    seatRouted: true,
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -414,6 +464,8 @@ export function pickModel(opts: {
   let pool = KNOWN_MODELS.filter((m) => {
     if (excluded.has(m.id)) return false;
     if (opts.engine && m.engine !== (opts.engine as EngineId)) return false;
+    // V3.10: a seat-routed entry is reachable only by naming its engine.
+    if (m.seatRouted && !opts.engine) return false;
     if (opts.capability && !m.capabilities.includes(opts.capability)) return false;
     if (opts.maxEffort !== undefined && m.minEffort > opts.maxEffort) return false;
     return true;

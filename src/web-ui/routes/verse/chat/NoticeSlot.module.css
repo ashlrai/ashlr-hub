@@ -1,0 +1,61 @@
+/**
+ * chat/NoticeSlot.module.css — the one-notice slot above the composer.
+ * Sits on the composer's measure so the notice reads as "about what you are
+ * about to send", not as page chrome. Tokens only (style-scan-310).
+ */
+.slot {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  box-sizing: border-box;
+  width: 100%;
+  max-width: calc(var(--measure-read) + 2 * var(--space-6));
+  margin: 0 auto;
+  padding: var(--space-2) var(--space-6) 0;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  /* Several notices open at once scroll inside the slot instead of pushing
+     the composer off the bottom of a short window. */
+  max-height: 45vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.notice {
+  min-width: 0;
+  animation: notice-in var(--duration-base) var(--ease-decelerate);
+}
+
+.more {
+  align-self: flex-end;
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+}
+.more:hover { color: var(--text-primary); background: var(--bg-hover); }
+.more:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+
+/* Motion (SPEC-310C §6): opacity plus a small shift, never a count-up. */
+@keyframes notice-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .notice { animation: none; }
+}
+:root[data-motion='reduce'] .notice { animation: none; }
+
+@media (max-width: 479.98px) {
+  .slot { padding: var(--space-2) var(--space-3) 0; }
+}

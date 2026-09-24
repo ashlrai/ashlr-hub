@@ -288,6 +288,127 @@ src/web-ui/routes/verse/context/   context-queries.ts, HandoffDialog, MemoryPane
 Private state: `~/.ashlr/verse/preferences.json` (0600) and `~/.ashlr/verse/memory/<slug>-<sha256(realpath)[0:12]>/` (0700, files
 0600). Neither is ever inside a repository.
 
+## V3.10 additive contract — the workbench and the autonomy console
+
+3.10 adds no V1 route and changes no V1 or V3.9 wire shape. Everything new is a **route family**: a module that owns
+one or more path prefixes and exports one `ApiModule` handler (`(req, res, ctx, path) => Promise<boolean>`). `verse-api.ts`
+only mounts them. Each module's header comment lists its own routes and is the authority for them; this section is the index.
+
+### Mount rules (every family)
+
+- **Order.** Families are consulted only after every V1 and V3.9 route has declined. Track A's modules come first, in a
+  fixed order (health, reasoning, fleet history, budget); then the workbench families of
+  `WORKBENCH_ROUTE_FAMILIES` (`src/core/verse/workbench-types.ts` §9), routed by prefix to exactly one family. A prefix
+  owns its exact path and `prefix + '/…'` only, and no two prefixes overlap (`test/verse-workbench-contracts-310.test.ts`).
+- **Gates.** GETs sit behind `server.ts`'s read session. Every non-GET is 404 unless the server allows dispatch, then
+  passes `passesMutationGate` (constant-time token + JSON `Content-Type`) **before the module loads**; each module
+  re-checks, so it is safe mounted anywhere. Agents and MCP clients hold no mutation token and reach none of it.
+- **Strict input.** An unknown body key or query parameter (or a repeated single-valued one) is a 400, never ignored.
+  Bodies keep the shared 64 KiB cap unless the family says otherwise (attachment uploads, terminal input).
+- **Output.** Every JSON response goes through `sendJson` → `sanitizePublicJson` (home → `~`, secret-shaped text
+  scrubbed). The two deliberate exceptions are named below: terminal output frames and preview file bodies.
+- **Partial landing.** A family whose module has not landed is a plain 404 that touches nothing else. One that landed but
+  fails to load answers 503 naming it (`API_MODULE_UNAVAILABLE`), never a misleading 404.
+- **Budget.** No handler blocks the event loop over 20 ms; nothing polls faster than 2 s. Producers that other families
+  read on every poll (`needsYouItems()`, `autonomyBadge()`) answer from memory and refresh off the caller's stack.
+- **Honesty.** `null` means not measured. A source that cannot be read makes its numbers `null` and names itself, never 0.
+
+### Track A modules
+
+| Family (module) | Routes | Notes |
+|---|---|---|
+| health (`verse/health-api.ts`) | `GET /api/verse/health` → `VerseHealthResponse`; `POST /api/verse/health/refresh`; `POST /api/verse/health/reconnect {seatId}` → 202 | Zero spend: status commands only. Reconnect opens the seat's own login in Terminal (10 s cooldown per seat; 501 off macOS). Readiness refusals elsewhere are 409 `{ error, code: 'seat-not-ready', readiness }`. |
+| reasoning (`reasoning/reasoning-api.ts`) | `GET /api/reasoning/digest[?days=1..180]`; `GET /api/reasoning/steps?q=&sessionId=&limit=` | Read-only. The only reader of the local reasoning store outside the process; the store never feeds a prompt. Note the prefix is `/api/reasoning`, not `/api/verse`. |
+| fleet history (`verse/fleet-history.ts`) | `GET /api/verse/fleet/history` | Daily projection (runs, proposals, verdicts, verification, authenticated merges) + scorecard trend. Incremental, async, time-sliced readers. |
+| budget (`routing/budget-api.ts`) | `GET /api/verse/budget`; `POST /api/verse/budget` (one of `{mode}` \| `{seatId, policy}`); `GET /api/verse/budget/preview?task=&difficulty=&autonomous=[&contextTokens=]`; `GET /api/verse/budget/decisions[?limit=]` | Nothing spends. A read refreshes `~/.ashlr/routing/capacity.json` (throttled) so the daemon sees current windows. |
+
+### Workbench families (Track C)
+
+| Family (owner, module) | Routes |
+|---|---|
+| activity (C1, `verse/activity-api.ts`) | `GET /api/verse/activity[?since=<cursor>]`; `POST /api/verse/activity/seen` (`{sessionId, turnCount}` or `{surface:'mind'}`); `GET /api/verse/session-meta`; `GET /api/verse/session-meta/:id`; `POST /api/verse/session-meta/:id {pinned?, archived?}` |
+| session-controls (C3, `verse/session-controls-api.ts`) | `GET\|POST /api/verse/session-controls/defaults`; `GET\|POST /api/verse/session-controls/:id` (`{model?, effort?, permissionMode?, confirmBypass?}`); `GET\|POST /api/verse/attachments/:id`, `POST …/:id/:attachmentId/delete`; `GET\|POST /api/verse/queue/:id`, `POST …/:id/:queueId/delete`, `POST …/:id/:queueId/send`; `GET /api/verse/files?sessionId=&q=` |
+| terminal (C4, `verse/terminal-api.ts`) | `GET\|POST /api/verse/terminal`; `POST /api/verse/terminal/:id/{input,resize,kill}`; `GET /api/verse/terminal/:id/stream?after=<seq>` (SSE via `fetch` + the read-client header); `POST /api/verse/terminal/open-external` → 202 |
+| preview (C4, `verse/preview-api.ts`) | `GET /api/verse/preview/targets?sessionId=`; `GET /api/verse/preview/raw?sessionId=&path=`; `GET /api/verse/preview/ticket?sessionId=&path=` → `{url, expiresAt}`; `GET /api/verse/preview/frame/<ticket>` |
+| git (C5, `verse/git-api.ts`) | `GET /api/verse/git/status?root=`; `GET /api/verse/git/diff?root=&scope=working\|branch[&file=]`; `POST /api/verse/git/{commit,push,pr,pr/merge,worktree}` |
+| apps (C6, `verse/apps-api.ts`) | `GET /api/verse/apps`; `POST /api/verse/apps/refresh`; `POST /api/verse/apps/:id/toggle {enabled, confirm:true}` → 202; `POST /api/verse/apps/:id/launch {root, via?, model?}` → 202 |
+
+- **session-controls.** `permissionMode` is `plan`, `acceptEdits` (default), `auto` or `bypass`; `bypass` needs
+  `confirmBypass: true` per chat and is never a default. The queue holds at most `VERSE_QUEUE_MAX` (3) turns per chat and
+  sends only through the engine's `sendTurn` (readiness gate, local-only policy, the one spawn chokepoint) — so the only
+  spend is still a turn. Attachments live in `~/.ashlr/verse/attachments/<sid>/` (0700 / 0600) and a turn is granted
+  exactly that folder.
+- **terminal.** The command typed into a shell is always built server-side (`appId` from the fixed catalog,
+  `devServerId` from what Preview discovered for this chat), never taken from the request. A `root` must be one of the
+  chat's roots or a discovered project and pass `checkWorkspaceRootPath` (never `/`, `~`, `~/.ashlr`). Output frames are
+  raw base64 bytes and **skip the public-JSON scrubber** on purpose: scrubbing a byte stream would corrupt it, and it is
+  the operator's own shell. Needs Bun (the desktop sidecar); under Node, `GET` reports `available: false` with the reason.
+- **preview.** `frame/<ticket>` is the **one path `server.ts` lets past its read boundary**: an `<iframe src>` can carry
+  neither the read-client header nor the query proof, so it answers only a live ticket presented with the cookie of the
+  read session that minted it. Every file is served under CSP `sandbox` (an opaque origin), `nosniff`, framable by Verse
+  alone, and only from inside the chat's own roots after symlinks are resolved. The page CSP adds
+  `frame-src 'self' http://127.0.0.1:* http://localhost:*`. Read-only: dev-server Start goes through the terminal.
+- **git.** `root` must be a folder the operator already brought into Verse and pass `checkWorkspaceRootPath`; a diff's
+  `file` must be one of that scope's changed files. git/gh stderr never reaches a response. A commit is 409 while a chat
+  turn runs in the same repository. `/api/verse/github` (the read-only V2 panel) is a different path, not this family.
+- **apps.** Status commands and loopback GETs only. Toggle and Launch open a visible Terminal the operator drives; a
+  model must be an installed Ollama tag. Accounts and MCP are composed on the page from `/api/verse/seats`,
+  `/api/verse/health`, `/api/verse/budget` and `/api/verse/mcp`, so no fourth description of a seat exists.
+
+### Autonomy families (Track B)
+
+| Family (owner, module) | Routes |
+|---|---|
+| authority (B-U1, `verse/authority-api.ts`) | `GET /api/verse/authority` → `AuthorityStatusV1` (+ `effectiveReason`); `GET /api/verse/authority/draft[?kind=new\|reapprove]` → draft (+ `kind`, `summary`, `startStageId`); `GET /api/verse/authority/ledger[?limit=&kind=]`; `POST /api/verse/authority` with one of `{action:'switch', to}`, `{action:'stop'}`, `{action:'clear-stop'}`, `{action:'revoke', reason?}`, `{action:'grant', draftDigest}`, `{action:'re-approve', draftDigest}` |
+| overnight (B-U5, `verse/overnight-api.ts`) | `GET /api/verse/overnight` → `OvernightStatus` (+ `daemon`, `pending`); `POST /api/verse/overnight` (`{action:'arm', stopRule}` \| `{action:'disarm'}`); `GET /api/verse/overnight/report` → `OvernightReportV1` |
+| fleet-live (B-U5, `verse/fleet-live-api.ts`) | `GET /api/verse/fleet/live` → `FleetLiveSnapshotV1`; `POST /api/verse/fleet/live` (`{action:'pause-repo', repo, reason}` \| `{action:'resume-repo', repo, kind?}`) |
+| leader (B-U8, `verse/leader-api.ts`) | `GET /api/verse/leader` → `LeaderStateV1`; `GET /api/verse/leader/memos/<id>`; `POST /api/verse/leader` with one of `{action:'run'}` (202), `{action:'veto', actionId, note?}`, `{action:'veto-memo', memoId, note?}`, `{action:'dismiss', itemId}` |
+| learning (B-U9, `verse/learning-api.ts`) | `GET /api/verse/learning` → `LearningStateV1`; `POST /api/verse/learning/experiments {hypothesis}`; `POST /api/verse/learning/experiments/cancel {experimentId, reason?}`; `POST /api/verse/learning/adopt {versionId, experimentId}`; `POST /api/verse/learning/rollback {toVersionId\|null, reason?}` |
+
+- **authority.** Lowering (switch down, stop, revoke) is instant and needs only the mutation token. Raising within the
+  installed grant needs nothing more; raising past it is 409 `grant-required`, and only `grant` / `re-approve` widen
+  authority — they ask the custody helper to show the scope in a Touch ID prompt on this Mac. The server signs exactly the
+  draft the operator saw: drafts are kept server-side by digest and the action echoes `draftDigest`. Digests (64-hex
+  values the server produced) are restored after sanitizing, because the secret scrubber would otherwise redact them.
+  Full model: [`docs/STANDING-AUTHORITY.md`](STANDING-AUTHORITY.md).
+- **overnight.** Arming never starts anything: a resident daemon adopts the armed record at its next iteration, and the
+  run ends by pausing at its stop rule, never by the kill switch. Refusals are `{ ok: false, note }`, in order: kill
+  switch engaged or unreadable, nothing enrolled, a run already armed or running, a stop rule that does not resolve (400).
+  Halting a live run is `POST /api/verse/daemon` (a separate V2 route, on purpose).
+- **fleet-live.** Read-only numbers from the authority ledger, the last standing tick, the runtime journal and the hold
+  store, built off the request path (≤ 2 s old). POSTs act as `mason`: pause sets an `owner-hold`; resume clears one kind,
+  or every active hold on the repo.
+- **leader.** A veto only lowers what autonomy is doing, so it needs nothing more. `run` spends at most one Leader call on
+  a seat the router allows; with no standing grant that is a free local model or nothing.
+- **learning.** Adoption must clear the same gate the Leader does; the route only removes the veto window the operator
+  would be waiting on. Cancel and rollback only lower. Refusals are 409 with the registry's reason.
+
+### Cross-family producers
+
+`needsYouItems(): NeedsYouItem[]` (type in `workbench-types.ts`) is exported by `authority-api.ts`, `fleet-live-api.ts`
+and `leader-api.ts`; the activity route merges them with the approvals scan. Each is pure and cached. A producer that has
+not produced its first answer **throws**, so activity reports that source as not answering instead of a false all-clear;
+a producer that has not landed reports `unavailable`. Items carrying a different `source`, or an action route outside
+`/api/`, are dropped. The desktop shell reads the activity response and depends on `running[].sessionId/title`,
+`needsYou[].id/kind/subject.sessionId`, `completions[].sessionId/title/outcome/durationMs`, `counts.needsYou` and a
+`cursor` matching `[A-Za-z0-9._-]`.
+
+### CLI (3.10)
+
+- `ashlr authority …` — `status`, `switch <off|propose|autonomous>`, `stop` / `clear-stop`, `revoke`, `draft`, `grant`,
+  `re-approve`, `ledger verify|tail`, `surface`, `protect --print|--apply`, `github-app`, `rotate-provenance`, and
+  `setup [--dry-run]` (guided one-time Phase 0). Lowering never asks; raising asks first or takes `--yes`.
+- `ashlr leader …` and `ashlr mirror …` — the Leader and the fleet's mirrors (`~/.ashlr/fleet/mirrors/<owner>__<repo>`).
+- `ashlr daemon start --until <HH:MM|ISO> | --iterations <n> | --until-paused`; `ashlr daemon doctor [--clear-stale] [--json]`;
+  `daemon status --json` gains `runningVerified` and `liveness`.
+
+### Private state added in 3.10
+
+`~/.ashlr/authority/` (grant, clamp, hash-chained `ledger.jsonl`; denied to every sandboxed agent), `~/.ashlr/budget.json`,
+`~/.ashlr/routing/{capacity.json,decisions.jsonl}`, `~/.ashlr/reasoning/{steps,features,state}/` (text 30 days, features
+180 days), `~/.ashlr/verse/attachments/<sid>/`, `~/.ashlr/fleet/mirrors/`. Directories 0700, files 0600, and none of them
+inside a repository.
+
 ## Definition of done
 - `npm run typecheck && npm run typecheck:web && npm run lint && npm run test:web && npx vitest run test/verse*.test.ts` green.
 - Live: `ashlr verse --no-open --json` → open `/verse/` → new chat on a local seat → two turns with memory across turns → context meter moves → stop works.

@@ -8,6 +8,7 @@
     "eslint.config.js",
     "vitest.config.ts",
     "test/setup/home.ts",
+    "test/setup/home-isolation-guard.ts",
     "scripts/test-ci.mjs",
     "scripts/copy-assets.mjs",
     "scripts/build-identity.mjs",

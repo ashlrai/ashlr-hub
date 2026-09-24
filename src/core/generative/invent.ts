@@ -17,6 +17,7 @@ import type { AshlrConfig, WorkItem } from '../types.js';
 import { resolveFrontierJudgeClient } from '../fleet/manager.js';
 import { ecosystemSummary, northStarDocSummary } from '../ecosystem/map.js';
 import { scoreItem } from '../portfolio/backlog.js';
+import { scrubSecrets } from '../util/scrub.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -26,32 +27,13 @@ const DEFAULT_N = 6;
 const DEDUP_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 // ---------------------------------------------------------------------------
-// Secret scrubbing — inline, no external dep. Redacts token/key-shaped strings.
+// Secret scrubbing — delegated to the shared scrubber (3.10 safety floor).
+// This module used to carry its own weaker 4-pattern copy that drifted from
+// src/core/util/scrub.ts (no GitHub/Slack/JWT/PEM/Telegram coverage). It is
+// re-exported under the same name so existing importers keep working.
 // ---------------------------------------------------------------------------
 
-const SECRET_PATTERNS: RegExp[] = [
-  /\b(sk-[A-Za-z0-9\-_]{20,})/g,
-  /\b(AKIA[A-Z0-9]{16})/g,
-  /(Bearer\s+)[A-Za-z0-9\-._~+/]+=*/gi,
-  /((?:token|key|secret|password|passwd|pwd)\s*[:=]\s*["']?)[^\s"',\n]{8,}(["']?)/gi,
-];
-
-export function scrubSecrets(text: string): string {
-  let out = text;
-  for (const re of SECRET_PATTERNS) {
-    // Reset lastIndex for global regexes
-    re.lastIndex = 0;
-    out = out.replace(re, (match) => {
-      // Keep first 4 chars of structural prefix, redact value
-      const eqIdx = match.search(/[:=]\s*/);
-      if (eqIdx > 0) {
-        return match.slice(0, eqIdx + 1) + '[REDACTED]';
-      }
-      return '[REDACTED]';
-    });
-  }
-  return out;
-}
+export { scrubSecrets };
 
 // ---------------------------------------------------------------------------
 // Dedup ledger

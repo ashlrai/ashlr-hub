@@ -543,13 +543,107 @@ function invalidEvaluation(
   };
 }
 
-function wilson95(successes: number, total: number): { lower: number; upper: number } {
-  const z = 1.959963984540054;
+const Z95 = 1.959963984540054;
+
+/** Unrounded Wilson score bounds; the paired interval below composes these. */
+function wilsonBounds95(successes: number, total: number): { lower: number; upper: number } {
   const p = successes / total;
-  const denominator = 1 + z * z / total;
-  const center = (p + z * z / (2 * total)) / denominator;
-  const margin = z * Math.sqrt((p * (1 - p) + z * z / (4 * total)) / total) / denominator;
-  return { lower: rounded(Math.max(0, center - margin)), upper: rounded(Math.min(1, center + margin)) };
+  const denominator = 1 + Z95 * Z95 / total;
+  const center = (p + Z95 * Z95 / (2 * total)) / denominator;
+  const margin = Z95 * Math.sqrt((p * (1 - p) + Z95 * Z95 / (4 * total)) / total) / denominator;
+  return { lower: Math.max(0, center - margin), upper: Math.min(1, center + margin) };
+}
+
+function wilson95(successes: number, total: number): { lower: number; upper: number } {
+  const bounds = wilsonBounds95(successes, total);
+  return { lower: rounded(bounds.lower), upper: rounded(bounds.upper) };
+}
+
+/**
+ * The 2×2 table of a paired binary trial: every pair ran the treatment arm and
+ * the control arm once, and each run passed or failed.
+ */
+export interface PairedOutcomeCounts {
+  /** Both arms passed. */
+  bothPass: number;
+  /** Treatment passed, control failed (a treatment "win"). */
+  treatmentOnly: number;
+  /** Control passed, treatment failed (a treatment "loss"). */
+  controlOnly: number;
+  /** Both arms failed. */
+  bothFail: number;
+}
+
+export interface PairedDifferenceInterval {
+  /** Complete pairs. */
+  pairs: number;
+  /** Treatment pass rate − control pass rate, in [-1, 1]. */
+  difference: number;
+  lower: number;
+  upper: number;
+  level: 0.95;
+  method: 'newcombe-hybrid-score-paired';
+}
+
+/**
+ * 95% confidence interval for the difference of two PAIRED proportions
+ * (treatment − control) — Newcombe (1998) method 10, the hybrid score interval
+ * with a continuity-corrected phi.
+ *
+ * WHY THIS METHOD. The descriptive effect above (`absoluteLift`) was enough
+ * for an observation-only trial; a harness ADOPTION gate needs an interval,
+ * and the gate reads its lower bound at n = 8. At that size the textbook
+ * choices fail in opposite directions: a Wald / paired-t interval collapses
+ * to a zero-width [1, 1] when all 8 pairs are wins (and to [0, 0] when all
+ * tie), so it would call 8/8 certain; exact intervals are markedly
+ * conservative at this size. Newcombe's method
+ * composes the two arms' Wilson intervals and corrects for the correlation
+ * the pairing induces, stays inside [-1, 1], never degenerates, and is the
+ * interval with near-nominal coverage at small n in Newcombe's own evaluation.
+ *
+ * Generalized here, beside the evaluator it extends, so skill trials and
+ * harness experiments (learn/experiments.ts) share one audited piece of
+ * statistics instead of two drifting copies.
+ *
+ * Returns null for an empty or malformed table: "no interval" is the honest
+ * answer, never a made-up [0, 0].
+ */
+export function pairedDifferenceConfidence95(counts: PairedOutcomeCounts): PairedDifferenceInterval | null {
+  const { bothPass: a, treatmentOnly: b, controlOnly: c, bothFail: d } = counts;
+  for (const value of [a, b, c, d]) {
+    if (!Number.isSafeInteger(value) || value < 0) return null;
+  }
+  const n = a + b + c + d;
+  if (n === 0) return null;
+  const p1 = (a + b) / n;
+  const p2 = (a + c) / n;
+  const w1 = wilsonBounds95(a + b, n);
+  const w2 = wilsonBounds95(a + c, n);
+  // Phi with Newcombe's continuity correction: a positive association is
+  // shrunk by n/2 (never below 0); a zero margin makes phi 0 (independence).
+  const margins = (a + b) * (c + d) * (a + c) * (b + d);
+  let numerator = a * d - b * c;
+  if (numerator > 0) numerator = Math.max(numerator - n / 2, 0);
+  const phi = margins === 0 ? 0 : numerator / Math.sqrt(margins);
+  const difference = p1 - p2;
+  const lowRadicand = (p1 - w1.lower) ** 2 - 2 * phi * (p1 - w1.lower) * (w2.upper - p2) + (w2.upper - p2) ** 2;
+  const highRadicand = (w1.upper - p1) ** 2 - 2 * phi * (w1.upper - p1) * (p2 - w2.lower) + (p2 - w2.lower) ** 2;
+  return {
+    pairs: n,
+    difference: rounded(difference),
+    lower: rounded(Math.max(-1, difference - Math.sqrt(Math.max(0, lowRadicand)))),
+    upper: rounded(Math.min(1, difference + Math.sqrt(Math.max(0, highRadicand)))),
+    level: 0.95,
+    method: 'newcombe-hybrid-score-paired',
+  };
+}
+
+/** Wilson 95% interval for one proportion (rounded to 6 dp); null when `total` is not a positive count. */
+export function wilsonInterval95(successes: number, total: number): { lower: number; upper: number } | null {
+  if (!Number.isSafeInteger(successes) || !Number.isSafeInteger(total) || total <= 0 || successes < 0 || successes > total) {
+    return null;
+  }
+  return wilson95(successes, total);
 }
 
 function receiptFingerprint(receipt: ExternalSkillTrialOutcomeReceipt): string {

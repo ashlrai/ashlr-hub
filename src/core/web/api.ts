@@ -189,6 +189,58 @@ interface SseHistoryProjection {
 
 let sseHistoryProjection: SseHistoryProjection | null = null;
 
+// ---------------------------------------------------------------------------
+// SSE topics + immediate Verse sidebar push (3.10)
+// ---------------------------------------------------------------------------
+
+/**
+ * Named event groups on /api/events. A client may subscribe to a subset with
+ * `?topics=a,b` — the Verse app needs only `verse-sessions`, and every other
+ * group costs a dashboard snapshot build plus ~73 KB per tick it discards.
+ * No `topics` parameter means every group (the historical behaviour).
+ */
+export const SSE_TOPICS = [
+  'verse-sessions', 'runs', 'swarms', 'inbox', 'daemon', 'fleet-activity', 'snapshot',
+] as const;
+export type SseTopic = typeof SSE_TOPICS[number];
+
+/** Parse `topics`; unknown names are ignored, and nothing valid means "all". */
+export function parseSseTopics(raw: string | undefined): ReadonlySet<SseTopic> {
+  const all = new Set<SseTopic>(SSE_TOPICS);
+  if (raw === undefined || raw.length === 0 || raw.length > 256) return all;
+  const picked = new Set<SseTopic>();
+  for (const part of raw.split(',')) {
+    const name = part.trim();
+    if ((SSE_TOPICS as readonly string[]).includes(name)) picked.add(name as SseTopic);
+  }
+  return picked.size > 0 ? picked : all;
+}
+
+/** Per-connection "push verse-sessions now if the list changed" callbacks. */
+const verseSessionPushers = new Set<() => void>();
+let verseNotifyScheduled = false;
+
+/**
+ * Push the Verse session list to every open /api/events stream NOW (coalesced
+ * to one push per event-loop turn), instead of waiting for the next poll tick.
+ *
+ * PERF (3.10): the sidebar used to update only when the 1.5 s poll got past
+ * the dashboard-snapshot build it was queued behind — 12–14 s gaps were
+ * measured. handleApi calls this after every mutating /api/verse request; the
+ * session engine should call it whenever a session's status, title, or turn
+ * count changes (turn start/end), which no request marks.
+ */
+export function notifyVerseSessionsChanged(): void {
+  if (verseNotifyScheduled || verseSessionPushers.size === 0) return;
+  verseNotifyScheduled = true;
+  setImmediate(() => {
+    verseNotifyScheduled = false;
+    for (const push of [...verseSessionPushers]) {
+      try { push(); } catch { /* one broken stream must not starve the rest */ }
+    }
+  });
+}
+
 const SNAPSHOT_CACHE_MS = 5_000;
 
 interface SnapshotCacheEntry {
@@ -897,6 +949,11 @@ function handleSseEvents(
   readSession: { id: string; expiresAt: number },
   projections?: ReadProjectionReader,
 ): void {
+  const topics = parseSseTopics(getQueryParam(req.url ?? '', 'topics'));
+  const wantsHistory = topics.has('runs') || topics.has('swarms');
+  const wantsDaemon = topics.has('daemon') || topics.has('fleet-activity') || topics.has('snapshot');
+  const wantsAnyPolled = wantsHistory || topics.has('inbox') || wantsDaemon;
+
   // Cap concurrent SSE connections to bound timer/socket growth.
   if (_sseCleanups.size >= SSE_MAX_CONNECTIONS) {
     sendJson(res, 503, { error: 'too many live connections' });
@@ -958,72 +1015,89 @@ function handleSseEvents(
   // emit nothing extra on this stream.
   let lastVerseDigest = '';
 
-  // Emit one full update (runs, swarms, inbox, daemon slices).
+  // Verse session list (src/core/verse/verse-api.ts). Metadata only —
+  // VerseSession records carry no launcher/env. Synchronous and cheap, so it
+  // runs OUTSIDE the in-flight guard below: a slow snapshot build must never
+  // hold the sidebar back (it used to, for up to 14 s).
+  function pushVerseSessionsIfChanged(): void {
+    if (cleaned || !topics.has('verse-sessions')) return;
+    try {
+      const digest = verseSessionsDigest();
+      if (digest !== lastVerseDigest) {
+        lastVerseDigest = digest;
+        sendNamed('verse-sessions', { sessions: verseSessionsSnapshot() });
+      }
+    } catch { /* verse slice is best-effort */ }
+  }
+
+  // Emit one full update (runs, swarms, inbox, daemon slices) for the
+  // subscribed topics.
   async function emitUpdate(): Promise<void> {
-    if (updateInFlight || backpressured) return;
+    if (updateInFlight || backpressured || !wantsAnyPolled) return;
     updateInFlight = true;
     try {
-      // Verse session list (src/core/verse/verse-api.ts). Metadata only —
-      // VerseSession records carry no launcher/env. Emitted first because it
-      // is synchronous and cheap; nothing below depends on it.
-      try {
-        const digest = verseSessionsDigest();
-        if (digest !== lastVerseDigest) {
-          lastVerseDigest = digest;
-          sendNamed('verse-sessions', { sessions: verseSessionsSnapshot() });
-        }
-      } catch { /* verse slice is best-effort */ }
-      try {
-        const history = await cachedSseHistoryProjection(projections);
-        if (cleaned) return;
-        sendNamed('runs', history.runs);
-        sendNamed('swarms', history.swarms);
-      } catch { /* Keep sending explicit daemon provenance if history is unavailable. */ }
+      if (wantsHistory) {
+        try {
+          const history = await cachedSseHistoryProjection(projections);
+          if (cleaned) return;
+          if (topics.has('runs')) sendNamed('runs', history.runs);
+          if (topics.has('swarms')) sendNamed('swarms', history.swarms);
+        } catch { /* Keep sending explicit daemon provenance if history is unavailable. */ }
+      }
       // M32: live inbox + daemon state for the web command center. Metadata
       // only — the inbox event carries id/title/kind, never diffs.
-      try {
-        const pending = projections
-          ? (await projections.read('proposals')).filter((proposal) => proposal.status === 'pending')
-          : listProposals({ status: 'pending' });
-        if (cleaned) return;
-        sendNamed('inbox', {
-          pending: pending.length,
-          proposals: pending.slice(0, 20).map((p) => ({
-            id: p.id,
-            title: p.title,
-            kind: p.kind,
-            repo: p.repo,
-            origin: p.origin,
-            createdAt: p.createdAt,
-          })),
-        });
-      } catch { /* inbox slice is best-effort */ }
+      if (topics.has('inbox')) {
+        try {
+          const pending = projections
+            ? (await projections.read('proposals')).filter((proposal) => proposal.status === 'pending')
+            : listProposals({ status: 'pending' });
+          if (cleaned) return;
+          sendNamed('inbox', {
+            pending: pending.length,
+            proposals: pending.slice(0, 20).map((p) => ({
+              id: p.id,
+              title: p.title,
+              kind: p.kind,
+              repo: p.repo,
+              origin: p.origin,
+              createdAt: p.createdAt,
+            })),
+          });
+        } catch { /* inbox slice is best-effort */ }
+      }
+      if (!wantsDaemon) return;
       let snap: DashboardSnapshotWithSourceQuality | null = null;
-      try {
-        snap = await buildCachedSnapshot(cfg, projections);
-      } catch {
-        // Keep the event stream alive with explicit unavailable provenance.
+      if (topics.has('snapshot')) {
+        try {
+          snap = await buildCachedSnapshot(cfg, projections);
+        } catch {
+          // Keep the event stream alive with explicit unavailable provenance.
+        }
       }
       if (cleaned) return;
       const daemon = await readFreshDaemonObservation(projections);
       if (cleaned) return;
-      sendNamed('daemon', legacyDaemonProjection(daemon));
-      sendNamed('daemon-observation', daemon);
+      if (topics.has('daemon')) {
+        sendNamed('daemon', legacyDaemonProjection(daemon));
+        sendNamed('daemon-observation', daemon);
+      }
       // M90: fleet-activity liveness pulse — carry daemon tick count so the
       // Fleet Activity tab can update its "last tick" indicator in real-time
       // without a full /api/fleet-activity poll.
-      sendNamed('fleet-activity-ping', {
-        running: daemon.running === true,
-        lastTickAt: daemon.lastTickAt,
-        tickCount: Array.isArray(daemon.ticks) ? daemon.ticks.length : 0,
-      });
-      sendNamed('fleet-activity-observation', {
-        runtimeState: daemon.runtimeState,
-        sourceQuality: daemon.sourceQuality,
-        running: daemon.running,
-        lastTickAt: daemon.lastTickAt,
-        tickCount: Array.isArray(daemon.ticks) ? daemon.ticks.length : null,
-      });
+      if (topics.has('fleet-activity')) {
+        sendNamed('fleet-activity-ping', {
+          running: daemon.running === true,
+          lastTickAt: daemon.lastTickAt,
+          tickCount: Array.isArray(daemon.ticks) ? daemon.ticks.length : 0,
+        });
+        sendNamed('fleet-activity-observation', {
+          runtimeState: daemon.runtimeState,
+          sourceQuality: daemon.sourceQuality,
+          running: daemon.running,
+          lastTickAt: daemon.lastTickAt,
+          tickCount: Array.isArray(daemon.ticks) ? daemon.ticks.length : null,
+        });
+      }
       // M213: dashboard snapshot push — lets fleet-dashboard update without polling.
       if (snap) {
         sendNamed('snapshot', {
@@ -1037,14 +1111,18 @@ function handleSseEvents(
   }
 
   // Send an initial snapshot immediately.
+  pushVerseSessionsIfChanged();
   try {
     void emitUpdate().catch(() => { /* A failed read must not reject outside the stream. */ });
   } catch {
     // If the initial read fails, the client gets no data until the next tick.
   }
 
-  // Poll on a bounded interval.
+  // Poll on a bounded interval (unchanged cadence). The Verse list check is
+  // also a push target for notifyVerseSessionsChanged().
+  verseSessionPushers.add(pushVerseSessionsIfChanged);
   const intervalId = setInterval(() => {
+    pushVerseSessionsIfChanged();
     try {
       void emitUpdate().catch(() => { /* Retry a failed read on the next bounded tick. */ });
     } catch {
@@ -1056,6 +1134,7 @@ function handleSseEvents(
   cleanup = (): void => {
     if (cleaned) return;
     cleaned = true;
+    verseSessionPushers.delete(pushVerseSessionsIfChanged);
     clearInterval(intervalId);
     if (backpressureTimer) clearTimeout(backpressureTimer);
     if (expiryTimer) clearTimeout(expiryTimer);
@@ -2160,7 +2239,14 @@ export async function handleApi(
     // ctx.allowDispatch + passesMutationGate inside handleVerseControlApi.
     if (isVerseControlPath(path)) {
       return handleVerseControlApi(
-        { cfg, token: ctx.token, allowDispatch: ctx.allowDispatch, readSession: ctx.readSession },
+        {
+          cfg,
+          token: ctx.token,
+          allowDispatch: ctx.allowDispatch,
+          readSession: ctx.readSession,
+          // PERF: lets /control and /usage-series refresh on the worker thread.
+          ...(ctx.readProjections ? { readProjections: ctx.readProjections } : {}),
+        },
         req,
         res,
         path,
@@ -2181,13 +2267,17 @@ export async function handleApi(
     // GETs are already behind the read-session boundary (server.ts); POSTs
     // apply ctx.allowDispatch + passesMutationGate inside handleVerseApi.
     if (isVerseApiPath(path)) {
-      return handleVerseApi(
+      const handled = await handleVerseApi(
         { cfg, token: ctx.token, allowDispatch: ctx.allowDispatch, readSession: ctx.readSession },
         req,
         res,
         path,
         method,
       );
+      // A create/rename/delete/send changed the session list: push the
+      // sidebar now rather than on the next poll tick.
+      if (method !== 'GET' && method !== 'HEAD') notifyVerseSessionsChanged();
+      return handled;
     }
 
     // ── Method not allowed on known /api/ routes ─────────────────────────────

@@ -273,43 +273,13 @@
 }
 
 /* ---------------------------------------------------------------------------
- * Keyboard reference
+ * Keyboard reference (the table itself is shell/ShortcutsOverlay's)
  * ------------------------------------------------------------------------- */
-.shortcuts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 0 var(--space-6);
-}
-
-.shortcut {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-2) 0;
-  border-bottom: 1px solid var(--border-subtle);
-  font-size: var(--text-sm-size);
-}
-
-.keys {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  flex: none;
-}
-
-.key {
-  min-width: 20px;
-  padding: 2px var(--space-1);
-  border: 1px solid var(--border-default);
-  border-bottom-width: 2px;
-  border-radius: var(--radius-xs);
-  background: var(--bg-surface);
-  color: var(--text-secondary);
-  font-family: var(--font-display);
-  font-size: var(--text-2xs-size);
-  line-height: var(--text-2xs-line);
-  text-align: center;
+.panelNote {
+  margin-bottom: var(--space-3);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
 }
 
 .about {

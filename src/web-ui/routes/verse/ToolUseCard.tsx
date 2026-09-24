@@ -21,6 +21,7 @@
  */
 import { useMemo } from 'react';
 import { CommandOutput } from './chat/CommandOutput.js';
+import { LiveTimer } from './chat/LiveTimer.js';
 import { DiffBlock } from './chat/DiffBlock.js';
 import { countDiffLines } from './chat/turn-model.js';
 import { readToolFacts, toolAnchorId, type ToolFacts } from './chat/tool-semantics.js';
@@ -41,11 +42,13 @@ export interface ToolUseCardProps {
    * parsed. Omitted (tests, one-off renders) it is derived here.
    */
   facts?: ToolFacts;
+  /** 3.10: ISO start of the call — a pending card counts up from it ("running 12s"). */
+  startedAt?: string | null;
 }
 
 const MAX_OUTPUT_CHARS = 20_000;
 
-export function ToolUseCard({ name, input, result, toolUseId, durationMs = null, facts }: ToolUseCardProps) {
+export function ToolUseCard({ name, input, result, toolUseId, durationMs = null, facts, startedAt = null }: ToolUseCardProps) {
   const derived = useMemo(
     () => facts ?? readToolFacts({ name, input, result }),
     [facts, name, input, result],
@@ -85,7 +88,9 @@ export function ToolUseCard({ name, input, result, toolUseId, durationMs = null,
             {delta.deletions > 0 ? <span className={styles.toolDel}>−{delta.deletions}</span> : null}
           </span>
         ) : null}
-        <span className={styles.toolState}>{state}</span>
+        <span className={styles.toolState}>
+          {pending && startedAt ? <>running <LiveTimer since={startedAt} /></> : state}
+        </span>
       </summary>
       <div className={styles.toolBody}>
         <ToolBody input={input} output={output} facts={derived} pending={pending} isError={isError} />

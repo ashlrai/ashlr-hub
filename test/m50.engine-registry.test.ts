@@ -38,7 +38,7 @@ function makeConfig(over: Partial<AshlrConfig> = {}): AshlrConfig {
   } as AshlrConfig;
 }
 
-const KNOWN_ENGINES: EngineId[] = ['builtin', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'opencode', 'nim', 'kimi', 'openai-compat', 'local-coder', 'grok', 'llama-server' as EngineId];
+const KNOWN_ENGINES: EngineId[] = ['builtin', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'opencode', 'nim', 'kimi', 'openai-compat', 'local-coder', 'grok', 'llama-server' as EngineId, 'grok-cli' as EngineId];
 
 describe('M50 registry — coverage', () => {
   it('every known EngineId has a builtin registry entry', () => {
@@ -48,9 +48,12 @@ describe('M50 registry — coverage', () => {
     }
   });
 
-  it('no builtin entry is tier "frontier" except claude and codex (no implicit frontier)', () => {
+  it('no builtin entry is tier "frontier" except claude, codex and the grok-cli seat (no implicit frontier)', () => {
+    // V3.10: grok-cli (the SuperGrok seat, SPEC-310B §3) is frontier by an
+    // explicit decision; the per-token `grok` api-model stays mid.
     const frontier = KNOWN_ENGINES.filter((e) => BUILTIN_ENGINE_REGISTRY[e].tier === 'frontier');
-    expect(frontier.sort()).toEqual(['claude', 'codex']);
+    expect(frontier.sort()).toEqual(['claude', 'codex', 'grok-cli']);
+    expect(BUILTIN_ENGINE_REGISTRY['grok']!.tier).toBe('mid');
   });
 });
 

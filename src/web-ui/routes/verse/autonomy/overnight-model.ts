@@ -149,6 +149,9 @@ export function projectOvernight(raw: unknown): OvernightStatus | null {
     armed,
     run: projectRun(raw['run']),
     repos: count(raw['repos']),
+    // Present-but-invalid reads as null ("not recorded"); absent stays absent,
+    // so an older server is not shown as having lost a count it never sent.
+    ...(raw['mirrors'] !== undefined ? { mirrors: count(raw['mirrors']) } : {}),
     gate: projectGate(raw['gate']),
   };
 }

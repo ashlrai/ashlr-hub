@@ -233,6 +233,25 @@ export interface TaskRouteDecision {
 export interface RoutingContext {
   /** Engines that are both in allowedBackends AND pass engineInstalled(). */
   availableEngines: EngineId[];
+  /**
+   * V3.10: true when this route feeds an AUTONOMOUS dispatch (daemon, fleet,
+   * conductor, Leader). Only then does the subscription gate fail CLOSED on
+   * unknown usage and apply the operator's budget reserves (Mason,
+   * 2026-09-24: "unknown usage = NOT eligible for autonomy"). Absent/false =
+   * interactive (`ashlr run`, `ashlr goal`, universe, direct callers): the
+   * pre-3.10 rule — only a KNOWN window at/above the cap blocks — because an
+   * npm user without the Verse account collector has no capacity snapshot, and
+   * a person at the keyboard choosing to spend their own subscription is not
+   * what the reserves protect against. Interactive is the default so every
+   * existing caller keeps its behaviour; autonomy must opt in explicitly.
+   *
+   * Today fleet/router.ts#routeBackend (daemon, gateway) does not set this: it
+   * calls routeTask only to ENRICH the model tag of an engine it already
+   * chose, and the dispatch itself is gated downstream by daemon/loop.ts and
+   * fabric/gateway.ts calling subscriptionAllows directly — whose default is
+   * autonomous/fail-closed. So an unset flag there cannot launch an engine.
+   */
+  autonomous?: boolean;
 }
 
 // Thresholds (mirror fleet/router.ts so they stay in sync)
@@ -344,10 +363,19 @@ function engineAvailable(engine: EngineId, cfg: AshlrConfig, ctx: RoutingContext
   if (avail !== null && !avail.includes(engine)) return false;
   try {
     if (!withinLimit(engine, cfg)) return false;
-    const sub = subscriptionAllows(engine, { cfg });
+    // The subscription gate's own default is autonomous (fail-closed) because
+    // every direct caller of it is a daemon/fleet dispatch gate; routing
+    // passes the context's mode explicitly so interactive routing keeps the
+    // pre-3.10 rule (see RoutingContext.autonomous).
+    const sub = subscriptionAllows(engine, { cfg, autonomous: ctx.autonomous === true });
     if (!sub.allowed) return false;
   } catch {
-    // fail-open: if quota/subscription checks throw, treat engine as available
+    // V3.10 fail CLOSED: a quota/subscription check that throws means usage is
+    // unknown, and unknown usage is not headroom (the same rule
+    // subscriptionAllows now applies internally). Treating the engine as
+    // available here would re-open the Claude fail-open one layer up. Routing
+    // then falls through to the next candidate (ultimately local/builtin).
+    return false;
   }
   return true;
 }
@@ -442,6 +470,9 @@ function permittedRoutingContext(
   // keeping it present stops the narrowing from emptying the context entirely.
   return {
     ctx: {
+      // Spread first: the narrowing must not drop `autonomous` (losing it
+      // would silently turn an autonomous route interactive).
+      ...ctx,
       availableEngines: permitted.includes(ALWAYS_PERMITTED_ENGINE)
         ? permitted
         : [...permitted, ALWAYS_PERMITTED_ENGINE],
@@ -1305,6 +1336,7 @@ export function routeTaskCascade(
     // Narrow context to requested tier engines still in availableEngines.
     const filteredEngines = preferredEngines.filter((e) => ctx.availableEngines.includes(e));
     const escalatedCtx: RoutingContext = {
+      ...ctx, // keep `autonomous` — the escalation re-dispatch is the same dispatch
       availableEngines:
         filteredEngines.length > 0
           ? [...filteredEngines, ...(ctx.availableEngines.filter((e) => !preferredEngines.includes(e)))]
@@ -1344,6 +1376,7 @@ export function routeTaskCascade(
 
   // Low/mid difficulty: prefer the cheapest capable tier (local → mid).
   const cheapCtx: RoutingContext = {
+    ...ctx, // keep `autonomous` — only the candidate ORDER changes here
     // Put local engines first to bias routeTask's "available" ordering toward free local.
     availableEngines: [
       ...ctx.availableEngines.filter(

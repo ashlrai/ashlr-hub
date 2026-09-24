@@ -1,14 +1,32 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { clearMutationToken, hasMutationHold, markCheckComplete } from '../data/auth-store.js';
+import { clearMutationToken, clearReadSession, getAuthSnapshot, getMutationToken, hasMutationHold, markCheckComplete } from '../data/auth-store.js';
 import { evictAll } from '../data/cache.js';
 import { MockEventSource, verseFetch } from '../routes/verse/fixtures.test-support.js';
+import * as verseQueries from '../routes/verse/verse-queries.js';
 import { resetVerseStore } from '../routes/verse/verse-store.js';
 import { isScopedConsolePath, isVerseConsolePath } from './console-mode.js';
-import { VerseConsoleApp } from './VerseConsoleApp.js';
+import { listenForSidecarRestart, SIDECAR_RESTARTED_EVENT, VerseConsoleApp } from './VerseConsoleApp.js';
 
 const READ = 'c'.repeat(64);
 const MUT = 'd'.repeat(64);
+
+/**
+ * "The app is in, not the gate": wait for the rail, then check which surface
+ * the launch rule picked.
+ *
+ * WHY NOT the Chats sidebar (the pre-3.10 landmark): verse-ui-store's launch
+ * rule opens COMMAND on the first launch of each local day, and every page
+ * load here is a first launch (localStorage is cleared, and the store reads it
+ * once at import). So Chat — and its "Chats" navigation — is not mounted.
+ * The rail is present on every surface, which is what "adopted, no gate"
+ * actually means; Command being current pins the launch rule itself, so a
+ * regression that silently dropped it would fail here rather than pass.
+ */
+async function expectShellOnCommand(): Promise<void> {
+  const rail = await screen.findByRole('navigation', { name: 'Verse sections' });
+  expect(within(rail).getByRole('button', { name: /^Command/ })).toHaveAttribute('aria-current', 'page');
+}
 
 beforeEach(() => {
   window.history.replaceState(null, '', '/verse/');
@@ -54,7 +72,7 @@ describe('VerseConsoleApp', () => {
     vi.stubGlobal('fetch', fetch);
     window.__ASHLR_TOKENS__ = { readToken: READ, token: MUT };
     render(<VerseConsoleApp />);
-    await screen.findByRole('navigation', { name: 'Chats' });
+    await expectShellOnCommand();
     expect(screen.queryByRole('heading', { name: 'Connect to Ashlr Verse' })).not.toBeInTheDocument();
     const sessionCall = state.calls.find((c) => c.path === '/api/session')!;
     expect(sessionCall.method).toBe('POST');
@@ -66,5 +84,91 @@ describe('VerseConsoleApp', () => {
     expect(Object.values(sessionStorage)).not.toContain(MUT);
     // No unlock prompt shown once the hold exists.
     expect(screen.queryByText(/Actions locked/)).not.toBeInTheDocument();
+  });
+});
+
+describe('listenForSidecarRestart (desktop sidecar restart → immediate re-adoption)', () => {
+  const READ2 = 'e'.repeat(64);
+  const MUT2 = 'f'.repeat(64);
+  const READ3 = '1'.repeat(64);
+
+  // Adoption remembers host tokens in memory for the page's life; forget the
+  // previous test's so the gate case really starts on the gate.
+  beforeEach(async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 204 })));
+    await clearReadSession();
+    vi.unstubAllGlobals();
+    vi.stubGlobal('EventSource', MockEventSource);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function sessionPosts(calls: Array<{ path: string; method: string; headers: Record<string, string> }>): string[] {
+    return calls.filter((c) => c.path === '/api/session' && c.method === 'POST').map((c) => c.headers['x-ashlr-token']!);
+  }
+
+  it('exchanges the restarted sidecar\'s tokens the moment the shell fires the event', async () => {
+    const { fetch, state } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    const invalidate = vi.spyOn(verseQueries, 'invalidateVerseLists');
+    const target = new EventTarget();
+    const dispose = listenForSidecarRestart(target as unknown as Window);
+    // The shell's token_handoff_script: set the tokens, then fire the event.
+    window.__ASHLR_TOKENS__ = { readToken: READ2, token: MUT2 };
+    target.dispatchEvent(new CustomEvent(SIDECAR_RESTARTED_EVENT));
+    await waitFor(() => expect(sessionPosts(state.calls)).toEqual([READ2]));
+    await waitFor(() => expect(getMutationToken()).toBe(MUT2));
+    expect(getAuthSnapshot().phase).toBe('authenticated');
+    expect(window.__ASHLR_TOKENS__).toBeUndefined();
+    // The restarted server may have interrupted turns: the lists are re-read.
+    await waitFor(() => expect(invalidate).toHaveBeenCalledTimes(1));
+    dispose();
+  });
+
+  it('a restart during an exchange runs once more with the newest tokens instead of racing', async () => {
+    const { fetch: base, state } = verseFetch();
+    let release: (() => void) | null = null;
+    const gated = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith('/api/session') && release === null) {
+        await new Promise<void>((resolve) => { release = resolve; });
+      }
+      return (base as unknown as typeof fetch)(input, init);
+    });
+    vi.stubGlobal('fetch', gated);
+    const target = new EventTarget();
+    const dispose = listenForSidecarRestart(target as unknown as Window);
+    window.__ASHLR_TOKENS__ = { readToken: READ2, token: MUT2 };
+    target.dispatchEvent(new CustomEvent(SIDECAR_RESTARTED_EVENT));
+    await waitFor(() => expect(release).not.toBeNull());
+    window.__ASHLR_TOKENS__ = { readToken: READ3 };
+    target.dispatchEvent(new CustomEvent(SIDECAR_RESTARTED_EVENT));
+    target.dispatchEvent(new CustomEvent(SIDECAR_RESTARTED_EVENT));
+    release!();
+    await waitFor(() => expect(sessionPosts(state.calls)).toEqual([READ2, READ3]));
+    dispose();
+  });
+
+  it('stops listening once disposed', async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const target = new EventTarget();
+    listenForSidecarRestart(target as unknown as Window)();
+    window.__ASHLR_TOKENS__ = { readToken: READ2 };
+    target.dispatchEvent(new CustomEvent(SIDECAR_RESTARTED_EVENT));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('replaces the session gate when the event lands while it is showing', async () => {
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    act(() => markCheckComplete(false));
+    render(<VerseConsoleApp />);
+    expect(await screen.findByRole('heading', { name: 'Connect to Ashlr Verse' })).toBeInTheDocument();
+    window.__ASHLR_TOKENS__ = { readToken: READ2, token: MUT2 };
+    act(() => { window.dispatchEvent(new CustomEvent(SIDECAR_RESTARTED_EVENT)); });
+    await expectShellOnCommand();
+    expect(screen.queryByRole('heading', { name: 'Connect to Ashlr Verse' })).not.toBeInTheDocument();
   });
 });

@@ -107,6 +107,14 @@ export const VERSE_ACCOUNTS_DEFAULT_IDLE_SUSPEND_MS = 5 * 60_000;
 const IDLE_CHECK_MS = 15_000;
 
 /**
+ * How often a read-only collector may retry the native-metadata lease on
+ * client interest. The daemon's capacity publisher holds it for one short
+ * sample every 5 minutes, so a 30 s spacing takes over within one or two
+ * page refreshes without turning every request into a lock attempt.
+ */
+export const VERSE_ACCOUNTS_LEASE_RETRY_MS = 30_000;
+
+/**
  * Recovery budget for a stopped collection generation.
  *
  * A regeneration only ever runs after the kernel has confirmed every
@@ -177,6 +185,13 @@ const MAX_CREDIT_FILES = 8;
 
 export type VerseAccountProvider = 'codex' | 'claude' | 'grok';
 
+/** Display names used in plain-language notes. */
+const VERSE_PROVIDER_NAME: Readonly<Record<VerseAccountProvider, string>> = {
+  claude: 'Claude Code',
+  codex: 'Codex',
+  grok: 'Grok',
+};
+
 export interface VerseAccountWindow {
   id: string;
   /** Provider-reported percent, or null for NO SIGNAL (which is not zero). */
@@ -192,10 +207,10 @@ export interface VerseAccountWindow {
   /**
    * TRUE only when the provider explicitly FLAGGED the limit (Codex's
    * classified `rateLimitReachedType`) and that flag survived to this module.
-   * It is never inferred from `usedPercent === 100`: the upstream normalizer
-   * writes the flag as the sentinel 100 and then drops it, so a bare 100 is
-   * indistinguishable from a measured 100 by the time it arrives. See
-   * `windowLimitReached`.
+   * It is never inferred from `usedPercent === 100`: since V3.10 the upstream
+   * normalizer writes the flag as the sentinel 100 AND keeps
+   * `limitReached: true` beside it, so a bare 100 is a measured 100 (or a
+   * pre-3.10 row that lost the flag). See `windowLimitReached`.
    */
   limitReached: boolean;
   /** False when `usedPercent` is a flagged sentinel rather than a reading. */
@@ -277,6 +292,8 @@ export interface VerseAccountObservation {
     usedPercent: number | null;
     resetsAt: string | null;
     nativeReport?: { source: 'claude-usage'; resetDescription: string | null };
+    /** Only ever the literal `true`, and only when the provider flagged it (see `windowLimitReached`). */
+    limitReached?: true;
   }>;
   observedAt: string | null;
 }
@@ -423,7 +440,13 @@ function toObservationMap(rows: ResourceObservation[]): Map<string, VerseAccount
   for (const row of rows) {
     out.set(row.workerId, {
       health: row.health,
-      windows: row.windows.map((w) => ({ id: w.id, usedPercent: w.usedPercent, resetsAt: w.resetsAt })),
+      // V3.10 — KEEP THE FLAG. This is the evidence path (in-process collector
+      // and the shared ledger file); rebuilding the window as the old
+      // three-key shape silently turned a provider DENIAL back into an
+      // unexplained measured 100, so `seatUsability` could not see Codex as
+      // exhausted here even though the live connection path could.
+      windows: row.windows.map((w) => ({ id: w.id, usedPercent: w.usedPercent, resetsAt: w.resetsAt,
+        ...(w.limitReached ? { limitReached: true as const } : {}) })),
       observedAt: row.observedAt,
     });
   }
@@ -659,24 +682,21 @@ function codexSessionRoots(config: ResourceConnectionConfig): Map<string, string
  * from a window that measured 100%.
  *
  * This used to be inferred as `provider === 'codex' && usedPercent === 100`.
- * That inference cannot be made here, because the distinguishing field is
- * destroyed upstream: `normalizeCodexResourceObservation`
- * (core/resources/provider-observations.ts) writes a classified
- * `rateLimitReachedType` as `usedPercent: 100` and then DROPS the flag, while
- * `codexWindow()` clamps a genuine reading with `Math.min(100, raw)`. By the
- * time a window reaches this module the two are byte-identical — and the
- * telemetry doc's own verified Codex payload
+ * That inference is wrong: `codexWindow()` clamps a genuine reading with
+ * `Math.min(100, raw)`, and the telemetry doc's own verified Codex payload
  * (docs/VERSE-TELEMETRY-V2.md:40-43) is a MEASURED `used_percent: 100.0` with
- * no `rateLimitReachedType`, i.e. exactly the case the old inference got
- * backwards. It then suppressed the number and printed prose asserting a
- * provenance nothing here can witness.
+ * no `rateLimitReachedType` — exactly the case the old inference got
+ * backwards, suppressing the number behind prose asserting a provenance
+ * nothing here witnessed.
  *
- * So this reads a flag it was GIVEN and never derives one. The window type
- * carries `limitReached` for the day the upstream threads it through
- * (`ResourceQuotaWindow` is key-exact-validated in `pool-policy.ts`, so adding
- * the field is a change to the shared resource subsystem, not to Verse); until
- * then a bare 100 renders as the measured 100% it is under both provenances,
- * and `providerNotes` states plainly that the distinction is not recoverable.
+ * So this reads a flag it was GIVEN and never derives one. Since V3.10 the
+ * flag is threaded end to end: `normalizeCodexResourceObservation`
+ * (core/resources/provider-observations.ts) keeps `limitReached: true` beside
+ * the sentinel 100, `ResourceQuotaWindow` (pool-policy.ts) validates and keeps
+ * it, and `toObservationMap` here preserves it on the evidence path. A bare
+ * 100 therefore renders as the measured 100% it is; the only rows where the
+ * provenance is still ambiguous are ones written by a pre-3.10 build (or a
+ * hand-seeded `observations.json`), which `providerNotes` says plainly.
  */
 function windowLimitReached(window: { limitReached?: boolean }): boolean {
   return window.limitReached === true;
@@ -764,15 +784,16 @@ function providerNotes(
     if (record.windows.some((w) => w.limitReached)) {
       notes.push('The provider flagged this Codex window as "limit reached" — that flag is a denial, not a measurement.');
     } else if (record.windows.some((w) => w.usedPercent === 100)) {
-      // Honest about what this layer can and cannot witness: the upstream
-      // normalizer writes a classified `rateLimitReachedType` as 100 and
-      // discards the flag, so a window that reads exactly 100 may be either
-      // provenance. The number is reported as given; the provenance is not
-      // claimed in either direction.
+      // Honest about what this layer can and cannot witness. Since V3.10 a
+      // flagged denial arrives WITH `limitReached`, so an unflagged 100 is
+      // most likely measured — but a row persisted by a pre-3.10 build, or
+      // hand-seeded in observations.json, still carries a flagged 100 with
+      // the flag stripped. The number is reported as given; the provenance
+      // is not claimed in either direction.
       notes.push(
-        'A Codex window reads exactly 100%. The upstream normalizer writes both a measured 100% and a flagged ' +
-        '"limit reached" as the same 100 and does not keep the flag, so this surface reports the number it was ' +
-        'given and does not claim which of the two it is.',
+        'A Codex window reads exactly 100% with no "limit reached" flag. Current builds keep that flag when ' +
+        'the provider sets it, but rows written by an older build or seeded by hand may have lost it, so this ' +
+        'surface reports the number it was given and does not claim which of the two it is.',
       );
     }
     if (record.credits?.hasCredits) {
@@ -783,15 +804,17 @@ function providerNotes(
   }
   if (provider === 'grok') {
     notes.push('Grok is absent from frontier-usage.ts, so /api/usage never carries it; this probe is its only source.');
-    if (record.state === 'signed-out') {
-      // The literal reconnect command IS the pinned launcher invocation, which
-      // is the account's identity and must never be serialized. Name the
-      // command GROUP and say plainly why the rest is withheld.
-      notes.push(
-        'Grok is signed out. Re-authenticate its pinned Grok profile through `ashlr resources` before this seat ' +
-        'can be used; the profile path is withheld from this payload on purpose.',
-      );
-    }
+  }
+  if (record.state === 'signed-out') {
+    // The literal reconnect command IS the pinned launcher invocation, which
+    // is the account's identity and must never be serialized. Name the remedy
+    // (V3.10: Verse's Reconnect runs that command server-side, in Terminal)
+    // and say plainly why the rest is withheld.
+    notes.push(
+      `${VERSE_PROVIDER_NAME[provider]} is signed out. Re-authenticate it with Reconnect in Verse, which opens this ` +
+      "profile's own sign-in in Terminal, before this seat can be used; the profile path is withheld from this " +
+      'payload on purpose.',
+    );
   }
   return notes;
 }
@@ -1216,61 +1239,107 @@ export async function startVerseAccountCollector(
       .finally(() => { recovering = null; });
   }
 
-  if (config) {
-    if (!config.quota && !config.connections) {
-      reasonCode = 'accounts-collection-not-configured';
-    } else {
-      try {
-        lease = await acquireResourceQuotaRefreshLease(config.ledgerRoot, {
-          ...(options.signal ? { signal: options.signal } : {}),
-          trackNativeActivity: true,
-          scope: config.connections ? 'native-connection-metadata' : 'codex-native-metadata',
-        });
-        mode = 'owned';
-        owner = 'this-server';
-      } catch (error) {
-        // Only a typed, cleanly released refusal may degrade to read-only.
-        // Anything else leaves this collector inert rather than guessing.
-        const typed = error instanceof ResourceQuotaRefreshLeaseError ? error : null;
-        mode = typed?.safeReadOnlyFallback ? 'read-only' : 'unconfigured';
-        state = 'blocked';
-        owner = typed?.code === 'collector-owned' ? 'another-collector' : 'none';
-        reasonCode = typed?.code ?? 'collector-unavailable';
+  /**
+   * Try to take the exclusive per-root lease and, on success, start native
+   * collection. `retry` = a later attempt by a collector that started
+   * read-only (see `requestLeaseRetry`). Never throws.
+   */
+  async function acquireLease(retry: boolean): Promise<void> {
+    if (!config) return;
+    const previousCode = reasonCode;
+    let acquired: ResourceQuotaRefreshLease | null = null;
+    try {
+      acquired = await acquireResourceQuotaRefreshLease(config.ledgerRoot, {
+        ...(options.signal ? { signal: options.signal } : {}),
+        trackNativeActivity: true,
+        scope: config.connections ? 'native-connection-metadata' : 'codex-native-metadata',
+      });
+    } catch (error) {
+      // Only a typed, cleanly released refusal may degrade to read-only.
+      // Anything else leaves this collector inert rather than guessing.
+      const typed = error instanceof ResourceQuotaRefreshLeaseError ? error : null;
+      mode = typed?.safeReadOnlyFallback ? 'read-only' : 'unconfigured';
+      state = 'blocked';
+      owner = typed?.code === 'collector-owned' ? 'another-collector' : 'none';
+      reasonCode = typed?.code ?? 'collector-unavailable';
+      // A retry that is refused for the same reason is not news (touch-driven).
+      if (!retry || reasonCode !== previousCode) {
         log(
           typed?.code === 'collector-owned'
             ? 'Verse account collector: another collector (ashlr resource-console) owns the metadata lease; reading shared evidence only.'
             : `Verse account collector: metadata lease unavailable (${reasonCode}); reading shared evidence only.`,
         );
       }
-      if (lease) {
-        // Everything past acquisition is a DIFFERENT failure from the refusal
-        // the catch above is written for. `markPending()` is a durable fs
-        // write and can throw on EIO/ENOSPC/EPERM — and the refusal handler
-        // would then report `owner: 'none'` and "reading shared evidence
-        // only" while this process silently still HELD the exclusive
-        // per-root lock, so `ashlr resource-console` could never acquire it
-        // and the watchdog (which requires mode 'owned') never revisited the
-        // state. Hand the lock back before degrading, so the reported owner
-        // matches reality.
-        try {
-          lease.markPending();
-          resume();
-        } catch {
-          try { lease.close(true); } catch { /* the pending marker stays durable, which is the safe side. */ }
-          lease = null;
-          mode = 'unconfigured';
-          state = 'blocked';
-          owner = 'none';
-          reasonCode = 'collector-start-failed';
-          log('Verse account collector: the metadata lease was acquired but could not be marked pending; it has been released and no native polling is running.');
-        }
-      }
+      return;
     }
+    if (closing || closed) {
+      // close() landed while this attempt was in flight: nothing was marked
+      // pending and no native contact happened, so a plain release is exact.
+      try { acquired.close(false); } catch { /* the lock stays durable, which is the safe side. */ }
+      return;
+    }
+    lease = acquired;
+    mode = 'owned';
+    owner = 'this-server';
+    reasonCode = null;
+    // Everything past acquisition is a DIFFERENT failure from the refusal
+    // the catch above is written for. `markPending()` is a durable fs
+    // write and can throw on EIO/ENOSPC/EPERM — and the refusal handler
+    // would then report `owner: 'none'` and "reading shared evidence
+    // only" while this process silently still HELD the exclusive
+    // per-root lock, so `ashlr resource-console` could never acquire it
+    // and the watchdog (which requires mode 'owned') never revisited the
+    // state. Hand the lock back before degrading, so the reported owner
+    // matches reality.
+    try {
+      lease.markPending();
+      resume();
+    } catch {
+      try { lease.close(true); } catch { /* the pending marker stays durable, which is the safe side. */ }
+      lease = null;
+      mode = 'unconfigured';
+      state = 'blocked';
+      owner = 'none';
+      reasonCode = 'collector-start-failed';
+      log('Verse account collector: the metadata lease was acquired but could not be marked pending; it has been released and no native polling is running.');
+      return;
+    }
+    if (watchdog === null) {
+      watchdog = setInterval(() => { tickIdle(); requestRecovery(); }, IDLE_CHECK_MS);
+      watchdog.unref?.();
+    }
+    if (retry) log('Verse account collector: the metadata lease was released by its previous owner; this server now collects live readings.');
   }
 
-  if (mode === 'owned') {
-    watchdog = setInterval(() => { tickIdle(); requestRecovery(); }, IDLE_CHECK_MS);
-    watchdog.unref?.();
+  /**
+   * 3.10 c8 follow-up: a collector that started read-only because another
+   * process held the lease — typically the daemon's short-lived capacity
+   * publisher, which holds it for one 5–10 s sample and then releases it —
+   * used to stay read-only for the whole session, so Claude windows read as
+   * unknown until Verse restarted. Client interest (`touch()`) now retries
+   * the lease, at most once per VERSE_ACCOUNTS_LEASE_RETRY_MS and one attempt
+   * at a time. Only a clean, typed refusal (mode 'read-only') is retried: an
+   * inert ('unconfigured') collector stays inert, as before.
+   */
+  let leaseRetry: Promise<void> | null = null;
+  let lastLeaseAttemptAt = Date.now();
+
+  function requestLeaseRetry(): void {
+    if (closing || closed || mode !== 'read-only' || leaseRetry) return;
+    if (Date.now() - lastLeaseAttemptAt < VERSE_ACCOUNTS_LEASE_RETRY_MS) return;
+    lastLeaseAttemptAt = Date.now();
+    leaseRetry = acquireLease(true)
+      .catch(() => { /* acquireLease never throws; defensive */ })
+      .finally(() => { leaseRetry = null; });
+  }
+
+  if (config) {
+    if (!config.quota && !config.connections) {
+      reasonCode = 'accounts-collection-not-configured';
+    } else {
+      await acquireLease(false);
+      lastLeaseAttemptAt = Date.now();
+    }
   }
 
   /**
@@ -1355,7 +1424,9 @@ export async function startVerseAccountCollector(
       // abort is a process-cleanup fence. It goes through `requestRecovery()`
       // instead, which starts a new generation only once the kernel has
       // confirmed the stranded process group is gone.
-      if (closed || mode !== 'owned') return;
+      if (closed) return;
+      if (mode === 'read-only') { requestLeaseRetry(); return; }
+      if (mode !== 'owned') return;
       if (collectionDegraded()) { requestRecovery(); return; }
       if (state === 'suspended') resume();
     },
@@ -1385,6 +1456,10 @@ export async function startVerseAccountCollector(
       // shutdown never races it into releasing the lock under a live probe.
       // `closed` is set AFTER, because the recovery bails out early on it.
       if (recovering) { try { await recovering; } catch { /* already recorded as a hold */ } }
+      // Same for a lease retry: it sees `closing` and hands the lock back, or
+      // it finished first and `lease` below is released normally.
+      if (leaseRetry) { try { await leaseRetry; } catch { /* never throws */ } }
+      if (watchdog !== null) { clearInterval(watchdog); watchdog = null; }
       closed = true;
       await suspend();
       state = 'stopped';

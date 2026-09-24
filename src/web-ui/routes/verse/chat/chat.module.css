@@ -262,6 +262,7 @@
   user-select: none;
 }
 .commandText {
+  flex: 1;
   min-width: 0;
   font-family: var(--font-mono);
   font-size: var(--text-xs-size);
@@ -653,3 +654,21 @@
   .activityRow { grid-template-columns: 2px 6ch minmax(0, 1fr) auto auto; }
   .activityDir { display: none; }
 }
+
+/* 3.10: "Run in terminal" — pastes, never runs (CommandOutput.tsx). */
+.commandRun {
+  flex: none;
+  align-self: center;
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-2xs-size);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.commandRun:hover { color: var(--text-primary); background: var(--bg-hover); border-color: var(--border-default); }
+.commandRun:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }

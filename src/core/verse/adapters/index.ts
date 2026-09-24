@@ -69,6 +69,8 @@ export interface VerseAdapter {
   afterTurn?(ctx: VerseAdapterTurnContext): VerseParsedEvent[];
 }
 
+export { turnAttachmentDirs, turnAttachmentImages, type VerseTurnExtras } from './turn-extras.js';
+
 /** V3.9 — live telemetry poll interval for adapters that implement `pollTelemetry`. */
 export const VERSE_TELEMETRY_POLL_MS = 2_000;
 

@@ -126,6 +126,112 @@ export function verseUrlFor(baseUrl: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// V3.10 background services
+// ---------------------------------------------------------------------------
+
+type AshlrConfig = import('../core/types.js').AshlrConfig;
+
+/**
+ * The server-lifetime services a Verse server runs beside HTTP. Each one
+ * otherwise starts on its FIRST request — so the first page load paid for it
+ * (a 370–600 ms synchronous cold scan of Claude usage on the first
+ * /bootstrap), and anything nobody had opened yet simply did not run:
+ *   - account health (A2): the 10-minute status-command sweep the readiness
+ *     gate and the desktop's notifications read;
+ *   - Claude usage (A3): the async cold scan, primed so no request pays it;
+ *   - reasoning maintenance (A7): ingest + retention every 10 minutes;
+ *   - budget capacity publisher (A9): the snapshot the fleet's fail-closed
+ *     budget gate reads — without it Claude autonomy is blocked whenever
+ *     nobody has the budget panel open.
+ * Every loader is a seam for tests; the defaults are the real modules.
+ */
+export interface VerseBackgroundDeps {
+  loadHealth?: () => Promise<{ startVerseHealth: (cfg: AshlrConfig) => unknown; stopVerseHealth: () => void }>;
+  loadClaudeUsage?: () => Promise<{ primeClaudeUsage: () => Promise<void> }>;
+  loadReasoning?: () => Promise<{ scheduleReasoningMaintenance: (cfg?: unknown) => void; resetReasoningApiState: () => void }>;
+  loadBudget?: () => Promise<{ startBudgetCapacityPublisher: (cfg: AshlrConfig) => () => void }>;
+  /**
+   * Run the services that probe or publish ACCOUNT state (health sweep,
+   * budget capacity publisher). False under `--no-accounts`: that flag says
+   * "this server does not watch accounts", and a throwaway server publishing
+   * an all-unknown capacity snapshot would overwrite the live server's and
+   * hold the fleet's budget gate shut until the next real tick. Default true.
+   */
+  accountServices?: boolean;
+  /** One line per service that could not start (never fatal). */
+  log?: (message: string) => void;
+}
+
+export interface VerseBackgroundServices {
+  /** Services that started, in start order (for the banner and tests). */
+  readonly started: readonly string[];
+  /** Stop every started service, newest first. Idempotent; never throws. */
+  stop(): void;
+}
+
+export async function startVerseBackgroundServices(
+  cfg: AshlrConfig,
+  deps: VerseBackgroundDeps = {},
+): Promise<VerseBackgroundServices> {
+  const log = deps.log ?? (() => {});
+  const started: string[] = [];
+  const stoppers: Array<{ name: string; stop: () => void }> = [];
+
+  // Each service is independent: one that fails to load or start is reported
+  // and skipped, and the console runs without it (every one of them also
+  // starts lazily on its own first request, so nothing is lost for good).
+  const attempt = async (name: string, run: () => Promise<(() => void) | null>): Promise<void> => {
+    try {
+      const stop = await run();
+      started.push(name);
+      if (stop) stoppers.push({ name, stop });
+    } catch (err) {
+      log(`${name} did not start: ${err instanceof Error ? err.message : 'unknown error'}`);
+    }
+  };
+
+  const accountServices = deps.accountServices !== false;
+  if (accountServices) await attempt('health', async () => {
+    const mod = await (deps.loadHealth ?? (() => import('../core/verse/health-api.js')))();
+    mod.startVerseHealth(cfg);
+    return () => mod.stopVerseHealth();
+  });
+  await attempt('claude-usage', async () => {
+    const mod = await (deps.loadClaudeUsage ?? (() => import('../core/fabric/claude-usage.js')))();
+    // NOT awaited: the scan reads every recent Claude transcript (~0.5 s, in
+    // small async slices). Awaiting it would hold the banner and the browser
+    // open for no reason; primeClaudeUsage never rejects, the catch is a belt.
+    void mod.primeClaudeUsage().catch(() => {});
+    return null;
+  });
+  await attempt('reasoning', async () => {
+    const mod = await (deps.loadReasoning ?? (() => import('../core/reasoning/reasoning-api.js')))();
+    mod.scheduleReasoningMaintenance(cfg);
+    // The module's only stop is its reset (clears the timer and caches),
+    // which is exactly what shutdown wants.
+    return () => mod.resetReasoningApiState();
+  });
+  if (accountServices) await attempt('budget', async () => {
+    const mod = await (deps.loadBudget ?? (() => import('../core/routing/budget-api.js')))();
+    return mod.startBudgetCapacityPublisher(cfg);
+  });
+
+  let stopped = false;
+  return {
+    started,
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      for (const { name, stop } of [...stoppers].reverse()) {
+        try { stop(); } catch (err) {
+          log(`${name} did not stop cleanly: ${err instanceof Error ? err.message : 'unknown error'}`);
+        }
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // cmdVerse
 // ---------------------------------------------------------------------------
 
@@ -174,6 +280,36 @@ export async function cmdVerse(args: string[]): Promise<number> {
 
   const verseUrl = verseUrlFor(handle.url);
 
+  // V3.10 crash handlers: a fatal exception is written to ~/.ashlr/verse/verse.log
+  // and every running turn is settled + its process group killed BEFORE the
+  // process exits, so no vendor CLI is left editing files under launchd. A
+  // stray promise rejection is logged and survived. See verse-log.ts.
+  //
+  // The reasoning store batches live steps (250 ms / 64 steps). The engine
+  // flushes it from `interruptAll`/`close`; the explicit flush here also
+  // covers a crash before any engine exists and closes the tap's open turns.
+  // Resolved NOW, not in the handler: onFatal must stay synchronous.
+  let flushReasoning: () => void = () => {};
+  try {
+    const { flushVerseReasoning } = await import('../core/reasoning/ingest-verse.js');
+    flushReasoning = () => { try { flushVerseReasoning(); } catch { /* exiting */ } };
+  } catch {
+    // No reasoning store: nothing to flush.
+  }
+  let uninstallCrashHandlers: () => void = () => {};
+  try {
+    const { installVerseCrashHandlers } = await import('../core/verse/verse-log.js');
+    const { peekVerseEngine } = await import('../core/verse/verse-api.js');
+    uninstallCrashHandlers = installVerseCrashHandlers({
+      onFatal: (reason) => {
+        // Turns first: settling them emits their final events into the tap.
+        try { peekVerseEngine()?.interruptAll?.(reason); } finally { flushReasoning(); }
+      },
+    });
+  } catch {
+    // Without the handlers the server still runs; it only loses the crash log.
+  }
+
   // ── Native account metadata collectors ───────────────────────────────────
   //
   // `ResourceConnectionMonitor` keeps its results IN MEMORY ONLY and is
@@ -213,6 +349,15 @@ export async function cmdVerse(args: string[]): Promise<number> {
       collectorBanner = 'Account telemetry unavailable: ' + (err instanceof Error ? err.message : 'unknown error');
     }
   }
+
+  // ── V3.10 background services (health, usage prime, reasoning, budget) ──
+  //
+  // After the collector, so the first health sweep and the first capacity
+  // snapshot read live account telemetry rather than "unknown".
+  const background = await startVerseBackgroundServices(cfg, {
+    accountServices: accounts,
+    log: (message) => { if (!json) console.error(dim(`  ${message}`)); },
+  });
 
   // ── Output (same token wording as serve.ts) ──────────────────────────────
 
@@ -279,6 +424,9 @@ export async function cmdVerse(args: string[]): Promise<number> {
         process.stderr.write('\n');
         console.error(dim('  Stopping server…'));
       }
+      // Background timers stop first, so no health sweep or capacity tick
+      // fires into a collector or server that is half closed.
+      background.stop();
       try {
         // Release the metadata lease BEFORE the HTTP server goes away, so a
         // waiting `ashlr resource-console` can take ownership immediately.
@@ -292,6 +440,9 @@ export async function cmdVerse(args: string[]): Promise<number> {
       } catch {
         // ignore close errors on shutdown
       }
+      // After close(): the engine's own close has settled running turns into
+      // the reasoning tap; this writes whatever is still batched.
+      flushReasoning();
       resolve();
     };
 
@@ -299,6 +450,7 @@ export async function cmdVerse(args: string[]): Promise<number> {
     process.once('SIGTERM', () => void onSignal());
   });
 
+  uninstallCrashHandlers();
   if (!json) console.error(dim('  Server stopped.'));
   return 0;
 }

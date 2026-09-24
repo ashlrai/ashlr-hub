@@ -4,15 +4,31 @@
  * Call registerCommsHandlers(cfg) once before running a comms cycle so that
  * resolved requests are routed to the correct action:
  *
- *   'elon-vision'  — Elon strategic Q&A:
- *     index 0 (Approve & create goals) → adoptBriefing(cfg, latestBriefing)
- *     index 1 (Hold)                   → no-op, recorded via resolution
- *     index 2 (Show full briefing)     → sendIMessage(full briefing text, cfg)
+ *   'elon-vision'  — the Visionary's briefing question (the kind string is a
+ *                    persisted wire value in ~/.ashlr/comms/requests.jsonl and
+ *                    cli/comms.ts, kept for compatibility; nothing user-facing
+ *                    names a real person). Two generations share the kind:
+ *     V3.10 Leader memo (meta.source 'leader', meta.memoId), from
+ *     `ashlr comms ask-vision` / the comms cycle via the Leader tick path:
+ *       index 0 (Keep it)          → no-op, recorded via resolution
+ *       index 1 (Veto this memo)   → vetoLeaderMemo (undoes every live action)
+ *       index 2 (Show full memo)   → the memo as text
+ *     Legacy Strategist briefing (any other meta.source) — requests posted
+ *     before 3.10 still resolve as they were asked:
+ *       index 0 (Approve & create goals) → adoptBriefing(cfg, latestBriefing)
+ *       index 1 (Hold)                   → no-op, recorded via resolution
+ *       index 2 (Show full briefing)     → sendIMessage(full briefing text, cfg)
  *
  *   'manager-approval' — M139: text-based merge approval path.
  *     index 0 (Approve & merge) → setStatus approved + applyProposal (human-authorized path)
  *     index 1 (Reject)          → setStatus rejected + text confirmation
  *     index 2 (Show diff)       → sendIMessage scrubbed diff + re-post the question
+ *
+ *   'leader-veto' — V3.10: a class-B Leader action inside its veto window:
+ *     index 0 (Veto)         → vetoLeaderAction (undoes / cancels it)
+ *     index 1 (Let it apply) → no-op
+ *   A veto only lowers what autonomy is doing (SPEC-310B I1), so a reply from
+ *   Mason's own channel is enough; it can never raise anything.
  *
  * Never throws — all handlers are wrapped best-effort.
  */
@@ -25,6 +41,7 @@ import { sendTelegramMessage, telegramEnabled } from '../integrations/telegram.j
 import { loadLatestBriefing, adoptBriefing } from '../vision/strategist.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { savePauseState } from './pause.js';
+import type { LeaderMemo } from '../vision/leader-types.js';
 
 // ---------------------------------------------------------------------------
 // Internal: transport helper
@@ -40,12 +57,65 @@ async function sendReply(text: string, cfg: AshlrConfig): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Internal: elon-vision handler
+// Internal: visionary briefing handler (kind 'elon-vision')
 // ---------------------------------------------------------------------------
 
-async function handleElonVision(req: CommsRequest, cfg: AshlrConfig): Promise<void> {
+const LEADER_MEMO_ID_RE = /^lm-\d{14}-[a-f0-9]{6}$/;
+const MEMO_TEXT_MAX = 3_500;
+
+/** A Leader memo as a message (plain text; model-authored parts scrubbed by the caller). */
+export function leaderMemoText(memo: LeaderMemo): string {
+  const lines: string[] = [`Leader memo ${memo.id} — ${memo.at}${memo.dryRun ? ' (dry run)' : ''}`];
+  if (memo.bottleneck) lines.push('', `BOTTLENECK: ${memo.bottleneck.statement}`);
+  if (memo.move) {
+    const d = memo.move.expectedDelta;
+    lines.push('', `MOVE: ${memo.move.statement}${d ? ` (${d.metric} ${d.delta >= 0 ? '+' : ''}${d.delta} by ${d.byDate.slice(0, 10)})` : ''}`);
+  }
+  if (memo.killList.length > 0) {
+    lines.push('', 'KILL LIST:');
+    memo.killList.forEach((k, i) => lines.push(`  ${i + 1}. ${k.target.kind} ${k.target.id}: ${k.why}`));
+  }
+  if (memo.actions.length > 0) {
+    lines.push('', 'ACTIONS:');
+    memo.actions.forEach((a, i) => lines.push(`  ${i + 1}. [${a.class}] ${a.status} — ${a.summary}`));
+  }
+  if (memo.questionsForMason.length > 0) {
+    lines.push('', 'QUESTIONS:');
+    memo.questionsForMason.forEach((q, i) => lines.push(`  ${i + 1}. ${q}`));
+  }
+  const text = lines.join('\n');
+  return text.length > MEMO_TEXT_MAX ? `${text.slice(0, MEMO_TEXT_MAX - 1)}…` : text;
+}
+
+async function handleLeaderMemoReply(idx: number, memoId: string, cfg: AshlrConfig): Promise<void> {
+  if (idx === 0) return; // Keep it — recorded via resolution.
+  if (idx === 1) {
+    // A veto only lowers what autonomy is doing (SPEC-310B I1): a reply from
+    // Mason's own channel is enough, exactly like 'leader-veto'.
+    const apply = await import('../vision/leader-apply.js');
+    const deps = await apply.loadDefaultLeaderDeps();
+    const result = await apply.vetoLeaderMemo(deps, memoId, 'Vetoed from a message reply');
+    await sendReply(scrubSecrets(result.ok ? `Vetoed: ${result.message}` : `Could not veto: ${result.message}`), cfg);
+    return;
+  }
+  if (idx === 2) {
+    const { readLeaderMemo } = await import('../vision/leader-memo.js');
+    const memo = readLeaderMemo(memoId);
+    await sendReply(memo ? scrubSecrets(leaderMemoText(memo)) : '[ashlr] That Leader memo is no longer on file.', cfg);
+  }
+}
+
+async function handleVisionaryBriefing(req: CommsRequest, cfg: AshlrConfig): Promise<void> {
   const idx = req.answerIndex;
   if (typeof idx !== 'number') return;
+
+  if (req.meta?.['source'] === 'leader') {
+    const memoId = req.meta['memoId'];
+    // Never act on a malformed id (it is used as a file name).
+    if (typeof memoId !== 'string' || !LEADER_MEMO_ID_RE.test(memoId)) return;
+    await handleLeaderMemoReply(idx, memoId, cfg);
+    return;
+  }
 
   if (idx === 0) {
     // Approve & create goals — evolve spec + post goals to conductor
@@ -229,6 +299,22 @@ async function handleManagerApproval(req: CommsRequest, cfg: AshlrConfig): Promi
 }
 
 // ---------------------------------------------------------------------------
+// Internal: leader-veto handler (V3.10 B-U8)
+// ---------------------------------------------------------------------------
+
+const LEADER_ACTION_ID_RE = /^la-\d{14}-[a-f0-9]{6}-\d{1,3}$/;
+
+async function handleLeaderVeto(req: CommsRequest, cfg: AshlrConfig): Promise<void> {
+  if (req.answerIndex !== 0) return; // 1 = "Let it apply": nothing to do
+  const actionId = req.meta?.['actionId'];
+  if (typeof actionId !== 'string' || !LEADER_ACTION_ID_RE.test(actionId)) return;
+  const apply = await import('../vision/leader-apply.js');
+  const deps = await apply.loadDefaultLeaderDeps();
+  const result = await apply.vetoLeaderAction(deps, actionId, 'Vetoed from a message reply');
+  await sendReply(scrubSecrets(result.ok ? `Vetoed: ${result.message}` : `Could not veto: ${result.message}`), cfg);
+}
+
+// ---------------------------------------------------------------------------
 // Public: registerCommsHandlers
 // ---------------------------------------------------------------------------
 
@@ -241,8 +327,14 @@ async function handleManagerApproval(req: CommsRequest, cfg: AshlrConfig): Promi
  */
 export function registerCommsHandlers(cfg: AshlrConfig): void {
   registerResolutionHandler('elon-vision', (req: CommsRequest) => {
-    return handleElonVision(req, cfg).catch(() => {
+    return handleVisionaryBriefing(req, cfg).catch(() => {
       // best-effort — handler errors must never crash the cycle
+    });
+  });
+
+  registerResolutionHandler('leader-veto', (req: CommsRequest) => {
+    return handleLeaderVeto(req, cfg).catch(() => {
+      // best-effort — the Verse Needs-you drawer can still veto
     });
   });
 
@@ -253,9 +345,9 @@ export function registerCommsHandlers(cfg: AshlrConfig): void {
   });
 
   // M212: decision-needed is resolved via button tap (option index already in req.answerIndex).
-  // The Elon dialogue or notifyFleetEvent('decision-needed', ...) posted this request.
+  // The strategic dialogue or notifyFleetEvent('decision-needed', ...) posted this request.
   // Resolution is recorded in the requests store; no further action needed here beyond
-  // re-posting the answer as a goal action if warranted (handled by elon-dialogue on next cycle).
+  // re-posting the answer as a goal action if warranted (handled by the dialogue on next cycle).
   registerResolutionHandler('decision-needed', (_req: CommsRequest) => {
     return Promise.resolve();
   });

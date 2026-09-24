@@ -108,6 +108,7 @@ import type { StreamSink } from './streaming.js';
 import { withRetry } from './retry.js';
 import { verifyTaskStructured } from './verify.js';
 import { detectVerifyCommands, runVerifyCommandAsync } from './verify-commands.js';
+import { currentStandingPolicy } from '../authority/effective-config.js';
 import { normalizeDelegationScope, summarizeDelegationScope } from './delegation-scope.js';
 import { withHeal, defaultHealPolicy } from './self-heal.js';
 import type { HealEvent, Sandbox } from '../types.js';
@@ -2148,6 +2149,26 @@ function foundryWantsSandbox(cfg: AshlrConfig, engine: EngineId): boolean {
 // ---------------------------------------------------------------------------
 
 /**
+ * V3.10 R3a (INT4 item 4): the engineer's `bash` tool runs agent-chosen shell
+ * commands in the daemon's own process tree — only the worktree is a
+ * throwaway, the process is not confined. While a standing policy is live
+ * nobody reviews those commands, so `allowBash` is refused outright, whatever
+ * else may allow it later. (The api-model producer path already runs with
+ * exec off; sandboxed-engine.ts.)
+ */
+const STANDING_POLICY_BASH_REFUSAL =
+  'Sandboxed bash is refused while a standing policy is live: agent shell commands would run unconfined under standing authority';
+
+/** Unknown ⇒ live (refuse): the conservative reading sandbox/confine.ts uses. */
+function standingPolicyLiveForBash(): boolean {
+  try {
+    return currentStandingPolicy() !== null;
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Top-level orchestrator driver. Builds/loads RunState, plans (unless resuming),
  * executes the DAG with parallelism up to opts.parallel, enforces HARD budget,
  * persists after every step, synthesizes final answer, best-effort Pulse POST.
@@ -2195,6 +2216,9 @@ export async function runGoal(
     };
   }
   if (opts.allowBash === true) {
+    // V3.10 R3a: named first so the reason is exact — under a standing policy
+    // bash stays refused even once the generic gate below is lifted.
+    if (standingPolicyLiveForBash()) throw new Error(STANDING_POLICY_BASH_REFUSAL);
     throw new Error('Sandboxed bash is unavailable until OS-enforced filesystem confinement is active');
   }
   if (opts.signal?.aborted === true) return runGoalInternal(goal, cfg, opts);
@@ -2834,6 +2858,9 @@ async function runGoalInternal(
               delegationScope,
               ...(opts.signal ? { signal: opts.signal } : {}),
               ...(opts.runId ? { runId: opts.runId } : {}),
+              // The SeatRouter's codex seat (RunOptions.seatId): without it a
+              // standing codex run is refused as unconfinable.
+              ...(opts.seatId ? { seatId: opts.seatId } : {}),
             });
             const fallbackStateWithRetention = withSandboxRetention(
               fallback.state,
@@ -2921,6 +2948,7 @@ async function runGoalInternal(
                 delegationScope,
                 ...(opts.signal ? { signal: opts.signal } : {}),
                 ...(opts.runId ? { runId: opts.runId } : {}),
+                ...(opts.seatId ? { seatId: opts.seatId } : {}),
                 deferTerminalAction: true,
               });
               const retention = sandboxRetentionFrom(rawR);
@@ -3533,6 +3561,12 @@ async function runGoalInternal(
           if (!engineerCleanupAuthority) {
             throw new Error('outward mutation authority became invalid before engineer execution');
           }
+        }
+        // Defense in depth for the runGoal refusal: this is the one place the
+        // engineer's exec (bash) tool is switched on. Throwing here lands in
+        // the catch below, which drops to read-only gateway tools.
+        if (opts.allowBash === true && standingPolicyLiveForBash()) {
+          throw new Error(STANDING_POLICY_BASH_REFUSAL);
         }
         engineerExecutionAuthorized = true;
         engCtx = {

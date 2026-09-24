@@ -208,13 +208,21 @@ describe('emergency authority release truth', () => {
     expect(desktop).not.toMatch(/^\|\s*(?:Start|Stop) Daemon\s*\|/im);
     expect(desktop).not.toMatch(/manages the daemon lifecycle|daemon keeps running/i);
 
-    // Bind the README's tray table to the shipped tray, not just to prose:
-    // the tray builder creates exactly Show and Quit, and no menu item anywhere
-    // in the shell is wired to a daemon command.
+    // Bind the README's tray table to the shipped tray, not just to prose.
+    // 3.10 (C8) moved the tray into tray.rs and builds its rows from data, so
+    // the ids are read from tray.rs's `pub const ID_*` declarations — the one
+    // place a new row has to be declared. The set is pinned EXACTLY: adding a
+    // row (say, a daemon toggle) must fail here and force a README + authority
+    // review, rather than slipping in. None of these rows starts, stops or
+    // activates the daemon: `tray.stop-chats` stops interactive Verse chat
+    // turns only; Stop for the fleet stays in the authority surfaces.
     const desktopMain = read('desktop/src-tauri/src/main.rs');
-    const trayItems = [...desktopMain.matchAll(/MenuItemBuilder::with_id\(\s*"(tray\.[^"]+)"/g)].map((match) => match[1]);
-    expect(trayItems).toEqual(['tray.show', 'tray.quit']);
-    for (const shellSource of [desktopMain, read('desktop/src-tauri/src/app_menu.rs')]) {
+    const trayRs = read('desktop/src-tauri/src/tray.rs');
+    const trayItems = [...trayRs.matchAll(/pub const ID_[A-Z_]+: &str = "(tray\.[^"]+)"/g)].map((match) => match[1]);
+    expect(trayItems).toEqual(['tray.show', 'tray.quit', 'tray.needs-you', 'tray.new-chat', 'tray.stop-chats']);
+    // A tray row built with a literal id in main.rs would dodge the list above.
+    expect([...desktopMain.matchAll(/MenuItemBuilder::with_id\(\s*"(tray\.[^"]+)"/g)]).toEqual([]);
+    for (const shellSource of [desktopMain, read('desktop/src-tauri/src/app_menu.rs'), trayRs]) {
       expect(shellSource).not.toMatch(/"daemon"\s*,\s*"start"|daemon start/);
     }
 

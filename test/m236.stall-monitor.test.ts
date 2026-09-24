@@ -391,8 +391,11 @@ describe('M236 terminationReason on RunState', () => {
           if (cmd?.cwd && existsSync(cmd.cwd)) {
             writeFileSync(join(cmd.cwd, 'cancelled.ts'), 'export const partial = true;\n', 'utf8');
           }
-          expect(options?.signal).toBe(controller.signal);
+          // V3.10 U6: the engine gets the run's execution-lease signal, bound to
+          // the caller's — aborting the caller aborts what the engine observes.
+          expect(options?.signal?.aborted).toBe(false);
           controller.abort();
+          expect(options?.signal?.aborted).toBe(true);
           return Promise.resolve({
             ok: false,
             output: '',
@@ -551,8 +554,11 @@ describe('M236 terminationReason on RunState', () => {
             usage: { tokensIn: 9, tokensOut: 4 },
           })
           .mockImplementationOnce((_cmd, _cfg, options) => {
-            expect(options?.signal).toBe(controller.signal);
+            // V3.10 U6: the engine gets the run's execution-lease signal, bound to
+            // the caller's — aborting the caller aborts what the engine observes.
+            expect(options?.signal?.aborted).toBe(false);
             controller.abort();
+            expect(options?.signal?.aborted).toBe(true);
             return Promise.resolve({
               ok: false,
               output: '',
@@ -617,8 +623,11 @@ describe('M236 terminationReason on RunState', () => {
             });
           })
           .mockImplementationOnce((_cmd, _cfg, options) => {
-            expect(options?.signal).toBe(controller.signal);
+            // V3.10 U6: the engine gets the run's execution-lease signal, bound to
+            // the caller's — aborting the caller aborts what the engine observes.
+            expect(options?.signal?.aborted).toBe(false);
             controller.abort();
+            expect(options?.signal?.aborted).toBe(true);
             return Promise.resolve({
               ok: false,
               output: '',

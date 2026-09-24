@@ -29,8 +29,10 @@ import { approveProposal, rejectProposal } from '../../../data/mutations.js';
 import { proposalDetailQuery } from '../../../data/queries.js';
 import { ConfirmDialog } from '../../inbox/ConfirmDialog.js';
 import { DiffViewer } from '../../inbox/DiffViewer.js';
-import { formatRelative } from '../autonomy/format.js';
-import { describeControlError } from '../autonomy/use-guarded-action.js';
+// Shell helpers, not autonomy/'s: 3.10 moves the Autonomy panels under Fleet
+// (C7), and the drawer that hosts this view must not break when they move.
+import { describeActionError as describeControlError } from '../shell/guarded-action.js';
+import { ago as formatRelative } from '../shell/needs-you-model.js';
 import { describeApproveConsequence, engineOf, reachesRemote } from './approvals-model.js';
 import styles from './approvals.module.css';
 
@@ -68,21 +70,38 @@ export function ApprovalDetail({ id, dispatchEnabled, onDispatchDisabled, onDeci
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // Confirmation FIRST, then the token (SPEC-310C §1; the same order as the
+  // Needs-you drawer's A / R keys — shell/guarded-action.tsx). An operator who
+  // pressed Approve by mistake backs out at a prompt that says what is about
+  // to happen, not at one asking for a secret.
   function requestAction(action: 'approve' | 'reject') {
     setActionError(null);
     setPendingAction(action);
-    if (hasMutationHold()) setConfirmOpen(true);
-    else setTokenPrompt(true);
+    setConfirmOpen(true);
   }
 
   function closeTokenPrompt() {
     setTokenPrompt(false);
     // Live read — MutationTokenDialog closes synchronously after setToken().
-    if (hasMutationHold()) setConfirmOpen(true);
-    else setPendingAction(null);
+    if (hasMutationHold()) {
+      setConfirmOpen(true);
+      void execute();
+    } else {
+      setPendingAction(null);
+    }
   }
 
-  async function confirmAction() {
+  function confirmAction() {
+    if (!pendingAction) return;
+    if (!hasMutationHold()) {
+      setConfirmOpen(false);
+      setTokenPrompt(true);
+      return;
+    }
+    void execute();
+  }
+
+  async function execute() {
     if (!pendingAction) return;
     setBusy(true);
     setActionError(null);
@@ -333,7 +352,7 @@ export function ApprovalDetail({ id, dispatchEnabled, onDispatchDisabled, onDeci
         destructive={pendingAction === 'approve'}
         busy={busy}
         error={actionError}
-        onConfirm={() => void confirmAction()}
+        onConfirm={confirmAction}
       />
     </div>
   );

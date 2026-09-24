@@ -23,7 +23,7 @@
  * checks three independent things rather than a path prefix alone.
  */
 
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import type { LlamaLivenessFacts, LlamaOwnershipRecord } from './types.js';
 
 /** How long a graceful SIGTERM is given before SIGKILL. */
@@ -65,16 +65,77 @@ function processIsZombie(pid: number): boolean {
   return out.trim().startsWith('Z');
 }
 
+const PS_TIMEOUT_MS = 5_000;
+/**
+ * `ps -axww` prints every process's full argv; on a busy Mac that is a few
+ * hundred KB. Node's execFile default (1 MB) would truncate-and-fail on a
+ * pathological table, so give it headroom rather than silently finding nothing.
+ */
+const PS_MAX_BUFFER = 16 * 1024 * 1024;
+
 /** Run `/bin/ps` with the given args, returning stdout or null. Never throws. */
 function runPs(args: string[]): string | null {
   if (process.platform === 'win32') return null;
   try {
-    const result = spawnSync('/bin/ps', args, { encoding: 'utf8', timeout: 5_000 });
+    const result = spawnSync('/bin/ps', args, { encoding: 'utf8', timeout: PS_TIMEOUT_MS });
     if (result.status !== 0 || typeof result.stdout !== 'string') return null;
     return result.stdout;
   } catch {
     return null;
   }
+}
+
+/**
+ * Async {@link runPs}: same args, same contract (stdout or null, never
+ * throws/rejects), but the subprocess runs off the event loop.
+ *
+ * WHY: the runtime probe runs inside the web server (resource monitor, Verse
+ * seats). A synchronous `ps -axww` there measured 36–78 ms of blocked event
+ * loop per refresh — over the 3.10 budget of 20 ms per handler — while the
+ * same scan through execFile costs the loop well under 1 ms.
+ */
+function runPsAsync(args: string[]): Promise<string | null> {
+  if (process.platform === 'win32') return Promise.resolve(null);
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        '/bin/ps',
+        args,
+        { encoding: 'utf8', timeout: PS_TIMEOUT_MS, maxBuffer: PS_MAX_BUFFER },
+        (err, stdout) => {
+          // Any failure (non-zero exit, timeout, buffer overflow) reads as
+          // "could not read", exactly as the sync path treats status !== 0.
+          if (err || typeof stdout !== 'string') resolve(null);
+          else resolve(stdout);
+        },
+      );
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/** Async {@link processIsZombie}; same unknown-reads-as-not-zombie rule. */
+async function processIsZombieAsync(pid: number): Promise<boolean> {
+  const out = await runPsAsync(['-p', String(pid), '-o', 'state=']);
+  if (out === null) return false;
+  return out.trim().startsWith('Z');
+}
+
+/**
+ * Async {@link processAlive}: identical semantics (zombie = dead, EPERM =
+ * exists), with the zombie probe off the event loop.
+ */
+export async function processAliveAsync(pid: number): Promise<boolean> {
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  let exists: boolean;
+  try {
+    process.kill(pid, 0);
+    exists = true;
+  } catch (err: unknown) {
+    exists = (err as NodeJS.ErrnoException)?.code === 'EPERM';
+  }
+  return exists && !(await processIsZombieAsync(pid));
 }
 
 /**
@@ -86,7 +147,16 @@ function runPs(args: string[]): string | null {
  */
 export function processArgv(pid: number): string | null {
   if (!Number.isInteger(pid) || pid <= 1) return null;
-  const out = runPs(['-ww', '-p', String(pid), '-o', 'args=']);
+  return argvFromPs(runPs(['-ww', '-p', String(pid), '-o', 'args=']));
+}
+
+/** Async {@link processArgv}; same `-ww` untruncated read, same null rules. */
+export async function processArgvAsync(pid: number): Promise<string | null> {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  return argvFromPs(await runPsAsync(['-ww', '-p', String(pid), '-o', 'args=']));
+}
+
+function argvFromPs(out: string | null): string | null {
   if (out === null) return null;
   const text = out.trim();
   return text.length > 0 ? text : null;
@@ -149,6 +219,16 @@ export function livenessFactsFor(record: LlamaOwnershipRecord): LlamaLivenessFac
   return { processAlive: true, argvMatches: argv !== null && argvMatchesRecord(argv, record) };
 }
 
+/** Async {@link livenessFactsFor}; same facts, no blocking subprocess. */
+export async function livenessFactsForAsync(
+  record: LlamaOwnershipRecord,
+): Promise<LlamaLivenessFacts> {
+  const alive = await processAliveAsync(record.pid);
+  if (!alive) return { processAlive: false, argvMatches: false };
+  const argv = await processArgvAsync(record.pid);
+  return { processAlive: true, argvMatches: argv !== null && argvMatchesRecord(argv, record) };
+}
+
 /** A llama-server process discovered by scanning the process table. */
 export interface DiscoveredLlamaServer {
   pid: number;
@@ -196,7 +276,31 @@ export function isLlamaServerArgv(argv: string): boolean {
  * not health.
  */
 export function findLlamaServersOnPort(port: number): DiscoveredLlamaServer[] {
-  const out = runPs(['-axww', '-o', 'pid=,args=']);
+  return parseLlamaServersOnPort(runPs(PROCESS_TABLE_ARGS), port);
+}
+
+/**
+ * Async {@link findLlamaServersOnPort} — the variant request-path callers
+ * (the runtime probe) should use.
+ *
+ * Still a FULL `ps -axww` scan, deliberately: a cheaper name-only listing
+ * (`pgrep -x`, `ps -o ucomm=`) matches the kernel's process name, not argv[0],
+ * and the two differ for a symlinked or wrapped binary — so it would silently
+ * miss servers the sync scan adopts. Moving the same scan off the event loop
+ * keeps the behaviour identical and removes the stall.
+ */
+export async function findLlamaServersOnPortAsync(port: number): Promise<DiscoveredLlamaServer[]> {
+  return parseLlamaServersOnPort(await runPsAsync(PROCESS_TABLE_ARGS), port);
+}
+
+const PROCESS_TABLE_ARGS = ['-axww', '-o', 'pid=,args='];
+
+/**
+ * Pure: the llama-servers bound to `port` in a `ps -o pid=,args=` listing.
+ * Null (the table could not be read) yields none. Exported so the parsing
+ * rules are pinned without depending on the live process table.
+ */
+export function parseLlamaServersOnPort(out: string | null, port: number): DiscoveredLlamaServer[] {
   if (out === null) return [];
 
   const found: DiscoveredLlamaServer[] = [];

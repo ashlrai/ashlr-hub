@@ -88,6 +88,43 @@ export interface HandoffDialogProps {
    * it in the editor — pre-fill it into the new chat's composer; do NOT send it.
    */
   onCreated: (session: VerseSession, text: string) => void;
+  /**
+   * The seat + model to open on, when the operator already named one — the
+   * composer's "Continue on ‹seat›" (Workspace). Absent = the usual default
+   * (same seat and model, "same agent, fresh context"). See
+   * `initialHandoffTarget` for how a stale choice is resolved.
+   */
+  initialTarget?: SeatChoice;
+}
+
+/**
+ * Where the dialog opens. An explicit `initial` choice wins over the default
+ * because the operator just picked it; the dialog must not silently swap it
+ * for "same seat" and make them pick again.
+ *
+ * - The seat is in the roster → that seat, on the named model (matched
+ *   exactly, then by canonical id). If the model is gone, the seat's first
+ *   runnable model: the seat was the choice; the model id may be an alias the
+ *   roster has since renamed. If nothing on it runs, the named model stays
+ *   selected so `targetUnavailableReason` says WHY, rather than a different
+ *   seat appearing unasked.
+ * - The roster is still empty (cold bootstrap) → null; the fill-once effect
+ *   retries with the same choice when seats arrive.
+ * - The seat is not in a loaded roster (removed since) → the ordinary default.
+ */
+export function initialHandoffTarget(
+  seats: readonly VerseSeat[],
+  source: Pick<VerseSession, 'seatId' | 'model'>,
+  initial: SeatChoice | undefined,
+): HandoffTarget | null {
+  if (!initial) return defaultHandoffTarget(seats, source);
+  if (seats.length === 0) return null;
+  const seat = seats.find((s) => s.id === initial.seatId);
+  if (!seat) return defaultHandoffTarget(seats, source);
+  const named = modelOption(seat, initial.model);
+  if (named) return { seatId: seat.id, model: named.id };
+  const runnable = seat.models.find((m) => !m.unavailableReason);
+  return { seatId: seat.id, model: runnable ? runnable.id : initial.model };
 }
 
 /** How often to re-read a session's log while waiting on a summary, when no live stream feeds the store. */
@@ -136,7 +173,7 @@ export function HandoffDialog(props: HandoffDialogProps) {
   return <HandoffDialogBody {...props} />;
 }
 
-function HandoffDialogBody({ session, seats, onClose, onCreated }: HandoffDialogProps) {
+function HandoffDialogBody({ session, seats, onClose, onCreated, initialTarget }: HandoffDialogProps) {
   const titleId = useId();
   const focusId = useId();
   const textId = useId();
@@ -209,11 +246,13 @@ function HandoffDialogBody({ session, seats, onClose, onCreated }: HandoffDialog
   const overBudget = text.length > VERSE_HANDOFF_MAX_CHARS;
 
   // ---- target ------------------------------------------------------------
-  const [target, setTarget] = useState<HandoffTarget | null>(() => defaultHandoffTarget(seats, session));
+  // The body mounts per open, so `initialTarget` is read once per open: a
+  // later pick inside the dialog is never overwritten by the prop.
+  const [target, setTarget] = useState<HandoffTarget | null>(() => initialHandoffTarget(seats, session, initialTarget));
   // Seats that arrive after the dialog opened (cold bootstrap) fill an empty target once.
   useEffect(() => {
-    if (target === null && seats.length > 0) setTarget(defaultHandoffTarget(seats, session));
-  }, [target, seats, session]);
+    if (target === null && seats.length > 0) setTarget(initialHandoffTarget(seats, session, initialTarget));
+  }, [target, seats, session, initialTarget]);
   const targetSeat = target ? seatById(seats, target.seatId) ?? null : null;
   const option = target ? modelOption(targetSeat, target.model) : null;
   const [modeChoice, setModeChoice] = useState<VerseContextMode | null>(null);

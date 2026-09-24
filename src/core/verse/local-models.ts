@@ -893,6 +893,122 @@ export async function probeLmStudioModels(
 }
 
 // ---------------------------------------------------------------------------
+// llama-server — /health, /props, /v1/models (V3.10, Apps & Accounts)
+// ---------------------------------------------------------------------------
+
+export const VERSE_DEFAULT_LLAMA_SERVER_BASE = 'http://127.0.0.1:8080';
+
+/**
+ * `ok` = /health answered 200; `loading` = 503 (llama-server answers that
+ * while it maps the weights); `error` = any other HTTP status; `down` = no
+ * answer at all (refused or timed out — see `reason`).
+ */
+export type VerseLlamaServerStatus = 'ok' | 'loading' | 'error' | 'down';
+
+export interface VerseLlamaServerReport {
+  reachable: boolean;
+  baseUrl: string;
+  status: VerseLlamaServerStatus;
+  /**
+   * Served model names — ONLY those that are not filesystem paths. llama-server
+   * started on a raw GGUF (the Ollama-blob case on this machine) names the model
+   * by its absolute path, which carries the operator's home directory; that is
+   * reported as a count, never as text.
+   */
+  models: string[];
+  modelCount: number | null;
+  /** `/props.total_slots` — what the server BUILT, not the `--parallel` it was asked for. */
+  slots: number | null;
+  /** Machine-readable; null when `ok`. */
+  reason: string | null;
+}
+
+async function probeStatus(
+  fetchImpl: typeof fetch,
+  url: string,
+  timeoutMs: number,
+): Promise<{ status: number | null; failure: 'timeout' | 'refused' | null }> {
+  try {
+    const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+    // Drain so the socket is released; the body of /health is not needed.
+    await res.arrayBuffer().catch(() => undefined);
+    return { status: res.status, failure: null };
+  } catch (err) {
+    const name = err instanceof Error ? err.name : '';
+    return { status: null, failure: name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'refused' };
+  }
+}
+
+/**
+ * A light liveness read of a llama-server, for the Apps page. Never throws.
+ *
+ * Deliberately NOT `local-runtime/llama/health.ts#probeLlamaRuntime`: that one
+ * also inspects the process table and the ownership record (it answers "is
+ * OUR supervised server healthy"), which costs process spawns a page render
+ * must not pay. This answers only "does something on the port serve", from
+ * three loopback GETs with a short timeout.
+ */
+export async function probeLlamaServer(opts: {
+  baseUrl?: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+} = {}): Promise<VerseLlamaServerReport> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const timeoutMs = opts.timeoutMs ?? VERSE_LOCAL_PROBE_TIMEOUT_MS;
+  const baseUrl = normalizeLocalBaseUrl(opts.baseUrl, VERSE_DEFAULT_LLAMA_SERVER_BASE);
+  const health = await probeStatus(fetchImpl, `${baseUrl}/health`, timeoutMs);
+  if (health.status === null) {
+    return {
+      reachable: false,
+      baseUrl,
+      status: 'down',
+      models: [],
+      modelCount: null,
+      slots: null,
+      reason: health.failure === 'timeout' ? 'llama-server-timeout' : 'llama-server-refused',
+    };
+  }
+  const status: VerseLlamaServerStatus = health.status === 200 ? 'ok' : health.status === 503 ? 'loading' : 'error';
+  if (status !== 'ok') {
+    return {
+      reachable: true,
+      baseUrl,
+      status,
+      models: [],
+      modelCount: null,
+      slots: null,
+      reason: status === 'loading' ? 'llama-server-loading' : `llama-server-http-${health.status}`,
+    };
+  }
+  const [props, models] = await Promise.all([
+    fetchJson(fetchImpl, `${baseUrl}/props`, timeoutMs),
+    fetchJson(fetchImpl, `${baseUrl}/v1/models`, timeoutMs),
+  ]);
+  const slots = isRecord(props) ? num(props['total_slots']) : null;
+  let modelCount: number | null = null;
+  const names: string[] = [];
+  if (isRecord(models) && Array.isArray(models['data'])) {
+    modelCount = 0;
+    for (const entry of models['data']) {
+      if (!isRecord(entry)) continue;
+      modelCount += 1;
+      const id = str(entry['id']);
+      // A path is not a name (and carries the home directory): count it only.
+      if (id !== null && !id.includes('/') && !id.includes('\\') && names.length < 8) names.push(id);
+    }
+  }
+  return {
+    reachable: true,
+    baseUrl,
+    status,
+    models: names,
+    modelCount,
+    slots: slots === null ? null : Math.round(slots),
+    reason: null,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 

@@ -1,134 +1,77 @@
 /**
  * routes/verse/MessageMarkdown.tsx — assistant text rendered as Markdown.
- * `marked` produces HTML, DOMPurify strips anything that isn't safe inline
- * content, then each fenced block gets a language label and a copy button
- * revealed on hover (DESIGN §5). Model output is untrusted: raw HTML in the
- * Markdown never reaches the DOM unsanitized, links open in a new tab with
- * rel=noopener, and no script/style/handler attributes survive.
+ *
+ * This file is the light half. The renderer — marked + DOMPurify plus the
+ * streaming block cache, ~70 KB minified — lives in MessageMarkdownRenderer
+ * and loads as its own chunk (3.10 first paint, SPEC-310A §1: the chat's
+ * critical JS was 658 KB against a 350 KB budget, and this was the largest
+ * piece the transcript did not need in order to show text).
+ *
+ * Until the renderer is in, a message shows as PLAIN TEXT (React text, never
+ * HTML — model output is untrusted, and nothing unsanitized can reach the
+ * DOM on this path either). The download starts when this module evaluates,
+ * so on a real load the renderer is usually in before the first message
+ * mounts; once in, every mount renders Markdown synchronously. If the chunk
+ * fails to load, the text stays plain (still complete and readable) and the
+ * next mount asks again.
+ *
+ * The pure helpers (splitStreamingBlocks, appendInlineText, codeLanguage)
+ * live in markdown-stream.ts and are re-exported here for existing importers.
  */
-import DOMPurify from 'dompurify';
-import { marked } from 'marked';
-import { useEffect, useMemo, useRef, type MouseEvent } from 'react';
+import { memo, useEffect, useState } from 'react';
 import styles from './Transcript.module.css';
 
-let hooked = false;
-function ensureHooks(): void {
-  if (hooked) return;
-  hooked = true;
-  DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-    if (node.tagName === 'A') {
-      node.setAttribute('target', '_blank');
-      node.setAttribute('rel', 'noopener noreferrer');
-    }
-  });
+export { appendInlineText, codeLanguage, splitStreamingBlocks, type StreamingSplit } from './markdown-stream.js';
+
+type RendererModule = typeof import('./MessageMarkdownRenderer.js');
+
+let renderer: RendererModule | null = null;
+let pending: Promise<RendererModule> | null = null;
+
+/**
+ * Load (once) the Markdown renderer chunk. Exported so a caller that needs
+ * Markdown synchronously — a test, a print path — can await it first.
+ */
+export function loadMarkdownRenderer(): Promise<RendererModule> {
+  pending ??= import('./MessageMarkdownRenderer.js').then(
+    (mod) => (renderer = mod),
+    (err: unknown) => {
+      // Not cached: a transient failure must not pin every message to plain text for the tab's life.
+      pending = null;
+      throw err;
+    },
+  );
+  return pending;
 }
 
-const SANITIZE: Parameters<typeof DOMPurify.sanitize>[1] = {
-  USE_PROFILES: { html: true },
-  ADD_ATTR: ['target'],
-  FORBID_TAGS: ['style', 'form', 'input', 'button', 'iframe', 'object', 'embed'],
-};
+// Start now, in parallel with whatever else the transcript is waiting on.
+if (typeof window !== 'undefined') void loadMarkdownRenderer().catch(() => undefined);
 
-export function renderMarkdown(text: string): string {
-  ensureHooks();
-  const html = marked.parse(text, { async: false, gfm: true, breaks: false });
-  return DOMPurify.sanitize(html, SANITIZE);
-}
-
-const COPY_LABEL = 'Copy';
-const COPIED_LABEL = 'Copied';
-
-/** `language-ts` / `lang-ts` → `ts`; anything else is an unlabelled block. */
-export function codeLanguage(code: Element | null): string {
-  const match = /(?:^|\s)(?:language|lang)-([\w+#.-]+)/.exec(code?.className ?? '');
-  return match?.[1] ?? '';
-}
-
-export function MessageMarkdown({ text, streaming = false }: { text: string; streaming?: boolean }) {
-  const html = useMemo(() => renderMarkdown(text), [text]);
-  const root = useRef<HTMLDivElement>(null);
-
-  // Decorate every <pre> with a language label + copy control after the
-  // sanitized HTML lands. Buttons are stripped by the sanitizer, so the only
-  // <button> inside a code block is one we put there ourselves.
+function useRenderer(): RendererModule | null {
+  const [mod, setMod] = useState<RendererModule | null>(renderer);
   useEffect(() => {
-    const node = root.current;
-    if (!node) return;
-    for (const pre of node.querySelectorAll('pre')) {
-      if (pre.querySelector('[data-code-head]')) continue;
-      const head = document.createElement('div');
-      head.className = styles.codeHead ?? '';
-      head.setAttribute('data-code-head', '');
+    if (mod) return undefined;
+    let live = true;
+    loadMarkdownRenderer().then((m) => { if (live) setMod(m); }, () => undefined);
+    return () => { live = false; };
+  }, [mod]);
+  return mod;
+}
 
-      const language = codeLanguage(pre.querySelector('code'));
-      const tag = document.createElement('span');
-      tag.className = styles.codeLang ?? '';
-      tag.textContent = language;
-      head.append(tag);
-
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = styles.copy ?? '';
-      button.setAttribute('data-copy', '');
-      button.setAttribute('aria-label', 'Copy code');
-      button.textContent = COPY_LABEL;
-      head.append(button);
-
-      pre.prepend(head);
-    }
-  }, [html]);
-
-  function onClick(event: MouseEvent<HTMLDivElement>) {
-    const target = event.target as HTMLElement | null;
-    const button = target?.closest<HTMLButtonElement>('[data-copy]');
-    if (!button) return;
-    event.preventDefault();
-    const pre = button.closest('pre');
-    const codeNode = pre?.querySelector('code');
-    const head = pre?.querySelector('[data-code-head]');
-    const code = codeNode
-      ? codeNode.textContent ?? ''
-      : Array.from(pre?.childNodes ?? []).filter((n) => n !== head).map((n) => n.textContent ?? '').join('');
-    void copyText(code).then((ok) => {
-      button.textContent = ok ? COPIED_LABEL : 'Copy failed';
-      setTimeout(() => {
-        button.textContent = COPY_LABEL;
-      }, 1500);
-    });
-  }
-
+/** The message before the renderer lands: all of it, as text, in the Markdown box's typography. */
+function PlainMessage({ text }: { text: string }) {
   return (
-    <div
-      ref={root}
-      className={`${styles.markdown} ${streaming ? styles.streaming : ''}`}
-      onClick={onClick}
-      // Sanitized above — DOMPurify with the html profile, no raw model HTML.
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+    <div className={styles.markdown} data-markdown-pending="">
+      <p style={{ whiteSpace: 'pre-wrap' }}>{text}</p>
+    </div>
   );
 }
 
-async function copyText(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    /* fall through to the legacy path */
-  }
-  try {
-    const area = document.createElement('textarea');
-    area.value = text;
-    area.setAttribute('readonly', '');
-    area.style.position = 'fixed';
-    area.style.opacity = '0';
-    document.body.append(area);
-    area.select();
-    const ok = document.execCommand('copy');
-    area.remove();
-    return ok;
-  } catch {
-    return false;
-  }
-}
+/**
+ * Memoized: a finished message re-renders only when its text changes, so a
+ * token streaming into the NEXT reply never re-parses this one.
+ */
+export const MessageMarkdown = memo(function MessageMarkdown({ text, streaming = false }: { text: string; streaming?: boolean }) {
+  const mod = useRenderer();
+  return mod ? <mod.RenderedMarkdown text={text} streaming={streaming} /> : <PlainMessage text={text} />;
+});

@@ -21,7 +21,8 @@
  * All subprocess invocations are mocked — no real processes spawned.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig } from '../src/core/types.js';
@@ -48,12 +49,13 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-// Mock spawnSync (git stash push/pop in completeness-gate.ts)
-vi.mock('node:child_process', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:child_process')>();
+// Mock the hardened git runner for stash push/pop (V3.10 R3a: the gate's
+// `git stash` goes through sandbox/safe-git runSafeGitSync).
+vi.mock('../src/core/sandbox/safe-git.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/sandbox/safe-git.js')>();
   return {
     ...actual,
-    spawnSync: vi.fn(actual.spawnSync),
+    runSafeGitSync: vi.fn(),
   };
 });
 
@@ -61,7 +63,11 @@ vi.mock('node:child_process', async (importOriginal) => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const FAKE_WORKTREE = path.join(os.tmpdir(), 'm281-test-worktree');
+// A real directory holding a linked-worktree `.git` pointer: the gate reads it
+// before handing git to safe-git (mocked above; the target is never touched).
+const FAKE_WORKTREE = fs.mkdtempSync(path.join(os.tmpdir(), 'm281-test-worktree-'));
+fs.writeFileSync(path.join(FAKE_WORKTREE, '.git'), 'gitdir: /nonexistent/.git/worktrees/m281\n');
+afterAll(() => { fs.rmSync(FAKE_WORKTREE, { recursive: true, force: true }); });
 
 function makeCfg(): AshlrConfig {
   return {
@@ -96,13 +102,13 @@ function vitestFailOutput(...names: string[]): string {
 // ---------------------------------------------------------------------------
 async function getMocks() {
   const vc = await import('../src/core/run/verify-commands.js');
-  const fs = await import('node:fs');
-  const cp = await import('node:child_process');
+  const nodeFs = await import('node:fs');
+  const sg = await import('../src/core/sandbox/safe-git.js');
   return {
     detectVerifyCommands: vi.mocked(vc.detectVerifyCommands),
     runVerifyCommand: vi.mocked(vc.runVerifyCommand),
-    existsSync: vi.mocked(fs.existsSync),
-    spawnSync: vi.mocked(cp.spawnSync),
+    existsSync: vi.mocked(nodeFs.existsSync),
+    stashGit: vi.mocked(sg.runSafeGitSync),
   };
 }
 
@@ -110,19 +116,23 @@ async function getGate() {
   return import('../src/core/run/completeness-gate.js');
 }
 
+function gitOk(stdout: string) {
+  return { ok: true, code: 0, signal: null, stdout, stderr: '', timedOut: false };
+}
+
 // Fake stash push that says "changes stashed"
 function stashPushSuccess() {
-  return { stdout: 'Saved working directory and index state ashlr-completeness-baseline', stderr: '', status: 0, error: undefined, pid: 1, output: [], signal: null };
+  return gitOk('Saved working directory and index state ashlr-completeness-baseline');
 }
 
 // Fake stash push that says "nothing to stash"
 function stashPushNoop() {
-  return { stdout: 'No local changes to stash', stderr: '', status: 0, error: undefined, pid: 1, output: [], signal: null };
+  return gitOk('No local changes to save');
 }
 
 // Fake stash pop success
 function stashPopSuccess() {
-  return { stdout: 'Dropped stash', stderr: '', status: 0, error: undefined, pid: 1, output: [], signal: null };
+  return gitOk('Dropped stash');
 }
 
 // ---------------------------------------------------------------------------
@@ -173,12 +183,12 @@ describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
 
   it('PASSES when baseline has pre-existing failures but change adds none (core M281 scenario)', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
+    const { runVerifyCommand, stashGit } = await getMocks();
 
     // Stash succeeds — changes were stashed
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)  // stash push
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);  // stash pop
+    stashGit
+      .mockReturnValueOnce(stashPushSuccess())  // stash push
+      .mockReturnValueOnce(stashPopSuccess());  // stash pop
 
     const preExistingOutput = vitestFailOutput('m53 > env failure', 'm123 > timing issue');
     const afterOutput = vitestFailOutput('m53 > env failure', 'm123 > timing issue'); // same failures
@@ -195,11 +205,11 @@ describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
 
   it('BLOCKS when change introduces a NEW failure not in baseline (regression protection)', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
+    const { runVerifyCommand, stashGit } = await getMocks();
 
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);
+    stashGit
+      .mockReturnValueOnce(stashPushSuccess())
+      .mockReturnValueOnce(stashPopSuccess());
 
     const baselineOutput = vitestFailOutput('m53 > env failure'); // 1 pre-existing
     const afterOutput = vitestFailOutput('m53 > env failure', 'myNewTest > should not regress'); // +1 NEW
@@ -217,11 +227,11 @@ describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
 
   it('PASSES when baseline is all-green and after is all-green', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
+    const { runVerifyCommand, stashGit } = await getMocks();
 
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);
+    stashGit
+      .mockReturnValueOnce(stashPushSuccess())
+      .mockReturnValueOnce(stashPopSuccess());
 
     runVerifyCommand
       .mockReturnValueOnce(okResult(TEST_CMD, 'Tests  10 passed'))
@@ -233,11 +243,11 @@ describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
 
   it('BLOCKS when baseline is all-green and after introduces a failure', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
+    const { runVerifyCommand, stashGit } = await getMocks();
 
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);
+    stashGit
+      .mockReturnValueOnce(stashPushSuccess())
+      .mockReturnValueOnce(stashPopSuccess());
 
     runVerifyCommand
       .mockReturnValueOnce(okResult(TEST_CMD, 'Tests  10 passed'))
@@ -250,10 +260,10 @@ describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
 
   it('falls back to direct run when stash fails — PASSES if direct run passes', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
+    const { runVerifyCommand, stashGit } = await getMocks();
 
     // Stash push says nothing to stash
-    spawnSync.mockReturnValueOnce(stashPushNoop() as ReturnType<typeof spawnSync>);
+    stashGit.mockReturnValueOnce(stashPushNoop());
 
     runVerifyCommand.mockReturnValueOnce(okResult(TEST_CMD));
 
@@ -263,9 +273,9 @@ describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
 
   it('falls back to direct run when stash fails — BLOCKS if direct run fails', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
+    const { runVerifyCommand, stashGit } = await getMocks();
 
-    spawnSync.mockReturnValueOnce(stashPushNoop() as ReturnType<typeof spawnSync>);
+    stashGit.mockReturnValueOnce(stashPushNoop());
 
     runVerifyCommand.mockReturnValueOnce(failResult(TEST_CMD, 'error output'));
 
@@ -276,11 +286,11 @@ describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
 
   it('PASSES safely when baseline run times out (safe fallback)', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
+    const { runVerifyCommand, stashGit } = await getMocks();
 
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);
+    stashGit
+      .mockReturnValueOnce(stashPushSuccess())
+      .mockReturnValueOnce(stashPopSuccess());
 
     // Baseline run times out
     runVerifyCommand.mockReturnValueOnce(failResult(TEST_CMD, '', true /* timedOut */));
@@ -292,11 +302,11 @@ describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
 
   it('PASSES safely when after run times out', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { runVerifyCommand, spawnSync } = await getMocks();
+    const { runVerifyCommand, stashGit } = await getMocks();
 
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);
+    stashGit
+      .mockReturnValueOnce(stashPushSuccess())
+      .mockReturnValueOnce(stashPopSuccess());
 
     runVerifyCommand
       .mockReturnValueOnce(okResult(TEST_CMD)) // baseline passes
@@ -308,10 +318,10 @@ describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
 
   it('never throws on unexpected error', async () => {
     const { runDeltaAwareTestCheck } = await getGate();
-    const { spawnSync } = await getMocks();
+    const { stashGit } = await getMocks();
 
-    // Make spawnSync throw
-    spawnSync.mockImplementation(() => { throw new Error('ENOENT git'); });
+    // Make stashGit throw
+    stashGit.mockImplementation(() => { throw new Error('ENOENT git'); });
 
     await expect(
       runDeltaAwareTestCheck(TEST_CMD, FAKE_WORKTREE, makeCfg(), 60_000),
@@ -330,7 +340,7 @@ describe('M281 · runCompletenessGate() — delta-aware integration', () => {
 
   it('PASSES when baseline has pre-existing failures but change adds none', async () => {
     const { runCompletenessGate } = await getGate();
-    const { detectVerifyCommands, runVerifyCommand, existsSync, spawnSync } = await getMocks();
+    const { detectVerifyCommands, runVerifyCommand, existsSync, stashGit } = await getMocks();
 
     existsSync.mockReturnValue(false); // no lockfile
 
@@ -339,9 +349,9 @@ describe('M281 · runCompletenessGate() — delta-aware integration', () => {
 
     // For delta logic: stash succeeds, baseline has 7 pre-existing failures,
     // after also has the same 7 → no new failures
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);
+    stashGit
+      .mockReturnValueOnce(stashPushSuccess())
+      .mockReturnValueOnce(stashPopSuccess());
 
     const preExisting = vitestFailOutput('m53 > env', 'm123 > timing', 'm130 > sandbox',
       'm160 > rate', 'm236 > quota', 'm245 > fleet', 'h8 > infra');
@@ -361,15 +371,15 @@ describe('M281 · runCompletenessGate() — delta-aware integration', () => {
 
   it('BLOCKS when change introduces a new test failure', async () => {
     const { runCompletenessGate } = await getGate();
-    const { detectVerifyCommands, runVerifyCommand, existsSync, spawnSync } = await getMocks();
+    const { detectVerifyCommands, runVerifyCommand, existsSync, stashGit } = await getMocks();
 
     existsSync.mockReturnValue(false);
     detectVerifyCommands.mockReturnValue([TYPECHECK_CMD, TEST_CMD]);
     runVerifyCommand.mockReturnValueOnce(okResult(TYPECHECK_CMD));
 
-    spawnSync
-      .mockReturnValueOnce(stashPushSuccess() as ReturnType<typeof spawnSync>)
-      .mockReturnValueOnce(stashPopSuccess() as ReturnType<typeof spawnSync>);
+    stashGit
+      .mockReturnValueOnce(stashPushSuccess())
+      .mockReturnValueOnce(stashPopSuccess());
 
     const baseline = vitestFailOutput('m53 > env');
     const after = vitestFailOutput('m53 > env', 'myFeature > broke something');

@@ -110,7 +110,11 @@ describe('M436 reviewer independence API', () => {
     ['anthropic/gpt-5.5', 'unknown'],
     ['local-coder:qwen3-coder', 'local'],
     ['moonshotai/kimi-k2.6', 'local'],
-    ['xai:grok-4', 'local'],
+    // V3.10: xAI is its own family (was filed under local).
+    ['xai:grok-4', 'xai'],
+    ['grok-cli:grok-4.7', 'xai'],
+    ['grok-cli:claude-opus-4-8', 'unknown'],
+    ['llama-server:qwen3.8:27b-ctx64k', 'local'],
     ['anthropic/opus-4-8', 'claude'],
     ['mystery:frontier-1', 'unknown'],
     [undefined, 'unknown'],

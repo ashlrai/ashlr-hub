@@ -24,13 +24,49 @@
  * `grok --help` on the pinned 0.2.118 binary. Grok can reach only `--cwd`, so
  * the memory directory itself is never granted; the block carries the file's
  * contents and says this seat may only read it (`writable: false`).
+ *
+ * V3.10:
+ *  - `--no-auto-update` on EVERY turn. The native-profile launcher leaves it
+ *    to the caller ("The caller supplies --no-auto-update … do not duplicate
+ *    it"), and a seat turn is no place for the CLI to replace its own binary
+ *    under a pinned profile. The flag is hidden from `--help` but documented
+ *    in grok's headless-mode guide; verified accepted by clap on 0.2.106 and
+ *    0.2.118 (`grok --no-auto-update --version` exits 0, while an unknown
+ *    `--zzz-bogus` exits 2 with "unexpected argument").
+ *  - reasoning streams live: the shared parser turns grok's `thinking_delta`
+ *    frames into transient `thinking-delta` events and each block into one
+ *    persisted `thinking` (kind left unknown: xAI does not say whether the
+ *    text is raw or summarised).
+ *  - `--session-id` vs `--resume` follows the conversation on disk
+ *    (`<GROK_HOME>/sessions/<encoded-cwd>/<id>/`), with the same rule and
+ *    reasons as the claude adapter (`chooseNativeSession`): grok's
+ *    `--session-id` also "errors if … already in use under the target session
+ *    directory".
  */
+
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 import { canonicalModelId } from '../context-math.js';
 import type { VerseSession, VerseTurnLaunch } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
 import type { VerseAdapter } from './index.js';
-import { createAnthropicStreamParser } from './claude.js';
+import { grokEffortArgs, grokPermissionArgs } from '../session-controls.js';
+import {
+  chooseNativeSession,
+  createAnthropicStreamParser,
+  grokConversationState,
+  nativeSessionOverride,
+  nativeStateDir,
+} from './claude.js';
+
+/** `--session-id <id>` or `--resume <id>` for a grok turn (see the file header). */
+export function grokNativeSessionArgs(session: VerseSession, launch: VerseSeatLaunch): string[] {
+  const id = session.nativeSessionId ?? '';
+  const home = nativeStateDir(launch.launcher, 'grok', join(homedir(), '.grok'));
+  const choice = chooseNativeSession(session, grokConversationState(home, session.projectPath, id), nativeSessionOverride(launch));
+  return choice === 'resume' ? ['--resume', id] : ['--session-id', id];
+}
 
 /** The launch record's memory block, when the snapshot is well-formed; anything else means memory off. */
 function launchMemoryBlock(launch: VerseSeatLaunch): string | null {
@@ -48,6 +84,7 @@ function buildGrokLaunch(session: VerseSession, text: string, launch: VerseSeatL
   const memoryBlock = launchMemoryBlock(launch);
   const argv = [
     ...prefix,
+    '--no-auto-update',
     '--output-format', 'streaming-messages-json',
     '--include-partial-messages',
     '--cwd', session.projectPath,
@@ -59,7 +96,11 @@ function buildGrokLaunch(session: VerseSession, text: string, launch: VerseSeatL
     // the file left untouched. Grok reaches for a terminal command on most
     // tasks (it shells out to find files), so this failed nearly always.
     // 'dontAsk' and 'auto' both complete; 'dontAsk' is the narrower of the two.
-    '--permission-mode', 'dontAsk',
+    // V3.10: the per-chat permission mode (session-controls.ts) — "Accept
+    // edits", the default, still maps to 'dontAsk' for exactly this reason.
+    ...grokPermissionArgs(session),
+    // V3.10 per-chat effort; nothing by default.
+    ...grokEffortArgs(session),
     // NO MULTI-ROOT FLAG IS EMITTED HERE, deliberately. A workspace session on
     // a Grok seat gets its primary root and nothing else.
     //
@@ -78,7 +119,7 @@ function buildGrokLaunch(session: VerseSession, text: string, launch: VerseSeatL
     // stable). The `=` spelling is the one clap accepts for a value that
     // starts with `-`, exactly as for `--single` below.
     ...(memoryBlock !== null ? [`--rules=${memoryBlock}`] : []),
-    ...(session.turnCount > 0 ? ['--resume', session.nativeSessionId] : ['--session-id', session.nativeSessionId]),
+    ...grokNativeSessionArgs(session, launch),
     `--single=${text}`,
   ];
   return { argv, cwd: session.projectPath, env: {}, stdin: null };

@@ -14,7 +14,7 @@
  *   GET  /api/verse/seats                    → VerseSeatsResponse (pollable)
  *   GET  /api/verse/sessions                 → VerseSession[]
  *   POST /api/verse/sessions                 → VerseSession (201)
- *   GET  /api/verse/sessions/:id             → VerseSessionDetail
+ *   GET  /api/verse/sessions/:id[?after=N]   → VerseSessionDetail (V3.10: events with seq > N)
  *   POST /api/verse/sessions/:id/turns       → VerseTurnResponse (202)
  *   POST /api/verse/sessions/:id/cancel      → { ok: true }
  *   POST /api/verse/sessions/:id/delete      → { ok: true }
@@ -30,12 +30,36 @@
  *   GET  /api/verse/search                   → VerseSearchResponse
  *   GET  /api/verse/memory                   → VerseProjectMemory (+ contentSanitized?)
  *   POST /api/verse/memory                   → VerseProjectMemory (+ contentSanitized?)
+ *  V3.10 mounted modules (api-modules.ts; each family's routes are owned and
+ *  documented by its module — this file only mounts them, in this order):
+ *   /api/verse/health*        → health-api.ts          (VerseHealthResponse)
+ *   /api/reasoning/*          → reasoning/reasoning-api.ts (digest, steps)
+ *   fleet history             → fleet-history.ts
+ *   /api/verse/budget*        → routing/budget-api.ts  (BudgetResponse)
+ *  They are consulted only after every V1 route above has declined, every
+ *  non-GET to them passes the V1 dispatch + mutation gate first, and a module
+ *  that fails to load turns an otherwise-unmatched path into a 503
+ *  (API_MODULE_UNAVAILABLE), never a misleading 404.
+ *  V3.10 WORKBENCH families (Tracks B + C, unit C0 — workbench-types.ts §9):
+ *   /api/verse/{activity,session-meta}*                      → activity-api.ts (C1)
+ *   /api/verse/{session-controls,attachments,queue,files}*   → session-controls-api.ts (C3)
+ *   /api/verse/terminal*  → terminal-api.ts (C4)   /api/verse/preview* → preview-api.ts (C4)
+ *   /api/verse/git*       → git-api.ts (C5)        /api/verse/apps*    → apps-api.ts (C6)
+ *   /api/verse/authority* → authority-api.ts (B-U1)
+ *   /api/verse/{overnight,fleet/live}*  → overnight-api.ts, fleet-live-api.ts (B-U5)
+ *   /api/verse/leader*    → leader-api.ts (B-U8)   /api/verse/learning* → learning-api.ts (B-U9)
+ *  Routed by PREFIX to exactly one family (dispatchWorkbenchModules), after
+ *  every V1 route, with the same non-GET gate. They land at different times:
+ *  a family whose module has not landed is a plain 404 that touches nothing
+ *  else; one that landed but fails to load is a 503 naming it.
  *
  * Errors: { error, code? } with VERSE_SESSION_NOT_FOUND 404,
  * VERSE_SESSION_BUSY 409, VERSE_INVALID 400, VERSE_TOO_LARGE 413, and two
  * route-local 409s: VERSE_MODEL_UNAVAILABLE (turns: the session's model is
  * listed but unrunnable on its seat) and VERSE_MEMORY_REDACTED (memory: the
- * content would write redaction placeholders over real values).
+ * content would write redaction placeholders over real values). V3.10: the
+ * engine's readiness refusal is a 409 `SeatNotReadyResponse`
+ * ({ error, code: 'seat-not-ready', readiness }, health-types.ts).
  *
  * STRICT BODIES AND QUERIES (V3.9 routes and POST /sessions): an unknown body
  * key or query parameter is a 400, never silently ignored — a misspelt
@@ -61,10 +85,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
-import { passesMutationGate, readBody, sendJson } from '../web/api.js';
+import { notifyVerseSessionsChanged, passesMutationGate, readBody, sendJson } from '../web/api.js';
 import { sanitizePublicJson } from '../util/public-json.js';
 import { budgetFor, canonicalModelId, hasExpansiveMode } from './context-math.js';
 import { estimateContextFit } from './context-fit.js';
+import { SEAT_NOT_READY_CODE } from './health-types.js';
 import { checkWorkspaceRootPath, expandHomePrefix } from './path-guard.js';
 import {
   loadVersePreferences,
@@ -75,7 +100,7 @@ import {
 } from './preferences.js';
 import { prepareProjectMemory, readProjectMemory, writeProjectMemory } from './project-memory.js';
 import { discoverProjects } from './projects.js';
-import { discoverSeats, refreshSeatTelemetry, type VerseSeatDiscovery } from './seats.js';
+import { discoverSeats, getSeatReadiness, refreshSeatTelemetry, type VerseSeatDiscovery } from './seats.js';
 import { buildHandoffPreview } from './session-handoff.js';
 import { searchSessions } from './session-search.js';
 import {
@@ -117,6 +142,13 @@ import {
   VERSE_MEMORY_BODY_MAX_BYTES,
 } from './types.js';
 import { handleVerseEventsSse, VERSE_EVENTS_PATH_RE, VERSE_SESSION_ID_RE } from './verse-stream.js';
+import type { ApiModule } from './api-modules.js';
+import { REASONING_API_PREFIX } from '../reasoning/types.js';
+import {
+  WORKBENCH_ROUTE_FAMILIES,
+  workbenchFamilyFor,
+  type WorkbenchRouteFamilyId,
+} from './workbench-types.js';
 
 // ---------------------------------------------------------------------------
 // Route matching
@@ -124,8 +156,348 @@ import { handleVerseEventsSse, VERSE_EVENTS_PATH_RE, VERSE_SESSION_ID_RE } from 
 
 export const VERSE_API_PREFIX = '/api/verse';
 
+/**
+ * Every prefix this handler answers for. `/api/reasoning` is here — not in a
+ * handleApi branch of its own — because it is a mounted module family (see
+ * MOUNTED_API_MODULES) and handleApi (core/web/api.ts) reaches this file
+ * only through isVerseApiPath(). Widening the predicate is what mounts the
+ * family without a second edit to api.ts; its read-session and mutation
+ * posture is identical to /api/verse/* either way.
+ */
+const MOUNTED_PREFIXES: readonly string[] = [VERSE_API_PREFIX, REASONING_API_PREFIX];
+
 export function isVerseApiPath(path: string): boolean {
-  return path === VERSE_API_PREFIX || path.startsWith(`${VERSE_API_PREFIX}/`);
+  // Exact prefix or prefix + '/': `/api/reasoningX` must stay handleApi's 404.
+  return MOUNTED_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
+}
+
+// ---------------------------------------------------------------------------
+// Mounted route modules (V3.10 — api-modules.ts contract)
+// ---------------------------------------------------------------------------
+
+/** Stable ids, in mount order. */
+export type MountedApiModuleId = 'health' | 'reasoning' | 'fleet-history' | 'budget';
+
+export interface MountedApiModule {
+  id: MountedApiModuleId;
+  /** Resolve the module's handler. Called at most once per success (memoized). */
+  load: () => Promise<ApiModule>;
+}
+
+/**
+ * The route families other units own, mounted in a FIXED order: health,
+ * reasoning, fleet history, budget. Each module answers true for its own
+ * paths and false for everything else (api-modules.ts), so the order only
+ * decides who is asked first; it can never make one family shadow another
+ * unless two claim the same path — which the mount test forbids.
+ *
+ * LAZY, with literal specifiers. Literal because `bun build --compile` (the
+ * desktop sidecar) only bundles imports it can see; lazy because the V1 hot
+ * paths — bootstrap, seats, sessions, SSE — are matched BEFORE any module is
+ * consulted (see handleVerseApi) and must not pay four modules' load and
+ * evaluation cost on the first request of a cold server. It also keeps this
+ * file free of load-time cycles: every module imports VerseApiContext from
+ * here.
+ */
+const DEFAULT_API_MODULES: readonly MountedApiModule[] = [
+  { id: 'health', load: async () => (await import('./health-api.js')).handleHealthApi },
+  { id: 'reasoning', load: async () => (await import('../reasoning/reasoning-api.js')).handleReasoningApi },
+  { id: 'fleet-history', load: async () => (await import('./fleet-history.js')).handleFleetHistoryApi },
+  { id: 'budget', load: async () => (await import('../routing/budget-api.js')).handleBudgetApi },
+];
+
+let mountedModules: readonly MountedApiModule[] = DEFAULT_API_MODULES;
+/** Memoized successful loads, keyed by the mount entry (so a test swap never sees stale handlers). */
+const loadedModules = new WeakMap<MountedApiModule, ApiModule>();
+/** Ids whose most recent load attempt failed — surfaced as a 503, never as a silent 404. */
+const failedModuleIds = new Set<MountedApiModuleId>();
+
+/** The mount table in order — for the mount test and diagnostics. */
+export function mountedApiModules(): readonly MountedApiModule[] {
+  return mountedModules;
+}
+
+/**
+ * Test hook: replace the mount table (fakes, a failing loader), or pass null
+ * to restore the real one. Clears memoized handlers and failure marks.
+ */
+export function setMountedApiModulesForTest(next: readonly MountedApiModule[] | null): void {
+  mountedModules = next ?? DEFAULT_API_MODULES;
+  failedModuleIds.clear();
+}
+
+/**
+ * Resolve one module's handler. A failed load is NOT memoized: the next
+ * request tries again (a module that throws at evaluation is a bug to fix,
+ * but a dev server mid-rebuild should recover without a restart). The error
+ * itself is dropped — its message can carry absolute paths — and only the
+ * module id is reported.
+ */
+async function loadMountedModule(entry: MountedApiModule): Promise<ApiModule | null> {
+  const cached = loadedModules.get(entry);
+  if (cached) return cached;
+  try {
+    const handler = await entry.load();
+    if (typeof handler !== 'function') throw new TypeError(`module ${entry.id} exports no handler`);
+    loadedModules.set(entry, handler);
+    failedModuleIds.delete(entry.id);
+    return handler;
+  } catch {
+    failedModuleIds.add(entry.id);
+    return null;
+  }
+}
+
+/**
+ * Offer the request to every mounted module in order. Returns true once one
+ * has responded.
+ *
+ * Every non-GET is gated HERE, before any module sees it, with the exact V1
+ * posture: 404 unless the server allows dispatch, then the constant-time
+ * mutation token + JSON Content-Type (passesMutationGate). Modules may gate
+ * again — it is idempotent — but a module that forgets cannot expose a
+ * mutation. HEAD and every other verb count as non-GET on purpose: server.ts
+ * puts only GET behind the read-session boundary, so a module that answered
+ * HEAD like GET would otherwise serve reads to anyone on loopback.
+ */
+async function dispatchMountedModules(
+  ctx: VerseApiContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  path: string,
+  method: string,
+): Promise<boolean> {
+  if (method !== 'GET') {
+    if (!ctx.allowDispatch) {
+      sendJson(res, 404, { error: `not found: ${method} ${path}` });
+      return true;
+    }
+    if (!passesMutationGate(req, res, ctx.token)) return true;
+  }
+  const unavailable: MountedApiModuleId[] = [];
+  for (const entry of mountedModules) {
+    const handler = await loadMountedModule(entry);
+    if (!handler) {
+      unavailable.push(entry.id);
+      continue;
+    }
+    if (await handler(ctx, req, res, path, method)) return true;
+  }
+  if (unavailable.length > 0) {
+    // The path may well belong to a module that failed to load; a 404 would
+    // tell the client the route does not exist, which is the wrong fix.
+    sendJson(res, 503, {
+      code: 'API_MODULE_UNAVAILABLE',
+      error: 'a route module failed to load',
+      unavailable,
+    });
+    return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Workbench route families (V3.10 Tracks B + C — unit C0, workbench-types.ts §9)
+// ---------------------------------------------------------------------------
+//
+// Eleven families, owned by nine builders, landing at different times. Two
+// differences from the A10 table above, both forced by that:
+//
+//   1. PREFIX-ROUTED, not asked in turn. WORKBENCH_ROUTE_FAMILIES gives each
+//      family exclusive path prefixes (the contract test proves they never
+//      overlap each other, V1, the control / GitHub / MCP routes or A10), so
+//      a request loads at most ONE workbench module — the one that owns it.
+//      A broken or missing terminal module can only ever affect
+//      /api/verse/terminal*; it cannot 503 the git bar or the activity poll.
+//   2. "NOT LANDED" IS A 404, NOT A 503. A family whose module file does not
+//      exist in this build answers exactly as if it had never been mounted.
+//      Only a module that exists but fails to load (throws while evaluating,
+//      imports a missing file, exports no handler) is a 503 naming it — that
+//      one is a bug to fix, and a 404 would hide it.
+
+/** One workbench family's module. `load` answers null when the module has not landed. */
+export interface WorkbenchApiModule {
+  id: WorkbenchRouteFamilyId;
+  load: () => Promise<ApiModule | null>;
+}
+
+const NOT_LANDED: unique symbol = Symbol('workbench-module-not-landed');
+type WorkbenchImport = Record<string, unknown> | typeof NOT_LANDED;
+
+/**
+ * True when `err` reports that the module `file` ITSELF is missing — never
+ * something it imports. Every runtime this file runs under says
+ * ERR_MODULE_NOT_FOUND with the missing specifier as the FIRST quoted string:
+ *   node / tsx: Cannot find module '/…/dist/core/verse/git-api.js' imported from /…/verse-api.js
+ *   vitest:     Cannot find module '/git-api.js' imported from /…/verse-api.ts
+ *   bun binary: Cannot find module './git-api.js' from '/$bunfs/root/ashlr'
+ * A module that DID land but imports a missing file names that other file
+ * first, so it is classified as broken (503), never as not landed (404).
+ */
+export function isOwnModuleMissing(err: unknown, file: string): boolean {
+  if (err === null || typeof err !== 'object') return false;
+  const { code, message } = err as { code?: unknown; message?: unknown };
+  const text = typeof message === 'string' ? message : '';
+  if (code !== 'ERR_MODULE_NOT_FOUND' && !/^Cannot find module /.test(text)) return false;
+  const quoted = /Cannot find module ['"]([^'"]+)['"]/.exec(text);
+  if (!quoted) return false;
+  const stem = (name: string): string =>
+    (name.replace(/\\/g, '/').split(/[?#]/)[0] ?? '').split('/').pop()!.replace(/\.(?:[cm]?js|[cm]?ts)$/, '');
+  return stem(quoted[1]!) === stem(file);
+}
+
+function notLandedOr(err: unknown, file: string): typeof NOT_LANDED {
+  if (isOwnModuleMissing(err, file)) return NOT_LANDED;
+  throw err;
+}
+
+/**
+ * One importer per family, each a LITERAL specifier lexically INSIDE a try:
+ *   - literal, because `bun build --compile` (the desktop sidecar) only
+ *     bundles imports it can see — a computed specifier would leave a landed
+ *     module out of the binary;
+ *   - inside a try, because Bun's bundler (like esbuild) treats an
+ *     unresolvable import in a try block as a runtime error instead of
+ *     failing the whole build — which is what lets the sidecar compile
+ *     before every family has landed;
+ *   - `as string`, so `tsc` does not demand a file that has not been written
+ *     yet. It is erased on emit, so dist/ keeps the literal the bundler needs.
+ * Adding a family is a WORKBENCH_ROUTE_FAMILIES entry plus one line here; the
+ * contract test fails if the two disagree.
+ */
+const WORKBENCH_IMPORTS: Readonly<Record<WorkbenchRouteFamilyId, () => Promise<WorkbenchImport>>> = {
+  activity: async () => {
+    try { return (await import('./activity-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'activity-api.js'); }
+  },
+  'session-controls': async () => {
+    try { return (await import('./session-controls-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'session-controls-api.js'); }
+  },
+  terminal: async () => {
+    try { return (await import('./terminal-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'terminal-api.js'); }
+  },
+  preview: async () => {
+    try { return (await import('./preview-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'preview-api.js'); }
+  },
+  git: async () => {
+    try { return (await import('./git-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'git-api.js'); }
+  },
+  apps: async () => {
+    try { return (await import('./apps-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'apps-api.js'); }
+  },
+  authority: async () => {
+    try { return (await import('./authority-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'authority-api.js'); }
+  },
+  overnight: async () => {
+    try { return (await import('./overnight-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'overnight-api.js'); }
+  },
+  'fleet-live': async () => {
+    try { return (await import('./fleet-live-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'fleet-live-api.js'); }
+  },
+  leader: async () => {
+    try { return (await import('./leader-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'leader-api.js'); }
+  },
+  learning: async () => {
+    try { return (await import('./learning-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'learning-api.js'); }
+  },
+};
+
+/** The importer table, for the contract test (every family has exactly one). */
+export function workbenchImporterIds(): readonly WorkbenchRouteFamilyId[] {
+  return Object.keys(WORKBENCH_IMPORTS) as WorkbenchRouteFamilyId[];
+}
+
+const DEFAULT_WORKBENCH_MODULES: readonly WorkbenchApiModule[] = WORKBENCH_ROUTE_FAMILIES.map((family) => ({
+  id: family.id,
+  load: async (): Promise<ApiModule | null> => {
+    const mod = await WORKBENCH_IMPORTS[family.id]();
+    if (mod === NOT_LANDED) return null;
+    // The handler name is the spec's frozen export (handleGitApi, …): a module
+    // exporting anything else is broken, not absent.
+    const handler = mod[family.handler];
+    if (typeof handler !== 'function') throw new TypeError(`module ${family.id} exports no ${family.handler}`);
+    return handler as ApiModule;
+  },
+}));
+
+let workbenchModules: readonly WorkbenchApiModule[] = DEFAULT_WORKBENCH_MODULES;
+/** Memoized successful loads only — "not landed" and "failed" are retried on the next request. */
+const loadedWorkbenchModules = new WeakMap<WorkbenchApiModule, ApiModule>();
+
+/** The workbench mount table, in WORKBENCH_ROUTE_FAMILIES order — for tests and diagnostics. */
+export function workbenchApiModules(): readonly WorkbenchApiModule[] {
+  return workbenchModules;
+}
+
+/**
+ * Test hook: replace the workbench modules (fakes, a failing or absent
+ * loader), or pass null to restore the real ones. Routing still uses the real
+ * WORKBENCH_ROUTE_FAMILIES prefixes — only the modules behind them change.
+ */
+export function setWorkbenchApiModulesForTest(next: readonly WorkbenchApiModule[] | null): void {
+  workbenchModules = next ?? DEFAULT_WORKBENCH_MODULES;
+}
+
+type WorkbenchLoad = { state: 'ready'; handler: ApiModule } | { state: 'not-landed' } | { state: 'failed' };
+
+async function loadWorkbenchModule(entry: WorkbenchApiModule): Promise<WorkbenchLoad> {
+  const cached = loadedWorkbenchModules.get(entry);
+  if (cached) return { state: 'ready', handler: cached };
+  try {
+    const handler = await entry.load();
+    // Not memoized: a module lands with the next build, and a dev server
+    // (tsx watch) should pick it up without a restart.
+    if (handler === null) return { state: 'not-landed' };
+    if (typeof handler !== 'function') return { state: 'failed' };
+    loadedWorkbenchModules.set(entry, handler);
+    return { state: 'ready', handler };
+  } catch {
+    // The error is dropped — its message can carry absolute paths — and only
+    // the family id is reported, like the A10 mount.
+    return { state: 'failed' };
+  }
+}
+
+/**
+ * Hand `path` to the ONE workbench family that owns it. Returns false only
+ * when no family owns `path` (the caller carries on to the A10 modules and
+ * the 404). For an owned path this always responds:
+ *   - non-GET: the V1 dispatch + mutation gate first, before any load (the
+ *     same posture as dispatchMountedModules; HEAD counts as non-GET);
+ *   - module not landed, or it declined the path → 404, as if never mounted;
+ *   - module landed but failed to load → 503 API_MODULE_UNAVAILABLE naming it;
+ *   - a module that throws while handling is caught by handleVerseApi's own
+ *     try (the V1 error mapping), because this is awaited inside it.
+ */
+async function dispatchWorkbenchModules(
+  ctx: VerseApiContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  path: string,
+  method: string,
+): Promise<boolean> {
+  const family = workbenchFamilyFor(path);
+  if (!family) return false;
+  if (method !== 'GET') {
+    if (!ctx.allowDispatch) {
+      sendJson(res, 404, { error: `not found: ${method} ${path}` });
+      return true;
+    }
+    if (!passesMutationGate(req, res, ctx.token)) return true;
+  }
+  const entry = workbenchModules.find((m) => m.id === family.id);
+  const loaded: WorkbenchLoad = entry ? await loadWorkbenchModule(entry) : { state: 'not-landed' };
+  if (loaded.state === 'failed') {
+    sendJson(res, 503, {
+      code: 'API_MODULE_UNAVAILABLE',
+      error: 'a route module failed to load',
+      unavailable: [family.id],
+    });
+    return true;
+  }
+  if (loaded.state === 'ready' && (await loaded.handler(ctx, req, res, path, method))) return true;
+  // The prefix is this family's alone: nothing after this could answer it.
+  if (!res.headersSent) sendJson(res, 404, { error: `not found: ${method} ${path}` });
+  return true;
 }
 
 export interface VerseApiContext {
@@ -156,7 +528,18 @@ export async function getVerseEngine(): Promise<VerseEngineHandle> {
   if (!enginePending) {
     enginePending = import('./session-engine.js')
       .then((mod) => {
-        const created = mod.createVerseEngine({ root: join(homedir(), '.ashlr', 'verse') });
+        const created = mod.createVerseEngine({
+          root: join(homedir(), '.ashlr', 'verse'),
+          // Explicit, not the engine's lazy default: until that dynamic import
+          // resolved, the gate was open and a turn on a signed-out seat could
+          // slip through as the server's very first request.
+          readiness: getSeatReadiness,
+          // Turn start/end change the sidebar with no HTTP request to mark
+          // them; push the list now instead of on the next /api/events tick.
+          // notifyVerseSessionsChanged is coalesced and a no-op with no
+          // stream open, so calling it on every change is cheap.
+          onSessionChange: () => { notifyVerseSessionsChanged(); },
+        });
         engineSingleton = created;
         return created;
       })
@@ -297,8 +680,33 @@ function isVerseErrorCode(value: unknown): value is VerseErrorCode {
 /**
  * Duck-typed (not instanceof) so a VerseError thrown by another module
  * instance — or a test fake — still maps to the contract's status codes.
+ *
+ * V3.10: a readiness refusal (VERSE_SEAT_NOT_READY) is answered in the frozen
+ * `SeatNotReadyResponse` shape by the engine's own `seatNotReadyResponse`, so
+ * the 409 carries the ranked alternatives the composer offers. The engine
+ * module is imported on this path only (this file keeps no load-time edge on
+ * it — see ENGINE LIFETIME); an error of that code can only come from the
+ * engine, so the import is already cached. A refusal whose `readiness` is
+ * malformed still gets its 409 and code, without the alternatives — never the
+ * 500 it used to become.
  */
-function sendVerseError(res: ServerResponse, err: unknown): void {
+async function sendVerseError(res: ServerResponse, err: unknown): Promise<void> {
+  if (isSeatNotReadyError(err)) {
+    try {
+      const mod = await import('./session-engine.js');
+      const mapped = mod.seatNotReadyResponse(err);
+      if (mapped) {
+        sendJson(res, mapped.status, mapped.body);
+        return;
+      }
+    } catch {
+      // Fall through to the bare 409 below.
+    }
+    if (res.headersSent) return;
+    const message = err instanceof Error ? err.message : 'seat is not ready';
+    sendJson(res, 409, { code: SEAT_NOT_READY_CODE, error: message });
+    return;
+  }
   if (err && typeof err === 'object') {
     const code = (err as { code?: unknown }).code;
     if (isVerseErrorCode(code)) {
@@ -308,6 +716,10 @@ function sendVerseError(res: ServerResponse, err: unknown): void {
     }
   }
   sendJson(res, 500, { code: 'INTERNAL_ERROR', error: 'internal server error' });
+}
+
+function isSeatNotReadyError(err: unknown): boolean {
+  return err !== null && typeof err === 'object' && (err as { code?: unknown }).code === 'VERSE_SEAT_NOT_READY';
 }
 
 function sendInvalid(res: ServerResponse, message: string): void {
@@ -412,6 +824,18 @@ function readQuery(
     }
   }
   return params;
+}
+
+/**
+ * `?after=` → the seq to return events AFTER: null when absent, undefined when
+ * malformed. The grammar is verse-stream.ts's cursor (1–15 digits, a safe
+ * integer), so the JSON route and the SSE tail accept exactly the same values.
+ */
+function parseAfterCursor(raw: string | null): number | null | undefined {
+  if (raw === null) return null;
+  if (!/^\d{1,15}$/.test(raw)) return undefined;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) ? n : undefined;
 }
 
 function isContextMode(value: unknown): value is VerseContextMode {
@@ -1487,15 +1911,31 @@ export async function handleVerseApi(
         return true;
       }
 
-      // GET /api/verse/sessions/:id
+      // GET /api/verse/sessions/:id[?after=<seq>]
+      //
+      // `after` (V3.10) returns only events with seq > after — the same
+      // cursor the SSE tail takes — so a client that already holds a chat
+      // resumes with what it lacks instead of re-downloading (and
+      // re-rendering) a 5k-event log. Absent = the whole log, as before.
+      // STRICT like the V3.9 routes: a malformed or repeated cursor is a 400,
+      // never silently "from the start", which would double every event the
+      // client already has.
       if (method === 'GET' && action === '') {
+        const params = readQuery(req, res, ['after']);
+        if (!params) return true;
+        const after = parseAfterCursor(params.get('after'));
+        if (after === undefined) {
+          sendInvalid(res, 'after must be a non-negative integer seq');
+          return true;
+        }
         const engine = await getVerseEngine();
         const session = engine.getSession(id);
         if (!session) {
           sendJson(res, 404, { code: 'VERSE_SESSION_NOT_FOUND', error: `session not found: ${id}` });
           return true;
         }
-        const detail: VerseSessionDetail = { session, events: engine.getEvents(id) };
+        const events = after === null ? engine.getEvents(id) : engine.getEvents(id, after);
+        const detail: VerseSessionDetail = { session, events };
         sendJson(res, 200, detail);
         return true;
       }
@@ -1635,10 +2075,23 @@ export async function handleVerseApi(
       return true;
     }
 
+    // ── workbench families (V3.10 Tracks B + C) ─────────────────────────
+    // After every V1 route, like the modules below. Prefix-routed: a path a
+    // family owns never reaches the A10 modules (and so never pays their
+    // load, or inherits their 503 when one of them is broken).
+    if (await dispatchWorkbenchModules(ctx, req, res, path, method)) return true;
+
+    // ── mounted modules: health, reasoning, fleet history, budget (V3.10) ─
+    // LAST, after every V1 route: a V1 path never loads a module, and no
+    // module can shadow a V1 route. AWAITED inside this try so a module that
+    // throws gets the same error mapping (VerseError codes → 4xx, anything
+    // else → a message-free 500) as the V1 routes.
+    if (await dispatchMountedModules(ctx, req, res, path, method)) return true;
+
     sendJson(res, 404, { error: `not found: ${method} ${path}` });
     return true;
   } catch (err) {
-    if (!res.headersSent) sendVerseError(res, err);
+    if (!res.headersSent) await sendVerseError(res, err);
     else if (!res.writableEnded) {
       try { res.end(); } catch { /* already gone */ }
     }

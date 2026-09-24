@@ -27,9 +27,8 @@
  * yields "unknown" health, which is never rendered as zero.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
 import { readClaudeUsage, type ClaudeUsageResult } from '../fabric/claude-usage.js';
 import type { VerseSeatLaunch } from './session-engine.js';
@@ -41,6 +40,9 @@ import {
   type VerseAccountWindow,
 } from './accounts.js';
 import { DEFAULT_LOCAL_MODEL_TAG } from '../run/model-catalog.js';
+import { getVerseHealthService, homeRelative, readNativeAccounts, readNativeProfileManifest } from './account-health.js';
+import type { SeatReadiness } from './health-types.js';
+import { seatReadiness } from './seat-readiness.js';
 import {
   claudeAutoCompactAt,
   LOCAL_MIN_USABLE_WINDOW,
@@ -123,7 +125,6 @@ export const VERSE_LOCAL_TAG_RE = /coder|code|qwen|deepseek|devstral|llama/i;
 
 export const VERSE_DEFAULT_OLLAMA_BASE_URL = 'http://127.0.0.1:11434';
 const OLLAMA_TIMEOUT_MS = 2_000;
-const MAX_CONNECTIONS_FILE_BYTES = 1024 * 1024;
 const MAX_LOCAL_TAGS = 64;
 
 // ---------------------------------------------------------------------------
@@ -196,25 +197,6 @@ interface ConnectionAccount {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function isNativeEngine(value: unknown): value is NativeEngine {
-  return value === 'claude' || value === 'codex' || value === 'grok';
-}
-
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((v) => typeof v === 'string');
-}
-
-function readJsonFile(path: string): unknown {
-  try {
-    if (!existsSync(path)) return null;
-    const raw = readFileSync(path, 'utf8');
-    if (raw.length > MAX_CONNECTIONS_FILE_BYTES) return null;
-    return JSON.parse(raw) as unknown;
-  } catch {
-    return null;
-  }
 }
 
 export function defaultAccountsRoot(): string {
@@ -306,24 +288,13 @@ async function resolveLocalDispatchBaseUrl(
   }
 }
 
+/**
+ * The account roster, launcher included. One parse, shared with the health
+ * sweep (account-health.ts `readNativeAccounts`), so seat discovery and seat
+ * health can never disagree about which accounts exist.
+ */
 function readConnections(accountsRoot: string): ConnectionAccount[] {
-  const parsed = readJsonFile(join(accountsRoot, 'connections.json'));
-  if (!isRecord(parsed) || !Array.isArray(parsed['accounts'])) return [];
-  const out: ConnectionAccount[] = [];
-  const seen = new Set<string>();
-  for (const entry of parsed['accounts']) {
-    if (!isRecord(entry)) continue;
-    const id = entry['id'];
-    const provider = entry['provider'];
-    const command = entry['command'];
-    if (typeof id !== 'string' || id.length === 0 || seen.has(id)) continue;
-    if (!isNativeEngine(provider)) continue;
-    if (!isStringArray(command) || command.length === 0) continue;
-    const label = typeof entry['label'] === 'string' && entry['label'].length > 0 ? entry['label'] : id;
-    seen.add(id);
-    out.push({ id, label, provider, command: [...command] });
-  }
-  return out;
+  return readNativeAccounts(accountsRoot);
 }
 
 // ---------------------------------------------------------------------------
@@ -345,8 +316,6 @@ export interface VerseSeatProfile {
   executable: string | null;
 }
 
-const MAX_PROFILE_BYTES = 64 * 1024;
-
 /**
  * Locate and read `<profile>/profile.json` from an account's launcher argv —
  * the same derivation `mcp-seat-view.resolveAccountStateRoots` uses
@@ -358,34 +327,7 @@ const MAX_PROFILE_BYTES = 64 * 1024;
  * than reading none. Returns null whenever anything is missing.
  */
 export function readSeatProfile(command: readonly string[], provider: NativeEngine): VerseSeatProfile | null {
-  const launcher = command.find((part) => typeof part === 'string' && part.endsWith('launcher.mjs'));
-  if (launcher === undefined || !isAbsolute(launcher)) return null;
-  const directory = dirname(launcher);
-  let manifest: unknown;
-  try {
-    const raw = readFileSync(join(directory, 'profile.json'), 'utf8');
-    if (raw.length > MAX_PROFILE_BYTES) return null;
-    manifest = JSON.parse(raw) as unknown;
-  } catch {
-    return null;
-  }
-  if (!isRecord(manifest)) return null;
-  if (manifest['provider'] !== undefined && manifest['provider'] !== provider) return null;
-  const absolute = (value: unknown): string | null =>
-    typeof value === 'string' && value.length > 0 && value.length <= 4096 && isAbsolute(value) ? value : null;
-  return {
-    directory,
-    nativeStatePath: absolute(manifest['nativeStatePath']),
-    executable: absolute(manifest['executable']),
-  };
-}
-
-/** `~/…` for a path under home, so remediation text is copyable but not machine-specific. */
-function homeRelative(path: string): string {
-  const home = homedir();
-  const rel = relative(home, path);
-  if (rel.length === 0 || rel.startsWith('..') || isAbsolute(rel)) return path;
-  return `~/${rel.split(sep).join('/')}`;
+  return readNativeProfileManifest(command, provider);
 }
 
 /** Stable-partition: runnable models first, so `models[0]` (the default) always runs. */
@@ -536,7 +478,7 @@ function seatWindow(window: VerseAccountWindow): VerseSeatWindow {
  * the verdict does not claim one.
  */
 export function seatUsability(
-  record: Pick<VerseAccountRecord, 'state' | 'binding' | 'credits' | 'windows'>,
+  record: Pick<VerseAccountRecord, 'state' | 'binding' | 'credits' | 'windows'> & Partial<Pick<VerseAccountRecord, 'provider'>>,
 ): VerseSeatUsability {
   if (record.state === 'signed-out') return 'signed-out';
   const binding = record.binding;
@@ -546,7 +488,16 @@ export function seatUsability(
   // nothing about headroom in either direction.
   const read = record.windows.filter((w) => w.usedPercent !== null);
   const spent = read.filter((w) => w.limitReached || (w.usedPercent ?? 0) >= 100);
-  if (spent.length === read.length) return record.credits?.hasCredits === true ? 'tight' : 'exhausted';
+  const creditsLeft = record.credits?.hasCredits === true;
+  if (spent.length === read.length) return creditsLeft ? 'tight' : 'exhausted';
+  // V3.10 — KEEP CODEX'S `limitReached`. Codex's flag is the provider's own
+  // DENIAL for the account's bucket (`rateLimitReachedType`), not a
+  // measurement: while it stands, turns fail, whatever the other window of the
+  // same bucket reads. So a surviving flag is exhaustion on its own (credits
+  // aside — they are spendable past the window). Claude and Grok are NOT
+  // treated this way: Claude's per-model weekly window can be spent while the
+  // account-wide ones have headroom (trap 1 above).
+  if (record.provider === 'codex' && !creditsLeft && read.some((w) => w.limitReached)) return 'exhausted';
   if (spent.length > 0) return 'tight';
   return binding.usedPercent >= VERSE_SEAT_TIGHT_PERCENT ? 'tight' : 'ready';
 }
@@ -1147,4 +1098,34 @@ export function refreshSeatTelemetry(
   }
 
   return { seats, launches, localRuntime: discovery.localRuntime };
+}
+
+// ---------------------------------------------------------------------------
+// Readiness — the engine's admission gate (V3.10)
+// ---------------------------------------------------------------------------
+
+/**
+ * Can `seatId` run a turn right now? The session engine calls this before it
+ * spawns anything; a refusal carries the ranked alternatives so the 409 always
+ * offers a way forward (`SeatNotReadyResponse`, core/verse/health-types.ts).
+ *
+ * Reads the health service's CURRENT view: seats with live collector telemetry
+ * fused with the latest background sweep (core/verse/account-health.ts). Sync
+ * and cheap (no process spawn, no network) so it is safe on the turn path.
+ *
+ * FAIL-OPEN BY DESIGN. Only positive evidence refuses a seat (signed out, or
+ * every window spent — see core/verse/seat-readiness.ts). When the health
+ * service has not started, or reading it fails, the seat is READY: an
+ * admission gate that refused on "we could not read it" would lock the
+ * operator out of their own accounts every time a probe hiccuped.
+ */
+export function getSeatReadiness(seatId: string): SeatReadiness {
+  const service = getVerseHealthService();
+  if (service === null) return { seatId, ready: true, reason: null, alternatives: [] };
+  try {
+    const current = service.current();
+    return seatReadiness(seatId, current.seats, current.reports);
+  } catch {
+    return { seatId, ready: true, reason: null, alternatives: [] };
+  }
 }

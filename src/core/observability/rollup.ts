@@ -3,12 +3,15 @@
  *
  * Privacy: delegates to collectUsageEvents which reads METADATA ONLY.
  * Performance: skips files outside the window (mtime filtering in usage-source),
- *   git log --since is bounded per-repo, never throws globally.
+ *   git commit counts are cached per repo behind a stat fingerprint (see
+ *   countCommitsSince), and request handlers read through getCachedRollup's
+ *   stale-while-revalidate cache instead of recomputing. Never throws globally.
  */
 
-import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { basename } from 'node:path';
+import { execFile, execFileSync } from 'node:child_process';
+import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, isAbsolute, join, resolve as resolvePath } from 'node:path';
 
 import type {
   AshlrConfig,
@@ -44,26 +47,237 @@ export function windowToMs(window: string): number {
 // ---------------------------------------------------------------------------
 // Git commit counting (best-effort, never throws)
 // ---------------------------------------------------------------------------
+//
+// PERF (3.10): the rollup used to spawn one `git log --oneline --after=…` per
+// indexed repo on EVERY call — 239 synchronous spawns (~2.5 s of frozen event
+// loop) to produce counts that change only when someone commits. Each repo's
+// committer timestamps for the widest window are now fetched once and kept,
+// keyed on a cheap stat signature of the files a commit must touch (HEAD, the
+// checked-out ref, packed-refs, logs/HEAD). A warm rollup costs ~5 stat calls
+// per repo and zero spawns; counts for 1d/7d/30d are derived by filtering the
+// cached timestamps, so they age correctly without a refetch.
 
 const GIT_TIMEOUT = 5_000;
+/** Widest window any caller asks for (windowToMs('30d')). */
+const COMMIT_HISTORY_SPAN_MS = 30 * 86_400_000;
+/** A repo whose git dir cannot be fingerprinted is refetched at most this often. */
+const UNSIGNED_HISTORY_TTL_MS = 60_000;
+/** Committer timestamps are ~11 bytes a line; 8 MiB is ~700k commits in a month. */
+const GIT_MAX_BUFFER = 8 * 1024 * 1024;
+/** Parallel async `git log` spawns when warming many repos at once. */
+const ASYNC_GIT_CONCURRENCY = 8;
+/** Bound the cache so a pathological index cannot grow it without limit. */
+const MAX_COMMIT_HISTORY_ENTRIES = 2_048;
+
+interface CommitHistory {
+  /** Stat fingerprint of the repo's git state; null = could not fingerprint. */
+  signature: string | null;
+  /** Earliest committer time (epoch ms) the fetch covered. */
+  coversFromMs: number;
+  fetchedAt: number;
+  /** Committer times (epoch ms) of commits reachable from HEAD within the span. */
+  times: number[];
+}
+
+const commitHistory = new Map<string, CommitHistory>();
+
+function statPart(path: string): string {
+  try {
+    const st = statSync(path);
+    return `${st.ino}:${st.size}:${st.mtimeMs}`;
+  } catch {
+    return '-';
+  }
+}
 
 /**
- * Count commits in `repoPath` with author date >= sinceMs.
- * Returns 0 on any error (git unavailable, not a repo, timeout, etc.).
+ * Resolve the git dir and common dir for a working tree. Handles the `.git`
+ * FILE form (worktrees, submodules). Returns null for anything unexpected —
+ * the caller then falls back to a short TTL instead of guessing.
+ */
+function resolveGitDirs(repoPath: string): { gitDir: string; commonDir: string } | null {
+  try {
+    const dotGit = join(repoPath, '.git');
+    const st = lstatSync(dotGit);
+    let gitDir: string;
+    if (st.isDirectory()) {
+      gitDir = dotGit;
+    } else if (st.isFile()) {
+      const text = readFileSync(dotGit, 'utf8').trim();
+      const m = /^gitdir:\s*(.+)$/m.exec(text);
+      if (!m) return null;
+      gitDir = isAbsolute(m[1]!) ? m[1]! : resolvePath(repoPath, m[1]!);
+    } else {
+      return null;
+    }
+    let commonDir = gitDir;
+    try {
+      const rel = readFileSync(join(gitDir, 'commondir'), 'utf8').trim();
+      if (rel) commonDir = isAbsolute(rel) ? rel : resolvePath(gitDir, rel);
+    } catch {
+      // Not a linked worktree: the git dir is its own common dir.
+    }
+    return { gitDir, commonDir };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fingerprint every file a new commit, checkout, reset or rebase of HEAD must
+ * rewrite. `git log` with no revision walks HEAD only, so these are exactly
+ * the inputs its answer depends on (plus the clock, handled by filtering).
+ * Exported for tests.
+ */
+export function gitStateSignature(repoPath: string): string | null {
+  const dirs = resolveGitDirs(repoPath);
+  if (!dirs) return null;
+  let head: string;
+  try {
+    head = readFileSync(join(dirs.gitDir, 'HEAD'), 'utf8').trim();
+  } catch {
+    return null;
+  }
+  const parts = [head, statPart(join(dirs.gitDir, 'HEAD')), statPart(join(dirs.gitDir, 'logs', 'HEAD'))];
+  const ref = /^ref:\s*(refs\/\S+)$/.exec(head)?.[1];
+  if (ref) {
+    // A branch ref lives loose in the common dir, or packed; watch both.
+    parts.push(statPart(join(dirs.commonDir, ref)));
+  }
+  parts.push(statPart(join(dirs.commonDir, 'packed-refs')));
+  return parts.join('|');
+}
+
+function parseCommitTimes(out: string): number[] {
+  const times: number[] = [];
+  for (const line of out.split('\n')) {
+    const trimmed = line.trim();
+    if (!/^\d+$/.test(trimmed)) continue;
+    times.push(Number(trimmed) * 1000);
+  }
+  return times;
+}
+
+function gitLogArgs(fromMs: number): string[] {
+  return ['log', '--format=%ct', `--after=${new Date(fromMs).toISOString()}`];
+}
+
+function historyIsFresh(entry: CommitHistory | undefined, signature: string | null, sinceMs: number, now: number): boolean {
+  if (!entry) return false;
+  if (entry.coversFromMs > sinceMs) return false;
+  if (signature === null || entry.signature === null) {
+    return now - entry.fetchedAt < UNSIGNED_HISTORY_TTL_MS;
+  }
+  return entry.signature === signature;
+}
+
+function storeHistory(repoPath: string, entry: CommitHistory): void {
+  if (!commitHistory.has(repoPath) && commitHistory.size >= MAX_COMMIT_HISTORY_ENTRIES) {
+    // Oldest-inserted first: Map iteration order is insertion order.
+    const oldest = commitHistory.keys().next().value;
+    if (oldest !== undefined) commitHistory.delete(oldest);
+  }
+  commitHistory.set(repoPath, entry);
+}
+
+function countFrom(entry: CommitHistory, sinceMs: number): number {
+  let n = 0;
+  for (const t of entry.times) if (t > sinceMs) n++;
+  return n;
+}
+
+/** Earliest instant a fetch should cover so every supported window is answerable. */
+function fetchFromMs(sinceMs: number, now: number): number {
+  return Math.min(sinceMs, now - COMMIT_HISTORY_SPAN_MS);
+}
+
+/**
+ * Count commits in `repoPath` with committer date after sinceMs (the same
+ * predicate as `git log --after`). Returns 0 on any error (git unavailable,
+ * not a repo, timeout, etc.). Served from the fingerprinted cache when the
+ * repo has not changed; otherwise ONE synchronous `git log` refills it.
  */
 function countCommitsSince(repoPath: string, sinceMs: number): number {
   try {
     if (!existsSync(repoPath)) return 0;
-    const since = new Date(sinceMs).toISOString();
-    const out = execFileSync(
-      'git',
-      ['log', '--oneline', `--after=${since}`],
-      { cwd: repoPath, timeout: GIT_TIMEOUT, stdio: 'pipe', encoding: 'utf8' },
-    );
-    return out.trim() === '' ? 0 : out.trim().split('\n').length;
+    const now = Date.now();
+    const signature = gitStateSignature(repoPath);
+    const cached = commitHistory.get(repoPath);
+    if (historyIsFresh(cached, signature, sinceMs, now)) return countFrom(cached!, sinceMs);
+    const from = fetchFromMs(sinceMs, now);
+    let times: number[] = [];
+    try {
+      const out = execFileSync('git', gitLogArgs(from), {
+        cwd: repoPath, timeout: GIT_TIMEOUT, stdio: 'pipe', encoding: 'utf8', maxBuffer: GIT_MAX_BUFFER,
+      });
+      times = parseCommitTimes(out);
+    } catch {
+      // Not a repo / no commits / git missing: remember "0" under the same
+      // fingerprint so a non-repo in the index is not respawned every call.
+      times = [];
+    }
+    const entry: CommitHistory = { signature, coversFromMs: from, fetchedAt: now, times };
+    storeHistory(repoPath, entry);
+    return countFrom(entry, sinceMs);
   } catch {
     return 0;
   }
+}
+
+function execFileText(file: string, args: string[], cwd: string): Promise<string | null> {
+  return new Promise((resolveText) => {
+    try {
+      execFile(file, args, {
+        cwd, timeout: GIT_TIMEOUT, encoding: 'utf8', maxBuffer: GIT_MAX_BUFFER, windowsHide: true,
+      }, (err, stdout) => {
+        resolveText(err ? null : String(stdout));
+      });
+    } catch {
+      resolveText(null);
+    }
+  });
+}
+
+/**
+ * Refill the commit-history cache for every stale repo with ASYNC spawns
+ * (bounded concurrency), so a following synchronous buildRollup() finds a
+ * warm cache and spawns nothing. Never throws. Returns how many repos were
+ * actually refetched (for tests and the perf benchmark).
+ */
+export async function warmCommitCounts(repoPaths: readonly string[], sinceMs: number): Promise<number> {
+  const now = Date.now();
+  const pending: Array<{ repoPath: string; signature: string | null }> = [];
+  for (const repoPath of new Set(repoPaths)) {
+    try {
+      if (!existsSync(repoPath)) continue;
+      const signature = gitStateSignature(repoPath);
+      if (historyIsFresh(commitHistory.get(repoPath), signature, sinceMs, now)) continue;
+      pending.push({ repoPath, signature });
+    } catch {
+      // A repo that cannot even be stat'ed simply stays cold.
+    }
+  }
+  const from = fetchFromMs(sinceMs, now);
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < pending.length) {
+      const job = pending[cursor++]!;
+      const out = await execFileText('git', gitLogArgs(from), job.repoPath);
+      storeHistory(job.repoPath, {
+        signature: job.signature,
+        coversFromMs: from,
+        fetchedAt: now,
+        times: out === null ? [] : parseCommitTimes(out),
+      });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(ASYNC_GIT_CONCURRENCY, pending.length) }, worker));
+  return pending.length;
+}
+
+/** Drop every cached commit history (tests; `ashlr index` rebuilds). */
+export function invalidateCommitCountCache(): void {
+  commitHistory.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +322,25 @@ export function isLocalProviderModel(model: string): boolean {
 // ---------------------------------------------------------------------------
 // buildRollup
 // ---------------------------------------------------------------------------
+
+type IndexedRepo = AshlrIndex['items'][number];
+
+/** Indexed repos matching the optional project filter — the commit-count set. */
+function indexedRepos(index: AshlrIndex, projectFilter: string | undefined): IndexedRepo[] {
+  const repos: IndexedRepo[] = [];
+  for (const item of index.items) {
+    if (item.kind !== 'repo') continue;
+    if (projectFilter) {
+      const matches =
+        item.path === projectFilter ||
+        item.name === projectFilter ||
+        item.path.includes(projectFilter);
+      if (!matches) continue;
+    }
+    repos.push(item);
+  }
+  return repos;
+}
 
 export function buildRollup(
   window: '1d' | '7d' | '30d',
@@ -276,18 +509,7 @@ export function buildRollup(
   let totalCommits = 0;
 
   if (index) {
-    for (const item of index.items) {
-      if (item.kind !== 'repo') continue;
-
-      // Apply project filter to repos
-      if (projectFilter) {
-        const matches =
-          item.path === projectFilter ||
-          item.name === projectFilter ||
-          item.path.includes(projectFilter);
-        if (!matches) continue;
-      }
-
+    for (const item of indexedRepos(index, projectFilter)) {
       const repoCommits = countCommitsSince(item.path, sinceMs);
       if (repoCommits <= 0) continue;
 
@@ -393,4 +615,154 @@ export function buildRollup(
     byModel,
     budget,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Async + cached entry points for request handlers
+// ---------------------------------------------------------------------------
+
+/**
+ * buildRollup, but the only expensive part it controls — one `git log` per
+ * stale repo — runs as async, bounded-concurrency spawns first, so the
+ * synchronous pass that follows finds a warm commit cache. Usage-event
+ * collection (usage-source.ts) is still synchronous; request paths that must
+ * never block go through getCachedRollup, whose refresh can be handed to the
+ * read-projection worker. Never throws.
+ */
+export async function buildRollupAsync(
+  window: '1d' | '7d' | '30d',
+  cfg: AshlrConfig,
+  opts?: { project?: string },
+): Promise<ActivityRollup> {
+  try {
+    const index = loadIndex();
+    if (index) {
+      const repos = indexedRepos(index, opts?.project?.trim() || undefined).map((item) => item.path);
+      await warmCommitCounts(repos, Date.now() - windowToMs(window));
+    }
+  } catch {
+    // A cold cache just means buildRollup pays for the spawns itself.
+  }
+  return buildRollup(window, cfg, opts);
+}
+
+/** Fresh for this long; then served stale while one refresh runs. */
+export const ROLLUP_CACHE_TTL_MS = 60_000;
+/** Older than this, a caller waits for a recompute instead of reading stale. */
+export const ROLLUP_CACHE_MAX_STALE_MS = 10 * 60_000;
+
+export interface CachedRollup {
+  rollup: ActivityRollup;
+  /** True when older than ROLLUP_CACHE_TTL_MS (a refresh is in flight). */
+  stale: boolean;
+  /** Milliseconds since the rollup was computed. */
+  ageMs: number;
+}
+
+interface RollupCacheEntry {
+  value: ActivityRollup | null;
+  computedAt: number;
+  inFlight: Promise<ActivityRollup> | null;
+}
+
+const rollupCache = new Map<string, RollupCacheEntry>();
+
+/**
+ * Key on everything that relocates the sources collectUsageEvents reads, so
+ * a relocated HOME (tests, `ashlr` under another user) never reads another
+ * home's cached numbers.
+ */
+function rollupCacheKey(window: string, project: string | undefined): string {
+  return JSON.stringify([
+    window,
+    project ?? '',
+    homedir(),
+    process.env['ASHLR_HOME'] ?? '',
+    process.env['CLAUDE_PROJECTS_DIR'] ?? '',
+    process.env['CODEX_HOME'] ?? '',
+  ]);
+}
+
+/**
+ * Re-evaluate the budget against the CALLER's config: the cached token and
+ * cost totals are config-independent, the budget verdict is not, and a cap
+ * edited a second ago must show up now rather than after the TTL.
+ */
+function withCurrentBudget(rollup: ActivityRollup, cfg: AshlrConfig): ActivityRollup {
+  try {
+    return {
+      ...rollup,
+      budget: evalBudget(
+        { spentUsd: rollup.totals.estCostUsd, spentTokens: rollup.totals.tokensIn + rollup.totals.tokensOut },
+        cfg,
+        rollup.window,
+      ),
+    };
+  } catch {
+    return rollup;
+  }
+}
+
+/**
+ * Stale-while-revalidate rollup for request handlers.
+ *   - cold: await one computation (single-flight across concurrent callers);
+ *   - fresh (< TTL): return immediately;
+ *   - stale (< MAX_STALE): return immediately with `stale: true` and start
+ *     one background refresh;
+ *   - older: wait for a refresh (serving hour-old numbers as current is a lie).
+ * `compute` defaults to buildRollupAsync; the Verse server passes a
+ * read-projection-worker reader so the refresh never runs on the request
+ * thread at all. A failed refresh keeps the last good value. Throws only when
+ * there is no value at all and the computation fails.
+ */
+export async function getCachedRollup(
+  window: '1d' | '7d' | '30d',
+  cfg: AshlrConfig,
+  opts: { project?: string; compute?: () => Promise<ActivityRollup> } = {},
+): Promise<CachedRollup> {
+  const project = opts.project?.trim() || undefined;
+  const key = rollupCacheKey(window, project);
+  let entry = rollupCache.get(key);
+  if (!entry) {
+    entry = { value: null, computedAt: 0, inFlight: null };
+    rollupCache.set(key, entry);
+  }
+  const compute = opts.compute ?? (() => buildRollupAsync(window, cfg, project ? { project } : undefined));
+  const current = entry;
+  const refresh = (): Promise<ActivityRollup> => {
+    if (current.inFlight) return current.inFlight;
+    current.inFlight = compute()
+      .then((value) => {
+        current.value = value;
+        current.computedAt = Date.now();
+        return value;
+      })
+      .finally(() => {
+        current.inFlight = null;
+      });
+    return current.inFlight;
+  };
+
+  const now = Date.now();
+  if (current.value === null || now - current.computedAt > ROLLUP_CACHE_MAX_STALE_MS) {
+    try {
+      const value = await refresh();
+      return { rollup: withCurrentBudget(value, cfg), stale: false, ageMs: 0 };
+    } catch (err) {
+      if (current.value === null) throw err;
+      return { rollup: withCurrentBudget(current.value, cfg), stale: true, ageMs: Date.now() - current.computedAt };
+    }
+  }
+  const ageMs = now - current.computedAt;
+  if (ageMs >= ROLLUP_CACHE_TTL_MS) {
+    void refresh().catch(() => { /* keep serving the last good value */ });
+    return { rollup: withCurrentBudget(current.value, cfg), stale: true, ageMs };
+  }
+  return { rollup: withCurrentBudget(current.value, cfg), stale: false, ageMs };
+}
+
+/** Drop cached rollups and commit histories (tests; after a reindex). */
+export function invalidateRollupCache(): void {
+  rollupCache.clear();
+  invalidateCommitCountCache();
 }

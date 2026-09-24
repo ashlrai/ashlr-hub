@@ -41,7 +41,8 @@ import { StatTile, chartFormat } from '../../../components/charts/index.js';
 import { verseBootstrapQuery } from '../verse-queries.js';
 import { AccountCard } from '../usage/AccountCard.js';
 import { AccountDetail } from '../usage/AccountDetail.js';
-import { CapacityStrip } from '../usage/CapacityStrip.js';
+import { CapacityFacts } from '../usage/CapacityFacts.js';
+import { CapacityStrip, useCapacityData } from '../usage/CapacityStrip.js';
 import { EfficiencyPanel } from '../usage/EfficiencyPanel.js';
 import { seatEfficiency } from '../usage/context-model.js';
 import { LimitsPanel } from '../usage/LimitsPanel.js';
@@ -264,6 +265,24 @@ export function UsageSection(): ReactNode {
 
   const localStale = useMemo(() => localStaleness(localView?.runtimes ?? []), [localView]);
 
+  // The shared strip speaks in SEAT ids; the account cards below are keyed by
+  // ACCOUNT id. A seat opens its card's detail only when that card exists.
+  const capacitySeats = useCapacityData();
+  const cardIds = useMemo(() => new Set(cards.map((c) => c.id)), [cards]);
+  const seatAccount = useMemo(
+    () => new Map(capacitySeats.seats.map((seat) => [seat.id, seat.accountId])),
+    [capacitySeats.seats],
+  );
+  const selectedSeatId = useMemo(() => {
+    if (selectedAccountId === null) return null;
+    for (const [seatId, accountId] of seatAccount) if (accountId === selectedAccountId) return seatId;
+    return null;
+  }, [seatAccount, selectedAccountId]);
+  const selectSeat = useCallback((seatId: string) => {
+    const accountId = seatAccount.get(seatId) ?? seatId;
+    if (cardIds.has(accountId)) setSelectedAccountId((current) => (current === accountId ? null : accountId));
+  }, [seatAccount, cardIds]);
+
   // The selection is held as an ID, never as a card object: a refresh rebuilds
   // every model, and a captured card would keep rendering readings the next
   // poll already replaced. The detail renders from the card the grid is holding
@@ -410,11 +429,19 @@ export function UsageSection(): ReactNode {
           </div>
         ) : (
           <>
+            {/*
+              The ONE capacity view every surface shares (SPEC-310C §4),
+              from the seat roster, A2 health and A9 budget. A seat name
+              opens its account card's detail when there is a card for it.
+            */}
             <CapacityStrip
-              overview={capacity}
-              selectedId={selectedAccountId}
-              onSelectSeat={toggleAccount}
+              seats={capacitySeats.seats}
+              health={capacitySeats.health}
+              budget={capacitySeats.budget}
+              selectedSeatId={selectedSeatId}
+              onSelectSeat={selectSeat}
             />
+            <CapacityFacts overview={capacity} />
 
             <section className={styles.panel} aria-labelledby="verse-usage-accounts">
               <div className={styles.panelHead}>

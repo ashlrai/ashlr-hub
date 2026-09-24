@@ -35,7 +35,8 @@ import { enqueueBacklogItemsDetailed } from '../portfolio/backlog.js';
 import { listGoals } from '../goals/store.js';
 import { goalFocusSnapshot } from '../goals/focus.js';
 import { createProposalMilestoneCompletionPredicate } from '../goals/completion.js';
-import { isEnrolled, killSwitchOn, listEnrolled } from '../sandbox/policy.js';
+import { activeEnrollmentLenses, isEnrolled, killSwitchOn, listEnrolled } from '../sandbox/policy.js';
+import { isMirrorPath } from '../fleet/mirrors.js';
 import {
   acquireOutwardMutationFence,
   ownsOutwardMutationFence,
@@ -43,6 +44,32 @@ import {
   type OutwardMutationFence,
 } from '../sandbox/mutation-fence.js';
 import { inventWorkItems } from './invent.js';
+
+/**
+ * 3.10: drop the fleet's own mirror clones from a DEFAULT scan set. A standing
+ * grant enrolls ~/.ashlr/fleet/mirrors/<owner>__<repo> (src/core/fleet/mirrors.ts)
+ * next to the checkout Mason enrolled himself; outside an enrollment lens both
+ * show up here, so a scan would report every finding twice and spend a bounded
+ * repo slot on a copy that is reset to origin every tick. Inside a lens (the
+ * standing daemon's autonomous lane) the lens already chose the view: every
+ * entry there IS a mirror, and dropping them would blind the fleet, so nothing
+ * is filtered. Any failure keeps the list as it was (the pre-3.10 behaviour):
+ * a duplicate is a nuisance, an empty scan is an outage.
+ */
+function withoutFleetMirrors(enrolled: string[]): string[] {
+  try {
+    if (activeEnrollmentLenses().length > 0) return enrolled;
+    return enrolled.filter((repo) => {
+      try {
+        return !isMirrorPath(repo);
+      } catch {
+        return true;
+      }
+    });
+  } catch {
+    return enrolled;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -295,7 +322,7 @@ export async function runInventCycle(
         ? Math.floor(rawCap)
         : DEFAULT_INVENT_PER_CYCLE;
 
-    const repos = listEnrolled().slice(0, MAX_REPOS_PER_CYCLE);
+    const repos = withoutFleetMirrors(listEnrolled()).slice(0, MAX_REPOS_PER_CYCLE);
     if (repos.length === 0) {
       return { invented: 0, enqueued: 0 };
     }

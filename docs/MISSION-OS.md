@@ -14,7 +14,7 @@ connector, release, deployment, or production workflow is installed or active.
 Mission OS separates intent, evidence, and authority:
 
 ```text
-strategist briefing
+latest briefing on disk
         |
         v
 bounded mission DAG ----> read-only preview
@@ -26,6 +26,21 @@ authenticated observation receipt ----> zero-effect shadow suggestion
         |
         +---- explicit `approve` or `reconcile` is still required to create goals
 ```
+
+**3.10: the Leader replaces the Strategist review.** `ashlr vision review` is
+now an alias of `ashlr leader tick --wait`. It never loads the legacy
+Strategist and never writes a briefing. A tick applies class-B actions whose
+veto window has passed, grades moves that are due, and starts a Leader run only
+when one is due (the 06:30 slot, or a trigger: 10 fleet merges, a revert, a
+seat window resetting or a high-severity insight; at most three runs a day;
+skipped when the evidence has not changed). That run goes to a seat the router
+admits under the budget mode, with no cloud fallback. Without a standing grant
+it runs on a free local model or not at all, and the memo is a dry run: its
+actions are shown, not applied. New direction arrives as
+Leader memos (`ashlr leader show`), and every memo action can be undone with
+`ashlr leader veto`. Preview, shadow, approve and reconcile below still read the
+latest briefing already on disk; nothing in 3.10 writes a new one. See
+[Authority](AUTHORITY.md) for the Leader's action classes and the nightly job.
 
 The mission graph is a planning DAG. A work node names one exact enrolled
 repository and its upstream dependencies. A human-gate node says that a human
@@ -57,7 +72,8 @@ equivalent development invocation is `npm run dev -- vision ...`.
 | Command | Reads | Writes | Authority/effect |
 | --- | --- | --- | --- |
 | `ashlr vision show` | Current end-state spec | Nothing | Read-only |
-| `ashlr vision review [--project <repo>]` | Spec, repository state, configured strategist backend | Latest strategic briefing | Produces planning input; does not create a goal or proposal |
+| `ashlr vision review [--project <repo>]` | Leader state, fleet digests, ledger, seat headroom | Leader state: due class-B actions applied, due moves graded, and a memo when a run is due | Alias of `ashlr leader tick --wait`; budget-gated; writes no briefing. Memo actions follow their class (A at once, B after the veto window, C to Needs you). `--project` is accepted but not applied: the Leader reviews the whole portfolio |
+| `ashlr leader show` / `ashlr leader veto <actionId>` | Leader state | `veto` runs the action's recorded inverse (`--memo <id>` undoes a whole memo) | `show` is read-only; `veto` only lowers what autonomy is doing |
 | `ashlr vision preview` | Latest briefing, enrollment, complete goal inventory | Nothing | Read-only; reports exact targets, selections, and hold reasons |
 | `ashlr vision shadow [--json]` | Briefing, enrollment, complete goals and proposals, realized-merge authority evidence | One immutable receipt, or replays the matching receipt | Observation-only; emits at most one `would-create` or `hold` suggestion and changes no operational state |
 | `ashlr vision approve` | Latest briefing and planning sources | Evolves the spec and adopts selected goals | Explicit planning mutation; still no dispatch, proposal, merge, release, or deployment |
@@ -85,11 +101,14 @@ partial, malformed, or mismatched evidence as a current suggestion.
 ```sh
 ashlr preflight
 ashlr enroll list
-ashlr vision review
+ashlr leader show
 ```
 
-Review can use a configured model and may therefore use the backend explicitly
-selected by the operator. It writes a briefing; it is not an approval.
+`ashlr leader show` prints the latest Leader memo and its actions; veto what
+you disagree with. `ashlr vision review` (the same as `ashlr leader tick --wait`)
+runs a tick now: it spends a seat only when a run is due and the budget mode
+admits it, and it writes no briefing. The preview below compiles the latest
+briefing already on disk.
 
 ### 2. Inspect the exact plan
 
@@ -258,10 +277,10 @@ do not run a merge, mutate a repository, push, or contact Cortex or Locus.
 
 | Symptom/reason | Meaning | Safe next step |
 | --- | --- | --- |
-| `briefing-source-incomplete` | Latest briefing is absent, unreadable, partial, or degraded | Run `ashlr vision review`, then `ashlr vision preview`; do not hand-edit an untrusted briefing into place |
+| `briefing-source-incomplete` | Latest briefing is absent, unreadable, partial, or degraded | Since 3.10 no command writes a briefing (`ashlr vision review` runs the Leader tick), so rerunning review will not repair it. Take direction from the Leader (`ashlr leader show`) instead; do not hand-edit an untrusted briefing into place |
 | `enrollment-source-incomplete` or `repository-not-enrolled` | Enrollment authority is degraded or a work node does not bind one exact enrolled root | Run `ashlr preflight` and `ashlr enroll list`; repair enrollment through the enrollment CLI |
 | `goal-source-incomplete` / `proposal-source-incomplete` | A bounded authoritative inventory could not be completed | Inspect `ashlr goals list` and `ashlr inbox`; repair filesystem ownership/permissions before retrying rather than treating records as absent |
-| `mission-graph-invalid` / `invalid-mission-goal-binding` | The graph digest, dependency DAG, target, or exact goal mission tuple does not validate | Run `ashlr vision preview`; regenerate the briefing after correcting the strategic input or enrollment |
+| `mission-graph-invalid` / `invalid-mission-goal-binding` | The graph digest, dependency DAG, target, or exact goal mission tuple does not validate | Run `ashlr vision preview` and correct the enrollment. The briefing is not regenerated in 3.10; new plans arrive as Leader memos (`ashlr leader show`) |
 | `linked-proposal-missing` / `linked-proposal-repository-mismatch` | A mission milestone points at evidence outside the complete inventory or wrong repo | Inspect the linked goal and proposal; never substitute a similarly named proposal |
 | `receipt-key-unavailable` | The existing provenance key is absent or unsafe | Do not fabricate or paste a key. Inspect `~/.ashlr/foundry/` ownership and the normal signed-evidence setup that owns key creation |
 | `receipt-conflicted` / `receipt-persistence-failed` | Immutable no-clobber publication or exact point verification failed | Stop retry loops, preserve the store, inspect local disk/permissions, and run `ashlr doctor`; do not delete receipt records as a first response |

@@ -1,243 +1,178 @@
 /**
- * CapacityStrip.test.tsx — the two-second read, pinned where it would
- * otherwise mislead: a state carried by color alone, a percentage printed for
- * a flagged limit, a prose reset rendered as a countdown, and an unreachable
- * runtime drawn as zero headroom.
+ * CapacityStrip.test.tsx — the ONE shared capacity view (SPEC-310C §4), as
+ * the operator reads it: a word for every state, a bar only for a real
+ * reading, "limit reached" instead of 100%, a visible reserve, keyboard-
+ * operable seat names, and the same markup at 375 (C0's viewport mock) and
+ * in dark (token-probe contrast of the colours the strip uses).
  */
-import { describe, expect, it, vi } from 'vitest';
-import { act, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { AccountCardModel, WindowView } from './accounts-model.js';
-import { buildCapacityOverview } from './capacity-model.js';
+import type { BudgetView } from '../../../../core/routing/policy.js';
+import { contrastRatio } from '../../../design/contrast.js';
+import { darkScope, lightScope, moduleColor, resolveToken } from '../../../design/token-probe.test-support.js';
+import { scanStyleSource } from '../../../design/style-scan.test-support.js';
+import { mockCompactViewport } from '../shell/viewport.test-support.js';
+import {
+  CLAUDE_MAX_SEAT,
+  CLAUDE_TIGHT_SEAT,
+  CODEX_CREDITS_SEAT,
+  GROK_SEAT,
+  LOCAL_SEAT_V2,
+  UNREAD_SEAT,
+} from '../seat-fixtures.test-support.js';
 import { CapacityStrip } from './CapacityStrip.js';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
-const NOW = Date.parse('2026-09-20T10:00:00.000Z');
+const CLAUDE = { ...CLAUDE_TIGHT_SEAT, id: 'claude-a', accountId: 'claude-a' };
 
-function window(over: Partial<WindowView> & { id: string }): WindowView {
-  return {
-    label: over.id,
-    usedPct: null,
-    tone: 'ok',
-    resetText: null,
-    resetsAt: null,
-    limitReached: false,
-    measured: true,
-    ...over,
-  };
-}
+const BUDGET = {
+  mode: 'balanced',
+  seats: {},
+  updatedAt: 'x',
+  headroom: [{ seatId: 'claude-a', sessionUsedPercent: 15, weeklyUsedPercent: 85, bindingWindow: 'weekly', autonomyHeadroomPercent: 0, resetAt: null, eligibleForAutonomy: false, reasons: ['Past the ceiling.'] }],
+  seatInfo: [{ seatId: 'claude-a', label: 'Claude Max', engine: 'claude', free: false }],
+  effective: { 'claude-a': { seatId: 'claude-a', enabled: true, reservePercent: 40 } },
+  readingMaxAgeMs: 1,
+  sampledAt: 'x',
+} as unknown as BudgetView;
 
-function card(over: Partial<AccountCardModel> & { id: string }): AccountCardModel {
-  return {
-    label: over.id,
-    engine: 'codex',
-    color: 'var(--engine-codex)',
-    plan: null,
-    verdict: { state: 'available', headline: 'Usable now', detail: 'd', code: null },
-    allWindows: [],
-    evidence: {
-      state: 'observed',
-      authentication: 'signed-in',
-      health: null,
-      reasonCode: null,
-      observedAt: null,
-      notes: [],
-      unsupported: null,
-    },
-    binding: null,
-    others: [],
-    credits: null,
-    reconnectCommand: null,
-    observedAt: null,
-    rank: 0,
-    hasDetail: true,
-    sourceNote: null,
-    ...over,
-  };
-}
-
-function strip(cards: AccountCardModel[], onSelect: ((id: string) => void) | null = null): void {
-  render(
-    <CapacityStrip
-      overview={buildCapacityOverview({ cards, localCard: null, localView: null, nowMs: NOW })}
-      selectedId={null}
-      onSelectSeat={onSelect}
-    />,
-  );
-}
+afterEach(() => vi.restoreAllMocks());
 
 describe('CapacityStrip', () => {
-  it('states every seat with a WORD, never with color alone', () => {
-    strip([
-      card({ id: 'a', label: 'Codex A', binding: window({ id: 'codex', usedPct: 40 }) }),
-      card({
-        id: 'b',
-        label: 'Codex B',
-        verdict: { state: 'exhausted', headline: 'Limit reached', detail: 'd', code: null },
-      }),
-      card({
-        id: 'c',
-        label: 'Claude',
-        verdict: { state: 'unknown', headline: 'No reading', detail: 'd', code: null },
-      }),
-    ]);
-    expect(screen.getByText('usable')).toBeInTheDocument();
-    expect(screen.getByText('blocked')).toBeInTheDocument();
-    expect(screen.getByText('no reading')).toBeInTheDocument();
+  it('states every seat with a WORD, and draws a bar only for a real reading', () => {
+    render(<CapacityStrip seats={[CLAUDE, CLAUDE_MAX_SEAT, UNREAD_SEAT]} local="each" />);
+    const list = screen.getByRole('list', { name: 'Seat capacity' });
+    const rows = within(list).getAllByRole('listitem');
+    expect(rows).toHaveLength(3);
+    expect(within(rows[0]!).getByText('tight')).toBeInTheDocument();
+    expect(within(rows[1]!).getByText('blocked')).toBeInTheDocument();
+    expect(within(rows[2]!).getByText('no reading')).toBeInTheDocument();
+    // The unread seat has no bar at all.
+    expect(within(rows[2]!).queryAllByRole('img')).toHaveLength(0);
+    // Real readings are printed as percentages…
+    expect(within(rows[0]!).getByText('92%')).toBeInTheDocument();
+    // …and the flagged limit is "limit reached", never 100%.
+    expect(within(rows[1]!).getByText('limit reached')).toBeInTheDocument();
+    expect(within(rows[1]!).queryByText('100%')).not.toBeInTheDocument();
   });
 
-  it('prints no percentage for a flagged limit, because the sentinel is not a measurement', () => {
-    strip([
-      card({
-        id: 'b',
-        label: 'Codex B',
-        verdict: { state: 'exhausted', headline: 'Limit reached', detail: 'd', code: null },
-        binding: window({ id: 'codex', usedPct: null, limitReached: true, measured: false }),
-      }),
-    ]);
-    expect(screen.queryByText('100%')).not.toBeInTheDocument();
-    expect(screen.getByText('blocked')).toBeInTheDocument();
+  it('prints reset prose verbatim and names each bar for assistive tech', () => {
+    render(<CapacityStrip seats={[CLAUDE]} />);
+    expect(screen.getAllByText('resets Sep 25 at 7pm (America/New_York)').length).toBeGreaterThan(0);
+    expect(screen.getByRole('img', { name: 'Claude Max 5-hour window: 15% used, resets Sep 21 at 1:40am (America/New_York)' })).toBeInTheDocument();
   });
 
-  it('prints a real binding percentage when there is one', () => {
-    strip([card({ id: 'a', label: 'Codex A', binding: window({ id: 'codex', usedPct: 73 }) })]);
-    expect(screen.getByText('73%')).toBeInTheDocument();
+  it('shows "Reserved for you 40%" with the autonomy word, and marks the kept band on the binding bar', () => {
+    const { container } = render(<CapacityStrip seats={[CLAUDE]} budget={BUDGET} />);
+    expect(screen.getByText(/Reserved for you 40%/)).toBeInTheDocument();
+    expect(screen.getByText('Held back')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: /weekly fable window: 92% used; 40% kept for you/ })).toBeInTheDocument();
+    // Exactly one reserve band: the reserve binds the binding window only.
+    expect(container.querySelectorAll('[class*="reserve"]')).toHaveLength(1);
   });
 
-  /**
-   * Claude's resetsAt is structurally null. Its reset sentence must appear
-   * verbatim under its own heading and must never become a countdown.
-   */
-  it('renders a prose-only reset verbatim, under a heading that says it is text', () => {
-    strip([
-      card({
-        id: 'claude',
-        label: 'Claude',
-        allWindows: [
-          window({ id: 'seven_day', resetText: 'resets Sep 25 at 7pm (America/New_York)' }),
-        ],
-      }),
-    ]);
-    expect(screen.getByText('Resets reported as text')).toBeInTheDocument();
-    expect(
-      screen.getByText(/resets Sep 25 at 7pm \(America\/New_York\)/),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/never turned into a countdown/)).toBeInTheDocument();
+  it('shows credits as a separate fact, never folded into the window', () => {
+    render(<CapacityStrip seats={[CODEX_CREDITS_SEAT]} />);
+    expect(screen.getByText('2048.42 credits left')).toBeInTheDocument();
+    expect(screen.getByText('limit reached')).toBeInTheDocument();
   });
 
-  it('says a missing dated reset is absent rather than "never"', () => {
-    strip([card({ id: 'a', label: 'Codex A' })]);
-    expect(screen.getByText(/absent timestamp, not "never"/)).toBeInTheDocument();
+  it('compact density: one line per seat, binding window only, no reset text', () => {
+    render(<CapacityStrip seats={[CLAUDE, GROK_SEAT]} density="compact" />);
+    expect(screen.getAllByRole('img')).toHaveLength(2);
+    expect(screen.queryByText(/resets Sep/)).not.toBeInTheDocument();
+    // No headline by default in compact.
+    expect(screen.queryByText(/accounts usable/)).not.toBeInTheDocument();
   });
 
-  it('says an elapsed reset predates the rollover instead of counting down past zero', () => {
-    strip([
-      card({
-        id: 'a',
-        label: 'Codex A',
-        allWindows: [window({ id: 'codex', resetsAt: '2026-09-20T09:00:00.000Z' })],
-      }),
-    ]);
-    expect(screen.getByText(/predates the rollover/)).toBeInTheDocument();
+  it('the headline counts only what was read', () => {
+    render(<CapacityStrip seats={[CLAUDE, UNREAD_SEAT, LOCAL_SEAT_V2]} />);
+    expect(screen.getByText('1 of 2 accounts usable · 1 not read yet · local models ready')).toBeInTheDocument();
   });
 
-  /**
-   * The regression this pins: `buildCapacityOverview` bakes `inMs`/`overdue`
-   * in at build time, and it is memoized on the ACCOUNT DATA. The strip armed
-   * a 30s interval whose own comment says "a countdown that does not tick is
-   * worse than no countdown" — and then re-rendered the same frozen number
-   * every 30 seconds forever, because nothing recomputed the elapsed time.
-   * `sameData` reference-preservation in the cache made even pressing Refresh
-   * fail to advance it.
-   */
-  describe('the countdown is derived from a live clock, not from the model', () => {
-    it('counts down as time passes', () => {
-      vi.useFakeTimers();
-      try {
-        const startedAt = Date.parse('2026-09-20T10:00:00.000Z');
-        vi.setSystemTime(startedAt);
-        render(
-          <CapacityStrip
-            overview={buildCapacityOverview({
-              cards: [
-                card({
-                  id: 'a',
-                  label: 'Codex A',
-                  // Two hours and one minute out, so the printed form is
-                  // `2h 1m` now and `1h 59m` after two minutes.
-                  allWindows: [window({ id: 'codex', resetsAt: '2026-09-20T12:01:00.000Z' })],
-                }),
-              ],
-              localCard: null,
-              localView: null,
-              nowMs: startedAt,
-            })}
-            selectedId={null}
-            onSelectSeat={null}
-          />,
-        );
-        expect(screen.getByText('2h 1m')).toBeInTheDocument();
-
-        act(() => {
-          vi.advanceTimersByTime(120_000);
-        });
-        expect(screen.queryByText('2h 1m')).not.toBeInTheDocument();
-        expect(screen.getByText('1h 59m')).toBeInTheDocument();
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('switches to the overdue copy once the instant actually passes', () => {
-      vi.useFakeTimers();
-      try {
-        const startedAt = Date.parse('2026-09-20T10:00:00.000Z');
-        vi.setSystemTime(startedAt);
-        render(
-          <CapacityStrip
-            overview={buildCapacityOverview({
-              cards: [
-                card({
-                  id: 'a',
-                  label: 'Codex A',
-                  // 40s out: ahead of us when the model is built, behind us a
-                  // minute later. The model still says `overdue: false`.
-                  allWindows: [window({ id: 'codex', resetsAt: '2026-09-20T10:00:40.000Z' })],
-                }),
-              ],
-              localCard: null,
-              localView: null,
-              nowMs: startedAt,
-            })}
-            selectedId={null}
-            onSelectSeat={null}
-          />,
-        );
-        expect(screen.queryByText(/predates the rollover/)).not.toBeInTheDocument();
-
-        act(() => {
-          vi.advanceTimersByTime(60_000);
-        });
-        expect(screen.getByText(/predates the rollover/)).toBeInTheDocument();
-      } finally {
-        vi.useRealTimers();
-      }
-    });
+  it('an empty roster says so rather than drawing seats at zero', () => {
+    render(<CapacityStrip seats={[]} />);
+    expect(screen.getByText(/an empty roster, not seats at zero/)).toBeInTheDocument();
   });
 
-  it('never reports local headroom as zero when no local source answered', () => {
-    strip([card({ id: 'a' })]);
-    expect(screen.getByText('No local source answered.')).toBeInTheDocument();
-  });
-
-  it('opens a seat detail when its chip is pressed', async () => {
+  it('seat names are toggles from the keyboard when a detail exists', async () => {
     const onSelect = vi.fn();
-    strip([card({ id: 'codex-a', label: 'Codex A' })], onSelect);
-    await userEvent.click(screen.getByRole('button', { name: /Codex A/ }));
-    expect(onSelect).toHaveBeenCalledWith('codex-a');
+    const user = userEvent.setup();
+    render(<CapacityStrip seats={[CLAUDE, GROK_SEAT]} onSelectSeat={onSelect} selectedSeatId="grok" />);
+    await user.tab();
+    expect(screen.getByRole('button', { name: /Claude Max/ })).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(onSelect).toHaveBeenCalledWith('claude-a');
+    expect(screen.getByRole('button', { name: /Grok/ })).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('renders an inert chip when there is nothing to open', () => {
-    strip([card({ id: 'codex-a', label: 'Codex A' })], null);
-    expect(screen.queryByRole('button', { name: /Codex A/ })).not.toBeInTheDocument();
+  it('renders the caller’s per-seat actions', () => {
+    render(<CapacityStrip seats={[CLAUDE, LOCAL_SEAT_V2]} renderActions={(row) => (row.kind === 'local' ? null : <button type="button">Fix {row.label}</button>)} />);
+    expect(screen.getByRole('button', { name: 'Fix Claude Max' })).toBeInTheDocument();
+  });
+
+  it('renders the same rows at 375', () => {
+    const viewport = mockCompactViewport();
+    try {
+      render(<CapacityStrip seats={[CLAUDE, GROK_SEAT]} budget={BUDGET} />);
+      expect(screen.getAllByRole('listitem')).toHaveLength(2);
+      expect(screen.getByText(/Reserved for you 40%/)).toBeInTheDocument();
+    } finally {
+      viewport.restore();
+    }
+  });
+});
+
+describe('CapacityStrip — a malformed budget read', () => {
+  // INT6: GET /api/verse/budget answering `{}` threw inside the strip's
+  // useMemo and blanked every surface that mounts it (Apps, onboarding,
+  // NewChatDialog). The seats must still render; only the reserve goes quiet.
+  it.each([['{}', {}], ['seatInfo: null', { seatInfo: null, headroom: null, effective: null }]])(
+    'budget = %s still renders every seat, with no reserve line',
+    (_name, value) => {
+      render(<CapacityStrip seats={[CLAUDE, CLAUDE_MAX_SEAT]} budget={value as unknown as BudgetView} health={{} as never} local="each" />);
+      expect(within(screen.getByRole('list', { name: 'Seat capacity' })).getAllByRole('listitem')).toHaveLength(2);
+      expect(screen.queryByText(/Reserved for you/)).not.toBeInTheDocument();
+    },
+  );
+});
+
+describe('CapacityStrip styles', () => {
+  const CSS = 'routes/verse/usage/CapacityStrip.module.css';
+
+  it('uses tokens only: no raw hex colour, no px font size', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/web-ui', CSS), 'utf8');
+    expect(scanStyleSource(CSS, source)).toEqual([]);
+    const tsx = readFileSync(resolve(process.cwd(), 'src/web-ui/routes/verse/usage/CapacityStrip.tsx'), 'utf8');
+    expect(scanStyleSource('routes/verse/usage/CapacityStrip.tsx', tsx)).toEqual([]);
+  });
+
+  it('keeps every state word readable (≥ 4.5:1) on the surface in both themes', () => {
+    for (const [theme, scope] of [['light', lightScope()], ['dark', darkScope()]] as const) {
+      const surface = resolveToken(scope, '--bg-surface')!;
+      for (const [selector, prop] of [
+        ['.word', 'color'],
+        [".word[data-tone='warning']", 'color'],
+        [".word[data-tone='danger']", 'color'],
+        ['.value', 'color'],
+        [".value[data-level='tight']", 'color'],
+        [".value[data-level='limit']", 'color'],
+        ['.summary', 'color'],
+      ] as const) {
+        const fg = moduleColor(scope, CSS, selector, prop);
+        expect(fg, `${theme} ${selector}`).not.toBeNull();
+        const ratio = contrastRatio(fg!, surface, surface)!;
+        expect(ratio, `${theme} ${selector} ${prop} = ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  it('draws the used bar from the quantity ramp, never the accent', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/web-ui', CSS), 'utf8');
+    const used = /\.used \{[^}]*\}/.exec(source)![0];
+    expect(used).toContain('var(--data-seq-5)');
+    expect(source).not.toMatch(/background:[^;]*--accent/);
   });
 });

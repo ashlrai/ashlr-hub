@@ -29,6 +29,18 @@
  *   turn.completed{usage:{input_tokens,cached_input_tokens,[cache_write_input_tokens],output_tokens}}
  *   turn.failed{error:{message}} / error{message}
  *
+ * V3.10 live reasoning + errors:
+ *   - `-c model_reasoning_summary="detailed"` on exec AND exec resume while the
+ *     `thinkingDisplay` preference is on. The seats have no config.toml, so
+ *     codex used `auto`: only 17% of reasoning items carried any text (median
+ *     32-47 chars of bold headers) vs a 1,100-char median with `detailed`,
+ *     measured on this machine's own rollouts.
+ *   - `--skip-git-repo-check` on every turn: without it codex refuses any
+ *     non-git folder ("Not inside a trusted directory") before it even starts.
+ *   - reasoning items → `thinking {kind:'summary', durationMs}` (an item with
+ *     no text → `redacted`), item starts → transient `progress`, and failures
+ *     carry a `code` (`native-thread-missing` for a vanished thread).
+ *
  * Telemetry (V3.9): stdout never carries per-call context, so the exact meter,
  * the window, compactions and the TRUE per-turn usage come from the thread's
  * own rollout file (core/verse/codex-rollout.ts) via `pollTelemetry` (live)
@@ -57,7 +69,10 @@ import { legacyModelOptionFallback } from '../model-windows.js';
 import { verseSessionRoots, type VerseModelOption, type VerseSession, type VerseTurnLaunch, type VerseUsage } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
 import type { VerseAdapter, VerseAdapterTurnContext, VerseParsedEvent, VerseTurnParser } from './index.js';
-import { parseJsonObjectLine } from './claude.js';
+import { turnAttachmentImages } from './turn-extras.js';
+import { codexEffortArgs, codexPermission } from '../session-controls.js';
+import { cliErrorEvent, classifyVerseCliError, nativeSessionOverride, parseJsonObjectLine, thinkingDisplayEnabled } from './claude.js';
+import type { VerseProgressPhase } from '../types.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -250,21 +265,81 @@ export const strictConfigVerified: readonly string[] = [
   'model_context_window',
   'model_auto_compact_token_limit',
   'developer_instructions',
+  // V3.10, same method on 0.136.0 (homebrew) and 0.155.0-alpha.9.2 (the
+  // seats' ChatGPT.app binary), exec AND exec resume: `"detailed"` passes
+  // config loading, `"bogusvalue"` fails with "unknown variant `bogusvalue`,
+  // expected one of `auto`, `concise`, `detailed`, `none`".
+  'model_reasoning_summary',
 ];
 
+/**
+ * Reasoning summaries for this turn: `detailed` while live reasoning is on,
+ * nothing otherwise (codex then keeps its own default). Sent on every turn,
+ * like the other overrides, so a resumed turn reasons out loud as turn 1 did.
+ */
+export function codexReasoningOverrides(launch: VerseSeatLaunch): string[] {
+  return thinkingDisplayEnabled(launch) ? ['-c', 'model_reasoning_summary="detailed"'] : [];
+}
+
+/**
+ * `--skip-git-repo-check`, on `exec` and `exec resume` (both list it in
+ * `--help` on 0.136.0 and 0.155.0-alpha.9.2). Verse already confines the
+ * agent to the session's roots; codex's own "trusted git directory" gate only
+ * made every non-git project fail turn 1 before authentication.
+ */
+const CODEX_SKIP_GIT_CHECK = '--skip-git-repo-check';
+
+/**
+ * Whether this turn is `exec resume <thread>` (true) or a fresh `exec`.
+ * The thread id only exists once a turn printed it, so resuming needs one.
+ * The engine may force a fresh thread (recovering a vanished one) with
+ * `nativeSession: 'new'`, or a resume with `'resume'`; otherwise a thread that
+ * already ran a turn is resumed. Shared by the launch and `afterTurn` (whose
+ * usage arithmetic differs for a thread's first turn).
+ */
+export function codexResumes(session: Pick<VerseSession, 'nativeSessionId' | 'turnCount'>, launch: VerseSeatLaunch | null | undefined): boolean {
+  if (!session.nativeSessionId) return false;
+  const override = launch ? nativeSessionOverride(launch) : null;
+  if (override === 'new') return false;
+  return override === 'resume' || session.turnCount > 0;
+}
+
+/**
+ * V3.10 (unit C3) controls and attachments, layered so an UNTOUCHED chat's
+ * argv is exactly the 3.9 one:
+ *  - effort → `-c model_reasoning_effort="…"` (config, so exec and resume
+ *    carry it the same way);
+ *  - permission → `--sandbox <mode>` on a new thread, `-c sandbox_mode=…` on
+ *    resume (which has no `--sandbox`), or
+ *    `--dangerously-bypass-approvals-and-sandbox` (both forms accept it);
+ *  - the model → `--model` on BOTH forms. A chat's model can change between
+ *    turns (⌘⇧I); `exec resume` lists `-m, --model` on 0.136 and 0.155, and
+ *    without it a resumed thread keeps whatever model it started on while the
+ *    picker claims otherwise;
+ *  - attached images → one `--image=<path>` each, placed BEFORE another flag
+ *    so the variadic option can never swallow the stdin marker `-`. Other
+ *    attachments need no grant: both sandbox modes read the whole disk, and
+ *    the message carries the file's path.
+ */
 function buildCodexLaunch(session: VerseSession, text: string, launch: VerseSeatLaunch): VerseTurnLaunch {
   const prefix = launch.launcher ? [...launch.launcher] : ['codex'];
   const memory = memoryOverrides(launch);
+  const permission = codexPermission(session);
+  const images = turnAttachmentImages(launch).map((path) => `--image=${path}`);
   const config = [
     ...writableRootsOverride([...verseSessionRoots(session).slice(1), ...memory.writableRoots]),
     ...codexContextOverrides(session, launch),
     ...memory.config,
+    ...codexReasoningOverrides(launch),
+    ...codexEffortArgs(session),
   ];
-  const argv = session.turnCount > 0 && session.nativeSessionId
-    ? [...prefix, 'exec', 'resume', session.nativeSessionId, ...config, '--json', '-']
-    // Always the CANONICAL id: a stored alias (e.g. a pre-3.9 record) must
-    // reach the CLI as the model the label promised.
-    : [...prefix, 'exec', ...config, '--json', '--model', canonicalModelId(session.model), '--cd', session.projectPath, '--sandbox', 'workspace-write', '-'];
+  // Always the CANONICAL id: a stored alias (e.g. a pre-3.9 record) must
+  // reach the CLI as the model the label promised.
+  const model = canonicalModelId(session.model);
+  const argv = codexResumes(session, launch) && session.nativeSessionId
+    ? [...prefix, 'exec', 'resume', session.nativeSessionId, ...config, ...permission.resume, ...permission.bypass, ...images, CODEX_SKIP_GIT_CHECK, '--model', model, '--json', '-']
+    : [...prefix, 'exec', ...config, ...permission.bypass, ...images, CODEX_SKIP_GIT_CHECK, '--json', '--model', model, '--cd', session.projectPath,
+      ...(permission.sandbox !== null ? ['--sandbox', permission.sandbox] : []), '-'];
   return { argv, cwd: session.projectPath, env: {}, stdin: text };
 }
 
@@ -317,18 +392,81 @@ function describeResult(item: JsonObject): { output: string; isError: boolean } 
 
 const TOOL_ITEM_TYPES = new Set(['command_execution', 'file_change', 'mcp_tool_call']);
 
-export function createCodexParser(turnId: string): VerseTurnParser {
+/** Options for the codex parser. `now` is the clock (a test seam). */
+export interface CodexParserOptions {
+  now?: () => number;
+}
+
+export function createCodexParser(turnId: string, options: CodexParserOptions = {}): VerseTurnParser {
+  const now = typeof options.now === 'function' ? options.now : Date.now;
+  const turnStartedAt = now();
   let threadId: string | null = null;
   const startedTools = new Set<string>();
   const completedTools = new Set<string>();
   const emittedMessages = new Set<string>();
+  /** Reasoning item id → when its `item.started` arrived (thinking duration). */
+  const reasoningStartedAt = new Map<string, number>();
+  const emittedReasoning = new Set<string>();
   let reported: CodexTokenTotals | null = null;
+  let phase: VerseProgressPhase | null = null;
+  let phaseTool: string | null = null;
 
-  function handleItem(out: VerseParsedEvent[], phase: 'started' | 'completed', item: JsonObject): void {
+  /**
+   * Transient `progress` on a phase/tool change. Codex prints no streaming
+   * token counts, so `outTokens`/`tokPerSec` stay absent (unmeasured).
+   */
+  function setPhase(out: VerseParsedEvent[], next: VerseProgressPhase, tool: string | null = null): void {
+    if (phase === next && phaseTool === tool) return;
+    phase = next;
+    phaseTool = tool;
+    const event: Extract<VerseParsedEvent, { type: 'progress' }> = {
+      type: 'progress',
+      turnId,
+      phase: next,
+      elapsedMs: Math.max(0, Math.round(now() - turnStartedAt)),
+    };
+    if (tool) event.tool = tool;
+    out.push(event);
+  }
+
+  function handleReasoning(out: VerseParsedEvent[], phaseName: 'started' | 'completed', item: JsonObject): void {
+    const id = str(item['id']);
+    if (phaseName === 'started') {
+      if (id && !reasoningStartedAt.has(id)) reasoningStartedAt.set(id, now());
+      setPhase(out, 'thinking');
+      return;
+    }
+    const text = str(item['text']);
+    // Dedupe by item id; an id-less item by its text (codex always sends ids).
+    const key = id || `text:${text}`;
+    if (emittedReasoning.has(key)) return;
+    emittedReasoning.add(key);
+    const event: Extract<VerseParsedEvent, { type: 'thinking' }> = { type: 'thinking', turnId, text };
+    if (text) {
+      // Hosted codex models never return raw chain of thought; the text is
+      // the summary `model_reasoning_summary` asked for.
+      event.kind = 'summary';
+    } else {
+      // The model reasoned but no summary text came back (encrypted content
+      // only): keep the marker so the UI can say it thought.
+      event.redacted = true;
+    }
+    const startedAt = id ? reasoningStartedAt.get(id) : undefined;
+    if (startedAt !== undefined) {
+      event.durationMs = Math.max(0, Math.round(now() - startedAt));
+      reasoningStartedAt.delete(id);
+    }
+    out.push(event);
+  }
+
+  function handleItem(out: VerseParsedEvent[], phaseName: 'started' | 'completed', item: JsonObject): void {
     const type = str(item['type']);
     const id = str(item['id']);
     if (type === 'agent_message') {
-      if (phase !== 'completed') return;
+      if (phaseName !== 'completed') {
+        setPhase(out, 'writing');
+        return;
+      }
       const text = str(item['text']);
       const key = id || text;
       if (!text || emittedMessages.has(key)) return;
@@ -337,9 +475,7 @@ export function createCodexParser(turnId: string): VerseTurnParser {
       return;
     }
     if (type === 'reasoning') {
-      if (phase !== 'completed') return;
-      const text = str(item['text']);
-      if (text) out.push({ type: 'thinking', turnId, text });
+      handleReasoning(out, phaseName, item);
       return;
     }
     if (!TOOL_ITEM_TYPES.has(type)) return;
@@ -348,11 +484,14 @@ export function createCodexParser(turnId: string): VerseTurnParser {
       startedTools.add(toolUseId);
       const described = describeItem(item);
       out.push({ type: 'tool-use', turnId, toolUseId, name: described.name, input: described.input });
+      // The same name as the tool-use event, so the UI labels both one way.
+      setPhase(out, 'tool', described.name);
     }
-    if (phase === 'completed' && !completedTools.has(toolUseId)) {
+    if (phaseName === 'completed' && !completedTools.has(toolUseId)) {
       completedTools.add(toolUseId);
       const result = describeResult(item);
       out.push({ type: 'tool-result', turnId, toolUseId, output: result.output, isError: result.isError });
+      setPhase(out, 'waiting');
     }
   }
 
@@ -362,6 +501,10 @@ export function createCodexParser(turnId: string): VerseTurnParser {
       case 'thread.started': {
         const id = str(ev['thread_id']);
         if (id) threadId = id;
+        return;
+      }
+      case 'turn.started': {
+        setPhase(out, 'waiting');
         return;
       }
       case 'item.started':
@@ -381,7 +524,7 @@ export function createCodexParser(turnId: string): VerseTurnParser {
       case 'error': {
         const error = ev['error'];
         const message = isObject(error) ? str(error['message']) : str(error) || str(ev['message']);
-        out.push({ type: 'error', turnId, message: `codex: ${message || type}` });
+        out.push(cliErrorEvent(turnId, 'codex', message || type));
         return;
       }
       default:
@@ -389,12 +532,27 @@ export function createCodexParser(turnId: string): VerseTurnParser {
     }
   }
 
+  /**
+   * A non-JSON stdout line is codex itself talking. Only a sentence Verse
+   * acts on (a vanished thread) becomes an `error`; the rest stays dropped.
+   */
+  let plainErrorEmitted = false;
+  function handlePlainLine(line: string): VerseParsedEvent[] {
+    const text = line.trim();
+    if (!text || plainErrorEmitted || classifyVerseCliError(text) === null) return [];
+    plainErrorEmitted = true;
+    return [cliErrorEvent(turnId, 'codex', text.replace(/^error:\s*/i, '').slice(0, 1_000))];
+  }
+
   const parser: VerseTurnParser = {
     push(line: string): VerseParsedEvent[] {
-      const ev = parseJsonObjectLine(line);
-      if (!ev) return [];
+      if (typeof line !== 'string') return [];
       const out: VerseParsedEvent[] = [];
-      try { handle(out, ev); } catch { /* never throw on odd input */ }
+      try {
+        const ev = parseJsonObjectLine(line);
+        if (!ev) return handlePlainLine(line);
+        handle(out, ev);
+      } catch { /* never throw on odd input */ }
       return out;
     },
     finish(_exitCode: number | null): VerseParsedEvent[] {
@@ -611,7 +769,8 @@ export function afterCodexTurn(ctx: VerseAdapterTurnContext): VerseParsedEvent[]
 
   try {
     const tracker = state?.tracker.initialized ? state.tracker : null;
-    const firstTurn = !(ctx.session.turnCount > 0 && ctx.session.nativeSessionId);
+    // The same decision the launch made: a forced fresh thread is a first turn.
+    const firstTurn = !codexResumes(ctx.session, ctx.launch);
     const turn = codexTurnUsage(tracker, reported, firstTurn);
     const reading = state ? currentReading(state, reported) : null;
     if (turn) {
@@ -645,7 +804,7 @@ export function afterCodexTurn(ctx: VerseAdapterTurnContext): VerseParsedEvent[]
 
 export const codexAdapter: VerseAdapter = {
   buildLaunch: buildCodexLaunch,
-  createParser: createCodexParser,
+  createParser: (turnId: string) => createCodexParser(turnId),
   pollTelemetry: pollCodexTelemetry,
   afterTurn: afterCodexTurn,
 };

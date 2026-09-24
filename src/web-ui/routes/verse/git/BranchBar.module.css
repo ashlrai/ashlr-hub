@@ -1,0 +1,266 @@
+/*
+ * Branch bar (SPEC-310C §2): one quiet line above the composer. Identity in
+ * secondary text, the ± counts as a button in the diff's own add/remove
+ * colours (with the +/− glyph carrying the meaning), the PR chip, and one
+ * primary split button pinned right. At compact width the row wraps: the
+ * identity takes the first line, counts + chip + button the second.
+ */
+.bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: var(--control-h-sm);
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+
+.ident {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+.glyph { flex: none; color: var(--text-tertiary); }
+.repo {
+  flex: none;
+  color: var(--text-primary);
+  font-weight: var(--font-weight-semibold);
+  max-width: 18ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.branch {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  color: var(--text-secondary);
+}
+.drift {
+  flex: none;
+  font-size: var(--text-xs-size);
+  color: var(--status-warning-fg);
+}
+
+.stat {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+.stat:hover { background: var(--bg-hover); border-color: var(--border-default); }
+.stat:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.add { color: var(--status-success-fg); }
+.del { color: var(--status-danger-fg); }
+
+.checking,
+.conflicts {
+  flex: none;
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+.conflicts { color: var(--status-danger-fg); font-weight: var(--font-weight-medium); }
+
+.spacer { flex: 1 1 0; min-width: 0; }
+
+/* ---- split button ------------------------------------------------------ */
+
+.split {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: stretch;
+  margin-left: auto;
+}
+
+.primary,
+.menuButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-sm);
+  border: 1px solid var(--accent-600);
+  background: var(--accent-600);
+  color: var(--text-on-accent);
+  font: inherit;
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-semibold);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+.primary {
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+.menuButton {
+  width: var(--control-h-sm);
+  padding: 0;
+  border-left-color: color-mix(in srgb, var(--text-on-accent) 35%, var(--accent-600));
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.primary:hover,
+.menuButton:hover { background: var(--accent-700); border-color: var(--accent-700); }
+.primary:focus-visible,
+.menuButton:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); z-index: 1; }
+.primary:disabled,
+.menuButton:disabled { cursor: default; opacity: 0.6; }
+
+/* View PR (and a lone ▾) is a quiet action: the work is done, nothing to push. */
+.primary[data-tone='subtle'],
+.primary[data-tone='subtle'] + .visuallyHidden + .menuButton,
+.menuButton[data-alone='true'] {
+  background: var(--bg-surface-raised);
+  border-color: var(--border-default);
+  color: var(--text-primary);
+}
+.primary[data-tone='subtle']:hover,
+.primary[data-tone='subtle'] + .visuallyHidden + .menuButton:hover,
+.menuButton[data-alone='true']:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.menuButton[data-alone='true'] { border-radius: var(--radius-sm); }
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid color-mix(in srgb, currentColor 35%, transparent);
+  border-top-color: currentColor;
+  border-radius: var(--radius-full);
+  animation: branch-spin 0.8s linear infinite;
+}
+@keyframes branch-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .spinner { animation-duration: 2.4s; }
+}
+
+.menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + var(--space-1));
+  z-index: var(--z-dropdown);
+  min-width: 15rem;
+  max-width: min(20rem, calc(100vw - var(--space-8)));
+  padding: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-menu);
+  animation: menu-in var(--duration-fast) var(--ease-decelerate);
+}
+.menu:focus { outline: none; }
+@keyframes menu-in {
+  from { opacity: 0; transform: translateY(2px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .menu { animation: none; }
+}
+
+.menuItem {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  text-align: left;
+  cursor: pointer;
+}
+.menuItem:hover:not([aria-disabled='true']),
+.menuItem:focus-visible { background: var(--bg-hover); outline: none; }
+.menuItem[aria-disabled='true'] { cursor: default; color: var(--text-tertiary); }
+.menuLabel { font-weight: var(--font-weight-medium); }
+.menuReason {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+}
+
+/* ---- footer lines ------------------------------------------------------ */
+
+.more {
+  align-self: flex-start;
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 0;
+  background: transparent;
+  color: var(--text-link);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.more:hover { text-decoration: underline; }
+.more:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+
+.notice {
+  margin: 0;
+  padding: 0 var(--space-3);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+.notice:empty { display: none; }
+.notice[data-tone='error'] { color: var(--status-danger-fg); }
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- compact (< 480) ---------------------------------------------------- */
+
+.bar[data-compact='true'] .row { padding-left: var(--space-2); }
+.bar[data-compact='true'] .ident { flex: 1 1 100%; }
+.bar[data-compact='true'] .repo { max-width: 14ch; }

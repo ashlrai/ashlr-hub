@@ -1,0 +1,13 @@
+/* ForestPlot — row banding and the keyboard focus ring. Colours are chart
+   tokens only (style-scan-310 bans raw hex and px font sizes here). */
+.band {
+  fill: var(--chart-grid);
+  opacity: 0.35;
+}
+
+.focusRing {
+  fill: none;
+  stroke: var(--border-focus);
+  stroke-width: 1.5;
+  pointer-events: none;
+}

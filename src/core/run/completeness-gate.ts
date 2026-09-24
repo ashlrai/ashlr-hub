@@ -17,10 +17,11 @@
  *  - Additive — does not weaken any existing gate (M87/M158/M259/H1).
  */
 
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import type { AshlrConfig } from '../types.js';
+import { currentStandingPolicy } from '../authority/effective-config.js';
+import { runSafeGitSync, type SafeGitResult } from '../sandbox/safe-git.js';
 import {
   detectVerifyCommands,
   runVerifyCommandAsync,
@@ -143,36 +144,98 @@ export function parseFailedTestIds(output: string): Set<string> {
   return ids;
 }
 
+/** Bounded like every other daemon git call: a wedged stash must not hold the gate. */
+const STASH_TIMEOUT_MS = 60_000;
+
+/** Non-secret identity for the stash commit (git refuses to stash without one). */
+const STASH_IDENTITY = { name: 'ashlr completeness gate', email: 'completeness-gate@ashlr.invalid' } as const;
+
+/**
+ * Run `git stash …` in the gate's worktree through safe-git (V3.10 R3a).
+ *
+ * WHY. The worktree is agent-written. A plain `git stash` there discovers its
+ * config through the worktree's `.git` and runs whatever that config names:
+ * core.fsmonitor, hooks, clean/smudge filter drivers routed by an agent's
+ * `.gitattributes` (stash push runs clean filters on every modified file;
+ * pop runs smudge filters) — agent-chosen programs executed by the daemon,
+ * outside every sandbox. safe-git runs the trusted absolute git with
+ * explicit --git-dir/--work-tree, every config-borne executable nulled, no
+ * global/system config, an env built from nothing, and gitattributes read
+ * from the empty tree, so no filter/diff driver can be routed at all.
+ *
+ * `.git` must be the linked-worktree pointer the daemon created: its gitdir
+ * outside the worktree, back-linked to this worktree, inside its common dir's
+ * `worktrees/` (safe-git verifyGitTarget). A plain `.git` directory (not a
+ * sandbox worktree) is accepted only while no standing policy is live — under
+ * one, `.git` inside agent-written tree is exactly the tamper this refuses.
+ * Returns null when git is refused or unavailable; the caller then skips the
+ * baseline (the stricter AFTER-only check), never an unhardened stash.
+ */
+function runStashGit(dir: string, args: readonly string[]): SafeGitResult | null {
+  try {
+    const workTree = realpathSync(dir);
+    const dotGit = join(workTree, '.git');
+    const stat = lstatSync(dotGit);
+    let gitDir: string;
+    let layout: 'linked' | 'repo';
+    if (stat.isFile() && !stat.isSymbolicLink()) {
+      const match = /^gitdir: (.+)\n?$/.exec(readFileSync(dotGit, 'utf8').slice(0, 4096));
+      if (!match) return null;
+      gitDir = resolve(workTree, match[1]!.trim());
+      layout = 'linked';
+    } else if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      if (standingPolicyLive()) return null;
+      gitDir = dotGit;
+      layout = 'repo';
+    } else {
+      return null;
+    }
+    return runSafeGitSync({
+      workTree,
+      gitDir,
+      layout,
+      args: ['stash', ...args],
+      identity: STASH_IDENTITY,
+      timeoutMs: STASH_TIMEOUT_MS,
+    });
+  } catch {
+    // SafeGitError (the layout failed verification / no trustworthy git) or
+    // an unreadable `.git`: no stash.
+    return null;
+  }
+}
+
+/** Unknown ⇒ live: the conservative reading, as sandbox/confine.ts does. */
+function standingPolicyLive(): boolean {
+  try {
+    return currentStandingPolicy() !== null;
+  } catch {
+    return true;
+  }
+}
+
 /**
  * Try to stash uncommitted changes in `dir`. Returns true when stash succeeded
  * (meaning changes were stashed). Returns false if nothing to stash or on error.
  * Never throws.
  */
 function gitStashPush(dir: string): boolean {
-  try {
-    const res = spawnSync('git', ['stash', 'push', '--include-untracked', '-m', 'ashlr-completeness-baseline'], {
-      cwd: dir, encoding: 'utf8', stdio: 'pipe',
-    });
-    if (res.error || res.status !== 0) return false;
-    const stdout = (res.stdout ?? '').trim();
-    // "No local changes to stash" means nothing was stashed
-    return !stdout.includes('No local changes');
-  } catch {
-    return false;
-  }
+  const res = runStashGit(dir, ['push', '--include-untracked', '-m', 'ashlr-completeness-baseline']);
+  if (!res || !res.ok) return false;
+  // "No local changes to stash" means nothing was stashed (safe-git pins LANG=C,
+  // so the message is never localised).
+  return !res.stdout.includes('No local changes');
 }
 
 /**
- * Pop the most recent stash in `dir`. Never throws.
+ * Pop the most recent stash in `dir`. Never throws. False when the agent's
+ * changes could not be restored (a refused/failed pop): the AFTER run would
+ * then test the BASE tree and could pass a broken change, so the caller
+ * blocks instead.
  */
-function gitStashPop(dir: string): void {
-  try {
-    spawnSync('git', ['stash', 'pop'], {
-      cwd: dir, encoding: 'utf8', stdio: 'pipe',
-    });
-  } catch {
-    /* ignore */
-  }
+function gitStashPop(dir: string): boolean {
+  const res = runStashGit(dir, ['pop']);
+  return res !== null && res.ok;
 }
 
 /**
@@ -249,6 +312,7 @@ export async function runDeltaAwareTestCheck(
 
     // Step 2: run baseline (pre-change)
     let baseline: Awaited<ReturnType<typeof collectFailingTests>>;
+    let restored = false;
     try {
       if (signal?.aborted) {
         return cancelledResult('self-verify cancelled: test baseline');
@@ -257,7 +321,14 @@ export async function runDeltaAwareTestCheck(
     } finally {
       // Step 3: restore agent changes before reporting any baseline outcome,
       // including cancellation or an unexpected command error.
-      gitStashPop(worktreePath);
+      restored = gitStashPop(worktreePath);
+    }
+
+    if (!restored && !(baseline?.cancelled || signal?.aborted)) {
+      return {
+        pass: false,
+        reason: 'self-verify failed: test: the agent changes could not be restored after the baseline run (git stash pop failed)',
+      };
     }
 
     if (baseline?.cancelled || signal?.aborted) {

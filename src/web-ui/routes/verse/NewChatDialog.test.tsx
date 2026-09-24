@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { VerseContextFit, VersePreferences, VersePreferencesUpdate } from '../../../core/verse/types.js';
-import type { VerseWorkspace } from '../../data/api-types.js';
+import type { VerseCreateSessionRequest, VerseWorkspace } from '../../data/api-types.js';
 import { ApiError } from '../../data/client.js';
 import { bootstrap } from './fixtures.test-support.js';
 import {
@@ -32,6 +32,10 @@ const queries = vi.hoisted(() => ({
   fetchContextFit: vi.fn(),
 }));
 vi.mock('./context/context-queries.js', () => queries);
+
+/** C5's worktree route, replaced so no test reaches git. */
+const gitQueries = vi.hoisted(() => ({ createGitWorktree: vi.fn() }));
+vi.mock('./git/git-queries.js', () => gitQueries);
 
 function prefs(seats: VersePreferences['seats'] = {}): VersePreferences {
   return { version: 1, seats, memory: { enabled: true, disabledProjects: [] } };
@@ -115,10 +119,12 @@ describe('NewChatDialog — capacity at the point of choice', () => {
 
   it('shows the chosen seat\u2019s plan, binding meter and verbatim reset', () => {
     render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={[CLAUDE_TIGHT_SEAT]} onCreate={() => {}} />);
-    expect(screen.getByText('max')).toBeInTheDocument();
-    expect(screen.getByRole('meter', { name: 'Claude Max weekly fable window used' })).toHaveAttribute('aria-valuenow', '92');
-    expect(screen.getByText('resets Sep 25 at 7pm (America/New_York)')).toBeInTheDocument();
-    expect(screen.getByText('tight')).toBeInTheDocument();
+    // 3.10: the dialog mounts THE shared capacity strip (usage/CapacityStrip), for the chosen seat only.
+    const strip = screen.getByRole('region', { name: 'Claude Max capacity' });
+    expect(within(strip).getByText('max')).toBeInTheDocument();
+    expect(within(strip).getByRole('img', { name: /^Claude Max weekly fable window: 92% used/ })).toBeInTheDocument();
+    expect(within(strip).getAllByText('resets Sep 25 at 7pm (America/New_York)').length).toBeGreaterThan(0);
+    expect(within(strip).getByText('tight')).toBeInTheDocument();
   });
 
   it('names the credits that outlive a spent window', () => {
@@ -129,8 +135,9 @@ describe('NewChatDialog — capacity at the point of choice', () => {
 
   it('draws no meter for a seat nothing was read from', () => {
     render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={[UNREAD_SEAT]} onCreate={() => {}} />);
-    expect(screen.queryByRole('meter')).not.toBeInTheDocument();
-    expect(screen.getByText('no capacity reading')).toBeInTheDocument();
+    // Absence drawn as absence: never a 0% bar.
+    expect(screen.queryByRole('img', { name: /% used/ })).not.toBeInTheDocument();
+    expect(screen.queryByText('0%')).not.toBeInTheDocument();
   });
 });
 
@@ -393,5 +400,87 @@ describe('NewChatDialog — pure helpers', () => {
     expect(normalizeChoice({ seatId: 'claude-a', model: 'claude-opus-5.5' }, V39_SEATS)).toEqual({ seatId: 'claude-a', model: 'claude-opus-5-5' });
     expect(normalizeChoice({ seatId: 'gone', model: 'x' }, V39_SEATS)).toEqual({ seatId: 'gone', model: 'x' });
     expect(normalizeChoice(null, V39_SEATS)).toBeNull();
+  });
+});
+
+/**
+ * 3.10 (C5 → C2): "Isolate in a worktree". The worktree is created FIRST,
+ * through the dialog's token guard, and the chat starts in the folder it
+ * returns; a refusal stops before any chat exists.
+ */
+describe('NewChatDialog — isolate in a worktree', () => {
+  const boot = bootstrap();
+  beforeEach(() => {
+    gitQueries.createGitWorktree.mockReset();
+  });
+
+  async function openOnFolder(onCreate: (req: VerseCreateSessionRequest) => void, runMutation?: RunMutation) {
+    const user = userEvent.setup();
+    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={onCreate}
+      {...(runMutation ? { runMutation } : {})} />);
+    await user.selectOptions(screen.getByLabelText('Project'), 'Other folder…');
+    await user.type(screen.getByLabelText('Folder path'), '/Users/mason/dev/hub');
+    return user;
+  }
+
+  it('off by default: the chat starts in the project itself and git is never asked', async () => {
+    const onCreate = vi.fn();
+    const user = await openOnFolder(onCreate);
+    expect(screen.getByRole('checkbox', { name: 'Isolate in a worktree' })).not.toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'Start chat' }));
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ projectPath: '/Users/mason/dev/hub' }));
+    expect(gitQueries.createGitWorktree).not.toHaveBeenCalled();
+  });
+
+  it('on (keyboard): creates the worktree through the token guard, then starts the chat in it', async () => {
+    gitQueries.createGitWorktree.mockResolvedValue({ path: '/Users/mason/.ashlr-worktrees/hub/fix-login', branch: 'verse/fix-login' });
+    const onCreate = vi.fn();
+    const reasons: string[] = [];
+    const runMutation: RunMutation = async (reason, action) => { reasons.push(reason); return action(); };
+    const user = await openOnFolder(onCreate, runMutation);
+    const box = screen.getByRole('checkbox', { name: 'Isolate in a worktree' });
+    box.focus();
+    await user.keyboard(' ');
+    expect(box).toBeChecked();
+    const name = screen.getByRole('textbox', { name: 'Name' });
+    await user.clear(name);
+    await user.type(name, 'Fix Login!');
+    expect(name).toHaveValue('fix-login-');
+    await user.clear(name);
+    await user.type(name, 'fix-login');
+    expect(screen.getByText(/on a new branch/)).toHaveTextContent('Creates ~/.ashlr-worktrees/hub/fix-login on a new branch verse/fix-login');
+    await user.click(screen.getByRole('button', { name: 'Start chat' }));
+    await waitFor(() => expect(onCreate).toHaveBeenCalled());
+    expect(gitQueries.createGitWorktree).toHaveBeenCalledWith('/Users/mason/dev/hub', 'fix-login');
+    expect(reasons).toEqual([expect.stringContaining('fix-login')]);
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ projectPath: '/Users/mason/.ashlr-worktrees/hub/fix-login', seatId: 'claude-a' }));
+  });
+
+  it('a refusal is shown in the server\'s words and no chat is created', async () => {
+    gitQueries.createGitWorktree.mockRejectedValue(new ApiError('POST failed (HTTP 409).', 409, '/api/verse/git/worktree', 'a worktree named fix-login already exists', 'VERSE_GIT_REFUSED'));
+    const onCreate = vi.fn();
+    const user = await openOnFolder(onCreate);
+    await user.click(screen.getByRole('checkbox', { name: 'Isolate in a worktree' }));
+    await user.click(screen.getByRole('button', { name: 'Start chat' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('The worktree could not be created: a worktree named fix-login already exists');
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it('dismissing the token prompt creates nothing at all', async () => {
+    const onCreate = vi.fn();
+    const user = await openOnFolder(onCreate, async () => null);
+    await user.click(screen.getByRole('checkbox', { name: 'Isolate in a worktree' }));
+    await user.click(screen.getByRole('button', { name: 'Start chat' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Start chat' })).toBeEnabled());
+    expect(gitQueries.createGitWorktree).not.toHaveBeenCalled();
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it('an invalid name disables Start chat', async () => {
+    const onCreate = vi.fn();
+    const user = await openOnFolder(onCreate);
+    await user.click(screen.getByRole('checkbox', { name: 'Isolate in a worktree' }));
+    await user.clear(screen.getByRole('textbox', { name: 'Name' }));
+    expect(screen.getByRole('button', { name: 'Start chat' })).toBeDisabled();
   });
 });

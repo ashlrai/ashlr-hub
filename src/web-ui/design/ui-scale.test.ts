@@ -188,12 +188,20 @@ describe('display size — desktop traffic-light clearance', () => {
   /** What desktop/README.md pins the Tauri shell to write on :root. */
   const TRAFFIC_LIGHT_INSET = 92;
 
-  /** The five stylesheets that subtract --rail-width from that inset. */
+  /**
+   * The five stylesheets that subtract --rail-width from that inset.
+   *
+   * 3.10: ApprovalsSection.module.css is gone (Approvals folded into Command's
+   * Needs-you drawer), and the four new surfaces — Command, Fleet, Growth,
+   * Mind — share ONE header strip in command/surface.module.css (Surface.tsx),
+   * so that single file carries the clearance for all four. Listing it here is
+   * what stops a new surface strip from sliding under the traffic lights.
+   */
   const CLEARANCE_FILES = [
     'routes/verse/Workspace.module.css',
     'routes/verse/sections/SettingsSection.module.css',
     'routes/verse/sections/AutonomySection.module.css',
-    'routes/verse/sections/ApprovalsSection.module.css',
+    'routes/verse/command/surface.module.css',
     'routes/verse/usage/usage.module.css',
   ];
 

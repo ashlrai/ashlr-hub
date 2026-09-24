@@ -623,20 +623,35 @@ describe('UsageSection — degraded, empty, error and unauthorized states', () =
 });
 
 describe('UsageSection — the capacity strip', () => {
-  it('answers "what can I run right now" in one line, over the whole roster', async () => {
+  // Each describe stubs its own routes: these used to lean on whatever the
+  // previous describe left in the cache, which only held while no new read
+  // (the shared strip's /health and /budget) joined the page.
+  beforeEach(() => {
+    evictAll();
+    vi.stubGlobal('fetch', routes());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * 3.10 (SPEC-310C §4): Usage leads with the ONE shared CapacityStrip, read
+   * from the seat roster — the same rows Apps & Accounts, Resources and the
+   * new-chat dialog show. This roster's two seats carry no capacity record
+   * and no windows, so both are UNREAD — counted as unread, never as usable
+   * or blocked.
+   */
+  it('leads with the shared capacity strip, counting only what was read', async () => {
     render(<UsageSection />);
-    // Claude is blocked by its per-model week; Codex A is fully used but has a
-    // spendable balance, so it is USABLE; Codex B is at 31%; Grok is signed
-    // out; the local seat is resident. Three of five.
-    await waitFor(() =>
-      expect(screen.getByText(/3 of 5 seats are usable right now\./)).toBeInTheDocument(),
-    );
+    const strip = await screen.findByRole('list', { name: 'Seat capacity' });
+    expect(within(strip).getAllByRole('listitem')).toHaveLength(2);
+    expect(screen.getByText('0 of 2 accounts usable · 2 not read yet')).toBeInTheDocument();
   });
 
   it('gives every seat a state WORD, not just a tint', async () => {
     render(<UsageSection />);
-    await waitFor(() => expect(screen.getAllByText('usable').length).toBe(3));
-    expect(screen.getAllByText('blocked').length).toBe(2);
+    const strip = await screen.findByRole('list', { name: 'Seat capacity' });
+    expect(within(strip).getAllByText('no reading')).toHaveLength(2);
   });
 
   /**
@@ -669,6 +684,14 @@ describe('UsageSection — the capacity strip', () => {
 });
 
 describe('UsageSection — per-account depth on demand', () => {
+  beforeEach(() => {
+    evictAll();
+    vi.stubGlobal('fetch', routes());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('opens every window of an account from its card, not just the binding one', async () => {
     render(<UsageSection />);
     await waitFor(() => expect(card('Claude Max')).toBeInTheDocument());

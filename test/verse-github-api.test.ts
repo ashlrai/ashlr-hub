@@ -13,7 +13,7 @@
  *     not brought into Verse is refused with the same answer whether or not it
  *     exists on disk
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -26,6 +26,19 @@ import {
   type VerseGithubApiDeps,
 } from '../src/core/verse/github-api.js';
 import type { VersePrPlanProposal } from '../src/core/verse/github-proposal.js';
+import * as githubRepo from '../src/core/verse/github-repo.js';
+
+// Spy on both snapshot readers (real implementations underneath) so a test
+// can pin WHICH one the handler uses by default — the sync one spawns `gh`
+// on the server's only thread (3.10 perf budget).
+vi.mock('../src/core/verse/github-repo.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/verse/github-repo.js')>();
+  return {
+    ...actual,
+    readVerseGithubSnapshot: vi.fn(actual.readVerseGithubSnapshot),
+    readVerseGithubSnapshotAsync: vi.fn(actual.readVerseGithubSnapshotAsync),
+  };
+});
 import type { VerseGithubPrPlan, VerseGithubSnapshot } from '../src/core/verse/github-types.js';
 
 // ---------------------------------------------------------------------------
@@ -260,6 +273,39 @@ describe('GET /api/verse/github', () => {
     const serialized = JSON.stringify(out.json);
     expect(serialized).not.toContain('ghp_0123456789abcdefghij');
     expect(serialized).toContain('[REDACTED]');
+  });
+
+  it('awaits an asynchronous reader before answering', async () => {
+    const out = await call(VERSE_GITHUB_ROUTE, 'GET', {
+      read: async (paths) => {
+        await new Promise<void>((r) => setImmediate(r));
+        return snapshotFor(paths);
+      },
+    });
+    expect(out.status).toBe(200);
+    expect((out.json as VerseGithubSnapshot).repos).toHaveLength(2);
+  });
+
+  it('answers 500 when the reader rejects, instead of leaving the request open', async () => {
+    const out = await call(VERSE_GITHUB_ROUTE, 'GET', {
+      read: () => Promise.reject(new Error('boom /Users/secret/path')),
+    });
+    expect(out.status).toBe(500);
+    expect(out.json).toMatchObject({ code: 'INTERNAL_ERROR' });
+    expect(JSON.stringify(out.json)).not.toContain('boom');
+  });
+
+  it('uses the async snapshot reader by default, never the sync gh path', async () => {
+    const asyncSpy = vi.mocked(githubRepo.readVerseGithubSnapshotAsync);
+    const syncSpy = vi.mocked(githubRepo.readVerseGithubSnapshot);
+    asyncSpy.mockClear();
+    syncSpy.mockClear();
+    const { read: _omit, ...rest } = deps({ knownRoots: () => ['/no/such/ashlr-root'] });
+    const { res, captured } = fakeRes();
+    await handleVerseGithubApi({}, { url: VERSE_GITHUB_ROUTE } as IncomingMessage, res, VERSE_GITHUB_ROUTE, 'GET', rest);
+    expect(captured.status).toBe(200);
+    expect(asyncSpy).toHaveBeenCalledTimes(1);
+    expect(syncSpy).not.toHaveBeenCalled();
   });
 
   it('rejects an empty or absurd repo parameter', async () => {

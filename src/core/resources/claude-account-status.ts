@@ -112,8 +112,14 @@ export async function probeClaudeAccountStatus(options: ClaudeAccountStatusOptio
     try { value = JSON.parse(executed.stdout); } catch { return result('failed', 'status-output-invalid'); }
     if (!record(value) || typeof value.loggedIn !== 'boolean' ||
       executed.exitCode !== (value.loggedIn ? 0 : 1)) return result('failed', 'status-output-invalid');
-    // Native Claude 2.1.257 authStatus emits these exact strings. Other native
-    // methods (oauth_token/api_key_helper/third_party) are deliberately unsupported.
+    // Native Claude authStatus emits these exact strings — verified on 2.1.257
+    // and again on 2.1.280 (2026-09-23: `{loggedIn, authMethod: 'claude.ai',
+    // apiProvider, …, subscriptionType}`, exit 0 signed in / 1 signed out).
+    // Other native methods (oauth_token/api_key_helper/third_party) are
+    // deliberately unsupported. The V3.10 seat-health sweep
+    // (core/verse/account-health.ts) reads `loggedIn` from here to flag a
+    // signed-out Claude seat, so a `not-logged-in` observation must stay an
+    // `observed` result with `loggedIn: false`, never a failure.
     const method = value.authMethod === 'claude.ai' ? 'claude.ai'
       : value.authMethod === 'api_key' ? 'api-key' : value.authMethod === 'none' ? 'none' : 'unknown';
     if (method === 'unknown') return result('failed', 'status-auth-method-unsupported');

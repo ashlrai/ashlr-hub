@@ -1,26 +1,20 @@
 /**
- * Chat section layout: sidebar · handle · workspace · (handle · resources).
- * Both side panels drag-resize and persist (chat-panel-sizing.ts); at 900px
- * the resources panel collapses first, at 760px the sidebar becomes an
- * overlay.
+ * Chat section layout: sidebar · handle · workspace · dock (3.10).
+ * The sidebar drag-resizes and persists (chat-panel-sizing.ts); the dock
+ * sizes itself (dock/Dock.tsx, dock-catalog.ts) and is a grid column only
+ * at ≥ 1024px — below that it is a sheet, absolutely positioned over the
+ * chat and out of the grid. At 760px the sidebar becomes an overlay.
  *
  * THE GRID TRACKS MATCH THE ITEMS THAT ACTUALLY EXIST. A hidden panel renders
- * no handle at all rather than a stranded one, and `display:none` takes an
- * element out of grid placement entirely — so every template below is
- * written for the exact item list that state produces. Getting this wrong is
- * silent: items shift one track left and the transcript lands in a 1px
- * column. `.scrim` never counts (display:none, then absolutely positioned).
+ * no handle, and `display:none` / absolute positioning take an element out
+ * of grid placement entirely — so every template below is written for the
+ * exact item list that state produces. `.scrim` never counts.
  */
 .chat {
   position: relative;
   display: grid;
-  /* nav · handle · main · handle · aside */
-  grid-template-columns:
-    var(--verse-sidebar-width, 264px)
-    1px
-    minmax(0, 1fr)
-    1px
-    var(--verse-resources-width, 320px);
+  /* nav · handle · main */
+  grid-template-columns: var(--verse-sidebar-width, 264px) 1px minmax(0, 1fr);
   flex: 1;
   height: 100%;
   min-height: 0;
@@ -28,16 +22,14 @@
   background: var(--bg-canvas);
   color: var(--text-primary);
 }
-/* nav · handle · main */
-.chat[data-resources='closed'] {
-  grid-template-columns: var(--verse-sidebar-width, 264px) 1px minmax(0, 1fr);
-}
-/* main · handle · aside — the collapsed nav and its handle are both gone. */
-.chat[data-sidebar='collapsed'] {
-  grid-template-columns: minmax(0, 1fr) 1px var(--verse-resources-width, 320px);
+/* nav · handle · main · dock */
+.chat[data-dock='open'] {
+  grid-template-columns: var(--verse-sidebar-width, 264px) 1px minmax(0, 1fr) var(--verse-dock-width, 440px);
 }
 /* main */
-.chat[data-sidebar='collapsed'][data-resources='closed'] { grid-template-columns: minmax(0, 1fr); }
+.chat[data-sidebar='collapsed'] { grid-template-columns: minmax(0, 1fr); }
+/* main · dock */
+.chat[data-sidebar='collapsed'][data-dock='open'] { grid-template-columns: minmax(0, 1fr) var(--verse-dock-width, 440px); }
 .chat[data-sidebar='collapsed'] > nav { display: none; }
 .chat > * { min-width: 0; min-height: 0; }
 
@@ -134,23 +126,13 @@
 /* ---- narrow-width sidebar overlay -------------------------------------- */
 .scrim { display: none; }
 
-/* The resources panel goes first: the transcript keeps the sidebar longer
-   than it keeps reference material. Its handle goes with it — see the grid
-   comment at the top; these templates are the item lists these rules leave. */
-@media (max-width: 900px) {
-  .chat,
-  .chat[data-resources='open'] { grid-template-columns: var(--verse-sidebar-width, 264px) 1px minmax(0, 1fr); }
-  .chat[data-sidebar='collapsed'],
-  .chat[data-sidebar='collapsed'][data-resources='open'] { grid-template-columns: minmax(0, 1fr); }
-  .chat > aside,
-  .chat > [data-verse-resizer='resources'] { display: none; }
-}
-
 /* Phone width: the sidebar floats over the transcript, so there is no edge
    left to drag and every handle goes. */
 @media (max-width: 760px) {
   .chat,
-  .chat[data-sidebar='collapsed'] { grid-template-columns: minmax(0, 1fr); }
+  .chat[data-dock='open'],
+  .chat[data-sidebar='collapsed'],
+  .chat[data-sidebar='collapsed'][data-dock='open'] { grid-template-columns: minmax(0, 1fr); }
   .chat > nav {
     position: absolute;
     z-index: var(--z-overlay);
@@ -169,4 +151,55 @@
     cursor: default;
   }
   .chat[data-sidebar='collapsed'] .scrim { display: none; }
+}
+
+/* The delete confirmation's buttons. */
+.dialogActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+/* ---- first paint: skeletons while the chat list / workspace chunks load ----
+   (ChatSection.tsx preloadedLazy). Same boxes as the loaded columns so nothing
+   jumps when they land. */
+.sidebarSkeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 0;
+  padding: var(--space-4) var(--space-3);
+  background: var(--bg-canvas);
+}
+.workspaceSkeleton {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.skeletonHeader {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  height: var(--strip-height);
+  padding: 0 var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.skeletonBody {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5);
+}
+.skeletonComposer {
+  flex-shrink: 0;
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: var(--space-3) var(--space-5) var(--space-5);
 }
