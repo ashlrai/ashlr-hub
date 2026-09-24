@@ -19,7 +19,8 @@
  *     test processes, like the daemon publisher.
  * Recording is idempotent across recorders: rows carry the reading's own
  * observedAt, and the store's compression rule drops a reading already
- * recorded (capacity-history.ts).
+ * recorded (capacity-history.ts). ASHLR_CAPACITY_HISTORY=0 stops every
+ * recorder in the store itself; this route keeps serving what exists.
  *
  * Security posture matches the budget GETs: behind server.ts's read-session
  * boundary (every GET under /api), non-GET is a 404 after verse-api's mutation
@@ -33,6 +34,7 @@ import type { ApiModule } from '../verse/api-modules.js';
 import { sendJson } from '../web/api.js';
 import {
   buildCapacityHistoryResponse,
+  capacityHistoryDisabled,
   readCapacityHistory,
   recordCapacityHistoryFromSnapshot,
   type CapacityHistoryWriteResult,
@@ -108,12 +110,16 @@ let lastServerRecordAt = Number.NEGATIVE_INFINITY;
 let lastServerError: string | null = null;
 let followTimer: ReturnType<typeof setInterval> | null = null;
 
-/** Why this process must not start the background follow; null when it may. */
+/**
+ * Why this process must not start the background follow; null when it may.
+ * ASHLR_CAPACITY_HISTORY=0 is enforced in the store (every recorder is a
+ * no-op); refusing the follow as well just keeps an idle timer from running.
+ */
 export function capacityHistoryFollowRefusal(env: NodeJS.ProcessEnv = process.env): string | null {
   // Never from a test run: a timer that outlives a test would write under
   // whatever HOME the next test set.
   if (env['VITEST'] || env['NODE_ENV'] === 'test') return 'test process';
-  if (env['ASHLR_CAPACITY_HISTORY'] === '0') return 'disabled by ASHLR_CAPACITY_HISTORY=0';
+  if (capacityHistoryDisabled(env)) return 'disabled by ASHLR_CAPACITY_HISTORY=0';
   return null;
 }
 

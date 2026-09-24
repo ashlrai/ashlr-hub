@@ -37,7 +37,8 @@
  * Every snapshot this process sees fresh — its own publish, or the Verse
  * server's while dormant — is also appended to the seat capacity history
  * (routing/capacity-history.ts, 3.10.1) so Command's burn-downs keep the
- * whole window; that write never affects the publisher's state.
+ * whole window; that write never affects the publisher's state, and the
+ * store makes it a no-op under ASHLR_CAPACITY_HISTORY=0.
  *
  * Started lazily (ensureDaemonCapacityPublisher) by the standing merge pass,
  * which runs every standing tick BEFORE beforeTick / dispatch. It refuses to
@@ -257,7 +258,13 @@ export function createDaemonCapacityPublisher(cfg: AshlrConfig, deps: DaemonCapa
   };
 }
 
-function defaultDeps(): DaemonCapacityPublisherDeps {
+/**
+ * The production wiring (exported so tests exercise THIS object, not a copy
+ * of it — e.g. that `recordHistory` is wired, since the deps field is
+ * optional and a missing one would fail silently). Building it has no side
+ * effects: the collector and the budget API load only when called.
+ */
+export function defaultDaemonCapacityPublisherDeps(): DaemonCapacityPublisherDeps {
   return {
     nowMs: () => Date.now(),
     sleep: (ms) => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); }),
@@ -304,7 +311,7 @@ export function ensureDaemonCapacityPublisher(cfg: AshlrConfig): PublisherStatus
   try {
     // The first standing tick's config is kept: the only thing read from it
     // is the accounts root and seat identity, which do not change mid-run.
-    singleton = createDaemonCapacityPublisher(cfg, defaultDeps());
+    singleton = createDaemonCapacityPublisher(cfg, defaultDaemonCapacityPublisherDeps());
     singleton.start();
     return singleton.status();
   } catch {

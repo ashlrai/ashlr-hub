@@ -241,8 +241,10 @@ export function disarmOvernightRun(): OvernightStatus {
 // printed "(exit 1).; lint …" or "… failed.. Back it out". The client now
 // tidies that for display (autonomy/format.ts tidyProse), but the record is
 // also read by the morning report and by anything that tails status.json, so
-// the engine writes clean prose itself. The rules mirror tidyProse so the two
-// never disagree. Kept inline (no import): this module is in the Tier-1
+// the engine writes clean prose itself. The rules mirror tidyProse, except
+// that ".." collapses only where it ends a sentence (SENTENCE_FINAL_DOUBLE_STOP
+// — a path or git range in a failure detail is never rewritten); tidyProse
+// should narrow the same way. Kept inline (no import): this module is in the Tier-1
 // runtime import closure, which must not grow for a string helper.
 //
 // ISO instants inside a passed-through sentence (a run-window refusal, a
@@ -256,16 +258,29 @@ const SENTENCE_END = /[.!?…]["'”’)\]]*$/;
 const STARTS_SENTENCE = /^[\p{Lu}\p{N}"'“‘]/u;
 
 /**
+ * A doubled full stop that ENDS a sentence: after a word character or a
+ * closing bracket/quote (never after a space, a slash or another dot), in a
+ * token with no path separator, and followed by the fragment's end, a ";", or
+ * a space and the start of a new sentence. Everything else is detail the
+ * operator acts on and is left byte-exact: a relative path ("'../dist/cli.js'",
+ * "cd .."), a git range ("abc123..def456", "origin/main.. unreadable"), an
+ * ellipsis. Known limit: a bare open range at a fragment's very end
+ * ("… range abc123..") reads as a doubled stop.
+ */
+const SENTENCE_FINAL_DOUBLE_STOP = /(?<![/\\]\S*)(?<=[^\s./\\])\.\.(?=\s*$|\s*;|\s+[\p{Lu}\p{N}"'“‘([])/gu;
+
+/**
  * One fragment made printable: line breaks (an Error message can carry
- * several) folded to one space, an accidental ".." or ".;" collapsed, and any
- * dangling ",", ";" or ":" dropped — "could not be run: " with an empty error
- * would otherwise close as "run:.".
+ * several) folded to one space, a sentence-final ".." or ".;" collapsed, and
+ * any dangling ",", ";" or ":" dropped — "could not be run: " with an empty
+ * error would otherwise close as "run:.".
  */
 function cleanFragment(text: string): string {
   return String(text ?? '')
     .replace(/\s*[\r\n]+\s*/g, ' ')
+    // ".." first, so "failed..; lint" ends as "failed; lint", not "failed.;".
+    .replace(SENTENCE_FINAL_DOUBLE_STOP, '.')
     .replace(/(?<!\.)\.\s*;/g, ';')
-    .replace(/([^.])\.\.(?!\.)/g, '$1.')
     .trim()
     .replace(/[\s,;:]+$/, '');
 }

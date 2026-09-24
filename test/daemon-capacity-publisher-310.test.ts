@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   createDaemonCapacityPublisher,
   daemonCapacityPublisherRefusal,
+  defaultDaemonCapacityPublisherDeps,
   ensureDaemonCapacityPublisher,
   FOREIGN_FRESH_MS,
   SAMPLE_EVERY_MS,
@@ -19,7 +20,7 @@ import {
   type PublisherCollector,
 } from '../src/core/daemon/capacity-publisher.js';
 import { publishCapacitySnapshotFrom, setBudgetCapacitySourceForTest } from '../src/core/routing/budget-api.js';
-import { readCapacitySnapshot, type CapacitySnapshot } from '../src/core/routing/budget-store.js';
+import { readCapacitySnapshot, writeCapacitySnapshot, type CapacitySnapshot } from '../src/core/routing/budget-store.js';
 import type { VerseAccountCollector } from '../src/core/verse/accounts.js';
 import type { AshlrConfig } from '../src/core/types.js';
 
@@ -250,34 +251,60 @@ describe('daemon capacity publisher → seat capacity history (3.10.1)', () => {
     ]);
   });
 
-  it('the default recorder writes the history file under the (relocated) HOME, 0600', async () => {
-    const { capacityHistoryPath, readCapacityHistory, recordCapacityHistoryFromSnapshot } = await import('../src/core/routing/capacity-history.js');
+  // Review finding (3.10.1): the old version of this test called the store
+  // directly, so deleting `recordHistory` from the daemon's default wiring
+  // (the field is optional) failed nothing. This drives the PRODUCTION deps.
+  it('the daemon\'s DEFAULT wiring records history: a fresh Verse snapshot seen while dormant lands in the file (relocated HOME, 0600)', async () => {
+    const { capacityHistoryPath, readCapacityHistory } = await import('../src/core/routing/capacity-history.js');
     const fs = await import('node:fs');
     const os = await import('node:os');
     const nodePath = await import('node:path');
     const savedHome = process.env['HOME'];
+    const savedFlag = process.env['ASHLR_CAPACITY_HISTORY'];
     const home = fs.realpathSync(fs.mkdtempSync(nodePath.join(os.tmpdir(), 'publisher-history-')));
     process.env['HOME'] = home;
+    delete process.env['ASHLR_CAPACITY_HISTORY'];
+    const grok = (observedAt: string, usedPercent: number): CapacitySnapshot['seats'][number] => ({
+      seatId: 'grok', engine: 'grok', label: 'Grok', free: false,
+      windows: [{ id: 'grok_unified_weekly', usedPercent, resetsAt: null, resetDescription: null, limitReached: false }],
+      signedOut: false, reachable: null, contextWindow: 256_000, observedAt, spentTodayUsd: null,
+    });
+    const tsOf = (iso: string) => new Date(Math.floor(Date.parse(iso) / 1000) * 1000).toISOString().replace('.000Z', 'Z');
     try {
-    const observedAt = new Date().toISOString();
-    const snapshot: CapacitySnapshot = {
-      v: 1,
-      publishedAt: observedAt,
-      seats: [{
-        seatId: 'grok', engine: 'grok', label: 'Grok', free: false,
-        windows: [{ id: 'grok_unified_weekly', usedPercent: 12, resetsAt: null, resetDescription: null, limitReached: false }],
-        signedOut: false, reachable: null, contextWindow: 256_000, observedAt, spentTodayUsd: null,
-      }],
-    };
-    const file = capacityHistoryPath();
-    expect(file).toBe(nodePath.join(home, '.ashlr', 'routing', 'capacity-history.jsonl'));
-    expect(recordCapacityHistoryFromSnapshot(snapshot, 'daemon').error).toBeNull();
-    expect(readCapacityHistory()).toEqual([
-      { ts: new Date(Math.floor(Date.parse(observedAt) / 1000) * 1000).toISOString().replace('.000Z', 'Z'), seat: 'grok', window: 'weekly', usedPct: 12, resetsAt: null, source: 'daemon' },
-    ]);
-    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+      const deps = defaultDaemonCapacityPublisherDeps();
+      expect(deps.recordHistory).toBeTypeOf('function');
+      // The Verse server just published: the production readSnapshot finds it
+      // fresh, the publisher stays dormant (no collector), and the production
+      // recordHistory appends it.
+      const observedAt = new Date(Date.now() - 5_000).toISOString();
+      writeCapacitySnapshot([grok(observedAt, 12)], new Date());
+      let started = 0;
+      const pub = createDaemonCapacityPublisher(cfg, {
+        ...deps,
+        startCollector: async () => { started += 1; throw new Error('no collector in tests'); },
+        log: () => {},
+      });
+      expect((await pub.cycle()).state).toBe('dormant');
+      expect(started).toBe(0);
+      const file = capacityHistoryPath();
+      expect(file).toBe(nodePath.join(home, '.ashlr', 'routing', 'capacity-history.jsonl'));
+      expect(readCapacityHistory()).toEqual([
+        { ts: tsOf(observedAt), seat: 'grok', window: 'weekly', usedPct: 12, resetsAt: null, source: 'daemon' },
+      ]);
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+      // The default recorder alone: a changed reading, no error.
+      const later = new Date().toISOString();
+      expect(deps.recordHistory!({ v: 1, publishedAt: later, seats: [grok(later, 13)] })).toBeNull();
+      expect(readCapacityHistory().map((r) => r.usedPct)).toEqual([12, 13]);
+      // ASHLR_CAPACITY_HISTORY=0 stops the daemon's recorder too (enforced in the store).
+      process.env['ASHLR_CAPACITY_HISTORY'] = '0';
+      const last = new Date(Date.now() + 1_000).toISOString();
+      expect(deps.recordHistory!({ v: 1, publishedAt: last, seats: [grok(last, 14)] })).toBeNull();
+      expect(readCapacityHistory().map((r) => r.usedPct)).toEqual([12, 13]);
     } finally {
       process.env['HOME'] = savedHome;
+      if (savedFlag === undefined) delete process.env['ASHLR_CAPACITY_HISTORY'];
+      else process.env['ASHLR_CAPACITY_HISTORY'] = savedFlag;
       fs.rmSync(home, { recursive: true, force: true });
     }
   });
