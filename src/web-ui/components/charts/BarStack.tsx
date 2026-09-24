@@ -22,9 +22,10 @@ import { hatchPatternId } from './colors.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
 import { ChartLegend, ChartTooltip, HatchPattern, clampTooltipLeft } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
-import { allIntegers, axisTicks, linearScale, roundedTopBar, stackColumn, thinIndexes, type StackedColumn } from './chart-math.js';
+import { allIntegers, axisTicks, linearScale, roundedTopBar, stackColumn, thinIndexes, tickGutter, type StackedColumn } from './chart-math.js';
 import { formatCompact, formatPercent } from './format.js';
 import { useChartWidth } from './useChartWidth.js';
+import { useTextScale } from './useTextScale.js';
 import plot from './plot.module.css';
 
 export interface BarStackSegment {
@@ -83,6 +84,7 @@ export function BarStack({
   const formatValue = formatValueProp ?? formatCompact;
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
+  const textScale = useTextScale();
   const [active, setActive] = useState<number | null>(null);
   const liveId = useId();
   const hatchId = hatchPatternId(useId());
@@ -110,14 +112,15 @@ export function BarStack({
     : axisTicks(0, maxTotal, { count: 4, integer: allIntegers(knownValues), format: formatValueProp });
   const ticks = yAxis.ticks;
   const top = ticks[ticks.length - 1]!;
-  const padL = Math.min(60, Math.max(28, Math.max(...yAxis.labels.map((l) => l.length)) * 7 + 10));
+  const padL = tickGutter(yAxis.labels, 28, 60, textScale);
   const plotW = Math.max(40, width - padL - PAD_R);
   const plotH = height - PAD_T - PAD_B;
   const slot = rows.length ? plotW / rows.length : plotW;
   const barW = Math.max(2, Math.min(BAR_MAX, slot * 0.66));
   const ys = linearScale(0, top, PAD_T + plotH, PAD_T);
   const xOf = (i: number) => padL + slot * i + (slot - barW) / 2;
-  const labelIdx = thinIndexes(rows.length, Math.max(2, Math.floor(plotW / 64)));
+  // A category label gets 64 px at 12 px text, more at a larger Display size.
+  const labelIdx = thinIndexes(rows.length, Math.max(2, Math.floor(plotW / (64 * textScale))));
 
   const fmtTotal = (r: Row) => `${r.stack.incomplete && !r.stack.unknown ? '≥ ' : ''}${r.stack.unknown ? '—' : formatValue(r.stack.total)}`;
 

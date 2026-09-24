@@ -10,6 +10,8 @@ import {
   ensureSpan,
   isPlausibleTime,
   isTimeAxis,
+  LABEL_CHAR_PX,
+  labelCharPx,
   labelsFaithful,
   layoutAxisLabels,
   percentScale,
@@ -26,7 +28,9 @@ import {
   splitRuns,
   stackColumn,
   thinIndexes,
+  tickGutter,
 } from './chart-math.js';
+import { formatPercent, formatUsd } from './format.js';
 
 describe('niceTicks', () => {
   it('produces clean steps that cover the domain', () => {
@@ -164,6 +168,22 @@ describe('projectBurnDown', () => {
     const p = projectBurnDown([{ t: 0, remaining: 5 }, { t: H, remaining: 0 }], 5 * H);
     expect(p.exhaustAt).toBe(H);
   });
+  // V3.10.1 review: an epoch-0 reset failed every `at <= resetAt` check and
+  // came back as "no crossing, 40 left at reset" for a seat losing 10%/h.
+  it('projects nothing forward to an unknown reset (null / NaN)', () => {
+    const pts = [{ t: 0, remaining: 90 }, { t: 3 * H, remaining: 60 }, { t: 5 * H, remaining: 40 }];
+    for (const reset of [null, Number.NaN]) {
+      const p = projectBurnDown(pts, reset, { reserve: 20 });
+      expect(p.slopePerMs).toBeLessThan(0);
+      expect(p.exhaustAt, String(reset)).toBeNull();
+      expect(p.reserveAt, String(reset)).toBeNull();
+      expect(p.remainingAtReset, String(reset)).toBeNull();
+      expect(p.from).toEqual({ t: 5 * H, remaining: 40 });
+    }
+    // A line the window has ALREADY crossed is a reading, not a projection.
+    expect(projectBurnDown(pts, null, { reserve: 50 }).reserveAt).toBe(5 * H);
+    expect(projectBurnDown([...pts, { t: 6 * H, remaining: 0 }], null).exhaustAt).toBe(6 * H);
+  });
 });
 
 describe('gauge helpers', () => {
@@ -233,6 +253,41 @@ describe('axisTicks — labels at the precision of the step', () => {
     expect(labelsFaithful([0, 0.75, 1], ['0', '+0.8', '+1.0'])).toBe(false);
     expect(labelsFaithful([0, 1], ['0', '1'])).toBe(true);
     expect(labelsFaithful([0, 0.2], ['0%', '0%'])).toBe(false);
+  });
+
+  // V3.10.1 review: the fallback jumped straight to integer ticks, so a day of
+  // spend under half a cent sat on a $0.00–$1.00 axis, ~0.6 px off the
+  // baseline — a flat zero. A decade coarser at a time prints it faithfully.
+  it('coarsens a decade at a time before it resorts to integer ticks', () => {
+    const usd = axisTicks(0, 0.004, { count: 4, format: formatUsd });
+    expect(usd.ticks).toEqual([0, 0.01]);
+    expect(usd.labels).toEqual(['$0.00', '$0.01']);
+    // Passed bare: a formatter with an optional second parameter
+    // (formatPercent's digits) is called with the value alone.
+    const pct = axisTicks(0, 0.004, { count: 4, format: formatPercent });
+    expect(pct.labels).toEqual(['0%', '1%']);
+    for (const max of [0.0004, 0.003, 0.004, 0.009, 0.012, 0.03, 0.4, 7.5]) {
+      const a = axisTicks(0, max, { count: 4, format: formatUsd });
+      const top = a.ticks[a.ticks.length - 1]!;
+      expect(labelsFaithful(a.ticks, a.labels), `${max}: ${a.labels.join(' / ')}`).toBe(true);
+      expect(top, `${max}`).toBeGreaterThanOrEqual(max);
+      expect(top, `${max}: the axis stays within a decade of the data`).toBeLessThanOrEqual(Math.max(0.01, max * 10));
+    }
+    // Whole numbers remain the last resort when nothing finer prints faithfully.
+    expect(axisTicks(0, 0.4, { format: (v) => String(Math.round(v)) }).ticks).toEqual([0, 1]);
+  });
+
+  it('honours a minimum step', () => {
+    expect(niceTicks(0, 0.004, 4, { minStep: 0.01 })).toEqual([0, 0.01]);
+    expect(niceTicks(0, 930, 4, { minStep: 1 })).toEqual([0, 250, 500, 750, 1000]);
+  });
+
+  // V3.10.1 review: the unit was picked tick by tick — "7,500" then "10.0K".
+  it('writes one axis in one unit, chosen from its largest tick', () => {
+    expect(axisTicks(0, 9000).labels).toEqual(['0', '2.5K', '5.0K', '7.5K', '10.0K']);
+    expect(axisTicks(-9000, 9000).labels).toEqual(['-10K', '-5K', '0', '5K', '10K']);
+    expect(axisTicks(0, 1_200_000).labels).toEqual(['0', '0.5M', '1.0M', '1.5M']);
+    expect(axisTicks(0, 7000).labels).toEqual(['0', '2,000', '4,000', '6,000', '8,000']);
   });
 
   it('recognises percent formatters and their units', () => {
@@ -327,6 +382,30 @@ describe('layoutAxisLabels', () => {
   it('pins a label that would overflow to the edge it hangs off', () => {
     const [p] = layoutAxisLabels([{ key: 'x', x: 295, anchor: 'middle', priority: 1, variants: ['11:46 PM'] }], bounds);
     expect(p).toEqual({ key: 'x', text: '11:46 PM', x: 300, anchor: 'end' });
+  });
+
+  // V3.10.1 review: at Display size XLarge (--ui-text-scale 1.25) the labels
+  // render at 15 px, and a 12 px budget accepted a pair that overprinted.
+  it('budgets label widths at the Display size the text renders at', () => {
+    expect(labelCharPx()).toBe(LABEL_CHAR_PX);
+    expect(labelCharPx(1.25)).toBeCloseTo(15 * 0.6);
+    for (const bad of [0, -1, Number.NaN]) expect(labelCharPx(bad)).toBe(LABEL_CHAR_PX);
+    const specs = [
+      { key: 'start', x: 0, anchor: 'start' as const, priority: 2, variants: ['Sep 18, 11:46 PM', 'Sep 18'] },
+      { key: 'reset', x: 300, anchor: 'end' as const, priority: 3, variants: ['Resets Sep 25, 11:46 PM', 'Resets Sep 25'] },
+    ];
+    // 39 characters: 281 px at 12 px text fits 300; 351 px at 15 px does not.
+    expect(layoutAxisLabels(specs, bounds).map((p) => p.text)).toEqual(['Sep 18, 11:46 PM', 'Resets Sep 25, 11:46 PM']);
+    expect(layoutAxisLabels(specs, { ...bounds, charPx: labelCharPx(1.25) }).map((p) => p.text)).toEqual(['Sep 18', 'Resets Sep 25']);
+  });
+
+  it('widens the y tick gutter (and its cap) with the Display size, never below its floor', () => {
+    const labels = ['0%', '25%', '50%', '75%', '100%'];
+    expect(tickGutter(labels, 28, 56)).toBe(4 * 7 + 10); // the pre-scale formula
+    expect(tickGutter(labels, 28, 56, 1.25)).toBeCloseTo(4 * 7 * 1.25 + 10);
+    expect(tickGutter(['12.5K pts'], 28, 56)).toBe(56);
+    expect(tickGutter(['12.5K pts'], 28, 56, 1.25)).toBe(70);
+    expect(tickGutter([], 28, 56, 1.25)).toBe(28);
   });
 });
 

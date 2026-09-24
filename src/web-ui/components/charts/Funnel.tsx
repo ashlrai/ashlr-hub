@@ -113,8 +113,10 @@ export function Funnel({
                 <text className={plot.label} x={narrow ? 0 : labelW - 10} y={narrow ? y - 5 : textY} dy={narrow ? undefined : '0.32em'} textAnchor={narrow ? 'start' : 'end'}>
                   {r.stage.label}
                 </text>
-                {/* The track is the neutral true-zero ground (heat-0), not the
-                    pale azure meter track: at 0 it must read as empty. */}
+                {/* The track is the neutral empty-meter gray (plot.module.css
+                    .trackEmpty), not the pale azure chart track: at 0 it must
+                    read as empty, and it must be SEEN — it is what every
+                    bar's length is a share of. */}
                 <rect data-role="track" className={plot.trackEmpty} x={labelW} y={y} width={plotW} height={BAR_H} rx={4} />
                 {r.value === null ? (
                   <rect data-unknown="true" className={plot.noData} x={labelW} y={y} width={Math.min(plotW, 48)} height={BAR_H} rx={4} />

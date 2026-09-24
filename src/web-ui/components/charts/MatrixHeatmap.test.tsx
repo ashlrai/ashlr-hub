@@ -78,9 +78,9 @@ describe('MatrixHeatmap V3.10.1 — in-cell numbers', () => {
     const text = (cell: string) => container.querySelector(`[data-cell-value="${cell}"]`)!;
     // 4 of max 4 → the darkest step (light theme) → surface ink (white).
     expect(text('loop:claude').getAttribute('fill')).toBe('var(--chart-surface)');
-    // 1 of 4 → a pale step → primary ink; a true zero on heat-0 → primary ink.
-    expect(text('struggle:claude').getAttribute('fill')).toBe('var(--text-primary)');
-    expect(text('loop:grok').getAttribute('fill')).toBe('var(--text-primary)');
+    // 1 of 4 → a pale step → the quantity ink; a true zero on heat-0 → the quantity ink.
+    expect(text('struggle:claude').getAttribute('fill')).toBe('var(--chart-quantity-ink)');
+    expect(text('loop:grok').getAttribute('fill')).toBe('var(--chart-quantity-ink)');
     for (const el of container.querySelectorAll('[data-cell-value]')) {
       expect(el.getAttribute('class') ?? '').not.toMatch(/halo|labelStrong/);
       expect(el.getAttribute('stroke')).toBeNull();

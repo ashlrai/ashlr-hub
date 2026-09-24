@@ -78,18 +78,43 @@ export function stepDecimals(step: number): number {
   return 10;
 }
 
+/** The unit one axis's tick labels are written in: plain, thousands (K) or millions (M). */
+export type TickUnit = 1 | 1_000 | 1_000_000;
+
+/** Most decimals a compacted (K / M) tick label may carry before the axis is written plain instead. */
+const MAX_COMPACT_DECIMALS = 3;
+
+/**
+ * The ONE unit for a whole axis, chosen from its largest tick — never tick
+ * by tick. Per-tick choice printed "0 / 2,500 / 5,000 / 7,500 / 10.0K" on a
+ * 0–10K axis (V3.10.1 review): two formats and two precisions on one scale.
+ * Thresholds match formatCompact (K from 10,000, M from 1,000,000). A unit
+ * whose labels would need more than three decimals to show the step (a 0.5
+ * step at 10,000 is "10.0005K") falls back to the next smaller unit.
+ */
+export function tickUnit(ticks: ReadonlyArray<number>, step: number): TickUnit {
+  const maxAbs = Math.max(0, ...ticks.filter(Number.isFinite).map((t) => Math.abs(t)));
+  const units: TickUnit[] = maxAbs >= 1_000_000 ? [1_000_000, 1_000] : maxAbs >= 10_000 ? [1_000] : [];
+  for (const unit of units) if (stepDecimals(step / unit) <= MAX_COMPACT_DECIMALS) return unit;
+  return 1;
+}
+
 /**
  * A tick label at the precision its step needs: every tick on one axis
  * carries the same number of decimals (0.0 / 0.2 / … / 1.0 reads as a scale;
  * 0 / 0.3 / 0.5 misreads as rounded data). Zero is always "0". Large values
  * compact like formatCompact (12.5K, 1.25M), again at the step's precision.
+ *
+ * Pass the axis's `unit` (tickUnit) so every tick shares it; without one the
+ * unit is taken from this tick alone, which is only right for a lone value.
  */
-export function formatTick(value: number, step: number): string {
+export function formatTick(value: number, step: number, unit: TickUnit = tickUnit([value], step)): string {
   if (!Number.isFinite(value)) return '—';
   if (Math.abs(value) < Math.abs(step) * 1e-9 || value === 0) return '0';
-  const abs = Math.abs(value);
-  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(Math.min(3, stepDecimals(step / 1_000_000)))}M`;
-  if (abs >= 10_000) return `${(value / 1_000).toFixed(Math.min(3, stepDecimals(step / 1_000)))}K`;
+  if (unit !== 1) {
+    const suffix = unit === 1_000_000 ? 'M' : 'K';
+    return `${(value / unit).toFixed(Math.min(MAX_COMPACT_DECIMALS, stepDecimals(step / unit)))}${suffix}`;
+  }
   const d = stepDecimals(step);
   return d === 0 ? Math.round(value).toLocaleString('en-US') : value.toFixed(d);
 }

@@ -9,7 +9,7 @@
  * 0 by anything in this file. Functions that need a number skip nulls and say
  * so in their return value.
  */
-import { formatTick } from './format.js';
+import { formatTick, tickUnit } from './format.js';
 
 // ---------------------------------------------------------------------------
 // Scales and ticks
@@ -21,6 +21,13 @@ export interface NiceTickOptions {
    * gives 0 and 1, never 0 / 0.25 / 0.5 / 0.75 / 1 of a run).
    */
   integer?: boolean;
+  /**
+   * Never step finer than this (pass a power of ten). axisTicks raises it
+   * one decade at a time to reach a resolution a caller's formatter can
+   * print — 0.01 for a two-decimal "$" formatter — before it ever resorts
+   * to integer ticks.
+   */
+  minStep?: number;
 }
 
 /**
@@ -49,6 +56,7 @@ export function niceTicks(min: number, max: number, count = 4, opts: NiceTickOpt
   const nice = residual <= 1 ? 1 : residual <= 2 ? 2 : residual <= 2.5 ? (allowQuarter ? 2.5 : 2) : residual <= 5 ? 5 : 10;
   let step = nice * magnitude;
   if (opts.integer && step < 1) step = 1;
+  if (opts.minStep !== undefined && Number.isFinite(opts.minStep) && step < opts.minStep) step = opts.minStep;
   const start = Math.floor(min / step) * step;
   const end = Math.ceil(max / step) * step;
   const n = Math.round((end - start) / step);
@@ -94,10 +102,17 @@ export interface AxisTicks {
 
 /**
  * Ticks AND their labels for a numeric axis. With no `format` the labels
- * take their precision from the step (format.ts formatTick). With a caller's
- * `format` (units: "%", "$", "pts") the ticks are coarsened until that
- * formatter prints every one of them faithfully — never a rounded label on
- * a precise tick.
+ * take their precision from the step and share ONE unit, chosen from the
+ * largest tick (format.ts tickUnit / formatTick). With a caller's `format`
+ * (units: "%", "$", "pts") the ticks are coarsened until that formatter
+ * prints every one of them faithfully — never a rounded label on a precise
+ * tick.
+ *
+ * Coarsening order (V3.10.1 review): fewer ticks at the same resolution,
+ * then one decade coarser at a time, and integer ticks only as the last
+ * resort. Jumping straight to integers put a day of spend under half a cent
+ * on a $0.00–$1.00 axis (the line drawn ~0.6 px off the baseline, reading as
+ * a flat zero) when a $0.01 step prints faithfully.
  */
 export function axisTicks(
   min: number,
@@ -105,21 +120,36 @@ export function axisTicks(
   opts: { count?: number; integer?: boolean; format?: (v: number) => string } = {},
 ): AxisTicks {
   const count = Math.max(1, opts.count ?? 4);
-  const build = (c: number, integer: boolean): AxisTicks => {
-    const ticks = niceTicks(min, max, c, { integer });
+  const integer = opts.integer === true;
+  const format = opts.format;
+  const build = (c: number, asInteger: boolean, minStep?: number): AxisTicks => {
+    const ticks = niceTicks(min, max, c, { integer: asInteger, minStep });
     const step = ticks.length > 1 ? ticks[1]! - ticks[0]! : 1;
-    const labels = ticks.map((t) => (opts.format ? opts.format(t) : formatTick(t, step)));
-    return { ticks, labels, step };
+    // One argument only: formatPercent(v, digits) must never get an index.
+    if (format) return { ticks, labels: ticks.map((t) => format(t)), step };
+    const unit = tickUnit(ticks, step);
+    return { ticks, labels: ticks.map((t) => formatTick(t, step, unit)), step };
   };
-  const first = build(count, opts.integer === true);
+  const first = build(count, integer);
   if (!opts.format || labelsFaithful(first.ticks, first.labels)) return first;
-  for (const integer of [opts.integer === true, true]) {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || !(first.step > 0)) return first;
+  const faithfulAt = (asInteger: boolean, minStep?: number): AxisTicks | null => {
     for (let c = count; c >= 1; c--) {
-      const candidate = build(c, integer);
+      const candidate = build(c, asInteger, minStep);
       if (labelsFaithful(candidate.ticks, candidate.labels)) return candidate;
     }
+    return null;
+  };
+  const sameResolution = faithfulAt(integer);
+  if (sameResolution) return sameResolution;
+  // One decade coarser at a time, up to ten times the data's own extent (a
+  // step past that only draws the data flatter; the integer pass follows).
+  const extent = Math.max(Math.abs(min), Math.abs(max), 1);
+  for (let decade = Math.floor(Math.log10(first.step)) + 1; 10 ** decade <= extent * 10; decade++) {
+    const coarser = faithfulAt(integer, Number((10 ** decade).toPrecision(1)));
+    if (coarser) return coarser;
   }
-  return first;
+  return faithfulAt(true) ?? first;
 }
 
 /**
@@ -193,14 +223,49 @@ export function ensureSpan(min: number, max: number, minSpan: number, align: 'ce
 // ---------------------------------------------------------------------------
 
 /**
- * Estimated advance of one label character: --text-xs-size (12 px) × 0.6,
- * the UI sans's average advance at medium weight, rounded up so estimates
- * err wide rather than letting two labels touch.
+ * Estimated advance of one label character at the DEFAULT display size:
+ * --text-xs-size (12 px) × 0.6, the UI sans's average advance at medium
+ * weight, rounded up so estimates err wide rather than letting two labels
+ * touch.
+ *
+ * --text-xs-size is `12px * var(--ui-text-scale)`, and Appearance → Display
+ * size sets that multiplier to 1.125 (Large) or 1.25 (XLarge). A chart must
+ * budget at the size the text really renders — labelCharPx(useTextScale()) —
+ * or the layout accepts a pair of 15 px labels as if they were 12 px ones
+ * and prints them over each other (V3.10.1 review).
  */
 export const LABEL_CHAR_PX = 12 * 0.6;
 
+/** A usable display text multiplier: anything non-finite or non-positive is the default, 1. */
+export function validTextScale(textScale: number): number {
+  return Number.isFinite(textScale) && textScale > 0 ? textScale : 1;
+}
+
+/** LABEL_CHAR_PX at a display text scale (1 Default, 1.125 Large, 1.25 XLarge). */
+export function labelCharPx(textScale = 1): number {
+  return LABEL_CHAR_PX * validTextScale(textScale);
+}
+
 export function estimateTextWidth(text: string, charPx = LABEL_CHAR_PX): number {
   return text.length * charPx;
+}
+
+/**
+ * Per-character budget of the y-axis tick gutters at 12 px — a shade under
+ * LABEL_CHAR_PX because tick labels are mostly tabular digits.
+ */
+const TICK_CHAR_PX = 7;
+
+/**
+ * Left gutter for right-aligned y tick labels: the widest label plus 10 px,
+ * clamped to [floor, cap]. The per-character budget AND the cap scale with
+ * the display text size (the cap was chosen for 12 px text); the floor is a
+ * minimum, not a fit, and does not.
+ */
+export function tickGutter(labels: ReadonlyArray<string>, floor: number, cap: number, textScale = 1): number {
+  const s = validTextScale(textScale);
+  const widest = Math.max(0, ...labels.map((l) => l.length));
+  return Math.min(cap * s, Math.max(floor, widest * TICK_CHAR_PX * s + 10));
 }
 
 export type LabelAnchor = 'start' | 'middle' | 'end';
@@ -615,12 +680,20 @@ export interface BurnProjection {
  * Least-squares slope over the most recent `window` known points, projected
  * forward from the last known point. A flat or rising series never
  * "exhausts". Pure: the caller supplies `resetAt`.
+ *
+ * `resetAt` null (or non-finite) is an UNKNOWN reset: nothing is projected
+ * forward — there is no moment to project to — so only a line the window
+ * has ALREADY crossed is reported, and remainingAtReset is null. (An
+ * epoch-0 reset used to fail every `at <= resetAt` check and come back as
+ * "no crossing, current remaining at reset": a green verdict for a seat
+ * burning 10%/h.)
  */
 export function projectBurnDown(
   points: ReadonlyArray<BurnPoint>,
-  resetAt: number,
+  resetAtIn: number | null,
   opts: { window?: number; reserve?: number | null } = {},
 ): BurnProjection {
+  const resetAt = resetAtIn !== null && Number.isFinite(resetAtIn) ? resetAtIn : null;
   const known = points
     .filter((p): p is { t: number; remaining: number } => p.remaining !== null && Number.isFinite(p.remaining) && Number.isFinite(p.t))
     .sort((a, b) => a.t - b.t);
@@ -640,7 +713,8 @@ export function projectBurnDown(
   }
   const slope = den === 0 ? 0 : num / den;
   const crossing = (level: number): number | null => {
-    if (slope >= 0 || from.remaining <= level) return from.remaining <= level ? from.t : null;
+    if (from.remaining <= level) return from.t;
+    if (slope >= 0 || resetAt === null) return null;
     const at = from.t + (level - from.remaining) / slope;
     return at <= resetAt ? at : null;
   };
@@ -649,7 +723,7 @@ export function projectBurnDown(
     slopePerMs: slope,
     exhaustAt: crossing(0),
     reserveAt: reserve === null ? null : crossing(reserve),
-    remainingAtReset: Math.max(0, from.remaining + slope * Math.max(0, resetAt - from.t)),
+    remainingAtReset: resetAt === null ? null : Math.max(0, from.remaining + slope * Math.max(0, resetAt - from.t)),
     from,
   };
 }

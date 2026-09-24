@@ -16,14 +16,17 @@ import {
   dodgeLabels,
   ensureSpan,
   isTimeAxis,
+  labelCharPx,
   layoutAxisLabels,
   xKeeper,
 } from './chart-math.js';
 import { timeLabelLadder } from './format.js';
+import { useTextScale } from './useTextScale.js';
 import './chart-tokens.css';
 import styles from './LineChart.module.css';
 
 const VBOX_W = 640;
+/** Minimum left gutter; it widens when the y tick labels need more (see padL). */
 const PAD_L = 44;
 const PAD_R = 12;
 const PAD_T = 12;
@@ -37,7 +40,12 @@ const TICKS_Y = 4;
    wide rather than clipping. Without the reserve the label was drawn at
    `VBOX_W - PAD_R + 4` with only PAD_R (12u) of room and the svg's own
    `overflow: hidden` cropped it to its first glyph — "Estimated spend"
-   rendered as a lone "E". */
+   rendered as a lone "E".
+   Every text measure here (END_LABEL_CH, END_LABEL_GAP_Y, the axis label
+   advance) is for 12 px text and is multiplied by the operator's Display
+   size (useTextScale): --text-xs-size is 12px × --ui-text-scale, so at
+   XLarge the same label is 15 units tall and 25% wider. END_LABEL_MAX is a
+   budget of plot width, not a text measure, and stays as it is. */
 const END_LABEL_CH = 6.4;
 const END_LABEL_GAP = 4;
 /* Past this the gutter would cost more plot than the label is worth, so the
@@ -46,11 +54,8 @@ const END_LABEL_GAP = 4;
    heading already names a lone series, and two-plus series always have the
    legend regardless. */
 const END_LABEL_MAX = 150;
-/** Line height of a direct end label (user units): two closer than this overlap. */
+/** Line height of a direct end label at 12 px (user units): two closer than this overlap. */
 const END_LABEL_GAP_Y = 14;
-/* The x-axis labels are 12 user units tall (see END_LABEL_CH); this is their
-   estimated advance per character for collision checks. */
-const AXIS_LABEL_CH = 12 * 0.6;
 
 interface Run {
   x: number;
@@ -88,6 +93,9 @@ export function LineChart({
   ariaLabel: string;
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
+  const textScale = useTextScale();
+  /* Axis labels' estimated advance per character, at the size they render. */
+  const axisLabelCh = labelCharPx(textScale);
   const [hoverX, setHoverX] = useState<number | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ left: number; top: number } | null>(null);
 
@@ -124,6 +132,10 @@ export function LineChart({
   const yRange = yMax - yMin || 1;
   const plotH = height - PAD_T - PAD_B;
   const yScale = (y: number) => PAD_T + plotH - ((y - yMin) / yRange) * plotH;
+  /* The y labels hang right-aligned 6 units left of the plot, and the svg
+     clips at its edge: the gutter grows to fit the widest one (+2 of air) —
+     44 still fits five 12 px characters, a larger Display size fewer. */
+  const padL = Math.max(PAD_L, Math.ceil(Math.max(0, ...yAxis.labels.map((l) => l.length)) * axisLabelCh) + 8);
 
   /* Decided before the x scale, because the reserved gutter is what plotW is
      measured against — and the gridlines and x-axis stop at the same edge.
@@ -132,7 +144,7 @@ export function LineChart({
      (always present for 2+ series) names them instead. */
   const wantEndLabels = series.length >= 1 && series.length <= 4;
   const endLabelW = wantEndLabels
-    ? Math.max(...series.map((s) => s.label.length)) * END_LABEL_CH
+    ? Math.max(...series.map((s) => s.label.length)) * END_LABEL_CH * textScale
     : 0;
   const endPoints = series.flatMap((s) => {
     for (let i = s.points.length - 1; i >= 0; i--) {
@@ -141,13 +153,13 @@ export function LineChart({
     }
     return [];
   });
-  const dodged = wantEndLabels && endLabelW <= END_LABEL_MAX ? dodgeLabels(endPoints, END_LABEL_GAP_Y, PAD_T, PAD_T + plotH) : null;
+  const dodged = wantEndLabels && endLabelW <= END_LABEL_MAX ? dodgeLabels(endPoints, END_LABEL_GAP_Y * textScale, PAD_T, PAD_T + plotH) : null;
   const showEndLabels = dodged !== null && endPoints.length > 0;
   const padR = PAD_R + (showEndLabels ? END_LABEL_GAP + endLabelW : 0);
   const showLegend = series.length >= 2;
 
-  const plotW = VBOX_W - PAD_L - padR;
-  const xScale = (x: number) => PAD_L + ((x - xMin) / xRange) * plotW;
+  const plotW = VBOX_W - padL - padR;
+  const xScale = (x: number) => padL + ((x - xMin) / xRange) * plotW;
 
   // Nearest-x lookup across a reference axis (the union of all distinct x
   // values, since series may not share every point).
@@ -161,7 +173,7 @@ export function LineChart({
   const xLabels = layoutAxisLabels(
     xEnds.map((x, i) => {
       const px = xScale(x);
-      const edge = i === 0 ? px <= PAD_L + 0.5 : px >= VBOX_W - padR - 0.5;
+      const edge = i === 0 ? px <= padL + 0.5 : px >= VBOX_W - padR - 0.5;
       return {
         key: i === 0 ? 'start' : 'end',
         x: px,
@@ -170,7 +182,7 @@ export function LineChart({
         variants: ladder.map((f) => f(x)),
       };
     }),
-    { min: PAD_L, max: VBOX_W - padR, charPx: AXIS_LABEL_CH },
+    { min: padL, max: VBOX_W - padR, charPx: axisLabelCh },
   );
 
   function nearestX(clientX: number): number | null {
@@ -178,7 +190,7 @@ export function LineChart({
     if (!svg) return null;
     const rect = svg.getBoundingClientRect();
     const svgX = ((clientX - rect.left) / rect.width) * VBOX_W;
-    const dataX = xMin + ((svgX - PAD_L) / plotW) * xRange;
+    const dataX = xMin + ((svgX - padL) / plotW) * xRange;
     let nearest = xAxis[0];
     let best = Infinity;
     for (const x of xAxis) {
@@ -225,20 +237,20 @@ export function LineChart({
         {yTicks.map((t, i) => (
           <g key={i}>
             <line
-              x1={PAD_L}
+              x1={padL}
               x2={VBOX_W - padR}
               y1={yScale(t)}
               y2={yScale(t)}
               className={styles.gridline}
               stroke={CHART_GRID}
             />
-            <text x={PAD_L - 6} y={yScale(t)} dy="0.32em" textAnchor="end" className={styles.axisLabel}>
+            <text x={padL - 6} y={yScale(t)} dy="0.32em" textAnchor="end" className={styles.axisLabel}>
               {yAxis.labels[i]}
             </text>
           </g>
         ))}
         <line
-          x1={PAD_L}
+          x1={padL}
           x2={VBOX_W - padR}
           y1={height - PAD_B}
           y2={height - PAD_B}
@@ -321,7 +333,7 @@ export function LineChart({
           : null}
 
         <rect
-          x={PAD_L}
+          x={padL}
           y={PAD_T}
           width={plotW}
           height={plotH}

@@ -71,15 +71,19 @@ export const QUANTITY_INK_FLIP_STEP = 5;
  *
  * The ramp is mirrored against the surface between themes (light: more =
  * darker; dark: more = lighter), so steps 1–4 are always NEAR the surface
- * and steps 5–7 always FAR from it. Near cells take the primary text ink;
- * far cells take the surface colour as ink — white on dark azure in light
- * mode, near-black on pale azure in dark mode. Measured (WCAG): light step 4
- * is 5.6:1 with ink vs 3.5:1 with white, step 5 is 4.9:1 with white vs
- * 4.1:1 with ink; dark step 4 is 4.5:1 with the light ink vs 3.8:1 with the
- * surface, step 5 is 5.1:1 with the surface vs 3.3:1 with the light ink.
+ * and steps 5–7 always FAR from it. Near cells take the quantity ink (the
+ * end of the gray ramp: near-black in light, near-white in dark); far cells
+ * take the surface colour as ink — white on dark azure in light mode,
+ * near-black on pale azure in dark mode. Measured (WCAG, 8-bit channels as
+ * the browser paints them): light step 4 is 5.61:1 with the ink vs 3.54:1
+ * with white, step 5 is 4.88:1 with white vs 4.08:1 with the ink; dark
+ * step 4 is 4.72:1 with the ink vs 3.80:1 with the surface, step 5 is
+ * 5.14:1 with the surface vs 3.49:1 with the ink. (Dark step 4 was 4.49:1
+ * with --text-primary — see --chart-quantity-ink in chart-tokens.css.)
+ * chart-contrast.test.ts holds every step to 4.5:1 in both themes.
  */
 export function quantityInk(fraction: number): string {
-  return quantityStep(fraction) >= QUANTITY_INK_FLIP_STEP ? 'var(--chart-surface)' : 'var(--text-primary)';
+  return quantityStep(fraction) >= QUANTITY_INK_FLIP_STEP ? 'var(--chart-surface)' : 'var(--chart-quantity-ink)';
 }
 
 export const CHART_DIVERGING_POS = 'var(--chart-diverging-pos)';

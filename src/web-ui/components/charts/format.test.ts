@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   formatClockTime, formatCompact, formatDayLabel, formatPercent, formatSignedCompact, formatTick, formatTimeLabel, formatUsd,
-  formatWeekdayTime, stepDecimals, timeLabelLadder, withinOneDay,
+  formatWeekdayTime, stepDecimals, tickUnit, timeLabelLadder, withinOneDay,
 } from './format';
 
 describe('formatDayLabel', () => {
@@ -92,6 +92,15 @@ describe('tick precision (V3.10.1)', () => {
     expect(formatTick(12_500, 2_500)).toBe('12.5K');
     expect(formatTick(1_250_000, 250_000)).toBe('1.25M');
     expect(formatTick(-0.4, 0.2)).toBe('-0.4');
+  });
+  it('picks ONE unit per axis from its largest tick, and writes every tick in it (V3.10.1 review)', () => {
+    expect(tickUnit([0, 2500, 5000, 7500, 10_000], 2500)).toBe(1_000);
+    expect(tickUnit([0, 2000, 8000], 2000)).toBe(1);
+    expect(tickUnit([0, 500_000, 1_500_000], 500_000)).toBe(1_000_000);
+    // A unit that would need four decimals to show the step is not used.
+    expect(tickUnit([10_000, 10_000.5], 0.5)).toBe(1);
+    expect(tickUnit([1_000_000, 1_000_500], 500)).toBe(1_000);
+    expect([0, 2500, 7500, 10_000].map((t) => formatTick(t, 2500, 1_000))).toEqual(['0', '2.5K', '7.5K', '10.0K']);
   });
 });
 

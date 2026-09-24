@@ -94,4 +94,12 @@
 
   /* Gauge/meter track: the lightest step of the fill's own ramp. */
   --chart-track: var(--chart-seq-1);
+
+  /* Ink for a number printed on a NEAR-surface quantity cell (colors.ts
+     quantityInk, steps 1–4). The END of the gray ramp, not --text-primary:
+     the two are the same #09090b in light, but in dark --text-primary is
+     #f4f4f5, which measured 4.49:1 on --chart-seq-4 (rgb 31 110 214) — just
+     under AA for 12 px digits. --gray-950 flips to #fafafa there: 4.72:1.
+     Asserted per step and theme in charts/chart-contrast.test.ts. */
+  --chart-quantity-ink: var(--gray-950);
 }
