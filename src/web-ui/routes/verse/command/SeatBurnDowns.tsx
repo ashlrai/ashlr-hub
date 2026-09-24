@@ -31,6 +31,8 @@ import { areaPath, linePath, linearScale, niceTicks, splitRuns, type BurnPoint }
 import { useChartWidth } from '../../../components/charts/useChartWidth.js';
 import plot from '../../../components/charts/plot.module.css';
 import { EngineMarker } from '../../../components/primitives/Tag.js';
+import { asClause } from '../autonomy/format.js';
+import { asSentence } from '../fleet/why-seat-model.js';
 import { WINDOW_MS, burnTimeFormat, resetWords, type SeatBurn } from './command-model.js';
 import { CardNote } from './Surface.js';
 import styles from './command.module.css';
@@ -172,7 +174,9 @@ export function SeatBurnCard({ burn, now, width }: { burn: SeatBurn; now: number
     );
   }
   const title = `${burn.label}${burn.window ? ` · ${WINDOW_WORD[burn.window]}` : ''}`;
-  const eligibility = burn.enabled ? (burn.eligible ? 'Autonomy may use it now' : burn.reason ?? 'Held back from autonomy') : 'Not used by autonomy';
+  // A clause in the header's " · " list (the reason's own full stop dropped);
+  // `asSentence` closes it again, once, where a sentence follows.
+  const eligibility = asClause(burn.enabled ? (burn.eligible ? 'Autonomy may use it now' : burn.reason ?? 'Held back from autonomy') : 'Not used by autonomy');
   const latest = [...burn.points].reverse().find((p) => p.remaining !== null)?.remaining ?? null;
   const noReading = (
     <section className={styles.freeSeat} aria-label={title}>
@@ -214,7 +218,7 @@ export function SeatBurnCard({ burn, now, width }: { burn: SeatBurn; now: number
         line={burn.line}
         width={width}
         formatTime={formatTime}
-        ariaLabel={`${title}: ${pct(latest)} left, ${reset}. ${eligibility}.`}
+        ariaLabel={`${title}: ${pct(latest)} left, ${reset}. ${asSentence(eligibility)}`}
       />
     );
   }

@@ -34,7 +34,7 @@ import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { useViewport } from '../shell/viewport.js';
 import { ActionStatus, useSurfaceActions } from '../command/actions.js';
 import { AutonomyBar } from '../command/AutonomyBar.js';
-import { buildKpis, claudeReserve, mergeSeatHistory, recordReading, seatBurns, sinceYouLooked, type SeatReading } from '../command/command-model.js';
+import { buildKpis, claudeReserve, mergeSeatHistory, recordReading, seatBurns, seatNames, sinceYouLooked, type SeatReading } from '../command/command-model.js';
 import { KpiRow } from '../command/KpiRow.js';
 import { LeaderCard } from '../command/LeaderCard.js';
 import { NeedsYouCard } from '../command/NeedsYouCard.js';
@@ -119,7 +119,9 @@ export function CommandSection() {
   // bindingResetText). Read from the cache WITHOUT fetching: the console
   // loads bootstrap at startup and the chat surfaces keep it live, and a
   // bootstrap read here would cost ~384 ms of server event loop per poll
-  // (useSeatsRefresh.ts). No roster → the card says "reset time not reported".
+  // (useSeatsRefresh.ts). No roster → the words of a reason that holds the
+  // seat at its reserve or ceiling (command-model reasonResetText), else the
+  // card says "reset time not reported". Needs-you also names seats from it.
   const roster = useSyncExternalStore(
     useCallback((listener: () => void) => subscribeQuery(VERSE_BOOTSTRAP_KEY, listener), []),
     () => getQuerySnapshot<VerseBootstrap>(VERSE_BOOTSTRAP_KEY),
@@ -151,6 +153,8 @@ export function CommandSection() {
   const recordedSeats = seatHistory.data?.value ?? null;
   const merged = useMemo(() => mergeSeatHistory(readings, recordedSeats), [readings, recordedSeats]);
   const burns = useMemo(() => seatBurns(view, merged.readings, seats, merged.recorded), [view, merged, seats]);
+  // Needs-you names seats as the burn-downs beside it do, never by raw id.
+  const names = useMemo(() => seatNames(seats, view), [seats, view]);
   const since = sinceYouLooked({ lastLookedAt: lastLooked, fleet: live, leader: leader.data?.value ?? null, activity: activity.data });
 
   const windowH = compact ? 6 : 12;
@@ -195,7 +199,7 @@ export function CommandSection() {
       }
     >
       <Cell span={5}>
-        <NeedsYouCard state={activity} actions={actions} fleetLine={fleetLine} />
+        <NeedsYouCard state={activity} actions={actions} fleetLine={fleetLine} seatNames={names} />
       </Cell>
       <Cell span={7}>
         <LeaderCard read={leader.data} loading={leader.status === 'loading'} actions={actions} />

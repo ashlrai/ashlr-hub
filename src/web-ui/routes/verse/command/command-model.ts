@@ -15,10 +15,13 @@ import type { NeedsYouItem, NeedsYouSeverity, VerseActivityResponse } from '../.
 import type { FleetHistoryDay, FleetHistoryResponse } from '../../../../core/verse/fleet-history-types.js';
 import type { BudgetView } from '../../../../core/routing/policy.js';
 import type { CapacityHistoryResponse } from '../../../../core/routing/capacity-history-types.js';
+import type { SeatReason, SeatReasonKind } from '../../../../core/routing/types.js';
 import type { VerseSeat } from '../../../../core/verse/types.js';
 import { classifyWindow } from '../../../../core/routing/headroom.js';
+import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import type { EffectivePolicy } from '../../../../core/authority/types.js';
 import type { StatTileDelta } from '../../../components/charts/StatTile.js';
+import { asSentence, localTimes, parseLegacyReason } from '../fleet/why-seat-model.js';
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
@@ -272,6 +275,25 @@ export function rankNeedsYou(items: readonly NeedsYouItem[]): NeedsYouItem[] {
   return [...items].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || Date.parse(b.since) - Date.parse(a.since));
 }
 
+/**
+ * Seat id → the label every other surface names that seat by ("Claude Max",
+ * never "claude-a"): the live roster when the cache holds it, else the
+ * budget route's seat info (polled on Command, so present when the roster is
+ * not). Both carry the same `VerseSeat.label` for the same id.
+ */
+export function seatNames(
+  seats: readonly Pick<VerseSeat, 'id' | 'label'>[] | null | undefined,
+  view: Pick<BudgetView, 'seatInfo'> | null | undefined,
+): Map<string, string> {
+  const names = new Map<string, string>();
+  const put = (id: unknown, label: unknown) => {
+    if (typeof id === 'string' && typeof label === 'string' && label.trim().length > 0) names.set(id, label.trim());
+  };
+  for (const s of view?.seatInfo ?? []) put(s.seatId, s.label);
+  for (const s of seats ?? []) put(s.id, s.label);
+  return names;
+}
+
 /** Sources that did not answer — the card must not say "All clear" while any is listed. */
 export function silentSources(activity: VerseActivityResponse | null): string[] {
   if (!activity) return [];
@@ -355,12 +377,32 @@ export interface MergedSeatHistory {
 
 /**
  * The server's recorded history merged with this page's live readings, per
- * seat window: one reading per instant (the live one wins a tie), oldest
- * first, cut after the last reset drop and with flat runs collapsed — the
- * same rules `recordReading` applies, so the line reads the same either way.
- * `server` is untrusted wire data: malformed series and points are skipped.
+ * seat window: oldest first, one reading per instant, cut after the last
+ * reset drop and with flat runs collapsed — the same rules `recordReading`
+ * applies, so the line reads the same either way. `server` is untrusted wire
+ * data: malformed series and points are skipped.
+ *
+ * ONE CLOCK PER STRETCH OF LINE (review 3.10.1). The two sources stamp the
+ * same observation differently: a recorded row carries the provider
+ * reading's `observedAt` (capacity-history.ts), a live reading the budget
+ * route's `sampledAt` — when it was ASKED, which is later, and the budget
+ * wire carries no `observedAt` to do better. Interleaved, the same value
+ * lands at two instants and an older value can sort after a newer one: a
+ * poll just after a reset still serving 85% drew 85 → 3 → 85 → 3. So the
+ * recorded history is authoritative for every instant it covers — up to the
+ * moment the server answered (`generatedAt`), or its newest row when that is
+ * later or `generatedAt` is unreadable — and live readings only extend a
+ * recorded line past that point. The server records the snapshot behind
+ * each budget read (capacity-history-api.ts, throttled to 15 s), so a live
+ * reading hidden this way is recorded at its own `observedAt` by the next
+ * history read, and until then the next live poll carries the same value.
+ * A live reading after `generatedAt` came from a collector that had already
+ * seen every recorded observation, so the extension never runs backwards.
+ * Both instants are the Verse server's own clock. A window with no recorded
+ * series keeps every live reading.
  */
 export function mergeSeatHistory(live: Readonly<Record<string, SeatReading[]>>, server: CapacityHistoryResponse | null): MergedSeatHistory {
+  const generatedAt = typeof server?.generatedAt === 'string' ? Date.parse(server.generatedAt) : Number.NaN;
   const persisted = new Map<string, SeatReading[]>();
   for (const series of Array.isArray(server?.series) ? server!.series : []) {
     if (!series || typeof series.seatId !== 'string' || (series.window !== 'session' && series.window !== 'weekly') || !Array.isArray(series.points)) continue;
@@ -378,10 +420,18 @@ export function mergeSeatHistory(live: Readonly<Record<string, SeatReading[]>>, 
   const recorded = new Set<string>();
   for (const key of new Set([...Object.keys(live), ...persisted.keys()])) {
     const fromServer = persisted.get(key) ?? [];
-    if (fromServer.length > 0) recorded.add(key);
+    let fromPage = live[key] ?? [];
+    if (fromServer.length > 0) {
+      recorded.add(key);
+      const newestRecorded = Math.max(...fromServer.map((r) => r.t));
+      const coveredTo = Number.isFinite(generatedAt) ? Math.max(generatedAt, newestRecorded) : newestRecorded;
+      fromPage = fromPage.filter((r) => r.t > coveredTo);
+    }
+    // Recorded rows can repeat an instant (two series under one key); the
+    // last one read stands. Live readings are strictly later than all of them.
     const byT = new Map<number, SeatReading>();
     for (const r of fromServer) byT.set(r.t, r);
-    for (const r of live[key] ?? []) byT.set(r.t, r);
+    for (const r of fromPage) byT.set(r.t, r);
     const sorted = [...byT.values()].sort((a, b) => a.t - b.t);
     let start = 0;
     for (let i = 1; i < sorted.length; i++) if (sorted[i]!.used + RESET_DROP < sorted[i - 1]!.used) start = i;
@@ -429,6 +479,11 @@ export interface SeatBurn {
   enabled: boolean;
   free: boolean;
   eligible: boolean;
+  /**
+   * The router's first reason for this seat in words (`seatReasonText`):
+   * complete sentences, local times, never the log form's " (resets <ISO>)."
+   * clause. Null when the route gave none.
+   */
   reason: string | null;
   /**
    * True when the server's recorded history contributed to this window's
@@ -647,14 +702,101 @@ export function bindingReset(
   return { at: words, from: 'words' };
 }
 
+// ---------------------------------------------------------------------------
+// Seat reasons, in words (3.10.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * The budget route's reasons as data. `SeatHeadroom.reasons` carries each
+ * one in the router's LOG form — "… so autonomy stops at 92% (resets
+ * 2026-09-26T03:46:56.000Z)." (core/routing/seat-reasons.ts
+ * `reasonSentence`) — so the reset clause is split back off with the Fleet
+ * surface's own parser: an instant → `resetsAt`, Claude's words →
+ * `resetDescription`. Non-strings and blanks are skipped (wire data).
+ */
+export function seatReasons(reasons: readonly unknown[] | null | undefined): SeatReason[] {
+  if (!Array.isArray(reasons)) return [];
+  return reasons.filter((r): r is string => typeof r === 'string' && r.trim().length > 0).map(parseLegacyReason);
+}
+
+/** Two resets this close are the same one (the router and the chart read the same window). */
+const SAME_RESET_MS = 60_000;
+
+/**
+ * Reasons whose reset is, by construction, the BINDING window's: headroom.ts
+ * attaches `resetOf(bindingRow.window)` to exactly these. A `spent` reason
+ * can name the other window (a spent 5-hour window beside a weekly one that
+ * is even further past its reserve), so it is never taken for the chart's.
+ */
+const BINDING_RESET_KINDS: ReadonlySet<SeatReasonKind> = new Set<SeatReasonKind>(['reserve', 'session-ceiling']);
+
+/** Claude's words without the "resets" some paths lead with. */
+function bareResetWords(text: string | null | undefined): string {
+  return typeof text === 'string' ? text.trim().replace(/^resets\s+/i, '') : '';
+}
+
+/**
+ * The binding window's reset words from the router's own reasons — the
+ * fallback when the roster (read from cache, never fetched here) has none,
+ * so a card never says "reset time not reported" beside a reason that names
+ * the reset.
+ */
+export function reasonResetText(reasons: readonly SeatReason[]): string | null {
+  for (const r of reasons) {
+    if (!BINDING_RESET_KINDS.has(r.kind)) continue;
+    const words = bareResetWords(r.resetDescription);
+    if (words) return words;
+  }
+  return null;
+}
+
+/**
+ * When `reason` lifts, in the viewer's words — or null when the card already
+ * says it: the chart's reset marker ("Resets Sep 26, 11:46 PM", a machine
+ * instant or Claude's words placed on their clock) or the header's verbatim
+ * words. A reset the card does NOT show (another window's) is kept: a machine
+ * instant in the viewer's zone (`describeResetAt`, as Fleet and Accounts
+ * word it), Claude's words verbatim.
+ */
+function unshownReset(reason: SeatReason, card: { resetAt: number | null; resetText: string | null }, nowMs: number): string | null {
+  const at = typeof reason.resetsAt === 'string' ? Date.parse(reason.resetsAt) : Number.NaN;
+  if (Number.isFinite(at)) {
+    if (card.resetAt !== null && Math.abs(at - card.resetAt) <= SAME_RESET_MS) return null;
+    return describeResetAt(reason.resetsAt, nowMs);
+  }
+  const words = bareResetWords(reason.resetDescription);
+  if (!words) return null;
+  if (card.resetText !== null && bareResetWords(card.resetText).toLowerCase() === words.toLowerCase()) return null;
+  return words;
+}
+
+/**
+ * What a card says about why the router holds a seat back: the reason's own
+ * sentence (any instant inside it in local time — Fleet's `localTimes`),
+ * closed by exactly one full stop, then "Resets …." only when the card does
+ * not already show that reset (`unshownReset`). Never the log form: held-back
+ * cards printed "… stops at 92% (resets 2026-09-26T03:46:56.000Z)." and, for
+ * Claude, "… (resets Sep 25 at 7pm (America/New_York))." verbatim.
+ */
+export function seatReasonText(reason: SeatReason | undefined, card: { resetAt: number | null; resetText: string | null }, nowMs: number): string | null {
+  if (!reason) return null;
+  const text = asSentence(localTimes(reason.text, nowMs));
+  if (!text) return null;
+  const when = unshownReset(reason, card, nowMs);
+  return when ? `${text} Resets ${when}.` : text;
+}
+
 /**
  * One burn-down per seat, paid seats first (they are the ones that run out).
  * `history` is keyed by `seriesKey` (seat + window); each card draws its
  * BINDING window's line. `seats` (the live roster, optional) supplies the
  * provider's reset wording for seats that publish no machine reset time (see
  * `bindingResetText`), which also places their reset when it names a clock
- * time (`bindingReset`). `recorded` (from `mergeSeatHistory`) names the lines
- * the server's recorded history contributed to.
+ * time (`bindingReset`); without a roster, a reason held at the binding
+ * window's reserve or ceiling supplies the same words (`reasonResetText`).
+ * `recorded` (from `mergeSeatHistory`) names the lines the server's recorded
+ * history contributed to. Each card's `reason` is the router's first reason
+ * in words (`seatReasonText`).
  */
 export function seatBurns(
   view: BudgetView | null,
@@ -672,7 +814,10 @@ export function seatBurns(
       const i = info.get(h.seatId);
       const engine = i?.engine ?? 'local';
       const windowMs = h.bindingWindow ? WINDOW_MS[h.bindingWindow] : null;
-      const resetText = bindingResetText(roster.get(h.seatId), engine, h.bindingWindow, nowMs);
+      const reasons = seatReasons(h.reasons);
+      const resetText =
+        bindingResetText(roster.get(h.seatId), engine, h.bindingWindow, nowMs) ??
+        (h.bindingWindow === null || engine === 'local' ? null : reasonResetText(reasons));
       // A reset is only placed on a chart that has a window to put before it.
       const reset = windowMs === null ? null : bindingReset(h.resetAt, resetText, windowMs, nowMs);
       const start = reset && windowMs !== null ? reset.at - windowMs : null;
@@ -693,7 +838,7 @@ export function seatBurns(
         enabled: view.effective[h.seatId]?.enabled ?? false,
         free: i?.free ?? false,
         eligible: h.eligibleForAutonomy,
-        reason: h.reasons[0] ?? null,
+        reason: seatReasonText(reasons[0], { resetAt: reset?.at ?? null, resetText }, nowMs),
         recorded: key !== null && (recorded?.has(key) ?? false),
       };
     })

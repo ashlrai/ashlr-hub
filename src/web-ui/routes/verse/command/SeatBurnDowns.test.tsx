@@ -11,8 +11,11 @@
  */
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
+import { reasonSentence } from '../../../../core/routing/seat-reasons.js';
+import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import { SeatBurnCard } from './SeatBurnDowns.js';
-import { burnTimeFormat, resetInstantFromWords, type SeatBurn } from './command-model.js';
+import { burnTimeFormat, recordReading, resetInstantFromWords, seatBurns, type SeatBurn } from './command-model.js';
+import { budgetView } from './fixtures.test-support.js';
 
 const NOW = Date.parse('2026-09-24T15:00:00Z');
 const MIN = 60_000;
@@ -71,9 +74,11 @@ describe('SeatBurnCard', () => {
     );
     const fmt = burnTimeFormat('weekly');
     const labels = svgTexts(container);
-    // The window start (7 days earlier) is on the same weekday and time, so only the date tells them apart.
+    // The window start (7 days earlier) is on the same weekday and time, so
+    // only the date tells them apart. Local time: Sep 19 in New York, Sep 20
+    // in Tokyo — compared as formatted, never as a hard-coded day.
     const startLabel = fmt(resetAt - 7 * 24 * HOUR);
-    expect(startLabel).toMatch(/Sep 19/);
+    expect(startLabel).toContain(day(resetAt - 7 * 24 * HOUR));
     expect(labels).toContain(startLabel);
     expect(labels).toContain(`Resets ${fmt(resetAt)}`);
     expect(startLabel).not.toBe(fmt(resetAt));
@@ -230,5 +235,53 @@ describe('SeatBurnCard', () => {
     expect(screen.getByText(/No window reading/)).toBeInTheDocument();
     render(<SeatBurnCard burn={burn({ window: null, points: [{ t: NOW, remaining: 50 }] })} now={NOW} width={320} />);
     expect(screen.getAllByText(/No window reading/)).toHaveLength(2);
+  });
+});
+
+// Review 3.10.1 (high): a held-back card printed the router's LOG sentence —
+// "… stops at 92% (resets 2026-09-26T03:46:56.000Z)." — in its header and
+// aria-label, "(resets Sep 25 at 7pm (America/New_York))." for Claude, and
+// the trailing window's aria-label closed it with a second period.
+describe('SeatBurnCard — held-back reasons in words', () => {
+  const RESET_ISO = '2026-09-26T03:46:56.000Z';
+  const REASON = 'The weekly window is 92% used; 8% is kept for you, so autonomy stops at 92%.';
+
+  /** The Codex card exactly as Command builds it from the budget route's wire reason. */
+  function codexCard(resetAt: string | null): SeatBurn {
+    const view = budgetView('live', NOW);
+    view.headroom[2] = { ...view.headroom[2]!, weeklyUsedPercent: 92, resetAt, eligibleForAutonomy: false, reasons: [reasonSentence({ kind: 'reserve', text: REASON, resetsAt: RESET_ISO })] };
+    view.effective['codex-a'] = { seatId: 'codex-a', enabled: true, reservePercent: 8 };
+    return seatBurns(view, recordReading({}, view)).find((b) => b.seatId === 'codex-a')!;
+  }
+
+  it('reset placed: the header is the sentence alone — the chart marks the reset in local time', () => {
+    const { container } = render(<SeatBurnCard burn={codexCard(RESET_ISO)} now={NOW} width={360} />);
+    const text = container.textContent ?? '';
+    expect(text).toContain('The weekly window is 92% used; 8% is kept for you, so autonomy stops at 92%');
+    expect(text).not.toMatch(/\d{4}-\d{2}-\d{2}T|\(resets|\.\./);
+    expect(svgTexts(container).filter((l) => l.startsWith('Resets '))).toEqual([`Resets ${burnTimeFormat('weekly')(Date.parse(RESET_ISO))}`]);
+    const aria = container.querySelector('svg[role="img"]')?.getAttribute('aria-label') ?? '';
+    expect(aria).not.toMatch(/\d{4}-\d{2}-\d{2}T|\(resets|\.\./);
+  });
+
+  it('no reset placed: the reason keeps its reset in local time, and the aria-label ends on one period', () => {
+    const burn = codexCard(null);
+    expect(burn.resetAt).toBeNull();
+    // The card has no reset marker here, so the reason says when — in the viewer's zone.
+    const sampledAt = Date.parse(budgetView('live', NOW).sampledAt);
+    expect(burn.reason).toBe(`${REASON} Resets ${describeResetAt(RESET_ISO, sampledAt)}.`);
+    const { container } = render(<SeatBurnCard burn={burn} now={NOW} width={320} />);
+    const aria = container.querySelector('svg[role="img"]')?.getAttribute('aria-label') ?? '';
+    expect(aria.endsWith(` ${burn.reason}`)).toBe(true);
+    expect(aria).not.toMatch(/\.\.|\d{4}-\d{2}-\d{2}T|\(resets/);
+    // In the header's " · " list it is a clause: no closing full stop.
+    const header = `8% left · reset time not reported · ${burn.reason!.slice(0, -1)}`;
+    expect(container.textContent).toContain(header);
+    expect(container.textContent).not.toContain(`${header}.`);
+  });
+
+  it('the free local seat states its reason as one sentence', () => {
+    render(<SeatBurnCard burn={burn({ seatId: 'local-qwen', label: 'Local Qwen', engine: 'local', window: null, free: true, eligible: false, reason: 'The local model runtime is not reachable.' })} now={NOW} />);
+    expect(screen.getByText('Local — free, no provider window. The local model runtime is not reachable.')).toBeInTheDocument();
   });
 });
