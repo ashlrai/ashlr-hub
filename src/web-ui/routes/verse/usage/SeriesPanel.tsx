@@ -25,6 +25,7 @@ import {
   chartFormat,
   type TableColumn,
 } from '../../../components/charts/index.js';
+import { formatWholePercent } from '../autonomy/format.js';
 import type { DailyUsage, SeriesWindow, UsageSeries } from './usage-contract.js';
 import {
   CACHE_CAVEAT,
@@ -82,7 +83,8 @@ const CACHE_COLUMNS: TableColumn<DailyUsage>[] = [
     key: 'rate',
     label: 'Cache hit rate',
     numeric: true,
-    render: (r) => (r.cacheHitRate === null ? 'not reported' : chartFormat.formatPercent(r.cacheHitRate)),
+    // "<1%" for a sliver of hits, never "0%" (the app-wide rule).
+    render: (r) => (r.cacheHitRate === null ? 'not reported' : formatWholePercent(r.cacheHitRate)),
   },
   {
     key: 'read',

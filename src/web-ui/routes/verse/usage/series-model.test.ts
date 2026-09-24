@@ -3,6 +3,9 @@
  * drawing something would be worse than drawing nothing.
  */
 import { describe, expect, it } from 'vitest';
+import { formatDayLabel, formatTimeLabel, timeLabelLadder } from '../../../components/charts/format.js';
+import { calendarDayStart } from '../growth/calendar-day.js';
+import { inTimeZone, TEST_ZONES } from '../growth/time-zone.test-support.js';
 import type { DailyUsage, UsageSeries } from './usage-contract.js';
 import { projectUsageSeries } from './usage-contract.js';
 import {
@@ -75,6 +78,40 @@ describe('buildSpendSeries', () => {
     if (!projected.available) return;
     expect(projected.series[0]?.label).toBe('Estimated spend');
     expect(projected.series[0]?.points.map((p) => p.y)).toEqual([1.5, 2.5, 4]);
+  });
+});
+
+/**
+ * A day bucket is a calendar date. The chart kit labels an x in LOCAL time,
+ * so the bucket sits at local midnight (growth/calendar-day) — stamped at UTC
+ * midnight, the "2026-09-24" bucket was labelled "Sep 23" on the axis and in
+ * the tooltip everywhere west of UTC while the card's own table said
+ * "Sep 24". Each check walks zones on both sides of UTC, whatever zone the
+ * suite itself runs in.
+ */
+describe('day buckets — the axis names the same day as the table', () => {
+  const DAYS = ['2026-09-23', '2026-09-24', '2026-12-31', '2027-01-01', '2026-03-08', '2026-11-01'];
+
+  it('plots every bucket at its own calendar day, and every rung of the axis ladder names the table\u2019s day', () => {
+    for (const zone of [...TEST_ZONES, 'America/Los_Angeles']) {
+      inTimeZone(zone, () => {
+        const projected = buildSpendSeries(series(DAYS.map((d, i) => day({ day: d, estCostUsd: i + 1 }))));
+        expect(projected.available).toBe(true);
+        if (!projected.available) return;
+        const xs = projected.series[0]!.points.map((p) => p.x);
+        expect(xs).toEqual(DAYS.map(calendarDayStart));
+        DAYS.forEach((d, i) => {
+          // The axis/tooltip label (SeriesPanel passes formatTimeLabel) is the table's label.
+          expect(formatTimeLabel(xs[i]!), `${zone} ${d}`).toBe(formatDayLabel(d));
+        });
+        // The ladder's fallback rungs are local too, so no rung names another day.
+        const [a, b] = [xs[0]!, xs[1]!];
+        for (const rung of timeLabelLadder(a, b, formatTimeLabel, [a, b])) {
+          expect(rung(a), zone).toBe('Sep 23');
+          expect(rung(b), zone).toBe('Sep 24');
+        }
+      });
+    }
   });
 });
 

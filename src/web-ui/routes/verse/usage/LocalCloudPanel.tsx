@@ -19,6 +19,7 @@ import {
   seriesColor,
   type TableColumn,
 } from '../../../components/charts/index.js';
+import { percentText } from '../autonomy/format.js';
 import { COST_ESTIMATE_NOTE } from './series-model.js';
 import type { LocalCloudSplit, ProviderSlice } from './usage-model.js';
 import styles from './usage.module.css';
@@ -31,11 +32,12 @@ const COLUMNS: TableColumn<ProviderSlice>[] = [
   { key: 'tier', label: 'Tier', render: (r) => r.tier },
   { key: 'tokens', label: 'Tokens', numeric: true, render: (r) => chartFormat.formatCompact(r.tokens) },
   { key: 'cost', label: 'Cost', numeric: true, render: (r) => chartFormat.formatUsd(r.costUsd) },
-  { key: 'share', label: 'Share', numeric: true, render: (r) => `${Math.round(r.sharePct)}%` },
+  { key: 'share', label: 'Share', numeric: true, render: (r) => percentText(r.sharePct) },
 ];
 
 function SplitRow({ label, tokens, total, color }: { label: string; tokens: number; total: number; color: string }): ReactNode {
-  const pct = total > 0 ? Math.round((tokens / total) * 100) : 0;
+  const share = total > 0 ? (tokens / total) * 100 : 0;
+  const pct = Math.round(share);
   return (
     <div className={styles.splitRow}>
       <span>{label}</span>
@@ -50,7 +52,7 @@ function SplitRow({ label, tokens, total, color }: { label: string; tokens: numb
         <div className={styles.splitFill} style={{ width: `${pct}%`, '--split-color': color } as CSSProperties} />
       </div>
       <span className={styles.num}>
-        {chartFormat.formatCompact(tokens)} · {pct}%
+        {chartFormat.formatCompact(tokens)} · {percentText(share)}
       </span>
     </div>
   );

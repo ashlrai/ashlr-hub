@@ -113,9 +113,9 @@ export function FleetPanel({ read, runtime, loading = false }: FleetPanelProps):
               max={utilisation.total}
               label="Slot utilisation"
               valueText={
-                utilisation.percent === null
+                utilisation.percentText === null
                   ? 'unknown'
-                  : `${utilisation.busy} / ${utilisation.total} · ${utilisation.percent}%`
+                  : `${utilisation.busy} / ${utilisation.total} · ${utilisation.percentText}`
               }
               tone={utilisation.saturated ? 'warning' : undefined}
             />

@@ -107,7 +107,14 @@ describe('ApprovalDetail — a readable header', () => {
     expect(heading).not.toHaveTextContent(/deg/);
     expect(heading).toHaveAttribute('title', TITLE);
     expect(screen.getByText('Patch \u00b7 Claude run')).toBeInTheDocument();
-    expect(screen.getByText('2 files \u00b7 +384 \u22120')).toHaveAttribute('aria-label', '2 files changed, 384 lines added, 0 removed');
+    // The glyph string is for the eye only; a screen reader reads the sentence,
+    // which is real text (an aria-label on a generic span is never announced).
+    const glyphs = screen.getByText('2 files \u00b7 +384 \u22120');
+    expect(glyphs).toHaveAttribute('aria-hidden', 'true');
+    expect(glyphs).not.toHaveAttribute('aria-label');
+    const spoken = screen.getByText('2 files changed, 384 lines added, 0 removed');
+    expect(spoken).toHaveClass('visually-hidden');
+    expect(spoken.closest('[aria-hidden="true"]')).toBeNull();
     expect(screen.getByText('created 38 days ago')).toBeInTheDocument();
     expect(screen.getByText('Review before applying.')).toBeInTheDocument();
     // The summary sentence is not repeated raw.

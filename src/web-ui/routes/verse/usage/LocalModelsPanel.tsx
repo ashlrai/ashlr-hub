@@ -41,6 +41,7 @@ import {
 } from '../../../components/charts/index.js';
 import type { ServingRuntimeSnapshot } from '../autonomy/fleet-contract.js';
 import { runtimeCapacity } from '../autonomy/fleet-model.js';
+import { percentText } from '../autonomy/format.js';
 import type { AccountVerdictState, LocalCardModel } from './accounts-model.js';
 import {
   formatAge,
@@ -145,7 +146,7 @@ function SizeCell({ row }: { row: LocalModelRow }): ReactNode {
   return (
     <span title={provenance}>
       {formatBytes(row.sizeBytes)}
-      {row.resident && row.memoryPct !== null ? ` · ${Math.round(row.memoryPct)}% of machine` : ''}
+      {row.resident && row.memoryPct !== null ? ` · ${percentText(row.memoryPct)} of machine` : ''}
     </span>
   );
 }
@@ -175,7 +176,7 @@ function PlacementCell({ row }: { row: LocalModelRow }): ReactNode {
       <span
         className={styles.placementBar}
         role="img"
-        aria-label={`${row.name}: ${gpu}% of resident bytes on GPU, ${100 - gpu}% on CPU`}
+        aria-label={`${row.name}: ${percentText(row.gpuPct)} of resident bytes on GPU, ${percentText(100 - row.gpuPct)} on CPU`}
       >
         <span
           className={styles.placementGpu}
@@ -187,7 +188,7 @@ function PlacementCell({ row }: { row: LocalModelRow }): ReactNode {
         />
       </span>
       <span className={styles.placementText}>
-        {row.placement === 'unknown' ? `${gpu}% GPU` : `${row.placement} · ${gpu}% GPU`}
+        {row.placement === 'unknown' ? `${percentText(row.gpuPct)} GPU` : `${row.placement} · ${percentText(row.gpuPct)} GPU`}
       </span>
     </span>
   );
@@ -256,6 +257,7 @@ export function LocalCard({
 }): ReactNode {
   const engineStyle = { '--engine-color': card.color } as CSSProperties;
   const pct = card.usedPct === null ? null : Math.round(card.usedPct);
+  const pctText = card.usedPct === null ? null : percentText(card.usedPct);
 
   return (
     <article className={styles.card} style={engineStyle} aria-label="Local usage">
@@ -304,7 +306,7 @@ export function LocalCard({
         <div className={styles.windowBlockLead}>
           <div className={styles.windowHead}>
             <span>Resident against machine memory</span>
-            <span className={styles.windowPct}>{pct}%</span>
+            <span className={styles.windowPct}>{pctText}</span>
           </div>
           <div
             className={styles.track}

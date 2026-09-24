@@ -50,7 +50,9 @@
  *
  * Pure: no React, no I/O.
  */
+import { describeResetAt } from '../../../core/verse/seat-readiness.js';
 import type { VerseEngine, VerseSeat } from '../../data/api-types.js';
+import { percentText } from './autonomy/format.js';
 import {
   SEAT_CAPACITY_WORD,
   seatCapacity,
@@ -159,16 +161,17 @@ const USABILITY_CLASS: Record<SeatCapacityRecord['usability'], SeatCapacityClass
 };
 
 /**
- * A machine-readable instant, formatted. Prose resets never reach this — they
- * are passed through untouched, because the provider's sentence already
- * carries the timezone it means and reformatting it would be a guess.
+ * A machine-readable instant, formatted — in the app's ONE reset wording,
+ * `describeResetAt`'s: "resets today 11:46 PM", "resets Fri 11:46 PM",
+ * "resets Sep 26, 11:46 PM". (A second wording here — "resets Sep 25 at
+ * 11:46 PM" — once reached the chat header and the seat meters while Accounts
+ * said "resets Fri 11:46 PM" for the same instant.) Prose resets never reach
+ * this — they are passed through untouched, because the provider's sentence
+ * already carries the timezone it means and reformatting it would be a guess.
  */
-export function formatResetInstant(iso: string): string | null {
-  const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return null;
-  const clock = at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  if (new Date().toDateString() === at.toDateString()) return `resets ${clock}`;
-  return `resets ${at.toLocaleDateString([], { month: 'short', day: 'numeric' })} at ${clock}`;
+export function formatResetInstant(iso: string, now: number = Date.now()): string | null {
+  const when = describeResetAt(iso, now);
+  return when === null ? null : `resets ${when}`;
 }
 
 /**
@@ -188,8 +191,8 @@ export function seatCapacityWindowLabel(engine: VerseEngine, id: string): string
   return seatWindowLabel(rest);
 }
 
-function toWindowView(engine: VerseEngine, w: SeatCapacityWindow): SeatWindowView {
-  const reset = w.resetDescription ?? (w.resetsAt === null ? null : formatResetInstant(w.resetsAt));
+function toWindowView(engine: VerseEngine, w: SeatCapacityWindow, now: number): SeatWindowView {
+  const reset = w.resetDescription ?? (w.resetsAt === null ? null : formatResetInstant(w.resetsAt, now));
   return {
     id: w.id,
     label: seatCapacityWindowLabel(engine, w.id),
@@ -202,7 +205,7 @@ function toWindowView(engine: VerseEngine, w: SeatCapacityWindow): SeatWindowVie
 }
 
 /** The V1 `health.windows` shape, for a seat with no `capacity` record. */
-function legacyWindowView(w: VerseSeat['health']['windows'][number]): SeatWindowView {
+function legacyWindowView(w: VerseSeat['health']['windows'][number], now: number): SeatWindowView {
   const used = typeof w.usedPercent === 'number' && Number.isFinite(w.usedPercent)
     ? Math.max(0, Math.min(100, w.usedPercent))
     : null;
@@ -214,7 +217,7 @@ function legacyWindowView(w: VerseSeat['health']['windows'][number]): SeatWindow
     label: seatWindowLabel(w.id),
     usedPercent: flagged ? null : used,
     limitReached: flagged,
-    resetText: w.resetsAt === null ? null : formatResetInstant(w.resetsAt),
+    resetText: w.resetsAt === null ? null : formatResetInstant(w.resetsAt, now),
     resetsAt: w.resetsAt,
   };
 }
@@ -253,9 +256,9 @@ function localView(seat: VerseSeat): SeatSubscriptionView {
 }
 
 /** The V1 path: no `capacity` record, so the V1 rule decides, unchanged. */
-function fallbackView(seat: VerseSeat): SeatSubscriptionView {
+function fallbackView(seat: VerseSeat, now: number): SeatSubscriptionView {
   const legacy = seatCapacity(seat);
-  const windows = seat.health.windows.map(legacyWindowView);
+  const windows = seat.health.windows.map((w) => legacyWindowView(w, now));
   const flagged = windows.find((w) => w.limitReached) ?? null;
   const measured = windows.filter((w) => w.usedPercent !== null);
   const worst = measured.length === 0
@@ -284,20 +287,21 @@ function fallbackView(seat: VerseSeat): SeatSubscriptionView {
 /**
  * The whole projection. Local seats short-circuit: they have no subscription,
  * so everything below the readiness line is deliberately empty rather than
- * zeroed.
+ * zeroed. `now` is the clock the reset wording is relative to ("today" vs a
+ * weekday); it defaults to the real one.
  */
-export function seatSubscription(seat: VerseSeat): SeatSubscriptionView {
+export function seatSubscription(seat: VerseSeat, now: number = Date.now()): SeatSubscriptionView {
   if (seat.engine === 'local') return localView(seat);
   const capacity = seat.capacity;
-  if (capacity === undefined) return fallbackView(seat);
+  if (capacity === undefined) return fallbackView(seat, now);
 
-  const windows = capacity.windows.map((w) => toWindowView(seat.engine, w));
+  const windows = capacity.windows.map((w) => toWindowView(seat.engine, w, now));
   // Resolve the server's CHOICE of binding window back to this seat's own
   // view of it, so the two can never disagree about a reset or a label.
   const served = capacity.binding;
   const binding = served === null
     ? null
-    : (windows.find((w) => w.id === served.id) ?? toWindowView(seat.engine, served));
+    : (windows.find((w) => w.id === served.id) ?? toWindowView(seat.engine, served, now));
   const others = binding === null ? windows : windows.filter((w) => w.id !== binding.id);
   const credits = creditsPhrase(capacity.credits);
 
@@ -326,7 +330,8 @@ export function seatSubscription(seat: VerseSeat): SeatSubscriptionView {
   } else if (binding.usedPercent === null) {
     summary = 'no capacity reading';
   } else {
-    summary = `${Math.round(binding.usedPercent)}% of ${binding.label} used`;
+    // The one percent rule: "99%", never a rounded "100%" beside a "99%" bar.
+    summary = `${percentText(binding.usedPercent)} of ${binding.label} used`;
   }
 
   return {
@@ -364,6 +369,44 @@ export function evidenceNote(source: SeatSubscriptionView['evidenceSource']): st
     default:
       return null;
   }
+}
+
+function parseableInstant(iso: string | null | undefined): iso is string {
+  return typeof iso === 'string' && Number.isFinite(Date.parse(iso));
+}
+
+function isSpentWindow(w: Pick<SeatWindowView, 'limitReached' | 'usedPercent'>): boolean {
+  return w.limitReached || (w.usedPercent !== null && w.usedPercent >= 100);
+}
+
+/**
+ * When a spent seat is usable again. A seat reopens only once EVERY spent
+ * window has reset — a Codex seat whose 5-hour window resets in 2h but whose
+ * weekly window is also spent until Wednesday is still spent in 2h — so this
+ * is the LATEST reset among the spent windows, matching Fleet's "eligible
+ * again" (fleet/why-seat-model `eligibleAgain`) and the router's headroom
+ * `lastReset`. Every surface that says "resets …" / "usable again in …" for
+ * a spent seat (Accounts, the health banner) asks here.
+ *
+ *   - a spent window with only provider prose (Claude) → null: when "all of
+ *     them" have reset is unknown, and prose is never parsed;
+ *   - `reported` (the health sweep's instant, which is its binding window's)
+ *     is folded in — it may know of a window this seat record does not — but
+ *     it can never make the answer EARLIER than a spent window's reset;
+ *   - nothing spent → `reported`, else the binding window's own instant.
+ */
+export function seatReopensAt(view: Pick<SeatSubscriptionView, 'binding' | 'others'>, reported?: string | null): string | null {
+  const known = parseableInstant(reported) ? reported : null;
+  const windows = view.binding === null ? view.others : [view.binding, ...view.others];
+  const spent = windows.filter(isSpentWindow);
+  if (spent.length > 0) {
+    if (spent.some((w) => !parseableInstant(w.resetsAt))) return null;
+    const instants = spent.map((w) => w.resetsAt as string);
+    if (known !== null) instants.push(known);
+    return instants.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a));
+  }
+  if (known !== null) return known;
+  return view.binding !== null && parseableInstant(view.binding.resetsAt) ? view.binding.resetsAt : null;
 }
 
 /**

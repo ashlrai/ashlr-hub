@@ -22,7 +22,7 @@ import {
   type BudgetView,
 } from '../../../../core/routing/policy.js';
 import type { BudgetMode, SeatBudgetPolicy, SeatHeadroom } from '../../../../core/routing/types.js';
-import { tidyProse } from '../autonomy/format.js';
+import { percentText, tidyProse } from '../autonomy/format.js';
 
 export type BudgetSeatStatus = 'eligible' | 'held' | 'off' | 'unknown';
 
@@ -111,7 +111,7 @@ function barsFor(engine: BudgetEngine, free: boolean, policy: SeatBudgetPolicy, 
       binding: h.bindingWindow === 'weekly',
       description: used === null
         ? 'Weekly window: no reading.'
-        : `Weekly window ${round(used)}% used; autonomy stops at ${round(reserveCeiling)}%, ${round(policy.reservePercent)}% kept for you.`,
+        : `Weekly window ${percentText(used)} used; autonomy stops at ${round(reserveCeiling)}%, ${round(policy.reservePercent)}% kept for you.`,
     });
   }
   if (h.sessionUsedPercent !== null || engine === 'claude') {
@@ -126,7 +126,7 @@ function barsFor(engine: BudgetEngine, free: boolean, policy: SeatBudgetPolicy, 
       binding: h.bindingWindow === 'session',
       description: used === null
         ? '5-hour window: no reading.'
-        : `5-hour window ${round(used)}% used; ${ceiling >= 100 ? 'no autonomy ceiling' : `autonomy stops at ${round(ceiling)}%`}.`,
+        : `5-hour window ${percentText(used)} used; ${ceiling >= 100 ? 'no autonomy ceiling' : `autonomy stops at ${round(ceiling)}%`}.`,
     });
   }
   return bars;

@@ -25,6 +25,7 @@ import {
   windowTone,
 } from './usage-model.js';
 import { buildFallbackAccountCards } from './accounts-model.js';
+import { inTimeZone, TEST_ZONES } from '../growth/time-zone.test-support.js';
 
 type SubscriptionEngineUsage = ControlSnapshot['subscriptionUsage'][number];
 type DaemonObservation = ControlSnapshot['daemonObservation'];
@@ -294,9 +295,12 @@ describe('buildDailySpendSeries', () => {
   const tick = (ts: string, spentUsd: number) =>
     ({ ts, itemsConsidered: 1, proposalsCreated: 0, spentUsd, reason: 'ok' }) as unknown as NonNullable<DaemonObservation['ticks']>[number];
 
+  // Tick instants are built in LOCAL time: the series buckets by the viewer's own calendar day.
+  const local = (d: number, h: number) => new Date(2026, 8, d, h).toISOString();
+
   it('refuses to call a single day of ticks a trend', () => {
     const series = buildDailySpendSeries(
-      observation({ ticks: [tick('2026-09-19T01:00:00.000Z', 1), tick('2026-09-19T05:00:00.000Z', 2)] }),
+      observation({ ticks: [tick(local(19, 1), 1), tick(local(19, 5), 2)] }),
     );
     expect(series.available).toBe(false);
     expect(series.available === false && series.reason).toContain('only 1 day');
@@ -306,9 +310,9 @@ describe('buildDailySpendSeries', () => {
     const series = buildDailySpendSeries(
       observation({
         ticks: [
-          tick('2026-09-17T01:00:00.000Z', 1.5),
-          tick('2026-09-17T09:00:00.000Z', 0.5),
-          tick('2026-09-19T02:00:00.000Z', 3),
+          tick(local(17, 1), 1.5),
+          tick(local(17, 9), 0.5),
+          tick(local(19, 2), 3),
         ],
       }),
     );
@@ -320,6 +324,31 @@ describe('buildDailySpendSeries', () => {
       { day: '2026-09-19', usd: 3 },
     ]);
     expect(series.caveat).toContain('interactive chat turns are not in it');
+  });
+
+  it('buckets by the viewer\u2019s LOCAL day — the calendar the chart and table label in — in every zone', () => {
+    for (const zone of [...TEST_ZONES, 'America/Los_Angeles']) {
+      inTimeZone(zone, () => {
+        // 8 PM and 11:30 PM on the 23rd are the 23rd where the viewer is, whatever UTC says.
+        const at = (d: number, h: number, m = 0) => new Date(2026, 8, d, h, m).toISOString();
+        const series = buildDailySpendSeries(observation({ ticks: [tick(at(22, 12), 1), tick(at(23, 20), 2), tick(at(23, 23, 30), 0.5), tick(at(24, 0, 30), 4)] }));
+        expect(series.available, zone).toBe(true);
+        if (!series.available) return;
+        expect(series.days, zone).toEqual([
+          { day: '2026-09-22', usd: 1 },
+          { day: '2026-09-23', usd: 2.5 },
+          { day: '2026-09-24', usd: 4 },
+        ]);
+      });
+    }
+  });
+
+  it('walks calendar days across a DST change without skipping or doubling one', () => {
+    inTimeZone('America/Los_Angeles', () => {
+      // 2026-11-01 is 25 hours long in Los Angeles.
+      const series = buildDailySpendSeries(observation({ ticks: [tick(new Date(2026, 9, 31, 12).toISOString(), 1), tick(new Date(2026, 10, 2, 12).toISOString(), 2)] }));
+      expect(series.available && series.days.map((d) => d.day)).toEqual(['2026-10-31', '2026-11-01', '2026-11-02']);
+    });
   });
 
   it('declines the series when the daemon ledger is degraded or absent', () => {

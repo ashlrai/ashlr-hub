@@ -26,8 +26,43 @@ export function formatWholePercent(fraction: number | null | undefined): string 
   return formatPercent(fraction);
 }
 
+/**
+ * THE ONE PERCENT RULE — a measured share of a window (or of anything capped
+ * at 100), printed the same way on every panel: a whole percent, except that a
+ * real reading under 1% is "<1%" (never "0%", which would read as "untouched")
+ * and one just short of 100 is "99%" (never a rounded "100%", which would read
+ * as "spent"). `used` is 0–100 and is clamped; not a number is "—".
+ *
+ * Every place that prints a used percent goes through this — a bar reading
+ * "99%" beside a summary reading "100% of 5-hour window used" is one seat
+ * described two ways. Bar WIDTHS stay numeric; only the words use this.
+ */
+export function percentText(used: number): string {
+  if (!Number.isFinite(used)) return UNKNOWN;
+  const clamped = Math.max(0, Math.min(100, used));
+  if (clamped > 99 && clamped < 100) return '99%';
+  return formatWholePercent(clamped / 100);
+}
+
 /** An ISO-8601 instant (a date WITH a time) anywhere inside a sentence. */
 const ISO_INSTANT_IN_TEXT = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?(?![\w:])/g;
+
+/**
+ * What may end a sentence right before its full stop: a letter, a digit, a
+ * percent sign, an ellipsis, or a closing quote / bracket / backtick. NOT a
+ * dot, a slash or a space — so a path segment (`../x`, `cd ..;`) never looks
+ * like doubled punctuation.
+ */
+const SENTENCE_END = String.raw`[\p{L}\p{N}%…)\]"'’”\x60]`;
+/** "failed.; next" / "failed..; next" → "failed; next". */
+const STOP_BEFORE_SEMICOLON = new RegExp(`(${SENTENCE_END})\\.{1,2}\\s*;`, 'gu');
+/**
+ * "failed.. Next" / "exhausted.." → one stop. The pair must be FOLLOWED by
+ * whitespace or the end, so a git range (`a1b2c3d..e4f5a6b`, `HEAD~1..HEAD`)
+ * and a traversal (`x/../y`) pass through untouched; a third dot (`...`) is
+ * an ellipsis, not a doubled stop.
+ */
+const DOUBLED_STOP = new RegExp(`(${SENTENCE_END})\\.\\.(?=\\s|$)`, 'gu');
 
 /**
  * Server prose made fit to print: every ISO instant becomes the viewer's
@@ -36,13 +71,17 @@ const ISO_INSTANT_IN_TEXT = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9
  * that a sentence joined onto another sentence leaves behind is collapsed.
  *
  * For text the server wrote for a person (`ApiError.detail`, action notes,
- * audit summaries, fleet notes): it is shown verbatim otherwise.
+ * audit summaries, fleet notes): it is shown verbatim otherwise. That matters
+ * on the trust surfaces this runs on (approval summaries, the audit trail):
+ * a `../../.ssh/authorized_keys` rewritten to `././.ssh/…` would hide the very
+ * traversal the operator is deciding about, so only sentence punctuation is
+ * ever touched.
  */
 export function tidyProse(text: string, now: number = Date.now()): string {
   return text
     .replace(ISO_INSTANT_IN_TEXT, (iso) => describeResetAt(iso, now) ?? iso)
-    .replace(/\.\s*;/g, ';')
-    .replace(/([^.])\.\.(?!\.)/g, '$1.');
+    .replace(STOP_BEFORE_SEMICOLON, '$1;')
+    .replace(DOUBLED_STOP, '$1.');
 }
 
 /**
@@ -242,8 +281,8 @@ export function budgetMeter(
   return {
     state,
     percent,
-    // The text says "<1%" for a sliver of spend; `percent` (the bar) stays numeric.
-    label: `${formatUsd(spend)} of ${formatUsd(cap)} today · ${formatWholePercent(Math.min(1, spend / cap))}`,
+    // The text follows the one percent rule ("<1%", "99%" short of the cap); `percent` (the bar) stays numeric.
+    label: `${formatUsd(spend)} of ${formatUsd(cap)} today · ${percentText((spend / cap) * 100)}`,
     note:
       state === 'over'
         ? 'Daily budget reached — the loop idles until the date rolls over.'

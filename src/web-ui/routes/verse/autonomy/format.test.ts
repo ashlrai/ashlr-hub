@@ -12,6 +12,7 @@ import {
   formatWholePercent,
   localDateKey,
   nextTickAt,
+  percentText,
   repoDisplayName,
   tidyProse,
   UNKNOWN,
@@ -49,6 +50,13 @@ describe('autonomy formatting', () => {
       expect(meter.percent).toBe(18);
       expect(meter.label).toBe('$4.50 of $25.00 today · 18%');
       expect(meter.note).toBe('$20.50 left today.');
+    });
+
+    it('words the share by the one percent rule: "99%" just short of the cap, "<1%" for a sliver', () => {
+      expect(budgetMeter(24.9, 25).label).toBe('$24.90 of $25.00 today · 99%');
+      expect(budgetMeter(24.9, 25).state).toBe('warn');
+      expect(budgetMeter(0.1, 25).label).toBe('$0.10 of $25.00 today · <1%');
+      expect(budgetMeter(30, 25).label).toBe('$30.00 of $25.00 today · 100%');
     });
 
     it('warns past 70% and says so past 100%', () => {
@@ -184,6 +192,19 @@ describe('autonomy formatting', () => {
     });
   });
 
+  describe('percentText — the one percent rule', () => {
+    it('prints whole percents, "<1%" for a real sliver and "99%" just short of full', () => {
+      expect(percentText(62.4)).toBe('62%');
+      expect(percentText(0)).toBe('0%');
+      expect(percentText(0.4)).toBe('<1%');
+      expect(percentText(99.6)).toBe('99%');
+      expect(percentText(99.01)).toBe('99%');
+      expect(percentText(100)).toBe('100%');
+      expect(percentText(140)).toBe('100%');
+      expect(percentText(Number.NaN)).toBe(UNKNOWN);
+    });
+  });
+
   describe('tidyProse', () => {
     // Local 09:00 and 23:46 on the same day, so the phrase is "today …" in any zone.
     const now = new Date(2026, 8, 24, 9, 0, 0).getTime();
@@ -210,6 +231,26 @@ describe('autonomy formatting', () => {
       expect(tidyProse('tests failed.; lint failed.', now)).toBe('tests failed; lint failed.');
       expect(tidyProse('quota exhausted..', now)).toBe('quota exhausted.');
       expect(tidyProse('still waiting...', now)).toBe('still waiting...');
+      expect(tidyProse('failed.. Back off and retry.', now)).toBe('failed. Back off and retry.');
+      expect(tidyProse('tests failed..; lint failed.', now)).toBe('tests failed; lint failed.');
+      expect(tidyProse('Cannot find module \'../dist/cli.js\'..', now)).toBe('Cannot find module \'../dist/cli.js\'.');
+      expect(tidyProse('Spent (resets later)..', now)).toBe('Spent (resets later).');
+    });
+
+    it('never rewrites ".." inside a path or a git range — these are trust surfaces', () => {
+      for (const verbatim of [
+        '../x',
+        'Updates ../../shared/.github/workflows/release.yml',
+        'sandbox refused a write to ../../.ssh/authorized_keys',
+        'compare a1b2c3d..e4f5a6b before merging',
+        'HEAD~1..HEAD',
+        'range v3.10.0..v3.10.1 is clean',
+        'Cannot find module \'../dist/cli.js\'',
+        'ran cd ..; npm test',
+        'cd ..',
+      ]) {
+        expect(tidyProse(verbatim, now)).toBe(verbatim);
+      }
     });
   });
 

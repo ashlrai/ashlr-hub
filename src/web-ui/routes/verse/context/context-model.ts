@@ -24,7 +24,7 @@ import {
   sessionOverheadTokens,
 } from '../../../../core/verse/context-math.js';
 import { formatRelative } from '../verse-model.js';
-import { asClause, tidyProse } from '../autonomy/format.js';
+import { asClause, percentText, tidyProse } from '../autonomy/format.js';
 import { formatTokens } from '../verse-store.js';
 
 // ---------------------------------------------------------------------------
@@ -217,7 +217,7 @@ export function handoffFit(
       return {
         ...base,
         tone: 'warn',
-        text: `Tight: ${sum} is ${Math.round((needTokens / (standardCap ?? needTokens)) * 100)}% of where this model compacts — the new chat will compact early.`,
+        text: `Tight: ${sum} is ${percentText((needTokens / (standardCap ?? needTokens)) * 100)} of where this model compacts — the new chat will compact early.`,
       };
     case 'expansive':
       return mode === 'expansive'
@@ -304,7 +304,11 @@ export function relativePhrase(iso: string | null | undefined, now: number = Dat
   const short = formatRelative(iso, now);
   if (!short) return null;
   if (short === 'now') return 'just now';
-  return /^\d/.test(short) ? `${short} ago` : `on ${short}`;
+  // Only the relative tokens ("5m", "3h", "2d") take "ago". Anything else is a
+  // DATE, whatever the locale prints: "Sep 1" (en-US) but "1 Sept" (en-GB)
+  // and "1. Sept." (de) start with a digit — testing for a leading digit
+  // printed "Last completed 1 Sept ago." outside the US.
+  return /^\d+[mhd]$/.test(short) ? `${short} ago` : `on ${short}`;
 }
 
 // ---------------------------------------------------------------------------

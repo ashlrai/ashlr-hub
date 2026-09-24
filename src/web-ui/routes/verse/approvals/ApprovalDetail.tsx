@@ -192,9 +192,13 @@ export function ApprovalDetail({ id, dispatchEnabled, onDispatchDisabled, onDeci
         </div>
         {facts ? (
           <p className={styles.runFacts}>
-            <span className={styles.diffStats} aria-label={describeDiffStats(facts)}>
+            {/* aria-label on a plain span is ignored (a generic role cannot be
+                named), so the glyphs are hidden and the sentence is real,
+                visually-hidden text — NeedsYouRunFacts' pattern. */}
+            <span className={styles.diffStats} aria-hidden="true">
               {formatDiffStats(facts)}
             </span>
+            <span className="visually-hidden">{describeDiffStats(facts)}</span>
             <span aria-hidden="true">·</span>
             <span className={styles.runSource} title={facts.sourceHint ?? undefined}>
               {facts.partial ? 'Partial \u00b7 ' : ''}{facts.sourceLabel}

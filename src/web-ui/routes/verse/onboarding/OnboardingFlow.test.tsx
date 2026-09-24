@@ -295,7 +295,10 @@ describe('OnboardingPanel — replay from Settings', () => {
     const now = Date.parse('2026-09-24T12:00:00.000Z');
     expect(describeOnboardingState('2026-09-24T11:55:00.000Z', null, now)).toBe('Last completed 5m ago.');
     const older = describeOnboardingState('2026-09-01T10:00:00.000Z', null, now);
-    expect(older).toMatch(/^Last completed on \w{3} \d{1,2}\.$/);
+    // A date reads "on <date>" in any locale ("on Sep 1" en-US, "on 1 Sept" en-GB) — never "1 Sept ago".
+    expect(older).toMatch(/^Last completed on .+\.$/);
+    expect(older).not.toMatch(/ago\.$/);
+    if (new Intl.DateTimeFormat().resolvedOptions().locale === 'en-US') expect(older).toMatch(/^Last completed on \w{3} \d{1,2}\.$/);
     expect(older).not.toMatch(/\d{1,2}\/\d{1,2}\/\d{4}|2026-09-01/);
   });
 
