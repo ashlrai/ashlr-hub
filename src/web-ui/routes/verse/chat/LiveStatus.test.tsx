@@ -15,7 +15,14 @@ describe('LiveStatus line', () => {
       ev(2, 'turn-started', { turnId: 't1', pid: 1 }),
       ev(3, 'tool-use', { turnId: 't1', toolUseId: 'a', name: 'Bash', input: { command: 'npm test' } }),
     ]).items;
-    expect(derivePhaseFromTranscript(pending, LIVE)).toEqual({ phase: 'tool', detail: 'npm test' });
+    // A command stays verbatim: no path is pulled out of it.
+    expect(derivePhaseFromTranscript(pending, LIVE)).toEqual({ phase: 'tool', detail: 'npm test', path: null });
+    // A file call also names its file, for the line to draw relative to the chat's roots.
+    const reading = buildTranscript([
+      ev(1, 'user-message', { turnId: 't1', text: 'go' }),
+      ev(2, 'tool-use', { turnId: 't1', toolUseId: 'r', name: 'Read', input: { file_path: '/Users/mason/dev/hub/src/a.ts' } }),
+    ]).items;
+    expect(derivePhaseFromTranscript(reading, LIVE)).toMatchObject({ phase: 'tool', path: '/Users/mason/dev/hub/src/a.ts' });
     const writing = buildTranscript([ev(1, 'turn-started', { turnId: 't1', pid: 1 }), ev(2, 'text-delta', { turnId: 't1', text: 'Hi' })]).items;
     expect(derivePhaseFromTranscript(writing, LIVE).phase).toBe('writing');
     expect(derivePhaseFromTranscript([], { thinking: { turnId: 't1', text: '', startedAt: 0, estimatedTokens: 10 } }).phase).toBe('thinking');

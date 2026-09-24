@@ -10,13 +10,14 @@
  *   modelOutcomes   what each model's dispatches became (ROI composition);
  *   harnessSteps    the active harness's level over time: each adoption
  *                   steps up by its experiment's lift, a rollback steps back
- *                   down with a ▼ marker;
+ *                   down with a ▼ marker; only real timestamps, never the
+ *                   baseline's epoch stamp;
  *   forestRows      one row per experiment, newest first.
  *
  * Framework-free; tested directly.
  */
 import type { FleetHistoryDay } from '../../../../core/verse/fleet-history-types.js';
-import type { ExperimentResultV1, LearningStateV1 } from '../../../../core/learn/harness-types.js';
+import type { ExperimentResultV1, HarnessVersion, LearningStateV1 } from '../../../../core/learn/harness-types.js';
 import { HARNESS_ADOPTION_GATE } from '../../../../core/learn/harness-types.js';
 import type { ModelStats } from '../../../data/api-types.js';
 import type { BarStackSegment } from '../../../components/charts/BarStack.js';
@@ -111,13 +112,54 @@ export interface HarnessSeries {
 }
 
 /**
+ * Anything stamped before this is not a real harness event. The registry
+ * stamps the compiled-defaults baseline `1970-01-01T00:00:00.000Z` (it has no
+ * creation time — core/learn/harness-registry.ts `baselineVersion`), and a
+ * step drawn there stretched the x-axis from "Dec 31" to today. No Ashlr
+ * harness predates 2020, so the floor also catches any other zero-ish stamp.
+ */
+export const HARNESS_TIME_FLOOR_MS = Date.UTC(2020, 0, 1);
+
+/** With nothing but the compiled defaults on record, the chart shows this trailing window. */
+export const HARNESS_BASELINE_WINDOW_MS = 90 * 86_400_000;
+
+/** Epoch ms of a real harness timestamp; null for missing, unparsable or pre-floor (epoch) stamps. */
+export function harnessTime(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) && t >= HARNESS_TIME_FLOOR_MS ? t : null;
+}
+
+/**
+ * When the compiled-defaults step starts: the baseline's own time when it has
+ * a real one, else the first real harness event (a candidate created, an
+ * experiment started, an adoption, a rollback), else — nothing but the
+ * defaults on record — `HARNESS_BASELINE_WINDOW_MS` before `now`.
+ */
+function baselineStart(learning: LearningStateV1, baseline: HarnessVersion, now: number): number {
+  const own = harnessTime(baseline.createdAt);
+  if (own !== null) return own;
+  const times = [
+    ...learning.versions.filter((v) => v.id !== baseline.id).flatMap((v) => [v.createdAt, v.adoptedAt, v.rolledBackAt]),
+    ...learning.experiments.flatMap((e) => [e.startedAt, e.finishedAt]),
+  ]
+    .map(harnessTime)
+    .filter((t): t is number => t !== null);
+  return times.length > 0 ? Math.min(...times) : now - HARNESS_BASELINE_WINDOW_MS;
+}
+
+/**
  * The level of the ACTIVE harness over time, in points of paired pass-rate
  * lift over the compiled defaults. Each adoption adds its own experiment's
  * lift to the level of the version it was measured against; its band is that
  * experiment's 95% interval (the step's own uncertainty, not a compounded
  * one — the caption says so). A rollback returns to the parent's level.
+ *
+ * Every step and marker carries a REAL timestamp (`harnessTime`): an event
+ * without one is left out rather than drawn at the epoch. `now` (default: the
+ * state's own `generatedAt`) only anchors the defaults-only window.
  */
-export function harnessSteps(learning: LearningStateV1 | null): HarnessSeries {
+export function harnessSteps(learning: LearningStateV1 | null, now?: number): HarnessSeries {
   if (!learning || learning.versions.length === 0) return { steps: [], markers: [] };
   const byId = new Map(learning.versions.map((v) => [v.id, v]));
   const exps = new Map(learning.experiments.map((e) => [e.id, e]));
@@ -126,8 +168,8 @@ export function harnessSteps(learning: LearningStateV1 | null): HarnessSeries {
 
   const baseline = [...learning.versions].sort((a, b) => a.seq - b.seq)[0]!;
   level.set(baseline.id, 0);
-  const t0 = Date.parse(baseline.createdAt);
-  if (Number.isFinite(t0)) events.push({ at: t0, step: { id: `${baseline.id}@base`, at: t0, value: 0, low: 0, high: 0, label: baseline.status === 'baseline' ? 'Compiled defaults' : baseline.id, detail: 'baseline' } });
+  const t0 = baselineStart(learning, baseline, now ?? harnessTime(learning.generatedAt) ?? Date.now());
+  events.push({ at: t0, step: { id: `${baseline.id}@base`, at: t0, value: 0, low: 0, high: 0, label: baseline.status === 'baseline' ? 'Compiled defaults' : baseline.id, detail: 'baseline' } });
 
   const adopted = learning.versions
     .filter((v) => v.adoptedAt && v.id !== baseline.id)
@@ -139,8 +181,8 @@ export function harnessSteps(learning: LearningStateV1 | null): HarnessSeries {
     const lift = exp?.lift ?? null;
     const value = lift && baseLevel !== null && baseLevel !== undefined ? baseLevel + lift.mean : null;
     level.set(v.id, value);
-    const at = Date.parse(v.adoptedAt!);
-    if (!Number.isFinite(at)) continue;
+    const at = harnessTime(v.adoptedAt);
+    if (at === null) continue;
     const detail = v.status === 'canary' ? 'canary' : v.status === 'rolled-back' ? 'adopted, later rolled back' : 'adopted';
     events.push({
       at,
@@ -155,8 +197,8 @@ export function harnessSteps(learning: LearningStateV1 | null): HarnessSeries {
       },
     });
     if (v.rolledBackAt) {
-      const back = Date.parse(v.rolledBackAt);
-      if (Number.isFinite(back)) {
+      const back = harnessTime(v.rolledBackAt);
+      if (back !== null) {
         const parentLevel = level.get(baseId) ?? null;
         const parent = byId.get(baseId);
         events.push({ at: back, marker: { id: `${v.id}@rb`, at: back, kind: 'rollback', label: `${v.id}: ${v.rollbackReason ?? 'rolled back'}` } });

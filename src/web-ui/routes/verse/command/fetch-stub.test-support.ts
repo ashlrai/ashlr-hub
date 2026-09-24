@@ -15,6 +15,7 @@ import {
   leaderState,
   learningState,
   reasoningDigest,
+  seatHistory,
   type FixtureKind,
 } from './fixtures.test-support.js';
 
@@ -45,6 +46,7 @@ export function surfaceRoutes(kind: FixtureKind, now: number): Record<string, un
     '/api/verse/learning': learningState(kind, now),
     '/api/verse/activity': activitySnapshot(kind, now),
     '/api/verse/budget/preview': null,
+    '/api/verse/budget/history': seatHistory(kind, now),
     '/api/verse/budget': budgetView(kind, now),
     '/api/reasoning/digest': reasoningDigest(kind, now),
     '/api/verse/overnight': { armed: false, run: null, repos: null, gate: null },

@@ -14,6 +14,7 @@ import type { LearningStateV1 } from '../../../../core/learn/harness-types.js';
 import type { NeedsYouItem, NeedsYouSeverity, VerseActivityResponse } from '../../../../core/verse/workbench-types.js';
 import type { FleetHistoryDay, FleetHistoryResponse } from '../../../../core/verse/fleet-history-types.js';
 import type { BudgetView } from '../../../../core/routing/policy.js';
+import type { CapacityHistoryResponse } from '../../../../core/routing/capacity-history-types.js';
 import type { VerseSeat } from '../../../../core/verse/types.js';
 import { classifyWindow } from '../../../../core/routing/headroom.js';
 import type { EffectivePolicy } from '../../../../core/authority/types.js';
@@ -281,20 +282,47 @@ export function silentSources(activity: VerseActivityResponse | null): string[] 
 // Seat burn-downs
 // ---------------------------------------------------------------------------
 
+export type SeatWindow = 'session' | 'weekly';
+
 export interface SeatReading {
   t: number;
-  /** Percent of the binding window used, 0–100. */
+  /** Percent of the window used, 0–100. */
   used: number;
 }
 
 /**
- * The readings the page has seen per seat. WHY client-side: the budget route
- * serves ONE reading per seat (its current headroom); no window history is
- * persisted server-side yet (CROSS-UNIT REQUEST to A9/C6). So the burn-down
- * starts with what this viewer has observed since Verse opened, says so, and
- * never draws a guessed history. Memory only, bounded.
+ * Readings are kept per seat WINDOW, not per seat: the binding window can flip
+ * between the 5-hour and the weekly window from one poll to the next, and a
+ * line that mixed the two would draw a jump that never happened. Seat ids may
+ * contain `:` and `/`, never `#` (the server keys its history the same way).
+ */
+export function seriesKey(seatId: string, window: SeatWindow): string {
+  return `${seatId}#${window}`;
+}
+
+/**
+ * The readings this page has seen since Verse opened, per seat window. The
+ * budget route serves ONE reading per seat, so on their own these start the
+ * burn-down empty on every load; `mergeSeatHistory` adds the server's recorded
+ * history (GET /api/verse/budget/history — core/routing/capacity-history.ts,
+ * written by the capacity publishers), so a reload keeps the whole window.
+ * Memory only, bounded; never a guessed history.
+ *
+ * The bound counts CHANGES, not polls: a flat run keeps only its two ends
+ * (see `recordReading`). At one poll per 30 s a plain 240-reading ring held
+ * two hours — a sliver of a 7-day window — while window percent moves in
+ * whole points a few times an hour.
  */
 export const SEAT_READINGS_MAX = 240;
+/** A merged line (recorded history + this page's readings), flat runs collapsed: a week of changes fits. */
+export const SEAT_HISTORY_MAX = 2000;
+/** A drop this large between consecutive readings is a window reset: the line starts again. */
+const RESET_DROP = 20;
+
+function isFlatEnd(line: readonly SeatReading[], used: number): boolean {
+  const n = line.length;
+  return n >= 2 && line[n - 1]!.used === used && line[n - 2]!.used === used;
+}
 
 export function recordReading(history: Readonly<Record<string, SeatReading[]>>, view: BudgetView | null): Record<string, SeatReading[]> {
   if (!view) return { ...history };
@@ -302,15 +330,69 @@ export function recordReading(history: Readonly<Record<string, SeatReading[]>>, 
   if (!Number.isFinite(t)) return { ...history };
   const next: Record<string, SeatReading[]> = { ...history };
   for (const h of view.headroom) {
-    const used = h.bindingWindow === 'session' ? h.sessionUsedPercent : h.bindingWindow === 'weekly' ? h.weeklyUsedPercent : null;
-    if (used === null || !Number.isFinite(used)) continue;
-    const prev = next[h.seatId] ?? [];
-    if (prev.length && prev[prev.length - 1]!.t >= t) continue;
-    // A reset (used dropped sharply) starts a new window — drop the old one.
-    const fresh = prev.length && used + 20 < prev[prev.length - 1]!.used ? [] : prev;
-    next[h.seatId] = [...fresh, { t, used }].slice(-SEAT_READINGS_MAX);
+    const windows: [SeatWindow, number | null][] = [['session', h.sessionUsedPercent], ['weekly', h.weeklyUsedPercent]];
+    for (const [window, used] of windows) {
+      if (used === null || !Number.isFinite(used)) continue;
+      const key = seriesKey(h.seatId, window);
+      const prev = next[key] ?? [];
+      if (prev.length && prev[prev.length - 1]!.t >= t) continue;
+      // A reset (used dropped sharply) starts a new window — drop the old one.
+      const fresh = prev.length && used + RESET_DROP < prev[prev.length - 1]!.used ? [] : prev;
+      // A flat run keeps only its first and latest reading: the line through
+      // them is identical, and the ring then spans hours or days, not minutes.
+      next[key] = [...(isFlatEnd(fresh, used) ? fresh.slice(0, -1) : fresh), { t, used }].slice(-SEAT_READINGS_MAX);
+    }
   }
   return next;
+}
+
+export interface MergedSeatHistory {
+  /** One line per seat window, oldest first, starting after its last reset. */
+  readings: Record<string, SeatReading[]>;
+  /** Series keys the server's recorded history contributed readings to. */
+  recorded: ReadonlySet<string>;
+}
+
+/**
+ * The server's recorded history merged with this page's live readings, per
+ * seat window: one reading per instant (the live one wins a tie), oldest
+ * first, cut after the last reset drop and with flat runs collapsed — the
+ * same rules `recordReading` applies, so the line reads the same either way.
+ * `server` is untrusted wire data: malformed series and points are skipped.
+ */
+export function mergeSeatHistory(live: Readonly<Record<string, SeatReading[]>>, server: CapacityHistoryResponse | null): MergedSeatHistory {
+  const persisted = new Map<string, SeatReading[]>();
+  for (const series of Array.isArray(server?.series) ? server!.series : []) {
+    if (!series || typeof series.seatId !== 'string' || (series.window !== 'session' && series.window !== 'weekly') || !Array.isArray(series.points)) continue;
+    const points: SeatReading[] = [];
+    for (const p of series.points) {
+      if (!Array.isArray(p)) continue;
+      const [t, used] = p as unknown[];
+      if (typeof t === 'number' && Number.isFinite(t) && typeof used === 'number' && Number.isFinite(used) && used >= 0 && used <= 100) points.push({ t, used });
+    }
+    if (points.length === 0) continue;
+    const key = seriesKey(series.seatId, series.window);
+    persisted.set(key, [...(persisted.get(key) ?? []), ...points]);
+  }
+  const readings: Record<string, SeatReading[]> = {};
+  const recorded = new Set<string>();
+  for (const key of new Set([...Object.keys(live), ...persisted.keys()])) {
+    const fromServer = persisted.get(key) ?? [];
+    if (fromServer.length > 0) recorded.add(key);
+    const byT = new Map<number, SeatReading>();
+    for (const r of fromServer) byT.set(r.t, r);
+    for (const r of live[key] ?? []) byT.set(r.t, r);
+    const sorted = [...byT.values()].sort((a, b) => a.t - b.t);
+    let start = 0;
+    for (let i = 1; i < sorted.length; i++) if (sorted[i]!.used + RESET_DROP < sorted[i - 1]!.used) start = i;
+    const line: SeatReading[] = [];
+    for (const r of sorted.slice(start)) {
+      if (isFlatEnd(line, r.used)) line.pop();
+      line.push(r);
+    }
+    readings[key] = line.slice(-SEAT_HISTORY_MAX);
+  }
+  return { readings, recorded };
 }
 
 export interface SeatBurn {
@@ -318,16 +400,24 @@ export interface SeatBurn {
   label: string;
   engine: 'claude' | 'codex' | 'grok' | 'local';
   window: 'session' | 'weekly' | null;
-  /** Remaining percent readings (100 − used). */
+  /** Remaining percent readings (100 − used), inside [start, resetAt] when the reset is known. */
   points: { t: number; remaining: number | null }[];
+  /** `resetAt` minus the window's length; null exactly when `resetAt` is. */
   start: number | null;
   resetAt: number | null;
   /**
+   * Where `resetAt` came from: the budget route's machine instant
+   * ('provider'), the provider's own reset words read on the clock they name
+   * ('words' — see `resetInstantFromWords`), or nowhere (null).
+   */
+  resetFrom: 'provider' | 'words' | null;
+  /**
    * The provider's own reset wording for the binding window, verbatim
    * ("Sep 25 at 7pm (America/New_York)"), when the seat roster carries it.
-   * Claude publishes ONLY this — never a machine instant — so a Claude card
-   * has readings but `resetAt === null`; the card shows the words and draws
-   * the readings with no projected reset point (never a synthesized one).
+   * Claude publishes ONLY this — never a machine instant. The card always
+   * shows the words; when they name a clock time inside this window they
+   * also place the reset (`resetFrom: 'words'`), otherwise the card draws the
+   * readings with no reset point or projection.
    */
   resetText: string | null;
   reservePercent: number;
@@ -340,9 +430,16 @@ export interface SeatBurn {
   free: boolean;
   eligible: boolean;
   reason: string | null;
+  /**
+   * True when the server's recorded history contributed to this window's
+   * line; false when every point is one this page saw since Verse opened.
+   * Picks the card's note when the line starts late in the window.
+   */
+  recorded: boolean;
 }
 
-const WINDOW_MS = { session: 5 * HOUR, weekly: 7 * DAY } as const;
+/** Length of each provider window, for the chart domain (reset − length → reset). */
+export const WINDOW_MS = { session: 5 * HOUR, weekly: 7 * DAY } as const;
 
 /**
  * The stop line for the binding window, mirroring core/routing/headroom.ts
@@ -384,12 +481,15 @@ export function bindingLine(
  * Axis/verdict time format per window (review 3.10 c17). A weekly window
  * starts exactly seven days before it resets, so weekday + time alone printed
  * "Sat 10:27 AM … Resets Sat 10:27 AM"; the weekly form carries the date.
+ * It carries ONLY the date (3.10.1): inside one week the weekday repeats what
+ * the date says, and at a quarter-width card "Fri, Sep 18 at 11:46 PM" +
+ * "Resets Fri, Sep 25 at 11:46 PM" were wider than the plot and collided.
  */
 export function burnTimeFormat(window: 'session' | 'weekly' | null): (ms: number) => string {
   const opts: Intl.DateTimeFormatOptions =
     window === 'session'
       ? { weekday: 'short', hour: 'numeric', minute: '2-digit' }
-      : { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+      : { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
   return (ms) => {
     const d = new Date(ms);
     return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('en-US', opts);
@@ -429,15 +529,138 @@ export function resetWords(text: string): string {
   return `resets ${text.replace(/^resets\s+/i, '')}`;
 }
 
+const MONTHS: readonly string[] = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+/**
+ * The collector's own reset grammar (core/resources/claude-account-usage.ts
+ * `RESET`), with the leading "resets" optional because other paths keep it.
+ * Anything outside it — a changed native format, free prose — stays words.
+ */
+const RESET_WORDS_RE = /^(?:resets\s+)?(?:([A-Za-z]{3}) ([1-9]|[12]\d|3[01]) at )?([1-9]|1[0-2])(?::([0-5]\d))?(am|pm) \(([A-Za-z0-9_+-]+(?:\/[A-Za-z0-9_+-]+){0,2})\)$/i;
+
+interface WallClock { y: number; mo: number; d: number; h: number; mi: number }
+
+function wallClock(ms: number, fmt: Intl.DateTimeFormat): WallClock | null {
+  const parts = fmt.formatToParts(new Date(ms));
+  const n = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((p) => p.type === type)?.value);
+  const c = { y: n('year'), mo: n('month') - 1, d: n('day'), h: n('hour') % 24, mi: n('minute') };
+  return Object.values(c).every(Number.isFinite) ? c : null;
+}
+
+const wallAsUtc = (c: WallClock) => Date.UTC(c.y, c.mo, c.d, c.h, c.mi);
+
+/**
+ * The instant whose wall clock in `fmt`'s zone reads `want`: start from the
+ * wall time as if it were UTC and correct by the zone's offset until the
+ * clock agrees. Null when it never does — a time skipped by a DST jump.
+ */
+function instantAt(want: WallClock, fmt: Intl.DateTimeFormat): number | null {
+  const target = wallAsUtc(want);
+  let at = target;
+  for (let i = 0; i < 3; i++) {
+    const seen = wallClock(at, fmt);
+    if (!seen) return null;
+    const drift = target - wallAsUtc(seen);
+    if (drift === 0) return at;
+    at += drift;
+  }
+  return null;
+}
+
+/**
+ * The instant named by the provider's reset words — "Sep 25 at 6:59pm
+ * (America/New_York)" or "1:40am (America/New_York)" — or null when the words
+ * are not in the collector's grammar or name an unknown zone.
+ *
+ * WHY this is not "synthesizing a countdown from a description"
+ * (core/verse/types.ts): the words ARE an instant — a wall-clock minute in a
+ * named IANA zone — so reading them on that zone's clock adds nothing the
+ * provider did not say. The only thing the words leave out is the year (or,
+ * for "1:40am", the day), and the candidate nearest `nowMs` is taken; the
+ * caller still refuses an instant outside the window's own span
+ * (`seatBurns`), so a misread can never stretch or shift the chart by more
+ * than the window it draws. Without this, Claude — the seat that matters
+ * most — was the one card with no window, no pace line and no projection.
+ */
+export function resetInstantFromWords(text: string, nowMs: number): number | null {
+  const m = RESET_WORDS_RE.exec(text.trim());
+  if (!m || !Number.isFinite(nowMs)) return null;
+  const [, month, day, hour, minute, meridiem, zone] = m;
+  let fmt: Intl.DateTimeFormat;
+  try {
+    fmt = new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric' });
+  } catch {
+    return null; // RangeError: not a zone this runtime knows.
+  }
+  const today = wallClock(nowMs, fmt);
+  if (!today) return null;
+  const h = (Number(hour) % 12) + (meridiem!.toLowerCase() === 'pm' ? 12 : 0);
+  const mi = minute === undefined ? 0 : Number(minute);
+  const candidates: WallClock[] = [];
+  if (month !== undefined) {
+    const mo = MONTHS.indexOf(month.toLowerCase());
+    const d = Number(day);
+    if (mo < 0) return null;
+    for (const y of [today.y - 1, today.y, today.y + 1]) {
+      // Feb 30 would roll into March — refuse it rather than move the reset.
+      if (new Date(Date.UTC(y, mo, d)).getUTCDate() === d) candidates.push({ y, mo, d, h, mi });
+    }
+  } else {
+    for (const k of [-1, 0, 1]) {
+      const date = new Date(Date.UTC(today.y, today.mo, today.d + k));
+      candidates.push({ y: date.getUTCFullYear(), mo: date.getUTCMonth(), d: date.getUTCDate(), h, mi });
+    }
+  }
+  let best: number | null = null;
+  for (const c of candidates) {
+    const at = instantAt(c, fmt);
+    if (at !== null && (best === null || Math.abs(at - nowMs) < Math.abs(best - nowMs))) best = at;
+  }
+  return best;
+}
+
+/**
+ * How far a words-derived reset may sit in the past (a reading taken just
+ * before the rollover) or beyond one window ahead (the provider rounds its
+ * words to the minute or the hour).
+ */
+const WORDS_RESET_SLACK_MS = 15 * 60_000;
+
+/**
+ * The binding window's reset instant: the budget route's machine instant when
+ * there is one, else the provider's words read on their own clock — but only
+ * when that instant can close the window the current reading sits in (no
+ * more than one window ahead, no more than a few minutes past). Words that
+ * fail either test stay words, and the card says the reset is not placed.
+ */
+export function bindingReset(
+  machine: string | null,
+  resetText: string | null,
+  windowMs: number | null,
+  nowMs: number,
+): { at: number; from: 'provider' | 'words' } | null {
+  const at = machine ? Date.parse(machine) : NaN;
+  if (Number.isFinite(at)) return { at, from: 'provider' };
+  if (resetText === null || windowMs === null) return null;
+  const words = resetInstantFromWords(resetText, nowMs);
+  if (words === null || words < nowMs - WORDS_RESET_SLACK_MS || words > nowMs + windowMs + WORDS_RESET_SLACK_MS) return null;
+  return { at: words, from: 'words' };
+}
+
 /**
  * One burn-down per seat, paid seats first (they are the ones that run out).
- * `seats` (the live roster, optional) supplies the provider's reset wording
- * for seats that publish no machine reset time (see `bindingResetText`).
+ * `history` is keyed by `seriesKey` (seat + window); each card draws its
+ * BINDING window's line. `seats` (the live roster, optional) supplies the
+ * provider's reset wording for seats that publish no machine reset time (see
+ * `bindingResetText`), which also places their reset when it names a clock
+ * time (`bindingReset`). `recorded` (from `mergeSeatHistory`) names the lines
+ * the server's recorded history contributed to.
  */
 export function seatBurns(
   view: BudgetView | null,
   history: Readonly<Record<string, SeatReading[]>>,
   seats?: readonly VerseSeat[] | null,
+  recorded?: ReadonlySet<string> | null,
 ): SeatBurn[] {
   if (!view) return [];
   const info = new Map(view.seatInfo.map((s) => [s.seatId, s]));
@@ -448,10 +671,13 @@ export function seatBurns(
     .map((h): SeatBurn => {
       const i = info.get(h.seatId);
       const engine = i?.engine ?? 'local';
-      const resetAt = h.resetAt ? Date.parse(h.resetAt) : NaN;
       const windowMs = h.bindingWindow ? WINDOW_MS[h.bindingWindow] : null;
-      const start = Number.isFinite(resetAt) && windowMs ? resetAt - windowMs : null;
-      const readings = history[h.seatId] ?? [];
+      const resetText = bindingResetText(roster.get(h.seatId), engine, h.bindingWindow, nowMs);
+      // A reset is only placed on a chart that has a window to put before it.
+      const reset = windowMs === null ? null : bindingReset(h.resetAt, resetText, windowMs, nowMs);
+      const start = reset && windowMs !== null ? reset.at - windowMs : null;
+      const key = h.bindingWindow ? seriesKey(h.seatId, h.bindingWindow) : null;
+      const readings = key ? history[key] ?? [] : [];
       return {
         seatId: h.seatId,
         label: i?.label ?? h.seatId,
@@ -459,14 +685,16 @@ export function seatBurns(
         window: h.bindingWindow,
         points: readings.filter((r) => start === null || r.t >= start).map((r) => ({ t: r.t, remaining: Math.max(0, 100 - r.used) })),
         start,
-        resetAt: Number.isFinite(resetAt) ? resetAt : null,
-        resetText: bindingResetText(roster.get(h.seatId), engine, h.bindingWindow, nowMs),
+        resetAt: reset?.at ?? null,
+        resetFrom: reset?.from ?? null,
+        resetText,
         reservePercent: view.effective[h.seatId]?.reservePercent ?? 0,
         line: bindingLine(h, view.effective[h.seatId]),
         enabled: view.effective[h.seatId]?.enabled ?? false,
         free: i?.free ?? false,
         eligible: h.eligibleForAutonomy,
         reason: h.reasons[0] ?? null,
+        recorded: key !== null && (recorded?.has(key) ?? false),
       };
     })
     .sort((a, b) => Number(a.free) - Number(b.free) || a.label.localeCompare(b.label));

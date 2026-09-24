@@ -18,6 +18,7 @@ import { useMemo, useState } from 'react';
 import { DiffViewer } from '../../inbox/DiffViewer.js';
 import { parseUnifiedDiff, type DiffFile, type DiffHunk } from '../../inbox/diff-parser.js';
 import { languageForPath, tokenizeLine, type LangFamily } from '../../inbox/highlight.js';
+import { useDisplayPath } from './path-display.js';
 import type { ToolDiff } from './tool-semantics.js';
 import styles from './chat.module.css';
 
@@ -85,17 +86,19 @@ function SingleFileDiff({ file, anchored, path }: { file: DiffFile; anchored: bo
   const hidden = rows.length - visible.length;
   const renamedFrom = file.status === 'renamed' ? file.oldPath : null;
   const note = statusNote(file);
+  // Drawn relative to the chat's roots; the full path is the tooltip.
+  const show = useDisplayPath();
 
   return (
     <div className={styles.diff} data-anchored={anchored ? 'true' : 'false'} data-status={file.status}>
       <div className={styles.diffHead}>
         {renamedFrom ? (
           <span className={styles.diffOldPath} title={renamedFrom}>
-            {renamedFrom}
+            {show(renamedFrom)}
             <span className={styles.visuallyHidden}> renamed to</span>
           </span>
         ) : null}
-        <span className={styles.diffPath} title={path}>{path}</span>
+        <span className={styles.diffPath} title={path}>{show(path)}</span>
         {file.status !== 'modified' ? (
           <span className={styles.diffStatus}>{file.status}</span>
         ) : null}

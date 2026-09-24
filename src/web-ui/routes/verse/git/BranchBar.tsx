@@ -360,7 +360,7 @@ function BranchRow({ status: s, compact, busy, onPrimary, onMenu, onOpenDiff }: 
     <li className={styles.row} aria-label={`${s.name}, ${s.branch ? `branch ${s.branch}` : 'detached HEAD'}`}>
       <span className={styles.ident}>
         <BranchGlyph />
-        <span className={styles.repo}>{s.name}</span>
+        <span className={styles.repo} title={s.gitRoot ?? s.root}>{s.name}</span>
         <span className={styles.branch} title={s.branch ?? undefined}>
           {s.branch ?? 'detached HEAD'}
         </span>

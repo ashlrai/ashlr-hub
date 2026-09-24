@@ -65,8 +65,8 @@ describe('Transcript', () => {
     const log = screen.getByRole('log');
     expect(log.querySelectorAll('[data-kind="tool"]')).toHaveLength(0);
     const group = log.querySelector('[data-kind="tool-group"]') as HTMLElement;
-    // Actions, not tool names: "Read 2 files, edited 1; 1 failed".
-    const line = within(group).getByRole('button', { name: /^Read 2 files, edited 1; 1 failed/ });
+    // Actions, not tool names: "Read 2 files, edited 1 file; 1 failed".
+    const line = within(group).getByRole('button', { name: /^Read 2 files, edited 1 file; 1 failed/ });
     // A failure opens the row on its FOCUS view: the failed call only…
     expect(line).toHaveAttribute('aria-expanded', 'true');
     expect(group.querySelectorAll('details[data-action]')).toHaveLength(1);
@@ -447,4 +447,109 @@ describe('Transcript — §1 target: ≤ 4 ms per streamed delta at 5k events', 
     expect(document.querySelector('[data-kind="assistant"][data-streaming] [data-stream-tail]')?.textContent).toContain(`word${n - 1}`);
     expect(perDelta).toBeLessThanOrEqual(4);
   }, 60_000);
+});
+
+// ===========================================================================
+// 3.10.1 — reading column polish: relative paths, the turn footer, notices
+// ===========================================================================
+
+describe('Transcript — 3.10.1 polish', () => {
+  /** The absolute scratch path the live app drew in the file-activity row. */
+  const SCRATCH = '/private/tmp/claude-501/-Users-mason-dev-hub/f387891f-39b2-43eb-90fc-2c5b22fac1e5/scratchpad/e2e-proj-39';
+  const READ_TURN = [
+    ev(1, 'user-message', { turnId: 't1', text: 'what is in math.ts?' }),
+    ev(2, 'tool-use', { turnId: 't1', toolUseId: 'r1', name: 'Read', input: { file_path: `${SCRATCH}/math.ts` } }),
+    ev(3, 'tool-result', { turnId: 't1', toolUseId: 'r1', output: 'export const add = (a, b) => a + b;', isError: false }),
+    ev(4, 'assistant-message', { turnId: 't1', text: 'It exports add.' }),
+    ev(5, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: null, durationMs: 219_000 }),
+  ];
+
+  it('draws tool paths relative to the chat root, with the full path in the tooltip', async () => {
+    const user = userEvent.setup();
+    render(<Transcript transcript={buildTranscript(READ_TURN)} loaded loadError={null} projectRoots={[SCRATCH]} />);
+
+    // The file-activity row: named by the relative path, the scratch path nowhere on it.
+    const activity = screen.getByRole('region', { name: 'Files this turn touched' });
+    const row = within(activity).getByRole('button', { name: 'read math.ts' });
+    expect(activity.textContent).not.toContain('scratchpad');
+    await user.hover(row);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(`${SCRATCH}/math.ts`);
+
+    // The tool card's line: the same relative path; the absolute one is its title.
+    const line = document.getElementById('verse-tool-r1')!.querySelector('summary')!;
+    expect(line.getAttribute('aria-label')).toMatch(/^Read: math\.ts \(/);
+    expect(line.textContent).not.toContain('scratchpad');
+    expect(within(line).getByText('math.ts')).toHaveAttribute('title', `${SCRATCH}/math.ts`);
+  });
+
+  it('falls back to a ~-abbreviated path for a file outside every root', () => {
+    const outside = [
+      ev(1, 'user-message', { turnId: 't1', text: 'check my settings' }),
+      ev(2, 'tool-use', { turnId: 't1', toolUseId: 'r1', name: 'Read', input: { file_path: '/Users/mason/.claude/settings.json' } }),
+      ev(3, 'tool-result', { turnId: 't1', toolUseId: 'r1', output: '{}', isError: false }),
+    ];
+    render(<Transcript transcript={buildTranscript(outside)} loaded loadError={null} projectRoots={['/Users/mason/dev/hub']} />);
+    expect(screen.getByRole('button', { name: 'read ~/.claude/settings.json' })).toBeInTheDocument();
+  });
+
+  it('attaches the turn duration to the turn footer — no orphan duration line between turns', () => {
+    render(<Transcript transcript={buildTranscript(READ_TURN)} loaded loadError={null} projectRoots={[SCRATCH]} />);
+    const log = screen.getByRole('log');
+    // A clean turn-done is not an item of its own any more…
+    expect(log.querySelector('[data-kind="turn-done"]')).toBeNull();
+    const turn = log.querySelector('[data-turn-key]') as HTMLElement;
+    expect([...turn.querySelectorAll(':scope > ol > li')].map((li) => li.getAttribute('data-kind'))).toEqual(['user', 'tool', 'assistant']);
+    // …its duration is the turn's last line, after the answer and the file summary.
+    const foot = turn.querySelector('[data-kind="turn-meta"]') as HTMLElement;
+    expect(foot).not.toBeNull();
+    expect(turn.lastElementChild).toBe(foot);
+    expect(foot).toHaveTextContent('Turn took 3m 39s');
+    expect(within(foot).getByText('3m 39s')).toBeInTheDocument();
+  });
+
+  it('keeps the failure jump in the footer beside the duration', () => {
+    const failed = [
+      ev(1, 'user-message', { turnId: 't1', text: 'build it' }),
+      ev(2, 'tool-use', { turnId: 't1', toolUseId: 'b1', name: 'Bash', input: { command: 'npm run build' } }),
+      ev(3, 'tool-result', { turnId: 't1', toolUseId: 'b1', output: 'boom', isError: true }),
+      ev(4, 'assistant-message', { turnId: 't1', text: 'The build fails.' }),
+      ev(5, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: null, durationMs: 4_200 }),
+    ];
+    render(<Transcript transcript={buildTranscript(failed)} loaded loadError={null} />);
+    const foot = screen.getByRole('log').querySelector('[data-kind="turn-meta"]') as HTMLElement;
+    expect(foot).toHaveTextContent('4.2s');
+    expect(within(foot).getByRole('button', { name: /1 failure in this turn/ })).toBeInTheDocument();
+  });
+
+  it('settles reasoning to "Thought …" with the shared ▸ and no stray bullet', () => {
+    const transcript = buildTranscript([
+      ev(1, 'user-message', { turnId: 't1', text: 'why?' }),
+      ev(2, 'thinking', { turnId: 't1', text: 'Because of the pager.', durationMs: 4_000 }),
+      ev(3, 'assistant-message', { turnId: 't1', text: 'The pager.' }),
+    ]);
+    render(<Transcript transcript={transcript} loaded loadError={null} />);
+    const summary = document.querySelector('[data-kind="thinking"] summary') as HTMLElement;
+    expect(summary).toHaveTextContent('Thought 4s · ~6 tok');
+    // The breathing dot is for a block that is still streaming only.
+    expect(summary.querySelector('[class*="glyph"]')).toBeNull();
+    expect(summary.querySelector('[class*="chevron"]')).not.toBeNull();
+  });
+
+  it('says a failed load in the notice shape: the state in words, then the reason, then Retry', async () => {
+    const user = userEvent.setup();
+    const onRetry = vi.fn();
+    render(<Transcript transcript={buildTranscript([])} loaded={false} loadError="HTTP 500" onRetry={onRetry} />);
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('Couldn’t load this chat. HTTP 500');
+    await user.click(within(alert).getByRole('button', { name: 'Retry' }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('draws the user turn as its own block and the answer as prose', () => {
+    render(<Transcript transcript={buildTranscript(READ_TURN)} loaded loadError={null} />);
+    const user = screen.getByRole('log').querySelector('[data-kind="user"]') as HTMLElement;
+    expect(user.firstElementChild).toHaveTextContent('what is in math.ts?');
+    expect(user.className).toMatch(/user/);
+    expect(screen.getByRole('log').querySelector('[data-kind="assistant"]')).toHaveTextContent('It exports add.');
+  });
 });

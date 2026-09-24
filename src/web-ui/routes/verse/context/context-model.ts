@@ -24,6 +24,7 @@ import {
   sessionOverheadTokens,
 } from '../../../../core/verse/context-math.js';
 import { formatRelative } from '../verse-model.js';
+import { asClause, tidyProse } from '../autonomy/format.js';
 import { formatTokens } from '../verse-store.js';
 
 // ---------------------------------------------------------------------------
@@ -71,12 +72,26 @@ export function modelOption(seat: VerseSeat | null | undefined, modelId: string)
   return seat.models.find((m) => canonicalModelId(m.id) === canonical) ?? null;
 }
 
-/** Why a seat+model cannot take a new session right now; null when it can. */
-export function targetUnavailableReason(seat: VerseSeat | null | undefined, option: VerseModelOption | null): string | null {
+/**
+ * Why a seat+model cannot take a new session right now; null when it can.
+ *
+ * The seat's own reason is embedded as a clause: its closing period is
+ * dropped (no "exhausted..") and any ISO instant in it — a health summary
+ * saying when usage resets — is read as the viewer's local time.
+ */
+export function targetUnavailableReason(
+  seat: VerseSeat | null | undefined,
+  option: VerseModelOption | null,
+  now: number = Date.now(),
+): string | null {
   if (!seat) return 'Pick a seat to continue on.';
-  if (seat.health.state === 'unavailable') return `${seat.label} is unavailable: ${seat.health.summary ?? 'no reason given'}.`;
+  if (seat.health.state === 'unavailable') {
+    return `${seat.label} is unavailable: ${asClause(tidyProse(seat.health.summary ?? 'no reason given', now))}.`;
+  }
   if (!option) return 'Pick a model on this seat.';
-  if (option.unavailableReason) return `${option.label} cannot run on ${seat.label}: ${option.unavailableReason}.`;
+  if (option.unavailableReason) {
+    return `${option.label} cannot run on ${seat.label}: ${asClause(tidyProse(option.unavailableReason, now))}.`;
+  }
   return null;
 }
 

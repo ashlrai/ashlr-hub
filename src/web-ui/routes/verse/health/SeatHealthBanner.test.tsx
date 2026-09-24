@@ -66,7 +66,10 @@ describe('SeatHealthBannerView', () => {
     render(<SeatHealthBannerView now={NOW} seats={SEATS} onRefresh={onRefresh} reports={[
       healthReport('grok', { engine: 'grok', connection: 'exhausted', resetAt: '2026-09-25T18:25:00.000Z', fix: { kind: 'wait' } }),
     ]} />);
-    expect(screen.getByText(/^resets /)).toBeInTheDocument();
+    // The reset is local wall-clock time with a countdown beside it — never the raw ISO instant.
+    const reset = screen.getByText(/^resets /);
+    expect(reset).toHaveTextContent(/ · usable again in \d/);
+    expect(reset).not.toHaveTextContent('2026-09-25T');
     await user.click(screen.getByRole('button', { name: 'Check again' }));
     await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
   });

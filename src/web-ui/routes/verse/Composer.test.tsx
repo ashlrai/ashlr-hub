@@ -62,7 +62,9 @@ describe('Composer', () => {
     render(<Composer {...p} />);
     // No per-message model <select> in the composer any more.
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
-    const pill = screen.getByRole('button', { name: /Claude Max · Opus 5/ });
+    // The chip names the seat; the model is the Model picker's (said once).
+    const pill = screen.getByRole('button', { name: /^Seat: Claude Max,/ });
+    expect(pill).toHaveTextContent(/^CClaude Max$/);
     expect(pill).toHaveAttribute('aria-haspopup', 'menu');
 
     await user.click(pill);
@@ -170,7 +172,11 @@ describe('Composer — depth for a long day', () => {
     const view = render(<Composer {...p} />);
     await user.keyboard('{Meta>}.{/Meta}');
     expect(p.onStop).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('button', { name: /Stop the running turn/ })).toHaveAttribute('title', 'Stop the running turn (⌘. or Esc from an empty box)');
+    // The square ■ says what it does and both ways to do it without the mouse.
+    screen.getByRole('button', { name: /Stop the running turn/ }).focus();
+    const tip = await screen.findByRole('tooltip');
+    expect(tip).toHaveTextContent('Stop the running turn — or Esc from an empty box');
+    expect(tip).toHaveTextContent('⌘.');
 
     // Never armed on an idle chat.
     view.rerender(<Composer {...props({ sessionId: 'vs_1', running: false, onStop: p.onStop })} />);
@@ -278,7 +284,7 @@ describe('Composer — V3.9 cost hint on the compaction point', () => {
     const allUnavailable: VerseSeat = { ...CLAUDE_1M_SEAT, id: 'claude-c', label: 'Claude C', models: [CLAUDE_1M_SEAT.models[1]!] };
     const p = props({ seats: [CLAUDE_SEAT, skewed, allUnavailable] });
     render(<Composer {...p} />);
-    await user.click(screen.getByRole('button', { name: /Claude Max · Opus 5/ }));
+    await user.click(screen.getByRole('button', { name: /^Seat: Claude Max,/ }));
     const menu = screen.getByRole('menu', { name: 'Seat' });
     expect(within(menu).queryByRole('menuitem', { name: /Claude C/ })).toBeNull();
     const item = within(menu).getByRole('menuitem', { name: /New chat on Claude B/ });

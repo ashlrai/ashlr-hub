@@ -53,7 +53,7 @@ export function SpendPanel({
   const stale = todaySpentDate !== null && !isCurrentLedgerDay(todaySpentDate);
   const spentToday = stale ? null : todaySpentUsd;
   const budgetCaption = stale
-    ? `Nothing recorded today — the last ledger day is ${todaySpentDate}`
+    ? `Nothing recorded today — the last ledger day is ${chartFormat.formatDayLabel(todaySpentDate)}`
     : dailyBudgetUsd === null
       ? 'Configured daily budget unavailable'
       : dailyBudgetUsd === 0

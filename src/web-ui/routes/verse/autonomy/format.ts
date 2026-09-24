@@ -8,9 +8,63 @@
  * "—", a null budget is "not configured", and a budget of exactly 0 is
  * "stopped" — which is the single most misread number in the whole product.
  */
+import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
+import { formatDayLabel, formatPercent } from '../../../components/charts/format.js';
+import { isAbsolutePath, projectName } from '../verse-model.js';
 
 /** What we render when a value genuinely is not known. */
 export const UNKNOWN = '—';
+
+/**
+ * A share as a whole percentage — "18%" — except a non-zero share under one
+ * percent, which reads "<1%". One precision per panel: "0%" for a sliver of
+ * real spend or progress would state that nothing happened.
+ */
+export function formatWholePercent(fraction: number | null | undefined): string {
+  if (typeof fraction !== 'number' || !Number.isFinite(fraction)) return UNKNOWN;
+  if (fraction > 0 && fraction < 0.01) return '<1%';
+  return formatPercent(fraction);
+}
+
+/** An ISO-8601 instant (a date WITH a time) anywhere inside a sentence. */
+const ISO_INSTANT_IN_TEXT = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?(?![\w:])/g;
+
+/**
+ * Server prose made fit to print: every ISO instant becomes the viewer's
+ * local time ("today 11:46 PM", "Fri 11:46 PM", "Sep 26, 11:46 PM" — the
+ * wording `describeResetAt` gives resets everywhere else), and the ".;" / ".."
+ * that a sentence joined onto another sentence leaves behind is collapsed.
+ *
+ * For text the server wrote for a person (`ApiError.detail`, action notes,
+ * audit summaries, fleet notes): it is shown verbatim otherwise.
+ */
+export function tidyProse(text: string, now: number = Date.now()): string {
+  return text
+    .replace(ISO_INSTANT_IN_TEXT, (iso) => describeResetAt(iso, now) ?? iso)
+    .replace(/\.\s*;/g, ';')
+    .replace(/([^.])\.\.(?!\.)/g, '$1.');
+}
+
+/**
+ * A sentence ready to be embedded in another one: trimmed, with its own
+ * closing period dropped so "… unavailable: quota exhausted." does not become
+ * "quota exhausted..". An ellipsis is kept — it is not a full stop.
+ */
+export function asClause(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.endsWith('...') || trimmed.endsWith('…')) return trimmed;
+  return trimmed.replace(/\.+$/, '');
+}
+
+/**
+ * What a repo cell shows: the folder's own name for an absolute checkout path
+ * (the full path belongs in the cell's `title`), and a `owner/name` slug or a
+ * bare name as it came — cutting a slug to its last segment would drop the
+ * owner, which is half of what identifies it.
+ */
+export function repoDisplayName(repo: string): string {
+  return isAbsolutePath(repo) ? projectName(repo) : repo;
+}
 
 export function formatUsd(value: number | null | undefined): string {
   if (typeof value !== 'number' || !Number.isFinite(value)) return UNKNOWN;
@@ -168,7 +222,9 @@ export function budgetMeter(
       state: 'unknown',
       percent: null,
       label: `${UNKNOWN} spent today · budget ${formatUsd(cap)}`,
-      note: `Nothing has been recorded today — the last ledger day is ${todayDate}.`,
+      // "Sep 1", not "2026-09-01": the ledger day is a calendar date, so it is
+      // read as one (formatDayLabel parses it in UTC and cannot shift a day).
+      note: `Nothing has been recorded today — the last ledger day is ${formatDayLabel(todayDate)}.`,
     };
   }
   if (cap === null || spend === null) {
@@ -186,7 +242,8 @@ export function budgetMeter(
   return {
     state,
     percent,
-    label: `${formatUsd(spend)} of ${formatUsd(cap)} today · ${percent}%`,
+    // The text says "<1%" for a sliver of spend; `percent` (the bar) stays numeric.
+    label: `${formatUsd(spend)} of ${formatUsd(cap)} today · ${formatWholePercent(Math.min(1, spend / cap))}`,
     note:
       state === 'over'
         ? 'Daily budget reached — the loop idles until the date rolls over.'

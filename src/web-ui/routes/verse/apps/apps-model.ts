@@ -3,7 +3,7 @@
  *
  * The page has five groups (SPEC-310C §4), from three kinds of source:
  *   ACCOUNTS       the shared capacity rows (usage/capacity-strip-model.ts)
- *                  plus the actions each seat needs (Reconnect / Fix / Edit budget);
+ *                  plus the actions each seat needs (Reconnect / Check again / Fix / Edit budget);
  *   DESKTOP, TERMINAL AGENTS, LOCAL MODELS   GET /api/verse/apps, as served;
  *   MCP SERVERS    GET /api/verse/mcp (what each seat would ACTUALLY load).
  * Everything that decides a word, a tone or whether a control is enabled
@@ -17,7 +17,7 @@ import type { VerseBootstrap, VerseEngine, VerseSeat } from '../../../data/api-t
 import type { HealthTone } from '../health/health-model.js';
 import type { McpSeat, McpServer, McpSnapshot } from '../mcp/mcp-contract.js';
 import { reasonSentence, SEAT_REASON_COPY } from '../mcp/mcp-contract.js';
-import type { CapacityRow } from '../usage/capacity-strip-model.js';
+import type { AccountStatus, CapacityRow } from '../usage/capacity-strip-model.js';
 
 /** SPEC-310C §4 order. */
 export const APPS_GROUP_ORDER = ['accounts', 'desktop', 'terminal-agents', 'local-models', 'mcp-servers'] as const;
@@ -117,7 +117,7 @@ export function launchCommand(row: VerseAppRow, choice: LaunchChoice): string[] 
 // Accounts
 // ---------------------------------------------------------------------------
 
-export type AccountActionKind = 'reconnect' | 'fix' | 'edit-budget';
+export type AccountActionKind = 'reconnect' | 'check-again' | 'fix' | 'edit-budget';
 
 export interface AccountAction {
   kind: AccountActionKind;
@@ -128,20 +128,30 @@ export interface AccountAction {
   primary: boolean;
 }
 
+/** Statuses a fresh health sweep can change on its own: offer "Check again" for them. */
+const RECHECKABLE: ReadonlySet<AccountStatus['kind']> = new Set(['spent', 'not-checked', 'unavailable']);
+
 /**
- * What a seat row offers. Reconnect when the seat is signed out or its
- * sign-in is expiring (the provider's own login, in Terminal); Fix when A2
- * has a command for what is wrong (a re-pin); Edit budget for every paid seat.
+ * What a seat row offers, the one it needs most first:
+ *   Reconnect    signed out or sign-in expiring (the provider's own login, in Terminal);
+ *   Check again  spent, not checked, or unavailable — a zero-cost health sweep
+ *                is what moves those (pass the row's SETTLED status, so the
+ *                button stays put while its own check runs);
+ *   Fix          A2 has a command for what is wrong (a re-pin);
+ *   Edit budget  every paid seat.
  * Local rows need none of these.
  */
-export function accountActions(row: CapacityRow): AccountAction[] {
+export function accountActions(row: CapacityRow, status?: AccountStatus | null): AccountAction[] {
   if (row.kind === 'local') return [];
   const out: AccountAction[] = [];
   const c = row.connection;
-  const needsLogin = c !== null && (c.connection === 'signed-out' || c.connection === 'expiring' || c.fixKind === 'reauth');
+  const needsLogin = row.signedOut
+    || (c !== null && (c.connection === 'signed-out' || c.connection === 'expiring' || c.fixKind === 'reauth'));
   if (needsLogin) out.push({ kind: 'reconnect', label: 'Reconnect', command: null, primary: true });
+  const recheck = !needsLogin && status != null && RECHECKABLE.has(status.kind);
+  if (recheck) out.push({ kind: 'check-again', label: 'Check again', command: null, primary: true });
   if (c !== null && c.fixKind !== 'reauth' && c.fixKind !== 'none' && c.fixCommand !== null) {
-    out.push({ kind: 'fix', label: 'Fix', command: c.fixCommand, primary: !needsLogin });
+    out.push({ kind: 'fix', label: 'Fix', command: c.fixCommand, primary: !needsLogin && !recheck });
   }
   out.push({ kind: 'edit-budget', label: 'Edit budget', command: null, primary: false });
   return out;

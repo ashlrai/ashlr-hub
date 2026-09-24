@@ -78,7 +78,7 @@ export function FleetSection() {
         <GateFunnelCards read={fleet.data} />
       </Cell>
       <Cell span={5}>
-        <WhySeatCard read={fleet.data} preview={preview.data ?? null} view={budget.data ?? null} />
+        <WhySeatCard read={fleet.data} preview={preview.data ?? null} view={budget.data ?? null} now={now} />
       </Cell>
       <Cell span={7}>
         <ParkedCard read={fleet.data} now={now} />

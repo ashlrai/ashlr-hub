@@ -10,6 +10,7 @@
 import { SkeletonRow } from '../../../components/primitives/Skeleton.js';
 import { useQuery } from '../../../data/hooks.js';
 import { verseBacklogQuery, verseGoalsQuery } from './control-queries.js';
+import { formatWholePercent, repoDisplayName, UNKNOWN } from './format.js';
 import styles from './autonomy.module.css';
 
 const MAX_ROWS = 8;
@@ -41,18 +42,22 @@ export function GoalsBacklogPanel() {
               {goals.error?.message ?? 'Could not read goals.'}
             </p>
           ) : activeGoals.length === 0 ? (
-            <p className={styles.empty}>No active goals. The loop falls back to the backlog for work.</p>
+            <p className={styles.empty}>
+              No active goals, so the loop falls back to the backlog for work. Add one with{' '}
+              <code>ashlr goals add "&lt;objective&gt;"</code>.
+            </p>
           ) : (
             <div className={styles.summaryList}>
               {activeGoals.slice(0, MAX_ROWS).map((goal) => {
-                const done = Math.round((goal.progress?.fractionDone ?? 0) * 100);
+                // One precision for the column: whole percent, "<1%" for a started goal.
+                const done = formatWholePercent(goal.progress?.fractionDone ?? 0);
                 return (
                   <div className={styles.summaryRow} key={goal.id}>
                     <span className={styles.summaryTitle} title={goal.objective}>
                       {goal.objective}
                     </span>
                     <span className={styles.summaryMeta}>
-                      {done}% · {goal.status}
+                      {done} · {goal.status}
                     </span>
                   </div>
                 );
@@ -76,9 +81,14 @@ export function GoalsBacklogPanel() {
               {backlog.error?.message ?? 'Could not read the backlog.'}
             </p>
           ) : backlog.data?.absent ? (
-            <p className={styles.empty}>No backlog has been built yet — run a tick, or `ashlr backlog`, to produce one.</p>
+            <p className={styles.empty}>
+              No backlog has been built yet. Run one tick from Controls, or <code>ashlr backlog</code>, to produce one.
+            </p>
           ) : items.length === 0 ? (
-            <p className={styles.empty}>The backlog is empty. A tick with nothing to do records `no-backlog` and idles.</p>
+            <p className={styles.empty}>
+              The backlog is empty, so a tick records <code>no-backlog</code> and idles. Enroll another repository in
+              Scope, or add a goal, to give it work.
+            </p>
           ) : (
             <div className={styles.summaryList}>
               {items.slice(0, MAX_ROWS).map((item, i) => (
@@ -86,8 +96,8 @@ export function GoalsBacklogPanel() {
                   <span className={styles.summaryTitle} title={item.title}>
                     {item.title ?? item.id ?? 'untitled item'}
                   </span>
-                  <span className={styles.summaryMeta}>
-                    {item.repo ? item.repo.split('/').pop() : '—'}
+                  <span className={styles.summaryMeta} title={item.repo ?? undefined}>
+                    {item.repo ? repoDisplayName(item.repo) : UNKNOWN}
                     {typeof item.score === 'number' ? ` · ${item.score}` : ''}
                   </span>
                 </div>

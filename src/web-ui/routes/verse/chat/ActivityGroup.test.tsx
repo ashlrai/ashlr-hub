@@ -34,8 +34,10 @@ describe('ActivityGroup', () => {
   it('folds a clean run to one line that states the work and the time', async () => {
     const user = userEvent.setup();
     render(<ActivityGroupView item={group([tool('Bash', ok), tool('Bash', ok), tool('Read', ok)])} facts={NO_FACTS} renderMember={renderMember} />);
-    const line = screen.getByRole('button', { name: 'Ran 2 commands, read 1; 2m 14s' });
+    const line = screen.getByRole('button', { name: 'Ran 2 commands, read 1 file; 2m 14s' });
     expect(line).toHaveAttribute('aria-expanded', 'false');
+    // The row itself reads with dots; the accessible name above with commas.
+    expect(line).toHaveTextContent('Ran 2 commands · read 1 file');
     expect(screen.queryAllByTestId('member')).toHaveLength(0);
     // Keyboard: Enter opens everything (nothing to focus on), Space folds it again.
     line.focus();
@@ -50,7 +52,7 @@ describe('ActivityGroup', () => {
     const user = userEvent.setup();
     const items = [tool('Bash', ok), tool('Bash', ok), tool('Bash', bad), tool('Read', ok), tool('Read', ok)];
     render(<ActivityGroupView item={group(items)} facts={NO_FACTS} renderMember={renderMember} />);
-    const line = screen.getByRole('button', { name: /^Ran 3 commands, read 2; 1 failed/ });
+    const line = screen.getByRole('button', { name: /^Ran 3 commands, read 2 files; 1 failed/ });
     expect(line).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getAllByTestId('member')).toHaveLength(1);
     await user.click(screen.getByRole('button', { name: 'Show 4 more' }));

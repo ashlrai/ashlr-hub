@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  formatCompact, formatDayLabel, formatPercent, formatSignedCompact, formatTimeLabel, formatUsd,
+  formatClockTime, formatCompact, formatDayLabel, formatPercent, formatSignedCompact, formatTick, formatTimeLabel, formatUsd,
+  formatWeekdayTime, stepDecimals, timeLabelLadder, withinOneDay,
 } from './format';
 
 describe('formatDayLabel', () => {
@@ -77,5 +78,48 @@ describe('shared chart number and timestamp formatting', () => {
   it('keeps epoch timestamp labels in the local calendar', () => {
     const localNoon = new Date(2024, 0, 2, 12, 0, 0).getTime();
     expect(formatTimeLabel(localNoon)).toBe('Jan 2');
+  });
+});
+
+describe('tick precision (V3.10.1)', () => {
+  it('needs exactly the decimals the step has', () => {
+    expect([1, 5, 25, 0.2, 0.5, 0.25, 0.05, 0.1 + 0.2].map(stepDecimals)).toEqual([0, 0, 0, 1, 1, 2, 2, 1]);
+  });
+  it('prints every tick at its step precision: 0.25 steps show two decimals', () => {
+    expect([0, 0.25, 0.5, 0.75, 1].map((t) => formatTick(t, 0.25))).toEqual(['0', '0.25', '0.50', '0.75', '1.00']);
+    expect([0, 0.2, 1].map((t) => formatTick(t, 0.2))).toEqual(['0', '0.2', '1.0']);
+    expect([0, 1, 2].map((t) => formatTick(t, 1))).toEqual(['0', '1', '2']);
+    expect(formatTick(12_500, 2_500)).toBe('12.5K');
+    expect(formatTick(1_250_000, 250_000)).toBe('1.25M');
+    expect(formatTick(-0.4, 0.2)).toBe('-0.4');
+  });
+});
+
+describe('time axis ladders (V3.10.1)', () => {
+  const T = Date.parse('2026-09-18T15:46:00Z');
+  const H = 3_600_000;
+  const D = 24 * H;
+  const custom = (ms: number) => `custom ${ms}`;
+
+  it('knows a span that sits inside one day, and never calls a zero span one', () => {
+    expect(withinOneDay(T, T + 5 * H)).toBe(true);
+    expect(withinOneDay(T, T + 60_000)).toBe(true);
+    expect(withinOneDay(T, T)).toBe(false);
+    expect(withinOneDay(T, T + 7 * D)).toBe(false);
+  });
+
+  it('uses the clock time alone inside one day, whatever the caller formats', () => {
+    const ladder = timeLabelLadder(T, T + 5 * H, custom);
+    expect(ladder).toEqual([formatClockTime]);
+    expect(formatClockTime(T)).toMatch(/^\d{1,2}:\d{2} [AP]M$/);
+  });
+
+  it('walks from the caller\'s format to shorter dates across days', () => {
+    // A 7-day window whose ends share a time of day: the time adds nothing.
+    expect(timeLabelLadder(T, T + 7 * D, custom)).toEqual([custom, formatTimeLabel]);
+    // Three days of readings at different times: weekday + time, then the date.
+    expect(timeLabelLadder(T, T + 3 * D + 2 * H, custom)).toEqual([custom, formatWeekdayTime, formatTimeLabel]);
+    // No caller format: the kit's day label.
+    expect(timeLabelLadder(T, T + 3 * D)).toEqual([formatTimeLabel]);
   });
 });

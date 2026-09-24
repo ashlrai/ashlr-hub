@@ -19,7 +19,7 @@
  * (`defaultView="table"`, SPEC-310C §5 "Mind's matrix shows as a table").
  */
 import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
-import { CHART_SEQUENTIAL_SOFT, hatchPatternId, heatColor, quantityColor, type ChartEngine } from './colors.js';
+import { CHART_SEQUENTIAL_SOFT, hatchPatternId, heatColor, quantityColor, quantityInk, type ChartEngine } from './colors.js';
 import { ChartFrame, type ChartStatus, type ChartView } from './ChartFrame.js';
 import { ChartTooltip, EngineTick, HatchPattern, clampTooltipLeft } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
@@ -134,7 +134,10 @@ export function MatrixHeatmap({
     const v = values[r]?.[c];
     return v === undefined || v === null || !Number.isFinite(v) ? null : v;
   };
-  const fill = (v: number | null): string => (v === null ? `url(#${hatchId})` : v <= 0 ? heatColor(0) : quantityColor(totals.max > 0 ? v / totals.max : 0));
+  const fraction = (v: number): number => (totals.max > 0 ? v / totals.max : 0);
+  const fill = (v: number | null): string => (v === null ? `url(#${hatchId})` : v <= 0 ? heatColor(0) : quantityColor(fraction(v)));
+  // A true zero sits on the faint heat-0 cell, the palest ground there is.
+  const cellInk = (v: number): string => (v <= 0 ? quantityInk(0) : quantityInk(fraction(v)));
   const describe = (r: number, c: number): string => {
     const v = cellValue(r, c);
     return `${rows[r]!.label} × ${columns[c]!.label}: ${v === null ? 'not measured' : `${formatValue(v)}${unitText}`}`;
@@ -279,7 +282,10 @@ export function MatrixHeatmap({
                         onPointerLeave={() => setFocus(null)}
                       />
                       {showNumbers && v !== null ? (
-                        <text className={`${plot.labelStrong} ${plot.halo} ${styles.num}`} x={x + cellW / 2} y={y + cellH / 2} dy="0.32em" textAnchor="middle">
+                        // Plain fill picked by the cell's luminance (colors.ts
+                        // quantityInk) — no halo: a surface stroke around text
+                        // on a dark cell smeared "1" into a blob.
+                        <text data-cell-value={`${row.id}:${col.id}`} className={styles.num} x={x + cellW / 2} y={y + cellH / 2} dy="0.32em" textAnchor="middle" fill={cellInk(v)}>
                           {formatValue(v)}
                         </text>
                       ) : null}

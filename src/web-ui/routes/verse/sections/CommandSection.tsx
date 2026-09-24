@@ -34,7 +34,7 @@ import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { useViewport } from '../shell/viewport.js';
 import { ActionStatus, useSurfaceActions } from '../command/actions.js';
 import { AutonomyBar } from '../command/AutonomyBar.js';
-import { buildKpis, claudeReserve, recordReading, seatBurns, sinceYouLooked, type SeatReading } from '../command/command-model.js';
+import { buildKpis, claudeReserve, mergeSeatHistory, recordReading, seatBurns, sinceYouLooked, type SeatReading } from '../command/command-model.js';
 import { KpiRow } from '../command/KpiRow.js';
 import { LeaderCard } from '../command/LeaderCard.js';
 import { NeedsYouCard } from '../command/NeedsYouCard.js';
@@ -48,7 +48,9 @@ import {
   fleetLiveQuery,
   leaderQuery,
   learningQuery,
+  seatHistoryQuery,
 } from '../command/surface-data.js';
+import { darkSinceDay, darkSinceLabel, fleetDarkSince } from '../fleet/dark-since.js';
 import { laneRows, runTone } from '../fleet/live-model.js';
 import styles from '../command/command.module.css';
 
@@ -58,11 +60,16 @@ const HOUR = 3_600_000;
 export const COMMAND_FAST_POLL_MS = 10_000;
 /** Slow reads: the Leader, budgets (the collector samples every 30 s). */
 export const COMMAND_SLOW_POLL_MS = 30_000;
-/** History and learning change daily. */
+/**
+ * History and learning change daily; the recorded seat history grows by a
+ * row per seat window every few minutes — its newest end is the live budget
+ * reading (30 s), so this slower refresh only fills in the middle.
+ */
 export const COMMAND_HISTORY_POLL_MS = 300_000;
 
 // Seat readings observed since the page opened (module scope: they survive
 // the keep-alive shell unmounting Command; see command-model recordReading).
+// Merged with the server's recorded history below, so a reload keeps the window.
 let seatReadings: Record<string, SeatReading[]> = {};
 
 export function CommandSection() {
@@ -75,6 +82,8 @@ export function CommandSection() {
   const learning = useQuery(learningQuery, { freshMs: 60_000 });
   const history = useQuery(fleetHistoryQuery, { freshMs: 60_000 });
   const budget = useQuery(budgetQuery, { freshMs: 15_000 });
+  // Fetched on mount, then with the other slow history reads — never at 30 s.
+  const seatHistory = useQuery(seatHistoryQuery, { freshMs: 60_000 });
 
   const refetch = {
     authority: useRefetch(authorityQuery),
@@ -83,6 +92,7 @@ export function CommandSection() {
     learning: useRefetch(learningQuery),
     history: useRefetch(fleetHistoryQuery),
     budget: useRefetch(budgetQuery),
+    seatHistory: useRefetch(seatHistoryQuery),
   };
   usePollWhileVisible(() => {
     refetch.authority();
@@ -95,6 +105,7 @@ export function CommandSection() {
   usePollWhileVisible(() => {
     refetch.history();
     refetch.learning();
+    refetch.seatHistory();
   }, COMMAND_HISTORY_POLL_MS);
 
   // A 30 s clock is enough for the chip and the swimlane's "now"; the
@@ -127,7 +138,9 @@ export function CommandSection() {
   const auth = authority.data?.value ?? null;
   const live = fleet.data?.value ?? null;
   const hist = history.data?.value ?? null;
-  const darkSince = live?.state === 'dark' ? live.lastActivityAt ?? hist?.darkSince ?? null : hist?.darkSince ?? null;
+  // THE dark-since instant (fleet/dark-since.ts): null unless the fleet is
+  // dark. Never fleet history's date — that is "quiet since", not "dark".
+  const darkSince = fleetDarkSince(live);
 
   const kpis = useMemo(
     // `budget` puts each paid seat's window usage (percent, never dollars) in
@@ -135,7 +148,9 @@ export function CommandSection() {
     () => buildKpis({ fleet: live, history: hist, learning: learning.data?.value ?? null, policy: auth?.policy ?? null, budget: view }),
     [live, hist, learning.data, auth, view],
   );
-  const burns = useMemo(() => seatBurns(view, readings, seats), [view, readings, seats]);
+  const recordedSeats = seatHistory.data?.value ?? null;
+  const merged = useMemo(() => mergeSeatHistory(readings, recordedSeats), [readings, recordedSeats]);
+  const burns = useMemo(() => seatBurns(view, merged.readings, seats, merged.recorded), [view, merged, seats]);
   const since = sinceYouLooked({ lastLookedAt: lastLooked, fleet: live, leader: leader.data?.value ?? null, activity: activity.data });
 
   const windowH = compact ? 6 : 12;
@@ -146,14 +161,14 @@ export function CommandSection() {
     : !live
       ? { kind: 'unknown', reason: fleet.data.reason ?? 'the live fleet view did not answer.' }
       : live.state === 'dark' && lanes.length === 0
-        ? { kind: 'dark', since: darkSince ?? live.generatedAt, detail: live.stateReason ?? undefined }
+        ? { kind: 'dark', since: darkSinceDay(darkSince ?? live.generatedAt), detail: live.stateReason ?? undefined }
         : lanes.length === 0
           ? { kind: 'empty', message: `No runs in the last ${windowH} hours.` }
           : { kind: 'ready' };
 
   const fleetLine = live
     ? live.state === 'dark'
-      ? `Fleet dark${darkSince ? ` since ${new Date(darkSince).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}` : ''}.`
+      ? `Fleet dark${darkSince ? ` since ${darkSinceLabel(darkSince)}` : ''}.`
       : `Fleet ${live.state}: ${live.summary.building ?? '—'} building, ${live.summary.queued ?? '—'} queued.`
     : 'Fleet status unknown.';
 

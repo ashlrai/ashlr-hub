@@ -12,13 +12,13 @@ import type { VerseEvent, VerseSeat, VerseSession } from '../../../data/api-type
 import { MEMORY_BLOCK_MAX_BYTES } from './context-model.js';
 import {
   CONTEXT_MODE_LABEL,
-  formatRatio,
   idleCacheWarning,
   reportedCacheHitRatio,
   sessionContext,
   turnContextStats,
 } from '../usage/context-model.js';
 import { formatElapsed, windowSourceText } from '../verse-model.js';
+import { formatWholePercent } from '../autonomy/format.js';
 import { formatTokens, lastTurnActivityAt } from '../verse-store.js';
 import styles from './ChatUsage.module.css';
 
@@ -70,7 +70,8 @@ export function ChatUsage({
         <div>
           <dt>Cache hit</dt>
           <dd title="Share of prompt tokens served from the provider's cache: cache read ÷ (input + cache read + cache write).">
-            {hit !== null ? formatRatio(hit) : promptTokens > 0 ? 'none reported' : '—'}
+            {/* Whole percent, "<1%" for a sliver — never "0%" beside real cache reads. */}
+            {hit !== null ? formatWholePercent(hit) : promptTokens > 0 ? 'none reported' : '—'}
           </dd>
         </div>
         <div><dt>Compactions</dt><dd>{compactions}</dd></div>

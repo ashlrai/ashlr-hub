@@ -28,12 +28,15 @@ import { memo, useEffect, useState } from 'react';
 import type { VerseProgressPhase, VerseStatusKind } from '../../../../core/verse/types.js';
 import { summarizeToolInput } from '../verse-model.js';
 import type { TranscriptItem, VerseLiveState } from '../verse-store.js';
+import { inputPath, useDisplayPath } from './path-display.js';
 import styles from './LiveStatus.module.css';
 
 export interface LivePhase {
   phase: VerseProgressPhase;
   /** What the phase is about: the running command/path, when known. */
   detail: string | null;
+  /** 3.10.1: the file the running call names, drawn relative to the chat's roots. */
+  path?: string | null;
 }
 
 /**
@@ -46,7 +49,7 @@ export function derivePhaseFromTranscript(items: readonly TranscriptItem[], live
     const item = items[i]!;
     if (item.kind === 'user') break;
     if (item.kind === 'tool') {
-      if (item.result === null) return { phase: 'tool', detail: summarizeToolInput(item.input) || item.name };
+      if (item.result === null) return { phase: 'tool', detail: summarizeToolInput(item.input) || item.name, path: inputPath(item.input) };
       break;
     }
     if (item.kind === 'assistant' && item.streaming) return { phase: 'writing', detail: null };
@@ -125,7 +128,11 @@ export const LiveStatus = memo(function LiveStatus({ live, derived, onStop, show
     return () => clearInterval(id);
   }, [live.turnId]);
 
-  const line = liveStatusLine(live, derived, now);
+  const show = useDisplayPath();
+  const computed = liveStatusLine(live, derived, now);
+  // A running Read names its file as the transcript does — relative, not the
+  // head of an absolute path (chat/path-display.ts); the full path is the title.
+  const line = computed.phase === 'tool' && derived.path ? { ...computed, detail: show(derived.path) } : computed;
   const spoken = line.detail ? `${line.word}: ${line.detail}` : line.word;
   const notice = showNotice ? live.notice : null;
 
@@ -136,7 +143,7 @@ export const LiveStatus = memo(function LiveStatus({ live, derived, onStop, show
         <span className={styles.text} aria-hidden="true">
           <span className={styles.word}>{line.word}</span>
           {line.elapsedMs !== null ? <><span className={styles.sep}>·</span><span className={styles.figure}>{formatLiveElapsed(line.elapsedMs)}</span></> : null}
-          {line.detail ? <><span className={styles.sep}>·</span><span className={styles.detail} title={line.detail}>{line.detail}</span></> : null}
+          {line.detail ? <><span className={styles.sep}>·</span><span className={styles.detail} title={derived.path ?? line.detail}>{line.detail}</span></> : null}
           {line.rate ? <><span className={styles.sep}>·</span><span className={styles.figure}>{line.rate}</span></> : null}
         </span>
         <span className="visually-hidden" role="status">{spoken}</span>

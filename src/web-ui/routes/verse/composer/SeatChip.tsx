@@ -2,13 +2,18 @@
  * routes/verse/composer/SeatChip.tsx — the seat this chat runs on, in the
  * composer footer (SPEC-310C §2 "Seat chip"; unit C3).
  *
- *   [C] Claude Max ◔
+ *   [C] Claude Max ◔          [L] Local
  *
+ * - The chip names the SEAT (the account: "Claude Max", or "Local" for a
+ *   local model, whose seat label is the model's own name); the model sits
+ *   beside it in the Model picker, so the footer never says the model twice.
  * - The monogram tile (C/X/G/L, never a vendor logo) carries the engine's
  *   identity tick; the ring is the SHORT window's use (5-hour where the
  *   provider reports one, else the binding window), drawn in the quantity
  *   ramp — never the accent — and switched to the status colours only past
- *   the tight / limit points, always with words in the tooltip.
+ *   the tight / limit points, always with words in the tooltip. A seat with
+ *   no reading (and every local seat: no limits) draws NO ring — an empty
+ *   circle said nothing and read as a stuck spinner.
  * - Hover or focus shows plan, every window with its reset, health, and what
  *   autonomy may take from this seat ("autonomy may use 60% · 40% reserved"),
  *   read from the Budget route (A9) only while the tooltip is open.
@@ -38,8 +43,10 @@ export interface SeatChipProps {
   seats: readonly VerseSeat[];
   seat: SeatChoice;
   engine: VerseSeat['engine'];
-  /** The chip's text ("Claude Max · Opus 5.5"). */
+  /** The chat's full seat label ("Claude Max · Opus 5.5") — the tooltip and menu heading. */
   label: string;
+  /** What the chip itself says ("Claude Max", "Local"). Default: `label`. */
+  name?: string;
   disabled?: boolean;
   /** Collapse to monogram + ring (the 375 footer). */
   compact?: boolean;
@@ -76,8 +83,9 @@ export function ringWindow(seat: VerseSeat | undefined): VerseSeatWindow | null 
 }
 
 function ringTone(reading: VerseSeatWindow | null): 'unknown' | 'ok' | 'tight' | 'limit' {
+  if (reading?.limitReached) return 'limit';
   if (!reading || reading.usedPercent === null) return 'unknown';
-  if (reading.limitReached || reading.usedPercent >= 100) return 'limit';
+  if (reading.usedPercent >= 100) return 'limit';
   if (reading.usedPercent >= 85) return 'tight';
   return 'ok';
 }
@@ -85,7 +93,8 @@ function ringTone(reading: VerseSeatWindow | null): 'unknown' | 'ok' | 'tight' |
 export function CapacityRing({ window: reading, size = 14 }: { window: VerseSeatWindow | null; size?: number }) {
   const r = (size - 3) / 2;
   const c = 2 * Math.PI * r;
-  const pct = reading?.usedPercent ?? null;
+  // A spent window is a full ring even when the provider gave no percentage.
+  const pct = reading?.limitReached ? 100 : reading?.usedPercent ?? null;
   const shown = pct === null ? 0 : Math.max(0, Math.min(100, pct));
   return (
     <svg className={styles.ring} data-tone={ringTone(reading)} width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden="true">
@@ -151,7 +160,7 @@ function SeatTooltip({ seats, seat, label }: { seats: readonly VerseSeat[]; seat
   );
 }
 
-export function SeatChip({ seats, seat, engine, label, disabled = false, compact = false, onContinueOn, onNewChat }: SeatChipProps) {
+export function SeatChip({ seats, seat, engine, label, name = label, disabled = false, compact = false, onContinueOn, onNewChat }: SeatChipProps) {
   const [open, setOpen] = useState(false);
   const [budgetOpen, setBudgetOpen] = useState(false);
   // The detail bubble is this component's own (not the Tooltip primitive):
@@ -165,11 +174,11 @@ export function SeatChip({ seats, seat, engine, label, disabled = false, compact
   const menuId = useId();
   const budgetTitleId = useId();
   const current = seats.find((s) => s.id === seat.seatId);
-  const ring = ringWindow(current);
+  const ring = engine === 'local' ? null : ringWindow(current);
   const others = seats.filter((s) => s.id !== seat.seatId && s.health.state !== 'unavailable' && firstRunnableModel(s) !== null);
-  const ringText = ring && ring.usedPercent !== null
-    ? `${seatWindowLabel(ring.id)} ${ring.limitReached ? 'limit reached' : `${Math.round(ring.usedPercent)}% used`}`
-    : 'no capacity reading';
+  const ringText = ring && (ring.usedPercent !== null || ring.limitReached)
+    ? `${seatWindowLabel(ring.id)} ${ring.limitReached ? 'limit reached' : `${Math.round(ring.usedPercent ?? 0)}% used`}`
+    : engine === 'local' ? 'no usage limits' : 'no capacity reading';
 
   useEffect(() => () => { if (tipTimer.current) clearTimeout(tipTimer.current); }, []);
 
@@ -227,15 +236,15 @@ export function SeatChip({ seats, seat, engine, label, disabled = false, compact
     <div ref={wrap} className={`${styles.seatChipWrap} ${styles[`engine-${engine}`] ?? ''}`}>
       <button ref={button} type="button" className={`${styles.seatChip} ${compact ? styles.seatChipCompact : ''}`}
         aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined} disabled={disabled}
-        aria-label={`Seat: ${label}, ${ringText}`}
+        aria-label={`Seat: ${name}, ${ringText}`}
         aria-describedby={tipOpen && !open ? tipId : undefined}
         onMouseEnter={() => showTip(true)} onMouseLeave={hideTip}
         onFocus={(event) => { if (event.currentTarget.matches(':focus-visible')) showTip(false); }} onBlur={hideTip}
         onKeyDown={(event) => { if (event.key === 'Escape' && tipOpen && !open) { event.stopPropagation(); hideTip(); } }}
         onClick={() => { hideTip(); setOpen((v) => !v); }}>
         <span className={styles.monogram} aria-hidden="true">{ENGINE_MONOGRAM[engine]}</span>
-        {compact ? null : <span className={styles.seatChipText}>{label}</span>}
-        <CapacityRing window={ring} />
+        {compact ? null : <span className={styles.seatChipText}>{name}</span>}
+        {ringTone(ring) === 'unknown' ? null : <CapacityRing window={ring} />}
       </button>
       {tipOpen && !open ? (
         <span id={tipId} role="tooltip" className={styles.seatTip}>

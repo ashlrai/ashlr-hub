@@ -10,7 +10,15 @@
   stroke-width: 2;
 }
 
+/* In-cell numbers: the fill is set per cell (colors.ts quantityInk, by the
+   cell's luminance), so this class must NOT set one — a CSS fill would beat
+   the attribute. Never a stroke / halo: paint-order stroke around dark text
+   on a dark cell turned the glyphs into blobs. */
 .num {
+  font-family: var(--font-ui);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-medium);
   font-variant-numeric: tabular-nums;
+  stroke: none;
   pointer-events: none;
 }

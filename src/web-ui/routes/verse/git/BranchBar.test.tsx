@@ -3,6 +3,8 @@
  * Status reads go through the component's test seam; writes go through a
  * stubbed `fetch`, so the real client, token gate and error mapping run.
  */
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -380,5 +382,47 @@ describe('through the real C0 slots', () => {
     expect(await screen.findByRole('button', { name: 'Create PR' })).toBeInTheDocument();
     expect(await screen.findByText('No uncommitted changes.')).toBeInTheDocument();
     expect(seen).toContain(`/api/verse/git/status?root=${encodeURIComponent(ROOT)}`);
+  });
+});
+
+describe('tooltips, truncation and busy width (3.10.1 polish)', () => {
+  const cssRule = (file: string, selector: string) => {
+    const src = readFileSync(resolve(process.cwd(), 'src/web-ui/routes/verse/git', file), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`).exec(src)?.[1] ?? null;
+  };
+
+  it('the ▾ button and the (truncating) repository name carry tooltips', async () => {
+    renderBar([status({ suggested: 'push', ahead: 1 })]);
+    const menu = await screen.findByRole('button', { name: 'More git actions for ashlr-hub' });
+    expect(menu).toHaveAttribute('title', 'More git actions for ashlr-hub');
+    expect(screen.getByText('ashlr-hub')).toHaveAttribute('title', ROOT);
+  });
+
+  it('the PR chip\'s checks phrase never truncates; the chip\'s tooltip says it all', async () => {
+    renderBar([status({ suggested: 'merge', pr: pr(), prCheckCounts: { total: 9, passed: 7, failed: 2, pending: 0 } })]);
+    const chip = await screen.findByRole('link', { name: /Pull request #463/ });
+    expect(chip.getAttribute('title')).toBe(chip.getAttribute('aria-label'));
+    expect(chip.getAttribute('title')).toMatch(/checks/);
+    expect(cssRule('PrChip.module.css', '.checks')).not.toMatch(/ellipsis/);
+  });
+
+  it('a busy primary keeps its label (and width); the spinner sits over it', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      await held;
+      return new Response(JSON.stringify({ ok: true, status: status({ suggested: 'create-pr', dirty: 0, ahead: 0 }), pr: null }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }));
+    renderBar([status({ suggested: 'push', ahead: 1, dirty: 0 })]);
+    await userEvent.click(await screen.findByRole('button', { name: 'Push' }));
+    const busy = await screen.findByRole('button', { name: 'Push' });
+    await waitFor(() => expect(busy).toHaveAttribute('aria-busy', 'true'));
+    expect(busy).toHaveTextContent('Push');
+    expect(busy.querySelector('[aria-hidden="true"]')).not.toBeNull();
+    expect(cssRule('BranchBar.module.css', '.spinner')).toMatch(/position:\s*absolute/);
+    expect(cssRule('BranchBar.module.css', ".primary[aria-busy='true'] .primaryLabel")).toMatch(/color:\s*transparent/);
+    await act(async () => { release(); await held; });
+    expect(await screen.findByText('Pushed feat/branch-bar to origin/feat/branch-bar.')).toBeInTheDocument();
   });
 });

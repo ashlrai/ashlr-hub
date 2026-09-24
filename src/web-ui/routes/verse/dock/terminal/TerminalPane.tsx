@@ -36,12 +36,13 @@ import { EmptyState } from '../../../../components/primitives/EmptyState.js';
 import { SkeletonLine } from '../../../../components/primitives/Skeleton.js';
 import { IconExternalLink, IconPlus, IconSend, IconX } from '../../../../components/primitives/icons.js';
 import { ActionMenu, anchorBelow, type MenuAnchor } from '../../chat/ActionMenu.js';
-import { detectKeyPlatform, eventKeyName, matchCommand, type KeyPlatform } from '../../shell/command-catalog.js';
+import { detectKeyPlatform, eventKeyName, findCommand, formatChord, matchCommand, type KeyPlatform } from '../../shell/command-catalog.js';
 import { usePollWhileVisible, useSectionVisible } from '../../shell/section-visibility.js';
 import type { VerseTerminalLaunchVia } from '../../../../../core/verse/workbench-types.js';
 import type { TerminalPaneProps } from '../../shell/slots.js';
 import type { TerminalRequest } from '../dock-store.js';
 import { useViewport } from '../../shell/viewport.js';
+import { projectName } from '../../verse-model.js';
 import { createInputQueue, type InputQueue } from './input-queue.js';
 import { base64ToBytes, fenceSelection, terminalApi, TerminalLockedError, type TerminalApi } from './terminal-client.js';
 import { openTerminalStream, type TerminalStreamState } from './terminal-stream.js';
@@ -54,6 +55,7 @@ import {
   type TerminalViewFactory,
 } from './terminal-view.js';
 import { ChevronDownGlyph, ScreenReaderGlyph, TerminalGlyph } from './terminal-icons.js';
+import chrome from '../pane-chrome.module.css';
 import styles from './TerminalPane.module.css';
 
 // ---------------------------------------------------------------------------
@@ -129,11 +131,6 @@ function errorText(err: unknown, fallback: string): string {
   return fallback;
 }
 
-function baseName(path: string): string {
-  const trimmed = path.replace(/\/+$/, '');
-  return trimmed.slice(trimmed.lastIndexOf('/') + 1) || trimmed;
-}
-
 interface ViewRecord {
   view: TerminalView;
   host: HTMLDivElement;
@@ -179,6 +176,13 @@ export function TerminalPane({ sessionId, roots, request, onSendToChat, visible,
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mounted = useRef(true);
+  /**
+   * True while a shell the operator CLICKED for is opening (New terminal, the
+   * folder menu). Any other open — the automatic first one, a dock request —
+   * shows the pane opening instead of "No terminal open"; a click keeps the
+   * empty state (and the focused, busy button) where it is.
+   */
+  const manualOpen = useRef(false);
 
   const allTabs = useMemo(() => list?.tabs ?? [], [list]);
   const exitedIds = useRef(new Set<string>());
@@ -588,8 +592,13 @@ export function TerminalPane({ sessionId, roots, request, onSendToChat, visible,
     }
   };
 
+  const openByClick = (opts: { root?: string }) => {
+    manualOpen.current = true;
+    void createTab(opts).finally(() => { manualOpen.current = false; });
+  };
+
   const onNewTabClick = () => {
-    void createTab(active?.root ? { root: active.root } : {});
+    openByClick(active?.root ? { root: active.root } : {});
   };
 
   // Tabs: ←/→ move and activate, Home/End jump (WAI-ARIA tabs, automatic activation).
@@ -621,6 +630,8 @@ export function TerminalPane({ sessionId, roots, request, onSendToChat, visible,
     }
     return (
       <div className={styles.pane} aria-busy="true">
+        {/* The strip's row is held from the first frame so the chrome does not drop in under the dock's tabs. */}
+        <div className={styles.strip} aria-hidden="true" />
         <div className={styles.loading}>
           <SkeletonLine width="40%" />
           <SkeletonLine width="70%" />
@@ -647,6 +658,17 @@ export function TerminalPane({ sessionId, roots, request, onSendToChat, visible,
   }
 
   const canChooseRoot = roots.length > 1;
+  const newTabChord = findCommand('dock.terminal-new')?.keys[0];
+  const newTabKey = newTabChord ? formatChord(newTabChord, deps.platform) : null;
+  // Before a chat's first shell is open — the automatic one on first sight,
+  // or one a dock request asked for — the pane shows it opening instead of
+  // flashing "No terminal open" for the moment the request takes.
+  const opening = tabs.length === 0 && !viewFailed && (!autoCreated.current || (creating && !manualOpen.current));
+  // The folder the header names: the visible tab's (or, for the render before
+  // the active tab is chosen, the one that will be), or while the first shell
+  // opens the chat's primary folder, where it opens — so the row does not
+  // appear, or change, when the tab lands.
+  const headerRoot = active?.root ?? tabs.at(-1)?.root ?? (opening ? roots[0] ?? null : null);
 
   return (
     <div className={styles.pane} data-compact={compact || undefined}>
@@ -683,7 +705,8 @@ export function TerminalPane({ sessionId, roots, request, onSendToChat, visible,
           })}
         </div>
         <div className={styles.stripActions}>
-          <IconButton variant="ghost" size="sm" icon={<IconPlus />} aria-label="New terminal tab" title="New terminal tab (⌃⇧`)"
+          <IconButton variant="ghost" size="sm" icon={<IconPlus />} aria-label="New terminal tab"
+            title={newTabKey ? `New terminal tab (${newTabKey})` : 'New terminal tab'}
             busy={creating} onClick={onNewTabClick} />
           {canChooseRoot ? (
             <IconButton variant="ghost" size="sm" icon={<ChevronDownGlyph />} aria-label="New terminal in…" aria-haspopup="menu"
@@ -693,13 +716,14 @@ export function TerminalPane({ sessionId, roots, request, onSendToChat, visible,
         </div>
       </div>
 
-      {active ? (
-        <div className={styles.header}>
-          <span className={styles.cwd} title={active.root}>{active.root}</span>
+      {headerRoot !== null ? (
+        <div className={`${chrome.header} ${styles.header}`}>
+          {/* The folder's NAME; the full path (a home or temp path) is the tooltip. */}
+          <span className={`${chrome.title} ${styles.cwd}`} title={headerRoot}>{projectName(headerRoot)}</span>
           <span className={styles.headerStatus} role="status" aria-live="polite">
             {streamState === 'reconnecting' ? 'Reconnecting…' : streamState === 'expired' ? 'Session expired — reload to reconnect' : copied ? 'Copied' : ''}
           </span>
-          <div className={styles.headerActions}>
+          <div className={chrome.actions}>
             <Button variant="ghost" size="sm" icon={<IconSend />} disabled={!hasSelection} aria-label="Send selection to chat"
               title={hasSelection ? 'Send the selected text to the chat as a code block' : 'Select text in the terminal first'}
               onClick={sendSelection}>
@@ -718,7 +742,7 @@ export function TerminalPane({ sessionId, roots, request, onSendToChat, visible,
       {notice ? (
         <div className={styles.notice} data-tone={notice.tone} role={notice.tone === 'error' ? 'alert' : 'status'}>
           <span>{notice.text}</span>
-          <button type="button" className={styles.noticeClose} aria-label="Dismiss" onClick={() => setNotice(null)}>
+          <button type="button" className={styles.noticeClose} aria-label="Dismiss" title="Dismiss" onClick={() => setNotice(null)}>
             <IconX size={12} />
           </button>
         </div>
@@ -732,9 +756,14 @@ export function TerminalPane({ sessionId, roots, request, onSendToChat, visible,
               for (const [id, host] of hosts.current) void attachView(id, host);
             }}>Try again</Button>} />
         ) : null}
-        {tabs.length === 0 && !viewFailed ? (
+        {opening ? (
+          <div className={styles.loading} role="status" aria-label="Opening a shell">
+            <SkeletonLine width="30%" />
+          </div>
+        ) : null}
+        {tabs.length === 0 && !viewFailed && !opening ? (
           <EmptyState compact icon={<TerminalGlyph size={20} />} title="No terminal open"
-            body={otherChats > 0 ? `A login shell in this chat's folder. ${otherChats} ${otherChats === 1 ? 'terminal is' : 'terminals are'} open in other chats.` : "A login shell in this chat's folder."}
+            body={`Click New terminal${newTabKey ? ` or press ${newTabKey}` : ''} to open a login shell in this chat's folder.${otherChats > 0 ? ` ${otherChats} ${otherChats === 1 ? 'terminal is' : 'terminals are'} open in other chats.` : ''}`}
             action={<Button size="sm" variant="subtle" icon={<IconPlus />} busy={creating} onClick={onNewTabClick}>New terminal</Button>} />
         ) : null}
         {tabs.map((tab) => {
@@ -778,9 +807,9 @@ export function TerminalPane({ sessionId, roots, request, onSendToChat, visible,
           onClose={() => setRootMenu(null)}
           items={roots.map((root) => ({
             id: root,
-            label: baseName(root),
+            label: projectName(root),
             description: root,
-            onSelect: () => { void createTab({ root }); },
+            onSelect: () => { openByClick({ root }); },
           }))}
         />
       ) : null}

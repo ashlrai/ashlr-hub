@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { AreaTrend } from './AreaTrend.js';
 import { formatDayLabel } from './format.js';
-import { showTable } from './chart-test-support.js';
+import { axisLabelBoxes, noOverlap, showTable } from './chart-test-support.js';
 
 // Day-bucketed series are UTC midnights; label them as UTC days (runner TZ-independent).
 const utcDay = (x: number) => formatDayLabel(new Date(x).toISOString().slice(0, 10));
@@ -82,5 +82,95 @@ describe('AreaTrend', () => {
     for (const line of container.querySelectorAll('line')) {
       expect(Number(line.getAttribute('x2'))).toBeLessThanOrEqual(375);
     }
+  });
+});
+
+describe('AreaTrend V3.10.1', () => {
+  const T = Date.parse('2026-09-24T03:46:00Z');
+  const tickTexts = (root: ParentNode) =>
+    [...root.querySelectorAll('svg[role="img"] text')].filter((t) => t.getAttribute('text-anchor') === 'end' && !t.hasAttribute('data-axis-label')).map((t) => t.textContent);
+
+  it('puts integer counts on whole-number ticks (a max of 1 is 0 and 1, never 0.3 / 0.8)', () => {
+    const { container } = render(<AreaTrend title="Wins" width={600} series={[{ id: 'w', label: 'Wins', points: pts([0, 1, 1]) }]} />);
+    expect(tickTexts(container)).toEqual(['0', '1']);
+  });
+
+  it('labels fractional data at the precision of the step', () => {
+    const { container } = render(<AreaTrend title="Rate" width={600} series={[{ id: 'r', label: 'Rate', points: pts([0.1, 0.9, 0.5]) }]} />);
+    expect(tickTexts(container)).toEqual(['0', '0.2', '0.4', '0.6', '0.8', '1.0']);
+  });
+
+  it('dodges end labels of lines that end on the same value', () => {
+    const { container } = render(
+      <AreaTrend
+        title="Struggles and wins"
+        width={600}
+        series={[
+          { id: 's', label: 'Struggles', points: pts([0, 2, 3]) },
+          { id: 'w', label: 'Wins', points: pts([1, 2, 3]) },
+        ]}
+      />,
+    );
+    const s = container.querySelector('[data-end-label="s"]')!;
+    const w = container.querySelector('[data-end-label="w"]')!;
+    expect(Math.abs(Number(s.getAttribute('y')) - Number(w.getAttribute('y')))).toBeGreaterThanOrEqual(14);
+    // The legend still names both.
+    expect(screen.getByText('Wins', { selector: 'li' })).toBeInTheDocument();
+  });
+
+  it('drops a 0 / pre-2000 x instead of starting the axis at "Dec 31" 1969', () => {
+    const { container } = render(
+      <AreaTrend title="Merges" width={600} formatX={utcDay} series={[{ id: 'm', label: 'Merges', points: [{ x: 0, y: 5 }, ...pts([1, 2, 3])] }]} />,
+    );
+    const labels = [...container.querySelectorAll('[data-axis-label]')].map((t) => t.textContent);
+    expect(labels[0]).toBe('Sep 1');
+    expect(labels.some((l) => /Dec 31|Jan 1/.test(l ?? ''))).toBe(false);
+    expect(screen.getByRole('img').getAttribute('aria-label')).toMatch(/^Merges: 3 points from Sep 1 to Sep 3/);
+  });
+
+  it('widens a burst of readings seconds apart instead of stacking three labels', () => {
+    const weekly = (ms: number) => new Date(ms).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    const { container } = render(
+      <AreaTrend
+        title="Claude · weekly"
+        width={300}
+        formatX={weekly}
+        series={[{ id: 'r', label: 'Remaining', points: [{ x: T, y: 40 }, { x: T + 20_000, y: 39 }, { x: T + 40_000, y: 38 }] }]}
+      />,
+    );
+    const boxes = axisLabelBoxes(container);
+    expect(boxes.length).toBeGreaterThanOrEqual(1);
+    expect(noOverlap(boxes)).toBe(true);
+    expect(new Set(boxes.map((b) => b.text)).size).toBe(boxes.length);
+    // Inside one day the axis speaks in clock times.
+    for (const b of boxes) expect(b.text).toMatch(/^\d{1,2}:\d{2} [AP]M$/);
+    // The burst sits as a cluster, not stretched edge to edge.
+    const line = container.querySelector('g[data-series="r"] path[class*="line"]')!;
+    const xs = [...(line.getAttribute('d') ?? '').matchAll(/[ML]([\d.]+),/g)].map((m) => Number(m[1]));
+    expect(Math.max(...xs) - Math.min(...xs)).toBeLessThan(40);
+  });
+
+  it('draws a percent card on 0–100% like its burn-down siblings, and honours an explicit domain', () => {
+    const pctFmt = (v: number) => `${Math.round(v)}%`;
+    const { container, unmount } = render(
+      <AreaTrend title="Claude · weekly" width={600} formatY={pctFmt} series={[{ id: 'r', label: 'Remaining', points: pts([40, 38, 35]) }]} />,
+    );
+    expect(tickTexts(container)).toEqual(['0%', '25%', '50%', '75%', '100%']);
+    unmount();
+    const explicit = render(
+      <AreaTrend title="Spend" width={600} yDomain={[0, 200]} series={[{ id: 'r', label: 'Spend', points: pts([40, 38, 35]) }]} />,
+    );
+    expect(tickTexts(explicit.container).at(-1)).toBe('200');
+  });
+
+  it('keeps x labels apart at 375 px with long caller labels', () => {
+    const DAY = 86_400_000;
+    const long = (ms: number) => `week ending ${new Date(ms).toISOString().slice(0, 10)}`;
+    const { container } = render(
+      <AreaTrend title="Merges" width={375} formatX={long} series={[{ id: 'm', label: 'Merges', points: Array.from({ length: 8 }, (_, i) => ({ x: T0 + i * 7 * DAY, y: i })) }]} />,
+    );
+    const boxes = axisLabelBoxes(container);
+    expect(noOverlap(boxes)).toBe(true);
+    expect(boxes.at(-1)!.key).toBe('7'); // the last point always keeps its label
   });
 });

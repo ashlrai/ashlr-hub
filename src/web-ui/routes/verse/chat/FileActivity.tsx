@@ -13,6 +13,7 @@
  */
 import { useState } from 'react';
 import { Tooltip } from '../../../components/primitives/Tooltip.js';
+import { useDisplayPath } from './path-display.js';
 import { fileBasename, fileDirname } from './tool-semantics.js';
 import { describeFiles, type TurnFileEntry } from './turn-model.js';
 import styles from './chat.module.css';
@@ -35,6 +36,7 @@ export interface FileActivityProps {
 
 export function FileActivity({ files, onJump }: FileActivityProps) {
   const [expanded, setExpanded] = useState(false);
+  const show = useDisplayPath();
   if (files.length === 0) return null;
   const visible = expanded || files.length <= COLLAPSE_AFTER ? files : files.slice(0, COLLAPSE_AFTER);
   const hidden = files.length - visible.length;
@@ -42,22 +44,24 @@ export function FileActivity({ files, onJump }: FileActivityProps) {
   return (
     <section className={styles.activity} aria-label="Files this turn touched">
       <h3 className={styles.activityHead}>
-        <span className={styles.activityCount}>{files.length}</span>
-        <span className={styles.activityLabel}>file{files.length === 1 ? '' : 's'}</span>
+        <span className={styles.activityLabel}>{files.length} file{files.length === 1 ? '' : 's'}</span>
         <span className={styles.activityBreakdown}>{describeFiles(files)}</span>
       </h3>
       <ul className={styles.activityList}>
         {visible.map((file) => {
           const times = file.reads + file.edits + file.creates + file.deletes;
-          const name = `${VERB[file.action]} ${file.path}${times > 1 ? `, ${times} calls` : ''}${
+          // Relative to the chat's roots (chat/path-display.ts): the raw path
+          // is usually absolute, and its directory half is what the row clips.
+          const shown = show(file.path);
+          const name = `${VERB[file.action]} ${shown}${times > 1 ? `, ${times} calls` : ''}${
             file.additions || file.deletions ? `, +${file.additions} −${file.deletions}` : ''
           }${file.failed ? ', a call on this file failed' : ''}`;
           return (
             <li key={file.path}>
               {/* The row draws the basename in full and lets the DIRECTORY
                   clip, which is the half that tells two same-named files
-                  apart. The full path stays in aria-label — this restores it
-                  for sighted operators, on focus as well as hover. */}
+                  apart. The full, absolute path is the tooltip, on focus as
+                  well as hover. */}
               <Tooltip label={file.path} placement="right">
                 <button type="button" className={styles.activityRow} data-action={file.action}
                   data-failed={file.failed ? 'true' : undefined}
@@ -65,8 +69,8 @@ export function FileActivity({ files, onJump }: FileActivityProps) {
                   <span className={styles.activityRule} aria-hidden="true" />
                   <span className={styles.activityVerb}>{VERB[file.action]}</span>
                   <span className={styles.activityPath}>
-                    <span className={styles.activityName}>{fileBasename(file.path)}</span>
-                    <span className={styles.activityDir}>{fileDirname(file.path)}</span>
+                    <span className={styles.activityName}>{fileBasename(shown)}</span>
+                    <span className={styles.activityDir}>{fileDirname(shown)}</span>
                   </span>
                   {file.failed ? (
                     // DESIGN §6: the danger tint on the 2px rule was the ONLY

@@ -26,6 +26,9 @@ import type {
 } from '../../../../core/verse/workbench-types.js';
 import { CLAUDE_SEAT, CODEX_SEAT, GROK_SEAT, LOCAL_SEAT } from '../fixtures.test-support.js';
 import { Composer, type ComposerProps } from '../Composer.js';
+import { ContextMeter } from '../ContextMeter.js';
+import { moduleDeclaration } from '../../../design/token-probe.test-support.js';
+import type { VerseSeat } from '../../../data/api-types.js';
 import { detectKeyPlatform } from '../shell/command-catalog.js';
 import { mockCompactViewport, type ViewportMock } from '../shell/viewport.test-support.js';
 
@@ -494,7 +497,7 @@ describe('footer', () => {
     const user = userEvent.setup();
     const onContinueOn = vi.fn();
     await renderReady(props({ onContinueOn }));
-    const chip = screen.getByRole('button', { name: /^Seat: Claude Max · Opus 5, 5h window 12% used/ });
+    const chip = screen.getByRole('button', { name: /^Seat: Claude Max, 5h window 12% used/ });
     await user.click(chip);
     const menu = screen.getByRole('menu', { name: 'Seat' });
     await user.click(within(menu).getByRole('menuitem', { name: /Continue on Qwen3 Coder/ }));
@@ -503,7 +506,7 @@ describe('footer', () => {
 
   it('the context ring states occupancy in words; unknown is "—", never zero', async () => {
     const view = await renderReady(props({ contextTokens: 50_000, contextWindow: 200_000, autoCompactAt: 167_000 }));
-    expect(screen.getByRole('img', { name: /^Context 25% — 50k of 200k tokens; the CLI compacts at 167k/ })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Context 25% — 50k of 200k tokens, compacts ≈167k' })).toBeInTheDocument();
     view.rerender(<Composer {...props({ contextTokens: null, contextWindow: null })} />);
     expect(screen.getByRole('img', { name: 'Context — not measured yet' })).toBeInTheDocument();
   });
@@ -572,5 +575,221 @@ describe('footer', () => {
     // No queue route: Enter keeps the draft rather than losing it.
     expect(box).toHaveValue('draft');
     expect(screen.queryByRole('button', { name: /^Permission mode:/ })).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Footer polish (3.10.1): one row, every word whole, the model said once
+// ---------------------------------------------------------------------------
+
+/** The live case that read "Qwen3.8 27b-ctx64k (l…" · ○ · "Qwen3.8 27b-ctx64k ▾" · "No effort setting". */
+const QWEN_SEAT: VerseSeat = {
+  ...LOCAL_SEAT,
+  id: 'local:qwen3.8:27b-ctx64k',
+  label: 'Qwen3.8 27b-ctx64k (local)',
+  models: [{ id: 'qwen3.8:27b-ctx64k', label: 'Qwen3.8 27b-ctx64k', contextWindow: 65_536 }],
+};
+
+function localView(): VerseSessionControlsResponse {
+  return {
+    sessionId: SID,
+    controls: { model: 'qwen3.8:27b-ctx64k', effort: null, permissionMode: 'accept-edits' },
+    appliesNextTurn: false,
+    options: {
+      models: [{ id: 'qwen3.8:27b-ctx64k', label: 'Qwen3.8 27b-ctx64k', available: true }],
+      efforts: controlsView().options.efforts.map((o) => ({ ...o, available: false, reason: 'Local models run without an effort setting.' })),
+      permissionModes: modes({ auto: 'Auto needs Anthropic’s safety check, which a local model can’t provide.' }),
+    },
+  };
+}
+
+function footerOf(): HTMLElement {
+  // Attach → its cluster (footerLeft) → the footer row.
+  return screen.getByRole('button', { name: 'Attach files' }).closest('div')!.parentElement!;
+}
+
+function count(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+describe('footer — the model is said once', () => {
+  it('the seat chip names the account and the Model picker the model', async () => {
+    await renderReady();
+    const footer = footerOf();
+    expect(count(footer.textContent ?? '', 'Opus 5')).toBe(1);
+    expect(screen.getByRole('button', { name: /^Seat: Claude Max,/ })).not.toHaveTextContent('Opus');
+    expect(screen.getByRole('button', { name: 'Model: Opus 5' })).toHaveTextContent('Opus 5');
+  });
+
+  it('a local seat reads "Local" + the model, with no empty capacity ring and no effort control', async () => {
+    server = installServer({ controls: localView() });
+    await renderReady(props({ seats: [...SEATS, QWEN_SEAT], seat: { seatId: QWEN_SEAT.id, model: 'qwen3.8:27b-ctx64k' }, engine: 'local' }));
+    const footer = footerOf();
+    expect(count(footer.textContent ?? '', 'Qwen3.8 27b-ctx64k')).toBe(1);
+    const chip = screen.getByRole('button', { name: 'Seat: Local, no usage limits' });
+    expect(chip).toHaveTextContent(/^LLocal$/);
+    // The hollow circle is gone: a seat without limits draws no ring at all.
+    expect(chip.querySelector('svg')).toBeNull();
+    // No effort on this seat: no control, and no "No effort setting" either.
+    expect(screen.queryByRole('button', { name: /^Effort/ })).toBeNull();
+    expect(footer).not.toHaveTextContent(/effort/i);
+  });
+
+  it('before session controls load (or on an older server) the model is plain text in the same place', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => json({ error: 'not found' }, 404)));
+    render(<Composer {...props()} />);
+    const footer = footerOf();
+    expect(count(footer.textContent ?? '', 'Opus 5')).toBe(1);
+    expect(screen.queryByRole('button', { name: /^Model:/ })).toBeNull();
+  });
+});
+
+describe('footer — whole words', () => {
+  it.each([
+    ['plan', 'Plan', 'Plan'],
+    ['accept-edits', 'Accept edits', 'Accept edits'],
+    ['auto', 'Auto', 'Auto'],
+    ['bypass', 'Bypass', 'Bypass permissions'],
+  ] as const)('mode %s shows "%s" in full; its name and title carry "%s"', async (mode, shown, full) => {
+    server = installServer({ controls: controlsView({ permissionMode: mode }) });
+    await renderReady();
+    const button = screen.getByRole('button', { name: `Permission mode: ${full}` });
+    expect(button).toHaveTextContent(new RegExp(`^${shown}$`));
+    expect(button.getAttribute('title')).toMatch(new RegExp(`^Permission mode: ${full} \\(.+M\\)$`));
+  });
+
+  it('no footer label can ellipsize: no max-width, no text-overflow on the picker, chip or send text', () => {
+    const css = 'routes/verse/composer/composer.module.css';
+    for (const selector of ['.control', '.seatChip']) expect(moduleDeclaration(css, selector, 'max-width')).toBeNull();
+    for (const selector of ['.controlText', '.seatChipText', '.controlStatic']) {
+      expect(moduleDeclaration(css, selector, 'text-overflow')).toBeNull();
+      expect(moduleDeclaration(css, selector, 'white-space')).toBe('nowrap');
+    }
+    // Hit targets: every footer control is the 28px step.
+    for (const selector of ['.control', '.seatChip', '.contextRing', '.controlStatic']) {
+      expect(moduleDeclaration(css, selector, 'min-height')).toBe('var(--control-h-sm)');
+    }
+  });
+
+  it('effort reads "Effort: High" where the seat supports it', async () => {
+    server = installServer({ controls: controlsView({ effort: 'high' }) });
+    await renderReady();
+    expect(screen.getByRole('button', { name: 'Effort: High' })).toHaveTextContent(/^Effort: High$/);
+  });
+
+  it('the placeholder says what the box takes', async () => {
+    await renderReady();
+    expect(screen.getByRole('textbox', { name: 'Message' })).toHaveAttribute('placeholder', 'Ask anything — @ to add files, / for commands');
+  });
+
+  it('Send shows ⏎; while a turn runs ■ and Queue stay put whether or not there is text', async () => {
+    const user = userEvent.setup();
+    const view = await renderReady();
+    expect(screen.getByRole('button', { name: 'Send message' })).toHaveTextContent('Send⏎');
+    view.rerender(<Composer {...props({ running: true })} />);
+    const queue = await screen.findByRole('button', { name: /^Queue this message/ });
+    expect(queue).toBeDisabled();
+    const before = footerOf().textContent;
+    await user.type(screen.getByRole('textbox', { name: 'Message' }), 'then run the tests');
+    expect(queue).toBeEnabled();
+    expect(footerOf().textContent).toBe(before);
+    expect(screen.getByRole('button', { name: 'Stop the running turn' })).toBeInTheDocument();
+  });
+});
+
+describe('footer — context ring', () => {
+  const reading = { contextTokens: 150_000, contextWindow: 200_000, autoCompactAt: 167_000 };
+
+  it('focus shows used / limit tokens and the compaction point', async () => {
+    await renderReady(props(reading));
+    const ring = screen.getByRole('img', { name: 'Context 75% — 150k of 200k tokens, compacts ≈167k' });
+    ring.focus();
+    const tip = await screen.findByRole('tooltip');
+    expect(tip).toHaveTextContent('Context: 150,000 of 200,000 tokens (75%).');
+    expect(tip).toHaveTextContent('Auto-compacts at ≈167,000 tokens — ≈17,000 left.');
+    expect(ring).toHaveAccessibleDescription(/Auto-compacts at ≈167,000 tokens/);
+  });
+
+  it('matches the header ring: same figure, same tone, the same compaction tick', async () => {
+    await renderReady(props(reading));
+    const ring = screen.getByRole('img', { name: /^Context 75%/ });
+    render(<ContextMeter variant="ring" {...reading} exact engine="claude" />);
+    const header = screen.getByRole('meter', { name: 'Context window' });
+    expect(ring).toHaveTextContent('75%');
+    expect(header).toHaveTextContent('75%');
+    expect(ring.dataset['tone']).toBe(header.dataset['tone']);
+    expect(ring.dataset['tone']).toBe('warn');
+    expect(ring.querySelector('[data-testid="compaction-tick"]')).not.toBeNull();
+  });
+
+  it('marks an upper bound with ≤, as the header does', async () => {
+    await renderReady(props({ ...reading, contextTokens: 50_000, contextExact: false }));
+    expect(screen.getByRole('img', { name: /^Context ≤25% — ≤50k of 200k tokens/ })).toHaveTextContent('≤25%');
+  });
+});
+
+describe('footer — folds instead of truncating', () => {
+  // jsdom lays nothing out: give the footer a width, and make its content as
+  // wide as its visible text, so the fold steps are exercised for real.
+  const CHAR = 8;
+  let limitChars = 0;
+  let restore: () => void = () => {};
+
+  beforeEach(() => {
+    const scroll = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollWidth');
+    const client = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+    Object.defineProperty(HTMLElement.prototype, 'scrollWidth', {
+      configurable: true,
+      get(this: HTMLElement) {
+        // Visible text only: a screen-reader-only label takes no room.
+        let chars = (this.textContent ?? '').length;
+        this.querySelectorAll('.visually-hidden').forEach((hidden) => { chars -= (hidden.textContent ?? '').length; });
+        return chars * CHAR;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get() { return limitChars * CHAR; } });
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe() { this.callback([{ contentRect: { width: limitChars * CHAR } } as ResizeObserverEntry], this as unknown as ResizeObserver); }
+      disconnect() {}
+      unobserve() {}
+    });
+    restore = () => {
+      if (scroll) Object.defineProperty(HTMLElement.prototype, 'scrollWidth', scroll);
+      if (client) Object.defineProperty(HTMLElement.prototype, 'clientWidth', client);
+    };
+  });
+  afterEach(() => restore());
+
+  it('drops "Effort:", then the seat name, then the mode word — names intact, nothing ellipsized', async () => {
+    const user = userEvent.setup();
+    // Visible: "Accept edits" "C" "Claude Max" "Opus 5" "Effort: High" "—" "Send⏎" = 47 chars;
+    // fold 1 drops "Effort: " (39), fold 2 "Claude Max" (29), fold 3 "Accept edits" (17).
+    limitChars = 25;
+    server = installServer({ controls: controlsView({ effort: 'high' }) });
+    render(<Composer {...props()} />);
+    const mode = await screen.findByRole('button', { name: 'Permission mode: Accept edits' });
+    await waitFor(() => expect(mode).toHaveTextContent(/^$/));
+    expect(screen.getByRole('button', { name: /^Seat: Claude Max,/ })).not.toHaveTextContent('Claude Max');
+    const effort = screen.getByRole('button', { name: 'Effort: High' });
+    expect(effort).toHaveTextContent(/^High$/);
+    expect(effort.querySelector('svg')).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Model: Opus 5' })).toHaveTextContent('Opus 5');
+    expect(screen.queryByRole('button', { name: /^Chat settings/ })).toBeNull();
+    // Typing never refolds the row.
+    const before = footerOf().textContent;
+    await user.type(screen.getByRole('textbox', { name: 'Message' }), 'a long message that changes nothing below it');
+    expect(footerOf().textContent).toBe(before);
+    expect(mode).toHaveTextContent(/^$/);
+  });
+
+  it('too narrow even for icons: the pickers move into the ⋯ sheet', async () => {
+    limitChars = 10;
+    render(<Composer {...props()} />);
+    const more = await screen.findByRole('button', { name: /^Chat settings: Accept edits, Opus 5/ });
+    expect(screen.queryByRole('button', { name: /^Permission mode:/ })).toBeNull();
+    const user = userEvent.setup();
+    await user.click(more);
+    expect(within(screen.getByRole('dialog', { name: 'Chat settings' })).getByRole('menu', { name: 'Model' })).toBeInTheDocument();
   });
 });

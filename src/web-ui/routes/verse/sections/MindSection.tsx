@@ -22,11 +22,14 @@ import { Card, Cell, Surface } from '../command/Surface.js';
 import { leaderQuery, reasoningDigestQuery } from '../command/surface-data.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { useViewport } from '../shell/viewport.js';
+import { verseBootstrapQuery, verseWorkspacesQuery } from '../verse-queries.js';
 import { ActionLog, HitRateCard, InsightCards, MemoTimeline } from '../mind/MindCards.js';
 import { insightMatrix, insightRepos, reasoningTrendSeries, topInsights } from '../mind/mind-model.js';
+import { projectLabels, projectNames } from '../mind/project-label.js';
 import styles from '../mind/mind.module.css';
 
 export const MIND_POLL_MS = 60_000;
+const NAMES_FRESH_MS = 5 * 60_000;
 
 export function MindSection() {
   const { compact } = useViewport();
@@ -41,8 +44,21 @@ export function MindSection() {
   const actions = useSurfaceActions();
   const facetId = useId();
 
+  // Registered project names for the insight cards and the Repo facet. Both
+  // reads are normally already cached by Chat (bootstrap on first paint, saved
+  // projects in its sidebar) and names rarely change, so a cached answer up
+  // to 5 minutes old is used as-is; either missing just means folder names.
+  const bootstrap = useQuery(verseBootstrapQuery, { freshMs: NAMES_FRESH_MS });
+  const saved = useQuery(verseWorkspacesQuery, { freshMs: NAMES_FRESH_MS });
+
   const d = digest.data?.value ?? null;
   const repos = useMemo(() => insightRepos(d), [d]);
+  const names = useMemo(() => projectNames(saved.data?.workspaces, bootstrap.data?.projects), [saved.data, bootstrap.data]);
+  const places = useMemo(() => projectLabels(repos, names), [repos, names]);
+  const placeText = (r: string) => {
+    const p = places.get(r);
+    return p ? `${p.label}${p.scratch ? ' · scratch' : ''}` : r;
+  };
   const [repo, setRepo] = useState<string | null>(null);
   const facet = repo !== null && repos.includes(repo) ? repo : null;
   const matrix = useMemo(() => insightMatrix(d, facet), [d, facet]);
@@ -64,14 +80,14 @@ export function MindSection() {
       <Cell span={12}>
         <Card title="What the reasoning shows" caption={d ? `Last 30 days · ${d.totals.steps.toLocaleString('en-US')} reasoning steps across ${d.totals.sessions} sessions` : undefined}>
           <div id={anchorId('insights')}>
-            <InsightCards insights={top} loading={!digest.data} reason={!digest.data || d ? null : (digest.data.reason ?? 'The reasoning digest did not answer.')} />
+            <InsightCards insights={top} places={places} loading={!digest.data} reason={!digest.data || d ? null : (digest.data.reason ?? 'The reasoning digest did not answer.')} />
           </div>
         </Card>
       </Cell>
       <Cell span={8}>
         <MatrixHeatmap
           title="Insights by kind and engine"
-          description={facet ? `In ${facet}` : 'All repos · 30 days'}
+          description={facet ? `In ${placeText(facet)}` : 'All repos · 30 days'}
           status={digestStatus(reasoned && matrix.columns.length > 0, 'No reasoning was recorded in the last 30 days.')}
           rows={matrix.rows}
           columns={matrix.columns}
@@ -85,8 +101,8 @@ export function MindSection() {
                 <select id={facetId} value={facet ?? ''} onChange={(e) => setRepo(e.target.value || null)}>
                   <option value="">All</option>
                   {repos.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
+                    <option key={r} value={r} title={r}>
+                      {placeText(r)}
                     </option>
                   ))}
                 </select>

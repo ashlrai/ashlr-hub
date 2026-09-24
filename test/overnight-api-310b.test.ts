@@ -22,12 +22,15 @@ import {
 } from '../src/core/verse/overnight-api.js';
 import {
   adoptOvernightRun,
+  joinReasonParts,
   pendingOvernightRun,
   readOvernightStatus,
+  recordOvernightIteration,
   recordOvernightLedgerRows,
   requestOvernightRun,
 } from '../src/core/daemon/overnight-status.js';
 import type { DaemonLivenessV1 } from '../src/core/daemon/liveness.js';
+import type { PostMergeFailure, PostMergeGateResult } from '../src/core/daemon/post-merge-halt.js';
 import type { LedgerEntry } from '../src/core/authority/types.js';
 import type { LandingRecord } from '../src/core/fleet/fleet-types.js';
 import type { AshlrConfig } from '../src/core/types.js';
@@ -333,5 +336,77 @@ describe('mirrors recorded apart from repos (L1 leftover 3)', () => {
     expect('mirrors' in readOvernightStatus()).toBe(false);
     writeFileSync(join(dir, 'status.json'), JSON.stringify({ recordType: 'daemon-overnight-status', armed: false, repos: 1, mirrors: -3, gate: null, run: null }));
     expect(readOvernightStatus().mirrors).toBeNull();
+  });
+});
+
+describe('post-merge discard reasons read as prose (3.10.1: no ".;", no "..")', () => {
+  const REPO = '/work/binshield';
+  const SHA = 'b'.repeat(40);
+  const REVERT = `git revert --no-edit ${SHA}`;
+  const halted = (verdict: 'regressed' | 'unverifiable', failures: PostMergeFailure[]): PostMergeGateResult => ({
+    verdict,
+    halt: true,
+    landings: [{
+      repo: REPO,
+      beforeHead: 'a'.repeat(40),
+      afterHead: SHA,
+      commits: [{ sha: SHA, subject: 'ashlr: auto-merge proposal p-9', isMerge: false }],
+      revertCommand: REVERT,
+    }],
+    failures,
+    ranCommands: failures.length,
+    detail: 'halted',
+    revertPlan: [REVERT],
+    durationMs: 1,
+  });
+  const reasonFor = (result: PostMergeGateResult): string => {
+    requestOvernightRun({ kind: 'until-paused' });
+    adoptOvernightRun({ pid: 7 });
+    recordOvernightIteration(result, { iterationsDone: 1, now: () => Date.parse('2026-09-24T03:00:00.000Z') });
+    const discarded = readOvernightStatus().run!.discarded;
+    expect(discarded).toHaveLength(1);
+    return discarded[0]!.reason;
+  };
+
+  it('fragments that end in a full stop are joined as clauses, and the sentence closes once', () => {
+    const reason = reasonFor(halted('regressed', [
+      { repo: REPO, kind: 'test', command: 'npm test', detail: 'failed after the merge (exit 1).' },
+      { repo: REPO, kind: 'lint', command: 'npm run lint', detail: 'timed out after the merge.' },
+      { repo: '/work/other', kind: 'test', command: 'npm test', detail: 'not this repo' },
+    ]));
+    expect(reason).toBe(
+      `post-merge suite failed on ${REPO}: test failed after the merge (exit 1); lint timed out after the merge. ` +
+      `Back it out with: ${REVERT}`,
+    );
+    expect(reason).not.toMatch(/\.\s*;|[^.]\.\.(?!\.)/);
+  });
+
+  it('an unprovable landing keeps its own wording; a multi-line error is folded and an empty one does not dangle', () => {
+    const reason = reasonFor(halted('unverifiable', [
+      { repo: REPO, kind: 'harness', command: 'npm test', detail: 'verify command could not be run: spawn npm ENOENT.\n  at child_process' },
+      { repo: REPO, kind: 'detection', command: 'detectVerifyCommands', detail: 'verify-command detection threw: ' },
+    ]));
+    expect(reason).toBe(
+      `the merge on ${REPO} could not be verified: ` +
+      'harness verify command could not be run: spawn npm ENOENT. at child_process; detection verify-command detection threw. ' +
+      `Back it out with: ${REVERT}`,
+    );
+  });
+
+  it('with no failure recorded for the repo, the fallback sentence still names the revert', () => {
+    expect(reasonFor(halted('regressed', []))).toBe(
+      `post-merge suite failed on ${REPO}: a required check went red after the merge. Back it out with: ${REVERT}`,
+    );
+  });
+
+  it('joinReasonParts: clauses take "; ", finished sentences take a space, "?"/"!"/"…" are never cut', () => {
+    expect(joinReasonParts(['Autonomy is switched off for this seat.', 'The weekly window is spent'])).toBe(
+      'Autonomy is switched off for this seat. The weekly window is spent');
+    expect(joinReasonParts(['typecheck failed (exit 2).', 'lint failed.'])).toBe('typecheck failed (exit 2); lint failed.');
+    expect(joinReasonParts(['first clause', '', '  ', 'second clause'])).toBe('first clause; second clause');
+    expect(joinReasonParts(['Is the runtime up?', 'no answer'])).toBe('Is the runtime up? no answer');
+    expect(joinReasonParts(['still waiting...', 'then it stopped'])).toBe('still waiting... then it stopped');
+    expect(joinReasonParts(['a doubled stop..', 'a joined one.;', 'last'])).toBe('a doubled stop; a joined one; last');
+    expect(joinReasonParts([])).toBe('');
   });
 });

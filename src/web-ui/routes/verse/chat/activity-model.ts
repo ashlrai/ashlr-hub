@@ -7,9 +7,14 @@
  * and `run_shell` are all "ran a command", and nobody scanning a long session
  * wants to learn which CLI spells it how. So the group now speaks in actions,
  * using the same classification the file-activity summary uses
- * (tool-semantics `readToolFacts`):
+ * (tool-semantics `readToolFacts`). Drawn, the clauses are separated by a
+ * middle dot; spoken, by commas:
  *
- *   Ran 12 commands, read 8, edited 3; 1 failed, 1 running; 2m 14s
+ *   Ran 12 commands · read 8 files · edited 3 files     (the row)
+ *   Ran 12 commands, read 8 files, edited 3 files; 1 failed, 1 running   (its name)
+ *
+ * 3.10.1: every clause carries its noun. "read 1" after "Ran 1 command"
+ * left the reader to work out what was read.
  *
  * and decides which member rows deserve to be on screen without a click: a
  * failed call is the one thing in a group the operator must see, and a
@@ -34,7 +39,7 @@ export interface ActivitySummary {
   running: number;
   /** Wall time first→last member, when both are stamped; null = unknown (never 0). */
   spanMs: number | null;
-  /** "Ran 12 commands, read 8, edited 3" — the WHAT. */
+  /** "Ran 12 commands · read 8 files · edited 3 files" — the WHAT, as drawn. */
   work: string;
   /** "1 failed, 1 running" — the STATE; empty when neither. */
   state: string;
@@ -42,22 +47,21 @@ export interface ActivitySummary {
   sentence: string;
 }
 
-/**
- * Display order and wording. `noun` is spoken on the FIRST clause only
- * ("Ran 12 commands, read 8") unless `alwaysNoun` — set where the bare verb
- * would be ambiguous ("ran 2" after commands could mean either).
- */
-const CLAUSES: ReadonlyArray<{ action: ToolAction; verb: string; noun: string; plural: string; alwaysNoun?: true }> = [
+/** Display order and wording; every clause names its noun. */
+const CLAUSES: ReadonlyArray<{ action: ToolAction; verb: string; noun: string; plural: string }> = [
   { action: 'command', verb: 'ran', noun: 'command', plural: 'commands' },
   { action: 'read', verb: 'read', noun: 'file', plural: 'files' },
   { action: 'edit', verb: 'edited', noun: 'file', plural: 'files' },
   { action: 'create', verb: 'created', noun: 'file', plural: 'files' },
   { action: 'delete', verb: 'deleted', noun: 'file', plural: 'files' },
   { action: 'search', verb: 'searched', noun: 'time', plural: 'times' },
-  { action: 'web', verb: 'fetched', noun: 'page', plural: 'pages', alwaysNoun: true },
-  { action: 'task', verb: 'ran', noun: 'subagent', plural: 'subagents', alwaysNoun: true },
-  { action: 'other', verb: 'used', noun: 'other tool', plural: 'other tools', alwaysNoun: true },
+  { action: 'web', verb: 'fetched', noun: 'page', plural: 'pages' },
+  { action: 'task', verb: 'ran', noun: 'subagent', plural: 'subagents' },
+  { action: 'other', verb: 'used', noun: 'other tool', plural: 'other tools' },
 ];
+
+/** The row's clause separator; the accessible sentence uses commas. */
+export const WORK_SEPARATOR = ' · ';
 
 function emptyCounts(): ActionCounts {
   return { read: 0, edit: 0, create: 0, delete: 0, command: 0, search: 0, task: 0, web: 0, other: 0 };
@@ -82,17 +86,15 @@ export function memberRunning(member: ToolGroupMember): boolean {
   return member.kind === 'tool' && member.result === null;
 }
 
-/** "Ran 12 commands, read 8, edited 3" from counts; "" when there is nothing. */
-export function describeWork(counts: ActionCounts): string {
+/** "Ran 12 commands · read 8 files" from counts (`separator` between clauses); "" when there is nothing. */
+export function describeWork(counts: ActionCounts, separator: string = WORK_SEPARATOR): string {
   const parts: string[] = [];
   for (const clause of CLAUSES) {
     const n = counts[clause.action];
     if (n <= 0) continue;
-    const noun = n === 1 ? clause.noun : clause.plural;
-    const withNoun = parts.length === 0 || clause.alwaysNoun === true;
-    parts.push(withNoun ? `${clause.verb} ${n} ${noun}` : `${clause.verb} ${n}`);
+    parts.push(`${clause.verb} ${n} ${n === 1 ? clause.noun : clause.plural}`);
   }
-  return capitalize(parts.join(', '));
+  return capitalize(parts.join(separator));
 }
 
 export function summarizeActivity(group: Pick<ToolGroupItem, 'items' | 'spanMs'>, facts: ReadonlyMap<string, ToolFacts> | null = null): ActivitySummary {
@@ -113,7 +115,7 @@ export function summarizeActivity(group: Pick<ToolGroupItem, 'items' | 'spanMs'>
   if (running > 0) stateParts.push(`${running} running`);
   const state = stateParts.join(', ');
   const spanMs = group.spanMs !== null && group.spanMs > 0 ? group.spanMs : null;
-  const sentence = [work, state, spanMs !== null && running === 0 ? formatDuration(spanMs) : '']
+  const sentence = [describeWork(counts, ', '), state, spanMs !== null && running === 0 ? formatDuration(spanMs) : '']
     .filter((part) => part.length > 0)
     .join('; ');
   return { counts, toolCount, failed, running, spanMs, work, state, sentence };

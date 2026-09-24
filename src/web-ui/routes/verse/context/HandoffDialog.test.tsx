@@ -443,6 +443,21 @@ describe('ask this seat to summarize first', () => {
     expect(handoffBox().value).toContain('Goal: move billing');
   });
 
+  it('embeds an engine error that is already a sentence without printing ".."', async () => {
+    const user = userEvent.setup();
+    mount();
+    await waitFor(() => expect(handoffBox().value).toContain('Goal'));
+    await user.click(screen.getByRole('button', { name: 'Ask Claude Max to summarize first' }));
+    await screen.findByText('Waiting for Claude Max to finish its summary…');
+    act(() => {
+      applyVerseEvent('vs_src', event({ type: 'error', turnId: 't-sum', message: 'Weekly limit reached.' }));
+      applyVerseEvent('vs_src', event({ type: 'turn-done', turnId: 't-sum', ok: false, nativeSessionId: null, durationMs: 10 }));
+    });
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('The summary turn failed: Weekly limit reached. The automatic preview is unchanged.');
+    expect(alert.textContent).not.toContain('..');
+  });
+
   it('stops the summary turn on request', async () => {
     const user = userEvent.setup();
     mount();

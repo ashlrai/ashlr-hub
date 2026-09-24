@@ -108,6 +108,17 @@ describe('budget-model', () => {
     expect(rows.find((r) => r.free)!.bars).toEqual([]);
   });
 
+  it('prints the router\u2019s reasons verbatim except for a raw ISO instant and a ".;" join', () => {
+    const at = new Date(2026, 8, 26, 23, 46); // local, so the words hold in any zone
+    const rows = buildBudgetRows(view({
+      headroom: [headroom('claude', { reasons: [
+        `Weekly window at 100% (resets ${at.toISOString()}).; Autonomy waits for the reset.`,
+      ] })],
+    }), new Date(2026, 8, 25, 12, 0).getTime());
+    expect(rows[0]!.why).toBe('Weekly window at 100% (resets Sat 11:46 PM); Autonomy waits for the reset.');
+    expect(rows[0]!.why).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
+  });
+
   it('summarises and ages honestly', () => {
     expect(budgetSummary(buildBudgetRows(view())).sentence).toBe('2 of 4 seats can take autonomous work (1 paid, 1 local).');
     expect(budgetSummary([]).sentence).toBe('No seats are known yet.');
@@ -120,6 +131,19 @@ describe('budget-model', () => {
 });
 
 describe('BudgetControlView', () => {
+  it('says a missing reading time plainly, localises the next-task reason, and gives a truncating name its tooltip', () => {
+    const at = new Date(2026, 8, 26, 23, 46);
+    renderView({
+      view: view({ sampledAt: 'x' }),
+      preview: { ...PREVIEW, why: `Claude is held back until ${at.toISOString()}.` },
+      nowMs: new Date(2026, 8, 25, 12, 0).getTime(),
+    });
+    expect(screen.getByText('Reading time not reported')).toBeInTheDocument();
+    expect(screen.queryByText(/Readings unknown/)).not.toBeInTheDocument();
+    expect(screen.getByText('Claude is held back until Sat 11:46 PM.')).toBeInTheDocument();
+    expect(screen.getByText('Personal Codex')).toHaveAttribute('title', 'Personal Codex');
+  });
+
   it('shows the mode, the summary, the next-task line and every seat with its why', () => {
     renderView();
     expect(screen.getByRole('heading', { name: 'Budget' })).toBeInTheDocument();

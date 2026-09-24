@@ -59,7 +59,7 @@ export function SessionInsightChip({ sessionId }: SessionInsightChipProps) {
               <li key={i.id}>
                 <span className={styles.insightTitle}>{i.title}</span>
                 <span className={styles.insightMeta}>
-                  {KIND_LABEL[i.kind]} · {i.count}× · last {formatRelative(i.lastAt)}
+                  {KIND_LABEL[i.kind]} · {i.count}× · last seen {formatRelative(i.lastAt)}
                 </span>
               </li>
             ))}

@@ -24,6 +24,7 @@ import { useEffect, useId, useState, type FormEvent } from 'react';
 import type { VerseRootPriority, VerseWorkspace } from '../../../data/api-types.js';
 import { Dialog } from '../../../components/primitives/Dialog.js';
 import { nativePickerAvailable, pickDirectory } from '../folder-picker.js';
+import { projectName } from '../verse-model.js';
 import {
   createVerseWorkspace,
   deleteVerseWorkspace,
@@ -182,6 +183,8 @@ export function SavedProjectDialog(props: SavedProjectDialogProps) {
               <input
                 className={styles.input}
                 value={root}
+                // A long path is cut with an ellipsis while the field is idle; the tooltip keeps it whole.
+                title={root || undefined}
                 onChange={(event) => setRow(index, event.target.value)}
                 placeholder="/absolute/path/to/folder"
                 aria-label={rootRowLabel(index)}
@@ -192,12 +195,15 @@ export function SavedProjectDialog(props: SavedProjectDialogProps) {
                 <button type="button" className={styles.rowButton} onClick={() => void choose(index)}
                   aria-label={`Choose ${rootRowLabel(index).toLowerCase()}`}>Choose folder…</button>
               ) : null}
+              {/* Glyph-only: the accessible name AND the tooltip both say what the arrow does. */}
               <button type="button" className={styles.rowButton} disabled={index === 0}
                 onClick={() => setRoots(moveRoot(rows, index, 'up'))}
-                aria-label={`Move ${rootRowLabel(index).toLowerCase()} up`}>↑</button>
+                aria-label={`Move ${rootRowLabel(index).toLowerCase()} up`}
+                title={`Move ${rootRowLabel(index).toLowerCase()} up`}><span aria-hidden="true">↑</span></button>
               <button type="button" className={styles.rowButton} disabled={index === rows.length - 1}
                 onClick={() => setRoots(moveRoot(rows, index, 'down'))}
-                aria-label={`Move ${rootRowLabel(index).toLowerCase()} down`}>↓</button>
+                aria-label={`Move ${rootRowLabel(index).toLowerCase()} down`}
+                title={`Move ${rootRowLabel(index).toLowerCase()} down`}><span aria-hidden="true">↓</span></button>
               <button type="button" className={styles.rowButton} disabled={rows.length === 1}
                 onClick={() => setRoots(rows.filter((_, i) => i !== index))}
                 aria-label={`Remove ${rootRowLabel(index).toLowerCase()}`}>Remove</button>
@@ -223,7 +229,8 @@ export function SavedProjectDialog(props: SavedProjectDialogProps) {
               <p className={styles.hint}>{ROOT_PRIORITY_NOTE}</p>
               {rows.filter((r) => r.trim().length > 0).map((root, index) => (
                 <div key={`${root}-${index}`} className={styles.priorityRow}>
-                  <span className={styles.priorityPath} title={root}>{root}</span>
+                  {/* The folder's own name; the full path is the tooltip (and the select's accessible name). */}
+                  <span className={styles.priorityPath} title={root}>{projectName(root.trim())}</span>
                   <select
                     className={styles.select}
                     aria-label={`Priority for ${root}`}

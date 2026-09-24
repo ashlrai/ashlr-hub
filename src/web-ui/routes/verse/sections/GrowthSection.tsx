@@ -28,6 +28,7 @@ import { modelsQuery } from '../../../data/queries.js';
 import { useNow } from '../autonomy/use-ticker.js';
 import { Cell, Surface } from '../command/Surface.js';
 import { fleetHistoryQuery, learningQuery } from '../command/surface-data.js';
+import { quietSinceStatus } from '../fleet/dark-since.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { OUTCOME_SEGMENTS, costPerMerge, forestRows, harnessSteps, modelOutcomes, weeklyBins } from '../growth/growth-model.js';
 import { HARNESS_ADOPTION_GATE } from '../../../../core/learn/harness-types.js';
@@ -58,7 +59,7 @@ export function GrowthSection() {
   const learn = learning.data?.value ?? null;
 
   const bins = useMemo(() => (hist ? weeklyBins(hist.days) : []), [hist]);
-  const histStatus: ChartStatus = !history.data ? { kind: 'loading' } : !hist ? unknownFrom(history.data.reason, 'fleet history did not answer.') : historyStatus(hist, hist.sources.runs);
+  const histStatus: ChartStatus = !history.data ? { kind: 'loading' } : !hist ? unknownFrom(history.data.reason, 'fleet history did not answer.') : quietSinceStatus(historyStatus(hist, hist.sources.runs));
   const weeklyStatus: ChartStatus = histStatus.kind !== 'ready' ? histStatus : bins.length === 0 ? { kind: 'empty', message: 'Not a full week of history yet.' } : { kind: 'ready' };
   const mergesCaveat = hist ? sourceCaveat('Merge counts', hist.sources.decisions) : undefined;
   const funnel = hist ? pipelineFunnel(hist) : null;
@@ -107,7 +108,7 @@ export function GrowthSection() {
           title="Pipeline · 90d"
           description="Filed → verified → passed → judged ship → merged"
           caveat={funnel?.caveat}
-          status={!funnel ? histStatus : funnel.status}
+          status={!funnel ? histStatus : quietSinceStatus(funnel.status)}
           stages={funnel?.stages ?? []}
         />
       </Cell>

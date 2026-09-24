@@ -11,6 +11,7 @@ import { ApiError } from '../../../data/client.js';
 import type { VerseGitDiffFile, VerseGitDiffScope } from '../../../data/api-types.js';
 import type { DiffPaneProps, TurnFileChange } from '../shell/slots.js';
 import { mockCompactViewport, type ViewportMock } from '../shell/viewport.test-support.js';
+import chrome from '../dock/pane-chrome.module.css';
 import { DiffPane } from './DiffPane.js';
 import type { GitDiffView } from './git-queries.js';
 
@@ -38,11 +39,12 @@ const PATCHES: Record<string, string> = {
 
 let calls: Array<{ root: string; scope: VerseGitDiffScope; file: string | null }>;
 let lists: Record<VerseGitDiffScope, VerseGitDiffFile[]>;
-let overrides: { truncated?: boolean; patchBytes?: number; fail?: unknown };
+let overrides: { truncated?: boolean; patchBytes?: number; fail?: unknown; failPatch?: unknown };
 
 const fetchDiff = vi.fn(async (root: string, scope: VerseGitDiffScope, f: string | null): Promise<GitDiffView> => {
   calls.push({ root, scope, file: f });
   if (overrides.fail) throw overrides.fail;
+  if (f !== null && overrides.failPatch) throw overrides.failPatch;
   return {
     root,
     scope,
@@ -155,10 +157,11 @@ describe('DiffPane', () => {
     expect(fetchDiff).not.toHaveBeenCalled();
   });
 
-  it('says so when the folder is not a repository', async () => {
+  it('says so when the folder is not a repository, and what would change that', async () => {
     overrides.fail = new ApiError('x', 404, '/api/verse/git/diff', 'This folder is not a git repository.', 'VERSE_GIT_NOT_A_REPO');
     renderPane();
     expect(await screen.findByText('Not a git repository')).toBeInTheDocument();
+    expect(screen.getByText('ashlr-hub is not tracked by git, so there is nothing to review. Run git init in the terminal to start tracking it.')).toBeInTheDocument();
   });
 
   it('says a patch was cut at 256 KB', async () => {
@@ -259,5 +262,61 @@ describe('at 375px (a bottom-sheet dock)', () => {
     expect(screen.getByRole('radiogroup', { name: 'What to review' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Refresh changes' })).toBeInTheDocument();
     await screen.findByRole('grid');
+  });
+});
+
+describe('honest states name the next step (3.10.1 polish)', () => {
+  it('a failed read offers Try again, which reads again', async () => {
+    const user = userEvent.setup();
+    overrides.fail = new ApiError('x', 500, '/api/verse/git/diff', 'git exploded.');
+    renderPane();
+    expect(await screen.findByText('Could not read the changes')).toBeInTheDocument();
+    overrides.fail = undefined;
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('listbox', { name: 'Changed files' })).toBeInTheDocument();
+  });
+
+  it('a patch that failed to load offers Try again', async () => {
+    const user = userEvent.setup();
+    overrides.failPatch = new ApiError('x', 500, '/api/verse/git/diff', 'The patch could not be read.');
+    renderPane();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('The patch could not be read.');
+    overrides.failPatch = undefined;
+    await user.click(within(alert).getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('grid', { name: /Changes in notes\/new.md/ })).toBeInTheDocument();
+  });
+
+  it('an empty scope states the fact once and says where to look next', async () => {
+    lists.working = [];
+    renderPane();
+    expect(await screen.findByText('No uncommitted changes.')).toBeInTheDocument();
+    expect(screen.getByText('Edits the chat makes show up here as they land. Branch shows what is already committed.')).toBeInTheDocument();
+  });
+
+  it('the patch grid\'s "+" comment buttons carry a tooltip as well as a name', async () => {
+    renderPane();
+    const grid = await screen.findByRole('grid', { name: /Changes in notes\/new.md/ });
+    const adds = within(grid).getAllByRole('button', { name: /^Add a comment on line \d+$/ });
+    expect(adds.length).toBeGreaterThan(0);
+    for (const add of adds) expect(add).toHaveAttribute('title', add.getAttribute('aria-label'));
+  });
+
+  it('with no folder, it says how to get one', () => {
+    renderPane({ roots: [] });
+    expect(screen.getByText('No folder to review')).toBeInTheDocument();
+    expect(screen.getByText('This chat has no project folder. Start a chat in a project to review the changes it makes.')).toBeInTheDocument();
+  });
+
+  it('wears the shared dock header: the repository name (full path as its tooltip), actions on the right, all named', async () => {
+    const tmp = '/private/tmp/claude-501/x/scratchpad/home-dock/proj';
+    renderPane({ roots: [tmp] });
+    await screen.findByRole('listbox', { name: 'Changed files' });
+    const header = screen.getByRole('button', { name: 'Refresh changes' }).closest('header')!;
+    expect(chrome.header).toEqual(expect.stringMatching(/header/)); // a real class name, not an empty stub
+    expect(header).toHaveClass(chrome.header);
+    expect(within(header).getByText('proj')).toHaveAttribute('title', tmp);
+    expect(document.body.textContent).not.toMatch(/\/private\/tmp|scratchpad/);
+    expect(within(header).getByRole('button', { name: 'Refresh changes' })).toHaveAttribute('title', 'Refresh changes');
   });
 });

@@ -46,8 +46,8 @@ import {
 import { matchCommand } from './command-catalog.js';
 import { isGuardOpen } from './guarded-action.js';
 import { markResolved, pruneResolved, runNeedsYouAction, useResolvedIds } from './needs-you-actions.js';
-import { actionOf, ago, describeSilence, itemsForSplit, SPLIT_LABEL, splitCounts, splitCoverage, until } from './needs-you-model.js';
-import { NeedsYouList } from './NeedsYouList.js';
+import { actionOf, describeSilence, itemsForSplit, needsYouRowView, SPLIT_LABEL, splitCounts, splitCoverage, until } from './needs-you-model.js';
+import { NeedsYouList, NeedsYouRunFacts } from './NeedsYouList.js';
 import { refreshActivity, useActivity } from './useActivity.js';
 import { useViewport } from './viewport.js';
 import styles from './NeedsYouDrawer.module.css';
@@ -433,16 +433,23 @@ function ItemDetail({
   dispatchEnabled: boolean;
 }) {
   const targetLabel = TARGET_LABEL(item);
+  // The same readable text as the row (needs-you-model needsYouRowView), with room for the whole title.
+  const view = needsYouRowView(item, now);
   return (
     <article className={styles.item}>
-      <h3 className={styles.itemTitle}>{item.title}</h3>
-      {item.detail ? <p className={styles.itemDetail}>{item.detail}</p> : null}
+      <header className={styles.itemHead}>
+        {view.kindLabel ? <p className={styles.rowKind}>{view.kindLabel}</p> : null}
+        <h3 className={styles.itemTitle} title={view.fullTitle}>{view.title}</h3>
+        {view.run ? <NeedsYouRunFacts run={view.run} /> : null}
+      </header>
+      {view.detail ? <p className={styles.itemDetail}>{view.detail}</p> : null}
       <dl className={styles.defs}>
-        {item.subject.repo ? (<><dt>Repo</dt><dd className={styles.mono}>{item.subject.repo}</dd></>) : null}
+        {view.repo ? (<><dt>Repo</dt><dd className={styles.repo} title={view.repoFull}>{view.repo}</dd></>) : null}
         {item.subject.pr ? (<><dt>Pull request</dt><dd>#{item.subject.pr}</dd></>) : null}
         {item.subject.seatId ? (<><dt>Seat</dt><dd className={styles.mono}>{item.subject.seatId}</dd></>) : null}
-        <dt>Waiting</dt>
-        <dd>since {ago(item.since, now)}</dd>
+        {view.run ? (<><dt>Model</dt><dd className={styles.mono}>{view.run.model}</dd></>) : null}
+        <dt>Raised</dt>
+        <dd title={view.ageStamp}>{view.age}</dd>
         {item.expiresAt ? (<><dt>Closes</dt><dd className={styles.deadline}>{until(item.expiresAt, now)}</dd></>) : null}
       </dl>
       <div className={styles.itemActions}>

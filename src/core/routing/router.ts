@@ -25,6 +25,7 @@
  */
 import { assessSeat, HEADROOM_READING_MAX_AGE_MS, type SeatCapacity } from './headroom.js';
 import { effectiveSeatPolicy, type BudgetEngine } from './policy.js';
+import { listSeatIds, reasonSentences } from './seat-reasons.js';
 import type {
   BudgetMode,
   BudgetPolicy,
@@ -33,6 +34,7 @@ import type {
   SeatDecision,
   SeatExclusion,
   SeatHeadroom,
+  SeatReason,
 } from './types.js';
 
 /** A request may use at most this share of a seat's context window. */
@@ -81,15 +83,16 @@ interface Verdict {
   index: number;
   headroom: SeatHeadroom | null;
   eligible: boolean;
-  reasons: string[];
+  /** The blockers as data; `SeatExclusion.reasons` is derived from them. */
+  details: SeatReason[];
   nextEligibleAt: string | null;
 }
 
 function interactiveVerdict(capacity: SeatCapacity, nowMs: number, readingMaxAgeMs: number): Verdict {
-  const reasons: string[] = [];
+  const details: SeatReason[] = [];
   let nextEligibleAt: string | null = null;
-  if (capacity.signedOut) reasons.push('Signed out — reconnect this account.');
-  if (capacity.reachable === false && !capacity.signedOut) reasons.push('Not reachable right now.');
+  if (capacity.signedOut) details.push({ kind: 'signed-out', text: 'Signed out — reconnect this account.' });
+  if (capacity.reachable === false && !capacity.signedOut) details.push({ kind: 'unreachable', text: 'Not reachable right now.' });
   // Reuse the autonomy assessment only for the facts it establishes about
   // the ACCOUNT (spent windows and their resets) — never its reserves.
   const facts = assessSeat(capacity, { seatId: capacity.seatId, enabled: true, reservePercent: 0 }, {
@@ -97,10 +100,10 @@ function interactiveVerdict(capacity: SeatCapacity, nowMs: number, readingMaxAge
     readingMaxAgeMs,
   });
   if (facts.exhausted) {
-    reasons.push(...facts.spentReasons);
+    details.push(...facts.spentDetails);
     nextEligibleAt = facts.reopensAt;
   }
-  return { capacity, index: 0, headroom: facts.headroom, eligible: reasons.length === 0, reasons, nextEligibleAt };
+  return { capacity, index: 0, headroom: facts.headroom, eligible: details.length === 0, details, nextEligibleAt };
 }
 
 function autonomousVerdict(capacity: SeatCapacity, policy: BudgetPolicy, nowMs: number, readingMaxAgeMs: number): Verdict {
@@ -112,7 +115,7 @@ function autonomousVerdict(capacity: SeatCapacity, policy: BudgetPolicy, nowMs: 
     headroom: assessed.headroom,
     eligible: assessed.headroom.eligibleForAutonomy,
     // Blocked seats report the blockers; the "N% left" line is for eligible ones.
-    reasons: assessed.headroom.eligibleForAutonomy ? [] : assessed.headroom.reasons,
+    details: assessed.headroom.eligibleForAutonomy ? [] : assessed.details,
     nextEligibleAt: assessed.headroom.eligibleForAutonomy ? null : assessed.reopensAt,
   };
 }
@@ -131,8 +134,11 @@ function applyFit(verdict: Verdict, contextTokens: number | undefined): Verdict 
   return {
     ...verdict,
     eligible: false,
-    reasons: [...verdict.reasons, `Needs about ${formatTokens(contextTokens)} tokens of context; this seat's window is `
-      + `${formatTokens(window)} (at most ${Math.round(ROUTER_CONTEXT_FIT_FRACTION * 100)}% is used for a task).`],
+    details: [...verdict.details, {
+      kind: 'context',
+      text: `Needs about ${formatTokens(contextTokens)} tokens of context; this seat's window is `
+        + `${formatTokens(window)} (at most ${Math.round(ROUTER_CONTEXT_FIT_FRACTION * 100)}% is used for a task).`,
+    }],
     // A window does not grow back on a schedule.
     nextEligibleAt: null,
   };
@@ -172,9 +178,19 @@ function describeWork(req: RoutingRequest): string {
   return `${req.difficulty}-difficulty ${req.task} work`;
 }
 
-function describeExclusion(exclusion: SeatExclusion): string {
-  const first = exclusion.reasons[0] ?? 'not eligible';
+/**
+ * "codex-cmp: autonomy is switched off for this seat" — the FIRST reason, as
+ * text without its reset clause, so a list of these never nests parentheses.
+ */
+export function describeExclusion(exclusion: SeatExclusion): string {
+  const first = exclusion.details?.[0]?.text ?? exclusion.reasons[0] ?? 'not eligible';
   return `${exclusion.seatId}: ${lowerFirst(first).replace(/\.$/, '')}`;
+}
+
+/** Up to `max` exclusions described, then "and N more" — never a bare "…". */
+export function describeExclusions(exclusions: readonly SeatExclusion[], max = 3): string {
+  const shown = exclusions.slice(0, max).map(describeExclusion).join('; ');
+  return exclusions.length > max ? `${shown}; and ${exclusions.length - max} more` : shown;
 }
 
 /**
@@ -202,31 +218,50 @@ export function routeSeat(
   const eligible = rank(verdicts.filter((v) => v.eligible), order);
   const exclusions: SeatExclusion[] = verdicts
     .filter((v) => !v.eligible)
-    .map((v) => ({ seatId: v.capacity.seatId, reasons: v.reasons, nextEligibleAt: v.nextEligibleAt }))
+    .map((v) => ({
+      seatId: v.capacity.seatId,
+      reasons: reasonSentences(v.details),
+      nextEligibleAt: v.nextEligibleAt,
+      details: v.details,
+    }))
     .sort((a, b) => compareIds(a.seatId, b.seatId));
 
   const chosen = eligible[0] ?? null;
   const candidates = eligible.map((v) => v.capacity.seatId);
   const who = req.autonomous ? 'autonomous ' : '';
 
+  // `why` is the full sentence the logs and the CLI print; `summary` is the
+  // short headline a UI shows above its own per-seat list. Neither repeats
+  // the per-seat reasons — `exclusions` carries those as data.
   let why: string;
+  let summary: string;
   if (chosen) {
     const engine = ENGINE_NAMES[chosen.capacity.engine];
     const room = chosen.headroom?.autonomyHeadroomPercent;
-    const roomText = req.autonomous && !chosen.capacity.free && typeof room === 'number'
-      ? ` with ${room}% of its ${chosen.headroom?.bindingWindow === 'session' ? '5-hour' : 'weekly'} window left for autonomy`
+    const windowWord = chosen.headroom?.bindingWindow === 'session' ? '5-hour' : 'weekly';
+    const hasRoom = req.autonomous && !chosen.capacity.free && typeof room === 'number';
+    const roomText = hasRoom
+      ? ` with ${room}% of its ${windowWord} window left for autonomy`
       : chosen.capacity.free ? ' at no cost' : '';
     const held = exclusions.length === 0 ? ''
-      : `; held back ${exclusions.length === 1 ? '1 seat' : `${exclusions.length} seats`} (${exclusions.slice(0, 2).map(describeExclusion).join('; ')}${exclusions.length > 2 ? '; …' : ''})`;
+      : `; held back ${exclusions.length === 1 ? '1 seat' : `${exclusions.length} seats`} (${listSeatIds(exclusions.map((e) => e.seatId))})`;
     why = `Routed ${who}${describeWork(req)} to ${chosen.capacity.label} (${chosen.capacity.seatId})${roomText}: `
       + `${policy.mode} mode prefers ${engine} first for this work${held}.`;
+    const lead = hasRoom
+      ? ` — ${room}% of its ${windowWord} window left`
+      : chosen.capacity.free ? ' — free, no usage window' : '';
+    summary = lead
+      ? `${chosen.capacity.label}${lead}; ${policy.mode} mode prefers ${engine} for this work.`
+      : `${chosen.capacity.label} — ${policy.mode} mode prefers ${engine} for this work.`;
   } else if (capacity.length === 0) {
     why = `No seats are known, so ${who}${describeWork(req)} has nowhere to run.`;
+    summary = 'No seats are known, so this work has nowhere to run.';
   } else {
     const reopen = exclusions.flatMap((e) => (e.nextEligibleAt ? [e.nextEligibleAt] : []))
       .sort((a, b) => Date.parse(a) - Date.parse(b))[0] ?? null;
-    why = `No seat can take ${who}${describeWork(req)} in ${policy.mode} mode (${exclusions.slice(0, 3).map(describeExclusion).join('; ')}`
-      + `${exclusions.length > 3 ? '; …' : ''})${reopen ? `; the earliest known reopening is ${reopen}` : ''}.`;
+    why = `No seat can take ${who}${describeWork(req)} in ${policy.mode} mode (${describeExclusions(exclusions)})`
+      + `${reopen ? `; the earliest known reopening is ${reopen}` : ''}.`;
+    summary = `No seat can take this ${describeWork(req)} in ${policy.mode} mode right now.`;
   }
 
   return {
@@ -234,6 +269,7 @@ export function routeSeat(
     candidates,
     exclusions,
     why,
+    summary,
     mode: policy.mode,
   };
 }

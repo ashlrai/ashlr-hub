@@ -119,15 +119,11 @@
 
 /* ---- toolbar -------------------------------------------------------------- */
 
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex: none;
-  padding: var(--space-1) var(--space-2);
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-surface);
-}
+/* Height, padding, border and surface come from ../pane-chrome.module.css
+   (the row every dock pane shares); the toolbar only lays out its parts. */
+/* Starts with icon buttons, so a smaller inset than a text title (and scoped
+   under .pane so it outranks the shared padding regardless of CSS order). */
+.pane .toolbar { padding-left: var(--space-2); }
 
 .nav {
   display: flex;
@@ -173,6 +169,8 @@
   color: var(--text-secondary);
 }
 .external:hover { background: var(--bg-hover); color: var(--text-primary); }
+/* No page to open elsewhere: the slot keeps its width, so the address bar does not jump. */
+.external[data-placeholder] { visibility: hidden; }
 
 /* ---- notices -------------------------------------------------------------- */
 

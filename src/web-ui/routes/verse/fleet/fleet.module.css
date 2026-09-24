@@ -79,12 +79,34 @@
   font-variant-numeric: tabular-nums;
 }
 
-.laneWhy {
+/* The dot between a lane and its slots ("Local · off"). */
+.laneSep {
   color: var(--text-tertiary);
-  max-width: 32ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+/* Chips, then each distinct cap reason once — wrapped, never truncated. */
+.laneStrip {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.laneNotes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+  overflow-wrap: anywhere;
+}
+
+.laneNoteLanes {
+  color: var(--text-secondary);
+  font-weight: var(--font-weight-medium);
 }
 
 /* ---- why this seat ---------------------------------------------------- */

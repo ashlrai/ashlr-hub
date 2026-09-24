@@ -422,6 +422,7 @@ export const REAL_IO_TEST_FILES = [
   'test/verse-accounts-limit-reached.test.ts', // private 0600/0700 ledger evidence files round-tripped in a tmp root (sibling of verse-accounts)
   'test/verse-fleet-history.test.ts', // one real worker thread + an event-loop budget assertion over on-disk fixtures
   'test/routing-budget-api.test.ts', // real web server bind for /api/verse/budget* under a relocated HOME
+  'test/routing-capacity-history.test.ts', // 3.10.1: real loopback http server + real authenticated web server bind for /api/verse/budget/history under a relocated HOME
   'test/setup/home-isolation-guard.test.ts', // spawns a nested real `vitest run` to prove the guard fails a leaking fixture
   // Track A/C — Verse server surfaces.
   'test/verse-activity-310.test.ts', // real web server bind for /api/verse/activity + a 300-chat warm-read latency bound

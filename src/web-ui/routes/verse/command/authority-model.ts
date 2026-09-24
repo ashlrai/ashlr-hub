@@ -18,6 +18,7 @@
  * Framework-free; tested directly.
  */
 import type { AuthorityGrantDraft, AuthorityStatusV1, AutonomySwitch, GrantState } from '../../../../core/authority/types.js';
+import { darkSinceLabel } from '../fleet/dark-since.js';
 
 export const SWITCH_RANK: Readonly<Record<AutonomySwitch, number>> = { off: 0, propose: 1, autonomous: 2 };
 
@@ -152,7 +153,11 @@ export interface VerdictInputs {
   revertsToday: number | null;
   /** "Claude" and the percent reserved for Mason on that seat; null = unknown / no such seat. */
   reserve: { label: string; percent: number } | null;
-  /** The fleet has done nothing since this ISO time (designed dark state). */
+  /**
+   * THE dark-since instant — `fleetDarkSince(live)` (fleet/dark-since.ts),
+   * null unless the fleet is dark. Never fleet history's "quiet since": an
+   * idle fleet that has not produced lately is not dark.
+   */
   darkSince: string | null;
 }
 
@@ -180,8 +185,8 @@ export function verdictParts(v: VerdictInputs): VerdictPart[] {
   const parts: VerdictPart[] = [modeWord(v.authority)];
   const anyFleet = v.building !== null || v.mergedToday !== null || v.revertsToday !== null;
   if (v.darkSince && !(v.building && v.building > 0)) {
-    const since = new Date(v.darkSince);
-    parts.push({ key: 'dark', text: `fleet dark since ${since.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, tone: 'neutral' });
+    // The same local-day label the Fleet surface's dark charts use.
+    parts.push({ key: 'dark', text: `fleet dark since ${darkSinceLabel(v.darkSince)}`, tone: 'neutral' });
   } else if (!anyFleet) {
     parts.push({ key: 'fleet', text: 'fleet status unknown', tone: 'unknown' });
   } else {

@@ -19,6 +19,7 @@
  */
 import type { ReactNode } from 'react';
 import { useEffect, useMemo, useState } from 'react';
+import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import type { CapacityOverview } from './capacity-model.js';
 import { formatUntil, nextResetAt } from './capacity-model.js';
 import { formatBytes } from './local-model.js';
@@ -58,14 +59,14 @@ export function CapacityFacts({ overview }: { overview: CapacityOverview }): Rea
             ) : overdue ? (
               <span className={styles.capacityMuted}>
                 <span className={styles.num}>{reset.seatLabel}</span> · {reset.windowLabel} was due to
-                reset at {new Date(reset.atMs).toLocaleString()} — this reading predates the rollover.
+                reset {describeResetAt(new Date(reset.atMs).toISOString(), nowMs)} — this reading predates the rollover.
               </span>
             ) : (
               <>
                 <span className={styles.num}>{formatUntil(untilMs)}</span>{' '}
                 <span className={styles.capacityMuted}>
-                  · {reset.seatLabel} {reset.windowLabel}, at{' '}
-                  {new Date(reset.atMs).toLocaleString()}
+                  · {reset.seatLabel} {reset.windowLabel}, resets{' '}
+                  {describeResetAt(new Date(reset.atMs).toISOString(), nowMs)}
                 </span>
               </>
             )}

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { funnelStages, laneRows, latestDecision, parkedGantt, refusalStack, runStatus, runTone } from './live-model.js';
+import { funnelStages, laneChipText, laneNotes, laneRows, latestDecision, parkedGantt, refusalStack, runStatus, runTone } from './live-model.js';
 import { fleetLive } from '../command/fixtures.test-support.js';
+import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 
 const NOW = Date.parse('2026-09-24T15:00:00Z');
 const H = 3_600_000;
@@ -48,6 +49,14 @@ describe('parkedGantt', () => {
     expect(unknown.unknownRelease).toBe(2);
     expect(unknown.lanes[0]!.items[0]!.end).toBeNull();
   });
+
+  it('shows a hold reason\'s instants in the viewer\'s zone, never raw ISO', () => {
+    const at = '2026-09-25T18:25:44.000Z';
+    const runs = fleetLive('live', NOW).runs.map((r) => (r.hold ? { ...r, hold: { ...r.hold, reason: `No seat can take it; the earliest known reopening is ${at}.` } } : r));
+    const detail = parkedGantt(runs, NOW).lanes[0]!.items[0]!.detail!;
+    expect(detail).toBe(`No seat can take it; the earliest known reopening is ${describeResetAt(at, NOW)}.`);
+    expect(detail).not.toContain('2026-09-25T');
+  });
 });
 
 describe('gates', () => {
@@ -70,5 +79,28 @@ describe('gates', () => {
   it('finds the newest routing decision', () => {
     expect(latestDecision(fleetLive('live', NOW))!.decision.seatId).toBe('grok-a');
     expect(latestDecision(fleetLive('dark', NOW))).toBeNull();
+  });
+});
+
+describe('lane chips', () => {
+  it('reads "Local · off" / "Grok · 1/2" — the why is not in the chip', () => {
+    expect(laneChipText({ lane: 'local', slots: 0, busy: 0, capReason: 'No standing grant is in force.' })).toEqual({ name: 'Local', slots: 'off' });
+    expect(laneChipText({ lane: 'grok-cli', slots: 2, busy: 1, capReason: null })).toEqual({ name: 'Grok', slots: '1/2' });
+  });
+
+  it('says a reason every lane shares ONCE, without lane names', () => {
+    const reason = 'No standing grant is in force.';
+    const lanes = (['local', 'grok-cli', 'claude-cli', 'codex'] as const).map((lane) => ({ lane, slots: 0, busy: 0, capReason: reason }));
+    expect(laneNotes(lanes)).toEqual([{ lanes: ['local', 'grok-cli', 'claude-cli', 'codex'], all: true, reason }]);
+  });
+
+  it('groups distinct reasons with the lanes they cover and skips lanes with none', () => {
+    const notes = laneNotes(fleetLive('live', NOW).lanes);
+    expect(notes.map((n) => [n.lanes, n.all])).toEqual([[['local'], false], [['claude-cli'], false], [['codex'], false]]);
+    const dark = laneNotes(fleetLive('dark', NOW).lanes);
+    expect(dark).toEqual([
+      { lanes: ['local', 'grok-cli', 'claude-cli'], all: false, reason: 'no grant' },
+      { lanes: ['codex'], all: false, reason: 'off until its window resets' },
+    ]);
   });
 });

@@ -9,11 +9,11 @@
 import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { dockPresentation } from '../shell/dock-catalog.js';
+import { DOCK_PANE_IDS, dockPresentation } from '../shell/dock-catalog.js';
 import { isSlotAvailable } from '../shell/slots.js';
 import { mockViewport, type ViewportMock } from '../shell/viewport.test-support.js';
 import { Dock, isPaneAvailable } from './Dock.js';
-import { getDockState, openDockPane, resetDockStore, splitDock } from './dock-store.js';
+import { closeDockTab, getDockState, openDockPane, resetDockStore, splitDock } from './dock-store.js';
 
 let vp: ViewportMock | null = null;
 
@@ -131,5 +131,43 @@ describe('Dock — presentation by window width', () => {
     expect(within(sheet).queryByRole('button', { name: /Split/ })).toBeNull();
     // The scrim closes it, as does the sheet's own close button.
     expect(screen.getAllByRole('button', { name: 'Close the dock' })).toHaveLength(2);
+  });
+});
+
+describe('Dock — header and empty states (3.10.1 polish)', () => {
+  it('gives every icon-only header button a name and a tooltip', () => {
+    act(() => { openDockPane('tasks'); openDockPane('context'); });
+    render(<Harness width={1440} />);
+    const dock = screen.getByRole('complementary', { name: 'Dock: Context' });
+    const iconOnly = within(dock).getAllByRole('button').filter((b) => b.getAttribute('role') !== 'tab' && !b.textContent?.replace('+', '').trim());
+    expect(iconOnly.map((b) => b.getAttribute('aria-label'))).toEqual(
+      expect.arrayContaining(['Close Tasks', 'Close Context', 'Add a pane', 'Split the dock', 'Close the dock']),
+    );
+    for (const button of iconOnly) {
+      expect(button.getAttribute('aria-label'), button.outerHTML).toBeTruthy();
+      expect(button.getAttribute('title'), button.outerHTML).toBeTruthy();
+    }
+    expect(within(dock).getByRole('button', { name: 'Close the dock' }).getAttribute('title')).toMatch(/^Close the dock \((⌘\\|Ctrl\+\\)\)$/);
+  });
+
+  it('keeps "Add a pane" in place — disabled, with the reason — once every pane is open', () => {
+    const all = DOCK_PANE_IDS.filter(isPaneAvailable);
+    act(() => { for (const pane of all) openDockPane(pane); });
+    render(<Harness width={1440} />);
+    const add = screen.getByRole('button', { name: 'Add a pane' });
+    expect(add).toBeDisabled();
+    expect(add).toHaveAttribute('title', 'Every pane is already open');
+    // Closing one brings it straight back into service, in the same spot.
+    act(() => { closeDockTab('tasks'); });
+    expect(screen.getByRole('button', { name: 'Add a pane' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Add a pane' })).toHaveAttribute('title', 'Add a pane');
+  });
+
+  it('a folder pane with no chat open says how to get one', () => {
+    expect(isPaneAvailable('terminal')).toBe(true); // C4's pane is in this build
+    act(() => { openDockPane('terminal'); });
+    render(<Harness width={1440} />);
+    expect(screen.getByText('Open a chat to use Terminal')).toBeInTheDocument();
+    expect(screen.getByText(/^Pick a chat in the sidebar or start one with (⌘N|Ctrl\+N)\. Terminal works in that chat's folders\.$/)).toBeInTheDocument();
   });
 });

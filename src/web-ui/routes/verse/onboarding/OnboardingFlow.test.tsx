@@ -14,7 +14,7 @@ import { bootstrap } from '../fixtures.test-support.js';
 import { healthReport } from '../health/health.test-support.js';
 import { CLAUDE_TIGHT_SEAT, GROK_SEAT } from '../seat-fixtures.test-support.js';
 import { OnboardingFlow } from './OnboardingFlow.js';
-import { OnboardingPanel } from './OnboardingPanel.js';
+import { OnboardingPanel, describeOnboardingState } from './OnboardingPanel.js';
 import {
   VERSE_ONBOARDING_STORAGE_KEY,
   getOnboardingState,
@@ -91,6 +91,11 @@ describe('OnboardingFlow — presence and dismissal', () => {
     render(<OnboardingFlow />);
     expect(screen.getByText('Welcome to Verse')).toBeInTheDocument();
     expect(screen.getByText('Getting started · 1 of 5')).toBeInTheDocument();
+  });
+
+  it('gives the icon-only close button a tooltip as well as an accessible name', () => {
+    render(<OnboardingFlow />);
+    expect(screen.getByRole('button', { name: 'Close getting started' })).toHaveAttribute('title', 'Close getting started');
   });
 
   it('tours the 3.10 rail — Command ⌘1 through Chat ⌘5 — and points at ⌘K, ⌘J and the gear', () => {
@@ -284,5 +289,17 @@ describe('OnboardingPanel — replay from Settings', () => {
     await user.click(screen.getByRole('button', { name: 'Replay' }));
     expect(screen.getByText('Welcome to Verse')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Showing' })).toBeDisabled();
+  });
+
+  it('says when the tour was completed in the app’s relative wording, not a numeric date', () => {
+    const now = Date.parse('2026-09-24T12:00:00.000Z');
+    expect(describeOnboardingState('2026-09-24T11:55:00.000Z', null, now)).toBe('Last completed 5m ago.');
+    const older = describeOnboardingState('2026-09-01T10:00:00.000Z', null, now);
+    expect(older).toMatch(/^Last completed on \w{3} \d{1,2}\.$/);
+    expect(older).not.toMatch(/\d{1,2}\/\d{1,2}\/\d{4}|2026-09-01/);
+  });
+
+  it('names the next step when the tour has not been seen', () => {
+    expect(describeOnboardingState(null, null)).toBe('Not seen yet. Replay it to take the two-minute tour.');
   });
 });

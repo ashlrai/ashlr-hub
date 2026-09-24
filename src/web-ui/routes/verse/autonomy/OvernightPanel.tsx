@@ -66,7 +66,7 @@ import { Tooltip } from '../../../components/primitives/Tooltip.js';
 import { runDaemonAction } from './control-queries.js';
 import type { VerseControlSnapshot } from './control-types.js';
 import type { OptionalFleetRead } from './fleet-contract.js';
-import { formatStamp, UNKNOWN } from './format.js';
+import { asClause, formatStamp, repoDisplayName, tidyProse, UNKNOWN } from './format.js';
 import type { OvernightStatus, OvernightStopRule, OvernightStopRuleKind } from './overnight-contract.js';
 import { armOvernight, disarmOvernight } from './overnight-queries.js';
 import {
@@ -117,7 +117,10 @@ export function OvernightPanel({
   const [timeValue, setTimeValue] = useState(DEFAULT_STOP_TIME);
   const [iterationsValue, setIterationsValue] = useState(DEFAULT_ITERATIONS);
   const [formError, setFormError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
+  const [note, setNoteRaw] = useState<string | null>(null);
+  // Every action note is the server's own sentence: shown verbatim, except
+  // that an ISO instant in it is read as local time.
+  const setNote = (next: string | null): void => setNoteRaw(next ? tidyProse(next) : null);
 
   const status = read?.value ?? null;
   const run = status?.run ?? null;
@@ -311,8 +314,14 @@ export function OvernightPanel({
           </p>
 
           <dl className={styles.facts}>
-            <Fact label="Doing now" value={run?.activity ?? UNKNOWN} wide />
-            <Fact label="Repository" value={run?.repo ?? UNKNOWN} mono />
+            <Fact label="Doing now" value={run?.activity ? tidyProse(run.activity) : UNKNOWN} wide />
+            {/* The checkout's folder name; the full path is the tooltip. */}
+            <Fact
+              label="Repository"
+              value={run?.repo ? repoDisplayName(run.repo) : UNKNOWN}
+              title={run?.repo ?? undefined}
+              mono
+            />
             <Fact label="Running for" value={formatRunElapsed(run?.startedAt, now)} />
           </dl>
 
@@ -339,22 +348,26 @@ export function OvernightPanel({
 
           <Ledger
             title="Merged"
-            empty="Nothing merged yet."
+            empty="Nothing merged yet. Changes that pass the gate land here as they merge."
             rows={(run?.merged ?? []).map((m) => ({
               id: m.id,
               repo: m.repo,
               title: m.title,
-              meta: m.commit ? `${m.commit} · ${formatStamp(m.at)}` : formatStamp(m.at),
+              // A short sha, like every git surface; the full one is the tooltip.
+              meta: metaLine(m.commit ? m.commit.slice(0, 7) : null, m.at),
+              metaTitle: m.commit ?? undefined,
             }))}
           />
           <Ledger
             title="Discarded"
-            empty="Nothing discarded yet."
+            empty="Nothing discarded yet. A change that fails the gate is listed here with the reason."
             rows={(run?.discarded ?? []).map((d) => ({
               id: d.id,
               repo: d.repo,
               title: d.title,
-              meta: `${d.reason} · ${formatStamp(d.at)}`,
+              // The reason is a sentence of its own, often several joined by
+              // the server: tidied so it never reads ".;" or ". ·".
+              meta: metaLine(asClause(tidyProse(d.reason)), d.at),
             }))}
           />
 
@@ -521,21 +534,33 @@ function buildRule(
   return { kind: 'after-iterations', iterations };
 }
 
+/** "abc1234 · 03:12:44" — a missing part is left out, never printed as "—". */
+function metaLine(lead: string | null, at: string | null): string {
+  const stamp = at ? formatStamp(at) : null;
+  return [lead, stamp === UNKNOWN ? null : stamp].filter((part): part is string => Boolean(part)).join(' · ');
+}
+
 function Fact({
   label,
   value,
+  title,
   mono = false,
   wide = false,
 }: {
   label: string;
   value: string;
+  /** The full text when `value` is a shortened form (a path shown by its folder name). */
+  title?: string;
   mono?: boolean;
   wide?: boolean;
 }): ReactNode {
   return (
     <div className={`${styles.fact} ${wide ? styles.factWide : ''}`}>
       <dt className={styles.factLabel}>{label}</dt>
-      <dd className={`${styles.factValue} ${mono ? styles.factMono : ''}`}>{value}</dd>
+      {/* A mono or wide value can be cut with an ellipsis, so it always carries its full text as a tooltip. */}
+      <dd className={`${styles.factValue} ${mono ? styles.factMono : ''}`} title={title ?? (mono || wide ? value : undefined)}>
+        {value}
+      </dd>
     </div>
   );
 }
@@ -545,6 +570,8 @@ interface LedgerRow {
   repo: string;
   title: string;
   meta: string;
+  /** Full text behind a shortened meta (the whole commit sha). */
+  metaTitle?: string;
 }
 
 /** What it merged, and what it threw away — same row shape for both. */
@@ -568,9 +595,10 @@ function Ledger({
         <ul className={styles.ledgerList}>
           {rows.map((row) => (
             <li key={row.id} className={styles.ledgerRow}>
-              <span className={styles.ledgerRepo}>{row.repo}</span>
+              {/* The repo cell truncates: its folder name (or owner/name) shows, the full value is the tooltip. */}
+              <span className={styles.ledgerRepo} title={row.repo}>{repoDisplayName(row.repo)}</span>
               <span className={styles.ledgerChange}>{row.title}</span>
-              <span className={styles.ledgerMeta}>{row.meta}</span>
+              {row.meta ? <span className={styles.ledgerMeta} title={row.metaTitle}>{row.meta}</span> : null}
             </li>
           ))}
         </ul>

@@ -413,14 +413,16 @@ export function LocalModelsPanel({
       {view === null ? (
         <p className={styles.muted}>
           No local-model source answered, so neither resident nor installed models can be listed. This
-          is a missing source, not an empty machine.
+          is a missing source, not an empty machine. Start Ollama (<code className={styles.commandInline}>ollama serve</code>)
+          or llama-server, and this fills in on the next check.
         </p>
       ) : !view.reachable ? (
         /* `view.reason` is a machine code, not a sentence. It is shown as
            evidence after the sentence rather than being the whole panel. */
         <p className={styles.muted}>
           No local runtime answered this probe, so nothing about local models can be read. That is an
-          unanswered probe, not a report that no models are installed.
+          unanswered probe, not a report that no models are installed. Start Ollama
+          (<code className={styles.commandInline}>ollama serve</code>) or llama-server, then check again.
           {view.reason ? (
             <>
               {' '}

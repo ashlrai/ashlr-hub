@@ -17,6 +17,11 @@
  *
  * `variant="list"` renders the same items as a plain radio list, for the 375px
  * sheet where a popover over a popover would be unusable.
+ *
+ * The button shows a SHORT value ("Accept edits", "Effort: High") and never
+ * ellipsizes it; the full value is its accessible name and its title, with
+ * the shortcut. Where the footer is too narrow it folds to the icon alone
+ * (`iconOnly`) — the name and the title still carry the words.
  */
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import type { VerseControlOption } from '../../../../core/verse/workbench-types.js';
@@ -25,8 +30,10 @@ import styles from './composer.module.css';
 export interface ControlMenuProps<T extends string> {
   /** Accessible name of the picker ("Permission mode"). */
   label: string;
-  /** What the button shows for the current value. */
+  /** What the button shows for the current value (short: "Accept edits", "Effort: High"). */
   valueLabel: string;
+  /** The full current value, for the accessible name and tooltip ("Bypass permissions"). Default: `valueLabel`. */
+  valueTitle?: string;
   options: readonly VerseControlOption<T>[];
   /** The checked option; null = none (e.g. effort at the CLI default). */
   value: T | null;
@@ -53,7 +60,7 @@ export interface ControlMenuProps<T extends string> {
 }
 
 export function ControlMenu<T extends string>({
-  label, valueLabel, options, value, onChange, defaultOption = null, disabled = false, disabledReason = null,
+  label, valueLabel, valueTitle = valueLabel, options, value, onChange, defaultOption = null, disabled = false, disabledReason = null,
   shortcut, openRequest, icon, danger = false, note = null, variant = 'menu', iconOnly = false, onOpenChange,
 }: ControlMenuProps<T>) {
   const [open, setOpen] = useState(false);
@@ -172,10 +179,13 @@ export function ControlMenu<T extends string>({
 
   return (
     <div ref={wrap} className={styles.controlWrap}>
+      {/* A native title, not the Tooltip primitive: WebKit does not focus a
+          clicked button, so a bubble opened by hover would never see the blur
+          that closes it and would sit over this button's own open menu. */}
       <button ref={button} type="button" className={`${styles.control} ${danger ? styles.controlDanger : ''} ${iconOnly ? styles.controlIconOnly : ''}`}
         aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined}
-        aria-label={`${label}: ${valueLabel}`} disabled={disabled}
-        title={disabled && disabledReason ? disabledReason : undefined}
+        aria-label={`${label}: ${valueTitle}`} disabled={disabled}
+        title={disabled && disabledReason ? disabledReason : `${label}: ${valueTitle}${shortcut ? ` (${shortcut})` : ''}`}
         onClick={() => setOpenState(!open)}
         onKeyDown={(event) => {
           if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !open) {

@@ -108,7 +108,8 @@ export function LocalCloudPanel({
 
       {split.empty ? (
         <p className={styles.muted} style={{ marginTop: 'var(--space-4)' }}>
-          No provider activity recorded in this window.
+          No provider activity recorded in this window. Choose a longer window, or run a chat turn and it
+          appears here.
         </p>
       ) : (
         <>

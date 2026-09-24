@@ -92,6 +92,7 @@ export function EfficiencyPanel({
       ) : rows.length === 0 ? (
         <p className={styles.muted}>
           No chats yet, so there is nothing to measure — this is an empty history, not a seat at 0%.
+          Start a chat on any seat and its context use shows up here.
         </p>
       ) : (
         <div className={styles.tableScroll}>

@@ -6,8 +6,8 @@
  *
  * A real menu: role="menu" with menuitem / menuitemcheckbox / menuitemradio,
  * one roving tab stop, ↑ ↓ Home End to move, Enter / Space to choose, Esc
- * (or a click outside) closes and puts focus back on the gear. Portalled to
- * <body> so the 56px rail cannot clip it.
+ * closes and puts focus back on the gear (a press outside just closes).
+ * Portalled to <body> so the 56px rail cannot clip it.
  */
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
@@ -87,38 +87,64 @@ export function GearTray({ open, anchorRef, onClose, compact }: GearTrayProps) {
     );
   }, [open, anchorRef, compact]);
 
-  // The latest onClose, without re-running the open effect: the shell passes
-  // an inline closure and re-renders on every activity poll, which would
-  // otherwise snap the highlight back to the first item mid-navigation.
+  // Every open starts on the first item. Reset while rendering (React's
+  // "adjust state when a prop changes"), not in an effect: an effect runs
+  // after the focus effect below has already focused wherever the LAST open
+  // left off, so focus would hop there and then back to the first item.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) setActive(0);
+  }
+
+  // The latest onClose, without re-subscribing the outside-press listener:
+  // the shell passes an inline closure and re-renders on every activity poll.
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
 
   useEffect(() => {
     if (!open) return;
-    setActive(0);
-    const id = requestAnimationFrame(() => menuRef.current?.querySelector<HTMLElement>('[data-index="0"]')?.focus());
     function onDown(event: MouseEvent) {
       const target = event.target as Node;
       if (menuRef.current?.contains(target) || anchorRef.current?.contains(target)) return;
       closeRef.current();
     }
     document.addEventListener('mousedown', onDown);
-    return () => {
-      cancelAnimationFrame(id);
-      document.removeEventListener('mousedown', onDown);
-    };
+    return () => document.removeEventListener('mousedown', onDown);
   }, [open, anchorRef]);
 
+  // Focus follows the roving tab stop — once the menu is placed. Until the
+  // layout effect above has measured the gear, the menu renders
+  // visibility:hidden and a browser will not focus it; the placed re-render
+  // follows in the same task, before paint, and this effect runs again then.
+  // (This used to be a requestAnimationFrame that focused item 0 whatever
+  // `active` was: an arrow key pressed before that frame moved the tab stop,
+  // then the frame pulled focus back to the first item, so focus and the tab
+  // stop sat on different items and Enter chose the wrong one.)
+  const placed = position !== null;
   useEffect(() => {
-    if (!open) return;
+    if (!open || !placed) return;
     menuRef.current?.querySelector<HTMLElement>(`[data-index="${active}"]`)?.focus();
-  }, [active, open]);
+  }, [active, open, placed]);
+
+  // Escape hands focus back to the gear AFTER the close has rendered, not in
+  // the key handler. The shell turns the gear's tooltip off while the tray is
+  // open and back on when it closes, and that re-creates the gear <button>:
+  // focusing `anchorRef.current` synchronously focused the button that was
+  // about to leave the document, and focus fell to <body>. This effect runs
+  // after the shell's commit, when the ref already points at the live button.
+  const refocusOnClose = useRef(false);
+  useEffect(() => {
+    if (open || !refocusOnClose.current) return;
+    refocusOnClose.current = false;
+    anchorRef.current?.focus();
+  }, [open, anchorRef]);
 
   if (!open) return null;
 
   function close(restoreFocus = true) {
+    refocusOnClose.current = restoreFocus;
     onClose();
-    if (restoreFocus) anchorRef.current?.focus();
   }
 
   function choose(entry: Entry) {

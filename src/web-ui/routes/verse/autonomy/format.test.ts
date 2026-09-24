@@ -1,5 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { budgetMeter, countdownLabel, describeTickOutcome, formatDuration, formatInterval, formatStamp, formatUsd, localDateKey, nextTickAt, UNKNOWN } from './format.js';
+import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
+import {
+  asClause,
+  budgetMeter,
+  countdownLabel,
+  describeTickOutcome,
+  formatDuration,
+  formatInterval,
+  formatStamp,
+  formatUsd,
+  formatWholePercent,
+  localDateKey,
+  nextTickAt,
+  repoDisplayName,
+  tidyProse,
+  UNKNOWN,
+} from './format.js';
 
 describe('autonomy formatting', () => {
   it('never renders an absent value as zero', () => {
@@ -60,7 +76,9 @@ describe('autonomy formatting', () => {
       const meter = budgetMeter(0, 50, '2026-09-01', now);
       expect(meter.state).toBe('unknown');
       expect(meter.percent).toBeNull();
-      expect(meter.note).toContain('2026-09-01');
+      // The ledger day as a person reads a date, never the raw ISO key.
+      expect(meter.note).toBe('Nothing has been recorded today — the last ledger day is Sep 1.');
+      expect(meter.note).not.toContain('2026-09-01');
       expect(meter.label).not.toContain('$0.00 of');
       expect(meter.label).toContain(UNKNOWN);
     });
@@ -142,6 +160,78 @@ describe('autonomy formatting', () => {
       expect(nextTickAt(null, 900_000)).toBeNull();
       expect(nextTickAt('2026-01-01T00:00:00.000Z', 0)).toBeNull();
       expect(countdownLabel(null, Date.now())).toBe(UNKNOWN);
+    });
+  });
+
+  describe('formatWholePercent', () => {
+    it('is a whole percent, with "<1%" for a non-zero sliver rather than "0%"', () => {
+      expect(formatWholePercent(0)).toBe('0%');
+      expect(formatWholePercent(0.004)).toBe('<1%');
+      expect(formatWholePercent(0.0099)).toBe('<1%');
+      expect(formatWholePercent(0.18)).toBe('18%');
+      expect(formatWholePercent(0.123456)).toBe('12%');
+      expect(formatWholePercent(1)).toBe('100%');
+      expect(formatWholePercent(null)).toBe(UNKNOWN);
+      expect(formatWholePercent(Number.NaN)).toBe(UNKNOWN);
+    });
+
+    it('keeps the budget line from claiming 0% of a cap that real spend has touched', () => {
+      const now = new Date('2026-09-20T09:00:00');
+      expect(budgetMeter(0.05, 25, localDateKey(now), now).label).toBe('$0.05 of $25.00 today · <1%');
+      expect(budgetMeter(4.5, 25, localDateKey(now), now).label).toBe('$4.50 of $25.00 today · 18%');
+      // Over the cap the text stops at 100%, like the bar.
+      expect(budgetMeter(30, 25, localDateKey(now), now).label).toBe('$30.00 of $25.00 today · 100%');
+    });
+  });
+
+  describe('tidyProse', () => {
+    // Local 09:00 and 23:46 on the same day, so the phrase is "today …" in any zone.
+    const now = new Date(2026, 8, 24, 9, 0, 0).getTime();
+    const tonight = new Date(2026, 8, 24, 23, 46, 56).toISOString();
+
+    it('reads an ISO instant inside server prose as local, human time', () => {
+      const text = tidyProse(`Claude Max is out of usage — resets ${tonight}.`, now);
+      expect(text).toBe(`Claude Max is out of usage — resets ${describeResetAt(tonight, now)}.`);
+      expect(text).toMatch(/resets today /);
+      expect(text).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it('replaces every instant, offsets and bare dates-with-time included', () => {
+      const text = tidyProse('from 2026-09-20T03:12:44+02:00 until 2026-09-26T03:46:56.000Z', now);
+      expect(text).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
+      expect(text.startsWith('from ')).toBe(true);
+    });
+
+    it('leaves a calendar date, a version and plain prose alone', () => {
+      expect(tidyProse('ledger day 2026-09-01; needs 2.1.280', now)).toBe('ledger day 2026-09-01; needs 2.1.280');
+    });
+
+    it('collapses the ".;" and ".." that joined sentences leave behind, keeping a real ellipsis', () => {
+      expect(tidyProse('tests failed.; lint failed.', now)).toBe('tests failed; lint failed.');
+      expect(tidyProse('quota exhausted..', now)).toBe('quota exhausted.');
+      expect(tidyProse('still waiting...', now)).toBe('still waiting...');
+    });
+  });
+
+  describe('asClause', () => {
+    it('drops a closing period so the sentence can be embedded, and keeps an ellipsis', () => {
+      expect(asClause(' quota exhausted. ')).toBe('quota exhausted');
+      expect(asClause('no period')).toBe('no period');
+      expect(asClause('trailing off…')).toBe('trailing off…');
+      expect(asClause('trailing off...')).toBe('trailing off...');
+    });
+  });
+
+  describe('repoDisplayName', () => {
+    it('shows a checkout path by its folder name, never the raw home or temp path', () => {
+      expect(repoDisplayName('/Users/mason/dev/ashlr-hub')).toBe('ashlr-hub');
+      expect(repoDisplayName('/private/tmp/claude-501/abc/scratchpad/home-ctx/')).toBe('home-ctx');
+      expect(repoDisplayName('~/code/hub')).toBe('hub');
+    });
+
+    it('keeps an owner/name slug whole — its owner is half of what identifies it', () => {
+      expect(repoDisplayName('ashlrai/ashlr-hub')).toBe('ashlrai/ashlr-hub');
+      expect(repoDisplayName('ashlr-hub')).toBe('ashlr-hub');
     });
   });
 

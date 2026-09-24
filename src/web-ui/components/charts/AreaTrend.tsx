@@ -17,8 +17,24 @@ import { seriesColor } from './colors.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
 import { ChartLegend, ChartTooltip, clampTooltipLeft } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
-import { areaPath, linePath, linearScale, niceTicks, splitRuns, thinIndexes, type XY } from './chart-math.js';
-import { formatCompact, formatTimeLabel } from './format.js';
+import {
+  MIN_TIME_SPAN_MS,
+  allIntegers,
+  areaPath,
+  axisTicks,
+  dodgeLabels,
+  ensureSpan,
+  isTimeAxis,
+  layoutAxisLabels,
+  linePath,
+  linearScale,
+  percentScale,
+  splitRuns,
+  thinIndexes,
+  xKeeper,
+  type XY,
+} from './chart-math.js';
+import { formatCompact, formatTimeLabel, timeLabelLadder } from './format.js';
 import { useChartWidth } from './useChartWidth.js';
 import plot from './plot.module.css';
 
@@ -42,6 +58,13 @@ export interface AreaTrendProps {
   formatY?: (y: number) => string;
   /** A labelled horizontal reference (a cap, a target). */
   threshold?: { value: number; label: string };
+  /**
+   * The y range to draw (widened, never clipped, if a value falls outside).
+   * Default: a percent formatter (`formatY(50)` → "50%") gets 0–100 — or 0–1
+   * for a fraction formatter — so percent cards share one scale; anything
+   * else fits its data.
+   */
+  yDomain?: readonly [number, number];
   /** Accessible summary override. */
   ariaLabel?: string;
 }
@@ -51,6 +74,8 @@ const PAD_B = 26;
 const PAD_R = 12;
 const END_LABEL_CH = 6.6;
 const END_LABEL_MAX = 120;
+/** Line height of a direct end label: two closer than this overlap. */
+const END_LABEL_GAP_Y = 14;
 
 interface Row {
   x: number;
@@ -67,11 +92,14 @@ export function AreaTrend({
   stacked = false,
   height = 200,
   width: fixedWidth,
-  formatX = formatTimeLabel,
-  formatY = formatCompact,
+  formatX: formatXProp,
+  formatY: formatYProp,
   threshold,
+  yDomain,
   ariaLabel,
 }: AreaTrendProps) {
+  const formatX = formatXProp ?? formatTimeLabel;
+  const formatY = formatYProp ?? formatCompact;
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
   const [active, setActive] = useState<number | null>(null);
@@ -80,7 +108,11 @@ export function AreaTrend({
   const colors = series.map((s, i) => s.color ?? seriesColor(i));
 
   const rows: Row[] = useMemo(() => {
-    const xs = Array.from(new Set(series.flatMap((s) => s.points.map((p) => p.x)))).sort((a, b) => a - b);
+    // On a time axis a 0 / NaN / pre-2000 x is a null timestamp that leaked
+    // through, not a moment — it would start the axis at "Dec 31" 1969.
+    const all = series.flatMap((s) => s.points.map((p) => p.x));
+    const keep = xKeeper(all);
+    const xs = Array.from(new Set(all.filter(keep))).sort((a, b) => a - b);
     const lookup = series.map((s) => new Map(s.points.map((p) => [p.x, p.y])));
     return xs.map((x) => {
       const values = lookup.map((m) => (m.has(x) ? m.get(x)! : null));
@@ -96,22 +128,51 @@ export function AreaTrend({
   const known = stacked
     ? rows.map((r) => r.total).filter((v): v is number => v !== null)
     : rows.flatMap((r) => r.values).filter((v): v is number => v !== null);
-  const ticksY = niceTicks(Math.min(0, ...known), Math.max(0, ...known, threshold?.value ?? 0, 0.0001), 4);
+  const pctScale = formatYProp ? percentScale(formatYProp) : null;
+  const inDomain = (d: readonly [number, number]) => known.every((v) => v >= d[0] && v <= d[1]);
+  const baseDomain: readonly [number, number] | null = yDomain ?? (pctScale !== null && inDomain([0, pctScale]) ? [0, pctScale] : null);
+  const yAxis = axisTicks(
+    Math.min(0, baseDomain?.[0] ?? 0, ...known),
+    Math.max(0, baseDomain?.[1] ?? 0, ...known, threshold?.value ?? 0),
+    { count: 4, integer: known.length > 0 && allIntegers(known), format: formatYProp },
+  );
+  const ticksY = yAxis.ticks;
   const yMin = ticksY[0]!;
   const yMax = ticksY[ticksY.length - 1]!;
-  const tickLabelW = Math.max(...ticksY.map((t) => formatY(t).length)) * 7 + 10;
+  const tickLabelW = Math.max(...yAxis.labels.map((l) => l.length)) * 7 + 10;
   const padL = Math.min(64, Math.max(28, tickLabelW));
-  const endLabels = !stacked && series.length <= 4
+  const plotH = height - PAD_T - PAD_B;
+  const ys = linearScale(yMin, yMax, PAD_T + plotH, PAD_T);
+
+  // Direct end labels (series names at each line's last point), dodged so
+  // two lines ending on the same value ("Struggles" and "Wins" both at 3)
+  // never print over each other. If they cannot all fit, the legend alone
+  // names the series. Decided before the x scale: the gutter they need is
+  // what plotW is measured against.
+  const endLabelW = !stacked && series.length <= 4
     ? Math.max(0, ...series.map((s) => s.label.length)) * END_LABEL_CH + 6
     : 0;
-  const showEndLabels = endLabels > 0 && endLabels <= END_LABEL_MAX && width >= 420;
-  const padR = PAD_R + (showEndLabels ? endLabels : 0);
+  const endPoints = series.flatMap((s, si) => {
+    for (let r = rows.length - 1; r >= 0; r--) {
+      const v = rows[r]!.values[si];
+      if (v !== null && v !== undefined) return [{ key: s.id, y: ys(v) }];
+    }
+    return [];
+  });
+  const dodged = endLabelW > 0 && endLabelW <= END_LABEL_MAX && width >= 420
+    ? dodgeLabels(endPoints, END_LABEL_GAP_Y, PAD_T, PAD_T + plotH)
+    : null;
+  const showEndLabels = dodged !== null && endPoints.length > 0;
+  const padR = PAD_R + (showEndLabels ? endLabelW : 0);
   const plotW = Math.max(40, width - padL - padR);
-  const plotH = height - PAD_T - PAD_B;
-  const xMin = rows.length ? rows[0]!.x : 0;
-  const xMax = rows.length ? rows[rows.length - 1]!.x : 1;
+
+  const rawMin = rows.length ? rows[0]!.x : 0;
+  const rawMax = rows.length ? rows[rows.length - 1]!.x : 1;
+  const timeAxis = isTimeAxis(rows.map((r) => r.x));
+  // A burst of readings seconds apart is widened to MIN_TIME_SPAN_MS around
+  // itself, not stretched edge to edge (a lone point stays centred as before).
+  const [xMin, xMax] = timeAxis && rawMax > rawMin ? ensureSpan(rawMin, rawMax, MIN_TIME_SPAN_MS) : [rawMin, rawMax];
   const xs = linearScale(xMin, xMax, padL, padL + plotW);
-  const ys = linearScale(yMin, yMax, PAD_T + plotH, PAD_T);
 
   // ── geometry ───────────────────────────────────────────────────────────
   // Recomputed per render on purpose: the scales depend on the measured width.
@@ -147,6 +208,29 @@ export function AreaTrend({
   })();
 
   const xTickIdx = thinIndexes(rows.length, Math.max(2, Math.floor(plotW / 84)));
+  // Collision-free x labels: the last point outranks the first, and both
+  // outrank the interior ticks, which are simply dropped when they collide.
+  // On a time axis the labels walk one shared detail ladder (caller's format
+  // → shorter date/time; clock time only inside one day) until the ends fit.
+  const ladder = timeAxis
+    ? timeLabelLadder(rawMin, rawMax, formatXProp, xTickIdx.map((i) => rows[i]!.x))
+    : [formatX];
+  const xLabels = layoutAxisLabels(
+    xTickIdx.map((i, n) => {
+      const px = xs(rows[i]!.x);
+      const isFirst = n === 0;
+      const isLast = n === xTickIdx.length - 1;
+      return {
+        key: String(i),
+        x: px,
+        anchor: rows.length === 1 ? 'middle' as const : isFirst && px <= padL + 0.5 ? 'start' as const : isLast && px >= padL + plotW - 0.5 ? 'end' as const : 'middle' as const,
+        priority: isLast ? 3 : isFirst ? 2 : 1,
+        required: isFirst || isLast,
+        variants: ladder.map((f) => f(rows[i]!.x)),
+      };
+    }),
+    { min: padL, max: padL + plotW },
+  );
 
   function indexAt(clientX: number): number | null {
     const el = wrapRef.current;
@@ -174,7 +258,7 @@ export function AreaTrend({
   const activeRow = active !== null ? rows[active] : undefined;
   const latest = [...rows].reverse().find((r) => r.values.some((v) => v !== null));
   const summary = ariaLabel ?? (rows.length
-    ? `${title}: ${rows.length} points from ${formatX(xMin)} to ${formatX(xMax)}.` +
+    ? `${title}: ${rows.length} points from ${formatX(rawMin)} to ${formatX(rawMax)}.` +
       (latest ? ` Latest ${formatX(latest.x)}: ${series.map((s, i) => `${s.label} ${latest.values[i] === null ? 'no data' : formatY(latest.values[i]!)}`).join(', ')}.` : '')
     : `${title}: no data.`);
 
@@ -225,22 +309,16 @@ export function AreaTrend({
           onPointerMove={(e: PointerEvent<SVGSVGElement>) => setActive(indexAt(e.clientX))}
           onPointerLeave={() => setActive(null)}
         >
-          {ticksY.map((t) => (
+          {ticksY.map((t, i) => (
             <g key={t}>
               <line className={plot.grid} x1={padL} x2={padL + plotW} y1={ys(t)} y2={ys(t)} />
-              <text className={plot.tick} x={padL - 6} y={ys(t)} dy="0.32em" textAnchor="end">{formatY(t)}</text>
+              <text className={plot.tick} x={padL - 6} y={ys(t)} dy="0.32em" textAnchor="end">{yAxis.labels[i]}</text>
             </g>
           ))}
           <line className={plot.axis} x1={padL} x2={padL + plotW} y1={ys(Math.max(yMin, 0))} y2={ys(Math.max(yMin, 0))} />
-          {xTickIdx.map((i, n) => (
-            <text
-              key={i}
-              className={plot.tick}
-              x={xs(rows[i]!.x)}
-              y={height - 8}
-              textAnchor={rows.length === 1 ? 'middle' : n === 0 && i === 0 ? 'start' : i === rows.length - 1 ? 'end' : 'middle'}
-            >
-              {formatX(rows[i]!.x)}
+          {xLabels.map((l) => (
+            <text key={l.key} data-axis-label={l.key} className={plot.tick} x={l.x} y={height - 8} textAnchor={l.anchor}>
+              {l.text}
             </text>
           ))}
 
@@ -270,7 +348,7 @@ export function AreaTrend({
                 const last = runs[runs.length - 1]!.top;
                 const end = last[last.length - 1]!;
                 return (
-                  <text className={plot.label} x={end.x + 6} y={end.y} dy="0.32em">{series[si]!.label}</text>
+                  <text data-end-label={series[si]!.id} className={plot.label} x={end.x + 6} y={dodged!.get(series[si]!.id) ?? end.y} dy="0.32em">{series[si]!.label}</text>
                 );
               })() : null}
             </g>

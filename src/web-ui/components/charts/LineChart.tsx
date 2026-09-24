@@ -9,6 +9,17 @@ import { useRef, useState } from 'react';
 import type { Series } from './types.js';
 import { seriesColor, CHART_GRID, CHART_AXIS } from './colors.js';
 import { Legend } from './Legend.js';
+import {
+  MIN_TIME_SPAN_MS,
+  allIntegers,
+  axisTicks,
+  dodgeLabels,
+  ensureSpan,
+  isTimeAxis,
+  layoutAxisLabels,
+  xKeeper,
+} from './chart-math.js';
+import { timeLabelLadder } from './format.js';
 import './chart-tokens.css';
 import styles from './LineChart.module.css';
 
@@ -35,6 +46,11 @@ const END_LABEL_GAP = 4;
    heading already names a lone series, and two-plus series always have the
    legend regardless. */
 const END_LABEL_MAX = 150;
+/** Line height of a direct end label (user units): two closer than this overlap. */
+const END_LABEL_GAP_Y = 14;
+/* The x-axis labels are 12 user units tall (see END_LABEL_CH); this is their
+   estimated advance per character for collision checks. */
+const AXIS_LABEL_CH = 12 * 0.6;
 
 interface Run {
   x: number;
@@ -56,18 +72,12 @@ function splitRuns(points: Series['points']): Run[][] {
   return runs;
 }
 
-function niceTicks(min: number, max: number, count: number): number[] {
-  if (max <= min) return [min];
-  const step = (max - min) / count;
-  return Array.from({ length: count + 1 }, (_, i) => min + step * i);
-}
-
 export function LineChart({
-  series,
+  series: seriesProp,
   height = 200,
   area = false,
-  formatX = (x: number) => String(x),
-  formatY = (y: number) => String(y),
+  formatX: formatXProp,
+  formatY: formatYProp,
   ariaLabel,
 }: {
   series: Series[];
@@ -81,38 +91,87 @@ export function LineChart({
   const [hoverX, setHoverX] = useState<number | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ left: number; top: number } | null>(null);
 
+  const formatX = formatXProp ?? ((x: number) => String(x));
+  const formatY = formatYProp ?? ((y: number) => String(y));
+  /* On a time axis a 0 / NaN / pre-2000 x is a null timestamp that leaked
+     through, not a moment: it would start the axis at "Dec 31" 1969. Such
+     points are left out of the domain AND the drawing. */
+  const keepX = xKeeper(seriesProp.flatMap((s) => s.points.map((p) => p.x)));
+  const series = seriesProp.map((s) => ({ ...s, points: s.points.filter((p) => keepX(p.x)) }));
   const allX = series.flatMap((s) => s.points.map((p) => p.x));
-  const knownY = series.flatMap((s) => s.points.map((p) => p.y)).filter((y): y is number => y !== null);
+  const knownY = series.flatMap((s) => s.points.map((p) => p.y)).filter((y): y is number => y !== null && Number.isFinite(y));
   if (allX.length === 0) {
     return <p>No data.</p>;
   }
-  const xMin = Math.min(...allX);
-  const xMax = Math.max(...allX);
-  const yMin = Math.min(0, ...knownY);
-  const yMax = Math.max(0.0001, ...knownY);
+  const rawXMin = Math.min(...allX);
+  const rawXMax = Math.max(...allX);
+  const timeAxis = isTimeAxis(allX);
+  // A burst of points seconds apart is widened to MIN_TIME_SPAN_MS around
+  // itself instead of stretched edge to edge under identical labels.
+  const [xMin, xMax] = timeAxis && rawXMax > rawXMin ? ensureSpan(rawXMin, rawXMax, MIN_TIME_SPAN_MS) : [rawXMin, rawXMax];
   const xRange = xMax - xMin || 1;
-  const yRange = yMax - yMin || 1;
 
-  /* Decided before the scales, because the reserved gutter is what plotW is
-     measured against — and the gridlines and x-axis stop at the same edge. */
+  // Nice ticks whose labels are exact: integer data get integer ticks, and a
+  // caller's formatter never prints a rounded label on a precise tick.
+  const yAxis = axisTicks(Math.min(0, ...knownY), Math.max(0, ...knownY), {
+    count: TICKS_Y,
+    integer: knownY.length > 0 && allIntegers(knownY),
+    format: formatYProp,
+  });
+  const yTicks = yAxis.ticks;
+  const yMin = yTicks[0]!;
+  const yMax = yTicks[yTicks.length - 1]!;
+  const yRange = yMax - yMin || 1;
+  const plotH = height - PAD_T - PAD_B;
+  const yScale = (y: number) => PAD_T + plotH - ((y - yMin) / yRange) * plotH;
+
+  /* Decided before the x scale, because the reserved gutter is what plotW is
+     measured against — and the gridlines and x-axis stop at the same edge.
+     End labels are dodged vertically so two lines ending on one value never
+     print their names over each other; if they cannot all fit, the legend
+     (always present for 2+ series) names them instead. */
   const wantEndLabels = series.length >= 1 && series.length <= 4;
   const endLabelW = wantEndLabels
     ? Math.max(...series.map((s) => s.label.length)) * END_LABEL_CH
     : 0;
-  const showEndLabels = wantEndLabels && endLabelW <= END_LABEL_MAX;
+  const endPoints = series.flatMap((s) => {
+    for (let i = s.points.length - 1; i >= 0; i--) {
+      const y = s.points[i]!.y;
+      if (y !== null && Number.isFinite(y)) return [{ key: s.id, y: yScale(y) }];
+    }
+    return [];
+  });
+  const dodged = wantEndLabels && endLabelW <= END_LABEL_MAX ? dodgeLabels(endPoints, END_LABEL_GAP_Y, PAD_T, PAD_T + plotH) : null;
+  const showEndLabels = dodged !== null && endPoints.length > 0;
   const padR = PAD_R + (showEndLabels ? END_LABEL_GAP + endLabelW : 0);
   const showLegend = series.length >= 2;
 
   const plotW = VBOX_W - PAD_L - padR;
-  const plotH = height - PAD_T - PAD_B;
   const xScale = (x: number) => PAD_L + ((x - xMin) / xRange) * plotW;
-  const yScale = (y: number) => PAD_T + plotH - ((y - yMin) / yRange) * plotH;
-
-  const yTicks = niceTicks(yMin, yMax, TICKS_Y);
 
   // Nearest-x lookup across a reference axis (the union of all distinct x
   // values, since series may not share every point).
   const xAxis = Array.from(new Set(allX)).sort((a, b) => a - b);
+
+  /* First and last x labels, collision-free: the end outranks the start;
+     on a time axis both walk one detail ladder (the caller's format → a
+     shorter date/time; clock time only inside one day) until they fit. */
+  const xEnds = xAxis.length > 1 ? [xAxis[0]!, xAxis[xAxis.length - 1]!] : [];
+  const ladder = timeAxis ? timeLabelLadder(rawXMin, rawXMax, formatXProp, xEnds) : [formatX];
+  const xLabels = layoutAxisLabels(
+    xEnds.map((x, i) => {
+      const px = xScale(x);
+      const edge = i === 0 ? px <= PAD_L + 0.5 : px >= VBOX_W - padR - 0.5;
+      return {
+        key: i === 0 ? 'start' : 'end',
+        x: px,
+        anchor: edge ? (i === 0 ? 'start' as const : 'end' as const) : 'middle' as const,
+        priority: i === 0 ? 2 : 3,
+        variants: ladder.map((f) => f(x)),
+      };
+    }),
+    { min: PAD_L, max: VBOX_W - padR, charPx: AXIS_LABEL_CH },
+  );
 
   function nearestX(clientX: number): number | null {
     const svg = svgRef.current;
@@ -174,7 +233,7 @@ export function LineChart({
               stroke={CHART_GRID}
             />
             <text x={PAD_L - 6} y={yScale(t)} dy="0.32em" textAnchor="end" className={styles.axisLabel}>
-              {formatY(t)}
+              {yAxis.labels[i]}
             </text>
           </g>
         ))}
@@ -186,19 +245,11 @@ export function LineChart({
           className={styles.axis}
           stroke={CHART_AXIS}
         />
-        {xAxis.length > 1
-          ? [xAxis[0], xAxis[xAxis.length - 1]].map((x, i) => (
-              <text
-                key={i}
-                x={xScale(x)}
-                y={height - 6}
-                textAnchor={i === 0 ? 'start' : 'end'}
-                className={styles.axisLabel}
-              >
-                {formatX(x)}
-              </text>
-            ))
-          : null}
+        {xLabels.map((l) => (
+          <text key={l.key} data-axis-label={l.key} x={l.x} y={height - 6} textAnchor={l.anchor} className={styles.axisLabel}>
+            {l.text}
+          </text>
+        ))}
 
         {series.map((s, si) => {
           const color = seriesColor(si);
@@ -227,8 +278,9 @@ export function LineChart({
                   const last = lastRun[lastRun.length - 1];
                   return (
                     <text
+                      data-end-label={s.id}
                       x={xScale(last.x) + END_LABEL_GAP}
-                      y={yScale(last.y)}
+                      y={dodged?.get(s.id) ?? yScale(last.y)}
                       dy="0.32em"
                       className={styles.endLabel}
                       fill={color}

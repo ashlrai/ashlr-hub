@@ -145,9 +145,11 @@
   border-radius: var(--radius-xs);
 }
 
-/* Seat pill: an engine-tinted dot and the seat name. The tint is identity,
-   never status — status is text or a glyph everywhere in this app.
-   The PROJECT is no longer repeated here; it is the lockup's eyebrow. */
+/* Status chip (was the seat pill): the engine tick and monogram, then the
+   chat's state in a word. The tint is identity, never status — the state is
+   the WORD, in the status foreground for running / failed. Neither the
+   project (the eyebrow) nor the seat and model (the composer's seat chip)
+   is repeated here; the chip's tooltip names seat and model. */
 .seatPill {
   display: inline-flex;
   align-items: center;
@@ -180,9 +182,11 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-primary);
+  color: var(--text-secondary);
   font-weight: var(--font-weight-medium);
 }
+.seatPill[data-status='running'] .seatText { color: var(--status-running-fg); }
+.seatPill[data-status='error'] .seatText { color: var(--status-danger-fg); }
 .engine-claude { --verse-engine: var(--engine-claude, #c96442); }
 .engine-codex { --verse-engine: var(--engine-codex, #10a37f); }
 .engine-grok { --verse-engine: var(--engine-grok, #6b7280); }

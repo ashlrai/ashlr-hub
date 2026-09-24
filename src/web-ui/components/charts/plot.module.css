@@ -109,6 +109,14 @@
   fill: var(--chart-track);
 }
 
+/* V3.10.1 — the empty part of a bar that is a share of something (Funnel):
+   the neutral true-zero ground (--chart-heat-0), lighter than any filled bar
+   in both themes. The azure --chart-track reads as "a little" — at zero a
+   whole row of it read as 100%. */
+.trackEmpty {
+  fill: var(--chart-heat-0);
+}
+
 .noData {
   fill: none;
   stroke: var(--chart-grid);

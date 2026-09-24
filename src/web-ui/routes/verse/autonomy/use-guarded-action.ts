@@ -20,6 +20,7 @@ import { useCallback, useRef, useState } from 'react';
 import { hasMutationHold } from '../../../data/auth-store.js';
 import { ApiError, DispatchDisabledError } from '../../../data/client.js';
 import { VerseControlLockedError } from './control-queries.js';
+import { tidyProse } from './format.js';
 
 export function describeControlError(err: unknown): string {
   if (err instanceof DispatchDisabledError) return 'This server runs without dispatch, so that action is unavailable.';
@@ -31,13 +32,14 @@ export function describeControlError(err: unknown): string {
     // it as `note` on the 409 body. A blanket "something else is already
     // running" replaced every one of those with a sentence that was usually
     // false and never actionable. Show the server's own words whenever it
-    // sent any; the generic line is now only the last resort.
-    if (err.detail) return err.detail;
-    if (err.status === 400) return err.message;
+    // sent any; the generic line is now only the last resort. `tidyProse`
+    // reads any ISO instant in those words as local time.
+    if (err.detail) return tidyProse(err.detail);
+    if (err.status === 400) return tidyProse(err.message);
     if (err.status === 409) return 'The server refused the action, and sent no reason.';
-    return err.message;
+    return tidyProse(err.message);
   }
-  return err instanceof Error ? err.message : 'That action failed. Try again.';
+  return err instanceof Error ? tidyProse(err.message) : 'That action failed. Try again.';
 }
 
 export interface GuardedAction {

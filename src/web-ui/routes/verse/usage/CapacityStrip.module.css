@@ -107,14 +107,15 @@
   color: var(--text-link);
 }
 
+/* The seat name is often a control (Usage's toggle): it wraps, never cut mid-word. */
 .name {
   font-size: var(--text-sm-size);
   line-height: var(--text-sm-line);
   font-weight: var(--font-weight-semibold);
   color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
 .plan {
@@ -152,6 +153,59 @@
 .word[data-tone='neutral'] .dot {
   background: transparent;
   border: 1px solid var(--status-unknown-solid);
+}
+
+/*
+ * Accounts mode: the row's status reads as a short sentence — a label in the
+ * tone's colour, then the detail in secondary text. The detail may wrap (a
+ * provider's reset prose can be long); the label never truncates.
+ */
+.status {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0 var(--space-1);
+  min-width: 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+.status .dot {
+  align-self: center;
+}
+.statusLabel {
+  font-weight: var(--font-weight-medium);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.status[data-tone='success'] .dot { background: var(--status-success-solid); }
+.status[data-tone='success'] .statusLabel { color: var(--status-success-fg); }
+.status[data-tone='warning'] .dot { background: var(--status-warning-solid); }
+.status[data-tone='warning'] .statusLabel { color: var(--status-warning-fg); }
+.status[data-tone='danger'] .dot { background: var(--status-danger-solid); }
+.status[data-tone='danger'] .statusLabel { color: var(--status-danger-fg); }
+.status[data-tone='neutral'] .dot {
+  background: transparent;
+  border: 1px solid var(--status-unknown-solid);
+}
+.status[data-tone='neutral'] .statusLabel {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+.statusDetail {
+  overflow-wrap: anywhere;
+}
+
+.stamp {
+  margin: 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.usableAgain {
+  color: var(--text-secondary);
+  font-weight: var(--font-weight-medium);
 }
 
 .summary,

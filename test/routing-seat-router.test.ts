@@ -29,6 +29,8 @@ import {
   type SeatCapacity,
 } from '../src/core/routing/headroom.js';
 import { enginePreference, rankAlternatives, routeSeat } from '../src/core/routing/router.js';
+import { boundSeatReasons, listSeatIds, reasonSentence, reasonSentences } from '../src/core/routing/seat-reasons.js';
+import { normalizeJournalRecord, type DispatchJournalRecord } from '../src/core/fleet/fleet-runtime-journal.js';
 import type { BudgetPolicy, RoutingRequest } from '../src/core/routing/types.js';
 import type { VerseSeat } from '../src/core/verse/types.js';
 
@@ -512,5 +514,98 @@ describe('interactive routing ignores reserves (they exist for Mason)', () => {
     expect(rankAlternatives('codex-personal', capacity, balanced(), opts))
       .toEqual(['codex-cmp', 'claude', 'grok', 'local:qwen3.8:27b-ctx64k']);
     expect(rankAlternatives('unknown-seat', capacity, balanced(), opts)[0]).toBe('claude');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3.10.1 — reasons as data (the Fleet surface's "why this seat")
+// ---------------------------------------------------------------------------
+
+describe('seat reasons as data (3.10.1)', () => {
+  const on = (seatId: string) => ({ seatId, enabled: true, reservePercent: 0 });
+
+  it('builds each reason as text + reset, and derives the SAME legacy sentence from it', () => {
+    const a = assessSeat(codexSpent('codex-personal', 30), on('codex-personal'), opts);
+    expect(a.spentDetails).toEqual([{ kind: 'spent', text: 'The weekly window is spent — 100% used.', resetsAt: iso(30 * H), resetDescription: null }]);
+    // The string form the CLI and logs print is unchanged, reset clause included.
+    expect(a.spentReasons).toEqual([`The weekly window is spent — 100% used (resets ${iso(30 * H)}).`]);
+    expect(a.headroom.reasons).toEqual(reasonSentences(a.details));
+  });
+
+  it('keeps Claude\'s reset as the provider\'s words, never an instant', () => {
+    const a = assessSeat(claude(15, 70), effectiveSeatPolicy(balanced(), 'claude'), opts);
+    const reserve = a.details.find((r) => r.kind === 'reserve')!;
+    expect(reserve).toEqual({
+      kind: 'reserve',
+      text: 'The weekly window is 70% used; 40% is kept for you, so autonomy stops at 60%.',
+      resetsAt: null,
+      resetDescription: 'Sep 25 at 7pm (America/New_York)',
+    });
+    expect(a.headroom.reasons).toContain('The weekly window is 70% used; 40% is kept for you, so autonomy stops at 60% (resets Sep 25 at 7pm (America/New_York)).');
+    expect(a.details.find((r) => r.kind === 'model-window')?.text).toContain('Fable-only weekly window is spent');
+  });
+
+  it('carries details on every exclusion, parallel to its sentences', () => {
+    const d = routeSeat(auto('code', 'medium'), [claude(15, 70), codexSpent('codex-cmp', 40), codexSpent('codex-personal', 30), grok(6)], balanced(), opts);
+    expect(d.seatId).toBe('grok');
+    const cmp = d.exclusions.find((e) => e.seatId === 'codex-cmp')!;
+    expect(cmp.details!.map((r) => r.kind)).toEqual(['switched-off', 'spent']);
+    expect(cmp.details![1]!.resetsAt).toBe(iso(40 * H));
+    expect(cmp.reasons).toEqual(reasonSentences(cmp.details!));
+    for (const x of d.exclusions) expect(x.details).toHaveLength(x.reasons.length);
+  });
+
+  it('writes a short summary, and a why that names held-back seats without nesting their reasons', () => {
+    const d = routeSeat(auto('code', 'medium'), [claude(15, 70), codexSpent('codex-cmp', 40), codexSpent('codex-personal', 30), grok(6)], balanced(), opts);
+    expect(d.summary).toBe('grok — 94% of its weekly window left; balanced mode prefers Grok for this work.');
+    expect(d.why).toBe('Routed autonomous medium-difficulty code work to grok (grok) with 94% of its weekly window left for autonomy: '
+      + 'balanced mode prefers Grok first for this work; held back 3 seats (claude, codex-cmp, codex-personal).');
+    expect(d.why).not.toMatch(/…|\(resets/);
+  });
+
+  it('with nothing eligible, lists at most three seats then "and N more" — never a bare "…"', () => {
+    const allOn: BudgetPolicy = { ...balanced(), seats: Object.fromEntries(['c1', 'c2', 'c3', 'c4'].map((id) => [id, on(id)])) };
+    const d = routeSeat(auto('code', 'medium'), ['c1', 'c2', 'c3', 'c4'].map((id, i) => codexSpent(id, 30 + i)), allOn, opts);
+    expect(d.seatId).toBeNull();
+    expect(d.why).toContain('; and 1 more)');
+    expect(d.why).not.toMatch(/…|\(resets/);
+    expect(d.why).toContain(`the earliest known reopening is ${iso(30 * H)}`);
+    expect(d.summary).toBe('No seat can take this medium-difficulty code work in balanced mode right now.');
+  });
+
+  it('reopens a seat with several spent windows only when the LAST of them resets', () => {
+    const both = seat('codex-personal', 'codex', [
+      win('codex_codex_primary', 100, { resetsAt: iso(2 * H) }),
+      win('codex_codex_secondary', 100, { resetsAt: iso(30 * H) }),
+    ]);
+    expect(assessSeat(both, on('codex-personal'), opts).reopensAt).toBe(iso(30 * H));
+    // One reset unreported makes the reopening unknown, not the other one's time.
+    const partial = seat('codex-personal', 'codex', [
+      win('codex_codex_primary', 100, { resetsAt: iso(2 * H) }),
+      win('codex_codex_secondary', 100),
+    ]);
+    expect(assessSeat(partial, on('codex-personal'), opts).reopensAt).toBeNull();
+  });
+
+  it('helpers: legacy sentence, seat lists, and bounded persistence', () => {
+    expect(reasonSentence({ kind: 'switched-off', text: 'Autonomy is switched off for this seat.' })).toBe('Autonomy is switched off for this seat.');
+    expect(reasonSentence({ kind: 'spent', text: 'Spent.', resetsAt: iso(H) })).toBe(`Spent (resets ${iso(H)}).`);
+    expect(listSeatIds(['a', 'b', 'c', 'd'])).toBe('a, b, c, d');
+    expect(listSeatIds(['a', 'b', 'c', 'd', 'e'])).toBe('a, b, c and 2 more');
+    const bounded = boundSeatReasons([{ kind: 'spent', text: 'x'.repeat(400), resetsAt: 'nope', resetDescription: 'Sep 25' }], (t) => t);
+    expect(bounded).toEqual([{ kind: 'spent', text: 'x'.repeat(300), resetsAt: null, resetDescription: 'Sep 25' }]);
+    expect(boundSeatReasons(undefined, (t) => t)).toBeUndefined();
+  });
+
+  it('the runtime journal keeps summary and details (the Fleet card reads them back)', () => {
+    const decision = routeSeat(auto('code', 'medium'), [codexSpent('codex-cmp', 40), grok(6)], balanced(), opts);
+    const record: DispatchJournalRecord = {
+      v: 1, type: 'dispatch', at: iso(0), itemId: 'i', taskId: null, runId: null, repo: 'a/b', title: 't', source: 'todo',
+      backend: 'grok-cli', model: null, lane: 'grok-cli', seatId: 'grok', dispatched: true, skipReason: null, proposalId: null,
+      spentUsd: 0, seatDecision: decision, hold: null,
+    };
+    const stored = normalizeJournalRecord(record) as DispatchJournalRecord;
+    expect(stored.seatDecision!.summary).toBe(decision.summary);
+    expect(stored.seatDecision!.exclusions[0]!.details).toEqual(decision.exclusions[0]!.details);
   });
 });

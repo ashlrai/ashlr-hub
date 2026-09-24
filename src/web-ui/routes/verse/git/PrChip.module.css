@@ -56,7 +56,11 @@
   color: var(--text-tertiary);
   font-weight: var(--font-weight-regular);
 }
-.checks { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; }
+/* The checks phrase is status, not decoration: it never truncates mid-word
+   (the title gives way first, and it carries the full text as a tooltip). */
+.checks { flex: none; color: var(--text-secondary); }
+.number,
+.state { flex: none; }
 
 .pulse {
   flex: none;

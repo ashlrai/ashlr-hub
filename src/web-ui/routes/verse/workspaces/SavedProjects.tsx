@@ -53,7 +53,9 @@ export function SavedProjects() {
                 <button
                   type="button"
                   className={styles.project}
-                  title={primary}
+                  // The name truncates to one line, so the tooltip carries it in
+                  // full, then the primary folder — which costs no pixels here.
+                  title={primary ? `${workspace.name}\n${primary}` : workspace.name}
                   aria-label={`Edit project ${workspace.name}`}
                   onClick={() => setEditing({ open: true, workspace })}
                 >
@@ -65,7 +67,7 @@ export function SavedProjects() {
           })}
         </ul>
       ) : query.status === 'error' ? null : (
-        <p className={styles.empty}>No saved projects yet.</p>
+        <p className={styles.empty}>No saved projects yet. Press + to keep a folder you work in.</p>
       )}
 
       <SavedProjectDialog

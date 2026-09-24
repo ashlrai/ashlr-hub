@@ -10,17 +10,23 @@ import { describe, expect, it } from 'vitest';
 import type { BudgetView } from '../../../../core/routing/policy.js';
 import type { SeatHealthReport } from '../../../../core/verse/health-types.js';
 import {
+  capacity,
   CLAUDE_MAX_SEAT,
   CLAUDE_TIGHT_SEAT,
   CODEX_CREDITS_SEAT,
   GROK_SEAT,
   LOCAL_SEAT_V2,
+  nativeSeat,
+  seatWindow,
   UNREAD_SEAT,
 } from '../seat-fixtures.test-support.js';
 import {
+  accountStatus,
   buildCapacityRows,
   capacityHeadline,
   capacityRowFor,
+  orderAccountRows,
+  percentText,
   readBudgetRows,
   readHealthReports,
   scarcestSeat,
@@ -236,5 +242,90 @@ describe('malformed server reads', () => {
     expect(buildCapacityRows({} as never)).toEqual([]);
     expect(buildCapacityRows([null, CLAUDE] as never).map((r) => r.seatId)).toEqual(['claude-a']);
     expect(capacityRowFor(null as never, 'claude-a')).toBeNull();
+  });
+});
+
+/**
+ * Apps & Accounts: the status each account row leads with. Instants are
+ * built in LOCAL time so "Fri 11:46 PM" holds in whatever zone the suite runs.
+ */
+describe('account status', () => {
+  const NOW = new Date(2026, 8, 25, 16, 34).getTime(); // Fri Sep 25, 4:34 PM local
+  const RESET = new Date(2026, 8, 26, 23, 46).toISOString(); // Sat 11:46 PM local
+  const CHECKED = new Date(NOW - 2 * 60_000).toISOString();
+
+  const spentWindow = seatWindow({ id: 'codex_codex_primary', usedPercent: 100, resetsAt: RESET, limitReached: true, measured: false });
+  const PERSONAL = nativeSeat(capacity({ planType: 'plus', windows: [spentWindow], binding: spentWindow, usability: 'exhausted', observedAt: CHECKED }),
+    { id: 'codex-personal', engine: 'codex', label: 'Personal Codex', accountId: 'codex-personal' });
+  const okWindow = seatWindow({ id: 'codex_codex_primary', usedPercent: 31, resetsAt: RESET });
+  const CMP = nativeSeat(capacity({ planType: 'pro', windows: [okWindow], binding: okWindow, usability: 'ready', observedAt: CHECKED }),
+    { id: 'codex-cmp', engine: 'codex', label: 'Cash Margin Partners', accountId: 'codex-cmp' });
+  const HEALTH = [
+    report('codex-personal', { engine: 'codex', connection: 'exhausted', resetAt: RESET, checkedAt: CHECKED, reasons: [`Every usage window with a reading is spent (resets ${RESET}).`], fix: { kind: 'wait' } }),
+    report('codex-cmp', { engine: 'codex', checkedAt: CHECKED }),
+    report('grok', { engine: 'grok', connection: 'signed-out', checkedAt: CHECKED, reasons: ['Grok CLI reports this account is not signed in.'], fix: { kind: 'reauth' } }),
+    report('claude-a', { checkedAt: CHECKED }),
+  ];
+  const ROSTER = [PERSONAL, GROK_SEAT, CLAUDE, CMP, LOCAL_SEAT_V2];
+  const rows = buildCapacityRows(ROSTER, { health: HEALTH });
+  const byId = new Map(rows.map((r) => [r.seatId, r]));
+  const status = (id: string, opts: { healthRead?: boolean; checking?: boolean } = {}) =>
+    accountStatus(byId.get(id)!, { healthRead: opts.healthRead ?? true, checking: opts.checking ?? false, now: NOW });
+
+  it('Connected · usable now, with when it was last checked', () => {
+    expect(status('codex-cmp')).toMatchObject({ kind: 'usable', label: 'Connected', detail: 'usable now', tone: 'success', checked: 'checked 2m ago', usableAgain: null });
+    expect(status('codex-cmp').checkedTitle).toMatch(/^Last checked Fri, Sep 25, 4:32/);
+  });
+
+  it('Spent · resets <local day and time>, and usable again in <countdown> — never the ISO instant', () => {
+    const spent = status('codex-personal');
+    expect(spent).toMatchObject({ kind: 'spent', label: 'Spent', detail: 'resets Sat 11:46 PM', tone: 'danger', usableAgain: 'usable again in 1d 7h', coversConnection: true });
+    // The health reason the row prints is localised too.
+    expect(byId.get('codex-personal')!.summary).toBe('Every usage window with a reading is spent (resets Sat 11:46 PM).');
+    expect(byId.get('codex-personal')!.windows[0]!.resetText).toBe('resets Sat 11:46 PM');
+  });
+
+  it('a spent seat whose reset has passed says so instead of counting down past zero', () => {
+    const late = accountStatus(byId.get('codex-personal')!, { healthRead: true, now: Date.parse(RESET) + 60_000 });
+    expect(late.detail).toMatch(/^was due to reset /);
+    expect(late.usableAgain).toBeNull();
+  });
+
+  it('Signed out · reconnect to use it', () => {
+    expect(status('grok')).toMatchObject({ kind: 'signed-out', label: 'Signed out', detail: 'reconnect to use it', tone: 'danger', coversConnection: true });
+  });
+
+  it('a running check, and a sweep that has not answered yet, both read "Checking…"', () => {
+    expect(status('codex-cmp', { checking: true })).toMatchObject({ kind: 'checking', label: 'Checking…', detail: null });
+    const unread = buildCapacityRows([UNREAD_SEAT], { health: null })[0]!;
+    expect(accountStatus(unread, { healthRead: false, now: NOW })).toMatchObject({ kind: 'checking', label: 'Checking…' });
+    expect(accountStatus(unread, { healthRead: true, now: NOW })).toMatchObject({ kind: 'not-checked', label: 'Not checked', detail: 'no reading yet' });
+  });
+
+  it('tight seats read as running low, or usable on credits when the window is spent but credits are not', () => {
+    expect(status('claude-a')).toMatchObject({ kind: 'low', label: 'Connected', detail: 'running low', tone: 'warning' });
+    const credits = buildCapacityRows([CODEX_CREDITS_SEAT], { health: [report('codex-personal', { engine: 'codex' })] })[0]!;
+    expect(accountStatus(credits, { healthRead: true, now: NOW })).toMatchObject({ kind: 'low', detail: 'usable on credits' });
+  });
+
+  it('local models read as Ready and free', () => {
+    expect(status('local:qwen3-coder')).toMatchObject({ kind: 'usable', label: 'Ready', detail: 'runs on this machine · free' });
+  });
+
+  it('orders usable accounts first, then what comes back by itself, then what needs you — stable within each', () => {
+    expect(orderAccountRows(rows, { healthRead: true, now: NOW }).map((r) => r.seatId))
+      .toEqual(['codex-cmp', 'local:qwen3-coder', 'claude-a', 'codex-personal', 'grok']);
+  });
+});
+
+describe('percentText', () => {
+  it('prints whole percents, never "0%" for a real reading or "100%" for one short of it', () => {
+    expect(percentText(62.4)).toBe('62%');
+    expect(percentText(0)).toBe('0%');
+    expect(percentText(0.4)).toBe('<1%');
+    expect(percentText(99.6)).toBe('99%');
+    expect(percentText(100)).toBe('100%');
+    expect(percentText(140)).toBe('100%');
+    expect(percentText(Number.NaN)).toBe('—');
   });
 });

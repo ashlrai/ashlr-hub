@@ -407,3 +407,60 @@ describe('FleetPanel', () => {
     expect(screen.getByRole('meter')).toHaveAttribute('aria-valuetext', 'unknown');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Copy: paths, prose, plurals, truncation
+// ---------------------------------------------------------------------------
+
+describe('local-fleet copy', () => {
+  it('names an agent’s repo by its folder, with the checkout path as the tooltip', () => {
+    render(
+      <FleetPanel
+        read={ok(fleet({ agents: [agent({ id: 'a1', task: 'Fix it', repo: '/Users/m/code/ashlr-hub', slot: 0 })], slotsBusy: 1 }))}
+        runtime={runtime()}
+      />,
+    );
+    const cell = screen.getByText('ashlr-hub');
+    expect(cell).toHaveAttribute('title', '/Users/m/code/ashlr-hub');
+    expect(screen.queryByText('/Users/m/code/ashlr-hub')).not.toBeInTheDocument();
+  });
+
+  it('reads an ISO instant in a fleet note as local time', () => {
+    const at = new Date(Date.now() - 600_000).toISOString();
+    render(<FleetPanel read={ok(fleet({ notes: [`last snapshot written ${at}`] }))} runtime={runtime()} />);
+    const note = screen.getByText(/^last snapshot written /);
+    expect(note.textContent).not.toContain(at);
+  });
+
+  it('points at the next step when nothing is in flight', () => {
+    render(<FleetPanel read={ok(fleet())} runtime={runtime()} />);
+    expect(screen.getByText(/an idle fleet/)).toHaveTextContent('Run one tick from Controls');
+  });
+
+  it('never ends the lane-cap sentence with ".." when the tick’s reason is a full sentence', () => {
+    render(
+      <LocalRuntimePanel
+        read={ok(runtime())}
+        guard={guard()}
+        dispatchEnabled
+        fleet={ok(fleet({ notes: ["bounded by this tick's lane cap, not by slots: lane cap 2 is below 4 (presence): Mason is present."] }))}
+      />,
+    );
+    const line = screen.getByRole('note');
+    expect(line).toHaveTextContent('a lane cap is tighter than this runtime: Mason is present.');
+    expect(line.textContent).not.toContain('..');
+  });
+
+  it('carries a truncatable endpoint or model name in full as a tooltip', () => {
+    render(<LocalRuntimePanel read={ok(runtime())} guard={guard()} dispatchEnabled fleet={null} />);
+    expect(screen.getByText('127.0.0.1:8080')).toHaveAttribute('title', '127.0.0.1:8080');
+    expect(screen.getByText('qwen3.8:27b-ctx64k')).toHaveAttribute('title', 'qwen3.8:27b-ctx64k');
+  });
+
+  it('agrees in number when one seat of one stops working', async () => {
+    const user = userEvent.setup();
+    render(<LocalOnlyPanel read={ok(policy())} seats={SEATS.slice(0, 1)} guard={guard()} dispatchEnabled />);
+    await user.click(screen.getByRole('button', { name: 'Turn local-only on' }));
+    expect(screen.getByText(/1 of your 1 seat stops working: Claude Code\./)).toBeInTheDocument();
+  });
+});

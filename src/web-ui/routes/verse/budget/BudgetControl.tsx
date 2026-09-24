@@ -33,6 +33,7 @@ import { Switch } from '../../../components/primitives/Switch.js';
 import { EngineMarker } from '../../../components/primitives/Tag.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { describeContextError, useTokenGate } from '../context/use-token-gate.js';
+import { tidyProse } from '../autonomy/format.js';
 import { readBudgetRows } from '../usage/capacity-strip-model.js';
 import {
   BUDGET_MODE_OPTIONS,
@@ -154,7 +155,8 @@ function SeatRow({ row, saving, readOnly, onSeat }: SeatRowProps) {
     <li className={styles.seat} aria-labelledby={headingId} data-status={row.status} aria-busy={saving || undefined}>
       <div className={styles.seatHead}>
         <EngineMarker engine={row.engine} className={styles.marker} />
-        <span id={headingId} className={styles.seatName}>{row.label}</span>
+        {/* The name may truncate in a narrow sheet; the full name rides in the tooltip. */}
+        <span id={headingId} className={styles.seatName} title={row.label}>{row.label}</span>
         <span className={styles.status} data-status={row.status}>{STATUS_WORDS[row.status]}</span>
         {row.free ? <span className={styles.free}>free</span> : null}
         <Switch
@@ -261,7 +263,9 @@ export function BudgetControlView({ view, preview, nowMs, pending, error, readOn
       <header className={styles.header}>
         <h2 id={titleId} className={styles.title}>Budget</h2>
         <p className={styles.summary}>{summary.sentence}</p>
-        <span className={styles.age}>Readings {readingAge(view.sampledAt, nowMs)}</span>
+        <span className={styles.age}>
+          {Number.isFinite(Date.parse(view.sampledAt)) ? `Readings ${readingAge(view.sampledAt, nowMs)}` : 'Reading time not reported'}
+        </span>
       </header>
 
       <div className={styles.mode}>
@@ -292,7 +296,8 @@ export function BudgetControlView({ view, preview, nowMs, pending, error, readOn
         <p className={styles.preview} aria-live="polite">
           <span className={styles.previewLead}>Next medium task →</span>{' '}
           <strong>{chosen?.label ?? (preview.seatId ?? 'nowhere right now')}</strong>
-          <span className={styles.previewWhy}>{preview.why}</span>
+          <span className={styles.previewWhy}>{/* A `{}` preview (an older server) has no why: say nothing rather than crash. */}
+          {typeof preview.why === 'string' ? tidyProse(preview.why, nowMs) : null}</span>
         </p>
       ) : null}
 

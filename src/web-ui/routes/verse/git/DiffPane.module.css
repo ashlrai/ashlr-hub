@@ -29,25 +29,20 @@
 
 /* ---- header -------------------------------------------------------------- */
 
-.head {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--border-subtle);
-}
-.headSpacer { flex: 1 1 0; }
-.rootName {
-  font-weight: var(--font-weight-semibold);
+/* Height, padding, border and surface come from ../dock/pane-chrome.module.css
+   (the row every dock pane shares); Review only wraps it at narrow widths. */
+.head { flex-wrap: wrap; }
+/* Scoped under .head so it outranks the shared title's size and colour. */
+.head .rootName {
   max-width: 16ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
 }
 .rootPick { display: inline-flex; min-width: 0; }
 .select {
-  min-height: var(--control-h-xs);
+  min-height: var(--control-h-sm);
   max-width: 16ch;
   padding: 0 var(--space-2);
   border: 1px solid var(--border-default);
@@ -58,19 +53,6 @@
   font-size: var(--text-sm-size);
 }
 .select:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
-.iconButton {
-  display: inline-grid;
-  place-items: center;
-  width: var(--control-h-xs);
-  height: var(--control-h-xs);
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-.iconButton:hover { background: var(--bg-hover); color: var(--text-primary); }
-.iconButton:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
 
 .summary {
   margin: 0;
@@ -231,7 +213,14 @@
   padding: var(--space-4) var(--space-3);
   color: var(--text-secondary);
 }
-.patchError { color: var(--status-danger-fg); }
+.patchError {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  color: var(--status-danger-fg);
+}
+.patchError > p { margin: 0; }
 .truncated {
   margin: 0;
   padding: var(--space-2) var(--space-3);

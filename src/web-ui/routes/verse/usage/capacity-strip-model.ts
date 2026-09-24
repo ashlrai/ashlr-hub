@@ -22,11 +22,14 @@
 import type { BudgetView } from '../../../../core/routing/policy.js';
 import type { SeatBudgetPolicy, SeatHeadroom } from '../../../../core/routing/types.js';
 import type { SeatConnection, SeatFixKind, SeatHealthReport } from '../../../../core/verse/health-types.js';
+import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import { ENGINE_MONOGRAM } from '../../../../core/verse/workbench-types.js';
 import type { VerseEngine, VerseSeat } from '../../../data/api-types.js';
 import { buildBudgetRows, STATUS_WORDS, type BudgetSeatStatus } from '../budget/budget-model.js';
-import { CONNECTION_TONE, CONNECTION_WORD, type HealthTone } from '../health/health-model.js';
-import { seatSubscription, type SeatCapacityClass, type SeatWindowView } from '../seat-subscription.js';
+import { relativePhrase } from '../context/context-model.js';
+import { formatWholePercent, tidyProse } from '../autonomy/format.js';
+import { CONNECTION_TONE, CONNECTION_WORD, usableAgainPhrase, type HealthTone } from '../health/health-model.js';
+import { formatResetInstant, seatSubscription, type SeatCapacityClass, type SeatWindowView } from '../seat-subscription.js';
 import { SEAT_CAPACITY_WORD } from '../verse-model.js';
 
 export type { SeatCapacityClass };
@@ -44,8 +47,10 @@ export interface CapacityWindowRow {
   usedPercent: number | null;
   /** The provider flagged the limit; no percentage exists. */
   limitReached: boolean;
-  /** Provider prose verbatim, or a formatted instant; null when neither. */
+  /** Provider prose verbatim, or a formatted local instant; null when neither. */
   resetText: string | null;
+  /** The machine-readable reset instant (ISO), when the provider gave one. */
+  resetsAt: string | null;
   /** True for the window that constrains work right now. */
   binding: boolean;
 }
@@ -93,6 +98,12 @@ export interface CapacityRow {
   notes: string[];
   /** For the collapsed local row: how many local seats it stands for. */
   localCount: number;
+  /** When this seat was last checked (health sweep, else the usage reading), ISO; null when never. */
+  checkedAt: string | null;
+  /** The instant a spent seat becomes usable again (ISO), when one is known. */
+  resetAt: string | null;
+  /** The account is signed out — by the health sweep or by its own capacity record. */
+  signedOut: boolean;
 }
 
 export interface CapacityInputs {
@@ -120,8 +131,49 @@ export function capacityTone(cls: SeatCapacityClass): HealthTone {
   return TONE_OF_CLASS[cls];
 }
 
+/**
+ * A reset formatted from a machine instant reads the way every other reset in
+ * the app does ("resets Fri 11:46 PM", via `describeResetAt`). Provider prose
+ * is left exactly as given — it is only rewritten when it IS the instant
+ * formatted by seat-subscription, never when the provider wrote it.
+ */
+function resetTextOf(w: SeatWindowView): string | null {
+  if (w.resetsAt === null || w.resetText === null || w.resetText !== formatResetInstant(w.resetsAt)) return w.resetText;
+  const when = describeResetAt(w.resetsAt);
+  return when === null ? w.resetText : `resets ${when}`;
+}
+
 function windowRow(w: SeatWindowView, binding: boolean): CapacityWindowRow {
-  return { id: w.id, label: w.label, usedPercent: w.usedPercent, limitReached: w.limitReached, resetText: w.resetText, binding };
+  return {
+    id: w.id,
+    label: w.label,
+    usedPercent: w.usedPercent,
+    limitReached: w.limitReached,
+    resetText: resetTextOf(w),
+    resetsAt: w.resetsAt,
+    binding,
+  };
+}
+
+function parseable(iso: string | null | undefined): iso is string {
+  return typeof iso === 'string' && Number.isFinite(Date.parse(iso));
+}
+
+/**
+ * When a spent seat comes back: the health sweep's own reset, else the
+ * earliest instant among the windows that are actually spent, else the
+ * binding window's. Null when no window carries a machine instant (Claude's
+ * resets are prose, and prose is never parsed).
+ */
+function resetInstant(report: SeatHealthReport | undefined, windows: readonly CapacityWindowRow[]): string | null {
+  if (parseable(report?.resetAt)) return report!.resetAt;
+  const spent = windows
+    .filter((w) => (w.limitReached || (w.usedPercent !== null && w.usedPercent >= 100)) && parseable(w.resetsAt))
+    .map((w) => w.resetsAt!)
+    .sort((a, b) => Date.parse(a) - Date.parse(b));
+  if (spent.length > 0) return spent[0]!;
+  const binding = windows.find((w) => w.binding) ?? null;
+  return binding !== null && parseable(binding.resetsAt) ? binding.resetsAt : null;
 }
 
 function connectionOf(report: SeatHealthReport | undefined): CapacityConnection | null {
@@ -130,10 +182,16 @@ function connectionOf(report: SeatHealthReport | undefined): CapacityConnection 
     connection: report.connection,
     word: CONNECTION_WORD[report.connection],
     tone: CONNECTION_TONE[report.connection],
-    reasons: [...report.reasons],
+    reasons: readableReasons(report.reasons),
     fixKind: report.fix.kind,
     fixCommand: report.fix.command && report.fix.command.length > 0 ? [...report.fix.command] : null,
   };
+}
+
+/** Reasons as printed: server sentences with any ISO instant shown in local time. */
+function readableReasons(reasons: readonly string[]): string[] {
+  const now = Date.now();
+  return reasons.map((r) => tidyProse(r, now).trim()).filter((r) => r.length > 0);
 }
 
 function reserveOf(budgetRow: BudgetRow | undefined): CapacityReserve | null {
@@ -166,7 +224,8 @@ function seatRow(
     if (windows.length >= CAPACITY_MAX_WINDOWS) break;
     windows.push(windowRow(w, false));
   }
-  const connection = connectionOf(health.get(seat.id));
+  const report = health.get(seat.id);
+  const connection = connectionOf(report);
   // A seat A2 found signed out or out of usage cannot run a turn, whatever
   // its last window reading says (the engine's readiness gate refuses it —
   // seat-readiness.ts SEAT_BLOCKING_CONNECTIONS). Counting it "usable"
@@ -188,6 +247,9 @@ function seatRow(
     reserve: reserveOf(budget.get(seat.id)),
     notes: [...view.notes],
     localCount: 1,
+    checkedAt: parseable(report?.checkedAt) ? report!.checkedAt : parseable(view.observedAt) ? view.observedAt : null,
+    resetAt: resetInstant(report, windows),
+    signedOut: connection?.connection === 'signed-out' || seat.capacity?.usability === 'signed-out',
   };
 }
 
@@ -219,6 +281,11 @@ function collapsedLocal(seats: readonly VerseSeat[], health: ReadonlyMap<string,
     reserve: null,
     notes: [],
     localCount: count,
+    checkedAt: parseable(report?.checkedAt)
+      ? report!.checkedAt
+      : rows.map((r) => r.observedAt).filter(parseable).sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null,
+    resetAt: null,
+    signedOut: false,
   };
 }
 
@@ -420,6 +487,20 @@ export function capacityRowFor(seats: readonly VerseSeat[], seatId: string, inpu
   return buildCapacityRows(seats, { ...inputs, seatIds: [seatId], local: 'each' })[0] ?? null;
 }
 
+/**
+ * A measured share, printed the same way on every capacity surface: a whole
+ * percent, except that a real reading under 1% is "<1%" (never "0%", which
+ * would read as "untouched") and one just short of 100 is "99%" (never a
+ * rounded "100%", which would read as "spent").
+ */
+export function percentText(used: number): string {
+  if (!Number.isFinite(used)) return '—';
+  const clamped = Math.max(0, Math.min(100, used));
+  if (clamped > 99 && clamped < 100) return '99%';
+  // The "<1%" rule is the app-wide one (autonomy/format `formatWholePercent`).
+  return formatWholePercent(clamped / 100);
+}
+
 /** The accessible sentence for one window bar. */
 export function windowSentence(row: Pick<CapacityRow, 'label'>, w: CapacityWindowRow, reservePercent: number | null): string {
   const head = `${row.label} ${w.label}`;
@@ -427,5 +508,170 @@ export function windowSentence(row: Pick<CapacityRow, 'label'>, w: CapacityWindo
   if (w.limitReached) return `${head}: limit reached${reset}`;
   if (w.usedPercent === null) return `${head}: no reading${reset}`;
   const kept = reservePercent !== null && reservePercent > 0 ? `; ${reservePercent}% kept for you` : '';
-  return `${head}: ${Math.round(w.usedPercent)}% used${kept}${reset}`;
+  return `${head}: ${percentText(w.usedPercent)} used${kept}${reset}`;
+}
+
+// ---------------------------------------------------------------------------
+// Account status (Apps & Accounts)
+// ---------------------------------------------------------------------------
+
+/**
+ * - `usable`       — connected (or read as usable) with room left;
+ * - `low`          — usable, but tight: past the warning line, or spent and running on credits;
+ * - `spent`        — the binding window is used up; comes back at `resetAt`;
+ * - `signed-out`   — needs the provider's own sign-in (Reconnect);
+ * - `unavailable`  — blocked for another reason (runtime down, CLI missing);
+ * - `not-checked`  — the health sweep has answered but said nothing usable about this seat;
+ * - `checking`     — nothing has answered yet, or a check is running right now.
+ */
+export type AccountStatusKind = 'usable' | 'low' | 'spent' | 'signed-out' | 'unavailable' | 'not-checked' | 'checking';
+
+export interface AccountStatus {
+  kind: AccountStatusKind;
+  /** Sentence case, leads the row: "Connected", "Spent", "Signed out", "Checking…". */
+  label: string;
+  /** Rides after a middle dot: "usable now", "resets Fri 11:46 PM", "reconnect to use it". */
+  detail: string | null;
+  tone: HealthTone;
+  /** "usable again in 7h 12m" — only for a spent seat whose reset is still ahead. */
+  usableAgain: string | null;
+  /** "checked 2m ago"; null when the seat was never checked. */
+  checked: string | null;
+  /** The last check as a local date and time, for a tooltip. */
+  checkedTitle: string | null;
+  /** True when `label` already says what the connection word would (signed out, out of usage). */
+  coversConnection: boolean;
+}
+
+export interface AccountStatusOptions {
+  /** False until the health sweep has answered once: an unanswered seat is "Checking…", not "Not checked". */
+  healthRead: boolean;
+  /** A check of this seat is running right now. */
+  checking?: boolean;
+  now?: number;
+}
+
+const STATUS_TONE: Record<AccountStatusKind, HealthTone> = {
+  usable: 'success',
+  low: 'warning',
+  spent: 'danger',
+  'signed-out': 'danger',
+  unavailable: 'danger',
+  'not-checked': 'neutral',
+  checking: 'neutral',
+};
+
+/** Usable first, then what will come back by itself, then what needs you. Used by `orderAccountRows`. */
+const STATUS_RANK: Record<AccountStatusKind, number> = {
+  usable: 0,
+  low: 1,
+  checking: 2,
+  'not-checked': 3,
+  spent: 4,
+  unavailable: 5,
+  'signed-out': 6,
+};
+
+function isSpentWindow(w: CapacityWindowRow): boolean {
+  return w.limitReached || (w.usedPercent !== null && w.usedPercent >= 100);
+}
+
+function checkedParts(row: Pick<CapacityRow, 'checkedAt'>, now: number): { checked: string | null; checkedTitle: string | null } {
+  const phrase = relativePhrase(row.checkedAt, now);
+  if (phrase === null || row.checkedAt === null) return { checked: null, checkedTitle: null };
+  const at = new Date(row.checkedAt);
+  return {
+    checked: `checked ${phrase}`,
+    checkedTitle: `Last checked ${at.toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`,
+  };
+}
+
+/**
+ * The one status an account row leads with, in the operator's words:
+ *
+ *   Connected · usable now            Spent · resets Fri 11:46 PM
+ *   Connected · running low           Signed out · reconnect to use it
+ *   Connected · usable on credits     Checking…
+ *
+ * Built from the row alone (no second reading of the seat), against a clock
+ * the caller passes, because "usable again in 7h" must keep counting down
+ * while the rows themselves are memoized on the data.
+ */
+export function accountStatus(row: CapacityRow, opts: AccountStatusOptions): AccountStatus {
+  const now = opts.now ?? Date.now();
+  const { checked, checkedTitle } = checkedParts(row, now);
+  const make = (kind: AccountStatusKind, label: string, detail: string | null, extra: Partial<AccountStatus> = {}): AccountStatus => ({
+    kind,
+    label,
+    detail,
+    tone: STATUS_TONE[kind],
+    usableAgain: null,
+    checked,
+    checkedTitle,
+    coversConnection: false,
+    ...extra,
+  });
+
+  if (opts.checking) return make('checking', 'Checking…', null);
+
+  if (row.kind === 'local') {
+    if (row.cls === 'ready') {
+      return make('usable', 'Ready', row.localCount > 1 ? `${row.localCount} models on this machine · free` : 'runs on this machine · free');
+    }
+    if (row.cls === 'blocked') return make('unavailable', 'Not running', row.summary);
+    return opts.healthRead ? make('not-checked', 'Not checked', 'readiness not reported yet') : make('checking', 'Checking…', null);
+  }
+
+  const c = row.connection?.connection ?? null;
+  if (row.signedOut) return make('signed-out', 'Signed out', 'reconnect to use it', { coversConnection: true });
+
+  const binding = row.windows.find((w) => w.binding) ?? null;
+  const spent = c === 'exhausted' || (row.cls === 'blocked' && binding !== null && isSpentWindow(binding));
+  if (spent) {
+    const when = describeResetAt(row.resetAt, now);
+    const ahead = row.resetAt !== null && Date.parse(row.resetAt) > now;
+    // No instant: the provider's own reset prose, verbatim, is the next best thing.
+    const prose = binding?.resetText ?? null;
+    const detail = when !== null
+      ? (ahead ? `resets ${when}` : `was due to reset ${when}`)
+      : (prose ?? 'reset time not reported');
+    return make('spent', 'Spent', detail, {
+      usableAgain: usableAgainPhrase(row.resetAt, now),
+      coversConnection: c === 'exhausted',
+    });
+  }
+
+  if (row.cls === 'blocked') return make('unavailable', 'Unavailable', row.summary);
+
+  // A seat nobody has read is not "fine" and not "broken": it is waiting on a check.
+  if (row.cls === 'unread') {
+    if (!opts.healthRead) return make('checking', 'Checking…', null);
+    if (c === null || c === 'unknown') return make('not-checked', 'Not checked', 'no reading yet');
+    return make('usable', 'Connected', 'no usage reading yet');
+  }
+
+  const lead = c === null || c === 'unknown' ? 'Usable' : 'Connected';
+  if (row.cls === 'tight') {
+    const onCredits = binding !== null && isSpentWindow(binding) && row.credits !== null;
+    if (lead === 'Usable') return make('low', 'Usable', onCredits ? 'on credits' : 'running low');
+    return make('low', lead, onCredits ? 'usable on credits' : 'running low');
+  }
+  return lead === 'Usable' ? make('usable', 'Usable now', null) : make('usable', 'Connected', 'usable now');
+}
+
+/**
+ * Usable accounts first, then the ones that come back on their own, then the
+ * ones that need you — stable within each group (the roster's own order), and
+ * paid seats ahead of local ones of the same standing. Ordered on the settled
+ * status (never on a running check), so a row does not jump while "Checking…".
+ */
+export function orderAccountRows(rows: readonly CapacityRow[], opts: Omit<AccountStatusOptions, 'checking'>): CapacityRow[] {
+  const ranked = rows.map((row, index) => ({
+    row,
+    index,
+    rank: STATUS_RANK[accountStatus(row, { ...opts, checking: false }).kind],
+    local: row.kind === 'local' ? 1 : 0,
+  }));
+  ranked.sort((a, b) => a.rank - b.rank || a.local - b.local || a.index - b.index);
+  return ranked.map((r) => r.row);
 }

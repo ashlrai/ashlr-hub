@@ -15,8 +15,20 @@ import { CHART_SEQUENTIAL, toneColor } from './colors.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
 import { ChartLegend } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
-import { areaPath, linePath, linearScale, niceTicks, projectBurnDown, splitRuns, type BurnPoint } from './chart-math.js';
-import { formatCompact } from './format.js';
+import {
+  MIN_TIME_SPAN_MS,
+  areaPath,
+  axisTicks,
+  ensureSpan,
+  isPlausibleTime,
+  layoutAxisLabels,
+  linePath,
+  linearScale,
+  projectBurnDown,
+  splitRuns,
+  type BurnPoint,
+} from './chart-math.js';
+import { formatCompact, timeLabelLadder } from './format.js';
 import { useChartWidth } from './useChartWidth.js';
 import plot from './plot.module.css';
 
@@ -105,28 +117,60 @@ export function BurnDown({
   reserve,
   height = 200,
   width: fixedWidth,
-  formatValue = formatCompact,
-  formatTime = defaultFormatTime,
+  formatValue: formatValueProp,
+  formatTime: formatTimeProp,
   ariaLabel,
 }: BurnDownProps) {
+  const formatValue = formatValueProp ?? formatCompact;
+  const formatTime = formatTimeProp ?? defaultFormatTime;
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
-  const sorted = [...points].sort((a, b) => a.t - b.t);
+  // A reading stamped 0 / NaN / pre-2000 is a null timestamp that leaked
+  // through: it is not on this window's time axis, and it would drag both
+  // the axis and the projection's slope back to 1970.
+  const sorted = points.filter((p) => isPlausibleTime(p.t)).sort((a, b) => a.t - b.t);
   const anyKnown = sorted.some((p) => p.remaining !== null);
   const resolvedStatus: ChartStatus = status ?? (sorted.length === 0 ? { kind: 'empty', message: 'No readings in this window yet.' } : anyKnown ? { kind: 'ready' } : { kind: 'unknown' });
 
   const projection = projectBurnDown(sorted, resetAt, { reserve: reserve?.value ?? null });
   const verdict = burnVerdict(projection, resetAt, formatValue, formatTime, reserve?.label);
 
-  const ticks = niceTicks(0, Math.max(capacity, 1), 4);
+  // Always 0 → capacity (100 for percent seats), so sibling cards share one
+  // scale; widened only if a reading overshoots, never clipped.
+  const known = sorted.flatMap((p) => (p.remaining !== null && Number.isFinite(p.remaining) ? [p.remaining] : []));
+  const yAxis = axisTicks(0, Math.max(capacity, ...known, 1), {
+    count: 4,
+    integer: Number.isInteger(capacity) && known.every((v) => Number.isInteger(v)),
+    format: formatValueProp,
+  });
+  const ticks = yAxis.ticks;
   const top = ticks[ticks.length - 1]!;
-  const padL = Math.min(56, Math.max(28, Math.max(...ticks.map((t) => formatValue(t).length)) * 7 + 10));
+  const padL = Math.min(56, Math.max(28, Math.max(...yAxis.labels.map((l) => l.length)) * 7 + 10));
   const plotW = Math.max(40, width - padL - PAD_R);
   const plotH = height - PAD_T - PAD_B;
-  const xEnd = Math.max(resetAt, start + 1);
-  const xs = linearScale(start, xEnd, padL, padL + plotW);
+  // The window runs start → reset. An implausible bound (0 / NaN) falls back
+  // to the readings; a degenerate one widens to MIN_TIME_SPAN_MS, keeping the
+  // reset on the right edge.
+  const lastT = sorted.length ? sorted[sorted.length - 1]!.t : now;
+  const rawEnd = isPlausibleTime(resetAt) ? resetAt : Math.max(now, lastT);
+  const rawStart = isPlausibleTime(start) ? start : sorted[0]?.t ?? rawEnd;
+  const [x0, xEnd] = ensureSpan(rawStart, rawEnd, MIN_TIME_SPAN_MS, 'end');
+  const xs = linearScale(x0, xEnd, padL, padL + plotW);
   const ys = linearScale(0, top, PAD_T + plotH, PAD_T);
-  const clampX = (t: number) => Math.min(xEnd, Math.max(start, t));
+  const clampX = (t: number) => Math.min(xEnd, Math.max(x0, t));
+
+  // x labels: the reset marker outranks the window start. Both walk the same
+  // detail ladder (the caller's format → "Fri 11:46 PM" → "Sep 18"; clock
+  // time only inside one day) until they fit side by side; if even the
+  // shortest pair collides, the start is dropped rather than overprinted.
+  const ladder = timeLabelLadder(x0, xEnd, formatTimeProp ?? defaultFormatTime, [x0, xEnd]);
+  const xLabels = layoutAxisLabels(
+    [
+      { key: 'start', x: padL, anchor: 'start', priority: 2, variants: ladder.map((f) => f(x0)) },
+      { key: 'reset', x: padL + plotW, anchor: 'end', priority: 3, variants: ladder.map((f) => `Resets ${f(xEnd)}`) },
+    ],
+    { min: padL, max: padL + plotW },
+  );
 
   const runs = splitRuns(sorted.map((p) => ({ x: clampX(p.t), y: p.remaining })))
     .map((run) => run.map((p) => ({ x: xs(p.x), y: ys(Math.max(0, p.y)) })));
@@ -173,17 +217,18 @@ export function BurnDown({
     >
       <div ref={wrapRef} className={plot.plotWrap}>
         <svg className={plot.svg} width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={summary}>
-          {ticks.map((t) => (
+          {ticks.map((t, i) => (
             <g key={t}>
               <line className={plot.grid} x1={padL} x2={padL + plotW} y1={ys(t)} y2={ys(t)} />
-              <text className={plot.tick} x={padL - 6} y={ys(t)} dy="0.32em" textAnchor="end">{formatValue(t)}</text>
+              <text className={plot.tick} x={padL - 6} y={ys(t)} dy="0.32em" textAnchor="end">{yAxis.labels[i]}</text>
             </g>
           ))}
           <line className={plot.axis} x1={padL} x2={padL + plotW} y1={ys(0)} y2={ys(0)} />
-          <text className={plot.tick} x={padL} y={height - 8} textAnchor="start">{formatTime(start)}</text>
-          <text className={plot.tick} x={padL + plotW} y={height - 8} textAnchor="end">Resets {formatTime(resetAt)}</text>
+          {xLabels.map((l) => (
+            <text key={l.key} data-axis-label={l.key} className={plot.tick} x={l.x} y={height - 8} textAnchor={l.anchor}>{l.text}</text>
+          ))}
 
-          <path data-role="pace" className={plot.reference} d={linePath([{ x: xs(start), y: ys(capacity) }, { x: xs(xEnd), y: ys(0) }])} />
+          <path data-role="pace" className={plot.reference} d={linePath([{ x: xs(x0), y: ys(capacity) }, { x: xs(xEnd), y: ys(0) }])} />
           {reserve ? (
             <g data-role="reserve">
               <line className={plot.reference} x1={padL} x2={padL + plotW} y1={ys(reserve.value)} y2={ys(reserve.value)} />
@@ -196,7 +241,7 @@ export function BurnDown({
               </text>
             </g>
           ) : null}
-          {now > start && now < xEnd ? (
+          {now > x0 && now < xEnd ? (
             <line className={plot.crosshair} x1={xs(now)} x2={xs(now)} y1={PAD_T} y2={PAD_T + plotH} />
           ) : null}
           {runs.map((run, i) => (

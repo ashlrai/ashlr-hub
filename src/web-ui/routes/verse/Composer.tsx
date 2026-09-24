@@ -4,11 +4,21 @@
  *
  *   [queued follow-ups: Edit · Send now · ×]          (hidden when empty; portalled
  *                                                      to the host's `queueSlot` when given)
- *   ┌───────────────────────────────────────────────┐
- *   │ [attachment chips]                            │
- *   │ Message the agent…                            │
- *   │ [+] 🎙 Permission ▾      [C] seat ◔ Model ▾ Effort ▾ ◔ Send │
- *   └───────────────────────────────────────────────┘
+ *   ┌──────────────────────────────────────────────────────────────────────┐
+ *   │ [attachment chips]                                                   │
+ *   │ Ask anything — @ to add files, / for commands                        │
+ *   │ [+] 🎙 ✎ Accept edits ▾     [C] Claude Max ◔  Opus 5 ▾  Effort: High ▾  ◔ 31%  Send ⏎ │
+ *   └──────────────────────────────────────────────────────────────────────┘
+ *
+ * FOOTER: left = how you write (attach, dictate, permission mode); right =
+ * where it runs and what it sends (seat, model, effort, context, send). The
+ * seat chip names the ACCOUNT and the Model picker the model, so the model is
+ * said once. Effort appears only where the seat can set it. Labels are short
+ * and never ellipsized; the full words are each control's name and title.
+ * When the row is too narrow it folds (composer/useFooterFold): "Effort:" →
+ * an icon, the seat chip → its monogram, the mode → its icon, then the
+ * pickers into the ⋯ sheet. Controls are 28px, 8px apart; typing never reflows the
+ * row (while a turn runs, ■ and Queue sit there empty or not).
  *
  * ALWAYS EDITABLE. Enter while a turn runs QUEUES the message on the server
  * (at most 3); the queue sends each follow-up when the turn before it ends
@@ -27,8 +37,8 @@
  * exactly that folder. `@` fuzzy-finds project files; `/` at the start offers
  * handoff, compact, new, plan, effort, model.
  *
- * At 375px the footer folds to [+] [mic] · seat · ⋯ (the pickers in a bottom
- * sheet) · Send.
+ * At 375px (or a column too narrow for the pickers) the footer folds to
+ * [+] [mic] · seat · ⋯ (the pickers in a bottom sheet) · Send.
  *
  * Kept from 3.9: per-chat drafts that survive a reload, ↑ history recall, the
  * pre-send cost hint, dictation, ⌘. to stop, and the seat-health block (A2).
@@ -63,12 +73,13 @@ import { QueueRow } from './composer/QueueRow.js';
 import { SeatChip } from './composer/SeatChip.js';
 import { SuggestMenu, suggestOptionId, type SuggestItem } from './composer/SuggestMenu.js';
 import { useAttachmentDrafts, useFollowUpQueue, useSessionControls } from './composer/useComposerData.js';
+import { FOOTER_FOLD_SHEET, useFooterFold } from './composer/useFooterFold.js';
 import { useTokenGate } from './context/use-token-gate.js';
 import { DictationButton } from './DictationButton.js';
 import { ComposerSeatBlock } from './health/ComposerSeatBlock.js';
 import type { SeatChoice } from './SeatSelector.js';
 import { useViewport } from './shell/viewport.js';
-import { seatPillLabel } from './verse-model.js';
+import { ENGINE_LABEL, modelLabel, seatPillLabel } from './verse-model.js';
 import { formatTokens } from './verse-store.js';
 import type { VerseFileMatch } from '../../../core/verse/workbench-types.js';
 import styles from './Composer.module.css';
@@ -169,6 +180,17 @@ const PERMISSION_GLYPH: Record<VersePermissionMode, ReactNode> = {
   bypass: <ModeIcon><path d="M8 2.6 14.2 13H1.8L8 2.6Z" /><path d="M8 6.6v3" /><circle cx="8" cy="11.3" r="0.75" fill="currentColor" stroke="none" /></ModeIcon>,
 };
 
+/** The footer's short mode names; the option's own label ("Bypass permissions") is the name and title. */
+const PERMISSION_SHORT: Record<VersePermissionMode, string> = {
+  plan: 'Plan',
+  'accept-edits': 'Accept edits',
+  auto: 'Auto',
+  bypass: 'Bypass',
+};
+
+/** Effort, once "Effort:" folds away: three rising bars (same geometry rules as ModeIcon). */
+const EFFORT_GLYPH = <ModeIcon><path d="M3.5 12.5v-2.5M8 12.5V7.5M12.5 12.5v-8" /></ModeIcon>;
+
 /** The compact footer's "more settings" dots — SVG for the same reason ('⋯' U+22EF is outside the subset and not in Plex). */
 const MORE_DOTS = (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" focusable="false" aria-hidden="true">
@@ -182,7 +204,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   hintSeen = false, contextTokens = null, contextWindow = null, autoCompactAt = null, contextExact = true, handoffDraft = false,
   onSend, onStop, onSeatChange, onContinueOn, onHandoff, handoffDisabledReason = null, queueSlot = null, insertRequest = null,
   autoFocus = false }: ComposerProps) {
-  const { compact } = useViewport();
+  const { compact: phone } = useViewport();
   const gate = useTokenGate();
   const run = gate.run;
   const controls = useSessionControls(disabled ? null : sessionId, running, run);
@@ -233,6 +255,17 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   const view = controls.view;
   const effectiveEngine = engine ?? seats.find((s) => s.id === seat.seatId)?.engine ?? 'claude';
   const chipLabel = seatPillLabel(seats, { seatId: seat.seatId, engine: effectiveEngine, model: view?.controls.model ?? seat.model });
+  // The chip names the account; a local seat's label IS its model's name, so it says "Local".
+  const seatName = effectiveEngine === 'local'
+    ? ENGINE_LABEL.local
+    : seats.find((s) => s.id === seat.seatId)?.label ?? ENGINE_LABEL[effectiveEngine];
+  const modelName = view ? labelOf(view.options.models, view.controls.model) : modelLabel(seats, seat);
+  const effortOn = view?.options.efforts.some((o) => o.available) === true;
+  const effortName = view?.controls.effort ? labelOf(view.options.efforts, view.controls.effort) : 'Default';
+  const footerRow = useRef<HTMLDivElement>(null);
+  const fold = useFooterFold(footerRow, [seatName, modelName, effortOn && effortName, view?.controls.permissionMode,
+    running, queueAvailable, queueFull, locked, disabled].join('|'));
+  const compact = phone || fold >= FOOTER_FOLD_SHEET;
   const attachBlocked = effectiveEngine === 'grok'
     ? 'Grok can only open files inside the project folder, so it can’t read attachments.'
     : null;
@@ -686,7 +719,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
     ? disabledReason ?? 'Sending is disabled'
     : running
       ? (queueAvailable ? 'Queue a follow-up — it sends when this turn ends…' : 'Draft your next message…')
-      : 'Message the agent… (@ files, / commands)';
+      : 'Ask anything — @ to add files, / for commands';
 
   const permissionValue = view?.controls.permissionMode ?? null;
   const bypassOn = permissionValue === 'bypass';
@@ -694,7 +727,8 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   const pickers = view ? (variant: 'menu' | 'list') => ({
     permission: (
       <ControlMenu<VersePermissionMode> key="permission" label="Permission mode" variant={variant}
-        valueLabel={labelOf(view.options.permissionModes, view.controls.permissionMode)}
+        valueLabel={PERMISSION_SHORT[view.controls.permissionMode]}
+        valueTitle={labelOf(view.options.permissionModes, view.controls.permissionMode)} iconOnly={fold >= 3}
         options={view.options.permissionModes} value={view.controls.permissionMode}
         onChange={(mode) => { void changePermission(mode); }} disabled={controls.pending}
         shortcut={shortcutLabel('composer.permission')} openRequest={openRequest.permission}
@@ -703,29 +737,29 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
     ),
     model: (
       <ControlMenu<string> key="model" label="Model" variant={variant}
-        valueLabel={labelOf(view.options.models, view.controls.model)}
+        valueLabel={modelName}
         options={view.options.models} value={view.controls.model}
         onChange={(model) => { void changeModel(model); }} disabled={controls.pending}
         shortcut={shortcutLabel('composer.model')} openRequest={openRequest.model} note={appliesNote}
         onOpenChange={(open) => setOpenMenus((m) => ({ ...m, model: open }))} />
     ),
-    effort: view.options.efforts.some((o) => o.available) ? (
+    // No control at all where the seat cannot set effort (local models, an old CLI).
+    effort: effortOn ? (
       <ControlMenu<VerseEffort> key="effort" label="Effort" variant={variant}
-        valueLabel={view.controls.effort ? labelOf(view.options.efforts, view.controls.effort) : 'Default effort'}
+        valueLabel={fold >= 1 ? effortName : `Effort: ${effortName}`} valueTitle={effortName}
+        icon={fold >= 1 ? EFFORT_GLYPH : undefined}
         options={view.options.efforts} value={view.controls.effort}
         defaultOption={{ label: 'Default', description: 'The CLI decides', onSelect: () => { void changeEffort(null); } }}
         onChange={(effort) => { void changeEffort(effort); }} disabled={controls.pending}
         shortcut={shortcutLabel('composer.effort')} openRequest={openRequest.effort} note={appliesNote}
         onOpenChange={(open) => setOpenMenus((m) => ({ ...m, effort: open }))} />
-    ) : (
-      <span key="effort" className={cstyles.controlStatic} title={view.options.efforts[0]?.reason ?? 'No effort setting on this seat'}>
-        No effort setting
-      </span>
-    ),
+    ) : null,
   }) : null;
   const wide = pickers?.('menu') ?? null;
 
-  const sendLabel = running ? (queueFull ? 'Queue full' : 'Queue') : sending ? 'Sending…' : locked ? 'Unlock & send' : 'Send';
+  // No "Sending…": a label that changes width on Enter would shift the row; the button is disabled + busy instead.
+  const sendLabel = running ? (queueFull ? 'Queue full' : 'Queue') : locked ? 'Unlock & send' : 'Send';
+  const returnKey = <span className={cstyles.sendKey} aria-hidden="true">⏎</span>;
 
   return (
     <form ref={form} className={`${styles.composer} ${compact ? cstyles.composerCompact : ''}`}
@@ -769,7 +803,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
           onPaste={onPaste} onKeyDown={onKeyDown} />
         <input ref={fileInput} type="file" multiple hidden tabIndex={-1} aria-hidden="true"
           onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
-        <div className={`${styles.row} ${cstyles.footer}`}>
+        <div ref={footerRow} className={`${styles.row} ${cstyles.footer}`}>
           <div className={cstyles.footerLeft}>
             <Tooltip label={attachBlocked ?? 'Attach files — or paste, or drop'} shortcut={attachBlocked ? undefined : shortcutLabel('composer.attach')}>
               <button type="button" className={cstyles.iconButton} aria-label="Attach files" aria-disabled={attachBlocked ? true : undefined}
@@ -785,32 +819,33 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
           </div>
           <div className={cstyles.footerRight}>
             <SeatChip seats={seats} seat={{ seatId: seat.seatId, model: view?.controls.model ?? seat.model }} engine={effectiveEngine}
-              label={chipLabel} disabled={disabled} compact={compact}
+              label={chipLabel} name={seatName} disabled={disabled} compact={compact || fold >= 2}
               {...(onContinueOn ? { onContinueOn } : {})} onNewChat={onSeatChange} />
-            {!compact && wide ? wide.model : null}
+            {compact ? null : wide ? wide.model : (
+              // No session controls (an older or read-only server, or still loading): the model, stated once, not a picker.
+              <span className={cstyles.controlStatic} title={`Model: ${modelName}`}>{modelName}</span>
+            )}
             {!compact && wide ? wide.effort : null}
-            {!compact ? <ContextRing contextTokens={contextTokens} contextWindow={contextWindow} autoCompactAt={autoCompactAt} exact={contextExact} /> : null}
+            {!compact ? <ContextRing contextTokens={contextTokens} contextWindow={contextWindow} autoCompactAt={autoCompactAt} exact={contextExact} engine={effectiveEngine} /> : null}
             {compact && view ? (
               <button type="button" className={`${cstyles.iconButton} ${bypassOn ? cstyles.iconButtonDanger : ''}`}
-                aria-haspopup="dialog" aria-label={`Chat settings: ${labelOf(view.options.permissionModes, view.controls.permissionMode)}, ${labelOf(view.options.models, view.controls.model)}`}
-                onClick={() => setSheetOpen(true)} disabled={disabled}>
+                aria-haspopup="dialog" aria-label={`Chat settings: ${labelOf(view.options.permissionModes, view.controls.permissionMode)}, ${modelName}`}
+                title="Chat settings" onClick={() => setSheetOpen(true)} disabled={disabled}>
                 {MORE_DOTS}
               </button>
             ) : null}
-            {running && hasText && queueAvailable ? (
-              <button key="queue" type="submit" className={styles.send} disabled={!canSend}
-                aria-label={queueFull ? 'Queue is full' : 'Queue this message — it sends when the turn ends'}>
-                {sendLabel}
-              </button>
-            ) : null}
             {running ? (
-              <button key="stop" type="button" className={styles.stop} onClick={onStop}
-                title="Stop the running turn (⌘. or Esc from an empty box)" aria-label="Stop the running turn">
-                <span className={styles.stopIcon} aria-hidden="true" />{compact ? null : 'Stop'}
-              </button>
-            ) : (
-              <button key="send" type="submit" className={styles.send} disabled={!canSend} aria-label={locked ? 'Send (unlocks first)' : 'Send message'}>
-                {sendLabel}
+              <Tooltip label="Stop the running turn — or Esc from an empty box" shortcut="⌘.">
+                <button key="stop" type="button" className={`${cstyles.iconButton} ${styles.stop}`} onClick={onStop} aria-label="Stop the running turn">
+                  <span className={styles.stopIcon} aria-hidden="true" />
+                </button>
+              </Tooltip>
+            ) : null}
+            {/* While a turn runs, Queue stays put — disabled until there is text — so typing never adds a button. */}
+            {running && !queueAvailable ? null : (
+              <button key={running ? 'queue' : 'send'} type="submit" className={styles.send} disabled={!canSend} aria-busy={sending || undefined}
+                aria-label={running ? (queueFull ? 'Queue is full' : 'Queue this message — it sends when the turn ends') : locked ? 'Send (unlocks first)' : 'Send message'}>
+                {sendLabel}{returnKey}
               </button>
             )}
           </div>

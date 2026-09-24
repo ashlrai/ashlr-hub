@@ -136,6 +136,15 @@ describe('toWindowView — the sentinel 100 is a flag, not a measurement', () =>
     expect(view.resetText).toBe('resets Sep 25 at 7pm');
   });
 
+  it('prints an instant-only reset as local time, never the raw ISO string', () => {
+    const at = new Date(2026, 8, 25, 23, 46); // local, so the words hold in any zone
+    const view = toWindowView(win({ id: 'codex', usedPercent: 31, resetsAt: at.toISOString() }), new Date(2026, 8, 24, 9, 0).getTime());
+    expect(view.resetText).toBe('resets Fri 11:46 PM');
+    expect(view.resetsAt).toBe(at.toISOString());
+    // An instant that does not parse says nothing rather than printing itself.
+    expect(toWindowView(win({ id: 'codex', usedPercent: 31, resetsAt: 'soon' })).resetText).toBeNull();
+  });
+
   it('names the per-model weekly windows in a way a human reads', () => {
     expect(windowLabel(win({ id: 'seven_day_fable' }))).toBe('Week · Fable');
     expect(windowLabel(win({ id: 'five_hour' }))).toBe('Session · rolling 5h');

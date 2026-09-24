@@ -34,6 +34,9 @@ const LAZY_ONLY = [
   './onboarding/OnboardingFlow.js',
   './shell/RailStatus.js',
   './shell/palette-model.js',
+  // The idle surface warm-up's query table pulls in every surface's data
+  // modules; only the tiny scheduler (./shell/idle-prefetch.js) is static.
+  './shell/surface-prefetch.js',
 ];
 
 describe('VerseApp keeps non-first-paint modules out of its static imports', () => {

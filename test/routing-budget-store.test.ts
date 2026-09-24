@@ -180,6 +180,27 @@ describe('shadow decision log', () => {
     expect(row!.decision.why).not.toContain('ghp_AAAA');
   });
 
+  it('keeps the 3.10.1 summary and structured reasons, scrubbed', () => {
+    const rich: SeatDecision = {
+      ...decision,
+      summary: 'grok — 94% of its weekly window left; balanced mode prefers Grok for this work.',
+      exclusions: [{
+        seatId: 'codex-cmp',
+        reasons: ['Autonomy is switched off for this seat.', 'The weekly window is spent — limit reached (resets 2026-09-26T03:46:56.000Z).'],
+        nextEligibleAt: null,
+        details: [
+          { kind: 'switched-off', text: 'Autonomy is switched off for this seat.' },
+          { kind: 'spent', text: 'The weekly window is spent — limit reached. ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', resetsAt: '2026-09-26T03:46:56.000Z', resetDescription: null },
+        ],
+      }],
+    };
+    expect(recordShadowDecision({ source: 'verse', request, decision: rich })).toBe(true);
+    const [row] = readShadowDecisions(1);
+    expect(row!.decision.summary).toBe(rich.summary);
+    expect(row!.decision.exclusions[0]!.details!.map((r) => [r.kind, r.resetsAt])).toEqual([['switched-off', undefined], ['spent', '2026-09-26T03:46:56.000Z']]);
+    expect(row!.decision.exclusions[0]!.details![1]!.text).not.toContain('ghp_AAAA');
+  });
+
   it('never throws: bad source, unwritable location, missing log', () => {
     expect(recordShadowDecision({ source: 'nope' as never, request, decision })).toBe(false);
     expect(readShadowDecisions(10)).toEqual([]);

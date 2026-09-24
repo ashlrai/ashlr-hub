@@ -274,6 +274,18 @@ describe('SavedProjectDialog — root order', () => {
     expect(screen.getByRole('button', { name: 'Move folder 2 down' })).toBeDisabled();
   });
 
+  it('gives each arrow-only reorder button a tooltip as well as an accessible name', () => {
+    render(<SavedProjectDialog open workspace={workspace()} onClose={() => {}} />);
+    for (const name of ['Move primary folder up', 'Move primary folder down', 'Move folder 2 up', 'Move folder 2 down']) {
+      expect(screen.getByRole('button', { name })).toHaveAttribute('title', name);
+    }
+  });
+
+  it('keeps a long folder path whole in the field’s tooltip', () => {
+    render(<SavedProjectDialog open workspace={workspace()} onClose={() => {}} />);
+    expect(screen.getByLabelText('Primary folder')).toHaveAttribute('title', '/repo/service');
+  });
+
   it('names a new project after its folder when nothing was typed', async () => {
     const user = userEvent.setup();
     render(<SavedProjectDialog open workspace={null} initialRoots={['/repo/service']} onClose={() => {}} />);
@@ -304,6 +316,10 @@ describe('SavedProjectDialog — priority', () => {
 
     // The note that priority never widens scope is at the point of the choice.
     expect(screen.getByText(/never adds one/)).toBeInTheDocument();
+    // Each row reads by the folder's own name; the absolute path is the tooltip.
+    const libLabel = screen.getByText('lib', { selector: 'span' });
+    expect(libLabel).toHaveAttribute('title', '/repo/lib');
+    expect(screen.queryByText('/repo/lib', { selector: 'span' })).not.toBeInTheDocument();
 
     await user.selectOptions(screen.getByLabelText('Priority for /repo/lib'), 'critical');
     await user.click(screen.getByRole('button', { name: 'Save project' }));

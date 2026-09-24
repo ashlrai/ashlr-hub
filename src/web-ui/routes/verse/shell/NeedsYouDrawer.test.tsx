@@ -93,6 +93,31 @@ describe('NeedsYouDrawer', () => {
     expect(selected()).toContain('fix the flaky snapshot');
   });
 
+  it('reads a sandboxed-run approval in words, keeping the server text for tooltips', async () => {
+    const rawTitle = 'patch: claude run: Advance goal "Add a circuit breaker to binshield\'s worker scan pipeline so a deg';
+    const since = new Date(Date.now() - 38 * 86_400_000).toISOString();
+    setup(activity({
+      needsYou: [approvalNeed('p-live', {
+        title: rawTitle,
+        detail: 'TITRR claude:claude-fable-5 run produced 2 file(s) (+384/-0). Review before applying.',
+        since,
+      })],
+    }));
+    await openDrawer();
+    const row = within(await screen.findByRole('listbox')).getByRole('option');
+    expect(within(row).getByText('Patch · Claude run')).toBeInTheDocument();
+    const title = within(row).getByText('Advance goal "Add a circuit breaker to binshield\'s worker scan pipeline so a…"');
+    expect(title).toHaveAttribute('title', rawTitle);
+    expect(within(row).getByText('2 files · +384 −0')).toBeInTheDocument();
+    expect(within(row).getByText('2 files changed, 384 lines added, 0 removed')).toHaveClass('visually-hidden');
+    expect(within(row).getByText('Test-and-repair loop')).toHaveAttribute('title', expect.stringMatching(/^TITRR — Test, Iterate/));
+    expect(within(row).getByText('binshield')).toBeInTheDocument();
+    const age = within(row).getByText('38 days ago');
+    expect(age.getAttribute('title')).toBeTruthy();
+    // None of the wire shorthand reaches the page as text.
+    expect(row.textContent).not.toMatch(/TITRR|patch:|claude run:|file\(s\)|\bdeg\b|38d\b/);
+  });
+
   it('H / L switch splits, each with its count', async () => {
     setup();
     const user = userEvent.setup();
@@ -125,7 +150,9 @@ describe('NeedsYouDrawer', () => {
     await waitFor(() => expect(net.posts()).toEqual([{ path: '/api/inbox/p-1/approve', body: {}, token: TOKEN }]));
     // Hidden at once, before the next poll catches up.
     await waitFor(() => expect(screen.queryByRole('option', { name: /fix the flaky snapshot/ })).not.toBeInTheDocument());
-    expect(await screen.findByText('Approve: PR: fix the flaky snapshot test')).toBeInTheDocument();
+    // The toast names the item as the row does, without the producer's "PR:" prefix.
+    expect(await screen.findByText('Approve: fix the flaky snapshot test')).toBeInTheDocument();
+    expect(screen.queryByText(/PR: fix the flaky/)).not.toBeInTheDocument();
   });
 
   it('cancelling the confirmation sends nothing', async () => {
@@ -191,6 +218,19 @@ describe('NeedsYouDrawer', () => {
     expect(await screen.findByRole('listbox')).toHaveFocus();
     await user.keyboard('{Escape}');
     await waitFor(() => expect(getVerseUiState().overlay).toBeNull());
+  });
+
+  it('↩ on anything else opens its own detail, aged in words with the exact time on hover', async () => {
+    setup();
+    const user = userEvent.setup();
+    await openDrawer();
+    await screen.findByRole('listbox');
+    await user.keyboard('j');
+    await user.keyboard('{Enter}');
+    expect(await screen.findByRole('heading', { name: 'Prune 17 stale goals' })).toHaveAttribute('title', 'Prune 17 stale goals');
+    const age = screen.getByText('5 minutes ago');
+    expect(age.previousElementSibling).toHaveTextContent('Raised');
+    expect(age.getAttribute('title')).toBeTruthy();
   });
 
   it('says "All clear" only when every producer answered', async () => {

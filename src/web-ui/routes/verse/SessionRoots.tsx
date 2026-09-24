@@ -22,6 +22,7 @@
  * because a branch is stale the moment a turn commits.
  */
 import type { VerseSession, VerseSessionRootsResponse } from '../../data/api-types.js';
+import { abbreviateHome } from './chat/path-display.js';
 import { rootCaveat, rootGitLine, rootTone } from './workspace-model.js';
 import styles from './SessionRoots.module.css';
 
@@ -75,8 +76,9 @@ export function SessionRoots({ session, data, error = null }: SessionRootsProps)
                   repository, and two checkouts of the same repo share a name —
                   so the thing that tells them apart cannot be the one fact you
                   have to hover to read. It is shown, directory-first, with the
-                  head clipping so the tail that disambiguates stays visible. */}
-              <p className={styles.path}>{root.path}</p>
+                  head clipping so the tail that disambiguates stays visible;
+                  `~`-abbreviated (3.10.1), the absolute path in the tooltip. */}
+              <p className={styles.path} title={root.path}>{abbreviateHome(root.path)}</p>
               <p className={styles.git}>{git ?? 'not a git repo'}</p>
               {root.git?.remote ? <p className={styles.remote}>{root.git.remote}</p> : null}
               {caveat ? <p className={styles.caveat}>{caveat}</p> : null}

@@ -1,0 +1,43 @@
+/*
+ * dock/pane-chrome.module.css — the header row every dock pane with controls
+ * wears under the dock's own tabs (Terminal, Preview, Review): what the pane
+ * is showing on the left, its actions on the right, one height and one
+ * surface, so two panes stacked in a split line up row for row.
+ *
+ * The panes compose these classes with their own layout-only ones; box
+ * properties (height, padding, border, background) live HERE only, so a
+ * pane's module cannot drift from the others. Tokens only (style-scan-310).
+ */
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  min-width: 0;
+  /* One sm control plus a hairline of air above and below. */
+  min-height: calc(var(--control-h-sm) + 2 * var(--space-1));
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+/* The subject: a folder name, a repository. Truncates (its element carries the full text as a title). */
+.title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+/* Actions sit on the right and never shrink or wrap their labels. */
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: none;
+  margin-left: auto;
+}

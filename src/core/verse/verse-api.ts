@@ -203,7 +203,8 @@ const DEFAULT_API_MODULES: readonly MountedApiModule[] = [
   { id: 'health', load: async () => (await import('./health-api.js')).handleHealthApi },
   { id: 'reasoning', load: async () => (await import('../reasoning/reasoning-api.js')).handleReasoningApi },
   { id: 'fleet-history', load: async () => (await import('./fleet-history.js')).handleFleetHistoryApi },
-  { id: 'budget', load: async () => (await import('../routing/budget-api.js')).handleBudgetApi },
+  // 'budget' also answers GET /api/verse/budget/history and records seat history (capacity-history-api.ts).
+  { id: 'budget', load: async () => (await import('../routing/capacity-history-api.js')).withCapacityHistory((await import('../routing/budget-api.js')).handleBudgetApi) },
 ];
 
 let mountedModules: readonly MountedApiModule[] = DEFAULT_API_MODULES;

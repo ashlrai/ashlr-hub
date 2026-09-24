@@ -138,8 +138,10 @@ export function ActionMenu<Id extends string>({ primary, items, onSelect, menuLa
           aria-describedby={disclosureId}
           title={primary.disclosure}
         >
+          {/* Busy draws the spinner OVER the label (kept, transparent) so the
+              button keeps its width and the row does not shift. */}
           {primary.busy ? <span className={styles.spinner} aria-hidden="true" /> : null}
-          {primary.label}
+          <span className={styles.primaryLabel}>{primary.label}</span>
         </button>
       ) : null}
       <span id={disclosureId} className={styles.visuallyHidden}>{primary?.disclosure ?? ''}</span>
@@ -152,6 +154,7 @@ export function ActionMenu<Id extends string>({ primary, items, onSelect, menuLa
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
         aria-label={menuLabel}
+        title={menuLabel}
         disabled={disabled}
         onClick={() => (open ? close(false) : openAt('first'))}
         onKeyDown={onButtonKey}

@@ -42,6 +42,16 @@
 }
 .muted + .action,
 .action + .muted { margin-top: var(--space-2); }
+/* The next step under an empty line ("No tool calls…" → what to do). */
+.hint {
+  margin: var(--space-1) 0 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+/* A line that comes and goes with the turn keeps its row, so the sections
+   below it do not jump every time a turn starts or ends. */
+.reserve { min-height: var(--text-xs-line); }
 
 .action {
   display: inline-flex;

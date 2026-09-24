@@ -28,6 +28,7 @@ import { Tooltip } from '../../../components/primitives/Tooltip.js';
 import { ConfirmDialog } from '../../inbox/ConfirmDialog.js';
 import { engageEmergencyStop, releaseEmergencyStop, runDaemonAction } from './control-queries.js';
 import type { VerseControlSnapshot, VerseDaemonActionResult } from './control-types.js';
+import { tidyProse } from './format.js';
 import { runStateOf } from './StatusHeader.js';
 import type { GuardedAction } from './use-guarded-action.js';
 import styles from './autonomy.module.css';
@@ -60,7 +61,7 @@ export function DaemonControls({ snapshot, guard, dispatchEnabled }: DaemonContr
   const locked = !dispatchEnabled || guard.readOnly;
   const disabled = locked || guard.busy;
 
-  const noteOf = (result: VerseDaemonActionResult) => setLastNote(result.note || null);
+  const noteOf = (result: VerseDaemonActionResult) => setLastNote(result.note ? tidyProse(result.note) : null);
 
   return (
     <section className={styles.panel} aria-label="Loop controls">

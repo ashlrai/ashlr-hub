@@ -10,12 +10,13 @@
  * does not, and the desktop traffic-light clearance) is in
  * Workspace.title.test.ts, which reads the stylesheet.
  */
-import { render, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { evictAll } from '../../data/cache.js';
 import { getDockState, resetDockStore } from './dock/dock-store.js';
-import { bootstrap, CLAUDE_SEAT, CODEX_SEAT, LOCAL_SEAT, session } from './fixtures.test-support.js';
+import { bootstrap, CLAUDE_SEAT, CODEX_SEAT, ev, LOCAL_SEAT, session } from './fixtures.test-support.js';
+import { buildTranscript } from './verse-store.js';
 import type { VerseSessionView } from './useVerseSession.js';
 import { Workspace, type WorkspaceProps } from './Workspace.js';
 
@@ -160,7 +161,8 @@ describe('Workspace header — the pane toggles', () => {
 });
 
 describe('Workspace header — a chat is open', () => {
-  it('puts the project above the title and stops repeating it in the seat pill', () => {
+  it('puts the project above the title, and a compact status — not the seat or model — beside it', async () => {
+    const user = userEvent.setup();
     const view1 = render(<Workspace {...props({ view: opened() })} />);
     const strip = header(view1.container);
 
@@ -169,11 +171,46 @@ describe('Workspace header — a chat is open', () => {
     expect(project).toHaveAttribute('title', '/Users/mason/dev/hub');
     expect(within(strip).getByRole('heading', { name: 'Fix the login bug' })).toBeInTheDocument();
 
-    // "what is it running on": seat · model, and the project is NOT said twice.
-    const pill = strip.querySelector('[data-engine="claude"]') as HTMLElement;
-    expect(pill).not.toBeNull();
-    expect(pill).toHaveTextContent('Claude Max · Opus 5');
-    expect(pill.textContent).not.toContain('hub');
+    // 3.10.1: the composer's seat chip names seat · model, so the header does
+    // not repeat them (nor the project). It says the chat's STATE instead…
+    const chip = within(strip).getByTestId('chat-status');
+    expect(chip).toHaveAttribute('data-engine', 'claude');
+    expect(chip).toHaveTextContent('Ready');
+    for (const repeated of ['Opus 5', 'Claude Max', 'hub']) expect(chip.textContent).not.toContain(repeated);
+    // …and what it runs on stays one hover away.
+    await user.hover(chip);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Runs on Claude Max · Opus 5');
+  });
+
+  it('says the chat state in words: Running, Last turn failed, Read-only', () => {
+    const running = render(<Workspace {...props({ view: opened({ status: 'running' }) })} />);
+    expect(within(header(running.container)).getByTestId('chat-status')).toHaveTextContent('Running');
+    running.unmount();
+    const failed = render(<Workspace {...props({ view: opened({ status: 'error' }) })} />);
+    const chip = within(header(failed.container)).getByTestId('chat-status');
+    expect(chip).toHaveTextContent('Last turn failed');
+    expect(chip).toHaveAttribute('data-status', 'error');
+    failed.unmount();
+    const readOnly = render(<Workspace {...props({ view: opened(), dispatchEnabled: false })} />);
+    expect(within(header(readOnly.container)).getByTestId('chat-status')).toHaveTextContent('Read-only');
+  });
+
+  it('gives every icon-only control a name AND a tooltip that shows on keyboard focus', async () => {
+    localStorage.clear();
+    resetDockStore();
+    const user = userEvent.setup();
+    const view1 = render(<Workspace {...props({ view: opened() })} />);
+    const strip = header(view1.container);
+    for (const [name, tip] of [['Chat actions', 'Chat actions'], ['Chat list', 'Hide chat list'], ['Dock', 'Show the dock']] as const) {
+      const button = within(strip).getByRole('button', { name });
+      // A native title is mouse-only and doubles the bubble: the primitive replaces it.
+      expect(button).not.toHaveAttribute('title');
+      button.focus();
+      await waitFor(() => expect(screen.getByRole('tooltip')).toHaveTextContent(tip));
+      expect(button).toHaveAccessibleName(name);
+      await user.keyboard('{Escape}');
+      expect(screen.queryByRole('tooltip')).toBeNull();
+    }
   });
 
   it('keeps every action reachable behind a title long enough to fill the strip', () => {
@@ -231,5 +268,21 @@ describe('Workspace header — a chat is open', () => {
     // The toggles are chrome, not chat data — they are usable immediately.
     expect(within(strip).getByRole('button', { name: 'Dock' })).toBeInTheDocument();
     expect(within(strip).getByRole('button', { name: 'Chat list' })).toBeInTheDocument();
+  });
+});
+
+describe('Workspace — paths in the chat', () => {
+  it('hands the chat\'s roots to the transcript, so a tool path reads relative to the project', () => {
+    const s = session();
+    const transcript = buildTranscript([
+      ev(1, 'user-message', { turnId: 't1', text: 'read it' }),
+      ev(2, 'tool-use', { turnId: 't1', toolUseId: 'r1', name: 'Read', input: { file_path: '/Users/mason/dev/hub/src/auth/login.ts' } }),
+      ev(3, 'tool-result', { turnId: 't1', toolUseId: 'r1', output: 'ok', isError: false }),
+    ]);
+    render(<Workspace {...props({ view: view({ sessionId: s.id, session: s, transcript }) })} />);
+    const log = screen.getByRole('log');
+    expect(within(log).getByRole('button', { name: 'read src/auth/login.ts' })).toBeInTheDocument();
+    const line = document.getElementById('verse-tool-r1')!.querySelector('summary')!;
+    expect(within(line).getByText('src/auth/login.ts')).toHaveAttribute('title', '/Users/mason/dev/hub/src/auth/login.ts');
   });
 });

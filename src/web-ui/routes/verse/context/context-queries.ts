@@ -48,6 +48,7 @@ import { ApiError, apiPost } from '../../../data/client.js';
 import type { QueryDef } from '../../../data/queries.js';
 import { invalidateVerseLists, verseSessionPath, VERSE_SESSIONS_KEY, VerseMutationLockedError } from '../verse-queries.js';
 import { setVerseSession } from '../verse-store.js';
+import { asClause } from '../autonomy/format.js';
 
 export const VERSE_PREFERENCES_KEY = 'verse-preferences';
 /** Prefix of every per-project memory key; `invalidatePrefix` reaches all of them. */
@@ -88,7 +89,8 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   }
   if (!res.ok) {
     const detail = await refusalDetail(res);
-    throw new ApiError(`GET ${path} failed (HTTP ${res.status})${detail ? `: ${detail}` : ''}.`, res.status, path, detail);
+    // asClause: a detail ending in its own period would otherwise read "…..".
+    throw new ApiError(`GET ${path} failed (HTTP ${res.status})${detail ? `: ${asClause(detail)}` : ''}.`, res.status, path, detail);
   }
   return (await res.json()) as T;
 }

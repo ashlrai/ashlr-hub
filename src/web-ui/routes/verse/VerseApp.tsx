@@ -48,6 +48,7 @@ import { VERSE_ACTIVITY_SEEN_PATH, type VerseActivityCompletion } from '../../..
 import { useOnboarding } from './onboarding/useOnboarding.js';
 import { detectKeyPlatform, findCommand, formatChord, matchCommand } from './shell/command-catalog.js';
 import { GuardHost } from './shell/guarded-action.js';
+import { scheduleIdleSteps, type IdleStepsOptions } from './shell/idle-prefetch.js';
 import type { RailBadge } from './shell/RailStatus.js';
 import { subscribeAnchorRequests } from './shell/reveal-anchor.js';
 import { executeCatalogCommand, useShellCommands } from './shell/run-command.js';
@@ -107,9 +108,26 @@ function sectionLoader(id: VerseSectionId): () => Promise<{ default: ComponentTy
   };
 }
 
+/** One load per section for the life of the tab — shared by its lazy component and the idle prefetch. */
+const sectionLoads = new Map<VerseSectionId, Promise<{ default: ComponentType }>>();
+/** Sections whose module has arrived, mounted directly (no Suspense round-trip, so no skeleton frame). */
+const loadedSections = new Map<VerseSectionId, ComponentType>();
+
+function loadSection(id: VerseSectionId): Promise<{ default: ComponentType }> {
+  let load = sectionLoads.get(id);
+  if (!load) {
+    load = sectionLoader(id)().then((mod) => {
+      loadedSections.set(id, mod.default);
+      return mod;
+    });
+    sectionLoads.set(id, load);
+  }
+  return load;
+}
+
 /** One lazy component per section, for the life of the tab. */
 const SECTION_COMPONENTS = new Map<VerseSectionId, ComponentType>(
-  VERSE_SECTIONS.map((s) => [s.id, lazy(sectionLoader(s.id))] as const),
+  VERSE_SECTIONS.map((s) => [s.id, lazy(() => loadSection(s.id))] as const),
 );
 
 // ---------------------------------------------------------------------------
@@ -132,6 +150,7 @@ const importShortcuts = () => import('./shell/ShortcutsOverlay.js');
 const importGearTray = () => import('./shell/GearTray.js');
 const importOnboarding = () => import('./onboarding/OnboardingFlow.js');
 const importRailStatus = () => import('./shell/RailStatus.js');
+const importSurfacePrefetch = () => import('./shell/surface-prefetch.js');
 
 const CommandPalette = lazy(() => importPalette().then((m) => ({ default: m.CommandPalette })));
 const NeedsYouDrawer = lazy(() => importDrawer().then((m) => ({ default: m.NeedsYouDrawer })));
@@ -139,18 +158,30 @@ const ShortcutsOverlay = lazy(() => importShortcuts().then((m) => ({ default: m.
 const GearTray = lazy(() => importGearTray().then((m) => ({ default: m.GearTray })));
 const OnboardingFlow = lazy(() => importOnboarding().then((m) => ({ default: m.OnboardingFlow })));
 
-/** Warm the overlay chunks once the first paint is done, so the first ⌘K / ⌘J never waits on the network. */
-function prefetchOverlays(): () => void {
-  const run = () => {
+/**
+ * Warm-up once the first paint is done, one step per idle period
+ * (shell/idle-prefetch.ts — staggered, paused while the window is hidden,
+ * cancelled on unmount):
+ *
+ *   1. the overlay chunks, so the first ⌘K / ⌘J never waits on the network;
+ *   2. each rail surface not yet open, in rail order — its chunk (the same
+ *      load its lazy component uses, so the first visit mounts it directly)
+ *      and the reads it opens with (shell/surface-prefetch.ts, itself a lazy
+ *      chunk: its query defs must not cost first-paint bytes). A first visit
+ *      to Fleet, Growth or Mind then paints from cache instead of a skeleton.
+ *
+ * A surface already mounted is skipped at its turn: its reads are live.
+ */
+export function prefetchAfterFirstPaint(options?: IdleStepsOptions): () => void {
+  const overlays = () => {
     for (const load of [importPalette, importDrawer, importShortcuts]) void load().catch(() => undefined);
   };
-  const w = window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number; cancelIdleCallback?: (id: number) => void };
-  if (typeof w.requestIdleCallback === 'function') {
-    const id = w.requestIdleCallback(run, { timeout: 3_000 });
-    return () => w.cancelIdleCallback?.(id);
-  }
-  const id = window.setTimeout(run, 1_500);
-  return () => window.clearTimeout(id);
+  const surface = (id: VerseSectionId) => () => {
+    if (getVerseUiState().mounted.includes(id)) return;
+    void loadSection(id);
+    void importSurfacePrefetch().then((m) => m.prefetchSurfaceData(id), () => undefined);
+  };
+  return scheduleIdleSteps([overlays, ...RAIL_SECTIONS.map((s) => surface(s.id))], options);
 }
 
 type RailStatusModule = typeof import('./shell/RailStatus.js');
@@ -205,7 +236,7 @@ export function VerseApp() {
   const rail = useRailStatusModule();
   const onboarding = useOnboarding();
 
-  useEffect(() => prefetchOverlays(), []);
+  useEffect(() => prefetchAfterFirstPaint(), []);
   // The gear tray is fetched right after mount (not on idle) and then stays
   // MOUNTED closed, exactly as before it was split out: its open effect
   // schedules the first item's focus on a frame, and mounting it only on the
@@ -458,7 +489,13 @@ function RailCapacityButton({ rail, expanded }: { rail: RailStatusModule; expand
 }
 
 function SurfaceHost({ id, active }: { id: VerseSectionId; active: boolean }) {
-  const Section = SECTION_COMPONENTS.get(id)!;
+  // A section the idle prefetch already loaded mounts directly: React.lazy
+  // would still suspend once on its first render — even with the module in
+  // hand — and commit the skeleton, the very flash the prefetch exists to
+  // remove. Chosen ONCE per host, so a load that lands while this surface is
+  // up never swaps the component type under it (that would remount the
+  // surface and drop its state).
+  const [Section] = useState<ComponentType>(() => loadedSections.get(id) ?? SECTION_COMPONENTS.get(id)!);
   const entry = sectionEntry(id);
   return (
     <div className={styles.surface} data-surface={id} hidden={!active} inert={!active}>

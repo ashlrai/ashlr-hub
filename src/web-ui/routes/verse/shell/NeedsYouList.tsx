@@ -6,12 +6,36 @@
  *
  * Each row says what, where, and how urgent — severity is a word AND a colour
  * (never colour alone), and an item with a deadline shows it counting down.
+ *
+ * Rows print needsYouRowView, not the wire text: "patch: claude run: Advance
+ * goal "… so a deg" becomes a "Patch · Claude run" label over a title that
+ * ends on a whole word (two lines at most; the server's text is the tooltip),
+ * a run summary becomes "2 files · +384 −0 · Test-and-repair loop", and an age
+ * is "38 days ago" with the exact local time on hover.
  */
 import { forwardRef, useEffect, useRef } from 'react';
 import type { NeedsYouItem } from '../../../../core/verse/workbench-types.js';
 import { NEEDS_YOU_ACTION_KEYS } from '../../../../core/verse/workbench-types.js';
-import { ago, until } from './needs-you-model.js';
+import { needsYouRowView, until, type NeedsYouRunView } from './needs-you-model.js';
 import styles from './NeedsYouDrawer.module.css';
+
+/**
+ * "2 files · +384 −0 · Test-and-repair loop". The stats are drawn for the eye
+ * and spoken as a sentence; the source's meaning (what TITRR did) is its
+ * tooltip. Shared with the drawer's item detail.
+ */
+export function NeedsYouRunFacts({ run }: { run: NeedsYouRunView }) {
+  return (
+    <span className={styles.runFacts}>
+      <span className={styles.diffStats} aria-hidden="true">{run.stats}</span>
+      <span className="visually-hidden">{run.statsSpoken}</span>
+      <span aria-hidden="true">·</span>
+      <span className={styles.runSource} title={run.sourceHint ?? undefined}>
+        {run.partial ? 'Partial · ' : ''}{run.source}
+      </span>
+    </span>
+  );
+}
 
 const SEVERITY_WORD: Readonly<Record<NeedsYouItem['severity'], string>> = { high: 'Urgent', warn: 'Soon', info: 'When you can' };
 
@@ -66,6 +90,7 @@ export const NeedsYouList = forwardRef<HTMLDivElement, NeedsYouListProps>(functi
         const keyed = item.actions
           .map((a) => NEEDS_YOU_ACTION_KEYS[a.kind])
           .filter((k): k is 'A' | 'R' | 'V' | 'E' => k !== undefined);
+        const view = needsYouRowView(item, now);
         return (
           <div
             key={item.id}
@@ -80,13 +105,16 @@ export const NeedsYouList = forwardRef<HTMLDivElement, NeedsYouListProps>(functi
           >
             <span className={styles.rule} aria-hidden="true" />
             <span className={styles.rowMain}>
-              <span className={styles.rowTitle}>{item.title}</span>
+              {view.kindLabel ? <span className={styles.rowKind}>{view.kindLabel}</span> : null}
+              {/* Two lines at most, ending on a whole word; the server's title is the tooltip. */}
+              <span className={styles.rowTitle} title={view.fullTitle}>{view.title}</span>
+              {view.run ? <NeedsYouRunFacts run={view.run} /> : null}
               <span className={styles.rowMeta}>
                 <span className={styles.severity} data-severity={item.severity}>{SEVERITY_WORD[item.severity]}</span>
                 <span>{SOURCE_WORD[item.source]}</span>
-                {item.subject.repo ? <span className={styles.mono}>{item.subject.repo}</span> : null}
+                {view.repo ? <span className={styles.repo} title={view.repoFull}>{view.repo}</span> : null}
                 {item.subject.pr ? <span>#{item.subject.pr}</span> : null}
-                <span>{ago(item.since, now)}</span>
+                <span title={view.ageStamp}>{view.age}</span>
                 {item.expiresAt ? <span className={styles.deadline}>closes {until(item.expiresAt, now)}</span> : null}
               </span>
             </span>

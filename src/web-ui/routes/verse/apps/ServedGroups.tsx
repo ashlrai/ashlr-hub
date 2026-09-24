@@ -125,6 +125,7 @@ export function AgentsGroup({
                           iconOnly
                           icon={<IconChevronDown size={14} />}
                           aria-label={`Launch options for ${row.name}`}
+                          title={`Launch options for ${row.name}`}
                           aria-haspopup="dialog"
                           onClick={() => onLaunchOptions(row)}
                         />

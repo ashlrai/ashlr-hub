@@ -20,17 +20,25 @@ import type { OvernightStatus } from '../autonomy/overnight-contract.js';
 import { describeStopRule } from '../autonomy/overnight-model.js';
 import { Card, CardNote, MicroLabel } from '../command/Surface.js';
 import type { OptionalRead } from '../command/surface-data.js';
-import { LANE_ENGINE, LANE_LABEL, funnelStages, laneRows, latestDecision, parkedGantt, refusalStack, runTone } from './live-model.js';
+import { darkSinceDay, fleetDarkSince } from './dark-since.js';
+import { LANE_ENGINE, LANE_LABEL, funnelStages, laneChipText, laneNotes, laneRows, latestDecision, parkedGantt, refusalStack, runTone } from './live-model.js';
+import { asSentence, decisionSummary, describeEligibleAgain, eligibleAgain, heldBackText } from './why-seat-model.js';
 import styles from './fleet.module.css';
 
 const HOUR = 3_600_000;
 
-/** The shared "is there a fleet to draw at all" decision for every chart card. */
+/**
+ * The shared "is there a fleet to draw at all" decision for every chart card.
+ * Dark reads THE dark-since instant (`fleetDarkSince`), as the viewer's local
+ * day — the same day Command's verdict line names.
+ */
 export function fleetStatus(read: OptionalRead<FleetLiveSnapshotV1> | undefined, empty: string, hasData: boolean): ChartStatus {
   if (!read) return { kind: 'loading' };
   const live = read.value;
   if (!live) return { kind: 'unknown', reason: read.reason ?? 'the live fleet view did not answer.' };
-  if (live.state === 'dark' && !hasData) return { kind: 'dark', since: live.lastActivityAt ?? live.generatedAt, detail: live.stateReason ?? undefined };
+  if (live.state === 'dark' && !hasData) {
+    return { kind: 'dark', since: darkSinceDay(fleetDarkSince(live) ?? live.generatedAt), detail: live.stateReason ?? undefined };
+  }
   return hasData ? { kind: 'ready' } : { kind: 'empty', message: empty };
 }
 
@@ -38,26 +46,42 @@ export function fleetStatus(read: OptionalRead<FleetLiveSnapshotV1> | undefined,
 // Lanes strip + live swimlane
 // ---------------------------------------------------------------------------
 
+/** "Local · off" — the chip is the lane and its slots; its why is one line below the strip (and its title). */
 function LaneChip({ lane }: { lane: FleetLaneState }) {
-  const off = lane.slots === 0;
+  const text = laneChipText(lane);
   return (
-    <li className={styles.lane} data-off={off || undefined} title={lane.capReason ?? undefined}>
+    <li className={styles.lane} data-off={lane.slots === 0 || undefined} title={lane.capReason ?? undefined}>
       <EngineMarker engine={LANE_ENGINE[lane.lane]} />
-      <span className={styles.laneName}>{LANE_LABEL[lane.lane]}</span>
-      <span className={styles.laneSlots}>{off ? 'off' : `${lane.busy}/${lane.slots}`}</span>
-      {lane.capReason ? <span className={styles.laneWhy}>{lane.capReason}</span> : null}
+      <span className={styles.laneName}>{text.name}</span>
+      <span className={styles.laneSep} aria-hidden="true">
+        {' · '}
+      </span>
+      <span className={styles.laneSlots}>{text.slots}</span>
     </li>
   );
 }
 
 export function LanesStrip({ live }: { live: FleetLiveSnapshotV1 | null }) {
   if (!live || live.lanes.length === 0) return null;
+  const notes = laneNotes(live.lanes);
   return (
-    <ul className={styles.lanes} aria-label="Lanes: busy of slots">
-      {live.lanes.map((l) => (
-        <LaneChip key={l.lane} lane={l} />
-      ))}
-    </ul>
+    <div className={styles.laneStrip}>
+      <ul className={styles.lanes} aria-label="Lanes: busy of slots">
+        {live.lanes.map((l) => (
+          <LaneChip key={l.lane} lane={l} />
+        ))}
+      </ul>
+      {notes.length > 0 ? (
+        <ul className={styles.laneNotes} aria-label="Why lanes are limited">
+          {notes.map((n) => (
+            <li key={n.lanes.join(',')}>
+              {n.all ? null : <span className={styles.laneNoteLanes}>{n.lanes.map((l) => LANE_LABEL[l]).join(', ')}: </span>}
+              {asSentence(n.reason)}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 
@@ -119,13 +143,7 @@ function seatLabel(view: BudgetView | null, seatId: string): { label: string; en
   return { label: info?.label ?? seatId, engine: info?.engine ?? null };
 }
 
-function when(iso: string | null): string {
-  if (!iso) return 'unknown';
-  const t = Date.parse(iso);
-  return Number.isFinite(t) ? new Date(t).toLocaleString('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : 'unknown';
-}
-
-export function DecisionView({ decision, view }: { decision: SeatDecision; view: BudgetView | null }) {
+export function DecisionView({ decision, view, now }: { decision: SeatDecision; view: BudgetView | null; now?: number }) {
   const chosen = decision.seatId ? seatLabel(view, decision.seatId) : null;
   return (
     <div className={styles.decision}>
@@ -140,7 +158,7 @@ export function DecisionView({ decision, view }: { decision: SeatDecision; view:
         )}
         <span className={styles.mode}>{decision.mode}</span>
       </p>
-      <p className={styles.decisionWhy}>{decision.why}</p>
+      <p className={styles.decisionWhy}>{decisionSummary(decision)}</p>
       {decision.candidates.length > 1 ? (
         <div>
           <MicroLabel>Then</MicroLabel>
@@ -154,12 +172,12 @@ export function DecisionView({ decision, view }: { decision: SeatDecision; view:
       {decision.exclusions.length ? (
         <div>
           <MicroLabel>Held back</MicroLabel>
-          <ul className={styles.exclusions}>
+          <ul className={styles.exclusions} aria-label="Held back seats">
             {decision.exclusions.map((x) => (
               <li key={x.seatId}>
                 <span className={styles.excluded}>{seatLabel(view, x.seatId).label}</span>
-                <span className={styles.excludedWhy}>{x.reasons.join('; ')}</span>
-                <span className={styles.excludedWhen}>eligible again: {when(x.nextEligibleAt)}</span>
+                <span className={styles.excludedWhy}>{heldBackText(x)}</span>
+                <span className={styles.excludedWhen}>eligible again: {describeEligibleAgain(eligibleAgain(x), now)}</span>
               </li>
             ))}
           </ul>
@@ -169,7 +187,7 @@ export function DecisionView({ decision, view }: { decision: SeatDecision; view:
   );
 }
 
-export function WhySeatCard({ read, preview, view }: { read: OptionalRead<FleetLiveSnapshotV1> | undefined; preview: SeatDecision | null; view: BudgetView | null }) {
+export function WhySeatCard({ read, preview, view, now }: { read: OptionalRead<FleetLiveSnapshotV1> | undefined; preview: SeatDecision | null; view: BudgetView | null; now?: number }) {
   const latest = latestDecision(read?.value ?? null);
   return (
     <Card
@@ -177,9 +195,9 @@ export function WhySeatCard({ read, preview, view }: { read: OptionalRead<FleetL
       caption={latest ? `Latest dispatch: ${latest.run.title} (${formatRelative(latest.run.phaseStartedAt ?? latest.run.startedAt)})` : preview ? 'The next medium autonomous task would go to…' : undefined}
     >
       {latest ? (
-        <DecisionView decision={latest.decision} view={view} />
+        <DecisionView decision={latest.decision} view={view} now={now} />
       ) : preview ? (
-        <DecisionView decision={preview} view={view} />
+        <DecisionView decision={preview} view={view} now={now} />
       ) : (
         <CardNote tone="unknown">No routing decision to show — nothing was dispatched, and the router preview did not answer.</CardNote>
       )}

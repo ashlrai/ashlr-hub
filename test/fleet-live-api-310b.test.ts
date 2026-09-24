@@ -17,6 +17,7 @@ import {
   buildFleetLiveSnapshot,
   createDispatchTail,
   gateFunnelFromLedger,
+  fleetDarkSince,
   handleFleetLiveApi,
   needsYouItems,
   needsYouSourceState,
@@ -190,12 +191,27 @@ async function post<T>(body: unknown, headers: Record<string, string> = {}): Pro
   return { status: res.status, body: (await res.json()) as T };
 }
 
+describe('fleetDarkSince — the one "Fleet dark since" instant', () => {
+  it('is the last sign of life while dark, and null in every other state', () => {
+    const at = '2026-09-01T19:10:00.000Z';
+    expect(fleetDarkSince('dark', at)).toBe(at);
+    for (const state of ['idle', 'running', 'paused', 'stopped'] as const) expect(fleetDarkSince(state, at)).toBeNull();
+    expect(fleetDarkSince('dark', null)).toBeNull();
+    expect(fleetDarkSince('dark', 'not a time')).toBeNull();
+  });
+});
+
 describe('GET /api/verse/fleet/live — states', () => {
   it('is DARK with its own sentence when no standing grant is in force', async () => {
     const res = await get();
     expect(res.status).toBe(200);
     expect(res.body.state).toBe('dark');
-    expect(res.body.stateReason).toMatch(/No standing grant is in force\. Fleet dark since Sep 1/);
+    expect(res.body.stateReason).toMatch(/^No standing grant is in force\./);
+    // 3.10.1: the date is data (`darkSince`), rendered by the reader in its
+    // own zone — never baked into the sentence in the server's.
+    expect(res.body.stateReason).not.toMatch(/dark since/i);
+    expect(res.body.darkSince).toBe('2026-09-01T19:10:00.000Z');
+    expect(res.body.darkSince).toBe(res.body.lastActivityAt);
     expect(res.body.lanes.every((l) => l.slots === 0 && l.capReason !== null)).toBe(true);
     // The ledger was readable and empty: zero is a measurement here, not a default.
     expect(res.body.summary).toMatchObject({ mergedToday: 0, merged7d: 0, revertsToday: 0, postMergeGreenPct7d: null, cycleTimeP50Ms7d: null });
@@ -255,6 +271,8 @@ describe('GET /api/verse/fleet/live — states', () => {
     const res = await get();
     const body = res.body;
     expect(body.state).toBe('running');
+    // A running fleet is never "dark since" anything.
+    expect(body.darkSince).toBeNull();
     expect(body.lanes.find((l) => l.lane === 'local')).toMatchObject({ slots: 2, busy: 1 });
     const producing = body.runs.find((r) => r.id === 'run-live');
     expect(producing).toMatchObject({ phase: 'producing', lane: 'local', repo: REPO, endedAt: null });

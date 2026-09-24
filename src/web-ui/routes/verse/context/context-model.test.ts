@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { VERSE_HANDOFF_SUMMARY_REQUEST, VERSE_MEMORY_MAX_BYTES, type VerseSearchHit } from '../../../../core/verse/types.js';
 import { fitVerdict, SESSION_BASE_OVERHEAD_BY_ENGINE, SESSION_BASE_OVERHEAD_TOKENS } from '../../../../core/verse/context-math.js';
+import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import {
   API_BODY_MAX_BYTES,
   budgetLine,
@@ -112,6 +113,25 @@ describe('targetUnavailableReason', () => {
   it('refuses an unavailable seat with its own summary', () => {
     const down = { ...CODEX_SEAT, health: { state: 'unavailable' as const, summary: 'quota exhausted', windows: [], observedAt: null } };
     expect(targetUnavailableReason(down, GPT6)).toBe('Personal Codex is unavailable: quota exhausted.');
+  });
+
+  it('embeds a reason that ends in its own period without printing ".."', () => {
+    const down = { ...CODEX_SEAT, health: { state: 'unavailable' as const, summary: 'quota exhausted.', windows: [], observedAt: null } };
+    expect(targetUnavailableReason(down, GPT6)).toBe('Personal Codex is unavailable: quota exhausted.');
+    const pinned = { ...OPUS_55, unavailableReason: 'needs Claude Code 2.1.280.' };
+    expect(targetUnavailableReason(CLAUDE_SEAT, pinned)).toBe('Opus 5.5 cannot run on Claude Max: needs Claude Code 2.1.280.');
+  });
+
+  it('reads a reset instant in the seat’s summary as local time, never raw ISO', () => {
+    const now = new Date(2026, 8, 24, 9, 0, 0).getTime();
+    const resetsAt = new Date(2026, 8, 24, 23, 46, 56).toISOString();
+    const down = {
+      ...CODEX_SEAT,
+      health: { state: 'unavailable' as const, summary: `out of usage — resets ${resetsAt}`, windows: [], observedAt: null },
+    };
+    const reason = targetUnavailableReason(down, GPT6, now);
+    expect(reason).toBe(`Personal Codex is unavailable: out of usage — resets ${describeResetAt(resetsAt, now)}.`);
+    expect(reason).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
   });
 });
 

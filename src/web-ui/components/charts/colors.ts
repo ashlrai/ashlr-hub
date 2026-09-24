@@ -52,8 +52,34 @@ export function seqColor(step: number): string {
  * azure cell would claim "a little", which is a measurement nobody made.
  */
 export function quantityColor(fraction: number): string {
-  const f = Math.max(0, Math.min(1, fraction));
-  return seqColor(1 + f * (SEQ_STEP_COUNT - 1));
+  return seqColor(quantityStep(fraction));
+}
+
+/** The quantity step (1..7) a magnitude in [0, 1] lands on — the rounding quantityColor uses. */
+export function quantityStep(fraction: number): number {
+  const f = Number.isFinite(fraction) ? Math.max(0, Math.min(1, fraction)) : 0;
+  return Math.max(1, Math.min(SEQ_STEP_COUNT, Math.round(1 + f * (SEQ_STEP_COUNT - 1))));
+}
+
+/** Steps at or past this are the far half of the ramp from the surface (see quantityInk). */
+export const QUANTITY_INK_FLIP_STEP = 5;
+
+/**
+ * Ink for a number printed ON a quantity cell, chosen by the cell's
+ * luminance — plain fill, never a stroke or halo (a surface-coloured halo
+ * around dark text on a dark cell turned "1" into a blob).
+ *
+ * The ramp is mirrored against the surface between themes (light: more =
+ * darker; dark: more = lighter), so steps 1–4 are always NEAR the surface
+ * and steps 5–7 always FAR from it. Near cells take the primary text ink;
+ * far cells take the surface colour as ink — white on dark azure in light
+ * mode, near-black on pale azure in dark mode. Measured (WCAG): light step 4
+ * is 5.6:1 with ink vs 3.5:1 with white, step 5 is 4.9:1 with white vs
+ * 4.1:1 with ink; dark step 4 is 4.5:1 with the light ink vs 3.8:1 with the
+ * surface, step 5 is 5.1:1 with the surface vs 3.3:1 with the light ink.
+ */
+export function quantityInk(fraction: number): string {
+  return quantityStep(fraction) >= QUANTITY_INK_FLIP_STEP ? 'var(--chart-surface)' : 'var(--text-primary)';
 }
 
 export const CHART_DIVERGING_POS = 'var(--chart-diverging-pos)';

@@ -10,20 +10,32 @@
  * clear" — it names the silent sources instead ("fleet not answering").
  * Every approve / reject / veto confirms first (NeedsYouAction contract),
  * then asks for the token; items render their text as plain text only.
+ *
+ * Rows read like the drawer's (shell/needs-you-model needsYouRowView, one
+ * copy): a "Patch · Claude run" label over a title that ends on a whole word
+ * (two lines at most, the server's text as its tooltip), "2 files · +384 −0 ·
+ * Test-and-repair loop" for a sandboxed run, the repo's short name, and
+ * "38 days ago" with the exact local time on hover.
  */
+import { Fragment, type ReactElement } from 'react';
 import type { NeedsYouAction, NeedsYouItem, VerseActivityResponse } from '../../../../core/verse/workbench-types.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { IconExternalLink } from '../../../components/primitives/icons.js';
-import { formatAge } from '../autonomy/format.js';
+import { useNow } from '../autonomy/use-ticker.js';
 import { rankNeedsYou, silentSources } from './command-model.js';
 import { anchorId, goToSection, openChat, openNeedsYou } from './nav.js';
 import { postNeedsYouAction } from './surface-data.js';
 import type { ActivityState } from '../shell/useActivity.js';
+import { needsYouRowView, readableItemTitle, type NeedsYouRowView } from '../shell/needs-you-model.js';
+import { NeedsYouRunFacts } from '../shell/NeedsYouList.js';
 import { Card, CardNote } from './Surface.js';
 import type { ConfirmSpec, SurfaceActions } from './actions.js';
 import styles from './command.module.css';
 
 export const NEEDS_YOU_CARD_LIMIT = 5;
+
+/** Relative ages ("38 days ago") only need to stay true to the minute. */
+const AGE_TICK_MS = 30_000;
 
 const SEVERITY_WORD = { high: 'Urgent', warn: 'Soon', info: 'FYI' } as const;
 const SOURCE_WORD: Record<string, string> = {
@@ -40,7 +52,7 @@ export function confirmFor(item: NeedsYouItem, action: NeedsYouAction): ConfirmS
   if (action.confirm) return { ...action.confirm, destructive: action.destructive };
   if (action.kind === 'approve' || action.kind === 'reject' || action.kind === 'veto') {
     const verb = action.kind === 'approve' ? 'Approve' : action.kind === 'reject' ? 'Reject' : 'Veto';
-    return { title: `${verb}?`, body: item.title, confirmLabel: action.label, destructive: action.destructive };
+    return { title: `${verb}?`, body: readableItemTitle(item).text, confirmLabel: action.label, destructive: action.destructive };
   }
   return undefined;
 }
@@ -62,24 +74,43 @@ function targetLink(item: NeedsYouItem): { label: string; onOpen?: () => void; h
   }
 }
 
-function meta(item: NeedsYouItem): string {
+/** "binshield · #81 · 38 days ago" — the short repo and the exact time ride in tooltips. */
+function Meta({ item, view }: { item: NeedsYouItem; view: NeedsYouRowView }) {
   const s = item.subject;
-  return [s.repo, s.pr ? `#${s.pr}` : null, s.seatId, formatAge(item.since)].filter(Boolean).join(' · ');
+  const parts: ReactElement[] = [];
+  if (view.repo) parts.push(<span key="repo" className={styles.needsRepo} title={view.repoFull}>{view.repo}</span>);
+  if (s.pr) parts.push(<span key="pr">#{s.pr}</span>);
+  if (s.seatId) parts.push(<span key="seat">{s.seatId}</span>);
+  parts.push(<span key="age" title={view.ageStamp}>{view.age}</span>);
+  return (
+    <span className={styles.needsMeta}>
+      {parts.map((part, i) => (
+        <Fragment key={part.key}>
+          {i > 0 ? <span aria-hidden="true">·</span> : null}
+          {part}
+        </Fragment>
+      ))}
+    </span>
+  );
 }
 
-export function NeedsYouRow({ item, actions }: { item: NeedsYouItem; actions: SurfaceActions }) {
+export function NeedsYouRow({ item, actions, now }: { item: NeedsYouItem; actions: SurfaceActions; now: number }) {
   const link = targetLink(item);
   const runnable = item.actions.filter((a) => a.request !== null);
+  const view = needsYouRowView(item, now);
   return (
     <li className={styles.needsRow} data-severity={item.severity} id={anchorId(item.id)}>
       <span className={styles.sevDot} data-severity={item.severity} aria-hidden="true" />
       <div className={styles.needsText}>
-        <span className={styles.needsTitle}>
+        {view.kindLabel ? <span className={styles.needsKind}>{view.kindLabel}</span> : null}
+        {/* Two lines at most, ending on a whole word; the server's title is the tooltip. */}
+        <span className={styles.needsTitle} title={view.fullTitle}>
           <span className="visually-hidden">{SEVERITY_WORD[item.severity]}: </span>
-          {item.title}
+          {view.title}
         </span>
-        {item.detail ? <span className={styles.needsDetail}>{item.detail}</span> : null}
-        <span className={styles.needsMeta}>{meta(item)}</span>
+        {view.run ? <NeedsYouRunFacts run={view.run} /> : null}
+        {view.detail ? <span className={styles.needsDetail}>{view.detail}</span> : null}
+        <Meta item={item} view={view} />
       </div>
       <div className={styles.needsActions}>
         {runnable.map((action) => (
@@ -89,7 +120,7 @@ export function NeedsYouRow({ item, actions }: { item: NeedsYouItem; actions: Su
             variant={action.destructive ? 'danger' : action.kind === 'approve' ? 'primary' : 'subtle'}
             disabled={actions.busy || actions.readOnly}
             onClick={() =>
-              actions.act(() => postNeedsYouAction(action.request!.path, action.request!.body), `${action.label}: ${item.title}`, {
+              actions.act(() => postNeedsYouAction(action.request!.path, action.request!.body), `${action.label}: ${view.title}`, {
                 confirm: confirmFor(item, action),
               })
             }
@@ -126,6 +157,7 @@ export function activityRead(state: ActivityState): { activity: VerseActivityRes
 
 export function NeedsYouCard({ state, actions, fleetLine }: { state: ActivityState; actions: SurfaceActions; fleetLine: string }) {
   const { activity, loading, reason, stale } = activityRead(state);
+  const now = useNow(AGE_TICK_MS);
   const items = activity ? rankNeedsYou(activity.needsYou) : [];
   const silent = silentSources(activity);
   const shown = items.slice(0, NEEDS_YOU_CARD_LIMIT);
@@ -162,7 +194,7 @@ export function NeedsYouCard({ state, actions, fleetLine }: { state: ActivitySta
         <>
           <ul className={styles.needsList}>
             {shown.map((item) => (
-              <NeedsYouRow key={item.id} item={item} actions={actions} />
+              <NeedsYouRow key={item.id} item={item} actions={actions} now={now} />
             ))}
           </ul>
           {items.length > shown.length ? (

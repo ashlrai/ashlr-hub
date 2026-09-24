@@ -58,6 +58,16 @@ describe('accountActions', () => {
     ]);
   });
 
+  it('a spent, unread or unavailable seat offers Check again as its one action; a usable one does not', () => {
+    const spent = { kind: 'spent', label: 'Spent', detail: 'resets Fri 11:46 PM', tone: 'danger', usableAgain: null, checked: null, checkedTitle: null, coversConnection: true } as const;
+    const claude = byId.get('claude-a')!;
+    // claude-a is pinned to an older CLI: with a recheckable status, Check again leads and Fix follows.
+    expect(accountActions(claude, spent).map((a) => [a.kind, a.primary])).toEqual([['check-again', true], ['fix', false], ['edit-budget', false]]);
+    expect(accountActions(claude, { ...spent, kind: 'usable', label: 'Connected' }).map((a) => a.kind)).toEqual(['fix', 'edit-budget']);
+    // Signed out needs the sign-in, not a re-check.
+    expect(accountActions(byId.get('grok')!, { ...spent, kind: 'not-checked' }).map((a) => a.kind)).toEqual(['reconnect', 'edit-budget']);
+  });
+
   it('a local seat needs none', () => {
     expect(accountActions(byId.get('local:qwen3-coder')!)).toEqual([]);
   });

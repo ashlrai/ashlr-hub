@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { costPerMerge, forestRows, harnessSteps, modelOutcomes, weeklyBins } from './growth-model.js';
+import {
+  HARNESS_BASELINE_WINDOW_MS,
+  HARNESS_TIME_FLOOR_MS,
+  costPerMerge,
+  forestRows,
+  harnessSteps,
+  harnessTime,
+  modelOutcomes,
+  weeklyBins,
+} from './growth-model.js';
 import { fleetHistory, learningState } from '../command/fixtures.test-support.js';
 import type { ModelStats } from '../../../data/api-types.js';
+import type { LearningStateV1 } from '../../../../core/learn/harness-types.js';
 
 const NOW = Date.parse('2026-09-24T15:00:00Z');
 
@@ -44,6 +54,58 @@ describe('harnessSteps', () => {
     expect(markers).toHaveLength(1);
     expect(markers[0]!.kind).toBe('rollback');
     expect(harnessSteps(learningState('dark', NOW))).toEqual({ steps: [], markers: [] });
+  });
+
+  describe('never emits a point without a real timestamp', () => {
+    // The registry stamps the compiled-defaults baseline at the epoch
+    // (core/learn/harness-registry.ts baselineVersion) — the live shape.
+    const EPOCH = '1970-01-01T00:00:00.000Z';
+    const DAY = 86_400_000;
+    const withEpochBaseline = (state: LearningStateV1): LearningStateV1 => ({
+      ...state,
+      versions: state.versions.map((v) => (v.seq === 0 ? { ...v, createdAt: EPOCH } : v)),
+    });
+    const allTimes = (s: ReturnType<typeof harnessSteps>) => [...s.steps.map((p) => p.at), ...s.markers.map((m) => m.at)];
+
+    it('anchors a defaults-only harness at a 90-day window before generatedAt, not the epoch', () => {
+      const only = withEpochBaseline(learningState('sparse', NOW));
+      const { steps, markers } = harnessSteps({ ...only, experiments: [] });
+      expect(steps).toHaveLength(1);
+      expect(steps[0]).toMatchObject({ label: 'Compiled defaults', value: 0 });
+      expect(steps[0]!.at).toBe(NOW - HARNESS_BASELINE_WINDOW_MS);
+      expect(markers).toEqual([]);
+      // An explicit `now` wins over generatedAt.
+      expect(harnessSteps({ ...only, experiments: [] }, NOW + DAY).steps[0]!.at).toBe(NOW + DAY - HARNESS_BASELINE_WINDOW_MS);
+    });
+
+    it('starts the defaults step at the first real harness event when there is history', () => {
+      const live = withEpochBaseline(learningState('live', NOW));
+      const series = harnessSteps(live);
+      // h-0001 was created (and e1 started) 20 days before NOW: the earliest real event.
+      expect(series.steps[0]).toMatchObject({ label: 'Compiled defaults', at: NOW - 20 * DAY });
+      expect(Math.min(...allTimes(series))).toBe(NOW - 20 * DAY);
+      expect(series.steps.map((s) => s.label)).toEqual(['Compiled defaults', 'h-0001', 'h-0002', 'h-0001']);
+    });
+
+    it('drops an adoption or rollback stamped at the epoch instead of drawing it in 1970', () => {
+      const live = learningState('live', NOW);
+      const bad: LearningStateV1 = {
+        ...live,
+        versions: live.versions.map((v) => (v.id === 'h-0002' ? { ...v, adoptedAt: EPOCH, rolledBackAt: '' } : v)),
+      };
+      const series = harnessSteps(bad);
+      expect(series.steps.map((s) => s.id)).not.toContain('h-0002@adopt');
+      expect(series.markers).toEqual([]);
+      for (const t of allTimes(series)) expect(t).toBeGreaterThanOrEqual(HARNESS_TIME_FLOOR_MS);
+    });
+
+    it('treats missing, unparsable and pre-2020 stamps as not real', () => {
+      expect(harnessTime(null)).toBeNull();
+      expect(harnessTime('')).toBeNull();
+      expect(harnessTime('not a date')).toBeNull();
+      expect(harnessTime(EPOCH)).toBeNull();
+      expect(harnessTime('2026-09-01T00:00:00Z')).toBe(Date.parse('2026-09-01T00:00:00Z'));
+    });
   });
 
   it('lists experiments with running ones below the pair gate as unknown', () => {

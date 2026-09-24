@@ -30,6 +30,7 @@ import type { NeedsYouItem, VerseActivityResponse } from '../../../../core/verse
 import type { FleetHistoryDay, FleetHistoryResponse, FleetHistorySource } from '../../../../core/verse/fleet-history-types.js';
 import type { ReasoningDigest } from '../../../../core/reasoning/types.js';
 import type { BudgetView } from '../../../../core/routing/policy.js';
+import type { CapacityHistoryResponse, CapacityHistorySeries } from '../../../../core/routing/capacity-history-types.js';
 import type { SeatDecision } from '../../../../core/routing/types.js';
 
 export type FixtureKind = 'live' | 'sparse' | 'dark';
@@ -702,6 +703,49 @@ export function budgetView(kind: FixtureKind = 'live', now = Date.now()): Budget
     },
     readingMaxAgeMs: 10 * MIN,
     sampledAt,
+  };
+}
+
+/**
+ * Recorded seat window history (GET /api/verse/budget/history), consistent
+ * with `budgetView`: each line rises to the budget view's current reading
+ * from its window's start (reset − length). live — the whole window; sparse —
+ * the last three hours only (history began recently); dark — nothing yet.
+ */
+export function seatHistory(kind: FixtureKind = 'live', now = Date.now()): CapacityHistoryResponse {
+  const line = (seatId: string, window: 'session' | 'weekly', from: number, to: number, fromUsed: number, toUsed: number, steps: number): CapacityHistorySeries => ({
+    seatId,
+    window,
+    points: Array.from({ length: steps + 1 }, (_, i): [number, number] => [
+      Math.round(from + ((to - from) * i) / steps),
+      Math.round(fromUsed + ((toUsed - fromUsed) * i) / steps),
+    ]),
+    resetsAt: null,
+    thinned: false,
+  });
+  const recent = now - 2 * MIN;
+  const series: CapacityHistorySeries[] =
+    kind === 'dark'
+      ? []
+      : kind === 'sparse'
+        ? [line('grok-a', 'weekly', now - 3 * HOUR, recent, 29, 31, 6)]
+        : [
+            // 5-hour window resetting at now + 2 h → opened now − 3 h.
+            line('claude-a', 'session', now - 3 * HOUR + 5 * MIN, recent, 8, 74, 12),
+            line('claude-a', 'weekly', now - 5 * DAY, recent, 12, 54, 20),
+            // Weekly windows: grok resets in 4 days (opened 3 days ago), codex in 42 h.
+            line('grok-a', 'weekly', now - 3 * DAY + 10 * MIN, recent, 2, 31, 18),
+            line('codex-a', 'weekly', now - 5 * DAY, recent, 30, 100, 20),
+          ];
+  const oldest = series.length ? Math.min(...series.map((s) => s.points[0]![0])) : null;
+  return {
+    v: 1,
+    generatedAt: iso(now),
+    days: 8,
+    since: iso(now - 8 * DAY),
+    oldestAt: oldest === null ? null : iso(oldest),
+    series,
+    truncated: false,
   };
 }
 

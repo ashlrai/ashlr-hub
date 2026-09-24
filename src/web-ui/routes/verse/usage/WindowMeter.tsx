@@ -23,6 +23,7 @@
 import type { ReactNode } from 'react';
 import { Epistemic } from '../../../components/primitives/Epistemic.js';
 import type { WindowView } from './accounts-model.js';
+import { percentText } from './capacity-strip-model.js';
 import { unknownQuality } from './usage-model.js';
 import styles from './usage.module.css';
 
@@ -77,7 +78,7 @@ export function WindowMeter({
     <div className={prominent ? styles.windowBlockLead : styles.windowBlock}>
       <div className={styles.windowHead}>
         <span>{view.label}</span>
-        <span className={styles.windowPct}>{pct}%</span>
+        <span className={styles.windowPct}>{percentText(view.usedPct)}</span>
       </div>
       <div
         className={styles.track}
@@ -87,7 +88,7 @@ export function WindowMeter({
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={pct}
-        aria-valuetext={`${pct}% used${view.resetText ? `, ${view.resetText}` : ''}`}
+        aria-valuetext={`${percentText(view.usedPct)} used${view.resetText ? `, ${view.resetText}` : ''}`}
       >
         <div className={styles.fill} style={{ width: `${pct}%` }} />
       </div>

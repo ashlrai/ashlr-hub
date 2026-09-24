@@ -12,9 +12,21 @@ import {
 } from '../../../../core/verse/workbench-types.js';
 import { verseFetch, type VerseFetchState } from '../fixtures.test-support.js';
 
-export const T0 = Date.parse('2026-09-24T12:00:00.000Z');
+/**
+ * The fixtures' clock: the moment a fixture is BUILT. Every since / expiresAt
+ * / generatedAt below is relative to it, so a veto window is always "closes in
+ * 24m" from the test's point of view. It used to be a fixed instant
+ * (2026-09-24T12:00Z), and once the real clock passed that instant + 24 min
+ * the drawer test read "closes expired" — a time bomb. `Date.now()` also
+ * honours vi.useFakeTimers / vi.setSystemTime, so a test that pins the clock
+ * still gets fixtures consistent with it.
+ */
+export function fixtureNow(): number {
+  return Date.now();
+}
 
 export function approvalNeed(id = 'p-1', over: Partial<NeedsYouItem> = {}): NeedsYouItem {
+  const t0 = fixtureNow();
   const item: NeedsYouItem = {
     id: `approvals:approval:${id}`,
     source: 'approvals',
@@ -22,7 +34,7 @@ export function approvalNeed(id = 'p-1', over: Partial<NeedsYouItem> = {}): Need
     severity: 'high',
     title: 'PR: fix the flaky snapshot test',
     detail: 'Two assertions raced the clock.',
-    since: new Date(T0 - 20 * 60_000).toISOString(),
+    since: new Date(t0 - 20 * 60_000).toISOString(),
     expiresAt: null,
     subject: { repo: 'binshield', pr: null, seatId: null, sessionId: null, engine: null },
     target: { kind: 'approval', proposalId: id },
@@ -49,6 +61,7 @@ export function approvalNeed(id = 'p-1', over: Partial<NeedsYouItem> = {}): Need
 }
 
 export function vetoNeed(over: Partial<NeedsYouItem> = {}): NeedsYouItem {
+  const t0 = fixtureNow();
   const item: NeedsYouItem = {
     id: 'leader:veto-window:m-7',
     source: 'leader',
@@ -56,8 +69,8 @@ export function vetoNeed(over: Partial<NeedsYouItem> = {}): NeedsYouItem {
     severity: 'warn',
     title: 'Prune 17 stale goals',
     detail: 'The backlog has 17 goals untouched for 30 days.',
-    since: new Date(T0 - 5 * 60_000).toISOString(),
-    expiresAt: new Date(T0 + 24 * 60_000).toISOString(),
+    since: new Date(t0 - 5 * 60_000).toISOString(),
+    expiresAt: new Date(t0 + 24 * 60_000).toISOString(),
     subject: { repo: null, pr: null, seatId: null, sessionId: null, engine: null },
     target: { kind: 'section', section: 'mind', anchor: 'memo:m-7' },
     actions: [{ kind: 'veto', label: 'Veto', request: { method: 'POST', path: '/api/verse/leader/veto', body: { actionId: 'm-7' } }, confirm: null, destructive: true }],
@@ -68,6 +81,7 @@ export function vetoNeed(over: Partial<NeedsYouItem> = {}): NeedsYouItem {
 }
 
 export function chatFailedNeed(sessionId = 's-9'): NeedsYouItem {
+  const t0 = fixtureNow();
   const item: NeedsYouItem = {
     id: `chats:chat-failed:${sessionId}@3`,
     source: 'chats',
@@ -75,7 +89,7 @@ export function chatFailedNeed(sessionId = 's-9'): NeedsYouItem {
     severity: 'warn',
     title: 'Failed: Migrate the store',
     detail: 'CLI exited 1',
-    since: new Date(T0 - 60_000).toISOString(),
+    since: new Date(t0 - 60_000).toISOString(),
     expiresAt: null,
     subject: { repo: 'ashlr-hub', pr: null, seatId: 'claude-a', sessionId, engine: 'claude' },
     target: { kind: 'session', sessionId },
@@ -89,7 +103,7 @@ export function activity(over: Partial<VerseActivityResponse> = {}): VerseActivi
   const needsYou = over.needsYou ?? [];
   return {
     cursor: 'v1.aaaaaaaa.t.1',
-    generatedAt: new Date(T0).toISOString(),
+    generatedAt: new Date(fixtureNow()).toISOString(),
     running: [],
     needsYou,
     completions: [],
