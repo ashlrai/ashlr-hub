@@ -5,7 +5,8 @@ import { FleetSection } from './FleetSection.js';
 import { evictAll } from '../../../data/cache.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
-import { SEAT_DECISION_FIXTURE, fleetLive } from '../command/fixtures.test-support.js';
+import { DARK_SINCE, SEAT_DECISION_FIXTURE, fleetLive } from '../command/fixtures.test-support.js';
+import { darkSinceLabel } from '../fleet/dark-since.js';
 import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import type { SeatDecision } from '../../../../core/routing/types.js';
 import { mockCompactViewport, mockWideViewport, type ViewportMock } from '../shell/viewport.test-support.js';
@@ -111,6 +112,26 @@ describe('FleetSection — lane chips', () => {
     const notes = await screen.findByRole('list', { name: 'Why lanes are limited' });
     expect(within(notes).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['Local, Grok, Claude: no grant.', 'Codex: off until its window resets.']);
   });
+
+  it('says the router\'s cap reasons in plain words — in the notes and the chip tooltips', async () => {
+    const live = fleetLive('live');
+    const lanes = [
+      { lane: 'local' as const, slots: 2, busy: 2, capReason: 'The local runtime serves 2 slot(s).' },
+      { lane: 'grok-cli' as const, slots: 2, busy: 2, capReason: null },
+      { lane: 'claude-cli' as const, slots: 0, busy: 0, capReason: 'You are active (or presence is unknown), so the Claude producer slice is held for your own session.' },
+      { lane: 'codex' as const, slots: 0, busy: 0, capReason: 'Codex lanes stay off until the Leader enables them after the usage reset (a class-B action).' },
+    ];
+    stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/fleet/live': { ...live, lanes } } });
+    render(<FleetSection />);
+    const notes = await screen.findByRole('list', { name: 'Why lanes are limited' });
+    expect(within(notes).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      'Local: The local runtime serves 2 slots.',
+      'Claude: You are active (or presence is unknown), so the Claude producer slice is held for your own session.',
+      'Codex: Codex stays off until the Leader turns it on after the usage reset (you can veto it).',
+    ]);
+    const strip = screen.getByRole('list', { name: 'Lanes: busy of slots' }).parentElement!;
+    expect(strip.innerHTML).not.toMatch(/slot\(s\)|class-B/);
+  });
 });
 
 describe('FleetSection — why this seat', () => {
@@ -146,18 +167,30 @@ describe('FleetSection — why this seat', () => {
 });
 
 describe('FleetSection — dark and absent', () => {
+  // The dark state names the viewer's LOCAL day (fleet/dark-since.ts), so the
+  // expected words come from the same helper: 'Sep 1' in New York is 'Sep 2'
+  // in Tokyo, and the suite must pass in both.
   it('designs the dark state and never draws empty axes', async () => {
     stubSurfaceFetch({ kind: 'dark' });
     render(<FleetSection />);
-    await waitFor(() => expect(screen.getAllByText('Fleet dark since Sep 1').length).toBeGreaterThanOrEqual(3));
+    await waitFor(() => expect(screen.getAllByText(`Fleet dark since ${darkSinceLabel(DARK_SINCE)}`).length).toBeGreaterThanOrEqual(3));
     expect(screen.getByRole('region', { name: 'Repositories' })).toHaveTextContent('Not in grant');
   });
 
   it('dates the dark state from the server\'s darkSince — the one Command uses too', async () => {
-    stubSurfaceFetch({ kind: 'dark', routes: { '/api/verse/fleet/live': { ...fleetLive('dark'), darkSince: '2026-08-30T15:00:00.000Z' } } });
+    const darkSince = '2026-08-30T15:00:00.000Z';
+    stubSurfaceFetch({ kind: 'dark', routes: { '/api/verse/fleet/live': { ...fleetLive('dark'), darkSince } } });
     render(<FleetSection />);
-    await waitFor(() => expect(screen.getAllByText('Fleet dark since Aug 30').length).toBeGreaterThanOrEqual(3));
-    expect(screen.queryByText('Fleet dark since Sep 1')).toBeNull();
+    await waitFor(() => expect(screen.getAllByText(`Fleet dark since ${darkSinceLabel(darkSince)}`).length).toBeGreaterThanOrEqual(3));
+    expect(screen.queryByText(`Fleet dark since ${darkSinceLabel(DARK_SINCE)}`)).toBeNull();
+  });
+
+  it('says just "Fleet dark." when the server knows no dark-since instant — never "since <today>"', async () => {
+    const dark = fleetLive('dark');
+    stubSurfaceFetch({ kind: 'dark', routes: { '/api/verse/fleet/live': { ...dark, darkSince: null } } });
+    render(<FleetSection />);
+    await waitFor(() => expect(screen.getAllByText(`Fleet dark. ${dark.stateReason}`).length).toBeGreaterThanOrEqual(3));
+    expect(screen.queryByText(/Fleet dark since/)).toBeNull();
   });
 
   it('says the live view is not in this build when its module has not landed', async () => {

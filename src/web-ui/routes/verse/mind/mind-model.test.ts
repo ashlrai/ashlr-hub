@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { citesSession, insightMatrix, insightRepos, reasoningTrendSeries, sessionInsights, topInsights } from './mind-model.js';
 import { countdownText, expectedDeltaText, isVetoable, memoActions, outcomeMark, vetoWindowFraction } from './leader-model.js';
 import { leaderState, reasoningDigest } from '../command/fixtures.test-support.js';
+import { formatDayLabel, timeLabelLadder } from '../../../components/charts/format.js';
+import { TEST_ZONES, inTimeZone } from '../growth/time-zone.test-support.js';
 
 const NOW = Date.parse('2026-09-24T15:00:00Z');
 
@@ -27,6 +29,21 @@ describe('insightMatrix', () => {
     const hub = insightMatrix(d, 'binshield');
     expect(hub.values.flat().filter((v) => v !== null && v > 0)).toEqual([3, 2]);
   });
+
+  it('offers ONE facet entry per folder, however the folder was spelled, and counts every spelling in it', () => {
+    const live = reasoningDigest('live', NOW);
+    // i2 (3×) and i4 (2×) are binshield's; record them under the two macOS spellings of one temp folder.
+    const d = {
+      ...live,
+      insights: live.insights.map((i) => (i.id === 'i2' ? { ...i, repo: '/private/tmp/e2e/proj' } : i.id === 'i4' ? { ...i, repo: '/tmp/e2e/proj' } : i)),
+    };
+    const repos = insightRepos(d);
+    expect(repos).toEqual(['ashlr-hub', '/private/tmp/e2e/proj', 'ashlrcode']);
+    // Faceting on either spelling finds both insights.
+    for (const facet of ['/private/tmp/e2e/proj', '/tmp/e2e/proj']) {
+      expect(insightMatrix(d, facet).values.flat().filter((v) => v !== null && v > 0), facet).toEqual([3, 2]);
+    }
+  });
 });
 
 describe('insight cards and trends', () => {
@@ -37,6 +54,19 @@ describe('insight cards and trends', () => {
     const series = reasoningTrendSeries(reasoningDigest('sparse', NOW));
     expect(series[0]!.points[0]!.y).toBeNull();
     expect(series[0]!.points.at(-1)!.y).not.toBeNull();
+  });
+
+  it('puts each day where the chart\'s local labels name that same day — west of UTC too', () => {
+    const d = reasoningDigest('live', NOW);
+    for (const zone of TEST_ZONES) {
+      inTimeZone(zone, () => {
+        const [struggles] = reasoningTrendSeries(d);
+        // AreaTrend labels a time axis with formatTimeLabel (local) — its
+        // default formatX and the ladder's only rung without a caller format.
+        const ladder = timeLabelLadder(struggles!.points[0]!.x, struggles!.points.at(-1)!.x);
+        expect(struggles!.points.map((p) => ladder.map((f) => f(p.x))), zone).toEqual(d.trends.map((t) => [formatDayLabel(t.day)]));
+      });
+    }
   });
 });
 
@@ -67,7 +97,9 @@ describe('leader-model', () => {
   });
 
   it('writes expected deltas and grades moves honestly', () => {
-    expect(expectedDeltaText({ metric: 'merges/day', delta: 4, byDate: '2026-09-27T12:00:00Z' })).toMatch(/^\+4 merges\/day by Sun, Sep 27$/);
+    // The deadline is an instant shown on the viewer's local day: noon local
+    // on Sep 27 reads "Sun, Sep 27" in every zone (noon UTC is Mon east of UTC+12).
+    expect(expectedDeltaText({ metric: 'merges/day', delta: 4, byDate: new Date(2026, 8, 27, 12).toISOString() })).toMatch(/^\+4 merges\/day by Sun, Sep 27$/);
     const tl = leaderState('live', NOW).timeline;
     expect(tl.map(outcomeMark)).toEqual(['pending', 'pending', 'miss', 'hit', 'hit', 'ungraded', 'hit']);
   });

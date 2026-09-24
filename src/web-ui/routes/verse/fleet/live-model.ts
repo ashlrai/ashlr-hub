@@ -20,7 +20,7 @@ import { CHART_NEUTRAL, seriesColor } from '../../../components/charts/colors.js
 import type { SwimlaneLane } from '../../../components/charts/Swimlane.js';
 import type { FunnelStage } from '../../../components/charts/Funnel.js';
 import type { BarStackSegment } from '../../../components/charts/BarStack.js';
-import { localTimes } from './why-seat-model.js';
+import { laneReasonText, localTimes } from './why-seat-model.js';
 
 export const LANE_ENGINE: Readonly<Record<FleetEngine, ChartEngine>> = {
   local: 'local',
@@ -49,15 +49,22 @@ export interface LaneNote {
   reason: string;
 }
 
+/** A lane's cap reason as the operator reads it (`laneReasonText`); null when it has none. */
+export function laneReason(lane: FleetLaneState): string | null {
+  const reason = lane.capReason?.trim();
+  return reason ? laneReasonText(reason) : null;
+}
+
 /**
- * Each distinct lane cap reason ONCE, with the lanes it covers. A dark fleet
- * gives every lane the same sentence; 3.10.0 repeated it inside every chip
- * and truncated it there.
+ * Each distinct lane cap reason ONCE, with the lanes it covers, in plain
+ * words (the router's "slot(s)" and "class-B action" never reach the
+ * operator). A dark fleet gives every lane the same sentence; 3.10.0
+ * repeated it inside every chip and truncated it there.
  */
 export function laneNotes(lanes: readonly FleetLaneState[]): LaneNote[] {
   const byReason = new Map<string, FleetEngine[]>();
   for (const lane of lanes) {
-    const reason = lane.capReason?.trim();
+    const reason = laneReason(lane);
     if (!reason) continue;
     const list = byReason.get(reason) ?? [];
     list.push(lane.lane);

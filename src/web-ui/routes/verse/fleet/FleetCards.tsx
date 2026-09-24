@@ -20,8 +20,8 @@ import type { OvernightStatus } from '../autonomy/overnight-contract.js';
 import { describeStopRule } from '../autonomy/overnight-model.js';
 import { Card, CardNote, MicroLabel } from '../command/Surface.js';
 import type { OptionalRead } from '../command/surface-data.js';
-import { darkSinceDay, fleetDarkSince } from './dark-since.js';
-import { LANE_ENGINE, LANE_LABEL, funnelStages, laneChipText, laneNotes, laneRows, latestDecision, parkedGantt, refusalStack, runTone } from './live-model.js';
+import { fleetDarkStatus } from './dark-since.js';
+import { LANE_ENGINE, LANE_LABEL, funnelStages, laneChipText, laneNotes, laneReason, laneRows, latestDecision, parkedGantt, refusalStack, runTone } from './live-model.js';
 import { asSentence, decisionSummary, describeEligibleAgain, eligibleAgain, heldBackText } from './why-seat-model.js';
 import styles from './fleet.module.css';
 
@@ -29,16 +29,15 @@ const HOUR = 3_600_000;
 
 /**
  * The shared "is there a fleet to draw at all" decision for every chart card.
- * Dark reads THE dark-since instant (`fleetDarkSince`), as the viewer's local
- * day — the same day Command's verdict line names.
+ * Dark reads THE dark-since instant (`fleetDarkStatus`), as the viewer's local
+ * day — the same day Command's verdict line names — and no day at all when
+ * the server does not know one.
  */
 export function fleetStatus(read: OptionalRead<FleetLiveSnapshotV1> | undefined, empty: string, hasData: boolean): ChartStatus {
   if (!read) return { kind: 'loading' };
   const live = read.value;
   if (!live) return { kind: 'unknown', reason: read.reason ?? 'the live fleet view did not answer.' };
-  if (live.state === 'dark' && !hasData) {
-    return { kind: 'dark', since: darkSinceDay(fleetDarkSince(live) ?? live.generatedAt), detail: live.stateReason ?? undefined };
-  }
+  if (live.state === 'dark' && !hasData) return fleetDarkStatus(live);
   return hasData ? { kind: 'ready' } : { kind: 'empty', message: empty };
 }
 
@@ -50,7 +49,7 @@ export function fleetStatus(read: OptionalRead<FleetLiveSnapshotV1> | undefined,
 function LaneChip({ lane }: { lane: FleetLaneState }) {
   const text = laneChipText(lane);
   return (
-    <li className={styles.lane} data-off={lane.slots === 0 || undefined} title={lane.capReason ?? undefined}>
+    <li className={styles.lane} data-off={lane.slots === 0 || undefined} title={laneReason(lane) ?? undefined}>
       <EngineMarker engine={LANE_ENGINE[lane.lane]} />
       <span className={styles.laneName}>{text.name}</span>
       <span className={styles.laneSep} aria-hidden="true">

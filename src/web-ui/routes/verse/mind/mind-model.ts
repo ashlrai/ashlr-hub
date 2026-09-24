@@ -16,6 +16,8 @@ import type { ChartEngine } from '../../../components/charts/colors.js';
 import type { MatrixAxisItem } from '../../../components/charts/MatrixHeatmap.js';
 import type { AreaTrendSeries } from '../../../components/charts/AreaTrend.js';
 import { toneColor } from '../../../components/charts/colors.js';
+import { calendarDayStart } from '../growth/calendar-day.js';
+import { pathKey } from './project-label.js';
 
 export const INSIGHT_KINDS: readonly ReasoningInsightKind[] = ['loop', 'struggle', 'verification-gap', 'uncertainty', 'backtrack', 'win'];
 
@@ -35,12 +37,33 @@ function asEngine(name: string): ChartEngine | null {
   return (KNOWN_ENGINES as readonly string[]).includes(name) ? (name as ChartEngine) : null;
 }
 
-/** Repos that appear in the digest's insights, most insight occurrences first. */
+/**
+ * Repos that appear in the digest's insights, most insight occurrences first
+ * — ONE per folder: two spellings of the same folder (`/tmp/x` and
+ * `/private/tmp/x`, which `pathKey` treats as one) are one Repo facet entry,
+ * named by the spelling recorded most often.
+ */
 export function insightRepos(digest: ReasoningDigest | null): string[] {
   if (!digest) return [];
-  const counts = new Map<string, number>();
-  for (const i of digest.insights) if (i.repo) counts.set(i.repo, (counts.get(i.repo) ?? 0) + i.count);
-  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([r]) => r);
+  const folders = new Map<string, { total: number; spellings: Map<string, number> }>();
+  for (const i of digest.insights) {
+    if (!i.repo) continue;
+    const key = pathKey(i.repo);
+    const f = folders.get(key) ?? { total: 0, spellings: new Map<string, number>() };
+    f.total += i.count;
+    f.spellings.set(i.repo, (f.spellings.get(i.repo) ?? 0) + i.count);
+    folders.set(key, f);
+  }
+  const byCount = (a: [string, number], b: [string, number]) => b[1] - a[1] || a[0].localeCompare(b[0]);
+  return [...folders.values()]
+    .map((f) => [[...f.spellings.entries()].sort(byCount)[0]![0], f.total] as [string, number])
+    .sort(byCount)
+    .map(([r]) => r);
+}
+
+/** Does insight `repo` name the same folder as facet `facet` (any spelling)? */
+function sameFolder(repo: string | null | undefined, facet: string): boolean {
+  return !!repo && (repo === facet || pathKey(repo) === pathKey(facet));
 }
 
 export interface InsightMatrix {
@@ -65,7 +88,7 @@ export function insightMatrix(digest: ReasoningDigest | null, repo: string | nul
     const engine = asEngine(name);
     return { id: name, label: ENGINE_LABEL[name] ?? name, ...(engine ? { engine } : {}) };
   });
-  const insights = digest.insights.filter((i) => repo === null || i.repo === repo);
+  const insights = digest.insights.filter((i) => repo === null || sameFolder(i.repo, repo));
   const values = INSIGHT_KINDS.map((kind) =>
     ordered.map((engine) => {
       const measured = (digest.totals.byEngine[engine] ?? 0) > 0;
@@ -86,11 +109,16 @@ export function topInsights(digest: ReasoningDigest | null, n = 3): ReasoningIns
     .slice(0, n);
 }
 
-/** Struggles vs wins per day, for the trends card. */
+/**
+ * Struggles vs wins per day, for the trends card. Each day is stamped at the
+ * viewer's LOCAL midnight (`calendarDayStart`), because the chart labels its
+ * x values in the local zone: a UTC-midnight stamp read one day early west of
+ * UTC ("2026-09-24" as "Sep 23").
+ */
 export function reasoningTrendSeries(digest: ReasoningDigest | null): AreaTrendSeries[] {
   if (!digest) return [];
   const pts = (pick: (d: ReasoningDigest['trends'][number]) => number) =>
-    digest.trends.map((d) => ({ x: Date.parse(`${d.day}T00:00:00Z`), y: d.steps === 0 ? null : pick(d) }));
+    digest.trends.map((d) => ({ x: calendarDayStart(d.day), y: d.steps === 0 ? null : pick(d) }));
   return [
     { id: 'struggles', label: 'Struggles', color: toneColor('warning'), points: pts((d) => d.struggles) },
     { id: 'wins', label: 'Wins', color: toneColor('success'), points: pts((d) => d.wins) },

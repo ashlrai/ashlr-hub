@@ -9,6 +9,7 @@ import {
   exclusionReasons,
   heldBackText,
   joinSentences,
+  laneReasonText,
   legacySummary,
   parseLegacyReason,
 } from './why-seat-model.js';
@@ -126,6 +127,57 @@ describe('eligible again', () => {
   it('falls back to the server\'s nextEligibleAt when the reasons carry no time', () => {
     const x: SeatExclusion = { seatId: 'codex-a', reasons: ['weekly window exhausted; resets Thu 09:00'], nextEligibleAt: '2026-09-26T09:00:00.000Z' };
     expect(describeEligibleAgain(eligibleAgain(x), NOW)).toBe(describeResetAt('2026-09-26T09:00:00.000Z', NOW));
+  });
+
+  it('reads every 3.10.0 lane-cap sentence as a lane — plural "lanes" and "slot(s)" included', () => {
+    // The router's planLanes capReasons as 3.10.0 wrote them into exclusions (dispatch-router.ts).
+    for (const sentence of [
+      'Codex lanes stay off until the Leader enables them after the usage reset (a class-B action).',
+      'The Leader set 0 grok-cli lanes.',
+      'The local runtime serves 0 slot(s).',
+      'A harness experiment is using 2 local slot(s).',
+      'You are active (or presence is unknown), so the Claude producer slice is held for your own session.',
+      'The codex lane has no slots this tick.',
+    ]) {
+      expect(parseLegacyReason(sentence).kind, sentence).toBe('lane');
+      const x: SeatExclusion = { seatId: 'codex-cmp', reasons: [sentence], nextEligibleAt: null };
+      expect(describeEligibleAgain(eligibleAgain(x), NOW), sentence).toBe('when its lane has a free slot');
+    }
+  });
+
+  it('prints a held-back seat\'s lane cap in plain words', () => {
+    const legacy: SeatExclusion = { seatId: 'codex-cmp', reasons: ['Codex lanes stay off until the Leader enables them after the usage reset (a class-B action).'], nextEligibleAt: null };
+    expect(heldBackText(legacy)).toBe('Codex stays off until the Leader turns it on after the usage reset (you can veto it).');
+    const structured: SeatExclusion = {
+      seatId: 'local:qwen',
+      reasons: ['The local runtime serves 0 slot(s).'],
+      details: [{ kind: 'lane', text: 'The local runtime serves 0 slot(s).', resetsAt: null, resetDescription: null }],
+      nextEligibleAt: null,
+    };
+    expect(heldBackText(structured)).toBe('The local runtime serves 0 slots.');
+  });
+});
+
+describe('lane cap reasons in operator words', () => {
+  it('pluralises by the count, drops the Leader action class and names lanes as the chips do', () => {
+    expect(laneReasonText('The local runtime serves 2 slot(s).')).toBe('The local runtime serves 2 slots.');
+    expect(laneReasonText('The local runtime serves 1 slot(s).')).toBe('The local runtime serves 1 slot.');
+    expect(laneReasonText('A harness experiment is using 1 local slot(s).')).toBe('A harness experiment is using 1 local slot.');
+    expect(laneReasonText('A harness experiment is using 2 local slot(s).')).toBe('A harness experiment is using 2 local slots.');
+    expect(laneReasonText('Codex lanes stay off until the Leader enables them after the usage reset (a class-B action).'))
+      .toBe('Codex stays off until the Leader turns it on after the usage reset (you can veto it).');
+    expect(laneReasonText('The Leader set 0 grok-cli lanes.')).toBe('The Leader set 0 Grok lanes.');
+    expect(laneReasonText('The Leader set 1 grok-cli lane.')).toBe('The Leader set 1 Grok lane.');
+    expect(laneReasonText('No codex seat has the producer role in the grant.')).toBe('No Codex seat has the producer role in the grant.');
+    expect(laneReasonText("The grant's current rollout stage does not include claude-cli.")).toBe("The grant's current rollout stage does not include Claude.");
+    const mixed = laneReasonText('The local runtime serves 2 slot(s). The Leader set 0 grok-cli lanes (a class-B action); claude-cli is off.');
+    expect(mixed).toBe('The local runtime serves 2 slots. The Leader set 0 Grok lanes (you can veto it); Claude is off.');
+  });
+
+  it('never rewrites a seat id and leaves prose it does not recognise alone', () => {
+    expect(laneReasonText('The grant gives codex-cmp no producer role.')).toBe('The grant gives codex-cmp no producer role.');
+    expect(laneReasonText('No standing grant is in force.')).toBe('No standing grant is in force.');
+    expect(laneReasonText('  off until its window resets ')).toBe('off until its window resets');
   });
 });
 
