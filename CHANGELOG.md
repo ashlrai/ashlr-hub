@@ -339,6 +339,14 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.11.3] — 2026-09-25 UTC — ship:local installs the app icon too
+
+- `npm run ship:local -- --native` now also installs a newer `desktop/src-tauri/icons/icon.icns` into Ashlr.app. It
+  backs up the old icon like every other file, then touches the bundle so the Dock and Finder pick up the new icon.
+  Without `--native`, or when the icon hasn't changed, the step is skipped.
+- Released with the new loop: `npm run gate` passed in 27.6s (88 web and 471 backend tests related to the change,
+  plus the smoke set), then `npm run ship:local` installed it.
+
 ## [3.11.2] — 2026-09-25 UTC — the Ashlr.AI mark, a lighter first paint, and a release loop measured in minutes
 
 3.11.1 was tagged but never published to npm. 3.11.2 includes everything in it.
