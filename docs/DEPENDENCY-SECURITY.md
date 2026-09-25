@@ -84,6 +84,11 @@ The gate's introduction also updates only `plist` 1.9.0 to 1.10.0 and its
 `RUSTSEC-2026-0194` and `RUSTSEC-2026-0195` without changing a direct desktop
 manifest dependency.
 
+`RUSTSEC-2026-0285` (`GHSA-2mjx-qc3c-rqvc`, moderate) is removed the same way:
+a lock-only update of `rustls` 0.23.41 to 0.23.45 and its required
+`rustls-webpki` child from 0.103.13 to 0.103.15. It does not touch the GLib
+exception above.
+
 A path, git, or vendored replacement for GLib is not remediation. RustSec can
 omit non-default-registry packages from its vulnerability lookup, so such a
 replacement could create a false clean result without a supported release. The
