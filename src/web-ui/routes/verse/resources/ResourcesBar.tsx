@@ -13,8 +13,8 @@
  *
  * Loaded with the Resources chrome chunk, never on the chat first-paint path.
  * It reads the same app-wide seat + health caches the rail already keeps warm
- * (useCapacityData, budget off) and the drawer's cloud read, so it adds no
- * poll of its own for accounts.
+ * plus the budget view (useCapacityData, as the drawer does) and the
+ * drawer's cloud read, so it adds no poll of its own for accounts.
  */
 import { useMemo, type CSSProperties } from 'react';
 import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
@@ -135,14 +135,16 @@ function RowTip({ row }: { row: BarRow }) {
 }
 
 export function ResourcesBar({ expanded }: { expanded: boolean }) {
-  const data = useCapacityData({ withBudget: false });
+  // With the budget view, like the drawer: for seats like Claude and Grok the
+  // window readings arrive through it, so without it the batteries read empty.
+  const data = useCapacityData();
   const cloudRead = useQuery(cloudCreditsQuery);
   const now = Date.now();
   const rows = useMemo(
-    () => (data.loading ? [] : barRows(buildCapacityRows(data.seats, { health: data.health, local: 'collapse' }), { healthRead: data.health !== null, now })),
+    () => (data.loading ? [] : barRows(buildCapacityRows(data.seats, { health: data.health, budget: data.budget, local: 'collapse', now }), { healthRead: data.health !== null, now })),
     // `now` moves every render; the rows only need to follow the data.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [data.loading, data.seats, data.health],
+    [data.loading, data.seats, data.health, data.budget],
   );
   const cloud = cloudRead.data?.credits ?? null;
   const cloudLeft = cloud && cloud.totalUsd > 0 ? (cloud.remainingUsd / cloud.totalUsd) * 100 : null;

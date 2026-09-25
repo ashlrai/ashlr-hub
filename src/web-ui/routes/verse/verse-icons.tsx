@@ -136,12 +136,17 @@ export function McpIcon(props: IconProps) {
 }
 
 /** The mark in the rail head. Not a section icon — it never gets a color state. */
+/**
+ * The Ashlr.AI keystone "A" (traced from the brand mark, ashlar-landing
+ * public/logos/ashlar-mark.png). The legs take the ink colour so the mark
+ * reads in light and dark themes; the core keeps the brand blue (#2563EB).
+ */
 export function VerseMark(props: IconProps) {
   const { size = 20, ...rest } = props;
   return (
-    <svg viewBox="0 0 32 32" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.8}
-      strokeLinejoin="round" strokeLinecap="round" aria-hidden="true" focusable="false" {...rest}>
-      <path d="m5 11 11-6 11 6-11 6Z M5 16l11 6 11-6 M5 21l11 6 11-6" />
+    <svg viewBox="54 67 146 124" width={size} height={size} aria-hidden="true" focusable="false" {...rest}>
+      <path fill="currentColor" d="M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z" />
+      <path fill="#2563EB" d="M110 121H143L133 152H120Z" />
     </svg>
   );
 }
