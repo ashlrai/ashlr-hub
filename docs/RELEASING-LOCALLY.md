@@ -19,9 +19,66 @@ cannot cryptographically verify the tarball was built from this source. Nothing
 else replaces that. The alternative was paying for Actions, which was the call
 this project made against.
 
+## The fast path
+
+Three commands, in order. Each one stops on its own failure.
+
+```sh
+npm run gate          # a few minutes: static checks + the tests your change can reach
+npm run ship:local    # macOS: build, pack, install, update Ashlr.app, restart, check /verse/
+npm publish <tarball> --access public   # the path ship:local printed; see Publishing
+```
+
+**`npm run gate`** (`scripts/gate.mjs`) runs, and prints one table with a final
+`GATE PASS` or `GATE FAIL`:
+
+- in parallel: the root build, the web typecheck, eslint (cached), the real-I/O lane guard
+  and the docs check;
+- then the web build and the first-paint budget;
+- then backend and web vitest in parallel, limited to the tests whose import graph reaches a
+  file changed since the merge-base with `origin/master` (`--base <ref>` to change that),
+  plus a smoke set that always runs (`scripts/gate-smoke.json`).
+
+A version bump (in `package.json` and `package-lock.json`) or a script edit does not widen
+the run; a dependency change in either file, or a change to a vitest config or vitest setup
+file, runs that suite in full. Logs, the eslint cache and vitest JSON reports go to `.ashlr-gate/` (gitignored).
+`--json` prints a machine-readable result instead of the table.
+
+The import graph cannot see a test that reads a changed file as text instead of importing it.
+Before a release that touches fixtures, scripts read by tests, or anything you are unsure
+about, run **`npm run gate:full`**: the same static checks plus every backend and web test.
+
+**Known failures.** `scripts/gate-known-failures.json` lists the test files that fail on a
+healthy machine (the table under "A full `vitest run` is not the gate" below). A failure in a listed file is shown
+as `KNOWN` and does not fail the gate; a failure anywhere else does. Delete an entry the day
+its cause is fixed.
+
+**`npm run ship:local`** (`scripts/ship-local.mjs`, macOS only) refuses a dirty tree
+(`--allow-dirty` installs it as `releases/<sha>-dirty-<time>`), then:
+
+1. `npm run build` on a clean `dist/`, and `npm pack --ignore-scripts` into OS temp;
+2. extracts the tarball into `~/.local/share/ashlr/releases/<sha>` and points
+   `~/.local/share/ashlr/current` at it;
+3. `npm run build:binary`;
+4. if `/Applications/Ashlr.app` exists: quits it, moves `Contents/MacOS/ashlr` and
+   `Contents/Resources/public` aside to `*.prev-<short sha>`, copies `dist-bin/ashlr` and
+   `dist-bin/public` in (with `--native`, also `desktop/src-tauri/target/release/ashlr-desktop`
+   when it is newer than the installed one), ad-hoc signs and verifies the bundle, relaunches;
+5. `launchctl kickstart -k` on `ai.ashlr.anthropic-proxy` and `ai.ashlr.serve`, if loaded;
+6. waits for `http://127.0.0.1:7777/verse/` to answer 200 and prints the versions and the
+   tarball path.
+
+Nothing is deleted. Only the three newest `*.prev-*` backups of each file stay in the bundle;
+older ones move to a dated folder under `~/.Trash`. To roll back, move a `.prev-` file back
+and re-run `codesign --force --deep --sign - /Applications/Ashlr.app`.
+`npm run ship:local -- --dry-run` prints every step and changes nothing.
+
+The sections below are the manual procedure these two scripts automate, and the traps
+behind their choices.
+
 ## Before you publish
 
-Run these. They are the whole gate.
+`npm run gate` runs all of this for you. By hand, these are the static checks:
 
 ```sh
 npm run build        # must exit 0 — see "the build used to be broken" below
@@ -30,7 +87,8 @@ npx eslint .
 ```
 
 Then the suites that matter, which take seconds rather than the full run's
-half hour:
+half hour (the gate replaces this fixed list with the tests your change reaches plus
+`scripts/gate-smoke.json`):
 
 ```sh
 npx vitest run \
@@ -75,7 +133,8 @@ npx vitest run <files> > /tmp/v.log 2>&1; echo $?
 ## A full `vitest run` is not the gate, and here is why
 
 It takes over half an hour and fails ~4 suites on a healthy machine. Those
-failures are environmental, and re-diagnosing them wastes an afternoon:
+failures are environmental, and re-diagnosing them wastes an afternoon. They are the
+entries in `scripts/gate-known-failures.json`:
 
 | Suite | Why it fails |
 |---|---|
@@ -141,7 +200,7 @@ npm view @ashlr/hub version
 
 ## Installing your own build
 
-The managed install is a SHA-pinned release directory with a `current` symlink.
+`npm run ship:local` does this (and updates the app). By hand: the managed install is a SHA-pinned release directory with a `current` symlink.
 Point it at an extracted tarball, never at the git worktree — a worktree install
 changes under you when you switch branches.
 
