@@ -576,6 +576,27 @@ routing weights) are tested as paired experiments with a confidence interval
 against held-out tasks, adopted only through the gate, and rolled back
 automatically if a 48-hour canary falls below baseline.
 
+## Resources: the drawer and the bar (3.11)
+
+- **Resources drawer (⌘.).** Open it from the edge tab, the rail button or "Show resources" in ⌘K. It holds one
+  card per resource:
+  - every Claude, Codex and Grok account, with its 5-hour and weekly windows, the share kept for you, reset times,
+    and Reconnect / Check again;
+  - the local runtime and its models, with their context windows;
+  - the cloud credits.
+  It opens as an overlay or pins as a column, and remembers which.
+- **Resource bar.** It sits in the rail foot and is always on:
+  - one battery per resource, showing how much of its binding window is left;
+  - green when usable, amber when low, red when spent or signed out;
+  - with rail labels shown, the full name above a battery and a value; with labels hidden, upright batteries under
+    each logo.
+  Hover or focus a row for every window and its reset, the reserve and when a spent account comes back. Click a row
+  to open the drawer. **Hide resource bar** (drawer footer, or ⌘K) brings back the single capacity ring.
+- **Provider marks.** Engine tiles, the seat chip, the chat header, ⌘K, the tasks pane and chart lane labels show
+  the provider's own mark: Anthropic's Claude, OpenAI, xAI's Grok or Ollama (path data from @lobehub/icons, MIT).
+  The account's name is always written beside the mark.
+- The rail head, the app icon, the menu-bar icon and verse.ashlr.ai carry the Ashlr.AI keystone "A".
+
 ## Cloud lane (3.11)
 
 Verse can start **Claude Code cloud sessions** (claude.ai/code) and follow what
