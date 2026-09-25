@@ -339,6 +339,52 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.11.1] — 2026-09-25 UTC — you can see who you're running on, all the time
+
+### Provider logos
+
+Every place Verse shows an engine now shows the provider's own mark: Anthropic's Claude, OpenAI, xAI's Grok and
+Ollama. That covers account tiles in the drawer and Apps & Accounts, the composer's seat chip, the chat header,
+⌘K, the tasks pane and chart lane labels. The account's name always sits beside the mark as text. The marks come
+from @lobehub/icons (MIT) and are inlined, so they need no network. They load with their own small chunk, never on
+chat's first paint.
+
+### Always-on resource bar
+
+The rail foot now carries a live bar with one battery per resource, showing what's left of each account's binding
+window. It covers Claude, both Codex accounts, Grok, your local models and your cloud credits. Colour tells you
+usable, low or spent. Hover or focus a row to see every window with its reset, the share kept for you, and when a
+spent account comes back. Click to open the Resources drawer. With labels shown, each row reads the full account
+name over a battery and value. With labels hidden, the rows become upright batteries under each logo. **Hide
+resource bar** is in the drawer's footer and in ⌘K, and it brings back the single capacity ring.
+
+### Verse keeps working in the background
+
+The main window no longer lets macOS suspend the page when it's hidden (macOS 14+). Until now, opening Verse
+behind another full-screen app could leave it on "Checking for an existing Verse session…" for minutes. Chats,
+Needs-you banners and resource readings also froze until you looked at it again.
+
+### Built by Verse, on its own
+
+The cloud lane's first self-improvement pull requests are in this release:
+- **#475** fixes the eight Universe campaign-recovery tests that had failed since 3.9.1. That includes a real bug:
+  a campaign whose run hit its deadline before a winner was picked was recorded "failed" instead of "completed".
+  The files that only run on macOS were verified on this Mac.
+- **#476** brings the release-policy tests (m522, m440, m468, m454, m231, npm-cli-launch) up to the current manual
+  release process. Their safety rules are kept as explicit checks, tested in both directions.
+
+The estimated cloud spend is calibrated to the real balance: $210 of $250 left.
+
+### Verification
+
+Checked locally:
+- Build, both type-checks, eslint, the real-I/O lane, docs and first paint (369.9 KB of 370) pass.
+- 4,619 web tests pass.
+- The backend suite passes 29,815 tests. The one failure is `m571`, which trips on the Tauri `gen/` folder a local
+  desktop build leaves behind; fixing that is queued in the self-improvement backlog. Every other failure that had
+  been open since 3.9.1 is fixed.
+- 173 Rust tests pass.
+
 ## [3.11.0] — 2026-09-25 UTC — the cloud lane, and every resource one keystroke away
 
 Verse can now spend Claude cloud credits. It launches Claude Code cloud sessions, which keep running on your
