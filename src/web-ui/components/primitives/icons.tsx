@@ -12,56 +12,18 @@
  * `title` ONLY when the icon is the sole carrier of meaning; it then becomes
  * `role="img"` with an accessible name.
  */
-import type { ReactNode, SVGProps } from 'react';
+import { Icon, type IconProps } from './icon-base.js';
 
-export interface IconProps extends Omit<SVGProps<SVGSVGElement>, 'children' | 'viewBox'> {
-  /** Edge length in px. Defaults to 16 — the design language's icon size. */
-  size?: number;
-  /** Accessible name. Omit for decorative icons (the default). */
-  title?: string;
-}
-
-function Icon({ size = 16, title, children, ...rest }: IconProps & { children: ReactNode }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      focusable="false"
-      {...(title ? { role: 'img' } : { 'aria-hidden': true })}
-      {...rest}
-    >
-      {title ? <title>{title}</title> : null}
-      {children}
-    </svg>
-  );
-}
-
-/** Chat — the transcript section. */
-export const IconChat = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="M2.5 11.5V4.25A1.75 1.75 0 0 1 4.25 2.5h7.5a1.75 1.75 0 0 1 1.75 1.75v4.5a1.75 1.75 0 0 1-1.75 1.75H5.5L2.5 13.5v-2Z" />
-  </Icon>
-);
+// The four glyphs the Verse rail draws at first paint live in icon-base.tsx
+// so the rail does not pull this whole set into the chat first-paint
+// critical JS; they are re-exported so this stays the one import site.
+export { IconChat, IconGauge, IconInbox, IconSliders, type IconProps } from './icon-base.js';
 
 /** CPU — autonomy / the daemon loop. */
 export const IconCpu = (p: IconProps) => (
   <Icon {...p}>
     <rect x="4.5" y="4.5" width="7" height="7" rx="1.5" />
     <path d="M6.5 1.5v3M9.5 1.5v3M6.5 11.5v3M9.5 11.5v3M1.5 6.5h3M1.5 9.5h3M11.5 6.5h3M11.5 9.5h3" />
-  </Icon>
-);
-
-/** Inbox — approvals. */
-export const IconInbox = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="M2 9.5 3.6 3.4A1.5 1.5 0 0 1 5.05 2.3h5.9a1.5 1.5 0 0 1 1.45 1.1L14 9.5" />
-    <path d="M2 9.5h3l.8 1.6h4.4l.8-1.6h3v2.6A1.9 1.9 0 0 1 12.1 14H3.9A1.9 1.9 0 0 1 2 12.1V9.5Z" />
   </Icon>
 );
 
@@ -81,24 +43,6 @@ export const IconCheckCircle = (p: IconProps) => (
 export const IconX = (p: IconProps) => (
   <Icon {...p}>
     <path d="m4 4 8 8M12 4l-8 8" />
-  </Icon>
-);
-
-/** Gauge — usage / spend. */
-export const IconGauge = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="M2.2 11.5a6.4 6.4 0 1 1 11.6 0" />
-    <path d="M8 11 10.8 6.6" />
-    <circle cx="8" cy="11.6" r="0.9" fill="currentColor" stroke="none" />
-  </Icon>
-);
-
-/** Sliders — settings. */
-export const IconSliders = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="M2.5 4.5h4M9.5 4.5h4M2.5 11.5h2M7.5 11.5h6" />
-    <circle cx="8" cy="4.5" r="1.6" />
-    <circle cx="6" cy="11.5" r="1.6" />
   </Icon>
 );
 

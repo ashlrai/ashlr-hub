@@ -5,9 +5,11 @@ import type { VerseEvent } from '../../data/api-types.js';
 import { ev, session } from './fixtures.test-support.js';
 import { appendInlineText, splitStreamingBlocks } from './MessageMarkdown.js';
 import { describeCompaction, Transcript } from './Transcript.js';
-import { useVerseLive, useVerseTranscript } from './useVerseSession.js';
+import { useVerseLive } from './useVerseSession.js';
+import { useVerseTranscript } from './useVerseTranscript.js';
 import { cpuMs, median, openLastTurn, realisticLog, stamp } from './verse-perf.test-support.js';
-import { applyVerseEvent, applyVerseEvents, buildTranscript, resetVerseStore, seedVerseSession, type VerseLiveState } from './verse-store.js';
+import { applyVerseEvent, applyVerseEvents, resetVerseStore, seedVerseSession, type VerseLiveState } from './verse-store.js';
+import { buildTranscript } from './verse-transcript.js';
 
 const NO_LIVE: VerseLiveState = { turnId: null, startedAt: null, progress: null, thinking: null, notice: null, settledTurnId: null };
 

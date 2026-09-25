@@ -20,8 +20,7 @@
  * with the old server, so without listening the page would sit until its
  * next 401 → failed renewal → SessionGate → adoption.
  */
-import { useEffect } from 'react';
-import { SessionGate } from '../components/auth/SessionGate.js';
+import { lazy, Suspense, useEffect } from 'react';
 import { ToastProvider } from '../components/primitives/Toast.js';
 import { adoptInjectedTokens, markCheckComplete } from '../data/auth-store.js';
 import { getQuerySnapshot, runQuery } from '../data/cache.js';
@@ -62,6 +61,20 @@ export function preloadVerseFirstPaint(doc: Document | null = typeof document ==
 }
 
 preloadVerseFirstPaint();
+
+/**
+ * The session gate is a dynamic import: a signed-in cold load (the common
+ * case — the desktop shell injects its tokens) never draws it, and as a
+ * static import it cost ~3 KB of chat first-paint critical JS (SPEC-310A §1).
+ * `preloadSessionGate` starts the download while the auth probe is in flight,
+ * so an unauthenticated answer finds the chunk already there instead of
+ * paying a second round trip. Vite shares the in-flight import with lazy().
+ */
+const importSessionGate = () => import('../components/auth/SessionGate.js');
+const SessionGate = lazy(() => importSessionGate().then((m) => ({ default: m.SessionGate })));
+function preloadSessionGate(): void {
+  void importSessionGate().catch(() => undefined);
+}
 
 /** DOM event the desktop shell fires after handing a restarted sidecar's tokens to this page. */
 export const SIDECAR_RESTARTED_EVENT = 'ashlr:sidecar-restarted';
@@ -118,6 +131,7 @@ export function VerseConsoleApp() {
   useEffect(() => listenForSidecarRestart(), []);
   useEffect(() => {
     if (phase !== 'checking') return;
+    preloadSessionGate();
     let cancelled = false;
     void adoptInjectedTokens().then((adopted) => {
       if (cancelled || adopted) return;
@@ -129,7 +143,11 @@ export function VerseConsoleApp() {
   }, [phase]);
   if (phase === 'checking') return <p className={styles.checking} role="status">Checking for an existing Verse session…</p>;
   if (phase === 'unauthenticated') {
-    return <SessionGate heading="Connect to Ashlr Verse" command="ashlr verse" subject="Ashlr Verse" mutationField />;
+    return (
+      <Suspense fallback={<p className={styles.checking} role="status">Checking for an existing Verse session…</p>}>
+        <SessionGate heading="Connect to Ashlr Verse" command="ashlr verse" subject="Ashlr Verse" mutationField />
+      </Suspense>
+    );
   }
   return (
     <ToastProvider>

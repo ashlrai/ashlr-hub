@@ -71,8 +71,8 @@ import { MessageMarkdown } from './MessageMarkdown.js';
 import { ToolUseCard, type ToolUseCardProps } from './ToolUseCard.js';
 import { ArrowDownIcon } from './verse-icons.js';
 import { ENGINE_LABEL, formatDuration } from './verse-model.js';
+import { formatTokens, type VerseLiveState } from './verse-store.js';
 import {
-  formatTokens,
   groupTranscriptItems,
   type ToolGroupItem,
   type ToolGroupMember,
@@ -80,8 +80,7 @@ import {
   type TranscriptItem,
   type TranscriptRenderItem,
   type TranscriptSegment,
-  type VerseLiveState,
-} from './verse-store.js';
+} from './verse-transcript.js';
 import styles from './Transcript.module.css';
 
 export interface TranscriptProps {

@@ -5,7 +5,8 @@
  * Needs-you items, Leader memos and Command cards point INTO a surface
  * ("memo:m-7" on Mind, "seat:claude-a" on Apps). Whoever raises it calls
  * `setVerseSection(section, anchor)` (or dispatches VERSE_ANCHOR_EVENT); the
- * shell listens once (VerseApp) and reveals the element here.
+ * shell listens once (VerseApp, through shell/anchor-requests.ts) and reveals
+ * the element here.
  *
  * WHY WAIT, AND FOR HOW LONG. The target surface may be a lazy chunk that has
  * not loaded, a keep-alive surface un-hiding, or a list still fetching its
@@ -80,18 +81,4 @@ export function revealAnchor({ section, anchor }: VerseAnchorRequest, waitMs: nu
     const timer = window.setTimeout(() => finish(null), waitMs);
     check();
   });
-}
-
-/** The shell's one listener. Returns the unsubscribe. */
-export function subscribeAnchorRequests(eventName: string): () => void {
-  if (typeof window === 'undefined') return () => {};
-  function onAnchor(event: Event): void {
-    const detail = (event as CustomEvent<unknown>).detail;
-    if (typeof detail !== 'object' || detail === null) return;
-    const { section, anchor } = detail as Record<string, unknown>;
-    if (typeof section !== 'string' || typeof anchor !== 'string' || anchor.length === 0 || anchor.length > 200) return;
-    void revealAnchor({ section: section as VerseAnchorRequest['section'], anchor });
-  }
-  window.addEventListener(eventName, onAnchor);
-  return () => window.removeEventListener(eventName, onAnchor);
 }
