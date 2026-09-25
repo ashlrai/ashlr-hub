@@ -37,7 +37,7 @@
  */
 import type { AshlrConfig, EngineId, EngineTier, WorkItem, WorkSource } from '../types.js';
 import type { EffectivePolicy } from '../authority/types.js';
-import { describeExclusions, routeSeat, ROUTER_CONTEXT_FIT_FRACTION } from '../routing/router.js';
+import { describeExclusions, routeSeat, ROUTER_CONTEXT_FIT_FRACTION, type RouterWeights } from '../routing/router.js';
 import { engineOfSeatId } from '../routing/policy.js';
 import { reasonSentences } from '../routing/seat-reasons.js';
 import type { SeatCapacity } from '../routing/headroom.js';
@@ -383,6 +383,12 @@ export interface DispatchRouterContext {
   /** The engine each lane dispatches through; null when none is installed / allowed. */
   laneEngines: Readonly<Record<FleetEngine, EngineId | null>>;
   demotions: readonly RouteDemotion[];
+  /**
+   * The λ routing weights this tick (`resolveRoutingWeights`: Leader ›
+   * harness › baseline). Absent = the router's defaults, which keep its
+   * explicit engine order.
+   */
+  weights?: Partial<RouterWeights>;
   /** Enrolled path (WorkItem.repo) → GitHub nameWithOwner; null when unknown. */
   repoOf: (repoPath: string) => string | null;
   /** Engine tier (sandboxed-engine engineTierOf), injected so this module stays light. */
@@ -487,7 +493,10 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
   }
 
   const request = routingRequestFor(item);
-  const decision = routeSeat(request, ctx.capacity, ctx.budget, { nowMs: ctx.nowMs });
+  const decision = routeSeat(request, ctx.capacity, ctx.budget, {
+    nowMs: ctx.nowMs,
+    ...(ctx.weights ? { weights: ctx.weights } : {}),
+  });
   const extra: SeatExclusion[] = [];
   const kind = item.source;
   let chosenSeat: string | null = null;

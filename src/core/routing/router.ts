@@ -18,6 +18,9 @@
  *      `enginePreference` — then more headroom first, then seat id. An
  *      explicit order is less clever than a weighted score, and that is the
  *      point: every decision has a one-sentence "why" a person can check.
+ *      The λ routing weights (`RouterWeights`, from the harness / Leader
+ *      `router.tune`) tilt that order — see `seatScore` — and at their
+ *      defaults they reproduce it exactly.
  *
  * Local models are never excluded for quality; they are ranked after the paid
  * seats where quality matters (high difficulty, leader work), so work still
@@ -43,7 +46,49 @@ export const ROUTER_CONTEXT_FIT_FRACTION = 0.8;
 export interface RouteOptions {
   nowMs: number;
   readingMaxAgeMs?: number;
+  /** The λ objective weights; absent = `DEFAULT_ROUTER_WEIGHTS` (today's explicit order). */
+  weights?: Partial<RouterWeights>;
+  /**
+   * Observed turn latency per seat id, in ms (e.g. a recent median). Only
+   * `lambdaLatency` reads it; a seat absent here is scored neutral. Absent =
+   * no latency evidence, so latency cannot move anything.
+   */
+  latencyMs?: Readonly<Record<string, number>>;
 }
+
+/**
+ * The router's λ objective weights — the same three numbers as
+ * learn/harness-types.ts `HarnessRoutingWeights` (restated structurally so
+ * this browser-safe module does not import the harness). Each λ is ≥ 0.
+ *
+ *   lambdaCost     — how hard to lean on engine COST against the mode's
+ *                    quality/cost order. 1 = the mode's own balance; above 1
+ *                    leans toward cheaper engines, below 1 toward pricier
+ *                    (higher-quality) ones.
+ *   lambdaPressure — how much a seat's remaining HEADROOM counts. 1 = a
+ *                    tie-breaker inside one engine (today); higher lets a
+ *                    much emptier seat of a less-preferred engine win; 0
+ *                    ignores headroom.
+ *   lambdaLatency  — how much observed LATENCY (`RouteOptions.latencyMs`)
+ *                    counts. At the default 0.25 it only separates seats
+ *                    whose headroom is equal.
+ */
+export interface RouterWeights {
+  lambdaCost: number;
+  lambdaPressure: number;
+  lambdaLatency: number;
+}
+
+/**
+ * Defaults = the compiled baseline (`BASELINE_HARNESS_CONFIG.routing`; a test
+ * pins the two together). At these values `rank` orders seats exactly as the
+ * pre-λ router did.
+ */
+export const DEFAULT_ROUTER_WEIGHTS: Readonly<RouterWeights> = Object.freeze({
+  lambdaCost: 1,
+  lambdaPressure: 1,
+  lambdaLatency: 0.25,
+});
 
 const ENGINE_NAMES: Readonly<Record<BudgetEngine, string>> = {
   claude: 'Claude',
@@ -54,6 +99,14 @@ const ENGINE_NAMES: Readonly<Record<BudgetEngine, string>> = {
 
 const CHEAP_FIRST: readonly BudgetEngine[] = ['local', 'grok', 'codex', 'claude'];
 const QUALITY_FIRST: readonly BudgetEngine[] = ['claude', 'codex', 'grok', 'local'];
+
+/**
+ * Relative cost step per engine (0 = free). CHEAP_FIRST is exactly the cost
+ * ladder, so it doubles as the table — one fact, not two.
+ */
+function costStep(engine: BudgetEngine): number {
+  return CHEAP_FIRST.indexOf(engine);
+}
 
 /**
  * Engine order for one request. Low-difficulty and bulk work always goes to
@@ -149,25 +202,113 @@ function compareIds(a: string, b: string): number {
 }
 
 /**
- * Rank eligible verdicts: engine order, then more headroom, then the caller's
- * order (seat discovery lists the operator's preferred local tags first —
- * `preferredLocalTags` in seats.ts — so two free local seats with equal
- * headroom resolve to the one he chose), then id.
+ * Scale of the headroom term at λ = 1: its whole range (100% left vs unknown)
+ * is worth half an engine step, so at the default weight it can only order
+ * seats of the SAME engine — exactly the old "then more headroom" key.
  */
-function rank(verdicts: Verdict[], order: readonly BudgetEngine[]): Verdict[] {
+const PRESSURE_SCALE = 0.5;
+
+/**
+ * Scale of the latency term at λ = 1. Headroom percents are whole numbers
+ * (headroom.ts rounds them), so one point of headroom is worth
+ * PRESSURE_SCALE / 101 ≈ 0.00495 at λ = 1. At the default λ = 0.25 the whole
+ * latency range (0.25 × 0.019 = 0.00475) stays below that, which keeps
+ * latency a pure tie-breaker; at λ = 10 it is worth ~38 points of headroom
+ * and still never a whole engine step (0.5 + 0.19 < 1).
+ */
+const LATENCY_SCALE = 0.019;
+
+/** Scores closer than this are a tie (they fall through to caller order, then id). */
+const SCORE_EPSILON = 1e-9;
+
+function resolveWeights(weights: Partial<RouterWeights> | undefined): RouterWeights {
+  // A malformed λ falls back to its default rather than poisoning the ranking
+  // (NaN would make the sort comparator inconsistent).
+  const pick = (key: keyof RouterWeights): number => {
+    const v = weights?.[key];
+    return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : DEFAULT_ROUTER_WEIGHTS[key];
+  };
+  return { lambdaCost: pick('lambdaCost'), lambdaPressure: pick('lambdaPressure'), lambdaLatency: pick('lambdaLatency') };
+}
+
+function isDefaultWeights(w: RouterWeights): boolean {
+  return w.lambdaCost === DEFAULT_ROUTER_WEIGHTS.lambdaCost
+    && w.lambdaPressure === DEFAULT_ROUTER_WEIGHTS.lambdaPressure
+    && w.lambdaLatency === DEFAULT_ROUTER_WEIGHTS.lambdaLatency;
+}
+
+/**
+ * Latency per seat normalised to [0, 1] across the seats with evidence
+ * (fastest 0, slowest 1). A seat without evidence gets 0.5: unknown latency
+ * is neither rewarded nor punished. No evidence anywhere = all 0.
+ */
+function latencyTerms(verdicts: readonly Verdict[], latencyMs: RouteOptions['latencyMs']): Map<string, number> {
+  const out = new Map<string, number>();
+  const known = verdicts.flatMap((v) => {
+    const ms = latencyMs?.[v.capacity.seatId];
+    return typeof ms === 'number' && Number.isFinite(ms) && ms >= 0 ? [ms] : [];
+  });
+  if (known.length === 0) return out;
+  const min = Math.min(...known);
+  const span = Math.max(...known) - min;
+  for (const v of verdicts) {
+    const ms = latencyMs?.[v.capacity.seatId];
+    const has = typeof ms === 'number' && Number.isFinite(ms) && ms >= 0;
+    out.set(v.capacity.seatId, !has ? 0.5 : span === 0 ? 0 : (ms - min) / span);
+  }
+  return out;
+}
+
+/**
+ * The λ objective for one seat — LOWER is better:
+ *
+ *   position                              quality: the mode's engine order (fixed anchor)
+ *   + (λcost − 1)   · costStep            cost:    one engine step per cost step per unit of λ
+ *   + λpressure     · PRESSURE_SCALE · p  headroom: p = (100 − left%) / 101, unknown = 1
+ *   + λlatency      · LATENCY_SCALE  · l  latency: l from `latencyTerms`
+ *
+ * Why `λcost − 1`: the engine order ALREADY prices cost in for the mode
+ * (CHEAP_FIRST is literally the cost ladder), so λcost = 1 must add nothing —
+ * the harness baseline documents "λ = 1 for cost and pressure keeps the A9
+ * router's own ordering". At λcost = 2 a quality-first order flattens (every
+ * engine ties and headroom decides); at 0 a cheap-first order does.
+ */
+function seatScore(v: Verdict, position: number, w: RouterWeights, latency: number): number {
+  const left = v.headroom?.autonomyHeadroomPercent ?? -1;
+  const pressure = (100 - left) / 101;
+  return position
+    + (w.lambdaCost - 1) * costStep(v.capacity.engine)
+    + w.lambdaPressure * PRESSURE_SCALE * pressure
+    + w.lambdaLatency * LATENCY_SCALE * latency;
+}
+
+/**
+ * Rank eligible verdicts by `seatScore`, then the caller's order (seat
+ * discovery lists the operator's preferred local tags first —
+ * `preferredLocalTags` in seats.ts — so two free local seats with equal
+ * headroom resolve to the one he chose), then id. At the default weights this
+ * is the old lexicographic order — engine, then more headroom — because the
+ * headroom and latency terms together stay under one engine step.
+ */
+function rank(verdicts: Verdict[], order: readonly BudgetEngine[], w: RouterWeights, latencyMs: RouteOptions['latencyMs']): Verdict[] {
   const position = (engine: BudgetEngine): number => {
     const index = order.indexOf(engine);
     return index === -1 ? order.length : index;
   };
+  const latency = latencyTerms(verdicts, latencyMs);
+  const score = new Map(verdicts.map((v) => [
+    v, seatScore(v, position(v.capacity.engine), w, latency.get(v.capacity.seatId) ?? 0),
+  ]));
   return [...verdicts].sort((a, b) => {
-    const byEngine = position(a.capacity.engine) - position(b.capacity.engine);
-    if (byEngine !== 0) return byEngine;
-    const ha = a.headroom?.autonomyHeadroomPercent ?? -1;
-    const hb = b.headroom?.autonomyHeadroomPercent ?? -1;
-    if (ha !== hb) return hb - ha;
+    const diff = score.get(a)! - score.get(b)!;
+    if (Math.abs(diff) > SCORE_EPSILON) return diff;
     if (a.index !== b.index) return a.index - b.index;
     return compareIds(a.capacity.seatId, b.capacity.seatId);
   });
+}
+
+function formatWeight(n: number): string {
+  return String(Math.round(n * 100) / 100);
 }
 
 function lowerFirst(text: string): string {
@@ -215,7 +356,8 @@ export function routeSeat(
   }));
 
   const order = enginePreference(policy.mode, req);
-  const eligible = rank(verdicts.filter((v) => v.eligible), order);
+  const weights = resolveWeights(opts.weights);
+  const eligible = rank(verdicts.filter((v) => v.eligible), order, weights, opts.latencyMs);
   const exclusions: SeatExclusion[] = verdicts
     .filter((v) => !v.eligible)
     .map((v) => ({
@@ -245,8 +387,13 @@ export function routeSeat(
       : chosen.capacity.free ? ' at no cost' : '';
     const held = exclusions.length === 0 ? ''
       : `; held back ${exclusions.length === 1 ? '1 seat' : `${exclusions.length} seats`} (${listSeatIds(exclusions.map((e) => e.seatId))})`;
+    // Tuned weights can put a seat ahead of the mode's own order, so the
+    // sentence names them; at the defaults it stays byte-identical.
+    const tuned = isDefaultWeights(weights) ? ''
+      : `; routing weights cost ×${formatWeight(weights.lambdaCost)}, headroom ×${formatWeight(weights.lambdaPressure)}, `
+        + `latency ×${formatWeight(weights.lambdaLatency)}`;
     why = `Routed ${who}${describeWork(req)} to ${chosen.capacity.label} (${chosen.capacity.seatId})${roomText}: `
-      + `${policy.mode} mode prefers ${engine} first for this work${held}.`;
+      + `${policy.mode} mode prefers ${engine} first for this work${tuned}${held}.`;
     const lead = hasRoom
       ? ` — ${room}% of its ${windowWord} window left`
       : chosen.capacity.free ? ' — free, no usage window' : '';

@@ -369,6 +369,22 @@ describe('grant scope and backpressure demotion', () => {
   });
 });
 
+describe('routing weights reach the seat ranking', () => {
+  // Medium work in balanced mode prefers Grok, then local. The λ weights the
+  // tick resolves (Leader › harness › baseline) used to stop at best-of-N.
+  it('keeps Grok at the baseline weights and leans to the free local lane when lambdaCost rises', () => {
+    const baseline = routeWorkItem(item({ effort: 3 }), LEGACY_LOCAL, ctx([grok(), local()], {
+      weights: { lambdaCost: 1, lambdaPressure: 1, lambdaLatency: 0.25 },
+    }));
+    expect(baseline.lane).toBe('grok-cli');
+    const cheap = routeWorkItem(item({ effort: 3 }), LEGACY_LOCAL, ctx([grok(), local()], {
+      weights: { lambdaCost: 3, lambdaPressure: 1, lambdaLatency: 0.25 },
+    }));
+    expect(cheap.lane).toBe('local');
+    expect(cheap.seatDecision?.candidates).toEqual([FLEET_LOCAL_SEAT_ID, 'grok']);
+  });
+});
+
 describe('lanes and requests', () => {
   const cfg = { user: { id: 't', name: 'T' } } as unknown as AshlrConfig;
 
