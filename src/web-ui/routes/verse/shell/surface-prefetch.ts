@@ -20,6 +20,7 @@ import { ensureQuery } from '../../../data/cache.js';
 import { modelsQuery, type QueryDef } from '../../../data/queries.js';
 import { overnightQuery } from '../autonomy/overnight-queries.js';
 import { budgetPreviewQuery, budgetQuery } from '../budget/budget-queries.js';
+import { cloudQuery } from '../cloud/cloud-queries.js';
 import {
   authorityQuery,
   fleetHistoryQuery,
@@ -40,7 +41,9 @@ export const SURFACE_PREFETCH: Readonly<Partial<Record<VerseSectionId, readonly 
   // burn-down from this page's own readings ("since Verse opened"), then
   // redraws once the recorded week lands — the reset-on-reload look 3.10.1
   // set out to remove.
-  command: [authorityQuery, fleetLiveQuery, leaderQuery, learningQuery, fleetHistoryQuery, budgetQuery, seatHistoryQuery],
+  // cloudQuery (3.11): the Cloud card's overview — without it a first visit
+  // paints "Reading the cloud lane…" under the burn-downs.
+  command: [authorityQuery, fleetLiveQuery, leaderQuery, learningQuery, fleetHistoryQuery, budgetQuery, seatHistoryQuery, cloudQuery],
   fleet: [fleetLiveQuery, overnightQuery, budgetQuery, budgetPreviewQuery],
   growth: [fleetHistoryQuery, learningQuery, modelsQuery('30d')],
   mind: [leaderQuery, reasoningDigestQuery, verseBootstrapQuery, verseWorkspacesQuery],

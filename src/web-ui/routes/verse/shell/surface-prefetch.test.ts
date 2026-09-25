@@ -72,6 +72,14 @@ describe('surface prefetch', () => {
     expect([...getPaths(fetchMock)].some((path) => path.startsWith('/api/verse/budget/history'))).toBe(true);
   });
 
+  it('warms Command’s Cloud card (3.11), so its first visit paints the credits, not “Reading the cloud lane…”', async () => {
+    const { fetchMock } = stubSurfaceFetch({ kind: 'live' });
+    await prefetchSurfaceData('command');
+    expect(getPaths(fetchMock)).toContain('/api/verse/cloud');
+    // Lazy only: the table reaches the cloud module, VerseApp never does.
+    expect(SURFACE_PREFETCH.command!.map((d) => d.key)).toContain('verse-cloud');
+  });
+
   it('a warmed Growth paints its charts on the very first render — no loading state', async () => {
     stubSurfaceFetch({ kind: 'live' });
     await prefetchSurfaceData('growth');

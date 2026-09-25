@@ -18,6 +18,7 @@ import { formatRelative } from '../autonomy/format.js';
 import type { OptionalFleetRead } from '../autonomy/fleet-contract.js';
 import type { OvernightStatus } from '../autonomy/overnight-contract.js';
 import { describeStopRule } from '../autonomy/overnight-model.js';
+import { CloudLaneChip } from '../cloud/CloudLaneChip.js';
 import { Card, CardNote, MicroLabel } from '../command/Surface.js';
 import type { OptionalRead } from '../command/surface-data.js';
 import { fleetDarkStatus } from './dark-since.js';
@@ -69,6 +70,7 @@ export function LanesStrip({ live }: { live: FleetLiveSnapshotV1 | null }) {
         {live.lanes.map((l) => (
           <LaneChip key={l.lane} lane={l} />
         ))}
+        <CloudLaneChip classes={{ lane: styles.lane, name: styles.laneName, sep: styles.laneSep, slots: styles.laneSlots }} />
       </ul>
       {notes.length > 0 ? (
         <ul className={styles.laneNotes} aria-label="Why lanes are limited">

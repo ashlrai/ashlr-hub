@@ -11,6 +11,7 @@
  *      — Needs you reads the shell's shared activity store (C1 useActivity).
  *   5. Is it working?                                         (5 KPI tiles)
  *   6. Will it run out?                                       (burn-down per seat, 3 each)
+ *      — and the cloud lane's estimated credits and tasks      (3.11 CloudCard)
  *   7. What ran?                                              (12 h swimlane)
  * At 375 px: Needs you, Leader, KPIs two per row, burn-downs in a snap
  * strip, then a 6 h swimlane — the DOM order below IS that order.
@@ -39,6 +40,7 @@ import { KpiRow } from '../command/KpiRow.js';
 import { LeaderCard } from '../command/LeaderCard.js';
 import { NeedsYouCard } from '../command/NeedsYouCard.js';
 import { SeatBurnDowns } from '../command/SeatBurnDowns.js';
+import { CloudCard } from '../cloud/CloudCard.js';
 import { Cell, Surface } from '../command/Surface.js';
 import { SinceStrip, VerdictLine, useLastLooked } from '../command/VerdictLine.js';
 import { useActivity } from '../shell/useActivity.js';
@@ -209,6 +211,9 @@ export function CommandSection() {
       </Cell>
       <Cell span={12}>
         <SeatBurnDowns burns={burns} now={now} compact={compact} />
+      </Cell>
+      <Cell span={12}>
+        <CloudCard actions={actions} now={now} />
       </Cell>
       <Cell span={12}>
         <Swimlane
