@@ -339,6 +339,56 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.11.2] — 2026-09-25 UTC — the Ashlr.AI mark, a lighter first paint, and a release loop measured in minutes
+
+3.11.1 was tagged but never published to npm. 3.11.2 includes everything in it.
+
+### The Ashlr.AI mark
+
+Verse now carries the Ashlr.AI keystone "A" in its rail, the macOS app icon, the menu-bar icon and on verse.ashlr.ai
+(the header and the favicon). The mark was traced from the brand's own file, `ashlar-landing`
+`public/logos/ashlar-mark.png`: navy `#1A2B3C` legs around an electric-blue `#2563EB` core. In the app, the legs take
+the ink colour so the mark reads in light and dark themes. The menu-bar icon is a dedicated template image, so it
+follows the macOS menu bar.
+
+### Faster first paint, built by Verse itself
+
+Chat's first-paint JavaScript fell from 369.9 KB to 349.7 KB, meeting the 350 KB target set in 3.10. The build now
+fails above 352 KB. The work came from Verse's own cloud self-improvement (#478).
+
+### A release loop measured in minutes
+
+- **`npm run gate`** runs the static checks in parallel with caching, then only the tests your change can reach
+  (backend and web), plus a smoke set that must always pass. Known environmental failures are listed with reasons
+  and reported, never hidden. `npm run gate:full` runs everything.
+- **`npm run ship:local`** builds, packs and installs the release as your CLI. It updates Ashlr.app with the
+  sidecar and web assets (and the native shell with `--native`), keeping the previous build aside, never deleting
+  it. It then re-signs the app, restarts the background services and waits for Verse to answer. `--dry-run` shows
+  every step.
+- See `docs/RELEASING-LOCALLY.md`.
+
+### Also from self-improvement
+
+- **#480:** the local production gate no longer fails on the `desktop/src-tauri/gen/` folder a Tauri build leaves
+  behind, while a truly unexpected file still fails it.
+- **#477:** fixes Dependabot alert #32. The vulnerable `rustls` in the desktop app is updated, and there's a
+  regression test.
+
+### Resource bar fix
+
+The rail's resource bar now includes the budget view, as the drawer does. Claude and Grok batteries show their real
+windows instead of an empty "—".
+
+### Verification
+
+Verified with the new gate itself. `npm run gate` against master took 5m24s for this 59-file change and passed: all
+static checks, first paint at 349.7 KB, 3,170 related web tests and 4,756 related backend tests (the rest were
+skipped). Separately, the full web suite (4,649 tests) and the Rust tests (173) pass.
+
+On the way, the gate caught two things, both fixed. A backend test imported a function the first-paint work had
+moved. And `compaction-point.ts`, split out of `context-math.ts`, joined the authority import closure; that
+growth was reviewed and accepted.
+
 ## [3.11.1] — 2026-09-25 UTC — you can see who you're running on, all the time
 
 ### Provider logos
