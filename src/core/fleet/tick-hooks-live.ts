@@ -810,10 +810,17 @@ export interface LiveTickHooks extends TickHooks {
   lastTickState(): FleetTickStateV1 | null;
   /**
    * B-U9: the harness this tick's producers run with — its version (null =
-   * baseline) and the producer prompt overlay loop.ts appends to the goal.
+   * baseline), the producer prompt overlay loop.ts appends to the goal, and
+   * (V3.11) the per-lane effort / sampling loop.ts forwards to the engine
+   * invocation (run/harness-dispatch.ts maps them to each engine's flags).
    * null when no tick context is ready (then nothing dispatches anyway).
    */
-  dispatchHarness(): { versionId: string | null; producerPrompt: string | null } | null;
+  dispatchHarness(): {
+    versionId: string | null;
+    producerPrompt: string | null;
+    effort: HarnessConfigV1['effort'];
+    sampling: HarnessConfigV1['sampling'];
+  } | null;
   /**
    * U7: the autonomous best-of-N plan for an item this tick already routed
    * (`hooks.route`). null = no plan (no context, or the item was not routed
@@ -1824,13 +1831,18 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       return lastState;
     },
 
-    dispatchHarness(): { versionId: string | null; producerPrompt: string | null } | null {
+    dispatchHarness() {
       const current = ctx;
       if (!current) return null;
       const prompt = current.harness.config.prompts?.producer;
       return {
         versionId: current.harness.versionId,
         producerPrompt: typeof prompt === 'string' && prompt.trim().length > 0 ? prompt : null,
+        // The same tick-read version the prompt overlay and the journal's
+        // harnessVersionId come from, so a run's settings and its outcome
+        // attribution can never name different versions.
+        effort: current.harness.config.effort ?? {},
+        sampling: current.harness.config.sampling ?? {},
       };
     },
 

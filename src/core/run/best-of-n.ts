@@ -864,6 +864,13 @@ async function runBestOfNInternal(
      */
     seatId?: string;
     /**
+     * V3.11: the active harness's per-lane effort / sampling (a standing
+     * dispatch's RunOptions.harness). Every non-shadow candidate gets it and
+     * maps the entry for ITS OWN engine's lane (run/harness-dispatch.ts), so a
+     * mixed grok + local fan-out runs each engine as the harness pins it.
+     */
+    harness?: import('./harness-dispatch.js').DispatchHarness;
+    /**
      * M333: per-candidate engine/model specs. Candidate i runs on
      * specs[i % specs.length] — one candidate per spec when n matches the
      * list length, cycling when the operator asks for more candidates than
@@ -1473,6 +1480,8 @@ async function runBestOfNInternal(
           existingWorktree: sb,
           runId,
           ...seatFor(cEngine as EngineId),
+          // A shadow observes the compiled defaults (its transport is immutable).
+          ...(opts?.harness && shadowConfig.kind !== 'on' ? { harness: opts.harness } : {}),
           ...(observedCandidateStreamClaim
             ? { runOutputStreamClaim: observedCandidateStreamClaim }
             : {}),
@@ -1620,6 +1629,7 @@ async function runBestOfNInternal(
         propose: true,
         runId,
         ...seatFor(cEngine as EngineId),
+        ...(opts?.harness ? { harness: opts.harness } : {}),
         ...(observedCandidateStreamClaim
           ? { runOutputStreamClaim: observedCandidateStreamClaim }
           : {}),

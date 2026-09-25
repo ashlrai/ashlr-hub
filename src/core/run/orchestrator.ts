@@ -2542,6 +2542,7 @@ async function runGoalInternal(
                   ...(effectGeneration ? { effectGeneration } : {}),
                   ...(opts.signal ? { signal: opts.signal } : {}),
                   ...(opts.runId ? { runId: opts.runId } : {}),
+                  ...(opts.harness ? { harness: opts.harness } : {}),
                   deferTerminalAction: true,
                 });
                 titrrUsage = addUsage(titrrUsage, accountedTitrrAttemptUsage(rawApiR.state.usage));
@@ -2861,6 +2862,7 @@ async function runGoalInternal(
               // The SeatRouter's codex seat (RunOptions.seatId): without it a
               // standing codex run is refused as unconfinable.
               ...(opts.seatId ? { seatId: opts.seatId } : {}),
+              ...(opts.harness ? { harness: opts.harness } : {}),
             });
             const fallbackStateWithRetention = withSandboxRetention(
               fallback.state,
@@ -2949,6 +2951,7 @@ async function runGoalInternal(
                 ...(opts.signal ? { signal: opts.signal } : {}),
                 ...(opts.runId ? { runId: opts.runId } : {}),
                 ...(opts.seatId ? { seatId: opts.seatId } : {}),
+                ...(opts.harness ? { harness: opts.harness } : {}),
                 deferTerminalAction: true,
               });
               const retention = sandboxRetentionFrom(rawR);

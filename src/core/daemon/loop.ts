@@ -138,6 +138,7 @@ import { DEFAULT_TICK_HOOKS, type BeforeTickResult, type TickHooks } from './tic
 // authority modules the live hooks import (tests mock activation-permit
 // partially; a static edge would break their module graph).
 import type { LiveTickHooks, StandingRun } from '../fleet/tick-hooks-live.js';
+import type { DispatchHarness } from '../run/harness-dispatch.js';
 import type { AutonomousBestOfNPlan } from '../run/best-of-n-policy.js';
 import type { DispatchOutcome } from '../fleet/fleet-types.js';
 import type { DaemonCapabilityKind } from '../authority/types.js';
@@ -1237,6 +1238,34 @@ export function withHarnessProducerPrompt(goal: string, hooks: TickHooks): strin
   }
   if (!harness?.producerPrompt) return goal;
   return `${goal}\n\n## Fleet harness guidance (${harness.versionId ?? 'baseline'})\n${harness.producerPrompt.trim()}`;
+}
+
+/**
+ * V3.11 (closes the 3.10 known gap): the active harness's per-lane effort and
+ * sampling for a standing dispatch, as `RunOptions.harness`. Before this the
+ * registry could adopt an effort / sampling change and the fleet kept running
+ * every engine at its compiled default — the canary then credited outcomes
+ * to settings that never ran. The sandboxed producers map each lane's entry
+ * to that engine's own flag (run/harness-dispatch.ts).
+ *
+ * null (no live hooks, no tick context, a throwing hook, or a harness that
+ * pins no effort / sampling at all) ⇒ nothing is forwarded and every engine
+ * runs its compiled defaults with a byte-identical argv.
+ */
+export function standingDispatchHarness(hooks: TickHooks): DispatchHarness | null {
+  const live = hooks as Partial<Pick<LiveTickHooks, 'dispatchHarness'>>;
+  if (typeof live.dispatchHarness !== 'function') return null;
+  let harness: ReturnType<LiveTickHooks['dispatchHarness']> = null;
+  try {
+    harness = live.dispatchHarness();
+  } catch {
+    return null;
+  }
+  if (!harness) return null;
+  const effort = harness.effort ?? {};
+  const sampling = harness.sampling ?? {};
+  if (Object.keys(effort).length === 0 && Object.keys(sampling).length === 0) return null;
+  return { versionId: harness.versionId, effort, sampling };
 }
 
 /**
@@ -7035,6 +7064,8 @@ export async function tick(
       // V3.10 (B-U9): a standing tick's producers run with the active harness —
       // its producer prompt overlay rides on the goal (baseline: none).
       const goal = standingTick ? withHarnessProducerPrompt(buildItemGoal(item), hooks) : buildItemGoal(item);
+      // …and its effort / sampling ride on the engine invocation itself.
+      const dispatchHarness = standingTick ? standingDispatchHarness(hooks) : null;
       const dispatchCfg = dispatchConfigForItem(item, routingCfg);
       const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
       const workItemGenerationId = generatedRepairGenerationId(item) ?? undefined;
@@ -7367,6 +7398,7 @@ export async function tick(
             return runBestOfN(item, routingCfg, {
               n: bestOfN, engine: backend, model: selectedModel,
               ...(standingCodexSeatId ? { seatId: standingCodexSeatId } : {}),
+              ...(dispatchHarness ? { harness: dispatchHarness } : {}),
               budget: itemBudget,
               ...(_bonCandidates ? { candidates: _bonCandidates as never } : {}),
               ...(_bonCandidateConfigRefusal ? { candidateConfigRefusal: _bonCandidateConfigRefusal } : {}),
@@ -7515,6 +7547,7 @@ export async function tick(
               budget: itemBudget, tools: true, noMemory: false, runId: attemptId,
               ...(selectedModel ? { model: selectedModel } : {}),
               ...(standingCodexSeatId ? { seatId: standingCodexSeatId } : {}),
+              ...(dispatchHarness ? { harness: dispatchHarness } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,
               signal: dispatchSignal,
             });

@@ -97,6 +97,13 @@ import {
   resolveGrokCliSeat,
 } from './engine-registry.js';
 import { buildOpenAICompatibleClient } from './provider-client.js';
+import {
+  applyHarnessToEngineCommand,
+  describeHarnessApplication,
+  harnessApiModelRequest,
+  harnessTuningFor,
+  type DispatchHarness,
+} from './harness-dispatch.js';
 import { runTask, type ReserveModelStep } from './agent-loop.js';
 import { MAX_GOVERNED_OUTPUT_TOKENS } from './model-call-authority.js';
 import { adaptivePromptsEnabled } from './model-profile.js';
@@ -233,6 +240,13 @@ export interface RunEngineSandboxedOptions {
   seatId?: string;
   /** Internal whole-attempt generation for mutating-tool evidence. */
   effectGeneration?: string;
+  /**
+   * V3.11: the active harness's per-lane effort / sampling for a standing
+   * fleet dispatch (RunOptions.harness). Mapped to this engine's own flag or
+   * request field by run/harness-dispatch.ts; absent = compiled defaults
+   * (byte-identical argv / request). Ignored under `localShadowBinding`.
+   */
+  harness?: DispatchHarness;
   /** Internal exclusive durable-output authority for a best-of-N candidate. */
   runOutputStreamClaim?: RunOutputStreamClaim;
   /** Internal TITRR handoff: caller emits the one authoritative terminal action. */
@@ -2115,6 +2129,16 @@ export async function runEngineSandboxed(
       model,
       autonomous: true,
     });
+    // V3.11: the adopted harness's effort (and, where a CLI has a carrier,
+    // sampling) rides on the argv BEFORE any rewrite below — the grok-cli
+    // direct exec and the autonomous launcher keep args, so it survives both.
+    const harnessTuning = harnessTuningFor(engineKey, opts.harness);
+    if (cmd && harnessTuning) {
+      const tuned = applyHarnessToEngineCommand(engineKey, cmd, harnessTuning);
+      cmd = tuned.cmd;
+      const line = describeHarnessApplication(engineKey, harnessTuning, tuned.application);
+      if (line) emitSinkEvent(streamSink, { kind: 'log', taskId: 't1', text: line });
+    }
 
     // M248/MCP safety: inject the worktree MCP config strictly for Claude so
     // daemon runs get only the sandbox-local ashlr MCP server, not global MCPs.
@@ -2678,12 +2702,14 @@ export async function runEngineSandboxed(
                     `${goal}\n\n[verify-to-green] A previous attempt failed verification. ` +
                     `Fix ONLY what is needed to make the checks pass — do not start new work.\n` +
                     `Verification failure (tail):\n${failureTail}`;
-                  const repairCmd = buildEngineCommand(engine, repairGoal, cfg, {
+                  const builtRepairCmd = buildEngineCommand(engine, repairGoal, cfg, {
                     cwd: sb.worktreePath,
                     model,
                     autonomous: true,
                   });
-                  if (!repairCmd) return null;
+                  if (!builtRepairCmd) return null;
+                  // A repair turn is the same dispatch: same harness settings.
+                  const repairCmd = applyHarnessToEngineCommand(engineKey, builtRepairCmd, harnessTuning).cmd;
                   incrementRunActionCount(actionCounts, 'verifyRepairAttempts');
                   incrementRunActionCount(actionCounts, 'spawnAttempts');
                   const r = await spawnEngine(repairCmd, cfg, {
@@ -3467,12 +3493,21 @@ export async function runApiModelSandboxed(
     // qwen2.5:72b confirms tool_calls — treat all local-coder models as tool-capable.
     const supportsTools = true;
 
+    // V3.11: the adopted harness's local-lane effort / sampling as request
+    // fields. Never on a verified shadow — its transport binding is immutable
+    // by contract, and a shadow observes the compiled defaults.
+    const harnessTuning = shadowBinding ? null : harnessTuningFor(engine, opts.harness);
+    const harnessRequest = harnessApiModelRequest(engine, harnessTuning);
+    const harnessOut = harnessRequest.request;
+    const harnessLine = describeHarnessApplication(engine, harnessTuning, harnessRequest.application);
+    if (harnessLine) emitSinkEvent(streamSink, { kind: 'log', taskId: 't1', text: harnessLine });
+
     const client = buildOpenAICompatibleClient(
       baseUrl,
       apiKey,
       model,
       supportsTools,
-      undefined,
+      harnessOut.temperature,
       opts.signal,
       // `cfg` is threaded so provider-client's endpoint-level local-only gate
       // sees the PERSISTED setting rather than falling back to the ambient
@@ -3491,7 +3526,12 @@ export async function runApiModelSandboxed(
           // ever set on the shadow path, and the fleet's agent-state promotion
           // below needs it on the ordinary one — which is the path the local
           // fleet actually takes.
-        : { onRequestStart: noteProviderContacted, cfg },
+        : {
+            onRequestStart: noteProviderContacted,
+            cfg,
+            ...(harnessOut.topP !== undefined ? { topP: harnessOut.topP } : {}),
+            ...(harnessOut.reasoningEffort !== undefined ? { reasoningEffort: harnessOut.reasoningEffort } : {}),
+          },
     );
 
     // Engineer tools scoped to the sandbox worktree — write/exec enabled so the
@@ -3521,8 +3561,12 @@ export async function runApiModelSandboxed(
         promptTokenReservation >= remainingTokens
       ) return undefined;
 
+      // The harness may LOWER the per-call cap (never raise it past the
+      // governed ceiling); the reservation uses the same number, so budget
+      // accounting and the wire agree.
       const maxOutputTokens = Math.min(
         MAX_GOVERNED_OUTPUT_TOKENS,
+        harnessOut.maxOutputTokens ?? Number.POSITIVE_INFINITY,
         remainingTokens - promptTokenReservation,
       );
       usage.tokensIn += promptTokenReservation;

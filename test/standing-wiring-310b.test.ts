@@ -414,7 +414,24 @@ describe('B-U9 — harness, canary, verdicts, experiments', () => {
     await hooks.beforeTick(ctx);
     expect(calls.canary).toBe(1);
     expect(calls.order.indexOf('canary')).toBeLessThan(calls.order.indexOf('harness'));
-    expect(hooks.dispatchHarness()).toEqual({ versionId: 'h-0003', producerPrompt: 'Re-run the project tests before claiming success.' });
+    expect(hooks.dispatchHarness()).toEqual({ versionId: 'h-0003', producerPrompt: 'Re-run the project tests before claiming success.', effort: {}, sampling: {} });
+  });
+
+  it('hands the adopted harness effort and sampling to dispatch (3.10 known gap)', async () => {
+    w.harnessVersion = 'h-0004';
+    w.harnessConfig = {
+      ...BASELINE_HARNESS_CONFIG,
+      effort: { codex: 'high', local: 'medium' },
+      sampling: { local: { temperature: 0.2, topP: null, maxOutputTokens: 2048 } },
+    } as HarnessConfigV1;
+    const hooks = createLiveTickHooks({ deps: deps() });
+    await hooks.beforeTick(ctx);
+    expect(hooks.dispatchHarness()).toEqual({
+      versionId: 'h-0004',
+      producerPrompt: null,
+      effort: { codex: 'high', local: 'medium' },
+      sampling: { local: { temperature: 0.2, topP: null, maxOutputTokens: 2048 } },
+    });
   });
 
   it('credits G3 verdicts to the version each dispatch ran with, once', async () => {
@@ -443,7 +460,7 @@ describe('B-U9 — harness, canary, verdicts, experiments', () => {
     expect(calls.journal.find((r) => r.type === 'dispatch')).not.toHaveProperty('harnessVersionId');
     expect(await hooks.recordVerdicts([gate('p-x', 'pass')])).toBe(0);
     // Dispatch still runs on the baseline config.
-    expect(hooks.dispatchHarness()).toEqual({ versionId: null, producerPrompt: null });
+    expect(hooks.dispatchHarness()).toEqual({ versionId: null, producerPrompt: null, effort: {}, sampling: {} });
   });
 
   it('runs experiments only in idle or overnight windows, one at a time, and stops them when authority goes', async () => {

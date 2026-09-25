@@ -2198,6 +2198,14 @@ export interface RunOptions {
   workItemGenerationId?: string;
   /** Optional originating backlog scanner/source for causal tracing. */
   workSource?: WorkSource;
+  /**
+   * V3.11: the active harness's per-lane effort / sampling for a STANDING
+   * fleet dispatch (loop.ts reads it from the tick's `dispatchHarness`).
+   * Forwarded to the sandboxed producers, which map it to the engine's own
+   * flag / request field (run/harness-dispatch.ts). Absent = the compiled
+   * engine defaults, byte-identical argv.
+   */
+  harness?: import('./run/harness-dispatch.js').DispatchHarness;
 }
 
 /** A single message in a chat exchange with a provider. */
