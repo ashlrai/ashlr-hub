@@ -71,6 +71,8 @@ interface TrackBHooks {
   states?: NeedsYouProducerStates;
   autonomy: (() => VerseAutonomyBadge | null) | null;
   latestMemoAt: (() => string | null) | null;
+  /** 3.11 cloud lane producer (core/cloud/cloud-api.ts); optional so older hooks / test fakes still conform. */
+  cloud?: (() => NeedsYouItem[]) | null;
 }
 
 const NO_HOOKS: TrackBHooks = { producers: { authority: null, fleet: null, leader: null }, states: {}, autonomy: null, latestMemoAt: null };
@@ -93,6 +95,14 @@ async function importFleetLive(): Promise<ModuleExports | null> {
 async function importLeader(): Promise<ModuleExports | null> {
   try { return (await import('./leader-api.js' as string)) as ModuleExports; } catch { return null; }
 }
+/**
+ * The cloud lane module. Importing it also starts its background scheduler
+ * (never under a test runner) — the Verse server's first activity poll is
+ * what brings the cloud lane up.
+ */
+async function importCloud(): Promise<ModuleExports | null> {
+  try { return (await import('../cloud/cloud-api.js' as string)) as ModuleExports; } catch { return null; }
+}
 
 function fn<T>(mod: ModuleExports | null, name: string): T | null {
   const value = mod?.[name];
@@ -100,7 +110,7 @@ function fn<T>(mod: ModuleExports | null, name: string): T | null {
 }
 
 export async function resolveTrackBHooks(): Promise<TrackBHooks> {
-  const [authority, fleet, leader] = await Promise.all([importAuthority(), importFleetLive(), importLeader()]);
+  const [authority, fleet, leader, cloud] = await Promise.all([importAuthority(), importFleetLive(), importLeader(), importCloud()]);
   return {
     producers: {
       authority: fn<() => NeedsYouItem[]>(authority, 'needsYouItems'),
@@ -116,6 +126,7 @@ export async function resolveTrackBHooks(): Promise<TrackBHooks> {
     },
     autonomy: fn<() => VerseAutonomyBadge | null>(authority, 'autonomyBadge'),
     latestMemoAt: fn<() => string | null>(leader, 'latestMemoAt'),
+    cloud: fn<() => NeedsYouItem[]>(cloud, 'needsYouItems'),
   };
 }
 
@@ -165,6 +176,7 @@ function currentWiring(): Wiring {
     },
     autonomy: () => (w.hooks.autonomy ? w.hooks.autonomy() : null),
     latestMemoAt: () => (w.hooks.latestMemoAt ? w.hooks.latestMemoAt() : null),
+    cloud: () => (w.hooks.cloud ? w.hooks.cloud() : []),
     ...depsOverride,
   });
   // Mind is only a badge once the Leader module exists; until then the

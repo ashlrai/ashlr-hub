@@ -409,6 +409,38 @@ a producer that has not landed reports `unavailable`. Items carrying a different
 180 days), `~/.ashlr/verse/attachments/<sid>/`, `~/.ashlr/fleet/mirrors/`. Directories 0700, files 0600, and none of them
 inside a repository.
 
+## V3.11 additive contract — the cloud lane
+
+3.11 adds one mounted module after `budget`: **cloud** (`cloud/cloud-api.ts`, wire shapes and constants in
+`cloud/types.ts`). Same mount rules as the Track A modules above. Nothing here merges, and nothing touches GitHub
+except the tracker's read-only `gh pr list`.
+
+| Route | Body / query | Response |
+|---|---|---|
+| `GET /api/verse/cloud` | no query parameters | `CloudOverviewResponse` (seat, budget view, newest ≤ 100 tasks, backlog). Reads local state only; refreshes nothing. |
+| `POST /api/verse/cloud/launch` | `CloudLaunchRequest { repo, prompt, baseBranch?, title?, origin? }` — `repo` is `owner/name`, `origin` is `chat` \| `operator` \| `cli` (default `operator`); body ≤ 128 KiB (the prompt may be 20 000 characters; the service truncates past that) | `CloudLaunchResponse`: 200 when launched; **409 with the same body** when refused (budget, seat) or when the launch failed (`failure` names why, `error` says it plainly) |
+| `POST /api/verse/cloud/budget` | `CloudBudgetUpdate` (any subset; numbers ≥ 0, counts whole; the store clamps maxima) | `CloudBudgetView` |
+| `POST /api/verse/cloud/refresh` | `{}` | `{ checked, updated }` — joins a scheduled refresh already running |
+| `POST /api/verse/cloud/improve` | `CloudImproveRequest { count? }` (1–5, default 1) | `CloudImproveResponse` — the operator's button: the launch gate only, not the self-improvement gate |
+| `POST /api/verse/cloud/tasks/<id>/dismiss` | `{}` | `{ ok: true, task }` — marks the local record `closed` with "Dismissed in Verse."; never touches GitHub. 404 unknown id, 409 for a merged task or one still launching |
+
+- **Gates and input.** GET behind the read session; every POST 404 unless dispatch is allowed, then token + JSON
+  `Content-Type`, then the body cap (4 KiB except launch). Unknown keys and query parameters are 400
+  `VERSE_INVALID` with a plain sentence. A service error is a bare 500 `cloud request failed` — its text can quote a
+  checkout path, so it is never forwarded.
+- **Scheduler.** Starts when the module first loads (the Verse server's first activity poll imports it), never under a
+  test runner; `ASHLR_CLOUD_AUTO=0` disables it. Every 10 min it refreshes tasks from GitHub; 2 min after start and
+  then hourly it runs self-improvement (`runSelfImprove({ auto: true })`, which also needs the self-improvement switch
+  and gate). Runs never overlap; a failure is logged once per distinct error.
+- **Needs you.** `cloud-api.ts` exports `needsYouItems()` (pure, cached, rebuilt off the caller's stack) and
+  `activity-api.ts` merges it. It adds no source or kind: a task whose PR is open is a `fleet` / `owner-lane-pr` item
+  ("Cloud task ready for review: …", the report summary, target = the PR); a launch that failed in the last 24 h is a
+  `chats` / `chat-failed` item with the plain reason, targeting Command. Both carry a Dismiss action (the route above).
+- **CLI.** `ashlr cloud launch|list|refresh|improve|budget|backlog` (`src/cli/cloud.ts`) calls the same service
+  in-process and never starts the scheduler. Output uses local times and no absolute paths; `--json` prints the wire
+  shapes.
+- **Private state.** `~/.ashlr/cloud/` (tasks, budget, backlog, launch checkouts); 0700 / 0600.
+
 ## Definition of done
 - `npm run typecheck && npm run typecheck:web && npm run lint && npm run test:web && npx vitest run test/verse*.test.ts` green.
 - Live: `ashlr verse --no-open --json` → open `/verse/` → new chat on a local seat → two turns with memory across turns → context meter moves → stop works.
