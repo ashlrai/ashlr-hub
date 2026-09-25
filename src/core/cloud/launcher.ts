@@ -14,10 +14,11 @@
  * into an API-key one, which cloud sessions refuse.
  */
 import { spawn } from 'node:child_process';
-import { join } from 'node:path';
+import { chmodSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 
 import { readPrivateFileCapped } from '../verse/preferences.js';
-import { ashlrHome } from './store.js';
+import { ashlrHome, cloudHome } from './store.js';
 import { CLOUD_LAUNCH_TIMEOUT_MS, CLOUD_SEAT_ID, type CloudLaunchFailureCode } from './types.js';
 
 export type CloudLaunchResult =
@@ -31,6 +32,8 @@ export interface CloudLaunchDeps {
   run?: (argv: string[], opts: { cwd: string; timeoutMs: number }) => Promise<{ output: string; code: number | null; timedOut: boolean }>;
   platform?: NodeJS.Platform;
   timeoutMs?: number;
+  /** Mark the launch folder trusted for the seat (default: trustCloudCheckoutFolder). */
+  trustFolder?: (cwd: string) => void;
 }
 
 export const SEAT_NOT_READY_REASON = "The Claude seat isn't set up on this Mac.";
@@ -132,9 +135,11 @@ function defaultRun(argv: string[], opts: { cwd: string; timeoutMs: number }): P
       child = spawn(argv[0]!, argv.slice(1), {
         cwd: opts.cwd,
         env: cloudLaunchEnv(),
-        // stdin stays open (never written) so script(1) does not forward an
-        // EOF to the CLI before it has printed the session.
-        stdio: ['pipe', 'pipe', 'pipe'],
+        // stdin is /dev/null: macOS script(1) calls tcgetattr on its stdin and
+        // aborts ("Operation not supported on socket") when that is a pipe.
+        // Verified 2026-09-24: with /dev/null the CLI prints the session and
+        // exits 0 on its own.
+        stdio: ['ignore', 'pipe', 'pipe'],
         detached: true,
         windowsHide: true,
       });
@@ -247,6 +252,39 @@ export function parseCloudLaunchOutput(raw: string): CloudLaunchResult {
 // Launch
 // ---------------------------------------------------------------------------
 
+/**
+ * A brand-new folder makes Claude Code stop at its interactive "Do you trust
+ * this folder?" prompt, which a scripted --cloud launch can never answer (it
+ * times out). Verse only ever launches from its OWN isolated checkouts
+ * (<cloudHome>/checkouts/<owner>__<name>, fresh clones of the operator's
+ * GitHub repo), so it records trust for exactly those folders in the seat's
+ * native-state .claude.json — once per folder, merged into the existing
+ * config, written atomically. Anything outside the checkouts root, a missing
+ * profile or an unreadable config is left alone (never throws).
+ */
+export function trustCloudCheckoutFolder(cwd: string, seat: string = CLOUD_SEAT_ID): void {
+  try {
+    const root = resolve(cloudHome(), 'checkouts') + sep;
+    const folder = resolve(cwd);
+    if (!folder.startsWith(root)) return;
+    const profile = JSON.parse(readFileSync(join(ashlrHome(), 'native-profiles', seat, 'profile.json'), 'utf8')) as { nativeStatePath?: unknown };
+    if (typeof profile.nativeStatePath !== 'string' || profile.nativeStatePath === '') return;
+    const configPath = join(profile.nativeStatePath, '.claude.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    if (config === null || typeof config !== 'object' || Array.isArray(config)) return;
+    const projects = (config.projects && typeof config.projects === 'object' && !Array.isArray(config.projects)
+      ? config.projects : {}) as Record<string, Record<string, unknown>>;
+    if (projects[folder]?.hasTrustDialogAccepted === true) return;
+    projects[folder] = { ...(projects[folder] ?? {}), hasTrustDialogAccepted: true };
+    config.projects = projects;
+    const mode = statSync(configPath).mode & 0o777;
+    const tmp = `${configPath}.ashlr-${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(config, null, 2), { mode });
+    chmodSync(tmp, mode);
+    renameSync(tmp, configPath);
+  } catch { /* launch proceeds; a trust prompt then shows up as a timeout */ }
+}
+
 export async function launchCloudSession(opts: { cwd: string; prompt: string }, deps: CloudLaunchDeps = {}): Promise<CloudLaunchResult> {
   if (typeof opts.prompt !== 'string' || opts.prompt.trim() === '') {
     return { ok: false, failure: 'unknown', message: 'There was no task text to launch.' };
@@ -256,6 +294,7 @@ export async function launchCloudSession(opts: { cwd: string; prompt: string }, 
   const argv = cloudPtyArgv(seatArgv, opts.prompt, deps.platform ?? process.platform);
   if (!argv) return { ok: false, failure: 'unknown', message: 'Cloud sessions can only be launched on macOS or Linux.' };
   const timeoutMs = deps.timeoutMs ?? CLOUD_LAUNCH_TIMEOUT_MS;
+  (deps.trustFolder ?? trustCloudCheckoutFolder)(opts.cwd);
   let result: { output: string; code: number | null; timedOut: boolean };
   try {
     result = await (deps.run ?? defaultRun)(argv, { cwd: opts.cwd, timeoutMs });

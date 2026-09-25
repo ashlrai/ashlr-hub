@@ -21,7 +21,9 @@ import {
   readCloudSeatArgv,
   shellQuote,
   stripTerminalSequences,
+  trustCloudCheckoutFolder,
 } from '../src/core/cloud/launcher.js';
+import { cloudHome } from '../src/core/cloud/store.js';
 
 /** As captured from `script -q /dev/null claude --cloud …`: colour, a cursor-hide, an OSC 8 hyperlink and CRLF endings. */
 const SUCCESS_RAW = [
@@ -247,4 +249,41 @@ describe('launchCloudSession', () => {
     });
     expect(res).toEqual({ ok: true, sessionId: 'session_fake1', url: 'https://claude.ai/code/session_fake1', title: 'Tidy docs' });
   }, 10_000);
+});
+
+describe('trustCloudCheckoutFolder', () => {
+  function seatWithConfig(config: unknown): string {
+    const state = path.join(home, '.ashlr', 'native-profiles', 'claude-a', 'native-state');
+    fs.mkdirSync(state, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(path.dirname(state), 'profile.json'), JSON.stringify({ nativeStatePath: state }));
+    const configPath = path.join(state, '.claude.json');
+    fs.writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
+    return configPath;
+  }
+
+  it('marks a Verse checkout trusted without disturbing the rest of the config', () => {
+    const configPath = seatWithConfig({ theme: 'dark', projects: { '/elsewhere': { hasTrustDialogAccepted: true, x: 1 } } });
+    const folder = path.join(cloudHome(), 'checkouts', 'ashlrai__ashlr-hub');
+    trustCloudCheckoutFolder(folder);
+    const after = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    expect(after.theme).toBe('dark');
+    expect(after.projects['/elsewhere']).toEqual({ hasTrustDialogAccepted: true, x: 1 });
+    expect(after.projects[folder]).toEqual({ hasTrustDialogAccepted: true });
+    expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('never trusts a folder outside the cloud checkouts root', () => {
+    const configPath = seatWithConfig({ projects: {} });
+    trustCloudCheckoutFolder(path.join(home, 'Desktop', 'some-repo'));
+    trustCloudCheckoutFolder(path.join(cloudHome(), 'checkouts-evil', 'x'));
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf8')).projects).toEqual({});
+  });
+
+  it('is a silent no-op without a seat profile or with an unreadable config', () => {
+    expect(() => trustCloudCheckoutFolder(path.join(cloudHome(), 'checkouts', 'a__b'))).not.toThrow();
+    const configPath = seatWithConfig({});
+    fs.writeFileSync(configPath, '{not json');
+    expect(() => trustCloudCheckoutFolder(path.join(cloudHome(), 'checkouts', 'a__b'))).not.toThrow();
+    expect(fs.readFileSync(configPath, 'utf8')).toBe('{not json');
+  });
 });
