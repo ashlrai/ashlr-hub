@@ -176,7 +176,7 @@ export function isVerseApiPath(path: string): boolean {
 // ---------------------------------------------------------------------------
 
 /** Stable ids, in mount order. */
-export type MountedApiModuleId = 'health' | 'reasoning' | 'fleet-history' | 'budget';
+export type MountedApiModuleId = 'health' | 'reasoning' | 'fleet-history' | 'budget' | 'cloud';
 
 export interface MountedApiModule {
   id: MountedApiModuleId;
@@ -205,6 +205,8 @@ const DEFAULT_API_MODULES: readonly MountedApiModule[] = [
   { id: 'fleet-history', load: async () => (await import('./fleet-history.js')).handleFleetHistoryApi },
   // 'budget' also answers GET /api/verse/budget/history and records seat history (capacity-history-api.ts).
   { id: 'budget', load: async () => (await import('../routing/capacity-history-api.js')).withCapacityHistory((await import('../routing/budget-api.js')).handleBudgetApi) },
+  // 3.11 cloud lane: /api/verse/cloud/* (core/cloud/cloud-api.ts).
+  { id: 'cloud', load: async () => (await import('../cloud/cloud-api.js')).handleCloudApi },
 ];
 
 let mountedModules: readonly MountedApiModule[] = DEFAULT_API_MODULES;
