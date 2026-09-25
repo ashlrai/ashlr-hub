@@ -339,6 +339,107 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.10.1] — 2026-09-24 UTC — the workbench reads cleanly, and the charts tell the truth
+
+3.10.0 landed on Mason's screen. This release fixes what showed up in the live app: labels piled on top of each
+other, raw timestamps and file paths where people expect words, the model named twice in the composer, and a Claude
+burn-down chart that forgot everything on every reload.
+
+### Charts
+
+- Axis labels no longer collide. When the start, "Resets …" and end labels don't fit, they shorten together
+  ("Fri 11:46 PM", then "Sep 18") before the lowest-priority label is dropped. Within one day, the axis shows clock
+  time only.
+- Ticks come from the step: a 0–1 axis reads 0, 0.2 … 1.0 rather than rounding 0.25 to "0.3", and count data gets
+  whole-number ticks.
+- Placeholder timestamps (epoch 0, anything before 2000) never set a chart's range, so the Growth harness chart no
+  longer starts on "Dec 31". A burst of readings shows as a cluster, not three stacked labels.
+- End-of-line labels move apart, or fall back to the legend. Heatmap digits are drawn without the halo that garbled
+  them. An all-zero funnel shows empty tracks.
+
+### Command
+
+- **Burn-down history survives a reload.** Seat window readings are recorded to
+  `~/.ashlr/routing/capacity-history.jsonl` (0600, at least 8 days kept, capped at 2 MiB, flat runs compressed) by
+  the daemon and by the Verse server every minute, and served at `GET /api/verse/budget/history`. The weekly
+  cards draw the whole window from it.
+- The Claude card shows its full weekly window on a 0–100% axis, with the even-pace line, projection and the 40%
+  reserve. The chart places Claude's reset, which Claude gives only in words ("Sep 25 at 6:59pm
+  (America/New_York)"), on the axis. It does this only for that exact form and only when the time falls within
+  one window of now; otherwise the words stay words.
+- Needs-you rows read like sentences: "Patch · Claude run", a title that ends on a whole word, "2 files · +384 −0",
+  "Test-and-repair loop" rather than "TITRR", and "38 days ago".
+
+### Fleet
+
+- "Why this seat" is one short sentence plus a held-back list. Reasons are structured on the server, so no more
+  ".;" joins and no raw ISO times. "Eligible again" shows the actual reopening time: a reset, "when you switch
+  autonomy on", or Claude's own words.
+- Lane chips read "Local · off", with the shared reason shown once.
+- "Fleet dark since" has one server definition: the last sign of fleet life, set only while the fleet is dark.
+  Every surface uses it. Growth says "No fleet runs or proposals since …" when it means that.
+
+### Chat
+
+- **Composer:** a seat chip names the account and one picker names the model. Nothing truncates; at narrow widths
+  the footer folds into icons and then into the ⋯ sheet. Effort shows only when the model supports it ("Effort:
+  High"). The context ring matches the header's and its tooltip gives exact tokens and the compaction point.
+- **Transcript:** a centred reading column. User turns are a quiet block on the right, and the assistant writes
+  plain prose. Duration and failure links sit in a muted turn footer. File and tool rows show project-relative
+  paths, with the full path on hover.
+- **Chat list:** folder names as they are on disk, with an explained "!" badge and ↑/↓/Enter navigation. "Disconnect
+  from hub" asks first, because it clears unsent drafts.
+
+### Accounts, approvals and panels
+
+- Every account row leads with its state ("Connected · usable now", "Spent · resets Sat 11:46 PM · usable again
+  in 1d 7h", "Signed out · reconnect to use it"), orders usable accounts first, and has a zero-cost **Check again**.
+- One rule for percentages and one prose tidier across the Usage, Budget, Health, Autonomy, Context, Dock and Git
+  panels. Raw ISO times, absolute paths, ".;" joins, "1 repos", untruncatable pills and icon buttons with no
+  tooltip are fixed throughout.
+
+### Shell
+
+- Only the current item in the left rail looks active. Each surface's data and code are warmed at idle after first
+  paint, so first visits skip the skeleton.
+- Keys pressed within a frame of opening the Settings menu no longer land on a different item from the highlighted
+  one, and Escape returns focus to the gear.
+
+### Hardening from review
+
+Before release, an eight-lens review ran over the whole change, with skeptics verifying each finding. All confirmed
+findings are fixed:
+
+- **Capacity history:**
+  - When it grows too large, compaction thins older readings per seat window instead of cutting every seat's first
+    days, so each series keeps its full 8 days.
+  - A Codex weekly-only window stays on its weekly line near its reset.
+  - `ASHLR_CAPACITY_HISTORY=0` now stops every recorder.
+  - The file is opened non-blocking, so a pipe at that path can't hang the server.
+- **Composer:** focus stays put when you change a setting in the ⋯ sheet or when the footer folds, Esc still stops a
+  turn, resizing never re-renders per pixel, and Send shows a sending state.
+- **Warm-up:** it waits for a visible, idle window, steps aside while chat reads are in flight, and never refetches
+  surfaces you haven't opened. Chat first paint stays at 367.1 KB, inside its 370 KB budget.
+- **Charts:** a placeholder reset is shown as unknown, not as "Resets now" with a green verdict. Label widths follow
+  the Display size setting. Heatmap digits and the funnel track meet contrast targets in both themes.
+- **Dates:** day buckets on the Mind, Growth, Usage and Spend charts use your local calendar day. Time-dependent
+  tests pass in every timezone and locale checked, and a test that would have failed on Sep 26 is fixed at the
+  source.
+- **Text:** the prose tidier no longer rewrites `..` inside paths or git ranges. Seat and model ids are shown by
+  name. One percent rule ("<1%", never a rounded "100%") applies everywhere a used share is printed.
+- **Accessibility:** the Disconnect warning, spoken diff stats, the header status chip and the icon-only mode picker
+  are all announced or reachable by keyboard.
+
+### Verification
+
+Checked locally, since GitHub Actions is off:
+- Build, both type-checks, eslint, the real-I/O lane, docs and the first-paint budget pass.
+- 4,476 web tests pass. The Verse and chart suites also pass under America/Los_Angeles and Asia/Tokyo
+  (2,382 tests each).
+- The backend suite passes 29,454 tests. Its 22 failures are the files that already fail on 3.9.1, plus four
+  load-timing flakes that pass when run on their own.
+- Rust and Swift code are unchanged since 3.10.0.
+
 ## [3.10.0] — 2026-09-24 UTC — autonomy with custody, and a workbench you can live in
 
 The fleet could propose but never finish: every change still waited on Mason, and the only way to let it merge
