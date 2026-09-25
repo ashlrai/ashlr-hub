@@ -270,6 +270,17 @@ export const WORKBENCH_COMMANDS = [
   { id: 'palette.open', title: 'Command palette', scope: 'global', keys: [{ key: 'k', mod: true }], group: null, section: 'Navigation' },
   { id: 'needs-you.open', title: 'Open Needs you', scope: 'global', keys: [{ key: 'j', mod: true }], group: 'actions', section: 'Navigation', keywords: ['approvals', 'inbox', 'triage'] },
   { id: 'shortcuts.open', title: 'Keyboard shortcuts', scope: 'global', keys: [{ key: '/', mod: true }], group: 'actions', section: 'Navigation', keywords: ['keys', 'help'] },
+  // The Resources drawer (3.11 C6): the key toggles it, the palette opens it.
+  // ⌘. — not ⇧⌘R, which browsers keep for a hard reload.
+  {
+    id: 'resources.toggle',
+    title: 'Show resources',
+    scope: 'global',
+    keys: [{ key: '.', mod: true }],
+    group: 'actions',
+    section: 'Navigation',
+    keywords: ['accounts', 'seats', 'capacity', 'credits', 'cloud', 'local models'],
+  },
   { id: 'history.back', title: 'Back', scope: 'global', keys: [{ key: '[', mod: true }], group: null, section: 'Navigation', note: 'through surfaces and chats' },
   { id: 'history.forward', title: 'Forward', scope: 'global', keys: [{ key: ']', mod: true }], group: null, section: 'Navigation', note: 'through surfaces and chats' },
   { id: 'chat.recent-next', title: 'Next recent chat', scope: 'global', keys: [{ key: 'tab', ctrl: true }], group: null, section: 'Navigation' },

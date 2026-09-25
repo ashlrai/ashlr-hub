@@ -162,6 +162,21 @@ describe('command catalog — table integrity', () => {
     expect(COMPOSER_WORKBENCH_COMMAND_EVENT).toBe(WORKBENCH_COMMAND_EVENT);
   });
 
+  it('offers the Resources drawer as ⌘. from anywhere and as "Show resources" in the palette (3.11 C6)', () => {
+    const c = findCommand('resources.toggle')!;
+    expect(c).not.toBeNull();
+    expect(c.title).toBe('Show resources');
+    expect(c.scope).toBe('global');
+    expect(c.group).toBe('actions');
+    expect(c.keys).toEqual([{ key: '.', mod: true }]);
+    expect(paletteCommands('actions').map((a) => a.id)).toContain('resources.toggle');
+    expect(shortcutSections().find((s) => s.section === 'Navigation')!.commands.map((a) => a.id)).toContain('resources.toggle');
+    // By physical key, so a layout or Shift that changes event.key still matches.
+    expect(matchCommand(ev('.', { code: 'Period', metaKey: true }), ['global'], 'mac')?.id).toBe('resources.toggle');
+    expect(matchCommand(ev('.', { code: 'Period', ctrlKey: true }), ['composer', 'chat', 'global'], 'other')?.id).toBe('resources.toggle');
+    expect(formatChord(c.keys[0]!, 'mac')).toBe('⌘.');
+  });
+
   it('lets Tab fill a seat for "New chat on…"', () => {
     expect(findCommand('chat.new-on')!.argument).toEqual({ kind: 'seat', prompt: 'Seat' });
   });

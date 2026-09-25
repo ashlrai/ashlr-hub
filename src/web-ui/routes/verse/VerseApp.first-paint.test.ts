@@ -41,6 +41,10 @@ const DYNAMIC = [
   // few-line trigger (prefetchAfterFirstPaint) is on the first-paint path;
   // the static scheduler and its preload list cost ~0.9 KB of chat critical JS.
   './shell/warmup.js',
+  // Resources (3.11 C6): the edge tab, rail button, ⌘. handler and — one
+  // import() further in — the drawer. Only the ~0.7 KB store is static (a
+  // pinned column must take its grid track at first paint).
+  './resources/ResourcesChrome.js',
 ];
 
 const LAZY_ONLY = [
@@ -49,6 +53,12 @@ const LAZY_ONLY = [
   // Reached only through ./shell/warmup.js, never from VerseApp at all.
   './shell/idle-prefetch.js',
   './shell/surface-prefetch.js',
+  // Reached only through the Resources chunk.
+  './resources/ResourcesHandle.js',
+  './resources/ResourcesDrawer.js',
+  './resources/resources-summary.js',
+  './resources/resources-model.js',
+  './resources/resources-queries.js',
 ];
 
 describe('VerseApp keeps non-first-paint modules out of its static imports', () => {

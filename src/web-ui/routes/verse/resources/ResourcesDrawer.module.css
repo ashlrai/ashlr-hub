@@ -1,0 +1,474 @@
+/* Resources — a 360px right-hand panel: over the surface (overlay) or beside
+   it (docked). Tokens only, so light and dark follow the theme. Cards are
+   hairline-separated blocks on the surface; state is a WORD first, a shape
+   second, colour last. */
+
+/* ── Overlay chrome ─────────────────────────────────────────────────── */
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-overlay);
+  display: flex;
+  justify-content: flex-end;
+  background: color-mix(in srgb, var(--bg-overlay) 55%, transparent);
+  animation: fade var(--duration-fast) var(--ease-standard);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  outline: none;
+}
+
+.panel[data-mode='overlay'] {
+  width: min(360px, calc(100vw - var(--space-8)));
+  border-left: 1px solid var(--border-default);
+  box-shadow: var(--shadow-dialog);
+  animation: slide var(--duration-base) var(--ease-decelerate);
+}
+
+.panel[data-mode='overlay'][data-presentation='full'] {
+  width: 100%;
+  border-left: 0;
+}
+
+/* Docked: the shell gives it a grid track; it fills that track. */
+.panel[data-mode='docked'] {
+  width: 100%;
+  border-left: 1px solid var(--border-subtle);
+}
+
+/* ── Head ───────────────────────────────────────────────────────────── */
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: var(--strip-height);
+  /* Clear the desktop title bar (0px in a browser), like the rail. */
+  padding: calc(var(--space-3) + var(--app-titlebar-height, 0px)) var(--space-3) var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.headText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  line-height: var(--text-md-line);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-display);
+}
+
+.headline {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.headActions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+/* ── Body ───────────────────────────────────────────────────────────── */
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-2) var(--space-3) var(--space-4);
+}
+
+.group + .group { margin-top: var(--space-4); }
+
+.groupTitle {
+  margin: var(--space-2) var(--space-1) var(--space-2);
+  color: var(--text-tertiary);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  /* The panel's own ground: tertiary text is certified AA on --bg-surface in
+     both themes (tokens-contrast.test.ts), not on the raised ground. */
+  background: var(--bg-surface);
+  /* Never break inside a word; long names wrap at spaces and carry a tooltip. */
+  overflow-wrap: normal;
+  word-break: normal;
+  hyphens: none;
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.cardName {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: var(--font-weight-semibold);
+}
+
+.plan {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-regular);
+}
+
+/* ── Status ─────────────────────────────────────────────────────────── */
+
+.status {
+  --tone: var(--status-neutral-solid);
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+.status[data-tone='success'] { --tone: var(--status-success-solid); }
+.status[data-tone='warning'] { --tone: var(--status-warning-solid); }
+.status[data-tone='danger'] { --tone: var(--status-danger-solid); }
+
+/* Shape follows the tone: a disc when fine, a ring when tight, a diamond when blocked. */
+.statusDot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: var(--tone);
+  transform: translateY(-1px);
+}
+.status[data-tone='warning'] .statusDot { background: transparent; border: 2px solid var(--tone); }
+.status[data-tone='danger'] .statusDot { border-radius: 1px; transform: translateY(-1px) rotate(45deg) scale(0.9); }
+.status[data-tone='neutral'] .statusDot { background: transparent; border: 1.5px dashed var(--text-tertiary); }
+
+.statusLabel {
+  color: var(--text-primary);
+  font-weight: var(--font-weight-medium);
+}
+
+.statusDetail { white-space: normal; }
+
+.stamp,
+.subtle,
+.fine,
+.reserveLine {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+.stamp { padding-left: calc(7px + var(--space-2)); }
+.subtle { color: var(--text-secondary); }
+.reserveLine { margin-top: var(--space-1); color: var(--text-secondary); }
+
+/* ── Window meters ──────────────────────────────────────────────────── */
+
+.meters,
+.meter[data-single] {
+  display: grid;
+  align-items: center;
+  column-gap: var(--space-2);
+  row-gap: 2px;
+  margin-top: var(--space-2);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+/* One grid for all of a card's windows, so the tracks line up under the
+   longest label ("Weekly fable") instead of wrapping it. */
+.meters { grid-template-columns: max-content minmax(0, 1fr) auto; }
+.meter[data-single] { grid-template-columns: minmax(0, 1fr) auto; }
+
+.meter {
+  --fill: var(--data-seq-5);
+  display: contents;
+}
+.meter[data-level='tight'] { --fill: var(--status-warning-solid); }
+.meter[data-level='limit'] { --fill: var(--status-danger-solid); }
+
+.meterLabel {
+  grid-column: 1;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.meter[data-binding] .meterLabel { color: var(--text-primary); font-weight: var(--font-weight-medium); }
+
+.meterTrack {
+  position: relative;
+  display: block;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--meter-track);
+  overflow: hidden;
+}
+/* No reading: absence drawn as absence (a dashed outline), never a 0% bar. */
+.meterTrack[data-unknown] {
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+}
+
+.meterFill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--fill);
+  transition: width var(--duration-slow) var(--ease-standard);
+}
+
+/* The band kept for the operator, past a tick at 100 − reserve. */
+.meterReserve {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--text-tertiary) 30%, transparent) 0 2px,
+    transparent 2px 4px
+  );
+}
+.meterTick {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  width: 1.5px;
+  background: var(--text-secondary);
+}
+
+.meterValue {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+.meter[data-level='limit'] .meterValue { font-weight: var(--font-weight-semibold); }
+.meter[data-level='unknown'] .meterValue { color: var(--text-tertiary); }
+
+.meterReset {
+  grid-column: 2 / 4;
+  margin-bottom: var(--space-1);
+  color: var(--text-tertiary);
+}
+
+/* ── Actions and notes ──────────────────────────────────────────────── */
+
+.cardActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.note {
+  margin: var(--space-2) var(--space-1) 0;
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+.note[data-tone='danger'] { color: var(--text-primary); font-weight: var(--font-weight-medium); }
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--status-neutral-bg);
+  color: var(--status-neutral-fg);
+  font-size: var(--text-2xs-size);
+  line-height: 18px;
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+}
+.pill[data-tone='success'] { background: var(--status-success-bg); color: var(--status-success-fg); }
+.pill[data-tone='warning'] { background: var(--status-warning-bg); color: var(--status-warning-fg); }
+
+/* ── Local ──────────────────────────────────────────────────────────── */
+
+.runtime {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.runtimeHead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+.runtimeName { font-weight: var(--font-weight-medium); }
+
+.models {
+  display: flex;
+  flex-direction: column;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-1) 0 0;
+  border-top: 1px solid var(--border-subtle);
+  list-style: none;
+}
+
+.model {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  column-gap: var(--space-3);
+  padding: var(--space-1) 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.modelName {
+  min-width: 0;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  overflow-wrap: anywhere; /* model tags have no spaces; break at any point rather than overflow */
+}
+
+.modelFacts {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ── Cloud ──────────────────────────────────────────────────────────── */
+
+.creditsHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 0;
+}
+
+.creditsAmount {
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  line-height: var(--text-md-line);
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.meterFill[data-kind='left'] { background: var(--fill); }
+
+.external {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  align-self: flex-start;
+  margin-top: var(--space-1);
+  color: var(--text-link);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  text-decoration: none;
+  border-radius: var(--radius-xs);
+}
+.external:hover { text-decoration: underline; }
+.external:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.external svg { width: 12px; height: 12px; }
+
+/* ── Foot ───────────────────────────────────────────────────────────── */
+
+.foot {
+  display: flex;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.linkButton {
+  align-self: flex-start;
+  padding: 2px 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--text-link);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  cursor: pointer;
+}
+.linkButton:hover { text-decoration: underline; }
+.linkButton:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Motion ─────────────────────────────────────────────────────────── */
+
+@keyframes fade { from { opacity: 0; } }
+@keyframes slide { from { transform: translateX(100%); } }
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .backdrop,
+  :root:not([data-motion='full']) .panel { animation: none; }
+  :root:not([data-motion='full']) .meterFill { transition: none; }
+}
+:root[data-motion='reduce'] .backdrop,
+:root[data-motion='reduce'] .panel { animation: none; }
+:root[data-motion='reduce'] .meterFill { transition: none; }
