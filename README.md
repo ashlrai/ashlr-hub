@@ -235,6 +235,14 @@ Your own chats ignore reserves.
 
 ---
 
+## Resources, on every page
+
+Press **⌘.** (or click the tab on the right edge, or run "Show resources" from ⌘K) to open the Resources drawer:
+every Claude, Codex and Grok account with its live 5-hour and weekly windows, the share kept for you, reset times
+and Reconnect / Check again; your local models with runtime state and context windows; and your cloud credits.
+It opens over your work or pins as a column beside it, and a dot on the edge tab tells you at a glance whether
+everything is usable.
+
 ## The cloud lane
 
 New in 3.11. Verse can start **Claude Code cloud sessions** (claude.ai/code) and
@@ -945,7 +953,7 @@ preflight soft-warns *consider locus.firm for production* (non-blocking).
 | **3.5–3.8** | Ashlr Verse — the operator console, local seats on llama.cpp, a native folder picker, bounded run windows, local-only that actually prevents spend | Shipped |
 | **3.9** | Context — windows read from each CLI, visible compaction, standard and expansive modes, continue in a fresh chat, shared project memory | Shipped |
 | **3.10** | Autonomy with custody and the workbench — Touch ID grants, budget modes, the Leader, five surfaces, ⌘K and ⌘J, the dock, live reasoning, charts, burn-down history | Shipped |
-| **3.11** | The cloud lane — Claude Code cloud sessions on Claude credits, with an estimated budget and self-improvement | In development |
+| **3.11** | The cloud lane — Claude Code cloud sessions on Claude credits, with an estimated budget and self-improvement — and the Resources drawer (⌘.) | Current |
 
 Releases are built and published locally (GitHub Actions is off); the procedure
 is in [Releasing without CI](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
