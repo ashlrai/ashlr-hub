@@ -11,11 +11,13 @@ import type { UniverseRun, UniverseSummary } from '../src/core/universe/types.js
 import * as universeStore from '../src/core/universe/store.js';
 
 const hooks = vi.hoisted(() => ({ universe: undefined as UniverseSummary | undefined, run: vi.fn() }));
-vi.mock('../src/core/universe/runner.js', () => ({ runUniverseOwned: hooks.run }));
+// The literal pins the runner's exact deadline-before-selection error text.
+vi.mock('../src/core/universe/runner.js', () => ({ runUniverseOwned: hooks.run,
+  RUN_DEADLINE_BEFORE_SELECTION: 'Run deadline exhausted before winner selection' }));
 
 const roots: string[] = [];
 afterEach(() => {
-  vi.restoreAllMocks(); hooks.run.mockReset(); hooks.universe = undefined;
+  vi.useRealTimers(); vi.restoreAllMocks(); hooks.run.mockReset(); hooks.universe = undefined;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -125,4 +127,43 @@ describe('campaign execution with an already acquired experiment lease', () => {
       expect(ownsLocalStoreLock(acquired.lock)).toBe(true);
     } finally { releaseLocalStoreLock(acquired.lock); }
   });
+});
+
+// The runner fails (never selects) a run whose wall deadline passes between its
+// trials and winner selection. At the campaign deadline that is budget
+// exhaustion; anything else must stay a campaign failure.
+describe('campaign settlement of a run failed at its deadline before winner selection', () => {
+  function failedRun(f: ReturnType<typeof fixture>, error: string, pastCampaignDeadline: boolean) {
+    const original = hooks.run.getMockImplementation()!;
+    hooks.run.mockImplementation(async (...args: Parameters<typeof original>) => {
+      const run = await original(...args);
+      Object.assign(run, { status: 'failed', error });
+      if (pastCampaignDeadline) {
+        const deadlineAt = readUniverseCampaign('campaign', f).deadlineAt;
+        expect(deadlineAt).not.toBeNull();
+        vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(Date.parse(deadlineAt!) + 1));
+      }
+      return run;
+    });
+  }
+
+  it('completes on the duration budget once the campaign deadline has passed', async () => {
+    const f = fixture(); failedRun(f, 'Run deadline exhausted before winner selection', true);
+    const final = await runUniverseCampaign('campaign', f);
+    expect(final).toMatchObject({ sourceState: 'healthy', state: 'completed', reason: 'Campaign duration budget exhausted' });
+    expect(final.progress.attempts).toBe(1); expect(hooks.run).toHaveBeenCalledOnce();
+  });
+
+  it('still fails when only the run deadline, not the campaign deadline, has passed', async () => {
+    const f = fixture(); failedRun(f, 'Run deadline exhausted before winner selection', false);
+    expect(await runUniverseCampaign('campaign', f)).toMatchObject({ state: 'failed',
+      reason: 'Universe generation failed; inspect its durable evidence' });
+  });
+
+  it.each(['Run stopped before winner selection', 'Parent comparator scope differs'])(
+    'does not mask a different run failure after the campaign deadline: %s', async (error) => {
+      const f = fixture(); failedRun(f, error, true);
+      expect(await runUniverseCampaign('campaign', f)).toMatchObject({ state: 'failed',
+        reason: 'Universe generation failed; inspect its durable evidence' });
+    });
 });

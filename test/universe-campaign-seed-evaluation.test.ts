@@ -1,6 +1,7 @@
 /** Real private campaign records and lease; evaluator responses are inert, controlled receipts. */
 import { execFileSync } from 'node:child_process';
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -16,13 +17,27 @@ import * as immutableStore from '../src/core/util/immutable-private-record-store
 import { runUniverseCampaign } from '../src/core/universe/campaign.js';
 import { runUniverse } from '../src/core/universe/runner.js';
 import { parsePreparationMeasurementReport } from '../src/core/universe/preparation-measurement-report.js';
+import { resolveBuiltinEvaluator } from '../src/core/universe/builtin-evaluator-registry.js';
 vi.mock('../src/core/universe/fixed-evaluator.js', () => ({ runFixedUniverseEvaluator: vi.fn() }));
+// The long-diagnostic fixtures declare the preparation-measurement-v1 builtin,
+// whose real resolution requires macOS, Node 24+ and a freshly built dist
+// bundle. These tests exercise campaign deadline and ingestion policy with an
+// inert fixed evaluator, so they pin a synthetic installed identity instead of
+// depending on host installation state (which made them fail everywhere but a
+// freshly built macOS checkout). Real bundle verification is covered by
+// universe-builtin-evaluator-registry and universe-builtin-preparation-evaluator.
+vi.mock('../src/core/universe/builtin-evaluator-registry.js', async original => ({ ...await original<object>(), resolveBuiltinEvaluator: vi.fn() }));
 vi.mock('../src/core/sandbox/policy.js', async (original) => ({ ...await original<object>(), readKillSwitch: vi.fn() }));
 const roots: string[] = [];
 const evaluator = vi.mocked(runFixedUniverseEvaluator);
 const response = (patch: Partial<VerifySubprocessResult> = {}): VerifySubprocessResult => ({ stdout: '{"passed":false,"score":0,"metrics":{"checks":142}}',
   stderr: '', exitCode: 0, signal: null, timedOut: false, cancelled: false, processGroupSettlement: 'group-exit-confirmed', ...patch });
+const nodeDigest = createHash('sha256').update(readFileSync(process.execPath)).digest('hex');
 beforeEach(() => {
+  // The real store still pins these bytes; the mocked fixed evaluator never launches the command.
+  vi.mocked(resolveBuiltinEvaluator).mockReturnValue({ id: 'preparation-measurement-v1', digest: 'a'.repeat(64),
+    executableDigest: nodeDigest, command: [process.execPath, '-e', 'throw new Error("inert evaluator must not execute")'],
+    files: [], tools: [], git: { path: '/usr/bin/git', digest: 'b'.repeat(64) } });
   vi.mocked(readKillSwitch).mockReturnValue({ state: 'inactive', sourceState: 'healthy' } as ReturnType<typeof readKillSwitch>);
   evaluator.mockImplementation(async (...args) => { args[9]?.(); return response(); });
 });
@@ -145,7 +160,10 @@ describe('campaign seed evaluation runtime', () => {
     initUniverseCampaign({ schemaVersion: 1, id: 'sibling', universeId: 'seed', feedback: true,
       budget: { maxGenerations: 1, maxDurationMs: 60_000, maxModelRequests: 0, maxStagnantGenerations: 1, maxReportedTokens: null } }, { root: f.root });
     await expect(runUniverseCampaign('sibling', { root: f.root })).rejects.toThrow('unresolved campaign seed evaluator');
-    await expect(runUniverse('seed', { root: f.root })).rejects.toThrow('unresolved campaign seed evaluator');
+    // Off macOS, direct Universe execution refuses earlier for lack of a verified
+    // confinement profile; it must still refuse and never re-run the evaluator.
+    await expect(runUniverse('seed', { root: f.root })).rejects.toThrow(process.platform === 'darwin'
+      ? 'unresolved campaign seed evaluator' : 'Universe local execution currently requires macOS sandbox-exec');
     expect(evaluator).toHaveBeenCalledTimes(1);
   });
   it('does not invent settled evidence when post-spawn integrity checking throws', async () => {

@@ -25,6 +25,10 @@ import { assertRunEvidenceBudget, assertTrialEvidenceBudget, preflightTrialEvide
 import { confinedUniverseArgv, runFixedUniverseEvaluator } from './fixed-evaluator.js';
 import { assertBuiltinTrialEvaluatorsSettled, writeBuiltinTrialCustody, type BuiltinTrialIntent } from './builtin-trial-custody.js';
 
+/** Exact run error when the wall deadline passes after trials but before winner
+ * selection. Campaigns match it to settle as duration exhaustion, not failure. */
+export const RUN_DEADLINE_BEFORE_SELECTION = 'Run deadline exhausted before winner selection';
+
 function shortError(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 1_024) || 'Experiment failed';
 }
@@ -440,9 +444,8 @@ export async function runUniverseOwned(id: string, options: UniverseOwnedRunOpti
       assertComparatorUnchanged(record);
       // Synchronous final proof must not carry a pre-proof deadline/stop decision
       // into winner selection while the abort timer is waiting for the event loop.
-      if (options.isExecutionStopped?.() || controller.signal.aborted || Date.now() >= deadline) {
-        throw new Error('Run stopped or deadline exhausted before winner selection');
-      }
+      if (options.isExecutionStopped?.() || controller.signal.aborted) throw new Error('Run stopped before winner selection');
+      if (Date.now() >= deadline) throw new Error(RUN_DEADLINE_BEFORE_SELECTION);
       run.status = 'completed';
       selectWinners(run, record.manifest, overview.elites);
     }

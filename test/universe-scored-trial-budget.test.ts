@@ -72,7 +72,7 @@ import { assertComparatorUnchanged, validateUniverseManifest } from '../src/core
 import { canonical } from '../src/core/universe/artifacts.js';
 import { generateModelCandidate } from '../src/core/universe/model-candidate.js';
 import { newGenerationReceipt } from '../src/core/universe/generation.js';
-import { runUniverse, runUniverseOwned } from '../src/core/universe/runner.js';
+import { RUN_DEADLINE_BEFORE_SELECTION, runUniverse, runUniverseOwned } from '../src/core/universe/runner.js';
 import { withUniverseExecution } from '../src/core/universe/execution.js';
 import { confinedUniverseArgv, runFixedUniverseEvaluator } from '../src/core/universe/fixed-evaluator.js';
 import { runVerifySubprocessAsync } from '../src/core/run/verify-commands.js';
@@ -280,7 +280,7 @@ describe('explicit scored trial budgets (inert runtime)', () => {
     const result = await f.execute();
     expect(result.status).toBe('failed');
     expect(result.trials[0]).toMatchObject({ selected: false });
-    expect(result.error).toContain('before winner selection');
+    expect(result.error).toBe(RUN_DEADLINE_BEFORE_SELECTION);
     expect(f.rows().map(row => row.kind)).toEqual(['intent', 'settlement']);
   });
   it('holds scored custody after a lost response and never renews by replay', async () => {

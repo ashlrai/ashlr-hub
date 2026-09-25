@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { verifiedProcessStartRef, ownsLocalStoreLock, type LocalStoreLock } from '../fleet/local-store-lock.js';
 import { assertUniverseExecution, withUniverseExecution } from './execution.js';
-import { runUniverseOwned } from './runner.js';
+import { RUN_DEADLINE_BEFORE_SELECTION, runUniverseOwned } from './runner.js';
 import { runCampaignSeedEvaluationOwned } from './campaign-seed-evaluation.js';
 import { scheduledVariants, universePath } from './store.js';
 import { canonical, defaultUniverseRoot, digest } from './artifacts.js';
@@ -260,6 +260,13 @@ async function runCampaignWithLease(id: string, options: CampaignOptions, lock: 
         deadlineMs: Date.parse(deadlineAt), trialLimit: variants.length,
         ...(summary.definition.feedback ? { feedback: true as const } : {}),
       }, lock);
+      // A run that reached the shared wall deadline between its trials and
+      // winner selection fails without selecting anything; that is this
+      // campaign exhausting its duration budget, not a generation failure.
+      // The loop top reconciles owner controls first, then reports the budget.
+      // Any other failure, or one before the campaign deadline, stays failed.
+      if (result.status === 'failed' && result.error === RUN_DEADLINE_BEFORE_SELECTION &&
+          Date.now() >= Date.parse(deadlineAt)) continue;
       if (result.status === 'failed') return finish('failed', 'Universe generation failed; inspect its durable evidence');
       if (result.status === 'interrupted' && !controller.signal.aborted) {
         return finish('interrupted', 'Universe generation interrupted before campaign completion');
