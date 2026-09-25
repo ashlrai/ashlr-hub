@@ -1,0 +1,23 @@
+{
+  "$comment": "Tests `npm run gate` ALWAYS runs, whatever changed. Keep this small (seconds, not minutes) and limited to things a release must never break. Every entry says why it is here. Do not add a test that is timing-sensitive under load: a flaky smoke test fails every gate.",
+  "backend": [
+    { "file": "test/verse-api-mount-310.test.ts", "why": "verse-api mounts its route families (health, reasoning, fleet history, budget) on the real server" },
+    { "file": "test/verse-server-wiring-310.test.ts", "why": "the glue between the Verse server units (readiness refusals, seat wiring)" },
+    { "file": "test/authority-tier1-closure-310b.test.ts", "why": "custody guard: the tier-1 authority import closure has not grown unreviewed" },
+    { "file": "test/authority-codeowners-310b.test.ts", "why": "custody guard: authority files stay owner-lane protected" },
+    { "file": "test/m33.release-meta.test.ts", "why": "scripts/check-version.mjs and the release metadata still agree with package.json" },
+    { "file": "test/cloud-api.test.ts", "why": "the cloud lane API contract (3.11)" },
+    { "file": "test/verse-session-engine.test.ts", "why": "core Verse: the session engine that runs every chat turn" },
+    { "file": "test/verse-seats.test.ts", "why": "core Verse: seat discovery and selection" },
+    { "file": "test/verse-handoff.test.ts", "why": "core Verse: planner-to-worker handoff rules" },
+    { "file": "test/verse-local-dispatch.test.ts", "why": "core Verse: the local seat dispatch lane" },
+    { "file": "test/completion-claims.test.ts", "why": "claim-vs-evidence check on agent completion reports" },
+    { "file": "test/local-runtime-anthropic-proxy.test.ts", "why": "the Anthropic normalising proxy behind ai.ashlr.anthropic-proxy, which ship:local restarts" },
+    { "file": "test/local-runtime-cli.test.ts", "why": "`ashlr runtime` CLI surface (install, status, rollback of the local runtime)" }
+  ],
+  "web": [
+    { "file": "src/web-ui/routes/verse/sections/ChatSection.first-paint.test.tsx", "why": "the chat first-paint path stays statically lean (pairs with the first-paint budget step)" },
+    { "file": "src/web-ui/routes/verse/VerseApp.first-paint.test.ts", "why": "VerseApp does not pull deferred modules onto first paint" },
+    { "file": "src/web-ui/routes/verse/VerseApp.test.tsx", "why": "the Verse app shell renders" }
+  ]
+}

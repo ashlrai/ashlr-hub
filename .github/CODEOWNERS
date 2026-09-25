@@ -215,6 +215,7 @@
 /test/fixtures/m518/visionquality-gate-robustness-false-positive-mer-c9c62c.json.b64 @masonwyatt23
 /test/fleet-learning-loop-sweeps.test.ts @masonwyatt23
 /test/fleet-live-api-310b.test.ts @masonwyatt23
+/test/gate.test.ts @masonwyatt23
 /test/goal-loop.result.test.ts @masonwyatt23
 /test/goal-loop.runner.test.ts @masonwyatt23
 /test/h1.apply-guardrails.test.ts @masonwyatt23

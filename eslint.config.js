@@ -10,6 +10,8 @@ export default tseslint.config(
   {
     ignores: [
       '.ashlr/**',
+      // scripts/gate.mjs output, including a scratch vite build of the web UI.
+      '.ashlr-gate/**',
       // Claude Code's per-checkout state. `.claude/worktrees/*` holds full
       // agent worktree copies of this repo (every src/ test/ desktop/ file
       // again, at other commits), so without this `npx eslint .` lints the

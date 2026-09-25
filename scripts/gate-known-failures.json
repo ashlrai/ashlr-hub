@@ -1,0 +1,15 @@
+{
+  "$comment": "Test FILES that fail on a healthy Mac for environmental reasons. A failure inside one of these files is reported by `npm run gate` as KNOWN and does not fail the gate; a failure in any other file does. The file still runs, so a new failure elsewhere is never hidden. Every entry must cite where the repo documents the failure. Remove an entry as soon as its cause is fixed. Source of every entry below: docs/RELEASING-LOCALLY.md, section 'A full vitest run is not the gate, and here is why'.",
+  "files": [
+    { "file": "test/resource-engineering-auto-admission-recovery-acceptance.test.ts", "reason": "resource-engineering-*-acceptance: 'Console read failed: ECONNRESET' from the real console transport on a loaded machine" },
+    { "file": "test/resource-engineering-mission-acceptance.test.ts", "reason": "resource-engineering-*-acceptance: 'Console read failed: ECONNRESET' from the real console transport on a loaded machine" },
+    { "file": "test/resource-engineering-preparation-acceptance.test.ts", "reason": "resource-engineering-*-acceptance: 'Console read failed: ECONNRESET' from the real console transport on a loaded machine" },
+    { "file": "test/resource-engineering-setup-acceptance.test.ts", "reason": "resource-engineering-*-acceptance: 'Console read failed: ECONNRESET' from the real console transport on a loaded machine" },
+    { "file": "test/resource-engineering-successor-acceptance.test.ts", "reason": "resource-engineering-*-acceptance: 'Console read failed: ECONNRESET' from the real console transport on a loaded machine" },
+    { "file": "test/resource-engineering-supervisor-acceptance.test.ts", "reason": "resource-engineering-*-acceptance: 'Console read failed: ECONNRESET' from the real console transport on a loaded machine" },
+    { "file": "test/resource-engineering-supervisor-admission-acceptance.test.ts", "reason": "resource-engineering-*-acceptance: 'Console read failed: ECONNRESET' from the real console transport on a loaded machine" },
+    { "file": "test/m571.local-production-gate.test.ts", "reason": "requires desktop/src-tauri/gen to be absent; any previous Tauri build on the Mac leaves it behind (it is gitignored)" },
+    { "file": "test/m201.daemon-loop.test.ts", "reason": "one TieredPool concurrency-cap assertion that is flaky under load" },
+    { "file": "test/universe-portfolio-controller.test.ts", "reason": "passes alone, fails ~6 tests under full-suite concurrency" }
+  ]
+}
