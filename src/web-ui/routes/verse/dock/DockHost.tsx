@@ -10,7 +10,7 @@ import type { VerseEvent, VerseSeat, VerseSession, VerseSessionRootsResponse } f
 import type { DockPresentation } from '../shell/dock-catalog.js';
 import type { TurnFileChange } from '../shell/slots.js';
 import { currentTurnTasks, type ChatTask } from '../chat/tasks-model.js';
-import { useVerseTranscript } from '../useVerseSession.js';
+import { useVerseTranscript } from '../useVerseTranscript.js';
 import { ContextPane } from './ContextPane.js';
 import { Dock } from './Dock.js';
 import { TasksPane } from './TasksPane.js';

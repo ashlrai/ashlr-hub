@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import type { VerseEvent } from '../../../data/api-types.js';
 import type { VerseActivityResponse } from '../../../../core/verse/workbench-types.js';
 import { ev, session } from '../fixtures.test-support.js';
-import { buildTranscript } from '../verse-store.js';
+import { buildTranscript } from '../verse-transcript.js';
 import { countTasks, currentTurnTasks, describeTaskCounts, otherRunningChats } from './tasks-model.js';
 import { lastTurnFiles } from './turn-files.js';
 

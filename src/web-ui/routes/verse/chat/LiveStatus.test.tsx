@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ev } from '../fixtures.test-support.js';
-import { buildTranscript, type VerseLiveState } from '../verse-store.js';
+import type { VerseLiveState } from '../verse-store.js';
+import { buildTranscript } from '../verse-transcript.js';
 import { derivePhaseFromTranscript, formatLiveElapsed, liveStatusLine } from './LiveStatus.js';
 import { formatThinkingTokens, thinkingLabel, thinkingTokenFigure, ThinkingBlock } from './ThinkingBlock.js';
 

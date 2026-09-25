@@ -95,7 +95,8 @@ import { invalidateVerseLists } from './verse-queries.js';
 import { formatTokens, lastTurnActivityAt, setVerseSession, type VerseLiveNotice } from './verse-store.js';
 import { rememberVerseSeat } from './verse-ui-store.js';
 import { useSeatsRefresh } from './useSeatsRefresh.js';
-import { useVerseLive, useVerseTranscript, type VerseSessionView } from './useVerseSession.js';
+import { useVerseLive, type VerseSessionView } from './useVerseSession.js';
+import { useVerseTranscript } from './useVerseTranscript.js';
 import styles from './Workspace.module.css';
 
 // Opened on request only: kept out of the chat's first-paint chunk.

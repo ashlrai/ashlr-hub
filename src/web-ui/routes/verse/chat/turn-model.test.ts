@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ev } from '../fixtures.test-support.js';
-import { buildTranscript, groupTranscriptItems } from '../verse-store.js';
+import { buildTranscript, groupTranscriptItems } from '../verse-transcript.js';
 import {
   buildTurns,
   countDiffLines,

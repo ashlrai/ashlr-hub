@@ -4,8 +4,9 @@
  *
  *   - guarded commands (Stop running chats…, Stop the fleet…) go through
  *     confirm → token → run (guarded-action.tsx), with the runner defined
- *     HERE: they are shell actions, and a guard must never depend on some
- *     other unit remembering to confirm;
+ *     by the SHELL (guarded-runners.ts, loaded when a run is confirmed):
+ *     they are shell actions, and a guard must never depend on some other
+ *     unit remembering to confirm;
  *   - chat commands run on the chat's handler, and when Chat is not on
  *     screen the shell switches to it and parks the command until the chat
  *     registers (command-bus runCommandWhenReady);
@@ -19,10 +20,7 @@
  */
 import { useEffect } from 'react';
 import { useToast } from '../../../components/primitives/Toast.js';
-import { getMutationToken, touchMutationHold } from '../../../data/auth-store.js';
-import { ApiError, apiPost } from '../../../data/client.js';
 import { cycleTheme } from '../../../data/theme-store.js';
-import { cancelVerseTurn } from '../verse-queries.js';
 import {
   closeVerseOverlay,
   cycleVerseRecentChat,
@@ -40,7 +38,6 @@ import { COMPOSER_COMMAND_IDS, WORKBENCH_COMMAND_EVENT } from '../composer/compo
 import { PARKED_COMMAND_TTL_MS, registerCommandHandler, runCommand, runCommandWhenReady, type CommandInvocation } from './command-bus.js';
 import { findCommand } from './command-catalog.js';
 import { requestGuarded } from './guarded-action.js';
-import { getActivityState, refreshActivity } from './useActivity.js';
 
 export type ShellNotify = (message: string, tone?: 'neutral' | 'success' | 'danger') => void;
 
@@ -51,80 +48,20 @@ export function setShellNotifier(fn: ShellNotify | null): void {
   notify = fn ?? (() => {});
 }
 
-function requireToken(path: string): string {
-  const token = getMutationToken();
-  if (!token) throw new ApiError('Mutation token was rejected.', 401, path);
-  return token;
-}
-
-/** Stop every running chat. Stops what activity says is running NOW, one cancel each. */
-async function stopRunningChats(): Promise<void> {
-  await refreshActivity();
-  const running = getActivityState().data?.running ?? [];
-  if (running.length === 0) {
-    notify('Nothing is running.', 'neutral');
-    return;
-  }
-  requireToken('/api/verse/sessions');
-  const results = await Promise.allSettled(running.map((r) => cancelVerseTurn(r.sessionId)));
-  touchMutationHold();
-  const failed = results.filter((r) => r.status === 'rejected').length;
-  void refreshActivity();
-  if (failed > 0) throw new Error(`Stopped ${running.length - failed} of ${running.length} chats; ${failed} did not answer.`);
-  notify(running.length === 1 ? 'Stopped 1 chat.' : `Stopped ${running.length} chats.`, 'success');
+/** Toast through whatever the shell installed (guarded-runners.ts reports with it). */
+export function shellNotify(message: string, tone?: 'neutral' | 'success' | 'danger'): void {
+  notify(message, tone);
 }
 
 /**
- * Stop the fleet: the authority route's `stop` (B-U1) when this build has it;
- * otherwise the daemon's ordinary stop, which engages the kill switch
- * (control-api.ts `POST /api/verse/daemon {action:'stop'}`). Both stop
- * autonomous work only — chats keep running.
+ * The guarded catalog commands the shell runs itself. Their runners
+ * (guarded-runners.ts: a cancel per running chat, the fleet stop and its
+ * toast) are a dynamic import — they run only after the operator confirmed
+ * (and unlocked), never at first paint, so they stay out of the chat
+ * first-paint critical JS. guarded-runners.test.ts pins that this list and
+ * the runner table name the same ids.
  */
-async function stopFleet(): Promise<void> {
-  const token = requireToken('/api/verse/authority');
-  let body: unknown = null;
-  try {
-    body = await apiPost<unknown>('/api/verse/authority', { action: 'stop' }, token);
-  } catch (err) {
-    // A CODELESS 404 from the authority route = not in this build (or no
-    // dispatch, which the daemon route will then report on its own).
-    if (!(err instanceof ApiError && err.status === 404 && err.code === null)) throw err;
-    await apiPost<unknown>('/api/verse/daemon', { action: 'stop' }, token);
-  }
-  touchMutationHold();
-  void refreshActivity();
-  notify(describeFleetStop(body), 'success');
-}
-
-/**
- * The toast after Stop, from B-U1's StopResult (`{ result: { stop } }` on
- * the authority route). Stop arms KILL at once but does not wait for agents
- * admitted before it (waitMs 0), so "stopped" alone would claim more than the
- * server knows (B-U6 request 8): the drain state and any armed merge it could
- * not revoke are said out loud. The daemon fallback has no such fields and
- * gets the plain sentence.
- */
-export function describeFleetStop(body: unknown): string {
-  const base = 'Fleet stopped. It stays stopped until you resume it.';
-  const stop = (body as { result?: { stop?: unknown } } | null)?.result?.stop;
-  if (typeof stop !== 'object' || stop === null) return base;
-  const { quiesced, liveExecutionLeases, mergeRevokeFailures } = stop as {
-    quiesced?: unknown;
-    liveExecutionLeases?: unknown;
-    mergeRevokeFailures?: unknown;
-  };
-  const parts = [base];
-  if (quiesced === false) {
-    const n = typeof liveExecutionLeases === 'number' && Number.isFinite(liveExecutionLeases) && liveExecutionLeases > 0 ? liveExecutionLeases : null;
-    // Unknown counts as still running (the server fails closed the same way).
-    parts.push(n === null ? 'Agents already running are finishing.' : `${n} agent${n === 1 ? ' is' : 's are'} still finishing work started before Stop.`);
-  }
-  if (Array.isArray(mergeRevokeFailures) && mergeRevokeFailures.length > 0) {
-    const m = mergeRevokeFailures.length;
-    parts.push(`${m} armed merge${m === 1 ? '' : 's'} could not be revoked; Stop still blocks ${m === 1 ? 'it' : 'them'}.`);
-  }
-  return parts.join(' ');
-}
+export const SHELL_GUARDED_COMMAND_IDS: ReadonlySet<string> = new Set(['chats.stop-all', 'fleet.stop']);
 
 /** The composer's message box inside the Chat surface (C3's Composer names it "Message"). */
 function composerPresent(): boolean {
@@ -174,11 +111,6 @@ export function deliverComposerCommand(id: string, ttlMs: number = PARKED_COMMAN
 
 const COMPOSER_IDS: ReadonlySet<string> = new Set(COMPOSER_COMMAND_IDS);
 
-const GUARDED_RUNNERS: Readonly<Record<string, () => Promise<void>>> = {
-  'chats.stop-all': stopRunningChats,
-  'fleet.stop': stopFleet,
-};
-
 /** Run catalog command `id`. Returns false when nothing could run it. */
 export function executeCatalogCommand(id: string, invocation: CommandInvocation = {}): boolean {
   const command = findCommand(id);
@@ -186,8 +118,8 @@ export function executeCatalogCommand(id: string, invocation: CommandInvocation 
   if (command.group !== null && invocation.via === 'palette') recordVerseAction(command.id);
 
   if (command.guard) {
-    const runner = GUARDED_RUNNERS[command.id];
-    if (!runner) return runCommand(id, invocation);
+    if (!SHELL_GUARDED_COMMAND_IDS.has(command.id)) return runCommand(id, invocation);
+    const commandId = command.id;
     const { confirm, token } = command.guard;
     requestGuarded({
       title: confirm.title,
@@ -196,7 +128,7 @@ export function executeCatalogCommand(id: string, invocation: CommandInvocation 
       destructive: confirm.destructive,
       token,
       tokenReason: `${command.title.replace(/…$/, '')} requires the dispatch token.`,
-      run: runner,
+      run: () => import('./guarded-runners.js').then((m) => m.runGuardedShellCommand(commandId)),
     });
     return true;
   }

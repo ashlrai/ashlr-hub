@@ -212,3 +212,17 @@ describe('advice is evidence-based and never spends', () => {
     expect(expansiveAdvice({ session: {}, option: CLAUDE_1M, workingSetTokens: 10_000 }).suggest).toBe(false);
   });
 });
+
+describe('compaction-point split (chat first-paint budget)', () => {
+  it('context-math re-exports the very same formulas and constants, so both entry points agree', async () => {
+    const math = await import('../src/core/verse/context-math.js');
+    const point = await import('../src/core/verse/compaction-point.js');
+    expect(math.reconcileAutoCompactAt).toBe(point.reconcileAutoCompactAt);
+    expect(math.claudeAutoCompactAt).toBe(point.claudeAutoCompactAt);
+    expect(math.codexAutoCompactAt).toBe(point.codexAutoCompactAt);
+    expect(math.CLAUDE_OUTPUT_RESERVE_CAP).toBe(point.CLAUDE_OUTPUT_RESERVE_CAP);
+    expect(math.CLAUDE_COMPACT_BUFFER).toBe(point.CLAUDE_COMPACT_BUFFER);
+    expect(math.CODEX_EFFECTIVE_WINDOW_PERCENT).toBe(point.CODEX_EFFECTIVE_WINDOW_PERCENT);
+    expect(math.CODEX_AUTO_COMPACT_FRACTION).toBe(point.CODEX_AUTO_COMPACT_FRACTION);
+  });
+});

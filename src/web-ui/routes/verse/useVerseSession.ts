@@ -11,7 +11,9 @@
  *                           header and resources panel stop re-rendering at
  *                           token rate.
  *   useVerseTranscript(id)  the derived transcript — changes at most once per
- *                           animation frame while text streams.
+ *                           animation frame while text streams. Lives in
+ *                           useVerseTranscript.ts: the derivation it reads is
+ *                           kept off the chat first-paint path.
  *   useVerseLive(id)        transient signals of the running turn
  *                           (reasoning, progress, retry/watchdog notices).
  *
@@ -23,7 +25,6 @@ import { openVerseSession } from './session-stream.js';
 import {
   getVerseLive,
   getVerseSessionHead,
-  getVerseTranscript,
   subscribeVerseSession,
   type Transcript,
   type VerseLiveState,
@@ -42,7 +43,7 @@ export interface VerseSessionView extends VerseSessionHead {
 
 const noop = () => () => {};
 
-function useSessionSubscription(sessionId: string | null) {
+export function useSessionSubscription(sessionId: string | null) {
   return useCallback(
     (listener: () => void) => (sessionId ? subscribeVerseSession(sessionId, listener) : noop()),
     [sessionId],
@@ -73,16 +74,6 @@ export function useVerseSession(sessionId: string | null, reload = 0): VerseSess
   }, [sessionId, reload]);
 
   return head;
-}
-
-/** The transcript of one chat, rebuilt only for the turn that changed. */
-export function useVerseTranscript(sessionId: string | null): Transcript {
-  const subscribe = useSessionSubscription(sessionId);
-  return useSyncExternalStore(
-    subscribe,
-    () => getVerseTranscript(sessionId),
-    () => getVerseTranscript(sessionId),
-  );
 }
 
 /** Live (never persisted) signals of the chat's running turn. */

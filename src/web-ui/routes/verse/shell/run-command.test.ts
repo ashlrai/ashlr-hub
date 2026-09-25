@@ -91,7 +91,7 @@ describe('composer commands', () => {
 
 describe('the Stop toast', () => {
   it('says what Stop could not promise — agents still draining, merges it could not revoke', async () => {
-    const { describeFleetStop } = await import('./run-command.js');
+    const { describeFleetStop } = await import('./guarded-runners.js');
     const plain = 'Fleet stopped. It stays stopped until you resume it.';
     expect(describeFleetStop(null)).toBe(plain);
     expect(describeFleetStop({ result: { stop: { quiesced: true, liveExecutionLeases: 0, mergeRevokeFailures: [] } } })).toBe(plain);
@@ -99,5 +99,21 @@ describe('the Stop toast', () => {
       .toBe(`${plain} 2 agents are still finishing work started before Stop.`);
     expect(describeFleetStop({ result: { stop: { quiesced: false, liveExecutionLeases: 'x', mergeRevokeFailures: ['m-1'] } } }))
       .toBe(`${plain} Agents already running are finishing. 1 armed merge could not be revoked; Stop still blocks it.`);
+  });
+});
+
+describe('the shell’s guarded runners (loaded on confirm, not at first paint)', () => {
+  it('run-command, guarded-runners and the catalog name the same guarded commands', async () => {
+    const { SHELL_GUARDED_COMMAND_IDS } = await import('./run-command.js');
+    const { GUARDED_RUNNERS } = await import('./guarded-runners.js');
+    const { WORKBENCH_COMMANDS } = await import('./command-catalog.js');
+    const guarded = (WORKBENCH_COMMANDS as ReadonlyArray<{ id: string; guard?: unknown }>).filter((c) => c.guard).map((c) => c.id).sort();
+    expect([...SHELL_GUARDED_COMMAND_IDS].sort()).toEqual(guarded);
+    expect(Object.keys(GUARDED_RUNNERS).sort()).toEqual(guarded);
+  });
+
+  it('an unknown id is a rejected run, never a silent success', async () => {
+    const { runGuardedShellCommand } = await import('./guarded-runners.js');
+    await expect(runGuardedShellCommand('nope')).rejects.toThrow('No shell runner for nope.');
   });
 });

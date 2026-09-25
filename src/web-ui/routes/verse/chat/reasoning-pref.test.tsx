@@ -6,7 +6,7 @@ import { act, render } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ev } from '../fixtures.test-support.js';
 import { Transcript } from '../Transcript.js';
-import { buildTranscript } from '../verse-store.js';
+import { buildTranscript } from '../verse-transcript.js';
 import {
   getReasoningDisplay,
   REASONING_DISPLAY_KEY,

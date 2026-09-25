@@ -31,7 +31,7 @@
 import { evictAll, invalidateObserved } from './cache.js';
 // The composer owns its own storage format, so the key names live with it
 // rather than being duplicated here where they could drift.
-import { clearComposerMemory } from '../routes/verse/chat/composer-state.js';
+import { clearComposerMemory } from '../routes/verse/chat/composer-memory.js';
 
 const READ_CLIENT_STORAGE_KEY = 'ashlr.readClientProof.v1';
 const READ_CLIENT_RE = /^[a-f0-9]{64}$/;
