@@ -6,6 +6,9 @@
  *          foot: Needs you (⌘J) · the scarcest seat's capacity ring · ⚙ tray
  *   [main] the current surface, with up to three recent surfaces (and Chat,
  *          once visited) kept MOUNTED behind it — hidden + inert
+ *   [dock] the Resources drawer when PINNED (3.11 C6): a third grid track
+ *          that shrinks [main]. Unpinned it floats over the surface, opened
+ *          from the right-edge tab, the rail, ⌘. or ⌘K "Show resources".
  *   overlays  ⌘K palette · ⌘J Needs-you drawer · ⌘/ shortcuts · the guard
  *
  * KEEP-ALIVE. Switching surfaces used to unmount the one you left: the
@@ -47,6 +50,7 @@ import { apiPost } from '../../data/client.js';
 import { useTheme } from '../../data/hooks.js';
 import { VERSE_ACTIVITY_SEEN_PATH, type VerseActivityCompletion } from '../../../core/verse/workbench-types.js';
 import { useOnboarding } from './onboarding/useOnboarding.js';
+import { useResourcesUi } from './resources/resources-store.js';
 import { detectKeyPlatform, findCommand, formatChord, matchCommand } from './shell/command-catalog.js';
 import { GuardHost } from './shell/guarded-action.js';
 import type { RailBadge } from './shell/RailStatus.js';
@@ -153,12 +157,17 @@ const importGearTray = () => import('./shell/GearTray.js');
 const importOnboarding = () => import('./onboarding/OnboardingFlow.js');
 const importRailStatus = () => import('./shell/RailStatus.js');
 const importWarmup = () => import('./shell/warmup.js');
+// Resources (3.11 C6): the edge tab, rail button, ⌘. handler and the drawer
+// (itself a further chunk) — see resources/ResourcesChrome.tsx for why.
+const importResources = () => import('./resources/ResourcesChrome.js');
 
 const CommandPalette = lazy(() => importPalette().then((m) => ({ default: m.CommandPalette })));
 const NeedsYouDrawer = lazy(() => importDrawer().then((m) => ({ default: m.NeedsYouDrawer })));
 const ShortcutsOverlay = lazy(() => importShortcuts().then((m) => ({ default: m.ShortcutsOverlay })));
 const GearTray = lazy(() => importGearTray().then((m) => ({ default: m.GearTray })));
 const OnboardingFlow = lazy(() => importOnboarding().then((m) => ({ default: m.OnboardingFlow })));
+const ResourcesChrome = lazy(() => importResources().then((m) => ({ default: m.ResourcesChrome })));
+const ResourcesRailButton = lazy(() => importResources().then((m) => ({ default: m.ResourcesRailButton })));
 
 /**
  * The after-first-paint warm-up (shell/warmup.ts): the overlay chunks, then
@@ -180,7 +189,7 @@ export function prefetchAfterFirstPaint(options?: WarmupOptions): () => void {
   let cancel: (() => void) | null = null;
   void importWarmup().then(
     (m) => {
-      if (live) cancel = m.warmUpAfterFirstPaint({ loadSection, overlays: [importPalette, importDrawer, importShortcuts], readsInFlight }, options);
+      if (live) cancel = m.warmUpAfterFirstPaint({ loadSection, overlays: [importPalette, importDrawer, importShortcuts, () => importResources().then((r) => r.preloadResourcesDrawer())], readsInFlight }, options);
     },
     () => undefined,
   );
@@ -241,6 +250,7 @@ export function VerseApp() {
   const data = activity.data;
   const rail = useRailStatusModule();
   const onboarding = useOnboarding();
+  const resources = useResourcesUi();
 
   useEffect(() => prefetchAfterFirstPaint(), []);
   // The gear tray is fetched right after mount (not on idle) and then stays
@@ -354,7 +364,12 @@ export function VerseApp() {
   };
 
   return (
-    <div className={styles.shell} data-rail={expanded ? 'expanded' : 'collapsed'} data-compact={compact || undefined}>
+    <div
+      className={styles.shell}
+      data-rail={expanded ? 'expanded' : 'collapsed'}
+      data-compact={compact || undefined}
+      data-resources={resources.open && resources.pinned && !compact ? 'docked' : undefined}
+    >
       <nav className={styles.rail} data-rail={expanded ? 'expanded' : 'collapsed'} aria-label="Verse sections">
         {/*
           Desktop shell: the window's top 48px is overlaid by the OS title bar
@@ -419,6 +434,11 @@ export function VerseApp() {
               {expanded || compact ? <span className={styles.railLabel}>{compact ? 'Inbox' : 'Needs you'}</span> : null}
             </button>
           </Tooltip>
+          {compact ? null : (
+            <Suspense fallback={null}>
+              <ResourcesRailButton expanded={expanded} buttonClass={styles.railButton} iconClass={styles.railIcon} labelClass={styles.railLabel} />
+            </Suspense>
+          )}
           {rail && !compact ? <RailCapacityButton rail={rail} expanded={expanded} /> : null}
           <Tooltip label="Settings and more" placement="right" disabled={expanded || compact || trayOpen}>
             <button
@@ -454,6 +474,9 @@ export function VerseApp() {
       {/* Lazy chunks (see "Off the first-paint path"); each mounts only while it can draw. */}
       <Suspense fallback={null}>
         {gearReady || trayOpen ? <GearTray open={trayOpen} anchorRef={gearRef} onClose={() => setTrayOpen(false)} compact={compact} /> : null}
+      </Suspense>
+      <Suspense fallback={null}>
+        <ResourcesChrome compact={compact} />
       </Suspense>
       <Suspense fallback={null}>
         {ui.overlay === 'palette' ? <CommandPalette /> : null}
