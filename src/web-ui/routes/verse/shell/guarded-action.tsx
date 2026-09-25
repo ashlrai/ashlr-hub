@@ -23,11 +23,34 @@
  * the FIRST prompt, which should describe what is about to happen — not a
  * prompt asking for a secret.
  */
-import { useSyncExternalStore, type ReactNode } from 'react';
-import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
+import { Suspense, useSyncExternalStore, type ComponentProps, type ReactNode } from 'react';
+import type { MutationTokenDialog as MutationTokenDialogComponent } from '../../../components/auth/MutationTokenDialog.js';
 import { hasMutationHold } from '../../../data/auth-store.js';
 import { ApiError, DispatchDisabledError } from '../../../data/client.js';
-import { ConfirmDialog } from '../../inbox/ConfirmDialog.js';
+import type { ConfirmDialog as ConfirmDialogComponent } from '../../inbox/ConfirmDialog.js';
+import { preloadedLazy } from './preloaded.js';
+
+/**
+ * The two dialogs are preloaded, not static imports: GuardHost is mounted by
+ * the shell at first paint but draws nothing until a guarded action starts,
+ * and the dialogs (with the dialog primitive and its focus trap) were ~4 KB
+ * of chat first-paint critical JS. Their download starts when this module
+ * evaluates, so the first guarded action finds them in and they mount in the
+ * same render that opens them.
+ */
+const ConfirmDialogModule = preloadedLazy<ComponentProps<typeof ConfirmDialogComponent>>(
+  () => import('../../inbox/ConfirmDialog.js').then((m) => m.ConfirmDialog),
+);
+const ConfirmDialog = ConfirmDialogModule.Slot;
+const TokenDialogModule = preloadedLazy<ComponentProps<typeof MutationTokenDialogComponent>>(
+  () => import('../../../components/auth/MutationTokenDialog.js').then((m) => m.MutationTokenDialog),
+);
+const MutationTokenDialog = TokenDialogModule.Slot;
+
+/** Resolves once both dialogs are in (tests await it; the app never needs to). */
+export function preloadGuardDialogs(): Promise<unknown> {
+  return Promise.all([ConfirmDialogModule.ready(), TokenDialogModule.ready()]);
+}
 
 export interface GuardedRequest {
   title: string;
@@ -150,7 +173,7 @@ export function GuardHost() {
   const { request, phase, error } = useGuardState();
   if (!request) return null;
   return (
-    <>
+    <Suspense fallback={null}>
       <ConfirmDialog
         open={phase !== 'token' && !request.skipConfirm}
         onClose={cancel}
@@ -168,6 +191,6 @@ export function GuardHost() {
         reason={request.tokenReason ?? 'This action changes state on this machine and requires the dispatch token.'}
         tokenHelp="the mutation token ashlr verse printed"
       />
-    </>
+    </Suspense>
   );
 }

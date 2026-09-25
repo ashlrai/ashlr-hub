@@ -9,7 +9,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { anchorId } from '../command/nav.js';
 import { VERSE_ANCHOR_EVENT } from '../verse-ui-store.js';
-import { findAnchorElement, revealAnchor, subscribeAnchorRequests } from './reveal-anchor.js';
+import { subscribeAnchorRequests } from './anchor-requests.js';
+import { findAnchorElement, revealAnchor } from './reveal-anchor.js';
 
 function surface(id: string, hidden = false): HTMLElement {
   const el = document.createElement('div');
@@ -93,6 +94,23 @@ describe('reveal-anchor', () => {
       expect(target.scrollIntoView).not.toHaveBeenCalled();
       window.dispatchEvent(new CustomEvent(VERSE_ANCHOR_EVENT, { detail: { section: 'mind', anchor: 'ok' } }));
       expect(target.scrollIntoView).toHaveBeenCalledTimes(1);
+    } finally {
+      off();
+    }
+  });
+
+  it('a request that arrives before the reveal module has loaded is still revealed', async () => {
+    // anchor-requests preloads reveal-anchor; a fresh module instance has
+    // not finished that import when the first event is dispatched below.
+    vi.resetModules();
+    const fresh = await import('./anchor-requests.js');
+    const off = fresh.subscribeAnchorRequests(VERSE_ANCHOR_EVENT);
+    try {
+      const mind = surface('mind');
+      const target = card({ id: anchorId('early') });
+      mind.appendChild(target);
+      window.dispatchEvent(new CustomEvent(VERSE_ANCHOR_EVENT, { detail: { section: 'mind', anchor: 'early' } }));
+      await vi.waitFor(() => expect(target.scrollIntoView).toHaveBeenCalledTimes(1));
     } finally {
       off();
     }

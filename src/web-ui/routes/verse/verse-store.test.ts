@@ -8,15 +8,11 @@ import {
   applyUsageFrame,
   applyVerseEvent,
   applyVerseEvents,
-  buildTranscript,
-  createTranscriptCache,
   forgetVerseSession,
   formatTokens,
   getVerseLive,
   getVerseSessionHead,
   getVerseSessionState,
-  getVerseTranscript,
-  groupTranscriptItems,
   lastTurnActivityAt,
   resetVerseStore,
   seedVerseSession,
@@ -26,6 +22,7 @@ import {
   subscribeVerseStore,
   subscribeVerseStoreLifecycle,
 } from './verse-store.js';
+import { buildTranscript, createTranscriptCache, getVerseTranscript, groupTranscriptItems } from './verse-transcript.js';
 
 /** A transient frame: it carries the last PERSISTED seq (wire rule, core/verse/types.ts). */
 function transient(seq: number, e: Record<string, unknown>): VerseEvent {
@@ -416,6 +413,21 @@ describe('verse store — V3.10 batched, incremental apply', () => {
     applyVerseEvent('vs_1', ev(4, 'tool-use', { turnId: 't1', toolUseId: 'x', name: 'Read', input: {} }));
     expect(getVerseSessionHead('vs_1')).not.toBe(head);
     expect(getVerseSessionHead('vs_1').events).toHaveLength(4);
+  });
+
+  it('drops the derived transcript with the chat (verse-transcript follows forget / reset)', () => {
+    // The memo moved out of the store into verse-transcript.ts, which clears
+    // it through the store's lifecycle channel instead of being cleared inline.
+    seedVerseSession('vs_1', session(), [ev(1, 'user-message', { turnId: 't1', text: 'hello' })]);
+    const before = getVerseTranscript('vs_1');
+    expect(before.items).toHaveLength(1);
+    expect(getVerseTranscript('vs_1')).toBe(before);
+    forgetVerseSession('vs_1');
+    expect(getVerseTranscript('vs_1').items).toEqual([]);
+    seedVerseSession('vs_1', session(), [ev(1, 'user-message', { turnId: 't1', text: 'again' })]);
+    expect(getVerseTranscript('vs_1').items[0]).toMatchObject({ kind: 'user', text: 'again' });
+    resetVerseStore();
+    expect(getVerseTranscript('vs_1').items).toEqual([]);
   });
 
   it('notifies only the session that changed (plus the global channel)', () => {

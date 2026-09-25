@@ -42,8 +42,8 @@ function ScopedWorkspace() {
       <header className={styles.scopeBar}>
         <div className={styles.scope}>
           <div className={styles.brand}>
-            <svg className={styles.brandMark} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
-              <path d="m5 11 11-6 11 6-11 6Z M5 16l11 6 11-6 M5 21l11 6 11-6" />
+            <svg className={styles.brandMark} viewBox="54 67 146 124" aria-hidden="true" focusable="false">
+              <path fill="currentColor" d="M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z" /><path fill="#2563EB" d="M110 121H143L133 152H120Z" />
             </svg><strong>Ashlrverse</strong><span className={styles.workspace}>Experiments</span>
           </div>
           <span className={styles.badge}>Read-only observation</span>

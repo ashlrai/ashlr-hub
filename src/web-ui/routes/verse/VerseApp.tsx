@@ -37,7 +37,8 @@
  * `subscribeShellCommands` — the one web seam to the desktop app — already
  * parsed by the catalog: `open-needs-you`, `new-chat`, `focus-composer`,
  * `open-session:<id>` (and the 3.9 menu's two). Anchors ("go to that card")
- * arrive as VERSE_ANCHOR_EVENT and are revealed by shell/reveal-anchor.ts.
+ * arrive as VERSE_ANCHOR_EVENT and are revealed by shell/reveal-anchor.ts
+ * (listened for by shell/anchor-requests.ts).
  */
 import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
 import { reportThemeToShell, subscribeShellCommands } from '../../app/desktop-shell.js';
@@ -54,7 +55,7 @@ import { useResourcesUi } from './resources/resources-store.js';
 import { detectKeyPlatform, findCommand, formatChord, matchCommand } from './shell/command-catalog.js';
 import { GuardHost } from './shell/guarded-action.js';
 import type { RailBadge } from './shell/RailStatus.js';
-import { subscribeAnchorRequests } from './shell/reveal-anchor.js';
+import { subscribeAnchorRequests } from './shell/anchor-requests.js';
 import { executeCatalogCommand, useShellCommands } from './shell/run-command.js';
 import { SectionVisibilityProvider } from './shell/section-visibility.js';
 import { SECTION_MODULES, sectionImporter } from './shell/section-modules.js';
@@ -63,7 +64,8 @@ import { onActivityCompletions, useActivity } from './shell/useActivity.js';
 import { useViewport } from './shell/viewport.js';
 import type { WarmupOptions } from './shell/warmup.js';
 import { useVerseUi } from './useVerseUi.js';
-import { GearIcon, NeedsYouIcon, SECTION_ICON, VerseMark } from './verse-icons.js';
+// rail-icons, not verse-icons: only the rail's glyphs belong in first paint.
+import { GearIcon, NeedsYouIcon, SECTION_ICON, VerseMark } from './rail-icons.js';
 import {
   acknowledgeChatMoved,
   closeVerseOverlay,

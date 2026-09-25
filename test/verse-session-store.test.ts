@@ -31,7 +31,7 @@ import {
   type VerseUnstampedEvent,
 } from '../src/core/verse/session-store.js';
 import { VERSE_MAX_EVENTS_PER_SESSION, type VerseEvent } from '../src/core/verse/types.js';
-import { buildTranscript } from '../src/web-ui/routes/verse/verse-store.js';
+import { buildTranscript } from '../src/web-ui/routes/verse/verse-transcript.js';
 
 // ---------------------------------------------------------------------------
 // Fixture builders

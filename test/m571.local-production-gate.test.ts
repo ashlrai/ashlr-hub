@@ -14,6 +14,7 @@ import {
   createIsolatedGateEnvironment,
   createPrivateLocalGateCustodyRoot,
   createPrivateLocalGateTempRoot,
+  ensureCleanExactSource,
   parseLocalGateArgs,
   parsePrivatePackEvidence,
   prepareDisposableTauriCheckIcon,
@@ -123,6 +124,38 @@ function validReceipt(): Record<string, unknown> {
     },
     verdict: 'passed',
   };
+}
+
+// A throwaway Git repository standing in for the gate's detached verification
+// worktree. Tests must never point gate helpers at the developer's own checkout:
+// that checkout legitimately carries gitignored build output (a Tauri build
+// leaves desktop/src-tauri/gen/ behind), which the real gate never sees because
+// it verifies inside a fresh `git worktree add`.
+function createDisposableGitRepo(prefix: string, files: Record<string, string> = {}) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  scratch.push(root);
+  const env = {
+    PATH: process.env.PATH ?? '/usr/bin:/bin',
+    HOME: root,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_AUTHOR_NAME: 'm571', GIT_AUTHOR_EMAIL: 'm571@example.invalid',
+    GIT_COMMITTER_NAME: 'm571', GIT_COMMITTER_EMAIL: 'm571@example.invalid',
+  };
+  const run = (...args: string[]) => {
+    const result = spawnSync('git', args, { cwd: root, env, encoding: 'utf8' });
+    if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${result.stderr}`);
+    return result.stdout.trim();
+  };
+  mkdirSync(join(root, 'desktop', 'src-tauri'), { recursive: true });
+  for (const [path, contents] of Object.entries({ 'README.md': 'fixture\n', ...files })) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), contents, 'utf8');
+  }
+  run('init', '--quiet');
+  run('add', '--all');
+  run('commit', '--quiet', '--no-gpg-sign', '-m', 'fixture');
+  return { root, head: run('rev-parse', 'HEAD') };
 }
 
 afterEach(() => {
@@ -278,6 +311,23 @@ describe('M571 local production gate v1', () => {
     expect(() => prepareDisposableTauriSidecar(fakeRepo, rustc)).toThrow(/already exists/u);
     sidecar.cleanup();
     expect(existsSync(sidecar.path)).toBe(false);
+  });
+
+  it('ignores generated Tauri gen/ output but still rejects a genuinely unexpected file', () => {
+    // Uses the repository's real .gitignore so this breaks if the gen/ ignore
+    // entry is ever dropped.
+    const fixture = createDisposableGitRepo('ashlr-m571-clean-source-', {
+      '.gitignore': readFileSync(join(repoRoot, '.gitignore'), 'utf8'),
+    });
+    const generatedSchemas = join(fixture.root, 'desktop', 'src-tauri', 'gen', 'schemas');
+    mkdirSync(generatedSchemas, { recursive: true });
+    for (const name of ['acl-manifests.json', 'capabilities.json', 'desktop-schema.json', 'macOS-schema.json']) {
+      writeFileSync(join(generatedSchemas, name), '{}\n', 'utf8');
+    }
+    expect(ensureCleanExactSource(fixture.root, fixture.head).revision).toBe(fixture.head);
+
+    writeFileSync(join(fixture.root, 'desktop', 'src-tauri', 'unexpected.txt'), 'stray\n', 'utf8');
+    expect(() => ensureCleanExactSource(fixture.root, fixture.head)).toThrow(/exactly clean/u);
   });
 
   it.runIf(process.platform === 'darwin')('owns and removes only the disposable Tauri generated root', () => {
@@ -452,8 +502,11 @@ describe('M571 local production gate v1', () => {
     mkdirSync(join(root, 'clang-module-cache'));
     mkdirSync(join(root, 'xdg-cache'));
     mkdirSync(join(custodyDirectory.path, 'home'));
+    // Stand-in for the fresh verification worktree; the developer checkout may
+    // already hold a gitignored desktop/src-tauri/gen/ from a Tauri build.
+    const verificationRoot = createDisposableGitRepo('ashlr-m571-verification-').root;
     const profiles = writeSandboxProfiles({
-      verificationRoot: repoRoot, tempRoot: root,
+      verificationRoot, tempRoot: root,
       custodyRoot: custodyDirectory.path, profileRoot,
     });
     const allowed = join(root, 'tmp', 'allowed.txt');
@@ -497,7 +550,7 @@ describe('M571 local production gate v1', () => {
       rmSync(packEvidence);
     }
 
-    const generated = prepareDisposableTauriGeneratedRoot(repoRoot);
+    const generated = prepareDisposableTauriGeneratedRoot(verificationRoot);
     try {
       const allowedSchema = join(generated.schemasPath, 'capabilities.json');
       expect(spawnSync('/usr/bin/sandbox-exec', [
@@ -559,7 +612,7 @@ describe('M571 local production gate v1', () => {
     const gitStatus = spawnSync('/usr/bin/sandbox-exec', [
       '-f', profiles.networkDenied.path, git, 'status', '--porcelain=v1',
     ], {
-      cwd: repoRoot,
+      cwd: verificationRoot,
       env: {
         PATH: `${git.slice(0, git.lastIndexOf('/'))}:/usr/bin:/bin`,
         HOME: join(custodyDirectory.path, 'home'),

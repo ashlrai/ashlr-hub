@@ -33,6 +33,25 @@ import type {
   VerseSession,
   VerseUsage,
 } from './types.js';
+import {
+  CLAUDE_COMPACT_BUFFER,
+  CLAUDE_OUTPUT_RESERVE_CAP,
+  CODEX_EFFECTIVE_WINDOW_PERCENT,
+  positiveInt,
+} from './compaction-point.js';
+
+// The runtime compaction-point formulas live in compaction-point.ts (the
+// browser's chat first-paint path needs them without the rest of this
+// module); re-exported so every existing importer keeps one entry point.
+export {
+  CLAUDE_COMPACT_BUFFER,
+  CLAUDE_OUTPUT_RESERVE_CAP,
+  CODEX_AUTO_COMPACT_FRACTION,
+  CODEX_EFFECTIVE_WINDOW_PERCENT,
+  claudeAutoCompactAt,
+  codexAutoCompactAt,
+  reconcileAutoCompactAt,
+} from './compaction-point.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -51,18 +70,9 @@ import type {
  */
 export const CLAUDE_STANDARD_AUTOCOMPACT_WINDOW = 400_000;
 
-/** Claude Code reserves min(max output, this) of the window for the reply. */
-export const CLAUDE_OUTPUT_RESERVE_CAP = 20_000;
-/** …and compacts this many tokens below the reserved window. */
-export const CLAUDE_COMPACT_BUFFER = 13_000;
 /** Claude Code clamps `--autocompact` to [100k, 1M]. */
 export const CLAUDE_AUTOCOMPACT_MIN = 100_000;
 export const CLAUDE_AUTOCOMPACT_MAX = 1_000_000;
-
-/** Codex: default `effective_context_window_percent` in every catalog entry. */
-export const CODEX_EFFECTIVE_WINDOW_PERCENT = 95;
-/** Codex: auto-compaction fires at this fraction of the RAW window. */
-export const CODEX_AUTO_COMPACT_FRACTION = 0.9;
 
 /** Grok: `auto_compact_threshold_percent` in the 0.2.118 catalog. */
 export const GROK_AUTO_COMPACT_PERCENT = 80;
@@ -124,38 +134,10 @@ export const CHARS_PER_TOKEN = 4;
 // Per-engine formulas
 // ---------------------------------------------------------------------------
 
-function positiveInt(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
-}
-
-/**
- * Claude Code's auto-compaction point.
- *
- * @param modelWindow        the model's context window (1_000_000, 200_000, or
- *                           the local num_ctx passed in CLAUDE_CODE_MAX_CONTEXT_TOKENS)
- * @param maxOutputTokens    the model's default max output; null → assume the cap
- * @param autocompactWindow  the `--autocompact` value in force; null → `auto`
- *                           (the full model window)
- */
-export function claudeAutoCompactAt(
-  modelWindow: number,
-  maxOutputTokens: number | null,
-  autocompactWindow: number | null = null,
-): number {
-  const window = Math.min(modelWindow, positiveInt(autocompactWindow) ?? modelWindow);
-  const reserve = Math.min(positiveInt(maxOutputTokens) ?? CLAUDE_OUTPUT_RESERVE_CAP, CLAUDE_OUTPUT_RESERVE_CAP);
-  return Math.max(0, window - reserve - CLAUDE_COMPACT_BUFFER);
-}
-
 /** Codex: the window the CLI measures occupancy against. */
 export function codexEffectiveWindow(rawWindow: number, percent: number | null = null): number {
   const pct = positiveInt(percent) !== null && (percent as number) <= 100 ? (percent as number) : CODEX_EFFECTIVE_WINDOW_PERCENT;
   return Math.floor((rawWindow * pct) / 100);
-}
-
-/** Codex: where auto-compaction fires for a given RAW window. */
-export function codexAutoCompactAt(rawWindow: number): number {
-  return Math.floor(rawWindow * CODEX_AUTO_COMPACT_FRACTION);
 }
 
 /** Grok: where auto-compaction fires. */
@@ -216,41 +198,6 @@ export function claudeAutocompactFlag(option: VerseModelOption | null | undefine
   return window !== null && window > CLAUDE_STANDARD_AUTOCOMPACT_WINDOW && hasExpansiveMode(option)
     ? CLAUDE_STANDARD_AUTOCOMPACT_WINDOW
     : null;
-}
-
-/**
- * Recompute the compaction point when the CLI reports a window at runtime
- * that differs from the catalog budget (Claude Code clamps a 1M model to 200k
- * when long-context credit runs out; grok can upgrade a window by header).
- *
- *  claude/local — fixed-buffer formula over min(runtime window, --autocompact).
- *  codex        — the runtime figure is the EFFECTIVE window; the compaction
- *                 point stays 90% of the raw window it implies.
- *  grok/other   — keep the budget's compaction RATIO.
- */
-export function reconcileAutoCompactAt(input: {
-  engine: VerseEngine;
-  runtimeWindow: number;
-  budget: VerseContextBudget | null;
-  /** The `--autocompact` value in force for claude/local; null = auto. */
-  autocompactWindow?: number | null;
-  maxOutputTokens?: number | null;
-}): number | null {
-  const runtime = positiveInt(input.runtimeWindow);
-  if (runtime === null) return input.budget?.autoCompactAt ?? null;
-  if (input.budget && input.budget.contextWindow === runtime) return input.budget.autoCompactAt;
-  switch (input.engine) {
-    case 'claude':
-    case 'local':
-      return claudeAutoCompactAt(runtime, input.maxOutputTokens ?? null, input.autocompactWindow ?? null);
-    case 'codex':
-      return codexAutoCompactAt(Math.round((runtime * 100) / CODEX_EFFECTIVE_WINDOW_PERCENT));
-    default: {
-      const b = input.budget;
-      if (!b || b.autoCompactAt === null || b.contextWindow <= 0) return null;
-      return Math.floor(runtime * (b.autoCompactAt / b.contextWindow));
-    }
-  }
 }
 
 export type VerseOccupancyTone = 'unknown' | 'ok' | 'warn' | 'danger' | 'over';

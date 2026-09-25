@@ -32,6 +32,9 @@ desktop/src-tauri/target/
 desktop/src-tauri/gen/
 undefined/
 
+# Local release gate output (scripts/gate.mjs): logs, caches, scratch web build
+.ashlr-gate/
+
 # Fleet runtime artifacts
 .ashlr/
 *.launchd.err.log

@@ -6,7 +6,7 @@
 <meta name="description" content="Ashlr Verse is an operator console for coding agents: every subscription you own, local models, Claude cloud sessions on your credits, and a fleet that merges only inside a scope you sign with Touch ID. macOS, Windows and Linux.">
 <meta name="color-scheme" content="light dark">
 <link rel="canonical" href="https://verse.ashlr.ai/">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='m5 11 11-6 11 6-11 6Z M5 16l11 6 11-6 M5 21l11 6 11-6' fill='none' stroke='%232F2BD6' stroke-width='1.8' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='54 55 146 146'%3E%3Cpath fill='%231A2B3C' d='M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z'/%3E%3Cpath fill='%232563EB' d='M110 121H143L133 152H120Z'/%3E%3C/svg%3E">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://verse.ashlr.ai/">
 <meta property="og:title" content="Ashlr Verse">
@@ -105,7 +105,8 @@
   }
   .masthead .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 14px; }
   .brand { display: flex; align-items: center; gap: 10px; font-family: var(--f-display); font-weight: 700; font-size: var(--step-1); letter-spacing: -0.03em; }
-  .brand .mark { flex: none; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round; }
+  .brand .mark { flex: none; }
+  .brand .mark .legs { fill: var(--ink); } /* Ashlr.AI keystone A: ink legs, brand-blue core */
   .brand .sub { color: var(--faint); font-weight: 500; }
   .masthead nav { display: flex; gap: 20px; font-size: var(--step--1); }
   .masthead nav a { color: var(--muted); text-decoration: none; }
@@ -239,7 +240,7 @@
 <body>
 <header class="masthead">
   <div class="wrap">
-    <div class="brand"><svg class="mark" viewBox="0 0 32 32" width="22" height="22" aria-hidden="true"><path d="m5 11 11-6 11 6-11 6Z M5 16l11 6 11-6 M5 21l11 6 11-6"/></svg>Ashlr&nbsp;<span class="sub">Verse</span></div>
+    <div class="brand"><svg class="mark" viewBox="54 67 146 124" width="24" height="24" role="img" aria-label="Ashlr.AI"><path class="legs" d="M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z"/><path fill="#2563EB" d="M110 121H143L133 152H120Z"/></svg>Ashlr&nbsp;<span class="sub">Verse</span></div>
     <nav>
       <a href="#measured">Measured</a>
       <a href="#seats">Seats</a>

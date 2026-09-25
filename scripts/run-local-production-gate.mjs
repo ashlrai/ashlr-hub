@@ -417,7 +417,12 @@ export function validateLocalProductionContract(raw) {
   return Object.freeze({ ...local, gates: Object.freeze(gates) });
 }
 
-function ensureCleanExactSource(repoRoot, expectedSha) {
+// Cleanliness deliberately follows Git's ignore rules: `git status` omits ignored
+// paths, so local build output a developer already has (for example the
+// gitignored desktop/src-tauri/gen/ schemas a Tauri build writes) never makes the
+// controlling checkout look dirty. It never reaches the verification tree
+// either: that is a fresh `git worktree add`, which only checks out tracked files.
+export function ensureCleanExactSource(repoRoot, expectedSha) {
   const topLevel = realpathSync(git(repoRoot, ['rev-parse', '--show-toplevel']));
   if (topLevel !== realpathSync(repoRoot)) fail('Git top-level does not match the supplied repository');
   const revision = git(repoRoot, ['rev-parse', '--verify', 'HEAD']);
@@ -641,6 +646,11 @@ export function prepareDisposableTauriSidecar(repoRoot, rustcVerbose) {
   });
 }
 
+// Only ever called on the fresh detached verification worktree, where gen/ can
+// exist only if something wrote it after checkout. The sandbox lets gates write
+// four exact schema files under gen/schemas, so a pre-existing gen/ (possibly
+// symlinked or hardlinked elsewhere) is refused rather than adopted; that refusal
+// is intentional and must not be relaxed to tolerate a developer's build output.
 export function prepareDisposableTauriGeneratedRoot(repoRoot) {
   const path = join(repoRoot, 'desktop', 'src-tauri', 'gen');
   const schemasPath = join(path, 'schemas');

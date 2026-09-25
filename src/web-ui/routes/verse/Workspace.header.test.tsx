@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { evictAll } from '../../data/cache.js';
 import { getDockState, resetDockStore } from './dock/dock-store.js';
 import { bootstrap, CLAUDE_SEAT, CODEX_SEAT, ev, LOCAL_SEAT, session } from './fixtures.test-support.js';
-import { buildTranscript } from './verse-store.js';
+import { buildTranscript } from './verse-transcript.js';
 import type { VerseSessionView } from './useVerseSession.js';
 import { Workspace, type WorkspaceProps } from './Workspace.js';
 

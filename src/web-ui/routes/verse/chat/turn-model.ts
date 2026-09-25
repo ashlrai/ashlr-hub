@@ -1,7 +1,7 @@
 /**
  * routes/verse/chat/turn-model.ts — a session as a list of TURNS.
  *
- * `verse-store.groupTranscriptItems()` already folds runs of tool calls into
+ * `verse-transcript.groupTranscriptItems()` already folds runs of tool calls into
  * one summary row; what it does not do is say where one exchange ends and
  * the next begins. Everything this file exists for needs that boundary: the
  * per-turn file-activity summary (the blast radius of one ask), the outline
@@ -31,7 +31,7 @@ export type TurnStatus = 'running' | 'ok' | 'error' | 'stopped';
  *
  * Caching is sound because `toolUseId` is a stable identity and a tool call's
  * `{name, input, result}` is immutable ONCE ITS RESULT HAS LANDED
- * (`verse-store.buildTranscript` replaces the item object exactly once, when the
+ * (`verse-transcript.buildTranscript` replaces the item object exactly once, when the
  * `tool-result` event arrives). A cached entry derived while the call was still
  * pending is therefore the only one that can go stale, and it is the only one
  * recomputed.

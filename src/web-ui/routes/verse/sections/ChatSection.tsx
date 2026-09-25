@@ -31,17 +31,17 @@
  * Mutations go through one guard: if no mutation token is held,
  * MutationTokenDialog opens and the action re-runs once unlocked.
  */
-import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type ComponentType, type CSSProperties } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type CSSProperties } from 'react';
 import type { VerseCreateSessionRequest, VerseSession } from '../../../data/api-types.js';
-import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
+import type { MutationTokenDialog as MutationTokenDialogComponent } from '../../../components/auth/MutationTokenDialog.js';
 import { Button } from '../../../components/primitives/Button.js';
-import { Dialog } from '../../../components/primitives/Dialog.js';
+import type { Dialog as DialogComponent } from '../../../components/primitives/Dialog.js';
 import { useToast } from '../../../components/primitives/Toast.js';
 import { clearReadSession } from '../../../data/auth-store.js';
 import { ApiError, DispatchDisabledError } from '../../../data/client.js';
 import { useMutationHold, useQuery, useRefresh } from '../../../data/hooks.js';
 import { insertIntoComposer } from '../chat/composer-bridge.js';
-import { forgetComposerMemory } from '../chat/composer-state.js';
+import { forgetComposerMemory } from '../chat/composer-memory.js';
 import type { ChatTask } from '../chat/tasks-model.js';
 import { requestTranscriptFind, requestTranscriptStep } from '../chat/transcript-jump.js';
 import { noteSessionSeen, useChatActivity } from '../chat/use-chat-activity.js';
@@ -53,6 +53,7 @@ import type { SeatChoice } from '../SeatSelector.js';
 import { clampDockWidth, DOCK_LAYOUT, dockPresentation } from '../shell/dock-catalog.js';
 import { useCommandHandler } from '../shell/command-bus.js';
 import { matchCommand } from '../shell/command-catalog.js';
+import { preloadedLazy, preloadedModule } from '../shell/preloaded.js';
 import { useSectionVisible } from '../shell/section-visibility.js';
 import type { TurnFileChange } from '../shell/slots.js';
 import type { Sidebar as SidebarComponent, SidebarRowActions } from '../Sidebar.js';
@@ -89,46 +90,23 @@ import styles from './ChatSection.module.css';
 const DockHost = lazy(() => import('../dock/DockHost.js').then((m) => ({ default: m.DockHost })));
 const NewChatDialog = lazy(() => import('../NewChatDialog.js').then((m) => ({ default: m.NewChatDialog })));
 
-/**
- * A component in its own chunk whose download starts the moment THIS module
- * evaluates — not when React first renders it — so it streams in parallel
- * with the chat's first paint instead of after it.
- *
- * WHY (SPEC-310A §1: chat first-paint critical JS ≤ 350 KB, measured by
- * scripts/check-first-paint-budget.mjs). React + react-dom alone are ~220 KB
- * of that; the chat list, the transcript, the composer and the markdown
- * renderer were another ~290 KB in this chunk. The section's frame (its
- * grid, the banners, every mutation and key handler) paints from this chunk;
- * the workspace and the chat list paint a beat later from theirs, over
- * skeletons in their own shape so nothing jumps.
- *
- * Once the module is in, every later mount renders it synchronously (no
- * Suspense flash when you come back to Chat). Which of the two a mount uses
- * is fixed for that mount's life: swapping the lazy wrapper for the loaded
- * component mid-life would remount the subtree and drop its state — the
- * composer's draft, the transcript's scroll.
- */
-function preloadedLazy<P extends object>(load: () => Promise<ComponentType<P>>): { Slot: ComponentType<P>; ready: () => Promise<ComponentType<P>> } {
-  let loaded: ComponentType<P> | null = null;
-  let pending: Promise<ComponentType<P>> | null = null;
-  const ready = (): Promise<ComponentType<P>> => {
-    // A failed download is not cached: the next mount (or retry) asks again.
-    pending ??= load().then((c) => (loaded = c), (err: unknown) => { pending = null; throw err; });
-    return pending;
-  };
-  const Lazy = lazy(() => ready().then((c) => ({ default: c })));
-  function Slot(props: P) {
-    const [Ready] = useState<ComponentType<P> | null>(() => loaded);
-    return Ready ? <Ready {...props} /> : <Lazy {...props} />;
-  }
-  if (typeof window !== 'undefined') void ready().catch(() => undefined);
-  return { Slot, ready };
-}
-
 const WorkspaceModule = preloadedLazy<ComponentProps<typeof WorkspaceComponent>>(() => import('../Workspace.js').then((m) => m.Workspace));
 const Workspace = WorkspaceModule.Slot;
 const SidebarModule = preloadedLazy<ComponentProps<typeof SidebarComponent>>(() => import('../Sidebar.js').then((m) => m.Sidebar));
 const Sidebar = SidebarModule.Slot;
+/**
+ * The delete confirmation and the token prompt draw nothing until an
+ * operator acts, and as static imports they (with the dialog primitive and
+ * its focus trap, ~4 KB) sat in the chat first-paint critical JS. Preloaded:
+ * by the time anyone can click Delete the chunk is in and they mount in the
+ * same render that opens them. Both come from one chunk.
+ */
+const DialogModule = preloadedLazy<ComponentProps<typeof DialogComponent>>(() => import('../../../components/primitives/Dialog.js').then((m) => m.Dialog));
+const Dialog = DialogModule.Slot;
+const TokenDialogModule = preloadedLazy<ComponentProps<typeof MutationTokenDialogComponent>>(
+  () => import('../../../components/auth/MutationTokenDialog.js').then((m) => m.MutationTokenDialog),
+);
+const MutationTokenDialog = TokenDialogModule.Slot;
 
 /**
  * The two derivations only the workspace's tasks row and the dock read
@@ -145,39 +123,14 @@ const NO_TASKS: readonly ChatTask[] = [];
 const NO_TURN_FILES: TurnFileChange[] = [];
 
 /**
- * A module (not a component) on the same terms as preloadedLazy: fetched when
- * this module evaluates, read synchronously once in. useLoaded() re-renders
- * its caller once, when it lands; a failed load leaves it null (the values it
- * would have computed stay empty) and is retried on the next mount.
- */
-function preloadedModule<M>(load: () => Promise<M>): { ready: () => Promise<M>; useLoaded: () => M | null } {
-  let loaded: M | null = null;
-  let pending: Promise<M> | null = null;
-  const ready = (): Promise<M> => {
-    pending ??= load().then((m) => (loaded = m), (err: unknown) => { pending = null; throw err; });
-    return pending;
-  };
-  function useLoaded(): M | null {
-    const [mod, setMod] = useState<{ current: M | null }>(() => ({ current: loaded }));
-    useEffect(() => {
-      if (mod.current) return undefined;
-      let live = true;
-      ready().then((m) => { if (live) setMod({ current: m }); }, () => undefined);
-      return () => { live = false; };
-    }, [mod]);
-    return mod.current;
-  }
-  if (typeof window !== 'undefined') void ready().catch(() => undefined);
-  return { ready, useLoaded };
-}
-
-/**
  * Resolves when the chat's own chunks (workspace, chat list) are in. Tests
  * await it so a mount renders the whole surface synchronously; nothing in the
  * app needs to — the Suspense skeletons cover the gap.
  */
 export function preloadChatSurface(): Promise<unknown> {
-  return Promise.all([WorkspaceModule.ready(), SidebarModule.ready(), DERIVATIONS.ready(), SEAT_MODEL.ready()]);
+  return Promise.all([
+    WorkspaceModule.ready(), SidebarModule.ready(), DialogModule.ready(), TokenDialogModule.ready(), DERIVATIONS.ready(), SEAT_MODEL.ready(),
+  ]);
 }
 
 /**
@@ -736,6 +689,8 @@ export function ChatSection() {
             runMutation={withToken} />
         </Suspense>
       ) : null}
+      {/* Closed dialogs render nothing, so a not-yet-loaded one (fallback null) looks the same. */}
+      <Suspense fallback={null}>
       <Dialog open={deleteTarget !== null} onClose={() => { if (!deleting) setDeleteTarget(null); }} titleId={deleteTitleId}
         title="Delete this chat?"
         description={deleteTarget ? `“${deleteTarget.title || 'Untitled chat'}” and its transcript are removed from this machine. This cannot be undone.` : undefined}>
@@ -775,6 +730,7 @@ export function ChatSection() {
           pendingAction.current = null;
           pending?.run();
         }} />
+      </Suspense>
     </div>
   );
 }
