@@ -245,11 +245,11 @@ export function MatrixHeatmap({
           {/* Column headers */}
           {columns.map((c, ci) => {
             const x = gridX + ci * (cellW + GAP);
-            const chars = Math.max(2, Math.floor((cellW - (c.engine ? 16 : 0)) / 7));
+            const chars = Math.max(2, Math.floor((cellW - (c.engine ? 22 : 0)) / 7));
             return (
               <g key={`ch-${c.id}`}>
                 {c.engine ? <EngineTick engine={c.engine} x={x + 2} y={marginTop + 5} height={HEADER_H - 12} /> : null}
-                <text className={plot.label} x={x + (c.engine ? 18 : cellW / 2)} y={marginTop + HEADER_H / 2} dy="0.32em" textAnchor={c.engine ? 'start' : 'middle'}>
+                <text className={plot.label} x={x + (c.engine ? 24 : cellW / 2)} y={marginTop + HEADER_H / 2} dy="0.32em" textAnchor={c.engine ? 'start' : 'middle'}>
                   {c.label.length > chars ? `${c.label.slice(0, chars - 1)}…` : c.label}
                 </text>
               </g>

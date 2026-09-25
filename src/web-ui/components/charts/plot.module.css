@@ -243,6 +243,8 @@
   font-size: var(--text-2xs-size);
   font-weight: var(--font-weight-semibold);
   fill: var(--text-secondary);
+  /* 3.11.1: the tick draws a provider mark (nested svg, currentColor). */
+  color: var(--text-secondary);
 }
 
 /* V3.10 — an unknown mark: hatch fill (set inline via url(#id)) + outline. */

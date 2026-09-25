@@ -633,9 +633,10 @@ describe('footer — the model is said once', () => {
     const footer = footerOf();
     expect(count(footer.textContent ?? '', 'Qwen3.8 27b-ctx64k')).toBe(1);
     const chip = screen.getByRole('button', { name: 'Seat: Local, no usage limits' });
-    expect(chip).toHaveTextContent(/^LLocal$/);
+    expect(chip).toHaveTextContent(/^Local$/);
+    expect(chip.querySelector('svg[data-provider="local"]')).not.toBeNull();
     // The hollow circle is gone: a seat without limits draws no ring at all.
-    expect(chip.querySelector('svg')).toBeNull();
+    expect(chip.querySelector('svg[data-tone]')).toBeNull();
     // No effort on this seat: no control, and no "No effort setting" either.
     expect(screen.queryByRole('button', { name: /^Effort/ })).toBeNull();
     expect(footer).not.toHaveTextContent(/effort/i);
@@ -755,6 +756,8 @@ describe('footer — folds instead of truncating', () => {
       let chars = (this.textContent ?? '').length;
       this.querySelectorAll('.visually-hidden').forEach((hidden) => { chars -= (hidden.textContent ?? '').length; });
       chars += this.querySelectorAll('svg[data-tone]').length * RING_CHARS;
+      // A provider mark takes the room its monogram letter used to (3.11.1).
+      chars += this.querySelectorAll('svg[data-provider]').length;
       return chars * CHAR;
     });
     vi.spyOn(Element.prototype, 'clientWidth', 'get').mockImplementation(() => limitChars * CHAR);
@@ -867,11 +870,11 @@ describe('footer — folds instead of truncating', () => {
     const mode = await screen.findByRole('button', { name: 'Permission mode: Accept edits' });
     await waitFor(() => expect(screen.getByRole('button', { name: /^Seat: Claude Max,/ })).not.toHaveTextContent('Claude Max'));
     expect(mode).toHaveTextContent(/^Accept edits$/);
-    expect(screen.getByRole('button', { name: /^Seat: Claude Max,/ }).querySelector('svg')).toBeNull();
+    expect(screen.getByRole('button', { name: /^Seat: Claude Max,/ }).querySelector('svg[data-tone]')).toBeNull();
 
     // The next roster poll brings a reading: the ring appears, and the row folds one more step.
     view.rerender(<Composer {...props()} />);
-    expect(screen.getByRole('button', { name: /^Seat: Claude Max,/ }).querySelector('svg')).not.toBeNull();
+    expect(screen.getByRole('button', { name: /^Seat: Claude Max,/ }).querySelector('svg[data-tone]')).not.toBeNull();
     expect(mode).toHaveTextContent(/^$/);
 
     // …and unfolds again when the reading goes.

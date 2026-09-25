@@ -1,0 +1,137 @@
+/* The always-on resource bar in the rail foot (3.11.1): provider mark + a
+   battery per resource. Collapsed rail: a column of marks over vertical
+   batteries. Labelled rail: mark · name · battery · value on one line. */
+
+.bar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-1) 0;
+  margin: var(--space-1) 0;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: calc(var(--control-h) + var(--space-1));
+  min-height: 26px;
+  padding: 3px 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+.row:hover { background: var(--bg-hover); color: var(--text-primary); }
+.row:focus-visible { outline: 2px solid var(--focus-ring, var(--accent-500)); outline-offset: 1px; }
+
+.bar:not([data-expanded]) .row { flex-direction: column; gap: 3px; }
+
+.bar[data-expanded] .row {
+  width: 100%;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  padding: 5px var(--space-2);
+}
+/* Labelled rail: logo + full name on one line, battery + value below. */
+.line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.bar[data-expanded] .battery { flex: 1 1 auto; }
+.bar[data-expanded] .cell { flex: 1 1 auto; width: auto; min-width: 40px; }
+
+.logo { flex: none; }
+.cloudLogo { position: relative; display: inline-flex; }
+.cloudLogo::after {
+  content: '';
+  position: absolute;
+  right: -3px;
+  bottom: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-500);
+  box-shadow: 0 0 0 1.5px var(--bg-surface);
+}
+
+.name {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  font-size: var(--text-xs-size, 12px);
+}
+
+.value {
+  flex: none;
+  text-align: right;
+  white-space: nowrap;
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+.row[data-level='out'] .value { color: var(--status-danger-fg); }
+.row[data-level='low'] .value { color: var(--status-warning-fg); }
+
+/* Battery: a rounded cell with a nub; the fill is what is LEFT. */
+.battery {
+  --level: var(--status-success-fg);
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+.battery[data-level='low'] { --level: var(--status-warning-fg); }
+.battery[data-level='out'] { --level: var(--status-danger-fg); }
+.battery[data-level='unknown'] { --level: var(--text-tertiary); }
+.battery[data-level='idle'] { --level: var(--status-success-fg); }
+
+.cell {
+  position: relative;
+  width: 26px;
+  height: 9px;
+  border: 1px solid color-mix(in srgb, var(--level) 55%, var(--border-strong, var(--border-subtle)));
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--bg-surface);
+}
+.cell::before {
+  content: '';
+  position: absolute;
+  inset: 1px auto 1px 1px;
+  width: max(0px, calc(var(--fill, 0%) - 2px));
+  border-radius: 1.5px;
+  background: var(--level);
+  transition: width var(--duration-medium, 240ms) var(--ease-standard);
+}
+.nub {
+  width: 2px;
+  height: 4px;
+  border-radius: 0 1px 1px 0;
+  background: color-mix(in srgb, var(--level) 55%, var(--border-strong, var(--border-subtle)));
+}
+.battery[data-level='idle'] .cell::before { opacity: 0.55; }
+
+/* Collapsed rail: the battery stands up, filling from the bottom. */
+.battery[data-vertical] { flex-direction: column-reverse; gap: 1px; }
+.battery[data-vertical] .cell { width: 9px; height: 16px; }
+.battery[data-vertical] .cell::before {
+  inset: auto 1px 1px 1px;
+  width: auto;
+  height: max(0px, calc(var(--fill, 0%) - 2px));
+  transition: height var(--duration-medium, 240ms) var(--ease-standard);
+}
+.battery[data-vertical] .nub { width: 4px; height: 2px; border-radius: 1px 1px 0 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cell::before { transition: none; }
+}
+
+/* Hover card */
+.tip { display: flex; flex-direction: column; gap: 3px; max-width: 280px; }
+.tipHead { display: flex; align-items: center; gap: 6px; }
+.tipSummary { color: var(--text-primary); }
+.tipLine { color: var(--text-secondary); font-size: var(--text-2xs-size, 11px); }
+.tipHint { margin-top: 2px; color: var(--text-tertiary); font-size: var(--text-2xs-size, 11px); }

@@ -1,17 +1,19 @@
 /**
- * routes/verse/apps/MonogramTile.tsx — the square letter tile every seat and
- * app row leads with (SPEC-310C §6: engines are a monogram and a 2px tick,
- * never a vendor logo — no brand impersonation, and one visual grammar for
- * the rail, the sidebar, Apps and the capacity strip).
+ * routes/verse/apps/MonogramTile.tsx — the square tile every seat and app row
+ * leads with. 3.11.1: engine-backed tiles show the provider's own mark
+ * (Anthropic Claude, OpenAI, xAI Grok, Ollama — ProviderLogo) so an account is
+ * recognisable at a glance; the mark only identifies the provider, the row's
+ * text still names the account. Neutral tiles (Aider, Goose, …) keep their
+ * letters.
  *
- * Engine-backed tiles take a 12% tint of the engine hue with an ink letter,
- * so the letter's contrast never depends on the hue; neutral tiles (Aider,
- * Goose, …) sit on the surface with a hairline. Decorative: the row's name
- * carries the meaning.
+ * Engine-backed tiles take a 12% tint of the engine hue; marks draw in ink
+ * (currentColor, Claude in its brand colour) so contrast never depends on the
+ * hue. Decorative: the row's name carries the meaning.
  */
 import type { CSSProperties } from 'react';
 import type { VerseEngine } from '../../../data/api-types.js';
 import { engineColor } from '../../../components/primitives/Tag.js';
+import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
 import styles from './Apps.module.css';
 
 export function MonogramTile({
@@ -33,7 +35,7 @@ export function MonogramTile({
       style={style}
       aria-hidden="true"
     >
-      {monogram.slice(0, 2)}
+      {engine === null ? monogram.slice(0, 2) : <ProviderLogo engine={engine} size={size === 'sm' ? 14 : 18} />}
     </span>
   );
 }

@@ -30,6 +30,7 @@ import { argumentItems, buildPaletteItems, paletteView, type PaletteItem } from 
 import { executeCatalogCommand } from './run-command.js';
 import { useActivity } from './useActivity.js';
 import styles from './CommandPalette.module.css';
+import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
 
 export interface CommandPaletteProps {
   onClose?: () => void;
@@ -253,7 +254,7 @@ export function CommandPalette({ onClose = closeVerseOverlay }: CommandPalettePr
                     >
                       <span className={styles.lead} aria-hidden="true">
                         {item.monogram ? (
-                          <span className={styles.monogram} data-engine={item.engine ?? undefined}>{item.monogram}</span>
+                          <span className={styles.monogram} data-engine={item.engine ?? undefined}>{item.engine ? <ProviderLogo engine={item.engine} size={13} /> : item.monogram}</span>
                         ) : (
                           <span className={styles.bullet} data-kind={item.kind} />
                         )}

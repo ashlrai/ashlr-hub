@@ -40,7 +40,7 @@ describe('resources-store', () => {
   it('comes back docked after a reload when it was PINNED open', () => {
     setResourcesPinned(true);
     openResources();
-    expect(JSON.parse(localStorage.getItem(RESOURCES_STORAGE_KEY)!)).toEqual({ open: true, pinned: true });
+    expect(JSON.parse(localStorage.getItem(RESOURCES_STORAGE_KEY)!)).toEqual({ open: true, pinned: true, bar: true });
     reloadResourcesUiForTest();
     expect(getResourcesUi()).toMatchObject({ open: true, pinned: true });
   });

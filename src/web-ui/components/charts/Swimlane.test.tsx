@@ -73,7 +73,7 @@ describe('spanTickFormatter', () => {
 });
 
 describe('Swimlane V3.10', () => {
-  it('draws the engine tick + monogram beside a lane and names the engine in words', () => {
+  it('draws the engine tick + provider mark beside a lane and names the engine in words', () => {
     const lanes: SwimlaneLane[] = [
       { id: 'g', label: 'grok-cli · 1', engine: 'grok', items: [{ id: 'a', start: FROM, end: FROM + H, status: 'done' }] },
       { id: 'l', label: 'local · 1', engine: 'local', items: [{ id: 'b', start: FROM, end: FROM + H, status: 'done' }] },
@@ -81,7 +81,7 @@ describe('Swimlane V3.10', () => {
     const { container } = render(<Swimlane title="Live" width={800} from={FROM} to={TO} lanes={lanes} />);
     const tick = container.querySelector('[data-engine="grok"]')!;
     expect(tick.querySelector('rect')!.getAttribute('fill')).toBe('var(--engine-grok)');
-    expect(tick.querySelector('text')!.textContent).toBe('G');
+    expect(tick.querySelector('svg[data-provider="grok"]')).not.toBeNull();
     expect(screen.getByRole('listitem', { name: 'grok-cli · 1 (grok): 1 run (1 done)' })).toBeInTheDocument();
   });
 

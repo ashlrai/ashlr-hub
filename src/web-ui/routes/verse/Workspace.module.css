@@ -684,6 +684,8 @@
 }
 .monogram {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
   font-family: var(--font-display);
   font-size: var(--text-2xs-size);
   font-weight: var(--font-weight-semibold);

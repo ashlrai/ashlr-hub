@@ -26,6 +26,8 @@ export const RESOURCES_STORAGE_KEY = 'ashlr.verse.resources.v1';
 export interface ResourcesUiState {
   open: boolean;
   pinned: boolean;
+  /** The always-on resource bar in the rail foot (3.11.1). On by default; persisted. */
+  bar: boolean;
   /**
    * The handle's dot, written by the lazily loaded summary probe
    * (resources-summary.tsx). NOT persisted; null until the probe has read.
@@ -37,9 +39,9 @@ function load(): ResourcesUiState {
   try {
     const raw = JSON.parse(localStorage.getItem(RESOURCES_STORAGE_KEY) ?? 'null') as Partial<ResourcesUiState> | null;
     const pinned = raw?.pinned === true;
-    return { pinned, open: pinned && raw?.open === true, summary: null };
+    return { pinned, open: pinned && raw?.open === true, bar: raw?.bar !== false, summary: null };
   } catch {
-    return { open: false, pinned: false, summary: null };
+    return { open: false, pinned: false, bar: true, summary: null };
   }
 }
 
@@ -48,12 +50,12 @@ const listeners = new Set<() => void>();
 
 function patch(delta: Partial<ResourcesUiState>): void {
   const next = { ...state, ...delta };
-  if (next.open === state.open && next.pinned === state.pinned && next.summary === state.summary) return;
-  const persist = next.open !== state.open || next.pinned !== state.pinned;
+  if (next.open === state.open && next.pinned === state.pinned && next.bar === state.bar && next.summary === state.summary) return;
+  const persist = next.open !== state.open || next.pinned !== state.pinned || next.bar !== state.bar;
   state = next;
   if (persist) {
     try {
-      localStorage.setItem(RESOURCES_STORAGE_KEY, JSON.stringify({ open: next.open, pinned: next.pinned }));
+      localStorage.setItem(RESOURCES_STORAGE_KEY, JSON.stringify({ open: next.open, pinned: next.pinned, bar: next.bar }));
     } catch {
       /* best-effort */
     }
@@ -79,6 +81,11 @@ export function toggleResources(): void {
 
 export function setResourcesPinned(pinned: boolean): void {
   patch({ pinned });
+}
+
+/** Show or hide the always-on resource bar in the rail foot. */
+export function setResourcesBar(bar: boolean): void {
+  patch({ bar });
 }
 
 export function setResourcesSummary(summary: ResourcesSummary | null): void {
