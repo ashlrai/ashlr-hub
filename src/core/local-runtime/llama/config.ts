@@ -323,6 +323,9 @@ function whichBin(bin: string): string | null {
   }
 }
 
+/** Everything {@link resolveLlamaRuntimeConfig} resolves except the binary. */
+export type LlamaRuntimeSettings = Omit<LlamaRuntimeConfig, 'binPath'>;
+
 /**
  * Merge config, environment and defaults into the launch parameters.
  *
@@ -332,6 +335,24 @@ function whichBin(bin: string): string | null {
  * legible refusal rather than an ENOENT from `spawn`.
  */
 export function resolveLlamaRuntimeConfig(cfg?: AshlrConfig): LlamaRuntimeConfig {
+  return {
+    ...resolveLlamaRuntimeSettings(cfg),
+    binPath: resolveLlamaServerBin(str(readSection(cfg).bin)),
+  };
+}
+
+/**
+ * {@link resolveLlamaRuntimeConfig} WITHOUT locating the binary — for callers
+ * that only need where the runtime listens (host/port), not how to launch it.
+ *
+ * WHY a separate resolver: finding the binary shells out to `which` with
+ * execFileSync, a fork+exec that blocks the event loop (~6–7 ms on Linux,
+ * far more on macOS with a long PATH). The Verse runtime probe resolves the
+ * config on every poll to learn the port and never reads `binPath`, so that
+ * spawn was pure stall on the request path — part of the 53–78 ms the 3.10
+ * CHANGELOG records against a 20 ms budget. Pure: no fs, no spawn.
+ */
+export function resolveLlamaRuntimeSettings(cfg?: AshlrConfig): LlamaRuntimeSettings {
   const section = readSection(cfg);
 
   // BIND HOST. llama-server has no authentication whatsoever: whoever reaches
@@ -385,7 +406,6 @@ export function resolveLlamaRuntimeConfig(cfg?: AshlrConfig): LlamaRuntimeConfig
     context,
     modelRef,
     modelPath,
-    binPath: resolveLlamaServerBin(str(section.bin)),
     extraArgs,
   };
 }
@@ -557,7 +577,9 @@ export function resolveLocalAnthropicBaseUrl(cfg?: AshlrConfig): string {
   const fromEnv = str(process.env['LLAMA_SERVER_ANTHROPIC_BASE_URL']);
   if (fromEnv) return fromEnv;
 
-  const runtime = resolveLlamaRuntimeConfig(cfg);
+  // Settings, not the full config: only host/port are needed, and the full
+  // resolver's `which` spawn would block the loop for a binary never used.
+  const runtime = resolveLlamaRuntimeSettings(cfg);
   return `${originFor(runtime.host, runtime.anthropicPort)}/v1`;
 }
 

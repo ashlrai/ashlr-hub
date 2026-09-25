@@ -22,6 +22,8 @@ import {
   isLoopbackHost,
   originFor,
   resolveLlamaRuntimeConfig,
+  resolveLlamaRuntimeSettings,
+  type LlamaRuntimeSettings,
 } from './config.js';
 import { ensureAnthropicProxy, stopAnthropicProxy } from './anthropic-proxy.js';
 import { probeLlamaRuntime } from './health.js';
@@ -82,7 +84,20 @@ export interface LifecycleOptions {
  * opt-in remains the only way out of loopback.
  */
 function effectiveRuntime(options: LifecycleOptions): LlamaRuntimeConfig {
-  const base = resolveLlamaRuntimeConfig(options.cfg);
+  return gateOverride(resolveLlamaRuntimeConfig(options.cfg), options);
+}
+
+/**
+ * {@link effectiveRuntime} without locating the binary, for the read-only
+ * status probe. It needs only host/port, and the binary lookup is a
+ * synchronous `which` spawn that stalled the web server's event loop on every
+ * runtime poll. The loopback gate is identical — it is the same merge.
+ */
+function effectiveEndpoint(options: LifecycleOptions): LlamaRuntimeSettings {
+  return gateOverride(resolveLlamaRuntimeSettings(options.cfg), options);
+}
+
+function gateOverride<T extends LlamaRuntimeSettings>(base: T, options: LifecycleOptions): T {
   const merged = { ...base, ...(options.runtime ?? {}) };
   const allowNonLoopback = base.hostDowngradedFrom === null && !isLoopbackHost(base.host);
   if (isLoopbackHost(merged.host) || allowNonLoopback) {
@@ -159,7 +174,7 @@ async function attachAnthropicProxy(
 
 /** Probe a specific host/port pair rather than the globally-resolved one. */
 async function snapshotFor(
-  runtime: LlamaRuntimeConfig,
+  runtime: Pick<LlamaRuntimeSettings, 'host' | 'port'>,
   record?: LlamaOwnershipRecord | null,
 ): Promise<LlamaRuntimeSnapshot> {
   const origin = originFor(runtime.host, runtime.port);
@@ -170,7 +185,7 @@ async function snapshotFor(
 export async function statusLocalRuntime(
   options: LifecycleOptions = {},
 ): Promise<LlamaRuntimeSnapshot> {
-  return snapshotFor(effectiveRuntime(options));
+  return snapshotFor(effectiveEndpoint(options));
 }
 
 /**
