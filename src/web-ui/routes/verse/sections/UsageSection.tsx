@@ -50,6 +50,7 @@ import { LocalCloudPanel } from '../usage/LocalCloudPanel.js';
 import { LocalCard, LocalModelsPanel } from '../usage/LocalModelsPanel.js';
 import { SeriesPanel } from '../usage/SeriesPanel.js';
 import { SpendPanel } from '../usage/SpendPanel.js';
+import { CloudCreditsPanel } from '../cloud/CloudCreditsPanel.js';
 import {
   frontierUsageQuery,
   usageSeriesQuery,
@@ -554,6 +555,9 @@ export function UsageSection(): ReactNode {
                 </div>
               </section>
             )}
+
+            {/* 3.11: Claude Code cloud sessions' estimated credits and their budget. */}
+            <CloudCreditsPanel />
 
             <LimitsPanel rows={limitRows} capsNote={caps.available ? null : caps.reason} />
 

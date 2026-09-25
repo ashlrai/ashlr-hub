@@ -1,0 +1,301 @@
+/*
+ * routes/verse/cloud/cloud.module.css — the cloud lane's card, dialog,
+ * popover, Usage panel, Fleet chip and composer action (3.11 unit C3).
+ * Tokens only (style-scan-310): no raw hex colour, no px font size, and
+ * every colour follows the theme. Nothing is ellipsized: long titles and
+ * reasons wrap at word boundaries (only an unbreakable run, like a URL, may
+ * break inside itself).
+ */
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.actionsRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.headActions {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.meterBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.estimateNote,
+.muted {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  overflow-wrap: break-word;
+}
+
+.facts {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  overflow-wrap: break-word;
+}
+
+.link {
+  color: var(--text-link);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.link:hover {
+  text-decoration: underline;
+}
+
+.link:focus-visible,
+.linkButton:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.linkButton {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-link);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.linkButton:hover {
+  text-decoration: underline;
+}
+
+.linkButton:disabled {
+  color: var(--text-disabled);
+  cursor: default;
+  text-decoration: none;
+}
+
+.toggleRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.toggleText {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+/* ---- tasks ------------------------------------------------------------ */
+
+.tasks {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.task:first-child {
+  border-top: 0;
+}
+
+.taskChip {
+  padding-top: 1px;
+}
+
+.taskMain {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.taskTitle {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: var(--font-weight-medium);
+  overflow-wrap: break-word;
+}
+
+.taskLinks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+}
+
+/* ---- notices (the NoticeSlot tones, inside a card) --------------------- */
+
+.notice {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-raised);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  overflow-wrap: break-word;
+}
+
+.notice[data-tone='warning'] {
+  border-color: var(--status-warning-solid);
+  background: var(--status-warning-bg);
+  color: var(--status-warning-fg);
+}
+
+.notice[data-tone='danger'] {
+  border-color: var(--status-danger-solid);
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+
+.notice[data-tone='success'] {
+  border-color: var(--status-success-solid);
+  background: var(--status-success-bg);
+  color: var(--status-success-fg);
+}
+
+.noticeRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-3);
+}
+
+/* ---- the Edit budget popover ------------------------------------------ */
+
+.popover {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: var(--z-dropdown);
+  width: min(26rem, calc(100vw - var(--space-8)));
+  max-height: min(34rem, 70vh);
+  overflow-y: auto;
+  padding: var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-raised);
+  box-shadow: var(--shadow-menu);
+}
+
+.popoverTitle {
+  margin: 0 0 var(--space-3);
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: var(--font-weight-semibold);
+}
+
+/* ---- forms (launch dialog, budget) ------------------------------------ */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.fieldGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: var(--space-3);
+}
+
+.textareaField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.label {
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  font-weight: var(--font-weight-medium);
+}
+
+.textarea {
+  min-height: 8rem;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  resize: vertical;
+}
+
+.textarea:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 0;
+}
+
+.textarea[aria-invalid='true'] {
+  border-color: var(--status-danger-solid);
+}
+
+.fieldError {
+  margin: 0;
+  color: var(--status-danger-fg);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.formActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.dialogWidth {
+  width: min(34rem, calc(100vw - var(--space-8)));
+}
+
+/* ---- the Fleet chip ---------------------------------------------------- */
+
+.laneChip[data-active='true'] {
+  border-color: var(--status-running-solid);
+}
+
+/* ---- the composer's "Run in cloud" ------------------------------------- */
+
+.sheetAction {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}

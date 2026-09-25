@@ -8,6 +8,7 @@ import { clearMutationToken, setMutationToken } from '../../../data/auth-store.j
 import { stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
 import { DARK_SINCE, activitySnapshot, authorityStatus, budgetView, fleetHistory, fleetLive, seatHistory } from '../command/fixtures.test-support.js';
 import { resetActivityForTest } from '../shell/useActivity.js';
+import { overview as cloudOverview, task as cloudTask } from '../cloud/cloud-fixtures.test-support.js';
 import { mockCompactViewport, mockWideViewport, type ViewportMock } from '../shell/viewport.test-support.js';
 
 const TOKEN = 'a'.repeat(64);
@@ -60,6 +61,23 @@ describe('CommandSection — live fleet', () => {
     expect(screen.getByRole('group', { name: 'Key numbers' })).toHaveTextContent('Merged · 7d23');
     await waitFor(() => expect(screen.getByRole('group', { name: 'Capacity per seat' })).toBeInTheDocument());
     expect(screen.getByRole('figure', { name: 'Last 12 hours' })).toBeInTheDocument();
+  });
+
+  it('mounts the Cloud card right after the burn-downs (3.11), and a server without the lane is one quiet line', async () => {
+    stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/cloud': cloudOverview({ tasks: [cloudTask('running')] }) } });
+    const { unmount } = render(<CommandSection />);
+    await ready();
+    const cloud = await screen.findByRole('region', { name: 'Cloud' });
+    expect(await within(cloud).findByText('$241 of $250 · estimate')).toBeInTheDocument();
+    const seats = await screen.findByRole('group', { name: 'Capacity per seat' });
+    expect(seats.compareDocumentPosition(cloud) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(cloud.compareDocumentPosition(screen.getByRole('figure', { name: 'Last 12 hours' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    unmount();
+    evictAll();
+    stubSurfaceFetch({ kind: 'live' });
+    render(<CommandSection />);
+    await ready();
+    expect(await within(screen.getByRole('region', { name: 'Cloud' })).findByText('The cloud lane is not in this build yet.')).toBeInTheDocument();
   });
 
   it('lowers the switch instantly — no confirmation, no Touch ID (I1)', async () => {
