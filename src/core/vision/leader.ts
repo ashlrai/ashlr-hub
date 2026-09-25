@@ -85,6 +85,7 @@ import {
   type LeaderApplyDeps,
 } from './leader-apply.js';
 import { loadDefaultLeaderSeatDeps, resolveLeaderSeat, type LeaderSeatDeps } from './leader-seat.js';
+import { suggestLeaderCloudBacklog, type LeaderCloudBacklogDeps } from './leader-cloud.js';
 
 // ---------------------------------------------------------------------------
 // Persona
@@ -629,10 +630,15 @@ export interface LeaderRunDeps {
   sources: LeaderEvidenceSources;
   seat: LeaderSeatDeps;
   apply: LeaderApplyDeps;
+  /**
+   * 3.11 cloud lane: where the memo's code-change actions are suggested as
+   * cloud backlog items (leader-cloud.ts). Absent = no cloud suggestions.
+   */
+  cloudBacklog?: LeaderCloudBacklogDeps;
 }
 
 export async function loadDefaultLeaderRunDeps(cfg: AshlrConfig): Promise<LeaderRunDeps> {
-  const [apply, seat, budgetStore, quarantine, quality, modelStats, reasoningApi, goalsStore, ledger, effective] = await Promise.all([
+  const [apply, seat, budgetStore, quarantine, quality, modelStats, reasoningApi, goalsStore, ledger, effective, cloudBacklog] = await Promise.all([
     loadDefaultLeaderDeps(),
     loadDefaultLeaderSeatDeps(cfg),
     import('../routing/budget-store.js'),
@@ -643,12 +649,14 @@ export async function loadDefaultLeaderRunDeps(cfg: AshlrConfig): Promise<Leader
     import('../goals/store.js'),
     import('../authority/ledger.js'),
     import('../authority/effective-config.js'),
+    import('../cloud/backlog.js'),
   ]);
   return {
     cfg,
     now: () => Date.now(),
     apply,
     seat,
+    cloudBacklog: { append: (items) => cloudBacklog.appendUserBacklogItems(items) },
     sources: {
       standingPolicy: () => effective.currentStandingPolicy(),
       budgetPolicy: () => budgetStore.loadBudgetPolicy(),
@@ -868,6 +876,15 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
     });
   } catch (err) {
     memo.statusReason = `Actions were not applied: ${err instanceof Error ? err.message : 'error'}`.slice(0, 400);
+  }
+
+  // Code-change actions also become cloud backlog suggestions. Only the
+  // cloud budget launches them; a backlog failure is noted, never fatal.
+  if (deps.cloudBacklog) {
+    const suggested = suggestLeaderCloudBacklog(deps.cloudBacklog, memo);
+    if (suggested.error) {
+      memo.statusReason = [memo.statusReason, suggested.error].filter((n): n is string => typeof n === 'string' && n.length > 0).join('; ').slice(0, 400);
+    }
   }
 
   // Baseline for the 7-day grade.
