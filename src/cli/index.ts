@@ -30,6 +30,7 @@
  *   leader <show|run|tick|veto|oversight-plist>  The Leader (Visionary): latest memo, run now, apply due
  *                              actions, veto; print (never install) the nightly oversight plist.
  *   mirror <list|add|sync|path|remove|reconcile>  The fleet's own mirror clones (~/.ashlr/fleet/mirrors).
+ *   cloud <launch|list|refresh|improve|budget|backlog>  Claude Code cloud sessions that deliver draft PRs (3.11).
  *   spec new "<goal>" [opts]   Author a versioned end-state spec artifact.
  *   spec list/show/refine      Manage spec artifacts.
  *   swarm "<goal>"|<specId>    Decompose a spec into a contracts-first agent swarm and run it.
@@ -672,6 +673,13 @@ const loadMirrorCmd = lazyCmd(
   () => import('./mirror.js'),
   (m) => m.runMirrorCli as Cmd,
   'mirror command requires a current build of src/cli/mirror.ts (3.10 Track B unit U6).',
+);
+
+// ─── 3.11 cloud lane ────────────────────────────────────────────────
+const loadCloudCmd = lazyCmd(
+  () => import('./cloud.js'),
+  (m) => m.runCloudCli as Cmd,
+  'cloud command requires a current build of src/cli/cloud.ts (3.11 cloud lane unit C2).',
 );
 
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
@@ -2218,6 +2226,14 @@ async function main(): Promise<void> {
         // list / add / sync / path / remove / reconcile (src/cli/mirror.ts).
         const cmdMirror = await loadMirrorCmd();
         process.exitCode = await cmdMirror(rest);
+        break;
+      }
+
+      case 'cloud': {
+        // 3.11: Claude Code cloud sessions — launch / list / refresh / improve /
+        // budget / backlog (src/cli/cloud.ts). Launches spend Claude credits.
+        const cmdCloud = await loadCloudCmd();
+        process.exitCode = await cmdCloud(rest);
         break;
       }
 

@@ -35,6 +35,8 @@ export const TOP_LEVEL_COMMANDS: string[] = [
   'verse', 'local-runtime',
   // V3.10 Track B: standing authority, the Leader, fleet mirrors.
   'authority', 'leader', 'mirror',
+  // 3.11 cloud lane.
+  'cloud',
 ];
 
 /** Subcommands per top-level command (first-position completion only). */
@@ -94,6 +96,8 @@ const SUBCOMMANDS: Record<string, string[]> = {
   // listed so the verb is discoverable, not hidden behind `leader help`.
   leader: ['show', 'run', 'tick', 'veto', 'oversight-plist', 'help'],
   mirror: ['list', 'add', 'sync', 'path', 'remove', 'reconcile', 'help'],
+  // Mirror the verb switch in src/cli/cloud.ts (runCloudCli).
+  cloud: ['launch', 'list', 'refresh', 'improve', 'budget', 'backlog', 'help'],
   universe: ['demo', 'init', 'run', 'status', 'archive', 'campaign', 'portfolio', 'integration', 'deliver', 'deliveries', 'graph', 'compare', 'help'],
 };
 
