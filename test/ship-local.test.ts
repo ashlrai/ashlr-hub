@@ -46,11 +46,13 @@ function ctx(overrides: Record<string, unknown> = {}) {
     appExists: true,
     listing: {
       'Contents/MacOS': [{ name: 'ashlr', mtimeMs: 10 }, { name: 'ashlr-desktop', mtimeMs: 10 }],
-      'Contents/Resources': [{ name: 'public', mtimeMs: 10 }],
+      'Contents/Resources': [{ name: 'public', mtimeMs: 10 }, { name: 'icon.icns', mtimeMs: 10 }],
     } as Record<string, Entry[]>,
     loadedAgents: ['ai.ashlr.anthropic-proxy', 'ai.ashlr.serve'],
     nativeBuildMtime: null as number | null,
     installedNativeMtime: 10 as number | null,
+    iconBuildMtime: null as number | null,
+    installedIconMtime: 10 as number | null,
     ...overrides,
   };
 }
@@ -306,5 +308,20 @@ describe('runSteps', () => {
     const steps = planShip(gatherContext({ dryRun: false, native: false, allowDirty: false }, io));
     expect(await runSteps(steps, io, { dryRun: false })).toBe(1);
     expect(logs.at(-1)).toMatch(/answered 502/);
+  });
+});
+
+describe('the app icon (3.11.3)', () => {
+  it('--native installs a newer icon.icns, backs up the old one, and touches the bundle', () => {
+    const steps = planShip(ctx({ native: true, iconBuildMtime: 99 })) as Step[];
+    expect(ids(steps)).toEqual(expect.arrayContaining(['backup-icon.icns', 'install-icon.icns', 'touch-app']));
+    expect(step(steps, 'install-icon.icns')!.argv).toEqual(['cp', '-R', `${REPO}/desktop/src-tauri/icons/icon.icns`, `${APP_PATH}/Contents/Resources/icon.icns`]);
+    expect(ids(steps).indexOf('touch-app')).toBeGreaterThan(ids(steps).indexOf('codesign'));
+  });
+
+  it('leaves the icon alone without --native or when it is not newer', () => {
+    expect(ids(planShip(ctx({ iconBuildMtime: 99 })) as Step[])).not.toContain('install-icon.icns');
+    expect(ids(planShip(ctx({ native: true, iconBuildMtime: 5 })) as Step[])).not.toContain('install-icon.icns');
+    expect(ids(planShip(ctx({ native: true, iconBuildMtime: 5 })) as Step[])).not.toContain('touch-app');
   });
 });

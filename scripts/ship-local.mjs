@@ -41,12 +41,15 @@ export const VERSE_URL = 'http://127.0.0.1:7777/verse/';
 export const LAUNCH_AGENTS = Object.freeze(['ai.ashlr.anthropic-proxy', 'ai.ashlr.serve']);
 export const KEEP_BACKUPS = 3;
 export const NATIVE_BUILD = 'desktop/src-tauri/target/release/ashlr-desktop';
+/** The Dock/Finder icon, generated from icons/icon.svg by `cargo tauri icon`. */
+export const APP_ICON_BUILD = 'desktop/src-tauri/icons/icon.icns';
 
 /** The app-bundle files ship:local replaces, each backed up as <path>.prev-<short sha>. */
 export const BUNDLE_TARGETS = Object.freeze({
   sidecar: { dir: 'Contents/MacOS', name: 'ashlr', source: 'dist-bin/ashlr' },
   public: { dir: 'Contents/Resources', name: 'public', source: 'dist-bin/public' },
   native: { dir: 'Contents/MacOS', name: 'ashlr-desktop', source: NATIVE_BUILD },
+  icon: { dir: 'Contents/Resources', name: 'icon.icns', source: APP_ICON_BUILD },
 });
 
 const USAGE = 'usage: node scripts/ship-local.mjs [--dry-run] [--native] [--allow-dirty]';
@@ -128,6 +131,8 @@ export function gatherContext(args, io) {
     loadedAgents,
     nativeBuildMtime: io.mtime(join(io.repoRoot, NATIVE_BUILD)),
     installedNativeMtime: appExists ? io.mtime(join(APP_PATH, BUNDLE_TARGETS.native.dir, BUNDLE_TARGETS.native.name)) : null,
+    iconBuildMtime: io.mtime(join(io.repoRoot, APP_ICON_BUILD)),
+    installedIconMtime: appExists ? io.mtime(join(APP_PATH, BUNDLE_TARGETS.icon.dir, BUNDLE_TARGETS.icon.name)) : null,
     ...args,
   };
 }
@@ -179,6 +184,10 @@ export function planShip(ctx) {
     const nativeNewer = ctx.native && ctx.nativeBuildMtime != null &&
       (ctx.installedNativeMtime == null || ctx.nativeBuildMtime > ctx.installedNativeMtime);
     if (nativeNewer) targets.push(BUNDLE_TARGETS.native);
+    // --native also refreshes the Dock/Finder icon when a newer one was generated.
+    const iconNewer = ctx.native && ctx.iconBuildMtime != null &&
+      (ctx.installedIconMtime == null || ctx.iconBuildMtime > ctx.installedIconMtime);
+    if (iconNewer) targets.push(BUNDLE_TARGETS.icon);
 
     steps.push({ id: 'app-quit', title: 'quit Ashlr', argv: ['osascript', '-e', 'quit app "Ashlr"'] });
     // Waits on the main process only: a sidecar that outlives it is reclaimed by the relaunched
@@ -208,6 +217,8 @@ export function planShip(ctx) {
       steps.push({ id: 'rotate-backups', title: `keep ${KEEP_BACKUPS} newest backups; move ${trashMoves.length} older to the Trash`, argv: ['mv', ...trashMoves, trashDir] });
     }
     steps.push({ id: 'codesign', title: 'ad-hoc codesign the bundle', argv: ['codesign', '--force', '--deep', '--sign', '-', APP_PATH] });
+    // Finder and the Dock cache the icon until the bundle's mtime changes.
+    if (iconNewer) steps.push({ id: 'touch-app', title: 'touch the bundle so the Dock picks up the new icon', argv: ['touch', APP_PATH] });
     steps.push({ id: 'codesign-verify', title: 'verify the signature', argv: ['codesign', '--verify', '--deep', '--strict', APP_PATH] });
     steps.push({ id: 'app-launch', title: 'relaunch Ashlr', argv: ['open', APP_PATH] });
   } else {
