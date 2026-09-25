@@ -25,6 +25,18 @@ describe('M522 — production-promotion operator boundary', () => {
     expect(releaseDocs).toContain('Do not recreate or move `v3.3.2`');
   });
 
+  it('states the current manual, local release process ahead of the historical lane', () => {
+    // The 3.3.2 record above is historical. The current-process note must lead
+    // the document, point at the local procedure, and keep the frozen workflows
+    // from reading as a publication path for later versions.
+    const currentNote = releaseDocs.split('\n\n')[1] ?? '';
+    expect(currentNote).toContain('**Current release process');
+    expect(currentNote).toContain('releases are manual\n> and local');
+    expect(currentNote).toContain('[Releasing without CI](RELEASING-LOCALLY.md)');
+    expect(currentNote).toMatch(/not a\s+(?:>\s+)?publication path for any later version/u);
+    expect(currentNote).toMatch(/strictly above\s+(?:>\s+)?`3\.3\.2`/u);
+  });
+
   it('documents the protected observation-only admission without inventing authority', () => {
     expect(promotionSection).toContain('`npm-production-promotion` environment');
     expect(promotionSection).toContain('protected branches only');

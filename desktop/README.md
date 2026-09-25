@@ -462,11 +462,12 @@ asks you to paste them:
 > block the root `ashlr` CLI, Bun sidecar, or web dashboard on Linux.
 > Default Tauri configuration also disables Linux bundling and runs a
 > fail-closed pre-bundle policy (`scripts/assert-desktop-bundle-policy.mjs`,
-> wired as `beforeBundleCommand`), covering the official workflow and ordinary
-> `cargo tauri build`, `--debug`, and direct `--bundles` paths. A hostile
-> `--config` override combined with an already-built/staged executable is
-> outside source-build enforcement; never treat artifacts from a custom config
-> or a non-fresh build tree as admitted release output.
+> first in `beforeBundleCommand`; the macOS DMG preflight is chained after it
+> with `&&`, so a refusal stops the bundle), covering the official workflow and
+> ordinary `cargo tauri build`, `--debug`, and direct `--bundles` paths.
+> A hostile `--config` override combined with an already-built/staged
+> executable is outside source-build enforcement; never treat artifacts from a
+> custom config or a non-fresh build tree as admitted release output.
 
 ### Prerequisites
 
@@ -647,7 +648,10 @@ with GTK4, or adoption of another supported dependency chain that resolves
 sidecar, signing/updater, and release acceptance on macOS, Windows, and Linux,
 with an independent security review. Removing the workflow row alone is not an
 override: the Rust build guard, default Linux bundle policy, and pre-bundle
-policy must be retired in the same reviewed change.
+policy must be retired in the same reviewed change. Release acceptance applies
+only to the official workflow, default Tauri configuration, and fresh builds;
+a hostile `--config` with a staged executable is outside source-build
+enforcement.
 
 After the quarantine exit review and external re-enablement, code-signing may be
 configured with `APPLE_CERTIFICATE` / `APPLE_ID` / `APPLE_TEAM_ID` for notarized

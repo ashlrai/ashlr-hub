@@ -548,11 +548,21 @@ describe('M454 pinned upstream routing challenge', () => {
       files?: string[];
       exports?: Record<string, unknown>;
     };
+    // The exact published allowlist. It grew with the builtin preparation
+    // verification helpers and two shipped docs, each of which the release
+    // inventory admits individually (m482); none is an m454 consumer, and the
+    // canary scan above covers every script here. Any further addition must be
+    // reviewed against that scan, not appended to make this pass.
     expect(packageManifest.files).toEqual([
       'dist',
       'bin',
       'scripts/run-verify-command.mjs',
       'scripts/scorecard-history-worker.mjs',
+      'scripts/evaluators/preparation-verification-activity.mjs',
+      'scripts/evaluators/preparation-verification-activity.d.mts',
+      'scripts/evaluators/preparation-verification-protocol.mjs',
+      'scripts/evaluators/preparation-verification-native.mjs',
+      'scripts/evaluators/preparation-verification-native.d.mts',
       'schema',
       'CHANGELOG.md',
       'docs/README.md',
@@ -561,6 +571,8 @@ describe('M454 pinned upstream routing challenge', () => {
       'docs/ARCHITECTURE.md',
       'docs/MISSION-OS.md',
       'docs/ASHLR-UNIVERSE.md',
+      'docs/AUTONOMY-GAP.md',
+      'docs/FIRM-DEMO.md',
       'docs/UNIVERSE-RESEARCH.md',
       'docs/UNIVERSE-AUTONOMY-RESEARCH.md',
       'docs/RESOURCE-POOLS.md',
