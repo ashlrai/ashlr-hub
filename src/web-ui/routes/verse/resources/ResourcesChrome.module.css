@@ -1,0 +1,91 @@
+/* The Resources edge tab: a slim pill half-tucked into the right edge of every
+   surface. Quiet at rest (it sits over content), full contrast on hover and
+   focus. 24px wide so it is a real target (WCAG 2.5.8), 64px tall so it is
+   findable without looking for it. */
+
+.handle {
+  position: fixed;
+  top: 50%;
+  right: 0;
+  z-index: var(--z-sticky);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  width: 24px;
+  height: 64px;
+  padding: 0;
+  border: 1px solid var(--border-default);
+  border-right: 0;
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transform: translate(4px, -50%);
+  transition:
+    transform var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard),
+    background-color var(--duration-fast) var(--ease-standard);
+}
+
+.handle:hover,
+.handle:focus-visible {
+  transform: translate(0, -50%);
+  background: var(--bg-surface-raised);
+  color: var(--text-primary);
+}
+
+.handle:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus-ring);
+}
+
+/* The dot: shape first, colour second. ok = a disc, tight = a ring,
+   alert = a diamond. A 2px canvas halo keeps it legible over any icon. */
+.dot {
+  display: block;
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  box-shadow: 0 0 0 2px var(--bg-surface);
+  background: var(--status-success-solid);
+}
+.dot[data-tone='tight'] {
+  background: transparent;
+  border: 2px solid var(--status-warning-solid);
+}
+.dot[data-tone='alert'] {
+  border-radius: 1px;
+  background: var(--status-danger-solid);
+  transform: rotate(45deg) scale(0.9);
+}
+
+/* A rail button carries the dot on its icon's corner, like the rail badges. */
+.railDot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+}
+.railDot .dot { box-shadow: 0 0 0 2px var(--bg-canvas); }
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .handle { transition: none; }
+}
+:root[data-motion='reduce'] .handle { transition: none; }
+
+@media print {
+  .handle { display: none; }
+}
+
+/* Pinned: the drawer's grid track (VerseApp gives the shell a third column). */
+.dock {
+  grid-column: 3;
+  grid-row: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-surface);
+}

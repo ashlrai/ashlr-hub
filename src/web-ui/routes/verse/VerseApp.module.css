@@ -41,6 +41,12 @@
   --rail-width: 216px;
 }
 
+/* Resources pinned (3.11 C6): a third track, so the surface SHRINKS beside
+   the drawer instead of sitting under it (the drawer places itself there). */
+.shell[data-resources='docked'] {
+  grid-template-columns: var(--rail-width) minmax(0, 1fr) var(--resources-width, 360px);
+}
+
 /* ---- rail ------------------------------------------------------------- */
 .rail {
   position: relative;

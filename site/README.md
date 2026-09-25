@@ -26,6 +26,11 @@ not estimated, and each one is reproducible from the repo:
 | 333s → 151s single agent, 1386s → 540s for four | timed agent runs before and after that fix |
 | 9.05 / 15.61 / 22.79 tok/s at 1 / 2 / 4 slots | aggregate decode throughput on llama-server |
 | four agents, 4/4 correct, 521s wall | driven through Verse's own dispatch path |
+| Context windows and compaction points (≈367k / ≈967k Claude, ≈244.8k of 258.4k Codex, 400k of 500k Grok) | CHANGELOG 3.9.0, read from the pinned CLIs and each seat's catalog; `docs/VERSE-CONTEXT.md` |
+| API, replay, render and first-paint before/after table | CHANGELOG 3.10.0, "Performance" |
+| Grant limits, compiled ceilings, two-hour watch, budget-mode reserves | CHANGELOG 3.10.0; `docs/STANDING-AUTHORITY.md` |
+| Burn-down history (every minute, ≥ 8 days, < 2 MiB) | CHANGELOG 3.10.1, "Command" |
+| Cloud lane defaults ($250, $3 per session, 4 at once, 20 a day, 4 self-improvement a day, $40 reserve) | `DEFAULT_CLOUD_BUDGET` in `src/core/cloud/types.ts`. These are settings, not measurements, and the page says so |
 
 If a measurement changes, change the page. A landing page that drifts from what
 the software does is worse than no landing page.
@@ -40,8 +45,9 @@ more useful to a reader deciding whether their setup is covered.
 **No claims about unbuilt features.** This rule stands; the example it used to
 give has expired. Multi-folder workspaces, GitHub surfacing and MCP management
 were listed here as unbuilt — all three now ship, and the page says so. What the
-page still does not claim: a Linux or Windows desktop package, and a notarized
-macOS build. Check this section against the product before a release rather than
+page still does not claim: a Linux or Windows desktop package, a notarized
+macOS build, or a readable Claude credit balance (the cloud lane's spend is an
+estimate, and the page labels it as one). Check this section against the product before a release rather than
 assuming the omission still holds.
 
 ## Platform claims
@@ -49,6 +55,8 @@ assuming the omission still holds.
 The page states per-platform support rather than showing three logos as though
 they were equivalent, because they are not:
 
-- **macOS** — CLI, console, desktop window, sandboxing via `sandbox-exec`
-- **Linux** — CLI and console (CI-tested), sandboxing via `bwrap`/`firejail`, no desktop package
-- **Windows** — CLI and console (CI-tested), per-account profile isolation, env-only isolation, installers draft-only
+- **macOS** — CLI, console, desktop app built from source, autonomy custody (Secure Enclave, Touch ID), sandboxing via `sandbox-exec`
+- **Linux** — CLI and console, sandboxing via `bwrap`/`firejail`, no desktop package, no custody helper
+- **Windows** — CLI and console, per-account profile isolation, env-only isolation, no desktop package, no custody helper
+
+GitHub Actions is off, so the page no longer says "CI-tested".

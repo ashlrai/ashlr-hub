@@ -339,6 +339,61 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.11.0] — 2026-09-25 UTC — the cloud lane, and every resource one keystroke away
+
+Verse can now spend Claude cloud credits. It launches Claude Code cloud sessions, which keep running on your
+credits after the subscription window is spent. It tracks what each one delivers, and it uses them to improve
+itself within limits you set. Every account, local model and credit balance now sits in one drawer on the right
+of every page.
+
+### Cloud lane
+
+- **Launch from anywhere.** The chat composer's ⋯ sheet has **Run in cloud**. Command has **New cloud task** and
+  **Improve Verse**. The CLI has `ashlr cloud launch "<task>"`.
+- **How a launch works.** Verse starts each session through the Claude seat's own claude.ai login, from an isolated
+  checkout under `~/.ashlr/cloud/checkouts`, never your working copies. It marks only those checkouts as trusted.
+  The session works on `ashlr-cloud/<task>` and opens a **draft PR** with a machine-readable report. Verse follows
+  the PR with `gh`: running, then PR open, then merged or closed. Nothing in the cloud lane merges; that stays with
+  the custody gates or you.
+- **Verse improves itself.** A built-in backlog of real gaps, plus suggestions from the Leader's memos, feeds
+  self-improvement launches. The defaults are 4 a day, on `ashlrai/ashlr-hub`, pausing below $40. You can switch
+  it off in the Cloud card, in Usage, or with `ashlr cloud budget --self-improve off`. Setting
+  `ASHLR_CLOUD_AUTO=0` disables the scheduler.
+- **Spend is an estimate, and says so.** Claude doesn't expose the credit balance, so Verse counts sessions at a
+  per-session estimate you can adjust. It always links to your real balance on claude.ai.
+- **Surfaces.** The Cloud card on Command, a Cloud credits panel in Usage, a "Cloud · N running" chip on Fleet,
+  Needs-you items for ready PRs and failed launches, and `ashlr cloud list | refresh | improve | budget |
+  backlog`. See `docs/CLOUD.md`.
+- Verified end to end on this Mac: launch, session, draft PR, parsed report, closed.
+
+### Resources drawer
+
+- **On every page.** An edge tab, a rail button, **⌘.**, or "Show resources" in ⌘K opens a drawer on the right
+  with every resource you run on. That's your Claude, Codex and Grok accounts, with window meters, the reserve
+  kept for you, reset times and Reconnect / Check again. It also shows local models, with runtime state and
+  verified context windows, and your cloud credits.
+- **Overlay or pinned.** It opens as an overlay or pins as a column beside your work, and remembers which you
+  chose. A dot on the edge tab says at a glance whether everything is usable, something is tight, or an account
+  is spent or signed out.
+- It loads after first paint, so chat still opens as fast as before.
+
+### Website and docs
+
+- verse.ashlr.ai, the README and `docs/VERSE.md` now describe 3.9–3.11: verified context windows, live reasoning,
+  autonomy with custody, budget modes, the workbench, the four surfaces, burn-down history and the cloud lane.
+  `docs/CLOUD.md` is new.
+
+### Verification
+
+Built as six Claude Code cloud sessions running on Claude credits, then integrated and checked locally (GitHub
+Actions is off):
+- **Static checks:** build, both type-checks, eslint, the real-I/O lane, docs, and first paint (369.3 KB of 370).
+- **Web suite:** 4,615 tests pass.
+- **Backend suite:** 29,772 tests pass. The only failures are files that already fail on 3.9.1.
+- **Cloud lane:** 312 tests, plus a real launch on this Mac that ran from session to draft PR to parsed report.
+- **Custody guards:** they flagged the cloud modules joining the authority import closure. That growth was
+  reviewed and accepted, and those files are now owner-lane protected.
+
 ## [3.10.1] — 2026-09-24 UTC — the workbench reads cleanly, and the charts tell the truth
 
 3.10.0 landed on Mason's screen. This release fixes what showed up in the live app: labels piled on top of each

@@ -196,6 +196,7 @@
 /test/autonomous-env-310b.test.ts @masonwyatt23
 /test/autonomy-contracts-310b.test.ts @masonwyatt23
 /test/backpressure-310b.test.ts @masonwyatt23
+/test/cloud-budget.test.ts @masonwyatt23
 /test/completeness-gate-stash-hardening-310b.test.ts @masonwyatt23
 /test/confine-autonomous-310b.test.ts @masonwyatt23
 /test/confine-autonomous-darwin-310b.test.ts @masonwyatt23
@@ -273,6 +274,7 @@
 /test/l1-seat-threading-310.test.ts @masonwyatt23
 /test/leader-api-310b.test.ts @masonwyatt23
 /test/leader-apply-310b.test.ts @masonwyatt23
+/test/leader-cloud-311.test.ts @masonwyatt23
 /test/leader-comms-310b.test.ts @masonwyatt23
 /test/leader-integration-310b.test.ts @masonwyatt23
 /test/leader-run-310b.test.ts @masonwyatt23

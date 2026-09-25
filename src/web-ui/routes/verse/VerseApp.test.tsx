@@ -21,6 +21,7 @@ import { activity, approvalNeed, shellFetch, vetoNeed, type ShellFetch } from '.
 import { refreshActivity, resetActivityForTest } from './shell/useActivity.js';
 import { mockCompactViewport, type ViewportMock } from './shell/viewport.test-support.js';
 import { MissingSection, SECTION_MODULES, VerseApp } from './VerseApp.js';
+import { getResourcesUi, reloadResourcesUiForTest, RESOURCES_STORAGE_KEY, setResourcesSummary } from './resources/resources-store.js';
 import { resetVerseStore } from './verse-store.js';
 import {
   getVerseUiState,
@@ -65,6 +66,7 @@ let viewport: ViewportMock | null = null;
 beforeEach(() => {
   window.history.replaceState(null, '', '/verse/');
   localStorage.clear();
+  reloadResourcesUiForTest();
   evictAll();
   resetVerseStore();
   resetVerseUi();
@@ -465,6 +467,136 @@ describe('overlays and keys', () => {
     expect(await screen.findByRole('dialog', { name: 'New chat' })).toBeInTheDocument();
     key('2', {}, 'Digit2');
     expect(getVerseUiState().section).toBe('chat');
+  });
+});
+
+describe('the Resources drawer (3.11 C6)', () => {
+  /** The edge tab arrives with the Resources chunk, just after first paint. */
+  const handle = () =>
+    waitFor(() => {
+      const el = document.querySelector<HTMLElement>('[data-resources-handle]');
+      expect(el).not.toBeNull();
+      return el!;
+    });
+
+  it('an edge tab on every surface opens it as an overlay; Esc closes it and focus returns to the tab', async () => {
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    const tab = await handle();
+    expect(tab).toHaveAccessibleName(/^Resources/);
+    act(() => setVerseSection('settings'));
+    expect(document.querySelector('[data-resources-handle]')).not.toBeNull();
+    await user.click(tab);
+    const drawer = await screen.findByRole('dialog', { name: 'Resources' });
+    expect(drawer.contains(document.activeElement)).toBe(true);
+    act(() => { fireEvent.keyDown(document, { key: 'Escape' }); });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Resources' })).not.toBeInTheDocument());
+    await waitFor(() => expect(document.querySelector('[data-resources-handle]')).toHaveFocus());
+    // The section did not change underneath it.
+    expect(getVerseUiState().section).toBe('settings');
+  });
+
+  it('⌘. toggles it from anywhere, and ⌘/ lists the key', async () => {
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    await handle();
+    key('.', {}, 'Period');
+    expect(await screen.findByRole('dialog', { name: 'Resources' })).toBeInTheDocument();
+    key('.', {}, 'Period');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Resources' })).not.toBeInTheDocument());
+    key('/', {}, 'Slash');
+    const overlay = await screen.findByRole('dialog', { name: 'Keyboard shortcuts' });
+    expect(within(overlay).getByText('Show resources')).toBeInTheDocument();
+  });
+
+  it('⌘K "Show resources" opens it and closes the palette', async () => {
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    await handle();
+    key('k', {}, 'KeyK');
+    const input = await screen.findByRole('combobox', { name: 'Search commands' });
+    await user.type(input, 'show resources');
+    await waitFor(() => expect(screen.getByRole('option', { name: /Show resources/ })).toHaveAttribute('aria-selected', 'true'));
+    await user.keyboard('{Enter}');
+    expect(await screen.findByRole('dialog', { name: 'Resources' })).toBeInTheDocument();
+    expect(getVerseUiState().overlay).toBeNull();
+  });
+
+  it('the rail button opens it too, and says so', async () => {
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    const button = await waitFor(() => {
+      const el = rail().querySelector<HTMLElement>('[data-resources-rail]');
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    await user.click(button);
+    expect(await screen.findByRole('dialog', { name: 'Resources' })).toBeInTheDocument();
+    expect(button).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('PINNED, it docks as a column that shrinks the surface, and comes back docked after a reload', async () => {
+    const user = userEvent.setup();
+    const view = mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    await user.click(await handle());
+    await user.click(await screen.findByRole('button', { name: 'Pin resources beside the page' }));
+    expect(await screen.findByRole('complementary', { name: 'Resources' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Resources' })).toBeNull();
+    const shell = view.container.firstElementChild as HTMLElement;
+    expect(shell).toHaveAttribute('data-resources', 'docked');
+    expect(document.querySelector('main#main-content')).toBeInTheDocument();
+    // The edge tab stands down while the drawer is on screen.
+    expect(document.querySelector('[data-resources-handle]')).toBeNull();
+    expect(JSON.parse(localStorage.getItem(RESOURCES_STORAGE_KEY)!)).toEqual({ open: true, pinned: true });
+
+    // ⌘J floats over a docked drawer; it stays docked.
+    key('j', {}, 'KeyJ');
+    expect(await screen.findByRole('dialog', { name: /Needs you/ })).toBeInTheDocument();
+    expect(getResourcesUi().open).toBe(true);
+    key('j', {}, 'KeyJ');
+
+    view.unmount();
+    reloadResourcesUiForTest();
+    const again = mount();
+    expect(again.container.firstElementChild).toHaveAttribute('data-resources', 'docked');
+    expect(await screen.findByRole('complementary', { name: 'Resources' })).toBeInTheDocument();
+  });
+
+  it('another overlay replaces a FLOATING drawer', async () => {
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    await handle();
+    key('.', {}, 'Period');
+    await screen.findByRole('dialog', { name: 'Resources' });
+    key('j', {}, 'KeyJ');
+    expect(await screen.findByRole('dialog', { name: /Needs you/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Resources' })).not.toBeInTheDocument());
+  });
+
+  it('the tab carries the summary dot — a shape and words, never colour alone', async () => {
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    const tab = await handle();
+    act(() => setResourcesSummary({ tone: 'alert', spoken: '2 usable · 1 spent' }));
+    await waitFor(() => expect(tab.querySelector('[data-resources-dot="alert"]')).not.toBeNull());
+    expect(tab).toHaveAccessibleName('Resources — 2 usable · 1 spent');
+    act(() => setResourcesSummary({ tone: 'unknown', spoken: 'not read yet' }));
+    await waitFor(() => expect(tab.querySelector('[data-resources-dot]')).toBeNull());
+  });
+
+  it('floats at phone width, even when pinned', async () => {
+    viewport = mockCompactViewport();
+    localStorage.setItem(RESOURCES_STORAGE_KEY, JSON.stringify({ open: true, pinned: true }));
+    reloadResourcesUiForTest();
+    const view = mount();
+    expect(view.container.firstElementChild).not.toHaveAttribute('data-resources');
+    expect(await screen.findByRole('dialog', { name: 'Resources' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Pin resources/ })).toBeNull();
   });
 });
 

@@ -115,8 +115,18 @@ export interface ActivityDeps {
   autonomy: () => VerseAutonomyBadge | null;
   /** B-U8's newest memo time; undefined = the Leader module has not landed. */
   latestMemoAt: (() => string | null) | null;
+  /**
+   * 3.11 cloud lane (core/cloud/cloud-api.ts `needsYouItems`). Additive: its
+   * items are filed under the existing `fleet` (PR ready for review) and
+   * `chats` (failed launch) sources, and only those two are accepted. Absent
+   * or null = the cloud module is not wired.
+   */
+  cloud?: (() => NeedsYouItem[]) | null;
   now?: () => number;
 }
+
+/** The only sources the cloud producer may file under (see ActivityDeps.cloud). */
+const CLOUD_ITEM_SOURCES: ReadonlySet<NeedsYouSource> = new Set(['fleet', 'chats']);
 
 // ===========================================================================
 // Cursor
@@ -550,6 +560,22 @@ export function createActivityReader(deps: ActivityDeps, bootId: string = random
           sources[source] = bad > 0 || state === 'error' ? 'error' : state === 'warming' ? 'unavailable' : 'ok';
         } catch {
           sources[source] = stateOf() === 'warming' ? 'unavailable' : 'error';
+        }
+      }
+
+      if (deps.cloud) {
+        // Same boundary as the producers above. A cloud producer that cannot
+        // answer marks the sources it files under as errored rather than let
+        // their splits claim an all-clear it cannot vouch for.
+        try {
+          const produced = deps.cloud();
+          if (!Array.isArray(produced)) throw new TypeError('not an array');
+          for (const item of produced) {
+            if (isNeedsYouItem(item) && CLOUD_ITEM_SOURCES.has(item.source)) items.push(item);
+            else dropped.fleet = (dropped.fleet ?? 0) + 1;
+          }
+        } catch {
+          for (const source of CLOUD_ITEM_SOURCES) if (sources[source] === 'ok') sources[source] = 'error';
         }
       }
 
