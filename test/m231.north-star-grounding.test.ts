@@ -73,13 +73,17 @@ describe('northStarDocSummary', () => {
     expect(summary).toMatch(/composition/i);
   });
 
-  it('grounds planning in Universe and verified engineering yield', async () => {
+  it('grounds planning in Ashlrverse and verified engineering yield', async () => {
     const { _resetNorthStarDocCache, northStarDocSummary } = await import(
       '../src/core/ecosystem/map.js'
     );
     _resetNorthStarDocCache();
     const summary = northStarDocSummary();
-    expect(summary).toContain('Ashlr Universe');
+    // NORTH-STAR.md renamed the product vision from "Ashlr Universe" to
+    // "Ashlrverse"; "Universe" now names only the experiment runtime. The
+    // grounding must carry the current product name into the vision line.
+    expect(summary).toContain('Build Ashlrverse into an agent-native operating system');
+    expect(summary).not.toContain('Ashlr Universe');
     expect(summary).toContain('useful accepted changes per measured token and hour');
     expect(summary).toContain('unknown usage is not zero');
   });

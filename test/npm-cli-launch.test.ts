@@ -214,29 +214,78 @@ describe('shell-free npm CLI launch', () => {
     expect(existsSync(replacementMarker)).toBe(false);
   });
 
-  it.runIf(canSymlink())('keeps install-generated npm runtime bin links outside the trusted closure', () => {
-    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-runtime-link-')));
+  // A stock npm ships `node_modules/.bin` shims as symlinks, so the closure
+  // scan no longer rejects every link (that made `npm run build` fail on any
+  // ordinary install; see scripts/build-release-dependency-inventory.mjs and
+  // docs/RELEASING-LOCALLY.md). What stays defended: a link may only name a
+  // regular file inside the closure, and its target bytes are hashed at the
+  // link's own path, so retargeting a shim still changes the closure digest.
+  function npmRuntimeWithBinLink(prefix: string) {
+    const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
     tempDirs.push(fixtureRoot);
     const fakeNode = join(fixtureRoot, 'bin', 'node');
     const npmRoot = join(fixtureRoot, 'lib', 'node_modules', 'npm');
     const trustedCli = join(npmRoot, 'bin', 'npm-cli.js');
-    const packageJson = join(npmRoot, 'package.json');
     const arborist = join(npmRoot, 'node_modules', '@npmcli', 'arborist', 'bin', 'index.js');
+    const semver = join(npmRoot, 'node_modules', 'semver', 'bin', 'semver.js');
     const runtimeLink = join(npmRoot, 'node_modules', '.bin', 'arborist');
     write(fakeNode, 'fixture node identity\n');
-    write(trustedCli, "process.stdout.write('must not run');\n");
-    write(packageJson, '{"name":"npm","version":"11.19.0"}\n');
+    write(trustedCli, "process.stdout.write('validated runtime');\n");
+    write(join(npmRoot, 'package.json'), '{"name":"npm","version":"11.19.0"}\n');
     write(arborist, "process.stdout.write('arborist');\n");
+    write(semver, "process.stdout.write('semver');\n");
     mkdirSync(dirname(runtimeLink), { recursive: true });
-    symlinkSync('../@npmcli/arborist/bin/index.js', runtimeLink);
-
-    expect(() => runTrustedNpmCli([], {
+    const run = (beforeSpawn?: () => void) => runTrustedNpmCli([], {
       environment: { npm_execpath: trustedCli },
     }, {
       command: process.execPath,
       execPath: fakeNode,
       platform: 'linux',
-    })).toThrow('npm runtime closure contains a symbolic link');
+      ...(beforeSpawn ? { beforeSpawn } : {}),
+    });
+    return { fixtureRoot, npmRoot, runtimeLink, run };
+  }
+
+  it.runIf(canSymlink())('admits install-generated npm bin links that stay inside the closure', () => {
+    const { runtimeLink, run } = npmRuntimeWithBinLink('ashlr-npm-runtime-link-');
+    symlinkSync('../@npmcli/arborist/bin/index.js', runtimeLink);
+
+    const result = run();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('validated runtime');
+  });
+
+  it.runIf(canSymlink())('still detects a bin link retargeted during execution', () => {
+    const { runtimeLink, run } = npmRuntimeWithBinLink('ashlr-npm-runtime-relink-');
+    symlinkSync('../@npmcli/arborist/bin/index.js', runtimeLink);
+
+    expect(() => run(() => {
+      unlinkSync(runtimeLink);
+      symlinkSync('../semver/bin/semver.js', runtimeLink);
+    })).toThrow('npm runtime closure changed during execution');
+  });
+
+  it.runIf(canSymlink())('rejects a bin link that escapes the npm runtime closure', () => {
+    const { fixtureRoot, runtimeLink, run } = npmRuntimeWithBinLink('ashlr-npm-runtime-escape-');
+    const outside = join(fixtureRoot, 'outside', 'payload.js');
+    write(outside, "process.stdout.write('outside');\n");
+    symlinkSync(outside, runtimeLink);
+
+    expect(() => run()).toThrow('npm runtime closure contains a symbolic link escaping the closure');
+  });
+
+  it.runIf(canSymlink())('rejects a dangling bin link', () => {
+    const { runtimeLink, run } = npmRuntimeWithBinLink('ashlr-npm-runtime-dangling-');
+    symlinkSync('../@npmcli/missing/bin/index.js', runtimeLink);
+
+    expect(() => run()).toThrow('npm runtime closure contains an unresolvable symbolic link');
+  });
+
+  it.runIf(canSymlink())('rejects a bin link to a directory inside the closure', () => {
+    const { runtimeLink, run } = npmRuntimeWithBinLink('ashlr-npm-runtime-dirlink-');
+    symlinkSync('../@npmcli/arborist', runtimeLink);
+
+    expect(() => run()).toThrow('npm runtime closure contains a non-file symbolic link');
   });
 
   it('isolates execution from an npm runtime ABA even when the original bytes are restored', () => {

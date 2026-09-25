@@ -49,6 +49,11 @@ const desktopReadme = readFileSync(join(REPO_ROOT, 'desktop/README.md'), 'utf8')
 const quickstart = readFileSync(join(REPO_ROOT, 'docs/QUICKSTART.md'), 'utf8');
 const desktopPointer = readFileSync(join(REPO_ROOT, 'DESKTOP.md'), 'utf8');
 
+// Tauri runs beforeBundleCommand through a shell; the chained-command check
+// below needs `sh`. (A named constant, not an inline `process.platform` gate,
+// so the real-io lane lint still sees this file's cheap policy-script spawns.)
+const HAS_POSIX_SHELL = process.platform !== 'win32';
+
 interface WorkflowStep {
   name?: string;
   uses?: string;
@@ -159,9 +164,17 @@ describe('M468 desktop release workflow supply-chain policy', () => {
     expect(packageSection.match(/^build\s*=\s*"build\.rs"$/gm)).toHaveLength(1);
     expect(packageSection).not.toMatch(/^links\s*=/m);
 
+    // The bundle policy must run first and gate everything after it. The DMG
+    // preflight (macOS stale-mount cleanup) is chained with `&&` only, so a
+    // policy refusal still stops the bundle; `;`, `||` or a reordering would
+    // let bundling continue past a refusal.
     expect(tauriConfig.build?.beforeBundleCommand).toBe(
+      'node scripts/assert-desktop-bundle-policy.mjs && node scripts/dmg-preflight.mjs',
+    );
+    expect(tauriConfig.build?.beforeBundleCommand?.split(' && ')[0]).toBe(
       'node scripts/assert-desktop-bundle-policy.mjs',
     );
+    expect(tauriConfig.build?.beforeBundleCommand).not.toMatch(/;|\|\||(?<!&)&(?!&)/);
     expect(tauriConfig.bundle?.active).toBe(true);
     expect(linuxTauriConfig.bundle?.active).toBe(false);
 
@@ -195,6 +208,24 @@ describe('M468 desktop release workflow supply-chain policy', () => {
     expect(linuxTargetPolicy.status).toBe(1);
     expect(linuxTargetPolicy.stderr).toContain('ASHLR_LINUX_DESKTOP_BUNDLE_QUARANTINED');
   });
+
+  it.runIf(HAS_POSIX_SHELL)(
+    'fails the whole chained beforeBundleCommand when the bundle policy refuses',
+    () => {
+      // Run the configured command exactly as Tauri does (a shell, from the
+      // desktop/ directory) against a Linux target: the refusal must be the
+      // command's result, and the chained preflight must never get to run.
+      const chained = spawnSync('sh', ['-c', tauriConfig.build?.beforeBundleCommand ?? 'false'], {
+        cwd: join(REPO_ROOT, 'desktop'),
+        encoding: 'utf8',
+        env: { ...process.env, TAURI_ENV_PLATFORM: 'linux' },
+        timeout: 5_000,
+      });
+      expect(chained.status).toBe(1);
+      expect(chained.stderr).toContain('ASHLR_LINUX_DESKTOP_BUNDLE_QUARANTINED');
+      expect(`${chained.stdout}${chained.stderr}`).not.toMatch(/dmg-preflight/i);
+    },
+  );
 
   it('keeps the quarantined GLib advisory registry-visible instead of creating false closure', () => {
     const glibPackages = [
