@@ -237,6 +237,24 @@ describe('M468 desktop release workflow supply-chain policy', () => {
     expect(cargoLock).not.toContain('version = "0.39.4"');
   });
 
+  // WHY: rustls 0.23.13..<0.23.45 accepts TLS 1.3 handshake messages across an
+  // encryption-level boundary (RUSTSEC-2026-0285 / GHSA-2mjx-qc3c-rqvc). It is
+  // reached through reqwest (Tauri updater/plugins), so a lock regression would
+  // silently re-open it; cargo-audit catches it too, but only in the audit lane.
+  it('keeps rustls on the patched registry release for RUSTSEC-2026-0285', () => {
+    const rustlsPackages = [
+      ...cargoLock.matchAll(
+        /\[\[package\]\]\nname = "rustls"\n([\s\S]*?)(?=\n\[\[package\]\]|$)/g,
+      ),
+    ];
+    expect(rustlsPackages).toHaveLength(1);
+    const rustlsVersion = rustlsPackages[0]?.[1].match(/^version = "0\.23\.(\d+)"$/m)?.[1];
+    expect(Number(rustlsVersion)).toBeGreaterThanOrEqual(45);
+    expect(rustlsPackages[0]?.[1]).toContain(
+      'source = "registry+https://github.com/rust-lang/crates.io-index"',
+    );
+  });
+
   it('publishes only independently admitted macOS and Windows matrix artifacts', () => {
     expect(releaseTriggers).toEqual({ push: { tags: ['desktop-v*'] } });
     expect(releaseTriggers.push?.branches).toBeUndefined();
