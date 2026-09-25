@@ -28,7 +28,6 @@ import { Dialog } from '../../../components/primitives/Dialog.js';
 import { useQuery } from '../../../data/hooks.js';
 import type { VerseSeat } from '../../../data/api-types.js';
 import type { VerseSeatWindow } from '../../../../core/verse/types.js';
-import { ENGINE_MONOGRAM } from '../../../../core/verse/workbench-types.js';
 import type { BudgetView } from '../../../../core/routing/policy.js';
 import { budgetQuery } from '../budget/budget-queries.js';
 import { useSeatHealth } from '../health/useSeatHealth.js';
@@ -37,6 +36,7 @@ import type { SeatChoice } from '../SeatSelector.js';
 import { firstRunnableModel, seatCapacity, SEAT_CAPACITY_WORD, seatWindowLabel } from '../verse-model.js';
 import styles from './composer.module.css';
 import { usedPercentText } from '../percent-text.js';
+import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
 
 const BudgetControl = lazy(async () => ({ default: (await import('../budget/BudgetControl.js')).BudgetControl }));
 
@@ -252,7 +252,7 @@ export function SeatChip({ seats, seat, engine, label, name = label, disabled = 
         onFocus={(event) => { if (event.currentTarget.matches(':focus-visible')) showTip(false); }} onBlur={hideTip}
         onKeyDown={(event) => { if (event.key === 'Escape' && tipOpen && !open) { event.stopPropagation(); hideTip(); } }}
         onClick={() => { hideTip(); setOpen((v) => !v); }}>
-        <span className={styles.monogram} aria-hidden="true">{ENGINE_MONOGRAM[engine]}</span>
+        <span className={styles.monogram} aria-hidden="true"><ProviderLogo engine={engine} size={13} /></span>
         {compact ? null : <span className={styles.seatChipText}>{name}</span>}
         {capacityRingShown(current, engine) ? <CapacityRing window={ring} /> : null}
       </button>
@@ -271,7 +271,7 @@ export function SeatChip({ seats, seat, engine, label, name = label, disabled = 
               <button key={s.id} type="button" role="menuitem" className={`${styles.menuItem} ${styles[`engine-${s.engine}`] ?? ''}`}
                 data-capacity={cap.cls}
                 onClick={() => pick(() => (onContinueOn ?? onNewChat)({ seatId: s.id, model: model.id }))}>
-                <span className={styles.monogram} aria-hidden="true">{ENGINE_MONOGRAM[s.engine]}</span>
+                <span className={styles.monogram} aria-hidden="true"><ProviderLogo engine={s.engine} size={13} /></span>
                 <span className={styles.menuText}>
                   <span className={styles.menuLabel}>{onContinueOn ? 'Continue on' : 'New chat on'} {s.label}</span>
                   <span className={styles.menuDesc}>{model.label}{cap.cls === 'unread' ? '' : ` · ${SEAT_CAPACITY_WORD[cap.cls]}, ${cap.text}`}</span>

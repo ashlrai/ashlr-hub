@@ -13,7 +13,6 @@
  * do" is answerable without scrolling the transcript.
  */
 import type { VerseEngine } from '../../../data/api-types.js';
-import { ENGINE_MONOGRAM } from '../../../../core/verse/workbench-types.js';
 import { LiveTimer } from '../chat/LiveTimer.js';
 import type { ChatTask, TurnTask } from '../chat/tasks-model.js';
 import { toolAnchorId } from '../chat/tool-semantics.js';
@@ -21,6 +20,7 @@ import { requestTranscriptJump } from '../chat/transcript-jump.js';
 import { findCommand, formatChord } from '../shell/command-catalog.js';
 import { formatDuration } from '../verse-model.js';
 import styles from './panes.module.css';
+import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
 
 const FINISHED_SHOWN = 20;
 
@@ -109,7 +109,7 @@ export function TasksPane({ turnTasks, otherChats, hasSession, onOpenSession }: 
   );
 }
 
-/** Engine identity: a 2px tick plus the monogram — never a vendor logo (SPEC-310C §6). */
+/** Engine identity: a 2px tick plus the provider's mark (3.11.1). */
 export function EngineTick({ engine }: { engine: VerseEngine }) {
-  return <span className={styles.engineTick} data-engine={engine} aria-hidden="true">{ENGINE_MONOGRAM[engine]}</span>;
+  return <span className={styles.engineTick} data-engine={engine} aria-hidden="true"><ProviderLogo engine={engine} size={12} /></span>;
 }

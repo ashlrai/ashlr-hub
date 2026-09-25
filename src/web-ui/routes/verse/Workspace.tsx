@@ -51,7 +51,6 @@
 import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type KeyboardEvent, type ReactNode } from 'react';
 import type { VerseContextMode, VerseProject, VerseSeat, VerseSession } from '../../data/api-types.js';
 import { engineSupportsModes, hasExpansiveMode } from '../../../core/verse/context-math.js';
-import { ENGINE_MONOGRAM } from '../../../core/verse/workbench-types.js';
 import { MutationTokenDialog } from '../../components/auth/MutationTokenDialog.js';
 import { Tooltip } from '../../components/primitives/Tooltip.js';
 import { ActionMenu, anchorBelow, type ActionMenuItem } from './chat/ActionMenu.js';
@@ -97,6 +96,7 @@ import { rememberVerseSeat } from './verse-ui-store.js';
 import { useSeatsRefresh } from './useSeatsRefresh.js';
 import { useVerseLive, useVerseTranscript, type VerseSessionView } from './useVerseSession.js';
 import styles from './Workspace.module.css';
+import { ProviderLogo } from '../../components/primitives/ProviderLogo.js';
 
 // Opened on request only: kept out of the chat's first-paint chunk.
 const HandoffDialog = lazy(() => import('./context/HandoffDialog.js').then((m) => ({ default: m.HandoffDialog })));
@@ -466,7 +466,7 @@ export function Workspace(props: WorkspaceProps) {
               data-status={session.status} data-testid="chat-status"
               data-seat-capacity={flagged?.cls}>
               <span className={styles.engineTick} aria-hidden="true" />
-              <span className={styles.monogram} aria-hidden="true">{ENGINE_MONOGRAM[session.engine]}</span>
+              <span className={styles.monogram} aria-hidden="true"><ProviderLogo engine={session.engine} size={13} /></span>
               <span className={styles.seatText}>{statusWord}</span>
               {flagged ? <CapacityChip view={flagged} /> : null}
             </span>

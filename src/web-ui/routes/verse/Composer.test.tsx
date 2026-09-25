@@ -67,7 +67,8 @@ describe('Composer', () => {
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
     // The chip names the seat; the model is the Model picker's (said once).
     const pill = screen.getByRole('button', { name: /^Seat: Claude Max,/ });
-    expect(pill).toHaveTextContent(/^CClaude Max$/);
+    expect(pill).toHaveTextContent(/^Claude Max$/);
+    expect(pill.querySelector('svg[data-provider="claude"]')).not.toBeNull();
     expect(pill).toHaveAttribute('aria-haspopup', 'menu');
 
     await user.click(pill);

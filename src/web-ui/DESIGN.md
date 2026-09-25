@@ -460,7 +460,9 @@ both themes.
 | Engines | `--engine-*` | Identity only (see below). |
 
 **Engines.** Each engine is marked by a 2px tick and a monogram tile
-(`ENGINE_MONOGRAM`). Never use a vendor logo.
+(`ENGINE_MONOGRAM`) in text contexts. Since 3.11.1 engine tiles, seat chips, lane ticks and the resource bar
+show the provider's own mark (`components/primitives/ProviderLogo.tsx`, path data from @lobehub/icons, MIT) to
+identify the provider an account belongs to; the account's name is always shown as text beside it.
 
 | Engine | Colour |
 |---|---|

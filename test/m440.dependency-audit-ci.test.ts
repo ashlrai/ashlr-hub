@@ -545,10 +545,21 @@ exit "\${TEST_OSV_RC:-0}"
       },
     };
 
+    // The root npm graph carries exactly four bounded version holds (see
+    // docs/DEPENDENCY-SECURITY.md "Version holds"). Each is one exact name plus
+    // a lower bound, so releases below the bound still update. Pinning the
+    // whole list keeps a new hold, or a widened one, a reviewed change.
+    const rootVersionHolds = [
+      { 'dependency-name': 'typescript', versions: ['>=6.1.0'] },
+      { 'dependency-name': 'eslint', versions: ['>=10.0.0'] },
+      { 'dependency-name': 'eslint-plugin-react-hooks', versions: ['>=7.0.0'] },
+      { 'dependency-name': 'jsdom', versions: ['>=30.0.0'] },
+    ];
+
     expect(dependabot).toEqual({
       version: 2,
       updates: [
-        { ...commonUpdate, directory: '/' },
+        { ...commonUpdate, directory: '/', ignore: rootVersionHolds },
         { ...commonUpdate, directory: '/src/raycast' },
         {
           'package-ecosystem': 'cargo',
@@ -566,7 +577,18 @@ exit "\${TEST_OSV_RC:-0}"
     });
     expect(dependabotText).not.toMatch(/password|token|secret|credential/i);
     expect(dependabotText).not.toMatch(/registries:|insecure-external-code-execution/i);
-    expect(dependabotText).not.toMatch(/^\s+(?:ignore|exclude):/m);
+    // Only the root ecosystem's single `ignore:` block is allowed; `exclude:`
+    // (the cooldown bypass) stays forbidden, and no hold may use update-types
+    // or a wildcard, which would silence a dependency rather than bound it.
+    expect(dependabotText.match(/^\s+ignore:/gm)).toHaveLength(1);
+    expect(dependabotText).not.toMatch(/^\s+exclude:/m);
+    expect(dependabotText).not.toMatch(/update-types|dependency-name:\s*["']?[^\s"']*\*/);
+    for (const hold of rootVersionHolds) {
+      expect(dependencySecurityPolicy).toContain(
+        `| \`${hold['dependency-name']}\` | \`${hold.versions[0]}\` |`,
+      );
+    }
+    expect(dependencySecurityPolicy).toContain('A hold is a version-update decision, not a security exception.');
     expect(dependabotText).toContain('verification and dependency maintenance run through the local fleet');
     expect(dependencySecurityPolicy).toContain(
       'GitHub-hosted Dependabot update jobs are intentionally paused',

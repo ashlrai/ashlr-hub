@@ -8,7 +8,7 @@ import { readUniversePortfolioController, runUniversePortfolioController } from 
 import * as controllerStore from '../src/core/universe/portfolio-controller-store.js';
 import * as campaignDelivery from '../src/core/universe/campaign-delivery.js';
 import * as evaluator from '../src/core/universe/fixed-evaluator.js';
-import { canonical } from '../src/core/universe/artifacts.js';
+import { canonical, digest } from '../src/core/universe/artifacts.js';
 import type { UniversePortfolioDefinition } from '../src/core/universe/portfolio-types.js';
 
 const scratch: string[] = [];
@@ -130,6 +130,16 @@ describe.runIf(process.platform === 'darwin')('Universe exact-dispatch native re
     else event.dispatchId = event.dispatchId === '11111111-1111-4111-8111-111111111111'
       ? '22222222-2222-4222-8222-222222222222' : '11111111-1111-4111-8111-111111111111';
     chmodSync(entry.path, 0o600); writeFileSync(entry.path, `${canonical(event)}\n`);
+    // The lost settlement leaves a dispatch diagnostic pinned to the exact
+    // intent digest. Without re-pinning it, the ledger fold (correctly) rejects
+    // the rewritten intent as tampered history, and this case would test that
+    // instead of the attribution policy. A real legacy/mismatched ledger has a
+    // diagnostic consistent with its own intent, so keep the fixture coherent.
+    const diagnostic = ledger(value.root, value.definition.id).find((row) => JSON.parse(row.text).kind === 'dispatch-diagnostic')!;
+    const diagnosticEvent = JSON.parse(diagnostic.text);
+    expect(diagnosticEvent).toMatchObject({ campaignId: 'campaign-a', intentDigest: digest(canonical(JSON.parse(entry.text))) });
+    diagnosticEvent.intentDigest = digest(canonical(event));
+    chmodSync(diagnostic.path, 0o600); writeFileSync(diagnostic.path, `${canonical(diagnosticEvent)}\n`);
     const recovered = await runUniversePortfolioController(value.definition, value.options);
     expect(recovered.status).not.toBe('completed');
     expect(recovered.outcomes[0]).toMatchObject({ state: 'in-flight', attempted: true });

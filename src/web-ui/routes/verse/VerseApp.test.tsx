@@ -21,7 +21,7 @@ import { activity, approvalNeed, shellFetch, vetoNeed, type ShellFetch } from '.
 import { refreshActivity, resetActivityForTest } from './shell/useActivity.js';
 import { mockCompactViewport, type ViewportMock } from './shell/viewport.test-support.js';
 import { MissingSection, SECTION_MODULES, VerseApp } from './VerseApp.js';
-import { getResourcesUi, reloadResourcesUiForTest, RESOURCES_STORAGE_KEY, setResourcesSummary } from './resources/resources-store.js';
+import { getResourcesUi, reloadResourcesUiForTest, RESOURCES_STORAGE_KEY, setResourcesBar, setResourcesSummary } from './resources/resources-store.js';
 import { resetVerseStore } from './verse-store.js';
 import {
   getVerseUiState,
@@ -94,6 +94,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
   resetActivityForTest();
   window.history.replaceState(null, '', '/');
+  // The resource bar switch persists; never let one test's choice leak.
+  try { localStorage.removeItem(RESOURCES_STORAGE_KEY); } catch { /* none */ }
+  reloadResourcesUiForTest();
 });
 
 describe('the rail', () => {
@@ -153,6 +156,8 @@ describe('the rail', () => {
   it('rings the scarcest seat from the shared capacity rows (C6), not a second description of it', async () => {
     // Activity still carries its own capacity badge (62% Claude); the ring
     // must ignore it and read the seat roster the capacity strip reads.
+    // 3.11.1: the ring only shows while the always-on resource bar is off.
+    setResourcesBar(false);
     net = shellFetch(activity(), { bootstrap: bootstrap({ seats: [GROK_SEAT, CLAUDE_TIGHT_SEAT, UNREAD_SEAT] }) });
     vi.stubGlobal('fetch', net.fetch);
     const user = userEvent.setup();
@@ -552,7 +557,7 @@ describe('the Resources drawer (3.11 C6)', () => {
     expect(document.querySelector('main#main-content')).toBeInTheDocument();
     // The edge tab stands down while the drawer is on screen.
     expect(document.querySelector('[data-resources-handle]')).toBeNull();
-    expect(JSON.parse(localStorage.getItem(RESOURCES_STORAGE_KEY)!)).toEqual({ open: true, pinned: true });
+    expect(JSON.parse(localStorage.getItem(RESOURCES_STORAGE_KEY)!)).toEqual({ open: true, pinned: true, bar: true });
 
     // ⌘J floats over a docked drawer; it stays docked.
     key('j', {}, 'KeyJ');

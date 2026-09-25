@@ -41,6 +41,29 @@ date, and remove the exclusion after the update merges. Wildcard exclusions are
 not permitted. Security advisories need no override because they already bypass
 the cooldown.
 
+## Version holds
+
+The root npm ecosystem carries four `ignore` holds, and no other ecosystem
+carries any. Each names one exact dependency and a lower version bound, so every
+release below the bound still flows through version updates; none ignores a
+whole dependency, an update type, or a wildcard name. Each hold exists because
+the held major cannot install or cannot pass here, and each is lifted by its
+stated condition, not by expiry:
+
+| Dependency | Held versions | Lifted when |
+| --- | --- | --- |
+| `typescript` | `>=6.1.0` | a typescript-eslint release admits it in its peer range |
+| `eslint` | `>=10.0.0` | the new `eslint:recommended` rules are migrated deliberately |
+| `eslint-plugin-react-hooks` | `>=7.0.0` | lifted together with the ESLint 10 migration |
+| `jsdom` | `>=30.0.0` | the affected `getByRole` queries are updated |
+
+A hold is a version-update decision, not a security exception. It changes only
+which version-update pull requests Dependabot would propose; it does not hide an
+advisory. Dependabot alerts stay enabled and `npm audit` reads the lockfile
+directly, so an advisory against a held version still surfaces there.
+Adding or widening a hold follows the same review as a `cooldown.exclude`
+entry: one exact dependency, a stated reason, and a stated lift condition.
+
 ## Desktop RustSec containment
 
 The audit ignores exactly `RUSTSEC-2024-0429` while Linux desktop output remains

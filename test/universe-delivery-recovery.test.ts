@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UniverseCampaignSummary } from '../src/core/universe/types.js';
-const sources = vi.hoisted(() => ({ universe: vi.fn(), deliveries: vi.fn(), manifest: vi.fn() }));
-vi.mock('../src/core/universe/campaign-store.js', () => ({ campaignUniverse: sources.universe }));
+const sources = vi.hoisted(() => ({ universe: vi.fn(), campaign: vi.fn(), deliveries: vi.fn(), manifest: vi.fn() }));
+// readCompletedCampaignDelivery re-reads the durable campaign so a caller
+// projection cannot hide a measured seed; the mock must expose that reader too.
+vi.mock('../src/core/universe/campaign-store.js', () => ({ campaignUniverse: sources.universe,
+  readUniverseCampaign: sources.campaign }));
 vi.mock('../src/core/universe/delivery.js', () => ({ readUniverseDeliveries: sources.deliveries }));
 vi.mock('../src/core/universe/store.js', () => ({ manifestRecord: sources.manifest, universePath: () => '/synthetic/universe' }));
 import { readCompletedCampaignDelivery } from '../src/core/universe/campaign-delivery-recovery.js';
@@ -25,6 +28,8 @@ function fixture() {
     runId: 'run-a', trialId: 'trial-a', artifactDigest: 'improvement' };
   const deliveries = { sourceState: 'healthy', deliveries: [receipt] };
   sources.universe.mockReturnValue(universe);
+  // Return the live fixture object so per-case mutations stay identical to the durable record.
+  sources.campaign.mockImplementation(() => campaign);
   sources.deliveries.mockReturnValue(deliveries);
   sources.manifest.mockReturnValue({ seedArtifact: { digest: 'seed' } });
   const read = () => readCompletedCampaignDelivery(campaign as unknown as UniverseCampaignSummary,
@@ -56,6 +61,17 @@ describe('Independent existing-delivery recovery provenance', () => {
     ['paused campaign', (f: ReturnType<typeof fixture>) => { f.campaign.state = 'paused'; }],
   ] as const)('does not recover %s', (_name, mutate) => {
     const f = fixture(); mutate(f); expect(f.read()).toBeNull();
+  });
+
+  it('does not recover when the caller projection differs from the durable campaign', () => {
+    const f = fixture();
+    sources.campaign.mockReturnValue({ ...f.campaign, seedEvaluation: { result: { measurement: { passed: true } } } });
+    expect(f.read()).toBeNull();
+  });
+
+  it('treats an unreadable durable campaign as no proof', () => {
+    const f = fixture(); sources.campaign.mockImplementation(() => { throw new Error('unavailable'); });
+    expect(f.read()).toBeNull();
   });
 
   it('treats unavailable source evidence as no proof', () => {

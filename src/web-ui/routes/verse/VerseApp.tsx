@@ -168,6 +168,7 @@ const GearTray = lazy(() => importGearTray().then((m) => ({ default: m.GearTray 
 const OnboardingFlow = lazy(() => importOnboarding().then((m) => ({ default: m.OnboardingFlow })));
 const ResourcesChrome = lazy(() => importResources().then((m) => ({ default: m.ResourcesChrome })));
 const ResourcesRailButton = lazy(() => importResources().then((m) => ({ default: m.ResourcesRailButton })));
+const ResourcesBar = lazy(() => importResources().then((m) => ({ default: m.ResourcesBar })));
 
 /**
  * The after-first-paint warm-up (shell/warmup.ts): the overlay chunks, then
@@ -439,7 +440,13 @@ export function VerseApp() {
               <ResourcesRailButton expanded={expanded} buttonClass={styles.railButton} iconClass={styles.railIcon} labelClass={styles.railLabel} />
             </Suspense>
           )}
-          {rail && !compact ? <RailCapacityButton rail={rail} expanded={expanded} /> : null}
+          {/* 3.11.1: the always-on resource bar (logos + batteries) replaces the
+              single capacity ring while it is on; off brings the ring back. */}
+          {compact ? null : resources.bar ? (
+            <Suspense fallback={null}>
+              <ResourcesBar expanded={expanded} />
+            </Suspense>
+          ) : rail ? <RailCapacityButton rail={rail} expanded={expanded} /> : null}
           <Tooltip label="Settings and more" placement="right" disabled={expanded || compact || trayOpen}>
             <button
               ref={gearRef}

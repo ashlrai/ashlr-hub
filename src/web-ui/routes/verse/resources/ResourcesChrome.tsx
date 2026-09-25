@@ -25,7 +25,8 @@ import { executeCatalogCommand } from '../shell/run-command.js';
 import { useVerseUi } from '../useVerseUi.js';
 import { closeVerseOverlay } from '../verse-ui-store.js';
 import { ResourcesDot, ResourcesHandle, ResourcesIcon, resourcesLabel } from './ResourcesHandle.js';
-import { closeResources, getResourcesUi, openResources, useResourcesUi } from './resources-store.js';
+import { closeResources, getResourcesUi, openResources, setResourcesBar, useResourcesUi } from './resources-store.js';
+export { ResourcesBar } from './ResourcesBar.js';
 import { ResourcesSummaryProbe } from './resources-summary.js';
 import styles from './ResourcesChrome.module.css';
 
@@ -68,6 +69,7 @@ export function ResourcesChrome({ compact }: { compact: boolean }) {
   const docked = resourcesDocked(resources, compact);
 
   useEffect(() => registerCommandHandler('resources.toggle', (inv) => runResourcesCommand(inv.via)), []);
+  useEffect(() => registerCommandHandler('resources.bar.toggle', () => setResourcesBar(!getResourcesUi().bar)), []);
   // Another overlay (⌘K, ⌘J, ⌘/) replaces a FLOATING drawer; a pinned one stays docked.
   useEffect(() => {
     if (overlay !== null && !resourcesDocked(getResourcesUi(), compact)) closeResources();

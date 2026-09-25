@@ -43,7 +43,7 @@ import { CloudCredits } from './CloudCredits.js';
 import { LocalResources } from './LocalResources.js';
 import { ResourceCard } from './ResourceCard.js';
 import { cloudCreditsQuery } from './resources-queries.js';
-import { closeResources, setResourcesPinned } from './resources-store.js';
+import { closeResources, setResourcesBar, setResourcesPinned, useResourcesUi } from './resources-store.js';
 import styles from './ResourcesDrawer.module.css';
 
 export const RESOURCES_EMPTY_TEXT =
@@ -251,6 +251,7 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
       <footer className={styles.foot}>
         <button type="button" className={styles.linkButton} onClick={() => go('apps')}>Apps &amp; Accounts</button>
         <button type="button" className={styles.linkButton} onClick={() => go('usage')}>Usage</button>
+        <BarToggle />
       </footer>
     </div>
   );
@@ -261,5 +262,21 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
       {panel}
     </div>,
     document.body,
+  );
+}
+
+/** Footer switch for the always-on resource bar in the rail (3.11.1). */
+function BarToggle() {
+  const { bar } = useResourcesUi();
+  return (
+    <button
+      type="button"
+      className={styles.linkButton}
+      style={{ marginLeft: 'auto' }}
+      aria-pressed={bar}
+      onClick={() => setResourcesBar(!bar)}
+    >
+      {bar ? 'Hide resource bar' : 'Show resource bar'}
+    </button>
   );
 }

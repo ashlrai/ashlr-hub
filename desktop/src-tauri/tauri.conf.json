@@ -29,7 +29,8 @@
         "create": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "acceptFirstMouse": true
+        "acceptFirstMouse": true,
+        "backgroundThrottling": "disabled"
       },
       {
         "label": "launch",

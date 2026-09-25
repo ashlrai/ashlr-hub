@@ -1,5 +1,17 @@
 # Releasing @ashlr/hub
 
+> **Current release process — rechecked 2026-09-25 UTC:** releases are manual
+> and local. GitHub Actions stays disabled, and a maintainer builds, verifies,
+> and publishes from a local checkout with npm's interactive web 2FA, following
+> [Releasing without CI](RELEASING-LOCALLY.md). npm `latest` is `3.10.1`;
+> `candidate` still points at the historical `3.3.2`; source is at the
+> unreleased `3.11.0`. The frozen 3.3.2 `release.yml` and `promote.yml` stay
+> in the repository as fail-closed historical evidence only. They are not a
+> publication path for any later version, and the source version must stay
+> strictly above `3.3.2` (enforced by the M522 identity test). The sections
+> below describe that historical 3.3.2 lane and the 3.4.0 readiness notes of
+> the time; where they conflict with this note, this note is current.
+
 > **Verified distribution state — 2026-09-05 UTC:** `@ashlr/hub@3.3.2` is the
 > accepted npm production version. Both npm dist-tags, `latest` and `candidate`,
 > resolve to `3.3.2`. Its immutable package SRI is

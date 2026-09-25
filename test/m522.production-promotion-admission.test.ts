@@ -48,7 +48,30 @@ const upload = steps.find((step) =>
   step.name === 'Upload bounded no-npm-mutation-authority promotion receipt');
 
 const EXPECTED_VERSION = '3.3.2';
-const EXPECTED_DEVELOPMENT_VERSION = '3.4.0';
+// The frozen 3.3.2 GitHub Actions lane above is historical: Actions is off and
+// releases are now published by hand from a local checkout (see
+// docs/RELEASING-LOCALLY.md), so the source manifest moves every release
+// (3.4.0 ... 3.10.1 on npm, 3.11.0 in source today). Pinning one exact
+// development version made this suite fail on every ordinary release while
+// adding no safety. The property it protected is kept as a rule instead: the
+// manifest must be a canonical release version strictly above the frozen lane,
+// so the frozen workflows (which require tag v3.3.2 and ashlr-hub-3.3.2.tgz)
+// can never admit, republish, or promote the current source, and the source
+// can never slide back onto the frozen, quarantined 3.3.0, or failed 3.3.1
+// versions.
+const CANONICAL_RELEASE_VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
+
+function isSuccessorOfFrozenLane(version: unknown): boolean {
+  if (typeof version !== 'string') return false;
+  const candidate = CANONICAL_RELEASE_VERSION.exec(version);
+  const frozen = CANONICAL_RELEASE_VERSION.exec(EXPECTED_VERSION);
+  if (!candidate || !frozen) return false;
+  for (let index = 1; index <= 3; index += 1) {
+    const difference = Number(candidate[index]) - Number(frozen[index]);
+    if (difference !== 0) return difference > 0;
+  }
+  return false;
+}
 const EXPECTED_PREVIOUS_CANDIDATE_VERSION = '3.3.0';
 const EXPECTED_FAILED_CANDIDATE_VERSION = '3.3.1';
 const EXPECTED_FAILED_CANDIDATE_TAG_SHA = 'f2c9353db35fbf12889bddafd8acc2b7ca5ae67c';
@@ -74,7 +97,7 @@ function identityViolations(
   if (versions.some((version) => version !== EXPECTED_VERSION)) {
     violations.push('release version');
   }
-  if (packageIdentity.version !== EXPECTED_DEVELOPMENT_VERSION) {
+  if (!isSuccessorOfFrozenLane(packageIdentity.version)) {
     violations.push('development version');
   }
   if (promotion.env?.REQUIRED_CANDIDATE_TAG !== release.env?.RELEASE_DIST_TAG) {
@@ -244,13 +267,15 @@ function mutationAuthorityViolations(text: string): string[] {
 }
 
 describe('M522 — production-promotion admission has no npm mutation authority', () => {
-  it('binds the frozen release lane to 3.3.2 and the unreleased product line to 3.4.0', () => {
+  it('binds the frozen release lane to 3.3.2 and keeps the source line strictly above it', () => {
     expect(identityViolations(promotionText, releaseText, packageText)).toEqual([]);
     expect([
       workflow.env?.PROMOTION_VERSION,
       releaseWorkflow.env?.RELEASE_VERSION,
-      packageMetadata.version,
-    ]).toEqual([EXPECTED_VERSION, EXPECTED_VERSION, EXPECTED_DEVELOPMENT_VERSION]);
+    ]).toEqual([EXPECTED_VERSION, EXPECTED_VERSION]);
+    expect(packageMetadata.version).toMatch(CANONICAL_RELEASE_VERSION);
+    expect(isSuccessorOfFrozenLane(packageMetadata.version)).toBe(true);
+    expect(releaseText).not.toContain(`ashlr-hub-${packageMetadata.version}.tgz`);
     expect(packageMetadata.name).toBe('@ashlr/hub');
     expect(releaseWorkflow.env).toMatchObject({
       RELEASE_VERSION: EXPECTED_VERSION,
@@ -283,11 +308,26 @@ describe('M522 — production-promotion admission has no npm mutation authority'
       releaseText.replace('RELEASE_VERSION: "3.3.2"', 'RELEASE_VERSION: "3.3.3"'),
       packageText,
     ],
-    [
-      'package version',
+    ...[
+      ['frozen', '3.3.2'],
+      ['failed candidate', '3.3.1'],
+      ['quarantined candidate', '3.3.0'],
+      ['baseline', '3.0.1'],
+      ['older minor', '3.2.9'],
+      ['prerelease', '3.11.0-rc.1'],
+      ['v-prefixed', 'v3.11.0'],
+      ['leading-zero', '3.011.0'],
+    ].map(([label, version]) => [
+      `package version (${label} ${version})`,
       promotionText,
       releaseText,
-      JSON.stringify({ ...packageMetadata, version: '3.4.1' }),
+      JSON.stringify({ ...packageMetadata, version }),
+    ] as const),
+    [
+      'package version (missing)',
+      promotionText,
+      releaseText,
+      JSON.stringify({ name: packageMetadata.name }),
     ],
     [
       'candidate dist-tag',
@@ -361,6 +401,17 @@ describe('M522 — production-promotion admission has no npm mutation authority'
   ])('rejects hostile cross-release identity drift in %s', (_label, promotion, release, pkg) => {
     expect(identityViolations(promotion, release, pkg)).not.toEqual([]);
   });
+
+  it.each(['3.3.3', '3.4.0', '3.10.1', '3.11.0', '4.0.0'])(
+    'admits locally released successor line %s without touching the frozen lane',
+    (version) => {
+      expect(identityViolations(
+        promotionText,
+        releaseText,
+        JSON.stringify({ ...packageMetadata, version }),
+      )).toEqual([]);
+    },
+  );
 
   it('is a separate, manually dispatched, environment-approved observation lane', () => {
     expect(promotionApproverViolations(promotionText)).toEqual([]);
