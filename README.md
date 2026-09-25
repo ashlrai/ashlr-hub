@@ -1,11 +1,10 @@
 <a id="ashlr-universe"></a>
 
-# Ashlrverse
+# Ashlr Verse
 
-**Build the self-improving engineering fleet. Give it direction, resources, and evidence—not an endless queue of prompts.**
+**One console for every coding agent you run: your subscriptions, your local models, Claude cloud sessions and a fleet that merges only inside a scope you sign.**
 
-**[verse.ashlr.ai](https://verse.ashlr.ai)** — Ashlr Verse, the operator console: every account you own
-behind one surface, plus a local model that keeps working after the quota runs out.
+**[verse.ashlr.ai](https://verse.ashlr.ai)**
 
 
 ![Ashlr Verse — the operator console: an expandable section rail, a project sidebar, and every connected account with its live usage windows](docs/images/verse-console.png)
@@ -17,34 +16,275 @@ behind one surface, plus a local model that keeps working after the quota runs o
 
 ---
 
-## What is this?
+## What it is
 
-Ashlrverse is building an open, agent-native operating system for engineers and
-builders: a fleet that can discover worthwhile work, build competing approaches,
-evaluate real outcomes, and improve how it works. Its
+**Ashlr Verse** is an operator console for coding agents. Every Claude, Codex
+and Grok account you own becomes a *seat*, and so does every tool-capable local
+model. You chat with any of them in one workbench. You watch and bound an
+autonomous fleet that works your enrolled repositories. And you hand work to
+Claude Code cloud sessions that keep running on your Claude credits after the
+subscription window is spent.
+
+It ships as a macOS desktop app and as the `ashlr` CLI (`@ashlr/hub`), which
+serves the same console in a browser on macOS, Linux and Windows. Under the
+console is the Hub kernel: the CLI, the Universe experiment runtime and
+account-aware resource pools.
+
+Names stay compatible. The repository is `ashlr-hub`, the package is
+`@ashlr/hub`, the command is `ashlr`, and experiments remain `ashlr universe`
+with the `@ashlr/hub/universe` SDK. "Ashlrverse" is the wider project; existing
+manifests, schemas and stores need no naming migration.
+
+The user guide is [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
+
+---
+
+## The desktop app (macOS)
+
+The desktop app is a native window around Verse, with a menu-bar item,
+notifications while it is hidden, a Dock badge for Needs-you items and the
+Terminal pane in the chat dock. It bundles the `ashlr` CLI, so it needs no
+separate Node.js install to run.
+
+### Install
+
+There is no public installer and the build is unsigned. You build it once on
+your Mac and keep it in the Dock. The full sequence, prerequisites (Rust with
+`tauri-cli` 2, Bun, Node, Xcode command line tools) and the checks that the
+bundle carries the current assets are in
+[Desktop app](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#desktop-app-macos).
+In short, from the repository root:
+
+```sh
+npm ci
+npm run build:binary                       # the CLI as one executable, web assets included
+node desktop/scripts/prepare-sidecar.mjs   # stage it inside the app
+cd desktop && npm run icons && CI=true cargo tauri build
+rm -rf /Applications/Ashlr.app
+cp -R src-tauri/target/release/bundle/macos/Ashlr.app /Applications/
+```
+
+Run all of those steps every time. A bare `cargo tauri build` wraps a new shell
+around whatever web assets an earlier build left behind.
+
+### Open
+
+The first time, right-click `Ashlr.app` and choose **Open**, because the build is
+unsigned. After that it opens normally. A small launch window says what is
+happening while the bundled server starts on `127.0.0.1:7777`. The Verse window
+then opens with its tokens already handed over, so there is nothing to paste.
+Closing the window hides it to the menu bar; **Quit** stops the server.
+
+On first launch a two-minute tour shows which seats this Mac can use, whether
+there is a local model, and the three ways to stop things.
+
+### Sign in your seats
+
+A seat is one account and the CLI that drives it, pinned to its own profile so a
+turn can never land on the wrong account. Verse never asks for or stores a
+credential; each vendor CLI signs itself in.
+
+1. **Prepare a private profile** for each account. For the Claude seat the cloud
+   lane uses:
+
+   ```sh
+   ashlr resources profile prepare --provider claude \
+     --directory ~/.ashlr/native-profiles/claude-a \
+     --executable /absolute/path/to/the/claude/binary --json
+   ```
+
+   Use `--provider codex` or `--provider grok` for those accounts, with a new
+   directory each time. Nothing is signed in yet.
+2. **Sign in** with the `loginCommand` the command printed: `auth login
+   --claudeai` for Claude, `login` for Codex, `--no-auto-update login --oauth`
+   for Grok. Finish the vendor's browser flow as the intended account.
+3. **List the account** in `~/.ashlr/account-connections/connections.json`,
+   using the `command` from step 1:
+
+   ```json
+   {
+     "schemaVersion": 1,
+     "intervalMs": 30000,
+     "accounts": [
+       { "id": "claude-a", "label": "Claude Max", "provider": "claude",
+         "command": ["/absolute/node", "/Users/you/.ashlr/native-profiles/claude-a/launcher.mjs"] }
+     ]
+   }
+   ```
+
+4. **Reopen Verse.** The account appears as a seat in the composer and in
+   **Apps & Accounts**, which shows its health, windows and resets. A background
+   sweep checks every seat every 10 minutes with status commands only.
+   **Reconnect** opens the seat's own login in Terminal.
+
+Local models need no sign-in. If Ollama is running, every tag that supports tool
+use becomes a local seat. The account commissioning details, including how to
+check identity and quota, are in
+[Resource Pools](docs/RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity).
+
+---
+
+## The CLI
+
+The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
+22.15 or newer and Git.
+
+```sh
+npm install -g @ashlr/hub
+ashlr --version
+ashlr verse                 # start the server and open http://127.0.0.1:7777/verse/
+```
+
+`ashlr verse` prints two tokens. Paste the **read token** into the page once. It
+asks for the **mutation token** the first time you start a chat or change
+something. The server listens on `127.0.0.1` only, and neither token is written
+to disk. `ashlr verse --no-open --json` prints one machine-readable line instead
+of the banner.
+
+What differs from the desktop app: the chat dock's Terminal pane needs the
+desktop app's runtime (the browser gets **Open in Terminal.app** instead), and
+the custody helper behind autonomy is macOS-only (a Secure Enclave key and Touch
+ID).
+
+---
+
+## Quickstart
+
+1. **Install** the desktop app or the CLI (above), and open Verse.
+2. **Sign in your seats** (above). Start `ollama serve` for local seats.
+3. **Open a project.** **New chat** (⌘N) picks a seat and a folder; in the
+   desktop app **Choose folder…** opens the native picker. Saving a folder as a
+   project never enrolls it for unattended work.
+4. **Chat.** The composer takes attachments, `@` files and `/` commands, and
+   queues up to 3 turns while one runs. The context meter shows the model's real
+   window and compaction point; **Continue in a fresh chat** hands off with a
+   note built without a model call. ⌘K reaches every chat, action and seat; ⌘J
+   opens Needs you.
+5. **Optionally run the local fast lane.** `ashlr local-runtime start --slots 4`
+   starts llama-server with batching slots, and
+   `ASHLR_VERSE_LOCAL_DISPATCH=llama-server` in Verse's environment sends local
+   turns to it. Model discovery stays on Ollama.
+6. **Optionally hand work to the cloud.** **New cloud task** on Command, or
+   `ashlr cloud launch "<task>" --repo owner/name` ([cloud lane](#the-cloud-lane)).
+7. **Optionally turn on autonomy** with the one-time setup below.
+
+---
+
+## Turn on autonomy: the one-time `ashlr authority setup`
+
+Autonomy ships **dormant**. Nothing merges, and no standing grant exists, until
+you run the guided setup once on your Mac. Until a grant is signed, live fleet
+ticks refuse: the compiled daemon and conductor trust roots are empty, and a
+signed standing grant is the only other way a tick is admitted. The dry run
+still works.
+
+```sh
+ashlr authority setup --dry-run   # print every step and what it would do
+ashlr authority setup             # do them, pausing only where you must act
+ashlr authority status            # grant, switch, Stop, rollout stage, ledger, custody
+```
+
+`setup` performs each step it can and **pauses only for the steps marked ✋**,
+which no agent may do. It prints exactly what it did and can be re-run safely.
+
+1. ✋ **Install the custody helper:** `sudo scripts/install-custody.sh`
+   (root-owned, in `/usr/local/libexec/`).
+2. ✋ **Create the Secure Enclave key** (Touch ID). The private key never leaves
+   this Mac's Secure Enclave.
+3. ✋ **Compile the public key in.** Setup opens a PR adding it to
+   `src/core/authority/trust-roots.ts`. You merge it, run `npm run build`,
+   install the release as usual and restart the daemon.
+4. ✋ **Create the `ashlr-fleet` GitHub App** (one browser page) and **install
+   it** on the enrolled repos (one more click). Its private key goes straight
+   into the custody Keychain item; the PEM never touches disk.
+5. ✋ **Store a Claude token:** run `claude setup-token` and paste it when
+   asked. Only tool-less judge and Leader calls ever see it.
+6. **Apply the rulesets** (`ashlr authority protect --print`, then `--apply`):
+   required checks, no force-push or deletion, and bypass for your admin role
+   but never for the App.
+7. **Create the canary** repository `fleet-canary` with its CI workflow, using
+   your own `gh` login (the App cannot write workflows).
+8. ✋ **Retire the old key.** Confirm moving `~/.ashlr/activation/` out of
+   `~/.ashlr`; archive it offline, then delete it.
+9. **Rotate the provenance HMAC key** (`ashlr authority rotate-provenance`).
+10. ✋ **Sign the first grant** (Touch ID) and, optionally, set the switch to
+    Autonomous. The grant starts on the shadow stage of its rollout ladder.
+
+After that, the only recurring step is one Touch ID every 30 days, or after a
+deploy that changes authority code.
+
+**What a grant allows.** A standing grant names the repositories, engines, risk
+and size caps, spend ceiling and Leader classes, and is valid for at most 30
+days. Effective policy is the minimum of the grant, the config and compiled
+ceilings (medium risk, 10 files / 300 lines, 24 merges per repo per day).
+Lowering never asks: the switch (Off, Propose, Autonomous) goes down instantly,
+**Stop** writes `~/.ashlr/KILL`, and **Revoke** needs a new grant to resume.
+Every merge happens on GitHub, pinned to the head SHA, after the gates and a
+judge from a different model family. CI and a fresh re-run watch it for two
+hours, and a red merge is reverted automatically. The full model is in
+[`docs/STANDING-AUTHORITY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md).
+
+**Budget modes** decide how much of each seat autonomy may use. They are set in
+`~/.ashlr/budget.json` and from the budget pill on Command. Under **balanced**
+(the default), Claude keeps 40 % of its weekly window for you, and autonomy
+never uses it while its five-hour window is above 70 %. Grok keeps no reserve.
+Local models are free and unlimited. **all-in** drops the reserves, and
+**reserve** keeps 85 % of every paid window for you. Codex is off for autonomy
+until you switch it on. A seat whose usage cannot be read is never eligible.
+Your own chats ignore reserves.
+
+---
+
+## The cloud lane
+
+New in 3.11. Verse can start **Claude Code cloud sessions** (claude.ai/code) and
+track what they deliver. They run on your Claude account, including its cloud
+credits, so they keep working after the subscription window is spent.
+
+- **Start one** from Command (**New cloud task**), from a chat (**Run in cloud**
+  in the composer's ⋯ sheet), or with `ashlr cloud launch "<task>"`. Verse can
+  also work through its own improvement backlog: **Improve Verse** launches the
+  next item now, and with self-improvement on the server launches at most 4 a
+  day on its own.
+- **Every task delivers to GitHub.** Verse cannot read a session back, so each
+  task pushes the branch `ashlr-cloud/<taskId>` and opens a **draft** PR with a
+  report block. Verse follows it with `gh` and lists it in Needs you when the PR
+  is open. **Nothing in the lane merges.**
+- **Spend is an estimate, and is labelled as one.** Claude does not expose the
+  credit balance. Verse counts $3 per launched session against $250 by default,
+  and you correct it after checking
+  [claude.ai/settings/usage](https://claude.ai/settings/usage). Limits: 4 at
+  once, 20 a day, and self-improvement stops at a $40 reserve.
+- **It launches only as the `claude-a` seat**, signed in with a claude.ai
+  account. Cloud sessions refuse API keys.
+- **Turn it off:** `ashlr cloud budget --self-improve off` stops launches Verse
+  starts itself, and `ASHLR_CLOUD_AUTO=0` stops the background scheduler.
+
+How it works, the delivery contract, the budget math and every failure code:
+[`docs/CLOUD.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md).
+
+---
+
+## Reference
+
+The sections below document the Hub underneath the console: the Universe
+experiment kernel, resource pools, and the legacy enrolled-repository fleet with
+its dashboard and CLI.
+
+### Universe experiments
+
+Universe turns a pinned Git seed, an objective and a resource budget into
+competing, evaluated artifacts. It runs isolated variants, freezes their
+artifacts, evaluates them against a fixed comparator, keeps the best result in
+each niche, and reuses those winners as parents in later generations. Its
 [North Star](docs/NORTH-STAR.md) is useful accepted engineering changes per token
-and hour—not more generated code or busier dashboards.
-
-**Hub is its local kernel**: the CLI, experiment runtime, account-aware resource
-pools and visual control room. Today it turns a pinned Git seed, an objective
-and a resource budget into competing, evaluated artifacts.
-
-The current local loop is concrete: run isolated variants, freeze their artifacts,
-evaluate against a fixed comparator, retain the best result in each niche, and
-reuse those winners as later-generation parents. Provider-backed generation and
-resource routing are separately configured; ecosystem projects remain independent.
-
-Ashlrverse is the public product name. Compatibility names stay unchanged:
-the repository is `ashlr-hub`, the package is `@ashlr/hub`, and experiment commands
-remain `ashlr universe` with the `@ashlr/hub/universe` SDK. Existing manifests,
-schemas and stores do not need a naming migration.
-
-### See the loop work
+and hour, not more generated code.
 
 Start with the [executable demo](docs/DEMO.md): two generations, three competing
 variants, seven correctness cases, two retained niches and a deliberately broken
-candidate that must lose. It runs real code without a model account. The candidate
-transformations are scripted, so this demonstrates the mechanism—not AI productivity.
+candidate that must lose. It runs real code without a model account. The
+candidate transformations are scripted, so it demonstrates the mechanism, not AI
+productivity.
 
 ![Two demo generations: compact code shrinks from 274 to 47 bytes and readable code from 317 to 210 bytes; all retained variants pass seven cases and the broken sorting variant is rejected.](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/universe-demo.png)
 
@@ -52,14 +292,7 @@ Recorded deterministic fixture at source `914ebd1f566c0dc4f0a95479d9c4f464289e73
 Arrows show parent reuse; byte reductions are not measured AI engineering yield.
 Read the [demo evidence and reproduction guide](docs/DEMO.md#recorded-example).
 
-The [Ashlrverse observatory source](https://github.com/ashlrai/ashlr-hub/blob/master/examples/universe-site/README.md)
-adds a space-themed landing page and interactive lineage replay of that recorded
-experiment. It is credential-free presentation code, not a live fleet dashboard;
-its [original artwork and provenance](https://github.com/ashlrai/ashlr-hub/blob/master/examples/universe-site/ASSETS.md)
-are included so contributors can reproduce the experience.
-
-From a trusted checkout on **macOS with Node.js 24+ and Git**, install and build
-locally, then create a fresh private experiment store:
+From a trusted checkout on **macOS with Node.js 24+ and Git**:
 
 ```sh
 npm ci
@@ -69,17 +302,9 @@ node bin/ashlr universe demo --root "$ASHLR_DEMO_ROOT" --json
 node bin/ashlr universe console --root "$ASHLR_DEMO_ROOT"
 ```
 
-Open the printed loopback URL and enter its private read token to inspect trials,
-parents and the evidence graph. The console observes; it does not launch work.
-Installation/build run trusted repository scripts; the demo creates local files
-and executes bounded sandboxed code. See the [demo guide](docs/DEMO.md) for expected
-results, prerequisites and recovery. No GitHub Actions are needed.
-
-**Source and distribution are different.** This checkout describes the 3.4.0
-development line. On 2026-09-09, npm `latest` and `candidate` both resolve to
-`@ashlr/hub@3.3.2`; installing that package does not install this Universe demo.
-See the [release record](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING.md) before choosing an artifact. Neither
-source availability nor a successful demo commissions an unattended provider fleet.
+Open the printed loopback URL and enter its private read token to inspect
+trials, parents and the evidence graph. The console observes; it does not launch
+work. See the [demo guide](docs/DEMO.md) for expected results and recovery.
 
 | Build your next step | Guide |
 |---------------------|-------|
@@ -89,39 +314,55 @@ source availability nor a successful demo commissions an unattended provider fle
 | Run a verified package independently of this checkout | [Pinned local runtime](docs/ASHLR-UNIVERSE.md#install-a-pinned-local-runtime) |
 | Understand the components or contribute | [Architecture](docs/ARCHITECTURE.md#current-runtime-map) · [Documentation map](docs/README.md) |
 
-### Existing fleet runtime
+### Resource pools
 
-For explicitly enrolled account and local-model tasks, the new
-[resource pool runner](docs/RESOURCE-POOLS.md) combines quota windows, rolling task
-caps, and shared-account concurrency before dispatch. `ashlr resources pool`
+For explicitly enrolled account and local-model tasks, the
+[resource pool runner](docs/RESOURCE-POOLS.md) combines quota windows, rolling
+task caps and shared-account concurrency before dispatch. `ashlr resources pool`
 records assignments and reported usage without switching credentials or starting
-a daemon. It is separate from Universe's evaluator and is not yet a commissioned
-unattended multi-account fleet.
+a daemon. It is separate from Universe's evaluator.
 
-Use `ashlr resources pool console` with the same explicit pool files to open its
+`ashlr resources pool console` opens its
 [operations desk](docs/RESOURCE-POOLS.md#operate-the-resource-console): account
 capacity lanes, routing exclusions, dispatch activity and token evidence. Adding
 `--execute --workspace /absolute/worktree` enables a durable foreground queue with
-task submission, pause/resume, cancellation and session-local output. The console
-separates owned dispatches from reservations with unknown process liveness.
+task submission, pause/resume, cancellation and session-local output.
 
-ashlr-hub is a single Node binary containing an autonomous agent fleet for enrolled repositories. In the current production build, compiled daemon and conductor trust roots are empty, so live non-dry fleet execution is deliberately dormant; verified dry-run, status, and local-console paths remain available.
+### The legacy enrolled-repository fleet
 
-When an independently provisioned runtime admits it, the fleet scans your backlog, dispatches sandboxed agent swarms across multiple backends (local Ollama/LM Studio, Claude Code, Codex, any OpenAI-compatible API), and deposits proposed diffs into an **Approval Inbox**. By default, nothing touches a branch until you explicitly approve it. A separate, default-off auto-merge subsystem can be enabled only with explicit authority and fail-closed verification. The kill-switch is a single file.
+ashlr-hub also contains the original autonomous fleet for enrolled repositories.
+In the current production build its compiled daemon and conductor trust roots are
+empty, so live non-dry fleet execution is dormant unless a standing grant (above)
+admits the tick; verified dry-run, status and local-console paths remain
+available.
 
-It is also a local unifying harness: one CLI and web dashboard that indexes your enrolled projects, aggregates all your MCP servers into a single gateway, tracks real spend, and provides `ashlr run` / `ashlr swarm` for ad-hoc work.
+When admitted, the fleet scans your backlog, dispatches sandboxed agent swarms
+across multiple backends (local Ollama/LM Studio, Claude Code, Codex, any
+OpenAI-compatible API), and deposits proposed diffs into an **Approval Inbox**.
+Without a grant, nothing touches a branch until you explicitly approve it. The
+kill-switch is a single file.
+
+It is also a local harness: one CLI and web dashboard that indexes your enrolled
+projects, aggregates your MCP servers into a single gateway, tracks real spend,
+and provides `ashlr run` / `ashlr swarm` for ad-hoc work.
 
 ### Authority defaults
 
-First activation currently stops at observation: run `ashlr preflight`, enroll a repo, and complete a dry-run. Empty compiled trust roots refuse live non-dry daemon and conductor effects, and resident service mutation has no production authority. Existing proposals can still be inspected, but no dry-run or readiness result widens runtime authority.
+Without a standing grant, first activation stops at observation: run
+`ashlr preflight`, enroll a repo, and complete a dry-run. Empty compiled trust
+roots refuse live non-dry daemon and conductor effects, and resident service
+mutation has no production authority. No dry-run or readiness result widens
+runtime authority.
 
 | Path | Default | Required authority | Possible outward effect |
 |------|---------|--------------------|-------------------------|
-| Daemon generation | **Dormant in production** | A separately provisioned compiled trust root; the shipped roots are empty | Dry-run/status only; live non-dry dispatch refuses before effects |
+| Daemon generation | **Dormant in production** | A signed standing grant (`ashlr authority setup`) or a separately provisioned compiled trust root; the shipped roots are empty | Dry-run/status only; live non-dry dispatch refuses before effects |
+| Standing-grant merge | **Off until setup** | A Touch ID-signed grant, the merge gates and a cross-family judge | Merge on GitHub pinned to the head SHA, watched for two hours and reverted if red |
 | Inbox apply | Manual | Explicit `ashlr inbox approve`, confirmation, enrollment, kill-switch clear | Applies to a dedicated local branch; never silently edits the working tree |
 | Protected PR submit | Operator-invoked | Explicit `ashlr inbox submit`, caller confirmation, signed frontier provenance, fresh verification, and live protected-remote evidence | Opens one review PR; never merges `main` or contacts a model. `--yes` is caller intent, not an authenticated human receipt. |
-| Autonomous merge | **Off** | `foundry.autoMerge.enabled: true` plus the selected tier, judge-backed verification, or evidence authority gates | Local merge or protected remote PR, depending on policy; every refusal is fail-closed |
+| Legacy autonomous merge | **Off** | `foundry.autoMerge.enabled: true` plus the selected tier, judge-backed verification, or evidence authority gates | Local merge or protected remote PR, depending on policy; every refusal is fail-closed |
 | Judge-free evidence merge | **Off** | Base- and diff-bound deterministic verification, signed provenance/evidence, strict scope/risk policy, and live protected-branch checks | Protected remote PR handoff only; no local fallback, self-target merge, partial capture, or build/CI/manifest change |
+| Cloud task | Operator-invoked, or self-improvement under its budget | The cloud budget gates and a signed-in `claude-a` seat | A draft PR on `ashlr-cloud/<taskId>`; never merges |
 | Deploy | Never performed by the daemon | Explicit `ashlr ship --deploy <target> --confirm` after pre-ship checks | Runs the selected production deploy command |
 | OS service mutation | **Temporarily unavailable** | No production install/reinstall/repair/restart authority is currently issued | Existing services expose status and uninstall only; no live one-shot or resident start is admitted |
 
@@ -129,9 +370,9 @@ No successful test, model verdict, or proposal record grants deployment or servi
 
 ---
 
-## What makes it different
+## The legacy autonomous loop
 
-Most AI coding tools are request-response: you ask, the model answers. Ashlr's source architecture defines a **continuous autonomous loop**, but the current production entrypoints keep its non-dry daemon and conductor effects dormant because their compiled trust roots are empty:
+Most AI coding tools are request-response: you ask, the model answers. Ashlr's source architecture defines a **continuous autonomous loop**. Without a signed standing grant, the current production entrypoints keep its non-dry daemon and conductor effects dormant because their compiled trust roots are empty:
 
 ```
 End-State Spec (your vision)
@@ -147,7 +388,7 @@ End-State Spec (your vision)
                     → Scorecard feedback (outcomes feed learned routing)
 ```
 
-**What this architecture unlocks once an independently provisioned runtime admits it:**
+**What this architecture unlocks once a standing grant or an independently provisioned runtime admits it:**
 
 - The fleet works your backlog while you sleep.
 - You review proposals with `ashlr inbox`, not a chat window.
@@ -169,7 +410,7 @@ separate [execution boundaries](docs/ARCHITECTURE.md#current-runtime-map).
 
 ---
 
-## Quickstart
+## Legacy fleet quickstart
 
 For Universe experiments and the resource fleet map, follow the
 [current-source quickstart](docs/QUICKSTART.md#run-the-current-universe-kernel).
@@ -179,20 +420,9 @@ have a separate [commissioning procedure](docs/RESOURCE-POOLS.md#commission-nati
 The instructions below cover the **general Hub and legacy fleet configuration**.
 They do not install an unreleased source feature or activate the dormant daemon.
 
-### Requirements
+### Install from source
 
-- Node.js 22.15+
-- Git
-- A configured backend only for commands that invoke a model; no model is required for the deterministic Universe demo or saved-evidence inspection
-
-### Install
-
-```sh
-npm install -g @ashlr/hub
-ashlr --version
-```
-
-Or from source:
+The npm install is [above](#the-cli). To run from a checkout instead:
 
 ```sh
 git clone https://github.com/ashlrai/ashlr-hub
@@ -241,8 +471,9 @@ Prints what the fleet would work on. Creates no proposals, spends $0.
 ashlr daemon start --once
 ```
 
-The current production build refuses this non-dry command before dispatch or
-proposal creation because its compiled daemon trust roots are empty. Use
+Without a signed standing grant, the current production build refuses this
+non-dry command before dispatch or proposal creation because its compiled daemon
+trust roots are empty. Use
 `ashlr daemon status`, the dry-run above, and Mission Control for verified
 observation. A test-only injected trust root is not production activation.
 
@@ -506,6 +737,12 @@ next actions point at work the daemon can select now instead of phantom backlog.
 
 | Command | What it does |
 |---------|-------------|
+| `ashlr verse [--port N] [--no-open] [--json]` | Start the Verse console at `127.0.0.1:7777/verse/` |
+| `ashlr authority setup/status/switch/stop/grant/revoke/ledger` | Standing authority: the one-time setup, Touch ID grants, the autonomy switch, Stop and the ledger |
+| `ashlr leader show/run/tick/veto` | The Leader: latest memo, a run when due, due class-B actions, veto |
+| `ashlr cloud launch/list/refresh/improve/budget/backlog` | The cloud lane: Claude Code cloud sessions, their budget and the self-improvement backlog |
+| `ashlr local-runtime start/stop/status` | Supervised llama-server with batching slots for local seats |
+| `ashlr resources profile prepare/repin` | Prepare or re-pin a private native profile for one account |
 | `ashlr setup` | First-activation checks; currently nonzero because resident service mutation is restricted |
 | `ashlr onboard <repo>` | Enroll one repo with walkthrough + dry run |
 | `ashlr enroll add/remove/list` | Manage enrolled repos |
@@ -589,7 +826,15 @@ Full invariant set: [`docs/SPEC-V4-FOUNDRY.md`](https://github.com/ashlrai/ashlr
 ├── foundry/
 │   └── provenance.key   # HMAC signing key (0600, per-machine, never transmitted)
 ├── audit/               # Append-only confinement + action audit log
-└── manager/             # Manager judge scorecards
+├── manager/             # Manager judge scorecards
+├── native-profiles/     # One private profile per seat (launcher, command.json, native state)
+├── account-connections/ # connections.json: the seats Verse lists
+├── verse/               # Verse sessions, workspaces, project memory, attachments
+├── authority/           # Standing grants and the hash-chained ledger
+├── budget.json          # Budget mode and per-seat overrides
+├── routing/
+│   └── capacity-history.jsonl  # Seat window readings behind the burn-downs
+└── cloud/               # Cloud tasks, cloud budget, backlog and launch checkouts
 ```
 
 Per-repo memory lives in `<repo>/.ashlrcode/genome/`. The CLI is the sole writer of `~/.ashlr/`.
@@ -697,11 +942,15 @@ preflight soft-warns *consider locus.firm for production* (non-blocking).
 | **v5** (M50–M55) | Open Fleet — declarative engine registry, tri-tier trust, OS confinement, fleet intelligence, self-improving fleet, goal/loop conductor | Shipped |
 | **v5.1** (M320–M324) | Claude 5 Model Intelligence — Sonnet 5 workhorse routing, Fable 5 judge with Opus fallback, per-model ROI telemetry, cost-aware learned routing | Shipped |
 | **v6** (M331–M340) | Verification-First — verify-to-green repair loop, real-world outcome watcher, multi-model best-of-N, gateway shadow activation program, Models dashboard tab, SWE-bench regression gate | Shipped |
+| **3.5–3.8** | Ashlr Verse — the operator console, local seats on llama.cpp, a native folder picker, bounded run windows, local-only that actually prevents spend | Shipped |
+| **3.9** | Context — windows read from each CLI, visible compaction, standard and expansive modes, continue in a fresh chat, shared project memory | Shipped |
+| **3.10** | Autonomy with custody and the workbench — Touch ID grants, budget modes, the Leader, five surfaces, ⌘K and ⌘J, the dock, live reasoning, charts, burn-down history | Shipped |
+| **3.11** | The cloud lane — Claude Code cloud sessions on Claude credits, with an estimated budget and self-improvement | In development |
 
-This release candidate was prepared against the public npm baseline **3.0.1**.
-A newer version is authoritative only after its protected tag workflow and the
-npm registry both confirm publication; repository or changelog state alone is
-not release evidence.
+Releases are built and published locally (GitHub Actions is off); the procedure
+is in [Releasing without CI](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
+A version is published only once `npm view @ashlr/hub version` confirms it;
+repository or changelog state alone is not release evidence.
 
 ---
 
@@ -718,6 +967,10 @@ Star and source-maintainer references. Start with these canonical guides:
 
 | Doc | What it covers |
 |-----|----------------|
+| [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) | The Verse user guide: surfaces, chat workbench, seats, autonomy, the cloud lane, the desktop app |
+| [`docs/CLOUD.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md) | The cloud lane: launch mechanics, delivery contract, estimated budget, self-improvement, failure codes |
+| [`docs/VERSE-CONTEXT.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-CONTEXT.md) | Context windows, compaction, standard and expansive modes, handoff and shared memory |
+| [`docs/STANDING-AUTHORITY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md) | Touch ID grants, the rollout ladder, merge gates and the ledger |
 | [`docs/NORTH-STAR.md`](docs/NORTH-STAR.md) | Target outcome: verified engineering yield, evolving objectives and independent ecosystem products |
 | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Run the current local kernel, inspect results and choose the correct commissioning path |
 | [`docs/ASHLR-UNIVERSE.md`](docs/ASHLR-UNIVERSE.md) | Experiments, campaigns, portfolio orchestration, evidence graphs and pinned local runtime |

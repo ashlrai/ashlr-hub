@@ -23,6 +23,8 @@ It is served by the normal `ashlr serve` server at `/verse/`, opened by
 - Standing authority, Touch ID grants, the rollout ladder and the ledger:
   [`docs/STANDING-AUTHORITY.md`](STANDING-AUTHORITY.md), the authority for
   everything autonomy may do without you.
+- The cloud lane (Claude Code cloud sessions, their budget and delivery
+  contract): [`docs/CLOUD.md`](CLOUD.md).
 
 This page is the user guide.
 
@@ -573,6 +575,51 @@ which feed Mind and the Leader. Harness changes (prompts, effort, sampling,
 routing weights) are tested as paired experiments with a confidence interval
 against held-out tasks, adopted only through the gate, and rolled back
 automatically if a 48-hour canary falls below baseline.
+
+## Cloud lane (3.11)
+
+Verse can start **Claude Code cloud sessions** (claude.ai/code) and follow what
+they deliver. They run on your Claude account, including its cloud credits, so
+work continues after the subscription's weekly window is spent. The mechanics,
+the delivery contract, the budget math and every failure code are in
+[`docs/CLOUD.md`](CLOUD.md). This is the operator's view.
+
+- **Where to start one.** **New cloud task** on Command's Cloud card (repo,
+  base branch, task text), **Run in cloud** in the composer's ⋯ sheet (the
+  typed prompt, for the chat's project), or `ashlr cloud launch "<task>"`.
+  Run in cloud is disabled, with the reason in its tooltip, when the project
+  has no GitHub origin or the seat is not ready.
+- **What a task delivers.** Verse cannot read a session back. Every task is
+  told to push the branch `ashlr-cloud/<taskId>` and open a **draft** PR
+  titled `[ashlr-cloud] <title>`, ending in an `ashlr-cloud-report` block
+  (status, summary, tests run, risks). Verse checks GitHub with `gh` every 10
+  minutes, or now with **Refresh**. A task with an open PR shows in Needs you
+  as "Cloud task ready for review", with its report summary.
+- **Nothing merges from the lane.** A cloud PR goes through the custody gates
+  above, or waits for you. Dismissing a task in Verse marks it closed and does
+  not touch GitHub.
+- **The seat.** Sessions launch only as the `claude-a` seat's native profile,
+  signed in with a claude.ai account. Cloud sessions refuse API keys, so the
+  `claude` on your `PATH` is never used. The seat counts as ready when its
+  profile's `command.json` exists and holds an argv array. Verse does not run the CLI to check sign-in,
+  so a signed-out seat shows up as an `auth` failure at launch.
+
+**Spend is an estimate, and is always labelled as one.** Claude does not expose
+the credit balance. The Cloud card shows "$X of $250 · estimate": $3 per
+launched session (failed launches cost nothing) plus an adjustment you set
+after checking <https://claude.ai/settings/usage>, which it links to. **Edit
+budget** (also in Settings ▸ Usage ▸ Cloud credits, and
+`ashlr cloud budget`) sets the total, the adjustment, the per-session
+estimate, at most 4 sessions at once and 20 a day.
+
+**Improve Verse.** Verse keeps a backlog of work on itself: built-in briefs
+plus items you or the Leader add. **Improve Verse** launches the next item now.
+With self-improvement on (the default), the server also launches one on its own
+two minutes after start and then hourly, at most 4 a day, and stops when
+estimated credits fall below the $40 reserve. The Cloud card's switch, or
+`ashlr cloud budget --self-improve off`, stops that. `ASHLR_CLOUD_AUTO=0` in the
+server's environment stops the scheduler entirely. Fleet's lanes row shows
+"Cloud · N running".
 
 ## Fleet ▸ Advanced — the daemon cockpit
 
