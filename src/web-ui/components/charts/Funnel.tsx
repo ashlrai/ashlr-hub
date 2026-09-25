@@ -2,7 +2,8 @@
  * components/charts/Funnel.tsx — an ordered pipeline (filed → verified →
  * passed → judged ship → merged). One series, so ONE hue for every bar (no
  * value ramp on stages); each bar's length is its share of the first stage,
- * and the step-to-step conversion is written out in words beside it.
+ * and the step-to-step conversion is written out in words beside it. A zero
+ * stage is an empty neutral track (never a full pale bar that reads 100%).
  *
  * Honesty: an unknown stage (null) draws a dashed placeholder and "unknown",
  * and the conversions on either side of it are "—", never a guessed rate.
@@ -69,6 +70,12 @@ export function Funnel({
       : first === 0 ? { kind: 'empty', message: `No ${stages[0]!.label.toLowerCase()} in this window.` } : { kind: 'ready' }
   );
 
+  // Bar length is a share of the widest stage — the first, in any real
+  // funnel; the max only guards a later stage that out-counts it (it would
+  // overflow the track). When that is 0 every bar is 0: an all-zero window
+  // is a row of EMPTY tracks, never full bars that read as 100%.
+  const scaleMax = Math.max(0, ...stages.map((s) => (s.value !== null && Number.isFinite(s.value) ? s.value : 0)));
+
   const narrow = width < NARROW;
   const labelW = narrow ? 0 : Math.min(170, Math.round(width * 0.28));
   const valueW = narrow ? 150 : 180;
@@ -99,18 +106,22 @@ export function Funnel({
         <svg className={plot.svg} width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={summary}>
           {rows.map((r, i) => {
             const y = i * rowH + (narrow ? 18 : 7);
-            const barW = r.ofFirst === null ? 0 : Math.max(r.value && r.value > 0 ? 3 : 0, r.ofFirst * plotW);
+            const barW = r.value === null || !(r.value > 0) || scaleMax <= 0 ? 0 : Math.max(3, (r.value / scaleMax) * plotW);
             const textY = y + BAR_H / 2;
             return (
               <g key={r.stage.id} data-stage={r.stage.id}>
                 <text className={plot.label} x={narrow ? 0 : labelW - 10} y={narrow ? y - 5 : textY} dy={narrow ? undefined : '0.32em'} textAnchor={narrow ? 'start' : 'end'}>
                   {r.stage.label}
                 </text>
-                <rect className={plot.track} x={labelW} y={y} width={plotW} height={BAR_H} rx={4} />
+                {/* The track is the neutral empty-meter gray (plot.module.css
+                    .trackEmpty), not the pale azure chart track: at 0 it must
+                    read as empty, and it must be SEEN — it is what every
+                    bar's length is a share of. */}
+                <rect data-role="track" className={plot.trackEmpty} x={labelW} y={y} width={plotW} height={BAR_H} rx={4} />
                 {r.value === null ? (
                   <rect data-unknown="true" className={plot.noData} x={labelW} y={y} width={Math.min(plotW, 48)} height={BAR_H} rx={4} />
                 ) : barW > 0 ? (
-                  <path d={roundedRightBar(labelW, y, barW, BAR_H)} fill={color} />
+                  <path data-role="bar" d={roundedRightBar(labelW, y, barW, BAR_H)} fill={color} />
                 ) : null}
                 <text className={plot.labelStrong} x={labelW + plotW + 10} y={textY} dy="0.32em">
                   {r.value === null ? 'unknown' : formatValue(r.value)}

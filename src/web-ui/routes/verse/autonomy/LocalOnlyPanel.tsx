@@ -30,6 +30,7 @@ import { ConfirmDialog } from '../../inbox/ConfirmDialog.js';
 import type { LocalOnlyPolicy, OptionalFleetRead } from './fleet-contract.js';
 import { localOnlyImpact, localOnlySourceNote, type SeatLike } from './fleet-model.js';
 import { setLocalOnly } from './fleet-queries.js';
+import { tidyProse } from './format.js';
 import type { GuardedAction } from './use-guarded-action.js';
 import styles from './autonomy.module.css';
 
@@ -66,7 +67,7 @@ export function LocalOnlyPanel({
         ? 'Turning local-only on requires the dispatch token.'
         : 'Turning local-only off requires the dispatch token.',
       (result) => {
-        setNote(result.note || null);
+        setNote(result.note ? tidyProse(result.note) : null);
         setConfirming(false);
       },
     );
@@ -196,9 +197,9 @@ export function LocalOnlyPanel({
                 <br />
                 {impact.blocked.length === 0
                   ? 'No seat on this machine is affected today: every configured seat is local.'
-                  : `${impact.blocked.length} of your ${seats.length} seats stop working: ${impact.blocked
-                      .map((s) => s.label)
-                      .join(', ')}.`}
+                  : `${impact.blocked.length} of your ${seats.length} ${seats.length === 1 ? 'seat' : 'seats'} ${
+                      impact.blocked.length === 1 ? 'stops' : 'stop'
+                    } working: ${impact.blocked.map((s) => s.label).join(', ')}.`}
                 <br />
                 <br />
                 It is reversible from this panel at any time.

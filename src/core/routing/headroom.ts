@@ -35,7 +35,8 @@
  */
 import type { VerseSeat, VerseSeatCapacity } from '../verse/types.js';
 import type { BudgetEngine } from './policy.js';
-import type { SeatBudgetPolicy, SeatHeadroom } from './types.js';
+import { reasonSentences } from './seat-reasons.js';
+import type { SeatBudgetPolicy, SeatHeadroom, SeatReason } from './types.js';
 
 /** A reading older than this is too stale to spend against (the collector polls every 30 s when active). */
 export const HEADROOM_READING_MAX_AGE_MS = 15 * 60_000;
@@ -93,6 +94,10 @@ export interface SeatAssessment {
   unknownUsage: boolean;
   /** The sentences naming each spent account window (a subset of `headroom.reasons`). */
   spentReasons: string[];
+  /** `headroom.reasons` as data (same order): each sentence without its reset clause, plus the reset. */
+  details: SeatReason[];
+  /** `spentReasons` as data. */
+  spentDetails: SeatReason[];
 }
 
 export interface AssessOptions {
@@ -180,11 +185,14 @@ export function windowName(engine: BudgetEngine, window: CapacityWindow, cls: Se
   return 'weekly window';
 }
 
-function resetPhrase(window: CapacityWindow): string {
-  if (window.resetsAt) return ` (resets ${window.resetsAt})`;
-  // Claude: the provider's own words, verbatim — never a synthesized time.
-  if (window.resetDescription) return ` (resets ${window.resetDescription})`;
-  return '';
+/**
+ * A window's reset as data: the machine instant when there is one, else
+ * Claude's own words, verbatim — never a synthesized time. `reasonSentence`
+ * turns it back into the " (resets …)" clause the string form has always had.
+ */
+function resetOf(window: CapacityWindow): Pick<SeatReason, 'resetsAt' | 'resetDescription'> {
+  if (window.resetsAt) return { resetsAt: window.resetsAt, resetDescription: null };
+  return { resetsAt: null, resetDescription: window.resetDescription ?? null };
 }
 
 function isSpent(window: CapacityWindow): boolean {
@@ -221,11 +229,19 @@ function peak(rows: ClassedWindow[]): ClassedWindow | null {
   return best;
 }
 
-/** Earliest machine-readable reset among `rows`; null when none is known. */
-function earliestReset(rows: ClassedWindow[]): string | null {
-  const times = rows.flatMap((row) => (row.window.resetsAt && Number.isFinite(Date.parse(row.window.resetsAt))
-    ? [row.window.resetsAt] : []));
-  times.sort((a, b) => Date.parse(a) - Date.parse(b));
+/**
+ * When EVERY spent window in `rows` has reset — the seat is blocked until the
+ * last of them does, so this is the latest reset. Null unless every row has a
+ * machine-readable reset (one unknown reset makes the reopening unknown).
+ */
+function lastReset(rows: ClassedWindow[]): string | null {
+  const times: string[] = [];
+  for (const row of rows) {
+    const at = row.window.resetsAt;
+    if (!at || !Number.isFinite(Date.parse(at))) return null;
+    times.push(at);
+  }
+  times.sort((a, b) => Date.parse(b) - Date.parse(a));
   return times[0] ?? null;
 }
 
@@ -233,15 +249,16 @@ function earliestReset(rows: ClassedWindow[]): string | null {
 export function assessSeat(capacity: SeatCapacity, policy: SeatBudgetPolicy, opts: AssessOptions): SeatAssessment {
   const { nowMs } = opts;
   const maxAge = opts.readingMaxAgeMs ?? HEADROOM_READING_MAX_AGE_MS;
-  const reasons: string[] = [];
+  // Reasons are built as data; `headroom.reasons` is derived from them.
+  const details: SeatReason[] = [];
 
   // ── Local: free, windowless, bounded only by reachability ──────────────
   if (capacity.free) {
     const reachable = capacity.reachable !== false;
-    if (!policy.enabled) reasons.push('Autonomy is switched off for this seat.');
-    if (!reachable) reasons.push('The local model runtime is not reachable.');
+    if (!policy.enabled) details.push({ kind: 'switched-off', text: 'Autonomy is switched off for this seat.' });
+    if (!reachable) details.push({ kind: 'unreachable', text: 'The local model runtime is not reachable.' });
     const eligible = policy.enabled && reachable;
-    if (eligible) reasons.push('Local model — free, with no usage window to protect.');
+    if (eligible) details.push({ kind: 'headroom', text: 'Local model — free, with no usage window to protect.' });
     return {
       headroom: {
         seatId: capacity.seatId,
@@ -253,12 +270,14 @@ export function assessSeat(capacity: SeatCapacity, policy: SeatBudgetPolicy, opt
         autonomyHeadroomPercent: reachable ? 100 : null,
         resetAt: null,
         eligibleForAutonomy: eligible,
-        reasons,
+        reasons: reasonSentences(details),
       },
       reopensAt: null,
       exhausted: false,
       unknownUsage: false,
       spentReasons: [],
+      details,
+      spentDetails: [],
     };
   }
 
@@ -310,30 +329,45 @@ export function assessSeat(capacity: SeatCapacity, policy: SeatBudgetPolicy, opt
   const exhausted = spentRows.length > 0;
   const unknownUsage = !hasReading || stale || nullWindow !== undefined;
 
-  if (!policy.enabled) reasons.push('Autonomy is switched off for this seat.');
-  if (capacity.signedOut) reasons.push('Signed out — reconnect this account before anything can run on it.');
+  if (!policy.enabled) details.push({ kind: 'switched-off', text: 'Autonomy is switched off for this seat.' });
+  if (capacity.signedOut) {
+    details.push({ kind: 'signed-out', text: 'Signed out — reconnect this account before anything can run on it.' });
+  }
 
-  const spentReasons: string[] = [];
+  const spentDetails: SeatReason[] = [];
   if (exhausted) {
     for (const row of spentRows) {
       const used = row.window.limitReached ? 'limit reached' : `${pct(row.window.usedPercent!)} used`;
-      spentReasons.push(`The ${windowName(capacity.engine, row.window, row.cls)} is spent — ${used}${resetPhrase(row.window)}.`);
+      spentDetails.push({
+        kind: 'spent',
+        text: `The ${windowName(capacity.engine, row.window, row.cls)} is spent — ${used}.`,
+        ...resetOf(row.window),
+      });
     }
-    reasons.push(...spentReasons);
-    reopensAt = earliestReset(spentRows);
+    details.push(...spentDetails);
+    reopensAt = lastReset(spentRows);
   }
 
   if (!hasReading) {
-    reasons.push(account.length === 0
-      ? 'No usage reading for this seat — unknown usage is not headroom, so autonomy stays off it.'
-      : 'Its usage windows carried no percentage — unknown usage is not headroom, so autonomy stays off it.');
+    details.push({
+      kind: 'unknown-usage',
+      text: account.length === 0
+        ? 'No usage reading for this seat — unknown usage is not headroom, so autonomy stays off it.'
+        : 'Its usage windows carried no percentage — unknown usage is not headroom, so autonomy stays off it.',
+    });
   } else if (stale) {
-    reasons.push(ageMs === null
-      ? 'The usage reading has no timestamp — too uncertain to spend against.'
-      : `The usage reading is ${formatAge(ageMs)} old — too stale to spend against (limit ${formatAge(maxAge)}).`);
+    details.push({
+      kind: 'unknown-usage',
+      text: ageMs === null
+        ? 'The usage reading has no timestamp — too uncertain to spend against.'
+        : `The usage reading is ${formatAge(ageMs)} old — too stale to spend against (limit ${formatAge(maxAge)}).`,
+    });
   } else if (nullWindow) {
-    reasons.push(`The ${windowName(capacity.engine, nullWindow.window, nullWindow.cls)} carried no percentage — `
-      + 'unknown usage is not headroom.');
+    details.push({
+      kind: 'unknown-usage',
+      text: `The ${windowName(capacity.engine, nullWindow.window, nullWindow.cls)} carried no percentage — `
+        + 'unknown usage is not headroom.',
+    });
   }
 
   const usdCap = policy.dailyUsdCap;
@@ -341,10 +375,10 @@ export function assessSeat(capacity: SeatCapacity, policy: SeatBudgetPolicy, opt
   if (usdCap !== undefined) {
     if (capacity.spentTodayUsd === null) {
       overUsd = true;
-      reasons.push(`A $${usdCap.toFixed(2)} daily cap is set but today's spend on this seat is unknown.`);
+      details.push({ kind: 'spend-cap', text: `A $${usdCap.toFixed(2)} daily cap is set but today's spend on this seat is unknown.` });
     } else if (capacity.spentTodayUsd >= usdCap) {
       overUsd = true;
-      reasons.push(`Spent $${capacity.spentTodayUsd.toFixed(2)} of its $${usdCap.toFixed(2)} daily cap.`);
+      details.push({ kind: 'spend-cap', text: `Spent $${capacity.spentTodayUsd.toFixed(2)} of its $${usdCap.toFixed(2)} daily cap.` });
     }
   }
 
@@ -354,11 +388,18 @@ export function assessSeat(capacity: SeatCapacity, policy: SeatBudgetPolicy, opt
     const name = windowName(capacity.engine, bindingRow.window, bindingRow.cls);
     const used = pct(bindingRow.window.usedPercent!);
     if (bindingWindow === 'session' && !sessionLimitIsReserve) {
-      reasons.push(`The ${name} is ${used} used; autonomy stops at ${pct(sessionLimit)} `
-        + `to protect your live session${resetPhrase(bindingRow.window)}.`);
+      details.push({
+        kind: 'session-ceiling',
+        text: `The ${name} is ${used} used; autonomy stops at ${pct(sessionLimit)} to protect your live session.`,
+        ...resetOf(bindingRow.window),
+      });
     } else {
-      reasons.push(`The ${name} is ${used} used; ${pct(policy.reservePercent)} is kept for you, so autonomy `
-        + `stops at ${pct(reserveCeiling)}${resetPhrase(bindingRow.window)}.`);
+      details.push({
+        kind: 'reserve',
+        text: `The ${name} is ${used} used; ${pct(policy.reservePercent)} is kept for you, so autonomy `
+          + `stops at ${pct(reserveCeiling)}.`,
+        ...resetOf(bindingRow.window),
+      });
     }
     reopensAt = bindingRow.window.resetsAt;
   }
@@ -366,7 +407,10 @@ export function assessSeat(capacity: SeatCapacity, policy: SeatBudgetPolicy, opt
   // Model-scoped windows are facts worth showing, never blockers.
   for (const row of classed) {
     if (row.cls === 'model' && isSpent(row.window)) {
-      reasons.push(`The ${windowName(capacity.engine, row.window, row.cls)} is spent — it limits that model only, not the account.`);
+      details.push({
+        kind: 'model-window',
+        text: `The ${windowName(capacity.engine, row.window, row.cls)} is spent — it limits that model only, not the account.`,
+      });
     }
   }
 
@@ -377,7 +421,7 @@ export function assessSeat(capacity: SeatCapacity, policy: SeatBudgetPolicy, opt
     const kept = bindingWindow === 'weekly' || sessionLimitIsReserve
       ? policy.reservePercent > 0 ? ` (${pct(policy.reservePercent)} kept for you)` : ''
       : sessionLimit < 100 ? ` (autonomy stops at ${pct(sessionLimit)} to protect your live session)` : '';
-    reasons.unshift(`${pct(room!)} of the ${name} is left for autonomy${kept}.`);
+    details.unshift({ kind: 'headroom', text: `${pct(room!)} of the ${name} is left for autonomy${kept}.` });
   }
 
   return {
@@ -389,14 +433,16 @@ export function assessSeat(capacity: SeatCapacity, policy: SeatBudgetPolicy, opt
       autonomyHeadroomPercent: room === null ? null : Math.max(0, Math.round(room)),
       resetAt: bindingRow?.window.resetsAt ?? null,
       eligibleForAutonomy: eligible,
-      reasons,
+      reasons: reasonSentences(details),
     },
     // A seat that is merely switched off, signed out, or unknown has no
     // known reopening — only a window reset is a date we can name.
     reopensAt: !policy.enabled || capacity.signedOut || unknownUsage || overUsd ? null : reopensAt,
     exhausted,
     unknownUsage,
-    spentReasons,
+    spentReasons: reasonSentences(spentDetails),
+    details,
+    spentDetails,
   };
 }
 

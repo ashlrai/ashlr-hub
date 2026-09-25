@@ -18,7 +18,14 @@
  * unread dot, or how long ago. A running row adds a muted second line from
  * activity: the command it is running, or the tail of what it is thinking.
  * Every status is a glyph with an accessible name, at least 11px, and never
- * colour alone (DESIGN §6).
+ * colour alone (DESIGN §6). The row's tooltip spells the status out too
+ * ("… · Last turn failed"), so the "!" is explained to a sighted pointer user
+ * as well as to a screen reader.
+ *
+ * Group headings are the project's display name as it is on disk (never
+ * upper-cased: a folder slug shouted in caps is a different-looking name),
+ * with the full path as their tooltip. ↑/↓ move between chats, Home/End jump
+ * to the ends, Enter opens; ↓ from the search field lands on the first chat.
  *
  * Hover a row (or right-click it, or press Shift+F10 / the menu key on it)
  * for pin, archive, rename, hand off and delete. Pin and archive need C1's
@@ -36,6 +43,8 @@ import { lazy, Suspense, useEffect, useId, useMemo, useRef, useState, type Keybo
 import type { VerseProject, VerseSeat, VerseSession } from '../../data/api-types.js';
 import type { VerseActivityResponse, VerseSessionMetaResponse } from '../../../core/verse/workbench-types.js';
 import type { QueryStatus } from '../../data/cache.js';
+import { Button } from '../../components/primitives/Button.js';
+import { Dialog } from '../../components/primitives/Dialog.js';
 import { RefreshIndicator } from '../../components/primitives/RefreshIndicator.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
 import { Tooltip } from '../../components/primitives/Tooltip.js';
@@ -69,6 +78,7 @@ export interface SidebarProps {
   onNew: () => void;
   onRetry: () => void;
   onCollapse: () => void;
+  /** Called only once the operator confirms the footer's "Disconnect from hub" dialog. */
   onDisconnect: () => void;
   /** 3.10 — C1's activity (null: not on this server / not answered yet). */
   activity?: VerseActivityResponse | null;
@@ -103,12 +113,25 @@ export function Sidebar(props: SidebarProps) {
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ row: SidebarRow; anchor: MenuAnchor; from: HTMLElement } | null>(null);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const disconnectTitleId = useId();
+  const disconnectCancelRef = useRef<HTMLButtonElement>(null);
   const model = useMemo(
     () => buildSidebar({ sessions, projects, query, filter, activity, meta, localSeen, selectedId }),
     [sessions, projects, query, filter, activity, meta, localSeen, selectedId],
   );
   const loading = sessionsStatus === 'loading' || (sessionsStatus === 'idle' && sessions.length === 0);
   const searching = query.trim().length > 0;
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  /** ↓ from the search field: into the list, on its first chat. */
+  function onSearchKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key !== 'ArrowDown') return;
+    const first = scrollRef.current?.querySelector<HTMLElement>(ROW_SELECTOR);
+    if (!first) return;
+    event.preventDefault();
+    first.focus();
+  }
 
   function openMenu(row: SidebarRow, anchor: MenuAnchor, from: HTMLElement) {
     if (!actions) return;
@@ -124,7 +147,7 @@ export function Sidebar(props: SidebarProps) {
           <span className={styles.searchIcon} aria-hidden="true"><SearchIcon /></span>
           <span className="visually-hidden">Search chats and messages</span>
           <input id={searchId} type="search" value={query} placeholder="Search chats" autoComplete="off"
-            onChange={(event) => onQuery(event.target.value)} />
+            onChange={(event) => onQuery(event.target.value)} onKeyDown={onSearchKeyDown} />
         </label>
         <Tooltip label="New chat" shortcut="⌘N" placement="bottom">
           <button type="button" className={styles.iconButton} onClick={onNew} aria-label="New chat">
@@ -141,7 +164,7 @@ export function Sidebar(props: SidebarProps) {
 
       <FilterChips value={filter} counts={model.counts} onChange={setFilter} />
 
-      <div className={styles.scroll}>
+      <div ref={scrollRef} className={styles.scroll} onKeyDown={onRowsKeyDown}>
         <SavedProjects />
         {loading ? (
           <div className={styles.skeleton} aria-busy="true">
@@ -175,8 +198,34 @@ export function Sidebar(props: SidebarProps) {
       </div>
 
       <footer className={styles.footer}>
-        <button type="button" onClick={onDisconnect} className={styles.footerButton}>Disconnect</button>
+        {/* clearReadSession (data/auth-store.ts): ends this window's read
+            session — the cookie, the remembered token, the mutation hold,
+            cached data and the composer's drafts — and shows the token screen
+            again. The chats themselves stay on the hub. Said in the label and
+            the tooltip, because "Disconnect" alone reads like a network blip.
+            It throws away unsent drafts, so — like Settings ▸ Connection — it
+            asks first; onDisconnect runs only from the dialog's red button. */}
+        <Tooltip label="Signs this window out: clears cached chats and unsent drafts here. Chats stay on the hub." placement="top">
+          <button type="button" onClick={() => setConfirmDisconnect(true)} className={styles.footerButton}
+            aria-haspopup="dialog">Disconnect from hub</button>
+        </Tooltip>
       </footer>
+
+      {/* The same confirm as Settings ▸ Connection (ConnectionPanel.tsx): the
+          Dialog primitive, focus on CANCEL so Enter-Enter keeps the session,
+          Escape and the backdrop cancel, and focus returns to the footer
+          button. */}
+      <Dialog open={confirmDisconnect} onClose={() => setConfirmDisconnect(false)} titleId={disconnectTitleId}
+        title="Disconnect from this hub?" initialFocusRef={disconnectCancelRef}
+        description="Unsent drafts in open chats will be cleared. Your chats stay on the hub; you will need the read token to reconnect.">
+        <div className={styles.confirmActions}>
+          <Button ref={disconnectCancelRef} variant="subtle" onClick={() => setConfirmDisconnect(false)}>Cancel</Button>
+          <Button variant="danger" onClick={() => {
+            setConfirmDisconnect(false);
+            onDisconnect();
+          }}>Disconnect</Button>
+        </div>
+      </Dialog>
 
       {menu && actions ? (
         <ActionMenu label={`Actions for ${menu.row.session.title || 'Untitled chat'}`} anchor={menu.anchor}
@@ -185,6 +234,36 @@ export function Sidebar(props: SidebarProps) {
       ) : null}
     </nav>
   );
+}
+
+/** Every chat row in the list (search results and saved projects are not rows). */
+const ROW_SELECTOR = '[data-focus-key^="verse-session:"]';
+
+/** ↑/↓ between chat rows, Home/End to the ends. Enter is the row button's own. */
+function onRowsKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+  if (event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return;
+  const target = event.target as HTMLElement;
+  if (!target.matches(ROW_SELECTOR)) return;
+  const rows = [...event.currentTarget.querySelectorAll<HTMLElement>(ROW_SELECTOR)];
+  const at = rows.indexOf(target);
+  let next: HTMLElement | undefined;
+  if (event.key === 'ArrowDown') next = rows[at + 1];
+  else if (event.key === 'ArrowUp') next = rows[at - 1];
+  else if (event.key === 'Home') next = rows[0];
+  else if (event.key === 'End') next = rows[rows.length - 1];
+  else return;
+  event.preventDefault();
+  next?.focus();
+}
+
+/** The row's status in words, for its tooltip (the glyph's accessible name, said to everyone). */
+function rowStatusWords(status: SidebarRow['status']): string | null {
+  switch (status.kind) {
+    case 'running': return 'Running';
+    case 'failed': return 'Last turn failed';
+    case 'unread': return `${status.newTurns} new turn${status.newTurns === 1 ? '' : 's'}`;
+    default: return null;
+  }
 }
 
 function rowMenuItems(row: SidebarRow, actions: SidebarRowActions, metaAvailable: boolean, startRename: () => void): ActionMenuItem[] {
@@ -358,9 +437,12 @@ function SessionRowView({ row, seats, selected, onSelect, onMenu }: {
   // Quiet by default: a marker only where it changes what the operator would
   // do — a turn in flight on a seat whose binding window is spent.
   const spentWhileRunning = status.kind === 'running' && capacity?.cls === 'blocked';
-  const tip = capacity === null || capacity.cls === 'ready' || capacity.cls === 'unread'
-    ? `${session.title} · ${seatPillLabel(seats, session)}`
-    : `${session.title} · ${seatPillLabel(seats, session)} · ${capacity.summary}`;
+  const tip = [
+    session.title || 'Untitled chat',
+    seatPillLabel(seats, session),
+    capacity === null || capacity.cls === 'ready' || capacity.cls === 'unread' ? null : capacity.summary,
+    rowStatusWords(status),
+  ].filter((part) => part !== null).join(' · ');
   const rowRef = useRef<HTMLButtonElement>(null);
 
   function onContextMenu(event: ReactMouseEvent<HTMLButtonElement>) {
@@ -414,21 +496,20 @@ function SessionRowView({ row, seats, selected, onSelect, onMenu }: {
 
 function RowStatus({ row }: { row: SidebarRow }) {
   const { status, session } = row;
+  // One wording for the glyph's name and the row's tooltip (rowStatusWords).
+  const words = rowStatusWords(status) ?? undefined;
   switch (status.kind) {
     case 'running':
       return (
         <span className={styles.statusRunning}>
-          <span className={styles.running} role="img" aria-label="Running" />
+          <span className={styles.running} role="img" aria-label={words} />
           {status.startedAt ? <LiveTimer className={styles.elapsed} since={status.startedAt} /> : null}
         </span>
       );
     case 'failed':
-      return <span className={styles.errored} role="img" aria-label="Last turn failed">!</span>;
+      return <span className={styles.errored} role="img" aria-label={words}>!</span>;
     case 'unread':
-      return (
-        <span className={styles.unread} role="img"
-          aria-label={`${status.newTurns} new turn${status.newTurns === 1 ? '' : 's'}`} />
-      );
+      return <span className={styles.unread} role="img" aria-label={words} />;
     default:
       return <time className={styles.time} dateTime={session.updatedAt}>{formatRelative(session.updatedAt)}</time>;
   }

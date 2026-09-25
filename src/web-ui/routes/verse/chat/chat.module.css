@@ -319,12 +319,14 @@
 /* ========================================================================== */
 
 .activity {
-  margin-top: var(--space-3);
+  margin-top: var(--space-4);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-xs);
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 
+/* Sentence case, like every other summary line in the transcript ("Ran 2
+   commands · read 1 file"): the card is a summary, not a table header. */
 .activityHead {
   display: flex;
   align-items: baseline;
@@ -333,24 +335,15 @@
   padding: var(--space-1) var(--space-3);
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-canvas);
-}
-.activityCount {
-  font-family: var(--font-display);
   font-size: var(--text-xs-size);
-  font-weight: var(--font-weight-semibold);
-  font-variant-numeric: tabular-nums;
-  color: var(--text-primary);
 }
 .activityLabel {
-  font-family: var(--font-display);
-  font-size: var(--text-2xs-size, 11px);
-  letter-spacing: var(--tracking-label, 0.06em);
-  text-transform: uppercase;
+  font-weight: var(--font-weight-medium);
+  font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
 }
 .activityBreakdown {
   margin-left: auto;
-  font-size: var(--text-2xs-size, 11px);
   color: var(--text-tertiary);
 }
 
@@ -369,7 +362,7 @@
 
 .activityRow {
   display: grid;
-  grid-template-columns: 2px 6ch minmax(0, 1fr) auto auto;
+  grid-template-columns: 2px calc(var(--space-3) + 7.5ch) minmax(0, 1fr) auto auto;
   align-items: center;
   gap: var(--space-2);
   width: 100%;
@@ -396,10 +389,7 @@
 .activityRow[data-failed='true'] .activityRule { background: var(--status-danger-solid); }
 
 .activityVerb {
-  font-family: var(--font-display);
-  font-size: var(--text-2xs-size, 11px);
-  letter-spacing: var(--tracking-label, 0.06em);
-  text-transform: uppercase;
+  font-size: var(--text-xs-size);
   color: var(--text-tertiary);
   padding-left: var(--space-3);
   white-space: nowrap;
@@ -412,10 +402,8 @@
    token (which clears the text floor) rather than the solid used for fills. */
 .activityFailed {
   flex: 0 0 auto;
-  font-family: var(--font-display);
-  font-size: var(--text-2xs-size, 11px);
-  letter-spacing: var(--tracking-label, 0.06em);
-  text-transform: uppercase;
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-medium);
   white-space: nowrap;
   color: var(--status-danger-fg);
 }
@@ -651,7 +639,6 @@
 
 @media (max-width: 900px) {
   .navSearch { flex-basis: 14ch; }
-  .activityRow { grid-template-columns: 2px 6ch minmax(0, 1fr) auto auto; }
   .activityDir { display: none; }
 }
 

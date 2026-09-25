@@ -1,8 +1,12 @@
 /**
  * Reasoning reads as a quieter voice beside the answer: tertiary text, a
  * 2px rule, no box (DESIGN §5 — role is weight and rule, never a card).
- * While it streams the glyph breathes in the running colour; the label's
+ * While it streams a dot breathes in the running colour; the label's
  * figures are tabular so a ticking clock does not jitter the line.
+ *
+ * The row keeps the tool rows' left geometry (a 2px rule slot and --space-3)
+ * so its ▸ sits exactly under theirs; the slot is transparent — reasoning has
+ * no rule of its own until it is open.
  */
 .thinking {
   color: var(--text-tertiary);
@@ -18,37 +22,41 @@
   gap: var(--space-2);
   min-height: var(--control-h-xs);
   max-width: 100%;
+  padding-left: var(--space-3);
+  border-left: 2px solid transparent;
 }
+/* No ▸ on a line with nothing to open: its label starts where theirs do. */
+.line { padding-left: calc(var(--space-3) + 10px + var(--space-2)); }
 .summary {
   cursor: pointer;
   list-style: none;
   border-radius: var(--radius-xs);
   padding-right: var(--space-2);
-  transition: color var(--duration-fast) var(--ease-standard);
+  transition: color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard);
 }
 .summary::-webkit-details-marker { display: none; }
-.summary:hover { color: var(--text-secondary); }
+.summary:hover { color: var(--text-secondary); background: var(--bg-hover); }
 
+/* The shared disclosure glyph (Transcript .toolGlyph, ActivityGroup .chevron). */
 .chevron {
-  display: inline-block;
-  width: 0.5em;
   flex: none;
-}
-.chevron::before {
-  content: '›';
-  display: inline-block;
+  width: 0;
+  height: 0;
+  margin: 0 3px 0 2px;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+  opacity: 0.7;
   transition: transform var(--duration-fast) var(--ease-standard);
 }
-.thinking[open] .chevron::before { transform: rotate(90deg); }
+.thinking[open] .chevron { transform: rotate(90deg); }
 
+/* Only while streaming: the running colour, breathing. */
 .glyph {
   width: 6px;
   height: 6px;
   flex: none;
   border-radius: var(--radius-full);
-  background: var(--border-strong);
-}
-.glyph[data-live] {
   background: var(--status-running-solid);
   animation: thinking-breathe 1.6s var(--ease-standard) infinite;
 }
@@ -56,7 +64,6 @@
 .label {
   font-family: var(--font-display);
   font-variant-numeric: tabular-nums;
-  font-style: italic;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -106,8 +113,8 @@
 @keyframes thinking-breathe { 50% { opacity: 0.35; } }
 
 @media (prefers-reduced-motion: reduce) {
-  :root:not([data-motion="full"]) .glyph[data-live] { animation: none; }
-  :root:not([data-motion="full"]) .chevron::before { transition: none; }
+  :root:not([data-motion="full"]) .glyph { animation: none; }
+  :root:not([data-motion="full"]) .chevron { transition: none; }
 }
-:root[data-motion="reduce"] .glyph[data-live] { animation: none; }
-:root[data-motion="reduce"] .chevron::before { transition: none; }
+:root[data-motion="reduce"] .glyph { animation: none; }
+:root[data-motion="reduce"] .chevron { transition: none; }

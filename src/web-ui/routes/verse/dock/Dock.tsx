@@ -29,6 +29,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { EmptyState } from '../../../components/primitives/EmptyState.js';
 import { ActionMenu, anchorBelow, type ActionMenuItem, type MenuAnchor } from '../chat/ActionMenu.js';
+import { findCommand, formatChord } from '../shell/command-catalog.js';
 import { DOCK_LAYOUT, DOCK_PANES, clampDockWidth, type DockPaneId, type DockPresentation } from '../shell/dock-catalog.js';
 import { DiffPaneSlot, PreviewPaneSlot, TerminalPaneSlot, type TurnFileChange } from '../shell/slots.js';
 import { DOCK_PANE_LABEL, isPaneAvailable } from './dock-panes.js';
@@ -64,6 +65,12 @@ export interface DockProps {
 }
 
 export { DOCK_PANE_LABEL, isPaneAvailable };
+
+/** A catalog command's chord as this platform prints it ("⌘N" / "Ctrl+N"), or null when it has none. */
+function chordOf(id: string): string | null {
+  const chord = findCommand(id)?.keys[0];
+  return chord ? formatChord(chord) : null;
+}
 
 const KEY_STEP = 16;
 const KEY_STEP_COARSE = 64;
@@ -166,6 +173,7 @@ export function Dock(props: DockProps) {
     ...(split ? [{ id: 'unsplit', label: 'One pane', separated: true, onSelect: () => splitDock(null) }] : []),
   ];
 
+  const toggleChord = chordOf('dock.toggle');
   const width = presentation === 'column' ? columnWidth : clampDockWidth(state.width, windowWidth);
   const label = `Dock: ${DOCK_PANE_LABEL[active!]}${split ? ` over ${DOCK_PANE_LABEL[split]}` : ''}`;
 
@@ -209,7 +217,7 @@ export function Dock(props: DockProps) {
                   <span className={styles.tabLabel}>{DOCK_PANE_LABEL[pane]}</span>
                 </button>
                 <button type="button" className={styles.tabClose} aria-label={`Close ${DOCK_PANE_LABEL[pane]}`}
-                  tabIndex={-1} onClick={() => closeDockTab(pane)}>
+                  title={`Close ${DOCK_PANE_LABEL[pane]}`} tabIndex={-1} onClick={() => closeDockTab(pane)}>
                   <CloseGlyph size={12} />
                 </button>
               </div>
@@ -217,13 +225,14 @@ export function Dock(props: DockProps) {
           })}
         </div>
         <div className={styles.headActions}>
-          {closedPanes.length > 0 ? (
-            <button type="button" className={styles.iconButton} aria-label="Add a pane" title="Add a pane" aria-haspopup="menu"
-              aria-expanded={menu?.kind === 'add'}
-              onClick={(event) => setMenu({ kind: 'add', anchor: anchorBelow(event.currentTarget), from: event.currentTarget })}>
-              <span className={styles.plus} aria-hidden="true">+</span>
-            </button>
-          ) : null}
+          {/* Always drawn (disabled when every pane is open) so the actions
+              never shift when the last closed pane is added back. */}
+          <button type="button" className={styles.iconButton} aria-label="Add a pane"
+            title={closedPanes.length > 0 ? 'Add a pane' : 'Every pane is already open'} aria-haspopup="menu"
+            aria-expanded={menu?.kind === 'add'} disabled={closedPanes.length === 0}
+            onClick={(event) => setMenu({ kind: 'add', anchor: anchorBelow(event.currentTarget), from: event.currentTarget })}>
+            <span className={styles.plus} aria-hidden="true">+</span>
+          </button>
           {presentation !== 'bottom-sheet' && splitItems.length > 0 ? (
             <button type="button" className={styles.iconButton} aria-label={split ? 'Split: change or undo' : 'Split the dock'}
               title={split ? 'Change the split' : 'Split: show a second pane below'} aria-haspopup="menu" aria-expanded={menu?.kind === 'split'}
@@ -232,7 +241,8 @@ export function Dock(props: DockProps) {
               <SplitGlyph size={14} />
             </button>
           ) : null}
-          <button type="button" className={styles.iconButton} aria-label="Close the dock" title="Close the dock (⌘\)" onClick={closeDock}>
+          <button type="button" className={styles.iconButton} aria-label="Close the dock"
+            title={`Close the dock${toggleChord ? ` (${toggleChord})` : ''}`} onClick={closeDock}>
             <CloseGlyph size={14} />
           </button>
         </div>
@@ -290,9 +300,10 @@ function DockPane({ pane, visible, sessionId, roots, turnFiles, onSendToChat, on
   if (pane === 'tasks') return <>{renderTasks(visible)}</>;
   if (pane === 'context') return <>{renderContext(visible)}</>;
   if (sessionId === null) {
+    const newChat = chordOf('chat.new');
     return (
       <EmptyState compact title={`Open a chat to use ${DOCK_PANE_LABEL[pane]}`}
-        body="It works on the chat's own folders." />
+        body={`Pick a chat in the sidebar${newChat ? ` or start one with ${newChat}` : ''}. ${DOCK_PANE_LABEL[pane]} works in that chat's folders.`} />
     );
   }
   switch (pane) {

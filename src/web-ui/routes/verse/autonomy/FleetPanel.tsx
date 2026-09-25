@@ -23,7 +23,7 @@
 import type { ReactNode } from 'react';
 import { Meter } from '../../../components/primitives/Meter.js';
 import { StatusBadge, type Tone } from '../../../components/primitives/StatusBadge.js';
-import { UNKNOWN, formatCount } from './format.js';
+import { UNKNOWN, formatCount, repoDisplayName, tidyProse } from './format.js';
 import type { FleetAgent, FleetSnapshot, OptionalFleetRead } from './fleet-contract.js';
 import {
   elapsedSince,
@@ -113,9 +113,9 @@ export function FleetPanel({ read, runtime, loading = false }: FleetPanelProps):
               max={utilisation.total}
               label="Slot utilisation"
               valueText={
-                utilisation.percent === null
+                utilisation.percentText === null
                   ? 'unknown'
-                  : `${utilisation.busy} / ${utilisation.total} · ${utilisation.percent}%`
+                  : `${utilisation.busy} / ${utilisation.total} · ${utilisation.percentText}`
               }
               tone={utilisation.saturated ? 'warning' : undefined}
             />
@@ -142,7 +142,7 @@ export function FleetPanel({ read, runtime, loading = false }: FleetPanelProps):
             <p className={styles.empty}>
               <span className={styles.emptyStrong}>Nothing in flight. </span>
               No agent is mid-turn. The fleet answered and reported an empty list — an idle fleet,
-              not a missing reading.
+              not a missing reading. Run one tick from Controls to put work in flight.
             </p>
           ) : (
             <div className={styles.tableScroll}>
@@ -173,7 +173,7 @@ export function FleetPanel({ read, runtime, loading = false }: FleetPanelProps):
             <ul className={styles.noteList}>
               {fleet.notes.map((n) => (
                 <li key={n} className={styles.capHelp}>
-                  {n}
+                  {tidyProse(n)}
                 </li>
               ))}
             </ul>
@@ -214,7 +214,10 @@ function AgentRow({
       <td className={styles.cellSummary}>
         {agent.task ?? <span className={styles.capHelp}>not reported</span>}
       </td>
-      <td className={styles.cellRepo}>{agent.repo ?? UNKNOWN}</td>
+      {/* The enrolled checkout's folder name; the full path is the tooltip. */}
+      <td className={styles.cellRepo} title={agent.repo ?? undefined}>
+        {agent.repo ? repoDisplayName(agent.repo) : UNKNOWN}
+      </td>
       <td className={styles.cellRepo}>{agent.model ?? agent.engine ?? UNKNOWN}</td>
       <td className={styles.cellTime}>
         {agent.slot === null ? (

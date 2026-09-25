@@ -17,6 +17,7 @@ import { ApiError } from '../../../../data/client.js';
 import type { PreviewOpenRequest, TerminalOpenRequest } from '../../shell/slots.js';
 import { mockCompactViewport, type ViewportMock } from '../../shell/viewport.test-support.js';
 import { formatBytes, parsePreviewAddress, shortUrl, type PreviewApi } from './preview-client.js';
+import chrome from '../pane-chrome.module.css';
 import { PreviewPane, resetPreviewPaneForTest, type PreviewPaneDeps } from './PreviewPane.js';
 
 const VERSE = 'http://127.0.0.1:7970';
@@ -106,10 +107,30 @@ describe('PreviewPane — launcher', () => {
     expect(within(servers).queryByText('null')).not.toBeInTheDocument();
   });
 
-  it('says what to do when there is nothing yet', async () => {
+  it('says what to do when there is nothing yet, and offers the terminal to do it in', async () => {
+    const user = userEvent.setup();
     const h = harness({ devServers: [], artifacts: [] });
-    renderPane(h);
+    const { onOpenTerminal } = renderPane(h);
     expect(await screen.findByText('Nothing to preview yet')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Open a terminal' }));
+    expect(onOpenTerminal).toHaveBeenCalledWith({ root: '~/code/app' });
+  });
+
+  it('an empty file list says how files get there', async () => {
+    const h = harness(targets({ artifacts: [] }));
+    renderPane(h);
+    const files = await screen.findByRole('region', { name: "This chat's files" });
+    expect(files).toHaveTextContent('Ask the chat for a report or a page: HTML, Markdown, SVG, images and PDFs it writes appear here.');
+  });
+
+  it('a listing failure is an error with a retry, not "nothing"', async () => {
+    const user = userEvent.setup();
+    const h = harness();
+    (h.api.targets as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new ApiError('boom', 500, '/x'));
+    renderPane(h);
+    expect(await screen.findByText('Could not list what to preview')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('region', { name: 'Dev servers' })).toBeInTheDocument();
   });
 
   it('does not fetch while hidden', async () => {
@@ -254,13 +275,16 @@ describe('PreviewPane — artifacts', () => {
     expect(await screen.findByRole('img', { name: 'shot.png' })).toHaveAttribute('src', expect.stringMatching(/^\/api\/verse\/preview\/frame\//));
   });
 
-  it('says so when a file is gone', async () => {
+  it('says so when a file is gone, and Try again loads it afresh', async () => {
     const user = userEvent.setup();
     const h = harness();
     (h.api.ticket as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new ApiError('gone', 404, '/x'));
     renderPane(h);
     await user.click(await screen.findByRole('button', { name: 'Open out/report.html' }));
     expect(await screen.findByText("This file is no longer in the chat's folder.")).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByTitle('Preview of out/report.html')).toBeInTheDocument();
+    expect(h.api.ticket).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -339,5 +363,51 @@ describe('address rules', () => {
     expect(formatBytes(300)).toBe('300 B');
     expect(formatBytes(12_400)).toBe('12 KB');
     expect(formatBytes(2_500_000)).toBe('2.4 MB');
+  });
+});
+
+describe('PreviewPane — UX contract (3.10.1 polish)', () => {
+  it('gives every icon-only control a name and a tooltip', async () => {
+    const user = userEvent.setup();
+    const h = harness();
+    renderPane(h);
+    await user.click(await screen.findByRole('button', { name: 'Open bun :8787' }));
+    await screen.findByTitle('Preview of localhost:8787');
+    // A notice, so its Dismiss is on screen too.
+    const bar = screen.getByRole('textbox', { name: 'Address' });
+    await user.clear(bar);
+    await user.type(bar, 'https://github.com/ashlrai{Enter}');
+    expect(screen.getByRole('button', { name: 'Dismiss' })).toHaveAttribute('title', 'Dismiss');
+    const iconOnly = screen.getAllByRole('button').filter((b) => !b.textContent?.trim());
+    expect(iconOnly.map((b) => b.getAttribute('aria-label'))).toEqual(expect.arrayContaining(['Back', 'Forward', 'Reload', 'New preview tab', 'Dismiss']));
+    for (const button of iconOnly) {
+      expect(button.getAttribute('aria-label'), button.outerHTML).toBeTruthy();
+      expect(button.getAttribute('title'), button.outerHTML).toBeTruthy();
+    }
+    expect(screen.getByRole('link', { name: 'Open in browser' })).toHaveAttribute('title', 'Open in browser');
+    // The toolbar is the shared dock header row, its trailing controls grouped on the right.
+    expect(screen.getByRole('search', { name: 'Preview address' }).parentElement).toHaveClass(chrome.header);
+    expect(screen.getByRole('link', { name: 'Open in browser' }).parentElement).toHaveClass(chrome.actions);
+  });
+
+  it('holds the "Open in browser" slot when there is no page, so the address bar does not jump', async () => {
+    const user = userEvent.setup();
+    const h = harness();
+    const { container } = renderPane(h);
+    await screen.findByRole('region', { name: 'Dev servers' });
+    // Launcher: no link, but its place is kept (hidden from assistive tech).
+    expect(screen.queryByRole('link', { name: 'Open in browser' })).toBeNull();
+    expect(container.querySelector('[data-placeholder="true"][aria-hidden="true"]')).not.toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Open bun :8787' }));
+    expect(await screen.findByRole('link', { name: 'Open in browser' })).toBeInTheDocument();
+    expect(container.querySelector('[data-placeholder="true"]')).toBeNull();
+  });
+
+  it('keeps truncating launcher text whole in a tooltip', async () => {
+    const h = harness();
+    renderPane(h);
+    const servers = await screen.findByRole('region', { name: 'Dev servers' });
+    expect(within(servers).getByText('npm run dev', { selector: '[title]' })).toHaveAttribute('title', 'npm run dev');
+    expect(within(servers).getByText(/localhost:5173 · stopped · package\.json/)).toHaveAttribute('title', 'localhost:5173 · stopped · package.json');
   });
 });

@@ -17,16 +17,30 @@
  *
  * `variant="list"` renders the same items as a plain radio list, for the 375px
  * sheet where a popover over a popover would be unusable.
+ *
+ * The button shows a SHORT value ("Accept edits", "Effort: High") and never
+ * ellipsizes it; the full value is its accessible name and its tooltip, with
+ * the shortcut. Where the footer is too narrow it folds to the icon alone
+ * (`iconOnly`) — the name and the tooltip still carry the words, and the
+ * tooltip shows on keyboard focus as well as hover (a native `title` never
+ * shows on focus, which left a sighted keyboard user with a bare glyph).
+ *
+ * Unmounted while open (the footer folded it into the ⋯ sheet, or the seat
+ * lost the control), it reports itself closed, so the owner's "a menu is
+ * open" state — which decides whether Esc stops the turn — never outlives it.
  */
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import type { VerseControlOption } from '../../../../core/verse/workbench-types.js';
+import { Tooltip, type TooltipPlacement } from '../../../components/primitives/Tooltip.js';
 import styles from './composer.module.css';
 
 export interface ControlMenuProps<T extends string> {
   /** Accessible name of the picker ("Permission mode"). */
   label: string;
-  /** What the button shows for the current value. */
+  /** What the button shows for the current value (short: "Accept edits", "Effort: High"). */
   valueLabel: string;
+  /** The full current value, for the accessible name and tooltip ("Bypass permissions"). Default: `valueLabel`. */
+  valueTitle?: string;
   options: readonly VerseControlOption<T>[];
   /** The checked option; null = none (e.g. effort at the CLI default). */
   value: T | null;
@@ -34,7 +48,7 @@ export interface ControlMenuProps<T extends string> {
   /** An extra first item that resets to the default (effort "Default"). */
   defaultOption?: { label: string; description?: string; onSelect: () => void } | null;
   disabled?: boolean;
-  /** Why the whole picker is disabled — shown as its title. */
+  /** Why the whole picker is disabled — shown as its tooltip. */
   disabledReason?: string | null;
   /** Shortcut hint shown in the menu header ("⇧⌘M"). */
   shortcut?: string;
@@ -49,23 +63,40 @@ export interface ControlMenuProps<T extends string> {
   variant?: 'menu' | 'list';
   /** Collapse the button to its icon (the compact footer). */
   iconOnly?: boolean;
+  /**
+   * Where the name bubble sits. Default 'left' (flipping right at the edge):
+   * BESIDE the button, never above it, because the menu opens upward and a
+   * bubble above would cover its last items (see the note at the button).
+   */
+  tooltipPlacement?: TooltipPlacement;
   onOpenChange?: (open: boolean) => void;
 }
 
 export function ControlMenu<T extends string>({
-  label, valueLabel, options, value, onChange, defaultOption = null, disabled = false, disabledReason = null,
-  shortcut, openRequest, icon, danger = false, note = null, variant = 'menu', iconOnly = false, onOpenChange,
+  label, valueLabel, valueTitle = valueLabel, options, value, onChange, defaultOption = null, disabled = false, disabledReason = null,
+  shortcut, openRequest, icon, danger = false, note = null, variant = 'menu', iconOnly = false, tooltipPlacement = 'left', onOpenChange,
 }: ControlMenuProps<T>) {
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   const menuId = useId();
   const seenRequest = useRef(openRequest);
+  // Read by the unmount cleanup, which must see the LAST open state and owner callback.
+  const openNow = useRef(open);
+  openNow.current = open;
+  const reportOpen = useRef(onOpenChange);
+  reportOpen.current = onOpenChange;
 
   const setOpenState = useCallback((next: boolean) => {
     setOpen(next);
     onOpenChange?.(next);
   }, [onOpenChange]);
+
+  // Unmounted while open (folded into the ⋯ sheet, or the control went away):
+  // the menu is gone, so say so — else the owner's Esc-to-stop stays disarmed.
+  useEffect(() => () => {
+    if (openNow.current) reportOpen.current?.(false);
+  }, []);
 
   const close = useCallback((refocus: boolean) => {
     setOpenState(false);
@@ -172,21 +203,31 @@ export function ControlMenu<T extends string>({
 
   return (
     <div ref={wrap} className={styles.controlWrap}>
-      <button ref={button} type="button" className={`${styles.control} ${danger ? styles.controlDanger : ''} ${iconOnly ? styles.controlIconOnly : ''}`}
-        aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined}
-        aria-label={`${label}: ${valueLabel}`} disabled={disabled}
-        title={disabled && disabledReason ? disabledReason : undefined}
-        onClick={() => setOpenState(!open)}
-        onKeyDown={(event) => {
-          if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !open) {
-            event.preventDefault();
-            setOpenState(true);
-          }
-        }}>
-        {icon ? <span className={styles.controlIcon} aria-hidden="true">{icon}</span> : null}
-        {iconOnly ? null : <span className={styles.controlText}>{valueLabel}</span>}
-        <span className={styles.caret} aria-hidden="true" />
-      </button>
+      {/* The Tooltip primitive, not a native title: a title shows on hover
+          only, and folded to its icon this button's words live nowhere else a
+          sighted keyboard user can see. The bubble sits BESIDE the button
+          (`tooltipPlacement`), never above it: WebKit does not focus a clicked
+          button, so a bubble opened by hover sees no blur when the menu opens,
+          and above the button it would cover the menu, which opens upward.
+          The wrapper is permanent (only its label changes), so folding never
+          remounts the button under focus. */}
+      <Tooltip label={disabled && disabledReason ? disabledReason : `${label}: ${valueTitle}`}
+        shortcut={disabled ? undefined : shortcut} placement={tooltipPlacement}>
+        <button ref={button} type="button" className={`${styles.control} ${danger ? styles.controlDanger : ''} ${iconOnly ? styles.controlIconOnly : ''}`}
+          aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined}
+          aria-label={`${label}: ${valueTitle}`} disabled={disabled}
+          onClick={() => setOpenState(!open)}
+          onKeyDown={(event) => {
+            if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !open) {
+              event.preventDefault();
+              setOpenState(true);
+            }
+          }}>
+          {icon ? <span className={styles.controlIcon} aria-hidden="true">{icon}</span> : null}
+          {iconOnly ? null : <span className={styles.controlText}>{valueLabel}</span>}
+          <span className={styles.caret} aria-hidden="true" />
+        </button>
+      </Tooltip>
       {open ? (
         <div id={menuId} role="menu" aria-label={label} className={styles.menu} onKeyDown={onMenuKey}>
           <p className={styles.menuHeading}>

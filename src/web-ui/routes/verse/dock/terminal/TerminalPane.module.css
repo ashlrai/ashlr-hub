@@ -221,29 +221,10 @@
 }
 
 /* ---- header --------------------------------------------------------------- */
+/* Height, padding, border and surface come from ../pane-chrome.module.css
+   (the row every dock pane shares); only what is terminal-specific is here. */
 
-.header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex: none;
-  min-height: var(--control-h-sm);
-  padding: 0 var(--space-2) 0 var(--space-3);
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-surface);
-}
-
-.cwd {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs-size);
-  line-height: var(--text-xs-line);
-  color: var(--text-secondary);
-}
+.cwd { font-family: var(--font-mono); }
 
 .headerStatus {
   flex: none;
@@ -251,13 +232,6 @@
   color: var(--text-tertiary);
 }
 .headerStatus:empty { display: none; }
-
-.headerActions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  flex: none;
-}
 
 /* ---- notices -------------------------------------------------------------- */
 

@@ -12,7 +12,9 @@
  *    ("exhausted").
  *  - The verdict is always a WORD (Eligible / Held back / Off / No reading);
  *    colour only reinforces it.
- *  - The "why" line is the server's own sentence, verbatim.
+ *  - The "why" line is the server's own sentence, verbatim — except that an
+ *    ISO instant inside it ("resets 2026-09-26T03:46:56.000Z") is shown in
+ *    local time, and ".;" joins read as ";" (autonomy/format `tidyProse`).
  */
 import {
   MODE_DESCRIPTIONS,
@@ -20,6 +22,7 @@ import {
   type BudgetView,
 } from '../../../../core/routing/policy.js';
 import type { BudgetMode, SeatBudgetPolicy, SeatHeadroom } from '../../../../core/routing/types.js';
+import { percentText, tidyProse } from '../autonomy/format.js';
 
 export type BudgetSeatStatus = 'eligible' | 'held' | 'off' | 'unknown';
 
@@ -52,9 +55,9 @@ export interface BudgetSeatRow {
   policy: SeatBudgetPolicy;
   headroom: SeatHeadroom | null;
   status: BudgetSeatStatus;
-  /** First server reason, verbatim. */
+  /** First server reason, verbatim (instants in local time). */
   why: string;
-  /** Remaining server reasons, verbatim. */
+  /** Remaining server reasons, verbatim (instants in local time). */
   more: string[];
   bars: BudgetBar[];
   /** Whether the 5-hour ceiling control applies (subscription seats with a short window). */
@@ -108,7 +111,7 @@ function barsFor(engine: BudgetEngine, free: boolean, policy: SeatBudgetPolicy, 
       binding: h.bindingWindow === 'weekly',
       description: used === null
         ? 'Weekly window: no reading.'
-        : `Weekly window ${round(used)}% used; autonomy stops at ${round(reserveCeiling)}%, ${round(policy.reservePercent)}% kept for you.`,
+        : `Weekly window ${percentText(used)} used; autonomy stops at ${round(reserveCeiling)}%, ${round(policy.reservePercent)}% kept for you.`,
     });
   }
   if (h.sessionUsedPercent !== null || engine === 'claude') {
@@ -123,19 +126,19 @@ function barsFor(engine: BudgetEngine, free: boolean, policy: SeatBudgetPolicy, 
       binding: h.bindingWindow === 'session',
       description: used === null
         ? '5-hour window: no reading.'
-        : `5-hour window ${round(used)}% used; ${ceiling >= 100 ? 'no autonomy ceiling' : `autonomy stops at ${round(ceiling)}%`}.`,
+        : `5-hour window ${percentText(used)} used; ${ceiling >= 100 ? 'no autonomy ceiling' : `autonomy stops at ${round(ceiling)}%`}.`,
     });
   }
   return bars;
 }
 
 /** Rows in the server's seat order (which lists the operator's preferred local tags first). */
-export function buildBudgetRows(view: BudgetView): BudgetSeatRow[] {
+export function buildBudgetRows(view: BudgetView, nowMs: number = Date.now()): BudgetSeatRow[] {
   const headroomById = new Map(view.headroom.map((h) => [h.seatId, h]));
   return view.seatInfo.map((info) => {
     const policy = view.effective[info.seatId] ?? { seatId: info.seatId, enabled: false, reservePercent: 100 };
     const headroom = headroomById.get(info.seatId) ?? null;
-    const reasons = headroom?.reasons ?? [];
+    const reasons = (headroom?.reasons ?? []).map((r) => tidyProse(r, nowMs).trim()).filter((r) => r.length > 0);
     return {
       seatId: info.seatId,
       label: info.label,

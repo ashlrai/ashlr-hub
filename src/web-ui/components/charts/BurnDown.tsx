@@ -8,16 +8,33 @@
  * The verdict is written in words under the plot — "At this pace: reserve
  * reached 14:20, 3h 40m before reset" — so the chart's point never depends on
  * reading slopes. With fewer than two readings it says it cannot project,
- * rather than drawing a guess.
+ * rather than drawing a guess — and with no plausible reset (0 / NaN /
+ * pre-2000) it draws neither pace nor projection and says the reset is
+ * unknown, rather than projecting to an invented one.
  */
 import { useRef } from 'react';
 import { CHART_SEQUENTIAL, toneColor } from './colors.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
 import { ChartLegend } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
-import { areaPath, linePath, linearScale, niceTicks, projectBurnDown, splitRuns, type BurnPoint } from './chart-math.js';
-import { formatCompact } from './format.js';
+import {
+  MIN_TIME_SPAN_MS,
+  areaPath,
+  axisTicks,
+  ensureSpan,
+  isPlausibleTime,
+  labelCharPx,
+  layoutAxisLabels,
+  linePath,
+  linearScale,
+  projectBurnDown,
+  splitRuns,
+  tickGutter,
+  type BurnPoint,
+} from './chart-math.js';
+import { formatCompact, timeLabelLadder } from './format.js';
 import { useChartWidth } from './useChartWidth.js';
+import { useTextScale } from './useTextScale.js';
 import plot from './plot.module.css';
 
 export interface BurnDownProps {
@@ -58,31 +75,41 @@ export function formatLead(ms: number): string {
   return `${Math.round(h / 24)}d`;
 }
 
+/**
+ * The verdict in words. `resetAt` null (or non-finite) is an UNKNOWN reset:
+ * what the window has already crossed is still said, but nothing is
+ * projected — "about 40% left at reset" needs a reset (V3.10.1 review: an
+ * epoch-0 reset printed a green verdict for a seat burning 10%/h, and a NaN
+ * one printed "about NaN% left at reset").
+ */
 export function burnVerdict(
   projection: ReturnType<typeof projectBurnDown>,
-  resetAt: number,
+  resetAt: number | null,
   formatValue: (v: number) => string,
   formatTime: (ms: number) => string,
   reserveLabel?: string,
 ): { text: string; severity: 'ok' | 'warn' | 'danger' | 'unknown' } {
+  const reset = resetAt !== null && Number.isFinite(resetAt) ? resetAt : null;
   // Already past a line: say where it IS, not a "projection" to a moment
   // that has passed (a used-up seat is not "running out at 3:02").
   if (projection.from && projection.from.remaining <= 0) {
-    return { text: `Used up — resets ${formatTime(resetAt)}.`, severity: 'danger' };
+    return { text: reset === null ? 'Used up — reset time unknown.' : `Used up — resets ${formatTime(reset)}.`, severity: 'danger' };
   }
   if (projection.from && reserveLabel !== undefined && projection.reserveAt !== null && projection.reserveAt <= projection.from.t) {
-    return { text: `Inside ${reserveLabel.toLowerCase()} — autonomy has stopped using this window until ${formatTime(resetAt)}.`, severity: 'warn' };
+    const until = reset === null ? 'until it resets (reset time unknown)' : `until ${formatTime(reset)}`;
+    return { text: `Inside ${reserveLabel.toLowerCase()} — autonomy has stopped using this window ${until}.`, severity: 'warn' };
   }
+  if (reset === null) return { text: 'Reset time unknown — not projecting this window.', severity: 'unknown' };
   if (projection.slopePerMs === null) return { text: 'Not enough readings to project this window yet.', severity: 'unknown' };
   if (projection.exhaustAt !== null) {
     return {
-      text: `At this pace: runs out ${formatTime(projection.exhaustAt)}, ${formatLead(resetAt - projection.exhaustAt)} before reset.`,
+      text: `At this pace: runs out ${formatTime(projection.exhaustAt)}, ${formatLead(reset - projection.exhaustAt)} before reset.`,
       severity: 'danger',
     };
   }
   if (projection.reserveAt !== null) {
     return {
-      text: `At this pace: ${reserveLabel ?? 'reserve'} reached ${formatTime(projection.reserveAt)}, ${formatLead(resetAt - projection.reserveAt)} before reset.`,
+      text: `At this pace: ${reserveLabel ?? 'reserve'} reached ${formatTime(projection.reserveAt)}, ${formatLead(reset - projection.reserveAt)} before reset.`,
       severity: 'warn',
     };
   }
@@ -105,35 +132,79 @@ export function BurnDown({
   reserve,
   height = 200,
   width: fixedWidth,
-  formatValue = formatCompact,
-  formatTime = defaultFormatTime,
+  formatValue: formatValueProp,
+  formatTime: formatTimeProp,
   ariaLabel,
 }: BurnDownProps) {
+  const formatValue = formatValueProp ?? formatCompact;
+  const formatTime = formatTimeProp ?? defaultFormatTime;
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
-  const sorted = [...points].sort((a, b) => a.t - b.t);
+  const textScale = useTextScale();
+  // A reading stamped 0 / NaN / pre-2000 is a null timestamp that leaked
+  // through: it is not on this window's time axis, and it would drag both
+  // the axis and the projection's slope back to 1970.
+  const sorted = points.filter((p) => isPlausibleTime(p.t)).sort((a, b) => a.t - b.t);
   const anyKnown = sorted.some((p) => p.remaining !== null);
   const resolvedStatus: ChartStatus = status ?? (sorted.length === 0 ? { kind: 'empty', message: 'No readings in this window yet.' } : anyKnown ? { kind: 'ready' } : { kind: 'unknown' });
 
-  const projection = projectBurnDown(sorted, resetAt, { reserve: reserve?.value ?? null });
-  const verdict = burnVerdict(projection, resetAt, formatValue, formatTime, reserve?.label);
+  // A reset of 0 / NaN / pre-2000 is a null that leaked through (an epoch-0
+  // machine reset parses as a finite 0). It is UNKNOWN, not a moment: the
+  // axis ends at the latest reading or now with no "Resets" on it, no even
+  // pace or projection is drawn toward it, and the verdict says the reset is
+  // unknown instead of inventing one (V3.10.1 review).
+  const resetKnown = isPlausibleTime(resetAt);
+  const reset = resetKnown ? resetAt : null;
+  const projection = projectBurnDown(sorted, reset, { reserve: reserve?.value ?? null });
+  const verdict = burnVerdict(projection, reset, formatValue, formatTime, reserve?.label);
 
-  const ticks = niceTicks(0, Math.max(capacity, 1), 4);
+  // Always 0 → capacity (100 for percent seats), so sibling cards share one
+  // scale; widened only if a reading overshoots, never clipped.
+  const known = sorted.flatMap((p) => (p.remaining !== null && Number.isFinite(p.remaining) ? [p.remaining] : []));
+  const yAxis = axisTicks(0, Math.max(capacity, ...known, 1), {
+    count: 4,
+    integer: Number.isInteger(capacity) && known.every((v) => Number.isInteger(v)),
+    format: formatValueProp,
+  });
+  const ticks = yAxis.ticks;
   const top = ticks[ticks.length - 1]!;
-  const padL = Math.min(56, Math.max(28, Math.max(...ticks.map((t) => formatValue(t).length)) * 7 + 10));
+  const padL = tickGutter(yAxis.labels, 28, 56, textScale);
   const plotW = Math.max(40, width - padL - PAD_R);
   const plotH = height - PAD_T - PAD_B;
-  const xEnd = Math.max(resetAt, start + 1);
-  const xs = linearScale(start, xEnd, padL, padL + plotW);
+  // The window runs start → reset. An implausible bound (0 / NaN) falls back
+  // to the readings; a degenerate one widens to MIN_TIME_SPAN_MS, keeping the
+  // right edge where it is.
+  const lastT = sorted.length ? sorted[sorted.length - 1]!.t : now;
+  const rawEnd = reset ?? Math.max(now, lastT);
+  const rawStart = isPlausibleTime(start) ? start : sorted[0]?.t ?? rawEnd;
+  const [x0, xEnd] = ensureSpan(rawStart, rawEnd, MIN_TIME_SPAN_MS, 'end');
+  const xs = linearScale(x0, xEnd, padL, padL + plotW);
   const ys = linearScale(0, top, PAD_T + plotH, PAD_T);
-  const clampX = (t: number) => Math.min(xEnd, Math.max(start, t));
+  const clampX = (t: number) => Math.min(xEnd, Math.max(x0, t));
+
+  // x labels: the reset marker outranks the window start. Both walk the same
+  // detail ladder (the caller's format → "Fri 11:46 PM" → "Sep 18"; clock
+  // time only inside one day) until they fit side by side; if even the
+  // shortest pair collides, the start is dropped rather than overprinted.
+  // Widths are budgeted at the operator's Display size. With no known reset
+  // the right edge is only the latest reading / now, and says just its time.
+  const ladder = timeLabelLadder(x0, xEnd, formatTimeProp ?? defaultFormatTime, [x0, xEnd]);
+  const xLabels = layoutAxisLabels(
+    [
+      { key: 'start', x: padL, anchor: 'start', priority: 2, variants: ladder.map((f) => f(x0)) },
+      resetKnown
+        ? { key: 'reset', x: padL + plotW, anchor: 'end', priority: 3, variants: ladder.map((f) => `Resets ${f(xEnd)}`) }
+        : { key: 'end', x: padL + plotW, anchor: 'end', priority: 3, variants: ladder.map((f) => f(xEnd)) },
+    ],
+    { min: padL, max: padL + plotW, charPx: labelCharPx(textScale) },
+  );
 
   const runs = splitRuns(sorted.map((p) => ({ x: clampX(p.t), y: p.remaining })))
     .map((run) => run.map((p) => ({ x: xs(p.x), y: ys(Math.max(0, p.y)) })));
 
   let projectionPath = '';
-  if (projection.from && projection.slopePerMs !== null) {
-    const endT = projection.exhaustAt ?? resetAt;
+  if (reset !== null && projection.from && projection.slopePerMs !== null) {
+    const endT = projection.exhaustAt ?? reset;
     const endR = projection.exhaustAt !== null ? 0 : projection.remainingAtReset ?? projection.from.remaining;
     if (endT > projection.from.t) {
       projectionPath = linePath([
@@ -144,7 +215,7 @@ export function BurnDown({
   }
   const projectionColor = verdict.severity === 'danger' ? toneColor('danger') : verdict.severity === 'warn' ? toneColor('warning') : 'var(--text-tertiary)';
 
-  const summary = ariaLabel ?? `${title}: ${projection.from ? `${formatValue(projection.from.remaining)} of ${formatValue(capacity)} left at ${formatTime(projection.from.t)}` : 'no readings'}; resets ${formatTime(resetAt)}. ${verdict.text}`;
+  const summary = ariaLabel ?? `${title}: ${projection.from ? `${formatValue(projection.from.remaining)} of ${formatValue(capacity)} left at ${formatTime(projection.from.t)}` : 'no readings'}; ${reset === null ? 'reset time unknown' : `resets ${formatTime(reset)}`}. ${verdict.text}`;
 
   const columns: TableColumn<BurnPoint>[] = [
     { key: 't', label: 'When', render: (p) => formatTime(p.t) },
@@ -153,7 +224,9 @@ export function BurnDown({
 
   const legendItems = [
     { label: 'Remaining', color: CHART_SEQUENTIAL, kind: 'line' as const },
-    { label: 'Even pace', color: 'var(--text-tertiary)', kind: 'line' as const },
+    // Even pace runs from full at the window's start to empty AT RESET: with
+    // no reset there is no pace to draw.
+    ...(resetKnown ? [{ label: 'Even pace', color: 'var(--text-tertiary)', kind: 'line' as const }] : []),
     ...(projectionPath ? [{ label: 'Projection', color: projectionColor, kind: 'line' as const }] : []),
   ];
 
@@ -173,17 +246,20 @@ export function BurnDown({
     >
       <div ref={wrapRef} className={plot.plotWrap}>
         <svg className={plot.svg} width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={summary}>
-          {ticks.map((t) => (
+          {ticks.map((t, i) => (
             <g key={t}>
               <line className={plot.grid} x1={padL} x2={padL + plotW} y1={ys(t)} y2={ys(t)} />
-              <text className={plot.tick} x={padL - 6} y={ys(t)} dy="0.32em" textAnchor="end">{formatValue(t)}</text>
+              <text className={plot.tick} x={padL - 6} y={ys(t)} dy="0.32em" textAnchor="end">{yAxis.labels[i]}</text>
             </g>
           ))}
           <line className={plot.axis} x1={padL} x2={padL + plotW} y1={ys(0)} y2={ys(0)} />
-          <text className={plot.tick} x={padL} y={height - 8} textAnchor="start">{formatTime(start)}</text>
-          <text className={plot.tick} x={padL + plotW} y={height - 8} textAnchor="end">Resets {formatTime(resetAt)}</text>
+          {xLabels.map((l) => (
+            <text key={l.key} data-axis-label={l.key} className={plot.tick} x={l.x} y={height - 8} textAnchor={l.anchor}>{l.text}</text>
+          ))}
 
-          <path data-role="pace" className={plot.reference} d={linePath([{ x: xs(start), y: ys(capacity) }, { x: xs(xEnd), y: ys(0) }])} />
+          {resetKnown ? (
+            <path data-role="pace" className={plot.reference} d={linePath([{ x: xs(x0), y: ys(capacity) }, { x: xs(xEnd), y: ys(0) }])} />
+          ) : null}
           {reserve ? (
             <g data-role="reserve">
               <line className={plot.reference} x1={padL} x2={padL + plotW} y1={ys(reserve.value)} y2={ys(reserve.value)} />
@@ -196,7 +272,7 @@ export function BurnDown({
               </text>
             </g>
           ) : null}
-          {now > start && now < xEnd ? (
+          {now > x0 && now < xEnd ? (
             <line className={plot.crosshair} x1={xs(now)} x2={xs(now)} y1={PAD_T} y2={PAD_T + plotH} />
           ) : null}
           {runs.map((run, i) => (

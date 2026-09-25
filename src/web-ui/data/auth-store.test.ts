@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getQuerySnapshot, runQuery, evictAll } from './cache.js';
+import { ensureQuery, getQuerySnapshot, runQuery, evictAll, subscribeQuery } from './cache.js';
 import {
   adoptInjectedTokens,
   clearReadSession,
@@ -72,6 +72,42 @@ describe('auth-store read-session renewal', () => {
     // Nothing is ever written to storage.
     expect(Object.values(sessionStorage)).not.toContain(READ);
     expect(Object.values(localStorage)).not.toContain(READ);
+  });
+
+  it('re-reads what is on screen after a renewal — not entries nobody observes (a warmed, never-opened surface)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 204 })));
+    await establishReadSession(READ);
+    const onScreen = vi.fn(async () => ({ chat: 'sessions' }));
+    const warmedOnly = vi.fn(async () => ({ fleet: 'history' }));
+    let lapsedFails = true;
+    const lapsed = vi.fn(async () => {
+      if (lapsedFails) throw new Error('HTTP 401');
+      return { models: '30d' };
+    });
+    await runQuery('chat:sessions', onScreen);
+    const unsubscribe = subscribeQuery('chat:sessions', () => undefined);
+    // The idle warm-up's reads: cached, fetcher registered, nobody subscribed.
+    await ensureQuery('command:fleet-history', warmedOnly, 60_000);
+    await ensureQuery('growth:models', lapsed, 60_000); // 401ed while the ticket was lapsed
+    expect(getQuerySnapshot('growth:models').status).toBe('error');
+    for (const fn of [onScreen, warmedOnly, lapsed]) fn.mockClear();
+
+    reportSessionExpired();
+    await renewReadSession();
+
+    expect(onScreen).toHaveBeenCalledTimes(1);
+    expect(warmedOnly).not.toHaveBeenCalled();
+    expect(lapsed).not.toHaveBeenCalled();
+    // Left exactly as it was: the next mount decides. Fresh data is served as-is…
+    expect(getQuerySnapshot('command:fleet-history').data).toEqual({ fleet: 'history' });
+    await ensureQuery('command:fleet-history', warmedOnly, 60_000);
+    expect(warmedOnly).not.toHaveBeenCalled();
+    // …and a read that failed during the lapse is re-read the moment its surface mounts.
+    lapsedFails = false;
+    await ensureQuery('growth:models', lapsed, 60_000);
+    expect(lapsed).toHaveBeenCalledTimes(1);
+    expect(getQuerySnapshot('growth:models').data).toEqual({ models: '30d' });
+    unsubscribe();
   });
 
   it('shows the gate only when renewal is rejected (server restarted with new tokens)', async () => {

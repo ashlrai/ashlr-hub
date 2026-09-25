@@ -70,3 +70,47 @@ describe('StepBand', () => {
     expect(screen.getByRole('note')).toHaveTextContent('no version has a measured value yet');
   });
 });
+
+describe('StepBand V3.10.1', () => {
+  const tickTexts = (root: ParentNode) =>
+    [...root.querySelectorAll('svg[role="img"] text')].filter((t) => t.getAttribute('text-anchor') === 'end' && !t.hasAttribute('data-axis-label')).map((t) => t.textContent);
+
+  it('labels an all-zero lift axis 0 / +1, never +1.0 / +0.8 / +0.5 / +0.3', () => {
+    const { container } = render(
+      <StepBand title="Harness level" width={720} now={T0 + 2 * D} steps={[{ id: 'b', at: T0, value: 0, low: 0, high: 0, label: 'Compiled defaults' }]} />,
+    );
+    expect(tickTexts(container)).toEqual(['0', '+1']);
+  });
+
+  it('prints fractional lifts at the step precision with a sign', () => {
+    const { container } = render(
+      <StepBand title="Harness level" width={720} now={T0 + 2 * D} steps={[{ id: 'b', at: T0, value: 0.4, low: 0.1, high: 0.9, label: 'h-1' }]} />,
+    );
+    expect(tickTexts(container)).toEqual(['0', '+0.2', '+0.4', '+0.6', '+0.8', '+1.0']);
+  });
+
+  it('keeps an epoch-0 baseline off the axis: no "Dec 31", and "—" in the table', () => {
+    const { container } = render(
+      <StepBand
+        title="Harness level"
+        width={720}
+        now={T0 + 12 * D}
+        formatTime={(ms) => new Date(ms).toISOString().slice(0, 10)}
+        steps={[{ id: 'b', at: 0, value: 0, label: 'Compiled defaults' }, { ...steps[1]!, at: T0 + 3 * D }]}
+        markers={[{ id: 'm0', at: 0, kind: 'rollback', label: 'bogus' }]}
+      />,
+    );
+    const labels = [...container.querySelectorAll('[data-axis-label]')].map((t) => t.textContent);
+    expect(labels).toEqual(['2026-09-04', '2026-09-13']);
+    expect(container.querySelector('[data-marker]')).toBeNull();
+    showTable();
+    expect(screen.getAllByRole('cell', { name: '—' }).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('cell', { name: '1970-01-01' })).toBeNull();
+  });
+
+  it('widens a degenerate span so the ends are two different labels', () => {
+    const { container } = render(<StepBand title="H" width={720} now={T0} steps={[{ id: 'a', at: T0, value: 1, label: 'h-1' }]} />);
+    const labels = [...container.querySelectorAll('[data-axis-label]')].map((t) => t.textContent);
+    expect(new Set(labels).size).toBe(labels.length);
+  });
+});

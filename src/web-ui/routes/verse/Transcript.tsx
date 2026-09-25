@@ -1,12 +1,15 @@
 /**
  * routes/verse/Transcript.tsx — the conversation, in one 720px measure.
  *
- * No bubbles (DESIGN §5): the user turn is indented behind a 2px left rule
- * in secondary text, the assistant turn is plain primary text at full
- * measure. Role is weight and rule, never a coloured box.
+ * 3.10.1: the user turn is a quiet rounded block on the right (the hover
+ * ground, primary text), the assistant turn plain primary text at full
+ * measure — role by placement and shape, never by colour alone. A turn ends
+ * in a muted footer (how long it took, the jump to its first failure) instead
+ * of a lone duration line between turns, and every path a tool touched reads
+ * relative to the chat's roots (chat/path-display.ts).
  *
  * Runs of tool calls fold (verse-store groupTranscriptItems) into one
- * activity row — "Ran 12 commands, read 8, edited 3; 1 failed · 2m 14s"
+ * activity row — "Ran 12 commands · read 8 files · edited 3 files · 1 failed · 2m 14s"
  * (chat/ActivityGroup) — that opens on its failed and running calls by
  * itself, so an agentic turn reads as a summary line between two pieces of
  * prose instead of a wall of cards.
@@ -49,11 +52,12 @@
  * Follows the newest message unless the operator scrolled up, in which case
  * a "Jump to latest" control appears.
  */
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { VerseEngine, VerseSession } from '../../data/api-types.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
 import { ActivityGroupView, revealAnchorInGroups } from './chat/ActivityGroup.js';
 import { ChapterRail } from './chat/ChapterRail.js';
+import { PathRootsContext } from './chat/path-display.js';
 import { buildChapters, chaptersSignature } from './chat/chapter-model.js';
 import { FileActivity } from './chat/FileActivity.js';
 import { useReasoningDisplay, type ReasoningDisplay } from './chat/reasoning-pref.js';
@@ -94,6 +98,13 @@ export interface TranscriptProps {
   onOpenSession?: (sessionId: string) => void;
   /** V3.10: transient signals of the running turn (the streaming reasoning block). */
   live?: VerseLiveState | null;
+  /**
+   * 3.10.1: the chat's roots, primary first. Tool paths under one of them are
+   * drawn relative to it (the full path stays in the tooltip). Absent → the
+   * roots already in context (Workspace provides them). Keep the array
+   * identity stable — every card showing a path re-renders when it changes.
+   */
+  projectRoots?: readonly string[];
 }
 
 type CompactionItem = Extract<TranscriptItem, { kind: 'compaction' }>;
@@ -168,8 +179,10 @@ function deriveSegment(segment: TranscriptSegment, cache: TurnCache): SegmentMod
   return { turns: model.turns, facts: model.facts, errorAnchors: model.errorAnchors, explained: explainedKeys(segment.items) };
 }
 
-export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, engine, handoffFrom = null, onOpenSession, live = null }: TranscriptProps) {
+export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, engine, handoffFrom = null, onOpenSession, live = null,
+  projectRoots }: TranscriptProps) {
   const reasoning = useReasoningDisplay();
+  const inheritedRoots = useContext(PathRootsContext);
   const scroller = useRef<HTMLDivElement>(null);
   const turnNodes = useRef(new Map<string, HTMLElement>());
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -420,7 +433,7 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
     return (
       <div className={styles.transcript}>
         <div role="alert" className={styles.loadError}>
-          <p>{loadError}</p>
+          <p><span className={styles.noteLead}>Couldn’t load this chat.</span> {loadError}</p>
           {onRetry ? <button type="button" onClick={onRetry}>Retry</button> : null}
         </div>
       </div>
@@ -430,6 +443,7 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
   const activeMatchKey = matchIndex >= 0 ? matches[matchIndex]?.turnKey ?? null : null;
 
   return (
+    <PathRootsContext.Provider value={projectRoots ?? inheritedRoots}>
     <div className={styles.transcriptWrap}>
       {turns.length >= NAV_MIN_TURNS ? (
         <TranscriptNav turns={turns} query={query} onQuery={setQuery} matches={matches} matchIndex={matchIndex}
@@ -489,6 +503,7 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
         </button>
       ) : null}
     </div>
+    </PathRootsContext.Provider>
   );
 }
 
@@ -517,6 +532,10 @@ interface TurnViewProps {
  */
 const TurnView = memo(function TurnView({ turn, index, facts, explained, engine, match, reasoning, onJumpTool, onJumpAnchor, registerNode }: TurnViewProps) {
   const running = turn.status === 'running';
+  // How long a settled turn took (turn-model: from its turn-done; unknown →
+  // null, never 0). The turn's footer, not a line of its own between turns.
+  const tookMs = running ? null : turn.durationMs;
+  const errorJump = turn.errorCount > 0 && turn.firstErrorAnchor ? turn.firstErrorAnchor : null;
   return (
     <li
       id={turnAnchorId(turn.key)}
@@ -534,11 +553,17 @@ const TurnView = memo(function TurnView({ turn, index, facts, explained, engine,
         {turn.items.map((item) => renderItem(item, facts, explained, reasoning, engine))}
       </ol>
       {turn.files.length > 0 ? <FileActivity files={turn.files} onJump={onJumpTool} /> : null}
-      {turn.errorCount > 0 && turn.firstErrorAnchor ? (
-        <button type="button" className={styles.turnErrorJump}
-          onClick={() => onJumpAnchor(turn.firstErrorAnchor!)}>
-          {turn.errorCount} failure{turn.errorCount === 1 ? '' : 's'} in this turn — jump to the first
-        </button>
+      {tookMs !== null || errorJump ? (
+        <footer className={styles.turnFoot} data-kind="turn-meta">
+          {tookMs !== null ? (
+            <span><span className="visually-hidden">Turn took </span><span>{formatDuration(tookMs)}</span></span>
+          ) : null}
+          {errorJump ? (
+            <button type="button" className={styles.turnErrorJump} onClick={() => onJumpAnchor(errorJump)}>
+              {turn.errorCount} failure{turn.errorCount === 1 ? '' : 's'} in this turn — jump to the first
+            </button>
+          ) : null}
+        </footer>
       ) : null}
     </li>
   );
@@ -597,7 +622,8 @@ function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, e
       return (
         <li key={item.key} className={styles.item} data-kind="error" data-code={item.code ?? undefined}>
           <div id={noteAnchorId(item.key)} role="alert" className={`${styles.note} ${styles.noteError}`}>
-            {item.message}
+            {/* The state in words — unless the CLI's own message already opens with it. */}
+            {/^error\b/i.test(item.message) ? null : <><span className={styles.noteLead}>Error</span>{' '}</>}{item.message}
             {hint ? <span className={styles.noteHint}>{hint}</span> : null}
           </div>
         </li>
@@ -643,16 +669,14 @@ function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, e
         </li>
       );
     case 'turn-done':
-      if (item.ok || explained.has(item.key)) {
-        return item.durationMs > 0 ? (
-          <li key={item.key} className={`${styles.item} ${styles.meta}`} data-kind="turn-done">
-            <span className={styles.metaText}>{formatDuration(item.durationMs)}</span>
-          </li>
-        ) : null;
-      }
+      // A clean (or already-explained) end is not a line of its own, and how
+      // long ANY turn took is its footer (TurnView), never this item.
+      if (item.ok || explained.has(item.key)) return null;
       return (
         <li key={item.key} className={styles.item} data-kind="turn-done">
-          <div id={noteAnchorId(item.key)} className={`${styles.note} ${styles.noteError}`}>Turn ended without a result (<span className={styles.noteDuration}>{formatDuration(item.durationMs)}</span>).</div>
+          <div id={noteAnchorId(item.key)} className={`${styles.note} ${styles.noteError}`}>
+            <span className={styles.noteLead}>Failed</span> Turn ended without a result.
+          </div>
         </li>
       );
     default:
@@ -698,8 +722,8 @@ function renderMember(member: ToolGroupMember, facts: Map<string, ToolFacts>, re
 }
 
 /**
- * The folded run (3.10: chat/ActivityGroup — "Ran 12 commands, read 8,
- * edited 3; 1 failed"). Re-rendered only when a member's visible facts
+ * The folded run (3.10: chat/ActivityGroup — "Ran 12 commands · read 8 files ·
+ * edited 3 files · 1 failed"). Re-rendered only when a member's visible facts
  * changed: the live turn rebuilds its item objects on every token, and
  * `sameMembers` compares what the row shows rather than object identity.
  */

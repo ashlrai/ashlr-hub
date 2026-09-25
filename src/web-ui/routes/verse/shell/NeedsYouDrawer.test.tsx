@@ -15,7 +15,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from '../../../components/primitives/Toast.js';
 import { clearMutationToken, markCheckComplete, setMutationToken } from '../../../data/auth-store.js';
 import { evictAll } from '../../../data/cache.js';
-import { MockEventSource } from '../fixtures.test-support.js';
+import { bootstrap, MockEventSource } from '../fixtures.test-support.js';
+import { CLAUDE_CONTEXT_SEAT } from '../seat-fixtures.test-support.js';
 import { useVerseUi } from '../useVerseUi.js';
 import { getVerseUiState, openVerseNeedsYou, resetVerseUi } from '../verse-ui-store.js';
 import { GuardHost, resetGuard } from './guarded-action.js';
@@ -93,6 +94,31 @@ describe('NeedsYouDrawer', () => {
     expect(selected()).toContain('fix the flaky snapshot');
   });
 
+  it('reads a sandboxed-run approval in words, keeping the server text for tooltips', async () => {
+    const rawTitle = 'patch: claude run: Advance goal "Add a circuit breaker to binshield\'s worker scan pipeline so a deg';
+    const since = new Date(Date.now() - 38 * 86_400_000).toISOString();
+    setup(activity({
+      needsYou: [approvalNeed('p-live', {
+        title: rawTitle,
+        detail: 'TITRR claude:claude-fable-5 run produced 2 file(s) (+384/-0). Review before applying.',
+        since,
+      })],
+    }));
+    await openDrawer();
+    const row = within(await screen.findByRole('listbox')).getByRole('option');
+    expect(within(row).getByText('Patch · Claude run')).toBeInTheDocument();
+    const title = within(row).getByText('Advance goal "Add a circuit breaker to binshield\'s worker scan pipeline so a…"');
+    expect(title).toHaveAttribute('title', rawTitle);
+    expect(within(row).getByText('2 files · +384 −0')).toBeInTheDocument();
+    expect(within(row).getByText('2 files changed, 384 lines added, 0 removed')).toHaveClass('visually-hidden');
+    expect(within(row).getByText('Test-and-repair loop')).toHaveAttribute('title', expect.stringMatching(/^TITRR — Test, Iterate/));
+    expect(within(row).getByText('binshield')).toBeInTheDocument();
+    const age = within(row).getByText('38 days ago');
+    expect(age.getAttribute('title')).toBeTruthy();
+    // None of the wire shorthand reaches the page as text.
+    expect(row.textContent).not.toMatch(/TITRR|patch:|claude run:|file\(s\)|\bdeg\b|38d\b/);
+  });
+
   it('H / L switch splits, each with its count', async () => {
     setup();
     const user = userEvent.setup();
@@ -125,7 +151,9 @@ describe('NeedsYouDrawer', () => {
     await waitFor(() => expect(net.posts()).toEqual([{ path: '/api/inbox/p-1/approve', body: {}, token: TOKEN }]));
     // Hidden at once, before the next poll catches up.
     await waitFor(() => expect(screen.queryByRole('option', { name: /fix the flaky snapshot/ })).not.toBeInTheDocument());
-    expect(await screen.findByText('Approve: PR: fix the flaky snapshot test')).toBeInTheDocument();
+    // The toast names the item as the row does, without the producer's "PR:" prefix.
+    expect(await screen.findByText('Approve: fix the flaky snapshot test')).toBeInTheDocument();
+    expect(screen.queryByText(/PR: fix the flaky/)).not.toBeInTheDocument();
   });
 
   it('cancelling the confirmation sends nothing', async () => {
@@ -191,6 +219,61 @@ describe('NeedsYouDrawer', () => {
     expect(await screen.findByRole('listbox')).toHaveFocus();
     await user.keyboard('{Escape}');
     await waitFor(() => expect(getVerseUiState().overlay).toBeNull());
+  });
+
+  it('↩ on anything else opens its own detail, aged in words with the exact time on hover', async () => {
+    setup();
+    const user = userEvent.setup();
+    await openDrawer();
+    await screen.findByRole('listbox');
+    await user.keyboard('j');
+    await user.keyboard('{Enter}');
+    expect(await screen.findByRole('heading', { name: 'Prune 17 stale goals' })).toHaveAttribute('title', 'Prune 17 stale goals');
+    const age = screen.getByText('5 minutes ago');
+    expect(age.previousElementSibling).toHaveTextContent('Raised');
+    expect(age.getAttribute('title')).toBeTruthy();
+  });
+
+  it('names the seat and the run’s model the way the pickers do — the raw ids only in tooltips', async () => {
+    const RUN = 'TITRR claude:claude-fable-5-1 run produced 2 file(s) (+384/-0). Review before applying.';
+    const quarantine = (id: string, seatId: string, detail: string) => vetoNeed({
+      id: `fleet:quarantine:${id}`,
+      source: 'fleet',
+      kind: 'quarantine',
+      title: `binshield quarantined (${id})`,
+      detail,
+      expiresAt: null,
+      subject: { repo: 'binshield', pr: null, seatId, sessionId: null, engine: 'claude' },
+      target: { kind: 'section', section: 'fleet', anchor: null },
+      actions: [],
+    });
+    net = shellFetch(
+      activity({ needsYou: [quarantine('known', 'claude-a', RUN), quarantine('unknown', 'claude-z', RUN.replace('fable-5-1', 'fable-9'))] }),
+      { bootstrap: bootstrap({ seats: [CLAUDE_CONTEXT_SEAT] }) },
+    );
+    vi.stubGlobal('fetch', net.fetch);
+    resetActivityForTest();
+    const user = userEvent.setup();
+    await openDrawer();
+    await screen.findByRole('listbox');
+
+    await user.keyboard('{Enter}');
+    const detail = await screen.findByLabelText('Item detail');
+    await waitFor(() => expect(within(detail).getByText('Claude Max')).toHaveAttribute('title', 'claude-a'));
+    expect(within(detail).getByText('Claude Max').previousElementSibling).toHaveTextContent('Seat');
+    const model = within(detail).getByText('Fable 5.1');
+    expect(model).toHaveAttribute('title', 'claude:claude-fable-5-1');
+    expect(model.previousElementSibling).toHaveTextContent('Model');
+    // Neither id reaches the page as text.
+    expect(detail.textContent).not.toMatch(/claude-a\b|claude:claude-fable/);
+
+    // An id the roster and the catalogs do not know is all there is: shown as sent.
+    await user.keyboard('{Escape}');
+    await user.keyboard('j');
+    await user.keyboard('{Enter}');
+    const other = await screen.findByLabelText('Item detail');
+    expect(await within(other).findByText('claude-z')).not.toHaveAttribute('title');
+    expect(within(other).getByText('claude:claude-fable-9')).not.toHaveAttribute('title');
   });
 
   it('says "All clear" only when every producer answered', async () => {

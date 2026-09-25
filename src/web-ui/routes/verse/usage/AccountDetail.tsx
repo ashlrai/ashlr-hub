@@ -22,6 +22,7 @@
  */
 import { useEffect, useRef, type ReactNode } from 'react';
 import { StatusBadge, type Tone } from '../../../components/primitives/StatusBadge.js';
+import { relativePhrase } from '../context/context-model.js';
 import { ENGINE_LABEL } from '../verse-model.js';
 import type { AccountCardModel, AccountVerdictState } from './accounts-model.js';
 import { WindowMeter } from './WindowMeter.js';
@@ -162,7 +163,9 @@ export function AccountDetail({
                   no observation timestamp was reported
                 </span>
               ) : (
-                <span className={styles.num}>{new Date(evidence.observedAt).toLocaleString()}</span>
+                <span className={styles.num} title={new Date(evidence.observedAt).toLocaleString()}>
+                  {relativePhrase(evidence.observedAt) ?? new Date(evidence.observedAt).toLocaleString()}
+                </span>
               )}
             </EvidenceRow>
             <EvidenceRow label="Probe reason">

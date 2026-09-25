@@ -24,9 +24,11 @@
   background: var(--bg-input);
   color: var(--text-primary);
   font-size: var(--text-sm-size);
-  text-overflow: ellipsis;
   transition: border-color var(--duration-fast) var(--ease-standard), box-shadow var(--duration-fast) var(--ease-standard);
 }
+/* Only the free-text path field may be cut (it carries its value as a
+   tooltip); the priority select is a control and never truncates its label. */
+.input { text-overflow: ellipsis; }
 .input::placeholder { color: var(--text-tertiary); }
 .select:hover:not(:disabled),
 .input:hover:not(:disabled) { border-color: var(--border-strong); }

@@ -62,3 +62,11 @@ describe('BarStack V3.10', () => {
     expect(screen.getByText('no data', { selector: 'li' })).toBeInTheDocument();
   });
 });
+
+describe('BarStack V3.10.1', () => {
+  it('puts integer counts on whole-number ticks (a max of 1 run is 0 and 1)', () => {
+    const { container } = render(<BarStack title="Model outcomes" width={400} categories={['a', 'b']} segments={segments} values={[[1, 0], [0, 1]]} />);
+    const ticks = [...container.querySelectorAll('svg[role="img"] text')].filter((t) => t.getAttribute('text-anchor') === 'end').map((t) => t.textContent);
+    expect(ticks).toEqual(['0', '1']);
+  });
+});

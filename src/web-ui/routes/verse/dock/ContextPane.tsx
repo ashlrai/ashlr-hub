@@ -79,7 +79,9 @@ export function ContextPane({ session, seats, events, roots, rootsError, onHando
             title={handoffDisabledReason ?? undefined}>
             Continue in a fresh chat…
           </button>
-          {handoffDisabledReason ? <p className={styles.muted}>{handoffDisabledReason}</p> : null}
+          {/* Always mounted: the reason comes and goes with every turn, and
+              an unmounting line would shift Memory below it each time. */}
+          <p className={`${styles.muted} ${styles.reserve}`}>{handoffDisabledReason ?? ''}</p>
         </section>
       ) : null}
 

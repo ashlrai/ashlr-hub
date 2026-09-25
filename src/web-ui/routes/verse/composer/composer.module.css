@@ -9,11 +9,14 @@
  */
 
 /* ---- footer layout ------------------------------------------------------ */
+/* One row, never wrapped, never shrunk: when the controls do not fit, the row
+   OVERFLOWS, which is exactly what useFooterFold measures to fold the next
+   label into its icon. A shrinking flex item would ellipsize instead. */
 .footer { gap: var(--space-2); flex-wrap: nowrap; }
 .footerLeft,
-.footerRight { display: flex; align-items: center; gap: var(--space-1); min-width: 0; }
-.footerLeft { flex: 1 1 auto; }
-.footerRight { flex: 0 1 auto; justify-content: flex-end; }
+.footerRight { display: flex; align-items: center; gap: var(--space-2); flex: none; }
+.footerLeft { flex: 1 0 auto; }
+.footerRight { justify-content: flex-end; }
 
 .iconButton {
   display: inline-flex;
@@ -40,16 +43,17 @@
    `.box:has(> .textarea:focus)` accent edge, which would otherwise hide it. */
 .boxBypass.boxBypass:has(> textarea:focus) { border-color: var(--status-danger-solid); box-shadow: 0 0 0 1px var(--status-danger-solid); }
 
-.composerCompact .footer { gap: var(--space-1); }
+.composerCompact .footer,
+.composerCompact .footerLeft,
+.composerCompact .footerRight { gap: var(--space-1); }
 
 /* ---- picker button + menu ------------------------------------------------ */
-.controlWrap { position: relative; display: inline-flex; min-width: 0; }
+.controlWrap { position: relative; display: inline-flex; flex: none; }
 .control {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
-  max-width: 22ch;
-  min-height: var(--control-h-xs);
+  min-height: var(--control-h-sm);
   padding: 0 var(--space-2);
   border-radius: var(--radius-xs);
   color: var(--text-secondary);
@@ -65,9 +69,10 @@
 .controlDanger { color: var(--status-danger-fg); background: var(--status-danger-bg); }
 .controlDanger:hover:not(:disabled),
 .controlDanger[aria-expanded='true'] { color: var(--status-danger-fg); background: var(--status-danger-bg); }
-.controlIconOnly { padding: 0 var(--space-1); }
-.controlIcon { flex-shrink: 0; font-size: var(--text-xs-size); line-height: 1; }
-.controlText { overflow: hidden; text-overflow: ellipsis; }
+.controlIconOnly { padding: 0 var(--space-2); }
+.controlIcon { display: inline-flex; flex-shrink: 0; font-size: var(--text-xs-size); line-height: 1; }
+/* Short labels, whole words: folding (useFooterFold) makes room, never an ellipsis. */
+.controlText { white-space: nowrap; }
 .caret {
   flex-shrink: 0;
   width: 0;
@@ -77,10 +82,17 @@
   border-top: 4px solid currentColor;
   opacity: 0.7;
 }
+/* The model when there is no picker (older / read-only server, or loading):
+   the picker's text and box, without its hover — so the picker replaces it in place. */
 .controlStatic {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  min-height: var(--control-h-sm);
   padding: 0 var(--space-2);
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-medium);
   white-space: nowrap;
 }
 
@@ -169,8 +181,7 @@
 
 /* The phone sheet shows each picker as a plain radio list. */
 .controlList { display: flex; flex-direction: column; gap: 1px; padding-bottom: var(--space-3); }
-.controlList + .controlList,
-.controlList + .controlStatic { border-top: 1px solid var(--border-subtle); padding-top: var(--space-2); }
+.controlList + .controlList { border-top: 1px solid var(--border-subtle); padding-top: var(--space-2); }
 .controlList .menuHeading {
   justify-content: flex-start;
   border-bottom: 0;
@@ -188,14 +199,13 @@
 .engine-codex { --verse-engine: var(--engine-codex); }
 .engine-grok { --verse-engine: var(--engine-grok); }
 .engine-local { --verse-engine: var(--engine-local); }
-.seatChipWrap { position: relative; display: inline-flex; min-width: 0; }
+.seatChipWrap { position: relative; display: inline-flex; flex: none; }
 .seatChip {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  max-width: 30ch;
-  min-height: var(--control-h-xs);
-  padding: 0 var(--space-2) 0 var(--space-1);
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-2);
   border-radius: var(--radius-xs);
   color: var(--text-secondary);
   font-size: var(--text-xs-size);
@@ -205,8 +215,8 @@
 .seatChip:hover:not(:disabled),
 .seatChip[aria-expanded='true'] { background: var(--bg-hover); color: var(--text-primary); }
 .seatChip:disabled { opacity: 0.55; cursor: not-allowed; }
-.seatChipCompact { padding: 0 var(--space-1); gap: var(--space-1); }
-.seatChipText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.seatChipCompact { gap: var(--space-1); }
+.seatChipText { white-space: nowrap; }
 .monogram {
   display: inline-flex;
   align-items: center;
@@ -256,25 +266,42 @@
 .budgetDialog { width: min(640px, calc(100vw - var(--space-8))); }
 
 /* ---- context ring -------------------------------------------------------- */
+/* Same glyph and tones as the header ring (ContextMeter `ContextRingGlyph`). */
 .contextRing {
   display: inline-flex;
+  flex: none;
   align-items: center;
   gap: var(--space-1);
-  min-height: var(--control-h-xs);
+  min-height: var(--control-h-sm);
   padding: 0 var(--space-1);
   border-radius: var(--radius-xs);
   color: var(--text-tertiary);
   font-size: var(--text-xs-size);
   font-variant-numeric: tabular-nums;
+  cursor: default;
 }
 .contextRing:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 1px; }
-.contextFill { stroke: var(--data-seq-5); }
+.contextRing circle { fill: none; stroke-width: 2; }
+.contextFill {
+  stroke: var(--data-seq-5);
+  stroke-linecap: round;
+  transition: stroke-dasharray var(--duration-base) var(--ease-standard);
+}
+.contextTick { stroke: var(--text-secondary); stroke-width: 1.25; stroke-linecap: round; }
 .contextRing[data-tone='warn'] .contextFill { stroke: var(--status-warning-solid); }
 .contextRing[data-tone='warn'] { color: var(--status-warning-fg); }
-.contextRing[data-tone='danger'] .contextFill { stroke: var(--status-danger-solid); }
-.contextRing[data-tone='danger'] { color: var(--status-danger-fg); }
+.contextRing[data-tone='danger'] .contextFill,
+.contextRing[data-tone='over'] .contextFill { stroke: var(--status-danger-solid); }
+.contextRing[data-tone='danger'],
+.contextRing[data-tone='over'] { color: var(--status-danger-fg); }
 .contextRing[data-tone='unknown'] .ringTrack { stroke-dasharray: 2 2; }
-.contextText { min-width: 3ch; }
+/* An upper bound (≤) is a ceiling, not a reading: fainter, as in the header. */
+.contextRing[data-exact='false'] .contextFill { opacity: 0.55; }
+/* Room for "100%": the figure ticking up while a reply streams never moves the row. */
+.contextText { min-width: 4ch; }
+
+/* The ⏎ on Send / Queue: Enter does the same thing. */
+.sendKey { font-size: var(--text-2xs-size); line-height: 1; opacity: 0.8; }
 
 /* ---- queued follow-ups --------------------------------------------------- */
 .queue {
@@ -504,6 +531,7 @@
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-motion='full']) .chipSpinner,
   :root:not([data-motion='full']) .sheet { animation: none; }
+  :root:not([data-motion='full']) .contextFill { transition: none; }
 }
 :root[data-motion='reduce'] .chipSpinner,
 :root[data-motion='reduce'] .sheet { animation: none; }

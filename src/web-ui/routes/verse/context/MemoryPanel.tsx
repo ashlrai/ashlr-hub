@@ -263,7 +263,7 @@ function MemoryPanelBody({ projectPath, refreshKey }: { projectPath: string; ref
       </h3>
 
       <p className={styles.hint}>
-        One <code>MEMORY.md</code> shared by every chat on <strong>{name}</strong>, whichever seat runs it. Agents keep it
+        One <code>MEMORY.md</code> shared by every chat on <strong title={projectPath}>{name}</strong>, whichever seat runs it. Agents keep it
         current — decisions and why, conventions, gotchas, plan status.
       </p>
 

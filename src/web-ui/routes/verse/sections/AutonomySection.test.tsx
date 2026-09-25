@@ -65,7 +65,7 @@ describe('AutonomySection', () => {
     // Next tick is a live countdown derived from lastTickAt + intervalMs.
     expect(screen.getByText(/^in \d+m \d+s$/)).toBeInTheDocument();
     // Scope and the approvals queue.
-    expect(screen.getByText('1 repos')).toBeInTheDocument();
+    expect(screen.getByText('1 repo')).toBeInTheDocument();
     expect(screen.getByText('2 approvals')).toBeInTheDocument();
   });
 
@@ -234,7 +234,9 @@ describe('AutonomySection', () => {
     render(<AutonomySection />);
 
     // Both the status header and the budget cap's usage line say it.
-    expect((await screen.findAllByText(/last ledger day is 2026-09-01/)).length).toBeGreaterThan(0);
+    // A calendar day, not the ledger's raw YYYY-MM-DD key.
+    expect((await screen.findAllByText(/last ledger day is Sep 1\b/)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/2026-09-01/)).not.toBeInTheDocument();
     expect(screen.queryByText(/\$0\.00 of \$25\.00 today/)).not.toBeInTheDocument();
     expect(screen.getByText(/— spent today/)).toBeInTheDocument();
   });

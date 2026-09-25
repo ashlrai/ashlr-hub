@@ -305,6 +305,9 @@ describe('cache ratios', () => {
     expect(reportedCacheHitRatio({ inputTokens: 1_000, cacheReadTokens: 0, cacheCreationTokens: 9_000 })).toBe(0);
     expect(formatRatio(0.8)).toBe('80%');
     expect(formatRatio(null)).toBe('—');
+    // One precision rule app-wide: a real sliver is "<1%", never a "0%" that reads as none.
+    expect(formatRatio(0.004)).toBe('<1%');
+    expect(formatRatio(0)).toBe('0%');
   });
 });
 

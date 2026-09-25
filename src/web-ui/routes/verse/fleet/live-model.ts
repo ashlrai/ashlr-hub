@@ -13,13 +13,14 @@
  *
  * Framework-free; tested directly.
  */
-import type { FleetEngine, FleetGateFunnel, FleetLiveRun, FleetLiveSnapshotV1 } from '../../../../core/fleet/fleet-types.js';
+import type { FleetEngine, FleetGateFunnel, FleetLaneState, FleetLiveRun, FleetLiveSnapshotV1 } from '../../../../core/fleet/fleet-types.js';
 import type { SeatDecision } from '../../../../core/routing/types.js';
 import type { ChartEngine, ChartTone } from '../../../components/charts/colors.js';
 import { CHART_NEUTRAL, seriesColor } from '../../../components/charts/colors.js';
 import type { SwimlaneLane } from '../../../components/charts/Swimlane.js';
 import type { FunnelStage } from '../../../components/charts/Funnel.js';
 import type { BarStackSegment } from '../../../components/charts/BarStack.js';
+import { laneReasonText, localTimes } from './why-seat-model.js';
 
 export const LANE_ENGINE: Readonly<Record<FleetEngine, ChartEngine>> = {
   local: 'local',
@@ -34,6 +35,47 @@ export const LANE_LABEL: Readonly<Record<FleetEngine, string>> = {
   'claude-cli': 'Claude',
   codex: 'Codex',
 };
+
+/** A lane chip's words: "Local · off", "Grok · 1/2". The why is a separate line (`laneNotes`). */
+export function laneChipText(lane: FleetLaneState): { name: string; slots: string } {
+  return { name: LANE_LABEL[lane.lane], slots: lane.slots === 0 ? 'off' : `${lane.busy}/${lane.slots}` };
+}
+
+export interface LaneNote {
+  /** The lanes this reason applies to, in strip order. */
+  lanes: FleetEngine[];
+  /** True when every lane shares it — then it is said once, without names. */
+  all: boolean;
+  reason: string;
+}
+
+/** A lane's cap reason as the operator reads it (`laneReasonText`); null when it has none. */
+export function laneReason(lane: FleetLaneState): string | null {
+  const reason = lane.capReason?.trim();
+  return reason ? laneReasonText(reason) : null;
+}
+
+/**
+ * Each distinct lane cap reason ONCE, with the lanes it covers, in plain
+ * words (the router's "slot(s)" and "class-B action" never reach the
+ * operator). A dark fleet gives every lane the same sentence; 3.10.0
+ * repeated it inside every chip and truncated it there.
+ */
+export function laneNotes(lanes: readonly FleetLaneState[]): LaneNote[] {
+  const byReason = new Map<string, FleetEngine[]>();
+  for (const lane of lanes) {
+    const reason = laneReason(lane);
+    if (!reason) continue;
+    const list = byReason.get(reason) ?? [];
+    list.push(lane.lane);
+    byReason.set(reason, list);
+  }
+  return [...byReason.entries()].map(([reason, covered]) => ({
+    lanes: covered,
+    all: covered.length === lanes.length && lanes.length > 1,
+    reason,
+  }));
+}
 
 /** The word a bar is labelled with: the outcome once it ended, else the phase. */
 export function runStatus(run: FleetLiveRun): string {
@@ -174,7 +216,7 @@ export function parkedGantt(runs: readonly FleetLiveRun[], now: number): GanttRo
         end: Number.isFinite(release) ? release : null,
         status: r.hold?.kind === 'split' ? 'split' : 'parked',
         outline: true,
-        detail: `${r.hold?.reason ?? 'parked'}${Number.isFinite(release) ? '' : ' · release time unknown'}`,
+        detail: `${localTimes(r.hold?.reason ?? 'parked', now)}${Number.isFinite(release) ? '' : ' · release time unknown'}`,
       }],
     };
   });

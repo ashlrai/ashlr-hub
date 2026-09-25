@@ -5,7 +5,10 @@ import { MindSection } from './MindSection.js';
 import { evictAll } from '../../../data/cache.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
+import { reasoningDigest } from '../command/fixtures.test-support.js';
 import { mockCompactViewport, mockWideViewport, type ViewportMock } from '../shell/viewport.test-support.js';
+import { showTable } from '../../../components/charts/chart-test-support.js';
+import { formatDayLabel } from '../../../components/charts/format.js';
 
 let vp: ViewportMock | null = null;
 beforeEach(() => {
@@ -33,6 +36,104 @@ describe('MindSection', () => {
     expect(container.querySelectorAll('[data-cell]').length).toBe(18);
     expect(screen.getByRole('figure', { name: 'Struggles and wins' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Action log' })).toHaveTextContent('Raise Grok to 3 lanes');
+  });
+
+  it('names each insight by its project — registered name, else folder — with the path in the tooltip and a scratch tag for temp folders', async () => {
+    const now = Date.now();
+    const SCRATCH = '/private/tmp/claude-501/-Users-masonwyatt-Desktop/9d28bdb1-4c1e/scratchpad/grokpad';
+    const live = reasoningDigest('live', now);
+    const digest = {
+      ...live,
+      insights: live.insights.map((i) => (i.id === 'i1' ? { ...i, repo: SCRATCH } : i.id === 'i2' ? { ...i, repo: '/Users/me/dev/binshield' } : i)),
+    };
+    stubSurfaceFetch({
+      kind: 'live',
+      now,
+      routes: {
+        '/api/reasoning/digest': digest,
+        '/api/verse/bootstrap': { projects: [{ path: '/Users/me/dev/binshield', name: 'Binshield', enrolled: true }] },
+        '/api/verse/workspaces': { workspaces: [] },
+      },
+    });
+    render(<MindSection />);
+    const list = await screen.findByRole('list', { name: 'Reasoning insights' });
+    await waitFor(() => expect(within(list).getByText('Binshield')).toBeInTheDocument());
+    const [first, second] = within(list).getAllByRole('listitem');
+    // The scratch folder: its own name, the full path only as the tooltip, and a quiet tag.
+    const place = within(first!).getByText('grokpad');
+    expect(place).toHaveAttribute('title', SCRATCH);
+    expect(within(first!).getByText('scratch')).toBeInTheDocument();
+    expect(first!.textContent).not.toContain('/private/tmp');
+    // "last seen 20m ago" — never the doubled "last 20m ago".
+    expect(first!.textContent).toMatch(/last seen \d+[smhd] ago/);
+    expect(first!.textContent).not.toMatch(/last \d/);
+    // A registered project reads by its name, untagged.
+    expect(within(second!).getByText('Binshield')).toHaveAttribute('title', '/Users/me/dev/binshield');
+    expect(within(second!).queryByText('scratch')).not.toBeInTheDocument();
+    // The Repo facet offers the same labels, never the raw path.
+    const select = screen.getByRole('combobox', { name: 'Repo' });
+    const options = within(select).getAllByRole('option').map((o) => o.textContent);
+    expect(options).toContain('grokpad · scratch');
+    expect(options).toContain('Binshield');
+    expect(options.some((o) => o?.includes('/'))).toBe(false);
+    fireEvent.change(select, { target: { value: SCRATCH } });
+    await waitFor(() => expect(screen.getByRole('figure', { name: 'Insights by kind and engine' })).toHaveTextContent('In grokpad · scratch'));
+  });
+
+  it('labels the struggles-and-wins axis in whole counts — never 0.3 of a struggle', async () => {
+    // Per-day counts topping out at 1 used to tick 0, 0.3, 0.5, 0.8, 1. The
+    // series are all integers, which is what makes the chart kit pick
+    // integer ticks (AreaTrend: axisTicks … integer: allIntegers(values)).
+    const now = Date.now();
+    const live = reasoningDigest('live', now);
+    const trends = live.trends.map((d, i) => ({ ...d, steps: 5, struggles: i % 2, wins: 1 - (i % 2) }));
+    stubSurfaceFetch({ kind: 'live', now, routes: { '/api/reasoning/digest': { ...live, trends } } });
+    render(<MindSection />);
+    const fig = await screen.findByRole('figure', { name: 'Struggles and wins' });
+    await waitFor(() => expect(fig.querySelector('svg')).not.toBeNull());
+    const numeric = [...fig.querySelectorAll('svg text')].map((t) => t.textContent ?? '').filter((t) => /^-?[\d.,]+$/.test(t));
+    expect(numeric.length).toBeGreaterThan(1);
+    for (const label of numeric) expect(Number.isInteger(Number(label.replace(/,/g, ''))), label).toBe(true);
+  });
+
+  it('labels each trend day as the calendar day the digest names — in the axis, the tooltip and the table alike', async () => {
+    // The digest's days are calendar days. A UTC-midnight stamp labelled in
+    // the local zone read one day early west of UTC ("2026-09-24" → "Sep 23");
+    // run under TZ=America/Los_Angeles to see it.
+    const now = Date.now();
+    const live = reasoningDigest('live', now);
+    stubSurfaceFetch({ kind: 'live', now, routes: { '/api/reasoning/digest': live } });
+    render(<MindSection />);
+    const fig = await screen.findByRole('figure', { name: 'Struggles and wins' });
+    await waitFor(() => expect(fig.querySelector('svg')).not.toBeNull());
+    const days = live.trends.map((t) => formatDayLabel(t.day));
+    // The axis ends on the last day.
+    const axis = [...fig.querySelectorAll('svg text')].map((t) => t.textContent ?? '');
+    expect(axis).toContain(days.at(-1));
+    showTable('Struggles and wins');
+    const whens = within(fig).getAllByRole('row').slice(1).map((r) => within(r).getAllByRole('cell')[0]!.textContent);
+    expect(whens).toEqual(days);
+  });
+
+  it('never offers two identical Repo choices — two agents\' scratchpads, or one folder spelled two ways', async () => {
+    const now = Date.now();
+    const A = '/private/tmp/claude-501/-Users-me-hub/9d28bdb1-aaaa/scratchpad/grokpad';
+    const B = '/private/tmp/claude-501/-Users-me-hub/1234abcd-bbbb/scratchpad/grokpad';
+    const live = reasoningDigest('live', now);
+    const repoOf: Record<string, string> = { i1: A, i2: B, i3: '/tmp/e2e/proj', i4: '/private/tmp/e2e/proj' };
+    const digest = { ...live, insights: live.insights.map((i) => (repoOf[i.id] ? { ...i, repo: repoOf[i.id]! } : i)) };
+    stubSurfaceFetch({ kind: 'live', now, routes: { '/api/reasoning/digest': digest } });
+    render(<MindSection />);
+    const select = await screen.findByRole('combobox', { name: 'Repo' });
+    const options = within(select).getAllByRole('option').map((o) => o.textContent);
+    // Before: "grokpad (scratchpad) · scratch" twice and "proj (e2e) · scratch" twice.
+    expect(new Set(options).size).toBe(options.length);
+    expect(options.sort()).toEqual(['All', 'ashlr-hub', 'ashlrcode', 'grokpad (1234abcd-bbbb) · scratch', 'grokpad (9d28bdb1-aaaa) · scratch', 'proj · scratch'].sort());
+    // The cards (i1, i2, i3) use the same labels, each with its own path as the tooltip.
+    const list = screen.getByRole('list', { name: 'Reasoning insights' });
+    expect(within(list).getByText('grokpad (9d28bdb1-aaaa)')).toHaveAttribute('title', A);
+    expect(within(list).getByText('grokpad (1234abcd-bbbb)')).toHaveAttribute('title', B);
+    expect(within(list).getByText('proj')).toHaveAttribute('title', '/tmp/e2e/proj');
   });
 
   it('facets the matrix by repo', async () => {

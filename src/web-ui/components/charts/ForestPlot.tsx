@@ -25,7 +25,7 @@ import { CHART_DIVERGING_MID, CHART_DIVERGING_NEG, CHART_DIVERGING_POS, hatchPat
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
 import { ChartLegend, HatchPattern } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
-import { linearScale, niceTicks } from './chart-math.js';
+import { allIntegers, axisTicks, linearScale } from './chart-math.js';
 import { useChartWidth } from './useChartWidth.js';
 import plot from './plot.module.css';
 import styles from './ForestPlot.module.css';
@@ -88,6 +88,8 @@ function signed(v: number, fmt: (v: number) => string): string {
   return v > 0 ? `+${fmt(v)}` : fmt(v);
 }
 
+const defaultFormatValue = (v: number): string => (Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(1));
+
 const ROW_H = 28;
 const AXIS_H = 22;
 const PAD_R = 12;
@@ -101,11 +103,12 @@ export function ForestPlot({
   rows,
   unit = '',
   gate,
-  formatValue = (v) => (Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(1)),
+  formatValue: formatValueProp,
   unknownText = 'not enough pairs yet',
   width: fixedWidth,
   ariaLabel,
 }: ForestPlotProps) {
+  const formatValue = formatValueProp ?? defaultFormatValue;
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
   const [active, setActive] = useState<number | null>(null);
@@ -124,7 +127,16 @@ export function ForestPlot({
   const bounds = known.flatMap((r) => [r.low!, r.high!]);
   const lo = Math.min(0, gate?.value ?? 0, ...bounds);
   const hi = Math.max(0, gate?.value ?? 0, ...bounds);
-  const ticks = niceTicks(lo, hi === lo ? lo + 1 : hi, narrow ? 3 : 5);
+  // Tick labels at the step's own precision (a lift axis of 0.25 steps
+  // printed at one decimal read "+0.3 / +0.8"); a caller's formatter is
+  // held to printing every tick faithfully.
+  const xAxis = axisTicks(lo, hi === lo ? lo + 1 : hi, {
+    count: narrow ? 3 : 5,
+    integer: allIntegers([...bounds, gate?.value ?? 0]),
+    format: formatValueProp ? (t) => (t === 0 ? '0' : signed(t, formatValueProp)) : undefined,
+  });
+  const ticks = xAxis.ticks;
+  const tickLabels = formatValueProp ? xAxis.labels : xAxis.labels.map((l, i) => (ticks[i]! > 0 ? `+${l}` : l));
   const xs = linearScale(ticks[0]!, ticks[ticks.length - 1]!, plotX0, plotX1);
   const bodyH = rows.length * ROW_H;
   const svgH = bodyH + AXIS_H;
@@ -198,11 +210,11 @@ export function ForestPlot({
           <defs>
             <HatchPattern id={hatchId} />
           </defs>
-          {ticks.map((t) => (
+          {ticks.map((t, i) => (
             <g key={t}>
               <line className={plot.grid} x1={xs(t)} x2={xs(t)} y1={0} y2={bodyH} />
               <text className={plot.tick} x={xs(t)} y={svgH - 6} textAnchor="middle">
-                {t === 0 ? '0' : signed(t, formatValue)}
+                {tickLabels[i]}
               </text>
             </g>
           ))}

@@ -50,6 +50,7 @@ import {
   type BudgetEngine,
   type ParsedBudgetUpdate,
 } from './policy.js';
+import { boundSeatReasons } from './seat-reasons.js';
 import type { BudgetPolicy, BudgetUpdateRequest, RoutingRequest, SeatDecision } from './types.js';
 
 export const BUDGET_FILE = 'budget.json';
@@ -444,12 +445,17 @@ function scrubDecision(decision: SeatDecision): SeatDecision {
   return {
     seatId: decision.seatId,
     candidates: [...decision.candidates],
-    exclusions: decision.exclusions.map((e) => ({
-      seatId: e.seatId,
-      reasons: e.reasons.map((r) => scrubSecrets(r)),
-      nextEligibleAt: e.nextEligibleAt,
-    })),
+    exclusions: decision.exclusions.map((e) => {
+      const details = boundSeatReasons(e.details, scrubSecrets, 16);
+      return {
+        seatId: e.seatId,
+        reasons: e.reasons.map((r) => scrubSecrets(r)),
+        nextEligibleAt: e.nextEligibleAt,
+        ...(details ? { details } : {}),
+      };
+    }),
     why: scrubSecrets(decision.why),
+    ...(typeof decision.summary === 'string' ? { summary: scrubSecrets(decision.summary) } : {}),
     mode: decision.mode,
   };
 }

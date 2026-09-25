@@ -8,10 +8,11 @@
  * operator sees: the kept projects are listed, and pressing one opens the
  * editor for THAT project rather than the create form.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { VerseWorkspacesResponse } from '../../../data/api-types.js';
+import { evictAll } from '../../../data/cache.js';
 
 const RESPONSE: VerseWorkspacesResponse = {
   workspaces: [
@@ -32,6 +33,9 @@ const RESPONSE: VerseWorkspacesResponse = {
   focusSectionId: null,
 };
 
+/** What the in-memory query answers; a test swaps it before rendering. */
+let current: VerseWorkspacesResponse = RESPONSE;
+
 vi.mock('../verse-queries.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../verse-queries.js')>();
   return {
@@ -40,7 +44,7 @@ vi.mock('../verse-queries.js', async (importOriginal) => {
     // to (or from) any other test's copy of the real key.
     verseWorkspacesQuery: {
       key: 'verse-workspaces--sidebar-test',
-      fetch: () => Promise.resolve(RESPONSE),
+      fetch: () => Promise.resolve(current),
     },
   };
 });
@@ -48,14 +52,28 @@ vi.mock('../verse-queries.js', async (importOriginal) => {
 const { SavedProjects } = await import('./SavedProjects.js');
 
 describe('SavedProjects', () => {
+  beforeEach(() => {
+    evictAll();
+    current = RESPONSE;
+  });
+
   it('lists each kept project with its folder count', async () => {
     render(<SavedProjects />);
     const row = await screen.findByRole('button', { name: 'Edit project Service + lib' });
     expect(row).toHaveTextContent('Service + lib');
     expect(row).toHaveTextContent('2 folders');
-    // The primary folder is the row's tooltip — it costs no pixels there.
-    expect(row).toHaveAttribute('title', '/repo/service');
-    expect(screen.queryByText('No saved projects yet.')).not.toBeInTheDocument();
+    // The name truncates to one line, so the tooltip carries it in full, then
+    // the primary folder — which costs no pixels there.
+    expect(row).toHaveAttribute('title', 'Service + lib\n/repo/service');
+    expect(screen.queryByText(/No saved projects yet/)).not.toBeInTheDocument();
+  });
+
+  it('says how to save the first project when there are none', async () => {
+    current = { ...RESPONSE, workspaces: [] };
+    render(<SavedProjects />);
+    expect(await screen.findByText('No saved projects yet. Press + to keep a folder you work in.')).toBeInTheDocument();
+    // The + is icon-only: it carries both an accessible name and a tooltip.
+    expect(screen.getByRole('button', { name: 'Save a project' })).toHaveAttribute('title', 'Save a project');
   });
 
   it('opens the editor for the project that was pressed', async () => {

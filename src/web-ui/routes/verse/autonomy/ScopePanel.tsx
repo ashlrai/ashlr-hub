@@ -22,6 +22,7 @@ import { verseAutonomyScopeQuery } from '../verse-queries.js';
 import { ROOT_PRIORITY_LABEL, ROOT_PRIORITY_NOTE } from '../workspace-model.js';
 import type { VerseAutonomyScopeView } from '../../../data/api-types.js';
 import type { VerseScopeRepo } from './control-types.js';
+import { tidyProse } from './format.js';
 import type { GuardedAction } from './use-guarded-action.js';
 import styles from './autonomy.module.css';
 
@@ -116,7 +117,7 @@ export function ScopePanel({ guard, dispatchEnabled }: { guard: GuardedAction; d
       </div>
 
       {scope.data?.degradedReason ? (
-        <p className={styles.readOnly}>The enrollment registry read is degraded: {scope.data.degradedReason}</p>
+        <p className={styles.readOnly}>The enrollment registry read is degraded: {tidyProse(scope.data.degradedReason)}</p>
       ) : null}
 
       {scope.status === 'loading' ? (
@@ -139,8 +140,12 @@ export function ScopePanel({ guard, dispatchEnabled }: { guard: GuardedAction; d
           {repos.map((repo) => (
             <div className={styles.repoRow} key={repo.path}>
               <span className={styles.repoName}>{repo.name}</span>
+              {/* `direction: rtl` makes the ellipsis eat the head of a long path
+                  so its tail survives; <bdi> keeps the path itself reading
+                  left-to-right — without it the leading "/" is reordered to
+                  the END ("Users/you/code/project/"). */}
               <span className={styles.repoPath} title={repo.path}>
-                {repo.path}
+                <bdi>{repo.path}</bdi>
               </span>
               {repo.exists ? null : <span className={styles.repoMissing}>⚠ path missing on disk</span>}
               {/* Workspace membership and rank, so the blast radius is legible:
@@ -197,7 +202,7 @@ export function ScopePanel({ guard, dispatchEnabled }: { guard: GuardedAction; d
         body={
           <>
             <code>{enrolling}</code> becomes autonomous scope. The loop may propose work against it, and the
-            agent&rsquo;s own mcp-native write tools will act on it — enrolment is the gate those tools check.
+            agent&rsquo;s own MCP-native write tools will act on it — enrolment is the gate those tools check.
             <br />
             <br />
             Nothing is written by enrolling. You can remove it again from this panel at any time.

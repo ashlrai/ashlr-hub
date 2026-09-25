@@ -25,6 +25,7 @@ import { buildCapacityRows, scarcestSeat, type CapacityRow } from '../usage/capa
 import { useCapacityData } from '../usage/CapacityStrip.js';
 import type { VerseSectionId } from '../verse-ui-store.js';
 import styles from './RailStatus.module.css';
+import { usedPercentText } from '../percent-text.js';
 
 export interface RailBadge {
   /** Appended to the rail button's accessible name (", 3 need you"). */
@@ -138,7 +139,7 @@ export function describeRailCapacity(c: RailCapacity): string {
   const reset = c.resetText ? ` · ${c.resetText}` : '';
   if (c.limitReached) return `${c.label}: ${c.windowLabel ?? 'window'} limit reached${reset}`;
   if (c.windowLabel === null) return `${c.label}: ${c.word}`;
-  return `${c.label}: ${c.windowLabel} ${Math.round(c.usedPercent)}% used${reset}`;
+  return `${c.label}: ${c.windowLabel} ${usedPercentText(c.usedPercent)} used${reset}`;
 }
 
 /**

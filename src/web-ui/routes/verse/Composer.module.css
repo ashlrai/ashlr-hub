@@ -123,11 +123,28 @@
   font-weight: var(--font-weight-medium);
   transition: background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
 }
-.send { background: var(--accent-600); color: var(--accent-contrast); }
+.send { flex: none; justify-content: center; gap: var(--space-1); background: var(--accent-600); color: var(--accent-contrast); white-space: nowrap; }
 .send:hover:not(:disabled) { background: var(--accent-700); }
 .send:active:not(:disabled) { background: var(--accent-700); border-color: var(--accent-700); }
-.send:disabled { opacity: 0.4; cursor: not-allowed; }
-.stop { border-color: var(--border-default); color: var(--text-primary); }
+/* Disabled reads as a quiet neutral button — words at full legibility — not
+   the accent faded to 40%, which read as a rendering glitch. */
+.send:disabled { background: var(--bg-hover); border-color: var(--border-subtle); color: var(--text-secondary); cursor: not-allowed; }
+/* A send in flight (Enter pressed, the turn not yet accepted — the text is
+   still in the box): it IS sending, so it keeps the accent and pulses, with a
+   progress cursor. The grey above would read as "nothing to send". Same box,
+   same words: the row never reflows. */
+.send[aria-busy='true']:disabled {
+  background: var(--accent-600);
+  border-color: transparent;
+  color: var(--accent-contrast);
+  cursor: progress;
+  animation: send-busy 1.1s var(--ease-standard) infinite alternate;
+}
+@keyframes send-busy {
+  to { opacity: 0.6; }
+}
+/* Stop is the square ■ beside Queue while a turn runs (its words are its name and tooltip). */
+.stop { flex: none; justify-content: center; width: var(--control-h-sm); padding: 0; border-color: var(--border-default); color: var(--text-primary); }
 .stop:hover { border-color: var(--status-danger-solid); color: var(--status-danger-fg); }
 .stop:active { background: var(--status-danger-bg); }
 .stopIcon { width: 8px; height: 8px; border-radius: 1px; background: currentColor; }
@@ -163,13 +180,17 @@
    collapsing --duration-* does NOT reach it — it needs both rules by name. */
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-motion="full"]) .dictationPulse { animation: none; }
+  /* Still unmistakably busy without motion: the accent, held a step lighter, and the progress cursor. */
+  :root:not([data-motion="full"]) .send[aria-busy='true']:disabled { animation: none; opacity: 0.8; }
 }
 :root[data-motion="reduce"] .dictationPulse { animation: none; }
+:root[data-motion="reduce"] .send[aria-busy='true']:disabled { animation: none; opacity: 0.8; }
 @media (max-width: 900px) {
   .composer { padding: 0 var(--space-4) var(--space-3); }
 }
+/* The footer row never wraps at any width: composer/useFooterFold folds its
+   labels into icons, and then its pickers into the ⋯ sheet, instead. */
 @media (max-width: 640px) {
-  .row { flex-wrap: wrap; }
   .textarea { font-size: 16px; }
 }
 

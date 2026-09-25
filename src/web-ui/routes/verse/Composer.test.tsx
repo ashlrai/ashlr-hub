@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup as cleanupRender, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup as cleanupRender, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { CLAUDE_1M_SEAT, CLAUDE_SEAT, CODEX_SEAT, LOCAL_SEAT } from './fixtures.test-support.js';
 import { Composer, costConsequence, type ComposerProps } from './Composer.js';
 import { clearComposerMemory, costHint, loadDraft, saveDraft } from './chat/composer-state.js';
 import type { VerseSeat } from '../../data/api-types.js';
+import { contrastRatio } from '../../design/contrast.js';
+import { darkScope, lightScope, moduleColor, moduleDeclaration, resolveToken } from '../../design/token-probe.test-support.js';
 
 const SEATS = [CLAUDE_SEAT, CODEX_SEAT, LOCAL_SEAT];
+const CSS = 'routes/verse/Composer.module.css';
 
 function props(over: Partial<ComposerProps> = {}): ComposerProps {
   return {
@@ -62,7 +65,9 @@ describe('Composer', () => {
     render(<Composer {...p} />);
     // No per-message model <select> in the composer any more.
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
-    const pill = screen.getByRole('button', { name: /Claude Max · Opus 5/ });
+    // The chip names the seat; the model is the Model picker's (said once).
+    const pill = screen.getByRole('button', { name: /^Seat: Claude Max,/ });
+    expect(pill).toHaveTextContent(/^CClaude Max$/);
     expect(pill).toHaveAttribute('aria-haspopup', 'menu');
 
     await user.click(pill);
@@ -170,12 +175,46 @@ describe('Composer — depth for a long day', () => {
     const view = render(<Composer {...p} />);
     await user.keyboard('{Meta>}.{/Meta}');
     expect(p.onStop).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('button', { name: /Stop the running turn/ })).toHaveAttribute('title', 'Stop the running turn (⌘. or Esc from an empty box)');
+    // The square ■ says what it does and both ways to do it without the mouse.
+    screen.getByRole('button', { name: /Stop the running turn/ }).focus();
+    const tip = await screen.findByRole('tooltip');
+    expect(tip).toHaveTextContent('Stop the running turn — or Esc from an empty box');
+    expect(tip).toHaveTextContent('⌘.');
 
     // Never armed on an idle chat.
     view.rerender(<Composer {...props({ sessionId: 'vs_1', running: false, onStop: p.onStop })} />);
     await user.keyboard('{Meta>}.{/Meta}');
     expect(p.onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a send in flight as busy — not as the grey of an empty box — without changing Send’s words', async () => {
+    const user = userEvent.setup();
+    let accept: (ok: boolean) => void = () => {};
+    const onSend = vi.fn(() => new Promise<boolean>((resolve) => { accept = resolve; }));
+    render(<Composer {...props({ onSend })} />);
+    const box = screen.getByRole('textbox', { name: 'Message' });
+    await user.type(box, 'a long message on a slow server{Enter}');
+    const send = screen.getByRole('button', { name: 'Send message' });
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(send).toBeDisabled();
+    expect(send).toHaveAttribute('aria-busy', 'true');
+    expect(send).toHaveTextContent('Send⏎');
+    expect(box).toHaveValue('a long message on a slow server');
+
+    // The busy style is its own: the accent (it IS sending) and a progress cursor, not `.send:disabled`'s grey.
+    const busy = ".send[aria-busy='true']:disabled";
+    expect(moduleDeclaration(CSS, busy, 'background')).toBe('var(--accent-600)');
+    expect(moduleDeclaration(CSS, busy, 'background')).not.toBe(moduleDeclaration(CSS, '.send:disabled', 'background'));
+    expect(moduleDeclaration(CSS, busy, 'cursor')).toBe('progress');
+    for (const scope of [lightScope(), darkScope()]) {
+      const fg = moduleColor(scope, CSS, busy, 'color')!;
+      const bg = moduleColor(scope, CSS, busy, 'background')!;
+      expect(contrastRatio(fg, bg, resolveToken(scope, '--bg-input')!)).toBeGreaterThanOrEqual(4.5);
+    }
+
+    await act(async () => { accept(true); });
+    await waitFor(() => expect(box).toHaveValue(''));
+    expect(send).not.toHaveAttribute('aria-busy');
   });
 
   it('also sends on ⌘Enter, for a hand already on the modifier', async () => {
@@ -278,7 +317,7 @@ describe('Composer — V3.9 cost hint on the compaction point', () => {
     const allUnavailable: VerseSeat = { ...CLAUDE_1M_SEAT, id: 'claude-c', label: 'Claude C', models: [CLAUDE_1M_SEAT.models[1]!] };
     const p = props({ seats: [CLAUDE_SEAT, skewed, allUnavailable] });
     render(<Composer {...p} />);
-    await user.click(screen.getByRole('button', { name: /Claude Max · Opus 5/ }));
+    await user.click(screen.getByRole('button', { name: /^Seat: Claude Max,/ }));
     const menu = screen.getByRole('menu', { name: 'Seat' });
     expect(within(menu).queryByRole('menuitem', { name: /Claude C/ })).toBeNull();
     const item = within(menu).getByRole('menuitem', { name: /New chat on Claude B/ });

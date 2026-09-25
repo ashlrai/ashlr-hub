@@ -8,11 +8,14 @@
  *   - focus returns to the trigger element on close
  *   - Escape closes
  *   - a click on the backdrop closes
+ *   - a `description` is the dialog's accessible description
+ *     (aria-describedby), so it is announced with the title on open — focus
+ *     usually lands on a button, and a plain <p> beside it was never read
  *
  * The trap itself lives in ./focus-trap.ts, shared with Sheet.tsx — the
  * behavior here is unchanged, it just stopped being copy-pasteable.
  */
-import { useRef, type ReactNode } from 'react';
+import { useId, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useFocusTrap } from './focus-trap.js';
 import styles from './Dialog.module.css';
@@ -23,7 +26,10 @@ export interface DialogProps {
   titleId: string;
   title: ReactNode;
   children: ReactNode;
-  /** Optional one-line description under the title. */
+  /**
+   * Optional one-line description under the title — also the dialog's
+   * aria-describedby, so put the consequence a confirm is asking about here.
+   */
   description?: ReactNode;
   initialFocusRef?: React.RefObject<HTMLElement | null>;
   widthClassName?: string;
@@ -40,6 +46,9 @@ export function Dialog({
   widthClassName,
 }: DialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
+  const descriptionId = useId();
+  // Same test that decides whether the <p> renders, so the id never dangles.
+  const described = Boolean(description);
 
   useFocusTrap({ open, containerRef: dialogRef, onClose, initialFocusRef });
 
@@ -53,12 +62,13 @@ export function Dialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        aria-describedby={described ? descriptionId : undefined}
         tabIndex={-1}
       >
         <h2 id={titleId} className={styles.title}>
           {title}
         </h2>
-        {description ? <p className={styles.description}>{description}</p> : null}
+        {described ? <p id={descriptionId} className={styles.description}>{description}</p> : null}
         {children}
       </div>
     </div>,

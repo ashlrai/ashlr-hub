@@ -46,6 +46,7 @@ import {
   ServerGlyph,
 } from '../terminal/terminal-icons.js';
 import { formatBytes, parsePreviewAddress, previewApi, shortUrl, type PreviewAddress, type PreviewApi } from './preview-client.js';
+import chrome from '../pane-chrome.module.css';
 import styles from './PreviewPane.module.css';
 
 // ---------------------------------------------------------------------------
@@ -532,11 +533,12 @@ export function PreviewPane({ sessionId, roots, request, onOpenTerminal, visible
           className={styles.newTab} onClick={newLauncherTab} />
       </div>
 
-      <div className={styles.toolbar}>
+      <div className={`${chrome.header} ${styles.toolbar}`}>
         <div className={styles.nav}>
-          <IconButton variant="ghost" size="sm" icon={<ArrowLeftGlyph />} aria-label="Back" disabled={!canBack} onClick={() => go(-1)} />
-          <IconButton variant="ghost" size="sm" icon={<ArrowRightGlyph />} aria-label="Forward" disabled={!canForward} onClick={() => go(1)} />
+          <IconButton variant="ghost" size="sm" icon={<ArrowLeftGlyph />} aria-label="Back" title="Back" disabled={!canBack} onClick={() => go(-1)} />
+          <IconButton variant="ghost" size="sm" icon={<ArrowRightGlyph />} aria-label="Forward" title="Forward" disabled={!canForward} onClick={() => go(1)} />
           <IconButton variant="ghost" size="sm" icon={<ReloadGlyph />} aria-label={showLauncher ? 'Refresh the list' : 'Reload'}
+            title={showLauncher ? 'Refresh the list' : 'Reload'}
             disabled={!active && showLauncher && targets === null} onClick={reload} />
         </div>
         <form className={styles.addressForm} onSubmit={submitAddress} role="search" aria-label="Preview address">
@@ -556,23 +558,29 @@ export function PreviewPane({ sessionId, roots, request, onOpenTerminal, visible
             readOnly={active?.kind === 'artifact'}
           />
         </form>
-        {!compact ? (
-          <Segmented<Device>
-            aria-label="Frame width"
-            size="sm"
-            value={device}
-            onChange={setDevice}
-            options={[
-              { value: 'desktop', label: <DesktopGlyph size={14} />, ariaLabel: 'Desktop width' },
-              { value: 'phone', label: <PhoneGlyph size={14} />, ariaLabel: '375 px width' },
-            ]}
-          />
-        ) : null}
-        {url ? (
-          <a className={styles.external} href={url} target="_blank" rel="noopener noreferrer" aria-label="Open in browser" title="Open in browser">
-            <IconExternalLink />
-          </a>
-        ) : null}
+        <div className={chrome.actions}>
+          {!compact ? (
+            <Segmented<Device>
+              aria-label="Frame width"
+              size="sm"
+              value={device}
+              onChange={setDevice}
+              options={[
+                { value: 'desktop', label: <DesktopGlyph size={14} />, ariaLabel: 'Desktop width' },
+                { value: 'phone', label: <PhoneGlyph size={14} />, ariaLabel: '375 px width' },
+              ]}
+            />
+          ) : null}
+          {url ? (
+            <a className={styles.external} href={url} target="_blank" rel="noopener noreferrer" aria-label="Open in browser" title="Open in browser">
+              <IconExternalLink />
+            </a>
+          ) : (
+            // Holds the link's place so the address bar keeps its width when a
+            // page opens or closes (no link to offer for a file or the launcher).
+            <span className={styles.external} data-placeholder="true" aria-hidden="true" />
+          )}
+        </div>
       </div>
 
       {addressNote ? <AddressNote note={addressNote} onDismiss={() => setAddressNote(null)} /> : null}
@@ -592,7 +600,7 @@ export function PreviewPane({ sessionId, roots, request, onOpenTerminal, visible
       {notice ? (
         <div className={styles.notice} role="alert">
           <span>{notice}</span>
-          <button type="button" className={styles.noticeClose} aria-label="Dismiss" onClick={() => setNotice(null)}><IconX size={12} /></button>
+          <button type="button" className={styles.noticeClose} aria-label="Dismiss" title="Dismiss" onClick={() => setNotice(null)}><IconX size={12} /></button>
         </div>
       ) : null}
 
@@ -605,6 +613,7 @@ export function PreviewPane({ sessionId, roots, request, onOpenTerminal, visible
             onOpenServer={openServer}
             onOpenArtifact={(a) => openArtifact(a.path, a.kind)}
             onRetry={() => void refreshTargets()}
+            onOpenTerminal={() => onOpenTerminal(roots[0] ? { root: roots[0] } : {})}
             waitingId={waiting?.server.id ?? null}
           />
         ) : active?.kind === 'url' ? (
@@ -625,7 +634,8 @@ export function PreviewPane({ sessionId, roots, request, onOpenTerminal, visible
             </p>
           </div>
         ) : active?.kind === 'artifact' ? (
-          <ArtifactView tab={active} content={contentKey ? content.get(contentKey) ?? { status: 'loading' } : { status: 'loading' }} device={device} />
+          <ArtifactView tab={active} content={contentKey ? content.get(contentKey) ?? { status: 'loading' } : { status: 'loading' }} device={device}
+            onRetry={reload} />
         ) : null}
       </div>
     </div>
@@ -649,17 +659,18 @@ function AddressNote({ note, onDismiss }: { note: PreviewAddress; onDismiss: () 
       ) : (
         <span>Enter a local address, like <code>localhost:5173</code>.</span>
       )}
-      <button type="button" className={styles.noticeClose} aria-label="Dismiss" onClick={onDismiss}><IconX size={12} /></button>
+      <button type="button" className={styles.noticeClose} aria-label="Dismiss" title="Dismiss" onClick={onDismiss}><IconX size={12} /></button>
     </div>
   );
 }
 
-function ArtifactView({ tab, content, device }: { tab: Extract<PreviewTab, { kind: 'artifact' }>; content: ArtifactContent; device: Device }) {
+function ArtifactView({ tab, content, device, onRetry }: { tab: Extract<PreviewTab, { kind: 'artifact' }>; content: ArtifactContent; device: Device; onRetry: () => void }) {
   if (content.status === 'loading') {
     return <div className={styles.loading} aria-busy="true"><SkeletonLine width="50%" /><SkeletonLine width="80%" /></div>;
   }
   if (content.status === 'error') {
-    return <EmptyState compact tone="error" title="Preview unavailable" body={content.message} />;
+    return <EmptyState compact tone="error" title="Preview unavailable" body={content.message}
+      action={<Button size="sm" variant="subtle" onClick={onRetry}>Try again</Button>} />;
   }
   if (content.status === 'text') {
     return (
@@ -692,18 +703,20 @@ function ArtifactView({ tab, content, device }: { tab: Extract<PreviewTab, { kin
   );
 }
 
-function Launcher({ targets, error, roots, onOpenServer, onOpenArtifact, onRetry, waitingId }: {
+function Launcher({ targets, error, roots, onOpenServer, onOpenArtifact, onRetry, onOpenTerminal, waitingId }: {
   targets: VersePreviewTargetsResponse | null;
   error: string | null;
   roots: readonly string[];
   onOpenServer: (server: VersePreviewDevServer) => void;
   onOpenArtifact: (artifact: VersePreviewArtifact) => void;
   onRetry: () => void;
+  /** Opens a terminal (below this pane) in the chat's first folder, to start a server by hand. */
+  onOpenTerminal: () => void;
   waitingId: string | null;
 }) {
   if (!targets) {
     if (error) {
-      return <EmptyState compact tone="error" title="Nothing to list" body={error}
+      return <EmptyState compact tone="error" title="Could not list what to preview" body={error}
         action={<Button size="sm" variant="subtle" onClick={onRetry}>Try again</Button>} />;
     }
     return <div className={styles.loading} aria-busy="true"><SkeletonLine width="35%" /><SkeletonLine width="70%" /><SkeletonLine width="60%" /></div>;
@@ -716,6 +729,7 @@ function Launcher({ targets, error, roots, onOpenServer, onOpenArtifact, onRetry
         icon={<PreviewGlyph size={20} />}
         title="Nothing to preview yet"
         body="Start a dev server in the terminal, or ask for an HTML report. Local servers and the files this chat writes show up here."
+        action={<Button size="sm" variant="subtle" onClick={onOpenTerminal}>Open a terminal</Button>}
       />
     );
   }
@@ -731,15 +745,16 @@ function Launcher({ targets, error, roots, onOpenServer, onOpenArtifact, onRetry
               <li key={server.id} className={styles.row}>
                 <span className={styles.dot} data-running={server.running || undefined} aria-hidden="true" />
                 <span className={styles.rowMain}>
-                  <span className={styles.rowTitle}>{server.label}</span>
-                  <span className={styles.rowMeta}>
+                  <span className={styles.rowTitle} title={server.label}>{server.label}</span>
+                  <span className={styles.rowMeta}
+                    title={`${shortUrl(server.url)} · ${server.running ? 'running' : 'stopped'} · ${SOURCE_LABEL[server.source]}${multiRoot ? ` · ${server.root}` : ''}`}>
                     {shortUrl(server.url)} · {server.running ? 'running' : 'stopped'} · {SOURCE_LABEL[server.source]}
                     {multiRoot ? ` · ${baseName(server.root)}` : ''}
                   </span>
                   {/* What Start will type, before the click — a launch.json row's
                       label is only its name. Skipped when the label already is it. */}
                   {!server.running && server.command && server.command !== server.label ? (
-                    <code className={styles.rowCommand}>{server.command}</code>
+                    <code className={styles.rowCommand} title={server.command}>{server.command}</code>
                   ) : null}
                 </span>
                 {server.running ? (
@@ -759,7 +774,7 @@ function Launcher({ targets, error, roots, onOpenServer, onOpenArtifact, onRetry
       <section className={styles.section} aria-labelledby="preview-files-title">
         <h3 className={styles.sectionTitle} id="preview-files-title">This chat's files</h3>
         {targets.artifacts.length === 0 ? (
-          <p className={styles.muted}>HTML, Markdown, SVG, images and PDFs this chat writes appear here.</p>
+          <p className={styles.muted}>Ask the chat for a report or a page: HTML, Markdown, SVG, images and PDFs it writes appear here.</p>
         ) : (
           <ul className={styles.rows}>
             {targets.artifacts.map((artifact) => {

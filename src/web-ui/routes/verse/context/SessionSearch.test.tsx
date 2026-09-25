@@ -80,6 +80,8 @@ describe('driven by the sidebar field', () => {
     expect(rows[1]).toHaveAttribute('aria-current', 'true');
     expect(rows[1]).toHaveAttribute('data-engine', 'codex');
     expect(within(results).getByText(/Searched 42 chats\./)).toBeInTheDocument();
+    // The title is cut to one line, so it carries itself in full as a tooltip.
+    expect(within(rows[0]!).getByText('Fix the login bug')).toHaveAttribute('title', 'Fix the login bug');
 
     await user.click(rows[0]!);
     expect(onOpen).toHaveBeenCalledWith('vs_1');
@@ -88,7 +90,8 @@ describe('driven by the sidebar field', () => {
   it('says when nothing matches', async () => {
     queries.searchSessions.mockResolvedValue(answer('zebra', []));
     render(<SessionSearch query="zebra" onOpenSession={() => {}} />);
-    expect(await screen.findByText('No messages match “zebra”.')).toBeInTheDocument();
+    // An empty result names the next thing to try, not only that nothing matched.
+    expect(await screen.findByText('No messages match “zebra”. Try fewer or different words.')).toBeInTheDocument();
   });
 
   it('says when the scan was bounded', async () => {

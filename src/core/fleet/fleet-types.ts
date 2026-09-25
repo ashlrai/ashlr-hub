@@ -554,6 +554,19 @@ export interface FleetLiveSnapshotV1 {
   stateReason: string | null;
   /** When the fleet last did anything; null = never / unknown. */
   lastActivityAt: string | null;
+  /**
+   * THE "Fleet dark since …" instant — the one Command, Fleet (and anything
+   * else that says "dark since") shows. Set only while `state` is `dark` (no
+   * standing grant in force, or the daemon is not running), to the last time
+   * the fleet showed any sign of life: `lastActivityAt` (its last standing
+   * tick, the daemon's last recorded tick, the last runtime-journal row or
+   * the last authority-ledger row). Null in every other state — an idle fleet
+   * is not dark, however long ago it last produced. Built by
+   * `fleetDarkSince` (verse/fleet-live-api.ts). Fleet HISTORY's `darkSince`
+   * is a different fact (the last run started or proposal filed).
+   * Absent from a pre-3.10.1 server.
+   */
+  darkSince?: string | null;
   summary: FleetLiveSummary;
   lanes: FleetLaneState[];
   /** Live runs plus the last 12 h (Swimlane), newest first. */

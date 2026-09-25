@@ -26,8 +26,10 @@
  *     the ledger's post-merge rows are the fallback when the store is empty
  *     or unreadable (the ledger is the append-only record of the same verdicts).
  * Honesty rule: a source that cannot be read makes its numbers `null`, never
- * zero, and the state line says which source is missing. "Dark" is a state
- * with its own sentence ("Fleet dark since …"), not an error.
+ * zero, and the state line says which source is missing. "Dark" is a state,
+ * not an error: `darkSince` ({@link fleetDarkSince}) is the one instant every
+ * surface renders as "Fleet dark since …", and `stateReason` says why it is
+ * dark without repeating that date (the UI formats it in the viewer's zone).
  *
  * PERFORMANCE: the snapshot is built OFF the request path by one coalesced
  * async refresh (≤ 2 s old for a GET; a background refresh every 15 s once
@@ -787,11 +789,27 @@ const UNKNOWN_LIVENESS: DaemonLivenessV1 = {
   reason: 'Daemon liveness could not be probed.',
 };
 
-function formatDay(atIso: string | null): string {
-  if (!atIso) return 'an unknown time';
-  const ms = msOf(atIso);
-  if (!Number.isFinite(ms)) return 'an unknown time';
-  return new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+/**
+ * THE "Fleet dark since …" instant (3.10.1) — one definition, served as
+ * `FleetLiveSnapshotV1.darkSince` and read by every surface that says it.
+ *
+ * "Dark" means autonomy is shut: no standing grant is in force, or the
+ * daemon is not running. It is dark SINCE the last moment the fleet showed
+ * any sign of life — `lastActivityAt`, the newest of its last standing tick,
+ * the daemon's last recorded tick, the last runtime-journal row and the last
+ * authority-ledger row. An idle or running fleet is never dark, however long
+ * ago it last produced; "no runs since …" is fleet history's separate fact
+ * (fleet-history.ts `darkSince`, the last run started or proposal filed).
+ */
+export function fleetDarkSince(state: FleetLiveState, lastActivityAt: string | null): string | null {
+  if (state !== 'dark' || lastActivityAt === null) return null;
+  return Number.isFinite(msOf(lastActivityAt)) ? lastActivityAt : null;
+}
+
+/** A reason as one complete sentence (the daemon probe's may lack a period). */
+function asSentence(text: string): string {
+  const t = text.trim();
+  return t === '' || /[.!?]$/.test(t) ? t : `${t}.`;
 }
 
 /** Build the snapshot and the Needs-you items from every source. Never throws. */
@@ -1108,11 +1126,14 @@ export async function buildFleetLiveSnapshot(d: FleetLiveDeps = deps): Promise<B
     state = 'stopped';
     stateReason = 'The kill switch could not be read, so the fleet is treated as stopped.';
   } else if (policy === null) {
+    // The date lives in `darkSince`, formatted by the reader — never baked
+    // into this sentence in the server's zone (it used to be, and then showed
+    // twice, and could disagree with the chart beside it).
     state = 'dark';
-    stateReason = `No standing grant is in force. Fleet dark since ${formatDay(lastActivityAt)}.`;
+    stateReason = 'No standing grant is in force.';
   } else if (live.alive !== true) {
     state = 'dark';
-    stateReason = `${live.reason} Fleet dark since ${formatDay(lastActivityAt)}.`;
+    stateReason = asSentence(live.reason) || 'The daemon is not running.';
   } else if (paused) {
     state = 'paused';
     stateReason = 'Autonomous dispatch is paused (the daemon is parked; your own tools are unaffected).';
@@ -1188,6 +1209,7 @@ export async function buildFleetLiveSnapshot(d: FleetLiveDeps = deps): Promise<B
     state,
     stateReason,
     lastActivityAt,
+    darkSince: fleetDarkSince(state, lastActivityAt),
     summary,
     lanes,
     runs: runList,

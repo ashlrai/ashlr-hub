@@ -11,7 +11,7 @@
  */
 import { isKnown } from '../../../components/primitives/Epistemic.js';
 import type { VerseControlSnapshot } from './control-types.js';
-import { budgetMeter, countdownLabel, describeTickOutcome, formatClock, formatInterval, formatRelative, nextTickAt, UNKNOWN } from './format.js';
+import { budgetMeter, countdownLabel, describeTickOutcome, formatInterval, formatRelative, formatStamp, nextTickAt, UNKNOWN } from './format.js';
 import { useNow } from './use-ticker.js';
 import styles from './autonomy.module.css';
 
@@ -72,7 +72,8 @@ export function StatusHeader({ snapshot }: { snapshot: VerseControlSnapshot }) {
           <div className={styles.fact}>
             <span className={styles.factLabel}>Last tick</span>
             <span className={styles.factValue} data-tone={outcome.tone}>
-              {observed && daemon?.lastTickAt ? `${formatClock(daemon.lastTickAt)} · ${outcome.label}` : outcome.label}
+              {/* formatStamp: a loop idle since yesterday must not show a bare "03:12:44" as if it ticked today. */}
+              {observed && daemon?.lastTickAt ? `${formatStamp(daemon.lastTickAt)} · ${outcome.label}` : outcome.label}
             </span>
           </div>
           <div className={styles.fact}>
@@ -88,12 +89,16 @@ export function StatusHeader({ snapshot }: { snapshot: VerseControlSnapshot }) {
           <div className={styles.fact}>
             <span className={styles.factLabel}>Scope</span>
             <span className={styles.factValue} data-tone={(repos?.length ?? 0) === 0 ? 'warning' : undefined}>
-              {repos ? `${repos.length} repos` : UNKNOWN}
+              {repos ? `${repos.length} ${repos.length === 1 ? 'repo' : 'repos'}` : UNKNOWN}
             </span>
           </div>
           <div className={styles.fact}>
             <span className={styles.factLabel}>Awaiting you</span>
-            <span className={styles.factValue}>{typeof snapshot.pendingApprovals === 'number' ? `${snapshot.pendingApprovals} approvals` : UNKNOWN}</span>
+            <span className={styles.factValue}>
+              {typeof snapshot.pendingApprovals === 'number'
+                ? `${snapshot.pendingApprovals} ${snapshot.pendingApprovals === 1 ? 'approval' : 'approvals'}`
+                : UNKNOWN}
+            </span>
           </div>
           <div className={styles.fact}>
             <span className={styles.factLabel}>Started</span>

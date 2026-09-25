@@ -26,6 +26,10 @@
  * Honesty rule: an unknown duration or token count is omitted, never shown
  * as 0. A token count the CLI did not report is estimated from the text
  * (~4 characters per token) and always carries the "~".
+ *
+ * 3.10.1: the row opens with the same ▸ every foldable transcript row uses
+ * (tool cards, activity groups), at the same x; the breathing dot appears
+ * only while the block streams — a settled block has no stray bullet.
  */
 import { memo, useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type SyntheticEvent } from 'react';
 import type { VerseThinkingKind } from '../../../../core/verse/types.js';
@@ -185,7 +189,7 @@ export const ThinkingBlock = memo(function ThinkingBlock({
       <div className={styles.thinking} data-streaming={streaming || undefined} data-redacted={redacted || undefined}
         data-thinking-kind={kind ?? undefined}>
         <span className={styles.line}>
-          <span className={styles.glyph} aria-hidden="true" data-live={streaming || undefined} />
+          {streaming ? <span className={styles.glyph} aria-hidden="true" /> : null}
           <span className={styles.label}>{label}</span>
           {redacted ? (
             <span className={styles.hidden} title="The provider returned this reasoning without its text; only how long it took is known.">
@@ -202,7 +206,7 @@ export const ThinkingBlock = memo(function ThinkingBlock({
       data-streaming={streaming || undefined} data-thinking-kind={kind ?? undefined}>
       <summary className={styles.summary} onClick={onSummaryClick} aria-label={windowed ? `${label} — show all` : undefined}>
         <span className={styles.chevron} aria-hidden="true" />
-        <span className={styles.glyph} aria-hidden="true" data-live={streaming || undefined} />
+        {streaming ? <span className={styles.glyph} aria-hidden="true" /> : null}
         <span className={styles.label}>{label}</span>
         {kind === 'summary' ? <span className={styles.kind} title="A summary the provider wrote of the model's reasoning, not its raw chain of thought.">summary</span> : null}
       </summary>

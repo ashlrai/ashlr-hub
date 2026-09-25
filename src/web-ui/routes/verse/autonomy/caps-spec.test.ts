@@ -54,6 +54,10 @@ describe('caps-spec', () => {
     expect(validateCap(items, '')).toMatchObject({ ok: false });
     expect(validateCap(items, 'four')).toMatchObject({ ok: false });
     expect(validateCap(items, '2.5')).toEqual({ ok: false, error: 'Items per tick must be a whole number of items.' });
+    // A percent unit hugs its number and has its own whole-number phrase.
+    const ceiling = capFieldByKey('subscriptionMaxPercent');
+    expect(validateCap(ceiling, '101')).toEqual({ ok: false, error: 'Subscription ceiling must be between 1 and 100% of window.' });
+    expect(validateCap(ceiling, '50.5')).toEqual({ ok: false, error: 'Subscription ceiling must be a whole percentage.' });
     expect(validateCap(items, '7')).toEqual({ ok: true, stored: 7, display: 7 });
   });
 

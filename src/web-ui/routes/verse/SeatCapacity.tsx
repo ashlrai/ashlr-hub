@@ -26,6 +26,7 @@
 import type { ReactNode } from 'react';
 import type { VerseSeat } from '../../data/api-types.js';
 import { Meter } from '../../components/primitives/Meter.js';
+import { percentText } from './autonomy/format.js';
 import {
   seatSubscription,
   type SeatCapacityClass,
@@ -104,14 +105,13 @@ export function SeatWindowMeter({
     );
   }
 
-  const pct = Math.round(windowView.usedPercent);
   return (
     <div className={prominent ? styles.windowLead : styles.window}>
       <Meter
-        value={pct}
+        value={Math.max(0, Math.min(100, windowView.usedPercent))}
         max={100}
         label={<span className={styles.windowLabel}>{windowView.label}</span>}
-        valueText={<span className={styles.pct}>{pct}%</span>}
+        valueText={<span className={styles.pct}>{percentText(windowView.usedPercent)}</span>}
         aria-label={`${name} used`}
       />
       {windowView.resetText === null ? null : <p className={styles.reset}>{windowView.resetText}</p>}

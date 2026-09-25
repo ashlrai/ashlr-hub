@@ -21,6 +21,7 @@ import { fenceSelection, type TerminalApi } from './terminal-client.js';
 import type { TerminalStreamHandlers } from './terminal-stream.js';
 import type { TerminalTheme, TerminalView, TerminalViewOptions } from './terminal-view.js';
 import type { TerminalRequest } from '../dock-store.js';
+import chrome from '../pane-chrome.module.css';
 import { keyPassesToPage, resetTerminalPaneForTest, TerminalPane, type TerminalPaneDeps } from './TerminalPane.js';
 
 // ---------------------------------------------------------------------------
@@ -175,8 +176,8 @@ describe('TerminalPane', () => {
     expect(h.views[0]!.host).toBeInTheDocument();
     h.output('t-new1', 1, 'hello\r\n% ');
     expect(h.views[0]!.written).toEqual(['hello\r\n% ']);
-    // The header shows where the shell runs.
-    expect(screen.getByText('~/code/app')).toBeInTheDocument();
+    // The header names the folder the shell runs in; the full path is its tooltip.
+    expect(screen.getByTitle('~/code/app')).toHaveTextContent(/^app$/);
   });
 
   it('reattaches to existing tabs after a reload instead of opening another, resuming after the last seq', async () => {
@@ -398,6 +399,74 @@ describe('TerminalPane', () => {
     renderPane(h);
     await waitFor(() => expect(h.views).toHaveLength(1));
     expect(screen.getByRole('button', { name: 'Send selection to chat' })).toHaveTextContent('Send to chat');
+  });
+});
+
+describe('TerminalPane — UX contract (3.10.1 polish)', () => {
+  /** Every icon-only button in the pane carries an accessible name AND a tooltip. */
+  function expectIconButtonsNamed() {
+    const iconOnly = screen.getAllByRole('button').filter((b) => !b.textContent?.trim());
+    expect(iconOnly.length).toBeGreaterThan(0);
+    for (const button of iconOnly) {
+      expect(button.getAttribute('aria-label'), button.outerHTML).toBeTruthy();
+      expect(button.getAttribute('title'), button.outerHTML).toBeTruthy();
+    }
+  }
+
+  it('names the folder, never a raw temp or home path, and keeps the path as the tooltip', async () => {
+    const root = '/private/tmp/claude-501/-Users-me-proj/0f3e/scratchpad/home-dock/proj';
+    const h = harness({ tabs: [tabOf('t-1', { root, title: 'zsh' })] });
+    renderPane(h, { roots: [root] });
+    await waitFor(() => expect(h.views).toHaveLength(1));
+    expect(screen.getByTitle(root)).toHaveTextContent(/^proj$/);
+    expect(document.body.textContent).not.toMatch(/\/private\/tmp|scratchpad/);
+    // The same header row every dock pane wears: the subject left, actions right.
+    expect(screen.getByTitle(root).parentElement).toHaveClass(chrome.header);
+    expect(screen.getByRole('button', { name: 'Screen reader mode' }).parentElement).toHaveClass(chrome.actions);
+  });
+
+  it('shows the first shell opening instead of flashing "No terminal open", with the header already in place', async () => {
+    const h = harness();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    (h.api.create as ReturnType<typeof vi.fn>).mockImplementationOnce(async (req: VerseTerminalCreateRequest) => {
+      await gate;
+      const tab = tabOf('t-slow', { root: req.root ?? '~/code/app' });
+      h.state.tabs.push(tab);
+      return tab;
+    });
+    renderPane(h);
+    await waitFor(() => expect(h.api.create).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('status', { name: 'Opening a shell' })).toBeInTheDocument();
+    expect(screen.queryByText('No terminal open')).toBeNull();
+    // The header row is drawn from the start, naming the folder the shell opens in.
+    expect(screen.getByTitle('~/code/app')).toHaveTextContent(/^app$/);
+    await act(async () => { release(); await gate; });
+    expect(await screen.findByRole('tab', { name: /app/ })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByRole('status', { name: 'Opening a shell' })).toBeNull();
+    expect(screen.getByTitle('~/code/app')).toHaveTextContent(/^app$/);
+  });
+
+  it('an empty pane says what to do next, with the platform\'s own chord', async () => {
+    const user = userEvent.setup();
+    const h = harness({ tabs: [tabOf('t-1', { title: 'one' })] });
+    renderPane(h);
+    await user.click(await screen.findByRole('button', { name: 'Close terminal one' }));
+    expect(await screen.findByText('No terminal open')).toBeInTheDocument();
+    expect(screen.getByText(/Click New terminal or press ⌃⇧` to open a login shell in this chat's folder\./)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'New terminal tab' })).toHaveAttribute('title', 'New terminal tab (⌃⇧`)');
+  });
+
+  it('gives every icon-only button a name and a tooltip — tabs, header and notices', async () => {
+    const user = userEvent.setup();
+    const h = harness({ tabs: [tabOf('t-1')] });
+    (h.api.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new ApiError('POST failed', 409, '/api/verse/terminal', 'No more tabs.', 'TERMINAL_LIMIT'));
+    renderPane(h, { roots: ['~/code/app', '~/code/lib'] });
+    await waitFor(() => expect(h.views).toHaveLength(1));
+    await user.click(screen.getByRole('button', { name: 'New terminal tab' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('No more tabs.');
+    expect(screen.getByRole('button', { name: 'Dismiss' })).toHaveAttribute('title', 'Dismiss');
+    expectIconButtonsNamed();
   });
 });
 

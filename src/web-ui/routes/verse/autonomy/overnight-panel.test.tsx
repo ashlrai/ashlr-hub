@@ -376,3 +376,74 @@ describe('OvernightPanel — absent backend', () => {
     expect(screen.getByRole('button', { name: 'Arm overnight run' })).toBeDisabled();
   });
 });
+
+describe('OvernightPanel — copy', () => {
+  it('names the repository by its folder, keeping the checkout path as the tooltip', () => {
+    const status = armedStatus();
+    status.run!.repo = '/Users/m/code/ashlr-hub';
+    status.run!.merged[0]!.repo = '/Users/m/code/ashlr-hub';
+    renderPanel(ok(status));
+
+    const repoFact = screen.getByText('Repository').closest('div')!;
+    const value = within(repoFact).getByText('ashlr-hub');
+    expect(value).toHaveAttribute('title', '/Users/m/code/ashlr-hub');
+
+    const merged = screen.getByText('Merged').closest('div')!;
+    expect(within(merged).getByText('ashlr-hub')).toHaveAttribute('title', '/Users/m/code/ashlr-hub');
+    expect(screen.queryByText('/Users/m/code/ashlr-hub')).not.toBeInTheDocument();
+  });
+
+  it('keeps an owner/name slug whole in the ledger', () => {
+    const status = armedStatus();
+    status.run!.discarded[0]!.repo = 'ashlrai/ashlrcode';
+    renderPanel(ok(status));
+    const discarded = screen.getByText('Discarded').closest('div')!;
+    expect(within(discarded).getByText('ashlrai/ashlrcode')).toBeInTheDocument();
+  });
+
+  it('shows a merge by its short sha, with the full sha as the tooltip', () => {
+    const status = armedStatus();
+    const sha = 'abc1234def5678901234567890abcdef12345678';
+    status.run!.merged[0]!.commit = sha;
+    renderPanel(ok(status));
+    const merged = screen.getByText('Merged').closest('div')!;
+    const meta = within(merged).getByText(/^abc1234 · /);
+    expect(meta).toHaveAttribute('title', sha);
+    expect(meta.textContent).not.toContain(sha);
+  });
+
+  it('never prints ".;" or ". ·" in a discard reason the server joined from sentences', () => {
+    const status = armedStatus();
+    status.run!.discarded[0]!.reason = 'tests failed.; lint failed.';
+    renderPanel(ok(status));
+    const discarded = screen.getByText('Discarded').closest('div')!;
+    const meta = within(discarded).getByText(/^tests failed; lint failed/);
+    expect(meta.textContent).not.toMatch(/\.;|\. ·/);
+  });
+
+  it('leaves out a missing stamp rather than printing "—" after the sha', () => {
+    const status = armedStatus();
+    status.run!.merged[0]!.at = null;
+    renderPanel(ok(status));
+    const merged = screen.getByText('Merged').closest('div')!;
+    expect(within(merged).getByText('abc1234')).toBeInTheDocument();
+  });
+
+  it('says what fills each ledger while it is still empty', () => {
+    const status = armedStatus();
+    status.run!.merged = [];
+    status.run!.discarded = [];
+    renderPanel(ok(status));
+    expect(screen.getByText(/Nothing merged yet\. Changes that pass the gate land here/)).toBeInTheDocument();
+    expect(screen.getByText(/Nothing discarded yet\. A change that fails the gate is listed here/)).toBeInTheDocument();
+  });
+
+  it('reads an ISO instant in the run’s activity as local time', () => {
+    const status = armedStatus();
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    status.run!.activity = `waiting for the window that opens ${at}`;
+    renderPanel(ok(status));
+    const activity = screen.getByText(/^waiting for the window that opens /);
+    expect(activity.textContent).not.toContain(at);
+  });
+});

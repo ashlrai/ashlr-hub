@@ -24,6 +24,7 @@ import { useFocusTrap } from '../../../components/primitives/focus-trap.js';
 import { IconExternalLink, IconX } from '../../../components/primitives/icons.js';
 import { SkeletonRow } from '../../../components/primitives/Skeleton.js';
 import { useToast } from '../../../components/primitives/Toast.js';
+import type { VerseSeat } from '../../../data/api-types.js';
 import { useQuery } from '../../../data/hooks.js';
 import {
   NEEDS_YOU_ACTION_KEYS,
@@ -46,8 +47,19 @@ import {
 import { matchCommand } from './command-catalog.js';
 import { isGuardOpen } from './guarded-action.js';
 import { markResolved, pruneResolved, runNeedsYouAction, useResolvedIds } from './needs-you-actions.js';
-import { actionOf, ago, describeSilence, itemsForSplit, SPLIT_LABEL, splitCounts, splitCoverage, until } from './needs-you-model.js';
-import { NeedsYouList } from './NeedsYouList.js';
+import {
+  actionOf,
+  describeSilence,
+  itemsForSplit,
+  needsYouRowView,
+  runModelDisplayName,
+  seatDisplayName,
+  SPLIT_LABEL,
+  splitCounts,
+  splitCoverage,
+  until,
+} from './needs-you-model.js';
+import { NeedsYouList, NeedsYouRunFacts } from './NeedsYouList.js';
 import { refreshActivity, useActivity } from './useActivity.js';
 import { useViewport } from './viewport.js';
 import styles from './NeedsYouDrawer.module.css';
@@ -330,7 +342,7 @@ export function NeedsYouDrawer() {
                   />
                 </div>
               ) : (
-                <ItemDetail item={detailItem} now={now} onAct={act} onOpenTarget={openTarget} dispatchEnabled={dispatchEnabled} />
+                <ItemDetail item={detailItem} now={now} seats={bootstrap.data?.seats ?? NO_SEATS} onAct={act} onOpenTarget={openTarget} dispatchEnabled={dispatchEnabled} />
               )}
             </div>
           ) : loading ? (
@@ -419,30 +431,46 @@ const TARGET_LABEL = (item: NeedsYouItem): string | null => {
   }
 };
 
+const NO_SEATS: readonly VerseSeat[] = [];
+
 function ItemDetail({
   item,
   now,
+  seats,
   onAct,
   onOpenTarget,
   dispatchEnabled,
 }: {
   item: NeedsYouItem;
   now: number;
+  /** The roster (bootstrap), for naming the item's seat and its run's model. */
+  seats: readonly VerseSeat[];
   onAct: (item: NeedsYouItem, kind: NeedsYouActionKind) => void;
   onOpenTarget: (item: NeedsYouItem) => void;
   dispatchEnabled: boolean;
 }) {
   const targetLabel = TARGET_LABEL(item);
+  // The same readable text as the row (needs-you-model needsYouRowView), with room for the whole title.
+  const view = needsYouRowView(item, now);
+  // "Claude Max" and "Fable 5.1", never `claude-a` / `claude:claude-fable-5-1`
+  // — the ids ride in tooltips (monospace only when the id is all we have).
+  const seat = item.subject.seatId ? seatDisplayName(seats, item.subject.seatId) : null;
+  const model = view.run ? runModelDisplayName(seats, view.run.model, item.subject.seatId) : null;
   return (
     <article className={styles.item}>
-      <h3 className={styles.itemTitle}>{item.title}</h3>
-      {item.detail ? <p className={styles.itemDetail}>{item.detail}</p> : null}
+      <header className={styles.itemHead}>
+        {view.kindLabel ? <p className={styles.rowKind}>{view.kindLabel}</p> : null}
+        <h3 className={styles.itemTitle} title={view.fullTitle}>{view.title}</h3>
+        {view.run ? <NeedsYouRunFacts run={view.run} /> : null}
+      </header>
+      {view.detail ? <p className={styles.itemDetail}>{view.detail}</p> : null}
       <dl className={styles.defs}>
-        {item.subject.repo ? (<><dt>Repo</dt><dd className={styles.mono}>{item.subject.repo}</dd></>) : null}
+        {view.repo ? (<><dt>Repo</dt><dd className={styles.repo} title={view.repoFull}>{view.repo}</dd></>) : null}
         {item.subject.pr ? (<><dt>Pull request</dt><dd>#{item.subject.pr}</dd></>) : null}
-        {item.subject.seatId ? (<><dt>Seat</dt><dd className={styles.mono}>{item.subject.seatId}</dd></>) : null}
-        <dt>Waiting</dt>
-        <dd>since {ago(item.since, now)}</dd>
+        {seat ? (<><dt>Seat</dt><dd className={seat.raw ? undefined : styles.mono} title={seat.raw}>{seat.text}</dd></>) : null}
+        {model ? (<><dt>Model</dt><dd className={model.raw ? undefined : styles.mono} title={model.raw}>{model.text}</dd></>) : null}
+        <dt>Raised</dt>
+        <dd title={view.ageStamp}>{view.age}</dd>
         {item.expiresAt ? (<><dt>Closes</dt><dd className={styles.deadline}>{until(item.expiresAt, now)}</dd></>) : null}
       </dl>
       <div className={styles.itemActions}>

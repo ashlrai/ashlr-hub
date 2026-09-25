@@ -9,6 +9,9 @@
 import type { SeatConnection, SeatHealthReport } from '../../../../core/verse/health-types.js';
 import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import type { VerseSeat } from '../../../data/api-types.js';
+import { tidyProse } from '../autonomy/format.js';
+import { seatReopensAt, seatSubscription } from '../seat-subscription.js';
+import { formatUntil } from '../usage/capacity-model.js';
 
 export type HealthTone = 'danger' | 'warning' | 'neutral' | 'success';
 
@@ -50,6 +53,20 @@ export interface SeatHealthIssue {
   detail: string | null;
   /** "resets Fri 2:25 PM" when the provider gave an instant. */
   reset: string | null;
+  /** "usable again in 7h 12m" for a spent seat whose reset is still ahead; null otherwise. */
+  usableAgain: string | null;
+}
+
+/**
+ * "usable again in 7h 12m" for an instant still ahead of `now`; null when the
+ * instant is missing, unparseable or already past (a past reset is a stale
+ * reading, not a negative countdown).
+ */
+export function usableAgainPhrase(resetAt: string | null | undefined, now: number = Date.now()): string | null {
+  if (typeof resetAt !== 'string') return null;
+  const at = Date.parse(resetAt);
+  if (!Number.isFinite(at) || at <= now) return null;
+  return `usable again in ${formatUntil(at - now)}`;
 }
 
 /**
@@ -71,18 +88,27 @@ export function seatHealthIssues(
   seats: readonly VerseSeat[] = [],
   now: number = Date.now(),
 ): SeatHealthIssue[] {
-  const labels = new Map(seats.map((seat) => [seat.id, seat.label]));
+  const byId = new Map(seats.map((seat) => [seat.id, seat]));
   return reports
     .filter(needsAttention)
     .map((report) => {
-      const when = describeResetAt(report.resetAt, now);
+      // A spent seat is usable again when its LAST spent window resets, not
+      // when the sweep's binding window does (seatReopensAt) — the same instant
+      // Accounts and Fleet name. Without the seat's windows, the sweep's own.
+      const seat = byId.get(report.seatId);
+      const resetAt = report.connection === 'exhausted' && seat !== undefined
+        ? seatReopensAt(seatSubscription(seat, now), report.resetAt)
+        : report.resetAt;
+      const when = describeResetAt(resetAt, now);
       return {
         report,
-        label: labels.get(report.seatId) ?? report.seatId,
+        label: seat?.label ?? report.seatId,
         word: CONNECTION_WORD[report.connection],
         tone: CONNECTION_TONE[report.connection],
-        detail: report.reasons[0] ?? null,
+        // Server sentences may carry a raw ISO instant or a ".;" join; tidyProse fixes exactly those.
+        detail: report.reasons[0] ? tidyProse(report.reasons[0], now) : null,
         reset: when === null ? null : `resets ${when}`,
+        usableAgain: report.connection === 'exhausted' ? usableAgainPhrase(resetAt, now) : null,
       };
     })
     .sort((a, b) => SEVERITY[a.report.connection] - SEVERITY[b.report.connection]);

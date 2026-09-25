@@ -109,6 +109,20 @@
   fill: var(--chart-track);
 }
 
+/* V3.10.1 — the empty part of a bar that is a share of something (Funnel):
+   NEUTRAL, because the azure --chart-track reads as "a little" — at zero a
+   whole row of it read as 100%. It is the app's empty-meter token, not the
+   heat-0 hairline gray it first borrowed: that measured 1.18:1 / 1.14:1 on
+   the card, so a zero stage was blank space and a bar's length had nothing
+   to be read against. --meter-track is 1.83:1 light / 2.06:1 dark (the
+   floor tokens.css holds an empty meter to) while the azure fill stays
+   2.66:1 / 2.50:1 against it — a 3:1 track would cut that data edge to
+   ~1.6:1, and each stage's count and rate are printed beside its bar.
+   Asserted in charts/chart-contrast.test.ts. */
+.trackEmpty {
+  fill: var(--meter-track);
+}
+
 .noData {
   fill: none;
   stroke: var(--chart-grid);

@@ -42,6 +42,7 @@ import { RouteErrorBoundary } from '../../components/primitives/RouteErrorBounda
 import { Tooltip } from '../../components/primitives/Tooltip.js';
 import { useToast } from '../../components/primitives/Toast.js';
 import { getMutationToken } from '../../data/auth-store.js';
+import { queryGateStats } from '../../data/cache.js';
 import { apiPost } from '../../data/client.js';
 import { useTheme } from '../../data/hooks.js';
 import { VERSE_ACTIVITY_SEEN_PATH, type VerseActivityCompletion } from '../../../core/verse/workbench-types.js';
@@ -56,6 +57,7 @@ import { SECTION_MODULES, sectionImporter } from './shell/section-modules.js';
 import { SurfaceNotInBuild, SurfaceSkeleton } from './shell/skeletons.js';
 import { onActivityCompletions, useActivity } from './shell/useActivity.js';
 import { useViewport } from './shell/viewport.js';
+import type { WarmupOptions } from './shell/warmup.js';
 import { useVerseUi } from './useVerseUi.js';
 import { GearIcon, NeedsYouIcon, SECTION_ICON, VerseMark } from './verse-icons.js';
 import {
@@ -72,6 +74,7 @@ import {
   type VerseSectionId,
 } from './verse-ui-store.js';
 import styles from './VerseApp.module.css';
+import { usedPercentText } from './percent-text.js';
 
 export { SECTION_MODULES };
 
@@ -107,9 +110,26 @@ function sectionLoader(id: VerseSectionId): () => Promise<{ default: ComponentTy
   };
 }
 
+/** One load per section for the life of the tab — shared by its lazy component and the idle prefetch. */
+const sectionLoads = new Map<VerseSectionId, Promise<{ default: ComponentType }>>();
+/** Sections whose module has arrived, mounted directly (no Suspense round-trip, so no skeleton frame). */
+const loadedSections = new Map<VerseSectionId, ComponentType>();
+
+function loadSection(id: VerseSectionId): Promise<{ default: ComponentType }> {
+  let load = sectionLoads.get(id);
+  if (!load) {
+    load = sectionLoader(id)().then((mod) => {
+      loadedSections.set(id, mod.default);
+      return mod;
+    });
+    sectionLoads.set(id, load);
+  }
+  return load;
+}
+
 /** One lazy component per section, for the life of the tab. */
 const SECTION_COMPONENTS = new Map<VerseSectionId, ComponentType>(
-  VERSE_SECTIONS.map((s) => [s.id, lazy(sectionLoader(s.id))] as const),
+  VERSE_SECTIONS.map((s) => [s.id, lazy(() => loadSection(s.id))] as const),
 );
 
 // ---------------------------------------------------------------------------
@@ -132,6 +152,7 @@ const importShortcuts = () => import('./shell/ShortcutsOverlay.js');
 const importGearTray = () => import('./shell/GearTray.js');
 const importOnboarding = () => import('./onboarding/OnboardingFlow.js');
 const importRailStatus = () => import('./shell/RailStatus.js');
+const importWarmup = () => import('./shell/warmup.js');
 
 const CommandPalette = lazy(() => importPalette().then((m) => ({ default: m.CommandPalette })));
 const NeedsYouDrawer = lazy(() => importDrawer().then((m) => ({ default: m.NeedsYouDrawer })));
@@ -139,18 +160,34 @@ const ShortcutsOverlay = lazy(() => importShortcuts().then((m) => ({ default: m.
 const GearTray = lazy(() => importGearTray().then((m) => ({ default: m.GearTray })));
 const OnboardingFlow = lazy(() => importOnboarding().then((m) => ({ default: m.OnboardingFlow })));
 
-/** Warm the overlay chunks once the first paint is done, so the first ⌘K / ⌘J never waits on the network. */
-function prefetchOverlays(): () => void {
-  const run = () => {
-    for (const load of [importPalette, importDrawer, importShortcuts]) void load().catch(() => undefined);
+/**
+ * The after-first-paint warm-up (shell/warmup.ts): the overlay chunks, then
+ * each rail surface not yet open — its chunk (the same load its lazy
+ * component uses, so the first visit mounts it directly) and the reads it
+ * opens with — one piece at a time, and only while the operator is idle: no
+ * input for a quiet period and none of their reads in flight.
+ *
+ * The scheduler and the step list are a lazy chunk; this trigger is all the
+ * warm-up costs chat first paint. Returns a cancel (called on unmount; safe
+ * before the chunk has even arrived).
+ */
+export function prefetchAfterFirstPaint(options?: WarmupOptions): () => void {
+  const readsInFlight = () => {
+    const gate = queryGateStats();
+    return gate.active + gate.queued > 0;
   };
-  const w = window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number; cancelIdleCallback?: (id: number) => void };
-  if (typeof w.requestIdleCallback === 'function') {
-    const id = w.requestIdleCallback(run, { timeout: 3_000 });
-    return () => w.cancelIdleCallback?.(id);
-  }
-  const id = window.setTimeout(run, 1_500);
-  return () => window.clearTimeout(id);
+  let live = true;
+  let cancel: (() => void) | null = null;
+  void importWarmup().then(
+    (m) => {
+      if (live) cancel = m.warmUpAfterFirstPaint({ loadSection, overlays: [importPalette, importDrawer, importShortcuts], readsInFlight }, options);
+    },
+    () => undefined,
+  );
+  return () => {
+    live = false;
+    cancel?.();
+  };
 }
 
 type RailStatusModule = typeof import('./shell/RailStatus.js');
@@ -205,7 +242,7 @@ export function VerseApp() {
   const rail = useRailStatusModule();
   const onboarding = useOnboarding();
 
-  useEffect(() => prefetchOverlays(), []);
+  useEffect(() => prefetchAfterFirstPaint(), []);
   // The gear tray is fetched right after mount (not on idle) and then stays
   // MOUNTED closed, exactly as before it was split out: its open effect
   // schedules the first item's focus on a frame, and mounting it only on the
@@ -304,6 +341,12 @@ export function VerseApp() {
 
   const expanded = ui.railExpanded && !compact;
   const needsYouCount = data ? data.counts.needsYou : null;
+  // Settings, Apps & Accounts and Usage open from the gear, so on those pages
+  // the gear IS the current rail item — for assistive tech too (aria-current,
+  // and the page's name, since one gear stands for three pages), not only
+  // through the data-active styling.
+  const currentPage = sectionEntry(ui.section);
+  const gearPage = currentPage.placement === 'tray' ? currentPage : null;
   const BadgeMark = rail?.RailBadgeMark ?? null;
   const shortcut = (id: string) => {
     const chord = findCommand(id)?.keys[0];
@@ -382,11 +425,12 @@ export function VerseApp() {
               ref={gearRef}
               type="button"
               className={styles.railButton}
-              aria-label="Settings and more"
+              aria-label={gearPage ? `Settings and more (${gearPage.label} open)` : 'Settings and more'}
               aria-haspopup="menu"
               aria-expanded={trayOpen}
+              aria-current={gearPage ? 'page' : undefined}
               data-gear
-              data-active={['settings', 'apps', 'usage'].includes(ui.section) || undefined}
+              data-active={gearPage ? true : undefined}
               onClick={() => setTrayOpen((v) => !v)}
             >
               <span className={styles.railIcon}><GearIcon /></span>
@@ -449,7 +493,7 @@ function RailCapacityButton({ rail, expanded }: { rail: RailStatusModule; expand
         </span>
         {expanded ? (
           <span className={styles.railLabel}>
-            {capacity.label} {capacity.limitReached ? 'limit' : `${Math.round(capacity.usedPercent)}%`}
+            {capacity.label} {capacity.limitReached ? 'limit' : usedPercentText(capacity.usedPercent)}
           </span>
         ) : null}
       </button>
@@ -458,7 +502,13 @@ function RailCapacityButton({ rail, expanded }: { rail: RailStatusModule; expand
 }
 
 function SurfaceHost({ id, active }: { id: VerseSectionId; active: boolean }) {
-  const Section = SECTION_COMPONENTS.get(id)!;
+  // A section the idle prefetch already loaded mounts directly: React.lazy
+  // would still suspend once on its first render — even with the module in
+  // hand — and commit the skeleton, the very flash the prefetch exists to
+  // remove. Chosen ONCE per host, so a load that lands while this surface is
+  // up never swaps the component type under it (that would remount the
+  // surface and drop its state).
+  const [Section] = useState<ComponentType>(() => loadedSections.get(id) ?? SECTION_COMPONENTS.get(id)!);
   const entry = sectionEntry(id);
   return (
     <div className={styles.surface} data-surface={id} hidden={!active} inert={!active}>

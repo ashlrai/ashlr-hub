@@ -2,7 +2,7 @@
  * routes/verse/chat/ActivityGroup.tsx — a run of tool calls as ONE row
  * (SPEC-310C §2, unit C2):
  *
- *   ▸ Ran 12 commands, read 8, edited 3 · 1 failed, 1 running · 2m 14s
+ *   ▸ Ran 12 commands · read 8 files · edited 3 files · 1 failed, 1 running · 2m 14s
  *
  * Three views, not two, because "folded" and "everything" both fail the
  * common case:

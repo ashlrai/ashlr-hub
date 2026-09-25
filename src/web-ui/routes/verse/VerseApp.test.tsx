@@ -4,6 +4,8 @@
  * C2's (sections/ChatSection.test.tsx); this file only asserts that the shell
  * mounts it, keeps it alive and gets out of its way.
  */
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -168,6 +170,61 @@ describe('the rail', () => {
     expect(within(rail()).queryByRole('button', { name: /^Capacity/ })).not.toBeInTheDocument();
   });
 
+  it('styles ONE item active — the current surface — while Command’s Needs-you count stays a badge', async () => {
+    mount();
+    await within(rail()).findByRole('button', { name: 'Command, 2 need you' });
+    for (const id of ['growth', 'fleet', 'mind', 'chat'] as const) {
+      act(() => setVerseSection(id));
+      const current = rail().querySelectorAll('[aria-current], [data-active]');
+      expect(current, id).toHaveLength(1);
+      expect(current[0]).toHaveAttribute('data-section', id);
+      const command = within(rail()).getByRole('button', { name: 'Command, 2 need you' });
+      expect(command).not.toHaveAttribute('aria-current');
+      expect(command.querySelector('[data-badge="count"]')).toHaveTextContent('2');
+    }
+    // On a tray section no rail surface is current; the gear alone is lit.
+    act(() => setVerseSection('settings'));
+    const lit = rail().querySelectorAll('[aria-current], [data-active]');
+    expect(lit).toHaveLength(1);
+    expect(lit[0]).toHaveAttribute('data-gear');
+  });
+
+  it('exposes the lit gear to assistive tech: aria-current and the open page’s name on Settings, Apps and Usage', async () => {
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    const gear = () => rail().querySelector<HTMLElement>('[data-gear]')!;
+    expect(gear()).not.toHaveAttribute('aria-current');
+    expect(gear()).toHaveAccessibleName('Settings and more');
+    for (const [id, label] of [['settings', 'Settings'], ['apps', 'Apps & Accounts'], ['usage', 'Usage']] as const) {
+      act(() => setVerseSection(id));
+      expect(gear(), id).toHaveAttribute('aria-current', 'page');
+      expect(gear(), id).toHaveAttribute('data-active');
+      expect(within(rail()).getByRole('button', { name: `Settings and more (${label} open)` })).toBe(gear());
+      // Still exactly one current item in the rail.
+      expect(rail().querySelectorAll('[aria-current]'), id).toHaveLength(1);
+    }
+    act(() => setVerseSection('chat'));
+    expect(gear()).not.toHaveAttribute('aria-current');
+    expect(gear()).not.toHaveAttribute('data-active');
+    expect(gear()).toHaveAccessibleName('Settings and more');
+  });
+
+  it('keeps active styling keyed ONLY to aria-current / data-active in the stylesheet', () => {
+    // jsdom runs without CSS (css: false), so the contract is read from the
+    // module itself: the active state owns ink + ground + weight, and no rule
+    // may style a rail item by which section it is or by the badge it carries.
+    const css = readFileSync(resolve(process.cwd(), 'src/web-ui/routes/verse/VerseApp.module.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    const rule = (selector: RegExp) => css.match(new RegExp(`${selector.source}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+    const active = rule(/\.railButton\[aria-current\],\s*\.railButton\[data-active\]/);
+    expect(active).toMatch(/color:\s*var\(--text-primary\)/);
+    expect(active).toMatch(/background:\s*var\(--bg-selected\)/);
+    expect(rule(/\.railButton\[aria-current\] \.railLabel,\s*\.railButton\[data-active\] \.railLabel/)).toMatch(/font-weight:\s*var\(--font-weight-medium\)/);
+    expect(rule(/\.railLabel/)).toMatch(/font-weight:\s*var\(--font-weight-regular\)/);
+    // Hover is a step quieter than active, so a resting pointer never reads as "here".
+    expect(rule(/\.railButton:hover/)).not.toMatch(/--text-primary|--bg-selected|font-weight/);
+    expect(css).not.toMatch(/\.railButton[^{]*(\[data-section|\[data-badge|\[data-needs-you|:has\()/);
+  });
+
   it('draws no badge at all when activity is not in this build — never a false zero', async () => {
     net.setActivity(404);
     mount();
@@ -289,6 +346,101 @@ describe('overlays and keys', () => {
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 
+  it('keys pressed before the next frame keep the gear tray’s focus on the tab stop, and a reopen starts at the top', async () => {
+    // Hand-cranked frames, run only AFTER the arrows: the order a loaded
+    // machine produces at random. The tray once focused item 0 on a frame
+    // whatever the tab stop was, so a quick ↓↓ left focus on Settings while
+    // the tab stop sat on Usage — and this file's test above failed at random.
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      nextFrame += 1;
+      frames.set(nextFrame, cb);
+      return nextFrame;
+    });
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => { frames.delete(id); });
+    const runFrames = () => act(() => {
+      for (let pass = 0; pass < 10 && frames.size > 0; pass += 1) {
+        const due = [...frames.values()];
+        frames.clear();
+        for (const cb of due) cb(performance.now());
+      }
+    });
+
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    const gear = () => within(rail()).getByRole('button', { name: 'Settings and more' });
+    await user.click(gear());
+    let menu = await screen.findByRole('menu', { name: 'Settings and more' });
+    await waitFor(() => expect(within(menu).getByRole('menuitem', { name: /Settings/ })).toHaveFocus());
+    await user.keyboard('{ArrowDown}{ArrowDown}');
+    runFrames();
+    const usage = within(menu).getByRole('menuitem', { name: /Usage/ });
+    expect(usage).toHaveFocus();
+    expect(usage).toHaveAttribute('tabindex', '0');
+
+    // Close from Usage, reopen: focus AND the tab stop are back on Settings.
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(gear()).toHaveFocus());
+    await user.keyboard('{Enter}');
+    menu = await screen.findByRole('menu', { name: 'Settings and more' });
+    runFrames();
+    const settings = within(menu).getByRole('menuitem', { name: /Settings/ });
+    await waitFor(() => expect(settings).toHaveFocus());
+    expect(settings).toHaveAttribute('tabindex', '0');
+    expect(within(menu).getByRole('menuitem', { name: /Usage/ })).toHaveAttribute('tabindex', '-1');
+  });
+
+  it('the gear opens on click and on Enter / Space, closes on Escape (focus back on the gear) and on an outside click', async () => {
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    const gear = () => within(rail()).getByRole('button', { name: 'Settings and more' });
+
+    // Click.
+    await user.click(gear());
+    let menu = await screen.findByRole('menu', { name: 'Settings and more' });
+    expect(gear()).toHaveAttribute('aria-expanded', 'true');
+    await waitFor(() => expect(within(menu).getByRole('menuitem', { name: /Settings/ })).toHaveFocus());
+
+    // Escape closes and hands focus back to the gear — the rail button is
+    // re-rendered as the tray opens and closes, so focus must land on the
+    // button that is in the document, not the one that was replaced.
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+    await waitFor(() => expect(gear()).toHaveFocus());
+    expect(gear()).toHaveAttribute('aria-expanded', 'false');
+
+    // Enter on the focused gear.
+    await user.keyboard('{Enter}');
+    menu = await screen.findByRole('menu', { name: 'Settings and more' });
+    await waitFor(() => expect(within(menu).getByRole('menuitem', { name: /Settings/ })).toHaveFocus());
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(gear()).toHaveFocus());
+
+    // Space on the focused gear.
+    await user.keyboard(' ');
+    expect(await screen.findByRole('menu', { name: 'Settings and more' })).toBeInTheDocument();
+
+    // A press outside closes it without stealing focus back.
+    await user.click(document.querySelector('main')!);
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+  });
+
+  it('Settings is reachable from ⌘K', async () => {
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    key('k', {}, 'KeyK');
+    const search = await screen.findByRole('combobox', { name: 'Search commands' });
+    await user.type(search, 'Settings');
+    expect(await screen.findByRole('option', { name: /Open Settings/ })).toBeInTheDocument();
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(getVerseUiState().section).toBe('settings'));
+    expect(await screen.findByRole('heading', { name: 'Appearance' })).toBeInTheDocument();
+  });
+
   it('marks every key it routes as taken (preventDefault), and leaves other keys alone', async () => {
     mount();
     await screen.findByRole('navigation', { name: 'Chats' });
@@ -313,6 +465,34 @@ describe('overlays and keys', () => {
     expect(await screen.findByRole('dialog', { name: 'New chat' })).toBeInTheDocument();
     key('2', {}, 'Digit2');
     expect(getVerseUiState().section).toBe('chat');
+  });
+});
+
+describe('the after-first-paint warm-up', () => {
+  // What it warms, the idle gate and the one-read concurrency are pinned in
+  // shell/warmup.test.tsx and shell/idle-prefetch.test.ts — and the "first
+  // visit paints without a skeleton" check lives there too, because this
+  // file visits Growth, Fleet and Mind first, which made it vacuous here.
+  // This file pins the WIRING: mount starts it, idle-gated; unmount stops it.
+
+  it('starts on mount — nothing warmed before a quiet period — and is cancelled on unmount', async () => {
+    const added = vi.spyOn(document, 'addEventListener');
+    const removed = vi.spyOn(document, 'removeEventListener');
+    const view = mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    // The lazy warm-up chunk arrives and starts listening for the operator's input.
+    const onInput = await waitFor(() => {
+      const call = added.mock.calls.find(([type, , options]) => type === 'pointerdown' && typeof options === 'object' && options.capture === true);
+      expect(call).toBeDefined();
+      return call![1];
+    });
+    // Well inside the quiet period: not one surface read, however idle the page is.
+    const paths = net.fetch.mock.calls.map(([input]) => String(input));
+    for (const path of ['/api/verse/authority', '/api/verse/fleet/history', '/api/verse/budget/history', '/api/reasoning/digest', '/api/models']) {
+      expect(paths.some((u) => u.startsWith(path)), path).toBe(false);
+    }
+    view.unmount();
+    expect(removed.mock.calls.some(([type, fn]) => type === 'pointerdown' && fn === onInput)).toBe(true);
   });
 });
 

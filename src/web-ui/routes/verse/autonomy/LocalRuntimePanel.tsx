@@ -23,7 +23,7 @@ import { getQuerySnapshot, subscribeQuery } from '../../../data/cache.js';
 import { StatusBadge, type Tone } from '../../../components/primitives/StatusBadge.js';
 import { Meter } from '../../../components/primitives/Meter.js';
 import { ConfirmDialog } from '../../inbox/ConfirmDialog.js';
-import { UNKNOWN } from './format.js';
+import { asClause, tidyProse, UNKNOWN } from './format.js';
 import type {
   FleetSnapshot,
   OptionalFleetRead,
@@ -116,12 +116,16 @@ export function laneCapFromNotes(notes: readonly string[] | null | undefined): L
   if (!note) return null;
   const reason = note.slice(LANE_CAP_NOTE_PREFIX.length).trim();
   const off = LANE_OFF_RE.exec(reason);
-  if (off) return { off: true, limit: null, uncapped: null, why: off[1]!.trim() };
+  // `why` is embedded mid-sentence ("…this tick: <why>."), so it is carried as
+  // a clause: no closing period of its own, instants read as local time.
+  if (off) return { off: true, limit: null, uncapped: null, why: asClause(tidyProse(off[1]!)) };
   const below = LANE_BELOW_RE.exec(reason);
-  if (below) return { off: false, limit: Number(below[1]), uncapped: Number(below[2]), why: below[3]!.trim() };
+  if (below) {
+    return { off: false, limit: Number(below[1]), uncapped: Number(below[2]), why: asClause(tidyProse(below[3]!)) };
+  }
   // A reason in a shape this client does not know: still say a lane cap binds,
   // in the server's words, rather than dropping the fact.
-  return { off: false, limit: null, uncapped: null, why: reason };
+  return { off: false, limit: null, uncapped: null, why: asClause(tidyProse(reason)) };
 }
 
 /**
@@ -169,7 +173,7 @@ export function LocalRuntimePanel({
       () => runRuntimeAction(action),
       reason,
       (result) => {
-        setNote(result.note || null);
+        setNote(result.note ? tidyProse(result.note) : null);
         setConfirmStop(null);
       },
     );
@@ -214,7 +218,7 @@ export function LocalRuntimePanel({
               {runtime.state === 'running' ? 'serving' : runtime.state}
             </StatusBadge>
             {runtime.reason ? (
-              <code className={styles.evidenceCode}>{runtime.reason}</code>
+              <code className={styles.evidenceCode}>{tidyProse(runtime.reason)}</code>
             ) : null}
           </div>
 
@@ -460,7 +464,10 @@ function Fact({
   return (
     <div className={`${styles.fact} ${wide ? styles.factWide : ''}`}>
       <span className={styles.factLabel}>{label}</span>
-      <span className={`${styles.factValue} ${mono ? styles.factMono : ''}`}>{value}</span>
+      {/* A mono or wide value can be cut with an ellipsis, so it carries itself in full as a tooltip. */}
+      <span className={`${styles.factValue} ${mono ? styles.factMono : ''}`} title={mono || wide ? value : undefined}>
+        {value}
+      </span>
     </div>
   );
 }

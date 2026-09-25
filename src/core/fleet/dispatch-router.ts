@@ -37,8 +37,9 @@
  */
 import type { AshlrConfig, EngineId, EngineTier, WorkItem, WorkSource } from '../types.js';
 import type { EffectivePolicy } from '../authority/types.js';
-import { routeSeat, ROUTER_CONTEXT_FIT_FRACTION } from '../routing/router.js';
+import { describeExclusions, routeSeat, ROUTER_CONTEXT_FIT_FRACTION } from '../routing/router.js';
 import { engineOfSeatId } from '../routing/policy.js';
+import { reasonSentences } from '../routing/seat-reasons.js';
 import type { SeatCapacity } from '../routing/headroom.js';
 import type {
   BudgetPolicy,
@@ -47,6 +48,7 @@ import type {
   RoutingTask,
   SeatDecision,
   SeatExclusion,
+  SeatReason,
 } from '../routing/types.js';
 import { engineLocality, engineMeteredness } from '../policy/local-only.js';
 import { LEADER_LIMITS, type LeaderDirectivesV1 } from '../vision/leader-types.js';
@@ -497,16 +499,24 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
     if (!seat) continue;
     const lane = laneOfSeat(seat);
     const grantSeat = grantSeatFor(ctx.policy.spend, seatId);
+    // Each reason as data, plus the sentence the logs and CLI have always
+    // printed (identical for all but a demotion, whose sentence keeps its
+    // "until <ISO>" while the data carries that instant as `resetsAt`).
+    const details: SeatReason[] = [];
     const reasons: string[] = [];
-    if (!ctx.policy.engines.includes(lane)) reasons.push(`The grant's current stage does not include ${lane}.`);
-    if (!grantSeat || !grantSeat.enabled) reasons.push('The grant does not let autonomy use this seat.');
+    const add = (detail: SeatReason, sentence?: string): void => {
+      details.push(detail);
+      reasons.push(sentence ?? reasonSentences([detail])[0]!);
+    };
+    if (!ctx.policy.engines.includes(lane)) add({ kind: 'grant', text: `The grant's current stage does not include ${lane}.` });
+    if (!grantSeat || !grantSeat.enabled) add({ kind: 'grant', text: 'The grant does not let autonomy use this seat.' });
     else if (!grantSeat.roles.includes('producer')) {
-      reasons.push(`The grant gives this seat no producer role (${grantSeat.roles.join(', ') || 'none'}).`);
+      add({ kind: 'grant', text: `The grant gives this seat no producer role (${grantSeat.roles.join(', ') || 'none'}).` });
     }
     const plan = ctx.lanes[lane];
-    if (plan.slots <= 0) reasons.push(plan.capReason ?? `The ${lane} lane has no slots this tick.`);
+    if (plan.slots <= 0) add({ kind: 'lane', text: plan.capReason ?? `The ${lane} lane has no slots this tick.` });
     const engine = ctx.laneEngines[lane];
-    if (engine === null) reasons.push(`No ${lane} engine is installed and allowed in this build.`);
+    if (engine === null) add({ kind: 'lane', text: `No ${lane} engine is installed and allowed in this build.` });
     if (reasons.length === 0 && engine !== null) {
       // Keep the legacy engine when it already dispatches through this lane:
       // it may encode item-specific rules (a repair's parent engine, the
@@ -514,7 +524,13 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
       const candidateEngine = fleetLaneOf(legacy.backend, ctx.cfg) === lane ? legacy.backend : engine;
       const demoted = activeDemotion(ctx.demotions, candidateEngine, repo, kind, ctx.nowMs);
       if (demoted) {
-        reasons.push(`This route (${candidateEngine} on ${repo} for ${kind} work) is demoted until ${demoted.until}: ${demoted.reason}`);
+        // The string form keeps "demoted until <ISO>: <why>" (logs, CLI); the
+        // data form carries the end as `resetsAt` so a UI can show it locally.
+        const why = demoted.reason.trim().replace(/[.!?]?$/, '.');
+        add(
+          { kind: 'demoted', text: `This route (${candidateEngine} on ${repo} for ${kind} work) is demoted: ${why}`, resetsAt: demoted.until },
+          `This route (${candidateEngine} on ${repo} for ${kind} work) is demoted until ${demoted.until}: ${demoted.reason}`,
+        );
       } else {
         chosenSeat = seatId;
         chosenLane = lane;
@@ -522,7 +538,7 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
         break;
       }
     }
-    extra.push({ seatId, reasons, nextEligibleAt: null });
+    extra.push({ seatId, reasons, nextEligibleAt: null, details });
   }
 
   const exclusions = [...decision.exclusions, ...extra].sort((a, b) => (a.seatId < b.seatId ? -1 : a.seatId > b.seatId ? 1 : 0));
@@ -538,7 +554,10 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
       why: decision.seatId === null
         ? decision.why
         : `No seat the grant lets produce can take ${request.difficulty}-difficulty ${request.task} work right now `
-          + `(${exclusions.slice(0, 3).map((e) => `${e.seatId}: ${lowerFirst(e.reasons[0] ?? 'not eligible').replace(/\.$/, '')}`).join('; ')}).`,
+          + `(${describeExclusions(exclusions)}).`,
+      summary: decision.seatId === null && decision.summary
+        ? decision.summary
+        : `No seat the grant lets produce can take this ${request.difficulty}-difficulty ${request.task} work right now.`,
       mode: decision.mode,
     };
     if (!fitsSomeSeat(ctx.capacity, request.contextTokens)) {
@@ -564,6 +583,8 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
         exclusions,
         why: `Routed autonomous ${request.difficulty}-difficulty ${request.task} work to ${chosenSeat} (${chosenLane}): `
           + `the router's first choice${decision.seatId ? ` (${decision.seatId})` : ''} is not a producer the grant allows right now.`,
+        summary: `${ctx.capacity.find((c) => c.seatId === chosenSeat)?.label ?? chosenSeat} — the router's first choice`
+          + `${decision.seatId ? ` (${decision.seatId})` : ''} is not a producer the grant allows right now.`,
         mode: decision.mode,
       };
   const tier = chosenEngine === legacy.backend ? legacyTier(legacy, ctx) : ctx.tierOf(chosenEngine) ?? 'local';

@@ -89,7 +89,29 @@
 /* --- detail ------------------------------------------------------------- */
 .detail { padding: var(--space-5) var(--space-6) var(--space-16); max-width: 1040px; }
 .detailHead { padding-bottom: var(--space-4); border-bottom: 1px solid var(--border-subtle); }
-.detailTitle { font-family: var(--font-display); font-size: var(--text-xl-size); line-height: var(--text-xl-line); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-display, -0.02em); }
+.eyebrow { margin: 0 0 var(--space-1); font-family: var(--font-display); font-size: var(--text-2xs-size, 11px); letter-spacing: var(--tracking-label, 0.06em); text-transform: uppercase; color: var(--text-tertiary); }
+/* Two lines at most, wrapped at word boundaries — a run title is a goal
+   sentence and used to be cut mid-word. The full text rides in `title`. */
+.detailTitle {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-xl-size);
+  line-height: var(--text-xl-line);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-display, -0.02em);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: break-word;
+}
+.project { font-weight: var(--font-weight-medium); color: var(--text-secondary); }
+.runFacts { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); margin-top: var(--space-2); font-size: var(--text-sm-size); line-height: var(--text-sm-line); color: var(--text-secondary); }
+.runFacts code { font-family: var(--font-mono); font-size: var(--text-xs-size); }
+.diffStats { font-family: var(--font-display); font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.runSource[title] { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
+.hint { margin: var(--space-1) 0 0; font-size: var(--text-xs-size); line-height: var(--text-xs-line); color: var(--text-tertiary); max-width: 64ch; }
 .detailMeta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin-top: var(--space-2); font-size: var(--text-xs-size); color: var(--text-tertiary); }
 .detailMeta code { font-family: var(--font-mono); }
 .summary { margin-top: var(--space-3); font-size: var(--text-base-size); line-height: var(--text-base-line); color: var(--text-secondary); max-width: 72ch; }

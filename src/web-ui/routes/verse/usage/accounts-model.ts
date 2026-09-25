@@ -30,6 +30,8 @@
  * Pure: no React, no I/O, no currency/percent formatting (chartFormat owns
  * that).
  */
+import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
+import { percentText } from '../autonomy/format.js';
 import type { ControlSnapshot, VerseBootstrap, VerseEngine } from '../../../data/api-types.js';
 import type { FrontierUsage } from '../../../../core/usage/frontier-usage.js';
 import type { Account, AccountWindow, LocalModelsSnapshot } from './usage-contract.js';
@@ -45,7 +47,11 @@ export interface WindowView {
   /** 0–100, or null when there is no reading. NEVER a substituted 0. */
   usedPct: number | null;
   tone: WindowTone;
-  /** Verbatim provider prose. Rendered as-is, never turned into a countdown. */
+  /**
+   * Verbatim provider prose, rendered as-is and never turned into a countdown;
+   * or, when the provider gave only an instant, that instant in local time
+   * ("resets Fri 11:46 PM") — never the raw ISO string.
+   */
   resetText: string | null;
   /**
    * The MACHINE-READABLE reset instant (ISO), when the provider gave one.
@@ -83,8 +89,14 @@ export function windowLabel(w: AccountWindow): string {
   return w.id;
 }
 
-export function toWindowView(w: AccountWindow): WindowView {
-  const reset = w.resetDescription ?? w.resetsAt;
+/** "resets Fri 11:46 PM" for a machine instant; null when it does not parse (a raw ISO string is never printed). */
+function instantResetText(iso: string | null, now: number): string | null {
+  const when = describeResetAt(iso, now);
+  return when === null ? null : `resets ${when}`;
+}
+
+export function toWindowView(w: AccountWindow, now: number = Date.now()): WindowView {
+  const reset = w.resetDescription ?? instantResetText(w.resetsAt, now);
   return {
     id: w.id,
     label: windowLabel(w),
@@ -326,7 +338,7 @@ export function accountVerdict(account: Account, binding: AccountWindow | null):
       headline: binding.limitReached ? 'Limit reached' : 'Window exhausted',
       detail: binding.limitReached
         ? `The provider flagged ${label} as rate-limited. That flag is a denial, not a measurement, so no percentage is shown.`
-        : `${label} is at ${Math.round(pct as number)}% — it is the binding constraint on this account.`,
+        : `${label} is at ${percentText(pct as number)} — it is the binding constraint on this account.`,
       code: null,
     };
   }
@@ -335,7 +347,7 @@ export function accountVerdict(account: Account, binding: AccountWindow | null):
     return {
       state: 'tight',
       headline: 'Running tight',
-      detail: `${label} is the binding constraint at ${Math.round(pct as number)}%.`,
+      detail: `${label} is the binding constraint at ${percentText(pct as number)}.`,
       code: null,
     };
   }
@@ -343,7 +355,7 @@ export function accountVerdict(account: Account, binding: AccountWindow | null):
   return {
     state: 'available',
     headline: 'Usable now',
-    detail: `${label} is the binding constraint at ${Math.round(pct as number)}%.`,
+    detail: `${label} is the binding constraint at ${percentText(pct as number)}.`,
     code: null,
   };
 }
@@ -413,7 +425,7 @@ export function buildAccountCard(account: Account, sourceNote: string | null = n
   const binding = bindingWindow(account);
   const verdict = accountVerdict(account, binding);
   const engine: VerseEngine = account.provider;
-  const others = account.windows.filter((w) => w.id !== binding?.id).map(toWindowView);
+  const others = account.windows.filter((w) => w.id !== binding?.id).map((w) => toWindowView(w));
   const bindingView = binding ? toWindowView(binding) : null;
   const evidence: AccountEvidence = {
     state: account.state,

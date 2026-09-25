@@ -21,7 +21,7 @@ import { getMutationToken, touchMutationHold } from '../../../data/auth-store.js
 import { invalidate, invalidatePrefix } from '../../../data/cache.js';
 import { ApiError, apiPost } from '../../../data/client.js';
 import { requestGuarded } from './guarded-action.js';
-import { ALWAYS_CONFIRM, confirmCopy } from './needs-you-model.js';
+import { ALWAYS_CONFIRM, confirmCopy, readableItemTitle } from './needs-you-model.js';
 import { refreshActivity } from './useActivity.js';
 
 /** How long an acted-on item stays hidden while the server catches up. */
@@ -102,6 +102,9 @@ export function runNeedsYouAction(item: NeedsYouItem, action: NeedsYouAction, ct
     return;
   }
   const copy = confirmCopy(item, action);
+  // The operator-facing title ("fix the flaky snapshot test"), not the raw
+  // producer string ("PR: fix the flaky snapshot test") — same text the row shows.
+  const title = readableItemTitle(item).text;
   const run = async () => {
     const token = getMutationToken();
     if (!token) throw new ApiError('Mutation token was rejected.', 401, request.path);
@@ -111,7 +114,7 @@ export function runNeedsYouAction(item: NeedsYouItem, action: NeedsYouAction, ct
   const mustConfirm = ALWAYS_CONFIRM.has(action.kind) || copy !== null;
   requestGuarded({
     title: copy?.title ?? action.label,
-    body: copy?.body ?? item.title,
+    body: copy?.body ?? title,
     confirmLabel: copy?.confirmLabel ?? action.label,
     destructive: action.destructive,
     token: true,
@@ -120,7 +123,7 @@ export function runNeedsYouAction(item: NeedsYouItem, action: NeedsYouAction, ct
     run,
     onDone: () => {
       afterSuccess(item);
-      ctx.toast(`${action.label}: ${item.title}`, 'success');
+      ctx.toast(`${action.label}: ${title}`, 'success');
     },
     onError: mustConfirm ? undefined : (message) => ctx.toast(message, 'danger'),
   });

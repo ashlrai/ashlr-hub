@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { VerseEvent, VerseSession } from '../../../data/api-types.js';
-import { VERSE_HANDOFF_SUMMARY_REQUEST, type VerseHandoffPreview, type VersePreferences } from '../../../../core/verse/types.js';
+import { VERSE_HANDOFF_MAX_CHARS, VERSE_HANDOFF_SUMMARY_REQUEST, type VerseHandoffPreview, type VersePreferences } from '../../../../core/verse/types.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { evictAll } from '../../../data/cache.js';
 import { applyVerseEvent, getVerseSessionState, resetVerseStore, seedVerseSession, setVerseStreamState } from '../verse-store.js';
@@ -188,7 +188,8 @@ describe('editing and focus', () => {
     const create = screen.getByRole('button', { name: 'Create chat' });
 
     await act(async () => { setTextareaValue(handoffBox(), 'x'.repeat(13_000)); });
-    expect(screen.getByText(/Longer than the 12,000-character handoff budget/)).toBeInTheDocument();
+    // The budget is printed in the viewer's own number format ("12,000" in en-US).
+    expect(screen.getByText(`Longer than the ${VERSE_HANDOFF_MAX_CHARS.toLocaleString()}-character handoff budget. It can still be sent; the new chat just starts bigger.`)).toBeInTheDocument();
     expect(create).toBeEnabled();
 
     await act(async () => { setTextareaValue(handoffBox(), 'é'.repeat(40_000)); });
@@ -441,6 +442,21 @@ describe('ask this seat to summarize first', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('The summary turn failed: weekly limit reached. The automatic preview is unchanged.');
     expect(queries.fetchHandoffPreview).toHaveBeenCalledTimes(1);
     expect(handoffBox().value).toContain('Goal: move billing');
+  });
+
+  it('embeds an engine error that is already a sentence without printing ".."', async () => {
+    const user = userEvent.setup();
+    mount();
+    await waitFor(() => expect(handoffBox().value).toContain('Goal'));
+    await user.click(screen.getByRole('button', { name: 'Ask Claude Max to summarize first' }));
+    await screen.findByText('Waiting for Claude Max to finish its summary…');
+    act(() => {
+      applyVerseEvent('vs_src', event({ type: 'error', turnId: 't-sum', message: 'Weekly limit reached.' }));
+      applyVerseEvent('vs_src', event({ type: 'turn-done', turnId: 't-sum', ok: false, nativeSessionId: null, durationMs: 10 }));
+    });
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('The summary turn failed: Weekly limit reached. The automatic preview is unchanged.');
+    expect(alert.textContent).not.toContain('..');
   });
 
   it('stops the summary turn on request', async () => {

@@ -78,7 +78,12 @@ function IssueRow({ issue, onReconnect }: { issue: SeatHealthIssue; onReconnect:
         <span className={styles.dot} aria-hidden="true" />
         <span className={styles.label}>{issue.label}</span>
         <span className={styles.word}>{issue.word}</span>
-        {issue.reset === null ? null : <span className={styles.reset}>{issue.reset}</span>}
+        {issue.reset === null ? null : (
+          <span className={styles.reset}>
+            {issue.reset}
+            {issue.usableAgain === null ? null : ` · ${issue.usableAgain}`}
+          </span>
+        )}
       </div>
       {issue.detail === null ? null : <p className={styles.detail}>{issue.detail}</p>}
       {report.fix.kind === 'reauth' || command !== null ? (

@@ -44,8 +44,10 @@ export const FLEET_HISTORY_MAX_DAYS = 365;
 export const FLEET_HISTORY_DEFAULT_DAYS = 90;
 
 /**
- * A fleet with no run started or proposal filed for this long reads as DARK
- * (the chart shows "Fleet dark since <date>" instead of an empty axis).
+ * A fleet with no run started or proposal filed for this long has gone QUIET
+ * (`FleetHistoryResponse.darkSince`); its charts say "No fleet runs or
+ * proposals since <date>" instead of drawing an empty axis. That is NOT the
+ * fleet being dark — see `FleetLiveSnapshotV1.darkSince`.
  */
 export const FLEET_DARK_AFTER_MS = 48 * 60 * 60 * 1000;
 
@@ -207,8 +209,14 @@ export interface FleetHistoryResponse {
   lastActivityAt: string | null;
   /**
    * Set when `lastActivityAt` is older than FLEET_DARK_AFTER_MS: the fleet has
-   * produced nothing since then. Judge re-runs of old proposals do not count
-   * as fleet activity.
+   * PRODUCED nothing (no run started, no proposal filed) since then. Judge
+   * re-runs of old proposals do not count as fleet activity.
+   *
+   * Despite the (wire-frozen) name this is "quiet since", a different fact
+   * from the fleet being dark: a fleet can tick for weeks under a grant and
+   * produce nothing. "Fleet dark since …" is `FleetLiveSnapshotV1.darkSince`
+   * (verse/fleet-live-api.ts `fleetDarkSince`), and only that value may be
+   * worded that way; this one reads "No fleet runs or proposals since …".
    */
   darkSince: string | null;
   sources: {

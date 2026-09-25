@@ -164,7 +164,11 @@ export interface VerseSeatWindow {
   /**
    * Machine-readable reset instant. STRUCTURALLY ALWAYS NULL for Claude: that
    * provider publishes only a sentence, which lives in `resetDescription` and
-   * is rendered verbatim. Never synthesize a countdown from a description.
+   * is rendered verbatim. The server never synthesizes an instant from it.
+   * (3.10.1: the Command burn-down chart may place the reset on its time axis
+   * via `resetInstantFromWords` in web-ui command-model, but only for the
+   * collector's exact "Mon D at H:MMam (Area/Zone)" form and only when the
+   * result lands within one window of now; anything else stays words.)
    */
   resetsAt: string | null;
   /** The provider's own reset wording, verbatim ("resets Sep 25 at 7pm (America/New_York)"). */

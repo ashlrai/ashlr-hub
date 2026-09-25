@@ -34,6 +34,12 @@
  * metadata-only (zero tokens, zero paid quota) — the same probes the Verse
  * server runs every 30 s; here they run at most once per SAMPLE_EVERY_MS.
  *
+ * Every snapshot this process sees fresh — its own publish, or the Verse
+ * server's while dormant — is also appended to the seat capacity history
+ * (routing/capacity-history.ts, 3.10.1) so Command's burn-downs keep the
+ * whole window; that write never affects the publisher's state, and the
+ * store makes it a no-op under ASHLR_CAPACITY_HISTORY=0.
+ *
  * Started lazily (ensureDaemonCapacityPublisher) by the standing merge pass,
  * which runs every standing tick BEFORE beforeTick / dispatch. It refuses to
  * start outside a daemon process (ASHLR_IN_DAEMON=1) and under vitest, so a
@@ -41,6 +47,7 @@
  */
 import type { AshlrConfig } from '../types.js';
 import { readCapacitySnapshot, type CapacitySnapshot } from '../routing/budget-store.js';
+import { recordCapacityHistoryFromSnapshot } from '../routing/capacity-history.js';
 
 /** Another publisher (Verse, every 60 s) counts as live while its snapshot is this fresh. */
 export const FOREIGN_FRESH_MS = 3 * 60_000;
@@ -67,6 +74,12 @@ export interface DaemonCapacityPublisherDeps {
   /** Publish through `collector`; resolves to the snapshot's publishedAt. */
   publish(cfg: AshlrConfig, collector: PublisherCollector): Promise<string>;
   log(message: string): void;
+  /**
+   * Append `snapshot`'s readings to the seat capacity history (3.10.1,
+   * routing/capacity-history.ts). Returns why nothing could be written, or
+   * null. Optional so a harness without it records nothing.
+   */
+  recordHistory?(snapshot: CapacitySnapshot): string | null;
 }
 
 export type PublisherState =
@@ -104,11 +117,34 @@ export function createDaemonCapacityPublisher(cfg: AshlrConfig, deps: DaemonCapa
   let inFlight: Promise<PublisherStatus> | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let stopped = false;
+  let historyError: string | null = null;
 
   const set = (state: PublisherState, reason: string): PublisherStatus => {
     status = { state, reason, lastPublishedAt: status.lastPublishedAt };
     return status;
   };
+
+  /**
+   * Seat capacity history (3.10.1): every snapshot this process sees fresh —
+   * its own publish, or the Verse server's while dormant — goes to the rolling
+   * history, so Command's burn-downs survive a reload. The store drops a
+   * reading it already holds, so recording the Verse server's snapshot here
+   * AND in the Verse server is harmless. Never throws; a failure is logged
+   * once per distinct error and never changes the publisher's state.
+   */
+  function recordHistory(snapshot: CapacitySnapshot): void {
+    if (!deps.recordHistory) return;
+    let error: string | null;
+    try {
+      error = deps.recordHistory(snapshot);
+    } catch (err) {
+      error = err instanceof Error ? err.message : 'unknown error';
+    }
+    if (error !== null && error !== historyError) {
+      try { deps.log(`daemon capacity publisher: capacity history was not recorded (${error})`); } catch { /* never throws */ }
+    }
+    historyError = error;
+  }
 
   async function waitForFirstSample(collector: PublisherCollector): Promise<boolean> {
     const deadline = deps.nowMs() + SAMPLE_TIMEOUT_MS;
@@ -138,6 +174,7 @@ export function createDaemonCapacityPublisher(cfg: AshlrConfig, deps: DaemonCapa
       const age = ageMs(snapshot.publishedAt, now);
       const ours = status.lastPublishedAt !== null && snapshot.publishedAt === status.lastPublishedAt;
       if (!ours && age <= FOREIGN_FRESH_MS) {
+        recordHistory(snapshot);
         return set('dormant', 'another publisher (the Verse server) keeps the capacity snapshot fresh');
       }
       if (ours && age < SAMPLE_EVERY_MS) return set('fresh', 'this daemon published the capacity snapshot recently');
@@ -165,6 +202,15 @@ export function createDaemonCapacityPublisher(cfg: AshlrConfig, deps: DaemonCapa
       if (stopped) return set('idle', 'the publisher stopped before publishing');
       const publishedAt = await deps.publish(cfg, collector);
       status = { state: 'published', reason: 'this daemon published a fresh capacity snapshot (no Verse server was publishing)', lastPublishedAt: publishedAt };
+      // Record exactly what was published: re-read it, and only when it is
+      // still ours (another writer may have replaced it in between).
+      let written: CapacitySnapshot | null = null;
+      try {
+        written = deps.readSnapshot();
+      } catch {
+        written = null;
+      }
+      if (written && written.publishedAt === publishedAt) recordHistory(written);
       return status;
     } catch (error) {
       return set('failed', `the capacity snapshot could not be published (${error instanceof Error ? error.message : 'unknown error'}); paid seats stay ineligible`);
@@ -212,7 +258,13 @@ export function createDaemonCapacityPublisher(cfg: AshlrConfig, deps: DaemonCapa
   };
 }
 
-function defaultDeps(): DaemonCapacityPublisherDeps {
+/**
+ * The production wiring (exported so tests exercise THIS object, not a copy
+ * of it — e.g. that `recordHistory` is wired, since the deps field is
+ * optional and a missing one would fail silently). Building it has no side
+ * effects: the collector and the budget API load only when called.
+ */
+export function defaultDaemonCapacityPublisherDeps(): DaemonCapacityPublisherDeps {
   return {
     nowMs: () => Date.now(),
     sleep: (ms) => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); }),
@@ -234,6 +286,7 @@ function defaultDeps(): DaemonCapacityPublisherDeps {
       return publishCapacitySnapshotFrom(cfg, collector as unknown as import('../verse/accounts.js').VerseAccountCollector);
     },
     log: (message) => { console.warn(`[ashlr] ${message}`); },
+    recordHistory: (snapshot) => recordCapacityHistoryFromSnapshot(snapshot, 'daemon').error,
   };
 }
 
@@ -258,7 +311,7 @@ export function ensureDaemonCapacityPublisher(cfg: AshlrConfig): PublisherStatus
   try {
     // The first standing tick's config is kept: the only thing read from it
     // is the accounts root and seat identity, which do not change mid-run.
-    singleton = createDaemonCapacityPublisher(cfg, defaultDeps());
+    singleton = createDaemonCapacityPublisher(cfg, defaultDaemonCapacityPublisherDeps());
     singleton.start();
     return singleton.status();
   } catch {

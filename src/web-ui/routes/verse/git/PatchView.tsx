@@ -331,7 +331,8 @@ function lineLabel(line: DiffLine): string {
 
 function AddButton({ onClick, line }: { onClick: () => void; line: number }) {
   return (
-    <button type="button" className={styles.gutterAdd} tabIndex={-1} onClick={onClick} aria-label={`Add a comment on line ${line}`}>
+    <button type="button" className={styles.gutterAdd} tabIndex={-1} onClick={onClick} aria-label={`Add a comment on line ${line}`}
+      title={`Add a comment on line ${line}`}>
       +
     </button>
   );

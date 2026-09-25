@@ -24,7 +24,17 @@ import type { AuditEntry, DaemonDispatchTrace, VerseControlSnapshot } from './co
 // defaults to 200 rows and offers 500), so a bare "03:12:44" cannot tell last
 // night from last week. It prints time alone for today and prefixes the date
 // otherwise.
-import { describeTickOutcome, formatAge, formatCount, formatStamp, formatUsd, UNKNOWN } from './format.js';
+// The relative age rides in the tooltip as a phrase ("7m ago"), not a bare "7m".
+import {
+  describeTickOutcome,
+  formatCount,
+  formatRelative,
+  formatStamp,
+  formatUsd,
+  repoDisplayName,
+  tidyProse,
+  UNKNOWN,
+} from './format.js';
 import styles from './autonomy.module.css';
 
 const RECENT_TICKS = 20;
@@ -83,7 +93,7 @@ export function ActivityPanel({ snapshot }: { snapshot: VerseControlSnapshot }) 
                 const outcome = describeTickOutcome(tick.reason);
                 return (
                   <tr key={`${tick.ts}-${tick.reason}`}>
-                    <td className={styles.cellTime} title={formatAge(tick.ts)}>
+                    <td className={styles.cellTime} title={formatRelative(tick.ts)}>
                       {formatStamp(tick.ts)}
                     </td>
                     <td className={styles.cellSummary} data-tone={outcome.tone}>
@@ -110,7 +120,7 @@ export function ActivityPanel({ snapshot }: { snapshot: VerseControlSnapshot }) 
       {dispatches.length === 0 ? (
         <p className={styles.empty}>
           No dispatch traces in the recorded ticks. A tick that finds nothing eligible records no dispatches — that is
-          normal, not a gap.
+          normal, not a gap. Run one tick from Controls to see what it would pick up.
         </p>
       ) : (
         <div className={styles.tableScroll}>
@@ -128,18 +138,18 @@ export function ActivityPanel({ snapshot }: { snapshot: VerseControlSnapshot }) 
             <tbody>
               {dispatches.map((row, i) => (
                 <tr key={`${row.tickTs}-${row.itemId}-${i}`}>
-                  <td className={styles.cellTime} title={formatAge(row.tickTs)}>
+                  <td className={styles.cellTime} title={formatRelative(row.tickTs)}>
                     {formatStamp(row.tickTs)}
                   </td>
                   <td className={styles.cellSummary} title={row.title}>
                     {row.title}
                   </td>
                   <td className={styles.cellRepo} title={row.repo}>
-                    {row.repo ? row.repo.split('/').pop() : UNKNOWN}
+                    {row.repo ? repoDisplayName(row.repo) : UNKNOWN}
                   </td>
                   <td className={styles.cellAction}>{row.backend ?? 'not routed'}</td>
                   <td className={styles.cellSummary}>
-                    {row.dispatched ? 'dispatched' : `skipped — ${row.reason}`}
+                    {row.dispatched ? 'dispatched' : `skipped — ${tidyProse(row.reason)}`}
                   </td>
                   <td className={styles.cellTime}>{formatUsd(row.spentUsd)}</td>
                 </tr>
@@ -240,7 +250,7 @@ export function AuditTrail() {
       ) : entries.length === 0 ? (
         <p className={styles.empty}>
           {action || result
-            ? 'No audit entries match this filter.'
+            ? 'No audit entries match this filter. Clear the Action or Result filter to see every entry.'
             : 'No audit entries recorded yet. Every autonomous or sandbox action appends one here, and none are ever deleted.'}
         </p>
       ) : (
@@ -263,7 +273,7 @@ export function AuditTrail() {
               <tbody>
                 {entries.map((entry, i) => (
                   <tr key={`${entry.ts}-${entry.action}-${i}`}>
-                    <td className={styles.cellTime} title={formatAge(entry.ts)}>
+                    <td className={styles.cellTime} title={formatRelative(entry.ts)}>
                       {formatStamp(entry.ts)}
                     </td>
                     <td className={styles.cellAction}>{entry.action}</td>
@@ -273,9 +283,9 @@ export function AuditTrail() {
                       </span>
                     </td>
                     <td className={styles.cellRepo} title={entry.repo ?? undefined}>
-                      {entry.repo ? entry.repo.split('/').pop() : '—'}
+                      {entry.repo ? repoDisplayName(entry.repo) : UNKNOWN}
                     </td>
-                    <td className={styles.cellSummary}>{entry.summary}</td>
+                    <td className={styles.cellSummary}>{tidyProse(entry.summary)}</td>
                   </tr>
                 ))}
               </tbody>

@@ -98,29 +98,51 @@ Three regions, all resizable, all persisted:
 - **Sidebar (240–360px, collapsible):** section-dependent. For Chat: search field, "New chat", then
   sessions grouped by project with a 2px engine marker, title, and a right-aligned relative time.
   Running sessions show a small pulsing dot, never a spinner.
-- **Main:** section content. For Chat: a header strip (title, seat pill, context meter, actions), the
+- **Main:** section content. For Chat: a header strip (title, seat pill, context ring, actions), the
   720px transcript column, and the composer docked at the bottom with the same measure.
 
 Header strips are 48px, bottom-bordered hairline, and contain no filled buttons — only ghost icon
-buttons and text. The context meter is a 2px full-width line directly under the header strip, not a
-labelled progress bar; its tooltip and an adjacent `18k / 66k` in Space Grotesk carry the numbers.
+buttons and text. Context is a 16px occupancy ring with a tick at the compaction point and the
+percentage beside it in Space Grotesk, not a labelled progress bar. The header and the composer
+footer draw the same ring from one reading, so they cannot disagree; its tooltip carries the tokens
+(`18,000 of 66,000 tokens`) and where the CLI compacts.
 
 ## 5. Chat surface specifics
 
-- **Messages.** No bubbles. The user turn is indented with a 2px left border in `--border-strong` and
-  secondary text color; the assistant turn is plain primary text at full measure. Role is conveyed by
-  weight and border, not by a colored box.
+- **Messages.** The user turn is a quiet rounded block aligned right: `--bg-hover` ground,
+  `--radius-lg`, primary text, at most 85% of the measure, no border and no colour of its own. The
+  assistant turn is plain primary prose at full measure, with no box at all. Role is conveyed by
+  placement and shape, never by colour alone.
+- **Turn footer.** A settled turn ends in a muted footer attached to it — its duration in Space
+  Grotesk tabular numerals and, when calls failed, "2 failures in this turn — jump to the first". It
+  is `--text-2xs` tertiary, stepping up to secondary while the turn is hovered or focused. There is
+  no duration line of its own between turns; a clean end draws nothing else.
 - **Markdown.** Real typographic hierarchy: h1–h3 in display font, lists with proper hanging indents,
   tables with hairline rules, blockquotes with a left rule. Code blocks: `--bg-code`, 1px border, a
   language label and a copy button revealed on hover in the top-right, no chrome otherwise.
 - **Tool calls.** One line per call when collapsed: a 12px glyph, the tool name in mono, a truncated
-  argument, and a right-aligned duration. A run of calls collapses into a single summary row
-  (`6 tools · Read ×4, Edit ×2 · 12s`). Expanded, each shows input and output in a bordered mono block.
-  Failures tint the left rule danger, nothing else.
+  argument, an edit's `+12 −3`, and a right-aligned duration. A run of calls collapses into a single
+  activity row (`Ran 12 commands · read 8 files · edited 3 files · 1 failed · 2m 14s`) that opens on
+  its failed and running calls. Expanded, each shows input and output in a bordered mono block.
+  Failures tint the left rule danger and say so in words.
+- **Paths.** Every path a tool or file row shows reads relative to the chat's roots (`src/math.ts`),
+  else `~`-abbreviated, else (when long) its last three segments behind `…/`. The full path is the
+  tooltip. Display only: nothing handed back to a tool, a search or a jump is rewritten.
 - **Composer.** Auto-growing textarea to 40% viewport height, hairline border that gains the accent on
-  focus, no inner card. Below it a single control row: seat pill (engine-tinted dot + name), a
-  mic button, and the send/stop button. Placeholder is one short line. The keyboard hint row is
-  `--text-2xs` tertiary and hides once the user has sent their first message in the session.
+  focus, no inner card. Placeholder: "Ask anything — @ to add files, / for commands". Below it one
+  footer row of 28px controls, 8px apart. Left is how you write: attach, mic, permission mode. Right
+  is where it runs: seat chip, Model picker, Effort, context ring, Send.
+  - The seat chip names only the account ("Claude Max", "Local") beside an engine monogram and, where
+    the provider reports one, a capacity ring; the model is said once, in the Model picker.
+  - Permission-mode labels are short and never ellipsized — Plan, Accept edits, Auto, Bypass — with
+    the full name ("Bypass permissions") as the control's accessible name and tooltip. Bypass is red.
+  - Effort appears only when the seat can set it, as "Effort: High".
+  - Send is the one filled accent button, "Send ⏎". While a turn runs it becomes Queue, with Stop
+    beside it as a square ■ icon button whose words are its name and tooltip.
+  - Too narrow for its words, the row folds in steps rather than truncating: "Effort:" becomes an
+    icon, the seat chip its monogram, the mode its icon, then the pickers move into a ⋯ sheet.
+  - The keyboard hint row under the box is `--text-2xs` tertiary and hides once the user has sent
+    their first message in the session.
 - **Streaming.** A 2px × 1em accent caret trailing the text. No skeletons mid-stream.
 
 ## 6. Accessibility, responsiveness, correctness

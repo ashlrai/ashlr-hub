@@ -18,11 +18,17 @@
  *
  * A failure tints the left rule and nothing else — the word "error" carries
  * the state (DESIGN §6).
+ *
+ * Paths read relative to the chat's roots (chat/path-display.ts): a Read of
+ * `/private/tmp/…/e2e-proj-39/math.ts` is drawn as `math.ts`, with the full
+ * path in the tooltip. The disclosure glyph is the same ▸ the activity row
+ * and the reasoning row use, so every foldable line opens the same way.
  */
 import { useMemo } from 'react';
 import { CommandOutput } from './chat/CommandOutput.js';
 import { LiveTimer } from './chat/LiveTimer.js';
 import { DiffBlock } from './chat/DiffBlock.js';
+import { useDisplayPath } from './chat/path-display.js';
 import { countDiffLines } from './chat/turn-model.js';
 import { readToolFacts, toolAnchorId, type ToolFacts } from './chat/tool-semantics.js';
 import { formatDuration, prettyJson, summarizeToolInput } from './verse-model.js';
@@ -53,7 +59,14 @@ export function ToolUseCard({ name, input, result, toolUseId, durationMs = null,
     () => facts ?? readToolFacts({ name, input, result }),
     [facts, name, input, result],
   );
-  const summary = summarizeToolInput(input);
+  const show = useDisplayPath();
+  // A file call names its file, relative to the chat's roots — never the
+  // 96-character head of an absolute path whose filename the cut dropped. A
+  // shell run keeps its command line verbatim.
+  const target = derived.command ? null : derived.paths[0] ?? null;
+  const summary = target === null
+    ? summarizeToolInput(input)
+    : `${show(target)}${derived.paths.length > 1 ? ` +${derived.paths.length - 1}` : ''}`;
   const isError = derived.failed || result?.isError === true;
   const pending = result === null;
   const state = pending
@@ -81,7 +94,7 @@ export function ToolUseCard({ name, input, result, toolUseId, durationMs = null,
       <summary className={styles.toolLine} aria-label={`${name}${summary ? `: ${summary}` : ''} (${state})`}>
         <span className={styles.toolGlyph} aria-hidden="true" />
         <span className={styles.toolName}>{name}</span>
-        {summary ? <span className={styles.toolArg} title={summary}>{summary}</span> : null}
+        {summary ? <span className={styles.toolArg} title={target ?? summary}>{summary}</span> : null}
         {delta && (delta.additions > 0 || delta.deletions > 0) ? (
           <span className={styles.toolDelta} aria-hidden="true">
             {delta.additions > 0 ? <span className={styles.toolAdd}>+{delta.additions}</span> : null}
@@ -108,6 +121,7 @@ interface ToolBodyProps {
 }
 
 function ToolBody({ input, output, facts, pending, isError }: ToolBodyProps) {
+  const show = useDisplayPath();
   // A shell run: the command line and exit status always, with the diff in
   // place of the log when the command's own output is one.
   if (facts.command) {
@@ -136,7 +150,9 @@ function ToolBody({ input, output, facts, pending, isError }: ToolBodyProps) {
     return (
       <>
         <section>
-          <h4 className={styles.toolLabel}>Contents written to {facts.written.path}</h4>
+          <h4 className={styles.toolLabel}>
+            Contents written to <span className={styles.toolLabelPath} title={facts.written.path}>{show(facts.written.path)}</span>
+          </h4>
           <pre className={styles.toolPre}>{facts.written.text}</pre>
           <p className={styles.toolNote}>
             The previous contents were not in this tool call, so there is nothing to diff against.

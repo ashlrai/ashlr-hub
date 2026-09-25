@@ -50,6 +50,7 @@ import type {
 } from '../../../../core/verse/types.js';
 import { CODEX_EXPANSIVE_METERING_NOTE, WINDOW_SOURCE_TEXT, modelOptionFor, seatUnavailableReason, sessionContextBudget } from '../verse-model.js';
 import { formatTokens } from '../verse-store.js';
+import { formatWholePercent } from '../autonomy/format.js';
 
 // ---------------------------------------------------------------------------
 // Models and modes
@@ -374,9 +375,10 @@ export function reportedCacheHitRatio(usage: Pick<VerseUsage, 'inputTokens' | 'c
   return cacheHitRatio(usage);
 }
 
+/** A 0–1 ratio as a whole percent; a real sliver reads "<1%", never "0%". */
 export function formatRatio(ratio: number | null): string {
   if (ratio === null || !Number.isFinite(ratio)) return '—';
-  return `${Math.round(ratio * 100)}%`;
+  return formatWholePercent(ratio);
 }
 
 export interface TurnContextStats {

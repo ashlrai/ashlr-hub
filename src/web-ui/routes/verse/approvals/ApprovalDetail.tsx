@@ -32,8 +32,21 @@ import { DiffViewer } from '../../inbox/DiffViewer.js';
 // Shell helpers, not autonomy/'s: 3.10 moves the Autonomy panels under Fleet
 // (C7), and the drawer that hosts this view must not break when they move.
 import { describeActionError as describeControlError } from '../shell/guarded-action.js';
-import { ago as formatRelative } from '../shell/needs-you-model.js';
-import { describeApproveConsequence, engineOf, reachesRemote } from './approvals-model.js';
+// A pure text helper (no panel code): ISO instants → local time, ".;" → ";".
+import { tidyProse } from '../autonomy/format.js';
+import {
+  describeApproveConsequence,
+  describeDiffStats,
+  engineOf,
+  formatDiffStats,
+  kindLabel,
+  localStamp,
+  longAgo,
+  parseRunSummary,
+  reachesRemote,
+  readableTitle,
+  repoName,
+} from './approvals-model.js';
 import styles from './approvals.module.css';
 
 const JUDGE_REASON_DISPLAY: Record<JudgeDecisionReasonCode, { label: string; tone: Tone }> = {
@@ -149,22 +162,56 @@ export function ApprovalDetail({ id, dispatchEnabled, onDispatchDisabled, onDeci
   const canDecide = p.status === 'pending' && dispatchEnabled;
   const engine = engineOf(p);
   const consequence = describeApproveConsequence(p.kind, p.repo);
+  const title = readableTitle(p.title);
+  const project = repoName(p.repo);
+  const facts = parseRunSummary(p.summary);
+  // The run facts are shown as stats; only what the summary says beyond them stays a sentence.
+  const summaryText = facts ? facts.rest : p.summary ? tidyProse(p.summary) : null;
 
   return (
     <div className={styles.detail}>
       <header className={styles.detailHead}>
-        <h3 className={styles.detailTitle}>{p.title}</h3>
+        <p className={styles.eyebrow}>
+          {kindLabel(p.kind)}
+          {title.eyebrow ? ` \u00b7 ${title.eyebrow}` : ''}
+        </p>
+        {/* Two lines at most; the whole title (as the server sent it) is the tooltip. */}
+        <h3 className={styles.detailTitle} title={p.title}>{title.text}</h3>
         <div className={styles.detailMeta}>
           <StatusBadge status={p.status} />
-          <span>{p.kind}</span>
-          <code title={p.repo ?? undefined}>{p.repo ?? 'no repo'}</code>
+          {project ? (
+            <span className={styles.project} title={p.repo ?? undefined}>{project}</span>
+          ) : (
+            <span>no repository</span>
+          )}
           <span>{p.riskClass ? `${p.riskClass} risk` : 'risk unstated'}</span>
-          {engine ? <code>{engine}</code> : null}
-          <span>created {formatRelative(p.createdAt)}</span>
-          {p.decidedAt ? <span>decided {formatRelative(p.decidedAt)}</span> : null}
+          {engine ? <code title="The model that produced this change">{engine}</code> : null}
+          <span title={localStamp(p.createdAt)}>created {longAgo(p.createdAt)}</span>
+          {p.decidedAt ? <span title={localStamp(p.decidedAt)}>decided {longAgo(p.decidedAt)}</span> : null}
           {query.status === 'refreshing' ? <RefreshIndicator /> : null}
         </div>
-        {p.summary ? <p className={styles.summary}>{p.summary}</p> : null}
+        {facts ? (
+          <p className={styles.runFacts}>
+            {/* aria-label on a plain span is ignored (a generic role cannot be
+                named), so the glyphs are hidden and the sentence is real,
+                visually-hidden text — NeedsYouRunFacts' pattern. */}
+            <span className={styles.diffStats} aria-hidden="true">
+              {formatDiffStats(facts)}
+            </span>
+            <span className="visually-hidden">{describeDiffStats(facts)}</span>
+            <span aria-hidden="true">·</span>
+            <span className={styles.runSource} title={facts.sourceHint ?? undefined}>
+              {facts.partial ? 'Partial \u00b7 ' : ''}{facts.sourceLabel}
+            </span>
+            {engine === null ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <code title="The model that produced this change">{facts.model}</code>
+              </>
+            ) : null}
+          </p>
+        ) : null}
+        {summaryText ? <p className={styles.summary}>{summaryText}</p> : null}
       </header>
 
       <section className={styles.block} aria-label="Evidence">
@@ -208,7 +255,7 @@ export function ApprovalDetail({ id, dispatchEnabled, onDispatchDisabled, onDeci
           {p.decisionReason ? (
             <>
               <dt>Decision reason</dt>
-              <dd>{p.decisionReason}</dd>
+              <dd>{tidyProse(p.decisionReason)}</dd>
             </>
           ) : null}
 
@@ -226,7 +273,7 @@ export function ApprovalDetail({ id, dispatchEnabled, onDispatchDisabled, onDeci
           {p.result ? (
             <>
               <dt>Result</dt>
-              <dd>{p.result}</dd>
+              <dd>{tidyProse(p.result)}</dd>
             </>
           ) : null}
         </dl>
@@ -239,6 +286,21 @@ export function ApprovalDetail({ id, dispatchEnabled, onDispatchDisabled, onDeci
           <dd>{engine ? <code>{engine}</code> : <span className={styles.muted}>unknown engine</span>}</dd>
           <dt>Origin</dt>
           <dd>{p.origin}</dd>
+          {facts ? (
+            <>
+              <dt>How it was made</dt>
+              <dd>
+                <span title={facts.sourceHint ?? undefined}>{facts.sourceLabel}</span>
+                {facts.sourceHint ? <p className={styles.hint}>{facts.sourceHint}</p> : null}
+              </dd>
+            </>
+          ) : null}
+          {p.repo ? (
+            <>
+              <dt>Repository</dt>
+              <dd><code>{p.repo}</code></dd>
+            </>
+          ) : null}
           {p.workItemId ? (
             <>
               <dt>Work item</dt>
@@ -316,15 +378,22 @@ export function ApprovalDetail({ id, dispatchEnabled, onDispatchDisabled, onDeci
         }}
         title={
           pendingAction === 'approve'
-            ? `Approve this ${p.kind} against ${p.repo ? p.repo.split('/').pop() : 'the repository'}?`
+            ? `Approve this ${p.kind} against ${project ?? 'the repository'}?`
             : 'Reject this proposal?'
         }
         body={
           pendingAction === 'approve' ? (
             <>
-              <strong>{p.title}</strong>
+              <strong>{title.text}</strong>
               <br />
-              Kind <strong>{p.kind}</strong> · repository <code>{p.repo ?? 'unknown'}</code>
+              {kindLabel(p.kind)} · <strong>{project ?? 'unknown repository'}</strong>
+              {p.repo ? (
+                <>
+                  <br />
+                  {/* The exact checkout the write lands in — the one place the full path belongs. */}
+                  <code>{p.repo}</code>
+                </>
+              ) : null}
               <br />
               <br />
               {consequence}
@@ -338,7 +407,7 @@ export function ApprovalDetail({ id, dispatchEnabled, onDispatchDisabled, onDeci
             </>
           ) : (
             <>
-              This rejects <strong>{p.title}</strong> and discards it. It stays in history as rejected and is never
+              This rejects <strong>{title.text}</strong> and discards it. It stays in history as rejected and is never
               applied.
             </>
           )

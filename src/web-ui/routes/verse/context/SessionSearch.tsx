@@ -160,7 +160,7 @@ export function SessionSearch({ onOpenSession, query, selectedId = null }: Sessi
       ) : busy && !response ? (
         <p className={`${styles.hint} ${styles.searchNote}`}>Searching messages…</p>
       ) : groups.length === 0 ? (
-        <p className={`${styles.hint} ${styles.searchNote}`}>No messages match “{q}”.</p>
+        <p className={`${styles.hint} ${styles.searchNote}`}>No messages match “{q}”. Try fewer or different words.</p>
       ) : (
         <ul className={styles.hits}>
           {groups.map((group) => {
@@ -174,7 +174,8 @@ export function SessionSearch({ onOpenSession, query, selectedId = null }: Sessi
                   data-session={group.sessionId} data-engine={group.engine}
                   onClick={() => onOpenSession(group.sessionId)}>
                   <span className={styles.hitMarker} aria-hidden="true" />
-                  <span className={styles.hitTitle}>{group.title || 'Untitled chat'}</span>
+                  {/* The title truncates to one line, so it carries itself in full as a tooltip. */}
+                  <span className={styles.hitTitle} title={group.title || 'Untitled chat'}>{group.title || 'Untitled chat'}</span>
                   <time className={styles.hitTime} dateTime={group.latestAt}>{formatRelative(group.latestAt)}</time>
                   <span className={styles.hitSnippet}>
                     <span className={styles.hitWho}>{who}{more}: </span>

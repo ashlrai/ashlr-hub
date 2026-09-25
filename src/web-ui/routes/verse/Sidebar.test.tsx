@@ -217,7 +217,7 @@ describe('Sidebar — one search field, two answers', () => {
     mountWithQuery('login');
     const nav = screen.getByRole('navigation', { name: 'Chats' });
     expect(within(nav).getByRole('button', { name: /Fix the login bug/ })).toBeInTheDocument();
-    expect(await screen.findByText('No messages match “login”.')).toBeInTheDocument();
+    expect(await screen.findByText(/^No messages match “login”\./)).toBeInTheDocument();
   });
 });
 
@@ -396,5 +396,178 @@ describe('Sidebar 3.10', () => {
     expect(within(menu).getByRole('menuitem', { name: /Pin/ })).toHaveAttribute('aria-disabled', 'true');
     expect(within(menu).getByRole('menuitem', { name: /Pin/ })).toHaveTextContent('Not available on this server yet.');
     expect(within(menu).getByRole('menuitem', { name: /Delete/ })).toHaveTextContent('Stop its turn before deleting.');
+  });
+});
+
+// ===========================================================================
+// 3.10.1 — group names, the "!" explained, keyboard, the footer action
+// ===========================================================================
+
+describe('Sidebar 3.10.1', () => {
+  function mountList(sessions: VerseSession[], over: Partial<import('./Sidebar.js').SidebarProps> = {}) {
+    const onSelect = vi.fn();
+    const onDisconnect = vi.fn();
+    render(
+      <Sidebar sessions={sessions} sessionsStatus="success" sessionsError={null} projects={[]} seats={[CLAUDE_SEAT]}
+        selectedId={null} query="" onQuery={() => {}} onSelect={onSelect} onNew={() => {}} onRetry={() => {}}
+        onCollapse={() => {}} onDisconnect={onDisconnect} {...over} />,
+    );
+    return { onSelect, onDisconnect, nav: screen.getByRole('navigation', { name: 'Chats' }) };
+  }
+
+  it('heads each group with the folder name as it is on disk, full path as the tooltip', async () => {
+    const path = '/Users/mason/.claude/plugins/ashlr-plugin--local';
+    const { nav } = mountList([session({ id: 'vs_p', title: 'Plugin work', projectPath: path })]);
+    const heading = within(nav).getByRole('heading', { name: /^ashlr-plugin--local/ });
+    // Normal case, not a shouted slug: the text is the basename verbatim…
+    expect(within(heading).getByText('ashlr-plugin--local')).toBeInTheDocument();
+    expect(heading).toHaveAttribute('title', path);
+    // …and the stylesheet no longer upper-cases it.
+    const { moduleDeclaration } = await import('../../design/token-probe.test-support.js');
+    expect(moduleDeclaration('routes/verse/Sidebar.module.css', '.groupTitle', 'text-transform')).toBeNull();
+  });
+
+  it('explains the red "!" in the row tooltip, not only to a screen reader', async () => {
+    const user = userEvent.setup();
+    const { nav } = mountList([session({ id: 'vs_f', title: 'Broken build', status: 'error' })]);
+    const row = within(nav).getByRole('button', { name: /Broken build/ });
+    expect(within(row).getByRole('img', { name: 'Last turn failed' })).toHaveTextContent('!');
+    await user.hover(row);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Broken build · Claude Max · Opus 5 · Last turn failed');
+  });
+
+  it('moves between chats with ↑/↓, Home/End, and opens one with Enter', async () => {
+    const user = userEvent.setup();
+    const { onSelect, nav } = mountList([
+      session({ id: 'vs_a', title: 'Alpha', updatedAt: '2026-09-19T10:05:00.000Z' }),
+      session({ id: 'vs_b', title: 'Bravo', updatedAt: '2026-09-19T10:04:00.000Z', projectPath: '/Users/mason/dev/site' }),
+      session({ id: 'vs_c', title: 'Charlie', updatedAt: '2026-09-19T10:03:00.000Z' }),
+    ]);
+    const row = (title: string) => within(nav).getByRole('button', { name: new RegExp(`^${title}`) });
+    // ↓ from the search field lands on the first chat.
+    screen.getByRole('searchbox', { name: 'Search chats and messages' }).focus();
+    await user.keyboard('{ArrowDown}');
+    expect(row('Alpha')).toHaveFocus();
+    // Across group boundaries, in the order the list draws them (hub: Alpha, Charlie; site: Bravo).
+    await user.keyboard('{ArrowDown}');
+    expect(row('Charlie')).toHaveFocus();
+    await user.keyboard('{ArrowDown}');
+    expect(row('Bravo')).toHaveFocus();
+    await user.keyboard('{ArrowDown}');
+    expect(row('Bravo')).toHaveFocus();
+    await user.keyboard('{Home}');
+    expect(row('Alpha')).toHaveFocus();
+    await user.keyboard('{End}{ArrowUp}');
+    expect(row('Charlie')).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(onSelect).toHaveBeenCalledWith('vs_c');
+  });
+
+  it('labels the footer action for what it does, and explains it in a tooltip', async () => {
+    const user = userEvent.setup();
+    const { onDisconnect, nav } = mountList([session()]);
+    const button = within(nav).getByRole('button', { name: 'Disconnect from hub' });
+    button.focus();
+    const tip = await screen.findByRole('tooltip');
+    expect(tip).toHaveTextContent('Signs this window out');
+    expect(tip).toHaveTextContent('unsent drafts');
+    expect(tip).toHaveTextContent('Chats stay on the hub');
+    // One click only ASKS (see "Sidebar — Disconnect from hub asks first").
+    await user.click(button);
+    expect(onDisconnect).not.toHaveBeenCalled();
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Disconnect' }));
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ===========================================================================
+// 3.10.1 — the footer's Disconnect confirms, like Settings ▸ Connection
+// ===========================================================================
+
+describe('Sidebar — Disconnect from hub asks first', () => {
+  /**
+   * Disconnecting signs this window out AND throws away every unsent draft,
+   * so one stray click in the footer must not do it. Settings ▸ Connection
+   * already confirms; the footer uses the same Dialog primitive and the same
+   * Cancel-first focus, and onDisconnect runs only from the red button.
+   */
+  function mountFooter() {
+    const onDisconnect = vi.fn();
+    render(
+      <Sidebar sessions={[session()]} sessionsStatus="success" sessionsError={null} projects={[]} seats={[CLAUDE_SEAT]}
+        selectedId={null} query="" onQuery={() => {}} onSelect={() => {}} onNew={() => {}} onRetry={() => {}}
+        onCollapse={() => {}} onDisconnect={onDisconnect} />,
+    );
+    const trigger = within(screen.getByRole('navigation', { name: 'Chats' })).getByRole('button', { name: 'Disconnect from hub' });
+    return { onDisconnect, trigger };
+  }
+
+  it('opens a confirm dialog, focused on Cancel, and does not disconnect on the first click', async () => {
+    const user = userEvent.setup();
+    const { onDisconnect, trigger } = mountFooter();
+    expect(trigger).toHaveAttribute('aria-haspopup', 'dialog');
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    await user.click(trigger);
+    const dialog = screen.getByRole('dialog', { name: 'Disconnect from this hub?' });
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(dialog).toHaveTextContent('Unsent drafts in open chats will be cleared.');
+    // Announced, not just drawn: focus opens on Cancel, so the warning is
+    // only heard because it is the dialog's description (3.10.1 review).
+    expect(dialog).toHaveAccessibleDescription(
+      'Unsent drafts in open chats will be cleared. Your chats stay on the hub; you will need the read token to reconnect.');
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus();
+    expect(within(dialog).getByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
+    expect(onDisconnect).not.toHaveBeenCalled();
+  });
+
+  it('Enter on the default (Cancel) keeps the session', async () => {
+    const user = userEvent.setup();
+    const { onDisconnect, trigger } = mountFooter();
+    await user.click(trigger);
+    await user.keyboard('{Enter}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(onDisconnect).not.toHaveBeenCalled();
+  });
+
+  it('Cancel dismisses without disconnecting and returns focus to the footer button', async () => {
+    const user = userEvent.setup();
+    const { onDisconnect, trigger } = mountFooter();
+    await user.click(trigger);
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(onDisconnect).not.toHaveBeenCalled();
+    expect(trigger).toHaveFocus();
+  });
+
+  it('Escape dismisses without disconnecting', async () => {
+    const user = userEvent.setup();
+    const { onDisconnect, trigger } = mountFooter();
+    await user.click(trigger);
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(onDisconnect).not.toHaveBeenCalled();
+    expect(trigger).toHaveFocus();
+  });
+
+  it('the red Disconnect calls onDisconnect exactly once and closes the dialog', async () => {
+    const user = userEvent.setup();
+    const { onDisconnect, trigger } = mountFooter();
+    await user.click(trigger);
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Disconnect' }));
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
+    expect(onDisconnect).toHaveBeenCalledWith();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('asks again every time: a cancelled confirm does not arm the next click', async () => {
+    const user = userEvent.setup();
+    const { onDisconnect, trigger } = mountFooter();
+    await user.click(trigger);
+    await user.keyboard('{Escape}');
+    await user.click(trigger);
+    expect(screen.getByRole('dialog', { name: 'Disconnect from this hub?' })).toBeInTheDocument();
+    expect(onDisconnect).not.toHaveBeenCalled();
   });
 });

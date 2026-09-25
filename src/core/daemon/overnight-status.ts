@@ -233,6 +233,91 @@ export function disarmOvernightRun(): OvernightStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Prose — the sentences a person reads in the morning
+// ---------------------------------------------------------------------------
+//
+// 3.10.0 built the post-merge discard reason by joining fragments with "; "
+// and then appending ". ", so a fragment that already ended in a full stop
+// printed "(exit 1).; lint …" or "… failed.. Back it out". The client now
+// tidies that for display (autonomy/format.ts tidyProse), but the record is
+// also read by the morning report and by anything that tails status.json, so
+// the engine writes clean prose itself. The rules mirror tidyProse, except
+// that ".." collapses only where it ends a sentence (SENTENCE_FINAL_DOUBLE_STOP
+// — a path or git range in a failure detail is never rewritten); tidyProse
+// should narrow the same way. Kept inline (no import): this module is in the Tier-1
+// runtime import closure, which must not grow for a string helper.
+//
+// ISO instants inside a passed-through sentence (a run-window refusal, a
+// gate's own words) are deliberately NOT rewritten here: the reader's local
+// time is the client's call, and every such row already carries its instant
+// as a structured `at` field.
+
+/** A sentence terminator, optionally followed by a closing quote or bracket. */
+const SENTENCE_END = /[.!?…]["'”’)\]]*$/;
+/** A fragment that opens a sentence of its own, rather than continuing a clause. */
+const STARTS_SENTENCE = /^[\p{Lu}\p{N}"'“‘]/u;
+
+/**
+ * A doubled full stop that ENDS a sentence: after a word character or a
+ * closing bracket/quote (never after a space, a slash or another dot), in a
+ * token with no path separator, and followed by the fragment's end, a ";", or
+ * a space and the start of a new sentence. Everything else is detail the
+ * operator acts on and is left byte-exact: a relative path ("'../dist/cli.js'",
+ * "cd .."), a git range ("abc123..def456", "origin/main.. unreadable"), an
+ * ellipsis. Known limit: a bare open range at a fragment's very end
+ * ("… range abc123..") reads as a doubled stop.
+ */
+const SENTENCE_FINAL_DOUBLE_STOP = /(?<![/\\]\S*)(?<=[^\s./\\])\.\.(?=\s*$|\s*;|\s+[\p{Lu}\p{N}"'“‘([])/gu;
+
+/**
+ * One fragment made printable: line breaks (an Error message can carry
+ * several) folded to one space, a sentence-final ".." or ".;" collapsed, and
+ * any dangling ",", ";" or ":" dropped — "could not be run: " with an empty
+ * error would otherwise close as "run:.".
+ */
+function cleanFragment(text: string): string {
+  return String(text ?? '')
+    .replace(/\s*[\r\n]+\s*/g, ' ')
+    // ".." first, so "failed..; lint" ends as "failed; lint", not "failed.;".
+    .replace(SENTENCE_FINAL_DOUBLE_STOP, '.')
+    .replace(/(?<!\.)\.\s*;/g, ';')
+    .trim()
+    .replace(/[\s,;:]+$/, '');
+}
+
+/**
+ * Join reason fragments into prose without ".;" or "..":
+ *   - after a fragment that is still a clause (no terminator): "; ";
+ *   - after a finished sentence, before one that starts a new sentence
+ *     (capital, digit or opening quote): a single space;
+ *   - after a sentence closed by ONE full stop, before a lowercase clause:
+ *     the stop is dropped and "; " joins them ("(exit 1); lint timed out");
+ *   - after "?", "!" or an ellipsis: a space (dropping those would change
+ *     what the sentence says).
+ * Empty fragments are skipped. The result keeps the LAST fragment's own
+ * ending; close it with {@link closeSentence} when it ends the sentence.
+ */
+export function joinReasonParts(parts: readonly string[]): string {
+  let out = '';
+  for (const raw of parts) {
+    const part = cleanFragment(raw);
+    if (part.length === 0) continue;
+    if (out.length === 0) out = part;
+    else if (!SENTENCE_END.test(out)) out = `${out}; ${part}`;
+    else if (STARTS_SENTENCE.test(part)) out = `${out} ${part}`;
+    else if (/(?<!\.)\.$/.test(out)) out = `${out.slice(0, -1)}; ${part}`;
+    else out = `${out} ${part}`;
+  }
+  return out;
+}
+
+/** End `text` with a full stop unless it already ends a sentence ("." "!" "?" "…"). */
+function closeSentence(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.length === 0 || SENTENCE_END.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+// ---------------------------------------------------------------------------
 // Recording progress
 // ---------------------------------------------------------------------------
 
@@ -290,10 +375,14 @@ export function recordOvernightIteration(
     // A halted landing is not a merge that stuck — it is work the operator
     // must back out, and it says exactly why and exactly how.
     for (const landing of result.landings) {
-      const why = result.failures
-        .filter((f) => f.repo === landing.repo)
-        .map((f) => `${f.kind} ${f.detail}`)
-        .join('; ');
+      const why = joinReasonParts(
+        result.failures
+          .filter((f) => f.repo === landing.repo)
+          .map((f) => `${f.kind} ${f.detail}`),
+      );
+      const verdict = result.verdict === 'regressed'
+        ? `post-merge suite failed on ${landing.repo}: ${why || 'a required check went red after the merge'}`
+        : `the merge on ${landing.repo} could not be verified: ${why || 'no required verify command could be run'}`;
       discarded.push({
         id: landing.commits[0]
           ? proposalIdFromCommitSubject(landing.commits[0].subject) ?? landing.commits[0].sha.slice(0, 12)
@@ -301,11 +390,9 @@ export function recordOvernightIteration(
         repo: landing.repo,
         title: landing.commits[0]?.subject ?? `landing ${landing.beforeHead.slice(0, 8)}..${landing.afterHead.slice(0, 8)}`,
         at,
-        reason: result.verdict === 'regressed'
-          ? `post-merge suite failed on ${landing.repo}: ${why || 'a required check went red after the merge'}. ` +
-            `Back it out with: ${landing.revertCommand}`
-          : `the merge on ${landing.repo} could not be verified: ${why || 'no required verify command could be run'}. ` +
-            `Back it out with: ${landing.revertCommand}`,
+        // The revert command is left exactly as the gate wrote it (no period
+        // appended, whitespace untouched) so it can be copied and run.
+        reason: `${closeSentence(verdict)} Back it out with: ${landing.revertCommand}`,
       });
     }
   }

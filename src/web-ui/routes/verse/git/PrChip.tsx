@@ -28,7 +28,7 @@ export function PrChip({ pr, counts = null, showTitle = true }: PrChipProps) {
       target="_blank"
       rel="noopener noreferrer"
       aria-label={`${model.label}. Opens on GitHub.`}
-      title={pr.title}
+      title={`${model.label}. Opens on GitHub.`}
     >
       <PrGlyph tone={model.tone} state={pr.state} />
       <span className={styles.number}>{model.number}</span>

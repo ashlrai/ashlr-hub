@@ -16,6 +16,8 @@
  *   GET  /api/verse/fleet/history     FleetHistoryResponse  (A8)
  *   GET  /api/reasoning/digest        ReasoningDigest       (A7)
  *   GET  /api/verse/budget            BudgetView            (A9 — budget-queries.ts)
+ *   GET  /api/verse/budget/history    CapacityHistoryResponse (3.10.1 — recorded
+ *                                     seat window history for the burn-downs)
  *   GET  /api/models                  per-model ROI         (data/queries.ts)
  *
  * WHY every read is OPTIONAL: Track B's modules land in parallel with these
@@ -49,6 +51,7 @@ import type { LearningStateV1 } from '../../../../core/learn/harness-types.js';
 import type { VerseActivityResponse } from '../../../../core/verse/workbench-types.js';
 import type { FleetHistoryResponse } from '../../../../core/verse/fleet-history-types.js';
 import type { ReasoningDigest } from '../../../../core/reasoning/types.js';
+import type { CapacityHistoryResponse } from '../../../../core/routing/capacity-history-types.js';
 
 /** A read that is allowed to be absent (the autonomy folder's shape, reused). */
 export type OptionalRead<T> = OptionalFleetRead<T>;
@@ -60,6 +63,8 @@ export const LEADER_PATH = '/api/verse/leader';
 export const LEARNING_PATH = '/api/verse/learning';
 export const FLEET_HISTORY_PATH = '/api/verse/fleet/history?days=90';
 export const REASONING_DIGEST_PATH = '/api/reasoning/digest?days=30';
+/** Eight days: the whole weekly window plus the day before it opened. */
+export const SEAT_HISTORY_PATH = '/api/verse/budget/history?days=8';
 
 export const SURFACE_KEYS = Object.freeze({
   authority: 'verse-authority',
@@ -69,6 +74,7 @@ export const SURFACE_KEYS = Object.freeze({
   learning: 'verse-learning',
   fleetHistory: 'verse-fleet-history-90d',
   reasoningDigest: 'verse-reasoning-digest-30d',
+  seatHistory: 'verse-seat-history-8d',
 });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -110,6 +116,10 @@ export const narrow = {
   reasoningDigest(raw: unknown): ReasoningDigest | null {
     return isRecord(raw) && Array.isArray(raw['insights']) && Array.isArray(raw['trends']) && isRecord(raw['totals']) ? (raw as unknown as ReasoningDigest) : null;
   },
+  /** Series and points are re-checked one by one where they are merged (command-model mergeSeatHistory). */
+  seatHistory(raw: unknown): CapacityHistoryResponse | null {
+    return isRecord(raw) && raw['v'] === 1 && Array.isArray(raw['series']) ? (raw as unknown as CapacityHistoryResponse) : null;
+  },
 };
 
 /** Operator words for a source that did not answer (never a path, never a trace). */
@@ -150,6 +160,8 @@ export const leaderQuery = optionalQuery(SURFACE_KEYS.leader, LEADER_PATH, 'The 
 export const learningQuery = optionalQuery(SURFACE_KEYS.learning, LEARNING_PATH, 'Self-improvement', narrow.learning);
 export const fleetHistoryQuery = optionalQuery(SURFACE_KEYS.fleetHistory, FLEET_HISTORY_PATH, 'Fleet history', narrow.fleetHistory);
 export const reasoningDigestQuery = optionalQuery(SURFACE_KEYS.reasoningDigest, REASONING_DIGEST_PATH, 'The reasoning digest', narrow.reasoningDigest);
+/** Optional like every surface read: a server without the route leaves the burn-downs on this page's own readings. */
+export const seatHistoryQuery = optionalQuery(SURFACE_KEYS.seatHistory, SEAT_HISTORY_PATH, 'Seat history', narrow.seatHistory);
 
 // ---------------------------------------------------------------------------
 // Writes

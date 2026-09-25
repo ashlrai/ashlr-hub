@@ -8,7 +8,7 @@
 import type { ReasoningInsight } from '../../../../core/reasoning/types.js';
 import type { LeaderAction, LeaderStateV1 } from '../../../../core/vision/leader-types.js';
 import { Gauge } from '../../../components/charts/Gauge.js';
-import { formatRelative } from '../autonomy/format.js';
+import { UNKNOWN, formatRelative } from '../autonomy/format.js';
 import type { SurfaceActions } from '../command/actions.js';
 import { ActionRow } from '../command/LeaderCard.js';
 import { anchorId } from '../command/nav.js';
@@ -16,6 +16,7 @@ import { Card, CardNote, MicroLabel } from '../command/Surface.js';
 import { postLeader, type OptionalRead } from '../command/surface-data.js';
 import { KIND_LABEL } from './mind-model.js';
 import { OUTCOME_WORD, expectedDeltaText, isVetoable, outcomeMark } from './leader-model.js';
+import { projectLabel, type ProjectLabel } from './project-label.js';
 import styles from './mind.module.css';
 
 const MARK: Record<ReturnType<typeof outcomeMark>, string> = { hit: '✓', miss: '✗', pending: '…', ungraded: '—' };
@@ -129,7 +130,34 @@ export function HitRateCard({ read }: { read: OptionalRead<LeaderStateV1> | unde
 
 const SEVERITY_WORD = { high: 'High', warn: 'Worth a look', info: 'FYI' } as const;
 
-export function InsightCards({ insights, reason, loading = false }: { insights: ReasoningInsight[]; reason: string | null; loading?: boolean }) {
+/**
+ * Where the insight happened: the project's name, the full path only in the
+ * tooltip, and a quiet `scratch` tag for a folder under the OS temp dir
+ * (project-label.ts). Plain text, never a link.
+ */
+function InsightPlace({ place }: { place: ProjectLabel }) {
+  return (
+    <>
+      <span className={styles.insightPlace} title={place.full}>{place.label}</span>
+      {place.scratch ? (
+        <span className={styles.scratchTag} title="A scratch folder under the system temp directory">scratch</span>
+      ) : null}
+    </>
+  );
+}
+
+export function InsightCards({
+  insights,
+  reason,
+  loading = false,
+  places,
+}: {
+  insights: ReasoningInsight[];
+  reason: string | null;
+  loading?: boolean;
+  /** Labels for the insights' repos (MindSection builds them once for the cards and the facet). */
+  places?: ReadonlyMap<string, ProjectLabel>;
+}) {
   if (loading) return <p className={styles.muted} aria-busy="true">Reading the reasoning digest…</p>;
   if (reason !== null) return <CardNote tone="unknown">{reason}</CardNote>;
   if (insights.length === 0) {
@@ -137,18 +165,25 @@ export function InsightCards({ insights, reason, loading = false }: { insights: 
   }
   return (
     <ul className={styles.insights} aria-label="Reasoning insights">
-      {insights.map((i) => (
-        <li key={i.id} className={styles.insight} data-severity={i.severity}>
-          <span className={styles.insightKind}>
-            <MicroLabel>{KIND_LABEL[i.kind]}</MicroLabel>
-            <span className={styles.insightSeverity} data-severity={i.severity}>{SEVERITY_WORD[i.severity]}</span>
-          </span>
-          <span className={styles.insightTitle}>{i.title}</span>
-          <span className={styles.insightMeta}>
-            {[i.repo, i.engine, `${i.count}×`, `last ${formatRelative(i.lastAt)}`].filter(Boolean).join(' · ')}
-          </span>
-        </li>
-      ))}
+      {insights.map((i) => {
+        const place = i.repo ? (places?.get(i.repo) ?? projectLabel(i.repo)) : null;
+        const seen = formatRelative(i.lastAt);
+        const rest = [i.engine, `${i.count}×`, seen === UNKNOWN ? null : `last seen ${seen}`].filter(Boolean).join(' · ');
+        return (
+          <li key={i.id} className={styles.insight} data-severity={i.severity}>
+            <span className={styles.insightKind}>
+              <MicroLabel>{KIND_LABEL[i.kind]}</MicroLabel>
+              <span className={styles.insightSeverity} data-severity={i.severity}>{SEVERITY_WORD[i.severity]}</span>
+            </span>
+            <span className={styles.insightTitle}>{i.title}</span>
+            <span className={styles.insightMeta}>
+              {place ? <InsightPlace place={place} /> : null}
+              {place && rest ? ' · ' : null}
+              {rest}
+            </span>
+          </li>
+        );
+      })}
     </ul>
   );
 }

@@ -23,6 +23,7 @@
  */
 import type { Series, SeriesPoint } from '../../../components/charts/index.js';
 import type { DailyUsage, SeriesWindow, UsageSeries } from './usage-contract.js';
+import { calendarDayStart } from '../growth/calendar-day.js';
 
 export const COST_ESTIMATE_NOTE =
   'Cost is ESTIMATED from a static price table in this repo, not billed. It will not match a provider invoice.';
@@ -54,17 +55,16 @@ export type SeriesProjection =
   | { available: true; series: Series[]; days: DailyUsage[] }
   | { available: false; reason: string };
 
-function dayX(day: string): number {
-  return Date.parse(`${day}T00:00:00Z`);
-}
-
 /** Days that carry at least one non-null reading for `pick`. */
 function knownCount(days: readonly DailyUsage[], pick: (d: DailyUsage) => number | null): number {
   return days.reduce((acc, d) => acc + (pick(d) === null ? 0 : 1), 0);
 }
 
 function points(days: readonly DailyUsage[], pick: (d: DailyUsage) => number | null): SeriesPoint[] {
-  return days.map((d) => ({ x: dayX(d.day), y: pick(d) }));
+  // Each day at LOCAL midnight (growth/calendar-day): the chart kit labels x in
+  // local time, so a UTC-midnight stamp read "Sep 23" for the "2026-09-24"
+  // row west of UTC while the table under the same card said "Sep 24".
+  return days.map((d) => ({ x: calendarDayStart(d.day), y: pick(d) }));
 }
 
 export interface SeriesTotals {

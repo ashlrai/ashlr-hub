@@ -21,13 +21,14 @@ import { ForestPlot } from '../../../components/charts/ForestPlot.js';
 import { Funnel } from '../../../components/charts/Funnel.js';
 import { StepBand } from '../../../components/charts/StepBand.js';
 import { dailyValues, historyStatus, pipelineFunnel, sourceCaveat } from '../../../components/charts/fleet-history-view.js';
-import { formatDayLabel, formatUsd } from '../../../components/charts/format.js';
+import { formatTimeLabel, formatUsd } from '../../../components/charts/format.js';
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { modelsQuery } from '../../../data/queries.js';
 import { useNow } from '../autonomy/use-ticker.js';
 import { Cell, Surface } from '../command/Surface.js';
 import { fleetHistoryQuery, learningQuery } from '../command/surface-data.js';
+import { quietSinceStatus } from '../fleet/dark-since.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { OUTCOME_SEGMENTS, costPerMerge, forestRows, harnessSteps, modelOutcomes, weeklyBins } from '../growth/growth-model.js';
 import { HARNESS_ADOPTION_GATE } from '../../../../core/learn/harness-types.js';
@@ -58,7 +59,7 @@ export function GrowthSection() {
   const learn = learning.data?.value ?? null;
 
   const bins = useMemo(() => (hist ? weeklyBins(hist.days) : []), [hist]);
-  const histStatus: ChartStatus = !history.data ? { kind: 'loading' } : !hist ? unknownFrom(history.data.reason, 'fleet history did not answer.') : historyStatus(hist, hist.sources.runs);
+  const histStatus: ChartStatus = !history.data ? { kind: 'loading' } : !hist ? unknownFrom(history.data.reason, 'fleet history did not answer.') : quietSinceStatus(historyStatus(hist, hist.sources.runs));
   const weeklyStatus: ChartStatus = histStatus.kind !== 'ready' ? histStatus : bins.length === 0 ? { kind: 'empty', message: 'Not a full week of history yet.' } : { kind: 'ready' };
   const mergesCaveat = hist ? sourceCaveat('Merge counts', hist.sources.decisions) : undefined;
   const funnel = hist ? pipelineFunnel(hist) : null;
@@ -77,7 +78,10 @@ export function GrowthSection() {
   const learnStatus = (emptyMessage: string, hasData: boolean): ChartStatus =>
     !learning.data ? { kind: 'loading' } : !learn ? unknownFrom(learning.data.reason, 'self-improvement did not answer.') : hasData ? { kind: 'ready' } : { kind: 'empty', message: emptyMessage };
 
-  const weekLabel = (ms: number) => `wk to ${formatDayLabel(new Date(ms).toISOString().slice(0, 10))}`;
+  // A week bin sits at its last day's LOCAL midnight (growth-model
+  // `weeklyBins`), so this label and the chart's own fallback rung (the
+  // local `formatTimeLabel`) name the same calendar day in every zone.
+  const weekLabel = (ms: number) => `wk to ${formatTimeLabel(ms)}`;
 
   return (
     <Surface title="Growth" actions={[history, learning].some((q) => q.status === 'refreshing') ? <RefreshIndicator /> : null}>
@@ -107,7 +111,7 @@ export function GrowthSection() {
           title="Pipeline · 90d"
           description="Filed → verified → passed → judged ship → merged"
           caveat={funnel?.caveat}
-          status={!funnel ? histStatus : funnel.status}
+          status={!funnel ? histStatus : quietSinceStatus(funnel.status)}
           stages={funnel?.stages ?? []}
         />
       </Cell>

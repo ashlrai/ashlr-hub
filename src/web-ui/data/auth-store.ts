@@ -28,7 +28,7 @@
  * for the query cache.
  */
 
-import { evictAll, invalidatePrefix } from './cache.js';
+import { evictAll, invalidateObserved } from './cache.js';
 // The composer owns its own storage format, so the key names live with it
 // rather than being duplicated here where they could drift.
 import { clearComposerMemory } from '../routes/verse/chat/composer-state.js';
@@ -205,8 +205,12 @@ export function renewReadSession(): Promise<boolean> {
   renewal = (async () => {
     try {
       await establishReadSession(token);
-      // Whatever 401ed while the ticket was lapsed refetches against the new cookie.
-      invalidatePrefix('');
+      // Whatever is on screen and 401ed while the ticket was lapsed refetches
+      // against the new cookie. Only what is OBSERVED: an entry nobody reads
+      // (a surface the idle warm-up fetched but the operator never opened)
+      // re-reads when it next mounts, if it is stale or failed — re-running
+      // them all here cost ~8 background reads every 15 minutes, all day.
+      invalidateObserved('');
       return true;
     } catch {
       rememberedReadToken = null;

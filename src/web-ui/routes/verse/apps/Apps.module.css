@@ -92,6 +92,17 @@
   color: var(--status-danger-fg);
 }
 
+/* The Accounts group's own "Checked … again" line, under the strip. */
+.accountsNote {
+  margin: 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+.accountsNote[data-tone='danger'] {
+  color: var(--status-danger-fg);
+}
+
 /* ── Groups ─────────────────────────────────────────────────────────── */
 
 .group {
@@ -305,16 +316,23 @@
   min-width: 0;
   max-width: 100%;
 }
+/*
+ * A long command WRAPS rather than ellipsizing: the operator reads what they
+ * are about to paste, and a command cut mid-word ("node ~/.ashlr/nat…") is
+ * exactly the part they need. One line keeps the pill shape (the radius is
+ * half the control height); two lines become a soft capsule.
+ */
 .pill {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
   max-width: 100%;
-  height: var(--control-h-sm);
-  padding: 0 var(--space-2) 0 var(--space-3);
+  min-height: var(--control-h-sm);
+  padding: 2px var(--space-2) 2px var(--space-3);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-full);
+  border-radius: calc(var(--control-h-sm) / 2);
+  text-align: left;
   background: var(--bg-code);
   color: var(--text-primary);
   cursor: pointer;
@@ -330,9 +348,9 @@
 .pillText {
   font-family: var(--font-mono);
   font-size: var(--text-xs-size);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: var(--text-xs-line);
+  white-space: normal;
+  overflow-wrap: anywhere;
   min-width: 0;
 }
 .pillIcon {

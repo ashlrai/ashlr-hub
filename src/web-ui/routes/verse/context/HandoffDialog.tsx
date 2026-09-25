@@ -51,6 +51,7 @@ import {
 import { expansiveMeteringNote, expansiveRatioSentence } from '../usage/context-model.js';
 import { rememberVerseSeat } from '../verse-ui-store.js';
 import { extraRootsCaveat } from '../workspace-model.js';
+import { asClause, tidyProse } from '../autonomy/format.js';
 import {
   budgetLine,
   defaultHandoffMode,
@@ -356,7 +357,9 @@ function HandoffDialogBody({ session, seats, onClose, onCreated, initialTarget }
         default:
           setSummary({
             phase: 'failed',
-            message: `The summary turn failed${outcome.message ? `: ${outcome.message}` : ''}. The automatic preview is unchanged.`,
+            // The engine's error is a sentence of its own: embedded as a
+            // clause so it cannot close with "..", instants read as local time.
+            message: `The summary turn failed${outcome.message ? `: ${asClause(tidyProse(outcome.message))}` : ''}. The automatic preview is unchanged.`,
           });
       }
     };

@@ -125,7 +125,8 @@ export function CapsPanel({ caps, snapshot, guard, dispatchEnabled }: CapsPanelP
       {limits.length === 0 ? (
         <p className={styles.empty}>
           No per-engine dispatch limits are configured. Every engine is bounded only by the caps above and by its own
-          provider quota.
+          provider quota. To cap one, add it under <code>foundry.limits</code> in <code>~/.ashlr/config.json</code>{' '}
+          (a <code>max</code> and a <code>window</code>); it then appears here to edit.
         </p>
       ) : (
         <div className={styles.capGrid}>

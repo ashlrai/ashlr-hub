@@ -11,6 +11,7 @@
 import type { ReactNode } from 'react';
 import { ChartContainer, LineChart, StatTile, TableView, chartFormat, type TableColumn } from '../../../components/charts/index.js';
 import { isCurrentLedgerDay } from '../autonomy/format.js';
+import { calendarDayStart } from '../growth/calendar-day.js';
 import type { SpendDay, SpendSeries } from './usage-model.js';
 import styles from './usage.module.css';
 
@@ -53,7 +54,7 @@ export function SpendPanel({
   const stale = todaySpentDate !== null && !isCurrentLedgerDay(todaySpentDate);
   const spentToday = stale ? null : todaySpentUsd;
   const budgetCaption = stale
-    ? `Nothing recorded today — the last ledger day is ${todaySpentDate}`
+    ? `Nothing recorded today — the last ledger day is ${chartFormat.formatDayLabel(todaySpentDate)}`
     : dailyBudgetUsd === null
       ? 'Configured daily budget unavailable'
       : dailyBudgetUsd === 0
@@ -106,7 +107,9 @@ export function SpendPanel({
                 {
                   id: 'spend',
                   label: 'Spend',
-                  points: series.days.map((d) => ({ x: Date.parse(`${d.day}T00:00:00Z`), y: d.usd })),
+                  // Local midnight of each ledger day (growth/calendar-day), so
+                  // the axis and tooltip name the same day as the table below.
+                  points: series.days.map((d) => ({ x: calendarDayStart(d.day), y: d.usd })),
                 },
               ]}
               area

@@ -182,15 +182,17 @@
   min-width: 0;
 }
 
+/* The account name is the card head's label (a control): it wraps rather
+   than cutting "Cash Margin Partners" off mid-word. */
 .cardLabel {
   font-family: var(--font-display);
   font-size: var(--text-sm-size);
   font-weight: var(--font-weight-medium);
   letter-spacing: var(--tracking-display, -0.02em);
   color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
 .cardMeta {

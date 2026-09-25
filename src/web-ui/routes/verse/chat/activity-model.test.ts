@@ -23,16 +23,17 @@ function counts(over: Partial<ActionCounts>): ActionCounts {
 }
 
 describe('describeWork', () => {
-  it('speaks actions, with the noun on the first clause only', () => {
-    expect(describeWork(counts({ command: 12, read: 8, edit: 3 }))).toBe('Ran 12 commands, read 8, edited 3');
+  it('speaks actions, every clause with its noun, dot-separated for the row (3.10.1)', () => {
+    // "Ran 1 command, read 1" left the reader to work out what was read.
+    expect(describeWork(counts({ command: 12, read: 8, edit: 3 }))).toBe('Ran 12 commands · read 8 files · edited 3 files');
+    expect(describeWork(counts({ command: 1, read: 1 }))).toBe('Ran 1 command · read 1 file');
     expect(describeWork(counts({ read: 1 }))).toBe('Read 1 file');
-    expect(describeWork(counts({ read: 2, create: 1 }))).toBe('Read 2 files, created 1');
+    expect(describeWork(counts({ read: 2, create: 1 }))).toBe('Read 2 files · created 1 file');
   });
 
-  it('keeps the noun where a bare verb would be ambiguous', () => {
-    // "ran 2" after commands could mean either.
-    expect(describeWork(counts({ command: 1, task: 2 }))).toBe('Ran 1 command, ran 2 subagents');
-    expect(describeWork(counts({ web: 1, other: 2 }))).toBe('Fetched 1 page, used 2 other tools');
+  it('takes the separator the caller speaks with', () => {
+    expect(describeWork(counts({ command: 1, task: 2 }), ', ')).toBe('Ran 1 command, ran 2 subagents');
+    expect(describeWork(counts({ web: 1, other: 2 }), ', ')).toBe('Fetched 1 page, used 2 other tools');
   });
 
   it('says nothing for nothing', () => {
@@ -41,25 +42,26 @@ describe('describeWork', () => {
 });
 
 describe('summarizeActivity', () => {
-  it('reads "Ran 2 commands, read 1; 1 failed, 1 running" with no duration while running', () => {
+  it('reads "Ran 2 commands, read 1 file; 1 failed, 1 running" with no duration while running', () => {
     const s = summarizeActivity(group([tool('Bash', ok), tool('Bash', bad), tool('Read', null)]));
-    expect(s.work).toBe('Ran 2 commands, read 1');
+    // Drawn with dots, spoken with commas.
+    expect(s.work).toBe('Ran 2 commands · read 1 file');
     expect(s.state).toBe('1 failed, 1 running');
     expect(s.failed).toBe(1);
     expect(s.running).toBe(1);
     // A running group's duration is still growing: the sentence leaves it out.
-    expect(s.sentence).toBe('Ran 2 commands, read 1; 1 failed, 1 running');
+    expect(s.sentence).toBe('Ran 2 commands, read 1 file; 1 failed, 1 running');
   });
 
   it('adds the wall time once finished, and never a zero or unknown one', () => {
-    expect(summarizeActivity(group([tool('Read', ok), tool('Edit', ok)])).sentence).toBe('Read 1 file, edited 1; 2m 14s');
-    expect(summarizeActivity(group([tool('Read', ok), tool('Edit', ok)], null)).sentence).toBe('Read 1 file, edited 1');
+    expect(summarizeActivity(group([tool('Read', ok), tool('Edit', ok)])).sentence).toBe('Read 1 file, edited 1 file; 2m 14s');
+    expect(summarizeActivity(group([tool('Read', ok), tool('Edit', ok)], null)).sentence).toBe('Read 1 file, edited 1 file');
     expect(summarizeActivity(group([tool('Read', ok), tool('Edit', ok)], 0)).spanMs).toBeNull();
   });
 
   it('classifies MCP-routed and vendor-specific names by what they do', () => {
     const s = summarizeActivity(group([tool('mcp__plugin_ashlr_ashlr__ashlr__edit', ok), tool('exec', ok), tool('run_terminal_cmd', ok)]));
-    expect(s.work).toBe('Ran 2 commands, edited 1');
+    expect(s.work).toBe('Ran 2 commands · edited 1 file');
   });
 
   it('does not count reasoning as work', () => {

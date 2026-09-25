@@ -6,21 +6,29 @@
  * free seat, twelve identical local rows, a scarcest-seat ring drawn from a
  * seat nobody measured.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { BudgetView } from '../../../../core/routing/policy.js';
 import type { SeatHealthReport } from '../../../../core/verse/health-types.js';
+import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import {
+  capacity,
   CLAUDE_MAX_SEAT,
   CLAUDE_TIGHT_SEAT,
   CODEX_CREDITS_SEAT,
   GROK_SEAT,
   LOCAL_SEAT_V2,
+  nativeSeat,
+  seatWindow,
   UNREAD_SEAT,
 } from '../seat-fixtures.test-support.js';
 import {
+  accountStatus,
   buildCapacityRows,
+  CAPACITY_MAX_WINDOWS,
   capacityHeadline,
   capacityRowFor,
+  orderAccountRows,
+  percentText,
   readBudgetRows,
   readHealthReports,
   scarcestSeat,
@@ -236,5 +244,205 @@ describe('malformed server reads', () => {
     expect(buildCapacityRows({} as never)).toEqual([]);
     expect(buildCapacityRows([null, CLAUDE] as never).map((r) => r.seatId)).toEqual(['claude-a']);
     expect(capacityRowFor(null as never, 'claude-a')).toBeNull();
+  });
+});
+
+/** True when the suite runs under an en-US default locale (the words below are pinned literally only there). */
+const EN_US = new Intl.DateTimeFormat().resolvedOptions().locale === 'en-US';
+
+/**
+ * Apps & Accounts: the status each account row leads with. Instants are
+ * built in LOCAL time so "Sat 11:46 PM" holds in whatever zone the suite
+ * runs; every row is built against NOW (never the real clock), so the words
+ * hold on whatever DAY it runs; and each expectation is the shared reset
+ * formatter's own output, so they hold under any default locale — the
+ * literal en-US wording is pinned too, where that is the locale.
+ */
+describe('account status', () => {
+  const NOW = new Date(2026, 8, 25, 16, 34).getTime(); // Fri Sep 25, 4:34 PM local
+  const RESET = new Date(2026, 8, 26, 23, 46).toISOString(); // Sat 11:46 PM local
+  const CHECKED = new Date(NOW - 2 * 60_000).toISOString();
+  const RESETS = `resets ${describeResetAt(RESET, NOW)}`;
+
+  const spentWindow = seatWindow({ id: 'codex_codex_primary', usedPercent: 100, resetsAt: RESET, limitReached: true, measured: false });
+  const PERSONAL = nativeSeat(capacity({ planType: 'plus', windows: [spentWindow], binding: spentWindow, usability: 'exhausted', observedAt: CHECKED }),
+    { id: 'codex-personal', engine: 'codex', label: 'Personal Codex', accountId: 'codex-personal' });
+  const okWindow = seatWindow({ id: 'codex_codex_primary', usedPercent: 31, resetsAt: RESET });
+  const CMP = nativeSeat(capacity({ planType: 'pro', windows: [okWindow], binding: okWindow, usability: 'ready', observedAt: CHECKED }),
+    { id: 'codex-cmp', engine: 'codex', label: 'Cash Margin Partners', accountId: 'codex-cmp' });
+  const HEALTH = [
+    report('codex-personal', { engine: 'codex', connection: 'exhausted', resetAt: RESET, checkedAt: CHECKED, reasons: [`Every usage window with a reading is spent (resets ${RESET}).`], fix: { kind: 'wait' } }),
+    report('codex-cmp', { engine: 'codex', checkedAt: CHECKED }),
+    report('grok', { engine: 'grok', connection: 'signed-out', checkedAt: CHECKED, reasons: ['Grok CLI reports this account is not signed in.'], fix: { kind: 'reauth' } }),
+    report('claude-a', { checkedAt: CHECKED }),
+  ];
+  const ROSTER = [PERSONAL, GROK_SEAT, CLAUDE, CMP, LOCAL_SEAT_V2];
+  const rows = buildCapacityRows(ROSTER, { health: HEALTH, now: NOW });
+  const byId = new Map(rows.map((r) => [r.seatId, r]));
+  const status = (id: string, opts: { healthRead?: boolean; checking?: boolean } = {}) =>
+    accountStatus(byId.get(id)!, { healthRead: opts.healthRead ?? true, checking: opts.checking ?? false, now: NOW });
+
+  it('Connected · usable now, with when it was last checked', () => {
+    expect(status('codex-cmp')).toMatchObject({ kind: 'usable', label: 'Connected', detail: 'usable now', tone: 'success', checked: 'checked 2m ago', usableAgain: null });
+    const title = status('codex-cmp').checkedTitle!;
+    expect(title.startsWith('Last checked ')).toBe(true);
+    if (EN_US) expect(title).toMatch(/^Last checked Fri, Sep 25, 4:32/);
+  });
+
+  it('Spent · resets <local day and time>, and usable again in <countdown> — never the ISO instant', () => {
+    const spent = status('codex-personal');
+    expect(spent).toMatchObject({ kind: 'spent', label: 'Spent', detail: RESETS, tone: 'danger', usableAgain: 'usable again in 1d 7h', coversConnection: true });
+    // The health reason the row prints is localised too.
+    expect(byId.get('codex-personal')!.summary).toBe(`Every usage window with a reading is spent (${RESETS}).`);
+    expect(byId.get('codex-personal')!.windows[0]!.resetText).toBe(RESETS);
+    expect(RESETS).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
+    if (EN_US) expect(RESETS).toBe('resets Sat 11:46 PM');
+  });
+
+  describe('the words are a function of the inputs, not of the day the suite runs', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    // The 3.10.1 time bomb: rows built against the real clock read "resets
+    // today 11:46 PM" from Sat Sep 26 2026, and "Sep 26, 11:46 PM" after it.
+    it.each([
+      ['on the day of the reset', Date.parse(RESET) - 6 * 3_600_000],
+      ['after the reset', Date.parse(RESET) + 86_400_000],
+      ['a year later', NOW + 365 * 86_400_000],
+      ['a week earlier', NOW - 7 * 86_400_000],
+    ])('same words when the real clock reads %s', (_label, realClock) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(realClock);
+      const again = new Map(buildCapacityRows(ROSTER, { health: HEALTH, now: NOW }).map((r) => [r.seatId, r]));
+      const personal = again.get('codex-personal')!;
+      expect(personal.summary).toBe(`Every usage window with a reading is spent (${RESETS}).`);
+      expect(personal.windows[0]!.resetText).toBe(RESETS);
+      expect(accountStatus(personal, { healthRead: true, now: NOW })).toMatchObject({ detail: RESETS, usableAgain: 'usable again in 1d 7h' });
+    });
+  });
+
+  it('a spent seat whose reset has passed says so instead of counting down past zero', () => {
+    const late = accountStatus(byId.get('codex-personal')!, { healthRead: true, now: Date.parse(RESET) + 60_000 });
+    expect(late.detail).toMatch(/^was due to reset /);
+    expect(late.usableAgain).toBeNull();
+  });
+
+  it('Signed out · reconnect to use it', () => {
+    expect(status('grok')).toMatchObject({ kind: 'signed-out', label: 'Signed out', detail: 'reconnect to use it', tone: 'danger', coversConnection: true });
+  });
+
+  it('a running check, and a sweep that has not answered yet, both read "Checking…"', () => {
+    expect(status('codex-cmp', { checking: true })).toMatchObject({ kind: 'checking', label: 'Checking…', detail: null });
+    const unread = buildCapacityRows([UNREAD_SEAT], { health: null })[0]!;
+    expect(accountStatus(unread, { healthRead: false, now: NOW })).toMatchObject({ kind: 'checking', label: 'Checking…' });
+    expect(accountStatus(unread, { healthRead: true, now: NOW })).toMatchObject({ kind: 'not-checked', label: 'Not checked', detail: 'no reading yet' });
+  });
+
+  it('tight seats read as running low, or usable on credits when the window is spent but credits are not', () => {
+    expect(status('claude-a')).toMatchObject({ kind: 'low', label: 'Connected', detail: 'running low', tone: 'warning' });
+    const credits = buildCapacityRows([CODEX_CREDITS_SEAT], { health: [report('codex-personal', { engine: 'codex' })] })[0]!;
+    expect(accountStatus(credits, { healthRead: true, now: NOW })).toMatchObject({ kind: 'low', detail: 'usable on credits' });
+  });
+
+  it('local models read as Ready and free', () => {
+    expect(status('local:qwen3-coder')).toMatchObject({ kind: 'usable', label: 'Ready', detail: 'runs on this machine · free' });
+  });
+
+  it('orders usable accounts first, then what comes back by itself, then what needs you — stable within each', () => {
+    expect(orderAccountRows(rows, { healthRead: true, now: NOW }).map((r) => r.seatId))
+      .toEqual(['codex-cmp', 'local:qwen3-coder', 'claude-a', 'codex-personal', 'grok']);
+  });
+});
+
+/**
+ * Accounts' "Spent · resets … · usable again in …" and Fleet's "eligible
+ * again" must name the same instant: a seat reopens only once EVERY spent
+ * window has reset, so the LATEST spent reset is the one that counts.
+ */
+describe('when a spent seat is usable again', () => {
+  // Mon–Wed of a week with no DST change anywhere, so the countdowns hold in every zone.
+  const NOW = new Date(2026, 8, 21, 15, 40).getTime(); // Mon 3:40 PM local
+  const SOON = new Date(2026, 8, 21, 17, 40).toISOString(); // today 5:40 PM — the 5-hour window
+  const WED = new Date(2026, 8, 23, 15, 0).toISOString(); // Wed 3:00 PM — the weekly window
+  const five = seatWindow({ id: 'codex_codex_primary', usedPercent: 100, resetsAt: SOON, limitReached: true, measured: false });
+  const weekly = seatWindow({ id: 'codex_codex_secondary', usedPercent: 100, resetsAt: WED, limitReached: true, measured: false });
+  const seat = (windows: ReturnType<typeof seatWindow>[], binding = windows[0]!) => nativeSeat(
+    capacity({ planType: 'plus', windows, binding, usability: 'exhausted', observedAt: new Date(NOW).toISOString() }),
+    { id: 'codex-personal', engine: 'codex', label: 'Personal Codex', accountId: 'codex-personal' },
+  );
+  const exhausted = (over: Partial<SeatHealthReport> = {}) =>
+    report('codex-personal', { engine: 'codex', connection: 'exhausted', checkedAt: new Date(NOW).toISOString(), fix: { kind: 'wait' }, ...over });
+
+  it('takes the LATEST reset among the spent windows, not the first to come back', () => {
+    // The server's binding (and the sweep's resetAt) is the 5-hour window, which resets first.
+    const row = buildCapacityRows([seat([five, weekly])], { health: [exhausted({ resetAt: SOON })], now: NOW })[0]!;
+    expect(row.resetAt).toBe(WED);
+    const status = accountStatus(row, { healthRead: true, now: NOW });
+    expect(status).toMatchObject({ kind: 'spent', detail: `resets ${describeResetAt(WED, NOW)}`, usableAgain: 'usable again in 1d 23h' });
+    // Two hours on, the 5-hour window has reset — and the seat is STILL spent until Wednesday.
+    const later = accountStatus(row, { healthRead: true, now: Date.parse(SOON) + 60_000 });
+    expect(later.usableAgain).toBe('usable again in 1d 21h');
+  });
+
+  it('with no sweep report, still the latest spent window', () => {
+    const row = buildCapacityRows([seat([five, weekly])], { now: NOW })[0]!;
+    expect(row.resetAt).toBe(WED);
+  });
+
+  it('counts a spent window the row has no room to draw', () => {
+    const fillers = Array.from({ length: CAPACITY_MAX_WINDOWS }, (_, i) =>
+      seatWindow({ id: `codex_extra_${i}`, usedPercent: 10, resetsAt: SOON }));
+    const row = buildCapacityRows([seat([five, ...fillers, weekly])], { now: NOW })[0]!;
+    expect(row.windows.map((w) => w.id)).not.toContain('codex_codex_secondary');
+    expect(row.resetAt).toBe(WED);
+  });
+
+  it('never lets the sweep make it EARLIER than a spent window, but a later sweep instant wins', () => {
+    const LATER = new Date(2026, 8, 25, 9, 0).toISOString();
+    expect(buildCapacityRows([seat([five, weekly])], { health: [exhausted({ resetAt: LATER })], now: NOW })[0]!.resetAt).toBe(LATER);
+  });
+
+  it('is unknown when a spent window only has provider prose — "when all of them reset" cannot be said', () => {
+    const prose = seatWindow({ id: 'codex_codex_secondary', usedPercent: 100, resetDescription: 'resets next week', limitReached: true, measured: false });
+    const row = buildCapacityRows([seat([five, prose])], { health: [exhausted({ resetAt: SOON })], now: NOW })[0]!;
+    expect(row.resetAt).toBeNull();
+    const status = accountStatus(row, { healthRead: true, now: NOW });
+    expect(status.usableAgain).toBeNull();
+    // The words of the window that holds the seat stand in — never the 5-hour
+    // window's earlier instant, and never a countdown to the wrong window.
+    expect(status.detail).toBe('resets next week');
+  });
+
+  it('with nothing spent, the sweep’s reset or the binding window’s', () => {
+    const ok = seatWindow({ id: 'codex_codex_primary', usedPercent: 40, resetsAt: SOON });
+    const ready = nativeSeat(capacity({ windows: [ok], binding: ok, usability: 'ready' }), { id: 'codex-personal', engine: 'codex', label: 'Personal Codex' });
+    expect(buildCapacityRows([ready], { now: NOW })[0]!.resetAt).toBe(SOON);
+    expect(buildCapacityRows([ready], { health: [exhausted({ resetAt: WED })], now: NOW })[0]!.resetAt).toBe(WED);
+  });
+});
+
+describe('one percent rule on the row itself', () => {
+  it('the summary and the bar agree: "99%", never a rounded "100%"; "<1%", never "0%"', () => {
+    const row = (usedPercent: number) => {
+      const w = seatWindow({ id: 'five_hour', usedPercent });
+      return buildCapacityRows([nativeSeat(capacity({ windows: [w], binding: w, usability: 'tight' }))])[0]!;
+    };
+    const high = row(99.6);
+    expect(high.summary).toBe('99% of 5-hour window used');
+    expect(percentText(high.windows[0]!.usedPercent!)).toBe('99%');
+    expect(row(0.4).summary).toBe('<1% of 5-hour window used');
+  });
+});
+
+describe('percentText', () => {
+  it('prints whole percents, never "0%" for a real reading or "100%" for one short of it', () => {
+    expect(percentText(62.4)).toBe('62%');
+    expect(percentText(0)).toBe('0%');
+    expect(percentText(0.4)).toBe('<1%');
+    expect(percentText(99.6)).toBe('99%');
+    expect(percentText(100)).toBe('100%');
+    expect(percentText(140)).toBe('100%');
+    expect(percentText(Number.NaN)).toBe('—');
   });
 });

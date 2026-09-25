@@ -174,16 +174,19 @@ export function writePrivateFileAtomic(target: string, content: string): void {
 /**
  * Read a regular file without following a symlink at its name, up to
  * `maxBytes`. Null when absent, not a regular file, or unreadable. `truncated`
- * says whether the file was longer than the cap.
+ * says whether the file was longer than the cap. O_NONBLOCK: a FIFO planted at
+ * the name opens at once (and is refused by the fstat check) instead of
+ * blocking this synchronous open forever; regular files ignore the flag.
  */
 export function readPrivateFileCapped(
   path: string,
   maxBytes: number,
 ): { text: string; bytes: number; mtimeMs: number; truncated: boolean } | null {
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+  const nonBlock = typeof fsConstants.O_NONBLOCK === 'number' ? fsConstants.O_NONBLOCK : 0;
   let fd: number;
   try {
-    fd = openSync(path, fsConstants.O_RDONLY | noFollow);
+    fd = openSync(path, fsConstants.O_RDONLY | noFollow | nonBlock);
   } catch {
     return null;
   }

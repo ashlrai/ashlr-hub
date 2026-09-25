@@ -42,6 +42,7 @@ import { useQuery } from '../../../data/hooks.js';
 import { SECTION_ICON } from '../verse-icons.js';
 import { RAIL_SECTIONS, requestVerseCommand, setVerseSection } from '../verse-ui-store.js';
 import { LiveCapacityStrip } from '../usage/CapacityStrip.js';
+import { tidyProse } from '../autonomy/format.js';
 import { verseLocalModelsQuery } from '../usage/usage-queries.js';
 import { projectLocalModels } from '../usage/usage-contract.js';
 import {
@@ -164,15 +165,15 @@ function AccountsStep() {
 
 function LocalStep() {
   const read = useQuery(verseLocalModelsQuery);
-  const finding = useMemo(
-    () =>
-      buildLocalFinding({
-        snapshot: read.data?.available ? projectLocalModels(read.data.raw) : null,
-        loading: read.data === undefined && read.status !== 'error',
-        unavailableReason: read.data?.reason ?? read.error?.message ?? null,
-      }),
-    [read.data, read.status, read.error],
-  );
+  const finding = useMemo(() => {
+    // The server's sentence, with any ISO instant in it read as local time.
+    const reason = read.data?.reason ?? read.error?.message ?? null;
+    return buildLocalFinding({
+      snapshot: read.data?.available ? projectLocalModels(read.data.raw) : null,
+      loading: read.data === undefined && read.status !== 'error',
+      unavailableReason: reason === null ? null : tidyProse(reason),
+    });
+  }, [read.data, read.status, read.error]);
 
   return (
     <StepBody>
@@ -305,6 +306,7 @@ export function OnboardingFlow() {
           variant="ghost"
           size="sm"
           aria-label="Close getting started"
+          title="Close getting started"
           icon={<IconX size={14} />}
           onClick={close}
         />

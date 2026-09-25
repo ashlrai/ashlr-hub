@@ -172,7 +172,8 @@
   color: var(--text-tertiary);
   cursor: pointer;
 }
-.iconButton:hover { color: var(--text-primary); background: var(--bg-hover); }
+.iconButton:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
+.iconButton:disabled { color: var(--text-disabled); cursor: default; }
 .iconButton[aria-pressed='true'] { color: var(--text-primary); }
 .iconButton:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
 .plus {

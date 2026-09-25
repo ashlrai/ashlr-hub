@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { Swimlane, VIRTUALIZE_AFTER, ROW_H, type SwimlaneLane } from './Swimlane.js';
-import { showTable } from './chart-test-support.js';
+import { axisLabelBoxes, noOverlap, showTable } from './chart-test-support.js';
 
 const H = 3_600_000;
 const FROM = Date.parse('2026-09-20T00:00:00Z');
@@ -107,5 +107,24 @@ describe('Swimlane V3.10', () => {
     for (const bar of container.querySelectorAll('rect[data-item]')) {
       expect(Number(bar.getAttribute('x')) + Number(bar.getAttribute('width'))).toBeLessThanOrEqual(375);
     }
+  });
+});
+
+describe('Swimlane V3.10.1 — axis', () => {
+  it('ignores an epoch-0 window start and never overprints tick labels', () => {
+    const { container } = render(
+      <Swimlane
+        title="Runs"
+        width={375}
+        from={0}
+        to={TO}
+        formatTick={(ms) => new Date(ms).toISOString().slice(0, 16)}
+        lanes={[lane('alpha', 2)]}
+      />,
+    );
+    const boxes = axisLabelBoxes(container);
+    expect(boxes.some((b) => b.text.startsWith('1970'))).toBe(false);
+    expect(noOverlap(boxes)).toBe(true);
+    expect(boxes.at(-1)!.text).toBe(new Date(TO).toISOString().slice(0, 16));
   });
 });

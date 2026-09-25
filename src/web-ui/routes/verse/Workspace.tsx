@@ -6,20 +6,25 @@
  * THE HEADER (3.10, SPEC-310C §2) reads left to right, in the order a person
  * asks the questions:
  *
- *   [ hub › v310-foundation ]  [C claude-a]  [insight]  ……  [◔ 42%] [⋯] │ [>_][▭][±] │ [⫿][▯]
+ *   [ hub › v310-foundation ]  [C Ready]  [insight]  ……  [◔ 42%] [⋯] │ [>_][▭][±] │ [⫿][▯]
  *   [ Chat title            ]
  *
  *  1. WHERE AM I — the chat title under a `repo › branch` breadcrumb (the
  *     branch from the chat's shared roots read). The only thing in the strip
  *     allowed to shrink; both lines ellipsise.
- *  2. WHAT IS IT RUNNING ON — the seat: an engine tick and its monogram
- *     (C/X/G/L, never a vendor logo), the seat and model, and a capacity chip
- *     only when the seat is tight or spent.
+ *  2. WHAT STATE IS IT IN — a compact status: an engine tick and its monogram
+ *     (C/X/G/L, never a vendor logo), then Ready / Running / Last turn failed /
+ *     Read-only, and a capacity chip only when the seat is tight or spent.
+ *     3.10.1: the seat and model are NOT repeated here — the composer's seat
+ *     chip names them, one step below; the chip's tooltip still says both,
+ *     and the chip is a tab stop so that tooltip opens on keyboard focus.
  *  3. WHAT DO I KNOW — C7's insight chip when an A7 insight cites this chat.
  *  4. WHAT CAN I DO — the context ring (its tooltip is the whole context
  *     story), then ⋯: context mode, compact, hand off, copy id, delete.
  *  5. WHICH PANES — Terminal, Preview and Review toggles (each only once its
  *     unit's pane exists in this build), then the chat list and the dock.
+ *     Every icon-only control has an accessible name AND a tooltip (the
+ *     Tooltip primitive, so it shows on keyboard focus too) with its key.
  *
  * NOTHING stacks under the header any more. Seat health, the engine's
  * retry / watchdog notices, context advice and the compact panel share ONE
@@ -48,10 +53,12 @@ import type { VerseContextMode, VerseProject, VerseSeat, VerseSession } from '..
 import { engineSupportsModes, hasExpansiveMode } from '../../../core/verse/context-math.js';
 import { ENGINE_MONOGRAM } from '../../../core/verse/workbench-types.js';
 import { MutationTokenDialog } from '../../components/auth/MutationTokenDialog.js';
+import { Tooltip } from '../../components/primitives/Tooltip.js';
 import { ActionMenu, anchorBelow, type ActionMenuItem } from './chat/ActionMenu.js';
 import { appendParagraph, registerComposerInserter } from './chat/composer-bridge.js';
 import { derivePhaseFromTranscript, LiveStatus } from './chat/LiveStatus.js';
 import { NoticeSlot, type NoticeCandidate } from './chat/NoticeSlot.js';
+import { PathRootsContext } from './chat/path-display.js';
 import { TasksTray } from './chat/TasksTray.js';
 import { countTasks, currentTurnTasks, type ChatTask } from './chat/tasks-model.js';
 import { useSessionRoots } from './chat/use-session-roots.js';
@@ -307,11 +314,17 @@ export function Workspace(props: WorkspaceProps) {
     (hasExpansiveMode(budget.option) || mode === 'expansive');
   const activeSeat = session ? seatById(seats, session.seatId) ?? null : null;
   const capacity = activeSeat === null ? null : seatSubscription(activeSeat);
+  /** The capacity worth a chip in the header: tight or spent, else none. */
+  const flagged = capacity !== null && worthFlagging(capacity.cls) ? capacity : null;
+  // The status chip's tooltip: what the chat runs on (seat · model), then the
+  // seat's capacity sentence without its repeated label. The project path is
+  // the breadcrumb's tooltip, not this one's.
+  const capacityLine = activeSeat === null || capacity === null
+    ? null
+    : seatSubscriptionSentence(activeSeat, capacity).replace(`${activeSeat.label} · `, '');
   const seatTitle = session === null
     ? ''
-    : `${activeSeat === null || capacity === null
-      ? seatPillLabel(seats, session)
-      : seatSubscriptionSentence(activeSeat, capacity)} · ${session.projectPath}`;
+    : `Runs on ${seatPillLabel(seats, session)}${capacityLine ? ` — ${capacityLine}` : ''}`;
   const disabledReason = !dispatchEnabled ? 'Sending is disabled: this server was started without dispatch.' : null;
   const runningReason = 'Available when the current turn finishes.';
   const compactable = session !== null && canCompactNow(session.engine);
@@ -335,6 +348,10 @@ export function Workspace(props: WorkspaceProps) {
     onHandoffOpenChange(true);
   };
   const breadcrumb = session ? projectName(session.projectPath, projects) : '';
+  // The header's compact status: the chat's state in a word — never the seat
+  // or model (the composer says those). data-status is the session's own.
+  const statusWord = session === null ? '' : session.status === 'running' ? 'Running'
+    : session.status === 'error' ? 'Last turn failed' : dispatchEnabled ? 'Ready' : 'Read-only';
 
   // ---- ⋯ menu -------------------------------------------------------------
   const menuItems: ActionMenuItem[] = [];
@@ -404,6 +421,8 @@ export function Workspace(props: WorkspaceProps) {
   }
 
   return (
+    // Paths the chat draws (the transcript, the live row) read relative to its roots.
+    <PathRootsContext.Provider value={roots.roots}>
     <section className={styles.workspace} aria-labelledby={headingId}>
       <header className={styles.header} data-app-region="drag">
         <Lockup
@@ -435,14 +454,23 @@ export function Workspace(props: WorkspaceProps) {
         />
 
         {session ? (
-          <span className={`${styles.seatPill} ${styles[`engine-${session.engine}`] ?? ''}`} data-engine={session.engine}
-            data-seat-capacity={capacity !== null && worthFlagging(capacity.cls) ? capacity.cls : undefined}
-            title={seatTitle}>
-            <span className={styles.engineTick} aria-hidden="true" />
-            <span className={styles.monogram} aria-hidden="true">{ENGINE_MONOGRAM[session.engine]}</span>
-            <span className={styles.seatText}>{seatPillLabel(seats, session)}</span>
-            {capacity !== null && worthFlagging(capacity.cls) ? <CapacityChip view={capacity} /> : null}
-          </span>
+          // The chat's STATE, not its seat: the composer's seat chip names
+          // seat and model; this chip's tooltip keeps them one hover away.
+          // That tooltip is now the header's only copy of seat, model and the
+          // capacity sentence, so the chip takes focus (a tab stop, named for
+          // its state): the Tooltip primitive opens on focus and makes the
+          // sentence the chip's aria-describedby, as for every icon control.
+          <Tooltip label={seatTitle} placement="bottom">
+            <span className={`${styles.seatPill} ${styles[`engine-${session.engine}`] ?? ''}`} data-engine={session.engine}
+              tabIndex={0} role="group" aria-label={`Chat status: ${statusWord}${flagged ? `, ${flagged.word}` : ''}`}
+              data-status={session.status} data-testid="chat-status"
+              data-seat-capacity={flagged?.cls}>
+              <span className={styles.engineTick} aria-hidden="true" />
+              <span className={styles.monogram} aria-hidden="true">{ENGINE_MONOGRAM[session.engine]}</span>
+              <span className={styles.seatText}>{statusWord}</span>
+              {flagged ? <CapacityChip view={flagged} /> : null}
+            </span>
+          </Tooltip>
         ) : null}
         {session ? <SessionInsightChipSlot sessionId={session.id} /> : null}
 
@@ -458,11 +486,13 @@ export function Workspace(props: WorkspaceProps) {
           ) : null}
           {modeState.error ? <span className={styles.modeError} role="alert">{modeState.error}</span> : null}
           {session ? (
-            <button type="button" className={styles.ghostIcon} aria-label="Chat actions" title="Chat actions" aria-haspopup="menu"
-              aria-expanded={menu !== null}
-              onClick={(event) => setMenu(menu ? null : { anchor: anchorBelow(event.currentTarget, 'end', 260), from: event.currentTarget })}>
-              <MoreGlyph />
-            </button>
+            <Tooltip label="Chat actions" placement="bottom">
+              <button type="button" className={styles.ghostIcon} aria-label="Chat actions" aria-haspopup="menu"
+                aria-expanded={menu !== null}
+                onClick={(event) => setMenu(menu ? null : { anchor: anchorBelow(event.currentTarget, 'end', 260), from: event.currentTarget })}>
+                <MoreGlyph />
+              </button>
+            </Tooltip>
           ) : null}
           <span className={styles.actionDivider} aria-hidden="true" />
           <PaneToggles sidebarCollapsed={sidebarCollapsed} onToggleSidebar={onToggleSidebar} hasSession={session !== null} />
@@ -523,6 +553,7 @@ export function Workspace(props: WorkspaceProps) {
       ) : null}
       <MutationTokenDialog {...gate.dialog} tokenLabel="Mutation token" tokenHelp="the mutation token ashlr verse printed" />
     </section>
+    </PathRootsContext.Provider>
   );
 }
 
@@ -736,22 +767,26 @@ function PaneToggles({ sidebarCollapsed, onToggleSidebar, hasSession }: { sideba
         const key = shortcutFor(PANE_COMMAND[pane]);
         const on = shows(pane);
         return (
-          <button key={pane} type="button" className={`${styles.ghostIcon} ${styles.paneToggle}`} aria-pressed={on} aria-label={DOCK_PANE_LABEL[pane]}
-            title={`${on ? 'Hide' : 'Show'} ${DOCK_PANE_LABEL[pane]}${key ? ` (${key})` : ''}`} onClick={() => toggleDockPane(pane)}>
-            <Icon />
-          </button>
+          <Tooltip key={pane} label={`${on ? 'Hide' : 'Show'} ${DOCK_PANE_LABEL[pane]}`} shortcut={key ?? undefined} placement="bottom">
+            <button type="button" className={`${styles.ghostIcon} ${styles.paneToggle}`} aria-pressed={on} aria-label={DOCK_PANE_LABEL[pane]}
+              onClick={() => toggleDockPane(pane)}>
+              <Icon />
+            </button>
+          </Tooltip>
         );
       })}
       {panes.length > 0 ? <span className={`${styles.actionDivider} ${styles.paneToggle}`} aria-hidden="true" /> : null}
-      <button type="button" className={styles.ghostIcon} onClick={onToggleSidebar} aria-pressed={!sidebarCollapsed}
-        title={`${sidebarCollapsed ? 'Show' : 'Hide'} chat list${listKey ? ` (${listKey})` : ''}`}
-        aria-label={sidebarCollapsed ? 'Show chat list' : 'Chat list'}>
-        <SidebarIcon />
-      </button>
-      <button type="button" className={styles.ghostIcon} onClick={toggleDock} aria-pressed={state.open}
-        title={`${state.open ? 'Hide' : 'Show'} the dock${dockKey ? ` (${dockKey})` : ''}`} aria-label="Dock">
-        <PanelIcon />
-      </button>
+      <Tooltip label={`${sidebarCollapsed ? 'Show' : 'Hide'} chat list`} shortcut={listKey ?? undefined} placement="bottom">
+        <button type="button" className={styles.ghostIcon} onClick={onToggleSidebar} aria-pressed={!sidebarCollapsed}
+          aria-label={sidebarCollapsed ? 'Show chat list' : 'Chat list'}>
+          <SidebarIcon />
+        </button>
+      </Tooltip>
+      <Tooltip label={`${state.open ? 'Hide' : 'Show'} the dock`} shortcut={dockKey ?? undefined} placement="bottom">
+        <button type="button" className={styles.ghostIcon} onClick={toggleDock} aria-pressed={state.open} aria-label="Dock">
+          <PanelIcon />
+        </button>
+      </Tooltip>
     </div>
   );
 }

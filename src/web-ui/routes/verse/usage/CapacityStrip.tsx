@@ -29,7 +29,7 @@
  *   useCapacityRows()                           the rows, for a custom layout
  *                                               (the rail ring, the seat chip).
  */
-import { useId, useMemo, type CSSProperties, type ReactNode } from 'react';
+import { useId, useMemo, useState, type CSSProperties, type ReactNode } from 'react';
 import type { BudgetView } from '../../../../core/routing/policy.js';
 import type { SeatHealthReport } from '../../../../core/verse/health-types.js';
 import type { VerseBootstrap, VerseSeat } from '../../../data/api-types.js';
@@ -41,10 +41,14 @@ import { usePollWhileVisible, useSectionVisible } from '../shell/section-visibil
 import { useSeatsRefresh } from '../useSeatsRefresh.js';
 import { verseBootstrapQuery } from '../verse-queries.js';
 import {
+  accountStatus,
   buildCapacityRows,
   capacityHeadline,
   capacityTone,
+  orderAccountRows,
+  percentText,
   windowSentence,
+  type AccountStatus,
   type CapacityInputs,
   type CapacityRow,
   type CapacityWindowRow,
@@ -53,6 +57,24 @@ import styles from './CapacityStrip.module.css';
 
 /** Above this share of a window the bar turns amber (the word "tight" rides with it). */
 const TIGHT_AT = 90;
+
+/** How often an accounts strip re-reads the clock ("usable again in 7h", "checked 2m ago"). */
+export const ACCOUNT_CLOCK_MS = 30_000;
+
+/**
+ * Apps & Accounts mode: every row leads with a sentence-case status
+ * ("Connected · usable now", "Spent · resets Fri 11:46 PM", "Signed out ·
+ * reconnect to use it", "Checking…"), says when it was last checked and — for
+ * a spent seat — when it is usable again, and usable rows come first.
+ */
+export interface CapacityAccountsMode {
+  /** False until the health sweep has answered once. */
+  healthRead: boolean;
+  /** The seat whose check is running now (its row reads "Checking…"). */
+  checkingSeatId?: string | null;
+  /** Injected clock for tests; otherwise the strip ticks every ACCOUNT_CLOCK_MS while visible. */
+  now?: number;
+}
 
 export interface CapacityStripProps {
   seats: readonly VerseSeat[];
@@ -79,6 +101,8 @@ export interface CapacityStripProps {
   selectedSeatId?: string | null;
   /** Shown instead of rows when the roster is empty. */
   emptyText?: string;
+  /** Apps & Accounts: a status per row, when it was checked, usable rows first. */
+  accounts?: CapacityAccountsMode;
 }
 
 function pct(n: number): number {
@@ -123,14 +147,14 @@ function WindowBar({
         {ceiling !== null ? <span className={styles.ceiling} style={{ left: `${ceiling}%` }} /> : null}
       </span>
     );
-    value = <span className={styles.value} data-level={level}>{used}%</span>;
+    value = <span className={styles.value} data-level={level}>{percentText(w.usedPercent)}</span>;
   }
   return (
     <div className={styles.bar} data-binding={w.binding || undefined} data-compact={compact || undefined}>
-      <span className={styles.barLabel}>{w.label.replace(/ window$/, '')}</span>
+      <span className={styles.barLabel} title={w.label}>{w.label.replace(/ window$/, '')}</span>
       {track}
       {value}
-      {!compact && w.resetText !== null ? <span className={styles.reset}>{w.resetText}</span> : null}
+      {!compact && w.resetText !== null ? <span className={styles.reset} title={w.resetText}>{w.resetText}</span> : null}
     </div>
   );
 }
@@ -151,18 +175,42 @@ function SeatName({ row, onSelect, selected }: { row: CapacityRow; onSelect: ((i
   );
 }
 
+function StatusLine({ status }: { status: AccountStatus }) {
+  return (
+    <span className={styles.status} data-tone={status.tone} data-status={status.kind}>
+      <span className={styles.dot} aria-hidden="true" />
+      <span className={styles.statusLabel}>{status.label}</span>
+      {status.detail !== null ? <span className={styles.statusDetail}>{`· ${status.detail}`}</span> : null}
+    </span>
+  );
+}
+
+/** "usable again in 7h 12m · checked 2m ago" — the row's clock facts, when it has any. */
+function StampLine({ status }: { status: AccountStatus }) {
+  if (status.usableAgain === null && status.checked === null) return null;
+  return (
+    <p className={styles.stamp}>
+      {status.usableAgain !== null ? <span className={styles.usableAgain}>{status.usableAgain}</span> : null}
+      {status.usableAgain !== null && status.checked !== null ? ' · ' : null}
+      {status.checked !== null ? <span title={status.checkedTitle ?? undefined}>{status.checked}</span> : null}
+    </p>
+  );
+}
+
 function CapacityRowView({
   row,
   compact,
   renderActions,
   onSelectSeat,
   selected,
+  status,
 }: {
   row: CapacityRow;
   compact: boolean;
   renderActions: CapacityStripProps['renderActions'];
   onSelectSeat: CapacityStripProps['onSelectSeat'];
   selected: boolean;
+  status: AccountStatus | null;
 }) {
   const tone = capacityTone(row.cls);
   const binding = row.windows.find((w) => w.binding) ?? null;
@@ -170,16 +218,21 @@ function CapacityRowView({
   const actions = renderActions ? renderActions(row) : null;
   const reserve = row.reserve;
   return (
-    <li className={styles.row} data-capacity={row.cls} data-compact={compact || undefined}>
+    <li className={styles.row} data-capacity={row.cls} data-compact={compact || undefined} data-status={status?.kind}>
       <MonogramTile monogram={row.monogram} engine={row.engine} size="sm" />
       <div className={styles.main}>
         <div className={styles.head}>
           <SeatName row={row} onSelect={onSelectSeat} selected={selected} />
-          <span className={styles.word} data-tone={tone}>
-            <span className={styles.dot} aria-hidden="true" />
-            {row.word}
-          </span>
-          {row.connection !== null && row.connection.connection !== 'connected' && row.connection.connection !== 'unknown' ? (
+          {status !== null ? (
+            <StatusLine status={status} />
+          ) : (
+            <span className={styles.word} data-tone={tone}>
+              <span className={styles.dot} aria-hidden="true" />
+              {row.word}
+            </span>
+          )}
+          {row.connection !== null && row.connection.connection !== 'connected' && row.connection.connection !== 'unknown'
+            && !(status?.coversConnection ?? false) && !(status?.kind === 'signed-out') ? (
             <span className={styles.word} data-tone={row.connection.tone}>
               <span className={styles.dot} aria-hidden="true" />
               {row.connection.word}
@@ -187,6 +240,7 @@ function CapacityRowView({
           ) : null}
         </div>
         {!compact || windows.length === 0 ? <p className={styles.summary}>{row.summary}</p> : null}
+        {status !== null && !compact ? <StampLine status={status} /> : null}
         {windows.length > 0 ? (
           <div className={styles.bars}>
             {windows.map((w) => (
@@ -229,16 +283,31 @@ export function CapacityStrip({
   onSelectSeat,
   selectedSeatId = null,
   emptyText = 'No seats yet. Connect an account or start Ollama — an empty roster, not seats at zero.',
+  accounts,
 }: CapacityStripProps) {
   const headingId = useId();
-  const rows = useMemo(
+  const [tick, setTick] = useState(() => Date.now());
+  usePollWhileVisible(() => setTick(Date.now()), ACCOUNT_CLOCK_MS, { enabled: accounts !== undefined && accounts.now === undefined });
+  const now = accounts?.now ?? tick;
+  const healthRead = accounts?.healthRead ?? false;
+  const accountsMode = accounts !== undefined;
+  // Accounts mode words every window reset and reason against the SAME clock
+  // as its status line ("Spent · resets Sat 11:46 PM"), so the two never
+  // disagree about which day "today" is.
+  const rowsNow = accountsMode ? now : undefined;
+  const built = useMemo(
     () => buildCapacityRows(seats, {
       health: health ?? null,
       budget: budget ?? null,
       ...(local ? { local } : {}),
       ...(seatIds ? { seatIds } : {}),
+      ...(rowsNow !== undefined ? { now: rowsNow } : {}),
     }),
-    [seats, health, budget, local, seatIds],
+    [seats, health, budget, local, seatIds, rowsNow],
+  );
+  const rows = useMemo(
+    () => (accountsMode ? orderAccountRows(built, { healthRead, now }) : built),
+    [built, accountsMode, healthRead, now],
   );
   const compact = density === 'compact';
   const showHeadline = headline ?? !compact;
@@ -261,6 +330,9 @@ export function CapacityStrip({
               renderActions={renderActions}
               onSelectSeat={onSelectSeat}
               selected={selectedSeatId === row.seatId}
+              status={accounts
+                ? accountStatus(row, { healthRead, now, checking: accounts.checkingSeatId === row.seatId })
+                : null}
             />
           ))}
         </ul>

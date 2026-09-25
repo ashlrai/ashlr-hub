@@ -42,11 +42,59 @@ export interface BudgetPolicy {
   updatedAt: string;
 }
 
+/**
+ * What a seat reason is about (3.10.1) — lets a reader derive "eligible again"
+ * from data instead of parsing prose. Blockers lift on a CONDITION (switch
+ * autonomy on, reconnect, a fresh reading, the grant) or at a TIME (a window
+ * reset, a demotion's end); `headroom` and `model-window` are notes, never
+ * blockers. Readers must treat an unrecognised kind as `other` (a newer
+ * server may add kinds).
+ */
+export type SeatReasonKind =
+  | 'headroom'
+  | 'switched-off'
+  | 'signed-out'
+  | 'unreachable'
+  | 'spent'
+  | 'reserve'
+  | 'session-ceiling'
+  | 'unknown-usage'
+  | 'spend-cap'
+  | 'model-window'
+  | 'context'
+  | 'grant'
+  | 'lane'
+  | 'demoted'
+  | 'other';
+
+/** One reason, as data: the sentence and — separately — when it lifts. */
+export interface SeatReason {
+  kind: SeatReasonKind;
+  /** One complete sentence ending in a period, WITHOUT a reset clause. */
+  text: string;
+  /**
+   * Machine-readable instant this blocker lifts on its own (a window reset, a
+   * demotion's end). Readers format it in the viewer's zone; null = none known.
+   */
+  resetsAt?: string | null;
+  /**
+   * The provider's own reset wording when it publishes no instant (Claude) —
+   * rendered verbatim, never parsed into a time.
+   */
+  resetDescription?: string | null;
+}
+
 export interface SeatExclusion {
   seatId: string;
+  /**
+   * Complete sentences, each carrying its own reset clause — the form the
+   * CLI, logs and pre-3.10.1 readers print. `details` is the same list as data.
+   */
   reasons: string[];
   /** ISO time the seat is expected to become eligible again; null when unknown / never. */
   nextEligibleAt: string | null;
+  /** Structured twin of `reasons`, same order (3.10.1+; absent on older records). */
+  details?: SeatReason[];
 }
 
 /** Output of the pure `routeSeat(req, capacity, policy)`. */
@@ -58,6 +106,12 @@ export interface SeatDecision {
   exclusions: SeatExclusion[];
   /** One plain-language sentence explaining the choice (or why nothing was chosen). */
   why: string;
+  /**
+   * One SHORT sentence for a headline (3.10.1+): the choice and its reason,
+   * without the per-seat detail `exclusions` already carries. Absent on older
+   * records — readers fall back to `why`.
+   */
+  summary?: string;
   mode: BudgetMode;
 }
 

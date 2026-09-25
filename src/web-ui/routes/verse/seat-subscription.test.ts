@@ -7,10 +7,12 @@
  * the obvious projection would have told him something false about it.
  */
 import { describe, expect, it } from 'vitest';
+import { describeResetAt } from '../../../core/verse/seat-readiness.js';
 import type { VerseSeat } from '../../data/api-types.js';
 import { seatCapacity } from './verse-model.js';
 import {
   evidenceNote,
+  formatResetInstant,
   seatCapacityWindowLabel,
   seatSubscription,
   seatSubscriptionSentence,
@@ -69,6 +71,41 @@ describe('seatSubscription — the binding window leads', () => {
     expect(view.binding?.resetText).toMatch(/^resets /);
     expect(view.cls).toBe('ready');
     expect(view.summary).toBe('1% of unified weekly window used');
+  });
+
+  it('words a machine reset exactly as describeResetAt does everywhere else — one reset wording, against the clock it is given', () => {
+    // Local instants: "today" / a weekday / a date, whatever zone the suite runs in.
+    const now = new Date(2026, 8, 24, 9, 0).getTime();
+    const tonight = new Date(2026, 8, 24, 23, 46).toISOString();
+    const tomorrow = new Date(2026, 8, 25, 23, 46).toISOString();
+    const later = new Date(2026, 9, 20, 23, 46).toISOString();
+    expect(formatResetInstant(tonight, now)).toBe(`resets ${describeResetAt(tonight, now)}`);
+    expect(formatResetInstant(tonight, now)).toMatch(/^resets today /);
+    expect(formatResetInstant(tomorrow, now)).toBe(`resets ${describeResetAt(tomorrow, now)}`);
+    expect(formatResetInstant(later, now)).toBe(`resets ${describeResetAt(later, now)}`);
+    // Never the retired second wording ("resets Sep 25 at 11:46 PM").
+    for (const iso of [tonight, tomorrow, later]) expect(formatResetInstant(iso, now)).not.toMatch(/ at /);
+    expect(formatResetInstant('not a date', now)).toBeNull();
+
+    // The projection threads the same clock through, so the words are a
+    // function of the inputs — never of the day the suite happens to run.
+    const w = seatWindow({ id: 'codex_codex_primary', usedPercent: 40, resetsAt: tomorrow });
+    const seat = nativeSeat(capacity({ windows: [w], binding: w, usability: 'ready' }), { id: 'codex', engine: 'codex', label: 'Codex' });
+    expect(seatSubscription(seat, now).binding?.resetText).toBe(`resets ${describeResetAt(tomorrow, now)}`);
+    const aDayLater = new Date(2026, 8, 25, 9, 0).getTime();
+    expect(seatSubscription(seat, aDayLater).binding?.resetText).toBe(`resets ${describeResetAt(tomorrow, aDayLater)}`);
+    expect(seatSubscription(seat, aDayLater).binding?.resetText).toMatch(/^resets today /);
+  });
+
+  it('prints the summary by the one percent rule — never "100%" short of spent, never "0%" for a real reading', () => {
+    const at = (usedPercent: number) => {
+      const w = seatWindow({ id: 'codex_codex_primary', usedPercent });
+      return seatSubscription(nativeSeat(capacity({ windows: [w], binding: w, usability: 'tight' }), { id: 'codex', engine: 'codex', label: 'Codex' }));
+    };
+    expect(at(99.6).summary).toBe('99% of primary window used');
+    expect(at(0.4).summary).toBe('<1% of primary window used');
+    expect(at(62.4).summary).toBe('62% of primary window used');
+    expect(at(100).summary).toBe('100% of primary window used');
   });
 });
 

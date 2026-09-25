@@ -17,7 +17,9 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-const SOURCE = readFileSync(resolve(process.cwd(), 'src/web-ui/routes/verse/VerseApp.tsx'), 'utf8');
+const read = (path: string) => readFileSync(resolve(process.cwd(), 'src/web-ui/routes/verse', path), 'utf8');
+const SOURCE = read('VerseApp.tsx');
+const WARMUP = read('shell/warmup.ts');
 
 /** Specifiers of VALUE imports (`import { X } from '…'`, `import X from '…'`, `import '…'`) — `import type` excluded. */
 function staticValueImports(src: string): string[] {
@@ -26,14 +28,27 @@ function staticValueImports(src: string): string[] {
   return out;
 }
 
-const LAZY_ONLY = [
+/** Modules VerseApp itself loads with import(). */
+const DYNAMIC = [
   './shell/CommandPalette.js',
   './shell/NeedsYouDrawer.js',
   './shell/ShortcutsOverlay.js',
   './shell/GearTray.js',
   './onboarding/OnboardingFlow.js',
   './shell/RailStatus.js',
+  // The after-first-paint warm-up (review 3.10.1): the idle gate, the step
+  // list and — one import() further in — the surfaces' query table. Only a
+  // few-line trigger (prefetchAfterFirstPaint) is on the first-paint path;
+  // the static scheduler and its preload list cost ~0.9 KB of chat critical JS.
+  './shell/warmup.js',
+];
+
+const LAZY_ONLY = [
+  ...DYNAMIC,
   './shell/palette-model.js',
+  // Reached only through ./shell/warmup.js, never from VerseApp at all.
+  './shell/idle-prefetch.js',
+  './shell/surface-prefetch.js',
 ];
 
 describe('VerseApp keeps non-first-paint modules out of its static imports', () => {
@@ -49,8 +64,15 @@ describe('VerseApp keeps non-first-paint modules out of its static imports', () 
   });
 
   it('loads each of them with import()', () => {
-    for (const spec of LAZY_ONLY.filter((s) => s !== './shell/palette-model.js')) {
-      expect(SOURCE).toContain(`import('${spec}')`);
-    }
+    for (const spec of DYNAMIC) expect(SOURCE).toContain(`import('${spec}')`);
+  });
+
+  it('the warm-up chunk reaches the surfaces’ query table only through import() too', () => {
+    // Otherwise every surface's data module would ride along with the tiny
+    // warm-up chunk the moment the shell mounts.
+    expect(staticValueImports(WARMUP)).not.toContain('./surface-prefetch.js');
+    expect(WARMUP).toContain(`import('./surface-prefetch.js')`);
+    // And VerseApp never names the scheduler or the table itself.
+    expect(SOURCE).not.toMatch(/['"]\.\/shell\/(idle-prefetch|surface-prefetch)\.js['"]/);
   });
 });

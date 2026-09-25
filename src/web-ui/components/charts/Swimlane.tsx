@@ -23,8 +23,9 @@ import { CHART_QUEUED_OUTLINE, hatchPatternId, toneColor, type ChartEngine, type
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
 import { ChartLegend, ChartTooltip, EngineTick, HatchPattern, clampTooltipLeft, type ChartLegendItem } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
-import { linearScale } from './chart-math.js';
+import { MIN_TIME_SPAN_MS, ensureSpan, isPlausibleTime, labelCharPx, layoutAxisLabels, linearScale } from './chart-math.js';
 import { useChartWidth } from './useChartWidth.js';
+import { useTextScale } from './useTextScale.js';
 import plot from './plot.module.css';
 import styles from './Swimlane.module.css';
 
@@ -150,8 +151,8 @@ export function Swimlane({
   caveat,
   status,
   lanes,
-  from,
-  to,
+  from: fromProp,
+  to: toProp,
   now,
   width: fixedWidth,
   toneOf = defaultToneOf,
@@ -159,9 +160,19 @@ export function Swimlane({
   formatTick,
   ariaLabel,
 }: SwimlaneProps) {
+  // A window bound of 0 / NaN / pre-2000 is a null timestamp that leaked
+  // through; fall back to the runs themselves (then to a day ending now), and
+  // widen a degenerate window so its ticks are distinct times.
+  const itemTimes = lanes.flatMap((l) => l.items.flatMap((i) => [i.start, i.end ?? Number.NaN])).filter(isPlausibleTime);
+  const toBound = isPlausibleTime(toProp)
+    ? toProp
+    : now !== undefined && isPlausibleTime(now) ? now : itemTimes.length ? Math.max(...itemTimes) : Date.now();
+  const fromBound = isPlausibleTime(fromProp) ? fromProp : itemTimes.length ? Math.min(...itemTimes) : toBound - 86_400_000;
+  const [from, to] = ensureSpan(fromBound, toBound, MIN_TIME_SPAN_MS, 'end');
   const tickLabel = formatTick ?? spanTickFormatter(from, to);
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
+  const textScale = useTextScale();
   const [scrollTop, setScrollTop] = useState(0);
   const [hover, setHover] = useState<{ lane: number; item: number } | null>(null);
   const liveId = useId();
@@ -175,7 +186,8 @@ export function Swimlane({
   // (plus room for the engine tick and monogram when lanes carry one).
   const tickW = lanes.some((l) => l.engine !== undefined) ? 18 : 0;
   const labelW = Math.max(72, Math.min(160, Math.round(width * 0.24))) + tickW;
-  const labelChars = Math.floor((labelW - tickW) / 7);
+  // 7 px a character at 12 px text, scaled to the Display size.
+  const labelChars = Math.floor((labelW - tickW) / (7 * textScale));
   const plotW = Math.max(40, width - labelW - 8);
   const xs = linearScale(from, Math.max(to, from + 1), labelW, labelW + plotW);
   const virtual = lanes.length > VIRTUALIZE_AFTER;
@@ -272,18 +284,27 @@ export function Swimlane({
     );
   }
 
+  // Tick labels never overprint: the window's end outranks its start, and an
+  // interior tick whose label would touch a neighbour is dropped (its
+  // gridline stays).
+  const tickLabels = layoutAxisLabels(
+    ticks.map((t, i) => ({
+      key: String(i),
+      x: xs(t),
+      anchor: i === 0 ? 'start' as const : i === ticks.length - 1 ? 'end' as const : 'middle' as const,
+      priority: i === ticks.length - 1 ? 3 : i === 0 ? 2 : 1,
+      required: i === 0 || i === ticks.length - 1,
+      variants: [tickLabel(t)],
+    })),
+    { min: labelW, max: labelW + plotW, charPx: labelCharPx(textScale) },
+  );
+
   const axis = (
     <svg className={plot.svg} width={width} height={AXIS_H} viewBox={`0 0 ${width} ${AXIS_H}`} aria-hidden="true">
       <line className={plot.axis} x1={labelW} x2={labelW + plotW} y1={AXIS_H - 1} y2={AXIS_H - 1} />
-      {ticks.map((t, i) => (
-        <text
-          key={t}
-          className={plot.tick}
-          x={xs(t)}
-          y={AXIS_H - 7}
-          textAnchor={i === 0 ? 'start' : i === ticks.length - 1 ? 'end' : 'middle'}
-        >
-          {tickLabel(t)}
+      {tickLabels.map((l) => (
+        <text key={l.key} data-axis-label={l.key} className={plot.tick} x={l.x} y={AXIS_H - 7} textAnchor={l.anchor}>
+          {l.text}
         </text>
       ))}
     </svg>

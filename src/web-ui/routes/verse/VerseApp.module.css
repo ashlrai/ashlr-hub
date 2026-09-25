@@ -132,7 +132,7 @@
     color var(--duration-fast) var(--ease-standard),
     background var(--duration-fast) var(--ease-standard);
 }
-.railButton:hover { color: var(--text-primary); background: var(--bg-hover); }
+.railButton:hover { color: var(--text-secondary); background: var(--bg-hover); }
 
 /* Expanded: a full-width row — icon, label, keycap. */
 .rail[data-rail="expanded"] .railButton {
@@ -163,6 +163,7 @@
   white-space: nowrap;
   text-align: left;
   font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-regular);
   line-height: var(--text-sm-line);
 }
 
@@ -176,7 +177,21 @@
 }
 .railButton:hover .railKey { color: var(--text-secondary); }
 .railButton:active { background: var(--bg-active); }
-.railButton[aria-current] { color: var(--text-primary); }
+
+/* ACTIVE is one item, and only ever by aria-current (or the gear's
+   data-active while a tray section is on screen): the primary ink, the
+   selected ground, a medium label and the accent bar below. Nothing else may
+   borrow any of those — a Needs-you count on Command is attention, carried by
+   the badge alone, and hover stays a step quieter (secondary ink) so a
+   pointer resting on an item never reads as "you are here". */
+.railButton[aria-current],
+.railButton[data-active] {
+  color: var(--text-primary);
+  background: var(--bg-selected);
+}
+.railButton[aria-current] .railLabel,
+.railButton[data-active] .railLabel { font-weight: var(--font-weight-medium); }
+.railButton[aria-current] .railKey { color: var(--text-secondary); }
 
 /* Active indicator: a 2px accent bar on the left edge of the icon, never a filled pill. */
 .railButton[aria-current]::before {
@@ -202,8 +217,7 @@
    so "5" never sits on the "C" of Command. */
 .rail[data-rail="expanded"] .railLabel { padding-left: var(--space-2); }
 
-/* The gear lights up while one of its tray sections is on screen. */
-.railButton[data-active] { color: var(--text-primary); }
+/* The gear lights up (styled active, above) while one of its tray sections is on screen. */
 
 /* ---- the surfaces ----------------------------------------------------- */
 .section {

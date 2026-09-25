@@ -24,6 +24,7 @@ import { join } from 'node:path';
 
 import type { DaemonCapabilityKind } from '../authority/types.js';
 import type { SeatDecision } from '../routing/types.js';
+import { boundSeatReasons } from '../routing/seat-reasons.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
 import type { OperatorPresence } from './dispatch-router.js';
@@ -142,12 +143,18 @@ function scrubDecision(decision: SeatDecision | null): SeatDecision | null {
   return {
     seatId: decision.seatId,
     candidates: decision.candidates.slice(0, 16),
-    exclusions: decision.exclusions.slice(0, 16).map((e) => ({
-      seatId: e.seatId,
-      reasons: e.reasons.slice(0, 6).map((r) => scrubSecrets(r).slice(0, 300)),
-      nextEligibleAt: e.nextEligibleAt,
-    })),
+    exclusions: decision.exclusions.slice(0, 16).map((e) => {
+      // 3.10.1: the structured twin of `reasons` ("why this seat" reads it).
+      const details = boundSeatReasons(e.details, scrubSecrets);
+      return {
+        seatId: e.seatId,
+        reasons: e.reasons.slice(0, 6).map((r) => scrubSecrets(r).slice(0, 300)),
+        nextEligibleAt: e.nextEligibleAt,
+        ...(details ? { details } : {}),
+      };
+    }),
     why: scrubSecrets(decision.why).slice(0, 600),
+    ...(typeof decision.summary === 'string' ? { summary: scrubSecrets(decision.summary).slice(0, 300) } : {}),
     mode: decision.mode,
   };
 }

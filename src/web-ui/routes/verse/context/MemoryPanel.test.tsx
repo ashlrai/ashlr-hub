@@ -100,6 +100,9 @@ describe('what it shows', () => {
     const panel = section();
     expect(within(panel).getByText('on')).toBeInTheDocument();
     expect(within(panel).getByText(/shared by every chat on/)).toHaveTextContent('hub');
+    // The project reads by its folder name; the absolute path is only the tooltip.
+    expect(within(panel).getByText('hub', { selector: 'strong' })).toHaveAttribute('title', PROJECT);
+    expect(within(panel).getByText(/shared by every chat on/)).not.toHaveTextContent(PROJECT);
     expect(within(panel).getByText('plan.md')).toBeInTheDocument();
     expect(within(panel).getByText('findings.log')).toBeInTheDocument();
     expect(within(panel).getByText(/^\d+ B$|KB$/)).toBeInTheDocument();

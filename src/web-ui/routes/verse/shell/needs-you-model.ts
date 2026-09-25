@@ -6,6 +6,11 @@
  * Pure. The items come from GET /api/verse/activity (C1's own producers plus
  * Track B's, R1); each carries its own actions, so nothing here knows what a
  * grant or an owner-lane PR is.
+ *
+ * How a row READS (needsYouRowView) borrows the approvals detail view's text
+ * helpers rather than growing a second copy: an approval item's title and
+ * detail are the same proposal title and run summary that view already
+ * untangles.
  */
 import {
   NEEDS_YOU_KIND_CATEGORY,
@@ -15,6 +20,18 @@ import {
   type NeedsYouSource,
   type VerseActivitySources,
 } from '../../../../core/verse/workbench-types.js';
+import {
+  describeDiffStats,
+  formatDiffStats,
+  kindLabel,
+  localStamp,
+  longAgo,
+  parseRunSummary,
+  readableTitle,
+  repoName,
+} from '../approvals/approvals-model.js';
+import type { VerseSeat } from '../../../data/api-types.js';
+import { isVerseEngine, modelOptionFor, seatById } from '../verse-model.js';
 import type { NeedsYouSplit } from '../verse-ui-store.js';
 
 export const SPLIT_LABEL: Readonly<Record<NeedsYouSplit, string>> = {
@@ -112,22 +129,102 @@ export function confirmCopy(item: NeedsYouItem, action: NeedsYouAction): Confirm
   if (action.confirm) return action.confirm;
   if (action.kind === 'approve' || action.kind === 'reject' || action.kind === 'veto') {
     const generic = GENERIC_CONFIRM[action.kind];
-    return { title: generic.title, body: item.title, confirmLabel: generic.confirmLabel };
+    return { title: generic.title, body: readableItemTitle(item).text, confirmLabel: generic.confirmLabel };
   }
   return null;
 }
 
-/** Relative time in operator language: "just now", "4m", "3h", "2d". */
-export function ago(iso: string, now: number = Date.now()): string {
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return '—';
-  const s = Math.max(0, Math.round((now - t) / 1000));
-  if (s < 45) return 'just now';
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.round(m / 60);
-  if (h < 36) return `${h}h ago`;
-  return `${Math.round(h / 24)}d ago`;
+// ---------------------------------------------------------------------------
+// How a row reads
+// ---------------------------------------------------------------------------
+
+/**
+ * The approvals producer titles an item `${kind === 'pr' ? 'PR' : kind}: ${proposal.title}`
+ * (core/verse/activity.ts approvalItem). Only an `approval` item is taken
+ * apart this way — "Failed: Migrate the store" is a chat title, not a kind.
+ */
+const APPROVAL_KIND_PREFIX = /^(PR|[a-z][a-z-]*):\s+([\s\S]+)$/;
+
+export interface ReadableItemTitle {
+  /** "Patch · Claude run": the proposal kind and the engine the title led with; null when neither. */
+  kindLabel: string | null;
+  /** The title to print. Never ends mid-word — a cut one ends in "…". */
+  text: string;
+}
+
+export function readableItemTitle(item: Pick<NeedsYouItem, 'kind' | 'title'>): ReadableItemTitle {
+  let proposalKind: string | null = null;
+  let rest = item.title;
+  if (item.kind === 'approval') {
+    const m = APPROVAL_KIND_PREFIX.exec(item.title.trim());
+    if (m) {
+      proposalKind = m[1] === 'PR' ? 'pr' : m[1]!;
+      rest = m[2]!;
+    }
+  }
+  const title = readableTitle(rest);
+  const parts = [proposalKind === null ? null : kindLabel(proposalKind), title.eyebrow].filter((p): p is string => p !== null);
+  return { kindLabel: parts.length > 0 ? parts.join(' · ') : null, text: title.text };
+}
+
+/** A sandboxed run's facts, lifted out of the item's detail line. */
+export interface NeedsYouRunView {
+  /** "2 files · +384 −0". */
+  stats: string;
+  /** "2 files changed, 384 lines added, 0 removed" — what a screen reader says instead. */
+  statsSpoken: string;
+  /** "Test-and-repair loop", never "TITRR". */
+  source: string;
+  /** What the source means, for a tooltip. */
+  sourceHint: string | null;
+  partial: boolean;
+  /** "claude:claude-fable-5". */
+  model: string;
+}
+
+/** Everything a Needs-you row prints, in operator language. The raw server text survives only in tooltips. */
+export interface NeedsYouRowView {
+  kindLabel: string | null;
+  title: string;
+  /** The title exactly as the server sent it — the row's tooltip. */
+  fullTitle: string;
+  run: NeedsYouRunView | null;
+  /** What the detail says beyond the run facts ("Review before applying."), or the detail verbatim; null when nothing. */
+  detail: string | null;
+  /** "binshield", never a path. */
+  repo: string | null;
+  /** The repo as sent, as a tooltip, when it was more than the name. */
+  repoFull: string | undefined;
+  /** "38 days ago". */
+  age: string;
+  /** The exact local time, for a tooltip. */
+  ageStamp: string | undefined;
+}
+
+export function needsYouRowView(item: NeedsYouItem, now: number = Date.now()): NeedsYouRowView {
+  const title = readableItemTitle(item);
+  const facts = parseRunSummary(item.detail);
+  const repo = repoName(item.subject.repo);
+  return {
+    kindLabel: title.kindLabel,
+    title: title.text,
+    fullTitle: item.title,
+    run: facts
+      ? {
+        stats: formatDiffStats(facts),
+        statsSpoken: describeDiffStats(facts),
+        source: facts.sourceLabel,
+        sourceHint: facts.sourceHint,
+        partial: facts.partial,
+        model: facts.model,
+      }
+      : null,
+    detail: facts ? facts.rest : item.detail,
+    repo,
+    repoFull: repo !== null && item.subject.repo !== null && item.subject.repo !== repo ? item.subject.repo : undefined,
+    age: longAgo(item.since, now),
+    ageStamp: localStamp(item.since),
+  };
 }
 
 /** "closes in 24m" / "expired" — for veto windows and grants. */
@@ -142,4 +239,48 @@ export function until(iso: string, now: number = Date.now()): string {
   const h = Math.round(m / 60);
   if (h < 48) return `in ${h}h`;
   return `in ${Math.round(h / 24)}d`;
+}
+
+// ---------------------------------------------------------------------------
+// Seats and models, by name
+// ---------------------------------------------------------------------------
+
+/** A seat or model as the operator knows it; `raw` is the id as sent, for a tooltip, when the text differs. */
+export interface DisplayName {
+  text: string;
+  raw: string | undefined;
+}
+
+/**
+ * "Claude Max" for `claude-a`: the roster's label (bootstrap seats — the name
+ * the seat picker and Apps & Accounts use). An id the roster does not know is
+ * shown as sent: it is all there is.
+ */
+export function seatDisplayName(seats: readonly VerseSeat[], seatId: string): DisplayName {
+  const label = seatById(seats, seatId)?.label;
+  return label && label !== seatId ? { text: label, raw: seatId } : { text: seatId, raw: undefined };
+}
+
+/**
+ * "Fable 5.1" for a run's `claude:claude-fable-5-1`: the catalog label (the
+ * model picker's) on the item's own seat first, then on any seat of the run's
+ * engine — exact id, then canonical (verse-model `modelOptionFor`, so a
+ * pre-alias `claude-opus-5.5` still finds `claude-opus-5-5`). A model no
+ * catalog lists is shown as sent.
+ */
+export function runModelDisplayName(seats: readonly VerseSeat[], model: string, seatId: string | null): DisplayName {
+  const colon = model.indexOf(':');
+  const prefix = colon > 0 ? model.slice(0, colon) : '';
+  const engine = isVerseEngine(prefix) ? prefix : null;
+  // `local:qwen3.8:27b` keeps its tag: only a known engine prefix is split off.
+  const id = engine ? model.slice(colon + 1) : model;
+  const order = [
+    ...(seatId ? [seatId] : []),
+    ...seats.filter((seat) => seat.id !== seatId && (engine === null || seat.engine === engine)).map((seat) => seat.id),
+  ];
+  for (const candidate of order) {
+    const label = modelOptionFor(seats, { seatId: candidate, model: id })?.label;
+    if (label && label !== model) return { text: label, raw: model };
+  }
+  return { text: model, raw: undefined };
 }

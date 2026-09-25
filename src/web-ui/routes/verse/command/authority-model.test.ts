@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { actionForDraft, classifySwitch, stopOutcomeSentence, grantChip, switchOptions, timeLeft, verdictParts } from './authority-model.js';
-import { authorityStatus } from './fixtures.test-support.js';
+import { authorityStatus, fleetLive } from './fixtures.test-support.js';
+import { darkSinceLabel, fleetDarkSince } from '../fleet/dark-since.js';
 
 const NOW = Date.parse('2026-09-24T15:00:00Z');
 const DAY = 86_400_000;
@@ -70,7 +71,19 @@ describe('verdictParts', () => {
     const stopped = verdictParts({ authority: authorityStatus('live', NOW, { kill: true }), building: 0, mergedToday: 0, revertsToday: 0, reserve: null, darkSince: null });
     expect(stopped[0]).toMatchObject({ text: 'Stopped', tone: 'danger' });
     const dark = verdictParts({ authority: authorityStatus('dark', NOW), building: 0, mergedToday: 0, revertsToday: 0, reserve: null, darkSince: '2026-09-01T19:10:00Z' });
-    expect(dark.map((p) => p.text)).toEqual(['Off', 'fleet dark since Sep 1']);
+    // The viewer's local day: Sep 1 in New York or UTC, Sep 2 in Tokyo.
+    const localDay = new Date('2026-09-01T19:10:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    expect(dark.map((p) => p.text)).toEqual(['Off', `fleet dark since ${localDay}`]);
+  });
+
+  it('dates "dark since" from THE fleet dark-since instant, as the viewer\'s local day', () => {
+    // The live snapshot's darkSince (fleet/dark-since.ts), not history's
+    // "quiet since"; labelled exactly as the Fleet charts label it.
+    const live = { ...fleetLive('dark', NOW), darkSince: '2026-09-02T02:30:00.000Z' };
+    const parts = verdictParts({ authority: authorityStatus('dark', NOW), building: 0, mergedToday: 0, revertsToday: 0, reserve: null, darkSince: fleetDarkSince(live) });
+    expect(parts[1]!.text).toBe(`fleet dark since ${darkSinceLabel('2026-09-02T02:30:00.000Z')}`);
+    // An idle fleet is not dark, whatever history says.
+    expect(fleetDarkSince(fleetLive('live', NOW))).toBeNull();
   });
 });
 

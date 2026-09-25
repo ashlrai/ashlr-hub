@@ -24,6 +24,7 @@ import {
   sessionOverheadTokens,
 } from '../../../../core/verse/context-math.js';
 import { formatRelative } from '../verse-model.js';
+import { asClause, percentText, tidyProse } from '../autonomy/format.js';
 import { formatTokens } from '../verse-store.js';
 
 // ---------------------------------------------------------------------------
@@ -71,12 +72,26 @@ export function modelOption(seat: VerseSeat | null | undefined, modelId: string)
   return seat.models.find((m) => canonicalModelId(m.id) === canonical) ?? null;
 }
 
-/** Why a seat+model cannot take a new session right now; null when it can. */
-export function targetUnavailableReason(seat: VerseSeat | null | undefined, option: VerseModelOption | null): string | null {
+/**
+ * Why a seat+model cannot take a new session right now; null when it can.
+ *
+ * The seat's own reason is embedded as a clause: its closing period is
+ * dropped (no "exhausted..") and any ISO instant in it — a health summary
+ * saying when usage resets — is read as the viewer's local time.
+ */
+export function targetUnavailableReason(
+  seat: VerseSeat | null | undefined,
+  option: VerseModelOption | null,
+  now: number = Date.now(),
+): string | null {
   if (!seat) return 'Pick a seat to continue on.';
-  if (seat.health.state === 'unavailable') return `${seat.label} is unavailable: ${seat.health.summary ?? 'no reason given'}.`;
+  if (seat.health.state === 'unavailable') {
+    return `${seat.label} is unavailable: ${asClause(tidyProse(seat.health.summary ?? 'no reason given', now))}.`;
+  }
   if (!option) return 'Pick a model on this seat.';
-  if (option.unavailableReason) return `${option.label} cannot run on ${seat.label}: ${option.unavailableReason}.`;
+  if (option.unavailableReason) {
+    return `${option.label} cannot run on ${seat.label}: ${asClause(tidyProse(option.unavailableReason, now))}.`;
+  }
   return null;
 }
 
@@ -202,7 +217,7 @@ export function handoffFit(
       return {
         ...base,
         tone: 'warn',
-        text: `Tight: ${sum} is ${Math.round((needTokens / (standardCap ?? needTokens)) * 100)}% of where this model compacts — the new chat will compact early.`,
+        text: `Tight: ${sum} is ${percentText((needTokens / (standardCap ?? needTokens)) * 100)} of where this model compacts — the new chat will compact early.`,
       };
     case 'expansive':
       return mode === 'expansive'
@@ -289,7 +304,11 @@ export function relativePhrase(iso: string | null | undefined, now: number = Dat
   const short = formatRelative(iso, now);
   if (!short) return null;
   if (short === 'now') return 'just now';
-  return /^\d/.test(short) ? `${short} ago` : `on ${short}`;
+  // Only the relative tokens ("5m", "3h", "2d") take "ago". Anything else is a
+  // DATE, whatever the locale prints: "Sep 1" (en-US) but "1 Sept" (en-GB)
+  // and "1. Sept." (de) start with a digit — testing for a leading digit
+  // printed "Last completed 1 Sept ago." outside the US.
+  return /^\d+[mhd]$/.test(short) ? `${short} ago` : `on ${short}`;
 }
 
 // ---------------------------------------------------------------------------

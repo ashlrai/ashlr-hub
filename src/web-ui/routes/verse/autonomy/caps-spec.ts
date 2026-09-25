@@ -187,6 +187,14 @@ export type CapValidation =
   | { ok: false; error: string };
 
 /**
+ * A number with its unit, as a sentence writes it: "50 items", but "100% of
+ * window" — a percent sign hugs its number ("100 % of window" read as a typo).
+ */
+function withUnit(value: number, unit: string): string {
+  return unit.startsWith('%') ? `${value}${unit}` : `${value} ${unit}`;
+}
+
+/**
  * Validate what the operator typed against the spec's DISPLAY range, then
  * convert to the stored unit. Rejects blanks, non-numbers, fractions on
  * whole-number caps, and anything outside the range the server enforces.
@@ -197,10 +205,12 @@ export function validateCap(spec: CapFieldSpec, raw: string): CapValidation {
   const parsed = Number(trimmed);
   if (!Number.isFinite(parsed)) return { ok: false, error: `${spec.label} must be a number.` };
   if (spec.integer && !Number.isInteger(parsed)) {
-    return { ok: false, error: `${spec.label} must be a whole number of ${spec.unit}.` };
+    // "a whole number of % of window" is not a phrase; a percentage cap says so plainly.
+    const whole = spec.unit.startsWith('%') ? 'a whole percentage' : `a whole number of ${spec.unit}`;
+    return { ok: false, error: `${spec.label} must be ${whole}.` };
   }
   if (parsed < spec.min || parsed > spec.max) {
-    return { ok: false, error: `${spec.label} must be between ${spec.min} and ${spec.max} ${spec.unit}.` };
+    return { ok: false, error: `${spec.label} must be between ${spec.min} and ${withUnit(spec.max, spec.unit)}.` };
   }
   return { ok: true, stored: spec.fromDisplay(parsed), display: parsed };
 }

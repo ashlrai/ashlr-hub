@@ -20,6 +20,7 @@ import { useCallback, useRef, useState } from 'react';
 import { hasMutationHold } from '../../../data/auth-store.js';
 import { ApiError, DispatchDisabledError } from '../../../data/client.js';
 import { VerseMutationLockedError } from '../verse-queries.js';
+import { tidyProse } from '../autonomy/format.js';
 
 export interface TokenGateDialogProps {
   open: boolean;
@@ -90,10 +91,11 @@ export function describeContextError(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.status === 401) return 'The mutation token was rejected. Unlock again with the token `ashlr verse` printed.';
     if (err.code === 'VERSE_SESSION_NOT_FOUND') return 'This chat no longer exists on the server — it may have been deleted. Refresh the chat list.';
-    if (err.detail) return err.detail;
+    // The server's own words, with any ISO instant in them read as local time.
+    if (err.detail) return tidyProse(err.detail);
     if (err.status === 404) return 'This server does not have that route yet — update Ashlr and restart `ashlr verse`.';
     if (err.status === 409) return 'A turn is already running in this chat. Wait for it or stop it first.';
-    return err.message;
+    return tidyProse(err.message);
   }
-  return err instanceof Error && err.message ? err.message : 'Something went wrong.';
+  return err instanceof Error && err.message ? tidyProse(err.message) : 'Something went wrong.';
 }

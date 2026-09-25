@@ -12,6 +12,7 @@ import { RefreshIndicator } from '../../../components/primitives/RefreshIndicato
 import { SkeletonLine } from '../../../components/primitives/Skeleton.js';
 import { useQuery, useRefresh } from '../../../data/hooks.js';
 import { verseSafetyQuery } from './control-queries.js';
+import { tidyProse } from './format.js';
 import styles from './autonomy.module.css';
 
 export function SafetyPanel() {
@@ -50,8 +51,8 @@ export function SafetyPanel() {
         </p>
       ) : !report || total === 0 ? (
         <p className={styles.empty}>
-          The safety report came back with no checks. That is itself a problem worth investigating — treat it as a
-          failure, not as a pass.
+          The safety report came back with no checks. Press <strong>Re-run checks</strong>; if it is still empty, that is
+          itself a problem worth investigating — treat it as a failure, not as a pass.
         </p>
       ) : (
         <div className={styles.checkList}>
@@ -64,7 +65,7 @@ export function SafetyPanel() {
                 {check.label}
                 <span className={styles.srOnly}>{check.pass ? ' — passed' : ' — failed'}</span>
               </span>
-              <span className={styles.checkDetail}>{check.detail || check.id}</span>
+              <span className={styles.checkDetail}>{check.detail ? tidyProse(check.detail) : check.id}</span>
             </div>
           ))}
         </div>

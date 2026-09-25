@@ -31,6 +31,7 @@
  * PatchView). Tab moves between those four stops.
  */
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { Button, IconButton } from '../../../components/primitives/Button.js';
 import { EmptyState } from '../../../components/primitives/EmptyState.js';
 import { Segmented } from '../../../components/primitives/Segmented.js';
 import { SkeletonLine } from '../../../components/primitives/Skeleton.js';
@@ -48,6 +49,7 @@ import {
 } from './git-model.js';
 import { fetchGitDiff, isRootUnavailable, type GitDiffView } from './git-queries.js';
 import { PatchView, type PatchLayout } from './PatchView.js';
+import chrome from '../dock/pane-chrome.module.css';
 import styles from './DiffPane.module.css';
 
 export interface DiffPaneTestProps {
@@ -278,29 +280,31 @@ export function DiffPane({ roots, request, turnFiles, onAddToMessage, visible, f
   );
   const base = list.state === 'ready' ? list.data.base : null;
   const fileComments = comments.filter((c) => c.path === file);
+  const refresh = () => setReloadKey((n) => n + 1);
 
   if (roots.length === 0 || root === null) {
     return (
       <div className={styles.pane} ref={paneRef}>
-        <EmptyState compact title="No folder to review" body="This chat has no project folder." />
+        <EmptyState compact title="No folder to review"
+          body="This chat has no project folder. Start a chat in a project to review the changes it makes." />
       </div>
     );
   }
 
   return (
     <div className={styles.pane} ref={paneRef} data-wide={wide ? 'true' : 'false'}>
-      <header className={styles.head}>
+      <header className={`${chrome.header} ${styles.head}`}>
         {roots.length > 1 ? (
           <label className={styles.rootPick}>
             <span className={styles.visuallyHidden}>Repository</span>
-            <select id={rootId} value={root} onChange={(e) => { setRoot(e.target.value); setFile(null); }} className={styles.select}>
+            <select id={rootId} value={root} onChange={(e) => { setRoot(e.target.value); setFile(null); }} className={styles.select} title={root}>
               {roots.map((r) => (
                 <option key={r} value={r}>{rootName(r)}</option>
               ))}
             </select>
           </label>
         ) : (
-          <span className={styles.rootName}>{rootName(root)}</span>
+          <span className={`${chrome.title} ${styles.rootName}`} title={root}>{rootName(root)}</span>
         )}
         <Segmented
           aria-label="What to review"
@@ -309,17 +313,17 @@ export function DiffPane({ roots, request, turnFiles, onAddToMessage, visible, f
           value={scope}
           onChange={(next) => { setScope(next); setFile(null); }}
         />
-        <span className={styles.headSpacer} />
-        <Segmented
-          aria-label="Diff layout"
-          size="sm"
-          options={layoutOptions.map((o) => (o.value === 'split' && !wide ? { ...o, disabled: true } : o))}
-          value={effectiveLayout}
-          onChange={setLayout}
-        />
-        <button type="button" className={styles.iconButton} onClick={() => setReloadKey((n) => n + 1)} aria-label="Refresh changes" title="Refresh changes">
-          <IconRefresh width={14} height={14} aria-hidden="true" />
-        </button>
+        <div className={chrome.actions}>
+          <Segmented
+            aria-label="Diff layout"
+            size="sm"
+            options={layoutOptions.map((o) => (o.value === 'split' && !wide ? { ...o, disabled: true } : o))}
+            value={effectiveLayout}
+            onChange={setLayout}
+          />
+          {/* The same ghost sm icon button the Terminal and Preview headers use. */}
+          <IconButton variant="ghost" size="sm" icon={<IconRefresh />} aria-label="Refresh changes" title="Refresh changes" onClick={refresh} />
+        </div>
       </header>
 
       <p className={styles.summary}>
@@ -340,16 +344,21 @@ export function DiffPane({ roots, request, turnFiles, onAddToMessage, visible, f
       </p>
 
       {list.state === 'not-a-repo' ? (
-        <EmptyState compact title="Not a git repository" body={`${rootName(root)} is not tracked by git, so there is nothing to review.`} />
+        <EmptyState compact title="Not a git repository"
+          body={`${rootName(root)} is not tracked by git, so there is nothing to review. Run git init in the terminal to start tracking it.`} />
       ) : list.state === 'error' ? (
-        <EmptyState compact tone="error" title="Could not read the changes" body={list.message} />
+        <EmptyState compact tone="error" title="Could not read the changes" body={list.message}
+          action={<Button size="sm" variant="subtle" onClick={refresh}>Try again</Button>} />
       ) : list.state !== 'ready' ? (
         <div className={styles.skeleton} aria-hidden="true">
           <SkeletonLine />
           <SkeletonLine />
           <SkeletonLine />
         </div>
-      ) : entries.length === 0 ? null : (
+      ) : entries.length === 0 ? (
+        // The summary line above states the fact; this says where to look next.
+        <p className={styles.patchNotice}>{emptyNextStep(scope)}</p>
+      ) : (
         <div className={styles.body}>
           <nav className={styles.files} aria-label="Changed files">
             <ul
@@ -366,7 +375,7 @@ export function DiffPane({ roots, request, turnFiles, onAddToMessage, visible, f
                 <li key={group.dir || '.'} role="presentation" className={styles.group}>
                   {/* RTL truncation keeps the tail of a long path visible; the LRM keeps
                       the trailing slash from being reordered to the front. */}
-                  {group.dir ? <span className={styles.dir} role="presentation">{group.dir}/{'\u200E'}</span> : null}
+                  {group.dir ? <span className={styles.dir} role="presentation" title={`${group.dir}/`}>{group.dir}/{'\u200E'}</span> : null}
                   <ul role="presentation" className={styles.groupFiles}>
                     {group.files.map((f) => {
                       const settled = entries.find((e) => e.file.path === f.path)?.settled ?? false;
@@ -408,14 +417,17 @@ export function DiffPane({ roots, request, turnFiles, onAddToMessage, visible, f
 
           <section className={styles.patchArea} aria-label={file ? `Patch for ${file}` : 'Patch'}>
             {file === null ? (
-              <p className={styles.patchNotice}>Choose a file.</p>
+              <p className={styles.patchNotice}>Choose a file in the list to see its changes.</p>
             ) : patch.state === 'loading' || patch.state === 'idle' ? (
               <div className={styles.skeleton} aria-hidden="true">
                 <SkeletonLine />
                 <SkeletonLine />
               </div>
             ) : patch.state === 'error' ? (
-              <p className={styles.patchError} role="alert">{patch.message}</p>
+              <div className={styles.patchError} role="alert">
+                <p>{patch.message}</p>
+                <Button size="sm" variant="subtle" onClick={refresh}>Try again</Button>
+              </div>
             ) : (
               <>
                 <h3 className={styles.patchPath} title={file}>{file}</h3>
@@ -456,6 +468,13 @@ export function DiffPane({ roots, request, turnFiles, onAddToMessage, visible, f
       <p className={styles.visuallyHidden} role="status" aria-live="polite">{announce}</p>
     </div>
   );
+}
+
+/** What to do about an empty scope: the next place to look, never a dead end. */
+function emptyNextStep(scope: VerseReviewScope): string {
+  if (scope === 'turn') return 'Switch to Uncommitted or Branch to see the rest of the changes.';
+  if (scope === 'working') return 'Edits the chat makes show up here as they land. Branch shows what is already committed.';
+  return 'Commits on this branch show up here. Uncommitted shows edits that are not committed yet.';
 }
 
 function emptySentence(scope: VerseReviewScope, base: string | null): string {

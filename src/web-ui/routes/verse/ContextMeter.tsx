@@ -101,6 +101,12 @@ export function describeContext(props: Omit<ContextMeterProps, 'variant'>): {
   tickPercent: number | null;
   /** Fill width on the track (0–100). */
   fillPercent: number;
+  /**
+   * The reading itself — occupancy, an upper-bound or past-the-window caveat,
+   * and where it compacts — without the explanation and provenance lines
+   * `title` adds. The composer ring's tooltip is exactly these lines.
+   */
+  summary: string[];
   title: string;
 } {
   const occ = occupancy({
@@ -140,10 +146,13 @@ export function describeContext(props: Omit<ContextMeterProps, 'variant'>): {
         ? 'at or past that point now'
         : `${occ.exact ? '' : 'at least '}≈${exactFigure(occ.untilCompaction ?? 0)} left`;
     lines.push(`Auto-compacts at ≈${exactFigure(occ.autoCompactAt)} tokens${modeText} — ${left}.`);
-    const who = props.engine ? COMPACTOR[props.engine] : 'The CLI';
-    lines.push(`When it compacts, ${who} replaces the earlier conversation with a summary and carries on; early detail then survives only as that summary.`);
   } else if (occ.window !== null) {
     lines.push(`The compaction point is unknown${modeText}; the colour is measured against the whole window.`);
+  }
+  const summary = [...lines];
+  if (occ.autoCompactAt !== null) {
+    const who = props.engine ? COMPACTOR[props.engine] : 'The CLI';
+    lines.push(`When it compacts, ${who} replaces the earlier conversation with a summary and carries on; early detail then survives only as that summary.`);
   }
   if ((props.compactionCount ?? 0) > 0) {
     const n = props.compactionCount ?? 0;
@@ -160,12 +169,41 @@ export function describeContext(props: Omit<ContextMeterProps, 'variant'>): {
     percentLabel: percent === null ? 'n/a' : `${bound}${percent}%`,
     tickPercent,
     fillPercent,
+    summary,
     title: lines.join('\n'),
   };
 }
 
 const RING_R = 6;
 const RING_C = 2 * Math.PI * RING_R;
+
+/**
+ * The 16px occupancy ring with the compaction point as a tick — ONE drawing
+ * for the chat header (`variant="ring"`) and the composer footer, fed from one
+ * `describeContext`, so the two rings cannot disagree about how full the chat
+ * is or where it compacts. Each caller brings its own classes (colours live
+ * with the surface). Decorative: the caller carries the words.
+ */
+export function ContextRingGlyph({ fillPercent, tickPercent, classes }: {
+  fillPercent: number;
+  tickPercent: number | null;
+  classes: { svg?: string; track?: string; fill?: string; tick?: string };
+}) {
+  const angle = tickPercent === null ? null : ((tickPercent / 100) * 360 - 90) * (Math.PI / 180);
+  const at = (radius: number) => (angle === null ? null : { x: 8 + Math.cos(angle) * radius, y: 8 + Math.sin(angle) * radius });
+  const inner = at(RING_R - 2.5);
+  const outer = at(RING_R + 1.5);
+  return (
+    <svg className={classes.svg} width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <circle className={classes.track} cx="8" cy="8" r={RING_R} />
+      <circle className={classes.fill} cx="8" cy="8" r={RING_R}
+        strokeDasharray={`${(fillPercent / 100) * RING_C} ${RING_C}`} transform="rotate(-90 8 8)" />
+      {inner && outer ? (
+        <line className={classes.tick} data-testid="compaction-tick" x1={inner.x} y1={inner.y} x2={outer.x} y2={outer.y} />
+      ) : null}
+    </svg>
+  );
+}
 
 export function ContextMeter({ variant = 'header', ...props }: ContextMeterProps) {
   const d = describeContext(props);
@@ -174,22 +212,13 @@ export function ContextMeter({ variant = 'header', ...props }: ContextMeterProps
   const valueNow = d.percent === null ? undefined : Math.min(100, d.percent);
   const valueText = `${d.label} (${d.percentLabel})${d.compactLabel ? `, ${d.compactLabel.replace('≈', 'at about ')}` : ''}${d.tone === 'over' ? ', past the window' : ''}`;
   if (variant === 'ring') {
-    // The compaction point is a tick on the ring, like on the line.
-    const tickAngle = d.tickPercent === null ? null : (d.tickPercent / 100) * 360 - 90;
     return (
       <div className={`${styles.ring} ${styles[`meter-${d.tone}`] ?? ''}`} role="meter" aria-label="Context window"
         aria-valuemin={0} aria-valuemax={100} aria-valuenow={valueNow} aria-valuetext={valueText}
         title={d.title} data-tone={d.tone} data-exact={props.exact === false ? 'false' : undefined}>
-        <svg className={styles.ringSvg} width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-          <circle className={styles.ringTrack} cx="8" cy="8" r={RING_R} />
-          <circle className={styles.ringFill} cx="8" cy="8" r={RING_R}
-            strokeDasharray={`${(d.fillPercent / 100) * RING_C} ${RING_C}`} transform="rotate(-90 8 8)" />
-          {tickAngle !== null ? (
-            <line className={styles.ringTick} data-testid="compaction-tick"
-              x1={8 + Math.cos((tickAngle * Math.PI) / 180) * (RING_R - 2.5)} y1={8 + Math.sin((tickAngle * Math.PI) / 180) * (RING_R - 2.5)}
-              x2={8 + Math.cos((tickAngle * Math.PI) / 180) * (RING_R + 1.5)} y2={8 + Math.sin((tickAngle * Math.PI) / 180) * (RING_R + 1.5)} />
-          ) : null}
-        </svg>
+        {/* The compaction point is a tick on the ring, like on the line. */}
+        <ContextRingGlyph fillPercent={d.fillPercent} tickPercent={d.tickPercent}
+          classes={{ svg: styles.ringSvg, track: styles.ringTrack, fill: styles.ringFill, tick: styles.ringTick }} />
         <span className={styles.ringText}>{d.percentLabel}</span>
       </div>
     );

@@ -211,7 +211,9 @@ describe('Claude and the 5-hour window (balanced: 70% ceiling, 40% weekly reserv
     const p = { ...base, spend: { ...base.spend, seats: { ...base.spend.seats, claude: seat('claude', ['judge', 'leader']) } } };
     const route = routeWorkItem(item({ tags: ['difficulty:high'] }), LEGACY_LOCAL, ctx([claude(10, 10), grok(), local()], { policy: p }));
     expect(route.backend).toBe('grok-cli');
-    expect(route.seatDecision?.exclusions.find((e) => e.seatId === 'claude')?.reasons.join(' ')).toMatch(/no producer role/);
+    const claudeOut = route.seatDecision?.exclusions.find((e) => e.seatId === 'claude');
+    expect(claudeOut?.reasons.join(' ')).toMatch(/no producer role/);
+    expect(claudeOut?.details?.map((r) => r.kind)).toEqual(['grant']);
   });
 });
 
@@ -360,7 +362,10 @@ describe('grant scope and backpressure demotion', () => {
       demotions: [{ engine: 'grok-cli', repo: REPO, kind: 'todo', since: NOW_ISO, until: IN_3H, reason: '3 consecutive rejects.' }],
     }));
     expect(route.lane).toBe('local');
-    expect(route.seatDecision?.exclusions.find((e) => e.seatId === 'grok')?.reasons.join(' ')).toMatch(/demoted until/);
+    const grokOut = route.seatDecision?.exclusions.find((e) => e.seatId === 'grok');
+    expect(grokOut?.reasons.join(' ')).toMatch(/demoted until/);
+    // 3.10.1: the same reason as data — its end is `resetsAt`, not prose.
+    expect(grokOut?.details).toEqual([{ kind: 'demoted', text: `This route (grok-cli on ${REPO} for todo work) is demoted: 3 consecutive rejects.`, resetsAt: IN_3H }]);
   });
 });
 

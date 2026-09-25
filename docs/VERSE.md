@@ -91,6 +91,16 @@ Every chart has a table twin (its ⋯ menu, or `T` when the card has focus), a
 designed empty state ("Fleet dark since Sep 1") and a hatched fill for values
 that were not measured. An unmeasured value is shown as "—", never as zero.
 
+**Seat burn-down history.** Command's per-seat burn-downs keep the whole
+window across reloads. Each seat's 5-hour and weekly readings are logged to
+`~/.ashlr/routing/capacity-history.jsonl` (0600) by the Verse server and by the
+daemon, and served from `GET /api/verse/budget/history`. The log holds at least
+8 days and stays under about 2 MiB; once it is full, older readings are thinned
+per seat before any are dropped. To stop recording, set
+`ASHLR_CAPACITY_HISTORY=0` in the environment of the Verse server and the
+daemon. Both then stop writing, and the burn-downs keep only what the page
+reads while it is open plus whatever the log already holds.
+
 ### Needs you (⌘J)
 
 One drawer for everything waiting on you: owner-lane PRs the fleet may not
@@ -122,21 +132,27 @@ required, recent chats ranked higher — each with a snippet around the match.
 That second half is a bounded scan of Verse's own session files on this
 machine; nothing is sent to a model and nothing spends.
 
-The transcript is a single 720px reading column. There are no chat bubbles: your
-turn is indented behind a 2px rule in secondary text, the assistant's is plain
-primary text at full measure. Markdown gets real typographic hierarchy, and code
-blocks have a language label and a copy button on hover.
+The transcript is a single 720px reading column. Your turn is a quiet rounded
+block aligned right, on the hover ground in primary text; the assistant's is
+plain prose at full measure with no box. Markdown gets real typographic
+hierarchy, and code blocks have a language label and a copy button on hover.
+A finished turn ends in a muted footer — how long it took and, if any call
+failed, "2 failures in this turn — jump to the first" — rather than a duration
+line of its own between turns.
 
 Tool calls collapse to one line each — glyph, tool name in mono, truncated
-argument, right-aligned duration — and a run of them collapses further into a
-single summary row like `6 tools · Read ×4, Edit ×2 · 12s`. Expand any of them
-for the full input and output. Failures tint the left rule; nothing else
-changes colour.
+argument, an edit's `+12 −3`, right-aligned duration — and a run of them
+collapses further into one activity row (below). Expand any of them for the
+full input and output. Failures tint the left rule and say so in words. Paths
+in tool and file rows read relative to the chat's folders (`src/math.ts`, else
+`~/…`); hover one for the full path.
 
 The composer grows to 40% of the viewport, gains the accent on focus, and docks
-at the bottom of the same 720px measure. Under the header strip there is a slim
-context meter rather than a labelled progress bar; its numbers
-(`142k / 1M · compacts ≈367k`) sit next to it in Space Grotesk.
+at the bottom of the same 720px measure. Its placeholder reads "Ask anything —
+@ to add files, / for commands". Context shows as a small ring with its
+percentage, in the header and again in the composer footer — one reading drawn
+twice, so the two cannot disagree. Hover either for the tokens
+(`142,000 of 1,000,000 tokens`) and where the CLI compacts.
 
 **How a turn actually runs.** Each turn spawns one vendor CLI process
 (`claude -p`, `codex exec`, `grok -p`) in the project directory with
@@ -257,13 +273,14 @@ or the time. A running row adds a muted second line from the live activity feed
 pin, archive, rename, hand off or delete. Unread is counted by turns: a chat that
 existed before 3.10 does not show unread on its first launch.
 
-**Transcript.** Consecutive tool calls fold into one activity row ("Ran 12
-commands, read 8, edited 3; 1 failed; 2m 14s ▸"); a failure expands the group to
-the failed rows. A **chapter rail** on the right edge has one tick per turn (red
-failed, amber running) plus markers for compaction, handoff and recovery; hover
-shows the prompt and a click jumps to it. Screen readers hear a polite
-announcement only when a turn starts, finishes or fails. A command block's
-**Run in terminal** pastes the command into the Terminal pane and never runs it.
+**Transcript.** Consecutive tool calls fold into one activity row ("▸ Ran 12
+commands · read 8 files · edited 3 files · 1 failed · 2m 14s"); a failure or a
+running call opens the group on just those rows. A **chapter rail** on the
+right edge has one tick per turn (red failed, amber running) plus markers for
+compaction, handoff and recovery; hover shows the prompt and a click jumps to
+it. Screen readers hear a polite announcement only when a turn starts, finishes
+or fails. A command block's **Run in terminal** pastes the command into the
+Terminal pane and never runs it.
 
 **Live reasoning.** Claude, Codex and Grok stream their reasoning while they
 think. The thinking block shows three live lines, then collapses to
@@ -283,12 +300,22 @@ and asks after a failure or Stop. ⌘⇧↩ stops the turn and sends. Attach fil
 upload, paste or drop (⌘U); they are stored in
 `~/.ashlr/verse/attachments/<session>/` (0600) and that one folder is shared
 with the turn. `@` fuzzy-finds project files and `/` offers handoff, compact,
-new, plan, effort and model. The footer holds the **permission mode** (Plan,
-Accept edits — the default —, Auto, and Bypass, which is red and confirmed per
-chat), the model and effort pickers, the context ring, and the **seat chip**:
-its tooltip shows plan, windows, resets, health and what autonomy may use of
-that seat, and its menu offers "Continue on ‹seat›" and the budget mode. An
-option a seat cannot run is disabled with the reason.
+new, plan, effort and model.
+
+The footer is one row. On the left: attach, dictation and the **permission
+mode** — Plan, Accept edits (the default), Auto, or Bypass, which is red and
+confirmed per chat. The labels are short and never cut off; the full name
+("Bypass permissions") is in the tooltip. On the right: the **seat chip**, the
+**model** picker, **effort**, the context ring and **Send ⏎**. The seat chip
+names only the account ("Claude Max", or "Local"), so the model appears once, in
+its picker. Its tooltip shows plan, windows, resets, health and what autonomy
+may use of that seat, and its menu offers "Continue on ‹seat›" and the budget
+mode. Effort ("Effort: High") appears only when the seat can set it. While a
+turn runs, Send becomes **Queue** and a square **■** Stop sits beside it. A
+narrow window folds the row instead of truncating it: "Effort:" becomes an
+icon, then the seat chip shows only its monogram, the permission mode only its
+icon, and last the pickers move into a **⋯** sheet. An option a seat cannot run
+is disabled with the reason.
 
 **Dock.** One pane or a vertical split of two, 320 px to 60 % of the window;
 a sheet below 1024 px and a bottom sheet on a phone.

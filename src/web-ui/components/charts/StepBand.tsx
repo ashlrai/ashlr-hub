@@ -24,9 +24,10 @@ import { CHART_DIVERGING_NEG, CHART_SEQUENTIAL, CHART_SEQUENTIAL_SOFT, hatchPatt
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
 import { ChartLegend, ChartTooltip, HatchPattern, clampTooltipLeft } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
-import { linearScale, niceTicks } from './chart-math.js';
-import { formatTimeLabel } from './format.js';
+import { MIN_TIME_SPAN_MS, allIntegers, axisTicks, ensureSpan, isPlausibleTime, labelCharPx, layoutAxisLabels, linearScale, tickGutter } from './chart-math.js';
+import { formatTimeLabel, timeLabelLadder } from './format.js';
 import { useChartWidth } from './useChartWidth.js';
+import { useTextScale } from './useTextScale.js';
 import plot from './plot.module.css';
 
 export interface StepPoint {
@@ -86,6 +87,9 @@ export function stepSpans(steps: ReadonlyArray<StepPoint>, now: number): StepSpa
 const PAD_T = 18;
 const PAD_B = 26;
 const PAD_R = 14;
+/** With no plausible time at all, the window shown ends now and spans a day. */
+const FALLBACK_SPAN_MS = 86_400_000;
+const defaultFormatValue = (v: number): string => (Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(1));
 
 function signed(v: number, fmt: (v: number) => string): string {
   return v > 0 ? `+${fmt(v)}` : fmt(v);
@@ -97,42 +101,72 @@ export function StepBand({
   caveat,
   status,
   steps,
-  markers = [],
+  markers: markersProp = [],
   now: nowProp,
   from: fromProp,
   baseline,
   unit = '',
-  formatValue = (v) => (Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(1)),
-  formatTime = formatTimeLabel,
+  formatValue: formatValueProp,
+  formatTime: formatTimeProp,
   height = 200,
   width: fixedWidth,
   ariaLabel,
 }: StepBandProps) {
+  const formatValue = formatValueProp ?? defaultFormatValue;
+  // A 0 / pre-2000 time is a null timestamp that leaked through (a baseline
+  // "created" at epoch 0): it is spoken and tabled as "—", never "Dec 31".
+  const formatTime = (ms: number): string => (isPlausibleTime(ms) ? (formatTimeProp ?? formatTimeLabel)(ms) : '—');
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
+  const textScale = useTextScale();
   const [active, setActive] = useState<number | null>(null);
   const liveId = useId();
   const hatchId = hatchPatternId(useId());
   const unitText = unit ? ` ${unit}` : '';
   const now = nowProp ?? Date.now();
   const spans = stepSpans(steps, now);
+  // A marker at an implausible time has nowhere honest to sit on the axis.
+  const markers = markersProp.filter((m) => isPlausibleTime(m.at));
   const known = spans.filter((s) => s.value !== null);
   const resolvedStatus: ChartStatus = status ?? (spans.length === 0
     ? { kind: 'empty', message: 'No versions yet — the compiled defaults are in force.' }
     : known.length === 0 ? { kind: 'unknown', reason: 'no version has a measured value yet.' } : { kind: 'ready' });
 
-  const x0 = fromProp ?? spans[0]?.at ?? now - 1;
-  const x1 = Math.max(now, ...spans.map((s) => s.until), ...markers.map((m) => m.at), x0 + 1);
+  // The domain comes from plausible times only; a step stamped at epoch 0
+  // still draws — held from the left edge — but no longer drags the axis to
+  // 1970. A degenerate span widens to MIN_TIME_SPAN_MS, ending at `now`.
+  const starts = [...spans.map((s) => s.at), ...markers.map((m) => m.at)].filter(isPlausibleTime);
+  const right = Math.max(isPlausibleTime(now) ? now : 0, ...starts, ...spans.map((s) => s.until).filter(isPlausibleTime));
+  const left = fromProp !== undefined && isPlausibleTime(fromProp) ? fromProp : starts.length ? Math.min(...starts) : right - FALLBACK_SPAN_MS;
+  const [x0, x1] = ensureSpan(left, right, MIN_TIME_SPAN_MS, 'end');
   const ys0 = known.flatMap((s) => [s.value!, s.low ?? s.value!, s.high ?? s.value!]);
   const lo = Math.min(baseline?.value ?? 0, ...ys0);
   const hi = Math.max(baseline?.value ?? 0, ...ys0);
-  const ticks = niceTicks(lo, hi === lo ? lo + 1 : hi, 4);
-  const padL = Math.min(56, Math.max(30, Math.max(...ticks.map((t) => signed(t, formatValue).length)) * 7 + 10));
+  const yAxis = axisTicks(lo, hi === lo ? lo + 1 : hi, {
+    count: 4,
+    integer: allIntegers([...ys0, baseline?.value ?? 0]),
+    format: formatValueProp ? (t) => (t === 0 ? '0' : signed(t, formatValueProp)) : undefined,
+  });
+  const ticks = yAxis.ticks;
+  // Kit labels take their precision from the step; a lift above zero wears "+".
+  const tickLabels = formatValueProp ? yAxis.labels : yAxis.labels.map((l, i) => (ticks[i]! > 0 ? `+${l}` : l));
+  const padL = tickGutter(tickLabels, 30, 56, textScale);
   const plotW = Math.max(40, width - padL - PAD_R);
   const plotH = height - PAD_T - PAD_B;
   const xs = linearScale(x0, x1, padL, padL + plotW);
   const ys = linearScale(ticks[0]!, ticks[ticks.length - 1]!, PAD_T + plotH, PAD_T);
   const cx = (t: number) => Math.min(padL + plotW, Math.max(padL, xs(t)));
+
+  // Start / end labels, collision-free at the operator's Display size: the
+  // end (now) outranks the start.
+  const ladder = timeLabelLadder(x0, x1, formatTimeProp, [x0, x1]);
+  const xLabels = layoutAxisLabels(
+    [
+      { key: 'start', x: padL, anchor: 'start', priority: 2, variants: ladder.map((f) => f(x0)) },
+      { key: 'end', x: padL + plotW, anchor: 'end', priority: 3, variants: ladder.map((f) => f(x1)) },
+    ],
+    { min: padL, max: padL + plotW, charPx: labelCharPx(textScale) },
+  );
 
   // One path per run of known steps; a null step breaks the line.
   const runs: string[] = [];
@@ -231,14 +265,15 @@ export function StepBand({
           <defs>
             <HatchPattern id={hatchId} />
           </defs>
-          {ticks.map((t) => (
+          {ticks.map((t, i) => (
             <g key={t}>
               <line className={plot.grid} x1={padL} x2={padL + plotW} y1={ys(t)} y2={ys(t)} />
-              <text className={plot.tick} x={padL - 6} y={ys(t)} dy="0.32em" textAnchor="end">{t === 0 ? '0' : signed(t, formatValue)}</text>
+              <text className={plot.tick} x={padL - 6} y={ys(t)} dy="0.32em" textAnchor="end">{tickLabels[i]}</text>
             </g>
           ))}
-          <text className={plot.tick} x={padL} y={height - 8} textAnchor="start">{formatTime(x0)}</text>
-          <text className={plot.tick} x={padL + plotW} y={height - 8} textAnchor="end">{formatTime(x1)}</text>
+          {xLabels.map((l) => (
+            <text key={l.key} data-axis-label={l.key} className={plot.tick} x={l.x} y={height - 8} textAnchor={l.anchor}>{l.text}</text>
+          ))}
           {baseline ? (
             <g data-role="baseline">
               <line className={plot.reference} x1={padL} x2={padL + plotW} y1={ys(baseline.value)} y2={ys(baseline.value)} />
