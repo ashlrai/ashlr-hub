@@ -258,11 +258,15 @@ describe('dispatch.ts — soft-pause integration', () => {
     setPause(false); // ensure clean state
   });
 
-  it('10. isPaused() short-circuits runCommsCycle → {sent:0, resolved:0}', async () => {
+  it('10. paused → nothing is SENT, but inbound is still polled (so "resume" can arrive)', async () => {
     setPause(true);
+    const { postRequest } = await import('../src/core/comms/requests.js');
+    postRequest({ kind: 'fleet-digest', type: 'report', text: 'held while paused', options: [] });
     const result = await runCommsCycle(makeCfg() as never);
-    expect(result).toEqual({ sent: 0, resolved: 0 });
-    expect(mockPollTelegramUpdates).not.toHaveBeenCalled();
+    expect(result.sent).toBe(0);
+    expect(result.resolved).toBe(0);
+    expect(mockPollTelegramUpdates).toHaveBeenCalled();
+    expect(mockSendTelegramMessage).not.toHaveBeenCalled();
   });
 
   it('11. "pause" text → setPause(true) + confirmation message', async () => {
@@ -279,14 +283,9 @@ describe('dispatch.ts — soft-pause integration', () => {
     );
   });
 
-  it('12. "resume fleet" text → setPause(false) + confirmation message', async () => {
+  it('12. "resume fleet" text while paused → setPause(false) + confirmation message', async () => {
+    // 3.14: inbound is polled even while paused, so the resume command arrives.
     setPause(true);
-    // Must not short-circuit: isPaused() check happens BEFORE poll, so we need
-    // the cycle to run. Set pause=false before the cycle reads it, but send the
-    // resume command — simulate by setting pause false via file then running.
-    // Actually: dispatch checks isPaused() at the top before polling.
-    // So we need pause=false when cycle starts, but "resume fleet" text received.
-    setPause(false);
     mockPollTelegramUpdates.mockResolvedValueOnce({
       updates: [{ kind: 'text', text: 'resume fleet', fromChatId: '42' }],
       newOffset: 1,

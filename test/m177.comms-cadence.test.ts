@@ -5,11 +5,14 @@
  *   src/cli/comms.ts — cmdComms 'cycle' with cadence throttle logic
  *
  * All external I/O is mocked:
- *   - buildOversightSnapshot → vi.fn() (deterministic snapshot)
+ *   - runChangeDigest        → vi.fn() (3.14: the change-driven digest; its own
+ *     behaviour is covered by comms-telegram-leader-314.test.ts)
+ *   - buildOversightSnapshot → vi.fn() (legacy; the digest no longer reads it)
  *   - loadLatestBriefing     → vi.fn() (legacy; the cycle no longer reaches it)
  *   - runStrategist          → vi.fn() (legacy; the cycle no longer reaches it)
  *   - leaderTick / buildLeaderState → vi.fn() (V3.10: ask-vision is the Leader
- *     tick path; it posts the latest Leader memo under the 'elon-vision' wire kind)
+ *     tick path; 3.14 queues the latest Leader memo as an informational
+ *     'leader-memo' report)
  *   - judgeHealth            → vi.fn() (returns zeroed health)
  *   - runCommsCycle          → vi.fn() (returns {sent:1, resolved:0})
  *   - loadConfig             → vi.fn() (returns minimal cfgEnabled)
@@ -47,7 +50,9 @@ const {
   mockLoadConfig,
   mockLeaderTick,
   mockBuildLeaderState,
+  mockRunChangeDigest,
 } = vi.hoisted(() => ({
+  mockRunChangeDigest: vi.fn(),
   mockLeaderTick: vi.fn(),
   mockBuildLeaderState: vi.fn(),
   mockBuildOversightSnapshot: vi.fn(),
@@ -189,6 +194,14 @@ vi.mock('../src/core/comms/dispatch.js', async (importOriginal) => {
 });
 
 // ---------------------------------------------------------------------------
+// Mock: the change-driven digest (3.14)
+// ---------------------------------------------------------------------------
+vi.mock('../src/core/comms/change-digest.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/comms/change-digest.js')>();
+  return { ...actual, runChangeDigest: mockRunChangeDigest };
+});
+
+// ---------------------------------------------------------------------------
 // Mock: config
 // ---------------------------------------------------------------------------
 vi.mock('../src/core/config.js', () => ({
@@ -313,6 +326,11 @@ beforeEach(() => {
   mockRunStrategist.mockResolvedValue(makeBriefing());
   mockJudgeHealth.mockResolvedValue(makeJudgeHealth());
   mockRunCommsCycle.mockResolvedValue({ sent: 1, resolved: 0 });
+  mockRunChangeDigest.mockImplementation(async () => {
+    const { postRequest } = await import('../src/core/comms/requests.js');
+    const requestId = postRequest({ kind: 'fleet-digest', type: 'report', text: 'Fleet update: 1 merged', options: [] });
+    return { posted: true, reason: 'changes', text: 'Fleet update: 1 merged', requestId };
+  });
   mockLoadConfig.mockResolvedValue(cfgEnabled());
   mockLeaderTick.mockResolvedValue({ applied: [], graded: [], due: { due: false }, started: false, run: null });
   mockBuildLeaderState.mockReturnValue({
@@ -361,7 +379,7 @@ describe('cycle digest cadence', () => {
 
     const exit = await cmdComms(['cycle']);
     expect(exit).toBe(0);
-    expect(mockBuildOversightSnapshot).toHaveBeenCalledOnce();
+    expect(mockRunChangeDigest).toHaveBeenCalledOnce();
     expect(mockRunCommsCycle).toHaveBeenCalledOnce();
 
     const queued = listRequests({ kind: 'fleet-digest' });
@@ -372,16 +390,25 @@ describe('cycle digest cadence', () => {
     setCadence('last-digest', RECENT);
 
     await cmdComms(['cycle']);
-    expect(mockBuildOversightSnapshot).not.toHaveBeenCalled();
+    expect(mockRunChangeDigest).not.toHaveBeenCalled();
     // cycle still runs
     expect(mockRunCommsCycle).toHaveBeenCalledOnce();
+  });
+
+  it('a silent digest (nothing changed) still counts as evaluated for the interval', async () => {
+    mockRunChangeDigest.mockResolvedValue({ posted: false, reason: 'unchanged', text: null, requestId: null });
+    const before = Date.now();
+    await cmdComms(['cycle']);
+    expect(mockRunChangeDigest).toHaveBeenCalledOnce();
+    expect(listRequests({ kind: 'fleet-digest' })).toHaveLength(0);
+    expect(getCadenceValue('last-digest')!).toBeGreaterThanOrEqual(before);
   });
 
   it('sends digest when no last-digest file exists (first run)', async () => {
     // cadenceStore is empty — no file
 
     await cmdComms(['cycle']);
-    expect(mockBuildOversightSnapshot).toHaveBeenCalledOnce();
+    expect(mockRunChangeDigest).toHaveBeenCalledOnce();
   });
 
   it('uses custom digestIntervalHours from config', async () => {
@@ -390,12 +417,12 @@ describe('cycle digest cadence', () => {
     setCadence('last-digest', Date.now() - 1 * 60 * 60 * 1000);
 
     await cmdComms(['cycle']);
-    expect(mockBuildOversightSnapshot).not.toHaveBeenCalled();
+    expect(mockRunChangeDigest).not.toHaveBeenCalled();
 
     // last-digest was 3h ago → should fire
     setCadence('last-digest', Date.now() - 3 * 60 * 60 * 1000);
     await cmdComms(['cycle']);
-    expect(mockBuildOversightSnapshot).toHaveBeenCalledOnce();
+    expect(mockRunChangeDigest).toHaveBeenCalledOnce();
   });
 });
 
@@ -410,8 +437,11 @@ describe('cycle ask-vision cadence', () => {
 
     await cmdComms(['cycle']);
     expect(mockLeaderTick).toHaveBeenCalled();
-    const queued = listRequests({ kind: 'elon-vision' });
+    const queued = listRequests({ kind: 'leader-memo' });
     expect(queued.length).toBeGreaterThan(0);
+    // Informational, never a blocking question; nothing new under the legacy kind.
+    expect(queued[0]!.type).toBe('report');
+    expect(listRequests({ kind: 'elon-vision' })).toHaveLength(0);
     expect(mockRunCommsCycle).toHaveBeenCalledOnce();
   });
 
@@ -429,7 +459,7 @@ describe('cycle ask-vision cadence', () => {
 
     await cmdComms(['cycle']);
     expect(mockLeaderTick).toHaveBeenCalled();
-    const queued = listRequests({ kind: 'elon-vision' });
+    const queued = listRequests({ kind: 'leader-memo' });
     expect(queued.length).toBeGreaterThan(0);
   });
 });
@@ -482,7 +512,7 @@ describe('timestamp update', () => {
 
 describe('never-throws', () => {
   it('digest error does not break the poll cycle (runCommsCycle still called)', async () => {
-    mockBuildOversightSnapshot.mockImplementation(() => { throw new Error('snapshot exploded'); });
+    mockRunChangeDigest.mockRejectedValue(new Error('digest exploded'));
     // cadenceStore empty → stale → will try digest → throws → must not break cycle
 
     const exit = await cmdComms(['cycle']);
@@ -500,7 +530,7 @@ describe('never-throws', () => {
   });
 
   it('both errors do not break the poll cycle', async () => {
-    mockBuildOversightSnapshot.mockImplementation(() => { throw new Error('snap fail'); });
+    mockRunChangeDigest.mockRejectedValue(new Error('digest fail'));
     mockLeaderTick.mockRejectedValue(new Error('leader fail'));
 
     const exit = await cmdComms(['cycle']);
@@ -519,7 +549,7 @@ describe('comms disabled', () => {
 
     const exit = await cmdComms(['cycle']);
     expect(exit).toBe(0);
-    expect(mockBuildOversightSnapshot).not.toHaveBeenCalled();
+    expect(mockRunChangeDigest).not.toHaveBeenCalled();
     expect(mockLeaderTick).not.toHaveBeenCalled();
     // cycle still runs (registerCommsHandlers + runCommsCycle)
     expect(mockRunCommsCycle).toHaveBeenCalledOnce();
@@ -537,11 +567,11 @@ describe('both stale', () => {
 
     await cmdComms(['cycle']);
 
-    expect(mockBuildOversightSnapshot).toHaveBeenCalledOnce();
+    expect(mockRunChangeDigest).toHaveBeenCalledOnce();
     expect(mockLeaderTick).toHaveBeenCalled();
 
     const digests = listRequests({ kind: 'fleet-digest' });
-    const visions = listRequests({ kind: 'elon-vision' });
+    const visions = listRequests({ kind: 'leader-memo' });
     expect(digests.length).toBeGreaterThan(0);
     expect(visions.length).toBeGreaterThan(0);
 

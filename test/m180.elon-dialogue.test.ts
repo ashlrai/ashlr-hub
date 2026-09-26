@@ -2,7 +2,8 @@
  * M180 — Elon strategic dialogue DISPATCH integration tests.
  *
  * Tests that runCommsCycle routes correctly:
- *   - Free-form text → handleStrategicMessage + reply sent back
+ *   - Free-form text → the Leader thread (3.14: appendMasonMessage replaces the
+ *     legacy handleStrategicMessage dialogue) + the Leader's reply sent back
  *   - Numbered reply to outstanding request → resolves (not hijacked)
  *   - Button tap (callback) to outstanding request → resolves (not hijacked)
  *   - Foreign chatId → ignored (pollTelegramUpdates returns nothing)
@@ -22,7 +23,9 @@ const {
   mockAnswerCallbackQuery,
   mockTelegramEnabled,
   mockHandleStrategicMessage,
+  mockAppendMasonMessage,
 } = vi.hoisted(() => ({
+  mockAppendMasonMessage: vi.fn(),
   mockSendTelegramMessage: vi.fn().mockResolvedValue({ ok: true }),
   mockPollTelegramUpdates: vi.fn().mockResolvedValue({ updates: [], newOffset: 0 }),
   mockAnswerCallbackQuery: vi.fn().mockResolvedValue(undefined),
@@ -40,6 +43,21 @@ vi.mock('../src/core/integrations/telegram.js', () => ({
 vi.mock('../src/core/comms/elon-dialogue.js', () => ({
   handleStrategicMessage: mockHandleStrategicMessage,
 }));
+
+vi.mock('../src/core/vision/leader-thread.js', () => ({
+  appendMasonMessage: mockAppendMasonMessage,
+  answerLeaderQuestion: vi.fn(),
+  approveLeaderAction: vi.fn(),
+  pendingOutbound: vi.fn(() => []),
+  markDelivered: vi.fn(),
+}));
+
+function leaderReply(text: string) {
+  return {
+    message: { id: 'm-1', at: new Date().toISOString(), from: 'mason', channel: 'telegram', kind: 'message', text: 'x' },
+    reply: { id: 'l-1', at: new Date().toISOString(), from: 'leader', channel: 'telegram', kind: 'message', text, replyTo: 'm-1' },
+  };
+}
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -98,8 +116,8 @@ import { postRequest, outstanding } from '../src/core/comms/requests.js';
 
 describe('M180 dispatch.ts Telegram routing integration', () => {
 
-  it('routes free-form text to handleStrategicMessage and sends the reply back', async () => {
-    mockHandleStrategicMessage.mockResolvedValue('Bold move. Creating goal now.');
+  it('routes free-form text to the Leader thread and sends the reply back', async () => {
+    mockAppendMasonMessage.mockResolvedValue(leaderReply('Bold move. Creating goal now.'));
     mockPollTelegramUpdates.mockResolvedValue({
       updates: [{ kind: 'text', text: 'what should we ship next?', fromChatId: '42' }],
       newOffset: 1,
@@ -107,13 +125,11 @@ describe('M180 dispatch.ts Telegram routing integration', () => {
 
     await runCommsCycle(makeCfg() as never);
 
-    expect(mockHandleStrategicMessage).toHaveBeenCalledWith(
-      'what should we ship next?',
-      expect.objectContaining({ comms: expect.objectContaining({ channel: 'telegram' }) }),
-    );
+    expect(mockAppendMasonMessage).toHaveBeenCalledWith('what should we ship next?', { channel: 'telegram' });
+    expect(mockHandleStrategicMessage).not.toHaveBeenCalled();
     expect(mockSendTelegramMessage).toHaveBeenCalledWith(
-      'Bold move. Creating goal now.',
-      undefined,
+      expect.stringContaining('Bold move. Creating goal now.'),
+      {},
       expect.anything(),
     );
   });
@@ -166,8 +182,8 @@ describe('M180 dispatch.ts Telegram routing integration', () => {
     expect(mockHandleStrategicMessage).not.toHaveBeenCalled();
   });
 
-  it('routes free-form text to dialogue even when no outstanding request exists', async () => {
-    mockHandleStrategicMessage.mockResolvedValue('Here is my assessment.');
+  it('routes free-form text to the Leader even when no outstanding request exists', async () => {
+    mockAppendMasonMessage.mockResolvedValue(leaderReply('Here is my assessment.'));
     mockPollTelegramUpdates.mockResolvedValue({
       updates: [{ kind: 'text', text: 'Tell me the strategy', fromChatId: '42' }],
       newOffset: 1,
@@ -175,8 +191,25 @@ describe('M180 dispatch.ts Telegram routing integration', () => {
 
     const result = await runCommsCycle(makeCfg() as never);
 
-    expect(mockHandleStrategicMessage).toHaveBeenCalledWith('Tell me the strategy', expect.anything());
-    expect(mockSendTelegramMessage).toHaveBeenCalledWith('Here is my assessment.', undefined, expect.anything());
+    expect(mockAppendMasonMessage).toHaveBeenCalledWith('Tell me the strategy', { channel: 'telegram' });
+    expect(mockSendTelegramMessage).toHaveBeenCalledWith(expect.stringContaining('Here is my assessment.'), {}, expect.anything());
     expect(result.resolved).toBe(0);
+  });
+
+  it('a longer message that merely starts with a number is conversation, not an option pick', async () => {
+    postRequest({ kind: 'test-kind', type: 'question', text: 'Approve?', options: ['Yes', 'No'] });
+    mockPollTelegramUpdates.mockResolvedValueOnce({ updates: [], newOffset: 0 });
+    await runCommsCycle(makeCfg() as never);
+    expect(outstanding()).toBeDefined();
+
+    mockAppendMasonMessage.mockResolvedValue(leaderReply('On it.'));
+    mockPollTelegramUpdates.mockResolvedValueOnce({
+      updates: [{ kind: 'text', text: '2 things: ship billing, then docs', fromChatId: '42' }],
+      newOffset: 1,
+    });
+    const result = await runCommsCycle(makeCfg() as never);
+    expect(result.resolved).toBe(0);
+    expect(outstanding()).toBeDefined();
+    expect(mockAppendMasonMessage).toHaveBeenCalledWith('2 things: ship billing, then docs', { channel: 'telegram' });
   });
 });
