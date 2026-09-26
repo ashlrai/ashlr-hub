@@ -9,8 +9,8 @@
  *     of failing on the leftover local branch; a git failure is a failed step
  *     with a summary, not an abort
  *   - an already-active grant still gets the autonomy switch offered
- *   - the last step reads (never changes) the daemon service and says exactly
- *     how to start it
+ *   - a read-only service observation cannot make resident activation complete
+ *     while production roots and native runtime authority remain unavailable
  *
  * Every external effect is injected (gh/git fake, custody fake, daemon
  * service fake). HOME-isolated.
@@ -54,7 +54,7 @@ vi.mock('../src/core/authority/effective-config.js', async (importOriginal) => {
   };
 });
 
-import { runAuthorityCli, type AuthorityCliDeps, type AuthoritySetupReportV1, type DaemonServiceState, type GhResult } from '../src/cli/authority.js';
+import { authoritySetupReport, runAuthorityCli, type AuthorityCliDeps, type AuthoritySetupReportV1, type DaemonServiceState, type GhResult } from '../src/cli/authority.js';
 import { keyIdForPublicKeyPem } from '../src/core/authority/custody-client.js';
 import { TEST_ROOT, withTempHome } from './helpers/authority-310b.js';
 
@@ -137,12 +137,14 @@ describe('setup --dry-run --json', () => {
     expect(report.next).toBe('custody-helper');
     expect(report.steps.map((s) => s.id)).toEqual([
       'custody-helper', 'host-binding', 'signing-key', 'trust-root', 'deploy', 'github-app', 'claude-token',
-      'canary-repo', 'rulesets', 'old-activation-state', 'provenance-key', 'standing-grant', 'autonomy-switch', 'daemon-service',
+      'canary-repo', 'rulesets', 'old-activation-state', 'provenance-key', 'standing-grant', 'autonomy-switch', 'daemon-service', 'resident-runtime',
     ]);
     expect(report.steps[0]).toMatchObject({ status: 'waiting-on-you', needs: ['sudo', 'terminal'] });
     expect(report.steps.find((s) => s.id === 'signing-key')?.needs).toEqual(['touch-id']);
     expect(report.steps.find((s) => s.id === 'github-app')?.needs).toEqual(['browser', 'github']);
-    expect(report.summary).toEqual({ done: 0, already: 1, waitingOnYou: 1, failed: 0, planned: 12 });
+    expect(report.steps.at(-1)).toMatchObject({ status: 'blocked', needs: [] });
+    expect(report.steps.at(-1)?.detail).toMatch(/Resident activation is unavailable in this build/);
+    expect(report.summary).toEqual({ done: 0, already: 1, waitingOnYou: 1, blocked: 1, failed: 0, planned: 12 });
     expect(h.calls).toEqual([]);
     expect(h.daemonService).not.toHaveBeenCalled();
   });
@@ -164,7 +166,8 @@ describe('setup --dry-run --json', () => {
     expect(byId.get('deploy')?.status).toBe('already');
     expect(byId.get('autonomy-switch')).toMatchObject({ status: 'skipped', detail: 'needs an active standing grant first' });
     expect(byId.get('daemon-service')?.status).toBe('waiting-on-you');
-    expect(byId.get('daemon-service')?.detail).toContain('launchctl enable gui/$(id -u)/ai.ashlr.daemon && launchctl bootstrap');
+    expect(byId.get('daemon-service')?.detail).toContain('this build cannot start it');
+    expect(byId.get('resident-runtime')).toMatchObject({ status: 'blocked', needs: [] });
     expect(report.next).toBe('github-app');
     expect(h.daemonService).toHaveBeenCalledTimes(1);
     // Read-only probes only: the canary existence check.
@@ -173,7 +176,19 @@ describe('setup --dry-run --json', () => {
 });
 
 describe('setup is resumable', () => {
-  it('a running daemon and an active grant with the switch already Autonomous are all in place', async () => {
+  it('reports the resident block exactly once when live setup stops at the missing helper', async () => {
+    const h = harness({ installed: false, confirm: true });
+    expect(await runAuthorityCli(['setup'], h.deps)).toBe(0);
+    const text = h.out.join('\n');
+    expect(text).toMatch(/… custody helper: run `sudo scripts\/install-custody\.sh`/);
+    expect(text.match(/^× resident runtime:/gm)).toHaveLength(1);
+    expect(text).toMatch(/1 blocked by this build/);
+    expect(text).not.toMatch(/signing key:|GitHub App:|standing grant:/);
+    expect(h.calls).toEqual([]);
+    expect(h.daemonService).not.toHaveBeenCalled();
+  });
+
+  it('a running daemon and an active grant still do not establish resident authority', async () => {
     trust.roots = [TEST_ROOT];
     standing.grantActive = true;
     standing.switch = 'autonomous';
@@ -183,6 +198,21 @@ describe('setup is resumable', () => {
     expect(text).toMatch(/^✓ standing grant: grant #3 is active$/m);
     expect(text).toMatch(/^✓ autonomy switch: Autonomous$/m);
     expect(text).toMatch(/^✓ daemon service: ai\.ashlr\.daemon is running/m);
+    expect(text).toMatch(/^× resident runtime: Resident activation is unavailable in this build/m);
+  });
+
+  it('never reports setup complete merely because every preparatory step is ready', () => {
+    const ready = ['custody helper', 'host binding', 'signing key', 'trust root', 'deploy', 'GitHub App',
+      'Claude token', 'canary repo', 'rulesets', 'old activation state', 'provenance key',
+      'standing grant', 'autonomy switch', 'daemon service']
+      .map((step) => ({ step, status: 'already' as const, detail: 'verified' }));
+    const report = authoritySetupReport([...ready, {
+      step: 'resident runtime', status: 'blocked' as const,
+      detail: 'Resident activation is unavailable in this build.',
+    }], true);
+    expect(report.complete).toBe(false);
+    expect(report.next).toBe('resident-runtime');
+    expect(report.summary).toMatchObject({ already: ready.length, blocked: 1, waitingOnYou: 0 });
   });
 
   it('an active grant from an earlier run still gets the switch offered (capped by the grant)', async () => {
