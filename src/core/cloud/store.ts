@@ -72,6 +72,8 @@ export const CLOUD_BUDGET_LIMITS = Object.freeze({
   maxConcurrent: 20,
   maxSessionsPerDay: 500,
   maxSelfImprovePerDay: 100,
+  /** At least one: zero would stop self-improvement for good — the enabled switch does that, visibly. */
+  maxSelfImproveOpenPrs: 50,
 });
 
 // ---------------------------------------------------------------------------
@@ -279,6 +281,7 @@ function mergeBudget(base: CloudBudgetV1, input: unknown): CloudBudgetV1 {
       repo,
       maxPerDay: clampCount(self['maxPerDay'], base.selfImprove.maxPerDay, 0, CLOUD_BUDGET_LIMITS.maxSelfImprovePerDay),
       reserveUsd: clampMoney(self['reserveUsd'], base.selfImprove.reserveUsd),
+      maxOpenPrs: clampCount(self['maxOpenPrs'], base.selfImprove.maxOpenPrs, 1, CLOUD_BUDGET_LIMITS.maxSelfImproveOpenPrs),
     },
     updatedAt: typeof src['updatedAt'] === 'string' && Number.isFinite(Date.parse(src['updatedAt'])) ? src['updatedAt'] : base.updatedAt,
   };

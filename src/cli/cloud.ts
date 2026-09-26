@@ -9,7 +9,8 @@
  *   ashlr cloud improve [--count N] [--json]
  *   ashlr cloud budget [--total N] [--spent N] [--per-session N] [--max-per-day N]
  *                      [--max-concurrent N] [--self-improve on|off]
- *                      [--self-improve-max N] [--reserve N] [--json]
+ *                      [--self-improve-max N] [--self-improve-max-open N]
+ *                      [--reserve N] [--json]
  *   ashlr cloud backlog [--json]
  *
  * Talks to the cloud service in-process (src/core/cloud/*), NOT to the Verse
@@ -50,8 +51,10 @@ Usage:
   ashlr cloud improve [--count N] [--json]
       Launch the next N (1–5, default 1) self-improvement backlog items.
   ashlr cloud budget [--total N] [--spent N] [--per-session N] [--max-per-day N] [--max-concurrent N]
-                     [--self-improve on|off] [--self-improve-max N] [--reserve N] [--json]
+                     [--self-improve on|off] [--self-improve-max N] [--self-improve-max-open N]
+                     [--reserve N] [--json]
       Show the estimated credits and limits; any flag updates them first.
+      --self-improve-max-open: self-improvement waits while this many of its PRs await review (default 3).
   ashlr cloud backlog [--json]
       The self-improvement backlog and what each item's latest task did.
 
@@ -243,6 +246,11 @@ export function parseBudgetFlags(args: string[]): CloudBudgetUpdate {
     if (toggle !== 'on' && toggle !== 'off') throw new UsageError('--self-improve takes on or off.');
     self.enabled = toggle === 'on';
   }
+  const selfMaxOpen = takeNumber(args, '--self-improve-max-open', true);
+  if (selfMaxOpen !== null) {
+    if (selfMaxOpen < 1) throw new UsageError('--self-improve-max-open must be at least 1 (use --self-improve off to stop).');
+    self.maxOpenPrs = selfMaxOpen;
+  }
   const selfMax = takeNumber(args, '--self-improve-max', true);
   if (selfMax !== null) self.maxPerDay = selfMax;
   const reserve = takeNumber(args, '--reserve', false);
@@ -283,7 +291,7 @@ function printBudget(view: CloudBudgetView, out: (line: string) => void): void {
   out(`Sessions today: ${view.sessionsToday} of ${b.maxSessionsPerDay} · running now: ${view.running} of ${b.maxConcurrent} at once`);
   out(`  Estimated cost per session: ${usd(b.estimatedCostPerSessionUsd)}${b.creditsSpentAdjustmentUsd > 0 ? ` · spent before tracking: ${usd(b.creditsSpentAdjustmentUsd)}` : ''}`);
   const self = b.selfImprove;
-  out(`Self-improvement: ${self.enabled ? 'on' : 'off'} · ${view.selfImproveToday} of ${self.maxPerDay} today · ${self.repo} · pauses below ${usd(self.reserveUsd)} left`);
+  out(`Self-improvement: ${self.enabled ? 'on' : 'off'} · ${view.selfImproveToday} of ${self.maxPerDay} today · ${self.repo} · pauses below ${usd(self.reserveUsd)} left · waits at ${self.maxOpenPrs} open PRs`);
   out(`Launch now: ${gateLine(view.canLaunch.ok, view.canLaunch.reason)}`);
   out(`Self-improve now: ${gateLine(view.canSelfImprove.ok, view.canSelfImprove.reason)}`);
 }

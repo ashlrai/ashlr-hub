@@ -114,6 +114,8 @@
     "src/core/cloud/delivery-contract.ts",
     "src/core/cloud/improvement-backlog.ts",
     "src/core/cloud/launcher.ts",
+    "src/core/cloud/pr-actions.ts",
+    "src/core/cloud/pr-preview.ts",
     "src/core/cloud/service.ts",
     "src/core/cloud/store.ts",
     "src/core/cloud/timeline-api.ts",

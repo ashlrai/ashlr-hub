@@ -175,6 +175,7 @@ const KEYS = {
     'drawer.reject': 'r',
     'drawer.veto': 'v',
     'drawer.done': 'e',
+    'drawer.select': 'x',
     'drawer.split-prev': 'h',
     'drawer.split-next': 'l',
   },

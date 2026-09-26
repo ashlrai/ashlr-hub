@@ -8,6 +8,11 @@
  *   POST /api/verse/cloud/refresh             {} → { checked, updated }
  *   POST /api/verse/cloud/improve             CloudImproveRequest → CloudImproveResponse
  *   POST /api/verse/cloud/tasks/<id>/dismiss  {} → { ok: true, task }
+ *   GET  /api/verse/cloud/previews            → CloudPrPreviewsResponse (pr-preview.ts)
+ *   POST /api/verse/cloud/tasks/<id>/land           { headSha } → { ok: true, task, message }
+ *   POST /api/verse/cloud/tasks/<id>/close          { headSha } → { ok: true, task, message }
+ *   POST /api/verse/cloud/tasks/<id>/update-branch  { headSha } → { ok: true, task, message }
+ *                                              (409 refused / moved, 502 GitHub unreachable; body { error })
  *
  * Posture matches every Verse module (budget-api.ts): GETs sit behind the
  * read-session boundary in server.ts; every POST is 404 unless the server
@@ -18,9 +23,10 @@
  * scrubbed); errors from the service are never forwarded verbatim, because
  * their messages can carry checkout paths.
  *
- * NOTHING HERE MERGES OR TOUCHES GITHUB except through the service: dismiss
- * only marks the local task record `closed`, and refresh is the tracker's
- * read-only `gh pr list`.
+ * NOTHING HERE MERGES ON ITS OWN. Dismiss only marks the local task record
+ * `closed`, and refresh is the tracker's read-only `gh pr list`. The three
+ * triage routes (3.13) act on GitHub only when the operator asks, with the
+ * mutation token, on the exact head SHA they saw (pr-actions.ts).
  *
  * Also owned here (spec C2):
  *   - the BACKGROUND SCHEDULER, started on this module's first load (never
@@ -28,7 +34,9 @@
  *     10 min, self-improvement 2 min after start and then hourly;
  *   - the Needs-you producer `needsYouItems()` that activity-api.ts merges:
  *     PR-open tasks ("ready for review") and launches that failed in the last
- *     24 h. Pure and served from a cache refreshed off the caller's stack.
+ *     24 h. Pure and served from a cache refreshed off the caller's stack. A
+ *     PR-open item carries the gates' preview of its PR (pr-preview.ts) and,
+ *     once previewed, Land / Close / Update branch.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
@@ -47,6 +55,18 @@ import { cloudBudgetView } from './budget.js';
 import { cloudOverview, launchCloudTask, runSelfImprove } from './service.js';
 import { listCloudTasks, readCloudTask, updateCloudBudget, writeCloudTask } from './store.js';
 import { refreshCloudTasks } from './tracker.js';
+import {
+  cachedCloudPrPreviews,
+  closeCloudPr,
+  cloudPrPreviewsStale,
+  HEAD_SHA_PATTERN,
+  landCloudPr,
+  refreshCloudPrPreviews,
+  updateCloudPrBranch,
+  type CloudPrActionDeps,
+  type CloudPrActionResult,
+} from './pr-actions.js';
+import { VERSE_CLOUD_PREVIEWS_PATH, type CloudPrPreview, type CloudPrPreviewsResponse } from './pr-preview.js';
 import {
   CLOUD_TASK_ID_PATTERN,
   VERSE_CLOUD_BUDGET_PATH,
@@ -87,7 +107,7 @@ const LAUNCH_ORIGINS: readonly CloudLaunchRequest['origin'][] = ['chat', 'operat
 const BUDGET_NUMBER_KEYS = ['creditsTotalUsd', 'creditsSpentAdjustmentUsd', 'estimatedCostPerSessionUsd'] as const;
 const BUDGET_COUNT_KEYS = ['maxConcurrent', 'maxSessionsPerDay'] as const;
 const BUDGET_KEYS: ReadonlySet<string> = new Set([...BUDGET_NUMBER_KEYS, ...BUDGET_COUNT_KEYS, 'selfImprove']);
-const SELF_IMPROVE_KEYS: ReadonlySet<string> = new Set(['enabled', 'repo', 'maxPerDay', 'reserveUsd']);
+const SELF_IMPROVE_KEYS: ReadonlySet<string> = new Set(['enabled', 'repo', 'maxPerDay', 'reserveUsd', 'maxOpenPrs']);
 
 export class CloudInputError extends Error {}
 
@@ -178,6 +198,7 @@ export function parseCloudBudgetBody(body: Record<string, unknown>): CloudBudget
     }
     if (raw['maxPerDay'] !== undefined) self.maxPerDay = budgetNumber('selfImprove.maxPerDay', raw['maxPerDay'], true);
     if (raw['reserveUsd'] !== undefined) self.reserveUsd = budgetNumber('selfImprove.reserveUsd', raw['reserveUsd'], false);
+    if (raw['maxOpenPrs'] !== undefined) self.maxOpenPrs = budgetNumber('selfImprove.maxOpenPrs', raw['maxOpenPrs'], true);
     if (Object.keys(self).length > 0) out.selfImprove = self;
   }
   if (Object.keys(out).length === 0) throw new CloudInputError('Nothing to update.');
@@ -192,6 +213,16 @@ export function parseCloudImproveBody(body: Record<string, unknown>): { count: n
     throw new CloudInputError(`Count must be a whole number from 1 to ${IMPROVE_MAX_COUNT}.`);
   }
   return { count };
+}
+
+/** Strict body of land / close / update-branch: exactly the head commit the operator saw. */
+export function parseCloudPrActionBody(body: Record<string, unknown>): { headSha: string } {
+  rejectUnknownKeys(body, new Set(['headSha']));
+  const headSha = body['headSha'];
+  if (typeof headSha !== 'string' || !HEAD_SHA_PATTERN.test(headSha)) {
+    throw new CloudInputError('headSha must be the full 40-character head commit you reviewed.');
+  }
+  return { headSha };
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +292,51 @@ function dismissAction(task: CloudTaskV1, confirmFirst: boolean): NeedsYouAction
   };
 }
 
+function taskRoute(task: CloudTaskV1, verb: 'land' | 'close' | 'update-branch', headSha: string): NeedsYouAction['request'] {
+  return { method: 'POST', path: `${VERSE_CLOUD_TASKS_PATH}/${task.id}/${verb}`, body: { headSha } };
+}
+
+/** Land / Close / Update branch for a previewed PR, pinned to the previewed head. */
+export function triageActions(task: CloudTaskV1, preview: CloudPrPreview): NeedsYouAction[] {
+  const n = preview.prNumber;
+  const sha7 = preview.headSha.slice(0, 7);
+  const out: NeedsYouAction[] = [];
+  if (preview.landable.ok) {
+    out.push({
+      kind: 'approve',
+      label: 'Land',
+      request: taskRoute(task, 'land', preview.headSha),
+      confirm: {
+        title: `Land #${n} on ${preview.baseBranch}?`,
+        body: clip(`${preview.reason} Squash-merges exactly ${sha7}; GitHub refuses if the branch has moved.`, NEEDS_YOU_DETAIL_MAX),
+        confirmLabel: 'Land',
+      },
+      destructive: false,
+    });
+  }
+  out.push({
+    kind: 'reject',
+    label: 'Close',
+    request: taskRoute(task, 'close', preview.headSha),
+    confirm: {
+      title: `Close #${n} without landing?`,
+      body: 'Closes the pull request on GitHub with a short comment. The branch is kept.',
+      confirmLabel: 'Close PR',
+    },
+    destructive: true,
+  });
+  if (preview.behind) {
+    out.push({
+      kind: 'fix',
+      label: 'Update branch',
+      request: taskRoute(task, 'update-branch', preview.headSha),
+      confirm: null,
+      destructive: false,
+    });
+  }
+  return out;
+}
+
 function isoOr(value: string | null | undefined, fallback: string): string {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value)) ? new Date(value).toISOString() : fallback;
 }
@@ -276,8 +352,18 @@ function isoOr(value: string | null | undefined, fallback: string): string {
  * drawer already reads for that kind. A failed launch is a failed piece of
  * work the operator started (often from a chat's "Run in cloud"), so it is a
  * `chats` / `chat-failed` item with no session to open.
+ *
+ * TRIAGE (3.13) maps onto the kinds the drawer already knows, so the
+ * contract does not change: approve = Land, reject = Close, fix = Update
+ * branch, done = Dismiss. They appear only once the PR has a preview (it
+ * carries the head SHA every action is pinned to); Land only when the
+ * preview says Land would not be refused; Update branch only when behind.
  */
-export function cloudNeedsYouItems(tasks: readonly CloudTaskV1[], now: Date): NeedsYouItem[] {
+export function cloudNeedsYouItems(
+  tasks: readonly CloudTaskV1[],
+  now: Date,
+  previews: ReadonlyMap<string, CloudPrPreview> = new Map(),
+): NeedsYouItem[] {
   const nowIso = now.toISOString();
   const out: NeedsYouItem[] = [];
   for (const task of tasks) {
@@ -286,18 +372,21 @@ export function cloudNeedsYouItems(tasks: readonly CloudTaskV1[], now: Date): Ne
       const report = task.report;
       const summary = report ? `Cloud session reports (unverified): ${scrubSecrets(report.summary)}` : 'No report yet: the pull request has no ashlr-cloud-report block.';
       const status = report && report.status !== 'done' ? ` (${report.status})` : '';
+      // Only a preview of THIS pull request counts: its number is the task's pinned one.
+      const cached = previews.get(task.id);
+      const preview = cached && cached.prNumber === task.pr.number && cached.open ? cached : null;
       item = {
         id: `fleet:owner-lane-pr:cloud-${task.id}`,
         source: 'fleet',
         kind: 'owner-lane-pr',
         severity: 'info',
         title: clip(`Cloud task ready for review: ${taskTitle(task)}`, NEEDS_YOU_TITLE_MAX),
-        detail: clip(`${summary}${status}`, NEEDS_YOU_DETAIL_MAX) || null,
+        detail: clip(preview ? `${preview.reason} ${summary}${status}` : `${summary}${status}`, NEEDS_YOU_DETAIL_MAX) || null,
         since: isoOr(task.updatedAt, nowIso),
         expiresAt: null,
         subject: { repo: task.repo, pr: task.pr.number, seatId: null, sessionId: null, engine: 'claude' },
         target: { kind: 'url', url: task.pr.url },
-        actions: [dismissAction(task, true)],
+        actions: preview ? [...triageActions(task, preview), dismissAction(task, true)] : [dismissAction(task, true)],
       };
     } else if (task.state === 'failed') {
       const at = Date.parse(task.updatedAt);
@@ -328,9 +417,31 @@ let needsYouCache: { at: number; items: NeedsYouItem[] } | null = null;
 let needsYouPending = false;
 let needsYouReadTasks: () => readonly CloudTaskV1[] = () => listCloudTasks(NEEDS_YOU_TASK_SCAN);
 
+/** Injected `gh` / policy for the triage routes and previews (tests); {} = production. */
+let prActionDeps: CloudPrActionDeps = {};
+/**
+ * Previews read GitHub (`gh`, read-only) off the request path. Never from a
+ * test process unless a test injected its own `gh` — the same rule as the
+ * scheduler, for the same reason.
+ */
+let autoPreview = !(process.env['VITEST'] || process.env['NODE_ENV'] === 'test');
+/** A preview sweep starts at most this often, so an unreachable GitHub is not hammered on every rebuild. */
+const PREVIEW_RETRY_MS = 60_000;
+let lastPreviewStartedAt = Number.NEGATIVE_INFINITY;
+
+function maybeRefreshPreviews(tasks: readonly CloudTaskV1[]): void {
+  if (!autoPreview) return;
+  const now = Date.now();
+  if (now - lastPreviewStartedAt < PREVIEW_RETRY_MS || !cloudPrPreviewsStale(tasks, now)) return;
+  lastPreviewStartedAt = now;
+  void guarded('preview', () => refreshCloudPrPreviews(tasks, prActionDeps)).catch(() => undefined);
+}
+
 function rebuildNeedsYou(): void {
   try {
-    needsYouCache = { at: Date.now(), items: cloudNeedsYouItems(needsYouReadTasks(), new Date()) };
+    const tasks = needsYouReadTasks();
+    needsYouCache = { at: Date.now(), items: cloudNeedsYouItems(tasks, new Date(), cachedCloudPrPreviews()) };
+    maybeRefreshPreviews(tasks);
   } catch {
     // Keep the last good answer: a transient store error must not flash an
     // empty drawer. Stamp it so the next rebuild waits a cache period.
@@ -372,11 +483,23 @@ export function setCloudNeedsYouReaderForTest(read: (() => readonly CloudTaskV1[
   needsYouPending = false;
 }
 
+/** Test seam: the triage routes' and previews' `gh` / policy (null restores production and turns auto-preview off). */
+export function setCloudPrActionDepsForTest(deps: CloudPrActionDeps | null, opts: { autoPreview?: boolean } = {}): void {
+  prActionDeps = deps ?? {};
+  autoPreview = deps !== null && opts.autoPreview === true;
+  lastPreviewStartedAt = Number.NEGATIVE_INFINITY;
+}
+
+/** Run one preview sweep now (tests; the drawer's rebuild does it on its own). */
+export function refreshCloudPrPreviewsGuarded(): Promise<{ checked: number; updated: number }> {
+  return guarded('preview', () => refreshCloudPrPreviews(needsYouReadTasks(), prActionDeps));
+}
+
 // ---------------------------------------------------------------------------
 // Guarded jobs (shared by the scheduler and the POST routes)
 // ---------------------------------------------------------------------------
 
-type JobName = 'refresh' | 'improve';
+type JobName = 'refresh' | 'improve' | 'preview';
 const inFlight: Partial<Record<JobName, Promise<unknown>>> = {};
 
 /**
@@ -571,6 +694,12 @@ async function readMutationBody(
 }
 
 const TASK_DISMISS_RE = /^\/api\/verse\/cloud\/tasks\/([^/]+)\/dismiss$/;
+const TASK_TRIAGE_RE = /^\/api\/verse\/cloud\/tasks\/([^/]+)\/(land|close|update-branch)$/;
+const TRIAGE: Readonly<Record<string, (id: string, headSha: string, deps: CloudPrActionDeps) => Promise<CloudPrActionResult>>> = {
+  land: landCloudPr,
+  close: closeCloudPr,
+  'update-branch': updateCloudPrBranch,
+};
 
 function ownsPath(path: string): boolean {
   return path === VERSE_CLOUD_PATH || path.startsWith(`${VERSE_CLOUD_PATH}/`);
@@ -590,6 +719,17 @@ export const handleCloudApi: ApiModule = async (ctx, req, res, path, method) => 
       }
       if (rejectQuery(req, res)) return true;
       sendJson(res, 200, await cloudOverview());
+      return true;
+    }
+
+    if (path === VERSE_CLOUD_PREVIEWS_PATH) {
+      if (method !== 'GET') {
+        sendJson(res, 404, { error: `not found: ${method} ${path}` });
+        return true;
+      }
+      if (rejectQuery(req, res)) return true;
+      const body: CloudPrPreviewsResponse = { generatedAt: new Date().toISOString(), previews: [...cachedCloudPrPreviews().values()] };
+      sendJson(res, 200, body);
       return true;
     }
 
@@ -655,6 +795,26 @@ export const handleCloudApi: ApiModule = async (ctx, req, res, path, method) => 
       }
       invalidateNeedsYou();
       sendJson(res, 200, { ok: true, task: result.task });
+      return true;
+    }
+
+    const triage = TASK_TRIAGE_RE.exec(path);
+    if (triage) {
+      const body = await readMutationBody(ctx, req, res, SMALL_BODY_MAX_BYTES);
+      if (!body) return true;
+      const id = triage[1]!;
+      if (!CLOUD_TASK_ID_PATTERN.test(id)) {
+        sendInvalid(res, 'That is not a cloud task id.');
+        return true;
+      }
+      const { headSha } = parseCloudPrActionBody(body);
+      const result = await TRIAGE[triage[2]!]!(id, headSha, prActionDeps);
+      invalidateNeedsYou();
+      if (!result.ok) {
+        sendJson(res, result.status, { error: result.error });
+        return true;
+      }
+      sendJson(res, 200, { ok: true, task: result.task, message: result.message });
       return true;
     }
 

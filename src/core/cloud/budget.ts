@@ -5,7 +5,7 @@
  *
  * Pure: no clock, no disk — the caller passes the tasks, the budget and now.
  */
-import { CLOUD_BALANCE_URL, type CloudBudgetV1, type CloudBudgetView, type CloudGate, type CloudTaskV1 } from './types.js';
+import { CLOUD_BALANCE_URL, DEFAULT_CLOUD_BUDGET, type CloudBudgetV1, type CloudBudgetView, type CloudGate, type CloudTaskV1 } from './types.js';
 
 const OK: CloudGate = Object.freeze({ ok: true, reason: null });
 const refuse = (reason: string): CloudGate => ({ ok: false, reason });
@@ -43,7 +43,9 @@ export function cloudBudgetView(tasks: readonly CloudTaskV1[], budget: CloudBudg
   let selfImproveToday = 0;
   let running = 0;
   let queued = 0;
+  let selfImprovePrsOpen = 0;
   for (const task of tasks) {
+    if (task.origin === 'self-improve' && task.state === 'pr-open') selfImprovePrsOpen += 1;
     const consumed = taskConsumedSession(task);
     if (consumed) spent += task.estimatedCostUsd;
     if (task.state === 'launching' || task.state === 'running') running += 1;
@@ -71,8 +73,14 @@ export function cloudBudgetView(tasks: readonly CloudTaskV1[], budget: CloudBudg
 
   let canSelfImprove: CloudGate = canLaunch;
   if (canLaunch.ok) {
+    // A budget written before 3.13 has no maxOpenPrs: the default applies.
+    const maxOpenPrs = budget.selfImprove.maxOpenPrs ?? DEFAULT_CLOUD_BUDGET.selfImprove.maxOpenPrs;
     if (!budget.selfImprove.enabled) {
       canSelfImprove = refuse('Self-improvement is turned off.');
+    } else if (selfImprovePrsOpen >= maxOpenPrs) {
+      // Review backpressure: Verse writes PRs faster than anyone reviews them,
+      // so it waits for the queue to drain (Land or Close in Needs-you).
+      canSelfImprove = refuse(`${selfImprovePrsOpen} self-improvement ${plural(selfImprovePrsOpen, 'PR is', 'PRs are')} waiting for review.`);
     } else if (selfImproveToday >= budget.selfImprove.maxPerDay) {
       canSelfImprove = refuse(`${selfImproveToday} of ${budget.selfImprove.maxPerDay} self-improvement ${plural(budget.selfImprove.maxPerDay, 'launch', 'launches')} used today.`);
     } else if (estimatedRemainingUsd - cost < budget.selfImprove.reserveUsd) {
