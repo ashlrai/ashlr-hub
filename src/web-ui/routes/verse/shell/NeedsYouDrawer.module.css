@@ -341,3 +341,81 @@
 }
 :root[data-motion='reduce'] .backdrop,
 :root[data-motion='reduce'] .panel { animation: none; }
+
+/* ---- Cloud PR triage (3.13) ------------------------------------------------
+   A verdict chip on the row (word + colour, never colour alone), picks for a
+   batch, and the strip that acts on them. */
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  max-width: 100%;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-xs-line);
+  letter-spacing: var(--tracking-label);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chip[data-tone='clean'] { background: var(--status-success-bg); color: var(--status-success-fg); }
+.chip[data-tone='held'] { background: var(--status-warning-bg); color: var(--status-warning-fg); }
+.chipWhy { font-family: var(--font-ui); letter-spacing: normal; }
+
+.row[data-picked='true'] { background: var(--bg-selected); }
+.row[data-picked='true'] .rule { background: var(--border-focus); }
+.pickMark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-xs);
+  background: var(--border-focus);
+  color: var(--accent-contrast);
+  font-size: var(--text-2xs-size);
+}
+
+.batch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+.batchCount {
+  margin-right: auto;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.verdict {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.verdictHead { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin: 0; }
+.checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+.checks li { display: flex; gap: var(--space-1); min-width: 0; overflow-wrap: anywhere; }
+.checks li[data-ok='false'] { color: var(--text-primary); }
+.checkMark { flex: none; width: 1em; text-align: center; }
+.checks li[data-ok='true'] .checkMark { color: var(--status-success-fg); }
+.checks li[data-ok='false'] .checkMark { color: var(--status-warning-fg); }

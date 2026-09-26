@@ -270,6 +270,7 @@ export const WORKBENCH_COMMANDS = [
   { ...bind('drawer.reject'), title: 'Reject', group: null, section: 'Needs you', note: 'confirms, then asks for the token' },
   { ...bind('drawer.veto'), title: 'Veto', group: null, section: 'Needs you', note: 'confirms, then asks for the token' },
   { ...bind('drawer.done'), title: 'Mark done', group: null, section: 'Needs you' },
+  { ...bind('drawer.select'), title: 'Select item', group: null, section: 'Needs you', note: 'A / R / E then act on every selected item' },
   { ...bind('drawer.split-prev'), title: 'Previous split', group: null, section: 'Needs you' },
   { ...bind('drawer.split-next'), title: 'Next split', group: null, section: 'Needs you' },
 

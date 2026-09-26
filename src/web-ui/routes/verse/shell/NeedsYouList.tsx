@@ -12,10 +12,16 @@
  * ends on a whole word (two lines at most; the server's text is the tooltip),
  * a run summary becomes "2 files · +384 −0 · Test-and-repair loop", and an age
  * is "38 days ago" with the exact local time on hover.
+ *
+ * Triage (3.13): a cloud PR's row carries its gate verdict as a chip ("Clean",
+ * or "Held · 2 commits behind"), and rows can be picked for a batch — X on
+ * the selected row or Shift-click — which the drawer then acts on with
+ * A / R / E. Picking never moves the cursor and never opens the item.
  */
 import { forwardRef, useEffect, useRef } from 'react';
 import type { NeedsYouItem } from '../../../../core/verse/workbench-types.js';
 import { NEEDS_YOU_ACTION_KEYS } from '../../../../core/verse/workbench-types.js';
+import type { TriageChip } from './cloud-triage.js';
 import { needsYouRowView, until, type NeedsYouRunView } from './needs-you-model.js';
 import styles from './NeedsYouDrawer.module.css';
 
@@ -55,10 +61,29 @@ export interface NeedsYouListProps {
   onOpen: (id: string) => void;
   now: number;
   label: string;
+  /** Rows picked for a batch action. */
+  picked?: ReadonlySet<string>;
+  /** Shift-click: pick or unpick a row. */
+  onTogglePick?: (id: string) => void;
+  /** Cloud PR verdicts by item id. */
+  chips?: ReadonlyMap<string, TriageChip>;
+}
+
+const NO_PICKS: ReadonlySet<string> = new Set();
+const NO_CHIPS: ReadonlyMap<string, TriageChip> = new Map();
+
+/** "Clean" / "Held · 2 commits behind" — tone is a word as well as a colour. */
+export function TriageChipView({ chip }: { chip: TriageChip }) {
+  return (
+    <span className={styles.chip} data-tone={chip.tone} title={chip.title}>
+      {chip.label}
+      {chip.why ? <span className={styles.chipWhy}> · {chip.why}</span> : null}
+    </span>
+  );
 }
 
 export const NeedsYouList = forwardRef<HTMLDivElement, NeedsYouListProps>(function NeedsYouList(
-  { items, selectedId, onSelect, onOpen, now, label },
+  { items, selectedId, onSelect, onOpen, now, label, picked = NO_PICKS, onTogglePick, chips = NO_CHIPS },
   ref,
 ) {
   const listId = 'verse-needs-you-list';
@@ -81,7 +106,7 @@ export const NeedsYouList = forwardRef<HTMLDivElement, NeedsYouListProps>(functi
       }}
       id={listId}
       role="listbox"
-      aria-label={label}
+      aria-label={picked.size > 0 ? `${label}, ${picked.size} picked` : label}
       tabIndex={0}
       aria-activedescendant={selectedId ? `${listId}-${items.findIndex((i) => i.id === selectedId)}` : undefined}
       className={styles.rows}
@@ -91,6 +116,8 @@ export const NeedsYouList = forwardRef<HTMLDivElement, NeedsYouListProps>(functi
           .map((a) => NEEDS_YOU_ACTION_KEYS[a.kind])
           .filter((k): k is 'A' | 'R' | 'V' | 'E' => k !== undefined);
         const view = needsYouRowView(item, now);
+        const isPicked = picked.has(item.id);
+        const chip = chips.get(item.id);
         return (
           <div
             key={item.id}
@@ -98,9 +125,17 @@ export const NeedsYouList = forwardRef<HTMLDivElement, NeedsYouListProps>(functi
             data-item-id={item.id}
             role="option"
             aria-selected={item.id === selectedId}
+            data-picked={isPicked ? 'true' : undefined}
             className={styles.row}
             data-severity={item.severity}
-            onClick={() => onOpen(item.id)}
+            onClick={(event) => {
+              if (event.shiftKey && onTogglePick) {
+                event.preventDefault();
+                onTogglePick(item.id);
+                return;
+              }
+              onOpen(item.id);
+            }}
             onMouseMove={() => item.id !== selectedId && onSelect(item.id)}
           >
             <span className={styles.rule} aria-hidden="true" />
@@ -110,6 +145,8 @@ export const NeedsYouList = forwardRef<HTMLDivElement, NeedsYouListProps>(functi
               <span className={styles.rowTitle} title={view.fullTitle}>{view.title}</span>
               {view.run ? <NeedsYouRunFacts run={view.run} /> : null}
               <span className={styles.rowMeta}>
+                {isPicked ? <span className="visually-hidden">Picked. </span> : null}
+                {chip ? <TriageChipView chip={chip} /> : null}
                 <span className={styles.severity} data-severity={item.severity}>{SEVERITY_WORD[item.severity]}</span>
                 <span>{SOURCE_WORD[item.source]}</span>
                 {view.repo ? <span className={styles.repo} title={view.repoFull}>{view.repo}</span> : null}
@@ -118,7 +155,7 @@ export const NeedsYouList = forwardRef<HTMLDivElement, NeedsYouListProps>(functi
                 {item.expiresAt ? <span className={styles.deadline}>closes {until(item.expiresAt, now)}</span> : null}
               </span>
             </span>
-            {item.id === selectedId && keyed.length > 0 ? (
+            {isPicked ? <span className={styles.pickMark} aria-hidden="true">✓</span> : item.id === selectedId && keyed.length > 0 ? (
               <span className={styles.rowKeys} aria-hidden="true">
                 {keyed.map((k) => (
                   <kbd key={k} className={styles.key}>{k}</kbd>

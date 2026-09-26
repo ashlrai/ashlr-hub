@@ -163,7 +163,14 @@ describe('budget', () => {
     expect(b.creditsTotalUsd).toBe(100);
     expect(b.estimatedCostPerSessionUsd).toBe(3);
     expect(b.maxConcurrent).toBe(1);
-    expect(b.selfImprove).toEqual({ enabled: false, repo: 'ashlrai/ashlr-hub', maxPerDay: 2, reserveUsd: 40 });
+    expect(b.selfImprove).toEqual({ enabled: false, repo: 'ashlrai/ashlr-hub', maxPerDay: 2, reserveUsd: 40, maxOpenPrs: 3 });
+  });
+
+  it('clamps the self-improvement review backpressure to 1..50 (3.13)', () => {
+    expect(updateCloudBudget({ selfImprove: { maxOpenPrs: 0 } }).selfImprove.maxOpenPrs).toBe(1);
+    expect(updateCloudBudget({ selfImprove: { maxOpenPrs: 999 } }).selfImprove.maxOpenPrs).toBe(50);
+    expect(updateCloudBudget({ selfImprove: { maxOpenPrs: 5 } }).selfImprove.maxOpenPrs).toBe(5);
+    expect(readCloudBudget().selfImprove.maxOpenPrs).toBe(5);
   });
 
   it('updates a subset, clamps, persists 0600, and never takes v/updatedAt from the caller', () => {

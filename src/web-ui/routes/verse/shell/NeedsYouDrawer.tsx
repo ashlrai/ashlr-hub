@@ -4,8 +4,12 @@
  *
  *   splits   All · Approvals · Fleet · Chats · Accounts      (H / L)
  *   list     J / K move · ↩ open · A approve · R reject · V veto · E done
+ *            X (or Shift-click) picks rows; A / R / E then act on every pick
  *   detail   an approval reuses ApprovalDetail (diff, evidence, provenance);
  *            anything else shows its argument, its deadline and its actions
+ *   cloud    a cloud PR shows its gate verdict (Clean / Held · why) and, in
+ *            its detail, every check; "Land all clean" lands every Clean one
+ *            after one confirmation (cloud-triage.ts)
  *
  * Every A / R / V goes through confirmation and then the mutation token
  * (needs-you-actions.ts → guarded-action.tsx) — keyboard triage is fast, but
@@ -25,7 +29,8 @@ import { IconExternalLink, IconX } from '../../../components/primitives/icons.js
 import { SkeletonRow } from '../../../components/primitives/Skeleton.js';
 import { useToast } from '../../../components/primitives/Toast.js';
 import type { VerseSeat } from '../../../data/api-types.js';
-import { useQuery } from '../../../data/hooks.js';
+import type { CloudPrPreview } from '../../../../core/cloud/pr-preview.js';
+import { useQuery, useRefetch } from '../../../data/hooks.js';
 import {
   NEEDS_YOU_ACTION_KEYS,
   type NeedsYouActionKind,
@@ -47,6 +52,7 @@ import {
 import { matchCommand } from './command-catalog.js';
 import { isGuardOpen } from './guarded-action.js';
 import { markResolved, pruneResolved, runNeedsYouAction, useResolvedIds } from './needs-you-actions.js';
+import { cleanLandable, cloudPreviewsQuery, runBatch, triageChip, type TriageChip } from './cloud-triage.js';
 import {
   actionOf,
   describeSilence,
@@ -59,13 +65,16 @@ import {
   splitCoverage,
   until,
 } from './needs-you-model.js';
-import { NeedsYouList, NeedsYouRunFacts } from './NeedsYouList.js';
+import { NeedsYouList, NeedsYouRunFacts, TriageChipView } from './NeedsYouList.js';
 import { refreshActivity, useActivity } from './useActivity.js';
 import { useViewport } from './viewport.js';
 import styles from './NeedsYouDrawer.module.css';
 
 /** A section anchor for the surface an item points into (the shell reveals it: shell/reveal-anchor.ts). */
 export { VERSE_ANCHOR_EVENT } from '../verse-ui-store.js';
+
+/** Cloud PR items (cloud-api.ts cloudNeedsYouItems) — the only rows with a gate preview. */
+const CLOUD_PR_ITEM_PREFIX = 'fleet:owner-lane-pr:cloud-';
 
 const DRAWER_ACTION: Readonly<Record<string, NeedsYouActionKind>> = {
   'drawer.approve': 'approve',
@@ -94,6 +103,7 @@ export function NeedsYouDrawer() {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [dispatchDenied, setDispatchDenied] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set());
 
   // Countdowns ("closes in 24m") tick while the drawer is open; nothing else re-renders.
   useEffect(() => {
@@ -113,6 +123,51 @@ export function NeedsYouDrawer() {
   const counts = useMemo(() => splitCounts(all), [all]);
   const coverage = splitCoverage(data?.sources ?? null, split);
   const dispatchEnabled = (bootstrap.data?.dispatchEnabled ?? true) && !dispatchDenied;
+
+  // Cloud PR verdicts: re-read whenever a cloud item's text changes (the
+  // server rewrites its detail when a new preview lands).
+  const previewsQuery = useQuery(cloudPreviewsQuery, { freshMs: 15_000 });
+  const refetchPreviews = useRefetch(cloudPreviewsQuery);
+  const cloudSignature = useMemo(
+    () => all.filter((i) => i.id.startsWith(CLOUD_PR_ITEM_PREFIX)).map((i) => `${i.id}\u0000${i.detail ?? ''}`).join('\u0001'),
+    [all],
+  );
+  const firstSignature = useRef(true);
+  useEffect(() => {
+    // The mount already fetched; only a CHANGE re-reads.
+    if (firstSignature.current) {
+      firstSignature.current = false;
+      return;
+    }
+    if (cloudSignature) refetchPreviews();
+  }, [cloudSignature, refetchPreviews]);
+  const previews = previewsQuery.data ?? NO_PREVIEWS;
+  const chips = useMemo(() => {
+    const out = new Map<string, TriageChip>();
+    for (const item of all) {
+      const chip = triageChip(item, previews.get(item.id));
+      if (chip) out.set(item.id, chip);
+    }
+    return out;
+  }, [all, previews]);
+  const landAll = useMemo(() => cleanLandable(items, previews), [items, previews]);
+
+  // Picks only ever name rows this split shows.
+  useEffect(() => {
+    setPicked((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set([...prev].filter((id) => items.some((i) => i.id === id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [items]);
+  const togglePick = useCallback((id: string) => {
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  }, []);
+  const clearPicks = useCallback(() => setPicked(new Set()), []);
 
   // Open on the item the palette / a notification asked for.
   const focusId = ui.needsYouFocus;
@@ -216,6 +271,17 @@ export function NeedsYouDrawer() {
     runNeedsYouAction(item, action, { openTarget, toast: toast.show });
   }, [dispatchEnabled, openTarget, toast]);
 
+  const actOnMany = useCallback((targets: readonly NeedsYouItem[], kind: NeedsYouActionKind) => {
+    if (!dispatchEnabled) {
+      toast.show('This server was started without dispatch — run `ashlr verse` to act.', 'neutral');
+      return;
+    }
+    runBatch(targets, kind, {
+      toast: toast.show,
+      onSettled: (done) => setPicked((prev) => new Set([...prev].filter((id) => !done.includes(id)))),
+    });
+  }, [dispatchEnabled, toast]);
+
   function move(delta: 1 | -1) {
     if (items.length === 0) return;
     const at = Math.max(0, items.findIndex((i) => i.id === selectedId));
@@ -229,6 +295,7 @@ export function NeedsYouDrawer() {
     const next = NEEDS_YOU_SPLITS[(at + delta + NEEDS_YOU_SPLITS.length) % NEEDS_YOU_SPLITS.length]!;
     setVerseNeedsYouSplit(next);
     setDetailId(null);
+    clearPicks();
   }
 
   function onKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
@@ -260,9 +327,16 @@ export function NeedsYouDrawer() {
       case 'drawer.open':
         if (current) setDetailId(current.id);
         return;
+      case 'drawer.select':
+        if (current && !detailId) togglePick(current.id);
+        return;
       default: {
         const kind = DRAWER_ACTION[command.id];
-        if (kind && current) act(current, kind);
+        if (!kind) return;
+        // With rows picked (and the list showing), the key acts on every pick.
+        const many = !detailId && picked.size > 0 ? items.filter((i) => picked.has(i.id)) : [];
+        if (many.length > 0) actOnMany(many, kind);
+        else if (current) act(current, kind);
       }
     }
   }
@@ -321,6 +395,16 @@ export function NeedsYouDrawer() {
           ))}
         </div>
 
+        {!detailItem && (picked.size > 0 || landAll.length > 0) ? (
+          <BatchBar
+            pickedItems={items.filter((i) => picked.has(i.id))}
+            landAll={landAll}
+            dispatchEnabled={dispatchEnabled}
+            onRun={actOnMany}
+            onClear={clearPicks}
+          />
+        ) : null}
+
         <div className={styles.body}>
           {detailItem ? (
             <div ref={detailRef} className={styles.detail} tabIndex={-1} aria-label="Item detail">
@@ -342,7 +426,16 @@ export function NeedsYouDrawer() {
                   />
                 </div>
               ) : (
-                <ItemDetail item={detailItem} now={now} seats={bootstrap.data?.seats ?? NO_SEATS} onAct={act} onOpenTarget={openTarget} dispatchEnabled={dispatchEnabled} />
+                <ItemDetail
+                  item={detailItem}
+                  now={now}
+                  seats={bootstrap.data?.seats ?? NO_SEATS}
+                  onAct={act}
+                  onOpenTarget={openTarget}
+                  dispatchEnabled={dispatchEnabled}
+                  chip={chips.get(detailItem.id) ?? null}
+                  preview={chips.has(detailItem.id) ? previews.get(detailItem.id) ?? null : null}
+                />
               )}
             </div>
           ) : loading ? (
@@ -372,6 +465,9 @@ export function NeedsYouDrawer() {
               }}
               now={now}
               label={`${SPLIT_LABEL[split]} needing you`}
+              picked={picked}
+              onTogglePick={togglePick}
+              chips={chips}
             />
           )}
           {/* The list holds the initial focus; with no list, the panel does. */}
@@ -386,6 +482,7 @@ export function NeedsYouDrawer() {
             <span><kbd className={styles.key}>R</kbd> reject</span>
             <span><kbd className={styles.key}>V</kbd> veto</span>
             <span><kbd className={styles.key}>E</kbd> done</span>
+            <span><kbd className={styles.key}>X</kbd> pick</span>
             <span><kbd className={styles.key}>H</kbd><kbd className={styles.key}>L</kbd> splits</span>
           </footer>
         ) : null}
@@ -432,6 +529,82 @@ const TARGET_LABEL = (item: NeedsYouItem): string | null => {
 };
 
 const NO_SEATS: readonly VerseSeat[] = [];
+const NO_PREVIEWS: ReadonlyMap<string, CloudPrPreview> = new Map();
+
+/** Which actions the picks can run: every kind at least one pick has, with how many have it. */
+function sharedActions(pickedItems: readonly NeedsYouItem[]): Array<{ kind: NeedsYouActionKind; label: string; destructive: boolean; count: number }> {
+  const byKind = new Map<NeedsYouActionKind, { label: string; destructive: boolean; count: number }>();
+  for (const item of pickedItems) {
+    for (const action of item.actions) {
+      if (!action.request) continue;
+      const entry = byKind.get(action.kind);
+      if (entry) entry.count += 1;
+      else byKind.set(action.kind, { label: action.label, destructive: action.destructive, count: 1 });
+    }
+  }
+  // Land first, Dismiss last.
+  const order: NeedsYouActionKind[] = ['approve', 'fix', 'reject', 'veto', 'resume', 'renew', 'done'];
+  return order.flatMap((kind) => {
+    const entry = byKind.get(kind);
+    return entry ? [{ kind, ...entry }] : [];
+  });
+}
+
+/**
+ * The strip over the list: what the picks can do (each button runs on the
+ * picks that have that action), or — with nothing picked — "Land all clean".
+ */
+function BatchBar({
+  pickedItems,
+  landAll,
+  dispatchEnabled,
+  onRun,
+  onClear,
+}: {
+  pickedItems: readonly NeedsYouItem[];
+  landAll: readonly NeedsYouItem[];
+  dispatchEnabled: boolean;
+  onRun: (targets: readonly NeedsYouItem[], kind: NeedsYouActionKind) => void;
+  onClear: () => void;
+}) {
+  if (pickedItems.length === 0) {
+    return (
+      <div className={styles.batch} role="toolbar" aria-label="Cloud pull requests">
+        <span className={styles.batchCount}>
+          {landAll.length} clean cloud {landAll.length === 1 ? 'PR' : 'PRs'}
+        </span>
+        <Button size="sm" variant="primary" disabled={!dispatchEnabled} onClick={() => onRun(landAll, 'approve')}>
+          Land all clean
+        </Button>
+      </div>
+    );
+  }
+  const actions = sharedActions(pickedItems);
+  return (
+    <div className={styles.batch} role="toolbar" aria-label="Picked items">
+      <span className={styles.batchCount}>{pickedItems.length} picked</span>
+      {actions.map((a) => {
+        const key = NEEDS_YOU_ACTION_KEYS[a.kind];
+        const partial = a.count < pickedItems.length;
+        return (
+          <Button
+            key={a.kind}
+            size="sm"
+            variant={a.destructive ? 'danger' : a.kind === 'approve' ? 'primary' : 'subtle'}
+            disabled={!dispatchEnabled}
+            onClick={() => onRun(pickedItems, a.kind)}
+            aria-keyshortcuts={key}
+            title={partial ? `${a.count} of ${pickedItems.length} picked can do this` : undefined}
+          >
+            {a.label}{partial ? ` ${a.count}` : ''}
+            {key ? <kbd className={styles.inlineKey} aria-hidden="true">{key}</kbd> : null}
+          </Button>
+        );
+      })}
+      <Button size="sm" variant="ghost" onClick={onClear}>Clear</Button>
+    </div>
+  );
+}
 
 function ItemDetail({
   item,
@@ -440,6 +613,8 @@ function ItemDetail({
   onAct,
   onOpenTarget,
   dispatchEnabled,
+  chip,
+  preview,
 }: {
   item: NeedsYouItem;
   now: number;
@@ -448,6 +623,9 @@ function ItemDetail({
   onAct: (item: NeedsYouItem, kind: NeedsYouActionKind) => void;
   onOpenTarget: (item: NeedsYouItem) => void;
   dispatchEnabled: boolean;
+  /** A cloud PR's verdict and the checks behind it; null for everything else. */
+  chip: TriageChip | null;
+  preview: CloudPrPreview | null;
 }) {
   const targetLabel = TARGET_LABEL(item);
   // The same readable text as the row (needs-you-model needsYouRowView), with room for the whole title.
@@ -464,6 +642,23 @@ function ItemDetail({
         {view.run ? <NeedsYouRunFacts run={view.run} /> : null}
       </header>
       {view.detail ? <p className={styles.itemDetail}>{view.detail}</p> : null}
+      {chip && preview ? (
+        <section className={styles.verdict} aria-label="Gate preview">
+          <p className={styles.verdictHead}>
+            <TriageChipView chip={{ ...chip, why: null }} />
+            <span className={styles.mono} title={preview.headSha}>{preview.headSha.slice(0, 7)}</span>
+          </p>
+          <ul className={styles.checks}>
+            {preview.checks.map((check) => (
+              <li key={check.id} data-ok={check.ok ? 'true' : 'false'}>
+                <span className={styles.checkMark} aria-hidden="true">{check.ok ? '✓' : '×'}</span>
+                <span className="visually-hidden">{check.ok ? 'Passes: ' : 'Fails: '}</span>
+                {check.text}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
       <dl className={styles.defs}>
         {view.repo ? (<><dt>Repo</dt><dd className={styles.repo} title={view.repoFull}>{view.repo}</dd></>) : null}
         {item.subject.pr ? (<><dt>Pull request</dt><dd>#{item.subject.pr}</dd></>) : null}

@@ -318,6 +318,8 @@ export interface BudgetForm {
   maxConcurrent: string;
   selfImprove: boolean;
   selfImproveMax: string;
+  /** Self-improvement waits while this many of its PRs await review (3.13). */
+  selfImproveMaxOpen: string;
   reserve: string;
 }
 
@@ -340,8 +342,15 @@ export const BUDGET_FIELDS: ReadonlyArray<{
   { field: 'maxPerDay', label: 'Sessions per day', hint: 'From every origin, counted per local day.', money: false, integer: true, min: 0, max: 500 },
   { field: 'maxConcurrent', label: 'Running at once', hint: 'Launching or running together.', money: false, integer: true, min: 1, max: 50 },
   { field: 'selfImproveMax', label: 'Self-improvement per day', hint: 'Launches Verse may make on its own.', money: false, integer: true, min: 0, max: 100 },
+  { field: 'selfImproveMaxOpen', label: 'Open self-improvement PRs', hint: 'Self-improvement waits while this many await review.', money: false, integer: true, min: 1, max: 50 },
   { field: 'reserve', label: 'Reserve', hint: 'Self-improvement stops under this estimated balance.', money: true, integer: false, min: 0, max: 100_000 },
 ];
+
+/** A pre-3.13 server sends no maxOpenPrs: the form shows the default and never sends it unchanged. */
+function maxOpenPrsOf(b: CloudBudgetV1): number {
+  const n = (b.selfImprove as Partial<CloudBudgetV1['selfImprove']>).maxOpenPrs;
+  return typeof n === 'number' && Number.isFinite(n) ? n : DEFAULT_CLOUD_BUDGET.selfImprove.maxOpenPrs;
+}
 
 function numText(n: number): string {
   return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100);
@@ -356,6 +365,7 @@ export function budgetFormFrom(b: CloudBudgetV1): BudgetForm {
     maxConcurrent: numText(b.maxConcurrent),
     selfImprove: b.selfImprove.enabled,
     selfImproveMax: numText(b.selfImprove.maxPerDay),
+    selfImproveMaxOpen: numText(maxOpenPrsOf(b)),
     reserve: numText(b.selfImprove.reserveUsd),
   };
 }
@@ -391,6 +401,7 @@ export function budgetPatch(form: BudgetForm, current: CloudBudgetV1): BudgetPat
   const selfImprove: NonNullable<CloudBudgetUpdate['selfImprove']> = {};
   if (form.selfImprove !== current.selfImprove.enabled) selfImprove.enabled = form.selfImprove;
   if (!same(values.selfImproveMax!, current.selfImprove.maxPerDay)) selfImprove.maxPerDay = values.selfImproveMax!;
+  if (!same(values.selfImproveMaxOpen!, maxOpenPrsOf(current))) selfImprove.maxOpenPrs = values.selfImproveMaxOpen!;
   if (!same(values.reserve!, current.selfImprove.reserveUsd)) selfImprove.reserveUsd = values.reserve!;
   if (Object.keys(selfImprove).length > 0) update.selfImprove = selfImprove;
   return { ok: true, update, changed: Object.keys(update).length > 0 };

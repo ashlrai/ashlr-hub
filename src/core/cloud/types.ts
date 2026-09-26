@@ -168,6 +168,11 @@ export interface CloudBudgetV1 {
     maxPerDay: number;
     /** Stop self-improvement when estimated remaining credits fall below this. */
     reserveUsd: number;
+    /**
+     * Review backpressure (3.13): no new self-improvement launch while this
+     * many self-improvement PRs are open and waiting for review (default 3).
+     */
+    maxOpenPrs: number;
   };
   updatedAt: string;
 }
@@ -179,7 +184,7 @@ export const DEFAULT_CLOUD_BUDGET: Omit<CloudBudgetV1, 'updatedAt'> = Object.fre
   estimatedCostPerSessionUsd: 3,
   maxConcurrent: 4,
   maxSessionsPerDay: 20,
-  selfImprove: Object.freeze({ enabled: true, repo: 'ashlrai/ashlr-hub', maxPerDay: 4, reserveUsd: 40 }),
+  selfImprove: Object.freeze({ enabled: true, repo: 'ashlrai/ashlr-hub', maxPerDay: 4, reserveUsd: 40, maxOpenPrs: 3 }),
 }) as Omit<CloudBudgetV1, 'updatedAt'>;
 
 export interface CloudGate {

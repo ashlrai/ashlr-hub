@@ -7,11 +7,14 @@ own improvement backlog. Sessions run on your Claude account. That includes its
 cloud credits, so work continues after the subscription's weekly window is
 spent.
 
-The lane never merges anything. Each task is instructed to open a **draft pull
-request** on GitHub. Verse tracks a matching PR if one arrives; failed launches
-and missing deliveries remain distinct states. From there the existing merge gates (see
-[Autonomy with custody](VERSE.md#autonomy-with-custody-310)) or you decide what
-happens to it.
+The lane never merges anything on its own. Each task is instructed to open a
+**draft pull request** on GitHub. Verse tracks a matching PR if one arrives;
+failed launches and missing deliveries remain distinct states. Cloud PRs are
+triaged in **Needs you**: each shows what the merge gates would say about its
+diff, and you land, close or update it there (see
+[Triage in Needs you](#triage-in-needs-you)). Automatic landing through the
+standing gates ([Autonomy with custody](VERSE.md#autonomy-with-custody-310))
+arrives with cloud intake; until then nothing lands without your click.
 
 The contracts live in `src/core/cloud/types.ts`. The user guide in Verse is
 [the Cloud lane section of VERSE.md](VERSE.md#cloud-lane-311).
@@ -171,6 +174,7 @@ started tracking.
 | Self-improvement | on | Whether Verse may launch backlog items without a click. |
 | Self-improvement repo | `ashlrai/ashlr-hub` | Where self-improvement tasks go. |
 | Self-improvement per day | 4 | Self-improvement launches per local day. |
+| Open self-improvement PRs | 3 | Self-improvement waits while this many of its PRs are open for review. |
 | Self-improvement reserve | $40 | Self-improvement stops when estimated remaining credits fall below this. |
 
 "Today" is your local calendar day, not UTC. Settings are saved in
@@ -183,8 +187,11 @@ questions, each with a plain sentence when the answer is no:
 - **Can launch?** Checked for every launch. It holds the concurrency limit, the
   daily session cap and the credit estimate.
 - **Can self-improve?** Checked additionally for launches Verse starts on its
-  own. It adds the self-improvement switch, the self-improvement daily cap
-  ("4 of 4 self-improvement launches used today.") and the reserve.
+  own. It adds the self-improvement switch, review backpressure ("3
+  self-improvement PRs are waiting for review."), the self-improvement daily
+  cap ("4 of 4 self-improvement launches used today.") and the reserve.
+  Backpressure lifts as you land or close those PRs; the **Improve Verse**
+  button and manual launches are not held by it.
 
 A refused launch is recorded nowhere and costs nothing. It comes back with the
 `budget` failure code and the gate's sentence.
@@ -241,8 +248,9 @@ There are two ways to launch backlog items:
   project has a GitHub origin and the seat is ready. Otherwise it is disabled,
   and its tooltip says why.
 - **Needs you** lists "Cloud task ready for review" for each task with an open
-  PR, with its title, PR link and report summary. It also lists launches that
-  failed in the last 24 hours, with the reason.
+  PR, with its title, PR link, gate verdict and report summary, and the triage
+  actions below. It also lists launches that failed in the last 24 hours, with
+  the reason.
 - **Fleet** shows a "Cloud · N running" chip in its lanes row.
 - **Settings ▸ Usage** has a Cloud credits panel with the same budget fields.
 
@@ -254,11 +262,39 @@ ashlr cloud list [--all] [--json]
 ashlr cloud refresh                        # ask GitHub for PRs now
 ashlr cloud improve [--count N]            # launch backlog items now
 ashlr cloud budget --total 250 --spent 12 --per-session 3 --max-per-day 20 \
-                   --self-improve on --self-improve-max 4 --reserve 40
+                   --self-improve on --self-improve-max 4 --self-improve-max-open 3 --reserve 40
 ashlr cloud backlog
 ```
 
 `launch` defaults `--repo` to the current directory's GitHub origin.
+
+### Triage in Needs you
+
+Every few minutes Verse reads each open cloud PR from GitHub and checks the
+diff, pinned to its head commit, with the merge gates' own functions:
+protected paths (G1), test tampering (G1b), risk and size against your grant's
+caps, or the compiled ceilings when no grant covers the repo (G2), and the
+session's report against its diff (G4). GitHub supplies conflicts, how far
+the branch is behind its base, and its checks. A PR where every check passes
+is **Clean**; otherwise it is **Held**, with the first reason on the row.
+Verification off the current base, the judge and authority are not part of
+the preview. They run only in the standing merge pass.
+
+| Key | Action | What it does |
+|---|---|---|
+| A | **Land** | Marks the draft ready and squash-merges exactly the commit that was checked. Refused if the diff touches a protected path, conflicts, or the branch moved. |
+| R | **Close** | Closes the PR on GitHub with a short comment. The branch is kept. |
+| — | **Update branch** | Shown when the branch is behind. GitHub merges the base into it, and checks run again. |
+| E | **Dismiss** | Stops tracking the task in Verse. GitHub is not touched. |
+
+X or Shift-click picks rows, and A / R / E then act on every pick after one
+confirmation. **Land all clean** lands every Clean PR the same way. Each
+action carries the head commit it was checked on, so a push in between is
+refused, not landed. Every action asks for the mutation token.
+
+The same actions are routes: `POST /api/verse/cloud/tasks/<id>/land`,
+`/close` and `/update-branch`, each with `{"headSha": "<40 hex>"}`, and
+`GET /api/verse/cloud/previews` for the verdicts.
 
 **Over HTTP** (the Verse server). `GET /api/verse/cloud` needs the read session.
 POST routes need the mutation token, a JSON content type and a bounded body:
@@ -336,5 +372,6 @@ there, and close their PRs on GitHub.
   and then `expired`. Its link still works.
 - The lane launches only through the `claude-a` seat. Other seats cannot start
   cloud sessions.
-- Nothing in the lane merges. A cloud PR goes through the same custody gates as
-  any other fleet change, or waits for you.
+- Nothing in the lane merges on its own. Cloud PRs are triaged in Needs you
+  and land only when you click Land. Automatic landing through the standing
+  gates arrives with cloud intake.
