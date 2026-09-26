@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — a plain .mjs build script with no type declarations.
-import { CHAT_FIRST_PAINT_ROOTS, criticalFiles } from '../../../../../scripts/check-first-paint-budget.mjs';
+import { aliasGroupedRoots, CHAT_FIRST_PAINT_ROOTS, criticalFiles } from '../../../../../scripts/check-first-paint-budget.mjs';
 
 const VERSE = resolve(process.cwd(), 'src/web-ui/routes/verse');
 const read = (rel: string) => readFileSync(join(VERSE, rel), 'utf8');
@@ -59,6 +59,33 @@ describe('check-first-paint-budget: what counts as critical', () => {
 
   it('measures from the entry, the /verse console and the Chat section', () => {
     expect(CHAT_FIRST_PAINT_ROOTS).toEqual(['index.html', 'app/VerseConsoleApp.tsx', 'routes/verse/sections/ChatSection.tsx']);
+  });
+});
+
+describe('check-first-paint-budget: a root folded into a group chunk', () => {
+  // vite.config.web.ts ships the console's first-paint modules as one group
+  // chunk, which has no facade module: the manifest keys it by file name and
+  // `app/VerseConsoleApp.tsx` is no longer a key.
+  const grouped = {
+    'index.html': { file: 'assets/index.js', imports: ['_react.js'] },
+    '_react.js': { file: 'assets/react.js' },
+    '_VerseConsoleApp-x.js': { file: 'assets/VerseConsoleApp-x.js', imports: ['_react.js'] },
+    'routes/verse/sections/ChatSection.tsx': { file: 'assets/ChatSection.js', imports: ['_VerseConsoleApp-x.js'] },
+  };
+  const maps: Record<string, string[]> = {
+    'assets/VerseConsoleApp-x.js': ['../../src/web-ui/routes/verse/VerseApp.tsx', '../../src/web-ui/app/VerseConsoleApp.tsx'],
+    'assets/ChatSection.js': ['../../src/web-ui/routes/verse/sections/ChatSection.tsx'],
+  };
+  const sourcesOf = (file: string) => maps[file] ?? [];
+
+  it('measures the chunk whose sourcemap carries the root', () => {
+    const aliased = aliasGroupedRoots(grouped, sourcesOf);
+    expect(aliased['app/VerseConsoleApp.tsx']).toBe(grouped['_VerseConsoleApp-x.js']);
+    expect([...criticalFiles(aliased)].sort()).toEqual(['assets/ChatSection.js', 'assets/VerseConsoleApp-x.js', 'assets/index.js', 'assets/react.js']);
+  });
+
+  it('still fails loudly when no chunk carries the root', () => {
+    expect(() => criticalFiles(aliasGroupedRoots(grouped, () => []))).toThrow(/VerseConsoleApp/);
   });
 });
 

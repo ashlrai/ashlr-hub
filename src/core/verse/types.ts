@@ -15,6 +15,7 @@
  * Nothing in this module reads secrets. Account identity is pinned by the
  * launcher command recorded in ~/.ashlr/account-connections/connections.json.
  */
+import type { TRANSIENT_EVENT_TYPE_LIST } from './transient-events.js';
 
 export type VerseEngine = 'claude' | 'codex' | 'grok' | 'local';
 
@@ -742,32 +743,16 @@ export type VerseErrorCode = (typeof VERSE_ERROR_CODES)[number];
 
 /**
  * V3.10. Event types that are NEVER persisted — emitted to live SSE listeners
- * only. Wire rules (A5 server, A6 client):
- *  - a transient event carries `seq` = the session's LAST PERSISTED seq (the
- *    counter does not advance), so the stored log stays gap-free and a server
- *    restart can never reissue a seq a client already saw;
- *  - its SSE frame has NO `id:` line, so the browser's Last-Event-ID resume
- *    cursor only ever points at persisted events;
- *  - clients must not dedupe, store or resume by a transient event's seq.
- * Browser-safe (plain Set), imported by the web bundle.
+ * only. The list and its guard live in ./transient-events.ts (re-exported
+ * here): the web chat's first-paint store needs the guard, and importing it
+ * from this module put every runtime value exported here — the handoff
+ * prompt, the effort tables — into the chat's first-paint chunk.
  */
-const TRANSIENT_EVENT_TYPE_LIST = [
-  'thinking-delta',
-  'thinking-progress',
-  'progress',
-  'status',
-] as const satisfies readonly VerseEventType[];
-
-export const VERSE_TRANSIENT_EVENT_TYPES: ReadonlySet<VerseEventType> = new Set<VerseEventType>(TRANSIENT_EVENT_TYPE_LIST);
+export { VERSE_TRANSIENT_EVENT_TYPES, isTransientVerseEvent } from './transient-events.js';
 
 export type VerseTransientEventType = (typeof TRANSIENT_EVENT_TYPE_LIST)[number];
 export type VerseTransientEvent = Extract<VerseEvent, { type: VerseTransientEventType }>;
 export type VersePersistedEvent = Exclude<VerseEvent, { type: VerseTransientEventType }>;
-
-/** V3.10. Type guard over VERSE_TRANSIENT_EVENT_TYPES. */
-export function isTransientVerseEvent(event: VerseEvent): event is VerseTransientEvent {
-  return VERSE_TRANSIENT_EVENT_TYPES.has(event.type);
-}
 
 /**
  * Which endpoint a LOCAL seat sends its turns to.

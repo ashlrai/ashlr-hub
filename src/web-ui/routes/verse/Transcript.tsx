@@ -71,7 +71,8 @@ import { MessageMarkdown } from './MessageMarkdown.js';
 import { ToolUseCard, type ToolUseCardProps } from './ToolUseCard.js';
 import { ArrowDownIcon } from './verse-icons.js';
 import { ENGINE_LABEL, formatDuration } from './verse-model.js';
-import { formatTokens, type VerseLiveState } from './verse-store.js';
+import { formatTokens } from './verse-readouts.js';
+import type { VerseLiveState } from './verse-store.js';
 import {
   groupTranscriptItems,
   type ToolGroupItem,

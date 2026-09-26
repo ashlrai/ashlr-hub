@@ -25,21 +25,24 @@ import {
   IconChevronDown,
   IconChevronRight,
   IconCpu,
+  IconGauge,
   IconInbox,
   IconMoon,
   IconPlus,
   IconSearch,
+  IconSliders,
   IconTrash,
   type IconProps,
 } from '../../components/primitives/icons.js';
-import { Icon } from './rail-icons.js';
+import { Icon, RAIL_ICON } from './rail-icons.js';
+import type { ComponentType } from 'react';
+import type { VerseSectionId } from './verse-ui-store.js';
 
 export type { IconProps };
 // The rail's icons (the section glyphs, the gear, the mark) live in
 // rail-icons.tsx so the shell's first paint does not pull this module and the
 // shared icon set in with them; re-exported so the names stay importable here.
 export {
-  AppsIcon,
   ChatIcon,
   CommandIcon,
   FleetIcon,
@@ -47,11 +50,38 @@ export {
   GrowthIcon,
   MindIcon,
   NeedsYouIcon,
-  SECTION_ICON,
-  SettingsIcon,
-  UsageIcon,
+  RAIL_ICON,
   VerseMark,
 } from './rail-icons.js';
+
+// The gear tray's pages: drawn when the tray (or onboarding's tour) opens,
+// never by the rail itself, so not in rail-icons.tsx.
+export const UsageIcon = IconGauge;
+export const SettingsIcon = IconSliders;
+
+/** Apps & Accounts — a grid of tiles. */
+export function AppsIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" />
+      <rect x="9" y="2.5" width="4.5" height="4.5" rx="1" />
+      <rect x="2.5" y="9" width="4.5" height="4.5" rx="1" />
+      <rect x="9" y="9" width="4.5" height="4.5" rx="1" />
+    </Icon>
+  );
+}
+
+/** Every section's glyph: the rail's, plus the tray's. */
+export const SECTION_ICON: Readonly<Record<VerseSectionId, ComponentType<IconProps>>> = {
+  command: RAIL_ICON.command!,
+  fleet: RAIL_ICON.fleet!,
+  growth: RAIL_ICON.growth!,
+  mind: RAIL_ICON.mind!,
+  chat: RAIL_ICON.chat!,
+  settings: SettingsIcon,
+  apps: AppsIcon,
+  usage: UsageIcon,
+};
 
 /**
  * Aliases onto the shared set. The names are the ones the Verse rail, sidebar

@@ -9,7 +9,7 @@ import type { Tone } from '../../components/primitives/StatusBadge.js';
 // type-only), so a value import here does not drag node into the bundle.
 import { budgetFor, canonicalModelId, claudeAutocompactFlag, reconcileAutoCompactAt } from '../../../core/verse/context-math.js';
 import { usedPercentText } from './percent-text.js';
-import { formatTokens } from './verse-store.js';
+import { formatTokens } from './verse-readouts.js';
 
 export const ENGINE_ORDER: readonly VerseEngine[] = ['claude', 'codex', 'grok', 'local'];
 

@@ -84,7 +84,7 @@ import { ComposerSeatBlock } from './health/ComposerSeatBlock.js';
 import type { SeatChoice } from './SeatSelector.js';
 import { useViewport } from './shell/viewport.js';
 import { ENGINE_LABEL, modelLabel, seatPillLabel } from './verse-model.js';
-import { formatTokens } from './verse-store.js';
+import { formatTokens } from './verse-readouts.js';
 import type { VerseFileMatch } from '../../../core/verse/workbench-types.js';
 import styles from './Composer.module.css';
 import cstyles from './composer/composer.module.css';

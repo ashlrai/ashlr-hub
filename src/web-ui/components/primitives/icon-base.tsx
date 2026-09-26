@@ -56,21 +56,3 @@ export const IconInbox = (p: IconProps) => (
     <path d="M2 9.5h3l.8 1.6h4.4l.8-1.6h3v2.6A1.9 1.9 0 0 1 12.1 14H3.9A1.9 1.9 0 0 1 2 12.1V9.5Z" />
   </Icon>
 );
-
-/** Gauge — usage / spend. */
-export const IconGauge = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="M2.2 11.5a6.4 6.4 0 1 1 11.6 0" />
-    <path d="M8 11 10.8 6.6" />
-    <circle cx="8" cy="11.6" r="0.9" fill="currentColor" stroke="none" />
-  </Icon>
-);
-
-/** Sliders — settings. */
-export const IconSliders = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="M2.5 4.5h4M9.5 4.5h4M2.5 11.5h2M7.5 11.5h6" />
-    <circle cx="8" cy="4.5" r="1.6" />
-    <circle cx="6" cy="11.5" r="1.6" />
-  </Icon>
-);

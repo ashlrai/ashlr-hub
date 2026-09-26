@@ -1,6 +1,8 @@
 /**
  * routes/verse/rail-icons.tsx — the icons the shell rail draws at first
- * paint: the section glyphs, Needs you, the gear and the Verse mark.
+ * paint: the rail sections' glyphs, Needs you, the gear and the Verse mark.
+ * The gear tray's glyphs (Settings, Apps, Usage) are drawn only once the
+ * tray opens, so they live in verse-icons.tsx with SECTION_ICON.
  *
  * Split from verse-icons.tsx (which re-exports all of these) because the
  * rail is on the chat first-paint path: importing verse-icons there pulled
@@ -10,12 +12,10 @@
  * drawn here or aliased onto the shared set.
  */
 import type { ComponentType, ReactNode } from 'react';
-import { IconChat, IconGauge, IconInbox, IconSliders, type IconProps } from '../../components/primitives/icon-base.js';
+import { IconChat, IconInbox, type IconProps } from '../../components/primitives/icon-base.js';
 import type { VerseSectionId } from './verse-ui-store.js';
 
 export const ChatIcon = IconChat;
-export const UsageIcon = IconGauge;
-export const SettingsIcon = IconSliders;
 
 /** The Verse chrome geometry (verse-icons.tsx draws its local glyphs with it too). */
 export function Icon({ size = 16, children, ...rest }: IconProps & { children: ReactNode }) {
@@ -98,18 +98,6 @@ export function MindIcon(props: IconProps) {
   );
 }
 
-/** Apps & Accounts — a grid of tiles. */
-export function AppsIcon(props: IconProps) {
-  return (
-    <Icon {...props}>
-      <rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" />
-      <rect x="9" y="2.5" width="4.5" height="4.5" rx="1" />
-      <rect x="2.5" y="9" width="4.5" height="4.5" rx="1" />
-      <rect x="9" y="9" width="4.5" height="4.5" rx="1" />
-    </Icon>
-  );
-}
-
 /** The gear tray (Settings, Apps, Usage, Shortcuts). */
 export function GearIcon(props: IconProps) {
   return (
@@ -124,13 +112,11 @@ export function GearIcon(props: IconProps) {
 /** Needs you — the one inbox (⌘J). */
 export const NeedsYouIcon = IconInbox;
 
-export const SECTION_ICON: Record<VerseSectionId, ComponentType<IconProps>> = {
+/** The rail sections' glyphs (SECTION_ICON in verse-icons.tsx adds the tray's). */
+export const RAIL_ICON: Readonly<Partial<Record<VerseSectionId, ComponentType<IconProps>>>> = {
   command: CommandIcon,
   fleet: FleetIcon,
   growth: GrowthIcon,
   mind: MindIcon,
   chat: ChatIcon,
-  settings: SettingsIcon,
-  apps: AppsIcon,
-  usage: UsageIcon,
 };

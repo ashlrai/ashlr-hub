@@ -50,9 +50,8 @@ import { queryGateStats } from '../../data/cache.js';
 import { apiPost } from '../../data/client.js';
 import { useTheme } from '../../data/hooks.js';
 import { VERSE_ACTIVITY_SEEN_PATH, type VerseActivityCompletion } from '../../../core/verse/workbench-types.js';
-import { useOnboarding } from './onboarding/useOnboarding.js';
 import { useResourcesUi } from './resources/resources-store.js';
-import { detectKeyPlatform, findCommand, formatChord, matchCommand } from './shell/command-catalog.js';
+import { commandChord, detectKeyPlatform, formatChord, matchKey } from './shell/command-keys.js';
 import { GuardHost } from './shell/guarded-action.js';
 import type { RailBadge } from './shell/RailStatus.js';
 import { subscribeAnchorRequests } from './shell/anchor-requests.js';
@@ -65,7 +64,7 @@ import { useViewport } from './shell/viewport.js';
 import type { WarmupOptions } from './shell/warmup.js';
 import { useVerseUi } from './useVerseUi.js';
 // rail-icons, not verse-icons: only the rail's glyphs belong in first paint.
-import { GearIcon, NeedsYouIcon, SECTION_ICON, VerseMark } from './rail-icons.js';
+import { GearIcon, NeedsYouIcon, RAIL_ICON, VerseMark } from './rail-icons.js';
 import {
   acknowledgeChatMoved,
   closeVerseOverlay,
@@ -156,7 +155,8 @@ const importPalette = () => import('./shell/CommandPalette.js');
 const importDrawer = () => import('./shell/NeedsYouDrawer.js');
 const importShortcuts = () => import('./shell/ShortcutsOverlay.js');
 const importGearTray = () => import('./shell/GearTray.js');
-const importOnboarding = () => import('./onboarding/OnboardingFlow.js');
+// The first-run tour's store and its flow: the gate reads the one and loads the other.
+const importOnboarding = () => import('./onboarding/OnboardingGate.js');
 const importRailStatus = () => import('./shell/RailStatus.js');
 const importWarmup = () => import('./shell/warmup.js');
 // Resources (3.11 C6): the edge tab, rail button, ⌘. handler and the drawer
@@ -167,7 +167,7 @@ const CommandPalette = lazy(() => importPalette().then((m) => ({ default: m.Comm
 const NeedsYouDrawer = lazy(() => importDrawer().then((m) => ({ default: m.NeedsYouDrawer })));
 const ShortcutsOverlay = lazy(() => importShortcuts().then((m) => ({ default: m.ShortcutsOverlay })));
 const GearTray = lazy(() => importGearTray().then((m) => ({ default: m.GearTray })));
-const OnboardingFlow = lazy(() => importOnboarding().then((m) => ({ default: m.OnboardingFlow })));
+const OnboardingGate = lazy(() => importOnboarding().then((m) => ({ default: m.OnboardingGate })));
 const ResourcesChrome = lazy(() => importResources().then((m) => ({ default: m.ResourcesChrome })));
 const ResourcesRailButton = lazy(() => importResources().then((m) => ({ default: m.ResourcesRailButton })));
 const ResourcesBar = lazy(() => importResources().then((m) => ({ default: m.ResourcesBar })));
@@ -252,7 +252,6 @@ export function VerseApp() {
   const [trayOpen, setTrayOpen] = useState(false);
   const data = activity.data;
   const rail = useRailStatusModule();
-  const onboarding = useOnboarding();
   const resources = useResourcesUi();
 
   useEffect(() => prefetchAfterFirstPaint(), []);
@@ -279,7 +278,7 @@ export function VerseApp() {
       if (event.defaultPrevented) return;
       if (getVerseUiState().overlay === 'palette') return;
       if (foreignModalOpen()) return;
-      const command = matchCommand(event, ['global']);
+      const command = matchKey(event, ['global']);
       if (!command) return;
       // preventDefault BEFORE running: the chat's key fallback and the
       // transcript's ⌥↑/⌥↓ skip default-prevented events (C2), which is what
@@ -319,7 +318,7 @@ export function VerseApp() {
   // ── one-time announcements ──────────────────────────────────────────────
   useEffect(() => {
     if (!ui.announceChatMoved) return;
-    const chat = findCommand('surface.chat')?.keys[0];
+    const chat = commandChord('surface.chat');
     toast.show(`Chat moved to ${chat ? formatChord(chat, platform) : '⌘5'} — Command, Fleet, Growth and Mind come first now.`);
     acknowledgeChatMoved();
   }, [ui.announceChatMoved, toast, platform]);
@@ -362,7 +361,7 @@ export function VerseApp() {
   const gearPage = currentPage.placement === 'tray' ? currentPage : null;
   const BadgeMark = rail?.RailBadgeMark ?? null;
   const shortcut = (id: string) => {
-    const chord = findCommand(id)?.keys[0];
+    const chord = commandChord(id);
     return chord ? formatChord(chord, platform) : undefined;
   };
 
@@ -389,7 +388,7 @@ export function VerseApp() {
         </Tooltip>
         <ul className={styles.railList}>
           {RAIL_SECTIONS.map((entry) => {
-            const IconComponent = SECTION_ICON[entry.id];
+            const IconComponent = RAIL_ICON[entry.id];
             // Mind's dot also clears on sight in THIS window, whether or not
             // the server-side mark could be written (it needs a held token).
             const mindSeenHere = entry.id === 'mind' && latestMemoAt !== null && mindSeenLocal === latestMemoAt;
@@ -409,7 +408,7 @@ export function VerseApp() {
                     onClick={() => setVerseSection(entry.id)}
                   >
                     <span className={styles.railIcon}>
-                      <IconComponent />
+                      {IconComponent ? <IconComponent /> : null}
                       {badge && BadgeMark ? <BadgeMark badge={badge} /> : null}
                     </span>
                     {expanded || compact ? <span className={styles.railLabel}>{entry.label}</span> : null}
@@ -497,7 +496,7 @@ export function VerseApp() {
         First run only, outside the surfaces: a docked card, not a modal, so
         the rail and the surface stay usable while it is open.
       */}
-      <Suspense fallback={null}>{onboarding.open ? <OnboardingFlow /> : null}</Suspense>
+      <Suspense fallback={null}><OnboardingGate /></Suspense>
     </div>
   );
 }

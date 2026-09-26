@@ -14,7 +14,8 @@ import { SettingsSection } from './SettingsSection.js';
 import { LIGHT_SURFACE, DARK_SURFACE, accentReadability } from './AppearancePanel.js';
 import { ToastProvider } from '../../../components/primitives/Toast.js';
 import { evictAll } from '../../../data/cache.js';
-import { resetAppearance, getAppearance, ACCENT_PRESETS } from '../../../data/appearance-store.js';
+import { resetAppearance, getAppearance } from '../../../data/appearance-store.js';
+import { ACCENT_PRESETS } from '../../../data/appearance-presets.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { darkScope, lightScope, resolveToken } from '../../../design/token-probe.test-support.js';
 

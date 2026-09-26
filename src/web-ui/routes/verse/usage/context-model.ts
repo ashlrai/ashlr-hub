@@ -49,7 +49,7 @@ import type {
   VerseWindowSource,
 } from '../../../../core/verse/types.js';
 import { CODEX_EXPANSIVE_METERING_NOTE, formatContextWindow, modelOptionFor, seatUnavailableReason, sessionContextBudget, WINDOW_SOURCE_TEXT } from '../verse-model.js';
-import { formatTokens } from '../verse-store.js';
+import { formatTokens } from '../verse-readouts.js';
 import { formatWholePercent } from '../autonomy/format.js';
 
 // ---------------------------------------------------------------------------

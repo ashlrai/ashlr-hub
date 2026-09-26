@@ -17,17 +17,22 @@ import {
   chordAccelerator,
   chordId,
   chordMatches,
+  COMMAND_KEYS,
   COMMAND_SCOPES,
   DESKTOP_COMMAND_NAMES,
   DESKTOP_COMMANDS,
   eventKeyName,
   findCommand,
   formatChord,
+  keyBinding,
+  loadedCommand,
   matchCommand,
+  matchKey,
   PALETTE_GROUPS,
   PALETTE_PREFIXES,
   PALETTE_RECENT_LIMIT,
   paletteCommands,
+  parseChord,
   parseDesktopCommand,
   SCOPE_LAYERS,
   SHORTCUT_SECTIONS,
@@ -36,6 +41,7 @@ import {
   WORKBENCH_COMMAND_EVENT,
   WORKBENCH_COMMANDS,
   type KeyChord,
+  type KeyedCommandId,
   type KeyEventLike,
   type WorkbenchCommand,
 } from './command-catalog.js';
@@ -312,6 +318,47 @@ describe('command catalog — keys', () => {
     const summon = findCommand('app.summon')!;
     expect(summon.native?.kind).toBe('global-hotkey');
     expect(matchCommand(ev(' ', { code: 'Space', ctrlKey: true, altKey: true }), ['global'], 'mac')).toBeNull();
+  });
+});
+
+describe('command catalog — the keys half (command-keys.ts, on the chat first-paint path)', () => {
+  it('gives every key-table entry exactly one catalog row, with the same scope, keys and native binding', () => {
+    const ids = Object.keys(COMMAND_KEYS);
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) {
+      const rows = COMMANDS.filter((c) => c.id === id);
+      expect(rows, id).toHaveLength(1);
+      const spec = COMMAND_KEYS[id as KeyedCommandId];
+      expect(rows[0]!.scope, id).toBe(spec.scope);
+      expect(rows[0]!.keys.map(chordId), id).toEqual(spec.keys.map(chordId));
+      expect(rows[0]!.native, id).toEqual(spec.native);
+    }
+  });
+
+  it('writes no key outside it: every catalog row with keys is in the key table', () => {
+    for (const c of COMMANDS) if (c.keys.length > 0) expect(keyBinding(c.id), c.id).not.toBeNull();
+    for (const c of COMMANDS) if (c.keys.length === 0) expect(keyBinding(c.id), c.id).toBeNull();
+  });
+
+  it('parses the table\'s chord text into the chord it names', () => {
+    expect(parseChord('mod+k')).toEqual({ key: 'k', mod: true });
+    expect(parseChord('ctrl+shift+`')).toEqual({ key: '`', ctrl: true, shift: true });
+    expect(parseChord('mod+shift+\\')).toEqual({ key: '\\', mod: true, shift: true });
+    expect(parseChord('enter')).toEqual({ key: 'enter' });
+    for (const c of COMMANDS) for (const chord of c.keys) expect(parseChord(chordId(chord)), c.id).toEqual(chord);
+  });
+
+  it('matches the same binding the full catalog does, without it', () => {
+    const press = ev('k', { code: 'KeyK', metaKey: true });
+    expect(matchKey(press, ['global'], 'mac')?.id).toBe('palette.open');
+    expect(matchCommand(press, ['global'], 'mac')?.id).toBe('palette.open');
+    expect(matchKey(ev(' ', { code: 'Space', ctrlKey: true, altKey: true }), ['global'], 'mac')).toBeNull();
+  });
+
+  it('resolves a keyless command through the loaded catalog, a keyed one from the key table', () => {
+    expect(loadedCommand('fleet.stop')?.guard).toBeDefined();
+    expect(keyBinding('fleet.stop')).toBeNull();
+    expect(keyBinding('chat.new')?.scope).toBe('global');
   });
 });
 

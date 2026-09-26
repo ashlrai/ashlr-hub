@@ -25,7 +25,7 @@ import {
 } from '../../../../core/verse/context-math.js';
 import { formatContextWindow, formatRelative } from '../verse-model.js';
 import { asClause, percentText, tidyProse } from '../autonomy/format.js';
-import { formatTokens } from '../verse-store.js';
+import { formatTokens } from '../verse-readouts.js';
 
 // ---------------------------------------------------------------------------
 // Handoff

@@ -169,7 +169,7 @@ describe('full font faces claim only what they can draw', () => {
     // ChapterRail's markers). The one exception is the key-legend STRING
     // formatChord returns for Enter: it is standard macOS notation, lives in
     // titles and the ⌘/ overlay, and never paints on a cold chat load.
-    const ALLOWED: Record<string, string> = { 'routes/verse/shell/command-catalog.ts': '↩' };
+    const ALLOWED: Record<string, string> = { 'routes/verse/shell/command-keys.ts': '↩' };
     const plex = faceRange('IBMPlexSans-full.woff2')!;
     const web = resolve(DESIGN, '..');
     const files = (dir: string): string[] => readdirSync(dir).flatMap((name) => {
