@@ -214,6 +214,13 @@ export interface WorkbenchCommand {
   native?: NativeBinding;
   /** A qualifier the overlay prints under the title. */
   note?: string;
+  /**
+   * The surface that serves it. The command's behaviour — and the dialogs it
+   * may open (the Touch ID sheet, the token prompt) — live on that surface,
+   * so the shell brings it forward and parks the command until the surface
+   * registers its handler (run-command.ts). The palette says where it runs.
+   */
+  surface?: 'command';
 }
 
 const STOP_CHATS_GUARD: CommandGuard = {
@@ -235,6 +242,37 @@ const STOP_FLEET_GUARD: CommandGuard = {
   },
   token: true,
 };
+
+/** Where the copy-setup command points: the one CLI step that turns autonomy on. */
+export const AUTONOMY_SETUP_COMMAND = 'ashlr authority setup';
+
+/**
+ * A palette-only App action (no key) — shared shape of the autonomy, grant,
+ * budget and setup entries below. The catalog is on the chat first-paint
+ * path, so the repeated fields are written once.
+ */
+const appAction = (id: string, title: string, keywords: readonly string[], surface?: 'command'): WorkbenchCommand => ({
+  id,
+  title,
+  scope: 'global',
+  keys: [],
+  group: 'actions',
+  section: 'App',
+  keywords,
+  ...(surface ? { surface } : {}),
+});
+
+/**
+ * The Command surface's autonomy switch, one palette entry per position.
+ * Served by AutonomyBar with the switch's own rules: lowering is instant,
+ * raising past the installed grant opens the Touch ID sheet instead.
+ */
+const autonomySwitch = (to: 'off' | 'propose' | 'autonomous', label: string, keywords: readonly string[]) =>
+  appAction(`autonomy.${to}`, `Autonomy: ${label}`, ['autonomy', 'switch', ...keywords], 'command');
+
+/** A9's budget mode, set from the palette — clamped to the grant's ceiling like the Budget pill. */
+const budgetMode = (mode: 'all-in' | 'balanced' | 'reserve', label: string, keywords: readonly string[]) =>
+  appAction(`budget.${mode}`, `Budget mode: ${label}`, ['budget', 'spend', ...keywords], 'command');
 
 const surface = (n: 1 | 2 | 3 | 4 | 5, id: string, name: string): WorkbenchCommand => ({
   id: `surface.${id}`,
@@ -274,12 +312,12 @@ export const WORKBENCH_COMMANDS = [
   // ⌘. — not ⇧⌘R, which browsers keep for a hard reload.
   {
     id: 'resources.toggle',
-    title: 'Show resources',
+    title: 'Open Resources',
     scope: 'global',
     keys: [{ key: '.', mod: true }],
     group: 'actions',
     section: 'Navigation',
-    keywords: ['accounts', 'seats', 'capacity', 'credits', 'cloud', 'local models'],
+    keywords: ['show resources', 'accounts', 'seats', 'capacity', 'credits', 'cloud', 'local models'],
   },
   {
     id: 'resources.bar.toggle',
@@ -321,6 +359,11 @@ export const WORKBENCH_COMMANDS = [
   // merge is never one keystroke away. Chat-scoped because the bar lives
   // above the composer; from another surface the shell switches to Chat and
   // parks the command until BranchBar registers (command-bus).
+  // ── Cloud (3.11 C3) ──────────────────────────────────────────────────────
+  // Opens the composer's Chat settings sheet, where "Run in cloud" lives with
+  // its own disabled reasons (no GitHub origin, seat not ready, budget gate,
+  // empty box) and the token gate — the palette never launches by itself.
+  { id: 'composer.cloud', title: 'Run in cloud…', scope: 'chat', keys: [], group: 'actions', section: 'Composer', keywords: ['cloud', 'remote', 'launch', 'draft pr'] },
   { id: 'git.create-pr', title: 'Create pull request…', scope: 'chat', keys: [], group: 'actions', section: 'Chat', keywords: ['pr', 'github', 'git', 'open pull request'] },
   { id: 'git.merge-pr', title: 'Merge pull request…', scope: 'chat', keys: [], group: 'actions', section: 'Chat', keywords: ['pr', 'github', 'git', 'land', 'ship'] },
 
@@ -376,6 +419,19 @@ export const WORKBENCH_COMMANDS = [
     native: { kind: 'global-hotkey', accelerator: 'Control+Alt+Space' },
   },
   { id: 'fleet.stop', title: 'Stop the fleet…', scope: 'global', keys: [], group: 'actions', section: 'App', guard: STOP_FLEET_GUARD, keywords: ['kill', 'halt', 'autonomy'] },
+
+  // ── Autonomy (Command's AutonomyBar serves these) ────────────────────────
+  // No keys on purpose: raising authority is never one keystroke away, and
+  // each entry runs the bar's own path (Touch ID sheet, token, read-only).
+  autonomySwitch('off', 'Off', ['disable', 'lower']),
+  autonomySwitch('propose', 'Propose', ['proposals', 'review']),
+  autonomySwitch('autonomous', 'Autonomous', ['auto', 'turn on', 'enable']),
+  appAction('autonomy.grant', 'Approve grant…', ['touch id', 're-approve', 'renew', 'authority', 'autonomy'], 'command'),
+  budgetMode('all-in', 'All-in', ['all in', 'max']),
+  budgetMode('balanced', 'Balanced', ['default']),
+  budgetMode('reserve', 'Reserve', ['save', 'conserve']),
+  // Served by the shell (run-command.ts → copy-setup.ts), wherever you are.
+  appAction('autonomy.copy-setup', 'Copy autonomy setup command', [AUTONOMY_SETUP_COMMAND, 'autonomy', 'turn on', 'clipboard']),
 ] as const satisfies readonly WorkbenchCommand[];
 
 export type CommandId = (typeof WORKBENCH_COMMANDS)[number]['id'];

@@ -106,7 +106,7 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
   }, []);
   useFocusTrap({ open: overlay, containerRef: panelRef, onClose: trapClose });
   // Focus goes back to whatever opened the drawer (the trap does that). When
-  // that is gone — the palette that ran "Show resources" unmounts — it lands
+  // that is gone — the palette that ran "Open Resources" unmounts — it lands
   // on the edge handle rather than on <body>.
   useEffect(() => {
     if (!overlay) return undefined;

@@ -246,7 +246,7 @@ Your own chats ignore reserves.
 
 ## Resources, on every page
 
-Press **⌘.** (or click the tab on the right edge, or run "Show resources" from ⌘K) to open the Resources drawer:
+Press **⌘.** (or click the tab on the right edge, or run "Open Resources" from ⌘K) to open the Resources drawer:
 every Claude, Codex and Grok account with its live 5-hour and weekly windows, the share kept for you, reset times
 and Reconnect / Check again; your local models with runtime state and context windows; and your cloud credits.
 It opens over your work or pins as a column beside it, and a dot on the edge tab tells you at a glance whether

@@ -583,7 +583,7 @@ automatically if a 48-hour canary falls below baseline.
 
 ## Resources: the drawer and the bar (3.11)
 
-- **Resources drawer (⌘.).** Open it from the edge tab, the rail button or "Show resources" in ⌘K. It holds one
+- **Resources drawer (⌘.).** Open it from the edge tab, the rail button or "Open Resources" in ⌘K. It holds one
   card per resource:
   - every Claude, Codex and Grok account, with its 5-hour and weekly windows, the share kept for you, reset times,
     and Reconnect / Check again;

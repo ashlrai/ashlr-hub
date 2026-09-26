@@ -42,7 +42,7 @@ const warm = () => {
   void importDrawer().catch(() => undefined);
 };
 
-/** The key and the buttons toggle; the palette ("Show resources") and the desktop menu open. */
+/** The key and the buttons toggle; the palette ("Open Resources") and the desktop menu open. */
 export function runResourcesCommand(via: string | undefined): void {
   if (getResourcesUi().open && (via === 'key' || via === 'button')) {
     closeResources();

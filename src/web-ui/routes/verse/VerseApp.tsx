@@ -8,7 +8,7 @@
  *          once visited) kept MOUNTED behind it — hidden + inert
  *   [dock] the Resources drawer when PINNED (3.11 C6): a third grid track
  *          that shrinks [main]. Unpinned it floats over the surface, opened
- *          from the right-edge tab, the rail, ⌘. or ⌘K "Show resources".
+ *          from the right-edge tab, the rail, ⌘. or ⌘K "Open Resources".
  *   overlays  ⌘K palette · ⌘J Needs-you drawer · ⌘/ shortcuts · the guard
  *
  * KEEP-ALIVE. Switching surfaces used to unmount the one you left: the

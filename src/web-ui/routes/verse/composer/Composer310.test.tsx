@@ -264,6 +264,13 @@ describe('pickers', () => {
     act(() => { window.dispatchEvent(new CustomEvent('ashlr:command', { detail: { id: 'composer.model' } })); });
     expect(await screen.findByRole('menu', { name: 'Model' })).toBeInTheDocument();
   });
+
+  it('⌘K "Run in cloud…" opens the Chat settings sheet, where Run in cloud lives with its own checks', async () => {
+    await renderReady();
+    act(() => { window.dispatchEvent(new CustomEvent('ashlr:command', { detail: { id: 'composer.cloud' } })); });
+    const sheet = await screen.findByRole('dialog', { name: 'Chat settings' });
+    expect(await within(sheet).findByRole('button', { name: 'Run in cloud' })).toBeInTheDocument();
+  });
 });
 
 describe('bypass', () => {

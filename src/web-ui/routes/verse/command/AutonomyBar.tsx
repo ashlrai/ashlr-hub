@@ -17,6 +17,13 @@
  *
  * At 375 px the bar is just [Autonomy][■] (SPEC-310C §5); the budget pill
  * and grant chip move under the verdict line (rendered by CommandSection).
+ *
+ * ⌘K reaches the same paths (usePaletteCommands below): "Autonomy: …",
+ * "Approve grant…" and "Budget mode: …" run THROUGH this bar — the switch's
+ * lower/raise/needs-grant classification, the grant chip's own intent, the
+ * budget's grant ceiling, the token prompt, the read-only session — so the
+ * palette can never be a shortcut around any of them. When the bar would
+ * have been disabled, the palette says why instead of doing nothing.
  */
 import { useState, type ReactNode } from 'react';
 import type { AuthorityGrantDraft, AuthorityStatusV1, AutonomySwitch } from '../../../../core/authority/types.js';
@@ -26,7 +33,11 @@ import { Segmented } from '../../../components/primitives/Segmented.js';
 import { Sheet } from '../../../components/primitives/Sheet.js';
 import { IconChevronDown, IconLock, IconPlay, IconStop } from '../../../components/primitives/icons.js';
 import { BudgetControl } from '../budget/BudgetControl.js';
+import { modeAboveCeiling } from '../budget/budget-model.js';
+import { updateBudget } from '../budget/budget-queries.js';
+import { useCommandHandler } from '../shell/command-bus.js';
 import { findCommand } from '../shell/command-catalog.js';
+import { shellNotify } from '../shell/run-command.js';
 import { actionForDraft, SWITCH_LABEL, SWITCH_RANK, classifySwitch, grantChip, stopOutcomeSentence, switchOptions, type ChipTone } from './authority-model.js';
 import { GrantSheet, type GrantIntent } from './GrantSheet.js';
 import { postAuthority, type OptionalRead } from './surface-data.js';
@@ -151,6 +162,9 @@ export function AutonomyBar({ read, loading, budgetMode, actions, compact, now, 
     actions.act(() => postAuthority({ action: 'switch', to }), `Switch autonomy to ${SWITCH_LABEL[to]}`);
   }
 
+  // ⌘K "Approve grant…" opens the SAME flow the chip and the off-state banner do.
+  usePaletteCommands({ read, status, budgetMode, actions, chip, onSwitch, openGrant: flow.open });
+
   const options = status ? switchOptions(status) : switchOptions({ switch: 'off', maxSwitchWithoutGrant: 'off' });
   const stopped = status?.kill ?? false;
   const disabled = unavailable || actions.busy || actions.readOnly;
@@ -218,6 +232,102 @@ export function AutonomyBar({ read, loading, budgetMode, actions, compact, now, 
       <BudgetSheet open={budgetOpen} onClose={() => setBudgetOpen(false)} status={status} />
     </>
   );
+}
+
+// ---------------------------------------------------------------------------
+// ⌘K — the palette's autonomy, grant and budget entries
+// ---------------------------------------------------------------------------
+
+interface PaletteWiring {
+  read: OptionalRead<AuthorityStatusV1> | undefined;
+  status: AuthorityStatusV1 | null;
+  budgetMode: BudgetMode | null;
+  actions: SurfaceActions;
+  chip: ReturnType<typeof grantChip>;
+  onSwitch: (to: AutonomySwitch) => void;
+  openGrant: GrantFlow['open'];
+}
+
+/**
+ * Why the bar's controls are disabled right now, in the words the operator
+ * needs — or null when they are live. Mirrors `disabled` in AutonomyBar.
+ */
+export function paletteBlock(p: { status: AuthorityStatusV1 | null; reason: string | null; readOnly: boolean; busy: boolean }): string | null {
+  if (p.readOnly) return 'Read-only session: this server was started without dispatch, so autonomy cannot be changed from here.';
+  if (!p.status) return p.reason ?? 'The autonomy state has not been read yet, so nothing was changed.';
+  if (p.busy) return 'Another autonomy action is still running. Try again when it finishes.';
+  return null;
+}
+
+function usePaletteCommands({ read, status, budgetMode, actions, chip, onSwitch, openGrant }: PaletteWiring): void {
+  // Registered only once the authority read has answered (value OR a reason):
+  // a command parked while Command mounts must be judged against a real
+  // status, never the empty one of the first render.
+  const ready = read !== undefined;
+  const block = () => paletteBlock({ status, reason: read?.reason ?? null, readOnly: actions.readOnly, busy: actions.busy });
+
+  const toSwitch = (to: AutonomySwitch) => () => {
+    const why = block();
+    if (why || !status) {
+      shellNotify(why ?? 'The autonomy state is unknown, so nothing was changed.', 'neutral');
+      return;
+    }
+    if (status.switch === to) {
+      shellNotify(`Autonomy is already ${SWITCH_LABEL[to]}.`, 'neutral');
+      return;
+    }
+    // The bar's own click path: lower / raise within the grant → POST;
+    // past the grant → the Touch ID sheet, which says why it opened.
+    onSwitch(to);
+  };
+  useCommandHandler('autonomy.off', toSwitch('off'), ready);
+  useCommandHandler('autonomy.propose', toSwitch('propose'), ready);
+  useCommandHandler('autonomy.autonomous', toSwitch('autonomous'), ready);
+
+  useCommandHandler(
+    'autonomy.grant',
+    () => {
+      const why = block();
+      if (why) {
+        shellNotify(why, 'neutral');
+        return;
+      }
+      // The chip decides, exactly as a click on it would: nothing to approve
+      // while an active grant has days left — say so rather than draft a
+      // replacement nobody asked for.
+      if (!chip.action) {
+        shellNotify(chip.detail, 'neutral');
+        return;
+      }
+      openGrant(chip.action, chip.detail);
+    },
+    ready,
+  );
+
+  const toBudget = (mode: BudgetMode) => () => {
+    // Budget does not need the authority read to be present — only to know
+    // the ceiling — but a read-only or busy surface refuses it like the pill.
+    if (actions.readOnly || actions.busy) {
+      shellNotify(block() ?? 'Budget cannot be changed right now.', 'neutral');
+      return;
+    }
+    if (budgetMode === mode) {
+      shellNotify(`Budget is already ${MODE_WORD[mode]}.`, 'neutral');
+      return;
+    }
+    // BudgetSheet's rule: an active grant's mode ceiling disables the modes above it.
+    const ceiling = status?.grant.state === 'active' ? status.grant.maxMode : null;
+    if (ceiling && modeAboveCeiling(mode, ceiling)) {
+      shellNotify(`Your grant allows up to ${MODE_WORD[ceiling]}, so ${MODE_WORD[mode]} is unavailable. A new grant can raise the ceiling.`, 'neutral');
+      return;
+    }
+    actions.act(() => updateBudget({ mode }), `Switch the budget to ${MODE_WORD[mode]}`, {
+      onDone: () => shellNotify(`Budget set to ${MODE_WORD[mode]}.`, 'success'),
+    });
+  };
+  useCommandHandler('budget.all-in', toBudget('all-in'), ready);
+  useCommandHandler('budget.balanced', toBudget('balanced'), ready);
+  useCommandHandler('budget.reserve', toBudget('reserve'), ready);
 }
 
 export function BudgetPill({ mode, onOpen }: { mode: BudgetMode | null; onOpen: () => void }) {

@@ -631,12 +631,18 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
       case 'composer.model': openPicker('model'); return;
       case 'composer.effort': openPicker('effort'); return;
       case 'composer.attach': openFilePicker(); return;
+      // "Run in cloud" lives in the Chat settings sheet (ControlsSheet), with
+      // its own disabled reasons and token gate; the palette only opens it.
+      case 'composer.cloud':
+        if (view) setSheetOpen(true);
+        else setNote({ text: 'Run in cloud opens from a chat whose controls have loaded — open or start a chat first.', error: false });
+        return;
       case 'composer.send': void submit('send'); return;
       case 'composer.stop-and-send': void submit('stop-and-send'); return;
       case 'composer.stop': if (running) onStop(); return;
       default:
     }
-  }, [openPicker, openFilePicker, submit, running, onStop]);
+  }, [openPicker, openFilePicker, submit, running, onStop, view]);
 
   // Chat-scope keys (⇧⌘M/I/E, ⌘U) are live while the chat is on screen, not
   // only while the box has focus; a modal dialog anywhere owns the keys.

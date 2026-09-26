@@ -512,18 +512,18 @@ describe('the Resources drawer (3.11 C6)', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Resources' })).not.toBeInTheDocument());
     key('/', {}, 'Slash');
     const overlay = await screen.findByRole('dialog', { name: 'Keyboard shortcuts' });
-    expect(within(overlay).getByText('Show resources')).toBeInTheDocument();
+    expect(within(overlay).getByText('Open Resources')).toBeInTheDocument();
   });
 
-  it('⌘K "Show resources" opens it and closes the palette', async () => {
+  it('⌘K "Open Resources" opens it and closes the palette', async () => {
     const user = userEvent.setup();
     mount();
     await screen.findByRole('navigation', { name: 'Chats' });
     await handle();
     key('k', {}, 'KeyK');
     const input = await screen.findByRole('combobox', { name: 'Search commands' });
-    await user.type(input, 'show resources');
-    await waitFor(() => expect(screen.getByRole('option', { name: /Show resources/ })).toHaveAttribute('aria-selected', 'true'));
+    await user.type(input, 'open resources');
+    await waitFor(() => expect(screen.getByRole('option', { name: /Open Resources/ })).toHaveAttribute('aria-selected', 'true'));
     await user.keyboard('{Enter}');
     expect(await screen.findByRole('dialog', { name: 'Resources' })).toBeInTheDocument();
     expect(getVerseUiState().overlay).toBeNull();

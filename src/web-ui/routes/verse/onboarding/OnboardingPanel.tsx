@@ -37,7 +37,7 @@ export function OnboardingPanel() {
     <Panel title="Onboarding">
       <SettingRow
         label="Replay the first-run tour"
-        description={`Your connected seats, whether a local runtime is available, and what each of the three stop controls really halts. ${describeOnboardingState(completedAt, dismissedAt)}`}
+        description={`Your connected seats, whether a local runtime is available, how autonomy is turned on, and what each of the three stop controls really halts. ${describeOnboardingState(completedAt, dismissedAt)}`}
       >
         <Button variant="subtle" size="sm" onClick={replayOnboarding} disabled={open}>
           {open ? 'Showing' : 'Replay'}
