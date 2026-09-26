@@ -310,6 +310,7 @@ function defaultHomes(): string[] {
   } catch {
     // homedir() can throw when no home is resolvable; env fallbacks below.
   }
+  if (typeof process === 'undefined') return out;
   for (const key of ['HOME', 'USERPROFILE'] as const) {
     const v = process.env[key];
     if (v) out.push(v);
@@ -317,8 +318,18 @@ function defaultHomes(): string[] {
   return out;
 }
 
-/** Case-insensitive filesystems (macOS APFS default, Windows) name one home many ways. */
-const CASE_INSENSITIVE_FS = process.platform === 'darwin' || process.platform === 'win32';
+/**
+ * Case-insensitive filesystems (macOS APFS default, Windows) name one home many
+ * ways. A function, not a module-level constant: the Verse web UI imports
+ * `scrubSecrets` from this module (routes/verse/cloud/cloud-model.ts), and a
+ * top-level `process.platform` read throws `ReferenceError: process is not
+ * defined` in the browser — which took down every lazy section that pulls the
+ * cloud model in (Command, Fleet). Nothing here may touch `process` at load.
+ */
+function caseInsensitiveFs(): boolean {
+  if (typeof process === 'undefined') return false;
+  return process.platform === 'darwin' || process.platform === 'win32';
+}
 
 /**
  * Other users' home roots (`/Users/<name>`, `/home/<name>`, `C:\Users\<name>`):
@@ -346,7 +357,7 @@ export function redactHomePaths(text: string, homes: readonly string[] = default
       ),
     ).sort((a, b) => b.length - a.length);
     for (const home of unique) {
-      const re = new RegExp(`(?<![\\w.-])${escapeRegExp(home)}(?![\\w.-])`, CASE_INSENSITIVE_FS ? 'gi' : 'g');
+      const re = new RegExp(`(?<![\\w.-])${escapeRegExp(home)}(?![\\w.-])`, caseInsensitiveFs() ? 'gi' : 'g');
       out = out.replace(re, '~');
     }
     return out.replace(GENERIC_HOME_ROOT, '~');
