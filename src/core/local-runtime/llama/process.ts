@@ -290,7 +290,7 @@ export function findLlamaServersOnPort(port: number): DiscoveredLlamaServer[] {
  * keeps the behaviour identical and removes the stall.
  */
 export async function findLlamaServersOnPortAsync(port: number): Promise<DiscoveredLlamaServer[]> {
-  return parseLlamaServersOnPort(await runPsAsync(PROCESS_TABLE_ARGS), port);
+  return parseLlamaServersOnPortSliced(await runPsAsync(PROCESS_TABLE_ARGS), port);
 }
 
 const PROCESS_TABLE_ARGS = ['-axww', '-o', 'pid=,args='];
@@ -305,19 +305,75 @@ export function parseLlamaServersOnPort(out: string | null, port: number): Disco
 
   const found: DiscoveredLlamaServer[] = [];
   for (const line of out.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const split = /^(\d+)\s+(.*)$/.exec(trimmed);
-    if (!split) continue;
-    const pid = Number.parseInt(split[1] as string, 10);
-    const argv = (split[2] as string).trim();
-    if (!Number.isInteger(pid) || pid <= 1) continue;
-    if (!isLlamaServerArgv(argv)) continue;
-    if (!argvBindsPort(argv, port)) continue;
-    const binPath = argv.split(/\s+/)[0] as string;
-    found.push({ pid, argv, binPath, modelPath: modelPathFromArgv(argv) });
+    const server = parsePsLine(line, port);
+    if (server !== null) found.push(server);
   }
   return found;
+}
+
+/**
+ * Longest stretch {@link parseLlamaServersOnPortSliced} parses before yielding
+ * to the event loop — well inside the 20 ms per-handler budget.
+ */
+export const PS_PARSE_SLICE_MS = 5;
+
+/** Lines parsed between clock reads; a clock read per line would dominate. */
+const PS_PARSE_LINES_PER_CHECK = 256;
+
+/**
+ * {@link parseLlamaServersOnPort}, time-sliced for the request path.
+ *
+ * WHY: moving `ps` off the loop (runPsAsync) removed the wait, but the parse
+ * still ran as one synchronous block. `ps -axww` output is bounded only by
+ * PS_MAX_BUFFER (16 MB) — a busy machine with thousands of processes carrying
+ * long argv (Electron helpers, JVMs, node workers) produces megabytes, and a
+ * regex over every line of that in one go is exactly the kind of multi-ten-ms
+ * slice the 20 ms budget forbids. Lines are walked with indexOf rather than
+ * split('\n') so no single call materialises the whole table as an array, and
+ * the loop yields via setImmediate whenever a slice passes `sliceMs`.
+ * Answers exactly what the sync parser answers (same per-line rule).
+ */
+export async function parseLlamaServersOnPortSliced(
+  out: string | null,
+  port: number,
+  sliceMs = PS_PARSE_SLICE_MS,
+): Promise<DiscoveredLlamaServer[]> {
+  if (out === null) return [];
+
+  const found: DiscoveredLlamaServer[] = [];
+  let sliceStart = performance.now();
+  let sinceCheck = 0;
+  let start = 0;
+  while (start <= out.length) {
+    const nl = out.indexOf('\n', start);
+    const end = nl === -1 ? out.length : nl;
+    const server = parsePsLine(out.slice(start, end), port);
+    if (server !== null) found.push(server);
+    start = end + 1;
+    if (++sinceCheck >= PS_PARSE_LINES_PER_CHECK) {
+      sinceCheck = 0;
+      if (performance.now() - sliceStart >= sliceMs) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        sliceStart = performance.now();
+      }
+    }
+  }
+  return found;
+}
+
+/** One `pid args` line: the llama-server it names on `port`, else null. */
+function parsePsLine(line: string, port: number): DiscoveredLlamaServer | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  const split = /^(\d+)\s+(.*)$/.exec(trimmed);
+  if (!split) return null;
+  const pid = Number.parseInt(split[1] as string, 10);
+  const argv = (split[2] as string).trim();
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  if (!isLlamaServerArgv(argv)) return null;
+  if (!argvBindsPort(argv, port)) return null;
+  const binPath = argv.split(/\s+/)[0] as string;
+  return { pid, argv, binPath, modelPath: modelPathFromArgv(argv) };
 }
 
 /** Direct children of `pid`. Empty when they cannot be read. */
