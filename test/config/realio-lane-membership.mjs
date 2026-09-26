@@ -422,6 +422,7 @@ export const REAL_IO_TEST_FILES = [
   'test/verse-accounts-limit-reached.test.ts', // private 0600/0700 ledger evidence files round-tripped in a tmp root (sibling of verse-accounts)
   'test/verse-fleet-history.test.ts', // one real worker thread + an event-loop budget assertion over on-disk fixtures
   'test/routing-budget-api.test.ts', // real web server bind for /api/verse/budget* under a relocated HOME
+  'test/harness-dispatch-311.test.ts', // 3.11: temp source repo + sandbox worktree + a spawned fake codex / claude recording its argv, behind a cache-busted re-import of the sandboxed-engine graph
   'test/cloud-api.test.ts', // 3.11: real authenticated web server bind for /api/verse/cloud/* under a relocated HOME
   'test/cloud-checkout.test.ts', // 3.11: real git child processes against a local bare origin for the isolated launch checkouts
   'test/cloud-launcher.test.ts', // 3.11: real child processes for the PTY wrapper (a fake seat script, never claude)
