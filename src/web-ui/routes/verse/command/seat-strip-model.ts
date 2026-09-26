@@ -23,9 +23,9 @@ import type { BudgetView } from '../../../../core/routing/policy.js';
 import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import { STATUS_WORDS, type BudgetSeatRow as BudgetRow, type BudgetSeatStatus } from '../budget/budget-model.js';
 import { usedPercentText } from '../percent-text.js';
+import { bindingLeftPercent } from '../usage/binding-left.js';
 import {
   accountStatus,
-  bindingLeftPercent,
   capacityHeadline,
   orderAccountRows,
   readBudgetRows,

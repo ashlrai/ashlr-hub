@@ -8,7 +8,8 @@ import type { BudgetView } from '../../../../core/routing/policy.js';
 import type { SeatHealthReport } from '../../../../core/verse/health-types.js';
 import type { VerseSeat } from '../../../data/api-types.js';
 import { CLAUDE_MAX_SEAT, GROK_SEAT, LOCAL_SEAT_V2 } from '../seat-fixtures.test-support.js';
-import { bindingLeftPercent, buildCapacityRows } from '../usage/capacity-strip-model.js';
+import { bindingLeftPercent } from '../usage/binding-left.js';
+import { buildCapacityRows } from '../usage/capacity-strip-model.js';
 import { seatAutonomy, seatStrip, stripColumns } from './seat-strip-model.js';
 
 const NOW = Date.parse('2026-09-21T12:00:00Z');
