@@ -42,7 +42,7 @@ import {
   type SeatHealthProbes,
   type SeatHealthSweepSnapshot,
 } from '../src/core/verse/account-health.js';
-import { rankSeatAlternatives, seatBlock, seatReadiness } from '../src/core/verse/seat-readiness.js';
+import { rankSeatAlternatives, seatBlock, seatReadiness, seatReopening } from '../src/core/verse/seat-readiness.js';
 import { getSeatReadiness, seatUsability } from '../src/core/verse/seats.js';
 import {
   handleHealthApi,
@@ -356,16 +356,69 @@ describe('buildSeatHealthReports', () => {
     expect(reportOf([liveOutNew], snapshot([facts('grok', 'grok')]), 'grok').connection).toBe('signed-out');
   });
 
-  it('reports an exhausted codex seat with its machine-readable reset and a wait fix', () => {
+  it('reports an exhausted codex seat with the time it actually reopens (its LATEST spent-window reset) and a wait fix', () => {
+    // Both windows are at 100, so `binding` is the FIRST (the earlier reset).
+    // The seat is still spent at 18:25 — it reopens only when the secondary
+    // window resets too, which is what Accounts and Fleet say.
     const spent = [
       window('codex_primary', 100, { limitReached: true, measured: false, resetsAt: '2026-09-25T18:25:00.000Z' }),
       window('codex_secondary', 100, { resetsAt: '2026-09-26T00:00:00.000Z' }),
     ];
     const s = seat('codex-personal', 'codex', { capacity: capacity({ windows: spent, usability: 'exhausted' }) });
+    expect(s.capacity?.binding?.id).toBe('codex_primary');
     const report = reportOf([s], snapshot([facts('codex-personal', 'codex')]), 'codex-personal');
     expect(report.connection).toBe('exhausted');
     expect(report.fix).toEqual({ kind: 'wait' });
-    expect(report.resetAt).toBe('2026-09-25T18:25:00.000Z');
+    expect(report.resetAt).toBe('2026-09-26T00:00:00.000Z');
+  });
+
+  it('picks the latest spent reset regardless of provider order, and ignores windows that are not spent', () => {
+    const windows = [
+      window('codex_secondary', 100, { resetsAt: '2026-09-30T00:00:00.000Z' }),
+      window('codex_primary', 100, { limitReached: true, measured: false, resetsAt: '2026-09-25T18:25:00.000Z' }),
+      // Not spent: its later reset must not delay the answer.
+      window('codex_other', 40, { resetsAt: '2026-10-09T00:00:00.000Z' }),
+    ];
+    const s = seat('codex-personal', 'codex', { capacity: capacity({ windows, usability: 'exhausted' }) });
+    const report = reportOf([s], snapshot([facts('codex-personal', 'codex')]), 'codex-personal');
+    expect(report.resetAt).toBe('2026-09-30T00:00:00.000Z');
+    expect(seatBlock(s, null, NOW)?.resetAt).toBe('2026-09-30T00:00:00.000Z');
+  });
+
+  it('gives no reset instant when any spent window only has provider prose, and shows that prose', () => {
+    const windows = [
+      window('five_hour', 100, { resetsAt: '2026-09-25T18:25:00.000Z' }),
+      window('seven_day', 100, { resetDescription: 'resets Sep 30 at 7pm (America/New_York)' }),
+    ];
+    const s = seat('claude', 'claude', { capacity: capacity({ windows, usability: 'exhausted' }) });
+    const report = reportOf([s], snapshot([facts('claude', 'claude')]), 'claude');
+    expect(report.resetAt).toBeNull();
+    expect(report.reasons[0]).toContain('resets Sep 30 at 7pm (America/New_York)');
+    expect(seatBlock(s, null, NOW)).toMatchObject({ resetAt: null,
+      reason: 'claude is out of usage — resets Sep 30 at 7pm (America/New_York).' });
+  });
+
+  it('seatReopening: no capacity, nothing spent, a flagged denial and an unparseable reset', () => {
+    expect(seatReopening(null)).toEqual({ resetAt: null, resetDescription: null });
+    expect(seatReopening(undefined)).toEqual({ resetAt: null, resetDescription: null });
+    // Nothing spent: the binding window's own reset, as before.
+    const open = capacity({ windows: [
+      window('five_hour', 30, { resetsAt: '2026-09-25T18:25:00.000Z' }),
+      window('seven_day', 70, { resetsAt: '2026-09-30T00:00:00.000Z' }),
+    ] });
+    expect(seatReopening(open)).toEqual({ resetAt: '2026-09-30T00:00:00.000Z', resetDescription: null });
+    // A Codex denial flag is spent whatever its percent reads; the open window does not count.
+    const flagged = capacity({ windows: [
+      window('codex_primary', 60, { limitReached: true, resetsAt: '2026-09-25T18:25:00.000Z' }),
+      window('codex_secondary', 40, { resetsAt: '2026-10-01T00:00:00.000Z' }),
+    ] });
+    expect(seatReopening(flagged).resetAt).toBe('2026-09-25T18:25:00.000Z');
+    // A garbage instant on a spent window is unknown, never a guess.
+    const garbled = capacity({ windows: [
+      window('codex_primary', 100, { resetsAt: '2026-09-25T18:25:00.000Z' }),
+      window('codex_secondary', 100, { resetsAt: 'soon' }),
+    ] });
+    expect(seatReopening(garbled)).toEqual({ resetAt: null, resetDescription: null });
   });
 
   it('keeps Claude prose resets verbatim and never invents a reset instant', () => {

@@ -66,6 +66,7 @@ import {
   defaultClaudeVersionsRoot,
   newestInstalledClaudeVersion,
 } from './model-windows.js';
+import { seatReopening } from './seat-readiness.js';
 import type { VerseSeat } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -871,15 +872,20 @@ function nativeReport(seat: VerseSeat, facts: SeatAccountFacts | null, checkedAt
   const reasons: string[] = [];
   let fix: SeatHealthFix = { kind: 'none' };
   let resetAt: string | null = null;
-  const binding = capacity?.binding ?? null;
 
   if (connection === 'signed-out') {
     reasons.push(`${PROVIDER_CLI[engine]} reports this account is not signed in.`);
     reasons.push("Reconnect opens the account's own sign-in in Terminal; Verse never sees the credentials.");
     fix = { kind: 'reauth' };
   } else if (connection === 'exhausted') {
-    resetAt = binding?.resetsAt ?? null;
-    const prose = binding?.resetDescription ?? null;
+    // When the seat actually REOPENS — the latest spent-window reset — not the
+    // binding window's: `binding` keeps the first window among equal
+    // percentages, so two spent windows named the earlier reset while Accounts
+    // and Fleet said the later one. A spent window with only prose makes the
+    // instant unknown (null), and its prose is shown instead.
+    const reopening = seatReopening(capacity);
+    resetAt = reopening.resetAt;
+    const prose = reopening.resetDescription;
     reasons.push(resetAt !== null
       ? `Every usage window with a reading is spent; it resets ${localDate(resetAt)}.`
       : prose !== null
