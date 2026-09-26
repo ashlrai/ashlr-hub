@@ -1,0 +1,76 @@
+/*
+ * routes/verse/leader/leader-line.module.css — the Leader line at the foot of
+ * Command's Leader card. Tokens only (style-scan-310).
+ */
+.line {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  min-width: 0;
+}
+
+.meta {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.text {
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ask {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: var(--text-sm-size);
+  text-align: left;
+  cursor: text;
+  transition: border-color var(--duration-fast) var(--ease-standard);
+}
+
+.ask:hover {
+  border-color: var(--border-strong);
+  color: var(--text-secondary);
+}
+
+.ask:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.askText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.where {
+  flex: none;
+  color: var(--text-tertiary);
+  font-size: var(--text-2xs-size);
+}

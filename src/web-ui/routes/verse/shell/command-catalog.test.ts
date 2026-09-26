@@ -207,8 +207,9 @@ describe('command catalog — table integrity', () => {
       expect(c.guard, id).toBeUndefined();
       expect(c.keywords?.length ?? 0, id).toBeGreaterThan(2);
     }
-    // Only these are surface-served.
-    expect(COMMANDS.filter((c) => c.surface).map((c) => c.id).sort()).toEqual([...served].sort());
+    // Only these — and the Leader's two, served on Mind — are surface-served.
+    expect(COMMANDS.filter((c) => c.surface === 'command').map((c) => c.id).sort()).toEqual([...served].sort());
+    expect(COMMANDS.filter((c) => c.surface === 'mind').map((c) => c.id).sort()).toEqual(['leader.directive', 'leader.message']);
   });
 
   it('copies the autonomy setup command from the palette', () => {

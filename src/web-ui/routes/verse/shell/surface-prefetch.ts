@@ -29,6 +29,7 @@ import {
   learningQuery,
   reasoningDigestQuery,
 } from '../command/surface-data.js';
+import { leaderDirectivesQuery, leaderThreadQuery } from '../leader/thread-data.js';
 import { verseBootstrapQuery, verseSessionsQuery, verseWorkspacesQuery } from '../verse-queries.js';
 import type { VerseSectionId } from '../verse-ui-store.js';
 
@@ -40,12 +41,14 @@ export const SURFACE_PREFETCH: Readonly<Partial<Record<VerseSectionId, readonly 
   // Command's seat strip reads the budget and the rail's warm seat caches.
   // cloudQuery (3.11): the Cloud card's overview — without it a first visit
   // paints "Reading the cloud lane…" under the seat strip.
-  command: [authorityQuery, fleetLiveQuery, leaderQuery, learningQuery, fleetHistoryQuery, budgetQuery, cloudQuery],
+  // leaderThreadQuery: the Leader card's latest-message line (leader/LeaderLine).
+  command: [authorityQuery, fleetLiveQuery, leaderQuery, learningQuery, fleetHistoryQuery, budgetQuery, cloudQuery, leaderThreadQuery],
   // authorityQuery + fleetLiveQuery on Fleet, Growth and Mind: the shared
   // "Autonomy is off" state (autonomy/AutonomyOffState) reads both.
   fleet: [fleetLiveQuery, authorityQuery, overnightQuery, budgetQuery, budgetPreviewQuery],
   growth: [fleetHistoryQuery, learningQuery, modelsQuery('30d'), authorityQuery, fleetLiveQuery],
-  mind: [leaderQuery, reasoningDigestQuery, verseBootstrapQuery, verseWorkspacesQuery, authorityQuery, fleetLiveQuery],
+  // The conversation (leader/LeaderConversation) reads the thread and the directives.
+  mind: [leaderQuery, leaderThreadQuery, leaderDirectivesQuery, reasoningDigestQuery, verseBootstrapQuery, verseWorkspacesQuery, authorityQuery, fleetLiveQuery],
   chat: [verseBootstrapQuery, verseSessionsQuery, verseWorkspacesQuery],
 };
 

@@ -52,6 +52,8 @@ import {
 import { matchCommand } from './command-catalog.js';
 import { isGuardOpen } from './guarded-action.js';
 import { markResolved, pruneResolved, runNeedsYouAction, useResolvedIds } from './needs-you-actions.js';
+import { requestLeaderFocus } from '../leader/leader-focus.js';
+import { needsYouQuestionText, parseNeedsYouQuestion } from '../leader/question-id.js';
 import { cleanLandable, cloudPreviewsQuery, runBatch, triageChip, type TriageChip } from './cloud-triage.js';
 import {
   actionOf,
@@ -533,6 +535,13 @@ const TARGET_LABEL = (item: NeedsYouItem): string | null => {
   }
 };
 
+/** Close the drawer and open this question's answer box in Mind's Leader conversation. */
+function answerLeaderQuestion(item: NeedsYouItem): void {
+  const ref = parseNeedsYouQuestion(item.id);
+  closeVerseOverlay();
+  requestLeaderFocus({ kind: 'question', questionId: item.id, memoId: ref?.memoId ?? null, index: ref?.index ?? null, text: needsYouQuestionText(item) });
+}
+
 const NO_SEATS: readonly VerseSeat[] = [];
 const NO_PREVIEWS: ReadonlyMap<string, CloudPrPreview> = new Map();
 
@@ -676,6 +685,13 @@ function ItemDetail({
         {item.expiresAt ? (<><dt>Closes</dt><dd className={styles.deadline}>{until(item.expiresAt, now)}</dd></>) : null}
       </dl>
       <div className={styles.itemActions}>
+        {item.kind === 'leader-question' ? (
+          // Answering lives in Mind's conversation (the item's own actions stay
+          // Dismiss-only): jump there with this question's answer box open.
+          <Button variant="primary" size="sm" onClick={() => answerLeaderQuestion(item)}>
+            Answer
+          </Button>
+        ) : null}
         {targetLabel ? (
           <Button variant="subtle" size="sm" onClick={() => onOpenTarget(item)} trailingIcon={item.target.kind === 'url' ? <IconExternalLink /> : undefined}>
             {targetLabel}

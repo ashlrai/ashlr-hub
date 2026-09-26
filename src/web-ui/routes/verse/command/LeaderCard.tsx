@@ -11,7 +11,9 @@
 import type { LeaderAction, LeaderStateV1 } from '../../../../core/vision/leader-types.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { asSentence, formatRelative } from '../autonomy/format.js';
-import { STATUS_WORD, expectedDeltaText, isVetoable, memoActions } from '../mind/leader-model.js';
+import { STATUS_WORD, expectedDeltaText, isApprovable, isVetoable, memoActions } from '../mind/leader-model.js';
+import { approveLeaderAction } from '../leader/thread-data.js';
+import { LeaderLine } from '../leader/LeaderLine.js';
 import { CountdownRing } from './CountdownRing.js';
 import { anchorId, goToSection } from './nav.js';
 import { postLeader, type OptionalRead } from './surface-data.js';
@@ -31,10 +33,34 @@ export function vetoConfirm(action: Pick<LeaderAction, 'summary' | 'status'>): C
   };
 }
 
-export function ActionRow({ action, actions, compact = false }: { action: LeaderAction; actions: SurfaceActions; compact?: boolean }) {
-  const vetoable = isVetoable(action);
+export function approveConfirm(action: Pick<LeaderAction, 'summary' | 'status'>): ConfirmSpec {
+  return {
+    title: 'Approve this action?',
+    body:
+      action.status === 'scheduled'
+        ? `“${action.summary}” applies now instead of waiting out its veto window. You can still veto it afterwards.`
+        : `“${action.summary}” is outside the standing grant. Approving tells the Leader to go ahead; the server still checks it against your authority.`,
+    confirmLabel: 'Approve',
+  };
+}
+
+export interface ActionRowProps {
+  action: LeaderAction;
+  actions: SurfaceActions;
+  compact?: boolean;
+  /** Offer Approve on a class-B action in its window or a class-C ask (the Leader conversation). */
+  approve?: boolean;
+  /** A shadow-stage memo's action: shown, never applied — nothing to approve or veto. */
+  dryRun?: boolean;
+  /** The row's anchor id (the action log's rows are jump targets; a copy in the conversation is not). */
+  anchored?: boolean;
+}
+
+export function ActionRow({ action, actions, compact = false, approve = false, dryRun = false, anchored = true }: ActionRowProps) {
+  const vetoable = !dryRun && isVetoable(action);
+  const approvable = approve && !dryRun && isApprovable(action);
   return (
-    <li className={styles.actionRow} data-status={action.status} id={anchorId(`action-${action.id}`)}>
+    <li className={styles.actionRow} data-status={action.status} id={anchored ? anchorId(`action-${action.id}`) : undefined}>
       <span className={styles.classBadge} data-class={action.class} title={`Class ${action.class}`}>
         {action.class}
       </span>
@@ -43,7 +69,24 @@ export function ActionRow({ action, actions, compact = false }: { action: Leader
         {!compact ? <span className={styles.actionWhy}>{action.why}</span> : null}
       </span>
       <span className={styles.actionState}>
-        {action.status === 'scheduled' ? <CountdownRing action={action} /> : <span className={styles.statusWord} data-status={action.status}>{STATUS_WORD[action.status]}</span>}
+        {dryRun ? (
+          <span className={styles.statusWord} data-status="dry-run">Dry run</span>
+        ) : action.status === 'scheduled' ? (
+          <CountdownRing action={action} />
+        ) : (
+          <span className={styles.statusWord} data-status={action.status}>{STATUS_WORD[action.status]}</span>
+        )}
+        {approvable ? (
+          <Button
+            size="sm"
+            variant="subtle"
+            disabled={actions.busy || actions.readOnly}
+            aria-label={`Approve: ${action.summary}`}
+            onClick={() => actions.act(() => approveLeaderAction(action.id), `Approve “${action.summary}”`, { confirm: approveConfirm(action) })}
+          >
+            Approve
+          </Button>
+        ) : null}
         {vetoable ? (
           <Button
             size="sm"
@@ -134,6 +177,7 @@ export function LeaderCard({ read, loading, actions }: { read: OptionalRead<Lead
           ) : null}
         </>
       )}
+      <LeaderLine />
     </Card>
   );
 }
