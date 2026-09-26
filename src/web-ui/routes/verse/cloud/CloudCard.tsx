@@ -18,7 +18,7 @@
  * while Command is visible; every write goes through Command's guarded
  * actions (confirm → token → request) and the overview is re-read after.
  *
- * States: loading, not in this build (404), empty, running, pr-open, failed,
+ * States: loading, not in this build (404 — renders nothing), empty, running, pr-open, failed,
  * and budget-refused (the launch gate closed — its plain sentence is shown,
  * and New cloud task / Improve Verse are disabled with that sentence as
  * their tooltip).
@@ -55,7 +55,7 @@ import {
   taskDetail,
   taskMeta,
 } from './cloud-model.js';
-import { CLOUD_POLL_MS, cloudQuery, dismissCloudTask, refreshCloudTasks, runCloudImprove, updateCloudBudget } from './cloud-queries.js';
+import { CLOUD_NOT_IN_BUILD, CLOUD_POLL_MS, cloudQuery, dismissCloudTask, refreshCloudTasks, runCloudImprove, updateCloudBudget } from './cloud-queries.js';
 import styles from './cloud.module.css';
 
 interface CardNotice {
@@ -261,6 +261,10 @@ export function CloudCard({ actions, now = Date.now() }: { actions: SurfaceActio
       {budgetOpen ? <BudgetPopover overview={overview} actions={actions} onClose={() => setBudgetOpen(false)} /> : null}
     </span>
   ) : null;
+
+  // A server without the cloud lane (404): no card at all, not a full-width
+  // row saying so. Every hook above has already run, so this early return is safe.
+  if (read.data?.available === false && read.data.reason === CLOUD_NOT_IN_BUILD) return null;
 
   return (
     <Card title="Cloud" caption="Claude Code cloud sessions on your Claude credits" actions={head}>

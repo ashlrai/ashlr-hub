@@ -90,16 +90,25 @@ function isUnauthorized(err: Error | undefined): boolean {
 function StateBlock({
   title,
   body,
+  detail,
   action,
 }: {
   title: string;
   body: string;
+  /** Raw diagnostics (HTTP status, route) — behind a disclosure, not in the sentence. */
+  detail?: string | undefined;
   action?: ReactNode;
 }): ReactNode {
   return (
     <div className={styles.stateBlock} role="status">
       <p className={styles.stateTitle}>{title}</p>
       <p className={styles.stateBody}>{body}</p>
+      {detail ? (
+        <details className={styles.stateBody}>
+          <summary>Details</summary>
+          <code className={styles.commandInline}>{detail}</code>
+        </details>
+      ) : null}
       {action ? <div className={styles.stateActions}>{action}</div> : null}
     </div>
   );
@@ -414,7 +423,10 @@ export function UsageSection(): ReactNode {
         ) : bothFailed ? (
           <StateBlock
             title="Usage sources unreachable"
-            body={`Neither /api/usage nor /api/control answered. ${control.error?.message ?? frontier.error?.message ?? ''}`.trim()}
+            // Most often a server older than the app (both routes 404). The
+            // raw route errors stay available, one click down.
+            body="Usage data unavailable — this server may be older than the app."
+            detail={[frontier.error?.message, control.error?.message].filter(Boolean).join(' ') || undefined}
             action={
               <button type="button" className={styles.ghostButton} onClick={refreshAll}>
                 Retry
@@ -475,8 +487,7 @@ export function UsageSection(): ReactNode {
 
               {cards.length === 0 && localCard === null ? (
                 <p className={styles.muted}>
-                  No accounts and no local runtime were reported. Connect an account or start Ollama,
-                  then refresh — this is an empty roster, not a set of accounts at zero.
+                  No accounts or local runtime found. Connect an account or start Ollama, then refresh.
                 </p>
               ) : (
                 <>

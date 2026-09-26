@@ -201,7 +201,7 @@ describe('OvernightPanel — arming', () => {
     renderPanel(
       ok({ ...IDLE, gate: { tests: true, lint: null, typecheck: null, autoMerge: true, branch: 'master' } }),
     );
-    expect(screen.getByText(/did not state whether lint and typecheck/)).toBeInTheDocument();
+    expect(screen.getByText(/Not reported whether lint and typecheck/)).toHaveTextContent(/don.t count them as passing/);
   });
 });
 
@@ -325,7 +325,7 @@ describe('OvernightPanel — the halt', () => {
         dispatchEnabled
       />,
     );
-    expect(screen.getByText(/fails safe rather than running on an unreadable signal/)).toBeInTheDocument();
+    expect(screen.getByText(/Treated as paused — the pause sentinel is unreadable/)).toBeInTheDocument();
   });
 });
 

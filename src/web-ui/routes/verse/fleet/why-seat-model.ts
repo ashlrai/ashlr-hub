@@ -24,6 +24,7 @@
  */
 import type { SeatDecision, SeatExclusion, SeatReason, SeatReasonKind } from '../../../../core/routing/types.js';
 import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
+import { asSentence } from '../autonomy/format.js';
 
 const KINDS: ReadonlySet<string> = new Set<SeatReasonKind>([
   'headroom', 'switched-off', 'signed-out', 'unreachable', 'spent', 'reserve', 'session-ceiling',
@@ -34,15 +35,9 @@ const KINDS: ReadonlySet<string> = new Set<SeatReasonKind>([
 // Sentences
 // ---------------------------------------------------------------------------
 
-/**
- * One sentence: trimmed and closed by exactly one full stop (a trailing ";"
- * or "," is dropped). Never re-cased — a sentence may open on a seat id.
- */
-export function asSentence(text: string): string {
-  const t = text.trim().replace(/[\s;,:]+$/, '');
-  if (!t) return '';
-  return /[.!?…]$/.test(t) ? t : `${t}.`;
-}
+// `asSentence` lives with the other shared prose helpers (autonomy/format.ts);
+// re-exported here so this module's callers keep one import.
+export { asSentence };
 
 /** Sentences as prose — "A. B." — never "A.; B" and never "A.. B". */
 export function joinSentences(texts: readonly string[]): string {

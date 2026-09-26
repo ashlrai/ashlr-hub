@@ -22,6 +22,7 @@
  */
 import type { FleetLiveSnapshotV1 } from '../../../../core/fleet/fleet-types.js';
 import type { ChartStatus } from '../../../components/charts/ChartFrame.js';
+import { asSentence } from '../autonomy/format.js';
 
 /**
  * The fleet's dark-since instant, or null when the fleet is not dark. A
@@ -69,7 +70,7 @@ export function fleetDarkStatus(live: FleetLiveSnapshotV1): ChartStatus {
   const detail = live.stateReason?.trim() || undefined;
   if (since !== null && Number.isFinite(Date.parse(since))) return { kind: 'dark', since: darkSinceDay(since), detail };
   if (!detail) return { kind: 'empty', message: 'Fleet dark.' };
-  return { kind: 'empty', message: `Fleet dark. ${/[.!?…]$/.test(detail) ? detail : `${detail}.`}` };
+  return { kind: 'empty', message: `Fleet dark. ${asSentence(detail)}` };
 }
 
 /**

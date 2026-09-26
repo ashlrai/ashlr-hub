@@ -315,8 +315,8 @@ export function BudgetControlView({ view, preview, nowMs, pending, error, readOn
       )}
 
       <p className={styles.footnote}>
-        Reserves apply to autonomous work only — your own chats can always use a seat. Unknown usage is never treated as
-        headroom: a seat with no reading, or one {maxAgeMs !== null ? `older than ${Math.round(maxAgeMs / 60_000)} minutes` : 'whose reading is stale'}, is held back.
+        Reserves limit autonomy only; your chats can always use a seat. A seat with no reading, or one{' '}
+        {maxAgeMs !== null ? `older than ${Math.round(maxAgeMs / 60_000)} minutes` : 'whose reading is stale'}, is held back.
       </p>
     </section>
   );

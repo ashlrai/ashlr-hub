@@ -94,7 +94,7 @@ describe('CapacityStrip', () => {
 
   it('an empty roster says so rather than drawing seats at zero', () => {
     render(<CapacityStrip seats={[]} />);
-    expect(screen.getByText(/an empty roster, not seats at zero/)).toBeInTheDocument();
+    expect(screen.getByText('No seats yet. Connect an account or start Ollama.')).toBeInTheDocument();
   });
 
   it('seat names are toggles from the keyboard when a detail exists', async () => {

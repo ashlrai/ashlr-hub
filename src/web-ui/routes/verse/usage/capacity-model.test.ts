@@ -78,13 +78,13 @@ describe('CAPACITY_CLASS — "nobody looked" is not "blocked"', () => {
 describe('capacityHeadline', () => {
   it('never claims anything about a seat nobody read', () => {
     const line = capacityHeadline({ ready: 0, tight: 0, blocked: 1, unread: 2, total: 3, local: null });
-    expect(line).toContain('unread, not exhausted');
+    expect(line).toContain('2 seats have no reading yet');
     expect(line).not.toContain('3 blocked');
   });
 
   it('says an empty roster is empty rather than reporting zeros', () => {
     const line = capacityHeadline({ ready: 0, tight: 0, blocked: 0, unread: 0, total: 0, local: null });
-    expect(line).toContain('empty roster');
+    expect(line).toBe('No seats found.');
   });
 
   it('leads with what is usable when anything is', () => {

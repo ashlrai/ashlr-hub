@@ -70,8 +70,8 @@ describe('LocalModelsPanel — staleness', () => {
       />,
     );
     expect(screen.getAllByText('last known-good').length).toBeGreaterThan(0);
-    expect(screen.getByText(/last known-good reading from 14s ago/)).toBeInTheDocument();
-    expect(screen.getByText(/not a fresh/)).toBeInTheDocument();
+    expect(screen.getByText(/Local figures are from 14s ago/)).toBeInTheDocument();
+    expect(screen.getByText(/didn.t answer in time/)).toBeInTheDocument();
   });
 
   it('says nothing about staleness when every runtime answered fresh', () => {
@@ -141,6 +141,6 @@ describe('LocalModelsPanel — placement', () => {
 describe('LocalModelsPanel — memory chart', () => {
   it('refuses to chart an idle machine as a set of zero bars', () => {
     render(<LocalModelsPanel view={view({ rows: [row({ name: 'x', resident: false, sizeBytes: 10 })] })} />);
-    expect(screen.getByText(/idle machine, not a zero reading/)).toBeInTheDocument();
+    expect(screen.getByText('No models in memory.')).toBeInTheDocument();
   });
 });

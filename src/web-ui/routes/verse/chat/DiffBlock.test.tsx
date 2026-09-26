@@ -30,7 +30,7 @@ describe('DiffBlock', () => {
     });
     render(<DiffBlock diff={facts.diff!} path="src/a.ts" />);
     expect(document.querySelectorAll('td[class*="diffNo"]')).toHaveLength(0);
-    expect(screen.getByText(/reported what it replaced, not where in the file/)).toBeInTheDocument();
+    expect(screen.getByText(/No line numbers — the tool didn.t report where in the file/)).toBeInTheDocument();
   });
 
   it('collapses a long diff behind an exact count and expands on demand', async () => {

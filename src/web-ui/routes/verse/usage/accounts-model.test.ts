@@ -193,7 +193,8 @@ describe('accountVerdict — credits are independent of the window', () => {
     });
     const verdict = accountVerdict(flagged, bindingWindow(flagged));
     expect(verdict.headline).toBe('Limit reached');
-    expect(verdict.detail).toMatch(/a denial, not a measurement/);
+    expect(verdict.detail).toMatch(/flagged .* as rate-limited; no percentage was reported/);
+    expect(verdict.detail).not.toMatch(/\d+%/);
   });
 
   it('states the binding share by the one percent rule — never a rounded "100%" short of spent, never "0%" for a reading', () => {
@@ -408,7 +409,7 @@ describe('buildLocalCard — the local analogue of a quota meter', () => {
     const card = buildLocalCard(snapshot({ reachable: false, reason: 'ollama-unreachable' }));
     expect(card?.verdict.state).toBe('unknown');
     // The machine code rides along as evidence; it is never the sentence.
-    expect(card?.verdict.detail).toMatch(/unanswered probe/);
+    expect(card?.verdict.detail).toBe('No local runtime answered. Start Ollama or LM Studio.');
     expect(card?.verdict.detail).not.toBe('ollama-unreachable');
     expect(card?.verdict.code).toBe('ollama-unreachable');
   });

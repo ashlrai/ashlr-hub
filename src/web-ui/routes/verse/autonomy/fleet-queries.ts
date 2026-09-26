@@ -47,7 +47,8 @@ export const VERSE_LOCAL_ONLY_KEY = 'verse-local-only';
 function describeAbsence(path: string, err: unknown): string {
   if (err instanceof ApiError) {
     if (err.status === 404) {
-      return `This server does not expose ${path}, so this panel has no source. It is a missing route, not an idle machine.`;
+      // A missing route — never read as an idle machine.
+      return `This server doesn't have ${path}.`;
     }
     return `${path} answered HTTP ${err.status}.`;
   }
@@ -71,7 +72,8 @@ function optionalRead<T>(
         return {
           value: null,
           available: true,
-          reason: `${path} answered in a shape this client does not recognise, so nothing is shown rather than guessed.`,
+          // Nothing is shown rather than guessed from an unknown shape.
+          reason: 'Unrecognized response — update Ashlr.',
         };
       }
       return { value, available: true, reason: null };

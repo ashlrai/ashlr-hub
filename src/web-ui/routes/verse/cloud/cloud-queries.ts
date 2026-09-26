@@ -94,10 +94,18 @@ export function narrowCloudOverview(raw: unknown): CloudOverviewResponse | null 
   return raw as unknown as CloudOverviewResponse;
 }
 
+/**
+ * The 404 sentence. Exported so Command's CloudCard can recognise a server
+ * without the lane and render nothing at all, rather than spending a
+ * full-width row to say so; launch buttons elsewhere still use it as their
+ * disabled tooltip.
+ */
+export const CLOUD_NOT_IN_BUILD = 'The cloud lane is not in this build yet.';
+
 /** Operator words for a cloud read that did not answer — never a path, never a trace. */
 function absence(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.status === 404) return 'The cloud lane is not in this build yet.';
+    if (err.status === 404) return CLOUD_NOT_IN_BUILD;
     if (err.status === 503) return 'The cloud lane failed to load on the server.';
     return `The cloud lane answered HTTP ${err.status}.`;
   }
@@ -110,7 +118,8 @@ export const cloudQuery: QueryDef<OptionalRead<CloudOverviewResponse>> = {
     try {
       const value = narrowCloudOverview(await apiGet<unknown>(VERSE_CLOUD_PATH, signal));
       if (value === null) {
-        return { value: null, available: true, reason: 'The cloud lane answered in a shape this version does not recognise, so nothing is shown rather than guessed.' };
+        // Nothing is shown rather than guessed from an unknown shape.
+        return { value: null, available: true, reason: 'Unrecognized response — update Ashlr.' };
       }
       return { value, available: true, reason: null };
     } catch (err) {

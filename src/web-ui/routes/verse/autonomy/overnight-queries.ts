@@ -51,7 +51,8 @@ export const OVERNIGHT_PATH = '/api/verse/overnight';
 function describeAbsence(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.status === 404) {
-      return `This build does not expose ${OVERNIGHT_PATH}, so an overnight run cannot be armed from here. It is a missing route, not a run that refused to start.`;
+      // A missing route — not a run that refused to start.
+      return 'Overnight runs are not available on this server.';
     }
     return `${OVERNIGHT_PATH} answered HTTP ${err.status}.`;
   }
@@ -75,7 +76,8 @@ export const overnightQuery: QueryDef<OptionalFleetRead<OvernightStatus>> = {
         return {
           value: null,
           available: true,
-          reason: `${OVERNIGHT_PATH} answered in a shape this client does not recognise, so nothing is shown rather than guessed.`,
+          // Nothing is shown rather than guessed from an unknown shape.
+          reason: 'Unrecognized response — update Ashlr.',
         };
       }
       return { value, available: true, reason: null };

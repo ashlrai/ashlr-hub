@@ -86,18 +86,14 @@ export function EfficiencyPanel({
         </h3>
         <p className={styles.panelNote}>
           Per seat, across every chat on this machine. Cache hit is the share of prompt tokens served
-          from the provider&apos;s cache — the higher it is, the less each turn re-reads at full price.
-          Compactions are the CLI summarizing a context that outgrew its budget.
+          from the provider&apos;s cache.
         </p>
       </div>
 
       {unavailableReason !== null ? (
         <p className={styles.muted}>{unavailableReason}</p>
       ) : rows.length === 0 ? (
-        <p className={styles.muted}>
-          No chats yet, so there is nothing to measure — this is an empty history, not a seat at 0%.
-          Start a chat on any seat and its context use shows up here.
-        </p>
+        <p className={styles.muted}>No chats yet.</p>
       ) : (
         <div className={styles.tableScroll}>
           <TableView

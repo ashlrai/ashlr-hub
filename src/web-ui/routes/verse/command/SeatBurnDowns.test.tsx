@@ -86,7 +86,7 @@ describe('SeatBurnCard', () => {
     expect(labels.filter((l) => l.includes(fmt(resetAt)))).toHaveLength(1);
   });
 
-  it('5-hour binding: 35% remaining is above the 70% ceiling, so it never says autonomy stopped', () => {
+  it('5-hour binding: 35% remaining is above autonomy’s 70% stop line, so it never says autonomy stopped', () => {
     // Review scenario: weekly 20% used, 5-hour 65% used → server: session binds, eligible.
     const resetAt = NOW + 2 * HOUR;
     render(
@@ -108,15 +108,15 @@ describe('SeatBurnCard', () => {
   it('unplaced reset words: shows the reading and the provider\'s words, and projects nothing', () => {
     const { container } = render(
       <SeatBurnCard
-        burn={burn({ window: 'session', line: { value: 30, label: '5-hour ceiling' }, resetText: 'Sep 24 at 5pm (America/New_York)', points: [{ t: NOW - 30 * MIN, remaining: 30 }, { t: NOW, remaining: 26 }], eligible: false, reason: '5-hour window at 74% — above the 70% ceiling' })}
+        burn={burn({ window: 'session', line: { value: 30, label: '5-hour ceiling' }, resetText: 'Sep 24 at 5pm (America/New_York)', points: [{ t: NOW - 30 * MIN, remaining: 30 }, { t: NOW, remaining: 26 }], eligible: false, reason: '5-hour window at 74% — above autonomy’s 70% stop line' })}
         now={NOW}
         width={320}
       />,
     );
     expect(screen.queryByText(/No window reading/)).toBeNull();
     const text = container.textContent ?? '';
-    expect(text).toContain('26% left · resets Sep 24 at 5pm (America/New_York) · 5-hour window at 74% — above the 70% ceiling');
-    expect(text).toContain("The provider's reset words could not be placed on a clock, so nothing is projected to a reset.");
+    expect(text).toContain('26% left · resets Sep 24 at 5pm (America/New_York) · 5-hour window at 74% — above autonomy’s 70% stop line');
+    expect(text).toContain("Reset words couldn't be placed on a clock, so no projection.");
     // No reset marker, no pace or projection line — nothing points at an instant nobody placed.
     expect(text).not.toMatch(/Resets /);
     expect(container.querySelector('[data-role="projection"]')).toBeNull();
@@ -155,8 +155,9 @@ describe('SeatBurnCard', () => {
     // The header keeps the provider's words verbatim, so the placed reset can be checked against them.
     expect(text).toContain('3% left · resets Sep 25 at 6:59pm (America/New_York) · The weekly window is 97% used');
     expect(text).not.toMatch(/only in words|could not be placed/);
-    // The line started watching days into the window, and the card says so.
-    expect(text).toContain('Readings since Verse opened');
+    // The line started watching days into the window. The card does not
+    // repeat why: the grid's single tooltip says it once (see SeatBurnDowns).
+    expect(text).not.toContain('Verse opened');
     // The x-domain is the whole window: its start on the left, ONE reset marker
     // on the right — at 320 px both as the kit's short date-only fallback,
     // which fits side by side where "Sep 18, 6:59 PM" + "Resets Sep 25, 6:59 PM" collided.
@@ -193,18 +194,18 @@ describe('SeatBurnCard', () => {
   it('no machine reset and no words: says the reset was not reported', () => {
     render(<SeatBurnCard burn={burn({ window: 'weekly', points: [{ t: NOW, remaining: 46 }] })} now={NOW} width={320} />);
     expect(screen.getByText(/46% left · reset time not reported · Autonomy may use it now/)).toBeInTheDocument();
-    expect(screen.getByText(/No reset time was reported for this window/)).toBeInTheDocument();
+    expect(screen.getByText(/No reset time reported, so no projection/)).toBeInTheDocument();
   });
 
   // 3.10.1: recorded history (GET /api/verse/budget/history) fills the line
-  // after a reload. The "since Verse opened" note is kept only for a line the
+  // after a reload. The "since Verse opened" note is the grid tooltip, for a line the
   // page drew alone; a recorded line that still starts late names the gap.
   it('recorded history that covers the window: the whole line, and no "since Verse opened" note', () => {
     const resetAt = NOW + 2 * 24 * HOUR;
     const start = resetAt - 7 * 24 * HOUR;
     const points = [start + 20 * 60_000, start + 2 * 24 * HOUR, NOW - HOUR, NOW].map((t, i) => ({ t, remaining: 90 - 10 * i }));
     const { container } = render(<SeatBurnCard burn={burn({ start, resetAt, resetFrom: 'provider', recorded: true, points })} now={NOW} width={360} />);
-    expect(container.textContent).not.toMatch(/Readings since Verse opened|No reading was recorded/);
+    expect(container.textContent).not.toMatch(/Verse opened|No readings before/);
     // The line starts at the window's left edge, not at "now".
     const xs = pathXs(container.querySelector('[data-role="remaining"] path:last-child')?.getAttribute('d') ?? '');
     expect(xs.length).toBeGreaterThanOrEqual(4);
@@ -218,23 +219,23 @@ describe('SeatBurnCard', () => {
     const { container } = render(
       <SeatBurnCard burn={burn({ start, resetAt, resetFrom: 'provider', recorded: true, points: [{ t: first, remaining: 70 }, { t: NOW, remaining: 60 }] })} now={NOW} width={360} />,
     );
-    expect(container.textContent).toContain(`No reading was recorded in this window before ${burnTimeFormat('weekly')(first)}.`);
-    expect(container.textContent).not.toContain('Readings since Verse opened');
+    expect(container.textContent).toContain(`No readings before ${burnTimeFormat('weekly')(first)}.`);
+    expect(container.textContent).not.toContain('Verse opened');
   });
 
   it('a trailing window (no reset placed) takes the same note', () => {
     const late = render(<SeatBurnCard burn={burn({ recorded: true, points: [{ t: NOW - 2 * HOUR, remaining: 50 }, { t: NOW, remaining: 48 }] })} now={NOW} width={320} />);
-    expect(late.container.textContent).toContain('No reading was recorded in this window before');
+    expect(late.container.textContent).toContain('No readings before');
     late.unmount();
     const full = render(<SeatBurnCard burn={burn({ recorded: true, points: [{ t: NOW - 7 * 24 * HOUR + HOUR, remaining: 90 }, { t: NOW, remaining: 48 }] })} now={NOW} width={320} />);
-    expect(full.container.textContent).not.toMatch(/No reading was recorded|Readings since Verse opened/);
+    expect(full.container.textContent).not.toMatch(/No readings before|Verse opened/);
   });
 
-  it('still says "No window reading" when there is no reading at all', () => {
+  it('still says "No usage reading yet" when there is no reading at all', () => {
     render(<SeatBurnCard burn={burn({ window: 'session', points: [] })} now={NOW} width={320} />);
-    expect(screen.getByText(/No window reading/)).toBeInTheDocument();
+    expect(screen.getByText(/No usage reading yet/)).toBeInTheDocument();
     render(<SeatBurnCard burn={burn({ window: null, points: [{ t: NOW, remaining: 50 }] })} now={NOW} width={320} />);
-    expect(screen.getAllByText(/No window reading/)).toHaveLength(2);
+    expect(screen.getAllByText(/No usage reading yet/)).toHaveLength(2);
   });
 });
 

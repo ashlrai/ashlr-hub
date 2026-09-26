@@ -197,11 +197,11 @@ export const REASON_COPY: Record<string, string> = {
   'connection-monitor-stopped':
     'Native polling stopped after a metadata sample could not confirm its process cleanup, so these readings are frozen and no new ones are being taken. Restarting `ashlr verse` begins a new collection generation.',
   'collector-unavailable':
-    'This server is not collecting native metadata, so nothing here is a live reading.',
+    'This server is not collecting native metadata — no live readings.',
   'collector-not-running':
     'No account collector is running in this server, so these cards fall back to whatever shared evidence exists.',
   'collector-owned':
-    'Another collector (`ashlr resource-console`) owns the exclusive metadata lease, so Verse is reading its shared evidence rather than probing.',
+    'Another collector (`ashlr resource-console`) holds the metadata lease; Verse reads its shared evidence.',
   'collector-start-failed':
     'The metadata collectors could not be started in this server, so no probe has run.',
   'connection-polling-paused':
@@ -215,9 +215,9 @@ export const REASON_COPY: Record<string, string> = {
   'accounts-collection-not-configured':
     'Native account collection is not configured for this accounts root.',
   'usage-version-unsupported':
-    'The usage probe is pinned to a specific provider build and failed closed on the installed one. That is a version pin, not an outage.',
+    'The usage probe is pinned to a different provider build than the one installed, so it did not run.',
   'usage-account-changed':
-    'The account behind this profile changed between two reads, so the reading was discarded rather than attributed to the wrong account.',
+    'The account behind this profile changed between reads; the reading was discarded.',
   'probe-account-unavailable':
     'The pinned profile answered but carries no usable account identity — it is not authenticated.',
   'probe-account-unsupported':
@@ -235,7 +235,7 @@ export const REASON_COPY: Record<string, string> = {
   'probe-protocol-unsupported':
     'The installed provider CLI does not speak the metadata protocol this probe requires.',
   'probe-quota-invalid':
-    'The provider returned a quota shape this probe does not recognise, so nothing was accepted as a reading.',
+    'The provider returned a quota shape this probe does not recognise; no reading taken.',
   'probe-timed-out':
     'The metadata probe for this account timed out before it returned anything.',
 };
@@ -291,7 +291,7 @@ export function accountVerdict(account: Account, binding: AccountWindow | null):
       headline: 'Probe version-pinned',
       detail: `The usage probe failed closed with ${account.unsupported.code}${
         account.unsupported.pinnedVersion ? `; it is pinned to ${account.unsupported.pinnedVersion}` : ''
-      }. This is a version pin, not an outage — no window can be read until the pin is bumped.`,
+      }. No window can be read until the pin is bumped.`,
       code: account.unsupported.code,
     };
   }
@@ -312,7 +312,7 @@ export function accountVerdict(account: Account, binding: AccountWindow | null):
       headline: 'No reading',
       detail: reasonSentence(
         account.reason,
-        'No window percentage reached this surface for this account, so nothing here is a measurement.',
+        'No usage reading yet.',
       ),
       code: account.reason,
     };
@@ -337,7 +337,7 @@ export function accountVerdict(account: Account, binding: AccountWindow | null):
       state: 'exhausted',
       headline: binding.limitReached ? 'Limit reached' : 'Window exhausted',
       detail: binding.limitReached
-        ? `The provider flagged ${label} as rate-limited. That flag is a denial, not a measurement, so no percentage is shown.`
+        ? `The provider flagged ${label} as rate-limited; no percentage was reported.`
         : `${label} is at ${percentText(pct as number)} — it is the binding constraint on this account.`,
       code: null,
     };
@@ -546,7 +546,7 @@ export function buildLocalCard(snapshot: LocalModelsSnapshot | null): LocalCardM
         state: 'unknown',
         headline: 'Runtime unreachable',
         detail:
-          'No local runtime answered, so neither resident nor installed models can be listed. This is an unanswered probe, not a report that the machine is empty.',
+          'No local runtime answered. Start Ollama or LM Studio.',
         code: snapshot.reason,
       }
     : resident.length > 0

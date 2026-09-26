@@ -128,8 +128,7 @@ export function AccountDetail({
           </span>
           {card.allWindows.length === 0 ? (
             <p className={styles.reason}>
-              This account reported no windows at all. That is an absent reading, not a set of
-              windows at zero.
+              No windows reported.
             </p>
           ) : (
             <div className={styles.windows}>
@@ -145,8 +144,7 @@ export function AccountDetail({
           )}
           {card.allWindows.some((w) => !w.measured) ? (
             <p className={styles.reason}>
-              At least one window above carries a provider FLAG rather than a measurement, so no
-              percentage is printed for it. A flagged limit and a measured 100% are different facts.
+              Flagged windows show no percentage — the provider sent only a limit flag.
             </p>
           ) : null}
         </div>
@@ -200,8 +198,7 @@ export function AccountDetail({
                     : (credits.balance ?? 'not reported')}
               </span>
               <p className={styles.reason}>
-                A separate pool from every window above. The provider gives a bare number, not a
-                currency, so it is shown as reported.
+                Separate from the windows above; shown as the provider reports it.
               </p>
             </div>
           ) : null}

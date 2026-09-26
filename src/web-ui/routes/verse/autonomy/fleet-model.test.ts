@@ -90,7 +90,8 @@ describe('runtimeCapacity — a slot count is not a concurrency', () => {
     const capacity = runtimeCapacity(null);
     expect(capacity.verdict).toBe('unknown');
     expect(capacity.effectiveConcurrency).toBeNull();
-    expect(capacity.detail).toContain('missing reading');
+    // Unknown, never a stopped runtime or a concurrency of zero.
+    expect(capacity.detail).toBe('Serving runtime unavailable — concurrency unknown.');
   });
 
   it('batches but cannot name a ceiling when the slot count is unreported', () => {
@@ -180,7 +181,7 @@ describe('fleetPressure — a queue is named as a queue', () => {
     const capacity = runtimeCapacity(runtime());
     const pressure = fleetPressure(fleet(), slotUtilisation(0, 4), capacity);
     expect(pressure.state).toBe('idle');
-    expect(pressure.detail).toContain('not stuck');
+    expect(pressure.detail).toBe('No agent is mid-turn.');
   });
 });
 

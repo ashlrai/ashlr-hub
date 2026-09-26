@@ -121,7 +121,7 @@ describe('AccountDetail', () => {
         allWindows: [window({ id: 'codex', limitReached: true, measured: false })],
       }),
     );
-    expect(screen.getByText(/carries a provider FLAG rather than a measurement/)).toBeInTheDocument();
+    expect(screen.getByText(/Flagged windows show no percentage/)).toBeInTheDocument();
   });
 
   it('refuses to invent a history the data does not carry', () => {

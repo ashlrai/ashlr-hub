@@ -70,6 +70,12 @@
   min-width: 0;
 }
 
+/* A card that renders nothing (e.g. Cloud on a server without the lane)
+   leaves no empty row and no extra grid gap. */
+.cell:empty {
+  display: none;
+}
+
 .surface[data-viewport='compact'] .body {
   padding: var(--space-4) var(--space-4) var(--space-12);
 }

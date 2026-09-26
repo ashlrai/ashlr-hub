@@ -23,6 +23,7 @@
  */
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
+import { asSentence } from '../autonomy/format.js';
 import { useTokenGate } from '../context/use-token-gate.js';
 import { useCommandHandler } from '../shell/command-bus.js';
 import type { BranchBarProps, DiffPaneRequest } from '../shell/slots.js';
@@ -208,7 +209,7 @@ export function BranchBar({ roots, onOpenDiff, statusOptions }: BranchBarProps &
         return;
       }
       const reason = rows.length > 0 ? menuItems(rows[0]!).find((item) => item.id === 'draft-pr')?.disabledReason : null;
-      setNotice({ text: reason ? `Can't open a pull request: ${reason}.` : 'No branch in this chat has changes to open a pull request from.', tone: 'error' });
+      setNotice({ text: reason ? `Can't open a pull request: ${asSentence(reason)}` : 'No branch in this chat has changes to open a pull request from.', tone: 'error' });
       return;
     }
     // Merge only where the server suggests it: that is the one place its

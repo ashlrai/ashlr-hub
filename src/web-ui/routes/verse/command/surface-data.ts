@@ -141,7 +141,8 @@ export function optionalQuery<T>(key: string, path: string, what: string, guard:
         const raw = await apiGet<unknown>(path, signal);
         const value = guard(raw);
         if (value === null) {
-          return { value: null, available: true, reason: `${what} answered in a shape this version does not recognise, so nothing is shown rather than guessed.` };
+          // Nothing is shown rather than guessed from an unknown shape.
+          return { value: null, available: true, reason: 'Unrecognized response — update Ashlr.' };
         }
         return { value, available: true, reason: null };
       } catch (err) {

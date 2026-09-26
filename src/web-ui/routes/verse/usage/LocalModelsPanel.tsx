@@ -142,7 +142,7 @@ function SizeCell({ row }: { row: LocalModelRow }): ReactNode {
   if (row.sizeBytes === null) return <span>—</span>;
   const provenance = row.resident
     ? 'Resident size reported by the runtime.'
-    : 'On-disk size; this model is not resident, so it is using no memory.';
+    : 'On-disk size; not in memory.';
   return (
     <span title={provenance}>
       {formatBytes(row.sizeBytes)}
@@ -239,11 +239,12 @@ export function StaleNotice({ staleness }: { staleness: LocalStaleness }): React
   if (!staleness.stale) return null;
   return (
     <p className={styles.staleNotice} role="status">
-      <span className={styles.staleFlag}>last known-good</span> Every local figure below is the last
-      known-good reading from {formatAge(staleness.staleForMs)} ago
-      {staleness.runtimes.length > 0 ? ` (${staleness.runtimes.join(', ')})` : ''}, not a fresh
-      probe: the runtime did not answer in time and the server kept the previous report rather than
-      erasing it.
+      {/* The server kept the previous report rather than erasing it; the
+          flag says so, the sentence says how old and why. */}
+      <span className={styles.staleFlag}>last known-good</span> Local figures are from{' '}
+      {formatAge(staleness.staleForMs)} ago
+      {staleness.runtimes.length > 0 ? ` (${staleness.runtimes.join(', ')})` : ''} — the runtime
+      didn&apos;t answer in time.
     </p>
   );
 }
@@ -293,7 +294,7 @@ export function LocalCard({
             <span>Resident against machine memory</span>
             <Epistemic
               quality={unknownQuality(
-                'Either the resident size or the machine memory budget was not reported, so no share can be computed.',
+                'Resident size or machine memory not reported.',
               )}
               label="local memory budget"
             >
@@ -352,10 +353,10 @@ export function LocalCard({
 function ConcurrencyNote({ serving }: { serving: ServingRuntimeSnapshot | null | undefined }): ReactNode {
   if (serving === undefined) {
     return (
+      // Residency is not concurrency: a resident model can still be served to
+      // one agent at a time. The real slot count lives with the runtime.
       <p className={styles.sourceLine}>
-        Residency is not concurrency. How many local agents can run at once is decided by the serving
-        runtime, not by these models — a resident model can still be served to one agent at a time.
-        The serving runtime and its real slot count are in Autonomy.
+        How many local agents can run at once is set by the serving runtime — see Autonomy.
       </p>
     );
   }
@@ -403,8 +404,7 @@ export function LocalModelsPanel({
           Local availability
         </h3>
         <p className={styles.panelNote}>
-          Resident models answer immediately. A model without tool support cannot drive an agentic
-          session at all, however much memory is free.
+          Resident models answer immediately. Models without tool support can&apos;t drive a session.
         </p>
       </div>
 
@@ -414,17 +414,15 @@ export function LocalModelsPanel({
 
       {view === null ? (
         <p className={styles.muted}>
-          No local-model source answered, so neither resident nor installed models can be listed. This
-          is a missing source, not an empty machine. Start Ollama (<code className={styles.commandInline}>ollama serve</code>)
-          or llama-server, and this fills in on the next check.
+          No local runtime answered. Start Ollama (<code className={styles.commandInline}>ollama serve</code>)
+          or llama-server.
         </p>
       ) : !view.reachable ? (
         /* `view.reason` is a machine code, not a sentence. It is shown as
            evidence after the sentence rather than being the whole panel. */
         <p className={styles.muted}>
-          No local runtime answered this probe, so nothing about local models can be read. That is an
-          unanswered probe, not a report that no models are installed. Start Ollama
-          (<code className={styles.commandInline}>ollama serve</code>) or llama-server, then check again.
+          No local runtime answered. Start Ollama
+          (<code className={styles.commandInline}>ollama serve</code>) or llama-server.
           {view.reason ? (
             <>
               {' '}
@@ -434,8 +432,7 @@ export function LocalModelsPanel({
         </p>
       ) : view.rows.length === 0 ? (
         <p className={styles.muted}>
-          The local runtime answered and reports no installed models. Pull one to give Ashlr a local
-          seat.
+          No models installed. Pull one to give Ashlr a local seat.
         </p>
       ) : (
         <>
@@ -445,7 +442,7 @@ export function LocalModelsPanel({
               value={String(view.rows.filter((r) => r.resident).length)}
               caption={
                 view.residentBytes === null
-                  ? 'At least one resident model reported no size, so the total is withheld rather than understated.'
+                  ? 'total unknown — a model reported no size'
                   : `${formatBytes(view.residentBytes)} in memory`
               }
             />
@@ -470,7 +467,7 @@ export function LocalModelsPanel({
               }
               caption={
                 view.freeMemoryBytes === null
-                  ? 'The machine reported no free-memory figure.'
+                  ? 'free memory not reported'
                   : `${formatBytes(view.freeMemoryBytes)} reported free by the OS`
               }
             />
@@ -506,9 +503,11 @@ export function LocalModelsPanel({
             <ChartContainer
               title="Resident memory by model"
               description="What is actually in memory right now"
-              caveat="Only models the runtime reports as resident WITH a size appear here. An installed model occupies no memory and is not a bar at zero."
+              // Only resident models WITH a reported size are bars: an installed
+              // model occupies no memory and is never drawn as a bar at zero.
+              caveat="Resident models with a reported size."
               empty={residentRows.length === 0}
-              emptyMessage="Nothing is resident, so there is no memory in use to chart. That is an idle machine, not a zero reading."
+              emptyMessage="No models in memory."
               table={
                 <TableView
                   caption="Resident size per model"
@@ -552,20 +551,15 @@ export function LocalModelsPanel({
             </ul>
           ) : null}
 
-          {view.notes.length > 0 ? (
-            <ul className={styles.noteList}>
-              {view.notes.map((n) => (
-                <li key={n} className={styles.capacityMuted}>
-                  {n}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-
-          <p className={styles.sourceLine}>
-            Sizes and the GPU share come from the runtime&apos;s own resident report; a model with no
-            reported VRAM split shows no placement bar rather than being drawn as fully on GPU.{' '}
-            {chartFormat.formatCompact(view.rows.length)} models installed.
+          {/* The server's fixed notes (tool capability, `supportsTools: null`,
+              memory budget) and the provenance of sizes ride in one tooltip,
+              not a stack of footnotes. A model with no reported VRAM split
+              shows no placement bar rather than being drawn as fully on GPU. */}
+          <p
+            className={styles.sourceLine}
+            title={[...view.notes, 'Sizes and GPU share come from the runtime’s own report.'].join('\n')}
+          >
+            {chartFormat.formatCompact(view.rows.length)} models installed · sizes from the runtime
           </p>
         </>
       )}

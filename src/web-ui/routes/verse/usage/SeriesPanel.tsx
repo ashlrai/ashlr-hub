@@ -146,8 +146,7 @@ export function SeriesPanel({
         </p>
       ) : series === null || series.days.length === 0 ? (
         <p className={styles.muted}>
-          The rollup for {WINDOW_LABEL[window].toLowerCase()} came back with no days in it. That is an
-          empty window, not a zero.
+          No days in the {WINDOW_LABEL[window].toLowerCase()} rollup.
         </p>
       ) : (
         <>

@@ -158,7 +158,7 @@ describe('ActivityPanel', () => {
     const base = controlSnapshot();
     const snapshot = controlSnapshot({ daemon: { ...base.daemon!, ticks: [{ ...base.daemon!.ticks![0]!, dispatches: [] }] } });
     render(<ActivityPanel snapshot={snapshot} />);
-    expect(screen.getByText(/No dispatch traces/)).toHaveTextContent('Run one tick from Controls');
+    expect(screen.getByText(/No dispatches in the recorded ticks/)).toHaveTextContent('Run one tick from Controls');
   });
 });
 

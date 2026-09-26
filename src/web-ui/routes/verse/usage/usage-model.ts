@@ -94,7 +94,7 @@ export const NO_SIGNAL_REASON: Partial<Record<VerseEngine, string>> = {
 };
 
 export const AMBIGUOUS_REASON =
-  'The only figure available is derived from the dispatch ledger against a configured cap, not from the subscription itself. It is shown under Dispatch limits.';
+  'Only a dispatch-ledger figure against a configured cap is available — see Dispatch limits.';
 
 export const GENERIC_NO_SIGNAL = 'No subscription window reading is reported for this engine.';
 
@@ -381,7 +381,7 @@ export type SpendSeries =
   | { available: false; reason: string };
 
 export const SERIES_UNAVAILABLE_NO_LEDGER =
-  'No per-day series is available: the sources this view reads carry aggregate spend only, not a dated history.';
+  'No per-day series — these sources report aggregate spend only.';
 
 /**
  * The only dated spend history reachable from the three endpoints this section
@@ -435,7 +435,9 @@ export function buildDailySpendSeries(observation: DaemonObservation | undefined
     available: true,
     days,
     tickCount: ticks.length,
-    caveat: `From the last ${ticks.length} recorded daemon ticks. The tick ledger is capped and records the autonomous loop only — interactive chat turns are not in it, and a gap is a day with no retained tick, not a measured zero.`,
+    // The tick ledger is capped and autonomous-only; a gap is a day with no
+    // retained tick, never a measured zero.
+    caveat: `Last ${ticks.length} daemon ticks · autonomous work only, chats excluded.`,
   };
 }
 

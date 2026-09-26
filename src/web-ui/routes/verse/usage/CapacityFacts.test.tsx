@@ -78,12 +78,12 @@ describe('CapacityFacts', () => {
     expect(
       screen.getByText(/resets Sep 25 at 7pm \(America\/New_York\)/),
     ).toBeInTheDocument();
-    expect(screen.getByText(/never turned into a countdown/)).toBeInTheDocument();
+    expect(screen.getByText(/Shown as the provider wrote it — no countdown/)).toBeInTheDocument();
   });
 
   it('says a missing dated reset is absent rather than "never"', () => {
     strip([card({ id: 'a', label: 'Codex A' })]);
-    expect(screen.getByText(/absent timestamp, not "never"/)).toBeInTheDocument();
+    expect(screen.getByText('No seat reported a reset time.')).toBeInTheDocument();
   });
 
   it('says an elapsed reset predates the rollover instead of counting down past zero', () => {

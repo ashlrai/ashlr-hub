@@ -282,7 +282,7 @@ export function CapacityStrip({
   renderActions,
   onSelectSeat,
   selectedSeatId = null,
-  emptyText = 'No seats yet. Connect an account or start Ollama — an empty roster, not seats at zero.',
+  emptyText = 'No seats yet. Connect an account or start Ollama.',
   accounts,
 }: CapacityStripProps) {
   const headingId = useId();

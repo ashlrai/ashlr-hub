@@ -162,7 +162,7 @@ export function DaemonControls({ snapshot, guard, dispatchEnabled }: DaemonContr
       {paused ? (
         <p className={styles.actionNote} role="status">
           {pauseUnknown
-            ? 'Dispatch is treated as paused: the pause sentinel could not be read, and the daemon fails safe rather than running on an unreadable signal.'
+            ? 'Treated as paused — the pause sentinel is unreadable.'
             : 'Autonomous dispatch is paused. The loop parks between ticks; your own write tools are unaffected, and the global kill switch is not engaged.'}
         </p>
       ) : null}

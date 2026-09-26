@@ -137,7 +137,7 @@ describe('LocalRuntimePanel', () => {
     );
     expect(screen.getByRole('button', { name: 'Stop runtime' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Restart runtime' })).toBeDisabled();
-    expect(screen.getByText(/managed outside the hub/)).toBeInTheDocument();
+    expect(screen.getByText(/Managed outside the hub/)).toBeInTheDocument();
   });
 
   it('calls an absent route a missing source, not a stopped runtime', () => {
@@ -191,15 +191,12 @@ describe('LocalOnlyPanel', () => {
       <LocalOnlyPanel read={ok(policy())} seats={SEATS} guard={guard()} dispatchEnabled />,
     );
     expect(screen.getAllByText(/unreachable/).length).toBeGreaterThan(0);
-    expect(screen.getByText(/fails outright rather than being routed/)).toBeInTheDocument();
-    // Both words appear only inside their own negation — "a refusal, NOT a
-    // preference", "unreachable, NOT deprioritised" — which is the whole
-    // point. An affirmative "prefers local models" would turn the guarantee
-    // back into a probability, so the copy is pinned in that shape.
-    expect(screen.getByText(/A refusal, not a preference/)).toBeInTheDocument();
-    expect(screen.getByText(/not deprioritised/)).toHaveTextContent(
-      /difference between a budget and a guarantee/,
-    );
+    // The guarantee, stated plainly: a cloud dispatch fails outright. Never
+    // worded as a preference ("prefers local", "deprioritised"), which would
+    // turn the guarantee back into a probability.
+    expect(screen.getByText(/While on, cloud engines are unreachable/)).toBeInTheDocument();
+    expect(screen.getByText(/a\s+dispatch to one fails outright/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/prefer|deprioriti/i);
   });
 
   it('names which of the operator’s own seats would stop working', () => {
@@ -393,7 +390,7 @@ describe('FleetPanel', () => {
         runtime={runtime()}
       />,
     );
-    expect(screen.getByText(/No fleet source/)).toBeInTheDocument();
+    expect(screen.getByText(/Fleet status unavailable/)).toBeInTheDocument();
     expect(screen.queryByText(/an idle fleet/)).not.toBeInTheDocument();
   });
 

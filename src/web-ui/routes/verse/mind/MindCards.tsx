@@ -8,7 +8,7 @@
 import type { ReasoningInsight } from '../../../../core/reasoning/types.js';
 import type { LeaderAction, LeaderStateV1 } from '../../../../core/vision/leader-types.js';
 import { Gauge } from '../../../components/charts/Gauge.js';
-import { UNKNOWN, formatRelative } from '../autonomy/format.js';
+import { UNKNOWN, asSentence, formatRelative } from '../autonomy/format.js';
 import type { SurfaceActions } from '../command/actions.js';
 import { ActionRow } from '../command/LeaderCard.js';
 import { anchorId } from '../command/nav.js';
@@ -38,7 +38,7 @@ export function MemoTimeline({ read, actions }: { read: OptionalRead<LeaderState
       ) : !state ? (
         <CardNote tone="unknown">{read.reason ?? 'The Leader did not answer.'}</CardNote>
       ) : memos.length === 0 ? (
-        <CardNote>No memos yet{state.lastRun ? ` — last run: ${state.lastRun.reason ?? state.lastRun.outcome}` : ''}.</CardNote>
+        <CardNote>{asSentence(`No memos yet${state.lastRun ? ` — last run: ${state.lastRun.reason ?? state.lastRun.outcome}` : ''}`)}</CardNote>
       ) : (
         <ol className={styles.timeline}>
           {memos.map((m) => {

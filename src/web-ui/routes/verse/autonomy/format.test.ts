@@ -39,7 +39,8 @@ describe('autonomy formatting', () => {
       const meter = budgetMeter(0, 0);
       expect(meter.state).toBe('stopped');
       expect(meter.note).toContain('stopped');
-      expect(meter.note).toContain('not unlimited');
+      expect(meter.note).not.toMatch(/unlimited/);
+      expect(meter.note).toBe('Daily budget is $0 — the loop is stopped.');
       // A full bar, not an empty one — an empty meter would read as headroom.
       expect(meter.percent).toBe(100);
     });

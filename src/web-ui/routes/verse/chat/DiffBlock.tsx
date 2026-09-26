@@ -149,7 +149,7 @@ function SingleFileDiff({ file, anchored, path }: { file: DiffFile; anchored: bo
       )}
       {!anchored ? (
         <p className={styles.diffUnanchored}>
-          Line numbers are not shown — this tool call reported what it replaced, not where in the file.
+          No line numbers — the tool didn&apos;t report where in the file.
         </p>
       ) : null}
     </div>

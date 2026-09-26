@@ -87,7 +87,7 @@ export function CloudCredits() {
           <p className={styles.fine}>Credits show here once this build has the cloud lane.</p>
         </>
       ) : credits === null ? (
-        <p className={styles.subtle}>The cloud lane answered in a shape this drawer does not recognise, so nothing is shown rather than guessed.</p>
+        <p className={styles.subtle}>Unrecognized response — update Ashlr.</p>
       ) : (
         <Credits credits={credits} />
       )}

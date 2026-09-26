@@ -48,7 +48,7 @@ function usageFor(key: CapKey, caps: VerseCaps, snapshot: VerseControlSnapshot):
   switch (key) {
     case 'dailyBudgetUsd': {
       const cap = caps.dailyBudgetUsd;
-      if (cap === 0) return 'Loop stopped — a budget of 0 is a stop, not "unlimited".';
+      if (cap === 0) return 'Loop stopped ($0 budget).';
       // Same honesty rule as the status header: `todayUsd` belongs to
       // `todayDate`, and a ledger day that is not today says nothing about
       // today. budgetMeter owns that comparison for both surfaces.

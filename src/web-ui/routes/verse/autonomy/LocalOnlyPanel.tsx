@@ -80,7 +80,7 @@ export function LocalOnlyPanel({
           Local only
         </h3>
         <p className={styles.panelNote}>
-          A refusal, not a preference. While it is on, cloud engines are unreachable.
+          While on, cloud engines are unreachable.
         </p>
       </div>
 
@@ -123,9 +123,8 @@ export function LocalOnlyPanel({
               </>
             ) : (
               <>
-                Cloud engines are reachable. Turning this on makes them <strong>unreachable</strong>,
-                not deprioritised: a dispatch to one fails outright rather than being routed
-                elsewhere. That is the difference between a budget and a guarantee.
+                Cloud engines are reachable. Turning this on makes them <strong>unreachable</strong>: a
+                dispatch to one fails outright.
               </>
             )}
           </p>
@@ -133,8 +132,7 @@ export function LocalOnlyPanel({
           {sourceNote ? <p className={styles.capHelp}>{sourceNote}</p> : null}
           {!policy.mutable && dispatchEnabled && !guard.readOnly ? (
             <p className={styles.actionNote} role="status">
-              This switch is not editable from here, so it is shown read-only rather than as a
-              control that would refuse the click.
+              Read-only here.
             </p>
           ) : null}
 
@@ -190,9 +188,8 @@ export function LocalOnlyPanel({
             title="Make cloud engines unreachable?"
             body={
               <>
-                This is a refusal, not a routing preference. While local-only is on, a dispatch to a
-                non-local engine <strong>fails</strong> with a named refusal — it does not fall back
-                to a local seat and it does not wait.
+                While local-only is on, a dispatch to a non-local engine <strong>fails</strong> with a
+                named refusal — no fallback to a local seat, no waiting.
                 <br />
                 <br />
                 {impact.blocked.length === 0

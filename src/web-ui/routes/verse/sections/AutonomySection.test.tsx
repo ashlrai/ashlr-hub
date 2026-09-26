@@ -130,8 +130,8 @@ describe('AutonomySection', () => {
     stubFetch({ caps: zeroed, control: controlSnapshot({ caps: zeroed, spend: { todayUsd: 0, todayDate: '2026-09-19', dailyBudgetUsd: 0 } }) });
     render(<AutonomySection />);
 
-    expect(await screen.findByText('Daily budget is 0 — the loop is stopped, not unlimited.')).toBeInTheDocument();
-    expect(screen.getByText('Loop stopped — a budget of 0 is a stop, not "unlimited".')).toBeInTheDocument();
+    expect(await screen.findByText('Daily budget is $0 — the loop is stopped.')).toBeInTheDocument();
+    expect(screen.getByText('Loop stopped ($0 budget).')).toBeInTheDocument();
   });
 
   it('explains that an empty enrollment registry is the default, not a bug', async () => {
@@ -364,7 +364,7 @@ describe('AutonomySection', () => {
     );
     render(<AutonomySection />);
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(/nothing below is shown rather than guessed/);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Loop status unknown, so nothing below is shown/);
     expect(screen.queryByRole('button', { name: 'Start loop' })).not.toBeInTheDocument();
   });
 });
