@@ -1,0 +1,176 @@
+/*
+ * routes/verse/command/seat-strip.module.css — Command's one compact row of
+ * seats (audit 14). Tokens only (style-scan-310: no raw hex, no px font
+ * sizes). Level colours follow the rail's batteries (ResourcesBar.module.css)
+ * so a seat reads the same on both.
+ */
+
+/* Equal columns, balanced so every row is full (seat-strip-model
+   stripColumns): four seats are 4 across at 1440 and 2 x 2 at 900, one per
+   line at 375 — never a horizontal scroll, never a lonely last seat. */
+.list {
+  display: grid;
+  grid-template-columns: repeat(var(--seat-columns, 1), minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.item {
+  --level: var(--status-success-fg);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+
+.item:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-default);
+}
+
+.item:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.item[data-level='low'] { --level: var(--status-warning-fg); }
+.item[data-level='out'] { --level: var(--status-danger-fg); }
+.item[data-level='unknown'] { --level: var(--text-tertiary); }
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.logo {
+  flex: none;
+}
+
+.name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: var(--font-weight-medium, 500);
+  color: var(--text-primary);
+}
+
+.value {
+  flex: none;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.item[data-level='low'] .value,
+.item[data-level='out'] .value {
+  color: var(--level);
+}
+
+.item[data-level='unknown'] .value {
+  color: var(--text-tertiary);
+}
+
+/* What is left of the binding window, with a tick where the operator's reserve begins. */
+.meter {
+  position: relative;
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-hover);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--fill, 0%);
+  border-radius: inherit;
+  background: var(--level);
+  transition: width var(--duration-base) var(--ease-standard);
+}
+
+/* A free local seat has no quota: a quiet full track, never a "100% left" claim. */
+.item[data-free] .fill {
+  opacity: 0.45;
+}
+
+.reserve {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  left: var(--reserve);
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--text-secondary);
+}
+
+.foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+}
+
+.autonomy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  color: var(--text-secondary);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+
+.autonomy[data-kind='eligible'] .dot { background: var(--status-success-fg); }
+.autonomy[data-kind='held'] .dot { background: var(--status-warning-fg); }
+.autonomy[data-kind='conflict'] { color: var(--status-unknown-fg); }
+.autonomy[data-kind='conflict'] .dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--status-unknown-fg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .item,
+  .fill {
+    transition: none;
+  }
+}
+
+/* Hover card — the rail's, so the two read as one family. */
+.tip { display: flex; flex-direction: column; gap: 3px; max-width: 300px; color: var(--text-primary); }
+.tipHead { display: flex; align-items: center; gap: 6px; }
+.tipLine { color: var(--text-secondary); font-size: var(--text-2xs-size); }
+.tipHint { margin-top: 2px; color: var(--text-tertiary); font-size: var(--text-2xs-size); }

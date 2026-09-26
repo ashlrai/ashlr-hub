@@ -96,7 +96,7 @@ describe('Verse UI text stays inside the Ashlr Sans subset', () => {
   });
 
   it('the Composer and Command surfaces carry none at all', () => {
-    for (const rel of ['routes/verse/Composer.tsx', 'routes/verse/command/SeatBurnDowns.tsx']) {
+    for (const rel of ['routes/verse/Composer.tsx', 'routes/verse/command/SeatBurnDowns.tsx', 'routes/verse/command/SeatStrip.tsx', 'routes/verse/command/seat-strip-model.ts']) {
       const text = stripComments(readFileSync(join(WEB, rel), 'utf8'));
       const outside = [...text].filter((ch) => !inSubset(ch.codePointAt(0)!));
       expect(outside, rel).toEqual([]);

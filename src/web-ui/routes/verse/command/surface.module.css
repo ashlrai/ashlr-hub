@@ -63,11 +63,21 @@
   display: grid;
   grid-template-columns: repeat(var(--surface-columns), minmax(0, 1fr));
   gap: var(--surface-gap);
-  align-items: start;
+  /* Cells share their row's height (audit 16)… */
+  align-items: stretch;
 }
 
 .cell {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+}
+
+/* …and a plain Card fills it, so a pair (Needs you | Leader) is one height.
+   A chart frame keeps its natural height: stretching a chart to a taller
+   neighbour draws a half-empty card (the 3.9 harness finding). */
+.cell > .card {
+  flex: 1 1 auto;
 }
 
 /* A card that renders nothing (e.g. Cloud on a server without the lane)
@@ -111,6 +121,7 @@
 .cardHeading {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   gap: 2px;
   min-width: 0;
 }

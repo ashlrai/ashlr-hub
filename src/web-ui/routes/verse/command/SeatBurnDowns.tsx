@@ -1,6 +1,7 @@
 /**
- * routes/verse/command/SeatBurnDowns.tsx — one burn-down per seat (span 3
- * each at 1440; a snap-scrolling strip at 375): remaining capacity in the
+ * routes/verse/command/SeatBurnDowns.tsx — one burn-down per seat, on Usage
+ * (audit 14 moved them off Command, which shows the compact SeatStrip; a
+ * snap-scrolling strip at 375): remaining capacity in the
  * binding window, the line autonomy stops at in THAT window (the weekly
  * reserve, or the 5-hour ceiling), the projection and the reset
  * (SPEC-310B §6 "BurnDown per seat: reserve band, ceiling, projected
@@ -23,6 +24,7 @@
  * has no window: it gets a quiet "free" tile, not an empty chart.
  */
 import { useRef } from 'react';
+import type { BudgetView } from '../../../../core/routing/policy.js';
 import { BurnDown } from '../../../components/charts/BurnDown.js';
 import { ChartFrame } from '../../../components/charts/ChartFrame.js';
 import { TableView, type TableColumn } from '../../../components/charts/TableView.js';
@@ -33,9 +35,12 @@ import { useTextScale } from '../../../components/charts/useTextScale.js';
 import plot from '../../../components/charts/plot.module.css';
 import { EngineMarker } from '../../../components/primitives/Tag.js';
 import { asClause } from '../autonomy/format.js';
+import { useNow } from '../autonomy/use-ticker.js';
+import { useViewport } from '../shell/viewport.js';
 import { asSentence } from '../fleet/why-seat-model.js';
 import { WINDOW_MS, burnTimeFormat, resetWords, type SeatBurn } from './command-model.js';
 import { CardNote } from './Surface.js';
+import { useSeatBurns } from './useSeatBurns.js';
 import styles from './command.module.css';
 
 const WINDOW_WORD = { session: '5-hour', weekly: 'weekly' } as const;
@@ -178,7 +183,7 @@ export function SeatBurnCard({ burn, now, width }: { burn: SeatBurn; now: number
         <span className={styles.freeValue}>
           <InfinityMark />
         </span>
-        <span className={styles.freeBody}>Local — free, no provider window. {burn.eligible ? 'Takes autonomous work.' : burn.reason ?? ''}</span>
+        <span className={styles.freeBody}>Local — free, no provider window.{!burn.eligible && burn.reason ? ` ${burn.reason}` : ''}</span>
       </section>
     );
   }
@@ -268,7 +273,7 @@ export function SeatBurnDowns({ burns, now, compact }: { burns: SeatBurn[]; now:
     <div
       className={compact ? styles.burnStrip : styles.burnGrid}
       role="group"
-      aria-label="Capacity per seat"
+      aria-label="Seat windows"
       title={burns.some((b) => b.window !== null && !b.recorded) ? SINCE_OPENED : undefined}
     >
       {burns.map((b) => (
@@ -278,4 +283,17 @@ export function SeatBurnDowns({ burns, now, compact }: { burns: SeatBurn[]; now:
       ))}
     </div>
   );
+}
+
+/**
+ * The burn-downs with their own data (useSeatBurns) — what Usage mounts in its
+ * accounts area (audit 14: Command shows the compact SeatStrip instead). The
+ * caller passes the budget view it already polls.
+ */
+export function LiveSeatBurnDowns({ budget }: { budget: BudgetView | null }) {
+  const burns = useSeatBurns(budget);
+  const { compact } = useViewport();
+  // A 30 s clock is enough for "now" on a 5-hour or weekly axis.
+  const now = useNow(30_000);
+  return <SeatBurnDowns burns={burns} now={now} compact={compact} />;
 }

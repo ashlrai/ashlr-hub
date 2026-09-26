@@ -22,6 +22,7 @@ import { Tooltip } from '../../../components/primitives/Tooltip.js';
 import { useQuery } from '../../../data/hooks.js';
 import { usedPercentText } from '../percent-text.js';
 import { useCapacityData } from '../usage/CapacityStrip.js';
+import { bindingLeftPercent } from '../usage/binding-left.js';
 import { accountStatus, buildCapacityRows, type AccountStatus, type CapacityRow } from '../usage/capacity-strip-model.js';
 import { formatUsd } from './resources-model.js';
 import { cloudCreditsQuery } from './resources-queries.js';
@@ -54,15 +55,6 @@ const LEVEL_OF_STATUS: Readonly<Record<AccountStatus['kind'], Level>> = {
   'not-checked': 'unknown',
 };
 
-/** The binding (or most-used) window's remaining share. */
-function leftOf(row: CapacityRow): number | null {
-  const measured = row.windows.filter((w) => w.usedPercent !== null || w.limitReached);
-  if (measured.length === 0) return null;
-  const binding = measured.find((w) => w.binding) ?? measured.reduce((a, b) => ((b.usedPercent ?? 100) > (a.usedPercent ?? 100) ? b : a));
-  if (binding.limitReached) return 0;
-  return Math.max(0, Math.min(100, 100 - (binding.usedPercent ?? 0)));
-}
-
 /** Pure: capacity rows → bar rows (exported for tests). */
 export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolean; now: number }): BarRow[] {
   const out: BarRow[] = [];
@@ -73,8 +65,10 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
         engine: 'local',
         name: row.localCount > 1 ? `Local models (${row.localCount})` : 'Local model',
         leftPercent: null,
-        level: row.cls === 'blocked' ? 'out' : 'idle',
-        value: row.cls === 'blocked' ? 'offline' : 'ready',
+        // An unread runtime is not "ready": the battery must say what the
+        // hover summary does ("readiness not reported"), as Command's strip does.
+        level: row.cls === 'blocked' ? 'out' : row.cls === 'unread' ? 'unknown' : 'idle',
+        value: row.cls === 'blocked' ? 'offline' : row.cls === 'unread' ? 'not reported' : 'ready',
         summary: `${row.label}: ${row.summary}`,
         detail: ['No usage limits — runs on this Mac.', ...row.notes],
       });
@@ -82,7 +76,7 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
     }
     const status = accountStatus(row, { healthRead: opts.healthRead, now: opts.now });
     const level = LEVEL_OF_STATUS[status.kind] ?? 'unknown';
-    const left = leftOf(row);
+    const left = bindingLeftPercent(row);
     const value = level === 'out' ? (status.kind === 'spent' ? 'spent' : status.label.toLowerCase())
       : left === null ? '—' : `${usedPercentText(left)} left`;
     const detail = row.windows.map((w) => {
