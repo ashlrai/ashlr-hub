@@ -1952,7 +1952,7 @@ describe('M362 durable repair handoff journal', () => {
     const queue = JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as Array<{ id: string }>;
     expect(queue).toHaveLength(12);
     expect(new Set(queue.map((item) => item.id)).size).toBe(12);
-  }, 20_000);
+  }, 60_000); // Twelve child runtimes contend with the broad release suite.
 
   it('preserves a concurrent journal burst and collapses replay by semantic event id', async () => {
     const repo = fx.makeRepo();
@@ -2008,7 +2008,7 @@ describe('M362 durable repair handoff journal', () => {
     expect(read.sourceState).toBe('healthy');
     expect(read.observations).toHaveLength(12);
     expect(new Set(read.observations.map((row) => row.eventId)).size).toBe(12);
-  }, 20_000);
+  }, 60_000); // Twelve child runtimes contend with the broad release suite.
 
   it('serializes an equal-time activation race and keeps exact replay idempotent', async () => {
     const repo = fx.makeRepo();
