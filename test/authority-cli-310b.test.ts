@@ -301,12 +301,12 @@ describe('setup and the trust-root PR', () => {
     const text = h.out.join('\n');
     expect(text).toMatch(/… custody helper: run `sudo scripts\/install-custody\.sh`/);
     // Every later step is described, marked as planned (·), never as done (✓).
-    for (const step of ['host binding', 'signing key', 'trust root', 'deploy', 'GitHub App', 'Claude token', 'rulesets', 'canary repo', 'provenance key', 'standing grant']) {
+    for (const step of ['host binding', 'signing key', 'trust root', 'deploy', 'GitHub App', 'Claude token', 'canary repo', 'rulesets', 'provenance key', 'standing grant', 'autonomy switch', 'daemon service']) {
       expect(text, step).toMatch(new RegExp(`^· ${step}: `, 'm'));
     }
     // The only ✓ is a real local fact (the temp HOME has no ~/.ashlr/activation).
     expect(text.match(/^✓ .*/gm) ?? []).toEqual(['✓ old activation state: nothing to retire']);
-    expect(text).toMatch(/Setup: 0 done, 1 already in place, 1 waiting on you, 0 failed, 10 planned \(dry run: nothing was asked or changed\)\./);
+    expect(text).toMatch(/Setup: 0 done, 1 already in place, 1 waiting on you, 0 failed, 12 planned \(dry run: nothing was asked or changed\)\./);
     expect(h.calls).toEqual([]);
     expect(h.deps.custody!.custodyInit).not.toHaveBeenCalled();
   });

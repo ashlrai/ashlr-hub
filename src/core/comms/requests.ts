@@ -7,7 +7,8 @@
  * all records.
  *
  * Protocol invariant: only ONE request may be 'sent' (awaiting reply) at a
- * time. postRequest always appends as 'pending'; dispatch decides when to
+ * time. Requests that outlive their TTL are expired (see expireStaleRequests)
+ * so one unanswered question cannot hold the queue shut indefinitely. postRequest always appends as 'pending'; dispatch decides when to
  * promote pending→sent. Answers arrive as numeric indices (1-based) that map
  * to the request's options array.
  *
@@ -54,6 +55,8 @@ export interface CommsRequest {
   sentAt?: string;
   /** ISO timestamp when the reply was matched and resolved. */
   answeredAt?: string;
+  /** ISO timestamp when the request aged out unsent or unanswered. */
+  expiredAt?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -227,4 +230,55 @@ export function outstanding(): CommsRequest | undefined {
   return sent.sort((a, b) =>
     (b.sentAt ?? b.createdAt) > (a.sentAt ?? a.createdAt) ? 1 : -1,
   )[0];
+}
+
+/** Default lifetime of a comms request before it is expired (hours). */
+export const DEFAULT_REQUEST_TTL_HOURS = 48;
+
+export interface ExpireResult {
+  /** Outstanding questions/approvals that were never answered in time. */
+  expiredSent: number;
+  /** Pending requests that were never sent in time. */
+  expiredPending: number;
+}
+
+function ageStartMs(r: CommsRequest): number {
+  const iso = r.status === 'sent' ? (r.sentAt ?? r.createdAt) : r.createdAt;
+  return Date.parse(iso);
+}
+
+/**
+ * Expire requests older than `ttlMs`: an outstanding (sent) question or
+ * approval nobody answered, and a pending request that was never sent.
+ *
+ * Without this, a single unanswered question blocks every later send forever
+ * (only one request may be outstanding), and the pending queue grows without
+ * bound — on a live machine one June question held 585 digests and briefings
+ * back for three months. Expiry is fail-closed: an expired approval is never
+ * treated as a yes, and a late reply or button tap on it resolves nothing
+ * because only the current outstanding request can be answered.
+ *
+ * Records with an unparseable timestamp are left untouched. Best-effort;
+ * never throws.
+ */
+export function expireStaleRequests(nowMs: number, ttlMs: number): ExpireResult {
+  const result: ExpireResult = { expiredSent: 0, expiredPending: 0 };
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0 || !Number.isFinite(nowMs)) return result;
+  try {
+    const all = loadAll();
+    const expiredAt = new Date(nowMs).toISOString();
+    const updated = all.map((r) => {
+      const awaitingReply = r.status === 'sent' && (r.type === 'question' || r.type === 'approval');
+      if (!awaitingReply && r.status !== 'pending') return r;
+      const started = ageStartMs(r);
+      if (!Number.isFinite(started) || nowMs - started < ttlMs) return r;
+      if (awaitingReply) result.expiredSent += 1;
+      else result.expiredPending += 1;
+      return { ...r, status: 'expired' as const, expiredAt };
+    });
+    if (result.expiredSent + result.expiredPending > 0) saveAll(updated);
+  } catch {
+    // best-effort
+  }
+  return result;
 }
