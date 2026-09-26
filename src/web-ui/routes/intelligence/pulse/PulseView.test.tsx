@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { PulseView } from './PulseView.js';
 import { evictAll } from '../../../data/cache.js';
 
@@ -56,5 +56,45 @@ describe('PulseView', () => {
     expect(screen.getByText('2026-08-10')).toBeInTheDocument();
     expect(screen.getByText('2026-08-12')).toBeInTheDocument();
     expect(screen.queryByText('2026-08-11')).not.toBeInTheDocument();
+  });
+});
+
+/*
+ * The rollup's byDay rows are CALENDAR days. Stamped at UTC midnight they were
+ * labelled in the viewer's LOCAL zone by the chart kit, so west of UTC the
+ * cost axis read one day early ("Aug 9" for the "2026-08-10" row). PulseView
+ * now stamps rows through growth/calendar-day's `calendarDayStart`; these
+ * cases pin the zone explicitly (a UTC CI box would never see the shift) on
+ * both sides of UTC: Los Angeles (UTC-7/-8) and Kiritimati (UTC+14, the far
+ * edge where a local label would instead run a day late).
+ *
+ * The view renders asynchronously (useQuery → fetch), so the zone is held for
+ * the whole test rather than through `inTimeZone`'s synchronous callback; it
+ * is restored in afterEach the same way.
+ */
+describe.each(['America/Los_Angeles', 'Pacific/Kiritimati'])('PulseView — cost axis days in %s', (zone) => {
+  let savedTz: string | undefined;
+  beforeEach(() => {
+    savedTz = process.env['TZ'];
+    process.env['TZ'] = zone;
+    evictAll();
+    vi.stubGlobal('fetch', mockFetch());
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    if (savedTz === undefined) delete process.env['TZ'];
+    else process.env['TZ'] = savedTz;
+  });
+
+  it('labels the axis ends with the rollup days themselves, never a neighbouring day', async () => {
+    render(<PulseView />);
+    const chart = await screen.findByRole('img', { name: 'Estimated cost over time' });
+    const axis = chart.textContent ?? '';
+    expect(axis).toContain('Aug 10');
+    expect(axis).toContain('Aug 12');
+    // The UTC-midnight stamp read a day early west of UTC ("Aug 9" … "Aug 11").
+    expect(axis).not.toContain('Aug 9');
+    expect(axis).not.toContain('Aug 13');
   });
 });
