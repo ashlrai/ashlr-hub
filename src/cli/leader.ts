@@ -113,9 +113,12 @@ function shellQuote(value: string): string {
  *    Claude CLI first with no budget gate). A run starts only when one is
  *    due, on a seat the router admits; the 07:00 slot catches the 06:30
  *    cadence when the daemon is dark, and is a cheap no-op when it already ran.
- *  - `fleet oversight` and `comms digest` are read-only snapshots (no model).
- *  - `comms ask-vision` posts the newest memo; its own tick finds nothing due
- *    right after the one above, so it never pays for a second run.
+ *  - `fleet oversight` is a read-only snapshot (no model). `comms digest` is
+ *    change-driven (3.14): it speaks only when merges / PRs / reverts / seats /
+ *    cloud tasks changed, or once per idle stretch; otherwise it is silent.
+ *  - `comms ask-vision` queues the newest memo as a non-blocking message; its
+ *    own tick finds nothing due right after the one above, so it never pays
+ *    for a second run.
  *  - `ashlr manager` is deliberately NOT here: its judge resolves the Claude
  *    CLI outside the SeatRouter, so it would spend the reserve unattended.
  */
