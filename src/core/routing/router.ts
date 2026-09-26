@@ -221,12 +221,23 @@ const LATENCY_SCALE = 0.019;
 /** Scores closer than this are a tie (they fall through to caller order, then id). */
 const SCORE_EPSILON = 1e-9;
 
+/**
+ * The largest λ the router honours — the harness registry's own bound
+ * (HARNESS_CONFIG_BOUNDS.lambdaMax; a test pins the two together, restated so
+ * this browser-safe module does not import the harness). A larger value is
+ * clamped here, so every score stays finite: an unbounded λ could overflow to
+ * Infinity, and Infinity − Infinity = NaN would make the comparator
+ * inconsistent (the sort order would then depend on the engine's algorithm).
+ */
+export const ROUTER_LAMBDA_MAX = 10;
+
 function resolveWeights(weights: Partial<RouterWeights> | undefined): RouterWeights {
-  // A malformed λ falls back to its default rather than poisoning the ranking
-  // (NaN would make the sort comparator inconsistent).
+  // A malformed λ (NaN, ±Infinity, negative, not a number) falls back to its
+  // default rather than poisoning the ranking; an over-large one is clamped
+  // to ROUTER_LAMBDA_MAX (it keeps its direction, bounded).
   const pick = (key: keyof RouterWeights): number => {
     const v = weights?.[key];
-    return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : DEFAULT_ROUTER_WEIGHTS[key];
+    return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.min(v, ROUTER_LAMBDA_MAX) : DEFAULT_ROUTER_WEIGHTS[key];
   };
   return { lambdaCost: pick('lambdaCost'), lambdaPressure: pick('lambdaPressure'), lambdaLatency: pick('lambdaLatency') };
 }

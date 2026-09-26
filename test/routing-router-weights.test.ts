@@ -17,12 +17,13 @@ import { assessSeat, type CapacityWindow, type SeatCapacity } from '../src/core/
 import { defaultBudgetPolicy, effectiveSeatPolicy } from '../src/core/routing/policy.js';
 import {
   DEFAULT_ROUTER_WEIGHTS,
+  ROUTER_LAMBDA_MAX,
   enginePreference,
   routeSeat,
   type RouteOptions,
   type RouterWeights,
 } from '../src/core/routing/router.js';
-import { BASELINE_HARNESS_CONFIG } from '../src/core/learn/harness-registry.js';
+import { BASELINE_HARNESS_CONFIG, HARNESS_CONFIG_BOUNDS } from '../src/core/learn/harness-registry.js';
 import type { BudgetMode, BudgetPolicy, RoutingRequest } from '../src/core/routing/types.js';
 
 const NOW = Date.parse('2026-09-24T12:00:00.000Z');
@@ -170,6 +171,42 @@ describe('λ weights at their defaults keep the explicit order', () => {
     expect(plain.why).not.toMatch(/routing weights/);
     const tuned = routeSeat(auto('code', 'medium'), fleet, policyFor('balanced'), { nowMs: NOW, weights: { lambdaCost: 3 } });
     expect(tuned.why).toMatch(/routing weights cost ×3, headroom ×1, latency ×0\.25/);
+  });
+
+  it('ROUTER_LAMBDA_MAX is the harness registry bound (one fact, two places)', () => {
+    expect(ROUTER_LAMBDA_MAX).toBe(HARNESS_CONFIG_BOUNDS.lambdaMax);
+  });
+
+  it('clamps a λ above the bound, so every score stays finite and ordered', () => {
+    // Unclamped, (1e308 − 1) · costStep overflows to Infinity; two seats of
+    // one engine would then compare Infinity − Infinity = NaN and headroom
+    // would stop ordering them.
+    const fleet = [claude('claude', 10, 10), grok(80), grok(20, 'grok-b'), local('qwen3.8:27b-ctx64k')];
+    const req = auto('code', 'high');
+    for (const key of ['lambdaCost', 'lambdaPressure', 'lambdaLatency'] as const) {
+      const huge = route(req, fleet, policyFor('balanced'), { weights: { [key]: 1e308 }, latencyMs: { grok: 1_000, 'grok-b': 9_000 } });
+      const atMax = route(req, fleet, policyFor('balanced'), { weights: { [key]: ROUTER_LAMBDA_MAX }, latencyMs: { grok: 1_000, 'grok-b': 9_000 } });
+      expect(huge).toEqual(atMax);
+    }
+    // Same-engine seats still order by headroom at the clamped maximum.
+    const cost = route(req, fleet, policyFor('balanced'), { weights: { lambdaCost: 1e308 } });
+    expect(cost.indexOf('grok-b')).toBeLessThan(cost.indexOf('grok'));
+  });
+
+  it('the full decision (candidates, why, exclusions) is identical with no weights and the baseline weights', () => {
+    const rand = prng(7);
+    for (let i = 0; i < 40; i += 1) {
+      const fleet = randomFleet(rand);
+      for (const mode of ['all-in', 'balanced', 'reserve'] as const) {
+        const policy = policyFor(mode, ['codex-personal']);
+        for (const req of REQUESTS) {
+          const none = routeSeat(req, fleet, policy, { nowMs: NOW });
+          // The tick passes the whole HarnessRoutingWeights (bonThreshold included).
+          const baseline = routeSeat(req, fleet, policy, { nowMs: NOW, weights: BASELINE_HARNESS_CONFIG.routing });
+          expect(baseline).toEqual(none);
+        }
+      }
+    }
   });
 
   it.each([
