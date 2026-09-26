@@ -70,3 +70,31 @@ describe('BarStack V3.10.1', () => {
     expect(ticks).toEqual(['0', '1']);
   });
 });
+
+describe('BarStack category titles', () => {
+  it('keeps the short label on the axis but names the full title in the tooltip, table and live text', () => {
+    const { container } = render(
+      <BarStack
+        title="Model outcomes"
+        width={400}
+        categories={['grok-4.7-fast…', 'qwen3.8']}
+        categoryTitles={['grok-4.7-fast-reasoning', undefined]}
+        segments={segments}
+        values={[[3, 1], [2, 0]]}
+      />,
+    );
+    const axis = [...container.querySelectorAll('svg[role="img"] text')].filter((t) => t.getAttribute('text-anchor') === 'middle').map((t) => t.textContent);
+    expect(axis).toEqual(['grok-4.7-fast…', 'qwen3.8']);
+    expect(container.querySelector('svg[role="img"]')!.getAttribute('aria-label')).toContain('Highest: grok-4.7-fast-reasoning with 4.');
+    const group = screen.getByRole('group');
+    fireEvent.focus(group);
+    fireEvent.keyDown(group, { key: 'Home' });
+    expect(document.querySelector('[aria-live="polite"]')!.textContent).toBe('grok-4.7-fast-reasoning: Done 3, Failed 1; total 4');
+    expect(screen.getByText('grok-4.7-fast-reasoning', { selector: ':not([aria-live]):not(svg *)' })).toBeInTheDocument();
+    showTable();
+    expect(screen.getByRole('cell', { name: 'grok-4.7-fast-reasoning' })).toBeInTheDocument();
+    // No title for a category: it falls back to the label.
+    expect(screen.getByRole('cell', { name: 'qwen3.8' })).toBeInTheDocument();
+    expect(screen.queryByRole('cell', { name: 'grok-4.7-fast…' })).toBeNull();
+  });
+});

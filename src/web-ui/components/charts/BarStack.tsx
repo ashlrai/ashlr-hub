@@ -45,6 +45,15 @@ export interface BarStackProps {
   status?: ChartStatus;
   /** Category labels in display order (e.g. formatted days). */
   categories: string[];
+  /**
+   * Optional full name per category, parallel to `categories`. The x-axis has
+   * ~64 px per label, so callers shorten names there (Growth cuts
+   * `grok-4.7-fast-reasoning` to `grok-4.7-fast…`); the tooltip, table,
+   * screen-reader text and summary have room, and are where a reader goes to
+   * learn WHICH category it is — so they use this title. A missing or empty
+   * entry falls back to the category label.
+   */
+  categoryTitles?: ReadonlyArray<string | undefined>;
   segments: BarStackSegment[];
   /** values[categoryIndex][segmentIndex]; null = unknown. */
   values: ReadonlyArray<ReadonlyArray<number | null>>;
@@ -62,7 +71,10 @@ const BAR_MAX = 24;
 const GAP = 2;
 
 interface Row {
+  /** The short axis label. */
   label: string;
+  /** The full name for tooltip, table and screen readers (`label` when none given). */
+  title: string;
   values: ReadonlyArray<number | null>;
   stack: StackedColumn;
 }
@@ -73,6 +85,7 @@ export function BarStack({
   caveat,
   status,
   categories,
+  categoryTitles,
   segments,
   values,
   normalize = false,
@@ -92,7 +105,7 @@ export function BarStack({
 
   const rows: Row[] = categories.map((label, i) => {
     const vals = values[i] ?? segments.map(() => null);
-    return { label, values: vals, stack: stackColumn(vals) };
+    return { label, title: categoryTitles?.[i] || label, values: vals, stack: stackColumn(vals) };
   });
   const anyKnown = rows.some((r) => !r.stack.unknown);
   const maxTotal = Math.max(0, ...rows.map((r) => r.stack.total));
@@ -135,10 +148,10 @@ export function BarStack({
 
   const busiest = rows.reduce<Row | null>((best, r) => (!r.stack.unknown && (!best || r.stack.total > best.stack.total) ? r : best), null);
   const summary = ariaLabel ?? `${title}: ${rows.length} columns of ${segments.map((s) => s.label).join(', ')}.` +
-    (busiest ? ` Highest: ${busiest.label} with ${fmtTotal(busiest)}.` : '');
+    (busiest ? ` Highest: ${busiest.title} with ${fmtTotal(busiest)}.` : '');
 
   const columns: TableColumn<Row>[] = [
-    { key: 'label', label: 'Category', render: (r) => r.label },
+    { key: 'label', label: 'Category', render: (r) => r.title },
     ...segments.map((s, i) => ({
       key: s.id,
       label: s.label,
@@ -246,14 +259,14 @@ export function BarStack({
         </svg>
         <span id={liveId} className={plot.srOnly} aria-live="polite">
           {activeRow
-            ? `${activeRow.label}: ${segments.map((s, i) => `${s.label} ${activeRow.values[i] === null ? 'no data' : formatValue(activeRow.values[i]!)}`).join(', ')}; total ${fmtTotal(activeRow)}`
+            ? `${activeRow.title}: ${segments.map((s, i) => `${s.label} ${activeRow.values[i] === null ? 'no data' : formatValue(activeRow.values[i]!)}`).join(', ')}; total ${fmtTotal(activeRow)}`
             : ''}
         </span>
         {activeRow && active !== null ? (
           <ChartTooltip
             left={clampTooltipLeft(xOf(active) + barW / 2, width)}
             top={activeRow.stack.unknown ? PAD_T + plotH - 12 : ys(normalize ? 1 : activeRow.stack.total)}
-            title={activeRow.label}
+            title={activeRow.title}
             rows={[
               ...segments.map((s, i) => ({
                 key: s.id,

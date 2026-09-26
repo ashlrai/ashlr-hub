@@ -65,10 +65,13 @@ describe('GrowthSection', () => {
     render(<GrowthSection />);
     const fig = await screen.findByRole('figure', { name: 'Model outcomes · 30d' });
     await waitFor(() => expect(within(fig).queryByText('Loading…')).not.toBeInTheDocument());
-    showTable('Model outcomes · 30d');
-    const names = within(fig).getAllByRole('row').slice(1).map((r) => within(r).getAllByRole('cell')[0]!.textContent);
+    const axis = [...fig.querySelectorAll('svg[role="img"] text')].filter((t) => t.getAttribute('text-anchor') === 'middle').map((t) => t.textContent);
     // Before: 'claude-haiku-4-5-…' twice and 'grok-4.7-fast-rea…'.
-    expect(names).toEqual(['claude-haiku-4-5-20251001', 'claude-haiku-4-5', 'grok-4.7-fast…']);
+    expect(axis).toEqual(['claude-haiku-4-5-20251001', 'claude-haiku-4-5', 'grok-4.7-fast…']);
+    showTable('Model outcomes · 30d');
+    // The table has room for the full id; the axis shortening stops there.
+    const names = within(fig).getAllByRole('row').slice(1).map((r) => within(r).getAllByRole('cell')[0]!.textContent);
+    expect(names).toEqual(['claude-haiku-4-5-20251001', 'claude-haiku-4-5', 'grok-4.7-fast-reasoning']);
   });
 
   it('is ONE state, not six empty cards, when autonomy is off and nothing was produced', async () => {

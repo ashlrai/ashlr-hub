@@ -76,7 +76,14 @@ export const OUTCOME_SEGMENTS: BarStackSegment[] = [
 ];
 
 export interface ModelOutcomes {
+  /** Short, unique axis names (`modelLabels`). */
   categories: string[];
+  /**
+   * Full model ids, parallel to `categories`, for BarStack's tooltip and table
+   * (`categoryTitles`): the axis label may be cut at a word boundary, but a
+   * reader hovering a column must be able to tell exactly which model it is.
+   */
+  titles: string[];
   values: (number | null)[][];
   /** Per category, for the caption / table: dollars per merge. */
   costPerMerged: (number | null)[];
@@ -145,8 +152,13 @@ export function modelLabels(models: readonly Pick<ModelStats, 'engine' | 'model'
 /** Top `limit` models by dispatches, each split into what its dispatches became. */
 export function modelOutcomes(models: readonly ModelStats[], limit = 6): ModelOutcomes {
   const top = [...models].filter((m) => m.dispatches > 0).sort((a, b) => b.dispatches - a.dispatches).slice(0, limit);
+  const categories = modelLabels(top);
   return {
-    categories: modelLabels(top),
+    categories,
+    // The full id. When the label had to name the engine to stay unique (one
+    // tag on two engines), keep the engine in the title too, or two tooltips
+    // would read the same.
+    titles: top.map((m, i) => (categories[i]!.startsWith(`${m.engine}:${m.model}`) ? `${m.engine}:${m.model}` : m.model)),
     values: top.map((m) => {
       const merged = Math.max(0, m.merged);
       const ship = Math.max(0, m.shipVerdicts - merged);

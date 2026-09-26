@@ -155,6 +155,7 @@ export function GrowthSection() {
             description="What each model's dispatches became"
             status={modelStatus}
             categories={outcomes.categories}
+            categoryTitles={outcomes.titles}
             segments={OUTCOME_SEGMENTS}
             values={outcomes.values}
             height={200}
