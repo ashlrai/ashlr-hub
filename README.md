@@ -166,35 +166,35 @@ ID).
    turns to it. Model discovery stays on Ollama.
 6. **Optionally hand work to the cloud.** **New cloud task** on Command, or
    `ashlr cloud launch "<task>" --repo owner/name` ([cloud lane](#the-cloud-lane)).
-7. **Inspect the autonomy boundary** with `ashlr authority setup --dry-run` and
-   `ashlr authority status`. The current production build does not admit setup
-   or resident fleet activation.
+7. **Inspect autonomy preparation** with `ashlr authority setup --dry-run --json`
+   and `ashlr authority status`. Guided setup can prepare prerequisites after
+   your explicit actions; this build cannot activate resident fleet work.
 
 ---
 
 ## Autonomy commissioning path (currently unavailable)
 
-**Current release status:** `ashlr authority setup` refuses before changing
-configuration because service install, repair and restart authority is withheld.
-The shipped daemon and conductor trust roots are empty, so non-dry resident
-work remains dormant. The sequence below describes the required commissioning
-path once that authority is issued; it is not an available quickstart today.
+**Current release status:** `ashlr authority setup` is a resumable preparation
+workflow. Its dry run is read-only; a live run can create custody, GitHub and
+grant state after your explicit actions. It never installs or restarts the
+daemon. Service install, repair and restart authority is withheld, compiled
+daemon and conductor trust roots are empty, and the native resident-start broker
+is absent. Non-dry resident work remains dormant. The setup checklist reports
+this runtime block even if every preparatory step is complete.
 
-Autonomy ships **dormant**. Nothing merges, and no standing grant exists, until
-you run the guided setup once on your Mac. Until a grant is signed, live fleet
-ticks refuse: the compiled daemon and conductor trust roots are empty, and a
-signed standing grant is the only other way a tick is admitted. The dry run
-still works.
+Autonomy ships **dormant**. Guided setup can help prepare a standing grant, but
+that grant alone does not admit resident activation. The compiled execution
+roots and native release boundary must be provisioned through reviewed releases.
 
 ```sh
 ashlr authority setup --dry-run   # print every step and what it would do
-# ashlr authority setup           # currently refuses; future commissioning step
+ashlr authority setup --dry-run --json  # machine-readable checklist and runtime block
+# ashlr authority setup           # live preparatory steps require your explicit actions
 ashlr authority status            # grant, switch, Stop, rollout stage, ledger, custody
 ```
 
-Once service mutation is admitted, `setup` is designed to perform each step it
-can and pause for the steps marked ✋. In the current build it refuses before
-these steps begin.
+`setup` performs each available step and pauses for the steps marked ✋. It
+cannot complete resident commissioning in the current build.
 
 1. ✋ **Install the custody helper:** `sudo scripts/install-custody.sh`
    (root-owned, in `/usr/local/libexec/`).
@@ -219,8 +219,8 @@ these steps begin.
 10. ✋ **Sign the first grant** (Touch ID) and, optionally, set the switch to
     Autonomous. The grant starts on the shadow stage of its rollout ladder.
 
-After that, the only recurring step is one Touch ID every 30 days, or after a
-deploy that changes authority code.
+After a future reviewed resident activation release, standing grants require
+Touch ID reapproval every 30 days or after authority code changes.
 
 **What a grant allows.** A standing grant names the repositories, engines, risk
 and size caps, spend ceiling and Leader classes, and is valid for at most 30

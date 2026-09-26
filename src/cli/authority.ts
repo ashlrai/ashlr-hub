@@ -892,7 +892,7 @@ jobs:
           echo "canary green"
 `;
 
-type StepStatus = 'done' | 'already' | 'waiting-on-you' | 'skipped' | 'failed';
+type StepStatus = 'done' | 'already' | 'waiting-on-you' | 'skipped' | 'blocked' | 'failed';
 
 /** What a setup step needs from Mason himself (a UI renders these as badges). */
 export type SetupNeed = 'sudo' | 'touch-id' | 'browser' | 'github' | 'terminal';
@@ -912,15 +912,22 @@ const SETUP_STEP_NEEDS: Readonly<Record<string, readonly SetupNeed[]>> = Object.
   'standing-grant': ['touch-id'],
   'autonomy-switch': [],
   'daemon-service': ['terminal'],
+  'resident-runtime': [],
 });
+
+// The packaged runtime still has no resident-start broker or production
+// authority roots. This is a source/release gate, not a missing setup action.
+// Keep the checklist blocked until a reviewed resident consumer can prove it.
+const RESIDENT_RUNTIME_BLOCK =
+  'Resident activation is unavailable in this build: service install/restart authority, compiled daemon and conductor roots, and the native resident-start broker are absent. Preparing the other steps does not start autonomous work.';
 
 /** `ashlr authority setup --dry-run --json` — the checklist a UI can render. */
 export interface AuthoritySetupReportV1 {
   schema: 'ashlr.authority-setup.v1';
   dryRun: boolean;
-  /** Every step is done or already in place: nothing is left for Mason. */
+  /** Every step is done or already in place, including resident runtime admission. */
   complete: boolean;
-  summary: { done: number; already: number; waitingOnYou: number; failed: number; planned: number };
+  summary: { done: number; already: number; waitingOnYou: number; blocked: number; failed: number; planned: number };
   steps: { id: string; step: string; status: StepStatus; detail: string; needs: readonly SetupNeed[] }[];
   /** The first step that is not done or already in place (null when complete). */
   next: string | null;
@@ -944,7 +951,7 @@ export function authoritySetupReport(report: readonly SetupRow[], dryRun: boolea
     schema: 'ashlr.authority-setup.v1',
     dryRun,
     complete: open === undefined,
-    summary: { done: count('done'), already: count('already'), waitingOnYou: count('waiting-on-you'), failed: count('failed'), planned: count('skipped') },
+    summary: { done: count('done'), already: count('already'), waitingOnYou: count('waiting-on-you'), blocked: count('blocked'), failed: count('failed'), planned: count('skipped') },
     steps,
     next: open?.id ?? null,
   };
@@ -965,10 +972,17 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
     report.push({ step, status, detail });
     if (json) return;
     // 'skipped' gets its own glyph: a ✓ on a step a dry run did not perform read as done.
-    const glyph = status === 'failed' ? '✗' : status === 'waiting-on-you' ? '…' : status === 'skipped' ? '·' : '✓';
+    const glyph = status === 'failed' ? '✗' : status === 'blocked' ? '×' : status === 'waiting-on-you' ? '…' : status === 'skipped' ? '·' : '✓';
     deps.out(`${glyph} ${step}: ${detail}`);
   };
-  const done = (): number => finish(report, deps, dryRun, json);
+  const done = (): number => {
+    // Every exit, including the first unmet live prerequisite, must report
+    // this independent source/release block exactly once.
+    if (!report.some((row) => row.step === 'resident runtime')) {
+      note('resident runtime', 'blocked', RESIDENT_RUNTIME_BLOCK);
+    }
+    return finish(report, deps, dryRun, json);
+  };
   const ask = async (question: string): Promise<boolean> => !dryRun && (yes || deps.confirm(question));
   // --dry-run PLANS: the CHANGELOG and docs/AUTHORITY.md promise it "prints
   // every step first" (3.10 review c20). A real run must stop at an unmet
@@ -1142,7 +1156,9 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
     note('provenance key', 'done', rotated.retiredAs ? 'rotated; the old key was moved aside' : 'created');
   } else note('provenance key', dryRun ? 'skipped' : 'waiting-on-you', 'run `ashlr authority rotate-provenance`');
 
-  // 10. First grant (Touch ID), 11. the switch, 12. the daemon service.
+  // 10. First grant (Touch ID), 11. the switch, 12. the daemon service,
+  // 13. production resident admission. A running legacy service is not proof
+  // that its execution gate or native release boundary is available.
   const DAEMON_DETAIL = 'would check that the ai.ashlr.daemon service is loaded and running (each tick re-verifies the grant)';
   if (planning) {
     note('standing grant', 'skipped', 'would sign the first standing grant (Touch ID)');
@@ -1177,23 +1193,19 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
     note('autonomy switch', switched.ok ? 'done' : 'failed', switched.ok ? 'Autonomous' : switched.reason);
   } else note('autonomy switch', dryRun ? 'skipped' : 'waiting-on-you', `it is ${evaluation.switch} — run \`ashlr authority switch autonomous\``);
 
-  // 12. Read-only: nothing runs unattended unless the resident daemon does.
-  // Setup never changes launchd (that stays Mason's command) — it only says
-  // exactly what to run. `launchctl enable` first: a service disabled in the
-  // user domain fails `bootstrap` with a bare "Input/output error".
+  // 12. Read-only service observation. Manual launchctl advice would imply
+  // that this build can admit a resident start, which its production gate denies.
   let service: DaemonServiceState;
   try {
     service = await deps.daemonService();
   } catch {
     service = 'unknown';
   }
-  const onMac = process.platform === 'darwin';
-  if (service === 'running') note('daemon service', 'already', 'ai.ashlr.daemon is running; each tick re-verifies the grant');
-  else if (service === 'absent') note('daemon service', 'waiting-on-you', 'no ai.ashlr.daemon service is installed — run ticks with `ashlr daemon start` in a terminal');
-  else if (service === 'loaded' && onMac) note('daemon service', 'waiting-on-you', 'loaded but not running: `launchctl kickstart gui/$(id -u)/ai.ashlr.daemon`');
-  else if (onMac) {
-    note('daemon service', 'waiting-on-you', 'not loaded: check the --budget in ~/Library/LaunchAgents/ai.ashlr.daemon.plist, then `launchctl enable gui/$(id -u)/ai.ashlr.daemon && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.ashlr.daemon.plist`');
-  } else note('daemon service', 'waiting-on-you', 'start the ashlr daemon service (`ashlr daemon status` shows its state)');
+  if (service === 'running') note('daemon service', 'already', 'ai.ashlr.daemon is running; resident execution still requires the separate runtime admission below');
+  else if (service === 'absent') note('daemon service', 'waiting-on-you', 'no ai.ashlr.daemon service is installed; this build cannot install or start one');
+  else if (service === 'loaded') note('daemon service', 'waiting-on-you', 'ai.ashlr.daemon is loaded but stopped; this build cannot restart it');
+  else if (service === 'not-loaded') note('daemon service', 'waiting-on-you', 'ai.ashlr.daemon is not loaded; this build cannot start it');
+  else note('daemon service', 'waiting-on-you', 'ai.ashlr.daemon state is unknown; this build cannot start or repair it');
   return done();
 }
 
@@ -1204,7 +1216,7 @@ function finish(report: readonly SetupRow[], deps: AuthorityCliDeps, dryRun = fa
     deps.out(JSON.stringify(result, null, 2));
   } else {
     const planned = dryRun ? `, ${summary.planned} planned (dry run: nothing was asked or changed)` : '';
-    deps.out(`\nSetup: ${summary.done} done, ${summary.already} already in place, ${summary.waitingOnYou} waiting on you, ${summary.failed} failed${planned}.`);
+    deps.out(`\nSetup: ${summary.done} done, ${summary.already} already in place, ${summary.waitingOnYou} waiting on you, ${summary.blocked} blocked by this build, ${summary.failed} failed${planned}.`);
   }
   return summary.failed > 0 ? 1 : 0;
 }
