@@ -11,11 +11,16 @@
  *
  * At 375 px: one column in that order; the repo table becomes cards.
  * The live view polls every 5 s while Fleet is the visible surface.
+ *
+ * Autonomy off: the shared AutonomyOffState sits under the lanes, and when
+ * the fleet has nothing to draw (no runs, no gate traffic) the three chart
+ * cards are left out instead of each repeating "Fleet dark since …".
  */
 import { Suspense, lazy, useId, useState } from 'react';
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
 import { IconChevronRight } from '../../../components/primitives/icons.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
+import { AutonomyOffState, useAutonomyOff } from '../autonomy/AutonomyOffState.js';
 import { overnightQuery } from '../autonomy/overnight-queries.js';
 import { useNow } from '../autonomy/use-ticker.js';
 import { budgetPreviewQuery, budgetQuery } from '../budget/budget-queries.js';
@@ -26,6 +31,7 @@ import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { useViewport } from '../shell/viewport.js';
 import { GateFunnelCards, LanesStrip, LiveSwimlane, OvernightCard, ParkedCard, WhySeatCard } from '../fleet/FleetCards.js';
 import { RepoTable } from '../fleet/RepoTable.js';
+import { nothingToDraw } from '../fleet/live-model.js';
 import styles from '../fleet/fleet.module.css';
 
 export const FLEET_POLL_MS = 5_000;
@@ -54,6 +60,10 @@ export function FleetSection() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const advancedId = useId();
   const live = fleet.data?.value ?? null;
+  const off = useAutonomyOff();
+  // Collapse only what would be empty: a fleet stopped an hour ago still
+  // draws its last runs.
+  const collapse = off != null && live !== null && nothingToDraw(live);
 
   function openAdvanced(): void {
     setAdvancedOpen(true);
@@ -68,23 +78,30 @@ export function FleetSection() {
         <>
           <ActionStatus actions={actions} />
           <LanesStrip live={live} />
+          {off ? <AutonomyOffState state={off} here="fleet" /> : null}
         </>
       }
     >
-      <Cell span={12}>
-        <LiveSwimlane read={fleet.data} now={now} hours={compact ? 6 : 12} />
-      </Cell>
-      <Cell span={7}>
-        <GateFunnelCards read={fleet.data} />
-      </Cell>
-      <Cell span={5}>
+      {collapse ? null : (
+        <Cell span={12}>
+          <LiveSwimlane read={fleet.data} now={now} hours={compact ? 6 : 12} />
+        </Cell>
+      )}
+      {collapse ? null : (
+        <Cell span={7}>
+          <GateFunnelCards read={fleet.data} />
+        </Cell>
+      )}
+      <Cell span={collapse ? 6 : 5}>
         <WhySeatCard read={fleet.data} preview={preview.data ?? null} view={budget.data ?? null} now={now} />
       </Cell>
-      <Cell span={7}>
-        <ParkedCard read={fleet.data} now={now} />
-      </Cell>
-      <Cell span={5}>
-        <OvernightCard read={overnight.data} onOpenAdvanced={openAdvanced} />
+      {collapse ? null : (
+        <Cell span={7}>
+          <ParkedCard read={fleet.data} now={now} />
+        </Cell>
+      )}
+      <Cell span={collapse ? 6 : 5}>
+        <OvernightCard read={overnight.data} onOpenAdvanced={openAdvanced} dark={live?.state === 'dark'} />
       </Cell>
       <Cell span={12}>
         <RepoTable read={fleet.data} actions={actions} now={now} compact={compact} />

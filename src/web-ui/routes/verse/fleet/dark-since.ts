@@ -12,7 +12,7 @@
  *                  fleet-live-api.ts `fleetDarkSince`). Only this value may be
  *                  worded "Fleet dark since …".
  *   quiet since  — fleet history's `darkSince`: the last run started or
- *                  proposal filed. Worded "No fleet runs or proposals since …"
+ *                  proposal filed. Worded "Nothing produced since …"
  *                  (`quietSinceStatus`), never "dark".
  *
  * Dates are the viewer's LOCAL calendar day everywhere ("Sep 1"), so the
@@ -76,10 +76,10 @@ export function fleetDarkStatus(live: FleetLiveSnapshotV1): ChartStatus {
 /**
  * A chart status built over fleet HISTORY, re-worded: history's `darkSince`
  * is "quiet since" (the last run or proposal), so its dark state becomes a
- * plain "No fleet runs or proposals since Aug 18." Every other status passes
+ * plain "Nothing produced since Aug 18." Every other status passes
  * through untouched.
  */
 export function quietSinceStatus(status: ChartStatus): ChartStatus {
   if (status.kind !== 'dark') return status;
-  return { kind: 'empty', message: `No fleet runs or proposals since ${darkSinceLabel(status.since)}.` };
+  return { kind: 'empty', message: `Nothing produced since ${darkSinceLabel(status.since)}.` };
 }

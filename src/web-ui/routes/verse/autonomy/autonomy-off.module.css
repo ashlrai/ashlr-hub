@@ -1,0 +1,180 @@
+/*
+ * routes/verse/autonomy/autonomy-off.module.css — the shared "autonomy is
+ * off" state (AutonomyOffState.tsx). The same frame as a surface card so it
+ * sits in the grid like one; inside, one title row, one line, one action.
+ * Colour only on the dot and the done marks. Tokens only (style-scan-310).
+ */
+.state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--card-pad);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  width: 100%;
+}
+
+/* The dot stays on the title's first line however the title wraps. */
+.titleRow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  margin-top: calc((var(--text-lg-line) - 8px) / 2);
+  border-radius: var(--radius-full);
+  background: var(--status-neutral-solid);
+}
+.dot[data-tone='danger'] {
+  background: var(--status-danger-solid);
+}
+.dot[data-tone='warning'] {
+  background: var(--status-warning-solid);
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg-size);
+  line-height: var(--text-lg-line);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-display);
+  color: var(--text-primary);
+}
+
+.since {
+  margin-left: auto;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.why {
+  margin: calc(-1 * var(--space-2)) 0 0;
+  max-width: 64ch;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-secondary);
+}
+
+/* The command reads in full, in mono, before it is copied. */
+.command {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: min(100%, 460px);
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-code);
+}
+.command[data-state='failed'] {
+  border-color: var(--status-danger-solid);
+}
+
+.code {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.prompt {
+  color: var(--text-tertiary);
+  user-select: none;
+}
+
+.action {
+  display: flex;
+}
+
+.progress {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+  width: 100%;
+}
+
+.count {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+.check[data-mark='todo'],
+.check[data-mark='unknown'] {
+  color: var(--text-tertiary);
+}
+
+.mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border: 1.5px solid var(--border-strong);
+  border-radius: var(--radius-full);
+}
+.check[data-mark='done'] .mark {
+  border-color: var(--status-success-solid);
+  background: var(--status-success-solid);
+  color: var(--text-on-accent);
+}
+.check[data-mark='unknown'] .mark {
+  border-style: dashed;
+  border-color: var(--status-unknown-solid);
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

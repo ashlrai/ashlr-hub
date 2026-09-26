@@ -2,12 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import { GrowthSection } from './GrowthSection.js';
 import { evictAll } from '../../../data/cache.js';
-import { stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
+import { draftRefused, stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
 import { mockCompactViewport, mockWideViewport, type ViewportMock } from '../shell/viewport.test-support.js';
 import { showTable } from '../../../components/charts/chart-test-support.js';
 import { formatDayLabel, formatTimeLabel } from '../../../components/charts/format.js';
 import type { ModelStats } from '../../../data/api-types.js';
-import { fleetHistory, learningState } from '../command/fixtures.test-support.js';
+import { DARK_SINCE, authorityStatus, fleetHistory, learningState } from '../command/fixtures.test-support.js';
 import { HARNESS_BASELINE_WINDOW_MS, weeklyBins } from '../growth/growth-model.js';
 import { darkSinceLabel } from '../fleet/dark-since.js';
 
@@ -37,6 +37,8 @@ describe('GrowthSection', () => {
     expect(screen.getByRole('cell', { name: 'qwen3.8:27b' })).toBeInTheDocument();
     showTable('Experiments');
     expect(within(screen.getByRole('figure', { name: 'Experiments' })).getByRole('cell', { name: 'running · 5/8 pairs' })).toBeInTheDocument();
+    // Autonomy is on and producing: no "off" state, every real data path as before.
+    expect(screen.queryByTestId('autonomy-off')).toBeNull();
   });
 
   it('labels each week by the calendar day it ends on, in every rung of the axis and the table', async () => {
@@ -69,15 +71,46 @@ describe('GrowthSection', () => {
     expect(names).toEqual(['claude-haiku-4-5-20251001', 'claude-haiku-4-5', 'grok-4.7-fast…']);
   });
 
-  it('is honest when learning has not landed and history is dark', async () => {
+  it('is ONE state, not six empty cards, when autonomy is off and nothing was produced', async () => {
     stubSurfaceFetch({ kind: 'dark', routes: { '/api/verse/learning': null } });
     render(<GrowthSection />);
-    // History's `darkSince` is "quiet since", never "dark" (fleet/dark-since.ts
-    // quietSinceStatus) — the viewer's local day, so the words come from the
-    // same helper ('Sep 1' in New York, 'Sep 2' in Tokyo).
-    await waitFor(() => expect(screen.getAllByText(`No fleet runs or proposals since ${darkSinceLabel(fleetHistory('dark').darkSince!)}.`).length).toBeGreaterThanOrEqual(2));
-    await waitFor(() => expect(screen.getAllByText(/Self-improvement is not in this build yet/).length).toBe(2));
-    expect(screen.getByText('No model dispatched fleet work in the last 30 days.')).toBeInTheDocument();
+    const state = await screen.findByRole('region', { name: 'Growth starts with the first fleet run.' });
+    expect(state).toHaveTextContent('Autonomy is off. Approve a standing grant to let the fleet work.');
+    // THE dark-since day (the live view's), as the viewer's local day.
+    expect(state).toHaveTextContent(`Fleet dark since ${darkSinceLabel(DARK_SINCE)}`);
+    expect(within(state).getByRole('button', { name: 'Approve in Command' })).toBeInTheDocument();
+    expect(screen.queryAllByRole('figure')).toHaveLength(0);
+    expect(screen.queryByText(/No fleet runs or proposals|Nothing produced since/)).toBeNull();
+  });
+
+  it('asks for the one-time setup, copyable, when no grant can be drafted yet', async () => {
+    const custody = { installed: true, keyInitialized: false, githubApp: false, claudeToken: false };
+    stubSurfaceFetch({ kind: 'dark', routes: { '/api/verse/authority/draft': draftRefused(), '/api/verse/authority': authorityStatus('dark', Date.now(), { custody }) } });
+    render(<GrowthSection />);
+    const state = await screen.findByRole('region', { name: 'Growth starts with the first fleet run.' });
+    await waitFor(() => expect(within(state).getByRole('button', { name: 'Copy the command: ashlr authority setup' })).toBeInTheDocument());
+    expect(state).toHaveTextContent('Autonomy is off. Nothing runs or merges on its own until the one-time setup is done.');
+    expect(within(state).getByRole('list', { name: 'Setup: 1 of 5 ready' })).toBeInTheDocument();
+  });
+
+  it('keeps the cards that have something real to draw while dormant, each under the one state', async () => {
+    const now = Date.now();
+    stubSurfaceFetch({ kind: 'dark', now, routes: { '/api/models': models, '/api/verse/learning': learningState('live', now) } });
+    render(<GrowthSection />);
+    const state = await screen.findByRole('region', { name: 'Autonomy is off' });
+    for (const name of ['Model outcomes · 30d', 'Harness level', 'Experiments']) expect(await screen.findByRole('figure', { name })).toBeInTheDocument();
+    // History cards would each repeat the same "since" date: left out.
+    for (const name of ['Merges per week', 'Cost per merge', 'Pipeline · 90d', 'Merges by day']) expect(screen.queryByRole('figure', { name })).toBeNull();
+    expect(state.compareDocumentPosition(screen.getByRole('figure', { name: 'Harness level' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('keeps every history card, with short empty lines, when autonomy is off but the fleet produced recently', async () => {
+    const now = Date.now();
+    stubSurfaceFetch({ kind: 'dark', now, routes: { '/api/verse/fleet/history': fleetHistory('live', now) } });
+    render(<GrowthSection />);
+    await screen.findByRole('region', { name: 'Autonomy is off' });
+    for (const name of ['Merges per week', 'Cost per merge', 'Pipeline · 90d', 'Merges by day', 'Model outcomes · 30d']) expect(screen.getByRole('figure', { name })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('No fleet dispatches in 30 days.')).toBeInTheDocument());
   });
 
   it('draws a defaults-only harness over its trailing window, never from the epoch baseline stamp', async () => {
@@ -95,7 +128,7 @@ describe('GrowthSection', () => {
     expect(whens).toEqual([formatTimeLabel(now - HARNESS_BASELINE_WINDOW_MS)]);
     expect(within(harness).queryByText(formatTimeLabel(0))).not.toBeInTheDocument();
     // The experiments card says so in plain words (no stray hyphen).
-    expect(within(screen.getByRole('figure', { name: 'Experiments' })).getByText('No experiments have run yet.')).toBeInTheDocument();
+    expect(within(screen.getByRole('figure', { name: 'Experiments' })).getByText('No experiments yet.')).toBeInTheDocument();
   });
 
   it('stacks into one column at 375', async () => {

@@ -163,10 +163,6 @@ button.chip:hover {
   color: var(--text-tertiary);
 }
 
-.sinceEmpty {
-  color: var(--text-tertiary);
-}
-
 .sinceChip {
   display: inline-flex;
   align-items: center;

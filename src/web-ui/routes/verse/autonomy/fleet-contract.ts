@@ -72,4 +72,6 @@ export interface OptionalFleetRead<T> {
   available: boolean;
   /** A sentence explaining the absence. null when the read succeeded. */
   reason: string | null;
+  /** The route's machine-readable refusal code, when it sent one (optional reads only). */
+  code?: string | null;
 }

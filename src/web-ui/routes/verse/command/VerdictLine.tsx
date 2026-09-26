@@ -65,25 +65,30 @@ export function useLastLooked(): string | null {
   return previous;
 }
 
-export function SinceStrip({ lastLookedAt, items }: { lastLookedAt: string | null; items: SinceItem[] }) {
-  if (!lastLookedAt) return null;
+/** A glance back sooner than this is the same visit; the strip stays hidden. */
+export const SINCE_MIN_GAP_MS = 3_600_000;
+
+/**
+ * "Since 9:40 AM: 3 merged · 1 reverted". Shown only when something changed
+ * AND the previous look was at least an hour ago — "Since 2:14 PM: nothing
+ * new" on every return from another surface was noise.
+ */
+export function SinceStrip({ lastLookedAt, items, now = Date.now() }: { lastLookedAt: string | null; items: SinceItem[]; now?: number }) {
+  if (!lastLookedAt || items.length === 0) return null;
   const when = new Date(lastLookedAt);
-  const sameDay = when.toDateString() === new Date().toDateString();
+  if (!Number.isFinite(when.getTime()) || now - when.getTime() < SINCE_MIN_GAP_MS) return null;
+  const sameDay = when.toDateString() === new Date(now).toDateString();
   const label = sameDay
     ? when.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
     : when.toLocaleString('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit' });
   return (
     <div className={styles.since} role="group" aria-label={`Since you looked at ${label}`}>
       <span className={styles.sinceLead}>Since {label}</span>
-      {items.length === 0 ? (
-        <span className={styles.sinceEmpty}>nothing new</span>
-      ) : (
-        items.map((item) => (
-          <span key={item.id} className={styles.sinceChip} data-tone={item.tone}>
-            {item.text}
-          </span>
-        ))
-      )}
+      {items.map((item) => (
+        <span key={item.id} className={styles.sinceChip} data-tone={item.tone}>
+          {item.text}
+        </span>
+      ))}
     </div>
   );
 }

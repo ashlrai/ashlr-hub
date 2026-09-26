@@ -203,6 +203,29 @@ export function buildKpis({ fleet, history, learning, policy }: KpiInputs): Kpi[
   ];
 }
 
+/**
+ * True when the KPI row would say nothing: no merge this week or last, no
+ * post-merge reading, no cycle time, no metered spend, no lift — "0", four
+ * dashes and "$0.00". Command drops the row then while its "Autonomy is off"
+ * banner explains why; a row with any real figure is always kept.
+ */
+export function kpisSayNothing({ fleet, history, learning }: Pick<KpiInputs, 'fleet' | 'history' | 'learning'>): boolean {
+  const days = history?.days ?? [];
+  const merges = (d: FleetHistoryDay) => d.merges.realized;
+  const merged7 = fleet?.summary.merged7d ?? windowSum(days, merges, 7);
+  const mergedPrior = windowSum(days, merges, 7, 7);
+  const active = learning?.active ?? null;
+  const lift = active?.experimentId ? (learning?.experiments.find((e) => e.id === active.experimentId)?.lift ?? null) : null;
+  return (
+    (merged7 ?? 0) === 0 &&
+    (mergedPrior ?? 0) === 0 &&
+    (fleet?.summary.postMergeGreenPct7d ?? null) === null &&
+    (fleet?.summary.cycleTimeP50Ms7d ?? null) === null &&
+    (windowSum(days, meteredCost, 7) ?? 0) === 0 &&
+    lift === null
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Since you looked
 // ---------------------------------------------------------------------------

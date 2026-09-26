@@ -57,42 +57,20 @@ export function ChipDot({ tone }: { tone: ChipTone }) {
   return <span className={styles.dot} data-tone={tone} aria-hidden="true" />;
 }
 
-export interface AutonomyBarProps {
-  read: OptionalRead<AuthorityStatusV1> | undefined;
-  loading: boolean;
-  budgetMode: BudgetMode | null;
-  actions: SurfaceActions;
-  compact: boolean;
-  now: number;
+/**
+ * The Touch ID sheet and what approving it does, as one piece: the bar's
+ * switch and grant chip open it, and so does Command's "Autonomy is off"
+ * banner (autonomy/AutonomyOffState) — one sheet, one approve path.
+ */
+export interface GrantFlow {
+  /** `then`: the switch position to apply after signing, if the new grant allows it. */
+  open: (intent: GrantIntent, why: string, then?: AutonomySwitch | null) => void;
+  /** Render once (the bar does unless its owner passes the flow in). */
+  sheet: ReactNode;
 }
 
-export function AutonomyBar({ read, loading, budgetMode, actions, compact, now }: AutonomyBarProps) {
-  const status = read?.value ?? null;
+export function useGrantFlow(actions: SurfaceActions): GrantFlow {
   const [sheet, setSheet] = useState<{ intent: GrantIntent; then: AutonomySwitch | null; why: string } | null>(null);
-  /** What the last Stop did (drain count, merges revoked) — shown while stopped. */
-  const [stopNote, setStopNote] = useState<string | null>(null);
-  const [budgetOpen, setBudgetOpen] = useState(false);
-  const unavailable = !status;
-  const chip = grantChip(status, now);
-
-  function onSwitch(to: AutonomySwitch): void {
-    if (!status) return;
-    const change = classifySwitch(status, to);
-    if (change === 'same') return;
-    if (change === 'raise-needs-grant') {
-      const paused = status.grant.state === 'paused';
-      setSheet({
-        intent: paused ? 're-approve' : 'grant',
-        then: to,
-        why: paused
-          ? `${status.grant.reason ?? 'The grant is paused.'} ${SWITCH_LABEL[to]} needs it re-approved.`
-          : `${SWITCH_LABEL[to]} is beyond what the installed grant allows, so it needs a new grant.`,
-      });
-      return;
-    }
-    // Lower, or raise within the grant: straight to the server, no dialog.
-    actions.act(() => postAuthority({ action: 'switch', to }), `Switch autonomy to ${SWITCH_LABEL[to]}`);
-  }
 
   function approve(draft: AuthorityGrantDraft): void {
     if (!sheet) return;
@@ -115,6 +93,62 @@ export function AutonomyBar({ read, loading, budgetMode, actions, compact, now }
         },
       },
     );
+  }
+
+  return {
+    open: (intent, why, then = null) => setSheet({ intent, then, why }),
+    sheet: (
+      <GrantSheet
+        open={sheet !== null}
+        intent={sheet?.intent ?? 'grant'}
+        then={sheet?.then ?? null}
+        why={sheet?.why ?? ''}
+        busy={actions.busy}
+        onApprove={approve}
+        onClose={() => setSheet(null)}
+      />
+    ),
+  };
+}
+
+export interface AutonomyBarProps {
+  read: OptionalRead<AuthorityStatusV1> | undefined;
+  loading: boolean;
+  budgetMode: BudgetMode | null;
+  actions: SurfaceActions;
+  compact: boolean;
+  now: number;
+  /** A flow shared with the rest of the surface; its owner renders `sheet`. Omitted = the bar's own. */
+  grantFlow?: GrantFlow;
+}
+
+export function AutonomyBar({ read, loading, budgetMode, actions, compact, now, grantFlow }: AutonomyBarProps) {
+  const status = read?.value ?? null;
+  const ownFlow = useGrantFlow(actions);
+  const flow = grantFlow ?? ownFlow;
+  /** What the last Stop did (drain count, merges revoked) — shown while stopped. */
+  const [stopNote, setStopNote] = useState<string | null>(null);
+  const [budgetOpen, setBudgetOpen] = useState(false);
+  const unavailable = !status;
+  const chip = grantChip(status, now);
+
+  function onSwitch(to: AutonomySwitch): void {
+    if (!status) return;
+    const change = classifySwitch(status, to);
+    if (change === 'same') return;
+    if (change === 'raise-needs-grant') {
+      const paused = status.grant.state === 'paused';
+      flow.open(
+        paused ? 're-approve' : 'grant',
+        paused
+          ? `${status.grant.reason ?? 'The grant is paused.'} ${SWITCH_LABEL[to]} needs it re-approved.`
+          : `${SWITCH_LABEL[to]} is beyond what the installed grant allows, so it needs a new grant.`,
+        to,
+      );
+      return;
+    }
+    // Lower, or raise within the grant: straight to the server, no dialog.
+    actions.act(() => postAuthority({ action: 'switch', to }), `Switch autonomy to ${SWITCH_LABEL[to]}`);
   }
 
   const options = status ? switchOptions(status) : switchOptions({ switch: 'off', maxSwitchWithoutGrant: 'off' });
@@ -167,7 +201,7 @@ export function AutonomyBar({ read, loading, budgetMode, actions, compact, now }
         {!compact ? (
           <>
             <BudgetPill mode={budgetMode} onOpen={() => setBudgetOpen(true)} />
-            <GrantChip chip={chip} onOpen={(intent) => setSheet({ intent, then: null, why: chip.detail })} />
+            <GrantChip chip={chip} onOpen={(intent) => flow.open(intent, chip.detail)} />
           </>
         ) : null}
         <span className={styles.barSpacer} />
@@ -177,18 +211,10 @@ export function AutonomyBar({ read, loading, budgetMode, actions, compact, now }
       {compact ? (
         <div className={styles.barSecondary}>
           <BudgetPill mode={budgetMode} onOpen={() => setBudgetOpen(true)} />
-          <GrantChip chip={chip} onOpen={(intent) => setSheet({ intent, then: null, why: chip.detail })} />
+          <GrantChip chip={chip} onOpen={(intent) => flow.open(intent, chip.detail)} />
         </div>
       ) : null}
-      <GrantSheet
-        open={sheet !== null}
-        intent={sheet?.intent ?? 'grant'}
-        then={sheet?.then ?? null}
-        why={sheet?.why ?? ''}
-        busy={actions.busy}
-        onApprove={approve}
-        onClose={() => setSheet(null)}
-      />
+      {grantFlow ? null : ownFlow.sheet}
       <BudgetSheet open={budgetOpen} onClose={() => setBudgetOpen(false)} status={status} />
     </>
   );

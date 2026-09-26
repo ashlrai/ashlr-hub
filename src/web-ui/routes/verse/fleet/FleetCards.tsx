@@ -200,7 +200,7 @@ export function WhySeatCard({ read, preview, view, now }: { read: OptionalRead<F
       ) : preview ? (
         <DecisionView decision={preview} view={view} now={now} />
       ) : (
-        <CardNote tone="unknown">No routing decision to show — nothing was dispatched, and the router preview did not answer.</CardNote>
+        <CardNote tone="unknown">No routing decision yet. The router preview didn't answer.</CardNote>
       )}
     </Card>
   );
@@ -233,7 +233,7 @@ export function ParkedCard({ read, now }: { read: OptionalRead<FleetLiveSnapshot
 // Overnight
 // ---------------------------------------------------------------------------
 
-export function OvernightCard({ read, onOpenAdvanced }: { read: OptionalFleetRead<OvernightStatus> | undefined; onOpenAdvanced: () => void }) {
+export function OvernightCard({ read, onOpenAdvanced, dark = false }: { read: OptionalFleetRead<OvernightStatus> | undefined; onOpenAdvanced: () => void; /** The fleet is dark: it has no "normal schedule" to run on. */ dark?: boolean }) {
   const status = read?.value ?? null;
   const run = status?.run ?? null;
   return (
@@ -251,7 +251,7 @@ export function OvernightCard({ read, onOpenAdvanced }: { read: OptionalFleetRea
       ) : !status ? (
         <CardNote tone="unknown">{read.reason ?? 'The overnight lane did not answer.'}</CardNote>
       ) : !status.armed && !run ? (
-        <CardNote>Nothing armed. The fleet runs on its normal schedule; arm an unattended run from Advanced when you walk away.</CardNote>
+        <CardNote>{dark ? 'Nothing armed.' : 'Nothing armed. The fleet runs on its normal schedule.'}</CardNote>
       ) : (
         <div className={styles.overnight}>
           {run?.stopRule ? <p className={styles.overnightLead}>{describeStopRule(run.stopRule)}</p> : null}

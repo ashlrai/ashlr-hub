@@ -80,3 +80,20 @@ export const STATUS_WORD: Record<LeaderAction['status'], string> = {
   failed: 'Failed',
   escalated: 'Needs you',
 };
+
+/**
+ * The Leader has nothing to show — no memo, no action, nothing graded, no
+ * standard — so Mind says it once instead of three empty cards. The title is
+ * the fact; the line is the last run's own reason when it gave one. Null
+ * while the Leader has anything to show (or has not answered).
+ */
+export function leaderSilence(state: LeaderStateV1 | null): { title: string; why: string | null } | null {
+  if (!state) return null;
+  const standards = state.standards.filter((s) => s.retiredAt === null);
+  if (state.timeline.length || state.actions.length || state.hitRate.graded > 0 || standards.length) return null;
+  const reason = state.lastRun?.reason?.trim() || null;
+  return {
+    title: state.lastRun ? "The Leader hasn't written a memo yet." : "The Leader hasn't run yet.",
+    why: reason ? (/[.!?…]$/.test(reason) ? reason : `${reason}.`) : null,
+  };
+}

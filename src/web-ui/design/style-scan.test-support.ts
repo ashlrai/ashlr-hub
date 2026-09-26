@@ -42,6 +42,8 @@ export const NEW_310_UI_PATHS: readonly string[] = [
   'routes/verse/fleet',
   'routes/verse/growth',
   'routes/verse/mind',
+  'routes/verse/autonomy/AutonomyOffState.tsx',
+  'routes/verse/autonomy/autonomy-off.module.css',
   'routes/verse/sections/CommandSection.tsx',
   'routes/verse/sections/FleetSection.tsx',
   'routes/verse/sections/GrowthSection.tsx',

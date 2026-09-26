@@ -16,6 +16,13 @@
  * At 375 px: Needs you, Leader, KPIs two per row, burn-downs in a snap
  * strip, then a 6 h swimlane — the DOM order below IS that order.
  *
+ * Autonomy off (no grant, grant lapsed, Stop, switch at Off, daemon down):
+ * ONE banner under the top bar (autonomy/AutonomyOffState) says what is off
+ * and holds the one action — Approve grant (the bar's own Touch ID sheet), or
+ * the one-time `ashlr authority setup` when no grant can be drafted yet. It
+ * stands in for the verdict line and the Since strip, and the KPI row and the
+ * swimlane are left out while they would only draw zeros and dashes.
+ *
  * Every source is optional (surface-data.ts): a Track B module that has not
  * landed is one card's designed "not in this build" state, never a blank
  * surface. Polling runs only while Command is the visible surface
@@ -34,8 +41,10 @@ import { useNow } from '../autonomy/use-ticker.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { useViewport } from '../shell/viewport.js';
 import { ActionStatus, useSurfaceActions } from '../command/actions.js';
-import { AutonomyBar } from '../command/AutonomyBar.js';
-import { buildKpis, claudeReserve, mergeSeatHistory, recordReading, seatBurns, seatNames, sinceYouLooked, type SeatReading } from '../command/command-model.js';
+import { AutonomyBar, useGrantFlow } from '../command/AutonomyBar.js';
+import { AutonomyOffState, useDraftReadiness } from '../autonomy/AutonomyOffState.js';
+import { autonomyOffState } from '../autonomy/autonomy-off-model.js';
+import { buildKpis, claudeReserve, kpisSayNothing, mergeSeatHistory, recordReading, seatBurns, seatNames, sinceYouLooked, type SeatReading } from '../command/command-model.js';
 import { KpiRow } from '../command/KpiRow.js';
 import { LeaderCard } from '../command/LeaderCard.js';
 import { NeedsYouCard } from '../command/NeedsYouCard.js';
@@ -52,7 +61,7 @@ import {
   learningQuery,
   seatHistoryQuery,
 } from '../command/surface-data.js';
-import { darkSinceLabel, fleetDarkSince, fleetDarkStatus } from '../fleet/dark-since.js';
+import { fleetDarkSince, fleetDarkStatus } from '../fleet/dark-since.js';
 import { laneRows, runTone } from '../fleet/live-model.js';
 import styles from '../command/command.module.css';
 
@@ -114,6 +123,8 @@ export function CommandSection() {
   // countdown rings keep their own 1 s ticker.
   const now = useNow(30_000);
   const actions = useSurfaceActions();
+  // One Touch ID sheet for the bar AND the "Autonomy is off" banner.
+  const grantFlow = useGrantFlow(actions);
   const lastLooked = useLastLooked();
 
   // The seat roster, for Claude's reset WORDS (the budget route carries only
@@ -157,6 +168,11 @@ export function CommandSection() {
   const burns = useMemo(() => seatBurns(view, merged.readings, seats, merged.recorded), [view, merged, seats]);
   // Needs-you names seats as the burn-downs beside it do, never by raw id.
   const names = useMemo(() => seatNames(seats, view), [seats, view]);
+  // The banner decides once both reads (and, with no grant, the draft) have
+  // answered — never a flash of "off" while Command is still loading.
+  const draft = useDraftReadiness(auth?.grant.state === 'none');
+  const banner = authority.data && fleet.data && draft !== undefined ? autonomyOffState({ authority: auth, live, draft }) : null;
+  const kpisEmpty = useMemo(() => kpisSayNothing({ fleet: live, history: hist, learning: learning.data?.value ?? null }), [live, hist, learning.data]);
   const since = sinceYouLooked({ lastLookedAt: lastLooked, fleet: live, leader: leader.data?.value ?? null, activity: activity.data });
 
   const windowH = compact ? 6 : 12;
@@ -172,12 +188,13 @@ export function CommandSection() {
           ? { kind: 'empty', message: `No runs in the last ${windowH} hours.` }
           : { kind: 'ready' };
 
+  // The banner (or the verdict) already says the fleet is dark; "All clear"
+  // needs no third copy of it.
   const fleetLine = live
     ? live.state === 'dark'
-      ? `Fleet dark${darkSince ? ` since ${darkSinceLabel(darkSince)}` : ''}.`
+      ? null
       : `Fleet ${live.state}: ${live.summary.building ?? '—'} building, ${live.summary.queued ?? '—'} queued.`
     : 'Fleet status unknown.';
-
   const refreshing = [authority, fleet].some((q) => q.status === 'refreshing');
 
   return (
@@ -186,17 +203,23 @@ export function CommandSection() {
       actions={refreshing ? <RefreshIndicator /> : null}
       lead={
         <div className={styles.lead}>
-          <AutonomyBar read={authority.data} loading={authority.status === 'loading'} budgetMode={view?.mode ?? null} actions={actions} compact={compact} now={now} />
+          <AutonomyBar read={authority.data} loading={authority.status === 'loading'} budgetMode={view?.mode ?? null} actions={actions} compact={compact} now={now} grantFlow={grantFlow} />
           <ActionStatus actions={actions} />
-          <VerdictLine
-            authority={auth}
-            building={live?.summary.building ?? null}
-            mergedToday={live?.summary.mergedToday ?? null}
-            revertsToday={live?.summary.revertsToday ?? null}
-            reserve={claudeReserve(view)}
-            darkSince={darkSince}
-          />
-          <SinceStrip lastLookedAt={lastLooked} items={since} />
+          {banner ? (
+            <AutonomyOffState state={banner} here="command" onGrant={(intent) => grantFlow.open(intent, banner.why)} />
+          ) : (
+            <>
+              <VerdictLine
+                authority={auth}
+                building={live?.summary.building ?? null}
+                mergedToday={live?.summary.mergedToday ?? null}
+                revertsToday={live?.summary.revertsToday ?? null}
+                reserve={claudeReserve(view)}
+                darkSince={darkSince}
+              />
+              <SinceStrip lastLookedAt={lastLooked} items={since} now={now} />
+            </>
+          )}
         </div>
       }
     >
@@ -206,27 +229,32 @@ export function CommandSection() {
       <Cell span={7}>
         <LeaderCard read={leader.data} loading={leader.status === 'loading'} actions={actions} />
       </Cell>
-      <Cell span={12}>
-        <KpiRow kpis={kpis} />
-      </Cell>
+      {banner && kpisEmpty ? null : (
+        <Cell span={12}>
+          <KpiRow kpis={kpis} />
+        </Cell>
+      )}
       <Cell span={12}>
         <SeatBurnDowns burns={burns} now={now} compact={compact} />
       </Cell>
       <Cell span={12}>
         <CloudCard actions={actions} now={now} />
       </Cell>
-      <Cell span={12}>
-        <Swimlane
-          title={`Last ${windowH} hours`}
-          description="Fleet lanes; bars coloured by status, outlines are queued or parked"
-          status={runsStatus}
-          lanes={lanes}
-          from={from}
-          to={now}
-          now={now}
-          toneOf={runTone}
-        />
-      </Cell>
+      {banner && lanes.length === 0 ? null : (
+        <Cell span={12}>
+          <Swimlane
+            title={`Last ${windowH} hours`}
+            description="Fleet lanes; bars coloured by status, outlines are queued or parked"
+            status={runsStatus}
+            lanes={lanes}
+            from={from}
+            to={now}
+            now={now}
+            toneOf={runTone}
+          />
+        </Cell>
+      )}
+      {grantFlow.sheet}
       {actions.dialogs}
     </Surface>
   );

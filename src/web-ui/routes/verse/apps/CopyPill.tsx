@@ -12,38 +12,15 @@
  * A copy that fails says so instead of showing a check.
  */
 import { useEffect, useRef, useState } from 'react';
+import { copyText } from '../../../components/primitives/clipboard.js';
 import { IconCheck, IconCopy } from '../../../components/primitives/icons.js';
 import styles from './Apps.module.css';
 
+// Moved to a style-free module so other surfaces can copy without Apps' CSS.
+export { copyText };
+
 /** SPEC-310C §4. */
 export const COPY_CONFIRM_MS = 1_200;
-
-export async function copyText(text: string): Promise<boolean> {
-  try {
-    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // fall through to the textarea path
-  }
-  if (typeof document === 'undefined') return false;
-  const area = document.createElement('textarea');
-  area.value = text;
-  area.setAttribute('readonly', '');
-  area.style.position = 'fixed';
-  area.style.opacity = '0';
-  document.body.appendChild(area);
-  area.select();
-  let ok = false;
-  try {
-    ok = typeof document.execCommand === 'function' && document.execCommand('copy');
-  } catch {
-    ok = false;
-  }
-  area.remove();
-  return ok;
-}
 
 export function CopyPill({ text, label, what }: { text: string; label?: string; /** "the Codex launch command" */ what: string }) {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');

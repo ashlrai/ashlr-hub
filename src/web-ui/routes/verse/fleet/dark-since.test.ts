@@ -67,7 +67,7 @@ describe('fleetDarkSince — the one "Fleet dark since"', () => {
 describe('quietSinceStatus — history\'s "last run or proposal" is not "dark"', () => {
   it('re-words the history dark state and passes everything else through', () => {
     const quiet = quietSinceStatus({ kind: 'dark', since: '2026-08-18T16:00:00.000Z' });
-    expect(quiet).toEqual({ kind: 'empty', message: `No fleet runs or proposals since ${darkSinceLabel('2026-08-18T16:00:00.000Z')}.` });
+    expect(quiet).toEqual({ kind: 'empty', message: `Nothing produced since ${darkSinceLabel('2026-08-18T16:00:00.000Z')}.` });
     expect(JSON.stringify(quiet)).not.toMatch(/dark/i);
     expect(quietSinceStatus({ kind: 'ready' })).toEqual({ kind: 'ready' });
     expect(quietSinceStatus({ kind: 'unknown', reason: 'x' })).toEqual({ kind: 'unknown', reason: 'x' });
