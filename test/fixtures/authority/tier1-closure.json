@@ -635,6 +635,7 @@
     "src/core/verse/session-handoff.ts",
     "src/core/verse/session-search.ts",
     "src/core/verse/session-store.ts",
+    "src/core/verse/transient-events.ts",
     "src/core/verse/turn-queue.ts",
     "src/core/verse/types.ts",
     "src/core/verse/verse-api.ts",
