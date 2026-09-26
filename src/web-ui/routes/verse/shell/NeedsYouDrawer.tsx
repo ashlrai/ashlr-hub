@@ -21,7 +21,7 @@
  *
  * A right-hand sheet on a desktop window; a full-screen sheet below 480px.
  */
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Button, IconButton } from '../../../components/primitives/Button.js';
 import { useFocusTrap } from '../../../components/primitives/focus-trap.js';
@@ -75,6 +75,11 @@ export { VERSE_ANCHOR_EVENT } from '../verse-ui-store.js';
 
 /** Cloud PR items (cloud-api.ts cloudNeedsYouItems) — the only rows with a gate preview. */
 const CLOUD_PR_ITEM_PREFIX = 'fleet:owner-lane-pr:cloud-';
+/** Any cloud task's item (its PR, or its failed launch) → the task id, for its evidence. */
+const CLOUD_ITEM_RE = /^(?:fleet:owner-lane-pr|chats:chat-failed):cloud-(ct_\d{8}T\d{4}_[a-z0-9]{6})$/;
+
+/** The task's evidence sheet (cloud/EvidenceTimeline.tsx): its own chunk, fetched the first time it opens. */
+const EvidenceTimeline = lazy(() => import('../cloud/EvidenceTimeline.js'));
 
 const DRAWER_ACTION: Readonly<Record<string, NeedsYouActionKind>> = {
   'drawer.approve': 'approve',
@@ -628,6 +633,8 @@ function ItemDetail({
   preview: CloudPrPreview | null;
 }) {
   const targetLabel = TARGET_LABEL(item);
+  const cloudTaskId = CLOUD_ITEM_RE.exec(item.id)?.[1] ?? null;
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
   // The same readable text as the row (needs-you-model needsYouRowView), with room for the whole title.
   const view = needsYouRowView(item, now);
   // "Claude Max" and "Fable 5.1", never `claude-a` / `claude:claude-fable-5-1`
@@ -674,6 +681,11 @@ function ItemDetail({
             {targetLabel}
           </Button>
         ) : null}
+        {cloudTaskId ? (
+          <Button variant="subtle" size="sm" aria-haspopup="dialog" onClick={() => setEvidenceOpen(true)}>
+            Evidence
+          </Button>
+        ) : null}
         {item.actions.map((action) => {
           const key = NEEDS_YOU_ACTION_KEYS[action.kind];
           const needsDispatch = action.request !== null;
@@ -693,6 +705,11 @@ function ItemDetail({
         })}
       </div>
       {!dispatchEnabled ? <p className={styles.caveat}>Read-only session — actions need `ashlr verse`.</p> : null}
+      {evidenceOpen && cloudTaskId ? (
+        <Suspense fallback={null}>
+          <EvidenceTimeline taskId={cloudTaskId} title={view.title} open onClose={() => setEvidenceOpen(false)} now={now} />
+        </Suspense>
+      ) : null}
     </article>
   );
 }

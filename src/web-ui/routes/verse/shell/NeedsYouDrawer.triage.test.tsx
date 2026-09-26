@@ -5,7 +5,8 @@
  *   - "Land all clean" lands every Clean PR after ONE confirmation, each POST
  *     pinned to the head SHA its preview judged;
  *   - X picks rows and R then closes every pick (one confirmation, one token);
- *   - Shift-click picks without opening; the detail lists every check.
+ *   - Shift-click picks without opening; the detail lists every check and
+ *     opens the task's evidence timeline.
  */
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -197,5 +198,14 @@ describe('cloud PR triage in the drawer', () => {
     expect(within(verdict).getByText('2 commits behind')).toBeInTheDocument();
     expect(within(verdict).getByText('No protected paths')).toBeInTheDocument();
     expect(within(verdict).getByText('bbbbbbb')).toBeInTheDocument();
+  });
+
+  it('a cloud item opens its evidence timeline from the detail', async () => {
+    setup();
+    const user = userEvent.setup();
+    await openDrawer();
+    await user.click(row(/Tidy the drawer/));
+    await user.click(await screen.findByRole('button', { name: 'Evidence' }));
+    expect(await screen.findByRole('dialog', { name: 'Evidence' })).toBeInTheDocument();
   });
 });
