@@ -333,7 +333,7 @@ describe('ContextModeControl', () => {
     await user.click(chip);
     const menu = screen.getByRole('menu', { name: 'Context' });
     expect(within(menu).queryByRole('menuitemradio')).toBeNull();
-    expect(menu).toHaveTextContent('Claude Code (driving the local model) compacts this chat on its own at ≈33k of 66k.');
+    expect(menu).toHaveTextContent('Claude Code (driving the local model) compacts this chat on its own at ≈33k of 64k.');
     const item = within(menu).getByRole('menuitem', { name: /Compact now/ });
     expect(item).toHaveFocus();
     await user.keyboard('{Enter}');

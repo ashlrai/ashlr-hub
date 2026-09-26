@@ -17,7 +17,7 @@ import {
   sessionContext,
   turnContextStats,
 } from '../usage/context-model.js';
-import { formatElapsed, windowSourceText } from '../verse-model.js';
+import { formatContextWindow, formatElapsed, windowSourceText } from '../verse-model.js';
 import { formatWholePercent } from '../autonomy/format.js';
 import { formatTokens, lastTurnActivityAt } from '../verse-store.js';
 import styles from './ChatUsage.module.css';
@@ -60,7 +60,7 @@ export function ChatUsage({
         <div>
           <dt>Context</dt>
           <dd title={ctx.exact ? undefined : 'An upper bound: the CLI reported only the turn total, which sums every call.'}>
-            {bound}{formatTokens(ctx.tokens)}{ctx.window === null ? '' : ` / ${formatTokens(ctx.window)}`}
+            {bound}{formatTokens(ctx.tokens)}{ctx.window === null ? '' : ` / ${formatContextWindow(ctx.window)}`}
           </dd>
         </div>
       </dl>

@@ -11,7 +11,6 @@ import {
   buildLocalModelRow,
   buildLocalModelsView,
   formatBytes,
-  formatContext,
   formatAge,
   formatCountdown,
   localStaleness,
@@ -174,10 +173,14 @@ describe('formatters', () => {
     expect(formatCountdown(null)).toBe('—');
   });
 
-  it('formats context windows compactly', () => {
-    expect(formatContext(262_144)).toBe('256k');
-    expect(formatContext(65_536)).toBe('64k');
-    expect(formatContext(null)).toBe('—');
+  it('a row carries the display name and the quantization as a separate detail', () => {
+    const r = buildLocalModelRow(model({ name: 'qwen3.8:27b-q8_0' }), 0);
+    expect(r.name).toBe('qwen3.8:27b-q8_0');
+    expect(r.displayName).toBe('Qwen3.8 27B');
+    expect(r.nameDetail).toBe('q8_0');
+    const g = buildLocalModelRow(model({ name: 'gpt-oss:20b' }), 0);
+    expect(g.displayName).toBe('gpt-oss 20B');
+    expect(g.nameDetail).toBeNull();
   });
 });
 

@@ -370,12 +370,12 @@ describe('verse seats — local Ollama', () => {
     const qwen = discovery.seats.find((s) => s.id === 'local:qwen3-coder-next:ctx64k')!;
     expect(qwen.engine).toBe('local');
     expect(qwen.accountId).toBe('local');
-    expect(qwen.label).toBe('Qwen3-Coder-Next ctx64k (local)');
+    expect(qwen.label).toBe('Qwen3-Coder-Next (64k, local)');
     // :ctx64k suffix (show returned no context_length) — a naming convention,
     // so it is labelled a fallback and the seat says the figure is an estimate.
     expect(qwen.models).toEqual([{
       id: 'qwen3-coder-next:ctx64k',
-      label: 'Qwen3-Coder-Next ctx64k',
+      label: 'Qwen3-Coder-Next (64k)',
       contextWindow: 65_536,
       autoCompactAt: 32_536,
       windowSource: 'fallback',
@@ -496,7 +496,7 @@ describe('verse seats — local Ollama', () => {
     expect(contextWindowFromTagSuffix('qwen3.8:27b-q8_0')).toBeNull();
     expect(contextWindowFromTagSuffix('bigctx64k')).toBeNull(); // not a separated suffix
     expect(contextWindowFromTagSuffix('x:ctx0k')).toBeNull();
-    expect(localSeatLabel('deepseek-coder-v2:16b')).toBe('Deepseek-Coder-V2 16b (local)');
+    expect(localSeatLabel('deepseek-coder-v2:16b')).toBe('DeepSeek-Coder-V2 16B (local)');
     expect(localSeatLabel('llama3.2:latest')).toBe('Llama3.2 (local)');
   });
 });

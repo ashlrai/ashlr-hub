@@ -313,7 +313,7 @@ describe('UsageSection — local availability', () => {
     // about, so it is selected by the caption rather than by being the only
     // occurrence of the name on the screen.
     const table = screen.getByRole('table', { name: /residency, tool support/i });
-    const row = within(table).getByText('qwen3-coder').closest('tr');
+    const row = within(table).getByText('Qwen3-Coder').closest('tr');
     expect(row).not.toBeNull();
     expect(within(row!).getByText('resident')).toBeInTheDocument();
     expect(within(row!).getByText(/88% GPU/)).toBeInTheDocument();
@@ -326,7 +326,7 @@ describe('UsageSection — local availability', () => {
   it('says plainly that a model without tools cannot drive an agentic session', async () => {
     render(<UsageSection />);
     await waitFor(() => expect(screen.getByText('Local availability')).toBeInTheDocument());
-    const row = screen.getByText('embed-small').closest('tr');
+    const row = screen.getByText('Embed-Small').closest('tr');
     expect(within(row!).getByText('no tools')).toBeInTheDocument();
     expect(within(row!).getByText('installed')).toBeInTheDocument();
   });

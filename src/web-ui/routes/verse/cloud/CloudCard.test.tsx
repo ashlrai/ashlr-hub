@@ -148,6 +148,18 @@ describe('CloudCard states', () => {
     expect(within(card()).getByRole('button', { name: 'New cloud task' })).toBeDisabled();
   });
 
+  it('seat not set up: the blocker is the state and the credits an estimate, never a "remaining" meter', async () => {
+    stubCloudFetch(overview({ seat: { id: 'claude-a', ready: false, reason: null }, budget: budgetView({ estimatedSpentUsd: 0 }) }));
+    render(<Host />);
+    expect(await within(card()).findByText('Not set up')).toBeInTheDocument();
+    expect(within(card()).getByText('~$250 credits · estimate')).toBeInTheDocument();
+    expect(within(card()).getByText("The Claude seat isn't set up on this Mac.")).toBeInTheDocument();
+    expect(within(card()).queryByRole('meter')).toBeNull();
+    expect(card().textContent).not.toContain('$250 of $250');
+    // The estimate's own note and the real-balance link stay.
+    expect(within(card()).getByRole('link', { name: 'Check the real balance on claude.ai' })).toBeInTheDocument();
+  });
+
   it('warns when the estimate is under the reserve', async () => {
     stubCloudFetch(overview({ budget: budgetView({ estimatedSpentUsd: 220 }) }));
     render(<Host />);

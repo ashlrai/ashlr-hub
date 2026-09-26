@@ -125,7 +125,10 @@ export function LocalResources({ status, onOpenUsage, now }: { status: AccountSt
             const context = modelContextText(m);
             return (
               <li key={`${m.runtime ?? 'local'}:${m.name}`} className={styles.model} data-resident={m.resident || undefined}>
-                <span className={styles.modelName} title={m.name}>{m.name}</span>
+                <span className={styles.modelName} title={m.name}>
+                  {m.displayName}
+                  {m.nameDetail ? <span className={styles.modelDetail}> {m.nameDetail}</span> : null}
+                </span>
                 <span className={styles.modelFacts}>
                   {m.resident ? <span className={styles.pill} data-tone="success">Loaded</span> : null}
                   {context !== null ? <span title={m.contextTruncated ? 'Configured below the model’s native window' : undefined}>{context}</span> : null}

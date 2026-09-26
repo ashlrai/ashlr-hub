@@ -136,7 +136,7 @@ describe('picker and dialog wording', () => {
     expect(modelContextPhrase(GPT6)).toBe('258k ctx · compacts ≈245k');
     expect(modelContextPhrase(GPT6, 'expansive')).toBe('828k ctx · compacts ≈785k (expansive)');
     expect(modelContextPhrase(GROK)).toBe('500k ctx · compacts ≈400k');
-    expect(modelContextPhrase(LOCAL)).toBe('66k ctx · compacts ≈33k');
+    expect(modelContextPhrase(LOCAL)).toBe('64k ctx · compacts ≈33k');
   });
 
   it('says "unknown" rather than printing a default, and marks an estimate as one', () => {

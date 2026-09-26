@@ -145,6 +145,40 @@ export function seatText(seat: CloudSeatStatus): string | null {
   return seat.reason ? safeCloudProse(seat.reason) : SEAT_NOT_READY;
 }
 
+// ---------------------------------------------------------------------------
+// Standing: what the credit figure MEANS while the lane cannot launch
+// ---------------------------------------------------------------------------
+//
+// The credit figure is always an estimate (a flat per-session cost counted
+// against the total the operator typed in; the real balance is not
+// readable). While the lane can launch, that estimate is headroom and a meter
+// is the honest picture. While the Claude seat is NOT set up nothing can
+// launch, so "$250 of $250 left" beside "the seat isn't set up" read as live
+// headroom the operator could not use. Then the setup blocker is the STATE,
+// and the credits a secondary, visibly approximate figure:
+//
+//   Cloud: not set up · ~$250 credits
+//
+// Shared by Command's Cloud card, Usage's Cloud credits panel and the
+// Resources drawer's cloud card.
+
+/** The state word shown in place of the meter while the seat is missing. */
+export const CLOUD_NOT_SET_UP_WORD = 'Not set up';
+
+/**
+ * "~$250 credits" — whole dollars, because an estimate that cannot be spent
+ * yet has no business showing cents. Never negative.
+ */
+export function approxCredits(remainingUsd: number): string {
+  const v = Number.isFinite(remainingUsd) ? Math.max(0, Math.round(remainingUsd)) : 0;
+  return `~$${v} credits`;
+}
+
+/** "Cloud: not set up · ~$250 credits" — the one-line summary of a lane that cannot launch. */
+export function notSetUpLine(remainingUsd: number): string {
+  return `Cloud: not set up · ${approxCredits(remainingUsd)}`;
+}
+
 /**
  * Why a launch button is disabled right now, or null when it may be pressed.
  * Seat first (nothing launches without it), then the budget gate.

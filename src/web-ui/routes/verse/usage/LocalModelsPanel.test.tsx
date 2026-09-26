@@ -12,6 +12,8 @@ import { LocalModelsPanel } from './LocalModelsPanel.js';
 
 function row(over: Partial<LocalModelRow> & { name: string }): LocalModelRow {
   return {
+    displayName: over.name,
+    nameDetail: null,
     runtime: 'ollama',
     resident: false,
     placement: 'unknown',

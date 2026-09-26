@@ -232,13 +232,14 @@ describe('ResourcesDrawer — local', () => {
     const user = userEvent.setup();
     render(<ResourcesDrawer mode="docked" now={NOW} />);
     const local = within(await screen.findByRole('region', { name: 'Local' }));
-    expect(await local.findByText('qwen3:32b')).toBeInTheDocument();
+    expect(await local.findByText('Qwen3 32B')).toBeInTheDocument();
+    expect(local.getByTitle('qwen3:32b')).toBeInTheDocument();
     expect(local.getByText('64k of 256k context')).toBeInTheDocument();
     expect(local.getByText('128k context')).toBeInTheDocument();
     expect(local.getByText('Loaded')).toBeInTheDocument();
     expect(await local.findByText('llama-server')).toBeInTheDocument();
     expect(local.getByText('Stopped')).toBeInTheDocument();
-    expect(local.getByText('Qwen3-32B · 16k context per agent')).toBeInTheDocument();
+    expect(local.getByText('Qwen3 32B · 16k context per agent')).toBeInTheDocument();
     await user.click(local.getByRole('button', { name: 'Start llama-server' }));
     await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.url === '/api/verse/runtime')).toBe(true));
     expect(calls.find((c) => c.method === 'POST' && c.url === '/api/verse/runtime')!.body).toEqual({ action: 'start' });
@@ -265,6 +266,23 @@ describe('ResourcesDrawer — cloud credits', () => {
     const link = card.getByRole('link', { name: /Real balance on claude\.ai/ });
     expect(link).toHaveAttribute('href', 'https://claude.ai/settings/usage');
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
+  it('seat not set up: "Not set up" is the state and the credits read "~$250", never "$250 of $250 left"', async () => {
+    cloud = {
+      ...CLOUD,
+      seat: { id: 'claude-a', ready: false, reason: "The Claude seat isn't set up on this Mac." },
+      budget: { ...CLOUD.budget, estimatedSpentUsd: 0, estimatedRemainingUsd: 250, running: 0, sessionsToday: 0 },
+    };
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    const card = within(screen.getByRole('region', { name: 'Cloud' }));
+    expect(await card.findByText('Not set up')).toBeInTheDocument();
+    expect(card.getByText('· ~$250 credits')).toBeInTheDocument();
+    expect(card.getByText('estimate')).toBeInTheDocument();
+    expect(card.getByText("The Claude seat isn't set up on this Mac.")).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Cloud' }).textContent).not.toMatch(/of \$250 left/);
+    expect(card.getByTitle('Cloud: not set up · ~$250 credits')).toBeInTheDocument();
+    expect(card.getByRole('link', { name: /Real balance on claude\.ai/ })).toBeInTheDocument();
   });
 });
 

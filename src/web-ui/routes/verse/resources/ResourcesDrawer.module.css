@@ -372,9 +372,15 @@
 
 .modelName {
   min-width: 0;
-  font-family: var(--font-mono);
   color: var(--text-primary);
-  overflow-wrap: anywhere; /* model tags have no spaces; break at any point rather than overflow */
+  overflow-wrap: anywhere; /* a long name still must not overflow the drawer */
+}
+
+/* The quantization (q8_0, q4_K_M) beside a model's name: a detail, not the name. */
+.modelDetail {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
 }
 
 .modelFacts {

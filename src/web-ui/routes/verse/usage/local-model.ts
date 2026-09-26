@@ -22,12 +22,18 @@
  *
  * Pure: no React, no I/O.
  */
+import { modelDisplayName, modelDisplayText } from '../../../../core/verse/model-display-name.js';
 import type { LocalModel, LocalModelsSnapshot, LocalRuntimeStatus } from './usage-contract.js';
 
 export type ToolSupport = 'supported' | 'unsupported' | 'unknown';
 
 export interface LocalModelRow {
+  /** The runtime's own tag (`qwen3.8:27b-q8_0`): the row key and the tooltip. */
   name: string;
+  /** "Qwen3.8 27B" — what a person reads (core/verse/model-display-name.ts). */
+  displayName: string;
+  /** "q8_0" — the quantization from the tag, shown subtly beside the name; null when none. */
+  nameDetail: string | null;
   /** Which runtime reported it, so a flattened list stays attributable. */
   runtime: LocalModel['runtime'];
   resident: boolean;
@@ -95,8 +101,11 @@ export function buildLocalModelRow(model: LocalModel, now: number): LocalModelRo
       ? Math.max(0, Math.min(100, (model.sizeVramBytes / model.sizeBytes) * 100))
       : null);
 
+  const display = modelDisplayName(model.name);
   return {
     name: model.name,
+    displayName: display.name,
+    nameDetail: display.detail,
     runtime: model.runtime,
     resident: model.loaded,
     placement: model.placement,
@@ -191,7 +200,7 @@ export function buildLocalModelsView(
   if (!snapshot) return null;
   const rows = snapshot.models
     .map((m) => buildLocalModelRow(m, now))
-    .sort((a, b) => Number(b.resident) - Number(a.resident) || a.name.localeCompare(b.name));
+    .sort((a, b) => Number(b.resident) - Number(a.resident) || a.displayName.localeCompare(b.displayName));
 
   const resident = rows.filter((r) => r.resident);
   // A resident model with no reported size makes the TOTAL unknown — summing
@@ -253,13 +262,13 @@ export function formatCountdown(ms: number | null): string {
 }
 
 /**
- * Context windows are powers of two and are quoted that way everywhere the
- * user will have seen them (262144 is "256k", not "262k"), so the divisor is
- * 1024 rather than 1000. Getting this wrong makes the UI disagree with the
- * model card the operator read five minutes ago.
+ * "Qwen3 32B · Q4_K_M" for a model named in running text (the serving
+ * runtime's model, a GGUF file name). A wrapper, not a re-export, on
+ * purpose: the web UI then reaches core/verse/model-display-name.ts through
+ * this one module, so the bundler folds it into this chunk. Imported from a
+ * second chunk (a re-export resolves to the original) it became a chunk of
+ * its own — one more name in the first-paint files' preload tables.
  */
-export function formatContext(tokens: number | null): string {
-  if (tokens === null || !Number.isFinite(tokens)) return '—';
-  if (tokens >= 1024) return `${Math.round(tokens / 1024)}k`;
-  return String(tokens);
+export function modelNameInText(tag: string): string {
+  return modelDisplayText(tag, true);
 }

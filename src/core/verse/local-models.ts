@@ -36,6 +36,7 @@
 import { closeSync, constants as fsConstants, fstatSync, openSync, readSync } from 'node:fs';
 import { freemem, homedir, totalmem } from 'node:os';
 import { join } from 'node:path';
+import { modelDisplayText } from './model-display-name.js';
 
 import {
   VERSE_DEFAULT_CONTEXT_WINDOWS,
@@ -307,14 +308,9 @@ async function mapLimited<T, R>(items: T[], limit: number, work: (item: T) => Pr
   return out;
 }
 
+/** "gpt-oss 20B", "Qwen3.8 27B · q8_0" — the shared display name, quantization after a middle dot. */
 function pretty(tag: string): string {
-  const [base = tag, ...rest] = tag.split(':');
-  const head = base
-    .split('-')
-    .map((seg) => (seg.length > 0 ? seg[0]!.toUpperCase() + seg.slice(1) : seg))
-    .join('-');
-  const variant = rest.join(':');
-  return variant && variant !== 'latest' ? `${head} ${variant}` : head;
+  return modelDisplayText(tag, true);
 }
 
 function percentOf(part: number | null, whole: number): number | null {

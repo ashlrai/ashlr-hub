@@ -22,7 +22,7 @@ import type { ReactNode } from 'react';
 import { TableView, chartFormat, type TableColumn } from '../../../components/charts/index.js';
 import { percentText } from '../autonomy/format.js';
 import { formatTokens } from '../verse-store.js';
-import { ENGINE_LABEL } from '../verse-model.js';
+import { ENGINE_LABEL, formatContextWindow } from '../verse-model.js';
 import { formatRatio, type SeatEfficiencyRow } from './context-model.js';
 import styles from './usage.module.css';
 
@@ -34,7 +34,7 @@ function fullestText(row: SeatEfficiencyRow): string {
   const share = (f.tokens / f.window) * 100;
   // The one percent rule up to the window ("99%", never a rounded "100%" that
   // reads as full); past it, the real overflow ("112%") rather than a clamp.
-  return `${size} / ${formatTokens(f.window)} · ${share <= 100 ? percentText(share) : chartFormat.formatPercent(share / 100)}`;
+  return `${size} / ${formatContextWindow(f.window)} · ${share <= 100 ? percentText(share) : chartFormat.formatPercent(share / 100)}`;
 }
 
 const COLUMNS: TableColumn<SeatEfficiencyRow>[] = [

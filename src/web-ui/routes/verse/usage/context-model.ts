@@ -48,7 +48,7 @@ import type {
   VerseUsage,
   VerseWindowSource,
 } from '../../../../core/verse/types.js';
-import { CODEX_EXPANSIVE_METERING_NOTE, WINDOW_SOURCE_TEXT, modelOptionFor, seatUnavailableReason, sessionContextBudget } from '../verse-model.js';
+import { CODEX_EXPANSIVE_METERING_NOTE, formatContextWindow, modelOptionFor, seatUnavailableReason, sessionContextBudget, WINDOW_SOURCE_TEXT } from '../verse-model.js';
 import { formatTokens } from '../verse-store.js';
 import { formatWholePercent } from '../autonomy/format.js';
 
@@ -132,7 +132,7 @@ export function modelContextPhrase(option: VerseModelOption, mode: VerseContextM
   const resolved = resolveContextMode(option, mode);
   const budget = budgetFor(option, resolved);
   if (!budget) return 'window unknown';
-  const window = `${formatTokens(budget.contextWindow)} ctx${isEstimatedWindow(option.windowSource) ? ' (est.)' : ''}`;
+  const window = `${formatContextWindow(budget.contextWindow)} ctx${isEstimatedWindow(option.windowSource) ? ' (est.)' : ''}`;
   const compacts = budget.autoCompactAt === null ? '' : ` · compacts ≈${formatTokens(budget.autoCompactAt)}`;
   return `${window}${compacts}${resolved === 'expansive' ? ' (expansive)' : ''}`;
 }
@@ -151,7 +151,7 @@ export function modelContextSentence(option: VerseModelOption): string {
     const where = standard.autoCompactAt === null
       ? ''
       : `; compacts at about ${formatTokens(standard.autoCompactAt)}${expansive ? ' in Standard' : ''}`;
-    parts.push(`${formatTokens(standard.contextWindow)}-token window${where}.`);
+    parts.push(`${formatContextWindow(standard.contextWindow)}-token window${where}.`);
   }
   if (expansive) {
     parts.push(`Expansive runs to about ${formatTokens(expansive.autoCompactAt ?? expansive.contextWindow)} before compacting.`);

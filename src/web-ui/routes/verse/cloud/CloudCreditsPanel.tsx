@@ -12,13 +12,14 @@
 import { CLOUD_BALANCE_URL, type CloudBudgetUpdate } from '../../../../core/cloud/types.js';
 import { IconExternalLink } from '../../../components/primitives/icons.js';
 import { Meter } from '../../../components/primitives/Meter.js';
+import { StatusBadge } from '../../../components/primitives/StatusBadge.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { tidyProse } from '../autonomy/format.js';
 import { ActionStatus, useSurfaceActions } from '../command/actions.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import usage from '../usage/usage.module.css';
 import { CloudBudgetForm } from './CloudBudgetForm.js';
-import { creditsMeter, gateText, sessionsLine } from './cloud-model.js';
+import { approxCredits, CLOUD_NOT_SET_UP_WORD, creditsMeter, gateText, notSetUpLine, seatText, sessionsLine } from './cloud-model.js';
 import { CLOUD_POLL_MS, cloudQuery, updateCloudBudget } from './cloud-queries.js';
 import styles from './cloud.module.css';
 
@@ -33,6 +34,7 @@ export function CloudCreditsPanel({ now = Date.now() }: { now?: number }) {
   const overview = read.data.value;
   const view = overview?.budget ?? null;
   const meter = view ? creditsMeter(view) : null;
+  const seat = overview ? seatText(overview.seat) : null;
   const refused = view ? gateText(view.canLaunch, 'The cloud budget does not allow another launch right now.') : null;
 
   const save = (update: CloudBudgetUpdate) => actions.act(() => updateCloudBudget(update), 'Change the cloud budget.');
@@ -52,21 +54,32 @@ export function CloudCreditsPanel({ now = Date.now() }: { now?: number }) {
       ) : (
         <div className={styles.body}>
           <ActionStatus actions={actions} />
-          <Meter
-            value={meter.value}
-            max={meter.max}
-            label="Credits remaining"
-            valueText={meter.text}
-            tone={meter.tone}
-            aria-label={`Estimated cloud credits remaining: ${meter.text}, ${meter.usedText}`}
-          />
+          {seat ? (
+            // No seat, no launches: the blocker is the state, the credits a plain estimate (cloud-model.ts, "Standing").
+            <>
+              <p className={styles.standing} title={notSetUpLine(view.estimatedRemainingUsd)}>
+                <StatusBadge status="not-set-up" tone="warning">{CLOUD_NOT_SET_UP_WORD}</StatusBadge>
+                <span className={styles.muted}>{approxCredits(view.estimatedRemainingUsd)} · estimate</span>
+              </p>
+              <p className={styles.notice} data-tone="warning" role="note">{seat}</p>
+            </>
+          ) : (
+            <Meter
+              value={meter.value}
+              max={meter.max}
+              label="Credits remaining"
+              valueText={meter.text}
+              tone={meter.tone}
+              aria-label={`Estimated cloud credits remaining: ${meter.text}, ${meter.usedText}`}
+            />
+          )}
           <p className={styles.estimateNote}>
             {tidyProse(view.estimateNote, now)}{' '}
             <a className={styles.link} href={CLOUD_BALANCE_URL} target="_blank" rel="noreferrer noopener" aria-label="Check the real balance on claude.ai">
               Check usage on claude.ai <IconExternalLink width={12} height={12} aria-hidden="true" />
             </a>
           </p>
-          {meter.warning ? <p className={styles.notice} data-tone="warning" role="note">{meter.warning}</p> : null}
+          {meter.warning && !seat ? <p className={styles.notice} data-tone="warning" role="note">{meter.warning}</p> : null}
           <p className={styles.facts}>{sessionsLine(view, now)}</p>
           {refused ? <p className={styles.notice} data-tone="warning" role="note">New launches are paused: {refused}</p> : null}
           <CloudBudgetForm idPrefix="usage-cloud-budget" budget={view.budget} busy={actions.busy} disabled={actions.readOnly} onSave={save} />

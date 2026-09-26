@@ -692,18 +692,6 @@ export function formatUptime(startedAt: string | null, now: number): string {
   return `up ${formatDuration(Math.max(0, now - at))}`;
 }
 
-/**
- * Context windows are quoted in powers of two everywhere the operator has
- * seen them (65536 is "64k"), so the divisor is 1024. Matching
- * `usage/local-model.ts`'s `formatContext` on purpose: two spellings of the
- * same number across two panels is how a UI starts to feel untrustworthy.
- */
-export function formatContextTokens(tokens: number | null): string {
-  if (tokens === null || !Number.isFinite(tokens)) return UNKNOWN;
-  if (tokens >= 1024) return `${Math.round(tokens / 1024)}k`;
-  return String(tokens);
-}
-
 /** Agent rows, ordered so the reader's first question is answered first. */
 export function orderAgents(agents: readonly FleetAgent[]): FleetAgent[] {
   const rank: Record<FleetAgentState, number> = { running: 0, finishing: 1, queued: 2 };
