@@ -337,6 +337,15 @@ export interface PaletteView {
   flat: PaletteItem[];
   /** The prefix in force (`>` / `#`), if any. */
   prefix: '>' | '#' | null;
+  /**
+   * Index into `flat` of the strongest match — what a fresh query highlights,
+   * so Enter runs it. Groups keep their fixed order, which means the best hit
+   * can sit in a LATER group: "usage" hits the resource-bar toggle's
+   * "usage bars" keyword in Actions above "Open Usage" in Go to, and
+   * highlighting row 0 made Enter toggle the bar instead of opening Usage.
+   * 0 for an empty query (the rows there are unscored).
+   */
+  best: number;
 }
 
 /** Items → ranked, grouped, capped view for `rawQuery`. */
@@ -374,6 +383,7 @@ export function paletteView(items: readonly PaletteItem[], rawQuery: string, rec
   }
 
   const out: PaletteGroup[] = [];
+  const flatScores: number[] = [];
   for (const id of GROUP_ORDER) {
     const list = groups.get(id);
     if (!list || list.length === 0) continue;
@@ -382,7 +392,16 @@ export function paletteView(items: readonly PaletteItem[], rawQuery: string, rec
     const runRank = (e: { item: PaletteItem }) => (id === 'chats' && e.item.tone === 'running' ? 0 : 1);
     list.sort((a, b) => runRank(a) - runRank(b) || b.score - a.score || a.order - b.order);
     const cap = prefix ? 50 : GROUP_CAP[id];
-    out.push({ id, label: GROUP_LABEL[id], items: list.slice(0, cap).map((e) => e.item) });
+    const shown = list.slice(0, cap);
+    for (const e of shown) flatScores.push(e.score);
+    out.push({ id, label: GROUP_LABEL[id], items: shown.map((e) => e.item) });
   }
-  return { groups: out, flat: out.flatMap((g) => g.items), prefix };
+  // Strictly greater: on a tie the earlier row (group order, then rank) wins.
+  let best = 0;
+  if (trimmed !== '') {
+    flatScores.forEach((score, i) => {
+      if (score > flatScores[best]!) best = i;
+    });
+  }
+  return { groups: out, flat: out.flatMap((g) => g.items), prefix, best };
 }
