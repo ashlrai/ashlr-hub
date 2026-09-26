@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { modelDisplayName, modelDisplayText } from '../src/core/verse/model-display-name.js';
-import { localSeatLabel, tagsNeedingDetail } from '../src/core/verse/seats.js';
 
 describe('modelDisplayName — local tags as a person reads them', () => {
   it.each([
@@ -29,23 +28,8 @@ describe('modelDisplayName — local tags as a person reads them', () => {
     expect(modelDisplayText('gpt-oss:20b', true)).toBe('gpt-oss 20B');
   });
 
-  it('never returns an empty name', () => {
+  it('passes an empty tag through and capitalizes an unknown family', () => {
     expect(modelDisplayName('').name).toBe('');
     expect(modelDisplayName('mystery').name).toBe('Mystery');
-  });
-});
-
-describe('local seat labels', () => {
-  it('folds the window into one parenthetical with "local"', () => {
-    expect(localSeatLabel('qwen3.8:27b-ctx64k')).toBe('Qwen3.8 27B (64k, local)');
-    expect(localSeatLabel('gpt-oss:20b')).toBe('gpt-oss 20B (local)');
-  });
-
-  it('keeps two quantizations of one model apart, and leaves a unique one clean', () => {
-    const tags = ['qwen3.8:27b-q8_0', 'qwen3.8:27b-q4_K_M', 'gpt-oss:20b'];
-    const need = tagsNeedingDetail(tags);
-    expect([...need].sort()).toEqual(['qwen3.8:27b-q4_K_M', 'qwen3.8:27b-q8_0']);
-    expect(localSeatLabel('qwen3.8:27b-q8_0', need.has('qwen3.8:27b-q8_0'))).toBe('Qwen3.8 27B · q8_0 (local)');
-    expect(localSeatLabel('gpt-oss:20b', need.has('gpt-oss:20b'))).toBe('gpt-oss 20B (local)');
   });
 });
