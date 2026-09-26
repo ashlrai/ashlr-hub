@@ -62,6 +62,17 @@ export const FLEET_LIVE_PATH = '/api/verse/fleet/live';
 export const LEADER_PATH = '/api/verse/leader';
 export const LEARNING_PATH = '/api/verse/learning';
 export const FLEET_HISTORY_PATH = '/api/verse/fleet/history?days=90';
+
+/**
+ * FLEET_HISTORY_PATH plus the viewer's zone (`tz`, Date#getTimezoneOffset
+ * minutes, which the route accepts). Without it the server bucketed runs by
+ * the UTC day (tz defaults to 0), so a Sep 25 evening's runs sat in a
+ * "Sep 26" column west of UTC. Read at fetch time, so a DST change between
+ * polls is picked up.
+ */
+export function fleetHistoryPath(now: Date = new Date()): string {
+  return `${FLEET_HISTORY_PATH}&tz=${now.getTimezoneOffset()}`;
+}
 export const REASONING_DIGEST_PATH = '/api/reasoning/digest?days=30';
 /** Eight days: the whole weekly window plus the day before it opened. */
 export const SEAT_HISTORY_PATH = '/api/verse/budget/history?days=8';
@@ -135,12 +146,12 @@ function absence(what: string, err: unknown): string {
 }
 
 /** A QueryDef whose value is an OptionalRead: 404 / unreachable / unrecognised all resolve, never throw. */
-export function optionalQuery<T>(key: string, path: string, what: string, guard: (raw: unknown) => T | null): QueryDef<OptionalRead<T>> {
+export function optionalQuery<T>(key: string, path: string | (() => string), what: string, guard: (raw: unknown) => T | null): QueryDef<OptionalRead<T>> {
   return {
     key,
     fetch: async (signal) => {
       try {
-        const raw = await apiGet<unknown>(path, signal);
+        const raw = await apiGet<unknown>(typeof path === 'function' ? path() : path, signal);
         const value = guard(raw);
         if (value === null) {
           // Nothing is shown rather than guessed from an unknown shape.
@@ -161,7 +172,7 @@ export const authorityDraftQuery = optionalQuery(SURFACE_KEYS.authorityDraft, AU
 export const fleetLiveQuery = optionalQuery(SURFACE_KEYS.fleetLive, FLEET_LIVE_PATH, 'The live fleet view', narrow.fleetLive);
 export const leaderQuery = optionalQuery(SURFACE_KEYS.leader, LEADER_PATH, 'The Leader', narrow.leader);
 export const learningQuery = optionalQuery(SURFACE_KEYS.learning, LEARNING_PATH, 'Self-improvement', narrow.learning);
-export const fleetHistoryQuery = optionalQuery(SURFACE_KEYS.fleetHistory, FLEET_HISTORY_PATH, 'Fleet history', narrow.fleetHistory);
+export const fleetHistoryQuery = optionalQuery(SURFACE_KEYS.fleetHistory, () => fleetHistoryPath(), 'Fleet history', narrow.fleetHistory);
 export const reasoningDigestQuery = optionalQuery(SURFACE_KEYS.reasoningDigest, REASONING_DIGEST_PATH, 'The reasoning digest', narrow.reasoningDigest);
 /** Optional like every surface read: a server without the route leaves the burn-downs on this page's own readings. */
 export const seatHistoryQuery = optionalQuery(SURFACE_KEYS.seatHistory, SEAT_HISTORY_PATH, 'Seat history', narrow.seatHistory);

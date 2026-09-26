@@ -22,6 +22,7 @@ import {
   type TableColumn,
 } from '../../../components/charts/index.js';
 import type { ActivityRollup, ProjectActivity, ModelUsage } from '../../../data/api-types.js';
+import { calendarDayStart } from '../../verse/growth/calendar-day.js';
 import styles from './PulseView.module.css';
 
 const WINDOWS: PulseWindow[] = ['1d', '7d', '30d'];
@@ -86,7 +87,10 @@ function PulseBody({ rollup }: { rollup: ActivityRollup }) {
     {
       id: 'cost',
       label: 'Est. cost (USD)',
-      points: rollup.byDay.map((d) => ({ x: Date.parse(`${d.day}T00:00:00Z`), y: d.estCostUsd })),
+      // Local midnight of each calendar-day row (see growth/calendar-day): the
+      // axis labels in local time, so a UTC-midnight stamp read a day early
+      // west of UTC.
+      points: rollup.byDay.map((d) => ({ x: calendarDayStart(d.day), y: d.estCostUsd })),
     },
   ];
 

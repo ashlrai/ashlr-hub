@@ -22,7 +22,7 @@
  */
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { MoreGlyph } from './ChartParts.js';
-import { formatDayLabel } from './format.js';
+import { formatDayLabel, formatTimeLabel } from './format.js';
 import './chart-tokens.css';
 import styles from './ChartFrame.module.css';
 
@@ -56,9 +56,16 @@ export interface ChartFrameProps {
   footer?: ReactNode;
 }
 
-/** "Sep 1" from an ISO timestamp or YYYY-MM-DD (UTC day, like the axis labels). */
+/**
+ * "Sep 1" from a YYYY-MM-DD calendar day (printed as written) or an ISO
+ * instant (its day in the VIEWER's zone). The instant used to be cut to its
+ * UTC date, so fleet history's `darkSince` — an ISO instant — read "dark
+ * since Sep 26" on a Sep 25 evening anywhere west of UTC.
+ */
 export function sinceLabel(since: string): string {
-  return formatDayLabel(since.slice(0, 10));
+  if (/^\d{4}-\d{2}-\d{2}$/.test(since)) return formatDayLabel(since);
+  const ms = Date.parse(since);
+  return Number.isFinite(ms) ? formatTimeLabel(ms) : formatDayLabel(since.slice(0, 10));
 }
 
 function StatusMessage({ status }: { status: Exclude<ChartStatus, { kind: 'ready' }> }): ReactNode {

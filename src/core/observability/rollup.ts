@@ -25,6 +25,7 @@ import { collectUsageEvents, dashNormalize } from './usage-source.js';
 import { evalBudget } from './budget-alert.js';
 import { estCostUsd } from '../run/budget.js';
 import { loadIndex } from '../index-engine.js';
+import { localDay } from '../reasoning/insights.js';
 import type { AshlrIndex } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -342,6 +343,22 @@ function indexedRepos(index: AshlrIndex, projectFilter: string | undefined): Ind
   return repos;
 }
 
+/**
+ * The calendar day (YYYY-MM-DD) an event belongs to, in the server's LOCAL
+ * zone — the operator's zone, since the daemon runs on their machine.
+ *
+ * WHY not `ts.slice(0, 10)`: event stamps are UTC ISO strings, so slicing
+ * them bucketed by the UTC day. At 22:52 EDT on Sep 25 (02:52Z Sep 26) the
+ * evening's usage landed in a "2026-09-26" row and the Usage page named
+ * "Sep 26" as the heaviest day while it was still Sep 25 on the operator's
+ * clock. Same `localDay` the reasoning trends already use. A stamp that does
+ * not parse keeps its written date rather than being dropped.
+ */
+export function rollupDay(ts: string): string {
+  const ms = Date.parse(ts);
+  return Number.isFinite(ms) ? localDay(ms) : ts.slice(0, 10);
+}
+
 export function buildRollup(
   window: '1d' | '7d' | '30d',
   cfg: AshlrConfig,
@@ -455,8 +472,8 @@ export function buildRollup(
     // Session key: for 'claude' events the session file is implicit per-event
     // grouping; we use (project + day) as a session proxy when we don't have
     // the actual filename, but usage-source may embed it in model/ts combos.
-    // For simplicity, use a session key = project + ISO-day to count sessions.
-    const day = ev.ts.slice(0, 10); // YYYY-MM-DD
+    // For simplicity, use a session key = project + day to count sessions.
+    const day = rollupDay(ev.ts);
     const sessionKey = `${ev.project ?? '__none__'}::${day}`;
     allSessions.add(sessionKey);
 
