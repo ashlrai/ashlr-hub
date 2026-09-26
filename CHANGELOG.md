@@ -11,47 +11,6 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
-### Rerun-safe autonomy setup, and a live setup checklist in Verse
-
-- `ashlr authority setup` is safe to rerun. The provenance key is rotated
-  only once; the rotation is recorded, so a rerun with `--yes` no longer
-  invalidates pending proposals. A ruleset GitHub already holds with the same
-  content is reported `already` and is not applied again, and
-  `protect --apply` skips it too. The GitHub App counts as done only once it
-  is installed on the enrolled repos; until then setup prints the install
-  page.
-- A failure in the App flow, the Claude token prompt, key creation or the
-  grant draft is recorded as a failed step, and the run still ends with its
-  summary.
-- The `--dry-run --json` checklist now gives each open step the command
-  that moves it on, plus a `link` where there is one (the install page or the
-  trust-root PR). Both fields are additive to `ashlr.authority-setup.v1`.
-- New read-only route `GET /api/verse/authority/setup` serves the dry run's
-  checklist, cached for 30 s. It never prompts, signs or opens a browser, and
-  it runs only bounded `gh api` reads.
-- Verse's "Autonomy is off" state and onboarding step 4 show that checklist:
-  the next step with what it needs and the command to copy for it, plus
-  every step. Verse no longer asks the server for a grant draft on load (a
-  dormant fleet used to log a 409 there on every launch). It drafts only
-  when you open the Touch ID sheet.
-
-### Resident runtime under the standing grant
-
-- Adds `ashlr authority resident start|stop|status`. `start` installs or
-  restarts `ai.ashlr.daemon` only under an active Touch-ID-signed standing
-  grant, from a clean compiled release, with Stop off. You run it yourself in a
-  terminal: agent, daemon or swarm environments, a redirected HOME, no TTY and
-  `--yes` are all refused. It claims a single-use capability before any launchd
-  effect and records the start in the authority ledger.
-- Regenerates the launchd plist (budget, interval, parallelism) from config on
-  every start. `status` and setup report drift after a config change.
-- `ashlr authority setup` now reports the resident step as already in place,
-  waiting on you with the exact command, or blocked on a missing prerequisite,
-  instead of a permanent build block.
-- The legacy install, reinstall, repair and restart paths stay denied, and the
-  permit-based compiled roots stay empty.
-- See [docs/RESIDENT-RUNTIME.md](docs/RESIDENT-RUNTIME.md).
-
 ### Autonomous coordinator lifecycle visibility
 
 - Separates last-reported coordinator transitions, fixed failure reasons and
@@ -379,6 +338,89 @@ which is absent from current source. That historical activation description is
 superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTIME_ACTIVATION_AUTHORITY.md)
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
+
+## [3.13.0] — 2026-09-26 UTC — autonomy you can actually turn on
+
+3.12.0 compiled in the operator's custody key. 3.13.0 closes the gaps that kept a signed grant from doing anything:
+G7 could never pass on a repo without CI, cloud and self-improvement PRs never entered the merge gates, and the
+resident daemon could not be installed at all. Autonomy still starts only when Mason signs a standing grant (Touch
+ID), sets the switch, and runs `ashlr authority resident start` himself; `ashlr authority setup` walks every step.
+
+### A host-verified `ashlr/verify` check (G7 can pass without CI)
+
+- The ashlr-fleet App posts `ashlr/verify` on each fleet PR head from the G3 result: `success` only when G3 passed,
+  commands ran, and GitHub's head carries exactly the verified tree on the verified base; anything else is `failure`
+  (#511). The run lists the verify digest, tree, base and the commands that ran.
+- G7 on local-enforcement repos requires the App's own green `ashlr/verify`; a deploy-only green (a Vercel preview)
+  or a same-named run from any other App no longer passes. `ashlr authority protect` pins `ashlr/verify` to the App
+  even when master has no check runs. The App manifest asks for Checks: write; setup links the settings page when an
+  existing App lacks it.
+
+### Cloud and self-improvement PRs land through the standing gates
+
+- Each standing tick ingests `pr-open` cloud tasks whose repo is in the grant: identity-checked against the pinned PR
+  (head `ashlr-cloud/<task>`, unchanged base, pinned head SHA), size-capped, filed as a pending proposal with the
+  session report marked UNVERIFIED, and host-signed over the diff hash (#514). Correctness still comes from G3–G7;
+  G6 needs a non-Claude judge. Once the fleet PR opens, the cloud PR is closed as superseded and the task follows the
+  fleet PR to `merged`.
+- Needs-you can Land, Close or Update a cloud PR, with an inline gate preview (G1/G1b/G2/G4 on the pinned diff,
+  GitHub mergeability and checks), multi-select and "Land all clean" (#508).
+- Self-improvement waits for review: at `selfImprove.maxOpenPrs` (default 3) open PRs it stops launching
+  (`ashlr cloud budget --self-improve-max-open <n>`) (#508).
+- Every cloud task has an evidence timeline — objective, session, worker, report (a claim), PR, diff, checks, gates,
+  merge, release, health, cost (an estimate) — each step marked verified, claim or unknown (#507).
+
+### Rerun-safe autonomy setup, and a live setup checklist in Verse
+
+- `ashlr authority setup` is safe to rerun. The provenance key is rotated
+  only once; the rotation is recorded, so a rerun with `--yes` no longer
+  invalidates pending proposals. A ruleset GitHub already holds with the same
+  content is reported `already` and is not applied again, and
+  `protect --apply` skips it too. The GitHub App counts as done only once it
+  is installed on the enrolled repos; until then setup prints the install
+  page.
+- A failure in the App flow, the Claude token prompt, key creation or the
+  grant draft is recorded as a failed step, and the run still ends with its
+  summary.
+- The `--dry-run --json` checklist now gives each open step the command
+  that moves it on, plus a `link` where there is one (the install page or the
+  trust-root PR). Both fields are additive to `ashlr.authority-setup.v1`.
+- New read-only route `GET /api/verse/authority/setup` serves the dry run's
+  checklist, cached for 30 s. It never prompts, signs or opens a browser, and
+  it runs only bounded `gh api` reads.
+- Verse's "Autonomy is off" state and onboarding step 4 show that checklist:
+  the next step with what it needs and the command to copy for it, plus
+  every step. Verse no longer asks the server for a grant draft on load (a
+  dormant fleet used to log a 409 there on every launch). It drafts only
+  when you open the Touch ID sheet.
+
+### Resident runtime under the standing grant
+
+- Adds `ashlr authority resident start|stop|status`. `start` installs or
+  restarts `ai.ashlr.daemon` only under an active Touch-ID-signed standing
+  grant, from a clean compiled release, with Stop off. You run it yourself in a
+  terminal: agent, daemon or swarm environments, a redirected HOME, no TTY and
+  `--yes` are all refused. It claims a single-use capability before any launchd
+  effect and records the start in the authority ledger.
+- Regenerates the launchd plist (budget, interval, parallelism) from config on
+  every start. `status` and setup report drift after a config change.
+- `ashlr authority setup` now reports the resident step as already in place,
+  waiting on you with the exact command, or blocked on a missing prerequisite,
+  instead of a permanent build block.
+- The legacy install, reinstall, repair and restart paths stay denied, and the
+  permit-based compiled roots stay empty.
+- See [docs/RESIDENT-RUNTIME.md](docs/RESIDENT-RUNTIME.md).
+
+### Verse's own improvements
+
+- A spent seat reports when it actually reopens (the latest reset among its spent windows) (#499).
+- Budget, decisions, capacity, session-meta and activity read failures return a 503 with a plain sentence instead of
+  defaults or empty lists, and the UI says so (#501).
+- Lane and seat reasons are written in plain words on the server; older journal wording is still rewritten (#504).
+- A regression test pins Pulse's local-day labels outside UTC (#505).
+
+Released with `npm run gate -- --base v3.12.0`: GATE PASS in 43m29s (854 backend files, 19,846/19,924 tests with
+known failures; 190 web files, 3,335/3,335).
 
 ## [3.12.0] — 2026-09-26 UTC — your key is the trust root, and Verse says one clear next step
 
