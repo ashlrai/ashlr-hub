@@ -22,6 +22,16 @@
  * of the read state rather than in a second route family. (C0 request:
  * add `VerseActivitySeenSurfaceRequest` to workbench-types §3.)
  *
+ * FAILURES ARE NAMED, NOT EMPTIED. If the chat engine cannot start, the
+ * session-meta routes and the seen route answer 503 `{ code:
+ * 'VERSE_ENGINE_UNAVAILABLE', error }` instead of an empty session list (the
+ * Sidebar read that as "no pins, nothing unread") or a 404 "session not
+ * found" for a chat that exists. GET /activity keeps answering — its other
+ * sources are still good — but marks `chats` as 'error' rather than
+ * 'unavailable' (which the UI reads as "not answering yet"). A build that
+ * throws is a 503 `VERSE_ACTIVITY_UNREADABLE`. `error` is a plain sentence:
+ * never a path or the underlying exception's text.
+ *
  * BUDGET: GET /activity answers from memory (activity.ts). The first request
  * of a process pays the engine's store scan and resolves the Track B
  * producer modules once; the inbox scan never runs on a request's stack.
@@ -141,6 +151,8 @@ interface Wiring {
   hooks: TrackBHooks;
   hooksAt: number;
   hooksPending: Promise<void> | null;
+  /** The last ensureReady's engine start was attempted and rejected. */
+  engineFailed: boolean;
 }
 
 let wiring: Wiring | null = null;
@@ -162,6 +174,7 @@ function currentWiring(): Wiring {
     hooks: hooksOverride ?? NO_HOOKS,
     hooksAt: 0,
     hooksPending: null,
+    engineFailed: false,
     reader: null as unknown as ActivityReader,
   };
   w.reader = createActivityReader({
@@ -187,7 +200,16 @@ function currentWiring(): Wiring {
 
 async function ensureReady(w: Wiring): Promise<void> {
   const tasks: Promise<unknown>[] = [];
-  if (!engineOverride && !peekVerseEngine()) tasks.push(getVerseEngine().catch(() => null));
+  w.engineFailed = false;
+  if (!engineOverride && !peekVerseEngine()) {
+    // Remember the failure: a null engine otherwise reads as "chats not
+    // answering yet", indistinguishable from a normal cold start.
+    tasks.push(getVerseEngine().catch(() => { w.engineFailed = true; }));
+  } else if (engineOverride && !engineOverride()) {
+    // Under the test seam an override with no engine stands for one that
+    // could not start (see setActivityWiringForTest).
+    w.engineFailed = true;
+  }
   if (!hooksOverride) {
     const missing = !w.hooks.producers.authority || !w.hooks.producers.fleet || !w.hooks.producers.leader;
     const due = w.hooksAt === 0 || (missing && Date.now() - w.hooksAt > HOOK_RETRY_MS);
@@ -209,7 +231,11 @@ async function ensureReady(w: Wiring): Promise<void> {
   if (tasks.length > 0) await Promise.all(tasks);
 }
 
-/** Test seam: inject the engine, the Track B hooks and/or any activity dependency; null restores. */
+/**
+ * Test seam: inject the engine, the Track B hooks and/or any activity
+ * dependency; null restores. An `engine` returning null stands for an engine
+ * that could not start (the routes answer VERSE_ENGINE_UNAVAILABLE).
+ */
 export function setActivityWiringForTest(next: {
   engine?: () => ActivityEngine | null;
   hooks?: TrackBHooks;
@@ -232,6 +258,14 @@ export function activityMetaStore(): SessionMetaStore {
 
 function bad(res: ServerResponse, error: string): true {
   sendJson(res, 400, { error, code: 'VERSE_INVALID' });
+  return true;
+}
+
+const ENGINE_UNAVAILABLE_ERROR = 'The chat engine is not answering. Restart ashlr verse.';
+
+/** The chat engine is down: say so (503), never answer as if there were no chats. */
+function engineUnavailable(res: ServerResponse): true {
+  sendJson(res, 503, { error: ENGINE_UNAVAILABLE_ERROR, code: 'VERSE_ENGINE_UNAVAILABLE' });
   return true;
 }
 
@@ -273,22 +307,29 @@ function queryParams(req: IncomingMessage): URLSearchParams {
   }
 }
 
-function sessionsOf(engine: ActivityEngine | null) {
-  return engine ? engine.listSessions() : [];
-}
-
 function currentEngine(): ActivityEngine | null {
   return engineOverride ? engineOverride() : (peekVerseEngine() as ActivityEngine | null);
 }
 
-async function requireEngine(): Promise<ActivityEngine | null> {
+/**
+ * The engine, starting it if needed. `failed` when it could not start (or,
+ * under a test override, when the override has none) — callers answer 503
+ * rather than treat that as an empty session list.
+ */
+async function requireEngine(): Promise<{ engine: ActivityEngine } | { failed: true }> {
   const engine = currentEngine();
-  if (engine || engineOverride) return engine;
-  try { return (await getVerseEngine()) as ActivityEngine; } catch { return null; }
+  if (engine) return { engine };
+  if (engineOverride) return { failed: true };
+  try { return { engine: (await getVerseEngine()) as ActivityEngine }; } catch { return { failed: true }; }
+}
+
+/** listSessions, with a throw read as "the engine could not answer" rather than a crash. */
+function listSessionsOf(engine: ActivityEngine): ReturnType<ActivityEngine['listSessions']> | null {
+  try { return engine.listSessions(); } catch { return null; }
 }
 
 /** Fix the unread baseline into existing chats (session-meta.ts SEEDING). Never fails a request. */
-function seed(w: Wiring, sessions: ReturnType<typeof sessionsOf>): void {
+function seed(w: Wiring, sessions: ReturnType<ActivityEngine['listSessions']>): void {
   try { w.meta.seedBaseline(sessions); } catch { /* reads fall back to the implied baseline */ }
 }
 
@@ -325,7 +366,17 @@ export const handleActivityApi: ApiModule = async (ctx: VerseApiContext, req, re
     const since = raw === null || raw === '' ? null : parseActivityCursor(raw);
     if (raw !== null && raw !== '' && !since) return bad(res, 'since must be a cursor this route returned');
     await ensureReady(w);
-    sendJson(res, 200, w.reader.build(since).response);
+    let response: ReturnType<ActivityReader['build']>['response'];
+    try {
+      response = w.reader.build(since).response;
+    } catch {
+      sendJson(res, 503, { error: 'Activity could not be read.', code: 'VERSE_ACTIVITY_UNREADABLE' });
+      return true;
+    }
+    if (w.engineFailed && response.sources.chats === 'unavailable') {
+      response = { ...response, sources: { ...response.sources, chats: 'error' } };
+    }
+    sendJson(res, 200, response);
     return true;
   }
 
@@ -350,8 +401,9 @@ export const handleActivityApi: ApiModule = async (ctx: VerseApiContext, req, re
     if (typeof turnCount !== 'number' || !Number.isInteger(turnCount) || turnCount < 0) {
       return bad(res, 'turnCount must be a non-negative integer');
     }
-    const engine = await requireEngine();
-    const sessions = sessionsOf(engine);
+    const got = await requireEngine();
+    const sessions = 'engine' in got ? listSessionsOf(got.engine) : null;
+    if (!sessions) return engineUnavailable(res);
     seed(w, sessions);
     const session = sessions.find((s) => s.id === sessionId);
     if (!session) {
@@ -368,8 +420,9 @@ export const handleActivityApi: ApiModule = async (ctx: VerseApiContext, req, re
 
   // ── /api/verse/session-meta[/:id] ───────────────────────────────────────
   if ([...queryParams(req).keys()].length > 0) return bad(res, 'session-meta takes no query parameters');
-  const engine = await requireEngine();
-  const sessions = sessionsOf(engine);
+  const got = await requireEngine();
+  const sessions = 'engine' in got ? listSessionsOf(got.engine) : null;
+  if (!sessions) return engineUnavailable(res);
   // The Sidebar's unread dots come from here, possibly before the first
   // activity poll: seed first, or an old chat reads unread on first launch.
   seed(w, sessions);

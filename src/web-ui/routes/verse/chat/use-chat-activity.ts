@@ -18,6 +18,7 @@
  * whether or not the server-side POST can run (it needs a held token).
  */
 import { useCallback, useSyncExternalStore } from 'react';
+import { readFailureReason } from '../../../data/client.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { markVerseSessionSeen, verseActivityQuery, verseSessionMetaQuery } from '../verse-queries.js';
@@ -69,6 +70,12 @@ export function useChatActivity() {
     /** null = the route is not mounted on this server (or has not answered yet). */
     activity: activity.data ?? null,
     meta: meta.data ?? null,
+    /**
+     * Why session-meta could not be read (the route's own sentence, e.g. the
+     * chat engine is not answering), or null. A 404 is not an error here — it
+     * reads as `meta: null` ("not on this server").
+     */
+    metaError: meta.status === 'error' ? readFailureReason(meta.error) : null,
     localSeen,
   };
 }

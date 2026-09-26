@@ -85,6 +85,12 @@ export interface SidebarProps {
   activity?: VerseActivityResponse | null;
   /** 3.10 — C1's per-chat meta (null: not on this server / not answered yet). */
   meta?: VerseSessionMetaResponse | null;
+  /**
+   * Why the per-chat meta could not be read (the server's sentence), when it
+   * failed rather than being absent. Pin/Archive then name THIS as their
+   * reason instead of "not available on this server yet".
+   */
+  metaError?: string | null;
   /** Turn counts this tab has seen, per chat. */
   localSeen?: ReadonlyMap<string, number>;
   /** Row actions (3.10). Absent → the row menu is not offered. */
@@ -108,7 +114,7 @@ const SessionSearch = lazy(() => import('./context/SessionSearch.js').then((m) =
 
 export function Sidebar(props: SidebarProps) {
   const { sessions, sessionsStatus, sessionsError, projects, seats, selectedId, query, onQuery, onSelect, onNew,
-    onRetry, onCollapse, onDisconnect, activity = null, meta = null, localSeen = NO_SEEN, actions } = props;
+    onRetry, onCollapse, onDisconnect, activity = null, meta = null, metaError = null, localSeen = NO_SEEN, actions } = props;
   const searchId = useId();
   const newChatShortcut = findCommand('chat.new')?.keys[0];
   const sidebarShortcut = findCommand('chat.sidebar')?.keys[0];
@@ -235,7 +241,7 @@ export function Sidebar(props: SidebarProps) {
       {menu && actions ? (
         <ActionMenu label={`Actions for ${menu.row.session.title || 'Untitled chat'}`} anchor={menu.anchor}
           returnFocus={menu.from} onClose={() => setMenu(null)}
-          items={rowMenuItems(menu.row, actions, model.metaAvailable, () => setRenaming(menu.row.session.id))} />
+          items={rowMenuItems(menu.row, actions, model.metaAvailable, metaError, () => setRenaming(menu.row.session.id))} />
       ) : null}
     </nav>
   );
@@ -271,11 +277,13 @@ function rowStatusWords(status: SidebarRow['status']): string | null {
   }
 }
 
-function rowMenuItems(row: SidebarRow, actions: SidebarRowActions, metaAvailable: boolean, startRename: () => void): ActionMenuItem[] {
+function rowMenuItems(row: SidebarRow, actions: SidebarRowActions, metaAvailable: boolean, metaError: string | null,
+  startRename: () => void): ActionMenuItem[] {
   const id = row.session.id;
   const running = row.status.kind === 'running';
   const writeReason = !actions.dispatchEnabled ? 'This server was started without dispatch.' : null;
-  const metaReason = writeReason ?? (metaAvailable ? null : 'Not available on this server yet.');
+  const metaReason = writeReason
+    ?? (metaAvailable ? null : metaError ? `Pins and archive unavailable. ${metaError}` : 'Not available on this server yet.');
   return [
     {
       id: 'pin',

@@ -18,6 +18,10 @@
  * `unavailable`, and every badge renders "unknown" (no dot), never zero. A
  * failed poll keeps the last good data and says `stale` — a badge that
  * flashes to 0 on one dropped request would read as a false all-clear.
+ * Any other failure carries the server's own reason in `error` (the route
+ * answers `{ code, error }` when it could not read, e.g. a 503), so a
+ * surface can say "could not read the inbox: …" instead of calling a broken
+ * server "not in this build".
  *
  * COMPLETIONS arrive once per cursor; `onActivityCompletions` listeners get
  * each batch exactly once. The first poll of a page carries none (history is
@@ -26,7 +30,7 @@
 import { useSyncExternalStore } from 'react';
 import type { VerseActivityCompletion, VerseActivityResponse } from '../../../../core/verse/workbench-types.js';
 import { VERSE_ACTIVITY_PATH } from '../../../../core/verse/workbench-types.js';
-import { ApiError, apiGet } from '../../../data/client.js';
+import { ApiError, apiGet, readFailureReason } from '../../../data/client.js';
 import { MIN_POLL_INTERVAL_MS } from './section-visibility.js';
 
 export const ACTIVITY_POLL_VISIBLE_MS = 5_000;
@@ -39,12 +43,14 @@ export interface ActivityState {
   data: VerseActivityResponse | null;
   /** ms epoch of the last successful poll. */
   updatedAt: number | null;
+  /** Why the last poll failed (null after a success, and for a 404 — that is `unavailable`, not a failure). */
+  error?: string | null;
 }
 
 type Fetcher = (path: string, signal?: AbortSignal) => Promise<VerseActivityResponse>;
 
 let fetcher: Fetcher = (path, signal) => apiGet<VerseActivityResponse>(path, signal);
-let snapshot: ActivityState = { status: 'idle', data: null, updatedAt: null };
+let snapshot: ActivityState = { status: 'idle', data: null, updatedAt: null, error: null };
 let cursor: string | null = null;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let inFlight: Promise<void> | null = null;
@@ -81,7 +87,7 @@ export function refreshActivity(): Promise<void> {
       const data = await fetcher(path);
       const firstPoll = cursor === null;
       cursor = typeof data.cursor === 'string' ? data.cursor : null;
-      emit({ status: 'ready', data, updatedAt: Date.now() });
+      emit({ status: 'ready', data, updatedAt: Date.now(), error: null });
       if (!firstPoll && Array.isArray(data.completions) && data.completions.length > 0) {
         for (const l of [...completionListeners]) {
           try { l(data.completions); } catch { /* a listener must not stop the loop */ }
@@ -89,13 +95,13 @@ export function refreshActivity(): Promise<void> {
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
-        emit({ status: 'unavailable', data: null, updatedAt: snapshot.updatedAt });
+        emit({ status: 'unavailable', data: null, updatedAt: snapshot.updatedAt, error: null });
       } else if (err instanceof ApiError && err.status === 400 && cursor) {
         // A cursor the server no longer accepts: start over rather than stall.
         cursor = null;
         emit({ ...snapshot, status: snapshot.data ? 'stale' : 'loading' });
       } else {
-        emit({ ...snapshot, status: snapshot.data ? 'stale' : 'unavailable' });
+        emit({ ...snapshot, status: snapshot.data ? 'stale' : 'unavailable', error: readFailureReason(err) });
       }
     } finally {
       inFlight = null;
@@ -161,5 +167,5 @@ export function resetActivityForTest(next?: Fetcher): void {
   listeners.clear();
   completionListeners.clear();
   fetcher = next ?? ((path, signal) => apiGet<VerseActivityResponse>(path, signal));
-  snapshot = { status: 'idle', data: null, updatedAt: null };
+  snapshot = { status: 'idle', data: null, updatedAt: null, error: null };
 }

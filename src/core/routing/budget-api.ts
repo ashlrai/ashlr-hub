@@ -23,6 +23,13 @@
  * shared 64 KB body cap. Every response goes through sendJson() →
  * sanitizePublicJson(). Unknown query parameters and body keys are 400s.
  *
+ * A READ THAT FAILS SAYS SO. When the policy file, the decision log or the
+ * seat capacity cannot be read, the route answers 503 `{ code, error }` —
+ * `error` a plain sentence naming WHAT could not be read and why, never a
+ * path, errno text or stack — rather than defaults or an empty list the
+ * panel would render as the operator's real policy or "no decisions yet".
+ * The web client lifts `error` into ApiError.detail for the panel to show.
+ *
  * SIDE EFFECT BY DESIGN: every read that computes headroom also refreshes the
  * capacity snapshot (~/.ashlr/routing/capacity.json, throttled) that
  * `subscriptionAllows` reads in processes without a collector — so as long as
@@ -43,10 +50,19 @@ import type { AshlrConfig } from '../types.js';
 import type { VerseSeat } from '../verse/types.js';
 import type { VerseAccountCollector } from '../verse/accounts.js';
 import { passesMutationGate, readBody, sendJson } from '../web/api.js';
-import { recordShadowDecision, loadBudgetPolicy, readShadowDecisions, updateBudgetPolicy, writeCapacitySnapshotAsync } from './budget-store.js';
+import {
+  BudgetPolicyUnreadableError,
+  loadBudgetPolicy,
+  readBudgetPolicyFileState,
+  readShadowDecisionsChecked,
+  recordShadowDecision,
+  updateBudgetPolicy,
+  writeCapacitySnapshotAsync,
+} from './budget-store.js';
 import { assessSeat, capacityFromSeat, HEADROOM_READING_MAX_AGE_MS, type SeatCapacity } from './headroom.js';
 import {
   BudgetPolicyError,
+  defaultBudgetPolicy,
   effectiveSeatPolicy,
   parseBudgetUpdate,
   type BudgetEngine,
@@ -150,9 +166,51 @@ export function setBudgetCapacitySourceForTest(source?: CapacitySource): void {
   lastSnapshotAt = 0;
 }
 
+// ---------------------------------------------------------------------------
+// Read failures the panel is told about
+// ---------------------------------------------------------------------------
+
+/**
+ * A source the route needed could not be read. `message` is the operator-
+ * facing sentence and is sent as-is, so it must never carry a path or the
+ * underlying error's text (which can). 503: the request was fine, the store
+ * or collector behind it is what is unusable right now.
+ */
+export class BudgetReadError extends Error {
+  readonly status = 503 as const;
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = 'BudgetReadError';
+  }
+}
+
+/**
+ * The policy as the PANEL must see it. `loadBudgetPolicy` is total (defaults
+ * for any bad file), which is right for the daemon but made the panel show
+ * "Balanced, every seat default" while the operator's real policy sat in a
+ * file nobody could read — and the next click was then refused (review d7)
+ * with no visible reason. Only a MISSING file is the defaults here.
+ */
+function loadPolicyForPanel(): BudgetPolicy {
+  const found = readBudgetPolicyFileState();
+  if (found.state === 'ok') return found.policy;
+  if (found.state === 'missing') return defaultBudgetPolicy();
+  throw new BudgetReadError(
+    'VERSE_STORE_UNREADABLE',
+    `The budget policy file ${found.reason}. Fix or remove it to use the defaults.`,
+  );
+}
+
 /** Read capacity and (throttled) persist it for collector-less readers. Never throws on the write. */
 async function readCapacity(cfg: AshlrConfig, force = false): Promise<CapacityReading> {
-  const reading = await capacitySource(cfg);
+  let reading: CapacityReading;
+  try {
+    reading = await capacitySource(cfg);
+  } catch {
+    // The cause (a collector or Ollama error) can name paths and hosts; the
+    // panel only needs to know WHICH read failed.
+    throw new BudgetReadError('VERSE_BUDGET_CAPACITY_UNREADABLE', 'Seat capacity could not be read.');
+  }
   const now = Date.now();
   if (force || now - lastSnapshotAt >= SNAPSHOT_MIN_INTERVAL_MS) {
     lastSnapshotAt = now;
@@ -289,8 +347,9 @@ export const handleBudgetApi: ApiModule = async (ctx, req, res, path, method) =>
     if (path === VERSE_BUDGET_PATH) {
       if (method === 'GET') {
         if (!readQuery(req, res, [])) return true;
+        const policy = loadPolicyForPanel();
         const reading = await readCapacity(ctx.cfg);
-        sendJson(res, 200, buildBudgetView(loadBudgetPolicy(), reading, Date.now()));
+        sendJson(res, 200, buildBudgetView(policy, reading, Date.now()));
         return true;
       }
       if (method === 'POST') {
@@ -329,8 +388,9 @@ export const handleBudgetApi: ApiModule = async (ctx, req, res, path, method) =>
         sendInvalid(res, request);
         return true;
       }
+      const policy = loadPolicyForPanel();
       const reading = await readCapacity(ctx.cfg);
-      sendJson(res, 200, routeSeat(request, reading.seats, loadBudgetPolicy(), { nowMs: Date.now() }));
+      sendJson(res, 200, routeSeat(request, reading.seats, policy, { nowMs: Date.now() }));
       return true;
     }
 
@@ -343,14 +403,27 @@ export const handleBudgetApi: ApiModule = async (ctx, req, res, path, method) =>
       return true;
     }
     const limit = limitRaw === null ? 50 : Math.max(1, Math.min(500, Number(limitRaw)));
-    sendJson(res, 200, { decisions: readShadowDecisions(limit) });
+    const log = readShadowDecisionsChecked(limit);
+    if (log.state === 'unreadable') {
+      throw new BudgetReadError('VERSE_BUDGET_DECISIONS_UNREADABLE', `The routing decision log ${log.reason}.`);
+    }
+    sendJson(res, 200, { decisions: log.decisions });
     return true;
   } catch (err) {
-    if (err instanceof BudgetPolicyError) {
+    if (err instanceof BudgetPolicyError || err instanceof BudgetReadError) {
       sendJson(res, err.status, { code: err.code, error: err.message });
       return true;
     }
-    sendJson(res, 500, { error: 'budget request failed' });
+    if (err instanceof BudgetPolicyUnreadableError) {
+      // Its own message names the absolute file and the archive copy; the
+      // panel gets the same fact without either.
+      sendJson(res, err.status, {
+        code: err.code,
+        error: `The budget policy file ${err.reason}. Nothing was saved. Fix or remove it to use the defaults.`,
+      });
+      return true;
+    }
+    sendJson(res, 500, { code: 'VERSE_BUDGET_FAILED', error: 'Budget request failed.' });
     return true;
   }
 };
