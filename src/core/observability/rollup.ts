@@ -320,7 +320,7 @@ export function modelToProviderKey(model: string): string {
  * and Ollama's own hosted `*-cloud` tags, which do not run on this machine.
  */
 function isOllamaTag(lowerModel: string): boolean {
-  if (!/^[a-z0-9][\w.\-/]*:[\w.\-]+$/.test(lowerModel)) return false;
+  if (!/^[a-z0-9][\w./-]*:[\w.-]+$/.test(lowerModel)) return false;
   if (lowerModel.startsWith('ft:') || lowerModel.includes('anthropic')) return false;
   return !lowerModel.endsWith('-cloud') && !lowerModel.endsWith(':cloud');
 }
