@@ -145,38 +145,33 @@ describe('eligible again', () => {
     }
   });
 
-  it('prints a held-back seat\'s lane cap in plain words', () => {
-    const legacy: SeatExclusion = { seatId: 'codex-cmp', reasons: ['Codex lanes stay off until the Leader enables them after the usage reset (a class-B action).'], nextEligibleAt: null };
+  it('prints a held-back seat\'s lane cap as the server wrote it', () => {
+    const legacy: SeatExclusion = { seatId: 'codex-cmp', reasons: ['Codex stays off until the Leader turns it on after the usage reset (you can veto it).'], nextEligibleAt: null };
     expect(heldBackText(legacy)).toBe('Codex stays off until the Leader turns it on after the usage reset (you can veto it).');
     const structured: SeatExclusion = {
       seatId: 'local:qwen',
-      reasons: ['The local runtime serves 0 slot(s).'],
-      details: [{ kind: 'lane', text: 'The local runtime serves 0 slot(s).', resetsAt: null, resetDescription: null }],
+      reasons: ['The local runtime serves 0 slots.'],
+      details: [{ kind: 'lane', text: 'The local runtime serves 0 slots.', resetsAt: null, resetDescription: null }],
       nextEligibleAt: null,
     };
     expect(heldBackText(structured)).toBe('The local runtime serves 0 slots.');
   });
 });
 
-describe('lane cap reasons in operator words', () => {
-  it('pluralises by the count, drops the Leader action class and names lanes as the chips do', () => {
-    expect(laneReasonText('The local runtime serves 2 slot(s).')).toBe('The local runtime serves 2 slots.');
-    expect(laneReasonText('The local runtime serves 1 slot(s).')).toBe('The local runtime serves 1 slot.');
-    expect(laneReasonText('A harness experiment is using 1 local slot(s).')).toBe('A harness experiment is using 1 local slot.');
-    expect(laneReasonText('A harness experiment is using 2 local slot(s).')).toBe('A harness experiment is using 2 local slots.');
-    expect(laneReasonText('Codex lanes stay off until the Leader enables them after the usage reset (a class-B action).'))
-      .toBe('Codex stays off until the Leader turns it on after the usage reset (you can veto it).');
-    expect(laneReasonText('The Leader set 0 grok-cli lanes.')).toBe('The Leader set 0 Grok lanes.');
-    expect(laneReasonText('The Leader set 1 grok-cli lane.')).toBe('The Leader set 1 Grok lane.');
-    expect(laneReasonText('No codex seat has the producer role in the grant.')).toBe('No Codex seat has the producer role in the grant.');
-    expect(laneReasonText("The grant's current rollout stage does not include claude-cli.")).toBe("The grant's current rollout stage does not include Claude.");
-    const mixed = laneReasonText('The local runtime serves 2 slot(s). The Leader set 0 grok-cli lanes (a class-B action); claude-cli is off.');
-    expect(mixed).toBe('The local runtime serves 2 slots. The Leader set 0 Grok lanes (you can veto it); Claude is off.');
-  });
-
-  it('never rewrites a seat id and leaves prose it does not recognise alone', () => {
-    expect(laneReasonText('The grant gives codex-cmp no producer role.')).toBe('The grant gives codex-cmp no producer role.');
-    expect(laneReasonText('No standing grant is in force.')).toBe('No standing grant is in force.');
+describe('lane cap reasons', () => {
+  it('passes the server\'s plain sentences through unchanged, only trimmed', () => {
+    // The server pluralises and names lanes at the source (dispatch-router.ts);
+    // the UI must not re-translate them.
+    for (const sentence of [
+      'The local runtime serves 1 slot.',
+      'A harness experiment is using 2 local slots.',
+      'Codex stays off until the Leader turns it on after the usage reset (you can veto it).',
+      'The Leader set 1 Grok lane.',
+      'No Codex seat has the producer role in the grant.',
+      'The grant gives codex-cmp no producer role.',
+    ]) {
+      expect(laneReasonText(sentence)).toBe(sentence);
+    }
     expect(laneReasonText('  off until its window resets ')).toBe('off until its window resets');
   });
 });

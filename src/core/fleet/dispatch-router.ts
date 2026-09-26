@@ -187,6 +187,28 @@ export function grantSeatFor<T>(spend: { seats: Readonly<Record<string, T>> }, s
   return null;
 }
 
+/**
+ * Lane names as the operator reads them — the same words the Verse lane chips
+ * use. The machine-readable `lane` field keeps the ids (`grok-cli`); only the
+ * sentences a person reads (`capReason`, held-back seat reasons) use these, so
+ * the web UI and logs can print them as they are instead of re-translating.
+ */
+export const FLEET_LANE_LABEL: Readonly<Record<FleetEngine, string>> = {
+  local: 'Local',
+  'grok-cli': 'Grok',
+  'claude-cli': 'Claude',
+  codex: 'Codex',
+};
+
+/**
+ * "1 slot", "2 slots", "1 local slot" — a count with its noun pluralised by
+ * the count, so reasons never read "2 slot(s)". `noun` is the singular and may
+ * carry leading words ("local slot"); only its last word gets the "s".
+ */
+export function countOf(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? '' : 's'}`;
+}
+
 function clampGrokLanes(value: number | null | undefined): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   return Math.max(LEADER_LIMITS.grokLanes.min, Math.min(LEADER_LIMITS.grokLanes.max, Math.floor(value)));
@@ -214,19 +236,22 @@ export function planLanes(input: LanePlanInput): Record<FleetEngine, LanePlan> {
       const leader = clampGrokLanes(input.directives?.grokLanes);
       if (leader !== null && leader !== slots) {
         slots = leader;
-        capReason = `The Leader set ${leader} grok-cli lane${leader === 1 ? '' : 's'}.`;
+        capReason = `The Leader set ${countOf(leader, `${FLEET_LANE_LABEL['grok-cli']} lane`)}.`;
       }
     }
     if (lane === 'codex') {
       if (input.directives?.codexEnabled !== true) {
         slots = 0;
-        capReason = 'Codex lanes stay off until the Leader enables them after the usage reset (a class-B action).';
+        // Enabling Codex is a class-B Leader action: it waits out a veto
+        // window, which is what the operator can act on — say that, not the
+        // action class.
+        capReason = 'Codex stays off until the Leader turns it on after the usage reset (you can veto it).';
       }
     }
     if (lane === 'local') {
       if (typeof input.localServingSlots === 'number' && Number.isFinite(input.localServingSlots)) {
-        narrow(Math.max(0, Math.floor(input.localServingSlots)),
-          `The local runtime serves ${Math.max(0, Math.floor(input.localServingSlots))} slot(s).`);
+        const serving = Math.max(0, Math.floor(input.localServingSlots));
+        narrow(serving, `The local runtime serves ${countOf(serving, 'slot')}.`);
       }
       if (presentOrUnknown) {
         narrow(PRESENCE_LOCAL_SLOTS, input.presence.present === null
@@ -241,12 +266,12 @@ export function planLanes(input: LanePlanInput): Record<FleetEngine, LanePlan> {
         narrow(0, 'You are active (or presence is unknown), so the Claude producer slice is held for your own session.');
       }
     } else if (lane !== 'local' && !grantHasProducerFor(input.policy, lane)) {
-      narrow(0, `No ${lane} seat has the producer role in the grant.`);
+      narrow(0, `No ${FLEET_LANE_LABEL[lane]} seat has the producer role in the grant.`);
     }
     const unavailable = input.engineUnavailable[lane];
     if (unavailable) narrow(0, unavailable);
     if (!input.policy.engines.includes(lane)) {
-      narrow(0, `The grant's current rollout stage does not include ${lane}.`);
+      narrow(0, `The grant's current rollout stage does not include ${FLEET_LANE_LABEL[lane]}.`);
     }
     out[lane] = { lane, slots, capReason };
   }
@@ -517,15 +542,15 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
       details.push(detail);
       reasons.push(sentence ?? reasonSentences([detail])[0]!);
     };
-    if (!ctx.policy.engines.includes(lane)) add({ kind: 'grant', text: `The grant's current stage does not include ${lane}.` });
+    if (!ctx.policy.engines.includes(lane)) add({ kind: 'grant', text: `The grant's current stage does not include ${FLEET_LANE_LABEL[lane]}.` });
     if (!grantSeat || !grantSeat.enabled) add({ kind: 'grant', text: 'The grant does not let autonomy use this seat.' });
     else if (!grantSeat.roles.includes('producer')) {
       add({ kind: 'grant', text: `The grant gives this seat no producer role (${grantSeat.roles.join(', ') || 'none'}).` });
     }
     const plan = ctx.lanes[lane];
-    if (plan.slots <= 0) add({ kind: 'lane', text: plan.capReason ?? `The ${lane} lane has no slots this tick.` });
+    if (plan.slots <= 0) add({ kind: 'lane', text: plan.capReason ?? `The ${FLEET_LANE_LABEL[lane]} lane has no slots this tick.` });
     const engine = ctx.laneEngines[lane];
-    if (engine === null) add({ kind: 'lane', text: `No ${lane} engine is installed and allowed in this build.` });
+    if (engine === null) add({ kind: 'lane', text: `No ${FLEET_LANE_LABEL[lane]} engine is installed and allowed in this build.` });
     if (reasons.length === 0 && engine !== null) {
       // Keep the legacy engine when it already dispatches through this lane:
       // it may encode item-specific rules (a repair's parent engine, the

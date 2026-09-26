@@ -95,33 +95,17 @@ function legacyKind(text: string): SeatReasonKind {
 // Lane cap reasons in operator words
 // ---------------------------------------------------------------------------
 
-/** Lane ids as the operator reads them — never inside a seat id (`codex-cmp`). */
-const LANE_WORDS: ReadonlyArray<readonly [RegExp, string]> = [
-  [/(?<![\w-])grok-cli(?![\w-])/g, 'Grok'],
-  [/(?<![\w-])claude-cli(?![\w-])/g, 'Claude'],
-  [/(?<![\w-])codex(?![\w-])/g, 'Codex'],
-];
-
 /**
  * A lane cap reason (the router's `capReason`, also a held-back seat's lane
- * reason) in plain words. The router words these for its log: "The local
- * runtime serves 2 slot(s).", "A harness experiment is using 1 local
- * slot(s).", "Codex lanes stay off until the Leader enables them after the
- * usage reset (a class-B action).", "The Leader set 0 grok-cli lanes." The
- * operator reads "2 slots", "1 local slot", "Codex stays off until the Leader
- * turns it on after the usage reset (you can veto it)" and "0 Grok lanes".
- * Anything it does not recognise passes through unchanged.
+ * reason) as the operator reads it. The server writes these in plain words at
+ * the source (dispatch-router.ts `planLanes`, tick-hooks-live.ts): counts are
+ * pluralised ("2 slots", "1 local slot"), lanes are named as the chips name
+ * them ("Grok", not "grok-cli"), and a Leader action says "you can veto it"
+ * rather than its class. So this only trims — re-translating here would
+ * duplicate the server's wording and drift from it.
  */
 export function laneReasonText(reason: string): string {
-  let text = reason.trim();
-  text = text.replace(/^Codex lanes stay off until the Leader enables them\b/, 'Codex stays off until the Leader turns it on');
-  // A class-A/B Leader action waits out a veto window; class C does not.
-  text = text.replace(/\s*\(an? class-([A-Za-z])\s+action\)/g, (_m, cls: string) => (/^[ab]$/i.test(cls) ? ' (you can veto it)' : ''));
-  // "2 slot(s)" → "2 slots"; "1 local slot(s)" → "1 local slot".
-  text = text.replace(/\b(\d+)((?:\s+[A-Za-z-]+)*?)\s+([A-Za-z]+)\(s\)/g, (_m, n: string, mid: string, word: string) => `${n}${mid} ${word}${Number(n) === 1 ? '' : 's'}`);
-  text = text.replace(/\b([A-Za-z]+)\(s\)/g, '$1s');
-  for (const [re, word] of LANE_WORDS) text = text.replace(re, word);
-  return text;
+  return reason.trim();
 }
 
 /**

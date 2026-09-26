@@ -121,10 +121,12 @@ import {
 } from './post-merge-watch.js';
 import {
   DEFAULT_LOCAL_CONTEXT_TOKENS,
+  FLEET_LANE_LABEL,
   FLEET_LOCAL_SEAT_ID,
   PRESENCE_WINDOW_MS,
   anyFanoutCandidate,
   clampLeaderDirectives,
+  countOf,
   fleetLaneOf,
   laneOfSeat,
   laneStates,
@@ -1549,7 +1551,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       if (experiment && lanes.local.slots > 0) {
         const width = lastFleetQueueDepth > 0 ? EXPERIMENT_LOCAL_SLOTS_BUSY : EXPERIMENT_LOCAL_SLOTS_IDLE;
         const left = Math.max(0, lanes.local.slots - width);
-        lanes.local = { lane: 'local', slots: left, capReason: `A harness experiment is using ${lanes.local.slots - left} local slot(s).` };
+        lanes.local = { lane: 'local', slots: left, capReason: `A harness experiment is using ${countOf(lanes.local.slots - left, 'local slot')}.` };
       }
 
       // ── Best-of-N reserve (review c15) ──────────────────────────────────
@@ -1702,15 +1704,15 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         return { allowed: false, reason: `${engine} is not a fleet lane under the standing grant (per-token APIs and agents whose spend cannot be read never are).` };
       }
       if (!current.policy.engines.includes(lane)) {
-        return { allowed: false, reason: `The grant's current rollout stage does not include ${lane}.` };
+        return { allowed: false, reason: `The grant's current rollout stage does not include ${FLEET_LANE_LABEL[lane]}.` };
       }
       const plan = current.lanes[lane];
-      if (plan.slots <= 0) return { allowed: false, reason: plan.capReason ?? `The ${lane} lane has no slots this tick.` };
+      if (plan.slots <= 0) return { allowed: false, reason: plan.capReason ?? `The ${FLEET_LANE_LABEL[lane]} lane has no slots this tick.` };
 
       // The seats behind the lane: every one the CLI might hit must have
       // headroom (the fleet cannot choose which account a CLI signs in with).
       const seats = current.capacity.filter((s) => laneOfSeat(s) === lane);
-      if (seats.length === 0) return { allowed: false, reason: `No ${lane} seat is known, so no usage can be checked.` };
+      if (seats.length === 0) return { allowed: false, reason: `No ${FLEET_LANE_LABEL[lane]} seat is known, so no usage can be checked.` };
       for (const seat of seats) {
         const grant = standingSeatFor(current.policy.spend, seat.seatId);
         if (!grant || !grant.enabled) {

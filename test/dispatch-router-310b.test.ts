@@ -22,6 +22,7 @@ import {
   fleetLaneOf,
   planFanoutReserve,
   planStandingBestOfN,
+  countOf,
   grantSeatFor,
   planLanes,
   resolveLaneEngines,
@@ -237,7 +238,7 @@ describe('Codex waits for its reset', () => {
       engineUnavailable: {},
     });
     expect(planned.codex.slots).toBe(0);
-    expect(planned.codex.capReason).toMatch(/until the Leader enables them/);
+    expect(planned.codex.capReason).toBe('Codex stays off until the Leader turns it on after the usage reset (you can veto it).');
     const enabled = planLanes({
       policy: policy(),
       directives: { v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: null, codexEnabled: true },
@@ -290,6 +291,33 @@ describe('split items never go local', () => {
   });
 });
 
+describe('lane cap reasons are plain sentences at the source', () => {
+  // The Verse UI prints these as they arrive, so the router must never write
+  // "slot(s)", an action class, or a lane id like "grok-cli" into them.
+  const plan = (over: Partial<Parameters<typeof planLanes>[0]>) => planLanes({
+    policy: policy(), directives: null, presence: ABSENT, localServingSlots: 4, engineUnavailable: {}, ...over,
+  });
+
+  it('pluralises counts by the number', () => {
+    expect(countOf(0, 'slot')).toBe('0 slots');
+    expect(countOf(1, 'local slot')).toBe('1 local slot');
+    expect(countOf(2, 'local slot')).toBe('2 local slots');
+    expect(plan({ localServingSlots: 1 }).local.capReason).toBe('The local runtime serves 1 slot.');
+    expect(plan({ localServingSlots: 0 }).local.capReason).toBe('The local runtime serves 0 slots.');
+    expect(plan({ localServingSlots: 3 }).local.capReason).toBe('The local runtime serves 3 slots.');
+  });
+
+  it('names lanes as the operator does and keeps the machine-readable lane id', () => {
+    const one = plan({ directives: { v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: 1, codexEnabled: null } });
+    expect(one['grok-cli']).toEqual({ lane: 'grok-cli', slots: 1, capReason: 'The Leader set 1 Grok lane.' });
+    const three = plan({ directives: { v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: 3, codexEnabled: null } });
+    expect(three['grok-cli'].capReason).toBe('The Leader set 3 Grok lanes.');
+    for (const lane of Object.values(plan({}))) {
+      expect(lane.capReason ?? '', lane.lane).not.toMatch(/\(s\)|class-[A-Z]|grok-cli|claude-cli|\bcodex\b/);
+    }
+  });
+});
+
 describe('presence caps', () => {
   it('holds the local lane to 2 and closes the Claude producer slice while Mason is present', () => {
     const present: OperatorPresence = { present: true, reason: 'A Verse chat turn is running.', evidenceAt: NOW_ISO };
@@ -328,7 +356,7 @@ describe('presence caps', () => {
   it('closes every lane outside the grant\'s current stage', () => {
     const planned = planLanes({ policy: policy({ engines: ['local'] }), directives: null, presence: ABSENT, localServingSlots: 4, engineUnavailable: {} });
     expect(planned['grok-cli'].slots).toBe(0);
-    expect(planned['grok-cli'].capReason).toMatch(/does not include grok-cli/);
+    expect(planned['grok-cli'].capReason).toBe("The grant's current rollout stage does not include Grok.");
     expect(planned.local.slots).toBe(4);
   });
 

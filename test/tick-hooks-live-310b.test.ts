@@ -361,7 +361,7 @@ describe('seatAllows', () => {
     expect(hooks.seatAllows('ashlrcode' as EngineId, { maxPercent: 90 }).allowed).toBe(false);
     // Presence closes the Claude producer slice.
     expect(hooks.seatAllows('claude' as EngineId, { maxPercent: 90 }).reason).toMatch(/held for your own session/);
-    expect(hooks.seatAllows('codex' as EngineId, { maxPercent: 90 }).reason).toMatch(/does not include codex/);
+    expect(hooks.seatAllows('codex' as EngineId, { maxPercent: 90 }).reason).toBe("The grant's current rollout stage does not include Codex.");
   });
 
   it('refuses a seat over its budget', async () => {
@@ -840,9 +840,13 @@ describe('review c15 — best-of-N and experiments stay inside the lane caps', (
     expect(started).toEqual([0]);
     const idleCaps = await hooks.beforeTick({ ...hookCtx, nowMs: now + 1 });
     expect(idleCaps.laneCaps.local).toBe(4 - EXPERIMENT_LOCAL_SLOTS_IDLE);
+    // The reason is a plain sentence pluralised by the count — never "slot(s)".
+    const localReason = (): string | null | undefined => hooks.lastTickState()?.lanes.find((l) => l.lane === 'local')?.capReason;
+    expect(localReason()).toBe('A harness experiment is using 2 local slots.');
     hooks.standingBacklog([item({ id: 'arrived' })]);
     const busyCaps = await hooks.beforeTick({ ...hookCtx, nowMs: now + 2 });
     expect(busyCaps.laneCaps.local).toBe(4 - EXPERIMENT_LOCAL_SLOTS_BUSY);
+    expect(localReason()).toBe('A harness experiment is using 1 local slot.');
     hooks.stopBackground('test over');
   });
 });

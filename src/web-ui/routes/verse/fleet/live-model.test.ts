@@ -104,13 +104,14 @@ describe('lane chips', () => {
     ]);
   });
 
-  it('says the router\'s log wording in plain words — no "slot(s)", no "class-B action"', () => {
-    // The live producers' sentences (dispatch-router.ts planLanes, tick-hooks-live.ts).
+  it('prints the server\'s plain-words lane reasons as they arrive', () => {
+    // The live producers' sentences (dispatch-router.ts planLanes,
+    // tick-hooks-live.ts) are already plain; the UI no longer rewrites them.
     const lanes = [
-      { lane: 'local' as const, slots: 2, busy: 1, capReason: 'The local runtime serves 2 slot(s).' },
-      { lane: 'grok-cli' as const, slots: 0, busy: 0, capReason: 'The Leader set 0 grok-cli lanes.' },
+      { lane: 'local' as const, slots: 2, busy: 1, capReason: 'The local runtime serves 2 slots.' },
+      { lane: 'grok-cli' as const, slots: 0, busy: 0, capReason: 'The Leader set 0 Grok lanes.' },
       { lane: 'claude-cli' as const, slots: 1, busy: 0, capReason: null },
-      { lane: 'codex' as const, slots: 0, busy: 0, capReason: 'Codex lanes stay off until the Leader enables them after the usage reset (a class-B action).' },
+      { lane: 'codex' as const, slots: 0, busy: 0, capReason: 'Codex stays off until the Leader turns it on after the usage reset (you can veto it).' },
     ];
     expect(laneNotes(lanes).map((n) => n.reason)).toEqual([
       'The local runtime serves 2 slots.',
@@ -118,10 +119,10 @@ describe('lane chips', () => {
       'Codex stays off until the Leader turns it on after the usage reset (you can veto it).',
     ]);
     expect(laneReason(lanes[2]!)).toBeNull();
-    // Two spellings that read the same in plain words are one note.
+    // The same sentence on two lanes is one note; surrounding space is not a difference.
     const same = laneNotes([
-      { lane: 'local', slots: 1, busy: 0, capReason: 'A harness experiment is using 1 local slot(s).' },
-      { lane: 'grok-cli', slots: 1, busy: 0, capReason: 'A harness experiment is using 1 local slot.' },
+      { lane: 'local', slots: 1, busy: 0, capReason: 'A harness experiment is using 1 local slot.' },
+      { lane: 'grok-cli', slots: 1, busy: 0, capReason: ' A harness experiment is using 1 local slot. ' },
     ]);
     expect(same).toEqual([{ lanes: ['local', 'grok-cli'], all: true, reason: 'A harness experiment is using 1 local slot.' }]);
   });
