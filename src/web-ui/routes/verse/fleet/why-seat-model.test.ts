@@ -169,10 +169,33 @@ describe('lane cap reasons', () => {
       'The Leader set 1 Grok lane.',
       'No Codex seat has the producer role in the grant.',
       'The grant gives codex-cmp no producer role.',
+      // The config value the operator must change keeps its id.
+      'grok-cli is not in foundry.allowedBackends.',
     ]) {
       expect(laneReasonText(sentence)).toBe(sentence);
     }
     expect(laneReasonText('  off until its window resets ')).toBe('off until its window resets');
+  });
+
+  it('rewrites the older router wording a stale daemon or a journaled run still carries', () => {
+    expect(laneReasonText('The local runtime serves 2 slot(s).')).toBe('The local runtime serves 2 slots.');
+    expect(laneReasonText('The local runtime serves 1 slot(s).')).toBe('The local runtime serves 1 slot.');
+    expect(laneReasonText('A harness experiment is using 1 local slot(s).')).toBe('A harness experiment is using 1 local slot.');
+    expect(laneReasonText('Codex lanes stay off until the Leader enables them after the usage reset (a class-B action).'))
+      .toBe('Codex stays off until the Leader turns it on after the usage reset (you can veto it).');
+    expect(laneReasonText('The Leader set 0 grok-cli lanes.')).toBe('The Leader set 0 Grok lanes.');
+    expect(laneReasonText('The Leader set 1 grok-cli lane.')).toBe('The Leader set 1 Grok lane.');
+    expect(laneReasonText('No codex seat has the producer role in the grant.')).toBe('No Codex seat has the producer role in the grant.');
+    expect(laneReasonText("The grant's current rollout stage does not include claude-cli.")).toBe("The grant's current rollout stage does not include Claude.");
+    expect(laneReasonText("The grant's current stage does not include grok-cli.")).toBe("The grant's current stage does not include Grok.");
+    expect(laneReasonText('The codex lane has no slots this tick.')).toBe('The Codex lane has no slots this tick.');
+    expect(laneReasonText('No claude-cli engine is installed and allowed in this build.')).toBe('No Claude engine is installed and allowed in this build.');
+    expect(laneReasonText('No grok-cli seat is known, so no usage can be checked.')).toBe('No Grok seat is known, so no usage can be checked.');
+  });
+
+  it('classifies a plain-words Codex cap from an unstructured exclusion as a lane reason', () => {
+    const x: SeatExclusion = { seatId: 'codex-cmp', reasons: ['Codex stays off until the Leader turns it on after the usage reset (you can veto it).'], nextEligibleAt: null };
+    expect(exclusionReasons(x)[0]?.kind).toBe('lane');
   });
 });
 

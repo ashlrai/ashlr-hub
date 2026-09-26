@@ -87,7 +87,8 @@ function legacyKind(text: string): SeatReasonKind {
   // stay off until…", "The Leader set 0 grok-cli lanes.", "The local runtime
   // serves 0 slot(s).", "…the Claude producer slice is held for your own
   // session." (3.10.1 sends these as `kind: 'lane'`.)
-  if (/\blanes?\b|\bslots?\b|producer slice is held/i.test(text)) return 'lane';
+  // The plain-words router says "Codex stays off until the Leader…".
+  if (/\blanes?\b|\bslots?\b|producer slice is held|stays off until the Leader/i.test(text)) return 'lane';
   return 'other';
 }
 
@@ -95,17 +96,48 @@ function legacyKind(text: string): SeatReasonKind {
 // Lane cap reasons in operator words
 // ---------------------------------------------------------------------------
 
+const LEGACY_LANE_LABEL: Readonly<Record<string, string>> = { 'grok-cli': 'Grok', 'claude-cli': 'Claude', codex: 'Codex' };
+
+/**
+ * The exact sentence shapes the pre-plain-words router (≤ 3.11) wrote with a
+ * lane id where the lane's name belongs. Only these are rewritten: a lane id
+ * elsewhere is left alone ("grok-cli is not in foundry.allowedBackends." names
+ * the config value to change, and a seat id like `codex-cmp` is never a lane).
+ */
+const LEGACY_LANE_SHAPES: readonly RegExp[] = [
+  /^(The Leader set \d+ )(grok-cli)( lanes?\.)$/,
+  /^(No )(grok-cli|claude-cli|codex)( seat has the producer role in the grant\.)$/,
+  /^(The grant's current (?:rollout )?stage does not include )(grok-cli|claude-cli|codex)(\.)$/,
+  /^(The )(grok-cli|claude-cli|codex)( lane has no slots this tick\.)$/,
+  /^(No )(grok-cli|claude-cli|codex)( engine is installed and allowed in this build\.)$/,
+  /^(No )(grok-cli|claude-cli|codex)( seat is known, so no usage can be checked\.)$/,
+];
+
 /**
  * A lane cap reason (the router's `capReason`, also a held-back seat's lane
  * reason) as the operator reads it. The server writes these in plain words at
- * the source (dispatch-router.ts `planLanes`, tick-hooks-live.ts): counts are
- * pluralised ("2 slots", "1 local slot"), lanes are named as the chips name
- * them ("Grok", not "grok-cli"), and a Leader action says "you can veto it"
- * rather than its class. So this only trims — re-translating here would
- * duplicate the server's wording and drift from it.
+ * the source (dispatch-router.ts `planLanes`, tick-hooks-live.ts), and they
+ * pass through trimmed.
+ *
+ * OLDER WORDING STILL ARRIVES: the daemon runs its own compiled build until it
+ * restarts, and the fleet runtime journal keeps each run's seat decision with
+ * the words of the router that made it. Those older sentences ("2 slot(s)",
+ * "(a class-B action)", "grok-cli") are rewritten into the same plain words;
+ * every rule matches only the old wording, so a current sentence is unchanged.
  */
 export function laneReasonText(reason: string): string {
-  return reason.trim();
+  let text = reason.trim();
+  text = text.replace(
+    /^Codex lanes stay off until the Leader enables them after the usage reset \(a class-B action\)\.$/,
+    'Codex stays off until the Leader turns it on after the usage reset (you can veto it).',
+  );
+  // "2 slot(s)" → "2 slots"; "1 local slot(s)" → "1 local slot".
+  text = text.replace(/\b(\d+)((?:\s+[A-Za-z-]+)*?)\s+([A-Za-z]+)\(s\)/g,
+    (_m, n: string, mid: string, word: string) => `${n}${mid} ${word}${Number(n) === 1 ? '' : 's'}`);
+  for (const shape of LEGACY_LANE_SHAPES) {
+    text = text.replace(shape, (_m, head: string, id: string, tail: string) => `${head}${LEGACY_LANE_LABEL[id] ?? id}${tail}`);
+  }
+  return text;
 }
 
 /**
