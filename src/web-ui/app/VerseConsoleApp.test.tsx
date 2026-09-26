@@ -6,7 +6,7 @@ import { MockEventSource, verseFetch } from '../routes/verse/fixtures.test-suppo
 import * as verseQueries from '../routes/verse/verse-queries.js';
 import { resetVerseStore } from '../routes/verse/verse-store.js';
 import { isScopedConsolePath, isVerseConsolePath } from './console-mode.js';
-import { listenForSidecarRestart, SIDECAR_RESTARTED_EVENT, VerseConsoleApp } from './VerseConsoleApp.js';
+import { listenForSidecarRestart, preloadVerseFirstPaint, preloadVerseFonts, SIDECAR_RESTARTED_EVENT, VerseConsoleApp } from './VerseConsoleApp.js';
 
 const READ = 'c'.repeat(64);
 const MUT = 'd'.repeat(64);
@@ -84,6 +84,48 @@ describe('VerseConsoleApp', () => {
     expect(Object.values(sessionStorage)).not.toContain(MUT);
     // No unlock prompt shown once the hold exists.
     expect(screen.queryByText(/Actions locked/)).not.toBeInTheDocument();
+  });
+});
+
+describe('font preloads (no "preloaded but not used" on the connect screen)', () => {
+  const fontPreloads = (doc: Document) =>
+    [...doc.head.querySelectorAll<HTMLLinkElement>('link[rel="preload"]')];
+  let doc: Document;
+  beforeEach(() => { doc = document.implementation.createHTMLDocument('preload'); });
+
+  it('signed out: preloads only the UI face, as a CORS font fetch the CSS request matches', () => {
+    preloadVerseFirstPaint(doc, false);
+    const links = fontPreloads(doc);
+    expect(links).toHaveLength(1);
+    expect(links[0]!.getAttribute('href')).toMatch(/AshlrSans-latin/);
+    expect(links[0]!.as).toBe('font');
+    expect(links[0]!.crossOrigin).toBe('anonymous');
+    expect(links[0]!.type).toBe('font/woff2');
+  });
+
+  it('host tokens injected: the chat will paint, so both faces go at once — and never twice', () => {
+    preloadVerseFirstPaint(doc, true);
+    preloadVerseFirstPaint(doc, true);
+    const hrefs = fontPreloads(doc).map((l) => l.getAttribute('href') ?? '');
+    expect(hrefs).toHaveLength(2);
+    expect(hrefs.some((h) => /SpaceGrotesk-latin/.test(h))).toBe(true);
+  });
+
+  it('the display face follows once signed in, idempotently', () => {
+    preloadVerseFirstPaint(doc, false);
+    preloadVerseFonts(doc, true);
+    preloadVerseFonts(doc, true);
+    expect(fontPreloads(doc)).toHaveLength(2);
+  });
+
+  it('the app adds the display face when the session turns out to be signed in', async () => {
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    window.__ASHLR_TOKENS__ = { readToken: READ, token: MUT };
+    render(<VerseConsoleApp />);
+    await expectShellOnCommand();
+    const hrefs = [...document.head.querySelectorAll('link[rel="preload"]')].map((l) => l.getAttribute('href') ?? '');
+    expect(hrefs.some((h) => /SpaceGrotesk-latin/.test(h))).toBe(true);
   });
 });
 
