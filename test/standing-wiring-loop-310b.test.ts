@@ -68,7 +68,9 @@ vi.mock('../src/core/fleet/quota.js', async (importOriginal) => {
   };
 });
 
-import { tick, withHarnessProducerPrompt } from '../src/core/daemon/loop.js';
+import { standingDispatchHarness, tick, withHarnessProducerPrompt } from '../src/core/daemon/loop.js';
+import type { HarnessEffort, HarnessSampling } from '../src/core/learn/harness-types.js';
+import type { FleetEngine } from '../src/core/fleet/fleet-types.js';
 import { DEFAULT_TICK_HOOKS, type TickHooks, type TickRouteDecision } from '../src/core/daemon/tick-hooks.js';
 import { readShadowDecisions, writeCapacitySnapshot } from '../src/core/routing/budget-store.js';
 import type { DaemonActivationCapability } from '../src/core/daemon/activation-permit.js';
@@ -101,7 +103,12 @@ type PlanFn = (item: WorkItem) => AutonomousBestOfNPlan | null;
 function standingHooks(opts: {
   backend: 'builtin' | 'claude';
   plan?: PlanFn;
-  harness?: { versionId: string | null; producerPrompt: string | null } | null;
+  harness?: {
+    versionId: string | null;
+    producerPrompt: string | null;
+    effort?: Partial<Record<FleetEngine, HarnessEffort>>;
+    sampling?: Partial<Record<FleetEngine, HarnessSampling>>;
+  } | null;
 }): TickHooks {
   return Object.assign({
     effectiveConfig: (cfg: AshlrConfig) => cfg,
@@ -235,6 +242,79 @@ describe('B-U9 — the harness producer prompt reaches a standing dispatch', () 
     expect(withHarnessProducerPrompt('goal', standingHooks({ backend: 'builtin', harness: { versionId: null, producerPrompt: null } }))).toBe('goal');
     const throwing = Object.assign({ ...DEFAULT_TICK_HOOKS }, { dispatchHarness: () => { throw new Error('store'); } });
     expect(withHarnessProducerPrompt('goal', throwing)).toBe('goal');
+  });
+});
+
+describe('V3.11 — the adopted harness effort / sampling reach the engine invocation', () => {
+  const TUNED = {
+    versionId: 'h-0005',
+    producerPrompt: null,
+    effort: { 'claude-cli': 'high', local: 'medium' } as Partial<Record<FleetEngine, HarnessEffort>>,
+    sampling: { local: { temperature: 0.2, topP: 0.9, maxOutputTokens: 1024 } } as Partial<Record<FleetEngine, HarnessSampling>>,
+  };
+
+  it('forwards the harness on a standing single dispatch', async () => {
+    fx.makeRepo().enroll();
+    await tick(cfgFor({ allowedBackends: ['builtin', 'claude'] }), {
+      dryRun: false,
+      activationCapability: STANDING,
+      hooks: standingHooks({ backend: 'claude', plan: () => ({ run: false, reason: 'not-needed', candidates: [] }), harness: TUNED }),
+    });
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    const opts = mockRunGoal.mock.calls[0]![2] as { harness?: unknown };
+    expect(opts.harness).toEqual({ versionId: 'h-0005', effort: TUNED.effort, sampling: TUNED.sampling });
+  });
+
+  it('forwards the harness to every best-of-N candidate', async () => {
+    fx.makeRepo().enroll();
+    await tick(cfgFor({ allowedBackends: ['builtin', 'claude'] }), {
+      dryRun: false,
+      activationCapability: STANDING,
+      hooks: standingHooks({ backend: 'claude', plan: () => PLAN, harness: TUNED }),
+    });
+    expect(mockRunBestOfN).toHaveBeenCalledTimes(1);
+    const opts = mockRunBestOfN.mock.calls[0]![2] as { harness?: unknown };
+    expect(opts.harness).toEqual({ versionId: 'h-0005', effort: TUNED.effort, sampling: TUNED.sampling });
+  });
+
+  it('forwards nothing for a baseline harness, so the compiled defaults apply', async () => {
+    fx.makeRepo().enroll();
+    await tick(cfgFor({ allowedBackends: ['builtin', 'claude'] }), {
+      dryRun: false,
+      activationCapability: STANDING,
+      hooks: standingHooks({
+        backend: 'claude',
+        plan: () => ({ run: false, reason: 'not-needed', candidates: [] }),
+        harness: { versionId: null, producerPrompt: null, effort: {}, sampling: {} },
+      }),
+    });
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal.mock.calls[0]![2]).not.toHaveProperty('harness');
+  });
+
+  it('never forwards a harness on master\'s (non-standing) path', async () => {
+    fx.makeRepo().enroll();
+    await tick(cfgFor({ allowedBackends: ['claude'] }), {
+      dryRun: false,
+      hooks: {
+        ...standingHooks({ backend: 'claude', harness: TUNED }),
+        // No subscription reading exists in a test HOME; master's gate would throttle claude.
+        seatAllows: () => ({ allowed: true, reason: 'test' }),
+      },
+    });
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal.mock.calls[0]![2]).not.toHaveProperty('harness');
+  });
+
+  it('standingDispatchHarness is null for default hooks, a throwing hook, or no settings', () => {
+    expect(standingDispatchHarness(DEFAULT_TICK_HOOKS)).toBeNull();
+    const throwing = Object.assign({ ...DEFAULT_TICK_HOOKS }, { dispatchHarness: () => { throw new Error('store'); } });
+    expect(standingDispatchHarness(throwing)).toBeNull();
+    expect(standingDispatchHarness(standingHooks({ backend: 'builtin', harness: null }))).toBeNull();
+    expect(standingDispatchHarness(standingHooks({ backend: 'builtin', harness: { versionId: 'h-1', producerPrompt: 'x', effort: {}, sampling: {} } }))).toBeNull();
+    expect(standingDispatchHarness(standingHooks({ backend: 'builtin', harness: TUNED }))).toEqual({
+      versionId: 'h-0005', effort: TUNED.effort, sampling: TUNED.sampling,
+    });
   });
 });
 

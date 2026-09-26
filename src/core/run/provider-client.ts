@@ -929,6 +929,14 @@ export function buildOpenAICompatibleClient(
     maxRequestBytes?: number;
     maxResponseBytes?: number;
     maxOutputTokens?: number;
+    /**
+     * `top_p` / top-level `reasoning_effort` for every request — how an
+     * adopted harness's local-lane sampling and effort reach the wire
+     * (run/harness-dispatch.ts). Absent = the provider's default, byte-identical
+     * request. Only chat() reads them: a transport-bound client never streams.
+     */
+    topP?: number;
+    reasoningEffort?: string;
     onRequestStart?: () => void;
     /**
      * Optional config for the local-only gate below. Callers that hold an
@@ -982,6 +990,8 @@ export function buildOpenAICompatibleClient(
       };
 
       if (temperature !== undefined) body['temperature'] = temperature;
+      if (transport?.topP !== undefined) body['top_p'] = transport.topP;
+      if (transport?.reasoningEffort !== undefined) body['reasoning_effort'] = transport.reasoningEffort;
       if (maxOutputTokens !== undefined) body['max_tokens'] = maxOutputTokens;
 
       if (supportsTools && tools && tools.length > 0) {

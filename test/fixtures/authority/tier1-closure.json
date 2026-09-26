@@ -443,6 +443,7 @@
     "src/core/run/diff.ts",
     "src/core/run/engine-registry.ts",
     "src/core/run/engines.ts",
+    "src/core/run/harness-dispatch.ts",
     "src/core/run/learned-router.ts",
     "src/core/run/local-context.ts",
     "src/core/run/localize.ts",
