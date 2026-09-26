@@ -30,16 +30,17 @@ import { scrubPrivateText } from '../util/scrub.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
 import { leaderRoot } from './leader-memo.js';
+import type { OperatorChannel, OperatorDirective, OperatorDirectiveKind } from './leader-thread-types.js';
+
+export type { OperatorChannel, OperatorDirective, OperatorDirectiveKind } from './leader-thread-types.js';
 
 // ---------------------------------------------------------------------------
 // Vocabulary and limits
 // ---------------------------------------------------------------------------
 
-export const OPERATOR_DIRECTIVE_KINDS = ['focus', 'stop', 'priority', 'guidance'] as const;
-export type OperatorDirectiveKind = (typeof OPERATOR_DIRECTIVE_KINDS)[number];
+export const OPERATOR_DIRECTIVE_KINDS: readonly OperatorDirectiveKind[] = ['focus', 'stop', 'priority', 'guidance'];
 
 /** Where an operator input came from (the thread's channels). */
-export type OperatorChannel = 'verse' | 'telegram' | 'cli' | 'system';
 export const OPERATOR_CHANNELS: readonly OperatorChannel[] = ['verse', 'telegram', 'cli', 'system'];
 
 export const OPERATOR_LIMITS = Object.freeze({
@@ -70,31 +71,9 @@ export function isOperatorChannel(value: unknown): value is OperatorChannel {
 // Records
 // ---------------------------------------------------------------------------
 
-export interface OperatorDirective {
-  v: 1;
-  /** `od-<yyyymmddhhmmss>-<6 hex>` */
-  id: string;
-  kind: OperatorDirectiveKind;
-  /** Mason's words (scrubbed, ≤ directiveMaxChars). */
-  text: string;
-  /**
-   * explicit  — a `directive:` / `focus:` / `stop:` / `priority:` prefix in a message;
-   * extracted — the Leader recognised standing guidance in Mason's message
-   *             (an extraction call that saw ONLY his message, never evidence);
-   * direct    — added through the directives route / CLI.
-   */
-  source: 'explicit' | 'extracted' | 'direct';
-  channel: OperatorChannel;
-  /** The thread message it came from; null when added directly. */
-  messageId: string | null;
-  createdAt: string;
-  retiredAt: string | null;
-  retiredVia: OperatorChannel | null;
-}
-
 export interface LeaderQuestionRecord {
   v: 1;
-  /** `lq-<memo stamp>-<memo suffix>-<index>` — derived from the memo, so stable. */
+  /** `<memoId>:<index>` — derived from the memo, so stable (= the Needs-you item id's tail). */
   questionId: string;
   memoId: string;
   index: number;
@@ -130,8 +109,8 @@ export interface OperatorApproval {
 // ---------------------------------------------------------------------------
 
 export const OPERATOR_DIRECTIVE_ID_RE = /^od-\d{14}-[a-f0-9]{6}$/;
-export const LEADER_QUESTION_ID_RE = /^lq-\d{14}-[a-f0-9]{6}-\d{1,2}$/;
-const MEMO_ID_RE = /^lm-(\d{14}-[a-f0-9]{6})$/;
+export const LEADER_QUESTION_ID_RE = /^lm-\d{14}-[a-f0-9]{6}:\d{1,2}$/;
+const MEMO_ID_RE = /^lm-\d{14}-[a-f0-9]{6}$/;
 
 function stamp(nowMs: number): string {
   return new Date(nowMs).toISOString().replace(/[-:T]/g, '').slice(0, 14);
@@ -141,11 +120,14 @@ export function newOperatorId(prefix: string, nowMs: number): string {
   return `${prefix}-${stamp(nowMs)}-${randomBytes(3).toString('hex')}`;
 }
 
-/** The stable id of a memo's `index`-th question; null for a malformed memo id. */
+/**
+ * The stable id of a memo's `index`-th question: `<memoId>:<index>` — exactly
+ * the tail of its Needs-you item id (`leader:leader-question:<memoId>:<index>`).
+ * Null for a malformed memo id.
+ */
 export function questionIdFor(memoId: string, index: number): string | null {
-  const m = MEMO_ID_RE.exec(memoId);
-  if (!m || !Number.isInteger(index) || index < 0 || index > 99) return null;
-  return `lq-${m[1]}-${index}`;
+  if (!MEMO_ID_RE.test(memoId) || !Number.isInteger(index) || index < 0 || index > 99) return null;
+  return `${memoId}:${index}`;
 }
 
 /**

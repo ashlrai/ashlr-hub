@@ -503,7 +503,7 @@ describe('memo delivery and questions', () => {
 
   it('refuses unknown or malformed question ids', async () => {
     world();
-    await expect(answerLeaderQuestion('lq-20260101000000-abcdef-0', 'x', { channel: 'cli' })).rejects.toMatchObject({ code: 404 });
+    await expect(answerLeaderQuestion('lm-20260101000000-abcdef:0', 'x', { channel: 'cli' })).rejects.toMatchObject({ code: 404 });
     await expect(answerLeaderQuestion('../../etc', 'x', { channel: 'cli' })).rejects.toMatchObject({ code: 400 });
   });
 });

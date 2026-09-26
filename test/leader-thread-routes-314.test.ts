@@ -6,6 +6,7 @@
  * `ashlr leader` CLI, under a tmp HOME with a fake local seat. No socket,
  * no model, no network, nothing sent.
  */
+import { readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -21,6 +22,7 @@ import {
 import { isNeedsYouItem } from '../src/core/verse/workbench-types.js';
 import { setLeaderThreadDepsForTest, listThread, syncLeaderMemosToThread } from '../src/core/vision/leader-thread.js';
 import { listOperatorDirectives, questionIdFor } from '../src/core/vision/leader-operator.js';
+import { LEADER_QUESTION_ITEM_PREFIX } from '../src/core/vision/leader-thread-types.js';
 import { enactLeaderActions, findStoredAction, readLeaderDirectives } from '../src/core/vision/leader-apply.js';
 import { actionIdFor, writeLeaderMemo, type AnyLeaderActionDraft } from '../src/core/vision/leader-memo.js';
 import type { LeaderRunDeps } from '../src/core/vision/leader.js';
@@ -199,7 +201,7 @@ describe('thread routes', () => {
     expect(res.body.message).toMatchObject({ kind: 'answer', questionId: qid });
     expect(res.body.reply.text).toBe('Good. Team plan goes in the next memo.');
     expect(needsYouItems()).toEqual([]);
-    expect((await call('POST', '/api/verse/leader/questions/lq-20260101000000-abcdef-0/answer', { text: 'x' })).status).toBe(404);
+    expect((await call('POST', '/api/verse/leader/questions/lm-20260101000000-abcdef:0/answer', { text: 'x' })).status).toBe(404);
     expect((await call('POST', '/api/verse/leader/questions/nope/answer', { text: 'x' })).status).toBe(400);
     expect((await call('POST', `/api/verse/leader/questions/${qid}/answer`, { text: 'x', extra: 1 })).status).toBe(400);
   });
@@ -276,6 +278,16 @@ describe('Needs-you actions (3.14)', () => {
     }
     const answered = buildLeaderNeedsYou([], m, new Set(), now, new Set([questionIdFor(MEMO, 0)!]));
     expect(answered.map((i) => i.id)).toEqual([`leader:leader-question:${MEMO}:1`]);
+    // The questionId IS the item id's tail: the UI matches Needs-you → thread exactly.
+    for (const [index, item] of items.entries()) {
+      expect(item.id).toBe(`${LEADER_QUESTION_ITEM_PREFIX}${questionIdFor(MEMO, index)}`);
+    }
+  });
+
+  it('the contract types module is browser-safe (no node: imports, type-only core imports)', () => {
+    const src = readFileSync(new URL('../src/core/vision/leader-thread-types.ts', import.meta.url), 'utf8');
+    expect(src).not.toMatch(/from 'node:/);
+    for (const m of src.matchAll(/^import (.*) from '(.*)';$/gm)) expect(m[1]).toMatch(/^type /);
   });
 
   it('class-C asks keep Dismiss first and gain an Approve that records', async () => {
@@ -332,7 +344,7 @@ describe('ashlr leader say / thread / answer / approve / directives', () => {
     const qid = questionIdFor(m.id, 0)!;
     expect(await runLeaderCli(['answer', qid, 'Yes,', 'team', 'plan'])).toBe(0);
     expect(io.out).toContain(`Answer recorded for ${qid}.`);
-    expect(await runLeaderCli(['answer', 'lq-20260101000000-abcdef-0', 'x'])).toBe(1);
+    expect(await runLeaderCli(['answer', 'lm-20260101000000-abcdef:0', 'x'])).toBe(1);
     expect(await runLeaderCli(['answer', 'nope', 'x'])).toBe(2);
     expect(await runLeaderCli(['answer', qid])).toBe(2);
   });

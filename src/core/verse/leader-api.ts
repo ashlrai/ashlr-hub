@@ -134,8 +134,8 @@ function approveAction(action: LeaderAction): NeedsYouItem['actions'][number] {
  * collect, so it maps onto the contract's button-only `fix` kind with a null
  * request: the drawer opens the item's target, where the thread takes the
  * answer (POST /api/verse/leader/questions/<questionId>/answer). The
- * questionId is derived from the item id `leader:leader-question:<memoId>:<i>`
- * as `lq-<memoId without "lm-">-<i>` (leader-operator.ts questionIdFor).
+ * questionId is the item id minus its `leader:leader-question:` prefix —
+ * `<memoId>:<i>` (leader-operator.ts questionIdFor, LEADER_QUESTION_ITEM_PREFIX).
  */
 function answerAction(): NeedsYouItem['actions'][number] {
   return { kind: 'fix', label: 'Answer', request: null, confirm: null, destructive: false };

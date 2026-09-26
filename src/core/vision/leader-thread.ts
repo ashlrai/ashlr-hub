@@ -63,7 +63,16 @@ import { cleanModelText, extractMemoJson, leaderRoot, listMemoIds, readLeaderMem
 import type { LeaderAction, LeaderMemo } from './leader-types.js';
 import type { LeaderEvidence, LeaderRunDeps } from './leader.js';
 import type { LeaderComplete, LeaderSeatResolution } from './leader-seat.js';
-import type { LeaderApprovalOutcome } from './leader-apply.js';
+import {
+  LEADER_THREAD_CHANNELS,
+  LEADER_THREAD_KINDS,
+  type AnswerLeaderQuestionResult,
+  type AppendMasonMessageResult,
+  type ApproveLeaderActionResult,
+  type LeaderThreadChannel,
+  type LeaderThreadKind,
+  type LeaderThreadMessage,
+} from './leader-thread-types.js';
 import {
   LEADER_QUESTION_ID_RE,
   OPERATOR_DIRECTIVE_KINDS,
@@ -80,33 +89,31 @@ import {
   type OperatorDirectiveKind,
 } from './leader-operator.js';
 
-export type { OperatorDirective, OperatorDirectiveKind } from './leader-operator.js';
+export type { OperatorDirective, OperatorDirectiveKind } from './leader-thread-types.js';
 
 // ---------------------------------------------------------------------------
 // Contract
 // ---------------------------------------------------------------------------
 
-export type LeaderThreadChannel = 'verse' | 'telegram' | 'cli' | 'system';
-export type LeaderThreadKind = 'message' | 'question' | 'answer' | 'memo' | 'directive' | 'update' | 'action';
+export {
+  LEADER_QUESTION_ITEM_PREFIX,
+  LEADER_THREAD_CHANNELS,
+  LEADER_THREAD_KINDS,
+  VERSE_LEADER_ACTIONS_PATH,
+  VERSE_LEADER_DIRECTIVES_PATH,
+  VERSE_LEADER_QUESTIONS_PATH,
+  VERSE_LEADER_THREAD_PATH,
+} from './leader-thread-types.js';
+export type {
+  AnswerLeaderQuestionResult,
+  AppendMasonMessageResult,
+  ApproveLeaderActionResult,
+  LeaderApprovalOutcome,
+  LeaderThreadChannel,
+  LeaderThreadKind,
+  LeaderThreadMessage,
+} from './leader-thread-types.js';
 
-export type LeaderThreadMessage = {
-  /** `lt-<yyyymmddhhmmss>-<6 hex>` */
-  id: string;
-  at: string;
-  from: 'mason' | 'leader';
-  channel: LeaderThreadChannel;
-  kind: LeaderThreadKind;
-  /** Scrubbed plain text (never markup to render). */
-  text: string;
-  replyTo?: string;
-  memoId?: string;
-  questionId?: string;
-  actionIds?: string[];
-  delivery?: { telegram?: 'pending' | 'sent' | 'failed'; sentAt?: string };
-};
-
-export const LEADER_THREAD_CHANNELS: readonly LeaderThreadChannel[] = ['verse', 'telegram', 'cli', 'system'];
-export const LEADER_THREAD_KINDS: readonly LeaderThreadKind[] = ['message', 'question', 'answer', 'memo', 'directive', 'update', 'action'];
 export const LEADER_THREAD_ID_RE = /^lt-\d{14}-[a-f0-9]{6}$/;
 export const LEADER_ACTION_ID_RE = /^la-\d{14}-[a-f0-9]{6}-\d{1,3}$/;
 
@@ -143,27 +150,6 @@ export class LeaderThreadError extends Error {
     super(message);
     this.name = 'LeaderThreadError';
   }
-}
-
-export interface AppendMasonMessageResult {
-  message: LeaderThreadMessage;
-  reply: LeaderThreadMessage | null;
-  directive?: OperatorDirective;
-}
-
-export interface AnswerLeaderQuestionResult {
-  message: LeaderThreadMessage;
-  reply: LeaderThreadMessage | null;
-}
-
-export interface ApproveLeaderActionResult {
-  ok: boolean;
-  code: 200 | 404 | 409;
-  outcome: LeaderApprovalOutcome | null;
-  message: string;
-  action: LeaderAction | null;
-  /** Mason's approval and the Leader's acknowledgement, as thread messages (null for an unknown action). */
-  thread: { message: LeaderThreadMessage; reply: LeaderThreadMessage } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -886,7 +872,7 @@ async function loadMind(d: LeaderThreadDeps, cfg: AshlrConfig | undefined, promp
 // ---------------------------------------------------------------------------
 
 /** Rough prompt size for the seat's context-fit check (the reply prompt is capped by its blocks). */
-const REPLY_PROMPT_CHARS = 24_000;
+const REPLY_PROMPT_CHARS = 40_000;
 
 /**
  * Mason says something. The message is recorded first (so it is never lost
