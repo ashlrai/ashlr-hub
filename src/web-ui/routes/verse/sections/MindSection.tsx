@@ -1,7 +1,10 @@
 /**
- * routes/verse/sections/MindSection.tsx — ⌘4 Mind: what did the Leader
- * decide, and was it right? (SPEC-310B §6, SPEC-310C §5; unit C7)
+ * routes/verse/sections/MindSection.tsx — ⌘4 Mind: talk to the Leader, and
+ * see what it decided and whether it was right (SPEC-310B §6, SPEC-310C §5;
+ * unit C7).
  *
+ *   The Leader conversation: directives, the thread, the composer          (12)
+ *     (leader/LeaderConversation.tsx — lazy; it talks even with autonomy off)
  *   Memo timeline with 7-day outcomes ✓/✗ and Veto (8) | Hit-rate gauge + standards (4)
  *   Three A7 insight cards                                               (12)
  *   Insight matrix kind × engine, per repo (8)          | Reasoning trends (4)
@@ -16,7 +19,7 @@
  * Action log; a digest with no reasoning drops the matrix and the trend
  * (the insights card says it once). Both empty: that one card is Mind.
  */
-import { useId, useMemo, useState } from 'react';
+import { lazy, Suspense, useId, useMemo, useState } from 'react';
 import { AreaTrend } from '../../../components/charts/AreaTrend.js';
 import type { ChartStatus } from '../../../components/charts/ChartFrame.js';
 import { MatrixHeatmap } from '../../../components/charts/MatrixHeatmap.js';
@@ -36,6 +39,10 @@ import { insightMatrix, insightRepos, reasoningTrendSeries, topInsights } from '
 import { leaderSilence } from '../mind/leader-model.js';
 import { projectLabels, projectNames } from '../mind/project-label.js';
 import styles from '../mind/mind.module.css';
+
+// The conversation is Mind's heart but its own chunk (thread model, composer,
+// memo cards): Mind's cards paint first, and the chat first paint never pays for it.
+const LeaderConversation = lazy(() => import('../leader/LeaderConversation.js'));
 
 export const MIND_POLL_MS = 60_000;
 
@@ -93,6 +100,14 @@ export function MindSection() {
 
   return (
     <Surface title="Mind" actions={[leader, digest].some((q) => q.status === 'refreshing') ? <RefreshIndicator /> : null} lead={<ActionStatus actions={actions} />}>
+      <Cell span={12}>
+        <div id={anchorId('leader-conversation')}>
+          <Suspense fallback={<p className={styles.muted} aria-busy="true">Opening the conversation…</p>}>
+            {/* The Leader talks whether or not autonomy is on; with it off, its memos are dry runs. */}
+            <LeaderConversation leader={leader.data} actions={actions} dormant={Boolean(off)} />
+          </Suspense>
+        </div>
+      </Cell>
       {silence ? (
         <Cell span={12}>
           <AutonomyOffState state={off ?? null} here="mind" title={silence.title} why={silenceLine(silence.why, off ?? null)} />

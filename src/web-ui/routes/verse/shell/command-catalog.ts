@@ -105,7 +105,7 @@ export interface WorkbenchCommand {
    * so the shell brings it forward and parks the command until the surface
    * registers its handler (run-command.ts). The palette says where it runs.
    */
-  surface?: 'command';
+  surface?: 'command' | 'mind';
 }
 
 /** A keyed row's id, scope, keys and native binding — from command-keys.ts, never re-declared here. */
@@ -292,6 +292,11 @@ export const WORKBENCH_COMMANDS = [
   budgetMode('all-in', 'All-in', ['all in', 'max']),
   budgetMode('balanced', 'Balanced', ['default']),
   budgetMode('reserve', 'Reserve', ['save', 'conserve']),
+  // ── The Leader (Mind's conversation) ────────────────────────────────────
+  // Served by the shell (run-command.ts → leader/leader-focus.ts): it goes to
+  // Mind and the conversation panel takes the ask once its chunk mounts.
+  { id: 'leader.message', title: 'Message the Leader…', scope: 'global', keys: [], group: 'actions', section: 'App', surface: 'mind', keywords: ['leader', 'ask', 'chat', 'strategy', 'memo', 'talk', 'telegram'] },
+  { id: 'leader.directive', title: 'Add Leader directive…', scope: 'global', keys: [], group: 'actions', section: 'App', surface: 'mind', keywords: ['leader', 'directive', 'instruction', 'rule', 'standing order'] },
   // Served by the shell (run-command.ts → copy-setup.ts), wherever you are.
   appAction('autonomy.copy-setup', 'Copy autonomy setup command', [AUTONOMY_SETUP_COMMAND, 'autonomy', 'turn on', 'clipboard']),
 ] as const satisfies readonly WorkbenchCommand[];

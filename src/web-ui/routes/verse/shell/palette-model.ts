@@ -195,7 +195,7 @@ export function commandItem(command: WorkbenchCommand, platform: KeyPlatform, gr
     kind: 'command',
     group,
     title: command.title,
-    subtitle: command.scope === 'chat' || command.scope === 'composer' ? 'in Chat' : command.surface === 'command' ? 'on Command' : null,
+    subtitle: command.scope === 'chat' || command.scope === 'composer' ? 'in Chat' : command.surface === 'command' ? 'on Command' : command.surface === 'mind' ? 'on Mind' : null,
     shortcut: chord ? formatChord(chord, platform) : null,
     monogram: null,
     engine: null,

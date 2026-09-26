@@ -15,6 +15,15 @@ export function isVetoable(action: LeaderAction): boolean {
   return action.status === 'applied' || action.status === 'scheduled';
 }
 
+/**
+ * Actions Mason can approve from the conversation: a class-B action still in
+ * its veto window (apply now) or a class-C ask outside the grant (go ahead —
+ * the server re-checks it against the authority it holds).
+ */
+export function isApprovable(action: Pick<LeaderAction, 'status' | 'class'>): boolean {
+  return (action.status === 'scheduled' && action.class === 'B') || action.status === 'escalated';
+}
+
 /** Remaining fraction (1 → 0) of a class-B action's veto window; null when it has none. */
 export function vetoWindowFraction(action: Pick<LeaderAction, 'status' | 'createdAt' | 'applyAfter'>, now: number): number | null {
   if (action.status !== 'scheduled' || !action.applyAfter) return null;

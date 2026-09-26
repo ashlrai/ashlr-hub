@@ -223,6 +223,9 @@ export function registerShellCommandHandlers(): () => void {
     registerCommandHandler('appearance.toggle-theme', () => cycleTheme()),
     registerCommandHandler('app.summon', () => requestVerseCommand('focus-composer')),
     // The clipboard code loads when asked for (copy-setup.ts), not at first paint.
+    // Mind's Leader panel takes these once it mounts (leader-focus.ts waits for it).
+    registerCommandHandler('leader.message', () => { void import('../leader/leader-focus.js').then((m) => m.requestLeaderFocus({ kind: 'composer' })); }),
+    registerCommandHandler('leader.directive', () => { void import('../leader/leader-focus.js').then((m) => m.requestLeaderFocus({ kind: 'directive' })); }),
     registerCommandHandler('autonomy.copy-setup', () => { void import('./copy-setup.js').then((m) => m.copyAutonomySetupCommand()); }),
   ];
   return () => offs.forEach((off) => off());
