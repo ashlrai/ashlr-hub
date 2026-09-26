@@ -135,6 +135,8 @@ describe('GET', () => {
     expect(status).toBe(200);
     expect(body).toMatchObject({ v: 1, latest: null, timeline: [], actions: [], runsToday: 0, hitRate: { rate: null } });
     expect(typeof body.nextRunAt).toBe('string');
+    // 3.14: the additive health field ("Leader: healthy / degraded (why)").
+    expect(body.health).toMatchObject({ status: 'unknown', lastRunAt: null, consecutiveFailures: 0 });
   });
 
   it('refuses query parameters and unknown sub-paths', async () => {
