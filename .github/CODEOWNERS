@@ -661,6 +661,7 @@
 /test/routing-interactive-scope.test.ts @masonwyatt23
 /test/routing-seat-router.test.ts @masonwyatt23
 /test/routing-subscription-failclosed.test.ts @masonwyatt23
+/test/runtime-probe-event-loop.test.ts @masonwyatt23
 /test/safe-git-310b.test.ts @masonwyatt23
 /test/sandbox-kernel-evidence-310.test.ts @masonwyatt23
 /test/sandbox-reservation-recovery.test.ts @masonwyatt23
