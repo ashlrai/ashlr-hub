@@ -11,6 +11,23 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Resident runtime under the standing grant
+
+- Adds `ashlr authority resident start|stop|status`. `start` installs or
+  restarts `ai.ashlr.daemon` only under an active Touch-ID-signed standing
+  grant, from a clean compiled release, with Stop off. You run it yourself in a
+  terminal: agent, daemon or swarm environments, a redirected HOME, no TTY and
+  `--yes` are all refused. It claims a single-use capability before any launchd
+  effect and records the start in the authority ledger.
+- Regenerates the launchd plist (budget, interval, parallelism) from config on
+  every start. `status` and setup report drift after a config change.
+- `ashlr authority setup` now reports the resident step as already in place,
+  waiting on you with the exact command, or blocked on a missing prerequisite,
+  instead of a permanent build block.
+- The legacy install, reinstall, repair and restart paths stay denied, and the
+  permit-based compiled roots stay empty.
+- See [docs/RESIDENT-RUNTIME.md](docs/RESIDENT-RUNTIME.md).
+
 ### Autonomous coordinator lifecycle visibility
 
 - Separates last-reported coordinator transitions, fixed failure reasons and

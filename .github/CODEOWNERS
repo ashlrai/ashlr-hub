@@ -131,6 +131,9 @@
 /src/core/daemon/loop.ts @masonwyatt23
 /src/core/daemon/post-merge-halt.ts @masonwyatt23
 /src/core/daemon/liveness.ts @masonwyatt23
+/src/core/daemon/service.ts @masonwyatt23
+/src/core/daemon/service-install-authority.ts @masonwyatt23
+/src/core/daemon/service-config.ts @masonwyatt23
 /src/core/inbox/merge.ts @masonwyatt23
 /src/core/fleet/automerge-pass.ts @masonwyatt23
 /src/core/fleet/host-merge.ts @masonwyatt23
@@ -188,6 +191,8 @@
 /test/authority-ledger-310b.test.ts @masonwyatt23
 /test/authority-no-file-trust-310b.test.ts @masonwyatt23
 /test/authority-release-truth.test.ts @masonwyatt23
+/test/authority-resident-admission.test.ts @masonwyatt23
+/test/authority-resident-cli.test.ts @masonwyatt23
 /test/authority-review-fixes-310.test.ts @masonwyatt23
 /test/authority-rollout-310b.test.ts @masonwyatt23
 /test/authority-setup-resume.test.ts @masonwyatt23
@@ -308,6 +313,7 @@
 /test/m107.security-hardening.test.ts @masonwyatt23
 /test/m108.fleet-quality.test.ts @masonwyatt23
 /test/m110.team-onboarding.test.ts @masonwyatt23
+/test/m112.keepawake.test.ts @masonwyatt23
 /test/m112.worker.test.ts @masonwyatt23
 /test/m113.coordinator-wire.test.ts @masonwyatt23
 /test/m114.shared-subscription.test.ts @masonwyatt23
@@ -379,6 +385,7 @@
 /test/m21.audit.test.ts @masonwyatt23
 /test/m21.policy.test.ts @masonwyatt23
 /test/m21.worktree.test.ts @masonwyatt23
+/test/m211.dashboard-cli.test.ts @masonwyatt23
 /test/m211.dashboard-service-install-authority.test.ts @masonwyatt23
 /test/m212.proactive-comms.test.ts @masonwyatt23
 /test/m213.dashboard-sse.test.ts @masonwyatt23
@@ -545,6 +552,7 @@
 /test/m467.detached-post-merge-verification.test.ts @masonwyatt23
 /test/m468.detached-post-merge-runner.test.ts @masonwyatt23
 /test/m468.release-desktop-workflow-policy.test.ts @masonwyatt23
+/test/m468.resident-service-readiness.test.ts @masonwyatt23
 /test/m47.merge.test.ts @masonwyatt23
 /test/m470.proposal-capture-candidate-identity.test.ts @masonwyatt23
 /test/m472.detached-post-merge-orchestrator.test.ts @masonwyatt23
@@ -557,6 +565,7 @@
 /test/m48.fleet-supervisor.test.ts @masonwyatt23
 /test/m487.daemon-state-quarantine.test.ts @masonwyatt23
 /test/m49.fleet-status.test.ts @masonwyatt23
+/test/m490.daemon-state-recovery-cli.test.ts @masonwyatt23
 /test/m492.mission-outcome-room.test.ts @masonwyatt23
 /test/m493.mission-receipt.test.ts @masonwyatt23
 /test/m494.mission-reconcile-shadow.test.ts @masonwyatt23
@@ -605,8 +614,13 @@
 /test/m85.fleet-continuity.test.ts @masonwyatt23
 /test/m86.automerge-gate.test.ts @masonwyatt23
 /test/m89.pulse-export.test.ts @masonwyatt23
+/test/m9.update.test.ts @masonwyatt23
 /test/m92.engines-operational.test.ts @masonwyatt23
+/test/m93.daemon-service-crash-recovery.test.ts @masonwyatt23
 /test/m93.daemon-service-install-authority.test.ts @masonwyatt23
+/test/m93.daemon-service-launchd-integration.test.ts @masonwyatt23
+/test/m93.daemon-service-transaction.test.ts @masonwyatt23
+/test/m93.daemon-service.test.ts @masonwyatt23
 /test/m93.service-authority-docs.test.ts @masonwyatt23
 /test/m93.windows-file-authority.test.ts @masonwyatt23
 /test/m96.goal-framing.test.ts @masonwyatt23

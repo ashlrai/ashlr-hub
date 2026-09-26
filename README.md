@@ -168,23 +168,26 @@ ID).
    `ashlr cloud launch "<task>" --repo owner/name` ([cloud lane](#the-cloud-lane)).
 7. **Inspect autonomy preparation** with `ashlr authority setup --dry-run --json`
    and `ashlr authority status`. Guided setup can prepare prerequisites after
-   your explicit actions; this build cannot activate resident fleet work.
+   your explicit actions; once your standing grant is active,
+   `ashlr authority resident start` runs the resident fleet under it.
 
 ---
 
-## Autonomy commissioning path (currently unavailable)
+## Autonomy commissioning path
 
 **Current release status:** `ashlr authority setup` is a resumable preparation
 workflow. Its dry run is read-only; a live run can create custody, GitHub and
-grant state after your explicit actions. It never installs or restarts the
-daemon. Service install, repair and restart authority is withheld, compiled
-daemon and conductor trust roots are empty, and the native resident-start broker
-is absent. Non-dry resident work remains dormant. The setup checklist reports
-this runtime block even if every preparatory step is complete.
+grant state after your explicit actions. Setup itself never installs or restarts
+the daemon. The legacy service paths (`ashlr daemon install`, `ashlr setup`,
+`worker setup`, `update`) remain temporarily unavailable for install, reinstall, repair and restart and support status and uninstall only; the permit-based compiled daemon and conductor trust roots are empty.
+The resident runtime instead runs under your **standing grant**
+([docs/RESIDENT-RUNTIME.md](docs/RESIDENT-RUNTIME.md)): with a Touch-ID-signed
+grant active, `ashlr authority resident start`, typed by you in your own
+terminal, installs `ai.ashlr.daemon` from a clean release with its plist
+regenerated from config. Every tick re-verifies the grant, Stop and the switch.
 
-Autonomy ships **dormant**. Guided setup can help prepare a standing grant, but
-that grant alone does not admit resident activation. The compiled execution
-roots and native release boundary must be provisioned through reviewed releases.
+Autonomy ships **dormant**: nothing runs until your custody key is compiled in,
+you sign a grant, and you start the resident service yourself.
 
 ```sh
 ashlr authority setup --dry-run   # print every step and what it would do
@@ -193,8 +196,9 @@ ashlr authority setup --dry-run --json  # machine-readable checklist and runtime
 ashlr authority status            # grant, switch, Stop, rollout stage, ledger, custody
 ```
 
-`setup` performs each available step and pauses for the steps marked ✋. It
-cannot complete resident commissioning in the current build.
+`setup` performs each available step and pauses for the steps marked ✋. Its
+last step reports the resident runtime: in place, waiting on the exact command,
+or blocked on a missing prerequisite.
 
 1. ✋ **Install the custody helper:** `sudo scripts/install-custody.sh`
    (root-owned, in `/usr/local/libexec/`).
@@ -218,9 +222,15 @@ cannot complete resident commissioning in the current build.
 9. **Rotate the provenance HMAC key** (`ashlr authority rotate-provenance`).
 10. ✋ **Sign the first grant** (Touch ID) and, optionally, set the switch to
     Autonomous. The grant starts on the shadow stage of its rollout ladder.
+11. ✋ **Start the resident daemon** in your own terminal:
+    `ashlr authority resident start`. It refuses agents, a dirty build, Stop,
+    the switch at Off and an inactive grant, shows the release, plist and daily
+    budget, and asks you to confirm. `ashlr authority resident status` shows
+    drift after a config change; `ashlr authority resident stop` removes the
+    service.
 
-After a future reviewed resident activation release, standing grants require
-Touch ID reapproval every 30 days or after authority code changes.
+Standing grants require Touch ID reapproval every 30 days or after authority
+code changes; until then the resident daemon parks without working.
 
 **What a grant allows.** A standing grant names the repositories, engines, risk
 and size caps, spend ceiling and Leader classes, and is valid for at most 30
@@ -398,7 +408,7 @@ runtime authority.
 | Judge-free evidence merge | **Off** | Base- and diff-bound deterministic verification, signed provenance/evidence, strict scope/risk policy, and live protected-branch checks | Protected remote PR handoff only; no local fallback, self-target merge, partial capture, or build/CI/manifest change |
 | Cloud task | Operator-invoked, or self-improvement under its budget | The cloud budget gates and a signed-in `claude-a` seat | A draft PR on `ashlr-cloud/<taskId>`; never merges |
 | Deploy | Never performed by the daemon | Explicit `ashlr ship --deploy <target> --confirm` after pre-ship checks | Runs the selected production deploy command |
-| OS service mutation | **Temporarily unavailable** | No production install/reinstall/repair/restart authority is currently issued | Existing services expose status and uninstall only; no live one-shot or resident start is admitted |
+| OS service mutation | **Temporarily unavailable** on legacy paths | No install/reinstall/repair/restart authority on `daemon install` / `setup` / `update`; the resident service installs only through `ashlr authority resident start` under an active standing grant | Legacy paths expose status and uninstall only; `resident start` installs `ai.ashlr.daemon` after your confirmation |
 
 No successful test, model verdict, or proposal record grants deployment or service-install authority. Those are separate operator commands.
 

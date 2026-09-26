@@ -15,13 +15,16 @@
  *   github-app [--org <login>] [--yes]    GitHub App manifest flow; the key goes straight to custody
  *   rotate-provenance [--yes]             replace the provenance HMAC key agents could read
  *   setup [--dry-run [--json]] [--yes] [--source <ashlr-hub checkout>]   the guided Phase-0 command
+ *   resident start|stop|status [--json]   the resident daemon service under the grant (docs/RESIDENT-RUNTIME.md)
  *
  * LOWERING never asks anything. Everything that raises authority or touches
  * GitHub asks first (or needs --yes) and prints exactly what it did. Nothing
- * here ever runs `sudo`, changes launchd, or prints a secret.
+ * here ever runs `sudo` or prints a secret. Only `resident start` / `resident
+ * stop` change launchd, only for ai.ashlr.daemon, and `start` only after the
+ * operator confirms at a terminal under an active standing grant (no --yes).
  */
 import { spawnSync } from 'node:child_process';
-import { createPublicKey, randomBytes } from 'node:crypto';
+import { createHash, createPublicKey, randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
@@ -29,6 +32,7 @@ import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { CUSTODY_HELPER_PATH } from '../core/authority/custody-client.js';
+import type { ResidentAdmission, ResidentPlistState } from '../core/authority/resident.js';
 import type { AutonomySwitch, LedgerEventKind, SignedStandingGrantV1, StandingGrantTrustRoot, StandingGrantV1 } from '../core/authority/types.js';
 
 // ---------------------------------------------------------------------------
@@ -55,6 +59,35 @@ export interface AuthorityCliDeps {
   custody: typeof import('../core/authority/custody-client.js');
   /** Read-only: the resident daemon service's state (setup's last step). Never changes launchd. */
   daemonService(): Promise<DaemonServiceState>;
+  /** `resident start|stop|status` and setup's resident step (docs/RESIDENT-RUNTIME.md). */
+  resident: ResidentCliDeps;
+}
+
+/** What `resident status` and setup read about the installed service. Read-only. */
+export interface ResidentServiceObservation {
+  state: DaemonServiceState;
+  /** The installed plist vs the one `resident start` would write from config now. */
+  plist: ResidentPlistState;
+  plistPath: string | null;
+  installedBudgetUsd: number | null;
+  expectedBudgetUsd: number | null;
+  /** Why the expected plist could not be computed (config unreadable…); null when it could. */
+  problem: string | null;
+}
+
+export type ResidentEffectResult = { ok: true; detail: string } | { ok: false; reason: string };
+
+export interface ResidentCliDeps {
+  /** Fresh, read-only admission verdict for the code this process runs. */
+  admission(): Promise<ResidentAdmission>;
+  /** Read-only service + plist observation. Never changes launchd. */
+  observe(): Promise<ResidentServiceObservation>;
+  /** Why this process is not the operator at a terminal; null when it is. */
+  operatorRefusal(): Promise<string | null>;
+  /** Mint the capability (re-verifying everything), record it, install / restart the service. */
+  start(): Promise<ResidentEffectResult>;
+  /** Lowering: boot the service out and remove its plist. Never touches Stop or the grant. */
+  stop(): Promise<ResidentEffectResult>;
 }
 
 /** The resident daemon service as setup reports it. */
@@ -143,8 +176,118 @@ async function defaultDeps(): Promise<AuthorityCliDeps> {
     fetch: globalThis.fetch,
     custody: await import('../core/authority/custody-client.js'),
     daemonService: realDaemonService,
+    resident: realResidentDeps,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Resident service — real effects (lazy: `authority stop` never loads them)
+// ---------------------------------------------------------------------------
+
+type ServiceInstallOptions = import('../core/daemon/service.js').ServiceInstallOptions;
+
+async function residentServiceOptions(): Promise<{ ok: true; opts: ServiceInstallOptions; budgetUsd: number | null } | { ok: false; problem: string }> {
+  const { loadConfigReadOnlyStrict } = await import('../core/config.js');
+  const { daemonServiceInstallOptions } = await import('../core/daemon/service-config.js');
+  let cfg: ReturnType<typeof loadConfigReadOnlyStrict>;
+  try {
+    cfg = loadConfigReadOnlyStrict();
+  } catch (error) {
+    return { ok: false, problem: `config.json could not be read (${(error as Error).message.slice(0, 160)})` };
+  }
+  // ALWAYS regenerated from config (daemon.dailyBudgetUsd / intervalMs /
+  // parallel) — never carried over from an earlier install, so a budget
+  // changed in config reaches the service on the next `resident start`.
+  const opts = daemonServiceInstallOptions(cfg, { autostart: true });
+  return { ok: true, opts, budgetUsd: opts.budget ?? null };
+}
+
+/** The installed service file: its text, null when absent, undefined when unreadable. */
+function readServiceFile(path: string): string | null | undefined {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : undefined;
+  }
+}
+
+const realResidentDeps: ResidentCliDeps = {
+  admission: async () => (await import('../core/authority/resident.js')).observeResidentAdmission().admission,
+  observe: async () => {
+    const { residentPlistState, plistBudgetUsd } = await import('../core/authority/resident.js');
+    const { generateServiceDefinition } = await import('../core/daemon/service.js');
+    let state: DaemonServiceState;
+    try {
+      state = await realDaemonService();
+    } catch {
+      state = 'unknown';
+    }
+    const prepared = await residentServiceOptions();
+    const def = generateServiceDefinition(prepared.ok ? prepared.opts : {});
+    const installed = readServiceFile(def.filePath);
+    return {
+      state,
+      plist: residentPlistState(installed, prepared.ok ? def.content : null),
+      plistPath: def.filePath,
+      installedBudgetUsd: plistBudgetUsd(installed ?? null),
+      expectedBudgetUsd: prepared.ok ? prepared.budgetUsd : null,
+      problem: prepared.ok ? null : prepared.problem,
+    };
+  },
+  operatorRefusal: async () => {
+    const { operatorContextRefusal, currentOperatorContext } = await import('../core/authority/resident.js');
+    return operatorContextRefusal(currentOperatorContext());
+  },
+  start: async () => {
+    const resident = await import('../core/authority/resident.js');
+    const service = await import('../core/daemon/service.js');
+    const { appendLedger } = await import('../core/authority/ledger.js');
+    const prepared = await residentServiceOptions();
+    if (!prepared.ok) return { ok: false, reason: prepared.problem };
+    // The mint re-observes the operator context and re-verifies the grant,
+    // the build identity and the authority surface itself: nothing this
+    // command computed or printed earlier counts toward the decision.
+    const minted = resident.mintResidentServiceCapability();
+    if (!minted.ok) return { ok: false, reason: minted.reason };
+    const def = service.generateServiceDefinition(prepared.opts);
+    const digest = createHash('sha256').update(def.content, 'utf8').digest('hex');
+    const grantId = minted.capability.grantId;
+    const detail = `release ${minted.admission.revision?.slice(0, 12) ?? '?'} · plist sha256 ${digest.slice(0, 16)} · `
+      + `budget $${prepared.budgetUsd ?? '?'}/day · interval ${prepared.opts.intervalMs ?? '?'} ms · parallel ${prepared.opts.parallel ?? '?'}`;
+    // Fail closed: a start the authority ledger cannot record does not happen.
+    const recorded = appendLedger({ kind: 'note', actor: 'mason', grantId, repo: null, data: { topic: 'resident-service:start', detail } });
+    if (!recorded.ok) return { ok: false, reason: `the ledger refused the start record: ${recorded.reason}` };
+    try {
+      await service.installResidentService(prepared.opts, minted.capability);
+    } catch (error) {
+      appendLedger({ kind: 'note', actor: 'mason', grantId, repo: null, data: { topic: 'resident-service:start-failed', detail: (error as Error).message.slice(0, 300) } });
+      return { ok: false, reason: (error as Error).message };
+    }
+    const status = service.serviceStatus(prepared.opts);
+    const grant = `grant #${minted.admission.grantSeq ?? '?'}`;
+    return {
+      ok: true,
+      detail: status.running
+        ? `ai.ashlr.daemon is running under ${grant} (${detail})`
+        : `ai.ashlr.daemon is installed and loaded under ${grant}, but launchd has not reported it running yet — check \`${resident.RESIDENT_STATUS_COMMAND}\` (${detail})`,
+    };
+  },
+  stop: async () => {
+    const service = await import('../core/daemon/service.js');
+    try {
+      await service.uninstall({});
+    } catch (error) {
+      return { ok: false, reason: (error as Error).message };
+    }
+    try {
+      const { appendLedger } = await import('../core/authority/ledger.js');
+      appendLedger({ kind: 'note', actor: 'mason', grantId: null, repo: null, data: { topic: 'resident-service:stop', detail: 'ai.ashlr.daemon booted out and its plist removed' } });
+    } catch {
+      // Lowering never depends on the ledger.
+    }
+    return { ok: true, detail: 'ai.ashlr.daemon is stopped and its plist removed' };
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Arguments
@@ -201,6 +344,9 @@ const USAGE = `Usage: ashlr authority <command>
   rotate-provenance [--yes]              Replace the provenance HMAC key
   setup [--dry-run [--json]] [--yes] [--source <checkout>]
                                          Guided Phase 0: custody, trust root, App, token, canary, rulesets, first grant, daemon
+  resident start                         Install / restart the resident daemon under the active grant (you confirm here)
+  resident stop                          Boot the resident daemon out and remove its plist (Stop is separate)
+  resident status [--json]               Resident admission, service state and plist drift
 
 Lowering authority never asks. Anything that raises it asks first (or takes --yes).`;
 
@@ -251,6 +397,8 @@ export async function runAuthorityCli(args: string[], injected?: Partial<Authori
         return await cmdRotateProvenance(parsed, deps);
       case 'setup':
         return await cmdSetup(parsed, deps);
+      case 'resident':
+        return await cmdResident(rest[0], parsed, deps);
       default:
         deps.err(`Unknown authority command: ${command}`);
         deps.out(USAGE);
@@ -1002,14 +1150,15 @@ const SETUP_STEP_NEEDS: Readonly<Record<string, readonly SetupNeed[]>> = Object.
   'standing-grant': ['touch-id'],
   'autonomy-switch': [],
   'daemon-service': ['terminal'],
-  'resident-runtime': [],
+  'resident-runtime': ['terminal'],
 });
 
-// The packaged runtime still has no resident-start broker or production
-// authority roots. This is a source/release gate, not a missing setup action.
-// Keep the checklist blocked until a reviewed resident consumer can prove it.
-const RESIDENT_RUNTIME_BLOCK =
-  'Resident activation is unavailable in this build: service install/restart authority, compiled daemon and conductor roots, and the native resident-start broker are absent. Preparing the other steps does not start autonomous work.';
+// Every exit before the grant is known to be active (the first unmet live
+// prerequisite, or a dry run past one) reports the resident step with this:
+// a resident service is admitted only under an active standing grant
+// (docs/RESIDENT-RUNTIME.md), so without one it is genuinely blocked.
+const RESIDENT_NEEDS_GRANT =
+  'blocked until a grant is active (`ashlr authority grant`, Touch ID); then `ashlr authority resident start` in your own terminal installs the resident daemon under it';
 
 /** `ashlr authority setup --dry-run --json` — the checklist a UI can render. */
 export interface AuthoritySetupReportV1 {
@@ -1066,10 +1215,10 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
     deps.out(`${glyph} ${step}: ${detail}`);
   };
   const done = (): number => {
-    // Every exit, including the first unmet live prerequisite, must report
-    // this independent source/release block exactly once.
+    // Every exit, including the first unmet live prerequisite, reports the
+    // resident step exactly once — it is never silently complete.
     if (!report.some((row) => row.step === 'resident runtime')) {
-      note('resident runtime', 'blocked', RESIDENT_RUNTIME_BLOCK);
+      note('resident runtime', 'blocked', RESIDENT_NEEDS_GRANT);
     }
     return finish(report, deps, dryRun, json);
   };
@@ -1258,8 +1407,8 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
   } else note('provenance key', dryRun ? 'skipped' : 'waiting-on-you', 'run `ashlr authority rotate-provenance`');
 
   // 10. First grant (Touch ID), 11. the switch, 12. the daemon service,
-  // 13. production resident admission. A running legacy service is not proof
-  // that its execution gate or native release boundary is available.
+  // 13. resident admission (docs/RESIDENT-RUNTIME.md). Setup itself never
+  // touches launchd: it names the one command that does.
   const DAEMON_DETAIL = 'would check that the ai.ashlr.daemon service is loaded and running (each tick re-verifies the grant)';
   if (planning) {
     note('standing grant', 'skipped', 'would sign the first standing grant (Touch ID)');
@@ -1294,20 +1443,173 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
     note('autonomy switch', switched.ok ? 'done' : 'failed', switched.ok ? 'Autonomous' : switched.reason);
   } else note('autonomy switch', dryRun ? 'skipped' : 'waiting-on-you', `it is ${evaluation.switch} — run \`ashlr authority switch autonomous\``);
 
-  // 12. Read-only service observation. Manual launchctl advice would imply
-  // that this build can admit a resident start, which its production gate denies.
+  // 12. Read-only service observation. Only `resident start` (Mason, in his
+  // own terminal, under the active grant) installs or restarts the service.
   let service: DaemonServiceState;
   try {
     service = await deps.daemonService();
   } catch {
     service = 'unknown';
   }
-  if (service === 'running') note('daemon service', 'already', 'ai.ashlr.daemon is running; resident execution still requires the separate runtime admission below');
-  else if (service === 'absent') note('daemon service', 'waiting-on-you', 'no ai.ashlr.daemon service is installed; this build cannot install or start one');
-  else if (service === 'loaded') note('daemon service', 'waiting-on-you', 'ai.ashlr.daemon is loaded but stopped; this build cannot restart it');
-  else if (service === 'not-loaded') note('daemon service', 'waiting-on-you', 'ai.ashlr.daemon is not loaded; this build cannot start it');
-  else note('daemon service', 'waiting-on-you', 'ai.ashlr.daemon state is unknown; this build cannot start or repair it');
+  const START = '`ashlr authority resident start`';
+  const after = grantActive ? `run ${START}` : `after the standing grant, run ${START}`;
+  if (service === 'running') note('daemon service', 'already', 'ai.ashlr.daemon is running (each tick re-verifies the grant)');
+  else if (service === 'absent') note('daemon service', 'waiting-on-you', `no ai.ashlr.daemon service is installed — ${after} to install it`);
+  else if (service === 'loaded') note('daemon service', 'waiting-on-you', `ai.ashlr.daemon is loaded but stopped — ${after} to restart it`);
+  else if (service === 'not-loaded') note('daemon service', 'waiting-on-you', `ai.ashlr.daemon is not loaded — ${after} to load it`);
+  else note('daemon service', 'waiting-on-you', `ai.ashlr.daemon state is unknown — \`ashlr authority resident status\` shows why; ${after} to repair it`);
+
+  // 13. Resident admission: the grant, this release and the service together.
+  if (!grantActive) {
+    note('resident runtime', 'blocked', RESIDENT_NEEDS_GRANT);
+    return done();
+  }
+  const resident = await residentSetupRow(deps, service);
+  note('resident runtime', resident.status, resident.detail);
   return done();
+}
+
+/**
+ * Setup's resident step (docs/RESIDENT-RUNTIME.md §d):
+ *   already        admitted AND ai.ashlr.daemon running AND its plist is what
+ *                  `resident start` would write from config now;
+ *   waiting-on-you the exact command that gets there (start / clear-stop / switch);
+ *   blocked        a prerequisite is missing (no active grant, not a compiled
+ *                  release, dirty build, no confinement, not macOS).
+ * Read-only: never mints, never touches launchd.
+ */
+async function residentSetupRow(deps: AuthorityCliDeps, service: DaemonServiceState): Promise<{ status: StepStatus; detail: string }> {
+  let admission: ResidentAdmission;
+  try {
+    admission = await deps.resident.admission();
+  } catch (error) {
+    return { status: 'failed', detail: `resident admission could not be evaluated (${(error as Error).message})` };
+  }
+  if (!admission.ok) {
+    const fix = admission.command ? ` — run \`${admission.command}\`` : '';
+    return { status: admission.status === 'waiting-on-you' ? 'waiting-on-you' : 'blocked', detail: `${admission.reason}${fix}` };
+  }
+  let observed: ResidentServiceObservation;
+  try {
+    observed = await deps.resident.observe();
+  } catch (error) {
+    return { status: 'failed', detail: `the resident service could not be observed (${(error as Error).message})` };
+  }
+  if (observed.problem) return { status: 'blocked', detail: observed.problem };
+  const start = '`ashlr authority resident start`';
+  if (service !== 'running') {
+    return { status: 'waiting-on-you', detail: `admitted under grant #${admission.grantSeq ?? '?'} but the resident daemon is not running — run ${start} in your own terminal` };
+  }
+  if (observed.plist === 'drifted') {
+    const budget = observed.installedBudgetUsd !== observed.expectedBudgetUsd
+      ? ` (installed budget $${observed.installedBudgetUsd ?? '?'}/day, config says $${observed.expectedBudgetUsd ?? '?'}/day)`
+      : '';
+    return { status: 'waiting-on-you', detail: `the running service's plist differs from config${budget} — run ${start} to regenerate and restart it` };
+  }
+  if (observed.plist !== 'current') {
+    return { status: 'waiting-on-you', detail: `the running service's plist could not be matched (${observed.plist}) — run ${start} to regenerate it` };
+  }
+  return { status: 'already', detail: `the resident daemon is running under grant #${admission.grantSeq ?? '?'} (until ${admission.expiresAt ?? '?'}), from clean release ${admission.revision?.slice(0, 12) ?? '?'}` };
+}
+
+// ---------------------------------------------------------------------------
+// resident start | stop | status
+// ---------------------------------------------------------------------------
+
+function describeAdmission(admission: ResidentAdmission): string {
+  if (admission.ok) return `admitted — ${admission.reason}`;
+  return `${admission.status} — ${admission.reason}${admission.command ? ` (run \`${admission.command}\`)` : ''}`;
+}
+
+async function cmdResident(sub: string | undefined, parsed: Parsed, deps: AuthorityCliDeps): Promise<number> {
+  switch (sub) {
+    case 'status':
+      return cmdResidentStatus(parsed, deps);
+    case 'start':
+      return cmdResidentStart(parsed, deps);
+    case 'stop':
+      return cmdResidentStop(deps);
+    default:
+      deps.err('Usage: ashlr authority resident <start|stop|status [--json]>');
+      return 2;
+  }
+}
+
+async function cmdResidentStatus(parsed: Parsed, deps: AuthorityCliDeps): Promise<number> {
+  const admission = await deps.resident.admission();
+  const observed = await deps.resident.observe();
+  if (parsed.flags.has('--json')) {
+    deps.out(JSON.stringify({ schema: 'ashlr.resident-status.v1', admission, service: observed }, null, 2));
+    return 0;
+  }
+  deps.out(`Resident admission: ${describeAdmission(admission)}`);
+  deps.out(`Service: ai.ashlr.daemon ${observed.state}${observed.plistPath ? ` (${observed.plistPath.replace(homedir(), '~')})` : ''}`);
+  const budget = `installed $${observed.installedBudgetUsd ?? '—'}/day, config $${observed.expectedBudgetUsd ?? '?'}/day`;
+  deps.out(`Plist: ${observed.plist}${observed.plist === 'drifted' ? ' — `ashlr authority resident start` regenerates it' : ''} (budget: ${budget})`);
+  if (observed.problem) deps.out(`  ${observed.problem}`);
+  return 0;
+}
+
+/**
+ * `resident start` — the only command that installs or restarts the resident
+ * service. Order: refuse a non-operator context; show the verdict; stop if
+ * not admitted; no-op when already running from the current plist; show
+ * exactly what will happen and ask (no --yes: the operator confirms here);
+ * then the real start, which re-verifies everything itself (mint).
+ */
+async function cmdResidentStart(parsed: Parsed, deps: AuthorityCliDeps): Promise<number> {
+  if (parsed.flags.has('--yes')) {
+    deps.err('resident start takes no --yes: confirm it yourself at the prompt.');
+    return 2;
+  }
+  const refusal = await deps.resident.operatorRefusal();
+  if (refusal) {
+    deps.err(`resident start refused: ${refusal}`);
+    return 1;
+  }
+  const admission = await deps.resident.admission();
+  if (!admission.ok) {
+    deps.err(`resident start refused: ${describeAdmission(admission)}`);
+    return 1;
+  }
+  const observed = await deps.resident.observe();
+  if (observed.problem) {
+    deps.err(`resident start refused: ${observed.problem}`);
+    return 1;
+  }
+  if (observed.state === 'running' && observed.plist === 'current') {
+    deps.out(`ai.ashlr.daemon is already running under grant #${admission.grantSeq ?? '?'} from the current plist; nothing to do.`);
+    return 0;
+  }
+  const action = observed.state === 'running' ? 'regenerate the plist from config and restart' : observed.plist === 'absent' ? 'install and start' : 'regenerate, load and start';
+  deps.out(`Resident daemon under grant #${admission.grantSeq ?? '?'} (expires ${admission.expiresAt ?? '?'}):`);
+  deps.out(`  release   ${admission.revision ?? '?'} (${admission.packageRoot?.replace(homedir(), '~') ?? '?'})`);
+  deps.out(`  service   ai.ashlr.daemon → ${observed.plistPath?.replace(homedir(), '~') ?? '?'} (${observed.state}, plist ${observed.plist})`);
+  deps.out(`  budget    $${observed.expectedBudgetUsd ?? '?'}/day from config daemon.dailyBudgetUsd${observed.installedBudgetUsd !== null && observed.installedBudgetUsd !== observed.expectedBudgetUsd ? ` (installed: $${observed.installedBudgetUsd})` : ''}`);
+  deps.out('  launchd   enable + bootstrap (RunAtLoad); every tick re-verifies the grant, Stop and the switch');
+  if (!(await deps.confirm(`${action[0]!.toUpperCase()}${action.slice(1)} ai.ashlr.daemon now?`))) {
+    deps.out('Nothing was changed.');
+    return 1;
+  }
+  const result = await deps.resident.start();
+  if (!result.ok) {
+    deps.err(`resident start failed: ${result.reason}`);
+    return 1;
+  }
+  deps.out(`✓ ${result.detail}`);
+  deps.out('Stop anytime: `ashlr authority stop` halts agents (the service stays up, idle); `ashlr authority resident stop` removes the service.');
+  return 0;
+}
+
+/** Lowering: never asks, never needs the grant. */
+async function cmdResidentStop(deps: AuthorityCliDeps): Promise<number> {
+  const result = await deps.resident.stop();
+  if (!result.ok) {
+    deps.err(`resident stop failed: ${result.reason}`);
+    return 1;
+  }
+  deps.out(`${result.detail}. Stop (~/.ashlr/KILL) and the grant are unchanged.`);
+  return 0;
 }
 
 function finish(report: readonly SetupRow[], deps: AuthorityCliDeps, dryRun = false, json = false): number {
@@ -1317,7 +1619,7 @@ function finish(report: readonly SetupRow[], deps: AuthorityCliDeps, dryRun = fa
     deps.out(JSON.stringify(result, null, 2));
   } else {
     const planned = dryRun ? `, ${summary.planned} planned (dry run: nothing was asked or changed)` : '';
-    deps.out(`\nSetup: ${summary.done} done, ${summary.already} already in place, ${summary.waitingOnYou} waiting on you, ${summary.blocked} blocked by this build, ${summary.failed} failed${planned}.`);
+    deps.out(`\nSetup: ${summary.done} done, ${summary.already} already in place, ${summary.waitingOnYou} waiting on you, ${summary.blocked} blocked on a prerequisite, ${summary.failed} failed${planned}.`);
   }
   return summary.failed > 0 ? 1 : 0;
 }

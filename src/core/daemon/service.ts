@@ -1424,6 +1424,33 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
   return withDaemonServiceLifecycleFence(opts, () => installWithinLifecycleFence(opts));
 }
 
+export const RESIDENT_SERVICE_CAPABILITY_REFUSAL =
+  'resident service install refused: no valid resident-service capability (run `ashlr authority resident start` yourself under an active standing grant)';
+
+/**
+ * Install — or regenerate and restart — the macOS resident daemon service
+ * under the operator's standing grant (docs/RESIDENT-RUNTIME.md §d). This is
+ * the ONLY service mutation path that is not denied outright: it claims a
+ * single-use capability that only authority/resident.ts mints, after that
+ * module re-verified the grant, the build identity and the operator context
+ * itself. The claim happens before any lock, file or launchctl effect. The
+ * legacy `install` / `ensureRunning` above stay unconditionally denied.
+ *
+ * Always autostart: the point is a daemon that survives logout and reboot.
+ * The transaction (write plist, enable, bootstrap, verify, roll back on
+ * failure) is the same one every earlier install used.
+ */
+export async function installResidentService(opts: ServiceInstallOptions, capability: unknown): Promise<void> {
+  // Lazy: the authority verifier stays out of this module's static graph
+  // (status / uninstall callers never load it).
+  const { claimResidentServiceCapability } = await import('../authority/resident.js');
+  if (!claimResidentServiceCapability(capability)) throw new Error(RESIDENT_SERVICE_CAPABILITY_REFUSAL);
+  const platform = (opts.platform ?? process.platform) as Platform;
+  if (platform !== 'darwin') throw new Error(`resident service install is macOS-only (platform ${platform})`);
+  const resident: ServiceInstallOptions = { ...opts, platform, autostart: true };
+  return withDaemonServiceLifecycleFence(resident, () => installWithinLifecycleFence(resident));
+}
+
 async function installWithinLifecycleFence(opts: ServiceInstallOptions): Promise<void> {
   const platform = (opts.platform ?? process.platform) as Platform;
   const def = generateServiceDefinition(opts);

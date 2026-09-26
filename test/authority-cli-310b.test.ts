@@ -314,10 +314,10 @@ describe('setup and the trust-root PR', () => {
     for (const step of ['host binding', 'signing key', 'trust root', 'deploy', 'GitHub App', 'Claude token', 'canary repo', 'rulesets', 'provenance key', 'standing grant', 'autonomy switch', 'daemon service']) {
       expect(text, step).toMatch(new RegExp(`^· ${step}: `, 'm'));
     }
-    expect(text).toMatch(/^× resident runtime: Resident activation is unavailable in this build/m);
+    expect(text).toMatch(/^× resident runtime: blocked until a grant is active/m);
     // The only ✓ is a real local fact (the temp HOME has no ~/.ashlr/activation).
     expect(text.match(/^✓ .*/gm) ?? []).toEqual(['✓ old activation state: nothing to retire']);
-    expect(text).toMatch(/Setup: 0 done, 1 already in place, 1 waiting on you, 1 blocked by this build, 0 failed, 12 planned \(dry run: nothing was asked or changed\)\./);
+    expect(text).toMatch(/Setup: 0 done, 1 already in place, 1 waiting on you, 1 blocked on a prerequisite, 0 failed, 12 planned \(dry run: nothing was asked or changed\)\./);
     expect(h.calls).toEqual([]);
     expect(h.deps.custody!.custodyInit).not.toHaveBeenCalled();
   });
