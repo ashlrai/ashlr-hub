@@ -19,6 +19,7 @@ import {
   contextWindowFromTagSuffix,
   discoverSeats,
   localSeatLabel,
+  tagsNeedingDetail,
   localSeatPreferenceRank,
   preferredLocalTags,
   resolveAccountsRoot,
@@ -370,12 +371,12 @@ describe('verse seats — local Ollama', () => {
     const qwen = discovery.seats.find((s) => s.id === 'local:qwen3-coder-next:ctx64k')!;
     expect(qwen.engine).toBe('local');
     expect(qwen.accountId).toBe('local');
-    expect(qwen.label).toBe('Qwen3-Coder-Next ctx64k (local)');
+    expect(qwen.label).toBe('Qwen3-Coder-Next (64k, local)');
     // :ctx64k suffix (show returned no context_length) — a naming convention,
     // so it is labelled a fallback and the seat says the figure is an estimate.
     expect(qwen.models).toEqual([{
       id: 'qwen3-coder-next:ctx64k',
-      label: 'Qwen3-Coder-Next ctx64k',
+      label: 'Qwen3-Coder-Next (64k)',
       contextWindow: 65_536,
       autoCompactAt: 32_536,
       windowSource: 'fallback',
@@ -496,8 +497,21 @@ describe('verse seats — local Ollama', () => {
     expect(contextWindowFromTagSuffix('qwen3.8:27b-q8_0')).toBeNull();
     expect(contextWindowFromTagSuffix('bigctx64k')).toBeNull(); // not a separated suffix
     expect(contextWindowFromTagSuffix('x:ctx0k')).toBeNull();
-    expect(localSeatLabel('deepseek-coder-v2:16b')).toBe('Deepseek-Coder-V2 16b (local)');
+    expect(localSeatLabel('deepseek-coder-v2:16b')).toBe('DeepSeek-Coder-V2 16B (local)');
     expect(localSeatLabel('llama3.2:latest')).toBe('Llama3.2 (local)');
+  });
+
+  it('local seat labels fold the window into one parenthetical with "local"', () => {
+    expect(localSeatLabel('qwen3.8:27b-ctx64k')).toBe('Qwen3.8 27B (64k, local)');
+    expect(localSeatLabel('gpt-oss:20b')).toBe('gpt-oss 20B (local)');
+  });
+
+  it('keeps two quantizations of one model apart, and leaves a unique one clean', () => {
+    const tags = ['qwen3.8:27b-q8_0', 'qwen3.8:27b-q4_K_M', 'gpt-oss:20b'];
+    const need = tagsNeedingDetail(tags);
+    expect([...need].sort()).toEqual(['qwen3.8:27b-q4_K_M', 'qwen3.8:27b-q8_0']);
+    expect(localSeatLabel('qwen3.8:27b-q8_0', need.has('qwen3.8:27b-q8_0'))).toBe('Qwen3.8 27B · q8_0 (local)');
+    expect(localSeatLabel('gpt-oss:20b', need.has('gpt-oss:20b'))).toBe('gpt-oss 20B (local)');
   });
 });
 

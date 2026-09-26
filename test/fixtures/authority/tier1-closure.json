@@ -621,6 +621,7 @@
     "src/core/verse/mcp-mutation.ts",
     "src/core/verse/mcp-scope.ts",
     "src/core/verse/mcp-seat-view.ts",
+    "src/core/verse/model-display-name.ts",
     "src/core/verse/model-windows.ts",
     "src/core/verse/path-guard.ts",
     "src/core/verse/preferences.ts",

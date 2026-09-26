@@ -150,6 +150,7 @@ export interface VerseBackgroundDeps {
   loadClaudeUsage?: () => Promise<{ primeClaudeUsage: () => Promise<void> }>;
   loadReasoning?: () => Promise<{ scheduleReasoningMaintenance: (cfg?: unknown) => void; resetReasoningApiState: () => void }>;
   loadBudget?: () => Promise<{ startBudgetCapacityPublisher: (cfg: AshlrConfig) => () => void }>;
+  loadApps?: () => Promise<{ warmVerseApps: (cfg: AshlrConfig) => Promise<void> }>;
   /**
    * Run the services that probe or publish ACCOUNT state (health sweep,
    * budget capacity publisher). False under `--no-accounts`: that flag says
@@ -214,6 +215,16 @@ export async function startVerseBackgroundServices(
   if (accountServices) await attempt('budget', async () => {
     const mod = await (deps.loadBudget ?? (() => import('../core/routing/budget-api.js')))();
     return mod.startBudgetCapacityPublisher(cfg);
+  });
+  await attempt('apps', async () => {
+    const mod = await (deps.loadApps ?? (() => import('../core/verse/apps-api.js')))();
+    // NOT awaited, like the usage prime: the cold Apps collect (login-shell
+    // PATH probe, version reads, loopback probes) took 1.35–1.8 s when the
+    // first GET /api/verse/apps paid for it. Warmed here, that request is
+    // served from a finished — or joins the in-flight — collect. Status
+    // commands and loopback GETs only; warmVerseApps never rejects.
+    void mod.warmVerseApps(cfg).catch(() => {});
+    return null;
   });
 
   let stopped = false;

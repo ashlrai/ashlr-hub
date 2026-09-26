@@ -12,7 +12,6 @@ import type { FleetSnapshot, LocalOnlyPolicy, ServingRuntimeSnapshot } from './f
 import {
   elapsedSince,
   fleetPressure,
-  formatContextTokens,
   localOnlyImpact,
   localOnlySourceNote,
   orderAgents,
@@ -350,11 +349,6 @@ describe('projection — owner R and L’s own shapes are read, not just this su
 });
 
 describe('small formatters', () => {
-  it('quotes context in powers of two, the way the model card does', () => {
-    expect(formatContextTokens(65536)).toBe('64k');
-    expect(formatContextTokens(16384)).toBe('16k');
-    expect(formatContextTokens(null)).toBe('—');
-  });
 
   it('renders an absent start time as unknown rather than as zero elapsed', () => {
     expect(elapsedSince(null, Date.now())).toBe('—');

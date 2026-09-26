@@ -30,6 +30,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readBody, sendJson } from '../web/api.js';
 import { resolveLlamaServerOrigin } from '../local-runtime/llama/config.js';
+import type { AshlrConfig } from '../types.js';
 import type { ApiModule } from './api-modules.js';
 import {
   createAppsService,
@@ -50,17 +51,17 @@ import { VERSE_APPS_PATH } from './workbench-types.js';
 export const VERSE_APPS_REFRESH_PATH = `${VERSE_APPS_PATH}/refresh`;
 const APP_ACTION_RE = /^\/api\/verse\/apps\/([a-z0-9][a-z0-9-]{0,63})\/(toggle|launch)$/;
 
-function ensureService(ctx: Parameters<ApiModule>[0]): AppsService {
+function ensureService(cfg: AshlrConfig): AppsService {
   const existing = getAppsService();
   if (existing) return existing;
   let llamaServerBaseUrl: string | undefined;
   try {
-    llamaServerBaseUrl = resolveLlamaServerOrigin(ctx.cfg);
+    llamaServerBaseUrl = resolveLlamaServerOrigin(cfg);
   } catch {
     llamaServerBaseUrl = undefined;
   }
   const created = createAppsService(defaultAppsDeps({
-    ollamaBaseUrl: resolveOllamaBaseUrl(ctx.cfg),
+    ollamaBaseUrl: resolveOllamaBaseUrl(cfg),
     ...(llamaServerBaseUrl ? { llamaServerBaseUrl } : {}),
     // peek, never create: the Apps page must not be what boots the chat engine.
     localThroughput: () => {
@@ -82,6 +83,24 @@ function ensureService(ctx: Parameters<ApiModule>[0]): AppsService {
   }));
   setAppsService(created);
   return created;
+}
+
+/**
+ * Collect the Apps snapshot in the background, so the first GET
+ * /api/verse/apps is served from a finished (or in-flight, coalesced)
+ * collect instead of paying the cold one — the login-shell PATH probe and
+ * the version reads measured 1.35–1.8 s on the operator's Mac (and 5.7 s
+ * under load). Called once by the long-lived servers (`ashlr verse`,
+ * `ashlr serve`) shortly after they bind; never by a route, never in tests.
+ * It runs status commands and loopback GETs only (apps.ts WHAT IT COSTS) and
+ * never throws.
+ */
+export function warmVerseApps(cfg: AshlrConfig): Promise<void> {
+  try {
+    return ensureService(cfg).snapshot().then(() => undefined, () => undefined);
+  } catch {
+    return Promise.resolve();
+  }
 }
 
 async function readStrictBody(
@@ -126,7 +145,7 @@ function sendAction(res: ServerResponse, result: AppsActionResult): void {
  */
 export const handleAppsApi: ApiModule = async (ctx, req, res, path, method) => {
   if (path !== VERSE_APPS_PATH && !path.startsWith(`${VERSE_APPS_PATH}/`)) return false;
-  const service = ensureService(ctx);
+  const service = ensureService(ctx.cfg);
 
   if (path === VERSE_APPS_PATH) {
     if (method !== 'GET') {

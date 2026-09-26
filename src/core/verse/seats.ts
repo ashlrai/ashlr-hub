@@ -32,6 +32,7 @@ import { join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
 import { readClaudeUsage, type ClaudeUsageResult } from '../fabric/claude-usage.js';
 import type { VerseSeatLaunch } from './session-engine.js';
+import { modelDisplayName, modelDisplayText } from './model-display-name.js';
 import {
   buildVerseAccountsSnapshot,
   getVerseAccountCollector,
@@ -758,17 +759,32 @@ export function localSeatPreferenceRank(tag: string, preferred: readonly string[
  */
 export { contextWindowFromTagSuffix };
 
-/** `qwen3-coder-next:ctx64k` → "Qwen3-Coder-Next (local)". */
-export function localSeatLabel(tag: string): string {
-  const [base = tag, ...rest] = tag.split(':');
-  const pretty = base
-    .split('-')
-    .map((seg) => (seg.length > 0 ? seg[0]!.toUpperCase() + seg.slice(1) : seg))
-    .join('-');
-  // Keep the Ollama variant tag (e.g. `ctx64k`, `q4_K_M`) so two quantizations
-  // of the same model are distinguishable in the seat picker.
-  const variant = rest.join(':');
-  return variant && variant !== 'latest' ? `${pretty} ${variant} (local)` : `${pretty} (local)`;
+/**
+ * The name a local seat's model goes by: `qwen3.8:27b-ctx64k` → "Qwen3.8 27B (64k)"
+ * (model-display-name.ts). The quantization is left out unless `withDetail`
+ * — set when another installed tag would otherwise read the same, so two
+ * quantizations of one model stay distinguishable in the seat picker.
+ */
+export function localModelName(tag: string, withDetail = false): string {
+  return modelDisplayText(tag, withDetail);
+}
+
+/** `qwen3-coder-next:ctx64k` → "Qwen3-Coder-Next (64k, local)"; `gpt-oss:20b` → "gpt-oss 20B (local)". */
+export function localSeatLabel(tag: string, withDetail = false): string {
+  const name = localModelName(tag, withDetail);
+  return name.endsWith(')') ? `${name.slice(0, -1)}, local)` : `${name} (local)`;
+}
+
+/** Tags whose display names collide once the quantization is set aside. */
+export function tagsNeedingDetail(tags: readonly string[]): Set<string> {
+  const byName = new Map<string, string[]>();
+  for (const tag of tags) {
+    const name = modelDisplayName(tag).name;
+    byName.set(name, [...(byName.get(name) ?? []), tag]);
+  }
+  const out = new Set<string>();
+  for (const group of byName.values()) if (group.length > 1) group.forEach((t) => out.add(t));
+  return out;
 }
 
 function formatWindow(n: number): string {
@@ -918,6 +934,7 @@ async function discoverLocalSeats(
   const residentByTag = new Map((resident ?? []).map((row) => [row.tag, row.contextLength]));
 
   const observedAt = new Date().toISOString();
+  const needDetail = tagsNeedingDetail(selectable.map(({ tag }) => tag));
   const built = selectable.map(({ tag, detail }) => {
     const resolved = resolveLocalContextWindow({
       tag,
@@ -928,9 +945,10 @@ async function discoverLocalSeats(
       serverDefault,
     });
     const notes = localWindowNotes(resolved, dispatch.lane, slotWindow !== null);
-    const label = localSeatLabel(tag);
+    const withDetail = needDetail.has(tag);
+    const label = localSeatLabel(tag, withDetail);
     const unavailableReason = localWindowUnusableReason(resolved.window);
-    const option = localModelOption(tag, label.replace(/ \(local\)$/, ''), resolved.window, resolved.source);
+    const option = localModelOption(tag, localModelName(tag, withDetail), resolved.window, resolved.source);
     const seat: VerseSeat = {
       id: `local:${tag}`,
       engine: 'local',

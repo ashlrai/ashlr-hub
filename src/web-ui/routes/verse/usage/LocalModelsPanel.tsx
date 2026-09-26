@@ -42,11 +42,11 @@ import {
 import type { ServingRuntimeSnapshot } from '../autonomy/fleet-contract.js';
 import { runtimeCapacity } from '../autonomy/fleet-model.js';
 import { percentText } from '../autonomy/format.js';
+import { formatContextWindow } from '../verse-model.js';
 import type { AccountVerdictState, LocalCardModel } from './accounts-model.js';
 import {
   formatAge,
   formatBytes,
-  formatContext,
   formatCountdown,
   localStaleness,
   type LocalModelRow,
@@ -110,7 +110,7 @@ function ToolsCell({ row }: { row: LocalModelRow }): ReactNode {
     return (
       <Epistemic
         quality={unknownQuality('The runtime did not report a capability list for this model.')}
-        label={`${row.name} tool support`}
+        label={`${row.displayName} tool support`}
       >
         {null}
       </Epistemic>
@@ -164,7 +164,7 @@ function PlacementCell({ row }: { row: LocalModelRow }): ReactNode {
     return (
       <Epistemic
         quality={unknownQuality('The runtime reported no VRAM split for this resident model.')}
-        label={`${row.name} placement`}
+        label={`${row.displayName} placement`}
       >
         {null}
       </Epistemic>
@@ -176,7 +176,7 @@ function PlacementCell({ row }: { row: LocalModelRow }): ReactNode {
       <span
         className={styles.placementBar}
         role="img"
-        aria-label={`${row.name}: ${percentText(row.gpuPct)} of resident bytes on GPU, ${percentText(100 - row.gpuPct)} on CPU`}
+        aria-label={`${row.displayName}: ${percentText(row.gpuPct)} of resident bytes on GPU, ${percentText(100 - row.gpuPct)} on CPU`}
       >
         <span
           className={styles.placementGpu}
@@ -196,16 +196,26 @@ function PlacementCell({ row }: { row: LocalModelRow }): ReactNode {
 
 function ContextCell({ row }: { row: LocalModelRow }): ReactNode {
   if (row.nativeContext === null && row.configuredContext === null) return <span>—</span>;
-  if (!row.contextTruncated) return <span>{formatContext(row.nativeContext ?? row.configuredContext)}</span>;
+  if (!row.contextTruncated) return <span>{formatContextWindow(row.nativeContext ?? row.configuredContext)}</span>;
   return (
-    <span title={`Native context is ${formatContext(row.nativeContext)}; Ashlr runs this seat at ${formatContext(row.configuredContext)}.`}>
-      {`${formatContext(row.configuredContext)} of ${formatContext(row.nativeContext)}`}
+    <span title={`Native context is ${formatContextWindow(row.nativeContext)}; Ashlr runs this seat at ${formatContextWindow(row.configuredContext)}.`}>
+      {`${formatContextWindow(row.configuredContext)} of ${formatContextWindow(row.nativeContext)}`}
+    </span>
+  );
+}
+
+/** "Qwen3.8 27B" with the quantization beside it, quieter; the raw tag on hover. */
+function ModelName({ row }: { row: LocalModelRow }) {
+  return (
+    <span title={row.name}>
+      {row.displayName}
+      {row.nameDetail ? <span className={styles.muted}> {row.nameDetail}</span> : null}
     </span>
   );
 }
 
 const COLUMNS: TableColumn<LocalModelRow>[] = [
-  { key: 'name', label: 'Model', render: (r) => r.name },
+  { key: 'name', label: 'Model', render: (r) => <ModelName row={r} /> },
   {
     key: 'state',
     label: 'State',
@@ -512,7 +522,7 @@ export function LocalModelsPanel({
                 <TableView
                   caption="Resident size per model"
                   columns={[
-                    { key: 'name', label: 'Model', render: (r: LocalModelRow) => r.name },
+                    { key: 'name', label: 'Model', render: (r: LocalModelRow) => <ModelName row={r} /> },
                     {
                       key: 'size',
                       label: 'Resident',
@@ -526,7 +536,7 @@ export function LocalModelsPanel({
               }
             >
               <BarChart
-                data={residentRows.map((r) => ({ label: r.name, value: r.sizeBytes }))}
+                data={residentRows.map((r) => ({ label: r.displayName, value: r.sizeBytes }))}
                 orientation="horizontal"
                 height={Math.max(120, residentRows.length * 34)}
                 formatValue={(v) => formatBytes(v)}

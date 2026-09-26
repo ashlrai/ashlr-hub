@@ -152,7 +152,7 @@ describe('Workspace — the context ring', () => {
     });
     render(<Workspace {...props({ view: viewFor(local), seats: [...SEATS, LOCAL_SEAT] })} />);
     const meter = screen.getByRole('meter');
-    expect(meter.getAttribute('aria-valuetext')).toContain('120k / 262k');
+    expect(meter.getAttribute('aria-valuetext')).toContain('120k / 256k');
     expect(meter).not.toHaveAttribute('data-tone', 'over');
     expect(meter.getAttribute('title')).toContain('Verse passes this window to Claude Code');
     expect(screen.queryByRole('region', { name: 'Context advice' })).toBeNull();

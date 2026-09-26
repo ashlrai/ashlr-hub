@@ -17,7 +17,8 @@
 import { CLOUD_BALANCE_URL, type CloudOverviewResponse } from '../../../../core/cloud/types.js';
 import type { ServingRuntimeSnapshot } from '../../../data/api-types.js';
 import { accountStatus, type AccountStatusKind, type CapacityRow } from '../usage/capacity-strip-model.js';
-import { formatContext, type LocalModelRow } from '../usage/local-model.js';
+import { modelNameInText, type LocalModelRow } from '../usage/local-model.js';
+import { formatContextWindow } from '../verse-model.js';
 
 // ---------------------------------------------------------------------------
 // The handle's dot
@@ -179,9 +180,9 @@ export interface RuntimeView {
 export function runtimeView(runtime: ServingRuntimeSnapshot | null): RuntimeView | null {
   if (!runtime) return null;
   const parts: string[] = [];
-  if (runtime.model) parts.push(runtime.model);
+  if (runtime.model) parts.push(modelNameInText(runtime.model));
   // Per-slot context, the number one agent actually gets (fleet-types.ts).
-  if (runtime.contextTokens !== null) parts.push(`${formatContext(runtime.contextTokens)} context per agent`);
+  if (runtime.contextTokens !== null) parts.push(`${formatContextWindow(runtime.contextTokens)} context per agent`);
   if (runtime.slotsTotal !== null && runtime.slotsTotal > 0) {
     parts.push(runtime.slotsBusy !== null ? `${runtime.slotsBusy} of ${runtime.slotsTotal} slots busy` : `${runtime.slotsTotal} slots`);
   }
@@ -206,9 +207,9 @@ export function runtimeView(runtime: ServingRuntimeSnapshot | null): RuntimeView
 export function modelContextText(row: Pick<LocalModelRow, 'nativeContext' | 'configuredContext' | 'contextTruncated'>): string | null {
   const configured = row.configuredContext;
   const native = row.nativeContext;
-  if (configured !== null && row.contextTruncated && native !== null) return `${formatContext(configured)} of ${formatContext(native)} context`;
-  if (configured !== null) return `${formatContext(configured)} context`;
-  if (native !== null) return `${formatContext(native)} context`;
+  if (configured !== null && row.contextTruncated && native !== null) return `${formatContextWindow(configured)} of ${formatContextWindow(native)} context`;
+  if (configured !== null) return `${formatContextWindow(configured)} context`;
+  if (native !== null) return `${formatContextWindow(native)} context`;
   return null;
 }
 

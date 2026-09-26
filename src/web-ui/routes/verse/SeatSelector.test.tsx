@@ -161,7 +161,7 @@ describe('SeatSelector — context per model', () => {
     expect(screen.getByRole('option', { name: /Claude Max — Haiku 4\.5 · 200k ctx · compacts ≈167k$/ })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /Work Codex — GPT-6 Astra · 258k ctx · compacts ≈245k$/ })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /Grok — Grok 4\.7 Fast · 500k ctx · compacts ≈400k$/ })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /qwen3\.8:27b-ctx64k · 66k ctx · compacts ≈33k$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /qwen3\.8:27b-ctx64k · 64k ctx · compacts ≈33k$/ })).toBeInTheDocument();
   });
 
   it('lists a model the pinned CLI cannot run, disabled, with the reason', () => {

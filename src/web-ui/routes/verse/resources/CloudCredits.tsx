@@ -14,12 +14,35 @@ import { IconExternalLink } from '../../../components/primitives/icons.js';
 import { MonogramTile } from '../apps/MonogramTile.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { usedPercentText } from '../percent-text.js';
+import { approxCredits, CLOUD_NOT_SET_UP_WORD, notSetUpLine } from '../cloud/cloud-model.js';
 import { formatUsd, type CloudCreditsView } from './resources-model.js';
 import { cloudCreditsQuery, RESOURCES_POLL_MS } from './resources-queries.js';
 import styles from './ResourcesDrawer.module.css';
 
 /** Below this share of the total left, the meter turns amber. */
 const LOW_AT = 20;
+
+/**
+ * The seat is missing, so nothing launches: the blocker is the state and the
+ * credits a plain approximate figure — no "left" meter reading as headroom
+ * (cloud/cloud-model.ts, "Standing").
+ */
+function NotSetUp({ credits, sessions }: { credits: CloudCreditsView; sessions: string }) {
+  return (
+    <>
+      <p className={styles.status} data-tone="warning" title={notSetUpLine(credits.remainingUsd)}>
+        <span className={styles.statusDot} aria-hidden="true" />
+        <span className={styles.statusLabel}>{CLOUD_NOT_SET_UP_WORD}</span>
+        <span className={styles.subtle}>· {approxCredits(credits.remainingUsd)}</span>
+        <span className={styles.pill} data-tone="neutral" title={credits.estimateNote}>estimate</span>
+      </p>
+      <p className={styles.subtle}>{credits.seatReason ?? SEAT_NOT_SET_UP}</p>
+      <p className={styles.subtle}>{sessions}</p>
+    </>
+  );
+}
+
+const SEAT_NOT_SET_UP = "The Claude seat isn't set up on this Mac.";
 
 function Credits({ credits }: { credits: CloudCreditsView }) {
   const left = credits.remainingPercent;
@@ -29,7 +52,16 @@ function Credits({ credits }: { credits: CloudCreditsView }) {
     `${credits.running} running`,
     credits.maxSessionsPerDay !== null ? `${credits.sessionsToday} of ${credits.maxSessionsPerDay} today` : `${credits.sessionsToday} today`,
   ].join(' · ');
-  const blocker = !credits.seatReady ? credits.seatReason : !credits.canLaunch ? credits.canLaunchReason : null;
+  if (!credits.seatReady) {
+    return (
+      <>
+        <NotSetUp credits={credits} sessions={sessions} />
+        <p className={styles.fine}>{credits.estimateNote}</p>
+        <BalanceLink href={credits.balanceUrl} />
+      </>
+    );
+  }
+  const blocker = !credits.canLaunch ? credits.canLaunchReason : null;
   return (
     <>
       <p className={styles.creditsHead}>
@@ -51,12 +83,18 @@ function Credits({ credits }: { credits: CloudCreditsView }) {
         <p className={styles.status} data-tone="warning"><span className={styles.statusDot} aria-hidden="true" /><span>{blocker}</span></p>
       ) : null}
       <p className={styles.fine}>{credits.estimateNote}</p>
-      <a className={styles.external} href={credits.balanceUrl} target="_blank" rel="noopener noreferrer">
-        Real balance on claude.ai
-        <IconExternalLink />
-        <span className={styles.visuallyHidden}> (opens in a new tab)</span>
-      </a>
+      <BalanceLink href={credits.balanceUrl} />
     </>
+  );
+}
+
+function BalanceLink({ href }: { href: string }) {
+  return (
+    <a className={styles.external} href={href} target="_blank" rel="noopener noreferrer">
+      Real balance on claude.ai
+      <IconExternalLink />
+      <span className={styles.visuallyHidden}> (opens in a new tab)</span>
+    </a>
   );
 }
 

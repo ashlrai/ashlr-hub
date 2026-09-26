@@ -44,6 +44,18 @@ describe('CloudCreditsPanel', () => {
     expect(within(panel).getByRole('switch', { name: 'Verse may launch self-improvement tasks on its own' })).toHaveAttribute('aria-checked', 'true');
   });
 
+  it('seat not set up: says so as the state, with the credits as a plain estimate and no meter', async () => {
+    stubCloudFetch(overview({ seat: { id: 'claude-a', ready: false, reason: null }, budget: budgetView({ estimatedSpentUsd: 0 }) }));
+    render(<CloudCreditsPanel />);
+    const panel = await screen.findByRole('region', { name: 'Cloud credits' });
+    expect(within(panel).getByText('Not set up')).toBeInTheDocument();
+    expect(within(panel).getByText('~$250 credits · estimate')).toBeInTheDocument();
+    expect(within(panel).getByText("The Claude seat isn't set up on this Mac.")).toBeInTheDocument();
+    expect(within(panel).queryByRole('meter')).toBeNull();
+    // The calibration form is still there: the estimate can be corrected before setup.
+    expect(within(panel).getByLabelText('Credits on the account')).toBeInTheDocument();
+  });
+
   it('saves a calibration after checking claude.ai — only the changed field', async () => {
     setMutationToken(TOKEN);
     const { posted } = stubCloudFetch(overview());

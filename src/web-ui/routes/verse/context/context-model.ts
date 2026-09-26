@@ -23,7 +23,7 @@ import {
   hasExpansiveMode,
   sessionOverheadTokens,
 } from '../../../../core/verse/context-math.js';
-import { formatRelative } from '../verse-model.js';
+import { formatContextWindow, formatRelative } from '../verse-model.js';
 import { asClause, percentText, tidyProse } from '../autonomy/format.js';
 import { formatTokens } from '../verse-store.js';
 
@@ -165,7 +165,7 @@ export function requestMode(option: VerseModelOption | null, mode: VerseContextM
 export function budgetLine(option: VerseModelOption | null, mode: VerseContextMode): string | null {
   const budget = budgetFor(option, mode);
   if (!budget) return null;
-  const window = `${formatTokens(budget.contextWindow)} window`;
+  const window = `${formatContextWindow(budget.contextWindow)} window`;
   return budget.autoCompactAt === null ? window : `${window} · compacts ≈${formatTokens(budget.autoCompactAt)}`;
 }
 

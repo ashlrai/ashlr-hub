@@ -40,7 +40,7 @@ import {
   type VerseHandoffAdvice,
   type VerseOccupancyTone,
 } from '../../../core/verse/context-math.js';
-import { CODEX_EXPANSIVE_METERING_NOTE, windowSourceText, type SessionContextBudget } from './verse-model.js';
+import { CODEX_EXPANSIVE_METERING_NOTE, formatContextWindow, windowSourceText, type SessionContextBudget } from './verse-model.js';
 import { dismissVerseAdvice, isVerseAdviceDismissed } from './verse-ui-store.js';
 import { formatTokens } from './verse-store.js';
 import styles from './Workspace.module.css';
@@ -120,7 +120,7 @@ export function describeContext(props: Omit<ContextMeterProps, 'variant'>): {
   // prompt (occupancy() returns tone 'unknown' for it), so no sentence below
   // may read it as "past" anything.
   const boundPast = !occ.exact && occ.untilCompaction === 0;
-  const label = `${bound}${formatTokens(occ.tokens)} / ${occ.window !== null ? formatTokens(occ.window) : 'n/a'}`;
+  const label = `${bound}${formatTokens(occ.tokens)} / ${occ.window !== null ? formatContextWindow(occ.window) : 'n/a'}`;
   const compactLabel = occ.autoCompactAt !== null ? `compacts ≈${formatTokens(occ.autoCompactAt)}` : null;
   const percent = occ.ofWindow !== null ? Math.round(occ.ofWindow * 100) : null;
   const tickPercent = occ.window !== null && occ.autoCompactAt !== null && occ.autoCompactAt < occ.window
@@ -269,7 +269,7 @@ function modeDetail(option: VerseModelOption | null | undefined, mode: VerseCont
   const b = budgetFor(option, mode);
   if (!b) return 'not available for this model';
   const point = b.autoCompactAt ?? b.contextWindow;
-  return `compacts ≈${formatTokens(point)} of ${formatTokens(b.contextWindow)}`;
+  return `compacts ≈${formatTokens(point)} of ${formatContextWindow(b.contextWindow)}`;
 }
 
 /**
@@ -560,7 +560,7 @@ export function ContextModeControl({ mode, option, disabled = false, disabledRea
           ) : (
             <p className={styles.modeMenuHeading}>
               {oneBudgetPoint !== null
-                ? `${who} compacts this chat on its own at ≈${formatTokens(oneBudgetPoint)}${budget?.contextWindow ? ` of ${formatTokens(budget.contextWindow)}` : ''}. This model has one context budget.`
+                ? `${who} compacts this chat on its own at ≈${formatTokens(oneBudgetPoint)}${budget?.contextWindow ? ` of ${formatContextWindow(budget.contextWindow)}` : ''}. This model has one context budget.`
                 : 'This model has one context budget; the CLI compacts at its own point.'}
             </p>
           )}

@@ -40,12 +40,15 @@ import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { CloudBudgetForm } from './CloudBudgetForm.js';
 import { CloudLaunchDialog } from './CloudLaunchDialog.js';
 import {
+  approxCredits,
   canDismiss,
   cardTasks,
+  CLOUD_NOT_SET_UP_WORD,
   creditsMeter,
   formatDollars,
   gateText,
   launchBlock,
+  notSetUpLine,
   safeHref,
   selfImproveLine,
   sessionsLine,
@@ -144,25 +147,40 @@ function CloudBody({ overview, actions, now, onNotice }: { overview: CloudOvervi
   const refused = gateText(view.canLaunch, 'The cloud budget does not allow another launch right now.');
   const { shown, hidden } = cardTasks(overview.tasks, now);
   const si = view.budget.selfImprove;
+  const estimateNote = (
+    <p className={styles.estimateNote}>
+      {tidyProse(view.estimateNote, now)}{' '}
+      <OutLink href={CLOUD_BALANCE_URL} label="Check the real balance on claude.ai">Check usage on claude.ai</OutLink>
+    </p>
+  );
   return (
     <div className={styles.body}>
-      <div className={styles.meterBlock}>
-        <Meter
-          value={meter.value}
-          max={meter.max}
-          label="Credits remaining"
-          valueText={meter.text}
-          tone={meter.tone}
-          aria-label={`Estimated credits remaining: ${meter.text}, ${meter.usedText}`}
-        />
-        <p className={styles.estimateNote}>
-          {tidyProse(view.estimateNote, now)}{' '}
-          <OutLink href={CLOUD_BALANCE_URL} label="Check the real balance on claude.ai">Check usage on claude.ai</OutLink>
-        </p>
-        {meter.warning ? <p className={styles.notice} data-tone="warning" role="note">{meter.warning}</p> : null}
-      </div>
+      {seat ? (
+        // No seat, no launches: the setup blocker is the state and the credit
+        // figure is a plain estimate, never a meter reading as headroom.
+        <div className={styles.meterBlock} data-standing="not-set-up">
+          <p className={styles.standing} title={notSetUpLine(view.estimatedRemainingUsd)}>
+            <StatusBadge status="not-set-up" tone="warning">{CLOUD_NOT_SET_UP_WORD}</StatusBadge>
+            <span className={styles.muted}>{approxCredits(view.estimatedRemainingUsd)} · estimate</span>
+          </p>
+          <p className={styles.notice} data-tone="warning" role="note">{seat}</p>
+          {estimateNote}
+        </div>
+      ) : (
+        <div className={styles.meterBlock}>
+          <Meter
+            value={meter.value}
+            max={meter.max}
+            label="Credits remaining"
+            valueText={meter.text}
+            tone={meter.tone}
+            aria-label={`Estimated credits remaining: ${meter.text}, ${meter.usedText}`}
+          />
+          {estimateNote}
+          {meter.warning ? <p className={styles.notice} data-tone="warning" role="note">{meter.warning}</p> : null}
+        </div>
+      )}
       <p className={styles.facts}>{sessionsLine(view, now)}</p>
-      {seat ? <p className={styles.notice} data-tone="warning" role="note">{seat}</p> : null}
       {refused ? (
         <p className={styles.notice} data-tone="warning" role="note" data-testid="cloud-budget-refused">
           New launches are paused: {refused}

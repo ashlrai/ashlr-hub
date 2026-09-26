@@ -105,7 +105,7 @@ describe('local wording', () => {
   });
 
   it('describes the serving runtime with per-agent context and offers Stop only when supervised', () => {
-    expect(runtimeView(runtime())).toMatchObject({ name: 'llama-server', word: 'Running', detail: 'Qwen3-32B · 16k context per agent · 1 of 4 slots busy', canStop: true, canStart: false });
+    expect(runtimeView(runtime())).toMatchObject({ name: 'llama-server', word: 'Running', detail: 'Qwen3 32B · 16k context per agent · 1 of 4 slots busy', canStop: true, canStart: false });
     expect(runtimeView(runtime({ state: 'stopped' }))).toMatchObject({ word: 'Stopped', canStart: true, canStop: false });
     expect(runtimeView(runtime({ supervised: false }))).toMatchObject({ canStart: false, canStop: false, managedElsewhere: true });
     expect(runtimeView(null)).toBeNull();

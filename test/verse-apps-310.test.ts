@@ -21,6 +21,7 @@ import {
   claudeDesktopOllamaState,
   commandText,
   createAppsService,
+  getAppsService,
   lastLocalThroughput,
   parseAppsState,
   parseVersionOutput,
@@ -35,7 +36,7 @@ import {
   type BinaryFacts,
   type RunResult,
 } from '../src/core/verse/apps.js';
-import { handleAppsApi } from '../src/core/verse/apps-api.js';
+import { handleAppsApi, warmVerseApps } from '../src/core/verse/apps-api.js';
 import { probeLlamaServer } from '../src/core/verse/local-models.js';
 import type { LoginPathResult } from '../src/core/verse/login-path.js';
 import type { VerseEvent, VerseSession } from '../src/core/verse/types.js';
@@ -416,6 +417,60 @@ describe('createAppsService — detection', () => {
   }, 10_000);
 });
 
+describe('createAppsService — a cold collect does not pay for the login shell twice', () => {
+  it('starts the loopback probes while the login shell is still answering', async () => {
+    const w = world();
+    let releaseLogin!: () => void;
+    const loginGate = new Promise<void>((resolve) => { releaseLogin = resolve; });
+    const fetchesBeforeLogin: string[] = [];
+    const deps: AppsDeps = {
+      ...w.deps,
+      loginPath: async (refresh) => {
+        await loginGate;
+        fetchesBeforeLogin.push(...w.fetches);
+        return w.deps.loginPath(refresh);
+      },
+    };
+    const service = createAppsService(deps);
+    const pending = service.get();
+    // Let the probes' first fetches go out, then let the "shell" answer.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    releaseLogin();
+    const res = await pending;
+    expect(fetchesBeforeLogin.some((u) => u.startsWith('http://127.0.0.1:11434'))).toBe(true);
+    expect(fetchesBeforeLogin.some((u) => u.startsWith('http://127.0.0.1:8080'))).toBe(true);
+    expect(fetchesBeforeLogin.some((u) => u.startsWith('http://127.0.0.1:1234'))).toBe(true);
+    // Same answer as before: the reordering changes timing, not results.
+    expect(row(res, 'ollama').health).toEqual({ state: 'ok', label: 'running' });
+    expect(row(res, 'llama-server').health).toEqual({ state: 'ok', label: 'running' });
+  });
+
+  it('a warmed service answers the first GET from its snapshot without probing again', async () => {
+    const w = world();
+    let logins = 0;
+    const service = createAppsService({ ...w.deps, loginPath: async (r) => { logins += 1; return w.deps.loginPath(r); } });
+    await service.snapshot(); // what warmVerseApps does at server start
+    const probed = w.fetches.length;
+    const t0 = performance.now();
+    const res = await service.get();
+    expect(performance.now() - t0).toBeLessThan(50);
+    expect(logins).toBe(1);
+    expect(w.fetches.length).toBe(probed);
+    expect(res.groups.map((g) => g.id)).toEqual(['desktop', 'terminal-agents', 'local-models']);
+  });
+
+  it('a GET during the warm-up joins the in-flight collect instead of starting another', async () => {
+    const w = world();
+    let logins = 0;
+    const service = createAppsService({ ...w.deps, loginPath: async (r) => { logins += 1; return w.deps.loginPath(r); } });
+    const warm = service.snapshot();
+    const res = await service.get();
+    await warm;
+    expect(logins).toBe(1);
+    expect(row(res, 'ollama').installed).toBe(true);
+  });
+});
+
 describe('createAppsService — local runtimes', () => {
   it('Ollama: running, with model counts and the measured end-to-end tok/s', async () => {
     const res = await createAppsService(world({ throughput: { model: 'qwen3.8:27b', tokPerSec: 8.5, at: 'x' } }).deps).get();
@@ -696,5 +751,25 @@ describe('handleAppsApi', () => {
     expect((await fetch(`${base}/api/verse/apps/codex/launch`)).status).toBe(405);
     expect((await post('/api/verse/apps', {})).status).toBe(405);
     expect((await fetch(`${base}/api/verse/apps/refresh`)).status).toBe(405);
+  });
+});
+
+describe('warmVerseApps — the server-start warm-up', () => {
+  afterEach(() => { setAppsService(null); });
+
+  it('collects through the process service, so the first GET is served from it, and never rejects', async () => {
+    const w = world();
+    let logins = 0;
+    setAppsService(createAppsService({ ...w.deps, loginPath: async (r) => { logins += 1; return w.deps.loginPath(r); } }));
+    await expect(warmVerseApps({} as AshlrConfig)).resolves.toBeUndefined();
+    expect(logins).toBe(1);
+    await getAppsService()!.get();
+    expect(logins).toBe(1);
+  });
+
+  it('swallows a collect that throws', async () => {
+    const w = world();
+    setAppsService(createAppsService({ ...w.deps, loginPath: async () => { throw new Error('no shell'); } }));
+    await expect(warmVerseApps({} as AshlrConfig)).resolves.toBeUndefined();
   });
 });

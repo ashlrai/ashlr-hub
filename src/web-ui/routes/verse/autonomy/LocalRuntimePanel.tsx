@@ -23,6 +23,7 @@ import { getQuerySnapshot, subscribeQuery } from '../../../data/cache.js';
 import { StatusBadge, type Tone } from '../../../components/primitives/StatusBadge.js';
 import { Meter } from '../../../components/primitives/Meter.js';
 import { ConfirmDialog } from '../../inbox/ConfirmDialog.js';
+import { formatContextWindow } from '../verse-model.js';
 import { asClause, asSentence, tidyProse, UNKNOWN } from './format.js';
 import type {
   FleetSnapshot,
@@ -32,7 +33,6 @@ import type {
 } from './fleet-contract.js';
 import {
   CONCURRENCY_EVIDENCE,
-  formatContextTokens,
   formatUptime,
   runtimeCapacity,
   runtimeLabel,
@@ -225,7 +225,7 @@ export function LocalRuntimePanel({
           <div className={styles.facts}>
             <Fact label="Model" value={runtime.model ?? UNKNOWN} wide />
             <Fact label="Endpoint" value={runtime.endpoint ?? UNKNOWN} mono />
-            <Fact label="Context" value={formatContextTokens(runtime.contextTokens)} />
+            <Fact label="Context" value={formatContextWindow(runtime.contextTokens)} />
             <Fact
               label="Slots configured"
               value={runtime.slotsTotal === null ? UNKNOWN : String(runtime.slotsTotal)}

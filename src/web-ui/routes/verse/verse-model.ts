@@ -9,6 +9,7 @@ import type { Tone } from '../../components/primitives/StatusBadge.js';
 // type-only), so a value import here does not drag node into the bundle.
 import { budgetFor, canonicalModelId, claudeAutocompactFlag, reconcileAutoCompactAt } from '../../../core/verse/context-math.js';
 import { usedPercentText } from './percent-text.js';
+import { formatTokens } from './verse-store.js';
 
 export const ENGINE_ORDER: readonly VerseEngine[] = ['claude', 'codex', 'grok', 'local'];
 
@@ -435,4 +436,26 @@ export function seatPillLabel(seats: readonly VerseSeat[], ref: Pick<VerseSessio
   const model = modelLabel(seats, ref);
   if (!model || seat.toLowerCase().includes(model.toLowerCase())) return seat;
   return `${seat} · ${model}`;
+}
+
+/**
+ * The ONE spelling of a context WINDOW's size, for every surface that prints
+ * one (New chat's picker, the context meter, Usage, Resources, Fleet).
+ *
+ * There used to be two: decimal (`formatTokens`, 65536 → "66k") in the
+ * picker and meter, binary (65536 → "64k") in Usage / Resources / Fleet, so
+ * one local model read "66k ctx" in New chat and "64k" in Resources. Now:
+ *
+ *   - an exact multiple of 1024 is quoted in binary k, the way its model card
+ *     and a `ctx64k` tag say it: 65536 → "64k", 262144 → "256k", 1048576 → "1M";
+ *   - anything else stays decimal: 200000 → "200k", 272000 → "272k", 1000000 → "1M".
+ *
+ * Token COUNTS (what a chat holds, where it compacts) are not windows and
+ * keep `formatTokens`. Lives in this (lazy, already shared) module rather
+ * than one of its own: a new module became one more chunk name in the
+ * first-paint files' preload tables, and verse-store.ts is first-paint code.
+ */
+export function formatContextWindow(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isInteger(n) || n < 1024 || n % 1024 !== 0) return formatTokens(n);
+  return n < 1_048_576 ? `${n / 1024}k` : `${(n / 1_048_576).toFixed(1).replace(/\.0$/, '')}M`;
 }

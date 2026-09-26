@@ -11,7 +11,8 @@
  * this module → probe → section chunk, one round trip after another. Now
  * this module starts that import the moment it evaluates, in parallel with
  * the probe (Vite shares the in-flight import with the lazy() that mounts
- * it later), and preloads the two Latin font subsets the first paint needs.
+ * it later), and preloads the Latin font subsets the first paint needs (the
+ * display face only once the signed-in app is what will paint).
  *
  * V3.10 — a restarted desktop sidecar is re-adopted at once. The desktop
  * shell restarts a crashed server in the background, hands the new tokens to
@@ -35,17 +36,17 @@ import styles from './VerseConsoleApp.module.css';
 import '../design/global.css';
 
 /**
- * Start what the first paint will need, without waiting for the auth probe.
- * Everything here is a cache warm-up: a failure is ignored, because the real
- * mount (VerseApp's sectionLoader, the CSS @font-face) repeats the request
- * and owns the error handling.
+ * Preload the Latin font subsets: the UI face always (every state's first
+ * text is set in it), the display face (Space Grotesk: headings, numerals)
+ * only when the signed-in app is what will paint. On the signed-out connect
+ * screen the display face serves one heading, drawn only after the auth probe
+ * answers and the gate's chunk arrives; preloaded at page start it routinely
+ * sat unused past the browser's few-second window and drew "preloaded but
+ * not used" in the console. Idempotent.
  */
-export function preloadVerseFirstPaint(doc: Document | null = typeof document === 'undefined' ? null : document): void {
-  const section = VERSE_SECTIONS.find((s) => s.id === getVerseUiState().section);
-  const importer = section ? SECTION_MODULES[`./sections/${section.module}.tsx`] : undefined;
-  if (importer) void importer().catch(() => undefined);
+export function preloadVerseFonts(doc: Document | null, display: boolean): void {
   if (!doc?.head) return;
-  for (const href of [uiFontLatin, displayFontLatin]) {
+  for (const href of display ? [uiFontLatin, displayFontLatin] : [uiFontLatin]) {
     const present = [...doc.head.querySelectorAll('link[rel="preload"]')].some((l) => l.getAttribute('href') === href);
     if (present) continue;
     const link = doc.createElement('link');
@@ -58,6 +59,26 @@ export function preloadVerseFirstPaint(doc: Document | null = typeof document ==
     link.href = href;
     doc.head.append(link);
   }
+}
+
+/**
+ * Start what the first paint will need, without waiting for the auth probe.
+ * Everything here is a cache warm-up: a failure is ignored, because the real
+ * mount (VerseApp's sectionLoader, the CSS @font-face) repeats the request
+ * and owns the error handling.
+ *
+ * `signedIn` is the best guess available before the probe: the desktop shell
+ * injected its tokens, so the chat is what paints. Otherwise the display face
+ * waits for the authenticated phase (VerseConsoleApp below).
+ */
+export function preloadVerseFirstPaint(
+  doc: Document | null = typeof document === 'undefined' ? null : document,
+  signedIn: boolean = typeof window !== 'undefined' && window.__ASHLR_TOKENS__ !== undefined,
+): void {
+  const section = VERSE_SECTIONS.find((s) => s.id === getVerseUiState().section);
+  const importer = section ? SECTION_MODULES[`./sections/${section.module}.tsx`] : undefined;
+  if (importer) void importer().catch(() => undefined);
+  preloadVerseFonts(doc, signedIn);
 }
 
 preloadVerseFirstPaint();
@@ -130,6 +151,7 @@ export function VerseConsoleApp() {
   const phase = useAuthPhase();
   useEffect(() => listenForSidecarRestart(), []);
   useEffect(() => {
+    if (phase === 'authenticated') preloadVerseFonts(document, true);
     if (phase !== 'checking') return;
     preloadSessionGate();
     let cancelled = false;
