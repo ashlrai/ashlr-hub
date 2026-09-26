@@ -57,6 +57,8 @@ import type { BudgetPolicy, RoutingRequest, SeatDecision } from '../routing/type
 import type { SeatCapacity } from '../routing/headroom.js';
 import type { EffectivePolicy } from '../authority/types.js';
 import type { VerseSeat } from '../verse/types.js';
+import type { LeaderRunMode, LeaderSeatAttempt } from './leader-types.js';
+import { claudeFallbackEnabled, leaderCallBudget, orderLocalModels, type LeaderCallBudget } from './leader-seat-plan.js';
 
 export type LeaderComplete = (system: string, user: string) => Promise<string>;
 export type LeaderSeatEngine = 'claude' | 'grok' | 'local';
@@ -91,10 +93,16 @@ export interface LeaderSeatCandidate {
  */
 export type LeaderClaudeCredential = (cmd: EngineCommand) => Promise<NodeJS.ProcessEnv | undefined | 'refused'>;
 
+/**
+ * 3.14: per-attempt limits. Optional so older fakes keep compiling; absent =
+ * the transport's own defaults.
+ */
+export type LeaderCallOptions = Partial<LeaderCallBudget>;
+
 export interface LeaderTransports {
-  local(baseUrl: string, model: string): LeaderComplete;
-  grok(launcher: readonly string[], model: string): LeaderComplete;
-  claude(launcher: readonly string[], model: string, credential: LeaderClaudeCredential): LeaderComplete;
+  local(baseUrl: string, model: string, opts?: LeaderCallOptions): LeaderComplete;
+  grok(launcher: readonly string[], model: string, opts?: LeaderCallOptions): LeaderComplete;
+  claude(launcher: readonly string[], model: string, credential: LeaderClaudeCredential, opts?: LeaderCallOptions): LeaderComplete;
 }
 
 export interface LeaderSeatDeps {
@@ -158,32 +166,64 @@ function unknownCapacity(seat: VerseSeat): SeatCapacity {
   };
 }
 
+interface LeaderRouting {
+  eligible: LeaderSeatCandidate[];
+  decision: SeatDecision;
+  policy: BudgetPolicy;
+  /** Seats the Leader's own rules removed before routing (codex, Claude outside its runs, not granted). */
+  ruledOut: LeaderSeatAttempt[];
+}
+
+function skippedSeat(c: LeaderSeatCandidate, reason: string): LeaderSeatAttempt {
+  return { seatId: c.seat.id, engine: c.seat.engine, model: runnableModel(c.seat), outcome: 'skipped', reason, ms: null, timeoutMs: null };
+}
+
 /**
- * Pick the Leader's seat and build its completion function. Never throws;
- * every refusal is a specific sentence.
+ * The shared routing step: the Leader's seat rules, the grant clamp, then the
+ * router. Returns the router's decision over the admitted seats, or a refusal.
  */
-export async function resolveLeaderSeat(
+async function routeLeader(
   deps: LeaderSeatDeps,
-  opts: { deep: boolean; promptChars: number },
-): Promise<LeaderSeatResolution> {
+  opts: { deep: boolean; promptChars: number; mode: LeaderRunMode; localOnly?: boolean },
+): Promise<{ ok: true; routing: LeaderRouting } | { ok: false; reason: string; decision: SeatDecision | null; ruledOut: LeaderSeatAttempt[] }> {
   const nowMs = deps.now();
   let candidates: LeaderSeatCandidate[];
   try {
     candidates = await deps.candidates();
   } catch {
-    return { ok: false, reason: 'Seat discovery failed.', decision: null };
+    return { ok: false, reason: 'Seat discovery failed.', decision: null, ruledOut: [] };
   }
   const standing = deps.standingPolicy();
-  const engines = new Set<string>(['grok', 'local']);
-  if (opts.deep && deps.claudeCredential) engines.add('claude');
+  // Claude: the weekly deep run (3.10), or — opt-in, 3.14 — the last fallback
+  // of a full run. A check-in is cheap by definition: grok or local only.
+  const claudeRun = opts.mode === 'full' && !opts.localOnly && (opts.deep || claudeFallbackEnabled(deps.cfg));
+  const engines = new Set<string>(opts.localOnly ? ['local'] : ['grok', 'local']);
+  if (claudeRun && deps.claudeCredential) engines.add('claude');
 
+  const ruledOut: LeaderSeatAttempt[] = [];
   const eligible = candidates.filter((c) => {
-    if (!engines.has(c.seat.engine)) return false;
+    if (!engines.has(c.seat.engine)) {
+      ruledOut.push(skippedSeat(c, opts.localOnly && c.seat.engine !== 'codex'
+        ? 'Budget mode is reserve: this run uses free local models only.'
+        : c.seat.engine !== 'claude'
+        ? `The Leader never uses ${c.seat.engine}.`
+        : opts.mode === 'checkin'
+          ? 'A check-in never uses Claude.'
+          : !claudeRun
+            ? 'Claude is only for the weekly deep run.'
+            : 'The restricted-Claude credential hook is unavailable.'));
+      return false;
+    }
     if (c.seat.engine === 'local') return true;
     // Paid seats need a standing grant that lists them for the leader role.
-    if (!standing) return false;
+    if (!standing) {
+      ruledOut.push(skippedSeat(c, 'No standing grant: paid seats are not Leader candidates.'));
+      return false;
+    }
     const grantSeat = standing.spend.seats[c.seat.id];
-    return grantSeat !== undefined && grantSeat.enabled && grantSeat.roles.includes('leader');
+    const ok = grantSeat !== undefined && grantSeat.enabled && grantSeat.roles.includes('leader');
+    if (!ok) ruledOut.push(skippedSeat(c, 'The grant does not list this seat for the leader role.'));
+    return ok;
   });
   if (eligible.length === 0) {
     return {
@@ -192,6 +232,7 @@ export async function resolveLeaderSeat(
         ? 'No seat is available to the Leader: no local model is running and the grant lists no paid seat for the leader role.'
         : 'No local model is running, and without a standing grant the Leader may not use a paid seat.',
       decision: null,
+      ruledOut,
     };
   }
 
@@ -202,9 +243,20 @@ export async function resolveLeaderSeat(
   } catch {
     // Cannot clamp to the grant ⇒ paid seats are out; local still works.
     const localOnly = eligible.filter((c) => c.seat.engine === 'local');
-    if (localOnly.length === 0) return { ok: false, reason: 'The budget could not be clamped to the grant, and no local model is running.', decision: null };
+    for (const c of eligible) if (c.seat.engine !== 'local') ruledOut.push(skippedSeat(c, 'The budget could not be clamped to the grant.'));
+    if (localOnly.length === 0) return { ok: false, reason: 'The budget could not be clamped to the grant, and no local model is running.', decision: null, ruledOut };
     eligible.splice(0, eligible.length, ...localOnly);
     policy = deps.budgetPolicy();
+  }
+  // The Claude FALLBACK (not the weekly deep run) is off in reserve mode.
+  if (!opts.deep && policy.mode === 'reserve') {
+    for (let i = eligible.length - 1; i >= 0; i -= 1) {
+      const c = eligible[i]!;
+      if (c.seat.engine !== 'claude') continue;
+      ruledOut.push(skippedSeat(c, 'Budget mode is reserve: no Claude fallback.'));
+      eligible.splice(i, 1);
+    }
+    if (eligible.length === 0) return { ok: false, reason: 'Budget mode is reserve and no other seat is available.', decision: null, ruledOut };
   }
 
   const snapshot = deps.capacitySnapshot();
@@ -219,27 +271,129 @@ export async function resolveLeaderSeat(
   };
   const decision = deps.route(request, capacity, policy, nowMs);
   try { deps.recordDecision(request, decision); } catch { /* shadow log is best-effort */ }
-  if (!decision.seatId) return { ok: false, reason: decision.why, decision };
+  if (!decision.seatId) return { ok: false, reason: decision.why, decision, ruledOut };
+  return { ok: true, routing: { eligible, decision, policy, ruledOut } };
+}
 
-  const chosen = eligible.find((c) => c.seat.id === decision.seatId);
-  const model = chosen ? runnableModel(chosen.seat) : null;
-  if (!chosen || !model) return { ok: false, reason: `Seat ${decision.seatId} has no runnable model.`, decision };
+type BuiltSeat = { ok: true; choice: LeaderSeatChoice; complete: LeaderComplete; budget: LeaderCallBudget } | { ok: false; reason: string };
+
+/** Build one seat's completion function (the per-engine gates run here). */
+function buildSeat(deps: LeaderSeatDeps, chosen: LeaderSeatCandidate, opts: { mode: LeaderRunMode; promptChars: number }): BuiltSeat {
+  const model = runnableModel(chosen.seat);
+  if (!model) return { ok: false, reason: `Seat ${chosen.seat.id} has no runnable model.` };
   const engine = chosen.seat.engine as LeaderSeatEngine;
-
+  const budget = leaderCallBudget(engine, model, opts.mode, opts.promptChars);
   let complete: LeaderComplete;
   if (engine === 'local') {
-    if (!chosen.ollamaBaseUrl) return { ok: false, reason: 'The local seat has no endpoint.', decision };
-    complete = deps.transports.local(chosen.ollamaBaseUrl, model);
+    if (!chosen.ollamaBaseUrl) return { ok: false, reason: 'The local seat has no endpoint.' };
+    complete = deps.transports.local(chosen.ollamaBaseUrl, model, budget);
   } else {
     const verdict = enginePermitted(engine, deps.cfg);
-    if (!verdict.permitted) return { ok: false, reason: `Local-only mode refuses ${engine}.`, decision };
-    if (!chosen.launcher || chosen.launcher.length === 0) return { ok: false, reason: `Seat ${chosen.seat.id} has no launcher.`, decision };
+    if (!verdict.permitted) return { ok: false, reason: `Local-only mode refuses ${engine}.` };
+    if (!chosen.launcher || chosen.launcher.length === 0) return { ok: false, reason: `Seat ${chosen.seat.id} has no launcher.` };
     complete = engine === 'grok'
-      ? deps.transports.grok(chosen.launcher, model)
+      ? deps.transports.grok(chosen.launcher, model, budget)
       // claudeCredential is non-null here: without it 'claude' never entered `engines`.
-      : deps.transports.claude(chosen.launcher, model, deps.claudeCredential!);
+      : deps.transports.claude(chosen.launcher, model, deps.claudeCredential!, budget);
   }
-  return { ok: true, choice: { seatId: chosen.seat.id, engine, model, deep: engine === 'claude' }, complete, decision };
+  return { ok: true, choice: { seatId: chosen.seat.id, engine, model, deep: engine === 'claude' }, complete, budget };
+}
+
+/**
+ * Pick the Leader's seat and build its completion function. Never throws;
+ * every refusal is a specific sentence. This is the router's single pick —
+ * a run walks the fallback chain from `planLeaderSeats` instead.
+ */
+export async function resolveLeaderSeat(
+  deps: LeaderSeatDeps,
+  opts: { deep: boolean; promptChars: number; mode?: LeaderRunMode },
+): Promise<LeaderSeatResolution> {
+  const mode = opts.mode ?? 'full';
+  const routed = await routeLeader(deps, { ...opts, mode });
+  if (!routed.ok) return { ok: false, reason: routed.reason, decision: routed.decision };
+  const { eligible, decision } = routed.routing;
+  const chosen = eligible.find((c) => c.seat.id === decision.seatId);
+  if (!chosen) return { ok: false, reason: `Seat ${decision.seatId} has no runnable model.`, decision };
+  const built = buildSeat(deps, chosen, { mode, promptChars: opts.promptChars });
+  if (!built.ok) return { ok: false, reason: built.reason, decision };
+  return { ok: true, choice: built.choice, complete: built.complete, decision };
+}
+
+export interface LeaderSeatPlanStep {
+  choice: LeaderSeatChoice;
+  complete: LeaderComplete;
+  budget: LeaderCallBudget;
+}
+
+export type LeaderSeatPlan =
+  | { ok: true; steps: LeaderSeatPlanStep[]; skipped: LeaderSeatAttempt[]; decision: SeatDecision }
+  | { ok: false; reason: string; skipped: LeaderSeatAttempt[]; decision: SeatDecision | null };
+
+function exclusionAttempts(decision: SeatDecision | null, byId: ReadonlyMap<string, LeaderSeatCandidate>): LeaderSeatAttempt[] {
+  return (decision?.exclusions ?? []).map((x) => {
+    const c = byId.get(x.seatId);
+    return {
+      seatId: x.seatId,
+      engine: c?.seat.engine ?? 'unknown',
+      model: c ? runnableModel(c.seat) : null,
+      outcome: 'skipped' as const,
+      reason: x.reasons.join(' ') || 'The router excluded this seat.',
+      ms: null,
+      timeoutMs: null,
+    };
+  });
+}
+
+/**
+ * 3.14 — the fallback CHAIN. Every step is a seat the router approved over the
+ * seats the Leader's rules admitted (the same gates as `resolveLeaderSeat`),
+ * ordered:
+ *   1. the router's pick when it is a paid seat (grok; Claude on the deep run);
+ *   2. other approved grok seats, in the router's order;
+ *   3. approved local models — operator-named first, then FAST before LARGE
+ *      (leader-seat-plan.ts: a 27B dense model is the slow last resort);
+ *   4. Claude last, when it was admitted as a fallback (opt-in; never on a
+ *      check-in, never in reserve mode unless it is the weekly deep run).
+ * Codex is never in it; with no grant it holds local models only; there is no
+ * cloud fallback outside it. Seats the router excluded or the rules removed
+ * come back as `skipped`, with their reasons, for the memo and the health
+ * surface.
+ */
+export async function planLeaderSeats(
+  deps: LeaderSeatDeps,
+  opts: { deep: boolean; promptChars: number; mode: LeaderRunMode; localOnly?: boolean },
+): Promise<LeaderSeatPlan> {
+  const routed = await routeLeader(deps, opts);
+  if (!routed.ok) {
+    return { ok: false, reason: routed.reason, skipped: [...routed.ruledOut, ...exclusionAttempts(routed.decision, new Map())], decision: routed.decision };
+  }
+  const { eligible, decision, ruledOut } = routed.routing;
+  const byId = new Map(eligible.map((c) => [c.seat.id, c]));
+  const approved = decision.candidates.map((id) => byId.get(id)).filter((c): c is LeaderSeatCandidate => c !== undefined);
+  const pick = decision.seatId ? byId.get(decision.seatId) : undefined;
+  // The router ranks Claude first for high-difficulty work; outside the weekly
+  // deep run Claude is only ever the LAST fallback.
+  const first = pick && pick.seat.engine !== 'local' && (pick.seat.engine !== 'claude' || opts.deep) ? [pick] : [];
+  const rest = approved.filter((c) => !first.includes(c));
+  const ordered = [
+    ...first,
+    ...rest.filter((c) => c.seat.engine === 'grok'),
+    ...orderLocalModels(rest.filter((c) => c.seat.engine === 'local'), (c) => runnableModel(c.seat) ?? '', deps.cfg),
+    ...rest.filter((c) => c.seat.engine === 'claude'),
+  ];
+
+  const skippedList: LeaderSeatAttempt[] = [...ruledOut, ...exclusionAttempts(decision, byId)];
+  const steps: LeaderSeatPlanStep[] = [];
+  for (const c of ordered) {
+    const built = buildSeat(deps, c, { mode: opts.mode, promptChars: opts.promptChars });
+    if (built.ok) steps.push({ choice: built.choice, complete: built.complete, budget: built.budget });
+    else skippedList.push(skippedSeat(c, built.reason));
+  }
+  if (steps.length === 0) {
+    const last = skippedList.map((x) => x.reason).filter((r): r is string => typeof r === 'string' && r.length > 0).at(-1);
+    return { ok: false, reason: last ?? decision.why, skipped: skippedList, decision };
+  }
+  return { ok: true, steps, skipped: skippedList, decision };
 }
 
 // ---------------------------------------------------------------------------
@@ -298,13 +452,73 @@ export function runCliCompletion(
   });
 }
 
-export function ollamaLeaderTransport(baseUrl: string, model: string, cfg: AshlrConfig | undefined, timeoutMs = 15 * 60_000): LeaderComplete {
+/**
+ * Read an Ollama `/api/chat` NDJSON stream to the end, concatenating
+ * `message.content`. Rejects on a stream-level `error` line.
+ */
+async function readOllamaChatStream(body: ReadableStream<Uint8Array>): Promise<string> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = '';
+  let text = '';
+  const take = (line: string): void => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let parsed: { message?: { content?: unknown }; error?: unknown };
+    try {
+      parsed = JSON.parse(trimmed) as typeof parsed;
+    } catch {
+      return; // a torn / non-JSON line is not content
+    }
+    if (typeof parsed.error === 'string') throw new Error(`ollama: ${parsed.error.slice(0, 200)}`);
+    if (typeof parsed.message?.content === 'string' && text.length < MAX_OUTPUT_BYTES) text += parsed.message.content;
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffered += decoder.decode(value, { stream: true });
+    let nl = buffered.indexOf('\n');
+    while (nl !== -1) {
+      take(buffered.slice(0, nl));
+      buffered = buffered.slice(nl + 1);
+      nl = buffered.indexOf('\n');
+    }
+  }
+  take(buffered + decoder.decode());
+  return text;
+}
+
+/**
+ * The local Leader call. STREAMED (3.14): with `stream: false` the server sends
+ * no response headers until the whole memo is written, and Node's fetch
+ * (undici) abandons a request after 300 s without headers — on 2026-09-26 a
+ * 27B decoding at ~3 tok/s hit exactly that ("fetch failed" at 5m2s) while
+ * the old 15-minute timer never fired. Streaming makes headers arrive at once;
+ * the wall-clock limit is then the per-attempt `timeoutMs` alone.
+ *
+ * `contextTokens` caps the KV cache the runtime allocates for this request
+ * (Ollama `num_ctx`): the Leader needs ~8–16k, not the model tag's 64k or the
+ * runtime's 262k.
+ */
+export function ollamaLeaderTransport(
+  baseUrl: string,
+  model: string,
+  cfg: AshlrConfig | undefined,
+  timeoutMs = 15 * 60_000,
+  opts: { maxOutputTokens?: number; contextTokens?: number | null } = {},
+): LeaderComplete {
   return async (system, user) => {
     const url = `${baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '')}/api/chat`;
     // LOCAL-ONLY GATE: a remote inference host configured as "ollama" is a cloud endpoint.
     assertPermitted(endpointPermitted(url, cfg));
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    const options: Record<string, number> = { temperature: 0.2, num_predict: opts.maxOutputTokens ?? 4_096 };
+    if (typeof opts.contextTokens === 'number' && opts.contextTokens > 0) options['num_ctx'] = opts.contextTokens;
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -312,22 +526,33 @@ export function ollamaLeaderTransport(baseUrl: string, model: string, cfg: Ashlr
         body: JSON.stringify({
           model,
           messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-          stream: false,
+          stream: true,
           // JSON-constrained decoding: the memo parser fails closed on prose,
           // so asking the runtime for an object is the cheap way to not fail.
           format: 'json',
           think: false,
-          options: { temperature: 0.2, num_predict: 4_096 },
+          options,
         }),
         signal: controller.signal,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as { message?: { content?: unknown } };
-      return typeof data.message?.content === 'string' ? data.message.content : '';
+      if (!res.body) throw new Error('empty response body');
+      return await readOllamaChatStream(res.body);
+    } catch (err) {
+      if (timedOut) throw new LeaderTimeoutError(timeoutMs);
+      throw err;
     } finally {
       clearTimeout(timer);
     }
   };
+}
+
+/** A per-attempt wall-clock limit was hit (the chain records it as `timeout`). */
+export class LeaderTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`timed out after ${Math.round(timeoutMs / 1000)} s`);
+    this.name = 'LeaderTimeoutError';
+  }
 }
 
 /**
@@ -379,8 +604,11 @@ const GROK_CLI_ENGINE = 'grok-cli';
 
 export function defaultLeaderTransports(cfg: AshlrConfig): LeaderTransports {
   return {
-    local: (baseUrl, model) => ollamaLeaderTransport(baseUrl, model, cfg),
-    grok: (launcher, model) => async (system, user) => {
+    local: (baseUrl, model, opts) => ollamaLeaderTransport(baseUrl, model, cfg, opts?.timeoutMs ?? 15 * 60_000, {
+      maxOutputTokens: opts?.maxOutputTokens,
+      contextTokens: opts?.contextTokens ?? null,
+    }),
+    grok: (launcher, model, opts) => async (system, user) => {
       // Re-checked per call (as the grok judge does): local-only may have been
       // latched since the seat was resolved.
       if (!enginePermitted(GROK_CLI_ENGINE, cfg).permitted) throw new Error('Local-only mode refuses grok-cli.');
@@ -389,7 +617,7 @@ export function defaultLeaderTransports(cfg: AshlrConfig): LeaderTransports {
       try {
         const built = grokLeaderCommand(launcher, model, system, user, cfg, cwd);
         if (!built.ok) throw new Error(built.reason);
-        const out = await runCliCompletion([built.cmd.bin, ...built.cmd.args], { stdin: null, timeoutMs: LEADER_CLI_TIMEOUT_MS, cwd });
+        const out = await runCliCompletion([built.cmd.bin, ...built.cmd.args], { stdin: null, timeoutMs: opts?.timeoutMs ?? LEADER_CLI_TIMEOUT_MS, cwd });
         const parsed = extractGrokStreamText(out);
         if (parsed.error !== null) throw new Error(`grok reported an error: ${parsed.error.slice(0, 200)}`);
         if (!parsed.text) throw new Error('grok returned no text');
@@ -398,12 +626,12 @@ export function defaultLeaderTransports(cfg: AshlrConfig): LeaderTransports {
         try { rmSync(cwd, { recursive: true, force: true }); } catch { /* temp dir; best effort */ }
       }
     },
-    claude: (launcher, model, credential) => async (system, user) => {
+    claude: (launcher, model, credential, opts) => async (system, user) => {
       const cmd = claudeLeaderCommand(launcher, model, system);
       if (!cmd) throw new Error('The Claude Leader command could not be restricted.');
       const env = await credential(cmd);
       if (env === 'refused') throw new Error('The restricted-Claude credential was refused.');
-      const raw = await runCliCompletion([cmd.bin, ...cmd.args], { stdin: user, timeoutMs: LEADER_CLI_TIMEOUT_MS, ...(env ? { env } : {}) });
+      const raw = await runCliCompletion([cmd.bin, ...cmd.args], { stdin: user, timeoutMs: opts?.timeoutMs ?? LEADER_CLI_TIMEOUT_MS, ...(env ? { env } : {}) });
       try {
         const parsed = JSON.parse(raw) as { result?: unknown };
         return typeof parsed.result === 'string' ? parsed.result : raw;

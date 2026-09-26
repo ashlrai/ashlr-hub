@@ -14,6 +14,10 @@
  * standing grant: a free local model or nothing). `veto` only lowers what
  * autonomy is doing. Exit codes: 0 success, 1 error / refused, 2 bad usage.
  */
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
+
 import { loadConfig } from '../core/config.js';
 import type { LeaderAction, LeaderMemo, LeaderStateV1 } from '../core/vision/leader-types.js';
 
@@ -82,10 +86,101 @@ function printState(state: LeaderStateV1): void {
   console.log(`\nHit-rate (${hr.windowDays} d): ${hr.rate === null ? 'not graded yet' : `${Math.round(hr.rate * 100)}% of ${hr.graded}`}`);
   console.log(`Runs today: ${state.runsToday}; next scheduled run: ${state.nextRunAt ?? 'unknown'}`);
   if (state.lastRun) console.log(`Last run: ${state.lastRun.at} — ${state.lastRun.outcome}${state.lastRun.reason ? ` (${state.lastRun.reason})` : ''}`);
+  const health = state.health;
+  if (health) {
+    console.log(`Leader: ${health.status} — ${health.summary}`);
+    if (health.nextDueAt) console.log(`Next due: ${health.nextDueAt} (${health.nextDueReason ?? ''})`);
+    for (const a of health.seats) {
+      console.log(`  seat ${a.seatId} [${a.outcome}]${a.ms !== null ? ` ${Math.round(a.ms / 1000)} s` : ''}${a.reason ? ` — ${a.reason}` : ''}`);
+    }
+  }
   const live = state.actions.filter((a) => a.status === 'scheduled');
   if (live.length > 0) {
     console.log('\nWaiting on their veto window:');
     for (const a of live) console.log(line(a));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wake (3.14): let the comms poller start a tick when a time-based run is due
+// ---------------------------------------------------------------------------
+
+/** Minimum gap between two background ticks started by the poller. */
+export const LEADER_WAKE_THROTTLE_MS = 10 * 60_000;
+
+export interface LeaderWakeDeps {
+  now(): number;
+  /** Start `ashlr leader tick --wait` detached; false when it could not be started. */
+  spawnTick(): boolean;
+  readLastWake(): number;
+  writeLastWake(ms: number): void;
+}
+
+function wakeStampPath(root: string): string {
+  return join(root, '.wake.json');
+}
+
+async function defaultWakeDeps(): Promise<LeaderWakeDeps> {
+  const { leaderRoot } = await import('../core/vision/leader-memo.js');
+  const root = leaderRoot();
+  return {
+    now: () => Date.now(),
+    spawnTick: () => {
+      // The same node + ashlr entry point this process runs under (launchd
+      // gives absolute paths); never a PATH lookup.
+      const entry = process.argv[1];
+      // Never from a test runner: argv[1] would be the runner, not ashlr (and a
+      // stray child could touch real state — see the 2026 poisoned-daemon incident).
+      if (process.env['VITEST']) return false;
+      if (!entry || !isAbsolute(entry) || !existsSync(entry)) return false;
+      try {
+        const child = spawn(process.execPath, [entry, 'leader', 'tick', '--wait'], { detached: true, stdio: 'ignore', env: process.env });
+        child.on('error', () => undefined);
+        child.unref();
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    readLastWake: () => {
+      try {
+        const parsed = JSON.parse(readFileSync(wakeStampPath(root), 'utf8')) as { at?: unknown };
+        return typeof parsed.at === 'number' ? parsed.at : 0;
+      } catch {
+        return 0;
+      }
+    },
+    writeLastWake: (ms) => {
+      try {
+        mkdirSync(root, { recursive: true, mode: 0o700 });
+        writeFileSync(wakeStampPath(root), JSON.stringify({ at: ms }), { mode: 0o600 });
+      } catch { /* a missed stamp only means an extra (lock-guarded) tick */ }
+    },
+  };
+}
+
+/**
+ * Called from `ashlr comms cycle` (every 3 minutes under ai.ashlr.comms-poll),
+ * so retries and working-hours check-ins happen without the daemon. Cheap:
+ * reads the Leader state file only, and starts a background tick at most
+ * every 10 minutes, only when a time-based run could be due. The tick runs
+ * under the Leader's run lock, so an overlap exits at once. Never throws.
+ */
+export async function wakeLeaderIfDue(
+  cfg: Awaited<ReturnType<typeof loadConfig>>,
+  deps?: LeaderWakeDeps,
+): Promise<{ started: boolean; why: string }> {
+  try {
+    const d = deps ?? await defaultWakeDeps();
+    const nowMs = d.now();
+    if (nowMs - d.readLastWake() < LEADER_WAKE_THROTTLE_MS) return { started: false, why: 'woke the Leader recently' };
+    const [leader, cadenceMod] = await Promise.all([import('../core/vision/leader.js'), import('../core/vision/leader-cadence.js')]);
+    const wake = leader.leaderWakeDue(nowMs, leader.readLeaderRunState(), cadenceMod.resolveLeaderCadence(cfg));
+    if (!wake.due) return { started: false, why: wake.why };
+    d.writeLastWake(nowMs);
+    return d.spawnTick() ? { started: true, why: wake.why } : { started: false, why: 'the tick could not be started' };
+  } catch {
+    return { started: false, why: 'error' };
   }
 }
 

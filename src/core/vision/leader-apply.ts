@@ -94,6 +94,7 @@ import {
   type LeaderVetoRecord,
 } from './leader-types.js';
 import { leaderRoot, parseActionParams, readLeaderMemo, type AnyLeaderActionDraft } from './leader-memo.js';
+import { isOpenGoal } from '../goals/open-goals.js';
 
 // Ranks duplicated from authority/types.ts on purpose: that module is a leaf
 // of the authority surface, and this one must stay importable by the router
@@ -1211,7 +1212,7 @@ async function executeAction(deps: LeaderApplyDeps, action: LeaderAction): Promi
     case 'goal.create': {
       const listed = deps.goals.list();
       if (!listed.complete) return { status: 'refused', reason: 'The goal list could not be read completely.' };
-      const open = listed.goals.filter((g) => g.status === 'active' || g.status === 'planning').length;
+      const open = listed.goals.filter(isOpenGoal).length;
       if (open >= LEADER_LIMITS.maxActiveGoals) {
         return { status: 'refused', reason: `${open} goals are already open (limit ${LEADER_LIMITS.maxActiveGoals}).` };
       }
@@ -1425,7 +1426,7 @@ export function buildPolicyContext(deps: LeaderApplyDeps, hypothesisIds: readonl
   let openGoalCount: number | null = null;
   try {
     const listed = deps.goals.list();
-    openGoalCount = listed.complete ? listed.goals.filter((g) => g.status === 'active' || g.status === 'planning').length : null;
+    openGoalCount = listed.complete ? listed.goals.filter(isOpenGoal).length : null;
   } catch {
     openGoalCount = null;
   }
