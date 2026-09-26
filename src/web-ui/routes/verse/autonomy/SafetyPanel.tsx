@@ -51,8 +51,8 @@ export function SafetyPanel() {
         </p>
       ) : !report || total === 0 ? (
         <p className={styles.empty}>
-          The safety report came back with no checks. Press <strong>Re-run checks</strong>; if it is still empty, that is
-          itself a problem worth investigating — treat it as a failure, not as a pass.
+          The safety report came back with no checks. Press <strong>Re-run checks</strong>; if it stays empty, treat
+          it as a failure.
         </p>
       ) : (
         <div className={styles.checkList}>

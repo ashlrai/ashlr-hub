@@ -128,7 +128,8 @@ export function buildCacheSeries(series: UsageSeries | null): SeriesProjection {
     return {
       available: false,
       reason:
-        'No day in this window reported a cache hit rate, so there is nothing to plot. This is an absent signal, not a 0% hit rate.',
+        // An absent signal, never drawn as a flat 0% hit rate.
+        'No cache data in this window.',
     };
   }
   if (known < 2) {
@@ -160,7 +161,8 @@ export function buildCacheTokenSeries(series: UsageSeries | null): SeriesProject
     return {
       available: false,
       reason:
-        'No day in this window reported cache read or write tokens, so there is nothing to plot. This is an absent signal, not zero cache activity.',
+        // An absent signal, never drawn as zero cache activity.
+        'No cache data in this window.',
     };
   }
   if (series.days.length < 2) return { available: false, reason: SERIES_TOO_THIN };

@@ -197,7 +197,7 @@ function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose }
       ) : draft ? (
         <DraftScope draft={draft} />
       ) : (
-        <CardNote tone="unknown">{reason ?? 'The grant draft could not be read, so nothing can be approved from here.'}</CardNote>
+        <CardNote tone="unknown">{reason ?? 'Grant draft unreadable — nothing to approve.'}</CardNote>
       )}
     </Sheet>
   );

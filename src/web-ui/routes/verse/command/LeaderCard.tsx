@@ -10,7 +10,7 @@
  */
 import type { LeaderAction, LeaderStateV1 } from '../../../../core/vision/leader-types.js';
 import { Button } from '../../../components/primitives/Button.js';
-import { formatRelative } from '../autonomy/format.js';
+import { asSentence, formatRelative } from '../autonomy/format.js';
 import { STATUS_WORD, expectedDeltaText, isVetoable, memoActions } from '../mind/leader-model.js';
 import { CountdownRing } from './CountdownRing.js';
 import { anchorId, goToSection } from './nav.js';
@@ -86,8 +86,8 @@ export function LeaderCard({ read, loading, actions }: { read: OptionalRead<Lead
         <CardNote tone="unknown">{read?.reason ?? 'The Leader did not answer.'}</CardNote>
       ) : !memo ? (
         <CardNote>
-          No memo yet
-          {state.lastRun ? ` — last run ${formatRelative(state.lastRun.at)}: ${state.lastRun.reason ?? state.lastRun.outcome}` : ''}.
+          {/* The run's reason is server prose that may carry its own stop. */}
+          {asSentence(`No memo yet${state.lastRun ? ` — last run ${formatRelative(state.lastRun.at)}: ${state.lastRun.reason ?? state.lastRun.outcome}` : ''}`)}
           {state.nextRunAt ? ` Next run ${new Date(state.nextRunAt).toLocaleString('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit' })}.` : ''}
         </CardNote>
       ) : (

@@ -125,8 +125,7 @@ export function FleetAdvanced({ embedded = false }: { embedded?: boolean }) {
             <div className={styles.failure} role="alert">
               {control.error?.message ?? 'Could not read the autonomy control snapshot.'}
               <br />
-              Without it the cockpit cannot honestly say whether the loop is running, so nothing below is shown rather
-              than guessed.
+              Loop status unknown, so nothing below is shown.
               <br />
               <button type="button" className={styles.retry} onClick={refetchControl}>
                 Try again

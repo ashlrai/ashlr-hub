@@ -22,7 +22,6 @@ import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import type { EffectivePolicy } from '../../../../core/authority/types.js';
 import type { StatTileDelta } from '../../../components/charts/StatTile.js';
 import { asSentence, localTimes, parseLegacyReason } from '../fleet/why-seat-model.js';
-import { usedPercentText } from '../percent-text.js';
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
@@ -76,9 +75,9 @@ export interface KpiInputs {
   learning: LearningStateV1 | null;
   policy: EffectivePolicy | null;
   /**
-   * The live budget view, for subscription usage as PERCENT of each paid
-   * seat's binding window. Optional so a caller without it still renders the
-   * metered figure honestly; the caption then points at the seat burn-downs.
+   * Accepted but no longer read: the spend caption used to list every paid
+   * seat's window usage, which the seat burn-downs already show. Kept so
+   * callers need not change.
    */
   budget?: BudgetView | null;
 }
@@ -97,20 +96,6 @@ export interface KpiInputs {
 export function meteredCost(d: FleetHistoryDay): number | null {
   const v = (d as FleetHistoryDay & { meteredCostUsd?: number | null }).meteredCostUsd;
   return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
-}
-
-/** "Claude 54% · Grok 31% of window used" — paid seats' binding-window usage, never dollars. */
-export function subscriptionUsage(view: BudgetView | null | undefined): string | null {
-  if (!view) return null;
-  const info = new Map(view.seatInfo.map((s) => [s.seatId, s]));
-  const parts: string[] = [];
-  for (const h of view.headroom) {
-    const seat = info.get(h.seatId);
-    if (!seat || seat.free) continue;
-    const used = h.bindingWindow === 'session' ? h.sessionUsedPercent : h.bindingWindow === 'weekly' ? h.weeklyUsedPercent : null;
-    parts.push(`${seat.label} ${used === null || !Number.isFinite(used) ? '—' : usedPercentText(used)}`);
-  }
-  return parts.length ? `${parts.join(' · ')} of window used` : null;
 }
 
 const signedInt = (v: number) => (v > 0 ? `+${v}` : String(v));
@@ -135,7 +120,7 @@ export function greenTrend(fleet: FleetLiveSnapshotV1 | null): (number | null)[]
   return Array.from({ length: len }, (_, i) => mean(fleet.repos.map((r) => r.greenTrend[i - (len - r.greenTrend.length)] ?? null)));
 }
 
-export function buildKpis({ fleet, history, learning, policy, budget }: KpiInputs): Kpi[] {
+export function buildKpis({ fleet, history, learning, policy }: KpiInputs): Kpi[] {
   const days = history?.days ?? [];
   const merges = (d: FleetHistoryDay) => d.merges.realized;
   const spend = meteredCost;
@@ -153,22 +138,16 @@ export function buildKpis({ fleet, history, learning, policy, budget }: KpiInput
   const gPrior = gTrend.length >= 14 ? mean(gTrend.slice(-14, -7)) : null;
   const greenDelta = gNow !== null && gPrior !== null ? gNow - gPrior : null;
 
-  // Metered spend vs cap — per-token API spend ONLY (see meteredCost);
-  // subscriptions go in the caption as percent of their window.
+  // Metered spend vs cap — per-token API spend ONLY (see meteredCost).
   const spend7 = windowSum(days, spend, 7);
   const spendPrior = windowSum(days, spend, 7, 7);
   const capPerDay = policy ? policy.spend.meteredUsdPerDay : null;
   const spendValue = spend7 === null ? '—' : `$${spend7.toFixed(2)}${capPerDay !== null ? ` / $${(capPerDay * 7).toFixed(0)}` : ''}`;
   const meteredKnown = days.some((d) => meteredCost(d) !== null);
-  const capWords = capPerDay === null ? null : capPerDay === 0 ? 'metered APIs off ($0 cap)' : `cap $${capPerDay}/day`;
-  const subs = subscriptionUsage(budget);
-  const spendCaption = [
-    capWords,
-    meteredKnown ? null : 'metered split not reported yet',
-    subs ? `subscriptions: ${subs}` : 'subscriptions are window usage, not dollars — see seat capacity',
-  ]
-    .filter(Boolean)
-    .join(' · ');
+  // One short line. Subscriptions are window usage, not dollars: they live
+  // on the seat burn-downs, not in this caption.
+  const capWords = capPerDay === null ? 'per-token APIs only' : capPerDay === 0 ? 'metered APIs off' : `cap $${capPerDay}/day`;
+  const spendCaption = meteredKnown ? capWords : `${capWords} · not reported yet`;
 
   // Lift — the active harness's own experiment (null = baseline in force).
   const active = learning?.active ?? null;

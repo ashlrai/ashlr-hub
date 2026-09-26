@@ -206,7 +206,7 @@ const decision: SeatDecision = {
   seatId: 'grok-a',
   candidates: ['grok-a', 'local-qwen'],
   exclusions: [
-    { seatId: 'claude-a', reasons: ['5-hour window at 74% — above the 70% ceiling that protects your live session'], nextEligibleAt: null },
+    { seatId: 'claude-a', reasons: ['5-hour window at 74% — above autonomy’s 70% stop line'], nextEligibleAt: null },
     { seatId: 'codex-a', reasons: ['weekly window exhausted; resets Thu 09:00'], nextEligibleAt: '2026-09-26T09:00:00.000Z' },
   ],
   why: 'grok-a has the most headroom for medium code work (0% reserve, 31% used this week); local-qwen is the fallback.',
@@ -275,7 +275,7 @@ export function fleetLive(kind: FixtureKind = 'live', now = Date.now()): FleetLi
           startedAt: null,
           phaseStartedAt: iso(now - 2 * HOUR),
           title: 'Judge: Split the router into modules',
-          hold: { kind: 'park', reason: 'claude-a 5-hour window at 74% — above the 70% ceiling that protects your live session', nextEligibleAt: iso(now + 95 * MIN) },
+          hold: { kind: 'park', reason: 'claude-a 5-hour window at 74% — above autonomy’s 70% stop line', nextEligibleAt: iso(now + 95 * MIN) },
         }, now),
         run('r12', {
           phase: 'parked',
@@ -684,7 +684,7 @@ export function budgetView(kind: FixtureKind = 'live', now = Date.now()): Budget
       // Consistent with core/routing/headroom.ts under balanced (reserve 40,
       // 5-hour cap 70): weekly room 60−54 = 6, 5-hour room 70−74 = −4, so the
       // 5-HOUR window binds (it used to say 'weekly', which hid review 3.10 d2).
-      { seatId: 'claude-a', sessionUsedPercent: 74, weeklyUsedPercent: kind === 'dark' ? null : 54, bindingWindow: 'session', autonomyHeadroomPercent: 0, resetAt: iso(now + 2 * HOUR), eligibleForAutonomy: false, reasons: ['5-hour window at 74% — above the 70% ceiling'] },
+      { seatId: 'claude-a', sessionUsedPercent: 74, weeklyUsedPercent: kind === 'dark' ? null : 54, bindingWindow: 'session', autonomyHeadroomPercent: 0, resetAt: iso(now + 2 * HOUR), eligibleForAutonomy: false, reasons: ['5-hour window at 74% — above autonomy’s 70% stop line'] },
       { seatId: 'grok-a', sessionUsedPercent: null, weeklyUsedPercent: 31, bindingWindow: 'weekly', autonomyHeadroomPercent: 69, resetAt: iso(now + 4 * DAY), eligibleForAutonomy: true, reasons: ['69% of the weekly window is free for autonomy'] },
       { seatId: 'codex-a', sessionUsedPercent: null, weeklyUsedPercent: 100, bindingWindow: 'weekly', autonomyHeadroomPercent: 0, resetAt: iso(now + 42 * HOUR), eligibleForAutonomy: false, reasons: ['weekly window exhausted'] },
       { seatId: 'local-qwen', sessionUsedPercent: null, weeklyUsedPercent: null, bindingWindow: null, autonomyHeadroomPercent: null, resetAt: null, eligibleForAutonomy: true, reasons: ['local: free, no provider window'] },

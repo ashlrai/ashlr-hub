@@ -59,7 +59,7 @@ export const CAP_FIELDS: readonly CapFieldSpec[] = [
     max: 1000,
     integer: false,
     step: 1,
-    help: 'Hard ceiling on what the loop may spend in a calendar day. 0 means the loop is stopped — it is not "unlimited".',
+    help: 'Hard ceiling on what the loop may spend in a calendar day. 0 stops the loop.',
     toDisplay: identity,
     fromDisplay: identity,
   },

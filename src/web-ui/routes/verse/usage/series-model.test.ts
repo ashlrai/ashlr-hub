@@ -122,7 +122,7 @@ describe('buildCacheSeries — an absent rate is not a 0% hit rate', () => {
     );
     expect(projected.available).toBe(false);
     if (projected.available) return;
-    expect(projected.reason).toMatch(/absent signal, not a 0% hit rate/);
+    expect(projected.reason).toBe('No cache data in this window.');
   });
 
   it('refuses a lone reported day as a trend', () => {

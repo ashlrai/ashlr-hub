@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { VerseSeat } from '../../../../core/verse/types.js';
-import { bindingLine, bindingReset, bindingResetText, buildKpis, burnTimeFormat, formatSpan, mergeSeatHistory, rankNeedsYou, reasonResetText, recordReading, resetInstantFromWords, resetWords, SEAT_READINGS_MAX, seatBurns, seatNames, seatReasons, seatReasonText, seriesKey, silentSources, sinceYouLooked, subscriptionUsage, windowSum } from './command-model.js';
+import { bindingLine, bindingReset, bindingResetText, buildKpis, burnTimeFormat, formatSpan, mergeSeatHistory, rankNeedsYou, reasonResetText, recordReading, resetInstantFromWords, resetWords, SEAT_READINGS_MAX, seatBurns, seatNames, seatReasons, seatReasonText, seriesKey, silentSources, sinceYouLooked, windowSum } from './command-model.js';
 import { activitySnapshot, budgetView, fleetHistory, fleetLive, leaderState, learningState, needsYouItems, seatHistory } from './fixtures.test-support.js';
 import type { CapacityHistoryResponse } from '../../../../core/routing/capacity-history-types.js';
 import { reasonSentence } from '../../../../core/routing/seat-reasons.js';
@@ -447,11 +447,11 @@ describe('metered spend KPI', () => {
     expect(spend.label).toBe('Metered spend · 7d');
     expect(spend.value).toBe('—');
     expect(spend.trend).toBeUndefined();
-    expect(spend.caption).toContain('metered APIs off ($0 cap)');
-    expect(spend.caption).toContain('metered split not reported yet');
-    // Subscriptions as percent of their binding window, never dollars.
-    expect(spend.caption).toContain('subscriptions: Claude (claude-a) 74% · Grok (grok-a) 31% · Codex (codex-a) 100% of window used');
+    // One short line: the $0 cap and the missing split, never a dollar estimate.
+    expect(spend.caption).toBe('metered APIs off · not reported yet');
     expect(spend.caption).not.toMatch(/\$\d+\.\d/);
+    // Subscriptions are window usage — they live on the seat burn-downs, not here.
+    expect(spend.caption).not.toMatch(/subscriptions|claude-a/);
   });
 
   it('uses the server’s metered split when it reports one', () => {
@@ -462,15 +462,14 @@ describe('metered spend KPI', () => {
     expect(spend.value).toBe('$3.50 / $14');
     expect(spend.trend).toHaveLength(14);
     expect(spend.delta?.value).toBe(0);
-    expect(spend.caption).toContain('cap $2/day');
-    expect(spend.caption).toContain('see seat capacity');
+    expect(spend.caption).toBe('cap $2/day');
   });
 
-  it('lists only paid seats, with "—" for an unknown window', () => {
-    const view = budgetView('dark', NOW);
-    view.headroom[1] = { ...view.headroom[1]!, weeklyUsedPercent: null };
-    expect(subscriptionUsage(view)).toBe('Claude (claude-a) 74% · Grok (grok-a) — · Codex (codex-a) 100% of window used');
-    expect(subscriptionUsage(null)).toBeNull();
+  it('with no policy, says what the figure covers', () => {
+    const history = fleetHistory('live', NOW);
+    const days = history.days.map((d) => ({ ...d, meteredCostUsd: 0.5 }));
+    const spend = buildKpis({ fleet: null, history: { ...history, days }, learning: null, policy: null }).find((k) => k.id === 'spend')!;
+    expect(spend.caption).toBe('per-token APIs only');
   });
 });
 

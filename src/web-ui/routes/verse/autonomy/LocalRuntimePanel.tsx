@@ -23,7 +23,7 @@ import { getQuerySnapshot, subscribeQuery } from '../../../data/cache.js';
 import { StatusBadge, type Tone } from '../../../components/primitives/StatusBadge.js';
 import { Meter } from '../../../components/primitives/Meter.js';
 import { ConfirmDialog } from '../../inbox/ConfirmDialog.js';
-import { asClause, tidyProse, UNKNOWN } from './format.js';
+import { asClause, asSentence, tidyProse, UNKNOWN } from './format.js';
 import type {
   FleetSnapshot,
   OptionalFleetRead,
@@ -196,12 +196,12 @@ export function LocalRuntimePanel({
         <p className={styles.empty}>
           <span className={styles.emptyStrong}>No serving-runtime source. </span>
           {read?.reason ??
-            'Nothing answered for the serving runtime, so whether a local fleet can run cannot be stated here.'}
+            'Serving runtime unavailable.'}
         </p>
       ) : runtime === null ? (
         <p className={styles.empty}>
           <span className={styles.emptyStrong}>Unreadable reading. </span>
-          {read.reason ?? 'The serving-runtime reading could not be narrowed, so nothing is shown rather than guessed.'}
+          {read.reason ?? 'Unrecognized response — update Ashlr.'}
         </p>
       ) : (
         <>
@@ -266,8 +266,8 @@ export function LocalRuntimePanel({
                   {laneCap.off ? 'lane off' : 'lane-capped'}
                 </StatusBadge>{' '}
                 {laneCap.off
-                  ? `The fleet runs no local agent ${laneCapStale ? 'as of its last tick' : 'this tick'}: ${laneCap.why}.`
-                  : `The fleet runs ${laneCap.limit === null ? 'fewer' : `at most ${laneCap.limit}`} local ${laneCap.limit === 1 ? 'agent' : 'agents'} ${laneCapStale ? 'as of its last tick' : 'this tick'}${laneCap.uncapped === null ? '' : `, not ${laneCap.uncapped}`} — a lane cap is tighter than this runtime: ${laneCap.why}.`}
+                  ? `The fleet runs no local agent ${laneCapStale ? 'as of its last tick' : 'this tick'}: ${asSentence(laneCap.why)}`
+                  : `The fleet runs ${laneCap.limit === null ? 'fewer' : `at most ${laneCap.limit}`} local ${laneCap.limit === 1 ? 'agent' : 'agents'} ${laneCapStale ? 'as of its last tick' : 'this tick'}${laneCap.uncapped === null ? '' : `, not ${laneCap.uncapped}`} — a lane cap is tighter than this runtime: ${asSentence(laneCap.why)}`}
               </p>
             ) : null}
 
@@ -323,9 +323,7 @@ export function LocalRuntimePanel({
 
           {!supervised ? (
             <p className={styles.actionNote} role="status">
-              This runtime is managed outside the hub, so it cannot be started or stopped from here.
-              Whoever launched it — a login item, a terminal — still owns it; these controls stay
-              disabled rather than sending an action that cannot land.
+              Managed outside the hub (a login item or terminal owns it) — start and stop it there.
             </p>
           ) : null}
 

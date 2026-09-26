@@ -323,7 +323,7 @@ describe('buildDailySpendSeries', () => {
       { day: '2026-09-18', usd: null },
       { day: '2026-09-19', usd: 3 },
     ]);
-    expect(series.caveat).toContain('interactive chat turns are not in it');
+    expect(series.caveat).toContain('autonomous work only, chats excluded');
   });
 
   it('buckets by the viewer\u2019s LOCAL day — the calendar the chart and table label in — in every zone', () => {

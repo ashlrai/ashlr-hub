@@ -17,7 +17,7 @@ describe('mirrorsText', () => {
     expect(mirrorsText(null)).toMatch(/unknown/);
     expect(mirrorsText({ count: 0, repos: [] })).toMatch(/none yet/);
     expect(mirrorsText({ count: 1, repos: ['ashlrai/binshield'] })).toBe(
-      "Fleet mirrors: 1 working copy (ashlrai/binshield) — the fleet's own clones of the repos above, not repos of their own.",
+      "Fleet mirrors: 1 working copy (ashlrai/binshield) — the fleet's own clones of the repos above.",
     );
     const many = Array.from({ length: 8 }, (_, i) => `ashlrai/r${i}`);
     expect(mirrorsText({ count: 8, repos: many })).toContain('and 2 more');

@@ -119,8 +119,7 @@ export function ActivityPanel({ snapshot }: { snapshot: VerseControlSnapshot }) 
       </div>
       {dispatches.length === 0 ? (
         <p className={styles.empty}>
-          No dispatch traces in the recorded ticks. A tick that finds nothing eligible records no dispatches — that is
-          normal, not a gap. Run one tick from Controls to see what it would pick up.
+          No dispatches in the recorded ticks. Run one tick from Controls to see what it would pick up.
         </p>
       ) : (
         <div className={styles.tableScroll}>

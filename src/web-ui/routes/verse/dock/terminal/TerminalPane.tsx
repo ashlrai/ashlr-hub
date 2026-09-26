@@ -35,6 +35,7 @@ import { Button, IconButton } from '../../../../components/primitives/Button.js'
 import { EmptyState } from '../../../../components/primitives/EmptyState.js';
 import { SkeletonLine } from '../../../../components/primitives/Skeleton.js';
 import { IconExternalLink, IconPlus, IconSend, IconX } from '../../../../components/primitives/icons.js';
+import { asSentence } from '../../autonomy/format.js';
 import { ActionMenu, anchorBelow, type MenuAnchor } from '../../chat/ActionMenu.js';
 import { detectKeyPlatform, eventKeyName, findCommand, formatChord, matchCommand, type KeyPlatform } from '../../shell/command-catalog.js';
 import { usePollWhileVisible, useSectionVisible } from '../../shell/section-visibility.js';
@@ -126,7 +127,7 @@ function errorText(err: unknown, fallback: string): string {
   if (err instanceof TerminalLockedError) return err.message;
   if (err instanceof ApiError) {
     if (err.status === 401) return 'Unlock actions with the mutation token to use the terminal.';
-    if (err.detail) return err.detail.endsWith('.') ? err.detail : `${err.detail}.`;
+    if (err.detail) return asSentence(err.detail);
   }
   return fallback;
 }

@@ -86,14 +86,13 @@ export function FleetPanel({ read, runtime, loading = false }: FleetPanelProps):
         <p className={styles.empty}>Reading the fleet…</p>
       ) : read === null || (!read.available && read.value === null) ? (
         <p className={styles.empty}>
-          <span className={styles.emptyStrong}>No fleet source. </span>
-          {read?.reason ??
-            'Nothing answered for the fleet, so what is in flight cannot be listed. That is a missing reading, not an empty fleet.'}
+          <span className={styles.emptyStrong}>Fleet status unavailable. </span>
+          {read?.reason ?? null}
         </p>
       ) : fleet === null ? (
         <p className={styles.empty}>
           <span className={styles.emptyStrong}>Unreadable reading. </span>
-          {read.reason ?? 'The fleet reading could not be narrowed, so nothing is shown rather than guessed.'}
+          {read.reason ?? 'Unrecognized response — update Ashlr.'}
         </p>
       ) : (
         <>

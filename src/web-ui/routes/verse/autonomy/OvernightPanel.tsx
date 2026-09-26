@@ -231,9 +231,8 @@ export function OvernightPanel({
       ) : null}
       {unstated.length > 0 ? (
         <p className={styles.authorisationCaveat}>
-          This build did not state whether {joinPhrase(unstated)}{' '}
-          {unstated.length === 1 ? 'runs' : 'run'} in the gate, so {unstated.length === 1 ? 'it is' : 'they are'} shown as
-          unstated rather than as passing checks you can rely on.
+          Not reported whether {joinPhrase(unstated)}{' '}
+          {unstated.length === 1 ? 'runs' : 'run'} in the gate — don&apos;t count {unstated.length === 1 ? 'it' : 'them'} as passing.
         </p>
       ) : null}
       {gate?.autoMerge === false ? (
@@ -268,7 +267,7 @@ export function OvernightPanel({
         <p className={autonomy.empty}>
           <span className={autonomy.emptyStrong}>Unreadable reading. </span>
           {read.reason ??
-            'The overnight reading could not be narrowed, so whether a run is armed is not stated rather than guessed.'}
+            'Unrecognized response — update Ashlr.'}
         </p>
       ) : status.armed ? (
         <>
@@ -308,7 +307,7 @@ export function OvernightPanel({
           <p className={styles.haltNote}>
             {paused
               ? pauseUnknown
-                ? 'Treated as paused: the pause sentinel could not be read, and the daemon fails safe rather than running on an unreadable signal. Nothing is being dispatched.'
+                ? 'Treated as paused — the pause sentinel is unreadable. Nothing is being dispatched.'
                 : 'Autonomous dispatch is paused. The loop parks between iterations; your own write tools are unaffected and the global kill switch is not engaged.'
               : 'Pause halts autonomous dispatch and nothing else — it undoes in one click. Disarm stops the next run from starting but leaves this one going.'}
           </p>
@@ -475,8 +474,8 @@ export function OvernightPanel({
           {paused ? (
             <p className={styles.haltNote} role="status">
               {pauseUnknown
-                ? 'Autonomous dispatch is treated as paused — the sentinel could not be read. An armed run would park rather than work until that is resolved.'
-                : 'Autonomous dispatch is paused, so an armed run would park rather than work. Resume before walking away.'}
+                ? 'Treated as paused — the pause sentinel is unreadable. An armed run would park until that is fixed.'
+                : 'Autonomous dispatch is paused, so an armed run would park. Resume before walking away.'}
             </p>
           ) : null}
 

@@ -244,7 +244,7 @@ describe('UsageSection — accounts', () => {
     expect(within(codex).queryByText('Window exhausted')).not.toBeInTheDocument();
     expect(within(codex).getByText('2,048.42')).toBeInTheDocument();
     expect(within(codex).getByText('pro plan')).toBeInTheDocument();
-    expect(within(codex).getByText(/Credits are a separate pool/)).toBeInTheDocument();
+    expect(within(codex).getByText(/spendable even when the window is full/)).toBeInTheDocument();
   });
 
   it('renders Grok as an actionable signed-out state, not a zero meter', async () => {
@@ -335,7 +335,7 @@ describe('UsageSection — local availability', () => {
     vi.stubGlobal('fetch', routes({ '/api/verse/local-models': () => new Response('nope', { status: 404 }) }));
     render(<UsageSection />);
     await waitFor(() => expect(screen.getByText('Local availability')).toBeInTheDocument());
-    expect(screen.getByText(/missing source, not an empty machine/)).toBeInTheDocument();
+    expect(screen.getByText(/No local runtime answered/)).toBeInTheDocument();
     expect(screen.queryByLabelText('Local usage')).not.toBeInTheDocument();
   });
 });
@@ -433,7 +433,7 @@ describe('UsageSection — a transient local probe failure corrects itself', () 
       }),
     );
     render(<UsageSection />);
-    await waitFor(() => expect(screen.getByText(/missing source, not an empty machine/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/No local runtime answered/)).toBeInTheDocument());
     expect(reads).toBe(1);
   });
 
@@ -447,7 +447,7 @@ describe('UsageSection — a transient local probe failure corrects itself', () 
     const local = card('Local');
     expect(within(local).getByText('Runtime unreachable')).toBeInTheDocument();
     // The machine code is evidence beside the sentence, never the sentence.
-    expect(within(local).getByText(/unanswered probe, not a report that the machine is empty/)).toBeInTheDocument();
+    expect(within(local).getByText('No local runtime answered. Start Ollama or LM Studio.')).toBeInTheDocument();
     expect(within(local).getByText('ollama-unreachable')).toBeInTheDocument();
     // …and no 0% meter, because an unanswered probe is not a reading of zero.
     expect(within(local).queryByRole('meter')).not.toBeInTheDocument();
@@ -535,7 +535,7 @@ describe('UsageSection — token output and spend', () => {
       }),
     );
     render(<UsageSection />);
-    await waitFor(() => expect(screen.getByText(/absent signal, not a 0% hit rate/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('No cache data in this window.').length).toBeGreaterThan(0));
     expect(screen.queryByRole('img', { name: /Cache hit rate per day/ })).not.toBeInTheDocument();
   });
 
@@ -603,7 +603,7 @@ describe('UsageSection — degraded, empty, error and unauthorized states', () =
       }),
     );
     render(<UsageSection />);
-    await waitFor(() => expect(screen.getByText(/empty roster, not a set of accounts at zero/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/No accounts or local runtime found/)).toBeInTheDocument());
   });
 
   it('still shows dispatch limits and the budget line from the older routes', async () => {
@@ -832,7 +832,7 @@ describe('UsageSection — context efficiency per seat', () => {
     evictAll();
     vi.stubGlobal('fetch', routes());
     render(<UsageSection />);
-    expect(await screen.findByText(/No chats yet, so there is nothing to measure/)).toBeInTheDocument();
+    expect(await screen.findByText('No chats yet.')).toBeInTheDocument();
     expect(screen.queryByRole('table', { name: /Context efficiency per seat/ })).not.toBeInTheDocument();
   });
 

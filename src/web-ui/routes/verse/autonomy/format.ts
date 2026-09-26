@@ -94,6 +94,19 @@ export function asClause(text: string): string {
 }
 
 /**
+ * One sentence: trimmed and closed by exactly one full stop — added only when
+ * the text does not already end in `.`, `!`, `?` or `…` (a trailing ";", ","
+ * or ":" is dropped first). The fix for "local Qwen offline.." when a server
+ * reason already carries its own stop. Never re-cased — a sentence may open on
+ * a seat id.
+ */
+export function asSentence(text: string): string {
+  const t = text.trim().replace(/[\s;,:]+$/, '');
+  if (!t) return '';
+  return /[.!?…]$/.test(t) ? t : `${t}.`;
+}
+
+/**
  * What a repo cell shows: the folder's own name for an absolute checkout path
  * (the full path belongs in the cell's `title`), and a `owner/name` slug or a
  * bare name as it came — cutting a slug to its last segment would drop the
@@ -251,7 +264,7 @@ export function budgetMeter(
       state: 'stopped',
       percent: 100,
       label: `${formatUsd(spend)} spent today · budget $0.00`,
-      note: 'Daily budget is 0 — the loop is stopped, not unlimited.',
+      note: 'Daily budget is $0 — the loop is stopped.',
     };
   }
   if (stale) {

@@ -109,7 +109,7 @@ describe('local runtime finding', () => {
     });
     expect(finding.stale).toBe(true);
     expect(finding.state).toMatch(/retained/);
-    expect(finding.summary).toMatch(/retained reading, not a fresh probe/);
+    expect(finding.summary).toMatch(/Last known reading\./);
   });
 
   it('an absent route is unknown, never ok and never attention-with-a-fix-it-invented', () => {

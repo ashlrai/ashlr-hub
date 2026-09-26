@@ -346,7 +346,7 @@ export const SEAT_REASON_COPY: Record<string, string> = {
   'mcp-account-config-read':
     'Read from this account\'s own private configuration.',
   'mcp-account-config-unreadable':
-    'This account\'s configuration could not be read, so nothing here is a reading.',
+    'This account\'s configuration could not be read.',
   'mcp-account-profile-unresolved':
     'This account\'s private profile could not be located, so Hub cannot say what it would load.',
 };

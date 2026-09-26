@@ -129,7 +129,7 @@ export function mirrorsText(mirrors: FleetMirrorSummary | null | undefined): str
   if (mirrors.count === 0) return 'Fleet mirrors: none yet — the fleet clones a repo the first time it works on it.';
   const shown = mirrors.repos.slice(0, 6).join(', ');
   const more = mirrors.repos.length > 6 ? ` and ${mirrors.repos.length - 6} more` : '';
-  return `Fleet mirrors: ${mirrors.count} working ${mirrors.count === 1 ? 'copy' : 'copies'}${shown ? ` (${shown}${more})` : ''} — the fleet's own clones of the repos above, not repos of their own.`;
+  return `Fleet mirrors: ${mirrors.count} working ${mirrors.count === 1 ? 'copy' : 'copies'}${shown ? ` (${shown}${more})` : ''} — the fleet's own clones of the repos above.`;
 }
 
 const today = (row: FleetRepoRow) => (row.mergesToday === null ? '—' : `${row.mergesToday}${row.maxMergesPerDay !== null ? ` / ${row.maxMergesPerDay}` : ''}`);

@@ -48,7 +48,7 @@ describe('the overview read', () => {
     const odd = await cloudQuery.fetch();
     expect(odd.value).toBeNull();
     expect(odd.available).toBe(true);
-    expect(odd.reason).toMatch(/shape this version does not recognise/);
+    expect(odd.reason).toBe('Unrecognized response — update Ashlr.');
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
     expect((await cloudQuery.fetch()).reason).toBe('The cloud lane could not be reached.');
     vi.stubGlobal('fetch', vi.fn(async () => json({ error: 'boom' }, 503)));

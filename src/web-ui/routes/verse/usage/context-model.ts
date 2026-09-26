@@ -321,7 +321,7 @@ export function fitExplanation(input: {
  */
 export function fitMethodNote(engine: VerseEngine | null): string {
   const cli = engine ? ` for ${ENGINE_CLI_NAME[engine]}` : '';
-  return `Estimated from the size of tracked text files (bytes ÷ 4), plus an estimated ~${formatTokens(sessionOverheadTokens(engine))} of fixed prompt${cli} that every chat starts with. An agent rarely reads everything, so this is a ceiling, not a forecast.`;
+  return `Estimated from the size of tracked text files (bytes ÷ 4), plus an estimated ~${formatTokens(sessionOverheadTokens(engine))} of fixed prompt${cli} that every chat starts with. An upper bound — agents rarely read everything.`;
 }
 
 function capitalize(text: string): string {

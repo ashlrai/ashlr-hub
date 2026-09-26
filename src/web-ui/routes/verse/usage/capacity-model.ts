@@ -162,7 +162,7 @@ export function capacityHeadline(input: {
 }): string {
   const { ready, tight, blocked, unread, total, local } = input;
   if (total === 0) {
-    return 'No seats are reported at all. This is an empty roster, not a set of seats at zero.';
+    return 'No seats found.';
   }
 
   const localClause =
@@ -179,7 +179,7 @@ export function capacityHeadline(input: {
   const unreadClause =
     unread === 0
       ? ''
-      : ` ${unread} ${plural(unread, 'seat has', 'seats have')} no reading at all — unread, not exhausted.`;
+      : ` ${unread} ${plural(unread, 'seat has', 'seats have')} no reading yet.`;
 
   if (ready > 0) {
     return `${ready} of ${total} ${plural(total, 'seat is', 'seats are')} usable right now.${unreadClause}${localClause}`;

@@ -49,11 +49,12 @@ describe('CloudCard states', () => {
     expect(within(card()).queryByRole('button', { name: 'New cloud task' })).toBeNull();
   });
 
-  it('not in this build: one designed line, no buttons', async () => {
+  it('not in this build: renders no card at all', async () => {
     stubCloudFetch(null);
-    render(<Host />);
-    expect(await within(card()).findByText('The cloud lane is not in this build yet.')).toBeInTheDocument();
-    expect(within(card()).queryByRole('button')).toBeNull();
+    const { container } = render(<Host />);
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Cloud' })).toBeNull());
+    expect(container.textContent).not.toContain('Reading the cloud lane');
+    expect(container.textContent).not.toContain('not in this build');
   });
 
   it('empty: the estimate meter, the note and link, the counts, and an invitation', async () => {

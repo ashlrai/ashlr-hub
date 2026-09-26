@@ -174,7 +174,7 @@ export function buildLocalFinding(input: LocalInput): LocalFinding {
     summary:
       `${models.length} local ${models.length === 1 ? 'model' : 'models'} available` +
       (toolCapable > 0 ? `, ${toolCapable} of them tool-capable.` : ', none of them tool-capable.') +
-      (stale ? ' This is a retained reading, not a fresh probe.' : ''),
+      (stale ? ' Last known reading.' : ''),
     meaning: toolCapable > 0
       ? LOCAL_MEANING_AVAILABLE
       : `${LOCAL_MEANING_AVAILABLE} A model that cannot call tools can answer, but cannot run an agentic turn.`,

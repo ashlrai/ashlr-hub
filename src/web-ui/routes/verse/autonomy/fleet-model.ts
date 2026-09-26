@@ -360,7 +360,7 @@ export function runtimeCapacity(runtime: ServingRuntimeSnapshot | null): Runtime
       overstated: false,
       headline: 'No serving runtime reported',
       detail:
-        'Nothing answered for the serving runtime, so how many agents can run at once is unknown. That is a missing reading, not an idle machine.',
+        'Serving runtime unavailable — concurrency unknown.',
       tone: 'unknown',
     };
   }
@@ -546,8 +546,8 @@ export function fleetPressure(
     return {
       state: 'unknown',
       headline: 'Fleet not reported',
-      detail:
-        'No fleet snapshot answered, so what is in flight cannot be listed. That is a missing reading, not an empty fleet.',
+      // A missing reading — never shown as an empty fleet.
+      detail: 'Fleet status unavailable.',
       tone: 'unknown',
     };
   }
@@ -573,7 +573,7 @@ export function fleetPressure(
     return {
       state: 'idle',
       headline: 'Nothing in flight',
-      detail: 'No agent is mid-turn. The fleet is idle, not stuck.',
+      detail: 'No agent is mid-turn.',
       tone: 'neutral',
     };
   }

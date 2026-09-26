@@ -54,7 +54,7 @@ export function CapacityFacts({ overview }: { overview: CapacityOverview }): Rea
           <dd>
             {reset === null ? (
               <span className={styles.capacityMuted}>
-                No seat reported a dated reset. That is an absent timestamp, not "never".
+                No seat reported a reset time.
               </span>
             ) : overdue ? (
               <span className={styles.capacityMuted}>
@@ -131,8 +131,7 @@ export function CapacityFacts({ overview }: { overview: CapacityOverview }): Rea
             ))}
           </ul>
           <p className={styles.capacityMuted}>
-            These providers publish a sentence rather than a timestamp, so it is shown exactly as
-            given and never turned into a countdown.
+            Shown as the provider wrote it — no countdown.
           </p>
         </div>
       ) : null}

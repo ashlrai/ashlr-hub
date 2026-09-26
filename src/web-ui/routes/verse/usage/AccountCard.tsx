@@ -59,9 +59,7 @@ function CreditsRow({ credits }: { credits: AccountCardModel['credits'] }): Reac
         {value ?? 'not reported'}
       </span>
       <p className={styles.reason}>
-        Credits are a separate pool from the window above — a fully used window does not stop a
-        spendable balance from being spent. The provider gives a bare number, not a currency, so it is
-        shown as reported.
+        Separate from the window above — spendable even when the window is full.
       </p>
     </div>
   );

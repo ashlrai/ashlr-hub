@@ -63,7 +63,7 @@ describe('CommandSection — live fleet', () => {
     expect(screen.getByRole('figure', { name: 'Last 12 hours' })).toBeInTheDocument();
   });
 
-  it('mounts the Cloud card right after the burn-downs (3.11), and a server without the lane is one quiet line', async () => {
+  it('mounts the Cloud card right after the burn-downs (3.11), and a server without the lane shows no card', async () => {
     stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/cloud': cloudOverview({ tasks: [cloudTask('running')] }) } });
     const { unmount } = render(<CommandSection />);
     await ready();
@@ -77,7 +77,9 @@ describe('CommandSection — live fleet', () => {
     stubSurfaceFetch({ kind: 'live' });
     render(<CommandSection />);
     await ready();
-    expect(await within(screen.getByRole('region', { name: 'Cloud' })).findByText('The cloud lane is not in this build yet.')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('group', { name: 'Capacity per seat' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Cloud' })).toBeNull());
+    expect(screen.queryByText('The cloud lane is not in this build yet.')).toBeNull();
   });
 
   it('lowers the switch instantly — no confirmation, no Touch ID (I1)', async () => {
@@ -164,15 +166,16 @@ describe('CommandSection — live fleet', () => {
 });
 
 // P4 regressions: the Claude card in production (no machine reset time) and
-// the Spend caption (needs the live budget to list subscription percent).
+// the Spend caption (one short line; subscription usage lives on the seat cards).
 describe('CommandSection — seat capacity and metered spend', () => {
-  it('puts subscription window usage in the metered-spend caption', async () => {
+  it('keeps the metered-spend caption to one short line, without subscription usage', async () => {
     stubSurfaceFetch({ kind: 'live' });
     render(<CommandSection />);
     await ready();
-    await waitFor(() =>
-      expect(screen.getByRole('group', { name: 'Key numbers' })).toHaveTextContent('subscriptions: Claude (claude-a) 74% · Grok (grok-a) 31% · Codex (codex-a) 100% of window used'),
-    );
+    const kpis = screen.getByRole('group', { name: 'Key numbers' });
+    await waitFor(() => expect(kpis).toHaveTextContent('Metered spend · 7d'));
+    expect(kpis).not.toHaveTextContent('subscriptions:');
+    expect(kpis).not.toHaveTextContent('of window used');
   });
 
   it('draws Claude\'s readings with its own reset words when it publishes no reset time', async () => {
@@ -294,8 +297,8 @@ describe('CommandSection — recorded seat history', () => {
     const grok = await screen.findByRole('figure', { name: 'Grok (grok-a) · weekly' });
     // Recorded since the window opened three days ago: nothing to apologise for.
     await waitFor(() => expect(historyCalls(fetchMock)).toBe(1));
-    await waitFor(() => expect(grok).not.toHaveTextContent('Readings since Verse opened'));
-    expect(grok).not.toHaveTextContent('No reading was recorded');
+    await waitFor(() => expect(grok).not.toHaveTextContent('No readings before'));
+    expect(grok).not.toHaveTextContent('Verse opened');
     expect(fetchMock.mock.calls.some(([u]) => String(u) === '/api/verse/budget/history?days=8')).toBe(true);
   });
 
@@ -329,21 +332,26 @@ describe('CommandSection — recorded seat history', () => {
     expect(COMMAND_HISTORY_POLL_MS).toBeGreaterThan(COMMAND_SLOW_POLL_MS);
   });
 
-  it('keeps the "since Verse opened" note when the server has no recorded history', async () => {
+  // The "since Verse opened" note is said ONCE, as the seat grid's tooltip —
+  // never repeated on each card.
+  it('says "since Verse opened" once, on the grid, when the server has no recorded history', async () => {
     stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/budget/history': null } });
     render(<CommandSection />);
     await ready();
     const grok = await screen.findByRole('figure', { name: 'Grok (grok-a) · weekly' });
-    await waitFor(() => expect(grok).toHaveTextContent('Readings since Verse opened'));
+    const grid = screen.getByRole('group', { name: 'Capacity per seat' });
+    await waitFor(() => expect(grid).toHaveAttribute('title', 'Lines without recorded history start when Verse opened.'));
+    expect(grok).not.toHaveTextContent('Verse opened');
   });
 
-  it('keeps the note when recorded history is empty too (nothing was recorded yet)', async () => {
+  it('keeps the grid note when recorded history is empty too (nothing was recorded yet)', async () => {
     const now = Date.now();
     stubSurfaceFetch({ kind: 'live', now, routes: { '/api/verse/budget/history': { v: 1, generatedAt: new Date(now).toISOString(), days: 8, since: new Date(now - 8 * DAY).toISOString(), oldestAt: null, series: [], truncated: false } } });
     render(<CommandSection />);
     await ready();
-    const grok = await screen.findByRole('figure', { name: 'Grok (grok-a) · weekly' });
-    await waitFor(() => expect(grok).toHaveTextContent('Readings since Verse opened'));
+    await screen.findByRole('figure', { name: 'Grok (grok-a) · weekly' });
+    const grid = screen.getByRole('group', { name: 'Capacity per seat' });
+    await waitFor(() => expect(grid).toHaveAttribute('title', 'Lines without recorded history start when Verse opened.'));
   });
 });
 

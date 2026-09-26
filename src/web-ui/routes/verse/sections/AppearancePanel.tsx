@@ -289,7 +289,7 @@ export function AppearancePanel({ appearance, onChange, onReset }: AppearancePan
         />
       </SettingRow>
 
-      <SettingRow label="Preview" description="Live — these are the real primitives, not a picture of them." stacked>
+      <SettingRow label="Preview" description="Live, using the real components." stacked>
         <div className={styles.preview}>
           <p className={styles.previewHeading}>Ashlr Verse</p>
           <p className={styles.previewBody}>

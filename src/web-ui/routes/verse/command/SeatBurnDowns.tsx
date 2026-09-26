@@ -62,13 +62,19 @@ const pct = (v: number) => `${Math.round(v)}%`;
 const PERCENT_TICKS = niceTicks(0, 100, 4);
 /** A line that starts this far into the window did not see the window's start. */
 const PARTIAL_WINDOW_FRACTION = 0.05;
-const SINCE_OPENED = 'Readings since Verse opened — the line fills in as it watches this seat.';
+/**
+ * Said once, as the grid's tooltip, when a line was drawn from this page's own
+ * readings: it starts when Verse opened, so an empty left edge is not idle
+ * time. Repeating it under every card said the same thing N times.
+ */
+const SINCE_OPENED = 'Lines without recorded history start when Verse opened.';
 
 /** Why a line starts late in its window — only asked when it does. */
-function lateStartNote(burn: SeatBurn, firstSeen: number | null, formatTime: (ms: number) => string): string {
+function lateStartNote(burn: SeatBurn, firstSeen: number | null, formatTime: (ms: number) => string): string | undefined {
   // Recorded history reached this window: the gap is real — nothing was read then.
-  if (burn.recorded && firstSeen !== null) return `No reading was recorded in this window before ${formatTime(firstSeen)}.`;
-  return SINCE_OPENED;
+  if (burn.recorded && firstSeen !== null) return `No readings before ${formatTime(firstSeen)}.`;
+  // Otherwise the late start is this page's own: covered once by SINCE_OPENED.
+  return undefined;
 }
 
 /**
@@ -187,7 +193,8 @@ export function SeatBurnCard({ burn, now, width }: { burn: SeatBurn; now: number
         <EngineMarker engine={burn.engine} />
         <span className={styles.freeTitle}>{burn.label}</span>
       </span>
-      <CardNote tone="unknown">No window reading — unknown usage is never treated as headroom.</CardNote>
+      {/* Unknown usage is never counted as headroom; the card just says so plainly. */}
+      <CardNote tone="unknown">No usage reading yet.</CardNote>
     </section>
   );
   if (burn.window === null) return noReading;
@@ -209,12 +216,12 @@ export function SeatBurnCard({ burn, now, width }: { burn: SeatBurn; now: number
     const to = Math.max(now, newest);
     const from = to - windowMs;
     const reset = words ?? 'reset time not reported';
-    const why = words ? "The provider's reset words could not be placed on a clock" : 'No reset time was reported for this window';
+    const why = words ? "Reset words couldn't be placed on a clock" : 'No reset time reported';
     return (
       <TrailingWindow
         title={title}
         description={`${pct(latest)} left · ${reset} · ${eligibility}`}
-        caveat={`${why}, so nothing is projected to a reset.${partial(from) ? ` ${lateStartNote(burn, firstSeen, formatTime)}` : ''}`}
+        caveat={[`${why}, so no projection.`, partial(from) ? lateStartNote(burn, firstSeen, formatTime) : undefined].filter(Boolean).join(' ')}
         points={burn.points}
         from={from}
         to={to}
@@ -255,10 +262,15 @@ export function SeatBurnCard({ burn, now, width }: { burn: SeatBurn; now: number
 
 export function SeatBurnDowns({ burns, now, compact }: { burns: SeatBurn[]; now: number; compact: boolean }) {
   if (burns.length === 0) {
-    return <CardNote tone="unknown">Seat capacity is not available — the budget route did not answer.</CardNote>;
+    return <CardNote tone="unknown">Seat capacity unavailable.</CardNote>;
   }
   return (
-    <div className={compact ? styles.burnStrip : styles.burnGrid} role="group" aria-label="Capacity per seat">
+    <div
+      className={compact ? styles.burnStrip : styles.burnGrid}
+      role="group"
+      aria-label="Capacity per seat"
+      title={burns.some((b) => b.window !== null && !b.recorded) ? SINCE_OPENED : undefined}
+    >
       {burns.map((b) => (
         <div key={b.seatId} className={styles.burnItem}>
           <SeatBurnCard burn={b} now={now} width={compact ? 300 : undefined} />

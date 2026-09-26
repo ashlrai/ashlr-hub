@@ -39,7 +39,7 @@ describe('FleetSection — live', () => {
     expect(screen.getByRole('figure', { name: 'Refusals by gate' })).toBeInTheDocument();
     const why = screen.getByRole('region', { name: 'Why this seat' });
     expect(within(why).getByText(/grok-a has the most headroom/)).toBeInTheDocument();
-    expect(within(why).getByText(/above the 70% ceiling/)).toBeInTheDocument();
+    expect(within(why).getByText(/above autonomy’s 70% stop line/)).toBeInTheDocument();
     expect(screen.getByRole('figure', { name: 'Parked' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Overnight' })).toHaveTextContent('Nothing armed');
     const repos = screen.getByRole('region', { name: 'Repositories' });
