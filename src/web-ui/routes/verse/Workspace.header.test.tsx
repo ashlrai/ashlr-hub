@@ -101,6 +101,17 @@ describe('Workspace header — nothing selected', () => {
     expect(within(header(view1.container)).getByText('No chats yet')).toBeInTheDocument();
   });
 
+  it('uses the Ctrl shortcut in the empty state outside macOS', () => {
+    const platform = vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Linux x86_64');
+    try {
+      render(<Workspace {...props({ hasAnySessions: false })} />);
+      expect(screen.getByRole('heading', { name: 'No chats yet — Ctrl+N' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'New chat Ctrl+N' })).toBeInTheDocument();
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
   it('carries both pane toggles even with no chat open', () => {
     const view1 = render(<Workspace {...props()} />);
     const strip = header(view1.container);

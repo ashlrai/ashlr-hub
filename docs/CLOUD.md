@@ -7,8 +7,9 @@ own improvement backlog. Sessions run on your Claude account. That includes its
 cloud credits, so work continues after the subscription's weekly window is
 spent.
 
-The lane never merges anything. Every task ends as a **draft pull request** on
-GitHub. From there the existing merge gates (see
+The lane never merges anything. Each task is instructed to open a **draft pull
+request** on GitHub. Verse tracks a matching PR if one arrives; failed launches
+and missing deliveries remain distinct states. From there the existing merge gates (see
 [Autonomy with custody](VERSE.md#autonomy-with-custody-310)) or you decide what
 happens to it.
 
@@ -109,9 +110,14 @@ stored task keeps only your text. The contract tells the session to:
 Task ids look like `ct_20260924T2331_k3f9q2`: sortable, and safe to use in a
 branch name.
 
-Verse reads the **last** well-formed report block in the PR body and
-validates it. A missing, malformed or oversized block leaves the task's report
-empty; the PR is still tracked.
+Verse reads the **last tagged** report block in the PR body and validates it.
+A missing, malformed, oversized or unfinished final block leaves the task's
+report empty, even if an older block was valid; the PR is still tracked.
+
+The report is written by the cloud session. Command and Needs you label its
+summary as unverified; `testsRun` records what the session claims to have run,
+not an independent test receipt. The tracker only treats a PR as this task's
+delivery when its repository, base branch and head branch match the task.
 
 ### Task states
 

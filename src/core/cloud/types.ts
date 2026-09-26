@@ -62,7 +62,8 @@ export type CloudTaskOrigin = 'chat' | 'operator' | 'leader' | 'self-improve' | 
  *            in one folder conflict).
  * launching  PTY launch in flight.
  * running    session created; no PR yet.
- * pr-open    draft/ready PR exists on `ashlr-cloud/<id>`.
+ * pr-open    a draft/ready PR was observed on `ashlr-cloud/<id>`; `pr` is null
+ *            while later verification is unavailable or its identity changed.
  * merged     PR merged (by gates or Mason).
  * closed     PR closed without merge (or dismissed by the operator).
  * failed     launch failed (see stateReason / failure code).
@@ -100,6 +101,12 @@ export interface CloudTaskPr {
   title: string;
 }
 
+/** Immutable identity of the first PR verified for this task. Remains after a lookup outage. */
+export interface CloudDeliveryPin {
+  number: number;
+  url: string;
+}
+
 export interface CloudTaskV1 {
   v: typeof CLOUD_TASK_SCHEMA_VERSION;
   id: string;
@@ -127,6 +134,8 @@ export interface CloudTaskV1 {
   updatedAt: string;
   pr: CloudTaskPr | null;
   report: CloudTaskReport | null;
+  /** Optional for 3.11 task files written before PR identity was pinned. */
+  deliveryPin?: CloudDeliveryPin;
   /** Budget accounting — an ESTIMATE fixed at launch. */
   estimatedCostUsd: number;
   /** Backlog item this task came from (self-improvement), if any. */

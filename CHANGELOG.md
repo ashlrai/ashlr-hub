@@ -339,6 +339,21 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.11.4] — 2026-09-26 UTC — verify cloud deliveries before showing them
+
+- Cloud tracking binds a delivery to the requested repository, base, head and
+  exact pull-request identity. Ambiguous, changed or unavailable GitHub evidence
+  removes a previously shown PR from Needs you until it can be verified again.
+  A verified closed PR is watched for a bounded period so reopening it restores
+  Needs you. Bounded polling shares attention across tasks so old work is not starved.
+- The latest tagged cloud report is authoritative. A newer malformed, oversized
+  or unfinished revision withdraws the older report. Command and Needs you label
+  session-authored summaries as unverified claims.
+- Chat shortcut hints use the shared command catalog, displaying Ctrl on
+  Windows/Linux and Command on macOS.
+- The public site and guides distinguish the working cloud lane from the dormant
+  resident fleet, and update the measured first-paint result to 349.7 KB.
+
 ## [3.11.3] — 2026-09-25 UTC — ship:local installs the app icon too
 
 - `npm run ship:local -- --native` now also installs a newer `desktop/src-tauri/icons/icon.icns` into Ashlr.app. It

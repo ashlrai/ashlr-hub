@@ -79,18 +79,30 @@ describe('parseCloudReport', () => {
       .toEqual({ status: 'no-change', summary: 'Nothing to do.', testsRun: [], risks: [] });
   });
 
-  it('takes the LAST well-formed block when there are several', () => {
+  it('uses the last tagged block, with a later valid revision replacing an invalid one', () => {
     const first = JSON.stringify({ status: 'partial', summary: 'First pass.', testsRun: [], risks: [] });
-    const body = [fence(first), 'later edit:', fence(GOOD), 'and a broken one:', fence('{"status":')].join('\n\n');
-    expect(parseCloudReport(body)?.summary).toBe('Fixed it.');
+    expect(parseCloudReport([fence(first), 'later edit:', fence(GOOD)].join('\n\n'))?.summary).toBe('Fixed it.');
+    expect(parseCloudReport([fence('{"status":'), fence(GOOD)].join('\n\n'))?.summary).toBe('Fixed it.');
+    expect(parseCloudReport('```ashlr-cloud-report\n' + fence(GOOD))?.summary).toBe('Fixed it.');
     expect(parseCloudReport([fence(GOOD), fence(first)].join('\n'))?.summary).toBe('First pass.');
+  });
+
+  it('invalidates an older report when the newest tagged attempt is malformed or unclosed', () => {
+    for (const latest of [
+      fence('{"status":'),
+      '```ashlr-cloud-report\n{"status":"blocked"',
+      '```ashlr-cloud-report',
+      '```ashlr-cloud-report not-a-valid-fence\n' + GOOD + '\n```',
+      '````ashlr-cloud-report\n{"status":"blocked"}\n```',
+    ]) {
+      expect(parseCloudReport(`${fence(GOOD)}\n\n${latest}`), latest).toBeNull();
+    }
   });
 
   it('refuses an oversized block and bounds long fields', () => {
     const huge = JSON.stringify({ status: 'done', summary: 'x'.repeat(CLOUD_REPORT_MAX_BLOCK_CHARS), testsRun: [], risks: [] });
     expect(parseCloudReport(fence(huge))).toBeNull();
-    // An oversized block after a good one does not hide the good one.
-    expect(parseCloudReport(`${fence(GOOD)}\n${fence(huge)}`)?.summary).toBe('Fixed it.');
+    expect(parseCloudReport(`${fence(GOOD)}\n${fence(huge)}`)).toBeNull();
 
     const long = JSON.stringify({
       status: 'done', summary: 's'.repeat(5_000), testsRun: Array.from({ length: 80 }, (_, i) => `t${i}`), risks: ['r'.repeat(900)],
@@ -100,6 +112,13 @@ describe('parseCloudReport', () => {
     expect(report.summary.endsWith('…')).toBe(true);
     expect(report.testsRun).toHaveLength(50);
     expect(report.risks[0]!.length).toBeLessThanOrEqual(500);
+  });
+
+  it('refuses an excessive fence length without compiling a huge close pattern', () => {
+    const excessive = `${'`'.repeat(40_000)}ashlr-cloud-report\n${GOOD}\n${'`'.repeat(40_000)}`;
+    expect(parseCloudReport(excessive)).toBeNull();
+    expect(parseCloudReport(`${fence(GOOD)}\n${excessive}`)).toBeNull();
+    expect(parseCloudReport(`${excessive}\n${fence(GOOD)}`)?.summary).toBe('Fixed it.');
   });
 
   it('scans only the tail of a giant body, where the contract puts the block', () => {

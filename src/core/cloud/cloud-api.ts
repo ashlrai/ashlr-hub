@@ -284,7 +284,7 @@ export function cloudNeedsYouItems(tasks: readonly CloudTaskV1[], now: Date): Ne
     let item: NeedsYouItem | null = null;
     if (task.state === 'pr-open' && task.pr) {
       const report = task.report;
-      const summary = report ? scrubSecrets(report.summary) : 'No report yet: the pull request has no ashlr-cloud-report block.';
+      const summary = report ? `Cloud session reports (unverified): ${scrubSecrets(report.summary)}` : 'No report yet: the pull request has no ashlr-cloud-report block.';
       const status = report && report.status !== 'done' ? ` (${report.status})` : '';
       item = {
         id: `fleet:owner-lane-pr:cloud-${task.id}`,

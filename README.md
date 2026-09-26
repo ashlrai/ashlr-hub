@@ -166,11 +166,19 @@ ID).
    turns to it. Model discovery stays on Ollama.
 6. **Optionally hand work to the cloud.** **New cloud task** on Command, or
    `ashlr cloud launch "<task>" --repo owner/name` ([cloud lane](#the-cloud-lane)).
-7. **Optionally turn on autonomy** with the one-time setup below.
+7. **Inspect the autonomy boundary** with `ashlr authority setup --dry-run` and
+   `ashlr authority status`. The current production build does not admit setup
+   or resident fleet activation.
 
 ---
 
-## Turn on autonomy: the one-time `ashlr authority setup`
+## Autonomy commissioning path (currently unavailable)
+
+**Current release status:** `ashlr authority setup` refuses before changing
+configuration because service install, repair and restart authority is withheld.
+The shipped daemon and conductor trust roots are empty, so non-dry resident
+work remains dormant. The sequence below describes the required commissioning
+path once that authority is issued; it is not an available quickstart today.
 
 Autonomy ships **dormant**. Nothing merges, and no standing grant exists, until
 you run the guided setup once on your Mac. Until a grant is signed, live fleet
@@ -180,12 +188,13 @@ still works.
 
 ```sh
 ashlr authority setup --dry-run   # print every step and what it would do
-ashlr authority setup             # do them, pausing only where you must act
+# ashlr authority setup           # currently refuses; future commissioning step
 ashlr authority status            # grant, switch, Stop, rollout stage, ledger, custody
 ```
 
-`setup` performs each step it can and **pauses only for the steps marked ✋**,
-which no agent may do. It prints exactly what it did and can be re-run safely.
+Once service mutation is admitted, `setup` is designed to perform each step it
+can and pause for the steps marked ✋. In the current build it refuses before
+these steps begin.
 
 1. ✋ **Install the custody helper:** `sudo scripts/install-custody.sh`
    (root-owned, in `/usr/local/libexec/`).
@@ -270,10 +279,11 @@ credits, so they keep working after the subscription window is spent.
   also work through its own improvement backlog: **Improve Verse** launches the
   next item now, and with self-improvement on the server launches at most 4 a
   day on its own.
-- **Every task delivers to GitHub.** Verse cannot read a session back, so each
-  task pushes the branch `ashlr-cloud/<taskId>` and opens a **draft** PR with a
-  report block. Verse follows it with `gh` and lists it in Needs you when the PR
-  is open. **Nothing in the lane merges.**
+- **Each task is instructed to deliver to GitHub.** Verse cannot read a session
+  back, so it asks the session to push `ashlr-cloud/<taskId>` and open a **draft**
+  PR with a report block. Verse follows a matching PR with `gh` and lists it in
+  Needs you when open. Failed launches and missing PRs remain separate states.
+  **Nothing in the lane merges.**
 - **Spend is an estimate, and is labelled as one.** Claude does not expose the
   credit balance. Verse counts $3 per launched session against $250 by default,
   and you correct it after checking
@@ -969,7 +979,7 @@ preflight soft-warns *consider locus.firm for production* (non-blocking).
 | **3.5–3.8** | Ashlr Verse — the operator console, local seats on llama.cpp, a native folder picker, bounded run windows, local-only that actually prevents spend | Shipped |
 | **3.9** | Context — windows read from each CLI, visible compaction, standard and expansive modes, continue in a fresh chat, shared project memory | Shipped |
 | **3.10** | Autonomy with custody and the workbench — Touch ID grants, budget modes, the Leader, five surfaces, ⌘K and ⌘J, the dock, live reasoning, charts, burn-down history | Shipped |
-| **3.11** | The cloud lane: Claude Code cloud sessions on Claude credits, with an estimated budget and self-improvement. Also the Resources drawer (⌘.) and the always-on resource bar, provider logos, the Ashlr.AI mark, a 349 KB first paint, and `npm run gate` / `npm run ship:local` | Current (3.11.3) |
+| **3.11** | The cloud lane: Claude Code cloud sessions on Claude credits, with an estimated budget and self-improvement. Also the Resources drawer (⌘.) and the always-on resource bar, provider logos, the Ashlr.AI mark, a 349 KB first paint, and `npm run gate` / `npm run ship:local` | 3.11.4 source candidate; verify npm publication separately |
 
 Releases are built and published locally (GitHub Actions is off); the procedure
 is in [Releasing without CI](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).

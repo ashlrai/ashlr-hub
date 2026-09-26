@@ -490,15 +490,20 @@ the operator's view of it.
   the authority surface pauses autonomy ("authority code changed — re-approve")
   until one more Touch ID.
 
-Autonomy stays dormant until you run the one-time setup:
+**Current release status:** `ashlr authority setup` refuses before the wizard
+while service install, repair and restart authority is withheld. The production
+daemon and conductor have empty compiled trust roots, so live non-dry resident
+work remains dormant. The sequence below is the commissioning path once that
+authority becomes available:
 
 ```sh
 ashlr authority setup --dry-run   # print every step and what it would do
-ashlr authority setup             # do them, pausing only where you must act
+# ashlr authority setup           # currently refuses; future commissioning step
 ashlr authority status            # grant, switch, Stop, rollout stage, ledger, custody
 ```
 
-`setup` does every step it can and stops only for what no agent may do: the
+Once admitted, `setup` is designed to do every step it can and stop for what
+no agent may do: the
 `sudo` install of the custody helper, Touch ID (key creation and the first
 grant), the two GitHub browser clicks for the `ashlr-fleet` App, `claude
 setup-token`, and confirming the archive of the old `~/.ashlr/activation/`. It
@@ -1128,10 +1133,11 @@ launches the staged sidecar, so run steps 1–2 first.
   system dictation in the desktop app.
 
 **Autonomy**
-- Autonomy is dormant until `ashlr authority setup` has installed the custody
-  helper, compiled your key into the trust roots and signed a grant. Without a
-  grant, the switch cannot go above what the config-level daemon allows, and
-  nothing merges.
+- Autonomy is dormant in the current production build. `ashlr authority setup`
+  currently refuses before the wizard, and the compiled daemon and conductor
+  trust roots are empty. A future admitted setup must install the custody
+  helper, compile a key into the trust roots and obtain a signed grant before
+  live resident work can run.
 - Claude as a fleet **producer** waits for a credential proxy (3.11). In 3.10
   Claude only judges and runs the Leader, with no tools.
 - Caps bound spend per day, not per task. A single expensive dispatch can still
