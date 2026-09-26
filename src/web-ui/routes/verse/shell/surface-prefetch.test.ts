@@ -66,10 +66,13 @@ describe('surface prefetch', () => {
     for (const path of mounted) expect(warmed, `${id} reads ${path} on mount but the prefetch does not warm it`).toContain(path);
   });
 
-  it('warms Command’s seat history, so a first visit draws the recorded week — not “since Verse opened”', async () => {
+  // Audit 14: the burn-downs moved to Usage, so Command's warm-up no longer
+  // spends a read on the up-to-2 MiB recorded seat history.
+  it('does not warm the recorded seat history for Command — its seat strip never reads it', async () => {
     const { fetchMock } = stubSurfaceFetch({ kind: 'live' });
     await prefetchSurfaceData('command');
-    expect([...getPaths(fetchMock)].some((path) => path.startsWith('/api/verse/budget/history'))).toBe(true);
+    expect([...getPaths(fetchMock)].some((path) => path.startsWith('/api/verse/budget/history'))).toBe(false);
+    expect(SURFACE_PREFETCH.command!.map((d) => d.key)).toContain('verse-budget');
   });
 
   it('warms Command’s Cloud card (3.11), so its first visit paints the credits, not “Reading the cloud lane…”', async () => {

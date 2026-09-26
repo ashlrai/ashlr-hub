@@ -10,11 +10,13 @@
  *   4. What needs me, and what is the Leader doing?           (Needs you 5 | Leader 7)
  *      — Needs you reads the shell's shared activity store (C1 useActivity).
  *   5. Is it working?                                         (5 KPI tiles)
- *   6. Will it run out?                                       (burn-down per seat, 3 each)
+ *   6. Will it run out?                                       (one compact seat strip)
  *      — and the cloud lane's estimated credits and tasks      (3.11 CloudCard)
+ *      The per-seat burn-down charts live on Usage (audit 14); a seat here
+ *      opens the Resources drawer (⌘.).
  *   7. What ran?                                              (12 h swimlane)
- * At 375 px: Needs you, Leader, KPIs two per row, burn-downs in a snap
- * strip, then a 6 h swimlane — the DOM order below IS that order.
+ * At 375 px: Needs you, Leader, KPIs two per row, one seat per line, then
+ * a 6 h swimlane — the DOM order below IS that order.
  *
  * Autonomy off (no grant, grant lapsed, Stop, switch at Off, daemon down):
  * ONE banner under the top bar (autonomy/AutonomyOffState) says what is off
@@ -28,7 +30,7 @@
  * surface. Polling runs only while Command is the visible surface
  * (usePollWhileVisible), at ≥ 2 s per the performance budget.
  */
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { useCallback, useMemo, useSyncExternalStore } from 'react';
 import { Swimlane } from '../../../components/charts/Swimlane.js';
 import type { ChartStatus } from '../../../components/charts/ChartFrame.js';
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
@@ -44,11 +46,11 @@ import { ActionStatus, useSurfaceActions } from '../command/actions.js';
 import { AutonomyBar, useGrantFlow } from '../command/AutonomyBar.js';
 import { AutonomyOffState, useDraftReadiness } from '../autonomy/AutonomyOffState.js';
 import { autonomyOffState } from '../autonomy/autonomy-off-model.js';
-import { buildKpis, claudeReserve, kpisSayNothing, mergeSeatHistory, recordReading, seatBurns, seatNames, sinceYouLooked, type SeatReading } from '../command/command-model.js';
+import { buildKpis, claudeReserve, kpisSayNothing, seatNames, sinceYouLooked } from '../command/command-model.js';
 import { KpiRow } from '../command/KpiRow.js';
 import { LeaderCard } from '../command/LeaderCard.js';
 import { NeedsYouCard } from '../command/NeedsYouCard.js';
-import { SeatBurnDowns } from '../command/SeatBurnDowns.js';
+import { SeatStrip } from '../command/SeatStrip.js';
 import { CloudCard } from '../cloud/CloudCard.js';
 import { Cell, Surface } from '../command/Surface.js';
 import { SinceStrip, VerdictLine, useLastLooked } from '../command/VerdictLine.js';
@@ -59,7 +61,6 @@ import {
   fleetLiveQuery,
   leaderQuery,
   learningQuery,
-  seatHistoryQuery,
 } from '../command/surface-data.js';
 import { fleetDarkSince, fleetDarkStatus } from '../fleet/dark-since.js';
 import { laneRows, runTone } from '../fleet/live-model.js';
@@ -71,17 +72,8 @@ const HOUR = 3_600_000;
 export const COMMAND_FAST_POLL_MS = 10_000;
 /** Slow reads: the Leader, budgets (the collector samples every 30 s). */
 export const COMMAND_SLOW_POLL_MS = 30_000;
-/**
- * History and learning change daily; the recorded seat history grows by a
- * row per seat window every few minutes — its newest end is the live budget
- * reading (30 s), so this slower refresh only fills in the middle.
- */
+/** History and learning change daily. */
 export const COMMAND_HISTORY_POLL_MS = 300_000;
-
-// Seat readings observed since the page opened (module scope: they survive
-// the keep-alive shell unmounting Command; see command-model recordReading).
-// Merged with the server's recorded history below, so a reload keeps the window.
-let seatReadings: Record<string, SeatReading[]> = {};
 
 export function CommandSection() {
   const { compact } = useViewport();
@@ -93,8 +85,6 @@ export function CommandSection() {
   const learning = useQuery(learningQuery, { freshMs: 60_000 });
   const history = useQuery(fleetHistoryQuery, { freshMs: 60_000 });
   const budget = useQuery(budgetQuery, { freshMs: 15_000 });
-  // Fetched on mount, then with the other slow history reads — never at 30 s.
-  const seatHistory = useQuery(seatHistoryQuery, { freshMs: 60_000 });
 
   const refetch = {
     authority: useRefetch(authorityQuery),
@@ -103,7 +93,6 @@ export function CommandSection() {
     learning: useRefetch(learningQuery),
     history: useRefetch(fleetHistoryQuery),
     budget: useRefetch(budgetQuery),
-    seatHistory: useRefetch(seatHistoryQuery),
   };
   usePollWhileVisible(() => {
     refetch.authority();
@@ -116,7 +105,6 @@ export function CommandSection() {
   usePollWhileVisible(() => {
     refetch.history();
     refetch.learning();
-    refetch.seatHistory();
   }, COMMAND_HISTORY_POLL_MS);
 
   // A 30 s clock is enough for the chip and the swimlane's "now"; the
@@ -127,14 +115,12 @@ export function CommandSection() {
   const grantFlow = useGrantFlow(actions);
   const lastLooked = useLastLooked();
 
-  // The seat roster, for Claude's reset WORDS (the budget route carries only
-  // machine reset instants, which Claude never publishes — command-model
-  // bindingResetText). Read from the cache WITHOUT fetching: the console
+  // The seat roster, for the seat strip (the rail's capacity projection) and
+  // Needs-you's seat names. Read from the cache WITHOUT fetching: the console
   // loads bootstrap at startup and the chat surfaces keep it live, and a
   // bootstrap read here would cost ~384 ms of server event loop per poll
-  // (useSeatsRefresh.ts). No roster → the words of a reason that holds the
-  // seat at its reserve or ceiling (command-model reasonResetText), else the
-  // card says "reset time not reported". Needs-you also names seats from it.
+  // (useSeatsRefresh.ts). No roster → the strip falls back to the budget
+  // route's own seat list and says readiness is unknown.
   const roster = useSyncExternalStore(
     useCallback((listener: () => void) => subscribeQuery(VERSE_BOOTSTRAP_KEY, listener), []),
     () => getQuerySnapshot<VerseBootstrap>(VERSE_BOOTSTRAP_KEY),
@@ -142,13 +128,7 @@ export function CommandSection() {
   );
   const seats = roster.data?.seats ?? null;
 
-  const [readings, setReadings] = useState(seatReadings);
   const view = budget.data ?? null;
-  useEffect(() => {
-    if (!view) return;
-    seatReadings = recordReading(seatReadings, view);
-    setReadings(seatReadings);
-  }, [view]);
 
   const auth = authority.data?.value ?? null;
   const live = fleet.data?.value ?? null;
@@ -163,10 +143,7 @@ export function CommandSection() {
     () => buildKpis({ fleet: live, history: hist, learning: learning.data?.value ?? null, policy: auth?.policy ?? null, budget: view }),
     [live, hist, learning.data, auth, view],
   );
-  const recordedSeats = seatHistory.data?.value ?? null;
-  const merged = useMemo(() => mergeSeatHistory(readings, recordedSeats), [readings, recordedSeats]);
-  const burns = useMemo(() => seatBurns(view, merged.readings, seats, merged.recorded), [view, merged, seats]);
-  // Needs-you names seats as the burn-downs beside it do, never by raw id.
+  // Needs-you names seats as the seat strip below it does, never by raw id.
   const names = useMemo(() => seatNames(seats, view), [seats, view]);
   // The banner decides once both reads (and, with no grant, the draft) have
   // answered — never a flash of "off" while Command is still loading.
@@ -235,7 +212,7 @@ export function CommandSection() {
         </Cell>
       )}
       <Cell span={12}>
-        <SeatBurnDowns burns={burns} now={now} compact={compact} />
+        <SeatStrip budget={view} seats={seats} now={now} />
       </Cell>
       <Cell span={12}>
         <CloudCard actions={actions} now={now} />

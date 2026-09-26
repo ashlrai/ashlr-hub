@@ -51,6 +51,7 @@ import { LocalCard, LocalModelsPanel } from '../usage/LocalModelsPanel.js';
 import { SeriesPanel } from '../usage/SeriesPanel.js';
 import { SpendPanel } from '../usage/SpendPanel.js';
 import { CloudCreditsPanel } from '../cloud/CloudCreditsPanel.js';
+import { LiveSeatBurnDowns } from '../command/SeatBurnDowns.js';
 import {
   frontierUsageQuery,
   usageSeriesQuery,
@@ -532,6 +533,23 @@ export function UsageSection(): ReactNode {
                   </div>
                 </>
               )}
+            </section>
+
+            {/*
+              The per-seat burn-downs (audit 14): Command shows one compact
+              seat strip and links here for the whole window. The budget view
+              is the one useCapacityData already polls for the strip above.
+            */}
+            <section className={styles.panel} aria-labelledby="verse-usage-burndowns">
+              <div className={styles.panelHead}>
+                <h3 id="verse-usage-burndowns" className={styles.panelTitle}>
+                  Seat windows
+                </h3>
+                <p className={styles.panelNote}>
+                  What is left of each seat's binding window, the line autonomy stops at, and the reset.
+                </p>
+              </div>
+              <LiveSeatBurnDowns budget={capacitySeats.budget} />
             </section>
 
             <LocalModelsPanel view={localView} />

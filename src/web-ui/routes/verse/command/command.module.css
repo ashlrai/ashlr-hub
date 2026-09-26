@@ -574,26 +574,36 @@ button.chip:hover {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--surface-gap);
-  align-items: start;
+  /* One height for every tile in a row, whatever its caption wraps to (audit 15). */
+  align-items: stretch;
 }
 
+/* Medium: five tiles as 3 + 2 on a 6-column track — the last two share the
+   second row instead of leaving a blank third column (audit 15). */
 [data-viewport='medium'] .kpis {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+[data-viewport='medium'] .kpis > * {
+  grid-column: span 2;
+}
+
+[data-viewport='medium'] .kpis > :nth-child(3n + 1):nth-last-child(2),
+[data-viewport='medium'] .kpis > :nth-child(3n + 2):nth-last-child(1) {
+  grid-column: span 3;
 }
 
 [data-viewport='compact'] .kpis {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+/* The burn-downs live on Usage (SeatBurnPanel), which has no Surface
+   viewport attribute: the columns follow the panel's own width instead. */
 .burnGrid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
   gap: var(--surface-gap);
   align-items: start;
-}
-
-[data-viewport='medium'] .burnGrid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 /* 375: one card at a time, snapping — the next card peeks in at the edge. */

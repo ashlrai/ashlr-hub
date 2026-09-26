@@ -4,16 +4,17 @@ import userEvent from '@testing-library/user-event';
 import { COMMAND_HISTORY_POLL_MS, COMMAND_SLOW_POLL_MS, CommandSection } from './CommandSection.js';
 import { evictAll, runQuery } from '../../../data/cache.js';
 import { VERSE_BOOTSTRAP_KEY } from '../verse-queries.js';
+import { VERSE_HEALTH_KEY } from '../health/health-queries.js';
+import { closeResources, getResourcesUi } from '../resources/resources-store.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { draftRefused, stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
-import { DARK_SINCE, activitySnapshot, authorityStatus, budgetView, fleetHistory, fleetLive, seatHistory } from '../command/fixtures.test-support.js';
+import { DARK_SINCE, activitySnapshot, authorityStatus, fleetHistory, fleetLive } from '../command/fixtures.test-support.js';
 import { resetActivityForTest } from '../shell/useActivity.js';
 import { overview as cloudOverview, task as cloudTask } from '../cloud/cloud-fixtures.test-support.js';
 import { mockCompactViewport, mockWideViewport, type ViewportMock } from '../shell/viewport.test-support.js';
 
 const TOKEN = 'a'.repeat(64);
 const HOUR = 3_600_000;
-const DAY = 24 * HOUR;
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
 /** "Sep 1" — the viewer's local day for an instant, as the dark-since labels word it (never a hard-coded day). */
 const localDay = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
@@ -72,7 +73,7 @@ describe('CommandSection — live fleet', () => {
     expect(screen.queryByTestId('autonomy-off')).toBeNull();
   });
 
-  it('mounts the Cloud card right after the burn-downs (3.11), and a server without the lane shows no card', async () => {
+  it('mounts the Cloud card right after the seat strip (3.11), and a server without the lane shows no card', async () => {
     stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/cloud': cloudOverview({ tasks: [cloudTask('running')] }) } });
     const { unmount } = render(<CommandSection />);
     await ready();
@@ -187,67 +188,50 @@ describe('CommandSection — seat capacity and metered spend', () => {
     expect(kpis).not.toHaveTextContent('of window used');
   });
 
-  it('draws Claude\'s readings with its own reset words when it publishes no reset time', async () => {
+  // Audit 14: one compact strip replaces the tall burn-down cards (they live on Usage).
+  it('shows every seat\'s headroom in one compact strip: left, reset, autonomy — and opens Resources', async () => {
     const now = Date.now();
-    const view = budgetView('live', now);
-    view.headroom[0] = { ...view.headroom[0]!, resetAt: null };
     // The roster is read from the cache the console loads at startup — never fetched here.
     await runQuery(VERSE_BOOTSTRAP_KEY, async () => ({
-      seats: [{ id: 'claude-a', capacity: { windows: [
-        { id: 'five_hour', usedPercent: 74, resetsAt: null, resetDescription: 'Sep 24 at 5pm (America/New_York)', limitReached: false, measured: true },
-        { id: 'seven_day', usedPercent: 54, resetsAt: null, resetDescription: 'Sep 25 at 7pm (America/New_York)', limitReached: false, measured: true },
-      ] } }],
+      seats: [{ id: 'claude-a', engine: 'claude', label: 'Claude Max', health: { state: 'ready', summary: null, windows: [], observedAt: null }, capacity: {
+        planType: 'max', usability: 'tight', observedAt: null, evidenceSource: 'collector', notes: [], credits: null,
+        binding: { id: 'five_hour', usedPercent: 74, resetsAt: null, resetDescription: 'Sep 24 at 5pm (America/New_York)', limitReached: false, measured: true },
+        windows: [
+          { id: 'five_hour', usedPercent: 74, resetsAt: null, resetDescription: 'Sep 24 at 5pm (America/New_York)', limitReached: false, measured: true },
+          { id: 'seven_day', usedPercent: 54, resetsAt: null, resetDescription: 'Sep 25 at 7pm (America/New_York)', limitReached: false, measured: true },
+        ],
+      } }],
     }));
-    const { fetchMock } = stubSurfaceFetch({ kind: 'live', now, routes: { '/api/verse/budget': view } });
+    const { fetchMock } = stubSurfaceFetch({ kind: 'live', now });
     render(<CommandSection />);
     await ready();
-    const seats = await screen.findByRole('group', { name: 'Capacity per seat' });
-    await waitFor(() => expect(seats).toHaveTextContent('26% left · resets Sep 24 at 5pm (America/New_York)'));
-    expect(within(seats).queryByText(/No window reading/)).toBeNull();
+    const seats = screen.getByRole('region', { name: 'Seats' });
+    const claude = await within(seats).findByRole('button', { name: /^Claude Max: 26% left/ });
+    expect(claude).toHaveTextContent('Claude Max26% left');
+    expect(claude).toHaveTextContent('resets Sep 24 at 5pm (America/New_York)');
+    // The router holds Claude above its 70% 5-hour ceiling.
+    expect(claude).toHaveTextContent('Held back');
+    expect(within(seats).queryByRole('figure')).toBeNull();
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/api/verse/bootstrap'))).toBe(false);
+    await userEvent.setup().click(claude);
+    expect(getResourcesUi().open).toBe(true);
+    closeResources();
   });
 
-  // The live 3.10.0 defect: "Claude Code · weekly" drew one minute of samples
-  // on a 0–40% axis and said the reset was "only in words" although the words
-  // name a time. They now place the reset: the whole week, 0–100%, one marker.
-  it('places Claude\'s weekly reset from its words: the whole window on the shared 0–100% axis', async () => {
+  // Audit 20: the local seat said "Takes autonomous work" while the rail said "readiness not reported".
+  it('says "Status unknown" when the router calls the local seat eligible but its readiness was never reported', async () => {
     const now = Date.now();
-    const words = newYorkWords(Math.ceil((now + 2 * DAY) / HOUR) * HOUR);
-    const view = budgetView('live', now);
-    view.headroom[0] = {
-      ...view.headroom[0]!,
-      bindingWindow: 'weekly',
-      weeklyUsedPercent: 97,
-      resetAt: null,
-      reasons: ['The weekly window is 97% used; 40% is kept for you, so autonomy stops at 60%'],
-    };
     await runQuery(VERSE_BOOTSTRAP_KEY, async () => ({
-      seats: [{ id: 'claude-a', capacity: { windows: [
-        { id: 'five_hour', usedPercent: 10, resetsAt: null, resetDescription: null, limitReached: false, measured: true },
-        { id: 'seven_day', usedPercent: 97, resetsAt: null, resetDescription: words, limitReached: false, measured: true },
-      ] } }],
+      seats: [{ id: 'local-qwen', engine: 'local', label: 'Local Qwen', health: { state: 'unknown', summary: null, windows: [], observedAt: null } }],
     }));
-    // The server records the snapshot behind every budget read (capacity-history-api.ts),
-    // so its history ends on the same 97% the budget route serves.
-    const recorded = seatHistory('live', now);
-    recorded.series = recorded.series.map((s) =>
-      s.seatId === 'claude-a' && s.window === 'weekly' ? { ...s, points: [...s.points, [Date.parse(view.sampledAt) - 1_000, 97] as [number, number]] } : s,
-    );
-    stubSurfaceFetch({ kind: 'live', now, routes: { '/api/verse/budget': view, '/api/verse/budget/history': recorded } });
+    await runQuery(VERSE_HEALTH_KEY, async () => ({ checkedAt: new Date(now).toISOString(), seats: [] }));
+    stubSurfaceFetch({ kind: 'live', now });
     render(<CommandSection />);
     await ready();
-    const card = await screen.findByRole('figure', { name: 'Claude (claude-a) · weekly' });
-    await waitFor(() => expect(card).toHaveTextContent(`3% left · resets ${words} · The weekly window is 97% used`));
-    expect(card).not.toHaveTextContent(/only in words|could not be placed/);
-    // The words are said once, in the header — never again as "(resets … (America/New_York))".
-    expect(card.textContent?.split(words)).toHaveLength(2);
-    expect(card).not.toHaveTextContent(/\(resets|\.\./);
-    const labels = Array.from(card.querySelectorAll('svg text')).map((t) => t.textContent ?? '');
-    expect(labels.filter((l) => l.startsWith('Resets '))).toHaveLength(1);
-    const ticks = labels.filter((l) => /^\d+%$/.test(l)).map((l) => Number(l.slice(0, -1)));
-    expect(Math.max(...ticks)).toBe(100);
-    expect(card.querySelector('[data-role="pace"]')).not.toBeNull();
-    expect(card.querySelector('[data-role="reserve-label"]')).toHaveTextContent('Reserved for you · 40%');
+    const local = await within(screen.getByRole('region', { name: 'Seats' })).findByRole('button', { name: /^Local Qwen/ });
+    expect(local).toHaveTextContent('Status unknown');
+    expect(local).not.toHaveTextContent('Eligible');
+    expect(document.body).not.toHaveTextContent('Takes autonomous work');
   });
 });
 
@@ -285,82 +269,17 @@ describe('CommandSection — Needs-you names seats', () => {
   });
 });
 
-/** "Sep 26 at 3pm (America/New_York)" — the collector's reset wording for an on-the-hour instant. */
-function newYorkWords(ms: number): string {
-  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', hour12: true }).formatToParts(new Date(ms));
-  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? '';
-  return `${part('month')} ${part('day')} at ${part('hour')}${part('dayPeriod').toLowerCase()} (America/New_York)`;
-}
-
-// 3.10.1: the burn-downs keep the whole window across a reload — the
-// server's recorded seat history (GET /api/verse/budget/history) is merged
-// under this page's own readings.
-describe('CommandSection — recorded seat history', () => {
-  const historyCalls = (fetchMock: ReturnType<typeof vi.fn>) =>
-    fetchMock.mock.calls.filter(([u]) => String(u).startsWith('/api/verse/budget/history')).length;
-
-  it('draws the recorded window after a reload, without the "since Verse opened" note', async () => {
-    const { fetchMock } = stubSurfaceFetch({ kind: 'live' });
-    render(<CommandSection />);
-    await ready();
-    const grok = await screen.findByRole('figure', { name: 'Grok (grok-a) · weekly' });
-    // Recorded since the window opened three days ago: nothing to apologise for.
-    await waitFor(() => expect(historyCalls(fetchMock)).toBe(1));
-    await waitFor(() => expect(grok).not.toHaveTextContent('No readings before'));
-    expect(grok).not.toHaveTextContent('Verse opened');
-    expect(fetchMock.mock.calls.some(([u]) => String(u) === '/api/verse/budget/history?days=8')).toBe(true);
-  });
-
-  // Review 3.10.1: the history read serves a file of up to 2 MiB, so it rides
-  // the 5-minute poll, never the 30 s budget poll. The clock is driven through
-  // both intervals; moving refetch.seatHistory() into the 30 s group fails here.
-  // The dark fixture keeps five simulated minutes of 1 s tickers and 10 s
-  // polls cheap; the longer timeout is for a loaded full-suite run.
-  it('re-asks the recorded history on the 5-minute poll, never on the 30 s budget poll', { timeout: 30_000 }, async () => {
+// Audit 14: the burn-downs (and the up-to-2 MiB recorded history behind them)
+// moved to Usage — command/LiveSeatBurnDowns.test.tsx keeps their cases.
+describe('CommandSection — no seat history read', () => {
+  it('never asks for the recorded seat history, on mount or on any poll', { timeout: 30_000 }, async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const { fetchMock } = stubSurfaceFetch({ kind: 'dark' });
-    const calls = (path: string) => fetchMock.mock.calls.filter(([u]) => String(u).split('?')[0] === path).length;
     render(<CommandSection />);
     await ready();
-    await waitFor(() => expect(historyCalls(fetchMock)).toBe(1));
-    const budgetAtMount = calls('/api/verse/budget');
-
-    // Past several 30 s budget polls: the budget is re-read, the history is not.
-    await act(async () => { await vi.advanceTimersByTimeAsync(3 * COMMAND_SLOW_POLL_MS + 1_000); });
-    expect(calls('/api/verse/budget')).toBeGreaterThanOrEqual(budgetAtMount + 3);
-    expect(historyCalls(fetchMock)).toBe(1);
-
-    // Just short of the history poll: still once.
-    const elapsed = 3 * COMMAND_SLOW_POLL_MS + 1_000;
-    await act(async () => { await vi.advanceTimersByTimeAsync(COMMAND_HISTORY_POLL_MS - elapsed - 2_000); });
-    expect(historyCalls(fetchMock)).toBe(1);
-
-    // The 5-minute poll re-asks it exactly once.
-    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
-    await waitFor(() => expect(historyCalls(fetchMock)).toBe(2));
-    expect(COMMAND_HISTORY_POLL_MS).toBeGreaterThan(COMMAND_SLOW_POLL_MS);
-  });
-
-  // The "since Verse opened" note is said ONCE, as the seat grid's tooltip —
-  // never repeated on each card.
-  it('says "since Verse opened" once, on the grid, when the server has no recorded history', async () => {
-    stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/budget/history': null } });
-    render(<CommandSection />);
-    await ready();
-    const grok = await screen.findByRole('figure', { name: 'Grok (grok-a) · weekly' });
-    const grid = screen.getByRole('group', { name: 'Capacity per seat' });
-    await waitFor(() => expect(grid).toHaveAttribute('title', 'Lines without recorded history start when Verse opened.'));
-    expect(grok).not.toHaveTextContent('Verse opened');
-  });
-
-  it('keeps the grid note when recorded history is empty too (nothing was recorded yet)', async () => {
-    const now = Date.now();
-    stubSurfaceFetch({ kind: 'live', now, routes: { '/api/verse/budget/history': { v: 1, generatedAt: new Date(now).toISOString(), days: 8, since: new Date(now - 8 * DAY).toISOString(), oldestAt: null, series: [], truncated: false } } });
-    render(<CommandSection />);
-    await ready();
-    await screen.findByRole('figure', { name: 'Grok (grok-a) · weekly' });
-    const grid = screen.getByRole('group', { name: 'Capacity per seat' });
-    await waitFor(() => expect(grid).toHaveAttribute('title', 'Lines without recorded history start when Verse opened.'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(COMMAND_HISTORY_POLL_MS + COMMAND_SLOW_POLL_MS); });
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).startsWith('/api/verse/budget/history'))).toHaveLength(0);
+    expect(screen.getByRole('group', { name: 'Capacity per seat' })).toBeInTheDocument();
   });
 });
 

@@ -110,11 +110,11 @@ describe('warmUpAfterFirstPaint', () => {
     expect(log).toEqual(['overlay palette', 'overlay drawer', 'overlay shortcuts', 'chunk command', 'chunk growth', 'chunk mind']);
     expect(loadSection).not.toHaveBeenCalledWith('fleet');
     expect(loadSection).not.toHaveBeenCalledWith('chat');
-    // No read before the first surface's chunk; Command's reads — including the
-    // seat history its burn-downs open with — all out before Growth's chunk.
+    // No read before the first surface's chunk; Command's reads all out before
+    // Growth's chunk. (No seat history: the burn-downs moved to Usage, audit 14.)
     expect(readsBefore.get('command')).toEqual([]);
     const beforeGrowth = readsBefore.get('growth') ?? [];
-    for (const path of ['/api/verse/authority', '/api/verse/fleet/live', '/api/verse/leader', '/api/verse/learning', '/api/verse/fleet/history', '/api/verse/budget', '/api/verse/budget/history']) {
+    for (const path of ['/api/verse/authority', '/api/verse/fleet/live', '/api/verse/leader', '/api/verse/learning', '/api/verse/fleet/history', '/api/verse/budget']) {
       expect(beforeGrowth.some((p) => p.startsWith(path)), path).toBe(true);
     }
   });
@@ -225,7 +225,7 @@ describe('the warm-up, end to end through VerseApp', () => {
       // Each surface's reads go out only after its chunk has landed; Mind's digest is the last surface's.
       await waitFor(() => {
         const paths = net.fetch.mock.calls.map(([input]) => String(input));
-        for (const path of ['/api/verse/budget/history', '/api/verse/overnight', '/api/verse/fleet/history', '/api/verse/learning', '/api/models', '/api/verse/leader', '/api/reasoning/digest']) {
+        for (const path of ['/api/verse/budget', '/api/verse/overnight', '/api/verse/fleet/history', '/api/verse/learning', '/api/models', '/api/verse/leader', '/api/reasoning/digest']) {
           expect(paths.some((u) => u.startsWith(path)), path).toBe(true);
         }
       }, { timeout: 5_000 });

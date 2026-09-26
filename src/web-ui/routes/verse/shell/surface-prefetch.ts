@@ -28,7 +28,6 @@ import {
   leaderQuery,
   learningQuery,
   reasoningDigestQuery,
-  seatHistoryQuery,
 } from '../command/surface-data.js';
 import { verseBootstrapQuery, verseSessionsQuery, verseWorkspacesQuery } from '../verse-queries.js';
 import type { VerseSectionId } from '../verse-ui-store.js';
@@ -37,13 +36,11 @@ type AnyQuery = QueryDef<unknown>;
 
 /** What each rail surface reads the moment it mounts. */
 export const SURFACE_PREFETCH: Readonly<Partial<Record<VerseSectionId, readonly AnyQuery[]>>> = {
-  // seatHistoryQuery: without it the first Command visit draws each seat's
-  // burn-down from this page's own readings ("since Verse opened"), then
-  // redraws once the recorded week lands — the reset-on-reload look 3.10.1
-  // set out to remove.
+  // No seat history: the burn-downs that drew it moved to Usage (audit 14);
+  // Command's seat strip reads the budget and the rail's warm seat caches.
   // cloudQuery (3.11): the Cloud card's overview — without it a first visit
-  // paints "Reading the cloud lane…" under the burn-downs.
-  command: [authorityQuery, fleetLiveQuery, leaderQuery, learningQuery, fleetHistoryQuery, budgetQuery, seatHistoryQuery, cloudQuery],
+  // paints "Reading the cloud lane…" under the seat strip.
+  command: [authorityQuery, fleetLiveQuery, leaderQuery, learningQuery, fleetHistoryQuery, budgetQuery, cloudQuery],
   // authorityQuery + fleetLiveQuery on Fleet, Growth and Mind: the shared
   // "Autonomy is off" state (autonomy/AutonomyOffState) reads both.
   fleet: [fleetLiveQuery, authorityQuery, overnightQuery, budgetQuery, budgetPreviewQuery],
