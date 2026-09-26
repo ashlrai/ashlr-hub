@@ -4,6 +4,14 @@
  * the line, never as a straight line through a missing value and never as
  * a silent zero. Single series gets an optional soft area fill; two-plus
  * series always render a legend (never color-matching alone).
+ *
+ * Sizing (after 3.11.3): the chart draws at its MEASURED pixel width and a fixed
+ * pixel `height` — one user unit is one CSS pixel — like the V3.10 kit
+ * (useChartWidth). It used to draw into a fixed 640-unit viewBox stretched
+ * with `width: 100%; height: auto`, so on a 1900 px window the whole figure,
+ * text included, scaled ~2.8×: 12 px tick labels rendered at ~34 px, the
+ * 200 px chart stood ~560 px tall, and the end label ("Tokens in") dwarfed
+ * the card. Now the coordinate system scales and the text never does.
  */
 import { useRef, useState } from 'react';
 import type { Series } from './types.js';
@@ -21,24 +29,25 @@ import {
   xKeeper,
 } from './chart-math.js';
 import { timeLabelLadder } from './format.js';
+import { useChartWidth } from './useChartWidth.js';
 import { useTextScale } from './useTextScale.js';
 import './chart-tokens.css';
 import styles from './LineChart.module.css';
 
-const VBOX_W = 640;
+/** Width drawn at before the container is measured (jsdom, first paint). */
+const FALLBACK_W = 640;
 /** Minimum left gutter; it widens when the y tick labels need more (see padL). */
 const PAD_L = 44;
 const PAD_R = 12;
 const PAD_T = 12;
 const PAD_B = 24;
 const TICKS_Y = 4;
-/* Direct end-of-line labels need a gutter of their own. They are drawn in USER
-   units — the viewBox scales the font along with the geometry, so a reserve
-   measured in user units holds at every rendered width — and `--text-xs-size`
-   resolves to 12 user units here, where the UI sans averages a shade over 6
-   units per character at medium weight. 6.4 rounds that up so the reserve errs
+/* Direct end-of-line labels need a gutter of their own. User units are CSS
+   pixels here (the viewBox matches the measured width), and `--text-xs-size`
+   is 12 px, where the UI sans averages a shade over 6 px per character at
+   medium weight. 6.4 rounds that up so the reserve errs
    wide rather than clipping. Without the reserve the label was drawn at
-   `VBOX_W - PAD_R + 4` with only PAD_R (12u) of room and the svg's own
+   `width - PAD_R + 4` with only PAD_R (12 px) of room and the svg's own
    `overflow: hidden` cropped it to its first glyph — "Estimated spend"
    rendered as a lone "E".
    Every text measure here (END_LABEL_CH, END_LABEL_GAP_Y, the axis label
@@ -84,15 +93,21 @@ export function LineChart({
   formatX: formatXProp,
   formatY: formatYProp,
   ariaLabel,
+  width: fixedWidth,
 }: {
   series: Series[];
+  /** Plot height in px, including the x-axis band. Fixed at every width. */
   height?: number;
+  /** Fixed width in px (tests, print). Omit to fill the container. */
+  width?: number;
   area?: boolean;
   formatX?: (x: number) => string;
   formatY?: (y: number) => string;
   ariaLabel: string;
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const width = useChartWidth(wrapRef, fixedWidth, FALLBACK_W);
   const textScale = useTextScale();
   /* Axis labels' estimated advance per character, at the size they render. */
   const axisLabelCh = labelCharPx(textScale);
@@ -109,7 +124,11 @@ export function LineChart({
   const allX = series.flatMap((s) => s.points.map((p) => p.x));
   const knownY = series.flatMap((s) => s.points.map((p) => p.y)).filter((y): y is number => y !== null && Number.isFinite(y));
   if (allX.length === 0) {
-    return <p>No data.</p>;
+    return (
+      <div ref={wrapRef} className={styles.wrap}>
+        <p>No data.</p>
+      </div>
+    );
   }
   const rawXMin = Math.min(...allX);
   const rawXMax = Math.max(...allX);
@@ -158,7 +177,7 @@ export function LineChart({
   const padR = PAD_R + (showEndLabels ? END_LABEL_GAP + endLabelW : 0);
   const showLegend = series.length >= 2;
 
-  const plotW = VBOX_W - padL - padR;
+  const plotW = Math.max(40, width - padL - padR);
   const xScale = (x: number) => padL + ((x - xMin) / xRange) * plotW;
 
   // Nearest-x lookup across a reference axis (the union of all distinct x
@@ -173,7 +192,7 @@ export function LineChart({
   const xLabels = layoutAxisLabels(
     xEnds.map((x, i) => {
       const px = xScale(x);
-      const edge = i === 0 ? px <= padL + 0.5 : px >= VBOX_W - padR - 0.5;
+      const edge = i === 0 ? px <= padL + 0.5 : px >= width - padR - 0.5;
       return {
         key: i === 0 ? 'start' : 'end',
         x: px,
@@ -182,14 +201,16 @@ export function LineChart({
         variants: ladder.map((f) => f(x)),
       };
     }),
-    { min: padL, max: VBOX_W - padR, charPx: axisLabelCh },
+    { min: padL, max: width - padR, charPx: axisLabelCh },
   );
 
   function nearestX(clientX: number): number | null {
     const svg = svgRef.current;
     if (!svg) return null;
     const rect = svg.getBoundingClientRect();
-    const svgX = ((clientX - rect.left) / rect.width) * VBOX_W;
+    // rect.width equals `width` once measured; the ratio only matters while the
+    // fallback width is still being drawn (or a CSS max-width squeezes it).
+    const svgX = ((clientX - rect.left) / (rect.width || width)) * width;
     const dataX = xMin + ((svgX - padL) / plotW) * xRange;
     let nearest = xAxis[0];
     let best = Infinity;
@@ -210,7 +231,7 @@ export function LineChart({
     const svg = svgRef.current;
     if (svg) {
       const rect = svg.getBoundingClientRect();
-      const px = (xScale(x) / VBOX_W) * rect.width;
+      const px = (xScale(x) / width) * (rect.width || width);
       setTooltipPos({ left: px, top: 0 });
     }
   }
@@ -224,11 +245,13 @@ export function LineChart({
       : null;
 
   return (
-    <div className={styles.wrap}>
+    <div ref={wrapRef} className={styles.wrap}>
       <svg
         ref={svgRef}
         className={styles.svg}
-        viewBox={`0 0 ${VBOX_W} ${height}`}
+        width={width}
+        height={height}
+        viewBox={`0 0 ${width} ${height}`}
         role="img"
         aria-label={ariaLabel}
         onPointerMove={handleMove}
@@ -238,7 +261,7 @@ export function LineChart({
           <g key={i}>
             <line
               x1={padL}
-              x2={VBOX_W - padR}
+              x2={width - padR}
               y1={yScale(t)}
               y2={yScale(t)}
               className={styles.gridline}
@@ -251,7 +274,7 @@ export function LineChart({
         ))}
         <line
           x1={padL}
-          x2={VBOX_W - padR}
+          x2={width - padR}
           y1={height - PAD_B}
           y2={height - PAD_B}
           className={styles.axis}

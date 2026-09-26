@@ -276,9 +276,12 @@ export function SeatBurnDowns({ burns, now, compact }: { burns: SeatBurn[]; now:
       aria-label="Seat windows"
       title={burns.some((b) => b.window !== null && !b.recorded) ? SINCE_OPENED : undefined}
     >
+      {/* Every card measures its own column, the strip's 86% one included. A
+          fixed 300 px svg in a narrower phone column was shrunk by the global
+          `svg { max-width: 100% }`, and its 12 px labels with it. */}
       {burns.map((b) => (
         <div key={b.seatId} className={styles.burnItem}>
-          <SeatBurnCard burn={b} now={now} width={compact ? 300 : undefined} />
+          <SeatBurnCard burn={b} now={now} />
         </div>
       ))}
     </div>

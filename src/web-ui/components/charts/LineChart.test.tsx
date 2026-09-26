@@ -9,7 +9,8 @@
  * the label inside the box at every rendered width.
  */
 import { render } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { moduleDeclaration } from '../../design/token-probe.test-support.js';
 import { LineChart } from './LineChart.js';
 import { clearDisplaySize, setDisplaySize } from './chart-test-support.js';
 import type { Series } from './types.js';
@@ -185,5 +186,62 @@ describe('LineChart V3.10.1 review — text measures at the Display size', () =>
     );
     const xs = yTickTexts(view.container).map((t) => Number(t.getAttribute('x')));
     expect(new Set(xs)).toEqual(new Set([44 - 6]));
+  });
+});
+
+/**
+ * After 3.11.3 — the chart keeps its size at any width. It used to draw a fixed
+ * 640-unit viewBox stretched by `width: 100%; height: auto`, so in a 1834 px
+ * card on a 1900 px window everything scaled 2.87×: the 200 px chart stood
+ * 573 px tall and 12 px tick labels ("60M") rendered at ~34 px. Now the
+ * viewBox IS the measured pixel box: one user unit per CSS pixel.
+ */
+describe('LineChart sizing — scale the coordinates, never the text', () => {
+  /** Lay every element out `w` px wide, as a real card of that width would be. */
+  function atWidth(w: number): void {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, top: 0, left: 0, bottom: 0, right: w, width: w, height: 0, toJSON: () => ({}),
+    } as DOMRect);
+  }
+  const tokens: Series[] = [
+    { id: 'tokensIn', label: 'Tokens in', points: [0, 1, 2, 3, 4, 5, 6].map((i) => ({ x: Date.parse('2026-09-20T04:00:00Z') + i * 86_400_000, y: [12e6, 48e6, 30e6, 61e6, 22e6, 40e6, 9e6][i]! })) },
+    { id: 'tokensOut', label: 'Tokens out', points: [0, 1, 2, 3, 4, 5, 6].map((i) => ({ x: Date.parse('2026-09-20T04:00:00Z') + i * 86_400_000, y: [1e6, 3e6, 2e6, 4e6, 1.5e6, 2.4e6, 0.6e6][i]! })) },
+  ];
+
+  for (const w of [1834, 834, 360]) {
+    it(`draws at ${w} px wide and a fixed 200 px tall, one user unit per pixel`, () => {
+      atWidth(w);
+      const view = render(<LineChart series={tokens} ariaLabel="Tokens per day" height={200} />);
+      const svg = view.container.querySelector('svg')!;
+      expect(svg.getAttribute('width')).toBe(String(w));
+      expect(svg.getAttribute('height')).toBe('200');
+      expect(svg.getAttribute('viewBox')).toBe(`0 0 ${w} 200`);
+    });
+
+    it(`keeps every line, rule and end label inside the ${w} px box`, () => {
+      atWidth(w);
+      const view = render(<LineChart series={tokens} ariaLabel="Tokens per day" height={200} />);
+      const svg = view.container.querySelector('svg')!;
+      for (const line of svg.querySelectorAll('line')) expect(Number(line.getAttribute('x2'))).toBeLessThanOrEqual(w - PAD_R);
+      for (const path of svg.querySelectorAll('path')) {
+        const xs = [...(path.getAttribute('d') ?? '').matchAll(/[ML]([\d.]+),/g)].map((m) => Number(m[1]));
+        expect(Math.max(...xs)).toBeLessThanOrEqual(w - PAD_R);
+      }
+      for (const label of svg.querySelectorAll('[data-end-label]')) {
+        const x = Number(label.getAttribute('x'));
+        expect(x + (label.textContent ?? '').length * END_LABEL_CH).toBeLessThanOrEqual(w - PAD_R + 0.01);
+      }
+    });
+  }
+
+  it('honours a fixed width over the measured one', () => {
+    atWidth(1834);
+    const view = render(<LineChart series={tokens} ariaLabel="t" width={500} />);
+    expect(view.container.querySelector('svg')!.getAttribute('viewBox')).toBe('0 0 500 200');
+  });
+
+  it('never stretches the svg with CSS (that is what scaled the text)', () => {
+    expect(moduleDeclaration('components/charts/LineChart.module.css', '.svg', 'width')).toBeNull();
+    expect(moduleDeclaration('components/charts/LineChart.module.css', '.svg', 'height')).toBeNull();
   });
 });

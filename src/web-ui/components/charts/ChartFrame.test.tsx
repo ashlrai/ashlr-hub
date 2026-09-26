@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { CHART_TABLE_KEY, ChartFrame } from './ChartFrame.js';
+import { CHART_TABLE_KEY, ChartFrame, sinceLabel } from './ChartFrame.js';
+import { TEST_ZONES, inTimeZone } from '../../routes/verse/growth/time-zone.test-support.js';
 import { TableView } from './TableView.js';
 import { findCommand } from '../../routes/verse/shell/command-catalog.js';
 
@@ -107,5 +108,22 @@ describe('TableView', () => {
   it('renders an explicit empty row', () => {
     render(<TableView caption="c" columns={[{ key: 'a', label: 'A', render: () => '' }]} rows={[]} rowKey={() => 'k'} emptyMessage="No runs." />);
     expect(screen.getByRole('cell', { name: 'No runs.' })).toBeInTheDocument();
+  });
+});
+
+describe('sinceLabel — the day in the viewer\'s zone', () => {
+  it('names an ISO instant by its LOCAL day (22:52 EDT Sep 25 is 02:52Z Sep 26)', () => {
+    // Fleet history's darkSince is an instant; slicing it read "Sep 26" here.
+    expect(inTimeZone('America/New_York', () => sinceLabel('2026-09-26T02:52:00.000Z'))).toBe('Sep 25');
+    expect(inTimeZone('America/New_York', () => sinceLabel('2026-09-26T04:05:00.000Z'))).toBe('Sep 26');
+    expect(inTimeZone('Asia/Tokyo', () => sinceLabel('2026-09-25T20:00:00.000Z'))).toBe('Sep 26');
+  });
+
+  it('prints a YYYY-MM-DD calendar day as written, in every zone', () => {
+    for (const zone of TEST_ZONES) expect(inTimeZone(zone, () => sinceLabel('2026-09-25')), zone).toBe('Sep 25');
+  });
+
+  it('falls back to the written date for an unparseable stamp', () => {
+    expect(sinceLabel('2026-09-25T99:99')).toBe('Sep 25');
   });
 });

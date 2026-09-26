@@ -1,7 +1,10 @@
+/* Drawn at its measured width and a fixed height (width/height attributes
+   set by LineChart). Never `width: 100%; height: auto` — that stretches the
+   viewBox, text included, with the window. `max-width` keeps a not-yet-
+   measured first paint from pushing its container wider. */
 .svg {
   display: block;
-  width: 100%;
-  height: auto;
+  max-width: 100%;
 }
 
 .gridline {
@@ -56,6 +59,8 @@
 
 .wrap {
   position: relative;
+  width: 100%;
+  min-width: 0;
 }
 
 .tooltip {

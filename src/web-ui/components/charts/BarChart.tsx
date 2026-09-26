@@ -7,9 +7,10 @@
  * "no data" dash, never a silent zero-height bar indistinguishable from a
  * real zero.
  */
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import type { CategoricalDatum } from './types.js';
 import { CHART_SEQUENTIAL, CHART_AXIS, CHART_GRID } from './colors.js';
+import { useChartWidth } from './useChartWidth.js';
 import './chart-tokens.css';
 import styles from './BarChart.module.css';
 
@@ -23,15 +24,23 @@ export function BarChart({
   color = CHART_SEQUENTIAL,
   formatValue = (v: number) => String(v),
   ariaLabel,
+  width: fixedWidth,
 }: {
   data: CategoricalDatum[];
   height?: number;
   orientation?: 'vertical' | 'horizontal';
+  /** Horizontal only: fixed width in px (tests, print). Omit to fill the container. */
+  width?: number;
   color?: string;
   formatValue?: (v: number) => string;
   ariaLabel: string;
 }) {
   const uid = useId();
+  const wrapRef = useRef<HTMLDivElement>(null);
+  // Horizontal bars take the container's measured width (fallback: the old
+  // fixed 588 px). A fixed-width svg under the global `svg { max-width: 100% }`
+  // was scaled DOWN in a narrower card, shrinking its 10 px labels with it.
+  const measuredW = useChartWidth(wrapRef, fixedWidth, 588);
   const [hover, setHover] = useState<number | null>(null);
 
   const known = data.map((d) => d.value).filter((v): v is number => v !== null);
@@ -43,12 +52,12 @@ export function BarChart({
     const LABEL_W = 120;
     const PAD_R = 48;
     const rowH = Math.min(BAR_MAX, Math.max(14, Math.floor((height - GAP) / data.length) - GAP));
-    const plotW = 420;
     const svgH = data.length * (rowH + GAP) + GAP;
-    const svgW = LABEL_W + plotW + PAD_R;
+    const svgW = measuredW;
+    const plotW = Math.max(40, svgW - LABEL_W - PAD_R);
 
     return (
-      <div className={styles.wrap}>
+      <div ref={wrapRef} className={styles.wrap}>
         <svg
           className={styles.svg}
           width={svgW}

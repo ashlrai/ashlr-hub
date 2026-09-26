@@ -10,10 +10,10 @@
  * live Claude card drew one minute of samples on a 0–40% axis.
  */
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { reasonSentence } from '../../../../core/routing/seat-reasons.js';
 import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
-import { SeatBurnCard } from './SeatBurnDowns.js';
+import { SeatBurnCard, SeatBurnDowns } from './SeatBurnDowns.js';
 import { burnTimeFormat, recordReading, resetInstantFromWords, seatBurns, type SeatBurn } from './command-model.js';
 import { budgetView } from './fixtures.test-support.js';
 
@@ -285,4 +285,27 @@ describe('SeatBurnCard — held-back reasons in words', () => {
     render(<SeatBurnCard burn={burn({ seatId: 'local-qwen', label: 'Local Qwen', engine: 'local', window: null, free: true, eligible: false, reason: 'The local model runtime is not reachable.' })} now={NOW} />);
     expect(screen.getByText('Local — free, no provider window. The local model runtime is not reachable.')).toBeInTheDocument();
   });
+});
+
+describe('SeatBurnDowns — sizes to its column at every width', () => {
+  // The compact (phone) strip used to pin every card at 300 px; in a narrower
+  // column the global `svg { max-width: 100% }` shrank the chart and its text.
+  for (const [compact, w] of [[true, 292], [false, 1834], [false, 420]] as const) {
+    it(`${compact ? 'compact' : 'grid'} at ${w} px: the svg IS the column, one unit per pixel`, () => {
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+        x: 0, y: 0, top: 0, left: 0, bottom: 0, right: w, width: w, height: 0, toJSON: () => ({}),
+      } as DOMRect);
+      const resetAt = NOW + 2 * 24 * HOUR;
+      const { container } = render(
+        <SeatBurnDowns
+          compact={compact}
+          now={NOW}
+          burns={[burn({ start: resetAt - 7 * 24 * HOUR, resetAt, resetFrom: 'provider', points: [{ t: NOW - HOUR, remaining: 70 }, { t: NOW, remaining: 68 }] })]}
+        />,
+      );
+      const svg = container.querySelector('svg[role="img"]')!;
+      expect(svg.getAttribute('width')).toBe(String(w));
+      expect(svg.getAttribute('viewBox')?.startsWith(`0 0 ${w} `)).toBe(true);
+    });
+  }
 });

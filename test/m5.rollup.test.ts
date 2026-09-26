@@ -75,7 +75,8 @@ vi.mock('../src/core/index-engine.js', () => ({
   buildIndex: vi.fn(async () => ({ version: 1, generatedAt: new Date().toISOString(), root: '/tmp', items: [] })),
 }));
 
-import { buildRollup } from '../src/core/observability/rollup.js';
+import { buildRollup, rollupDay } from '../src/core/observability/rollup.js';
+import { localDay } from '../src/core/reasoning/insights.js';
 import { collectUsageEvents as _collectUsageEvents } from '../src/core/observability/usage-source.js';
 
 const mockCollect = _collectUsageEvents as ReturnType<typeof vi.fn>;
@@ -105,7 +106,8 @@ function makeConfig(telemetry: AshlrConfig['telemetry'] = {}): AshlrConfig {
 
 function now(): number { return Date.now(); }
 function daysAgo(n: number): string { return new Date(now() - n * 86_400_000).toISOString(); }
-function today(): string { return new Date().toISOString().slice(0, 10); }
+/** Today as the rollup keys it: the LOCAL calendar day, not the UTC slice. */
+function today(): string { return localDay(Date.now()); }
 
 function makeEvent(opts: Partial<UsageEvent> & { tokensIn: number; tokensOut: number }): UsageEvent {
   return {
@@ -271,7 +273,7 @@ describe('buildRollup — byDay', () => {
     const rollup = buildRollup('7d', makeConfig());
     // Should have 2 day buckets
     expect(rollup.byDay.length).toBeGreaterThanOrEqual(2);
-    const d1Key = day1.slice(0, 10);
+    const d1Key = localDay(Date.parse(day1));
     const dayBucket = rollup.byDay.find(d => d.day === d1Key);
     expect(dayBucket).toBeDefined();
     expect(dayBucket!.tokensIn).toBe(300);
@@ -294,6 +296,43 @@ describe('buildRollup — byDay', () => {
     mockCollect.mockReturnValue([]);
     const rollup = buildRollup('7d', makeConfig());
     expect(rollup.byDay.length).toBe(0);
+  });
+
+  describe('local calendar day (TZ pinned to America/New_York)', () => {
+    const savedTz = process.env['TZ'];
+    beforeEach(() => {
+      process.env['TZ'] = 'America/New_York';
+      vi.useFakeTimers({ toFake: ['Date'] });
+      // 22:52 EDT on Sep 25 is already 02:52Z on Sep 26.
+      vi.setSystemTime(new Date('2026-09-26T02:52:00Z'));
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      if (savedTz === undefined) delete process.env['TZ'];
+      else process.env['TZ'] = savedTz;
+    });
+
+    it('buckets an evening event on the operator\'s day, not the UTC day', () => {
+      mockCollect.mockReturnValue([
+        makeEvent({ ts: '2026-09-26T02:40:00.000Z', tokensIn: 7, tokensOut: 1 }), // Sep 25, 22:40 EDT
+        makeEvent({ ts: '2026-09-25T13:00:00.000Z', tokensIn: 5, tokensOut: 1 }), // Sep 25, 09:00 EDT
+        makeEvent({ ts: '2026-09-25T03:30:00.000Z', tokensIn: 3, tokensOut: 1 }), // Sep 24, 23:30 EDT
+      ]);
+      const rollup = buildRollup('7d', makeConfig());
+      expect(rollup.byDay.map((d) => [d.day, d.tokensIn])).toEqual([
+        ['2026-09-24', 3],
+        ['2026-09-25', 12],
+      ]);
+      // Nothing is dated tomorrow while it is still Sep 25 on the operator's clock.
+      expect(rollup.byDay.some((d) => d.day === '2026-09-26')).toBe(false);
+    });
+
+    it('rollupDay keeps a genuine local next day, and an unparseable stamp\'s written date', () => {
+      expect(rollupDay('2026-09-26T04:05:00.000Z')).toBe('2026-09-26'); // 00:05 EDT Sep 26
+      expect(rollupDay('2026-09-26T03:59:59.000Z')).toBe('2026-09-25'); // 23:59 EDT Sep 25
+      expect(rollupDay('2026-09-25T21:00:00-05:00')).toBe('2026-09-25'); // an offset stamp is read as its instant
+      expect(rollupDay('2026-09-25 not a time')).toBe('2026-09-25');
+    });
   });
 
   it('single event produces a single day bucket', () => {
