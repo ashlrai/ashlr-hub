@@ -41,7 +41,8 @@
  *     `dispatchHarness`, its version is journaled with each dispatch so a G3
  *     verdict credits the right version), queued experiments run in idle or
  *     overnight windows, and its routing weights (Leader › harness ›
- *     BASELINE_HARNESS_CONFIG.routing) set the best-of-N threshold.
+ *     BASELINE_HARNESS_CONFIG.routing) set the best-of-N threshold and
+ *     tilt the dispatch router's seat ranking.
  *   - U7 engines: `bestOfNPlan` = planAutonomousBestOfN over this tick's
  *     lanes; the grant's engines filter `allowedBackends` (nim, kimi and the
  *     per-token xAI API never reach a standing tick).
@@ -692,7 +693,7 @@ interface TickContext {
   tickState: FleetTickStateV1;
   /** The harness dispatch runs with this tick (read once, after the canary check). */
   harness: TickHarness;
-  /** Leader › harness › baseline routing weights (best-of-N threshold). */
+  /** Leader › harness › baseline routing weights (seat ranking λ + best-of-N threshold). */
   routing: HarnessRoutingWeights;
   /** Fleet task id → attempts so far (best-of-N's "already failed once"). */
   taskAttempts: Map<string, number>;
@@ -1555,6 +1556,9 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
           lanes,
           laneEngines: laneEngines.engines,
           demotions,
+          // The λ weights used to reach only best-of-N (bonThreshold); the
+          // seat ranking now reads them too (routing/router.ts seatScore).
+          weights: routing,
           repoOf: (path) => repoOfPath.get(resolve(path)) ?? (() => {
             try {
               return deps.repoIdentity(path);
