@@ -34,6 +34,11 @@ describe('barRows', () => {
     expect(grok!.detail[0]).toBe('Weekly window: 28% used · resets Sat 8:43 AM');
   });
 
+  it('says "resets" once when the accounts model already worded the reset', () => {
+    const [grok] = barRows([row({ windows: [win({ usedPercent: 28, resetText: 'resets Sat 8:43 AM' })] })], { healthRead: true, now: NOW });
+    expect(grok!.detail[0]).toBe('Weekly window: 28% used · resets Sat 8:43 AM');
+  });
+
   it('shows a limit-reached account as an empty battery and sorts it after usable ones', () => {
     const spent = row({ seatId: 'codex-a', label: 'Personal Codex', engine: 'codex', cls: 'blocked', word: 'blocked',
       windows: [win({ id: 'primary', label: 'primary window', limitReached: true, resetText: 'Fri 2:25 PM' })] });

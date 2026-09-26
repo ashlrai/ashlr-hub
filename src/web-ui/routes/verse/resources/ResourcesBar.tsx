@@ -81,7 +81,9 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
       : left === null ? '—' : `${usedPercentText(left)} left`;
     const detail = row.windows.map((w) => {
       const used = w.limitReached ? 'limit reached' : w.usedPercent === null ? 'no reading' : `${usedPercentText(w.usedPercent)} used`;
-      return `${w.label.charAt(0).toUpperCase()}${w.label.slice(1)}: ${used}${w.resetText ? ` · resets ${w.resetText}` : ''}`;
+      // The accounts model already words it "resets Fri 2:25 PM"; don't say it twice.
+      const reset = w.resetText ? w.resetText.replace(/^resets\s+/i, '') : '';
+      return `${w.label.charAt(0).toUpperCase()}${w.label.slice(1)}: ${used}${reset ? ` · resets ${reset}` : ''}`;
     });
     if (row.reserve) detail.push(row.reserve.label);
     if (status.usableAgain) detail.push(`Usable again ${status.usableAgain}`);
