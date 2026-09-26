@@ -21,7 +21,7 @@
  * strings on dynamic imports — mirrors m117.api-model-dispatch.test.ts.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -42,6 +42,34 @@ const MOCK_REPO = '/tmp/fake-repo';
 const mockPersistedProposals = new Map<string, import('../src/core/types.js').Proposal>();
 const originalHome = process.env.HOME;
 let testHome: string;
+
+/**
+ * Transform the unmocked part of the best-of-n graph (best-of-n, the run
+ * orchestrator, output streaming) ONCE, outside every test's 5 s budget.
+ * The first test's cache-busted import used to pay for it: ~2.5 s alone,
+ * past 5 s when the suite runs beside other files on a loaded machine (the
+ * "creates a running candidate record…" timeout on origin/master). Later
+ * imports still re-evaluate after vi.resetModules(), but reuse the
+ * transforms. HOME points at a throwaway directory while the modules load,
+ * so no import-time read can touch the real ~/.ashlr.
+ */
+beforeAll(async () => {
+  const warmHome = mkdtempSync(join(tmpdir(), 'ashlr-best-of-n-m142-warm-'));
+  const previousHome = process.env.HOME;
+  process.env.HOME = warmHome;
+  try {
+    await Promise.all([
+      import('../src/core/run/best-of-n.js'),
+      import('../src/core/run/orchestrator.js'),
+      import('../src/core/run/streaming.js'),
+    ]);
+  } finally {
+    vi.resetModules();
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    rmSync(warmHome, { recursive: true, force: true });
+  }
+}, 60_000);
 
 beforeEach(() => {
   testHome = mkdtempSync(join(tmpdir(), 'ashlr-best-of-n-m142-'));
@@ -369,9 +397,18 @@ function makeSandboxMock(opts: {
   });
 }
 
+/**
+ * `loadProposal` replaces the default persisted-proposal reader. A test that
+ * needs a different reader passes it HERE rather than calling vi.doMock on
+ * inbox/store.js a second time: two pending doMock registrations for one
+ * module settle in no guaranteed order, so under load the first (default)
+ * factory could win and the test saw the untampered diff (the M142
+ * "rejects tampered persisted bytes" flake on origin/master).
+ */
 function mockSandboxedEngine(
   apiSandboxMock: ReturnType<typeof vi.fn>,
   engineSandboxMock: ReturnType<typeof vi.fn> = vi.fn(),
+  loadProposal: (id: string) => import('../src/core/types.js').Proposal | null = (id) => mockPersistedProposals.get(id) ?? null,
 ) {
   mockPersistedProposals.clear();
   vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
@@ -379,7 +416,7 @@ function mockSandboxedEngine(
     runEngineSandboxed: engineSandboxMock,
   }));
   vi.doMock('../src/core/inbox/store.js', () => ({
-    loadProposal: vi.fn((id: string) => mockPersistedProposals.get(id) ?? null),
+    loadProposal: vi.fn(loadProposal),
   }));
 }
 
@@ -811,17 +848,14 @@ describe('M142 — daemon routing alignment', () => {
       wouldMerge: true,
     }));
 
-    mockSandboxedEngine(sandboxMock);
+    mockSandboxedEngine(sandboxMock, vi.fn(), (id) => {
+      const persisted = mockPersistedProposals.get(id);
+      return persisted && id === 'proposal-0'
+        ? { ...persisted, diff: 'TAMPERED_PROPOSAL_DIFF' }
+        : persisted ?? null;
+    });
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
-    }));
-    vi.doMock('../src/core/inbox/store.js', () => ({
-      loadProposal: vi.fn((id: string) => {
-        const persisted = mockPersistedProposals.get(id);
-        return persisted && id === 'proposal-0'
-          ? { ...persisted, diff: 'TAMPERED_PROPOSAL_DIFF' }
-          : persisted ?? null;
-      }),
     }));
 
     const { runBestOfN } = await import('../src/core/run/best-of-n.js?realdiff=' + randomUUID());

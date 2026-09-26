@@ -38,7 +38,19 @@ import type { PostMergeWatchView } from '../src/core/fleet/post-merge-watch.js';
 
 const TOKEN = 'test-mutation-token';
 const REPO = 'ashlrai/binshield';
-const NOW = Date.now();
+// A FIXED local noon, never the wall clock. The handler's "today" starts at
+// LOCAL midnight (fleet-live-api.ts), and the fixtures sit up to an hour
+// before NOW: with NOW = Date.now(), a run between 00:00 and 00:20 put the
+// 20-minutes-ago merge on YESTERDAY and "mergedToday" read 0. The Date clock
+// is faked to the same instant (beforeAll) because the Needs-you staleness
+// checks read Date.now() directly; it still advances in real time.
+// A FIXED local noon, never the wall clock. The handler's "today" starts at
+// LOCAL midnight (fleet-live-api.ts), and the fixtures sit up to an hour
+// before NOW: with NOW = Date.now(), a run between 00:00 and 00:20 put the
+// 20-minutes-ago merge on YESTERDAY and "mergedToday" read 0. The Date clock
+// is faked to the same instant (beforeAll) because the Needs-you staleness
+// checks read Date.now() directly; it still advances in real time.
+const NOW = new Date(2026, 8, 24, 12, 0, 0, 0).getTime();
 const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
 const MIN = 60_000;
 
@@ -139,6 +151,7 @@ function deps(): Partial<FleetLiveDeps> {
 }
 
 beforeAll(async () => {
+  vi.useFakeTimers({ toFake: ['Date'], now: NOW, shouldAdvanceTime: true });
   server = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     void handleFleetLiveApi(ctx, req, res, url.pathname, req.method ?? 'GET').then((handled) => {
@@ -154,6 +167,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  vi.useRealTimers();
 });
 
 beforeEach(() => {
