@@ -260,6 +260,9 @@
 /test/h8.demo.test.ts @masonwyatt23
 /test/h8.docs.test.ts @masonwyatt23
 /test/h8.no-new-outward.test.ts @masonwyatt23
+/test/harness-dispatch-311.test.ts @masonwyatt23
+/test/harness-dispatch-api-model-311.test.ts @masonwyatt23
+/test/harness-dispatch-threading-311.test.ts @masonwyatt23
 /test/harness-store-hardening-310.test.ts @masonwyatt23
 /test/helpers/authority-310b.ts @masonwyatt23
 /test/helpers/fixture-custody.ts @masonwyatt23
