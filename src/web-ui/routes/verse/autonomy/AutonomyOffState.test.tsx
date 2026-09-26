@@ -51,7 +51,8 @@ describe('AutonomyOffState', () => {
     expect(items[5]).toHaveTextContent('GitHub App');
     expect(items[6]).toHaveTextContent('Claude token');
     expect(items[6]).toHaveTextContent('— to do');
-    expect(items[14]).toHaveTextContent('Resident runtimeblocked by this build');
+    expect(items[14]).toHaveTextContent('Resident runtimeblocked');
+    expect(within(items[14]!).getByLabelText('Needs Terminal')).toBeInTheDocument();
     // Folded by default: the count is the summary.
     expect(checklist.querySelector('details')?.open).toBe(false);
   });

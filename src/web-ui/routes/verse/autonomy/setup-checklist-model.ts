@@ -132,13 +132,14 @@ export function nextRow(report: AuthoritySetupReportV1): SetupRow | null {
 /**
  * The command to copy for the next step: the step's own (sudo for the
  * helper, the build after the trust-root PR, …), else the setup command
- * (rerun-safe, it resumes where it stopped). null when nothing on this Mac
- * moves the next step (it is blocked by this build).
+ * (rerun-safe, it resumes where it stopped). A blocked step offers only the
+ * command it names itself (e.g. the grant that unblocks the resident step);
+ * null when nothing on this Mac moves it (not a compiled release, …).
  */
 export function nextCommand(report: AuthoritySetupReportV1 | null): string | null {
   if (!report) return SETUP_COMMAND;
   const row = nextRow(report);
   if (!row) return null;
-  if (row.mark === 'blocked') return null;
-  return row.command ?? (row.id === 'daemon-service' ? null : SETUP_COMMAND);
+  if (row.mark === 'blocked') return row.command;
+  return row.command ?? SETUP_COMMAND;
 }

@@ -130,14 +130,14 @@ const SETUP_STEPS: readonly (readonly [id: string, step: string, needs: Authorit
   ['provenance-key', 'provenance key', [], 'ashlr authority setup'],
   ['standing-grant', 'standing grant', ['touch-id'], 'ashlr authority grant'],
   ['autonomy-switch', 'autonomy switch', [], 'ashlr authority switch autonomous'],
-  ['daemon-service', 'daemon service', ['terminal'], null],
-  ['resident-runtime', 'resident runtime', [], null],
+  ['daemon-service', 'daemon service', ['terminal'], 'ashlr authority resident start'],
+  ['resident-runtime', 'resident runtime', ['terminal'], null],
 ];
 
 /**
  * GET /api/verse/authority/setup — every step before `next` in place, `next`
  * waiting on Mason, later steps planned; the daemon service waits and the
- * resident runtime is blocked by the build, as in every release today.
+ * resident runtime is blocked on a prerequisite (the grant, a clean release).
  * Default: everything up to the standing grant is done (a grant can be approved).
  */
 export function setupReport(next = 'standing-grant', over: Partial<Record<string, Partial<AuthoritySetupStepV1>>> = {}): AuthoritySetupReportV1 {

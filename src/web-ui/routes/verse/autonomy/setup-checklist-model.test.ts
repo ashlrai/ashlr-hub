@@ -41,6 +41,9 @@ describe('the checklist rows', () => {
     expect(nextCommand(setupReport('rulesets'))).toBe(SETUP_COMMAND);
     expect(nextCommand(setupReport('github-app', { 'github-app': { command: undefined } }))).toBe(SETUP_COMMAND);
     expect(nextCommand(setupReport('resident-runtime'))).toBeNull();
+    // A blocked step offers the command it names itself (the grant unblocks the resident step).
+    expect(nextCommand(setupReport('resident-runtime', { 'resident-runtime': { command: 'ashlr authority grant' } }))).toBe('ashlr authority grant');
+    expect(nextCommand(setupReport('daemon-service'))).toBe('ashlr authority resident start');
   });
 
   it('renders the CLI’s detail with its backticked commands as code, sentence-cased', () => {

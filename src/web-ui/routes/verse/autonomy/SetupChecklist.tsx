@@ -10,7 +10,7 @@
  *       ✓ Custody helper
  *       ● GitHub App                Browser · GitHub
  *       ○ Claude token              Terminal
- *       × Resident runtime          blocked by this build
+ *       × Resident runtime          blocked   Terminal
  *
  * The next step leads, with what it needs from you and the one action (the
  * caller's: a copyable command, or Approve grant). The full list folds away
@@ -28,7 +28,7 @@ const MARK_WORD: Readonly<Record<SetupRowMark, string>> = Object.freeze({
   done: 'done',
   next: 'next',
   todo: 'to do',
-  blocked: 'blocked by this build',
+  blocked: 'blocked',
   failed: 'failed',
 });
 
@@ -108,7 +108,8 @@ export function SetupChecklist({ report, action = null, open = false }: SetupChe
             <li key={row.id} className={styles.step} data-mark={row.mark} aria-current={row.mark === 'next' ? 'step' : undefined}>
               <Mark mark={row.mark} />
               <span className={styles.stepLabel}>{row.label}</span>
-              {row.mark === 'blocked' ? <span className={styles.stepNote}>blocked by this build</span> : row.mark !== 'done' ? <Needs needs={row.needs} /> : null}
+              {row.mark === 'blocked' ? <span className={styles.stepNote}>blocked</span> : null}
+              {row.mark !== 'done' ? <Needs needs={row.needs} /> : null}
               {row.mark === 'blocked' ? null : <span className={styles.visuallyHidden}>{` — ${MARK_WORD[row.mark]}`}</span>}
             </li>
           ))}
