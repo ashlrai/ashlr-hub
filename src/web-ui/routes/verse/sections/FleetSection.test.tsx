@@ -113,13 +113,13 @@ describe('FleetSection — lane chips', () => {
     expect(within(notes).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['Local, Grok, Claude: no grant.', 'Codex: off until its window resets.']);
   });
 
-  it('says the router\'s cap reasons in plain words — in the notes and the chip tooltips', async () => {
+  it('prints the server\'s plain-words cap reasons in the notes and the chip tooltips', async () => {
     const live = fleetLive('live');
     const lanes = [
-      { lane: 'local' as const, slots: 2, busy: 2, capReason: 'The local runtime serves 2 slot(s).' },
+      { lane: 'local' as const, slots: 2, busy: 2, capReason: 'The local runtime serves 2 slots.' },
       { lane: 'grok-cli' as const, slots: 2, busy: 2, capReason: null },
       { lane: 'claude-cli' as const, slots: 0, busy: 0, capReason: 'You are active (or presence is unknown), so the Claude producer slice is held for your own session.' },
-      { lane: 'codex' as const, slots: 0, busy: 0, capReason: 'Codex lanes stay off until the Leader enables them after the usage reset (a class-B action).' },
+      { lane: 'codex' as const, slots: 0, busy: 0, capReason: 'Codex stays off until the Leader turns it on after the usage reset (you can veto it).' },
     ];
     stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/fleet/live': { ...live, lanes } } });
     render(<FleetSection />);

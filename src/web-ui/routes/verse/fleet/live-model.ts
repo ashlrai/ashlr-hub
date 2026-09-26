@@ -56,9 +56,8 @@ export function laneReason(lane: FleetLaneState): string | null {
 }
 
 /**
- * Each distinct lane cap reason ONCE, with the lanes it covers, in plain
- * words (the router's "slot(s)" and "class-B action" never reach the
- * operator). A dark fleet gives every lane the same sentence; 3.10.0
+ * Each distinct lane cap reason ONCE, with the lanes it covers, in the plain
+ * words the server already wrote. A dark fleet gives every lane the same sentence; 3.10.0
  * repeated it inside every chip and truncated it there.
  */
 export function laneNotes(lanes: readonly FleetLaneState[]): LaneNote[] {
