@@ -339,6 +339,25 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.11.5] — 2026-09-26 UTC — keep account evidence honest through probe faults
+
+- Keep a verified account's last observed usage visible only for its original
+  freshness window when a native metadata probe fails. Show that the new check
+  failed and withhold usable/autonomous status until a fresh probe succeeds.
+- Expire retained readings at their original deadline and withdraw them on
+  account identity changes, sign-out or uncertain native process cleanup.
+- Treat individually expired shared readings and operator baselines as
+  historical evidence. Account cards and seat summaries no longer turn saved
+  credits or old percentages into a current access claim.
+- Start each nonoverlapping account probe cycle from its previous start time,
+  reducing false gaps in healthy Codex readings during slow provider checks.
+- Expire Claude and Grok readings between probes as well. Label retained
+  windows and credits as prior reports in the account card and detail view,
+  including accessible meter descriptions.
+- Honor local and shared collector denial signals while retaining unexpired
+  quota flags for context. Unknown or denied account evidence cannot become
+  autonomous routing headroom, even when a prior percentage is visible.
+
 ## [3.11.4] — 2026-09-26 UTC — verify cloud deliveries before showing them
 
 - Cloud tracking binds a delivery to the requested repository, base, head and

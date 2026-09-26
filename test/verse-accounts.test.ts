@@ -59,7 +59,7 @@ import {
   type VerseAccountCollector,
   type VerseCodexCredits,
 } from '../src/core/verse/accounts.js';
-import { discoverSeats, refreshSeatTelemetry, seatUsability } from '../src/core/verse/seats.js';
+import { buildSeatTelemetry, discoverSeats, refreshSeatTelemetry, seatUsability } from '../src/core/verse/seats.js';
 
 // ---------------------------------------------------------------------------
 // Fixture root
@@ -260,6 +260,9 @@ describe('verse accounts — evidence precedence', () => {
     const evidence = readVerseAccountEvidence(root);
     expect(evidence.source).toBe('baseline');
     expect(evidence.byAccount.get('claude')!.windows[0]!.usedPercent).toBe(12);
+    const snapshot = buildVerseAccountsSnapshot({ accountsRoot: root, collector: null });
+    expect(snapshot.accounts.find((a) => a.id === 'claude')).toMatchObject({ state: 'unavailable',
+      authentication: 'unknown', reason: 'baseline-historical', windows: [], observedAt: null });
     expect(evidence.byAccount.has('codex-a')).toBe(false);
     expect(readBaselineObservations(root).size).toBe(1);
   });
@@ -290,11 +293,76 @@ describe('verse accounts — evidence precedence', () => {
 
     const evidence = readVerseAccountEvidence(root);
     expect(evidence.source).toBe('shared-evidence');
+    expect(evidence.liveAccountIds.has('codex-a')).toBe(true);
     expect(evidence.ownerNote).toContain('read-only');
     // The live Codex reading arrived…
     expect(evidence.byAccount.get('codex-a')!.windows[0]!.usedPercent).toBe(42);
     // …and the seeded Claude baseline still survives underneath it.
     expect(evidence.byAccount.get('claude')!.windows[0]!.usedPercent).toBe(12);
+    const telemetry = buildSeatTelemetry(root, { collector: null });
+    expect(telemetry.get('codex-a')!.capacity.evidenceSource).toBe('shared-evidence');
+    expect(telemetry.get('claude')!.capacity.evidenceSource).toBe('baseline');
+    expect(telemetry.get('grok')!.capacity.evidenceSource).toBe('none');
+  });
+
+  it('honors a shared owner’s unavailable veto over a still-fresh prior Codex sample', async () => {
+    held = await acquireResourceQuotaRefreshLease(accountsLedgerRoot(root), { trackNativeActivity: true });
+    held.markPending();
+    publishSharedQuotaEvidence({ root: accountsLedgerRoot(root), pool: POOL as never, bindings: BINDINGS as never,
+      config: QUOTA_CONFIG as never, lease: held, state: 'running',
+      evidence: { observations: [freshObservation(4)] as never, unavailableWorkerIds: ['codex-a'] } });
+
+    const evidence = readVerseAccountEvidence(root);
+    expect(evidence.source).toBe('shared-evidence');
+    expect(evidence.liveAccountIds.has('codex-a')).toBe(true);
+    expect(evidence.unavailableAccountIds.has('codex-a')).toBe(true);
+    expect(evidence.byAccount.get('codex-a')!.windows[0]!.usedPercent).toBe(4);
+    const record = buildVerseAccountsSnapshot({ accountsRoot: root, collector: null }).accounts.find((a) => a.id === 'codex-a');
+    expect(record).toMatchObject({ state: 'unavailable', authentication: 'unknown',
+      reason: 'native-account-unavailable', observedAt: evidence.byAccount.get('codex-a')!.observedAt,
+      expiresAt: evidence.byAccount.get('codex-a')!.expiresAt,
+      windows: [{ usedPercent: 4 }], binding: { usedPercent: 4 } });
+    expect(Date.parse(record!.expiresAt!)).toBeGreaterThan(Date.now());
+    const capacity = buildSeatTelemetry(root, { collector: null }).get('codex-a')!.capacity;
+    expect(capacity.evidenceSource).toBe('shared-evidence');
+    expect(capacity.usability).toBe('unknown');
+  });
+
+  it('honors the local collector’s unavailable veto over its retained Codex sample', () => {
+    const owner: VerseAccountCollector = { ...warmCollector(root, []), connections: () => null,
+      observations: () => [freshObservation(4)], unavailableWorkerIds: () => ['codex-a'] };
+    const evidence = readVerseAccountEvidence(root, owner);
+    expect(evidence.source).toBe('collector');
+    expect(evidence.liveAccountIds.has('codex-a')).toBe(true);
+    expect(evidence.unavailableAccountIds.has('codex-a')).toBe(true);
+    expect(evidence.byAccount.get('codex-a')!.windows[0]!.usedPercent).toBe(4);
+    const record = buildVerseAccountsSnapshot({ accountsRoot: root, collector: owner }).accounts.find((a) => a.id === 'codex-a');
+    expect(record).toMatchObject({ state: 'unavailable', authentication: 'unknown',
+      reason: 'native-account-unavailable', windows: [{ usedPercent: 4 }], binding: { usedPercent: 4 } });
+    const capacity = buildSeatTelemetry(root, { collector: owner }).get('codex-a')!.capacity;
+    expect(capacity.evidenceSource).toBe('collector');
+    expect(capacity.usability).toBe('unknown');
+  });
+
+  it('does not revive an individually expired Codex sample from a fresh shared heartbeat', async () => {
+    held = await acquireResourceQuotaRefreshLease(accountsLedgerRoot(root), { trackNativeActivity: true });
+    held.markPending();
+    const now = Date.now();
+    const expired = { ...freshObservation(0), observedAt: new Date(now - 70_000).toISOString(),
+      expiresAt: new Date(now - 10_000).toISOString() };
+    publishSharedQuotaEvidence({ root: accountsLedgerRoot(root), pool: POOL as never, bindings: BINDINGS as never,
+      config: QUOTA_CONFIG as never, lease: held, state: 'running',
+      evidence: { observations: [expired] as never, unavailableWorkerIds: ['codex-a'] } });
+    const evidence = readVerseAccountEvidence(root);
+    expect(evidence.source).toBe('shared-evidence');
+    expect(evidence.liveAccountIds.has('codex-a')).toBe(false);
+    expect(evidence.unavailableAccountIds.has('codex-a')).toBe(false);
+    expect(evidence.byAccount.has('codex-a')).toBe(false);
+    const snapshot = buildVerseAccountsSnapshot({ accountsRoot: root, collector: null });
+    expect(snapshot.accounts.find((a) => a.id === 'codex-a')).toMatchObject({ state: 'unavailable',
+      authentication: 'unknown', windows: [], binding: null });
+    expect(snapshot.accounts.find((a) => a.id === 'claude')).toMatchObject({ state: 'unavailable',
+      reason: 'baseline-historical', windows: [] });
   });
 
   it('seats render the ledger reading — the file the V1 code never opened', async () => {
@@ -318,9 +386,10 @@ describe('verse accounts — evidence precedence', () => {
     ]);
     expect(codex.health.summary).toContain('codex_primary window 73% used');
 
-    // The seed is still the floor for accounts with no live reading.
+    // The old seed remains diagnostic evidence, never a current usage meter.
     const claude = discovery.seats.find((s) => s.id === 'claude')!;
-    expect(claude.health.windows[0]!.usedPercent).toBe(12);
+    expect(claude.health.windows).toEqual([]);
+    expect(claude.capacity?.usability).toBe('unknown');
 
     // The launcher is still the account's private identity.
     const wire = JSON.stringify(discovery.seats);
@@ -377,10 +446,11 @@ describe('verse accounts — collector lifecycle', () => {
     expect(snapshot.collector.mode).toBe('read-only');
     expect(snapshot.collector.reasonCode).toBe('collector-owned');
     expect(snapshot.accounts.map((a) => a.id)).toEqual(['codex-a', 'claude', 'grok']);
-    // Degraded records carry the reason, not a fabricated reading.
-    expect(snapshot.accounts.every((a) => a.reason === 'collector-owned')).toBe(true);
+    // The unavailable collector and historical seed each say what they are.
+    expect(snapshot.accounts.find((a) => a.id === 'codex-a')!.reason).toBe('collector-owned');
+    expect(snapshot.accounts.find((a) => a.id === 'claude')!.reason).toBe('baseline-historical');
     expect(snapshot.accounts.find((a) => a.id === 'codex-a')!.windows).toEqual([]);
-    expect(snapshot.accounts.find((a) => a.id === 'claude')!.windows[0]!.usedPercent).toBe(12);
+    expect(snapshot.accounts.find((a) => a.id === 'claude')!.windows).toEqual([]);
   });
 
   // ── Integration regression (V2.1) ───────────────────────────────────────
@@ -411,6 +481,7 @@ describe('verse accounts — collector lifecycle', () => {
       touch: () => {},
       connections: () => null,
       observations: () => [],
+      unavailableWorkerIds: () => [],
       credits: () => null,
       close: async () => {},
     };
@@ -824,7 +895,7 @@ describe('verse accounts — stranded native cleanup recovery', () => {
         lastPolledAt: '2026-09-20T06:24:21.061Z', lastRequestAt: '2026-09-20T06:24:21.061Z',
         note: VERSE_COLLECTOR_RECOVERING_NOTE,
       }),
-      touch: () => {}, connections: () => null, observations: () => [], credits: () => null,
+      touch: () => {}, connections: () => null, observations: () => [], unavailableWorkerIds: () => [], credits: () => null,
       close: async () => {},
     };
     const snapshot = buildVerseAccountsSnapshot({ accountsRoot: root, collector: recovering });
@@ -991,6 +1062,7 @@ function warmCollector(
     // Deliberately EMPTY: the Codex-only evidence path must not be what makes
     // these seats work, or the Claude/Grok bug comes straight back.
     observations: () => [],
+    unavailableWorkerIds: () => [],
     credits: (id: string) => credits[id] ?? null,
     close: async () => {},
   };
@@ -1235,5 +1307,13 @@ describe('verse seats — live collector is the source of seat health', () => {
       binding: { id: 'a', usedPercent: 94, limitReached: false },
       windows: [{ id: 'a', usedPercent: 94, resetsAt: null, nativeReport: null, limitReached: false, measured: true }],
     })).toBe('tight');
+    // A failed check may retain this same measured window for display, but
+    // it no longer proves current access or autonomy headroom.
+    expect(seatUsability({
+      ...base,
+      state: 'unavailable',
+      binding: { id: 'a', usedPercent: 4, limitReached: false },
+      windows: [{ id: 'a', usedPercent: 4, resetsAt: null, nativeReport: null, limitReached: false, measured: true }],
+    })).toBe('unknown');
   });
 });

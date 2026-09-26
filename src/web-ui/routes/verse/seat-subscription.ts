@@ -303,7 +303,10 @@ export function seatSubscription(seat: VerseSeat, now: number = Date.now()): Sea
     ? null
     : (windows.find((w) => w.id === served.id) ?? toWindowView(seat.engine, served, now));
   const others = binding === null ? windows : windows.filter((w) => w.id !== binding.id);
-  const credits = creditsPhrase(capacity.credits);
+  const lastReading = seat.health.state === 'degraded' && capacity.usability === 'unknown';
+  // A failed latest check leaves the old meter visible for context only.
+  // Session credits are likewise historical and must not imply spendability.
+  const credits = lastReading ? { phrase: null, title: null } : creditsPhrase(capacity.credits);
 
   const unavailable = seatUnavailableReason(seat);
   const cls: SeatCapacityClass = unavailable !== null ? 'blocked' : USABILITY_CLASS[capacity.usability];
@@ -333,6 +336,9 @@ export function seatSubscription(seat: VerseSeat, now: number = Date.now()): Sea
     // The one percent rule: "99%", never a rounded "100%" beside a "99%" bar.
     summary = `${percentText(binding.usedPercent)} of ${binding.label} used`;
   }
+  if (lastReading) summary = binding === null
+    ? 'No current capacity reading; current access unconfirmed'
+    : `Last verified reading: ${summary}; current access unconfirmed`;
 
   return {
     kind: 'subscription',

@@ -117,7 +117,12 @@ export interface AssessOptions {
 export function capacityFromSeat(seat: VerseSeat, liveCapacity?: VerseSeatCapacity | null): SeatCapacity {
   const free = seat.engine === 'local';
   const capacity = liveCapacity === undefined ? seat.capacity ?? null : liveCapacity;
-  const windows: CapacityWindow[] = free || !capacity ? [] : capacity.windows.map((w) => ({
+  // A failed account check may retain a verified window for display until its
+  // original expiry. Autonomy cannot spend against that prior reading.
+  const current = !free && capacity &&
+    (capacity.usability === 'ready' || capacity.usability === 'tight' || capacity.usability === 'exhausted')
+    ? capacity : null;
+  const windows: CapacityWindow[] = current === null ? [] : current.windows.map((w) => ({
     id: w.id,
     usedPercent: typeof w.usedPercent === 'number' && Number.isFinite(w.usedPercent)
       ? Math.max(0, Math.min(100, w.usedPercent))
@@ -139,7 +144,7 @@ export function capacityFromSeat(seat: VerseSeat, liveCapacity?: VerseSeatCapaci
     // question, not a reachability one.
     reachable: free ? true : signedOut ? false : null,
     contextWindow: typeof seat.contextWindow === 'number' && seat.contextWindow > 0 ? seat.contextWindow : null,
-    observedAt: free ? null : capacity?.observedAt ?? seat.health.observedAt ?? null,
+    observedAt: current === null ? null : current.observedAt ?? seat.health.observedAt ?? null,
     spentTodayUsd: null,
   };
 }

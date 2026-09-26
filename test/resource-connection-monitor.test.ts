@@ -71,6 +71,67 @@ describe('explicit connection configuration', () => {
 });
 
 describe('native metadata monitoring', () => {
+  it('keeps a verified Codex window for display across transient failures, without renewing its expiry or auth', async () => {
+    const handle = start({ config: config(['codex']) }); await settle();
+    const observed = handle.snapshot().accounts[0]!;
+    expect(observed).toMatchObject({ state: 'observed', authentication: 'signed-in', windows: quota(), observedAt: NOW, expiresAt: EXPIRES });
+
+    probes.codex.mockResolvedValue({ status: 'timed-out', reason: 'probe-timed-out' });
+    await vi.advanceTimersByTimeAsync(30_000);
+    const retained = handle.snapshot().accounts[0]!;
+    expect(retained).toMatchObject({ state: 'unavailable', authentication: 'unknown', health: 'unavailable',
+      reason: 'probe-timed-out', windows: quota(), observedAt: NOW, expiresAt: EXPIRES });
+    expect(JSON.stringify(retained)).not.toContain(HINT);
+    expect(JSON.stringify(retained)).not.toContain('/private/inert-fixture');
+
+    // A read at the exact expiry must clear the meter even before the next
+    // scheduled probe has settled. Repeated failures cannot extend its TTL.
+    vi.setSystemTime(EXPIRES);
+    expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'unavailable', authentication: 'unknown',
+      windows: [], observedAt: null, expiresAt: null, reason: 'connection-reading-expired' });
+  });
+
+  it('withdraws expired Claude and Grok readings before the next native cycle settles', async () => {
+    const handle = start({ config: config(['claude', 'grok']) }); await settle();
+    for (const row of handle.snapshot().accounts) expect(row).toMatchObject({ state: 'observed', authentication: 'signed-in' });
+    // Snapshot is a read-only projection, so an expiry between cycles must not
+    // wait for a future native probe to stop claiming current access.
+    vi.setSystemTime(EXPIRES);
+    for (const row of handle.snapshot().accounts) expect(row).toMatchObject({
+      state: 'unavailable', authentication: 'unknown', health: 'unknown', planType: null,
+      windows: [], observedAt: null, expiresAt: null, reason: 'connection-reading-expired',
+    });
+  });
+
+  it('does not resurrect a verified Codex window after repeat failures or identity change', async () => {
+    const extended = '2026-09-08T12:02:00.000Z';
+    probes.codex.mockResolvedValueOnce({ ...codex(), observation: { observedAt: NOW, expiresAt: extended, windows: quota() } });
+    const handle = start({ config: config(['codex']) }); await settle();
+    probes.codex.mockResolvedValue({ status: 'failed', reason: 'probe-process-failed' });
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'unavailable', windows: quota(), expiresAt: extended,
+      reason: 'probe-process-failed' });
+    probes.codex.mockResolvedValue({ status: 'failed', reason: 'probe-account-hint-mismatch' });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'unavailable', windows: [], observedAt: null,
+      reason: 'probe-account-hint-mismatch' });
+    probes.codex.mockResolvedValue({ status: 'timed-out', reason: 'probe-timed-out' });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(handle.snapshot().accounts[0]!.windows).toEqual([]);
+  });
+
+  it('replaces a degraded Codex reading only after a fresh successful probe', async () => {
+    const handle = start({ config: config(['codex']) }); await settle();
+    probes.codex.mockResolvedValueOnce({ status: 'failed', reason: 'probe-native-unavailable' })
+      .mockResolvedValueOnce({ ...codex(), observation: { observedAt: '2026-09-08T12:01:00.000Z',
+        expiresAt: '2026-09-08T12:02:00.000Z', windows: [{ id: 'primary', usedPercent: 29, resetsAt: EXPIRES }] } });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'unavailable', windows: quota() });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'observed', authentication: 'signed-in',
+      observedAt: '2026-09-08T12:01:00.000Z', windows: [{ usedPercent: 29 }] });
+  });
   it.each(['codex', 'claude', 'grok'] as const)('forwards the durable lifecycle into %s without publishing it', async (provider) => {
     const processGroupLifecycle = { prepare: vi.fn() }; const settled = vi.fn();
     const coordinator = createNativeMetadataCoordinator({
@@ -220,6 +281,58 @@ describe('native metadata monitoring', () => {
     await vi.advanceTimersByTimeAsync(90_000); expect(probes.codex).toHaveBeenCalledTimes(2);
     releases.splice(0).forEach((release) => release()); await settle(); expect(probes.codex).toHaveBeenCalledTimes(3);
     releases.splice(0).forEach((release) => release()); await settle(); expect(handle.snapshot().refreshing).toBe(false);
+  });
+  it('starts the next full pass relative to its start so a slow healthy Codex reading stays fresh', async () => {
+    probes.codex.mockImplementation(() => {
+      const observedAt = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 60_000).toISOString();
+      return new Promise((resolve) => setTimeout(() => resolve({ ...codex(),
+        observation: { observedAt, expiresAt, windows: quota() } }), 10_000));
+    });
+    probes.claude.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve(claude()), 20_000)));
+    probes.grok.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve(grok()), 15_000)));
+    const handle = start({ config: config(['codex', 'codex', 'claude', 'grok']) });
+    await vi.advanceTimersByTimeAsync(30_000); // first 10s pair + 20s pair
+    expect(probes.codex).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_000); // bounded 1s overrun pause
+    expect(probes.codex).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(29_000);
+    expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'observed',
+      observedAt: '2026-09-08T12:00:31.000Z', expiresAt: '2026-09-08T12:01:31.000Z' });
+    await vi.advanceTimersByTimeAsync(1_000); // finish the second pass before close
+  });
+
+  it('does not overlap an overrun under coordinator contention and reports expiry until recovery', async () => {
+    const coordinator = createNativeMetadataCoordinator({ maxConcurrent: 1 });
+    let active = 0; let peak = 0;
+    const delayed = <T>(make: () => T, delay: number): Promise<T> => {
+      active++; peak = Math.max(peak, active);
+      return new Promise((resolve) => setTimeout(() => { active--; resolve(make()); }, delay));
+    };
+    probes.codex.mockImplementation(() => {
+      const observedAt = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 60_000).toISOString();
+      return delayed(() => ({ ...codex(), observation: { observedAt, expiresAt, windows: quota() } }), 10_000);
+    });
+    probes.claude.mockImplementation(() => delayed(claude, 20_000));
+    probes.grok.mockImplementation(() => delayed(grok, 15_000));
+    const handle = start({ config: config(['codex', 'codex', 'claude', 'grok']), coordinator });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(probes.codex).toHaveBeenCalledTimes(2); // still in the first pass
+    expect(peak).toBe(1);
+    await vi.advanceTimersByTimeAsync(25_000); // first pass ends at 55s
+    expect(probes.codex).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_000); // 1s pause, then second pass
+    expect(probes.codex).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(4_000); // original first reading expires at 60s
+    expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'unavailable', windows: [],
+      reason: 'connection-reading-expired' });
+    await vi.advanceTimersByTimeAsync(6_000); // new first reading settles at 66s
+    expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'observed',
+      observedAt: '2026-09-08T12:00:56.000Z' });
+    expect(peak).toBe(1);
+    await vi.advanceTimersByTimeAsync(45_000); // finish second pass before close
+    coordinator.dispose();
   });
   it('close aborts in-flight work, awaits cleanup and prevents future probes', async () => {
     let cancelled = false;

@@ -57,6 +57,26 @@ function detail(model: AccountCardModel, onClose = vi.fn()): void {
 }
 
 describe('AccountDetail', () => {
+  it('keeps retained windows and credits as historical evidence when access is unconfirmed', () => {
+    detail(card({
+      id: 'codex-a',
+      label: 'Codex A',
+      evidence: { ...card({ id: 'x' }).evidence, state: 'unavailable', authentication: 'unknown' },
+      verdict: { state: 'unknown', headline: 'Last reading', detail: 'Current access unconfirmed.', code: 'probe-timed-out' },
+      allWindows: [
+        window({ id: 'primary', usedPct: 86, resetText: 'resets tomorrow' }),
+        window({ id: 'secondary', limitReached: true, measured: false }),
+      ],
+      credits: { hasCredits: true, unlimited: false, balance: '2', balanceValue: 2 },
+    }));
+    expect(screen.getByText('Last reported windows (2)')).toBeInTheDocument();
+    const meter = screen.getByRole('meter', { name: 'Codex A primary prior reading used' });
+    expect(meter).toHaveAttribute('aria-valuetext', 'Prior reading: 86% used, prior report: resets tomorrow; current access unconfirmed');
+    expect(screen.getByRole('img', { name: /Codex A secondary: prior reading; the provider flagged/ })).toBeInTheDocument();
+    expect(screen.getByText('Last reported credits')).toBeInTheDocument();
+    expect(screen.getByText(/Prior balance for context only; current access and spendability are unconfirmed/)).toBeInTheDocument();
+  });
+
   it('shows every window, not just the binding one', () => {
     detail(
       card({
@@ -138,6 +158,23 @@ describe('AccountDetail', () => {
 });
 
 describe('AccountCard — the card head is the control that opens the detail', () => {
+  it('labels a retained meter and credit balance as prior readings', () => {
+    render(<AccountCard card={card({
+      id: 'codex-a',
+      label: 'Codex A',
+      evidence: { ...card({ id: 'x' }).evidence, state: 'unavailable', authentication: 'unknown' },
+      verdict: { state: 'unknown', headline: 'Last reading', detail: 'Current access unconfirmed.', code: 'probe-timed-out' },
+      binding: window({ id: 'primary', usedPct: 86, resetText: 'resets tomorrow' }),
+      credits: { hasCredits: true, unlimited: false, balance: '2', balanceValue: 2 },
+    })} />);
+    expect(screen.getByText('Last reported window')).toBeInTheDocument();
+    expect(screen.queryByText('Binding constraint')).not.toBeInTheDocument();
+    expect(screen.getByRole('meter', { name: 'Codex A primary prior reading used' })).toHaveAttribute('aria-valuetext', expect.stringContaining('current access unconfirmed'));
+    expect(screen.getByText('Prior report: resets tomorrow')).toBeInTheDocument();
+    expect(screen.getByText('Last reported credits')).toBeInTheDocument();
+    expect(screen.queryByText(/spendable even when the window is full/)).not.toBeInTheDocument();
+  });
+
   it('exposes the head as a keyboard-reachable expander tied to the detail region', async () => {
     const onOpen = vi.fn();
     render(

@@ -42,7 +42,7 @@ const VERDICT_TONE: Record<AccountVerdictState, Tone> = {
   unknown: 'unknown',
 };
 
-function CreditsRow({ credits }: { credits: AccountCardModel['credits'] }): ReactNode {
+function CreditsRow({ credits, historical }: { credits: AccountCardModel['credits']; historical: boolean }): ReactNode {
   if (!credits) return null;
   const value = credits.unlimited
     ? 'unlimited'
@@ -54,12 +54,14 @@ function CreditsRow({ credits }: { credits: AccountCardModel['credits'] }): Reac
 
   return (
     <div className={styles.creditsRow}>
-      <span className={styles.figureLabel}>Credits</span>
+      <span className={styles.figureLabel}>{historical ? 'Last reported credits' : 'Credits'}</span>
       <span className={styles.num} title={credits.balance ?? undefined}>
         {value ?? 'not reported'}
       </span>
       <p className={styles.reason}>
-        Separate from the window above — spendable even when the window is full.
+        {historical
+          ? 'Prior balance for context only; current access and spendability are unconfirmed.'
+          : 'Separate from the window above — spendable even when the window is full.'}
       </p>
     </div>
   );
@@ -82,6 +84,7 @@ export function AccountCard({
   const engineStyle = { '--engine-color': card.color } as CSSProperties;
   const showReconnect = card.verdict.state === 'signed-out';
   const openable = onOpen !== undefined && card.hasDetail;
+  const historical = card.evidence.state !== 'observed';
 
   const head = (
     <>
@@ -134,20 +137,20 @@ export function AccountCard({
 
       {card.binding ? (
         <>
-          <span className={styles.bindingLabel}>Binding constraint</span>
-          <WindowMeter view={card.binding} ariaPrefix={card.label} prominent />
+          <span className={styles.bindingLabel}>{historical ? 'Last reported window' : 'Binding constraint'}</span>
+          <WindowMeter view={card.binding} ariaPrefix={card.label} prominent historical={historical} />
         </>
       ) : null}
 
       {card.others.length > 0 ? (
         <div className={styles.windows}>
           {card.others.map((w) => (
-            <WindowMeter key={w.id} view={w} ariaPrefix={card.label} />
+            <WindowMeter key={w.id} view={w} ariaPrefix={card.label} historical={historical} />
           ))}
         </div>
       ) : null}
 
-      <CreditsRow credits={card.credits} />
+      <CreditsRow credits={card.credits} historical={historical} />
 
       {showReconnect ? (
         <div className={styles.actionBlock}>

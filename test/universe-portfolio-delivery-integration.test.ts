@@ -95,7 +95,10 @@ describe.runIf(process.platform === 'darwin')('portfolio local delivery acceptan
     expect(replay.outcomes.every((outcome) => !outcome.attempted)).toBe(true);
     expect(readUniverseOverview(f).universes.map((universe) => universe.runs)).toEqual(beforeRuns);
     expect(['a', 'b'].map((id) => readUniverseDeliveries(`universe-${id}`, f))).toEqual(beforeDeliveries);
-  }, 30_000);
+  // Two complete local deliveries and their replay use real Git subprocesses.
+  // On a loaded Mac this path completes around 34s; the old 30s deadline
+  // expired even though the same case passed when given time to finish.
+  }, 60_000);
 
   it('delivers an already completed campaign without rerunning it before starting its dependant', async () => {
     const f = fixture(); const before = await runUniverseCampaign('campaign-a', f);

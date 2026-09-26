@@ -296,10 +296,16 @@ export interface VerseAccountObservation {
     limitReached?: true;
   }>;
   observedAt: string | null;
+  /** Original native expiry; an owner heartbeat never extends it. */
+  expiresAt?: string | null;
 }
 
 export interface VerseAccountEvidence {
   byAccount: Map<string, VerseAccountObservation>;
+  /** Accounts with an individually unexpired native observation, including denied rows. */
+  liveAccountIds: ReadonlySet<string>;
+  /** A current owner veto: retained windows are display evidence, not authority. */
+  unavailableAccountIds: ReadonlySet<string>;
   source: VerseEvidenceSource;
   /** Non-null when another process owns the collector. */
   ownerNote: string | null;
@@ -437,7 +443,12 @@ export function readVerseAccountsConfig(accountsRoot: string, pollIntervalMs?: n
 
 function toObservationMap(rows: ResourceObservation[]): Map<string, VerseAccountObservation> {
   const out = new Map<string, VerseAccountObservation>();
+  const now = Date.now();
   for (const row of rows) {
+    // The shared file's five-second heartbeat proves its OWNER is alive, not
+    // that each older native sample is still current. Never renew a row here.
+    if (Date.parse(row.observedAt) > now || !Number.isFinite(Date.parse(row.expiresAt)) ||
+      Date.parse(row.expiresAt) <= now || row.windows.length === 0) continue;
     out.set(row.workerId, {
       health: row.health,
       // V3.10 — KEEP THE FLAG. This is the evidence path (in-process collector
@@ -448,6 +459,7 @@ function toObservationMap(rows: ResourceObservation[]): Map<string, VerseAccount
       windows: row.windows.map((w) => ({ id: w.id, usedPercent: w.usedPercent, resetsAt: w.resetsAt,
         ...(w.limitReached ? { limitReached: true as const } : {}) })),
       observedAt: row.observedAt,
+      expiresAt: row.expiresAt,
     });
   }
   return out;
@@ -524,8 +536,15 @@ export function readVerseAccountEvidence(
   if (collector && collector.accountsRoot === accountsRoot) {
     const live = collector.observations();
     if (live.length > 0) {
+      // The owner retains its last measured rows across probe failures. Its
+      // current admission veto must win over those rows here as well as in the
+      // shared publication read by another process.
+      const unavailable = new Set(collector.unavailableWorkerIds());
+      const fresh = toObservationMap(live);
       return {
-        byAccount: overlayObservations(baseline, toObservationMap(live)),
+        byAccount: overlayObservations(baseline, fresh),
+        liveAccountIds: new Set(fresh.keys()),
+        unavailableAccountIds: new Set([...fresh.keys()].filter((id) => unavailable.has(id))),
         source: 'collector',
         ownerNote: null,
       };
@@ -541,8 +560,15 @@ export function readVerseAccountEvidence(
         bindings: config.bindings,
         config: config.quota,
       });
+      // The shared owner may retain a prior native observation after a probe
+      // fails. Its unavailable-worker veto outranks that still-unexpired row;
+      // the row is history, not proof that this account is usable now.
+      const unavailable = new Set(evidence.unavailableWorkerIds);
+      const fresh = toObservationMap(evidence.observations);
       return {
-        byAccount: overlayObservations(baseline, toObservationMap(evidence.observations)),
+        byAccount: overlayObservations(baseline, fresh),
+        liveAccountIds: new Set(fresh.keys()),
+        unavailableAccountIds: new Set([...fresh.keys()].filter((id) => unavailable.has(id))),
         source: 'shared-evidence',
         ownerNote: 'Another collector owns the native metadata lease; these readings are read-only.',
       };
@@ -553,6 +579,8 @@ export function readVerseAccountEvidence(
 
   return {
     byAccount: baseline,
+    liveAccountIds: new Set(),
+    unavailableAccountIds: new Set(),
     source: baseline.size > 0 ? 'baseline' : 'none',
     ownerNote: null,
   };
@@ -871,23 +899,30 @@ export function deriveVerseAccountRecordFromEvidence(
   identity: VerseAccountIdentity,
   observation: VerseAccountObservation | null,
   reason: string,
+  historical = false,
+  unavailable = false,
 ): VerseAccountRecord {
-  const windows = (observation?.windows ?? []).map((w) => mapWindow(identity.provider, w));
+  // Operator-seeded baselines have no native expiry witness. Keep them in the
+  // evidence reader for diagnostics, but never publish them as current meters.
+  const windows = historical ? [] : (observation?.windows ?? []).map((w) => mapWindow(identity.provider, w));
   const health: ResourceAccountConnection['health'] =
-    observation?.health === 'ready' ? 'reachable' : observation ? 'unavailable' : 'unknown';
-  const base = { state: 'unavailable' as const, health, reason, windows, credits: null };
+    historical ? 'unknown' : unavailable ? 'unavailable'
+      : observation?.health === 'ready' ? 'reachable' : observation ? 'unavailable' : 'unknown';
+  const evidenceReason = historical && observation ? 'baseline-historical'
+    : unavailable ? 'native-account-unavailable' : reason;
+  const base = { state: 'unavailable' as const, health, reason: evidenceReason, windows, credits: null };
   return {
     id: identity.id,
     label: identity.label,
     provider: identity.provider,
-    state: observation ? 'observed' : 'unavailable',
+    state: observation && !historical && !unavailable ? 'observed' : 'unavailable',
     authentication: 'unknown',
     health,
     planType: null,
-    observedAt: observation?.observedAt ?? null,
-    expiresAt: null,
+    observedAt: historical ? null : observation?.observedAt ?? null,
+    expiresAt: historical ? null : observation?.expiresAt ?? null,
     windows,
-    reason,
+    reason: evidenceReason,
     onDemandEnabled: null,
     executionSupported: identity.provider !== 'grok',
     credits: null,
@@ -941,6 +976,8 @@ export interface VerseAccountCollector {
   connections(): ResourceConnectionsSnapshot | null;
   /** Live Codex observations (NOT merged with the baseline — the caller merges). */
   observations(): ResourceObservation[];
+  /** Current account/transport vetoes, including failures after a prior sample. */
+  unavailableWorkerIds(): string[];
   /** Codex credits by account id, best effort. */
   credits(accountId: string): VerseCodexCredits | null;
   close(): Promise<void>;
@@ -1441,6 +1478,13 @@ export async function startVerseAccountCollector(
       if (refresher) lastObservations = refresher.readObservations([]);
       return lastObservations;
     },
+    unavailableWorkerIds: () => {
+      // A suspended generation can retain historical observations in memory;
+      // without its owner refresher none may become current evidence.
+      const all = config?.quota?.workers.map((row) => row.workerId) ?? [];
+      if (!refresher) return all;
+      try { return refresher.unavailableWorkerIds(true); } catch { return all; }
+    },
     credits: (accountId: string) => {
       if (creditsCache.has(accountId)) return creditsCache.get(accountId) ?? null;
       const root = sessionRoots.get(accountId);
@@ -1557,6 +1601,8 @@ export function buildVerseAccountsSnapshot(options: {
       identity,
       evidence.byAccount.get(id) ?? null,
       degradedReason,
+      !evidence.liveAccountIds.has(id),
+      evidence.unavailableAccountIds.has(id),
     ));
   }
 

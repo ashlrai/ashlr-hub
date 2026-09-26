@@ -77,6 +77,7 @@ export function AccountDetail({
 }): ReactNode {
   const { evidence } = card;
   const credits = card.credits;
+  const historical = evidence.state !== 'observed';
 
   // Move focus to the heading when this opens, and again when the selection
   // moves to a different account.
@@ -124,7 +125,7 @@ export function AccountDetail({
       <div className={styles.detailGrid}>
         <div className={styles.detailColumn}>
           <span className={styles.figureLabel}>
-            All windows ({card.allWindows.length})
+            {historical && card.allWindows.length > 0 ? 'Last reported windows' : 'All windows'} ({card.allWindows.length})
           </span>
           {card.allWindows.length === 0 ? (
             <p className={styles.reason}>
@@ -138,6 +139,7 @@ export function AccountDetail({
                   view={w}
                   ariaPrefix={card.label}
                   prominent={i === 0}
+                  historical={historical}
                 />
               ))}
             </div>
@@ -189,7 +191,7 @@ export function AccountDetail({
 
           {credits ? (
             <div className={styles.creditsRow}>
-              <span className={styles.figureLabel}>Credits</span>
+              <span className={styles.figureLabel}>{historical ? 'Last reported credits' : 'Credits'}</span>
               <span className={styles.num} title={credits.balance ?? undefined}>
                 {credits.unlimited
                   ? 'unlimited'
@@ -198,7 +200,9 @@ export function AccountDetail({
                     : (credits.balance ?? 'not reported')}
               </span>
               <p className={styles.reason}>
-                Separate from the windows above; shown as the provider reports it.
+                {historical
+                  ? 'Prior balance for context only; current access and spendability are unconfirmed.'
+                  : 'Separate from the windows above; shown as the provider reports it.'}
               </p>
             </div>
           ) : null}

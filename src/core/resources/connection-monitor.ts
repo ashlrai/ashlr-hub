@@ -16,6 +16,7 @@ export interface ResourceConnectionConfig {
 }
 export interface ResourceConnectionMonitor { snapshot(): ResourceConnectionsSnapshot; close(): Promise<void> }
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const MIN_OVERDUE_CYCLE_PAUSE_MS = 1_000;
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 }
@@ -64,9 +65,26 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
     provider: row.provider, state: 'checking', authentication: 'unknown', health: 'unknown', planType: null,
     observedAt: null, expiresAt: null, windows: [], reason: 'connection-not-checked', onDemandEnabled: null, executionSupported: row.provider !== 'grok' });
   let rows = config.accounts.map(blank);
-  const projectStopped = () => { rows = rows.map((row) => ({ ...row, state: 'unavailable', authentication: 'unknown',
-    health: 'unknown', windows: [], reason: 'connection-monitor-stopped' })); };
+  // Only a successful, account-checked Codex probe may supply a retained
+  // window. A failed check can display that prior reading until its original
+  // expiry, but it cannot renew the reading or attest current authentication.
+  const lastVerifiedCodex: Array<ResourceAccountConnection | null> = config.accounts.map(() => null);
+  const projectStopped = () => { lastVerifiedCodex.fill(null); rows = rows.map((row) => ({ ...row, state: 'unavailable', authentication: 'unknown',
+    health: 'unknown', planType: null, observedAt: null, expiresAt: null, windows: [], reason: 'connection-monitor-stopped' })); };
   abort.signal.addEventListener('abort', projectStopped, { once: true });
+  const transientCodexReasons = new Set(['probe-native-unavailable', 'probe-native-exit-failed', 'probe-provider-error',
+    'probe-server-request-refused', 'probe-protocol-invalid', 'probe-output-limit', 'probe-quota-invalid',
+    'probe-process-failed', 'probe-process-output-invalid', 'probe-timed-out']);
+  function fresh(row: ResourceAccountConnection | null): row is ResourceAccountConnection {
+    return row !== null && row.observedAt !== null && row.expiresAt !== null && row.windows.length > 0 &&
+      Number.isFinite(Date.parse(row.expiresAt)) && Date.parse(row.expiresAt) > Date.now();
+  }
+  function retained(index: number, reason: string): ResourceAccountConnection | null {
+    const previous = lastVerifiedCodex[index] ?? null;
+    if (!fresh(previous)) return null;
+    return { ...previous, state: 'unavailable', authentication: 'unknown', health: 'unavailable',
+      planType: null, onDemandEnabled: null, reason };
+  }
   function owns(): void {
     try { options.assertOwnership(); }
     catch { uncertain = true; options.coordinator?.abort(); abort.abort(); throw new Error('Connection ownership unavailable'); }
@@ -116,6 +134,13 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
           hints.set(account.id, result.accountHint);
           row = { ...row, state: 'observed', authentication: 'signed-in', health: 'reachable', planType: result.planType,
             observedAt: result.observation.observedAt, expiresAt: result.observation.expiresAt, windows: result.observation.windows };
+          lastVerifiedCodex[index] = row;
+        } else if ((result.status === 'failed' || result.status === 'timed-out') && transientCodexReasons.has(result.reason)) {
+          row = retained(index, result.reason) ?? row;
+        } else {
+          // A changed/missing account, unsupported auth, or uncertain cleanup
+          // invalidates the identity proof immediately, regardless of TTL.
+          lastVerifiedCodex[index] = null;
         }
       } else if (account.provider === 'claude') {
         const result = await native((processGroupLifecycle) => probeClaudeAccountUsage({ command: account.command, cwd: options.cwd,
@@ -148,6 +173,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
     if (!closing && !abort.signal.aborted) rows[index] = row;
   }
   async function cycle(): Promise<void> {
+    const startedAt = Date.now();
     refreshing = true;
     try {
       // At most two simultaneous native clients; no overlapping refresh cycles.
@@ -157,14 +183,27 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
     } finally {
       refreshing = false;
       if (abort.signal.aborted) projectStopped();
-      if (!closing && !abort.signal.aborted) timer = setTimeout(() => { pending = cycle(); }, config.intervalMs);
+      if (!closing && !abort.signal.aborted) {
+        // A 60s Codex observation can expire if we wait intervalMs AFTER a
+        // 20–30s full pass. Start-to-start cadence keeps it fresh when probes
+        // settle promptly; a positive pause prevents a tight loop on overrun.
+        const delay = Math.max(MIN_OVERDUE_CYCLE_PAUSE_MS, config.intervalMs - (Date.now() - startedAt));
+        timer = setTimeout(() => { pending = cycle(); }, delay);
+      }
     }
   }
   const stopped = () => { abort.abort(); if (timer) clearTimeout(timer); };
   if (signal?.aborted) stopped(); else signal?.addEventListener('abort', stopped, { once: true });
   if (!abort.signal.aborted) pending = cycle();
   return {
-    snapshot: () => ({ sampledAt: new Date().toISOString(), refreshing, accounts: structuredClone(rows) }),
+    snapshot: () => ({ sampledAt: new Date().toISOString(), refreshing, accounts: structuredClone(rows.map((row) => {
+      // A slow cycle or coordinator queue can cross any provider's native
+      // expiry before its replacement settles. Expiry never renews a reading;
+      // signed-out rows carry no usable observation and remain signed out.
+      if (row.state === 'signed-out' || row.expiresAt === null || Date.parse(row.expiresAt) > Date.now()) return row;
+      return { ...row, state: 'unavailable', authentication: 'unknown', health: 'unknown', planType: null,
+        observedAt: null, expiresAt: null, windows: [], reason: 'connection-reading-expired' };
+    })) }),
     async close() { closing = true; stopped(); signal?.removeEventListener('abort', stopped); await pending;
       rows = rows.map((row) => ({ ...row, health: 'unknown' }));
       if (uncertain) throw new Error('Native connection process cleanup uncertain'); },
