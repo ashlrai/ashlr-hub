@@ -1,7 +1,6 @@
 import { mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { performance } from 'node:perf_hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AshlrConfig } from '../src/core/types.js';
 
@@ -203,55 +202,18 @@ describe('M423 control-plane lock order', () => {
     },
   );
 
-  it('holds outward authority through an unresolved Director LLM phase', async () => {
-    const llm = Promise.withResolvers<{ ok: boolean; output: string }>();
-    directorMocks.spawnEngine.mockReturnValueOnce(llm.promise);
+  // 3.14: the Director is retired (the Leader is the one brain). Its cycle no
+  // longer calls a model or publishes anything, so it has no outward phase to
+  // hold authority through — and it must never block a pause.
+  it('the retired Director cycle calls no model, publishes nothing and never blocks a pause', async () => {
     const cfg = {
       comms: { director: true, telegram: { botToken: 'test', chatId: 'm423' } },
       foundry: { managerJudgeEngine: 'claude', allowedBackends: ['claude'] },
     } as unknown as AshlrConfig;
 
-    const running = runDirectorCycle(cfg);
-    await vi.waitFor(() => expect(directorMocks.spawnEngine).toHaveBeenCalledOnce());
-
-    const startedAt = performance.now();
-    const whileHeld = setKill(true, { waitMs: 60 });
-    const waitedMs = performance.now() - startedAt;
-    expect(whileHeld).toMatchObject({ ok: false, quiesced: false });
-    expect(waitedMs).toBeGreaterThanOrEqual(40);
-
-    llm.resolve({ ok: true, output: directorDecision });
-    await running;
+    await runDirectorCycle(cfg);
+    expect(directorMocks.spawnEngine).not.toHaveBeenCalled();
     expect(directorMocks.sendTelegram).not.toHaveBeenCalled();
-    expect(directorMocks.postRequest).not.toHaveBeenCalled();
-    expect(setKill(true, { waitMs: 500 })).toMatchObject({ ok: true, quiesced: true });
-  });
-
-  it('holds outward authority through Telegram and suppresses later publication after pause', async () => {
-    const telegramStarted = Promise.withResolvers<void>();
-    const releaseTelegram = Promise.withResolvers<{ ok: boolean }>();
-    directorMocks.sendTelegram.mockImplementationOnce(() => {
-      telegramStarted.resolve();
-      return releaseTelegram.promise;
-    });
-
-    const cfg = {
-      comms: { director: true, telegram: { botToken: 'test', chatId: 'm423' } },
-      foundry: { managerJudgeEngine: 'claude', allowedBackends: ['claude'] },
-    } as unknown as AshlrConfig;
-    const running = runDirectorCycle(cfg);
-    await telegramStarted.promise;
-
-    const startedAt = performance.now();
-    const whileHeld = setKill(true, { waitMs: 60 });
-    const waitedMs = performance.now() - startedAt;
-
-    expect(whileHeld).toMatchObject({ ok: false, quiesced: false });
-    expect(waitedMs).toBeGreaterThanOrEqual(40);
-    expect(directorMocks.postRequest).not.toHaveBeenCalled();
-
-    releaseTelegram.resolve({ ok: true });
-    await running;
     expect(directorMocks.postRequest).not.toHaveBeenCalled();
     expect(setKill(true, { waitMs: 500 })).toMatchObject({ ok: true, quiesced: true });
   });

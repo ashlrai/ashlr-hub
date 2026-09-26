@@ -1654,6 +1654,13 @@ export interface AshlrConfig {
      */
     proactive?: boolean;
     /**
+     * M257 Director switch. @deprecated 3.14 — the Director is retired
+     * (comms/director.ts): the Leader is the one strategic brain and talks
+     * to Mason through the Leader thread. Kept so existing configs still
+     * parse; it turns nothing on (the web status line reports it as set).
+     */
+    director?: boolean;
+    /**
      * M214: OTLP endpoint for fleet-pulse emit (GenAI-OTel spans).
      * Takes precedence over PULSE_OTLP_URL env and cfg.pulse.endpoint.
      * Example: 'https://pulse.example.com' (no trailing slash).

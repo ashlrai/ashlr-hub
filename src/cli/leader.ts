@@ -10,6 +10,19 @@
  *   ashlr leader oversight-plist --print [--bin P]  print (never install) the
  *                                            nightly ai.ashlr.oversight plist
  *
+ * 3.14 — talk to the Leader (vision/leader-thread.ts; the same thread Verse
+ * and Telegram use):
+ *   ashlr leader say "<text>"                 say something; prints the reply
+ *   ashlr leader thread [--limit n] [--json]  the conversation, oldest first
+ *   ashlr leader answer <questionId> "<text>" answer one of the memo's questions
+ *   ashlr leader approve <actionId>           approve a pending action (class B
+ *                                            applies now only if the grant
+ *                                            still allows it; dry run / class C
+ *                                            are recorded, never applied)
+ *   ashlr leader directives [list] [--all] [--json]
+ *   ashlr leader directives add "<text>" [--kind focus|stop|priority|guidance]
+ *   ashlr leader directives retire <directiveId>
+ *
  * `run` spends at most one Leader call on a seat the router allows (with no
  * standing grant: a free local model or nothing). `veto` only lowers what
  * autonomy is doing. Exit codes: 0 success, 1 error / refused, 2 bad usage.
@@ -25,7 +38,14 @@ Usage:
   ashlr leader tick [--wait]
   ashlr leader veto <actionId> [--note "why"]
   ashlr leader veto --memo <memoId> [--note "why"]
-  ashlr leader oversight-plist --print [--bin /path/to/ashlr]`;
+  ashlr leader oversight-plist --print [--bin /path/to/ashlr]
+  ashlr leader say "<text>"
+  ashlr leader thread [--limit n] [--json]
+  ashlr leader answer <questionId> "<text>"
+  ashlr leader approve <actionId>
+  ashlr leader directives [list] [--all] [--json]
+  ashlr leader directives add "<text>" [--kind focus|stop|priority|guidance]
+  ashlr leader directives retire <directiveId>`;
 
 function flag(args: string[], name: string): boolean {
   const i = args.indexOf(name);
@@ -205,6 +225,140 @@ async function runOversightPlist(args: string[]): Promise<number> {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// The thread (3.14)
+// ---------------------------------------------------------------------------
+
+type ThreadModule = typeof import('../core/vision/leader-thread.js');
+
+function printThreadMessage(m: import('../core/vision/leader-thread.js').LeaderThreadMessage): void {
+  const who = m.from === 'mason' ? 'You' : 'Leader';
+  const tag = m.kind === 'message' ? '' : ` [${m.kind}${m.questionId ? ` ${m.questionId}` : ''}]`;
+  console.log(`${m.at.slice(0, 16).replace('T', ' ')} ${who} (${m.channel})${tag} ${m.id}`);
+  for (const l of m.text.split('\n')) console.log(`  ${l}`);
+}
+
+/** Thread errors are the caller's (bad id, empty text): exit 1 with the reason, never a stack. */
+async function threadCall(thread: ThreadModule, fn: () => Promise<number> | number): Promise<number> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err instanceof thread.LeaderThreadError) {
+      console.error(err.message);
+      return err.code === 400 ? 2 : 1;
+    }
+    throw err;
+  }
+}
+
+async function runThreadCli(sub: string, args: string[]): Promise<number> {
+  const thread = await import('../core/vision/leader-thread.js');
+  if (sub === 'say') {
+    const text = args.join(' ').trim();
+    if (text.length === 0) {
+      console.error(USAGE);
+      return 2;
+    }
+    return threadCall(thread, async () => {
+      const result = await thread.appendMasonMessage(text, { channel: 'cli', cfg: loadConfig() });
+      if (result.directive) console.log(`Standing directive recorded: ${result.directive.id} (${result.directive.kind}) ${result.directive.text}`);
+      if (result.reply) console.log(result.reply.text);
+      return 0;
+    });
+  }
+  if (sub === 'thread') {
+    const json = flag(args, '--json');
+    const limitOpt = option(args, '--limit');
+    if (limitOpt === undefined || args.length > 0 || (limitOpt !== null && !/^\d{1,3}$/.test(limitOpt))) {
+      console.error(USAGE);
+      return 2;
+    }
+    return threadCall(thread, () => {
+      const messages = thread.listThread(limitOpt === null ? {} : { limit: Number(limitOpt) });
+      if (json) console.log(JSON.stringify({ messages }, null, 2));
+      else if (messages.length === 0) console.log('No messages yet. Say something: ashlr leader say "…"');
+      else for (const m of messages) printThreadMessage(m);
+      return 0;
+    });
+  }
+  if (sub === 'answer') {
+    const questionId = args.shift();
+    const text = args.join(' ').trim();
+    if (!questionId || text.length === 0) {
+      console.error(USAGE);
+      return 2;
+    }
+    return threadCall(thread, async () => {
+      const result = await thread.answerLeaderQuestion(questionId, text, { channel: 'cli', cfg: loadConfig() });
+      console.log(`Answer recorded for ${questionId}.`);
+      if (result.reply) console.log(result.reply.text);
+      return 0;
+    });
+  }
+  if (sub === 'approve') {
+    const actionId = args.shift();
+    if (!actionId || args.length > 0) {
+      console.error(USAGE);
+      return 2;
+    }
+    return threadCall(thread, async () => {
+      const result = await thread.approveLeaderAction(actionId, { channel: 'cli', cfg: loadConfig() });
+      console.log(result.message);
+      return result.ok ? 0 : 1;
+    });
+  }
+  return runDirectivesCli(args);
+}
+
+async function runDirectivesCli(args: string[]): Promise<number> {
+  const operator = await import('../core/vision/leader-operator.js');
+  const action = args[0] && !args[0].startsWith('--') ? args.shift()! : 'list';
+  if (action === 'list') {
+    const all = flag(args, '--all');
+    const json = flag(args, '--json');
+    if (args.length > 0) {
+      console.error(USAGE);
+      return 2;
+    }
+    const directives = operator.listOperatorDirectives({ includeRetired: all });
+    if (json) console.log(JSON.stringify({ directives }, null, 2));
+    else if (directives.length === 0) console.log('No standing directives. Add one: ashlr leader directives add "focus on …"');
+    else for (const d of directives) console.log(`  ${d.id} [${d.kind}]${d.retiredAt ? ` (retired ${d.retiredAt.slice(0, 10)})` : ''} ${d.text}`);
+    return 0;
+  }
+  if (action === 'add') {
+    const kindOpt = option(args, '--kind');
+    const text = args.join(' ').trim();
+    if (kindOpt === undefined || text.length === 0 || (kindOpt !== null && !operator.isOperatorDirectiveKind(kindOpt))) {
+      console.error(USAGE);
+      return 2;
+    }
+    const result = operator.addOperatorDirective({ kind: (kindOpt ?? 'guidance') as import('../core/vision/leader-operator.js').OperatorDirectiveKind, text, source: 'direct', channel: 'cli' });
+    if (!result.ok) {
+      console.error(result.reason);
+      return result.code === 400 ? 2 : 1;
+    }
+    console.log(`${result.duplicate ? 'Already in force' : 'Recorded'}: ${result.directive.id} [${result.directive.kind}] ${result.directive.text}`);
+    return 0;
+  }
+  if (action === 'retire') {
+    const id = args.shift();
+    if (!id || args.length > 0) {
+      console.error(USAGE);
+      return 2;
+    }
+    const result = operator.retireOperatorDirective(id, 'cli');
+    if (!result.ok) {
+      console.error(result.reason);
+      return result.code === 400 ? 2 : 1;
+    }
+    console.log(`Retired: ${result.directive.id} ${result.directive.text}`);
+    return 0;
+  }
+  console.error(USAGE);
+  return 2;
+}
+
 export async function runLeaderCli(argv: string[]): Promise<number> {
   const args = [...argv];
   const sub = args.shift();
@@ -214,6 +368,7 @@ export async function runLeaderCli(argv: string[]): Promise<number> {
   }
   // Before the core import: printing a plist needs no Leader state.
   if (sub === 'oversight-plist') return runOversightPlist(args);
+  if (sub === 'say' || sub === 'thread' || sub === 'answer' || sub === 'approve' || sub === 'directives') return runThreadCli(sub, args);
   const leader = await import('../core/vision/leader.js');
 
   if (sub === 'show') {

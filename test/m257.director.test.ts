@@ -13,8 +13,9 @@
  *  9.  buildDirectorContext — derives resourcePosture 'local-only' when all frontier exhausted
  * 10.  runDirectorCycle — no-op when cfg.comms.director is false (default)
  * 11.  runDirectorCycle — no-op when cfg.comms.director is absent
- * 12.  runDirectorCycle — parses mocked LLM decision → calls sendTelegramMessage with digest
- * 13.  runDirectorCycle — posts postRequest('decision-needed') for each escalation
+ * 12.  runDirectorCycle — RETIRED (3.14): even with cfg.comms.director=true it
+ *      makes no model call and sends no Telegram digest (the Leader is the one brain)
+ * 13.  runDirectorCycle — RETIRED: posts no decision-needed requests
  * 14.  runDirectorCycle — no goal mutation (createGoal never called)
  * 15.  runDirectorCycle — never throws even when LLM call throws
  * 16.  runDirectorCycle — never throws even when sendTelegramMessage throws
@@ -593,18 +594,15 @@ describe('M257 — Elon Director', () => {
   // ── runDirectorCycle — live path ────────────────────────────────────────
 
   describe('runDirectorCycle — live path', () => {
-    it('12. parses mocked LLM decision and calls sendTelegramMessage with digest', async () => {
+    it('12. is retired: no model call and no Telegram digest even with cfg.comms.director=true (3.14)', async () => {
       const { runDirectorCycle } = await import('../src/core/comms/director.js');
       await runDirectorCycle(makeConfig(true) as never);
 
-      expect(mockSendTelegramMessage).toHaveBeenCalledOnce();
-      const [digestText] = mockSendTelegramMessage.mock.calls[0] as [string, ...unknown[]];
-      expect(typeof digestText).toBe('string');
-      expect(digestText).toContain('Fleet brief');
-      expect(digestText).toContain('phantom team-vaults');
+      expect(mockBuildComplete).not.toHaveBeenCalled();
+      expect(mockSendTelegramMessage).not.toHaveBeenCalled();
     });
 
-    it('13. posts postRequest(decision-needed) for each escalation', async () => {
+    it('13. is retired: posts no decision-needed requests (3.14)', async () => {
       mockBuildComplete.mockResolvedValue({
         ok: true,
         output: DECISION_WITH_ESCALATIONS,
@@ -613,11 +611,7 @@ describe('M257 — Elon Director', () => {
       const { runDirectorCycle } = await import('../src/core/comms/director.js');
       await runDirectorCycle(makeConfig(true) as never);
 
-      expect(mockPostRequest).toHaveBeenCalledOnce();
-      const [reqArg] = mockPostRequest.mock.calls[0] as [{ kind: string; type: string; text: string }];
-      expect(reqArg.kind).toBe('decision-needed');
-      expect(reqArg.type).toBe('question');
-      expect(reqArg.text).toContain('binshield');
+      expect(mockPostRequest).not.toHaveBeenCalled();
     });
 
     it('14. never calls createGoal (no goal mutation in M257)', async () => {
@@ -662,13 +656,14 @@ describe('M257 — Elon Director', () => {
       expect(mockSendTelegramMessage).not.toHaveBeenCalled();
     });
 
-    it('19. handles LLM parse failure gracefully', async () => {
-      mockBuildComplete.mockResolvedValue({ ok: true, output: 'not valid json {{{' });
+    it('19. is read-only: the snapshot, no model call, and a pointer to the Leader', async () => {
       const { runDirectorDryRun } = await import('../src/core/comms/director.js');
       const output = await runDirectorDryRun(makeConfig(true) as never);
 
       expect(typeof output).toBe('string');
       expect(output).toContain('GOD-VIEW');
+      expect(output).toContain('ashlr leader');
+      expect(mockBuildComplete).not.toHaveBeenCalled();
       expect(mockSendTelegramMessage).not.toHaveBeenCalled();
     });
 
