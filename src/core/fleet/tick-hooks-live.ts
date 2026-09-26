@@ -101,6 +101,7 @@ import {
 } from '../learn/harness-registry.js';
 import type { AutonomousBestOfNPlan } from '../run/best-of-n-policy.js';
 import type { MirrorTickPreparation } from './mirrors.js';
+import type { CloudIntakeMirror, CloudIntakeResult } from './cloud-intake.js';
 import { overnightRunInProgress } from '../daemon/overnight-status.js';
 import { readLeaderDirectives } from '../vision/leader-apply.js';
 import { killSwitchOn, listEnrolled } from '../sandbox/policy.js';
@@ -271,6 +272,12 @@ export interface LiveHooksDeps {
   audit(entry: { action: string; repo: string | null; summary: string; result: 'ok' | 'refused' | 'error' }): void;
   /** U6 `prepareMirrorsForTick`: create / reset the stage's mirrors. */
   prepareMirrors(policy: EffectivePolicy): Promise<MirrorTickPreparation>;
+  /**
+   * 3.13 fleet/cloud-intake.ts `ingestCloudPrs` over this tick's CURRENT
+   * mirrors: cloud / self-improvement PRs become pending proposals the
+   * standing pass (later this tick) judges like any other.
+   */
+  ingestCloudPrs(cfg: AshlrConfig, policy: EffectivePolicy, mirrors: readonly CloudIntakeMirror[]): Promise<CloudIntakeResult>;
   /** U6 `reconcileAutonomousEnrollment`, applied only when its plan is non-empty. */
   reconcileEnrollment(policy: EffectivePolicy, enrolled: readonly string[]): Promise<EnrollmentReconcile>;
   /** U4 `sweepExpiredRepoHolds`. */
@@ -309,6 +316,8 @@ export const HOLD_SWEEP_INTERVAL_MS = 10 * 60_000;
  * source must not hold the fleet tick hostage.
  */
 export const LEADER_TICK_TIMEOUT_MS = 15_000;
+/** Bound on the cloud-PR intake per standing tick (it keeps running if it overruns; the tick does not wait). */
+export const CLOUD_INTAKE_TICK_TIMEOUT_MS = 90_000;
 /** An idle / overnight tick asks the experiment queue at most this often. */
 export const EXPERIMENT_POLL_INTERVAL_MS = 5 * 60_000;
 /** In-memory dedupe of credited verification verdicts (the ledger read is seq-based; this only guards re-reads). */
@@ -649,6 +658,7 @@ export function defaultLiveHooksDeps(): LiveHooksDeps {
       } catch { /* audit is best effort */ }
     },
     prepareMirrors: async (policy) => (await import('./mirrors.js')).prepareMirrorsForTick(policy),
+    ingestCloudPrs: async (cfg, policy, mirrors) => (await import('./cloud-intake.js')).ingestCloudPrs(cfg, policy, { mirrors }),
     reconcileEnrollment: reconcileEnrollmentDefault,
     sweepHolds: (nowMs) => {
       const swept = sweepExpiredRepoHolds({ nowMs });
@@ -1124,9 +1134,11 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       // the grant's repo list — only when the plan says something changes.
       let mirrorProblem: string | null = null;
       const mirrorPaused: { path: string; repo: string; reason: string }[] = [];
+      let readyMirrors: MirrorTickPreparation['ready'] = [];
       if (!hookCtx.dryRun) {
         try {
           const prep = await deps.prepareMirrors(policy);
+          readyMirrors = prep.ready;
           for (const failed of prep.failed) {
             if (!failed.path) continue;
             mirrorPaused.push({ path: failed.path, repo: failed.nameWithOwner, reason: `Its mirror is not current (${failed.reason}).` });
@@ -1159,6 +1171,39 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
           } catch (err) {
             deps.audit({ action: 'daemon:autonomous-enrollment', repo: null, summary: `enrollment could not be reconciled: ${describeError(err)}`, result: 'error' });
           }
+        }
+      }
+
+      // ── Cloud-PR intake (3.13) ───────────────────────────────────────────
+      // After the mirrors are current and BEFORE this tick's standing merge
+      // pass: a cloud / self-improvement PR on a current mirror becomes a
+      // pending proposal the pass judges through G0–G7 like any other, and a
+      // cloud PR the pass already superseded with its App PR is closed. Bounded
+      // in time; a failure is audited and never holds the tick.
+      if (!hookCtx.dryRun && mirrorProblem === null && readyMirrors.length > 0 && !deps.killActive()) {
+        const intakeRun = deps.ingestCloudPrs(cfg, policy, readyMirrors);
+        intakeRun.catch(() => undefined);
+        try {
+          const intake = await withTimeout(intakeRun, CLOUD_INTAKE_TICK_TIMEOUT_MS);
+          if (intake === 'timeout') {
+            deps.audit({ action: 'daemon:cloud-intake', repo: null, summary: `the cloud-PR intake exceeded ${CLOUD_INTAKE_TICK_TIMEOUT_MS} ms; the tick continues without waiting`, result: 'error' });
+          } else {
+            // Per-head refusals are remembered on the task, so each is audited
+            // once; grant / mirror refusals (no head) would repeat every tick.
+            const notable = intake.outcomes.filter((o) => o.action === 'ingested' || o.action === 'superseded'
+              || (o.action === 'refused' && o.headSha !== undefined) || o.code === 'error');
+            if (notable.length > 0) {
+              deps.audit({
+                action: 'daemon:cloud-intake',
+                repo: null,
+                summary: `cloud intake: ${intake.ingested} ingested, ${intake.superseded} superseded, ${intake.refused} refused — `
+                  + notable.slice(0, 5).map((o) => `${o.taskId} ${o.code}${o.proposalId ? ` → ${o.proposalId}` : ''}${o.appPr ? ` (#${o.appPr})` : ''}`).join('; '),
+                result: notable.some((o) => o.code === 'error') ? 'error' : 'ok',
+              });
+            }
+          }
+        } catch (err) {
+          deps.audit({ action: 'daemon:cloud-intake', repo: null, summary: `the cloud-PR intake failed: ${describeError(err)}`, result: 'error' });
         }
       }
 

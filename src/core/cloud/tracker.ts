@@ -14,9 +14,22 @@
  *   expired  → pr-open | merged | closed   (a late PR, within EXPIRED_WATCH_MS)
  *   closed   → pr-open                      (the same verified PR reopened within the watch window)
  *   queued | launching → failed            (a launch interrupted by a restart)
+ *
+ * 3.13 — superseded tasks. When the standing-pass intake (fleet/cloud-intake.ts)
+ * has closed the cloud PR in favour of the ashlr-fleet App PR, the task
+ * records `supersededBy` and stays `pr-open`; from then on the tracker follows
+ * THAT PR instead of the (closed) cloud PR:
+ *   App PR open    → pr-open  ("superseded by fleet PR #N")
+ *   App PR merged  → merged   (so the backlog item is done for good — a
+ *                              `closed` task would be released for another
+ *                              attempt after CLOUD_BACKLOG_RETRY_MS)
+ *   App PR closed  → closed   (the gates or Mason did not land it)
+ * The App PR must be in the task's repo, at its canonical URL, on a fleet
+ * branch (`ashlr/fleet/…`); anything else is left unchanged.
  */
 import { tmpdir } from 'node:os';
 
+import { FLEET_BRANCH_PREFIX } from '../fleet/host-merge.js';
 import { defaultGitRunner } from '../verse/git-ops.js';
 import { parseCloudReport } from './delivery-contract.js';
 import { listCloudTasks, readCloudTask, writeCloudTask } from './store.js';
@@ -165,6 +178,51 @@ function clearUnverifiedDelivery(task: CloudTaskV1, reason: string): boolean {
   }
 }
 
+/** Where a superseded task stands, from the App PR's state (see the header). */
+function supersededStateFor(number: number, state: 'OPEN' | 'MERGED' | 'CLOSED'): { state: CloudTaskState; reason: string } {
+  if (state === 'MERGED') return { state: 'merged', reason: `Landed through the standing gates as fleet PR #${number}.` };
+  if (state === 'CLOSED') return { state: 'closed', reason: `Fleet PR #${number} was closed without merging.` };
+  return { state: 'pr-open', reason: `Superseded by fleet PR #${number}; it lands through the standing gates.` };
+}
+
+/**
+ * Follow the fleet App PR that superseded the task's cloud PR. An unreadable
+ * or foreign answer changes nothing (the task keeps its last verified state).
+ */
+async function followSupersedingPr(
+  task: CloudTaskV1,
+  gh: NonNullable<CloudTrackerDeps['gh']>,
+): Promise<boolean> {
+  const by = task.supersededBy!;
+  let result: { ok: boolean; stdout: string };
+  try {
+    result = await gh(['pr', 'view', String(by.number), '--repo', by.repo, '--json', 'number,url,state,headRefName']);
+  } catch {
+    return false;
+  }
+  if (!result.ok) return false;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(result.stdout);
+  } catch {
+    return false;
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  const pr = raw as Record<string, unknown>;
+  if (pr['number'] !== by.number
+    || by.repo.toLowerCase() !== task.repo.toLowerCase()
+    || typeof pr['url'] !== 'string' || pr['url'].toLowerCase() !== canonicalPrUrl(task, by.number).toLowerCase()
+    || typeof pr['headRefName'] !== 'string' || !pr['headRefName'].startsWith(FLEET_BRANCH_PREFIX)
+    || !['OPEN', 'MERGED', 'CLOSED'].includes(pr['state'] as string)) return false;
+  const { state, reason } = supersededStateFor(by.number, pr['state'] as 'OPEN' | 'MERGED' | 'CLOSED');
+  if (state === task.state && reason === task.stateReason) return false;
+  try {
+    return commit(task, { ...task, state, stateReason: reason, failure: null });
+  } catch {
+    return false;
+  }
+}
+
 /** A stable last-id cursor prevents the newest 50 persistent tasks from starving older tasks. */
 let lastCheckedTaskId: string | null = null;
 function watchedForRefresh(tasks: readonly CloudTaskV1[], nowMs: number): CloudTaskV1[] {
@@ -207,6 +265,10 @@ export async function refreshCloudTasks(deps: CloudTrackerDeps = {}): Promise<{ 
 
   for (const task of watchedForRefresh(tasks, nowMs)) {
     checked += 1;
+    if (task.supersededBy) {
+      if (await followSupersedingPr(task, gh)) updated += 1;
+      continue;
+    }
     let result: { ok: boolean; stdout: string; stderr: string };
     try {
       result = await gh(['pr', 'list', '--repo', task.repo, '--head', task.branch, '--state', 'all',
