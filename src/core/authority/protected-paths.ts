@@ -85,6 +85,13 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/daemon/loop.ts',
   'src/core/daemon/post-merge-halt.ts',
   'src/core/daemon/liveness.ts',
+  // Resident service (docs/RESIDENT-RUNTIME.md): the only launchd mutation
+  // path (installResidentService claims authority/resident.ts's capability),
+  // the legacy deny-only boundary, and the config → plist mapping (budget,
+  // interval, parallel) — each decides what launchd runs unattended.
+  'src/core/daemon/service.ts',
+  'src/core/daemon/service-install-authority.ts',
+  'src/core/daemon/service-config.ts',
   // Merge and fleet
   'src/core/inbox/merge.ts',
   'src/core/fleet/automerge-pass.ts',
