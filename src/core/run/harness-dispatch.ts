@@ -38,13 +38,26 @@
  * is on PATH — is resolved by the caller and passed in.)
  */
 import type { FleetEngine } from '../fleet/fleet-types.js';
-import { HARNESS_CONFIG_BOUNDS } from '../learn/harness-registry.js';
 import type { HarnessEffort, HarnessSampling } from '../learn/harness-types.js';
 import type { EngineCommand } from '../types.js';
 import { compareCliVersions } from '../verse/model-windows.js';
 import { CLAUDE_EFFORT_MIN_CLI } from '../verse/session-controls.js';
 
 const HARNESS_EFFORT_LEVELS: ReadonlySet<string> = new Set<HarnessEffort>(['low', 'medium', 'high', 'xhigh', 'max']);
+
+/**
+ * The registry's sampling bounds (learn/harness-registry.ts
+ * HARNESS_CONFIG_BOUNDS; a test pins the two together). Restated, not
+ * imported: a runtime edge from this producer-side module to the registry
+ * reorders module evaluation across the authority graph (measured: it broke
+ * test/authority-api-310b's authority/surface mock — host-mismatch on grant).
+ * This module keeps runtime imports to the light verse helpers only.
+ */
+export const DISPATCH_SAMPLING_BOUNDS = Object.freeze({
+  temperature: Object.freeze({ min: 0, max: 2 }),
+  topP: Object.freeze({ min: 0.01, max: 1 }),
+  maxOutputTokens: Object.freeze({ min: 256, max: 128_000 }),
+} as const);
 
 /** The slice of an active harness a dispatch carries (per fleet lane). */
 export interface DispatchHarness {
@@ -108,7 +121,7 @@ export function harnessTuningFor(engine: string, harness: DispatchHarness | null
   const rawEffort: unknown = harness.effort?.[lane] ?? null;
   const effort = typeof rawEffort === 'string' && HARNESS_EFFORT_LEVELS.has(rawEffort) ? rawEffort as HarnessEffort : null;
   const sampling = harness.sampling?.[lane] ?? null;
-  const b = HARNESS_CONFIG_BOUNDS;
+  const b = DISPATCH_SAMPLING_BOUNDS;
   const tuning: EngineHarnessTuning = {
     versionId: harness.versionId,
     lane,

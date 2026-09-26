@@ -33,11 +33,13 @@ import { buildEngineCommand } from '../src/core/run/engines.js';
 import {
   applyHarnessToEngineCommand,
   describeHarnessApplication,
+  DISPATCH_SAMPLING_BOUNDS,
   harnessApiModelRequest,
   harnessLaneOf,
   harnessTuningFor,
   type DispatchHarness,
 } from '../src/core/run/harness-dispatch.js';
+import { HARNESS_CONFIG_BOUNDS } from '../src/core/learn/harness-registry.js';
 import { buildOpenAICompatibleClient } from '../src/core/run/provider-client.js';
 import type { AshlrConfig, EngineCommand, EngineId } from '../src/core/types.js';
 
@@ -129,6 +131,14 @@ describe('applyHarnessToEngineCommand — engine-specific flags on the real regi
     const out = applyHarnessToEngineCommand('codex', cmd, harnessTuningFor('codex', harness({ effort: { codex: 'high' } })));
     expect(out.cmd).toBe(cmd);
     expect(out.application.withheld).toEqual(['effort: the codex command has no `exec` subcommand to carry -c']);
+  });
+
+  it('restates the registry\'s sampling bounds exactly (one fact, two places)', () => {
+    expect(DISPATCH_SAMPLING_BOUNDS).toEqual({
+      temperature: HARNESS_CONFIG_BOUNDS.temperature,
+      topP: HARNESS_CONFIG_BOUNDS.topP,
+      maxOutputTokens: HARNESS_CONFIG_BOUNDS.maxOutputTokens,
+    });
   });
 
   it('treats an effort or sampling value off the registry vocabulary / bounds as unset', () => {
