@@ -278,10 +278,75 @@ describe('capacity publisher', () => {
     expect(readCapacitySnapshot()!.seats).toHaveLength(4);
   });
 
-  it('a failing capacity source is a 500 on read, with no detail leaked', async () => {
+  it('a failing capacity source is a named 503 on every read, with no detail leaked', async () => {
     setBudgetCapacitySourceForTest(async () => { throw new Error(`secret at ${home}`); });
-    const res = await fetch(`${base}/api/verse/budget`);
-    expect(res.status).toBe(500);
-    expect(await res.text()).not.toContain(home);
+    for (const p of ['/api/verse/budget', '/api/verse/budget/preview']) {
+      const res = await fetch(`${base}${p}`);
+      expect(res.status).toBe(503);
+      const text = await res.text();
+      expect(text).not.toContain(home);
+      expect(text).not.toContain('secret');
+      expect(JSON.parse(text)).toEqual({
+        code: 'VERSE_BUDGET_CAPACITY_UNREADABLE',
+        error: 'Could not read seat capacity: the account collector did not answer.',
+      });
+    }
+  });
+});
+
+describe('read failures are forwarded, not swallowed', () => {
+  const policyFile = () => path.join(home, '.ashlr', 'budget.json');
+  const decisionsFile = () => path.join(home, '.ashlr', 'routing', 'decisions.jsonl');
+
+  it('GET: an unreadable policy file is a 503 with the plain reason, not the defaults', async () => {
+    fs.mkdirSync(path.dirname(policyFile()), { recursive: true });
+    fs.writeFileSync(policyFile(), '{ not json', { mode: 0o600 });
+    const { status, body } = await get<{ code: string; error: string }>('/api/verse/budget');
+    expect(status).toBe(503);
+    expect(body.code).toBe('VERSE_STORE_UNREADABLE');
+    expect(body.error).toBe('Could not read the budget policy: the file is not valid JSON. Fix it or move it aside to start from the defaults.');
+    expect(JSON.stringify(body)).not.toContain(home);
+    // The preview routes on the same policy, so it refuses the same way.
+    expect((await get<{ code: string }>('/api/verse/budget/preview')).body.code).toBe('VERSE_STORE_UNREADABLE');
+  });
+
+  it('GET: a missing policy file is still the defaults (a fresh install is not an error)', async () => {
+    const { status, body } = await get<BudgetView>('/api/verse/budget');
+    expect(status).toBe(200);
+    expect(body.mode).toBe('balanced');
+  });
+
+  it('POST: the write refusal for an unreadable policy is a 503 naming the reason, never a bare 500 or the path', async () => {
+    fs.mkdirSync(path.dirname(policyFile()), { recursive: true });
+    fs.writeFileSync(policyFile(), JSON.stringify({ mode: 'from-the-future' }), { mode: 0o600 });
+    const { status, body } = await post<{ code: string; error: string }>({ mode: 'reserve' });
+    expect(status).toBe(503);
+    expect(body.code).toBe('VERSE_STORE_UNREADABLE');
+    expect(body.error).toMatch(/^Could not read the budget policy: the file has a mode this build does not know\. Nothing was saved/);
+    expect(JSON.stringify(body)).not.toContain(home);
+    expect(JSON.stringify(body)).not.toContain('budget.json');
+  });
+
+  it('decisions: an unreadable log is a 503, a missing one is an empty list', async () => {
+    expect(await get('/api/verse/budget/decisions')).toEqual({ status: 200, body: { decisions: [] } });
+    // A directory where the log should be: open succeeds, it is not a file.
+    fs.mkdirSync(decisionsFile(), { recursive: true });
+    const { status, body } = await get<{ code: string; error: string }>('/api/verse/budget/decisions');
+    expect(status).toBe(503);
+    expect(body).toEqual({
+      code: 'VERSE_BUDGET_DECISIONS_UNREADABLE',
+      error: 'Could not read the routing decision log: the file is not a regular file.',
+    });
+    // The attributor's reader stays total.
+    expect(readShadowDecisions(5)).toEqual([]);
+  });
+
+  it('decisions: a symlinked log is refused by name', async () => {
+    fs.mkdirSync(path.dirname(decisionsFile()), { recursive: true });
+    fs.writeFileSync(path.join(home, 'elsewhere.jsonl'), '');
+    fs.symlinkSync(path.join(home, 'elsewhere.jsonl'), decisionsFile());
+    const { status, body } = await get<{ code: string; error: string }>('/api/verse/budget/decisions');
+    expect(status).toBe(503);
+    expect(body.error).toBe('Could not read the routing decision log: the file is a symlink.');
   });
 });

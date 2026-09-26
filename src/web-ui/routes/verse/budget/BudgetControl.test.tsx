@@ -331,4 +331,39 @@ describe('BudgetControl (connected, real query layer)', () => {
     render(<BudgetControl />);
     expect(await screen.findByRole('alert')).toHaveTextContent(/Budget unavailable/);
   });
+
+  // budget-api.ts answers a read it could not make with 503 { code, error };
+  // the panel used to print "GET /api/verse/budget failed (HTTP 503)." — a
+  // URL, not a cause.
+  it('a failed read shows the server’s reason, not the request URL', async () => {
+    installFetch(() => json({
+      code: 'VERSE_STORE_UNREADABLE',
+      error: 'Could not read the budget policy: the file is not valid JSON. Fix it or move it aside to start from the defaults.',
+    }, 503));
+    render(<BudgetControl />);
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Budget unavailable: Could not read the budget policy: the file is not valid JSON.');
+    expect(alert).not.toHaveTextContent(/HTTP|\/api\//);
+  });
+
+  it('a refresh that fails keeps the last readings AND says they are old, with the reason', async () => {
+    let failing = false;
+    installFetch((call) => {
+      if (failing && call.path === '/api/verse/budget') {
+        return json({ code: 'VERSE_BUDGET_CAPACITY_UNREADABLE', error: 'Could not read seat capacity: the account collector did not answer.' }, 503);
+      }
+      if (call.path === '/api/verse/budget' && call.method === 'GET') return json(view());
+      if (call.path.startsWith('/api/verse/budget/preview')) return json(PREVIEW);
+      return json({ error: 'not found' }, 404);
+    });
+    render(<BudgetControl />);
+    expect(await screen.findByText('Claude Code')).toBeInTheDocument();
+    expect(screen.queryByText(/Could not refresh/)).toBeNull();
+    failing = true;
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    const notice = await screen.findByText(/Could not refresh the budget/);
+    expect(notice).toHaveTextContent('Could not refresh the budget, so these are the last readings. Could not read seat capacity: the account collector did not answer.');
+    // The bars are still there — a failed refresh is not "no seats".
+    expect(screen.getByText('Claude Code')).toBeInTheDocument();
+  });
 });

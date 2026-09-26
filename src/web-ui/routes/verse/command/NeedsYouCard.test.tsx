@@ -12,7 +12,7 @@ import { activity, approvalNeed } from '../shell/shell-fixtures.test-support.js'
 import type { ActivityState } from '../shell/useActivity.js';
 import type { ConfirmSpec, SurfaceActions } from './actions.js';
 import { needsYouItems } from './fixtures.test-support.js';
-import { cardKindLabel, NeedsYouCard, type SeatNames } from './NeedsYouCard.js';
+import { activityRead, cardKindLabel, NeedsYouCard, type SeatNames } from './NeedsYouCard.js';
 
 const DAY = 86_400_000;
 const RAW_TITLE = 'patch: claude run: Advance goal "Add a circuit breaker to binshield\'s worker scan pipeline so a deg';
@@ -166,5 +166,14 @@ describe('NeedsYouCard names seats and engines as every other surface does', () 
     expect(cardKindLabel('Patch')).toBe('Patch');
     expect(cardKindLabel('Dry run')).toBe('Dry run');
     expect(cardKindLabel(null)).toBeNull();
+  });
+});
+
+describe('activityRead', () => {
+  it('a first poll that failed names the server’s reason; only a clean 404 is "not in this build"', () => {
+    const failed = activityRead({ status: 'unavailable', data: null, updatedAt: null, error: 'Could not read activity: building the answer failed.' });
+    expect(failed.reason).toBe('Could not read the Needs-you inbox. Could not read activity: building the answer failed.');
+    const missing = activityRead({ status: 'unavailable', data: null, updatedAt: null, error: null });
+    expect(missing.reason).toMatch(/not in this build yet/);
   });
 });

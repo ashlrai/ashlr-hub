@@ -635,7 +635,7 @@ export function ChatSection() {
         onSelect={selectFromList} onNew={() => openNewChat()}
         onRetry={() => { refetchSessions(); refetchBootstrap(); }}
         onCollapse={() => setVerseSidebarCollapsed(true)} onDisconnect={() => { void clearReadSession(); }}
-        activity={chatActivity.activity} meta={chatActivity.meta} localSeen={chatActivity.localSeen} actions={actions} />
+        activity={chatActivity.activity} meta={chatActivity.meta} metaError={chatActivity.metaError} localSeen={chatActivity.localSeen} actions={actions} />
       </Suspense>
       {sidebarCollapsed ? null : <ChatResizer side="sidebar" label="Resize chat list" className={styles.resize} />}
       {/* At phone width the sidebar floats over the transcript; the scrim dismisses it. */}

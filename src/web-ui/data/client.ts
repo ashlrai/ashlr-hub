@@ -46,6 +46,20 @@ export class DispatchDisabledError extends ApiError {
   }
 }
 
+/**
+ * The plain reason a READ failed, for a surface to print after "Could not
+ * read X:". Routes that fail a read answer `{ code, error }` with `error` a
+ * sentence written for the operator (budget-api.ts, activity-api.ts), which
+ * apiGet keeps as `detail`; prefer it over our own "GET … failed (HTTP N)"
+ * wrapper, which names a URL instead of the cause. Fits ChartFrame's
+ * `{ kind: 'unknown', reason }` and a NoticeSlot line alike.
+ */
+export function readFailureReason(err: unknown): string {
+  if (err instanceof ApiError) return err.detail ?? `The server answered HTTP ${err.status}.`;
+  if (err instanceof Error && err.message) return err.message;
+  return 'The request failed.';
+}
+
 /** GET an authenticated read route. 401 reports session-expired and throws. */
 export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {

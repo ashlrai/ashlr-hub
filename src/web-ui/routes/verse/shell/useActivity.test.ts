@@ -53,6 +53,34 @@ describe('the activity loop', () => {
     expect(getActivityState().data?.counts.needsYou).toBe(0);
   });
 
+  // A 503 from activity-api.ts on the FIRST poll also lands in `unavailable`
+  // (no data to keep); `error` is what tells it apart from a missing route.
+  it('keeps the server’s reason for a failed poll; a 404 and a success carry none', async () => {
+    resetActivityForTest(async () => {
+      throw new ApiError('GET /api/verse/activity failed (HTTP 503).', 503, '/api/verse/activity',
+        'Could not read activity: building the answer failed. The next poll retries.', 'VERSE_ACTIVITY_UNREADABLE');
+    });
+    await refreshActivity();
+    expect(getActivityState()).toMatchObject({
+      status: 'unavailable', data: null, error: 'Could not read activity: building the answer failed. The next poll retries.',
+    });
+
+    resetActivityForTest(async () => { throw new ApiError('nf', 404, '/api/verse/activity'); });
+    await refreshActivity();
+    expect(getActivityState()).toMatchObject({ status: 'unavailable', error: null });
+
+    let fail = false;
+    resetActivityForTest(async () => {
+      if (fail) throw new ApiError('x', 503, '/api/verse/activity', 'Could not read activity: it broke.');
+      return activity();
+    });
+    await refreshActivity();
+    expect(getActivityState().error).toBeNull();
+    fail = true;
+    await refreshActivity();
+    expect(getActivityState()).toMatchObject({ status: 'stale', error: 'Could not read activity: it broke.' });
+  });
+
   it('starts over when the server refuses an old cursor', async () => {
     const paths: string[] = [];
     let n = 0;

@@ -160,6 +160,8 @@ export class BudgetPolicyUnreadableError extends Error {
   readonly status = 503 as const;
   readonly file: string;
   readonly archivedTo: string | null;
+  /** What is wrong with the file, without its path ("is a symlink") — what a route may show. */
+  readonly reason: string;
 
   constructor(file: string, reason: string, archivedTo: string | null) {
     super(
@@ -170,6 +172,7 @@ export class BudgetPolicyUnreadableError extends Error {
     this.name = 'BudgetPolicyUnreadableError';
     this.file = file;
     this.archivedTo = archivedTo;
+    this.reason = reason;
   }
 }
 
@@ -527,19 +530,37 @@ function isDecisionRecord(value: unknown): value is ShadowDecisionRecord {
     && Array.isArray(decision['exclusions']) && isObject(value['request']);
 }
 
-/** Tail-read the newest `limit` shadow decisions, newest first. Never throws. */
-export function readShadowDecisions(limit = 50, file: string = decisionsLogPath()): ShadowDecisionRecord[] {
+/**
+ * The decision log as a reader of the panel needs it: `ok` with the newest
+ * `limit` records (newest first; a MISSING log is simply no decisions yet),
+ * or `unreadable` with a short plain reason (an errno code or what the path
+ * is — never the path itself). Never throws.
+ *
+ * WHY THIS EXISTS: `readShadowDecisions` answers [] for every failure, which
+ * is right for the reserve-breach attributor (no evidence → no attribution)
+ * but made the decisions route say "no decisions" when the log was there and
+ * could not be read.
+ */
+export type ShadowDecisionsRead =
+  | { state: 'ok'; decisions: ShadowDecisionRecord[] }
+  | { state: 'unreadable'; reason: string };
+
+export function readShadowDecisionsChecked(limit = 50, file: string = decisionsLogPath()): ShadowDecisionsRead {
   const want = Math.max(1, Math.min(500, Math.floor(limit)));
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
   let fd: number;
   try {
     fd = openSync(file, fsConstants.O_RDONLY | noFollow);
-  } catch {
-    return [];
+  } catch (err) {
+    const code = (err as { code?: unknown } | null)?.code;
+    if (code === 'ENOENT') return { state: 'ok', decisions: [] };
+    // ELOOP under O_NOFOLLOW is a planted symlink; say so rather than the errno.
+    if (code === 'ELOOP') return { state: 'unreadable', reason: 'is a symlink' };
+    return { state: 'unreadable', reason: `could not be opened (${typeof code === 'string' ? code : 'error'})` };
   }
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile()) return [];
+    if (!stat.isFile()) return { state: 'unreadable', reason: 'is not a regular file' };
     const length = Math.min(stat.size, want * MAX_DECISION_LINE_BYTES, 4 * 1024 * 1024);
     const buffer = Buffer.alloc(length);
     let offset = 0;
@@ -560,10 +581,17 @@ export function readShadowDecisions(limit = 50, file: string = decisionsLogPath(
         // The first line of a tail window is usually partial.
       }
     }
-    return out;
-  } catch {
-    return [];
+    return { state: 'ok', decisions: out };
+  } catch (err) {
+    const code = (err as { code?: unknown } | null)?.code;
+    return { state: 'unreadable', reason: `could not be read (${typeof code === 'string' ? code : 'error'})` };
   } finally {
     closeSync(fd);
   }
+}
+
+/** Tail-read the newest `limit` shadow decisions, newest first. Never throws; an unreadable log reads as none. */
+export function readShadowDecisions(limit = 50, file: string = decisionsLogPath()): ShadowDecisionRecord[] {
+  const read = readShadowDecisionsChecked(limit, file);
+  return read.state === 'ok' ? read.decisions : [];
 }

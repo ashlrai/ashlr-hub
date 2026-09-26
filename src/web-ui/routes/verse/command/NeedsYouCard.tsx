@@ -174,7 +174,12 @@ export function NeedsYouRow({ item, actions, now, seatNames }: { item: NeedsYouI
 /** C1's activity store in the surfaces' OptionalRead words. */
 export function activityRead(state: ActivityState): { activity: VerseActivityResponse | null; loading: boolean; reason: string | null; stale: boolean } {
   if (state.status === 'unavailable') {
-    return { activity: null, loading: false, reason: 'The Needs-you inbox is not in this build yet, so this card has no source.', stale: false };
+    // `unavailable` is also where a FIRST poll that failed lands: only a
+    // failure-free one (the route's 404) means "not in this build".
+    const reason = state.error
+      ? `Could not read the Needs-you inbox. ${state.error}`
+      : 'The Needs-you inbox is not in this build yet, so this card has no source.';
+    return { activity: null, loading: false, reason, stale: false };
   }
   if (!state.data) return { activity: null, loading: true, reason: null, stale: false };
   return { activity: state.data, loading: false, reason: null, stale: state.status === 'stale' };

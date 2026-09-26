@@ -31,6 +31,7 @@ import { Segmented } from '../../../components/primitives/Segmented.js';
 import { Slider } from '../../../components/primitives/Slider.js';
 import { Switch } from '../../../components/primitives/Switch.js';
 import { EngineMarker } from '../../../components/primitives/Tag.js';
+import { readFailureReason } from '../../../data/client.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { describeContextError, useTokenGate } from '../context/use-token-gate.js';
 import { percentText, tidyProse } from '../autonomy/format.js';
@@ -231,6 +232,12 @@ export interface BudgetControlViewProps {
   /** `'mode'` or a seat id while its change is in flight. */
   pending: string | null;
   error: string | null;
+  /**
+   * Why the last READ failed while an older answer is still on screen (the
+   * server's own sentence, e.g. "Could not read seat capacity: …"). Without
+   * it the panel kept showing the old bars as if they were current.
+   */
+  readError?: string | null;
   readOnly?: boolean;
   /**
    * The standing grant's ceiling (`spend.maxMode`). Modes above it are shown
@@ -243,7 +250,7 @@ export interface BudgetControlViewProps {
   onSeat: (seatId: string, patch: BudgetSeatPatchWire) => void;
 }
 
-export function BudgetControlView({ view, preview, nowMs, pending, error, readOnly = false, maxMode = null, onMode, onSeat }: BudgetControlViewProps) {
+export function BudgetControlView({ view, preview, nowMs, pending, error, readError = null, readOnly = false, maxMode = null, onMode, onSeat }: BudgetControlViewProps) {
   const titleId = useId();
   // The wire view is read defensively (the capacity strip's own guard): this
   // panel is opened from Apps, the composer's seat chip and the autonomy bar,
@@ -303,6 +310,7 @@ export function BudgetControlView({ view, preview, nowMs, pending, error, readOn
       ) : null}
 
       {error ? <p className={styles.error} role="alert">{error}</p> : null}
+      {readError ? <p className={styles.error} role="status" data-read-error="">{readError}</p> : null}
 
       {rows.length === 0 ? (
         <p className={styles.empty}>No seats yet — connect an account or start Ollama, and they appear here.</p>
@@ -373,11 +381,16 @@ export function BudgetControl({ maxMode = null }: { maxMode?: BudgetMode | null 
     }
   }, [gate]);
 
+  // The server's reason (budget-api.ts answers `{ code, error }` for a read it
+  // could not make), never the bare "GET … failed (HTTP 503)" wrapper.
+  const budgetFailure = budget.status === 'error' ? readFailureReason(budget.error) : null;
+  const previewFailure = preview.status === 'error' ? readFailureReason(preview.error) : null;
+
   if (!view) {
     return (
       <section className={styles.panel} aria-label="Budget">
-        {budget.status === 'error' ? (
-          <p className={styles.error} role="alert">Budget unavailable: {budget.error?.message ?? 'the request failed.'}</p>
+        {budgetFailure ? (
+          <p className={styles.error} role="alert">Budget unavailable: {budgetFailure}</p>
         ) : (
           <p className={styles.loading}>Reading seat usage…</p>
         )}
@@ -393,6 +406,9 @@ export function BudgetControl({ maxMode = null }: { maxMode?: BudgetMode | null 
         nowMs={nowMs}
         pending={pending}
         error={error}
+        readError={budgetFailure
+          ? `Could not refresh the budget, so these are the last readings. ${budgetFailure}`
+          : previewFailure ? `Could not work out where the next task goes. ${previewFailure}` : null}
         maxMode={maxMode}
         onMode={(mode) => void apply('mode', `Switch the budget to ${mode}`, { mode })}
         onSeat={(seatId, patch) => void apply(seatId, `Change the budget for ${seatId}`, { seatId, policy: patch })}

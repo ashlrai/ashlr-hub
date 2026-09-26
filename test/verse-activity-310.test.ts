@@ -657,6 +657,55 @@ describe('activity routes', () => {
     expect(stored.sessions).toEqual({ s1: { pinned: true } });
   });
 
+  describe('a chat engine that cannot start is named, never emptied', () => {
+    beforeEach(() => {
+      setActivityWiringForTest({
+        engine: () => null,
+        hooks: { producers: { authority: () => [], fleet: null, leader: () => [] }, autonomy: null, latestMemoAt: null },
+        deps: { health: () => null },
+      });
+    });
+
+    it('session-meta answers 503 VERSE_ENGINE_UNAVAILABLE instead of an empty list or a false 404', async () => {
+      for (const p of ['/api/verse/session-meta', '/api/verse/session-meta/s1']) {
+        const { status, body } = await get<{ code: string; error: string }>(p);
+        expect(status).toBe(503);
+        expect(body.code).toBe('VERSE_ENGINE_UNAVAILABLE');
+        expect(body.error).toMatch(/^Could not read chats: the chat engine did not start/);
+        expect(body.error).not.toContain(home);
+      }
+      const pin = await post<{ code: string }>('/api/verse/session-meta/s1', { pinned: true });
+      expect(pin).toMatchObject({ status: 503, body: { code: 'VERSE_ENGINE_UNAVAILABLE' } });
+      const seen = await post<{ code: string }>('/api/verse/activity/seen', { sessionId: 's1', turnCount: 1 });
+      expect(seen).toMatchObject({ status: 503, body: { code: 'VERSE_ENGINE_UNAVAILABLE' } });
+      // Nothing was written for a chat nobody could look up.
+      expect(fs.existsSync(path.join(home, '.ashlr', 'verse', VERSE_SESSION_META_FILE))).toBe(false);
+    });
+
+    it('GET /activity still answers, with chats as error (not "not answering yet")', async () => {
+      const { status, body } = await get<VerseActivityResponse>('/api/verse/activity');
+      expect(status).toBe(200);
+      expect(body.sources.chats).toBe('error');
+      expect(body.sources.approvals).toBe('ok');
+    });
+  });
+
+  it('an engine whose listSessions throws is a 503 on every route, with no detail leaked', async () => {
+    setActivityWiringForTest({
+      engine: () => ({ listSessions: () => { throw new Error(`store corrupt at ${home}`); } }),
+      hooks: { producers: { authority: null, fleet: null, leader: null }, autonomy: null, latestMemoAt: null },
+      deps: { health: () => null },
+    });
+    const activity = await fetch(`${base}/api/verse/activity`);
+    expect(activity.status).toBe(503);
+    const text = await activity.text();
+    expect(JSON.parse(text)).toMatchObject({ code: 'VERSE_ACTIVITY_UNREADABLE' });
+    expect(text).not.toContain(home);
+    expect(text).not.toContain('store corrupt');
+    const meta = await get<{ code: string }>('/api/verse/session-meta');
+    expect(meta).toMatchObject({ status: 503, body: { code: 'VERSE_ENGINE_UNAVAILABLE' } });
+  });
+
   it('declines paths and methods it does not own', async () => {
     expect((await get<{ error: string }>('/api/verse/activityx')).body.error).toBe('fallthrough');
     const res = await fetch(`${base}/api/verse/activity`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ashlr-token': TOKEN }, body: '{}' });
