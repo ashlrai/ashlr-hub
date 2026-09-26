@@ -21,16 +21,24 @@
  *   3. elon-vision index=1 (Hold) is a no-op — adoptBriefing/sendIMessage not called
  *   4. elon-vision index=2 (Show) sends full briefing text via sendIMessage
  *   5. elon-vision handler never throws even when adoptBriefing rejects
- *   6. comms digest sends an SMS-sized scrubbed report
- *   7. comms digest report text contains key fleet metrics
- *   8. comms ask-vision runs the Leader tick path and posts the latest Leader
- *      memo as a 3-option question (V3.10 — the kind stays 'elon-vision', a
- *      persisted wire value; the text names no real person)
+ *   6. comms digest (3.14 change-driven) queues and delivers a report
+ *   7. an idle digest is one honest line — no "nominal", κ or vision-% noise
+ *   8. comms ask-vision runs the Leader tick path and queues the latest Leader
+ *      memo as an INFORMATIONAL 'leader-memo' report (3.14 — it never waits
+ *      behind an unanswered question; the text names no real person)
  *   9. comms ask-vision never reaches the legacy runStrategist / briefing path
  *  10. no Leader memo yet ⇒ nothing posted, exit 1; a memo is posted once
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+/** A fake cycle that delivers every pending report (what the real dispatch does). */
+async function deliverPendingReports(): Promise<{ sent: number; resolved: number }> {
+  const { listRequests: lr, markReportDelivered } = await import('../src/core/comms/requests.js');
+  const pending = lr({ status: 'pending', type: 'report' });
+  for (const r of pending) markReportDelivered(r.id);
+  return { sent: pending.length, resolved: pending.length };
+}
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -381,39 +389,39 @@ describe('elon-vision handler', () => {
 // ===========================================================================
 
 describe('comms digest', () => {
-  it('sends a scrubbed SMS-sized report via postRequest + runCommsCycle', async () => {
-    mockBuildOversightSnapshot.mockReturnValue(makeSnapshot());
-    mockRunCommsCycle.mockResolvedValue({ sent: 1, resolved: 0 });
+  it('queues a report and runs a cycle that delivers it', async () => {
+    mockRunCommsCycle.mockImplementation(deliverPendingReports);
 
     const exitCode = await cmdComms(['digest']);
     expect(exitCode).toBe(0);
-    expect(mockBuildOversightSnapshot).toHaveBeenCalledOnce();
     expect(mockRunCommsCycle).toHaveBeenCalledOnce();
+    const all = listRequests({ kind: 'fleet-digest' });
+    expect(all).toHaveLength(1);
+    expect(all[0]!.type).toBe('report');
+    expect(all[0]!.status).toBe('answered');
   });
 
-  it('digest report text contains fleet metrics (proposals, accept rate, goals)', async () => {
-    const snap = makeSnapshot();
-    mockBuildOversightSnapshot.mockReturnValue(snap);
-    mockRunCommsCycle.mockResolvedValue({ sent: 1, resolved: 0 });
+  it('an idle fleet gets one honest line — no "nominal", κ or vision-% noise; then silence', async () => {
+    mockRunCommsCycle.mockImplementation(deliverPendingReports);
 
-    // Capture what was posted via postRequest by inspecting requests store
     await cmdComms(['digest']);
+    const [r] = listRequests({ kind: 'fleet-digest' });
+    expect(r!.text).toMatch(/^Fleet idle/);
+    expect(r!.text).toMatch(/autonomy is off — next step: `ashlr authority setup`/);
+    expect(r!.text).not.toMatch(/nominal|κ|kappa|Vision progress|0 proposals/i);
+    // The old digest read the oversight snapshot; the change-driven one does not.
+    expect(mockBuildOversightSnapshot).not.toHaveBeenCalled();
 
-    const all = listRequests({ kind: 'fleet-digest' });
-    expect(all.length).toBeGreaterThan(0);
-    const r = all[all.length - 1]!;
-    expect(r.type).toBe('report');
-    expect(r.text).toMatch(/42 proposals/);          // proposalsCreated
-    expect(r.text).toMatch(/81%/);                   // acceptRate
-    expect(r.text).not.toMatch(/ASHLR_PULSE_PAT/i); // no secrets
-    expect(r.text).not.toMatch(/token|secret|key/i); // no secrets
+    // Nothing changed since: the second digest is silent (exit 0, nothing queued).
+    expect(await cmdComms(['digest'])).toBe(0);
+    expect(listRequests({ kind: 'fleet-digest' })).toHaveLength(1);
   });
 
   it('returns exit code 1 when comms is disabled', async () => {
     mockLoadConfig.mockResolvedValue(makeCfg({ comms: { enabled: false } }));
     const exitCode = await cmdComms(['digest']);
     expect(exitCode).toBe(1);
-    expect(mockBuildOversightSnapshot).not.toHaveBeenCalled();
+    expect(listRequests({ kind: 'fleet-digest' })).toHaveLength(0);
   });
 });
 
@@ -439,18 +447,19 @@ describe('comms ask-vision', () => {
     mockBuildLeaderState.mockReturnValue({ latest: leaderMemo() });
   });
 
-  it('runs the Leader tick and posts the latest memo as a 3-option question', async () => {
-    mockRunCommsCycle.mockResolvedValue({ sent: 1, resolved: 0 });
+  it('runs the Leader tick and queues the latest memo as an informational leader-memo report', async () => {
+    mockRunCommsCycle.mockImplementation(deliverPendingReports);
 
     const exitCode = await cmdComms(['ask-vision']);
     expect(exitCode).toBe(0);
     expect(mockLeaderTick).toHaveBeenCalledWith({ fake: 'deps' }, { awaitRun: true });
     expect(mockRunCommsCycle).toHaveBeenCalledOnce();
 
-    const all = listRequests({ kind: 'elon-vision' });
+    expect(listRequests({ kind: 'elon-vision' })).toHaveLength(0);
+    const all = listRequests({ kind: 'leader-memo' });
     const r = all[all.length - 1]!;
-    expect(r.type).toBe('question');
-    expect(r.options).toEqual(['Keep it', 'Veto this memo', 'Show full memo']);
+    expect(r.type).toBe('report');
+    expect(r.options).toEqual([]);
     expect(r.meta).toEqual({ source: 'leader', memoId: MEMO_ID });
     expect(r.text).toContain('Bottleneck: Too many open goals');
     expect(r.text).toContain('Move: Prune to four goals');
@@ -469,14 +478,31 @@ describe('comms ask-vision', () => {
   it('no ok memo yet ⇒ nothing posted, exit 1; the same memo is posted only once', async () => {
     mockBuildLeaderState.mockReturnValue({ latest: leaderMemo({ status: 'no-seat' }) });
     expect(await cmdComms(['ask-vision'])).toBe(1);
-    expect(listRequests({ kind: 'elon-vision' })).toHaveLength(0);
+    expect(listRequests({ kind: 'leader-memo' })).toHaveLength(0);
 
     mockBuildLeaderState.mockReturnValue({ latest: leaderMemo() });
-    mockRunCommsCycle.mockResolvedValue({ sent: 1, resolved: 0 });
+    mockRunCommsCycle.mockImplementation(deliverPendingReports);
     expect(await cmdComms(['ask-vision'])).toBe(0);
+    expect(await cmdComms(['ask-vision'])).toBe(0);
+    expect(listRequests({ kind: 'leader-memo' })).toHaveLength(1);
+  });
+
+  it('says "queued, not delivered" (exit 1) instead of "already sent" when the memo is stuck', async () => {
     mockRunCommsCycle.mockResolvedValue({ sent: 0, resolved: 0 });
-    expect(await cmdComms(['ask-vision'])).toBe(0);
-    expect(listRequests({ kind: 'elon-vision' })).toHaveLength(1);
+    const errors: string[] = [];
+    const logs: string[] = [];
+    const errSpy = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => { errors.push(a.join(' ')); });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
+    try {
+      expect(await cmdComms(['ask-vision'])).toBe(1);
+      expect(await cmdComms(['ask-vision'])).toBe(1);
+    } finally {
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+    expect(logs.join('\n')).toContain(`Leader memo ${MEMO_ID} is queued but not delivered yet`);
+    expect(logs.join('\n')).not.toMatch(/already sent/);
+    expect(errors.join('\n')).toContain('was not delivered');
   });
 
   it('returns exit code 1 when comms is disabled', async () => {

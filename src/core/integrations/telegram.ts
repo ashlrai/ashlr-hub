@@ -19,6 +19,18 @@
  *
  * Offset persistence: ~/.ashlr/comms/telegram-offset (plain text, one integer).
  *
+ * Formatting (3.14): every send uses parse_mode=HTML, so text is ESCAPED by
+ * default (escapeTelegramHtml) — a stray `<` in model text used to make
+ * Telegram reject the whole send. Callers that build Telegram HTML themselves
+ * pass `html: true`. Messages over 4096 chars are split on line boundaries;
+ * buttons ride on the last chunk. A send Telegram rejects for bad markup is
+ * retried once as plain text.
+ *
+ * Threading (3.14): sends can reply to a message (replyToMessageId) and
+ * report every message_id they produced; inbound events carry the message's
+ * own id and the id it replied to, so the comms layer can map Telegram
+ * messages to Leader-thread messages.
+ *
  * Never throws — all errors silently degrade to {ok:false} / [].
  */
 
@@ -26,21 +38,43 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
+import { splitTelegramText, telegramHtmlToPlain } from './telegram-format.js';
+
+export { escapeTelegramHtml, splitTelegramText, TELEGRAM_MAX_MESSAGE } from './telegram-format.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
+/** One inline-keyboard button: a callback (data ≤ 64 bytes) or a public URL. */
+export type TelegramButton = { text: string; data: string } | { text: string; url: string };
+
 export interface TelegramSendOpts {
-  /** Inline button labels. One per row. callback_data = "<requestId>:<optionIndex>". */
+  /**
+   * Inline button labels. One per row. callback_data = "<requestId>:<optionIndex>".
+   * A label of the form "Label|target" sends `target` as the callback_data
+   * instead (or as a URL button when target is a public http(s) URL; local
+   * URLs Telegram cannot open are dropped).
+   */
   buttons?: string[];
   /** requestId to embed in callback_data (required when buttons is set). */
   requestId?: string;
+  /** Explicit inline keyboard (rows of buttons). Takes precedence over `buttons`. */
+  keyboard?: TelegramButton[][];
+  /** The text is caller-built Telegram HTML — do not escape it. Default false. */
+  html?: boolean;
+  /** Send as a reply to this Telegram message id (ignored if it no longer exists). */
+  replyToMessageId?: number;
 }
 
 export interface TelegramSendResult {
   ok: boolean;
+  /** message_id of the FIRST chunk (the one a reply should target). */
   messageId?: number;
+  /** message_id of every chunk that was delivered, in order. */
+  messageIds?: number[];
+  /** True when the text was split and a later chunk failed after the first landed. */
+  partial?: boolean;
 }
 
 /** An inbound event parsed from a Telegram update. */
@@ -57,7 +91,20 @@ export interface InboundEvent {
   fromChatId: string;
   /** Telegram callback_query id — needed to ack via answerCallbackQuery. */
   callbackQueryId?: string;
+  /** kind='text': this message's id. kind='callback': the id of the message whose button was tapped. */
+  messageId?: number;
+  /** kind='text': the id of the message Mason replied to (reply_to_message), if any. */
+  replyToMessageId?: number;
+  /**
+   * kind='callback': the raw callback_data, set for routed prefixes
+   * (`lt:` Leader-thread buttons, `revert:` merge buttons) that are not
+   * "<requestId>:<index>" pairs.
+   */
+  data?: string;
 }
+
+/** callback_data prefixes routed by the comms layer instead of the request store. */
+const ROUTED_CALLBACK_PREFIXES = ['lt:', 'revert:'];
 
 export interface PollResult {
   updates: InboundEvent[];
@@ -130,6 +177,28 @@ function scrubToken(msg: string, token: string | undefined): string {
   return msg.split(token).join('[REDACTED]');
 }
 
+/**
+ * Test seam: a fake Bot API transport. Receives the METHOD name (never the
+ * URL, so the token cannot leak into a fake) and the JSON body; returns the
+ * parsed API response (or null for a network failure). Null restores HTTPS.
+ */
+export type TelegramTransport = (method: string, body: Record<string, unknown>) => Promise<unknown>;
+let _transport: TelegramTransport | null = null;
+export function setTelegramTransportForTests(t: TelegramTransport | null): void {
+  _transport = t;
+}
+
+async function callApi(cfg: AshlrConfig, method: string, body: Record<string, unknown>): Promise<unknown> {
+  if (_transport) {
+    try {
+      return await _transport(method, body);
+    } catch {
+      return null;
+    }
+  }
+  return postJson(apiUrl(cfg, method), body, resolveToken(cfg));
+}
+
 /** Make an HTTPS POST with JSON body. Returns parsed response body or null on error. */
 async function postJson(
   url: string,
@@ -176,11 +245,76 @@ async function postJson(
 // sendTelegramMessage
 // ---------------------------------------------------------------------------
 
+const CALLBACK_DATA_MAX_BYTES = 64;
+
+function isPublicHttpUrl(target: string): boolean {
+  try {
+    const u = new URL(target);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    const h = u.hostname.toLowerCase();
+    // Telegram rejects the WHOLE send for a URL button it cannot open.
+    return !(h === 'localhost' || h.endsWith('.localhost') || h === '0.0.0.0' || h.startsWith('127.') || h === '[::1]');
+  } catch {
+    return false;
+  }
+}
+
+function callbackDataOk(data: string): boolean {
+  const bytes = Buffer.byteLength(data, 'utf8');
+  return bytes > 0 && bytes <= CALLBACK_DATA_MAX_BYTES;
+}
+
+/** Build the inline keyboard for a send (null = no keyboard). */
+function buildKeyboard(opts: TelegramSendOpts | undefined): Record<string, string>[][] | null {
+  if (opts?.keyboard && opts.keyboard.length > 0) {
+    const rows = opts.keyboard
+      .map((row) =>
+        row
+          .filter((b) => ('url' in b ? isPublicHttpUrl(b.url) : callbackDataOk(b.data)))
+          .map((b): Record<string, string> => ('url' in b ? { text: b.text, url: b.url } : { text: b.text, callback_data: b.data })),
+      )
+      .filter((row) => row.length > 0);
+    return rows.length > 0 ? rows : null;
+  }
+  if (opts?.buttons && opts.buttons.length > 0) {
+    const reqId = opts.requestId ?? 'unknown';
+    const rows: Record<string, string>[][] = [];
+    opts.buttons.forEach((label, idx) => {
+      const pipe = label.indexOf('|');
+      if (pipe < 0) {
+        rows.push([{ text: label, callback_data: `${reqId}:${idx}` }]);
+        return;
+      }
+      const text = label.slice(0, pipe);
+      const target = label.slice(pipe + 1);
+      if (/^https?:\/\//i.test(target)) {
+        if (isPublicHttpUrl(target)) rows.push([{ text, url: target }]);
+        return; // a local URL cannot be opened from a phone — drop the button
+      }
+      if (callbackDataOk(target)) rows.push([{ text, callback_data: target }]);
+    });
+    return rows.length > 0 ? rows : null;
+  }
+  return null;
+}
+
+function parseSendResponse(resp: unknown): { ok: boolean; messageId?: number; description?: string } {
+  if (!resp || typeof resp !== 'object') return { ok: false };
+  const r = resp as Record<string, unknown>;
+  if (r['ok'] === true) {
+    const result = r['result'] as Record<string, unknown> | undefined;
+    return { ok: true, messageId: typeof result?.['message_id'] === 'number' ? (result['message_id'] as number) : undefined };
+  }
+  return { ok: false, description: typeof r['description'] === 'string' ? (r['description'] as string) : undefined };
+}
+
 /**
  * Send a Telegram message to cfg.comms.telegram.chatId.
  *
- * When opts.buttons is set, each button becomes a row in an inline_keyboard.
- * callback_data = "<requestId>:<0-based-index>" for clean resolution.
+ * Text is escaped for parse_mode=HTML unless opts.html is set, and split into
+ * ≤4096-char chunks (buttons ride on the last chunk; replyToMessageId applies
+ * to the first). When opts.buttons is set, each button becomes a row in an
+ * inline_keyboard with callback_data = "<requestId>:<0-based-index>".
  *
  * No-op (ok:false) when not configured. Never throws.
  */
@@ -195,33 +329,44 @@ export async function sendTelegramMessage(
   const chatId = resolveChatId(cfg)!;
 
   try {
-    const body: Record<string, unknown> = {
-      chat_id: chatId,
-      text,
-      parse_mode: 'HTML',
-    };
+    const chunks = splitTelegramText(String(text ?? ''), { html: opts?.html === true }).filter((c) => c.length > 0);
+    if (chunks.length === 0) return { ok: false };
+    const keyboard = buildKeyboard(opts);
+    const messageIds: number[] = [];
 
-    if (opts?.buttons && opts.buttons.length > 0) {
-      const reqId = opts.requestId ?? 'unknown';
-      body['reply_markup'] = {
-        inline_keyboard: opts.buttons.map((label, idx) => [
-          { text: label, callback_data: `${reqId}:${idx}` },
-        ]),
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i]!;
+      const body: Record<string, unknown> = {
+        chat_id: chatId,
+        text: chunk,
+        parse_mode: 'HTML',
       };
+      if (i === 0 && typeof opts?.replyToMessageId === 'number' && opts.replyToMessageId > 0) {
+        // allow_sending_without_reply: a deleted original must not fail the send.
+        body['reply_parameters'] = { message_id: opts.replyToMessageId, allow_sending_without_reply: true };
+      }
+      if (i === chunks.length - 1 && keyboard) {
+        body['reply_markup'] = { inline_keyboard: keyboard };
+      }
+
+      let res = parseSendResponse(await callApi(cfg, 'sendMessage', body));
+      if (!res.ok && res.description && /pars|entit/i.test(res.description)) {
+        // Markup Telegram cannot parse: retry once as plain text (no parse_mode).
+        const plain: Record<string, unknown> = { ...body, text: telegramHtmlToPlain(chunk) };
+        delete plain['parse_mode'];
+        res = parseSendResponse(await callApi(cfg, 'sendMessage', plain));
+      }
+      if (!res.ok) {
+        // First chunk failed → nothing landed. A later chunk failing still
+        // counts as delivered (re-sending would duplicate what Mason has).
+        return messageIds.length === 0 && i === 0
+          ? { ok: false }
+          : { ok: true, messageId: messageIds[0], messageIds, partial: true };
+      }
+      if (typeof res.messageId === 'number') messageIds.push(res.messageId);
     }
 
-    const url = apiUrl(cfg, 'sendMessage');
-    const resp = await postJson(url, body, token);
-
-    if (
-      resp &&
-      typeof resp === 'object' &&
-      (resp as Record<string, unknown>)['ok'] === true
-    ) {
-      const result = (resp as Record<string, unknown>)['result'] as Record<string, unknown> | undefined;
-      return { ok: true, messageId: typeof result?.['message_id'] === 'number' ? result['message_id'] : undefined };
-    }
-    return { ok: false };
+    return { ok: true, messageId: messageIds[0], messageIds };
   } catch (err) {
     // Scrub token from any error that might surface it
     const msg = err instanceof Error ? err.message : String(err);
@@ -255,8 +400,7 @@ export async function pollTelegramUpdates(cfg: AshlrConfig): Promise<PollResult>
     };
     if (offset > 0) body['offset'] = offset;
 
-    const url = apiUrl(cfg, 'getUpdates');
-    const resp = await postJson(url, body, token);
+    const resp = await callApi(cfg, 'getUpdates', body);
 
     if (
       !resp ||
@@ -289,7 +433,17 @@ export async function pollTelegramUpdates(cfg: AshlrConfig): Promise<PollResult>
 
         const text = typeof msg['text'] === 'string' ? msg['text'] : undefined;
         if (text !== undefined) {
-          events.push({ kind: 'text', text, fromChatId });
+          const messageId = typeof msg['message_id'] === 'number' ? (msg['message_id'] as number) : undefined;
+          const replied = msg['reply_to_message'] as Record<string, unknown> | undefined;
+          const replyToMessageId =
+            replied && typeof replied['message_id'] === 'number' ? (replied['message_id'] as number) : undefined;
+          events.push({
+            kind: 'text',
+            text,
+            fromChatId,
+            ...(messageId !== undefined ? { messageId } : {}),
+            ...(replyToMessageId !== undefined ? { replyToMessageId } : {}),
+          });
         }
       }
 
@@ -302,6 +456,18 @@ export async function pollTelegramUpdates(cfg: AshlrConfig): Promise<PollResult>
 
         const callbackQueryId = typeof cbq['id'] === 'string' ? cbq['id'] : undefined;
         const data = typeof cbq['data'] === 'string' ? cbq['data'] : '';
+        const cbMsg = cbq['message'] as Record<string, unknown> | undefined;
+        const tappedMessageId = typeof cbMsg?.['message_id'] === 'number' ? (cbMsg['message_id'] as number) : undefined;
+        if (ROUTED_CALLBACK_PREFIXES.some((p) => data.startsWith(p))) {
+          events.push({
+            kind: 'callback',
+            data,
+            fromChatId,
+            callbackQueryId,
+            ...(tappedMessageId !== undefined ? { messageId: tappedMessageId } : {}),
+          });
+          continue;
+        }
         // Parse callback_data = "<requestId>:<optionIndex>"
         const colonIdx = data.lastIndexOf(':');
         if (colonIdx < 0) continue; // malformed — skip
@@ -316,6 +482,7 @@ export async function pollTelegramUpdates(cfg: AshlrConfig): Promise<PollResult>
           optionIndex: idxRaw,
           fromChatId,
           callbackQueryId,
+          ...(tappedMessageId !== undefined ? { messageId: tappedMessageId } : {}),
         });
       }
     }
@@ -343,11 +510,14 @@ export async function pollTelegramUpdates(cfg: AshlrConfig): Promise<PollResult>
 export async function answerCallbackQuery(
   callbackQueryId: string,
   cfg: AshlrConfig,
+  text?: string,
 ): Promise<void> {
   if (!telegramEnabled(cfg)) return;
   try {
-    const url = apiUrl(cfg, 'answerCallbackQuery');
-    await postJson(url, { callback_query_id: callbackQueryId }, resolveToken(cfg));
+    const body: Record<string, unknown> = { callback_query_id: callbackQueryId };
+    // A toast is plain text (no parse_mode) and capped at 200 chars by Telegram.
+    if (text) body['text'] = text.slice(0, 200);
+    await callApi(cfg, 'answerCallbackQuery', body);
   } catch {
     // best-effort ack — failure is harmless (spinner times out on its own)
   }

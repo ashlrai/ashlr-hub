@@ -6,11 +6,14 @@
  * line). Mutations (markSent, resolveRequest) rewrite the file after loading
  * all records.
  *
- * Protocol invariant: only ONE request may be 'sent' (awaiting reply) at a
- * time. Requests that outlive their TTL are expired (see expireStaleRequests)
- * so one unanswered question cannot hold the queue shut indefinitely. postRequest always appends as 'pending'; dispatch decides when to
- * promote pending→sent. Answers arrive as numeric indices (1-based) that map
- * to the request's options array.
+ * Protocol invariant: only ONE question/approval may be 'sent' (awaiting
+ * reply) at a time. Reports are informational: dispatch delivers them
+ * regardless of any outstanding question (3.14), so they never wait behind
+ * one. Requests that outlive their TTL are expired (see expireStaleRequests)
+ * so one unanswered question cannot hold the question slot shut
+ * indefinitely. postRequest always appends as 'pending'; dispatch decides
+ * when to promote pending→sent. Answers arrive as numeric indices (1-based)
+ * that map to the request's options array.
  *
  * Never throws. All I/O errors are caught and silently degrade.
  */
@@ -57,6 +60,10 @@ export interface CommsRequest {
   answeredAt?: string;
   /** ISO timestamp when the request aged out unsent or unanswered. */
   expiredAt?: string;
+  /** Why it was expired, when not by plain TTL (e.g. a one-time migration). */
+  expiredReason?: string;
+  /** Consecutive failed send attempts (informational requests only). */
+  sendFailures?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -281,4 +288,94 @@ export function expireStaleRequests(nowMs: number, ttlMs: number): ExpireResult 
     // best-effort
   }
   return result;
+}
+
+/**
+ * 3.14: expire every pending/sent request matching `pred`, stamping
+ * `expiredReason`. Returns the expired records (as they were before expiry)
+ * so callers can log exactly what went. Answered/expired rows are never
+ * touched. Best-effort; never throws.
+ */
+export function expireRequestsWhere(
+  pred: (r: CommsRequest) => boolean,
+  nowMs: number,
+  reason: string,
+): CommsRequest[] {
+  const expired: CommsRequest[] = [];
+  try {
+    const all = loadAll();
+    const expiredAt = new Date(nowMs).toISOString();
+    const updated = all.map((r) => {
+      if (r.status !== 'pending' && r.status !== 'sent') return r;
+      if (!pred(r)) return r;
+      expired.push(r);
+      return { ...r, status: 'expired' as const, expiredAt, expiredReason: reason };
+    });
+    if (expired.length > 0) saveAll(updated);
+  } catch {
+    // best-effort
+  }
+  return expired;
+}
+
+/**
+ * 3.14: count a failed send of a pending request; once it has failed
+ * `maxFailures` times it is expired (reason recorded) so one message the
+ * transport keeps rejecting cannot hold every later report back.
+ * Returns true when this call expired it. Best-effort; never throws.
+ */
+export function noteSendFailure(id: string, nowMs: number, maxFailures: number): boolean {
+  let expired = false;
+  try {
+    const all = loadAll();
+    let found = false;
+    const updated = all.map((r) => {
+      if (r.id !== id || r.status !== 'pending') return r;
+      found = true;
+      const failures = (r.sendFailures ?? 0) + 1;
+      if (failures >= maxFailures) {
+        expired = true;
+        return {
+          ...r,
+          sendFailures: failures,
+          status: 'expired' as const,
+          expiredAt: new Date(nowMs).toISOString(),
+          expiredReason: `send failed ${failures} times`,
+        };
+      }
+      return { ...r, sendFailures: failures };
+    });
+    if (found) saveAll(updated);
+  } catch {
+    // best-effort
+  }
+  return expired;
+}
+
+/**
+ * 3.14: an informational request (a report) was delivered — record it as
+ * sent and answered in ONE rewrite. Reports never await a reply, so they
+ * never occupy the single outstanding-question slot.
+ */
+export function markReportDelivered(id: string, nowMs = Date.now()): void {
+  try {
+    const all = loadAll();
+    const iso = new Date(nowMs).toISOString();
+    let found = false;
+    const updated = all.map((r) => {
+      if (r.id !== id) return r;
+      found = true;
+      return {
+        ...r,
+        status: 'answered' as const,
+        sentAt: iso,
+        answeredAt: iso,
+        answerIndex: -1,
+        answerText: '(report delivered)',
+      };
+    });
+    if (found) saveAll(updated);
+  } catch {
+    // best-effort
+  }
 }

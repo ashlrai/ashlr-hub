@@ -7,7 +7,11 @@
  *   'elon-vision'  — the Visionary's briefing question (the kind string is a
  *                    persisted wire value in ~/.ashlr/comms/requests.jsonl and
  *                    cli/comms.ts, kept for compatibility; nothing user-facing
- *                    names a real person). Two generations share the kind:
+ *                    names a real person). Since 3.14 nothing new is posted
+ *                    under it — Leader memos go out as informational
+ *                    'leader-memo' reports with Approve / Veto / Details
+ *                    buttons (comms/telegram-channel.ts) — but rows already
+ *                    in the store still resolve here. Two generations share the kind:
  *     V3.10 Leader memo (meta.source 'leader', meta.memoId), from
  *     `ashlr comms ask-vision` / the comms cycle via the Leader tick path:
  *       index 0 (Keep it)          → no-op, recorded via resolution

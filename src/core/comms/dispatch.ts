@@ -1,17 +1,27 @@
 /**
- * M137: comms dispatch cycle — send pending requests + poll + match replies.
+ * M137 / 3.14: comms dispatch cycle — poll + route replies, then send.
  *
- * runCommsCycle() is the heartbeat:
- *   1. If nothing is outstanding and a pending request exists → send the next
- *      one via sendIMessage, markSent. Reports (type='report') send-and-done.
- *   2. Poll inbound replies since the watermark. For each matching numeric reply
- *      → resolveRequest + invoke the registered resolution handler for its kind.
- *   3. Advance the watermark.
+ * runCommsCycle() is the heartbeat (launchd ai.ashlr.comms-poll, every 180 s):
+ *   0. One-time queue migration (comms/migrations.ts), then TTL expiry.
+ *   1. Poll inbound FIRST, so Mason's replies and commands act this cycle —
+ *      even while comms are paused (otherwise "resume" could never arrive).
+ *      Telegram routing lives in telegram-channel.ts: keywords, /commands,
+ *      Leader-button taps, answers to a Leader question, numbered answers to
+ *      the outstanding button-question, and free text to the Leader thread.
+ *   2. Send (skipped while paused):
+ *      a. informational messages — reports (digests, Leader memos, test
+ *         pings) and, on Telegram, the Leader thread's pending messages.
+ *         They NEVER wait for an unanswered question; they are only paced
+ *         (≥ sendGapMs apart, at most batchCap per cycle).
+ *      b. the single question slot — a question/approval that expects a
+ *         numbered answer or a button tap goes out only when no other one is
+ *         outstanding and the question cooldown has elapsed.
  *
- * Rate limit: won't send another message if one was sent < SEND_COOLDOWN_MS ago.
+ * Why the split: before 3.14 every message shared one slot, so a single
+ * unanswered June briefing held back 594 rows — including both Leader memos.
  *
- * Expiry: before sending, requests older than cfg.comms.requestTtlHours
- * (default 48h) are expired, so an unanswered question cannot block the queue.
+ * Expiry: requests older than cfg.comms.requestTtlHours (default 48h) are
+ * expired, so an unanswered question cannot block the question slot.
  *
  * Resolution handler registry: other modules call registerResolutionHandler(kind, fn)
  * to receive callbacks when a request of their kind is answered. Best-effort.
@@ -28,24 +38,47 @@ import {
   pollTelegramUpdates,
   answerCallbackQuery,
   telegramEnabled,
+  type InboundEvent,
 } from '../integrations/telegram.js';
-import { handleStrategicMessage } from './elon-dialogue.js';
 import {
   DEFAULT_REQUEST_TTL_HOURS,
   expireStaleRequests,
   listRequests,
+  markReportDelivered,
   markSent,
+  noteSendFailure,
   outstanding,
   resolveRequest,
   type CommsRequest,
 } from './requests.js';
+import { runCommsMigrationsOnce, type CommsMigrationSummary } from './migrations.js';
+import {
+  converseWithLeader,
+  createPacer,
+  drainLeaderThread,
+  handleLeaderButton,
+  handleSlashCommand,
+  LEADER_CALLBACK_PREFIX,
+  paceNext,
+  recordPacedSend,
+  sendReportViaTelegram,
+  type SendPacer,
+} from './telegram-channel.js';
+import { scrubSecrets } from '../util/scrub.js';
 import type { AshlrConfig } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const SEND_COOLDOWN_MS = 30_000; // minimum gap between outbound sends
+/** Minimum gap between two button-QUESTION sends (informational sends are paced separately). */
+const QUESTION_COOLDOWN_MS = 30_000;
+/** Default gap between informational sends within one cycle (Telegram flood limits). */
+export const DEFAULT_SEND_GAP_MS = 3_000;
+/** Default cap on informational sends per cycle; the rest go next cycle. */
+export const DEFAULT_BATCH_CAP = 8;
+/** A report that fails this many sends in a row is expired, so it cannot wedge the queue. */
+const MAX_REPORT_SEND_FAILURES = 3;
 
 /** Request TTL in ms from cfg.comms.requestTtlHours; invalid values use the default. */
 export function commsRequestTtlMs(cfg: AshlrConfig): number {
@@ -61,7 +94,7 @@ export function commsRequestTtlMs(cfg: AshlrConfig): number {
 interface CommsState {
   /** Unix ms — only poll messages newer than this. */
   watermarkMs: number;
-  /** Unix ms — when the last outbound message was sent. */
+  /** Unix ms — when the last button-question was sent (question cooldown). */
   lastSentMs: number;
 }
 
@@ -119,13 +152,9 @@ async function invokeHandler(req: CommsRequest): Promise<void> {
   }
 }
 
-/**
- * Re-load the answered request by id and invoke its resolution handler.
- * Extracted from the three identical inline blocks in the Telegram/iMessage paths.
- */
+/** Re-load the answered request by id and invoke its resolution handler. */
 async function reloadAndInvoke(id: string): Promise<void> {
-  const { listRequests: lr } = await import('./requests.js');
-  const resolved = lr({ status: 'answered' }).find((r) => r.id === id);
+  const resolved = listRequests({ status: 'answered' }).find((r) => r.id === id);
   if (resolved) {
     await invokeHandler(resolved);
   }
@@ -147,6 +176,13 @@ function formatMessage(req: CommsRequest): string {
   return `${req.text}\n\nReply ${req.options.length === 1 ? '1' : `1-${req.options.length}`}: ${opts}`;
 }
 
+/**
+ * A numbered answer is a message that is JUST a number ("2", " 2. ").
+ * Anything longer is conversation and goes to the Leader — before 3.14 any
+ * leading integer ("3 things I want…") was swallowed as an option pick.
+ */
+const NUMERIC_ANSWER_RE = /^\s*(\d{1,3})\s*[.)]?\s*$/;
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -154,226 +190,254 @@ function formatMessage(req: CommsRequest): string {
 export interface CycleResult {
   sent: number;
   resolved: number;
+  /** Present only on the cycle that ran the one-time queue migration. */
+  migration?: CommsMigrationSummary;
+}
+
+export interface CycleOptions {
+  /** Gap between informational sends (ms). Default DEFAULT_SEND_GAP_MS. */
+  sendGapMs?: number;
+  /** Max informational sends this cycle. Default DEFAULT_BATCH_CAP. */
+  batchCap?: number;
+  /** Injectable sleep (tests). */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Telegram inbound
+// ---------------------------------------------------------------------------
+
+function replyOpts(event: InboundEvent): { replyToMessageId: number } | undefined {
+  return typeof event.messageId === 'number' ? { replyToMessageId: event.messageId } : undefined;
+}
+
+/** "revert:<proposalId>:<repo>" — creates a SIGNED REVERT PROPOSAL. Never applies. */
+async function handleRevert(spec: string, event: InboundEvent, cfg: AshlrConfig): Promise<void> {
+  const m = /^\s*revert:([^:]+):(.*)$/i.exec(spec);
+  if (!m) return;
+  const proposalId = (m[1] ?? '').trim();
+  const repo = (m[2] ?? '').trim();
+  if (!proposalId) return;
+  try {
+    const { buildRevertProposal } = await import('./events.js');
+    const proposal = await buildRevertProposal(proposalId, repo || process.cwd(), cfg);
+    const text = proposal
+      ? `Revert proposal created (pending, not applied): "${proposal.title}" — review at http://localhost:4317/proposals/${proposal.id}`
+      : `Could not create revert proposal for "${proposalId}" — see dashboard for details`;
+    await sendTelegramMessage(text, replyOpts(event), cfg);
+  } catch {
+    // best-effort
+  }
+}
+
+async function handleTelegramCallback(event: InboundEvent, cfg: AshlrConfig, result: CycleResult): Promise<void> {
+  if (event.data?.startsWith(LEADER_CALLBACK_PREFIX)) {
+    await handleLeaderButton(event, cfg);
+    return;
+  }
+  if (event.data?.startsWith('revert:')) {
+    if (event.callbackQueryId) await answerCallbackQuery(event.callbackQueryId, cfg, 'Creating a revert proposal…');
+    await handleRevert(event.data, event, cfg);
+    return;
+  }
+  // Button tap on a numbered question: resolve by requestId + optionIndex.
+  const out = outstanding();
+  if (
+    out &&
+    event.requestId === out.id &&
+    typeof event.optionIndex === 'number' &&
+    event.optionIndex >= 0 &&
+    event.optionIndex < out.options.length
+  ) {
+    resolveRequest(out.id, event.optionIndex);
+    // Ack the button tap so Telegram removes the spinner
+    if (event.callbackQueryId) await answerCallbackQuery(event.callbackQueryId, cfg);
+    await reloadAndInvoke(out.id);
+    result.resolved++;
+    return;
+  }
+  // A tap on an expired / already-answered question: say so instead of spinning.
+  if (event.callbackQueryId) await answerCallbackQuery(event.callbackQueryId, cfg, 'That question is no longer open.');
+}
+
+async function handleTelegramText(event: InboundEvent, text: string, cfg: AshlrConfig, result: CycleResult): Promise<void> {
+  // M212: pause/resume commands (comms soft-pause).
+  if (/^\s*pause(\s+fleet)?\s*$/i.test(text)) {
+    const { setPause } = await import('./pause.js');
+    setPause(true);
+    await sendTelegramMessage('⏸ Fleet messages paused. Send "resume" to restart.', replyOpts(event), cfg);
+    return;
+  }
+  if (/^\s*resume(\s+fleet)?\s*$/i.test(text)) {
+    const { setPause } = await import('./pause.js');
+    setPause(false);
+    await sendTelegramMessage('▶️ Fleet resumed.', replyOpts(event), cfg);
+    return;
+  }
+
+  // M215: "snapshot" / "dashboard" — read-only fleet snapshot.
+  if (/^\s*(snapshot|dashboard|status\s+full)\s*$/i.test(text)) {
+    try {
+      const { buildFleetSnapshot } = await import('./events.js');
+      const snapshot = await buildFleetSnapshot(cfg);
+      await sendTelegramMessage(snapshot, replyOpts(event), cfg);
+    } catch {
+      // best-effort — never crash the cycle
+    }
+    return;
+  }
+
+  // M215: "revert:<proposalId>:<repo>" typed (or from an old merge button).
+  if (/^\s*revert:[^:]+:/i.test(text)) {
+    await handleRevert(text, event, cfg);
+    return;
+  }
+
+  // 3.14: /help /start /status /leader /directives (unknown /x → help).
+  if (await handleSlashCommand(event, text, cfg)) return;
+
+  // A Telegram reply to one of our Leader messages is conversation — even a
+  // bare number ("2") answering a Leader question — so it never picks an
+  // option of an unrelated outstanding button-question.
+  const { lookupTelegramMessage } = await import('./telegram-thread-map.js');
+  const repliedTo = lookupTelegramMessage(event.replyToMessageId);
+  if (!repliedTo || (!repliedTo.threadId && !repliedTo.memoId)) {
+    const out = outstanding();
+    const numMatch = out ? NUMERIC_ANSWER_RE.exec(text) : null;
+    const num = numMatch ? parseInt(numMatch[1]!, 10) : NaN;
+    if (out && numMatch && num >= 1 && num <= out.options.length) {
+      resolveRequest(out.id, num - 1);
+      await reloadAndInvoke(out.id);
+      result.resolved++;
+      return;
+    }
+  }
+
+  // Everything else is Mason talking to the Leader. Auth: telegram.ts already
+  // dropped messages from foreign chat ids, so this path is Mason-only.
+  await converseWithLeader(event, text, cfg);
+}
+
+async function pollTelegram(cfg: AshlrConfig, result: CycleResult): Promise<void> {
+  const { updates } = await pollTelegramUpdates(cfg);
+  for (const event of updates ?? []) {
+    try {
+      if (event.kind === 'callback') await handleTelegramCallback(event, cfg, result);
+      else if (event.kind === 'text' && event.text) await handleTelegramText(event, event.text, cfg, result);
+    } catch {
+      // one bad event must not stop the rest
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Outbound
+// ---------------------------------------------------------------------------
+
+/** Send every pending report (FIFO), paced. Reports never wait for a question. */
+async function sendReports(cfg: AshlrConfig, isTelegram: boolean, pacer: SendPacer, result: CycleResult): Promise<void> {
+  const reports = listRequests({ status: 'pending', type: 'report' });
+  for (const next of reports) {
+    if (!(await paceNext(pacer))) return;
+    const ok = isTelegram
+      ? await sendReportViaTelegram(next, cfg)
+      : (await sendIMessage(scrubSecrets(formatMessage(next)), cfg)).ok;
+    recordPacedSend(pacer);
+    if (!ok) {
+      // Transport is likely down — retry next cycle; a report that keeps
+      // failing is expired so it cannot wedge the ones behind it.
+      noteSendFailure(next.id, Date.now(), MAX_REPORT_SEND_FAILURES);
+      return;
+    }
+    markReportDelivered(next.id);
+    result.sent++;
+    await invokeHandler({ ...next, status: 'answered', answerIndex: -1 });
+    result.resolved++;
+  }
+}
+
+/** The single question slot: one button-question outstanding at a time. */
+async function sendNextQuestion(cfg: AshlrConfig, isTelegram: boolean, state: CommsState, nowMs: number, result: CycleResult): Promise<void> {
+  if (outstanding()) return;
+  if (nowMs - state.lastSentMs < QUESTION_COOLDOWN_MS) return;
+  const next = listRequests({ status: 'pending' }).find((r) => r.type !== 'report');
+  if (!next) return;
+
+  let sendOk = false;
+  if (isTelegram) {
+    const tgOpts = next.options.length > 0 ? { buttons: next.options, requestId: next.id } : undefined;
+    const { ok } = await sendTelegramMessage(scrubSecrets(next.text), tgOpts, cfg);
+    sendOk = ok;
+  } else {
+    const { ok } = await sendIMessage(scrubSecrets(formatMessage(next)), cfg);
+    sendOk = ok;
+  }
+  if (sendOk) {
+    markSent(next.id);
+    state.lastSentMs = nowMs;
+    result.sent++;
+  }
 }
 
 /**
  * Run one comms cycle. Never throws.
  *
- * @param cfg  AshlrConfig — comms.enabled + comms.imessageHandle must be set.
+ * @param cfg  AshlrConfig — comms.enabled + a configured channel.
  */
-export async function runCommsCycle(cfg: AshlrConfig): Promise<CycleResult> {
+export async function runCommsCycle(cfg: AshlrConfig, opts: CycleOptions = {}): Promise<CycleResult> {
   const result: CycleResult = { sent: 0, resolved: 0 };
-
-  // Select transport based on cfg.comms.channel
   const isTelegram = telegramEnabled(cfg);
 
-  // M212: soft-pause — skip the send/poll cycle when paused (but don't throw)
-  const { isPaused } = await import('./pause.js');
-  if (isPaused()) return result;
-
   try {
+    const { isPaused } = await import('./pause.js');
     const state = loadState();
     const now = Date.now();
 
-    // ── 0. Expire stale requests so a dead question cannot block the queue ──
+    // ── 0. One-time migration, then expire stale requests ─────────────────
+    const migration = runCommsMigrationsOnce(now);
+    if (migration) result.migration = migration;
     expireStaleRequests(now, commsRequestTtlMs(cfg));
 
-    // ── 1. Send next pending (if nothing outstanding + cooldown elapsed) ──────
-
-    const current = outstanding();
-    const cooldownOk = now - state.lastSentMs >= SEND_COOLDOWN_MS;
-
-    if (!current && cooldownOk) {
-      const pending = listRequests({ status: 'pending' });
-      if (pending.length > 0) {
-        const next = pending[0]!;
-
-        let sendOk = false;
-
-        if (isTelegram) {
-          // Telegram: send with inline keyboard buttons when the request has options
-          const tgOpts =
-            next.options.length > 0
-              ? { buttons: next.options, requestId: next.id }
-              : undefined;
-          const { ok } = await sendTelegramMessage(next.text, tgOpts, cfg);
-          sendOk = ok;
-        } else {
-          // iMessage: format text with numbered options
-          const text = formatMessage(next);
-          const { ok } = await sendIMessage(text, cfg);
-          sendOk = ok;
-        }
-
-        if (sendOk) {
-          markSent(next.id);
-          state.lastSentMs = now;
-          result.sent++;
-
-          // Reports are send-and-done — immediately mark answered (no reply needed)
-          if (next.type === 'report') {
-            resolveRequest(next.id, -1, '(report delivered)');
-            await invokeHandler({ ...next, status: 'answered', answerIndex: -1 });
-            result.resolved++;
-          }
-        }
-      }
-    }
-
-    // ── 2. Poll inbound replies ───────────────────────────────────────────────
-
+    // ── 1. Inbound ────────────────────────────────────────────────────────
     if (isTelegram) {
-      // ── Telegram path ─────────────────────────────────────────────────────
-      const { updates } = await pollTelegramUpdates(cfg);
-
-      for (const event of updates) {
-        if (event.kind === 'callback') {
-          // Button tap: resolve directly by requestId + optionIndex (no numeric parsing)
-          const out = outstanding();
-          if (
-            out &&
-            event.requestId === out.id &&
-            typeof event.optionIndex === 'number' &&
-            event.optionIndex >= 0 &&
-            event.optionIndex < out.options.length
-          ) {
-            resolveRequest(out.id, event.optionIndex);
-
-            // Ack the button tap so Telegram removes the spinner
-            if (event.callbackQueryId) {
-              await answerCallbackQuery(event.callbackQueryId, cfg);
-            }
-
-            await reloadAndInvoke(out.id);
-            result.resolved++;
-          }
-        } else if (event.kind === 'text' && event.text) {
-          const out = outstanding();
-
-          // M212: pause/resume commands
-          const pauseRe = /^\s*pause(\s+fleet)?\s*$/i;
-          const resumeRe = /^\s*resume(\s+fleet)?\s*$/i;
-          if (pauseRe.test(event.text)) {
-            const { setPause } = await import('./pause.js');
-            setPause(true);
-            await sendTelegramMessage('⏸ Fleet paused. Send "resume" to restart.', undefined, cfg);
-            continue;
-          }
-          if (resumeRe.test(event.text)) {
-            const { setPause } = await import('./pause.js');
-            setPause(false);
-            await sendTelegramMessage('▶️ Fleet resumed.', undefined, cfg);
-            continue;
-          }
-
-          // M215: "snapshot" / "dashboard" command — reply with fleet snapshot.
-          // Auth: messages from foreign chatIds are already dropped by telegram.ts.
-          // SAFETY: buildFleetSnapshot is read-only; no merge/push/apply.
-          const snapshotRe = /^\s*(snapshot|dashboard|status\s+full)\s*$/i;
-          if (snapshotRe.test(event.text)) {
-            try {
-              const { buildFleetSnapshot } = await import('./events.js');
-              const snapshot = await buildFleetSnapshot(cfg);
-              await sendTelegramMessage(snapshot, undefined, cfg);
-            } catch {
-              // best-effort — never crash the cycle
-            }
-            continue;
-          }
-
-          // M215: "revert:<proposalId>:<repo>" callback from merge inline button.
-          // Creates a SIGNED REVERT PROPOSAL via regression-sentinel. Never applies.
-          const revertRe = /^\s*revert:([^:]+):(.*)$/i;
-          const revertMatch = revertRe.exec(event.text);
-          if (revertMatch) {
-            const proposalId = revertMatch[1] as string;
-            const repo = revertMatch[2] as string;
-            if (proposalId && proposalId.trim()) {
-              try {
-                const { buildRevertProposal } = await import('./events.js');
-                const proposal = await buildRevertProposal(proposalId.trim(), repo?.trim() || process.cwd(), cfg);
-                if (proposal) {
-                  await sendTelegramMessage(
-                    `Revert proposal created (pending, not applied): "${proposal.title}" — review at http://localhost:4317/proposals/${proposal.id}`,
-                    undefined,
-                    cfg,
-                  );
-                } else {
-                  await sendTelegramMessage(
-                    `Could not create revert proposal for "${proposalId}" — see dashboard for details`,
-                    undefined,
-                    cfg,
-                  );
-                }
-              } catch {
-                // best-effort
-              }
-            }
-            continue;
-          }
-
-          // Text — check if it's a numbered reply to an outstanding request first.
-          const numMatch = out ? /^\s*(\d+)\b/.exec(event.text) : null;
-          const num = numMatch ? parseInt(numMatch[1]!, 10) : NaN;
-          const isNumericReply =
-            out !== undefined &&
-            numMatch !== null &&
-            num >= 1 &&
-            num <= out.options.length;
-
-          if (isNumericReply && out) {
-            // Numbered reply — resolve the outstanding request as before
-            const answerIndex = num - 1;
-            resolveRequest(out.id, answerIndex);
-            await reloadAndInvoke(out.id);
-            result.resolved++;
-          } else {
-            // M180: free-form text → strategic dialogue with the Elon agent (Opus).
-            // Auth: telegram.ts already dropped messages from foreign chatIds before
-            // this point. This path is Mason-only by construction.
-            // SAFETY: handleStrategicMessage only sets goals/vision — it cannot
-            // trigger merge/push/destructive ops (those remain gated by execution floor).
-            const reply = await handleStrategicMessage(event.text, cfg);
-            if (reply) {
-              await sendTelegramMessage(reply, undefined, cfg);
-            }
-          }
-        }
-      }
-
-      // Telegram uses its own offset file — no watermarkMs needed
-      saveState({ ...state });
-    } else {
-      // ── iMessage path ─────────────────────────────────────────────────────
-      // Lazy import to allow mocking in tests
+      // Polled even while paused, so "resume" (and /status) still work.
+      await pollTelegram(cfg, result);
+    } else if (!isPaused()) {
+      // iMessage: only numbered answers to the outstanding question.
       const { pollInboundReplies } = await import('../integrations/imessage.js');
       const inbound = await pollInboundReplies(state.watermarkMs, cfg);
       let newWatermark = state.watermarkMs;
-
       for (const msg of inbound) {
         if (msg.ts > newWatermark) newWatermark = msg.ts;
-
-        // Only attempt resolution if there's an outstanding question/approval
         const out = outstanding();
         if (!out) continue;
-
-        // Parse leading integer from the reply text (1-based)
         const match = /^\s*(\d+)\b/.exec(msg.text);
         if (!match) continue; // non-numeric — safe start: ignore
-
         const num = parseInt(match[1]!, 10);
         if (num < 1 || num > out.options.length) continue; // out-of-range
-
-        const answerIndex = num - 1; // convert to 0-based
-        resolveRequest(out.id, answerIndex);
-
+        resolveRequest(out.id, num - 1);
         await reloadAndInvoke(out.id);
         result.resolved++;
       }
-
-      // ── 3. Advance watermark ─────────────────────────────────────────────
-      saveState({ ...state, watermarkMs: newWatermark });
+      state.watermarkMs = newWatermark;
     }
+
+    // ── 2. Outbound (held while paused) ───────────────────────────────────
+    if (!isPaused()) {
+      const pacer = createPacer({
+        gapMs: opts.sendGapMs ?? DEFAULT_SEND_GAP_MS,
+        batchCap: opts.batchCap ?? DEFAULT_BATCH_CAP,
+        ...(opts.sleep ? { sleep: opts.sleep } : {}),
+      });
+      await sendReports(cfg, isTelegram, pacer, result);
+      if (isTelegram) {
+        const drained = await drainLeaderThread(cfg, pacer);
+        result.sent += drained.sent;
+      }
+      await sendNextQuestion(cfg, isTelegram, state, now, result);
+    }
+
+    saveState(state);
   } catch {
     // top-level safety net — runCommsCycle NEVER throws
   }
