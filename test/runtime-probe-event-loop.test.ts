@@ -55,7 +55,10 @@ import {
 } from '../src/core/local-runtime/llama/process.js';
 import { statusLocalRuntime } from '../src/core/local-runtime/llama/supervisor.js';
 import { probeLlamaRuntime, type FetchLike } from '../src/core/local-runtime/llama/health.js';
-import { resolveLlamaRuntimeSettings } from '../src/core/local-runtime/llama/config.js';
+import {
+  resolveLlamaRuntimeConfig,
+  resolveLlamaRuntimeSettings,
+} from '../src/core/local-runtime/llama/config.js';
 import type { LlamaOwnershipRecord } from '../src/core/local-runtime/llama/types.js';
 
 const BUDGET_MS = 20;
@@ -140,6 +143,15 @@ describe('the runtime probe path', () => {
     expect(slice).toBeLessThan(BUDGET_MS);
   });
 
+  it('still applies the loopback gate to an override on the spawn-free path', async () => {
+    // effectiveEndpoint must re-gate exactly like effectiveRuntime: an override
+    // object is an ordinary argument and must not carry a non-loopback bind
+    // host past the resolver's rule, even on the read-only status path.
+    const snapshot = await statusLocalRuntime({ runtime: { host: '0.0.0.0', port: 1 } });
+    expect(snapshot.host).toBe('127.0.0.1');
+    expect(snapshot.port).toBe(1);
+  });
+
   it('the re-adoption scan over a heavy ps table stays inside the budget', async () => {
     fakePs.stdout = heavyProcessTable(8080);
     const record: LlamaOwnershipRecord = {
@@ -176,5 +188,19 @@ describe('resolveLlamaRuntimeSettings', () => {
     expect(cp.execFileSync).not.toHaveBeenCalled();
     expect('binPath' in settings).toBe(false);
     expect(typeof settings.port).toBe('number');
+  });
+
+  it('is exactly the full config minus binPath (the full resolver is unchanged)', () => {
+    // An operator's LLAMA_SERVER_BIN would bypass `which`; take it out of play.
+    const savedBin = process.env['LLAMA_SERVER_BIN'];
+    delete process.env['LLAMA_SERVER_BIN'];
+    try {
+      const { binPath, ...rest } = resolveLlamaRuntimeConfig();
+      expect(rest).toEqual(resolveLlamaRuntimeSettings());
+      // The full resolver still locates the binary (here via the faked `which`).
+      expect(binPath).toBe('/usr/local/bin/llama-server');
+    } finally {
+      if (savedBin !== undefined) process.env['LLAMA_SERVER_BIN'] = savedBin;
+    }
   });
 });
