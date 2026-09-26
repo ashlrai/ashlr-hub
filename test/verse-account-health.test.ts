@@ -42,7 +42,7 @@ import {
   type SeatHealthProbes,
   type SeatHealthSweepSnapshot,
 } from '../src/core/verse/account-health.js';
-import { rankSeatAlternatives, seatBlock, seatReadiness } from '../src/core/verse/seat-readiness.js';
+import { rankSeatAlternatives, seatBlock, seatReadiness, seatReopening } from '../src/core/verse/seat-readiness.js';
 import { getSeatReadiness, seatUsability } from '../src/core/verse/seats.js';
 import {
   handleHealthApi,
@@ -396,6 +396,29 @@ describe('buildSeatHealthReports', () => {
     expect(report.reasons[0]).toContain('resets Sep 30 at 7pm (America/New_York)');
     expect(seatBlock(s, null, NOW)).toMatchObject({ resetAt: null,
       reason: 'claude is out of usage — resets Sep 30 at 7pm (America/New_York).' });
+  });
+
+  it('seatReopening: no capacity, nothing spent, a flagged denial and an unparseable reset', () => {
+    expect(seatReopening(null)).toEqual({ resetAt: null, resetDescription: null });
+    expect(seatReopening(undefined)).toEqual({ resetAt: null, resetDescription: null });
+    // Nothing spent: the binding window's own reset, as before.
+    const open = capacity({ windows: [
+      window('five_hour', 30, { resetsAt: '2026-09-25T18:25:00.000Z' }),
+      window('seven_day', 70, { resetsAt: '2026-09-30T00:00:00.000Z' }),
+    ] });
+    expect(seatReopening(open)).toEqual({ resetAt: '2026-09-30T00:00:00.000Z', resetDescription: null });
+    // A Codex denial flag is spent whatever its percent reads; the open window does not count.
+    const flagged = capacity({ windows: [
+      window('codex_primary', 60, { limitReached: true, resetsAt: '2026-09-25T18:25:00.000Z' }),
+      window('codex_secondary', 40, { resetsAt: '2026-10-01T00:00:00.000Z' }),
+    ] });
+    expect(seatReopening(flagged).resetAt).toBe('2026-09-25T18:25:00.000Z');
+    // A garbage instant on a spent window is unknown, never a guess.
+    const garbled = capacity({ windows: [
+      window('codex_primary', 100, { resetsAt: '2026-09-25T18:25:00.000Z' }),
+      window('codex_secondary', 100, { resetsAt: 'soon' }),
+    ] });
+    expect(seatReopening(garbled)).toEqual({ resetAt: null, resetDescription: null });
   });
 
   it('keeps Claude prose resets verbatim and never invents a reset instant', () => {
