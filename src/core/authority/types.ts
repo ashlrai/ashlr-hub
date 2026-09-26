@@ -792,6 +792,47 @@ export interface AuthorityStatusV1 {
 }
 
 /**
+ * GET /api/verse/authority/setup and `ashlr authority setup --dry-run --json`
+ * (src/cli/authority.ts) — the Phase-0 checklist. Read-only: producing it
+ * asks nothing and changes nothing.
+ */
+export const VERSE_AUTHORITY_SETUP_PATH = '/api/verse/authority/setup';
+
+/** `skipped` = a dry run planned the step without performing it. */
+export type AuthoritySetupStepStatus = 'done' | 'already' | 'waiting-on-you' | 'skipped' | 'blocked' | 'failed';
+
+/** What a setup step needs from Mason himself (a UI renders these as badges). */
+export type AuthoritySetupNeed = 'sudo' | 'touch-id' | 'browser' | 'github' | 'terminal';
+
+export interface AuthoritySetupStepV1 {
+  /** Stable id (`custody-helper`, `github-app`, …). */
+  id: string;
+  step: string;
+  status: AuthoritySetupStepStatus;
+  detail: string;
+  needs: readonly AuthoritySetupNeed[];
+  /**
+   * The exact command that moves this step on (copied, never executed by a
+   * UI); null when nothing on this Mac can (a PR to merge, a build block).
+   * Additive to v1 — absent from reports made before it existed.
+   */
+  command?: string | null;
+  /** A page the step waits on (the App's install page, the trust-root PR); null when none. Additive. */
+  link?: string | null;
+}
+
+export interface AuthoritySetupReportV1 {
+  schema: 'ashlr.authority-setup.v1';
+  dryRun: boolean;
+  /** Every step is done or already in place, including resident runtime admission. */
+  complete: boolean;
+  summary: { done: number; already: number; waitingOnYou: number; blocked: number; failed: number; planned: number };
+  steps: AuthoritySetupStepV1[];
+  /** The first step that is not done or already in place (null when complete). */
+  next: string | null;
+}
+
+/**
  * GET /api/verse/authority/draft — the grant the server would ask Mason to
  * sign (the default ladder) and its digest. The Touch ID sheet renders it;
  * the `grant` / `re-approve` actions echo `digest` so the server signs

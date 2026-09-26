@@ -198,7 +198,10 @@ ashlr authority status            # grant, switch, Stop, rollout stage, ledger, 
 
 `setup` performs each available step and pauses for the steps marked ✋. Its
 last step reports the resident runtime: in place, waiting on the exact command,
-or blocked on a missing prerequisite.
+or blocked on a missing prerequisite. Rerunning it is safe: whatever is already
+in place is reported `already` and left alone (the provenance key is rotated
+only once). Verse shows the same checklist, with the next step's command to
+copy.
 
 1. ✋ **Install the custody helper:** `sudo scripts/install-custody.sh`
    (root-owned, in `/usr/local/libexec/`).

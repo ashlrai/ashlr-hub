@@ -6,6 +6,8 @@
  *                                          → AuthorityGrantDraft (+ kind, summary, startStageId)
  *   GET  /api/verse/authority/ledger[?limit=&kind=]
  *                                          → { entries, head, chain, brokenAtSeq, reason }
+ *   GET  /api/verse/authority/setup        → AuthoritySetupReportV1 — `ashlr authority
+ *                                            setup --dry-run --json`, read-only, cached 30 s
  *   POST /api/verse/authority              → one AuthorityActionRequest → AuthorityStatusV1 (+ result)
  *
  * The Command top bar: the Autonomy switch, Stop, the grant chip and the Touch
@@ -65,6 +67,8 @@ import {
   AUTONOMY_SWITCHES,
   LEDGER_EVENT_KINDS,
   VERSE_AUTHORITY_PATH,
+  VERSE_AUTHORITY_SETUP_PATH,
+  type AuthoritySetupReportV1,
   type AuthorityCustodyView,
   type AuthorityGrantDraft,
   type AuthorityGrantView,
@@ -442,6 +446,73 @@ export function resetAuthorityApiCachesForTest(): void {
   custodyCache = null;
   drafts.clear();
   signingInFlight = false;
+  setupCache = null;
+  setupInflight = null;
+  setupPlanner = defaultSetupPlanner;
+}
+
+// ---------------------------------------------------------------------------
+// Setup checklist — GET /api/verse/authority/setup
+// ---------------------------------------------------------------------------
+
+/** The checklist moves when Mason runs something in a terminal; half a minute is fresh enough. */
+const SETUP_CACHE_MS = 30_000;
+/** The route answers within this even when a probe (gh, custody) is slow; the probe finishes into the cache. */
+const SETUP_DEADLINE_MS = 45_000;
+
+/**
+ * The CLI's own dry run (`planAuthoritySetup`): the same steps `ashlr
+ * authority setup --dry-run --json` prints, with dependencies that cannot
+ * prompt, sign, open a browser or run anything but a bounded `gh api` read.
+ */
+const defaultSetupPlanner = async (): Promise<AuthoritySetupReportV1> => (await import('../../cli/authority.js')).planAuthoritySetup();
+
+let setupPlanner: () => Promise<AuthoritySetupReportV1> = defaultSetupPlanner;
+let setupCache: { at: number; report: AuthoritySetupReportV1 } | null = null;
+let setupInflight: Promise<AuthoritySetupReportV1> | null = null;
+
+/** Test seam: replace the planner (reset by resetAuthorityApiCachesForTest). */
+export function setAuthoritySetupPlannerForTest(planner: () => Promise<AuthoritySetupReportV1>): void {
+  setupPlanner = planner;
+  setupCache = null;
+  setupInflight = null;
+}
+
+/** Forget the cached checklist (an action just changed what it would say). */
+function invalidateSetupCache(): void {
+  setupCache = null;
+}
+
+/**
+ * The checklist, cached SETUP_CACHE_MS. Concurrent readers share one probe
+ * (so a slow gh never piles up runs), and a reader waits at most
+ * SETUP_DEADLINE_MS.
+ */
+export async function readAuthoritySetup(nowMs = Date.now()): Promise<AuthoritySetupReportV1> {
+  if (setupCache && nowMs - setupCache.at < SETUP_CACHE_MS) return setupCache.report;
+  if (!setupInflight) {
+    const run = setupPlanner().then((report) => {
+      setupCache = { at: Date.now(), report };
+      return report;
+    });
+    setupInflight = run;
+    void run.then(
+      () => { if (setupInflight === run) setupInflight = null; },
+      () => { if (setupInflight === run) setupInflight = null; },
+    );
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      setupInflight,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('the setup checklist took too long')), SETUP_DEADLINE_MS);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -748,7 +819,7 @@ async function readMutationBody(ctx: VerseApiContext, req: IncomingMessage, res:
 const LEDGER_KIND_SET: ReadonlySet<string> = new Set(LEDGER_EVENT_KINDS);
 
 export const handleAuthorityApi: ApiModule = async (ctx, req, res, path, method) => {
-  if (path !== VERSE_AUTHORITY_PATH && path !== VERSE_AUTHORITY_DRAFT_PATH && path !== VERSE_AUTHORITY_LEDGER_PATH) return false;
+  if (path !== VERSE_AUTHORITY_PATH && path !== VERSE_AUTHORITY_DRAFT_PATH && path !== VERSE_AUTHORITY_LEDGER_PATH && path !== VERSE_AUTHORITY_SETUP_PATH) return false;
   try {
     if (path === VERSE_AUTHORITY_PATH) {
       if (method === 'GET') {
@@ -761,6 +832,8 @@ export const handleAuthorityApi: ApiModule = async (ctx, req, res, path, method)
         const body = await readMutationBody(ctx, req, res);
         if (!body) return true;
         const outcome = await applyAuthorityAction(body);
+        // A grant, a switch or Stop changes what the checklist says.
+        if (outcome.ok) invalidateSetupCache();
         if (!outcome.ok) {
           sendAuthorityJson(res, outcome.status, { code: outcome.code, error: outcome.error, ...(outcome.extra ?? {}) });
           return true;
@@ -789,6 +862,17 @@ export const handleAuthorityApi: ApiModule = async (ctx, req, res, path, method)
       } catch (error) {
         if (error instanceof AuthorityDraftError) sendAuthorityJson(res, error.status, { code: error.code, error: error.message });
         else sendAuthorityJson(res, 500, { code: 'draft-failed', error: 'the grant draft could not be built' });
+      }
+      return true;
+    }
+    if (path === VERSE_AUTHORITY_SETUP_PATH) {
+      // Read-only: the dry run's checklist. It never asks, signs, opens a
+      // browser or changes GitHub, so the read token is enough.
+      if (!readQuery(req, res, [])) return true;
+      try {
+        sendAuthorityJson(res, 200, await readAuthoritySetup());
+      } catch {
+        sendAuthorityJson(res, 503, { code: 'setup-unavailable', error: 'the setup checklist could not be read' });
       }
       return true;
     }
