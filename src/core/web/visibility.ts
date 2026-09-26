@@ -429,12 +429,9 @@ async function buildDirectorState(cfg: AshlrConfig): Promise<DirectorState> {
   };
 
   try {
-    const directorEnabled = !!(
-      cfg &&
-      typeof cfg === 'object' &&
-      'comms' in cfg &&
-      (cfg as { comms?: { director?: boolean } }).comms?.director === true
-    );
+    // Typed since 3.14 (cfg.comms.director, deprecated): the Director is
+    // retired, so this only reports that the old switch is still set.
+    const directorEnabled = cfg?.comms?.director === true;
 
     let resourcePosture = 'unknown';
     let topGoalObjective: string | null = null;

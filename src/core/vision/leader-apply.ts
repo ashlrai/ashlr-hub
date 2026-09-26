@@ -1358,7 +1358,7 @@ function settleNotApplied(deps: LeaderApplyDeps, claimed: Claimed, next: LeaderA
  * Returns the updated action — or, when a veto took the row while the change
  * was being made, the vetoed action after the change has been undone.
  */
-async function applyClaimed(deps: LeaderApplyDeps, claimed: Claimed): Promise<LeaderAction> {
+async function applyClaimed(deps: LeaderApplyDeps, claimed: Claimed, opts: { approvedVia?: string } = {}): Promise<LeaderAction> {
   const action = claimed.stored.action;
   let outcome: ApplyOutcome;
   try {
@@ -1369,7 +1369,11 @@ async function applyClaimed(deps: LeaderApplyDeps, claimed: Claimed): Promise<Le
   if (outcome.status !== 'applied') {
     return settleNotApplied(deps, claimed, { ...action, status: outcome.status, statusReason: outcome.reason } as LeaderAction);
   }
-  let next = { ...action, status: 'applied', statusReason: outcome.detail, appliedAt: new Date(deps.now()).toISOString(), inverse: outcome.inverse } as LeaderAction;
+  // An early apply Mason approved says so on its `applied` row (the ledger's record of why it did not wait).
+  const statusReason = opts.approvedVia
+    ? [`Approved by Mason (${opts.approvedVia}) before its veto window closed.`, outcome.detail].filter((t): t is string => typeof t === 'string' && t.length > 0).join(' ')
+    : outcome.detail;
+  let next = { ...action, status: 'applied', statusReason, appliedAt: new Date(deps.now()).toISOString(), inverse: outcome.inverse } as LeaderAction;
   let restore = outcome.restore;
   const row = ledgerAction(deps, next);
   if (!row.ok) {
@@ -1531,36 +1535,136 @@ export async function applyDueLeaderActions(deps: LeaderApplyDeps): Promise<Lead
       s.action.status === 'scheduled' && s.action.class === 'B' && s.action.applyAfter === snap.action.applyAfter);
     if (!claimed) continue;
     const action = claimed.stored.action;
-    const row = await ledgerRowFor(deps, action.id, 'scheduled');
-    if (row === 'unavailable' || row === null
-      || row.kind !== action.kind || row.class !== 'B' || row.applyAfter !== action.applyAfter || row.memoId !== action.memoId
-      || canonical(row.params) !== canonical(action.params)) {
-      out.push(settleNotApplied(deps, claimed, {
-        ...action,
-        status: 'refused',
-        statusReason: row === 'unavailable'
-          ? 'The authority ledger could not be read, so the scheduled action was not applied.'
-          : 'The scheduled action does not match its ledger record, so it was not applied.',
-      } as LeaderAction));
-      continue;
-    }
-    const memo = readLeaderMemo(action.memoId);
-    const ctx = buildPolicyContext(deps, memo?.hypotheses.map((h) => h.id) ?? []);
-    // The action itself is already counted in the 24 h create tally — do not count it twice.
-    if (action.kind === 'goal.create') ctx.goalCreatesLast24h = Math.max(0, ctx.goalCreatesLast24h - 1);
-    const again = classifyLeaderAction(action as unknown as AnyLeaderActionDraft, ctx);
-    const granted = !isLeaderDryRun(ctx.policy) && again.verdict === 'ok' && again.class === 'B' && ctx.policy!.leader.classes.includes('B');
-    if (!granted) {
-      out.push(settleNotApplied(deps, claimed, {
-        ...action,
-        status: 'refused',
-        statusReason: `The grant changed during the veto window: ${again.reason ?? (isLeaderDryRun(ctx.policy) ? 'the Leader may no longer act' : 'class B is no longer granted')}.`,
-      } as LeaderAction));
+    const refusal = await scheduledApplyRefusal(deps, action);
+    if (refusal !== null) {
+      out.push(settleNotApplied(deps, claimed, { ...action, status: 'refused', statusReason: refusal } as LeaderAction));
       continue;
     }
     out.push(await applyClaimed(deps, claimed));
   }
   return out;
+}
+
+/**
+ * The authority checks a scheduled class-B action must pass before it may
+ * apply — at the end of its veto window AND when Mason approves it early.
+ * Null = it may apply; otherwise the reason it may not:
+ *   - its `scheduled` row must be on the ledger with the same kind, class,
+ *     window, memo and params (the local store never authorizes anything);
+ *   - it must STILL classify as class B under today's grant, with class B
+ *     granted and the Leader not in dry run (a grant revoked or narrowed
+ *     since stops it).
+ */
+async function scheduledApplyRefusal(deps: LeaderApplyDeps, action: LeaderAction): Promise<string | null> {
+  const row = await ledgerRowFor(deps, action.id, 'scheduled');
+  if (row === 'unavailable') return 'The authority ledger could not be read, so the scheduled action was not applied.';
+  if (row === null
+    || row.kind !== action.kind || row.class !== 'B' || row.applyAfter !== action.applyAfter || row.memoId !== action.memoId
+    || canonical(row.params) !== canonical(action.params)) {
+    return 'The scheduled action does not match its ledger record, so it was not applied.';
+  }
+  const memo = readLeaderMemo(action.memoId);
+  const ctx = buildPolicyContext(deps, memo?.hypotheses.map((h) => h.id) ?? []);
+  // The action itself is already counted in the 24 h create tally — do not count it twice.
+  if (action.kind === 'goal.create') ctx.goalCreatesLast24h = Math.max(0, ctx.goalCreatesLast24h - 1);
+  const again = classifyLeaderAction(action as unknown as AnyLeaderActionDraft, ctx);
+  const granted = !isLeaderDryRun(ctx.policy) && again.verdict === 'ok' && again.class === 'B' && ctx.policy!.leader.classes.includes('B');
+  if (!granted) {
+    return `The grant changed during the veto window: ${again.reason ?? (isLeaderDryRun(ctx.policy) ? 'the Leader may no longer act' : 'class B is no longer granted')}.`;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Approve (3.14)
+// ---------------------------------------------------------------------------
+
+/**
+ * - `applied`                — a class-B action Mason approved inside its window
+ *                              was applied now (and stays vetoable, like any
+ *                              applied action);
+ * - `recorded-dry-run`       — the Leader is in dry run: the approval is
+ *                              recorded (it feeds the next memo), nothing applied;
+ * - `recorded-outside-grant` — a class-C ask: outside the grant, never applied
+ *                              from here; the approval is recorded;
+ * - `refused`                — the authority checks said no right now (the
+ *                              action stays scheduled; its window decides);
+ * - `not-pending`            — already applied / vetoed / refused / failed, or
+ *                              a class-A action mid-apply.
+ */
+export type LeaderApprovalOutcome = 'applied' | 'recorded-dry-run' | 'recorded-outside-grant' | 'refused' | 'not-pending';
+
+export interface LeaderApprovalResult {
+  ok: boolean;
+  /** HTTP-ish: 404 unknown action, 409 nothing to approve / refused now. */
+  code: 200 | 404 | 409;
+  outcome: LeaderApprovalOutcome | null;
+  message: string;
+  /** The action as it stands after the approval (null when unknown). */
+  action: LeaderAction | null;
+}
+
+/**
+ * Mason approves a pending Leader action. NEVER BYPASSES AUTHORITY:
+ *   - class B inside its veto window → claimed like the window close claims
+ *     it, re-checked by `scheduledApplyRefusal` (ledger row + today's grant),
+ *     then applied early through the same `applyClaimed` path, its ledger row
+ *     saying who approved it. The window is Mason's review; his explicit
+ *     approval is that review, and the action stays vetoable afterwards.
+ *     If a check fails the action is left scheduled — its window decides.
+ *   - dry run (no grant / Propose / shadow stage) → recorded only;
+ *   - class C (outside the grant) → recorded only: raising the grant is
+ *     Mason's own step (`ashlr authority`), never an approval side effect.
+ * Recording the approval (leader-operator.ts) is the caller's job — this
+ * module decides and applies; it does not keep operator records.
+ */
+export async function applyApprovedLeaderAction(
+  deps: LeaderApplyDeps,
+  actionId: string,
+  opts: { via: string },
+): Promise<LeaderApprovalResult> {
+  const stored = findStoredAction(actionId);
+  if (!stored) return { ok: false, code: 404, outcome: null, message: `No Leader action ${actionId}.`, action: null };
+  const action = stored.action;
+  if (action.status === 'escalated') {
+    return {
+      ok: true,
+      code: 200,
+      outcome: 'recorded-outside-grant',
+      message: 'Recorded your approval. This is outside the standing grant, so nothing was applied; widen the grant yourself (ashlr authority) if you want the Leader to do it.',
+      action,
+    };
+  }
+  if (action.status === 'refused' && typeof action.statusReason === 'string' && action.statusReason.startsWith('dry run:')) {
+    return {
+      ok: true,
+      code: 200,
+      outcome: 'recorded-dry-run',
+      message: `Recorded your approval. Nothing was applied — ${action.statusReason}`,
+      action,
+    };
+  }
+  if (action.status !== 'scheduled' || action.class !== 'B') {
+    const why = action.status === 'scheduled' ? 'it is being applied now' : `it is ${action.status}`;
+    return { ok: false, code: 409, outcome: 'not-pending', message: `Nothing to approve: ${why}.`, action };
+  }
+  const claimed = claimAction(deps, actionId, 'apply', (s) =>
+    s.action.status === 'scheduled' && s.action.class === 'B' && s.action.applyAfter === action.applyAfter);
+  if (!claimed) {
+    const current = currentAction(actionId, action);
+    return { ok: false, code: 409, outcome: 'not-pending', message: `Nothing to approve: it is ${current.status === 'scheduled' ? 'being applied now' : current.status}.`, action: current };
+  }
+  const refusal = await scheduledApplyRefusal(deps, claimed.stored.action);
+  if (refusal !== null) {
+    // Release the claim and leave it scheduled: the window close re-checks it.
+    settleClaim(claimed, claimed.stored);
+    return { ok: false, code: 409, outcome: 'refused', message: `Not applied: ${refusal}`, action: currentAction(actionId, action) };
+  }
+  const applied = await applyClaimed(deps, claimed, { approvedVia: opts.via });
+  if (applied.status === 'applied') {
+    return { ok: true, code: 200, outcome: 'applied', message: `Applied: ${applied.summary}`, action: applied };
+  }
+  return { ok: false, code: 409, outcome: 'refused', message: `Not applied: ${applied.statusReason ?? applied.status}`, action: applied };
 }
 
 /**

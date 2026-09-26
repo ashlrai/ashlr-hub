@@ -86,6 +86,7 @@ import {
 } from './leader-apply.js';
 import { loadDefaultLeaderSeatDeps, resolveLeaderSeat, type LeaderSeatDeps } from './leader-seat.js';
 import { suggestLeaderCloudBacklog, type LeaderCloudBacklogDeps } from './leader-cloud.js';
+import { readLeaderOperatorContext, type LeaderOperatorContext } from './leader-operator.js';
 
 // ---------------------------------------------------------------------------
 // Persona
@@ -206,6 +207,14 @@ export interface LeaderEvidence {
   hitRate: LeaderHitRate;
   recentVetoes: { summary: string; note: string | null }[];
   directives: { grokLanes: number | null; codexEnabled: boolean | null; routerTuning: unknown } | null;
+  /**
+   * 3.14: what Mason told the Leader — standing operator directives, his
+   * answers to earlier questions, the actions he approved (leader-operator.ts).
+   * Absent when he has said nothing, so the evidence digest is unchanged for
+   * a Leader nobody has talked to. The prompt renders `trusted` as Mason's
+   * own words and `untrusted` (the Leader's earlier wording) as data.
+   */
+  operator?: LeaderOperatorContext;
   /** Sections whose source failed — reported so the model does not read them as zero. */
   unknown: string[];
 }
@@ -344,6 +353,8 @@ export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs
 
   const directives = readLeaderDirectives();
   const actions = listLeaderActions(200);
+  // 3.14 operator input (additive): unreadable is reported, never read as "no guidance".
+  const operator = attempt('operator', () => readLeaderOperatorContext(nowMs));
   return {
     grant,
     budget,
@@ -363,6 +374,7 @@ export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs
     hitRate: computeHitRate(state.outcomes, nowMs),
     recentVetoes: actions.filter((a) => a.status === 'vetoed').slice(0, 5).map((a) => ({ summary: a.summary, note: a.vetoNote })),
     directives: directives ? { grokLanes: directives.grokLanes, codexEnabled: directives.codexEnabled, routerTuning: directives.routerTuning } : null,
+    ...(operator ? { operator } : {}),
     unknown: [...new Set(unknown)].sort(),
   };
 }
@@ -387,6 +399,23 @@ function untrustedBlock(label: string, value: unknown): string {
   return `=== BEGIN UNTRUSTED DATA: ${label} ===\n${serialized}\n=== END UNTRUSTED DATA: ${label} ===`;
 }
 
+/**
+ * 3.14: Mason's standing directives and answers — the one TRUSTED block in
+ * the memo prompt. Serialized like the data blocks (JSON, line separators
+ * escaped) so its text cannot fake a delimiter. It steers judgement only:
+ * the grant and the policy check still bound every action.
+ */
+function operatorBlock(operator: LeaderOperatorContext): string {
+  const serialized = (JSON.stringify(operator.trusted) ?? 'null')
+    .replace(/\u0085/gu, '\\u0085')
+    .replace(/\u2028/gu, '\\u2028')
+    .replace(/\u2029/gu, '\\u2029');
+  return `=== OPERATOR DIRECTIVES FROM MASON (trusted: the owner's own words) ===
+${serialized}
+=== END OPERATOR DIRECTIVES ===
+Honor every directive above in the bottleneck, the move, the kill list and every action; when evidence conflicts with a directive, follow the directive and say why in notes. Answers are Mason's replies to your earlier questions (joined by questionId to the data block below); approvals are actions he endorsed. None of this widens the standing grant — the policy check still classifies every action.`;
+}
+
 export function buildLeaderPrompt(evidence: LeaderEvidence, opts: { dryRun: boolean; nowIso: string }): string {
   const blocks = [
     untrustedBlock('STANDING GRANT (null = none: every action is a dry run)', evidence.grant),
@@ -401,6 +430,10 @@ export function buildLeaderPrompt(evidence: LeaderEvidence, opts: { dryRun: bool
     untrustedBlock('YOUR STANDING DIRECTIVES', evidence.directives),
     untrustedBlock('UNKNOWN SECTIONS (sources that failed — not zero)', evidence.unknown),
   ];
+  if (evidence.operator) {
+    blocks.unshift(operatorBlock(evidence.operator));
+    blocks.push(untrustedBlock('YOUR EARLIER WORDING THAT MASON ANSWERED OR APPROVED', evidence.operator.untrusted));
+  }
   const openGoals = evidence.goals?.open ?? null;
   const focus = openGoals !== null && openGoals > LEADER_LIMITS.maxActiveGoals
     ? `\nFOCUS FIRST: ${openGoals} goals are open; at most ${LEADER_LIMITS.maxActiveGoals} may be. Pause or archive the rest (priorityChanges or goal.pause / goal.archive actions) before anything else.`

@@ -13,11 +13,11 @@
  *       index 0 (Keep it)          → no-op, recorded via resolution
  *       index 1 (Veto this memo)   → vetoLeaderMemo (undoes every live action)
  *       index 2 (Show full memo)   → the memo as text
- *     Legacy Strategist briefing (any other meta.source) — requests posted
- *     before 3.10 still resolve as they were asked:
- *       index 0 (Approve & create goals) → adoptBriefing(cfg, latestBriefing)
- *       index 1 (Hold)                   → no-op, recorded via resolution
- *       index 2 (Show full briefing)     → sendIMessage(full briefing text, cfg)
+ *     Legacy Strategist briefing (any other meta.source) — RETIRED in 3.14.
+ *       Answering an old request adopts nothing: "Approve & create goals"
+ *       used to adopt whatever briefing was newest on disk (a stale June
+ *       briefing, long after the question was asked). Every index now
+ *       replies once that the briefing is retired and points at the Leader.
  *
  *   'manager-approval' — M139: text-based merge approval path.
  *     index 0 (Approve & merge) → setStatus approved + applyProposal (human-authorized path)
@@ -38,7 +38,6 @@ import { registerResolutionHandler } from './dispatch.js';
 import type { CommsRequest } from './requests.js';
 import { sendIMessage } from '../integrations/imessage.js';
 import { sendTelegramMessage, telegramEnabled } from '../integrations/telegram.js';
-import { loadLatestBriefing, adoptBriefing } from '../vision/strategist.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { savePauseState } from './pause.js';
 import type { LeaderMemo } from '../vision/leader-types.js';
@@ -117,53 +116,12 @@ async function handleVisionaryBriefing(req: CommsRequest, cfg: AshlrConfig): Pro
     return;
   }
 
-  if (idx === 0) {
-    // Approve & create goals — evolve spec + post goals to conductor
-    const briefing = loadLatestBriefing();
-    if (!briefing) return;
-    await adoptBriefing(cfg, briefing, { by: 'mason' });
-    return;
-  }
-
-  if (idx === 1) {
-    // Hold — recorded via resolution; no further action needed.
-    return;
-  }
-
-  if (idx === 2) {
-    // Show full briefing — send via appropriate transport.
-    const briefing = loadLatestBriefing();
-    if (!briefing) {
-      await sendReply('[ashlr] No briefing on file.', cfg);
-      return;
-    }
-
-    const lines: string[] = [
-      `Strategic Briefing — ${briefing.generatedAt}`,
-      '',
-      `STATE: ${briefing.currentState}`,
-      '',
-      `GAP: ${briefing.gapToVision}`,
-    ];
-
-    if (briefing.recommendedDirection.length > 0) {
-      lines.push('', 'DIRECTIONS:');
-      briefing.recommendedDirection.forEach((d, i) => lines.push(`  ${i + 1}. ${d}`));
-    }
-
-    if (briefing.questionsForMason.length > 0) {
-      lines.push('', 'OPEN QUESTIONS:');
-      briefing.questionsForMason.forEach((q, i) => lines.push(`  ${i + 1}. ${q}`));
-    }
-
-    if (briefing.proposedGoals.length > 0) {
-      lines.push('', 'PROPOSED GOALS:');
-      briefing.proposedGoals.forEach((g, i) => lines.push(`  ${i + 1}. ${g.objective}`));
-    }
-
-    await sendReply(lines.join('\n'), cfg);
-    return;
-  }
+  // Legacy Strategist briefing: retired (3.14). Never adopt a stale briefing.
+  if (idx === 1) return; // Hold — recorded via resolution.
+  await sendReply(
+    '[ashlr] That Strategist briefing is retired; nothing was adopted. The Leader is the one brain now: reply here to talk to it, or see its latest memo with `ashlr leader show`.',
+    cfg,
+  );
 }
 
 // ---------------------------------------------------------------------------

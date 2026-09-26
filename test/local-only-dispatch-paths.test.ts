@@ -234,8 +234,9 @@ describe('§A dispatch-path inventory', () => {
    * and an existing one that loses its gate fails the next one.
    */
   const RAW_TRANSPORT_RESIDUAL: ReadonlyArray<string> = [
-    'core/comms/director.ts',        // Ollama fallback for director dialogue
-    'core/comms/elon-dialogue.ts',   // Ollama fallback for the Elon dialogue
+    // 3.14: comms/director.ts and comms/elon-dialogue.ts left this list — the
+    // Director is retired and the dialogue delegates to the Leader thread,
+    // whose replies go through leader-seat.ts (gated per transport).
     'core/fleet/manager.ts',         // ollamaDirectComplete — the local judge, 3-min timeout
     'core/genome/playbook.ts',       // LM Studio playbook synthesis (documented LOCAL-ONLY)
     'core/vision/strategist.ts',     // ollamaDirectComplete — mirrors manager.ts

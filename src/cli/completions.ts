@@ -94,7 +94,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   // Mirror the verb switches in src/cli/leader.ts (runLeaderCli) and src/cli/mirror.ts (runMirrorCli).
   // oversight-plist only PRINTS the nightly LaunchAgent (install is by hand) —
   // listed so the verb is discoverable, not hidden behind `leader help`.
-  leader: ['show', 'run', 'tick', 'veto', 'oversight-plist', 'help'],
+  leader: ['show', 'run', 'tick', 'veto', 'oversight-plist', 'say', 'thread', 'answer', 'approve', 'directives', 'help'],
   mirror: ['list', 'add', 'sync', 'path', 'remove', 'reconcile', 'help'],
   // Mirror the verb switch in src/cli/cloud.ts (runCloudCli).
   cloud: ['launch', 'list', 'refresh', 'improve', 'budget', 'backlog', 'help'],

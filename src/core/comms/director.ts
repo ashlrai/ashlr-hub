@@ -1,321 +1,41 @@
 /**
- * M257: Elon Director — reasoning cycle.
+ * M257 → 3.14: the Director is RETIRED — the Leader is the one brain.
  *
- * runDirectorCycle(cfg) — one complete director loop:
- *   1. Build DirectorContext from god-view sources
- *   2. Call the strategist LLM (Opus/frontier, same path as elon-dialogue.ts)
- *   3. Parse DirectorDecision JSON
- *   4. Send telegramDigest via sendTelegramMessage
- *   5. Post each escalation as a 'decision-needed' CommsRequest
+ * Until 3.14 `runDirectorCycle` was a third strategic persona: every 15
+ * minutes (when cfg.comms.director was true) it asked the strategist model —
+ * Claude CLI first, outside the Leader's seat routing and budget gate — for a
+ * "decision", sent its digest to Telegram and posted its escalations as
+ * decision-needed requests. That duplicated the Leader (vision/leader.ts),
+ * whose memo, actions, questions and veto windows now reach Mason through the
+ * Leader thread (vision/leader-thread.ts) on every channel.
  *
- * GATING: only runs when cfg.comms?.director === true (default-false).
- * When gated off, runDirectorCycle is a synchronous no-op — byte-identical
- * to absent.
+ * What is left is inspection only:
+ *   runDirectorCycle(cfg)  — a no-op whatever cfg.comms.director says (kept so
+ *                            the daemon's call site and older configs stay
+ *                            harmless; it spends nothing and sends nothing);
+ *   runDirectorDryRun(cfg) — the read-only god-view snapshot
+ *                            (director-context.ts), no model call, with a
+ *                            pointer to the Leader thread.
  *
- * SAFETY (critical):
- *   - READ-ONLY god-view access — no goal mutations, no merge, no push
- *   - Communicates ONLY through sendTelegramMessage + postRequest
- *   - NO new execution path, NO bypass of judge/scope-cap/sandbox/kill-switch
- *   - High-stakes actions (enrollment/releases/spend/arch) → escalate to Mason
- *     via decision-needed, NEVER auto-act
- *   - Never throws — fire-and-forget by design
+ * Never throws.
  */
 
 import type { AshlrConfig } from '../types.js';
-import { defaultStrategistModel } from '../run/model-catalog.js';
-import { buildDirectorContext } from './director-context.js';
-import { DIRECTOR_SYSTEM_PROMPT, renderDirectorPrompt } from './director-prompt.js';
-import { sendTelegramMessage, telegramEnabled } from '../integrations/telegram.js';
-import { postRequest } from './requests.js';
-import { killSwitchOn } from '../sandbox/policy.js';
-import {
-  acquireOutwardMutationFence,
-  ownsOutwardMutationFence,
-  releaseOutwardMutationFence,
-} from '../sandbox/mutation-fence.js';
-import { assertPermitted, endpointPermitted, isLocalOnlyRefusal } from '../policy/local-only.js';
-import { audit } from '../sandbox/audit.js';
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
-export interface BackendHint {
-  preferBackends: string[];
-  avoidBackends: string[];
-  rationale: string;
-}
-
-export interface EscalationItem {
-  topic: string;
-  context: string;
-  options: string[];
-  stakes: 'high' | 'critical';
-}
-
-export interface DirectorDecision {
-  reasoning: string;
-  resourcePosture: string;
-  resourceRationale: string;
-  topGoalId: string | null;
-  suggestedNewGoal: string | null;
-  backendHint: BackendHint | null;
-  telegramDigest: string;
-  escalations: EscalationItem[];
-  confidence: 'high' | 'medium' | 'low';
-}
+import { buildDirectorContext, type DirectorContext } from './director-context.js';
 
 export interface DirectorCycleOptions {
   signal?: AbortSignal;
 }
 
 // ---------------------------------------------------------------------------
-// LLM caller (mirrors buildComplete from elon-dialogue.ts)
-// ---------------------------------------------------------------------------
-
-// M320: strategist default resolves via defaultStrategistModel() in
-// run/model-catalog.ts (Fable 5 when claude5.fable is on, else Opus 4.8).
-
-async function buildComplete(
-  cfg: AshlrConfig,
-  signal?: AbortSignal,
-): Promise<(system: string, user: string) => Promise<string>> {
-  const foundry = cfg.foundry as Record<string, unknown> | undefined;
-  const managerJudgeEngine =
-    (foundry?.['managerJudgeEngine'] as string | undefined) ?? 'auto';
-  const allowedBackends: string[] =
-    (foundry?.['allowedBackends'] as string[] | undefined) ?? ['builtin'];
-  const configuredModel = foundry?.['strategistModel'] as string | undefined;
-  const eliteModel = configuredModel ?? defaultStrategistModel(cfg);
-
-  const wantClaude =
-    managerJudgeEngine === 'auto' || managerJudgeEngine === 'claude';
-  const claudeAllowed = allowedBackends.includes('claude');
-
-  try {
-    const { engineInstalled, buildEngineCommand, spawnEngine } =
-      await import('../run/engines.js');
-
-    if (wantClaude && claudeAllowed && engineInstalled('claude', cfg)) {
-      const single = (model: string) =>
-        async (system: string, user: string): Promise<string> => {
-          try {
-            const combined = `${system}\n\n${user}`;
-            const cmd = buildEngineCommand('claude', combined, cfg, { model });
-            if (!cmd) return '';
-            const result = await spawnEngine(cmd, cfg, { timeoutMs: 120_000, signal });
-            // `spawnEngine` never throws: a local-only refusal arrives as
-            // `{ ok: false, error: '<the reason>' }`. Discarding it silently
-            // would make a refused director turn read exactly like a model
-            // that returned nothing, which is the failure the policy module
-            // exists to prevent — so it is reported before the empty return.
-            if (!result.ok && result.error) reportDirectorRefusal(result.error);
-            if (!result.ok || !result.output) return '';
-            try {
-              const parsed = JSON.parse(result.output) as Record<string, unknown>;
-              const text = parsed['result'];
-              return typeof text === 'string' ? text : result.output;
-            } catch {
-              return result.output;
-            }
-          } catch {
-            return '';
-          }
-        };
-      const primary = single(eliteModel);
-      // M337 (review fix): mirror the judge's Fable→Opus fallback — the
-      // claude5.fable contract promises it for every elite-model surface.
-      if (eliteModel !== 'claude-fable-5') return primary;
-      const fallback = single('claude-opus-4-8');
-      return async (system: string, user: string): Promise<string> =>
-        (await primary(system, user)) || fallback(system, user);
-    }
-  } catch {
-    // engines unavailable — fall through to Ollama
-  }
-
-  // Ollama fallback
-  const baseUrl =
-    (foundry?.['ollamaBaseUrl'] as string | undefined) ??
-    'http://localhost:11434';
-  const localModel =
-    (foundry?.['localModel'] as string | undefined) ?? 'mistral';
-
-  return async (system: string, user: string): Promise<string> => {
-    try {
-      const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
-      // LOCAL-ONLY GATE. This path builds its own request instead of going
-      // through provider-client's transport — it needs a far longer timeout
-      // than that path allows — which means it also bypasses the refusal that
-      // lives there. The base URL is loopback by default, so nothing reaches a
-      // paid provider as configured; the gate is here so that an operator who
-      // repoints it at a remote inference host does not end up with a
-      // local-only mode that has a hole in it.
-      assertPermitted(endpointPermitted(url, cfg));
-      const timeoutSignal = AbortSignal.timeout(120_000);
-      const requestSignal = signal
-        ? AbortSignal.any([signal, timeoutSignal])
-        : timeoutSignal;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: localModel,
-          messages: [
-            { role: 'system', content: system },
-            { role: 'user', content: user },
-          ],
-          stream: false,
-          temperature: 0.3,
-          max_tokens: 2048,
-        }),
-        signal: requestSignal,
-      });
-      if (!response.ok) return '';
-      const data = (await response.json()) as {
-        choices?: Array<{ message?: { content?: string } }>;
-      };
-      return data.choices?.[0]?.message?.content ?? '';
-    } catch (err) {
-      // A LOCAL-ONLY REFUSAL IS NOT AN EMPTY COMPLETION. Swallowing it here
-      // made the two indistinguishable: `parseDecision('')` returns null, the
-      // caller sees no digest and no escalations, and nothing anywhere names
-      // the refusal — so an operator reading a silent 3am digest cannot tell a
-      // policy refusal from a dead model. It is named, then re-thrown so the
-      // cycle's own handler can record it too.
-      if (isLocalOnlyRefusal(err)) {
-        reportDirectorRefusal(err.message);
-        throw err;
-      }
-      return '';
-    }
-  };
-}
-
-/**
- * Record a refusal that would otherwise vanish into an empty completion.
- *
- * Best-effort and idempotent per reason: the director runs on a timer, and a
- * persisted local-only setting refuses every cycle, so writing the same line
- * every few minutes would bury the audit trail it is meant to serve.
- */
-let lastReportedDirectorRefusal = '';
-function reportDirectorRefusal(reason: string): void {
-  const detail = reason.slice(0, 240);
-  if (detail === lastReportedDirectorRefusal) return;
-  lastReportedDirectorRefusal = detail;
-  try {
-    audit({
-      action: 'comms:director',
-      repo: null,
-      sandboxId: null,
-      summary: `director turn refused: ${detail}`,
-      result: 'refused',
-    });
-  } catch {
-    // The audit trail is best-effort; it must never take the cycle down.
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Parse DirectorDecision from LLM output
-// ---------------------------------------------------------------------------
-
-function parseDecision(raw: string): DirectorDecision | null {
-  if (!raw) return null;
-  try {
-    // Strip markdown fences if present
-    const cleaned = raw
-      .replace(/^```(?:json)?\s*/m, '')
-      .replace(/\s*```\s*$/m, '')
-      .trim();
-    const parsed = JSON.parse(cleaned) as Record<string, unknown>;
-
-    // Validate required fields
-    if (typeof parsed['telegramDigest'] !== 'string') return null;
-
-    const escalations: EscalationItem[] = [];
-    if (Array.isArray(parsed['escalations'])) {
-      for (const e of parsed['escalations'] as unknown[]) {
-        if (
-          typeof e === 'object' &&
-          e !== null &&
-          typeof (e as Record<string, unknown>)['topic'] === 'string'
-        ) {
-          const ei = e as Record<string, unknown>;
-          escalations.push({
-            topic: String(ei['topic'] ?? ''),
-            context: String(ei['context'] ?? ''),
-            options: Array.isArray(ei['options'])
-              ? (ei['options'] as unknown[]).map(String)
-              : [],
-            stakes:
-              ei['stakes'] === 'critical' || ei['stakes'] === 'high'
-                ? (ei['stakes'] as 'critical' | 'high')
-                : 'high',
-          });
-        }
-      }
-    }
-
-    let backendHint: BackendHint | null = null;
-    if (
-      parsed['backendHint'] !== null &&
-      typeof parsed['backendHint'] === 'object'
-    ) {
-      const bh = parsed['backendHint'] as Record<string, unknown>;
-      backendHint = {
-        preferBackends: Array.isArray(bh['preferBackends'])
-          ? (bh['preferBackends'] as unknown[]).map(String)
-          : [],
-        avoidBackends: Array.isArray(bh['avoidBackends'])
-          ? (bh['avoidBackends'] as unknown[]).map(String)
-          : [],
-        rationale: String(bh['rationale'] ?? ''),
-      };
-    }
-
-    return {
-      reasoning: String(parsed['reasoning'] ?? ''),
-      resourcePosture: String(parsed['resourcePosture'] ?? 'unknown'),
-      resourceRationale: String(parsed['resourceRationale'] ?? ''),
-      topGoalId:
-        typeof parsed['topGoalId'] === 'string' ? parsed['topGoalId'] : null,
-      suggestedNewGoal:
-        typeof parsed['suggestedNewGoal'] === 'string'
-          ? parsed['suggestedNewGoal']
-          : null,
-      backendHint,
-      telegramDigest: String(parsed['telegramDigest']),
-      escalations,
-      confidence:
-        parsed['confidence'] === 'high' ||
-        parsed['confidence'] === 'medium' ||
-        parsed['confidence'] === 'low'
-          ? (parsed['confidence'] as 'high' | 'medium' | 'low')
-          : 'low',
-    };
-  } catch {
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Dry-run formatter (CLI --dry-run path)
 // ---------------------------------------------------------------------------
 
-/**
- * Format a DirectorContext + optional DirectorDecision for dry-run output.
- * Never sends Telegram. Never throws.
- */
-export function formatDryRun(
-  ctx: import('./director-context.js').DirectorContext,
-  decision: DirectorDecision | null,
-  raw?: string,
-): string {
+/** The god-view snapshot as text. Never sends anything. Never throws. */
+export function formatDryRun(ctx: DirectorContext): string {
   const lines: string[] = [];
 
-  lines.push('=== ELON DIRECTOR — DRY RUN ===');
+  lines.push('=== FLEET GOD-VIEW (read-only) ===');
   lines.push(`Generated: ${new Date().toUTCString()}`);
   lines.push('');
 
@@ -329,9 +49,7 @@ export function formatDryRun(
 
   lines.push(`Fleet: ${ctx.fleet.daemonRunning ? 'RUNNING' : 'STOPPED'}${ctx.fleet.killed ? ' [KILLED]' : ''}`);
   lines.push(`Today spent: $${ctx.fleet.todaySpentUsd.toFixed(4)}`);
-  lines.push(
-    `Proposals: ${ctx.fleet.pendingProposals} pending, ${ctx.fleet.recentMerges} recent merges`,
-  );
+  lines.push(`Proposals: ${ctx.fleet.pendingProposals} pending, ${ctx.fleet.recentMerges} recent merges`);
   lines.push(`Backlog: ${ctx.fleet.backlogItems} items`);
   lines.push('');
 
@@ -345,67 +63,19 @@ export function formatDryRun(
     lines.push(`Active goals (${ctx.goals.active.length}):`);
     for (const g of ctx.goals.active.slice(0, 4)) {
       const pct = Math.round(g.fractionDone * 100);
-      lines.push(
-        `  [${g.id}] ${g.objective.slice(0, 60)} — ${pct}% (${g.milestonesDone}/${g.milestonesTotal})`,
-      );
+      lines.push(`  [${g.id}] ${g.objective.slice(0, 60)} — ${pct}% (${g.milestonesDone}/${g.milestonesTotal})`);
     }
     lines.push('');
   }
 
   if (ctx.learning.lessonsCount > 0) {
-    lines.push(
-      `Learning (7d): ${ctx.learning.lessonsCount} lessons, ${ctx.learning.skillCount} skills`,
-    );
+    lines.push(`Learning (7d): ${ctx.learning.lessonsCount} lessons, ${ctx.learning.skillCount} skills`);
     lines.push('');
   }
 
-  if (!decision) {
-    lines.push('--- DIRECTOR DECISION ---');
-    lines.push('LLM unavailable or parse failed.');
-    if (raw) {
-      lines.push('');
-      lines.push('Raw LLM output:');
-      lines.push(raw.slice(0, 500));
-    }
-    return lines.join('\n');
-  }
-
-  lines.push('--- DIRECTOR DECISION ---');
-  lines.push(`Confidence: ${decision.confidence.toUpperCase()}`);
-  lines.push(`Resource posture: ${decision.resourcePosture.toUpperCase()}`);
-  lines.push(`Rationale: ${decision.resourceRationale}`);
-  lines.push('');
-  lines.push(`Reasoning: ${decision.reasoning}`);
-  lines.push('');
-
-  if (decision.topGoalId) {
-    lines.push(`Top goal: ${decision.topGoalId}`);
-  }
-  if (decision.suggestedNewGoal) {
-    lines.push(`Suggested new goal: ${decision.suggestedNewGoal}`);
-  }
-  if (decision.backendHint) {
-    lines.push(
-      `Backend hint: prefer [${decision.backendHint.preferBackends.join(', ')}] avoid [${decision.backendHint.avoidBackends.join(', ')}]`,
-    );
-  }
-  lines.push('');
-
-  lines.push('--- TELEGRAM DIGEST (would send) ---');
-  lines.push(decision.telegramDigest);
-
-  if (decision.escalations.length > 0) {
-    lines.push('');
-    lines.push(`--- ESCALATIONS (${decision.escalations.length}) ---`);
-    for (const esc of decision.escalations) {
-      lines.push(`  [${esc.stakes.toUpperCase()}] ${esc.topic}`);
-      lines.push(`    Context: ${esc.context.slice(0, 120)}`);
-      if (esc.options.length > 0) {
-        lines.push(`    Options: ${esc.options.join(' | ')}`);
-      }
-    }
-  }
-
+  lines.push('--- STRATEGY ---');
+  lines.push('The Director is retired: the Leader is the one strategic brain.');
+  lines.push('Read its latest memo with `ashlr leader show`, talk to it with `ashlr leader say "…"`.');
   return lines.join('\n');
 }
 
@@ -414,109 +84,21 @@ export function formatDryRun(
 // ---------------------------------------------------------------------------
 
 /**
- * Run one complete director cycle:
- *   build context → call LLM → parse decision → send digest → post escalations
- *
- * GATED: cfg.comms?.director must be true. When false/absent, returns immediately
- * (no-op, byte-identical to absent). Default-false.
- *
- * SAFETY: read-only god-view access. Communicates only through sendTelegramMessage
- * and postRequest('decision-needed'). No goal mutations, no execution, no merge,
- * no push. Never bypasses any safety gate.
- *
- * Never throws — fire-and-forget by design.
+ * Retired (3.14): a no-op. No model call, no Telegram message, no request —
+ * whatever cfg.comms.director says. The Leader tick and the Leader thread
+ * carry strategy and escalations now.
  */
 export async function runDirectorCycle(
-  cfg: AshlrConfig,
-  opts: DirectorCycleOptions = {},
+  _cfg: AshlrConfig,
+  _opts: DirectorCycleOptions = {},
 ): Promise<void> {
-  try {
-    // Gate: cfg.comms.director must be explicitly true
-    const directorEnabled =
-      (cfg.comms as Record<string, unknown> | undefined)?.['director'] === true;
-    if (!directorEnabled) return;
-    if (opts.signal?.aborted) return;
-
-    let outwardFence: ReturnType<typeof acquireOutwardMutationFence> = null;
-    try {
-      outwardFence = acquireOutwardMutationFence();
-      if (!ownsOutwardMutationFence(outwardFence)) return;
-      if (opts.signal?.aborted || killSwitchOn()) return;
-
-      // Context and LLM work can lead directly to Telegram/local publication,
-      // so they share one authority epoch with those effects. Pause can arm KILL
-      // while this awaits, but cannot report quiescence until the cycle drains.
-      const ctx = await buildDirectorContext(cfg);
-      if (opts.signal?.aborted || killSwitchOn()) return;
-      const userPrompt = renderDirectorPrompt(ctx);
-      const complete = await buildComplete(cfg, opts.signal);
-      const raw = await complete(DIRECTOR_SYSTEM_PROMPT, userPrompt);
-      if (opts.signal?.aborted || killSwitchOn()) return;
-      const decision = parseDecision(raw);
-      if (!decision) return;
-
-      if (telegramEnabled(cfg) && decision.telegramDigest) {
-        try {
-          await sendTelegramMessage(decision.telegramDigest, undefined, cfg);
-        } catch {
-          // Telegram is best-effort; escalations still retain their local effect.
-        }
-      }
-      if (opts.signal?.aborted || killSwitchOn()) return;
-
-      // Post escalations as decision-needed requests under the same authority as
-      // the digest so pause cannot linearize between the related effects.
-      for (const esc of decision.escalations) {
-        try {
-          postRequest({
-            kind: 'decision-needed',
-            type: 'question',
-            text: `[${esc.stakes.toUpperCase()}] ${esc.topic}\n\n${esc.context}`,
-            options: esc.options.length > 0 ? esc.options : ['Acknowledge'],
-            meta: {
-              source: 'director',
-              stakes: esc.stakes,
-              topic: esc.topic,
-            },
-          });
-        } catch {
-          // best-effort — individual escalation failure must not block others
-        }
-      }
-    } finally {
-      releaseOutwardMutationFence(outwardFence);
-    }
-  } catch (err) {
-    // Fire-and-forget — errors must never propagate. A refusal is still
-    // recorded on its way past, so "the director produced nothing" has a
-    // reason an operator can read.
-    if (isLocalOnlyRefusal(err)) reportDirectorRefusal(err.message);
-  }
+  return;
 }
 
-/**
- * Run one director cycle in dry-run mode: build context + call LLM but do NOT
- * send Telegram or post requests. Returns the formatted output string.
- * Never throws.
- */
+/** The read-only god-view snapshot (no model call). Never throws. */
 export async function runDirectorDryRun(cfg: AshlrConfig): Promise<string> {
   try {
-    // Build god-view snapshot (always — dry-run should show real state)
-    const ctx = await buildDirectorContext(cfg);
-    const userPrompt = renderDirectorPrompt(ctx);
-
-    // Call LLM (uses real engine — shows actual reasoning against live state)
-    let raw = '';
-    let decision: DirectorDecision | null = null;
-    try {
-      const complete = await buildComplete(cfg);
-      raw = await complete(DIRECTOR_SYSTEM_PROMPT, userPrompt);
-      decision = parseDecision(raw);
-    } catch {
-      // LLM unavailable — still show context
-    }
-
-    return formatDryRun(ctx, decision, decision ? undefined : raw);
+    return formatDryRun(await buildDirectorContext(cfg));
   } catch {
     return '[director dry-run failed]';
   }

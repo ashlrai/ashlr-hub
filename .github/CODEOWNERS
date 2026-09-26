@@ -296,6 +296,8 @@
 /test/leader-seat-310b.test.ts @masonwyatt23
 /test/leader-seat-transports-310b.test.ts @masonwyatt23
 /test/leader-store-cas-310.test.ts @masonwyatt23
+/test/leader-thread-314.test.ts @masonwyatt23
+/test/leader-thread-routes-314.test.ts @masonwyatt23
 /test/learn-experiments-310b.test.ts @masonwyatt23
 /test/learn-harness-310b.test.ts @masonwyatt23
 /test/legacy-collector-reconciliation-driver.test.ts @masonwyatt23

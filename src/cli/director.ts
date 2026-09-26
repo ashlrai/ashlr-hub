@@ -1,47 +1,32 @@
 /**
- * M257: `ashlr director` CLI command.
+ * M257 → 3.14: `ashlr director` CLI command.
  *
- * Usage:
- *   ashlr director             — run one director cycle (sends Telegram if configured)
- *   ashlr director --dry-run   — print the director digest WITHOUT sending Telegram
+ * The Director's model cycle is retired: the Leader is the one strategic
+ * brain (vision/leader.ts), and Mason talks to it through the Leader thread
+ * (`ashlr leader say`, Verse, Telegram). What remains is the read-only
+ * god-view snapshot:
+ *
+ *   ashlr director             — print the god-view snapshot (no model call, sends nothing)
+ *   ashlr director --dry-run   — the same (kept for scripts that pass it)
  *   ashlr director --help      — show usage
- *
- * The --dry-run flag is the primary testing/inspection path: it builds the real
- * god-view snapshot, calls the LLM against live state, and prints the digest +
- * decision to stdout — no Telegram, no requests posted.
- *
- * SAFETY: the director is READ-ONLY in M257 (no goal mutations). Communicates
- * only through Telegram and postRequest('decision-needed'). Never bypasses safety
- * gates. High-stakes actions escalate to Mason — never auto-act.
  */
 
 import { loadConfig } from '../core/config.js';
 
 export async function cmdDirector(args: string[]): Promise<number> {
-  const isDryRun = args.includes('--dry-run') || args.includes('-n');
   const isHelp = args.includes('--help') || args.includes('-h');
 
   if (isHelp) {
-    console.log(`ashlr director — Elon Director strategic reasoning cycle
+    console.log(`ashlr director — read-only fleet god-view (the Director is retired)
 
 USAGE
-  ashlr director              Run one director cycle (sends Telegram digest)
-  ashlr director --dry-run    Print digest without sending Telegram (testable)
+  ashlr director              Print the god-view snapshot
+  ashlr director --dry-run    The same (kept for older scripts)
   ashlr director --help       Show this help
 
-FLAGS
-  --dry-run, -n    Build real god-view + call LLM, print digest to stdout
-                   Does NOT send Telegram. Does NOT post any requests.
-  --help, -h       Show this help
-
-GATING
-  The live director cycle (without --dry-run) requires cfg.comms.director=true.
-  Dry-run mode always runs regardless of the gate — it's read-only inspection.
-
-SAFETY (M257 MVP)
-  Read + reason + communicate only. No goal mutations. No merge/push/apply.
-  High-stakes decisions (enrollment, releases, spend, arch) → escalate to Mason.
-  All existing gates (sandbox, judge, scope-cap, kill-switch, enrollment) intact.
+The Director's model cycle was retired in 3.14: the Leader is the one
+strategic brain. Read its memo with \`ashlr leader show\`; talk to it with
+\`ashlr leader say "…"\`. cfg.comms.director no longer turns anything on.
 `);
     return 0;
   }
@@ -54,38 +39,13 @@ SAFETY (M257 MVP)
     return 1;
   }
 
-  if (isDryRun) {
-    try {
-      const { runDirectorDryRun } = await import('../core/comms/director.js');
-      const output = await runDirectorDryRun(cfg);
-      console.log(output);
-      return 0;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`director --dry-run failed: ${msg}`);
-      return 1;
-    }
-  }
-
-  // Live cycle — requires cfg.comms.director=true
-  const directorEnabled =
-    (cfg.comms as Record<string, unknown> | undefined)?.['director'] === true;
-
-  if (!directorEnabled) {
-    console.log(
-      'Director is disabled (cfg.comms.director=false). Use --dry-run to inspect live state, or set cfg.comms.director=true to enable the live cycle.',
-    );
-    return 0;
-  }
-
   try {
-    const { runDirectorCycle } = await import('../core/comms/director.js');
-    await runDirectorCycle(cfg);
-    console.log('Director cycle complete.');
+    const { runDirectorDryRun } = await import('../core/comms/director.js');
+    console.log(await runDirectorDryRun(cfg));
     return 0;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`director cycle failed: ${msg}`);
+    console.error(`director failed: ${msg}`);
     return 1;
   }
 }

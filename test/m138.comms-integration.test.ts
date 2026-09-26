@@ -17,9 +17,10 @@
  *
  * Test counts:
  *   1. registerCommsHandlers wires the elon-vision handler (kind found in registry)
- *   2. elon-vision index=0 (Approve) calls adoptBriefing with loadLatestBriefing result
+ *   2. elon-vision index=0 (legacy Approve) adopts NOTHING (3.14: the stale
+ *      Strategist briefing is retired) and says so
  *   3. elon-vision index=1 (Hold) is a no-op — adoptBriefing/sendIMessage not called
- *   4. elon-vision index=2 (Show) sends full briefing text via sendIMessage
+ *   4. elon-vision index=2 (legacy Show) sends the retirement note, not the stale briefing
  *   5. elon-vision handler never throws even when adoptBriefing rejects
  *   6. comms digest sends an SMS-sized scrubbed report
  *   7. comms digest report text contains key fleet metrics
@@ -332,15 +333,16 @@ describe('elon-vision handler', () => {
     };
   }
 
-  it('index=0 (Approve) calls adoptBriefing with loadLatestBriefing result', async () => {
+  it('index=0 (legacy Approve) adopts nothing — the stale Strategist briefing is retired (3.14)', async () => {
     const cfg = cfgEnabled();
-    const briefing = makeBriefing();
-    mockLoadLatestBriefing.mockReturnValue(briefing);
-    mockAdoptBriefing.mockResolvedValue({ specId: 'ecosystem', goalIds: ['g1'] });
+    mockLoadLatestBriefing.mockReturnValue(makeBriefing());
 
     await invokeElonHandler(cfg, 0, 'Approve & create goals');
 
-    expect(mockAdoptBriefing).toHaveBeenCalledWith(cfg, briefing, { by: 'mason' });
+    expect(mockAdoptBriefing).not.toHaveBeenCalled();
+    expect(mockLoadLatestBriefing).not.toHaveBeenCalled();
+    expect(mockSendIMessage).toHaveBeenCalledOnce();
+    expect((mockSendIMessage.mock.calls[0] as [string])[0]).toMatch(/retired; nothing was adopted/);
   });
 
   it('index=1 (Hold) does not call adoptBriefing or sendIMessage', async () => {
@@ -353,7 +355,7 @@ describe('elon-vision handler', () => {
     expect(mockSendIMessage).not.toHaveBeenCalled();
   });
 
-  it('index=2 (Show) sends full briefing text via sendIMessage', async () => {
+  it('index=2 (legacy Show) sends the retirement note, never the stale briefing', async () => {
     const cfg = cfgEnabled();
     const briefing = makeBriefing();
     mockLoadLatestBriefing.mockReturnValue(briefing);
@@ -362,9 +364,8 @@ describe('elon-vision handler', () => {
 
     expect(mockSendIMessage).toHaveBeenCalledOnce();
     const [sentText] = mockSendIMessage.mock.calls[0] as [string, unknown];
-    expect(sentText).toContain('Strategic Briefing');
-    expect(sentText).toContain(briefing.currentState);
-    expect(sentText).toContain(briefing.gapToVision);
+    expect(sentText).not.toContain(briefing.currentState);
+    expect(sentText).toContain('ashlr leader show');
   });
 
   it('handler never throws even when adoptBriefing rejects', async () => {
