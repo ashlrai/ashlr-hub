@@ -172,6 +172,7 @@ const NEVER_FIRST_PAINT: Readonly<Record<string, string>> = {
   'web-ui/routes/verse/verse-icons.tsx': 'the rail draws from rail-icons.tsx',
   'web-ui/routes/verse/shell/reveal-anchor.ts': 'preloaded by anchor-requests.ts',
   'web-ui/routes/verse/shell/guarded-runners.ts': 'run-command imports it when a guarded run is confirmed',
+  'web-ui/routes/verse/shell/copy-setup.ts': 'run-command imports it when ⌘K "Copy autonomy setup command" runs',
   'web-ui/routes/verse/shell/CommandPalette.tsx': 'VerseApp overlay',
   'web-ui/routes/verse/shell/warmup.ts': 'VerseApp after-first-paint warm-up',
   'web-ui/routes/verse/resources/ResourcesChrome.tsx': 'VerseApp Resources chrome',

@@ -12,7 +12,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WORKBENCH_COMMAND_EVENT } from '../composer/composer-keys.js';
 import { getVerseUiState, resetVerseUi, setVerseSection } from '../verse-ui-store.js';
 import { registerCommandHandler, resetCommandBus } from './command-bus.js';
-import { COMPOSER_LISTEN_GRACE_MS, executeCatalogCommand } from './run-command.js';
+import {
+  COMPOSER_LISTEN_GRACE_MS,
+  executeCatalogCommand,
+  registerShellCommandHandlers,
+  setShellNotifier,
+} from './run-command.js';
+import { copyAutonomySetupCommand } from './copy-setup.js';
 
 let received: string[] = [];
 const listener = (event: Event) => { received.push(String((event as CustomEvent<{ id: unknown }>).detail.id)); };
@@ -86,6 +92,94 @@ describe('composer commands', () => {
     executeCatalogCommand('chat.sidebar', { via: 'palette' });
     expect(handler).toHaveBeenCalledTimes(1);
     expect(received).toEqual([]);
+  });
+});
+
+describe('Command-served commands (autonomy, grant, budget)', () => {
+  it('bring Command forward and run on its handler when it is already mounted', () => {
+    const handler = vi.fn();
+    registerCommandHandler('autonomy.off', handler);
+    setVerseSection('chat');
+    expect(executeCatalogCommand('autonomy.off', { via: 'palette' })).toBe(true);
+    expect(getVerseUiState().section).toBe('command');
+    expect(handler).toHaveBeenCalledWith({ via: 'palette' });
+  });
+
+  it('park until Command mounts and registers, then run exactly once', async () => {
+    setVerseSection('fleet');
+    executeCatalogCommand('budget.reserve', { via: 'palette' });
+    expect(getVerseUiState().section).toBe('command');
+    const handler = vi.fn();
+    registerCommandHandler('budget.reserve', handler);
+    await Promise.resolve(); // delivery waits a microtask for sibling effects
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('are dropped, never run late, when Command does not register in time', async () => {
+    vi.useFakeTimers();
+    executeCatalogCommand('autonomy.grant', { via: 'palette' });
+    await vi.advanceTimersByTimeAsync(5_000);
+    const handler = vi.fn();
+    registerCommandHandler('autonomy.grant', handler);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('are remembered for the palette’s Recent list', () => {
+    registerCommandHandler('autonomy.propose', () => {});
+    executeCatalogCommand('autonomy.propose', { via: 'palette' });
+    expect(getVerseUiState().recentActions[0]).toBe('autonomy.propose');
+  });
+});
+
+describe('Copy autonomy setup command', () => {
+  let off: (() => void) | null = null;
+  const notify = vi.fn();
+
+  beforeEach(() => {
+    notify.mockReset();
+    setShellNotifier(notify);
+    off = registerShellCommandHandlers();
+  });
+
+  afterEach(() => {
+    off?.();
+    setShellNotifier(null);
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+  });
+
+  it('puts `ashlr authority setup` on the clipboard and says what to do with it', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    expect(executeCatalogCommand('autonomy.copy-setup', { via: 'palette' })).toBe(true);
+    await vi.waitFor(() => expect(notify).toHaveBeenCalled());
+    expect(writeText).toHaveBeenCalledWith('ashlr authority setup');
+    expect(notify).toHaveBeenCalledWith('Copied `ashlr authority setup`. Run it in a terminal; add --dry-run to see every step first.', 'success');
+    // Stays where the operator is: copying is not a navigation.
+    expect(getVerseUiState().section).not.toBe('command');
+  });
+
+  it('names the command in the toast when the clipboard refuses', async () => {
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: vi.fn(async () => { throw new Error('denied'); }) }, configurable: true });
+    executeCatalogCommand('autonomy.copy-setup', { via: 'palette' });
+    await vi.waitFor(() => expect(notify).toHaveBeenCalled());
+    expect(notify).toHaveBeenCalledWith('Could not reach the clipboard. Run `ashlr authority setup` in a terminal.', 'neutral');
+  });
+
+  it('says the same when there is no clipboard API at all', async () => {
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+    await expect(copyAutonomySetupCommand()).resolves.toBe(false);
+    expect(notify).toHaveBeenCalledWith('Could not reach the clipboard. Run `ashlr authority setup` in a terminal.', 'neutral');
+  });
+});
+
+describe('Run in cloud…', () => {
+  it('reaches the composer through the window event, like the other composer commands', () => {
+    document.body.appendChild(chatSurfaceWithComposer());
+    setVerseSection('command');
+    expect(executeCatalogCommand('composer.cloud', { via: 'palette' })).toBe(true);
+    expect(received).toEqual(['composer.cloud']);
+    expect(getVerseUiState().section).toBe('chat');
   });
 });
 

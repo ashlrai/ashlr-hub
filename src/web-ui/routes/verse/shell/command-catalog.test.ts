@@ -13,6 +13,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { NEEDS_YOU_ACTION_KEYS, WORKBENCH_SURFACES } from '../../../../core/verse/workbench-types.js';
 import {
+  AUTONOMY_SETUP_COMMAND,
   chordAccelerator,
   chordId,
   chordMatches,
@@ -39,6 +40,7 @@ import {
   type WorkbenchCommand,
 } from './command-catalog.js';
 import { DOCK_PANES } from './dock-catalog.js';
+import { SETUP_COMMAND } from '../autonomy/autonomy-off-model.js';
 import { WORKBENCH_COMMAND_EVENT as COMPOSER_WORKBENCH_COMMAND_EVENT } from '../composer/composer-keys.js';
 
 const COMMANDS = WORKBENCH_COMMANDS as readonly WorkbenchCommand[];
@@ -162,10 +164,10 @@ describe('command catalog — table integrity', () => {
     expect(COMPOSER_WORKBENCH_COMMAND_EVENT).toBe(WORKBENCH_COMMAND_EVENT);
   });
 
-  it('offers the Resources drawer as ⌘. from anywhere and as "Show resources" in the palette (3.11 C6)', () => {
+  it('offers the Resources drawer as ⌘. from anywhere and as "Open Resources" in the palette (3.11 C6)', () => {
     const c = findCommand('resources.toggle')!;
     expect(c).not.toBeNull();
-    expect(c.title).toBe('Show resources');
+    expect(c.title).toBe('Open Resources');
     expect(c.scope).toBe('global');
     expect(c.group).toBe('actions');
     expect(c.keys).toEqual([{ key: '.', mod: true }]);
@@ -175,6 +177,49 @@ describe('command catalog — table integrity', () => {
     expect(matchCommand(ev('.', { code: 'Period', metaKey: true }), ['global'], 'mac')?.id).toBe('resources.toggle');
     expect(matchCommand(ev('.', { code: 'Period', ctrlKey: true }), ['composer', 'chat', 'global'], 'other')?.id).toBe('resources.toggle');
     expect(formatChord(c.keys[0]!, 'mac')).toBe('⌘.');
+  });
+
+  it('offers the autonomy switch, the grant and the budget modes as palette actions served by Command — never by a key', () => {
+    const served = ['autonomy.off', 'autonomy.propose', 'autonomy.autonomous', 'autonomy.grant', 'budget.all-in', 'budget.balanced', 'budget.reserve'];
+    expect(served.map((id) => findCommand(id)?.title)).toEqual([
+      'Autonomy: Off',
+      'Autonomy: Propose',
+      'Autonomy: Autonomous',
+      'Approve grant…',
+      'Budget mode: All-in',
+      'Budget mode: Balanced',
+      'Budget mode: Reserve',
+    ]);
+    for (const id of served) {
+      const c = findCommand(id)!;
+      expect(c.group, id).toBe('actions');
+      expect(c.scope, id).toBe('global');
+      expect(c.surface, id).toBe('command');
+      // Raising authority is never one keystroke away.
+      expect(c.keys, id).toEqual([]);
+      // Not a catalog guard: the bar's own path (Touch ID sheet, token) guards it.
+      expect(c.guard, id).toBeUndefined();
+      expect(c.keywords?.length ?? 0, id).toBeGreaterThan(2);
+    }
+    // Only these are surface-served.
+    expect(COMMANDS.filter((c) => c.surface).map((c) => c.id).sort()).toEqual([...served].sort());
+  });
+
+  it('copies the autonomy setup command from the palette', () => {
+    const c = findCommand('autonomy.copy-setup')!;
+    expect(c.title).toBe('Copy autonomy setup command');
+    expect(AUTONOMY_SETUP_COMMAND).toBe('ashlr authority setup');
+    // One command, two homes (the catalog is first-paint; the off-state model is lazy): never let them drift.
+    expect(AUTONOMY_SETUP_COMMAND).toBe(SETUP_COMMAND);
+    expect(c.keywords).toContain(AUTONOMY_SETUP_COMMAND);
+    expect(c.group).toBe('actions');
+    expect(c.surface).toBeUndefined();
+  });
+
+  it('offers "Run in cloud…" as a chat command the composer answers', () => {
+    const c = findCommand('composer.cloud')!;
+    expect(c).toMatchObject({ title: 'Run in cloud…', scope: 'chat', group: 'actions', keys: [] });
+    expect(c.keywords).toContain('cloud');
   });
 
   it('lets Tab fill a seat for "New chat on…"', () => {

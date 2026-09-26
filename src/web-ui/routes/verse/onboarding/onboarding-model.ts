@@ -24,7 +24,7 @@ import type { LocalModelsSnapshot } from '../usage/usage-contract.js';
 // Steps
 // ---------------------------------------------------------------------------
 
-export type OnboardingStepId = 'welcome' | 'accounts' | 'local' | 'stops' | 'finish';
+export type OnboardingStepId = 'welcome' | 'accounts' | 'local' | 'autonomy' | 'stops' | 'finish';
 
 export interface OnboardingStepMeta {
   id: OnboardingStepId;
@@ -38,7 +38,7 @@ export const ONBOARDING_STEPS: readonly OnboardingStepMeta[] = [
   {
     id: 'welcome',
     title: 'Welcome to Verse',
-    subtitle: 'Five sections, one rail. Two minutes and you will know what each one does.',
+    subtitle: 'Five sections, one rail.',
   },
   {
     id: 'accounts',
@@ -49,6 +49,11 @@ export const ONBOARDING_STEPS: readonly OnboardingStepMeta[] = [
     id: 'local',
     title: 'Local runtime',
     subtitle: 'Whether there is a model on this machine, and what that changes.',
+  },
+  {
+    id: 'autonomy',
+    title: 'Turn on autonomy',
+    subtitle: 'It stays off until you set it up. Turning it down is always one click.',
   },
   {
     id: 'stops',

@@ -2,39 +2,46 @@
  * routes/verse/onboarding/OnboardingFlow.tsx — the first-run tour.
  *
  * A first-time operator opens Verse to five unlabelled rail icons and no
- * guidance. This is five short steps that answer the questions that actually
+ * guidance. This is six short steps that answer the questions that actually
  * block someone on day one: which of my accounts can this thing use, is
- * there anything local, what do the three stop buttons really do, where do I
- * change how it looks, and how do I start.
+ * there anything local, how do I turn autonomy on, what do the three stop
+ * buttons really do, where do I change how it looks, and how do I start.
  *
  * THREE RULES IT IS BUILT AROUND:
  *
  * 1. It never blocks the app. This is NOT a modal — no backdrop, no focus
- *    trap, no `aria-modal`. It is a docked card over the section area; every
- *    rail button, shortcut and section behind it stays clickable while it is
- *    open. Escape closes it, so does Skip, so does the close button, and any
- *    of those three silences it for good.
+ *    trap, no `aria-modal`. It first appears as a one-line chip
+ *    ("Getting started 1/6 →") in the corner; only a click opens the card,
+ *    and every rail button, shortcut and section behind either stays
+ *    clickable. The card's minimise button and Escape fold it back to the
+ *    chip without answering it; Skip, or the chip's ×, silences it for good.
  *
  * 2. It never asserts more than it read. Step 2 is C6's shared capacity
  *    strip (no reading is "no reading", never zero); step 3 reads the same
  *    local-models route Usage reads, through the same narrower — an
  *    unanswered probe is "no answer", never a green check (logic in
- *    ./onboarding-model.ts, tested without a DOM).
+ *    ./onboarding-model.ts, tested without a DOM); step 4 reads the same
+ *    authority entry Command's switch reads.
  *
- * 3. It costs no extra requests on the common path. Each data step mounts
- *    its own query only when the operator reaches it, and those queries are
- *    the Usage section's own cache entries — so a first-run user who walks
- *    the tour and then opens Usage finds both reads already in cache and
- *    within the freshness window (data/hooks.ts DEFAULT_QUERY_FRESH_MS).
+ * 3. It costs no extra requests on the common path. The chip reads nothing.
+ *    Each data step mounts its own query only when the operator reaches it,
+ *    and those queries are the Usage / Command sections' own cache entries —
+ *    so a first-run user who walks the tour and then opens either finds the
+ *    reads already in cache and within the freshness window
+ *    (data/hooks.ts DEFAULT_QUERY_FRESH_MS).
  */
-import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Button } from '../../../components/primitives/index.js';
 import {
   IconAlert,
   IconCheckCircle,
   IconChat,
+  IconChevronDown,
+  IconChevronRight,
+  IconCopy,
   IconCpu,
   IconInfo,
+  IconLock,
   IconSliders,
   IconX,
 } from '../../../components/primitives/icons.js';
@@ -45,6 +52,12 @@ import { LiveCapacityStrip } from '../usage/CapacityStrip.js';
 import { tidyProse } from '../autonomy/format.js';
 import { verseLocalModelsQuery } from '../usage/usage-queries.js';
 import { projectLocalModels } from '../usage/usage-contract.js';
+import { authorityQuery } from '../command/surface-data.js';
+import { grantChip, modeWord, type ChipTone } from '../command/authority-model.js';
+import { useDraftReadiness } from '../autonomy/AutonomyOffState.js';
+import { AUTONOMY_SETUP_COMMAND } from '../shell/command-catalog.js';
+import { copyAutonomySetupCommand } from '../shell/copy-setup.js';
+import { executeCatalogCommand } from '../shell/run-command.js';
 import {
   ONBOARDING_STEPS,
   STOP_CONTROLS,
@@ -53,8 +66,10 @@ import {
   type FindingTone,
 } from './onboarding-model.js';
 import {
+  collapseOnboarding,
   completeOnboarding,
   dismissOnboarding,
+  expandOnboarding,
   setOnboardingStep,
 } from './onboarding-store.js';
 import { useOnboarding } from './useOnboarding.js';
@@ -85,10 +100,7 @@ function StepBody({ children }: { children: ReactNode }) {
 function WelcomeStep() {
   return (
     <StepBody>
-      <p className={styles.lead}>
-        Verse is the desktop surface over this machine’s agentic fleet. Everything it shows comes from one local
-        server — no session, token or artifact leaves this machine.
-      </p>
+      <p className={styles.lead}>Verse runs your chats and this machine’s agent fleet from one local server.</p>
       {/*
         The five rail surfaces, in ⌘1–⌘5 order, with the same one-line blurbs
         the palette uses (VERSE_SECTIONS) — one description per surface, not
@@ -196,7 +208,95 @@ function LocalStep() {
 }
 
 // ---------------------------------------------------------------------------
-// Step 4 — the three stops
+// Step 4 — autonomy
+// ---------------------------------------------------------------------------
+
+/** The Command bar's chip tones, in the tour's three (glyph + word, never colour alone). */
+function findingTone(tone: ChipTone | undefined): FindingTone {
+  if (tone === 'success') return 'ok';
+  if (tone === 'warning' || tone === 'danger') return 'attention';
+  return 'unknown';
+}
+
+/**
+ * Reads the SAME authority entry Command's bar reads (surface-data
+ * authorityQuery), so "Right now" can never disagree with the switch — and
+ * never claims a state it did not read: no answer is "not reported", with
+ * the server's own reason.
+ *
+ * The next step is the one Command's "Autonomy is off" state names, decided
+ * the same way (autonomy-off-model): with no grant, the one-time setup
+ * command while the server cannot draft a grant yet (or we cannot tell);
+ * once it can, "Approve grant…" — the same ⌘K command, which opens the
+ * Touch ID sheet on Command. With a grant, the chip decides (re-approve /
+ * renew), else Command itself.
+ */
+function AutonomyStep() {
+  const read = useQuery(authorityQuery);
+  const [copied, setCopied] = useState<boolean | null>(null);
+  const status = read.data?.value ?? null;
+  const loading = read.data === undefined && read.status !== 'error';
+  const mode = modeWord(status);
+  const chip = grantChip(status, Date.now());
+  const readiness = useDraftReadiness(status?.grant.state === 'none');
+  const needsSetup = !status || (status.grant.state === 'none' && readiness !== 'ready');
+  const detail = loading
+    ? 'Reading the autonomy state…'
+    : status
+      ? chip.detail
+      : (read.data?.reason ?? read.error?.message ?? 'The autonomy state could not be read.');
+
+  return (
+    <StepBody>
+      <div className={styles.findingHead}>
+        <span className={styles.stopName}>Right now</span>
+        <ToneMark tone={loading ? 'unknown' : findingTone(mode.tone)} label={loading ? 'checking' : status ? mode.text : 'not reported'} />
+      </div>
+      <p className={styles.findingDetail}>{detail}</p>
+      <p className={styles.lead}>
+        The switch on Command <kbd className={styles.kbd}>⌘1</kbd> — Off, Propose, Autonomous — decides what the fleet
+        may do on its own. Raising it past your grant asks for Touch ID; lowering it never does.
+      </p>
+      {needsSetup ? (
+        <>
+          <div className={styles.findingFix}>
+            <span className={styles.fixLabel}>Set up</span>
+            <code className={styles.code}>{AUTONOMY_SETUP_COMMAND}</code>
+            <Button
+              variant="subtle"
+              size="sm"
+              icon={<IconCopy size={13} />}
+              onClick={() => {
+                void copyAutonomySetupCommand().then(setCopied);
+              }}
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </Button>
+          </div>
+          <p className={styles.aside} role={copied === false ? 'alert' : undefined}>
+            {copied === false
+              ? 'The clipboard is not available here — select the command and copy it by hand.'
+              : 'Run it in a terminal. It stops for what only you can do — sudo, Touch ID, GitHub — and --dry-run prints every step first.'}
+          </p>
+        </>
+      ) : chip.action ? (
+        <Button variant="subtle" icon={<IconLock size={14} />} onClick={() => executeCatalogCommand('autonomy.grant', { via: 'button' })}>
+          {chip.action === 're-approve' ? 'Re-approve grant…' : 'Approve grant…'}
+        </Button>
+      ) : (
+        <Button variant="subtle" icon={<IconLock size={14} />} onClick={() => setVerseSection('command')}>
+          Open Command
+        </Button>
+      )}
+      <p className={styles.aside}>
+        <kbd className={styles.kbd}>⌘K</kbd> “Autonomy: …” and “Approve grant…” work from any surface.
+      </p>
+    </StepBody>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Step 5 — the three stops
 // ---------------------------------------------------------------------------
 
 function StopsStep() {
@@ -224,7 +324,7 @@ function StopsStep() {
 }
 
 // ---------------------------------------------------------------------------
-// Step 5 — appearance, then go
+// Step 6 — appearance, then go
 // ---------------------------------------------------------------------------
 
 function FinishStep() {
@@ -248,53 +348,104 @@ function FinishStep() {
   );
 }
 
-const STEP_COMPONENTS = [WelcomeStep, AccountsStep, LocalStep, StopsStep, FinishStep] as const;
+/** In ONBOARDING_STEPS order (the model test pins the ids; the flow test walks them). */
+const STEP_COMPONENTS = [WelcomeStep, AccountsStep, LocalStep, AutonomyStep, StopsStep, FinishStep] as const;
 
 // ---------------------------------------------------------------------------
-// The card
+// The chip and the card
 // ---------------------------------------------------------------------------
 
 export function OnboardingFlow() {
-  const { open, step } = useOnboarding();
+  const { open, expanded, step } = useOnboarding();
   const index = clampStep(step);
   const meta = ONBOARDING_STEPS[index]!;
   const Step = STEP_COMPONENTS[index]!;
   const last = index === ONBOARDING_STEPS.length - 1;
+  const total = ONBOARDING_STEPS.length;
 
-  const close = useCallback(() => dismissOnboarding(), []);
+  const dismiss = useCallback(() => dismissOnboarding(), []);
   const cardRef = useRef<HTMLElement>(null);
+  const chipRef = useRef<HTMLButtonElement>(null);
+  // Focus follows a fold / unfold the operator asked for — never a mount:
+  // the chip appearing on first launch must not steal focus from the composer.
+  const moveFocus = useRef(false);
 
-  // Escape dismisses the tour — but ONLY when the focus is inside the card.
+  const expand = useCallback(() => {
+    moveFocus.current = true;
+    expandOnboarding();
+  }, []);
+  const collapse = useCallback(() => {
+    moveFocus.current = true;
+    collapseOnboarding();
+  }, []);
+
+  useEffect(() => {
+    if (!moveFocus.current) return;
+    moveFocus.current = false;
+    if (expanded) cardRef.current?.focus();
+    else chipRef.current?.focus();
+  }, [expanded]);
+
+  // Escape folds the card back to the chip — but ONLY when the focus is
+  // inside the card.
   //
   // This card is deliberately not a modal (rule 1 above): the operator works
   // behind it, and every Escape they press for something else — closing the
   // command palette, backing out of a seat menu, stopping dictation — used to
-  // land here too and permanently dismiss the tour, writing `dismissedAt` with
-  // no confirmation and no undo short of Settings → Replay. It also swallowed
-  // the default Escape behaviour of whatever they were actually trying to
-  // close. Scoped to the card, both problems go away and the shortcut still
-  // works where the operator would expect it to.
+  // land here too and permanently dismiss the tour. Scoped to the card, and
+  // folding rather than answering, an Escape can never cost the operator the
+  // tour; Skip and the chip's × are the only ways to silence it.
   useEffect(() => {
-    if (!open) return undefined;
+    if (!open || !expanded) return undefined;
     function onKey(event: globalThis.KeyboardEvent) {
       if (event.key !== 'Escape') return;
       const card = cardRef.current;
       if (!card || !(event.target instanceof Node) || !card.contains(event.target)) return;
       event.preventDefault();
-      dismissOnboarding();
+      collapse();
     }
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [open]);
+  }, [open, expanded, collapse]);
 
   if (!open) return null;
 
+  if (!expanded) {
+    return (
+      <div className={styles.chip} role="region" aria-label="Getting started">
+        <button
+          ref={chipRef}
+          type="button"
+          className={styles.chipOpen}
+          aria-expanded="false"
+          title={`Getting started: ${meta.title}`}
+          onClick={expand}
+        >
+          <span className={styles.chipLabel}>Getting started</span>
+          <span className={styles.chipCount}>
+            {index + 1}/{total}
+          </span>
+          <IconChevronRight size={13} aria-hidden="true" focusable="false" />
+        </button>
+        <button
+          type="button"
+          className={styles.chipDismiss}
+          aria-label="Dismiss getting started"
+          title="Dismiss getting started — replay it any time from Settings"
+          onClick={dismiss}
+        >
+          <IconX size={12} aria-hidden="true" focusable="false" />
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <aside ref={cardRef} className={styles.card} aria-labelledby="verse-onboarding-title" role="region">
+    <aside ref={cardRef} tabIndex={-1} className={styles.card} aria-labelledby="verse-onboarding-title" role="region">
       <header className={styles.head}>
         <div className={styles.headText}>
           <p className={styles.eyebrow}>
-            Getting started · {index + 1} of {ONBOARDING_STEPS.length}
+            Getting started · {index + 1} of {total}
           </p>
           <h2 id="verse-onboarding-title" className={styles.title}>
             {meta.title}
@@ -305,10 +456,11 @@ export function OnboardingFlow() {
           iconOnly
           variant="ghost"
           size="sm"
-          aria-label="Close getting started"
-          title="Close getting started"
-          icon={<IconX size={14} />}
-          onClick={close}
+          aria-label="Minimize getting started"
+          title="Minimize getting started"
+          aria-expanded="true"
+          icon={<IconChevronDown size={14} />}
+          onClick={collapse}
         />
       </header>
 
@@ -321,7 +473,7 @@ export function OnboardingFlow() {
           ))}
         </ol>
         <div className={styles.actions}>
-          <Button variant="ghost" size="sm" onClick={close}>
+          <Button variant="ghost" size="sm" onClick={dismiss}>
             Skip setup
           </Button>
           {index > 0 ? (

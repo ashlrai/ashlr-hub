@@ -103,3 +103,46 @@ describe('the palette view', () => {
     expect(mac.shortcut).toBe('⇧⌘B');
   });
 });
+
+describe('the actions that matter', () => {
+  const actions = (query: string) => paletteView(buildPaletteItems(input()), `>${query}`, [], 'mac').flat;
+  const first = (query: string) => actions(query)[0]!;
+
+  it('"autonomy" lists the three switch positions, the grant and the setup command — each saying it runs on Command', () => {
+    const titles = actions('autonomy').map((i) => i.title);
+    for (const t of ['Autonomy: Off', 'Autonomy: Propose', 'Autonomy: Autonomous', 'Approve grant…', 'Copy autonomy setup command']) {
+      expect(titles, t).toContain(t);
+    }
+    expect(actions('autonomy').find((i) => i.title === 'Autonomy: Off')!.subtitle).toBe('on Command');
+    expect(actions('autonomy').find((i) => i.title === 'Copy autonomy setup command')!.subtitle).toBeNull();
+  });
+
+  it.each([
+    ['autonomy off', 'Autonomy: Off'],
+    ['auto propose', 'Autonomy: Propose'],
+    ['turn on autonomy', 'Autonomy: Autonomous'],
+    ['disable autonomy', 'Autonomy: Off'],
+    ['touch id', 'Approve grant…'],
+    ['renew grant', 'Approve grant…'],
+    ['budget reserve', 'Budget mode: Reserve'],
+    ['budget all in', 'Budget mode: All-in'],
+    ['balanced', 'Budget mode: Balanced'],
+    ['authority setup', 'Copy autonomy setup command'],
+    ['open resources', 'Open Resources'],
+    ['run in cloud', 'Run in cloud…'],
+  ])('"%s" finds %s first', (query, title) => {
+    expect(first(query).title).toBe(title);
+  });
+
+  it('shows the key where one exists — Open Resources ⌘., Toggle light / dark ⇧⌘L — and none where it does not', () => {
+    expect(first('open resources').shortcut).toBe('⌘.');
+    expect(first('theme').shortcut).toBe('⇧⌘L');
+    expect(first('budget reserve').shortcut).toBeNull();
+  });
+
+  it('keeps "Open Usage" and "Open Settings" reachable as destinations', () => {
+    const goTo = (q: string) => paletteView(buildPaletteItems(input()), q, [], 'mac').groups.find((g) => g.id === 'go-to')?.items.map((i) => i.title) ?? [];
+    expect(goTo('usage')).toContain('Open Usage');
+    expect(goTo('settings')).toContain('Open Settings');
+  });
+});

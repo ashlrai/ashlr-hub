@@ -14,6 +14,10 @@
  *     through the `ashlr:command` window event, not the bus — so they are
  *     DISPATCHED to it, after switching to Chat and waiting for a composer to
  *     exist (deliverComposerCommand);
+ *   - surface commands (`surface: 'command'` in the catalog — the autonomy
+ *     switch, the grant sheet, budget modes) run on the surface that owns
+ *     their dialogs: the shell brings it forward and parks the command until
+ *     it registers, exactly like a chat command;
  *   - everything else runs on its registered handler.
  *
  * Palette-listed commands are remembered for the empty-query "Recent" list.
@@ -133,6 +137,15 @@ export function executeCatalogCommand(id: string, invocation: CommandInvocation 
     return true;
   }
 
+  if (command.surface) {
+    // Its handler (and the Touch ID sheet / token dialog it may open) lives on
+    // that surface. Going there first means the operator sees the switch move
+    // — or the sheet it opened — rather than a change behind another surface.
+    if (getVerseUiState().section !== command.surface) setVerseSection(command.surface);
+    runCommandWhenReady(id, invocation);
+    return true;
+  }
+
   if (COMPOSER_IDS.has(command.id)) {
     // A bus handler (should C3 ever register one) outranks the event.
     if (runCommand(id, invocation)) return true;
@@ -152,6 +165,7 @@ export function executeCatalogCommand(id: string, invocation: CommandInvocation 
   notify(`${command.title} isn't available here yet.`, 'neutral');
   return false;
 }
+
 
 /**
  * The GLOBAL commands the shell itself serves (every other id belongs to the
@@ -189,6 +203,8 @@ export function registerShellCommandHandlers(): () => void {
     }),
     registerCommandHandler('appearance.toggle-theme', () => cycleTheme()),
     registerCommandHandler('app.summon', () => requestVerseCommand('focus-composer')),
+    // The clipboard code loads when asked for (copy-setup.ts), not at first paint.
+    registerCommandHandler('autonomy.copy-setup', () => { void import('./copy-setup.js').then((m) => m.copyAutonomySetupCommand()); }),
   ];
   return () => offs.forEach((off) => off());
 }
