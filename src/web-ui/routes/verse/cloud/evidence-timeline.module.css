@@ -1,0 +1,171 @@
+/*
+ * routes/verse/cloud/evidence-timeline.module.css — a cloud task's evidence
+ * chain (3.13). Tokens only (style-scan-310): no raw hex colour, no px font
+ * size, every colour follows the theme. Long text wraps at word boundaries;
+ * nothing is ellipsized — evidence is read, not skimmed.
+ *
+ * The rail: a filled node for a reached stage (its colour follows the trust
+ * badge), a hollow one for a stage not reached, joined by a hairline.
+ */
+
+.summaryRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.summary,
+.muted {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.notice {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+  overflow-wrap: break-word;
+}
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.step {
+  display: grid;
+  grid-template-columns: var(--space-4) minmax(0, 1fr);
+  gap: 0 var(--space-3);
+}
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: var(--space-1);
+}
+
+.node {
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  border: 1.5px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+}
+
+.step[data-badge='verified'] .node {
+  border-color: var(--status-success-solid);
+  background: var(--status-success-solid);
+}
+
+.step[data-badge='claim'] .node {
+  border-color: var(--status-warning-solid);
+  background: var(--status-warning-solid);
+}
+
+.step[data-reached='false'] .node {
+  background: var(--bg-surface);
+}
+
+.line {
+  flex: 1 1 auto;
+  width: 1px;
+  min-height: var(--space-3);
+  margin-top: var(--space-1);
+  background: var(--border-subtle);
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  padding-bottom: var(--space-4);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.label {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--text-xs-line);
+}
+
+.badge {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--text-sm-line);
+  overflow-wrap: break-word;
+}
+
+.step[data-reached='false'] .title {
+  color: var(--text-secondary);
+  font-weight: var(--font-weight-regular);
+}
+
+.detail {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+  overflow-wrap: break-word;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.meta > span + span::before {
+  content: '·';
+  margin-right: var(--space-2);
+}
+
+.link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-link);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.link:hover {
+  text-decoration: underline;
+}
+
+.link:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}

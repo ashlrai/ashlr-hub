@@ -23,7 +23,7 @@
  * and New cloud task / Improve Verse are disabled with that sentence as
  * their tooltip).
  */
-import { useId, useRef, useState } from 'react';
+import { lazy, Suspense, useId, useRef, useState } from 'react';
 import { CLOUD_BALANCE_URL, type CloudBudgetUpdate, type CloudOverviewResponse, type CloudTaskV1 } from '../../../../core/cloud/types.js';
 import { Button, IconButton } from '../../../components/primitives/Button.js';
 import { useFocusTrap } from '../../../components/primitives/focus-trap.js';
@@ -61,6 +61,9 @@ import {
 import { CLOUD_NOT_IN_BUILD, CLOUD_POLL_MS, cloudQuery, dismissCloudTask, refreshCloudTasks, runCloudImprove, updateCloudBudget } from './cloud-queries.js';
 import styles from './cloud.module.css';
 
+/** 3.13: the evidence sheet is its own chunk, fetched the first time a row's Evidence is opened. */
+const EvidenceTimeline = lazy(() => import('./EvidenceTimeline.js'));
+
 interface CardNotice {
   tone: 'success' | 'warning' | 'danger';
   text: string;
@@ -81,6 +84,7 @@ export function CloudTaskRow({ task, actions, now }: { task: CloudTaskV1; action
   const session = safeHref(task.sessionUrl, 'claude.ai');
   const pr = task.pr ? safeHref(task.pr.url, 'github.com') : null;
   const detail = taskDetail(task, now);
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
   return (
     <li className={styles.task} data-state={task.state}>
       <span className={styles.taskChip}>
@@ -93,6 +97,9 @@ export function CloudTaskRow({ task, actions, now }: { task: CloudTaskV1; action
         <span className={styles.taskLinks}>
           {session ? <OutLink href={session} label={`Open “${task.title}” in Claude`}>Open in Claude</OutLink> : null}
           {pr && task.pr ? <OutLink href={pr} label={`Pull request #${task.pr.number} on GitHub`}>{`PR #${task.pr.number}`}</OutLink> : null}
+          <button type="button" className={styles.linkButton} aria-haspopup="dialog" aria-label={`Evidence for “${task.title}”`} onClick={() => setEvidenceOpen(true)}>
+            Evidence
+          </button>
           {canDismiss(task) ? (
             <button
               type="button"
@@ -114,6 +121,11 @@ export function CloudTaskRow({ task, actions, now }: { task: CloudTaskV1; action
           ) : null}
         </span>
       </span>
+      {evidenceOpen ? (
+        <Suspense fallback={null}>
+          <EvidenceTimeline taskId={task.id} title={task.title} open onClose={() => setEvidenceOpen(false)} now={now} />
+        </Suspense>
+      ) : null}
     </li>
   );
 }
