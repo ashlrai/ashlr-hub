@@ -557,8 +557,9 @@ Colour comes only from `components/charts/colors.ts`:
 
 ### 13.9 Keys, slots, dock, visibility
 
-- **Keys:** `routes/verse/shell/command-catalog.ts` is the only source of commands and keys.
-  - The palette, the shortcuts overlay, the desktop menu bridge, the drawer and every key handler read it.
+- **Keys:** `routes/verse/shell/command-catalog.ts` is the only source of commands, and `routes/verse/shell/command-keys.ts` the only source of their keys.
+  - The palette, the shortcuts overlay, the drawer and the surfaces read the catalog. The shell's and the chat's key handlers, the rail's hints, the composer's keys and the desktop menu bridge read `command-keys.ts`, the half on the chat first-paint path; the catalog loads with the palette.
+  - A catalog row with keys takes them with `bind(id)`; a key that is not in `command-keys.ts` does not exist.
   - Scopes are global, chat, composer, drawer and chart. A key must be unique among the scopes that can be live together (`SCOPE_LAYERS`).
   - A key the desktop menu owns (⌘, and ⇧⌘L) is declared as `native: { kind: 'menu' }`. The page's own handler then runs only in a plain browser.
   - `app.summon` (⌃⌥Space) is system-wide and registered by the desktop app. The page never binds it.

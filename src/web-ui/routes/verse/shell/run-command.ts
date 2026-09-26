@@ -40,7 +40,7 @@ import {
 } from '../verse-ui-store.js';
 import { COMPOSER_COMMAND_IDS, WORKBENCH_COMMAND_EVENT } from '../composer/composer-keys.js';
 import { PARKED_COMMAND_TTL_MS, registerCommandHandler, runCommand, runCommandWhenReady, type CommandInvocation } from './command-bus.js';
-import { findCommand } from './command-catalog.js';
+import { commandCatalogLoaded, keyBinding, loadedCommand } from './command-keys.js';
 import { requestGuarded } from './guarded-action.js';
 
 export type ShellNotify = (message: string, tone?: 'neutral' | 'success' | 'danger') => void;
@@ -115,33 +115,50 @@ export function deliverComposerCommand(id: string, ttlMs: number = PARKED_COMMAN
 
 const COMPOSER_IDS: ReadonlySet<string> = new Set(COMPOSER_COMMAND_IDS);
 
-/** Run catalog command `id`. Returns false when nothing could run it. */
+/**
+ * Run catalog command `id`. Returns false when nothing could run it.
+ *
+ * A key, the menu or a rail button names a KEYED command, and its keys and
+ * scope are here from first paint (command-keys.ts). The rest of the entry —
+ * title, palette group, guard, serving surface — is the full catalog's,
+ * which every caller naming a keyless command (the palette, onboarding) has
+ * loaded, and the warm-up fetches after first paint anyway. Should one
+ * arrive before it, the catalog is loaded and the command run then.
+ */
 export function executeCatalogCommand(id: string, invocation: CommandInvocation = {}): boolean {
-  const command = findCommand(id);
-  if (!command) return false;
-  if (command.group !== null && invocation.via === 'palette') recordVerseAction(command.id);
+  const full = loadedCommand(id);
+  const command = full ?? keyBinding(id);
+  if (!command) {
+    if (commandCatalogLoaded()) return false;
+    void import('./command-catalog.js').then(
+      () => { if (loadedCommand(id)) executeCatalogCommand(id, invocation); },
+      (err) => console.error('[verse] command catalog failed to load', err),
+    );
+    return true;
+  }
+  if (full && full.group !== null && invocation.via === 'palette') recordVerseAction(full.id);
 
-  if (command.guard) {
-    if (!SHELL_GUARDED_COMMAND_IDS.has(command.id)) return runCommand(id, invocation);
-    const commandId = command.id;
-    const { confirm, token } = command.guard;
+  if (full?.guard) {
+    if (!SHELL_GUARDED_COMMAND_IDS.has(full.id)) return runCommand(id, invocation);
+    const commandId = full.id;
+    const { confirm, token } = full.guard;
     requestGuarded({
       title: confirm.title,
       body: confirm.body,
       confirmLabel: confirm.confirmLabel,
       destructive: confirm.destructive,
       token,
-      tokenReason: `${command.title.replace(/…$/, '')} requires the dispatch token.`,
+      tokenReason: `${full.title.replace(/…$/, '')} requires the dispatch token.`,
       run: () => import('./guarded-runners.js').then((m) => m.runGuardedShellCommand(commandId)),
     });
     return true;
   }
 
-  if (command.surface) {
+  if (full?.surface) {
     // Its handler (and the Touch ID sheet / token dialog it may open) lives on
     // that surface. Going there first means the operator sees the switch move
     // — or the sheet it opened — rather than a change behind another surface.
-    if (getVerseUiState().section !== command.surface) setVerseSection(command.surface);
+    if (getVerseUiState().section !== full.surface) setVerseSection(full.surface);
     runCommandWhenReady(id, invocation);
     return true;
   }
@@ -162,7 +179,9 @@ export function executeCatalogCommand(id: string, invocation: CommandInvocation 
   }
 
   if (runCommand(id, invocation)) return true;
-  notify(`${command.title} isn't available here yet.`, 'neutral');
+  const unavailable = (title: string) => notify(`${title} isn't available here yet.`, 'neutral');
+  if (full) unavailable(full.title);
+  else void import('./command-catalog.js').then((m) => unavailable(m.findCommand(id)?.title ?? id), () => unavailable(id));
   return false;
 }
 

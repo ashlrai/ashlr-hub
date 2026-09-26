@@ -47,6 +47,34 @@ export const CHAT_FIRST_PAINT_ROOTS = Object.freeze([
 export const DEFAULT_BUDGET_KB = 350;
 
 /**
+ * Pure: `manifest` with every root that has no key of its own aliased to the
+ * chunk that carries its code.
+ *
+ * vite.config.web.ts folds the Verse shell's first-paint modules into one
+ * named chunk (the `VerseConsoleApp` group). A group chunk has no facade
+ * module, so the manifest keys it `_VerseConsoleApp-<hash>.js`, and
+ * `app/VerseConsoleApp.tsx` stops being a key. The chunk's sourcemap still
+ * names every module in it: a root whose source appears in exactly one
+ * chunk's map is measured from that chunk. A root found nowhere (or in two
+ * chunks) is left missing, and criticalFiles() fails loudly as before.
+ *
+ * `sourcesOf(file)` returns the `sources` of that chunk's sourcemap (paths as
+ * the map spells them; matched by suffix `src/web-ui/<root>`).
+ */
+export function aliasGroupedRoots(manifest, sourcesOf, roots = CHAT_FIRST_PAINT_ROOTS) {
+  const out = { ...manifest };
+  for (const root of roots) {
+    if (out[root]) continue;
+    const suffix = `src/web-ui/${root}`;
+    const hits = Object.values(manifest).filter(
+      (chunk) => typeof chunk.file === 'string' && chunk.file.endsWith('.js') && sourcesOf(chunk.file).some((s) => s.replace(/\\/g, '/').endsWith(suffix)),
+    );
+    if (hits.length === 1) out[root] = hits[0];
+  }
+  return out;
+}
+
+/**
  * Pure: the set of JS files in the static closure of `roots`.
  * Throws when a root is missing from the manifest — a renamed module must fail
  * the check loudly rather than silently shrink the measured set to zero.
@@ -110,7 +138,14 @@ function main() {
     if (args.build) build(outDir);
     const manifestPath = join(outDir, '.vite', 'manifest.json');
     if (!existsSync(manifestPath)) throw new Error(`no manifest at ${manifestPath} (build with --manifest)`);
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    const sourcesOf = (file) => {
+      try {
+        return JSON.parse(readFileSync(join(outDir, `${file}.map`), 'utf8')).sources ?? [];
+      } catch {
+        return [];
+      }
+    };
+    const manifest = aliasGroupedRoots(JSON.parse(readFileSync(manifestPath, 'utf8')), sourcesOf);
     const rows = [...criticalFiles(manifest)]
       .map((file) => ({ file, bytes: statSync(join(outDir, file)).size }))
       .sort((a, b) => b.bytes - a.bytes);

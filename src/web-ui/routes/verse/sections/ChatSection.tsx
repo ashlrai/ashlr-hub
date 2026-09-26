@@ -31,15 +31,14 @@
  * Mutations go through one guard: if no mutation token is held,
  * MutationTokenDialog opens and the action re-runs once unlocked.
  */
-import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type CSSProperties } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type CSSProperties } from 'react';
 import type { VerseCreateSessionRequest, VerseSession } from '../../../data/api-types.js';
 import type { MutationTokenDialog as MutationTokenDialogComponent } from '../../../components/auth/MutationTokenDialog.js';
-import { Button } from '../../../components/primitives/Button.js';
-import type { Dialog as DialogComponent } from '../../../components/primitives/Dialog.js';
 import { useToast } from '../../../components/primitives/Toast.js';
 import { clearReadSession } from '../../../data/auth-store.js';
 import { ApiError, DispatchDisabledError } from '../../../data/client.js';
 import { useMutationHold, useQuery, useRefresh } from '../../../data/hooks.js';
+import type { DeleteChatDialog as DeleteChatDialogComponent } from '../chat/DeleteChatDialog.js';
 import { insertIntoComposer } from '../chat/composer-bridge.js';
 import { forgetComposerMemory } from '../chat/composer-memory.js';
 import type { ChatTask } from '../chat/tasks-model.js';
@@ -52,7 +51,7 @@ import { clearDockRequests, requestTerminal, toggleDock, toggleDockPane, useDock
 import type { SeatChoice } from '../SeatSelector.js';
 import { clampDockWidth, DOCK_LAYOUT, dockPresentation } from '../shell/dock-catalog.js';
 import { useCommandHandler } from '../shell/command-bus.js';
-import { matchCommand } from '../shell/command-catalog.js';
+import { matchKey } from '../shell/command-keys.js';
 import { preloadedLazy, preloadedModule } from '../shell/preloaded.js';
 import { useSectionVisible } from '../shell/section-visibility.js';
 import type { TurnFileChange } from '../shell/slots.js';
@@ -97,12 +96,13 @@ const Sidebar = SidebarModule.Slot;
 /**
  * The delete confirmation and the token prompt draw nothing until an
  * operator acts, and as static imports they (with the dialog primitive and
- * its focus trap, ~4 KB) sat in the chat first-paint critical JS. Preloaded:
+ * its focus trap, ~4 KB, and the button primitive) sat in the chat
+ * first-paint critical JS. Preloaded (chat/DeleteChatDialog.tsx):
  * by the time anyone can click Delete the chunk is in and they mount in the
- * same render that opens them. Both come from one chunk.
+ * same render that opens them; the two share the dialog primitive's chunk.
  */
-const DialogModule = preloadedLazy<ComponentProps<typeof DialogComponent>>(() => import('../../../components/primitives/Dialog.js').then((m) => m.Dialog));
-const Dialog = DialogModule.Slot;
+const DeleteDialogModule = preloadedLazy<ComponentProps<typeof DeleteChatDialogComponent>>(() => import('../chat/DeleteChatDialog.js').then((m) => m.DeleteChatDialog));
+const DeleteChatDialog = DeleteDialogModule.Slot;
 const TokenDialogModule = preloadedLazy<ComponentProps<typeof MutationTokenDialogComponent>>(
   () => import('../../../components/auth/MutationTokenDialog.js').then((m) => m.MutationTokenDialog),
 );
@@ -129,7 +129,7 @@ const NO_TURN_FILES: TurnFileChange[] = [];
  */
 export function preloadChatSurface(): Promise<unknown> {
   return Promise.all([
-    WorkspaceModule.ready(), SidebarModule.ready(), DialogModule.ready(), TokenDialogModule.ready(), DERIVATIONS.ready(), SEAT_MODEL.ready(),
+    WorkspaceModule.ready(), SidebarModule.ready(), DeleteDialogModule.ready(), TokenDialogModule.ready(), DERIVATIONS.ready(), SEAT_MODEL.ready(),
   ]);
 }
 
@@ -233,7 +233,6 @@ export function ChatSection() {
   const dock = useDock();
   const chatActivity = useChatActivity();
   const windowWidth = useWindowWidth();
-  const deleteTitleId = useId();
 
   const [selectedId, setSelectedIdState] = useState<string | null>(loadSelected);
   const [query, setQuery] = useState('');
@@ -244,7 +243,6 @@ export function ChatSection() {
   const [tokenPrompt, setTokenPrompt] = useState<{ open: boolean; reason: string }>({ open: false, reason: '' });
   const [handoffFor, setHandoffFor] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<VerseSession | null>(null);
-  const [deleting, setDeleting] = useState(false);
   const [chatWidth, setChatWidth] = useState(0);
   const pendingAction = useRef<{ run: () => void; cancel: () => void } | null>(null);
   const chatRef = useRef<HTMLDivElement>(null);
@@ -551,7 +549,7 @@ export function ChatSection() {
     if (!visible) return undefined;
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || inOverlay(event.target)) return;
-      const command = matchCommand(event, ['chat']);
+      const command = matchKey(event, ['chat']);
       if (!command || command.scope !== 'chat') return;
       if (command.id === 'chat.find' || command.id === 'chat.turn-prev' || command.id === 'chat.turn-next') return;
       const run = handlerRef.current.get(command.id);
@@ -691,24 +689,8 @@ export function ChatSection() {
       ) : null}
       {/* Closed dialogs render nothing, so a not-yet-loaded one (fallback null) looks the same. */}
       <Suspense fallback={null}>
-      <Dialog open={deleteTarget !== null} onClose={() => { if (!deleting) setDeleteTarget(null); }} titleId={deleteTitleId}
-        title="Delete this chat?"
-        description={deleteTarget ? `“${deleteTarget.title || 'Untitled chat'}” and its transcript are removed from this machine. This cannot be undone.` : undefined}>
-        <div className={styles.dialogActions}>
-          <Button variant="ghost" onClick={() => setDeleteTarget(null)} disabled={deleting}>Keep</Button>
-          <Button variant="danger" busy={deleting} onClick={async () => {
-            const target = deleteTarget;
-            if (!target) return;
-            setDeleting(true);
-            try {
-              await removeChat(target.id);
-            } finally {
-              setDeleting(false);
-              setDeleteTarget(null);
-            }
-          }}>Delete</Button>
-        </div>
-      </Dialog>
+      <DeleteChatDialog target={deleteTarget} onClose={() => setDeleteTarget(null)} onDelete={removeChat}
+        actionsClassName={styles.dialogActions} />
       <MutationTokenDialog open={tokenPrompt.open} reason={tokenPrompt.reason} tokenLabel="Mutation token"
         tokenHelp="the mutation token ashlr verse printed"
         onClose={() => {

@@ -11,17 +11,15 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  ACCENT_PRESETS,
   APPEARANCE_STORAGE_KEY,
   applyAppearance,
   defaultAppearance,
   getAppearance,
-  isDefaultAppearance,
-  matchingAccentPreset,
   resetAppearance,
   setAppearance,
   subscribeAppearance,
 } from './appearance-store.js';
+import { ACCENT_PRESETS, isDefaultAppearance, matchingAccentPreset } from './appearance-presets.js';
 
 const root = () => document.documentElement;
 

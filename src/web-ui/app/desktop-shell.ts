@@ -15,7 +15,7 @@
  */
 import { useSyncExternalStore } from 'react';
 import type { ThemePreference } from '../data/theme-store.js';
-import { parseDesktopCommand, type ParsedDesktopCommand } from '../routes/verse/shell/command-catalog.js';
+import { parseDesktopCommand, type ParsedDesktopCommand } from '../routes/verse/shell/command-keys.js';
 
 /**
  * The two commands the native MENU BAR sends (the 3.9 contract).

@@ -9,11 +9,9 @@ import {
   applyVerseEvent,
   applyVerseEvents,
   forgetVerseSession,
-  formatTokens,
   getVerseLive,
   getVerseSessionHead,
   getVerseSessionState,
-  lastTurnActivityAt,
   resetVerseStore,
   seedVerseSession,
   setVerseSession,
@@ -22,6 +20,7 @@ import {
   subscribeVerseStore,
   subscribeVerseStoreLifecycle,
 } from './verse-store.js';
+import { formatTokens, lastTurnActivityAt } from './verse-readouts.js';
 import { buildTranscript, createTranscriptCache, getVerseTranscript, groupTranscriptItems } from './verse-transcript.js';
 
 /** A transient frame: it carries the last PERSISTED seq (wire rule, core/verse/types.ts). */

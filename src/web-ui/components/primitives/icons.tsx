@@ -14,10 +14,28 @@
  */
 import { Icon, type IconProps } from './icon-base.js';
 
-// The four glyphs the Verse rail draws at first paint live in icon-base.tsx
-// so the rail does not pull this whole set into the chat first-paint
-// critical JS; they are re-exported so this stays the one import site.
-export { IconChat, IconGauge, IconInbox, IconSliders, type IconProps } from './icon-base.js';
+// The glyphs the Verse rail draws at first paint live in icon-base.tsx so
+// the rail does not pull this whole set into the chat first-paint critical
+// JS; they are re-exported so this stays the one import site.
+export { IconChat, IconInbox, type IconProps } from './icon-base.js';
+
+/** Gauge — usage / spend. */
+export const IconGauge = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M2.2 11.5a6.4 6.4 0 1 1 11.6 0" />
+    <path d="M8 11 10.8 6.6" />
+    <circle cx="8" cy="11.6" r="0.9" fill="currentColor" stroke="none" />
+  </Icon>
+);
+
+/** Sliders — settings. */
+export const IconSliders = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M2.5 4.5h4M9.5 4.5h4M2.5 11.5h2M7.5 11.5h6" />
+    <circle cx="8" cy="4.5" r="1.6" />
+    <circle cx="6" cy="11.5" r="1.6" />
+  </Icon>
+);
 
 /** CPU — autonomy / the daemon loop. */
 export const IconCpu = (p: IconProps) => (

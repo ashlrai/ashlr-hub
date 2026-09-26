@@ -19,7 +19,7 @@ import {
 } from '../usage/context-model.js';
 import { formatContextWindow, formatElapsed, windowSourceText } from '../verse-model.js';
 import { formatWholePercent } from '../autonomy/format.js';
-import { formatTokens, lastTurnActivityAt } from '../verse-store.js';
+import { formatTokens, lastTurnActivityAt } from '../verse-readouts.js';
 import styles from './ChatUsage.module.css';
 
 /**

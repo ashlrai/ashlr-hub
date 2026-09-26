@@ -21,9 +21,6 @@ import { IconAlert, IconCheck, IconMonitor, IconMoon, IconSun } from '../../../c
 import { accentHex, contrastRatio } from '../../../design/contrast.js';
 import {
   ACCENT_LIGHTNESS_RANGE,
-  ACCENT_PRESETS,
-  isDefaultAppearance,
-  matchingAccentPreset,
   type Appearance,
   type Density,
   type DisplayFont,
@@ -31,6 +28,7 @@ import {
   type ThemePreference,
   type UiScale,
 } from '../../../data/appearance-store.js';
+import { ACCENT_PRESETS, isDefaultAppearance, matchingAccentPreset } from '../../../data/appearance-presets.js';
 import { Panel, SettingRow } from './SettingRow.js';
 import styles from './SettingsSection.module.css';
 

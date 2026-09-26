@@ -20,6 +20,14 @@
  * WHOLE static-import graph from the first-paint roots — the same closure the
  * budget script measures, from source — so a static import added anywhere in
  * it (not only in VerseApp) fails here before the budget does.
+ *
+ * 3.11.4 (351.8 → 333.1 KB, `npm run check:first-paint`, 352 KB budget): the
+ * command catalog split in two — the keys (command-keys.ts) stay, the
+ * palette's titles, keywords, guards and keyless actions (command-catalog.ts)
+ * load with the palette; the tour's store rides with OnboardingGate; the
+ * delete confirmation took the button primitive with it; the shell's
+ * first-paint modules ship as one chunk (vite.config.web.ts). The entries
+ * below pin each move.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
@@ -42,7 +50,8 @@ const DYNAMIC = [
   './shell/NeedsYouDrawer.js',
   './shell/ShortcutsOverlay.js',
   './shell/GearTray.js',
-  './onboarding/OnboardingFlow.js',
+  // The tour's store and the tour: the gate reads the one and loads the other.
+  './onboarding/OnboardingGate.js',
   './shell/RailStatus.js',
   // The after-first-paint warm-up (review 3.10.1): the idle gate, the step
   // list and — one import() further in — the surfaces' query table. Only a
@@ -58,6 +67,11 @@ const DYNAMIC = [
 const LAZY_ONLY = [
   ...DYNAMIC,
   './shell/palette-model.js',
+  // The palette's half of the catalog; first paint matches keys with command-keys.ts.
+  './shell/command-catalog.js',
+  // Reached only through ./onboarding/OnboardingGate.js.
+  './onboarding/OnboardingFlow.js',
+  './onboarding/useOnboarding.js',
   // Reached only through ./shell/warmup.js, never from VerseApp at all.
   './shell/idle-prefetch.js',
   './shell/surface-prefetch.js',
@@ -176,6 +190,14 @@ const NEVER_FIRST_PAINT: Readonly<Record<string, string>> = {
   'web-ui/routes/verse/shell/CommandPalette.tsx': 'VerseApp overlay',
   'web-ui/routes/verse/shell/warmup.ts': 'VerseApp after-first-paint warm-up',
   'web-ui/routes/verse/resources/ResourcesChrome.tsx': 'VerseApp Resources chrome',
+  'web-ui/routes/verse/shell/command-catalog.ts': 'the palette loads it; keys and the menu bridge read command-keys.ts',
+  'web-ui/routes/verse/onboarding/onboarding-store.ts': 'OnboardingGate (lazy) reads it',
+  'web-ui/routes/verse/onboarding/OnboardingFlow.tsx': 'OnboardingGate loads it while the tour is open',
+  'web-ui/routes/verse/chat/DeleteChatDialog.tsx': 'preloaded by ChatSection',
+  'web-ui/components/primitives/Button.tsx': 'the delete confirmation carries it (chat/DeleteChatDialog.tsx)',
+  'web-ui/routes/verse/verse-readouts.ts': 'token and turn readouts — the workspace, meters and usage panels',
+  'core/verse/types.ts': 'verse-store takes the transient-event guard from transient-events.ts',
+  'web-ui/data/appearance-presets.ts': 'Settings ▸ Appearance only',
 };
 
 describe('the chat first-paint static closure (whole graph)', () => {
@@ -191,6 +213,8 @@ describe('the chat first-paint static closure (whole graph)', () => {
       'web-ui/components/primitives/icon-base.tsx',
       'web-ui/routes/verse/shell/anchor-requests.ts',
       'web-ui/routes/verse/shell/run-command.ts',
+      'web-ui/routes/verse/shell/command-keys.ts',
+      'core/verse/transient-events.ts',
     ]) expect(closure).toContain(expected);
   });
 

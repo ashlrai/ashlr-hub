@@ -42,7 +42,7 @@ import {
 } from '../../../core/verse/context-math.js';
 import { CODEX_EXPANSIVE_METERING_NOTE, formatContextWindow, windowSourceText, type SessionContextBudget } from './verse-model.js';
 import { dismissVerseAdvice, isVerseAdviceDismissed } from './verse-ui-store.js';
-import { formatTokens } from './verse-store.js';
+import { formatTokens } from './verse-readouts.js';
 import styles from './Workspace.module.css';
 
 /** Percent-of-compaction thresholds, re-exported so copy can quote them. */

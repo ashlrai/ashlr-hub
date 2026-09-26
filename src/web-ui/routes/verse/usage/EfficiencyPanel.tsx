@@ -21,7 +21,7 @@
 import type { ReactNode } from 'react';
 import { TableView, chartFormat, type TableColumn } from '../../../components/charts/index.js';
 import { percentText } from '../autonomy/format.js';
-import { formatTokens } from '../verse-store.js';
+import { formatTokens } from '../verse-readouts.js';
 import { ENGINE_LABEL, formatContextWindow } from '../verse-model.js';
 import { formatRatio, type SeatEfficiencyRow } from './context-model.js';
 import styles from './usage.module.css';

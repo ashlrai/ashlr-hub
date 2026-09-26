@@ -121,7 +121,8 @@ Projects. Start with `>` for actions only or `#` for chats only; ⇥ fills an
 argument ("New chat on…" → a seat). An empty query lists your last five
 actions. Guarded actions ("Stop running chats…", "Stop the fleet…") confirm,
 then ask for the token. Every palette entry, menu item, shortcut and key
-handler reads one catalog, `routes/verse/shell/command-catalog.ts`.
+handler reads one catalog, `routes/verse/shell/command-catalog.ts`; its keys
+are written once in `command-keys.ts`, the half the first paint loads.
 
 ### Chat
 
