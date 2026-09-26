@@ -845,6 +845,26 @@ export function createAppsService(deps: AppsDeps): AppsService {
 
   async function collect(refreshPath: boolean): Promise<AppsSnapshot> {
     lastCollectStarted = deps.now();
+    // The loopback probes need nothing from the login shell, so they start
+    // FIRST and run while it answers: the login-shell PATH probe is the
+    // slowest step of a cold collect (an interactive zsh reading the
+    // operator's startup files, 0.5–3 s), and awaiting it before the probes
+    // made the first GET /api/verse/apps pay both back to back.
+    const probes = Promise.all([
+      probeOllama(),
+      probeLlamaServer({ baseUrl: deps.llamaServerBaseUrl, fetchImpl: deps.fetchImpl }).catch((): VerseLlamaServerReport => ({
+        reachable: false,
+        baseUrl: deps.llamaServerBaseUrl,
+        status: 'down',
+        models: [],
+        modelCount: null,
+        slots: null,
+        reason: 'llama-server-probe-failed',
+      })),
+      probeLmStudio(),
+    ]);
+    // Never an unhandled rejection if the login-path step throws first (each probe already catches).
+    probes.catch(() => undefined);
     const login = await deps.loginPath(refreshPath);
     const env = await deps.childEnv();
     const binaries = new Map<string, BinaryFacts | null>();
@@ -873,19 +893,9 @@ export function createAppsService(deps: AppsDeps): AppsService {
       }),
     ]);
 
-    const [ollamaLaunchIds, ollama, llamaServer, lmStudio] = await Promise.all([
+    const [ollamaLaunchIds, [ollama, llamaServer, lmStudio]] = await Promise.all([
       readOllamaLaunchIds(binaries.get('ollama') ?? null, env),
-      probeOllama(),
-      probeLlamaServer({ baseUrl: deps.llamaServerBaseUrl, fetchImpl: deps.fetchImpl }).catch((): VerseLlamaServerReport => ({
-        reachable: false,
-        baseUrl: deps.llamaServerBaseUrl,
-        status: 'down',
-        models: [],
-        modelCount: null,
-        slots: null,
-        reason: 'llama-server-probe-failed',
-      })),
-      probeLmStudio(),
+      probes,
       waitVersions,
     ]);
 

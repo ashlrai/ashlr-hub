@@ -600,17 +600,21 @@ describe('cli/verse: background services', () => {
       loadBudget: async () => ({
         startBudgetCapacityPublisher: () => { order.push('budget:start'); return () => { order.push('budget:stop'); }; },
       }),
+      loadApps: async () => ({
+        // Never settles: proves the Apps warm-up is not awaited either.
+        warmVerseApps: (cfg: AshlrConfig) => { order.push(`apps:warm:${cfg === OPEN_CFG}`); return new Promise<void>(() => {}); },
+      }),
     };
   }
 
-  it('starts all four with the server config, without awaiting the usage prime, and stops them newest first', async () => {
+  it('starts all five with the server config, without awaiting the usage prime or the Apps warm-up, and stops them newest first', async () => {
     const order: string[] = [];
     const services = await startVerseBackgroundServices(OPEN_CFG, fakes(order));
-    expect(services.started).toEqual(['health', 'claude-usage', 'reasoning', 'budget']);
-    expect(order).toEqual(['health:start:true', 'usage:prime', 'reasoning:start', 'budget:start']);
+    expect(services.started).toEqual(['health', 'claude-usage', 'reasoning', 'budget', 'apps']);
+    expect(order).toEqual(['health:start:true', 'usage:prime', 'reasoning:start', 'budget:start', 'apps:warm:true']);
     services.stop();
     services.stop(); // idempotent
-    expect(order.slice(4)).toEqual(['budget:stop', 'reasoning:stop', 'health:stop']);
+    expect(order.slice(5)).toEqual(['budget:stop', 'reasoning:stop', 'health:stop']);
   });
 
   it('a service that fails to load or start is reported and skipped; the rest still run', async () => {
@@ -625,21 +629,21 @@ describe('cli/verse: background services', () => {
       }),
       log,
     });
-    expect(services.started).toEqual(['claude-usage', 'budget']);
+    expect(services.started).toEqual(['claude-usage', 'budget', 'apps']);
     expect(log.mock.calls.map(([m]) => m)).toEqual([
       'health did not start: module missing',
       'reasoning did not start: bad root',
     ]);
     services.stop();
-    expect(order).toEqual(['usage:prime', 'budget:start', 'budget:stop']);
+    expect(order).toEqual(['usage:prime', 'budget:start', 'apps:warm:true', 'budget:stop']);
   });
 
   it('skips the account services under --no-accounts', async () => {
     const order: string[] = [];
     const services = await startVerseBackgroundServices(OPEN_CFG, { ...fakes(order), accountServices: false });
-    expect(services.started).toEqual(['claude-usage', 'reasoning']);
+    expect(services.started).toEqual(['claude-usage', 'reasoning', 'apps']);
     services.stop();
-    expect(order).toEqual(['usage:prime', 'reasoning:start', 'reasoning:stop']);
+    expect(order).toEqual(['usage:prime', 'reasoning:start', 'apps:warm:true', 'reasoning:stop']);
   });
 
   it('a throwing stopper does not keep the others from stopping', async () => {
