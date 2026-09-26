@@ -53,14 +53,15 @@
  * a file it reads itself is current where a pasted copy is already stale.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { isAbsolute, relative, resolve as resolvePath, sep } from 'node:path';
 
 import { scrubSecrets } from '../util/scrub.js';
 
 import { estimateTokensFromChars } from './context-math.js';
 import { gitArgs } from './context-fit.js';
-import { isDirectoryPath } from './path-guard.js';
+import { mapLimited, withFolderIo } from './folder-io.js';
+import { isDirectoryPath, isDirectoryPathAsync } from './path-guard.js';
 import { VerseServiceError } from './preferences.js';
 import { stripUnsafeControlChars } from './project-memory.js';
 import {
@@ -117,7 +118,16 @@ export interface HandoffPreviewOptions {
   focus?: string;
   /** Injectable for tests. Default: bounded `git -C <root> diff --stat HEAD`. */
   gitDiffStat?: (root: string) => string | null;
+  /**
+   * Stats already collected per root (by {@link buildHandoffPreviewAsync});
+   * when set, no git runs here. A root mapped to
+   * {@link HANDOFF_DIFF_BUDGET_SPENT} is reported as over the time budget.
+   */
+  gitDiffStats?: ReadonlyMap<string, string | null | typeof HANDOFF_DIFF_BUDGET_SPENT>;
 }
+
+/** Marks a root whose diff the total time budget left uncollected. */
+export const HANDOFF_DIFF_BUDGET_SPENT: unique symbol = Symbol('handoff-diff-budget-spent');
 
 // ---------------------------------------------------------------------------
 // Tool classification (claude / local share Claude Code's names; codex and
@@ -400,6 +410,81 @@ export function defaultGitDiffStat(root: string): string | null {
   }
 }
 
+/**
+ * {@link defaultGitDiffStat} off the event loop, for the HTTP route: the same
+ * hardened command, bounds and answer, but the directory check runs on the
+ * libuv pool and git is awaited rather than waited for — the roots are
+ * operator folders a macOS privacy prompt can hold (folder-io.ts). The child
+ * starts in `/` and reaches the root through `-C`, so its chdir never runs
+ * inside the spawn call. Never rejects.
+ */
+export async function defaultGitDiffStatAsync(root: string): Promise<string | null> {
+  if (!(await withFolderIo(() => isDirectoryPathAsync(root)))) return null;
+  return new Promise((resolve) => {
+    try {
+      const child = execFile(
+        'git',
+        gitArgs(root, ['diff', '--stat', '--no-color', '--no-ext-diff', '--no-textconv', 'HEAD']),
+        {
+          cwd: '/',
+          encoding: 'utf8',
+          timeout: HANDOFF_GIT_TIMEOUT_MS,
+          maxBuffer: 1024 * 1024,
+          env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', PAGER: 'cat' },
+        },
+        (error, stdout) => resolve(error ? null : capGitStat(String(stdout))),
+      );
+      child.stdin?.end();
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/** Roots whose `git diff --stat` runs at once in {@link buildHandoffPreviewAsync}. */
+const HANDOFF_GIT_CONCURRENCY = 4;
+
+/**
+ * {@link buildHandoffPreview} for the HTTP route: identical note, but the
+ * per-root `git diff --stat` runs asynchronously ({@link HANDOFF_GIT_CONCURRENCY}
+ * roots at a time) under the same total budget — a root not started within
+ * it is reported as "time budget spent", as the synchronous loop reports the
+ * roots after the budget ran out. A `gitDiffStat` in `opts` (tests) keeps the
+ * synchronous path unchanged.
+ */
+export async function buildHandoffPreviewAsync(
+  session: VerseSession,
+  events: VerseEvent[],
+  opts: HandoffPreviewOptions = {},
+  diffStat: (root: string) => Promise<string | null> = defaultGitDiffStatAsync,
+): Promise<VerseHandoffPreview> {
+  if (opts.gitDiffStat !== undefined || opts.gitDiffStats !== undefined) {
+    return buildHandoffPreview(session, events, opts);
+  }
+  // Validate the cheap input before spending any git time.
+  const focusRaw = typeof opts.focus === 'string' ? opts.focus.trim() : '';
+  if (focusRaw.length > VERSE_HANDOFF_FOCUS_MAX_CHARS) {
+    throw new VerseServiceError('VERSE_INVALID', `focus must be at most ${VERSE_HANDOFF_FOCUS_MAX_CHARS} characters`);
+  }
+  const roots = verseSessionRoots(session);
+  const started = Date.now();
+  const stats = new Map<string, string | null | typeof HANDOFF_DIFF_BUDGET_SPENT>();
+  await mapLimited(roots, HANDOFF_GIT_CONCURRENCY, async (root) => {
+    if (Date.now() - started > HANDOFF_GIT_TOTAL_BUDGET_MS) {
+      stats.set(root, HANDOFF_DIFF_BUDGET_SPENT);
+      return;
+    }
+    let stat: string | null;
+    try {
+      stat = await diffStat(root);
+    } catch {
+      stat = null;
+    }
+    stats.set(root, stat);
+  });
+  return buildHandoffPreview(session, events, { ...opts, gitDiffStats: stats });
+}
+
 function capGitStat(raw: string): string | null {
   const text = raw.replace(/\r\n?/g, '\n').trimEnd();
   if (text.trim().length === 0) return '';
@@ -539,17 +624,26 @@ export function buildHandoffPreview(
     const started = Date.now();
     roots.forEach((root, index) => {
       lines.push(`- ${root}${index === 0 ? ' (primary)' : ''}`);
-      // The default runs git synchronously on the request thread: bound the
-      // whole loop, not just each call, so eight slow roots cannot stall it.
-      if (opts.gitDiffStat === undefined && Date.now() - started > HANDOFF_GIT_TOTAL_BUDGET_MS) {
-        lines.push('  (diff not collected: time budget spent)');
-        return;
-      }
       let stat: string | null;
-      try {
-        stat = gitDiffStat(root);
-      } catch {
-        stat = null;
+      if (opts.gitDiffStats !== undefined) {
+        const collected = opts.gitDiffStats.get(root);
+        if (collected === HANDOFF_DIFF_BUDGET_SPENT) {
+          lines.push('  (diff not collected: time budget spent)');
+          return;
+        }
+        stat = collected ?? null;
+      } else {
+        // The default runs git synchronously on the calling thread: bound the
+        // whole loop, not just each call, so eight slow roots cannot stall it.
+        if (opts.gitDiffStat === undefined && Date.now() - started > HANDOFF_GIT_TOTAL_BUDGET_MS) {
+          lines.push('  (diff not collected: time budget spent)');
+          return;
+        }
+        try {
+          stat = gitDiffStat(root);
+        } catch {
+          stat = null;
+        }
       }
       if (stat === null) return;
       const capped = capGitStat(stat);

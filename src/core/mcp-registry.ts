@@ -9,6 +9,7 @@
  */
 
 import { readFileSync, existsSync } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { McpRegistry, McpServerSpec } from './types.js';
@@ -81,6 +82,81 @@ export function discoverMcpServers(paths?: string[]): McpRegistry {
   }
 
   return { servers };
+}
+
+/**
+ * {@link discoverMcpServers} for a server's request path (GET /api/verse/mcp):
+ * the same files, order, de-duplication and answer, but the reads happen off
+ * the event loop, concurrently, and a file whose size and mtime have not
+ * changed since the last call is not re-read or re-parsed. ~/.claude.json
+ * alone is routinely several MB (Claude Code keeps per-project history in
+ * it), and reading plus parsing it synchronously on every request stalled
+ * every other route for the duration. Never throws.
+ */
+export async function discoverMcpServersAsync(paths?: string[]): Promise<McpRegistry> {
+  const configPaths = paths ?? knownConfigPaths();
+  const perFile = await Promise.all(configPaths.map((configPath) => specsFromFileAsync(configPath)));
+  const seen = new Set<string>();
+  const servers: McpServerSpec[] = [];
+  for (const specsFromFile of perFile) {
+    for (const spec of specsFromFile) {
+      if (!seen.has(spec.name)) {
+        seen.add(spec.name);
+        servers.push(spec);
+      }
+    }
+  }
+  return { servers };
+}
+
+interface ParsedConfigCacheEntry {
+  size: number;
+  mtimeMs: number;
+  specs: McpServerSpec[];
+}
+
+/** Last parse of each config file, keyed by path; reused while size and mtime match. */
+const parsedConfigCache = new Map<string, ParsedConfigCacheEntry>();
+
+/** Test seam: forget every cached parse. */
+export function resetMcpRegistryCache(): void {
+  parsedConfigCache.clear();
+}
+
+async function specsFromFileAsync(configPath: string): Promise<McpServerSpec[]> {
+  let before;
+  try {
+    before = await stat(configPath);
+  } catch {
+    // Missing (or unreadable): skipped, as `existsSync` skips it.
+    parsedConfigCache.delete(configPath);
+    return [];
+  }
+  const cached = parsedConfigCache.get(configPath);
+  if (cached && cached.size === before.size && cached.mtimeMs === before.mtimeMs) {
+    return structuredClone(cached.specs);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(configPath, 'utf8'));
+  } catch {
+    // Unreadable or malformed: skip silently per contract.
+    parsedConfigCache.delete(configPath);
+    return [];
+  }
+  const specs = extractSpecsFromConfig(parsed, configPath);
+  // Cache only a parse whose file did not change underneath the read.
+  try {
+    const after = await stat(configPath);
+    if (after.size === before.size && after.mtimeMs === before.mtimeMs) {
+      parsedConfigCache.set(configPath, { size: after.size, mtimeMs: after.mtimeMs, specs: structuredClone(specs) });
+    } else {
+      parsedConfigCache.delete(configPath);
+    }
+  } catch {
+    parsedConfigCache.delete(configPath);
+  }
+  return specs;
 }
 
 /**

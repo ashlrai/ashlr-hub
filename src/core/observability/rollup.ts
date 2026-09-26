@@ -749,33 +749,66 @@ function withCurrentBudget(rollup: ActivityRollup, cfg: AshlrConfig): ActivityRo
  * thread at all. A failed refresh keeps the last good value. Throws only when
  * there is no value at all and the computation fails.
  */
-export async function getCachedRollup(
-  window: '1d' | '7d' | '30d',
-  cfg: AshlrConfig,
-  opts: { project?: string; compute?: () => Promise<ActivityRollup> } = {},
-): Promise<CachedRollup> {
-  const project = opts.project?.trim() || undefined;
+function rollupCacheEntry(window: string, project: string | undefined): RollupCacheEntry {
   const key = rollupCacheKey(window, project);
   let entry = rollupCache.get(key);
   if (!entry) {
     entry = { value: null, computedAt: 0, inFlight: null };
     rollupCache.set(key, entry);
   }
+  return entry;
+}
+
+/** Start (or join) the entry's single-flight refresh. */
+function refreshRollupEntry(entry: RollupCacheEntry, compute: () => Promise<ActivityRollup>): Promise<ActivityRollup> {
+  if (entry.inFlight) return entry.inFlight;
+  entry.inFlight = compute()
+    .then((value) => {
+      entry.value = value;
+      entry.computedAt = Date.now();
+      return value;
+    })
+    .finally(() => {
+      entry.inFlight = null;
+    });
+  return entry.inFlight;
+}
+
+/**
+ * The cached rollup WITHOUT ever waiting for, or computing, one on the
+ * calling thread — for request paths that only decorate their answer with it
+ * (the Verse cockpit's quota row). Returns the cached value (null when there
+ * is none, or it is older than ROLLUP_CACHE_MAX_STALE_MS) and, when it is
+ * missing or past ROLLUP_CACHE_TTL_MS, starts one background refresh through
+ * `compute` — only if a `compute` is given: a caller without a worker gets
+ * whatever another caller cached and never pays for the rollup itself (its
+ * usage collection and per-repo git state reads are synchronous; the repos
+ * are operator folders, see verse/folder-io.ts). Never throws.
+ */
+export function peekCachedRollup(
+  window: '1d' | '7d' | '30d',
+  cfg: AshlrConfig,
+  opts: { compute?: () => Promise<ActivityRollup> } = {},
+): CachedRollup | null {
+  const entry = rollupCacheEntry(window, undefined);
+  const now = Date.now();
+  const ageMs = now - entry.computedAt;
+  if (opts.compute && (entry.value === null || ageMs >= ROLLUP_CACHE_TTL_MS)) {
+    void refreshRollupEntry(entry, opts.compute).catch(() => { /* keep serving the last good value */ });
+  }
+  if (entry.value === null || ageMs > ROLLUP_CACHE_MAX_STALE_MS) return null;
+  return { rollup: withCurrentBudget(entry.value, cfg), stale: ageMs >= ROLLUP_CACHE_TTL_MS, ageMs };
+}
+
+export async function getCachedRollup(
+  window: '1d' | '7d' | '30d',
+  cfg: AshlrConfig,
+  opts: { project?: string; compute?: () => Promise<ActivityRollup> } = {},
+): Promise<CachedRollup> {
+  const project = opts.project?.trim() || undefined;
+  const current = rollupCacheEntry(window, project);
   const compute = opts.compute ?? (() => buildRollupAsync(window, cfg, project ? { project } : undefined));
-  const current = entry;
-  const refresh = (): Promise<ActivityRollup> => {
-    if (current.inFlight) return current.inFlight;
-    current.inFlight = compute()
-      .then((value) => {
-        current.value = value;
-        current.computedAt = Date.now();
-        return value;
-      })
-      .finally(() => {
-        current.inFlight = null;
-      });
-    return current.inFlight;
-  };
+  const refresh = (): Promise<ActivityRollup> => refreshRollupEntry(current, compute);
 
   const now = Date.now();
   if (current.value === null || now - current.computedAt > ROLLUP_CACHE_MAX_STALE_MS) {

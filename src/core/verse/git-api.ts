@@ -54,7 +54,8 @@ import {
   resolveGitRoot,
   type GitOpsOptions,
 } from './git-ops.js';
-import { checkWorkspaceRootPath, expandHomePrefix } from './path-guard.js';
+import { withFolderIo } from './folder-io.js';
+import { checkWorkspaceRootPathAsync, expandHomePrefix } from './path-guard.js';
 import { createWorktree, type WorktreeOptions } from './worktrees.js';
 import { VERSE_GIT_PATH, type VerseGitActionResponse, type VerseGitDiffScope } from './workbench-types.js';
 
@@ -119,8 +120,8 @@ async function defaultKnownRoots(): Promise<string[]> {
   const roots: string[] = [];
   for (const s of sessions) roots.push(s.projectPath, ...(s.extraRoots ?? []));
   try {
-    const { discoverProjects } = await import('./projects.js');
-    for (const p of discoverProjects({ sessions })) roots.push(p.path);
+    const { discoverProjectsAsync } = await import('./projects.js');
+    for (const p of await discoverProjectsAsync({ sessions })) roots.push(p.path);
   } catch {
     /* enrollment unreadable: session roots still count */
   }
@@ -178,7 +179,7 @@ async function checkedRoot(raw: unknown): Promise<string> {
   if (typeof raw !== 'string' || raw.length === 0 || raw.length > MAX_ROOT_CHARS) invalid('root must be a folder path.');
   const expanded = expandHomePrefix(raw.trim());
   if (!isAbsolute(expanded)) invalid('root must be an absolute path.');
-  const guard = checkWorkspaceRootPath(expanded);
+  const guard = await withFolderIo(() => checkWorkspaceRootPathAsync(expanded));
   if (!guard.ok) throw new GitOpError('VERSE_GIT_REFUSED', 'Verse does not run git in that folder.');
   const known = await knownRootSet();
   if (!known.has(resolvePath(expanded)) && !known.has(guard.path)) {

@@ -39,10 +39,19 @@
 
 import { execFile, spawnSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve as resolvePath } from 'node:path';
 
-import { defaultBranch, isRepo, resolveGitHubOriginAuthority } from '../git.js';
+import {
+  defaultBranch,
+  defaultBranchAsync,
+  isRepo,
+  isRepoAsync,
+  resolveGitHubOriginAuthority,
+  resolveGitHubOriginAuthorityAsync,
+} from '../git.js';
+import { folderAccessPendingMessage, probeFolderAccess, withFolderIo } from './folder-io.js';
 import type {
   VerseGithubChecks,
   VerseGithubCheckState,
@@ -494,6 +503,63 @@ function identitySignature(path: string): string {
   ].join('|');
 }
 
+function statTokenAsync(path: string): Promise<string> {
+  return withFolderIo(() => stat(path)).then((st) => `${st.ino}:${st.size}:${st.mtimeMs}`, () => '-');
+}
+
+/** {@link identitySignature} off the event loop: the same files, the same fingerprint. */
+async function identitySignatureAsync(path: string): Promise<string> {
+  const dotGit = join(path, '.git');
+  let gitDir = dotGit;
+  try {
+    if ((await withFolderIo(() => stat(dotGit))).isFile()) {
+      const m = /^gitdir:\s*(.+)$/m.exec(await withFolderIo(() => readFile(dotGit, 'utf8')));
+      if (m) gitDir = isAbsolute(m[1]!.trim()) ? m[1]!.trim() : resolvePath(path, m[1]!.trim());
+    }
+  } catch {
+    // Missing .git: the fingerprint still changes if one appears.
+  }
+  let commonDir = gitDir;
+  try {
+    const rel = (await withFolderIo(() => readFile(join(gitDir, 'commondir'), 'utf8'))).trim();
+    if (rel) commonDir = isAbsolute(rel) ? rel : resolvePath(gitDir, rel);
+  } catch {
+    // Not a linked worktree.
+  }
+  const tokens = await Promise.all([
+    statTokenAsync(dotGit),
+    statTokenAsync(join(gitDir, 'HEAD')),
+    statTokenAsync(join(commonDir, 'config')),
+    statTokenAsync(join(gitDir, 'config.worktree')),
+    statTokenAsync(join(commonDir, 'refs', 'remotes', 'origin', 'HEAD')),
+    statTokenAsync(join(commonDir, 'packed-refs')),
+    statTokenAsync(join(homedir(), '.gitconfig')),
+    statTokenAsync(join(homedir(), '.config', 'git', 'config')),
+  ]);
+  return tokens.join('|');
+}
+
+/** {@link probeIdentity} with the real git probe, off the event loop (git.ts `*Async`). Same answer. */
+async function probeIdentityAsync(path: string): Promise<RootIdentity> {
+  if (!(await withFolderIo(() => isRepoAsync(path)))) return { isRepo: false, defaultBranch: null, nameWithOwner: null };
+  const [branch, nameWithOwner] = await Promise.all([
+    defaultBranchAsync(path).catch(() => null),
+    resolveGitHubOriginAuthorityAsync(path).catch(() => null),
+  ]);
+  return { isRepo: true, defaultBranch: branch, nameWithOwner };
+}
+
+/** {@link rootIdentity} for the async reader: same cache, same rules; the real probe never blocks the loop. */
+async function rootIdentityAsync(path: string, opts: VerseGithubReadOptions): Promise<RootIdentity> {
+  if (opts.git) return probeIdentity(path, opts.git);
+  const signature = await identitySignatureAsync(path);
+  const hit = identityCache.get(path);
+  if (hit && hit.signature === signature && Date.now() - hit.at < IDENTITY_MAX_AGE_MS) return hit.identity;
+  const identity = await probeIdentityAsync(path);
+  boundedSet(identityCache, path, { signature, at: Date.now(), identity });
+  return identity;
+}
+
 function probeIdentity(path: string, git: VerseGithubGitProbe): RootIdentity {
   let repoIsGit = false;
   try {
@@ -616,31 +682,78 @@ type Prepared =
   | { done: VerseGithubRepoSnapshot }
   | { path: string; remote: VerseGithubRemote; observedAt: string; prLimit: number; issueLimit: number; now: () => Date };
 
-/** Validation + identity: everything except the two list reads. */
-function prepareRoot(path: string, opts: VerseGithubReadOptions): Prepared {
+const NOT_A_REPO: VerseGithubRemote = Object.freeze({
+  state: 'not-a-repo',
+  nameWithOwner: null,
+  defaultBranch: null,
+}) as VerseGithubRemote;
+
+interface RootFrame {
+  now: () => Date;
+  observedAt: string;
+  prLimit: number;
+  issueLimit: number;
+}
+
+/** The filesystem-free half of validation: the frame, or a finished snapshot. */
+function frameFor(path: string, opts: VerseGithubReadOptions): { done: VerseGithubRepoSnapshot } | RootFrame {
   const now = opts.now ?? (() => new Date());
   const observedAt = now().toISOString();
-  const isDirectory = opts.isDirectory ?? realIsDirectory;
   const prLimit = clampLimit(opts.prLimit, DEFAULT_PR_LIMIT);
   const issueLimit = clampLimit(opts.issueLimit, DEFAULT_ISSUE_LIMIT);
-
-  const notARepo: VerseGithubRemote = {
-    state: 'not-a-repo',
-    nameWithOwner: null,
-    defaultBranch: null,
-  };
-
   if (typeof path !== 'string' || path.length === 0 || path.length > MAX_PATH_CHARS) {
-    return { done: emptySnapshot(typeof path === 'string' ? path : '', notARepo, observedAt, 'invalid path') };
+    return { done: emptySnapshot(typeof path === 'string' ? path : '', { ...NOT_A_REPO }, observedAt, 'invalid path') };
   }
   if (!isAbsolute(path)) {
-    return { done: emptySnapshot(path, notARepo, observedAt, 'path is not absolute') };
+    return { done: emptySnapshot(path, { ...NOT_A_REPO }, observedAt, 'path is not absolute') };
   }
-  if (!isDirectory(path)) {
-    return { done: emptySnapshot(path, notARepo, observedAt, 'not a directory') };
-  }
+  return { now, observedAt, prLimit, issueLimit };
+}
 
-  const identity = rootIdentity(path, opts);
+/** Validation + identity: everything except the two list reads. */
+function prepareRoot(path: string, opts: VerseGithubReadOptions): Prepared {
+  const frame = frameFor(path, opts);
+  if ('done' in frame) return frame;
+  const isDirectory = opts.isDirectory ?? realIsDirectory;
+  if (!isDirectory(path)) {
+    return { done: emptySnapshot(path, { ...NOT_A_REPO }, frame.observedAt, 'not a directory') };
+  }
+  return prepareWithIdentity(path, opts, frame, rootIdentity(path, opts));
+}
+
+/**
+ * {@link prepareRoot} for the async reader: the directory check, the
+ * identity fingerprint and the git probe all run off the event loop (roots
+ * are operator folders; folder-io.ts). Same answers. A root whose macOS
+ * privacy prompt is still unanswered is reported as unreadable for now
+ * instead of being entered: `gh` would start inside it, and a spawn's chdir
+ * runs on the event loop.
+ */
+async function prepareRootAsync(path: string, opts: VerseGithubReadOptions): Promise<Prepared> {
+  const frame = frameFor(path, opts);
+  if ('done' in frame) return frame;
+  const real = opts.isDirectory === undefined && opts.git === undefined;
+  if (real && (await probeFolderAccess(path)) === 'pending') {
+    return { done: emptySnapshot(path, { ...NOT_A_REPO }, frame.observedAt, folderAccessPendingMessage(path)) };
+  }
+  const isDirectory = opts.isDirectory
+    ? opts.isDirectory(path)
+    : await withFolderIo(async () => {
+      try {
+        return (await stat(path)).isDirectory();
+      } catch {
+        return false;
+      }
+    });
+  if (!isDirectory) {
+    return { done: emptySnapshot(path, { ...NOT_A_REPO }, frame.observedAt, 'not a directory') };
+  }
+  return prepareWithIdentity(path, opts, frame, await rootIdentityAsync(path, opts));
+}
+
+function prepareWithIdentity(path: string, opts: VerseGithubReadOptions, frame: RootFrame, identity: RootIdentity): Prepared {
+  const { now, observedAt, prLimit, issueLimit } = frame;
+  const notARepo: VerseGithubRemote = { ...NOT_A_REPO };
   if (!identity.isRepo) {
     return { done: emptySnapshot(path, notARepo, observedAt, 'not a git repository') };
   }
@@ -738,7 +851,7 @@ export async function readVerseGithubRepoAsync(
   path: string,
   opts: VerseGithubReadOptions = {},
 ): Promise<VerseGithubRepoSnapshot> {
-  const prepared = prepareRoot(path, opts);
+  const prepared = await prepareRootAsync(path, opts);
   if ('done' in prepared) return prepared.done;
   if (opts.gh) return readVerseGithubRepo(path, opts);
   const cached = cachedLists(prepared.path, prepared.prLimit, prepared.issueLimit, prepared.now);

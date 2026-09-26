@@ -66,6 +66,7 @@ import {
   type VerseGitPrLookup,
   type VerseGitStatusDetail,
 } from './workbench-types.js';
+import { folderAccessPendingMessage, probeFolderAccess } from './folder-io.js';
 
 // ===========================================================================
 // Wire additions — contract now (workbench-types.ts §7 VerseGitStatusDetail):
@@ -143,8 +144,24 @@ export function gitChildEnv(base: NodeJS.ProcessEnv = process.env): Record<strin
   };
 }
 
-/** The production runner: async spawn, no shell, argv only, hard timeout, bounded output. */
-export const defaultGitRunner: GitRunner = (bin, args, opts) =>
+/**
+ * The production runner: async spawn, no shell, argv only, hard timeout,
+ * bounded output.
+ *
+ * The child starts IN the repo (`cwd`), and a spawn's chdir runs inside the
+ * parent's spawn call — on the event loop. A repo in a folder whose macOS
+ * privacy prompt is still unanswered would park the whole server there
+ * (folder-io.ts), so the folder is entered off the loop first; while the
+ * prompt is pending the run reports a timeout instead of spawning.
+ */
+export const defaultGitRunner: GitRunner = async (bin, args, opts) => {
+  if ((await probeFolderAccess(opts.cwd)) === 'pending') {
+    return { code: null, stdout: '', stderr: folderAccessPendingMessage(opts.cwd), timedOut: true, truncated: false, missing: false };
+  }
+  return spawnGitChild(bin, args, opts);
+};
+
+const spawnGitChild: GitRunner = (bin, args, opts) =>
   new Promise<GitRunResult>((resolveRun) => {
     const timeoutMs = opts.timeoutMs ?? VERSE_GIT_TIMEOUT_MS;
     const maxStdout = opts.maxStdoutBytes ?? DEFAULT_MAX_STDOUT;

@@ -33,7 +33,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readBody, sendJson } from '../web/api.js';
 import type { ApiModule } from './api-modules.js';
 import { sharedFileIndex, type VerseFileIndex } from './file-index.js';
-import { checkWorkspaceRootPath } from './path-guard.js';
+import { withFolderIo } from './folder-io.js';
+import { checkWorkspaceRootPathAsync } from './path-guard.js';
 import { parseControlsUpdate, parseDefaultsUpdate } from './session-controls.js';
 import type { VerseEngineHandle } from './session-engine.js';
 import { verseSessionRoots } from './types.js';
@@ -368,8 +369,11 @@ async function handleFiles(req: IncomingMessage, res: ServerResponse, path: stri
   // Only the chat's own roots, and each must still pass the workspace-root
   // guard (a root that has since become a forbidden or missing directory is
   // simply not searched).
-  const roots = verseSessionRoots(session)
-    .map((root) => checkWorkspaceRootPath(root))
+  // Off the event loop: each root is an operator folder (folder-io.ts).
+  const checks = await Promise.all(
+    verseSessionRoots(session).map((root) => withFolderIo(() => checkWorkspaceRootPathAsync(root))),
+  );
+  const roots = checks
     .filter((check): check is { ok: true; path: string } => check.ok)
     .map((check) => check.path);
   const index = fileIndexOverride ?? sharedFileIndex();

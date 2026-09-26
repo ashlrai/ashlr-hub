@@ -2,7 +2,7 @@ import { parentPort, workerData } from 'node:worker_threads';
 import type { AshlrConfig } from '../types.js';
 import { buildSnapshot } from '../dashboard.js';
 import { buildRollup } from '../observability/rollup.js';
-import { listProposals } from '../inbox/store.js';
+import { listProposals, pendingCount } from '../inbox/store.js';
 import { listRuns } from '../run/orchestrator.js';
 import { listSwarms } from '../swarm/store.js';
 import { readFleetDaemonStatus } from '../fleet/status.js';
@@ -26,6 +26,7 @@ async function project(kind: ReadProjectionKind, payload: ReadProjectionPayloads
     case 'fleet': return await getCachedFleetStatus(cfg!);
     case 'fleet-activity': return await buildFleetActivity(cfg!);
     case 'proposals': return listProposals();
+    case 'pending-count': return pendingCount();
     case 'runs': return listRuns({ limit: 200 });
     case 'swarms': return listSwarms({ limit: 200 });
     case 'universe-campaign-readiness': {

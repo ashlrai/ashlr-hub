@@ -69,7 +69,7 @@
  *     (fleet + single-task + best-of-N sandboxed fan-out paths)
  */
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -450,6 +450,86 @@ export function locusAvailable(): boolean {
   } catch {
     return false;
   }
+}
+
+/** How long {@link locusAvailableAsync} trusts a PATH lookup. A miss is re-checked sooner. */
+const LOCUS_WHICH_TTL_MS = 5 * 60_000;
+const LOCUS_WHICH_MISS_TTL_MS = 30_000;
+let locusWhichCache: { at: number; available: boolean; path: string | undefined } | null = null;
+let locusWhichInFlight: Promise<boolean> | null = null;
+
+/** Test seam: forget the cached PATH lookup. */
+export function resetLocusAvailabilityCache(): void {
+  locusWhichCache = null;
+  locusWhichInFlight = null;
+}
+
+/**
+ * Settle a child's result like spawnSync reports one: the exit status (null
+ * when it was killed or never started), and whatever stdout/stderr it wrote.
+ */
+function execFileSettled(
+  file: string,
+  args: readonly string[],
+  opts: { env?: NodeJS.ProcessEnv; maxBuffer?: number; timeoutMs?: number },
+): Promise<{ status: number | null; stdout: string; stderr: string; error?: Error }> {
+  return new Promise((resolveResult) => {
+    try {
+      const child = execFile(
+        file,
+        [...args],
+        {
+          // A neutral cwd, never the server's: the spawn's chdir runs inside
+          // the parent's spawn call, and a server started from (or left in) a
+          // privacy-guarded folder would otherwise park there (verse/folder-io.ts).
+          cwd: homedir(),
+          encoding: "utf8",
+          timeout: opts.timeoutMs ?? TIMEOUT_MS,
+          maxBuffer: opts.maxBuffer ?? 1024 * 1024,
+          ...(opts.env ? { env: opts.env } : {}),
+        },
+        (error, stdout, stderr) => {
+          const code = (error as (Error & { code?: unknown }) | null)?.code;
+          resolveResult({
+            status: error ? (typeof code === "number" ? code : null) : 0,
+            stdout: String(stdout ?? ""),
+            stderr: String(stderr ?? ""),
+            ...(error ? { error } : {}),
+          });
+        },
+      );
+      child.stdin?.end();
+    } catch (error) {
+      resolveResult({ status: null, stdout: "", stderr: "", error: error instanceof Error ? error : new Error(String(error)) });
+    }
+  });
+}
+
+/**
+ * {@link locusAvailable} without blocking the event loop, for server request
+ * paths (GET /api/verse/mcp, MCP proposal/apply). The PATH lookup is cached
+ * ({@link LOCUS_WHICH_TTL_MS}; a miss for {@link LOCUS_WHICH_MISS_TTL_MS}) and
+ * concurrent callers share one lookup. Never rejects.
+ */
+export async function locusAvailableAsync(): Promise<boolean> {
+  const cached = locusWhichCache;
+  const path = process.env.PATH;
+  if (cached && cached.path === path &&
+      Date.now() - cached.at < (cached.available ? LOCUS_WHICH_TTL_MS : LOCUS_WHICH_MISS_TTL_MS)) {
+    return cached.available;
+  }
+  if (!locusWhichInFlight) {
+    locusWhichInFlight = execFileSettled(process.platform === "win32" ? "where" : "which", [LOCUS_BIN], {})
+      .then((r) => {
+        const available = r.status === 0;
+        locusWhichCache = { at: Date.now(), available, path };
+        return available;
+      })
+      .finally(() => {
+        locusWhichInFlight = null;
+      });
+  }
+  return locusWhichInFlight;
 }
 
 function locusEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -998,7 +1078,15 @@ export function evaluateFleetGate(
  * @see schema/hub-gate.schema.json
  */
 export function locusFleetGate(env?: NodeJS.ProcessEnv): LocusFleetGateResult {
-  const probe = locusAgentReport(env);
+  return fleetGateFromProbe(locusAgentReport(env));
+}
+
+/** {@link locusFleetGate} without blocking the event loop (see {@link locusAgentReportAsync}). */
+export async function locusFleetGateAsync(env?: NodeJS.ProcessEnv): Promise<LocusFleetGateResult> {
+  return fleetGateFromProbe(await locusAgentReportAsync(env));
+}
+
+function fleetGateFromProbe(probe: LocusProbeResult): LocusFleetGateResult {
   if (!probe.available) {
     return {
       allowDispatch: false,
@@ -1264,6 +1352,31 @@ export function assertLocusPreMutate(
 }
 
 /**
+ * {@link assertLocusPreMutate} for a server's request path: the same mode
+ * resolution (including "config omitted -> read ~/.ashlr" versus "config
+ * null -> no config", decided by argument count exactly as the sync form
+ * does) and the same decision, with the Locus probe awaited instead of
+ * spawned synchronously.
+ */
+export async function assertLocusPreMutateAsync(
+  ...args: [env?: NodeJS.ProcessEnv, config?: LocusEnforceConfigInput]
+): Promise<LocusPreMutateDecision> {
+  const [env, config] = args;
+  const cfg = args.length >= 2 ? config : readLocusConfigFromAshlr();
+  const mode = resolveLocusEnforceMode(env, cfg);
+  if (mode === "off") {
+    return {
+      allow: true,
+      mode,
+      blockers: [],
+      shouldWarn: false,
+    };
+  }
+  const gate = await locusFleetGateAsync(env);
+  return decidePreMutateGate(gate, mode);
+}
+
+/**
  * Format a pre-mutate decision for stderr / job UI (never includes secrets).
  */
 export function formatPreMutateBlockers(decision: LocusPreMutateDecision): string {
@@ -1446,15 +1559,7 @@ export async function runWithLocusSessionIfConfigured<T>(
  * Preferred hub readiness entrypoint.
  */
 export function locusAgentReport(env?: NodeJS.ProcessEnv): LocusProbeResult {
-  if (!locusAvailable()) {
-    return {
-      available: false,
-      report: null,
-      exitCode: 2,
-      error: "locus CLI not found on PATH",
-      gateOk: false,
-    };
-  }
+  if (!locusAvailable()) return LOCUS_NOT_ON_PATH;
   try {
     const r = spawnSync(LOCUS_BIN, ["agent", "report", "--json"], {
       encoding: "utf8",
@@ -1462,33 +1567,71 @@ export function locusAgentReport(env?: NodeJS.ProcessEnv): LocusProbeResult {
       env: locusEnv(env),
       maxBuffer: 4 * 1024 * 1024,
     });
-    const exitCode = typeof r.status === "number" ? r.status : 2;
-    const stdout = (r.stdout ?? "").trim();
-    if (!stdout) {
-      return {
-        available: true,
-        report: null,
-        exitCode,
-        error: r.stderr?.trim() || "empty agent report",
-        gateOk: false,
-      };
-    }
-    const report = parseAgentReportJson(stdout);
-    const oneline = report.status_oneline ?? "";
-    const gateOk =
-      report.ready === true &&
-      report.status === "ready" &&
-      isStatusOnelineHealthy(oneline);
-    return { available: true, report, exitCode, gateOk };
+    return agentReportFrom(r.status, r.stdout, r.stderr);
   } catch (e) {
+    return agentReportFailure(e);
+  }
+}
+
+const LOCUS_NOT_ON_PATH: LocusProbeResult = Object.freeze({
+  available: false,
+  report: null,
+  exitCode: 2,
+  error: "locus CLI not found on PATH",
+  gateOk: false,
+}) as LocusProbeResult;
+
+/**
+ * {@link locusAgentReport} without blocking the event loop — for server
+ * request paths (GET /api/verse/mcp, MCP proposal and apply), where the sync
+ * form held the whole server for up to {@link TIMEOUT_MS} per call (twice on
+ * apply). Same command, env, timeout and output cap; the child starts in the
+ * home directory rather than inheriting the server's cwd; the PATH lookup is
+ * cached. Same result shape and rules. Never rejects.
+ */
+export async function locusAgentReportAsync(env?: NodeJS.ProcessEnv): Promise<LocusProbeResult> {
+  if (!(await locusAvailableAsync())) return { ...LOCUS_NOT_ON_PATH };
+  try {
+    const r = await execFileSettled(LOCUS_BIN, ["agent", "report", "--json"], {
+      env: locusEnv(env),
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    return agentReportFrom(r.status, r.stdout, r.stderr);
+  } catch (e) {
+    return agentReportFailure(e);
+  }
+}
+
+/** The probe result for one `locus agent report --json` run. Throws on unparseable JSON (callers map it). */
+function agentReportFrom(status: number | null, rawStdout: string | null | undefined, stderr: string | null | undefined): LocusProbeResult {
+  const exitCode = typeof status === "number" ? status : 2;
+  const stdout = (rawStdout ?? "").trim();
+  if (!stdout) {
     return {
       available: true,
       report: null,
-      exitCode: 2,
-      error: e instanceof Error ? e.message : String(e),
+      exitCode,
+      error: stderr?.trim() || "empty agent report",
       gateOk: false,
     };
   }
+  const report = parseAgentReportJson(stdout);
+  const oneline = report.status_oneline ?? "";
+  const gateOk =
+    report.ready === true &&
+    report.status === "ready" &&
+    isStatusOnelineHealthy(oneline);
+  return { available: true, report, exitCode, gateOk };
+}
+
+function agentReportFailure(e: unknown): LocusProbeResult {
+  return {
+    available: true,
+    report: null,
+    exitCode: 2,
+    error: e instanceof Error ? e.message : String(e),
+    gateOk: false,
+  };
 }
 
 /** `locus status --oneline` — never throws. */

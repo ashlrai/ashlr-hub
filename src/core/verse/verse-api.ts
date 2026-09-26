@@ -85,14 +85,15 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
 import { notifyVerseSessionsChanged, passesMutationGate, readBody, sendJson } from '../web/api.js';
 import { sanitizePublicJson } from '../util/public-json.js';
 import { budgetFor, canonicalModelId, hasExpansiveMode } from './context-math.js';
 import { estimateContextFit } from './context-fit.js';
 import { SEAT_NOT_READY_CODE } from './health-types.js';
-import { checkWorkspaceRootPath, expandHomePrefix } from './path-guard.js';
+import { firstPendingFolder, folderAccessPendingMessage, withFolderIo } from './folder-io.js';
+import { checkWorkspaceRootPathAsync, expandHomePrefix } from './path-guard.js';
 import {
   loadVersePreferences,
   memoryEnabledFor,
@@ -103,13 +104,14 @@ import {
 import { prepareProjectMemory, readProjectMemory, writeProjectMemory } from './project-memory.js';
 import { discoverProjectsAsync } from './projects.js';
 import { discoverSeats, getSeatReadiness, refreshSeatTelemetry, type VerseSeatDiscovery } from './seats.js';
-import { buildHandoffPreview } from './session-handoff.js';
+import { buildHandoffPreviewAsync } from './session-handoff.js';
 import { searchSessions } from './session-search.js';
 import {
   buildAutonomyScopeView,
   createVerseWorkspaceStore,
-  describeRoots,
+  describeRootsAsync,
   rootNotes,
+  type RootFacts,
   VerseWorkspaceError,
   type VerseWorkspaceStore,
 } from './workspaces.js';
@@ -865,17 +867,43 @@ const CONTEXT_MODE_LIST = VERSE_CONTEXT_MODES.join(', ');
  * receive); `physical` is the resolved one the memory and preference stores
  * key on, so `/tmp/x` and `/private/tmp/x` are one project.
  */
-function guardRoot(
+async function guardRoot(
   raw: unknown,
   field: string,
-): { ok: true; path: string; physical: string } | { ok: false; error: string } {
+): Promise<{ ok: true; path: string; physical: string } | { ok: false; error: string }> {
   if (typeof raw !== 'string' || raw.trim().length === 0 || raw.length > MAX_PATH_CHARS) {
     return { ok: false, error: `${field} is required` };
   }
   const trimmed = raw.trim();
-  const check = checkWorkspaceRootPath(trimmed);
+  // Off the event loop: the path is an operator folder (folder-io.ts). Once
+  // this has resolved, any macOS privacy prompt for it has been answered, so
+  // the store helpers the caller runs next (which canonicalise the same path
+  // synchronously) cannot be parked behind one.
+  const check = await withFolderIo(() => checkWorkspaceRootPathAsync(trimmed));
   if (!check.ok) return { ok: false, error: check.error };
   return { ok: true, path: expandHomePrefix(trimmed), physical: check.path };
+}
+
+/**
+ * Wait, OFF the event loop, until every root can be entered — before a route
+ * hands roots to code that touches them synchronously or spawns a child with
+ * one as its cwd (the session engine: realpath at create, the CLI's cwd on a
+ * turn). A spawn's chdir runs inside the parent's spawn call, so a cwd behind
+ * a pending macOS privacy prompt would park the whole server there
+ * (folder-io.ts). `ok`, `missing` and `denied` all let the request continue
+ * to its usual answer (a gone or refused folder already fails fast with its
+ * own error); only `pending` — the prompt is still up, or the volume hung —
+ * refuses, with 503 VERSE_FOLDER_ACCESS_PENDING. False after responding.
+ */
+async function rootsSettled(res: ServerResponse, roots: readonly string[]): Promise<boolean> {
+  // Only real paths are probed; anything else is left to the code that
+  // validates it next, which answers exactly as it did before.
+  const dirs = roots.filter((root): root is string => typeof root === 'string' && root.length > 0 && !root.includes('\0'));
+  const pending = await firstPendingFolder(dirs.map((root) => expandHomePrefix(root)));
+  if (pending === null) return true;
+  res.setHeader('Retry-After', '5');
+  sendJson(res, 503, { code: 'VERSE_FOLDER_ACCESS_PENDING', error: folderAccessPendingMessage(pending) });
+  return false;
 }
 
 /**
@@ -977,11 +1005,11 @@ function parseContextFields(
  * guard the enrollment registry uses, so `~/.ashlr` (provider tokens, the
  * KILL sentinel, the 0600 launcher records) can never become a session root.
  */
-function parseCreateRequest(
+async function parseCreateRequest(
   body: Record<string, unknown>,
   res: ServerResponse,
   store: VerseWorkspaceStore,
-): VerseCreateSessionRequest | null {
+): Promise<VerseCreateSessionRequest | null> {
   if (body['workspaceName'] !== undefined) {
     sendInvalid(res, 'workspaceName is filled in by the server from workspaceId; do not send it');
     return null;
@@ -1039,7 +1067,7 @@ function parseCreateRequest(
   // already realpaths in `resolveProjectDir`, so the stored record is
   // identical either way; what this call adds is the deny-root refusal, and
   // that is all it should add.
-  const primaryCheck = checkWorkspaceRootPath(projectPath.trim());
+  const primaryCheck = await withFolderIo(() => checkWorkspaceRootPathAsync(projectPath.trim()));
   if (!primaryCheck.ok) {
     sendInvalid(res, primaryCheck.error);
     return null;
@@ -1061,7 +1089,7 @@ function parseCreateRequest(
         sendInvalid(res, 'every extra root must be an absolute path');
         return null;
       }
-      const check = checkWorkspaceRootPath(raw.trim());
+      const check = await withFolderIo(() => checkWorkspaceRootPathAsync(raw.trim()));
       if (!check.ok) {
         sendInvalid(res, check.error);
         return null;
@@ -1216,13 +1244,25 @@ function isRootPriority(value: unknown): value is VerseRootPriority {
   return typeof value === 'string' && (VERSE_ROOT_PRIORITIES as readonly string[]).includes(value);
 }
 
-/** Workspaces + their live per-root facts + priorities, in one read. */
-function workspacesResponse(store: VerseWorkspaceStore): VerseWorkspacesResponse {
+/**
+ * Workspaces + their live per-root facts + priorities, in one read.
+ *
+ * Up to seven git calls and three filesystem checks per root, every one of
+ * them inside an operator folder: all of it runs off the event loop
+ * (describeRootsAsync), so a folder behind a pending macOS privacy prompt
+ * holds this response and nothing else. A root shared by several workspaces
+ * is examined once per response.
+ */
+async function workspacesResponse(store: VerseWorkspaceStore): Promise<VerseWorkspacesResponse> {
   const workspaces: VerseWorkspace[] = store.list();
   const status: Record<string, VerseRootStatus[]> = {};
-  for (const workspace of workspaces) {
-    status[workspace.id] = describeRoots(workspace.roots.map((r) => r.path));
-  }
+  const memo = new Map<string, Promise<RootFacts>>();
+  const described = await Promise.all(
+    workspaces.map((workspace) => describeRootsAsync(workspace.roots.map((r) => r.path), { memo })),
+  );
+  workspaces.forEach((workspace, index) => {
+    status[workspace.id] = described[index]!;
+  });
   return {
     workspaces,
     status,
@@ -1250,7 +1290,7 @@ async function handleWorkspaces(
   const prefix = `${VERSE_API_PREFIX}/workspaces`;
 
   if (path === prefix && method === 'GET') {
-    sendJson(res, 200, workspacesResponse(store));
+    sendJson(res, 200, await workspacesResponse(store));
     return true;
   }
 
@@ -1274,7 +1314,7 @@ async function handleWorkspaces(
         sendInvalid(res, `roots must be 1-${VERSE_MAX_WORKSPACE_ROOTS} absolute paths`);
         return true;
       }
-      const created = store.create(String(body['name'] ?? ''), roots, body['section'] === true);
+      const created = await store.createAsync(String(body['name'] ?? ''), roots, body['section'] === true);
       sendJson(res, 201, created);
       return true;
     }
@@ -1293,7 +1333,7 @@ async function handleWorkspaces(
         sendInvalid(res, `priority must be one of ${VERSE_ROOT_PRIORITIES.join(', ')}`);
         return true;
       }
-      const priorities = store.setPriority(target.trim(), priority);
+      const priorities = await store.setPriorityAsync(target.trim(), priority);
       // Echo the ranked scope so the caller sees the ORDER it just changed,
       // and sees that ranking did not widen it.
       sendJson(res, 200, { ok: true, priorities, scope: buildAutonomyScopeView(store) });
@@ -1353,7 +1393,7 @@ async function handleWorkspaces(
       patch.roots = roots;
     }
     if (body['section'] !== undefined) patch.section = body['section'] === true;
-    sendJson(res, 200, store.update(id, patch));
+    sendJson(res, 200, await store.updateAsync(id, patch));
     return true;
   } catch (err) {
     return sendWorkspaceError(res, err);
@@ -1505,6 +1545,13 @@ async function handleContextRoutes(
       const body = await readMutationBody(ctx, req, res);
       if (!body) return true;
       if (rejectUnknownKeys(body, PREFERENCES_KEYS, res)) return true;
+      // The parser canonicalises `projectPath` (a realpath, synchronously):
+      // enter that folder off the event loop first (rootsSettled), so a
+      // pending macOS privacy prompt refuses this request, not the server.
+      const rawProjectPath = body['projectPath'];
+      if (typeof rawProjectPath === 'string' && rawProjectPath.length <= MAX_PATH_CHARS && !rawProjectPath.includes('\0')
+          && isAbsolute(expandHomePrefix(rawProjectPath))
+          && !(await rootsSettled(res, [rawProjectPath]))) return true;
       // Exactly one form, every value typed; throws VERSE_INVALID (400).
       parseVersePreferencesUpdate(body);
       let update = body as unknown as VersePreferencesUpdate;
@@ -1536,7 +1583,7 @@ async function handleContextRoutes(
       } else if ('projectPath' in update) {
         // The same path rule a session root obeys, and the PHYSICAL spelling
         // the store keys opt-outs on.
-        const guard = guardRoot(update.projectPath, 'projectPath');
+        const guard = await guardRoot(update.projectPath, 'projectPath');
         if (!guard.ok) {
           sendInvalid(res, guard.error);
           return true;
@@ -1602,7 +1649,7 @@ async function handleContextRoutes(
       const roots: string[] = [];
       const seen = new Set<string>();
       for (const [index, candidate] of candidates.entries()) {
-        const guard = guardRoot(candidate, index === 0 ? 'projectPath' : 'extraRoots entry');
+        const guard = await guardRoot(candidate, index === 0 ? 'projectPath' : 'extraRoots entry');
         if (!guard.ok) {
           sendInvalid(res, guard.error);
           return true;
@@ -1652,7 +1699,7 @@ async function handleContextRoutes(
       if (method === 'GET') {
         const params = readQuery(req, res, ['projectPath']);
         if (!params) return true;
-        const guard = guardRoot(params.get('projectPath'), 'projectPath');
+        const guard = await guardRoot(params.get('projectPath'), 'projectPath');
         if (!guard.ok) {
           sendInvalid(res, guard.error);
           return true;
@@ -1669,7 +1716,7 @@ async function handleContextRoutes(
       const body = await readMutationBody(ctx, req, res, VERSE_MEMORY_BODY_MAX_BYTES);
       if (!body) return true;
       if (rejectUnknownKeys(body, MEMORY_WRITE_KEYS, res)) return true;
-      const guard = guardRoot(body['projectPath'], 'projectPath');
+      const guard = await guardRoot(body['projectPath'], 'projectPath');
       if (!guard.ok) {
         sendInvalid(res, guard.error);
         return true;
@@ -1850,8 +1897,11 @@ export async function handleVerseApi(
       if (method === 'POST') {
         const body = await readMutationBody(ctx, req, res);
         if (!body) return true;
-        const create = parseCreateRequest(body, res, getVerseWorkspaceStore());
+        const create = await parseCreateRequest(body, res, getVerseWorkspaceStore());
         if (!create) return true;
+        // Roots from a workspace were not re-checked above; the engine (and
+        // the memory snapshot) realpath every root synchronously next.
+        if (!(await rootsSettled(res, [create.projectPath, ...(create.extraRoots ?? [])]))) return true;
         const discovery = await cachedSeats(ctx.cfg);
         const launch = discovery.launches.get(create.seatId);
         if (!launch) {
@@ -1909,7 +1959,7 @@ export async function handleVerseApi(
           sendJson(res, 404, { code: 'VERSE_SESSION_NOT_FOUND', error: `session not found: ${id}` });
           return true;
         }
-        const roots: VerseRootStatus[] = describeRoots(verseSessionRoots(session), { engine: session.engine });
+        const roots: VerseRootStatus[] = await describeRootsAsync(verseSessionRoots(session), { engine: session.engine });
         const body: VerseSessionRootsResponse = {
           sessionId: session.id,
           workspaceId: session.workspaceId ?? null,
@@ -2007,7 +2057,7 @@ export async function handleVerseApi(
           return true;
         }
         const focusLine = typeof focus === 'string' ? focus.trim() : '';
-        const preview: VerseHandoffPreview = buildHandoffPreview(session, engine.getEvents(id), {
+        const preview: VerseHandoffPreview = await buildHandoffPreviewAsync(session, engine.getEvents(id), {
           ...(includeLastAssistant === true ? { includeLastAssistant: true } : {}),
           ...(focusLine.length > 0 ? { focus: focusLine } : {}),
         });
@@ -2050,6 +2100,9 @@ export async function handleVerseApi(
         if (current?.engine === 'local' && live.option !== null) {
           engine.refreshLocalWindow(id, live.option);
         }
+        // The CLI is spawned with the primary root as its cwd (and granted
+        // the rest): never inside a pending privacy prompt (rootsSettled).
+        if (current && !(await rootsSettled(res, verseSessionRoots(current)))) return true;
         const result: VerseTurnResponse = engine.sendTurn(id, text);
         sendJson(res, 202, result);
         return true;

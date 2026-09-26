@@ -39,9 +39,10 @@ import { deregisterSse, readBody, registerSse, sendJson, sseConnectionCapReached
 import type { ApiModule } from './api-modules.js';
 import { getAppsService, resolveAppLaunch, type AppsSnapshot } from './apps.js';
 import { appCatalogEntry } from './apps-catalog.js';
-import { checkWorkspaceRootPath, expandHomePrefix, physicalPath } from './path-guard.js';
+import { withFolderIo } from './folder-io.js';
+import { checkWorkspaceRootPathAsync, expandHomePrefix, physicalPathAsync } from './path-guard.js';
 import { discoverDevServers, sessionRoots, shellJoin, type DevServerDiscoveryDeps } from './preview.js';
-import { discoverProjects } from './projects.js';
+import { discoverProjectsAsync } from './projects.js';
 import {
   TERMINAL_TAB_ID_RE,
   TerminalError,
@@ -167,13 +168,17 @@ async function resolveRoot(session: VerseSession, raw: string | undefined): Prom
     if (!primary) throw new BadRequest(400, "this chat's folder is no longer available");
     return primary;
   }
-  const checked = checkWorkspaceRootPath(expandHomePrefix(raw));
+  // Off the event loop: roots and projects are operator folders (folder-io.ts).
+  const checked = await withFolderIo(() => checkWorkspaceRootPathAsync(expandHomePrefix(raw)));
   if (!checked.ok) throw new BadRequest(400, checked.error);
   if (roots.includes(checked.path)) return checked.path;
   let projects: string[] = [];
   try {
     const sessions = (await getVerseEngine()).listSessions();
-    projects = discoverProjects({ sessions }).map((p) => physicalPath(p.path) ?? p.path);
+    const discovered = await discoverProjectsAsync({ sessions });
+    projects = await Promise.all(
+      discovered.map(async (p) => (await withFolderIo(() => physicalPathAsync(p.path))) ?? p.path),
+    );
   } catch {
     projects = [];
   }

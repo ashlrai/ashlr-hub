@@ -8,9 +8,10 @@
  *    so a hung git never blocks the indexer.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { stat } from 'node:fs/promises';
+import { join, resolve as resolvePath } from 'node:path';
 import type { GitStatus } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -37,6 +38,41 @@ function git(cwd: string, args: string[]): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * `git()` without blocking the event loop: the same command, timeout and
+ * output rules (trimmed stdout; null on a non-zero exit, a timeout, a spawn
+ * failure or stdout over execFileSync's default 1 MiB), but the wait happens
+ * in libuv instead of on the calling thread.
+ *
+ * WHY. A server calling these helpers per request (the Verse sidecar's
+ * GET /api/verse/workspaces, up to seven git calls per root) must not freeze
+ * while git works in a folder macOS guards with a privacy prompt (~/Desktop,
+ * ~/Documents, removable volumes): execFileSync parks the whole process until
+ * the prompt is answered or the timeout fires, once per call.
+ *
+ * The repo is named with `git -C <dir>` and the child starts in `/`, NOT with
+ * `cwd: dir`: the spawn's chdir runs inside the parent's posix_spawn/fork
+ * call, so a cwd behind a pending prompt would park the calling thread in
+ * uv_spawn itself. `-C` moves that chdir into git, where waiting is harmless.
+ * `-C` is git's documented equivalent of starting in that directory. Stdin is
+ * closed at once, as execFileSync's is, so a command that would read it sees EOF.
+ */
+function gitAsync(cwd: string, args: readonly string[], signal?: AbortSignal): Promise<string | null> {
+  return new Promise((resolvePromise) => {
+    try {
+      const child = execFile(
+        'git',
+        ['-C', resolvePath(cwd), ...args],
+        { cwd: '/', timeout: GIT_TIMEOUT, encoding: 'utf8', maxBuffer: 1024 * 1024, ...(signal ? { signal } : {}) },
+        (error, stdout) => resolvePromise(error ? null : String(stdout).trim()),
+      );
+      child.stdin?.end();
+    } catch {
+      resolvePromise(null);
+    }
+  });
 }
 
 /** Normalize one supported GitHub transport URL to lowercase owner/repo. */
@@ -79,6 +115,23 @@ export function isRepo(dir: string): boolean {
   return st !== undefined; // exists as either file or dir
 }
 
+/** {@link isRepo} with the stat off the event loop. Never rejects. */
+export async function isRepoAsync(dir: string): Promise<boolean> {
+  try {
+    await stat(join(dir, '.git'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The commands getGitStatus runs, shared with getGitStatusAsync so both ask
+// git exactly the same questions.
+const STATUS_BRANCH_ARGS: readonly string[] = ['rev-parse', '--abbrev-ref', 'HEAD'];
+const STATUS_PORCELAIN_ARGS: readonly string[] = ['status', '--porcelain'];
+const STATUS_REV_COUNT_ARGS: readonly string[] = ['rev-list', '--left-right', '--count', '@{u}...HEAD'];
+const STATUS_LAST_COMMIT_ARGS: readonly string[] = ['log', '-1', '--format=%cI'];
+
 /**
  * Returns a GitStatus snapshot for the repo at `repoPath`, or null when the
  * path is not a repo or git is unavailable.
@@ -87,12 +140,43 @@ export function getGitStatus(repoPath: string): GitStatus | null {
   if (!isRepo(repoPath)) return null;
 
   // --- branch ---
-  const branchRaw = git(repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const branchRaw = git(repoPath, [...STATUS_BRANCH_ARGS]);
   if (branchRaw === null) return null; // git not available / not a real repo
+  return gitStatusFrom(
+    branchRaw,
+    git(repoPath, [...STATUS_PORCELAIN_ARGS]),
+    git(repoPath, [...STATUS_REV_COUNT_ARGS]),
+    git(repoPath, [...STATUS_LAST_COMMIT_ARGS]),
+  );
+}
+
+/**
+ * {@link getGitStatus} without blocking the event loop (see `gitAsync`): the
+ * same four git commands and the same answer. After the branch read succeeds
+ * the other three run concurrently; they are independent reads. Never rejects.
+ */
+export async function getGitStatusAsync(repoPath: string, signal?: AbortSignal): Promise<GitStatus | null> {
+  if (!(await isRepoAsync(repoPath))) return null;
+  const branchRaw = await gitAsync(repoPath, STATUS_BRANCH_ARGS, signal);
+  if (branchRaw === null) return null; // git not available / not a real repo
+  const [porcelain, revCount, lastCommit] = await Promise.all([
+    gitAsync(repoPath, STATUS_PORCELAIN_ARGS, signal),
+    gitAsync(repoPath, STATUS_REV_COUNT_ARGS, signal),
+    gitAsync(repoPath, STATUS_LAST_COMMIT_ARGS, signal),
+  ]);
+  return gitStatusFrom(branchRaw, porcelain, revCount, lastCommit);
+}
+
+/** The GitStatus four git outputs describe (a null output: that command failed). */
+function gitStatusFrom(
+  branchRaw: string,
+  porcelain: string | null,
+  revCount: string | null,
+  lastCommitRaw: string | null,
+): GitStatus {
   const branch = branchRaw || 'HEAD'; // detached HEAD shows 'HEAD'
 
   // --- dirty (number of changed lines in porcelain output) ---
-  const porcelain = git(repoPath, ['status', '--porcelain']);
   const dirty =
     porcelain === null || porcelain === ''
       ? 0
@@ -101,12 +185,6 @@ export function getGitStatus(repoPath: string): GitStatus | null {
   // --- ahead / behind upstream ---
   let ahead = 0;
   let behind = 0;
-  const revCount = git(repoPath, [
-    'rev-list',
-    '--left-right',
-    '--count',
-    '@{u}...HEAD',
-  ]);
   if (revCount !== null) {
     // Output is "<behind>\t<ahead>" (left=upstream, right=HEAD)
     const parts = revCount.split(/\s+/);
@@ -118,7 +196,7 @@ export function getGitStatus(repoPath: string): GitStatus | null {
   // If no upstream is configured, revCount is null → ahead/behind stay 0.
 
   // --- last commit ISO timestamp ---
-  const lastCommit = git(repoPath, ['log', '-1', '--format=%cI']) || null;
+  const lastCommit = lastCommitRaw || null;
 
   return { branch, dirty, ahead, behind, lastCommit };
 }
@@ -136,17 +214,30 @@ export function getGitStatus(repoPath: string): GitStatus | null {
  * through to 'main'.
  */
 export function defaultBranch(repoPath: string): string {
-  const sym = git(repoPath, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
-  if (sym) {
-    // e.g. "origin/main" → "main"
-    const slash = sym.indexOf('/');
-    const name = slash >= 0 ? sym.slice(slash + 1) : sym;
-    if (name) return name;
-  }
+  const fromOrigin = originHeadBranch(git(repoPath, [...ORIGIN_HEAD_ARGS]));
+  if (fromOrigin) return fromOrigin;
+  return currentBranchOrMain(git(repoPath, [...STATUS_BRANCH_ARGS]));
+}
 
-  const cur = git(repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+/** {@link defaultBranch} without blocking the event loop (see `gitAsync`): same commands, same answer. Never rejects. */
+export async function defaultBranchAsync(repoPath: string, signal?: AbortSignal): Promise<string> {
+  const fromOrigin = originHeadBranch(await gitAsync(repoPath, ORIGIN_HEAD_ARGS, signal));
+  if (fromOrigin) return fromOrigin;
+  return currentBranchOrMain(await gitAsync(repoPath, STATUS_BRANCH_ARGS, signal));
+}
+
+const ORIGIN_HEAD_ARGS: readonly string[] = ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'];
+
+/** e.g. "origin/main" → "main"; null when there is no usable origin/HEAD. */
+function originHeadBranch(sym: string | null): string | null {
+  if (!sym) return null;
+  const slash = sym.indexOf('/');
+  const name = slash >= 0 ? sym.slice(slash + 1) : sym;
+  return name || null;
+}
+
+function currentBranchOrMain(cur: string | null): string {
   if (cur && cur !== 'HEAD') return cur;
-
   return 'main';
 }
 
@@ -174,12 +265,41 @@ export interface GitHubOriginAuthority {
 export function resolveGitHubOriginAuthorityDetails(repoPath: string): GitHubOriginAuthority | null {
   // A resolved URL can be rewritten again when fed back to another git command.
   // Refuse every rewrite rule instead of trying to reason about chained config.
-  const rewriteRules = git(repoPath, [
-    'config', '--get-regexp', '^url\\..*\\.(insteadof|pushinsteadof)$',
-  ]);
+  const rewriteRules = git(repoPath, [...ORIGIN_REWRITE_RULE_ARGS]);
   if (rewriteRules) return null;
-  const fetchUrls = gitUrls(git(repoPath, ['remote', 'get-url', '--all', 'origin']));
-  const pushUrls = gitUrls(git(repoPath, ['remote', 'get-url', '--push', '--all', 'origin']));
+  return originAuthorityFrom(
+    git(repoPath, [...ORIGIN_FETCH_URL_ARGS]),
+    git(repoPath, [...ORIGIN_PUSH_URL_ARGS]),
+  );
+}
+
+// The commands resolveGitHubOriginAuthorityDetails runs, shared with its async twin.
+const ORIGIN_REWRITE_RULE_ARGS: readonly string[] = [
+  'config', '--get-regexp', '^url\\..*\\.(insteadof|pushinsteadof)$',
+];
+const ORIGIN_FETCH_URL_ARGS: readonly string[] = ['remote', 'get-url', '--all', 'origin'];
+const ORIGIN_PUSH_URL_ARGS: readonly string[] = ['remote', 'get-url', '--push', '--all', 'origin'];
+
+/**
+ * {@link resolveGitHubOriginAuthority} without blocking the event loop (see
+ * `gitAsync`): the same three git commands and the same fail-closed answer.
+ * The two URL reads run concurrently once the rewrite-rule check has passed.
+ * Never rejects.
+ */
+export async function resolveGitHubOriginAuthorityAsync(repoPath: string, signal?: AbortSignal): Promise<string | null> {
+  const rewriteRules = await gitAsync(repoPath, ORIGIN_REWRITE_RULE_ARGS, signal);
+  if (rewriteRules) return null;
+  const [fetchOut, pushOut] = await Promise.all([
+    gitAsync(repoPath, ORIGIN_FETCH_URL_ARGS, signal),
+    gitAsync(repoPath, ORIGIN_PUSH_URL_ARGS, signal),
+  ]);
+  return originAuthorityFrom(fetchOut, pushOut)?.nameWithOwner ?? null;
+}
+
+/** The authority two `remote get-url --all` outputs describe, or null (fail closed). */
+function originAuthorityFrom(fetchOut: string | null, pushOut: string | null): GitHubOriginAuthority | null {
+  const fetchUrls = gitUrls(fetchOut);
+  const pushUrls = gitUrls(pushOut);
   if (!fetchUrls || !pushUrls) return null;
 
   const destinations = new Set<string>();

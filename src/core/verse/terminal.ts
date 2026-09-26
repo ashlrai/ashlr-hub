@@ -36,7 +36,6 @@
  */
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join } from 'node:path';
 
@@ -50,6 +49,8 @@ import {
   type VerseTerminalFrame,
   type VerseTerminalTab,
 } from './workbench-types.js';
+import { folderAccessPendingMessage, probeFolderAccess, withFolderIo } from './folder-io.js';
+import { isDirectoryPathAsync } from './path-guard.js';
 
 // ---------------------------------------------------------------------------
 // The PTY seam
@@ -630,9 +631,14 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
         throw new TerminalError('TERMINAL_LIMIT', `${maxTabs} terminals are already open. Close one to open another.`);
       }
       if (typeof req.root !== 'string' || !isAbsolute(req.root)) throw new TerminalError('TERMINAL_INVALID', 'root must be an absolute path');
-      try {
-        if (!statSync(req.root).isDirectory()) throw new Error('not a directory');
-      } catch {
+      // Off the event loop, then spawn: the shell starts IN the root, and a
+      // spawn's chdir runs inside the parent's spawn call. A root behind an
+      // unanswered macOS privacy prompt would park the whole server there
+      // (folder-io.ts); a pending prompt refuses this one request instead.
+      if ((await probeFolderAccess(req.root)) === 'pending') {
+        throw new TerminalError('TERMINAL_UNAVAILABLE', folderAccessPendingMessage(req.root));
+      }
+      if (!(await withFolderIo(() => isDirectoryPathAsync(req.root)))) {
         throw new TerminalError('TERMINAL_INVALID', 'root must be an existing directory');
       }
       const shell = shellFor();

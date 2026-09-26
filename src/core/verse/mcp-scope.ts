@@ -27,7 +27,9 @@
 
 import {
   assertLocusPreMutate,
+  assertLocusPreMutateAsync,
   locusAgentReport,
+  locusAgentReportAsync,
   type LocusEnforceConfigInput,
   type LocusEnforceMode,
   type LocusProbeResult,
@@ -190,6 +192,55 @@ export function readVerseMcpScope(read: () => LocusProbeResult = locusAgentRepor
   } catch {
     return UNAVAILABLE;
   }
+}
+
+/**
+ * {@link readVerseMcpScope} for the HTTP routes: the Locus probe is awaited
+ * (locusAgentReportAsync) instead of blocking the server for up to its 12 s
+ * timeout. Same projection. Never rejects.
+ */
+export async function readVerseMcpScopeAsync(
+  read: () => Promise<LocusProbeResult> = locusAgentReportAsync,
+): Promise<VerseMcpScope> {
+  try {
+    return projectVerseMcpScope(await read());
+  } catch {
+    return UNAVAILABLE;
+  }
+}
+
+/**
+ * {@link readVerseMcpScopeGate} for the HTTP routes (MCP proposal and apply):
+ * the scope read and the pre-mutate decision each await their Locus probe
+ * instead of spawning it synchronously on the request thread. Same answer,
+ * same fail-closed rule. Never rejects.
+ */
+export async function readVerseMcpScopeGateAsync(options: {
+  read?: () => Promise<LocusProbeResult>;
+  decide?: () => Promise<{ allow: boolean; mode: LocusEnforceMode; blockers: string[] }>;
+  env?: NodeJS.ProcessEnv;
+  config?: LocusEnforceConfigInput;
+} = {}): Promise<VerseMcpScopeGate> {
+  const scope = await readVerseMcpScopeAsync(options.read ?? locusAgentReportAsync);
+
+  let decision: { allow: boolean; mode: LocusEnforceMode; blockers: string[] };
+  try {
+    decision = options.decide
+      ? await options.decide()
+      // Argument count carries meaning (see readVerseMcpScopeGate).
+      : 'config' in options
+        ? await assertLocusPreMutateAsync(options.env, options.config)
+        : await assertLocusPreMutateAsync(options.env);
+  } catch {
+    decision = { allow: false, mode: 'enforce', blockers: ['locus pre-mutate gate could not be evaluated'] };
+  }
+
+  return {
+    scope,
+    mode: decision.mode,
+    allow: decision.allow,
+    blockers: [...decision.blockers],
+  };
 }
 
 /**

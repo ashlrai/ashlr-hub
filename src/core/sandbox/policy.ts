@@ -33,6 +33,7 @@ import {
   writeSync,
   type Stats,
 } from 'node:fs';
+import { lstat as lstatAsync, readdir as readdirAsync, realpath as realpathAsync } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, win32 } from 'node:path';
 import {
@@ -179,9 +180,92 @@ export function canonicalFilesystemPathIdentity(
   }
 }
 
+/**
+ * {@link canonicalFilesystemPathIdentity} with every filesystem touch off the
+ * event loop — a statement-for-statement mirror (lstat, native realpath,
+ * readdir from fs/promises in place of their *Sync forms), so it gives the
+ * same identity or null for every input. For read-only callers on a server's
+ * request path: the path is usually an operator's project folder under
+ * ~/Desktop or ~/Documents, which macOS guards with a privacy prompt that
+ * parks a SYNCHRONOUS caller's thread until it is answered. Never rejects.
+ * Mutations keep the synchronous form, under their fence.
+ */
+export async function canonicalFilesystemPathIdentityAsync(
+  value: string,
+  options: { foldWindowsCase?: boolean } = {},
+): Promise<string | null> {
+  let ancestor: string;
+  try {
+    ancestor = resolve(value);
+  } catch {
+    return null;
+  }
+  const missing: string[] = [];
+  let uncertainWindowsSuffix = false;
+
+  const identityFromExistingAncestor = async (canonicalAncestor: string, stat: Stats): Promise<string | null> => {
+    if (missing.length > 0 && !stat.isDirectory()) return null;
+    if (uncertainWindowsSuffix && missing.length > 0) {
+      const firstMissing = missing.at(-1);
+      if (!firstMissing || /~\d/u.test(firstMissing)) return null;
+      const entries = await readdirAsync(canonicalAncestor);
+      if (entries.some((entry) => entry.toLowerCase() === firstMissing.toLowerCase())) return null;
+    }
+    const canonical = join(canonicalAncestor, ...missing.reverse());
+    return process.platform === 'win32'
+      ? canonicalWindowsPath(canonical, options.foldWindowsCase !== false)
+      : canonical;
+  };
+
+  while (true) {
+    try {
+      await lstatAsync(ancestor);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        if (process.platform !== 'win32' || code !== 'UNKNOWN') return null;
+        uncertainWindowsSuffix = true;
+        let canonicalAncestor: string | null = null;
+        let stat: Stats | null = null;
+        try {
+          canonicalAncestor = await realpathAsync(ancestor);
+          stat = await lstatAsync(canonicalAncestor);
+        } catch {
+          // Continue to the parent absence proof below.
+        }
+        if (canonicalAncestor !== null && stat !== null) {
+          try {
+            return await identityFromExistingAncestor(canonicalAncestor, stat);
+          } catch {
+            return null;
+          }
+        }
+      }
+      const parent = dirname(ancestor);
+      if (parent === ancestor) return null;
+      missing.push(basename(ancestor));
+      ancestor = parent;
+      continue;
+    }
+
+    try {
+      const canonicalAncestor = await realpathAsync(ancestor);
+      const stat = await lstatAsync(canonicalAncestor);
+      return await identityFromExistingAncestor(canonicalAncestor, stat);
+    } catch {
+      return null;
+    }
+  }
+}
+
 /** Persist enrollment authority by full physical target on every platform. */
 export function canonicalEnrollmentPath(value: string): string | null {
   return canonicalFilesystemPathIdentity(value, { foldWindowsCase: false });
+}
+
+/** {@link canonicalEnrollmentPath} off the event loop (read-only callers; see the async identity above). */
+export function canonicalEnrollmentPathAsync(value: string): Promise<string | null> {
+  return canonicalFilesystemPathIdentityAsync(value, { foldWindowsCase: false });
 }
 
 function ashlrDir(): string {
@@ -1843,6 +1927,20 @@ function lensedRepos(repos: readonly string[]): string[] {
  */
 export function isEnrolled(repo: string): boolean {
   const abs = canonicalEnrollmentPath(repo);
+  if (!abs) return false;
+  const reg = readRegistry();
+  return reg.repos.includes(abs) && lensAdmits(abs);
+}
+
+/**
+ * {@link isEnrolled} for a server's request path: the repo path is resolved
+ * off the event loop (it is an operator folder, possibly behind a macOS
+ * privacy prompt); the registry itself lives under ~/.ashlr and is read as
+ * before. Same answer. A READ: nothing that decides a mutation should use it
+ * in place of the fenced synchronous checks.
+ */
+export async function isEnrolledAsync(repo: string): Promise<boolean> {
+  const abs = await canonicalEnrollmentPathAsync(repo);
   if (!abs) return false;
   const reg = readRegistry();
   return reg.repos.includes(abs) && lensAdmits(abs);

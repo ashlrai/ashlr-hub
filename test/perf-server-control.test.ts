@@ -122,6 +122,7 @@ function fakeReader(): ReadProjectionReader & { calls: Array<[string, unknown]>;
       if (reader.hold) await new Promise<void>((r) => reader.pending.push(r));
       if (kind === 'fleet') return fleetFixture(reader.calls.length);
       if (kind === 'pulse') return rollupFixture(`worker-${reader.calls.length}`);
+      if (kind === 'pending-count') return 2;
       throw new Error(`unexpected ${kind}`);
     },
     async invalidate(): Promise<void> {},
