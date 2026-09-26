@@ -10,11 +10,12 @@
  *
  * Precedence (first match wins):
  *   stopped — Stop is in force (authority `kill`, or the live view says so);
- *   setup   — no grant, and none can be drafted yet (the grant draft
- *             answers `no-trust-roots` / `custody-key-unknown`): the one-time
- *             `ashlr authority setup`;
- *   grant   — no grant, or it is paused, expired, revoked or invalid, and a
- *             new one can be drafted: approve it (Touch ID, on Command);
+ *   setup   — no grant, and the setup checklist (GET /api/verse/authority/
+ *             setup) says a step before the grant is still open: its next
+ *             step's command (setup is rerun-safe, it resumes);
+ *   grant   — no grant, and everything before it is in place (or the
+ *             checklist did not answer), or it is paused, expired, revoked
+ *             or invalid: approve it (Touch ID, on Command);
  *   off     — a grant is in force but the switch holds autonomy at Off;
  *   dark    — the live view is dark for another reason (daemon not running);
  *   paused  — the daemon is parked;
@@ -27,22 +28,15 @@
  *
  * Framework-free; tested directly.
  */
-import type { AuthorityStatusV1 } from '../../../../core/authority/types.js';
+import type { AuthoritySetupReportV1, AuthorityStatusV1 } from '../../../../core/authority/types.js';
 import type { FleetLiveSnapshotV1 } from '../../../../core/fleet/fleet-types.js';
 import type { WorkbenchSectionId } from '../../../../core/verse/workbench-types.js';
 import { darkSinceLabel, fleetDarkSince } from '../fleet/dark-since.js';
+import { SETUP_COMMAND, nextCommand, type SetupReadiness } from './setup-checklist-model.js';
 
-/** The single command that walks Mason through every setup step, resuming where it stopped. */
-export const SETUP_COMMAND = 'ashlr authority setup';
+export { SETUP_COMMAND } from './setup-checklist-model.js';
 
 export type AutonomyOffKind = 'stopped' | 'setup' | 'grant' | 'off' | 'dark' | 'paused' | 'quiet';
-
-/** One setup step the server can see (custody probe + grant). `null` = unknown. */
-export interface SetupCheck {
-  id: 'custody' | 'key' | 'github-app' | 'claude-token' | 'grant';
-  label: string;
-  done: boolean | null;
-}
 
 export interface AutonomyOffState {
   kind: AutonomyOffKind;
@@ -60,8 +54,8 @@ export interface AutonomyOffState {
   go: { section: WorkbenchSectionId; anchor: string | null; label: string } | null;
   /** Command's own action: open the Touch ID sheet with this intent (it holds the sheet). */
   grant: { intent: 'grant' | 're-approve'; label: string } | null;
-  /** Setup progress the server can see; [] when none of it is known. */
-  checks: SetupCheck[];
+  /** The live setup checklist while there is no grant; null when it is not known or not relevant. */
+  setup: AuthoritySetupReportV1 | null;
 }
 
 export interface AutonomyOffInputs {
@@ -71,42 +65,14 @@ export interface AutonomyOffInputs {
   live: FleetLiveSnapshotV1 | null;
   /** Fleet history's `darkSince` ("quiet since"); null = produced within 48 h, or unknown. */
   quietSince?: string | null;
-  /** Whether a new grant can be drafted (`draftReadiness`); only consulted when there is no grant. */
-  draft?: DraftReadiness;
-}
-
-/**
- * What GET /api/verse/authority/draft says about setup: `ready` — a grant can
- * be drafted, so approving it is the next step; `setup` — the build has no
- * trust root for this Mac's custody key yet, which only the one-time setup
- * fixes; `unknown` — any other answer (the Touch ID sheet shows its reason).
- */
-export type DraftReadiness = 'ready' | 'setup' | 'unknown';
-
-const SETUP_CODES: ReadonlySet<string> = new Set(['no-trust-roots', 'custody-key-unknown']);
-
-export function draftReadiness(read: { value: unknown; code?: string | null } | undefined): DraftReadiness | undefined {
-  if (!read) return undefined;
-  if (read.value) return 'ready';
-  return read.code && SETUP_CODES.has(read.code) ? 'setup' : 'unknown';
+  /** Where setup stands (`setupReadiness`); only consulted when there is no grant. */
+  readiness?: SetupReadiness;
+  /** The checklist itself, when it answered. */
+  setup?: AuthoritySetupReportV1 | null;
 }
 
 const GO_COMMAND = { section: 'command', anchor: null, label: 'Open Command' } as const;
 const GO_FLEET = { section: 'fleet', anchor: null, label: 'Open Fleet' } as const;
-
-/** The five setup facts the authority read carries. The CLI's own list is longer; this is what Verse can check. */
-export function setupChecks(authority: AuthorityStatusV1): SetupCheck[] {
-  const c = authority.custody;
-  const checks: SetupCheck[] = [
-    { id: 'custody', label: 'Custody helper', done: c.installed },
-    { id: 'key', label: 'Signing key', done: c.keyInitialized },
-    { id: 'github-app', label: 'GitHub App', done: c.githubApp },
-    { id: 'claude-token', label: 'Claude token', done: c.claudeToken },
-    { id: 'grant', label: 'Standing grant', done: authority.grant.state === 'active' },
-  ];
-  // Custody unreadable: four unknowns and a ✗ say nothing the title does not.
-  return checks.slice(0, 4).every((s) => s.done === null) ? [] : checks;
-}
 
 function sentence(text: string | null | undefined): string | null {
   const t = text?.trim();
@@ -116,7 +82,7 @@ function sentence(text: string | null | undefined): string | null {
 
 const GRANT_TITLE = { paused: 'Grant paused', expired: 'Grant expired', revoked: 'Grant revoked', invalid: 'Grant invalid' } as const;
 
-export function autonomyOffState({ authority, live, quietSince = null, draft = 'unknown' }: AutonomyOffInputs): AutonomyOffState | null {
+export function autonomyOffState({ authority, live, quietSince = null, readiness = 'unknown', setup = null }: AutonomyOffInputs): AutonomyOffState | null {
   if (!authority && !live) return null;
   const dark = fleetDarkSince(live);
   const since = dark
@@ -124,7 +90,7 @@ export function autonomyOffState({ authority, live, quietSince = null, draft = '
     : quietSince
       ? `Nothing produced since ${darkSinceLabel(quietSince)}`
       : null;
-  const base = { since, tone: 'neutral' as const, command: null, go: null, grant: null, checks: [] as SetupCheck[] };
+  const base = { since, tone: 'neutral' as const, command: null, go: null, grant: null, setup: null };
 
   if (authority?.kill || live?.state === 'stopped') {
     return { ...base, kind: 'stopped', tone: 'danger', title: 'Fleet stopped', why: 'Nothing new starts until you resume it.', go: GO_COMMAND };
@@ -132,14 +98,14 @@ export function autonomyOffState({ authority, live, quietSince = null, draft = '
 
   if (authority) {
     const grant = authority.grant.state;
-    if (grant === 'none' && draft === 'setup') {
+    if (grant === 'none' && readiness === 'setup') {
       return {
         ...base,
         kind: 'setup',
         title: 'Autonomy is off',
         why: 'Nothing runs or merges on its own until the one-time setup is done.',
-        command: SETUP_COMMAND,
-        checks: setupChecks(authority),
+        command: nextCommand(setup) ?? SETUP_COMMAND,
+        setup,
       };
     }
     if (grant === 'none') {
@@ -150,7 +116,7 @@ export function autonomyOffState({ authority, live, quietSince = null, draft = '
         why: 'Approve a standing grant to let the fleet work.',
         go: { ...GO_COMMAND, label: 'Approve in Command' },
         grant: { intent: 'grant', label: 'Approve grant' },
-        checks: setupChecks(authority),
+        setup,
       };
     }
     if (grant !== 'active') {

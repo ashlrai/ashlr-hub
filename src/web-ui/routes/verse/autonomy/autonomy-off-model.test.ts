@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { authorityStatus, DARK_SINCE, fleetLive } from '../command/fixtures.test-support.js';
 import { darkSinceLabel } from '../fleet/dark-since.js';
-import { SETUP_COMMAND, autonomyOffState, draftReadiness, setupChecks } from './autonomy-off-model.js';
+import { setupReport } from '../command/fixtures.test-support.js';
+import { SETUP_COMMAND, autonomyOffState } from './autonomy-off-model.js';
 
 const NOW = Date.parse('2026-09-25T15:00:00Z');
 const dark = fleetLive('dark', NOW);
@@ -13,26 +14,37 @@ describe('autonomyOffState', () => {
     expect(autonomyOffState({ authority: null, live: null })).toBeNull();
   });
 
-  it('asks for the one-time setup when no grant can be drafted yet', () => {
-    const s = autonomyOffState({ authority: noGrant, live: dark, draft: 'setup' })!;
+  it('asks for the next setup step while one before the grant is open — its own command, and the checklist', () => {
+    const report = setupReport('github-app');
+    const s = autonomyOffState({ authority: noGrant, live: dark, readiness: 'setup', setup: report })!;
     expect(s.kind).toBe('setup');
     expect(s.title).toBe('Autonomy is off');
     expect(s.why).toBe('Nothing runs or merges on its own until the one-time setup is done.');
     expect(s.command).toBe(SETUP_COMMAND);
+    expect(s.setup).toBe(report);
     expect(s.grant).toBeNull();
     // THE dark-since instant, as the viewer's local day.
     expect(s.since).toBe(`Fleet dark since ${darkSinceLabel(DARK_SINCE)}`);
+    // A step only Mason runs names its own command (the helper needs sudo).
+    expect(autonomyOffState({ authority: noGrant, live: dark, readiness: 'setup', setup: setupReport('custody-helper') })!.command).toBe('sudo scripts/install-custody.sh');
+    // The checklist did not answer, but it said setup: the command that walks every step.
+    expect(autonomyOffState({ authority: noGrant, live: dark, readiness: 'setup', setup: null })!.command).toBe(SETUP_COMMAND);
   });
 
-  it('asks for a grant when one can be drafted (or the draft said something else)', () => {
-    for (const draft of ['ready', 'unknown'] as const) {
-      const s = autonomyOffState({ authority: noGrant, live: dark, draft })!;
+  it('asks for a grant when only the grant is left (or the checklist did not answer)', () => {
+    for (const readiness of ['ready', 'unknown'] as const) {
+      const s = autonomyOffState({ authority: noGrant, live: dark, readiness, setup: readiness === 'ready' ? setupReport() : null })!;
       expect(s.kind).toBe('grant');
       expect(`${s.title}. ${s.why}`).toBe('Autonomy is off. Approve a standing grant to let the fleet work.');
       expect(s.grant).toEqual({ intent: 'grant', label: 'Approve grant' });
       expect(s.go).toEqual({ section: 'command', anchor: null, label: 'Approve in Command' });
       expect(s.command).toBeNull();
     }
+  });
+
+  it('carries no checklist once a grant exists', () => {
+    const lapsed = autonomyOffState({ authority: authorityStatus('live', NOW, { grant: { ...authorityStatus('live', NOW).grant, state: 'expired' } }), live: dark, readiness: 'setup', setup: setupReport('github-app') })!;
+    expect(lapsed).toMatchObject({ kind: 'grant', setup: null });
   });
 
   it('words a lapsed grant by its state and re-approves a paused one', () => {
@@ -71,27 +83,3 @@ describe('autonomyOffState', () => {
   });
 });
 
-describe('setupChecks', () => {
-  it('lists the five steps Verse can see, and nothing when custody is unreadable', () => {
-    const partial = authorityStatus('dark', NOW, { custody: { installed: true, keyInitialized: true, githubApp: false, claudeToken: null } });
-    expect(setupChecks(partial).map((c) => [c.label, c.done])).toEqual([
-      ['Custody helper', true],
-      ['Signing key', true],
-      ['GitHub App', false],
-      ['Claude token', null],
-      ['Standing grant', false],
-    ]);
-    expect(setupChecks(noGrant)).toEqual([]);
-  });
-});
-
-describe('draftReadiness', () => {
-  it('reads the grant draft: drafted → ready; no trust root → setup; anything else → unknown', () => {
-    expect(draftReadiness(undefined)).toBeUndefined();
-    expect(draftReadiness({ value: { digest: 'x' } })).toBe('ready');
-    expect(draftReadiness({ value: null, code: 'no-trust-roots' })).toBe('setup');
-    expect(draftReadiness({ value: null, code: 'custody-key-unknown' })).toBe('setup');
-    expect(draftReadiness({ value: null, code: 'ledger' })).toBe('unknown');
-    expect(draftReadiness({ value: null })).toBe('unknown');
-  });
-});

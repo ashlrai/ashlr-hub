@@ -8,7 +8,7 @@ import { VERSE_HEALTH_KEY } from '../health/health-queries.js';
 import { closeResources, getResourcesUi } from '../resources/resources-store.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { draftRefused, stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
-import { DARK_SINCE, activitySnapshot, authorityStatus, fleetHistory, fleetLive } from '../command/fixtures.test-support.js';
+import { DARK_SINCE, activitySnapshot, authorityStatus, fleetHistory, fleetLive, setupReport } from '../command/fixtures.test-support.js';
 import { resetActivityForTest } from '../shell/useActivity.js';
 import { overview as cloudOverview, task as cloudTask } from '../cloud/cloud-fixtures.test-support.js';
 import { mockCompactViewport, mockWideViewport, type ViewportMock } from '../shell/viewport.test-support.js';
@@ -345,6 +345,9 @@ describe('CommandSection — autonomy off', () => {
     expect(screen.getByText('All clear')).toBeInTheDocument();
     expect(screen.queryByText(`Fleet dark since ${localDay(DARK_SINCE)}.`)).toBeNull();
     expect(screen.getByRole('region', { name: 'Leader' })).toHaveTextContent('No memo yet');
+    // Nothing drafts a grant on load: only the sheet does, once it is opened.
+    await within(banner).findByTestId('setup-checklist');
+    expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith('/api/verse/authority/draft'))).toBe(false);
     // The one action opens the bar's own Touch ID sheet.
     await user.click(within(banner).getByRole('button', { name: 'Approve grant' }));
     const sheet = await screen.findByRole('dialog', { name: 'Approve a standing grant' });
@@ -352,14 +355,23 @@ describe('CommandSection — autonomy off', () => {
     expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith('/api/verse/authority/draft'))).toBe(true);
   });
 
-  it('asks for the one-time setup instead when the grant draft has no trust root', async () => {
+  it('asks for the next setup step instead while the trust root is not in this build — and never asks for a draft', async () => {
     const now = Date.now();
-    stubSurfaceFetch({ kind: 'dark', now, routes: { '/api/verse/authority/draft': draftRefused(), '/api/verse/fleet/history': emptyHistory(now) } });
+    const { fetchMock } = stubSurfaceFetch({
+      kind: 'dark',
+      now,
+      routes: { '/api/verse/authority/setup': setupReport('trust-root'), '/api/verse/authority/draft': draftRefused(), '/api/verse/fleet/history': emptyHistory(now) },
+    });
     render(<CommandSection />);
     const banner = await screen.findByRole('region', { name: 'Autonomy is off' });
     await waitFor(() => expect(within(banner).getByText('ashlr authority setup')).toBeInTheDocument());
     expect(banner).toHaveTextContent('Nothing runs or merges on its own until the one-time setup is done.');
     expect(within(banner).getAllByRole('button').map((b) => b.getAttribute('aria-label'))).toEqual(['Copy the command: ashlr authority setup']);
+    const checklist = await within(banner).findByTestId('setup-checklist');
+    expect(checklist).toHaveTextContent('NextTrust root');
+    expect(within(checklist).getByRole('list', { name: 'Setup: 3 of 15 ready' })).toBeInTheDocument();
+    // The 409 no-trust-roots draft (and its console error) never happens on load.
+    expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith('/api/verse/authority/draft'))).toBe(false);
   });
 
   it('keeps a KPI row that has real figures, even with autonomy off', async () => {

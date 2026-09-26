@@ -21,7 +21,7 @@ import {
   getOnboardingState,
   resetOnboarding,
 } from './onboarding-store.js';
-import { authorityStatus, grantDraft } from '../command/fixtures.test-support.js';
+import { authorityStatus, grantDraft, setupReport } from '../command/fixtures.test-support.js';
 import { setShellNotifier } from '../shell/run-command.js';
 
 /** Step 2 reads C6's shared capacity strip: the seat roster (bootstrap) and A2's health. */
@@ -363,15 +363,40 @@ describe('OnboardingFlow — what it says about the machine', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/copy it by hand/);
   });
 
-  it('when setup is done but no grant is signed yet, offers "Approve grant…" (the ⌘K command) instead of setup', async () => {
-    vi.stubGlobal(
-      'fetch',
-      routes({
-        // Longest first: `routes` matches by prefix, in insertion order.
-        '/api/verse/authority/draft': () => json(grantDraft()),
-        '/api/verse/authority': () => json(authorityStatus('dark')),
-      }),
-    );
+  it('while setup has a step open, shows the live checklist unfolded and copies THAT step’s command', async () => {
+    const fetchMock = routes({
+      // Longest first: `routes` matches by prefix, in insertion order.
+      '/api/verse/authority/setup': () => json(setupReport('deploy')),
+      '/api/verse/authority/draft': () => json(grantDraft()),
+      '/api/verse/authority': () => json(authorityStatus('dark')),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const writeText = vi.fn(async () => {});
+    const notify = vi.fn();
+    setShellNotifier(notify);
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    render(<OnboardingFlow />);
+    await stepTo(user, 3);
+    const checklist = await screen.findByTestId('setup-checklist');
+    expect(checklist).toHaveTextContent('NextDeploy');
+    expect(checklist.querySelector('details')?.open).toBe(true);
+    expect(within(checklist).getByRole('list', { name: 'Setup: 4 of 15 ready' })).toBeInTheDocument();
+    expect(within(checklist).getByText('npm run build')).toBeInTheDocument();
+    await user.click(within(checklist).getByRole('button', { name: 'Copy' }));
+    expect(writeText).toHaveBeenCalledWith('npm run build');
+    expect(notify).toHaveBeenCalledWith('Copied `npm run build`. Run it in a terminal; then rerun `ashlr authority setup`.', 'success');
+    expect(fetchMock.mock.calls.some(([u]: [unknown]) => String(u).startsWith('/api/verse/authority/draft'))).toBe(false);
+    setShellNotifier(null);
+  });
+
+  it('when only the grant is left, offers "Approve grant…" (the ⌘K command) instead of setup — without drafting one', async () => {
+    const fetchMock = routes({
+      '/api/verse/authority/setup': () => json(setupReport()),
+      '/api/verse/authority/draft': () => json(grantDraft()),
+      '/api/verse/authority': () => json(authorityStatus('dark')),
+    });
+    vi.stubGlobal('fetch', fetchMock);
     const user = userEvent.setup();
     render(<OnboardingFlow />);
     await stepTo(user, 3);
@@ -380,6 +405,7 @@ describe('OnboardingFlow — what it says about the machine', () => {
     await user.click(approve);
     // The shell brings Command forward and parks the command for its bar.
     expect(getVerseUiState().section).toBe('command');
+    expect(fetchMock.mock.calls.some(([u]: [unknown]) => String(u).startsWith('/api/verse/authority/draft'))).toBe(false);
   });
 
   it('once a grant exists, points at Command instead of setup', async () => {

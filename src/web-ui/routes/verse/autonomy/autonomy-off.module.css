@@ -1,7 +1,8 @@
 /*
  * routes/verse/autonomy/autonomy-off.module.css — the shared "autonomy is
  * off" state (AutonomyOffState.tsx). The same frame as a surface card so it
- * sits in the grid like one; inside, one title row, one line, one action.
+ * sits in the grid like one; inside, one title row, one line, one action
+ * (and, before the first grant, the setup checklist: setup-checklist.module.css).
  * Colour only on the dot and the done marks. Tokens only (style-scan-310).
  */
 .state {
@@ -105,66 +106,6 @@
 
 .action {
   display: flex;
-}
-
-.progress {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2) var(--space-4);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border-subtle);
-  width: 100%;
-}
-
-.count {
-  font-size: var(--text-xs-size);
-  line-height: var(--text-xs-line);
-  font-weight: var(--font-weight-medium);
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-
-.checks {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1) var(--space-4);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.check {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: var(--text-xs-size);
-  line-height: var(--text-xs-line);
-  color: var(--text-secondary);
-}
-.check[data-mark='todo'],
-.check[data-mark='unknown'] {
-  color: var(--text-tertiary);
-}
-
-.mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-  flex: none;
-  border: 1.5px solid var(--border-strong);
-  border-radius: var(--radius-full);
-}
-.check[data-mark='done'] .mark {
-  border-color: var(--status-success-solid);
-  background: var(--status-success-solid);
-  color: var(--text-on-accent);
-}
-.check[data-mark='unknown'] .mark {
-  border-style: dashed;
-  border-color: var(--status-unknown-solid);
 }
 
 .visuallyHidden {

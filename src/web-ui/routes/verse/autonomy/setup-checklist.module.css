@@ -1,0 +1,254 @@
+/*
+ * routes/verse/autonomy/setup-checklist.module.css — the live setup checklist
+ * (SetupChecklist.tsx). Quiet by default: one highlighted next step, the
+ * rest folded under a count. Colour only on marks and the next step's edge.
+ * Tokens only (style-scan-310).
+ */
+.checklist {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  width: 100%;
+  min-width: 0;
+}
+
+/* The next step: a hairline accent edge, never a filled banner. */
+.next {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-width: 64ch;
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--accent-500);
+}
+.next[data-mark='failed'] {
+  border-left-color: var(--status-danger-solid);
+}
+.next[data-mark='blocked'] {
+  border-left-color: var(--border-strong);
+}
+
+.nextHead {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+}
+
+.nextLabel {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.nextTitle {
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-primary);
+}
+
+.nextDetail {
+  margin: 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.inlineCode {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+  color: var(--text-primary);
+}
+
+.needs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.need {
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.link {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-link);
+  text-decoration: none;
+}
+.link:hover {
+  text-decoration: underline;
+}
+.link:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+.all {
+  width: 100%;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  cursor: pointer;
+  list-style: none;
+  border-radius: var(--radius-xs);
+}
+.summary::-webkit-details-marker {
+  display: none;
+}
+.summary::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-right: 1.5px solid var(--text-tertiary);
+  border-bottom: 1.5px solid var(--text-tertiary);
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+.all[open] > .summary::before {
+  transform: rotate(45deg);
+}
+.summary:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.count {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* One pip per step: the whole checklist at a glance while it is folded. */
+.pips {
+  display: inline-flex;
+  gap: 3px;
+}
+.pip {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+}
+.pip[data-mark='done'] {
+  background: var(--status-success-solid);
+}
+.pip[data-mark='next'] {
+  background: var(--accent-500);
+}
+.pip[data-mark='failed'] {
+  background: var(--status-danger-solid);
+}
+.pip[data-mark='blocked'] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+/* Column-major, so the steps read in setup's order down each column. */
+.steps {
+  columns: 200px 3;
+  column-gap: var(--space-6);
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.step {
+  break-inside: avoid;
+  padding: 2px 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+}
+.step[data-mark='done'] {
+  color: var(--text-secondary);
+}
+.step[data-mark='next'] {
+  color: var(--text-primary);
+  font-weight: var(--font-weight-medium);
+}
+.step[data-mark='failed'] {
+  color: var(--status-danger-fg);
+}
+
+.stepLabel {
+  min-width: 0;
+}
+
+.stepNote {
+  color: var(--text-tertiary);
+}
+
+.mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border: 1.5px solid var(--border-strong);
+  border-radius: var(--radius-full);
+}
+.mark[data-mark='done'] {
+  border-color: var(--status-success-solid);
+  background: var(--status-success-solid);
+  color: var(--text-on-accent);
+}
+.mark[data-mark='next'] {
+  border-color: var(--accent-500);
+  box-shadow: inset 0 0 0 3px var(--bg-surface), inset 0 0 0 7px var(--accent-500);
+}
+.mark[data-mark='failed'] {
+  border-color: var(--status-danger-solid);
+  color: var(--status-danger-solid);
+}
+.mark[data-mark='blocked'] {
+  border-style: dashed;
+  color: var(--text-tertiary);
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .summary::before {
+    transition: none;
+  }
+}

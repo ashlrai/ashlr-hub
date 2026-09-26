@@ -16,6 +16,7 @@ import {
   learningState,
   reasoningDigest,
   seatHistory,
+  setupReport,
   type FixtureKind,
 } from './fixtures.test-support.js';
 
@@ -47,6 +48,7 @@ export const draftRefused = (code = 'no-trust-roots') => () =>
 export function surfaceRoutes(kind: FixtureKind, now: number): Record<string, unknown> {
   return {
     '/api/verse/authority/draft': grantDraft(now),
+    '/api/verse/authority/setup': setupReport(),
     '/api/verse/authority': authorityStatus(kind, now),
     '/api/verse/fleet/live': fleetLive(kind, now),
     '/api/verse/fleet/history': fleetHistory(kind, now),
