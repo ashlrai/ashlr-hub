@@ -132,6 +132,8 @@ export type CloudPrRead =
 /** The task's pinned, verified PR — or why it has none to act on. */
 function actionablePr(task: CloudTaskV1): { number: number; url: string } | string {
   if (task.state !== 'pr-open') return 'This cloud task has no open pull request.';
+  // 3.13: the standing-pass intake closed this PR in favour of the fleet's App PR.
+  if (task.supersededBy) return `This pull request was superseded by fleet PR #${task.supersededBy.number}; it lands through the standing gates.`;
   if (!task.pr) return "Verse can't verify this pull request right now. Refresh and try again.";
   const pin = task.deliveryPin ?? { number: task.pr.number, url: task.pr.url };
   if (pin.number !== task.pr.number || pin.url.toLowerCase() !== task.pr.url.toLowerCase()) {

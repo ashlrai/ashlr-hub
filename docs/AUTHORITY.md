@@ -142,6 +142,21 @@ the Command bar). Re-approval continues from the rung you had reached.
   decide authority, about 357 files. A deploy that changes any of them pauses
   the grant until you re-approve. The same four modules were added as roots.
   U4's post-merge watch, quarantine and post-merge halt were already roots.
+- **Cloud intake (3.13)** (`fleet/cloud-intake.ts`, a Tier-1 root) is the one
+  place the host signs provenance for a diff it did not produce. Each standing
+  tick it turns a Claude cloud or self-improvement PR (`ashlr-cloud/<taskId>`)
+  on a granted repo with a current mirror into a pending mirror proposal with
+  producer `claude:cloud`. The signature vouches for **identity only**: this
+  host read exactly this diff hash from the pinned head SHA of the task's
+  pinned PR, with the head ref, repository and base checked on GitHub that
+  tick. It says nothing about correctness, and no gate reads it that way. G3
+  still verifies the exact tree in the mirror, G4 checks the session's
+  (UNVERIFIED) report against the diff, G6 requires a codex or Grok judge (the
+  producer family is `claude`), and G7 requires the App's green
+  `ashlr/verify`. G1 (protected paths go to the owner lane) and G1b are
+  unchanged. The cloud PR is closed as "superseded" once the App PR exists,
+  and the tracker follows the App PR to `merged`. Details:
+  [CLOUD.md](CLOUD.md#intake-into-the-standing-gates-313).
 - **The Tier-1 closure snapshot** (`test/fixtures/authority/tier1-closure.json`)
   makes CI fail when any Tier-1 module's import closure grows. The snapshot
   file is itself protected, so only you can bless new members:
@@ -223,6 +238,13 @@ the Command bar). Re-approval continues from the rung you had reached.
     the seat, reverses the M298 rule that Grok never carries merge authority
     (U7). The per-token Grok API engine is still refused. This is your call to
     confirm.
+20. **Cloud intake trusts GitHub's answer for the diff.** The host signs
+    what `gh api …/compare/<merge-base>...<head>` returned for the pinned
+    head. A compromised gh session could feed it a different diff. That diff
+    would still have to pass G3 in the mirror, an independent judge and G7,
+    and what lands is the verified tree, not the cloud branch. The gh
+    identity that closes the superseded cloud PR is yours (the cloud lane's
+    `gh`), not the App's.
 
 ## 7. Nightly oversight
 

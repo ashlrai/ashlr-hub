@@ -432,6 +432,17 @@ function mergeStep(sources: TimelineSources): Step {
       ...(found && commitLink(task.repo, found) ? { link: commitLink(task.repo, found)! } : {}),
     });
   }
+  if (task.state === 'pr-open' && task.supersededBy) {
+    // 3.13: the cloud PR was closed in favour of the fleet App PR (fleet/cloud-intake.ts).
+    return step('merge', {
+      at: null,
+      title: `Superseded by fleet PR #${task.supersededBy.number}`,
+      detail: 'The fleet rebuilt this change through the standing merge gates; it lands from that PR, never from the cloud PR.',
+      source: 'cloud task record',
+      verified: true,
+      reached: false,
+    });
+  }
   if (task.state === 'closed' || task.pr?.state === 'closed') {
     return step('merge', {
       at: null,

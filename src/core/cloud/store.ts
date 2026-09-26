@@ -35,6 +35,8 @@ import {
   type CloudTaskOrigin,
   type CloudTaskPr,
   type CloudDeliveryPin,
+  type CloudIntakeMemo,
+  type CloudSupersededBy,
   type CloudTaskReport,
   type CloudTaskState,
   type CloudTaskV1,
@@ -155,6 +157,30 @@ function isDeliveryPin(value: unknown, repo: string): value is CloudDeliveryPin 
   return value['url'].toLowerCase() === `https://github.com/${repo}/pull/${value['number']}`.toLowerCase();
 }
 
+/** 3.13: a fleet App PR in the task's own repo (the intake never supersedes across repos). */
+function isSupersededBy(value: unknown, repo: string): value is CloudSupersededBy {
+  return isRecord(value)
+    && isString(value['repo']) && value['repo'].toLowerCase() === repo.toLowerCase()
+    && Number.isSafeInteger(value['number']) && (value['number'] as number) >= 1;
+}
+
+const SHA1_HEX = /^[0-9a-f]{40}$/;
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+/** Inbox proposal ids are filename stems; the fleet merge state keys on the same shape. */
+const PROPOSAL_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** 3.13: the intake memo — either a filed proposal (id + diff hash) or a refusal code, for one head. */
+function isIntakeMemo(value: unknown): value is CloudIntakeMemo {
+  if (!isRecord(value) || !isString(value['headSha']) || !SHA1_HEX.test(value['headSha'])) return false;
+  if (!isString(value['at']) || !Number.isFinite(Date.parse(value['at']))) return false;
+  const proposalId = value['proposalId'];
+  const diffHash = value['diffHash'];
+  const refused = value['refused'];
+  const filed = isString(proposalId) && PROPOSAL_ID.test(proposalId) && isString(diffHash) && SHA256_HEX.test(diffHash) && refused === null;
+  const declined = proposalId === null && diffHash === null && isString(refused) && refused.length > 0 && refused.length <= 200;
+  return filed || declined;
+}
+
 /** Structural check of a persisted task. Hand-edited or foreign files fail it and are skipped by readers. */
 export function isCloudTask(value: unknown): value is CloudTaskV1 {
   if (!isRecord(value)) return false;
@@ -180,6 +206,8 @@ export function isCloudTask(value: unknown): value is CloudTaskV1 {
     && (value['pr'] === null || isPr(value['pr']))
     && (value['report'] === null || isReport(value['report']))
     && (value['deliveryPin'] === undefined || isDeliveryPin(value['deliveryPin'], value['repo'] as string))
+    && (value['supersededBy'] === undefined || isSupersededBy(value['supersededBy'], value['repo'] as string))
+    && (value['intake'] === undefined || isIntakeMemo(value['intake']))
     && typeof value['estimatedCostUsd'] === 'number' && Number.isFinite(value['estimatedCostUsd']) && value['estimatedCostUsd'] >= 0
     && isNullableString(value['backlogItemId'])
     && isNullableString(value['needsYouId']);

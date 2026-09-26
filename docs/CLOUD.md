@@ -9,12 +9,13 @@ spent.
 
 The lane never merges anything on its own. Each task is instructed to open a
 **draft pull request** on GitHub. Verse tracks a matching PR if one arrives;
-failed launches and missing deliveries remain distinct states. Cloud PRs are
-triaged in **Needs you**: each shows what the merge gates would say about its
-diff, and you land, close or update it there (see
-[Triage in Needs you](#triage-in-needs-you)). Automatic landing through the
-standing gates ([Autonomy with custody](VERSE.md#autonomy-with-custody-310))
-arrives with cloud intake; until then nothing lands without your click.
+failed launches and missing deliveries remain distinct states. Under a
+standing grant, a cloud PR on a granted repo is taken in by the standing merge
+pass and lands only through its gates, from the fleet App's own PR (see
+[Intake into the standing gates](#intake-into-the-standing-gates-313)).
+Everything else is triaged in **Needs you**: each row shows what the merge
+gates would say about its diff, and you land, close or update it there (see
+[Triage in Needs you](#triage-in-needs-you)).
 
 The contracts live in `src/core/cloud/types.ts`. The user guide in Verse is
 [the Cloud lane section of VERSE.md](VERSE.md#cloud-lane-311).
@@ -129,8 +130,8 @@ delivery when its repository, base branch and head branch match the task.
 | `queued` | Accepted and waiting for its repository's launch slot. |
 | `launching` | The CLI is running under the pseudo-terminal. |
 | `running` | The session exists. No PR yet. |
-| `pr-open` | A draft or ready PR exists on `ashlr-cloud/<id>`. |
-| `merged` | The PR was merged, by the gates or by you. |
+| `pr-open` | A draft or ready PR exists on `ashlr-cloud/<id>`, or the cloud PR was superseded by a fleet App PR that is still open (`supersededBy`). |
+| `merged` | The PR was merged by you, or the fleet App PR that superseded it was merged by the standing gates. |
 | `closed` | The PR was closed without merging, or you dismissed the task in Verse. Dismissing never touches GitHub. |
 | `failed` | The launch failed. The failure code and a plain reason are recorded. |
 | `expired` | No PR appeared within 6 hours. The session link still works. |
@@ -296,6 +297,55 @@ The same actions are routes: `POST /api/verse/cloud/tasks/<id>/land`,
 `/close` and `/update-branch`, each with `{"headSha": "<40 hex>"}`, and
 `GET /api/verse/cloud/previews` for the verdicts.
 
+### Intake into the standing gates (3.13)
+
+When a standing grant is in force, every standing tick (after the fleet
+mirrors are made current, before the merge pass) runs the cloud intake
+(`src/core/fleet/cloud-intake.ts`). It looks at tasks that are `pr-open` with a
+pinned delivery and, for each, decides:
+
+1. **Eligible?** The repo must be in the grant and have a current fleet
+   mirror whose default branch is the task's base branch. Otherwise the task
+   is left for Needs you (the reason is reported, not audited every tick).
+2. **Same identity?** Read from GitHub now: the pinned PR number and URL, head
+   ref exactly `ashlr-cloud/<taskId>` in the same repository, base ref still
+   the task's base. A retargeted PR (`base-moved`), a foreign head
+   (`head-ref-mismatch`), a changed PR (`pr-identity-changed`) or a fork
+   (`cross-repository`) is refused.
+3. **The diff, pinned.** The head SHA is read, the diff is downloaded for
+   exactly `<merge base>...<head SHA>`, and the head is read again. A push
+   during the download means "next tick", never a mixed diff. An empty diff,
+   one over the absolute grant ceilings (10 files, 300 lines, 256 KiB), or one
+   the proposal store would rewrite (secret-like or long-hex content) is
+   refused and remembered for that head.
+4. **A pending proposal** is filed in the repo's fleet mirror: origin `agent`,
+   kind `pr`, producer `claude:cloud`, the backlog item as its work item. Its
+   summary is the session's report, marked UNVERIFIED. For a `blocked` or
+   `no-change` report only the status is kept, so a diff under it is the
+   "silent change" G4 refuses. The host signs its provenance over the diff
+   hash. That vouches for identity only (see
+   [AUTHORITY.md](AUTHORITY.md#5-what-is-protected-and-how-the-list-stays-honest)).
+5. **The standing pass does the rest**, unchanged: G0 to G6, where G6 needs a
+   codex or Grok judge because the producer is Claude; the verified-tree App
+   PR; G7 with the App's `ashlr/verify`; the SHA-pinned merge; the post-merge
+   watch and auto-revert; and KILL. G1 still sends a diff touching an
+   ashlr-hub protected path to the owner lane. When the rollout stage does
+   not allow merging, the pass's would-merge record is the dry run.
+
+One proposal is filed per task and head SHA (the task's `intake` memo). A new
+push supersedes the old pending proposal. A proposal already carried by an
+App PR is never touched.
+
+**Superseded.** On the next tick after the pass opens the App PR for exactly
+the diff that was filed, the intake comments "Superseded by #N" on the cloud
+PR, closes it, and records `supersededBy` on the task. From then on the
+tracker follows the App PR: open stays `pr-open`, merged makes the task
+`merged` (so its backlog item is done for good), and closed makes it
+`closed`. Needs you no longer offers actions on a superseded PR.
+
+KILL stops the intake before it reads anything. It never runs outside a
+standing tick and never merges.
+
 **Over HTTP** (the Verse server). `GET /api/verse/cloud` needs the read session.
 POST routes need the mutation token, a JSON content type and a bounded body:
 
@@ -372,6 +422,7 @@ there, and close their PRs on GitHub.
   and then `expired`. Its link still works.
 - The lane launches only through the `claude-a` seat. Other seats cannot start
   cloud sessions.
-- Nothing in the lane merges on its own. Cloud PRs are triaged in Needs you
-  and land only when you click Land. Automatic landing through the standing
-  gates arrives with cloud intake.
+- Nothing in the lane merges on its own. A cloud PR lands only when you click
+  Land in Needs you, or, under a standing grant, through the standing gates
+  from the fleet App PR that superseded it. Cloud diffs over the absolute
+  grant ceilings are never taken in; they stay in Needs you.

@@ -107,6 +107,37 @@ export interface CloudDeliveryPin {
   url: string;
 }
 
+/**
+ * 3.13 cloud intake (fleet/cloud-intake.ts): the ashlr-fleet App PR that
+ * carries this task's change through the standing gates. Set only after the
+ * intake closed the cloud PR in its favour; from then on the tracker follows
+ * THIS PR (merged ⇒ the task is `merged`, so its backlog item is never
+ * released again).
+ */
+export interface CloudSupersededBy {
+  /** GitHub `owner/name` (always the task's repo). */
+  repo: string;
+  number: number;
+}
+
+/**
+ * 3.13 cloud intake memo — what the standing-pass intake last decided for
+ * this task's head. Dedupe only: no gate reads it (the proposal it names is
+ * judged on its own signed diff), so a hand-edited memo can at worst delay an
+ * intake, never admit one.
+ */
+export interface CloudIntakeMemo {
+  /** Head SHA the intake last judged (40 hex). */
+  headSha: string;
+  /** The pending proposal filed for headSha; null when the intake refused it. */
+  proposalId: string | null;
+  /** sha256 of the proposal's diff (64 hex); null when refused. */
+  diffHash: string | null;
+  /** Short refusal code for headSha; null when a proposal was filed. */
+  refused: string | null;
+  at: string;
+}
+
 export interface CloudTaskV1 {
   v: typeof CLOUD_TASK_SCHEMA_VERSION;
   id: string;
@@ -136,6 +167,10 @@ export interface CloudTaskV1 {
   report: CloudTaskReport | null;
   /** Optional for 3.11 task files written before PR identity was pinned. */
   deliveryPin?: CloudDeliveryPin;
+  /** 3.13: the fleet App PR that superseded the cloud PR (see CloudSupersededBy). */
+  supersededBy?: CloudSupersededBy;
+  /** 3.13: the standing-pass intake's dedupe memo (see CloudIntakeMemo). */
+  intake?: CloudIntakeMemo;
   /** Budget accounting — an ESTIMATE fixed at launch. */
   estimatedCostUsd: number;
   /** Backlog item this task came from (self-improvement), if any. */
