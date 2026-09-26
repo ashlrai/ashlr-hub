@@ -332,7 +332,7 @@ describe('pending ownership capacity', () => {
     expect(store.load('capacity-recovered')?.id).toBe('capacity-recovered');
     expect(store.list().map((record) => record.id)).toEqual(['capacity-recovered']);
     expect(pendingClaimPaths(store)).toHaveLength(1_023);
-  });
+  }, 30_000); // The 1,024-file scan exceeds Vitest's default timeout under broad-suite load.
 
   it('reconciles a dead writer lock while pruning an expired claim', () => {
     const store = stores[0]!;
