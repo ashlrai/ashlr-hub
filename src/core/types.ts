@@ -1642,6 +1642,12 @@ export interface AshlrConfig {
      */
     askVisionIntervalHours?: number;
     /**
+     * Hours before an unsent pending request, or a sent question/approval that
+     * was never answered, is expired. Default 48. Expiry never counts as an
+     * answer; it only stops one stale question from blocking every later send.
+     */
+    requestTtlHours?: number;
+    /**
      * M212: enable proactive fleet event notifications (merge shipped,
      * anomaly, decision-needed, daily standup). Default false.
      * Only fires when channel === 'telegram' and Telegram is configured.

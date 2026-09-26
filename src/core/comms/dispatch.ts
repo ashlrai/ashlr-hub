@@ -10,6 +10,9 @@
  *
  * Rate limit: won't send another message if one was sent < SEND_COOLDOWN_MS ago.
  *
+ * Expiry: before sending, requests older than cfg.comms.requestTtlHours
+ * (default 48h) are expired, so an unanswered question cannot block the queue.
+ *
  * Resolution handler registry: other modules call registerResolutionHandler(kind, fn)
  * to receive callbacks when a request of their kind is answered. Best-effort.
  *
@@ -28,6 +31,8 @@ import {
 } from '../integrations/telegram.js';
 import { handleStrategicMessage } from './elon-dialogue.js';
 import {
+  DEFAULT_REQUEST_TTL_HOURS,
+  expireStaleRequests,
   listRequests,
   markSent,
   outstanding,
@@ -41,6 +46,13 @@ import type { AshlrConfig } from '../types.js';
 // ---------------------------------------------------------------------------
 
 const SEND_COOLDOWN_MS = 30_000; // minimum gap between outbound sends
+
+/** Request TTL in ms from cfg.comms.requestTtlHours; invalid values use the default. */
+export function commsRequestTtlMs(cfg: AshlrConfig): number {
+  const hours = cfg.comms?.requestTtlHours;
+  const valid = typeof hours === 'number' && Number.isFinite(hours) && hours > 0;
+  return (valid ? hours : DEFAULT_REQUEST_TTL_HOURS) * 3_600_000;
+}
 
 // ---------------------------------------------------------------------------
 // Watermark / state
@@ -162,6 +174,9 @@ export async function runCommsCycle(cfg: AshlrConfig): Promise<CycleResult> {
   try {
     const state = loadState();
     const now = Date.now();
+
+    // ── 0. Expire stale requests so a dead question cannot block the queue ──
+    expireStaleRequests(now, commsRequestTtlMs(cfg));
 
     // ── 1. Send next pending (if nothing outstanding + cooldown elapsed) ──────
 

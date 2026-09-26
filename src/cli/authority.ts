@@ -14,7 +14,7 @@
  *   protect --print|--apply [--repo owner/name …]        GitHub rulesets (addendum §4)
  *   github-app [--org <login>] [--yes]    GitHub App manifest flow; the key goes straight to custody
  *   rotate-provenance [--yes]             replace the provenance HMAC key agents could read
- *   setup [--dry-run] [--yes] [--source <ashlr-hub checkout>]   the guided Phase-0 command
+ *   setup [--dry-run [--json]] [--yes] [--source <ashlr-hub checkout>]   the guided Phase-0 command
  *
  * LOWERING never asks anything. Everything that raises authority or touches
  * GitHub asks first (or needs --yes) and prints exactly what it did. Nothing
@@ -28,6 +28,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 
+import { CUSTODY_HELPER_PATH } from '../core/authority/custody-client.js';
 import type { AutonomySwitch, LedgerEventKind, SignedStandingGrantV1, StandingGrantTrustRoot, StandingGrantV1 } from '../core/authority/types.js';
 
 // ---------------------------------------------------------------------------
@@ -52,6 +53,23 @@ export interface AuthorityCliDeps {
   openBrowser(url: string): void;
   fetch: typeof fetch;
   custody: typeof import('../core/authority/custody-client.js');
+  /** Read-only: the resident daemon service's state (setup's last step). Never changes launchd. */
+  daemonService(): Promise<DaemonServiceState>;
+}
+
+/** The resident daemon service as setup reports it. */
+export type DaemonServiceState = 'running' | 'loaded' | 'not-loaded' | 'absent' | 'unknown';
+
+// Loaded lazily: `authority stop` and friends must never depend on the daemon
+// service module being importable.
+async function realDaemonService(): Promise<DaemonServiceState> {
+  const { serviceStatus } = await import('../core/daemon/service.js');
+  const status = serviceStatus();
+  if (status.running) return 'running';
+  if (status.registrationState === 'absent') return 'absent';
+  if (status.runtimeState === 'ready') return 'loaded';
+  if (status.runtimeState === 'stopped' || status.runtimeState === 'disabled') return 'not-loaded';
+  return 'unknown';
 }
 
 function realRun(bin: 'gh' | 'git', args: readonly string[], opts: { cwd?: string; input?: string } = {}): GhResult {
@@ -124,6 +142,7 @@ async function defaultDeps(): Promise<AuthorityCliDeps> {
     },
     fetch: globalThis.fetch,
     custody: await import('../core/authority/custody-client.js'),
+    daemonService: realDaemonService,
   };
 }
 
@@ -180,8 +199,8 @@ const USAGE = `Usage: ashlr authority <command>
   protect --print|--apply [--repo o/n]   GitHub rulesets for the grant's server-enforced repos
   github-app [--org <login>] [--yes]     Create the ashlr-fleet GitHub App (key stored in custody)
   rotate-provenance [--yes]              Replace the provenance HMAC key
-  setup [--dry-run] [--yes] [--source <checkout>]
-                                         Guided Phase 0: custody, trust root, App, token, rulesets, canary, first grant
+  setup [--dry-run [--json]] [--yes] [--source <checkout>]
+                                         Guided Phase 0: custody, trust root, App, token, canary, rulesets, first grant, daemon
 
 Lowering authority never asks. Anything that raises it asks first (or takes --yes).`;
 
@@ -875,16 +894,81 @@ jobs:
 
 type StepStatus = 'done' | 'already' | 'waiting-on-you' | 'skipped' | 'failed';
 
+/** What a setup step needs from Mason himself (a UI renders these as badges). */
+export type SetupNeed = 'sudo' | 'touch-id' | 'browser' | 'github' | 'terminal';
+
+const SETUP_STEP_NEEDS: Readonly<Record<string, readonly SetupNeed[]>> = Object.freeze({
+  'custody-helper': ['sudo', 'terminal'],
+  'host-binding': [],
+  'signing-key': ['touch-id'],
+  'trust-root': ['github'],
+  deploy: ['terminal'],
+  'github-app': ['browser', 'github'],
+  'claude-token': ['terminal'],
+  'canary-repo': ['github'],
+  rulesets: ['github'],
+  'old-activation-state': [],
+  'provenance-key': [],
+  'standing-grant': ['touch-id'],
+  'autonomy-switch': [],
+  'daemon-service': ['terminal'],
+});
+
+/** `ashlr authority setup --dry-run --json` — the checklist a UI can render. */
+export interface AuthoritySetupReportV1 {
+  schema: 'ashlr.authority-setup.v1';
+  dryRun: boolean;
+  /** Every step is done or already in place: nothing is left for Mason. */
+  complete: boolean;
+  summary: { done: number; already: number; waitingOnYou: number; failed: number; planned: number };
+  steps: { id: string; step: string; status: StepStatus; detail: string; needs: readonly SetupNeed[] }[];
+  /** The first step that is not done or already in place (null when complete). */
+  next: string | null;
+}
+
+type SetupRow = { step: string; status: StepStatus; detail: string };
+
+function setupStepId(step: string): string {
+  return step.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+/** PURE: the machine-readable form of a setup run. */
+export function authoritySetupReport(report: readonly SetupRow[], dryRun: boolean): AuthoritySetupReportV1 {
+  const count = (status: StepStatus): number => report.filter((r) => r.status === status).length;
+  const steps = report.map((r) => {
+    const id = setupStepId(r.step);
+    return { id, step: r.step, status: r.status, detail: r.detail, needs: SETUP_STEP_NEEDS[id] ?? [] };
+  });
+  const open = steps.find((s) => s.status !== 'done' && s.status !== 'already');
+  return {
+    schema: 'ashlr.authority-setup.v1',
+    dryRun,
+    complete: open === undefined,
+    summary: { done: count('done'), already: count('already'), waitingOnYou: count('waiting-on-you'), failed: count('failed'), planned: count('skipped') },
+    steps,
+    next: open?.id ?? null,
+  };
+}
+
 async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number> {
   const dryRun = parsed.flags.has('--dry-run');
   const yes = parsed.flags.has('--yes');
-  const report: { step: string; status: StepStatus; detail: string }[] = [];
+  const json = parsed.flags.has('--json');
+  if (json && !dryRun) {
+    // A real run asks questions and prints what gh / signing did; only the
+    // read-only plan can promise a clean JSON document on stdout.
+    deps.err('setup --json needs --dry-run');
+    return 2;
+  }
+  const report: SetupRow[] = [];
   const note = (step: string, status: StepStatus, detail: string): void => {
     report.push({ step, status, detail });
+    if (json) return;
     // 'skipped' gets its own glyph: a ✓ on a step a dry run did not perform read as done.
     const glyph = status === 'failed' ? '✗' : status === 'waiting-on-you' ? '…' : status === 'skipped' ? '·' : '✓';
     deps.out(`${glyph} ${step}: ${detail}`);
   };
+  const done = (): number => finish(report, deps, dryRun, json);
   const ask = async (question: string): Promise<boolean> => !dryRun && (yes || deps.confirm(question));
   // --dry-run PLANS: the CHANGELOG and docs/AUTHORITY.md promise it "prints
   // every step first" (3.10 review c20). A real run must stop at an unmet
@@ -908,7 +992,7 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
   }
   if (!custody || !custody.installed) {
     note('custody helper', 'waiting-on-you', 'run `sudo scripts/install-custody.sh` from the ashlr-hub checkout, then run setup again');
-    if (stopHere()) return finish(report, deps, dryRun);
+    if (stopHere()) return done();
   } else {
     note('custody helper', 'already', `installed${custody.version ? ` (${custody.version})` : ''}`);
   }
@@ -931,9 +1015,10 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
       note('host binding', 'failed', `could not compare with ashlr-custody (${(error as Error).message})`);
     }
   }
-  if (report.some((r) => r.step === 'host binding' && r.status === 'failed') && stopHere()) return finish(report, deps, dryRun);
+  if (report.some((r) => r.step === 'host binding' && r.status === 'failed') && stopHere()) return done();
 
-  // 2. Secure Enclave key (Touch ID).
+  // 2. Secure Enclave key (Touch ID). The helper is not on PATH, so every
+  // message names it by its installed path.
   let keyId = custody?.keyId ?? null;
   let publicKeyPem: string | null = null;
   if (planning || !custody) {
@@ -941,9 +1026,9 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
   } else if (!custody.keyInitialized) {
     if (!(await ask('Create the Secure Enclave signing key now (Touch ID)?'))) {
       note('signing key', dryRun ? 'skipped' : 'waiting-on-you', dryRun
-        ? 'would create it (Touch ID) — or run `ashlr-custody init`'
-        : 'create it with `ashlr-custody init` or rerun setup');
-      if (stopHere()) return finish(report, deps, dryRun);
+        ? `would create it (Touch ID) — or run \`${CUSTODY_HELPER_PATH} init\``
+        : `create it with \`${CUSTODY_HELPER_PATH} init\` or rerun setup`);
+      if (stopHere()) return done();
     } else {
       const info = await deps.custody.custodyInit();
       keyId = info.keyId;
@@ -960,7 +1045,10 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
   // public half back (`ashlr-custody pubkey`, no Touch ID) instead of asking
   // Mason to copy it by hand.
   const isTrusted = (id: string | null): boolean => id !== null && STANDING_GRANT_TRUST_ROOTS.some((root) => root.keyId === id);
-  const DEPLOY_DETAIL = 'after you merge that PR: `npm run build`, install the release as you normally do (docs/RELEASING-LOCALLY.md), then `launchctl kickstart -k gui/$(id -u)/ai.ashlr.daemon` and rerun setup';
+  // No kickstart here: a daemon that is disabled or not loaded (the usual
+  // state before the first grant) has nothing to kickstart, and the last step
+  // (daemon service) says how to start it once the grant is in force.
+  const DEPLOY_DETAIL = 'after you merge that PR: `npm run build`, install the release as you normally do (docs/RELEASING-LOCALLY.md), then rerun setup (restart a running daemon with `launchctl kickstart -k gui/$(id -u)/ai.ashlr.daemon`)';
   if (planning) {
     note('trust root', 'skipped', 'would check that your signing key is compiled into this release, and if not open a PR adding it to trust-roots.ts for you to review and merge');
     note('deploy', 'skipped', `would wait for you: ${DEPLOY_DETAIL}`);
@@ -977,20 +1065,26 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
       }
     }
     if (trustRootFailed) {
-      if (stopHere()) return finish(report, deps, dryRun);
+      if (stopHere()) return done();
     } else if (isTrusted(keyId)) {
       note('trust root', 'already', `${keyId} is compiled into this release`);
+      note('deploy', 'already', 'this release carries your trust root');
     } else {
       const root: StandingGrantTrustRoot = { keyId: keyId!, alg: 'ES256', publicKeyPem: publicKeyPem! };
       const invalid = validateCustodyRoot(root, deps.custody.keyIdForPublicKeyPem);
       if (invalid) {
         note('trust root', 'failed', invalid);
       } else {
-        const pr = await openTrustRootPr(parsed, deps, root, ask);
+        let pr: { status: StepStatus; detail: string };
+        try {
+          pr = await openTrustRootPr(parsed, deps, root, ask, !dryRun);
+        } catch (error) {
+          pr = { status: 'failed', detail: (error as Error).message };
+        }
         note('trust root', pr.status, pr.detail);
         note('deploy', 'waiting-on-you', DEPLOY_DETAIL);
       }
-      if (stopHere()) return finish(report, deps, dryRun);
+      if (stopHere()) return done();
     }
   }
 
@@ -1012,13 +1106,9 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
     }
   } else note('Claude token', dryRun ? 'skipped' : 'waiting-on-you', 'run `claude setup-token`, then rerun setup');
 
-  // 6. Rulesets.
-  if (await ask('Apply the fleet rulesets to the server-enforced repos now?')) {
-    const code = await cmdProtect({ ...parsed, flags: new Set([...parsed.flags, '--apply', '--yes']) }, deps);
-    note('rulesets', code === 0 ? 'done' : 'failed', code === 0 ? 'applied (see above)' : 'some repos failed (see above)');
-  } else note('rulesets', dryRun ? 'skipped' : 'waiting-on-you', 'run `ashlr authority protect --print`, then `--apply`');
-
-  // 7. Canary repo (the App cannot write workflows, so this uses your own gh auth).
+  // 6. Canary repo (the App cannot write workflows, so this uses your own gh
+  // auth). Before the rulesets: the grant's server-enforced repos include the
+  // canary, and a ruleset cannot be applied to a repo that does not exist yet.
   const canary = planning ? null : deps.run('gh', ['api', 'repos/ashlrai/fleet-canary']);
   if (canary?.status === 0) note('canary repo', 'already', 'ashlrai/fleet-canary exists');
   else if (await ask('Create the public repo ashlrai/fleet-canary with its CI workflow (your gh auth)?')) {
@@ -1030,6 +1120,12 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
       : null;
     note('canary repo', created.status === 0 && workflow?.status === 0 ? 'done' : 'failed', created.status === 0 ? (workflow?.status === 0 ? 'created with its CI workflow' : 'created, but the workflow push failed') : created.stderr.trim().slice(0, 200));
   } else note('canary repo', dryRun ? 'skipped' : 'waiting-on-you', 'create ashlrai/fleet-canary with a CI workflow');
+
+  // 7. Rulesets.
+  if (await ask('Apply the fleet rulesets to the server-enforced repos now?')) {
+    const code = await cmdProtect({ ...parsed, flags: new Set([...parsed.flags, '--apply', '--yes']) }, deps);
+    note('rulesets', code === 0 ? 'done' : 'failed', code === 0 ? 'applied (see above)' : 'some repos failed (see above)');
+  } else note('rulesets', dryRun ? 'skipped' : 'waiting-on-you', 'run `ashlr authority protect --print`, then `--apply`');
 
   // 8. Retire the burned activation directory.
   const activation = join(homedir(), '.ashlr', 'activation');
@@ -1046,78 +1142,149 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
     note('provenance key', 'done', rotated.retiredAs ? 'rotated; the old key was moved aside' : 'created');
   } else note('provenance key', dryRun ? 'skipped' : 'waiting-on-you', 'run `ashlr authority rotate-provenance`');
 
-  // 10. First grant (Touch ID) and the switch.
+  // 10. First grant (Touch ID), 11. the switch, 12. the daemon service.
+  const DAEMON_DETAIL = 'would check that the ai.ashlr.daemon service is loaded and running (each tick re-verifies the grant)';
   if (planning) {
-    note('standing grant', 'skipped', 'would sign the first standing grant (Touch ID), then offer to set the autonomy switch to Autonomous (the ladder starts in shadow)');
-    return finish(report, deps, dryRun);
+    note('standing grant', 'skipped', 'would sign the first standing grant (Touch ID)');
+    note('autonomy switch', 'skipped', 'would offer to set the autonomy switch to Autonomous (the ladder starts in shadow)');
+    note('daemon service', 'skipped', DAEMON_DETAIL);
+    return done();
   }
   const { evaluateStandingAuthority, displaySurfaceTarget } = await import('../core/authority/effective-config.js');
   const evaluation = evaluateStandingAuthority({ mode: 'cached', surface: displaySurfaceTarget() });
-  if (evaluation.grantState === 'active') {
+  let grantActive = evaluation.grantState === 'active';
+  if (grantActive) {
     note('standing grant', 'already', `grant #${evaluation.grant?.grantSeq ?? '?'} is active`);
   } else if (await ask('Sign the first standing grant now (Touch ID)?')) {
     const { buildStandingGrantDraft } = await import('../core/verse/authority-api.js');
     const draft = await buildStandingGrantDraft('auto');
     for (const line of draft.summary) deps.out(`    ${line}`);
     const signed = await signAndInstall(draft.payload, deps);
+    grantActive = signed.ok;
     note('standing grant', signed.ok ? 'done' : 'failed', signed.ok ? `grant #${signed.grant.grantSeq} installed, starting at ${signed.grant.rollout.stages[0]!.id}` : signed.reason);
-    if (signed.ok && (await ask('Set the autonomy switch to Autonomous (the ladder starts in shadow)?'))) {
-      const { requestAutonomySwitch } = await import('../core/authority/effective-config.js');
-      const switched = requestAutonomySwitch('autonomous', 'mason', 'ashlr authority setup');
-      note('autonomy switch', switched.ok ? 'done' : 'failed', switched.ok ? 'Autonomous' : switched.reason);
-    }
   } else note('standing grant', dryRun ? 'skipped' : 'waiting-on-you', 'run `ashlr authority grant`');
-  return finish(report, deps, dryRun);
+
+  // Resumable: a grant signed on an earlier run (or with `authority grant`)
+  // still gets the switch offered — it used to be offered only in the run
+  // that signed. Raising stays capped by the grant (requestAutonomySwitch).
+  if (!grantActive) {
+    note('autonomy switch', dryRun ? 'skipped' : 'waiting-on-you', 'needs an active standing grant first');
+  } else if (evaluation.switch === 'autonomous') {
+    note('autonomy switch', 'already', 'Autonomous');
+  } else if (await ask('Set the autonomy switch to Autonomous (the ladder starts in shadow)?')) {
+    const { requestAutonomySwitch } = await import('../core/authority/effective-config.js');
+    const switched = requestAutonomySwitch('autonomous', 'mason', 'ashlr authority setup');
+    note('autonomy switch', switched.ok ? 'done' : 'failed', switched.ok ? 'Autonomous' : switched.reason);
+  } else note('autonomy switch', dryRun ? 'skipped' : 'waiting-on-you', `it is ${evaluation.switch} — run \`ashlr authority switch autonomous\``);
+
+  // 12. Read-only: nothing runs unattended unless the resident daemon does.
+  // Setup never changes launchd (that stays Mason's command) — it only says
+  // exactly what to run. `launchctl enable` first: a service disabled in the
+  // user domain fails `bootstrap` with a bare "Input/output error".
+  let service: DaemonServiceState;
+  try {
+    service = await deps.daemonService();
+  } catch {
+    service = 'unknown';
+  }
+  const onMac = process.platform === 'darwin';
+  if (service === 'running') note('daemon service', 'already', 'ai.ashlr.daemon is running; each tick re-verifies the grant');
+  else if (service === 'absent') note('daemon service', 'waiting-on-you', 'no ai.ashlr.daemon service is installed — run ticks with `ashlr daemon start` in a terminal');
+  else if (service === 'loaded' && onMac) note('daemon service', 'waiting-on-you', 'loaded but not running: `launchctl kickstart gui/$(id -u)/ai.ashlr.daemon`');
+  else if (onMac) {
+    note('daemon service', 'waiting-on-you', 'not loaded: check the --budget in ~/Library/LaunchAgents/ai.ashlr.daemon.plist, then `launchctl enable gui/$(id -u)/ai.ashlr.daemon && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.ashlr.daemon.plist`');
+  } else note('daemon service', 'waiting-on-you', 'start the ashlr daemon service (`ashlr daemon status` shows its state)');
+  return done();
 }
 
-function finish(report: { step: string; status: StepStatus; detail: string }[], deps: AuthorityCliDeps, dryRun = false): number {
-  const failed = report.filter((r) => r.status === 'failed').length;
-  const waiting = report.filter((r) => r.status === 'waiting-on-you').length;
-  const planned = dryRun ? `, ${report.filter((r) => r.status === 'skipped').length} planned (dry run: nothing was asked or changed)` : '';
-  deps.out(`\nSetup: ${report.filter((r) => r.status === 'done').length} done, ${report.filter((r) => r.status === 'already').length} already in place, ${waiting} waiting on you, ${failed} failed${planned}.`);
-  return failed > 0 ? 1 : 0;
+function finish(report: readonly SetupRow[], deps: AuthorityCliDeps, dryRun = false, json = false): number {
+  const result = authoritySetupReport(report, dryRun);
+  const { summary } = result;
+  if (json) {
+    deps.out(JSON.stringify(result, null, 2));
+  } else {
+    const planned = dryRun ? `, ${summary.planned} planned (dry run: nothing was asked or changed)` : '';
+    deps.out(`\nSetup: ${summary.done} done, ${summary.already} already in place, ${summary.waitingOnYou} waiting on you, ${summary.failed} failed${planned}.`);
+  }
+  return summary.failed > 0 ? 1 : 0;
 }
 
-/** Open Mason's trust-root PR from a throwaway worktree (his checkout is never touched). */
+/**
+ * Open Mason's trust-root PR from a throwaway worktree (his checkout is never
+ * touched). Resumable: a rerun finds the PR it already opened, or the key
+ * already merged on the base branch, instead of failing on the leftover branch.
+ */
 async function openTrustRootPr(
   parsed: Parsed,
   deps: AuthorityCliDeps,
   root: StandingGrantTrustRoot,
   ask: (q: string) => Promise<boolean>,
+  probe: boolean,
 ): Promise<{ status: StepStatus; detail: string }> {
   const source = one(parsed, '--source') ?? (await findSelfCheckout());
   if (!source) return { status: 'waiting-on-you', detail: 'pass --source <your ashlr-hub checkout> so setup can open the trust-root PR' };
+  const branch = `authority/trust-root-${root.keyId}`;
+  const base = (): string => {
+    const result = deps.run('gh', ['repo', 'view', 'ashlrai/ashlr-hub', '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']);
+    return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : 'master';
+  };
+  let baseBranch: string | null = null;
+  let pushedAlready = false;
+  if (probe) {
+    // Read-only probes (a dry run never makes them).
+    const open = deps.run('gh', ['pr', 'list', '--repo', 'ashlrai/ashlr-hub', '--head', branch, '--state', 'open', '--json', 'url', '--jq', '.[0].url // ""']);
+    if (open.status === 0 && open.stdout.trim()) {
+      return { status: 'waiting-on-you', detail: `${open.stdout.trim()} is already open — review and merge it yourself` };
+    }
+    baseBranch = base();
+    const fetched = deps.run('git', ['-C', source, 'fetch', 'origin', baseBranch]);
+    const onBase = fetched.status === 0
+      ? deps.run('git', ['-C', source, 'show', `origin/${baseBranch}:src/core/authority/trust-roots.ts`])
+      : null;
+    if (onBase?.status === 0 && onBase.stdout.includes(`keyId: '${root.keyId}'`)) {
+      return { status: 'waiting-on-you', detail: `${root.keyId} is already on ${baseBranch}, but this release was built before it` };
+    }
+    // An earlier run pushed the branch but `gh pr create` failed: open the PR from it.
+    const remote = deps.run('git', ['-C', source, 'ls-remote', '--exit-code', '--heads', 'origin', branch]);
+    pushedAlready = remote.status === 0 && remote.stdout.trim() !== '';
+  }
   if (!(await ask(`Open a PR in ${source.replace(homedir(), '~')} adding key ${root.keyId} to trust-roots.ts?`))) {
     return { status: 'waiting-on-you', detail: `add this root yourself: ${JSON.stringify({ keyId: root.keyId, alg: 'ES256' })}` };
   }
-  const base = (() => {
-    const result = deps.run('gh', ['repo', 'view', 'ashlrai/ashlr-hub', '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']);
-    return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : 'master';
-  })();
-  const branch = `authority/trust-root-${root.keyId}`;
+  baseBranch ??= base();
+  const createPr = (cwd?: string): { status: StepStatus; detail: string } => {
+    const pr = deps.run('gh', ['pr', 'create', '--repo', 'ashlrai/ashlr-hub', '--base', baseBranch!, '--head', branch,
+      '--title', `authority: trust custody key ${root.keyId}`,
+      '--body', `Adds the Secure Enclave custody key \`${root.keyId}\` to STANDING_GRANT_TRUST_ROOTS (opened by \`ashlr authority setup\`). Tier-1 path: review it yourself.`], cwd ? { cwd } : {});
+    if (pr.status !== 0) return { status: 'failed', detail: `pushed ${branch}, but the PR could not be opened: ${pr.stderr.trim().slice(0, 200)}` };
+    return { status: 'waiting-on-you', detail: `opened ${pr.stdout.trim()} — review and merge it yourself` };
+  };
+  if (pushedAlready) return createPr();
   const worktree = mkdtempSync(join(tmpdir(), 'ashlr-trust-root-'));
   rmSync(worktree, { recursive: true, force: true });
   const step = (bin: 'git' | 'gh', args: readonly string[], cwd?: string): void => {
     const result = deps.run(bin, args, cwd ? { cwd } : {});
-    if (result.status !== 0) throw new Error(`${bin} ${args[0]} failed: ${result.stderr.trim().slice(0, 200)}`);
+    if (result.status !== 0) throw new Error(`${bin} ${args[0] === '-C' ? args[2] : args[0]} failed: ${result.stderr.trim().slice(0, 200)}`);
   };
+  let worktreeAdded = false;
   try {
-    step('git', ['-C', source, 'fetch', 'origin', base]);
-    step('git', ['-C', source, 'worktree', 'add', '-b', branch, worktree, `origin/${base}`]);
+    step('git', ['-C', source, 'fetch', 'origin', baseBranch]);
+    // -B: a local branch left by an earlier run that stopped before the PR
+    // (push or `gh pr create` failed) is reset instead of blocking every rerun.
+    step('git', ['-C', source, 'worktree', 'add', '-B', branch, worktree, `origin/${baseBranch}`]);
+    worktreeAdded = true;
     const file = join(worktree, 'src', 'core', 'authority', 'trust-roots.ts');
     const updated = renderTrustRootsWithKey(readFileSync(file, 'utf8'), root);
-    if (!updated) return { status: 'failed', detail: 'trust-roots.ts already lists a root — add the key by hand' };
+    if (!updated) return { status: 'failed', detail: `trust-roots.ts on ${baseBranch} already lists a different root — add the key by hand` };
     writeFileSync(file, updated);
     step('git', ['add', 'src/core/authority/trust-roots.ts'], worktree);
     step('git', ['commit', '-m', `authority: trust custody key ${root.keyId}`], worktree);
     step('git', ['push', '-u', 'origin', branch], worktree);
-    const pr = deps.run('gh', ['pr', 'create', '--repo', 'ashlrai/ashlr-hub', '--base', base, '--head', branch,
-      '--title', `authority: trust custody key ${root.keyId}`,
-      '--body', `Adds the Secure Enclave custody key \`${root.keyId}\` to STANDING_GRANT_TRUST_ROOTS (opened by \`ashlr authority setup\`). Tier-1 path: review it yourself.`], { cwd: worktree });
-    if (pr.status !== 0) return { status: 'failed', detail: `pushed ${branch}, but the PR could not be opened: ${pr.stderr.trim().slice(0, 200)}` };
-    return { status: 'waiting-on-you', detail: `opened ${pr.stdout.trim()} — review and merge it yourself` };
+    return createPr(worktree);
   } finally {
     deps.run('git', ['-C', source, 'worktree', 'remove', '--force', worktree]);
+    // The pushed branch lives on origin; the local copy only blocks a rerun.
+    if (worktreeAdded) deps.run('git', ['-C', source, 'branch', '-D', branch]);
   }
 }
 
