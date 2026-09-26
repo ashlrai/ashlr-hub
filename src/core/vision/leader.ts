@@ -19,12 +19,18 @@
  *
  *   SEAT: leader-seat.ts — grok first, then local; Claude only for the weekly
  *   deep run inside Mason's reserve; no seat ⇒ `no-seat`, never a cloud
- *   fallback.
+ *   fallback. 3.14: a run walks a CHAIN of router-approved seats (grok → fast
+ *   local → large local → opt-in Claude) with per-attempt timeouts, and the
+ *   memo records every attempt (leader-seat.ts planLeaderSeats,
+ *   leader-run-chain.ts).
  *
  *   CADENCE: daily at 06:30 local, plus runs triggered by 10 fleet merges, any
  *   revert, a seat window resetting, or a high-severity reasoning insight —
- *   skipped when the evidence digest is unchanged, and at most 3 model runs
- *   per local day.
+ *   skipped when the evidence digest is unchanged, and at most 3 full model
+ *   runs per local day. 3.14 (leader-cadence.ts): a failed full run retries
+ *   (bounded, backed off), and a cheap advisory check-in may run every
+ *   `foundry.leader.checkinHours` (default 2) in working hours when the
+ *   evidence changed materially — at most 8 model runs a day in total.
  *
  *   ACCOUNTABILITY: each move's expectedDelta is graded against the measured
  *   metric once 7 days have passed and its own deadline has come; the grades
@@ -56,6 +62,8 @@ import {
   type LeaderOutcomeRecord,
   type LeaderRunOutcome,
   type LeaderStateV1,
+  type LeaderRunMode,
+  type LeaderSeatAttempt,
   type LeaderTrigger,
 } from './leader-types.js';
 import {
@@ -84,8 +92,22 @@ import {
   readStandards,
   type LeaderApplyDeps,
 } from './leader-apply.js';
-import { loadDefaultLeaderSeatDeps, resolveLeaderSeat, type LeaderSeatDeps } from './leader-seat.js';
+import { loadDefaultLeaderSeatDeps, planLeaderSeats, type LeaderSeatDeps } from './leader-seat.js';
 import { suggestLeaderCloudBacklog, type LeaderCloudBacklogDeps } from './leader-cloud.js';
+import { buildLeaderGoalEvidence, type LeaderGoalEvidence } from './leader-goal-evidence.js';
+import {
+  LEADER_CHECKIN_SUFFIX,
+  LEADER_MAX_RETRY_ATTEMPTS,
+  LEGACY_LEADER_CADENCE,
+  checkinWindowOpen,
+  materialEvidenceDigest,
+  resolveLeaderCadence,
+  retryDelayMs,
+  type LeaderCadence,
+} from './leader-cadence.js';
+import { runLeaderSeatChain } from './leader-run-chain.js';
+import { buildLeaderHealth } from './leader-health.js';
+import { isOpenGoal } from '../goals/open-goals.js';
 
 // ---------------------------------------------------------------------------
 // Persona
@@ -162,7 +184,8 @@ export interface LeaderEvidenceSources {
   standingPolicy(): EffectivePolicy | null;
   budgetPolicy(): BudgetPolicy;
   capacity(): { publishedAt: string; seats: SeatCapacity[] } | null;
-  goals(): { goals: Goal[]; complete: boolean };
+  /** `unreadable` (optional): goal files the store could not read — reported so an incomplete read is a lower bound, not null. */
+  goals(): { goals: Goal[]; complete: boolean; unreadable?: number };
   readLedger(opts?: LedgerReadOptions): Promise<LedgerReadResult>;
   holds(): RepoHold[];
   quality7d(): LeaderQualitySnapshot;
@@ -182,12 +205,8 @@ export interface LeaderEvidence {
   } | null;
   budget: { mode: string; seats: { seatId: string; enabled: boolean; reservePercent: number }[] } | null;
   seats: { seatId: string; engine: string; windows: { id: string; usedPercentBucket: number | null; resetsOn: string | null; limitReached: boolean }[] }[] | null;
-  goals: {
-    open: number;
-    total: number;
-    focusLimit: number;
-    items: { id: string; objective: string; status: string; repo: string | null; milestonesDone: number; milestones: number; updatedOn: string }[];
-  } | null;
+  /** null only when the goal source threw; an incomplete read is a lower bound (leader-goal-evidence.ts). */
+  goals: LeaderGoalEvidence | null;
   fleet: {
     merges7d: number | null;
     reverts7d: number | null;
@@ -296,25 +315,10 @@ export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs
   })).sort((a, b) => a.seatId.localeCompare(b.seatId)) : null;
 
   const goalRead = attempt('goals', () => sources.goals());
-  const goals: LeaderEvidence['goals'] = goalRead && goalRead.complete ? (() => {
-    const open = goalRead.goals.filter((g) => g.status === 'active' || g.status === 'planning');
-    const shown = [...open, ...goalRead.goals.filter((g) => g.status === 'paused')].slice(0, 40);
-    return {
-      open: open.length,
-      total: goalRead.goals.length,
-      focusLimit: LEADER_LIMITS.maxActiveGoals,
-      items: shown.map((g) => ({
-        id: g.id,
-        objective: cleanModelText(g.objective, 200) ?? '',
-        status: g.status,
-        repo: g.project ? g.project.split(/[\\/]/).pop() ?? null : null,
-        milestonesDone: g.milestones.filter((m) => m.status === 'done').length,
-        milestones: g.milestones.length,
-        updatedOn: day(g.updatedAt) ?? '',
-      })),
-    };
-  })() : null;
-  if (goalRead && !goalRead.complete) unknown.push('goals');
+  // An incomplete read is a LOWER BOUND with its caveat, never null: null read
+  // as "zero goals" to the model while 21 were open (leader-goal-evidence.ts).
+  const goals: LeaderEvidence['goals'] = goalRead ? buildLeaderGoalEvidence(goalRead) : null;
+  if (goalRead && !goalRead.complete) unknown.push('goals-partial');
 
   const facts = await ledgerFacts((o) => sources.readLedger(o), nowMs);
   if (!facts) unknown.push('ledger');
@@ -429,6 +433,34 @@ export interface LeaderRunState {
   baselines: Record<string, { metric: string; value: number | null; at: string }>;
   /** Graded moves, oldest first. */
   outcomes: LeaderOutcomeRecord[];
+  // --- 3.14 (optional: absent in older state files) ---------------------------
+  /** Check-in runs per LOCAL day (a subset of runDays). */
+  checkinDays?: Record<string, number>;
+  /** Material-evidence digest of the last ok memo (a check-in needs it to change). */
+  lastMaterialDigest?: string | null;
+  /** Last time a due check-in found nothing material. */
+  lastCheckinEvalAt?: string | null;
+  lastSuccessAt?: string | null;
+  /** A pending bounded retry of a failed full run. */
+  retry?: LeaderRetryState | null;
+  /** Failed / no-seat / parse-failed runs since the last ok memo. */
+  consecutiveFailures?: number;
+  lastFailure?: { at: string; outcome: LeaderRunOutcome; reason: string | null } | null;
+  /** Every seat the most recent run tried or passed over. */
+  lastAttempts?: LeaderSeatAttempt[];
+  lastAttemptsAt?: string | null;
+  lastServed?: { seatId: string; model: string | null; at: string } | null;
+  /** The cadence the last tick ran under (for the config-less health read). */
+  cadence?: { checkinHours: number; workingHours: { start: number; end: number } } | null;
+}
+
+export interface LeaderRetryState {
+  /** 1-based: the attempt this retry will be. */
+  attempt: number;
+  at: string;
+  /** The trigger of the run that failed first (a retried 06:30 run stays deep-eligible). */
+  of: LeaderTrigger;
+  reason: string | null;
 }
 
 const MAX_STATE_BYTES = 1024 * 1024;
@@ -447,12 +479,20 @@ export function readLeaderRunState(): LeaderRunState {
   try {
     const parsed = JSON.parse(read.text) as Partial<LeaderRunState>;
     if (parsed.v !== 1) return emptyState();
+    const obj = (v: unknown): boolean => typeof v === 'object' && v !== null && !Array.isArray(v);
     return {
       ...emptyState(),
       ...parsed,
       runDays: typeof parsed.runDays === 'object' && parsed.runDays !== null ? parsed.runDays : {},
       baselines: typeof parsed.baselines === 'object' && parsed.baselines !== null ? parsed.baselines : {},
       outcomes: Array.isArray(parsed.outcomes) ? parsed.outcomes : [],
+      checkinDays: obj(parsed.checkinDays) ? parsed.checkinDays! : {},
+      retry: obj(parsed.retry) && typeof parsed.retry!.at === 'string' && Number.isInteger(parsed.retry!.attempt) ? parsed.retry! : null,
+      // Absent (a pre-3.14 file) stays undefined: health then reads the last run's outcome.
+      consecutiveFailures: Number.isInteger(parsed.consecutiveFailures) && parsed.consecutiveFailures! >= 0 ? parsed.consecutiveFailures! : undefined,
+      lastFailure: obj(parsed.lastFailure) ? parsed.lastFailure! : null,
+      lastAttempts: Array.isArray(parsed.lastAttempts) ? parsed.lastAttempts.filter(obj).slice(0, 20) : [],
+      lastServed: obj(parsed.lastServed) ? parsed.lastServed! : null,
     };
   } catch {
     return emptyState();
@@ -464,10 +504,22 @@ function writeLeaderRunState(state: LeaderRunState): void {
   const keepDays = Object.keys(state.runDays).sort().slice(-14);
   const runDays: Record<string, number> = {};
   for (const d of keepDays) runDays[d] = state.runDays[d]!;
+  const checkinDays: Record<string, number> = {};
+  for (const d of Object.keys(state.checkinDays ?? {}).sort().slice(-14)) checkinDays[d] = state.checkinDays![d]!;
   const memoIds = Object.keys(state.baselines).sort().slice(-300);
   const baselines: LeaderRunState['baselines'] = {};
   for (const id of memoIds) baselines[id] = state.baselines[id]!;
-  writePrivateFileAtomic(leaderStatePath(), `${JSON.stringify({ ...state, runDays, baselines, outcomes: state.outcomes.slice(-300) })}\n`);
+  writePrivateFileAtomic(leaderStatePath(), `${JSON.stringify({ ...state, runDays, checkinDays, baselines, outcomes: state.outcomes.slice(-300) })}\n`);
+}
+
+/** Check-in runs on the local day of `ms` (3.14). */
+export function checkinsOnDay(state: LeaderRunState, ms: number): number {
+  return state.checkinDays?.[localDay(ms)] ?? 0;
+}
+
+/** Full (non-check-in) runs on the local day of `ms` — what the 3-a-day cap counts. */
+export function fullRunsOnDay(state: LeaderRunState, ms: number): number {
+  return Math.max(0, runsOnDay(state, ms) - checkinsOnDay(state, ms));
 }
 
 /** Local calendar day (the cadence and the 3-runs-a-day cap are local). */
@@ -516,15 +568,28 @@ export interface LeaderDue {
   nextRunAt: string;
 }
 
-/** Pure: is a Leader run due now, and why. */
-export function leaderRunDue(nowMs: number, state: LeaderRunState, signals: LeaderTriggerSignals): LeaderDue {
+/**
+ * Pure: is a Leader run due now, and why. `cadence` (3.14) adds the bounded
+ * retry and the working-hours check-in; without it this is the 3.10 cadence
+ * (no check-ins, 3 runs a day) — retries still apply, inside that cap.
+ */
+export function leaderRunDue(nowMs: number, state: LeaderRunState, signals: LeaderTriggerSignals, cadence: LeaderCadence = LEGACY_LEADER_CADENCE): LeaderDue {
   const slots = scheduleSlots(nowMs);
   const nextRunAt = new Date(slots.next).toISOString();
-  if (runsOnDay(state, nowMs) >= LEADER_LIMITS.maxRunsPerDay) {
-    return { due: false, trigger: null, reason: `The Leader already ran ${LEADER_LIMITS.maxRunsPerDay} times today.`, nextRunAt };
+  const capped = `The Leader already ran ${cadence.maxRunsPerDay} times today.`;
+  if (runsOnDay(state, nowMs) >= cadence.maxRunsPerDayTotal) {
+    return { due: false, trigger: null, reason: `The Leader already ran ${cadence.maxRunsPerDayTotal} times today.`, nextRunAt };
+  }
+  if (fullRunsOnDay(state, nowMs) >= cadence.maxRunsPerDay) {
+    // Full runs are spent for today; only a check-in may still run.
+    if (checkinWindowOpen(nowMs, state, cadence)) return { due: true, trigger: 'checkin', reason: 'A working-hours check-in is due.', nextRunAt };
+    return { due: false, trigger: null, reason: capped, nextRunAt };
   }
   const lastMs = state.lastRun ? Date.parse(state.lastRun.at) : -Infinity;
   if (lastMs < slots.previous) return { due: true, trigger: 'schedule', reason: 'The daily 06:30 run is due.', nextRunAt };
+  if (state.retry && Date.parse(state.retry.at) <= nowMs) {
+    return { due: true, trigger: 'retry', reason: `Retry ${state.retry.attempt} of ${LEADER_MAX_RETRY_ATTEMPTS} after a failed run.`, nextRunAt };
+  }
   if (signals.revertsSinceLastRun !== null && signals.revertsSinceLastRun > 0) {
     return { due: true, trigger: 'revert', reason: 'A fleet merge was reverted.', nextRunAt };
   }
@@ -533,7 +598,26 @@ export function leaderRunDue(nowMs: number, state: LeaderRunState, signals: Lead
   }
   if (signals.seatResetSinceLastRun) return { due: true, trigger: 'seat-reset', reason: 'A seat window reset.', nextRunAt };
   if (signals.highInsightSinceLastRun) return { due: true, trigger: 'insight', reason: 'A high-severity reasoning insight appeared.', nextRunAt };
+  if (checkinWindowOpen(nowMs, state, cadence)) return { due: true, trigger: 'checkin', reason: 'A working-hours check-in is due.', nextRunAt };
   return { due: false, trigger: null, reason: 'Nothing new since the last memo.', nextRunAt };
+}
+
+/**
+ * PURE and cheap (state file only — no ledger, no evidence): could a tick run
+ * the Leader now for a TIME reason — the daily slot not yet run, a retry
+ * that came due, or an open check-in window? The comms poller (every 3 min,
+ * no daemon needed) uses it to decide whether to start `ashlr leader tick
+ * --wait` in the background; the tick then applies the real rules.
+ * Event triggers (merges, reverts, …) are left to the daily ticks.
+ */
+export function leaderWakeDue(nowMs: number, state: LeaderRunState, cadence: LeaderCadence): { due: boolean; why: string } {
+  if (runsOnDay(state, nowMs) >= cadence.maxRunsPerDayTotal) return { due: false, why: 'daily cap reached' };
+  const fullRoom = fullRunsOnDay(state, nowMs) < cadence.maxRunsPerDay;
+  const lastMs = state.lastRun ? Date.parse(state.lastRun.at) : -Infinity;
+  if (fullRoom && lastMs < scheduleSlots(nowMs).previous) return { due: true, why: 'the daily run has not happened' };
+  if (fullRoom && state.retry && Date.parse(state.retry.at) <= nowMs) return { due: true, why: `retry ${state.retry.attempt} is due` };
+  if (checkinWindowOpen(nowMs, state, cadence)) return { due: true, why: 'a check-in window is open' };
+  return { due: false, why: 'nothing is due' };
 }
 
 export async function gatherTriggerSignals(sources: LeaderEvidenceSources, state: LeaderRunState, nowMs: number): Promise<LeaderTriggerSignals> {
@@ -574,7 +658,8 @@ export async function measureLeaderMetric(metric: LeaderMetric, sources: LeaderE
     switch (metric) {
       case 'active-goals': {
         const read = sources.goals();
-        return read.complete ? read.goals.filter((g) => g.status === 'active' || g.status === 'planning').length : null;
+        // Grading needs the exact count: a lower bound is not a measurement.
+        return read.complete ? read.goals.filter(isOpenGoal).length : null;
       }
       case 'proposals-7d':
         return sources.quality7d().proposalsCreated;
@@ -663,7 +748,7 @@ export async function loadDefaultLeaderRunDeps(cfg: AshlrConfig): Promise<Leader
       capacity: () => budgetStore.readCapacitySnapshot(),
       goals: () => {
         const read = goalsStore.listGoalsDetailed();
-        return { goals: read.goals, complete: read.complete || read.sourceState === 'missing' };
+        return { goals: read.goals, complete: read.complete || read.sourceState === 'missing', unreadable: read.unreadableFiles };
       },
       readLedger: (opts) => ledger.readLedger(opts),
       holds: () => quarantine.listRepoHolds(),
@@ -759,15 +844,32 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
   const nowMs = deps.now();
   const nowIso = new Date(nowMs).toISOString();
   const state = readLeaderRunState();
+  const cadence = resolveLeaderCadence(deps.cfg);
+  const mode: LeaderRunMode = trigger === 'checkin' ? 'checkin' : 'full';
 
-  if (runsOnDay(state, nowMs) >= LEADER_LIMITS.maxRunsPerDay) {
-    return { outcome: 'skipped-unchanged', reason: `The Leader already ran ${LEADER_LIMITS.maxRunsPerDay} times today.`, memo: null };
+  // Full runs keep the 3-a-day cap; check-ins have their own room under the total cap.
+  if (mode === 'full' && fullRunsOnDay(state, nowMs) >= cadence.maxRunsPerDay) {
+    return { outcome: 'skipped-unchanged', reason: `The Leader already ran ${cadence.maxRunsPerDay} times today.`, memo: null };
+  }
+  if (runsOnDay(state, nowMs) >= cadence.maxRunsPerDayTotal) {
+    return { outcome: 'skipped-unchanged', reason: `The Leader already ran ${cadence.maxRunsPerDayTotal} times today.`, memo: null };
   }
 
   const evidence = await gatherLeaderEvidence(deps.sources, nowMs, state);
   const digest = evidenceDigest(evidence);
+  const material = materialEvidenceDigest(evidence);
+  if (mode === 'checkin' && !opts.force && (state.lastMaterialDigest ?? null) === material) {
+    // Nothing material: no model call, and the next look is a recheck interval away.
+    state.lastRun = { at: nowIso, outcome: 'skipped-unchanged', reason: 'Check-in: nothing material changed since the last memo.', memoId: null, trigger };
+    state.lastCheckinEvalAt = nowIso;
+    writeLeaderRunState(state);
+    return { outcome: 'skipped-unchanged', reason: state.lastRun.reason, memo: null };
+  }
   if (!opts.force && state.lastEvidenceDigest === digest) {
     state.lastRun = { at: nowIso, outcome: 'skipped-unchanged', reason: 'The evidence has not changed since the last memo.', memoId: null, trigger };
+    if (mode === 'checkin') state.lastCheckinEvalAt = nowIso;
+    // A retry whose evidence a later run already consumed has nothing left to do.
+    if (trigger === 'retry') state.retry = null;
     writeLeaderRunState(state);
     return { outcome: 'skipped-unchanged', reason: state.lastRun.reason, memo: null };
   }
@@ -776,62 +878,113 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
     try { return deps.sources.standingPolicy(); } catch { return null; }
   })();
   const dryRun = isLeaderDryRun(policy);
-  const prompt = buildLeaderPrompt(evidence, { dryRun, nowIso });
-  const deep = trigger === 'schedule'
+  const basePrompt = buildLeaderPrompt(evidence, { dryRun, nowIso });
+  const prompt = mode === 'checkin' ? `${basePrompt}\n\n${LEADER_CHECKIN_SUFFIX}` : basePrompt;
+  // A retry of the 06:30 run is still that run (deep-eligible).
+  const scheduled = trigger === 'schedule' || (trigger === 'retry' && state.retry?.of === 'schedule');
+  const deep = scheduled
     && (state.lastDeepRunAt === null || nowMs - Date.parse(state.lastDeepRunAt) >= 7 * 86_400_000);
   const memoId = newMemoId(nowMs);
   const memo = emptyMemo(memoId, nowIso, trigger, digest, dryRun);
+  memo.mode = mode;
 
-  const seat = await resolveLeaderSeat(deps.seat, { deep, promptChars: LEADER_SYSTEM_PROMPT.length + prompt.length });
+  // Check-ins in reserve mode stay on free local models.
+  const budgetMode = (() => {
+    try { return deps.sources.budgetPolicy().mode; } catch { return null; }
+  })();
+  const plan = await planLeaderSeats(deps.seat, {
+    deep,
+    promptChars: LEADER_SYSTEM_PROMPT.length + prompt.length,
+    mode,
+    localOnly: mode === 'checkin' && budgetMode === 'reserve',
+  });
+  let servedDeep = false;
+  let attempts: LeaderSeatAttempt[] = [];
   const finish = (outcome: LeaderRunOutcome, reason: string | null, countsAsRun: boolean): LeaderRunResult => {
     memo.status = outcome;
     memo.statusReason = reason === null ? null : scrubPrivateText(reason).slice(0, 400);
+    memo.attempts = attempts.map((a) => ({ ...a, reason: a.reason === null ? null : scrubPrivateText(a.reason).slice(0, 300) }));
     writeLeaderMemo(memo);
     recordMemoOnLedger(deps, memo);
     const fresh = readLeaderRunState();
     fresh.lastRun = { at: nowIso, outcome, reason: memo.statusReason, memoId, trigger };
     fresh.lastMemoAt = nowIso;
-    if (countsAsRun) fresh.runDays[localDay(nowMs)] = (fresh.runDays[localDay(nowMs)] ?? 0) + 1;
-    // A failed run does not consume the evidence: the next trigger may retry it.
-    if (outcome === 'ok') fresh.lastEvidenceDigest = digest;
-    if (outcome === 'ok' && memo.seatId && seat.ok && seat.choice.deep) fresh.lastDeepRunAt = nowIso;
+    const today = localDay(nowMs);
+    if (countsAsRun) fresh.runDays[today] = (fresh.runDays[today] ?? 0) + 1;
+    if (countsAsRun && mode === 'checkin') fresh.checkinDays = { ...(fresh.checkinDays ?? {}), [today]: (fresh.checkinDays?.[today] ?? 0) + 1 };
+    fresh.lastAttempts = memo.attempts;
+    fresh.lastAttemptsAt = nowIso;
+    if (outcome === 'ok') {
+      // A failed run does not consume the evidence: the next trigger may retry it.
+      fresh.lastEvidenceDigest = digest;
+      fresh.lastMaterialDigest = material;
+      fresh.lastSuccessAt = nowIso;
+      fresh.consecutiveFailures = 0;
+      fresh.lastFailure = null;
+      fresh.retry = null;
+      fresh.lastServed = memo.seatId ? { seatId: memo.seatId, model: memo.model, at: nowIso } : null;
+      if (memo.seatId && servedDeep) fresh.lastDeepRunAt = nowIso;
+    } else {
+      fresh.consecutiveFailures = (fresh.consecutiveFailures ?? 0) + 1;
+      fresh.lastFailure = { at: nowIso, outcome, reason: memo.statusReason };
+      if (mode === 'full') {
+        // A bounded retry instead of waiting for tomorrow's slot. A check-in
+        // does not retry: the next check-in window is its retry.
+        const attempt = trigger === 'retry' ? (fresh.retry?.attempt ?? 0) + 1 : 1;
+        const delay = retryDelayMs(attempt);
+        fresh.retry = delay === null ? null : {
+          attempt,
+          at: new Date(nowMs + delay).toISOString(),
+          of: trigger === 'retry' ? fresh.retry?.of ?? 'schedule' : trigger,
+          reason: memo.statusReason,
+        };
+      }
+    }
     writeLeaderRunState(fresh);
     return { outcome, reason: memo.statusReason, memo };
   };
 
-  if (!seat.ok) return finish('no-seat', seat.reason, false);
-  memo.seatId = seat.choice.seatId;
-  memo.model = seat.choice.model;
-
-  let raw: string;
-  try {
-    raw = await seat.complete(LEADER_SYSTEM_PROMPT, prompt);
-  } catch (err) {
-    return finish('failed', `The ${seat.choice.engine} call failed: ${err instanceof Error ? err.message : 'error'}`, true);
+  if (!plan.ok) {
+    attempts = plan.skipped;
+    return finish('no-seat', plan.reason, false);
   }
-  let parsed = parseLeaderMemoOutput(raw, { nowMs });
-  // One retry, on FREE seats only — a paid retry would double the spend of a memo.
-  if (!parsed.ok && seat.choice.engine === 'local') {
-    try {
-      raw = await seat.complete(LEADER_SYSTEM_PROMPT, `${prompt}\n\nYour previous reply could not be parsed (${parsed.reason}). Reply with ONLY the JSON object.`);
-      parsed = parseLeaderMemoOutput(raw, { nowMs });
-    } catch { /* keep the first failure */ }
-  }
-  if (!parsed.ok) return finish('parse-failed', parsed.reason, true);
+  const chain = await runLeaderSeatChain(plan.steps, {
+    system: LEADER_SYSTEM_PROMPT,
+    user: prompt,
+    parse: (raw) => parseLeaderMemoOutput(raw, { nowMs }),
+    reask: (why) => `${prompt}\n\nYour previous reply could not be parsed (${why}). Reply with ONLY the JSON object.`,
+  }, () => deps.now());
+  attempts = [...chain.attempts, ...plan.skipped];
+  const step = chain.ok ? chain.step : chain.lastStep;
+  memo.seatId = step?.choice.seatId ?? null;
+  memo.model = step?.choice.model ?? null;
+  if (!chain.ok) return finish(chain.outcome, chain.reason, true);
+  servedDeep = chain.step.choice.deep;
 
-  const draft = parsed.draft;
+  const draft = chain.draft;
   memo.bottleneck = draft.bottleneck;
   memo.move = draft.move;
   memo.killList = draft.killList;
+  memo.questionsForMason = draft.questionsForMason;
+  memo.status = 'ok';
+  memo.statusReason = draft.notes.length > 0 ? draft.notes.join('; ').slice(0, 400) : null;
+  if (mode === 'checkin') {
+    // ADVISORY: a check-in's goals, hypotheses, standards and actions are
+    // never enacted (a cheap model every two hours does not act; the daily
+    // memo does). Its move is not graded either (gradeLeaderOutcomes).
+    const dropped = draft.actions.length + draft.goals.length + draft.hypotheses.length + draft.standards.length;
+    if (dropped > 0) {
+      memo.statusReason = [memo.statusReason, `Check-in: ${dropped} proposal(s) not enacted (check-ins are advisory).`]
+        .filter((n): n is string => typeof n === 'string' && n.length > 0).join('; ').slice(0, 400);
+    }
+    return finish('ok', memo.statusReason, true);
+  }
   memo.goals = draft.goals;
   memo.priorityChanges = draft.priorityChanges;
   memo.standards = draft.standards;
   memo.critiques = draft.critiques;
   memo.seatPlan = draft.seatPlan;
-  memo.questionsForMason = draft.questionsForMason;
   memo.hypotheses = materializeHypotheses(memoId, draft.hypotheses, nowIso);
-  memo.status = 'ok';
-  memo.statusReason = draft.notes.length > 0 ? draft.notes.join('; ').slice(0, 400) : null;
   // Written BEFORE the actions run: experiment.start reads its hypothesis from this file.
   writeLeaderMemo(memo);
 
@@ -929,7 +1082,8 @@ export async function gradeLeaderOutcomes(deps: LeaderRunDeps): Promise<LeaderOu
   const graded = new Set(state.outcomes.map((o) => o.memoId));
   const fresh: LeaderOutcomeRecord[] = [];
   for (const memo of readRecentMemos(60)) {
-    if (memo.status !== 'ok' || graded.has(memo.id)) continue;
+    // Check-ins are advisory (3.14): their moves are not graded into the hit-rate.
+    if (memo.status !== 'ok' || memo.mode === 'checkin' || graded.has(memo.id)) continue;
     const due = gradeDueAt(memo);
     const expected = memo.move?.expectedDelta;
     if (due === null || !expected || due > nowMs) continue;
@@ -984,8 +1138,10 @@ export async function leaderTick(deps: LeaderRunDeps, opts: { awaitRun?: boolean
     graded = await gradeLeaderOutcomes(deps);
   } catch { /* retried next tick */ }
   const state = readLeaderRunState();
+  const cadence = resolveLeaderCadence(deps.cfg);
+  rememberCadence(state, cadence);
   const signals = await gatherTriggerSignals(deps.sources, state, nowMs);
-  const due = leaderRunDue(nowMs, state, signals);
+  const due = leaderRunDue(nowMs, state, signals, cadence);
   if (!due.due || !due.trigger || runInFlight) return { applied, graded, due, started: false, run: null };
   const job = runLeader(deps, due.trigger);
   if (opts.awaitRun) return { applied, graded, due, started: true, run: await job };
@@ -997,12 +1153,51 @@ export async function leaderTick(deps: LeaderRunDeps, opts: { awaitRun?: boolean
 // State for the API / UI
 // ---------------------------------------------------------------------------
 
-export function buildLeaderState(nowMs: number): LeaderStateV1 {
+/**
+ * The cadence the last tick ran under, kept in the state file so the read
+ * path (GET /api/verse/leader, which has no config in hand) reports the same
+ * check-in interval the runs use. Written only when it changed.
+ */
+function rememberCadence(state: LeaderRunState, cadence: LeaderCadence): void {
+  const stored = state.cadence;
+  if (stored && stored.checkinHours === cadence.checkinHours
+    && stored.workingHours.start === cadence.workingHours.start && stored.workingHours.end === cadence.workingHours.end) return;
+  try {
+    const fresh = readLeaderRunState();
+    fresh.cadence = { checkinHours: cadence.checkinHours, workingHours: { ...cadence.workingHours } };
+    writeLeaderRunState(fresh);
+  } catch { /* the health read falls back to the defaults */ }
+}
+
+function cadenceFor(state: LeaderRunState, cfg: AshlrConfig | undefined): LeaderCadence {
+  if (cfg) return resolveLeaderCadence(cfg);
+  const stored = state.cadence;
+  if (!stored) return resolveLeaderCadence(undefined);
+  return resolveLeaderCadence({ foundry: { leader: { checkinHours: stored.checkinHours, workingHours: stored.workingHours } } } as unknown as AshlrConfig);
+}
+
+export function buildLeaderState(nowMs: number, cfg?: AshlrConfig): LeaderStateV1 {
   const state = readLeaderRunState();
   const memos = readRecentMemos(30);
   const outcomeByMemo = new Map(state.outcomes.map((o) => [o.memoId, o]));
   const timeline: LeaderMemoSummary[] = memos.map((m) => summarizeMemo(m, outcomeByMemo.get(m.id) ?? null));
   const latest = memos.find((m) => m.status === 'ok') ?? memos[0] ?? null;
+  const lastOk = memos.find((m) => m.status === 'ok') ?? null;
+  const health = buildLeaderHealth(
+    {
+      ...state,
+      // Pre-3.14 state files: the newest ok memo is the last success.
+      lastSuccessAt: state.lastSuccessAt ?? lastOk?.at ?? null,
+      lastServed: state.lastServed ?? (lastOk?.seatId ? { seatId: lastOk.seatId, model: lastOk.model, at: lastOk.at } : null),
+    },
+    nowMs,
+    {
+      cadence: cadenceFor(state, cfg),
+      nextScheduledAt: scheduleSlots(nowMs).next,
+      runsToday: runsOnDay(state, nowMs),
+      checkinsToday: checkinsOnDay(state, nowMs),
+    },
+  );
   return {
     v: 1,
     generatedAt: new Date(nowMs).toISOString(),
@@ -1015,5 +1210,6 @@ export function buildLeaderState(nowMs: number): LeaderStateV1 {
     hitRate: computeHitRate(state.outcomes, nowMs),
     standards: readStandards(),
     directives: readLeaderDirectives(),
+    health,
   };
 }

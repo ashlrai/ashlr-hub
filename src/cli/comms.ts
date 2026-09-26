@@ -366,6 +366,12 @@ async function cmdCycle(): Promise<number> {
     }
   }
 
+  // 3.14: Leader retries and working-hours check-ins without the daemon — a
+  // detached `ashlr leader tick --wait` when a time-based run is due (cheap
+  // state-file check; at most every 10 min; never throws).
+  const wake = await (await import('./leader.js')).wakeLeaderIfDue(cfg);
+  if (wake.started) console.log(`cycle: leader tick started (${wake.why})`);
+
   // Register M138 resolution handlers before the cycle polls/resolves.
   registerCommsHandlers(cfg);
   const result = await runCommsCycle(cfg);
