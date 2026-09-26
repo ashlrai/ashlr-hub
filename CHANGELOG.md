@@ -339,6 +339,76 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.12.0] — 2026-09-26 UTC — your key is the trust root, and Verse says one clear next step
+
+**Your custody key is compiled in.** `src/core/authority/trust-roots.ts` now carries Mason's Secure Enclave key
+`se-p256-9c1330e3bd72cf3e` (#506, opened by `ashlr authority setup`), so a Touch ID–signed standing grant verifies on
+this build. Resident activation stays blocked in this release (see `ashlr authority setup`); the resident runtime,
+the host-verified `ashlr/verify` check and cloud-PR intake are the 3.13 work.
+
+The 3.11.5 package already contained the changes below; its notes described only the account-freshness repair. They
+are recorded here. 3.11.4 shipped a crash — Command and Fleet failed to load in the browser because a shared secret
+scrubber read `process.platform` at import time — fixed in #498 (and in 3.11.5). A new test walks everything the
+web UI loads and fails on any Node-only global touched at import.
+
+### Autonomy is off → one clear next step
+
+- Command, Fleet, Growth and Mind no longer show grids of empty cards while the fleet is dormant. One shared
+  "Autonomy is off" state says what is off and offers the single next action: **Approve grant** (opens the Touch ID
+  sheet) or the exact setup command with Copy (#490).
+- `ashlr authority setup --dry-run --json` prints the setup checklist for a UI: each step's status and what it
+  needs from you (sudo, Touch ID, browser, GitHub, terminal) (#492).
+- `ashlr authority setup` is safer to rerun: it finds a trust-root PR it already opened (or a key already merged),
+  creates the canary repo before protecting it, and ends with the daemon service's real launchd state (#492).
+- ⌘K gains the actions that matter: Autonomy Off / Propose / Autonomous, Approve grant…, Budget mode, Copy the
+  setup command, Run in cloud… — all through the same guarded paths as the Command bar (#494).
+
+### A calmer Command
+
+- One compact **Seats** strip replaces the tall burn-down cards; the full charts moved to Usage → Seat windows.
+  Seat status comes from the same model as the rail, and says "Status unknown" when sources disagree (#493).
+- The grid no longer leaves half-empty rows at medium widths; card menus sit in the card header (#493).
+- The first-run tour is a one-line "Getting started" chip, with a new "Turn on autonomy" step (#494).
+- About 85 strings rewritten: plain facts instead of defensive "X, not Y" sentences; route paths moved out of error
+  copy into a details disclosure; the double-period bug fixed (#489).
+
+### Accurate numbers
+
+- Charts keep their size at any window width: line, bar and burn-down charts measure their container and draw at a
+  fixed pixel height with 12 px labels (the 1900 px tokens chart used to stand 573 px tall) (#497).
+- Days are local: usage rollups, fleet history and "dark since" bucket by your local day, not UTC (#497).
+- Claude usage is no longer double-counted (one transcript line per content block repeated the full usage); this
+  also corrects the Claude capacity reader that feeds the budget gate (#498).
+- Local Ollama `name:tag` models cost $0 (#498). One context-window unit everywhere (64k, not 66k) and clean model
+  names ("gpt-oss 20B", "Qwen3.8 27B (64k)") (#500).
+- The cloud lane says "Not set up · ~$250 credits (estimate)" instead of showing unspent credits as live headroom (#500).
+- The rail tooltip says "resets" once (#495).
+
+### Fleet engine
+
+- The runtime probe no longer blocks the event loop: no `which llama-server` per poll, and `ps` output is parsed in
+  yielding slices (#481).
+- Adopted harness effort and sampling now reach every engine at dispatch (Claude `--effort` only on builds that accept
+  it) (#484). The seat router uses its λ cost/headroom/latency weights; default weights reproduce the previous order
+  exactly (#486).
+
+### Operations
+
+- Comms: requests older than 48 h (`comms.requestTtlHours`) expire, so one unanswered Telegram question no longer
+  blocks every later message and fails the nightly oversight job (#492).
+- `/api/verse/apps` is warmed at `ashlr verse` start; ⌘. during a running turn only stops the turn (#498, #500).
+- Test flakes fixed: fleet-live "mergedToday" near midnight, m142 under parallel load (#500).
+
+### Faster first paint
+
+- Chat's first-paint JavaScript fell from 351.8 KB to 333.1 KB under the unchanged 352 KB budget: the shell's
+  first-paint code ships as one chunk, and the ⌘K catalog, onboarding flow and delete dialog load on demand (#502).
+
+Released with `npm run gate -- --base v3.11.5`: build, typechecks, eslint, real-io lane, docs, first-paint and web tests
+passed; the backend run (757 files, 17,896/17,995 tests) failed 14 files on a machine at load ~200. Rerun alone with
+longer timeouts, 12 pass; `universe-hub-marker-campaign` and `universe-capacity-wait-integration` fail the same way on
+v3.11.5 and are pre-existing.
+
 ## [3.11.5] — 2026-09-26 UTC — keep account evidence honest through probe faults
 
 - Keep a verified account's last observed usage visible only for its original
