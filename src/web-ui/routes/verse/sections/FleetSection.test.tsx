@@ -170,27 +170,55 @@ describe('FleetSection — dark and absent', () => {
   // The dark state names the viewer's LOCAL day (fleet/dark-since.ts), so the
   // expected words come from the same helper: 'Sep 1' in New York is 'Sep 2'
   // in Tokyo, and the suite must pass in both.
-  it('designs the dark state and never draws empty axes', async () => {
+  it('says it once — lanes, the one state, the repos — and leaves the empty charts out', async () => {
     stubSurfaceFetch({ kind: 'dark' });
     render(<FleetSection />);
-    await waitFor(() => expect(screen.getAllByText(`Fleet dark since ${darkSinceLabel(DARK_SINCE)}`).length).toBeGreaterThanOrEqual(3));
+    const state = await screen.findByRole('region', { name: 'Autonomy is off' });
+    expect(state).toHaveTextContent('Approve a standing grant to let the fleet work.');
+    expect(within(state).getByRole('button', { name: 'Approve in Command' })).toBeInTheDocument();
+    expect(screen.getAllByText(`Fleet dark since ${darkSinceLabel(DARK_SINCE)}`)).toHaveLength(1);
+    for (const name of ['Live fleet', 'Gate funnel', 'Refusals by gate', 'Parked']) expect(screen.queryByRole('figure', { name })).toBeNull();
+    expect(screen.getByRole('list', { name: 'Lanes: busy of slots' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Repositories' })).toHaveTextContent('Not in grant');
+    expect(screen.getByRole('region', { name: 'Why this seat' })).toBeInTheDocument();
+    // A dark fleet has no "normal schedule" to promise.
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Overnight' })).toHaveTextContent('Nothing armed.'));
+    expect(screen.getByRole('region', { name: 'Overnight' })).not.toHaveTextContent('normal schedule');
   });
 
   it('dates the dark state from the server\'s darkSince — the one Command uses too', async () => {
     const darkSince = '2026-08-30T15:00:00.000Z';
     stubSurfaceFetch({ kind: 'dark', routes: { '/api/verse/fleet/live': { ...fleetLive('dark'), darkSince } } });
     render(<FleetSection />);
-    await waitFor(() => expect(screen.getAllByText(`Fleet dark since ${darkSinceLabel(darkSince)}`).length).toBeGreaterThanOrEqual(3));
+    const state = await screen.findByRole('region', { name: 'Autonomy is off' });
+    expect(state).toHaveTextContent(`Fleet dark since ${darkSinceLabel(darkSince)}`);
     expect(screen.queryByText(`Fleet dark since ${darkSinceLabel(DARK_SINCE)}`)).toBeNull();
   });
 
-  it('says just "Fleet dark." when the server knows no dark-since instant — never "since <today>"', async () => {
+  it('names no day when the server knows no dark-since instant — never "since <today>"', async () => {
     const dark = fleetLive('dark');
     stubSurfaceFetch({ kind: 'dark', routes: { '/api/verse/fleet/live': { ...dark, darkSince: null } } });
     render(<FleetSection />);
-    await waitFor(() => expect(screen.getAllByText(`Fleet dark. ${dark.stateReason}`).length).toBeGreaterThanOrEqual(3));
+    await screen.findByRole('region', { name: 'Autonomy is off' });
     expect(screen.queryByText(/Fleet dark since/)).toBeNull();
+  });
+
+  it('keeps drawing the last runs of a fleet that went dark with work on the board', async () => {
+    const now = Date.now();
+    const live = fleetLive('live', now);
+    stubSurfaceFetch({ kind: 'dark', now, routes: { '/api/verse/fleet/live': { ...fleetLive('dark', now), runs: live.runs, funnel: live.funnel } } });
+    render(<FleetSection />);
+    await screen.findByRole('region', { name: 'Autonomy is off' });
+    expect(screen.getByRole('figure', { name: 'Live fleet' })).toBeInTheDocument();
+    expect(screen.getByRole('figure', { name: 'Gate funnel' })).toBeInTheDocument();
+  });
+
+  it('shows no "off" state for an active fleet', async () => {
+    stubSurfaceFetch({ kind: 'live' });
+    render(<FleetSection />);
+    await screen.findByRole('figure', { name: 'Live fleet' });
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Overnight' })).toHaveTextContent(/Nothing armed|Armed|Started/));
+    expect(screen.queryByTestId('autonomy-off')).toBeNull();
   });
 
   it('says the live view is not in this build when its module has not landed', async () => {

@@ -194,7 +194,8 @@ export function verdictParts(v: VerdictInputs): VerdictPart[] {
     if (v.mergedToday !== null) parts.push({ key: 'merged', text: `${v.mergedToday} merged today` });
     if (v.revertsToday !== null) parts.push({ key: 'reverts', text: `${v.revertsToday} revert${v.revertsToday === 1 ? '' : 's'}`, tone: v.revertsToday > 0 ? 'warning' : undefined });
   }
-  if (v.reserve) parts.push({ key: 'reserve', text: `${v.reserve.label} ${Math.round(v.reserve.percent)}% reserved for you` });
+  // The reserve is what autonomy leaves you; with autonomy off it reserves nothing.
+  if (v.reserve && v.authority?.effectiveSwitch !== 'off') parts.push({ key: 'reserve', text: `${v.reserve.label} ${Math.round(v.reserve.percent)}% reserved for you` });
   return parts;
 }
 

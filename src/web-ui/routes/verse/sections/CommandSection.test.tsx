@@ -5,7 +5,7 @@ import { COMMAND_HISTORY_POLL_MS, COMMAND_SLOW_POLL_MS, CommandSection } from '.
 import { evictAll, runQuery } from '../../../data/cache.js';
 import { VERSE_BOOTSTRAP_KEY } from '../verse-queries.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
-import { stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
+import { draftRefused, stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
 import { DARK_SINCE, activitySnapshot, authorityStatus, budgetView, fleetHistory, fleetLive, seatHistory } from '../command/fixtures.test-support.js';
 import { resetActivityForTest } from '../shell/useActivity.js';
 import { overview as cloudOverview, task as cloudTask } from '../cloud/cloud-fixtures.test-support.js';
@@ -41,8 +41,15 @@ afterEach(() => {
 });
 
 async function ready() {
-  await waitFor(() => expect(screen.getByTestId('verdict')).toHaveTextContent(/building|dark|Propose|unknown/));
+  // The verdict line — or, with autonomy off, the banner that stands in for it.
+  await waitFor(() => expect(screen.queryByTestId('autonomy-off') ?? screen.getByTestId('verdict')).toHaveTextContent(/building|dark|Propose|unknown|off/i));
 }
+
+/** Fleet history with nothing in it: a dormant fleet's KPI row has no figure to show. */
+const emptyHistory = (now: number) => {
+  const h = fleetHistory('dark', now);
+  return { ...h, days: h.days.map((d) => ({ ...d, merges: { realized: 0 }, estCostUsd: 0 })) };
+};
 
 describe('CommandSection — live fleet', () => {
   it('answers the questions top to bottom: verdict, needs you, Leader, KPIs, seats, runs', async () => {
@@ -61,6 +68,8 @@ describe('CommandSection — live fleet', () => {
     expect(screen.getByRole('group', { name: 'Key numbers' })).toHaveTextContent('Merged · 7d23');
     await waitFor(() => expect(screen.getByRole('group', { name: 'Capacity per seat' })).toBeInTheDocument());
     expect(screen.getByRole('figure', { name: 'Last 12 hours' })).toBeInTheDocument();
+    // Autonomy is on: no banner, and nothing asks the server to draft a grant.
+    expect(screen.queryByTestId('autonomy-off')).toBeNull();
   });
 
   it('mounts the Cloud card right after the burn-downs (3.11), and a server without the lane shows no card', async () => {
@@ -398,18 +407,53 @@ describe('CommandSection — raising past the grant', () => {
   });
 });
 
-describe('CommandSection — dark and not-landed states', () => {
-  it('designs the dark state everywhere instead of drawing empty axes', async () => {
-    stubSurfaceFetch({ kind: 'dark' });
+describe('CommandSection — autonomy off', () => {
+  it('says it ONCE, under the bar, with Approve grant — no verdict, Since strip, empty KPIs or empty swimlane', async () => {
+    const now = Date.now();
+    const { fetchMock } = stubSurfaceFetch({ kind: 'dark', now, routes: { '/api/verse/fleet/history': emptyHistory(now) } });
+    const user = userEvent.setup();
     render(<CommandSection />);
+    const banner = await screen.findByRole('region', { name: 'Autonomy is off' });
+    expect(banner).toHaveTextContent('Approve a standing grant to let the fleet work.');
     // The viewer's local day for DARK_SINCE (Sep 1 19:10 UTC): Sep 1 in New York, Sep 2 in Tokyo.
-    await waitFor(() => expect(screen.getByTestId('verdict')).toHaveTextContent(`Off · fleet dark since ${localDay(DARK_SINCE)}`));
-    expect(screen.getByText(`Fleet dark since ${localDay(DARK_SINCE)}`)).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Leader' })).toHaveTextContent('No memo yet');
-    expect(screen.getByRole('button', { name: /Grant: No grant/ })).toBeInTheDocument();
+    expect(within(banner).getByText(`Fleet dark since ${localDay(DARK_SINCE)}`)).toBeInTheDocument();
+    const bar = screen.getByRole('toolbar', { name: 'Autonomy controls' });
+    expect(bar.compareDocumentPosition(banner) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await waitFor(() => expect(screen.queryByTestId('verdict')).toBeNull());
+    expect(screen.queryByRole('group', { name: 'Key numbers' })).toBeNull();
+    expect(screen.queryByRole('figure', { name: 'Last 12 hours' })).toBeNull();
+    // "All clear" no longer repeats the dark-since fact a third time.
     expect(screen.getByText('All clear')).toBeInTheDocument();
+    expect(screen.queryByText(`Fleet dark since ${localDay(DARK_SINCE)}.`)).toBeNull();
+    expect(screen.getByRole('region', { name: 'Leader' })).toHaveTextContent('No memo yet');
+    // The one action opens the bar's own Touch ID sheet.
+    await user.click(within(banner).getByRole('button', { name: 'Approve grant' }));
+    const sheet = await screen.findByRole('dialog', { name: 'Approve a standing grant' });
+    expect(sheet).toHaveTextContent('Approve a standing grant to let the fleet work.');
+    expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith('/api/verse/authority/draft'))).toBe(true);
   });
 
+  it('asks for the one-time setup instead when the grant draft has no trust root', async () => {
+    const now = Date.now();
+    stubSurfaceFetch({ kind: 'dark', now, routes: { '/api/verse/authority/draft': draftRefused(), '/api/verse/fleet/history': emptyHistory(now) } });
+    render(<CommandSection />);
+    const banner = await screen.findByRole('region', { name: 'Autonomy is off' });
+    await waitFor(() => expect(within(banner).getByText('ashlr authority setup')).toBeInTheDocument());
+    expect(banner).toHaveTextContent('Nothing runs or merges on its own until the one-time setup is done.');
+    expect(within(banner).getAllByRole('button').map((b) => b.getAttribute('aria-label'))).toEqual(['Copy the command: ashlr authority setup']);
+  });
+
+  it('keeps a KPI row that has real figures, even with autonomy off', async () => {
+    const now = Date.now();
+    const base = fleetLive('dark', now);
+    stubSurfaceFetch({ kind: 'dark', now, routes: { '/api/verse/fleet/live': { ...base, summary: { ...base.summary, merged7d: 4 } }, '/api/verse/fleet/history': emptyHistory(now) } });
+    render(<CommandSection />);
+    await screen.findByRole('region', { name: 'Autonomy is off' });
+    expect(await screen.findByRole('group', { name: 'Key numbers' })).toHaveTextContent('Merged · 7d4');
+  });
+});
+
+describe('CommandSection — not-landed states', () => {
   it('treats a module that has not landed as one card\'s absence, never a false all-clear', async () => {
     stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/authority': null, '/api/verse/activity': null, '/api/verse/leader': null } });
     render(<CommandSection />);

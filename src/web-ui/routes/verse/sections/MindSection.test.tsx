@@ -157,12 +157,31 @@ describe('MindSection', () => {
     await waitFor(() => expect(posted[0]).toEqual({ url: '/api/verse/leader', body: { action: 'veto', actionId: 'a1' } }));
   });
 
-  it('designs the empty and not-landed states', async () => {
+  it('says a silent Leader once, with its reason and the autonomy action, instead of three empty cards', async () => {
     stubSurfaceFetch({ kind: 'dark', routes: { '/api/reasoning/digest': null } });
     render(<MindSection />);
-    await waitFor(() => expect(screen.getByRole('region', { name: 'Memos' })).toHaveTextContent('No memos yet — last run: No eligible seat'));
+    const leader = await screen.findByRole('region', { name: "The Leader hasn't written a memo yet." });
+    expect(leader).toHaveTextContent('No eligible seat for the Leader: grok-a signed out, local Qwen offline. Autonomy is off.');
+    await waitFor(() => expect(within(leader).getByRole('button', { name: 'Approve in Command' })).toBeInTheDocument());
+    for (const name of ['Memos', 'Standards', 'Action log']) expect(screen.queryByRole('region', { name })).toBeNull();
+    expect(screen.queryByRole('meter', { name: 'Leader hit rate' })).toBeNull();
+    // The digest that has not landed still says so on its own cards.
     await waitFor(() => expect(screen.getAllByText(/The reasoning digest is not in this build yet/).length).toBeGreaterThanOrEqual(1));
-    expect(screen.getByRole('meter', { name: 'Leader hit rate' })).toHaveAttribute('aria-valuetext', 'Leader hit rate: unknown');
+  });
+
+  it('is that one card alone when there was no reasoning either', async () => {
+    stubSurfaceFetch({ kind: 'dark' });
+    render(<MindSection />);
+    await screen.findByRole('region', { name: "The Leader hasn't written a memo yet." });
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'What the reasoning shows' })).toBeNull());
+    expect(screen.queryAllByRole('figure')).toHaveLength(0);
+  });
+
+  it('shows the Leader\'s cards, not the silent one, when it has memos', async () => {
+    stubSurfaceFetch({ kind: 'live' });
+    render(<MindSection />);
+    await screen.findByRole('region', { name: 'Memos' });
+    expect(screen.queryByTestId('autonomy-off')).toBeNull();
   });
 
   it('starts the matrix on its table at 375', async () => {

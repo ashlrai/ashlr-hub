@@ -288,6 +288,14 @@ export function refusalStack(funnel: FleetGateFunnel | null, topN = 5): RefusalS
   };
 }
 
+/**
+ * No run of any kind and no proposal at the gates: every chart card on Fleet
+ * (live swimlane, gate funnel, refusals, parked) would be an empty state.
+ */
+export function nothingToDraw(fleet: FleetLiveSnapshotV1): boolean {
+  return fleet.runs.length === 0 && funnelStages(fleet.funnel).length === 0 && refusalStack(fleet.funnel).total === 0;
+}
+
 /** The newest seat decision behind a live dispatch ("why this seat"). */
 export function latestDecision(fleet: FleetLiveSnapshotV1 | null): { decision: SeatDecision; run: FleetLiveRun } | null {
   if (!fleet) return null;

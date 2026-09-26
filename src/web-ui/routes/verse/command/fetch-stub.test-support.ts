@@ -36,6 +36,14 @@ export interface StubHandle {
 
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
 
+/**
+ * The grant draft's refusal before setup (core/verse/authority-api.ts
+ * AuthorityDraftError): no custody key is compiled in, so no grant can be
+ * drafted and the "Autonomy is off" state asks for `ashlr authority setup`.
+ */
+export const draftRefused = (code = 'no-trust-roots') => () =>
+  json({ code, error: 'No custody key is compiled into this build yet — run `ashlr authority setup` and merge the trust-root PR it opens.' }, 409);
+
 export function surfaceRoutes(kind: FixtureKind, now: number): Record<string, unknown> {
   return {
     '/api/verse/authority/draft': grantDraft(now),

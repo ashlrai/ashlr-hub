@@ -188,7 +188,8 @@ export function NeedsYouCard({
 }: {
   state: ActivityState;
   actions: SurfaceActions;
-  fleetLine: string;
+  /** One line under "All clear"; null when the surface already says it (Command's "Autonomy is off" banner). */
+  fleetLine: string | null;
   /** Labels for the seats items name; an id neither source knows is shown as sent. */
   seatNames?: SeatNames;
 }) {
@@ -212,7 +213,7 @@ export function NeedsYouCard({
       {loading ? (
         <p className={styles.muted} aria-busy="true">Reading the inbox…</p>
       ) : !activity ? (
-        <CardNote tone="unknown">{reason ?? 'The Needs-you inbox did not answer.'} Nothing is shown rather than a false all-clear.</CardNote>
+        <CardNote tone="unknown">{reason ?? "The inbox didn't answer."} This is not an all-clear.</CardNote>
       ) : shown.length === 0 ? (
         silent.length || stale ? (
           <CardNote tone="unknown">
@@ -223,7 +224,7 @@ export function NeedsYouCard({
         ) : (
           <div className={styles.allClear} role="status">
             <span className={styles.allClearTitle}>All clear</span>
-            <span className={styles.allClearBody}>{fleetLine}</span>
+            {fleetLine ? <span className={styles.allClearBody}>{fleetLine}</span> : null}
           </div>
         )
       ) : (

@@ -58,6 +58,12 @@ describe('verdictParts', () => {
     expect(parts.map((p) => p.text).join(' · ')).toBe('Autonomous · 5 building · 7 merged today · 0 reverts · Claude 46% reserved for you');
   });
 
+  it('reserves nothing for you while autonomy is Off — the reserve is what autonomy leaves you', () => {
+    const off = authorityStatus('live', NOW, { switch: 'off', effectiveSwitch: 'off' });
+    const parts = verdictParts({ authority: off, building: 0, mergedToday: 0, revertsToday: 0, reserve: { label: 'Claude', percent: 40 }, darkSince: null });
+    expect(parts.map((p) => p.text)).toEqual(['Off', '0 building', '0 merged today', '0 reverts']);
+  });
+
   it('leaves unknown numbers out instead of printing zeros, and says when the fleet is unknown', () => {
     expect(verdictParts({ authority: null, building: null, mergedToday: null, revertsToday: null, reserve: null, darkSince: null }).map((p) => p.text)).toEqual([
       'Autonomy unknown',

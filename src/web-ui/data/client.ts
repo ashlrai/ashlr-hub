@@ -59,7 +59,10 @@ export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> 
     throw new ApiError('Read session expired.', 401, path);
   }
   if (!res.ok) {
-    throw new ApiError(`GET ${path} failed (HTTP ${res.status}).`, res.status, path);
+    // Keep the route's own sentence and code (e.g. the grant draft's
+    // `no-trust-roots`) so a reader can branch on WHAT was refused.
+    const { detail, code } = await readRefusal(res);
+    throw new ApiError(`GET ${path} failed (HTTP ${res.status}).`, res.status, path, detail || null, code);
   }
   return (await res.json()) as T;
 }

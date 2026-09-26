@@ -127,6 +127,8 @@ function absence(what: string, err: unknown): string {
   if (err instanceof ApiError) {
     if (err.status === 404) return `${what} is not in this build yet, so this card has no source.`;
     if (err.status === 503) return `${what} failed to load on the server.`;
+    // A refusal the route explained (409 with a sentence): say it, not the status.
+    if (err.detail && err.status < 500) return /[.!?]$/.test(err.detail) ? err.detail : `${err.detail}.`;
     return `${what} answered HTTP ${err.status}.`;
   }
   return `${what} could not be reached.`;
@@ -148,7 +150,7 @@ export function optionalQuery<T>(key: string, path: string, what: string, guard:
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) throw err;
         if (err instanceof DOMException && err.name === 'AbortError') throw err;
-        return { value: null, available: false, reason: absence(what, err) };
+        return { value: null, available: false, reason: absence(what, err), code: err instanceof ApiError ? err.code : null };
       }
     },
   };

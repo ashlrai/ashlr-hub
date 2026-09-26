@@ -103,7 +103,7 @@ export function HitRateCard({ read }: { read: OptionalRead<LeaderStateV1> | unde
         status={!read ? { kind: 'loading' } : !state ? { kind: 'unknown', reason: read.reason ?? 'the Leader did not answer.' } : undefined}
         value={hr?.rate ?? null}
         showState={false}
-        caption={hr && hr.rate === null ? 'nothing graded yet — moves are graded 7 days after they are made' : undefined}
+        caption={hr && hr.rate === null ? 'nothing graded yet — moves are graded after 7 days' : undefined}
         size={180}
       />
       <Card title="Standards" caption={state ? `${standards.length} in force` : undefined}>
@@ -151,17 +151,20 @@ export function InsightCards({
   reason,
   loading = false,
   places,
+  empty,
 }: {
   insights: ReasoningInsight[];
   reason: string | null;
   loading?: boolean;
+  /** The no-insights line; Mind passes "No reasoning recorded…" when there was no reasoning at all. */
+  empty?: string;
   /** Labels for the insights' repos (MindSection builds them once for the cards and the facet). */
   places?: ReadonlyMap<string, ProjectLabel>;
 }) {
   if (loading) return <p className={styles.muted} aria-busy="true">Reading the reasoning digest…</p>;
   if (reason !== null) return <CardNote tone="unknown">{reason}</CardNote>;
   if (insights.length === 0) {
-    return <CardNote>No loops, repeated failures or verification gaps in the last 30 days.</CardNote>;
+    return <CardNote>{empty ?? 'No loops, repeated failures or verification gaps in the last 30 days.'}</CardNote>;
   }
   return (
     <ul className={styles.insights} aria-label="Reasoning insights">

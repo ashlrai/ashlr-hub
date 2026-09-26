@@ -9,6 +9,12 @@
  *
  * At 375 px one column in that order, and the matrix starts on its table
  * (a 6 × 4 grid of 22 px cells says less than its table on a phone).
+ *
+ * Nothing yet: a Leader with no memo, no action and nothing graded is ONE
+ * card ("The Leader hasn't run yet." + its last run's reason, and the
+ * autonomy action when autonomy is off) in place of Memos, Hit rate and the
+ * Action log; a digest with no reasoning drops the matrix and the trend
+ * (the insights card says it once). Both empty: that one card is Mind.
  */
 import { useId, useMemo, useState } from 'react';
 import { AreaTrend } from '../../../components/charts/AreaTrend.js';
@@ -16,6 +22,8 @@ import type { ChartStatus } from '../../../components/charts/ChartFrame.js';
 import { MatrixHeatmap } from '../../../components/charts/MatrixHeatmap.js';
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
+import { AutonomyOffState, useAutonomyOff } from '../autonomy/AutonomyOffState.js';
+import type { AutonomyOffState as AutonomyOffStateModel } from '../autonomy/autonomy-off-model.js';
 import { ActionStatus, useSurfaceActions } from '../command/actions.js';
 import { anchorId } from '../command/nav.js';
 import { Card, Cell, Surface } from '../command/Surface.js';
@@ -25,10 +33,17 @@ import { useViewport } from '../shell/viewport.js';
 import { verseBootstrapQuery, verseWorkspacesQuery } from '../verse-queries.js';
 import { ActionLog, HitRateCard, InsightCards, MemoTimeline } from '../mind/MindCards.js';
 import { insightMatrix, insightRepos, reasoningTrendSeries, topInsights } from '../mind/mind-model.js';
+import { leaderSilence } from '../mind/leader-model.js';
 import { projectLabels, projectNames } from '../mind/project-label.js';
 import styles from '../mind/mind.module.css';
 
 export const MIND_POLL_MS = 60_000;
+
+/** The Leader's own reason first; with autonomy off, the one fact its action button answers. */
+function silenceLine(reason: string | null, off: AutonomyOffStateModel | null): string | null {
+  if (!off) return reason;
+  return reason ? `${reason} ${off.title}.` : `${off.title}. ${off.why}`;
+}
 const NAMES_FRESH_MS = 5 * 60_000;
 
 export function MindSection() {
@@ -71,61 +86,87 @@ export function MindSection() {
   const digestStatus = (hasData: boolean, empty: string): ChartStatus =>
     !digest.data ? { kind: 'loading' } : !d ? { kind: 'unknown', reason: digest.data.reason ?? 'the reasoning digest did not answer.' } : hasData ? { kind: 'ready' } : { kind: 'empty', message: empty };
   const reasoned = d ? d.totals.steps > 0 : false;
+  const off = useAutonomyOff();
+  // Settled reads only: a loading Leader or digest keeps its own card.
+  const silence = leaderSilence(leader.data?.value ?? null);
+  const noReasoning = d !== null && !reasoned && top.length === 0;
 
   return (
     <Surface title="Mind" actions={[leader, digest].some((q) => q.status === 'refreshing') ? <RefreshIndicator /> : null} lead={<ActionStatus actions={actions} />}>
-      <Cell span={8}>
-        <MemoTimeline read={leader.data} actions={actions} />
-      </Cell>
-      <Cell span={4}>
-        <HitRateCard read={leader.data} />
-      </Cell>
-      <Cell span={12}>
-        <Card title="What the reasoning shows" caption={d ? `Last 30 days · ${d.totals.steps.toLocaleString('en-US')} reasoning steps across ${d.totals.sessions} sessions` : undefined}>
-          <div id={anchorId('insights')}>
-            <InsightCards insights={top} places={places} loading={!digest.data} reason={!digest.data || d ? null : (digest.data.reason ?? 'The reasoning digest did not answer.')} />
-          </div>
-        </Card>
-      </Cell>
-      <Cell span={8}>
-        <MatrixHeatmap
-          title="Insights by kind and engine"
-          description={facet ? `In ${placeText(facet)}` : 'All repos · 30 days'}
-          status={digestStatus(reasoned && matrix.columns.length > 0, 'No reasoning was recorded in the last 30 days.')}
-          rows={matrix.rows}
-          columns={matrix.columns}
-          values={matrix.values}
-          unit="insights"
-          defaultView={compact ? 'table' : 'chart'}
-          actions={
-            repos.length > 1 ? (
-              <label className={styles.facet} htmlFor={facetId}>
-                Repo
-                <select id={facetId} value={facet ?? ''} onChange={(e) => setRepo(e.target.value || null)}>
-                  <option value="">All</option>
-                  {repos.map((r) => (
-                    <option key={r} value={r} title={r}>
-                      {placeText(r)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : null
-          }
-        />
-      </Cell>
-      <Cell span={4}>
-        <AreaTrend
-          title="Struggles and wins"
-          description="Per day · days with no reasoning are gaps"
-          status={digestStatus(reasoned, 'No reasoning was recorded in the last 30 days.')}
-          series={trends}
-          height={200}
-        />
-      </Cell>
-      <Cell span={12}>
-        <ActionLog read={leader.data} actions={actions} />
-      </Cell>
+      {silence ? (
+        <Cell span={12}>
+          <AutonomyOffState state={off ?? null} here="mind" title={silence.title} why={silenceLine(silence.why, off ?? null)} />
+        </Cell>
+      ) : (
+        <>
+          <Cell span={8}>
+            <MemoTimeline read={leader.data} actions={actions} />
+          </Cell>
+          <Cell span={4}>
+            <HitRateCard read={leader.data} />
+          </Cell>
+        </>
+      )}
+      {silence && noReasoning ? null : (
+        <Cell span={12}>
+          <Card title="What the reasoning shows" caption={d ? `Last 30 days · ${d.totals.steps.toLocaleString('en-US')} reasoning steps across ${d.totals.sessions} sessions` : undefined}>
+            <div id={anchorId('insights')}>
+              <InsightCards
+                insights={top}
+                places={places}
+                loading={!digest.data}
+                reason={!digest.data || d ? null : (digest.data.reason ?? 'The reasoning digest did not answer.')}
+                empty={noReasoning ? 'No reasoning recorded in the last 30 days.' : undefined}
+              />
+            </div>
+          </Card>
+        </Cell>
+      )}
+      {noReasoning ? null : (
+        <Cell span={8}>
+          <MatrixHeatmap
+            title="Insights by kind and engine"
+            description={facet ? `In ${placeText(facet)}` : 'All repos · 30 days'}
+            status={digestStatus(reasoned && matrix.columns.length > 0, 'No reasoning was recorded in the last 30 days.')}
+            rows={matrix.rows}
+            columns={matrix.columns}
+            values={matrix.values}
+            unit="insights"
+            defaultView={compact ? 'table' : 'chart'}
+            actions={
+              repos.length > 1 ? (
+                <label className={styles.facet} htmlFor={facetId}>
+                  Repo
+                  <select id={facetId} value={facet ?? ''} onChange={(e) => setRepo(e.target.value || null)}>
+                    <option value="">All</option>
+                    {repos.map((r) => (
+                      <option key={r} value={r} title={r}>
+                        {placeText(r)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null
+            }
+          />
+        </Cell>
+      )}
+      {noReasoning ? null : (
+        <Cell span={4}>
+          <AreaTrend
+            title="Struggles and wins"
+            description="Per day · days with no reasoning are gaps"
+            status={digestStatus(reasoned, 'No reasoning was recorded in the last 30 days.')}
+            series={trends}
+            height={200}
+          />
+        </Cell>
+      )}
+      {silence ? null : (
+        <Cell span={12}>
+          <ActionLog read={leader.data} actions={actions} />
+        </Cell>
+      )}
       {actions.dialogs}
     </Surface>
   );

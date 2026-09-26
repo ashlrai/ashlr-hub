@@ -44,9 +44,11 @@ export const SURFACE_PREFETCH: Readonly<Partial<Record<VerseSectionId, readonly 
   // cloudQuery (3.11): the Cloud card's overview — without it a first visit
   // paints "Reading the cloud lane…" under the burn-downs.
   command: [authorityQuery, fleetLiveQuery, leaderQuery, learningQuery, fleetHistoryQuery, budgetQuery, seatHistoryQuery, cloudQuery],
-  fleet: [fleetLiveQuery, overnightQuery, budgetQuery, budgetPreviewQuery],
-  growth: [fleetHistoryQuery, learningQuery, modelsQuery('30d')],
-  mind: [leaderQuery, reasoningDigestQuery, verseBootstrapQuery, verseWorkspacesQuery],
+  // authorityQuery + fleetLiveQuery on Fleet, Growth and Mind: the shared
+  // "Autonomy is off" state (autonomy/AutonomyOffState) reads both.
+  fleet: [fleetLiveQuery, authorityQuery, overnightQuery, budgetQuery, budgetPreviewQuery],
+  growth: [fleetHistoryQuery, learningQuery, modelsQuery('30d'), authorityQuery, fleetLiveQuery],
+  mind: [leaderQuery, reasoningDigestQuery, verseBootstrapQuery, verseWorkspacesQuery, authorityQuery, fleetLiveQuery],
   chat: [verseBootstrapQuery, verseSessionsQuery, verseWorkspacesQuery],
 };
 
