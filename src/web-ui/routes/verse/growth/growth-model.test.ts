@@ -113,6 +113,19 @@ describe('modelOutcomes', () => {
     expect(twice).toEqual(['local:same', 'local:same #2']);
     expect(modelOutcomes([m('claude-haiku-4-5-20251001', { dispatches: 3 }), m('claude-haiku-4-5', { dispatches: 2 })]).categories).toEqual(['claude-haiku-4-5-20251001', 'claude-haiku-4-5']);
   });
+
+  it('keeps each model\'s full id as its title while the axis label is shortened', () => {
+    const out = modelOutcomes([
+      m('grok-4.7-fast-reasoning', { engine: 'grok-cli', dispatches: 9 }),
+      m('meta/llama-3.1-70b-instruct', { engine: 'nim', dispatches: 8 }),
+      m('claude-haiku-4-5-20251001', { engine: 'claude', dispatches: 7 }),
+      m('qwen3.8:27b', { engine: 'local', dispatches: 6 }),
+      m('qwen3.8:27b', { engine: 'local-coder', dispatches: 5 }),
+    ]);
+    expect(out.categories).toEqual(['grok-4.7-fast…', 'llama-3.1-70b…', 'claude-haiku-4-5', 'local:qwen3.8:27b', 'local-coder:qwen3.8:27b']);
+    // A title never drops what the label needed to stay unique (the engine).
+    expect(out.titles).toEqual(['grok-4.7-fast-reasoning', 'meta/llama-3.1-70b-instruct', 'claude-haiku-4-5-20251001', 'local:qwen3.8:27b', 'local-coder:qwen3.8:27b']);
+  });
 });
 
 describe('harnessSteps', () => {
