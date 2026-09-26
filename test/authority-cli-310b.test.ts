@@ -275,7 +275,15 @@ describe('github-app — the manifest flow', () => {
 
 describe('setup and the trust-root PR', () => {
   it('renders trust-roots.ts with the custody key (valid TypeScript), exactly once', () => {
-    const source = readFileSync(join(import.meta.dirname, '..', 'src', 'core', 'authority', 'trust-roots.ts'), 'utf8');
+    // The live file carries Mason's committed root, which setup must never
+    // overwrite; render against the same file with the roots emptied, as it
+    // stood before Phase 0.
+    const live = readFileSync(join(import.meta.dirname, '..', 'src', 'core', 'authority', 'trust-roots.ts'), 'utf8');
+    expect(renderTrustRootsWithKey(live, TEST_ROOT)).toBeNull();
+    const source = live.replace(
+      /export const STANDING_GRANT_TRUST_ROOTS: readonly Readonly<StandingGrantTrustRoot>\[\] = Object\.freeze\(\[[\s\S]*?\n\]\);/u,
+      'export const STANDING_GRANT_TRUST_ROOTS: readonly Readonly<StandingGrantTrustRoot>[] = Object.freeze([]);',
+    );
     const rendered = renderTrustRootsWithKey(source, TEST_ROOT);
     expect(rendered).not.toBeNull();
     expect(rendered).toContain(`keyId: '${TEST_ROOT.keyId}'`);

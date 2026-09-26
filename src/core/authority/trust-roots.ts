@@ -25,7 +25,13 @@
 import type { StandingGrantTrustRoot } from './types.js';
 
 /** Intentionally empty until Mason commits his custody public key (Phase 0). */
-export const STANDING_GRANT_TRUST_ROOTS: readonly Readonly<StandingGrantTrustRoot>[] = Object.freeze([]);
+export const STANDING_GRANT_TRUST_ROOTS: readonly Readonly<StandingGrantTrustRoot>[] = Object.freeze([
+  Object.freeze({
+    keyId: 'se-p256-9c1330e3bd72cf3e',
+    alg: 'ES256' as const,
+    publicKeyPem: '-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaR0NPKbqxZLsqsQfvfPd8YgfPJQz\nkDLeyeUL4pzlpEVYn6gNi/Tfd8YsFjxyhqhrViApx3Kc5qGYVPULyaE+7g==\n-----END PUBLIC KEY-----\n',
+  }),
+]);
 
 /**
  * Key ids that must never be trusted again, even if a root with the id were
