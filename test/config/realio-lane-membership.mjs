@@ -427,6 +427,7 @@ export const REAL_IO_TEST_FILES = [
   'test/cloud-checkout.test.ts', // 3.11: real git child processes against a local bare origin for the isolated launch checkouts
   'test/cloud-launcher.test.ts', // 3.11: real child processes for the PTY wrapper (a fake seat script, never claude)
   'test/cloud-store.test.ts', // 3.11: real child process to prove the store's FIFO guard cannot hang
+  'test/cloud-timeline-api.test.ts', // 3.13: real loopback http server bind for GET /api/verse/cloud/tasks/<id>/timeline under a relocated HOME
   'test/routing-capacity-history.test.ts', // 3.10.1: real loopback http server + real authenticated web server bind for /api/verse/budget/history under a relocated HOME; real mkfifo + a tsx child with a deadline for the FIFO guard; multi-MiB compaction fixtures
   'test/setup/home-isolation-guard.test.ts', // spawns a nested real `vitest run` to prove the guard fails a leaking fixture
   // Track A/C — Verse server surfaces.

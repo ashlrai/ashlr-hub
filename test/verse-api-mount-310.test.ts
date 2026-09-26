@@ -41,6 +41,8 @@ import {
 import { VERSE_HEALTH_PATH } from '../src/core/verse/health-types.js';
 import { VERSE_BUDGET_PATH } from '../src/core/routing/types.js';
 import { REASONING_DIGEST_PATH, REASONING_STEPS_PATH } from '../src/core/reasoning/types.js';
+import { VERSE_CLOUD_PATH } from '../src/core/cloud/types.js';
+import { cloudTimelinePath } from '../src/core/cloud/timeline-types.js';
 import { readAuthHeaders, startServer } from './helpers/authenticated-web-server.js';
 
 // ---------------------------------------------------------------------------
@@ -182,9 +184,9 @@ async function boot(opts: Partial<WebServerOptions> = {}) {
 // ---------------------------------------------------------------------------
 
 describe('the real mount table', () => {
-  it('mounts health, reasoning, fleet history, budget and cloud — in that order', () => {
+  it('mounts health, reasoning, fleet history, budget, the cloud timeline and cloud — in that order', () => {
     setMountedApiModulesForTest(null);
-    expect(mountedApiModules().map((m) => m.id)).toEqual(['health', 'reasoning', 'fleet-history', 'budget', 'cloud']);
+    expect(mountedApiModules().map((m) => m.id)).toEqual(['health', 'reasoning', 'fleet-history', 'budget', 'cloud-timeline', 'cloud']);
   });
 
   it('every entry resolves to a handler function (the owning units exported what the contract names)', async () => {
@@ -217,6 +219,8 @@ describe('the real mount table', () => {
       reasoning: REASONING_DIGEST_PATH,
       'fleet-history': FLEET_HISTORY_PATH,
       budget: VERSE_BUDGET_PATH,
+      'cloud-timeline': cloudTimelinePath('ct_20260926T0000_abc123'),
+      cloud: VERSE_CLOUD_PATH,
     };
     for (const [owner, p] of Object.entries(representative) as Array<[MountedApiModuleId, string]>) {
       for (const { id, handler } of handlers) {
@@ -224,6 +228,10 @@ describe('the real mount table', () => {
         // fleet-history's exact path is the owning unit's choice; only the
         // three contract-pinned paths are asserted against the others.
         if (owner === 'fleet-history') continue;
+        // cloud-api.ts answers every /api/verse/cloud/* path (unknown ones with
+        // a 404), so the timeline is mounted BEFORE it; the test below proves
+        // the timeline path reaches the timeline module first.
+        if (owner === 'cloud-timeline' && id === 'cloud') continue;
         expect(await probe(handler, p), `${id} must decline ${p}`).toBe(false);
       }
     }

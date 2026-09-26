@@ -36,6 +36,8 @@
  *   /api/reasoning/*          → reasoning/reasoning-api.ts (digest, steps)
  *   fleet history             → fleet-history.ts
  *   /api/verse/budget*        → routing/budget-api.ts  (BudgetResponse)
+ *   /api/verse/cloud/tasks/<id>/timeline → cloud/timeline-api.ts (CloudTimelineResponse)
+ *   /api/verse/cloud*         → cloud/cloud-api.ts     (cloud lane)
  *  They are consulted only after every V1 route above has declined, every
  *  non-GET to them passes the V1 dispatch + mutation gate first, and a module
  *  that fails to load turns an otherwise-unmatched path into a 503
@@ -176,7 +178,7 @@ export function isVerseApiPath(path: string): boolean {
 // ---------------------------------------------------------------------------
 
 /** Stable ids, in mount order. */
-export type MountedApiModuleId = 'health' | 'reasoning' | 'fleet-history' | 'budget' | 'cloud';
+export type MountedApiModuleId = 'health' | 'reasoning' | 'fleet-history' | 'budget' | 'cloud-timeline' | 'cloud';
 
 export interface MountedApiModule {
   id: MountedApiModuleId;
@@ -205,6 +207,10 @@ const DEFAULT_API_MODULES: readonly MountedApiModule[] = [
   { id: 'fleet-history', load: async () => (await import('./fleet-history.js')).handleFleetHistoryApi },
   // 'budget' also answers GET /api/verse/budget/history and records seat history (capacity-history-api.ts).
   { id: 'budget', load: async () => (await import('../routing/capacity-history-api.js')).withCapacityHistory((await import('../routing/budget-api.js')).handleBudgetApi) },
+  // 3.13 evidence timeline: GET /api/verse/cloud/tasks/<id>/timeline only
+  // (core/cloud/timeline-api.ts). BEFORE 'cloud', which answers every other
+  // /api/verse/cloud/* path — including unknown ones, with a 404.
+  { id: 'cloud-timeline', load: async () => (await import('../cloud/timeline-api.js')).handleCloudTimelineApi },
   // 3.11 cloud lane: /api/verse/cloud/* (core/cloud/cloud-api.ts).
   { id: 'cloud', load: async () => (await import('../cloud/cloud-api.js')).handleCloudApi },
 ];
