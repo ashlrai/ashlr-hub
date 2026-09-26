@@ -73,10 +73,57 @@ export function describeResetAt(iso: string | null | undefined, now: number = Da
   return `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
 }
 
-/** The provider's own reset wording for the seat's binding window (Claude publishes prose only). */
-function bindingResetDescription(seat: VerseSeat): string | null {
-  const binding = seat.capacity?.binding ?? null;
-  return binding?.resetDescription ?? null;
+/** When a spent seat reopens, as a machine-readable instant and/or the provider's own words. */
+export interface SeatReopening {
+  /** ISO instant the LAST spent window resets; null when any spent window gave only prose (or nothing). */
+  resetAt: string | null;
+  /** Provider reset wording to show when `resetAt` is null (Claude publishes prose only). */
+  resetDescription: string | null;
+}
+
+function parseableInstant(iso: string | null | undefined): iso is string {
+  return typeof iso === 'string' && Number.isFinite(Date.parse(iso));
+}
+
+type CapacityWindow = NonNullable<VerseSeat['capacity']>['windows'][number];
+
+function isSpentWindow(w: CapacityWindow): boolean {
+  return w.limitReached || (w.usedPercent !== null && w.usedPercent >= 100);
+}
+
+/**
+ * When a spent seat is usable again: the LATEST reset among its spent
+ * windows. A seat reopens only once EVERY spent window has reset — a Codex
+ * seat whose 5-hour window resets in 2h but whose weekly window is spent
+ * until Wednesday is still spent in 2h. `capacity.binding` cannot answer
+ * this: `bindingWindow` (accounts.ts) keeps the FIRST window among equal
+ * percentages, so two windows at 100% named whichever the provider listed
+ * first — usually the earlier reset. This is the server twin of the web's
+ * `seatReopensAt` (routes/verse/seat-subscription.ts), Fleet's
+ * `eligibleAgain` and the router's headroom `lastReset`, so every surface
+ * names the same instant.
+ *
+ *   - a spent window with only provider prose → `resetAt` null (prose is
+ *     never parsed, and "when all of them have reset" is then unknown); that
+ *     window's prose is returned instead;
+ *   - nothing spent → the binding window's own reset, as before.
+ */
+export function seatReopening(capacity: VerseSeat['capacity'] | null | undefined): SeatReopening {
+  if (!capacity) return { resetAt: null, resetDescription: null };
+  const spent = capacity.windows.filter(isSpentWindow);
+  if (spent.length === 0) {
+    const binding = capacity.binding;
+    return {
+      resetAt: binding !== null && parseableInstant(binding.resetsAt) ? binding.resetsAt : null,
+      resetDescription: binding?.resetDescription ?? null,
+    };
+  }
+  const unknown = spent.filter((w) => !parseableInstant(w.resetsAt));
+  if (unknown.length > 0) {
+    return { resetAt: null, resetDescription: unknown.find((w) => w.resetDescription !== null)?.resetDescription ?? null };
+  }
+  const latest = spent.reduce((a, b) => (Date.parse(b.resetsAt!) > Date.parse(a.resetsAt!) ? b : a));
+  return { resetAt: latest.resetsAt, resetDescription: latest.resetDescription };
 }
 
 /**
@@ -103,7 +150,8 @@ export function seatBlock(
     const usability = seat.capacity?.usability;
     if (usability === 'signed-out' || usability === 'exhausted') {
       connection = usability;
-      resetAt = usability === 'exhausted' ? seat.capacity?.binding?.resetsAt ?? null : null;
+      // The latest spent-window reset, the same instant the health report names.
+      resetAt = usability === 'exhausted' ? seatReopening(seat.capacity).resetAt : null;
     }
   }
   if (connection === null) return null;
@@ -111,7 +159,7 @@ export function seatBlock(
     return { connection, resetAt: null, reason: `${seat.label} is signed out — reconnect it to use this seat.` };
   }
   const when = describeResetAt(resetAt, now);
-  const prose = when === null ? bindingResetDescription(seat) : null;
+  const prose = when === null ? seatReopening(seat.capacity).resetDescription : null;
   const tail = when !== null ? ` — resets ${when}` : prose !== null ? ` — ${prose}` : '';
   return { connection, resetAt, reason: `${seat.label} is out of usage${tail}.` };
 }
