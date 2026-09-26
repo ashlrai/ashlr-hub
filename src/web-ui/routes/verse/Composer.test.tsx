@@ -188,6 +188,33 @@ describe('Composer — depth for a long day', () => {
     expect(p.onStop).toHaveBeenCalledTimes(1);
   });
 
+  it('claims ⌘. before the shell sees it (the Resources toggle), but leaves it to an open modal', async () => {
+    const user = userEvent.setup();
+    const p = props({ sessionId: 'vs_1', running: true });
+    render(<Composer {...p} />);
+    // Stands in for VerseApp's global handler: bubble phase, skips taken keys.
+    const shell = vi.fn();
+    const onShellKey = (event: KeyboardEvent) => { if (!event.defaultPrevented && event.key === '.') shell(); };
+    document.addEventListener('keydown', onShellKey);
+    try {
+      await user.keyboard('{Meta>}.{/Meta}');
+      expect(p.onStop).toHaveBeenCalledTimes(1);
+      expect(shell).not.toHaveBeenCalled();
+
+      // With a modal open (the floating Resources drawer, the palette), ⌘. is
+      // that modal's — closing the drawer must never cancel the turn.
+      const modal = document.createElement('div');
+      modal.setAttribute('aria-modal', 'true');
+      document.body.append(modal);
+      await user.keyboard('{Meta>}.{/Meta}');
+      modal.remove();
+      expect(p.onStop).toHaveBeenCalledTimes(1);
+      expect(shell).toHaveBeenCalledTimes(1);
+    } finally {
+      document.removeEventListener('keydown', onShellKey);
+    }
+  });
+
   it('shows a send in flight as busy — not as the grey of an empty box — without changing Send’s words', async () => {
     const user = userEvent.setup();
     let accept: (ok: boolean) => void = () => {};

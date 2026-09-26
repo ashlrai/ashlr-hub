@@ -317,6 +317,9 @@ export const WORKBENCH_COMMANDS = [
     keys: [{ key: '.', mod: true }],
     group: 'actions',
     section: 'Navigation',
+    // The composer claims ⌘. to stop a running turn (Composer.tsx) — say so
+    // where the key is listed, so the same chord is never a surprise.
+    note: 'stops the running turn instead while one runs',
     keywords: ['show resources', 'accounts', 'seats', 'capacity', 'credits', 'cloud', 'local models'],
   },
   {
