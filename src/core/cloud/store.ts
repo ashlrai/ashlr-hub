@@ -34,6 +34,7 @@ import {
   type CloudLaunchFailureCode,
   type CloudTaskOrigin,
   type CloudTaskPr,
+  type CloudDeliveryPin,
   type CloudTaskReport,
   type CloudTaskState,
   type CloudTaskV1,
@@ -147,6 +148,11 @@ function isPr(value: unknown): value is CloudTaskPr {
     && isString(value['title']);
 }
 
+function isDeliveryPin(value: unknown, repo: string): value is CloudDeliveryPin {
+  if (!isRecord(value) || !Number.isSafeInteger(value['number']) || (value['number'] as number) < 1 || !isString(value['url'])) return false;
+  return value['url'].toLowerCase() === `https://github.com/${repo}/pull/${value['number']}`.toLowerCase();
+}
+
 /** Structural check of a persisted task. Hand-edited or foreign files fail it and are skipped by readers. */
 export function isCloudTask(value: unknown): value is CloudTaskV1 {
   if (!isRecord(value)) return false;
@@ -171,6 +177,7 @@ export function isCloudTask(value: unknown): value is CloudTaskV1 {
     && isString(value['updatedAt'])
     && (value['pr'] === null || isPr(value['pr']))
     && (value['report'] === null || isReport(value['report']))
+    && (value['deliveryPin'] === undefined || isDeliveryPin(value['deliveryPin'], value['repo'] as string))
     && typeof value['estimatedCostUsd'] === 'number' && Number.isFinite(value['estimatedCostUsd']) && value['estimatedCostUsd'] >= 0
     && isNullableString(value['backlogItemId'])
     && isNullableString(value['needsYouId']);

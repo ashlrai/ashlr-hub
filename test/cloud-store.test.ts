@@ -88,6 +88,24 @@ describe('tasks', () => {
     expect(readCloudTask('../../etc/passwd')).toBeNull();
   });
 
+  it('reads legacy tasks without a delivery pin and validates a persisted pin', () => {
+    const id = 'ct_20260924T2331_k3f9q2';
+    const createdAt = '2026-09-24T23:31:00.000Z';
+    writeCloudTask(task(id, createdAt));
+    expect(readCloudTask(id)?.deliveryPin).toBeUndefined();
+    const pinned = task(id, createdAt, {
+      deliveryPin: { number: 42, url: 'https://github.com/ashlrai/ashlr-hub/pull/42' },
+    });
+    writeCloudTask(pinned);
+    expect(readCloudTask(id)?.deliveryPin).toEqual(pinned.deliveryPin);
+    expect(() => writeCloudTask(task(id, createdAt, {
+      deliveryPin: { number: 42, url: 'https://github.com/other/repo/pull/42' },
+    }))).toThrow(/malformed/);
+    expect(() => writeCloudTask(task(id, createdAt, {
+      deliveryPin: { number: 0, url: 'https://github.com/ashlrai/ashlr-hub/pull/0' },
+    }))).toThrow(/malformed/);
+  });
+
   it('lists newest first, skipping corrupt, foreign, mismatched and symlinked files, with a limit', () => {
     writeCloudTask(task('ct_20260920T0000_aaaaaa', '2026-09-20T00:00:00.000Z'));
     writeCloudTask(task('ct_20260922T0000_bbbbbb', '2026-09-22T00:00:00.000Z'));

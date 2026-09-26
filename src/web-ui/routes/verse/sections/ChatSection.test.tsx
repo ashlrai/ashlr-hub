@@ -33,6 +33,9 @@ import { resetLocalSeen } from '../chat/use-chat-activity.js';
 import { CHAT_PANEL_RANGES, CHAT_PANEL_SIZING_KEY, resetChatPanelSizing } from '../chat-panel-sizing.js';
 import { ApiError } from '../../../data/client.js';
 import { ChatSection, describeChatError, preloadChatSurface } from './ChatSection.js';
+import { findCommand, formatChord } from '../shell/command-catalog.js';
+
+const newChatHint = () => formatChord(findCommand('chat.new')!.keys[0]!);
 
 const TOKEN = 'b'.repeat(64);
 
@@ -110,13 +113,13 @@ describe('ChatSection bootstrap', () => {
     const { fetch } = verseFetch({ sessions: [] });
     vi.stubGlobal('fetch', fetch);
     mount();
-    await screen.findByRole('heading', { name: 'No chats yet — ⌘N' });
+    await screen.findByRole('heading', { name: `No chats yet — ${newChatHint()}` });
     // The sidebar's own empty state no longer folds the shortcut into a line
     // of prose. It states the situation and then OFFERS the action, with the
     // shortcut on the control that performs it.
     expect(screen.getByText('No chats yet', { selector: 'p' })).toBeInTheDocument();
     const start = screen.getByRole('button', { name: /Start your first chat/ });
-    expect(start).toHaveTextContent('⌘N');
+    expect(start).toHaveTextContent(newChatHint());
   });
 });
 

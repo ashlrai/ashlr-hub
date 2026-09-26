@@ -7,8 +7,8 @@
  * Copy rules (DESIGN §13.8, and the cloud contract's own):
  *   - spend is ALWAYS an estimate and says so — Claude does not expose the
  *     credit balance, so every dollar figure carries "estimate" beside it;
- *   - server prose (gate reasons, state reasons, report summaries) goes
- *     through `tidyProse`, so an ISO instant reads as local time;
+ *   - server prose (gate reasons, state reasons, report summaries) is scrubbed
+ *     for secrets before `tidyProse` makes ISO instants readable in local time;
  *   - times are local and relative ("started 5m ago"), never ISO;
  *   - a state is always a WORD beside any colour.
  */
@@ -24,11 +24,17 @@ import {
   type CloudTaskV1,
 } from '../../../../core/cloud/types.js';
 import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
+import { scrubSecrets } from '../../../../core/util/scrub.js';
 import type { Tone } from '../../../components/primitives/StatusBadge.js';
 import type { MeterTone } from '../../../components/primitives/Meter.js';
 import { tidyProse } from '../autonomy/format.js';
 import { relativePhrase } from '../context/context-model.js';
 import { usedPercentText } from '../percent-text.js';
+
+/** Cloud text can originate in a PR body; keep every card reason safe even outside the HTTP sanitizer. */
+function safeCloudProse(text: string, now?: number): string {
+  return tidyProse(scrubSecrets(text), now);
+}
 
 /** The repo a new task targets unless the operator names another (the self-improvement default). */
 export const CLOUD_DEFAULT_REPO = DEFAULT_CLOUD_BUDGET.selfImprove.repo;
@@ -129,14 +135,14 @@ export function selfImproveLine(view: CloudBudgetView): string {
 /** A gate's reason, fit to print (null when the gate is open). */
 export function gateText(gate: { ok: boolean; reason: string | null }, fallback: string): string | null {
   if (gate.ok) return null;
-  return gate.reason ? tidyProse(gate.reason) : fallback;
+  return gate.reason ? safeCloudProse(gate.reason) : fallback;
 }
 
 export const SEAT_NOT_READY = "The Claude seat isn't set up on this Mac.";
 
 export function seatText(seat: CloudSeatStatus): string | null {
   if (seat.ready) return null;
-  return seat.reason ? tidyProse(seat.reason) : SEAT_NOT_READY;
+  return seat.reason ? safeCloudProse(seat.reason) : SEAT_NOT_READY;
 }
 
 /**
@@ -175,6 +181,7 @@ export const STATE_TONE: Record<CloudTaskState, Tone> = {
 
 /** A draft PR reads "Draft PR", not "PR open": the session may still be pushing. */
 export function stateWord(task: Pick<CloudTaskV1, 'state' | 'pr'>): string {
+  if (task.state === 'pr-open' && !task.pr) return 'PR unverified';
   if (task.state === 'pr-open' && task.pr?.draft) return 'Draft PR';
   return STATE_WORD[task.state] ?? task.state;
 }
@@ -222,8 +229,8 @@ export function taskMeta(task: CloudTaskV1, now: number = Date.now()): string {
 
 /** The one line under a task's title: the report for a PR, else the state's reason. */
 export function taskDetail(task: CloudTaskV1, now: number = Date.now()): string | null {
-  if (task.report?.summary && (task.state === 'pr-open' || task.state === 'merged')) return tidyProse(task.report.summary, now);
-  return task.stateReason ? tidyProse(task.stateReason, now) : null;
+  if (task.report?.summary && (task.state === 'pr-open' || task.state === 'merged')) return `Cloud session reports (unverified): ${safeCloudProse(task.report.summary, now)}`;
+  return task.stateReason ? safeCloudProse(task.stateReason, now) : null;
 }
 
 /** Dismiss is offered for anything Verse is still tracking; merged and closed tasks are already done. */

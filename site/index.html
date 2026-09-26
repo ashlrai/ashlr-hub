@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="description" content="Ashlr Verse is an operator console for coding agents: every subscription you own, local models, Claude cloud sessions on your credits, and a fleet that merges only inside a scope you sign with Touch ID. macOS, Windows and Linux.">
+<meta name="description" content="Ashlr Verse is an operator console for coding agents across your signed-in CLI seats, local models and Claude cloud sessions. Available on macOS, Windows and Linux.">
 <meta name="color-scheme" content="light dark">
 <link rel="canonical" href="https://verse.ashlr.ai/">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='54 55 146 146'%3E%3Cpath fill='%231A2B3C' d='M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z'/%3E%3Cpath fill='%232563EB' d='M110 121H143L133 152H120Z'/%3E%3C/svg%3E">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://verse.ashlr.ai/">
 <meta property="og:title" content="Ashlr Verse">
-<meta property="og:description" content="Run your whole agent fleet from one place: every subscription you pay for, local models, and Claude cloud sessions when the window runs out.">
+<meta property="og:description" content="Run supported CLI seats and local models from one console, with Claude cloud sessions when your subscription window runs out.">
 <meta name="twitter:card" content="summary_large_image">
 <style>
   html { -webkit-text-size-adjust: 100%; }
@@ -257,13 +257,13 @@
 <main>
   <div class="wrap hero">
     <p class="eyebrow">Operator console for coding agents</p>
-    <h1>Run your whole agent fleet from one place.</h1>
+    <h1>Run your coding agents from one local workspace.</h1>
     <p class="lede">
-      Every account you own behind one console, working at the same time: each subscription, each
-      local model, each machine. <strong>Add a seat and you add a worker</strong> &mdash; there is no
-      cap in the product, only the accounts you connect and the hardware you point it at. When a
-      subscription window runs out, Claude cloud sessions keep working on your credits, and the
-      fleet merges only inside a scope you sign.
+      Your supported coding accounts behind one console, working at the same time: each subscription and
+      local model on this machine. <strong>Add a seat and you add a worker</strong>, subject to
+      configured concurrency limits and the accounts and hardware you connect. When a
+      subscription window runs out, Claude cloud sessions can work on your credits. The guarded
+      resident merge path remains dormant in this release.
     </p>
 
     <div class="cta-row">
@@ -383,8 +383,9 @@
         Worth saying plainly, because most tools will not: <em>on a single GPU</em>, local
         parallelism buys throughput rather than speed &mdash; about 1.1&times; more work per minute
         than running the same agents one after another. That is a property of one piece of silicon,
-        not a limit of the console. Seats on different accounts, and seats on different machines, run
-        genuinely in parallel because they do not share a bottleneck.
+        not a limit of the local console. Seats on different accounts can run
+        in parallel when their providers and resources allow it. Separate machines can run
+        independent Verse workspaces; coordinated multi-machine control is not shipped.
       </p>
       <p style="color:var(--muted);max-width:64ch;margin-top:18px">
         The large win above was the cache fix, and it helps a single agent just as much.
@@ -396,7 +397,7 @@
     <div class="wrap">
       <div class="sec-head">
         <p class="eyebrow">Seats</p>
-        <h2>Every account you own, plus one that never runs out.</h2>
+        <h2>Your connected accounts, plus local models.</h2>
         <p>
           A seat is an account and the CLI that drives it, each pinned to its own profile so turns
           never cross accounts. When a subscription hits its ceiling you switch seats instead of
@@ -444,11 +445,11 @@
     <div class="wrap">
       <div class="sec-head">
         <p class="eyebrow">Scale</p>
-        <h2>Nothing in the product caps how many agents you run.</h2>
+        <h2>Bring your accounts into one workspace.</h2>
         <p>
           A seat is an account plus the CLI that drives it. Connect two Codex accounts and you have
-          two Codex seats. Connect five and you have five. The ceiling is your subscriptions and your
-          hardware, not a number chosen by this software.
+          two Codex seats. Connect five and you have five. Your subscriptions, hardware and configured
+          concurrency limits determine how much work can run at once.
         </p>
       </div>
 
@@ -466,9 +467,9 @@
           own seats alongside the first.</p>
         </div>
         <div class="seat">
-          <span class="tag">Machines</span><h3>More machines, more throughput</h3>
-          <p>Seats on different machines share no bottleneck, so they scale close to linearly —
-          unlike local slots on one GPU. A spare laptop is another set of workers.</p>
+          <span class="tag">Machines</span><h3>Independent local workspaces</h3>
+          <p>A second machine can run its own seats and local models. Verse does not yet provide
+          one coordinated inbox or scheduler across those machines.</p>
         </div>
         <div class="seat">
           <span class="tag">Projects</span><h3>Any folder, not just the enrolled ones</h3>
@@ -695,8 +696,9 @@
         </table>
       </div>
       <p style="color:var(--muted);max-width:64ch;margin-top:18px">
-        Not yet met: the 350&nbsp;KB first-paint target, and the runtime probe still stalls the event
-        loop for 53&ndash;78&nbsp;ms against a 20&nbsp;ms budget.
+        The table shows the 3.10 result. In 3.11.2, first-chat-paint JavaScript fell to
+        349.7&nbsp;KB, meeting the 350&nbsp;KB target. The 3.10 runtime probe measured a
+        53&ndash;78&nbsp;ms event-loop stall against a 20&nbsp;ms budget; no newer result is reported here.
       </p>
     </div>
   </section>
@@ -705,26 +707,27 @@
     <div class="wrap">
       <div class="sec-head">
         <p class="eyebrow">Autonomy with custody</p>
-        <h2>It merges on its own, inside a scope you sign.</h2>
+        <h2>Guarded autonomy, currently dormant.</h2>
         <p>
-          The fleet can finish its own work: judged, merged on GitHub, watched and reverted if it goes
-          red. It can only do that inside a standing grant you sign with Touch ID on your Mac, and it
-          ships dormant until you run the setup once.
+          The source defines a guarded path from judged work to GitHub merges and a two-hour watch.
+          The current production build cannot run an unattended resident fleet: its compiled daemon
+          and conductor trust roots are empty, and service install or restart authority is unavailable.
+          Running the guided setup alone does not activate live resident work.
         </p>
       </div>
 
       <dl class="guards">
-        <div class="guard"><dt>Dormant until setup</dt><dd>Nothing merges and no grant exists until you run <code>ashlr authority setup</code> once. It pauses only for the steps no agent may do: the <code>sudo</code> install of the custody helper, Touch ID, two GitHub clicks and a Claude token.</dd></div>
-        <div class="guard"><dt>One Touch ID grant</dt><dd>A grant names the repositories, engines, risk and size caps, spend ceiling and Leader classes. It is shown in full in the Touch ID prompt, bound to this Mac and valid for at most 30 days. Config and the Leader can only tighten it.</dd></div>
-        <div class="guard"><dt>Gates, in order</dt><dd>Authority, protected paths (always to you), tamper, scope, verify, claims, blast radius, a judge from a different model family than the producer, then GitHub's required checks. Compiled ceilings: medium risk, 10 files or 300 lines, 24 merges per repo per day.</dd></div>
-        <div class="guard"><dt>Reversible merges</dt><dd>Each merge is made on GitHub, pinned to its head SHA and carrying grant, gate and ledger trailers. CI and a fresh re-run watch it for two hours. A red merge is reverted automatically and the repository quarantined.</dd></div>
-        <div class="guard"><dt>Lowering never asks</dt><dd>Off, Propose and Autonomous go down instantly. Stop writes one file that halts every autonomous effect, and Revoke needs a new grant to resume. A broken ledger chain halts everything.</dd></div>
+        <div class="guard"><dt>Production status</dt><dd>Live non-dry daemon and conductor dispatch and resident service install or restart are unavailable in this release. <code>ashlr authority setup --dry-run</code> shows the plan; activation requires separately reviewed trust-root and service-authority work.</dd></div>
+        <div class="guard"><dt>Grant design</dt><dd>A Touch ID grant names repositories, engines, risk and size caps, a spend ceiling and Leader classes. It is bound to one Mac and valid for at most 30 days. Config and the Leader can only tighten it.</dd></div>
+        <div class="guard"><dt>Gates, in order</dt><dd>The guarded merge path checks authority, protected paths, tamper, scope, verification, claims, blast radius, a cross-family judge and GitHub's required checks. Compiled ceilings: medium risk, 10 files or 300 lines, 24 merges per repo per day.</dd></div>
+        <div class="guard"><dt>Reversible merges</dt><dd>When admitted, a GitHub merge is pinned to its head SHA and carries grant, gate and ledger trailers. CI and a fresh re-run watch it for two hours; a red merge is reverted and the repository quarantined.</dd></div>
+        <div class="guard"><dt>Stop and revoke</dt><dd>The source switch can lower Autonomous to Propose or Off without a new grant. Stop halts autonomous effects; revocation requires a new grant to resume. A broken ledger chain halts the guarded path.</dd></div>
       </dl>
 
       <div class="tbl-scroll" style="margin-top:32px">
         <table style="min-width:0">
-          <caption>Budget modes. Your own chats ignore reserves; the reserves exist for you.</caption>
-          <thead><tr><th scope="col">Mode</th><th scope="col">What autonomy may use</th></tr></thead>
+          <caption>Configured budget modes for an admitted autonomy run. Your own chats ignore reserves.</caption>
+          <thead><tr><th scope="col">Mode</th><th scope="col">What admitted autonomy may use</th></tr></thead>
           <tbody>
             <tr><th scope="row">all-in</th><td>Everything available. No reserves.</td></tr>
             <tr><th scope="row">balanced (default)</th><td>Claude keeps 40% of its weekly window for you, and autonomy never uses it while the five-hour window is above 70%. Grok keeps no reserve. Local models are free and unlimited.</td></tr>
@@ -733,8 +736,8 @@
         </table>
       </div>
       <p style="color:var(--muted);max-width:64ch;margin-top:18px">
-        Codex is off for autonomy until you switch it on. A seat whose usage cannot be read is never
-        eligible, because your reserve is not spent on a guess.
+        Codex is off for autonomy unless enabled. In an admitted run, a seat whose usage cannot be
+        read is ineligible, because your reserve is not spent on a guess.
       </p>
     </div>
   </section>
@@ -747,8 +750,8 @@
         <p>
           Verse can start Claude Code cloud sessions that run on your Claude account's cloud credits.
           Start one from a chat, from Command or from the CLI, or let Verse work through its own
-          improvement backlog under a budget you set. Every task ends as a draft pull request, and
-          the lane never merges anything.
+          improvement backlog under a budget you set. Successful tasks are asked to deliver a draft
+          pull request. Failed launches and missing PRs remain separate states; the lane never merges.
         </p>
         <p>
           Everything you run on is one keystroke away. Press <kbd>⌘.</kbd> on any page for the Resources
@@ -760,7 +763,7 @@
       </div>
 
       <figure>
-        <svg viewBox="0 0 700 200" width="100%" role="img" aria-label="Verse launches claude --cloud as the claude-a seat. The cloud session works on the branch ashlr-cloud slash task id and opens a draft pull request with a report block. Verse follows the pull request with gh, and the merge gates or you decide what happens to it.">
+        <svg viewBox="0 0 700 200" width="100%" role="img" aria-label="Verse launches claude --cloud as the claude-a seat. The cloud session is asked to work on branch ashlr-cloud slash task id and open a draft pull request with a report block. Verse follows any matching pull request with gh; the merge gates or you decide what happens next.">
           <rect x="8" y="70" width="118" height="54" rx="3" fill="var(--surface-2)" stroke="var(--line)"/>
           <text x="67" y="93" text-anchor="middle" font-size="12" fill="var(--ink)">Verse</text>
           <text x="67" y="110" text-anchor="middle" font-size="9" fill="var(--muted)">chat, Command, CLI</text>
@@ -795,7 +798,7 @@
 
           <text x="273" y="52" text-anchor="middle" font-size="10" fill="var(--faint)">claude.ai account, never an API key</text>
         </svg>
-        <figcaption>Verse cannot read a session back, so every task delivers to GitHub: its own branch, a draft PR, and a JSON report of status, summary, tests run and risks.</figcaption>
+        <figcaption>Verse cannot read a session back, so it asks each cloud task to deliver on its own branch with a draft PR and JSON report. Verse tracks a matching PR when one appears; failed or missing deliveries remain visible separately.</figcaption>
       </figure>
 
       <div class="two" style="margin-top:30px">
@@ -811,7 +814,7 @@
         <div class="note cool">
           <h3>Self-improvement, with caps</h3>
           <p>
-            Verse keeps a backlog of work on itself: known failing tests, the first-paint target, the
+            Verse keeps a backlog of work on itself: known failing tests, performance regressions, the
             runtime probe stall and similar gaps. <b>Improve Verse</b> launches the next item. On its
             own, Verse launches only under a daily cap, and it stops at a reserve. One switch, or one
             environment variable, turns that off.
@@ -857,10 +860,11 @@
           <ul>
             <li class="yes"><span class="m">&check;</span><span>CLI and console</span></li>
             <li class="yes"><span class="m">&check;</span><span>Desktop app, with the Terminal dock</span></li>
-            <li class="yes"><span class="m">&check;</span><span>Autonomy custody: Secure Enclave key, Touch ID</span></li>
+            <li class="yes"><span class="m">&check;</span><span>Custody support: Secure Enclave key, Touch ID</span></li>
             <li class="yes"><span class="m">&check;</span><span>Local models via llama.cpp</span></li>
             <li class="yes"><span class="m">&check;</span><span>Sandboxing with <code>sandbox-exec</code></span></li>
             <li class="no"><span class="m">&ndash;</span><span>Desktop app is built from source, unsigned</span></li>
+            <li class="no"><span class="m">&ndash;</span><span>Resident autonomy is dormant in this release</span></li>
           </ul>
         </div>
         <div class="pcol">
@@ -897,7 +901,7 @@
     <div class="wrap">
       <div class="sec-head">
         <p class="eyebrow">Get started</p>
-        <h2>Four steps to a working fleet.</h2>
+        <h2>Open the console. Check autonomy separately.</h2>
       </div>
 
       <div class="two" style="gap:44px">
@@ -922,10 +926,10 @@ ashlr verse</pre>
 export ASHLR_VERSE_LOCAL_DISPATCH=llama-server</pre>
           </div></div>
           <div class="step"><span class="n"></span><div>
-            <h3>Turn on autonomy, once</h3>
-            <p>Optional, and macOS only. It pauses for each step only you can do, and prints what it did.</p>
-            <pre>ashlr authority setup --dry-run
-ashlr authority setup</pre>
+            <h3>Inspect autonomy status</h3>
+            <p>Optional, and macOS only. The dry run describes the custody steps. This release does not admit live resident autonomy or service installation.</p>
+            <pre>ashlr authority status
+ashlr authority setup --dry-run</pre>
           </div></div>
         </div>
 

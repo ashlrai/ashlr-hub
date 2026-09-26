@@ -11,6 +11,8 @@ import { CLOUD_PR_TITLE_PREFIX, CLOUD_REPORT_FENCE, type CloudTaskReport, type C
 
 /** A report block is a few hundred bytes; past this it is not a report, it is a dump. */
 export const CLOUD_REPORT_MAX_BLOCK_CHARS = 32 * 1024;
+/** Markdown needs only a few ticks; cap dynamic close-pattern construction. */
+const MAX_REPORT_FENCE_CHARS = 128;
 /** PR bodies can be edited by anyone with write access; only this much of the tail is scanned. */
 const MAX_BODY_CHARS = 512 * 1024;
 const MAX_SUMMARY_CHARS = 2_000;
@@ -109,27 +111,33 @@ function reportFromBlock(text: string): CloudTaskReport | null {
   return report;
 }
 
-/**
- * Opening fence (3+ backticks) tagged `ashlr-cloud-report`, the body, and a
- * closing fence of the same length — so a report containing a ``` string
- * inside a longer fence still parses.
- */
-const REPORT_BLOCK_RE = new RegExp(
-  String.raw`(?:^|\n)[ \t]*(\`{3,})[ \t]*` + CLOUD_REPORT_FENCE + String.raw`[ \t]*\n([\s\S]*?)\n[ \t]*\1[ \t]*(?=\n|$)`,
-  'g',
+/** Find tagged openings separately so an unclosed last attempt cannot expose an older report. */
+const REPORT_OPEN_RE = new RegExp(
+  String.raw`^[ \t]*(\`{3,})[ \t]*` + CLOUD_REPORT_FENCE + String.raw`(?=[ \t\n]|$)([^\n]*)(?:\n|$)`,
+  'gm',
 );
 
-/** Last well-formed `ashlr-cloud-report` block in the body, validated; else null. */
+/** The newest tagged block is authoritative, including when malformed or unclosed. */
 export function parseCloudReport(prBody: string | null | undefined): CloudTaskReport | null {
   if (typeof prBody !== 'string' || prBody === '') return null;
   // The contract puts the block at the END, so a giant body keeps its tail.
   const body = (prBody.length > MAX_BODY_CHARS ? prBody.slice(-MAX_BODY_CHARS) : prBody).replace(/\r\n?/g, '\n');
-  const blocks = [...body.matchAll(REPORT_BLOCK_RE)].map((match) => match[2] ?? '');
-  // Newest wins: a session that revised its report appends a second block,
-  // and an earlier malformed block must not hide a later good one (or vice versa).
-  for (let i = blocks.length - 1; i >= 0; i -= 1) {
-    const report = reportFromBlock(blocks[i]!);
-    if (report) return report;
+  let latest: RegExpExecArray | null = null;
+  let latestEnd = 0;
+  REPORT_OPEN_RE.lastIndex = 0;
+  for (let match = REPORT_OPEN_RE.exec(body); match; match = REPORT_OPEN_RE.exec(body)) {
+    latest = match;
+    latestEnd = REPORT_OPEN_RE.lastIndex;
   }
-  return null;
+  if (!latest) return null;
+  if (latest[2]!.trim() !== '') return null;
+
+  const ticks = latest[1]!;
+  if (ticks.length > MAX_REPORT_FENCE_CHARS) return null;
+  const close = new RegExp(String.raw`^[ \t]*` + ticks + String.raw`[ \t]*(?=\n|$)`, 'gm');
+  close.lastIndex = latestEnd;
+  const ending = close.exec(body);
+  if (!ending) return null;
+  const block = body.slice(latestEnd, ending.index);
+  return reportFromBlock(block);
 }

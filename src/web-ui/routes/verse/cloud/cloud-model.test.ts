@@ -135,6 +135,7 @@ describe('tasks', () => {
   });
 
   it('words states, drafts and meta without ISO', () => {
+    expect(stateWord(task('pr-open'))).toBe('PR unverified');
     expect(stateWord(task('pr-open', { pr: { number: 7, url: 'https://github.com/a/b/pull/7', state: 'open', draft: true, title: 't' } }))).toBe('Draft PR');
     expect(stateWord(task('pr-open', { pr: { number: 7, url: 'https://github.com/a/b/pull/7', state: 'open', draft: false, title: 't' } }))).toBe('PR open');
     expect(stateWord(task('expired'))).toBe('Expired');
@@ -145,13 +146,20 @@ describe('tasks', () => {
 
   it('shows the report summary on a PR, else the state reason — with instants read as local time', () => {
     const pr = task('pr-open', { report: { status: 'done', summary: 'Fixed the race.', testsRun: [], risks: [] }, stateReason: 'PR opened.' });
-    expect(taskDetail(pr, NOW)).toBe('Fixed the race.');
+    expect(taskDetail(pr, NOW)).toBe('Cloud session reports (unverified): Fixed the race.');
     const at = '2026-09-25T14:30:00.000Z';
     const failed = task('failed', { stateReason: `Rate limited until ${at}..` });
     const detail = taskDetail(failed, NOW)!;
     expect(detail).not.toContain(at);
     expect(detail).not.toMatch(/\.\.$/);
     expect(taskDetail(task('running'), NOW)).toBeNull();
+  });
+
+  it('scrubs credential-shaped report and state text before formatting the card detail', () => {
+    const secret = 'supersecretvalue123456';
+    const pr = task('pr-open', { report: { status: 'done', summary: `Fixed the race. api_key=${secret}`, testsRun: [], risks: [] } });
+    expect(taskDetail(pr, NOW)).toBe('Cloud session reports (unverified): Fixed the race. api_key=[REDACTED]');
+    expect(taskDetail(task('failed', { stateReason: `Launch failed: api_key=${secret}` }), NOW)).toBe('Launch failed: api_key=[REDACTED]');
   });
 
   it('offers Dismiss for everything but merged and closed', () => {

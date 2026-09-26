@@ -63,6 +63,7 @@ import { PlusIcon, SearchIcon, SidebarIcon } from './verse-icons.js';
 import { seatSubscription } from './seat-subscription.js';
 import { formatRelative, seatById, seatPillLabel } from './verse-model.js';
 import { SavedProjects } from './workspaces/SavedProjects.js';
+import { findCommand, formatChord } from './shell/command-catalog.js';
 import styles from './Sidebar.module.css';
 
 export interface SidebarProps {
@@ -109,6 +110,10 @@ export function Sidebar(props: SidebarProps) {
   const { sessions, sessionsStatus, sessionsError, projects, seats, selectedId, query, onQuery, onSelect, onNew,
     onRetry, onCollapse, onDisconnect, activity = null, meta = null, localSeen = NO_SEEN, actions } = props;
   const searchId = useId();
+  const newChatShortcut = findCommand('chat.new')?.keys[0];
+  const sidebarShortcut = findCommand('chat.sidebar')?.keys[0];
+  const newChatHint = newChatShortcut ? formatChord(newChatShortcut) : null;
+  const sidebarHint = sidebarShortcut ? formatChord(sidebarShortcut) : null;
   const [filter, setFilter] = useState<SidebarFilter>('all');
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -149,12 +154,12 @@ export function Sidebar(props: SidebarProps) {
           <input id={searchId} type="search" value={query} placeholder="Search chats" autoComplete="off"
             onChange={(event) => onQuery(event.target.value)} onKeyDown={onSearchKeyDown} />
         </label>
-        <Tooltip label="New chat" shortcut="⌘N" placement="bottom">
+        <Tooltip label="New chat" shortcut={newChatHint ?? undefined} placement="bottom">
           <button type="button" className={styles.iconButton} onClick={onNew} aria-label="New chat">
             <PlusIcon />
           </button>
         </Tooltip>
-        <Tooltip label="Hide chat list" shortcut="⌘B" placement="bottom">
+        <Tooltip label="Hide chat list" shortcut={sidebarHint ?? undefined} placement="bottom">
           <button type="button" className={styles.iconButton} onClick={onCollapse} aria-label="Hide chat list">
             <SidebarIcon />
           </button>
@@ -177,7 +182,7 @@ export function Sidebar(props: SidebarProps) {
             <button type="button" onClick={onRetry}>Retry</button>
           </div>
         ) : model.groups.length === 0 ? (
-          <EmptyList query={query} filter={filter} hasSessions={sessions.length > 0} onClearQuery={() => onQuery('')}
+          <EmptyList query={query} filter={filter} hasSessions={sessions.length > 0} newChatHint={newChatHint} onClearQuery={() => onQuery('')}
             onClearFilter={() => setFilter('all')} onNew={onNew} />
         ) : model.groups.map((group) => (
           <GroupView key={group.id} group={group} seats={seats} selectedId={selectedId} renaming={renaming}
@@ -346,10 +351,11 @@ function FilterChips({ value, counts, onChange }: { value: SidebarFilter; counts
   );
 }
 
-function EmptyList({ query, filter, hasSessions, onClearQuery, onClearFilter, onNew }: {
+function EmptyList({ query, filter, hasSessions, newChatHint, onClearQuery, onClearFilter, onNew }: {
   query: string;
   filter: SidebarFilter;
   hasSessions: boolean;
+  newChatHint: string | null;
   onClearQuery: () => void;
   onClearFilter: () => void;
   onNew: () => void;
@@ -379,7 +385,7 @@ function EmptyList({ query, filter, hasSessions, onClearQuery, onClearFilter, on
       <p>Start one on any project with any seat.</p>
       {/* Not named "New chat": the header already has a control by that name. */}
       <button type="button" className={styles.emptyAction} onClick={onNew}>
-        Start your first chat <kbd className={styles.emptyKey}>⌘N</kbd>
+        Start your first chat {newChatHint ? <kbd className={styles.emptyKey}>{newChatHint}</kbd> : null}
       </button>
     </div>
   );

@@ -99,7 +99,19 @@ describe('CloudCard states', () => {
     const row = within(await within(card()).findByRole('list', { name: 'Cloud tasks' })).getByRole('listitem');
     expect(within(row).getByText('Draft PR')).toBeInTheDocument();
     expect(within(row).getByRole('link', { name: 'Pull request #481 on GitHub' })).toHaveAttribute('href', 'https://github.com/ashlrai/ashlr-hub/pull/481');
-    expect(within(row).getByText('Fixed the race in the tracker; 12 tests added.')).toBeInTheDocument();
+    expect(within(row).getByText('Cloud session reports (unverified): Fixed the race in the tracker; 12 tests added.')).toBeInTheDocument();
+  });
+
+  it('redacts a credential-shaped PR report before showing it on the Command cloud card', async () => {
+    const secret = 'supersecretvalue123456';
+    const pr = task('pr-open', {
+      report: { status: 'done', summary: `Fixed the race. api_key=${secret}`, testsRun: [], risks: [] },
+    });
+    stubCloudFetch(overview({ tasks: [pr] }));
+    render(<Host />);
+    const row = within(await within(card()).findByRole('list', { name: 'Cloud tasks' })).getByRole('listitem');
+    expect(within(row).getByText('Cloud session reports (unverified): Fixed the race. api_key=[REDACTED]')).toBeInTheDocument();
+    expect(row.textContent).not.toContain(secret);
   });
 
   it('failed: the plain reason, no session link, and never a link to a foreign host', async () => {

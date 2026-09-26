@@ -156,6 +156,7 @@ export function Workspace(props: WorkspaceProps) {
   const [queueHost, setQueueHost] = useState<HTMLDivElement | null>(null);
   const titleInput = useRef<HTMLInputElement>(null);
   const headingId = useId();
+  const newChatShortcut = shortcutFor('chat.new');
 
   // Mounted for the whole life of the section, so the roster stays live.
   useSeatsRefresh();
@@ -268,11 +269,11 @@ export function Workspace(props: WorkspaceProps) {
         <WorkspaceSeatHealth seats={seats} />
         <div className={styles.emptyState}>
           <span className={styles.emptyMark} aria-hidden="true"><VerseMark size={36} /></span>
-          <h1 className={styles.emptyTitle}>{hasAnySessions ? 'Pick a chat, or start a new one' : 'No chats yet — ⌘N'}</h1>
+          <h1 className={styles.emptyTitle}>{hasAnySessions ? 'Pick a chat, or start a new one' : `No chats yet${newChatShortcut ? ` — ${newChatShortcut}` : ''}`}</h1>
           <p className={styles.emptyBody}>
             Open a project, choose a seat — a Claude or Codex account, Grok, or a local Ollama model — and talk to an agent that can edit that project.
           </p>
-          <button type="button" className={styles.emptyButton} onClick={onNew}>New chat <kbd>⌘N</kbd></button>
+          <button type="button" className={styles.emptyButton} onClick={onNew}>New chat {newChatShortcut ? <kbd>{newChatShortcut}</kbd> : null}</button>
           {!dispatchEnabled ? (
             <p className={styles.emptyWarn} role="status">
               This server was started without dispatch, so chats are read-only here. Run <code>ashlr verse</code> to enable sending.

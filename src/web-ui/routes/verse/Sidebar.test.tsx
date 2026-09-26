@@ -14,6 +14,7 @@ import type { VerseSearchResponse } from '../../../core/verse/types.js';
 import { CLAUDE_SEAT, bootstrap, session } from './fixtures.test-support.js';
 import { CLAUDE_MAX_SEAT } from './seat-fixtures.test-support.js';
 import { Sidebar } from './Sidebar.js';
+import { findCommand, formatChord } from './shell/command-catalog.js';
 
 // Message search is the one network read the sidebar itself triggers; its
 // wire contract is pinned in context/context-queries.test.ts, so here it is
@@ -108,12 +109,25 @@ describe('Sidebar — the chat list after the title sweep', () => {
     expect(tip).toHaveTextContent('New chat');
     // The shortcut travels with the label rather than being folded into the
     // accessible name, where a screen reader would read it out as part of it.
-    expect(tip).toHaveTextContent('⌘N');
+    expect(tip).toHaveTextContent(formatChord(findCommand('chat.new')!.keys[0]!));
     expect(button).toHaveAccessibleName('New chat');
 
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('tooltip')).toBeNull();
     expect(button).toHaveFocus();
+  });
+
+  it('shows the actual Ctrl shortcuts on non-Mac platforms', async () => {
+    const platform = vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Win32');
+    try {
+      mount([], [CLAUDE_SEAT]);
+      expect(screen.getByRole('button', { name: /Start your first chat/ })).toHaveTextContent('Ctrl+N');
+      const newChat = screen.getByRole('button', { name: 'New chat' });
+      newChat.focus();
+      expect(await screen.findByRole('tooltip')).toHaveTextContent('Ctrl+N');
+    } finally {
+      platform.mockRestore();
+    }
   });
 
   it('truncates a very long chat title instead of letting it set the row width', async () => {

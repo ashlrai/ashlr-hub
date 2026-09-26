@@ -93,7 +93,7 @@ describe('cloudNeedsYouItems — PR ready for review', () => {
       kind: 'owner-lane-pr',
       severity: 'info',
       title: 'Cloud task ready for review: Fix the flaky test',
-      detail: 'Stabilised the retry timing; 3 tests added.',
+      detail: 'Cloud session reports (unverified): Stabilised the retry timing; 3 tests added.',
       since: '2026-09-25T17:00:00.000Z',
       expiresAt: null,
       subject: { repo: 'ashlrai/ashlr-hub', pr: 42, seatId: null, sessionId: null, engine: 'claude' },
@@ -112,7 +112,7 @@ describe('cloudNeedsYouItems — PR ready for review', () => {
     const partial = task({ state: 'pr-open', pr: PR, report: { status: 'blocked', summary: 'Needs a secret.', testsRun: [], risks: [] } });
     const none = task({ state: 'pr-open', pr: PR });
     const [a, b] = cloudNeedsYouItems([partial, none], NOW);
-    expect(a!.detail).toBe('Needs a secret. (blocked)');
+    expect(a!.detail).toBe('Cloud session reports (unverified): Needs a secret. (blocked)');
     expect(b!.detail).toBe('No report yet: the pull request has no ashlr-cloud-report block.');
   });
 

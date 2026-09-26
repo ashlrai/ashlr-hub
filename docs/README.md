@@ -16,6 +16,7 @@ that every integration, provider or autonomous effect is active.
 | Separate tested firm machinery from remaining activation and integration work | [Autonomy gap map](AUTONOMY-GAP.md) |
 | Exercise signed graph execution and a deliberately lying candidate | [Firm graph fixture](FIRM-DEMO.md) |
 | Connect autonomy research to engineering acceptance | [Autonomy engineering brief](UNIVERSE-AUTONOMY-RESEARCH.md) |
+| Compare Ashlrverse with current agent platforms using measurable acceptance gates | [Competitive acceptance](VERSE-COMPETITIVE-ACCEPTANCE.md) |
 | Run a first bounded experiment and inspect its results | [Quickstart](QUICKSTART.md) |
 | Understand the current components and their boundaries | [Architecture](ARCHITECTURE.md#current-runtime-map) |
 | Configure experiments, campaigns, portfolios and artifact delivery | [Ashlrverse operator guide](ASHLR-UNIVERSE.md) |
@@ -29,7 +30,7 @@ that every integration, provider or autonomous effect is active.
 | See what multi-folder workspaces, GitHub and MCP management still need | [Workspaces build contract](VERSE-WORKSPACES.md) |
 | Read a Verse chat's context meter, choose standard or expansive context, and continue a long session in a fresh chat | [Verse context windows — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-CONTEXT.md) |
 | Use the Verse workbench: Command, Fleet, Growth, Mind and Chat, the Needs-you drawer, terminal, preview, review, budget modes and account health | [Ashlr Verse — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) |
-| Let the fleet merge on its own inside a scope you signed with Touch ID, and run the one-time `ashlr authority setup` | [Standing authority — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md) |
+| Understand the standing authority design and the currently dormant activation path | [Standing authority — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md) |
 | Find a Verse route family, its gates and wire shapes | [Verse build contract — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-CONTRACT-V1.md#v310-additive-contract--the-workbench-and-the-autonomy-console) |
 
 The CLI's `universe help`, `resources pool --help` and `runtime help` describe
