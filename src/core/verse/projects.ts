@@ -14,6 +14,7 @@
  */
 
 import { existsSync, readFileSync, statSync } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
 import { enrollmentPath } from '../sandbox/policy.js';
@@ -98,5 +99,85 @@ export function discoverProjects(opts: VerseProjectDiscoveryOptions = {}): Verse
   for (const repo of readEnrolledRepos(registry)) add(repo, true);
   for (const session of opts.sessions ?? []) add(session.projectPath, false);
 
+  return out;
+}
+
+/** Test seam for {@link discoverProjectsAsync}: resolves whether `path` is a directory. Never rejects. */
+export type AsyncDirectoryCheck = (path: string) => Promise<boolean>;
+
+async function isDirectoryAsync(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+async function readEnrolledReposAsync(path: string): Promise<string[]> {
+  try {
+    const raw = await readFile(path, 'utf8');
+    if (raw.length > MAX_ENROLLMENT_BYTES) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+    const repos = (parsed as { repos?: unknown }).repos;
+    if (!Array.isArray(repos)) return [];
+    return repos.filter((r): r is string => typeof r === 'string' && r.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * `discoverProjects`, with every filesystem touch off the event loop — for
+ * the HTTP routes the page calls as it loads (GET /api/verse/bootstrap).
+ *
+ * WHY. Project paths are the operator's folders, usually under ~/Desktop or
+ * ~/Documents, which macOS guards with a privacy (TCC) consent prompt. While
+ * that prompt is up — every time the app's ad-hoc code identity changes, e.g.
+ * right after `ship:local` swaps the binary — a SYNCHRONOUS stat into the
+ * folder parks the calling thread until the operator answers it. On the main
+ * thread that froze the whole sidecar, static `/verse/` included, for as long
+ * as the dialog went unanswered (3.13.0 ship, 2026-09-26: ~3 minutes). Here
+ * the wait lands on a libuv pool thread instead, so only this request waits.
+ *
+ * Same answer, same order, same filters as the synchronous version; the
+ * directory checks run concurrently. Never throws.
+ */
+export async function discoverProjectsAsync(
+  opts: VerseProjectDiscoveryOptions & { isDirectory?: AsyncDirectoryCheck } = {},
+): Promise<VerseProject[]> {
+  const registry = opts.enrollmentPath ?? safeEnrollmentPath();
+  const artifactsRoot = opts.artifactsRoot ?? join(homedir(), '.codex', 'artifacts');
+  const checkDirectory = opts.isDirectory ?? isDirectoryAsync;
+
+  // Candidates in the exact order the synchronous version visits them.
+  const candidates: Array<{ path: string; enrolled: boolean }> = [];
+  for (const repo of await readEnrolledReposAsync(registry)) candidates.push({ path: repo, enrolled: true });
+  for (const session of opts.sessions ?? []) candidates.push({ path: session.projectPath, enrolled: false });
+
+  const unique = new Map<string, Promise<boolean>>();
+  const resolved = candidates.map(({ path: rawPath, enrolled }) => {
+    if (typeof rawPath !== 'string' || rawPath.length === 0) return null;
+    const path = resolve(rawPath);
+    if (isUnder(path, artifactsRoot)) return null;
+    if (!unique.has(path)) unique.set(path, checkDirectory(path).catch(() => false));
+    return { path, enrolled };
+  });
+  const isDir = new Map<string, boolean>();
+  await Promise.all([...unique].map(async ([path, check]) => { isDir.set(path, await check); }));
+
+  const out: VerseProject[] = [];
+  const byPath = new Map<string, VerseProject>();
+  for (const candidate of resolved) {
+    if (!candidate || !isDir.get(candidate.path)) continue;
+    const existing = byPath.get(candidate.path);
+    if (existing) {
+      if (candidate.enrolled) existing.enrolled = true;
+      continue;
+    }
+    const project: VerseProject = { path: candidate.path, name: basename(candidate.path) || candidate.path, enrolled: candidate.enrolled };
+    byPath.set(candidate.path, project);
+    out.push(project);
+  }
   return out;
 }

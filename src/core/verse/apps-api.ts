@@ -96,11 +96,21 @@ function ensureService(cfg: AshlrConfig): AppsService {
  * never throws.
  */
 export function warmVerseApps(cfg: AshlrConfig): Promise<void> {
-  try {
-    return ensureService(cfg).snapshot().then(() => undefined, () => undefined);
-  } catch {
-    return Promise.resolve();
-  }
+  // On the NEXT macrotask, not inline: building the service and starting the
+  // collect (the login-shell spawn, the loopback probes) is synchronous work
+  // up to its first await, and none of it belongs on the startup path that
+  // prints the sidecar's JSON line and starts answering /verse/. The timer is
+  // unref'd so a process that is otherwise done never waits on a warm-up.
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      try {
+        ensureService(cfg).snapshot().then(() => resolve(), () => resolve());
+      } catch {
+        resolve();
+      }
+    }, 0);
+    (timer as { unref?: () => void }).unref?.();
+  });
 }
 
 async function readStrictBody(

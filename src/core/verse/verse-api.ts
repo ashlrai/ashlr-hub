@@ -101,7 +101,7 @@ import {
   updateVersePreferences,
 } from './preferences.js';
 import { prepareProjectMemory, readProjectMemory, writeProjectMemory } from './project-memory.js';
-import { discoverProjects } from './projects.js';
+import { discoverProjectsAsync } from './projects.js';
 import { discoverSeats, getSeatReadiness, refreshSeatTelemetry, type VerseSeatDiscovery } from './seats.js';
 import { buildHandoffPreview } from './session-handoff.js';
 import { searchSessions } from './session-search.js';
@@ -1782,7 +1782,8 @@ export async function handleVerseApi(
       const sessions = engine.listSessions();
       const body: VerseBootstrap = {
         seats: discovery.seats,
-        projects: discoverProjects({ sessions }),
+        // Async: project paths sit in TCC-guarded folders (projects.ts).
+        projects: await discoverProjectsAsync({ sessions }),
         sessions,
         // NOT `workspaces`. Bootstrap's key set is asserted exactly by
         // test/verse-api.test.ts (the no-launcher-leak shape guard), and the
