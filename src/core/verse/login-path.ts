@@ -295,7 +295,6 @@ export function createShellRunner(deps: ShellRunnerDeps = {}): ShellRunner {
     const chunks: Buffer[] = [];
     let kept = 0;
     let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
     let grace: ReturnType<typeof setTimeout> | undefined;
     let child: ChildProcess | undefined;
 
@@ -307,12 +306,17 @@ export function createShellRunner(deps: ShellRunnerDeps = {}): ShellRunner {
     const settle = (code: number | null, timedOut: boolean): void => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
       if (grace) clearTimeout(grace);
       // Stop reading: whoever still holds the pipe gets EPIPE, not our memory.
       try { child?.stdout?.destroy(); } catch { /* ignore */ }
       resolve({ stdout: Buffer.concat(chunks).toString('utf8'), code, timedOut });
     };
+    // Armed before the spawn so every settle path (a throwing spawn included) clears it.
+    const timer = setTimeout(() => {
+      reap();
+      settle(null, true);
+    }, opts.timeoutMs);
 
     try {
       child = spawnChild(file, [...args], {
@@ -325,11 +329,6 @@ export function createShellRunner(deps: ShellRunnerDeps = {}): ShellRunner {
       settle(null, false);
       return;
     }
-
-    timer = setTimeout(() => {
-      reap();
-      settle(null, true);
-    }, opts.timeoutMs);
 
     child.stdout?.on('data', (chunk: Buffer) => {
       if (kept >= MAX_PROBE_STDOUT) return;
