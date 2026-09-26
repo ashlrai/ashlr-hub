@@ -659,6 +659,7 @@
 /test/routing-budget-store.test.ts @masonwyatt23
 /test/routing-capacity-history.test.ts @masonwyatt23
 /test/routing-interactive-scope.test.ts @masonwyatt23
+/test/routing-router-weights.test.ts @masonwyatt23
 /test/routing-seat-router.test.ts @masonwyatt23
 /test/routing-subscription-failclosed.test.ts @masonwyatt23
 /test/runtime-probe-event-loop.test.ts @masonwyatt23
