@@ -502,3 +502,34 @@ describe('buildRollup — output shape', () => {
     expect(typeof totals.commits).toBe('number');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Local Ollama tags are free — a Verse local seat's transcript names the tag
+// ---------------------------------------------------------------------------
+
+describe('modelToProviderKey — Ollama tags from Verse local seats', () => {
+  it('maps name:tag references to ollama (so they cost $0), including gpt-oss', async () => {
+    const { modelToProviderKey, isLocalProviderModel } = await import('../src/core/observability/rollup.js');
+    for (const tag of ['gpt-oss:20b', 'qwen3.8:27b-q8_0', 'llama3.2:latest', 'hf.co/unsloth/Qwen3-8B-GGUF:Q4_K_M']) {
+      expect(modelToProviderKey(tag), tag).toBe('ollama');
+      expect(isLocalProviderModel(tag), tag).toBe(true);
+    }
+  });
+
+  it('leaves cloud ids alone, including the ones that also carry a colon', async () => {
+    const { modelToProviderKey, isLocalProviderModel } = await import('../src/core/observability/rollup.js');
+    expect(modelToProviderKey('claude-sonnet-4-5-20250929')).toBe('claude');
+    expect(modelToProviderKey('gpt-5-codex')).toBe('gpt');
+    expect(modelToProviderKey('ft:gpt-4o-mini:acme::abc123')).not.toBe('ollama');
+    expect(modelToProviderKey('us.anthropic.claude-sonnet-4-5-20250929-v1:0')).not.toBe('ollama');
+    expect(isLocalProviderModel('gpt-oss:120b-cloud')).toBe(false);
+  });
+
+  it('a local-seat day in the rollup carries tokens but no estimated spend', () => {
+    mockCollect.mockReturnValue([makeEvent({ model: 'gpt-oss:20b', tokensIn: 12_560, tokensOut: 47 })]);
+    const r = buildRollup('7d', makeConfig());
+    expect(r.totals.tokensIn).toBe(12_560);
+    expect(r.totals.estCostUsd).toBe(0);
+    expect(r.byDay.reduce((s, d) => s + d.estCostUsd, 0)).toBe(0);
+  });
+});

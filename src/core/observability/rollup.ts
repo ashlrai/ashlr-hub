@@ -297,6 +297,11 @@ export function invalidateCommitCountCache(): void {
  */
 export function modelToProviderKey(model: string): string {
   const m = model.toLowerCase();
+  // Before the `gpt` prefix: a Verse local seat drives the Claude Code CLI at
+  // Ollama, so its transcript names the OLLAMA tag — `gpt-oss:20b`,
+  // `qwen3.8:27b-q8_0` — and a free local chat was priced as OpenAI (gpt-*)
+  // or at the $3/$15 fallback on the Usage page.
+  if (isOllamaTag(m)) return 'ollama';
   if (m.startsWith('claude'))  return 'claude';
   if (m.startsWith('gpt'))     return 'gpt';
   if (m.startsWith('gemini'))  return 'gemini';
@@ -306,6 +311,18 @@ export function modelToProviderKey(model: string): string {
   if (m.includes('lmstudio'))  return 'lmstudio';
   // Pass through: estCostUsd will fallback to conservative $3/$15
   return model;
+}
+
+/**
+ * An Ollama model reference: `name:tag`, optionally namespaced
+ * (`hf.co/org/model:Q4_K_M`). Cloud ids that also carry a colon are excluded:
+ * Bedrock (`us.anthropic.claude-…-v1:0`), OpenAI fine-tunes (`ft:gpt-4o:org::id`)
+ * and Ollama's own hosted `*-cloud` tags, which do not run on this machine.
+ */
+function isOllamaTag(lowerModel: string): boolean {
+  if (!/^[a-z0-9][\w./-]*:[\w.-]+$/.test(lowerModel)) return false;
+  if (lowerModel.startsWith('ft:') || lowerModel.includes('anthropic')) return false;
+  return !lowerModel.endsWith('-cloud') && !lowerModel.endsWith(':cloud');
 }
 
 /**

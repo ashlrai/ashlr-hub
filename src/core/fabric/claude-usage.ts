@@ -108,7 +108,14 @@ const MAX_FILES_PER_CALL = 500;
 const GUARD_BYTES = 64;
 const NEWLINE = 0x0a;
 
-interface UsageRecord { ts: number; total: number }
+/**
+ * `key` is the response identity (message.id + requestId), null when the line
+ * has none. Claude Code writes one line PER CONTENT BLOCK (thinking, text,
+ * each tool_use), every one repeating the response's id and full usage, so
+ * the aggregate counts each key once — otherwise a reply with three tool
+ * calls counted as four messages and four times its tokens.
+ */
+interface UsageRecord { ts: number; total: number; key: string | null }
 
 interface FileUsageState {
   ino: number;
@@ -156,7 +163,10 @@ function parseUsageLine(line: string): UsageRecord | null {
   const tcw   = typeof u['cache_creation_input_tokens'] === 'number' ? (u['cache_creation_input_tokens'] as number) : 0;
   const total = tin + tout + tcr + tcw;
   if (total === 0) return null;
-  return { ts: tsMs, total };
+  const id = (msg as Record<string, unknown>)['id'];
+  const requestId = typeof o['requestId'] === 'string' ? o['requestId'] : '';
+  const key = typeof id === 'string' && id.length > 0 ? `${id}\u0000${requestId}` : null;
+  return { ts: tsMs, total, key };
 }
 
 function pushLines(text: string, into: UsageRecord[], sinceMs: number): void {
@@ -369,6 +379,9 @@ export function readClaudeUsage(): ClaudeUsageResult {
     let tokens5h = 0, tokens7d = 0;
     let messages5h = 0, messages7d = 0;
     const nextStates = new Map<string, FileUsageState>();
+    // Keyed records already counted, across files (a resumed session can
+    // replay earlier responses into a new transcript): first ts + counted total.
+    const counted = new Map<string, { ts: number; total: number }>();
 
     for (const { filePath, stat } of toScan) {
       const state = refreshFile(filePath, stat, fileStates.get(filePath), since7d);
@@ -381,6 +394,21 @@ export function readClaudeUsage(): ClaudeUsageResult {
       for (const list of [state.records, state.tailRecords]) {
         for (const r of list) {
           if (r.ts < since7d) continue;
+          if (r.key !== null) {
+            const prev = counted.get(r.key);
+            if (prev) {
+              // A repeat line of a counted response: never a new message; its
+              // tokens only if a later copy reports more (a streamed early copy).
+              if (r.total > prev.total) {
+                const delta = r.total - prev.total;
+                tokens7d += delta;
+                if (prev.ts >= since5h) tokens5h += delta;
+                prev.total = r.total;
+              }
+              continue;
+            }
+            counted.set(r.key, { ts: r.ts, total: r.total });
+          }
           tokens7d += r.total;
           messages7d += 1;
           if (r.ts >= since5h) {

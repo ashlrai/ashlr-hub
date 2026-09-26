@@ -339,15 +339,26 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   }, [insertRequest]);
 
   // ⌘. stops the running turn from anywhere in the app (armed only while one runs).
+  //
+  // ⌘. is ALSO the shell's Resources toggle (3.11 C6), and both listened on
+  // document in the bubble phase: one press cancelled the turn AND opened the
+  // drawer. While a turn runs, stopping wins (the macOS cancel chord, and the
+  // urgent one) — so this listens in the CAPTURE phase and claims the event;
+  // the shell skips default-prevented keys. Inside a modal (the palette, a
+  // confirmation, the floating Resources drawer) the keyboard belongs to that
+  // modal and ⌘. keeps its drawer meaning, so a press meant to close the
+  // drawer never cancels work.
   useEffect(() => {
     if (!running) return undefined;
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (event.key !== '.' || (!event.metaKey && !event.ctrlKey) || event.shiftKey || event.altKey) return;
+      if (event.defaultPrevented) return;
+      if (document.querySelector('[aria-modal="true"]')) return;
       event.preventDefault();
       onStop();
     };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
   }, [running, onStop]);
 
   // When the reply finishes, hand focus back to the box unless it went somewhere deliberate.

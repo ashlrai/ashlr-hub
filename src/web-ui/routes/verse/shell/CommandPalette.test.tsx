@@ -107,6 +107,22 @@ describe('CommandPalette', () => {
     expect(getVerseUiState().command).toMatchObject({ name: 'open-session', sessionId: 'vs_run' });
   });
 
+  it('highlights the best match even when a weaker hit sits in an earlier group — "usage" ↩ opens Usage', async () => {
+    const user = userEvent.setup();
+    act(() => setVerseSection('command'));
+    mount();
+    const input = await openPalette();
+    await user.type(input, 'usage');
+    // The resource-bar toggle matches its "usage bars" keyword and is listed
+    // first (Actions precede Go to), but "Open Usage" is the title hit.
+    const toggle = await screen.findByRole('option', { name: /Show or hide the resource bar/ });
+    const usage = screen.getByRole('option', { name: /Open Usage/ });
+    expect(toggle.compareDocumentPosition(usage) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(usage).toHaveAttribute('aria-selected', 'true');
+    await user.keyboard('{Enter}');
+    expect(getVerseUiState()).toMatchObject({ section: 'usage', overlay: null });
+  });
+
   it('⇥ fills an argument: New chat on… → a seat', async () => {
     const user = userEvent.setup();
     mount();

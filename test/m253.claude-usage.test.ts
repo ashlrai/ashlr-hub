@@ -154,6 +154,33 @@ describe('M253 readClaudeUsage — transcript 5h token sum', () => {
     expect(result.messages5h).toBe(2);
   });
 
+  it('counts one response once — Claude Code writes a line per content block', async () => {
+    // thinking + text + tool_use of ONE response: same message.id/requestId, same full usage.
+    const block = (id: string, requestId: string, out: number) => {
+      const line = JSON.parse(makeAssistantLine({ tsOffsetMs: -5 * 60 * 1000, inputTokens: 1000, outputTokens: out })) as Record<string, any>;
+      line['requestId'] = requestId;
+      line['message']['id'] = id;
+      return JSON.stringify(line);
+    };
+    writeTranscript('proj-a', [
+      block('msg_1', 'req_1', 10),
+      block('msg_1', 'req_1', 10),
+      block('msg_1', 'req_1', 40), // a later copy that finished streaming reports more output
+      block('msg_2', 'req_2', 50),
+    ]);
+    // The same response replayed into a resumed session's new file is not counted again.
+    const other = join(tmpHome, '.claude', 'projects', 'proj-b');
+    mkdirSync(other, { recursive: true });
+    writeFileSync(join(other, 'resumed.jsonl'), block('msg_2', 'req_2', 50) + '\n');
+
+    const { readClaudeUsage } = await import('../src/core/fabric/claude-usage.js');
+    const result = readClaudeUsage();
+    expect(result.messages5h).toBe(2);
+    expect(result.messages7d).toBe(2);
+    expect(result.tokens5h).toBe(1040 + 1050);
+    expect(result.tokens7d).toBe(1040 + 1050);
+  });
+
   it('ignores human/tool type lines (only assistant)', async () => {
     writeTranscript('proj-a', [
       JSON.stringify({ type: 'human', timestamp: new Date().toISOString(), message: { content: 'hello' } }),

@@ -67,6 +67,18 @@ describe('the palette view', () => {
     expect(chats.items[0]!.subtitle).toContain('running 1m 02s');
   });
 
+  it('points `best` at the strongest match across groups; ties and empty queries stay on row 0', () => {
+    const view = paletteView(buildPaletteItems(input()), 'usage', [], 'mac');
+    expect(view.flat[0]!.title).toBe('Show or hide the resource bar'); // keyword hit, earlier group
+    expect(view.flat[view.best]!.title).toBe('Open Usage'); // title hit wins the highlight
+    expect(paletteView(buildPaletteItems(input()), '', [], 'mac').best).toBe(0);
+    const stop = paletteView(buildPaletteItems(input()), 'stop', [], 'mac');
+    // "Stop words tokenizer" (Chats) and "Stop running chats…" (Actions) both
+    // start with the word — a tie keeps the earlier row.
+    expect(stop.flat[0]!.title).toBe('Stop words tokenizer');
+    expect(stop.best).toBe(0);
+  });
+
   it('> limits to actions and # to chats', () => {
     expect(paletteView(buildPaletteItems(input()), '>new', [], 'mac').groups.map((g) => g.id)).toEqual(['actions']);
     expect(paletteView(buildPaletteItems(input()), '#stop', [], 'mac').groups.map((g) => g.id)).toEqual(['chats']);

@@ -83,10 +83,18 @@ export function CommandPalette({ onClose = closeVerseOverlay }: CommandPalettePr
     return paletteView(buildPaletteItems(input), query, ui.recentActions, platform);
   }, [argFor, input, query, ui.recentActions, platform]);
 
-  // Keep the highlight on a real row as results change.
+  // A new query highlights its best match (see PaletteView.best); a data
+  // refresh under an unchanged query only keeps the highlight on a real row,
+  // so it never yanks a highlight the operator arrowed to.
+  const highlightBestRef = useRef(false);
   useEffect(() => {
+    if (highlightBestRef.current) {
+      highlightBestRef.current = false;
+      setActive(view.best);
+      return;
+    }
     setActive((i) => (view.flat.length === 0 ? 0 : Math.min(i, view.flat.length - 1)));
-  }, [view.flat.length]);
+  }, [view]);
 
   useEffect(() => {
     const row = listRef.current?.querySelector<HTMLElement>(`[data-index="${active}"]`);
@@ -220,7 +228,7 @@ export function CommandPalette({ onClose = closeVerseOverlay }: CommandPalettePr
             spellCheck={false}
             onChange={(e) => {
               setQuery(e.target.value);
-              setActive(0);
+              highlightBestRef.current = true;
             }}
             onKeyDown={onKeyDown}
           />
