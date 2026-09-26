@@ -441,6 +441,7 @@ export const REAL_IO_TEST_FILES = [
   // Track B — autonomy core.
   'test/host-merge-310b.test.ts', // real git through FakeGithub (test/helpers/fleet-github-310b.ts) — guard cannot see it
   'test/standing-merge-pass-310b.test.ts', // real git rebase/squash through FakeGithub — guard cannot see it
+  'test/cloud-pr-actions.test.ts', // 3.13: real loopback http server bind for the Needs-you land/close/update-branch routes
   'test/cloud-intake-313.test.ts', // 3.13: its end-to-end block runs real git through FakeGithub — guard cannot see it
   'test/execution-leases-310b.test.ts', // cross-process lease cases via real tsx children (test/helpers/throughput-310b.ts)
   'test/throughput-310b.test.ts', // real tsx children + h1 temp repos; only the model is faked
