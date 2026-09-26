@@ -25,11 +25,14 @@
  * anything they export themselves comes back — only what the SIDECAR carried
  * is removed.
  *
- * NEVER BLOCKS: the probe is one async execFile with a hard timeout; the
+ * NEVER BLOCKS: the probe is one async spawn in its own session with a hard
+ * timeout enforced by our own timer, which kills the probe's whole process
+ * group and resolves even when stdio never closes (createShellRunner). The
  * result is cached (single-flight), so a request handler awaits a resolved
- * promise after the first call.
+ * promise after the first call. Nothing that serves a page awaits it: only
+ * the Apps family, terminal tabs and launches do.
  */
-import { execFile } from 'node:child_process';
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, isAbsolute } from 'node:path';
@@ -229,25 +232,130 @@ export function parseLoginShellOutput(stdout: string): string[] | null {
   return entries.length > 0 ? entries : null;
 }
 
-const defaultRunShell: ShellRunner = (file, args, opts) =>
-  new Promise((resolve) => {
-    const child = execFile(
-      file,
-      [...args],
-      { timeout: opts.timeoutMs, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024, env: opts.env, windowsHide: true },
-      (error, stdout) => {
-        // Non-zero exit: `code` is the number. Timeout: `killed`. Spawn failure: `code` is 'ENOENT'.
-        const err = error as { killed?: boolean; code?: unknown } | null;
-        resolve({
-          stdout: typeof stdout === 'string' ? stdout : String(stdout ?? ''),
-          code: err ? (typeof err.code === 'number' ? err.code : null) : 0,
-          timedOut: Boolean(err?.killed),
-        });
-      },
-    );
-    // A startup file that reads stdin gets EOF instead of waiting for the timeout.
-    child.stdin?.end();
+/** Bytes of probe stdout kept; the rest is drained and dropped so the shell never blocks on a full pipe. */
+const MAX_PROBE_STDOUT = 1024 * 1024;
+
+/**
+ * How long, after the shell itself exits, the probe waits for its stdout to
+ * close. A background job a startup file left running (an async prompt
+ * worker, an updater, `cmd &`) inherits the pipe and can hold it open for
+ * ever; the answer is already printed by then, so it is read and the job's
+ * process group is killed.
+ */
+export const LOGIN_SHELL_EXIT_GRACE_MS = 250;
+
+/** The seams `createShellRunner` spawns and kills through (tests pass fakes). */
+export interface ShellRunnerDeps {
+  spawn?: (file: string, args: string[], opts: SpawnOptions) => ChildProcess;
+  /** Kill every process in the probe's own process group. Never throws. */
+  killGroup?: (pid: number) => void;
+  platform?: NodeJS.Platform;
+  exitGraceMs?: number;
+}
+
+function defaultKillGroup(pid: number): void {
+  try {
+    // Negative pid: the whole group. The probe is its own group leader
+    // (detached ⇒ setsid), so this reaches the shell AND every background job
+    // its startup files started, and nothing of the sidecar's.
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    // ESRCH: the group is already gone.
+  }
+}
+
+/**
+ * The real probe runner. Every guarantee here is about NOT depending on the
+ * operator's startup files behaving:
+ *
+ *   - its own session and process group (`detached` ⇒ setsid): an
+ *     interactive shell may do job control (tcsetpgrp, SIGTTIN/SIGTTOU,
+ *     `kill 0`) on the group it lives in, and without this that group is the
+ *     sidecar's. In a fresh session it also has no controlling terminal to
+ *     fight over, even when the sidecar was started from one;
+ *   - stdin is /dev/null (`ignore`), stderr is discarded (a chatty startup
+ *     file can never fill a pipe nobody reads and block), stdout is drained
+ *     continuously and capped;
+ *   - the timeout is OUR timer: it kills the whole group and resolves at once,
+ *     without waiting for stdio to close (a grandchild holding stdout open
+ *     would otherwise keep `execFile`'s callback — and so the probe — pending
+ *     after the shell was killed);
+ *   - a shell that exits but leaves stdout held resolves after a short grace.
+ *
+ * `-l -i` semantics are kept (the interactive startup files are where most
+ * operators set PATH); only the ways they could stall the caller are removed.
+ */
+export function createShellRunner(deps: ShellRunnerDeps = {}): ShellRunner {
+  const spawnChild = deps.spawn ?? ((file, args, opts) => spawn(file, args, opts));
+  const killGroup = deps.killGroup ?? defaultKillGroup;
+  const platform = deps.platform ?? process.platform;
+  const exitGraceMs = deps.exitGraceMs ?? LOGIN_SHELL_EXIT_GRACE_MS;
+
+  return (file, args, opts) => new Promise<ShellRunResult>((resolve) => {
+    const chunks: Buffer[] = [];
+    let kept = 0;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    let child: ChildProcess | undefined;
+
+    const reap = (): void => {
+      const pid = child?.pid;
+      if (typeof pid === 'number' && pid > 0 && platform !== 'win32') killGroup(pid);
+      try { child?.kill('SIGKILL'); } catch { /* already gone */ }
+    };
+    const settle = (code: number | null, timedOut: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (grace) clearTimeout(grace);
+      // Stop reading: whoever still holds the pipe gets EPIPE, not our memory.
+      try { child?.stdout?.destroy(); } catch { /* ignore */ }
+      resolve({ stdout: Buffer.concat(chunks).toString('utf8'), code, timedOut });
+    };
+
+    try {
+      child = spawnChild(file, [...args], {
+        detached: platform !== 'win32',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env: opts.env,
+        windowsHide: true,
+      });
+    } catch {
+      settle(null, false);
+      return;
+    }
+
+    timer = setTimeout(() => {
+      reap();
+      settle(null, true);
+    }, opts.timeoutMs);
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (kept >= MAX_PROBE_STDOUT) return;
+      const slice = chunk.length > MAX_PROBE_STDOUT - kept ? chunk.subarray(0, MAX_PROBE_STDOUT - kept) : chunk;
+      chunks.push(slice);
+      kept += slice.length;
+    });
+    child.stdout?.on('error', () => { /* destroyed on settle, or the writer died */ });
+    // Spawn failure (ENOENT, EACCES): 'error' without 'exit'.
+    child.on('error', () => {
+      reap();
+      settle(null, false);
+    });
+    child.on('exit', (code) => {
+      if (settled) return;
+      grace = setTimeout(() => {
+        // The shell is gone but something it started still holds stdout.
+        reap();
+        settle(code, false);
+      }, exitGraceMs);
+    });
+    child.on('close', (code) => settle(code, false));
   });
+}
+
+const defaultRunShell: ShellRunner = createShellRunner();
 
 function fallbackEntries(env: NodeJS.ProcessEnv, home: string, isDirectory: (p: string) => boolean): string[] {
   const inherited = typeof env['PATH'] === 'string' ? env['PATH'].split(':') : [];
