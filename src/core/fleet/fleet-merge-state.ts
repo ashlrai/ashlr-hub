@@ -29,6 +29,7 @@ import type { HostMergeRevocationIdentityV1 } from '../autonomy/host-merge-revoc
 import { readStableRegularFile } from '../util/stable-file-read.js';
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock, type LocalStoreLock } from './local-store-lock.js';
+import type { VerifyCheckCommand, VerifyCheckMemo } from './verify-check-run.js';
 import type {
   FleetActor,
   GateId,
@@ -88,6 +89,13 @@ export interface FleetPrMemo {
   checks: ChecksMemo | null;
   /** Head SHA a `gate:would-merge` row was written for (once per head). */
   wouldMergeHeadSha: string | null;
+  /**
+   * 3.13: the `ashlr/verify` check run the App posted on a head (verify-check-run.ts).
+   * Its `appId` is GitHub's own attribution of that run — the App id G7
+   * requires `ashlr/verify` from on local-enforcement repos. Absent on
+   * records written before 3.13 (treated as "never posted").
+   */
+  verifyCheck?: VerifyCheckMemo | null;
 }
 
 /** The host-merge authority for one merge attempt (host-merge-revocation-protocol). */
@@ -131,6 +139,8 @@ export interface FleetMergeStateV1 {
   treeSha: string | null;
   diffHash: string | null;
   verifyDigest: string | null;
+  /** 3.13: the verify commands G3's verification ran (reported by `ashlr/verify`); absent before 3.13. */
+  verifyCommands?: VerifyCheckCommand[] | null;
   risk: MergeRisk | null;
   files: number | null;
   linesAdded: number | null;
