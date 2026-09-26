@@ -196,6 +196,7 @@
 /test/authority-resident-cli.test.ts @masonwyatt23
 /test/authority-review-fixes-310.test.ts @masonwyatt23
 /test/authority-rollout-310b.test.ts @masonwyatt23
+/test/authority-setup-api.test.ts @masonwyatt23
 /test/authority-setup-resume.test.ts @masonwyatt23
 /test/authority-standing-grant-310b.test.ts @masonwyatt23
 /test/authority-surface-310b.test.ts @masonwyatt23

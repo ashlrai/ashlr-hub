@@ -79,6 +79,15 @@ immediately before it calls GitHub, and again after consuming.
 prints what it did, never runs `sudo`, and never touches launchd.
 `--dry-run` shows the plan without asking or changing anything.
 
+Setup is safe to rerun, as often as you like. Each step checks first and
+reports `already` for what is in place: an open trust-root PR is found, not
+reopened; a ruleset GitHub already holds with the same content is not applied
+again; the provenance key is rotated only once. A step that fails is reported
+as failed, and the run still ends with its summary. Verse shows the same
+checklist, read-only, on Command and in onboarding
+(`GET /api/verse/authority/setup`, the dry run's `--json`), with the next
+step's command to copy.
+
 1. **Custody helper.** If the helper is missing, setup stops and asks you to
    run `sudo scripts/install-custody.sh` yourself. Running it with `--dry-run`
    first prints the plan. The build and the tests run as you; only the final
@@ -95,14 +104,21 @@ prints what it did, never runs `sudo`, and never touches launchd.
    rerun setup.
 5. **GitHub App.** Setup creates the `ashlr-fleet` App through the Manifest
    flow, which takes one browser page. Installing the App on the repos is one
-   more click. An App created before 3.13 has only `checks: read` and cannot
-   post `ashlr/verify`; setup detects that, marks this step waiting on you
-   and prints the exact links: set **Checks: Read and write** on the App's
+   more click. The step counts as done only when the App is installed on the
+   enrolled repos, not just when its key is in custody. Setup checks with
+   `gh api orgs/<owner>/installations`, then asks the App itself (custody
+   `gh-token`) about any repo that check leaves open. Until the App is
+   installed, the step waits on you and prints the install page. An App
+   created before 3.13 has only `checks: read` and cannot post
+   `ashlr/verify`; setup detects that, marks this step waiting on you and
+   prints the exact links: set **Checks: Read and write** on the App's
    Permissions page, then accept the new permission on each installation.
 6. **Claude token.** Run `claude setup-token` in another terminal and paste
    the token. The input is hidden, and the token goes straight to custody.
 7. **Rulesets.** Setup runs `ashlr authority protect --apply`; review the
-   rules first with `--print`. Each ruleset requires status checks, pinned to
+   rules first with `--print`. Only repos whose ruleset is missing or
+   differs are applied. An extra rule, bypass actor or required check counts
+   as a difference. Each ruleset requires status checks, pinned to
    the App that reports each one today, and requires the head to be up to
    date with its base. For a grant repo whose fleet mirror has a verify
    command it also requires `ashlr/verify`, pinned to the `ashlr-fleet` App,
@@ -119,7 +135,11 @@ prints what it did, never runs `sudo`, and never touches launchd.
 9. **Old activation state.** Setup moves `~/.ashlr/activation`, which holds
    the burned key, out of `~/.ashlr`. Archive it offline, then delete it.
 10. **Provenance key.** Setup rotates the provenance HMAC key, which agents
-    could read while confinement was off.
+    could read while confinement was off. It does this once. The rotation is
+    recorded next to the key in `provenance.key.rotation.json`, as the new
+    key's sha256, so a rerun leaves that key alone. Rotating again would
+    invalidate every pending proposal. `ashlr authority rotate-provenance`
+    still rotates whenever you run it, and records that rotation too.
 11. **First grant.** You sign the first grant (Touch ID). If you agree, setup
     then sets the switch to Autonomous; the ladder starts in shadow.
 

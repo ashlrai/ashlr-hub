@@ -15,6 +15,8 @@
  */
 import type {
   AuthorityGrantDraft,
+  AuthoritySetupReportV1,
+  AuthoritySetupStepV1,
   AuthorityStatusV1,
   RolloutStage,
   StandingGrantV1,
@@ -111,6 +113,49 @@ export function grantPayload(now = Date.now()): StandingGrantV1 {
 export function grantDraft(now = Date.now()): AuthorityGrantDraft {
   const payload = grantPayload(now);
   return { payload: { ...payload, issuedAt: iso(now), expiresAt: iso(now + 30 * DAY), grantSeq: 4 }, digest: hex('draft', 64) };
+}
+
+/** The fifteen steps of `ashlr authority setup`, in order, with what each needs from Mason (src/cli/authority.ts). */
+const SETUP_STEPS: readonly (readonly [id: string, step: string, needs: AuthoritySetupStepV1['needs'], command: string | null])[] = [
+  ['custody-helper', 'custody helper', ['sudo', 'terminal'], 'sudo scripts/install-custody.sh'],
+  ['host-binding', 'host binding', [], 'sudo scripts/install-custody.sh'],
+  ['signing-key', 'signing key', ['touch-id'], 'ashlr authority setup'],
+  ['trust-root', 'trust root', ['github'], 'ashlr authority setup'],
+  ['deploy', 'deploy', ['terminal'], 'npm run build'],
+  ['github-app', 'GitHub App', ['browser', 'github'], 'ashlr authority setup'],
+  ['claude-token', 'Claude token', ['terminal'], 'ashlr authority setup'],
+  ['canary-repo', 'canary repo', ['github'], 'ashlr authority setup'],
+  ['rulesets', 'rulesets', ['github'], 'ashlr authority setup'],
+  ['old-activation-state', 'old activation state', [], 'ashlr authority setup'],
+  ['provenance-key', 'provenance key', [], 'ashlr authority setup'],
+  ['standing-grant', 'standing grant', ['touch-id'], 'ashlr authority grant'],
+  ['autonomy-switch', 'autonomy switch', [], 'ashlr authority switch autonomous'],
+  ['daemon-service', 'daemon service', ['terminal'], 'ashlr authority resident start'],
+  ['resident-runtime', 'resident runtime', ['terminal'], null],
+];
+
+/**
+ * GET /api/verse/authority/setup — every step before `next` in place, `next`
+ * waiting on Mason, later steps planned; the daemon service waits and the
+ * resident runtime is blocked on a prerequisite (the grant, a clean release).
+ * Default: everything up to the standing grant is done (a grant can be approved).
+ */
+export function setupReport(next = 'standing-grant', over: Partial<Record<string, Partial<AuthoritySetupStepV1>>> = {}): AuthoritySetupReportV1 {
+  const at = SETUP_STEPS.findIndex(([id]) => id === next);
+  const steps: AuthoritySetupStepV1[] = SETUP_STEPS.map(([id, step, needs, command], i) => {
+    const status: AuthoritySetupStepV1['status'] = id === 'resident-runtime' ? 'blocked' : i < at ? 'already' : i === at || id === 'daemon-service' ? 'waiting-on-you' : 'skipped';
+    const open = status !== 'already';
+    return { id, step, status, detail: open ? `${step} is not in place yet` : `${step} is in place`, needs, command: open ? command : null, link: null, ...over[id] };
+  });
+  const count = (s: AuthoritySetupStepV1['status']) => steps.filter((row) => row.status === s).length;
+  return {
+    schema: 'ashlr.authority-setup.v1',
+    dryRun: true,
+    complete: false,
+    summary: { done: count('done'), already: count('already'), waitingOnYou: count('waiting-on-you'), blocked: count('blocked'), failed: count('failed'), planned: count('skipped') },
+    steps,
+    next: steps.find((row) => row.status !== 'done' && row.status !== 'already')?.id ?? null,
+  };
 }
 
 export function authorityStatus(kind: FixtureKind = 'live', now = Date.now(), over: Partial<AuthorityStatusV1> = {}): AuthorityStatusV1 {

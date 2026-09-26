@@ -7,7 +7,7 @@ import { mockCompactViewport, mockWideViewport, type ViewportMock } from '../she
 import { showTable } from '../../../components/charts/chart-test-support.js';
 import { formatDayLabel, formatTimeLabel } from '../../../components/charts/format.js';
 import type { ModelStats } from '../../../data/api-types.js';
-import { DARK_SINCE, authorityStatus, fleetHistory, learningState } from '../command/fixtures.test-support.js';
+import { DARK_SINCE, fleetHistory, learningState, setupReport } from '../command/fixtures.test-support.js';
 import { HARNESS_BASELINE_WINDOW_MS, weeklyBins } from '../growth/growth-model.js';
 import { darkSinceLabel } from '../fleet/dark-since.js';
 
@@ -83,14 +83,15 @@ describe('GrowthSection', () => {
     expect(screen.queryByText(/No fleet runs or proposals|Nothing produced since/)).toBeNull();
   });
 
-  it('asks for the one-time setup, copyable, when no grant can be drafted yet', async () => {
-    const custody = { installed: true, keyInitialized: false, githubApp: false, claudeToken: false };
-    stubSurfaceFetch({ kind: 'dark', routes: { '/api/verse/authority/draft': draftRefused(), '/api/verse/authority': authorityStatus('dark', Date.now(), { custody }) } });
+  it('asks for the next setup step, copyable, with the live checklist, while a step before the grant is open', async () => {
+    const { fetchMock } = stubSurfaceFetch({ kind: 'dark', routes: { '/api/verse/authority/setup': setupReport('custody-helper'), '/api/verse/authority/draft': draftRefused() } });
     render(<GrowthSection />);
     const state = await screen.findByRole('region', { name: 'Growth starts with the first fleet run.' });
-    await waitFor(() => expect(within(state).getByRole('button', { name: 'Copy the command: ashlr authority setup' })).toBeInTheDocument());
+    await waitFor(() => expect(within(state).getByRole('button', { name: 'Copy the command: sudo scripts/install-custody.sh' })).toBeInTheDocument());
     expect(state).toHaveTextContent('Autonomy is off. Nothing runs or merges on its own until the one-time setup is done.');
-    expect(within(state).getByRole('list', { name: 'Setup: 1 of 5 ready' })).toBeInTheDocument();
+    expect(await within(state).findByRole('list', { name: 'Setup: 0 of 15 ready' })).toBeInTheDocument();
+    expect(within(state).getAllByLabelText('Needs sudo, Terminal').length).toBeGreaterThan(0);
+    expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith('/api/verse/authority/draft'))).toBe(false);
   });
 
   it('keeps the cards that have something real to draw while dormant, each under the one state', async () => {

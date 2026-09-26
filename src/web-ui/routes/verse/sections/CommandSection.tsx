@@ -20,8 +20,10 @@
  *
  * Autonomy off (no grant, grant lapsed, Stop, switch at Off, daemon down):
  * ONE banner under the top bar (autonomy/AutonomyOffState) says what is off
- * and holds the one action — Approve grant (the bar's own Touch ID sheet), or
- * the one-time `ashlr authority setup` when no grant can be drafted yet. It
+ * and holds the one action — Approve grant (the bar's own Touch ID sheet), or,
+ * while the live setup checklist has a step open before the grant, that
+ * step's command (with the checklist under it). The grant is only drafted
+ * when the sheet opens, never on load. It
  * stands in for the verdict line and the Since strip, and the KPI row and the
  * swimlane are left out while they would only draw zeros and dashes.
  *
@@ -44,7 +46,7 @@ import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { useViewport } from '../shell/viewport.js';
 import { ActionStatus, useSurfaceActions } from '../command/actions.js';
 import { AutonomyBar, useGrantFlow } from '../command/AutonomyBar.js';
-import { AutonomyOffState, useDraftReadiness } from '../autonomy/AutonomyOffState.js';
+import { AutonomyOffState, useSetupChecklist } from '../autonomy/AutonomyOffState.js';
 import { autonomyOffState } from '../autonomy/autonomy-off-model.js';
 import { buildKpis, claudeReserve, kpisSayNothing, seatNames, sinceYouLooked } from '../command/command-model.js';
 import { KpiRow } from '../command/KpiRow.js';
@@ -145,10 +147,12 @@ export function CommandSection() {
   );
   // Needs-you names seats as the seat strip below it does, never by raw id.
   const names = useMemo(() => seatNames(seats, view), [seats, view]);
-  // The banner decides once both reads (and, with no grant, the draft) have
-  // answered — never a flash of "off" while Command is still loading.
-  const draft = useDraftReadiness(auth?.grant.state === 'none');
-  const banner = authority.data && fleet.data && draft !== undefined ? autonomyOffState({ authority: auth, live, draft }) : null;
+  // The banner decides once both reads (and, with no grant, the setup
+  // checklist) have answered — never a flash of "off" while Command is still loading.
+  const setup = useSetupChecklist(auth?.grant.state === 'none');
+  const banner = authority.data && fleet.data && setup.readiness !== undefined
+    ? autonomyOffState({ authority: auth, live, readiness: setup.readiness, setup: setup.report })
+    : null;
   const kpisEmpty = useMemo(() => kpisSayNothing({ fleet: live, history: hist, learning: learning.data?.value ?? null }), [live, hist, learning.data]);
   const since = sinceYouLooked({ lastLookedAt: lastLooked, fleet: live, leader: leader.data?.value ?? null, activity: activity.data });
 

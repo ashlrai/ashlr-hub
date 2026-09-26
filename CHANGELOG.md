@@ -11,6 +11,30 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Rerun-safe autonomy setup, and a live setup checklist in Verse
+
+- `ashlr authority setup` is safe to rerun. The provenance key is rotated
+  only once; the rotation is recorded, so a rerun with `--yes` no longer
+  invalidates pending proposals. A ruleset GitHub already holds with the same
+  content is reported `already` and is not applied again, and
+  `protect --apply` skips it too. The GitHub App counts as done only once it
+  is installed on the enrolled repos; until then setup prints the install
+  page.
+- A failure in the App flow, the Claude token prompt, key creation or the
+  grant draft is recorded as a failed step, and the run still ends with its
+  summary.
+- The `--dry-run --json` checklist now gives each open step the command
+  that moves it on, plus a `link` where there is one (the install page or the
+  trust-root PR). Both fields are additive to `ashlr.authority-setup.v1`.
+- New read-only route `GET /api/verse/authority/setup` serves the dry run's
+  checklist, cached for 30 s. It never prompts, signs or opens a browser, and
+  it runs only bounded `gh api` reads.
+- Verse's "Autonomy is off" state and onboarding step 4 show that checklist:
+  the next step with what it needs and the command to copy for it, plus
+  every step. Verse no longer asks the server for a grant draft on load (a
+  dormant fleet used to log a 409 there on every launch). It drafts only
+  when you open the Touch ID sheet.
+
 ### Resident runtime under the standing grant
 
 - Adds `ashlr authority resident start|stop|status`. `start` installs or

@@ -1,15 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { authorityStatus, fleetLive } from '../command/fixtures.test-support.js';
+import { authorityStatus, fleetLive, setupReport } from '../command/fixtures.test-support.js';
 import { getVerseUiState, setVerseSection } from '../verse-ui-store.js';
 import { AutonomyOffState } from './AutonomyOffState.js';
 import { SETUP_COMMAND, autonomyOffState } from './autonomy-off-model.js';
 
 const NOW = Date.parse('2026-09-25T15:00:00Z');
-const custody = { installed: true, keyInitialized: true, githubApp: false, claudeToken: false };
-const setup = autonomyOffState({ authority: authorityStatus('dark', NOW, { custody }), live: fleetLive('dark', NOW), draft: 'setup' })!;
-const grant = autonomyOffState({ authority: authorityStatus('dark', NOW), live: fleetLive('dark', NOW), draft: 'ready' })!;
+const INSTALL = 'https://github.com/apps/ashlr-fleet/installations/new';
+const pending = setupReport('github-app', {
+  'github-app': { detail: 'the ashlr-fleet key is in custody, but the App is not installed on ashlrai/fleet-canary', link: INSTALL },
+});
+const setup = autonomyOffState({ authority: authorityStatus('dark', NOW), live: fleetLive('dark', NOW), readiness: 'setup', setup: pending })!;
+const grant = autonomyOffState({ authority: authorityStatus('dark', NOW), live: fleetLive('dark', NOW), readiness: 'ready', setup: setupReport() })!;
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -30,16 +33,38 @@ describe('AutonomyOffState', () => {
     await waitFor(() => expect(within(region).getByRole('button', { name: /Copy the command/ })).toHaveTextContent('Copied'));
   });
 
-  it('shows the setup progress Verse can see', () => {
+  it('shows the live checklist: the next step with what it needs and its page, then every step, folded', async () => {
     render(<AutonomyOffState state={setup} here="growth" />);
-    const checks = screen.getByRole('list', { name: 'Setup: 2 of 5 ready' });
-    expect(within(checks).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
-      'Custody helper — done',
-      'Signing key — done',
-      'GitHub App — to do',
-      'Claude token — to do',
-      'Standing grant — to do',
-    ]);
+    const checklist = await screen.findByTestId('setup-checklist');
+    expect(checklist).toHaveTextContent('NextGitHub App');
+    // On the next step and on its row in the list.
+    expect(within(checklist).getAllByLabelText('Needs Browser, GitHub')).toHaveLength(2);
+    expect(checklist).toHaveTextContent('the App is not installed on ashlrai/fleet-canary');
+    expect(within(checklist).getByRole('link', { name: 'Open the install page ↗' })).toHaveAttribute('href', INSTALL);
+    // The ONE action is still the single button, right under the next step.
+    expect(within(checklist).getByRole('button', { name: `Copy the command: ${SETUP_COMMAND}` })).toBeInTheDocument();
+    const steps = within(checklist).getByRole('list', { name: 'Setup: 5 of 15 ready' });
+    const items = within(steps).getAllByRole('listitem');
+    expect(items).toHaveLength(15);
+    expect(items[0]).toHaveTextContent('Custody helper — done');
+    expect(items[5]).toHaveAttribute('aria-current', 'step');
+    expect(items[5]).toHaveTextContent('GitHub App');
+    expect(items[6]).toHaveTextContent('Claude token');
+    expect(items[6]).toHaveTextContent('— to do');
+    expect(items[14]).toHaveTextContent('Resident runtimeblocked');
+    expect(within(items[14]!).getByLabelText('Needs Terminal')).toBeInTheDocument();
+    // Folded by default: the count is the summary.
+    expect(checklist.querySelector('details')?.open).toBe(false);
+  });
+
+  it('the grant state lists the checklist too, with Approve grant as the one action on Command', async () => {
+    const onGrant = vi.fn();
+    render(<AutonomyOffState state={grant} here="command" onGrant={onGrant} />);
+    const checklist = await screen.findByTestId('setup-checklist');
+    expect(checklist).toHaveTextContent('NextStanding grant');
+    expect(within(checklist).getAllByLabelText('Needs Touch ID').length).toBeGreaterThan(0);
+    expect(within(checklist).getByRole('button', { name: 'Approve grant' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button')).toHaveLength(1);
   });
 
   it('goes to Command from another surface, and leaves that out on Command itself', async () => {

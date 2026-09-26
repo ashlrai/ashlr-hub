@@ -338,10 +338,10 @@ describe('ashlr authority protect / github-app — ashlr/verify pinned to the Ap
     expect(noApp.out.join('\n')).not.toMatch(/"integration_id"/);
   });
 
-  it('readFleetApp reads the App\'s checks permission; the settings links are exact', () => {
-    expect(readFleetApp(harness(() => ({ status: 0, stdout: appJson('read'), stderr: '' })).deps as AuthorityCliDeps))
+  it('readFleetApp reads the App\'s checks permission; the settings links are exact', async () => {
+    expect(await readFleetApp(harness(() => ({ status: 0, stdout: appJson('read'), stderr: '' })).deps as AuthorityCliDeps))
       .toEqual({ id: FLEET_APP, slug: 'ashlr-fleet', ownerLogin: 'ashlrai', ownerIsOrg: true, checks: 'read' });
-    expect(readFleetApp(harness(() => ({ status: 1, stdout: '', stderr: 'x' })).deps as AuthorityCliDeps)).toBeNull();
+    expect(await readFleetApp(harness(() => ({ status: 1, stdout: '', stderr: 'x' })).deps as AuthorityCliDeps)).toBeNull();
     expect(fleetAppPermissionUrls({ slug: 'ashlr-fleet', ownerLogin: 'ashlrai', ownerIsOrg: true })).toEqual({
       permissions: 'https://github.com/organizations/ashlrai/settings/apps/ashlr-fleet/permissions',
       installations: 'https://github.com/organizations/ashlrai/settings/installations',

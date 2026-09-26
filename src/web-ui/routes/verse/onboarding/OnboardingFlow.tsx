@@ -30,7 +30,7 @@
  *    reads already in cache and within the freshness window
  *    (data/hooks.ts DEFAULT_QUERY_FRESH_MS).
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Button } from '../../../components/primitives/index.js';
 import {
   IconAlert,
@@ -54,7 +54,8 @@ import { verseLocalModelsQuery } from '../usage/usage-queries.js';
 import { projectLocalModels } from '../usage/usage-contract.js';
 import { authorityQuery } from '../command/surface-data.js';
 import { grantChip, modeWord, type ChipTone } from '../command/authority-model.js';
-import { useDraftReadiness } from '../autonomy/AutonomyOffState.js';
+import { useSetupChecklist } from '../autonomy/AutonomyOffState.js';
+import { nextCommand } from '../autonomy/setup-checklist-model.js';
 import { AUTONOMY_SETUP_COMMAND } from '../shell/command-catalog.js';
 import { copyAutonomySetupCommand } from '../shell/copy-setup.js';
 import { executeCatalogCommand } from '../shell/run-command.js';
@@ -74,6 +75,9 @@ import {
 } from './onboarding-store.js';
 import { useOnboarding } from './useOnboarding.js';
 import styles from './onboarding.module.css';
+
+// The setup checklist is its own chunk (shared with the "Autonomy is off" state).
+const SetupChecklist = lazy(() => import('../autonomy/SetupChecklist.js'));
 
 /**
  * Tone is paired with a glyph everywhere it appears, never carried by colour
@@ -225,11 +229,12 @@ function findingTone(tone: ChipTone | undefined): FindingTone {
  * the server's own reason.
  *
  * The next step is the one Command's "Autonomy is off" state names, decided
- * the same way (autonomy-off-model): with no grant, the one-time setup
- * command while the server cannot draft a grant yet (or we cannot tell);
- * once it can, "Approve grant…" — the same ⌘K command, which opens the
- * Touch ID sheet on Command. With a grant, the chip decides (re-approve /
- * renew), else Command itself.
+ * the same way (autonomy-off-model): with no grant, the live setup checklist
+ * (every step, unfolded) and the command for its next open step while one
+ * before the grant is open (or we cannot tell); once only the grant is left,
+ * "Approve grant…" — the same ⌘K command, which opens the Touch ID sheet on
+ * Command (the only place a grant is drafted). With a grant, the chip decides
+ * (re-approve / renew), else Command itself.
  */
 function AutonomyStep() {
   const read = useQuery(authorityQuery);
@@ -238,8 +243,25 @@ function AutonomyStep() {
   const loading = read.data === undefined && read.status !== 'error';
   const mode = modeWord(status);
   const chip = grantChip(status, Date.now());
-  const readiness = useDraftReadiness(status?.grant.state === 'none');
-  const needsSetup = !status || (status.grant.state === 'none' && readiness !== 'ready');
+  const setup = useSetupChecklist(status?.grant.state === 'none');
+  const needsSetup = !status || (status.grant.state === 'none' && setup.readiness !== 'ready');
+  const command = nextCommand(setup.report) ?? AUTONOMY_SETUP_COMMAND;
+  const fix = (
+    <div className={styles.findingFix}>
+      <span className={styles.fixLabel}>{command === AUTONOMY_SETUP_COMMAND ? 'Set up' : 'Next'}</span>
+      <code className={styles.code}>{command}</code>
+      <Button
+        variant="subtle"
+        size="sm"
+        icon={<IconCopy size={13} />}
+        onClick={() => {
+          void copyAutonomySetupCommand(command).then(setCopied);
+        }}
+      >
+        {copied ? 'Copied' : 'Copy'}
+      </Button>
+    </div>
+  );
   const detail = loading
     ? 'Reading the autonomy state…'
     : status
@@ -259,20 +281,11 @@ function AutonomyStep() {
       </p>
       {needsSetup ? (
         <>
-          <div className={styles.findingFix}>
-            <span className={styles.fixLabel}>Set up</span>
-            <code className={styles.code}>{AUTONOMY_SETUP_COMMAND}</code>
-            <Button
-              variant="subtle"
-              size="sm"
-              icon={<IconCopy size={13} />}
-              onClick={() => {
-                void copyAutonomySetupCommand().then(setCopied);
-              }}
-            >
-              {copied ? 'Copied' : 'Copy'}
-            </Button>
-          </div>
+          {setup.report ? (
+            <Suspense fallback={fix}>
+              <SetupChecklist report={setup.report} action={fix} open />
+            </Suspense>
+          ) : fix}
           <p className={styles.aside} role={copied === false ? 'alert' : undefined}>
             {copied === false
               ? 'The clipboard is not available here — select the command and copy it by hand.'

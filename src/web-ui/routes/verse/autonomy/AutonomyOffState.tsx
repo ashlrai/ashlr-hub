@@ -3,29 +3,45 @@
  * state Command, Fleet, Growth and Mind show in place of their empty cards.
  *
  *   ● Autonomy is off                               Fleet dark since Sep 1
- *     Nothing runs or merges on its own until setup is done.
+ *     Nothing runs or merges on its own until the one-time setup is done.
+ *     NEXT  GitHub App   Browser · GitHub
+ *     The ashlr-fleet key is in custody, but the App is not installed on …
  *     [ $ ashlr authority setup                                  ⧉ Copy ]
- *     ✓ Custody helper  ✓ Signing key  ○ GitHub App  ○ Claude token  ○ Standing grant
+ *     ▸ 6 of 15 ready  ✓✓✓✓✓✓●○○○○○○○×
  *
- * One title, one line of why, ONE primary action: copy the setup command, or
- * go to the surface that has the control (left out when that surface is the
- * one showing the state — its control is already on screen). The decision is
- * autonomy-off-model.ts; `useAutonomyOff` reads it for the surfaces that do
- * not already hold the authority and live reads.
+ * One title, one line of why, ONE primary action: copy the next step's
+ * command, approve the grant, or go to the surface that has the control (left
+ * out when that surface is the one showing the state — its control is already
+ * on screen). The decision is autonomy-off-model.ts; the checklist is
+ * GET /api/verse/authority/setup (setup-checklist-model.ts), rendered by the
+ * lazily loaded SetupChecklist. The grant draft is never read here: only the
+ * Touch ID sheet drafts, when the operator opens it.
  */
-import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import type { AuthoritySetupReportV1 } from '../../../../core/authority/types.js';
 import type { WorkbenchSectionId } from '../../../../core/verse/workbench-types.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { copyText } from '../../../components/primitives/clipboard.js';
 import { IconCheck, IconCopy } from '../../../components/primitives/icons.js';
-import type { AuthorityGrantDraft } from '../../../../core/authority/types.js';
 import { ensureQuery, getQuerySnapshot, subscribeQuery } from '../../../data/cache.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { goToSection } from '../command/nav.js';
-import { authorityDraftQuery, authorityQuery, fleetLiveQuery, type OptionalRead } from '../command/surface-data.js';
+import { authorityQuery, fleetLiveQuery, optionalQuery, type OptionalRead } from '../command/surface-data.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
-import { autonomyOffState, draftReadiness, type AutonomyOffState as OffState, type DraftReadiness, type SetupCheck } from './autonomy-off-model.js';
+import { autonomyOffState, type AutonomyOffState as OffState } from './autonomy-off-model.js';
+import {
+  AUTHORITY_SETUP_PATH,
+  narrowSetupReport,
+  SETUP_FRESH_MS,
+  SETUP_POLL_MS,
+  setupReadiness,
+  type SetupReadiness,
+} from './setup-checklist-model.js';
 import styles from './autonomy-off.module.css';
+
+// Split off the state's own chunk: the checklist renders only while autonomy
+// is off, and never on the chat first-paint path.
+const SetupChecklist = lazy(() => import('./SetupChecklist.js'));
 
 /** How long "Copied" stays on the button (SPEC-310C §4's copy-pill timing). */
 const COPIED_MS = 1_200;
@@ -33,25 +49,34 @@ const COPIED_MS = 1_200;
 /** Authority and the live view move slowly while autonomy is off; a minute is plenty for a state. */
 export const AUTONOMY_OFF_POLL_MS = 60_000;
 
-/** A drafted grant is only a readiness probe here; a minute-old answer is fine (the sheet re-drafts on open). */
-const DRAFT_FRESH_MS = 60_000;
+/** GET /api/verse/authority/setup — the server's own `ashlr authority setup --dry-run --json`. */
+export const authoritySetupQuery = optionalQuery('verse-authority-setup', AUTHORITY_SETUP_PATH, 'The setup checklist', narrowSetupReport);
+
+export interface SetupChecklistRead {
+  /** Undefined while the first read is in flight; 'unknown' when not enabled or unanswered. */
+  readiness: SetupReadiness | undefined;
+  report: AuthoritySetupReportV1 | null;
+}
 
 /**
- * Whether a new grant can be drafted — read ONLY while `enabled` (there is
- * no grant), so an active fleet never asks the server to draft one.
- * Undefined while that read is in flight.
+ * The live setup checklist — read ONLY while `enabled` (there is no grant),
+ * refreshed every minute while it is on screen, so reruns of setup in a
+ * terminal show up without a reload. An active fleet never reads it.
  */
-export function useDraftReadiness(enabled: boolean): DraftReadiness | undefined {
-  const key = authorityDraftQuery.key;
+export function useSetupChecklist(enabled: boolean): SetupChecklistRead {
+  const key = authoritySetupQuery.key;
   const snap = useSyncExternalStore(
     useCallback((listener: () => void) => subscribeQuery(key, listener), [key]),
-    () => getQuerySnapshot<OptionalRead<AuthorityGrantDraft>>(key),
-    () => getQuerySnapshot<OptionalRead<AuthorityGrantDraft>>(key),
+    () => getQuerySnapshot<OptionalRead<AuthoritySetupReportV1>>(key),
+    () => getQuerySnapshot<OptionalRead<AuthoritySetupReportV1>>(key),
   );
   useEffect(() => {
-    if (enabled) void ensureQuery(key, () => authorityDraftQuery.fetch(), DRAFT_FRESH_MS);
+    if (enabled) void ensureQuery(key, () => authoritySetupQuery.fetch(), SETUP_FRESH_MS);
   }, [enabled, key]);
-  return enabled ? draftReadiness(snap.data) : 'unknown';
+  const refetch = useRefetch(authoritySetupQuery);
+  usePollWhileVisible(refetch, SETUP_POLL_MS, { enabled, refreshOnShow: false });
+  if (!enabled) return { readiness: 'unknown', report: null };
+  return { readiness: setupReadiness(snap.data), report: snap.data?.value ?? null };
 }
 
 /**
@@ -69,12 +94,12 @@ export function useAutonomyOff(quietSince: string | null = null): OffState | nul
     refetchLive();
   }, AUTONOMY_OFF_POLL_MS);
   const noGrant = authority.data?.value?.grant.state === 'none';
-  const draft = useDraftReadiness(noGrant);
-  if (!authority.data || !live.data || draft === undefined) return undefined;
-  return autonomyOffState({ authority: authority.data.value, live: live.data.value, quietSince, draft });
+  const setup = useSetupChecklist(noGrant);
+  if (!authority.data || !live.data || setup.readiness === undefined) return undefined;
+  return autonomyOffState({ authority: authority.data.value, live: live.data.value, quietSince, readiness: setup.readiness, setup: setup.report });
 }
 
-function CopyCommand({ command }: { command: string }) {
+export function CopyCommand({ command }: { command: string }) {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
@@ -102,31 +127,6 @@ function CopyCommand({ command }: { command: string }) {
       <span className={styles.visuallyHidden} role="status" aria-live="polite">
         {state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed. Select the command and copy it yourself.' : ''}
       </span>
-    </div>
-  );
-}
-
-function Checks({ checks }: { checks: SetupCheck[] }) {
-  const done = checks.filter((c) => c.done === true).length;
-  return (
-    <div className={styles.progress}>
-      <span className={styles.count} aria-hidden="true">
-        {done} of {checks.length} ready
-      </span>
-      <ul className={styles.checks} aria-label={`Setup: ${done} of ${checks.length} ready`}>
-        {checks.map((c) => {
-          const mark = c.done === true ? 'done' : c.done === false ? 'todo' : 'unknown';
-          return (
-            <li key={c.id} className={styles.check} data-mark={mark}>
-              <span className={styles.mark} aria-hidden="true">
-                {mark === 'done' ? <IconCheck size={10} strokeWidth={2.5} /> : null}
-              </span>
-              {c.label}
-              <span className={styles.visuallyHidden}>{mark === 'done' ? ' — done' : mark === 'todo' ? ' — to do' : ' — unknown'}</span>
-            </li>
-          );
-        })}
-      </ul>
     </div>
   );
 }
@@ -183,8 +183,12 @@ export function AutonomyOffState({ state, here, title, why, onGrant }: AutonomyO
         {state?.since ? <span className={styles.since}>{state.since}</span> : null}
       </header>
       {line ? <p className={styles.why}>{line}</p> : null}
-      {action}
-      {state && state.checks.length > 0 ? <Checks checks={state.checks} /> : null}
+      {state?.setup ? (
+        // Until the checklist chunk arrives, the action stands alone (never a blank gap).
+        <Suspense fallback={action}>
+          <SetupChecklist report={state.setup} action={action} />
+        </Suspense>
+      ) : action}
     </section>
   );
 }
