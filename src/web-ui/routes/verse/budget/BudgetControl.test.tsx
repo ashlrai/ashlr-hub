@@ -338,11 +338,11 @@ describe('BudgetControl (connected, real query layer)', () => {
   it('a failed read shows the server’s reason, not the request URL', async () => {
     installFetch(() => json({
       code: 'VERSE_STORE_UNREADABLE',
-      error: 'Could not read the budget policy: the file is not valid JSON. Fix it or move it aside to start from the defaults.',
+      error: 'The budget policy file is not valid JSON. Fix or remove it to use the defaults.',
     }, 503));
     render(<BudgetControl />);
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('Budget unavailable: Could not read the budget policy: the file is not valid JSON.');
+    expect(alert).toHaveTextContent('Budget unavailable. The budget policy file is not valid JSON. Fix or remove it to use the defaults.');
     expect(alert).not.toHaveTextContent(/HTTP|\/api\//);
   });
 
@@ -350,7 +350,7 @@ describe('BudgetControl (connected, real query layer)', () => {
     let failing = false;
     installFetch((call) => {
       if (failing && call.path === '/api/verse/budget') {
-        return json({ code: 'VERSE_BUDGET_CAPACITY_UNREADABLE', error: 'Could not read seat capacity: the account collector did not answer.' }, 503);
+        return json({ code: 'VERSE_BUDGET_CAPACITY_UNREADABLE', error: 'Seat capacity could not be read.' }, 503);
       }
       if (call.path === '/api/verse/budget' && call.method === 'GET') return json(view());
       if (call.path.startsWith('/api/verse/budget/preview')) return json(PREVIEW);
@@ -358,11 +358,11 @@ describe('BudgetControl (connected, real query layer)', () => {
     });
     render(<BudgetControl />);
     expect(await screen.findByText('Claude Code')).toBeInTheDocument();
-    expect(screen.queryByText(/Could not refresh/)).toBeNull();
+    expect(screen.queryByText(/Showing the last readings/)).toBeNull();
     failing = true;
     act(() => { document.dispatchEvent(new Event('visibilitychange')); });
-    const notice = await screen.findByText(/Could not refresh the budget/);
-    expect(notice).toHaveTextContent('Could not refresh the budget, so these are the last readings. Could not read seat capacity: the account collector did not answer.');
+    const notice = await screen.findByText(/Showing the last readings/);
+    expect(notice).toHaveTextContent('Showing the last readings. Seat capacity could not be read.');
     // The bars are still there — a failed refresh is not "no seats".
     expect(screen.getByText('Claude Code')).toBeInTheDocument();
   });

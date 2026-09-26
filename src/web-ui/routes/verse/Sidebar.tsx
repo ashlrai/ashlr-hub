@@ -283,7 +283,7 @@ function rowMenuItems(row: SidebarRow, actions: SidebarRowActions, metaAvailable
   const running = row.status.kind === 'running';
   const writeReason = !actions.dispatchEnabled ? 'This server was started without dispatch.' : null;
   const metaReason = writeReason
-    ?? (metaAvailable ? null : metaError ? `Could not read chat pins and archive state. ${metaError}` : 'Not available on this server yet.');
+    ?? (metaAvailable ? null : metaError ? `Pins and archive unavailable. ${metaError}` : 'Not available on this server yet.');
   return [
     {
       id: 'pin',

@@ -261,7 +261,7 @@ function bad(res: ServerResponse, error: string): true {
   return true;
 }
 
-const ENGINE_UNAVAILABLE_ERROR = 'Could not read chats: the chat engine did not start. Restart ashlr verse; if it keeps failing, check its log.';
+const ENGINE_UNAVAILABLE_ERROR = 'The chat engine is not answering. Restart ashlr verse.';
 
 /** The chat engine is down: say so (503), never answer as if there were no chats. */
 function engineUnavailable(res: ServerResponse): true {
@@ -370,7 +370,7 @@ export const handleActivityApi: ApiModule = async (ctx: VerseApiContext, req, re
     try {
       response = w.reader.build(since).response;
     } catch {
-      sendJson(res, 503, { error: 'Could not read activity: building the answer failed. The next poll retries.', code: 'VERSE_ACTIVITY_UNREADABLE' });
+      sendJson(res, 503, { error: 'Activity could not be read.', code: 'VERSE_ACTIVITY_UNREADABLE' });
       return true;
     }
     if (w.engineFailed && response.sources.chats === 'unavailable') {

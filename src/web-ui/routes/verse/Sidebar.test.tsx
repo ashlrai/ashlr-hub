@@ -414,15 +414,15 @@ describe('Sidebar 3.10', () => {
 
   it('a session-meta read that FAILED names the reason on pin and archive, not "not on this server"', async () => {
     const user = userEvent.setup();
-    mount310({ meta: null, metaError: 'Could not read chats: the chat engine did not start.' });
+    mount310({ meta: null, metaError: 'The chat engine is not answering. Restart ashlr verse.' });
     const row = within(screen.getByRole('navigation', { name: 'Chats' })).getByRole('button', { name: /Running one/ });
     row.focus();
     await user.keyboard('{Shift>}{F10}{/Shift}');
     const menu = screen.getByRole('menu');
-    for (const name of [/Pin/, /Archive/]) {
+    for (const name of [/^Pin/, /^Archive/]) {
       const item = within(menu).getByRole('menuitem', { name });
       expect(item).toHaveAttribute('aria-disabled', 'true');
-      expect(item).toHaveTextContent('Could not read chat pins and archive state. Could not read chats: the chat engine did not start.');
+      expect(item).toHaveTextContent('Pins and archive unavailable. The chat engine is not answering. Restart ashlr verse.');
       expect(item).not.toHaveTextContent('Not available on this server yet.');
     }
   });

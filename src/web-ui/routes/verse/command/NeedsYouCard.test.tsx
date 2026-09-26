@@ -171,8 +171,8 @@ describe('NeedsYouCard names seats and engines as every other surface does', () 
 
 describe('activityRead', () => {
   it('a first poll that failed names the server’s reason; only a clean 404 is "not in this build"', () => {
-    const failed = activityRead({ status: 'unavailable', data: null, updatedAt: null, error: 'Could not read activity: building the answer failed.' });
-    expect(failed.reason).toBe('Could not read the Needs-you inbox. Could not read activity: building the answer failed.');
+    const failed = activityRead({ status: 'unavailable', data: null, updatedAt: null, error: 'Activity could not be read.' });
+    expect(failed.reason).toBe('Needs-you inbox unavailable. Activity could not be read.');
     const missing = activityRead({ status: 'unavailable', data: null, updatedAt: null, error: null });
     expect(missing.reason).toMatch(/not in this build yet/);
   });

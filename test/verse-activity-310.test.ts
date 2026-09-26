@@ -671,7 +671,7 @@ describe('activity routes', () => {
         const { status, body } = await get<{ code: string; error: string }>(p);
         expect(status).toBe(503);
         expect(body.code).toBe('VERSE_ENGINE_UNAVAILABLE');
-        expect(body.error).toMatch(/^Could not read chats: the chat engine did not start/);
+        expect(body.error).toMatch(/^The chat engine is not answering\. Restart ashlr verse\.$/);
         expect(body.error).not.toContain(home);
       }
       const pin = await post<{ code: string }>('/api/verse/session-meta/s1', { pinned: true });

@@ -288,7 +288,7 @@ describe('capacity publisher', () => {
       expect(text).not.toContain('secret');
       expect(JSON.parse(text)).toEqual({
         code: 'VERSE_BUDGET_CAPACITY_UNREADABLE',
-        error: 'Could not read seat capacity: the account collector did not answer.',
+        error: 'Seat capacity could not be read.',
       });
     }
   });
@@ -304,7 +304,7 @@ describe('read failures are forwarded, not swallowed', () => {
     const { status, body } = await get<{ code: string; error: string }>('/api/verse/budget');
     expect(status).toBe(503);
     expect(body.code).toBe('VERSE_STORE_UNREADABLE');
-    expect(body.error).toBe('Could not read the budget policy: the file is not valid JSON. Fix it or move it aside to start from the defaults.');
+    expect(body.error).toBe('The budget policy file is not valid JSON. Fix or remove it to use the defaults.');
     expect(JSON.stringify(body)).not.toContain(home);
     // The preview routes on the same policy, so it refuses the same way.
     expect((await get<{ code: string }>('/api/verse/budget/preview')).body.code).toBe('VERSE_STORE_UNREADABLE');
@@ -322,7 +322,7 @@ describe('read failures are forwarded, not swallowed', () => {
     const { status, body } = await post<{ code: string; error: string }>({ mode: 'reserve' });
     expect(status).toBe(503);
     expect(body.code).toBe('VERSE_STORE_UNREADABLE');
-    expect(body.error).toMatch(/^Could not read the budget policy: the file has a mode this build does not know\. Nothing was saved/);
+    expect(body.error).toMatch(/^The budget policy file has a mode this build does not know\. Nothing was saved\. Fix or remove it to use the defaults\.$/);
     expect(JSON.stringify(body)).not.toContain(home);
     expect(JSON.stringify(body)).not.toContain('budget.json');
   });
@@ -335,7 +335,7 @@ describe('read failures are forwarded, not swallowed', () => {
     expect(status).toBe(503);
     expect(body).toEqual({
       code: 'VERSE_BUDGET_DECISIONS_UNREADABLE',
-      error: 'Could not read the routing decision log: the file is not a regular file.',
+      error: 'The routing decision log is not a regular file.',
     });
     // The attributor's reader stays total.
     expect(readShadowDecisions(5)).toEqual([]);
@@ -347,6 +347,6 @@ describe('read failures are forwarded, not swallowed', () => {
     fs.symlinkSync(path.join(home, 'elsewhere.jsonl'), decisionsFile());
     const { status, body } = await get<{ code: string; error: string }>('/api/verse/budget/decisions');
     expect(status).toBe(503);
-    expect(body.error).toBe('Could not read the routing decision log: the file is a symlink.');
+    expect(body.error).toBe('The routing decision log is a symlink.');
   });
 });

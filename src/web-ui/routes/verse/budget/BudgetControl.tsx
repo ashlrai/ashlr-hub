@@ -234,7 +234,7 @@ export interface BudgetControlViewProps {
   error: string | null;
   /**
    * Why the last READ failed while an older answer is still on screen (the
-   * server's own sentence, e.g. "Could not read seat capacity: …"). Without
+   * server's own sentence, e.g. "Seat capacity could not be read."). Without
    * it the panel kept showing the old bars as if they were current.
    */
   readError?: string | null;
@@ -390,7 +390,7 @@ export function BudgetControl({ maxMode = null }: { maxMode?: BudgetMode | null 
     return (
       <section className={styles.panel} aria-label="Budget">
         {budgetFailure ? (
-          <p className={styles.error} role="alert">Budget unavailable: {budgetFailure}</p>
+          <p className={styles.error} role="alert">Budget unavailable. {budgetFailure}</p>
         ) : (
           <p className={styles.loading}>Reading seat usage…</p>
         )}
@@ -407,8 +407,8 @@ export function BudgetControl({ maxMode = null }: { maxMode?: BudgetMode | null 
         pending={pending}
         error={error}
         readError={budgetFailure
-          ? `Could not refresh the budget, so these are the last readings. ${budgetFailure}`
-          : previewFailure ? `Could not work out where the next task goes. ${previewFailure}` : null}
+          ? `Showing the last readings. ${budgetFailure}`
+          : previewFailure ? `Next-task preview unavailable. ${previewFailure}` : null}
         maxMode={maxMode}
         onMode={(mode) => void apply('mode', `Switch the budget to ${mode}`, { mode })}
         onSeat={(seatId, patch) => void apply(seatId, `Change the budget for ${seatId}`, { seatId, policy: patch })}

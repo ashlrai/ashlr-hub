@@ -177,7 +177,7 @@ export function activityRead(state: ActivityState): { activity: VerseActivityRes
     // `unavailable` is also where a FIRST poll that failed lands: only a
     // failure-free one (the route's 404) means "not in this build".
     const reason = state.error
-      ? `Could not read the Needs-you inbox. ${state.error}`
+      ? `Needs-you inbox unavailable. ${state.error}`
       : 'The Needs-you inbox is not in this build yet, so this card has no source.';
     return { activity: null, loading: false, reason, stale: false };
   }

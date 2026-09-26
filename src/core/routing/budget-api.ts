@@ -197,7 +197,7 @@ function loadPolicyForPanel(): BudgetPolicy {
   if (found.state === 'missing') return defaultBudgetPolicy();
   throw new BudgetReadError(
     'VERSE_STORE_UNREADABLE',
-    `Could not read the budget policy: the file ${found.reason}. Fix it or move it aside to start from the defaults.`,
+    `The budget policy file ${found.reason}. Fix or remove it to use the defaults.`,
   );
 }
 
@@ -209,7 +209,7 @@ async function readCapacity(cfg: AshlrConfig, force = false): Promise<CapacityRe
   } catch {
     // The cause (a collector or Ollama error) can name paths and hosts; the
     // panel only needs to know WHICH read failed.
-    throw new BudgetReadError('VERSE_BUDGET_CAPACITY_UNREADABLE', 'Could not read seat capacity: the account collector did not answer.');
+    throw new BudgetReadError('VERSE_BUDGET_CAPACITY_UNREADABLE', 'Seat capacity could not be read.');
   }
   const now = Date.now();
   if (force || now - lastSnapshotAt >= SNAPSHOT_MIN_INTERVAL_MS) {
@@ -405,7 +405,7 @@ export const handleBudgetApi: ApiModule = async (ctx, req, res, path, method) =>
     const limit = limitRaw === null ? 50 : Math.max(1, Math.min(500, Number(limitRaw)));
     const log = readShadowDecisionsChecked(limit);
     if (log.state === 'unreadable') {
-      throw new BudgetReadError('VERSE_BUDGET_DECISIONS_UNREADABLE', `Could not read the routing decision log: the file ${log.reason}.`);
+      throw new BudgetReadError('VERSE_BUDGET_DECISIONS_UNREADABLE', `The routing decision log ${log.reason}.`);
     }
     sendJson(res, 200, { decisions: log.decisions });
     return true;
@@ -419,11 +419,11 @@ export const handleBudgetApi: ApiModule = async (ctx, req, res, path, method) =>
       // panel gets the same fact without either.
       sendJson(res, err.status, {
         code: err.code,
-        error: `Could not read the budget policy: the file ${err.reason}. Nothing was saved; fix it or move it aside to start from the defaults.`,
+        error: `The budget policy file ${err.reason}. Nothing was saved. Fix or remove it to use the defaults.`,
       });
       return true;
     }
-    sendJson(res, 500, { code: 'VERSE_BUDGET_FAILED', error: 'The budget request failed.' });
+    sendJson(res, 500, { code: 'VERSE_BUDGET_FAILED', error: 'Budget request failed.' });
     return true;
   }
 };

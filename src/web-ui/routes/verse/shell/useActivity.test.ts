@@ -58,11 +58,11 @@ describe('the activity loop', () => {
   it('keeps the server’s reason for a failed poll; a 404 and a success carry none', async () => {
     resetActivityForTest(async () => {
       throw new ApiError('GET /api/verse/activity failed (HTTP 503).', 503, '/api/verse/activity',
-        'Could not read activity: building the answer failed. The next poll retries.', 'VERSE_ACTIVITY_UNREADABLE');
+        'Activity could not be read.', 'VERSE_ACTIVITY_UNREADABLE');
     });
     await refreshActivity();
     expect(getActivityState()).toMatchObject({
-      status: 'unavailable', data: null, error: 'Could not read activity: building the answer failed. The next poll retries.',
+      status: 'unavailable', data: null, error: 'Activity could not be read.',
     });
 
     resetActivityForTest(async () => { throw new ApiError('nf', 404, '/api/verse/activity'); });
@@ -71,14 +71,14 @@ describe('the activity loop', () => {
 
     let fail = false;
     resetActivityForTest(async () => {
-      if (fail) throw new ApiError('x', 503, '/api/verse/activity', 'Could not read activity: it broke.');
+      if (fail) throw new ApiError('x', 503, '/api/verse/activity', 'Activity could not be read.');
       return activity();
     });
     await refreshActivity();
     expect(getActivityState().error).toBeNull();
     fail = true;
     await refreshActivity();
-    expect(getActivityState()).toMatchObject({ status: 'stale', error: 'Could not read activity: it broke.' });
+    expect(getActivityState()).toMatchObject({ status: 'stale', error: 'Activity could not be read.' });
   });
 
   it('starts over when the server refuses an old cursor', async () => {

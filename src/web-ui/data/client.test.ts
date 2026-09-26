@@ -8,7 +8,7 @@
  * is reported as a read-only server.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, apiPost, DispatchDisabledError } from './client.js';
+import { ApiError, apiPost, DispatchDisabledError, readFailureReason } from './client.js';
 
 function respond(status: number, body: unknown): void {
   vi.stubGlobal('fetch', vi.fn(async () => new Response(
@@ -75,5 +75,23 @@ describe('apiPost — refusals', () => {
     expect(err).toBeInstanceOf(ApiError);
     expect(err).not.toBeInstanceOf(DispatchDisabledError);
     expect((err as ApiError).status).toBe(401);
+  });
+});
+
+describe('readFailureReason — what a surface prints after its own "X unavailable."', () => {
+  it("prefers the route's own sentence over the GET wrapper", () => {
+    const err = new ApiError('GET /api/verse/budget failed (HTTP 503).', 503, '/api/verse/budget', 'Seat capacity could not be read.');
+    expect(readFailureReason(err)).toBe('Seat capacity could not be read.');
+  });
+
+  it('names the status when the route sent no sentence', () => {
+    expect(readFailureReason(new ApiError('GET /x failed (HTTP 502).', 502, '/x'))).toBe('The server answered HTTP 502.');
+  });
+
+  it("never shows a browser's own exception text", () => {
+    // fetch() rejects with a TypeError when nothing answered.
+    expect(readFailureReason(new TypeError('Failed to fetch'))).toBe('The server did not answer.');
+    expect(readFailureReason(new SyntaxError('Unexpected token < in JSON at position 0'))).toBe('The request failed.');
+    expect(readFailureReason('boom')).toBe('The request failed.');
   });
 });

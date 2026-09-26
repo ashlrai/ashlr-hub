@@ -72,7 +72,7 @@ export function useChatActivity() {
     meta: meta.data ?? null,
     /**
      * Why session-meta could not be read (the route's own sentence, e.g. the
-     * chat engine did not start), or null. A 404 is not an error here — it
+     * chat engine is not answering), or null. A 404 is not an error here — it
      * reads as `meta: null` ("not on this server").
      */
     metaError: meta.status === 'error' ? readFailureReason(meta.error) : null,

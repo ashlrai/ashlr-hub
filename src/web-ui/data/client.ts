@@ -47,16 +47,20 @@ export class DispatchDisabledError extends ApiError {
 }
 
 /**
- * The plain reason a READ failed, for a surface to print after "Could not
- * read X:". Routes that fail a read answer `{ code, error }` with `error` a
- * sentence written for the operator (budget-api.ts, activity-api.ts), which
- * apiGet keeps as `detail`; prefer it over our own "GET … failed (HTTP N)"
- * wrapper, which names a URL instead of the cause. Fits ChartFrame's
+ * The plain reason a READ failed, one or two short sentences for a surface to
+ * print after its own "X unavailable." Routes that fail a read answer
+ * `{ code, error }` with `error` a sentence written for the operator
+ * (budget-api.ts, activity-api.ts), which apiGet keeps as `detail`; prefer it
+ * over our own "GET … failed (HTTP N)" wrapper, which names a URL instead of
+ * the cause. Anything that is not an ApiError gets a fixed sentence: a
+ * browser's own exception text ("Failed to fetch", a JSON parser's
+ * "Unexpected token <") is not written for a person. Fits ChartFrame's
  * `{ kind: 'unknown', reason }` and a NoticeSlot line alike.
  */
 export function readFailureReason(err: unknown): string {
   if (err instanceof ApiError) return err.detail ?? `The server answered HTTP ${err.status}.`;
-  if (err instanceof Error && err.message) return err.message;
+  // fetch() rejects with a TypeError when the request never got an answer.
+  if (err instanceof TypeError) return 'The server did not answer.';
   return 'The request failed.';
 }
 
