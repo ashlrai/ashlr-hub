@@ -482,6 +482,9 @@ export function seatUsability(
   record: Pick<VerseAccountRecord, 'state' | 'binding' | 'credits' | 'windows'> & Partial<Pick<VerseAccountRecord, 'provider'>>,
 ): VerseSeatUsability {
   if (record.state === 'signed-out') return 'signed-out';
+  // A failed native probe may carry an unexpired last-known window for display.
+  // That historical percentage cannot authorize routing or autonomy.
+  if (record.state !== 'observed') return 'unknown';
   const binding = record.binding;
   // No window carried a percent: no signal. Not zero, not healthy.
   if (binding === null) return 'unknown';
@@ -564,13 +567,15 @@ export function buildSeatTelemetry(
   try {
     const collector = opts.collector === undefined ? getVerseAccountCollector() : opts.collector;
     const snapshot = buildVerseAccountsSnapshot({ accountsRoot, collector });
-    // `snapshot.evidenceSource` describes the EVIDENCE MAP, which is only what
-    // the degraded records were built from. A record the live monitor answered
-    // for did not come from that map, so it is labelled for what it is —
-    // otherwise a live Claude reading would claim to be a stale seed.
+    // The snapshot source describes the evidence map as a whole. A shared
+    // publication can contain a live Codex row alongside a historical seed
+    // for Claude (or no row for Grok), so label each seat by its own evidence.
     const liveIds = new Set((collector?.connections()?.accounts ?? []).map((a) => a.id));
     for (const record of snapshot.accounts) {
-      out.set(record.id, telemetryOf(record, liveIds.has(record.id) ? 'collector' : snapshot.evidenceSource));
+      const source: VerseSeatEvidenceSource = liveIds.has(record.id) ? 'collector'
+        : record.reason === 'baseline-historical' ? 'baseline'
+          : record.observedAt !== null ? snapshot.evidenceSource : 'none';
+      out.set(record.id, telemetryOf(record, source));
     }
   } catch {
     // Missing/corrupt account files: every seat degrades to unknown health.

@@ -339,6 +339,18 @@ describe('account status', () => {
     expect(accountStatus(unread, { healthRead: true, now: NOW })).toMatchObject({ kind: 'not-checked', label: 'Not checked', detail: 'no reading yet' });
   });
 
+  it('labels a degraded retained window as a last reading without counting it usable', () => {
+    const original = ROSTER.find((seat) => seat.id === 'codex-cmp')!;
+    const retained = { ...original, health: { ...original.health, state: 'degraded' as const },
+      capacity: { ...original.capacity!, usability: 'unknown' as const } };
+    const row = buildCapacityRows([retained], { health: [report('codex-cmp', { engine: 'codex' })], now: NOW })[0]!;
+    expect(row.windows.length).toBeGreaterThan(0);
+    expect(row.lastReading).toBe(true);
+    expect(accountStatus(row, { healthRead: true, now: NOW })).toMatchObject({ kind: 'unavailable', label: 'Last reading',
+      detail: 'latest check failed · access unconfirmed' });
+    expect(capacityHeadline([row])).toBe('0 of 1 account usable · 1 last reading');
+  });
+
   it('tight seats read as running low, or usable on credits when the window is spent but credits are not', () => {
     expect(status('claude-a')).toMatchObject({ kind: 'low', label: 'Connected', detail: 'running low', tone: 'warning' });
     const credits = buildCapacityRows([CODEX_CREDITS_SEAT], { health: [report('codex-personal', { engine: 'codex' })] })[0]!;

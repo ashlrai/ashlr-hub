@@ -143,6 +143,28 @@ describe('seatSubscription — credits are not the window', () => {
 });
 
 describe('seatSubscription — no signal is never zero', () => {
+  it('labels a retained degraded meter as historical in chat and hides old credit spendability', () => {
+    const prior = CODEX_CREDITS_SEAT;
+    const seat = { ...prior, health: { ...prior.health, state: 'degraded' as const },
+      capacity: { ...prior.capacity!, usability: 'unknown' as const } };
+    const view = seatSubscription(seat);
+    expect(view.cls).toBe('unread');
+    expect(view.summary).toMatch(/^Last verified reading: .*current access unconfirmed$/);
+    expect(view.credits).toBeNull();
+    expect(seatSubscriptionSentence(seat, view)).toContain('Last verified reading:');
+  });
+
+  it('hides old credit spendability even when the failed check retained no percentage', () => {
+    const prior = CODEX_CREDITS_SEAT;
+    const window = seatWindow({ id: 'codex_codex_primary', usedPercent: null });
+    const seat = { ...prior, health: { ...prior.health, state: 'degraded' as const },
+      capacity: { ...prior.capacity!, windows: [window], binding: null, usability: 'unknown' as const } };
+    const view = seatSubscription(seat);
+    expect(view.binding).toBeNull();
+    expect(view.summary).toBe('No current capacity reading; current access unconfirmed');
+    expect(view.credits).toBeNull();
+  });
+
   it('reports an unread account as unread, with no binding window to meter', () => {
     const view = seatSubscription(UNREAD_SEAT);
     expect(view.cls).toBe('unread');

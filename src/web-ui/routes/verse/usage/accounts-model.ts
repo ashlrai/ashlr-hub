@@ -208,6 +208,12 @@ export const REASON_COPY: Record<string, string> = {
     'Native polling is paused because no client has asked for account data recently; it resumes on the next request.',
   'connection-not-checked':
     'No probe has run for this account yet in this server.',
+  'connection-reading-expired':
+    'The last verified window expired before another check succeeded, so no current usage reading is available.',
+  'baseline-historical':
+    'Only an operator-seeded historical baseline exists for this account; it cannot establish current usage or access.',
+  'native-account-unavailable':
+    'The collection owner marked this account unavailable for use. Its retained window is shown for context and cannot authorize work.',
   'connection-probe-unavailable':
     'The probe for this account did not return a usable result, so there is no measurement to show.',
   'accounts-pool-unavailable':
@@ -293,6 +299,17 @@ export function accountVerdict(account: Account, binding: AccountWindow | null):
         account.unsupported.pinnedVersion ? `; it is pinned to ${account.unsupported.pinnedVersion}` : ''
       }. No window can be read until the pin is bumped.`,
       code: account.unsupported.code,
+    };
+  }
+
+  if (account.state !== 'observed') {
+    return {
+      state: 'unknown',
+      headline: binding === null ? 'No current reading' : 'Last reading',
+      detail: binding === null
+        ? `${reasonSentence(account.reason, 'The latest account check did not succeed.')} Current access and headroom are unconfirmed.`
+        : `${reasonSentence(account.reason, 'The latest account check did not succeed.')} The window shown is a prior verified reading for context only; current access and headroom are unconfirmed.`,
+      code: account.reason,
     };
   }
 

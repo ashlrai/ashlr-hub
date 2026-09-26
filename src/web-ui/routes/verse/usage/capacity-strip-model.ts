@@ -104,6 +104,8 @@ export interface CapacityRow {
   resetAt: string | null;
   /** The account is signed out — by the health sweep or by its own capacity record. */
   signedOut: boolean;
+  /** A verified, still-fresh window retained only for display after a failed check. */
+  lastReading?: boolean;
 }
 
 export interface CapacityInputs {
@@ -241,6 +243,7 @@ function seatRow(
     // "eligible again" and the health banner agree with.
     resetAt: seatReopensAt(view, report?.resetAt),
     signedOut: connection?.connection === 'signed-out' || seat.capacity?.usability === 'signed-out',
+    lastReading: seat.health.state === 'degraded' && seat.capacity?.usability === 'unknown' && windows.length > 0,
   };
 }
 
@@ -445,10 +448,12 @@ export function capacityHeadline(rows: readonly CapacityRow[]): string {
   const paid = rows.filter((r) => r.kind === 'subscription');
   const local = rows.filter((r) => r.kind === 'local');
   const usable = paid.filter((r) => r.cls === 'ready' || r.cls === 'tight').length;
-  const unread = paid.filter((r) => r.cls === 'unread').length;
+  const lastReadings = paid.filter((r) => r.lastReading).length;
+  const unread = paid.filter((r) => r.cls === 'unread' && !r.lastReading).length;
   const parts: string[] = [];
   if (paid.length === 0) parts.push('No accounts connected');
   else parts.push(`${usable} of ${paid.length} ${paid.length === 1 ? 'account' : 'accounts'} usable`);
+  if (lastReadings > 0) parts.push(`${lastReadings} last ${lastReadings === 1 ? 'reading' : 'readings'}`);
   if (unread > 0) parts.push(`${unread} not read yet`);
   if (local.some((r) => r.cls === 'ready')) parts.push('local models ready');
   else if (local.length > 0) parts.push('local models not ready');
@@ -605,6 +610,7 @@ export function accountStatus(row: CapacityRow, opts: AccountStatusOptions): Acc
 
   const c = row.connection?.connection ?? null;
   if (row.signedOut) return make('signed-out', 'Signed out', 'reconnect to use it', { coversConnection: true });
+  if (row.lastReading) return make('unavailable', 'Last reading', 'latest check failed · access unconfirmed', { coversConnection: true });
 
   const binding = row.windows.find((w) => w.binding) ?? null;
   const spent = c === 'exhausted' || (row.cls === 'blocked' && binding !== null && isSpentWindow(binding));

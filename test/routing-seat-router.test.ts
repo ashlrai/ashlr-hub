@@ -363,6 +363,28 @@ describe('capacityFromSeat', () => {
     expect(signedOut.reachable).toBe(false);
   });
 
+  it('never turns a failed Codex check with a retained prior window into autonomous headroom', () => {
+    const verified = {
+      planType: 'pro', binding: { id: 'codex_codex_primary', usedPercent: 4, resetsAt: iso(H), resetDescription: null,
+        limitReached: false, measured: true },
+      windows: [{ id: 'codex_codex_primary', usedPercent: 4, resetsAt: iso(H), resetDescription: null,
+        limitReached: false, measured: true }],
+      credits: null, usability: 'ready' as const, observedAt: iso(-30_000), evidenceSource: 'collector' as const, notes: [],
+    };
+    const codexSeat: VerseSeat = { ...base, id: 'codex-personal', engine: 'codex', accountId: 'codex-personal',
+      capacity: verified };
+    const policy = { seatId: codexSeat.id, enabled: true, reservePercent: 0 };
+    expect(assessSeat(capacityFromSeat(codexSeat), policy, opts).headroom.eligibleForAutonomy).toBe(true);
+
+    const degraded: VerseSeat = { ...codexSeat, health: { ...base.health, state: 'degraded' },
+      capacity: { ...verified, usability: 'unknown' } };
+    const projected = capacityFromSeat(degraded);
+    expect(projected).toMatchObject({ windows: [], observedAt: null, signedOut: false });
+    const assessed = assessSeat(projected, policy, opts);
+    expect(assessed.headroom.eligibleForAutonomy).toBe(false);
+    expect(assessed.unknownUsage).toBe(true);
+  });
+
   it('local seats are free and reachable', () => {
     const c = capacityFromSeat({ ...base, id: 'local:qwen', engine: 'local', accountId: 'local', contextWindow: 65_536 });
     expect(c).toMatchObject({ free: true, reachable: true, windows: [], contextWindow: 65_536, observedAt: null });

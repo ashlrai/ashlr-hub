@@ -85,6 +85,7 @@ function fakeCollector(accountsRoot: string, rows: ResourceObservation[]): Verse
     touch: () => {},
     connections: () => null,
     observations: () => rows,
+    unavailableWorkerIds: () => [],
     credits: () => null,
     close: async () => {},
   };
@@ -175,8 +176,19 @@ describe('verse accounts — limitReached on the evidence path', () => {
 
     const evidence = readVerseAccountEvidence(root);
     expect(evidence.source).toBe('shared-evidence');
+    expect(evidence.unavailableAccountIds.has('codex-a')).toBe(true);
     expect(evidence.byAccount.get('codex-a')!.windows[0]).toEqual(
       { id: 'codex_codex_primary', usedPercent: 100, resetsAt: null, limitReached: true });
     expect(evidence.byAccount.get('codex-a')!.windows[1]).not.toHaveProperty('limitReached');
+    const record = deriveVerseAccountRecordFromEvidence(
+      { id: 'codex-a', label: 'Personal Codex', provider: 'codex' },
+      evidence.byAccount.get('codex-a')!,
+      'connection-not-checked',
+      false,
+      evidence.unavailableAccountIds.has('codex-a'),
+    );
+    expect(record).toMatchObject({ state: 'unavailable', reason: 'native-account-unavailable' });
+    expect(record.windows[0]).toMatchObject({ limitReached: true, measured: false });
+    expect(seatUsability(record)).toBe('unknown');
   });
 });

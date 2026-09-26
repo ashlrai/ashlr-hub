@@ -179,6 +179,21 @@ describe('accountVerdict — credits are independent of the window', () => {
     expect(verdict.state).toBe('exhausted');
   });
 
+  it('calls a retained window a last reading and never usable headroom after a failed probe', () => {
+    const prior = { ...exhaustedCodex, state: 'unavailable' as const, authentication: 'unknown' as const,
+      reason: 'probe-timed-out', credits: { hasCredits: true, unlimited: false, balance: '2', balanceValue: 2 } };
+    const verdict = accountVerdict(prior, bindingWindow(prior));
+    expect(verdict).toMatchObject({ state: 'unknown', headline: 'Last reading', code: 'probe-timed-out' });
+    expect(verdict.detail).toMatch(/prior verified reading.*current access and headroom are unconfirmed/);
+  });
+
+  it('does not call an expired unread account usable because old session credits exist', () => {
+    const expired = { ...exhaustedCodex, state: 'unavailable' as const, authentication: 'unknown' as const,
+      windows: [], reason: 'connection-reading-expired', credits: { hasCredits: true, unlimited: false, balance: '2', balanceValue: 2 } };
+    expect(accountVerdict(expired, bindingWindow(expired))).toMatchObject({ state: 'unknown', headline: 'No current reading',
+      code: 'connection-reading-expired' });
+  });
+
   it('treats a zero balance as not spendable, and an unlimited plan as spendable', () => {
     expect(creditsSpendable({ hasCredits: true, unlimited: false, balance: '0', balanceValue: 0 })).toBe(false);
     expect(creditsSpendable({ hasCredits: false, unlimited: true, balance: null, balanceValue: null })).toBe(true);

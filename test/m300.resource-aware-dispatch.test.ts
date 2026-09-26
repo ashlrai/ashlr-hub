@@ -33,6 +33,18 @@ vi.mock('../src/core/daemon/activation-permit.js', () => ({
   liveConductorActivationAuthorized: () => true,
 }));
 
+// One engine mock for the whole file. Vitest hoists vi.mock calls even when
+// written inside tests, so per-test factories for this module were order
+// dependent under the full suite. Each case configures this single spy.
+const mockEngineInstalled = vi.hoisted(() =>
+  vi.fn((engine: string) => engine === 'codex' || engine === 'claude')
+);
+vi.mock('../src/core/run/engines.js', () => ({
+  engineInstalled: mockEngineInstalled,
+  buildEngineCommand: vi.fn((engine: string) => ({ bin: engine, argv: ['test'] })),
+  spawnEngine: vi.fn(async () => ({ ok: true, output: 'judge output' })),
+}));
+
 // ---------------------------------------------------------------------------
 // HOME isolation
 // ---------------------------------------------------------------------------
@@ -189,6 +201,7 @@ beforeEach(() => {
   tmpHome = mkdtempSync(join(tmpdir(), 'm300-test-'));
   process.env.HOME = tmpHome;
   vi.clearAllMocks();
+  mockEngineInstalled.mockImplementation((engine: string) => engine === 'codex' || engine === 'claude');
   // Default: kill-switch off, assertMayMutate no-op, autoMergePass → 0 merged
   mockKillSwitchOn.mockReturnValue(false);
   mockAssertMayMutate.mockImplementation(() => { /* allow */ });
@@ -584,12 +597,7 @@ describe('M300 [S1] non-frontier judge → evaluateVerificationGate refuses', ()
 
 describe('M300 [J1] managerJudgeEngine=codex → codex judge client', () => {
   it('returns a non-null client with gpt-5.5 model when codex installed', async () => {
-    // Mock engineInstalled to return true for codex, false for claude
-    vi.mock('../src/core/run/engines.js', () => ({
-      engineInstalled: (engine: string) => engine === 'codex',
-      buildEngineCommand: vi.fn(() => ({ bin: 'codex', argv: ['exec', '--json', 'test'] })),
-      spawnEngine: vi.fn(async () => ({ ok: true, output: 'codex output' })),
-    }));
+    mockEngineInstalled.mockImplementation((engine: string) => engine === 'codex');
 
     const { resolveFrontierJudgeClient } = await import('../src/core/fleet/manager.js');
 
@@ -627,12 +635,6 @@ describe('M300 [J2] auto + claude exhausted → codex judge fallback', () => {
       backend === 'claude' ? 'exhausted' : 'open'
     );
 
-    vi.mock('../src/core/run/engines.js', () => ({
-      engineInstalled: (engine: string) => engine === 'codex' || engine === 'claude',
-      buildEngineCommand: vi.fn(() => ({ bin: 'codex', argv: ['exec', '--json', 'test'] })),
-      spawnEngine: vi.fn(async () => ({ ok: true, output: 'codex output' })),
-    }));
-
     const { resolveFrontierJudgeClient } = await import('../src/core/fleet/manager.js');
 
     const cfg = {
@@ -668,12 +670,6 @@ describe('M521 [J3] explicit managerJudgeEngine same-family fallback', () => {
     // Both CLIs installed; claude has no resource-availability penalty.
     const { peekBackendAvailability } = await import('../src/core/fabric/resource-monitor.js');
     vi.mocked(peekBackendAvailability).mockReturnValue(null);
-
-    vi.mock('../src/core/run/engines.js', () => ({
-      engineInstalled: (engine: string) => engine === 'codex' || engine === 'claude',
-      buildEngineCommand: vi.fn(() => ({ bin: 'claude', argv: ['-p', 'test'] })),
-      spawnEngine: vi.fn(async () => ({ ok: true, output: 'claude output' })),
-    }));
 
     const { resolveFrontierJudgeClient } = await import('../src/core/fleet/manager.js');
 
@@ -712,12 +708,6 @@ describe('M521 [J3] explicit managerJudgeEngine same-family fallback', () => {
   it('managerJudgeEngine=codex judging a claude-produced proposal still uses codex (preference honoured when independent)', async () => {
     const { peekBackendAvailability } = await import('../src/core/fabric/resource-monitor.js');
     vi.mocked(peekBackendAvailability).mockReturnValue(null);
-
-    vi.mock('../src/core/run/engines.js', () => ({
-      engineInstalled: (engine: string) => engine === 'codex' || engine === 'claude',
-      buildEngineCommand: vi.fn(() => ({ bin: 'codex', argv: ['exec', '--json', 'test'] })),
-      spawnEngine: vi.fn(async () => ({ ok: true, output: 'codex output' })),
-    }));
 
     const { resolveFrontierJudgeClient } = await import('../src/core/fleet/manager.js');
 

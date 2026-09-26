@@ -278,28 +278,17 @@ describe('verse seats — native accounts', () => {
     expect(discovery.launches.get('claude')?.seat).toBe(claude);
   });
 
-  it('maps observations.json into seat health, unknown when absent', async () => {
+  it('treats seeded observations as historical rather than current seat health', async () => {
     writeAccounts(tmpRoot);
     const discovery = await discoverSeats(makeConfig(), {
       accountsRoot: tmpRoot, claudeUsage: zeroUsage, collector: null,
     });
     const claude = discovery.seats.find((s) => s.id === 'claude')!;
-    expect(claude.health.state).toBe('ready');
-    // V2.1: Claude's `resetsAt` is STRUCTURALLY always null — the provider
-    // publishes a sentence, never an instant. The seed file in this fixture
-    // carries one anyway (it is operator-authored and predates the rule), and
-    // the account derivation drops it rather than passing a fabricated
-    // timestamp the UI would turn into a countdown.
-    expect(claude.health.windows).toEqual([
-      { id: '5h', usedPercent: 72, resetsAt: null },
-      { id: '7d', usedPercent: 31, resetsAt: null },
-    ]);
-    expect(claude.health.summary).toContain('5h window 72% used');
-    expect(claude.health.summary).toContain('7d window 31% used');
-    expect(claude.health.observedAt).toBe('2026-09-19T10:00:00.000Z');
-    // …and the capacity rides along, so the seat list needs no second request.
-    expect(claude.capacity?.binding).toMatchObject({ id: '5h', usedPercent: 72, measured: true });
-    expect(claude.capacity?.usability).toBe('ready');
+    // The seed has no native expiry witness, so its percentage cannot attest
+    // current headroom or authorize routing after the collector is gone.
+    expect(claude.health).toEqual({ state: 'unknown', summary: null, windows: [], observedAt: null });
+    expect(claude.capacity?.binding).toBeNull();
+    expect(claude.capacity?.usability).toBe('unknown');
     expect(claude.capacity?.evidenceSource).toBe('baseline');
 
     const codex = discovery.seats.find((s) => s.id === 'codex-personal')!;

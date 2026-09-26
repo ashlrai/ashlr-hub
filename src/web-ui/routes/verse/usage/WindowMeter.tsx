@@ -31,11 +31,14 @@ export function WindowMeter({
   view,
   ariaPrefix,
   prominent = false,
+  historical = false,
 }: {
   view: WindowView;
   /** Account label, so every meter has a unique accessible name. */
   ariaPrefix: string;
   prominent?: boolean;
+  /** The account is no longer observed; this is context from a prior verified reading. */
+  historical?: boolean;
 }): ReactNode {
   const name = `${ariaPrefix} ${view.label}`;
 
@@ -44,17 +47,17 @@ export function WindowMeter({
       <div className={prominent ? styles.windowBlockLead : styles.windowBlock}>
         <div className={styles.windowHead}>
           <span>{view.label}</span>
-          <span className={styles.windowFlag}>limit reached</span>
+          <span className={styles.windowFlag}>{historical ? 'limit reached · prior reading' : 'limit reached'}</span>
         </div>
         <div
           className={styles.track}
           data-tone="danger"
           role="img"
-          aria-label={`${name}: the provider flagged this window as rate-limited, so no percentage is shown`}
+          aria-label={`${name}: ${historical ? 'prior reading; ' : ''}the provider flagged this window as rate-limited, so no percentage is shown${historical ? '; current access unconfirmed' : ''}`}
         >
           <div className={styles.fill} style={{ width: '100%' }} />
         </div>
-        {view.resetText ? <p className={styles.windowReset}>{view.resetText}</p> : null}
+        {view.resetText ? <p className={styles.windowReset}>{historical ? 'Prior report: ' : null}{view.resetText}</p> : null}
       </div>
     );
   }
@@ -64,7 +67,7 @@ export function WindowMeter({
       <div className={prominent ? styles.windowBlockLead : styles.windowBlock}>
         <div className={styles.windowHead}>
           <span>{view.label}</span>
-          <Epistemic quality={unknownQuality('No percentage was reported for this window.')} label={name}>
+          <Epistemic quality={unknownQuality(historical ? 'No percentage was reported for this prior window reading.' : 'No percentage was reported for this window.')} label={historical ? `${name} prior reading` : name}>
             {null}
           </Epistemic>
         </div>
@@ -78,21 +81,21 @@ export function WindowMeter({
     <div className={prominent ? styles.windowBlockLead : styles.windowBlock}>
       <div className={styles.windowHead}>
         <span>{view.label}</span>
-        <span className={styles.windowPct}>{percentText(view.usedPct)}</span>
+        <span className={styles.windowPct}>{percentText(view.usedPct)}{historical ? ' · prior' : null}</span>
       </div>
       <div
         className={styles.track}
         data-tone={view.tone}
         role="meter"
-        aria-label={`${name} used`}
+        aria-label={`${name} ${historical ? 'prior reading used' : 'used'}`}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={pct}
-        aria-valuetext={`${percentText(view.usedPct)} used${view.resetText ? `, ${view.resetText}` : ''}`}
+        aria-valuetext={`${historical ? 'Prior reading: ' : ''}${percentText(view.usedPct)} used${view.resetText ? `, ${historical ? 'prior report: ' : ''}${view.resetText}` : ''}${historical ? '; current access unconfirmed' : ''}`}
       >
         <div className={styles.fill} style={{ width: `${pct}%` }} />
       </div>
-      {view.resetText ? <p className={styles.windowReset}>{view.resetText}</p> : null}
+      {view.resetText ? <p className={styles.windowReset}>{historical ? 'Prior report: ' : null}{view.resetText}</p> : null}
     </div>
   );
 }

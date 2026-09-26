@@ -116,8 +116,11 @@ describe('CloudCard states', () => {
   });
 
   it('failed: the plain reason, no session link, and never a link to a foreign host', async () => {
-    const failed = task('failed', { stateReason: 'Claude Code cloud sessions need a claude.ai login on the claude-a seat.', failure: 'auth' });
-    const spoofed = task('running', { title: 'spoofed', sessionUrl: 'https://claude.ai.evil.example/code/session_x' });
+    // Keep both rows at the same instant so newest-first sorting does not
+    // reorder the fixtures when separate Date.now() calls straddle a millisecond.
+    const now = Date.now();
+    const failed = task('failed', { stateReason: 'Claude Code cloud sessions need a claude.ai login on the claude-a seat.', failure: 'auth' }, now);
+    const spoofed = task('running', { title: 'spoofed', sessionUrl: 'https://claude.ai.evil.example/code/session_x' }, now);
     stubCloudFetch(overview({ tasks: [failed, spoofed] }));
     render(<Host />);
     const list = await within(card()).findByRole('list', { name: 'Cloud tasks' });
