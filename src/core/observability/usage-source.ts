@@ -210,12 +210,47 @@ function extractClaudeEvent(
   };
 }
 
+/**
+ * Identity of the API response a transcript line belongs to, or null when the
+ * line carries none (older transcripts). Claude Code writes ONE LINE PER
+ * CONTENT BLOCK — a thinking block, a text block and each tool_use block of a
+ * single response are separate `assistant` lines that all repeat the SAME
+ * `message.id` and the SAME full `usage`. Summing every line counted a
+ * thinking+text reply twice and a reply with three tool calls four times
+ * (the ccusage method dedupes on message.id + requestId for this reason).
+ */
+function claudeMessageKey(raw: unknown): string | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const obj = raw as Record<string, unknown>;
+  const message = obj["message"];
+  if (typeof message !== "object" || message === null) return null;
+  const id = (message as Record<string, unknown>)["id"];
+  if (typeof id !== "string" || id.length === 0) return null;
+  const requestId = typeof obj["requestId"] === "string" ? obj["requestId"] : "";
+  return `${id}\u0000${requestId}`;
+}
+
+/**
+ * Fold a repeat line of an already-counted response into its first event.
+ * The copies normally carry identical usage; taking the max per field keeps
+ * the final figure if a streamed copy was written before its output finished.
+ */
+function mergeRepeatedUsage(into: UsageEvent, repeat: UsageEvent): void {
+  into.tokensIn = Math.max(into.tokensIn, repeat.tokensIn);
+  into.tokensOut = Math.max(into.tokensOut, repeat.tokensOut);
+  into.cacheRead = Math.max(into.cacheRead, repeat.cacheRead);
+  into.cacheWrite = Math.max(into.cacheWrite, repeat.cacheWrite);
+}
+
 // ---------------------------------------------------------------------------
 // Claude Code transcript ingestion
 // ---------------------------------------------------------------------------
 
 function collectClaudeEvents(sinceMs: number): UsageEvent[] {
   const events: UsageEvent[] = [];
+  // One response → one event, across every file: a resumed session can
+  // replay earlier responses into a new transcript file (see claudeMessageKey).
+  const byMessage = new Map<string, UsageEvent>();
   const projectsRoot = claudeProjectsDir();
 
   let projectDirs: string[];
@@ -259,7 +294,19 @@ function collectClaudeEvents(sinceMs: number): UsageEvent[] {
           return; // malformed line — skip silently
         }
         const event = extractClaudeEvent(parsed, project, sinceMs);
-        if (event) events.push(event);
+        if (!event) return;
+        const key = claudeMessageKey(parsed);
+        if (key === null) {
+          events.push(event);
+          return;
+        }
+        const first = byMessage.get(key);
+        if (first) {
+          mergeRepeatedUsage(first, event);
+          return;
+        }
+        byMessage.set(key, event);
+        events.push(event);
       });
     }
   }

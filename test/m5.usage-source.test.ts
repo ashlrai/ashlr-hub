@@ -359,6 +359,70 @@ describe('collectUsageEvents — skips non-usage lines', () => {
 // collectUsageEvents — malformed line tolerance
 // ---------------------------------------------------------------------------
 
+describe('collectUsageEvents — one response is one event', () => {
+  // Claude Code writes one transcript line PER CONTENT BLOCK, each repeating
+  // the response's message.id, requestId and full usage (a real Verse local
+  // chat produced a thinking line and a text line, both with 12,560 in).
+  function blockLine(id: string | null, requestId: string | null, block: string, usage: { in: number; out: number }): string {
+    return JSON.stringify({
+      type: 'assistant',
+      timestamp: new Date().toISOString(),
+      ...(requestId ? { requestId } : {}),
+      message: {
+        ...(id ? { id } : {}),
+        role: 'assistant',
+        model: 'claude-sonnet-4-5-20250929',
+        content: [{ type: block }],
+        usage: { input_tokens: usage.in, output_tokens: usage.out, cache_read_input_tokens: 7, cache_creation_input_tokens: 3 },
+      },
+    });
+  }
+
+  it('counts a thinking + text + tool_use response once, not three times', () => {
+    const dir = path.join(tmpHome, '.claude', 'projects', ENCODED_DIR);
+    writeFile(path.join(dir, 's.jsonl'), [
+      blockLine('msg_1', 'req_1', 'thinking', { in: 12_560, out: 47 }),
+      blockLine('msg_1', 'req_1', 'text', { in: 12_560, out: 47 }),
+      blockLine('msg_1', 'req_1', 'tool_use', { in: 12_560, out: 47 }),
+      blockLine('msg_2', 'req_2', 'text', { in: 100, out: 5 }),
+    ].join('\n') + '\n');
+    const events = collectUsageEvents(0);
+    expect(events).toHaveLength(2);
+    expect(events.reduce((s, e) => s + e.tokensIn, 0)).toBe(12_660);
+    expect(events.reduce((s, e) => s + e.tokensOut, 0)).toBe(52);
+    expect(events.reduce((s, e) => s + e.cacheRead, 0)).toBe(14);
+  });
+
+  it('keeps the largest figure when a streamed copy was written before output finished', () => {
+    const dir = path.join(tmpHome, '.claude', 'projects', ENCODED_DIR);
+    writeFile(path.join(dir, 's.jsonl'), [
+      blockLine('msg_1', 'req_1', 'thinking', { in: 900, out: 1 }),
+      blockLine('msg_1', 'req_1', 'text', { in: 900, out: 312 }),
+    ].join('\n') + '\n');
+    const [only, ...rest] = collectUsageEvents(0);
+    expect(rest).toHaveLength(0);
+    expect(only).toMatchObject({ tokensIn: 900, tokensOut: 312 });
+  });
+
+  it('dedupes a response replayed into another transcript file (resumed session)', () => {
+    const dir = path.join(tmpHome, '.claude', 'projects', ENCODED_DIR);
+    writeFile(path.join(dir, 'a.jsonl'), blockLine('msg_1', 'req_1', 'text', { in: 500, out: 20 }) + '\n');
+    writeFile(path.join(dir, 'b.jsonl'), blockLine('msg_1', 'req_1', 'text', { in: 500, out: 20 }) + '\n');
+    expect(collectUsageEvents(0)).toHaveLength(1);
+  });
+
+  it('never merges lines without a message id, or the same id under different requests', () => {
+    const dir = path.join(tmpHome, '.claude', 'projects', ENCODED_DIR);
+    writeFile(path.join(dir, 's.jsonl'), [
+      blockLine(null, null, 'text', { in: 10, out: 1 }),
+      blockLine(null, null, 'text', { in: 10, out: 1 }),
+      blockLine('msg_9', 'req_a', 'text', { in: 10, out: 1 }),
+      blockLine('msg_9', 'req_b', 'text', { in: 10, out: 1 }),
+    ].join('\n') + '\n');
+    expect(collectUsageEvents(0)).toHaveLength(4);
+  });
+});
+
 describe('collectUsageEvents — tolerates malformed lines', () => {
   it('skips blank lines without throwing', () => {
     const projectsDir = path.join(tmpHome, '.claude', 'projects', ENCODED_DIR);
