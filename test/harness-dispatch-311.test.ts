@@ -25,7 +25,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -98,12 +98,57 @@ describe('applyHarnessToEngineCommand — engine-specific flags on the real regi
       effort: { 'claude-cli': 'xhigh' },
       sampling: { 'claude-cli': { temperature: 0.3, topP: null, maxOutputTokens: null } },
     }));
-    const out = applyHarnessToEngineCommand('claude', cmd, tuning);
+    const out = applyHarnessToEngineCommand('claude', cmd, tuning, { claudeCliVersion: '2.1.257' });
     expect(out.cmd.args).toEqual([...cmd.args, '--effort', 'xhigh']);
     expect(out.application.applied).toEqual(['effort=xhigh']);
     expect(out.application.withheld).toEqual(['temperature: claude has no sampling flag']);
     // The input command is never mutated.
     expect(cmd.args).not.toContain('--effort');
+  });
+
+  it('claude: --effort is withheld (argv untouched) on an unknown or pre-2.1.243 build', () => {
+    // commander rejects an unknown option before any inference, so sending
+    // --effort to a build that predates it would fail every claude dispatch.
+    const cmd = built('claude');
+    const tuning = harnessTuningFor('claude', harness({ effort: { 'claude-cli': 'high' } }));
+    const unknown = applyHarnessToEngineCommand('claude', cmd, tuning);
+    expect(unknown.cmd).toBe(cmd);
+    expect(unknown.application.applied).toEqual([]);
+    expect(unknown.application.withheld).toEqual(['effort: the claude build is unknown (--effort needs 2.1.243+)']);
+    const nullVersion = applyHarnessToEngineCommand('claude', cmd, tuning, { claudeCliVersion: null });
+    expect(nullVersion.cmd).toBe(cmd);
+    const old = applyHarnessToEngineCommand('claude', cmd, tuning, { claudeCliVersion: '2.1.200' });
+    expect(old.cmd).toBe(cmd);
+    expect(old.application.withheld).toEqual(['effort: claude 2.1.200 predates --effort (needs 2.1.243+)']);
+    const exact = applyHarnessToEngineCommand('claude', cmd, tuning, { claudeCliVersion: '2.1.243' });
+    expect(exact.cmd.args).toEqual([...cmd.args, '--effort', 'high']);
+  });
+
+  it('codex: a command without the `exec` subcommand withholds effort instead of misplacing -c', () => {
+    const cmd: EngineCommand = { bin: 'codex', args: ['--cd', '/wt', '--json', 'fix the parser'], cwd: '/wt' };
+    const out = applyHarnessToEngineCommand('codex', cmd, harnessTuningFor('codex', harness({ effort: { codex: 'high' } })));
+    expect(out.cmd).toBe(cmd);
+    expect(out.application.withheld).toEqual(['effort: the codex command has no `exec` subcommand to carry -c']);
+  });
+
+  it('treats an effort or sampling value off the registry vocabulary / bounds as unset', () => {
+    const bad = harness({
+      effort: { codex: 'turbo' as never, 'claude-cli': 'high' },
+      sampling: {
+        local: { temperature: Number.NaN, topP: 5, maxOutputTokens: 12.5 },
+        'grok-cli': { temperature: -1, topP: null, maxOutputTokens: Number.POSITIVE_INFINITY },
+      },
+    });
+    expect(harnessTuningFor('codex', bad)).toBeNull();
+    expect(harnessTuningFor('llama-server', bad)).toBeNull();
+    expect(harnessTuningFor('grok-cli', bad)).toBeNull();
+    const cmd = built('codex', 'gpt-5.5');
+    expect(applyHarnessToEngineCommand('codex', cmd, harnessTuningFor('codex', bad)).cmd).toBe(cmd);
+    // A valid neighbour still applies.
+    expect(harnessTuningFor('claude', bad)?.effort).toBe('high');
+    expect(harnessTuningFor('llama-server', harness({
+      sampling: { local: { temperature: 0, topP: 0.01, maxOutputTokens: 256 } },
+    }))).toMatchObject({ temperature: 0, topP: 0.01, maxOutputTokens: 256 });
   });
 
   it('codex: -c model_reasoning_effort right after `exec`, the goal stays last', () => {
@@ -152,7 +197,7 @@ describe('applyHarnessToEngineCommand — engine-specific flags on the real regi
       effort: { 'claude-cli': 'high' },
       sampling: { 'claude-cli': { temperature: 0.1, topP: null, maxOutputTokens: null } },
     }));
-    const { application } = applyHarnessToEngineCommand('claude', built('claude'), tuning);
+    const { application } = applyHarnessToEngineCommand('claude', built('claude'), tuning, { claudeCliVersion: '2.1.280' });
     expect(describeHarnessApplication('claude', tuning, application))
       .toBe('harness h-0007 on claude: applied effort=high; withheld temperature: claude has no sampling flag');
     expect(describeHarnessApplication('claude', null, { applied: [], withheld: [] })).toBeNull();
@@ -229,12 +274,14 @@ describe('buildOpenAICompatibleClient — harness request fields on the wire', (
 // 4. runEngineSandboxed — the argv a real spawn receives
 // ---------------------------------------------------------------------------
 
-describe.skipIf(process.platform === 'win32')('runEngineSandboxed spawns codex with the harness effort', () => {
+describe.skipIf(process.platform === 'win32')('runEngineSandboxed spawns codex / claude with the harness effort', () => {
   const cleanup: string[] = [];
   let prevPath: string | undefined;
   let prevAllowAnyRepo: string | undefined;
   let prevAshlrHome: string | undefined;
   let argsFile: string;
+  let stubDir: string;
+  let stubScript: string;
 
   beforeEach(() => {
     prevPath = process.env.PATH;
@@ -245,10 +292,11 @@ describe.skipIf(process.platform === 'win32')('runEngineSandboxed spawns codex w
     cleanup.push(home);
     process.env.ASHLR_HOME = join(home, '.ashlr');
     // A fake `codex` that records its argv NUL-separated (a goal can hold newlines).
-    const stubDir = mkdtempSync(join(tmpdir(), 'ashlr-h311-stub-'));
+    stubDir = mkdtempSync(join(tmpdir(), 'ashlr-h311-stub-'));
     cleanup.push(stubDir);
     argsFile = join(stubDir, 'argv');
-    writeFileSync(join(stubDir, 'codex'), `#!/bin/sh\n: > "${argsFile}"\nfor a in "$@"; do printf '%s\\0' "$a" >> "${argsFile}"; done\nprintf 'done'\nexit 0\n`, { mode: 0o755 });
+    stubScript = `#!/bin/sh\n: > "${argsFile}"\nfor a in "$@"; do printf '%s\\0' "$a" >> "${argsFile}"; done\nprintf 'done'\nexit 0\n`;
+    writeFileSync(join(stubDir, 'codex'), stubScript, { mode: 0o755 });
     process.env.PATH = `${stubDir}:${prevPath ?? ''}`;
   });
 
@@ -277,7 +325,7 @@ describe.skipIf(process.platform === 'win32')('runEngineSandboxed spawns codex w
     return {
       version: 1, roots: [], editor: 'cursor', staleDays: 30, categories: {}, tidyRules: [], keepers: [],
       models: { lmstudio: 'http://localhost:1234', ollama: 'http://localhost:11434', providerChain: ['ollama'] },
-      telemetry: {}, tools: {}, foundry: { allowedBackends: ['codex'], dispatchRetries: 0 },
+      telemetry: {}, tools: {}, foundry: { allowedBackends: ['codex', 'claude'], dispatchRetries: 0, fleetMcp: false },
     } as unknown as AshlrConfig;
   }
 
@@ -299,6 +347,31 @@ describe.skipIf(process.platform === 'win32')('runEngineSandboxed spawns codex w
     });
     const argv = spawnedArgv();
     expect(argv.slice(0, 3)).toEqual(['exec', '-c', 'model_reasoning_effort="high"']);
+  });
+
+  it('claude on a native-installer build ≥ 2.1.243 ⇒ --effort in the spawned argv', async () => {
+    // The native installer links `claude` → …/versions/<X.Y.Z>; the version is read from that name.
+    const versions = join(stubDir, 'versions');
+    mkdirSync(versions);
+    writeFileSync(join(versions, '2.1.257'), stubScript, { mode: 0o755 });
+    symlinkSync(join(versions, '2.1.257'), join(stubDir, 'claude'));
+    const { runEngineSandboxed } = await freshSandboxedEngine();
+    await runEngineSandboxed('claude', 'Write hello world', cfg(), {
+      sourceRepo: sourceRepo(), propose: false, harness: harness({ effort: { 'claude-cli': 'high' } }),
+    });
+    const argv = spawnedArgv();
+    expect(argv.slice(-2)).toEqual(['--effort', 'high']);
+  });
+
+  it('claude whose build cannot be read ⇒ --effort withheld, the compiled argv', async () => {
+    writeFileSync(join(stubDir, 'claude'), stubScript, { mode: 0o755 });
+    const { runEngineSandboxed } = await freshSandboxedEngine();
+    await runEngineSandboxed('claude', 'Write hello world', cfg(), {
+      sourceRepo: sourceRepo(), propose: false, harness: harness({ effort: { 'claude-cli': 'high' } }),
+    });
+    const argv = spawnedArgv();
+    expect(argv[0]).toBe('-p');
+    expect(argv).not.toContain('--effort');
   });
 
   it('no harness ⇒ the compiled argv, no effort override', async () => {

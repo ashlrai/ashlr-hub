@@ -11,7 +11,7 @@
  * engine-specific form each producer understands:
  *
  *   lane        engine id                effort                                   sampling
- *   claude-cli  claude                   `--effort <level>`                       — (no CLI flag)
+ *   claude-cli  claude                   `--effort <level>` (build ≥ 2.1.243)     — (no CLI flag)
  *   codex       codex                    `-c model_reasoning_effort="<level>"`    — (no CLI flag)
  *   grok-cli    grok-cli                 `--reasoning-effort=<level>`             — (no CLI flag)
  *   local       llama-server             request `reasoning_effort`               temperature, top_p, max_tokens
@@ -34,11 +34,17 @@
  * effort / sampling) applies NOTHING: the argv and request are byte-identical
  * to the compiled defaults.
  *
- * PURE: no I/O, no clock.
+ * PURE: no I/O, no clock. (The one fact that needs I/O — which claude build
+ * is on PATH — is resolved by the caller and passed in.)
  */
 import type { FleetEngine } from '../fleet/fleet-types.js';
+import { HARNESS_CONFIG_BOUNDS } from '../learn/harness-registry.js';
 import type { HarnessEffort, HarnessSampling } from '../learn/harness-types.js';
 import type { EngineCommand } from '../types.js';
+import { compareCliVersions } from '../verse/model-windows.js';
+import { CLAUDE_EFFORT_MIN_CLI } from '../verse/session-controls.js';
+
+const HARNESS_EFFORT_LEVELS: ReadonlySet<string> = new Set<HarnessEffort>(['low', 'medium', 'high', 'xhigh', 'max']);
 
 /** The slice of an active harness a dispatch carries (per fleet lane). */
 export interface DispatchHarness {
@@ -95,23 +101,47 @@ export function harnessTuningFor(engine: string, harness: DispatchHarness | null
   if (!harness) return null;
   const lane = harnessLaneOf(engine);
   if (lane === null) return null;
-  const effort = harness.effort?.[lane] ?? null;
+  // Defence in depth: the registry refuses out-of-bounds values at adoption,
+  // but this is the last stop before an argv / request body, where one bad
+  // value fails EVERY dispatch on the lane. Anything off the registry's own
+  // vocabulary / bounds is treated as unset (the engine default).
+  const rawEffort: unknown = harness.effort?.[lane] ?? null;
+  const effort = typeof rawEffort === 'string' && HARNESS_EFFORT_LEVELS.has(rawEffort) ? rawEffort as HarnessEffort : null;
   const sampling = harness.sampling?.[lane] ?? null;
+  const b = HARNESS_CONFIG_BOUNDS;
   const tuning: EngineHarnessTuning = {
     versionId: harness.versionId,
     lane,
     effort,
-    temperature: sampling?.temperature ?? null,
-    topP: sampling?.topP ?? null,
-    maxOutputTokens: sampling?.maxOutputTokens ?? null,
+    temperature: inBounds(sampling?.temperature, b.temperature.min, b.temperature.max, false),
+    topP: inBounds(sampling?.topP, b.topP.min, b.topP.max, false),
+    maxOutputTokens: inBounds(sampling?.maxOutputTokens, b.maxOutputTokens.min, b.maxOutputTokens.max, true),
   };
   const empty = tuning.effort === null && tuning.temperature === null && tuning.topP === null && tuning.maxOutputTokens === null;
   return empty ? null : tuning;
 }
 
+function inBounds(value: unknown, min: number, max: number, integer: boolean): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  if (value < min || value > max) return null;
+  if (integer && !Number.isInteger(value)) return null;
+  return value;
+}
+
 // ---------------------------------------------------------------------------
 // CLI engines — argv
 // ---------------------------------------------------------------------------
+
+/** Facts about the binary a CLI command will exec, resolved by the caller. */
+export interface EngineCommandContext {
+  /**
+   * The claude build the command will run (e.g. `2.1.257`), or null/absent
+   * when unknown. `--effort` is only sent to a build known to accept it
+   * (session-controls CLAUDE_EFFORT_MIN_CLI): commander rejects an unknown
+   * option, so a guess would fail every claude dispatch.
+   */
+  claudeCliVersion?: string | null;
+}
 
 /** Codex models whose API accepts `xhigh` (engines.ts codexReasoningConfigRecovery uses the same test). */
 function codexSupportsXHigh(model: string | undefined): boolean {
@@ -146,6 +176,7 @@ export function applyHarnessToEngineCommand(
   engine: string,
   cmd: EngineCommand,
   tuning: EngineHarnessTuning | null,
+  context: EngineCommandContext = {},
 ): { cmd: EngineCommand; application: HarnessApplication } {
   const application: HarnessApplication = { applied: [], withheld: [] };
   if (!tuning) return { cmd, application };
@@ -155,8 +186,13 @@ export function applyHarnessToEngineCommand(
   if (engine === 'claude') {
     if (effort !== null) {
       // claude --effort accepts all five harness levels (session-controls CLAUDE_EFFORTS).
+      const version = context.claudeCliVersion ?? null;
       if (sets(cmd.args, '--effort')) application.withheld.push('effort: the command already sets --effort');
-      else {
+      else if (version === null) {
+        application.withheld.push(`effort: the claude build is unknown (--effort needs ${CLAUDE_EFFORT_MIN_CLI}+)`);
+      } else if (compareCliVersions(version, CLAUDE_EFFORT_MIN_CLI) < 0) {
+        application.withheld.push(`effort: claude ${version} predates --effort (needs ${CLAUDE_EFFORT_MIN_CLI}+)`);
+      } else {
         args = [...cmd.args, '--effort', effort];
         application.applied.push(`effort=${effort}`);
       }
@@ -164,8 +200,13 @@ export function applyHarnessToEngineCommand(
     withholdSampling(tuning, engine, application);
   } else if (engine === 'codex') {
     if (effort !== null) {
+      const execAt = cmd.args.indexOf('exec');
       if (cmd.args.some((a) => /^model_reasoning_effort\s*=/.test(a))) {
         application.withheld.push('effort: the command already sets model_reasoning_effort');
+      } else if (execAt < 0) {
+        // `-c` is an `exec` option. A command without the subcommand (a
+        // config-defined codex spec) has no safe place for it.
+        application.withheld.push('effort: the codex command has no `exec` subcommand to carry -c');
       } else {
         // Codex accepts minimal|low|medium|high|xhigh; xhigh only on gpt-5.4+.
         // `max` (and xhigh on an older model) runs at the model's ceiling.
@@ -173,10 +214,8 @@ export function applyHarnessToEngineCommand(
         const level = effort === 'max' || effort === 'xhigh' ? ceiling : effort;
         // `-c` is an `exec` option: insert right after the subcommand (the
         // goal is the last positional and must stay last).
-        const execAt = cmd.args.indexOf('exec');
-        const at = execAt >= 0 ? execAt + 1 : 0;
         args = [...cmd.args];
-        args.splice(at, 0, '-c', `model_reasoning_effort="${level}"`);
+        args.splice(execAt + 1, 0, '-c', `model_reasoning_effort="${level}"`);
         application.applied.push(level === effort ? `effort=${level}` : `effort=${level} (requested ${effort})`);
       }
     }

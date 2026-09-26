@@ -39,7 +39,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, appendFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, appendFileSync, readFileSync, realpathSync } from 'node:fs';
 import { execFileSync, execSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
@@ -72,7 +72,8 @@ import {
   scopeHintFiles,
   summarizeDelegationScope,
 } from './delegation-scope.js';
-import { buildEngineCommand, spawnEngine, describeRunEventForStream } from './engines.js';
+import { buildEngineCommand, spawnEngine, describeRunEventForStream, resolveBinAbsolute } from './engines.js';
+import { cliVersionFromExecutable } from '../verse/model-windows.js';
 import {
   nullSink,
   withOptionalRunOutputPersistence,
@@ -1784,6 +1785,22 @@ export function grokNoDiffMinEvents(cfg: AshlrConfig): number {
 }
 
 /**
+ * V3.11: the claude build `bin` resolves to, or null when unknown. The native
+ * installer links `claude` to `…/claude/versions/<X.Y.Z>`, so the version is
+ * read from the resolved file name (verse/model-windows.ts, the same reading
+ * the Verse effort picker uses). Any other install shape reads as unknown,
+ * which withholds `--effort` rather than risk a flag that build rejects.
+ * Never throws.
+ */
+function claudeCliVersionOnPath(bin: string): string | null {
+  try {
+    return cliVersionFromExecutable(realpathSync(resolveBinAbsolute(bin)));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Run `engine` on `goal` inside a sandbox worktree of `opts.sourceRepo`, capturing
  * the diff as a PENDING proposal. Never throws; failures surface as a 'failed'
  * RunState. Does NOT fall back to a raw (unsandboxed) run — that would defeat the
@@ -2133,8 +2150,13 @@ export async function runEngineSandboxed(
     // sampling) rides on the argv BEFORE any rewrite below — the grok-cli
     // direct exec and the autonomous launcher keep args, so it survives both.
     const harnessTuning = harnessTuningFor(engineKey, opts.harness);
+    // Only claude's --effort depends on the build (older builds reject the
+    // flag outright), so the PATH lookup happens only when it can matter.
+    const harnessCommandContext = cmd && harnessTuning?.effort && engineKey === 'claude'
+      ? { claudeCliVersion: claudeCliVersionOnPath(cmd.bin) }
+      : {};
     if (cmd && harnessTuning) {
-      const tuned = applyHarnessToEngineCommand(engineKey, cmd, harnessTuning);
+      const tuned = applyHarnessToEngineCommand(engineKey, cmd, harnessTuning, harnessCommandContext);
       cmd = tuned.cmd;
       const line = describeHarnessApplication(engineKey, harnessTuning, tuned.application);
       if (line) emitSinkEvent(streamSink, { kind: 'log', taskId: 't1', text: line });
@@ -2709,7 +2731,7 @@ export async function runEngineSandboxed(
                   });
                   if (!builtRepairCmd) return null;
                   // A repair turn is the same dispatch: same harness settings.
-                  const repairCmd = applyHarnessToEngineCommand(engineKey, builtRepairCmd, harnessTuning).cmd;
+                  const repairCmd = applyHarnessToEngineCommand(engineKey, builtRepairCmd, harnessTuning, harnessCommandContext).cmd;
                   incrementRunActionCount(actionCounts, 'verifyRepairAttempts');
                   incrementRunActionCount(actionCounts, 'spawnAttempts');
                   const r = await spawnEngine(repairCmd, cfg, {
