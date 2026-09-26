@@ -101,6 +101,8 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/fleet/fleet-merge-state.ts',
   // 3.13: posts the host-verified ashlr/verify check G7 and the rulesets trust
   'src/core/fleet/verify-check-run.ts',
+  // 3.13: signs provenance for cloud PRs it ingests into the standing pass
+  'src/core/fleet/cloud-intake.ts',
   'src/core/fleet/post-merge-watch.ts',
   'src/core/fleet/quarantine.ts',
   'src/core/fleet/regression-sentinel.ts',
