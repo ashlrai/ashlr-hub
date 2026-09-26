@@ -26,7 +26,7 @@ import type { AutoMergePassResult } from '../src/core/fleet/automerge-pass.js';
 import type { EffectivePolicy } from '../src/core/authority/types.js';
 import type { FleetEngine, LandingRecord } from '../src/core/fleet/fleet-types.js';
 import type { AshlrConfig, DecisionEntry, Proposal } from '../src/core/types.js';
-import { FakeGithub, MemoryLedger, fleetProposal, judgedDecision, repoPolicy, standingPolicy } from './helpers/fleet-github-310b.js';
+import { FLEET_APP_ID, FakeGithub, MemoryLedger, fleetProposal, judgedDecision, repoPolicy, standingPolicy } from './helpers/fleet-github-310b.js';
 
 beforeAll(() => {
   loadOrCreateKey();
@@ -679,5 +679,76 @@ describe('standing merge pass — human exits and the owner-lane TTL (P1)', () =
     await pass(w, []);
     expect(w.fake.pulls.get(pr.number)!.state).toBe('open');
     expect(w.proposals.get(p.id)!.status).toBe('pending');
+  });
+});
+
+describe('standing merge pass — host-verified ashlr/verify (3.13)', () => {
+  const VERCEL_APP_ID = 8329;
+  // Local enforcement caps fleet work at low risk (a compiled-in ceiling): a docs change.
+  const LOW_RISK = { 'docs/NOTES.md': '# notes\n' };
+  /** A local-enforcement repo with no GitHub-side required checks (a free private repo, or Actions off). */
+  function localWorld(): World {
+    const w = world({ required: [] });
+    w.policy.current = standingPolicy([repoPolicy(w.repo, { enforcement: 'local' })]);
+    return w;
+  }
+  const verifyPosts = (w: World) => w.fake.checkRunPosts().filter((post) => post.body['name'] === 'ashlr/verify' || post.method === 'PATCH');
+
+  it('the App posts success on the verified head; with it (plus a Vercel green) the PR merges', async () => {
+    const w = localWorld();
+    add(w, fleetProposal(w.fake, { files: LOW_RISK, ...GROK }));
+    await pass(w);
+    const pr = prOf(w);
+    const head = w.fake.headOfPull(pr.number)!;
+    expect(verifyPosts(w)).toHaveLength(1);
+    expect(verifyPosts(w)[0]!.body).toMatchObject({ name: 'ashlr/verify', head_sha: head, status: 'completed', conclusion: 'success' });
+    expect(w.fake.checkRuns.get(head)).toEqual([expect.objectContaining({ name: 'ashlr/verify', appId: FLEET_APP_ID, conclusion: 'success' })]);
+    w.fake.setCheck(head, 'Vercel', 'success', VERCEL_APP_ID);
+    w.clock.now += 10 * 60 * 1000;
+    const merged = await pass(w);
+    expect(merged.summary.merged).toBe(1);
+    // Idempotent per head: progressing the PR re-posted nothing.
+    expect(verifyPosts(w)).toHaveLength(1);
+  });
+
+  it('a Vercel-only green never merges: without the App check (no checks:write) the PR goes to the owner lane', async () => {
+    const w = localWorld();
+    w.fake.checkRunsStatus = 403;
+    add(w, fleetProposal(w.fake, { files: LOW_RISK, ...GROK }));
+    const opened = await pass(w);
+    expect(opened.summary.notes.join('\n')).toMatch(/ashlr\/verify not posted \(permission\)/);
+    const pr = prOf(w);
+    w.fake.setCheck(w.fake.headOfPull(pr.number)!, 'Vercel', 'success', VERCEL_APP_ID);
+    w.clock.now += 10 * 60 * 1000;
+    await pass(w);
+    expect(w.fake.mergeCalls()).toHaveLength(0);
+    expect(w.ledger.gateRows().at(-1)).toMatchObject({ gate: 'G7', verdict: 'owner-lane', code: 'no-verify-check' });
+    expect([...w.fake.pulls.get(pr.number)!.labels]).toContain('ashlr:owner-lane');
+  });
+
+  it('a moved base rebuilds the head and posts ashlr/verify on the new head', async () => {
+    const w = localWorld();
+    add(w, fleetProposal(w.fake, { files: LOW_RISK, ...GROK }));
+    await pass(w);
+    const pr = prOf(w);
+    const firstHead = w.fake.headOfPull(pr.number)!;
+    w.fake.pushCommit('main', { 'README.md': '# canary\n\nmoved\n' });
+    w.fake.syncMirror();
+    w.clock.now += 10 * 60 * 1000;
+    await pass(w);
+    const rebuilt = w.fake.headOfPull(pr.number)!;
+    expect(rebuilt).not.toBe(firstHead);
+    expect(verifyPosts(w).map((post) => post.body['head_sha'])).toEqual([firstHead, rebuilt]);
+    expect(w.fake.checkRuns.get(rebuilt)).toEqual([expect.objectContaining({ name: 'ashlr/verify', conclusion: 'success', appId: FLEET_APP_ID })]);
+    w.clock.now += 10 * 60 * 1000;
+    expect((await pass(w)).summary.merged).toBe(1);
+  });
+
+  it('an owner-lane PR (no G3) is reported not host-verified', async () => {
+    const w = localWorld();
+    add(w, fleetProposal(w.fake, { files: { ...LOW_RISK, 'package.json': '{ "name": "canary", "version": "1.0.2" }\n' }, ...GROK }));
+    await pass(w);
+    expect(verifyPosts(w)).toHaveLength(1);
+    expect(verifyPosts(w)[0]!.body).toMatchObject({ conclusion: 'failure', output: expect.objectContaining({ title: 'Not host-verified' }) });
   });
 });

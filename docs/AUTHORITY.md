@@ -53,7 +53,7 @@ neither the Leader nor config can skip a rung or edit one.
 | Signing key | Secure Enclave, through `/usr/local/libexec/ashlr-custody` (root-owned, installed once with `sudo scripts/install-custody.sh`) | The key cannot be exported, and every signature needs Touch ID or the login password. The helper parses the grant strictly, shows its scope in the Touch ID prompt, and refuses anything that is not a StandingGrantV1 within the compiled ceilings. |
 | Key id | `se-p256-` + the first 16 hex characters of sha256(SPKI DER) | The verifier accepts a compiled root only when its `keyId` equals `keyIdForPublicKeyPem(publicKeyPem)`, so anyone reviewing a trust-roots PR can recompute the id. |
 | Trust roots | `src/core/authority/trust-roots.ts` | Added only in your own PR (setup opens it from a throwaway worktree). The August `mason-workstation` ed25519 key is burned: roots are ES256 only, and that key id is on the refusal list. |
-| GitHub App key (`ashlr-fleet`) | Keychain item owned by the helper | Created through the App Manifest flow. The PEM never touches disk and is never printed. The App can write contents and pull requests and read checks, statuses and metadata. It is never a code owner and cannot bypass rulesets. |
+| GitHub App key (`ashlr-fleet`) | Keychain item owned by the helper | Created through the App Manifest flow. The PEM never touches disk and is never printed. The App can write contents, pull requests and check runs (3.13: it posts the host-verified `ashlr/verify` check) and read statuses and metadata. It is never a code owner and cannot bypass rulesets. |
 | Claude token | Keychain item owned by the helper | Used only by `claude --restricted --tools ""` judge and Leader calls, which have no tools. |
 | Grant, switch, ledger | `~/.ashlr/authority/` (0700; files 0600) | The grant is signed, the ledger is hash-chained and anchored, and a missing or unreadable switch reads as Off. Confined agents cannot read this directory at all; it is a tripwire that kills the reader. |
 
@@ -95,13 +95,22 @@ prints what it did, never runs `sudo`, and never touches launchd.
    rerun setup.
 5. **GitHub App.** Setup creates the `ashlr-fleet` App through the Manifest
    flow, which takes one browser page. Installing the App on the repos is one
-   more click.
+   more click. An App created before 3.13 has only `checks: read` and cannot
+   post `ashlr/verify`; setup detects that, marks this step waiting on you
+   and prints the exact links: set **Checks: Read and write** on the App's
+   Permissions page, then accept the new permission on each installation.
 6. **Claude token.** Run `claude setup-token` in another terminal and paste
    the token. The input is hidden, and the token goes straight to custody.
 7. **Rulesets.** Setup runs `ashlr authority protect --apply`; review the
    rules first with `--print`. Each ruleset requires status checks, pinned to
    the App that reports each one today, and requires the head to be up to
-   date with its base. It also blocks force-push and deletion and requires
+   date with its base. For a grant repo whose fleet mirror has a verify
+   command it also requires `ashlr/verify`, pinned to the `ashlr-fleet` App,
+   even when the default branch reports no checks at all (GitHub Actions
+   off). The App posts `ashlr/verify` only on fleet PRs: `success` only when
+   G3 passed and the PR head is exactly the verified tree on the verified
+   base, `failure` otherwise. Your own PRs need the admin bypass unless
+   another required check covers them. It also blocks force-push and deletion and requires
    code-owner review on protected paths.
    **The repository admin role (you) may bypass the ruleset; the App may
    not.**
@@ -185,7 +194,11 @@ the Command bar). Re-approval continues from the rung you had reached.
     the flag reads as unknown, and local enforcement.
 12. **Zero auto-merges at first on repos without required checks.** A repo
     with no required checks sends every fleet PR to the owner lane until its
-    ruleset exists. ashlr-hub is such a repo today.
+    ruleset exists. ashlr-hub is such a repo today; once `protect --apply`
+    requires `ashlr/verify` there, G7 can pass on the App's host-verified
+    check. On a local-enforcement repo G7 requires the App's green
+    `ashlr/verify` among the checks, so a deploy-only green (a Vercel
+    preview) never proves a PR green.
 13. **Slow revert CI can trip the kill.** The revert lander waits up to 15
     minutes for checks. Repeated slow runs escalate to owner-hold plus a
     global soft kill.

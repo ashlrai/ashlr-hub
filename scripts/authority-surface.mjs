@@ -80,6 +80,7 @@ export const AUTHORITY_SURFACE_ROOTS = Object.freeze([
   'dist/core/fleet/merge-gates.js',
   'dist/core/fleet/standing-merge-pass.js',
   'dist/core/fleet/fleet-merge-state.js',
+  'dist/core/fleet/verify-check-run.js',
   'dist/core/fleet/host-merge.js',
   'dist/core/fleet/post-merge-watch.js',
   'dist/core/fleet/quarantine.js',

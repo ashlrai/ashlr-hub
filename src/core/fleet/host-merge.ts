@@ -84,6 +84,7 @@ import {
   type FleetPrMemo,
 } from './fleet-merge-state.js';
 import { mirrorLeaseKey, mirrorPathFor, parseNameWithOwner } from './mirrors.js';
+import { ASHLR_VERIFY_CHECK_NAME, ensureFleetVerifyCheck, normalizeVerifyCommands } from './verify-check-run.js';
 import { VerificationCapacityError, withRepoLease, withVerificationSlot } from '../sandbox/execution-leases.js';
 // One definition of the revert seam: U4 owns the request / outcome shapes
 // (type-only import — post-merge-watch loads this module lazily, never the reverse).
@@ -1455,7 +1456,16 @@ export interface LandFleetRevertOptions {
   maxWaitMs?: number;
   deps?: HostMergeDeps;
   /** Verification seam (tests); production runs verifyProposal in the mirror. */
-  verify?: (proposal: Proposal) => Promise<{ ok: boolean; detail: string; failureCategory?: string; baseBranch?: string; baseHead?: string; commandKinds: string[] }>;
+  verify?: (proposal: Proposal) => Promise<{
+    ok: boolean;
+    detail: string;
+    failureCategory?: string;
+    baseBranch?: string;
+    baseHead?: string;
+    commandKinds: string[];
+    /** 3.13: the commands that ran (reported by `ashlr/verify`); kinds alone when absent. */
+    commands?: { kind: string; cmd: string[] }[];
+  }>;
 }
 
 /**
@@ -1491,6 +1501,7 @@ async function defaultRevertVerify(proposal: Proposal): ReturnType<NonNullable<L
     ...(result.baseBranch ? { baseBranch: result.baseBranch } : {}),
     ...(result.baseHead ? { baseHead: result.baseHead } : {}),
     commandKinds: result.ran.map((command) => command.kind),
+    commands: result.ran.map((command) => ({ kind: command.kind, cmd: [...command.cmd] })),
   };
 }
 
@@ -1813,6 +1824,7 @@ async function buildRevert(
   state.linesAdded = size.added;
   state.linesDeleted = size.deleted;
   state.verifyDigest = sha256Hex(`${g3Row.row.digest}`);
+  state.verifyCommands = normalizeVerifyCommands(verified?.commands ?? verified?.commandKinds.map((kind) => ({ kind, cmd: [] })) ?? []);
 
   // ── G7: publish + open ────────────────────────────────────────────────
   const branch = `${FLEET_BRANCH_PREFIX}${state.key}`;
@@ -1873,6 +1885,13 @@ type WaitResult =
 
 async function waitForChecks(state: FleetMergeStateV1, deps: HostMergeDeps, deadlineMs: number): Promise<WaitResult> {
   const pr = state.pr!;
+  // 3.13: the App's ashlr/verify on the revert head (idempotent per head). A
+  // local-enforcement repo cannot pass G7 without it, so a transient failure
+  // is retried later rather than sending the revert to the owner lane.
+  const posted = await ensureFleetVerifyCheck(state, deps);
+  if (!posted.ok && posted.retryable && state.enforcement === 'local') {
+    return { kind: 'error', reason: `${ASHLR_VERIFY_CHECK_NAME} could not be posted: ${posted.reason}` };
+  }
   for (;;) {
     if (deps.killActive()) return { kind: 'killed' };
     const required = await readRequiredChecks(state.repo, pr.baseBranch, deps);
@@ -1886,6 +1905,7 @@ async function waitForChecks(state: FleetMergeStateV1, deps: HostMergeDeps, dead
       statuses: checks.statuses,
       pendingSinceMs: Date.parse(pr.openedAt) || deps.nowMs(),
       nowMs: deps.nowMs(),
+      fleetAppId: pr.verifyCheck?.appId ?? null,
     });
     pr.checks = { state: evaluation.state === 'none' ? 'none' : evaluation.state, detail: evaluation.reason, at: new Date(deps.nowMs()).toISOString() };
     if (evaluation.verdict === 'pass') return { kind: 'green', evaluation, protectionDigest: required.protectionDigest, strict: required.strict };

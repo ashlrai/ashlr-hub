@@ -577,6 +577,8 @@ interface RepoProtectPlan {
   checks: string[];
   ruleset: Record<string, unknown> | null;
   existingId: number | null;
+  /** 3.13: why `ashlr/verify` is not required for a grant repo (null when it is, or the repo is not in the grant). */
+  verifyNote?: string | null;
 }
 
 function ghJson(deps: AuthorityCliDeps, args: readonly string[]): unknown {
@@ -585,26 +587,91 @@ function ghJson(deps: AuthorityCliDeps, args: readonly string[]): unknown {
   return JSON.parse(result.stdout || 'null') as unknown;
 }
 
-/** Check-run names on the default branch head: what CI actually reports today. */
-function discoverChecks(deps: AuthorityCliDeps, repo: string): RequiredCheck[] {
+/**
+ * Check-run names on the default branch head: what CI actually reports today.
+ * 3.13: with `verifyAppId` (the repo is in the grant, the fleet can verify it
+ * and the ashlr-fleet App's id is known) the host-verified `ashlr/verify` is
+ * always required, pinned to the App — even when master has no runs at all
+ * (Actions off), which is exactly the repo it exists for. A same-named run
+ * from another App on master never replaces the pin.
+ */
+function discoverChecks(deps: AuthorityCliDeps, repo: string, verifyAppId: number | null = null): RequiredCheck[] {
   const info = ghJson(deps, ['api', `repos/${repo}`]) as { default_branch?: string; private?: boolean };
   const branch = info.default_branch ?? 'main';
   const runs = ghJson(deps, ['api', `repos/${repo}/commits/${encodeURIComponent(branch)}/check-runs?per_page=100`]) as { check_runs?: { name?: string; app?: { id?: unknown } }[] };
   const found: RequiredCheck[] = [];
   for (const run of runs.check_runs ?? []) {
     if (typeof run.name !== 'string' || run.name.length === 0) continue;
+    if (verifyAppId !== null && run.name === ASHLR_VERIFY_CHECK) continue;
     const appId = run.app?.id;
     found.push({ context: run.name, integrationId: typeof appId === 'number' && Number.isSafeInteger(appId) && appId > 0 ? appId : null });
   }
+  if (verifyAppId !== null) found.push({ context: ASHLR_VERIFY_CHECK, integrationId: verifyAppId });
   return normalizeRequiredChecks(found);
+}
+
+/** The check the ashlr-fleet App posts on fleet PR heads (core/fleet/verify-check-run.ts ASHLR_VERIFY_CHECK_NAME). */
+export const ASHLR_VERIFY_CHECK = 'ashlr/verify';
+
+export interface FleetAppInfo {
+  id: number;
+  slug: string;
+  ownerLogin: string;
+  ownerIsOrg: boolean;
+  /** The App's configured permission for check runs ('write' | 'read' | null = none). */
+  checks: string | null;
+}
+
+/** The ashlr-fleet App as GitHub describes it to your own gh auth; null = unreadable. */
+export function readFleetApp(deps: AuthorityCliDeps): FleetAppInfo | null {
+  try {
+    const app = ghJson(deps, ['api', `apps/${FLEET_APP_NAME}`]) as {
+      id?: unknown;
+      slug?: unknown;
+      owner?: { login?: unknown; type?: unknown };
+      permissions?: Record<string, unknown>;
+    } | null;
+    if (!app || typeof app.id !== 'number' || !Number.isSafeInteger(app.id) || app.id <= 0) return null;
+    const slug = typeof app.slug === 'string' && /^[a-z0-9-]{1,100}$/.test(app.slug) ? app.slug : FLEET_APP_NAME;
+    const ownerLogin = typeof app.owner?.login === 'string' && /^[A-Za-z0-9-]{1,39}$/.test(app.owner.login) ? app.owner.login : '';
+    const checks = typeof app.permissions?.['checks'] === 'string' ? app.permissions['checks'] as string : null;
+    return { id: app.id, slug, ownerLogin, ownerIsOrg: app.owner?.type === 'Organization', checks };
+  } catch {
+    return null;
+  }
+}
+
+/** PURE: where the App's permissions (and then each installation's acceptance) are changed. */
+export function fleetAppPermissionUrls(app: Pick<FleetAppInfo, 'slug' | 'ownerLogin' | 'ownerIsOrg'>): { permissions: string; installations: string } {
+  const base = app.ownerIsOrg && app.ownerLogin
+    ? `https://github.com/organizations/${app.ownerLogin}/settings`
+    : 'https://github.com/settings';
+  return { permissions: `${base}/apps/${app.slug}/permissions`, installations: `${base}/installations` };
+}
+
+/** True when the fleet mirror of `repo` exists and the fleet detects at least one required verify command there. */
+async function fleetCanVerify(repo: string): Promise<boolean> {
+  try {
+    const { mirrorPathFor } = await import('../core/fleet/mirrors.js');
+    const { detectVerifyCommands } = await import('../core/run/verify-commands.js');
+    const mirror = mirrorPathFor(repo);
+    if (!existsSync(mirror)) return false;
+    return detectVerifyCommands(mirror, 'merge').some((command) => command.required !== false);
+  } catch {
+    return false;
+  }
 }
 
 async function protectPlans(parsed: Parsed, deps: AuthorityCliDeps): Promise<RepoProtectPlan[]> {
   let repos = parsed.values.get('--repo') ?? [];
   let enforcement = new Map<string, string>();
+  // Repos the grant covers (installed grant, or the draft when protecting the
+  // grant's own list): only those get the fleet's ashlr/verify requirement.
+  const grantMembers = new Set<string>();
+  const { readInstalledGrant } = await import('../core/authority/standing-grant.js');
+  const installed = readInstalledGrant();
+  if (installed.state === 'ok') for (const r of installed.envelope.payload.repos) grantMembers.add(r.nameWithOwner.toLowerCase());
   if (repos.length === 0) {
-    const { readInstalledGrant } = await import('../core/authority/standing-grant.js');
-    const installed = readInstalledGrant();
     let grantRepos: { nameWithOwner: string; enforcement: string }[] = [];
     if (installed.state === 'ok') grantRepos = installed.envelope.payload.repos;
     else {
@@ -613,7 +680,9 @@ async function protectPlans(parsed: Parsed, deps: AuthorityCliDeps): Promise<Rep
     }
     repos = grantRepos.map((r) => r.nameWithOwner);
     enforcement = new Map(grantRepos.map((r) => [r.nameWithOwner, r.enforcement]));
+    for (const r of grantRepos) grantMembers.add(r.nameWithOwner.toLowerCase());
   }
+  let fleetApp: FleetAppInfo | null | undefined;
   const plans: RepoProtectPlan[] = [];
   for (const repo of repos) {
     if (enforcement.get(repo) === 'local') {
@@ -622,7 +691,18 @@ async function protectPlans(parsed: Parsed, deps: AuthorityCliDeps): Promise<Rep
     }
     try {
       const info = ghJson(deps, ['api', `repos/${repo}`]) as { private?: boolean; visibility?: string };
-      const required = discoverChecks(deps, repo);
+      let verifyAppId: number | null = null;
+      let verifyNote: string | null = null;
+      if (grantMembers.has(repo.toLowerCase())) {
+        if (!(await fleetCanVerify(repo))) {
+          verifyNote = `${ASHLR_VERIFY_CHECK} not required: the fleet mirror has no verify command yet (rerun protect once it has synced)`;
+        } else {
+          if (fleetApp === undefined) fleetApp = readFleetApp(deps);
+          if (fleetApp) verifyAppId = fleetApp.id;
+          else verifyNote = `${ASHLR_VERIFY_CHECK} not required: the ${FLEET_APP_NAME} App could not be read (\`gh api apps/${FLEET_APP_NAME}\`)`;
+        }
+      }
+      const required = discoverChecks(deps, repo, verifyAppId);
       const checks = required.map((check) => check.context);
       const existing = ghJson(deps, ['api', `repos/${repo}/rulesets`]) as { id?: number; name?: string }[] | null;
       const match = Array.isArray(existing) ? existing.find((r) => r.name === FLEET_RULESET_NAME) : undefined;
@@ -632,6 +712,7 @@ async function protectPlans(parsed: Parsed, deps: AuthorityCliDeps): Promise<Rep
         checks,
         ruleset: buildFleetRuleset(required),
         existingId: typeof match?.id === 'number' ? match.id : null,
+        verifyNote,
       });
     } catch (error) {
       plans.push({ repo, skipped: `could not read it from GitHub: ${(error as Error).message}`, checks: [], ruleset: null, existingId: null });
@@ -653,6 +734,10 @@ async function cmdProtect(parsed: Parsed, deps: AuthorityCliDeps): Promise<numbe
       continue;
     }
     deps.out(`${plan.repo}: ${plan.existingId === null ? 'create' : `update ruleset ${plan.existingId}`}; required checks: ${plan.checks.length > 0 ? plan.checks.join(', ') : 'none found (the repo goes to the owner lane until it has CI)'}`);
+    if (plan.verifyNote) deps.out(`  note: ${plan.verifyNote}`);
+    else if (plan.checks.includes(ASHLR_VERIFY_CHECK)) {
+      deps.out(`  note: ${ASHLR_VERIFY_CHECK} is posted only on fleet PRs; your own PRs need the admin bypass unless another required check covers them`);
+    }
     if (!apply) {
       deps.out(`  gh api --method ${plan.existingId === null ? 'POST' : 'PUT'} repos/${plan.repo}/rulesets${plan.existingId === null ? '' : `/${plan.existingId}`} --input - <<'JSON'`);
       deps.out(JSON.stringify(plan.ruleset, null, 2));
@@ -689,9 +774,13 @@ async function cmdProtect(parsed: Parsed, deps: AuthorityCliDeps): Promise<numbe
 export const FLEET_APP_NAME = 'ashlr-fleet';
 
 /**
- * PURE: the App manifest. Contents + pull requests read/write, checks /
- * statuses / metadata read. No workflows, no administration — GitHub itself
- * then refuses CI-config and protection changes from the fleet.
+ * PURE: the App manifest. Contents + pull requests read/write, checks
+ * read/write (3.13: the App posts the host-verified `ashlr/verify` check run
+ * on fleet PR heads — core/fleet/verify-check-run.ts), statuses / metadata
+ * read. No workflows, no administration — GitHub itself then refuses
+ * CI-config and protection changes from the fleet. An App created before 3.13
+ * has `checks: read`; `ashlr authority setup` detects that and prints where
+ * to raise it (fleetAppPermissionUrls).
  */
 export function buildGithubAppManifest(redirectUrl: string): Record<string, unknown> {
   return {
@@ -700,7 +789,7 @@ export function buildGithubAppManifest(redirectUrl: string): Record<string, unkn
     hook_attributes: { url: 'https://github.com/ashlrai/ashlr-hub', active: false },
     redirect_url: redirectUrl,
     public: false,
-    default_permissions: { contents: 'write', pull_requests: 'write', checks: 'read', statuses: 'read', metadata: 'read' },
+    default_permissions: { contents: 'write', pull_requests: 'write', checks: 'write', statuses: 'read', metadata: 'read' },
     default_events: [],
   };
 }
@@ -795,6 +884,7 @@ async function cmdGithubApp(parsed: Parsed, deps: AuthorityCliDeps): Promise<num
   const result = await runGithubAppFlow(deps, { org });
   deps.out(`Created ${result.slug} (App id ${result.appId}); its private key is in custody and was never written to disk.`);
   deps.out(`Install it on the enrolled repos: ${result.installUrl}`);
+  deps.out(`It can post the host-verified ${ASHLR_VERIFY_CHECK} check (checks: write). An ${FLEET_APP_NAME} App created before 3.13 cannot: \`ashlr authority setup\` prints the exact settings link to raise it.`);
   return 0;
 }
 
@@ -1102,9 +1192,20 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
     }
   }
 
-  // 4. GitHub App.
-  if (custody?.githubApp) note('GitHub App', 'already', 'the ashlr-fleet key is in custody');
-  else if (await ask(`Create the ${FLEET_APP_NAME} GitHub App now (one browser page)?`)) {
+  // 4. GitHub App. 3.13: it must also be able to post ashlr/verify (checks: write);
+  // an App created before 3.13 has checks: read and must be raised by hand.
+  if (custody?.githubApp) {
+    const app = planning ? null : readFleetApp(deps);
+    if (app && app.checks !== 'write') {
+      const urls = fleetAppPermissionUrls(app);
+      note('GitHub App', 'waiting-on-you', `the ${FLEET_APP_NAME} key is in custody, but the App cannot post the ${ASHLR_VERIFY_CHECK} check (Checks: ${app.checks ?? 'no access'}): ` +
+        `set "Checks: Read and write" at ${urls.permissions}, accept the new permission on each installation at ${urls.installations}, then rerun setup`);
+    } else {
+      note('GitHub App', 'already', app
+        ? `the ${FLEET_APP_NAME} key is in custody and the App can post ${ASHLR_VERIFY_CHECK} (checks: write)`
+        : `the ${FLEET_APP_NAME} key is in custody (its checks permission was not read; it needs "Checks: Read and write" for ${ASHLR_VERIFY_CHECK})`);
+    }
+  } else if (await ask(`Create the ${FLEET_APP_NAME} GitHub App now (one browser page)?`)) {
     const app = await runGithubAppFlow(deps, { org: one(parsed, '--org') ?? 'ashlrai' });
     note('GitHub App', 'done', `created ${app.slug}; install it on the repos: ${app.installUrl}`);
   } else note('GitHub App', dryRun ? 'skipped' : 'waiting-on-you', 'run `ashlr authority github-app`');

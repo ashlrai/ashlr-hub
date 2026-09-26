@@ -19,7 +19,9 @@
  *   G6  Judge        an eligible frontier judge of a DIFFERENT family, HMAC
  *                    attested; waits (never downgrades) when no seat is free.
  *   G7  GitHub       App PR; every required check green on the head SHA; no
- *                    checks ⇒ owner lane; SHA-pinned squash merge.
+ *                    checks ⇒ owner lane; SHA-pinned squash merge. On a
+ *                    local-enforcement repo the App's own host-verified
+ *                    `ashlr/verify` run must be among the green (3.13).
  *
  * Everything here is PURE (inputs in, verdict out) except `recordGateRow`,
  * which appends to the ledger through an injected sink. The orchestration —
@@ -56,6 +58,7 @@ import {
   type ReviewModelFamily,
 } from './reviewer-independence.js';
 import type { FleetMergeStateV1 } from './fleet-merge-state.js';
+import { ASHLR_VERIFY_CHECK_NAME } from './verify-check-run.js';
 import {
   GATE_ORDER,
   MERGE_RISK_RANK,
@@ -897,6 +900,14 @@ export interface G7ChecksInput {
   /** When this head started waiting for checks (for the 24 h timeout). */
   pendingSinceMs: number;
   nowMs: number;
+  /**
+   * 3.13: the App id GitHub attributed the fleet's own `ashlr/verify` run to
+   * (from the App's authenticated create call, verify-check-run.ts); null or
+   * absent = the fleet has no verify check on record. Consulted only for
+   * local enforcement — server-enforced repos require what their rulesets
+   * name (which `ashlr authority protect` pins to this App).
+   */
+  fleetAppId?: string | null;
 }
 
 const OK_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
@@ -952,10 +963,15 @@ export function evaluateG7Checks(input: G7ChecksInput): GateEvaluation & { state
     }
   } else {
     // Local enforcement: GitHub protects nothing here, so every check that
-    // ran must be green and at least one must exist ("Actions green").
+    // ran must be green AND (3.13) the fleet App's own host-verified
+    // `ashlr/verify` must be one of them. WHY the second half: "every check
+    // that ran is green" alone let a deploy-only check (a Vercel preview)
+    // prove a PR green although no test ran anywhere; a same-named run from
+    // any other App never counts (it is just one more check that must be green).
     for (const run of latestRuns) states.push({ name: run.name, state: runState(run) });
     for (const status of input.statuses) states.push({ name: status.context, state: statusState(status) });
-    if (states.length === 0) {
+    const fleetAppId = input.fleetAppId ?? null;
+    if (states.length === 0 && fleetAppId === null) {
       return out(evaluation(
         'owner-lane',
         'no-checks',
@@ -963,10 +979,25 @@ export function evaluateG7Checks(input: G7ChecksInput): GateEvaluation & { state
         { enforcement: 'local', required: [] },
       ), 'none');
     }
+    if (fleetAppId === null) {
+      return out(evaluation(
+        'owner-lane',
+        'no-verify-check',
+        `this local-enforcement repo has no host-verified ${ASHLR_VERIFY_CHECK_NAME} check from the ashlr-fleet App on the PR head ` +
+          '(other green checks, e.g. a deploy preview, prove no tests ran); it goes to the owner lane',
+        { enforcement: 'local', required: [`${ASHLR_VERIFY_CHECK_NAME}@fleet-app`], states: states.map((s) => `${s.name}:${s.state}`).sort() },
+      ), 'none');
+    }
+    // Posted but not (yet) listed: pending, under the same 24 h timeout.
+    if (!latestRuns.some((run) => run.name === ASHLR_VERIFY_CHECK_NAME && run.appId === fleetAppId)) {
+      states.push({ name: ASHLR_VERIFY_CHECK_NAME, state: 'pending' });
+    }
   }
   const inputs = {
     enforcement: input.enforcement,
-    required: input.required.map((r) => `${r.context}@${r.appId ?? '*'}`).sort(),
+    required: input.enforcement === 'local'
+      ? [`${ASHLR_VERIFY_CHECK_NAME}@${input.fleetAppId}`]
+      : input.required.map((r) => `${r.context}@${r.appId ?? '*'}`).sort(),
     states: states.map((s) => `${s.name}:${s.state}`).sort(),
   };
   const red = states.filter((s) => s.state === 'red');
@@ -980,7 +1011,14 @@ export function evaluateG7Checks(input: G7ChecksInput): GateEvaluation & { state
     }
     return out(evaluation('wait', 'checks-pending', `waiting on ${pending.map((s) => s.name).slice(0, 5).join(', ')}`, inputs), 'pending');
   }
-  return out(evaluation('pass', 'checks-green', `every ${input.enforcement === 'server' ? 'required ' : ''}check is green on the head SHA`, inputs), 'green');
+  return out(evaluation(
+    'pass',
+    'checks-green',
+    input.enforcement === 'server'
+      ? 'every required check is green on the head SHA'
+      : `every check is green on the head SHA, including the App's host-verified ${ASHLR_VERIFY_CHECK_NAME}`,
+    inputs,
+  ), 'green');
 }
 
 /** The one G7 pass row a landing is attested with: bound to the exact head, tree, base and checks. */

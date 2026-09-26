@@ -122,6 +122,7 @@ import {
   type FleetMergeStateV1,
 } from './fleet-merge-state.js';
 import { producerModelFamily, type ReviewModelFamily } from './reviewer-independence.js';
+import { ensureFleetVerifyCheck, normalizeVerifyCommands, type VerifyCheckResult } from './verify-check-run.js';
 import type {
   FleetEngine,
   GateId,
@@ -1131,8 +1132,10 @@ async function runG3(
   const { deps } = ctx;
   const diff = proposal.diff ?? '';
   let verify: Parameters<typeof evaluateG3>[0]['verify'] = null;
+  let ranCommands: { kind?: unknown; cmd?: unknown }[] = [];
   if (deps.hasCurrentVerificationBinding(proposal) && proposal.verifyResult?.passed === true) {
     const stored = proposal.verifyResult;
+    ranCommands = stored.ran ?? [];
     verify = {
       ok: true,
       detail: stored.detail ?? 'verified earlier on the current base',
@@ -1150,6 +1153,7 @@ async function runG3(
     try {
       const transaction = await deps.verifyAndPersist(proposal, ctx.cfg);
       if (transaction.persisted && transaction.authorityLive) {
+        ranCommands = transaction.verify.ran;
         verify = {
           ok: transaction.verify.ok,
           detail: transaction.verify.detail,
@@ -1200,8 +1204,21 @@ async function runG3(
     state.treeSha = tree.treeSha;
     state.diffHash = hashDiff(diff);
     state.verifyDigest = state.gates['G3']?.digest ?? null;
+    state.verifyCommands = normalizeVerifyCommands(ranCommands);
   }
   return g3;
+}
+
+/**
+ * 3.13: post (or confirm — idempotent per head) the App's `ashlr/verify`
+ * check on the open fleet PR's head. Success only for a G3-passed change
+ * whose head is exactly the verified tree on the verified base
+ * (verify-check-run.ts). A failure is noted, never fatal here: G7 decides.
+ */
+async function postVerifyCheck(ctx: PassContext, state: FleetMergeStateV1): Promise<VerifyCheckResult> {
+  const result = await ensureFleetVerifyCheck(state, ctx.deps.host);
+  if (!result.ok) note(ctx, `${state.repo}#${state.pr?.number ?? '?'}: ashlr/verify not posted (${result.code}): ${result.reason}`);
+  return result;
 }
 
 function prBody(state: FleetMergeStateV1, proposal: Proposal, ownerLaneReason: string | null): string {
@@ -1294,6 +1311,7 @@ async function openChangePr(
     return;
   }
   state.pr = opened.pr;
+  await postVerifyCheck(ctx, state);
   state.openGatesDigest = openGatesDigest((['G0', 'G1', 'G1b', 'G2', 'G3', 'G4', 'G5', 'G6'] as GateId[])
     .map((gate) => ({ gate, digest: state.gates[gate]?.digest ?? 'none' })));
   const grantId = deps.host.policy()?.grantId ?? ctx.policy.grantId;
@@ -1487,6 +1505,16 @@ async function progressFleetPr(key: string, ctx: PassContext): Promise<void> {
     }
 
     // ── G7 — required checks on the exact head ─────────────────────────
+    // The App's ashlr/verify on this head (a no-op once posted for it). A
+    // local-enforcement repo cannot pass G7 without it, so a transient
+    // failure to post waits instead of sending the PR to the owner lane.
+    const verifyCheck = await postVerifyCheck(ctx, state);
+    if (!verifyCheck.ok && verifyCheck.retryable && state.enforcement === 'local') {
+      backoff(ctx, state);
+      ctx.summary.waiting++;
+      persist(ctx, state);
+      return;
+    }
     const cacheKey = `${state.repo.toLowerCase()}\0${state.pr.baseBranch}`;
     let required = ctx.requiredChecks.get(cacheKey);
     if (required === undefined) {
@@ -1501,6 +1529,7 @@ async function progressFleetPr(key: string, ctx: PassContext): Promise<void> {
       statuses: checks && typeof checks !== 'string' ? checks.statuses : null,
       pendingSinceMs: Date.parse(state.pr.openedAt) || nowMs,
       nowMs,
+      fleetAppId: state.pr.verifyCheck?.appId ?? null,
     });
     state.pr.checks = { state: g7c.state, detail: g7c.reason, at: iso(nowMs) };
     if (g7c.verdict === 'owner-lane') {
@@ -1964,6 +1993,7 @@ async function rebuildOnNewBase(
   pr.checks = null;
   pr.wouldMergeHeadSha = null;
   pr.checkBackoffMs = 0;
+  await postVerifyCheck(ctx, state);
   schedule(ctx, state, MIN_CHECK_BACKOFF_MS);
   note(ctx, `${state.repo}#${pr.number}: rebuilt on the new base ${remoteBaseSha.slice(0, 12)}`);
 }

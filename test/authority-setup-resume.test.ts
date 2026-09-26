@@ -173,6 +173,23 @@ describe('setup --dry-run --json', () => {
     // Read-only probes only: the canary existence check.
     expect(h.calls.map((c) => c.args.slice(0, 2).join(' '))).toEqual(['api repos/ashlrai/fleet-canary']);
   });
+
+  it('3.13: an existing App without checks:write waits on you, with the exact settings links', async () => {
+    trust.roots = [TEST_ROOT];
+    const app = (checks: string) => ok(JSON.stringify({ id: 424242, slug: 'ashlr-fleet', owner: { login: 'ashlrai', type: 'Organization' }, permissions: { checks } }));
+    const readOnly = harness({ custodyExtras: { githubApp: true }, run: (_bin, args) => (args[1] === 'apps/ashlr-fleet' ? app('read') : no()) });
+    expect(await runAuthorityCli(['setup', '--dry-run', '--json'], readOnly.deps)).toBe(0);
+    const step = (JSON.parse(readOnly.out[0]!) as AuthoritySetupReportV1).steps.find((s) => s.id === 'github-app')!;
+    expect(step.status).toBe('waiting-on-you');
+    expect(step.detail).toContain('https://github.com/organizations/ashlrai/settings/apps/ashlr-fleet/permissions');
+    expect(step.detail).toContain('https://github.com/organizations/ashlrai/settings/installations');
+    expect(step.detail).toMatch(/Checks: Read and write/);
+
+    const writable = harness({ custodyExtras: { githubApp: true }, run: (_bin, args) => (args[1] === 'apps/ashlr-fleet' ? app('write') : no()) });
+    expect(await runAuthorityCli(['setup', '--dry-run', '--json'], writable.deps)).toBe(0);
+    expect((JSON.parse(writable.out[0]!) as AuthoritySetupReportV1).steps.find((s) => s.id === 'github-app'))
+      .toMatchObject({ status: 'already', detail: expect.stringMatching(/checks: write/) });
+  });
 });
 
 describe('setup is resumable', () => {

@@ -237,9 +237,11 @@ describe('protect — rulesets', () => {
 });
 
 describe('github-app — the manifest flow', () => {
-  it('asks for contents + PRs read/write and read-only checks, never workflows or administration', () => {
+  it('asks for contents + PRs + checks read/write (3.13: ashlr/verify), never workflows or administration', () => {
     const manifest = buildGithubAppManifest('http://127.0.0.1:1234/callback') as { default_permissions: Record<string, string>; hook_attributes: { active: boolean }; public: boolean };
-    expect(manifest.default_permissions).toEqual({ contents: 'write', pull_requests: 'write', checks: 'read', statuses: 'read', metadata: 'read' });
+    expect(manifest.default_permissions).toEqual({ contents: 'write', pull_requests: 'write', checks: 'write', statuses: 'read', metadata: 'read' });
+    expect(manifest.default_permissions).not.toHaveProperty('workflows');
+    expect(manifest.default_permissions).not.toHaveProperty('administration');
     expect(manifest.hook_attributes.active).toBe(false);
     expect(manifest.public).toBe(false);
     const page = manifestFormPage({ ...manifest, name: 'a"b<c>' }, 'ashlrai', 'f'.repeat(32));

@@ -28,6 +28,8 @@ import type { DecisionEntry, Proposal } from '../../src/core/types.js';
 export const BOT_LOGIN = 'ashlr-fleet[bot]';
 export const BOT_EMAIL = '41898282+ashlr-fleet[bot]@users.noreply.github.com';
 export const CI_APP_ID = 15368;
+/** The ashlr-fleet App's id as the fake attributes its check runs (3.13 ashlr/verify). */
+export const FLEET_APP_ID = 424242;
 
 const GIT_ENV_BASE = {
   PATH: process.env['PATH'] ?? '/usr/bin:/bin',
@@ -112,6 +114,8 @@ export class FakeGithub {
   beforeMerge: (() => void) | null = null;
   /** Test hook: corrupt the tree id GitHub answers for POST /git/trees. */
   corruptTrees = false;
+  /** Test hook: how POST/PATCH /check-runs answers (e.g. 403 = the App lacks checks:write). */
+  checkRunsStatus: number | null = null;
   readonly classic: { enforcement_level: string; contexts: string[] } | null;
   private nextPr = 1;
   private nextCheck = 1000;
@@ -301,6 +305,26 @@ export class FakeGithub {
     return { sha, tree: { sha: tree }, parents, author: { name: author?.[1] ?? null, email: author?.[2] ?? null }, message: rest.join('\n\n') };
   }
 
+  /** Every body the App sent to POST/PATCH /check-runs, in order. */
+  checkRunPosts(): { method: string; path: string; body: Record<string, unknown> }[] {
+    return this.calls
+      .filter((call) => /\/check-runs(?:\/\d+)?$/.test(call.path) && (call.method === 'POST' || call.method === 'PATCH'))
+      .map((call) => ({ method: call.method, path: call.path, body: call.body as Record<string, unknown> }));
+  }
+
+  private checkRunJson(sha: string, run: FakeCheckRun, body: Record<string, unknown> | undefined): Record<string, unknown> {
+    return {
+      id: run.id,
+      name: run.name,
+      head_sha: sha,
+      status: run.status,
+      conclusion: run.conclusion,
+      external_id: body?.['external_id'] ?? null,
+      output: body?.['output'] ?? null,
+      app: { id: run.appId, slug: 'ashlr-fleet' },
+    };
+  }
+
   private requiredGreen(sha: string): boolean {
     const runs = this.checkRuns.get(sha) ?? [];
     return this.required.every((required) => runs.some((run) => run.name === required.context &&
@@ -436,6 +460,27 @@ export class FakeGithub {
     if (method === 'GET' && (m = /^\/commits\/([0-9a-f]{40})\/check-runs$/.exec(path))) {
       const runs = (this.checkRuns.get(m[1]!) ?? []).map((r) => ({ id: r.id, name: r.name, status: r.status, conclusion: r.conclusion, app: r.appId === null ? null : { id: r.appId } }));
       return { status: 200, body: { total_count: runs.length, check_runs: runs } };
+    }
+    if (method === 'POST' && path === '/check-runs') {
+      if (this.checkRunsStatus !== null) return { status: this.checkRunsStatus, body: { message: 'Resource not accessible by integration' } };
+      const sha = String(body?.['head_sha'] ?? '');
+      if (!/^[0-9a-f]{40}$/.test(sha) || typeof body?.['name'] !== 'string') return { status: 422, body: { message: 'Invalid request' } };
+      this.setCheck(sha, body['name'] as string, (body['conclusion'] as string | undefined) ?? null, FLEET_APP_ID,
+        body['status'] === 'completed' ? 'completed' : 'in_progress');
+      const created = this.checkRuns.get(sha)!.at(-1)!;
+      return { status: 201, body: this.checkRunJson(sha, created, body) };
+    }
+    if (method === 'PATCH' && (m = /^\/check-runs\/(\d+)$/.exec(path))) {
+      if (this.checkRunsStatus !== null) return { status: this.checkRunsStatus, body: { message: 'Resource not accessible by integration' } };
+      for (const [sha, runs] of this.checkRuns) {
+        const found = runs.find((r) => r.id === Number(m![1]));
+        if (!found) continue;
+        if (found.appId !== FLEET_APP_ID) return { status: 403, body: { message: 'not your check run' } };
+        if (typeof body?.['conclusion'] === 'string') found.conclusion = body['conclusion'] as string;
+        if (body?.['status'] === 'completed') found.status = 'completed';
+        return { status: 200, body: this.checkRunJson(sha, found, body) };
+      }
+      return { status: 404, body: { message: 'Not Found' } };
     }
     if (method === 'GET' && (m = /^\/commits\/([0-9a-f]{40})\/status$/.exec(path))) {
       return { status: 200, body: { state: 'success', statuses: this.statuses.get(m[1]!) ?? [] } };
