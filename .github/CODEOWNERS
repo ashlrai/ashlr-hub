@@ -137,6 +137,7 @@
 /src/core/fleet/merge-gates.ts @masonwyatt23
 /src/core/fleet/standing-merge-pass.ts @masonwyatt23
 /src/core/fleet/fleet-merge-state.ts @masonwyatt23
+/src/core/fleet/verify-check-run.ts @masonwyatt23
 /src/core/fleet/post-merge-watch.ts @masonwyatt23
 /src/core/fleet/quarantine.ts @masonwyatt23
 /src/core/fleet/regression-sentinel.ts @masonwyatt23
@@ -198,6 +199,7 @@
 /test/autonomy-contracts-310b.test.ts @masonwyatt23
 /test/backpressure-310b.test.ts @masonwyatt23
 /test/cloud-budget.test.ts @masonwyatt23
+/test/cloud-timeline.test.ts @masonwyatt23
 /test/completeness-gate-stash-hardening-310b.test.ts @masonwyatt23
 /test/confine-autonomous-310b.test.ts @masonwyatt23
 /test/confine-autonomous-darwin-310b.test.ts @masonwyatt23
@@ -704,6 +706,7 @@
 /test/universe-supervisor-enrollment-stop.test.ts @masonwyatt23
 /test/universe-value-allocation-store.test.ts @masonwyatt23
 /test/universe-value-allocation.test.ts @masonwyatt23
+/test/verify-check-run-313.test.ts @masonwyatt23
 /test/verify-commands-confine-310b.test.ts @masonwyatt23
 /test/verify-confinement-310b.test.ts @masonwyatt23
 /test/verify-mirror-bins-310.test.ts @masonwyatt23
