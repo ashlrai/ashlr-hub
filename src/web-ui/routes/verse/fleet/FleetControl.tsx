@@ -40,7 +40,7 @@ export const FLEET_CONTROL_POLL_MS = 5_000;
 
 const START_CONFIRM: ConfirmSpec = {
   title: 'Start the fleet?',
-  body: 'Start clears Stop, resumes dispatch and switches autonomy to Autonomous — only within your signed grant. If the daemon is not running, the desktop app asks you to confirm starting it.',
+  body: 'Start clears Stop, resumes dispatch and, if autonomy is switched Off, turns it to Autonomous — only within your signed grant. If the daemon is not running, the desktop app asks you to confirm starting it.',
   confirmLabel: 'Start fleet',
   destructive: false,
 };

@@ -133,7 +133,7 @@ export function fleetControlAvailability(inputs: FleetControlInputs, verdict: Ve
   const steps: string[] = [];
   if (inputs.kill) steps.push('clears Stop');
   if (inputs.paused) steps.push('resumes dispatch');
-  if (inputs.grant.switch !== 'autonomous' && (inputs.grant.state === 'active')) steps.push('switches to Autonomous');
+  if (inputs.grant.switch === 'off' && inputs.grant.state === 'active') steps.push('switches to Autonomous');
   if (!daemonRunning(inputs)) steps.push('starts the daemon');
   const hardBlock = verdict.state === 'blocked' && verdict.blocker !== null
     && (verdict.blocker.action.kind === 'install-custody' || verdict.blocker.action.kind === 'setup' || verdict.blocker.action.kind === 'wait');

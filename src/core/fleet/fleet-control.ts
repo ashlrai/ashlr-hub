@@ -12,7 +12,7 @@
  *     revoked. The grant, the switch and the daemon service are left alone.
  *   - Start → the steps Start can take itself, each only when needed: clear
  *     Stop (ledgered first — authority/clamp.ts `clearStop`), resume dispatch,
- *     raise the switch to Autonomous WITHIN the installed grant
+ *     raise the switch from Off to Autonomous WITHIN the installed grant
  *     (`requestAutonomySwitch`, which refuses past it). What Start cannot do
  *     here comes back as `needs`: the Touch ID grant sheet, or starting the
  *     resident daemon — a native step in the desktop app (fleet_ops.rs), never
@@ -592,7 +592,8 @@ export async function applyFleetControlAction(action: FleetControlAction, deps: 
         needs = FLEET_ACTIONS.reapprove;
         break;
       }
-      if (before.switch !== 'autonomous') {
+      // Only Off is raised: Propose is a running mode Mason chose on purpose.
+      if (before.switch === 'off') {
         const r = deps.raiseSwitch();
         if (r.ok) did.push('Switched to Autonomous.');
         else if (r.code === 'grant-required') {
