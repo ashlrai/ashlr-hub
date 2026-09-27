@@ -68,6 +68,7 @@ import {
   type DraftSeatInput,
 } from '../authority/standing-grant.js';
 import { applyGrantScopeEdit, editableEngines, grantScopeDiff, parseGrantScopeEdit, type GrantDiffLine, type GrantScopeEdit } from '../authority/grant-scope.js';
+import type { GrantDraftEditable } from '../authority/grant-scope-types.js';
 import { probeServerEnforcementAll, type GithubGet } from '../authority/server-enforcement.js';
 import { currentHostBinding, verifyAuthoritySurface } from '../authority/surface.js';
 import { STANDING_GRANT_TRUST_ROOTS } from '../authority/trust-roots.js';
@@ -251,7 +252,9 @@ export async function buildAuthorityStatus(): Promise<{ status: AuthorityStatusW
 const REFRESH_AFTER_MS = 15_000;
 const EXPIRY_WARNING_MS = 72 * 60 * 60 * 1000;
 const REGRESSION_VISIBLE_MS = 24 * 60 * 60 * 1000;
-const SECTION_TARGET = { kind: 'section', section: 'command', anchor: 'autonomy' } as const;
+// 3.15: autonomy is operated on the Fleet tab (its control surface carries
+// the `fleet-control`, `authority-grant` and `autonomy` ladder anchors).
+const SECTION_TARGET = { kind: 'section', section: 'fleet', anchor: 'autonomy' } as const;
 const EMPTY_SUBJECT = Object.freeze({ repo: null, pr: null, seatId: null, sessionId: null, engine: null });
 
 let statusCache: { at: number; status: AuthorityStatusV1; items: NeedsYouItem[]; badge: VerseAutonomyBadge } | null = null;
@@ -317,7 +320,7 @@ export function authorityNeedsYouItems(status: AuthorityStatusV1, ev: StandingEv
       since: status.checkedAt,
       expiresAt: grant.expiresAt,
       subject: { ...EMPTY_SUBJECT },
-      target: { kind: 'section', section: 'command', anchor: 'authority-grant' },
+      target: { kind: 'section', section: 'fleet', anchor: 'authority-grant' },
       actions: renew,
     });
   } else if (grant.state === 'expired' || grant.state === 'invalid') {
@@ -331,7 +334,7 @@ export function authorityNeedsYouItems(status: AuthorityStatusV1, ev: StandingEv
       since: grant.state === 'expired' && grant.expiresAt ? grant.expiresAt : status.checkedAt,
       expiresAt: null,
       subject: { ...EMPTY_SUBJECT },
-      target: { kind: 'section', section: 'command', anchor: 'authority-grant' },
+      target: { kind: 'section', section: 'fleet', anchor: 'authority-grant' },
       actions: renew,
     });
   } else if (grant.state === 'active' && grant.expiresAt) {
@@ -348,7 +351,7 @@ export function authorityNeedsYouItems(status: AuthorityStatusV1, ev: StandingEv
         since: new Date(Date.parse(grant.expiresAt) - EXPIRY_WARNING_MS).toISOString(),
         expiresAt: grant.expiresAt,
         subject: { ...EMPTY_SUBJECT },
-        target: { kind: 'section', section: 'command', anchor: 'authority-grant' },
+        target: { kind: 'section', section: 'fleet', anchor: 'authority-grant' },
         actions: renew,
       });
     }
@@ -548,7 +551,7 @@ export interface AuthorityDraftResponse extends AuthorityGrantDraft {
    */
   diff?: GrantDiffLine[];
   /** 3.15 (additive): what the grant editor may choose from for this draft. */
-  editable?: { repos: string[]; engines: string[]; leaderClasses: string[]; maxDays: number };
+  editable?: GrantDraftEditable;
 }
 
 const DRAFT_TTL_MS = 15 * 60 * 1000;

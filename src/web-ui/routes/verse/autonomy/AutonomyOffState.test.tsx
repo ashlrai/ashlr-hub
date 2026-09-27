@@ -67,14 +67,14 @@ describe('AutonomyOffState', () => {
     expect(screen.getAllByRole('button')).toHaveLength(1);
   });
 
-  it('goes to Command from another surface, and leaves that out on Command itself', async () => {
+  it('goes to Fleet (3.15: where the fleet is operated) from another surface, and leaves that out on Fleet itself', async () => {
     setVerseSection('growth');
     const user = userEvent.setup();
     const { unmount } = render(<AutonomyOffState state={grant} here="growth" />);
-    await user.click(screen.getByRole('button', { name: 'Approve in Command' }));
-    expect(getVerseUiState().section).toBe('command');
+    await user.click(screen.getByRole('button', { name: 'Approve in Fleet' }));
+    expect(getVerseUiState().section).toBe('fleet');
     unmount();
-    render(<AutonomyOffState state={grant} here="command" />);
+    render(<AutonomyOffState state={grant} here="fleet" />);
     expect(screen.queryByRole('button')).toBeNull();
   });
 

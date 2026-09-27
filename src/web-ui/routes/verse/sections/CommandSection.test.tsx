@@ -12,6 +12,7 @@ import { DARK_SINCE, activitySnapshot, authorityStatus, fleetHistory, fleetLive,
 import { resetActivityForTest } from '../shell/useActivity.js';
 import { overview as cloudOverview, task as cloudTask } from '../cloud/cloud-fixtures.test-support.js';
 import { mockCompactViewport, mockWideViewport, type ViewportMock } from '../shell/viewport.test-support.js';
+import { getVerseUiState, setVerseSection } from '../verse-ui-store.js';
 
 const TOKEN = 'a'.repeat(64);
 const HOUR = 3_600_000;
@@ -327,7 +328,7 @@ describe('CommandSection — raising past the grant', () => {
 });
 
 describe('CommandSection — autonomy off', () => {
-  it('says it ONCE, under the bar, with Approve grant — no verdict, Since strip, empty KPIs or empty swimlane', async () => {
+  it('says it ONCE, under the bar, linking to Fleet to approve — no verdict, Since strip, empty KPIs or empty swimlane', async () => {
     const now = Date.now();
     const { fetchMock } = stubSurfaceFetch({ kind: 'dark', now, routes: { '/api/verse/fleet/history': emptyHistory(now) } });
     const user = userEvent.setup();
@@ -348,11 +349,12 @@ describe('CommandSection — autonomy off', () => {
     // Nothing drafts a grant on load: only the sheet does, once it is opened.
     await within(banner).findByTestId('setup-checklist');
     expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith('/api/verse/authority/draft'))).toBe(false);
-    // The one action opens the bar's own Touch ID sheet.
-    await user.click(within(banner).getByRole('button', { name: 'Approve grant' }));
-    const sheet = await screen.findByRole('dialog', { name: 'Approve a standing grant' });
-    expect(sheet).toHaveTextContent('Approve a standing grant to let the fleet work.');
-    expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith('/api/verse/authority/draft'))).toBe(true);
+    // 3.15: the fleet is operated on Fleet — the one action goes there (to its
+    // control surface, which holds the Touch ID sheet), not a second sheet here.
+    setVerseSection('command');
+    await user.click(within(banner).getByRole('button', { name: 'Approve in Fleet' }));
+    expect(getVerseUiState().section).toBe('fleet');
+    expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith('/api/verse/authority/draft'))).toBe(false);
   });
 
   it('asks for the next setup step instead while the trust root is not in this build — and never asks for a draft', async () => {

@@ -29,20 +29,9 @@ import { engineOfSeatId } from '../routing/policy.js';
 import { FLEET_ENGINES, DEVIN_GRANT_ENGINE, type GrantEngine } from '../fleet/fleet-types.js';
 import { parseStandingGrantPayload } from './standing-grant.js';
 import { STANDING_GRANT_CEILINGS, type LeaderGrantClass, type StandingGrantV1 } from './types.js';
+import type { GrantDiffLine, GrantScopeEdit } from './grant-scope-types.js';
 
-/** What the grant editor sends. Every field is optional: absent = keep the draft's. */
-export interface GrantScopeEdit {
-  /** nameWithOwner, a subset of the draft's repos. */
-  repos?: string[];
-  engines?: GrantEngine[];
-  leaderClasses?: LeaderGrantClass[];
-  maxMode?: BudgetMode;
-  /** Integer USD/day for metered APIs, 0..STANDING_GRANT_CEILINGS.maxMeteredUsdPerDay. */
-  meteredUsdPerDay?: number;
-  /** 1..30. */
-  days?: number;
-  conductorGoals?: boolean;
-}
+export type { GrantDiffDirection, GrantDiffLine, GrantScopeEdit } from './grant-scope-types.js';
 
 export const GRANT_SCOPE_EDIT_KEYS: readonly (keyof GrantScopeEdit)[] = Object.freeze([
   'repos', 'engines', 'leaderClasses', 'maxMode', 'meteredUsdPerDay', 'days', 'conductorGoals',
@@ -176,17 +165,6 @@ export function applyGrantScopeEdit(draft: StandingGrantV1, edit: GrantScopeEdit
 // ---------------------------------------------------------------------------
 // Diff vs the grant in force
 // ---------------------------------------------------------------------------
-
-/** `wider` raises authority, `narrower` lowers it, `changed` is neither (e.g. a new expiry). */
-export type GrantDiffDirection = 'wider' | 'narrower' | 'changed';
-
-export interface GrantDiffLine {
-  field: 'repos' | 'repo-stage' | 'engines' | 'leader' | 'spend-mode' | 'metered' | 'expiry' | 'conductor' | 'ladder' | 'merge-caps';
-  label: string;
-  before: string;
-  after: string;
-  direction: GrantDiffDirection;
-}
 
 const MODE_RANK: Readonly<Record<BudgetMode, number>> = { reserve: 0, balanced: 1, 'all-in': 2 };
 

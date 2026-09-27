@@ -68,6 +68,7 @@ export function requestRunCancel(runId: string, reason: string, opts: { nowMs?: 
   const request: RunCancelRequest = {
     v: 1,
     runId,
+    // eslint-disable-next-line no-control-regex -- strips control characters from free text
     reason: scrubSecrets(String(reason ?? '')).replace(/[\u0000-\u001f\u007f]/gu, ' ').trim().slice(0, MAX_REASON_CHARS) || 'stopped from the Fleet tab',
     requestedAt: new Date(nowMs).toISOString(),
     by: 'mason',

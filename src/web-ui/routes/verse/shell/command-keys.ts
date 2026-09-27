@@ -141,6 +141,14 @@ const KEYS = {
     'rail.toggle-labels': 'mod+shift+\\',
     // Chats
     'chat.new': 'mod+n',
+    // The fleet (3.15): Start / Pause / Resume / Stop from anywhere. Start
+    // and Stop still confirm on screen — raising authority is never ONE key.
+    'fleet.start': 'mod+alt+s',
+    'fleet.pause': 'mod+alt+p',
+    'fleet.resume': 'mod+alt+r',
+    // Not `fleet.stop` (the shell's guarded palette row, which stays keyless):
+    // this key opens the Fleet tab's own Stop confirmation.
+    'fleet.halt': 'mod+alt+.',
     // App
     'appearance.toggle-theme': 'mod+shift+l',
     'app.summon': 'ctrl+alt+space',

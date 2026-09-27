@@ -774,3 +774,72 @@ button.chip:hover {
   border-radius: var(--radius-lg);
   background: var(--bg-surface);
 }
+
+/* ---- 3.15 grant scope editor (GrantScopeEditor.tsx) --------------------- */
+.scopeEditToggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.scopeEditor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-raised);
+}
+
+.scopeFieldset {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.scopeCheck {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-primary);
+}
+
+.scopeField {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-secondary);
+}
+
+.scopeField input,
+.scopeField select {
+  min-width: 96px;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.diffDirection[data-direction='wider'] {
+  color: var(--status-warning-fg);
+  font-weight: var(--font-weight-medium);
+}
+
+.diffDirection[data-direction='narrower'] {
+  color: var(--status-success-fg);
+}
