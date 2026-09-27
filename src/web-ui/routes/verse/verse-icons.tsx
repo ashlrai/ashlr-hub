@@ -71,6 +71,17 @@ export function AppsIcon(props: IconProps) {
   );
 }
 
+/** Repo wiki — an open book. */
+export function WikiIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M8 4.5C6.6 3.4 4.6 3 2.5 3.2v9c2.1-.2 4.1.2 5.5 1.3" />
+      <path d="M8 4.5c1.4-1.1 3.4-1.5 5.5-1.3v9c-2.1-.2-4.1.2-5.5 1.3" />
+      <path d="M8 4.5v9" />
+    </Icon>
+  );
+}
+
 /** Every section's glyph: the rail's, plus the tray's. */
 export const SECTION_ICON: Readonly<Record<VerseSectionId, ComponentType<IconProps>>> = {
   command: RAIL_ICON.command!,
@@ -81,6 +92,7 @@ export const SECTION_ICON: Readonly<Record<VerseSectionId, ComponentType<IconPro
   settings: SettingsIcon,
   apps: AppsIcon,
   usage: UsageIcon,
+  wiki: WikiIcon,
 };
 
 /**

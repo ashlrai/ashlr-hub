@@ -470,6 +470,9 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'ask "<question>"',             desc: 'Local RAG across the indexed portfolio; cites repo/file:line. --allow-cloud opt-in.', topic: 'knowledge' },
   { cmd: 'knowledge impact <target>',    desc: 'Show references + dependents of a file/symbol within and across enrolled repos.', topic: 'knowledge' },
   { cmd: 'knowledge graph',              desc: 'Print the portfolio knowledge graph (repos/modules/deps + cross-repo findings).', topic: 'knowledge' },
+  { cmd: 'wiki build [repo] [--all]',    desc: 'Private architecture wiki per repo (local models; cited, verified file:line). Only stale pages rebuild.', topic: 'knowledge' },
+  { cmd: 'wiki ask "<question>"',        desc: 'Answer from the wiki + index + genome with verified file:line citations, or say "not found".', topic: 'knowledge' },
+  { cmd: 'wiki status [repo]',           desc: 'Wiki freshness: generated at <commit>, N pages stale.', topic: 'knowledge' },
 
   { cmd: 'enroll list',                  desc: 'List enrolled repos + kill switch state.', topic: 'autonomy' },
   { cmd: 'enroll add <repo> [--locus-firm]', desc: 'Enroll a repo for autonomous work. First enroll soft-offers locus.firm when locus CLI is present; --locus-firm / ASHLR_LOCUS_FIRM=1 enable without prompt (default off).', topic: 'autonomy' },

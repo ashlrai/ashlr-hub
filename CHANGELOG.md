@@ -11,6 +11,26 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Private repo wiki and Ask
+
+- `ashlr wiki build|status|show|ask` and a Verse **Repo wiki** section (gear
+  tray, ⌘K "Open repo wiki…" / "Ask the codebase…") generate a per-repo
+  architecture wiki — overview, module map with import graph, key flows, data
+  stores, commands and "how to change X" pages — stored only under
+  `~/.ashlr/knowledge/wiki/`.
+- Every file:line citation is verified against the repo before it is stored;
+  unverifiable ones are removed and counted. Pages and answers are
+  secret-scrubbed when stored and again when served.
+- Generation routes through the Leader's check-in seat plan: local models
+  first, Grok only when the grant lists the seat and the repo is not
+  local-only, never Claude. With no allowed model, pages are built from
+  deterministic repo facts and Ask returns cited passages.
+- Pages regenerate only when their inputs' git blob ids change, within a page
+  and token budget per run. Existing wikis refresh in the Verse background.
+  Steering comes from `.ashlr/wiki.json`, and `.devin/wiki.json` is also read.
+- Ask retrieves over wiki pages, the knowledge index and genome notes. It
+  answers "not found" when they do not cover the question.
+
 ### Autonomous coordinator lifecycle visibility
 
 - Separates last-reported coordinator transitions, fixed failure reasons and

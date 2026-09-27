@@ -151,6 +151,7 @@ export interface VerseBackgroundDeps {
   loadReasoning?: () => Promise<{ scheduleReasoningMaintenance: (cfg?: unknown) => void; resetReasoningApiState: () => void }>;
   loadBudget?: () => Promise<{ startBudgetCapacityPublisher: (cfg: AshlrConfig) => () => void }>;
   loadApps?: () => Promise<{ warmVerseApps: (cfg: AshlrConfig) => Promise<void> }>;
+  loadWiki?: () => Promise<{ scheduleWikiAutoRefresh: (cfg: AshlrConfig) => (() => void) | null }>;
   /**
    * Run the services that probe or publish ACCOUNT state (health sweep,
    * budget capacity publisher). False under `--no-accounts`: that flag says
@@ -225,6 +226,15 @@ export async function startVerseBackgroundServices(
     // commands and loopback GETs only; warmVerseApps never rejects.
     void mod.warmVerseApps(cfg).catch(() => {});
     return null;
+  });
+  // 3.15: keep EXISTING repo wikis fresh — one stale repo per interval, its
+  // stale pages only, on a small page budget, through the seat routing (local
+  // first, never Claude). Never creates a wiki nobody asked for; off with
+  // foundry.wiki.autoRefresh=false. A throwaway --no-accounts server does not
+  // run it: background model work belongs to the live console.
+  if (accountServices) await attempt('wiki', async () => {
+    const mod = await (deps.loadWiki ?? (() => import('../core/knowledge/wiki/jobs.js')))();
+    return mod.scheduleWikiAutoRefresh(cfg);
   });
 
   let stopped = false;

@@ -166,6 +166,8 @@ const EXPECTED_HANDLERS: Record<WorkbenchRouteFamilyId, string> = {
   'fleet-live': 'handleFleetLiveApi',
   leader: 'handleLeaderApi',
   learning: 'handleLearningApi',
+  // 3.15: the private repo wiki.
+  wiki: 'handleWikiApi',
 };
 
 const allPrefixes = WORKBENCH_ROUTE_FAMILIES.flatMap((family) => family.prefixes.map((prefix) => ({ family: family.id, prefix })));

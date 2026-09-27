@@ -182,6 +182,7 @@ export const WORKBENCH_COMMANDS = [
   { ...bind('section.settings'), title: 'Open Settings', group: 'go-to', section: 'Surfaces', keywords: ['preferences', 'appearance'] },
   { id: 'section.apps', title: 'Open Apps & Accounts', scope: 'global', keys: [], group: 'go-to', section: 'Surfaces', keywords: ['mcp', 'accounts', 'seats', 'integrations', 'ollama'] },
   { id: 'section.usage', title: 'Open Usage', scope: 'global', keys: [], group: 'go-to', section: 'Surfaces', keywords: ['capacity', 'spend', 'limits'] },
+  { id: 'section.wiki', title: 'Open Repo wiki', scope: 'global', keys: [], group: 'go-to', section: 'Surfaces', keywords: ['wiki', 'docs', 'architecture', 'deepwiki', 'knowledge'] },
 
   // ── Navigation ───────────────────────────────────────────────────────────
   { ...bind('palette.open'), title: 'Command palette', group: null, section: 'Navigation' },
@@ -304,6 +305,11 @@ export const WORKBENCH_COMMANDS = [
   // Mind and the conversation panel takes the ask once its chunk mounts.
   { id: 'leader.message', title: 'Message the Leader…', scope: 'global', keys: [], group: 'actions', section: 'App', surface: 'mind', keywords: ['leader', 'ask', 'chat', 'strategy', 'memo', 'talk', 'telegram'] },
   { id: 'leader.directive', title: 'Add Leader directive…', scope: 'global', keys: [], group: 'actions', section: 'App', surface: 'mind', keywords: ['leader', 'directive', 'instruction', 'rule', 'standing order'] },
+  // ── The repo wiki (3.15) ────────────────────────────────────────────────
+  // Served by the shell (run-command.ts → wiki/wiki-focus.ts): it opens the
+  // Wiki section, which takes the request once its chunk mounts. Tab picks a repo.
+  { id: 'wiki.open', title: 'Open repo wiki…', scope: 'global', keys: [], group: 'actions', section: 'App', argument: { kind: 'project', prompt: 'Repo' }, keywords: ['wiki', 'docs', 'architecture', 'deepwiki', 'modules', 'overview'] },
+  { id: 'wiki.ask', title: 'Ask the codebase…', scope: 'global', keys: [], group: 'actions', section: 'App', keywords: ['ask', 'question', 'codebase', 'where', 'how', 'explain', 'wiki', 'search code'] },
   // Served by the shell (run-command.ts → copy-setup.ts), wherever you are.
   appAction('autonomy.copy-setup', 'Copy autonomy setup command', [AUTONOMY_SETUP_COMMAND, 'autonomy', 'turn on', 'clipboard']),
 ] as const satisfies readonly WorkbenchCommand[];

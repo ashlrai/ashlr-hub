@@ -489,6 +489,12 @@ const loadKnowledgeCmd = lazyCmd(
   'knowledge command requires src/cli/knowledge.ts (M25 module not yet built).',
 );
 
+const loadWikiCmd = lazyCmd(
+  () => import('./wiki.js'),
+  (m) => m.cmdWiki as Cmd,
+  'wiki command requires src/cli/wiki.ts (3.15 module not yet built).',
+);
+
 // ─── M26 command loaders ────────────────────────────────────────────
 
 const loadReflectCmd = lazyCmd(
@@ -2081,6 +2087,12 @@ async function main(): Promise<void> {
       case 'knowledge': {
         const cmdKnowledge = await loadKnowledgeCmd();
         process.exitCode = await cmdKnowledge(rest);
+        break;
+      }
+
+      case 'wiki': {
+        const cmdWiki = await loadWikiCmd();
+        process.exitCode = await cmdWiki(rest);
         break;
       }
 

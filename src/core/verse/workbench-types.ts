@@ -41,8 +41,12 @@ export type { VerseEffort, VersePermissionMode, VerseSessionControls };
 export const WORKBENCH_SURFACES = ['command', 'fleet', 'growth', 'mind', 'chat'] as const;
 export type WorkbenchSurfaceId = (typeof WORKBENCH_SURFACES)[number];
 
-/** Sections reached from the gear tray, not the rail (Shortcuts is an overlay, not a section). */
-export const WORKBENCH_TRAY_SECTIONS = ['settings', 'apps', 'usage'] as const;
+/**
+ * Sections reached from the gear tray, not the rail (Shortcuts is an overlay,
+ * not a section). 3.15 adds the private repo wiki here — and to ⌘K — rather
+ * than as a sixth rail slot: it is a reference you open, not a surface you watch.
+ */
+export const WORKBENCH_TRAY_SECTIONS = ['settings', 'apps', 'usage', 'wiki'] as const;
 export type WorkbenchTraySectionId = (typeof WORKBENCH_TRAY_SECTIONS)[number];
 
 export type WorkbenchSectionId = WorkbenchSurfaceId | WorkbenchTraySectionId;
@@ -1226,6 +1230,13 @@ export const WORKBENCH_ROUTE_FAMILIES = [
     module: 'src/core/verse/learning-api.ts',
     handler: 'handleLearningApi',
     prefixes: ['/api/verse/learning'],
+  },
+  {
+    id: 'wiki',
+    owner: '3.15-wiki',
+    module: 'src/core/verse/wiki-api.ts',
+    handler: 'handleWikiApi',
+    prefixes: ['/api/verse/wiki'],
   },
 ] as const satisfies readonly {
   id: string;
