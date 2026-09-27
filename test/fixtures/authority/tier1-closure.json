@@ -211,6 +211,7 @@
     "src/core/devin/devin-api.ts",
     "src/core/devin/fleet-launcher.ts",
     "src/core/devin/intake.ts",
+    "src/core/devin/models.ts",
     "src/core/devin/secret.ts",
     "src/core/devin/service.ts",
     "src/core/devin/store.ts",
