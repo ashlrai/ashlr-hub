@@ -51,6 +51,7 @@ import { currentStandingPolicy } from '../authority/effective-config.js';
 import { listEnrolled, readKillSwitch } from '../sandbox/policy.js';
 import { isMirrorPath } from '../fleet/mirrors.js';
 import { audit } from '../sandbox/audit.js';
+import { firstPendingFolder, folderAccessPendingMessage } from './folder-io.js';
 
 export const VERSE_OVERNIGHT_REPORT_PATH = `${VERSE_OVERNIGHT_PATH}/report`;
 
@@ -340,7 +341,7 @@ export function parseStopRule(value: unknown): RunWindowStopRule | string {
 // Actions
 // ---------------------------------------------------------------------------
 
-function refusal(res: ServerResponse, status: 409 | 500, note: string): void {
+function refusal(res: ServerResponse, status: 409 | 500 | 503, note: string): void {
   sendJson(res, status, { ok: false, note, status: overnightStatusView() } satisfies OvernightActionResult);
 }
 
@@ -350,7 +351,7 @@ function auditAction(action: 'arm' | 'disarm', summary: string, ok: boolean): vo
   } catch { /* audit is best effort */ }
 }
 
-function arm(res: ServerResponse, body: Record<string, unknown>): void {
+async function arm(res: ServerResponse, body: Record<string, unknown>): Promise<void> {
   if (!exactKeys(body, ['action', 'stopRule'])) {
     sendInvalid(res, 'arm takes exactly {action, stopRule}');
     return;
@@ -367,6 +368,22 @@ function arm(res: ServerResponse, body: Record<string, unknown>): void {
       : 'Refused: the kill switch state could not be read, so a run is not armed (failing closed).';
     auditAction('arm', note, false);
     refusal(res, 409, note);
+    return;
+  }
+  // The counts classify each enrolled path with isMirrorPath, which
+  // canonicalises it SYNCHRONOUSLY — an lstat/realpath into the operator's
+  // folders. Enter them off the event loop first (folder-io.ts): a folder
+  // whose macOS privacy prompt is still unanswered refuses this arm instead
+  // of parking the whole server on it.
+  let enrolledPaths: string[] = [];
+  try {
+    enrolledPaths = listEnrolled();
+  } catch {
+    enrolledPaths = [];
+  }
+  const pendingPath = await firstPendingFolder(enrolledPaths);
+  if (pendingPath !== null) {
+    refusal(res, 503, `Refused for now: ${folderAccessPendingMessage(pendingPath)}.`);
     return;
   }
   const checkouts = deps.enrolledCount();
@@ -505,7 +522,7 @@ export const handleOvernightApi: ApiModule = async (ctx, req, res, path, method)
     if (method === 'POST') {
       const body = await readMutationBody(ctx, req, res);
       if (!body) return true;
-      if (body['action'] === 'arm') arm(res, body);
+      if (body['action'] === 'arm') await arm(res, body);
       else if (body['action'] === 'disarm') disarm(res, body);
       else sendInvalid(res, 'action must be one of: arm, disarm');
       return true;

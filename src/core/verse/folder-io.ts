@@ -146,3 +146,10 @@ export async function firstPendingFolder(dirs: readonly string[], timeoutMs = FO
   const index = answers.indexOf('pending');
   return index < 0 ? null : unique[index]!;
 }
+
+/** Every one of `dirs` whose access is still `pending` (all probed at once). */
+export async function pendingFolders(dirs: readonly string[], timeoutMs = FOLDER_ACCESS_PROBE_MS): Promise<Set<string>> {
+  const unique = [...new Set(dirs)];
+  const answers = await Promise.all(unique.map((dir) => probeFolderAccess(dir, timeoutMs)));
+  return new Set(unique.filter((_, index) => answers[index] === 'pending'));
+}
