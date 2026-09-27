@@ -62,6 +62,8 @@ const DYNAMIC = [
   // import() further in — the drawer. Only the ~0.7 KB store is static (a
   // pinned column must take its grid track at first paint).
   './resources/ResourcesChrome.js',
+  // Computer use (3.15 P4): desktop shells with the computer bridge only.
+  './computer/ComputerControl.js',
 ];
 
 const LAZY_ONLY = [
@@ -81,6 +83,10 @@ const LAZY_ONLY = [
   './resources/resources-summary.js',
   './resources/resources-model.js',
   './resources/resources-queries.js',
+  // Reached only through the computer-use chunk.
+  './computer/computer-runner.js',
+  './computer/native-computer.js',
+  './computer/computer-queries.js',
 ];
 
 describe('VerseApp keeps non-first-paint modules out of its static imports', () => {

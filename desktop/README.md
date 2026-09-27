@@ -342,6 +342,91 @@ lazy-loaded by each surface), `VoiceHud` (the one floating pill: waveform,
 last-focused, input). In a plain browser the same UI runs on the Web Speech
 API.
 
+### 9. Computer use (shell contract v1)
+
+Desktop control for Verse's agents: screenshots, the accessibility tree, and
+clicks / typing / keys / scroll / drag in apps the operator granted to a chat.
+The shared contract (ops, tiers, bundle lists, error codes) is
+`src/core/verse/computer-types.ts`; the native half is
+`src-tauri/src/computer.rs`. macOS only.
+
+**Feature test.**
+
+```ts
+const computer = window.__ASHLR_DESKTOP__?.computer;
+// { version: 1, capabilities: { supported: boolean /* macOS */ }, send(msg): boolean }
+```
+
+**Page → native.** `send(msg)` takes a plain object ≤ 16 KB of JSON and emits
+`shell-computer` over the event permission the page already has (no new
+capability, no new command). Parsed strictly: an unknown `op` or field, a bad
+`req` (`^[A-Za-z0-9_-]{1,40}$`), a bad bundle id, a non-finite number or an
+out-of-range value drops the message (answered `invalid` when its `req` is
+readable).
+
+| `op` | Fields | Answer `data` |
+|---|---|---|
+| `permissions` | `req` | `{ supported, macos, screen, accessibility, postEvents }` |
+| `request-permission` | `req`, `kind`: `screen` \| `accessibility` \| `post-events` | same (after the system prompt) |
+| `open-settings` | `kind`: `screen` \| `accessibility` | none (opens the Privacy pane from a closed enum) |
+| `list-apps` | `req` | `{ apps: [{ bundleId, name, pid, active, hidden, path }] }` (Dock apps) |
+| `screenshot` | `req`, `grants`, `app?`, `display?`, `scale?` (0.25–1) | `{ mime, base64, width, height, frame, display, apps: [{ bundleId, name }] }` |
+| `zoom` | `req`, `grants`, `frame`, `region: [x0,y0,x1,y1]` | `{ mime, base64, width, height }` |
+| `ax-tree` | `req`, `grants`, `app`, `maxDepth` (1–12), `frame?` | `{ app, nodes: [{ ref, depth, role, subrole?, title?, description?, value?, enabled, focused, secure, frame? }], truncated }` |
+| `probe` | `req`, `grants`, `frame?`, `target`: point \| ref \| focus | `{ app \| null, role, subrole, label, secure, windowTitle }` |
+| `ax-press` | `req`, `grants`, `app`, `ref` | `{ app, role, label }` |
+| `click` | `req`, `grants`, `frame`, `x`, `y`, `button`, `count` (1–3), `modifiers` | `{ app, role, label }` |
+| `type` | `req`, `grants`, `text` (≤ 2000 chars) | `{ app, chars }` |
+| `key` | `req`, `grants`, `keys` (e.g. `cmd+shift+t`, `Return`, `F5`) | `{ app }` |
+| `scroll` | `req`, `grants`, `frame`, `x`, `y`, `dx`, `dy` (lines, ±50; +dy = down) | `{ app, role, label }` |
+| `drag` | `req`, `grants`, `frame`, `from`, `to` | `{ app, role, label }` |
+| `resume` / `kill` / `arm` | — | a `state` event |
+
+`app` in answers is `{ bundleId, name, pid }`. Captures fit ≈1280×800 (times
+`scale`), never upscaled; `frame` maps screenshot pixels to global points
+(`origin + px * scale`). Refs (`e1`…) are valid until the next `ax-tree` for
+that app (`stale-ref` after).
+
+**Native → page.** `window.__ASHLR_COMPUTER_EVENT__(<json>)` (non-writable,
+non-configurable) dispatches `ashlr:computer`:
+
+```ts
+// { kind: 'result', req, ok: true, data } | { kind: 'result', req, ok: false, code, error }
+// { kind: 'state', state: 'idle' | 'active' | 'paused' | 'killed', app?, reason? }
+```
+
+Screen text in `data` (labels, values, titles) comes from other apps: render it
+as text and frame it as untrusted for the agent.
+
+**What native enforces** (whatever the page sends):
+
+- Grants are clamped to each app's ceiling — browsers `read`, terminals / IDEs
+  `click`, the rest `full` — and never widened. The hard denylist (password
+  managers, Keychain / Passwords, authentication prompts, the custody helper,
+  Ashlr itself, anything without a bundle id) is never captured or driven.
+- The target is resolved natively: the app under the point for mouse ops, the
+  frontmost app for `type` / `key`.
+- Secure text fields: never read, never typed into (nor while any app holds
+  secure input); only Tab, Shift+Tab and Escape are sent there.
+- System Settings' Privacy & Security / Passwords / Users & Groups / Login
+  Items panes are refused per action (an unreadable title counts as denied).
+- Takeover: hardware input more than 350 ms after the last synthetic event
+  pauses control (`operator-took-over`) until `resume`. Esc — registered as a
+  global shortcut only while the HUD shows — or `kill` stops it until `arm`.
+  Hiding, closing or reloading the Verse window pauses active control; acting
+  needs the Verse window visible. Ten idle seconds end the active state.
+- While an agent acts, an orange screen-edge border and a pill ("Agent
+  controlling <App> — Esc to stop") float above everything, ignore the mouse,
+  never take focus, and are excluded from sharing. Screenshots include only
+  granted apps' windows, so the HUD and Verse never appear in them.
+
+**Permissions.** Screen Recording (captures) and Accessibility (tree, input)
+are the operator's to grant in System Settings; `open-settings` deep-links
+there. Screenshots use ScreenCaptureKit's `SCScreenshotManager` (macOS 14+,
+loaded at run time); older macOS answers `unsupported`.
+
+**Shipping.** Rust binary change: `npm run ship:local -- --native`.
+
 ---
 
 ## Window behaviour
@@ -557,6 +642,10 @@ asks you to paste them:
 - `shell.open` is not granted to any page. The one Rust-side use is the
   browser pane's `external` op, which opens only `http`/`https` URLs that pass
   the pane's URL rule, at most one per second.
+- Computer use (§8) adds no capability or command: the page emits
+  `shell-computer`, and native re-checks every grant against the tier
+  ceilings, the hard denylist, secure fields, System Settings' privacy panes,
+  takeover and the kill switch before it captures or posts an event.
 - Browser pane tabs (§7) are separate `browser-<tab>` windows that no
   capability matches — websites in them get no IPC — with their own website
   data store, fixed read-only scripts, and the URL rule on every navigation.

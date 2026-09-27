@@ -186,6 +186,25 @@ function dictationPossible(): boolean {
   }
 }
 
+// Computer use (3.15 P4): the relay poller, access / confirmation sheets and
+// the control pill. Desktop-only, so a browser tab never even fetches it.
+const importComputer = () => import('./computer/ComputerControl.js');
+const ComputerControl = lazy(() => importComputer().then((m) => ({ default: m.ComputerControl })));
+
+/**
+ * Does this shell implement computer use on this platform? The same test as
+ * computer/native-computer.ts `hasNativeComputer`, inlined so first paint
+ * does not carry that module; ComputerControl re-checks with the real one.
+ */
+function shellSupportsComputerUse(): boolean {
+  try {
+    const bridge = (window as unknown as { __ASHLR_DESKTOP__?: { computer?: { version?: unknown; send?: unknown; capabilities?: { supported?: unknown } } } }).__ASHLR_DESKTOP__?.computer;
+    return typeof bridge?.version === 'number' && bridge.version >= 1 && typeof bridge.send === 'function' && bridge.capabilities?.supported === true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The after-first-paint warm-up (shell/warmup.ts): the overlay chunks, then
  * each rail surface not yet open — its chunk (the same load its lazy
@@ -283,6 +302,7 @@ export function VerseApp() {
   const resources = useResourcesUi();
   // Focus mode (⇧⌘F) is the chat's: the rail steps aside only on the Chat surface.
   const focus = useFocusMode() && ui.section === 'chat';
+  const [computerUse] = useState(shellSupportsComputerUse);
 
   useEffect(() => prefetchAfterFirstPaint(), []);
   // The gear tray is fetched right after mount (not on idle) and then stays
@@ -537,6 +557,11 @@ export function VerseApp() {
       </Suspense>
       {voiceHud ? <Suspense fallback={null}><VoiceHud /></Suspense> : null}
       <GuardHost />
+      {computerUse ? (
+        <Suspense fallback={null}>
+          <ComputerControl />
+        </Suspense>
+      ) : null}
       {/*
         First run only, outside the surfaces: a docked card, not a modal, so
         the rail and the surface stay usable while it is open.

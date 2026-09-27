@@ -61,6 +61,7 @@ use tauri_plugin_updater::UpdaterExt;
 mod activity_watch;
 mod app_menu;
 mod browser_pane;
+mod computer;
 mod desktop_prefs;
 mod health_watch;
 mod hotkey;
@@ -682,6 +683,9 @@ fn create_main_window(handle: &AppHandle, startup: Option<&SidecarStartup>) {
             .on_page_load(|window, payload| {
                 if matches!(payload.event(), PageLoadEvent::Started) {
                     browser_pane::hide_all(window.app_handle());
+                    // "Verse window present" is an invariant for desktop
+                    // control: a reload pauses it and hides the HUD.
+                    computer::on_verse_window_gone(window.app_handle());
                 }
             });
         builder = match (restored.x, restored.y) {
@@ -1491,6 +1495,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir().join("ai.ashlr.desktop"));
     app.manage(voice::VoiceHub::new(app_data));
+    app.manage(computer::ComputerState::default());
 
     // ── menu bar ─────────────────────────────────────────────────────────────
     // Built before any window so ⌘C / ⌘V / ⌘Z work in the composer from the
@@ -1612,6 +1617,15 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     voice::init(&handle);
+    // ── computer use (shell contract v1, computer.rs) ────────────────────────
+    // Same shape: parsed strictly here, handled in order on its own worker
+    // thread; resume / kill / arm apply at once. Native re-checks every grant.
+    {
+        let handle = handle.clone();
+        app.listen(computer::COMPUTER_EVENT, move |event| {
+            computer::handle_event(&handle, event.payload());
+        });
+    }
     if prefs.global_hotkey {
         let status = hotkey::apply(&handle, true);
         if let Some(state) = handle.try_state::<AppState>() {
@@ -1700,6 +1714,7 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             let app = tray.app_handle();
             if let Some(win) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                 if win.is_visible().unwrap_or(false) {
+                    computer::on_verse_window_gone(app);
                     let _ = win.hide();
                 } else {
                     let _ = win.show();
@@ -2141,6 +2156,7 @@ fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
             }
             api.prevent_close();
             browser_pane::hide_all(&handle);
+            computer::on_verse_window_gone(&handle);
             let _ = window.hide();
         }
         // Closing the launch window before the app ever came up means "give up".
@@ -2216,7 +2232,8 @@ fn main() {
         // Rust-only (see Cargo.toml): no window is granted `notification:*`.
         .plugin(tauri_plugin_notification::init())
         // Rust-only too; `hotkey::apply` registers ⌃⌥Space when Settings ▸
-        // Desktop turns it on. Key-up events are ignored (`is_summon_press`).
+        // Desktop turns it on, and `computer.rs` registers Esc only while its
+        // HUD shows. Key-up events are ignored (`is_summon_press`).
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -2227,6 +2244,9 @@ fn main() {
                         // both matter (hold = push-to-talk, tap = latch).
                         voice::on_hotkey(app, chord, event.state());
                     }
+                    // Esc while an agent drives the desktop = KILL (only
+                    // registered while the computer-use HUD is showing).
+                    computer::on_global_shortcut(app, shortcut, event.state());
                 })
                 .build(),
         )

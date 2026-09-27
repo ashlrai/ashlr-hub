@@ -35,6 +35,14 @@
 //!    `{ version: 1, send }` and the `ashlr:voice` event. The page emits
 //!    `shell-voice` (same event permission, no new capability); native
 //!    answers through the locked `window.__ASHLR_VOICE_EVENT__(<json>)`.
+//! 8. Computer use (protocol v1, `computer.rs`):
+//!    `window.__ASHLR_DESKTOP__.computer` = `{ version: 1, capabilities:
+//!    { supported }, send }` and the `ashlr:computer` event. The page emits
+//!    `shell-computer` over the same event permission (no new capability, no
+//!    new command); native answers by evaluating
+//!    `window.__ASHLR_COMPUTER_EVENT__(<json>)`, defined non-writable and
+//!    non-configurable here. `capabilities.supported` comes from
+//!    `ShellConfig::computer_supported` (macOS only).
 //!
 //! The script is origin-gated to the sidecar origin. Token values are
 //! JSON-encoded into a config object, never string-interpolated, so no token
@@ -101,6 +109,10 @@ struct ShellConfig<'a> {
     /// macOS only; elsewhere a `screenshot` request answers `unsupported`).
     #[serde(rename = "browserScreenshot")]
     browser_screenshot: bool,
+    /// Whether desktop control exists on this platform (macOS only; elsewhere
+    /// every `shell-computer` op answers `unsupported`).
+    #[serde(rename = "computerSupported")]
+    computer_supported: bool,
 }
 
 /// Test convenience: the script without desktop state (`"desktop":null`).
@@ -129,6 +141,7 @@ pub fn init_script_with_state(
         tokens,
         desktop,
         browser_screenshot: cfg!(target_os = "macos"),
+        computer_supported: cfg!(target_os = "macos"),
     };
     let json = serde_json::to_string(&config).unwrap_or_else(|_| "null".to_string());
     format!("var __ASHLR_SHELL_CONFIG = {json};\n{SHELL_JS}")
@@ -314,6 +327,54 @@ mod tests {
             assert!(script.contains(needle), "shell contract lost `{needle}`");
         }
         assert_eq!(crate::voice::VOICE_EVENT, "shell-voice");
+    }
+
+    #[test]
+    fn the_computer_use_contract_is_present() {
+        let script = init_script(ORIGIN, None);
+        assert!(script.contains(&format!(
+            "\"computerSupported\":{}",
+            cfg!(target_os = "macos")
+        )));
+        for needle in [
+            "computer: Object.freeze(",
+            "capabilities: Object.freeze({ supported: cfg.computerSupported === true })",
+            "send: sendComputer",
+            "event: 'shell-computer'",
+            "COMPUTER_MESSAGE_MAX = 16384",
+            "Object.defineProperty(window, '__ASHLR_COMPUTER_EVENT__'",
+            "new CustomEvent('ashlr:computer'",
+        ] {
+            assert!(script.contains(needle), "shell contract lost `{needle}`");
+        }
+        // The page-side event name is the one native listens on, and native
+        // answers through the channel defined here.
+        assert_eq!(crate::computer::COMPUTER_EVENT, "shell-computer");
+        assert!(
+            crate::computer::event_script(&crate::computer::ComputerEvent::result(
+                "r",
+                Ok(serde_json::Value::Null)
+            ))
+            .contains("window.__ASHLR_COMPUTER_EVENT__(")
+        );
+        // sendComputer is the same plain-object / JSON round-trip / size-cap
+        // gate as sendBrowser, and the channel is locked like the browser one.
+        let send = &script[script
+            .find("function sendComputer(msg)")
+            .expect("sendComputer")..];
+        let send = &send[..send.find("window.__ASHLR_DESKTOP__ =").expect("end")];
+        for needle in [
+            "Array.isArray(msg)",
+            "Object.getPrototypeOf(msg)",
+            "json.length > COMPUTER_MESSAGE_MAX",
+            "payload: JSON.parse(json)",
+        ] {
+            assert!(send.contains(needle), "sendComputer lost `{needle}`");
+        }
+        let channel = &script[script.find("'__ASHLR_COMPUTER_EVENT__'").expect("channel")..];
+        let channel = &channel[..channel.find("} catch (_) {}\n\n").expect("end")];
+        assert!(channel.contains("writable: false"));
+        assert!(channel.contains("configurable: false"));
     }
 
     #[test]

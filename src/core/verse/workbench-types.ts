@@ -1385,6 +1385,16 @@ export const WORKBENCH_ROUTE_FAMILIES = [
     prefixes: ['/api/verse/browser'],
   },
   {
+    // Desktop control for agents (3.15, agent-tools P4): the Verse window's
+    // relay, grants and KILL (computer-api.ts). No seat-facing endpoint:
+    // seats reach the tools through verse-mcp.ts in-process.
+    id: 'computer',
+    owner: '3.15-computer',
+    module: 'src/core/verse/computer-api.ts',
+    handler: 'handleComputerApi',
+    prefixes: ['/api/verse/computer'],
+  },
+  {
     id: 'multimodel',
     owner: '3.16-multimodel',
     module: 'src/core/verse/multimodel-api.ts',

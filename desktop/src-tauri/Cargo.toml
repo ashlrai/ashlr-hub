@@ -59,27 +59,46 @@ libc = "0.2"
 # `orderFront:`). Every crate here is already in Cargo.lock as a wry/tao
 # dependency at these exact versions — this adds root edges, not packages —
 # and default features are off so nothing new is compiled in.
+#
+# Computer use (`computer.rs`, macOS only) adds FEATURES of the same crates, not
+# crates: NSWorkspace / NSRunningApplication (which app is where), NSScreen /
+# NSColor / NSView / NSControl / NSTextField / NSText / NSFont (the HUD border and
+# pill), NSArray / NSGeometry / NSURL. Accessibility, CoreGraphics events and
+# CoreFoundation are hand-declared `extern "C"`; ScreenCaptureKit is loaded with
+# dlopen at first use (never linked — the minimum macOS predates it).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 block2 = "0.6.2"
 base64 = "0.22.1"
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
+    "NSArray",
     "NSData",
     "NSDictionary",
     "NSError",
+    "NSGeometry",
     "NSProcessInfo",
     "NSString",
+    "NSURL",
     "NSValue",
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSBitmapImageRep",
+    "NSColor",
+    "NSControl",
+    "NSFont",
     "NSGraphics",
     "NSImage",
     "NSImageRep",
     "NSResponder",
+    "NSRunningApplication",
+    "NSScreen",
+    "NSText",
+    "NSTextField",
+    "NSView",
     "NSWindow",
+    "NSWorkspace",
 ] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = [
     "std",

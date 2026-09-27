@@ -433,6 +433,9 @@ const WORKBENCH_IMPORTS: Readonly<Record<WorkbenchRouteFamilyId, () => Promise<W
   browser: async () => {
     try { return (await import('./browser-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'browser-api.js'); }
   },
+  computer: async () => {
+    try { return (await import('./computer-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'computer-api.js'); }
+  },
   multimodel: async () => {
     try { return (await import('./multimodel-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'multimodel-api.js'); }
   },
@@ -578,15 +581,28 @@ export function verseTurnHooks(env: NodeJS.ProcessEnv = process.env): VerseTurnH
   // A deleted chat also loses its Browser-pane grant (browser-bridge.ts), whatever the
   // checkpoint setting: the grant is the MCP endpoint's only credential.
   const forgetBrowser = async (sessionId: string) => { (await import('./browser-bridge.js')).forgetBrowserChat(sessionId); };
+  // Desktop control (computer-bridge.ts): a deleted chat loses its app grants,
+  // and every turn END clears the "this turn read untrusted content" mark.
+  // afterTurn, not beforeTurn: a beforeTurn hook makes the engine gate every
+  // spawn on it, which only the checkpoint service should do.
+  const forgetComputer = async (sessionId: string) => { (await import('./computer-bridge.js')).forgetComputerChat(sessionId); };
+  const endComputerTurn = async (sessionId: string) => { (await import('./computer-bridge.js')).endComputerTurn(sessionId); };
   if (env['ASHLR_VERSE_CHECKPOINTS'] === '0') {
-    return { onSessionDeleted: async (info) => { await forgetBrowser(info.sessionId); } };
+    return {
+      afterTurn: async (info) => { await endComputerTurn(info.sessionId); },
+      onSessionDeleted: async (info) => { await forgetBrowser(info.sessionId); await forgetComputer(info.sessionId); },
+    };
   }
   const service = async () => (await import('./checkpoint-service.js')).getCheckpointService();
   return {
     beforeTurn: async (info) => { await (await service()).beforeTurn(info); },
-    afterTurn: async (info) => { await (await service()).afterTurn(info); },
+    afterTurn: async (info) => {
+      await endComputerTurn(info.sessionId);
+      await (await service()).afterTurn(info);
+    },
     onSessionDeleted: async (info) => {
       await forgetBrowser(info.sessionId);
+      await forgetComputer(info.sessionId);
       await (await service()).forgetChat(info.sessionId, info.roots);
     },
   };

@@ -115,6 +115,37 @@
     return true
   }
 
+  // Computer use (protocol v1, computer.rs). Same shape as the browser
+  // channel: a plain object, measured and sent as a JSON round-trip copy.
+  // Native is the enforcement point (denylist, tier ceilings, secure fields,
+  // takeover, kill switch) and answers through window.__ASHLR_COMPUTER_EVENT__.
+  var COMPUTER_MESSAGE_MAX = 16384
+
+  function sendComputer(msg) {
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return false
+    var proto = Object.getPrototypeOf(msg)
+    if (proto !== Object.prototype && proto !== null) return false
+    var json
+    try {
+      json = JSON.stringify(msg)
+    } catch (_) {
+      return false
+    }
+    if (typeof json !== 'string' || json.length > COMPUTER_MESSAGE_MAX) return false
+    var internals = window.__TAURI_INTERNALS__
+    if (!internals || typeof internals.invoke !== 'function') return false
+    try {
+      var pending = internals.invoke('plugin:event|emit', {
+        event: 'shell-computer',
+        payload: JSON.parse(json)
+      })
+      if (pending && typeof pending.catch === 'function') pending.catch(function () {})
+    } catch (_) {
+      return false
+    }
+    return true
+  }
+
   window.__ASHLR_DESKTOP__ = Object.freeze({
     shell: 'tauri',
     platform: cfg.platform,
@@ -163,6 +194,14 @@
     voice: Object.freeze({
       version: 1,
       send: sendVoice
+    }),
+    // Desktop control for Verse's agents. Absent on older shells (the
+    // feature test); `supported` is false off macOS, where every op answers
+    // `unsupported`.
+    computer: Object.freeze({
+      version: 1,
+      capabilities: Object.freeze({ supported: cfg.computerSupported === true }),
+      send: sendComputer
     })
   })
 
@@ -193,6 +232,22 @@
         if (!detail || typeof detail !== 'object') return
         try {
           window.dispatchEvent(new CustomEvent('ashlr:voice', { detail: detail }))
+        } catch (_) {}
+      },
+      enumerable: false,
+      writable: false,
+      configurable: false
+    })
+  } catch (_) {}
+
+  // Native → page: computer-use results and control-state changes
+  // (computer::event_script). Locked down exactly like the browser channel.
+  try {
+    Object.defineProperty(window, '__ASHLR_COMPUTER_EVENT__', {
+      value: function (detail) {
+        if (!detail || typeof detail !== 'object') return
+        try {
+          window.dispatchEvent(new CustomEvent('ashlr:computer', { detail: detail }))
         } catch (_) {}
       },
       enumerable: false,
