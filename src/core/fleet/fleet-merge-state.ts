@@ -141,6 +141,12 @@ export interface FleetMergeStateV1 {
   verifyDigest: string | null;
   /** 3.13: the verify commands G3's verification ran (reported by `ashlr/verify`); absent before 3.13. */
   verifyCommands?: VerifyCheckCommand[] | null;
+  /**
+   * 3.14: the sibling-pin digest (fleet/mirrors.ts siblingPinsDigest) G3's
+   * verification ran against; null/absent = no `file:../<sibling>` deps. The
+   * pass re-verifies before publishing or merging when it no longer matches.
+   */
+  siblingPins?: string | null;
   risk: MergeRisk | null;
   files: number | null;
   linesAdded: number | null;

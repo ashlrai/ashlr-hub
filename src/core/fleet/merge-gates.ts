@@ -617,6 +617,12 @@ export interface G3Input {
     baseHead?: string;
     /** Commands that ran (0 ⇒ nothing verified — never a pass under a standing grant). */
     commandKinds: readonly string[];
+    /**
+     * 3.14: digest of the `file:../<sibling>` mirror pins verified against
+     * (fleet/mirrors.ts siblingPinsDigest). Hashed into the row only when
+     * present, so repos without siblings keep their digests.
+     */
+    siblingPins?: string;
   } | null;
   /** Self-eval parity for ashlr-hub; null when not the self repo. */
   parity: { ok: boolean; reason: string } | null;
@@ -640,6 +646,7 @@ export function evaluateG3(input: G3Input): GateEvaluation {
     baseBranch: verify.baseBranch ?? null,
     baseHead: verify.baseHead ?? null,
     commands: [...verify.commandKinds],
+    ...(verify.siblingPins ? { siblingPins: verify.siblingPins } : {}),
   };
   if (!verify.ok) {
     if (verify.failureCategory && INFRA_FAILURES.has(verify.failureCategory)) {

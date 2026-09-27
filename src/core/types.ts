@@ -4139,6 +4139,12 @@ export interface ProposalVerifyResult {
   baseHead?: string;
   /** Hash of the proposal diff that was verified. Required for judge-free evidence reuse. */
   diffHash?: string;
+  /**
+   * 3.14: digest of the `file:../<sibling>` mirror pins the verification ran
+   * against (fleet/mirrors.ts siblingPinsDigest); absent when the repo has
+   * none. A sibling that moves makes the binding stale.
+   */
+  siblingPins?: string;
   verifiedAt?: string;
   source?: 'auto-merge' | 'auto-merge-preflight' | 'manual' | string;
 }

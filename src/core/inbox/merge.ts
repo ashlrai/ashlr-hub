@@ -190,7 +190,7 @@ import {
   withRepoLease,
   withVerificationSlot,
 } from '../sandbox/execution-leases.js';
-import { isMirrorPath, mirrorLeaseKey } from '../fleet/mirrors.js';
+import { isMirrorPath, mirrorLeaseKey, mirrorSiblingPins } from '../fleet/mirrors.js';
 import {
   isWebApp,
   verifyInBrowser,
@@ -533,7 +533,17 @@ export function linkVerifyNodeModules(repo: string, worktreeDir: string): string
   linkNodeModules(repo, worktreeDir);
   const grants: string[] = [];
   const rootInstall = join(repo, 'node_modules');
-  if (existsSync(rootInstall)) grants.push(rootInstall);
+  if (existsSync(rootInstall)) {
+    grants.push(rootInstall);
+    // 3.14: a fleet mirror installed against pinned `file:../<sibling>`
+    // snapshots (fleet/mirrors.ts "SIBLING DEPENDENCIES"): npm links them
+    // through `~/.ashlr/fleet/mirrors/<sibling>`, so the confined suite reads
+    // the pin snapshot too. Only paths under ~/.ashlr/fleet; never a checkout.
+    try {
+      const pins = mirrorSiblingPins(repo);
+      if (pins.ok) grants.push(...pins.readPaths);
+    } catch { /* best effort: a missing grant fails closed as a denied read */ }
+  }
   try {
     if (!declaresJsWorkspace(repo)) return grants;
     const worktreeReal = realpathSync(worktreeDir);
@@ -2083,6 +2093,11 @@ export interface VerifyProposalResult {
    * verification INFRASTRUCTURE, not the diff, is suspect.
    */
   failureCategory?: VerifyFailureCategory;
+  /**
+   * 3.14: digest of the sibling mirror pins (`file:../<sibling>`) the run
+   * verified against — the same before and after it ran; absent when none.
+   */
+  siblingPins?: string;
 }
 
 export function verifyResultFromProposalResult(
@@ -2101,6 +2116,7 @@ export function verifyResultFromProposalResult(
     ...(result.baseBranch ? { baseBranch: result.baseBranch } : {}),
     ...(result.baseHead ? { baseHead: result.baseHead } : {}),
     ...(diffHash ? { diffHash } : {}),
+    ...(result.siblingPins ? { siblingPins: result.siblingPins } : {}),
     verifiedAt,
     source,
   };
@@ -2140,6 +2156,10 @@ export function hasCurrentVerificationBinding(
   proposal: Proposal,
 ): proposal is Proposal & { verifyResult: ProposalVerifyResult & { passed: boolean; baseBranch: string; baseHead: string; diffHash: string } } {
   if (!hasVerificationDiffBinding(proposal) || !proposal.repo) return false;
+  // 3.14: a sibling mirror pin that moved since verification (or can no
+  // longer be read) makes the proof stale, exactly like a moved base.
+  const pins = mirrorSiblingPins(proposal.repo);
+  if (!pins.ok || (pins.digest ?? undefined) !== proposal.verifyResult.siblingPins) return false;
 
   const base = defaultBranch(proposal.repo);
   return proposal.verifyResult.baseBranch === base &&
@@ -2446,6 +2466,13 @@ export async function openStandingVerificationConfinement(
       if (base.deniedReadPaths.some((d) => isInsideDir(d, real) || isInsideDir(real, d))) continue;
       if (callerPaths.has(p) && !callerGrants.includes(real)) callerGrants.push(real);
       if (!readOnly.includes(real)) readOnly.push(real);
+      // 3.14: a caller grant that is itself a symlink (a fleet mirror's
+      // `../<sibling>` link to its pin — fleet/mirrors.ts) is passed on as
+      // well, so the profile lets the run traverse the link (metadata on the
+      // link inode only; sandbox/confine.ts). Its target is `real`, above.
+      try {
+        if (callerPaths.has(p) && p !== real && lstatSync(p).isSymbolicLink() && !readOnly.includes(p)) readOnly.push(p);
+      } catch { /* vanished: nothing to traverse */ }
     }
     const overlay = {
       ...base,
@@ -2518,6 +2545,39 @@ function verificationSlotKey(repo: string): string {
  * NEVER throws — any error resolves to ok:false with a detail.
  */
 export async function verifyProposal(
+  proposal: Proposal,
+  cfg: AshlrConfig,
+): Promise<VerifyProposalResult> {
+  // 3.14: a fleet mirror with `file:../<sibling>` dependencies verifies
+  // against pinned sibling snapshots (fleet/mirrors.ts). The pins must be
+  // intact before the run and unchanged after it; their digest is recorded
+  // on the result, so G3 and the verification binding cover them.
+  const before = proposal.repo ? mirrorSiblingPins(proposal.repo) : null;
+  if (before && !before.ok) {
+    return {
+      ok: false,
+      ran: [],
+      detail: `sibling dependencies are not at their pinned commits: ${before.reason}`,
+      failureCategory: 'infra',
+    };
+  }
+  const result = await verifyProposalAgainstCurrentPins(proposal, cfg);
+  const digest = before?.ok ? before.digest : null;
+  if (digest === null) return result;
+  const after = mirrorSiblingPins(proposal.repo!);
+  if (!after.ok || after.digest !== digest) {
+    return {
+      ...result,
+      ok: false,
+      detail: `the sibling dependency pins changed while verification ran (${after.ok ? 'a sibling was re-pinned' : after.reason}); re-verification required`,
+      failureCategory: 'infra',
+      siblingPins: digest,
+    };
+  }
+  return { ...result, siblingPins: digest };
+}
+
+async function verifyProposalAgainstCurrentPins(
   proposal: Proposal,
   cfg: AshlrConfig,
 ): Promise<VerifyProposalResult> {
