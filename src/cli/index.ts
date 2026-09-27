@@ -32,6 +32,7 @@
  *   mirror <list|add|sync|path|remove|reconcile>  The fleet's own mirror clones (~/.ashlr/fleet/mirrors).
  *   cloud <launch|list|refresh|improve|budget|backlog>  Claude Code cloud sessions that deliver draft PRs (3.11).
  *   devin <connect|status|launch|list|refresh|message|budget>  Devin sessions that deliver PRs through the gates (3.15).
+ *   automations <list|templates|add|enable|disable|remove|fire>  Issues, red builds, schedules and webhooks become work (3.15).
  *   spec new "<goal>" [opts]   Author a versioned end-state spec artifact.
  *   spec list/show/refine      Manage spec artifacts.
  *   swarm "<goal>"|<specId>    Decompose a spec into a contracts-first agent swarm and run it.
@@ -701,6 +702,13 @@ const loadDevinCmd = lazyCmd(
   () => import('./devin.js'),
   (m) => m.runDevinCli as Cmd,
   'devin command requires a current build of src/cli/devin.ts (3.15 Devin lane).',
+);
+
+// ─── 3.15 Automations ───────────────────────────────────────────────
+const loadAutomationsCmd = lazyCmd(
+  () => import('./automations.js'),
+  (m) => m.runAutomationsCli as Cmd,
+  'automations command requires a current build of src/cli/automations.ts (3.15 automations).',
 );
 
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
@@ -2279,6 +2287,14 @@ async function main(): Promise<void> {
         // nothing merges from here.
         const cmdDevin = await loadDevinCmd();
         process.exitCode = await cmdDevin(rest);
+        break;
+      }
+
+      case 'automations': {
+        // 3.15: standing triggers → lane tasks (src/cli/automations.ts). `fire`
+        // goes through the lanes' own gates; `fire --dry-run` writes nothing.
+        const cmdAutomations = await loadAutomationsCmd();
+        process.exitCode = await cmdAutomations(rest);
         break;
       }
 

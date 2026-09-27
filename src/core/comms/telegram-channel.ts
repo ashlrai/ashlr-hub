@@ -543,6 +543,7 @@ export const TELEGRAM_HELP_TEXT = [
   '/status — fleet, autonomy and Leader status',
   '/leader — the latest Leader memo (or /leader <text> to message the Leader)',
   '/directives — the Leader\'s standing directives and standards',
+  '/task <owner/repo> <what to do> — hand work to a Telegram automation',
   '/help — this list',
   'pause / resume — hold or restart messages from the fleet',
   'snapshot — full fleet snapshot',
@@ -677,6 +678,23 @@ export async function handleSlashCommand(event: InboundEvent, text: string, cfg:
     case 'directives':
       await replyTo(event, await directivesText(), cfg);
       return true;
+    case 'task': {
+      // 3.15 automations: routed by an enabled Telegram automation covering
+      // the repo, through its lane's own gates. Lazy: most chats never use it.
+      const task = /^([A-Za-z0-9-]+\/[A-Za-z0-9._-]+)\s+([\s\S]+)$/.exec(rest);
+      if (!task) {
+        await replyTo(event, 'Usage: /task <owner/repo> <what to do>', cfg);
+        return true;
+      }
+      try {
+        const { receiveTelegramTask } = await import('../automations/engine.js');
+        const result = await receiveTelegramTask(task[1]!, task[2]!);
+        await replyTo(event, scrubSecrets(result.message), cfg);
+      } catch {
+        await replyTo(event, 'Could not hand that over — try again, or use Verse → Automations.', cfg);
+      }
+      return true;
+    }
     default:
       await replyTo(event, `Unknown command /${cmd}.\n\n${TELEGRAM_HELP_TEXT}`, cfg);
       return true;
