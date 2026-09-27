@@ -164,7 +164,11 @@ const BlockCard = memo(function BlockCard({ block, open, onToggle, loadOutput, o
 
   const filtered = useMemo(() => (output !== null && filter.pattern ? filterOutputLines(output, filter) : null), [output, filter]);
   const loadFix = extras?.loadFix ?? null;
-  const fixLoader = useMemo(() => (loadFix ? () => loadFix(block) : null), [loadFix, block]);
+  // Keyed on the block's id and exit: re-renders of the same finished block never ask the model again.
+  const blockRef = useRef(block);
+  blockRef.current = block;
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the block's identity; the block is read through the ref
+  const fixLoader = useMemo(() => (loadFix ? () => loadFix(blockRef.current) : null), [loadFix, block.id, block.exitCode]);
 
   const cwdName = folderName(block.cwd);
   const offerExplain = actions.includes('explain') && (status.tone === 'error');

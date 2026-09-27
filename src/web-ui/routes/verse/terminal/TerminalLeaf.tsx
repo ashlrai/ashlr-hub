@@ -591,7 +591,14 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
   const urlBlock = extrasProp && latest && (latest.localUrls?.length ?? 0) > 0 && !dismissed.has(`url:${latest.id}`) ? latest : null;
   const fixBlock = extrasProp && latest && !latest.running && latest.exitCode !== null && latest.exitCode !== 0 && !tab.agent && !dismissed.has(`fix:${latest.id}`) ? latest : null;
   const fixLoadFn = extrasProp?.loadFix ?? null;
-  const fixLoad = useMemo(() => (fixLoadFn && fixBlock ? () => fixLoadFn(tab.id, fixBlock) : null), [fixLoadFn, fixBlock, tab.id]);
+  // Keyed on the block's id: a later frame for another block must not ask the model again.
+  const fixBlockRef = useRef(fixBlock);
+  fixBlockRef.current = fixBlock;
+  const fixBlockId = fixBlock?.id ?? null;
+  const fixLoad = useMemo(
+    () => (fixLoadFn && fixBlockId ? () => fixLoadFn(tab.id, fixBlockRef.current!) : null),
+    [fixLoadFn, fixBlockId, tab.id],
+  );
   const dismiss = (key: string) => setDismissed((prev) => new Set(prev).add(key));
 
   const findKey = panelKeyLabel('find', deps.platform);
