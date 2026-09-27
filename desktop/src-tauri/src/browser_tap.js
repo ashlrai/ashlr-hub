@@ -187,13 +187,13 @@
         }
         XHR.prototype.send = function () {
           try {
-            var xhr = this
-            var info = meta.get(xhr)
+            var info = meta.get(this)
             if (info && !info.hooked) {
               info.hooked = true
-              xhr.addEventListener('loadend', function () {
+              // A DOM listener's `this` is the XHR it is attached to, so no alias is needed.
+              this.addEventListener('loadend', function () {
                 try {
-                  var status = xhr.status
+                  var status = this.status
                   if (status === 0) recordNetwork(info.method, info.url, null, 'network error')
                   else if (status >= 400) recordNetwork(info.method, info.url, status)
                 } catch (_) {}
