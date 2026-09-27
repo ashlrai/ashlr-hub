@@ -319,6 +319,8 @@
 /test/legacy-collector-reconciliation-driver.test.ts @masonwyatt23
 /test/legacy-judge-lanes-310.test.ts @masonwyatt23
 /test/legacy-red-team-routing-310.test.ts @masonwyatt23
+/test/live-fleet-display-policy-315.test.ts @masonwyatt23
+/test/live-fleet-leader-315.test.ts @masonwyatt23
 /test/local-eval-heldout.test.ts @masonwyatt23
 /test/local-only-consumer-parity.test.ts @masonwyatt23
 /test/local-only-dispatch-paths.test.ts @masonwyatt23
