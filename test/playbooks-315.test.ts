@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildCloudPrompt } from '../src/core/cloud/delivery-contract.js';
 import type { CloudTaskV1 } from '../src/core/cloud/types.js';
 import { buildDevinPrompt } from '../src/core/devin/delivery-contract.js';
+import type { DevinTaskV1 } from '../src/core/devin/types.js';
 import type { LedgerEntry } from '../src/core/authority/types.js';
 import { listRetros } from '../src/core/learn/retro/store.js';
 import { collectRetros, sweepRetros, withPlaybookRef, type RetroSweepDeps, type SweepProposal } from '../src/core/learn/retro/sweep.js';
@@ -435,6 +436,10 @@ describe('attribution', () => {
     } as CloudTaskV1;
     const [retro] = collectRetros({ ledger: null, inbox: null, cloud: [task], leader: null, load: () => null, sinceIso: iso(NOW - 30 * DAY), nowIso: iso(NOW) });
     expect(retro!.playbookRef).toEqual(ref);
+    // Devin tasks share the cloud end rules — and the attribution.
+    const devinTask = { ...task, id: 'dt_20260926T1000_aaaaaa', branch: 'ashlr-devin/x', playbookRef: { ...ref, version: 1 } } as unknown as DevinTaskV1;
+    const [devinRetro] = collectRetros({ ledger: null, inbox: null, cloud: null, devin: [devinTask], leader: null, load: () => null, sinceIso: iso(NOW - 30 * DAY), nowIso: iso(NOW) });
+    expect(devinRetro!.playbookRef).toEqual({ ...ref, version: 1 });
   });
 
   it('fleet retros are attributed through the proposal runId and the uses ledger', async () => {
