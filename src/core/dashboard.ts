@@ -342,7 +342,9 @@ async function buildPortfolio(cfg: AshlrConfig): Promise<PortfolioSummary> {
   try {
     const { listGoals } = await import('./goals/store.js');
     const { progressOf, nextActionableMilestone } = await import('./goals/advance.js');
-    const active = listGoals({ status: 'active' });
+    const { isOpenGoal } = await import('./goals/open-goals.js');
+    // The shared open-goal rule (goals/open-goals.ts): the Leader counts the same set.
+    const active = listGoals().filter(isOpenGoal);
     const inFlight: PortfolioGoalInFlight[] = [];
     for (const goal of active) {
       const progress = progressOf(goal);

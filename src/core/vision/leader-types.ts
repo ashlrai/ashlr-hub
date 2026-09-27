@@ -260,7 +260,67 @@ export type LeaderAction = { [K in LeaderActionKind]: LeaderActionOf<K> }[Leader
  */
 export type LeaderRunOutcome = 'ok' | 'no-seat' | 'skipped-unchanged' | 'failed' | 'parse-failed';
 
-export type LeaderTrigger = 'schedule' | 'merges' | 'revert' | 'seat-reset' | 'insight' | 'manual';
+/**
+ * `retry` (3.14): a bounded re-run after a failed / no-seat run, instead of
+ * waiting for tomorrow's slot. `checkin` (3.14): the cheap working-hours
+ * check-in (LeaderRunMode 'checkin').
+ */
+export type LeaderTrigger = 'schedule' | 'merges' | 'revert' | 'seat-reset' | 'insight' | 'manual' | 'retry' | 'checkin';
+
+/**
+ * 3.14: `full` is the daily memo (and trigger / manual runs); `checkin` is the
+ * lightweight working-hours check-in — local or grok only, short output, and
+ * ADVISORY: its actions, goals and hypotheses are never enacted.
+ */
+export type LeaderRunMode = 'full' | 'checkin';
+
+/**
+ * 3.14: one seat the run tried or passed over. `served` answered (its output
+ * may still have failed to parse — then `parse-failed`); `skipped` was never
+ * called (the reason says why: the router, the Leader's seat rules, the mode).
+ */
+export type LeaderAttemptOutcome = 'served' | 'failed' | 'timeout' | 'parse-failed' | 'skipped';
+
+export interface LeaderSeatAttempt {
+  seatId: string;
+  engine: string;
+  model: string | null;
+  outcome: LeaderAttemptOutcome;
+  reason: string | null;
+  /** Wall-clock of the call; null when skipped. */
+  ms: number | null;
+  /** The per-attempt limit it ran under; null when skipped. */
+  timeoutMs: number | null;
+}
+
+/**
+ * 3.14: Leader health for the UI / Telegram — "Leader: healthy / degraded (why)".
+ * Derived from the run state (no model call, no seat probe on the read path).
+ */
+export interface LeaderHealth {
+  status: 'healthy' | 'degraded' | 'down' | 'unknown';
+  /** One plain sentence: why the status is what it is. */
+  summary: string;
+  lastRunAt: string | null;
+  lastRunOutcome: LeaderRunOutcome | null;
+  lastSuccessAt: string | null;
+  /** The last failed / no-seat / parse-failed run's reason; null when none since the last success. */
+  lastFailure: { at: string; outcome: LeaderRunOutcome; reason: string | null } | null;
+  /** Consecutive runs without a memo (failed, no-seat, parse-failed). */
+  consecutiveFailures: number;
+  nextDueAt: string | null;
+  nextDueReason: string | null;
+  /** A scheduled bounded retry, if one is pending. */
+  retry: { attempt: number; maxAttempts: number; at: string } | null;
+  /** Seats as the most recent run found them (served / failed / skipped + why). */
+  seats: LeaderSeatAttempt[];
+  seatsObservedAt: string | null;
+  /** The seat that served the most recent memo. */
+  servedBy: { seatId: string; model: string | null; at: string } | null;
+  runsToday: number;
+  checkinsToday: number;
+  checkinHours: number;
+}
 
 export interface LeaderExpectedDelta {
   metric: string;
@@ -279,6 +339,10 @@ export interface LeaderMemo {
   dryRun: boolean;
   seatId: string | null;
   model: string | null;
+  /** 3.14: absent on older memos (= 'full'). */
+  mode?: LeaderRunMode;
+  /** 3.14: every seat tried or passed over, in order (absent on older memos). */
+  attempts?: LeaderSeatAttempt[];
   /** sha256 hex of the digests the memo was written from (unchanged ⇒ skip). */
   evidenceDigest: string;
   bottleneck: { statement: string; metric: string | null; evidence: string[] } | null;
@@ -376,6 +440,8 @@ export interface LeaderStateV1 {
   hitRate: LeaderHitRate;
   standards: LeaderStandard[];
   directives: LeaderDirectivesV1 | null;
+  /** 3.14 (additive): run health for the UI / Telegram. */
+  health?: LeaderHealth;
 }
 
 /** POST /api/verse/leader — exactly one form per request. */
