@@ -23,6 +23,8 @@ export interface DockHostProps {
   presentation: DockPresentation;
   windowWidth: number;
   columnWidth: number;
+  /** The widest the column may be dragged (the transcript keeps its floor). */
+  columnMax?: number;
   /** The chat column's height (the bottom panel's caps). */
   columnHeight?: number;
   session: VerseSession | null;
@@ -72,7 +74,7 @@ export function DockHost(props: DockHostProps) {
   return (
     <ChatPaneDataContext.Provider value={data}>
       <Dock presentation={props.presentation} windowWidth={props.windowWidth} columnWidth={props.columnWidth}
-        columnHeight={props.columnHeight} pane={pane} />
+        columnMax={props.columnMax} columnHeight={props.columnHeight} pane={pane} />
     </ChatPaneDataContext.Provider>
   );
 }

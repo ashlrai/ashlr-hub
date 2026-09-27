@@ -4,16 +4,18 @@
  * searches, files read — newest first. The Reasoning + Sources unit replaces
  * it by registering the id `sources` (../README.md).
  */
-import { useMemo } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import { EmptyState } from '../../../../components/primitives/EmptyState.js';
 import { displayPath } from '../../chat/path-display.js';
+import { FilesGlyph, PreviewGlyph } from '../../dock/dock-icons.js';
+import { SearchIcon } from '../../verse-icons.js';
 import { useVerseTranscript } from '../../useVerseTranscript.js';
 import { formatRelative } from '../../verse-model.js';
 import type { PaneProps } from '../pane-registry.js';
 import { chatSources, type SourceKind } from './pane-models.js';
 import styles from './stub-panes.module.css';
 
-const KIND_MARK: Record<SourceKind, string> = { web: '↗', search: '⌕', file: '¶' };
+const KIND_ICON: Record<SourceKind, (p: { size?: number }) => ReactNode> = { web: PreviewGlyph, search: SearchIcon, file: FilesGlyph };
 const KIND_WORD: Record<SourceKind, string> = { web: 'Page', search: 'Search', file: 'File' };
 
 export function SourcesPane({ sessionId, roots, host }: PaneProps) {
@@ -44,7 +46,7 @@ export function SourcesPane({ sessionId, roots, host }: PaneProps) {
                 return (
                   <li key={source.key} className={styles.row} data-failed={source.failed || undefined}
                     title={`${KIND_WORD[source.kind]}: ${source.target}${source.failed ? ' (failed)' : ''}`}>
-                    <span className={styles.mark} aria-label={KIND_WORD[source.kind]}>{KIND_MARK[source.kind]}</span>
+                    <span className={styles.mark} role="img" aria-label={KIND_WORD[source.kind]}>{KIND_ICON[source.kind]({ size: 12 })}</span>
                     {source.href ? (
                       <a className={`${styles.name} ${styles.link}`} href={source.href} target="_blank" rel="noopener noreferrer">{label}</a>
                     ) : <span className={styles.name}>{label}</span>}

@@ -47,7 +47,7 @@ import { noteSessionSeen, useChatActivity } from '../chat/use-chat-activity.js';
 import { useSessionRoots } from '../chat/use-session-roots.js';
 import { ChatResizer, useChatPanelSizing } from '../ChatResizer.js';
 import { CHAT_PANEL_RANGES, MIN_TRANSCRIPT_WIDTH, setChatPanelFit } from '../chat-panel-sizing.js';
-import { activateDockChat, clearDockRequests, requestTerminal, toggleDock, toggleDockPane, toggleDockPlacement, useDock } from '../dock/dock-store.js';
+import { activateDockChat, clearDockRequests, requestTerminal, toggleDock, toggleDockPane, toggleDockPlacement, useDockValue } from '../dock/dock-store.js';
 import type { SeatChoice } from '../SeatSelector.js';
 import { clampDockHeight, clampDockWidth, DOCK_LAYOUT, dockPresentation } from '../shell/dock-catalog.js';
 import { isFocusMode, setFocusMode, toggleFocusMode, useFocusMode } from '../shell/focus-mode.js';
@@ -244,7 +244,13 @@ export function ChatSection() {
   const toast = useToast();
   const ui = useVerseUi();
   const visible = useSectionVisible();
-  const dock = useDock();
+  // The dock fields the layout needs, each subscribed on its own: dragging the
+  // split boundary, or a pane request, does not re-render the chat surface.
+  const dockOpenState = useDockValue((s) => s.open && s.tabs.length > 0);
+  const dockPlacement = useDockValue((s) => s.placement);
+  const dockStoredWidth = useDockValue((s) => s.width);
+  const dockStoredHeight = useDockValue((s) => s.height);
+  const terminalShown = useDockValue((s) => s.open && (s.active === 'terminal' || s.splitWith === 'terminal'));
   const chatActivity = useChatActivity();
   const windowWidth = useWindowWidth();
   const focus = useFocusMode();
@@ -487,7 +493,6 @@ export function ChatSection() {
   // ⌃` : a terminal, focused — the active tab, else one at the chat's root
   // (TerminalPane resolves an empty request that way). Pressed again while
   // Terminal is on screen it hides it, like every editor's ⌃`.
-  const terminalShown = dock.state.open && (dock.state.active === 'terminal' || dock.state.splitWith === 'terminal');
   const openTerminal = useCallback(() => {
     if (terminalShown) toggleDockPane('terminal');
     else requestTerminal({});
@@ -617,20 +622,18 @@ export function ChatSection() {
   }, [visible, focus]);
 
   // ---- layout -------------------------------------------------------------------
-  const presentation = dockPresentation(windowWidth, dock.state.placement);
-  const dockOpen = dock.state.open && dock.state.tabs.length > 0;
+  const presentation = dockPresentation(windowWidth, dockPlacement);
+  const dockOpen = dockOpenState;
   const dockColumn = dockOpen && presentation === 'column' && !focus;
   const dockBottom = dockOpen && presentation === 'bottom' && !focus;
-  const dockHeight = dockBottom ? clampDockHeight(dock.state.height, chatHeight) : 0;
+  const dockHeight = dockBottom ? clampDockHeight(dockStoredHeight, chatHeight) : 0;
   // The dock yields before the transcript does: never past the window's 60%,
   // and never so wide that the transcript (plus the chat list, when shown at
   // its minimum) drops under its floor. The floor for the dock is its 320px.
   const sidebarFloor = sidebarCollapsed ? 0 : CHAT_PANEL_RANGES.sidebar.min;
+  const dockColumnMax = chatWidth > 0 ? chatWidth - MIN_TRANSCRIPT_WIDTH - sidebarFloor : Number.POSITIVE_INFINITY;
   const dockWidth = dockColumn
-    ? Math.max(DOCK_LAYOUT.minWidth, Math.min(
-      clampDockWidth(dock.state.width, windowWidth),
-      chatWidth > 0 ? chatWidth - MIN_TRANSCRIPT_WIDTH - sidebarFloor : Number.POSITIVE_INFINITY,
-    ))
+    ? Math.max(DOCK_LAYOUT.minWidth, Math.min(clampDockWidth(dockStoredWidth, windowWidth), dockColumnMax))
     : 0;
 
   useEffect(() => {
@@ -663,6 +666,16 @@ export function ChatSection() {
   } as CSSProperties;
 
   // ---- dock data ------------------------------------------------------------------
+  // Stable across renders: every pane gets these through one memoized `host`,
+  // so a chat-surface render does not re-render every mounted pane.
+  const sendToChat = useCallback((text: string) => {
+    if (!selectedId || !insertIntoComposer(selectedId, text)) toast.show('Open a chat to send this to it.', 'neutral');
+  }, [selectedId, toast]);
+  const addToMessage = useCallback((text: string) => {
+    if (!selectedId || !insertIntoComposer(selectedId, text)) toast.show('Open a chat to add this to its message.', 'neutral');
+  }, [selectedId, toast]);
+  // Accounts & capacity live in Apps & Accounts (C6) since 3.10.
+  const openAccounts = useCallback(() => setVerseSection('apps'), []);
   const derive = DERIVATIONS.useLoaded();
   const otherRunning = useMemo(
     () => (derive ? derive.otherRunningChats(sessions, chatActivity.activity, selectedId) : NO_TASKS),
@@ -724,14 +737,12 @@ export function ChatSection() {
       </div>
       {dockOpen ? (
         <Suspense fallback={null}>
-          <DockHost presentation={presentation} windowWidth={windowWidth} columnWidth={dockWidth} columnHeight={chatHeight} session={view.session} seats={seats}
+          <DockHost presentation={presentation} windowWidth={windowWidth} columnWidth={dockWidth} columnMax={dockColumnMax} columnHeight={chatHeight} session={view.session} seats={seats}
             events={view.events} roots={roots.roots} rootsData={roots.data} rootsError={roots.error} turnFiles={turnFiles}
             otherRunning={otherRunning} dispatchEnabled={dispatchEnabled} onOpenSession={setSelectedId}
-            onHandoff={(id) => setHandoffFor(id)}
+            onHandoff={setHandoffFor}
             // Accounts & capacity live in Apps & Accounts (C6) since 3.10.
-            onOpenAccounts={() => setVerseSection('apps')}
-            onSendToChat={(text) => { if (!selectedId || !insertIntoComposer(selectedId, text)) toast.show('Open a chat to send this to it.', 'neutral'); }}
-            onAddToMessage={(text) => { if (!selectedId || !insertIntoComposer(selectedId, text)) toast.show('Open a chat to add this to its message.', 'neutral'); }} />
+            onOpenAccounts={openAccounts} onSendToChat={sendToChat} onAddToMessage={addToMessage} />
         </Suspense>
       ) : null}
 

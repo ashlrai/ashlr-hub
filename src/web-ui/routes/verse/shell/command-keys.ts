@@ -282,9 +282,17 @@ export const DESKTOP_COMMANDS: Readonly<Record<DesktopCommandName, KeyedCommandI
 /** `open-session:<id>` — the notification for a finished or failed chat. */
 export const OPEN_SESSION_COMMAND_RE = /^open-session:([A-Za-z0-9._-]{1,128})$/;
 
+/**
+ * `open-pane:<paneId>` or `open-pane:<paneId>@<sessionId>` — a pane in the
+ * chat's panel area, in the open chat or in the one named (3.16 workbench;
+ * shell/deep-link.ts is the URL form of the same thing).
+ */
+export const OPEN_PANE_COMMAND_RE = /^open-pane:([a-z][a-z0-9-]{0,39})(?:@([A-Za-z0-9._-]{1,128}))?$/;
+
 export type ParsedDesktopCommand =
   | { kind: 'command'; name: DesktopCommandName; commandId: KeyedCommandId }
-  | { kind: 'open-session'; sessionId: string };
+  | { kind: 'open-session'; sessionId: string }
+  | { kind: 'open-pane'; paneId: string; sessionId: string | null };
 
 /** Parse a raw desktop command string; null for anything unknown (never guessed). */
 export function parseDesktopCommand(raw: unknown): ParsedDesktopCommand | null {
@@ -293,6 +301,8 @@ export function parseDesktopCommand(raw: unknown): ParsedDesktopCommand | null {
     const name = raw as DesktopCommandName;
     return { kind: 'command', name, commandId: DESKTOP_COMMANDS[name] };
   }
+  const pane = OPEN_PANE_COMMAND_RE.exec(raw);
+  if (pane) return { kind: 'open-pane', paneId: pane[1]!, sessionId: pane[2] ?? null };
   const session = OPEN_SESSION_COMMAND_RE.exec(raw);
   return session ? { kind: 'open-session', sessionId: session[1]! } : null;
 }

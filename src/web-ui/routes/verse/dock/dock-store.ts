@@ -109,6 +109,7 @@ export function resetDockStore(): void {
   snapshot = null;
   nonce = 0;
   activeChat = undefined;
+  pendingPane = null;
   for (const listener of [...listeners]) listener();
 }
 
@@ -268,16 +269,40 @@ export function toggleDockPlacement(): void {
  */
 let activeChat: string | null | undefined;
 
+/**
+ * A pane to open once chat `sessionId` is the open one (a deep link, a
+ * notification): opening it BEFORE the switch would file it under the chat
+ * being left, since the switch swaps layouts.
+ */
+let pendingPane: { sessionId: string; paneId: DockPaneId } | null = null;
+
 /** The chat surface calls this whenever the open chat changes (and once on mount). */
 export function activateDockChat(sessionId: string | null): void {
-  if (activeChat === undefined) {
+  if (activeChat !== undefined && activeChat !== sessionId) {
+    const from = activeChat;
     activeChat = sessionId;
+    setState(withChatSwitch(current().state, from, sessionId));
+  } else {
+    activeChat = sessionId;
+  }
+  if (pendingPane && pendingPane.sessionId === sessionId) {
+    const { paneId } = pendingPane;
+    pendingPane = null;
+    openDockPane(paneId);
+  }
+}
+
+/**
+ * Open `paneId` in chat `sessionId` — now, when that chat is already open
+ * (or none is named), else as soon as the chat surface switches to it.
+ */
+export function openPaneInChat(paneId: DockPaneId, sessionId: string | null = null): void {
+  if (sessionId === null || sessionId === activeChat) {
+    pendingPane = null;
+    openDockPane(paneId);
     return;
   }
-  if (activeChat === sessionId) return;
-  const from = activeChat;
-  activeChat = sessionId;
-  setState(withChatSwitch(current().state, from, sessionId));
+  pendingPane = { sessionId, paneId };
 }
 
 /** Open the Terminal pane with a request (a tab at a root, a pasted command, an app launch). */
@@ -332,4 +357,14 @@ export function clearDockRequests(): void {
 
 export function useDock(): DockSnapshot {
   return useSyncExternalStore(subscribeDockState, getDockSnapshot, getDockSnapshot);
+}
+
+/**
+ * One primitive derived from the dock's state, re-rendering only when THAT
+ * value changes — so the chat surface does not re-render while the split
+ * boundary is dragged, or when a request is raised.
+ */
+export function useDockValue<T extends string | number | boolean | null>(select: (state: DockState) => T): T {
+  const read = () => select(current().state);
+  return useSyncExternalStore(subscribeDockState, read, read);
 }

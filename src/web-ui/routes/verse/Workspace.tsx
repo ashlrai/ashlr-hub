@@ -75,9 +75,10 @@ import {
   standardSwitchCompacts,
 } from './ContextMeter.js';
 import { CopyGlyph, FocusGlyph, HandoffGlyph, MoreGlyph, PanelBottomGlyph, RenameGlyph, TrashGlyph } from './dock/dock-icons.js';
-import { openDockPane, requestDiff, toggleDock, toggleDockPane, useDock } from './dock/dock-store.js';
+import { getDockState, openDockPane, requestDiff, toggleDock, toggleDockPane, useDock, useDockValue } from './dock/dock-store.js';
 import { paneApplies, paneChordLabel, usePanes } from './panes/index.js';
 import { setFocusMode, useFocusMode } from './shell/focus-mode.js';
+import { deepLinkUrl } from './shell/deep-link.js';
 import { saveDraft } from './chat/composer-state.js';
 import type { SeatChoice } from './SeatSelector.js';
 import { BranchBarSlot, SessionInsightChipSlot } from './shell/slots.js';
@@ -150,6 +151,8 @@ export function Workspace(props: WorkspaceProps) {
   const [handoffCreated, setHandoffCreated] = useState<{ title: string } | null>(null);
   const [menu, setMenu] = useState<{ anchor: { x: number; y: number }; from: HTMLElement } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
+
   /** Text another pane drafted in (Review "Add to message", Terminal "Send selection to chat"). */
   const [insertRequest, setInsertRequest] = useState<{ nonce: number; text: string } | null>(null);
   /** "Continue on ‹seat›": the seat the handoff should open on. */
@@ -276,6 +279,7 @@ export function Workspace(props: WorkspaceProps) {
             Open a project, choose a seat — a Claude or Codex account, Grok, or a local Ollama model — and talk to an agent that can edit that project.
           </p>
           <button type="button" className={styles.emptyButton} onClick={onNew}>New chat {newChatShortcut ? <kbd>{newChatShortcut}</kbd> : null}</button>
+          <WorkbenchKeys />
           {!dispatchEnabled ? (
             <p className={styles.emptyWarn} role="status">
               This server was started without dispatch, so chats are read-only here. Run <code>ashlr verse</code> to enable sending.
@@ -409,6 +413,20 @@ export function Workspace(props: WorkspaceProps) {
         void navigator.clipboard?.writeText(session.id).then(() => {
           setCopied(true);
           setTimeout(() => setCopied(false), 1200);
+        }, () => undefined);
+      },
+    });
+    menuItems.push({
+      id: 'copy-link',
+      label: linkCopied ? 'Link copied' : 'Copy link to this chat',
+      icon: <CopyGlyph size={14} />,
+      onSelect: () => {
+        // With the pane on top, so the link reopens the chat the way you were looking at it.
+        const dock = getDockState();
+        const url = deepLinkUrl({ sessionId: session.id, paneId: dock.open ? dock.active : null });
+        void navigator.clipboard?.writeText(url).then(() => {
+          setLinkCopied(true);
+          setTimeout(() => setLinkCopied(false), 1200);
         }, () => undefined);
       },
     });
@@ -591,7 +609,7 @@ function LiveRow({ sessionId, running, otherRunning, onStop }: {
 }) {
   const transcript = useVerseTranscript(sessionId);
   const live = useVerseLive(sessionId);
-  const dock = useDock();
+  const tasksActive = useDockValue((s) => s.open && (s.active === 'tasks' || s.splitWith === 'tasks'));
   const segments = transcript.segments;
   const lastItems = segments && segments.length > 0 ? segments[segments.length - 1]!.items : transcript.items;
   const liveThinking = live.thinking && live.thinking.turnId === live.turnId ? live.thinking : null;
@@ -600,7 +618,6 @@ function LiveRow({ sessionId, running, otherRunning, onStop }: {
   const counts = useMemo(() => countTasks(running ? tasks : [], otherRunning), [running, tasks, otherRunning]);
   const showLive = running && transcript.live;
   if (!showLive && counts.total === 0) return null;
-  const tasksActive = dock.state.open && (dock.state.active === 'tasks' || dock.state.splitWith === 'tasks');
   return (
     <div className={styles.liveRow} data-running={showLive || undefined}>
       {showLive ? <LiveStatus live={live} derived={derived} onStop={onStop} showNotice={false} /> : <span className={styles.liveSpacer} />}
@@ -735,6 +752,28 @@ function Lockup({ eyebrow, title }: { eyebrow: ReactNode; title: ReactNode }) {
       {eyebrow}
       {title}
     </div>
+  );
+}
+
+/** What sits beside every chat, and the key for each — the empty state teaches the workbench before there is one. */
+const WORKBENCH_KEYS: ReadonlyArray<readonly [label: string, commandId: string]> = [
+  ['Terminal', 'dock.terminal'],
+  ['Browser', 'dock.preview'],
+  ['Changes', 'dock.diff'],
+  ['Reasoning', 'dock.reasoning'],
+  ['Focus', 'chat.focus-mode'],
+  ['Commands', 'palette.open'],
+];
+
+function WorkbenchKeys() {
+  const keys = WORKBENCH_KEYS.map(([label, id]) => [label, shortcutFor(id)] as const).filter(([, key]) => key !== null);
+  if (keys.length === 0) return null;
+  return (
+    <ul className={styles.emptyKeys} aria-label="Beside every chat">
+      {keys.map(([label, key]) => (
+        <li key={label}><span>{label}</span> <kbd>{key}</kbd></li>
+      ))}
+    </ul>
   );
 }
 

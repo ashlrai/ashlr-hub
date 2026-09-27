@@ -585,6 +585,22 @@
 .emptyButton:hover { border-color: var(--accent-500); }
 .emptyButton:active { background: var(--bg-active); }
 .emptyButton kbd { font-family: var(--font-mono); font-size: var(--text-2xs-size, 11px); color: var(--text-tertiary); }
+/* What sits beside every chat: a quiet row of names and keys, wrapping as needed. */
+.emptyKeys {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2) var(--space-4);
+  max-width: 44ch;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+.emptyKeys li { display: inline-flex; align-items: baseline; gap: var(--space-1); white-space: nowrap; }
+.emptyKeys kbd { font-family: var(--font-mono); font-size: var(--text-2xs-size); color: var(--text-secondary); }
 .emptyWarn {
   padding-left: var(--space-3);
   border-left: 2px solid var(--status-warning-solid);

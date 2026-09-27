@@ -8,6 +8,7 @@ import { useMemo } from 'react';
 import { EmptyState } from '../../../../components/primitives/EmptyState.js';
 import { displayPath } from '../../chat/path-display.js';
 import { fileBasename } from '../../chat/tool-semantics.js';
+import { FilesGlyph } from '../../dock/dock-icons.js';
 import { useVerseTranscript } from '../../useVerseTranscript.js';
 import { formatRelative } from '../../verse-model.js';
 import type { PaneProps } from '../pane-registry.js';
@@ -51,7 +52,7 @@ export function FilesPane({ sessionId, roots, host }: PaneProps) {
           <ul className={styles.list}>
             {roots.map((root) => (
               <li key={root} className={styles.row} title={root}>
-                <span className={styles.mark} aria-hidden="true">▸</span>
+                <span className={styles.mark} aria-hidden="true"><FilesGlyph size={12} /></span>
                 <span className={styles.name}>{fileBasename(root) || root}</span>
                 <span>
                   <button type="button" className={styles.rowAction} onClick={() => host.openTerminal({ root })}>Terminal</button>

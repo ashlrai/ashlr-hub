@@ -28,7 +28,7 @@
  *
  * KEYS. A pane's chord is either a catalog command's (`command:`, for the
  * first-party panes — the palette and the shortcuts overlay list those) or
- * its own `shortcut:`. An own shortcut must use ⌘/Ctrl or ⌃, and is REFUSED
+ * its own `shortcut:`. An own shortcut must use mod (Cmd/Ctrl) or ctrl, and is REFUSED
  * (with a console warning; the pane still registers, keyless) when it
  * collides with a catalog key live in the chat, a system chord, or another
  * pane's key. A pane can never steal a key.
@@ -193,7 +193,7 @@ export function shortcutProblem(text: string, paneId: string, panes: Iterable<Re
   }
   const modifiers = text.toLowerCase().split('+').slice(0, -1);
   if (!chord.key || modifiers.some((m) => !['mod', 'ctrl', 'shift', 'alt'].includes(m))) return `"${text}" is not a chord`;
-  if (!chord.mod && !chord.ctrl) return `"${text}" needs ⌘/Ctrl or ⌃ — a bare key would eat typing`;
+  if (!chord.mod && !chord.ctrl) return `"${text}" needs mod or ctrl — a bare key would eat typing`;
   const id = chordId(chord);
   if (RESERVED.has(id)) return `"${text}" belongs to the system`;
   const owner = catalogChords().get(id);

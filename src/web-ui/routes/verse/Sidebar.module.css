@@ -464,6 +464,16 @@
   border-radius: var(--radius-full);
   background: var(--status-info-solid);
 }
+/* Waiting for you (a Needs-you item points at this chat): an amber RING —
+   a different shape from the unread dot, so it never rests on colour. */
+.waiting {
+  width: 9px;
+  height: 9px;
+  margin: 0 2px;
+  border: 2px solid var(--status-warning-solid);
+  border-radius: var(--radius-full);
+  background: transparent;
+}
 
 /* The row's ⋯ appears on hover or keyboard focus, over the status column. */
 .rowMore {

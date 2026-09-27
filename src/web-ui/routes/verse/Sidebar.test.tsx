@@ -341,6 +341,18 @@ describe('Sidebar 3.10', () => {
     expect(all).toHaveAttribute('aria-checked', 'true');
   });
 
+  it('marks a chat that is waiting for YOU with a ring that outranks its news — but never a running or failed one', () => {
+    const waiting = { ...activity.needsYou[0]!, id: 'chats:approval:vs_new', subject: { ...activity.needsYou[0]!.subject, sessionId: 'vs_new' }, target: { kind: 'session', sessionId: 'vs_new' } };
+    mount310({ activity: { ...activity, needsYou: [...activity.needsYou, waiting] } as typeof activity });
+    const nav = screen.getByRole('navigation', { name: 'Chats' });
+    const row = within(nav).getByRole('button', { name: /Unread one/ });
+    const ring = within(row).getByRole('img', { name: 'Waiting for you' });
+    expect(ring).toHaveAttribute('data-status', 'waiting');
+    expect(within(row).queryByRole('img', { name: /new turn/ })).toBeNull();
+    // The failed chat is ALSO in Needs-you, but "failed" is the more urgent word.
+    expect(within(within(nav).getByRole('button', { name: /Failed one/ })).getByRole('img', { name: 'Last turn failed' })).toBeInTheDocument();
+  });
+
   it('offers a way out of an empty filter', async () => {
     const user = userEvent.setup();
     mount310({ activity: { ...activity, running: [] }, sessions: S.map((s) => ({ ...s, status: 'idle' as const })) });

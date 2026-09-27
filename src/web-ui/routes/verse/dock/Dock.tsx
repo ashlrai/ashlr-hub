@@ -71,8 +71,10 @@ export interface DockProps {
   presentation: DockPresentation;
   /** Window width, for the 60% cap. */
   windowWidth: number;
-  /** The width the column may actually take (after the transcript's floor); column presentation only. */
+  /** The width the column takes (after the transcript's floor); column presentation only. */
   columnWidth: number;
+  /** The widest the column may be dragged before the transcript drops under its floor. */
+  columnMax?: number;
   /** The chat column's height, for the bottom panel's caps; bottom presentation only. */
   columnHeight?: number;
   /** The open chat and the host actions, handed to every pane. */
@@ -114,7 +116,7 @@ function useFrameWriter(write: (value: number) => void): (value: number) => void
 }
 
 export function Dock(props: DockProps) {
-  const { presentation, windowWidth, columnWidth, columnHeight = 0, pane: paneContext } = props;
+  const { presentation, windowWidth, columnWidth, columnMax = Number.POSITIVE_INFINITY, columnHeight = 0, pane: paneContext } = props;
   const { state, requests } = useDock();
   usePanes(); // re-render when a pane is registered, replaced or removed
   const panelRef = useRef<HTMLElement>(null);
@@ -239,10 +241,11 @@ export function Dock(props: DockProps) {
       style={style}
       onKeyDown={onSheetKeyDown}
     >
-      {presentation === 'column' ? <WidthHandle width={width} windowWidth={windowWidth} /> : null}
+      {presentation === 'column' ? <WidthHandle width={width} windowWidth={windowWidth} columnMax={columnMax} /> : null}
       {presentation === 'bottom' ? <HeightHandle height={height} columnHeight={columnHeight} /> : null}
       {presentation === 'bottom-sheet' ? <span className={styles.grabber} aria-hidden="true" /> : null}
-      <div className={styles.head}>
+      {/* Beside the chat, the head runs under the macOS title bar: it drags the window like the chat header does. */}
+      <div className={styles.head} data-app-region={presentation === 'column' ? 'drag' : undefined}>
         <div className={styles.tabs} role="tablist" aria-label="Dock panes">
           {tabs.map((id) => {
             const registered = getPane(id)!;
@@ -423,33 +426,76 @@ class PaneBoundary extends Component<{ title: string; onRetry: () => void; child
 // Handles
 // ---------------------------------------------------------------------------
 
-/** The column's left edge: drag, or ←/→ (⇧ for coarse), double-click for the default. */
-function WidthHandle({ width, windowWidth }: { width: number; windowWidth: number }) {
-  const max = Math.max(DOCK_LAYOUT.minWidth, Math.floor(windowWidth * DOCK_LAYOUT.maxWidthFraction));
-  const drag = useRef<{ startX: number; startWidth: number } | null>(null);
+/**
+ * An edge drag that never re-renders React while it moves: each frame writes
+ * the new size straight onto the panel (inline width / height), the chat
+ * grid's CSS variable and the handle's aria-valuenow, and the store gets ONE
+ * write on release. That is what keeps a resize at 60fps with a transcript,
+ * a terminal and a browser all on screen.
+ */
+function useEdgeDrag({ axis, size, min, max, cssVar, commit }: {
+  axis: 'x' | 'y';
+  size: number;
+  min: number;
+  max: number;
+  /** The chat grid's variable for this size (ChatSection reads it for the track). */
+  cssVar: '--verse-dock-width' | '--verse-dock-height';
+  commit: (value: number) => void;
+}) {
+  const drag = useRef<{ start: number; startSize: number; last: number | null; handle: HTMLElement; frame: number | null } | null>(null);
   const [dragging, setDragging] = useState(false);
-  const write = useFrameWriter(setDockWidth);
+  useEffect(() => () => {
+    if (drag.current?.frame != null) cancelAnimationFrame(drag.current.frame);
+    document.body.removeAttribute('data-verse-resizing');
+  }, []);
+
+  function paint(handle: HTMLElement, value: number) {
+    const panel = handle.parentElement;
+    const host = panel?.parentElement;
+    if (panel) panel.style[axis === 'x' ? 'width' : 'height'] = `${value}px`;
+    host?.style.setProperty(cssVar, `${value}px`);
+    handle.setAttribute('aria-valuenow', String(value));
+  }
 
   function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
     if (event.button !== 0) return;
     event.preventDefault();
-    drag.current = { startX: event.clientX, startWidth: width };
+    drag.current = { start: axis === 'x' ? event.clientX : event.clientY, startSize: size, last: null, handle: event.currentTarget, frame: null };
     event.currentTarget.setPointerCapture?.(event.pointerId);
     setDragging(true);
-    document.body.setAttribute('data-verse-resizing', 'true');
+    document.body.setAttribute('data-verse-resizing', axis === 'x' ? 'true' : 'row');
   }
   function onPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
-    const start = drag.current;
-    if (!start) return;
-    // The dock grows leftward: moving the edge left by N widens it by N.
-    write(clampDockWidth(start.startWidth + (start.startX - event.clientX), windowWidth));
+    const d = drag.current;
+    if (!d) return;
+    // Both panels grow AWAY from the chat: dragging the edge left (or up) by N adds N.
+    const delta = d.start - (axis === 'x' ? event.clientX : event.clientY);
+    d.last = Math.min(max, Math.max(min, Math.round(d.startSize + delta)));
+    if (d.frame !== null) return;
+    d.frame = requestAnimationFrame(() => {
+      d.frame = null;
+      if (d.last !== null) paint(d.handle, d.last);
+    });
   }
   function end() {
+    const d = drag.current;
     drag.current = null;
     setDragging(false);
     document.body.removeAttribute('data-verse-resizing');
+    if (!d) return;
+    if (d.frame !== null) cancelAnimationFrame(d.frame);
+    if (d.last !== null) commit(d.last);
   }
-  useEffect(() => () => document.body.removeAttribute('data-verse-resizing'), []);
+  return {
+    dragging,
+    handlers: { onPointerDown, onPointerMove, onPointerUp: end, onPointerCancel: end, onLostPointerCapture: end },
+  };
+}
+
+/** The column's left edge: drag, or ←/→ (⇧ for coarse), double-click for the default. */
+function WidthHandle({ width, windowWidth, columnMax }: { width: number; windowWidth: number; columnMax: number }) {
+  const max = Math.max(DOCK_LAYOUT.minWidth, Math.min(Math.floor(windowWidth * DOCK_LAYOUT.maxWidthFraction), columnMax));
+  const { dragging, handlers } = useEdgeDrag({ axis: 'x', size: width, min: DOCK_LAYOUT.minWidth, max, cssVar: '--verse-dock-width', commit: setDockWidth });
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     const step = event.shiftKey ? KEY_STEP_COARSE : KEY_STEP;
@@ -460,45 +506,21 @@ function WidthHandle({ width, windowWidth }: { width: number; windowWidth: numbe
     else if (event.key === 'End') next = max;
     if (next === null) return;
     event.preventDefault();
-    setDockWidth(clampDockWidth(next, windowWidth));
+    setDockWidth(Math.min(max, clampDockWidth(next, windowWidth)));
   }
 
   return (
     <div className={styles.widthHandle} role="separator" aria-orientation="vertical" aria-label="Resize the dock"
       aria-valuemin={DOCK_LAYOUT.minWidth} aria-valuemax={max} aria-valuenow={Math.round(width)} tabIndex={0}
-      data-dragging={dragging || undefined}
-      onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end}
+      data-dragging={dragging || undefined} {...handlers}
       onDoubleClick={() => setDockWidth(DOCK_LAYOUT.defaultWidth)} onKeyDown={onKeyDown} />
   );
 }
 
 /** The bottom panel's top edge: drag, or ↑/↓ (⇧ for coarse), double-click for the default. */
 function HeightHandle({ height, columnHeight }: { height: number; columnHeight: number }) {
-  const drag = useRef<{ startY: number; startHeight: number } | null>(null);
-  const [dragging, setDragging] = useState(false);
-  const write = useFrameWriter(setDockHeight);
   const max = clampDockHeight(Number.MAX_SAFE_INTEGER, columnHeight);
-
-  function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    drag.current = { startY: event.clientY, startHeight: height };
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    setDragging(true);
-    document.body.setAttribute('data-verse-resizing', 'row');
-  }
-  function onPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
-    const start = drag.current;
-    if (!start) return;
-    // The panel grows upward: moving the edge up by N makes it N taller.
-    write(clampDockHeight(start.startHeight + (start.startY - event.clientY), columnHeight));
-  }
-  function end() {
-    drag.current = null;
-    setDragging(false);
-    document.body.removeAttribute('data-verse-resizing');
-  }
-  useEffect(() => () => document.body.removeAttribute('data-verse-resizing'), []);
+  const { dragging, handlers } = useEdgeDrag({ axis: 'y', size: height, min: DOCK_LAYOUT.minHeight, max, cssVar: '--verse-dock-height', commit: setDockHeight });
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     const step = event.shiftKey ? KEY_STEP_COARSE : KEY_STEP;
@@ -515,8 +537,7 @@ function HeightHandle({ height, columnHeight }: { height: number; columnHeight: 
   return (
     <div className={styles.heightHandle} role="separator" aria-orientation="horizontal" aria-label="Resize the dock"
       aria-valuemin={DOCK_LAYOUT.minHeight} aria-valuemax={max} aria-valuenow={Math.round(height)} tabIndex={0}
-      data-dragging={dragging || undefined}
-      onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end}
+      data-dragging={dragging || undefined} {...handlers}
       onDoubleClick={() => setDockHeight(DOCK_LAYOUT.defaultHeight)} onKeyDown={onKeyDown} />
   );
 }
