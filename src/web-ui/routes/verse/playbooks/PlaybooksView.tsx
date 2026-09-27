@@ -106,8 +106,8 @@ export function PlaybooksView() {
             <div className={styles.headerText}>
               <h2 className={styles.title}>Playbooks</h2>
               <p className={styles.lede}>
-                Reusable, versioned task templates. Type <code>!macro</code> in any task — chat, a goal, Run in cloud or Devin — and that lane
-                follows the playbook. Every edit is a new version, and each version shows how its runs ended.
+                Reusable, versioned task templates. Type <code>!macro</code> in a goal, a Devin chat, Run in cloud or Run in Devin — and that lane
+                follows the playbook (other chats send the text as written). Every edit is a new version, and each version shows how its runs ended.
               </p>
             </div>
             <Button variant="subtle" size="sm" icon={<IconPlus size={14} />} onClick={() => { setEditing({ mode: 'new' }); setNotice(null); }}>
