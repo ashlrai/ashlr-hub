@@ -43,6 +43,7 @@ import {
 import { CODEX_EXPANSIVE_METERING_NOTE, formatContextWindow, windowSourceText, type SessionContextBudget } from './verse-model.js';
 import { dismissVerseAdvice, isVerseAdviceDismissed } from './verse-ui-store.js';
 import { formatTokens } from './verse-readouts.js';
+import { usedPercentText } from './percent-text.js';
 import styles from './Workspace.module.css';
 
 /** Percent-of-compaction thresholds, re-exported so copy can quote them. */
@@ -123,6 +124,12 @@ export function describeContext(props: Omit<ContextMeterProps, 'variant'>): {
   const label = `${bound}${formatTokens(occ.tokens)} / ${occ.window !== null ? formatContextWindow(occ.window) : 'n/a'}`;
   const compactLabel = occ.autoCompactAt !== null ? `compacts ≈${formatTokens(occ.autoCompactAt)}` : null;
   const percent = occ.ofWindow !== null ? Math.round(occ.ofWindow * 100) : null;
+  // Printed text follows the one percent rule up to the window (99.6% is
+  // "99%", not a full-looking "100%"; 0.3% is "<1%", not "0%"). Past the
+  // window the rule's clamp would hide the overflow, so "130%" stays literal.
+  const percentText = occ.ofWindow === null
+    ? null
+    : occ.ofWindow * 100 > 100 ? `${percent}%` : usedPercentText(occ.ofWindow * 100);
   const tickPercent = occ.window !== null && occ.autoCompactAt !== null && occ.autoCompactAt < occ.window
     ? (occ.autoCompactAt / occ.window) * 100
     : null;
@@ -130,7 +137,7 @@ export function describeContext(props: Omit<ContextMeterProps, 'variant'>): {
 
   const lines: string[] = [];
   lines.push(occ.window !== null
-    ? `Context: ${bound}${exactFigure(occ.tokens)} of ${exactFigure(occ.window)} tokens (${percent}%).`
+    ? `Context: ${bound}${exactFigure(occ.tokens)} of ${exactFigure(occ.window)} tokens (${percentText}).`
     : `Context: ${bound}${exactFigure(occ.tokens)} tokens — the window is unknown, so no percentage is shown.`);
   if (!occ.exact) {
     lines.push('Upper bound: this CLI reported only the turn total so far; the exact last-call size replaces it once its session log is read.');
@@ -166,7 +173,7 @@ export function describeContext(props: Omit<ContextMeterProps, 'variant'>): {
     label,
     compactLabel,
     percent,
-    percentLabel: percent === null ? 'n/a' : `${bound}${percent}%`,
+    percentLabel: percentText === null ? 'n/a' : `${bound}${percentText}`,
     tickPercent,
     fillPercent,
     summary,

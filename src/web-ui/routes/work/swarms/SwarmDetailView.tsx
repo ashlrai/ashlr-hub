@@ -14,6 +14,7 @@ import { StatusBadge } from '../../../components/primitives/StatusBadge.js';
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
 import { SkeletonLine } from '../../../components/primitives/Skeleton.js';
 import { SwarmDag, mergeSwarmTasks } from './SwarmDag.js';
+import { usedPercentText } from '../../verse/percent-text.js';
 import styles from './SwarmDetailView.module.css';
 
 const TASK_ANCHOR_PREFIX = 'dag-task';
@@ -91,7 +92,7 @@ export function SwarmDetailView() {
           <div className={styles.burndownFill} style={{ width: `${pct}%` }} />
         </div>
         <span className={styles.burndownLabel}>
-          {done}/{total} tasks done ({pct}%)
+          {done}/{total} tasks done ({usedPercentText(total > 0 ? (done / total) * 100 : 0)})
         </span>
       </div>
 

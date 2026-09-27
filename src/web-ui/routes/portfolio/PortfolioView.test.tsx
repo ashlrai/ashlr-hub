@@ -57,6 +57,22 @@ describe('PortfolioView', () => {
     expect(screen.getByText('Effectiveness trending up')).toBeInTheDocument();
   });
 
+  it('prints goal progress by the one percent rule ("99%", "<1%"), never a rounded 100% or 0%', async () => {
+    vi.stubGlobal('fetch', mockFetch({
+      ...PORTFOLIO,
+      goalsInFlight: [
+        { ...PORTFOLIO.goalsInFlight[0]!, fractionDone: 0.996 },
+        { ...PORTFOLIO.goalsInFlight[0]!, goalId: 'goal2', objective: 'just started', fractionDone: 0.003 },
+      ],
+    }));
+    render(<PortfolioView />);
+    await waitFor(() => expect(screen.getByText('ship the chart layer')).toBeInTheDocument());
+    expect(screen.getByText('99%')).toBeInTheDocument();
+    expect(screen.getByText('<1%')).toBeInTheDocument();
+    expect(screen.queryByText('100%')).toBeNull();
+    expect(screen.queryByText('0%')).toBeNull();
+  });
+
   it('renders an honest "not available" state instead of a fake chart when portfolio is null', async () => {
     vi.stubGlobal('fetch', mockFetch(null));
     render(<PortfolioView />);

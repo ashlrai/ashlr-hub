@@ -109,6 +109,18 @@ describe('ContextMeter — a full-window track with the compaction point marked'
     expect(meter).toHaveTextContent('n/a');
   });
 
+  it('prints the percentage by the one percent rule, but never hides an overflow', () => {
+    // 99.6% of the window is "99%" — a rounded "100%" reads as full.
+    const nearlyFull = describeContext({ contextTokens: 996_000, contextWindow: 1_000_000 });
+    expect(nearlyFull.percentLabel).toBe('99%');
+    expect(nearlyFull.title).toContain('(99%).');
+    expect(nearlyFull.percent).toBe(100); // aria-valuenow stays the numeric reading
+    // A real reading under 1% is "<1%", not an untouched-looking "0%".
+    expect(describeContext({ contextTokens: 3_000, contextWindow: 1_000_000 }).percentLabel).toBe('<1%');
+    // Past the window the rule's clamp would say "100%"; the literal overflow stays.
+    expect(describeContext({ contextTokens: 1_300_000, contextWindow: 1_000_000 }).percentLabel).toBe('130%');
+  });
+
   it('names the window source, the mode and the compaction count in the tooltip', () => {
     const d = describeContext({ contextTokens: 100_000, contextWindow: 1_000_000, autoCompactAt: 967_000, mode: 'expansive', engine: 'claude', source: 'runtime', compactionCount: 3 });
     expect(d.title).toContain('Context: 100,000 of 1,000,000 tokens (10%).');

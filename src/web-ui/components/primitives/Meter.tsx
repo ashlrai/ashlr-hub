@@ -15,6 +15,7 @@
  * never a full bar, never zero (DESIGN.md §7).
  */
 import type { ReactNode } from 'react';
+import { usedPercentText } from '../../routes/verse/percent-text.js';
 import styles from './Meter.module.css';
 
 export type MeterTone = 'accent' | 'neutral' | 'running' | 'warning' | 'danger' | 'engine';
@@ -72,7 +73,10 @@ export function Meter({
       aria-valuenow={known ? Math.round(percent) : undefined}
       aria-valuemin={0}
       aria-valuemax={100}
-      aria-valuetext={known ? `${Math.round(percent)}%` : 'unknown'}
+      // The spoken value follows the one percent rule: a 99.6% meter must not
+      // announce "100%" (spent) nor a 0.3% one "0%" (untouched). aria-valuenow
+      // stays the plain numeric reading, as ARIA requires a number there.
+      aria-valuetext={known ? usedPercentText(percent) : 'unknown'}
       {...aria}
     >
       <div

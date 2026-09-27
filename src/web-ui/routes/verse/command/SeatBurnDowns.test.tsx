@@ -199,6 +199,17 @@ describe('SeatBurnCard', () => {
     expect(svgTexts(container).some((l) => l.startsWith('Resets'))).toBe(false);
   });
 
+  it('what is left follows the one percent rule; the axis ticks stay whole', () => {
+    // 0.4% left is "<1% left" — a rounded "0% left" reads as spent.
+    const { container, unmount } = render(<SeatBurnCard burn={burn({ window: 'weekly', points: [{ t: NOW, remaining: 0.4 }] })} now={NOW} width={320} />);
+    expect(screen.getByText(/<1% left · reset time not reported/)).toBeInTheDocument();
+    expect(percentTicks(container)).toEqual({ min: 0, max: 100 });
+    unmount();
+    // 99.6% left is "99% left", not a never-touched "100% left".
+    render(<SeatBurnCard burn={burn({ window: 'weekly', points: [{ t: NOW, remaining: 99.6 }] })} now={NOW} width={320} />);
+    expect(screen.getByText(/99% left · reset time not reported/)).toBeInTheDocument();
+  });
+
   it('no machine reset and no words: says the reset was not reported', () => {
     render(<SeatBurnCard burn={burn({ window: 'weekly', points: [{ t: NOW, remaining: 46 }] })} now={NOW} width={320} />);
     expect(screen.getByText(/46% left · reset time not reported · Autonomy may use it now/)).toBeInTheDocument();

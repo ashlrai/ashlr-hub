@@ -64,4 +64,22 @@ describe('GoalsView', () => {
     // the milestones array — shown as its own line, not fabricated onto a title.
     expect(screen.getByText('m_abc123')).toBeInTheDocument();
   });
+
+  it('labels a goal 99.6% through as "99%", never a finished-looking "100%"', async () => {
+    const almost = [{ ...GOALS[0]!, progress: { ...GOALS[0]!.progress, fractionDone: 0.996 } }];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.startsWith('/api/goals')) return new Response(JSON.stringify(almost), { status: 200 });
+      if (url.startsWith('/api/vision/mission')) return new Response(JSON.stringify(MISSION), { status: 200 });
+      return new Response('not found', { status: 404 });
+    }));
+    render(
+      <MemoryRouter>
+        <GoalsView />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText('Ship the operator console')).toBeInTheDocument());
+    expect(screen.getByText('99%')).toBeInTheDocument();
+    expect(screen.queryByText('100%')).toBeNull();
+  });
 });
