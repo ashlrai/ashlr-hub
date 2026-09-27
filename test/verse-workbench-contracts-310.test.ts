@@ -179,6 +179,8 @@ const EXPECTED_HANDLERS: Record<WorkbenchRouteFamilyId, string> = {
   checkpoints: 'handleCheckpointsApi',
   // 3.15: open a cited source file in the editor.
   sources: 'handleSourcesApi',
+  // 3.15: the Fleet tab's control surface (Start / Pause / Stop, steering).
+  'fleet-control': 'handleFleetControlApi',
 };
 
 const allPrefixes = WORKBENCH_ROUTE_FAMILIES.flatMap((family) => family.prefixes.map((prefix) => ({ family: family.id, prefix })));
