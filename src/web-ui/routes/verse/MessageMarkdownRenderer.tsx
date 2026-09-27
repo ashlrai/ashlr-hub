@@ -9,6 +9,12 @@
  * Markdown never reaches the DOM unsanitized, links open in a new tab with
  * rel=noopener, and no script/style/handler attributes survive.
  *
+ * TERMINAL LINKS (3.15). The one app scheme a message may link is
+ * `verse://terminal/<tabId>[/<blockId>]` (shell/deep-link.ts
+ * parseTerminalLink): a click opens that terminal tab in the app (the shell's
+ * terminal handler, shell/open-terminal-request.ts) instead of navigating.
+ * Any other `verse:` href loses its href.
+ *
  * STREAMING (V3.10). The old bubble re-ran marked + DOMPurify over the WHOLE
  * accumulated text on every token and replaced the bubble's innerHTML — a
  * 27 KB reply cost 6–19 s of main thread in jsdom, 93% of it DOMPurify.
@@ -29,6 +35,8 @@ import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import { useEffect, useMemo, useRef, type MouseEvent } from 'react';
 import { appendInlineText, codeLanguage, splitStreamingBlocks } from './markdown-stream.js';
+import { parseTerminalLink } from './shell/deep-link.js';
+import { requestOpenTerminal } from './shell/open-terminal-request.js';
 import styles from './Transcript.module.css';
 
 let hooked = false;
@@ -37,15 +45,32 @@ function ensureHooks(): void {
   hooked = true;
   DOMPurify.addHook('afterSanitizeAttributes', (node) => {
     if (node.tagName === 'A') {
+      const href = node.getAttribute('href');
+      if (href !== null && /^\s*verse:/i.test(href)) {
+        // An in-app terminal link stays in the app; any other verse: href
+        // (the URI allow-list is case-insensitive) is not a link at all.
+        if (parseTerminalLink(href)) node.setAttribute('data-verse-terminal', '');
+        else node.removeAttribute('href');
+        node.removeAttribute('target');
+        return;
+      }
       node.setAttribute('target', '_blank');
       node.setAttribute('rel', 'noopener noreferrer');
     }
   });
 }
 
+/**
+ * DOMPurify's default URI allow-list (3.x IS_ALLOWED_URI) plus exactly one app
+ * link shape: `verse://terminal/<tabId>[/<blockId>]`.
+ */
+const ALLOWED_URI =
+  /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix):|verse:\/\/terminal\/t-[a-z0-9]{1,32}(?:\/b-\d{1,9})?\/?$|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i;
+
 const SANITIZE: Parameters<typeof DOMPurify.sanitize>[1] = {
   USE_PROFILES: { html: true },
   ADD_ATTR: ['target'],
+  ALLOWED_URI_REGEXP: ALLOWED_URI,
   FORBID_TAGS: ['style', 'form', 'input', 'button', 'iframe', 'object', 'embed'],
 };
 
@@ -83,6 +108,23 @@ function decorateCodeBlocks(node: HTMLElement): void {
 
     pre.prepend(head);
   }
+}
+
+/** A click on a `verse://terminal/…` link opens the tab in the app; never navigates. True when handled. */
+function onTerminalLinkClick(event: MouseEvent<HTMLDivElement>): boolean {
+  const target = event.target as HTMLElement | null;
+  const anchor = target?.closest?.<HTMLAnchorElement>('a[href]');
+  if (!anchor) return false;
+  const link = parseTerminalLink(anchor.getAttribute('href') ?? '');
+  if (!link) return false;
+  event.preventDefault();
+  requestOpenTerminal({ tabId: link.tabId, blockId: link.blockId });
+  return true;
+}
+
+function onMarkdownClick(event: MouseEvent<HTMLDivElement>): void {
+  if (onTerminalLinkClick(event)) return;
+  onCopyClick(event);
 }
 
 function onCopyClick(event: MouseEvent<HTMLDivElement>): void {
@@ -165,7 +207,7 @@ function StreamingMarkdown({ text }: { text: string }) {
     }
   }, [split, doneHtml]);
 
-  return <div ref={root} className={`${styles.markdown} ${styles.streaming}`} onClick={onCopyClick} data-markdown-streaming="" />;
+  return <div ref={root} className={`${styles.markdown} ${styles.streaming}`} onClick={onMarkdownClick} data-markdown-streaming="" />;
 }
 
 function FinalMarkdown({ text }: { text: string }) {
@@ -184,7 +226,7 @@ function FinalMarkdown({ text }: { text: string }) {
     <div
       ref={root}
       className={styles.markdown}
-      onClick={onCopyClick}
+      onClick={onMarkdownClick}
       // Sanitized above — DOMPurify with the html profile, no raw model HTML.
       dangerouslySetInnerHTML={{ __html: html }}
     />

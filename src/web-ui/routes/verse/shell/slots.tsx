@@ -65,6 +65,14 @@ export interface TerminalOpenRequest {
   model?: string;
   /** Preview's dev-server Start: the server to run in the new tab. */
   devServerId?: string;
+  /**
+   * 3.15: focus this existing tab (a `verse://terminal/<tab>/<block>` link, a
+   * notification click, a Needs-you row) and, with `blockId`, show that block.
+   */
+  tabId?: string;
+  blockId?: string;
+  /** 3.15: open the launch-configuration dialog (the palette's "Launch terminal configuration…"). */
+  launch?: boolean;
 }
 
 /** Open the Preview pane on a loopback URL, a chat artifact, or a dev server. */

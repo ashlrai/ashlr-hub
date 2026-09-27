@@ -36,7 +36,10 @@
  * system-wide hotkey arrive through app/desktop-shell.ts
  * `subscribeShellCommands` — the one web seam to the desktop app — already
  * parsed by the catalog: `open-needs-you`, `new-chat`, `focus-composer`,
- * `open-session:<id>` (and the 3.9 menu's two). Anchors ("go to that card")
+ * `open-session:<id>`, `open-terminal:<tab>[/<block>]` (and the 3.9 menu's
+ * two). Every pointer at a terminal tab — that command, a `?terminal=` link,
+ * a `verse://terminal/…` link in chat, a Needs-you row — arrives as one
+ * request (shell/open-terminal-request.ts) served by a lazy chunk. Anchors ("go to that card")
  * arrive as VERSE_ANCHOR_EVENT and are revealed by shell/reveal-anchor.ts
  * (listened for by shell/anchor-requests.ts).
  */
@@ -65,6 +68,8 @@ import type { WarmupOptions } from './shell/warmup.js';
 import { useVerseUi } from './useVerseUi.js';
 import { useFocusMode } from './shell/focus-mode.js';
 import { openPaneInChat } from './dock/dock-store.js';
+// Only the event name: validation and the handler are the lazy open-terminal chunk.
+import { VERSE_OPEN_TERMINAL_EVENT } from './shell/open-terminal-event.js';
 // rail-icons, not verse-icons: only the rail's glyphs belong in first paint.
 import { GearIcon, NeedsYouIcon, RAIL_ICON, VerseMark } from './rail-icons.js';
 import {
@@ -334,6 +339,10 @@ export function VerseApp() {
           openWorkbenchLink(command.sessionId, command.paneId);
           return;
         }
+        if (command.kind === 'open-terminal') {
+          window.dispatchEvent(new CustomEvent(VERSE_OPEN_TERMINAL_EVENT, { detail: { tabId: command.tabId, blockId: command.blockId } }));
+          return;
+        }
         // The tray's "New chat" and the hotkey's "focus the composer" must
         // land in the composer: an open palette or shortcuts sheet would keep
         // focus (and every key) for itself. The drawer opener, the theme and
@@ -343,13 +352,28 @@ export function VerseApp() {
       }),
     [],
   );
-  // A link into the workbench (?chat=…&pane=…): opened once, then stripped
-  // from the address bar. The parser loads only when the URL carries one.
+  // "Open this terminal tab", from wherever (see the header): the handler —
+  // the tab's chat, the Terminal pane, the block — is its own chunk.
   useEffect(() => {
-    if (typeof window === 'undefined' || !/[?&](?:chat|pane)=/.test(window.location.search)) return;
+    function onRequest(event: Event): void {
+      const request: unknown = (event as CustomEvent<unknown>).detail;
+      void import('./shell/open-terminal.js').then(
+        ({ openTerminalTarget }) => openTerminalTarget(request, { toast: toast.show }),
+        (err) => console.error('[verse] terminal link failed to load', err),
+      );
+    }
+    window.addEventListener(VERSE_OPEN_TERMINAL_EVENT, onRequest);
+    return () => window.removeEventListener(VERSE_OPEN_TERMINAL_EVENT, onRequest);
+  }, [toast]);
+  // A link into the workbench (?chat=…&pane=…, ?terminal=…&block=…): opened
+  // once, then stripped from the address bar. The parser loads only when the
+  // URL carries one.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !/[?&](?:chat|pane|terminal)=/.test(window.location.search)) return;
     void import('./shell/deep-link.js').then(({ consumeDeepLink }) => {
       const link = consumeDeepLink();
-      if (link) openWorkbenchLink(link.sessionId, link.paneId);
+      if (link?.terminal) window.dispatchEvent(new CustomEvent(VERSE_OPEN_TERMINAL_EVENT, { detail: { ...link.terminal, sessionId: link.sessionId } }));
+      else if (link) openWorkbenchLink(link.sessionId, link.paneId);
     }, () => undefined);
   }, []);
   // "Go to that card": whoever raises it (drawer, Command, Mind), the shell reveals it.

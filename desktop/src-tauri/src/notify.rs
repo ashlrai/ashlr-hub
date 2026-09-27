@@ -7,10 +7,13 @@
 //!   * "Finished: N chats" — several ended in one poll (one banner, not a burst),
 //!   * "Needs you: N new" — new items in the Needs-you drawer, described by
 //!     CATEGORY COUNTS only ("2 approvals · 1 fleet decision"),
+//!   * terminal (3.15): "Command finished · exit 1 · 2m14s", "Claude Code
+//!     needs you", "Codex finished" — body the tab's title; several in one
+//!     poll become one ("3 terminal commands finished"),
 //!   * seat health — `health_watch` renders that text from its own templates.
 //!
-//! The only server-supplied text that can reach a banner is a chat title, and
-//! it passes [`sanitize_title`] first: control and bidi-override characters are
+//! The only server-supplied text that can reach a banner is a chat or
+//! terminal tab title, and it passes [`sanitize_title`] first: control and bidi-override characters are
 //! stripped (a title cannot fake a line break or flip "Finished" into
 //! something else visually) and it is capped at [`TITLE_MAX_CHARS`]. Needs-you
 //! item titles are producer text (Track B, other chats) and never appear.
@@ -23,7 +26,7 @@
 //! CLICKS: `tauri-plugin-notification` cannot report a click on desktop. So
 //! each banner ARMS a [`PendingClick`]; if the window regains focus within
 //! [`CLICK_WINDOW`] (which is what clicking a banner does), Rust sends the page
-//! `open-session:<id>` or `open-needs-you`. Focus regained for another reason
+//! `open-session:<id>`, `open-needs-you` or `open-terminal:<tab>[/<block>]`. Focus regained for another reason
 //! inside that window also navigates — the documented trade the spec accepts.
 //!
 //! HOW: a Developer ID–signed bundle uses the plugin (Ashlr's icon, grouped
@@ -49,6 +52,11 @@ pub const THROTTLE_MAX: usize = 6;
 pub const THROTTLE_WINDOW: Duration = Duration::from_secs(60);
 /// What a title that sanitizes down to nothing is called.
 const UNTITLED: &str = "Untitled chat";
+/// …and a terminal tab's.
+const UNTITLED_TERMINAL: &str = "Terminal";
+/// A finished command shorter than this is not news (the server only reports
+/// longer ones; this is the shell's own guard).
+pub const COMMAND_MIN_MS: u64 = 30_000;
 
 // ── title sanitizer ──────────────────────────────────────────────────────────
 
@@ -75,6 +83,11 @@ fn is_invisible_format(c: char) -> bool {
 /// whitespace collapsed to single spaces, at most [`TITLE_MAX_CHARS`]
 /// characters (an ellipsis marks a cut), never empty.
 pub fn sanitize_title(raw: &str) -> String {
+    sanitize_label(raw, UNTITLED)
+}
+
+/// [`sanitize_title`] with the name an empty result gets.
+fn sanitize_label(raw: &str, fallback: &str) -> String {
     let mut out = String::with_capacity(raw.len().min(TITLE_MAX_CHARS * 4));
     let mut pending_space = false;
     for c in raw.chars() {
@@ -94,7 +107,7 @@ pub fn sanitize_title(raw: &str) -> String {
         out.push(c);
     }
     if out.is_empty() {
-        return UNTITLED.to_string();
+        return fallback.to_string();
     }
     if out.chars().count() > TITLE_MAX_CHARS {
         let mut cut: String = out.chars().take(TITLE_MAX_CHARS - 1).collect();
@@ -121,11 +134,35 @@ pub fn is_valid_session_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// A terminal tab id the page accepts in `open-terminal:` — `t-` and 1–32 of
+/// `[a-z0-9]` (the server's `VERSE_TERMINAL_AGENT_STATE_PATH_RE` shape).
+pub fn is_valid_terminal_tab_id(id: &str) -> bool {
+    id.strip_prefix("t-").is_some_and(|rest| {
+        (1..=32).contains(&rest.len())
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    })
+}
+
+/// A command block id the page accepts: `b-` and 1–9 digits.
+pub fn is_valid_terminal_block_id(id: &str) -> bool {
+    id.strip_prefix("b-").is_some_and(|rest| {
+        (1..=9).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
 /// Where a clicked banner takes the operator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClickTarget {
     Session(String),
     NeedsYou,
+    /// A terminal tab (its chat, the Terminal pane), and optionally one of its
+    /// command blocks.
+    Terminal {
+        tab_id: String,
+        block_id: Option<String>,
+    },
 }
 
 impl ClickTarget {
@@ -134,11 +171,30 @@ impl ClickTarget {
         is_valid_session_id(id).then(|| Self::Session(id.to_string()))
     }
 
+    /// `None` for a tab id the page would refuse; a block id it would refuse
+    /// is dropped (the tab still opens).
+    pub fn terminal(tab_id: &str, block_id: Option<&str>) -> Option<Self> {
+        is_valid_terminal_tab_id(tab_id).then(|| Self::Terminal {
+            tab_id: tab_id.to_string(),
+            block_id: block_id
+                .filter(|b| is_valid_terminal_block_id(b))
+                .map(str::to_string),
+        })
+    }
+
     /// The desktop command (`ashlr:desktop-command`) this target sends.
     pub fn command(&self) -> String {
         match self {
             Self::Session(id) => format!("open-session:{id}"),
             Self::NeedsYou => "open-needs-you".to_string(),
+            Self::Terminal {
+                tab_id,
+                block_id: Some(block),
+            } => format!("open-terminal:{tab_id}/{block}"),
+            Self::Terminal {
+                tab_id,
+                block_id: None,
+            } => format!("open-terminal:{tab_id}"),
         }
     }
 }
@@ -251,7 +307,7 @@ impl NeedsYouCounts {
             "approval" | "owner-lane-pr" | "class-c" => self.approvals += 1,
             "veto-window" | "leader-question" | "owner-hold" | "quarantine" | "revert"
             | "grant" | "kill" => self.fleet += 1,
-            "chat-failed" | "queue-held" => self.chats += 1,
+            "chat-failed" | "queue-held" | "agent-waiting" => self.chats += 1,
             "reconnect" | "repin" => self.accounts += 1,
             _ => self.other += 1,
         }
@@ -307,6 +363,32 @@ pub enum Notice {
         title: String,
         body: String,
     },
+    /// A long terminal command finished (3.15). `title` is the TAB's title,
+    /// never the command line (it can hold a secret).
+    TerminalCommand {
+        tab_id: String,
+        block_id: Option<String>,
+        title: String,
+        exit_code: Option<i64>,
+        duration_ms: u64,
+    },
+    /// A CLI agent in a terminal tab went idle, or needs the operator.
+    TerminalAgent {
+        tab_id: String,
+        title: String,
+        /// `claude-code` | `codex` | `devin` | `grok`; anything else is "Agent".
+        agent: Option<String>,
+        needs_you: bool,
+    },
+    /// Several terminal events in one poll. `focus` is what a click opens: the
+    /// newest agent that needs you, else the newest failed command, else the
+    /// newest event.
+    Terminal {
+        commands: usize,
+        agents_finished: usize,
+        agents_waiting: usize,
+        focus: Option<ClickTarget>,
+    },
 }
 
 /// A banner ready for the OS.
@@ -331,6 +413,32 @@ pub fn turn_duration(ms: u64) -> String {
         format!("{h}h {m:02}m")
     } else {
         format!("{m}m {s:02}s")
+    }
+}
+
+/// "45s", "2m14s", "1h03m" — how long a terminal command ran (compact: it
+/// shares the banner title with the exit code).
+pub fn command_duration(ms: u64) -> String {
+    let secs = ms / 1000;
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}h{m:02}m")
+    } else {
+        format!("{m}m{s:02}s")
+    }
+}
+
+/// The operator's name for a terminal agent (the server's `TERMINAL_AGENT_LABEL`).
+pub fn agent_label(agent: Option<&str>) -> &'static str {
+    match agent {
+        Some("claude-code") => "Claude Code",
+        Some("codex") => "Codex",
+        Some("devin") => "Devin",
+        Some("grok") => "Grok",
+        _ => "Agent",
     }
 }
 
@@ -398,6 +506,79 @@ pub fn render(notice: &Notice) -> Rendered {
             // Account problems are fixed from the drawer's Accounts split.
             click: Some(ClickTarget::NeedsYou),
         },
+        Notice::TerminalCommand {
+            tab_id,
+            block_id,
+            title,
+            exit_code,
+            duration_ms,
+        } => Rendered {
+            title: match exit_code {
+                Some(code) => format!(
+                    "Command finished · exit {code} · {}",
+                    command_duration(*duration_ms)
+                ),
+                None => format!("Command finished · {}", command_duration(*duration_ms)),
+            },
+            body: sanitize_label(title, UNTITLED_TERMINAL),
+            click: ClickTarget::terminal(tab_id, block_id.as_deref()),
+        },
+        Notice::TerminalAgent {
+            tab_id,
+            title,
+            agent,
+            needs_you,
+        } => Rendered {
+            title: format!(
+                "{} {}",
+                agent_label(agent.as_deref()),
+                if *needs_you { "needs you" } else { "finished" }
+            ),
+            body: sanitize_label(title, UNTITLED_TERMINAL),
+            click: ClickTarget::terminal(tab_id, None),
+        },
+        Notice::Terminal {
+            commands,
+            agents_finished,
+            agents_waiting,
+            focus,
+        } => {
+            let parts: Vec<String> = [
+                (*agents_waiting, "agent needs you", "agents need you"),
+                (*agents_finished, "agent finished", "agents finished"),
+                (*commands, "command finished", "commands finished"),
+            ]
+            .iter()
+            .filter(|(n, _, _)| *n > 0)
+            .map(|(n, one, many)| plural(*n, one, many))
+            .collect();
+            let (title, body) = if parts.len() == 1 && *commands > 0 {
+                // Only commands: say where they ran.
+                (
+                    plural(
+                        *commands,
+                        "terminal command finished",
+                        "terminal commands finished",
+                    ),
+                    "Open Ashlr to review them.".to_string(),
+                )
+            } else if parts.len() == 1 {
+                (parts[0].clone(), "Open Ashlr to review them.".to_string())
+            } else {
+                (
+                    format!(
+                        "Terminal: {} updates",
+                        commands + agents_finished + agents_waiting
+                    ),
+                    parts.join(" · "),
+                )
+            };
+            Rendered {
+                title,
+                body,
+                click: focus.clone(),
+            }
+        }
     }
 }
 
@@ -827,6 +1008,7 @@ mod tests {
             "kill",
             "chat-failed",
             "queue-held",
+            "agent-waiting",
             "reconnect",
             "repin",
         ] {
@@ -881,5 +1063,174 @@ mod tests {
         assert_eq!(delivery_for(Signing::Unknown, false), Delivery::Native);
         assert_eq!(Delivery::Native.wire_name(), "native");
         assert_eq!(Delivery::Script.wire_name(), "script");
+    }
+
+    // ── terminal (3.15) ──────────────────────────────────────────────────────
+
+    #[test]
+    fn terminal_click_targets_match_the_pages_regexes() {
+        assert_eq!(
+            ClickTarget::terminal("t-abc123", Some("b-42")).map(|t| t.command()),
+            Some("open-terminal:t-abc123/b-42".to_string())
+        );
+        assert_eq!(
+            ClickTarget::terminal("t-abc123", None).map(|t| t.command()),
+            Some("open-terminal:t-abc123".to_string())
+        );
+        // A block the page would refuse is dropped; the tab still opens.
+        for bad_block in ["b-", "b-x", "B-1", "b-1234567890", "b-1/../x", "1"] {
+            assert_eq!(
+                ClickTarget::terminal("t-a", Some(bad_block)).map(|t| t.command()),
+                Some("open-terminal:t-a".to_string()),
+                "{bad_block:?}"
+            );
+        }
+        let long = format!("t-{}", "a".repeat(33));
+        for bad_tab in [
+            "",
+            "t-",
+            "T-a",
+            "t-A",
+            "tab-1",
+            "t-a b",
+            "t-a/b",
+            "t-a\nopen-needs-you",
+            long.as_str(),
+        ] {
+            assert_eq!(
+                ClickTarget::terminal(bad_tab, Some("b-1")),
+                None,
+                "{bad_tab:?}"
+            );
+        }
+        assert!(is_valid_terminal_tab_id(&format!("t-{}", "z9".repeat(16))));
+    }
+
+    #[test]
+    fn command_durations_are_compact() {
+        assert_eq!(command_duration(0), "0s");
+        assert_eq!(command_duration(45_000), "45s");
+        assert_eq!(command_duration(59_999), "59s");
+        assert_eq!(command_duration(60_000), "1m00s");
+        assert_eq!(command_duration(134_000), "2m14s");
+        assert_eq!(command_duration(3_780_000), "1h03m");
+        assert_eq!(command_duration(36_000_000), "10h00m");
+    }
+
+    #[test]
+    fn a_finished_command_names_its_exit_code_and_duration_never_the_command() {
+        let r = render(&Notice::TerminalCommand {
+            tab_id: "t-1".into(),
+            block_id: Some("b-9".into()),
+            title: "ashlr-hub\n\u{202e}npm test".into(),
+            exit_code: Some(1),
+            duration_ms: 134_000,
+        });
+        assert_eq!(r.title, "Command finished · exit 1 · 2m14s");
+        assert_eq!(r.body, "ashlr-hub npm test");
+        assert_eq!(r.click, ClickTarget::terminal("t-1", Some("b-9")));
+        assert_eq!(r.click.unwrap().command(), "open-terminal:t-1/b-9");
+
+        let r = render(&Notice::TerminalCommand {
+            tab_id: "t-1".into(),
+            block_id: None,
+            title: "".into(),
+            exit_code: None,
+            duration_ms: 45_000,
+        });
+        assert_eq!(r.title, "Command finished · 45s");
+        assert_eq!(r.body, "Terminal", "an empty tab title gets a name");
+
+        let r = render(&Notice::TerminalCommand {
+            tab_id: "bad id".into(),
+            block_id: None,
+            title: "x".into(),
+            exit_code: Some(0),
+            duration_ms: 3_780_000,
+        });
+        assert_eq!(r.title, "Command finished · exit 0 · 1h03m");
+        assert_eq!(
+            r.click, None,
+            "a tab id the page would refuse is not clickable"
+        );
+    }
+
+    #[test]
+    fn agents_are_named_the_way_the_app_names_them() {
+        for (agent, label) in [
+            (Some("claude-code"), "Claude Code"),
+            (Some("codex"), "Codex"),
+            (Some("devin"), "Devin"),
+            (Some("grok"), "Grok"),
+            (Some("gpt-9"), "Agent"),
+            (None, "Agent"),
+        ] {
+            let needs = render(&Notice::TerminalAgent {
+                tab_id: "t-2".into(),
+                title: "binshield".into(),
+                agent: agent.map(str::to_string),
+                needs_you: true,
+            });
+            assert_eq!(needs.title, format!("{label} needs you"));
+            assert_eq!(needs.body, "binshield");
+            assert_eq!(needs.click.unwrap().command(), "open-terminal:t-2");
+            let idle = render(&Notice::TerminalAgent {
+                tab_id: "t-2".into(),
+                title: "binshield".into(),
+                agent: agent.map(str::to_string),
+                needs_you: false,
+            });
+            assert_eq!(idle.title, format!("{label} finished"));
+        }
+    }
+
+    #[test]
+    fn a_burst_of_terminal_events_is_one_banner() {
+        let focus = ClickTarget::terminal("t-3", None);
+        let r = render(&Notice::Terminal {
+            commands: 3,
+            agents_finished: 0,
+            agents_waiting: 0,
+            focus: focus.clone(),
+        });
+        assert_eq!(r.title, "3 terminal commands finished");
+        assert_eq!(r.body, "Open Ashlr to review them.");
+        assert_eq!(r.click, focus);
+
+        let r = render(&Notice::Terminal {
+            commands: 0,
+            agents_finished: 0,
+            agents_waiting: 3,
+            focus: None,
+        });
+        assert_eq!(r.title, "3 agents need you");
+
+        let r = render(&Notice::Terminal {
+            commands: 0,
+            agents_finished: 4,
+            agents_waiting: 0,
+            focus: None,
+        });
+        assert_eq!(r.title, "4 agents finished");
+
+        let r = render(&Notice::Terminal {
+            commands: 2,
+            agents_finished: 1,
+            agents_waiting: 1,
+            focus: None,
+        });
+        assert_eq!(r.title, "Terminal: 4 updates");
+        assert_eq!(
+            r.body,
+            "1 agent needs you · 1 agent finished · 2 commands finished"
+        );
+    }
+
+    #[test]
+    fn an_agent_waiting_item_counts_as_a_chat() {
+        let mut c = NeedsYouCounts::default();
+        c.add_kind("agent-waiting");
+        assert_eq!(c.chats, 1);
+        assert_eq!(c.describe(), "1 chat");
     }
 }
