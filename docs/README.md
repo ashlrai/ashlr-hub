@@ -29,8 +29,10 @@ that every integration, provider or autonomous effect is active.
 | Cut a release and publish without CI | [Releasing locally](RELEASING-LOCALLY.md) |
 | See what multi-folder workspaces, GitHub and MCP management still need | [Workspaces build contract](VERSE-WORKSPACES.md) |
 | Read a Verse chat's context meter, choose standard or expansive context, and continue a long session in a fresh chat | [Verse context windows — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-CONTEXT.md) |
-| Use the Verse workbench: Command, Fleet, Growth, Mind and Chat, the Needs-you drawer, terminal, preview, review, budget modes and account health | [Ashlr Verse — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) |
-| Understand the standing authority design and the currently dormant activation path | [Standing authority — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md) |
+| Use the Verse workbench: Command, Fleet, Growth and Lessons, Mind, Chat, the Needs-you and Resources drawers, the repo wiki, ⌘K, budget modes and account health | [Ashlr Verse — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) |
+| Talk to the Leader from Verse, Telegram or the CLI: directives, answers, approvals, check-ins | [The Leader — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md) |
+| Hand work to Claude Code cloud sessions or Devin, and triage what they deliver | [Cloud lane — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md) · [Devin — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md) |
+| Understand the standing authority design, and turn autonomy on under a grant that starts in shadow | [Standing authority — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md) · [Current activation state](AUTONOMY-GAP.md#current-activation-state-315) |
 | Find a Verse route family, its gates and wire shapes | [Verse build contract — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-CONTRACT-V1.md#v310-additive-contract--the-workbench-and-the-autonomy-console) |
 
 The CLI's `universe help`, `resources pool --help` and `runtime help` describe

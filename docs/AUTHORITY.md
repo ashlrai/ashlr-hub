@@ -1,4 +1,4 @@
-# Autonomy authority (3.10)
+# Autonomy authority
 
 This is the owner's contract for what the ashlr fleet may do on its own, who can
 change that, how to stop it, and what is still exposed. The grant format, the
@@ -10,6 +10,17 @@ The code lives in `src/core/authority/`, the CLI is `ashlr authority`, and the
 Verse Command bar uses `/api/verse/authority`. Every path named here is a Tier-1
 protected path. The fleet can never change one, and `.github/CODEOWNERS`
 requires the owner's review on GitHub as well.
+
+**Current state (3.15).** Autonomy is built and ships dormant. It runs only
+after you install custody, sign a standing grant with Touch ID and start the
+resident daemon yourself (`ashlr authority resident start`). A grant starts on
+the **shadow** stage, where every proposal goes through the gates and nothing
+merges. On the maintainer's Mac a grant is active and the ladder is at shadow;
+the dated details, and what is left to do, are in
+[AUTONOMY-GAP.md](AUTONOMY-GAP.md#current-activation-state-315). Devin PRs
+are shadow-only at every stage ([DEVIN.md](DEVIN.md)). You can talk to the
+Leader and set directives ([LEADER.md](LEADER.md)), but nothing said in that
+conversation widens the grant.
 
 ## 1. The model
 
@@ -129,7 +140,11 @@ step's command to copy.
    another required check covers them. It also blocks force-push and deletion and requires
    code-owner review on protected paths.
    **The repository admin role (you) may bypass the ruleset; the App may
-   not.**
+   not.** A private repository on GitHub's free plan cannot have rulesets or
+   branch protection. New grants use **local enforcement** there, with the
+   App's `ashlr/verify` and lower compiled caps (low risk, 4 files / 150
+   lines, 4 merges a day); `status` and `setup` explain the mismatch for an
+   older grant, and re-approving switches it.
 8. **Canary repo.** Setup creates `ashlrai/fleet-canary` and its CI workflow
    using your own `gh` auth, because the App cannot write workflows.
 9. **Old activation state.** Setup moves `~/.ashlr/activation`, which holds
@@ -143,9 +158,18 @@ step's command to copy.
 11. **First grant.** You sign the first grant (Touch ID). If you agree, setup
     then sets the switch to Autonomous; the ladder starts in shadow.
 
-Your only recurring action after setup is one Touch ID per 30-day grant, or
-after a deploy that changes authority code (`ashlr authority re-approve`, or
-the Command bar). Re-approval continues from the rung you had reached.
+12. **Resident daemon.** In your own terminal, `ashlr authority resident
+    start`. It refuses agents, a dirty build, Stop, the switch at Off and an
+    inactive grant, shows the release, plist and daily budget, and asks you
+    to confirm. Setup never does this step for you
+    ([RESIDENT-RUNTIME.md](RESIDENT-RUNTIME.md)).
+
+Your recurring actions after setup are one Touch ID per 30-day grant, and one
+after installing a release that changes authority code (`ashlr authority
+re-approve`, or the Command bar), followed by `ashlr authority resident stop`
+and `start` so the daemon runs that release. Re-approval continues from the
+rung you had reached. `ashlr authority resident status` shows when the
+installed plist has drifted from config.
 
 ## 5. What is protected, and how the list stays honest
 

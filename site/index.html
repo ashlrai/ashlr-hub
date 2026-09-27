@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="description" content="Ashlr Verse is an operator console for coding agents across your signed-in CLI seats, local models and Claude cloud sessions. Available on macOS, Windows and Linux.">
+<meta name="description" content="Ashlr Verse is an operator console for coding agents: Claude Code, Codex, Grok and local seats in one workbench, Claude cloud and Devin lanes, a Leader you can talk to, and a fleet that merges only inside a scope you sign.">
 <meta name="color-scheme" content="light dark">
 <link rel="canonical" href="https://verse.ashlr.ai/">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='54 55 146 146'%3E%3Cpath fill='%231A2B3C' d='M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z'/%3E%3Cpath fill='%232563EB' d='M110 121H143L133 152H120Z'/%3E%3C/svg%3E">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://verse.ashlr.ai/">
 <meta property="og:title" content="Ashlr Verse">
-<meta property="og:description" content="Run supported CLI seats and local models from one console, with Claude cloud sessions when your subscription window runs out.">
+<meta property="og:description" content="Every coding agent in one console, a Leader you can talk to in Verse, Telegram or the terminal, and autonomy that starts in shadow under a grant you sign.">
 <meta name="twitter:card" content="summary_large_image">
 <style>
   html { -webkit-text-size-adjust: 100%; }
@@ -234,6 +234,52 @@
   footer p { margin: 0; color: var(--faint); font-size: var(--step--1); font-family: var(--f-mono); }
   footer a { color: var(--muted); text-decoration: none; font-size: var(--step--1); }
   footer a:hover { color: var(--ink); }
+  /* 3.15: conversation, ladder, gates */
+  .convo { padding: 0; overflow: hidden; }
+  .convo-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 16px; padding: 12px 16px; border-bottom: 1px solid var(--line-soft); background: var(--surface-2); font-family: var(--f-mono); font-size: var(--step--1); color: var(--muted); }
+  .convo-head b { color: var(--ink); font-weight: 500; }
+  .thread { padding: 16px; display: grid; gap: 14px; }
+  .msg { display: grid; gap: 5px; max-width: 58ch; }
+  .msg.me { justify-self: end; text-align: left; }
+  .msg .who { display: flex; align-items: center; gap: 8px; font-family: var(--f-mono); font-size: .6875rem; color: var(--faint); letter-spacing: .04em; }
+  .msg.me .who { justify-content: flex-end; }
+  .chan { border: 1px solid var(--line); border-radius: 2px; padding: 0 5px; color: var(--muted); }
+  .chan.tg { border-color: var(--live); color: var(--live); }
+  .chan.cli { border-color: var(--accent); color: var(--accent); }
+  .bubble { font-size: var(--step--1); line-height: 1.55; overflow-wrap: anywhere; }
+  .msg.me .bubble { background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 6px; padding: 8px 12px; }
+  .msg.sys .bubble { color: var(--muted); font-family: var(--f-mono); font-size: .75rem; }
+  .memo { border: 1px solid var(--line); border-left: 2px solid var(--accent); border-radius: 3px; padding: 12px 14px; display: grid; gap: 8px; font-size: var(--step--1); }
+  .memo .t { font-family: var(--f-display); font-weight: 700; font-size: var(--step-0); }
+  .memo p { margin: 0; color: var(--muted); }
+  .act { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+  .act .cls { font-family: var(--f-mono); font-size: .6875rem; border: 1px solid var(--accent); color: var(--accent); border-radius: 2px; padding: 0 5px; }
+  .act .what { flex: 1 1 200px; min-width: 0; }
+  .act .when { font-family: var(--f-mono); font-size: .6875rem; color: var(--warn); }
+  .pill { font-family: var(--f-mono); font-size: .75rem; border: 1px solid var(--line); border-radius: 3px; padding: 2px 10px; color: var(--ink); }
+  .pill.go { border-color: var(--live); color: var(--live); }
+  .caption-note { font-family: var(--f-mono); font-size: var(--step--1); color: var(--faint); padding: 0 16px 14px; margin: 0; line-height: 1.5; }
+
+  .ladder { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 1px; background: var(--line-soft); border: 1px solid var(--line-soft); }
+  .ladder li { background: var(--surface); padding: 12px 10px; display: grid; gap: 4px; align-content: start; min-width: 0; }
+  .ladder .st { font-family: var(--f-mono); font-size: var(--step--1); color: var(--ink); }
+  .ladder .ds { font-size: .75rem; color: var(--muted); line-height: 1.4; overflow-wrap: anywhere; }
+  .ladder li.here { background: var(--accent-dim); }
+  .ladder li.here .st { color: var(--accent); font-weight: 500; }
+  .ladder .you { font-family: var(--f-mono); font-size: .625rem; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+  @media (max-width: 760px) { .ladder { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  @media (max-width: 480px) { .ladder { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+  .gates { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; list-style: none; }
+  .gates li { font-family: var(--f-mono); font-size: var(--step--1); border: 1px solid var(--line); background: var(--surface); border-radius: 3px; padding: 4px 9px; color: var(--muted); }
+  .gates li b { color: var(--live); font-weight: 500; margin-right: 6px; }
+  .status { margin-top: 22px; display: flex; flex-wrap: wrap; gap: 8px 18px; font-family: var(--f-mono); font-size: var(--step--1); color: var(--muted); border: 1px solid var(--line-soft); background: var(--surface); border-radius: 3px; padding: 10px 14px; max-width: 72ch; }
+  .status b { color: var(--ink); font-weight: 500; }
+  .status .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--live); margin-right: 7px; vertical-align: 1px; }
+  kbd { font-family: var(--f-mono); font-size: .8125em; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 5px; background: var(--surface); }
+  .sub-h { font-size: var(--step-1); margin: 38px 0 14px; }
+  .note a { color: var(--accent); text-underline-offset: 2px; }
+
 </style>
 
 </head>
@@ -242,34 +288,37 @@
   <div class="wrap">
     <div class="brand"><svg class="mark" viewBox="54 67 146 124" width="24" height="24" role="img" aria-label="Ashlr.AI"><path class="legs" d="M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z"/><path fill="#2563EB" d="M110 121H143L133 152H120Z"/></svg>Ashlr&nbsp;<span class="sub">Verse</span></div>
     <nav>
-      <a href="#measured">Measured</a>
-      <a href="#seats">Seats</a>
-      <a href="#context">Context</a>
-      <a href="#workbench">Workbench</a>
+      <a href="#leader">Leader</a>
       <a href="#autonomy">Autonomy</a>
-      <a href="#cloud">Cloud</a>
+      <a href="#workbench">Workbench</a>
+      <a href="#knowledge">Wiki &amp; lessons</a>
+      <a href="#lanes-cloud">Cloud &amp; Devin</a>
+      <a href="#measured">Measured</a>
       <a href="#platforms">Platforms</a>
       <a href="#start">Start</a>
     </nav>
   </div>
 </header>
 
+
 <main>
   <div class="wrap hero">
-    <p class="eyebrow">Operator console for coding agents</p>
-    <h1>Run your coding agents from one local workspace.</h1>
+    <p class="eyebrow">Ashlr Verse 3.15 &middot; Operator console for coding agents</p>
+    <h1>Every coding agent in one console. A Leader you can talk to.</h1>
     <p class="lede">
-      Your supported coding accounts behind one console, working at the same time: each subscription and
-      local model on this machine. <strong>Add a seat and you add a worker</strong>, subject to
-      configured concurrency limits and the accounts and hardware you connect. When a
-      subscription window runs out, Claude cloud sessions can work on your credits. The guarded
-      resident merge path remains dormant in this release.
+      Your Claude Code, Codex and Grok accounts and your local models become seats in one workbench.
+      Claude cloud sessions and Devin take tasks off your hands and come back with pull requests.
+      A <strong>Leader</strong> plans the fleet's work and talks with you in Verse, on Telegram or in
+      the terminal. And the fleet merges <strong>only inside a scope you sign with Touch ID</strong>,
+      starting in shadow, where it records what it would merge before it merges anything.
     </p>
 
     <div class="cta-row">
       <a class="btn btn-primary" href="#start">Get started</a>
       <a class="btn btn-ghost" href="https://github.com/ashlrai/ashlr-hub">View on GitHub</a>
     </div>
+
+    <p class="status" role="note"><span><span class="dot" aria-hidden="true"></span><b>Our own fleet, today:</b></span><span>standing grant active</span><span>ladder stage <b>1 of 8</b>, shadow</span><span><b>0</b> repos merging yet</span></p>
 
     <div class="strip">
       <span class="label">Console runs on</span>
@@ -294,25 +343,338 @@
         <div class="prov"><span class="phead"><svg class="plogo" viewBox="0 0 34 33" width="20" height="20" aria-hidden="true"><path d="M13.2371 21.0407L24.3186 12.8506C24.8619 12.4491 25.6384 12.6057 25.8973 13.2294C27.2597 16.5185 26.651 20.4712 23.9403 23.1851C21.2297 25.8989 17.4581 26.4941 14.0108 25.1386L10.2449 26.8843C15.6463 30.5806 22.2053 29.6665 26.304 25.5601C29.5551 22.3051 30.562 17.8683 29.6205 13.8673L29.629 13.8758C28.2637 7.99809 29.9647 5.64871 33.449 0.844576C33.5314 0.730667 33.6139 0.616757 33.6964 0.5L29.1113 5.09055V5.07631L13.2343 21.0436"/><path d="M10.9503 23.0313C7.07343 19.3235 7.74185 13.5853 11.0498 10.2763C13.4959 7.82722 17.5036 6.82767 21.0021 8.2971L24.7595 6.55998C24.0826 6.07017 23.215 5.54334 22.2195 5.17313C17.7198 3.31926 12.3326 4.24192 8.67479 7.90126C5.15635 11.4239 4.0499 16.8403 5.94992 21.4622C7.36924 24.9165 5.04257 27.3598 2.69884 29.826C1.86829 30.7002 1.0349 31.5745 0.36364 32.5L10.9474 23.0341"/></svg><span class="nm">Grok</span></span><span class="via">grok &middot; GROK_HOME</span><span class="mdl">Grok 4.7, 4.7 Fast, 4.6, 4.5</span></div>
         <div class="prov"><span class="phead"><svg class="plogo" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M16.361 10.26a.894.894 0 0 0-.558.47l-.072.148.001.207c0 .193.004.217.059.353.076.193.152.312.291.448.24.238.51.3.872.205a.86.86 0 0 0 .517-.436.752.752 0 0 0 .08-.498c-.064-.453-.33-.782-.724-.897a1.06 1.06 0 0 0-.466 0zm-9.203.005c-.305.096-.533.32-.65.639a1.187 1.187 0 0 0-.06.52c.057.309.31.59.598.667.362.095.632.033.872-.205.14-.136.215-.255.291-.448.055-.136.059-.16.059-.353l.001-.207-.072-.148a.894.894 0 0 0-.565-.472 1.02 1.02 0 0 0-.474.007Zm4.184 2c-.131.071-.223.25-.195.383.031.143.157.288.353.407.105.063.112.072.117.136.004.038-.01.146-.029.243-.02.094-.036.194-.036.222.002.074.07.195.143.253.064.052.076.054.255.059.164.005.198.001.264-.03.169-.082.212-.234.15-.525-.052-.243-.042-.28.087-.355.137-.08.281-.219.324-.314a.365.365 0 0 0-.175-.48.394.394 0 0 0-.181-.033c-.126 0-.207.03-.355.124l-.085.053-.053-.032c-.219-.13-.259-.145-.391-.143a.396.396 0 0 0-.193.032zm.39-2.195c-.373.036-.475.05-.654.086-.291.06-.68.195-.951.328-.94.46-1.589 1.226-1.787 2.114-.04.176-.045.234-.045.53 0 .294.005.357.043.524.264 1.16 1.332 2.017 2.714 2.173.3.033 1.596.033 1.896 0 1.11-.125 2.064-.727 2.493-1.571.114-.226.169-.372.22-.602.039-.167.044-.23.044-.523 0-.297-.005-.355-.045-.531-.288-1.29-1.539-2.304-3.072-2.497a6.873 6.873 0 0 0-.855-.031zm.645.937a3.283 3.283 0 0 1 1.44.514c.223.148.537.458.671.662.166.251.26.508.303.82.02.143.01.251-.043.482-.08.345-.332.705-.672.957a3.115 3.115 0 0 1-.689.348c-.382.122-.632.144-1.525.138-.582-.006-.686-.01-.853-.042-.57-.107-1.022-.334-1.35-.68-.264-.28-.385-.535-.45-.946-.03-.192.025-.509.137-.776.136-.326.488-.73.836-.963.403-.269.934-.46 1.422-.512.187-.02.586-.02.773-.002zm-5.503-11a1.653 1.653 0 0 0-.683.298C5.617.74 5.173 1.666 4.985 2.819c-.07.436-.119 1.04-.119 1.503 0 .544.064 1.24.155 1.721.02.107.031.202.023.208a8.12 8.12 0 0 1-.187.152 5.324 5.324 0 0 0-.949 1.02 5.49 5.49 0 0 0-.94 2.339 6.625 6.625 0 0 0-.023 1.357c.091.78.325 1.438.727 2.04l.13.195-.037.064c-.269.452-.498 1.105-.605 1.732-.084.496-.095.629-.095 1.294 0 .67.009.803.088 1.266.095.555.288 1.143.503 1.534.071.128.243.393.264.407.007.003-.014.067-.046.141a7.405 7.405 0 0 0-.548 1.873c-.062.417-.071.552-.071.991 0 .56.031.832.148 1.279L3.42 24h1.478l-.05-.091c-.297-.552-.325-1.575-.068-2.597.117-.472.25-.819.498-1.296l.148-.29v-.177c0-.165-.003-.184-.057-.293a.915.915 0 0 0-.194-.25 1.74 1.74 0 0 1-.385-.543c-.424-.92-.506-2.286-.208-3.451.124-.486.329-.918.544-1.154a.787.787 0 0 0 .223-.531c0-.195-.07-.355-.224-.522a3.136 3.136 0 0 1-.817-1.729c-.14-.96.114-2.005.69-2.834.563-.814 1.353-1.336 2.237-1.475.199-.033.57-.028.776.01.226.04.367.028.512-.041.179-.085.268-.19.374-.431.093-.215.165-.333.36-.576.234-.29.46-.489.822-.729.413-.27.884-.467 1.352-.561.17-.035.25-.04.569-.04.319 0 .398.005.569.04a4.07 4.07 0 0 1 1.914.997c.117.109.398.457.488.602.034.057.095.177.132.267.105.241.195.346.374.43.14.068.286.082.503.045.343-.058.607-.053.943.016 1.144.23 2.14 1.173 2.581 2.437.385 1.108.276 2.267-.296 3.153-.097.15-.193.27-.333.419-.301.322-.301.722-.001 1.053.493.539.801 1.866.708 3.036-.062.772-.26 1.463-.533 1.854a2.096 2.096 0 0 1-.224.258.916.916 0 0 0-.194.25c-.054.109-.057.128-.057.293v.178l.148.29c.248.476.38.823.498 1.295.253 1.008.231 2.01-.059 2.581a.845.845 0 0 0-.044.098c0 .006.329.009.732.009h.73l.02-.074.036-.134c.019-.076.057-.3.088-.516.029-.217.029-1.016 0-1.258-.11-.875-.295-1.57-.597-2.226-.032-.074-.053-.138-.046-.141.008-.005.057-.074.108-.152.376-.569.607-1.284.724-2.228.031-.26.031-1.378 0-1.628-.083-.645-.182-1.082-.348-1.525a6.083 6.083 0 0 0-.329-.7l-.038-.064.131-.194c.402-.604.636-1.262.727-2.04a6.625 6.625 0 0 0-.024-1.358 5.512 5.512 0 0 0-.939-2.339 5.325 5.325 0 0 0-.95-1.02 8.097 8.097 0 0 1-.186-.152.692.692 0 0 1 .023-.208c.208-1.087.201-2.443-.017-3.503-.19-.924-.535-1.658-.98-2.082-.354-.338-.716-.482-1.15-.455-.996.059-1.8 1.205-2.116 3.01a6.805 6.805 0 0 0-.097.726c0 .036-.007.066-.015.066a.96.96 0 0 1-.149-.078A4.857 4.857 0 0 0 12 3.03c-.832 0-1.687.243-2.456.698a.958.958 0 0 1-.148.078c-.008 0-.015-.03-.015-.066a6.71 6.71 0 0 0-.097-.725C8.997 1.392 8.337.319 7.46.048a2.096 2.096 0 0 0-.585-.041Zm.293 1.402c.248.197.523.759.682 1.388.03.113.06.244.069.292.007.047.026.152.041.233.067.365.098.76.102 1.24l.002.475-.12.175-.118.178h-.278c-.324 0-.646.041-.954.124l-.238.06c-.033.007-.038-.003-.057-.144a8.438 8.438 0 0 1 .016-2.323c.124-.788.413-1.501.696-1.711.067-.05.079-.049.157.013zm9.825-.012c.17.126.358.46.498.888.28.854.36 2.028.212 3.145-.019.14-.024.151-.057.144l-.238-.06a3.693 3.693 0 0 0-.954-.124h-.278l-.119-.178-.119-.175.002-.474c.004-.669.066-1.19.214-1.772.157-.623.434-1.185.68-1.382.078-.062.09-.063.159-.012z"/></svg><span class="nm">Ollama</span></span><span class="via">/api/tags &middot; /api/show</span><span class="mdl">Local model discovery and tool-capability checks</span></div>
         <div class="prov"><span class="phead"><svg class="plogo" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 7h18M3 12h18M3 17h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span class="nm">llama.cpp</span></span><span class="via">llama-server &middot; slots</span><span class="mdl">Local turn dispatch, Qwen3.8 27B and anything else you load</span></div>
+        <div class="prov"><span class="phead"><svg class="plogo" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="2.5" y="4.5" width="19" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 10l3 2-3 2M12 15h5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="nm">Devin</span></span><span class="via">Devin API v3 &middot; sessions &middot; ACUs</span><span class="mdl">Hand it a task; it delivers one PR. Shadow-only under the gates</span></div>
     </div>
-
-    <section class="run" aria-label="Measured parallel run" style="border-top:0;padding-block:0">
-      <div class="run-head">
-        <h2>One machine, one GPU, four local slots</h2>
-        <span class="meta">Qwen3.8 27B &middot; one measured configuration, not a ceiling &middot; driven through the console's own dispatch path</span>
-      </div>
-      <div class="run-body">
-        <div class="lane"><span class="name">agent 1</span><span class="track"><span class="fill" style="width:93.1%;animation-delay:.05s"></span></span><span class="val">485s <span class="ok">&check;</span></span></div>
-        <div class="lane"><span class="name">agent 2</span><span class="track"><span class="fill" style="width:94.8%;animation-delay:.12s"></span></span><span class="val">494s <span class="ok">&check;</span></span></div>
-        <div class="lane"><span class="name">agent 3</span><span class="track"><span class="fill" style="width:100%;animation-delay:.19s"></span></span><span class="val">521s <span class="ok">&check;</span></span></div>
-        <div class="lane"><span class="name">agent 4</span><span class="track"><span class="fill" style="width:96.2%;animation-delay:.26s"></span></span><span class="val">501s <span class="ok">&check;</span></span></div>
-      </div>
-      <div class="run-foot">
-        <span>wall <b>521s</b></span><span>completed <b>4 / 4</b></span>
-        <span>edits correct <b>4 / 4</b></span><span>slots busy <b>4 / 4</b></span>
-      </div>
-    </section>
   </div>
+
+
+  <section id="leader">
+    <div class="wrap">
+      <div class="sec-head">
+        <p class="eyebrow">New in 3.14 &middot; The Leader</p>
+        <h2>One brain, one thread, wherever you are.</h2>
+        <p>
+          The Leader reads what the fleet actually did and writes memos: the bottleneck, one move with
+          an expected result and a date, and questions for you. Now you can answer. Verse, Telegram and
+          the CLI all read and write the same conversation, so a directive you send from your phone is
+          in force at your desk.
+        </p>
+      </div>
+
+      <div class="two">
+        <figure class="convo">
+          <div class="convo-head"><span><b>Mind &#8984;4</b> &middot; One thread &middot; Verse, Telegram, CLI</span><span>illustrative</span></div>
+          <div class="thread">
+            <div class="msg me"><span class="who">You <span class="chan tg">Telegram</span></span><div class="bubble">focus: the flaky retry test in binshield before anything new</div></div>
+            <div class="msg sys"><span class="who">System</span><div class="bubble">Standing directive recorded: Focus on the flaky retry test in binshield before anything new</div></div>
+            <div class="msg"><span class="who">Leader <span class="chan">Verse</span></span>
+              <div class="memo">
+                <span class="t">Memo &middot; verify keeps failing on binshield</span>
+                <p>Move: one repair goal on a Grok seat. Expected: verify green on the retry suite within 48&nbsp;h.</p>
+                <div class="act"><span class="cls">B</span><span class="what">Add goal: fix the retry test in binshield</span><span class="when">applies in 30 min unless you veto</span><span class="pill go">Approve</span><span class="pill">Veto</span></div>
+              </div>
+            </div>
+            <div class="msg me"><span class="who">You <span class="chan cli">CLI</span></span><div class="bubble"><code>ashlr leader answer lm-&hellip;:0 "yes, ashlrcode only"</code></div></div>
+          </div>
+          <p class="caption-note">An illustrative exchange. The thread, channel badges, directives, memo card and buttons are the real surfaces; the words are an example. While the ladder is at shadow, memos are dry runs and carry no buttons.</p>
+        </figure>
+
+        <dl class="guards">
+          <div class="guard"><dt>Directives</dt><dd>Start a line with <code>focus:</code>, <code>stop:</code> or <code>priority:</code> from any channel, and it rides in every memo run until you retire it. Directives steer the Leader's judgement; they never widen your grant.</dd></div>
+          <div class="guard"><dt>Approve or veto</dt><dd>Class-A actions apply at once, class-B after a veto window, class-C only go to you. Approving early runs the same checks as the window closing. Veto runs the recorded inverse.</dd></div>
+          <div class="guard"><dt>Telegram</dt><dd>A real two-way line: replies thread into the conversation, memos arrive with Approve, Veto and Details buttons, and <code>/leader</code>, <code>/status</code>, <code>/directives</code>, <code>/settings</code>, <code>/help</code>. Digests are sent only when something changed.</dd></div>
+          <div class="guard"><dt>Always answers</dt><dd>Grok first, then fast and large local models; Claude only for a weekly deep run or by opt-in, never Codex. Failed runs retry at 15&nbsp;min, 45&nbsp;min and 2&nbsp;h. When it cannot think, it says why.</dd></div>
+          <div class="guard"><dt>Check-ins</dt><dd>Every 2 hours in working hours, but only when the evidence changed. A new directive or answer counts. Capped, advisory, and never retried.</dd></div>
+        </dl>
+      </div>
+    </div>
+  </section>
+
+
+  <section id="autonomy">
+    <div class="wrap">
+      <div class="sec-head">
+        <p class="eyebrow">Autonomy with custody</p>
+        <h2>It merges only inside a scope you sign, and it starts in shadow.</h2>
+        <p>
+          Autonomy ships dormant. You install a custody helper, create a key in your Mac's Secure
+          Enclave and sign a standing grant with Touch ID: which repositories, which engines, what risk
+          and size, what spend, for at most 30 days. Then you start the resident daemon yourself. Nothing
+          else, not config, not the Leader, not an agent, can widen what it may do.
+        </p>
+      </div>
+
+      <h3 class="sub-h">The rollout ladder</h3>
+      <ol class="ladder" aria-label="The default eight-stage rollout ladder">
+        <li class="here"><span class="you">We are here</span><span class="st">1 &middot; shadow</span><span class="ds">Gates run, would-merges recorded, nothing merges</span></li>
+        <li><span class="st">2 &middot; 2a</span><span class="ds">First repos merge, low risk</span></li>
+        <li><span class="st">3 &middot; 2b</span><span class="ds">More repos</span></li>
+        <li><span class="st">4 &middot; 2c</span><span class="ds">Leader class A</span></li>
+        <li><span class="st">5 &middot; 3a</span><span class="ds">Medium caps, Leader A and B</span></li>
+        <li><span class="st">6 &middot; 3b</span><span class="ds">More repos</span></li>
+        <li><span class="st">7 &middot; 3c</span><span class="ds">More repos</span></li>
+        <li><span class="st">8 &middot; 3d</span><span class="ds">Last signed stage</span></li>
+      </ol>
+      <p style="color:var(--muted);max-width:68ch;margin-top:14px;font-size:var(--step--1)">
+        The default ladder the grant draft proposes. It advances one stage when that stage's criteria are
+        met in the ledger (shadow: 5 would-merges and 12 hours), drops back one on any breach, and can never
+        pass the last stage you signed. Command shows the stage, the progress to the next and the grant's
+        countdown.
+      </p>
+
+      <h3 class="sub-h">Every change, through the same gates</h3>
+      <ul class="gates" aria-label="Merge gates G0 to G7">
+        <li><b>G0</b>Authority</li><li><b>G1</b>Protected paths</li><li><b>G1b</b>Tamper</li><li><b>G2</b>Scope</li>
+        <li><b>G3</b>Verify</li><li><b>G4</b>Claims</li><li><b>G5</b>Blast radius</li><li><b>G6</b>Cross-family judge</li><li><b>G7</b>GitHub checks</li>
+      </ul>
+      <p style="color:var(--muted);max-width:68ch;margin-top:14px;font-size:var(--step--1)">
+        Fleet lists every shadow decision with these chips and a one-sentence reason, so you can read what
+        the fleet would have done before it does it.
+      </p>
+
+      <dl class="guards" style="margin-top:30px">
+        <div class="guard"><dt>Reversible merges</dt><dd>When a stage merges, the merge happens on GitHub, pinned to the head SHA, with grant, gate and ledger trailers. CI and a fresh re-run watch it for two hours; a red merge is reverted and the repository quarantined. Protected paths always go to you.</dd></div>
+        <div class="guard"><dt>Host-verified</dt><dd>The fleet's GitHub App posts <code>ashlr/verify</code> only when verification passed on exactly the tree it proposes. Free-plan private repos, which cannot have rulesets, use local enforcement with the same check and lower caps.</dd></div>
+        <div class="guard"><dt>Stop and revoke</dt><dd>Lowering never asks: the switch drops to Propose or Off at once, Stop halts running agents and armed merges, and Revoke needs a new grant to resume. A broken ledger chain halts everything.</dd></div>
+        <div class="guard"><dt>Re-approval</dt><dd>A release that changes authority code pauses the grant until one more Touch ID, and the ladder continues from where it was. The resident daemon re-verifies grant, Stop and switch on every tick.</dd></div>
+        <div class="guard"><dt>Compiled ceilings</dt><dd>Medium risk, 10 files or 300 lines, 24 merges per repo per day. Effective policy is the minimum of the grant, the current stage, the switch, config and these.</dd></div>
+      </dl>
+
+      <div class="tbl-scroll" style="margin-top:32px">
+        <table style="min-width:0">
+          <caption>Configured budget modes for an admitted autonomy run. Your own chats ignore reserves.</caption>
+          <thead><tr><th scope="col">Mode</th><th scope="col">What admitted autonomy may use</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">all-in</th><td>Everything available. No reserves.</td></tr>
+            <tr><th scope="row">balanced (default)</th><td>Claude keeps 40% of its weekly window for you, and autonomy never uses it while the five-hour window is above 70%. Grok keeps no reserve. Local models are free and unlimited.</td></tr>
+            <tr><th scope="row">reserve</th><td>Free local models first; 85% of every paid window is kept for you.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="color:var(--muted);max-width:64ch;margin-top:18px">
+        Codex is off for autonomy unless enabled. In an admitted run, a seat whose usage cannot be
+        read is ineligible, because your reserve is not spent on a guess.
+      </p>
+    </div>
+  </section>
+
+
+  <section id="workbench">
+    <div class="wrap">
+      <div class="sec-head">
+        <p class="eyebrow">The multi-seat workbench</p>
+        <h2>Claude Code, two Codex accounts, Grok and a local model, side by side.</h2>
+        <p>
+          A seat is an account and the CLI that drives it, pinned to its own profile so a turn never
+          lands on the wrong account. Connect two Codex accounts and you have two Codex seats. When one
+          runs out of window, move to the next without changing tools. Verse never asks for or stores a
+          credential; each vendor CLI signs itself in.
+        </p>
+      </div>
+
+      <figure class="shot">
+        <img src="assets/verse-console.png" width="1900" height="1030" loading="lazy" decoding="async"
+             alt="The Ashlr Verse console: an expandable rail of sections down the left, a project-grouped
+                  chat sidebar, and a resources panel listing every connected account with its live usage
+                  windows — two Codex seats blocked at 100%, Claude and Grok usable, two local models ready." />
+        <figcaption>
+          The console as it actually runs. Two Codex seats are out of window; Claude, Grok and both
+          local models are not. Account names are the only thing edited in this image.
+        </figcaption>
+      </figure>
+
+      <div class="seats">
+        <div class="seat">
+          <span class="tag local">Local</span><h3>Qwen3.8 27B</h3>
+          <p class="speed">~151s / turn &middot; 4 concurrent</p>
+          <p>Your own GPU through llama.cpp, four batching slots. No quota, no network, no per-token cost. Slower per turn, and still there at 2am.</p>
+        </div>
+        <div class="seat">
+          <span class="tag">Grok</span><h3>Grok 4.7</h3>
+          <p class="speed">~16&ndash;21s / turn</p>
+          <p>The fast lane, and a build-fast variant. Sessions resume by native id, so a long task keeps its context across turns.</p>
+        </div>
+        <div class="seat">
+          <span class="tag">Claude</span><h3>Fable 5.1 &amp; Opus 5.5</h3>
+          <p class="speed">Subscription</p>
+          <p>Driven through its own CLI and profile. Remaining quota is visible before you spend it, from metadata probes that cost no tokens.</p>
+        </div>
+        <div class="seat">
+          <span class="tag">Codex</span><h3>GPT-6 Astra</h3>
+          <p class="speed">Multiple accounts</p>
+          <p>Several Codex accounts enrolled at once, each pinned to its own home directory so a turn can never land on the wrong one.</p>
+        </div>
+      </div>
+
+      <h3 class="sub-h">Five surfaces, two drawers, one palette</h3>
+      <div class="seats">
+        <div class="seat">
+          <span class="tag">&#8984;1 &ndash; &#8984;5</span><h3>Command, Fleet, Growth, Mind, Chat</h3>
+          <p>What needs you and the ladder; what runs where and every shadow decision; whether output compounds, with Lessons; the Leader conversation; and the chat itself.</p>
+        </div>
+        <div class="seat">
+          <span class="tag">&#8984;.</span><h3>Resources, ready or not</h3>
+          <p>Every account with its live windows and reset times, local runtimes, cloud credits and Devin. Each card says &ldquo;Chat: ready&rdquo; and &ldquo;Fleet: ready &middot; reserve kept&rdquo;, or why not and the command that fixes it.</p>
+        </div>
+        <div class="seat">
+          <span class="tag">&#8984;J</span><h3>Needs you</h3>
+          <p>Owner-lane PRs, cloud and Devin PRs with a gate verdict, the Leader's questions, seats to reconnect. Single-key triage: <code>A</code> land or approve, <code>R</code> reject, <code>V</code> veto.</p>
+        </div>
+        <div class="seat">
+          <span class="tag">&#8984;K</span><h3>Command palette</h3>
+          <p>Every chat, action, seat, project and repo. Message the Leader, add a directive, open a repo wiki, ask the codebase, run in cloud or in Devin.</p>
+        </div>
+        <div class="seat">
+          <span class="tag">Composer</span><h3>Queue, attach, steer</h3>
+          <p>Queues up to 3 turns while one runs; attachments, <code>@</code> files and <code>/</code> commands; four permission modes, with Bypass red and confirmed per chat.</p>
+        </div>
+        <div class="seat">
+          <span class="tag">Dock</span><h3>Terminal, Preview, Review</h3>
+          <p>A real login shell per tab in the desktop app, loopback dev servers, diffs whose notes draft into the composer, and a branch bar that commits, pushes and opens PRs.</p>
+        </div>
+        <div class="seat">
+          <span class="tag local">Live</span><h3>Reasoning as it happens</h3>
+          <p>Claude, Codex and Grok stream their reasoning, then collapse it to &ldquo;Thought 12s, ~1.8k tok&rdquo;. Every figure on the status line is measured from the CLI's own events.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  <section id="knowledge">
+    <div class="wrap">
+      <div class="sec-head">
+        <p class="eyebrow">New in 3.15 &middot; Wiki and lessons</p>
+        <h2>It knows your code, and it learns only what you approve.</h2>
+        <p>
+          Two ways the fleet gets smarter about your repositories without handing your code to anyone you
+          did not choose, and without teaching itself anything behind your back.
+        </p>
+      </div>
+
+      <div class="two">
+        <div class="note cool">
+          <h3>A private wiki for every repo</h3>
+          <p>
+            An overview, a module map with the import graph and blast radius, key flows, data stores,
+            commands and &ldquo;how to change X&rdquo; guides. Every <code>file:line</code> citation is
+            checked against the repository before it is kept; the rest are removed and counted. Pages are
+            written by your local models, by Grok only if your grant allows it, never by Claude, and with no
+            model at all they are built from repository facts alone. They live only on your Mac and rebuild
+            only when the files they cite change. <b>Ask the codebase</b> answers with citations, or says
+            &ldquo;not found&rdquo;.
+          </p>
+        </div>
+        <div class="note">
+          <h3>Lessons you sign off on</h3>
+          <p>
+            Every way a task ends, a merge, a refused gate, a failed verify, a revert, a closed PR, a
+            vetoed Leader action, becomes a short retro with a stable root cause, what to do differently and
+            a better prompt. Knowledge it suggests is used only after you approve it in Growth &#9656;
+            Lessons, and only where its repo, paths and task kind match, within a 16&nbsp;KiB cap. When
+            nothing matches, the prompt is byte-identical to before. Changes to a repo's AGENTS.md go through
+            the gates like any other PR.
+          </p>
+        </div>
+      </div>
+
+      <pre style="margin-top:30px"><span class="c"># the same wiki from the terminal</span>
+ashlr wiki build ashlr-hub
+ashlr wiki ask "where are standing grants verified?"</pre>
+    </div>
+  </section>
+
+
+  <section id="lanes-cloud">
+    <div class="wrap">
+      <div class="sec-head">
+        <p class="eyebrow">Cloud and Devin lanes</p>
+        <h2>Hand a task off. Get a pull request back, through the same gates.</h2>
+        <p>
+          Claude Code cloud sessions run on your Claude account's cloud credits, so work continues after
+          the subscription window is spent. Devin sessions run on your Devin ACUs. Both are told to deliver
+          exactly one pull request from their own branch, with a report block, and never to merge.
+        </p>
+      </div>
+
+      <figure>
+        <svg viewBox="0 0 700 220" width="100%" role="img" aria-label="Verse launches a Claude cloud session or a Devin session. Each delivers one pull request from its own branch with a report. Pull requests are triaged in Needs you or taken into the standing gates; Devin pull requests are shadow-only.">
+          <rect x="8" y="80" width="112" height="54" rx="3" fill="var(--surface-2)" stroke="var(--line)"/>
+          <text x="64" y="103" text-anchor="middle" font-size="12" fill="var(--ink)">Verse</text>
+          <text x="64" y="120" text-anchor="middle" font-size="9" fill="var(--muted)">chat, Command, CLI</text>
+
+          <path d="M120 100 L196 62" stroke="var(--accent)" stroke-width="1.5" fill="none"/>
+          <path d="M120 114 L196 154" stroke="var(--accent)" stroke-width="1.5" fill="none"/>
+
+          <rect x="198" y="34" width="166" height="56" rx="3" fill="var(--accent-dim)" stroke="var(--accent)"/>
+          <text x="281" y="56" text-anchor="middle" font-size="12" fill="var(--ink)">Claude cloud session</text>
+          <text x="281" y="74" text-anchor="middle" font-size="10" fill="var(--muted)">ashlr-cloud/&lt;id&gt;</text>
+
+          <rect x="198" y="128" width="166" height="56" rx="3" fill="var(--accent-dim)" stroke="var(--accent)"/>
+          <text x="281" y="150" text-anchor="middle" font-size="12" fill="var(--ink)">Devin session</text>
+          <text x="281" y="168" text-anchor="middle" font-size="10" fill="var(--muted)">ashlr-devin/&lt;id&gt;, ACU cap</text>
+
+          <path d="M364 62 L420 100" stroke="var(--accent)" stroke-width="1.5" fill="none"/>
+          <path d="M364 156 L420 116" stroke="var(--accent)" stroke-width="1.5" fill="none"/>
+
+          <rect x="422" y="80" width="112" height="54" rx="3" fill="var(--surface)" stroke="var(--line)"/>
+          <text x="478" y="103" text-anchor="middle" font-size="12" fill="var(--ink)">One PR</text>
+          <text x="478" y="120" text-anchor="middle" font-size="10" fill="var(--muted)">+ report block</text>
+
+          <path d="M534 100 L584 70" stroke="var(--live)" stroke-width="1.5" fill="none"/>
+          <path d="M534 114 L584 146" stroke="var(--live)" stroke-width="1.5" fill="none"/>
+
+          <rect x="586" y="44" width="108" height="50" rx="3" fill="var(--live-dim)" stroke="var(--live)"/>
+          <text x="640" y="66" text-anchor="middle" font-size="12" fill="var(--ink)">Needs you</text>
+          <text x="640" y="82" text-anchor="middle" font-size="10" fill="var(--muted)">Land &middot; Close</text>
+
+          <rect x="586" y="122" width="108" height="50" rx="3" fill="var(--live-dim)" stroke="var(--live)"/>
+          <text x="640" y="144" text-anchor="middle" font-size="12" fill="var(--ink)">G0&ndash;G7</text>
+          <text x="640" y="160" text-anchor="middle" font-size="9" fill="var(--muted)">Devin: shadow only</text>
+
+          <text x="350" y="208" text-anchor="middle" font-size="10" fill="var(--faint)">tracked with gh &middot; merged only by the gates or by you &middot; never by the session</text>
+        </svg>
+        <figcaption>Verse cannot read a session back, so each task delivers on its own branch with a PR and a report. Failed launches and missing PRs stay visible as their own states.</figcaption>
+      </figure>
+
+      <div class="two" style="margin-top:30px">
+        <div class="note">
+          <h3>Claude cloud sessions</h3>
+          <p>
+            Start one from a chat, from Command or with <code>ashlr cloud launch</code>, or let Verse work
+            through its own improvement backlog under a daily cap. Claude does not expose the credit balance,
+            so spend is a labelled estimate you correct on claude.ai. Under a standing grant, a cloud PR on a
+            granted repo lands only through the gates.
+          </p>
+        </div>
+        <div class="note cool">
+          <h3>Devin, as a resource</h3>
+          <p>
+            Off until you run <code>ashlr devin connect</code> with a service-user key, which goes straight
+            to the macOS Keychain. <b>Run in Devin</b> from a chat or <code>ashlr devin launch</code>. Each
+            session has a hard ACU cap, and a daily cap and a reserve bound the rest. Devin PRs go through
+            G0&ndash;G7 judged by another model family, and are <b>shadow-only at every stage</b>: nothing
+            Devin writes is merged automatically. Devin is not a chat seat, and the fleet does not start
+            Devin sessions on its own yet.
+          </p>
+        </div>
+      </div>
+
+      <div class="tbl-scroll" style="margin-top:32px">
+        <table style="min-width:0">
+          <caption>Defaults, all adjustable. Settings, not measurements.</caption>
+          <thead><tr><th scope="col">Limit</th><th scope="col" class="num">Cloud</th><th scope="col" class="num">Devin</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Budget</th><td class="num">$250 (estimate)</td><td class="num">50 ACU</td></tr>
+            <tr><th scope="row">Per session</th><td class="num">$3 est.</td><td class="num">10 ACU cap</td></tr>
+            <tr><th scope="row">At once</th><td class="num">4</td><td class="num">2</td></tr>
+            <tr><th scope="row">Per day</th><td class="num">20 sessions</td><td class="num">30 ACU, 10 sessions</td></tr>
+            <tr><th scope="row">Kept in reserve</th><td class="num">$40</td><td class="num">10 ACU</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
 
   <section id="measured">
     <div class="wrap">
@@ -390,108 +752,42 @@
       <p style="color:var(--muted);max-width:64ch;margin-top:18px">
         The large win above was the cache fix, and it helps a single agent just as much.
       </p>
-    </div>
-  </section>
-
-  <section id="seats">
-    <div class="wrap">
-      <div class="sec-head">
-        <p class="eyebrow">Seats</p>
-        <h2>Your connected accounts, plus local models.</h2>
-        <p>
-          A seat is an account and the CLI that drives it, each pinned to its own profile so turns
-          never cross accounts. When a subscription hits its ceiling you switch seats instead of
-          switching tools.
-        </p>
+    <section class="run" aria-label="Measured parallel run" style="border-top:1px solid var(--line);padding-block:0;margin-top:32px">
+      <div class="run-head">
+        <h2>One machine, one GPU, four local slots</h2>
+        <span class="meta">Qwen3.8 27B &middot; one measured configuration, not a ceiling &middot; driven through the console's own dispatch path</span>
       </div>
-
-      <figure class="shot">
-        <img src="assets/verse-console.png" width="1900" height="1030" loading="lazy" decoding="async"
-             alt="The Ashlr Verse console: an expandable rail of sections down the left, a project-grouped
-                  chat sidebar, and a resources panel listing every connected account with its live usage
-                  windows — two Codex seats blocked at 100%, Claude and Grok usable, two local models ready." />
-        <figcaption>
-          The console as it actually runs. Two Codex seats are out of window; Claude, Grok and both
-          local models are not. Account names are the only thing edited in this image.
-        </figcaption>
-      </figure>
-
-      <div class="seats">
-        <div class="seat">
-          <span class="tag local">Local</span><h3>Qwen3.8 27B</h3>
-          <p class="speed">~151s / turn &middot; 4 concurrent</p>
-          <p>Your own GPU through llama.cpp, four batching slots. No quota, no network, no per-token cost. Slower per turn, and still there at 2am.</p>
-        </div>
-        <div class="seat">
-          <span class="tag">Grok</span><h3>Grok 4.7</h3>
-          <p class="speed">~16&ndash;21s / turn</p>
-          <p>The fast lane, and a build-fast variant. Sessions resume by native id, so a long task keeps its context across turns.</p>
-        </div>
-        <div class="seat">
-          <span class="tag">Claude</span><h3>Fable 5.1 &amp; Opus 5.5</h3>
-          <p class="speed">Subscription</p>
-          <p>Driven through its own CLI and profile. Remaining quota is visible before you spend it, from metadata probes that cost no tokens.</p>
-        </div>
-        <div class="seat">
-          <span class="tag">Codex</span><h3>GPT-6 Astra</h3>
-          <p class="speed">Multiple accounts</p>
-          <p>Several Codex accounts enrolled at once, each pinned to its own home directory so a turn can never land on the wrong one.</p>
-        </div>
+      <div class="run-body">
+        <div class="lane"><span class="name">agent 1</span><span class="track"><span class="fill" style="width:93.1%;animation-delay:.05s"></span></span><span class="val">485s <span class="ok">&check;</span></span></div>
+        <div class="lane"><span class="name">agent 2</span><span class="track"><span class="fill" style="width:94.8%;animation-delay:.12s"></span></span><span class="val">494s <span class="ok">&check;</span></span></div>
+        <div class="lane"><span class="name">agent 3</span><span class="track"><span class="fill" style="width:100%;animation-delay:.19s"></span></span><span class="val">521s <span class="ok">&check;</span></span></div>
+        <div class="lane"><span class="name">agent 4</span><span class="track"><span class="fill" style="width:96.2%;animation-delay:.26s"></span></span><span class="val">501s <span class="ok">&check;</span></span></div>
       </div>
-    </div>
-  </section>
-
-  <section id="scale">
-    <div class="wrap">
-      <div class="sec-head">
-        <p class="eyebrow">Scale</p>
-        <h2>Bring your accounts into one workspace.</h2>
-        <p>
-          A seat is an account plus the CLI that drives it. Connect two Codex accounts and you have
-          two Codex seats. Connect five and you have five. Your subscriptions, hardware and configured
-          concurrency limits determine how much work can run at once.
-        </p>
+      <div class="run-foot">
+        <span>wall <b>521s</b></span><span>completed <b>4 / 4</b></span>
+        <span>edits correct <b>4 / 4</b></span><span>slots busy <b>4 / 4</b></span>
       </div>
-
-      <div class="seats">
-        <div class="seat">
-          <span class="tag">Accounts</span><h3>One seat per account</h3>
-          <p>Each is pinned to its own profile directory, so a turn can never land on the wrong
-          account. Add a subscription, get a worker. Run out on one and move to the next without
-          changing tools.</p>
-        </div>
-        <div class="seat">
-          <span class="tag local">Local</span><h3>Slots follow your hardware</h3>
-          <p>Local concurrency is set by how you start the runtime, not by the console. More memory
-          and more GPU mean more slots, or a larger window for each. A second model can serve its
-          own seats alongside the first.</p>
-        </div>
-        <div class="seat">
-          <span class="tag">Machines</span><h3>Independent local workspaces</h3>
-          <p>A second machine can run its own seats and local models. Verse does not yet provide
-          one coordinated inbox or scheduler across those machines.</p>
-        </div>
-        <div class="seat">
-          <span class="tag">Projects</span><h3>Any folder, not just the enrolled ones</h3>
-          <p>Open a project from a native folder chooser and keep it in the list, whether or not it
-          is enrolled for autonomous work. The two are deliberately separate registries: picking a
-          folder to work in never hands it to the unattended lane.</p>
-        </div>
-        <div class="seat">
-          <span class="tag">Tooling</span><h3>MCP servers per seat</h3>
-          <p>Codex and Grok seats load the MCP servers from their own profile. Claude and local seats
-          load none. Apps &amp; Accounts says which is which, so a tool configured for one client does
-          not silently follow you into another.</p>
-        </div>
+    </section>
+      <div class="tbl-scroll" style="margin-top:32px">
+        <table>
+          <caption>Measured before and after the 3.10 performance work, on the same machine.</caption>
+          <thead><tr><th scope="col">Path</th><th scope="col" class="num">Before</th><th scope="col" class="num">After</th></tr></thead>
+          <tbody>
+            <tr><th scope="row"><code>/api/verse/control</code>, warm</th><td class="num">5.2&ndash;6.1 s</td><td class="num after">2.9&ndash;4.1 ms</td></tr>
+            <tr><th scope="row"><code>/api/verse/usage-series</code>, warm</th><td class="num">1.3&ndash;3.4 s</td><td class="num after">0.3&ndash;0.5 ms</td></tr>
+            <tr><th scope="row">Replay 10k chat events</th><td class="num">17 s</td><td class="num after">0.9&ndash;2.4 ms</td></tr>
+            <tr><th scope="row">Render per streamed delta at 5k events</th><td class="num">50 ms</td><td class="num after">1.0&ndash;1.3 ms</td></tr>
+            <tr><th scope="row">First-chat-paint JavaScript</th><td class="num">615 KB</td><td class="num after">366 KB</td></tr>
+          </tbody>
+        </table>
       </div>
-
-      <p style="color:var(--muted);max-width:64ch;margin-top:26px">
-        The measured figures on this page come from one machine with four local slots, because that
-        is what was in front of us. They describe a configuration, not a maximum.
+      <p style="color:var(--muted);max-width:64ch;margin-top:18px">
+        The table shows the 3.10 result. In 3.11.2, first-chat-paint JavaScript fell to
+        349.7&nbsp;KB, meeting the 350&nbsp;KB target. The 3.10 runtime probe measured a
+        53&ndash;78&nbsp;ms event-loop stall against a 20&nbsp;ms budget; no newer result is reported here.
       </p>
     </div>
   </section>
-
   <section id="lanes">
     <div class="wrap">
       <div class="sec-head">
@@ -564,7 +860,6 @@
       </div>
     </div>
   </section>
-
   <section id="context">
     <div class="wrap">
       <div class="sec-head">
@@ -611,234 +906,6 @@
       </div>
     </div>
   </section>
-
-  <section id="workbench">
-    <div class="wrap">
-      <div class="sec-head">
-        <p class="eyebrow">The workbench</p>
-        <h2>A chat you can work in all day.</h2>
-        <p>
-          Five surfaces on one rail, a palette that reaches everything, and a chat built for long
-          sessions with real tools beside it.
-        </p>
-      </div>
-
-      <div class="seats">
-        <div class="seat">
-          <span class="tag">&#8984;K</span><h3>Command palette</h3>
-          <p>Every chat, action, seat and project from one field. Guarded actions confirm first, then ask for the token. Every shortcut, menu item and palette entry reads one catalog.</p>
-        </div>
-        <div class="seat">
-          <span class="tag">&#8984;J</span><h3>Needs you</h3>
-          <p>One drawer for everything waiting on you: owner-lane PRs, the Leader's asks, seats to reconnect and proposals. Single-key triage: <code>A</code> approve, <code>R</code> reject, <code>V</code> veto.</p>
-        </div>
-        <div class="seat">
-          <span class="tag">Composer</span><h3>Queue, attach, steer</h3>
-          <p>Queues up to 3 turns while one runs, and takes attachments, <code>@</code> files and <code>/</code> commands. Four permission modes: Plan, Accept edits, Auto, and Bypass, which is red and confirmed per chat.</p>
-        </div>
-        <div class="seat">
-          <span class="tag">Dock</span><h3>Terminal, Preview, Review</h3>
-          <p>A real login shell per tab in the desktop app, loopback dev servers with sandboxed artifacts, and diffs whose notes draft into the composer. A branch bar commits, pushes and opens pull requests.</p>
-        </div>
-        <div class="seat">
-          <span class="tag local">Live</span><h3>Reasoning as it happens</h3>
-          <p>Claude, Codex and Grok stream their reasoning into the chat, then collapse it to &ldquo;Thought 12s, ~1.8k tok&rdquo;. The status line's step, elapsed time and tokens per second are measured from the CLI's own events.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section id="command">
-    <div class="wrap">
-      <div class="sec-head">
-        <p class="eyebrow">Command &middot; Fleet &middot; Growth &middot; Mind</p>
-        <h2>Four surfaces for the company, one chart kit.</h2>
-        <p>
-          <b>Command</b> answers what needs you and whether the fleet is producing. <b>Fleet</b> shows
-          what runs where and why that seat. <b>Growth</b> asks whether output compounds, and
-          <b>Mind</b> shows what the Leader decided and whether it was right. Every chart has a table
-          twin and a designed empty state. A value that was not measured is hatched and shown as
-          &ldquo;&mdash;&rdquo;, never as zero.
-        </p>
-      </div>
-
-      <div class="two">
-        <div class="note cool">
-          <h3>Burn-down history that survives a reload</h3>
-          <p>
-            Each seat's five-hour and weekly readings are logged every minute by the Verse server and
-            the daemon, kept for at least 8 days in under 2&nbsp;MiB, and thinned per seat before any
-            are dropped. The Claude card draws its whole weekly window with the even-pace line, the
-            projection and the 40% reserve. <code>ASHLR_CAPACITY_HISTORY=0</code> stops every recorder.
-          </p>
-        </div>
-        <div class="note">
-          <h3>Charts that say what they do not know</h3>
-          <p>
-            Axis labels shorten together before any is dropped. Ticks come from the step, so a 0&ndash;1
-            axis reads 0.2, not a rounded 0.3. Placeholder timestamps never set a range, and day
-            buckets use your local calendar day.
-          </p>
-        </div>
-      </div>
-
-      <div class="tbl-scroll" style="margin-top:32px">
-        <table>
-          <caption>Measured before and after the 3.10 performance work, on the same machine.</caption>
-          <thead><tr><th scope="col">Path</th><th scope="col" class="num">Before</th><th scope="col" class="num">After</th></tr></thead>
-          <tbody>
-            <tr><th scope="row"><code>/api/verse/control</code>, warm</th><td class="num">5.2&ndash;6.1 s</td><td class="num after">2.9&ndash;4.1 ms</td></tr>
-            <tr><th scope="row"><code>/api/verse/usage-series</code>, warm</th><td class="num">1.3&ndash;3.4 s</td><td class="num after">0.3&ndash;0.5 ms</td></tr>
-            <tr><th scope="row">Replay 10k chat events</th><td class="num">17 s</td><td class="num after">0.9&ndash;2.4 ms</td></tr>
-            <tr><th scope="row">Render per streamed delta at 5k events</th><td class="num">50 ms</td><td class="num after">1.0&ndash;1.3 ms</td></tr>
-            <tr><th scope="row">First-chat-paint JavaScript</th><td class="num">615 KB</td><td class="num after">366 KB</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p style="color:var(--muted);max-width:64ch;margin-top:18px">
-        The table shows the 3.10 result. In 3.11.2, first-chat-paint JavaScript fell to
-        349.7&nbsp;KB, meeting the 350&nbsp;KB target. The 3.10 runtime probe measured a
-        53&ndash;78&nbsp;ms event-loop stall against a 20&nbsp;ms budget; no newer result is reported here.
-      </p>
-    </div>
-  </section>
-
-  <section id="autonomy">
-    <div class="wrap">
-      <div class="sec-head">
-        <p class="eyebrow">Autonomy with custody</p>
-        <h2>Guarded autonomy, currently dormant.</h2>
-        <p>
-          The source defines a guarded path from judged work to GitHub merges and a two-hour watch.
-          The current production build cannot run an unattended resident fleet: its compiled daemon
-          and conductor trust roots are empty, and service install or restart authority is unavailable.
-          Running the guided setup alone does not activate live resident work.
-        </p>
-      </div>
-
-      <dl class="guards">
-        <div class="guard"><dt>Production status</dt><dd>Live non-dry daemon and conductor dispatch and resident service install or restart are unavailable in this release. <code>ashlr authority setup --dry-run</code> shows the plan; activation requires separately reviewed trust-root and service-authority work.</dd></div>
-        <div class="guard"><dt>Grant design</dt><dd>A Touch ID grant names repositories, engines, risk and size caps, a spend ceiling and Leader classes. It is bound to one Mac and valid for at most 30 days. Config and the Leader can only tighten it.</dd></div>
-        <div class="guard"><dt>Gates, in order</dt><dd>The guarded merge path checks authority, protected paths, tamper, scope, verification, claims, blast radius, a cross-family judge and GitHub's required checks. Compiled ceilings: medium risk, 10 files or 300 lines, 24 merges per repo per day.</dd></div>
-        <div class="guard"><dt>Reversible merges</dt><dd>When admitted, a GitHub merge is pinned to its head SHA and carries grant, gate and ledger trailers. CI and a fresh re-run watch it for two hours; a red merge is reverted and the repository quarantined.</dd></div>
-        <div class="guard"><dt>Stop and revoke</dt><dd>The source switch can lower Autonomous to Propose or Off without a new grant. Stop halts autonomous effects; revocation requires a new grant to resume. A broken ledger chain halts the guarded path.</dd></div>
-      </dl>
-
-      <div class="tbl-scroll" style="margin-top:32px">
-        <table style="min-width:0">
-          <caption>Configured budget modes for an admitted autonomy run. Your own chats ignore reserves.</caption>
-          <thead><tr><th scope="col">Mode</th><th scope="col">What admitted autonomy may use</th></tr></thead>
-          <tbody>
-            <tr><th scope="row">all-in</th><td>Everything available. No reserves.</td></tr>
-            <tr><th scope="row">balanced (default)</th><td>Claude keeps 40% of its weekly window for you, and autonomy never uses it while the five-hour window is above 70%. Grok keeps no reserve. Local models are free and unlimited.</td></tr>
-            <tr><th scope="row">reserve</th><td>Free local models first; 85% of every paid window is kept for you.</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p style="color:var(--muted);max-width:64ch;margin-top:18px">
-        Codex is off for autonomy unless enabled. In an admitted run, a seat whose usage cannot be
-        read is ineligible, because your reserve is not spent on a guess.
-      </p>
-    </div>
-  </section>
-
-  <section id="cloud">
-    <div class="wrap">
-      <div class="sec-head">
-        <p class="eyebrow">New in 3.11 &middot; The cloud lane</p>
-        <h2>Work that keeps going when the subscription window runs out.</h2>
-        <p>
-          Verse can start Claude Code cloud sessions that run on your Claude account's cloud credits.
-          Start one from a chat, from Command or from the CLI, or let Verse work through its own
-          improvement backlog under a budget you set. Successful tasks are asked to deliver a draft
-          pull request. Failed launches and missing PRs remain separate states; the lane never merges.
-        </p>
-        <p>
-          Everything you run on is one keystroke away. Press <kbd>⌘.</kbd> on any page for the Resources
-          drawer: each Claude, Codex and Grok account with its live windows and reset times, your local
-          models and their context windows, and your cloud credits. Pin it beside your work or let it slide
-          away. And without opening anything, a resource bar in the rail keeps a battery for every account,
-          each under its own provider's mark, so you always know what is left before you start a turn.
-        </p>
-      </div>
-
-      <figure>
-        <svg viewBox="0 0 700 200" width="100%" role="img" aria-label="Verse launches claude --cloud as the claude-a seat. The cloud session is asked to work on branch ashlr-cloud slash task id and open a draft pull request with a report block. Verse follows any matching pull request with gh; the merge gates or you decide what happens next.">
-          <rect x="8" y="70" width="118" height="54" rx="3" fill="var(--surface-2)" stroke="var(--line)"/>
-          <text x="67" y="93" text-anchor="middle" font-size="12" fill="var(--ink)">Verse</text>
-          <text x="67" y="110" text-anchor="middle" font-size="9" fill="var(--muted)">chat, Command, CLI</text>
-
-          <path d="M126 97 H196" stroke="var(--accent)" stroke-width="1.5" fill="none"/>
-          <path d="M190 93 l6 4 -6 4Z" fill="var(--accent)"/>
-          <text x="161" y="86" text-anchor="middle" font-size="10" fill="var(--accent)">launch</text>
-
-          <rect x="198" y="64" width="150" height="66" rx="3" fill="var(--surface)" stroke="var(--accent)"/>
-          <text x="273" y="86" text-anchor="middle" font-size="12" fill="var(--ink)">claude --cloud</text>
-          <text x="273" y="103" text-anchor="middle" font-size="10" fill="var(--muted)">as the claude-a seat,</text>
-          <text x="273" y="116" text-anchor="middle" font-size="10" fill="var(--muted)">from a pushed branch</text>
-
-          <path d="M348 97 H418" stroke="var(--accent)" stroke-width="1.5" fill="none"/>
-          <path d="M412 93 l6 4 -6 4Z" fill="var(--accent)"/>
-
-          <rect x="420" y="64" width="130" height="66" rx="3" fill="var(--accent-dim)" stroke="var(--accent)"/>
-          <text x="485" y="86" text-anchor="middle" font-size="12" fill="var(--ink)">Cloud session</text>
-          <text x="485" y="103" text-anchor="middle" font-size="10" fill="var(--muted)">branch</text>
-          <text x="485" y="116" text-anchor="middle" font-size="10" fill="var(--muted)">ashlr-cloud/&lt;id&gt;</text>
-
-          <path d="M550 97 H584" stroke="var(--live)" stroke-width="1.5" fill="none"/>
-          <path d="M578 93 l6 4 -6 4Z" fill="var(--live)"/>
-
-          <rect x="586" y="64" width="108" height="66" rx="3" fill="var(--live-dim)" stroke="var(--live)"/>
-          <text x="640" y="90" text-anchor="middle" font-size="12" fill="var(--ink)">Draft PR</text>
-          <text x="640" y="108" text-anchor="middle" font-size="10" fill="var(--muted)">+ report block</text>
-
-          <path d="M640 130 V170 H67 V124" stroke="var(--live)" stroke-width="1.5" fill="none" stroke-dasharray="4 3"/>
-          <path d="M63 130 l4 -6 4 6Z" fill="var(--live)"/>
-          <text x="356" y="186" text-anchor="middle" font-size="10" fill="var(--live)">tracked with gh &middot; merged only by the gates or by you</text>
-
-          <text x="273" y="52" text-anchor="middle" font-size="10" fill="var(--faint)">claude.ai account, never an API key</text>
-        </svg>
-        <figcaption>Verse cannot read a session back, so it asks each cloud task to deliver on its own branch with a draft PR and JSON report. Verse tracks a matching PR when one appears; failed or missing deliveries remain visible separately.</figcaption>
-      </figure>
-
-      <div class="two" style="margin-top:30px">
-        <div class="note">
-          <h3>The balance is an estimate, and says so</h3>
-          <p>
-            Claude does not expose the credit balance, so Verse counts a flat estimate per launched
-            session against the total you enter, and failed launches cost nothing. Every figure is
-            labelled as an estimate and links to claude.ai, where you check the real balance and
-            correct it.
-          </p>
-        </div>
-        <div class="note cool">
-          <h3>Self-improvement, with caps</h3>
-          <p>
-            Verse keeps a backlog of work on itself: known failing tests, performance regressions, the
-            runtime probe stall and similar gaps. <b>Improve Verse</b> launches the next item. On its
-            own, Verse launches only under a daily cap, and it stops at a reserve. One switch, or one
-            environment variable, turns that off.
-          </p>
-        </div>
-      </div>
-
-      <div class="tbl-scroll" style="margin-top:32px">
-        <table style="min-width:0">
-          <caption>Defaults, all adjustable from Command, Settings or <code>ashlr cloud budget</code>.</caption>
-          <thead><tr><th scope="col">Limit</th><th scope="col" class="num">Default</th></tr></thead>
-          <tbody>
-            <tr><th scope="row">Credits total</th><td class="num">$250</td></tr>
-            <tr><th scope="row">Estimate per launched session</th><td class="num">$3</td></tr>
-            <tr><th scope="row">Sessions at once</th><td class="num">4</td></tr>
-            <tr><th scope="row">Sessions per day</th><td class="num">20</td></tr>
-            <tr><th scope="row">Self-improvement launches per day</th><td class="num">4</td></tr>
-            <tr><th scope="row">Self-improvement stops below</th><td class="num">$40</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </section>
-
   <section id="platforms">
     <div class="wrap">
       <div class="sec-head">
@@ -864,7 +931,8 @@
             <li class="yes"><span class="m">&check;</span><span>Local models via llama.cpp</span></li>
             <li class="yes"><span class="m">&check;</span><span>Sandboxing with <code>sandbox-exec</code></span></li>
             <li class="no"><span class="m">&ndash;</span><span>Desktop app is built from source, unsigned</span></li>
-            <li class="no"><span class="m">&ndash;</span><span>Resident autonomy is dormant in this release</span></li>
+            <li class="yes"><span class="m">&check;</span><span>Resident autonomy under a Touch ID grant you start yourself</span></li>
+            <li class="yes"><span class="m">&check;</span><span>Devin key in the Keychain</span></li>
           </ul>
         </div>
         <div class="pcol">
@@ -901,7 +969,7 @@
     <div class="wrap">
       <div class="sec-head">
         <p class="eyebrow">Get started</p>
-        <h2>Open the console. Check autonomy separately.</h2>
+        <h2>Open the console. Talk to the Leader. Turn on autonomy when you are ready.</h2>
       </div>
 
       <div class="two" style="gap:44px">
@@ -920,16 +988,23 @@ ashlr verse</pre>
   --executable /path/to/claude</pre>
           </div></div>
           <div class="step"><span class="n"></span><div>
-            <h3>Bring up the local runtime</h3>
-            <p>Optional. Starts llama-server with batching slots and the normalising proxy in front of it. Opt local turns in, because the fallback should be the lane that already works.</p>
-            <pre>ashlr local-runtime start --slots 4
-export ASHLR_VERSE_LOCAL_DISPATCH=llama-server</pre>
+            <h3>Talk to the Leader</h3>
+            <p>Open Mind with <kbd>&#8984;4</kbd>, or from the terminal. Add Telegram for a two-way line on your phone.</p>
+            <pre>ashlr leader say "focus: the flaky retry test"
+ashlr comms setup-telegram</pre>
           </div></div>
           <div class="step"><span class="n"></span><div>
-            <h3>Inspect autonomy status</h3>
-            <p>Optional, and macOS only. The dry run describes the custody steps. This release does not admit live resident autonomy or service installation.</p>
-            <pre>ashlr authority status
-ashlr authority setup --dry-run</pre>
+            <h3>Turn on autonomy</h3>
+            <p>macOS only. Setup does what it can and stops for what only you may do: the custody install, Touch ID, two GitHub clicks. Then you start the resident daemon in your own terminal. It begins in shadow.</p>
+            <pre>ashlr authority setup --dry-run
+ashlr authority setup
+ashlr authority resident start</pre>
+          </div></div>
+          <div class="step"><span class="n"></span><div>
+            <h3>Optionally, connect Devin</h3>
+            <p>Needs a Devin plan with API access and Devin's GitHub integration on the repos it may touch. Decide on Devin's training opt-out first.</p>
+            <pre>ashlr devin connect
+ashlr devin budget --acu 50</pre>
           </div></div>
         </div>
 
@@ -938,13 +1013,21 @@ ashlr authority setup --dry-run</pre>
           <p>
             Node.js 22.15 or newer, and Git. Ollama for local model discovery. Whichever agent CLIs
             you already use. For the cloud lane, a Claude account with cloud sessions enabled and a
-            GitHub origin for the repository. A 27B model at eight-bit holds about 27&nbsp;GB of
-            weights resident, plus its cache; budget comfortably above that.
+            GitHub origin for the repository. For Devin, a Devin Teams or Enterprise plan. A 27B model at
+            eight-bit holds about 27&nbsp;GB of weights resident, plus its cache; budget comfortably above
+            that.
           </p>
           <p style="margin-top:14px">
             Verse never asks for your credentials. It drives each CLI with its own pinned profile, and
             the console itself is loopback-only: it prints a token at startup and will not answer a
             request that does not carry it.
+          </p>
+          <p style="margin-top:14px">
+            Guides: <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md">Verse</a>,
+            <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md">the Leader</a>,
+            <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTHORITY.md">autonomy</a>,
+            <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md">cloud</a> and
+            <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md">Devin</a>.
           </p>
         </div>
       </div>
@@ -954,8 +1037,8 @@ ashlr authority setup --dry-run</pre>
 
 <footer>
   <div class="wrap">
-    <p>Ashlr Verse &middot; verse.ashlr.ai</p>
-    <span><a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md">User guide</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/CHANGELOG.md">Changelog</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub">github.com/ashlrai/ashlr-hub</a></span>
+    <p>Ashlr Verse 3.15 &middot; verse.ashlr.ai</p>
+    <span><a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md">User guide</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md">Leader</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md">Devin</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/CHANGELOG.md">Changelog</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub">github.com/ashlrai/ashlr-hub</a></span>
   </div>
 </footer>
 </body>

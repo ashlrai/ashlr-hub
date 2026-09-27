@@ -136,6 +136,23 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   spend chokepoint, readiness gate, local-only gate and mutation token apply
   unchanged. No routing file and no fleet caller changed.
 
+### Documentation and verse.ashlr.ai for 3.15
+
+- New guides: `docs/LEADER.md` (Mind, Telegram commands and buttons, the CLI,
+  directives, approvals, check-ins; written for the fixed Telegram
+  `/directives` and `/settings` from the leader-conversation-gaps change) and `docs/DEVIN.md` (plan,
+  training opt-out, GitHub integration, service user, `ashlr devin connect`, ACU
+  budget, delivery, shadow-only intake, limits).
+- `docs/VERSE.md` covers every surface and shortcut as of 3.15: the ladder and
+  shadow decisions, Lessons, the Leader conversation, Resources readiness lines,
+  the repo wiki and Ask, the Devin lane and the ⌘K catalog. `docs/CLOUD.md`
+  compares the cloud and Devin lanes. `docs/AUTHORITY.md` and
+  `docs/AUTONOMY-GAP.md` state the current activation (grant active, ladder at
+  shadow) and what the operator must still do.
+- The site describes the Leader, autonomy with custody (grant, ladder, gates),
+  the multi-seat workbench, the wiki and lessons, and the cloud and Devin lanes,
+  with the fleet's real status (stage 1 of 8, shadow, 0 repos merging).
+
 ### Private repo wiki and Ask
 
 - `ashlr wiki build|status|show|ask` and a Verse **Repo wiki** section (gear
