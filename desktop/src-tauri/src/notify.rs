@@ -251,7 +251,9 @@ impl NeedsYouCounts {
             "approval" | "owner-lane-pr" | "class-c" => self.approvals += 1,
             "veto-window" | "leader-question" | "owner-hold" | "quarantine" | "revert"
             | "grant" | "kill" => self.fleet += 1,
-            "chat-failed" | "queue-held" => self.chats += 1,
+            "chat-failed" | "queue-held" | "agent-plan" | "agent-spend" | "agent-ci" | "agent-setup" => {
+                self.chats += 1
+            }
             "reconnect" | "repin" => self.accounts += 1,
             _ => self.other += 1,
         }
@@ -827,6 +829,10 @@ mod tests {
             "kill",
             "chat-failed",
             "queue-held",
+            "agent-plan",
+            "agent-spend",
+            "agent-ci",
+            "agent-setup",
             "reconnect",
             "repin",
         ] {

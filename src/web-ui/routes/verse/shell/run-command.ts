@@ -190,6 +190,11 @@ export function executeCatalogCommand(id: string, invocation: CommandInvocation 
  * The GLOBAL commands the shell itself serves (every other id belongs to the
  * unit that owns the behaviour). Returns the unregister function.
  */
+/** The Agents board (3.16) takes New agent once its lazy chunk mounts (agents-focus.ts). */
+function agentsFocus(kind: 'new' | 'new-multi'): void {
+  void import('../agents/agents-focus.js').then((m) => m.requestAgentsFocus(kind));
+}
+
 export function registerShellCommandHandlers(): () => void {
   const surfaces: Array<[string, VerseSectionId]> = [
     ['surface.command', 'command'],
@@ -197,6 +202,7 @@ export function registerShellCommandHandlers(): () => void {
     ['surface.growth', 'growth'],
     ['surface.mind', 'mind'],
     ['surface.chat', 'chat'],
+    ['surface.agents', 'agents'],
     ['section.settings', 'settings'],
     ['section.apps', 'apps'],
     ['section.usage', 'usage'],
@@ -218,7 +224,13 @@ export function registerShellCommandHandlers(): () => void {
     registerCommandHandler('chat.recent-next', () => { cycleVerseRecentChat(1); }),
     registerCommandHandler('chat.recent-prev', () => { cycleVerseRecentChat(-1); }),
     registerCommandHandler('rail.toggle-labels', () => toggleVerseRail()),
-    registerCommandHandler('chat.new', () => requestVerseCommand('new-chat')),
+    // ⌘N on the Agents board starts an agent in its own workspace; anywhere else, a chat.
+    registerCommandHandler('chat.new', () => {
+      if (getVerseUiState().section === 'agents') agentsFocus('new');
+      else requestVerseCommand('new-chat');
+    }),
+    registerCommandHandler('agents.new', () => agentsFocus('new')),
+    registerCommandHandler('agents.new-multi', () => agentsFocus('new-multi')),
     registerCommandHandler('chat.new-on', (inv) => {
       const seat = inv.argument?.kind === 'seat' ? inv.argument.id : undefined;
       requestVerseCommand('new-chat', seat ? { seatId: seat } : {});

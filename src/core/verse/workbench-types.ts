@@ -37,8 +37,11 @@ export type { VerseEffort, VersePermissionMode, VerseSessionControls };
 // §1 Information architecture (SPEC-310C §0.1, SPEC-310B §6)
 // ===========================================================================
 
-/** The rail, in ⌘1–⌘5 order. Chat moved from ⌘1 to ⌘5 in 3.10. */
-export const WORKBENCH_SURFACES = ['command', 'fleet', 'growth', 'mind', 'chat'] as const;
+/**
+ * The rail, in ⌘1–⌘6 order. Chat moved from ⌘1 to ⌘5 in 3.10; 3.16 adds the
+ * Agents board at ⌘6 (every chat and agent across repos, by attention).
+ */
+export const WORKBENCH_SURFACES = ['command', 'fleet', 'growth', 'mind', 'chat', 'agents'] as const;
 export type WorkbenchSurfaceId = (typeof WORKBENCH_SURFACES)[number];
 
 /**
@@ -144,6 +147,10 @@ export const NEEDS_YOU_KINDS = [
   // chats split
   'chat-failed', // a turn failed and has not been looked at
   'queue-held', // a queued follow-up is held after a failure or Stop
+  'agent-plan', // 3.16: an agent's plan waits for approval (Plan first)
+  'agent-spend', // 3.16: an agent is at 80% of its spend cap, or reached it
+  'agent-ci', // 3.16: an agent's PR is red with no auto-fix left, or cannot merge
+  'agent-setup', // 3.16: an agent workspace's setup script failed (its prompt is held)
   // accounts split
   'reconnect', // a seat is signed out or its credential is expiring
   'repin', // a seat is pinned to an older CLI than the newest installed
@@ -168,6 +175,10 @@ export const NEEDS_YOU_KIND_CATEGORY: Readonly<Record<NeedsYouKind, NeedsYouCate
   kill: 'fleet',
   'chat-failed': 'chats',
   'queue-held': 'chats',
+  'agent-plan': 'chats',
+  'agent-spend': 'chats',
+  'agent-ci': 'chats',
+  'agent-setup': 'chats',
   reconnect: 'accounts',
   repin: 'accounts',
 };
@@ -1404,6 +1415,15 @@ export const WORKBENCH_ROUTE_FAMILIES = [
     module: 'src/core/verse/sources-api.ts',
     handler: 'handleSourcesApi',
     prefixes: ['/api/verse/sources'],
+  },
+  {
+    // 3.16 "run many agents": the Agents board, agent workspaces, Checks,
+    // Plan first and spend caps (core/verse/agents/types.ts).
+    id: 'agents',
+    owner: '3.16-agents',
+    module: 'src/core/verse/agents-api.ts',
+    handler: 'handleAgentsApi',
+    prefixes: ['/api/verse/agents'],
   },
 ] as const satisfies readonly {
   id: string;

@@ -111,6 +111,7 @@ export const SECTION_ICON: Readonly<Record<VerseSectionId, ComponentType<IconPro
   growth: RAIL_ICON.growth!,
   mind: RAIL_ICON.mind!,
   chat: RAIL_ICON.chat!,
+  agents: RAIL_ICON.agents!,
   settings: SettingsIcon,
   apps: AppsIcon,
   usage: UsageIcon,

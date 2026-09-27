@@ -88,6 +88,7 @@ export const VERSE_SECTIONS: readonly VerseSectionEntry[] = [
   { id: 'growth', label: 'Growth', module: 'GrowthSection', placement: 'rail', blurb: 'Is the fleet getting better? Merges, cost per merge and the experiments behind them.' },
   { id: 'mind', label: 'Mind', module: 'MindSection', placement: 'rail', blurb: "The Leader's memos, what came of each move, and what the reasoning shows." },
   { id: 'chat', label: 'Chat', module: 'ChatSection', placement: 'rail', blurb: 'Talk to a seat. Chats are grouped by project and resume where they stopped.' },
+  { id: 'agents', label: 'Agents', module: 'AgentsSection', placement: 'rail', blurb: 'Every chat and agent, by what it needs — with one-click workspaces and Checks.' },
   { id: 'settings', label: 'Settings', module: 'SettingsSection', placement: 'tray', blurb: 'Theme, chat, desktop and keyboard — and this tour again.' },
   { id: 'apps', label: 'Apps & Accounts', module: 'AppsSection', placement: 'tray', blurb: 'Seats, terminal agents, local models and MCP servers in one list.' },
   { id: 'usage', label: 'Usage', module: 'UsageSection', placement: 'tray', blurb: 'Which account you can actually use right now, and what it costs.' },

@@ -158,10 +158,10 @@ describe('OnboardingFlow — presence and dismissal', () => {
     expect(screen.getByRole('button', { name: 'Minimize getting started' })).toHaveAttribute('title', 'Minimize getting started');
   });
 
-  it('tours the 3.10 rail — Command ⌘1 through Chat ⌘5 — and points at ⌘K, ⌘J and the gear', () => {
+  it('tours the rail — Command ⌘1 through Chat ⌘5, then Agents ⌘6 — and points at ⌘K, ⌘J and the gear', () => {
     render(<OnboardingFlow />);
     const names = screen.getAllByRole('listitem').map((li) => li.textContent ?? '');
-    expect(names.map((n) => n.slice(0, n.indexOf('⌘') + 2))).toEqual(['Command ⌘1', 'Fleet ⌘2', 'Growth ⌘3', 'Mind ⌘4', 'Chat ⌘5']);
+    expect(names.map((n) => n.slice(0, n.indexOf('⌘') + 2))).toEqual(['Command ⌘1', 'Fleet ⌘2', 'Growth ⌘3', 'Mind ⌘4', 'Chat ⌘5', 'Agents ⌘6']);
     expect(screen.getByText(/runs anything by name/)).toBeInTheDocument();
     expect(screen.queryByText(/Approvals|Autonomy/)).not.toBeInTheDocument();
   });

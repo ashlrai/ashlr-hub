@@ -127,6 +127,7 @@ const KEYS = {
     'surface.growth': 'mod+3',
     'surface.mind': 'mod+4',
     'surface.chat': 'mod+5',
+    'surface.agents': 'mod+6',
     'section.settings': 'mod+,',
     // Navigation
     'palette.open': 'mod+k',
@@ -141,6 +142,8 @@ const KEYS = {
     'rail.toggle-labels': 'mod+shift+\\',
     // Chats
     'chat.new': 'mod+n',
+    // 3.16: one task on several seats, each in its own workspace (the Agents board).
+    'agents.new-multi': 'mod+shift+n',
     // App
     'appearance.toggle-theme': 'mod+shift+l',
     'app.summon': 'ctrl+alt+space',

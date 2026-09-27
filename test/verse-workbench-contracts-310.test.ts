@@ -179,6 +179,8 @@ const EXPECTED_HANDLERS: Record<WorkbenchRouteFamilyId, string> = {
   checkpoints: 'handleCheckpointsApi',
   // 3.15: open a cited source file in the editor.
   sources: 'handleSourcesApi',
+  // 3.16: run many agents — the board, agent workspaces, Checks, Plan first, spend caps.
+  agents: 'handleAgentsApi',
 };
 
 const allPrefixes = WORKBENCH_ROUTE_FAMILIES.flatMap((family) => family.prefixes.map((prefix) => ({ family: family.id, prefix })));
@@ -719,8 +721,8 @@ describe('NeedsYouItem (R1)', () => {
 });
 
 describe('information architecture', () => {
-  it('orders the rail ⌘1 Command … ⌘5 Chat', () => {
-    expect(WORKBENCH_SURFACES).toEqual(['command', 'fleet', 'growth', 'mind', 'chat']);
+  it('orders the rail ⌘1 Command … ⌘5 Chat, ⌘6 Agents (3.16)', () => {
+    expect(WORKBENCH_SURFACES).toEqual(['command', 'fleet', 'growth', 'mind', 'chat', 'agents']);
   });
 
   it('migrates every v2 section: autonomy → fleet, approvals → command + drawer, mcp → apps', () => {

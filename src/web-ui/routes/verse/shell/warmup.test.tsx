@@ -107,7 +107,7 @@ describe('warmUpAfterFirstPaint', () => {
     });
     cancel = warmUpAfterFirstPaint({ loadSection, overlays: [overlay('palette'), overlay('drawer'), overlay('shortcuts')], readsInFlight }, FAST);
     await vi.waitFor(() => expect(net.paths().some((p) => p.startsWith('/api/reasoning/digest'))).toBe(true), { timeout: 5_000 });
-    expect(log).toEqual(['overlay palette', 'overlay drawer', 'overlay shortcuts', 'chunk command', 'chunk growth', 'chunk mind']);
+    expect(log).toEqual(['overlay palette', 'overlay drawer', 'overlay shortcuts', 'chunk command', 'chunk growth', 'chunk mind', 'chunk agents']);
     expect(loadSection).not.toHaveBeenCalledWith('fleet');
     expect(loadSection).not.toHaveBeenCalledWith('chat');
     // No read before the first surface's chunk; Command's reads all out before
