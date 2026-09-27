@@ -24,6 +24,7 @@ import { readCloudBacklog, nextBacklogItem } from './backlog.js';
 import { cloudBudgetView } from './budget.js';
 import { ensureCloudCheckout, isSafeBranchName, KeyedMutex, type CloudCheckoutDeps } from './checkout.js';
 import { buildCloudPrompt } from './delivery-contract.js';
+import { knowledgeBlockFor } from '../learn/retro/inject.js';
 import { launchCloudSession, readCloudSeatArgv, SEAT_NOT_READY_REASON, type CloudLaunchDeps } from './launcher.js';
 import { CLOUD_REPO_PATTERN, listCloudTasks, newCloudTaskId, readCloudBudget, writeCloudTask } from './store.js';
 import { defaultCloudGh, type CloudTrackerDeps } from './tracker.js';
@@ -176,7 +177,11 @@ async function launchWithGate(req: CloudLaunchRequest | CloudInternalLaunch, gat
       writeCloudTask(task);
       const checkout = await ensureCloudCheckout(repo, baseBranch, deps.checkout);
       if (!checkout.ok) return fail(checkout.failure, checkout.message);
-      const launched = await launchCloudSession({ cwd: checkout.path, prompt: buildCloudPrompt(task) }, deps.launcher);
+      const lessons = knowledgeBlockFor(
+        { repo: task.repo, paths: [], kind: null, text: `${task.title}\n${task.prompt}` },
+        { fromLeader: task.origin === 'leader' },
+      ).text;
+      const launched = await launchCloudSession({ cwd: checkout.path, prompt: buildCloudPrompt(task, lessons) }, deps.launcher);
       if (!launched.ok) return fail(launched.failure, launched.message);
       Object.assign(task, {
         state: 'running',

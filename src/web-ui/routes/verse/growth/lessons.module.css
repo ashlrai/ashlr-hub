@@ -1,0 +1,223 @@
+/*
+ * routes/verse/growth/lessons.module.css — Growth › Lessons (3.15).
+ * Tokens only: style-scan-310 bans raw hex colours and px font sizes here.
+ */
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  line-height: var(--text-md-line);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.meta {
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: var(--surface-gap, var(--space-4));
+}
+
+@media (max-width: 960px) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.wide,
+.narrow {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.wide > *,
+.narrow > * {
+  flex: 1 1 auto;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.retro {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-2);
+}
+
+.retro:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.retroHead {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.retroHead:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.retroAsked {
+  flex: 1 1 16rem;
+  min-width: 0;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.retroBody {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line-relaxed);
+  color: var(--text-secondary);
+}
+
+.retroBody dt {
+  color: var(--text-tertiary);
+}
+
+.retroBody dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.bullets {
+  margin: 0;
+  padding-left: var(--space-4);
+}
+
+.prompt {
+  margin: 0;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-code);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.note {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-2);
+}
+
+.note:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.noteText {
+  margin: 0;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line-relaxed);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.scopeRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: var(--space-2);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.label {
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  color: var(--text-tertiary);
+}
+
+.input,
+.textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-sm-size);
+}
+
+.textarea {
+  resize: vertical;
+}
+
+.input:focus-visible,
+.textarea:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+}

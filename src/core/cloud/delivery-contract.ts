@@ -30,8 +30,11 @@ const STATUSES: readonly CloudTaskReport['status'][] = ['done', 'partial', 'bloc
  * `${CLOUD_REPORT_FENCE}` JSON block matching CloudTaskReport. If nothing
  * needs changing, still push an empty commit on the branch and open the PR
  * with status "no-change" so Verse sees completion.
+ *
+ * `knowledge` (3.15) is the approved-lessons block for this task; it sits
+ * between the task text and the contract. Empty ⇒ the prompt is unchanged.
  */
-export function buildCloudPrompt(task: CloudTaskV1): string {
+export function buildCloudPrompt(task: CloudTaskV1, knowledge = ''): string {
   const example = JSON.stringify({
     status: 'done',
     summary: 'One or two plain sentences on what changed and why.',
@@ -41,6 +44,8 @@ export function buildCloudPrompt(task: CloudTaskV1): string {
   }, null, 2);
   return [
     task.prompt.trim(),
+    // 3.15: approved lessons for this repo / kind of task (learn/retro/inject.ts), before the contract.
+    ...(knowledge.trim() ? ['', knowledge.trim()] : []),
     '',
     '---',
     `DELIVERY CONTRACT (Ashlr Verse cloud task ${task.id}) — follow it exactly; Verse only sees what arrives on GitHub.`,
