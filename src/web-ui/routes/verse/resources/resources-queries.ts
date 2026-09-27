@@ -11,6 +11,7 @@
  * problem, not this panel's.
  */
 import { VERSE_CLOUD_PATH } from '../../../../core/cloud/types.js';
+import { VERSE_RESOURCE_READINESS_PATH, type ResourceReadinessResponse } from '../../../../core/routing/readiness-types.js';
 import { ApiError, apiGet } from '../../../data/client.js';
 import type { QueryDef } from '../../../data/queries.js';
 import { projectCloudCredits, type CloudCreditsView } from './resources-model.js';
@@ -38,5 +39,39 @@ export const cloudCreditsQuery: QueryDef<CloudCreditsRead> = {
   },
 };
 
+export const RESOURCES_READINESS_KEY = 'verse-resources-readiness';
+
+export interface ReadinessRead {
+  /** False when this server has no readiness route (404) or it could not answer. */
+  available: boolean;
+  /** Null when absent, or when the body was not a readiness response. */
+  value: ResourceReadinessResponse | null;
+}
+
+function isReadiness(raw: unknown): raw is ResourceReadinessResponse {
+  if (raw === null || typeof raw !== 'object') return false;
+  const r = raw as Record<string, unknown>;
+  return r['v'] === 1 && Array.isArray(r['resources']) && typeof r['autonomy'] === 'object' && r['autonomy'] !== null;
+}
+
+/**
+ * GET /api/verse/budget/readiness (3.14): per resource, "ready for chat?" and
+ * "ready for the fleet?" with the one fix. An older server answers 404 — the
+ * drawer then simply shows no readiness lines, never a false "not ready".
+ */
+export const resourceReadinessQuery: QueryDef<ReadinessRead> = {
+  key: RESOURCES_READINESS_KEY,
+  fetch: async (signal) => {
+    try {
+      const raw = await apiGet<unknown>(VERSE_RESOURCE_READINESS_PATH, signal);
+      return { available: true, value: isReadiness(raw) ? raw : null };
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err;
+      if (err instanceof DOMException && err.name === 'AbortError') throw err;
+      return { available: false, value: null };
+    }
+  },
+};
+
 /** While the drawer is open: seats and health ride their own 30 s polls; these are the drawer's own. */
-export const RESOURCES_POLL_MS = { cloud: 60_000, local: 30_000, runtime: 15_000 } as const;
+export const RESOURCES_POLL_MS = { cloud: 60_000, local: 30_000, runtime: 15_000, readiness: 30_000 } as const;

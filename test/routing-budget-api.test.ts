@@ -17,6 +17,8 @@ import {
   handleBudgetApi,
   routeSeatShadow,
   setBudgetCapacitySourceForTest,
+  setCapacityPublishGateForTest,
+  setReadinessSourceForTest,
   startBudgetCapacityPublisher,
   type CapacityReading,
 } from '../src/core/routing/budget-api.js';
@@ -93,10 +95,14 @@ beforeEach(() => {
     sourceCalls += 1;
     return reading;
   });
+  // A live collector owns the snapshot (see the publish-gate block below for
+  // what happens when it does not).
+  setCapacityPublishGateForTest(() => true);
 });
 
 afterEach(() => {
   setBudgetCapacitySourceForTest();
+  setCapacityPublishGateForTest();
   process.env['HOME'] = savedHome;
   fs.rmSync(home, { recursive: true, force: true });
 });
@@ -291,6 +297,56 @@ describe('capacity publisher', () => {
         error: 'Seat capacity could not be read.',
       });
     }
+  });
+});
+
+describe('capacity publish gate (3.14 — a server with no live collector stays quiet)', () => {
+  it('does not write the fleet snapshot while this server has no live collector', async () => {
+    setCapacityPublishGateForTest(() => false);
+    const { status } = await get('/api/verse/budget');
+    expect(status).toBe(200);
+    expect(readCapacitySnapshot()).toBeNull();
+    const stop = startBudgetCapacityPublisher({} as AshlrConfig, { intervalMs: 1 });
+    await new Promise((r) => setTimeout(r, 20));
+    stop();
+    // Still nothing: an empty-but-fresh snapshot would keep the daemon's own
+    // publisher dormant and read every paid seat as "unknown usage".
+    expect(readCapacitySnapshot()).toBeNull();
+  });
+
+  it('a throwing gate fails closed (no write) and the read still answers', async () => {
+    setCapacityPublishGateForTest(() => { throw new Error('status unreadable'); });
+    expect((await get('/api/verse/budget')).status).toBe(200);
+    expect(readCapacitySnapshot()).toBeNull();
+  });
+
+  it('with no collector registered at all, the default gate refuses', async () => {
+    setCapacityPublishGateForTest();
+    await get('/api/verse/budget');
+    expect(readCapacitySnapshot()).toBeNull();
+  });
+});
+
+describe('GET /api/verse/budget/readiness (3.14)', () => {
+  afterEach(() => setReadinessSourceForTest());
+
+  it('serves the readiness response through the same sanitising sendJson, GET only', async () => {
+    setReadinessSourceForTest(async () => ({
+      v: 1,
+      checkedAt: '2026-09-27T00:05:00.000Z',
+      autonomy: { active: true, stage: 'shadow', detail: 'Stage 1 of 8 · shadow' },
+      capacitySnapshotAt: null,
+      resources: [],
+    }));
+    const { status, body } = await get<{ v: number; autonomy: { stage: string } }>('/api/verse/budget/readiness');
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ v: 1, autonomy: { stage: 'shadow' } });
+    // It refreshes the fleet's snapshot first (the gate allows it here).
+    expect(sourceCalls).toBe(1);
+
+    const res = await fetch(`${base}/api/verse/budget/readiness`, { method: 'POST', headers: { 'x-ashlr-token': TOKEN } });
+    expect(res.status).toBe(404);
+    expect((await get('/api/verse/budget/readiness?x=1')).status).toBe(400);
   });
 });
 

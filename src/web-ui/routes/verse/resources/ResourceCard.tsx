@@ -24,6 +24,8 @@ import { accountActions, type AccountAction } from '../apps/apps-model.js';
 import { MonogramTile } from '../apps/MonogramTile.js';
 import { usedPercentText } from '../percent-text.js';
 import { windowSentence, type AccountStatus, type CapacityRow, type CapacityWindowRow } from '../usage/capacity-strip-model.js';
+import type { ResourceReadinessRow } from '../../../../core/routing/readiness-types.js';
+import { ReadinessLines } from './ReadinessLines.js';
 import styles from './ResourcesDrawer.module.css';
 
 /** Above this share of a window the meter turns amber (the capacity strip's own line). */
@@ -97,9 +99,15 @@ export interface ResourceCardProps {
   mode: BudgetMode | null;
   busy: { seatId: string; kind: AccountAction['kind'] } | null;
   onAction: (row: CapacityRow, action: AccountAction) => void;
+  /**
+   * This account's row of GET /api/verse/budget/readiness (3.14). Its
+   * reconnect / check-again fixes are NOT repeated here — `accountActions`
+   * already offers them below — only a literal command is.
+   */
+  readiness?: ResourceReadinessRow | null;
 }
 
-export function ResourceCard({ row, status, settled, mode, busy, onAction }: ResourceCardProps) {
+export function ResourceCard({ row, status, settled, mode, busy, onAction, readiness = null }: ResourceCardProps) {
   // Budget editing lives in Apps & Accounts; the drawer offers what the seat needs now.
   const actions = accountActions(row, settled).filter((a) => a.kind !== 'edit-budget');
   const reserve = row.reserve;
@@ -131,6 +139,7 @@ export function ResourceCard({ row, status, settled, mode, busy, onAction }: Res
           {row.credits !== null ? <span>{row.credits}</span> : null}
         </p>
       ) : null}
+      <ReadinessLines row={readiness} />
       {actions.length > 0 ? (
         <div className={styles.cardActions}>
           {actions.map((action) => (

@@ -54,6 +54,20 @@ export function validateResourceConnectionConfig(value: unknown): ResourceConnec
   return { schemaVersion: 1, intervalMs: Number(value.intervalMs), accounts };
 }
 
+/**
+ * Project one row as it reads at `nowMs`. A slow cycle, a coordinator queue or
+ * a SUSPENDED collector holding its last snapshot can all cross a provider's
+ * native expiry before a replacement settles. Expiry never renews a reading;
+ * signed-out rows carry no usable observation and remain signed out. Exported
+ * so a caller that retains a snapshot past the monitor's life (Verse's idle
+ * collector) applies exactly the rule the live monitor does.
+ */
+export function expireConnectionRow(row: ResourceAccountConnection, nowMs: number = Date.now()): ResourceAccountConnection {
+  if (row.state === 'signed-out' || row.expiresAt === null || Date.parse(row.expiresAt) > nowMs) return row;
+  return { ...row, state: 'unavailable', authentication: 'unknown', health: 'unknown', planType: null,
+    observedAt: null, expiresAt: null, windows: [], reason: 'connection-reading-expired' };
+}
+
 export function createResourceConnectionMonitor(options: { config: ResourceConnectionConfig; cwd: string;
   signal?: AbortSignal; assertOwnership: () => void; coordinator?: NativeMetadataCoordinator }): ResourceConnectionMonitor {
   const config = validateResourceConnectionConfig(options.config); inspectPrivateDirectory(options.cwd);
@@ -196,14 +210,11 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
   if (signal?.aborted) stopped(); else signal?.addEventListener('abort', stopped, { once: true });
   if (!abort.signal.aborted) pending = cycle();
   return {
-    snapshot: () => ({ sampledAt: new Date().toISOString(), refreshing, accounts: structuredClone(rows.map((row) => {
-      // A slow cycle or coordinator queue can cross any provider's native
-      // expiry before its replacement settles. Expiry never renews a reading;
-      // signed-out rows carry no usable observation and remain signed out.
-      if (row.state === 'signed-out' || row.expiresAt === null || Date.parse(row.expiresAt) > Date.now()) return row;
-      return { ...row, state: 'unavailable', authentication: 'unknown', health: 'unknown', planType: null,
-        observedAt: null, expiresAt: null, windows: [], reason: 'connection-reading-expired' };
-    })) }),
+    snapshot: () => {
+      const nowMs = Date.now();
+      return { sampledAt: new Date(nowMs).toISOString(), refreshing,
+        accounts: structuredClone(rows.map((row) => expireConnectionRow(row, nowMs))) };
+    },
     async close() { closing = true; stopped(); signal?.removeEventListener('abort', stopped); await pending;
       rows = rows.map((row) => ({ ...row, health: 'unknown' }));
       if (uncertain) throw new Error('Native connection process cleanup uncertain'); },

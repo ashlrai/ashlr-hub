@@ -10,6 +10,9 @@
  *        ?task=&difficulty=&autonomous=[&contextTokens=]
  *   GET  /api/verse/budget/decisions      → { decisions: ShadowDecisionRecord[] }
  *        [?limit=]
+ *   GET  /api/verse/budget/readiness      → ResourceReadinessResponse (3.14): per
+ *        resource, "ready for chat?" and "ready for the fleet?" with the one fix
+ *        (core/routing/readiness.ts)
  *
  * NOTHING HERE SPENDS. Headroom is computed from the account collector's
  * existing readings (no probe is started), the preview runs the pure router,
@@ -48,7 +51,7 @@ import type { ApiModule } from '../verse/api-modules.js';
 import type { VerseApiContext } from '../verse/verse-api.js';
 import type { AshlrConfig } from '../types.js';
 import type { VerseSeat } from '../verse/types.js';
-import type { VerseAccountCollector } from '../verse/accounts.js';
+import { getVerseAccountCollector, verseCollectorLive, type VerseAccountCollector } from '../verse/accounts.js';
 import { passesMutationGate, readBody, sendJson } from '../web/api.js';
 import {
   BudgetPolicyUnreadableError,
@@ -70,6 +73,7 @@ import {
   type BudgetView,
 } from './policy.js';
 import { routeSeat } from './router.js';
+import { VERSE_RESOURCE_READINESS_PATH, type ResourceReadinessResponse } from './readiness-types.js';
 import {
   VERSE_BUDGET_PATH,
   type BudgetPolicy,
@@ -81,6 +85,7 @@ import {
 } from './types.js';
 
 export const VERSE_BUDGET_PREVIEW_PATH = `${VERSE_BUDGET_PATH}/preview`;
+export { VERSE_RESOURCE_READINESS_PATH };
 export const VERSE_BUDGET_DECISIONS_PATH = `${VERSE_BUDGET_PATH}/decisions`;
 
 /** Seat IDENTITY (which accounts and Ollama tags exist) changes rarely and costs HTTP round trips to learn. */
@@ -156,6 +161,15 @@ async function defaultCapacitySource(cfg: AshlrConfig, opts: { collector?: Verse
 }
 
 let capacitySource: CapacitySource = defaultCapacitySource;
+
+/** The readiness builder's live gatherer (core/routing/readiness.ts); injectable for tests. */
+let readinessSource: (cfg: AshlrConfig) => Promise<ResourceReadinessResponse> =
+  async (cfg) => (await import('./readiness.js')).gatherResourceReadiness(cfg);
+
+/** Test hook: replace (or with no argument, restore) the readiness source. */
+export function setReadinessSourceForTest(source?: (cfg: AshlrConfig) => Promise<ResourceReadinessResponse>): void {
+  readinessSource = source ?? (async (cfg) => (await import('./readiness.js')).gatherResourceReadiness(cfg));
+}
 let lastSnapshotAt = 0;
 
 /** Test hook: replace (or with no argument, restore) the capacity source; also resets caches. */
@@ -201,6 +215,28 @@ function loadPolicyForPanel(): BudgetPolicy {
   );
 }
 
+/**
+ * May THIS server write the fleet's capacity snapshot right now?
+ *
+ * Only while its own account collector is live (owned AND running). The
+ * snapshot is the fleet's one source of paid-seat evidence, and the daemon's
+ * publisher (daemon/capacity-publisher.ts) stays DORMANT for as long as a
+ * foreign snapshot is fresh. A Verse whose collector was idle-suspended, or
+ * read-only behind another holder, or started with --no-accounts, used to keep
+ * republishing every 60 s a snapshot with NO readings — fresh enough to keep
+ * the daemon dormant, empty enough that every paid seat read "unknown usage".
+ * That silently held autonomy off Claude and Grok on 2026-09-26. Now such a
+ * server stays quiet and the daemon samples for itself.
+ *
+ * Injectable so tests can assert the gate without a real collector.
+ */
+let publishGate: () => boolean = () => verseCollectorLive(getVerseAccountCollector());
+
+/** Test hook: replace (or with no argument, restore) the publish gate. */
+export function setCapacityPublishGateForTest(gate?: () => boolean): void {
+  publishGate = gate ?? (() => verseCollectorLive(getVerseAccountCollector()));
+}
+
 /** Read capacity and (throttled) persist it for collector-less readers. Never throws on the write. */
 async function readCapacity(cfg: AshlrConfig, force = false): Promise<CapacityReading> {
   let reading: CapacityReading;
@@ -212,7 +248,9 @@ async function readCapacity(cfg: AshlrConfig, force = false): Promise<CapacityRe
     throw new BudgetReadError('VERSE_BUDGET_CAPACITY_UNREADABLE', 'Seat capacity could not be read.');
   }
   const now = Date.now();
-  if (force || now - lastSnapshotAt >= SNAPSHOT_MIN_INTERVAL_MS) {
+  let mayPublish = false;
+  try { mayPublish = publishGate(); } catch { mayPublish = false; }
+  if (mayPublish && (force || now - lastSnapshotAt >= SNAPSHOT_MIN_INTERVAL_MS)) {
     lastSnapshotAt = now;
     try {
       await writeCapacitySnapshotAsync(reading.seats, new Date(now));
@@ -340,10 +378,25 @@ function parsePreview(params: URLSearchParams): RoutingRequest | string {
  * module (or handleApi's own 404) runs.
  */
 export const handleBudgetApi: ApiModule = async (ctx, req, res, path, method) => {
-  if (path !== VERSE_BUDGET_PATH && path !== VERSE_BUDGET_PREVIEW_PATH && path !== VERSE_BUDGET_DECISIONS_PATH) {
+  if (path !== VERSE_BUDGET_PATH && path !== VERSE_BUDGET_PREVIEW_PATH && path !== VERSE_BUDGET_DECISIONS_PATH
+    && path !== VERSE_RESOURCE_READINESS_PATH) {
     return false;
   }
   try {
+    if (path === VERSE_RESOURCE_READINESS_PATH) {
+      if (method !== 'GET') {
+        sendJson(res, 404, { error: `not found: ${method} ${path}` });
+        return true;
+      }
+      if (!readQuery(req, res, [])) return true;
+      // Refresh the fleet's snapshot first (a no-op unless this server's
+      // collector is live — see `publishGate`), so "Fleet" is judged against
+      // the freshest evidence the daemon can actually read.
+      try { await readCapacity(ctx.cfg); } catch { /* the snapshot read below says what is missing */ }
+      sendJson(res, 200, await readinessSource(ctx.cfg));
+      return true;
+    }
+
     if (path === VERSE_BUDGET_PATH) {
       if (method === 'GET') {
         if (!readQuery(req, res, [])) return true;

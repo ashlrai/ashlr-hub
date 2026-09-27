@@ -215,3 +215,96 @@ export function modelContextText(row: Pick<LocalModelRow, 'nativeContext' | 'con
 
 /** How many models the drawer lists before pointing at Usage for the rest. */
 export const LOCAL_MODELS_SHOWN = 6;
+
+// ---------------------------------------------------------------------------
+// Local runtimes (3.14): Ollama, LM Studio and llama-server as ONE resource
+// ---------------------------------------------------------------------------
+
+export interface LocalRuntimeLine {
+  id: 'ollama' | 'lmstudio' | 'llama-server';
+  name: string;
+  /** Status-line tone: answering with something loaded = success. */
+  tone: 'success' | 'warning' | 'danger' | 'neutral';
+  /** "Answering", "Not answering", "Loading…". */
+  word: string;
+  /** "4 installed · 1 loaded" / "listening on :8080 but not answering — restart it". */
+  detail: string;
+}
+
+function portOf(baseUrl: unknown): string {
+  if (typeof baseUrl !== 'string') return '';
+  try {
+    const url = new URL(baseUrl);
+    return url.port ? `:${url.port}` : url.host;
+  } catch {
+    return '';
+  }
+}
+
+function modelCounts(report: Record<string, unknown>): { installed: number; loaded: number } {
+  const models = Array.isArray(report['models']) ? report['models'] : [];
+  let loaded = 0;
+  // `state: 'loaded'` is the current wire; `loaded: true` the pre-3.10 one.
+  for (const m of models) {
+    const row = rec(m);
+    if (row?.['state'] === 'loaded' || row?.['loaded'] === true) loaded += 1;
+  }
+  return { installed: models.length, loaded };
+}
+
+function catalogLine(id: 'ollama' | 'lmstudio', name: string, raw: unknown): LocalRuntimeLine | null {
+  const report = rec(raw);
+  if (!report) return null;
+  const port = portOf(report['baseUrl']);
+  if (report['reachable'] !== true) {
+    return { id, name, tone: 'neutral', word: 'Not running', detail: port ? `nothing answering on ${port}` : 'nothing answering' };
+  }
+  const { installed, loaded } = modelCounts(report);
+  const stale = report['stale'] === true ? ' · last known' : '';
+  return {
+    id,
+    name,
+    tone: loaded > 0 ? 'success' : 'neutral',
+    word: 'Answering',
+    detail: `${installed} installed · ${loaded > 0 ? `${loaded} loaded` : 'none loaded'}${stale}`,
+  };
+}
+
+function llamaLine(raw: unknown): LocalRuntimeLine | null {
+  const report = rec(raw);
+  if (!report) return null;
+  const port = portOf(report['baseUrl']);
+  const status = report['status'];
+  const reason = report['reason'];
+  const name = 'llama-server';
+  if (status === 'ok') {
+    const count = typeof report['modelCount'] === 'number' ? report['modelCount'] : null;
+    const slots = typeof report['slots'] === 'number' ? report['slots'] : null;
+    const parts = [count !== null ? `${count} model${count === 1 ? '' : 's'} served` : 'serving', slots !== null ? `${slots} slots` : null]
+      .filter((p): p is string => p !== null);
+    return { id: 'llama-server', name, tone: 'success', word: 'Answering', detail: parts.join(' · ') };
+  }
+  if (status === 'loading') return { id: 'llama-server', name, tone: 'warning', word: 'Loading…', detail: `mapping weights on ${port}` };
+  if (status === 'error') return { id: 'llama-server', name, tone: 'danger', word: 'Error', detail: `answering on ${port} with an error` };
+  // `down`: refused = not running; timed out = a process holds the port but
+  // never answers — wedged, which needs a restart, not a start.
+  if (reason === 'llama-server-timeout') {
+    return { id: 'llama-server', name, tone: 'danger', word: 'Not answering', detail: `listening on ${port} but not answering — restart it` };
+  }
+  return { id: 'llama-server', name, tone: 'neutral', word: 'Not running', detail: port ? `nothing answering on ${port}` : 'nothing answering' };
+}
+
+/**
+ * One line per local runtime from GET /api/verse/local-models. A runtime the
+ * server did not report (an older build has no `llamaServer`) is simply
+ * absent — never shown as down.
+ */
+export function localRuntimeLines(raw: unknown): LocalRuntimeLine[] {
+  const root = rec(raw);
+  if (!root) return [];
+  return [
+    catalogLine('ollama', 'Ollama', root['ollama']),
+    catalogLine('lmstudio', 'LM Studio', root['lmStudio']),
+    llamaLine(root['llamaServer']),
+  ].filter((line): line is LocalRuntimeLine => line !== null);
+}

@@ -25,15 +25,28 @@ import type { AccountStatus } from '../usage/capacity-strip-model.js';
 import { buildLocalModelsView } from '../usage/local-model.js';
 import { projectLocalModels } from '../usage/usage-contract.js';
 import { verseLocalModelsQuery } from '../usage/usage-queries.js';
-import { LOCAL_MODELS_SHOWN, modelContextText, runtimeView } from './resources-model.js';
+import type { ReadinessFix, ResourceReadinessRow } from '../../../../core/routing/readiness-types.js';
+import { LOCAL_MODELS_SHOWN, localRuntimeLines, modelContextText, runtimeView } from './resources-model.js';
 import { RESOURCES_POLL_MS } from './resources-queries.js';
+import { ReadinessLines } from './ReadinessLines.js';
 import { StatusLine } from './ResourceCard.js';
 import styles from './ResourcesDrawer.module.css';
 
 const STOP_BODY =
   'Every local agent turn in flight is answered by this process. Stopping it ends those turns — nothing in flight is rolled back, and no local seat can take a new turn until it is running again.';
 
-export function LocalResources({ status, onOpenUsage, now }: { status: AccountStatus | null; onOpenUsage: () => void; now: number }) {
+const RUNTIME_LABEL: Readonly<Record<string, string>> = { ollama: 'Ollama', lmstudio: 'LM Studio' };
+
+export interface LocalResourcesProps {
+  status: AccountStatus | null;
+  onOpenUsage: () => void;
+  now: number;
+  /** The `local` row of GET /api/verse/budget/readiness, when this server has it. */
+  readiness?: ResourceReadinessRow | null;
+  onReadinessAction?: (fix: ReadinessFix, row: ResourceReadinessRow) => void;
+}
+
+export function LocalResources({ status, onOpenUsage, now, readiness = null, onReadinessAction }: LocalResourcesProps) {
   const models = useQuery(verseLocalModelsQuery);
   const runtimeRead = useQuery(servingRuntimeQuery);
   const refetchModels = useRefetch(verseLocalModelsQuery);
@@ -44,6 +57,7 @@ export function LocalResources({ status, onOpenUsage, now }: { status: AccountSt
   const [busy, setBusy] = useState<'start' | 'stop' | null>(null);
 
   const view = models.data?.available ? buildLocalModelsView(projectLocalModels(models.data.raw), now) : null;
+  const runtimes = models.data?.available ? localRuntimeLines(models.data.raw) : [];
   const runtime = runtimeView(runtimeRead.data?.value ?? null);
   const modelsLoading = models.data === undefined && models.status !== 'error';
   const rows = view?.rows ?? [];
@@ -89,6 +103,20 @@ export function LocalResources({ status, onOpenUsage, now }: { status: AccountSt
         <p className={styles.status} data-tone="neutral"><span className={styles.statusDot} aria-hidden="true" /><span className={styles.statusLabel}>No local runtime answering</span></p>
       ) : null}
 
+      <ReadinessLines row={readiness} {...(onReadinessAction ? { onAction: onReadinessAction } : {})} />
+
+      {runtimes.length > 0 ? (
+        <ul className={styles.runtimes} aria-label="Local runtimes">
+          {runtimes.map((line) => (
+            <li key={line.id} className={styles.runtimeRow} data-tone={line.tone} data-runtime={line.id} title={`${line.name}: ${line.word} — ${line.detail}`}>
+              <span className={styles.statusDot} aria-hidden="true" />
+              <span className={styles.runtimeRowName}>{line.name}</span>
+              <span className={styles.runtimeRowDetail}>{`${line.word} · ${line.detail}`}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
       {runtime !== null ? (
         <div className={styles.runtime} data-runtime-state={runtime.state}>
           <p className={styles.runtimeHead}>
@@ -130,6 +158,7 @@ export function LocalResources({ status, onOpenUsage, now }: { status: AccountSt
                   {m.nameDetail ? <span className={styles.modelDetail}> {m.nameDetail}</span> : null}
                 </span>
                 <span className={styles.modelFacts}>
+                  {m.runtime && RUNTIME_LABEL[m.runtime] ? <span className={styles.modelRuntime}>{RUNTIME_LABEL[m.runtime]}</span> : null}
                   {m.resident ? <span className={styles.pill} data-tone="success">Loaded</span> : null}
                   {context !== null ? <span title={m.contextTruncated ? 'Configured below the model’s native window' : undefined}>{context}</span> : null}
                 </span>
