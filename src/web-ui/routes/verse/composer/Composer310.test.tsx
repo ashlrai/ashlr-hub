@@ -151,6 +151,12 @@ function installServer(over: Partial<Pick<FakeServer, 'controls' | 'queue' | 'fi
       return json({ sessionId: SID, query: q, files, truncated: false, primaryRoot: '~/dev/hub' });
     }
     if (url.startsWith('/api/verse/budget')) return json({ effective: { 'claude-main': { seatId: 'claude-main', enabled: true, reservePercent: 40 } } });
+    if (url === '/api/verse/playbooks') {
+      return json({ v: 1, playbooks: [
+        { id: 'fix-issue', name: 'Fix a reported bug', macro: '!fix-bug', description: '', taskKinds: ['fix'], auto: false, latest: 1, builtin: true, updatedAt: '' },
+        { id: 'docs-sync', name: 'Sync docs with the code', macro: '!docs-sync', description: '', taskKinds: ['docs'], auto: false, latest: 1, builtin: true, updatedAt: '' },
+      ] });
+    }
     return json({ error: 'not found' }, 404);
   }));
   return state;
@@ -482,6 +488,19 @@ describe('@ files and / commands', () => {
     await user.type(box, 'pl{Enter}');
     await waitFor(() => expect(server.posts(/session-controls/).at(-1)!.body).toEqual({ permissionMode: 'plan' }));
     expect(box).toHaveValue('');
+  });
+
+  it('3.15: ! lists playbooks on first use; Enter inserts the macro', async () => {
+    const user = userEvent.setup();
+    await renderReady();
+    const box = screen.getByRole('textbox', { name: 'Message' });
+    expect(server.calls.some((c) => c.url === '/api/verse/playbooks')).toBe(false);
+    await user.type(box, 'please !fi');
+    const list = await screen.findByRole('listbox', { name: 'Playbooks' });
+    await waitFor(() => expect(within(list).getAllByRole('option').map((o) => o.textContent)).toEqual([expect.stringContaining('!fix-bug')]));
+    await user.keyboard('{Enter}');
+    expect(box).toHaveValue('please !fix-bug ');
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
   });
 
   it('/model opens the model picker; /new starts a new chat on this seat; /handoff calls the owner', async () => {

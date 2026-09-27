@@ -201,6 +201,7 @@ export function registerShellCommandHandlers(): () => void {
     ['section.apps', 'apps'],
     ['section.usage', 'usage'],
     ['section.wiki', 'wiki'],
+    ['section.playbooks', 'playbooks'],
   ];
   const offs = [
     ...surfaces.map(([id, section]) => registerCommandHandler(id, () => setVerseSection(section))),
@@ -236,6 +237,8 @@ export function registerShellCommandHandlers(): () => void {
       void import('../wiki/wiki-focus.js').then((m) => m.requestWikiFocus({ kind: 'repo', projectPath }));
     }),
     registerCommandHandler('wiki.ask', () => { void import('../wiki/wiki-focus.js').then((m) => m.requestWikiFocus({ kind: 'ask', projectPath: null })); }),
+    // Playbooks (3.15): the section takes the request once its chunk mounts (playbook-focus.ts).
+    registerCommandHandler('playbook.run', () => { void import('../playbooks/playbook-focus.js').then((m) => m.requestPlaybookFocus({ kind: 'run' })); }),
   ];
   return () => offs.forEach((off) => off());
 }

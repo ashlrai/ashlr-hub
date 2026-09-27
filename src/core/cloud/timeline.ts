@@ -281,7 +281,8 @@ function workerStep(task: CloudTaskV1, model: string | null): Step {
   return step('worker', {
     at: isoOrNull(task.launchedAt),
     title: `Claude Code cloud session · seat ${clip(task.seat, 40)}`,
-    detail: `${modelText} Account: unknown — the claude.ai account behind the seat is not recorded with the task.`,
+    // 3.15: the playbook version the brief carried (absent = none; nothing is appended).
+    detail: `${modelText} Account: unknown — the claude.ai account behind the seat is not recorded with the task.${task.playbookRef ? ` Playbook: ${clip(task.playbookRef.id, 48)}@v${task.playbookRef.version}.` : ''}`,
     source: model ? 'evidence pack' : 'not recorded',
     verified: model ? true : 'unknown',
     reached: launched,

@@ -14,7 +14,7 @@ import { createPortal } from 'react-dom';
 import { useTheme } from '../../../data/hooks.js';
 import type { ThemePreference } from '../../../data/theme-store.js';
 import { useVerseUi } from '../useVerseUi.js';
-import { AppsIcon, SettingsIcon, UsageIcon, WikiIcon } from '../verse-icons.js';
+import { AppsIcon, PlaybooksIcon, SettingsIcon, UsageIcon, WikiIcon } from '../verse-icons.js';
 import { IconKeyboard } from '../../../components/primitives/icons.js';
 import { openVerseOverlay, setVerseSection, toggleVerseRail } from '../verse-ui-store.js';
 import { detectKeyPlatform, findCommand, formatChord } from './command-catalog.js';
@@ -63,6 +63,7 @@ export function GearTray({ open, anchorRef, onClose, compact }: GearTrayProps) {
     { key: 'apps', role: 'menuitem', label: 'Apps & Accounts', icon: <AppsIcon />, run: () => setVerseSection('apps') },
     { key: 'usage', role: 'menuitem', label: 'Usage', icon: <UsageIcon />, run: () => setVerseSection('usage') },
     { key: 'wiki', role: 'menuitem', label: 'Repo wiki', icon: <WikiIcon />, run: () => setVerseSection('wiki') },
+    { key: 'playbooks', role: 'menuitem', label: 'Playbooks', icon: <PlaybooksIcon />, run: () => setVerseSection('playbooks') },
     { key: 'shortcuts', role: 'menuitem', label: 'Keyboard shortcuts', icon: <IconKeyboard />, shortcut: shortcutOf('shortcuts.open'), run: () => openVerseOverlay('shortcuts') },
     ...(compact
       ? []

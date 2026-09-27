@@ -51,6 +51,8 @@ export const NEW_310_UI_PATHS: readonly string[] = [
   'routes/verse/sections/AppsSection.tsx',
   'routes/verse/wiki',
   'routes/verse/sections/WikiSection.tsx',
+  'routes/verse/playbooks',
+  'routes/verse/sections/PlaybooksSection.tsx',
   'routes/verse/chat/ActivityGroup.tsx',
   'routes/verse/chat/ActivityGroup.module.css',
   'routes/verse/chat/TasksTray.tsx',

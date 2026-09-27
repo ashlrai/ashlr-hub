@@ -45,8 +45,9 @@ export type WorkbenchSurfaceId = (typeof WORKBENCH_SURFACES)[number];
  * Sections reached from the gear tray, not the rail (Shortcuts is an overlay,
  * not a section). 3.15 adds the private repo wiki here — and to ⌘K — rather
  * than as a sixth rail slot: it is a reference you open, not a surface you watch.
+ * Playbooks (3.15) join it for the same reason: a library you open and edit.
  */
-export const WORKBENCH_TRAY_SECTIONS = ['settings', 'apps', 'usage', 'wiki'] as const;
+export const WORKBENCH_TRAY_SECTIONS = ['settings', 'apps', 'usage', 'wiki', 'playbooks'] as const;
 export type WorkbenchTraySectionId = (typeof WORKBENCH_TRAY_SECTIONS)[number];
 
 export type WorkbenchSectionId = WorkbenchSurfaceId | WorkbenchTraySectionId;

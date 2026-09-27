@@ -183,6 +183,7 @@ export const WORKBENCH_COMMANDS = [
   { id: 'section.apps', title: 'Open Apps & Accounts', scope: 'global', keys: [], group: 'go-to', section: 'Surfaces', keywords: ['mcp', 'accounts', 'seats', 'integrations', 'ollama'] },
   { id: 'section.usage', title: 'Open Usage', scope: 'global', keys: [], group: 'go-to', section: 'Surfaces', keywords: ['capacity', 'spend', 'limits'] },
   { id: 'section.wiki', title: 'Open Repo wiki', scope: 'global', keys: [], group: 'go-to', section: 'Surfaces', keywords: ['wiki', 'docs', 'architecture', 'deepwiki', 'knowledge'] },
+  { id: 'section.playbooks', title: 'Open Playbooks', scope: 'global', keys: [], group: 'go-to', section: 'Surfaces', keywords: ['playbook', 'playbooks', 'template', 'macro', 'procedure', 'recipe'] },
 
   // ── Navigation ───────────────────────────────────────────────────────────
   { ...bind('palette.open'), title: 'Command palette', group: null, section: 'Navigation' },
@@ -309,6 +310,10 @@ export const WORKBENCH_COMMANDS = [
   // Served by the shell (run-command.ts → wiki/wiki-focus.ts): it opens the
   // Wiki section, which takes the request once its chunk mounts. Tab picks a repo.
   { id: 'wiki.open', title: 'Open repo wiki…', scope: 'global', keys: [], group: 'actions', section: 'App', argument: { kind: 'project', prompt: 'Repo' }, keywords: ['wiki', 'docs', 'architecture', 'deepwiki', 'modules', 'overview'] },
+  // ── Playbooks (3.15) ──────────────────────────────────────────────────
+  // Served by the shell (run-command.ts → playbooks/playbook-focus.ts): opens
+  // Playbooks in "pick one to run" mode; Run… writes its !macro into the chat.
+  { id: 'playbook.run', title: 'Run playbook…', scope: 'global', keys: [], group: 'actions', section: 'App', keywords: ['playbook', 'macro', 'template', 'run', 'fix bug', 'bump deps', 'add tests', 'docs sync', 'security fix'] },
   { id: 'wiki.ask', title: 'Ask the codebase…', scope: 'global', keys: [], group: 'actions', section: 'App', keywords: ['ask', 'question', 'codebase', 'where', 'how', 'explain', 'wiki', 'search code'] },
   // Served by the shell (run-command.ts → copy-setup.ts), wherever you are.
   appAction('autonomy.copy-setup', 'Copy autonomy setup command', [AUTONOMY_SETUP_COMMAND, 'autonomy', 'turn on', 'clipboard']),

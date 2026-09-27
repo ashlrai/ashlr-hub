@@ -10,7 +10,11 @@ import type { VerseFileMatch } from '../../../../core/verse/workbench-types.js';
 
 export type ComposerTrigger =
   | { kind: 'mention'; query: string; start: number; end: number }
-  | { kind: 'command'; query: string; start: number; end: number };
+  | { kind: 'command'; query: string; start: number; end: number }
+  | { kind: 'macro'; query: string; start: number; end: number };
+
+/** Longest `!` query (a playbook macro name is at most 48 characters). */
+const MACRO_QUERY_MAX = 48;
 
 /** Longest `@` query the finder is asked for (the route caps at 200). */
 const MENTION_QUERY_MAX = 120;
@@ -22,6 +26,9 @@ const MENTION_QUERY_MAX = 120;
  *    not a trigger.
  *  - `/query` — only as the FIRST thing in the message (a slash command),
  *    letters and dashes only, caret still inside it.
+ *  - `!query` — a playbook macro (3.15): a `!` at the start or after
+ *    whitespace, then lowercase letters, digits and dashes. `Hi!` and `!=`
+ *    are not triggers.
  */
 export function activeTrigger(text: string, caret: number): ComposerTrigger | null {
   if (caret < 0 || caret > text.length) return null;
@@ -39,6 +46,15 @@ export function activeTrigger(text: string, caret: number): ComposerTrigger | nu
     const start = caret - query.length - 1;
     const after = /^[^\s@]*/.exec(text.slice(caret))?.[0] ?? '';
     return { kind: 'mention', query, start, end: caret + after.length };
+  }
+  const macro = /(^|\s)!([a-z0-9-]*)$/.exec(before);
+  if (macro) {
+    const query = macro[2]!;
+    if (query.length > MACRO_QUERY_MAX) return null;
+    const after = /^[a-z0-9-]*/.exec(text.slice(caret))?.[0] ?? '';
+    // `!=`, `!Foo`, `!(…)`: the token goes on with something no macro has.
+    if (/^[^\s]/.test(text.slice(caret + after.length))) return null;
+    return { kind: 'macro', query, start: caret - query.length - 1, end: caret + after.length };
   }
   return null;
 }
