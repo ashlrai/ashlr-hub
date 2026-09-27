@@ -80,6 +80,13 @@ export interface DaemonCapacityPublisherDeps {
    * null. Optional so a harness without it records nothing.
    */
   recordHistory?(snapshot: CapacitySnapshot): string | null;
+  /**
+   * True when the CURRENT lease holder is publishing live shared quota
+   * evidence (ledger/.resource-quota-shared-evidence.json: owner-verified,
+   * 5 s TTL) with at least one unexpired account reading. Optional: a harness
+   * without it never publishes from shared evidence.
+   */
+  sharedEvidenceLive?(cfg: AshlrConfig): Promise<boolean>;
 }
 
 export type PublisherState =
@@ -87,6 +94,7 @@ export type PublisherState =
   | 'dormant'
   | 'fresh'
   | 'published'
+  | 'published-shared'
   | 'lease-held-elsewhere'
   | 'sample-timeout'
   | 'failed';
@@ -189,8 +197,31 @@ export function createDaemonCapacityPublisher(cfg: AshlrConfig, deps: DaemonCapa
     try {
       const collectorStatus = collector.status();
       if (collectorStatus.mode !== 'owned') {
-        // Without the lease this process is not the native writer. Publishing
-        // shared-evidence readings here could race the owner — stay cold.
+        // Without the lease this process is not the NATIVE writer, and it never
+        // samples. But reaching here already means no other publisher kept the
+        // snapshot fresh — so a holder that is itself publishing live shared
+        // evidence (a resource console, or a Verse whose publisher is gated off
+        // because it is read-only) has readings nobody hands the fleet. Those
+        // readings are owner-verified with a 5 s TTL, so relaying them is a
+        // copy of current evidence, not a guess; with none live, stay cold.
+        let shared = false;
+        try {
+          shared = collectorStatus.mode === 'read-only' && (await deps.sharedEvidenceLive?.(cfg)) === true;
+        } catch {
+          shared = false;
+        }
+        if (shared && !stopped) {
+          const publishedAt = await deps.publish(cfg, collector);
+          status = {
+            state: 'published-shared',
+            reason: 'this daemon published the lease holder\'s live shared evidence (it holds the native metadata lease, so the daemon could not sample itself)',
+            lastPublishedAt: publishedAt,
+          };
+          let written: CapacitySnapshot | null = null;
+          try { written = deps.readSnapshot(); } catch { written = null; }
+          if (written && written.publishedAt === publishedAt) recordHistory(written);
+          return status;
+        }
         return set(
           'lease-held-elsewhere',
           `the native account-metadata lease is not available to the daemon (${collectorStatus.reasonCode ?? collectorStatus.mode}); paid seats stay ineligible until a publisher runs`,
@@ -287,6 +318,14 @@ export function defaultDaemonCapacityPublisherDeps(): DaemonCapacityPublisherDep
     },
     log: (message) => { console.warn(`[ashlr] ${message}`); },
     recordHistory: (snapshot) => recordCapacityHistoryFromSnapshot(snapshot, 'daemon').error,
+    sharedEvidenceLive: async (cfg) => {
+      const [{ readVerseAccountEvidence }, { resolveAccountsRoot }] = await Promise.all([
+        import('../verse/accounts.js'),
+        import('../verse/seats.js'),
+      ]);
+      const evidence = readVerseAccountEvidence(resolveAccountsRoot(cfg), null);
+      return evidence.source === 'shared-evidence' && evidence.liveAccountIds.size > 0;
+    },
   };
 }
 

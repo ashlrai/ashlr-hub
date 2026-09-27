@@ -77,6 +77,7 @@ import {
 } from '../resources/quota-shared-evidence.js';
 import {
   createResourceConnectionMonitor,
+  expireConnectionRow,
   validateResourceConnectionConfig,
   type ResourceConnectionConfig,
   type ResourceConnectionMonitor,
@@ -255,6 +256,13 @@ export interface VerseAccountRecord {
   binding: { id: string; usedPercent: number; limitReached: boolean } | null;
   /** Plain-language facts the UI must show instead of implying a fault. */
   notes: string[];
+  /**
+   * When THIS server last held a verified reading for the account, present
+   * only while `observedAt` is null (the reading expired, or polling paused).
+   * History for an honest "last reading at …" line — never current evidence:
+   * no window, percentage or usability is derived from it.
+   */
+  lastReadingAt?: string;
 }
 
 export type VerseAccountsCollectorMode = 'owned' | 'read-only' | 'unconfigured';
@@ -264,6 +272,11 @@ export interface VerseAccountsCollectorStatus {
   state: 'running' | 'suspended' | 'blocked' | 'stopped';
   /** Who owns the exclusive per-root native metadata lease. */
   owner: 'this-server' | 'another-collector' | 'none';
+  /**
+   * The process id recorded on the lease while ANOTHER process holds it (so
+   * the operator can see which one), or absent. Never the lock's token.
+   */
+  holderPid?: number;
   /** Lease refusal code (`collector-owned`, …) or a config reason. Null when fine. */
   reasonCode: string | null;
   pollIntervalMs: number;
@@ -319,6 +332,31 @@ export interface VerseAccountEvidence {
 /** The private ledger root: where the lease, activity and evidence files live. */
 export function accountsLedgerRoot(accountsRoot: string): string {
   return join(accountsRoot, 'ledger');
+}
+
+/**
+ * The pid recorded on the native-metadata lease lock, or null. Reads ONLY the
+ * `pid` field: the lock also carries the holder's ownership token, which never
+ * leaves this function. Diagnostics only — ownership is decided by the lease
+ * itself, never by this read.
+ */
+export function readLeaseHolderPid(ledgerRoot: string): number | null {
+  const parsed = readJsonLenient(join(ledgerRoot, '.resource-quota-refresh.lock'), 4096);
+  if (!isRecord(parsed)) return null;
+  const pid = parsed['pid'];
+  return typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+/**
+ * One sentence naming who holds the lease. The old wording always blamed
+ * `ashlr resource-console`, but on Mason's machine the holder is almost
+ * always another Verse (the desktop sidecar) or the fleet daemon's 5-minute
+ * capacity sample — and a wrong name sends the operator hunting for a process
+ * that is not running.
+ */
+export function leaseHolderSentence(pid: number | null): string {
+  const who = pid === null ? 'Another Ashlr process' : `Another Ashlr process (pid ${pid})`;
+  return `${who} holds the native metadata lease — usually the desktop app's Verse or the fleet daemon's 5-minute sample; Verse reads its shared evidence and takes over when it is released.`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -571,7 +609,7 @@ export function readVerseAccountEvidence(
         liveAccountIds: new Set(fresh.keys()),
         unavailableAccountIds: new Set([...fresh.keys()].filter((id) => unavailable.has(id))),
         source: 'shared-evidence',
-        ownerNote: 'Another collector owns the native metadata lease; these readings are read-only.',
+        ownerNote: `${leaseHolderSentence(readLeaseHolderPid(config.ledgerRoot))} These readings are read-only.`,
       };
     } catch {
       // No live collector, stale, or past the 5s TTL — fall back to the seed.
@@ -963,6 +1001,8 @@ export interface VerseAccountCollectorOptions {
   pollIntervalMs?: number;
   /** Suspend polling after this long with no client interest. Default 5 min. */
   idleSuspendMs?: number;
+  /** Idle watchdog cadence. Default 15 s; tests shorten it. */
+  idleCheckMs?: number;
   signal?: AbortSignal;
   /** Diagnostics sink. Receives plain sentences only — never a command or token. */
   log?: (message: string) => void;
@@ -981,7 +1021,26 @@ export interface VerseAccountCollector {
   unavailableWorkerIds(): string[];
   /** Codex credits by account id, best effort. */
   credits(accountId: string): VerseCodexCredits | null;
+  /** When this server last held a verified reading for `accountId` (history, never evidence). */
+  lastReadingAt?(accountId: string): string | null;
   close(): Promise<void>;
+}
+
+/**
+ * True only while this server OWNS native collection and it is actually
+ * running — the one state in which its readings are current. Suspended,
+ * read-only, degraded and unconfigured collectors all answer false, and so
+ * does "no collector". Publishers use it to decide whether to write the
+ * fleet's capacity snapshot at all (budget-api.ts `startBudgetCapacityPublisher`).
+ */
+export function verseCollectorLive(collector: VerseAccountCollector | null | undefined): boolean {
+  if (!collector) return false;
+  try {
+    const status = collector.status();
+    return status.mode === 'owned' && status.state === 'running' && status.reasonCode === null;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1037,6 +1096,23 @@ export async function startVerseAccountCollector(
 
   const creditsCache = new Map<string, VerseCodexCredits | null>();
   const sessionRoots = config?.connections ? codexSessionRoots(config.connections) : new Map<string, string>();
+  const idleCheckMs = Math.max(10, options.idleCheckMs ?? IDLE_CHECK_MS);
+  /** Latest verified observation instant per account this server saw (display history only). */
+  const lastReadings = new Map<string, string>();
+  /**
+   * The lease was handed back because nobody was looking (see
+   * `releaseIdleLease`). Distinct from a refused acquisition: the status says
+   * "paused", not "someone else owns it".
+   */
+  let idleReleased = false;
+  /** Pid recorded on the lock while another process holds it (diagnostics only). */
+  let holderPid: number | null = null;
+
+  function rememberReadings(snapshot: ResourceConnectionsSnapshot | null): void {
+    for (const row of snapshot?.accounts ?? []) {
+      if (row.state === 'observed' && row.observedAt !== null) lastReadings.set(row.id, row.observedAt);
+    }
+  }
 
   function publishEvidence(): void {
     if (!config?.quota || !lease || !refresher || publicationFailed) return;
@@ -1068,6 +1144,7 @@ export async function startVerseAccountCollector(
     if (monitor) {
       lastConnections = monitor.snapshot();
       lastPolledAt = lastConnections.sampledAt;
+      rememberReadings(lastConnections);
     }
     if (refresher) lastObservations = refresher.readObservations([]);
   }
@@ -1163,10 +1240,65 @@ export async function startVerseAccountCollector(
 
   function tickIdle(): void {
     if (closed || mode !== 'owned') return;
-    if (!monitor && !refresher) return;
+    if (!monitor && !refresher) {
+      // Already suspended (a previous tick, or a suspend that finished while
+      // this lease was still held for a fence that has since discharged).
+      if (state === 'suspended') releaseIdleLease();
+      return;
+    }
     if (Date.now() - lastRequestAt < idleSuspendMs) return;
     log('Verse account collector: no client has asked for account data recently; pausing native polling.');
-    void suspend().catch(() => {});
+    void suspend().then(releaseIdleLease).catch(() => {});
+  }
+
+  /**
+   * ── WHY AN IDLE COLLECTOR HANDS THE LEASE BACK ───────────────────────────
+   * The lease is EXCLUSIVE PER ROOT. A suspended collector spawns nothing,
+   * but it used to keep holding the lock — so the desktop app's Verse, sitting
+   * in the background for hours, starved every other collector: the fleet
+   * daemon's capacity publisher (daemon/capacity-publisher.ts) was refused on
+   * every 5-minute attempt, the capacity snapshot the fleet routes on carried
+   * no readings, and every paid seat read "unknown usage" to autonomy while
+   * the app showed nothing wrong. Measured on this machine 2026-09-26: the
+   * shared evidence stopped at 16:56 local, the lease stayed with the idle
+   * sidecar, and the daemon logged "lease is not available" all evening.
+   *
+   * So once polling is paused AND every native process is confirmed settled
+   * (no uncertain sample, no undischarged fence, publication intact), the
+   * lease goes back. The next client interest re-acquires it at once
+   * (`lastLeaseAttemptAt = 0`), or — if the daemon is mid-sample — within the
+   * normal retry spacing. A fence that is NOT discharged stays with its owner:
+   * handing back an uncertain lease is exactly what the fence forbids.
+   */
+  function releaseIdleLease(): void {
+    if (closing || closed || mode !== 'owned' || !lease) return;
+    // Resumed while the teardown ran, or interest arrived meanwhile.
+    if (state !== 'suspended' || monitor || refresher || suspending) return;
+    if (Date.now() - lastRequestAt < idleSuspendMs) return;
+    if (cleanupUncertain || publicationFailed || recoveryHold !== null || recovering || leaseRetry) return;
+    const held = lease;
+    lease = null;
+    try {
+      held.close(false);
+    } catch {
+      // The lock stays durable (the safe side), but this process no longer
+      // holds a usable lease either: report that plainly instead of "paused".
+      mode = 'unconfigured';
+      state = 'blocked';
+      owner = 'none';
+      reasonCode = 'collector-unavailable';
+      log('Verse account collector: the idle metadata lease could not be released cleanly; its marker stays durable.');
+      return;
+    }
+    mode = 'read-only';
+    owner = 'none';
+    reasonCode = 'connection-polling-paused';
+    idleReleased = true;
+    holderPid = null;
+    // The very next touch() re-acquires: nobody should wait out a retry
+    // spacing that exists to stop hammering a lock someone ELSE holds.
+    lastLeaseAttemptAt = 0;
+    log('Verse account collector: polling paused and the metadata lease handed back so the fleet daemon can sample; it is re-acquired on the next request.');
   }
 
   /** Prune the rolling window and report whether another generation may start. */
@@ -1305,11 +1437,13 @@ export async function startVerseAccountCollector(
       state = 'blocked';
       owner = typed?.code === 'collector-owned' ? 'another-collector' : 'none';
       reasonCode = typed?.code ?? 'collector-unavailable';
+      idleReleased = false;
+      holderPid = owner === 'another-collector' ? readLeaseHolderPid(config.ledgerRoot) : null;
       // A retry that is refused for the same reason is not news (touch-driven).
       if (!retry || reasonCode !== previousCode) {
         log(
           typed?.code === 'collector-owned'
-            ? 'Verse account collector: another collector (ashlr resource-console) owns the metadata lease; reading shared evidence only.'
+            ? `Verse account collector: ${leaseHolderSentence(holderPid)}`
             : `Verse account collector: metadata lease unavailable (${reasonCode}); reading shared evidence only.`,
         );
       }
@@ -1321,10 +1455,13 @@ export async function startVerseAccountCollector(
       try { acquired.close(false); } catch { /* the lock stays durable, which is the safe side. */ }
       return;
     }
+    const resumedFromIdle = idleReleased;
     lease = acquired;
     mode = 'owned';
     owner = 'this-server';
     reasonCode = null;
+    idleReleased = false;
+    holderPid = null;
     // Everything past acquisition is a DIFFERENT failure from the refusal
     // the catch above is written for. `markPending()` is a durable fs
     // write and can throw on EIO/ENOSPC/EPERM — and the refusal handler
@@ -1348,10 +1485,14 @@ export async function startVerseAccountCollector(
       return;
     }
     if (watchdog === null) {
-      watchdog = setInterval(() => { tickIdle(); requestRecovery(); }, IDLE_CHECK_MS);
+      watchdog = setInterval(() => { tickIdle(); requestRecovery(); }, idleCheckMs);
       watchdog.unref?.();
     }
-    if (retry) log('Verse account collector: the metadata lease was released by its previous owner; this server now collects live readings.');
+    if (retry) {
+      log(resumedFromIdle
+        ? 'Verse account collector: a client asked for account data; native polling resumed under the metadata lease.'
+        : 'Verse account collector: the metadata lease was released by its previous owner; this server now collects live readings.');
+    }
   }
 
   /**
@@ -1442,8 +1583,11 @@ export async function startVerseAccountCollector(
         : 'This server owns the native metadata lease; readings are live.';
     }
     if (mode === 'read-only') {
+      if (idleReleased) {
+        return 'Native polling is paused because no client has asked for account data recently, and the metadata lease was handed back so the fleet daemon can keep sampling. It resumes on the next request.';
+      }
       return owner === 'another-collector'
-        ? 'Another collector (ashlr resource-console) owns the native metadata lease; Verse is reading its shared evidence only.'
+        ? leaseHolderSentence(holderPid)
         : 'The native metadata lease is unavailable; Verse is reading shared evidence only.';
     }
     return 'Native account metadata collection is not configured for this accounts root.';
@@ -1460,6 +1604,7 @@ export async function startVerseAccountCollector(
         mode,
         state: degraded && state === 'running' ? 'blocked' : state,
         owner,
+        ...(holderPid !== null && owner === 'another-collector' ? { holderPid } : {}),
         reasonCode: degraded ? (reasonCode ?? 'collector-unavailable') : reasonCode,
         pollIntervalMs,
         idleSuspendMs,
@@ -1485,8 +1630,27 @@ export async function startVerseAccountCollector(
       if (monitor) {
         lastConnections = monitor.snapshot();
         lastPolledAt = lastConnections.sampledAt;
+        rememberReadings(lastConnections);
+        return lastConnections;
       }
-      return lastConnections;
+      if (lastConnections === null) return null;
+      // The monitor is gone (idle suspend, lease handed back, stopped
+      // generation) but its last snapshot is retained. It used to be served
+      // verbatim, so an hour-old row still read `observed` — a current claim
+      // nothing was measuring. Expiry applies exactly as in the live monitor,
+      // and a row that lapsed because polling PAUSED says so.
+      const nowMs = Date.now();
+      const paused = state === 'suspended';
+      return {
+        ...lastConnections,
+        refreshing: false,
+        accounts: lastConnections.accounts.map((row) => {
+          const next = expireConnectionRow(row, nowMs);
+          return paused && next !== row && next.reason === 'connection-reading-expired'
+            ? { ...next, reason: 'connection-polling-paused' }
+            : next;
+        }),
+      };
     },
     observations: () => {
       if (refresher) lastObservations = refresher.readObservations([]);
@@ -1506,6 +1670,7 @@ export async function startVerseAccountCollector(
       creditsCache.set(accountId, found);
       return found;
     },
+    lastReadingAt: (accountId: string) => lastReadings.get(accountId) ?? null,
     close: async () => {
       if (closed) return;
       closing = true;
@@ -1572,6 +1737,64 @@ function unconfiguredStatus(reasonCode: string): VerseAccountsCollectorStatus {
 }
 
 /**
+ * Connection-row reasons that mean "no check has landed in this window" — a
+ * GAP between probes — rather than "a check ran and failed". Only these may be
+ * bridged by the quota refresher's own reading (see `codexGapReading`).
+ */
+export const VERSE_CODEX_GAP_REASONS: ReadonlySet<string> = new Set([
+  'connection-reading-expired',
+  'connection-not-checked',
+]);
+
+/**
+ * THE CODEX "NO WINDOW READING" FLICKER. Two independent collectors read each
+ * Codex account in this server: the connection monitor (all four providers,
+ * one pass every 30 s, at most two native clients at a time) and the quota
+ * refresher (Codex only, its own cadence, account-hint verified against
+ * quota-config.json). Since 3.11.5 (#491) a connection row whose 60-second
+ * native observation lapses before the next pass settles is projected to "no
+ * reading" — correct in isolation, but a pass that queues behind Claude's
+ * 20-second /usage probe regularly crosses that line, so the Codex cards
+ * blinked to "No current reading" while the refresher held a verified reading
+ * seconds old.
+ *
+ * So a Codex row that is merely BETWEEN checks is answered by the refresher's
+ * unexpired, un-vetoed observation from the same process. Never a failed
+ * check (a probe error, account change or sign-out keeps its own verdict, as
+ * #491 requires), never the shared file from another process, never a Claude
+ * or Grok row, and never an expired row — the refresher's observation carries
+ * its own native expiry and `toObservationMap` already dropped lapsed ones.
+ */
+function codexGapReading(
+  identity: VerseAccountIdentity,
+  connection: ResourceAccountConnection,
+  evidence: VerseAccountEvidence,
+  credits: VerseCodexCredits | null,
+): VerseAccountRecord | null {
+  if (connection.provider !== 'codex' || identity.provider !== 'codex') return null;
+  if (connection.state === 'observed' || connection.state === 'signed-out') return null;
+  if (!VERSE_CODEX_GAP_REASONS.has(connection.reason)) return null;
+  if (evidence.source !== 'collector') return null;
+  if (!evidence.liveAccountIds.has(identity.id) || evidence.unavailableAccountIds.has(identity.id)) return null;
+  const observation = evidence.byAccount.get(identity.id);
+  if (!observation || observation.health !== 'ready' || observation.windows.length === 0) return null;
+  // `probe-observed`: the refresher's check SUCCEEDED; the connection row's gap
+  // reason no longer describes this record.
+  const record = deriveVerseAccountRecordFromEvidence(identity, observation, 'probe-observed');
+  if (record.state !== 'observed') return null;
+  return {
+    ...record,
+    // The refresher verified the account hint; the connection row carries the
+    // authentication verdict only while its own reading is current.
+    authentication: 'signed-in',
+    health: 'reachable',
+    credits,
+    executionSupported: connection.executionSupported,
+    notes: providerNotes('codex', { ...record, credits }),
+  };
+}
+
+/**
  * The `GET /api/verse/accounts` body. Live records when this server owns the
  * collectors, evidence-derived records otherwise, and an explicit collector
  * status either way — the UI must never have to guess why a field is null.
@@ -1601,23 +1824,28 @@ export function buildVerseAccountsSnapshot(options: {
   const identityById = new Map(identities.map((i) => [i.id, i]));
 
   const accounts: VerseAccountRecord[] = [];
+  const withHistory = (record: VerseAccountRecord): VerseAccountRecord => {
+    if (record.observedAt !== null) return record;
+    const last = collector?.lastReadingAt?.(record.id) ?? null;
+    return last === null ? record : { ...record, lastReadingAt: last };
+  };
   for (const id of ids) {
     const connection = liveById.get(id);
+    const identity = identityById.get(id);
     if (connection) {
-      accounts.push(deriveVerseAccountRecord(connection, {
-        credits: connection.provider === 'codex' ? collector?.credits(id) ?? null : null,
-      }));
+      const credits = connection.provider === 'codex' ? collector?.credits(id) ?? null : null;
+      const bridged = identity ? codexGapReading(identity, connection, evidence, credits) : null;
+      accounts.push(withHistory(bridged ?? deriveVerseAccountRecord(connection, { credits })));
       continue;
     }
-    const identity = identityById.get(id);
     if (!identity) continue;
-    accounts.push(deriveVerseAccountRecordFromEvidence(
+    accounts.push(withHistory(deriveVerseAccountRecordFromEvidence(
       identity,
       evidence.byAccount.get(id) ?? null,
       degradedReason,
       !evidence.liveAccountIds.has(id),
       evidence.unavailableAccountIds.has(id),
-    ));
+    )));
   }
 
   const notes = [...VERSE_ACCOUNT_NOTES];

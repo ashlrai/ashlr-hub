@@ -8,7 +8,7 @@ import type { SeatHealthReport } from '../../../../core/verse/health-types.js';
 import type { ServingRuntimeSnapshot } from '../../../data/api-types.js';
 import { capacity, GROK_SEAT, LOCAL_SEAT_V2, nativeSeat, seatWindow } from '../seat-fixtures.test-support.js';
 import { buildCapacityRows } from '../usage/capacity-strip-model.js';
-import { formatUsd, modelContextText, projectCloudCredits, runtimeView, summarizeResources } from './resources-model.js';
+import { formatUsd, localRuntimeLines, modelContextText, projectCloudCredits, runtimeView, summarizeResources } from './resources-model.js';
 
 const NOW = new Date(2026, 8, 25, 16, 34).getTime();
 const RESET = new Date(2026, 8, 26, 23, 46).toISOString();
@@ -115,5 +115,32 @@ describe('local wording', () => {
     expect(modelContextText({ nativeContext: 262_144, configuredContext: 65_536, contextTruncated: true })).toBe('64k of 256k context');
     expect(modelContextText({ nativeContext: 131_072, configuredContext: null, contextTruncated: false })).toBe('128k context');
     expect(modelContextText({ nativeContext: null, configuredContext: null, contextTruncated: false })).toBeNull();
+  });
+});
+
+describe('localRuntimeLines (3.14): Ollama, LM Studio and llama-server as one Local resource', () => {
+  it('says which runtime answers, what is installed and what is loaded', () => {
+    const lines = localRuntimeLines({
+      ollama: { reachable: true, baseUrl: 'http://127.0.0.1:11434', models: [{ id: 'gpt-oss:20b', state: 'available' }, { id: 'bge-m3:latest', state: 'loaded' }] },
+      lmStudio: { reachable: false, baseUrl: 'http://127.0.0.1:1234', models: [], reason: 'lmstudio-refused' },
+      llamaServer: { reachable: true, baseUrl: 'http://127.0.0.1:8080', status: 'ok', models: [], modelCount: 1, slots: 4, reason: null },
+    });
+    expect(lines.map((l) => [l.name, l.word, l.detail, l.tone])).toEqual([
+      ['Ollama', 'Answering', '2 installed · 1 loaded', 'success'],
+      ['LM Studio', 'Not running', 'nothing answering on :1234', 'neutral'],
+      ['llama-server', 'Answering', '1 model served · 4 slots', 'success'],
+    ]);
+  });
+
+  it('tells a wedged llama-server (timed out) from a stopped one (refused)', () => {
+    const wedged = localRuntimeLines({ llamaServer: { baseUrl: 'http://127.0.0.1:8080', status: 'down', reason: 'llama-server-timeout' } });
+    expect(wedged[0]).toMatchObject({ tone: 'danger', word: 'Not answering', detail: 'listening on :8080 but not answering — restart it' });
+    const stopped = localRuntimeLines({ llamaServer: { baseUrl: 'http://127.0.0.1:8080', status: 'down', reason: 'llama-server-refused' } });
+    expect(stopped[0]).toMatchObject({ tone: 'neutral', word: 'Not running' });
+  });
+
+  it('a runtime an older server does not report is absent, never "down"', () => {
+    expect(localRuntimeLines({ ollama: { reachable: true, models: [] } }).map((l) => l.id)).toEqual(['ollama']);
+    expect(localRuntimeLines(null)).toEqual([]);
   });
 });

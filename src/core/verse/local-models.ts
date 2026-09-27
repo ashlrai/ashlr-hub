@@ -189,6 +189,14 @@ export interface VerseLocalModelsSnapshot {
   };
   ollama: VerseLocalRuntimeReport;
   lmStudio: VerseLocalRuntimeReport;
+  /**
+   * The third local runtime (3.14): a llama-server on its loopback port — the
+   * launchd-managed one on this machine. Liveness plus served-model COUNT only
+   * (it names a raw GGUF by its absolute path, which is never sent). Present
+   * whenever this build probes it; absent from older servers, which the UI
+   * treats as "not reported", never as "down".
+   */
+  llamaServer?: VerseLlamaServerReport;
   /** Plain-language caveats the UI must show rather than imply precision. */
   notes: string[];
 }
@@ -216,6 +224,8 @@ export interface VerseOllamaModelDetail {
 export interface VerseLocalProbeOptions {
   ollamaBaseUrl?: string;
   lmStudioBaseUrl?: string;
+  /** llama-server origin; defaults to 127.0.0.1:8080. `null` skips the probe. */
+  llamaServerBaseUrl?: string | null;
   /** Injectable fetch for tests. Defaults to the global fetch. */
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
@@ -1029,13 +1039,21 @@ export async function collectVerseLocalModels(
   const ttlMs = opts.lastGoodTtlMs ?? VERSE_LOCAL_LAST_GOOD_TTL_MS;
   const now = Date.now();
   const serverDefault = opts.ollamaServerDefault !== undefined ? opts.ollamaServerDefault : readOllamaServerDefault();
-  const [ollamaFresh, lmStudioFresh] = await Promise.all([
+  const llamaBaseUrl = opts.llamaServerBaseUrl === null
+    ? null
+    : normalizeLocalBaseUrl(opts.llamaServerBaseUrl ?? undefined, VERSE_DEFAULT_LLAMA_SERVER_BASE);
+  const [ollamaFresh, lmStudioFresh, llamaServer] = await Promise.all([
     collectOllama(fetchImpl, ollamaBaseUrl, timeoutMs, serverDefault).catch((): VerseLocalRuntimeReport => ({
       reachable: false, baseUrl: ollamaBaseUrl, models: [], reason: 'ollama-probe-failed',
     })),
     probeLmStudioModels(fetchImpl, lmStudioBaseUrl, timeoutMs).catch((): VerseLocalRuntimeReport => ({
       reachable: false, baseUrl: lmStudioBaseUrl, models: [], reason: 'lmstudio-probe-failed',
     })),
+    // In parallel, so a wedged llama-server (listening, never answering —
+    // measured on this machine) costs one timeout, not a serial one.
+    llamaBaseUrl === null
+      ? Promise.resolve(null)
+      : probeLlamaServer({ baseUrl: llamaBaseUrl, fetchImpl, timeoutMs }).catch(() => null),
   ]);
   // A timed-out probe must not erase a reading we genuinely took seconds ago.
   const ollama = withLastGood(`ollama:${ollamaBaseUrl}`, ollamaFresh, now, ttlMs);
@@ -1046,6 +1064,7 @@ export async function collectVerseLocalModels(
     machine: { totalMemoryBytes: totalmem(), freeMemoryBytes: freemem() },
     ollama,
     lmStudio,
+    ...(llamaServer ? { llamaServer } : {}),
     notes: [...VERSE_LOCAL_MODEL_NOTES],
   };
 }

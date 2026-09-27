@@ -16,7 +16,9 @@ import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { usedPercentText } from '../percent-text.js';
 import { approxCredits, CLOUD_NOT_SET_UP_WORD, notSetUpLine } from '../cloud/cloud-model.js';
 import { formatUsd, type CloudCreditsView } from './resources-model.js';
+import type { ReadinessFix, ResourceReadinessRow } from '../../../../core/routing/readiness-types.js';
 import { cloudCreditsQuery, RESOURCES_POLL_MS } from './resources-queries.js';
+import { ReadinessLines } from './ReadinessLines.js';
 import styles from './ResourcesDrawer.module.css';
 
 /** Below this share of the total left, the meter turns amber. */
@@ -98,7 +100,14 @@ function BalanceLink({ href }: { href: string }) {
   );
 }
 
-export function CloudCredits() {
+export interface CloudCreditsProps {
+  /** The `cloud` row of GET /api/verse/budget/readiness, when this server has it. */
+  readiness?: ResourceReadinessRow | null;
+  onReadinessAction?: (fix: ReadinessFix, row: ResourceReadinessRow) => void;
+  readinessBusy?: boolean;
+}
+
+export function CloudCredits({ readiness = null, onReadinessAction, readinessBusy = false }: CloudCreditsProps = {}) {
   const read = useQuery(cloudCreditsQuery);
   const refetch = useRefetch(cloudCreditsQuery);
   usePollWhileVisible(refetch, RESOURCES_POLL_MS.cloud);
@@ -129,6 +138,7 @@ export function CloudCredits() {
       ) : (
         <Credits credits={credits} />
       )}
+      <ReadinessLines row={readiness} busy={readinessBusy} {...(onReadinessAction ? { onAction: onReadinessAction } : {})} />
     </li>
   );
 }

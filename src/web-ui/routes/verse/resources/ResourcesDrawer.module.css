@@ -465,6 +465,130 @@
   border: 0;
 }
 
+/* ── Readiness: Chat / Fleet (3.14) ─────────────────────────────────── */
+
+/* Two quiet lines under the meters: a fixed key column, then the verdict. The
+   dot reuses the status line's shape language (disc ready, ring caveat,
+   diamond blocked, dashed off). */
+.readiness {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.readyLine {
+  --tone: var(--status-neutral-solid);
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  column-gap: var(--space-2);
+  align-items: baseline;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+.readyLine[data-tone='success'] { --tone: var(--status-success-solid); }
+.readyLine[data-tone='warning'] { --tone: var(--status-warning-solid); }
+.readyLine[data-tone='danger'] { --tone: var(--status-danger-solid); }
+.readyLine[data-tone='warning'] .statusDot { background: transparent; border: 2px solid var(--tone); }
+.readyLine[data-tone='danger'] .statusDot { border-radius: 1px; transform: translateY(-1px) rotate(45deg) scale(0.9); }
+.readyLine[data-tone='neutral'] .statusDot { background: transparent; border: 1.5px dashed var(--text-tertiary); }
+
+.readyKey {
+  color: var(--text-tertiary);
+  font-size: var(--text-2xs-size);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.readyBody { display: flex; flex-direction: column; min-width: 0; }
+.readyHead { display: inline-flex; align-items: baseline; gap: var(--space-2); }
+.readyWord { color: var(--text-primary); font-weight: var(--font-weight-medium); }
+.readyLine[data-tone='neutral'] .readyWord { color: var(--text-secondary); font-weight: var(--font-weight-regular, 400); }
+.readyDetail { color: var(--text-secondary); padding-left: calc(7px + var(--space-2)); overflow-wrap: anywhere; }
+
+.readyReading {
+  margin: 2px 0 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.fixBlock { display: flex; flex-direction: column; gap: 2px; margin-top: var(--space-1); }
+.fixLabel { margin: 0; color: var(--text-secondary); font-size: var(--text-xs-size); line-height: var(--text-xs-line); }
+
+.fixCommand {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-surface-raised);
+  overflow: hidden;
+}
+
+.fixCode {
+  flex: 1;
+  min-width: 0;
+  padding: 3px var(--space-2);
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size);
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fixCopy {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-left: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-2xs-size);
+  cursor: pointer;
+}
+.fixCopy:hover { background: var(--bg-hover); color: var(--text-primary); }
+.fixCopy:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.fixCopy svg { width: 12px; height: 12px; }
+
+/* Local runtimes: one line each — Ollama, LM Studio, llama-server. */
+.runtimes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.runtimeRow {
+  --tone: var(--status-neutral-solid);
+  display: grid;
+  grid-template-columns: 7px auto minmax(0, 1fr);
+  column-gap: var(--space-2);
+  align-items: baseline;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+.runtimeRow[data-tone='success'] { --tone: var(--status-success-solid); }
+.runtimeRow[data-tone='warning'] { --tone: var(--status-warning-solid); }
+.runtimeRow[data-tone='danger'] { --tone: var(--status-danger-solid); }
+.runtimeRow[data-tone='warning'] .statusDot { background: transparent; border: 2px solid var(--tone); }
+.runtimeRow[data-tone='danger'] .statusDot { border-radius: 1px; transform: translateY(-1px) rotate(45deg) scale(0.9); }
+.runtimeRow[data-tone='neutral'] .statusDot { background: transparent; border: 1.5px dashed var(--text-tertiary); }
+.runtimeRowName { color: var(--text-primary); font-weight: var(--font-weight-medium); white-space: nowrap; }
+.runtimeRowDetail { color: var(--text-secondary); min-width: 0; overflow-wrap: anywhere; }
+.modelRuntime { color: var(--text-tertiary); font-size: var(--text-2xs-size); }
+
 /* ── Motion ─────────────────────────────────────────────────────────── */
 
 @keyframes fade { from { opacity: 0; } }

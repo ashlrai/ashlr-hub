@@ -414,7 +414,11 @@ describe('verse accounts — collector lifecycle', () => {
     expect(status.owner).toBe('another-collector');
     expect(status.reasonCode).toBe('collector-owned');
     expect(status.state).toBe('blocked');
-    expect(status.note).toContain('resource-console');
+    // Names the holder by pid, and no longer blames a resource-console that
+    // is usually not the holder at all (3.14).
+    expect(status.note).toContain('holds the native metadata lease');
+    expect(status.note).toContain(`pid ${process.pid}`);
+    expect(status.holderPid).toBe(process.pid);
     // A read-only collector spawns nothing and reports no live connections.
     expect(collector.connections()).toBeNull();
     expect(collector.observations()).toEqual([]);

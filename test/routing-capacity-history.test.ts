@@ -43,7 +43,7 @@ import {
   withCapacityHistory,
 } from '../src/core/routing/capacity-history-api.js';
 import type { CapacityHistoryResponse, CapacityHistoryRow } from '../src/core/routing/capacity-history-types.js';
-import { handleBudgetApi, setBudgetCapacitySourceForTest, type CapacityReading } from '../src/core/routing/budget-api.js';
+import { handleBudgetApi, setBudgetCapacitySourceForTest, setCapacityPublishGateForTest, type CapacityReading } from '../src/core/routing/budget-api.js';
 import { writeCapacitySnapshot } from '../src/core/routing/budget-store.js';
 import type { SeatCapacity } from '../src/core/routing/headroom.js';
 import type { ApiModule } from '../src/core/verse/api-modules.js';
@@ -68,11 +68,13 @@ beforeEach(() => {
   home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'capacity-history-')));
   process.env['HOME'] = home;
   resetCapacityHistoryApiForTest();
+  setCapacityPublishGateForTest(() => true);
 });
 
 afterEach(() => {
   resetCapacityHistoryApiForTest();
   setBudgetCapacitySourceForTest();
+  setCapacityPublishGateForTest();
   process.env['HOME'] = savedHome;
   if (savedHistoryFlag === undefined) delete process.env['ASHLR_CAPACITY_HISTORY'];
   else process.env['ASHLR_CAPACITY_HISTORY'] = savedHistoryFlag;

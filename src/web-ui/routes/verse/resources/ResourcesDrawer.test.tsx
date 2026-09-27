@@ -96,9 +96,55 @@ const CLOUD = {
   backlog: { items: [], nextUp: null },
 };
 
+/** GET /api/verse/budget/readiness (3.14), shaped like the machine as diagnosed on 2026-09-26. */
+const SETUP_COMMAND = 'ashlr resources profile prepare --provider claude --directory ~/.ashlr/native-profiles/claude-a --executable "$(realpath "$(command -v claude)")"';
+const READINESS = {
+  v: 1,
+  checkedAt: CHECKED,
+  autonomy: { active: true, stage: 'shadow', detail: 'Stage 1 of 8 · shadow' },
+  capacitySnapshotAt: CHECKED,
+  resources: [
+    {
+      id: 'codex-cmp', label: 'Cash Margin Partners', engine: 'codex', kind: 'subscription',
+      reading: { state: 'live', at: CHECKED, note: null },
+      chat: { ready: true, tone: 'ok', word: 'Ready', detail: '', fix: null },
+      fleet: { ready: false, tone: 'off', word: 'Not in this stage', detail: 'The rollout is at stage 1 of 8 (shadow); the Codex lane opens at stage 5 (3a).', fix: null, roles: ['producer', 'judge'], reservePercent: null },
+    },
+    {
+      id: 'claude-a', label: 'Claude Max', engine: 'claude', kind: 'subscription',
+      reading: { state: 'live', at: CHECKED, note: null },
+      chat: { ready: true, tone: 'ok', word: 'Ready', detail: '', fix: null },
+      fleet: { ready: true, tone: 'ok', word: 'Ready', detail: '35% of the weekly window is left for the fleet. Roles: judges, leads.', fix: null, roles: ['judge', 'leader'], reservePercent: 40 },
+    },
+    {
+      id: 'personal-last', label: 'Personal Codex', engine: 'codex', kind: 'subscription',
+      reading: { state: 'last', at: new Date(NOW - 3 * 3_600_000).toISOString(), note: 'Polling is paused because nothing has asked for account data recently; it resumes the moment Verse is looked at.' },
+      chat: { ready: true, tone: 'warn', word: 'Ready', detail: 'No current usage reading — the provider decides at send time.', fix: { kind: 'check-again', label: 'Check again', seatId: 'codex-personal' } },
+      fleet: { ready: false, tone: 'blocked', word: 'No reading', detail: 'No usage reading for this seat — unknown usage is not headroom, so autonomy stays off it.', fix: null, roles: ['producer', 'judge'], reservePercent: 40 },
+    },
+    {
+      id: 'local', label: 'Local models', engine: 'local', kind: 'local',
+      reading: { state: 'live', at: CHECKED, note: null },
+      chat: { ready: true, tone: 'ok', word: 'Ready', detail: 'qwen3:32b.', fix: null },
+      fleet: { ready: true, tone: 'ok', word: 'Ready', detail: 'Free — no usage window to protect. Roles: builds, leads.', fix: null, roles: ['producer', 'leader'], reservePercent: null },
+    },
+    {
+      id: 'cloud', label: 'Claude cloud', engine: 'claude', kind: 'cloud',
+      reading: { state: 'live', at: CHECKED, note: 'About $212 of $250 in estimated credits left.' },
+      chat: {
+        ready: false, tone: 'blocked', word: 'Not set up', detail: "The Claude seat isn't set up on this Mac. Create the claude-a profile, then sign it in with the command it prints.",
+        fix: { kind: 'command', label: 'Set up the Claude seat', command: SETUP_COMMAND },
+      },
+      fleet: { ready: false, tone: 'off', word: 'Off', detail: 'Self-improvement is off — cloud sessions run only when you launch them.', fix: null, roles: [], reservePercent: null },
+    },
+  ],
+};
+
 interface Call { method: string; url: string; body: unknown; token: string | null }
 let calls: Call[];
 let cloud: unknown;
+let readiness: unknown;
+let localModels: unknown;
 
 function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
@@ -126,7 +172,9 @@ function stubFetch() {
       case '/api/verse/budget':
         return json(BUDGET);
       case '/api/verse/local-models':
-        return json(LOCAL_MODELS);
+        return json(localModels);
+      case '/api/verse/budget/readiness':
+        return readiness === 404 ? json({ error: 'not found' }, 404) : json(readiness);
       case '/api/verse/runtime':
         return json(RUNTIME);
       case '/api/verse/cloud':
@@ -146,6 +194,8 @@ beforeEach(() => {
   setMutationToken(TOKEN);
   calls = [];
   cloud = 404;
+  readiness = 404;
+  localModels = LOCAL_MODELS;
   stubFetch();
 });
 
@@ -283,6 +333,73 @@ describe('ResourcesDrawer — cloud credits', () => {
     expect(screen.getByRole('region', { name: 'Cloud' }).textContent).not.toMatch(/of \$250 left/);
     expect(card.getByTitle('Cloud: not set up · ~$250 credits')).toBeInTheDocument();
     expect(card.getByRole('link', { name: /Real balance on claude\.ai/ })).toBeInTheDocument();
+  });
+});
+
+describe('ResourcesDrawer — readiness for chat and the fleet (3.14)', () => {
+  it('an older server (404) shows no readiness lines — never a false "not ready"', async () => {
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    await screen.findByRole('heading', { name: /^Cash Margin Partners/ });
+    expect(screen.queryByRole('group', { name: /readiness/ })).toBeNull();
+  });
+
+  it('every account card answers Chat and Fleet, with the reserve kept for Mason in words', async () => {
+    readiness = READINESS;
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    const claude = within(await screen.findByRole('group', { name: 'Claude Max: readiness' }));
+    expect(claude.getByText('Chat')).toBeInTheDocument();
+    expect(claude.getByText('Fleet')).toBeInTheDocument();
+    expect(claude.getByText('Ready · reserve 40% kept for you')).toBeInTheDocument();
+    expect(claude.getByText('35% of the weekly window is left for the fleet. Roles: judges, leads.')).toBeInTheDocument();
+
+    const cmp = within(screen.getByRole('group', { name: 'Cash Margin Partners: readiness' }));
+    expect(cmp.getByText('Not in this stage')).toBeInTheDocument();
+    expect(cmp.getByText(/the Codex lane opens at stage 5 \(3a\)/)).toBeInTheDocument();
+    // Reconnect / Check again stay the card's own buttons — readiness never repeats them.
+    expect(cmp.queryByRole('button')).toBeNull();
+  });
+
+  it('local is one resource: Chat / Fleet plus a line per runtime, including a wedged llama-server', async () => {
+    readiness = READINESS;
+    localModels = {
+      ...LOCAL_MODELS,
+      ollama: { ...LOCAL_MODELS.ollama, baseUrl: 'http://127.0.0.1:11434' },
+      lmStudio: { reachable: true, baseUrl: 'http://127.0.0.1:1234', models: [{ id: 'qwen/qwen3-coder-30b', state: 'available' }] },
+      llamaServer: { reachable: false, baseUrl: 'http://127.0.0.1:8080', status: 'down', models: [], modelCount: null, slots: null, reason: 'llama-server-timeout' },
+    };
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    const local = within(await screen.findByRole('region', { name: 'Local' }));
+    expect(await local.findByRole('group', { name: 'Local models: readiness' })).toBeInTheDocument();
+    const runtimes = within(await local.findByRole('list', { name: 'Local runtimes' }));
+    expect(runtimes.getByText('Ollama')).toBeInTheDocument();
+    expect(runtimes.getByText('Answering · 2 installed · 1 loaded')).toBeInTheDocument();
+    expect(runtimes.getByText('LM Studio')).toBeInTheDocument();
+    expect(runtimes.getByText('Answering · 1 installed · none loaded')).toBeInTheDocument();
+    expect(runtimes.getByText('llama-server')).toBeInTheDocument();
+    expect(runtimes.getByText('Not answering · listening on :8080 but not answering — restart it')).toBeInTheDocument();
+  });
+
+  it('the cloud card shows the one command that sets the Claude seat up, copyable', async () => {
+    readiness = READINESS;
+    cloud = { ...CLOUD, seat: { id: 'claude-a', ready: false, reason: "The Claude seat isn't set up on this Mac." } };
+    const writeText = vi.fn(async (_text: string) => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    const group = within(await screen.findByRole('group', { name: 'Claude cloud: readiness' }));
+    expect(group.getByText('Set up the Claude seat — run in Terminal')).toBeInTheDocument();
+    const code = group.getByText(/^ashlr resources profile prepare --provider claude/);
+    expect(code.tagName).toBe('CODE');
+    await userEvent.click(group.getByRole('button', { name: 'Copy command: Set up the Claude seat' }));
+    expect(writeText).toHaveBeenCalledWith(SETUP_COMMAND);
+    expect(await group.findByText('Copied')).toBeInTheDocument();
+  });
+
+  it('an account with only an expired reading says when, and why — never a current claim', async () => {
+    readiness = { ...READINESS, resources: READINESS.resources.map((r) => (r.id === 'personal-last' ? { ...r, id: 'codex-personal' } : r)) };
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    const personal = within(await screen.findByRole('group', { name: 'Personal Codex: readiness' }));
+    expect(personal.getByText(/^Last reading .+ · Polling is paused/)).toBeInTheDocument();
+    expect(personal.getByText('No reading')).toBeInTheDocument();
   });
 });
 

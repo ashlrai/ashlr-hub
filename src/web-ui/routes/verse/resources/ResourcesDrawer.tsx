@@ -28,7 +28,8 @@ import { IconButton } from '../../../components/primitives/Button.js';
 import { useFocusTrap } from '../../../components/primitives/focus-trap.js';
 import { IconRefresh, IconX } from '../../../components/primitives/icons.js';
 import { Tooltip } from '../../../components/primitives/Tooltip.js';
-import { useRefetch } from '../../../data/hooks.js';
+import { useQuery, useRefetch } from '../../../data/hooks.js';
+import type { ReadinessFix, ResourceReadinessRow } from '../../../../core/routing/readiness-types.js';
 import type { AccountAction } from '../apps/apps-model.js';
 import { servingRuntimeQuery } from '../autonomy/fleet-queries.js';
 import { reconnectSeat, refreshSeatHealth, verseHealthQuery } from '../health/health-queries.js';
@@ -42,7 +43,7 @@ import { setVerseSection, type VerseSectionId } from '../verse-ui-store.js';
 import { CloudCredits } from './CloudCredits.js';
 import { LocalResources } from './LocalResources.js';
 import { ResourceCard } from './ResourceCard.js';
-import { cloudCreditsQuery } from './resources-queries.js';
+import { cloudCreditsQuery, resourceReadinessQuery, RESOURCES_POLL_MS } from './resources-queries.js';
 import { closeResources, setResourcesBar, setResourcesPinned, useResourcesUi } from './resources-store.js';
 import styles from './ResourcesDrawer.module.css';
 
@@ -84,6 +85,16 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
   const refetchLocal = useRefetch(verseLocalModelsQuery);
   const refetchRuntime = useRefetch(servingRuntimeQuery);
   const refetchCloud = useRefetch(cloudCreditsQuery);
+  // 3.14: "ready for chat?" / "ready for the fleet?" per resource. An older
+  // server has no route; every card then simply omits the two lines.
+  const readinessRead = useQuery(resourceReadinessQuery);
+  const refetchReadiness = useRefetch(resourceReadinessQuery);
+  usePollWhileVisible(refetchReadiness, RESOURCES_POLL_MS.readiness);
+  const readinessById = useMemo(() => {
+    const map = new Map<string, ResourceReadinessRow>();
+    for (const r of readinessRead.data?.value?.resources ?? []) map.set(r.id, r);
+    return map;
+  }, [readinessRead.data]);
 
   const rows = useMemo(
     () => buildCapacityRows(data.seats, { health: data.health, budget: data.budget, now }),
@@ -149,15 +160,25 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
           setBusy(null);
         }
       },
-      onDone: () =>
+      onDone: () => {
+        refetchReadiness();
         setNote({
           tone: 'neutral',
           text: reconnect
             ? `Opened the sign-in for ${row.label} in Terminal. Finish it there; this drawer picks it up.`
             : `Checked ${row.label} again.`,
-        }),
+        });
+      },
       onError: (message) => setNote({ tone: 'danger', text: message }),
     });
+  };
+
+  /** A readiness fix that is a Verse action (the cloud card's Reconnect): the same guarded flow as a card button. */
+  const onReadinessAction = (fix: ReadinessFix) => {
+    if (fix.kind === 'command' || !fix.seatId) return;
+    const target = rows.find((r) => r.seatId === fix.seatId);
+    if (!target) return;
+    onAction(target, { kind: fix.kind, label: fix.label, command: null, primary: true });
   };
 
   const refreshAll = () => {
@@ -166,6 +187,7 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
     refetchLocal();
     refetchRuntime();
     refetchCloud();
+    refetchReadiness();
     setTick(Date.now());
   };
 
@@ -226,7 +248,18 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
                 const settled = accountStatus(row, { healthRead, now });
                 const checking = busy?.seatId === row.seatId && busy.kind === 'check-again';
                 const status = checking ? accountStatus(row, { healthRead, now, checking: true }) : settled;
-                return <ResourceCard key={row.seatId} row={row} status={status} settled={settled} mode={mode_} busy={busy} onAction={onAction} />;
+                return (
+                  <ResourceCard
+                    key={row.seatId}
+                    row={row}
+                    status={status}
+                    settled={settled}
+                    mode={mode_}
+                    busy={busy}
+                    onAction={onAction}
+                    readiness={readinessById.get(row.seatId) ?? null}
+                  />
+                );
               })}
             </ul>
           )}
@@ -236,14 +269,23 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
         <section className={styles.group} aria-labelledby={`${titleId}-local`}>
           <h3 id={`${titleId}-local`} className={styles.groupTitle}>Local</h3>
           <ul className={styles.cards}>
-            <LocalResources status={localRow ? accountStatus(localRow, { healthRead, now }) : null} onOpenUsage={() => go('usage')} now={now} />
+            <LocalResources
+              status={localRow ? accountStatus(localRow, { healthRead, now }) : null}
+              onOpenUsage={() => go('usage')}
+              now={now}
+              readiness={readinessById.get('local') ?? null}
+            />
           </ul>
         </section>
 
         <section className={styles.group} aria-labelledby={`${titleId}-cloud`}>
           <h3 id={`${titleId}-cloud`} className={styles.groupTitle}>Cloud</h3>
           <ul className={styles.cards}>
-            <CloudCredits />
+            <CloudCredits
+              readiness={readinessById.get('cloud') ?? null}
+              onReadinessAction={onReadinessAction}
+              readinessBusy={busy !== null && busy.seatId === readinessById.get('cloud')?.chat.fix?.seatId}
+            />
           </ul>
         </section>
       </div>
