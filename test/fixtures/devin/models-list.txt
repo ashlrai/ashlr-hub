@@ -1,0 +1,88 @@
+Available models (52 families)
+
+Adaptive (adaptive)
+  adaptive                                                                 Adaptive  [$0.5 / 1M Input · $0.1 / 1M Cached input · $2 / 1M Output]
+
+SWE-2 (swe-2)
+  aliases: swe
+  swe-2-high                                                               SWE-2 High  [262K context, Free]
+  swe-2-medium                                                             SWE-2 Medium  [262K context, Free]
+  swe-2-max                                                                SWE-2 Max  [262K context, Free]
+
+SWE-1.7 Lightning (swe-1.7-lightning)
+  swe-1-7-lightning                                                        SWE-1.7 Lightning Max  [202752 context, $2.5 / 1M Input · $1 / 1M Cached input · $12.5 / 1M Output]
+  swe-1-7-lightning-medium                                                 SWE-1.7 Lightning Medium  [202752 context, $2.5 / 1M Input · $1 / 1M Cached input · $12.5 / 1M Output]
+
+Claude Fable 5.1 (claude-fable-5.1)
+  aliases: fable
+  claude-fable-5-1-medium                                                  Claude Fable 5.1 Medium  [1M context, $10 / 1M Input · $0.25 / 1M Cached input · $50 / 1M Output]
+  claude-fable-5-1-low                                                     Claude Fable 5.1 Low  [1M context, $10 / 1M Input · $0.25 / 1M Cached input · $50 / 1M Output]
+  claude-fable-5-1-high                                                    Claude Fable 5.1 High  [1M context, $10 / 1M Input · $0.25 / 1M Cached input · $50 / 1M Output]
+  claude-fable-5-1-xhigh                                                   Claude Fable 5.1 XHigh  [1M context, $10 / 1M Input · $0.25 / 1M Cached input · $50 / 1M Output]
+  claude-fable-5-1-max                                                     Claude Fable 5.1 Max  [1M context, $10 / 1M Input · $0.25 / 1M Cached input · $50 / 1M Output]
+
+Claude Opus 5.5 (claude-opus-5.5)
+  claude-opus-5-5-medium                                                   Claude Opus 5.5 Medium  [1M context, $4 / 1M Input · $0.2 / 1M Cached input · $20 / 1M Output, new]
+  claude-opus-5-5-low                                                      Claude Opus 5.5 Low  [1M context, $4 / 1M Input · $0.2 / 1M Cached input · $20 / 1M Output, new]
+  claude-opus-5-5-high                                                     Claude Opus 5.5 High  [1M context, $4 / 1M Input · $0.2 / 1M Cached input · $20 / 1M Output, new]
+  claude-opus-5-5-xhigh                                                    Claude Opus 5.5 XHigh  [1M context, $4 / 1M Input · $0.2 / 1M Cached input · $20 / 1M Output, new]
+  claude-opus-5-5-max                                                      Claude Opus 5.5 Max  [1M context, $4 / 1M Input · $0.2 / 1M Cached input · $20 / 1M Output, new]
+  claude-opus-5-5-low-fast                                                 Claude Opus 5.5 Low Fast  [1M context, $8 / 1M Input · $0.4 / 1M Cached input · $40 / 1M Output, new]
+  claude-opus-5-5-medium-fast                                              Claude Opus 5.5 Medium Fast  [1M context, $8 / 1M Input · $0.4 / 1M Cached input · $40 / 1M Output, new]
+  claude-opus-5-5-high-fast                                                Claude Opus 5.5 High Fast  [1M context, $8 / 1M Input · $0.4 / 1M Cached input · $40 / 1M Output, new]
+  claude-opus-5-5-xhigh-fast                                               Claude Opus 5.5 XHigh Fast  [1M context, $8 / 1M Input · $0.4 / 1M Cached input · $40 / 1M Output, new]
+  claude-opus-5-5-max-fast                                                 Claude Opus 5.5 Max Fast  [1M context, $8 / 1M Input · $0.4 / 1M Cached input · $40 / 1M Output, new]
+
+Kimi K3 (kimi-k3)
+  kimi-k3-high                                                             Kimi K3 High  [1048576 context, $3 / 1M Input · $0.3 / 1M Cached input · $15 / 1M Output]
+  kimi-k3-low                                                              Kimi K3 Low  [1048576 context, $3 / 1M Input · $0.3 / 1M Cached input · $15 / 1M Output]
+  kimi-k3-max                                                              Kimi K3 Max  [1048576 context, $3 / 1M Input · $0.3 / 1M Cached input · $15 / 1M Output]
+
+GLM-5.2 (glm-5.2)
+  glm-5-2                                                                  GLM-5.2 High  [200K context, $1.4 / 1M Input · $0.26 / 1M Cached input · $4.4 / 1M Output]
+  glm-5-2-max                                                              GLM-5.2 Max  [200K context, $1.4 / 1M Input · $0.26 / 1M Cached input · $4.4 / 1M Output]
+  glm-5-2-1m                                                               GLM-5.2 High 1M  [1M context, $1.4 / 1M Input · $0.26 / 1M Cached input · $4.4 / 1M Output]
+  glm-5-2-max-1m                                                           GLM-5.2 Max 1M  [1M context, $1.4 / 1M Input · $0.26 / 1M Cached input · $4.4 / 1M Output]
+  glm-5-2-none                                                             GLM-5.2 No Thinking  [200K context, $1.4 / 1M Input · $0.26 / 1M Cached input · $4.4 / 1M Output]
+  glm-5-2-none-1m                                                          GLM-5.2 No Thinking 1M  [1M context, $1.4 / 1M Input · $0.26 / 1M Cached input · $4.4 / 1M Output]
+
+Claude Sonnet 5 (claude-sonnet-5)
+  aliases: claude, sonnet
+  claude-sonnet-5-medium                                                   Claude Sonnet 5 Medium  [1M context, $2 / 1M Input · $0.2 / 1M Cached input · $10 / 1M Output]
+  claude-sonnet-5-low                                                      Claude Sonnet 5 Low  [1M context, $2 / 1M Input · $0.2 / 1M Cached input · $10 / 1M Output]
+  claude-sonnet-5-high                                                     Claude Sonnet 5 High  [1M context, $2 / 1M Input · $0.2 / 1M Cached input · $10 / 1M Output]
+  claude-sonnet-5-xhigh                                                    Claude Sonnet 5 XHigh  [1M context, $2 / 1M Input · $0.2 / 1M Cached input · $10 / 1M Output]
+  claude-sonnet-5-max                                                      Claude Sonnet 5 Max  [1M context, $2 / 1M Input · $0.2 / 1M Cached input · $10 / 1M Output]
+
+
+Grok 4.6 (grok-4.6)
+  grok-4-6-low                                                             Grok 4.6 Low  [500K context, $2 / 1M Input · $0.3 / 1M Cached input · $6 / 1M Output, beta]
+  grok-4-6-medium                                                          Grok 4.6 Medium  [500K context, $2 / 1M Input · $0.3 / 1M Cached input · $6 / 1M Output, beta]
+  grok-4-6-high                                                            Grok 4.6 High  [500K context, $2 / 1M Input · $0.3 / 1M Cached input · $6 / 1M Output, beta]
+  grok-4-6-xhigh                                                           Grok 4.6 XHigh  [500K context, $2 / 1M Input · $0.3 / 1M Cached input · $6 / 1M Output, beta]
+
+Fusion (fusion)
+  fusion-claude-fable-5-1-medium-sidekick-swe-2-medium                     Fusion (Claude Fable 5.1 Medium + SWE-2 Medium)  [1M context, $10 / 1M Input · $0.25 / 1M Cached input · $50 / 1M Output · Sidekick: Free]
+  fusion-claude-fable-5-1-high-sidekick-swe-2-medium                       Fusion (Claude Fable 5.1 High + SWE-2 Medium)  [1M context, $10 / 1M Input · $0.25 / 1M Cached input · $50 / 1M Output · Sidekick: Free]
+  fusion-gpt-5-6-sol-high-sidekick-swe-2-medium                            Fusion (GPT-5.6 Sol High Thinking + SWE-2 Medium)  [1M context, $1.2 / 1M Input · $0.12 / 1M Cached input · $6 / 1M Output · Sidekick: Free]
+  fusion-claude-fable-5-1-medium-sidekick-gpt-5-6-luna-high                Fusion (Claude Fable 5.1 Medium + GPT-5.6 Luna High Thinking)  [1M context, $10 / 1M Input · $0.25 / 1M Cached input · $50 / 1M Output · $0.2 / 1M Sidekick input · $0.02 / 1M Sidekick cached input · $1.2 / 1M Sidekick output]
+
+GPT-5.5 (gpt-5.5)
+  aliases: gpt
+  gpt-5-5-none                                                             GPT-5.5 No Thinking  [272K context, $5 / 1M Input · $0.5 / 1M Cached input · $30 / 1M Output]
+  gpt-5-5-low                                                              GPT-5.5 Low Thinking  [272K context, $5 / 1M Input · $0.5 / 1M Cached input · $30 / 1M Output]
+  gpt-5-5-medium                                                           GPT-5.5 Medium Thinking  [272K context, $5 / 1M Input · $0.5 / 1M Cached input · $30 / 1M Output]
+  gpt-5-5-high                                                             GPT-5.5 High Thinking  [272K context, $5 / 1M Input · $0.5 / 1M Cached input · $30 / 1M Output]
+  gpt-5-5-xhigh                                                            GPT-5.5 XHigh Thinking  [272K context, $5 / 1M Input · $0.5 / 1M Cached input · $30 / 1M Output]
+  gpt-5-5-none-priority                                                    GPT-5.5 No Thinking Fast  [272K context, $12.5 / 1M Input · $1.25 / 1M Cached input · $75 / 1M Output]
+  gpt-5-5-low-priority                                                     GPT-5.5 Low Thinking Fast  [272K context, $12.5 / 1M Input · $1.25 / 1M Cached input · $75 / 1M Output]
+  gpt-5-5-medium-priority                                                  GPT-5.5 Medium Thinking Fast  [272K context, $12.5 / 1M Input · $1.25 / 1M Cached input · $75 / 1M Output]
+  gpt-5-5-high-priority                                                    GPT-5.5 High Thinking Fast  [272K context, $12.5 / 1M Input · $1.25 / 1M Cached input · $75 / 1M Output]
+  gpt-5-5-xhigh-priority                                                   GPT-5.5 XHigh Thinking Fast  [272K context, $12.5 / 1M Input · $1.25 / 1M Cached input · $75 / 1M Output]
+
+Claude Haiku 4.5 (claude-haiku-4.5)
+  MODEL_PRIVATE_11                                                         Claude Haiku 4.5  [200K context, $1 / 1M Input · $0.1 / 1M Cached input · $5 / 1M Output]
+
+
+Pass a family slug, alias, or model UID to `--model` (e.g. `--model opus`)
+or switch models in a session with `/model <name>`.

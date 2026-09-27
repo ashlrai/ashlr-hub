@@ -214,9 +214,27 @@ export function effortOptionsFor(engine: VerseEngine, ctx: ControlOptionsContext
 }
 
 export function modelOptionsFor(seat: Pick<VerseSeat, 'models'>): VerseControlOption[] {
+  // 3.15: a family-grouped catalog (the Devin CLI seat) keeps its groups. The
+  // heading carries the price of the family's first model ("SWE-2 · Free");
+  // a model whose price differs from that says so under its own label.
+  const groupPrice = new Map<string, string | null>();
+  for (const model of seat.models) {
+    if (typeof model.group === 'string' && model.group && !groupPrice.has(model.group)) groupPrice.set(model.group, model.priceNote ?? null);
+  }
   return seat.models.map((model) => {
     const reason = typeof model.unavailableReason === 'string' ? model.unavailableReason.trim() : '';
-    return { id: model.id, label: model.label, available: reason.length === 0, ...(reason ? { reason } : {}) };
+    const group = typeof model.group === 'string' && model.group ? model.group : null;
+    const headPrice = group === null ? null : groupPrice.get(group) ?? null;
+    const price = typeof model.priceNote === 'string' && model.priceNote ? model.priceNote : null;
+    const note = price !== null && (group === null || price !== headPrice) ? price : null;
+    return {
+      id: model.id,
+      label: model.label,
+      available: reason.length === 0,
+      ...(reason ? { reason } : {}),
+      ...(group !== null ? { group: headPrice ? `${group} · ${headPrice}` : group } : {}),
+      ...(note !== null ? { note } : {}),
+    };
   });
 }
 
