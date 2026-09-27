@@ -209,6 +209,10 @@ describe('buildCloudTimeline — shape', () => {
     expect(known.verified).toBe(true);
     expect(known.detail).toContain('Model: claude-opus-5-5 (evidence pack)');
     expect(known.detail).toContain('Account: unknown');
+    // 3.15: the playbook version the brief carried, only when there was one.
+    expect(none.detail).not.toContain('Playbook:');
+    const pinned = byKind(buildCloudTimeline(sources({ task: task({ playbookRef: { id: 'fix-issue', version: 3, sha: 'abcdefabcdef' } }) }), NOW).steps).worker!;
+    expect(pinned.detail).toContain('Playbook: fix-issue@v3.');
   });
 
   it('the cost is always an estimate (verified false) with the real-balance link', () => {

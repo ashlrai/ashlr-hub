@@ -32,6 +32,15 @@ describe('activeTrigger', () => {
     expect(activeTrigger('/usr/bin', 8)).toBeNull();
   });
 
+  it('3.15: finds a ! playbook macro at the start or after whitespace, not inside a word or `!=`', () => {
+    expect(activeTrigger('!', 1)).toEqual({ kind: 'macro', query: '', start: 0, end: 1 });
+    expect(activeTrigger('fix it !fix-b', 13)).toEqual({ kind: 'macro', query: 'fix-b', start: 7, end: 13 });
+    expect(activeTrigger('!fix-bug now', 4)).toEqual({ kind: 'macro', query: 'fix', start: 0, end: 8 });
+    expect(activeTrigger('Hi!', 3)).toBeNull();
+    expect(activeTrigger('a != b', 3)).toBeNull();
+    expect(activeTrigger('!Fix', 4)).toBeNull();
+  });
+
   it('refuses an out-of-range caret', () => {
     expect(activeTrigger('@a', 5)).toBeNull();
     expect(activeTrigger('@a', -1)).toBeNull();

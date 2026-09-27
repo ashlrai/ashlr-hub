@@ -18,6 +18,8 @@
  * BROWSER-SAFE: the Lessons view imports this — type-only imports, plain consts.
  */
 
+import type { PlaybookRef } from '../../playbooks/types.js';
+
 export const VERSE_LESSONS_PATH = '/api/verse/learning/lessons';
 export const VERSE_LESSONS_KNOWLEDGE_PATH = `${VERSE_LESSONS_PATH}/knowledge`;
 export const VERSE_LESSONS_AGENTS_MD_PATH = `${VERSE_LESSONS_PATH}/agents-md`;
@@ -132,6 +134,12 @@ export interface RetroV1 {
   /** The optional cheap model pass: null = deterministic only. */
   model: { engine: string; model: string | null; at: string } | null;
   createdAt: string;
+  /**
+   * The playbook version the task ran under (playbooks/). Absent = none /
+   * not recorded. Named `playbookRef` so it is never confused with the
+   * Lessons view's `playbook` (the Leader's veto deltas).
+   */
+  playbookRef?: PlaybookRef;
 }
 
 // ---------------------------------------------------------------------------

@@ -682,6 +682,13 @@ const loadMirrorCmd = lazyCmd(
   'mirror command requires a current build of src/cli/mirror.ts (3.10 Track B unit U6).',
 );
 
+// ─── 3.15 playbooks ─────────────────────────────────────────────────
+const loadPlaybookCmd = lazyCmd(
+  () => import('./playbook.js'),
+  (m) => m.runPlaybookCli as Cmd,
+  'playbook command requires a current build of src/cli/playbook.ts (3.15 playbooks).',
+);
+
 // ─── 3.11 cloud lane ────────────────────────────────────────────────
 const loadCloudCmd = lazyCmd(
   () => import('./cloud.js'),
@@ -2254,6 +2261,15 @@ async function main(): Promise<void> {
         // budget / backlog (src/cli/cloud.ts). Launches spend Claude credits.
         const cmdCloud = await loadCloudCmd();
         process.exitCode = await cmdCloud(rest);
+        break;
+      }
+
+      case 'playbook': {
+        // 3.15: versioned playbooks — list / show / new / edit / run
+        // (src/cli/playbook.ts). `run` launches through the cloud / Devin
+        // services and every gate they hold; nothing merges from here.
+        const cmdPlaybook = await loadPlaybookCmd();
+        process.exitCode = await cmdPlaybook(rest);
         break;
       }
 

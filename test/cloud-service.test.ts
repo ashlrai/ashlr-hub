@@ -153,6 +153,35 @@ describe('launchCloudTask — success', () => {
   });
 });
 
+describe('launchCloudTask — playbooks (3.15)', () => {
+  it('no playbook: the task has no playbookRef and the prompt is exactly task text + contract', async () => {
+    const h = harness();
+    const res = await launchCloudTask(REQ, h.deps);
+    expect(res.task).not.toHaveProperty('playbookRef');
+    expect(h.prompts[0]).not.toContain('## Playbook:');
+    expect(h.prompts[0]!.startsWith(`${REQ.prompt}\n\n---\nDELIVERY CONTRACT`)).toBe(true);
+  });
+
+  it('a !macro in the text pins the playbook version on the task and inlines it before the contract', async () => {
+    const h = harness();
+    const res = await launchCloudTask({ ...REQ, prompt: 'The parser crashes on CRLF. !fix-bug' }, h.deps);
+    expect(res.task!.playbookRef).toMatchObject({ id: 'fix-issue', version: 1 });
+    expect(readCloudTask(res.task!.id)!.playbookRef).toEqual(res.task!.playbookRef);
+    const prompt = h.prompts[0]!;
+    expect(prompt.indexOf('## Playbook: Fix a reported bug')).toBeGreaterThan(0);
+    expect(prompt.indexOf('## Playbook:')).toBeLessThan(prompt.indexOf('DELIVERY CONTRACT'));
+  });
+
+  it('an explicit playbook that does not exist refuses before anything is persisted or run', async () => {
+    const h = harness();
+    const res = await launchCloudTask({ ...REQ, playbook: 'no-such-playbook' }, h.deps);
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/no playbook called/);
+    expect(listCloudTasks()).toEqual([]);
+    expect(h.prompts).toEqual([]);
+  });
+});
+
 describe('launchCloudTask — validation (nothing persisted, nothing run)', () => {
   it.each([
     ['a bad repo', { ...REQ, repo: 'https://github.com/ashlrai/ashlr-hub' }, /owner\/name/],

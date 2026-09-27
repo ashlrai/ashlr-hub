@@ -133,7 +133,9 @@ function launchStep(task: DevinTaskV1): Step {
 function workerStep(task: DevinTaskV1, model: string | null): Step {
   const snap = task.session;
   const messages = devinMessagesLine(task);
-  const modelText = model ? `Model: ${clip(model, 80)} (evidence pack).` : 'Model: unknown — the Devin API does not name it.';
+  // 3.15: the playbook version the prompt carried (absent = none; nothing is appended).
+  const playbook = task.playbookRef ? ` Playbook: ${clip(task.playbookRef.id, 48)}@v${task.playbookRef.version}.` : '';
+  const modelText = `${model ? `Model: ${clip(model, 80)} (evidence pack).` : 'Model: unknown — the Devin API does not name it.'}${playbook}`;
   if (!snap) {
     return step('worker', {
       at: null,

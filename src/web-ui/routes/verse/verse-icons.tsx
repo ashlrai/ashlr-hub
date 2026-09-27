@@ -82,6 +82,19 @@ export function WikiIcon(props: IconProps) {
   );
 }
 
+/** Playbooks — a checklist on a page. */
+export function PlaybooksIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="3" y="2.5" width="10" height="11" rx="1.5" />
+      <path d="M5.5 6l1 1 1.75-2" />
+      <path d="M5.5 10l1 1 1.75-2" />
+      <path d="M10 6h1" />
+      <path d="M10 10h1" />
+    </Icon>
+  );
+}
+
 /** Every section's glyph: the rail's, plus the tray's. */
 export const SECTION_ICON: Readonly<Record<VerseSectionId, ComponentType<IconProps>>> = {
   command: RAIL_ICON.command!,
@@ -93,6 +106,7 @@ export const SECTION_ICON: Readonly<Record<VerseSectionId, ComponentType<IconPro
   apps: AppsIcon,
   usage: UsageIcon,
   wiki: WikiIcon,
+  playbooks: PlaybooksIcon,
 };
 
 /**

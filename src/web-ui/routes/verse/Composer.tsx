@@ -85,6 +85,7 @@ import type { SeatChoice } from './SeatSelector.js';
 import { useViewport } from './shell/viewport.js';
 import { ENGINE_LABEL, modelLabel, seatPillLabel } from './verse-model.js';
 import { formatTokens } from './verse-readouts.js';
+import { matchPlaybookMacros, usePlaybookMacroSuggestions } from './playbooks/macro-suggest.js';
 import type { VerseFileMatch } from '../../../core/verse/workbench-types.js';
 import styles from './Composer.module.css';
 import cstyles from './composer/composer.module.css';
@@ -409,6 +410,9 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   }, [trigger?.kind, trigger?.query, sessionId]);
 
   const commands: SlashCommand[] = trigger?.kind === 'command' ? matchSlashCommands(trigger.query) : [];
+  // 3.15: `!` lists playbooks (playbooks/macro-suggest.ts); the list is read on first use.
+  const macroList = usePlaybookMacroSuggestions(trigger?.kind === 'macro');
+  const macros = trigger?.kind === 'macro' && macroList.rows ? matchPlaybookMacros(macroList.rows, trigger.query) : [];
   const commandDisabled = useCallback((id: SlashCommand['id']): string | null => {
     if (id === 'handoff' && !onHandoff) return 'Use Hand off in the chat header’s Chat actions menu'; // named, not drawn as the U+22EF glyph, which is outside the font subset (c18)
     if (id === 'handoff' && handoffDisabledReason) return handoffDisabledReason;
@@ -421,11 +425,15 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
     ? commands.map((c) => ({ id: c.id, primary: c.title, secondary: c.description, disabledReason: commandDisabled(c.id) }))
     : trigger?.kind === 'mention'
       ? (fileMatches?.files ?? []).slice(0, 12).map((f) => ({ id: `${f.root}:${f.path}`, primary: f.path, secondary: fileMatches?.primaryRoot === f.root ? null : f.root }))
-      : [];
+      : trigger?.kind === 'macro'
+        ? macros.map((p) => ({ id: p.id, primary: p.macro, secondary: p.name }))
+        : [];
   const suggestOpen = trigger !== null;
   const suggestStatus = trigger?.kind === 'mention'
     ? fileSearchError ?? (fileMatches === null || fileMatches.query !== trigger.query ? 'Searching…' : suggestItems.length === 0 ? 'No files match' : null)
-    : null;
+    : trigger?.kind === 'macro'
+      ? macroList.reason ?? (macroList.rows === null ? 'Loading playbooks…' : suggestItems.length === 0 ? 'No playbook matches' : null)
+      : null;
   const boundedActive = suggestItems.length === 0 ? 0 : Math.min(activeIndex, suggestItems.length - 1);
 
   useEffect(() => { setActiveIndex(0); }, [trigger?.kind, trigger?.query]);
@@ -497,6 +505,14 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
     if (trigger.kind === 'command') {
       const command = commands[index];
       if (command) runSlash(command);
+      return;
+    }
+    if (trigger.kind === 'macro') {
+      const playbook = macros[index];
+      if (!playbook) return;
+      const next = applyCompletion(draft, trigger, playbook.macro);
+      setDraft(next.text);
+      placeCaret(next.caret);
       return;
     }
     const match = fileMatches?.files[index];
@@ -836,7 +852,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
       ))}
       <div className={`${styles.box} ${listening ? styles.boxListening : ''} ${dragging ? cstyles.boxDragging : ''} ${bypassOn ? cstyles.boxBypass : ''}`}>
         {suggestOpen ? (
-          <SuggestMenu id={suggestId} label={trigger?.kind === 'command' ? 'Commands' : 'Files in this chat’s folders'}
+          <SuggestMenu id={suggestId} label={trigger?.kind === 'command' ? 'Commands' : trigger?.kind === 'macro' ? 'Playbooks' : 'Files in this chat’s folders'}
             items={suggestItems} activeIndex={boundedActive} status={suggestStatus}
             onPick={acceptSuggestion} onHover={setActiveIndex} />
         ) : null}
@@ -929,7 +945,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
                         ? <>Handoff note drafted from the previous chat — review or edit it; nothing is spent until you press Send.</>
                         : historyAt !== -1 ? <>Recalled message {historyAt + 1} of {history.current.length} · <kbd>↓</kbd> returns to your draft</>
                           : showHint
-                            ? <><kbd>Enter</kbd> sends · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>@</kbd> files · <kbd>/</kbd> commands · <kbd>↑</kbd> recalls</>
+                            ? <><kbd>Enter</kbd> sends · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>@</kbd> files · <kbd>/</kbd> commands · <kbd>!</kbd> playbooks · <kbd>↑</kbd> recalls</>
                             : null}
       </p>
       {/* Mounted whenever there are pickers, not only while the row is

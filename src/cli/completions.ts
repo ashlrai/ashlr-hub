@@ -41,6 +41,8 @@ export const TOP_LEVEL_COMMANDS: string[] = [
   'devin',
   // 3.15 private repo wiki.
   'wiki',
+  // 3.15 versioned playbooks.
+  'playbook',
 ];
 
 /** Subcommands per top-level command (first-position completion only). */
@@ -105,6 +107,8 @@ const SUBCOMMANDS: Record<string, string[]> = {
   cloud: ['launch', 'list', 'refresh', 'improve', 'budget', 'backlog', 'help'],
   // Mirror the verb switch in src/cli/devin.ts (runDevinCli).
   devin: ['connect', 'disconnect', 'enable', 'disable', 'fleet', 'status', 'launch', 'list', 'refresh', 'message', 'budget', 'help'],
+  // Mirror the verb switch in src/cli/playbook.ts (runPlaybookCli).
+  playbook: ['list', 'show', 'new', 'edit', 'run', 'help'],
   universe: ['demo', 'init', 'run', 'status', 'archive', 'campaign', 'portfolio', 'integration', 'deliver', 'deliveries', 'graph', 'compare', 'help'],
 };
 

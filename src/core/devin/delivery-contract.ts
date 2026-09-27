@@ -32,7 +32,13 @@ export const DEVIN_REPORT_SCHEMA: Readonly<Record<string, unknown>> = Object.fre
   },
 });
 
-export function buildDevinPrompt(task: Pick<DevinTaskV1, 'id' | 'prompt' | 'repo' | 'branch' | 'baseBranch' | 'title'>): string {
+/**
+ * `playbook` (3.15) is the rendered playbook block (playbooks/resolve.ts),
+ * inlined between the task text and the contract. Empty ⇒ unchanged. It is
+ * inlined rather than synced as a Devin-side playbook: one source of truth,
+ * versioned here, and no Devin playbook to keep in step.
+ */
+export function buildDevinPrompt(task: Pick<DevinTaskV1, 'id' | 'prompt' | 'repo' | 'branch' | 'baseBranch' | 'title'>, playbook = ''): string {
   const example = JSON.stringify({
     status: 'done',
     summary: 'One or two plain sentences on what changed and why.',
@@ -42,6 +48,7 @@ export function buildDevinPrompt(task: Pick<DevinTaskV1, 'id' | 'prompt' | 'repo
   }, null, 2);
   return [
     task.prompt.trim(),
+    ...(playbook.trim() ? ['', playbook.trim()] : []),
     '',
     '---',
     `DELIVERY CONTRACT (Ashlr Verse Devin task ${task.id}) — follow it exactly; Verse only sees what arrives on GitHub.`,

@@ -45,6 +45,7 @@
  */
 import type { CloudDeliveryPin, CloudIntakeMemo, CloudSupersededBy, CloudTaskPr, CloudTaskReport } from '../cloud/types.js';
 import type { FleetReadinessVerdict, ReadinessVerdict } from '../routing/readiness-types.js';
+import type { PlaybookRef } from '../playbooks/types.js';
 
 export const DEVIN_TASK_SCHEMA_VERSION = 1 as const;
 export const DEVIN_BUDGET_SCHEMA_VERSION = 1 as const;
@@ -163,6 +164,8 @@ export interface DevinTaskV1 {
   deliveryPin?: CloudDeliveryPin;
   supersededBy?: CloudSupersededBy;
   intake?: CloudIntakeMemo;
+  /** 3.15: the playbook version this task runs under (playbooks/); absent = none. */
+  playbookRef?: PlaybookRef;
   /** Backlog / fleet work item this task came from, if any. */
   backlogItemId: string | null;
   /**
@@ -307,6 +310,8 @@ export interface DevinLaunchRequest {
   title?: string;
   prompt: string;
   origin: Extract<DevinTaskOrigin, 'chat' | 'operator' | 'cli'>;
+  /** 3.15: a playbook to run under — `id`, `!macro` or `id@v3` (in-process callers; the CLI). */
+  playbook?: string;
 }
 
 export interface DevinLaunchResponse {

@@ -52,6 +52,7 @@ import type { EffectivePolicy, LedgerEntry, LedgerReadOptions, LedgerReadResult 
 import type { RepoHold } from '../fleet/fleet-types.js';
 import type { ReasoningDigest } from '../reasoning/types.js';
 import type { LeaderLessonsEvidence } from '../learn/retro/inject.js';
+import type { LeaderPlaybookRow } from '../playbooks/lanes.js';
 import {
   LEADER_ACTION_KINDS,
   LEADER_LIMITS,
@@ -137,7 +138,7 @@ HOW YOU ACT
 You propose; the system classifies and applies. Class A applies at once (Mason can veto any time). Class B waits out a veto window. Anything outside the grant goes to Mason as an "escalate" action with your argument. You cannot raise the grant, spend Mason's reserve, or touch authority. Action kinds and their exact params:
 - goal.focus {goalId} · goal.pause {goalId, until: ISO|null} · goal.archive {goalId} · goal.reorder {goalIds: [2-10 ids, highest priority first]}
 - goal.create {goal: {objective, rationale, targetRepo: "owner/name"|null, deliverable, acceptanceEvidence: [..]}} (class B; at most ${LEADER_LIMITS.maxNewGoalsPerDay}/day and only while fewer than ${LEADER_LIMITS.maxActiveGoals} goals are open)
-- work.dispatch {task: {repo: "owner/name", title, detail, difficulty: low|medium|high, value: 1-5, goalId?}}
+- work.dispatch {task: {repo: "owner/name", title, detail, difficulty: low|medium|high, value: 1-5, goalId?, playbook?: an id from PLAYBOOKS when one fits the task}}
 - standard.add {rule, appliesTo, evidence}
 - router.tune {tuning: {lambdaCost?, lambdaPressure?, lambdaLatency? (0-10), bonThreshold?: low|medium|high}}
 - repo.pause {repo, reason, until: ISO|null} · repo.resume {repo}
@@ -199,6 +200,8 @@ export interface LeaderEvidenceSources {
    * (learn/retro/inject.ts). null / absent = none.
    */
   lessons?(): LeaderLessonsEvidence | null;
+  /** 3.15 (optional): the playbooks a work.dispatch may name (playbooks/lanes.ts). */
+  playbooks?(): LeaderPlaybookRow[];
 }
 
 export interface LeaderEvidence {
@@ -247,6 +250,8 @@ export interface LeaderEvidence {
    * unchanged. Rendered as untrusted data like every other block.
    */
   lessons?: LeaderLessonsEvidence;
+  /** 3.15: playbooks a work.dispatch may name. Absent when there are none. */
+  playbooks?: LeaderPlaybookRow[];
   /** Sections whose source failed — reported so the model does not read them as zero. */
   unknown: string[];
 }
@@ -373,6 +378,7 @@ export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs
   // 3.14 operator input (additive): unreadable is reported, never read as "no guidance".
   const operator = attempt('operator', () => readLeaderOperatorContext(nowMs));
   const lessons = sources.lessons ? attempt('lessons', () => sources.lessons!()) : null;
+  const playbooks = sources.playbooks ? attempt('playbooks', () => sources.playbooks!()) : null;
   return {
     grant,
     budget,
@@ -394,6 +400,7 @@ export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs
     directives: directives ? { grokLanes: directives.grokLanes, codexEnabled: directives.codexEnabled, routerTuning: directives.routerTuning } : null,
     ...(operator ? { operator } : {}),
     ...(lessons ? { lessons } : {}),
+    ...(playbooks && playbooks.length > 0 ? { playbooks } : {}),
     unknown: [...new Set(unknown)].sort(),
   };
 }
@@ -451,6 +458,9 @@ export function buildLeaderPrompt(evidence: LeaderEvidence, opts: { dryRun: bool
   ];
   if (evidence.lessons) {
     blocks.push(untrustedBlock('LESSONS: MASON\'S VETOES (with repeats) AND HIS APPROVED KNOWLEDGE', evidence.lessons));
+  }
+  if (evidence.playbooks) {
+    blocks.push(untrustedBlock('PLAYBOOKS (name one in work.dispatch.playbook when it fits)', evidence.playbooks));
   }
   if (evidence.operator) {
     blocks.unshift(operatorBlock(evidence.operator));
@@ -774,7 +784,7 @@ export interface LeaderRunDeps {
 }
 
 export async function loadDefaultLeaderRunDeps(cfg: AshlrConfig): Promise<LeaderRunDeps> {
-  const [apply, seat, budgetStore, quarantine, quality, modelStats, reasoningApi, goalsStore, ledger, effective, cloudBacklog, lessons] = await Promise.all([
+  const [apply, seat, budgetStore, quarantine, quality, modelStats, reasoningApi, goalsStore, ledger, effective, cloudBacklog, lessons, playbookLanes] = await Promise.all([
     loadDefaultLeaderDeps(),
     loadDefaultLeaderSeatDeps(cfg),
     import('../routing/budget-store.js'),
@@ -787,6 +797,7 @@ export async function loadDefaultLeaderRunDeps(cfg: AshlrConfig): Promise<Leader
     import('../authority/effective-config.js'),
     import('../cloud/backlog.js'),
     import('../learn/retro/inject.js'),
+    import('../playbooks/lanes.js'),
   ]);
   return {
     cfg,
@@ -829,6 +840,7 @@ export async function loadDefaultLeaderRunDeps(cfg: AshlrConfig): Promise<Leader
         })),
       reasoning: () => reasoningApi.computeReasoningDigest(14),
       lessons: () => lessons.leaderLessons(),
+      playbooks: () => playbookLanes.leaderPlaybookCatalog(),
     },
   };
 }

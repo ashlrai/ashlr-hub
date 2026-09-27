@@ -226,6 +226,10 @@ describe('buildDevinTimeline', () => {
     expect(worker).toMatchObject({ title: 'Devin session · exit (finished)', source: 'Devin API (session status)', verified: true, at: '2026-09-27T05:00:00.000Z' });
     expect(worker.detail).toContain('2 messages sent from Verse.');
     expect(worker.detail).toContain('Model: unknown');
+    // 3.15: the playbook version the prompt carried, only when there was one.
+    expect(worker.detail).not.toContain('Playbook:');
+    const pinned = stepOf(buildDevinTimeline(sources(task({ playbookRef: { id: 'dependency-bump', version: 2, sha: 'abcdefabcdef' } })), 2.25, NOW).steps, 'worker');
+    expect(pinned.detail).toContain('Playbook: dependency-bump@v2.');
 
     const report = stepOf(tl.steps, 'report');
     expect(report.verified).toBe(false);

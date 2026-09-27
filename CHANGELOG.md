@@ -11,6 +11,36 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Versioned playbooks for every lane
+
+- Playbooks are reusable task templates with the sections Outcome, Procedure,
+  Specifications, Advice, Forbidden actions and Required from user. Each has
+  front-matter for its id, name, `!macro`, the repos, globs and task kinds it
+  applies to, done-when checks and a default budget.
+- Versions never change after they are written. They are stored under
+  `~/.ashlr/playbooks/<id>/v<N>.md`, and an edit writes the next version.
+- Seven starters ship built in: fix-failing-test, fix-issue, dependency-bump,
+  add-tests-for-module, docs-sync, perf-regression and security-fix.
+- A task gets a playbook in one of three ways:
+  - it is named directly (id, `!macro` or `id@v3`);
+  - its text contains a `!macro`;
+  - it is auto-matched by task kind and repo. Auto-matching is off for every
+    playbook until it is turned on.
+- The playbook is added to fleet goal dispatch, cloud briefs, Devin prompts
+  and the Leader's `work.dispatch`, which gains an optional `playbook`. Cloud
+  and Devin briefs get it before the delivery contract. Tasks with no
+  playbook get exactly the same prompt as before.
+- Every run records `id@version`. Cloud and Devin tasks record it on the task.
+  Fleet runs record it in a uses ledger that is matched to the proposal's
+  runId. Retros carry the record, so merged, refused, reverted and failed
+  outcomes are counted per version.
+- In Verse, a **Playbooks** section in the gear tray lists playbooks and shows
+  each one as an engine reads it, with outcomes per version. Editing saves a
+  new version. The ⌘K palette adds "Open Playbooks" and "Run playbook…", and
+  the composer's ⋯ sheet adds "Use playbook…".
+- Typing `!` in the composer suggests playbook macros.
+- CLI: `ashlr playbook list|show|new|edit|run`.
+
 ### Private repo wiki and Ask
 
 - `ashlr wiki build|status|show|ask` and a Verse **Repo wiki** section (gear

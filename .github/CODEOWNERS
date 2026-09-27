@@ -649,6 +649,7 @@
 /test/mirrors-310b.test.ts @masonwyatt23
 /test/orchestrator-bash-standing-310b.test.ts @masonwyatt23
 /test/overnight-api-310b.test.ts @masonwyatt23
+/test/playbooks-315.test.ts @masonwyatt23
 /test/post-merge-credit-import-cycle.test.ts @masonwyatt23
 /test/post-merge-credit-release.test.ts @masonwyatt23
 /test/post-merge-halt-310b.test.ts @masonwyatt23

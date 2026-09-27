@@ -8,8 +8,9 @@
  * radio lists in a sheet that rises from the bottom. It traps focus while
  * open, Esc and the backdrop close it, and focus returns to ⋯.
  *
- * Below the pickers: "Run in cloud" (3.11 cloud lane) — launches the typed
- * message as a cloud task — and "Run in Devin" (3.15 Devin lane). Both are
+ * Below the pickers: "Use playbook…" (3.15) — puts a playbook's `!macro` in
+ * the message — then "Run in cloud" (3.11 cloud lane) — launches the typed
+ * message as a cloud task — and "Run in Devin" (3.15 Devin lane). All are
  * import()s loaded the first time the sheet opens, so nothing cloud- or
  * Devin-related is on the chat's first-paint path.
  */
@@ -20,6 +21,7 @@ import styles from './composer.module.css';
 
 const RunInCloudAction = lazy(() => import('../cloud/RunInCloudAction.js').then((m) => ({ default: m.RunInCloudAction })));
 const RunInDevinAction = lazy(() => import('../devin/RunInDevinAction.js').then((m) => ({ default: m.RunInDevinAction })));
+const UsePlaybookAction = lazy(() => import('../playbooks/UsePlaybookAction.js').then((m) => ({ default: m.UsePlaybookAction })));
 
 export interface ControlsSheetProps {
   open: boolean;
@@ -43,6 +45,9 @@ export function ControlsSheet({ open, onClose, children }: ControlsSheetProps) {
         <p className={styles.sheetNote}>Changes apply from the next turn.</p>
         <div className={styles.sheetBody}>
           {children}
+          <Suspense fallback={null}>
+            <UsePlaybookAction />
+          </Suspense>
           <Suspense fallback={null}>
             <RunInCloudAction />
           </Suspense>

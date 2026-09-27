@@ -33,6 +33,7 @@ import { scrubPrivateText } from '../util/scrub.js';
 import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
 import { BUDGET_MODES, type BudgetMode, type RoutingDifficulty } from '../routing/types.js';
 import type { FleetTaskInput } from '../fleet/fleet-types.js';
+import { PLAYBOOK_ID_PATTERN } from '../playbooks/types.js';
 import type {
   HarnessConfigPatch,
   HarnessEffort,
@@ -258,7 +259,7 @@ function parseGoalProposal(value: unknown): LeaderGoalProposal | null {
 
 function parseTaskInput(value: unknown): FleetTaskInput | null {
   if (!isRecord(value)) return null;
-  if (!hasExactKeys(value, ['repo', 'title', 'difficulty', 'value'], ['detail', 'goalId'])) return null;
+  if (!hasExactKeys(value, ['repo', 'title', 'difficulty', 'value'], ['detail', 'goalId', 'playbook'])) return null;
   const repo = value['repo'];
   if (typeof repo !== 'string' || !NAME_WITH_OWNER_RE.test(repo)) return null;
   const title = cleanModelText(value['title'], 120);
@@ -269,13 +270,19 @@ function parseTaskInput(value: unknown): FleetTaskInput | null {
   if (!Number.isInteger(taskValue) || (taskValue as number) < 1 || (taskValue as number) > 5) return null;
   const goalId = value['goalId'] ?? null;
   if (goalId !== null && (typeof goalId !== 'string' || !GOAL_ID_RE.test(goalId))) return null;
+  // 3.15: a playbook id rides in the detail as a `!macro` line, so every lane
+  // the task reaches (fleet brief, cloud backlog) resolves it the same way
+  // (playbooks/resolve.ts); an id that names no playbook is inert text.
+  const playbook = value['playbook'] ?? null;
+  if (playbook !== null && (typeof playbook !== 'string' || !PLAYBOOK_ID_PATTERN.test(playbook))) return null;
+  const detail = cleanModelText(value['detail'], TEXT.detail) ?? '';
   // `source` and `requestedBy` are FORCED, never taken from the model: a task
   // the Leader dispatches is always attributed to the Leader.
   return {
     repo,
     source: 'leader',
     title,
-    detail: cleanModelText(value['detail'], TEXT.detail) ?? '',
+    detail: playbook ? `${detail}${detail ? '\n\n' : ''}Playbook: !${playbook}` : detail,
     difficulty: difficulty as RoutingDifficulty,
     value: taskValue as number,
     requestedBy: 'leader',

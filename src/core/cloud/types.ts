@@ -31,6 +31,8 @@
  * gates (custody) or by Mason — never by the cloud lane.
  */
 
+import type { PlaybookRef } from '../playbooks/types.js';
+
 export const CLOUD_TASK_SCHEMA_VERSION = 1 as const;
 export const CLOUD_BUDGET_SCHEMA_VERSION = 1 as const;
 
@@ -171,6 +173,8 @@ export interface CloudTaskV1 {
   supersededBy?: CloudSupersededBy;
   /** 3.13: the standing-pass intake's dedupe memo (see CloudIntakeMemo). */
   intake?: CloudIntakeMemo;
+  /** 3.15: the playbook version this task runs under (playbooks/); absent = none. */
+  playbookRef?: PlaybookRef;
   /** Budget accounting — an ESTIMATE fixed at launch. */
   estimatedCostUsd: number;
   /** Backlog item this task came from (self-improvement), if any. */
@@ -296,6 +300,8 @@ export interface CloudLaunchRequest {
   title?: string;
   prompt: string;
   origin: Extract<CloudTaskOrigin, 'chat' | 'operator' | 'cli'>;
+  /** 3.15: a playbook to run under — `id`, `!macro` or `id@v3` (in-process callers; the CLI). */
+  playbook?: string;
 }
 
 export interface CloudLaunchResponse {
