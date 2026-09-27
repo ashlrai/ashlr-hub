@@ -14,12 +14,17 @@
  *
  * An action with no route (it needs Touch ID or a terminal) opens the item's
  * target instead — that is where the flow lives.
+ *
+ * 3.15: a cloud / Devin PR's Close confirms with an optional one-line reason
+ * (close-reason.tsx) that rides in the POST body as `reason` — only for that
+ * one route, and only when something was typed.
  */
 import { useSyncExternalStore } from 'react';
 import { isSafeApiRoute, type NeedsYouAction, type NeedsYouItem } from '../../../../core/verse/workbench-types.js';
 import { getMutationToken, touchMutationHold } from '../../../data/auth-store.js';
 import { invalidate, invalidatePrefix } from '../../../data/cache.js';
 import { ApiError, apiPost } from '../../../data/client.js';
+import { closeReasonBody, isCloseTriageAction, withCloseReason, type CloseReasonHolder } from './close-reason.js';
 import { requestGuarded } from './guarded-action.js';
 import { ALWAYS_CONFIRM, confirmCopy, readableItemTitle } from './needs-you-model.js';
 import { refreshActivity } from './useActivity.js';
@@ -105,16 +110,19 @@ export function runNeedsYouAction(item: NeedsYouItem, action: NeedsYouAction, ct
   // The operator-facing title ("fix the flaky snapshot test"), not the raw
   // producer string ("PR: fix the flaky snapshot test") — same text the row shows.
   const title = readableItemTitle(item).text;
+  // Read at click time, so a retry after an error sends what is typed now.
+  const reason: CloseReasonHolder | null = isCloseTriageAction(action) ? { value: '' } : null;
   const run = async () => {
     const token = getMutationToken();
     if (!token) throw new ApiError('Mutation token was rejected.', 401, request.path);
-    await apiPost<unknown>(request.path, request.body, token);
+    await apiPost<unknown>(request.path, reason ? withCloseReason(request.body, reason.value) : request.body, token);
     touchMutationHold();
   };
   const mustConfirm = ALWAYS_CONFIRM.has(action.kind) || copy !== null;
+  const bodyText = copy?.body ?? title;
   requestGuarded({
     title: copy?.title ?? action.label,
-    body: copy?.body ?? title,
+    body: reason ? closeReasonBody(bodyText, reason) : bodyText,
     confirmLabel: copy?.confirmLabel ?? action.label,
     destructive: action.destructive,
     token: true,

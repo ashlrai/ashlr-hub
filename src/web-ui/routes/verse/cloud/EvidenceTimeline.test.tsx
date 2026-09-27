@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { cloudTimelinePath, TIMELINE_STEP_ORDER, type CloudTimelineResponse, type TimelineStep } from '../../../../core/cloud/timeline-types.js';
+import { cloudTimelinePath, devinTimelinePath, TIMELINE_STEP_ORDER, type CloudTimelineResponse, type TimelineStep } from '../../../../core/cloud/timeline-types.js';
 import { clearMutationToken } from '../../../data/auth-store.js';
 import { evictAll } from '../../../data/cache.js';
 import { useSurfaceActions } from '../command/actions.js';
@@ -109,6 +109,30 @@ describe('EvidenceTimeline', () => {
     render(<EvidenceTimeline taskId="../../etc" title="Fix" open onClose={() => {}} now={NOW} />);
     expect(await screen.findByRole('note')).toHaveTextContent('That task id is not one Verse issued.');
     expect(stub.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('3.15: a Devin task reads its own route, and its session / usage links on app.devin.ai survive', async () => {
+    const DV = 'dv_20260927T0400_abc123';
+    const steps = timeline().steps.map((s) => (s.kind === 'launch'
+      ? { ...s, verified: true as const, title: 'Devin session started (normal mode)', link: { href: 'https://app.devin.ai/sessions/devin-s1', label: 'Open in Devin' } }
+      : s.kind === 'cost'
+        ? { ...s, title: '3.5 of 10 ACUs used · ~$7.88 estimated', link: { href: 'https://app.devin.ai/settings/usage', label: 'Check usage in Devin' } }
+        : s));
+    const stub = stubCloudFetch(null, { routes: { [devinTimelinePath(DV)]: timeline({ taskId: DV, steps }) } });
+    render(<EvidenceTimeline taskId={DV} title="Add a helper" open onClose={() => {}} now={NOW} />);
+    const list = await screen.findByRole('list', { name: 'Evidence, from objective to cost' });
+    expect(stub.fetchMock.mock.calls.map(([u]) => String(u))).toEqual([devinTimelinePath(DV)]);
+    expect(within(list).getByRole('link', { name: /Open in Devin/ })).toHaveAttribute('href', 'https://app.devin.ai/sessions/devin-s1');
+    expect(within(list).getByRole('link', { name: /Check usage in Devin/ })).toHaveAttribute('href', 'https://app.devin.ai/settings/usage');
+  });
+
+  it('3.15: app.devin.ai links are a Devin timeline’s only — a cloud timeline drops them (and a Devin one drops claude.ai)', () => {
+    const devinLink = step('launch', { link: { href: 'https://app.devin.ai/sessions/devin-s1', label: 'Open in Devin' } });
+    const claudeLink = step('cost', { link: { href: 'https://claude.ai/settings/usage', label: 'Usage' } });
+    const cloud = narrowTimeline({ ...timeline(), steps: [devinLink, claudeLink] })!;
+    expect(cloud.steps.map((s) => s.link?.href ?? null)).toEqual([null, 'https://claude.ai/settings/usage']);
+    const devin = narrowTimeline({ ...timeline({ taskId: 'dv_20260927T0400_abc123' }), steps: [devinLink, claudeLink] })!;
+    expect(devin.steps.map((s) => s.link?.href ?? null)).toEqual(['https://app.devin.ai/sessions/devin-s1', null]);
   });
 
   it('opens from a task row on Command’s cloud card and closes again', async () => {

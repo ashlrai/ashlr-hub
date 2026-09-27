@@ -9,8 +9,12 @@
  * server without the lane (404) renders nothing — the drawer simply has no
  * Devin card, never a false "not connected". Setting up happens in a
  * terminal (`ashlr devin connect`, hidden input): the page never takes a key.
+ *
+ * A waiting session's row also opens its Evidence (the same timeline sheet
+ * cloud tasks use, cloud/EvidenceTimeline.tsx): session status, ACUs against
+ * its cap, messages Verse sent, and its PR onward once there is one.
  */
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import type { DevinTaskV1 } from '../../../../core/devin/types.js';
 import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
 import { Button } from '../../../components/primitives/Button.js';
@@ -25,11 +29,15 @@ import { DEVIN_POLL_MS, devinQuery, messageDevinTask } from '../devin/devin-quer
 import { ReadinessLines } from './ReadinessLines.js';
 import styles from './ResourcesDrawer.module.css';
 
+/** The evidence sheet is its own chunk, fetched the first time a row's Evidence opens. */
+const EvidenceTimeline = lazy(() => import('../cloud/EvidenceTimeline.js'));
+
 function Reply({ task }: { task: DevinTaskV1 }) {
   const gate = useTokenGate();
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null);
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
   const session = safeDevinHref(task.sessionUrl, 'app.devin.ai');
   const send = async () => {
     const message = text.trim();
@@ -61,6 +69,10 @@ function Reply({ task }: { task: DevinTaskV1 }) {
             </a>
           </>
         ) : null}
+        {' '}
+        <Button size="sm" variant="ghost" aria-haspopup="dialog" aria-label={`Evidence: ${task.title}`} onClick={() => setEvidenceOpen(true)}>
+          Evidence
+        </Button>
       </p>
       <form className={styles.devinReply} onSubmit={(event) => { event.preventDefault(); void send(); }}>
         <Input aria-label={`Reply to Devin: ${task.title}`} value={text} maxLength={4000} placeholder="Reply to Devin…" onChange={(event) => setText(event.target.value)} />
@@ -68,6 +80,11 @@ function Reply({ task }: { task: DevinTaskV1 }) {
       </form>
       {note ? <p className={styles.status} data-tone={note.tone} role="status"><span className={styles.statusDot} aria-hidden="true" /><span>{note.text}</span></p> : null}
       <MutationTokenDialog {...gate.dialog} tokenLabel="Mutation token" tokenHelp="the mutation token ashlr verse printed" />
+      {evidenceOpen ? (
+        <Suspense fallback={null}>
+          <EvidenceTimeline taskId={task.id} title={task.title} open onClose={() => setEvidenceOpen(false)} />
+        </Suspense>
+      ) : null}
     </li>
   );
 }

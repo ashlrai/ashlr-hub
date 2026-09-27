@@ -7,9 +7,10 @@
  *            X (or Shift-click) picks rows; A / R / E then act on every pick
  *   detail   an approval reuses ApprovalDetail (diff, evidence, provenance);
  *            anything else shows its argument, its deadline and its actions
- *   cloud    a cloud PR shows its gate verdict (Clean / Held · why) and, in
- *            its detail, every check; "Land all clean" lands every Clean one
- *            after one confirmation (cloud-triage.ts)
+ *   cloud    a cloud or Devin PR shows its gate verdict (Clean / Held · why)
+ *            and, in its detail, every check and its Evidence; "Land all
+ *            clean" lands every Clean one after one confirmation
+ *            (cloud-triage.ts)
  *
  * Every A / R / V goes through confirmation and then the mutation token
  * (needs-you-actions.ts → guarded-action.tsx) — keyboard triage is fast, but
@@ -54,7 +55,16 @@ import { isGuardOpen } from './guarded-action.js';
 import { markResolved, pruneResolved, runNeedsYouAction, useResolvedIds } from './needs-you-actions.js';
 import { requestLeaderFocus } from '../leader/leader-focus.js';
 import { needsYouQuestionText, questionIdOfNeedsYouItem } from '../leader/question-id.js';
-import { cleanLandable, cloudPreviewsQuery, runBatch, triageChip, type TriageChip } from './cloud-triage.js';
+import {
+  cleanLandable,
+  cloudPreviewsQuery,
+  deliveryTaskOfItem,
+  isDeliveryPrItem,
+  PR_ITEM_PREFIX,
+  runBatch,
+  triageChip,
+  type TriageChip,
+} from './cloud-triage.js';
 import {
   actionOf,
   describeSilence,
@@ -75,12 +85,7 @@ import styles from './NeedsYouDrawer.module.css';
 /** A section anchor for the surface an item points into (the shell reveals it: shell/reveal-anchor.ts). */
 export { VERSE_ANCHOR_EVENT } from '../verse-ui-store.js';
 
-/** Cloud PR items (cloud-api.ts cloudNeedsYouItems) — the only rows with a gate preview. */
-const CLOUD_PR_ITEM_PREFIX = 'fleet:owner-lane-pr:cloud-';
-/** Any cloud task's item (its PR, or its failed launch) → the task id, for its evidence. */
-const CLOUD_ITEM_RE = /^(?:fleet:owner-lane-pr|chats:chat-failed):cloud-(ct_\d{8}T\d{4}_[a-z0-9]{6})$/;
-
-/** The task's evidence sheet (cloud/EvidenceTimeline.tsx): its own chunk, fetched the first time it opens. */
+/** The task's evidence sheet (cloud/EvidenceTimeline.tsx, cloud and Devin tasks): its own chunk, fetched the first time it opens. */
 const EvidenceTimeline = lazy(() => import('../cloud/EvidenceTimeline.js'));
 
 const DRAWER_ACTION: Readonly<Record<string, NeedsYouActionKind>> = {
@@ -131,12 +136,12 @@ export function NeedsYouDrawer() {
   const coverage = splitCoverage(data?.sources ?? null, split);
   const dispatchEnabled = (bootstrap.data?.dispatchEnabled ?? true) && !dispatchDenied;
 
-  // Cloud PR verdicts: re-read whenever a cloud item's text changes (the
-  // server rewrites its detail when a new preview lands).
+  // Cloud and Devin PR verdicts: re-read whenever such an item's text
+  // changes (the server rewrites its detail when a new preview lands).
   const previewsQuery = useQuery(cloudPreviewsQuery, { freshMs: 15_000 });
   const refetchPreviews = useRefetch(cloudPreviewsQuery);
   const cloudSignature = useMemo(
-    () => all.filter((i) => i.id.startsWith(CLOUD_PR_ITEM_PREFIX)).map((i) => `${i.id}\u0000${i.detail ?? ''}`).join('\u0001'),
+    () => all.filter((i) => isDeliveryPrItem(i.id)).map((i) => `${i.id}\u0000${i.detail ?? ''}`).join('\u0001'),
     [all],
   );
   const firstSignature = useRef(true);
@@ -595,10 +600,13 @@ function BatchBar({
   onClear: () => void;
 }) {
   if (pickedItems.length === 0) {
+    // Name the lane when every clean PR is from one ("2 clean Devin PRs").
+    const lanes = new Set(landAll.map((i) => (i.id.startsWith(PR_ITEM_PREFIX.devin) ? 'Devin' : 'cloud')));
+    const lane = lanes.size === 1 ? [...lanes][0]! : null;
     return (
-      <div className={styles.batch} role="toolbar" aria-label="Cloud pull requests">
+      <div className={styles.batch} role="toolbar" aria-label={lane ? `${lane === 'cloud' ? 'Cloud' : 'Devin'} pull requests` : 'Pull requests'}>
         <span className={styles.batchCount}>
-          {landAll.length} clean cloud {landAll.length === 1 ? 'PR' : 'PRs'}
+          {landAll.length} clean {lane ? `${lane} ` : ''}{landAll.length === 1 ? 'PR' : 'PRs'}
         </span>
         <Button size="sm" variant="primary" disabled={!dispatchEnabled} onClick={() => onRun(landAll, 'approve')}>
           Land all clean
@@ -650,12 +658,14 @@ function ItemDetail({
   onAct: (item: NeedsYouItem, kind: NeedsYouActionKind) => void;
   onOpenTarget: (item: NeedsYouItem) => void;
   dispatchEnabled: boolean;
-  /** A cloud PR's verdict and the checks behind it; null for everything else. */
+  /** A cloud or Devin PR's verdict and the checks behind it; null for everything else. */
   chip: TriageChip | null;
   preview: CloudPrPreview | null;
 }) {
   const targetLabel = TARGET_LABEL(item);
-  const cloudTaskId = CLOUD_ITEM_RE.exec(item.id)?.[1] ?? null;
+  // A cloud or Devin task's item → its task id, for its evidence (null for
+  // anything else, or for an id that is not its lane's own format).
+  const evidenceTaskId = deliveryTaskOfItem(item.id)?.taskId ?? null;
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   // The same readable text as the row (needs-you-model needsYouRowView), with room for the whole title.
   const view = needsYouRowView(item, now);
@@ -710,7 +720,7 @@ function ItemDetail({
             {targetLabel}
           </Button>
         ) : null}
-        {cloudTaskId ? (
+        {evidenceTaskId ? (
           <Button variant="subtle" size="sm" aria-haspopup="dialog" onClick={() => setEvidenceOpen(true)}>
             Evidence
           </Button>
@@ -735,9 +745,9 @@ function ItemDetail({
         })}
       </div>
       {!dispatchEnabled ? <p className={styles.caveat}>Read-only session — actions need `ashlr verse`.</p> : null}
-      {evidenceOpen && cloudTaskId ? (
+      {evidenceOpen && evidenceTaskId ? (
         <Suspense fallback={null}>
-          <EvidenceTimeline taskId={cloudTaskId} title={view.title} open onClose={() => setEvidenceOpen(false)} now={now} />
+          <EvidenceTimeline taskId={evidenceTaskId} title={view.title} open onClose={() => setEvidenceOpen(false)} now={now} />
         </Suspense>
       ) : null}
     </article>

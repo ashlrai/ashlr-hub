@@ -7,6 +7,8 @@
  *   - X picks rows and R then closes every pick (one confirmation, one token);
  *   - Shift-click picks without opening; the detail lists every check and
  *     opens the task's evidence timeline.
+ *   - 3.15: Devin PR rows get the same chip, join "Land all clean" and open
+ *     their own evidence route; a single Close takes an optional reason.
  */
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -28,10 +30,10 @@ import { resetActivityForTest } from './useActivity.js';
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
 
-function cloudNeed(taskId: string, pr: number, title: string, headSha: string, behind: boolean): NeedsYouItem {
-  const route = (verb: string) => ({ method: 'POST' as const, path: `/api/verse/cloud/tasks/${taskId}/${verb}`, body: { headSha } });
+function cloudNeed(taskId: string, pr: number, title: string, headSha: string, behind: boolean, lane: 'cloud' | 'devin' = 'cloud'): NeedsYouItem {
+  const route = (verb: string) => ({ method: 'POST' as const, path: `/api/verse/${lane}/tasks/${taskId}/${verb}`, body: { headSha } });
   const item: NeedsYouItem = {
-    id: `fleet:owner-lane-pr:cloud-${taskId}`,
+    id: `fleet:owner-lane-pr:${lane}-${taskId}`,
     source: 'fleet',
     kind: 'owner-lane-pr',
     severity: 'info',
@@ -45,17 +47,17 @@ function cloudNeed(taskId: string, pr: number, title: string, headSha: string, b
       { kind: 'approve', label: 'Land', request: route('land'), confirm: { title: `Land #${pr} on master?`, body: 'Squash-merges.', confirmLabel: 'Land' }, destructive: false },
       { kind: 'reject', label: 'Close', request: route('close'), confirm: { title: `Close #${pr} without landing?`, body: 'Closes it.', confirmLabel: 'Close PR' }, destructive: true },
       ...(behind ? [{ kind: 'fix' as const, label: 'Update branch', request: route('update-branch'), confirm: null, destructive: false }] : []),
-      { kind: 'done', label: 'Dismiss', request: { method: 'POST', path: `/api/verse/cloud/tasks/${taskId}/dismiss`, body: {} }, confirm: null, destructive: false },
+      { kind: 'done', label: 'Dismiss', request: { method: 'POST', path: `/api/verse/${lane}/tasks/${taskId}/dismiss`, body: {} }, confirm: null, destructive: false },
     ],
   };
   if (!isNeedsYouItem(item)) throw new Error('fixture is not a valid NeedsYouItem');
   return item;
 }
 
-function previewOf(taskId: string, pr: number, headSha: string, behind: boolean): CloudPrPreview {
+function previewOf(taskId: string, pr: number, headSha: string, behind: boolean, lane: 'cloud' | 'devin' = 'cloud'): CloudPrPreview {
   return {
     taskId,
-    itemId: `fleet:owner-lane-pr:cloud-${taskId}`,
+    itemId: `fleet:owner-lane-pr:${lane}-${taskId}`,
     prNumber: pr,
     headSha,
     baseBranch: 'master',
@@ -89,18 +91,34 @@ function Harness() {
 }
 
 let cloudPosts: Array<{ path: string; body: unknown }>;
+let reads: string[];
 
-function setup() {
-  const net = shellFetch(activity({ needsYou: [CLEAN, HELD] }));
+const DEVIN_ID = 'dv_20260927T0400_devin1';
+const DEVIN_CLEAN = cloudNeed(DEVIN_ID, 44, 'Add a CSV export', SHA_A, false, 'devin');
+const DEVIN_PREVIEWS = [previewOf(DEVIN_ID, 44, SHA_A, false, 'devin')];
+
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
+function setup(opts: { needsYou?: NeedsYouItem[]; devinPreviews?: CloudPrPreview[] | 404 } = {}) {
+  const net = shellFetch(activity({ needsYou: opts.needsYou ?? [CLEAN, HELD] }));
   cloudPosts = [];
+  reads = [];
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = typeof input === 'string' ? input : input.toString();
     if (path === '/api/verse/cloud/previews') {
-      return new Response(JSON.stringify({ generatedAt: new Date(fixtureNow()).toISOString(), previews: PREVIEWS }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return json({ generatedAt: new Date(fixtureNow()).toISOString(), previews: PREVIEWS });
     }
-    if (path.startsWith('/api/verse/cloud/tasks/') && init?.method === 'POST') {
+    if (path === '/api/verse/devin/previews') {
+      const devin = opts.devinPreviews ?? 404;
+      return devin === 404 ? json({ error: 'not found' }, 404) : json({ generatedAt: new Date(fixtureNow()).toISOString(), previews: devin });
+    }
+    if (/^\/api\/verse\/(cloud|devin)\/tasks\/[^/]+\/timeline$/.test(path)) {
+      reads.push(path);
+      return json({ error: 'No task with that id.' }, 404);
+    }
+    if (/^\/api\/verse\/(cloud|devin)\/tasks\//.test(path) && init?.method === 'POST') {
       cloudPosts.push({ path, body: typeof init.body === 'string' ? JSON.parse(init.body) : undefined });
-      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return json({ ok: true });
     }
     return net.fetch(input, init);
   }));
@@ -207,5 +225,73 @@ describe('cloud PR triage in the drawer', () => {
     await user.click(row(/Tidy the drawer/));
     await user.click(await screen.findByRole('button', { name: 'Evidence' }));
     expect(await screen.findByRole('dialog', { name: 'Evidence' })).toBeInTheDocument();
+  });
+});
+
+describe('3.15: Devin PR rows and the close reason', () => {
+  it('a Devin row gets its Clean chip and joins "Land all clean", which lands it on its own route', async () => {
+    setup({ needsYou: [CLEAN, HELD, DEVIN_CLEAN], devinPreviews: DEVIN_PREVIEWS });
+    act(() => setMutationToken(TOKEN));
+    const user = userEvent.setup();
+    await openDrawer();
+    await waitFor(() => expect(within(row(/Add a CSV export/)).getByText('Clean')).toBeInTheDocument());
+    const bar = await screen.findByRole('toolbar', { name: 'Pull requests' });
+    expect(within(bar).getByText('2 clean PRs')).toBeInTheDocument();
+    await user.click(within(bar).getByRole('button', { name: 'Land all clean' }));
+    const confirm = await screen.findByRole('dialog', { name: 'Land 2 pull requests?' });
+    await user.click(within(confirm).getByRole('button', { name: 'Land 2' }));
+    await waitFor(() => expect(cloudPosts).toEqual([
+      { path: '/api/verse/cloud/tasks/ct_20260926T1100_clean1/land', body: { headSha: SHA_A } },
+      { path: `/api/verse/devin/tasks/${DEVIN_ID}/land`, body: { headSha: SHA_A } },
+    ]));
+  });
+
+  it('with Devin off (its previews 404) the cloud chips still show and the Devin row simply has none', async () => {
+    setup({ needsYou: [CLEAN, DEVIN_CLEAN], devinPreviews: 404 });
+    await openDrawer();
+    await waitFor(() => expect(within(row(/Tidy the drawer/)).getByText('Clean')).toBeInTheDocument());
+    expect(within(row(/Add a CSV export/)).queryByText('Clean')).not.toBeInTheDocument();
+    expect(within(await screen.findByRole('toolbar', { name: 'Cloud pull requests' })).getByText('1 clean cloud PR')).toBeInTheDocument();
+  });
+
+  it('a Devin item opens its evidence from the Devin timeline route', async () => {
+    setup({ needsYou: [DEVIN_CLEAN], devinPreviews: DEVIN_PREVIEWS });
+    const user = userEvent.setup();
+    await openDrawer();
+    await user.click(row(/Add a CSV export/));
+    await user.click(await screen.findByRole('button', { name: 'Evidence' }));
+    expect(await screen.findByRole('dialog', { name: 'Evidence' })).toBeInTheDocument();
+    await waitFor(() => expect(reads).toEqual([`/api/verse/devin/tasks/${DEVIN_ID}/timeline`]));
+  });
+
+  it('a single Close takes an optional one-line reason that rides in the POST body', async () => {
+    setup();
+    act(() => setMutationToken(TOKEN));
+    const user = userEvent.setup();
+    await openDrawer();
+    await user.click(row(/Tidy the drawer/));
+    await user.click(await screen.findByRole('button', { name: 'Close' }));
+    const confirm = await screen.findByRole('dialog', { name: 'Close #42 without landing?' });
+    const field = within(confirm).getByRole('textbox', { name: 'Why? (optional)' });
+    expect(field).toHaveAttribute('maxlength', '200');
+    await user.type(field, '  Wrong approach; reuse the list  ');
+    await user.click(within(confirm).getByRole('button', { name: 'Close PR' }));
+    await waitFor(() => expect(cloudPosts).toEqual([
+      { path: '/api/verse/cloud/tasks/ct_20260926T1100_clean1/close', body: { headSha: SHA_A, reason: 'Wrong approach; reuse the list' } },
+    ]));
+  });
+
+  it('a Close with nothing typed sends no reason key', async () => {
+    setup();
+    act(() => setMutationToken(TOKEN));
+    const user = userEvent.setup();
+    await openDrawer();
+    await user.click(row(/Tidy the drawer/));
+    await user.click(await screen.findByRole('button', { name: 'Close' }));
+    const confirm = await screen.findByRole('dialog', { name: 'Close #42 without landing?' });
+    await user.click(within(confirm).getByRole('button', { name: 'Close PR' }));
+    await waitFor(() => expect(cloudPosts).toEqual([
+      { path: '/api/verse/cloud/tasks/ct_20260926T1100_clean1/close', body: { headSha: SHA_A } },
+    ]));
   });
 });

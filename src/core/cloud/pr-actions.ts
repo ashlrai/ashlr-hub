@@ -6,7 +6,9 @@
  *   land           `gh pr ready` (a draft) then
  *                  `gh pr merge --squash --match-head-commit <sha>` — refused
  *                  when G1 hits a protected path or GitHub says it cannot merge
- *   close          `gh pr close --comment "<short>"`
+ *   close          `gh pr close --comment "<short>"` (3.15: plus Mason's
+ *                  optional one-line reason, which also becomes the task's
+ *                  stateReason so the retro sweep learns from it)
  *   update-branch  PUT repos/<repo>/pulls/<n>/update-branch with expected_head_sha
  *
  * STRICT: every action names the head SHA the operator saw. It is compared
@@ -37,6 +39,7 @@ import {
   type CloudPrPolicy,
   type CloudPrPreview,
 } from './pr-preview.js';
+import { scrubSecrets } from '../util/scrub.js';
 import { readCloudTask, writeCloudTask } from './store.js';
 import { defaultCloudGh } from './tracker.js';
 import type { CloudDeliveryPin, CloudSupersededBy, CloudTaskPr, CloudTaskReport, CloudTaskV1 } from './types.js';
@@ -98,6 +101,40 @@ export const HEAD_SHA_PATTERN = /^[0-9a-f]{40}$/;
 export const CLOUD_CLOSE_COMMENT = 'Closed from Ashlr Verse (Needs you) without landing.';
 export const CLOUD_LANDED_REASON = (n: number): string => `Landed from Verse (#${n}).`;
 export const CLOUD_CLOSED_REASON = 'Closed in Verse without landing.';
+
+/**
+ * 3.15 — Mason's own words on a close. Without them every Verse close was
+ * recorded as the generic sentence above, which the retro sweep
+ * (learn/retro/extract.ts GENERIC_CLOSE) rightly treats as "no lesson". With
+ * them the stateReason is `Closed in Verse: <reason>` — deliberately NOT
+ * matched by GENERIC_CLOSE, so the retro is `closed:by-mason` with the reason
+ * as its lesson — and the GitHub comment carries the same reason.
+ */
+export const CLOUD_CLOSE_REASON_MAX = 200;
+export const CLOUD_CLOSED_WITH_REASON_PREFIX = 'Closed in Verse: ';
+export const CLOUD_CLOSED_WITH_REASON = (reason: string): string => `${CLOUD_CLOSED_WITH_REASON_PREFIX}${reason}`;
+export const CLOUD_CLOSE_COMMENT_WITH_REASON = (reason: string): string =>
+  `Closed from Ashlr Verse (Needs you) without landing. Reason: ${reason}`;
+
+/**
+ * A close reason, normalised: one line (control and line-separator characters
+ * become spaces, runs of whitespace collapse), trimmed, secret-scrubbed.
+ * `null` = no reason (absent, or blank after trimming). Throws a plain
+ * sentence for anything else — a non-string or one longer than
+ * CLOUD_CLOSE_REASON_MAX — so a malformed reason is a refusal, never silently
+ * cut into something Mason did not write.
+ */
+export function normalizeCloseReason(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'string') throw new TypeError('The close reason must be text.');
+  // eslint-disable-next-line no-control-regex
+  const flat = raw.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (flat.length === 0) return null;
+  if (flat.length > CLOUD_CLOSE_REASON_MAX) throw new RangeError(`The close reason must be at most ${CLOUD_CLOSE_REASON_MAX} characters.`);
+  // Scrubbing only ever shortens or keeps the length ("[REDACTED]" replaces
+  // longer secret shapes), but clamp anyway so the bound is unconditional.
+  return scrubSecrets(flat).slice(0, CLOUD_CLOSE_REASON_MAX).trim() || null;
+}
 
 /** The one self repo rule the standing pass uses (defaultStandingPassDeps.isSelfRepo, minus proposal metadata a PR lacks). */
 export function isCloudSelfRepo(repo: string, policy: EffectivePolicy | null): boolean {
@@ -463,13 +500,29 @@ export async function landCloudPr<T extends CloudDeliveryTask = CloudTaskV1>(tas
   });
 }
 
-/** Close without landing, leaving a short comment. The branch is kept. */
-export async function closeCloudPr<T extends CloudDeliveryTask = CloudTaskV1>(taskId: string, headSha: string, deps: CloudPrActionDeps<T> = {}): Promise<CloudPrActionResult<T>> {
+/**
+ * Close without landing, leaving a short comment. The branch is kept.
+ * `reason` (3.15, optional) is Mason's one line: normalised again here —
+ * whatever the route already did — and refused (400) rather than trimmed into
+ * something else when it is malformed.
+ */
+export async function closeCloudPr<T extends CloudDeliveryTask = CloudTaskV1>(
+  taskId: string,
+  headSha: string,
+  deps: CloudPrActionDeps<T> = {},
+  reason: string | null = null,
+): Promise<CloudPrActionResult<T>> {
+  let why: string | null;
+  try {
+    why = normalizeCloseReason(reason);
+  } catch (error) {
+    return { ok: false, status: 400, error: error instanceof Error ? error.message : 'The close reason is not valid.' };
+  }
   return withTask<T>(taskId, headSha, deps, async (task, _read, gh) => {
     const prNumber = task.pr!.number;
     let closed: { ok: boolean; stderr: string };
     try {
-      closed = await gh(['pr', 'close', String(prNumber), '--repo', task.repo, '--comment', CLOUD_CLOSE_COMMENT]);
+      closed = await gh(['pr', 'close', String(prNumber), '--repo', task.repo, '--comment', why ? CLOUD_CLOSE_COMMENT_WITH_REASON(why) : CLOUD_CLOSE_COMMENT]);
     } catch {
       return { ok: false, status: 502, error: 'GitHub could not be reached.' };
     }
@@ -478,7 +531,7 @@ export async function closeCloudPr<T extends CloudDeliveryTask = CloudTaskV1>(ta
       ...t,
       state: 'closed',
       pr: t.pr ? { ...t.pr, state: 'closed' } : t.pr,
-      stateReason: CLOUD_CLOSED_REASON,
+      stateReason: why ? CLOUD_CLOSED_WITH_REASON(why) : CLOUD_CLOSED_REASON,
     }) as T);
     return { ok: true, task: next ?? task, message: `Closed #${prNumber}.` };
   });

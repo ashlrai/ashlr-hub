@@ -10,7 +10,7 @@
  *   POST /api/verse/cloud/tasks/<id>/dismiss  {} → { ok: true, task }
  *   GET  /api/verse/cloud/previews            → CloudPrPreviewsResponse (pr-preview.ts)
  *   POST /api/verse/cloud/tasks/<id>/land           { headSha } → { ok: true, task, message }
- *   POST /api/verse/cloud/tasks/<id>/close          { headSha } → { ok: true, task, message }
+ *   POST /api/verse/cloud/tasks/<id>/close          { headSha, reason? } → { ok: true, task, message }
  *   POST /api/verse/cloud/tasks/<id>/update-branch  { headSha } → { ok: true, task, message }
  *                                              (409 refused / moved, 502 GitHub unreachable; body { error })
  *
@@ -61,6 +61,7 @@ import {
   cloudPrPreviewsStale,
   HEAD_SHA_PATTERN,
   landCloudPr,
+  normalizeCloseReason,
   refreshCloudPrPreviews,
   updateCloudPrBranch,
   type CloudPrActionDeps,
@@ -223,6 +224,25 @@ export function parseCloudPrActionBody(body: Record<string, unknown>): { headSha
     throw new CloudInputError('headSha must be the full 40-character head commit you reviewed.');
   }
   return { headSha };
+}
+
+/**
+ * Strict body of close (3.15): the head commit plus Mason's OPTIONAL one-line
+ * reason — the only triage body that may carry one (land / update-branch
+ * still refuse any key but headSha). A non-string or over-long reason is a
+ * 400, never silently cut; blank means "no reason". The reason is normalised
+ * and secret-scrubbed here (normalizeCloseReason) and again by closeCloudPr.
+ */
+export function parseCloudPrCloseBody(body: Record<string, unknown>): { headSha: string; reason: string | null } {
+  rejectUnknownKeys(body, new Set(['headSha', 'reason']));
+  const { headSha } = parseCloudPrActionBody({ headSha: body['headSha'] });
+  let reason: string | null;
+  try {
+    reason = normalizeCloseReason(body['reason']);
+  } catch (error) {
+    throw new CloudInputError(error instanceof Error ? error.message : 'The close reason is not valid.');
+  }
+  return { headSha, reason };
 }
 
 // ---------------------------------------------------------------------------
@@ -696,9 +716,9 @@ export async function readMutationBody(
 
 const TASK_DISMISS_RE = /^\/api\/verse\/cloud\/tasks\/([^/]+)\/dismiss$/;
 const TASK_TRIAGE_RE = /^\/api\/verse\/cloud\/tasks\/([^/]+)\/(land|close|update-branch)$/;
+/** Land and Update branch (close carries an optional reason and is dispatched on its own). */
 const TRIAGE: Readonly<Record<string, (id: string, headSha: string, deps: CloudPrActionDeps) => Promise<CloudPrActionResult>>> = {
   land: landCloudPr,
-  close: closeCloudPr,
   'update-branch': updateCloudPrBranch,
 };
 
@@ -808,8 +828,14 @@ export const handleCloudApi: ApiModule = async (ctx, req, res, path, method) => 
         sendInvalid(res, 'That is not a cloud task id.');
         return true;
       }
-      const { headSha } = parseCloudPrActionBody(body);
-      const result = await TRIAGE[triage[2]!]!(id, headSha, prActionDeps);
+      const verb = triage[2]!;
+      let result: CloudPrActionResult;
+      if (verb === 'close') {
+        const parsed = parseCloudPrCloseBody(body);
+        result = await closeCloudPr(id, parsed.headSha, prActionDeps, parsed.reason);
+      } else {
+        result = await TRIAGE[verb]!(id, parseCloudPrActionBody(body).headSha, prActionDeps);
+      }
       invalidateNeedsYou();
       if (!result.ok) {
         sendJson(res, result.status, { error: result.error });

@@ -8,7 +8,8 @@
  *   POST /api/verse/devin/refresh               {} → { checked, updated }
  *   POST /api/verse/devin/tasks/<id>/dismiss    {} → { ok, task }
  *   POST /api/verse/devin/tasks/<id>/message    { message } → { ok, task }     (reply to a waiting session)
- *   POST /api/verse/devin/tasks/<id>/land|close|update-branch  { headSha } → { ok, task, message }
+ *   POST /api/verse/devin/tasks/<id>/land|update-branch  { headSha } → { ok, task, message }
+ *   POST /api/verse/devin/tasks/<id>/close      { headSha, reason? } → { ok, task, message }
  *
  * Same posture as the cloud module (cloud-api.ts, whose strict helpers this
  * reuses): GETs behind the read session; POSTs 404 unless dispatch is allowed,
@@ -33,6 +34,7 @@ import {
   isValidBranchName,
   isValidCloudRepo,
   parseCloudPrActionBody,
+  parseCloudPrCloseBody,
   readMutationBody,
   rejectQuery,
   rejectUnknownKeys,
@@ -88,8 +90,9 @@ const BUDGET_NUMBER_MAX = 1_000_000;
 
 const LAUNCH_KEYS: ReadonlySet<string> = new Set(['repo', 'baseBranch', 'title', 'prompt', 'origin']);
 const LAUNCH_ORIGINS: readonly DevinLaunchRequest['origin'][] = ['chat', 'operator', 'cli'];
-const BUDGET_KEYS = ['acuBudgetTotal', 'acuSpentAdjustment', 'usdPerAcu', 'maxAcuPerSession', 'maxAcuPerDay', 'reserveAcu', 'pauseAtFraction', 'maxConcurrent', 'maxSessionsPerDay'] as const;
-const BUDGET_WHOLE: ReadonlySet<string> = new Set(['maxAcuPerSession', 'maxConcurrent', 'maxSessionsPerDay']);
+const BUDGET_KEYS = ['acuBudgetTotal', 'acuSpentAdjustment', 'usdPerAcu', 'maxAcuPerSession', 'maxAcuPerDay', 'reserveAcu', 'pauseAtFraction', 'maxConcurrent', 'maxSessionsPerDay',
+  'fleetMaxConcurrent', 'fleetMaxSessionsPerDay'] as const;
+const BUDGET_WHOLE: ReadonlySet<string> = new Set(['maxAcuPerSession', 'maxConcurrent', 'maxSessionsPerDay', 'fleetMaxConcurrent', 'fleetMaxSessionsPerDay']);
 
 // ---------------------------------------------------------------------------
 // Input validation (pure, exported for tests)
@@ -180,9 +183,9 @@ export function setDevinApiDepsForTest(deps: { pr?: Omit<CloudPrActionDeps<Devin
   needsYouPending = false;
 }
 
+/** Land and Update branch; close carries Mason's optional reason and is dispatched on its own (cloud-api.ts parseCloudPrCloseBody). */
 const TRIAGE: Readonly<Record<string, (id: string, headSha: string, deps: CloudPrActionDeps<DevinTaskV1>) => Promise<CloudPrActionResult<DevinTaskV1>>>> = {
   land: (id, sha, deps) => landCloudPr<DevinTaskV1>(id, sha, deps),
-  close: (id, sha, deps) => closeCloudPr<DevinTaskV1>(id, sha, deps),
   'update-branch': (id, sha, deps) => updateCloudPrBranch<DevinTaskV1>(id, sha, deps),
 };
 
@@ -481,8 +484,14 @@ export const handleDevinApi: ApiModule = async (ctx, req: IncomingMessage, res: 
       const body = await readMutationBody(ctx, req, res, SMALL_BODY_MAX_BYTES);
       if (!body) return true;
       if (!taskIdOr400(res, triage[1]!)) return true;
-      const { headSha } = parseCloudPrActionBody(body);
-      const result = await TRIAGE[triage[2]!]!(triage[1]!, headSha, prActionDeps);
+      const verb = triage[2]!;
+      let result: CloudPrActionResult<DevinTaskV1>;
+      if (verb === 'close') {
+        const parsed = parseCloudPrCloseBody(body);
+        result = await closeCloudPr<DevinTaskV1>(triage[1]!, parsed.headSha, prActionDeps, parsed.reason);
+      } else {
+        result = await TRIAGE[verb]!(triage[1]!, parseCloudPrActionBody(body).headSha, prActionDeps);
+      }
       invalidateNeedsYou();
       if (!result.ok) sendJson(res, result.status, { error: result.error });
       else sendJson(res, 200, { ok: true, task: result.task, message: result.message });

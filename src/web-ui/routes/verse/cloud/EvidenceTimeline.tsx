@@ -1,6 +1,8 @@
 /**
  * routes/verse/cloud/EvidenceTimeline.tsx — one cloud task's evidence chain
- * (3.13), in a side sheet opened from its row on Command's cloud card.
+ * (3.13), in a side sheet opened from its row on Command's cloud card. 3.15:
+ * a Devin task's too (Needs-you, the Devin resource card), from its own
+ * route — the same shape, its own session and cost steps.
  *
  *   Evidence                                               [↻] [×]
  *   Fix the flaky tracker test · ashlrai/ashlr-hub
@@ -12,18 +14,19 @@
  *   ○ Release        Release unknown                       Unknown
  *   …
  *
- * Reads GET /api/verse/cloud/tasks/<id>/timeline (core/cloud/timeline-api.ts)
- * only while open. Every step shows a trust WORD (timeline-model.ts): the
- * session's report is always a Claim and the cost an Estimate. Stages the
- * task has not reached are drawn hollow and quiet, never hidden, so the
- * chain always reads end to end.
+ * Reads GET /api/verse/cloud/tasks/<id>/timeline or
+ * GET /api/verse/devin/tasks/<id>/timeline (core/cloud/timeline-api.ts) only
+ * while open, picked by the id's own format (evidenceTimelinePath). Every
+ * step shows a trust WORD (timeline-model.ts): the session's report is
+ * always a Claim and the cost an Estimate. Stages the task has not reached
+ * are drawn hollow and quiet, never hidden, so the chain always reads end to
+ * end.
  *
  * LAZY: CloudCard imports this with React.lazy, so none of it costs chat
  * first-paint bytes (cloud-queries.ts rule).
  */
 import { useId, useMemo } from 'react';
-import { cloudTimelinePath, type CloudTimelineResponse, type TimelineStep } from '../../../../core/cloud/timeline-types.js';
-import { CLOUD_TASK_ID_PATTERN } from '../../../../core/cloud/types.js';
+import { evidenceTimelinePath, type CloudTimelineResponse, type TimelineStep } from '../../../../core/cloud/timeline-types.js';
 import { IconButton } from '../../../components/primitives/Button.js';
 import { IconExternalLink, IconRefresh } from '../../../components/primitives/icons.js';
 import { Sheet } from '../../../components/primitives/Sheet.js';
@@ -67,10 +70,12 @@ export function cloudTimelineQuery(taskId: string): QueryDef<TimelineRead> {
   return {
     key: `verse-cloud-timeline-${taskId}`,
     fetch: async (signal) => {
-      // The id came from the server, but it is spliced into a request path.
-      if (!CLOUD_TASK_ID_PATTERN.test(taskId)) return { timeline: null, reason: 'That task id is not one Verse issued.' };
+      // The id came from the server, but it is spliced into a request path:
+      // only a cloud (`ct_…`) or Devin (`dv_…`) id Verse issues gets one.
+      const path = evidenceTimelinePath(taskId);
+      if (!path) return { timeline: null, reason: 'That task id is not one Verse issued.' };
       try {
-        const timeline = narrowTimeline(await apiGet<unknown>(cloudTimelinePath(taskId), signal));
+        const timeline = narrowTimeline(await apiGet<unknown>(path, signal));
         return timeline ? { timeline, reason: null } : { timeline: null, reason: 'Unrecognized response — update Ashlr.' };
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) throw err;

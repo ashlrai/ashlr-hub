@@ -18,6 +18,8 @@
  *           pr:closed (not after a refusal)  → closed
  *           inbox rejected / failed proposals the ledger did not cover
  *   cloud   tasks in merged / closed / failed / expired (not superseded by a fleet PR)
+ *   devin   the same, for Devin tasks (3.15; the cloud extractor with lane
+ *           'devin', keyed `devin:<taskId>:<state>`)
  *   leader  actions vetoed / refused / failed
  *
  * Bounded: a 30-day window, ≤ 40 new retros per sweep, the model pass (when
@@ -26,6 +28,7 @@
  */
 import type { LedgerEntry, LedgerReadOptions, LedgerReadResult } from '../../authority/types.js';
 import type { CloudTaskV1 } from '../../cloud/types.js';
+import type { DevinTaskV1 } from '../../devin/types.js';
 import type { Proposal } from '../../types.js';
 import type { LeaderAction } from '../../vision/leader-types.js';
 import { diffPaths, retroFromCloud, retroFromFleet, retroFromLeader, type FleetEndInput } from './extract.js';
@@ -44,6 +47,12 @@ export interface RetroSweepDeps {
   decidedProposals(): SweepProposal[];
   loadProposal(id: string): SweepProposal | null;
   cloudTasks(): CloudTaskV1[];
+  /**
+   * 3.15: Devin task ends (production: devin/store.ts listDevinTasks(500)).
+   * Optional so a caller that predates the Devin lane — or a test that does
+   * not care — reads no Devin store at all rather than the real one.
+   */
+  devinTasks?(): DevinTaskV1[];
   leaderActions(): LeaderAction[];
   /** null = deterministic only. */
   model: RetroModel | null;
@@ -198,6 +207,8 @@ export function collectRetros(parts: {
   ledger: readonly LedgerEntry[] | null;
   inbox: readonly SweepProposal[] | null;
   cloud: readonly CloudTaskV1[] | null;
+  /** 3.15: Devin tasks (optional: absent = no Devin lane). */
+  devin?: readonly DevinTaskV1[] | null;
   leader: readonly LeaderAction[] | null;
   load: (id: string) => SweepProposal | null;
   sinceIso: string;
@@ -208,15 +219,23 @@ export function collectRetros(parts: {
   // Ledger first: it carries owner/name repos and gate detail the inbox copy lacks.
   if (parts.ledger) for (const end of fleetEndsFromLedger(parts.ledger, parts.load)) add(retroFromFleet(end, parts.nowIso));
   if (parts.inbox) for (const end of fleetEndsFromInbox(parts.inbox, parts.sinceIso)) add(retroFromFleet(end, parts.nowIso));
-  for (const t of parts.cloud ?? []) {
-    if (t.state !== 'merged' && t.state !== 'closed' && t.state !== 'failed' && t.state !== 'expired') continue;
-    if (t.updatedAt < parts.sinceIso) continue;
-    // Closed in favour of the fleet App PR that carries the same change: not an end, a hand-off.
-    if (t.state === 'closed' && t.supersededBy) continue;
-    add(retroFromCloud({
-      taskId: t.id, repo: t.repo, state: t.state, endedAt: t.updatedAt, title: t.title, prompt: t.prompt,
-      stateReason: t.stateReason, failure: t.failure, report: t.report, origin: t.origin,
-    }, parts.nowIso));
+  // Cloud and Devin tasks share a delivery shape (branch → PR → report), so
+  // they share the end rules and the extractor; only the lane differs.
+  const lanes: Array<{ lane: 'cloud' | 'devin'; tasks: readonly (CloudTaskV1 | DevinTaskV1)[] }> = [
+    { lane: 'cloud', tasks: parts.cloud ?? [] },
+    { lane: 'devin', tasks: parts.devin ?? [] },
+  ];
+  for (const { lane, tasks } of lanes) {
+    for (const t of tasks) {
+      if (t.state !== 'merged' && t.state !== 'closed' && t.state !== 'failed' && t.state !== 'expired') continue;
+      if (t.updatedAt < parts.sinceIso) continue;
+      // Closed in favour of the fleet App PR that carries the same change: not an end, a hand-off.
+      if (t.state === 'closed' && t.supersededBy) continue;
+      add(retroFromCloud({
+        taskId: t.id, repo: t.repo, state: t.state, endedAt: t.updatedAt, title: t.title, prompt: t.prompt,
+        stateReason: t.stateReason, failure: t.failure, report: t.report, origin: t.origin, lane,
+      }, parts.nowIso));
+    }
   }
   for (const a of parts.leader ?? []) {
     if (a.status !== 'vetoed' && a.status !== 'failed' && a.status !== 'refused') continue;
@@ -263,9 +282,11 @@ async function runSweep(deps: RetroSweepDeps, opts: { windowDays?: number; maxNe
   }
   const inbox = guard('inbox', () => deps.decidedProposals());
   const cloud = guard('cloud', () => deps.cloudTasks());
+  const devinTasks = deps.devinTasks;
+  const devin = devinTasks ? guard('devin', () => devinTasks.call(deps)) : null;
   const leader = guard('leader', () => deps.leaderActions());
 
-  const all = collectRetros({ ledger, inbox, cloud, leader, load: (id) => deps.loadProposal(id), sinceIso, nowIso });
+  const all = collectRetros({ ledger, inbox, cloud, devin, leader, load: (id) => deps.loadProposal(id), sinceIso, nowIso });
   const state = await readSweepState();
   const day = localDay(nowMs);
   let calls = state.modelCalls[day] ?? 0;
@@ -306,10 +327,11 @@ async function runSweep(deps: RetroSweepDeps, opts: { windowDays?: number; maxNe
 
 /** The production sources, loaded lazily so importing this module stays cheap. */
 export async function loadDefaultRetroSweepDeps(cfg: unknown): Promise<RetroSweepDeps> {
-  const [ledger, inbox, cloudStore, leaderApply, model] = await Promise.all([
+  const [ledger, inbox, cloudStore, devinStore, leaderApply, model] = await Promise.all([
     import('../../authority/ledger.js'),
     import('../../inbox/store.js'),
     import('../../cloud/store.js'),
+    import('../../devin/store.js'),
     import('../../vision/leader-apply.js'),
     loadRetroModel(cfg),
   ]);
@@ -324,6 +346,7 @@ export async function loadDefaultRetroSweepDeps(cfg: unknown): Promise<RetroSwee
     ],
     loadProposal: (id) => inbox.loadProposal(id),
     cloudTasks: () => cloudStore.listCloudTasks(500),
+    devinTasks: () => devinStore.listDevinTasks(500),
     leaderActions: () => leaderApply.listLeaderActions(300),
     model,
   };

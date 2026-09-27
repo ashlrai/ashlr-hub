@@ -36,6 +36,7 @@ import { classifyRisk } from '../inbox/merge.js';
 import type { Proposal } from '../types.js';
 import { evaluateG1, evaluateG1b, evaluateG2, evaluateG4 } from '../fleet/merge-gates.js';
 import { MERGE_RISK_RANK } from '../fleet/fleet-types.js';
+import { DEVIN_TASK_ID_PATTERN } from '../devin/types.js';
 import type { CloudTaskReport } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -96,9 +97,20 @@ export interface CloudPrPreviewsResponse {
   previews: CloudPrPreview[];
 }
 
-/** Needs-you id of a cloud task's PR item (cloud-api.ts cloudNeedsYouItems). */
+/**
+ * Needs-you id of a delivery task's PR item: `fleet:owner-lane-pr:cloud-<ct_…>`
+ * (cloud-api.ts cloudNeedsYouItems) or `fleet:owner-lane-pr:devin-<dv_…>`
+ * (devin/devin-api.ts devinNeedsYouItems).
+ *
+ * 3.15 — WHY derived from the id rather than passed in: the preview code is
+ * shared by both lanes (pr-actions.ts), and a Devin preview used to be keyed
+ * `cloud-dv_…`, an id no Needs-you row has, so the drawer never showed its
+ * Clean / Held chip and "Land all clean" never saw it. The two id formats are
+ * disjoint (`ct_` / `dv_`), so the id itself names its lane and the key can
+ * never drift from the row it belongs to.
+ */
 export function cloudPrItemId(taskId: string): string {
-  return `fleet:owner-lane-pr:cloud-${taskId}`;
+  return DEVIN_TASK_ID_PATTERN.test(taskId) ? `fleet:owner-lane-pr:devin-${taskId}` : `fleet:owner-lane-pr:cloud-${taskId}`;
 }
 
 // ---------------------------------------------------------------------------

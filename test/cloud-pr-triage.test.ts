@@ -11,7 +11,14 @@ import { describe, expect, it } from 'vitest';
 
 import { parseBudgetFlags } from '../src/cli/cloud.js';
 import { cloudBudgetView } from '../src/core/cloud/budget.js';
-import { CloudInputError, cloudNeedsYouItems, parseCloudBudgetBody, parseCloudPrActionBody, triageActions } from '../src/core/cloud/cloud-api.js';
+import {
+  CloudInputError,
+  cloudNeedsYouItems,
+  parseCloudBudgetBody,
+  parseCloudPrActionBody,
+  parseCloudPrCloseBody,
+  triageActions,
+} from '../src/core/cloud/cloud-api.js';
 import {
   ceilingPolicy,
   claimOfReport,
@@ -23,7 +30,8 @@ import {
   type CloudPrGithubState,
   type CloudPrPreview,
 } from '../src/core/cloud/pr-preview.js';
-import { ghRefusal, rollupChecks } from '../src/core/cloud/pr-actions.js';
+import { ghRefusal, normalizeCloseReason, rollupChecks } from '../src/core/cloud/pr-actions.js';
+import { retroFromCloud } from '../src/core/learn/retro/extract.js';
 import { DEFAULT_CLOUD_BUDGET, type CloudBudgetV1, type CloudTaskReport, type CloudTaskV1 } from '../src/core/cloud/types.js';
 import { isNeedsYouItem } from '../src/core/verse/workbench-types.js';
 
@@ -151,6 +159,7 @@ describe('GitHub checks and the verdict', () => {
     expect(p.landable).toEqual({ ok: true, reason: null });
     expect(p.reason).toBe('Clean: medium risk, 1 file, 1 line, checks green.');
     expect(p.itemId).toBe(cloudPrItemId(p.taskId));
+    expect(p.itemId).toBe(`fleet:owner-lane-pr:cloud-${p.taskId}`);
     expect(p.behind).toBe(false);
   });
 
@@ -235,6 +244,36 @@ describe('strict action body', () => {
     for (const bad of [{}, { headSha: 'abc' }, { headSha: SHA.toUpperCase() }, { headSha: SHA, force: true }]) {
       expect(() => parseCloudPrActionBody(bad)).toThrow(CloudInputError);
     }
+  });
+});
+
+describe('3.15: close carries an optional reason', () => {
+  it('parseCloudPrCloseBody: headSha as strict as ever, reason optional, normalised and scrubbed', () => {
+    expect(parseCloudPrCloseBody({ headSha: SHA })).toEqual({ headSha: SHA, reason: null });
+    expect(parseCloudPrCloseBody({ headSha: SHA, reason: '  Too big;\tsplit it\n' })).toEqual({ headSha: SHA, reason: 'Too big; split it' });
+    expect(parseCloudPrCloseBody({ headSha: SHA, reason: '' })).toEqual({ headSha: SHA, reason: null });
+    expect(parseCloudPrCloseBody({ headSha: SHA, reason: `token ghp_${'z'.repeat(36)}` }).reason).toBe('token [REDACTED]');
+    for (const bad of [{ reason: 'x' }, { headSha: 'abc', reason: 'x' }, { headSha: SHA, reason: 1 }, { headSha: SHA, reason: ['x'] }, { headSha: SHA, reason: 'x'.repeat(201) }, { headSha: SHA, reason: 'x', extra: 1 }]) {
+      expect(() => parseCloudPrCloseBody(bad as Record<string, unknown>)).toThrow(CloudInputError);
+    }
+    // The other verbs' parser never learned the key.
+    expect(() => parseCloudPrActionBody({ headSha: SHA, reason: 'x' })).toThrow(CloudInputError);
+  });
+
+  it('normalizeCloseReason: control characters and line separators become spaces; 200 characters is the bound', () => {
+    expect(normalizeCloseReason(undefined)).toBeNull();
+    expect(normalizeCloseReason(null)).toBeNull();
+    expect(normalizeCloseReason('a\u0000b\u2028c\u0085d')).toBe('a b c d');
+    expect(normalizeCloseReason('y'.repeat(200))).toBe('y'.repeat(200));
+    expect(() => normalizeCloseReason('y'.repeat(201))).toThrow(/at most 200/);
+    expect(() => normalizeCloseReason({})).toThrow(/must be text/);
+  });
+
+  it('the recorded sentence is never the retro sweep’s "generic close": it teaches closed:by-mason', () => {
+    const end = { taskId: 'ct_20260926T1200_abc123', repo: 'ashlrai/widget', state: 'closed' as const, endedAt: NOW.toISOString(), title: 't', prompt: 'p', failure: null, report: null, origin: 'operator' };
+    expect(retroFromCloud({ ...end, stateReason: 'Closed in Verse without landing.' }, NOW.toISOString()).rootCause!.code).toBe('closed:unreviewed');
+    expect(retroFromCloud({ ...end, stateReason: `Closed in Verse: ${normalizeCloseReason('wrong repo')!}` }, NOW.toISOString()).rootCause)
+      .toMatchObject({ code: 'closed:by-mason', detail: 'wrong repo' });
   });
 });
 

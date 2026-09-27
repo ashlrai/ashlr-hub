@@ -5,6 +5,13 @@
  * action kind over several items at once ("Land all clean", or A / R / E on a
  * multi-selection).
  *
+ * 3.15 — Devin PRs are triaged the same way: their previews come from GET
+ * /api/verse/devin/previews (same shape; the server's shared pr-actions.ts
+ * computes both) and are merged with the cloud lane's. Each lane's endpoint
+ * may only speak for its own rows (`cloud-ct_…` / `devin-dv_…` item ids), and
+ * one lane failing — a 404 while Devin is off — never costs the other its
+ * chips.
+ *
  * The actions themselves are the items' own (cloud-api.ts triageActions maps
  * Land / Close / Update branch onto approve / reject / fix), so nothing here
  * builds a route: a batch POSTs each item's own request, pinned by the server
@@ -15,7 +22,8 @@
  * graph is the server's merge gates.
  */
 import type { CloudPrCheck, CloudPrPreview, CloudPrPreviewsResponse } from '../../../../core/cloud/pr-preview.js';
-import { VERSE_CLOUD_PATH } from '../../../../core/cloud/types.js';
+import { CLOUD_TASK_ID_PATTERN, VERSE_CLOUD_PATH } from '../../../../core/cloud/types.js';
+import { DEVIN_TASK_ID_PATTERN, VERSE_DEVIN_PATH } from '../../../../core/devin/types.js';
 import { isSafeApiRoute, type NeedsYouActionKind, type NeedsYouItem } from '../../../../core/verse/workbench-types.js';
 import { getMutationToken, touchMutationHold } from '../../../data/auth-store.js';
 import { ApiError, apiGet, apiPost } from '../../../data/client.js';
@@ -27,6 +35,38 @@ import { refreshActivity } from './useActivity.js';
 
 export const CLOUD_PREVIEWS_KEY = 'verse-cloud-previews';
 const PREVIEWS_PATH = `${VERSE_CLOUD_PATH}/previews`;
+/** core/devin/devin-api.ts VERSE_DEVIN_PREVIEWS_PATH (that module is server-only). */
+const DEVIN_PREVIEWS_PATH = `${VERSE_DEVIN_PATH}/previews`;
+
+export type DeliveryLane = 'cloud' | 'devin';
+
+/** Needs-you item id prefix of each lane's PR rows (cloud-api.ts / devin-api.ts). */
+export const PR_ITEM_PREFIX: Readonly<Record<DeliveryLane, string>> = {
+  cloud: 'fleet:owner-lane-pr:cloud-',
+  devin: 'fleet:owner-lane-pr:devin-',
+};
+
+/** A PR row of either lane — the only rows with a gate preview. */
+export function isDeliveryPrItem(id: string): boolean {
+  return id.startsWith(PR_ITEM_PREFIX.cloud) || id.startsWith(PR_ITEM_PREFIX.devin);
+}
+
+const ITEM_TASK_RE = /^(?:fleet:owner-lane-pr|chats:chat-failed):(cloud|devin)-([^:]+)$/;
+
+/**
+ * The lane and task behind a cloud or Devin item (its PR, its failed launch,
+ * a waiting Devin session) — for its evidence. Null unless the id carries a
+ * task id OF THAT LANE's own format, so no other id is ever spliced into a
+ * request path (`cloud-dv_…` or `devin-ct_…` are refused).
+ */
+export function deliveryTaskOfItem(id: string): { lane: DeliveryLane; taskId: string } | null {
+  const match = ITEM_TASK_RE.exec(id);
+  if (!match) return null;
+  const lane = match[1] as DeliveryLane;
+  const taskId = match[2]!;
+  const pattern = lane === 'cloud' ? CLOUD_TASK_ID_PATTERN : DEVIN_TASK_ID_PATTERN;
+  return pattern.test(taskId) ? { lane, taskId } : null;
+}
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -44,32 +84,52 @@ function isPreview(value: unknown): value is CloudPrPreview {
     && Array.isArray(value['checks']) && value['checks'].every(isCheck);
 }
 
-/** Previews by Needs-you item id. A malformed entry is dropped, never guessed at. */
-export function narrowPreviews(raw: unknown): ReadonlyMap<string, CloudPrPreview> {
+/**
+ * Previews by Needs-you item id. A malformed entry is dropped, never guessed
+ * at. With `lane`, only that lane's rows are kept: a lane's endpoint cannot
+ * vouch for the other lane's pull requests.
+ */
+export function narrowPreviews(raw: unknown, lane?: DeliveryLane): ReadonlyMap<string, CloudPrPreview> {
   const out = new Map<string, CloudPrPreview>();
   const list = isRecord(raw) ? (raw as Partial<CloudPrPreviewsResponse>).previews : undefined;
   if (!Array.isArray(list)) return out;
-  for (const entry of list) if (isPreview(entry)) out.set(entry.itemId, entry);
+  for (const entry of list) {
+    if (!isPreview(entry)) continue;
+    if (lane && !entry.itemId.startsWith(PR_ITEM_PREFIX[lane])) continue;
+    out.set(entry.itemId, entry);
+  }
   return out;
 }
 
 const NONE: ReadonlyMap<string, CloudPrPreview> = new Map();
 
+/** One lane's previews; a 404 (Devin off, an older server) or any failed read is no chips for that lane. */
+async function lanePreviews(path: string, lane: DeliveryLane, signal: AbortSignal | undefined): Promise<ReadonlyMap<string, CloudPrPreview>> {
+  try {
+    return narrowPreviews(await apiGet<unknown>(path, signal), lane);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) throw err;
+    if (err instanceof DOMException && err.name === 'AbortError') throw err;
+    return NONE;
+  }
+}
+
 /**
- * Optional read: a server without the route (404) or a failed read shows no
- * chips — the items and their own actions still work. 401 propagates (the
- * whole app's read session expired).
+ * Optional read of both lanes' previews, merged. A server without a route
+ * (404) or a failed read shows no chips for that lane — the items and their
+ * own actions still work, and the other lane is unaffected. 401 propagates
+ * (the whole app's read session expired).
  */
 export const cloudPreviewsQuery: QueryDef<ReadonlyMap<string, CloudPrPreview>> = {
   key: CLOUD_PREVIEWS_KEY,
   fetch: async (signal) => {
-    try {
-      return narrowPreviews(await apiGet<unknown>(PREVIEWS_PATH, signal));
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) throw err;
-      if (err instanceof DOMException && err.name === 'AbortError') throw err;
-      return NONE;
-    }
+    const [cloud, devin] = await Promise.all([
+      lanePreviews(PREVIEWS_PATH, 'cloud', signal),
+      lanePreviews(DEVIN_PREVIEWS_PATH, 'devin', signal),
+    ]);
+    if (devin.size === 0) return cloud;
+    if (cloud.size === 0) return devin;
+    return new Map([...cloud, ...devin]);
   },
 };
 

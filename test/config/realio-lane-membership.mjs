@@ -444,6 +444,7 @@ export const REAL_IO_TEST_FILES = [
   'test/standing-merge-pass-310b.test.ts', // real git rebase/squash through FakeGithub — guard cannot see it
   'test/devin-api-315.test.ts', // 3.15: real loopback http server bind for the /api/verse/devin routes
   'test/cloud-pr-actions.test.ts', // 3.13: real loopback http server bind for the Needs-you land/close/update-branch routes
+  'test/devin-evidence-triage-315.test.ts', // 3.15: real loopback http server bind for the Devin previews / close-with-reason / timeline routes
   'test/cloud-intake-313.test.ts', // 3.13: its end-to-end block runs real git through FakeGithub — guard cannot see it
   'test/verse-async-folder-access-314.test.ts', // 3.14: real temp repos + a slowed fake `git` behind a real server, a fake `locus`, real spawns
   'test/execution-leases-310b.test.ts', // cross-process lease cases via real tsx children (test/helpers/throughput-310b.ts)

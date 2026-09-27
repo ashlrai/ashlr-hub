@@ -24,6 +24,14 @@
  * and is always `verified: false`; the model and account are 'unknown'
  * unless a record names them. Nothing is inferred from the report.
  *
+ * 3.15 — SHARED WITH THE DEVIN LANE. A Devin task (devin/types.ts) delivers
+ * exactly like a cloud task (branch → PR → report block), so everything from
+ * the report onward — PR, diff, checks, gates, merge, release, health — and
+ * all of the gathering are written against the narrow TimelineDeliveryTask
+ * and a lane's words (TimelineLaneWords), and devin/timeline.ts supplies only
+ * its own objective / session / worker / cost steps. The cloud chain reads
+ * exactly as before.
+ *
  * BOUNDED: every source has its own time budget and an unreadable or slow
  * source degrades its steps to 'unknown' — the route always answers. Git
  * answers and the merge-record index are cached; a whole timeline is cached
@@ -49,7 +57,60 @@ import {
   type TimelineLink,
   type TimelineStep,
 } from './timeline-types.js';
-import { CLOUD_BALANCE_URL, CLOUD_TASK_ID_PATTERN, type CloudTaskV1 } from './types.js';
+import {
+  CLOUD_BALANCE_URL,
+  CLOUD_TASK_ID_PATTERN,
+  type CloudDeliveryPin,
+  type CloudSupersededBy,
+  type CloudTaskPr,
+  type CloudTaskReport,
+  type CloudTaskV1,
+} from './types.js';
+
+/**
+ * What the shared steps and the gathering read from a task (3.15). A cloud
+ * task (CloudTaskV1) and a Devin task (DevinTaskV1) both carry exactly these
+ * fields with the same meaning.
+ */
+export interface TimelineDeliveryTask {
+  id: string;
+  repo: string;
+  branch: string;
+  baseBranch: string;
+  createdAt: string;
+  updatedAt: string;
+  state: string;
+  stateReason: string | null;
+  pr: CloudTaskPr | null;
+  report: CloudTaskReport | null;
+  deliveryPin?: CloudDeliveryPin;
+  supersededBy?: CloudSupersededBy;
+}
+
+/** The few words that differ between lanes in the shared steps (sources, the report fence). */
+export interface TimelineLaneWords {
+  /** "cloud task record" */
+  record: string;
+  /** "GitHub, read by the cloud tracker" */
+  tracker: string;
+  /** "GitHub (cloud tracker) + local git" */
+  trackerAndGit: string;
+  /** "cloud task delivery pin" */
+  pin: string;
+  /** The fenced report block the PR body should carry ("ashlr-cloud-report"). */
+  reportFence: string;
+  /** "cloud PR" */
+  prNoun: string;
+}
+
+export const CLOUD_TIMELINE_WORDS: TimelineLaneWords = {
+  record: 'cloud task record',
+  tracker: 'GitHub, read by the cloud tracker',
+  trackerAndGit: 'GitHub (cloud tracker) + local git',
+  pin: 'cloud task delivery pin',
+  reportFence: 'ashlr-cloud-report',
+  prNoun: 'cloud PR',
+};
 
 // ---------------------------------------------------------------------------
 // Sources — what the pure builder is given
@@ -87,8 +148,8 @@ export type ReleaseSource =
   | { state: 'no-tags' }
   | { state: 'unknown'; reason: string };
 
-export interface TimelineSources {
-  task: CloudTaskV1;
+export interface TimelineSources<T extends TimelineDeliveryTask = CloudTaskV1> {
+  task: T;
   merge: MergeRecordSource;
   ledger: LedgerSource;
   watch: WatchSource;
@@ -103,7 +164,7 @@ export interface TimelineSources {
 // Text helpers
 // ---------------------------------------------------------------------------
 
-function clip(text: string, max: number): string {
+export function clip(text: string, max: number): string {
   // eslint-disable-next-line no-control-regex
   const flat = scrubSecrets(text).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim();
   return flat.length <= max ? flat : `${flat.slice(0, max - 1).trimEnd()}…`;
@@ -111,13 +172,17 @@ function clip(text: string, max: number): string {
 
 const short = (sha: string): string => sha.slice(0, 7);
 
-function isoOrNull(value: string | null | undefined): string | null {
+export function isoOrNull(value: string | null | undefined): string | null {
   if (typeof value !== 'string') return null;
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 }
 
-function httpsLink(href: string | null | undefined, host: 'claude.ai' | 'github.com', label: string): TimelineLink | undefined {
+/**
+ * An https link to exactly `host`, or nothing. `app.devin.ai` (3.15) is
+ * passed only by the Devin lane, for its own session link.
+ */
+export function httpsLink(href: string | null | undefined, host: 'claude.ai' | 'github.com' | 'app.devin.ai', label: string): TimelineLink | undefined {
   if (typeof href !== 'string' || href.length > 2_048) return undefined;
   try {
     const url = new URL(href);
@@ -143,7 +208,7 @@ const ORIGIN_WORD: Record<CloudTaskV1['origin'], string> = {
   cli: 'the ashlr CLI',
 };
 
-function prNumberOf(task: CloudTaskV1): number | null {
+function prNumberOf(task: TimelineDeliveryTask): number | null {
   return task.pr?.number ?? task.deliveryPin?.number ?? null;
 }
 
@@ -155,7 +220,7 @@ const sameRepo = (a: string, b: string): boolean => a.toLowerCase() === b.toLowe
 
 type Step = TimelineStep;
 
-function step(kind: Step['kind'], fields: Omit<Step, 'kind'>): Step {
+export function step(kind: Step['kind'], fields: Omit<Step, 'kind'>): Step {
   const out: Step = { kind, at: fields.at, title: fields.title, detail: fields.detail, source: fields.source, verified: fields.verified, reached: fields.reached };
   if (fields.link) out.link = fields.link;
   return out;
@@ -223,14 +288,14 @@ function workerStep(task: CloudTaskV1, model: string | null): Step {
   });
 }
 
-function reportStep(task: CloudTaskV1): Step {
+function reportStep(task: TimelineDeliveryTask, words: TimelineLaneWords): Step {
   const report = task.report;
   if (!report) {
     const hasPr = task.pr !== null;
     return step('report', {
       at: null,
       title: hasPr ? 'No session report' : 'No session report yet',
-      detail: hasPr ? 'The pull request carries no ashlr-cloud-report block.' : '',
+      detail: hasPr ? `The pull request carries no ${words.reportFence} block.` : '',
       source: 'pull request body',
       verified: 'unknown',
       reached: hasPr,
@@ -250,7 +315,7 @@ function reportStep(task: CloudTaskV1): Step {
   });
 }
 
-function prStep(task: CloudTaskV1, merge: MergeRecordSource): Step {
+function prStep(task: TimelineDeliveryTask, merge: MergeRecordSource, words: TimelineLaneWords): Step {
   const openedAt = merge.state === 'ok' ? isoOrNull(merge.record.pr?.openedAt) : null;
   if (task.pr) {
     const link = httpsLink(task.pr.url, 'github.com', `PR #${task.pr.number}`);
@@ -260,7 +325,7 @@ function prStep(task: CloudTaskV1, merge: MergeRecordSource): Step {
       at: openedAt,
       title: `PR #${task.pr.number} ${stateWord}`,
       detail: `${clip(task.pr.title, 200)}. Repository, branch and base checked against the task by the tracker${pinned === false ? '; it differs from the PR first pinned for this task' : ''}.`,
-      source: 'GitHub, read by the cloud tracker',
+      source: words.tracker,
       verified: pinned === false ? 'unknown' : true,
       reached: true,
       ...(link ? { link } : {}),
@@ -272,7 +337,7 @@ function prStep(task: CloudTaskV1, merge: MergeRecordSource): Step {
       at: openedAt,
       title: `PR #${task.deliveryPin.number} (not currently verified)`,
       detail: 'This PR was verified for the task earlier; the latest GitHub lookup could not confirm it.',
-      source: 'cloud task delivery pin',
+      source: words.pin,
       verified: 'unknown',
       reached: true,
       ...(link ? { link } : {}),
@@ -282,13 +347,13 @@ function prStep(task: CloudTaskV1, merge: MergeRecordSource): Step {
     at: null,
     title: 'No pull request yet',
     detail: task.state === 'expired' ? 'No PR appeared within the watch window; the session link still works.' : '',
-    source: 'GitHub, read by the cloud tracker',
+    source: words.tracker,
     verified: 'unknown',
     reached: false,
   });
 }
 
-function diffStep(task: CloudTaskV1, merge: MergeRecordSource): Step {
+function diffStep(task: TimelineDeliveryTask, merge: MergeRecordSource): Step {
   const record = merge.state === 'ok' ? merge.record : null;
   const landing = record?.landing ?? null;
   const files = landing?.files ?? record?.files ?? null;
@@ -327,7 +392,7 @@ function diffStep(task: CloudTaskV1, merge: MergeRecordSource): Step {
   });
 }
 
-function checksStep(task: CloudTaskV1, merge: MergeRecordSource): Step {
+function checksStep(task: TimelineDeliveryTask, merge: MergeRecordSource): Step {
   const checks = merge.state === 'ok' ? merge.record.pr?.checks ?? null : null;
   if (checks) {
     const title = checks.state === 'green' ? 'Required checks passed'
@@ -356,7 +421,7 @@ function checksStep(task: CloudTaskV1, merge: MergeRecordSource): Step {
   });
 }
 
-function gatesStep(task: CloudTaskV1, merge: MergeRecordSource, ledger: LedgerSource): Step {
+function gatesStep(task: TimelineDeliveryTask, merge: MergeRecordSource, ledger: LedgerSource): Step {
   if (ledger.state === 'ok' && ledger.gates.length > 0) {
     const latest = new Map<string, GateResult & { rowAt: string }>();
     for (const row of ledger.gates) latest.set(row.gate, row); // oldest first ⇒ last wins
@@ -399,12 +464,12 @@ function gatesStep(task: CloudTaskV1, merge: MergeRecordSource, ledger: LedgerSo
   });
 }
 
-function landingOf(sources: TimelineSources): LandingRecord | null {
+function landingOf(sources: TimelineSources<TimelineDeliveryTask>): LandingRecord | null {
   if (sources.merge.state === 'ok' && sources.merge.record.landing) return sources.merge.record.landing;
   return sources.ledger.state === 'ok' ? sources.ledger.landing : null;
 }
 
-function mergeStep(sources: TimelineSources): Step {
+function mergeStep(sources: TimelineSources<TimelineDeliveryTask>, words: TimelineLaneWords): Step {
   const { task, mergeCommit } = sources;
   const landing = landingOf(sources);
   if (landing) {
@@ -426,19 +491,19 @@ function mergeStep(sources: TimelineSources): Step {
       detail: found
         ? 'GitHub reports the PR merged; the commit was found in local git by its merge message (no fleet landing recorded it).'
         : 'GitHub reports the PR merged. No landing record or local commit names the merge commit.',
-      source: found ? 'GitHub (cloud tracker) + local git' : 'GitHub, read by the cloud tracker',
+      source: found ? words.trackerAndGit : words.tracker,
       verified: true,
       reached: true,
       ...(found && commitLink(task.repo, found) ? { link: commitLink(task.repo, found)! } : {}),
     });
   }
   if (task.state === 'pr-open' && task.supersededBy) {
-    // 3.13: the cloud PR was closed in favour of the fleet App PR (fleet/cloud-intake.ts).
+    // 3.13: the lane's PR was closed in favour of the fleet App PR (fleet/cloud-intake.ts).
     return step('merge', {
       at: null,
       title: `Superseded by fleet PR #${task.supersededBy.number}`,
-      detail: 'The fleet rebuilt this change through the standing merge gates; it lands from that PR, never from the cloud PR.',
-      source: 'cloud task record',
+      detail: `The fleet rebuilt this change through the standing merge gates; it lands from that PR, never from the ${words.prNoun}.`,
+      source: words.record,
       verified: true,
       reached: false,
     });
@@ -448,7 +513,7 @@ function mergeStep(sources: TimelineSources): Step {
       at: null,
       title: 'Closed without merging',
       detail: clip(task.stateReason ?? '', 300),
-      source: 'cloud task record',
+      source: words.record,
       verified: true,
       reached: true,
     });
@@ -457,13 +522,13 @@ function mergeStep(sources: TimelineSources): Step {
     at: null,
     title: 'Not merged',
     detail: task.state === 'pr-open' ? 'The PR is open; nothing merges on its own.' : '',
-    source: 'cloud task record',
+    source: words.record,
     verified: task.state === 'pr-open' ? true : 'unknown',
     reached: false,
   });
 }
 
-function releaseStep(sources: TimelineSources): Step {
+function releaseStep(sources: TimelineSources<TimelineDeliveryTask>): Step {
   const { task, mergeCommit, release } = sources;
   if (!mergeCommit || !release) {
     return step('release', {
@@ -517,7 +582,7 @@ function releaseStep(sources: TimelineSources): Step {
   }
 }
 
-function healthStep(sources: TimelineSources): Step {
+function healthStep(sources: TimelineSources<TimelineDeliveryTask>): Step {
   const { watch, ledger, task } = sources;
   const view = watch.state === 'ok' ? watch.view : null;
   if (view) {
@@ -579,6 +644,25 @@ function costStep(task: CloudTaskV1): Step {
   });
 }
 
+/**
+ * PURE (3.15): the lane-independent middle of the chain — report, PR, diff,
+ * checks, gates, merge, release, health — in TIMELINE_STEP_ORDER. Each lane
+ * puts its own objective / launch / worker before it and its cost after.
+ */
+export function deliveryTimelineSteps<T extends TimelineDeliveryTask>(sources: TimelineSources<T>, words: TimelineLaneWords): TimelineStep[] {
+  const { task } = sources;
+  return [
+    reportStep(task, words),
+    prStep(task, sources.merge, words),
+    diffStep(task, sources.merge),
+    checksStep(task, sources.merge),
+    gatesStep(task, sources.merge, sources.ledger),
+    mergeStep(sources, words),
+    releaseStep(sources),
+    healthStep(sources),
+  ];
+}
+
 /** PURE: the ordered evidence chain for one task from already-gathered sources. */
 export function buildCloudTimeline(sources: TimelineSources, now: Date = new Date()): CloudTimelineResponse {
   const { task } = sources;
@@ -586,14 +670,7 @@ export function buildCloudTimeline(sources: TimelineSources, now: Date = new Dat
     objectiveStep(task),
     launchStep(task),
     workerStep(task, sources.model),
-    reportStep(task),
-    prStep(task, sources.merge),
-    diffStep(task, sources.merge),
-    checksStep(task, sources.merge),
-    gatesStep(task, sources.merge, sources.ledger),
-    mergeStep(sources),
-    releaseStep(sources),
-    healthStep(sources),
+    ...deliveryTimelineSteps(sources, CLOUD_TIMELINE_WORDS),
     costStep(task),
   ];
   return {
@@ -676,6 +753,9 @@ class TtlCache<V> {
   }
 }
 
+/** What gathering reads (every lane); `TimelineDeps` adds the cloud task reader. */
+export type TimelineGatherDeps = Omit<TimelineDeps, 'readTask'>;
+
 export interface TimelineDeps {
   now?: () => Date;
   readTask?: (id: string) => CloudTaskV1 | null;
@@ -745,7 +825,7 @@ function mergeIndex(deps: Required<Pick<TimelineDeps, 'listMergeKeys' | 'readMer
   return index;
 }
 
-function findMergeRecord(task: CloudTaskV1, deps: Required<Pick<TimelineDeps, 'listMergeKeys' | 'readMergeRecord'>>, now: number): MergeRecordSource {
+function findMergeRecord(task: TimelineDeliveryTask, deps: Required<Pick<TimelineDeps, 'listMergeKeys' | 'readMergeRecord'>>, now: number): MergeRecordSource {
   try {
     const index = mergeIndex(deps, now);
     if (!index) return { state: 'unknown', reason: 'the fleet merge records could not be listed' };
@@ -765,7 +845,7 @@ function findMergeRecord(task: CloudTaskV1, deps: Required<Pick<TimelineDeps, 'l
   }
 }
 
-async function gatherLedger(task: CloudTaskV1, merge: MergeRecordSource, read: typeof readLedger, budgetMs: number): Promise<LedgerSource> {
+async function gatherLedger(task: TimelineDeliveryTask, merge: MergeRecordSource, read: typeof readLedger, budgetMs: number): Promise<LedgerSource> {
   try {
     const result = await withBudget(budgetMs, () => read({
       kinds: ['gate:result', 'merge:landed', 'post-merge:result'],
@@ -798,7 +878,7 @@ async function gatherLedger(task: CloudTaskV1, merge: MergeRecordSource, read: t
   }
 }
 
-function gatherWatch(task: CloudTaskV1, landing: LandingRecord | null, mergeSha: string | null, list: () => PostMergeWatchView[]): WatchSource {
+function gatherWatch(task: TimelineDeliveryTask, landing: LandingRecord | null, mergeSha: string | null, list: () => PostMergeWatchView[]): WatchSource {
   try {
     const pr = prNumberOf(task);
     const views = list().filter((v) => sameRepo(v.repo, task.repo) && v.kind === 'merge');
@@ -822,7 +902,7 @@ async function gitLines(git: GitRunner, cwd: string, args: string[]): Promise<{ 
 }
 
 /** The merge commit by its message in local git: the task branch in a merge commit, else a squash subject ending `(#N)`. */
-async function findMergeCommitInGit(git: GitRunner, cwd: string, task: CloudTaskV1, pr: number): Promise<string | null> {
+async function findMergeCommitInGit(git: GitRunner, cwd: string, task: TimelineDeliveryTask, pr: number): Promise<string | null> {
   const merged = await gitLines(git, cwd, [
     'log', '--all', '-n', '1', '--format=%H', '--fixed-strings', '--all-match',
     `--grep=Merge pull request #${pr} from `, `--grep=${task.branch}`,
@@ -889,7 +969,7 @@ export function defaultCheckoutFor(git: GitRunner): (repo: string) => Promise<st
 }
 
 async function gatherGit(
-  task: CloudTaskV1,
+  task: TimelineDeliveryTask,
   landing: LandingRecord | null,
   deps: { git: GitRunner; checkoutFor: (repo: string) => Promise<string | null> },
   now: number,
@@ -937,8 +1017,12 @@ function evidenceModel(proposalId: string): string | null {
   return typeof model === 'string' && model.trim() ? model : null;
 }
 
-/** Gather every source for one task. Never throws; a failing source becomes 'unknown'. */
-export async function gatherTimelineSources(task: CloudTaskV1, deps: TimelineDeps = {}): Promise<TimelineSources> {
+/**
+ * Gather every source for one task. Never throws; a failing source becomes
+ * 'unknown'. Lane-independent (3.15): matched by repo + PR number, the task
+ * branch (`ashlr-cloud/<id>` or `ashlr-devin/<id>`) or the task id.
+ */
+export async function gatherTimelineSources<T extends TimelineDeliveryTask = CloudTaskV1>(task: T, deps: TimelineGatherDeps = {}): Promise<TimelineSources<T>> {
   const now = (deps.now ?? (() => new Date()))().getTime();
   const git = deps.git ?? defaultGitRunner;
   const merge = findMergeRecord(task, {
@@ -991,14 +1075,27 @@ export async function cloudTaskTimeline(id: string, deps: TimelineDeps = {}): Pr
   const clock = deps.now ?? (() => new Date());
   const task = (deps.readTask ?? readCloudTask)(id);
   if (!task) return null;
+  return cachedTimeline(task, clock, async () => buildCloudTimeline(await gatherTimelineSources(task, deps), clock()));
+}
+
+/**
+ * The per-revision cache and single-flight every lane's timeline uses
+ * (3.15: shared with devin/timeline.ts). Keyed by task id + `updatedAt`; the
+ * cloud and Devin id formats are disjoint, so one cache serves both.
+ */
+export async function cachedTimeline(
+  task: { id: string; updatedAt: string },
+  clock: () => Date,
+  build: () => Promise<CloudTimelineResponse>,
+): Promise<CloudTimelineResponse> {
   const key = `${task.id}\0${task.updatedAt}`;
   const cached = timelineCache.get(key, clock().getTime());
   if (cached) return cached;
   const pending = inFlight.get(key);
-  if (pending) return pending;
+  if (pending) return pending as Promise<CloudTimelineResponse>;
   const work = (async () => {
     try {
-      const timeline = buildCloudTimeline(await gatherTimelineSources(task, deps), clock());
+      const timeline = await build();
       timelineCache.set(key, timeline, clock().getTime());
       return timeline;
     } finally {

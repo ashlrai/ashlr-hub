@@ -55,7 +55,7 @@ export function isBranchName(value: string): boolean {
 }
 
 /** Only these hosts become links: the ids came from a CLI's stdout and gh's JSON. */
-export function safeHref(url: string | null | undefined, host: 'claude.ai' | 'github.com'): string | null {
+export function safeHref(url: string | null | undefined, host: 'claude.ai' | 'github.com' | 'app.devin.ai'): string | null {
   if (typeof url !== 'string' || url.length > 2_048) return null;
   try {
     const parsed = new URL(url);

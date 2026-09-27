@@ -76,6 +76,16 @@ export interface CloudEndInput {
   failure: string | null;
   report: { status: string; summary: string; testsRun: readonly string[]; risks: readonly string[] } | null;
   origin: string;
+  /**
+   * 3.15: which delivery lane ran it (default 'cloud'). A Devin task has the
+   * same delivery shape (branch → PR → report block), so it goes through this
+   * extractor rather than a copy of it; the lane picks its failure codes, its
+   * words and its idempotency key (`devin:<taskId>:<state>` — the id formats
+   * are disjoint anyway, but the prefix keeps the key self-describing). The
+   * retro's `source` stays 'cloud' (RetroSource is a closed, persisted and
+   * charted vocabulary; the Lessons view groups both lanes as "cloud").
+   */
+  lane?: 'cloud' | 'devin';
 }
 
 export interface LeaderEndInput {
@@ -517,13 +527,41 @@ const CLOUD_FAILURES: Readonly<Record<string, { label: string; infra: boolean; a
   unknown: { label: 'Cloud launch failed', infra: true, advice: 'The launch failed for an unknown reason; check the Verse log.' },
 };
 
+/** Devin launch / session failure codes (devin/types.ts DevinFailureCode). Every one is setup, not the task. */
+const DEVIN_FAILURES: Readonly<Record<string, { label: string; infra: boolean; advice: string }>> = {
+  'not-enabled': { label: 'Devin not enabled', infra: true, advice: 'Turn the Devin lane on (devin.enabled) before launching.' },
+  'not-connected': { label: 'Devin not connected', infra: true, advice: 'Connect a Devin key with `ashlr devin connect` before relaunching.' },
+  auth: { label: 'Devin key rejected', infra: true, advice: 'The Devin key is invalid, expired or revoked; reconnect it.' },
+  forbidden: { label: 'Devin key not permitted', infra: true, advice: 'The Devin key cannot create sessions in this organization; use a key with that role.' },
+  'rate-limited': { label: 'Devin rate-limited', infra: true, advice: 'Devin rate-limited the launch; relaunch later.' },
+  budget: { label: 'Devin budget refused', infra: true, advice: 'The Devin ACU budget refused the launch; raise it or wait for the window.' },
+  'invalid-request': { label: 'Devin refused the request', infra: true, advice: 'Devin refused the session request; check the repo is connected to Devin.' },
+  server: { label: 'Devin API error', infra: true, advice: 'Devin answered with a server error; retry.' },
+  network: { label: 'Devin unreachable', infra: true, advice: 'Devin could not be reached; retry when the network is back.' },
+  unparsed: { label: 'Devin answer unreadable', infra: true, advice: 'Devin answered in a shape Verse does not recognise; update Ashlr.' },
+  'session-error': { label: 'Devin session errored', infra: true, advice: 'The Devin session ended in an error; open it in Devin to see why.' },
+  unknown: { label: 'Devin launch failed', infra: true, advice: 'The Devin launch failed for an unknown reason; check the Verse log.' },
+};
+
+/**
+ * Mason's own close reason, when Verse recorded one (cloud/pr-actions.ts
+ * CLOUD_CLOSED_WITH_REASON: `Closed in Verse: <reason>`). A literal here so
+ * this module stays pure and import-light. GENERIC_CLOSE never matches it
+ * (it needs "Closed in Verse" to END the sentence, optionally with
+ * " without landing."), and this regex never matches the generic sentence.
+ */
+const VERSE_CLOSE_REASON = /^Closed in Verse: (.+)$/s;
+
 export function retroFromCloud(input: CloudEndInput, createdAt: string): RetroV1 {
+  const devin = input.lane === 'devin';
+  const lane = devin ? 'devin' : 'cloud';
+  const noun = devin ? 'Devin' : 'cloud';
   const asked = firstLines([input.title, input.prompt].join('\n'), 400) || '(no request recorded)';
   const kind = classifyTaskKind(`${input.title} ${input.prompt}`);
   const kinds: TaskKind[] = kind === 'other' ? [] : [kind];
   const endKind: RetroEndKind = input.state;
   const common = {
-    sourceKey: `cloud:${input.taskId}:${input.state}`,
+    sourceKey: `${lane}:${input.taskId}:${input.state}`,
     source: 'cloud' as const,
     taskId: input.taskId,
     repo: input.repo,
@@ -548,14 +586,15 @@ export function retroFromCloud(input: CloudEndInput, createdAt: string): RetroV1
   }
 
   if (input.state === 'failed') {
-    const f = CLOUD_FAILURES[input.failure ?? 'unknown'] ?? CLOUD_FAILURES['unknown']!;
+    const table = devin ? DEVIN_FAILURES : CLOUD_FAILURES;
+    const f = table[input.failure ?? 'unknown'] ?? table['unknown']!;
     return baseRetro({
       ...common,
-      happened: `The cloud launch failed: ${input.stateReason ?? f.label}.`,
-      rootCause: { code: `cloud:${input.failure ?? 'unknown'}`, label: f.label, detail: input.stateReason ?? f.advice, evidence: 'launch failure code' },
+      happened: `The ${noun} launch failed: ${input.stateReason ?? f.label}.`,
+      rootCause: { code: `${lane}:${input.failure ?? 'unknown'}`, label: f.label, detail: input.stateReason ?? f.advice, evidence: 'launch failure code' },
       doDifferently: [f.advice],
       betterPrompt: null,
-      candidates: f.infra ? [] : [{ text: `Cloud tasks in ${input.repo}: ${f.advice}`, scope: { repo: input.repo, pathGlobs: [], taskKinds: [] } }],
+      candidates: f.infra ? [] : [{ text: `${devin ? 'Devin' : 'Cloud'} tasks in ${input.repo}: ${f.advice}`, scope: { repo: input.repo, pathGlobs: [], taskKinds: [] } }],
     });
   }
 
@@ -563,36 +602,42 @@ export function retroFromCloud(input: CloudEndInput, createdAt: string): RetroV1
     return baseRetro({
       ...common,
       happened: 'No pull request arrived before the task expired.',
-      rootCause: { code: 'cloud:no-pr', label: 'No PR delivered', detail: input.stateReason ?? 'The session never opened its pull request.', evidence: 'task state' },
+      rootCause: { code: `${lane}:no-pr`, label: 'No PR delivered', detail: input.stateReason ?? 'The session never opened its pull request.', evidence: 'task state' },
       doDifferently: ['Make the delivery step explicit and small: push the branch and open the draft PR even when blocked.'],
       betterPrompt: betterPrompt(asked, ['Open the draft pull request early and push progress to it, even if the work is blocked.']),
       candidates: [],
     });
   }
 
-  // closed: the report's own status and risks are the richest evidence.
+  // closed: Mason's own words when he gave them (3.15, the Needs-you Close
+  // reason); otherwise the report's own status and risks are the richest
+  // evidence. An explicit reason outranks the report: it is the one
+  // judgement a human made about this attempt.
   const reason = input.stateReason?.trim() || 'Closed without landing.';
-  const blocked = report && (report.status === 'blocked' || report.status === 'partial');
-  const informative = !GENERIC_CLOSE.test(reason);
+  const masonSaid = VERSE_CLOSE_REASON.exec(reason)?.[1]?.trim() || null;
+  const lesson = masonSaid ?? reason;
+  const blocked = !masonSaid && report && (report.status === 'blocked' || report.status === 'partial');
+  const noChange = !masonSaid && report?.status === 'no-change';
+  const informative = masonSaid !== null || !GENERIC_CLOSE.test(reason);
   const cause: RetroRootCause = blocked
-    ? { code: `cloud:${report.status}`, label: report.status === 'blocked' ? 'Session blocked' : 'Partial delivery', detail: report.summary || reason, evidence: 'PR report' }
-    : report?.status === 'no-change'
-      ? { code: 'cloud:no-change', label: 'Nothing to change', detail: report.summary || reason, evidence: 'PR report' }
+    ? { code: `${lane}:${report.status}`, label: report.status === 'blocked' ? 'Session blocked' : 'Partial delivery', detail: report.summary || reason, evidence: 'PR report' }
+    : noChange
+      ? { code: `${lane}:no-change`, label: 'Nothing to change', detail: report?.summary || reason, evidence: 'PR report' }
       : informative
-        ? { code: 'closed:by-mason', label: 'Closed by Mason', detail: reason, evidence: 'close reason' }
+        ? { code: 'closed:by-mason', label: 'Closed by Mason', detail: lesson, evidence: masonSaid ? 'Mason’s close reason' : 'close reason' }
         : { code: 'closed:unreviewed', label: 'Closed without a reason', detail: reason, evidence: 'close reason' };
   const doNext = blocked
     ? [`Unblock before relaunching: ${cleanText(report.summary, 200)}`]
-    : report?.status === 'no-change'
+    : noChange
       ? ['Check the request is still needed; the session found nothing to change.']
       : informative
-        ? [`Address the close reason before retrying: ${cleanText(reason, 200)}`]
+        ? [`Address the close reason before retrying: ${cleanText(lesson, 200)}`]
         : ['Record a close reason next time so the lesson is not lost.'];
   const candidates: KnowledgeCandidate[] = [];
   if (blocked && report.summary) {
-    candidates.push({ text: `Cloud ${kind === 'other' ? '' : `${kind} `}tasks in ${input.repo} got ${report.status}: ${cleanText(report.summary, 240)}`, scope: { repo: input.repo, pathGlobs: [], taskKinds: kinds } });
+    candidates.push({ text: `${devin ? 'Devin' : 'Cloud'} ${kind === 'other' ? '' : `${kind} `}tasks in ${input.repo} got ${report.status}: ${cleanText(report.summary, 240)}`, scope: { repo: input.repo, pathGlobs: [], taskKinds: kinds } });
   } else if (informative && cause.code === 'closed:by-mason') {
-    candidates.push({ text: `Mason closed a cloud ${kind === 'other' ? '' : `${kind} `}change in ${input.repo} without landing: ${cleanText(reason, 240)}`, scope: { repo: input.repo, pathGlobs: [], taskKinds: kinds } });
+    candidates.push({ text: `Mason closed a ${noun} ${kind === 'other' ? '' : `${kind} `}change in ${input.repo} without landing: ${cleanText(lesson, 240)}`, scope: { repo: input.repo, pathGlobs: [], taskKinds: kinds } });
   }
   const risks = (report?.risks ?? []).slice(0, 2).map((r) => cleanText(r, 160)).filter(Boolean);
   return baseRetro({
@@ -601,7 +646,7 @@ export function retroFromCloud(input: CloudEndInput, createdAt: string): RetroV1
     rootCause: cause,
     doDifferently: [...doNext, ...risks.map((r) => `Reviewer risk flagged: ${r}`)],
     betterPrompt: blocked || (informative && cause.code === 'closed:by-mason')
-      ? betterPrompt(asked, [blocked ? `The last attempt got ${report.status}: ${cleanText(report.summary, 200)}` : `Mason closed the last attempt because: ${cleanText(reason, 200)}`])
+      ? betterPrompt(asked, [blocked ? `The last attempt got ${report.status}: ${cleanText(report.summary, 200)}` : `Mason closed the last attempt because: ${cleanText(lesson, 200)}`])
       : null,
     candidates,
   });

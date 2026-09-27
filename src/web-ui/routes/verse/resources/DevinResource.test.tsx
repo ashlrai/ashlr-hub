@@ -126,6 +126,19 @@ describe('DevinResource', () => {
   });
 });
 
+describe('DevinResource evidence (3.15)', () => {
+  it('a waiting session opens its Evidence sheet, read from the Devin timeline route only when asked', async () => {
+    overview = { generatedAt: 'x', status: status(), budget: budget(), tasks: [blockedTask()] };
+    mount();
+    const open = await screen.findByRole('button', { name: 'Evidence: Add a helper' });
+    const timelineReads = () => (vi.mocked(fetch).mock.calls as Array<[RequestInfo | URL]>).map(([u]) => String(u)).filter((u) => u.endsWith('/timeline'));
+    expect(timelineReads()).toEqual([]);
+    await userEvent.click(open);
+    expect(await screen.findByRole('dialog', { name: 'Evidence' })).toBeTruthy();
+    await waitFor(() => expect(timelineReads()).toEqual(['/api/verse/devin/tasks/dv_20260927T0400_aaaaaa/timeline']));
+  });
+});
+
 describe('runInDevinBlock', () => {
   const base = { overview: null, overviewReason: null, repo: 'ashlrai/x', rootsLoading: false, prompt: 'Do it' };
   const ov = (s: Record<string, unknown>, b: Record<string, unknown> = {}) => ({ generatedAt: 'x', status: status(s), budget: budget(b), tasks: [] }) as never;
