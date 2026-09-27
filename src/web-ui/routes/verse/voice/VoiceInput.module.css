@@ -1,0 +1,175 @@
+/* routes/verse/voice — the mic button (VoiceInput) and the floating
+   dictation pill (VoiceHud). Tokens only; no raw colours. */
+
+/* ---- mic button ---------------------------------------------------------- */
+.mic {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: var(--control-h-sm);
+  height: var(--control-h-sm);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.mic:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.mic:active:not(:disabled) { background: var(--bg-active); }
+.mic:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.mic:disabled { opacity: 0.45; cursor: not-allowed; }
+.mic[aria-busy='true'] { cursor: progress; color: var(--status-running-fg); }
+.mic[data-error='true']::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--status-danger-solid);
+}
+.micLive { color: var(--status-running-fg); background: var(--status-running-bg); }
+.micPulse {
+  position: absolute;
+  inset: -2px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--status-running-solid);
+  animation: voice-ring 1.4s ease-out infinite;
+  pointer-events: none;
+}
+@keyframes voice-ring {
+  from { opacity: 0.9; transform: scale(1); }
+  to { opacity: 0; transform: scale(1.25); }
+}
+
+/* ---- the pill ------------------------------------------------------------ */
+.hud {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--space-6) + env(safe-area-inset-bottom, 0px));
+  z-index: var(--z-toast);
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: max-content;
+  min-width: 320px;
+  max-width: min(640px, calc(100vw - 2 * var(--space-4)));
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-raised);
+  box-shadow: var(--shadow-toast);
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+.hud[data-state='listening'] { border-color: var(--status-running-solid); }
+.hud[data-state='error'] { border-color: var(--status-danger-solid); }
+.hudRow { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.hudDot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-full);
+  background: var(--status-running-bg);
+  color: var(--status-running-fg);
+}
+.hudDot[data-tone='danger'] { background: var(--status-danger-bg); color: var(--status-danger-fg); }
+.hudLabel { flex: none; font-weight: var(--font-weight-medium); white-space: nowrap; }
+.hudWhere { color: var(--text-tertiary); font-weight: var(--font-weight-regular); }
+.hudHint { flex: 1 1 auto; min-width: 0; color: var(--text-tertiary); font-size: var(--text-xs-size); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hudMessage { flex: 1 1 auto; min-width: 0; }
+.hudButton {
+  flex: none;
+  height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.hudButton:hover { background: var(--bg-hover); }
+.hudButton[data-primary='true'] { border-color: transparent; background: var(--accent-500); color: var(--accent-contrast); }
+.hudButton[data-primary='true']:hover { background: var(--accent-600); }
+.hudButton:focus-visible, .hudIcon:focus-visible, .rawBadge:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.hudIcon {
+  flex: none;
+  width: var(--control-h-xs);
+  height: var(--control-h-xs);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-md-size);
+  line-height: 1;
+  cursor: pointer;
+}
+.hudIcon:hover { background: var(--bg-hover); color: var(--text-primary); }
+/* Partials are provisional: dimmed and italic until the final lands solid. */
+.hudPartial {
+  margin: 0;
+  padding-left: calc(24px + var(--space-2));
+  color: var(--text-tertiary);
+  font-style: italic;
+  overflow-wrap: anywhere;
+}
+.hudPartial[data-solid='true'] { padding-left: 0; color: var(--text-primary); font-style: normal; }
+.hudModel { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs-size); color: var(--text-secondary); }
+.hudModelText { flex: none; white-space: nowrap; }
+.progress { position: relative; flex: 1 1 auto; min-width: 80px; height: 4px; overflow: hidden; border-radius: var(--radius-full); background: var(--meter-track); }
+.progressFill { position: absolute; inset: 0; transform-origin: left center; background: var(--accent-500); transition: transform var(--duration-base) var(--ease-standard); }
+.rawBadge {
+  flex: none;
+  height: 18px;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size);
+  cursor: pointer;
+}
+
+/* ---- waveform / meter ---------------------------------------------------- */
+.wave { display: inline-flex; align-items: center; gap: 2px; flex: none; height: 20px; }
+.waveBar {
+  display: block;
+  width: 2px;
+  height: 100%;
+  border-radius: var(--radius-full);
+  background: var(--status-running-solid);
+  transform: scaleY(0.08);
+  transform-origin: center;
+  transition: transform 60ms linear;
+}
+.wave:not([data-active='true']) .waveBar { background: var(--text-disabled); }
+.meter { position: relative; flex: none; width: 72px; height: 6px; overflow: hidden; border-radius: var(--radius-full); background: var(--meter-track); }
+.meterFill { position: absolute; inset: 0; transform-origin: left center; transform: scaleX(0.02); background: var(--status-running-solid); }
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .micPulse { animation: none; }
+  :root:not([data-motion='full']) .waveBar,
+  :root:not([data-motion='full']) .progressFill { transition: none; }
+}
+:root[data-motion='reduce'] .micPulse { animation: none; }
+:root[data-motion='reduce'] .waveBar,
+:root[data-motion='reduce'] .progressFill { transition: none; }
+
+@media (max-width: 520px) {
+  .hud { min-width: 0; width: calc(100vw - 2 * var(--space-4)); }
+  .hudHint { display: none; }
+}

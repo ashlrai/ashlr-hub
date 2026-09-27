@@ -79,11 +79,11 @@ import { SuggestMenu, suggestOptionId, type SuggestItem } from './composer/Sugge
 import { useAttachmentDrafts, useFollowUpQueue, useSessionControls } from './composer/useComposerData.js';
 import { FOOTER_FOLD_SHEET, useFooterFold } from './composer/useFooterFold.js';
 import { useTokenGate } from './context/use-token-gate.js';
-import { DictationButton } from './DictationButton.js';
 import { ComposerSeatBlock } from './health/ComposerSeatBlock.js';
 import type { SeatChoice } from './SeatSelector.js';
 import { useViewport } from './shell/viewport.js';
 import { getVerseSessionHead } from './verse-store.js';
+import { insertDictation } from './voice/insert-text.js';
 import { ENGINE_LABEL, modelLabel, seatPillLabel } from './verse-model.js';
 import { formatTokens } from './verse-readouts.js';
 import { matchPlaybookMacros, usePlaybookMacroSuggestions } from './playbooks/macro-suggest.js';
@@ -97,6 +97,8 @@ import cstyles from './composer/composer.module.css';
  * lazy chunk, so the composer's first paint does not carry the advisor.
  */
 const MultiModelBar = lazy(() => import('./multimodel/MultiModelBar.js'));
+// Dictation (voice/): lazy, so none of it is in the composer's own chunk.
+const VoiceInput = lazy(() => import('./voice/VoiceInput.js'));
 
 export interface ComposerProps {
   /** Which chat this box belongs to — drafts, history, controls and the queue are per session. */
@@ -226,7 +228,6 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
 
   // A draft survives ⌘K, a reload and a crash (Composer is keyed by session id).
   const [draft, setDraft] = useState(() => loadDraft(sessionId));
-  const [interim, setInterim] = useState('');
   const [sending, setSending] = useState(false);
   const [listening, setListening] = useState(false);
   const [sentHere, setSentHere] = useState(false);
@@ -257,7 +258,33 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   const sendInterceptor = useRef<SendInterceptor | null>(null);
   const registerInterceptor = useCallback((fn: SendInterceptor | null) => { sendInterceptor.current = fn; }, []);
 
-  const text = interim ? `${draft}${draft && !draft.endsWith(' ') ? ' ' : ''}${interim}` : draft;
+  // ---- dictation (voice/) ---------------------------------------------------
+  // A FINAL transcript lands at the caret (or the end, when the box is not
+  // focused); partials only ever show, dimmed, in the dictation pill.
+  const insertDictated = useCallback((chunk: string) => {
+    const node = textarea.current;
+    const focused = node !== null && typeof document !== 'undefined' && document.activeElement === node;
+    let caretAfter = -1;
+    setHistoryAt(-1);
+    setDraft((current) => {
+      const next = insertDictation(current, chunk, focused ? node.selectionStart : null, focused ? node.selectionEnd : null);
+      caretAfter = next.caret;
+      return next.value;
+    });
+    requestAnimationFrame(() => {
+      if (caretAfter >= 0 && textarea.current) textarea.current.setSelectionRange(caretAfter, caretAfter);
+    });
+  }, []);
+  // The chat's repo: the lexicon applies that project's terms.
+  const dictationCwd = useCallback(() => (sessionId ? getVerseSessionHead(sessionId).session?.projectPath ?? null : null), [sessionId]);
+  // The chat's own files, for "browser pane dot rs" → `browser_pane.rs`.
+  const lookupChatFiles = useCallback(async (queries: string[]) => {
+    if (!sessionId) return [];
+    const found = await Promise.all(queries.map((q) => searchSessionFiles(sessionId, q).then((r) => r.files.map((f) => f.path), () => [] as string[])));
+    return found.flat();
+  }, [sessionId]);
+
+  const text = draft;
   const tooLong = useMemo(() => new TextEncoder().encode(text).length > MAX_TEXT_BYTES, [text]);
   const queue = followUps.queue;
   const queueAvailable = queue !== null;
@@ -393,12 +420,12 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
 
   // ---- `@` and `/` ------------------------------------------------------------
   const trigger: ComposerTrigger | null = useMemo(() => {
-    if (disabled || interim || caret === null) return null;
+    if (disabled || caret === null) return null;
     const found = activeTrigger(draft, caret);
     if (!found || found.start === dismissedTrigger) return null;
     if (found.kind === 'mention' && !sessionId) return null;
     return found;
-  }, [draft, caret, disabled, interim, dismissedTrigger, sessionId]);
+  }, [draft, caret, disabled, dismissedTrigger, sessionId]);
 
   useEffect(() => {
     if (trigger?.kind !== 'mention' || !sessionId) {
@@ -644,7 +671,6 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
     persistedDraft.current = '';
     latestDraft.current = '';
     saveDraft(sessionId, '');
-    setInterim('');
     setSentHere(true);
     attachments.reset();
   }, [sessionId, attachments]);
@@ -762,7 +788,6 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
       const next = list.length - 1;
       setHistoryAt(next);
       setDraft(list[next]!);
-      setInterim('');
       return true;
     }
     const next = historyAt + delta;
@@ -826,7 +851,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
       }
       return;
     }
-    if (event.key === 'ArrowUp' && collapsed && (historyAt !== -1 || (node.selectionStart === 0 && !interim))) {
+    if (event.key === 'ArrowUp' && collapsed && (historyAt !== -1 || node.selectionStart === 0)) {
       if (recall(-1)) event.preventDefault();
       return;
     }
@@ -924,7 +949,6 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
           aria-expanded={suggestOpen ? true : undefined}
           aria-activedescendant={suggestOpen && suggestItems.length > 0 ? suggestOptionId(suggestId, boundedActive) : undefined}
           onChange={(event) => {
-            setInterim('');
             setHistoryAt(-1);
             setDraft(event.target.value);
             setDismissedTrigger(null);
@@ -943,10 +967,12 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
                 <IconPlus width={16} height={16} aria-hidden="true" />
               </button>
             </Tooltip>
-            <DictationButton disabled={disabled}
-              onInterim={setInterim}
-              onFinal={(chunk) => setDraft((current) => (current && !current.endsWith(' ') ? `${current} ${chunk}` : `${current}${chunk}`))}
-              onListeningChange={setListening} />
+            <Suspense fallback={null}>
+              <VoiceInput surface="composer" targetRef={textarea} disabled={disabled}
+                onInsert={insertDictated} cwd={dictationCwd}
+                {...(sessionId ? { lookupIdentifiers: lookupChatFiles } : {})}
+                onListeningChange={setListening} />
+            </Suspense>
             {!compact && wide ? wide.permission : null}
           </div>
           <div className={cstyles.footerRight}>

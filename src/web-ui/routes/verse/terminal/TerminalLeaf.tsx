@@ -14,7 +14,7 @@
  * a status dot beside it (click for its actions), a tick in the scrollbar's
  * overview ruler, ⌘↑/⌘↓ to walk them, and "Show in terminal" from the list.
  */
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import type { VerseTerminalBlock, VerseTerminalStreamFrame, VerseTerminalTab } from '../../../data/api-types.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { SkeletonLine } from '../../../components/primitives/Skeleton.js';
@@ -32,6 +32,10 @@ import type { PanelTerminalApi } from './panel-client.js';
 import { keyPassesToPage, panelKeyAction, panelKeyLabel, type PanelKeyAction } from './panel-keys.js';
 import { resolvePanelColors, type LineMark, type PanelView, type PanelViewFactory, type ViewDisposable } from './xterm-view.js';
 import styles from './TerminalPanel.module.css';
+
+// Dictation (voice/): lazy. The terminal is the `verbatim` surface — the
+// words go in exactly as heard, and are NEVER followed by Enter.
+const VoiceInput = lazy(() => import('../voice/VoiceInput.js'));
 
 export interface LeafDeps {
   api: PanelTerminalApi;
@@ -96,6 +100,7 @@ interface MarkRecord {
 export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function TerminalLeaf(props, ref) {
   const { tab, deps, shown, focused, mode, prefs } = props;
   const hostRef = useRef<HTMLDivElement>(null);
+  const leafRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<PanelView | null>(null);
   const queueRef = useRef<InputQueue | null>(null);
   const lastSeq = useRef(0);
@@ -468,6 +473,25 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
     setHighlight(blockId);
   }, []);
 
+  /** Insert text at the prompt — never a trailing newline, so nothing runs. */
+  const pasteText = useCallback((text: string) => {
+    const view = viewRef.current;
+    if (!view) return;
+    const clean = text.replace(/[\r\n]+$/, '');
+    if (clean.includes('\n') && !view.bracketedPaste()) {
+      // Without bracketed paste a shell would RUN each line as it arrives.
+      deps.writeClipboard(clean).then(
+        () => propsRef.current.onNotice({ tone: 'info', text: 'That command has several lines, so it was copied instead: paste it with ⌘V.' }),
+        () => propsRef.current.onNotice({ tone: 'error', text: 'That command has several lines and could not be pasted safely.' }),
+      );
+    } else {
+      view.paste(clean);
+    }
+    view.focus();
+  }, [deps]);
+  // Dictated words: one line, verbatim, typed at the prompt (no Enter).
+  const insertDictated = useCallback((text: string) => pasteText(text.replace(/\s*[\r\n]+\s*/g, ' ').trim()), [pasteText]);
+
   useImperativeHandle(ref, () => ({
     focus: () => viewRef.current?.focus(),
     getSelection: () => viewRef.current?.getSelection() ?? '',
@@ -481,22 +505,8 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
     jumpTo,
     size: () => (viewRef.current && viewRef.current.cols > 1 ? { cols: viewRef.current.cols, rows: viewRef.current.rows } : null),
     hasOutput: () => writtenSeq.current > 0,
-    paste: (text: string) => {
-      const view = viewRef.current;
-      if (!view) return;
-      const clean = text.replace(/[\r\n]+$/, '');
-      if (clean.includes('\n') && !view.bracketedPaste()) {
-        // Without bracketed paste a shell would RUN each line as it arrives.
-        deps.writeClipboard(clean).then(
-          () => propsRef.current.onNotice({ tone: 'info', text: 'That command has several lines, so it was copied instead: paste it with ⌘V.' }),
-          () => propsRef.current.onNotice({ tone: 'error', text: 'That command has several lines and could not be pasted safely.' }),
-        );
-      } else {
-        view.paste(clean);
-      }
-      view.focus();
-    },
-  }), [deps, jumpTo]);
+    paste: pasteText,
+  }), [jumpTo, pasteText]);
 
   const blockViews = useMemo(() => blocks.map(terminalBlockView), [blocks]);
   const loadOutput = useCallback(async (block: BlockView) =>
@@ -510,6 +520,7 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
 
   return (
     <div
+      ref={leafRef}
       className={styles.leaf}
       data-focused={focused || undefined}
       data-testid={`terminal-leaf-${tab.id}`}
@@ -552,6 +563,13 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
 
       <div className={styles.viewport} hidden={mode !== 'terminal'}>
         <div className={styles.host} ref={hostRef} data-testid={`terminal-host-${tab.id}`} />
+        {ready && !exited ? (
+          <span className={styles.voiceSlot}>
+            <Suspense fallback={null}>
+              <VoiceInput surface="terminal" mode="verbatim" targetRef={leafRef} onInsert={insertDictated} />
+            </Suspense>
+          </span>
+        ) : null}
         {!ready && !failed ? <div className={styles.viewLoading} aria-hidden="true"><SkeletonLine width="30%" /></div> : null}
         {failed ? (
           <div className={styles.viewLoading} role="alert">

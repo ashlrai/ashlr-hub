@@ -362,6 +362,19 @@
   padding: var(--space-2) var(--space-1) var(--space-1) var(--space-3);
 }
 .viewport[hidden] { display: none; }
+/* The dictation mic (voice/VoiceInput): top-right of the shell, quiet until
+   the pane is hovered or focused, always visible while it is live. */
+.voiceSlot {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-3);
+  z-index: 3;
+  opacity: 0.35;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+.leaf:hover .voiceSlot,
+.leaf:focus-within .voiceSlot,
+.voiceSlot:has([aria-pressed='true']) { opacity: 1; }
 
 .host {
   width: 100%;

@@ -10,9 +10,10 @@
  * Also the inline answer box under a Leader question (`variant="answer"`):
  * the same keys, one line to start.
  */
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, type KeyboardEvent } from 'react';
+import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useRef, type KeyboardEvent } from 'react';
 import { IconSend, IconX } from '../../../components/primitives/icons.js';
 import { LEADER_MESSAGE_MAX } from './thread-model.js';
+import { insertDictation } from '../voice/insert-text.js';
 import styles from './leader.module.css';
 
 export interface LeaderComposerHandle {
@@ -36,6 +37,9 @@ export interface LeaderComposerProps {
   maxLines?: number;
 }
 
+// Dictation (voice/): lazy — none of it loads until a Leader box is on screen.
+const VoiceInput = lazy(() => import('../voice/VoiceInput.js'));
+
 /** Grow the box to its content, up to `maxLines`. */
 function fit(el: HTMLTextAreaElement, maxLines: number): void {
   el.style.height = 'auto';
@@ -56,6 +60,19 @@ export const LeaderComposer = forwardRef<LeaderComposerHandle, LeaderComposerPro
   useEffect(() => {
     if (boxRef.current) fit(boxRef.current, maxLines);
   }, [value, maxLines]);
+
+  // A FINAL dictated transcript lands at the caret (or the end).
+  const valueRef = useRef(value);
+  valueRef.current = value;
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  const insertDictated = useCallback((chunk: string) => {
+    const node = boxRef.current;
+    const focused = node !== null && document.activeElement === node;
+    const next = insertDictation(valueRef.current, chunk, focused ? node.selectionStart : null, focused ? node.selectionEnd : null);
+    onChangeRef.current(next.value);
+    requestAnimationFrame(() => boxRef.current?.setSelectionRange(next.caret, next.caret));
+  }, []);
 
   const trimmed = value.trim();
   const over = value.length > LEADER_MESSAGE_MAX;
@@ -102,6 +119,9 @@ export const LeaderComposer = forwardRef<LeaderComposerHandle, LeaderComposerPro
           onKeyDown={onKeyDown}
           aria-invalid={over || undefined}
         />
+        <Suspense fallback={null}>
+          <VoiceInput surface="leader" targetRef={boxRef} disabled={disabledReason !== null} onInsert={insertDictated} />
+        </Suspense>
         <button type="button" className={styles.send} aria-label={variant === 'answer' ? 'Send answer' : 'Send to the Leader'} disabled={!canSend} onClick={send}>
           <IconSend />
         </button>
