@@ -194,6 +194,42 @@
 
 .streamState { flex-shrink: 0; font-size: var(--text-2xs-size, 11px); color: var(--text-tertiary); }
 
+/* What the chat has cost so far, in tokens: quiet, tabular, one tab stop (its tooltip is the breakdown). */
+.usageReadout {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: baseline;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: default;
+}
+.usageReadout:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.usageUnit { color: var(--text-tertiary); }
+
+/* Focus mode's one control: where the pane toggles were, so the way back is where you look. */
+.focusExit {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.focusExit:hover { background: var(--bg-hover); color: var(--text-primary); }
+.focusExit:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+
 /* ---- action cluster ----------------------------------------------------- */
 /*
  * flex-shrink: 0 is the whole contract of this strip's truncation behaviour:
@@ -549,6 +585,22 @@
 .emptyButton:hover { border-color: var(--accent-500); }
 .emptyButton:active { background: var(--bg-active); }
 .emptyButton kbd { font-family: var(--font-mono); font-size: var(--text-2xs-size, 11px); color: var(--text-tertiary); }
+/* What sits beside every chat: a quiet row of names and keys, wrapping as needed. */
+.emptyKeys {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2) var(--space-4);
+  max-width: 44ch;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+.emptyKeys li { display: inline-flex; align-items: baseline; gap: var(--space-1); white-space: nowrap; }
+.emptyKeys kbd { font-family: var(--font-mono); font-size: var(--text-2xs-size); color: var(--text-secondary); }
 .emptyWarn {
   padding-left: var(--space-3);
   border-left: 2px solid var(--status-warning-solid);

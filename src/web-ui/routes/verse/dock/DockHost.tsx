@@ -1,24 +1,32 @@
 /**
- * routes/verse/dock/DockHost.tsx — the dock with the chat's own panes wired
- * in (unit C2). The Chat section loads THIS lazily the first time the dock
- * opens: the dock starts closed, so none of it — the container, the Tasks
- * and Context panes, the memory editor behind Context — belongs on the
- * chat's first-paint path (SPEC-310C budget: chat critical JS ≤ 350 KB).
+ * routes/verse/dock/DockHost.tsx — the dock with the open chat wired in
+ * (unit C2; 3.16 workbench). The Chat section loads THIS lazily the first
+ * time the dock opens: the dock starts closed, so none of it — the
+ * container, the pane registry and every pane — belongs on the chat's
+ * first-paint path (SPEC-310C budget: chat critical JS ≤ 350 KB).
+ *
+ * It turns the chat's data and actions into what every registered pane
+ * receives (PaneProps: the chat, its folders and events, the host actions),
+ * and provides the extra data the first-party Tasks and Context panes read.
  */
 import { useMemo } from 'react';
 import type { VerseEvent, VerseSeat, VerseSession, VerseSessionRootsResponse } from '../../../data/api-types.js';
 import type { DockPresentation } from '../shell/dock-catalog.js';
 import type { TurnFileChange } from '../shell/slots.js';
-import { currentTurnTasks, type ChatTask } from '../chat/tasks-model.js';
-import { useVerseTranscript } from '../useVerseTranscript.js';
-import { ContextPane } from './ContextPane.js';
-import { Dock } from './Dock.js';
-import { TasksPane } from './TasksPane.js';
+import type { ChatTask } from '../chat/tasks-model.js';
+import { ChatPaneDataContext, type ChatPaneData } from '../panes/chat-pane-data.js';
+import type { PaneHost } from '../panes/index.js';
+import { Dock, type DockPaneContext } from './Dock.js';
+import { closeDockTab, openDockPane, requestDiff, requestTerminal, requestTerminalBelow } from './dock-store.js';
 
 export interface DockHostProps {
   presentation: DockPresentation;
   windowWidth: number;
   columnWidth: number;
+  /** The widest the column may be dragged (the transcript keeps its floor). */
+  columnMax?: number;
+  /** The chat column's height (the bottom panel's caps). */
+  columnHeight?: number;
   session: VerseSession | null;
   seats: readonly VerseSeat[];
   events: readonly VerseEvent[];
@@ -36,26 +44,37 @@ export interface DockHostProps {
 }
 
 export function DockHost(props: DockHostProps) {
-  const { session, seats, events, rootsData, rootsError, otherRunning, dispatchEnabled, onOpenSession, onHandoff, onOpenAccounts } = props;
-  const handoffReason = !dispatchEnabled
-    ? 'Sending is disabled on this server.'
-    : session?.status === 'running' ? 'Available when the current turn finishes.' : null;
-  return (
-    <Dock presentation={props.presentation} windowWidth={props.windowWidth} columnWidth={props.columnWidth}
-      sessionId={session?.id ?? null} roots={props.roots} turnFiles={props.turnFiles}
-      onSendToChat={props.onSendToChat} onAddToMessage={props.onAddToMessage}
-      renderTasks={() => <LiveTasksPane sessionId={session?.id ?? null} otherChats={otherRunning} onOpenSession={onOpenSession} />}
-      renderContext={(visible) => (
-        <ContextPane session={session} seats={seats} events={events} roots={rootsData} rootsError={rootsError} visible={visible}
-          onHandoff={session ? () => onHandoff(session.id) : undefined} handoffDisabledReason={handoffReason}
-          onOpenAccounts={onOpenAccounts} />
-      )} />
-  );
-}
+  const { session, seats, events, roots, rootsData, rootsError, turnFiles, otherRunning, dispatchEnabled,
+    onOpenSession, onHandoff, onOpenAccounts, onSendToChat, onAddToMessage } = props;
 
-/** The Tasks pane, subscribed to the open chat's transcript on its own (a streamed token re-renders this, not the section). */
-function LiveTasksPane({ sessionId, otherChats, onOpenSession }: { sessionId: string | null; otherChats: readonly ChatTask[]; onOpenSession: (id: string) => void }) {
-  const transcript = useVerseTranscript(sessionId);
-  const turnTasks = useMemo(() => currentTurnTasks(transcript.items), [transcript.items]);
-  return <TasksPane turnTasks={turnTasks} otherChats={otherChats} hasSession={sessionId !== null} onOpenSession={onOpenSession} />;
+  const host = useMemo<PaneHost>(() => ({
+    sendToChat: onSendToChat,
+    addToMessage: onAddToMessage,
+    openPane: openDockPane,
+    closePane: closeDockTab,
+    openTerminal: requestTerminal,
+    openTerminalBelow: requestTerminalBelow,
+    openDiff: requestDiff,
+    openSession: onOpenSession,
+  }), [onSendToChat, onAddToMessage, onOpenSession]);
+
+  const pane = useMemo<DockPaneContext>(() => ({
+    sessionId: session?.id ?? null,
+    session,
+    roots,
+    events,
+    turnFiles,
+    host,
+  }), [session, roots, events, turnFiles, host]);
+
+  const data = useMemo<ChatPaneData>(() => ({
+    seats, rootsData, rootsError, otherRunning, dispatchEnabled, onHandoff, onOpenAccounts,
+  }), [seats, rootsData, rootsError, otherRunning, dispatchEnabled, onHandoff, onOpenAccounts]);
+
+  return (
+    <ChatPaneDataContext.Provider value={data}>
+      <Dock presentation={props.presentation} windowWidth={props.windowWidth} columnWidth={props.columnWidth}
+        columnMax={props.columnMax} columnHeight={props.columnHeight} pane={pane} />
+    </ChatPaneDataContext.Provider>
+  );
 }

@@ -25,8 +25,11 @@ import { useSyncExternalStore } from 'react';
 import {
   DOCK_LAYOUT,
   VERSE_UI_STORAGE_KEY,
+  normalizePaneId,
   sanitizeDockState,
+  type DockLayout,
   type DockPaneId,
+  type DockPlacement,
   type DockState,
 } from '../shell/dock-catalog.js';
 import type { DiffPaneRequest, PreviewOpenRequest, TerminalOpenRequest } from '../shell/slots.js';
@@ -105,6 +108,8 @@ export function hydrateDockState(raw: unknown): void {
 export function resetDockStore(): void {
   snapshot = null;
   nonce = 0;
+  activeChat = undefined;
+  pendingPane = null;
   for (const listener of [...listeners]) listener();
 }
 
@@ -112,8 +117,10 @@ export function resetDockStore(): void {
 // Transitions (pure over DockState, exported for tests)
 // ---------------------------------------------------------------------------
 
-/** Open `pane` (adding its tab) and make it the visible one. */
-export function withPaneOpen(state: DockState, pane: DockPaneId): DockState {
+/** Open `pane` (adding its tab) and make it the visible one. A legacy id opens the pane it became. */
+export function withPaneOpen(state: DockState, requested: DockPaneId): DockState {
+  const pane = normalizePaneId(requested);
+  if (pane === null) return state;
   const tabs = state.tabs.includes(pane) ? state.tabs : [...state.tabs, pane];
   // Opening the pane that is the split's lower half swaps it to the top.
   const splitWith = state.splitWith === pane ? (state.active !== pane ? state.active : null) : state.splitWith;
@@ -121,7 +128,9 @@ export function withPaneOpen(state: DockState, pane: DockPaneId): DockState {
 }
 
 /** The pane's toggle: open & focus it, or — when it is already the visible pane — close the dock. */
-export function withPaneToggled(state: DockState, pane: DockPaneId): DockState {
+export function withPaneToggled(state: DockState, requested: DockPaneId): DockState {
+  const pane = normalizePaneId(requested);
+  if (pane === null) return state;
   if (state.open && (state.active === pane || state.splitWith === pane)) return { ...state, open: false };
   return withPaneOpen(state, pane);
 }
@@ -161,6 +170,41 @@ export function withSplitRatio(state: DockState, ratio: number): DockState {
   if (!Number.isFinite(ratio)) return state;
   const { min, max } = DOCK_LAYOUT.splitRatio;
   return { ...state, splitRatio: Math.min(max, Math.max(min, ratio)) };
+}
+
+export function withHeight(state: DockState, height: number): DockState {
+  if (!Number.isFinite(height)) return state;
+  return { ...state, height: Math.max(DOCK_LAYOUT.minHeight, Math.round(height)) };
+}
+
+export function withPlacement(state: DockState, placement: DockPlacement): DockState {
+  return state.placement === placement ? state : { ...state, placement };
+}
+
+const layoutOf = (state: DockLayout): DockLayout => ({ open: state.open, tabs: state.tabs, active: state.active, splitWith: state.splitWith });
+
+/**
+ * Leaving chat `from` for chat `to`: `from`'s layout is remembered (as the
+ * most recent), and `to`'s comes back — or, for a chat never opened with a
+ * panel, the current layout carries over (a new chat starts the way you
+ * were working). The open chat's layout always lives in the top-level
+ * fields; `byChat` holds the others, capped at DOCK_LAYOUT.chatMemoryLimit.
+ */
+export function withChatSwitch(state: DockState, from: string | null, to: string | null): DockState {
+  if (from === to) return state;
+  const byChat: Record<string, DockLayout> = { ...state.byChat };
+  if (from !== null) {
+    delete byChat[from];
+    byChat[from] = layoutOf(state);
+  }
+  let next = layoutOf(state);
+  if (to !== null && byChat[to]) {
+    next = byChat[to]!;
+    delete byChat[to];
+  }
+  const ids = Object.keys(byChat);
+  for (const id of ids.slice(0, Math.max(0, ids.length - DOCK_LAYOUT.chatMemoryLimit))) delete byChat[id];
+  return { ...state, ...next, byChat };
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +248,63 @@ export function setDockSplitRatio(ratio: number): void {
   setState(withSplitRatio(current().state, ratio));
 }
 
+export function setDockHeight(height: number): void {
+  setState(withHeight(current().state, height));
+}
+
+export function setDockPlacement(placement: DockPlacement): void {
+  setState(withPlacement(current().state, placement));
+}
+
+/** Beside the chat ⇄ under it. */
+export function toggleDockPlacement(): void {
+  const state = current().state;
+  setState(withPlacement(state, state.placement === 'right' ? 'bottom' : 'right'));
+}
+
+/**
+ * The chat whose layout the panel shows. undefined = not told yet: the FIRST
+ * call (the chat surface mounting on the chat that was open at reload)
+ * adopts the persisted layout as that chat's instead of swapping.
+ */
+let activeChat: string | null | undefined;
+
+/**
+ * A pane to open once chat `sessionId` is the open one (a deep link, a
+ * notification): opening it BEFORE the switch would file it under the chat
+ * being left, since the switch swaps layouts.
+ */
+let pendingPane: { sessionId: string; paneId: DockPaneId } | null = null;
+
+/** The chat surface calls this whenever the open chat changes (and once on mount). */
+export function activateDockChat(sessionId: string | null): void {
+  if (activeChat !== undefined && activeChat !== sessionId) {
+    const from = activeChat;
+    activeChat = sessionId;
+    setState(withChatSwitch(current().state, from, sessionId));
+  } else {
+    activeChat = sessionId;
+  }
+  if (pendingPane && pendingPane.sessionId === sessionId) {
+    const { paneId } = pendingPane;
+    pendingPane = null;
+    openDockPane(paneId);
+  }
+}
+
+/**
+ * Open `paneId` in chat `sessionId` — now, when that chat is already open
+ * (or none is named), else as soon as the chat surface switches to it.
+ */
+export function openPaneInChat(paneId: DockPaneId, sessionId: string | null = null): void {
+  if (sessionId === null || sessionId === activeChat) {
+    pendingPane = null;
+    openDockPane(paneId);
+    return;
+  }
+  pendingPane = { sessionId, paneId };
+}
+
 /** Open the Terminal pane with a request (a tab at a root, a pasted command, an app launch). */
 export function requestTerminal(request: Omit<TerminalRequest, 'nonce'>): void {
   nonce += 1;
@@ -233,7 +334,7 @@ export function requestTerminalBelow(request: Omit<TerminalRequest, 'nonce'>): v
 export function requestPreview(request: Omit<PreviewOpenRequest, 'nonce'>): void {
   nonce += 1;
   const snap = current();
-  emit({ state: withPaneOpen(snap.state, 'preview'), requests: { ...snap.requests, preview: { ...request, nonce } } });
+  emit({ state: withPaneOpen(snap.state, 'browser'), requests: { ...snap.requests, preview: { ...request, nonce } } });
 }
 
 export function requestDiff(request: DiffPaneRequest): void {
@@ -256,4 +357,14 @@ export function clearDockRequests(): void {
 
 export function useDock(): DockSnapshot {
   return useSyncExternalStore(subscribeDockState, getDockSnapshot, getDockSnapshot);
+}
+
+/**
+ * One primitive derived from the dock's state, re-rendering only when THAT
+ * value changes — so the chat surface does not re-render while the split
+ * boundary is dragged, or when a request is raised.
+ */
+export function useDockValue<T extends string | number | boolean | null>(select: (state: DockState) => T): T {
+  const read = () => select(current().state);
+  return useSyncExternalStore(subscribeDockState, read, read);
 }

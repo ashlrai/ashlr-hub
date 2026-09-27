@@ -267,14 +267,21 @@ function onRowsKeyDown(event: KeyboardEvent<HTMLDivElement>) {
   next?.focus();
 }
 
-/** The row's status in words, for its tooltip (the glyph's accessible name, said to everyone). */
-function rowStatusWords(status: SidebarRow['status']): string | null {
+/**
+ * The row's status in words, for its tooltip (the glyph's accessible name,
+ * said to everyone). Waiting on YOU — an approval or a question from the
+ * Needs-you list — outranks news and age: it is the one state where the
+ * chat cannot move until you do.
+ */
+function rowStatusWords(row: Pick<SidebarRow, 'status' | 'needsYou'>): string | null {
+  const { status } = row;
   switch (status.kind) {
     case 'running': return 'Running';
     case 'failed': return 'Last turn failed';
-    case 'unread': return `${status.newTurns} new turn${status.newTurns === 1 ? '' : 's'}`;
-    default: return null;
+    default: break;
   }
+  if (row.needsYou) return 'Waiting for you';
+  return status.kind === 'unread' ? `${status.newTurns} new turn${status.newTurns === 1 ? '' : 's'}` : null;
 }
 
 function rowMenuItems(row: SidebarRow, actions: SidebarRowActions, metaAvailable: boolean, metaError: string | null,
@@ -455,7 +462,7 @@ function SessionRowView({ row, seats, selected, onSelect, onMenu }: {
     session.title || 'Untitled chat',
     seatPillLabel(seats, session),
     capacity === null || capacity.cls === 'ready' || capacity.cls === 'unread' ? null : capacity.summary,
-    rowStatusWords(status),
+    rowStatusWords(row),
   ].filter((part) => part !== null).join(' · ');
   const rowRef = useRef<HTMLButtonElement>(null);
 
@@ -511,7 +518,11 @@ function SessionRowView({ row, seats, selected, onSelect, onMenu }: {
 function RowStatus({ row }: { row: SidebarRow }) {
   const { status, session } = row;
   // One wording for the glyph's name and the row's tooltip (rowStatusWords).
-  const words = rowStatusWords(status) ?? undefined;
+  const words = rowStatusWords(row) ?? undefined;
+  if (row.needsYou && status.kind !== 'running' && status.kind !== 'failed') {
+    // A ring, not a dot: waiting on you reads differently from "new turns" without colour.
+    return <span className={styles.waiting} role="img" aria-label={words} data-status="waiting" />;
+  }
   switch (status.kind) {
     case 'running':
       return (

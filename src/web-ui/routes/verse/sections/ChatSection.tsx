@@ -47,9 +47,10 @@ import { noteSessionSeen, useChatActivity } from '../chat/use-chat-activity.js';
 import { useSessionRoots } from '../chat/use-session-roots.js';
 import { ChatResizer, useChatPanelSizing } from '../ChatResizer.js';
 import { CHAT_PANEL_RANGES, MIN_TRANSCRIPT_WIDTH, setChatPanelFit } from '../chat-panel-sizing.js';
-import { clearDockRequests, requestTerminal, toggleDock, toggleDockPane, useDock } from '../dock/dock-store.js';
+import { activateDockChat, clearDockRequests, getDockState, requestTerminal, toggleDock, toggleDockPane, toggleDockPlacement, useDockValue } from '../dock/dock-store.js';
 import type { SeatChoice } from '../SeatSelector.js';
-import { clampDockWidth, DOCK_LAYOUT, dockPresentation } from '../shell/dock-catalog.js';
+import { clampDockHeight, clampDockWidth, DOCK_LAYOUT, dockPresentation } from '../shell/dock-catalog.js';
+import { isFocusMode, setFocusMode, toggleFocusMode, useFocusMode } from '../shell/focus-mode.js';
 import { useCommandHandler } from '../shell/command-bus.js';
 import { matchKey } from '../shell/command-keys.js';
 import { preloadedLazy, preloadedModule } from '../shell/preloaded.js';
@@ -119,6 +120,12 @@ const DERIVATIONS = preloadedModule(() => Promise.all([import('../chat/tasks-mod
   .then(([tasks, files]) => ({ otherRunningChats: tasks.otherRunningChats, lastTurnFiles: files.lastTurnFiles })));
 /** Seat lookups for ⌘N "New chat on…" — the only first-paint-path use of verse-model (5.6 KB). */
 const SEAT_MODEL = preloadedModule(() => import('../verse-model.js').then((m) => ({ firstRunnableModel: m.firstRunnableModel, seatById: m.seatById })));
+/**
+ * The pane registry, for panes that bring their OWN shortcut (a unit's
+ * `registerPane({ shortcut })`): loaded just after first paint, never on it.
+ * Until it is in, such a key does nothing — a few milliseconds after paint.
+ */
+const PANES = preloadedModule(() => import('../panes/index.js').then((m) => ({ matchPaneShortcut: m.matchPaneShortcut, preloadPaneIds: m.preloadPaneIds })));
 const NO_TASKS: readonly ChatTask[] = [];
 const NO_TURN_FILES: TurnFileChange[] = [];
 
@@ -216,6 +223,13 @@ function focusComposer(): void {
   });
 }
 
+/** Is the key event aimed at something that takes typing (a field, the composer, a terminal)? Esc is theirs there. */
+function inTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  if (target.closest('input, textarea, select, [contenteditable="true"], [data-dock-pane="terminal"]')) return true;
+  return false;
+}
+
 /** Is the key event aimed at an overlay that owns its own keys (a dialog, a menu, the palette)? */
 function inOverlay(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest('[role="dialog"], [role="menu"], [role="listbox"], [aria-modal="true"]') !== null;
@@ -230,9 +244,16 @@ export function ChatSection() {
   const toast = useToast();
   const ui = useVerseUi();
   const visible = useSectionVisible();
-  const dock = useDock();
+  // The dock fields the layout needs, each subscribed on its own: dragging the
+  // split boundary, or a pane request, does not re-render the chat surface.
+  const dockOpenState = useDockValue((s) => s.open && s.tabs.length > 0);
+  const dockPlacement = useDockValue((s) => s.placement);
+  const dockStoredWidth = useDockValue((s) => s.width);
+  const dockStoredHeight = useDockValue((s) => s.height);
+  const terminalShown = useDockValue((s) => s.open && (s.active === 'terminal' || s.splitWith === 'terminal'));
   const chatActivity = useChatActivity();
   const windowWidth = useWindowWidth();
+  const focus = useFocusMode();
 
   const [selectedId, setSelectedIdState] = useState<string | null>(loadSelected);
   const [query, setQuery] = useState('');
@@ -244,6 +265,7 @@ export function ChatSection() {
   const [handoffFor, setHandoffFor] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<VerseSession | null>(null);
   const [chatWidth, setChatWidth] = useState(0);
+  const [chatHeight, setChatHeight] = useState(0);
   const pendingAction = useRef<{ run: () => void; cancel: () => void } | null>(null);
   const chatRef = useRef<HTMLDivElement>(null);
   const panels = useChatPanelSizing();
@@ -295,6 +317,8 @@ export function ChatSection() {
   const requestsFor = useRef(selectedId);
   useEffect(() => {
     setVerseActiveSession(selectedId);
+    // Each chat keeps its own panel layout (which panes, which on top, split).
+    activateDockChat(selectedId);
     if (requestsFor.current !== selectedId) {
       requestsFor.current = selectedId;
       clearDockRequests();
@@ -469,7 +493,6 @@ export function ChatSection() {
   // ⌃` : a terminal, focused — the active tab, else one at the chat's root
   // (TerminalPane resolves an empty request that way). Pressed again while
   // Terminal is on screen it hides it, like every editor's ⌃`.
-  const terminalShown = dock.state.open && (dock.state.active === 'terminal' || dock.state.splitWith === 'terminal');
   const openTerminal = useCallback(() => {
     if (terminalShown) toggleDockPane('terminal');
     else requestTerminal({});
@@ -524,8 +547,13 @@ export function ChatSection() {
     ['dock.toggle', toggleDock],
     ['dock.terminal', openTerminal],
     ['dock.terminal-new', newTerminalTab],
-    ['dock.preview', () => toggleDockPane('preview')],
+    ['dock.preview', () => toggleDockPane('browser')],
     ['dock.diff', () => toggleDockPane('diff')],
+    ['dock.files', () => toggleDockPane('files')],
+    ['dock.sources', () => toggleDockPane('sources')],
+    ['dock.reasoning', () => toggleDockPane('reasoning')],
+    ['dock.placement', toggleDockPlacement],
+    ['chat.focus-mode', toggleFocusMode],
   ];
   const handlerMap = new Map(handlers);
   useCommandHandler('chat.sidebar', handlerMap.get('chat.sidebar')!);
@@ -537,6 +565,11 @@ export function ChatSection() {
   useCommandHandler('dock.terminal-new', handlerMap.get('dock.terminal-new')!);
   useCommandHandler('dock.preview', handlerMap.get('dock.preview')!);
   useCommandHandler('dock.diff', handlerMap.get('dock.diff')!);
+  useCommandHandler('dock.files', handlerMap.get('dock.files')!);
+  useCommandHandler('dock.sources', handlerMap.get('dock.sources')!);
+  useCommandHandler('dock.reasoning', handlerMap.get('dock.reasoning')!);
+  useCommandHandler('dock.placement', handlerMap.get('dock.placement')!);
+  useCommandHandler('chat.focus-mode', handlerMap.get('chat.focus-mode')!);
 
   // Keys, as a fallback: the shell's handler routes catalog keys through the
   // bus and marks the event handled (preventDefault); this listener acts only
@@ -545,12 +578,36 @@ export function ChatSection() {
   // are the transcript's own listeners, which follow the same rule.
   const handlerRef = useRef(handlerMap);
   handlerRef.current = handlerMap;
+  const panes = PANES.useLoaded();
+  const panesRef = useRef(panes);
+  panesRef.current = panes;
+  // Once the registry is in, warm the code of the panes this chat is likely to
+  // show — its open tabs, and Tasks (what an empty panel opens on) — so the
+  // first ⌘\ or tab click draws the pane, not its skeleton. The rest stay lazy.
+  useEffect(() => {
+    if (panes) panes.preloadPaneIds([...getDockState().tabs, 'tasks']);
+  }, [panes]);
   useEffect(() => {
     if (!visible) return undefined;
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || inOverlay(event.target)) return;
+      // Esc leaves focus mode — except where Esc already means something (the composer's Stop, a field, a terminal).
+      if (event.key === 'Escape' && isFocusMode() && !inTypingTarget(event.target)) {
+        event.preventDefault();
+        setFocusMode(false);
+        return;
+      }
       const command = matchKey(event, ['chat']);
-      if (!command || command.scope !== 'chat') return;
+      if (!command) {
+        // A registered pane's own key (the registry refused any that collide with the catalog).
+        const pane = panesRef.current?.matchPaneShortcut(event);
+        if (pane) {
+          event.preventDefault();
+          toggleDockPane(pane.id);
+        }
+        return;
+      }
+      if (command.scope !== 'chat') return;
       if (command.id === 'chat.find' || command.id === 'chat.turn-prev' || command.id === 'chat.turn-next') return;
       const run = handlerRef.current.get(command.id);
       if (!run) return;
@@ -564,19 +621,25 @@ export function ChatSection() {
   const dispatchOff = bootstrap.data ? !bootstrap.data.dispatchEnabled : false;
   const sidebarCollapsed = ui.sidebarCollapsed;
 
+  // Focus mode belongs to the chat surface: leaving it (⌘1…) leaves focus too,
+  // so no other surface ever opens without its rail.
+  useEffect(() => {
+    if (!visible && focus) setFocusMode(false);
+  }, [visible, focus]);
+
   // ---- layout -------------------------------------------------------------------
-  const presentation = dockPresentation(windowWidth);
-  const dockOpen = dock.state.open && dock.state.tabs.length > 0;
-  const dockColumn = dockOpen && presentation === 'column';
+  const presentation = dockPresentation(windowWidth, dockPlacement);
+  const dockOpen = dockOpenState;
+  const dockColumn = dockOpen && presentation === 'column' && !focus;
+  const dockBottom = dockOpen && presentation === 'bottom' && !focus;
+  const dockHeight = dockBottom ? clampDockHeight(dockStoredHeight, chatHeight) : 0;
   // The dock yields before the transcript does: never past the window's 60%,
   // and never so wide that the transcript (plus the chat list, when shown at
   // its minimum) drops under its floor. The floor for the dock is its 320px.
   const sidebarFloor = sidebarCollapsed ? 0 : CHAT_PANEL_RANGES.sidebar.min;
+  const dockColumnMax = chatWidth > 0 ? chatWidth - MIN_TRANSCRIPT_WIDTH - sidebarFloor : Number.POSITIVE_INFINITY;
   const dockWidth = dockColumn
-    ? Math.max(DOCK_LAYOUT.minWidth, Math.min(
-      clampDockWidth(dock.state.width, windowWidth),
-      chatWidth > 0 ? chatWidth - MIN_TRANSCRIPT_WIDTH - sidebarFloor : Number.POSITIVE_INFINITY,
-    ))
+    ? Math.max(DOCK_LAYOUT.minWidth, Math.min(clampDockWidth(dockStoredWidth, windowWidth), dockColumnMax))
     : 0;
 
   useEffect(() => {
@@ -584,6 +647,7 @@ export function ChatSection() {
     if (!node) return undefined;
     const measure = () => {
       setChatWidth(node.clientWidth);
+      setChatHeight(node.clientHeight);
       setChatPanelFit({
         // The dock's column is not the sidebar's to spend.
         containerWidth: Math.max(0, node.clientWidth - dockWidth),
@@ -604,9 +668,20 @@ export function ChatSection() {
   const style = {
     '--verse-sidebar-width': `${panels.effective.sidebar}px`,
     '--verse-dock-width': `${dockWidth}px`,
+    '--verse-dock-height': `${dockHeight}px`,
   } as CSSProperties;
 
   // ---- dock data ------------------------------------------------------------------
+  // Stable across renders: every pane gets these through one memoized `host`,
+  // so a chat-surface render does not re-render every mounted pane.
+  const sendToChat = useCallback((text: string) => {
+    if (!selectedId || !insertIntoComposer(selectedId, text)) toast.show('Open a chat to send this to it.', 'neutral');
+  }, [selectedId, toast]);
+  const addToMessage = useCallback((text: string) => {
+    if (!selectedId || !insertIntoComposer(selectedId, text)) toast.show('Open a chat to add this to its message.', 'neutral');
+  }, [selectedId, toast]);
+  // Accounts & capacity live in Apps & Accounts (C6) since 3.10.
+  const openAccounts = useCallback(() => setVerseSection('apps'), []);
   const derive = DERIVATIONS.useLoaded();
   const otherRunning = useMemo(
     () => (derive ? derive.otherRunningChats(sessions, chatActivity.activity, selectedId) : NO_TASKS),
@@ -628,7 +703,8 @@ export function ChatSection() {
 
   return (
     <div ref={chatRef} className={styles.chat} style={style}
-      data-sidebar={sidebarCollapsed ? 'collapsed' : 'open'} data-dock={dockColumn ? 'open' : 'closed'}>
+      data-sidebar={sidebarCollapsed || focus ? 'collapsed' : 'open'} data-dock={dockColumn ? 'open' : dockBottom ? 'bottom' : 'closed'}
+      data-focus={focus ? 'on' : undefined}>
       <Suspense fallback={<SidebarSkeleton />}>
       <Sidebar sessions={sessions} sessionsStatus={sessionsQuery.status} sessionsError={sessionsQuery.error?.message ?? null}
         projects={projects} seats={seats} selectedId={selectedId} query={query} onQuery={setQuery}
@@ -667,14 +743,12 @@ export function ChatSection() {
       </div>
       {dockOpen ? (
         <Suspense fallback={null}>
-          <DockHost presentation={presentation} windowWidth={windowWidth} columnWidth={dockWidth} session={view.session} seats={seats}
+          <DockHost presentation={presentation} windowWidth={windowWidth} columnWidth={dockWidth} columnMax={dockColumnMax} columnHeight={chatHeight} session={view.session} seats={seats}
             events={view.events} roots={roots.roots} rootsData={roots.data} rootsError={roots.error} turnFiles={turnFiles}
             otherRunning={otherRunning} dispatchEnabled={dispatchEnabled} onOpenSession={setSelectedId}
-            onHandoff={(id) => setHandoffFor(id)}
+            onHandoff={setHandoffFor}
             // Accounts & capacity live in Apps & Accounts (C6) since 3.10.
-            onOpenAccounts={() => setVerseSection('apps')}
-            onSendToChat={(text) => { if (!selectedId || !insertIntoComposer(selectedId, text)) toast.show('Open a chat to send this to it.', 'neutral'); }}
-            onAddToMessage={(text) => { if (!selectedId || !insertIntoComposer(selectedId, text)) toast.show('Open a chat to add this to its message.', 'neutral'); }} />
+            onOpenAccounts={openAccounts} onSendToChat={sendToChat} onAddToMessage={addToMessage} />
         </Suspense>
       ) : null}
 

@@ -74,13 +74,14 @@ import {
   expansiveCostCopy,
   standardSwitchCompacts,
 } from './ContextMeter.js';
-import { CopyGlyph, HandoffGlyph, MoreGlyph, RenameGlyph, TrashGlyph, DOCK_PANE_GLYPH } from './dock/dock-icons.js';
-import { openDockPane, requestDiff, toggleDock, toggleDockPane, useDock } from './dock/dock-store.js';
-import { DOCK_PANE_LABEL, isPaneAvailable } from './dock/dock-panes.js';
+import { CopyGlyph, FocusGlyph, HandoffGlyph, MoreGlyph, PanelBottomGlyph, RenameGlyph, TrashGlyph } from './dock/dock-icons.js';
+import { getDockState, openDockPane, requestDiff, toggleDock, toggleDockPane, useDock, useDockValue } from './dock/dock-store.js';
+import { paneApplies, paneChordLabel, usePanes } from './panes/index.js';
+import { setFocusMode, useFocusMode } from './shell/focus-mode.js';
+import { deepLinkUrl } from './shell/deep-link.js';
 import { saveDraft } from './chat/composer-state.js';
 import type { SeatChoice } from './SeatSelector.js';
 import { BranchBarSlot, SessionInsightChipSlot } from './shell/slots.js';
-import type { DockPaneId } from './shell/dock-catalog.js';
 import { findCommand, formatChord } from './shell/command-catalog.js';
 import { Transcript } from './Transcript.js';
 import { PanelIcon, SidebarIcon, VerseMark } from './verse-icons.js';
@@ -102,6 +103,7 @@ import { ProviderLogo } from '../../components/primitives/ProviderLogo.js';
 
 // Opened on request only: kept out of the chat's first-paint chunk.
 const HandoffDialog = lazy(() => import('./context/HandoffDialog.js').then((m) => ({ default: m.HandoffDialog })));
+const NO_ROOTS: readonly string[] = [];
 
 export interface WorkspaceProps {
   view: VerseSessionView;
@@ -149,6 +151,8 @@ export function Workspace(props: WorkspaceProps) {
   const [handoffCreated, setHandoffCreated] = useState<{ title: string } | null>(null);
   const [menu, setMenu] = useState<{ anchor: { x: number; y: number }; from: HTMLElement } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
+
   /** Text another pane drafted in (Review "Add to message", Terminal "Send selection to chat"). */
   const [insertRequest, setInsertRequest] = useState<{ nonce: number; text: string } | null>(null);
   /** "Continue on ‹seat›": the seat the handoff should open on. */
@@ -265,7 +269,7 @@ export function Workspace(props: WorkspaceProps) {
             }
           />
           <div className={styles.headerSpacer} />
-          <div className={styles.actions}><PaneToggles sidebarCollapsed={sidebarCollapsed} onToggleSidebar={onToggleSidebar} hasSession={false} /></div>
+          <div className={styles.actions}><PaneToggles sidebarCollapsed={sidebarCollapsed} onToggleSidebar={onToggleSidebar} session={null} roots={NO_ROOTS} /></div>
         </header>
         <WorkspaceSeatHealth seats={seats} />
         <div className={styles.emptyState}>
@@ -275,6 +279,7 @@ export function Workspace(props: WorkspaceProps) {
             Open a project, choose a seat — a Claude or Codex account, Grok, or a local Ollama model — and talk to an agent that can edit that project.
           </p>
           <button type="button" className={styles.emptyButton} onClick={onNew}>New chat {newChatShortcut ? <kbd>{newChatShortcut}</kbd> : null}</button>
+          <WorkbenchKeys />
           {!dispatchEnabled ? (
             <p className={styles.emptyWarn} role="status">
               This server was started without dispatch, so chats are read-only here. Run <code>ashlr verse</code> to enable sending.
@@ -412,6 +417,20 @@ export function Workspace(props: WorkspaceProps) {
       },
     });
     menuItems.push({
+      id: 'copy-link',
+      label: linkCopied ? 'Link copied' : 'Copy link to this chat',
+      icon: <CopyGlyph size={14} />,
+      onSelect: () => {
+        // With the pane on top, so the link reopens the chat the way you were looking at it.
+        const dock = getDockState();
+        const url = deepLinkUrl({ sessionId: session.id, paneId: dock.open ? dock.active : null });
+        void navigator.clipboard?.writeText(url).then(() => {
+          setLinkCopied(true);
+          setTimeout(() => setLinkCopied(false), 1200);
+        }, () => undefined);
+      },
+    });
+    menuItems.push({
       id: 'delete',
       label: 'Delete chat…',
       icon: <TrashGlyph size={14} />,
@@ -482,6 +501,7 @@ export function Workspace(props: WorkspaceProps) {
         {/* One cluster, and it never shrinks: the lockup truncates instead. */}
         <div className={styles.actions}>
           {view.stream === 'reconnecting' ? <span className={styles.streamState} role="status">reconnecting…</span> : null}
+          {session ? <UsageReadout session={session} /> : null}
           {session && budget ? (
             <ContextMeter variant="ring" contextTokens={budget.contextTokens} contextWindow={budget.contextWindow} autoCompactAt={budget.autoCompactAt}
               exact={budget.exact} source={budget.source} mode={modesAvailable ? mode : null} engine={session.engine}
@@ -498,7 +518,7 @@ export function Workspace(props: WorkspaceProps) {
             </Tooltip>
           ) : null}
           <span className={styles.actionDivider} aria-hidden="true" />
-          <PaneToggles sidebarCollapsed={sidebarCollapsed} onToggleSidebar={onToggleSidebar} hasSession={session !== null} />
+          <PaneToggles sidebarCollapsed={sidebarCollapsed} onToggleSidebar={onToggleSidebar} session={session} roots={roots.roots} />
         </div>
       </header>
 
@@ -589,7 +609,7 @@ function LiveRow({ sessionId, running, otherRunning, onStop }: {
 }) {
   const transcript = useVerseTranscript(sessionId);
   const live = useVerseLive(sessionId);
-  const dock = useDock();
+  const tasksActive = useDockValue((s) => s.open && (s.active === 'tasks' || s.splitWith === 'tasks'));
   const segments = transcript.segments;
   const lastItems = segments && segments.length > 0 ? segments[segments.length - 1]!.items : transcript.items;
   const liveThinking = live.thinking && live.thinking.turnId === live.turnId ? live.thinking : null;
@@ -598,7 +618,6 @@ function LiveRow({ sessionId, running, otherRunning, onStop }: {
   const counts = useMemo(() => countTasks(running ? tasks : [], otherRunning), [running, tasks, otherRunning]);
   const showLive = running && transcript.live;
   if (!showLive && counts.total === 0) return null;
-  const tasksActive = dock.state.open && (dock.state.active === 'tasks' || dock.state.splitWith === 'tasks');
   return (
     <div className={styles.liveRow} data-running={showLive || undefined}>
       {showLive ? <LiveStatus live={live} derived={derived} onStop={onStop} showNotice={false} /> : <span className={styles.liveSpacer} />}
@@ -736,49 +755,97 @@ function Lockup({ eyebrow, title }: { eyebrow: ReactNode; title: ReactNode }) {
   );
 }
 
+/** What sits beside every chat, and the key for each — the empty state teaches the workbench before there is one. */
+const WORKBENCH_KEYS: ReadonlyArray<readonly [label: string, commandId: string]> = [
+  ['Terminal', 'dock.terminal'],
+  ['Browser', 'dock.preview'],
+  ['Changes', 'dock.diff'],
+  ['Reasoning', 'dock.reasoning'],
+  ['Focus', 'chat.focus-mode'],
+  ['Commands', 'palette.open'],
+];
+
+function WorkbenchKeys() {
+  const keys = WORKBENCH_KEYS.map(([label, id]) => [label, shortcutFor(id)] as const).filter(([, key]) => key !== null);
+  if (keys.length === 0) return null;
+  return (
+    <ul className={styles.emptyKeys} aria-label="Beside every chat">
+      {keys.map(([label, key]) => (
+        <li key={label}><span>{label}</span> <kbd>{key}</kbd></li>
+      ))}
+    </ul>
+  );
+}
+
 function shortcutFor(commandId: string): string | null {
   const chord = findCommand(commandId)?.keys[0];
   return chord ? formatChord(chord) : null;
 }
 
-const PANE_COMMAND: Readonly<Record<'terminal' | 'preview' | 'diff', string>> = {
-  terminal: 'dock.terminal',
-  preview: 'dock.preview',
-  diff: 'dock.diff',
-};
-
 /**
- * The pane toggles, as one group: Terminal, Preview and Review (each only
- * once its unit's pane is in this build), then the chat list and the dock.
- * All are aria-pressed buttons, so open/closed is spoken, not implied by a
- * name that changes under you. The action and its key are in the tooltip.
+ * The pane toggles, as one group: the registered panes that ask for a
+ * header toggle (Terminal, Browser, Changes — `toggle: true` in the pane
+ * registry; the rest live in the dock's "+" menu, the palette and their
+ * keys), then focus mode, the chat list and the dock. All are aria-pressed
+ * buttons, so open/closed is spoken, not implied by a name that changes
+ * under you. The action and its key are in the tooltip.
  *
  * The chat-list toggle keeps the 3.9 names — "Show chat list" collapsed,
  * "Chat list" expanded (the sidebar owns a "Hide chat list" button, and two
  * controls sharing one accessible name is an ambiguity, not a pair).
  */
-function PaneToggles({ sidebarCollapsed, onToggleSidebar, hasSession }: { sidebarCollapsed: boolean; onToggleSidebar: () => void; hasSession: boolean }) {
+function PaneToggles({ sidebarCollapsed, onToggleSidebar, session, roots }: {
+  sidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
+  session: VerseSession | null;
+  roots: readonly string[];
+}) {
   const { state } = useDock();
-  const shows = (pane: DockPaneId) => state.open && (state.active === pane || state.splitWith === pane);
-  const panes = (['terminal', 'preview', 'diff'] as const).filter((pane) => hasSession && isPaneAvailable(pane));
+  const registered = usePanes();
+  const focus = useFocusMode();
+  const shows = (pane: string) => state.open && (state.active === pane || state.splitWith === pane);
+  const context = { sessionId: session?.id ?? null, session, roots };
+  const panes = session ? registered.filter((pane) => pane.toggle && paneApplies(pane, context)) : [];
   const dockKey = shortcutFor('dock.toggle');
   const listKey = shortcutFor('chat.sidebar');
+  const focusKey = shortcutFor('chat.focus-mode');
+  const PlacementIcon = state.placement === 'bottom' ? PanelBottomGlyph : PanelIcon;
+  if (focus) {
+    // Focus mode: one way back, where the controls were.
+    return (
+      <div className={styles.toggles} role="group" aria-label="Panels">
+        <Tooltip label="Exit focus mode" shortcut={focusKey ?? undefined} placement="bottom">
+          <button type="button" className={styles.focusExit} aria-pressed onClick={() => setFocusMode(false)} aria-label="Focus mode">
+            <FocusGlyph size={14} /><span aria-hidden="true">Exit focus</span>
+          </button>
+        </Tooltip>
+      </div>
+    );
+  }
   return (
     <div className={styles.toggles} role="group" aria-label="Panels">
       {panes.map((pane) => {
-        const Icon = DOCK_PANE_GLYPH[pane];
-        const key = shortcutFor(PANE_COMMAND[pane]);
-        const on = shows(pane);
+        const Icon = pane.icon;
+        const key = paneChordLabel(pane);
+        const on = shows(pane.id);
         return (
-          <Tooltip key={pane} label={`${on ? 'Hide' : 'Show'} ${DOCK_PANE_LABEL[pane]}`} shortcut={key ?? undefined} placement="bottom">
-            <button type="button" className={`${styles.ghostIcon} ${styles.paneToggle}`} aria-pressed={on} aria-label={DOCK_PANE_LABEL[pane]}
-              onClick={() => toggleDockPane(pane)}>
+          <Tooltip key={pane.id} label={`${on ? 'Hide' : 'Show'} ${pane.title}`} shortcut={key ?? undefined} placement="bottom">
+            <button type="button" className={`${styles.ghostIcon} ${styles.paneToggle}`} aria-pressed={on} aria-label={pane.title}
+              onClick={() => toggleDockPane(pane.id)}>
               <Icon />
             </button>
           </Tooltip>
         );
       })}
       {panes.length > 0 ? <span className={`${styles.actionDivider} ${styles.paneToggle}`} aria-hidden="true" /> : null}
+      {session ? (
+        <Tooltip label="Focus mode: just the conversation" shortcut={focusKey ?? undefined} placement="bottom">
+          <button type="button" className={`${styles.ghostIcon} ${styles.paneToggle}`} aria-pressed={false} aria-label="Focus mode"
+            onClick={() => setFocusMode(true)}>
+            <FocusGlyph />
+          </button>
+        </Tooltip>
+      ) : null}
       <Tooltip label={`${sidebarCollapsed ? 'Show' : 'Hide'} chat list`} shortcut={listKey ?? undefined} placement="bottom">
         <button type="button" className={styles.ghostIcon} onClick={onToggleSidebar} aria-pressed={!sidebarCollapsed}
           aria-label={sidebarCollapsed ? 'Show chat list' : 'Chat list'}>
@@ -787,9 +854,31 @@ function PaneToggles({ sidebarCollapsed, onToggleSidebar, hasSession }: { sideba
       </Tooltip>
       <Tooltip label={`${state.open ? 'Hide' : 'Show'} the dock`} shortcut={dockKey ?? undefined} placement="bottom">
         <button type="button" className={styles.ghostIcon} onClick={toggleDock} aria-pressed={state.open} aria-label="Dock">
-          <PanelIcon />
+          <PlacementIcon />
         </button>
       </Tooltip>
     </div>
+  );
+}
+
+/**
+ * What this chat has cost so far, in the unit every seat bills: tokens.
+ * One quiet figure (input + output); the tooltip breaks it down, cache
+ * included. No dollar figure: a subscription seat has none per chat, and a
+ * guessed one would be a lie.
+ */
+function UsageReadout({ session }: { session: VerseSession }) {
+  const u = session.usage;
+  const total = (u?.inputTokens ?? 0) + (u?.outputTokens ?? 0);
+  if (!u || total <= 0) return null;
+  const detail = `This chat so far: ${formatTokens(u.inputTokens)} in · ${formatTokens(u.outputTokens)} out`
+    + `${u.cacheReadTokens > 0 ? ` · ${formatTokens(u.cacheReadTokens)} read from cache` : ''}`
+    + ` · ${session.turnCount} turn${session.turnCount === 1 ? '' : 's'}`;
+  return (
+    <Tooltip label={detail} placement="bottom">
+      <span className={styles.usageReadout} tabIndex={0} role="group" aria-label={`Tokens used: ${formatTokens(total)}`} data-testid="chat-usage">
+        {formatTokens(total)}<span className={styles.usageUnit} aria-hidden="true"> tok</span>
+      </span>
+    </Tooltip>
   );
 }

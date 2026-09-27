@@ -20,6 +20,14 @@
   flex: none;
   border-left: 1px solid var(--border-subtle);
 }
+/* Under the transcript (placement 'bottom'): a row with a hairline above,
+   no title-bar inset (the chat header already clears the traffic lights). */
+.dock[data-presentation='bottom'] {
+  flex: none;
+  height: auto;
+  border-top: 1px solid var(--border-subtle);
+}
+.dock[data-presentation='bottom'] .head { height: var(--strip-height); padding-top: 0; }
 
 /* ---- sheets --------------------------------------------------------------- */
 .sheetLayer {
@@ -215,6 +223,45 @@
 }
 .splitHandle:hover,
 .splitHandle:focus-visible { background: var(--accent-500); outline: none; }
+
+/* ---- a pane loading: its shape, not a spinner ------------------------------ */
+.loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+/* ---- height handle (bottom panel only) ------------------------------------- */
+.heightHandle {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  height: 9px;
+  cursor: row-resize;
+  touch-action: none;
+}
+.heightHandle::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 4px;
+  height: 1px;
+  background: transparent;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+.heightHandle:hover::after,
+.heightHandle:focus-visible::after,
+.heightHandle[data-dragging]::after { background: var(--accent-500); }
+.heightHandle:focus-visible { outline: none; }
+:global(body[data-verse-resizing='row']) {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: row-resize;
+}
 
 /* ---- width handle (column only) ------------------------------------------- */
 .widthHandle {

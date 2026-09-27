@@ -150,12 +150,20 @@ const KEYS = {
     'chat.find': 'mod+f',
     'chat.turn-prev': 'alt+arrowup',
     'chat.turn-next': 'alt+arrowdown',
-    // Dock
+    // Focus mode: everything but the conversation steps aside.
+    'chat.focus-mode': 'mod+shift+f',
+    // Dock (the panel area). One mnemonic chord per first-party pane; a pane
+    // registered by another unit brings its own (panes/pane-registry.ts
+    // refuses one that collides with any chord here). NOT ⇧⌘E (composer
+    // effort) and NOT ⇧⌘R (a browser's hard reload).
     'dock.toggle': 'mod+\\',
     'dock.terminal': 'ctrl+`',
     'dock.terminal-new': 'ctrl+shift+`',
     'dock.preview': 'mod+shift+b',
     'dock.diff': 'mod+shift+d',
+    'dock.files': 'mod+shift+o',
+    'dock.sources': 'mod+shift+s',
+    'dock.reasoning': 'mod+shift+y',
     // Composer menus (open from anywhere in the chat)
     'composer.permission': 'mod+shift+m',
     'composer.model': 'mod+shift+i',
@@ -274,9 +282,17 @@ export const DESKTOP_COMMANDS: Readonly<Record<DesktopCommandName, KeyedCommandI
 /** `open-session:<id>` — the notification for a finished or failed chat. */
 export const OPEN_SESSION_COMMAND_RE = /^open-session:([A-Za-z0-9._-]{1,128})$/;
 
+/**
+ * `open-pane:<paneId>` or `open-pane:<paneId>@<sessionId>` — a pane in the
+ * chat's panel area, in the open chat or in the one named (3.16 workbench;
+ * shell/deep-link.ts is the URL form of the same thing).
+ */
+export const OPEN_PANE_COMMAND_RE = /^open-pane:([a-z][a-z0-9-]{0,39})(?:@([A-Za-z0-9._-]{1,128}))?$/;
+
 export type ParsedDesktopCommand =
   | { kind: 'command'; name: DesktopCommandName; commandId: KeyedCommandId }
-  | { kind: 'open-session'; sessionId: string };
+  | { kind: 'open-session'; sessionId: string }
+  | { kind: 'open-pane'; paneId: string; sessionId: string | null };
 
 /** Parse a raw desktop command string; null for anything unknown (never guessed). */
 export function parseDesktopCommand(raw: unknown): ParsedDesktopCommand | null {
@@ -285,6 +301,8 @@ export function parseDesktopCommand(raw: unknown): ParsedDesktopCommand | null {
     const name = raw as DesktopCommandName;
     return { kind: 'command', name, commandId: DESKTOP_COMMANDS[name] };
   }
+  const pane = OPEN_PANE_COMMAND_RE.exec(raw);
+  if (pane) return { kind: 'open-pane', paneId: pane[1]!, sessionId: pane[2] ?? null };
   const session = OPEN_SESSION_COMMAND_RE.exec(raw);
   return session ? { kind: 'open-session', sessionId: session[1]! } : null;
 }

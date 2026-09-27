@@ -4,7 +4,7 @@
  * writes it (C1's verse-ui-store is the one writer).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
-import { DEFAULT_DOCK_STATE, VERSE_UI_STORAGE_KEY, type DockState } from '../shell/dock-catalog.js';
+import { DEFAULT_DOCK_STATE, DOCK_LAYOUT, VERSE_UI_STORAGE_KEY, type DockState } from '../shell/dock-catalog.js';
 import {
   getDockSnapshot,
   getDockState,
@@ -21,6 +21,11 @@ import {
   withSplitRatio,
   withTabClosed,
   withWidth,
+  activateDockChat,
+  setDockHeight,
+  toggleDockPlacement,
+  withChatSwitch,
+  withHeight,
 } from './dock-store.js';
 
 const base = (over: Partial<DockState> = {}): DockState => ({ ...DEFAULT_DOCK_STATE, tabs: [], ...over });
@@ -73,7 +78,8 @@ describe('the store', () => {
   });
 
   it('reads its field of the shell\'s v3 blob, sanitised', () => {
-    localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ section: 'chat', dock: { open: true, tabs: ['tasks', 'bogus', 'tasks'], active: 'bogus', width: 500 } }));
+    // Ids are checked by SHAPE (a unit's pane may register after the dock hydrates); anything that cannot be an id is dropped.
+    localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ section: 'chat', dock: { open: true, tabs: ['tasks', 'Not a pane!', 'tasks'], active: 'Not a pane!', width: 500 } }));
     resetDockStore();
     expect(getDockState()).toMatchObject({ open: true, tabs: ['tasks'], active: 'tasks', width: 500 });
   });
@@ -103,10 +109,10 @@ describe('the store', () => {
     expect(getDockState().active).toBe('diff');
   });
 
-  it('Preview\'s Start puts Terminal BELOW the pane on top (Preview over Terminal), with the request', () => {
-    openDockPane('preview');
+  it('Preview\'s Start puts Terminal BELOW the pane on top (Browser over Terminal), with the request', () => {
+    openDockPane('preview'); // the legacy id opens the pane it became
     requestTerminalBelow({ root: '~/app', devServerId: 'dev-vite' });
-    expect(getDockState()).toMatchObject({ open: true, active: 'preview', splitWith: 'terminal', tabs: ['preview', 'terminal'] });
+    expect(getDockState()).toMatchObject({ open: true, active: 'browser', splitWith: 'terminal', tabs: ['browser', 'terminal'] });
     expect(getDockSnapshot().requests.terminal).toMatchObject({ root: '~/app', devServerId: 'dev-vite' });
   });
 
@@ -120,5 +126,64 @@ describe('the store', () => {
   it('carries an Apps launch\'s via/model on the request (the server resolves the command)', () => {
     requestTerminal({ newTab: true, appId: 'codex', via: 'ollama', model: 'qwen3.8:27b' });
     expect(getDockSnapshot().requests.terminal).toMatchObject({ appId: 'codex', via: 'ollama', model: 'qwen3.8:27b' });
+  });
+});
+
+describe('each chat keeps its own layout', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    resetDockStore();
+  });
+
+  it('remembers the chat you leave and restores the one you open; a new chat starts as you were working', () => {
+    const a = base({ open: true, tabs: ['terminal', 'diff'], active: 'diff', splitWith: 'terminal' });
+    const toB = withChatSwitch(a, 'chat-a', 'chat-b');
+    // chat-b has no memory: it carries the layout over…
+    expect(toB).toMatchObject({ open: true, tabs: ['terminal', 'diff'], active: 'diff' });
+    expect(toB.byChat['chat-a']).toEqual({ open: true, tabs: ['terminal', 'diff'], active: 'diff', splitWith: 'terminal' });
+    // …and what you do there is chat-b's alone.
+    const bReading = { ...toB, open: false, tabs: ['reasoning'], active: 'reasoning', splitWith: null };
+    const backToA = withChatSwitch(bReading, 'chat-b', 'chat-a');
+    expect(backToA).toMatchObject({ open: true, tabs: ['terminal', 'diff'], active: 'diff', splitWith: 'terminal' });
+    expect(backToA.byChat['chat-a']).toBeUndefined(); // the open chat lives in the top-level fields
+    expect(backToA.byChat['chat-b']).toEqual({ open: false, tabs: ['reasoning'], active: 'reasoning', splitWith: null });
+  });
+
+  it('keeps sizes and placement window-wide, and forgets the least recent chats past the cap', () => {
+    let state = base({ width: 600, height: 420, placement: 'bottom', open: true, tabs: ['files'], active: 'files' });
+    for (let i = 0; i < DOCK_LAYOUT.chatMemoryLimit + 5; i += 1) state = withChatSwitch(state, `chat-${i}`, `chat-${i + 1}`);
+    expect(Object.keys(state.byChat)).toHaveLength(DOCK_LAYOUT.chatMemoryLimit);
+    expect(state.byChat['chat-0']).toBeUndefined();
+    expect(state).toMatchObject({ width: 600, height: 420, placement: 'bottom' });
+  });
+
+  it('adopts the persisted layout for the chat open at reload, then swaps on every switch', () => {
+    openDockPane('terminal');
+    activateDockChat('chat-a'); // mount: no swap
+    expect(getDockState()).toMatchObject({ open: true, active: 'terminal' });
+    activateDockChat('chat-b');
+    openDockPane('sources');
+    activateDockChat('chat-a');
+    expect(getDockState()).toMatchObject({ active: 'terminal', tabs: ['terminal'] });
+    activateDockChat('chat-b');
+    expect(getDockState()).toMatchObject({ active: 'sources', tabs: ['terminal', 'sources'] });
+  });
+});
+
+describe('placement and height', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    resetDockStore();
+  });
+
+  it('moves between beside and below, and keeps the height at or above its floor', () => {
+    expect(getDockState().placement).toBe('right');
+    toggleDockPlacement();
+    expect(getDockState().placement).toBe('bottom');
+    setDockHeight(40);
+    expect(getDockState().height).toBe(DOCK_LAYOUT.minHeight);
+    expect(withHeight(base(), Number.NaN)).toEqual(base());
+    toggleDockPlacement();
+    expect(getDockState().placement).toBe('right');
   });
 });

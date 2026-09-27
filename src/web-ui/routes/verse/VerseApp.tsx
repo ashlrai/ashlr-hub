@@ -63,6 +63,8 @@ import { onActivityCompletions, useActivity } from './shell/useActivity.js';
 import { useViewport } from './shell/viewport.js';
 import type { WarmupOptions } from './shell/warmup.js';
 import { useVerseUi } from './useVerseUi.js';
+import { useFocusMode } from './shell/focus-mode.js';
+import { openPaneInChat } from './dock/dock-store.js';
 // rail-icons, not verse-icons: only the rail's glyphs belong in first paint.
 import { GearIcon, NeedsYouIcon, RAIL_ICON, VerseMark } from './rail-icons.js';
 import {
@@ -241,6 +243,19 @@ function foreignModalOpen(): boolean {
 
 const COMPLETION_TOAST_LIMIT = 3;
 
+/**
+ * Open a chat (or just the Chat surface) and, optionally, a pane in its
+ * panel area — the one path for URL deep links and the desktop's
+ * `open-pane:` command. The pane opens once that chat IS the open one, so it
+ * lands in that chat's remembered layout, not the one being left.
+ */
+function openWorkbenchLink(sessionId: string | null, paneId: string | null): void {
+  closeVerseOverlay();
+  if (sessionId) openVerseSession(sessionId);
+  else setVerseSection('chat');
+  if (paneId) openPaneInChat(paneId, sessionId);
+}
+
 export function VerseApp() {
   const ui = useVerseUi();
   const theme = useTheme();
@@ -253,6 +268,8 @@ export function VerseApp() {
   const data = activity.data;
   const rail = useRailStatusModule();
   const resources = useResourcesUi();
+  // Focus mode (⇧⌘F) is the chat's: the rail steps aside only on the Chat surface.
+  const focus = useFocusMode() && ui.section === 'chat';
 
   useEffect(() => prefetchAfterFirstPaint(), []);
   // The gear tray is fetched right after mount (not on idle) and then stays
@@ -300,6 +317,10 @@ export function VerseApp() {
           openVerseSession(command.sessionId);
           return;
         }
+        if (command.kind === 'open-pane') {
+          openWorkbenchLink(command.sessionId, command.paneId);
+          return;
+        }
         // The tray's "New chat" and the hotkey's "focus the composer" must
         // land in the composer: an open palette or shortcuts sheet would keep
         // focus (and every key) for itself. The drawer opener, the theme and
@@ -309,6 +330,15 @@ export function VerseApp() {
       }),
     [],
   );
+  // A link into the workbench (?chat=…&pane=…): opened once, then stripped
+  // from the address bar. The parser loads only when the URL carries one.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !/[?&](?:chat|pane)=/.test(window.location.search)) return;
+    void import('./shell/deep-link.js').then(({ consumeDeepLink }) => {
+      const link = consumeDeepLink();
+      if (link) openWorkbenchLink(link.sessionId, link.paneId);
+    }, () => undefined);
+  }, []);
   // "Go to that card": whoever raises it (drawer, Command, Mind), the shell reveals it.
   useEffect(() => subscribeAnchorRequests(VERSE_ANCHOR_EVENT), []);
   // Report the PAINTED theme so the native window pre-paints its background
@@ -371,6 +401,7 @@ export function VerseApp() {
       data-rail={expanded ? 'expanded' : 'collapsed'}
       data-compact={compact || undefined}
       data-resources={resources.open && resources.pinned && !compact ? 'docked' : undefined}
+      data-focus={focus ? 'on' : undefined}
     >
       <nav className={styles.rail} data-rail={expanded ? 'expanded' : 'collapsed'} aria-label="Verse sections">
         {/*

@@ -251,12 +251,17 @@ export const WORKBENCH_COMMANDS = [
   { id: 'git.create-pr', title: 'Create pull request…', scope: 'chat', keys: [], group: 'actions', section: 'Chat', keywords: ['pr', 'github', 'git', 'open pull request'] },
   { id: 'git.merge-pr', title: 'Merge pull request…', scope: 'chat', keys: [], group: 'actions', section: 'Chat', keywords: ['pr', 'github', 'git', 'land', 'ship'] },
 
-  // ── Dock (C2 container; panes from dock-catalog.ts) ───────────────────────
-  { ...bind('dock.toggle'), title: 'Show or hide the dock', group: 'actions', section: 'Dock' },
+  // ── Dock (the panel area; panes from panes/pane-registry.ts) ─────────────
+  { ...bind('chat.focus-mode'), title: 'Focus mode', group: 'actions', section: 'Chat', keywords: ['zen', 'distraction free', 'hide panels'] },
+  { ...bind('dock.toggle'), title: 'Show or hide the panel', group: 'actions', section: 'Dock', keywords: ['dock'] },
+  { id: 'dock.placement', title: 'Move the panel (beside or below the chat)', scope: 'chat', keys: [], group: 'actions', section: 'Dock', keywords: ['bottom', 'right', 'layout', 'dock position'] },
   { ...bind('dock.terminal'), title: 'Terminal', group: 'actions', section: 'Dock', keywords: ['shell', 'console'] },
   { ...bind('dock.terminal-new'), title: 'New terminal tab', group: 'actions', section: 'Dock' },
-  { ...bind('dock.preview'), title: 'Preview', group: 'actions', section: 'Dock', keywords: ['browser', 'dev server'] },
-  { ...bind('dock.diff'), title: 'Review changes', group: 'actions', section: 'Dock', keywords: ['diff', 'git'] },
+  { ...bind('dock.preview'), title: 'Browser', group: 'actions', section: 'Dock', keywords: ['preview', 'dev server', 'localhost', 'web'] },
+  { ...bind('dock.diff'), title: 'Changes', group: 'actions', section: 'Dock', keywords: ['diff', 'git', 'review'] },
+  { ...bind('dock.files'), title: 'Files', group: 'actions', section: 'Dock', keywords: ['explorer', 'tree', 'touched'] },
+  { ...bind('dock.sources'), title: 'Sources', group: 'actions', section: 'Dock', keywords: ['citations', 'references', 'read', 'fetched'] },
+  { ...bind('dock.reasoning'), title: 'Reasoning', group: 'actions', section: 'Dock', keywords: ['thinking', 'why', 'chain of thought'] },
 
   // ── Composer ─────────────────────────────────────────────────────────────
   { ...bind('composer.permission'), title: 'Permission mode…', group: 'actions', section: 'Composer', keywords: ['plan', 'bypass', 'auto'] },

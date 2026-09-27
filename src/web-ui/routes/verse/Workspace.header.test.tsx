@@ -15,6 +15,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { evictAll } from '../../data/cache.js';
 import { getDockState, resetDockStore } from './dock/dock-store.js';
+import { setFocusMode } from './shell/focus-mode.js';
 import { bootstrap, CLAUDE_SEAT, CODEX_SEAT, ev, LOCAL_SEAT, session } from './fixtures.test-support.js';
 import { buildTranscript } from './verse-transcript.js';
 import type { VerseSessionView } from './useVerseSession.js';
@@ -327,5 +328,42 @@ describe('Workspace — paths in the chat', () => {
     expect(within(log).getByRole('button', { name: 'read src/auth/login.ts' })).toBeInTheDocument();
     const line = document.getElementById('verse-tool-r1')!.querySelector('summary')!;
     expect(within(line).getByText('src/auth/login.ts')).toHaveAttribute('title', '/Users/mason/dev/hub/src/auth/login.ts');
+  });
+});
+
+describe('Workspace header — the workbench bar (3.16)', () => {
+  beforeEach(() => { setFocusMode(false); resetDockStore(); });
+  afterEach(() => { setFocusMode(false); });
+
+  it('says what the chat has cost, in tokens, with the breakdown one focus away', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<Workspace {...props({ view: opened({ turnCount: 3 }) })} />);
+    const readout = within(header(container)).getByTestId('chat-usage');
+    // 1,200 in + 300 out — one quiet figure, no invented dollars.
+    expect(readout).toHaveAccessibleName('Tokens used: 2k');
+    expect(readout.textContent).not.toMatch(/\$/);
+    await user.hover(readout);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('This chat so far: 1k in · 300 out · 3 turns');
+  });
+
+  it('draws a toggle for each registered pane that asks for one, from the registry', () => {
+    const { container } = render(<Workspace {...props({ view: opened() })} />);
+    const panels = within(header(container)).getByRole('group', { name: 'Panels' });
+    const names = within(panels).getAllByRole('button').map((b) => b.getAttribute('aria-label'));
+    expect(names).toEqual(expect.arrayContaining(['Terminal', 'Browser', 'Changes', 'Focus mode', 'Chat list', 'Dock']));
+    // Files / Sources / Reasoning live in the dock's "+" menu, the palette and their keys — not the bar.
+    expect(names).not.toContain('Reasoning');
+  });
+
+  it('enters focus mode from its toggle; in focus the bar keeps one way back', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<Workspace {...props({ view: opened() })} />);
+    const strip = header(container);
+    await user.click(within(strip).getByRole('button', { name: 'Focus mode' }));
+    const exit = within(strip).getByRole('button', { name: 'Focus mode' });
+    expect(exit).toHaveAttribute('aria-pressed', 'true');
+    expect(within(strip).queryByRole('button', { name: 'Dock' })).toBeNull();
+    await user.click(exit);
+    expect(within(strip).getByRole('button', { name: 'Dock' })).toBeInTheDocument();
   });
 });

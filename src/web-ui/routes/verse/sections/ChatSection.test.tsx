@@ -29,6 +29,7 @@ import { getVerseUiState, openVerseSession, requestVerseCommand, resetVerseUi, V
 import { resetCommandBus, runCommand } from '../shell/command-bus.js';
 import { mockCompactViewport } from '../shell/viewport.test-support.js';
 import { getDockSnapshot, requestTerminal, resetDockStore } from '../dock/dock-store.js';
+import { setFocusMode } from '../shell/focus-mode.js';
 import { resetLocalSeen } from '../chat/use-chat-activity.js';
 import { CHAT_PANEL_RANGES, CHAT_PANEL_SIZING_KEY, resetChatPanelSizing } from '../chat-panel-sizing.js';
 import { ApiError } from '../../../data/client.js';
@@ -330,7 +331,8 @@ describe('ChatSection layout', () => {
     // The dock loads on first open (lazy chunk).
     const dock = await screen.findByRole('complementary', { name: 'Dock: Tasks' });
     expect(within(dock).getByRole('tab', { name: 'Tasks' })).toHaveAttribute('aria-selected', 'true');
-    expect(within(dock).getByText('No tool calls in the latest turn.')).toBeInTheDocument();
+    // Each pane is its own lazy chunk (warmed after first paint): it may take a tick.
+    expect(await within(dock).findByText('No tool calls in the latest turn.')).toBeInTheDocument();
     expect(JSON.parse(localStorage.getItem(VERSE_UI_STORAGE_KEY) ?? '{}').dock).toMatchObject({ open: true, active: 'tasks', tabs: ['tasks'] });
 
     // "+" adds Context; it is the ResourcesPanel minus the accounts.
@@ -338,7 +340,7 @@ describe('ChatSection layout', () => {
     await user.click(screen.getByRole('menuitem', { name: 'Context' }));
     const context = screen.getByRole('complementary', { name: 'Dock: Context' });
     expect(within(context).getByRole('tab', { name: 'Context' })).toHaveAttribute('aria-selected', 'true');
-    expect(within(context).getByLabelText('Context efficiency')).toBeInTheDocument();
+    expect(await within(context).findByLabelText('Context efficiency')).toBeInTheDocument();
     expect(within(context).getByRole('button', { name: 'Accounts & capacity →' })).toBeInTheDocument();
     expect(within(context).queryByText('Personal Codex')).not.toBeInTheDocument();
 
@@ -792,7 +794,7 @@ describe('ChatSection — commands and keys (3.10)', () => {
     const dock = await screen.findByRole('complementary', { name: 'Dock: Tasks' });
     await user.click(within(dock).getByRole('button', { name: 'Add a pane' }));
     await user.click(screen.getByRole('menuitem', { name: 'Context' }));
-    await user.click(screen.getByRole('button', { name: 'Accounts & capacity →' }));
+    await user.click(await screen.findByRole('button', { name: 'Accounts & capacity →' }));
     expect(getVerseUiState().section).toBe('apps');
   });
 
@@ -814,6 +816,109 @@ describe('ChatSection — commands and keys (3.10)', () => {
       expect(screen.queryByRole('dialog', { name: /^Dock/ })).not.toBeInTheDocument();
     } finally {
       vp.restore();
+    }
+  });
+});
+
+describe('ChatSection — the workbench (3.16)', () => {
+  const chat = () => document.querySelector<HTMLElement>('[data-dock]')!;
+  // Focus mode is module state (never persisted): start every test outside it.
+  beforeEach(() => { setFocusMode(false); });
+
+  it('opens every first-party pane from its catalog command on the bus', async () => {
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    const user = userEvent.setup();
+    mount();
+    await user.click(await screen.findByRole('button', { name: /Fix the login bug/ }));
+    await screen.findByRole('heading', { name: 'Fix the login bug' });
+    for (const [command, pane, title] of [['dock.files', 'files', 'Files'], ['dock.sources', 'sources', 'Sources'], ['dock.reasoning', 'reasoning', 'Reasoning']] as const) {
+      act(() => { runCommand(command); });
+      expect(getDockSnapshot().state).toMatchObject({ open: true, active: pane });
+      expect(await screen.findByRole('complementary', { name: `Dock: ${title}` })).toBeInTheDocument();
+    }
+    // Each stub teaches what it is for while it has nothing to show.
+    expect(await screen.findByText('No reasoning yet')).toBeInTheDocument();
+    act(() => { runCommand('dock.preview'); });
+    expect(getDockSnapshot().state.active).toBe('browser');
+  });
+
+  it('moves the panel under the chat — same element, so no pane remounts — and back', async () => {
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    const user = userEvent.setup();
+    mount();
+    await user.click(await screen.findByRole('button', { name: /Fix the login bug/ }));
+    await screen.findByRole('heading', { name: 'Fix the login bug' });
+    act(() => { runCommand('dock.toggle'); });
+    const beside = await screen.findByRole('complementary', { name: 'Dock: Tasks' });
+    const panel = within(beside).getByRole('tabpanel');
+    expect(chat()).toHaveAttribute('data-dock', 'open');
+    await user.click(within(beside).getByRole('button', { name: 'Move the dock below the chat' }));
+    const below = screen.getByRole('complementary', { name: 'Dock: Tasks' });
+    expect(below).toHaveAttribute('data-presentation', 'bottom');
+    expect(chat()).toHaveAttribute('data-dock', 'bottom');
+    // The tab's panel is the same DOM node: nothing inside it remounted.
+    expect(within(below).getByRole('tabpanel')).toBe(panel);
+    act(() => { runCommand('dock.placement'); });
+    expect(chat()).toHaveAttribute('data-dock', 'open');
+  });
+
+  it('focus mode hides everything but the conversation; ⇧⌘F or Esc brings it all back', async () => {
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    const user = userEvent.setup();
+    mount();
+    await user.click(await screen.findByRole('button', { name: /Fix the login bug/ }));
+    await screen.findByRole('heading', { name: 'Fix the login bug' });
+    act(() => { runCommand('dock.toggle'); });
+    await screen.findByRole('complementary', { name: 'Dock: Tasks' });
+
+    fireEvent.keyDown(document.body, { key: 'f', code: 'KeyF', ctrlKey: true, shiftKey: true });
+    expect(chat()).toHaveAttribute('data-focus', 'on');
+    expect(chat()).toHaveAttribute('data-sidebar', 'collapsed');
+    expect(chat()).toHaveAttribute('data-dock', 'closed');
+    // Hidden, not closed: the dock keeps its tabs for the way back.
+    expect(getDockSnapshot().state.open).toBe(true);
+    const exit = screen.getByRole('button', { name: 'Focus mode' });
+    expect(exit).toHaveAttribute('aria-pressed', 'true');
+    expect(exit).toHaveTextContent('Exit focus');
+
+    // Esc in the composer is the composer's (Stop) — focus mode stays.
+    const box = screen.getByRole('textbox', { name: 'Message' });
+    fireEvent.keyDown(box, { key: 'Escape' });
+    expect(chat()).toHaveAttribute('data-focus', 'on');
+    // Esc anywhere else leaves it.
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(chat()).not.toHaveAttribute('data-focus');
+    expect(chat()).toHaveAttribute('data-dock', 'open');
+
+    // The header's toggle, and ⇧⌘F again.
+    await user.click(screen.getByRole('button', { name: 'Focus mode' }));
+    expect(chat()).toHaveAttribute('data-focus', 'on');
+    fireEvent.keyDown(document.body, { key: 'f', code: 'KeyF', ctrlKey: true, shiftKey: true });
+    expect(chat()).not.toHaveAttribute('data-focus');
+  });
+
+  it('toggles a registered pane with its OWN shortcut (a key the catalog does not have)', async () => {
+    const { registerPane } = await import('../panes/index.js');
+    const dispose = registerPane({
+      id: 'test-runner', title: 'Tests', icon: () => null, shortcut: 'mod+alt+t', needsSession: false,
+      component: () => <p>test runner body</p>,
+    });
+    try {
+      const { fetch } = verseFetch();
+      vi.stubGlobal('fetch', fetch);
+      mount();
+      await screen.findByRole('navigation', { name: 'Chats' });
+      // The registry loads just after first paint; the key works once it is in.
+      await waitFor(() => {
+        fireEvent.keyDown(document.body, { key: 't', code: 'KeyT', ctrlKey: true, altKey: true });
+        expect(getDockSnapshot().state).toMatchObject({ open: true, active: 'test-runner' });
+      });
+      expect(await screen.findByText('test runner body')).toBeInTheDocument();
+    } finally {
+      dispose();
     }
   });
 });
