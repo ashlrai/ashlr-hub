@@ -211,7 +211,7 @@ export const DECISION_KINDS: Readonly<Record<DecisionKind, DecisionKindSpec>> = 
     threshold: 0.85,
     timeoutMs: 6_000,
     safetyAdjacent: true,
-    callSites: ['exported: suggestActionClass (Leader)'],
+    callSites: ['vision/leader-advice.ts: suggestActionClass after enactment (Leader memo label only)'],
   }),
   'operator-intent': spec({
     kind: 'operator-intent',

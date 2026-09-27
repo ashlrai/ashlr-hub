@@ -118,5 +118,5 @@ Jev card and the Usage "Jev decisions" panel. Cost is an estimate at placeholder
 | interrupt-worthiness | exported `worthInterrupting` | 0.8 | severity/expiry/quiet-hours rule | never suppresses high/blocking |
 | lane-choice | exported `chooseLane`; Devin fleet `laneAdvisor` | 0.8 | size/keyword heuristic over available lanes | advisor returns null on fallback; launcher only narrows |
 | trigger-triage | exported `triageTrigger` | 0.8 | label/keyword triage | every part must clear the gate |
-| action-class | exported `suggestActionClass` | 0.85 | the deterministic class | advisory, escalate-only; authority class unchanged |
+| action-class | `suggestActionClass`, called by `vision/leader-advice.ts` after `enactLeaderActions` (≤ 8 actions per memo) | 0.85 | the deterministic class | advisory, escalate-only: a `memo.actionAdvice` label and a line in the memo message; asked after every class and window is decided, read by no gate, can never lower a class or approve |
 | operator-intent | exported `classifyOperatorIntent` | 0.8 | regex ladder | routing only; Jev can never introduce `approval` |

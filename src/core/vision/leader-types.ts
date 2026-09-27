@@ -327,6 +327,27 @@ export interface LeaderActionOf<K extends LeaderActionKind> {
 /** Discriminated on `kind`, so narrowing the kind narrows `params`. */
 export type LeaderAction = { [K in LeaderActionKind]: LeaderActionOf<K> }[LeaderActionKind];
 
+/**
+ * 3.15: Jev's ADVISORY second opinion on one action's class
+ * (decide/action-class.ts, via vision/leader-advice.ts). Recorded only when Jev
+ * answered above the kind's confidence gate. It is a label on the memo and
+ * nothing else: the action's `class`, status and window were decided — and
+ * the action applied or scheduled — by the deterministic policy check before
+ * any advice was asked for, and no code reads this back into a gate.
+ * Escalate-only by construction: `suggested` is never below `deterministic`.
+ */
+export interface LeaderActionAdvice {
+  actionId: string;
+  /** The action's class as the policy check decided it. */
+  deterministic: LeaderActionClass;
+  suggested: LeaderActionClass;
+  /** `suggested` is stricter than `deterministic` (A < B < C). */
+  stricter: boolean;
+  /** Jev's calibrated confidence in `suggested`. */
+  confidence: number;
+  source: 'jev';
+}
+
 // ---------------------------------------------------------------------------
 // Memo
 // ---------------------------------------------------------------------------
@@ -438,6 +459,11 @@ export interface LeaderMemo {
   hypotheses: HarnessHypothesis[];
   questionsForMason: string[];
   actions: LeaderAction[];
+  /**
+   * 3.15: Jev's advisory class labels for `actions` (only confident answers;
+   * absent when none, and on older memos). Display only — see LeaderActionAdvice.
+   */
+  actionAdvice?: LeaderActionAdvice[];
 }
 
 // ---------------------------------------------------------------------------

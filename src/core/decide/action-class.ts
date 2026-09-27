@@ -61,7 +61,8 @@ const QUESTION: TypeSafeChoiceQuestion = {
  * Second opinion on one Leader action. NEVER THROWS. With no key, or a
  * less-strict answer, `value === deterministicClass` and `path === 'fallback'`.
  *
- * STABLE API — the Leader agent calls this (advisory only).
+ * STABLE API — the Leader calls this through vision/leader-advice.ts, after
+ * its actions were enacted (advisory only: a memo label, never a gate).
  */
 export async function suggestActionClass(
   action: ActionForReview,

@@ -109,6 +109,7 @@ import {
   type LeaderCadence,
 } from './leader-cadence.js';
 import { runLeaderSeatChain } from './leader-run-chain.js';
+import { adviseLeaderActions, defaultLeaderActionAdvisor, type LeaderActionAdvisor } from './leader-advice.js';
 import { buildLeaderHealth } from './leader-health.js';
 import { LEADER_FOUNDER_VOICE } from './leader-persona.js';
 import { listSelfDirectives } from './leader-powers.js';
@@ -810,6 +811,12 @@ export interface LeaderRunDeps {
    * cloud backlog items (leader-cloud.ts). Absent = no cloud suggestions.
    */
   cloudBacklog?: LeaderCloudBacklogDeps;
+  /**
+   * 3.15: Jev's ADVISORY second opinion on each enacted action's class
+   * (leader-advice.ts). Asked only after the actions were planned and applied;
+   * the answer labels the memo and never reaches a gate. Absent = no advice.
+   */
+  adviseActionClass?: LeaderActionAdvisor;
 }
 
 export async function loadDefaultLeaderRunDeps(cfg: AshlrConfig): Promise<LeaderRunDeps> {
@@ -834,6 +841,7 @@ export async function loadDefaultLeaderRunDeps(cfg: AshlrConfig): Promise<Leader
     apply,
     seat,
     cloudBacklog: { append: (items) => cloudBacklog.appendUserBacklogItems(items) },
+    adviseActionClass: defaultLeaderActionAdvisor(cfg),
     sources: {
       standingPolicy: () => effective.currentStandingPolicy(),
       budgetPolicy: () => budgetStore.loadBudgetPolicy(),
@@ -1123,6 +1131,16 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
     });
   } catch (err) {
     memo.statusReason = `Actions were not applied: ${err instanceof Error ? err.message : 'error'}`.slice(0, 400);
+  }
+
+  // 3.15: Jev's advisory class labels. Deliberately AFTER enactment: every
+  // class, status and veto window above came from the deterministic policy
+  // check, and class-A actions have already applied, so the advice cannot move
+  // a gate — it is shown on the memo (the message flags a stricter opinion)
+  // and read by nothing that decides. Never throws; no advice = no field.
+  if (deps.adviseActionClass && memo.actions.length > 0) {
+    const advice = await adviseLeaderActions(memo.actions, deps.adviseActionClass).catch(() => []);
+    if (advice.length > 0) memo.actionAdvice = advice;
   }
 
   // Code-change actions also become cloud backlog suggestions. Only the

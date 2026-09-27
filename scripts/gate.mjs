@@ -9,7 +9,8 @@
  *
  * GitHub Actions is off, so this is what verifies a release (docs/RELEASING-LOCALLY.md).
  *
- * Phase A (parallel): root build, web typecheck, eslint (cached), the real-io lane guard, the
+ * Phase A (parallel): root build (tsc, then the static-asset copy from `npm run build` — see
+ * GATE_BUILD_ASSET_SCRIPTS), web typecheck, eslint (cached), the real-io lane guard, the
  * Verse route sync-I/O guard (scripts/check-verse-sync-io.mjs),
  * the docs check. Then the web build + first-paint budget. Then Phase B: backend and web
  * vitest, in parallel.
@@ -307,10 +308,10 @@ export function loadKnownFailures(data = loadJson('scripts/gate-known-failures.j
 }
 
 /** Run one command, streaming stdout+stderr into .ashlr-gate/<name>.log. */
-function runCommand(name, cmd, args, env = {}) {
+function runCommand(name, cmd, args, env = {}, { append = false } = {}) {
   const logPath = join(repoRoot, GATE_DIR, `${name}.log`);
-  const log = createWriteStream(logPath);
-  log.write(`$ ${[cmd, ...args].join(' ')}\n\n`);
+  const log = createWriteStream(logPath, { flags: append ? 'a' : 'w' });
+  log.write(`${append ? '\n' : ''}$ ${[cmd, ...args].join(' ')}\n\n`);
   const started = performance.now();
   return new Promise((resolvePromise) => {
     const child = spawn(cmd, args, { cwd: repoRoot, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -346,13 +347,35 @@ const bin = {
 };
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
+/**
+ * The `npm run build` steps (package.json `scripts.build`, each `node <script>`) the gate's build
+ * runs after tsc. tsc emits only .js/.d.ts, so without the asset copy dist/core/web/public/ is
+ * never written and every test that reads a copied asset (test/activation-readiness-package
+ * reads dist/core/web/public/app.js) fails in a fresh worktree. Only the fast steps: the copy
+ * is a millisecond cpSync. The rest of `npm run build` stays out of Phase A on purpose — the
+ * vite build is the first-paint step's job (into a scratch dir), and the esbuild/inventory/
+ * identity steps cost seconds for outputs no gate-selected test reads. test/gate.test.ts
+ * asserts every entry is still a step of `npm run build`, so this reuses that script, never
+ * forks it.
+ */
+export const GATE_BUILD_ASSET_SCRIPTS = Object.freeze(['scripts/copy-assets.mjs']);
+
+/** The build step's commands, in order: tsc, then each asset script. Pure. */
+export function buildCommands({ nodeBin, tscBin, tsBuildInfoFile }) {
+  return [
+    { cmd: nodeBin, args: [tscBin, '-p', 'tsconfig.json', '--incremental', '--tsBuildInfoFile', tsBuildInfoFile] },
+    ...GATE_BUILD_ASSET_SCRIPTS.map((script) => ({ cmd: nodeBin, args: [script] })),
+  ];
+}
+
 /** Phase A: independent static checks, run in parallel. */
 function staticSteps() {
   const gate = (file) => join(GATE_DIR, file);
   // A tsbuildinfo whose outputs are gone would skip re-emitting them; start clean then.
   if (!existsSync(join(repoRoot, 'dist'))) rmSync(join(repoRoot, gate('tsc.tsbuildinfo')), { force: true });
+  const [tsc, ...assets] = buildCommands({ nodeBin: node, tscBin: bin.tsc, tsBuildInfoFile: gate('tsc.tsbuildinfo') });
   return [
-    { name: 'build', cmd: node, args: [bin.tsc, '-p', 'tsconfig.json', '--incremental', '--tsBuildInfoFile', gate('tsc.tsbuildinfo')] },
+    { name: 'build', ...tsc, then: assets },
     { name: 'typecheck-web', cmd: node, args: [bin.tsc, '--noEmit', '-p', 'src/web-ui/tsconfig.json', '--incremental', '--tsBuildInfoFile', gate('tsc-web.tsbuildinfo')] },
     { name: 'eslint', cmd: node, args: [bin.eslint, '--cache', '--cache-location', gate('eslintcache'), '.'] },
     { name: 'realio-lane', cmd: npm, args: ['run', '--silent', 'lint:realio-lane'] },
@@ -362,11 +385,18 @@ function staticSteps() {
 }
 
 async function runStatic(step) {
-  const result = await runCommand(step.name, step.cmd, step.args);
+  let result = await runCommand(step.name, step.cmd, step.args);
+  let durationMs = result.durationMs;
+  // `then`: follow-up commands in the same step and log, each only after the previous passed.
+  for (const next of step.then ?? []) {
+    if (result.exitCode !== 0) break;
+    result = await runCommand(step.name, next.cmd, next.args, {}, { append: true });
+    durationMs += result.durationMs;
+  }
   return {
     name: step.name,
     status: result.exitCode === 0 ? 'pass' : 'fail',
-    durationMs: result.durationMs,
+    durationMs,
     detail: result.exitCode === 0 ? null : `exit ${result.exitCode ?? 'spawn error'} — ${relative(repoRoot, result.logPath)}`,
     logPath: result.logPath,
   };

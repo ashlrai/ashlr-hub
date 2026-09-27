@@ -60,7 +60,8 @@ import type { AshlrConfig } from '../types.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
 import { cleanModelText, extractMemoJson, leaderRoot, listMemoIds, readLeaderMemo, readRecentMemos } from './leader-memo.js';
-import type { LeaderAction, LeaderMemo } from './leader-types.js';
+import type { LeaderAction, LeaderActionAdvice, LeaderMemo } from './leader-types.js';
+import { stricterAdviceFor } from './leader-advice.js';
 import type { LeaderEvidence, LeaderRunDeps } from './leader.js';
 import type { LeaderComplete, LeaderSeatResolution } from './leader-seat.js';
 import {
@@ -547,11 +548,14 @@ function topActions(memo: LeaderMemo, max = 5): LeaderAction[] {
   return [...memo.actions].sort((a, b) => rank(a) - rank(b)).filter((a) => rank(a) < 3).slice(0, max);
 }
 
-function actionLine(a: LeaderAction): string {
+function actionLine(a: LeaderAction, advice?: readonly LeaderActionAdvice[]): string {
   const status = a.status === 'scheduled' && a.applyAfter
     ? `applies ${hhmm(a.applyAfter)} unless you veto`
     : a.status === 'escalated' ? 'needs your decision (outside the grant)' : a.status;
-  return `• [${a.class}] ${clip(a.summary, 140)} — ${status} (${a.id})`;
+  // 3.15: Jev's advisory label (leader-advice.ts) — shown, never acted on.
+  const stricter = stricterAdviceFor(advice, a.id);
+  const flag = stricter ? ` — Jev suggests class ${stricter.suggested} (advisory; the class above stands)` : '';
+  return `• [${a.class}] ${clip(a.summary, 140)} — ${status} (${a.id})${flag}`;
 }
 
 /** The concise memo message: bottleneck, move, top actions with class and veto window. */
@@ -565,7 +569,7 @@ export function memoSummaryText(memo: LeaderMemo): string {
   const top = topActions(memo);
   if (top.length > 0) {
     lines.push('Actions:');
-    for (const a of top) lines.push(actionLine(a));
+    for (const a of top) lines.push(actionLine(a, memo.actionAdvice));
     const pending = memo.actions.filter((a) => (a.status === 'scheduled' && a.class === 'B') || a.status === 'escalated').length;
     if (pending > 0) lines.push('Approve or veto any of them by id.');
   } else if (memo.actions.length > 0) {
