@@ -11,6 +11,50 @@ are not execution edges. A runtime edge exists only after its source artifact
 digest is committed into a dispatch intent. Package reports and unsigned trace
 stubs are review aids, not signed runtime evidence.
 
+## Current activation state (3.15)
+
+This section is dated. Recheck it with `ashlr authority status` and
+`ashlr authority resident status` before relying on it.
+
+As of 2026-09-27, on the maintainer's Mac:
+
+- **Grant:** a Touch-ID-signed standing grant is active (30-day term), the
+  switch is Autonomous, and custody is complete (helper, Secure Enclave key,
+  `ashlr-fleet` App, Claude token). Status reported every server-enforced
+  repository protected by GitHub. Free-plan private repositories, which cannot
+  have rulesets, would use local enforcement with the App's `ashlr/verify`
+  check instead.
+- **Ladder:** stage 1 of 8, **shadow**: 3 repositories in policy, 0 merging,
+  engines local, Grok and Claude (judge and Leader only), caps 4 files / 150
+  lines. Advancing needs 5
+  would-merge digests and 12 hours at the stage; none had been recorded yet.
+- **Resident runtime:** admitted under the grant, but the installed plist had
+  drifted from config, so the daemon was not confirmed running the current
+  release.
+- **Lanes:** the cloud lane's PRs go through the standing intake. Devin PRs go
+  through the same intake; the grant above does not name Devin, so they stay
+  shadow and the fleet launches no Devin sessions
+  ([DEVIN.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md#limits)).
+
+What Mason must do to move this forward:
+
+1. Install the 3.15 release. It changes authority code (the lessons and Devin
+   work grew the authority surface), so the grant pauses.
+2. `ashlr authority re-approve` (Touch ID). The ladder continues from the stage
+   it had reached.
+3. `ashlr authority resident stop`, then `ashlr authority resident start`, typed
+   in his own terminal, so the resident daemon runs the new build with a
+   regenerated plist.
+4. Watch Fleet ▸ Shadow decisions and Command's ladder. The ladder advances by
+   itself when the stage's criteria are met in the ledger; nothing skips a
+   stage, and no stage past what the grant signs is reachable.
+5. Optionally, for Devin: `ashlr devin connect` and a budget, then
+   `ashlr devin fleet on`, `sudo scripts/install-custody.sh` (the helper must
+   be 1.1.0 or later to sign a grant that names Devin) and a new grant or
+   re-approval that adds Devin as a producer. Steps 2 and this re-approval can
+   be the same Touch ID. Devin PRs merge only at a stage that names Devin and
+   with two judges from different families.
+
 ## Classification
 
 - **EXISTS-LIVE** requires current end-to-end operational evidence. No item below
@@ -46,7 +90,7 @@ stubs are review aids, not signed runtime evidence.
 | Exception-only inbox | UNWIRED | Existing daemon opt-in auto-merge pass already uses inbox authority. Reuse it; do not create a parallel ungated drainer. |
 | Global stop | UNWIRED | Existing sandbox KILL policy is authoritative. New graph checks it plus a restrictive root-local sentinel. Resource workers now use the same shared policy before transport and during active cancellation; broader pre-intent controller integration still needs wiring. Native Windows dispatch is explicitly unavailable until owned cancellation is supported; local HTTP still works. |
 | Operator interface | UNWIRED | The resource console includes registered project switching over one account ledger, separate session drafts, opt-in durable transcripts, digest-pinned same-project follow-ups, retention/deletion, text attachments, output, cancellation and a resizable inspector. Control-unlocked file browsing reads pinned project directories; explicit attachment copies the viewed snapshot and provenance, never later disk contents. Immutable directory bindings and project-local holds preserve unrelated work; accepted context survives source deletion and restart without replay. Missing/truncated responses stay explicit. Unsent drafts are not persisted and auth/scope changes clear private UI state. Conversation compaction, terminal/browser panels, native desktop bootstrap and resident-firm controls remain unwired. |
-| Activation | UNWIRED | Resident authority now comes from the Touch-ID-signed standing grant (custody key compiled into `STANDING_GRANT_TRUST_ROOTS`): `runDaemon` opens a standing session and re-verifies the grant, Stop and the switch every tick, and `liveConductorActivationAuthorized()` follows the grant's `conductorGoals`. `ashlr authority resident start` — typed by the operator in a terminal, clean build, active grant, Stop off — is the one admitted launchd install/restart path ([RESIDENT-RUNTIME.md](RESIDENT-RUNTIME.md)). Legacy service paths stay denied and the permit-based daemon/conductor compiled roots stay empty. Not commissioned: no grant has been signed and no resident service started, so this is not EXISTS-LIVE. |
+| Activation | UNWIRED | Resident authority now comes from the Touch-ID-signed standing grant (custody key compiled into `STANDING_GRANT_TRUST_ROOTS`): `runDaemon` opens a standing session and re-verifies the grant, Stop and the switch every tick, and `liveConductorActivationAuthorized()` follows the grant's `conductorGoals`. `ashlr authority resident start` — typed by the operator in a terminal, clean build, active grant, Stop off — is the one admitted launchd install/restart path ([RESIDENT-RUNTIME.md](RESIDENT-RUNTIME.md)). Legacy service paths stay denied and the permit-based daemon/conductor compiled roots stay empty. Grants have since been signed on the maintainer's Mac (see [Current activation state](#current-activation-state-315)); the ladder is at shadow with no repository merging and no would-merge digests yet, so this is still not EXISTS-LIVE. |
 
 ## Next executable milestones
 

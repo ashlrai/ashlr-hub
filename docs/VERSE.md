@@ -25,8 +25,32 @@ It is served by the normal `ashlr serve` server at `/verse/`, opened by
   everything autonomy may do without you.
 - The cloud lane (Claude Code cloud sessions, their budget and delivery
   contract): [`docs/CLOUD.md`](CLOUD.md).
+- Talking to the Leader from Verse, Telegram and the CLI:
+  [`docs/LEADER.md`](LEADER.md).
+- Devin as chat seats, a lane and a fleet producer (setup, budget, delivery,
+  the two-judge rule, limits): [`docs/DEVIN.md`](DEVIN.md).
+- The integrated browser and what agents may do with it:
+  [`docs/VERSE-BROWSER.md`](VERSE-BROWSER.md).
+- The Jev decision layer, its call sites and its bounds:
+  [`docs/JEV-INTEGRATION.md`](JEV-INTEGRATION.md).
 
-This page is the user guide.
+This page is the user guide. It describes 3.15.
+
+**At a glance.**
+
+| Where | What it is for |
+|---|---|
+| ⌘1 **Command** | What needs you, the autonomy switch and rollout ladder, the Leader's memo, seat burn-downs, the Cloud card |
+| ⌘2 **Fleet** | What runs where, the gate funnel, every shadow decision with its G0–G7 chips |
+| ⌘3 **Growth** | Whether output compounds, and **Lessons**: retros and the knowledge you approved |
+| ⌘4 **Mind** | The **Leader conversation**: one thread with Verse, Telegram and the CLI, directives, memos to approve or veto |
+| ⌘5 **Chat** | The workbench: Claude Code, Codex, Grok, local and Devin seats, with a panel for Terminal, Browser, Changes, Files, Sources and Reasoning, and Run in cloud and Run in Devin |
+| ⌘J **Needs you** | Everything waiting on you, including cloud and Devin PRs to land or close |
+| ⌘. **Resources** | Every account, local runtime, cloud credits and Devin, each with a Chat and a Fleet readiness line |
+| Gear ▸ **Repo wiki** | A private architecture wiki per repo, and Ask the codebase |
+| Gear ▸ **Playbooks** | Versioned task templates, run with a `!macro` in any chat or lane |
+| Gear ▸ **Automations** | Issues, red builds, schedules and webhooks that become work in a lane |
+| ⌘K | Every chat, action, seat, project and repo from one field |
 
 ---
 
@@ -63,15 +87,23 @@ left switches between them, and ⌘1–⌘5 do the same.
 
 | Key | Surface | What it answers |
 |-----|---------|-----------------|
-| ⌘1 | **Command** | What needs me, and is the company producing? The autonomy switch, Stop, the budget pill and the grant chip; a one-line verdict ("Autonomous · 5 building · 7 merged today · 0 reverts · Claude 46% reserved for you"); Needs you; the Leader's memo; five KPIs; a burn-down per seat; a 12-hour swimlane. |
-| ⌘2 | **Fleet** | What is running where, and why that seat? A live swimlane by lane and phase, the gate funnel with refusal reasons, "why this seat" for each dispatch, parked work, the repo table with pause and resume, and Overnight. The 3.9 Autonomy panels live under **Fleet ▸ Advanced**. |
-| ⌘3 | **Growth** | Is the output compounding? Merges per week, cost per merge, model ROI, a calendar of merges, the harness history and the experiment results. |
-| ⌘4 | **Mind** | What did the Leader decide, and was it right? Its memos with each move's 7-day outcome, its hit-rate, the reasoning insights, the standards it set, and the action log with Veto. |
-| ⌘5 | **Chat** | The interactive workbench: sessions, transcript, dock (Terminal, Preview, Review) and composer. |
+| ⌘1 | **Command** | What needs me, and is the company producing? The autonomy switch, Stop, the budget pill and the grant chip; while a grant is active, the **rollout ladder** ("Shadow · 1 of 8", progress bars toward the next stage, what happened last) and the grant countdown with Re-approve under 7 days; a one-line verdict ("Autonomous · 5 building · 7 merged today · 0 reverts · Claude 46% reserved for you"); Needs you; the Leader's memo; five KPIs; a burn-down per seat; the Cloud card; a 12-hour swimlane. |
+| ⌘2 | **Fleet** | What is running where, and why that seat? A live swimlane by lane and phase, **Shadow decisions** (every proposal with G0–G7 chips, the outcome and why), the gate funnel with refusal reasons, "why this seat" for each dispatch, parked work, the repo table with pause and resume, and Overnight. The 3.9 Autonomy panels live under **Fleet ▸ Advanced**. |
+| ⌘3 | **Growth** | Is the output compounding? Merges per week, cost per merge, model outcomes, a calendar of merges, the harness history, the experiment results, and **Lessons** (3.15). |
+| ⌘4 | **Mind** | Talk to the Leader. The **conversation** (3.14): one thread across Verse, Telegram and the CLI, with directives, memo cards to approve or veto, and its questions to answer. Below it, the Leader's hit-rate and the reasoning insights. |
+| ⌘5 | **Chat** | The interactive workbench: sessions, transcript, composer and a panel of tabs and splits (Terminal, Browser, Changes, Files, Sources, Reasoning, Tasks, Context), with **Run in cloud** and **Run in Devin** in its ⋯ sheet. |
 
 The **gear** at the foot of the rail holds Settings (⌘,), **Apps & Accounts**,
-Usage and Shortcuts (⌘/). Beside it, a small ring shows the scarcest seat's
-five-hour window.
+Usage, **Repo wiki**, **Playbooks** and **Automations** (3.15) and Shortcuts
+(⌘/). Beside it, a small ring shows
+the scarcest seat's five-hour window.
+
+**Shadow decisions (Fleet).** One row per proposal the standing pass
+considered: chips for G0 Authority, G1 Protected paths, G1b Tamper, G2 Scope,
+G3 Verify, G4 Claims, G5 Blast radius, G6 Judge and G7 GitHub checks, the
+outcome with a one-sentence reason, and Evidence and PR links. Ladder
+regressions are shown above the list. While the ladder is at shadow, this is
+where you read what the fleet *would* have merged.
 
 **Where the 3.9 sections went.** Chat is ⌘5. Autonomy is Fleet (its panels
 under Fleet ▸ Advanced). Approvals is the **Needs you** drawer (⌘J). Usage and
@@ -108,8 +140,12 @@ reads while it is open plus whatever the log already holds.
 One drawer for everything waiting on you: owner-lane PRs the fleet may not
 merge, the Leader's class-C asks and questions, repos on owner hold, seats that
 need reconnecting, a grant about to expire, and the proposals that used to be
-Approvals. Splits: All, Approvals, Fleet, Chats, Accounts (`H`/`L` switch).
-`J`/`K` move, ↩ opens, `A` approves, `R` rejects, `V` vetoes, `E` marks done.
+Approvals. Cloud and Devin PRs arrive here too, each with a Clean or Held
+verdict and Land, Close and Update branch
+([Triage in Needs you](CLOUD.md#triage-in-needs-you)); a Leader question
+has **Answer**, which jumps to it in Mind. Splits: All, Approvals, Fleet,
+Chats, Accounts (`H`/`L` switch). `J`/`K` move, ↩ opens, `X` selects, `A`
+approves, `R` rejects, `V` vetoes, `E` marks done.
 Approve, reject and veto confirm first, then ask for the mutation token. An
 empty drawer says "All clear" with the fleet's status line.
 
@@ -123,6 +159,20 @@ actions. Guarded actions ("Stop running chats…", "Stop the fleet…") confirm,
 then ask for the token. Every palette entry, menu item, shortcut and key
 handler reads one catalog, `routes/verse/shell/command-catalog.ts`; its keys
 are written once in `command-keys.ts`, the half the first paint loads.
+
+Actions worth knowing by name:
+
+| Area | Palette entries |
+|---|---|
+| Leader | Message the Leader…, Add Leader directive… (both open Mind) |
+| Wiki | Open repo wiki… (⇥ picks a repo), Ask the codebase… |
+| Playbooks | Open Playbooks, Run playbook… |
+| Automations | Open Automations, New automation… |
+| Lanes | Run in cloud…, Run in Devin… (both open the composer's sheet; neither launches on its own) |
+| Autonomy | Autonomy: Off / Propose / Autonomous, Approve grant…, Re-approve grant…, Autonomy status, Stop the fleet…, Copy autonomy setup command |
+| Budget | Budget mode: All-in / Balanced / Reserve |
+| Chat | New chat, New chat on…, Stop running chats…, Create pull request…, Merge pull request… |
+| Panels | Open Resources, Show or hide the resource bar, Open Needs you, Keyboard shortcuts, each workbench pane, Focus mode, Move the panel (beside or below the chat) |
 
 ### Chat
 
@@ -320,27 +370,9 @@ icon, then the seat chip shows only its monogram, the permission mode only its
 icon, and last the pickers move into a **⋯** sheet. An option a seat cannot run
 is disabled with the reason.
 
-**Dock.** One pane or a vertical split of two, 320 px to 60 % of the window;
-a sheet below 1024 px and a bottom sheet on a phone.
-
-- **Terminal** (⌃`; ⌃⇧` for a new tab): a real login shell per tab in the
-  chat's folder, with copy on select, "Send selection to chat" and a
-  screen-reader mode. Up to 8 tabs; scrollback is 256 KB in memory only; a tab
-  idle for 12 h is closed; tabs survive a page reload. It needs the desktop app
-  (the sidecar's Bun runtime provides the pseudo-terminal). Under plain Node the
-  pane offers **Open in Terminal.app** instead.
-- **Preview** (⌘⇧B): loopback dev servers (`http://127.0.0.1:*`,
-  `http://localhost:*`) with back, forward, reload and a Desktop/375 frame. Its
-  dev-server list comes from `.claude/launch.json`, `package.json` scripts and
-  listening ports; **Start** runs the server in a Terminal tab and waits for the
-  port. The html, markdown, svg, image and pdf files the chat wrote open as
-  **artifacts** under a CSP sandbox, an opaque origin with no access to Verse's
-  cookies.
-- **Review** (⌘⇧D): This turn, Uncommitted or Branch, as a file tree with
-  unified or split diffs. The gutter's `+` adds a note; **Add to message** drafts
-  `path:line: note` into the composer.
-- **Tasks** lists the tools and subagents running in this turn and the other
-  running chats; **Context** is this chat's memory, roots and handoff.
+**Panel.** Terminal, Browser, Changes, Files, Sources, Reasoning, Tasks and
+Context live in the chat's panel; see
+[The workbench panel](#the-workbench-panel-315).
 
 **Branch bar and pull requests.** One bar per root with changes
 (`ashlr-hub  v310-foundation  +35,079 −1,074  [Create PR ▾]`). Its button
@@ -350,12 +382,147 @@ while a turn is running in that repository, so you never commit half an edit.
 **Isolate in worktree** in the new-chat dialog creates
 `~/.ashlr-worktrees/<repo>/<name>` on the branch `verse/<name>`.
 
+### The workbench panel (3.15)
+
+The conversation stays in the middle. The **panel** sits beside it or under it
+(⌘K "Move the panel (beside or below the chat)") and holds tabs and splits of
+**panes**. ⌘\ shows or hides it. Each chat remembers its own panel layout (the
+40 most recently opened chats); sizes and placement are shared by the window.
+Below 1024 px the panel is a sheet, and below 480 px a bottom sheet. A sheet
+restored open when the page loads closes with Esc even while the composer has
+focus.
+
+| Pane | Key | What it holds |
+|---|---|---|
+| Terminal | ⌃` (⌃⇧` new tab) | Your shells in the chat's folders, with command blocks, and a read-only Agent tab |
+| Browser | ⇧⌘B | A browser you and the chat's agents share |
+| Changes | ⇧⌘D | Every turn's checkpoint, a diff review, Accept / Reject, Undo and Redo |
+| Files | ⇧⌘O | The chat's folders, and the files it read or changed (a simple list for now) |
+| Sources | ⇧⌘S | Everything the chat's answers drew on, de-duplicated across the chat |
+| Reasoning | ⇧⌘Y | Every turn's reasoning in one scroll, with what the turn did |
+| Tasks, Context | — | Running tools and subagents; this chat's memory, roots and handoff |
+
+**Focus mode** (⇧⌘F, or ⌘K "Focus mode") hides the rail, the chat list and
+the panel and leaves the conversation. ⇧⌘F again, Esc outside a text field,
+or the **Exit focus** pill leaves it, and so does a pane key, which then shows
+that pane. Focus mode is not remembered across reloads, and leaving Chat ends
+it. A link of the form `/verse/?chat=<id>&pane=<pane>` opens a chat with a pane
+showing (use `pane=diff` for Changes); "Copy link to this chat" is in the chat
+menu. Other code can add a pane through the pane registry
+(`src/web-ui/routes/verse/panes/README.md`).
+
+**Terminal.** A real login shell per tab in the chat's folder, drawn with
+xterm on WebGL: ⌘F finds, ⌘-click opens a URL or a `file:line`, copy on
+select, and **Send selection** (secret-scrubbed) drafts into the message box.
+A tab holds at most two panes (⌘D splits right, ⌥⌘D down). Tabs, splits and
+scrollback survive a page reload. Up to 8 tabs; a tab idle for 12 hours is
+closed.
+
+- **Command blocks.** In zsh, bash and fish, each command becomes a block with
+  its command line, folder, duration, exit code and output (the tail, up to
+  256 KB per block and 4 MB per tab). Verse wires this up without editing your
+  dotfiles; other shells start as before, without blocks. A dot on each
+  prompt line opens the block's actions, ⌘↑ / ⌘↓ jump between commands, and
+  ⇧⌘K opens the **Blocks** view: Copy output, Send to chat, Explain and fix
+  (on a failed block), Paste command and Show in terminal.
+- **Agent tab.** Every shell command the chat's agents ran (Claude's Bash,
+  Codex's commands, local seats' commands), as blocks. It is read-only and
+  never re-runs anything; **Paste command** types a command at your prompt
+  and stops there.
+- **KILL.** With `~/.ashlr/KILL` engaged, agent terminal tabs are refused and
+  open ones are hung up. Your own shells stay open.
+- The Terminal needs the desktop app, whose Bun runtime provides the
+  pseudo-terminal. Under plain Node the pane says so.
+
+**Browser.** An address bar, back, forward and reload, up to 8 tabs, device
+sizes (fill, 1280, 820, 390), zoom, "Open in your browser", and the chat's dev
+servers one click away. In the desktop app each tab is a native webview, so
+any site loads, and the pane can take screenshots (macOS), show console
+output, errors and failed requests, and pick an element. In a browser tab or
+an older desktop shell it falls back to an `<iframe>` for loopback pages.
+**Send to chat** drafts the page, its logs, a picked element and a screenshot
+into the message box; it never sends. A per-chat switch, off by default, lets
+the chat's **Claude and local seats** look through the pane with five
+read-mostly tools (status, navigate, screenshot, read text, console), on
+localhost unless you allow another origin for that chat. Agents cannot click,
+type or submit. Details: [VERSE-BROWSER.md](VERSE-BROWSER.md).
+
+**Changes and checkpoints.** Before every agent turn, on every seat, Verse
+snapshots each repository the chat can reach into a hidden commit
+(`refs/ashlr/checkpoints/<chat>/<turn>/<root>/pre`), and again after it
+(`…/post`). Your index, stash, HEAD and branches are never touched. Files over
+8 MB, or past 128 MB in total, are skipped and listed; more than 20,000
+changed paths means no checkpoint for that turn, and the pane says so. The
+**Changes** pane has a **Turns | Git** switch:
+
+- **Turns** shows **This turn** (what the turn did) or **Since turn** / **All
+  turns** (checkpoint to what is on disk now), as a file tree with unified or
+  side-by-side diffs and word-level emphasis. A file changed after the agent
+  is marked **edited**; one too large to capture, **not captured**.
+- **Accept** or **Reject** per file (a file reject needs a second click) or
+  per hunk. Reject restores from the checkpoint; a hunk that moved is refused
+  rather than misapplied.
+- **Undo turn…**, **Rewind to before turn N…** and **Redo** always preview
+  first: what is restored, removed and left alone. A file you edited after
+  the agent gets a three-way choice: Merge both (only when the merge is
+  clean), Keep current or Use checkpoint. Apply is refused if anything changed
+  since the preview.
+- **Commit…** and **Open PR…** use the usual dialogs. **Git** is the
+  uncommitted and branch review, where the gutter's `+` adds a note and **Add
+  to message** drafts `path:line: note` into the composer.
+
+Reject, Undo and Redo are refused while this chat, or any chat whose folders
+overlap it, has a turn running. Every checkpoint and decision is recorded in
+`~/.ashlr/verse/checkpoints/<chat>.jsonl` (0600). `ASHLR_VERSE_CHECKPOINTS=0`
+in the server's environment turns checkpoints off.
+
+**Reasoning and Sources.** Every answer ends with numbered **Sources**: files
+read, with the line range the call proved (`parser.ts:12-51`), pages fetched,
+web searches, docs and wiki pages, and shared memory. A cited file opens in
+your editor at its line, confined to the chat's folders; when it cannot, the
+row jumps to the call that read it. A settled turn's footer says what it did
+in one line ("Read 8 files · edited 3 files (+42 −7) · ran 4 commands (1
+failed) · 2 web lookups"), and a seat that keeps its reasoning to itself says
+so. Local reasoning models that write `<think>…</think>` stream that as
+reasoning. The **Sources** pane lists every source the chat used, with the
+turns that cited it, filters and **Cite** into the message; **Reasoning**
+shows each turn's thinking in order. Past 40 turns the transcript keeps
+far-away turns as placeholders (the newest 10 and the running turn always
+render).
+
+### Every seat together (3.15)
+
+A line above the composer makes the seats work as one. **Auto** names the seat
+for this message and the one reason ("Qwen 27B (local) — quick explanation —
+free and private on this Mac."), using the seat router in interactive mode,
+where the fleet's reserves never bind you. **Send to** overrides it for one
+message; a message bound for another seat continues the conversation there
+with the zero-spend handoff note, and a change of seat is shown before it is
+sent. **Cheap-first** lets a local model draft and escalates a weak draft
+(failed, hedging, looping, cut off, no code for a code request) to a frontier
+seat with the draft quoted. **Compare** sends one prompt to 2–3 seats side by
+side and continues with the answer you pick; **Review with ‹seat›** asks a
+seat from another model family to review the last answer. The seat chip's
+**Continue on ‹seat›** hands off in one click; nothing is spent until Send.
+A local model's badge shows its context window, measured tokens/s, "On this
+Mac · private" for loopback runtimes, and **Warm up**. The meter shows tokens
+and API list-price equivalents across every seat the thread touched, and what
+cheap-first saved. Auto never picks a Devin or cloud seat, the line is hidden
+on Devin chats, and a local-only repository is routed over local seats only.
+On send, the message is labelled once by the
+[Jev decision layer](#the-jev-decision-layer-315) when it is installed, else
+by rules. Every turn still goes through the ordinary session routes and gates.
+
 ---
 
 ## Seats
 
 A seat is one place a turn can run: an **engine** plus the **account** (or local
-model) it is pinned to. Sessions are seat-bound — changing the seat on an
+model) it is pinned to. The engines are Claude Code, Codex, Grok and local; you
+get one seat per signed-in account, so two Codex accounts are two Codex seats
+side by side. Devin adds two chat seats, **Devin (cloud)** and **Devin (CLI)**
+(see [Devin](#devin-315)). Claude cloud sessions are a lane you hand a task to
+(Run in cloud), not a chat seat. Sessions are seat-bound — changing the seat on an
 existing chat starts a new session. To carry the work across, use **Continue in
 a fresh chat** (above) rather than starting cold.
 
@@ -491,25 +658,38 @@ the operator's view of it.
   the authority surface pauses autonomy ("authority code changed — re-approve")
   until one more Touch ID.
 
-**Current release status:** `ashlr authority setup` refuses before the wizard
-while service install, repair and restart authority is withheld. The production
-daemon and conductor have empty compiled trust roots, so live non-dry resident
-work remains dormant. The sequence below is the commissioning path once that
-authority becomes available:
+**Current status (3.15).** Autonomy ships dormant and is turned on by you, on
+macOS, in three moves: `ashlr authority setup` (custody helper, Secure
+Enclave key, trust root, `ashlr-fleet` App, Claude token, rulesets or local
+enforcement, first grant), then `ashlr authority resident start` typed in your
+own terminal, which installs the resident daemon under the grant
+([RESIDENT-RUNTIME.md](RESIDENT-RUNTIME.md)). A new grant starts on the
+**shadow** stage: the gates run on every proposal and record would-merges,
+and no repository merges until the ladder advances. On the maintainer's Mac a
+standing grant is active and the ladder is at stage 1 of 8 (shadow).
 
 ```sh
 ashlr authority setup --dry-run   # print every step and what it would do
-# ashlr authority setup           # currently refuses; future commissioning step
+ashlr authority setup             # do each step; pauses for what only you can do
 ashlr authority status            # grant, switch, Stop, rollout stage, ledger, custody
+ashlr authority resident start    # in your own terminal, with the grant active
+ashlr authority re-approve        # Touch ID, after a deploy that changed authority code
 ```
 
-Once admitted, `setup` is designed to do every step it can and stop for what
-no agent may do: the
-`sudo` install of the custody helper, Touch ID (key creation and the first
-grant), the two GitHub browser clicks for the `ashlr-fleet` App, `claude
+`setup` does every step it can and stops for what no agent may do: the `sudo`
+install of the custody helper, Touch ID (key creation and the first grant),
+the two GitHub browser clicks for the `ashlr-fleet` App, `claude
 setup-token`, and confirming the archive of the old `~/.ashlr/activation/`. It
-prints exactly what it did. Afterwards the only recurring step is one Touch ID
-per 30-day grant, or after an authority deploy.
+prints exactly what it did. Afterwards the recurring steps are one Touch ID per
+30-day grant, and one after installing a release that changed authority code
+(3.15 does: the lessons and Devin work grew the authority surface), followed by
+`ashlr authority resident stop` and `start` so the daemon runs the new build.
+The resident daemon still re-verifies the grant, Stop and the switch on every
+tick.
+
+Private repositories on GitHub's free plan cannot have rulesets. There, a grant
+uses **local enforcement** with the fleet App's host-verified `ashlr/verify`
+check, and `ashlr authority status` says which repos are enforced which way.
 
 ### Budget modes
 
@@ -540,13 +720,21 @@ types, reads or stores a credential.
 
 ### The Leader
 
-The Leader is the fleet's planning agent. It reads deterministic digests (fleet
-history, the ledger, seat headroom, model ROI, reasoning insights and its own
-hit-rate), never raw reasoning, and writes a memo: the bottleneck, one move with
-an expected result and a date, goals, standards, and questions for you. It runs
-daily and after notable events, at most three times a day, on Grok or a local
-model; Claude only for a weekly deep run that fits inside your reserve, and never
-Codex. With no standing grant it runs on free local models or not at all.
+The Leader is the fleet's planning agent, and since 3.14 you talk to it: one
+conversation across Mind (⌘4), Telegram and `ashlr leader say`, with standing
+directives, answers to its questions and early approvals. The full guide is
+[`docs/LEADER.md`](LEADER.md).
+
+It reads deterministic digests (fleet history, the ledger, seat headroom, model
+outcomes, reasoning insights, approved lessons and its own hit-rate), never raw
+reasoning, and writes a memo: the bottleneck, one move with an expected result
+and a date, goals, standards, and questions for you. It runs daily and after
+notable events, at most three full runs a day, plus check-ins every 2 hours in
+working hours when the evidence changed. Seats fall back Grok → fast local →
+large local, with Claude only for a weekly deep run that fits inside your
+reserve (or by opt-in), and never Codex. Failed runs retry at 15 minutes, 45
+minutes and 2 hours. With no standing grant it runs on free local models or not
+at all.
 From the CLI, `ashlr leader tick` is the same pass the daemon makes: it applies
 class-B actions whose veto window has passed, grades due moves, and starts a
 run only when one is due. `ashlr leader show`, `run` and `veto` cover the rest.
@@ -571,6 +759,17 @@ no longer runs the legacy Strategist or writes a briefing. The nightly
 Each move is graded after 7 days, and the grades are the Leader's hit-rate on
 Mind.
 
+**Founder mode (3.15).** The Leader speaks as a blunt, brief founder-operator
+(it never claims to be a real person) and can do more under the grant:
+launch a cloud or Devin task, add backlog work, keep its own notes, and save a
+new playbook or automation version, each with its class and veto window. On
+Telegram it sends a morning brief and an evening recap, answers "status" at
+once from recorded state, turns "go build X" into work, and asks one question
+at a time. Once a day it may pick up to three Ashlr Verse improvements of its
+own (at most one paid). Jev may add an advisory note to a memo when it thinks
+an action deserves a stricter class; the class the policy set always stands.
+Details: [LEADER.md](LEADER.md#founder-mode-315).
+
 ### Learning, reasoning data and experiments
 
 Reasoning from every chat and fleet run is stored as data, scrubbed of secrets
@@ -582,15 +781,244 @@ routing weights) are tested as paired experiments with a confidence interval
 against held-out tasks, adopted only through the gate, and rolled back
 automatically if a 48-hour canary falls below baseline.
 
+### Lessons: retros and approved knowledge (3.15)
+
+Every way a task ends now produces a short **retro**: a merge, a gate refusal,
+an owner-lane PR, a failed verify, a revert, a closed PR, a cloud task that
+merged, blocked, failed or expired, the same for Devin tasks, and a Leader
+action you vetoed or that was refused. A Devin chat that ends without a PR is
+not a failed task end. Retros come from a sweep over the last 30 days of what
+is already recorded (the authority ledger, the inbox, cloud and Devin task
+files and the Leader's action log), so nothing is hooked into the merge path,
+and re-sweeping writes nothing new. A sweep writes at most 40 new retros.
+
+Each retro has a stable root-cause code (for example `gate:files-over-cap`,
+`verify:typecheck`, `revert:ci-red`, `closed:by-mason`), what to do differently,
+a better prompt and **suggested knowledge**: short notes scoped to a repo, path
+globs and task kinds. Infrastructure causes (no required checks, verifier
+unavailable, cloud auth) are counted and charted but never become a lesson. An
+optional model pass (`foundry.retroModel`, **off by default**; local or Grok,
+never Claude, at most 12 calls a day) can refine a retro but never replace its
+cause. When Jev is set up, generic causes (`fleet:failed`, `cloud:unknown` and
+the like) also get a category from it; the codes themselves never change.
+
+**Suggested knowledge is used only after you approve it.** In **Growth ▸
+Lessons** you approve, edit then approve, or reject each note; a rejected note
+is never suggested again. Approved notes are added, only where their scope
+matches and within a 16 KiB cap that drops whole notes, to fleet goals, cloud
+briefs and the Leader's evidence. When nothing matches, the prompt is exactly
+what it was before. **Propose for AGENTS.md** files an ordinary fleet task that
+goes through every gate; it never writes to a repository directly. The Leader's
+veto lessons are read back into its evidence and into tasks the Leader started.
+
+Lessons shows recurring failure causes (stacked by fleet, cloud and Leader),
+the suggested-knowledge queue, recent retros (each expandable to its cause,
+next steps and better prompt), approved knowledge with hit counts, and Leader
+veto lessons. It loads separately, so Growth's first paint never waits on it.
+
+**When sweeps run.** `ashlr verse` sweeps in the background: first 5 minutes
+after start, then hourly, skipping a tick while a sweep is running or when the
+last one is under 10 minutes old. It runs only on the live console (not with
+`--no-accounts`) and never in the daemon. `ASHLR_RETRO_SWEEP_TIMER=0` in the
+server's environment turns the timer off. Opening Lessons also starts a sweep
+when the last one is over 10 minutes old, and **Sweep now** runs one
+immediately. Everything is stored under `~/.ashlr/learn/` (0700/0600), scrubbed
+of secrets, home paths and emails.
+
+## Repo wiki and Ask (3.15)
+
+**Gear ▸ Repo wiki**, ⌘K "Open repo wiki…" (⇥ picks a repo) or `ashlr wiki`
+keeps a private architecture wiki for each enrolled repository: an overview, a
+module map with the import graph and blast radius, key flows, data stores,
+commands, and "How to change X" guides for the most-imported modules or the
+areas you steer it toward. Each page is model prose on top of a deterministic,
+cited Reference section.
+
+- **Verified citations.** A `file:line` citation is kept only if the file is in
+  the repository and the line exists; anything else is removed and counted
+  ("N unverifiable removed"). A citation opens your editor at that line, or
+  GitHub at the commit the page was written from.
+- **Private.** Pages live only under `~/.ashlr/knowledge/wiki/<repo>/`, never in
+  the repository, and are secret-scrubbed when stored and again when served.
+- **Your models.** Generation uses the Leader's check-in seat plan: local models
+  first, Grok only when the grant lists that seat and the repo is not
+  local-only, **never Claude**. Global local-only mode, the reserve budget mode,
+  `foundry.wiki.localOnly`, `foundry.wiki.localOnlyRepos` or `"localOnly": true`
+  in the repo's steering file force local. With no allowed model, pages are
+  built from repository facts alone ("facts-only").
+- **Fresh and bounded.** "Generated at abc1234 · 3 pages stale" comes from git
+  blob ids; only pages whose inputs changed are rebuilt, within a page budget
+  (default 8) and a token budget (default 60k) per run. Builds run in the
+  background. Existing wikis refresh one stale repo at a time in the Verse
+  background (`foundry.wiki.autoRefresh=false` stops it).
+- **Steering.** `.ashlr/wiki.json` (include, exclude, focus, notes, ignorePaths,
+  pages, maxPages, localOnly). `.devin/wiki.json` is also read, so a
+  DeepWiki-style `repo_notes` and `pages` file works as is.
+
+**Ask the codebase** (⌘K "Ask the codebase…" or `ashlr wiki ask`) retrieves
+over wiki pages, the knowledge index and genome notes, and answers with
+citations. It says "not found" when those do not cover the question, and
+withholds an answer that has no verifiable citation. With no model it returns
+the best passages, cited.
+
+```sh
+ashlr wiki build [repo] [--all] [--force] [--no-model] [--pages N] [--tokens N]
+ashlr wiki status [repo]
+ashlr wiki show <repo> [page]
+ashlr wiki ask "where are standing grants verified?" [--repo <path|name>] [--no-model]
+```
+
+## Playbooks (3.15)
+
+A **playbook** is a reusable task template. It is Markdown with front-matter
+(`id`, `name`, `macro`, `description`, `kinds`, `repos`, `globs`, `auto`,
+`budget-usd`, `budget-minutes`, `done-when`) and up to six sections: Outcome
+and Procedure (required), Specifications, Advice, Forbidden actions and
+Required from user. Versions never change once written: they are stored as
+`~/.ashlr/playbooks/<id>/v<N>.md`, and an edit writes the next version.
+
+Seven starters ship built in, all with auto-match off:
+
+| Playbook | Macro |
+|---|---|
+| `fix-failing-test` | `!fix-test` |
+| `fix-issue` | `!fix-bug` |
+| `dependency-bump` | `!bump-deps` |
+| `add-tests-for-module` | `!add-tests` |
+| `docs-sync` | `!docs-sync` |
+| `perf-regression` | `!perf-fix` |
+| `security-fix` | `!security-fix` |
+
+**How a task gets one.** In order: it names a playbook (`id`, `!macro` or
+`id@v3`); its text contains a `!macro` (not inside code; an unknown `!word`
+is left alone); or, for fleet, cloud and Devin tasks only, it matches a
+playbook whose `auto` is on by kind, repo and globs. The rendered block is
+capped at 16 KiB, dropping optional sections whole. A task with no playbook
+gets exactly the prompt it got before.
+
+- **In any chat.** A `!macro` typed in a message runs its playbook on every
+  seat (Claude Code, Codex, Grok, local, Devin). The block is appended to what
+  the seat receives; your message is logged as you typed it, with a
+  **Playbook: ‹name› · v‹N›** chip under it. Chats never auto-match.
+- **In the lanes.** Fleet goals, cloud briefs, Devin prompts and the Leader's
+  `work.dispatch` carry the playbook, and every run records `id@version`, so
+  the Playbooks section can show merged, refused, reverted and failed counts
+  per version.
+- **In Verse.** Gear ▸ **Playbooks** lists them with a version picker, shows
+  each as an engine reads it with its outcomes, and saves an edit as a new
+  version ("Edit from vN" restores an older one). **Run…** writes the macro
+  into the message box. Typing `!` in the composer suggests macros, the ⋯
+  sheet has "Use playbook…", and ⌘K has "Open Playbooks" and "Run playbook…".
+
+```sh
+ashlr playbook list [--json]
+ashlr playbook show <id>[@vN] [--source] [--json]
+ashlr playbook new <id> [--file path] [--note "why"]
+ashlr playbook edit <id> [--file path] [--note "why"]
+ashlr playbook run <id>[@vN] [--repo owner/name] [--lane cloud|devin] [--task "text"] [--title t] [--base branch] [--json]
+```
+
+`run` goes through the same services and gates as `ashlr cloud launch` and
+`ashlr devin launch`.
+
+## Automations (3.15)
+
+An **automation** is a standing instruction: when its trigger fires, send one
+task to one lane through that lane's own entry point.
+
+| Trigger | Notes |
+|---|---|
+| GitHub issues or PRs | By labels (all must match) and/or a search query. With a query and no label, only issues from the repo's owner, members and collaborators fire. |
+| Red default branch | Failing checks on the head commit, once per commit. |
+| Schedule | A subset of RRULE (hourly, daily, weekly, monthly, with interval, days, hours and minutes), in local time. |
+| Local webhook | `POST /api/verse/automations/<id>/webhook`, loopback only, with the mutation token. |
+| Telegram | `/task <owner/repo> <text>` |
+
+| Lane | What it does |
+|---|---|
+| `fleet` | Queues a fleet task that the daemon runs under the standing grant and the merge gates. |
+| `cloud` | Launches a cloud task as self-improvement, so the self-improvement switch, daily cap and reserve apply. |
+| `devin` | Launches a Devin session through the fleet entry point: opt-in, grant and fleet budget. |
+| `leader-review` | Puts the item in Needs you; Approve sends it through the same gates. |
+
+A firing is held back, never forced, by KILL and Stop, a standing grant that
+covers the repo, the automation's own limits (in flight, per day, a monthly
+spend cap) and then the lane's gates. The same source item makes one task per
+automation, remembered for 30 days. Optional Jev triage may pick a lane from
+an allowed list, a playbook, or send a doubtful item to review; it can never
+drop work. Verse checks triggers every minute on the live console
+(`ASHLR_AUTOMATIONS_AUTO=0` turns that off). Firings are recorded in
+`~/.ashlr/automations/firings.jsonl` with links to the source and the lane's
+task.
+
+Gear ▸ **Automations** lists each automation's last and next firing, queue,
+in flight, today, spend and success rate, with on/off, Run now, Dry run, Edit
+and Delete, and says why nothing dispatches when KILL is on or no grant
+covers it. New automations start from four templates, all **disabled**: fix
+issues labelled `ashlr` (fleet), a nightly flaky-test hunt (cloud), weekly
+dependency bumps (fleet) and fix a red main (cloud). ⌘K has "Open
+Automations" and "New automation…".
+
+```sh
+ashlr automations list [--json]
+ashlr automations templates
+ashlr automations add --template <id> [--name "…"] [--repos o/n,o/n|*] [--lane <lane>] [--enable]
+ashlr automations add --file <automation.json> [--enable]
+ashlr automations enable <id> | disable <id> | remove <id>
+ashlr automations fire <id> [--dry-run] [--repo o/n] [--text "…"] [--title "…"]
+```
+
+## The Jev decision layer (3.15)
+
+Jev is TypeSafe AI's fast classification model. `src/core/decide/` is one
+layer every call site goes through, with the same rules everywhere: a
+deterministic fallback is always there, each kind has a confidence gate,
+answers are cached, a daily paid-call budget applies (1,500 by default), and
+`ASHLR_JEV_DISABLE=1` or `ASHLR_CLASSIFY_DISABLE=1` turns it off. Without a
+key, nothing is sent and the rules decide. Nothing it says touches the risk
+checks, merge authority or the G-gates; safety-adjacent kinds are advisory or
+can only escalate. Each decision is logged to
+`~/.ashlr/jev/decisions/YYYY-MM-DD.jsonl` without the text it classified.
+
+Where it is asked today:
+
+| Kind | Where |
+|---|---|
+| engine-error | Classifying sandboxed-engine failures |
+| completion-claim | Checking completion claims in the merge passes |
+| task-class | Reflection goals, retro task kinds and swarm playbook distillation; the chat's Auto seat label |
+| judge-verdict, taste-verdict, red-team-verdict | Reading what the fleet's judge, taste critic and red team said (red team: can only add a finding) |
+| retro-root-cause | Categorising generic retro causes |
+| needs-you-priority | Ordering Needs you within a severity band, in the background |
+| interrupt-worthiness | Whether a landed revert is worth a Telegram ping |
+| lane-choice | "Go build X" on the Leader's line; the Devin fleet launcher (can only narrow) |
+| trigger-triage | Automations with triage on |
+| action-class | Advisory notes on Leader memos (never lowers a class) |
+| operator-intent | Classifying what you text the Leader (never invents an approval) |
+
+`ashlr jev status [--json]` and `ashlr jev test "<text>" [--kind …]` show what
+it is doing; the Resources drawer has a Jev card and Usage a "Jev decisions"
+panel. Cost figures are estimates. Thresholds, bounds and file locations:
+[JEV-INTEGRATION.md](JEV-INTEGRATION.md#the-decision-layer-srccoredecide).
+
 ## Resources: the drawer and the bar (3.11)
 
 - **Resources drawer (⌘.).** Open it from the edge tab, the rail button or "Open Resources" in ⌘K. It holds one
   card per resource:
   - every Claude, Codex and Grok account, with its 5-hour and weekly windows, the share kept for you, reset times,
     and Reconnect / Check again;
-  - the local runtime and its models, with their context windows;
-  - the cloud credits.
-  It opens as an overlay or pins as a column, and remembers which.
+  - the local runtime and its models, with their context windows (one Local card
+    spans Ollama, LM Studio and llama-server);
+  - the cloud credits, the **Devin** card (3.15; see [Devin](#devin-315)) and
+    the **Jev** card (decisions today by kind, confidence, fallback rate and
+    estimated cost; see [The Jev decision layer](#the-jev-decision-layer-315)).
+  It opens as an overlay or pins as a column, and remembers which. While a chat
+  turn is running, ⌘. in the composer stops the turn instead.
+- **Readiness lines (3.14).** Every card says whether the resource is usable in
+  each place, with the fixing command when it is not: "Chat: ready / why" and
+  "Fleet: ready · reserve kept / why". A seat can be ready for your chats but
+  not for the fleet, for example while its window is inside the reserve kept
+  for you, or when there is no standing grant.
 - **Resource bar.** It sits in the rail foot and is always on:
   - one battery per resource, showing how much of its binding window is left;
   - green when usable, amber when low, red when spent or signed out;
@@ -647,6 +1075,37 @@ estimated credits fall below the $40 reserve. The Cloud card's switch, or
 `ashlr cloud budget --self-improve off`, stops that. `ASHLR_CLOUD_AUTO=0` in the
 server's environment stops the scheduler entirely. Fleet's lanes row shows
 "Cloud · N running".
+
+**Cloud PRs and the gates (3.13).** Under a standing grant, a cloud PR on a
+granted repository is taken in by the standing merge pass and can land only
+through G0–G7, from the fleet App's own PR. Everything else is triaged in Needs
+you. See [Intake into the standing gates](CLOUD.md#intake-into-the-standing-gates-313).
+
+## Devin (3.15)
+
+Devin (Cognition) shows up in four places. Everything except the CLI seat is
+off until you run `ashlr devin connect`; the CLI seat appears once the `devin`
+binary is installed.
+
+- **Chat seats.** **Devin (cloud)** runs one Devin session per chat, with its
+  replies, status, PR cards and ACU reading in the transcript. **Devin (CLI)**
+  drives the `devin` agent on this Mac; Verse checks that it is installed and
+  logged in before each turn and says what to run if not. The Auto seat line
+  is hidden on Devin chats.
+- **A lane.** **Run in Devin** in the composer's ⋯ sheet and in ⌘K, or `ashlr
+  devin launch`. Each session must deliver one PR from `ashlr-devin/<taskId>`
+  with an `ashlr-devin-report` block, capped at a per-session ACU limit.
+- **The fleet.** Under a grant that names Devin (with the fleet opt-in and a
+  custody helper new enough to sign it), the daemon may launch Devin on
+  well-scoped backlog work, at most 1 at a time and 3 a day by default.
+- **Needs you.** Devin PRs get the same Clean or Held verdict, Land, Close,
+  Update branch, Land all clean and Evidence as cloud PRs. Under a grant they
+  go through the standing gates, where a Devin PR merges only if the stage
+  names Devin and judges from two different model families approved it;
+  otherwise the gates record a would-merge and the PR waits for you.
+
+Setup (plan, training opt-out, GitHub integration, service user, `ashlr devin
+connect`, ACU budget, the CLI) and limits: [`docs/DEVIN.md`](DEVIN.md).
 
 ## Fleet ▸ Advanced — the daemon cockpit
 
@@ -836,6 +1295,7 @@ the same catalog the handlers use.
 | ⌘1 – ⌘5 | Command, Fleet, Growth, Mind, Chat |
 | ⌘K | Command palette |
 | ⌘J | Needs you |
+| ⌘. | Resources drawer (in the composer while a turn runs: stop the turn) |
 | ⌘N | New chat |
 | ⌘, / ⌘/ | Settings / keyboard shortcuts |
 | ⌘[ / ⌘] | Back / forward through surfaces and chats |
@@ -846,9 +1306,11 @@ In Chat:
 
 | Keys | Action |
 |---|---|
-| ⌘\ | Show or hide the dock |
+| ⌘\ | Show or hide the panel |
 | ⌃` / ⌃⇧` | Terminal / new terminal tab |
-| ⌘⇧B / ⌘⇧D | Preview / Review changes |
+| ⇧⌘B / ⇧⌘D / ⇧⌘O | Browser / Changes / Files |
+| ⇧⌘S / ⇧⌘Y | Sources / Reasoning |
+| ⇧⌘F | Focus mode (Esc outside a text field leaves it) |
 | ⌘B / ⌘F | Chat list / find in chat |
 | ⌥↑ / ⌥↓ | Previous / next turn |
 | ⌘⇧M / ⌘⇧I / ⌘⇧E | Permission mode / model / effort |
@@ -856,10 +1318,13 @@ In Chat:
 | ↩ | Send (queues while a turn runs, up to 3) |
 | ⇧↩ | Newline |
 | ⌘⇧↩ | Stop the running turn and send |
-| Esc | Stop the running turn (only from an empty composer with no overlay open) |
+| Esc | Stop the running turn (only from an empty composer with no overlay open); closes a panel sheet restored open on a narrow window |
 
-In the Needs-you drawer: `J`/`K` move, ↩ opens, `A` approve, `R` reject,
-`V` veto, `E` done, `H`/`L` switch splits. On a focused chart card: `T` shows it
+In the Terminal pane: ⌘D / ⌥⌘D split right / down, ⌘F find, ⌘↑ / ⌘↓
+previous / next command, ⇧⌘K the Blocks view.
+
+In the Needs-you drawer: `J`/`K` move, ↩ opens, `X` select, `A` approve,
+`R` reject, `V` veto, `E` done, `H`/`L` switch splits. On a focused chart card: `T` shows it
 as a table.
 
 Desktop app only, from the macOS menu bar:
@@ -1109,15 +1574,22 @@ launches the staged sidecar, so run steps 1–2 first.
   deterministic handoff note across. Beyond that note and the shared project
   memory, a session knows only what its own vendor conversation holds.
 - Permission modes are Plan, Accept edits (default), Auto and Bypass. Verse does
-  not surface per-tool approval prompts yet ("Ask" mode arrives in 3.11); use
+  not surface per-tool approval prompts yet; use
   the CLI directly when you want to approve each tool call.
-- The Terminal pane needs the desktop app (Bun's pseudo-terminal). A browser
-  tab against `ashlr verse` under Node gets **Open in Terminal.app** instead.
-- Preview frames loopback dev servers only. Anything else opens in your
-  browser. Side chats, split sessions, hunk staging and multi-seat compare are
-  deferred to 3.11.
-- No virtualized transcript. Very long sessions render every event — continue in
-  a fresh chat when the handoff banner appears anyway.
+- The Terminal pane needs the desktop app (Bun's pseudo-terminal). Under plain
+  Node the pane says so. A terminal tab holds at most two visible panes.
+- The Browser pane loads any site only in the desktop app with the current
+  shell; elsewhere it frames loopback dev servers and opens anything else in
+  your browser. Agents get its tools only on Claude and local seats, and
+  cannot click or type. See [VERSE-BROWSER.md](VERSE-BROWSER.md).
+- The Files pane is a simple list of folders and touched files, not a file
+  browser yet. Side chats and split sessions are not built yet.
+- Past 40 turns the transcript renders far-away turns as placeholders, but a
+  very long session still costs context — continue in a fresh chat when the
+  handoff banner appears.
+- `!macro` runs a playbook in any chat, but a chat never auto-matches one.
+- Devin (CLI) chats report no usage, so they are not counted in the Devin
+  budget, and their PRs get only Dismiss in Needs you.
 - Verse never compacts, summarizes or switches context mode on its own. The
   CLIs compact themselves; Verse shows it. **Compact now** is the operator's, on
   Claude and local sessions only; it was verified headless on a local seat and not
@@ -1136,13 +1608,20 @@ launches the staged sidecar, so run steps 1–2 first.
   system dictation in the desktop app.
 
 **Autonomy**
-- Autonomy is dormant in the current production build. `ashlr authority setup`
-  currently refuses before the wizard, and the compiled daemon and conductor
-  trust roots are empty. A future admitted setup must install the custody
-  helper, compile a key into the trust roots and obtain a signed grant before
-  live resident work can run.
-- Claude as a fleet **producer** waits for a credential proxy (3.11). In 3.10
-  Claude only judges and runs the Leader, with no tools.
+- Autonomy is dormant until you act: it needs the custody helper, your key
+  compiled into the standing-grant trust roots, a Touch ID grant and
+  `ashlr authority resident start`. It is macOS-only. A new grant starts at
+  shadow, where nothing merges. The legacy permit-based daemon and conductor
+  roots stay empty; the resident daemon runs only under a standing grant.
+- Installing a release that changes authority code pauses the grant until
+  `ashlr authority re-approve` (Touch ID).
+- Claude as a fleet **producer** waits for a credential proxy. Claude judges
+  and runs the Leader, with no tools; Claude cloud sessions are a separate
+  lane whose PRs go through the same gates.
+- A Devin PR merges only under a grant whose stage names Devin and with two
+  judges from different families; otherwise it is shadow. Fleet use of Devin
+  needs custody helper 1.1.0 or later and a grant that names it
+  ([DEVIN.md](DEVIN.md#limits)).
 - Caps bound spend per day, not per task. A single expensive dispatch can still
   consume a large share of the day's budget before the meter catches up.
 - Spend figures are the hub's own accounting, not the vendor's billing. Treat
