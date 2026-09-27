@@ -733,6 +733,104 @@ export interface VerseTerminalTab {
   /** Opened from Apps' [Launch ▸] or Preview's dev-server Start, when it was. */
   appId: string | null;
   devServerId: string | null;
+  /**
+   * 3.15: the shell's current directory, as its shell integration last
+   * reported it (OSC 7 / OSC 633 P;Cwd). Null until reported, or when the
+   * shell runs without integration.
+   */
+  cwd?: string | null;
+  /**
+   * 3.15: whether command blocks come from this shell. `active` once the
+   * injected integration has drawn its first prompt marker; `injected` while
+   * it is loading; `off` for a shell it does not support (sh, ksh…) or when
+   * it was turned off.
+   */
+  shellIntegration?: VerseTerminalShellIntegration;
+  /** 3.15: the tab runs an agent (Apps [Launch ▸]) — hung up when the kill switch is engaged. */
+  agent?: boolean;
+}
+
+export type VerseTerminalShellIntegration = 'active' | 'injected' | 'off';
+
+/** Per tab: how many finished blocks keep their metadata (their OUTPUT has a byte budget of its own). */
+export const VERSE_TERMINAL_MAX_BLOCKS = 500;
+/** Per block, the output kept (the LAST bytes: an error is at the end). */
+export const VERSE_TERMINAL_BLOCK_OUTPUT_BYTES = 256 * 1024;
+/** Per tab, all blocks' output together; the oldest blocks' output goes first. */
+export const VERSE_TERMINAL_BLOCKS_TOTAL_BYTES = 4 * 1024 * 1024;
+
+/**
+ * 3.15 — one command the operator ran in a terminal tab, cut from the byte
+ * stream by the shell integration's OSC 133 markers (A prompt, B input,
+ * C executed, D;<exit> finished) and OSC 633 E (the command line, nonce-checked
+ * so program output cannot forge one).
+ *
+ * `startSeq`/`ordinal` place the block's C marker in the output stream: the
+ * `ordinal`-th C marker inside output frame `startSeq`. The page uses that to
+ * pin an xterm marker to the exact line the command started on.
+ */
+export interface VerseTerminalBlock {
+  /** `b-<n>`, unique within its tab. */
+  id: string;
+  tabId: string;
+  /** The command line as typed; '' when the shell did not say and nothing could be read back. */
+  command: string;
+  /** Where it ran, when the integration reported it. */
+  cwd: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number | null;
+  /** Null while running, or when the shell never reported one (a prompt redrawn without D). */
+  exitCode: number | null;
+  state: 'running' | 'done';
+  startSeq: number;
+  ordinal: number;
+  /** Bytes of output captured (before truncation). */
+  outputBytes: number;
+  /** The kept output is the tail only. */
+  truncated: boolean;
+  /** Output dropped to stay inside the tab's budget (metadata kept). */
+  evicted: boolean;
+  /** The command switched to the alternate screen (vim, less, htop): its output is not a transcript. */
+  fullscreen: boolean;
+}
+
+/** GET /api/verse/terminal/:id/blocks */
+export interface VerseTerminalBlocksResponse {
+  blocks: VerseTerminalBlock[];
+}
+
+/**
+ * GET /api/verse/terminal/:id/blocks/:blockId?format=ansi|text|chat
+ *   ansi — the bytes as the shell wrote them (UTF-8), for the block view;
+ *   text — escape sequences and carriage-return redraws removed ("Copy output");
+ *   chat — `text`, then every recognised secret replaced by [REDACTED] (scrubSecrets),
+ *          the command line too. The ONLY form that may be sent to a chat seat.
+ */
+export type VerseTerminalBlockOutputFormat = 'ansi' | 'text' | 'chat';
+export interface VerseTerminalBlockOutputResponse {
+  block: VerseTerminalBlock;
+  /** The command, scrubbed when format=chat. */
+  command: string;
+  output: string;
+  truncated: boolean;
+}
+
+/** POST /api/verse/terminal/redact { text } → { text } — "Send selection to chat" goes through the same scrub. */
+export const VERSE_TERMINAL_REDACT_PATH = '/api/verse/terminal/redact';
+export const VERSE_TERMINAL_REDACT_MAX_BYTES = 256 * 1024;
+
+/**
+ * POST /api/verse/terminal/:id/open-file { path, line?, column? } → { ok: true }
+ * A `file:line[:col]` link clicked in the terminal. Relative paths resolve
+ * against `cwd` (the block's or the tab's); the file must resolve INSIDE one
+ * of the tab's chat roots, and opens in the operator's configured editor.
+ */
+export interface VerseTerminalOpenFileRequest {
+  path: string;
+  line?: number;
+  column?: number;
+  cwd?: string;
 }
 
 /** GET /api/verse/terminal. `available: false` under Node (no Bun PTY) — `reason` says "needs the desktop app". */
@@ -759,6 +857,13 @@ export interface VerseTerminalCreateRequest {
   via?: VerseTerminalLaunchVia;
   model?: string;
   devServerId?: string;
+  /**
+   * 3.15: start in this directory instead of the root — a split opening where
+   * its neighbour is. Must resolve inside `root` (or the chat's primary root).
+   */
+  cwd?: string;
+  /** 3.15: false = no shell integration for this tab (no command blocks). Default true. */
+  shellIntegration?: boolean;
   cols: number;
   rows: number;
 }
@@ -794,6 +899,20 @@ export type VerseTerminalFrame =
   | { type: 'output'; seq: number; dataBase64: string }
   | { type: 'title'; title: string }
   | { type: 'exit'; code: number | null; signal: string | null };
+
+/**
+ * 3.15 — everything the stream may carry: the 3.10 frames plus the shell
+ * integration's. A 3.10 client ignores the new event types (its parser
+ * returns null for them), so the stream stays compatible.
+ */
+export type VerseTerminalStreamFrame =
+  | VerseTerminalFrame
+  /** A block started or finished (the whole record each time). Replayed on subscribe. */
+  | { type: 'block'; block: VerseTerminalBlock }
+  /** The shell's directory changed. */
+  | { type: 'cwd'; cwd: string }
+  /** Shell integration came up. */
+  | { type: 'integration'; state: VerseTerminalShellIntegration };
 
 // ===========================================================================
 // §6 Preview (C4)
