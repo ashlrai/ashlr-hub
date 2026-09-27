@@ -24,7 +24,7 @@
  * path in the tooltip. The disclosure glyph is the same ▸ the activity row
  * and the reasoning row use, so every foldable line opens the same way.
  */
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { CommandOutput } from './chat/CommandOutput.js';
 import { LiveTimer } from './chat/LiveTimer.js';
 import { DiffBlock } from './chat/DiffBlock.js';
@@ -53,6 +53,33 @@ export interface ToolUseCardProps {
 }
 
 const MAX_OUTPUT_CHARS = 20_000;
+/** Changed lines previewed under a collapsed edit (V3.15). */
+const MINI_DIFF_LINES = 3;
+const MINI_DIFF_LINE_CHARS = 140;
+
+export interface MiniDiffLine { sign: '+' | '-'; text: string }
+
+/**
+ * The first few CHANGED lines of a unified diff — what a collapsed edit row
+ * previews so a scan down the timeline shows what each edit did without a
+ * click. Headers and context lines are skipped; `more` is the exact count of
+ * changed lines not shown.
+ */
+export function miniDiffPreview(diffText: string, max = MINI_DIFF_LINES): { lines: MiniDiffLine[]; more: number } {
+  const lines: MiniDiffLine[] = [];
+  let changed = 0;
+  for (const line of diffText.split('\n')) {
+    if (line.startsWith('+++') || line.startsWith('---')) continue;
+    const sign = line[0];
+    if (sign !== '+' && sign !== '-') continue;
+    changed += 1;
+    if (lines.length < max) {
+      const text = line.slice(1);
+      lines.push({ sign, text: text.length > MINI_DIFF_LINE_CHARS ? `${text.slice(0, MINI_DIFF_LINE_CHARS - 1)}…` : text });
+    }
+  }
+  return { lines, more: changed - lines.length };
+}
 
 export function ToolUseCard({ name, input, result, toolUseId, durationMs = null, facts, startedAt = null }: ToolUseCardProps) {
   const derived = useMemo(
@@ -60,13 +87,21 @@ export function ToolUseCard({ name, input, result, toolUseId, durationMs = null,
     [facts, name, input, result],
   );
   const show = useDisplayPath();
+  const [open, setOpen] = useState(false);
   // A file call names its file, relative to the chat's roots — never the
   // 96-character head of an absolute path whose filename the cut dropped. A
-  // shell run keeps its command line verbatim.
+  // shell run keeps its command line verbatim. V3.15: a web call names its
+  // query or its page (domain + path), a subagent call its brief.
   const target = derived.command ? null : derived.paths[0] ?? null;
-  const summary = target === null
-    ? summarizeToolInput(input)
-    : `${show(target)}${derived.paths.length > 1 ? ` +${derived.paths.length - 1}` : ''}`;
+  const summary = target !== null
+    ? `${show(target)}${derived.paths.length > 1 ? ` +${derived.paths.length - 1}` : ''}`
+    : derived.web
+      ? derived.web.mode === 'search' && derived.web.query
+        ? derived.web.query
+        : derived.web.url ?? derived.web.query ?? summarizeToolInput(input)
+      : derived.task?.description
+        ? `${derived.task.agent ? `${derived.task.agent}: ` : ''}${derived.task.description}`
+        : summarizeToolInput(input);
   const isError = derived.failed || result?.isError === true;
   const pending = result === null;
   const state = pending
@@ -82,6 +117,11 @@ export function ToolUseCard({ name, input, result, toolUseId, durationMs = null,
     () => (derived.diff ? countDiffLines(derived.diff.text) : null),
     [derived.diff],
   );
+  // V3.15: a collapsed edit previews its first changed lines under the row.
+  const mini = useMemo(
+    () => (derived.diff && (derived.action === 'edit' || derived.action === 'create') && !derived.command ? miniDiffPreview(derived.diff.text) : null),
+    [derived.diff, derived.action, derived.command],
+  );
   const output = result
     ? result.output.length > MAX_OUTPUT_CHARS
       ? `${result.output.slice(0, MAX_OUTPUT_CHARS)}\n… (${result.output.length - MAX_OUTPUT_CHARS} more characters)`
@@ -89,12 +129,14 @@ export function ToolUseCard({ name, input, result, toolUseId, durationMs = null,
     : '';
 
   return (
+    <>
     <details id={toolAnchorId(toolUseId)} className={`${styles.tool} ${isError ? styles.toolFailed : ''}`}
-      data-state-key={`tool:${toolUseId}`} data-action={derived.action}>
+      data-state-key={`tool:${toolUseId}`} data-action={derived.action}
+      onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary className={styles.toolLine} aria-label={`${name}${summary ? `: ${summary}` : ''} (${state})`}>
         <span className={styles.toolGlyph} aria-hidden="true" />
         <span className={styles.toolName}>{name}</span>
-        {summary ? <span className={styles.toolArg} title={target ?? summary}>{summary}</span> : null}
+        {summary ? <span className={styles.toolArg} title={target ?? derived.web?.url ?? summary}>{summary}</span> : null}
         {delta && (delta.additions > 0 || delta.deletions > 0) ? (
           <span className={styles.toolDelta} aria-hidden="true">
             {delta.additions > 0 ? <span className={styles.toolAdd}>+{delta.additions}</span> : null}
@@ -109,6 +151,17 @@ export function ToolUseCard({ name, input, result, toolUseId, durationMs = null,
         <ToolBody input={input} output={output} facts={derived} pending={pending} isError={isError} />
       </div>
     </details>
+    {mini && !open && mini.lines.length > 0 ? (
+      <div className={styles.miniDiff} aria-hidden="true" data-kind="mini-diff">
+        {mini.lines.map((line, i) => (
+          <div key={i} className={line.sign === '+' ? styles.miniAdd : styles.miniDel}>
+            <span className={styles.miniSign}>{line.sign === '+' ? '+' : '−'}</span>{line.text || ' '}
+          </div>
+        ))}
+        {mini.more > 0 ? <div className={styles.miniMore}>{mini.more} more changed line{mini.more === 1 ? '' : 's'}</div> : null}
+      </div>
+    ) : null}
+    </>
   );
 }
 

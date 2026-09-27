@@ -716,9 +716,56 @@ export type VerseEvent =
    * a TURN boundary (never mid-turn). `turnId` is always null — it is present
    * only so code reading `event.turnId` across the union keeps typechecking.
    */
-  | { seq: number; at: string; type: 'history-truncated'; turnId: null; droppedBefore: number };
+  | { seq: number; at: string; type: 'history-truncated'; turnId: null; droppedBefore: number }
+  // ── V3.15 PERSISTED (additive) ────────────────────────────────────────────
+  /**
+   * Where information reached the agent from, when that is NOT already
+   * visible as a tool call: context the engine injected, or a source a
+   * remote seat (Devin) reported. Sources a tool call proves — a Read, a
+   * WebFetch — are DERIVED from the call at read time (core/verse/trace.ts
+   * `sourcesFromToolCall`) and never persisted twice. `turnId` null = the
+   * whole chat. Older clients drop an unknown type; older logs never carry it.
+   */
+  | { seq: number; at: string; type: 'source'; turnId: string | null; source: VerseSource };
 
 export type VerseEventType = VerseEvent['type'];
+
+/**
+ * V3.15. What kind of thing an agent drew on.
+ *  - `file`      a file in (or near) the workspace it read;
+ *  - `url`       a web page it fetched (or a search result it was handed);
+ *  - `search`    a web search it ran (the query is the source);
+ *  - `doc`       documentation: a repo doc (*.md) or a repo-wiki page (#537);
+ *  - `memory`    shared project memory (MEMORY.md) offered to the chat;
+ *  - `knowledge` approved lessons / playbooks (#535) put in front of it.
+ */
+export type VerseSourceKind = 'file' | 'url' | 'search' | 'doc' | 'memory' | 'knowledge';
+
+/**
+ * V3.15. One source, normalized across seats. Everything but `kind`, `ref`,
+ * `title` and `origin` is optional and ABSENT when unknown — never guessed.
+ */
+export interface VerseSource {
+  kind: VerseSourceKind;
+  /** Dedupe key within a chat: the path for file-ish kinds, the normalized URL, `search:<query>`. */
+  ref: string;
+  /** Short human label (a basename, a page title, the query). */
+  title: string;
+  /** Who vouches for it: derived from a tool call, injected by the engine, or reported by the seat. */
+  origin: 'tool' | 'engine' | 'agent';
+  path?: string;
+  /** 1-based inclusive line range the agent actually saw, when the call (or its output) says so. */
+  lineStart?: number;
+  lineEnd?: number;
+  url?: string;
+  /** `example.com` (no `www.`), for URL sources. */
+  domain?: string;
+  query?: string;
+  /** The tool call that produced it (origin `tool`). */
+  toolUseId?: string;
+  /** One plain-language line of context ("offered on every turn"). */
+  detail?: string;
+}
 
 /** V3.10. `summary` = vendor-summarised reasoning, `raw` = verbatim, `progress` = a heading/placeholder only. */
 export type VerseThinkingKind = 'summary' | 'raw' | 'progress';

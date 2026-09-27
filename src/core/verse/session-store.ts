@@ -253,6 +253,27 @@ function isSession(value: unknown): value is VerseSession {
  * persisted types are checked in full for the same reason; a TRANSIENT type
  * on disk is invalid by definition (it was never meant to replay).
  */
+const VERSE_SOURCE_KIND_SET: ReadonlySet<string> = new Set(['file', 'url', 'search', 'doc', 'memory', 'knowledge']);
+const VERSE_SOURCE_ORIGINS: ReadonlySet<string> = new Set(['tool', 'engine', 'agent']);
+
+/**
+ * V3.15 `source` payload. Kept HERE rather than imported from ./trace.ts
+ * (which carries the same check as `isVerseSource`): this store sits in the
+ * Tier-1 authority import closure, and a validator is not worth growing it.
+ * test/verse-trace.test.ts pins the two to the same verdicts.
+ */
+export function isPersistedVerseSource(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  const optString = (key: string, max: number) => value[key] === undefined || (typeof value[key] === 'string' && (value[key] as string).length <= max);
+  const optLine = (key: string) => value[key] === undefined || (typeof value[key] === 'number' && Number.isInteger(value[key]) && (value[key] as number) > 0);
+  return typeof value['kind'] === 'string' && VERSE_SOURCE_KIND_SET.has(value['kind'])
+    && typeof value['ref'] === 'string' && value['ref'].length > 0 && value['ref'].length <= 4096
+    && typeof value['title'] === 'string' && value['title'].length <= 1024
+    && typeof value['origin'] === 'string' && VERSE_SOURCE_ORIGINS.has(value['origin'])
+    && optString('path', 4096) && optString('url', 2048) && optString('domain', 255) && optString('query', 2048)
+    && optString('toolUseId', 256) && optString('detail', 1024) && optLine('lineStart') && optLine('lineEnd');
+}
+
 function isEvent(value: unknown): value is VerseEvent {
   if (!isObject(value)
     || !isFiniteNumber(value['seq'])
@@ -263,6 +284,8 @@ function isEvent(value: unknown): value is VerseEvent {
   switch (value['type']) {
     case 'history-truncated':
       return turnId === null && isFiniteNumber(value['droppedBefore']);
+    case 'source':
+      return (turnId === null || typeof turnId === 'string') && isPersistedVerseSource(value['source']);
     case 'recovered':
       return (turnId === null || typeof turnId === 'string')
         && typeof value['how'] === 'string' && VERSE_RECOVERY_HOWS.has(value['how'])

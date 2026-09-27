@@ -26,10 +26,15 @@
  */
 import type { ToolGroupItem, ToolGroupMember } from '../verse-store.js';
 import { formatDuration } from '../verse-model.js';
+import { isWebSearchTool } from '../../../../core/verse/trace.js';
 import { actionForName, type ToolAction, type ToolFacts } from './tool-semantics.js';
 
-/** Per-action counts for one group. Thinking members are not counted: they are not work. */
-export type ActionCounts = Record<ToolAction, number>;
+/**
+ * Per-action counts for one group. Thinking members are not counted: they
+ * are not work. V3.15: a web SEARCH is counted apart from a page fetch —
+ * "fetched 1 page" for a query was simply untrue.
+ */
+export type ActionCounts = Record<ToolAction | 'websearch', number>;
 
 export interface ActivitySummary {
   counts: ActionCounts;
@@ -48,13 +53,14 @@ export interface ActivitySummary {
 }
 
 /** Display order and wording; every clause names its noun. */
-const CLAUSES: ReadonlyArray<{ action: ToolAction; verb: string; noun: string; plural: string }> = [
+const CLAUSES: ReadonlyArray<{ action: keyof ActionCounts; verb: string; noun: string; plural: string }> = [
   { action: 'command', verb: 'ran', noun: 'command', plural: 'commands' },
   { action: 'read', verb: 'read', noun: 'file', plural: 'files' },
   { action: 'edit', verb: 'edited', noun: 'file', plural: 'files' },
   { action: 'create', verb: 'created', noun: 'file', plural: 'files' },
   { action: 'delete', verb: 'deleted', noun: 'file', plural: 'files' },
   { action: 'search', verb: 'searched', noun: 'time', plural: 'times' },
+  { action: 'websearch', verb: 'ran', noun: 'web search', plural: 'web searches' },
   { action: 'web', verb: 'fetched', noun: 'page', plural: 'pages' },
   { action: 'task', verb: 'ran', noun: 'subagent', plural: 'subagents' },
   { action: 'other', verb: 'used', noun: 'other tool', plural: 'other tools' },
@@ -64,7 +70,7 @@ const CLAUSES: ReadonlyArray<{ action: ToolAction; verb: string; noun: string; p
 export const WORK_SEPARATOR = ' · ';
 
 function emptyCounts(): ActionCounts {
-  return { read: 0, edit: 0, create: 0, delete: 0, command: 0, search: 0, task: 0, web: 0, other: 0 };
+  return { read: 0, edit: 0, create: 0, delete: 0, command: 0, search: 0, task: 0, web: 0, websearch: 0, other: 0 };
 }
 
 function capitalize(text: string): string {
@@ -105,7 +111,9 @@ export function summarizeActivity(group: Pick<ToolGroupItem, 'items' | 'spanMs'>
   for (const member of group.items) {
     if (member.kind !== 'tool') continue;
     toolCount += 1;
-    counts[memberAction(member, facts)] += 1;
+    const action = memberAction(member, facts);
+    const isSearch = action === 'web' && (facts?.get(member.toolUseId)?.web?.mode ?? (isWebSearchTool(member.name) ? 'search' : 'fetch')) === 'search';
+    counts[isSearch ? 'websearch' : action] += 1;
     if (memberRunning(member)) running += 1;
     else if (memberFailed(member, facts)) failed += 1;
   }
@@ -140,4 +148,53 @@ export function focusMembers(
 ): { shown: ToolGroupMember[]; hidden: number } {
   const shown = group.items.filter((m) => memberRunning(m) || memberFailed(m, facts));
   return { shown, hidden: group.items.length - shown.length };
+}
+
+// ---------------------------------------------------------------------------
+// Read runs (V3.15)
+// ---------------------------------------------------------------------------
+
+type ToolMember = Extract<ToolGroupMember, { kind: 'tool' }>;
+
+export type ActivityRow =
+  | { kind: 'member'; member: ToolGroupMember }
+  | { kind: 'reads'; key: string; members: ToolMember[]; paths: string[] };
+
+/** Below this many consecutive reads the rows stay as they are. */
+export const READ_RUN_MIN = 2;
+
+function isQuietRead(member: ToolGroupMember, facts: ReadonlyMap<string, ToolFacts> | null): member is ToolMember {
+  return member.kind === 'tool' && memberAction(member, facts) === 'read' && !memberRunning(member) && !memberFailed(member, facts);
+}
+
+/**
+ * An agent orients by reading — six files in a row is common, and six
+ * identical "Read" rows bury the edit that follows them. Consecutive
+ * FINISHED, SUCCESSFUL reads fold into one "Read 6 files" row; a failed or
+ * running read never folds (it is the row the operator must see), and any
+ * other member ends the run.
+ */
+export function foldReadRuns(members: readonly ToolGroupMember[], facts: ReadonlyMap<string, ToolFacts> | null = null): ActivityRow[] {
+  const out: ActivityRow[] = [];
+  let run: ToolMember[] = [];
+  const flush = () => {
+    if (run.length >= READ_RUN_MIN) {
+      const paths: string[] = [];
+      for (const m of run) for (const p of facts?.get(m.toolUseId)?.paths ?? []) if (!paths.includes(p)) paths.push(p);
+      out.push({ kind: 'reads', key: `reads-${run[0]!.key}`, members: run, paths });
+    } else {
+      for (const member of run) out.push({ kind: 'member', member });
+    }
+    run = [];
+  };
+  for (const member of members) {
+    if (isQuietRead(member, facts)) {
+      run.push(member);
+      continue;
+    }
+    flush();
+    out.push({ kind: 'member', member });
+  }
+  flush();
+  return out;
 }

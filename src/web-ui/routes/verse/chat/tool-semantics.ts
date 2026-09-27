@@ -13,18 +13,20 @@
  * does not carry) is reported as unknown rather than guessed — DESIGN §6,
  * and the same discipline VERSE-TELEMETRY-V2 imposes on provider data.
  */
+import type { VerseSource } from '../../../../core/verse/types.js';
+import {
+  baseToolName as coreBaseToolName,
+  isWebSearchTool,
+  normalizeUrl,
+  sourcesFromToolCall,
+  toolActionForName,
+  toolInputPaths,
+  type VerseToolAction,
+} from '../../../../core/verse/trace.js';
 import { splitLines, unifiedDiffFor } from './line-diff.js';
 
-export type ToolAction =
-  | 'read'
-  | 'edit'
-  | 'create'
-  | 'delete'
-  | 'command'
-  | 'search'
-  | 'task'
-  | 'web'
-  | 'other';
+/** Shared with the server (core/verse/trace.ts) so a Read is a read on both sides. */
+export type ToolAction = VerseToolAction;
 
 /** Actions that change the working tree — the blast radius of a turn. */
 export const MUTATING_ACTIONS: readonly ToolAction[] = ['edit', 'create', 'delete'];
@@ -69,43 +71,47 @@ export interface ToolFacts {
   failed: boolean;
   /** Still waiting for its result. */
   pending: boolean;
+  /**
+   * V3.15: what this call proves the agent saw — files (with the line range
+   * the payload or output states), fetched pages, searches. Empty while
+   * pending or when the call failed (a Read that errored read nothing).
+   */
+  sources: VerseSource[];
+  /** V3.15: a web call's address or query, for the one-line row. */
+  web: WebFacts | null;
+  /** V3.15: a subagent call's brief, for the one-line row. */
+  task: TaskFacts | null;
+}
+
+export interface WebFacts {
+  /** `search` = the argument is a query; `fetch` = an address. */
+  mode: 'search' | 'fetch';
+  query: string | null;
+  url: string | null;
+  domain: string | null;
+}
+
+export interface TaskFacts {
+  /** The short description the agent gave the subagent. */
+  description: string | null;
+  /** The subagent's type/name, when the call names one. */
+  agent: string | null;
 }
 
 // ---------------------------------------------------------------------------
-// Name → action
+// Name → action (the table lives in core/verse/trace.ts)
 // ---------------------------------------------------------------------------
-
-const ACTION_BY_NAME = new Map<string, ToolAction>([
-  ['read', 'read'], ['readfile', 'read'], ['read_file', 'read'], ['view', 'read'],
-  ['notebookread', 'read'], ['notebook_read', 'read'], ['cat', 'read'], ['open', 'read'],
-  ['edit', 'edit'], ['multiedit', 'edit'], ['multi_edit', 'edit'], ['notebookedit', 'edit'],
-  ['notebook_edit', 'edit'], ['str_replace', 'edit'], ['str_replace_editor', 'edit'],
-  ['str_replace_based_edit_tool', 'edit'], ['apply_patch', 'edit'], ['patch', 'edit'],
-  ['edit_structural', 'edit'], ['search_replace_regex', 'edit'], ['rename_file', 'edit'],
-  ['update', 'edit'], ['applydiff', 'edit'], ['apply_diff', 'edit'],
-  ['write', 'create'], ['create', 'create'], ['create_file', 'create'], ['writefile', 'create'],
-  ['write_file', 'create'], ['new_file', 'create'],
-  ['delete', 'delete'], ['delete_file', 'delete'], ['remove_file', 'delete'], ['rm', 'delete'],
-  ['bash', 'command'], ['shell', 'command'], ['exec', 'command'], ['run', 'command'],
-  ['run_command', 'command'], ['runcommand', 'command'], ['run_terminal_cmd', 'command'],
-  ['bash_start', 'command'], ['bash_tail', 'command'], ['terminal', 'command'], ['test', 'command'],
-  ['grep', 'search'], ['glob', 'search'], ['search', 'search'], ['find', 'search'],
-  ['codebase_search', 'search'], ['ls', 'search'], ['tree', 'search'], ['list_dir', 'search'],
-  ['task', 'task'], ['agent', 'task'], ['dispatch_agent', 'task'], ['subagent', 'task'],
-  ['webfetch', 'web'], ['websearch', 'web'], ['fetch', 'web'], ['http', 'web'], ['browser', 'web'],
-]);
 
 /**
  * Strip transport prefixes so an MCP-routed edit reads as an edit:
- * `mcp__plugin_ashlr_ashlr__ashlr__edit` → `edit`.
+ * `mcp__plugin_ashlr_ashlr__ashlr__edit` → `edit`, codex `mcp:ashlr.edit` → `edit`.
  */
 export function baseToolName(name: string): string {
-  const parts = name.split('__').filter(Boolean);
-  return (parts[parts.length - 1] ?? name).trim().toLowerCase();
+  return coreBaseToolName(name);
 }
 
 export function actionForName(name: string): ToolAction {
-  return ACTION_BY_NAME.get(baseToolName(name)) ?? 'other';
+  return toolActionForName(name);
 }
 
 /** Short verb for a file-activity row; also the a11y wording. */
@@ -135,24 +141,12 @@ function str(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
-const PATH_KEYS = [
-  'file_path', 'filePath', 'notebook_path', 'notebookPath', 'target_file',
-  'path', 'file', 'filename', 'fileName', 'relative_workspace_path',
-];
-
-/** Every path-ish string in the payload, first-seen order, de-duplicated. */
+/**
+ * Every path-ish string in the payload, first-seen order, de-duplicated —
+ * list forms and codex `file_change` `changes: [{path}]` included.
+ */
 export function pathsIn(input: unknown): string[] {
-  const rec = record(input);
-  if (!rec) return [];
-  const out: string[] = [];
-  const push = (value: unknown) => {
-    const s = str(value);
-    if (s && !out.includes(s)) out.push(s);
-  };
-  for (const key of PATH_KEYS) push(rec[key]);
-  const list = rec.paths ?? rec.file_paths ?? rec.files;
-  if (Array.isArray(list)) for (const item of list) push(typeof item === 'string' ? item : record(item)?.path);
-  return out;
+  return toolInputPaths(input);
 }
 
 /** `src/web-ui/App.tsx` → `App.tsx`. Never the whole path in a dense row. */
@@ -314,6 +308,8 @@ export function readToolFacts({ name, input, result }: ToolCallInput): ToolFacts
 
   // Write is create-or-overwrite and only the RESULT knows which.
   if (action === 'create' && result && WROTE_EXISTING.test(output) && !WROTE_NEW.test(output)) action = 'edit';
+  // Codex `file_change` says per file whether it was added, updated or deleted.
+  if (base === 'file_change') action = fileChangeAction(rec) ?? action;
 
   const paths = pathsIn(input);
   const primary = paths[0] ?? null;
@@ -380,8 +376,40 @@ export function readToolFacts({ name, input, result }: ToolCallInput): ToolFacts
   }
 
   const failed = result !== null && (result.isError || (command?.exitCode ?? 0) > 0);
+  const sources = failed ? [] : sourcesFromToolCall({ name, input, output: result ? output : null, isError: result?.isError === true });
 
-  return { base, action, paths, command, diff, written, failed, pending };
+  return { base, action, paths, command, diff, written, failed, pending, sources, web: webFacts(name, action, rec), task: taskFacts(action, rec) };
+}
+
+/** Codex `changes: [{kind:'add'|'update'|'delete'}]` → one action; mixed → edit. */
+function fileChangeAction(rec: Record<string, unknown> | null): ToolAction | null {
+  const changes = rec?.changes;
+  if (!Array.isArray(changes) || changes.length === 0) return null;
+  const kinds = new Set(changes.map((c) => String(record(c)?.kind ?? '').toLowerCase()));
+  if (kinds.size === 1 && kinds.has('add')) return 'create';
+  if (kinds.size === 1 && kinds.has('delete')) return 'delete';
+  return 'edit';
+}
+
+const URL_KEYS = ['url', 'uri', 'href', 'link', 'page_url'];
+
+function webFacts(name: string, action: ToolAction, rec: Record<string, unknown> | null): WebFacts | null {
+  if (action !== 'web' || !rec) return null;
+  const query = str(rec.query) ?? str(rec.q) ?? str(rec.search_query);
+  let url: string | null = null;
+  for (const key of URL_KEYS) {
+    const value = str(rec[key]);
+    if (value) { url = value; break; }
+  }
+  const norm = url ? normalizeUrl(url) : null;
+  const mode = isWebSearchTool(name) && !url ? 'search' : url ? 'fetch' : query ? 'search' : 'fetch';
+  return { mode, query, url: norm?.url ?? url, domain: norm?.domain ?? null };
+}
+
+function taskFacts(action: ToolAction, rec: Record<string, unknown> | null): TaskFacts | null {
+  if (action !== 'task' || !rec) return null;
+  const description = str(rec.description) ?? str(rec.task) ?? (str(rec.prompt)?.split('\n')[0]?.slice(0, 120) ?? null);
+  return { description, agent: str(rec.subagent_type) ?? str(rec.agent) ?? str(rec.agent_type) };
 }
 
 /** DOM id a file-activity row scrolls to. One per tool call. */

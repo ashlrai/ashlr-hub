@@ -17,7 +17,7 @@
  * log, rebuilding only the turn segments that changed.
  */
 import type { VerseEvent, VerseUsage } from '../../data/api-types.js';
-import type { VerseRecoveryHow, VerseThinkingKind } from '../../../core/verse/types.js';
+import type { VerseRecoveryHow, VerseSource, VerseThinkingKind } from '../../../core/verse/types.js';
 import { getVerseSessionState, getVerseThinkingStats, subscribeVerseStoreLifecycle, type VerseThinkingStat } from './verse-store.js';
 
 // ---------------------------------------------------------------------------
@@ -100,7 +100,13 @@ export type TranscriptItem =
   /** V3.10: the engine restored a lost native conversation. */
   | { kind: 'recovered'; key: string; turnId: string | null; at: string; how: VerseRecoveryHow; message: string }
   /** V3.10: the log hit its cap and dropped everything before `droppedBefore` (at a turn boundary). */
-  | { kind: 'truncated'; key: string; turnId: null; at: string; droppedBefore: number };
+  | { kind: 'truncated'; key: string; turnId: null; at: string; droppedBefore: number }
+  /**
+   * V3.15: a source no tool call shows — injected context, or one a remote
+   * seat reported. Renders nothing in place; the turn's citation list and the
+   * Sources pane read it. `turnId` null = the whole chat.
+   */
+  | { kind: 'source'; key: string; turnId: string | null; at: string; source: VerseSource };
 
 /**
  * One turn's worth of items — the log cut at each `user-message`. Unchanged
@@ -313,6 +319,10 @@ function buildSegment(
       case 'history-truncated':
         items.push({ kind: 'truncated', key: `h-${e.seq}`, turnId: null, at: e.at, droppedBefore: e.droppedBefore });
         break;
+      case 'source':
+        // No flush: a source is metadata about the turn, not a break in its prose.
+        items.push({ kind: 'source', key: `src-${e.seq}`, turnId: e.turnId, at: e.at, source: e.source });
+        break;
       default:
         break;
     }
@@ -466,6 +476,12 @@ export function groupTranscriptItems(items: readonly TranscriptItem[]): Transcri
   };
 
   for (const item of items) {
+    // A source renders nothing in place, so it must not split a run of calls
+    // into two activity rows.
+    if (item.kind === 'source') {
+      out.push(item);
+      continue;
+    }
     if ((item.kind === 'tool' || item.kind === 'thinking') && (run.length === 0 || run[0]!.turnId === item.turnId)) {
       run.push(item);
       continue;

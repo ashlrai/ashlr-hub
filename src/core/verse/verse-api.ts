@@ -438,6 +438,9 @@ const WORKBENCH_IMPORTS: Readonly<Record<WorkbenchRouteFamilyId, () => Promise<W
   checkpoints: async () => {
     try { return (await import('./checkpoints-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'checkpoints-api.js'); }
   },
+  sources: async () => {
+    try { return (await import('./sources-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'sources-api.js'); }
+  },
 };
 
 /** The importer table, for the contract test (every family has exactly one). */

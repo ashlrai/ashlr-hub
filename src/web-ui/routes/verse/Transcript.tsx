@@ -52,27 +52,35 @@
  * Follows the newest message unless the operator scrolled up, in which case
  * a "Jump to latest" control appears.
  */
-import { memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { Suspense, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react';
 import type { VerseEngine, VerseSession } from '../../data/api-types.js';
+import { reasoningPolicyFor } from '../../../core/verse/trace.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
 import { ActivityGroupView, revealAnchorInGroups } from './chat/ActivityGroup.js';
 import { ChapterRail } from './chat/ChapterRail.js';
 import { PathRootsContext } from './chat/path-display.js';
 import { buildChapters, chaptersSignature } from './chat/chapter-model.js';
 import { FileActivity } from './chat/FileActivity.js';
+import { SourceList } from './chat/SourceList.js';
 import { useReasoningDisplay, type ReasoningDisplay } from './chat/reasoning-pref.js';
 import { ThinkingBlock } from './chat/ThinkingBlock.js';
 import { onTranscriptFind, onTranscriptJump, onTranscriptStep } from './chat/transcript-jump.js';
+import { anchorTurnKey, useTurnWindow } from './chat/turn-window.js';
 import { TranscriptNav } from './chat/TranscriptNav.js';
 import { TurnAnnouncer } from './chat/TurnAnnouncer.js';
 import { toolAnchorId, type ToolFacts } from './chat/tool-semantics.js';
 import { buildTurns, createTurnCache, noteAnchorId, searchTurns, turnAnchorId, type TurnBlock, type TurnCache } from './chat/turn-model.js';
 import { MessageMarkdown } from './MessageMarkdown.js';
+import type { ReasoningSheetTab } from './reasoning/ReasoningSheet.js';
+import { openSourceFile } from './reasoning/sources-queries.js';
 import { ToolUseCard, type ToolUseCardProps } from './ToolUseCard.js';
 import { ArrowDownIcon } from './verse-icons.js';
 import { ENGINE_LABEL, formatDuration } from './verse-model.js';
 import { formatTokens } from './verse-readouts.js';
-import type { VerseLiveState } from './verse-store.js';
+import { getDockSnapshot, subscribeDockState } from './dock/dock-store.js';
+import { runCommand } from './shell/command-bus.js';
+import { getVerseSessionHead, type VerseLiveState } from './verse-store.js';
+import { getVerseUiState } from './verse-ui-store.js';
 import {
   groupTranscriptItems,
   type ToolGroupItem,
@@ -83,6 +91,17 @@ import {
   type TranscriptSegment,
 } from './verse-transcript.js';
 import styles from './Transcript.module.css';
+
+/** The dock's open/active pair as a primitive-stable snapshot (a new object per call would re-render forever). */
+let dockFocusCache: { open: boolean; active: string | null } = { open: false, active: null };
+function getDockPaneFocus(): { open: boolean; active: string | null } {
+  const { open, active } = getDockSnapshot().state;
+  if (open !== dockFocusCache.open || active !== dockFocusCache.active) dockFocusCache = { open, active };
+  return dockFocusCache;
+}
+
+// V3.15: the Sources / Reasoning sheet loads only when first opened.
+const ReasoningSheet = lazy(() => import('./reasoning/ReasoningSheet.js').then((m) => ({ default: m.ReasoningSheet })));
 
 export interface TranscriptProps {
   transcript: TranscriptModel;
@@ -105,6 +124,11 @@ export interface TranscriptProps {
    * identity stable — every card showing a path re-renders when it changes.
    */
   projectRoots?: readonly string[];
+  /**
+   * V3.15: the chat this transcript shows — what "open this source in my
+   * editor" is scoped to. Absent → the chat the shell reports as active.
+   */
+  sessionId?: string | null;
 }
 
 type CompactionItem = Extract<TranscriptItem, { kind: 'compaction' }>;
@@ -180,7 +204,7 @@ function deriveSegment(segment: TranscriptSegment, cache: TurnCache): SegmentMod
 }
 
 export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, engine, handoffFrom = null, onOpenSession, live = null,
-  projectRoots }: TranscriptProps) {
+  projectRoots, sessionId = null }: TranscriptProps) {
   const reasoning = useReasoningDisplay();
   const inheritedRoots = useContext(PathRootsContext);
   const scroller = useRef<HTMLDivElement>(null);
@@ -192,6 +216,8 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
   const [matchIndex, setMatchIndex] = useState(-1);
   const [focusToken, setFocusToken] = useState(0);
   const lastVersion = useRef('');
+  /** V3.15: which tab of the Sources / Reasoning sheet is open, if any. */
+  const [sheet, setSheet] = useState<ReasoningSheetTab | null>(null);
 
   // Per-segment derivation. The store returns an unchanged segment as the
   // SAME object, so only the live turn's segment misses this cache while a
@@ -212,6 +238,11 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
     return model;
   }), [segments]);
   const turns = useMemo(() => perSegment.flatMap((m) => m.turns), [perSegment]);
+  // V3.15: a long chat renders only the turns near the viewport (chat/turn-window.ts).
+  const win = useTurnWindow(scroller, turns.length);
+  const { pin: pinTurn, observe: observeTurn } = win;
+  const turnsNow = useRef(turns);
+  turnsNow.current = turns;
   /** Index of each segment's first turn in `turns` (for the per-turn ordinal). */
   const turnOffsets = useMemo(() => {
     const out: number[] = [];
@@ -272,8 +303,13 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
   }, []);
 
   const jumpToTurn = useCallback((turnKey: string) => {
+    // A windowed-out turn is a placeholder: render it in full, then land on it.
+    if (pinTurn(turnKey)) {
+      requestAnimationFrame(() => reveal(turnNodes.current.get(turnKey) ?? null));
+      return;
+    }
     reveal(turnNodes.current.get(turnKey) ?? null);
-  }, [reveal]);
+  }, [reveal, pinTurn]);
 
   /**
    * Open the disclosure chain around a tool call before revealing it. A call
@@ -281,14 +317,18 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
    * group is asked to open (revealAnchorInGroups) and the jump retried on
    * the next frame, once it has rendered its members.
    */
-  const jumpToAnchor = useCallback((id: string, retried = false): boolean => {
+  const jumpToAnchor = useCallback((id: string, attempt = 0): boolean => {
     const node = scroller.current?.ownerDocument?.getElementById(id) ?? null;
-    if (!node) {
-      if (!retried && revealAnchorInGroups(id)) {
-        requestAnimationFrame(() => { jumpToAnchor(id, true); });
+    if (!node || node.hasAttribute('data-turn-placeholder')) {
+      // Two things can keep an anchor out of the DOM: its turn is windowed
+      // out (render it in full) and its call is folded in a group (open it).
+      // One per frame, so each step sees the other's render.
+      const windowKey = attempt < 3 ? anchorTurnKey(turnsNow.current, id) : null;
+      if (attempt < 3 && ((windowKey !== null && pinTurn(windowKey)) || revealAnchorInGroups(id))) {
+        requestAnimationFrame(() => { jumpToAnchor(id, attempt + 1); });
         return true;
       }
-      return false;
+      if (!node) return false;
     }
     for (let el: Element | null = node; el; el = el.parentElement) {
       if (el instanceof HTMLDetailsElement) el.open = true;
@@ -296,7 +336,7 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
     }
     reveal(node);
     return true;
-  }, [reveal]);
+  }, [reveal, pinTurn]);
 
   // The dock's Tasks pane (and anything else outside this subtree) jumps
   // through the bus; ⌘K "Find in chat" focuses the search the same way ⌘F does.
@@ -310,15 +350,27 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
 
   const jumpToTool = useCallback((toolUseId: string) => jumpToAnchor(toolAnchorId(toolUseId)), [jumpToAnchor]);
 
+  // V3.15: a cited file opens in the operator's editor at its line. The
+  // server confines the path to this chat's folders; the chat id is read at
+  // click time so the transcript never subscribes to the shell's UI store.
+  const resolveSessionId = useCallback(() => sessionId ?? getVerseUiState().activeSessionId, [sessionId]);
+  const openFile = useCallback(async (path: string, line: number | undefined) => {
+    const id = resolveSessionId();
+    if (!id) throw new Error('no chat is open');
+    await openSourceFile(id, path, line);
+  }, [resolveSessionId]);
+  const silentNote = reasoningPolicyFor(engine).silentTurnNote;
+
   const jumpToFirstError = useCallback(() => {
     const anchor = errorAnchors[0];
     if (anchor) jumpToAnchor(anchor);
   }, [errorAnchors, jumpToAnchor]);
 
   const registerTurn = useCallback((key: string, node: HTMLElement | null) => {
+    observeTurn(key, node);
     if (node) turnNodes.current.set(key, node);
-    else turnNodes.current.delete(key);
-  }, []);
+    else if (turnNodes.current.get(key)) turnNodes.current.delete(key);
+  }, [observeTurn]);
 
   const stepMatch = useCallback((delta: number) => {
     if (matches.length === 0) return;
@@ -401,6 +453,34 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
   const liveThinking = running && reasoning !== 'hidden' && live?.thinking && live.thinking.turnId === live.turnId ? live.thinking : null;
   const lastTurn = turns.length > 0 ? turns[turns.length - 1]! : null;
 
+  // V3.15: the counts on the Reasoning / Sources toggles — unique refs across
+  // the chat (the sheet numbers them). `turns` is a new array on every
+  // streamed token, so the union is keyed on a cheap signature (per-turn
+  // totals) and rebuilt only when a citation or a thought actually lands.
+  let traceSignature = '';
+  for (const turn of turns) traceSignature += `${turn.citations.length}.${turn.reasoning.shown + turn.reasoning.hidden},`;
+  const turnsForTrace = useRef(turns);
+  turnsForTrace.current = turns;
+  const traceCounts = useMemo(() => {
+    const refs = new Set<string>();
+    let thoughts = 0;
+    for (const turn of turnsForTrace.current) {
+      for (const citation of turn.citations) refs.add(citation.source.ref);
+      thoughts += turn.reasoning.shown + turn.reasoning.hidden;
+    }
+    return { sources: refs.size, thoughts };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the signature IS the dependency
+  }, [traceSignature]);
+  const hasTrace = traceCounts.sources > 0 || traceCounts.thoughts > 0;
+  // Whether the dock already shows one of these panes (the toggles' pressed state).
+  const dock = useSyncExternalStore(subscribeDockState, getDockPaneFocus, getDockPaneFocus);
+  // Read when the sheet renders (not subscribed): memory is pinned at creation.
+  const sheetSessionId = sheet ? resolveSessionId() : null;
+  const sheetSession = useMemo(
+    () => (sheetSessionId ? getVerseSessionHead(sheetSessionId).session : null),
+    [sheetSessionId],
+  );
+
   // Auto-follow new content only while pinned to the bottom. "New content"
   // includes the live parts: streamed reasoning and a notice appearing.
   const lastItem = transcript.items[transcript.items.length - 1];
@@ -441,6 +521,29 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
   }
 
   const activeMatchKey = matchIndex >= 0 ? matches[matchIndex]?.turnKey ?? null : null;
+  // In the chat these open the dock's Sources / Reasoning panes (⇧⌘S / ⇧⌘Y,
+  // reasoning/reasoning.pane.tsx); where no dock handles the command, the
+  // transcript's own sheet shows the same panels.
+  const openSheet = (tab: ReasoningSheetTab) => {
+    if (runCommand(tab === 'sources' ? 'dock.sources' : 'dock.reasoning')) {
+      setSheet(null);
+      return;
+    }
+    setSheet((current) => (current === tab ? null : tab));
+  };
+  const pressed = (tab: ReasoningSheetTab) => sheet === tab || (dock.open && dock.active === tab);
+  const sheetToggles = hasTrace ? (
+    <span className={styles.traceToggles}>
+      <button type="button" className={styles.traceToggle} aria-pressed={pressed('reasoning')} onClick={() => openSheet('reasoning')}
+        title="Every turn's reasoning in one place (⇧⌘Y)">
+        Reasoning{traceCounts.thoughts > 0 ? <span className={styles.traceCount}>{traceCounts.thoughts}</span> : null}
+      </button>
+      <button type="button" className={styles.traceToggle} aria-pressed={pressed('sources')} onClick={() => openSheet('sources')}
+        title="Every file, page and search this chat drew on (⇧⌘S)">
+        Sources{traceCounts.sources > 0 ? <span className={styles.traceCount}>{traceCounts.sources}</span> : null}
+      </button>
+    </span>
+  ) : null;
 
   return (
     <PathRootsContext.Provider value={projectRoots ?? inheritedRoots}>
@@ -448,8 +551,8 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
       {turns.length >= NAV_MIN_TURNS ? (
         <TranscriptNav turns={turns} query={query} onQuery={setQuery} matches={matches} matchIndex={matchIndex}
           onStepMatch={stepMatch} errorCount={errorAnchors.length} onJumpError={jumpToFirstError}
-          onJumpTurn={jumpToTurn} focusToken={focusToken} />
-      ) : null}
+          onJumpTurn={jumpToTurn} focusToken={focusToken} trailing={sheetToggles} />
+      ) : sheetToggles ? <div className={styles.traceBar}>{sheetToggles}</div> : null}
       {/* The log is NOT a live region (3.10): streamed tokens announced one by
           one made a screen reader unusable mid-turn. TurnAnnouncer says only
           when a turn starts, finishes, fails or is stopped. */}
@@ -477,11 +580,14 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
           </div>
         ) : null}
         <ol className={styles.list} onKeyDown={onListKeyDown}>
-          {perSegment.map((segment, s) => segment.turns.map((turn, t) => (
+          {perSegment.map((segment, s) => segment.turns.map((turn, t) => (!win.isFull(turn.key, turnOffsets[s]! + t, turn.status === 'running') ? (
+            <TurnPlaceholder key={turn.key} turnKey={turn.key} index={turnOffsets[s]! + t} height={win.heightOf(turn.key)} registerNode={registerTurn} />
+          ) : (
             <TurnView key={turn.key} turn={turn} index={turnOffsets[s]! + t} facts={segment.facts} explained={segment.explained}
               engine={engine} match={matchKeys.has(turn.key) ? (turn.key === activeMatchKey ? 'active' : 'true') : undefined}
-              reasoning={reasoning} onJumpTool={jumpToTool} onJumpAnchor={jumpToAnchor} registerNode={registerTurn} />
-          )))}
+              reasoning={reasoning} onJumpTool={jumpToTool} onJumpAnchor={jumpToAnchor} registerNode={registerTurn}
+              openFile={openFile} silentNote={silentNote} />
+          ))))}
           {/* The reasoning streaming right now — it becomes an ordinary
               thinking item the moment its persisted block lands. */}
           {liveThinking ? (
@@ -494,6 +600,12 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
       </div>
       {turns.length >= NAV_MIN_TURNS ? (
         <ChapterRail model={chapters} onJumpTurn={jumpToTurn} />
+      ) : null}
+      {sheet ? (
+        <Suspense fallback={null}>
+          <ReasoningSheet tab={sheet} onTab={setSheet} onClose={() => setSheet(null)} turns={turns} engine={engine ?? null}
+            session={sheetSession} openFile={openFile} jumpToTool={jumpToTool} jumpToTurn={jumpToTurn} />
+        </Suspense>
       ) : null}
       </div>
       {!following ? (
@@ -522,7 +634,29 @@ interface TurnViewProps {
   onJumpTool: (toolUseId: string) => void;
   onJumpAnchor: (id: string) => boolean;
   registerNode: (key: string, node: HTMLElement | null) => void;
+  /** V3.15: open a cited file in the editor (rejects when it cannot). */
+  openFile: (path: string, line: number | undefined) => Promise<void>;
+  /** V3.15: what to say under a settled turn with no reasoning, for a seat that withholds it. */
+  silentNote: string | null;
 }
+
+/**
+ * A windowed-out turn (chat/turn-window.ts): its anchor id, its place in the
+ * turn order and the height it last had — no content. It becomes a TurnView
+ * again as it nears the viewport, or the moment a jump targets it.
+ */
+const TurnPlaceholder = memo(function TurnPlaceholder({ turnKey, index, height, registerNode }: {
+  turnKey: string;
+  index: number;
+  height: number;
+  registerNode: (key: string, node: HTMLElement | null) => void;
+}) {
+  const nodeRef = useCallback((node: HTMLElement | null) => registerNode(turnKey, node), [registerNode, turnKey]);
+  return (
+    <li id={turnAnchorId(turnKey)} ref={nodeRef} className={`${styles.turn} ${styles.turnPlaceholder}`} data-turn-key={turnKey}
+      data-turn-placeholder="" tabIndex={-1} aria-label={`Turn ${index + 1}`} style={{ height }} />
+  );
+});
 
 /**
  * Memoized on its props, all of which are stable for a finished turn: the
@@ -530,16 +664,24 @@ interface TurnViewProps {
  * `match` only changes for turns a search touches. So a streamed token
  * re-renders exactly one TurnView.
  */
-const TurnView = memo(function TurnView({ turn, index, facts, explained, engine, match, reasoning, onJumpTool, onJumpAnchor, registerNode }: TurnViewProps) {
+const TurnView = memo(function TurnView({ turn, index, facts, explained, engine, match, reasoning, onJumpTool, onJumpAnchor, registerNode,
+  openFile, silentNote }: TurnViewProps) {
   const running = turn.status === 'running';
+  // Stable, so a streamed token's re-render does not detach and re-observe the node.
+  const nodeRef = useCallback((node: HTMLElement | null) => registerNode(turn.key, node), [registerNode, turn.key]);
   // How long a settled turn took (turn-model: from its turn-done; unknown →
   // null, never 0). The turn's footer, not a line of its own between turns.
   const tookMs = running ? null : turn.durationMs;
   const errorJump = turn.errorCount > 0 && turn.firstErrorAnchor ? turn.firstErrorAnchor : null;
+  // V3.15: the one line of what the turn did, and — for a seat that keeps its
+  // reasoning to itself — that fact in words, not an unexplained absence.
+  const work = running ? '' : turn.work;
+  const quiet = !running && reasoning !== 'hidden' && silentNote !== null && turn.reasoning.shown + turn.reasoning.hidden === 0
+    && turn.prompt !== null ? silentNote : null;
   return (
     <li
       id={turnAnchorId(turn.key)}
-      ref={(node) => registerNode(turn.key, node)}
+      ref={nodeRef}
       // A settled turn no longer changes: let the browser skip its layout
       // and paint while it is off screen (Transcript.module.css .turnSettled).
       className={`${styles.turn} ${running ? '' : styles.turnSettled}`}
@@ -552,12 +694,15 @@ const TurnView = memo(function TurnView({ turn, index, facts, explained, engine,
       <ol className={styles.turnItems}>
         {turn.items.map((item) => renderItem(item, facts, explained, reasoning, engine))}
       </ol>
+      {turn.citations.length > 0 ? <SourceList citations={turn.citations} openFile={openFile} jumpToTool={onJumpTool} /> : null}
       {turn.files.length > 0 ? <FileActivity files={turn.files} onJump={onJumpTool} /> : null}
-      {tookMs !== null || errorJump ? (
+      {tookMs !== null || errorJump || work || quiet ? (
         <footer className={styles.turnFoot} data-kind="turn-meta">
+          {work ? <span className={styles.turnWork} data-kind="turn-work">{work}</span> : null}
           {tookMs !== null ? (
             <span><span className="visually-hidden">Turn took </span><span>{formatDuration(tookMs)}</span></span>
           ) : null}
+          {quiet ? <span className={styles.turnQuiet} data-kind="reasoning-not-shared">{quiet}</span> : null}
           {errorJump ? (
             <button type="button" className={styles.turnErrorJump} onClick={() => onJumpAnchor(errorJump)}>
               {turn.errorCount} failure{turn.errorCount === 1 ? '' : 's'} in this turn — jump to the first

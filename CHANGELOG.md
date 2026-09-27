@@ -11,6 +11,38 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Reasoning, actions and sources in Verse chats
+
+- Every answer ends with numbered **Sources**: files the agent read, with the
+  exact line range the call or its output proved (`parser.ts:12-51`), pages it
+  fetched (title and domain), web searches it ran, docs and wiki pages, and
+  shared memory. A cited file opens in your editor at its line, confined to
+  the chat's own folders (`POST /api/verse/sources/open`); when it cannot, the
+  row shows the call that read it.
+- A settled turn's footer says what it did in one line ("Read 8 files ·
+  edited 3 files (+42 −7) · ran 4 commands (1 failed) · 2 web lookups"), and a
+  seat that keeps its reasoning to itself (Grok, remote agents) says so
+  instead of leaving a gap.
+- The actions timeline previews each collapsed edit's first changed lines,
+  folds runs of clean reads into one "Read 6 files" row, names web calls by
+  query or page and subagents by their brief, and counts a web search apart
+  from a page fetch.
+- **Sources** (⇧⌘S) and **Reasoning** (⇧⌘Y) panes replace the workbench
+  stubs: sources de-duplicated across the chat with the turns that cited each,
+  filters and "Cite" into your message; every turn's reasoning in one scroll
+  with what the turn did. The transcript's own toggles open the same panes.
+- Long chats stay light: past 40 turns, turns far from the viewport are held
+  as placeholders at their measured height (the newest 10 and the running
+  turn always render); jumping to any call, note or turn renders it first.
+- Local reasoning models that inline `<think>…</think>` (Qwen3, QwQ,
+  DeepSeek-R1) now stream that as reasoning, not answer text; Codex
+  `web_search` items are no longer dropped.
+- `core/verse/trace.ts` normalizes every seat's events into one schema
+  (`thinking`, `tool-call`, `tool-result`, `source`, `summary`) and lowers it
+  back to the existing events, so a new seat can emit it directly. The one new
+  persisted event, `source`, carries only what no tool call proves (injected
+  context, a remote seat's report); older clients ignore it.
+
 ### Versioned playbooks for every lane
 
 - Playbooks are reusable task templates with the sections Outcome, Procedure,

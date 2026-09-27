@@ -24,9 +24,9 @@
 import { memo, useEffect, useId, useMemo, useState, type ReactNode } from 'react';
 import type { ToolGroupItem, ToolGroupMember } from '../verse-store.js';
 import { formatDuration } from '../verse-model.js';
-import { defaultActivityView, focusMembers, summarizeActivity, type ActivityView } from './activity-model.js';
+import { defaultActivityView, focusMembers, foldReadRuns, summarizeActivity, type ActivityRow, type ActivityView } from './activity-model.js';
 import { LiveTimer } from './LiveTimer.js';
-import { toolAnchorId, type ToolFacts } from './tool-semantics.js';
+import { fileBasename, toolAnchorId, type ToolFacts } from './tool-semantics.js';
 import styles from './ActivityGroup.module.css';
 
 // ---------------------------------------------------------------------------
@@ -66,6 +66,13 @@ export function ActivityGroupView({ item, facts, renderMember }: ActivityGroupPr
   // "focus" with nothing left to focus on (the run finished clean) folds.
   const effective: ActivityView = view === 'focus' && focus.shown.length === 0 ? 'collapsed' : view;
   const members = effective === 'all' ? item.items : effective === 'focus' ? focus.shown : [];
+  // V3.15: in the full view, consecutive clean reads fold into one row.
+  const rows = useMemo<ActivityRow[]>(
+    () => (effective === 'all' ? foldReadRuns(item.items, facts) : members.map((member) => ({ kind: 'member' as const, member }))),
+    // `members` is derived from these three.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [effective, item, facts, focus],
+  );
 
   function toggle() {
     setChosen(effective === 'collapsed' ? (focus.shown.length > 0 ? 'focus' : 'all') : 'collapsed');
@@ -109,9 +116,9 @@ export function ActivityGroupView({ item, facts, renderMember }: ActivityGroupPr
         {effective === 'collapsed' ? null : (
           <>
             <ol className={styles.list}>
-              {members.map((member) => (
-                <li key={member.key} data-member={member.kind}>{renderMember(member)}</li>
-              ))}
+              {rows.map((row) => (row.kind === 'member'
+                ? <li key={row.member.key} data-member={row.member.kind}>{renderMember(row.member)}</li>
+                : <li key={row.key} data-member="reads"><ReadRun row={row} renderMember={renderMember} /></li>))}
             </ol>
             {effective === 'focus' && focus.hidden > 0 ? (
               <button type="button" className={styles.more} onClick={() => setChosen('all')}>
@@ -127,6 +134,31 @@ export function ActivityGroupView({ item, facts, renderMember }: ActivityGroupPr
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * "Read 6 files  Transcript.tsx, turn-model.ts, trace.ts +3" — a run of clean
+ * reads as one disclosure. Opening it shows each call as usual. A <details>,
+ * so a jump to one of its calls opens it with the rest of the chain.
+ */
+function ReadRun({ row, renderMember }: { row: Extract<ActivityRow, { kind: 'reads' }>; renderMember: (member: ToolGroupMember) => ReactNode }) {
+  const names = row.paths.map((p) => fileBasename(p));
+  const shown = names.slice(0, 3).join(', ');
+  const extra = names.length > 3 ? ` +${names.length - 3}` : '';
+  const count = row.paths.length > 0 ? row.paths.length : row.members.length;
+  const noun = row.paths.length > 0 ? (count === 1 ? 'file' : 'files') : 'times';
+  return (
+    <details className={styles.readRun} data-state-key={`reads:${row.key}`}>
+      <summary className={styles.readRunLine} title={row.paths.join('\n')}>
+        <span className={styles.chevron} aria-hidden="true" />
+        <span className={styles.readRunVerb}>Read {count} {noun}</span>
+        {shown ? <span className={styles.readRunNames}>{shown}{extra}</span> : null}
+      </summary>
+      <ol className={styles.list}>
+        {row.members.map((member) => <li key={member.key} data-member="tool">{renderMember(member)}</li>)}
+      </ol>
+    </details>
   );
 }
 
