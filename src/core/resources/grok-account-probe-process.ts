@@ -47,7 +47,33 @@ function timestamp(value: unknown): string | null | undefined {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) && parsed >= 0 && parsed <= 253_402_300_799_999 ? new Date(parsed).toISOString() : undefined;
 }
-function billing(value: unknown): { windows: GrokAccountProbeWindow[]; planType: string | null; onDemandEnabled: boolean | null } | null {
+/**
+ * The percent of the included allowance used, or null when the provider gave
+ * no signal.
+ *
+ * `creditUsagePercent` is a proto3 `double` on xAI's GetGrokCreditsConfig, and
+ * proto3 JSON OMITS zero-valued scalars. So right after a weekly reset, until
+ * the account's first metered turn, the field is simply absent — upstream's
+ * own billing.rs notes the same omission for `Cent`, and its pager renders
+ * `None => 0.0`. Reading that absence as "no signal" is what blanked Grok's
+ * meter from the 2026-09-26 12:43Z reset onward while Claude and Codex kept
+ * theirs.
+ *
+ * Absence means 0 ONLY when the reply is demonstrably the credits config for a
+ * period that is current at this sample: a `currentPeriod` whose start and end
+ * both parsed and bracket `observedAt`. An empty or legacy config (no period),
+ * or a period that has already ended, stays unknown rather than being invented
+ * into headroom. The deprecated `monthlyLimit`/`used` pair is still never used
+ * to derive a percent.
+ */
+function usedPercentOf(used: unknown, start: string | null, end: string | null, observedAt: string): number | null {
+  if (typeof used === 'number') return used;
+  if (start === null || end === null) return null;
+  const at = Date.parse(observedAt);
+  return Date.parse(start) <= at && at < Date.parse(end) ? 0 : null;
+}
+
+function billing(value: unknown, observedAt: string): { windows: GrokAccountProbeWindow[]; planType: string | null; onDemandEnabled: boolean | null } | null {
   if (!record(value) || !Object.hasOwn(value, 'config') || value.config !== null && !record(value.config) ||
     value.on_demand_enabled !== undefined && value.on_demand_enabled !== null && typeof value.on_demand_enabled !== 'boolean' ||
     value.subscription_tier !== undefined && value.subscription_tier !== null && typeof value.subscription_tier !== 'string') return null;
@@ -62,7 +88,7 @@ function billing(value: unknown): { windows: GrokAccountProbeWindow[]; planType:
     period.type !== undefined && period.type !== null && !['USAGE_PERIOD_TYPE_WEEKLY', 'USAGE_PERIOD_TYPE_MONTHLY'].includes(String(period.type))) return null;
   const scope = cfg.isUnifiedBillingUser === true ? 'unified' : cfg.isUnifiedBillingUser === false ? 'build' : 'credits';
   const suffix = period.type === 'USAGE_PERIOD_TYPE_WEEKLY' ? '_weekly' : period.type === 'USAGE_PERIOD_TYPE_MONTHLY' ? '_monthly' : '';
-  return { windows: [{ id: `grok_${scope}${suffix}`, usedPercent: typeof used === 'number' ? used : null, resetsAt: end }],
+  return { windows: [{ id: `grok_${scope}${suffix}`, usedPercent: usedPercentOf(used, start, end, observedAt), resetsAt: end }],
     planType: typeof value.subscription_tier === 'string' && PLANS.has(value.subscription_tier) ? value.subscription_tier : null,
     onDemandEnabled: typeof value.on_demand_enabled === 'boolean' ? value.on_demand_enabled : null };
 }
@@ -152,7 +178,7 @@ function start(input: GrokProbeProcessInput): void {
       if (input.expectedAccountHint !== null && before !== input.expectedAccountHint) { fail('probe-account-hint-mismatch'); return; }
       pending = 3; send('_x.ai/billing');
     } else if (pending === 3) {
-      quota = billing(v.result); if (!quota) { fail('probe-quota-invalid'); return; }
+      quota = billing(v.result, input.startedAt); if (!quota) { fail('probe-quota-invalid'); return; }
       pending = 4; send('_x.ai/auth/info');
     } else if (pending === 4) {
       const after = account(v.result); if (!after) return;
