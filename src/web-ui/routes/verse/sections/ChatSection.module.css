@@ -33,6 +33,26 @@
 .chat[data-sidebar='collapsed'] > nav { display: none; }
 .chat > * { min-width: 0; min-height: 0; }
 
+/* The panel UNDER the chat (placement 'bottom', ≥ 1024px). The same DOM
+   order as the column — the dock is the last item either way, so moving it
+   never remounts a pane (a terminal keeps its scrollback) — placed by grid
+   lines instead: the chat list spans both rows, the transcript takes the
+   last column's top row, the panel its bottom row. */
+.chat[data-dock='bottom'] { grid-template-rows: minmax(0, 1fr) var(--verse-dock-height, 300px); }
+.chat[data-dock='bottom'] > nav,
+.chat[data-dock='bottom'] > [data-verse-resizer] { grid-row: 1 / -1; }
+.chat[data-dock='bottom'] > .main { grid-column: -2 / -1; grid-row: 1; }
+.chat[data-dock='bottom'] > aside[data-presentation='bottom'] { grid-column: -2 / -1; grid-row: 2; }
+
+/* Focus mode: only the conversation. Hidden, not unmounted — the chat list
+   keeps its scroll and every pane its state for the way back. */
+.chat[data-focus='on'] { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+.chat[data-focus='on'] > nav,
+.chat[data-focus='on'] > [data-verse-resizer],
+.chat[data-focus='on'] > aside,
+.chat[data-focus='on'] > [data-dock-layer] { display: none; }
+.chat[data-focus='on'] > .main { grid-column: 1; grid-row: 1; }
+
 .main {
   display: flex;
   flex-direction: column;

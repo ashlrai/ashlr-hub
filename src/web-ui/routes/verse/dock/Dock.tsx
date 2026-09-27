@@ -1,50 +1,71 @@
 /**
- * routes/verse/dock/Dock.tsx — the chat's right-hand workbench: Terminal,
- * Preview, Review, Tasks and Context as tabs, one pane or two stacked
- * (SPEC-310C §3, unit C2; contracts: shell/dock-catalog.ts, shell/slots.tsx).
+ * routes/verse/dock/Dock.tsx — the chat's PANEL AREA: every registered pane
+ * (Terminal, Browser, Changes, Files, Sources, Reasoning, Tasks, Context,
+ * and whatever other units register) as tabs, one pane or two stacked
+ * (SPEC-310C §3, unit C2; 3.16 workbench; contracts: shell/dock-catalog.ts,
+ * panes/pane-registry.ts).
  *
- * THE CONTAINER, NOT THE PANES. Terminal and Preview are C4's, Review is
- * C5's; the dock renders them through C0's slots, so it never imports their
- * code (xterm and the diff viewer stay off the chat's critical path) and a
- * pane whose file has not landed simply has no tab. Tasks and Context are
- * C2's own and arrive as render props from the Chat section, which holds
- * the data they show.
+ * THE CONTAINER, NOT THE PANES. Panes come from the pane REGISTRY: the dock
+ * never imports a pane's code. A pane that is not registered (or whose
+ * `when` says it does not apply to this chat) simply has no tab — its
+ * persisted tab comes back when it does. Each pane renders inside its own
+ * error boundary (a crash says so, with a retry, and takes nothing else
+ * down) and Suspense boundary (a lazy pane is its own chunk).
  *
- * LAYOUT follows the window (dockPresentation):
- *   ≥ 1024px   a column right of the transcript, 320px … 60% of the window,
- *              resized by dragging its left edge or with ←/→ on that edge;
+ * LAYOUT follows the window and the operator (dockPresentation):
+ *   ≥ 1024px   beside the chat (`column`, 320px … 60% of the window, its
+ *              left edge dragged or moved with ←/→) — or under it (`bottom`,
+ *              its top edge dragged or moved with ↑/↓), the operator's pick;
  *   480–1023   a sheet over the chat from the right;
  *   < 480      a bottom sheet, 75vh.
- * Two panes split vertically ("Preview over Terminal"), their boundary
- * dragged or moved with ↑/↓.
+ * Two panes split vertically ("Browser over Terminal"), their boundary
+ * dragged or moved with ↑/↓. Every drag is coalesced to one state write per
+ * animation frame, so resizing holds 60fps however heavy the panes are.
  *
  * KEEP-ALIVE. A pane stays mounted from the moment its tab opens until the
  * tab closes — hidden, not unmounted, when another tab is on top — so a
- * terminal keeps its scrollback and a preview its page. Each pane is told
+ * terminal keeps its scrollback and a browser its page. Each pane is told
  * whether it is visible, so it can stop timers while hidden.
  *
- * State (open, tabs, split, width) lives in dock-store.ts and persists with
- * the shell's v3 blob.
+ * State (open, tabs, split, sizes, placement, each chat's layout) lives in
+ * dock-store.ts and persists with the shell's v3 blob.
  */
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import {
+  Component,
+  Suspense,
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ErrorInfo,
+  type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
+import { Button } from '../../../components/primitives/Button.js';
 import { EmptyState } from '../../../components/primitives/EmptyState.js';
+import { SkeletonLine } from '../../../components/primitives/Skeleton.js';
 import { ActionMenu, anchorBelow, type ActionMenuItem, type MenuAnchor } from '../chat/ActionMenu.js';
-import { findCommand, formatChord } from '../shell/command-catalog.js';
-import { DOCK_LAYOUT, DOCK_PANES, clampDockWidth, type DockPaneId, type DockPresentation } from '../shell/dock-catalog.js';
-import { DiffPaneSlot, PreviewPaneSlot, TerminalPaneSlot, type TurnFileChange } from '../shell/slots.js';
-import { DOCK_PANE_LABEL, isPaneAvailable } from './dock-panes.js';
+import { commandChord, formatChord } from '../shell/command-keys.js';
+import { DOCK_LAYOUT, clampDockHeight, clampDockWidth, type DockPaneId, type DockPresentation } from '../shell/dock-catalog.js';
+import { getPane, isPaneAvailable, paneChordLabel, panesFor, preloadPanes, usePanes, type PaneContext, type PaneProps, type RegisteredPane } from '../panes/index.js';
 import {
   closeDock,
   closeDockTab,
   openDockPane,
-  requestTerminalBelow,
+  setDockHeight,
   setDockSplitRatio,
   setDockWidth,
   splitDock,
+  toggleDockPlacement,
   useDock,
 } from './dock-store.js';
-import { CloseGlyph, DOCK_PANE_GLYPH, SplitGlyph } from './dock-icons.js';
+import { CloseGlyph, PanelBottomGlyph, PanelRightGlyph, SplitGlyph } from './dock-icons.js';
 import styles from './Dock.module.css';
+
+/** What every pane gets besides its own id, visibility and presentation (PaneProps minus those). */
+export type DockPaneContext = Omit<PaneProps, 'paneId' | 'visible' | 'presentation' | 'requests'>;
 
 export interface DockProps {
   presentation: DockPresentation;
@@ -52,33 +73,50 @@ export interface DockProps {
   windowWidth: number;
   /** The width the column may actually take (after the transcript's floor); column presentation only. */
   columnWidth: number;
-  sessionId: string | null;
-  roots: readonly string[];
-  turnFiles: readonly TurnFileChange[];
-  /** Terminal ▸ Send selection to chat: already fenced. */
-  onSendToChat: (text: string) => void;
-  /** Review ▸ Add to message: `path:line: note`. */
-  onAddToMessage: (text: string) => void;
-  /** C2's own panes. */
-  renderTasks: (visible: boolean) => ReactNode;
-  renderContext: (visible: boolean) => ReactNode;
+  /** The chat column's height, for the bottom panel's caps; bottom presentation only. */
+  columnHeight?: number;
+  /** The open chat and the host actions, handed to every pane. */
+  pane: DockPaneContext;
 }
-
-export { DOCK_PANE_LABEL, isPaneAvailable };
 
 /** A catalog command's chord as this platform prints it ("⌘N" / "Ctrl+N"), or null when it has none. */
 function chordOf(id: string): string | null {
-  const chord = findCommand(id)?.keys[0];
+  const chord = commandChord(id);
   return chord ? formatChord(chord) : null;
+}
+
+/** The pane's title, or the id itself while its registration is not in (never a blank tab). */
+function titleOf(id: DockPaneId): string {
+  return getPane(id)?.title ?? id;
 }
 
 const KEY_STEP = 16;
 const KEY_STEP_COARSE = 64;
 const RATIO_STEP = 0.05;
 
+/**
+ * One write per animation frame while a handle is dragged: pointermove fires
+ * faster than the screen refreshes, and each write re-lays-out the chat.
+ */
+function useFrameWriter(write: (value: number) => void): (value: number) => void {
+  const pending = useRef<number | null>(null);
+  const frame = useRef<number | null>(null);
+  useEffect(() => () => { if (frame.current !== null) cancelAnimationFrame(frame.current); }, []);
+  return useCallback((value: number) => {
+    pending.current = value;
+    if (frame.current !== null) return;
+    frame.current = requestAnimationFrame(() => {
+      frame.current = null;
+      if (pending.current !== null) write(pending.current);
+      pending.current = null;
+    });
+  }, [write]);
+}
+
 export function Dock(props: DockProps) {
-  const { presentation, windowWidth, columnWidth } = props;
+  const { presentation, windowWidth, columnWidth, columnHeight = 0, pane: paneContext } = props;
   const { state, requests } = useDock();
+  usePanes(); // re-render when a pane is registered, replaced or removed
   const panelRef = useRef<HTMLElement>(null);
   const tabRefs = useRef(new Map<DockPaneId, HTMLButtonElement>());
   const idBase = useId();
@@ -86,11 +124,16 @@ export function Dock(props: DockProps) {
   // Panes mount on first show and stay mounted while their tab is open.
   const [mounted, setMounted] = useState<ReadonlySet<DockPaneId>>(() => new Set(state.open && state.active ? [state.active] : []));
 
-  const tabs = state.tabs.filter(isPaneAvailable);
+  const context: PaneContext = { sessionId: paneContext.sessionId, session: paneContext.session, roots: paneContext.roots };
+  const tabs = state.tabs.filter((id) => isPaneAvailable(id, context));
   const active = state.active !== null && tabs.includes(state.active) ? state.active : tabs[0] ?? null;
   const split = state.splitWith !== null && tabs.includes(state.splitWith) && state.splitWith !== active ? state.splitWith : null;
   const open = state.open && active !== null;
-  const sheet = presentation !== 'column';
+  const sheet = presentation === 'sheet' || presentation === 'bottom-sheet';
+  const docked = !sheet;
+  // Stacked panes only where there is height for two: not in a phone's sheet, not in the bottom row.
+  const canSplit = presentation === 'column' || presentation === 'sheet';
+  const showSplit = split !== null && canSplit;
 
   useEffect(() => {
     if (!open) return;
@@ -103,8 +146,14 @@ export function Dock(props: DockProps) {
     });
   }, [open, active, split, tabs.join('|')]); // eslint-disable-line react-hooks/exhaustive-deps -- tabs is compared by content
 
+  // The panel is open: fetch every pane's code now, so a tab's first click
+  // renders in the same frame instead of flashing its skeleton.
+  useEffect(() => {
+    if (open) preloadPanes();
+  }, [open]);
+
   // A sheet takes focus when it opens and gives it back when it closes; a
-  // column does not steal focus from the composer.
+  // docked panel does not steal focus from the composer.
   useEffect(() => {
     if (!open || !sheet) return undefined;
     const before = document.activeElement as HTMLElement | null;
@@ -155,69 +204,73 @@ export function Dock(props: DockProps) {
     tabRefs.current.get(next)?.focus();
   }
 
-  const closedPanes = DOCK_PANES.map((p) => p.id).filter((id) => isPaneAvailable(id) && !tabs.includes(id));
-  const addItems: ActionMenuItem[] = closedPanes.map((id) => ({
-    id,
-    label: DOCK_PANE_LABEL[id],
-    icon: DOCK_PANE_GLYPH[id]({}),
-    onSelect: () => openDockPane(id),
-  }));
-  const splitCandidates = DOCK_PANES.map((p) => p.id).filter((id) => isPaneAvailable(id) && id !== active);
+  const available = panesFor(context);
+  // One line per pane: the name is the item's whole accessible name. What a
+  // pane is FOR is taught where it is needed — its empty state.
+  const menuItem = (p: RegisteredPane, label: string, onSelect: () => void): ActionMenuItem => {
+    const Icon = p.icon;
+    return { id: p.id, label, icon: <Icon size={14} />, onSelect };
+  };
+  const closedPanes = available.filter((p) => !tabs.includes(p.id));
+  const addItems: ActionMenuItem[] = closedPanes.map((p) => menuItem(p, p.title, () => openDockPane(p.id)));
   const splitItems: ActionMenuItem[] = [
-    ...splitCandidates.map((id) => ({
-      id,
-      label: `${DOCK_PANE_LABEL[id]} below`,
-      icon: DOCK_PANE_GLYPH[id]({}),
-      onSelect: () => splitDock(id),
-    })),
+    ...available.filter((p) => p.id !== active).map((p) => menuItem(p, `${p.title} below`, () => splitDock(p.id))),
     ...(split ? [{ id: 'unsplit', label: 'One pane', separated: true, onSelect: () => splitDock(null) }] : []),
   ];
 
   const toggleChord = chordOf('dock.toggle');
   const width = presentation === 'column' ? columnWidth : clampDockWidth(state.width, windowWidth);
-  const label = `Dock: ${DOCK_PANE_LABEL[active!]}${split ? ` over ${DOCK_PANE_LABEL[split]}` : ''}`;
+  const height = clampDockHeight(state.height, columnHeight);
+  const label = `Dock: ${titleOf(active!)}${showSplit ? ` over ${titleOf(split!)}` : ''}`;
+  const style = presentation === 'bottom-sheet'
+    ? { height: `${DOCK_LAYOUT.bottomSheetHeightVh}vh` }
+    : presentation === 'bottom' ? { height } : { width };
 
   const panel = (
     <aside
       ref={panelRef}
       className={styles.dock}
       data-presentation={presentation}
-      data-split={split ? 'true' : undefined}
+      data-split={showSplit ? 'true' : undefined}
       aria-label={label}
       role={sheet ? 'dialog' : 'complementary'}
       aria-modal={sheet ? true : undefined}
       tabIndex={-1}
-      style={presentation === 'bottom-sheet' ? { height: `${DOCK_LAYOUT.bottomSheetHeightVh}vh` } : { width }}
+      style={style}
       onKeyDown={onSheetKeyDown}
     >
       {presentation === 'column' ? <WidthHandle width={width} windowWidth={windowWidth} /> : null}
+      {presentation === 'bottom' ? <HeightHandle height={height} columnHeight={columnHeight} /> : null}
       {presentation === 'bottom-sheet' ? <span className={styles.grabber} aria-hidden="true" /> : null}
       <div className={styles.head}>
         <div className={styles.tabs} role="tablist" aria-label="Dock panes">
-          {tabs.map((pane) => {
-            const Icon = DOCK_PANE_GLYPH[pane];
-            const selected = pane === active;
-            const below = pane === split;
+          {tabs.map((id) => {
+            const registered = getPane(id)!;
+            const Icon = registered.icon;
+            const title = registered.title;
+            const selected = id === active;
+            const below = id === split && showSplit;
+            const key = paneChordLabel(registered);
             return (
-              <div key={pane} className={styles.tabWrap} data-selected={selected || undefined} data-below={below || undefined}>
+              <div key={id} className={styles.tabWrap} data-selected={selected || undefined} data-below={below || undefined}>
                 <button
-                  ref={(node) => { if (node) tabRefs.current.set(pane, node); else tabRefs.current.delete(pane); }}
+                  ref={(node) => { if (node) tabRefs.current.set(id, node); else tabRefs.current.delete(id); }}
                   type="button"
                   role="tab"
-                  id={`${idBase}-tab-${pane}`}
+                  id={`${idBase}-tab-${id}`}
                   aria-selected={selected}
-                  aria-controls={`${idBase}-pane-${pane}`}
+                  aria-controls={`${idBase}-pane-${id}`}
                   tabIndex={selected ? 0 : -1}
                   className={styles.tab}
-                  onClick={() => openDockPane(pane)}
-                  onKeyDown={(event) => onTabKeyDown(event, pane)}
-                  title={below ? `${DOCK_PANE_LABEL[pane]} (lower pane)` : undefined}
+                  onClick={() => openDockPane(id)}
+                  onKeyDown={(event) => onTabKeyDown(event, id)}
+                  title={below ? `${title} (lower pane)` : key ? `${title} (${key})` : undefined}
                 >
                   <Icon size={14} />
-                  <span className={styles.tabLabel}>{DOCK_PANE_LABEL[pane]}</span>
+                  <span className={styles.tabLabel}>{title}</span>
                 </button>
-                <button type="button" className={styles.tabClose} aria-label={`Close ${DOCK_PANE_LABEL[pane]}`}
-                  title={`Close ${DOCK_PANE_LABEL[pane]}`} tabIndex={-1} onClick={() => closeDockTab(pane)}>
+                <button type="button" className={styles.tabClose} aria-label={`Close ${title}`}
+                  title={`Close ${title}`} tabIndex={-1} onClick={() => closeDockTab(id)}>
                   <CloseGlyph size={12} />
                 </button>
               </div>
@@ -233,12 +286,19 @@ export function Dock(props: DockProps) {
             onClick={(event) => setMenu({ kind: 'add', anchor: anchorBelow(event.currentTarget), from: event.currentTarget })}>
             <span className={styles.plus} aria-hidden="true">+</span>
           </button>
-          {presentation !== 'bottom-sheet' && splitItems.length > 0 ? (
-            <button type="button" className={styles.iconButton} aria-label={split ? 'Split: change or undo' : 'Split the dock'}
-              title={split ? 'Change the split' : 'Split: show a second pane below'} aria-haspopup="menu" aria-expanded={menu?.kind === 'split'}
-              aria-pressed={split !== null}
+          {canSplit && splitItems.length > 0 ? (
+            <button type="button" className={styles.iconButton} aria-label={showSplit ? 'Split: change or undo' : 'Split the dock'}
+              title={showSplit ? 'Change the split' : 'Split: show a second pane below'} aria-haspopup="menu" aria-expanded={menu?.kind === 'split'}
+              aria-pressed={showSplit}
               onClick={(event) => setMenu({ kind: 'split', anchor: anchorBelow(event.currentTarget), from: event.currentTarget })}>
               <SplitGlyph size={14} />
+            </button>
+          ) : null}
+          {docked ? (
+            <button type="button" className={styles.iconButton}
+              aria-label={presentation === 'bottom' ? 'Move the dock beside the chat' : 'Move the dock below the chat'}
+              title={presentation === 'bottom' ? 'Move beside the chat' : 'Move below the chat'} onClick={toggleDockPlacement}>
+              {presentation === 'bottom' ? <PanelRightGlyph size={14} /> : <PanelBottomGlyph size={14} />}
             </button>
           ) : null}
           <button type="button" className={styles.iconButton} aria-label="Close the dock"
@@ -249,29 +309,29 @@ export function Dock(props: DockProps) {
       </div>
 
       <div className={styles.body}>
-        {tabs.filter((p) => mounted.has(p) || p === active || p === split).map((pane) => {
-          const shown = pane === active || (pane === split && presentation !== 'bottom-sheet');
-          const position = pane === active ? 'top' : pane === split ? 'bottom' : 'hidden';
+        {tabs.filter((p) => mounted.has(p) || p === active || p === split).map((id) => {
+          const shown = id === active || (id === split && showSplit);
+          const position = id === active ? 'top' : id === split ? 'bottom' : 'hidden';
           return (
             <div
-              key={pane}
-              id={`${idBase}-pane-${pane}`}
+              key={id}
+              id={`${idBase}-pane-${id}`}
               role="tabpanel"
-              aria-labelledby={`${idBase}-tab-${pane}`}
+              aria-labelledby={`${idBase}-tab-${id}`}
               className={styles.pane}
-              data-dock-pane={pane}
+              data-dock-pane={id}
               data-position={shown ? position : 'hidden'}
               hidden={!shown}
               inert={!shown}
-              style={shown && split && presentation !== 'bottom-sheet'
+              style={shown && showSplit
                 ? { flexBasis: `${(position === 'top' ? state.splitRatio : 1 - state.splitRatio) * 100}%`, order: position === 'top' ? 0 : 2 }
                 : undefined}
             >
-              <DockPane pane={pane} visible={shown} {...props} requests={requests} />
+              <PaneHost id={id} visible={shown} presentation={presentation} context={paneContext} requests={requests} />
             </div>
           );
         })}
-        {split && presentation !== 'bottom-sheet' ? <SplitHandle ratio={state.splitRatio} lower={DOCK_PANE_LABEL[split]} /> : null}
+        {showSplit ? <SplitHandle ratio={state.splitRatio} lower={titleOf(split!)} /> : null}
       </div>
 
       {menu ? (
@@ -288,46 +348,87 @@ export function Dock(props: DockProps) {
 
   if (!sheet) return panel;
   return (
-    <div className={styles.sheetLayer} data-presentation={presentation}>
+    <div className={styles.sheetLayer} data-presentation={presentation} data-dock-layer>
       <button type="button" className={styles.scrim} aria-label="Close the dock" tabIndex={-1} onClick={closeDock} />
       {panel}
     </div>
   );
 }
 
-function DockPane({ pane, visible, sessionId, roots, turnFiles, onSendToChat, onAddToMessage, renderTasks, renderContext, requests }:
-  DockProps & { pane: DockPaneId; visible: boolean; requests: ReturnType<typeof useDock>['requests'] }) {
-  if (pane === 'tasks') return <>{renderTasks(visible)}</>;
-  if (pane === 'context') return <>{renderContext(visible)}</>;
-  if (sessionId === null) {
+// ---------------------------------------------------------------------------
+// One pane: its empty state, its boundary, its component
+// ---------------------------------------------------------------------------
+
+function PaneHost({ id, visible, presentation, context, requests }: {
+  id: DockPaneId;
+  visible: boolean;
+  presentation: DockPresentation;
+  context: DockPaneContext;
+  requests: ReturnType<typeof useDock>['requests'];
+}) {
+  const [attempt, setAttempt] = useState(0);
+  const registered = getPane(id);
+  if (!registered) return null;
+  if (registered.needsSession && context.sessionId === null) {
     const newChat = chordOf('chat.new');
     return (
-      <EmptyState compact title={`Open a chat to use ${DOCK_PANE_LABEL[pane]}`}
-        body={`Pick a chat in the sidebar${newChat ? ` or start one with ${newChat}` : ''}. ${DOCK_PANE_LABEL[pane]} works in that chat's folders.`} />
+      <EmptyState compact title={`Open a chat to use ${registered.title}`}
+        body={`Pick a chat in the sidebar${newChat ? ` or start one with ${newChat}` : ''}. ${registered.description ?? `${registered.title} works in that chat's folders.`}`} />
     );
   }
-  switch (pane) {
-    case 'terminal':
-      return <TerminalPaneSlot sessionId={sessionId} roots={roots} request={requests.terminal} onSendToChat={onSendToChat} visible={visible} />;
-    case 'preview':
-      return (
-        // Dev-server Start: Terminal opens BELOW Preview, so the page appears
-        // on top when its port answers (SPEC-310C acceptance step 3).
-        <PreviewPaneSlot sessionId={sessionId} roots={roots} request={requests.preview} visible={visible}
-          onOpenTerminal={requestTerminalBelow} />
-      );
-    case 'diff':
-      return <DiffPaneSlot sessionId={sessionId} roots={roots} request={requests.diff} turnFiles={turnFiles} onAddToMessage={onAddToMessage} visible={visible} />;
-    default:
-      return null;
+  const Body = registered.component;
+  return (
+    // A new key per attempt (and per replacement): a fresh boundary AND a fresh lazy component.
+    <PaneBoundary key={`${attempt}`} title={registered.title} onRetry={() => setAttempt((n) => n + 1)}>
+      <Suspense fallback={<PaneLoading title={registered.title} />}>
+        <Body {...context} paneId={id} visible={visible} presentation={presentation} requests={requests} />
+      </Suspense>
+    </PaneBoundary>
+  );
+}
+
+/** The pane's shape while its chunk loads — lines, not a spinner, so nothing jumps when it lands. */
+function PaneLoading({ title }: { title: string }) {
+  return (
+    <div className={styles.loading} role="status" aria-label={`Loading ${title}`}>
+      <SkeletonLine width="42%" />
+      <SkeletonLine width="78%" />
+      <SkeletonLine width="64%" />
+    </div>
+  );
+}
+
+class PaneBoundary extends Component<{ title: string; onRetry: () => void; children: ReactNode }, { failed: boolean }> {
+  override state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  override componentDidCatch(error: Error, info: ErrorInfo): void {
+    // The console, not the page: operator copy never carries a stack or a path.
+    console.error(`[verse] ${this.props.title} pane failed`, error, info.componentStack);
+  }
+
+  override render(): ReactNode {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <EmptyState compact tone="error" title={`${this.props.title} could not load`} body="The rest of the chat still works."
+        action={<Button variant="subtle" size="sm" onClick={this.props.onRetry}>Try again</Button>} />
+    );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Handles
+// ---------------------------------------------------------------------------
 
 /** The column's left edge: drag, or ←/→ (⇧ for coarse), double-click for the default. */
 function WidthHandle({ width, windowWidth }: { width: number; windowWidth: number }) {
   const max = Math.max(DOCK_LAYOUT.minWidth, Math.floor(windowWidth * DOCK_LAYOUT.maxWidthFraction));
   const drag = useRef<{ startX: number; startWidth: number } | null>(null);
   const [dragging, setDragging] = useState(false);
+  const write = useFrameWriter(setDockWidth);
 
   function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
     if (event.button !== 0) return;
@@ -341,7 +442,7 @@ function WidthHandle({ width, windowWidth }: { width: number; windowWidth: numbe
     const start = drag.current;
     if (!start) return;
     // The dock grows leftward: moving the edge left by N widens it by N.
-    setDockWidth(clampDockWidth(start.startWidth + (start.startX - event.clientX), windowWidth));
+    write(clampDockWidth(start.startWidth + (start.startX - event.clientX), windowWidth));
   }
   function end() {
     drag.current = null;
@@ -371,10 +472,60 @@ function WidthHandle({ width, windowWidth }: { width: number; windowWidth: numbe
   );
 }
 
+/** The bottom panel's top edge: drag, or ↑/↓ (⇧ for coarse), double-click for the default. */
+function HeightHandle({ height, columnHeight }: { height: number; columnHeight: number }) {
+  const drag = useRef<{ startY: number; startHeight: number } | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const write = useFrameWriter(setDockHeight);
+  const max = clampDockHeight(Number.MAX_SAFE_INTEGER, columnHeight);
+
+  function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    drag.current = { startY: event.clientY, startHeight: height };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setDragging(true);
+    document.body.setAttribute('data-verse-resizing', 'row');
+  }
+  function onPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const start = drag.current;
+    if (!start) return;
+    // The panel grows upward: moving the edge up by N makes it N taller.
+    write(clampDockHeight(start.startHeight + (start.startY - event.clientY), columnHeight));
+  }
+  function end() {
+    drag.current = null;
+    setDragging(false);
+    document.body.removeAttribute('data-verse-resizing');
+  }
+  useEffect(() => () => document.body.removeAttribute('data-verse-resizing'), []);
+
+  function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    const step = event.shiftKey ? KEY_STEP_COARSE : KEY_STEP;
+    let next: number | null = null;
+    if (event.key === 'ArrowUp') next = height + step;
+    else if (event.key === 'ArrowDown') next = height - step;
+    else if (event.key === 'Home') next = DOCK_LAYOUT.minHeight;
+    else if (event.key === 'End') next = max;
+    if (next === null) return;
+    event.preventDefault();
+    setDockHeight(clampDockHeight(next, columnHeight));
+  }
+
+  return (
+    <div className={styles.heightHandle} role="separator" aria-orientation="horizontal" aria-label="Resize the dock"
+      aria-valuemin={DOCK_LAYOUT.minHeight} aria-valuemax={max} aria-valuenow={Math.round(height)} tabIndex={0}
+      data-dragging={dragging || undefined}
+      onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end}
+      onDoubleClick={() => setDockHeight(DOCK_LAYOUT.defaultHeight)} onKeyDown={onKeyDown} />
+  );
+}
+
 /** The boundary between the two stacked panes: drag, or ↑/↓. */
 function SplitHandle({ ratio, lower }: { ratio: number; lower: string }) {
   const ref = useRef<HTMLDivElement>(null);
   const drag = useRef<{ top: number; height: number } | null>(null);
+  const write = useFrameWriter(setDockSplitRatio);
 
   function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
     if (event.button !== 0) return;
@@ -388,7 +539,7 @@ function SplitHandle({ ratio, lower }: { ratio: number; lower: string }) {
   function onPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
     const d = drag.current;
     if (!d || d.height <= 0) return;
-    setDockSplitRatio((event.clientY - d.top) / d.height);
+    write((event.clientY - d.top) / d.height);
   }
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (event.key === 'ArrowUp') { event.preventDefault(); setDockSplitRatio(ratio - RATIO_STEP); }

@@ -47,6 +47,16 @@
   grid-template-columns: var(--rail-width) minmax(0, 1fr) var(--resources-width, 360px);
 }
 
+/* Focus mode (⇧⌘F, Chat only): the rail steps aside and the conversation
+   takes the window. The TOKEN goes to 0 too, so every header strip's
+   traffic-light inset (calc(--app-traffic-light-inset - --rail-width))
+   clears the macOS lights in the desktop window. Hidden, not unmounted. */
+.shell[data-focus='on'] {
+  --rail-width: 0px;
+  grid-template-columns: minmax(0, 1fr);
+}
+.shell[data-focus='on'] > .rail { display: none; }
+
 /* ---- rail ------------------------------------------------------------- */
 .rail {
   position: relative;

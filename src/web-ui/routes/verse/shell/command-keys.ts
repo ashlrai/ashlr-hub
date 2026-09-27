@@ -150,12 +150,20 @@ const KEYS = {
     'chat.find': 'mod+f',
     'chat.turn-prev': 'alt+arrowup',
     'chat.turn-next': 'alt+arrowdown',
-    // Dock
+    // Focus mode: everything but the conversation steps aside.
+    'chat.focus-mode': 'mod+shift+f',
+    // Dock (the panel area). One mnemonic chord per first-party pane; a pane
+    // registered by another unit brings its own (panes/pane-registry.ts
+    // refuses one that collides with any chord here). NOT ⇧⌘E (composer
+    // effort) and NOT ⇧⌘R (a browser's hard reload).
     'dock.toggle': 'mod+\\',
     'dock.terminal': 'ctrl+`',
     'dock.terminal-new': 'ctrl+shift+`',
     'dock.preview': 'mod+shift+b',
     'dock.diff': 'mod+shift+d',
+    'dock.files': 'mod+shift+o',
+    'dock.sources': 'mod+shift+s',
+    'dock.reasoning': 'mod+shift+y',
     // Composer menus (open from anywhere in the chat)
     'composer.permission': 'mod+shift+m',
     'composer.model': 'mod+shift+i',

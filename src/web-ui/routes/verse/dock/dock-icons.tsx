@@ -7,7 +7,7 @@
  * the shell's file.
  */
 import type { ReactNode, SVGProps } from 'react';
-import type { DockPaneId } from '../shell/dock-catalog.js';
+import type { BuiltinPaneId } from '../shell/dock-catalog.js';
 
 export interface GlyphProps extends Omit<SVGProps<SVGSVGElement>, 'children' | 'viewBox'> {
   size?: number;
@@ -84,10 +84,40 @@ export function TrashGlyph(p: GlyphProps) {
   return <Glyph {...p}><path d="M2.75 4.25h10.5M6.25 4.25V2.75h3.5v1.5M4.25 4.25l.6 9h6.3l.6-9" /></Glyph>;
 }
 
-export const DOCK_PANE_GLYPH: Readonly<Record<DockPaneId, (p: GlyphProps) => ReactNode>> = {
+export function FilesGlyph(p: GlyphProps) {
+  return <Glyph {...p}><path d="M2.25 4.25a1.5 1.5 0 0 1 1.5-1.5h2.5l1.5 1.75h4.5a1.5 1.5 0 0 1 1.5 1.5v5.75a1.5 1.5 0 0 1-1.5 1.5h-8.5a1.5 1.5 0 0 1-1.5-1.5Z" /></Glyph>;
+}
+
+export function SourcesGlyph(p: GlyphProps) {
+  return <Glyph {...p}><path d="M3.25 2.75h6l3.5 3.5v7a1 1 0 0 1-1 1h-8.5a1 1 0 0 1-1-1v-9.5a1 1 0 0 1 1-1Z" /><path d="M9 2.75v3.5h3.75M5 9h6M5 11.5h4" /></Glyph>;
+}
+
+export function ReasoningGlyph(p: GlyphProps) {
+  return <Glyph {...p}><path d="M6 13.25h4M6.5 11.25h3M8 1.75a4.25 4.25 0 0 0-2.4 7.76c.3.2.5.55.5.92v.82h3.8v-.82c0-.37.2-.72.5-.92A4.25 4.25 0 0 0 8 1.75Z" /></Glyph>;
+}
+
+/** Focus mode: four corners closing in on the conversation. */
+export function FocusGlyph(p: GlyphProps) {
+  return <Glyph {...p}><path d="M2.25 5.5V3.25a1 1 0 0 1 1-1H5.5M10.5 2.25h2.25a1 1 0 0 1 1 1V5.5M13.75 10.5v2.25a1 1 0 0 1-1 1H10.5M5.5 13.75H3.25a1 1 0 0 1-1-1V10.5" /></Glyph>;
+}
+
+/** The panel docked beside the chat. */
+export function PanelRightGlyph(p: GlyphProps) {
+  return <Glyph {...p}><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5" /><path d="M9.75 2.75v10.5" /></Glyph>;
+}
+
+/** The panel docked under the chat. */
+export function PanelBottomGlyph(p: GlyphProps) {
+  return <Glyph {...p}><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5" /><path d="M1.75 9.5h12.5" /></Glyph>;
+}
+
+export const DOCK_PANE_GLYPH: Readonly<Record<BuiltinPaneId, (p: GlyphProps) => ReactNode>> = {
   terminal: TerminalGlyph,
-  preview: PreviewGlyph,
+  browser: PreviewGlyph,
   diff: ReviewGlyph,
+  files: FilesGlyph,
+  sources: SourcesGlyph,
+  reasoning: ReasoningGlyph,
   tasks: TasksGlyph,
   context: ContextGlyph,
 };

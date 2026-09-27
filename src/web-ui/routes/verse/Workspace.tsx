@@ -74,13 +74,13 @@ import {
   expansiveCostCopy,
   standardSwitchCompacts,
 } from './ContextMeter.js';
-import { CopyGlyph, HandoffGlyph, MoreGlyph, RenameGlyph, TrashGlyph, DOCK_PANE_GLYPH } from './dock/dock-icons.js';
+import { CopyGlyph, FocusGlyph, HandoffGlyph, MoreGlyph, PanelBottomGlyph, RenameGlyph, TrashGlyph } from './dock/dock-icons.js';
 import { openDockPane, requestDiff, toggleDock, toggleDockPane, useDock } from './dock/dock-store.js';
-import { DOCK_PANE_LABEL, isPaneAvailable } from './dock/dock-panes.js';
+import { paneApplies, paneChordLabel, usePanes } from './panes/index.js';
+import { setFocusMode, useFocusMode } from './shell/focus-mode.js';
 import { saveDraft } from './chat/composer-state.js';
 import type { SeatChoice } from './SeatSelector.js';
 import { BranchBarSlot, SessionInsightChipSlot } from './shell/slots.js';
-import type { DockPaneId } from './shell/dock-catalog.js';
 import { findCommand, formatChord } from './shell/command-catalog.js';
 import { Transcript } from './Transcript.js';
 import { PanelIcon, SidebarIcon, VerseMark } from './verse-icons.js';
@@ -102,6 +102,7 @@ import { ProviderLogo } from '../../components/primitives/ProviderLogo.js';
 
 // Opened on request only: kept out of the chat's first-paint chunk.
 const HandoffDialog = lazy(() => import('./context/HandoffDialog.js').then((m) => ({ default: m.HandoffDialog })));
+const NO_ROOTS: readonly string[] = [];
 
 export interface WorkspaceProps {
   view: VerseSessionView;
@@ -265,7 +266,7 @@ export function Workspace(props: WorkspaceProps) {
             }
           />
           <div className={styles.headerSpacer} />
-          <div className={styles.actions}><PaneToggles sidebarCollapsed={sidebarCollapsed} onToggleSidebar={onToggleSidebar} hasSession={false} /></div>
+          <div className={styles.actions}><PaneToggles sidebarCollapsed={sidebarCollapsed} onToggleSidebar={onToggleSidebar} session={null} roots={NO_ROOTS} /></div>
         </header>
         <WorkspaceSeatHealth seats={seats} />
         <div className={styles.emptyState}>
@@ -482,6 +483,7 @@ export function Workspace(props: WorkspaceProps) {
         {/* One cluster, and it never shrinks: the lockup truncates instead. */}
         <div className={styles.actions}>
           {view.stream === 'reconnecting' ? <span className={styles.streamState} role="status">reconnecting…</span> : null}
+          {session ? <UsageReadout session={session} /> : null}
           {session && budget ? (
             <ContextMeter variant="ring" contextTokens={budget.contextTokens} contextWindow={budget.contextWindow} autoCompactAt={budget.autoCompactAt}
               exact={budget.exact} source={budget.source} mode={modesAvailable ? mode : null} engine={session.engine}
@@ -498,7 +500,7 @@ export function Workspace(props: WorkspaceProps) {
             </Tooltip>
           ) : null}
           <span className={styles.actionDivider} aria-hidden="true" />
-          <PaneToggles sidebarCollapsed={sidebarCollapsed} onToggleSidebar={onToggleSidebar} hasSession={session !== null} />
+          <PaneToggles sidebarCollapsed={sidebarCollapsed} onToggleSidebar={onToggleSidebar} session={session} roots={roots.roots} />
         </div>
       </header>
 
@@ -741,44 +743,70 @@ function shortcutFor(commandId: string): string | null {
   return chord ? formatChord(chord) : null;
 }
 
-const PANE_COMMAND: Readonly<Record<'terminal' | 'preview' | 'diff', string>> = {
-  terminal: 'dock.terminal',
-  preview: 'dock.preview',
-  diff: 'dock.diff',
-};
-
 /**
- * The pane toggles, as one group: Terminal, Preview and Review (each only
- * once its unit's pane is in this build), then the chat list and the dock.
- * All are aria-pressed buttons, so open/closed is spoken, not implied by a
- * name that changes under you. The action and its key are in the tooltip.
+ * The pane toggles, as one group: the registered panes that ask for a
+ * header toggle (Terminal, Browser, Changes — `toggle: true` in the pane
+ * registry; the rest live in the dock's "+" menu, the palette and their
+ * keys), then focus mode, the chat list and the dock. All are aria-pressed
+ * buttons, so open/closed is spoken, not implied by a name that changes
+ * under you. The action and its key are in the tooltip.
  *
  * The chat-list toggle keeps the 3.9 names — "Show chat list" collapsed,
  * "Chat list" expanded (the sidebar owns a "Hide chat list" button, and two
  * controls sharing one accessible name is an ambiguity, not a pair).
  */
-function PaneToggles({ sidebarCollapsed, onToggleSidebar, hasSession }: { sidebarCollapsed: boolean; onToggleSidebar: () => void; hasSession: boolean }) {
+function PaneToggles({ sidebarCollapsed, onToggleSidebar, session, roots }: {
+  sidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
+  session: VerseSession | null;
+  roots: readonly string[];
+}) {
   const { state } = useDock();
-  const shows = (pane: DockPaneId) => state.open && (state.active === pane || state.splitWith === pane);
-  const panes = (['terminal', 'preview', 'diff'] as const).filter((pane) => hasSession && isPaneAvailable(pane));
+  const registered = usePanes();
+  const focus = useFocusMode();
+  const shows = (pane: string) => state.open && (state.active === pane || state.splitWith === pane);
+  const context = { sessionId: session?.id ?? null, session, roots };
+  const panes = session ? registered.filter((pane) => pane.toggle && paneApplies(pane, context)) : [];
   const dockKey = shortcutFor('dock.toggle');
   const listKey = shortcutFor('chat.sidebar');
+  const focusKey = shortcutFor('chat.focus-mode');
+  const PlacementIcon = state.placement === 'bottom' ? PanelBottomGlyph : PanelIcon;
+  if (focus) {
+    // Focus mode: one way back, where the controls were.
+    return (
+      <div className={styles.toggles} role="group" aria-label="Panels">
+        <Tooltip label="Exit focus mode" shortcut={focusKey ?? undefined} placement="bottom">
+          <button type="button" className={styles.focusExit} aria-pressed onClick={() => setFocusMode(false)} aria-label="Focus mode">
+            <FocusGlyph size={14} /><span aria-hidden="true">Exit focus</span>
+          </button>
+        </Tooltip>
+      </div>
+    );
+  }
   return (
     <div className={styles.toggles} role="group" aria-label="Panels">
       {panes.map((pane) => {
-        const Icon = DOCK_PANE_GLYPH[pane];
-        const key = shortcutFor(PANE_COMMAND[pane]);
-        const on = shows(pane);
+        const Icon = pane.icon;
+        const key = paneChordLabel(pane);
+        const on = shows(pane.id);
         return (
-          <Tooltip key={pane} label={`${on ? 'Hide' : 'Show'} ${DOCK_PANE_LABEL[pane]}`} shortcut={key ?? undefined} placement="bottom">
-            <button type="button" className={`${styles.ghostIcon} ${styles.paneToggle}`} aria-pressed={on} aria-label={DOCK_PANE_LABEL[pane]}
-              onClick={() => toggleDockPane(pane)}>
+          <Tooltip key={pane.id} label={`${on ? 'Hide' : 'Show'} ${pane.title}`} shortcut={key ?? undefined} placement="bottom">
+            <button type="button" className={`${styles.ghostIcon} ${styles.paneToggle}`} aria-pressed={on} aria-label={pane.title}
+              onClick={() => toggleDockPane(pane.id)}>
               <Icon />
             </button>
           </Tooltip>
         );
       })}
       {panes.length > 0 ? <span className={`${styles.actionDivider} ${styles.paneToggle}`} aria-hidden="true" /> : null}
+      {session ? (
+        <Tooltip label="Focus mode: just the conversation" shortcut={focusKey ?? undefined} placement="bottom">
+          <button type="button" className={`${styles.ghostIcon} ${styles.paneToggle}`} aria-pressed={false} aria-label="Focus mode"
+            onClick={() => setFocusMode(true)}>
+            <FocusGlyph />
+          </button>
+        </Tooltip>
+      ) : null}
       <Tooltip label={`${sidebarCollapsed ? 'Show' : 'Hide'} chat list`} shortcut={listKey ?? undefined} placement="bottom">
         <button type="button" className={styles.ghostIcon} onClick={onToggleSidebar} aria-pressed={!sidebarCollapsed}
           aria-label={sidebarCollapsed ? 'Show chat list' : 'Chat list'}>
@@ -787,9 +815,31 @@ function PaneToggles({ sidebarCollapsed, onToggleSidebar, hasSession }: { sideba
       </Tooltip>
       <Tooltip label={`${state.open ? 'Hide' : 'Show'} the dock`} shortcut={dockKey ?? undefined} placement="bottom">
         <button type="button" className={styles.ghostIcon} onClick={toggleDock} aria-pressed={state.open} aria-label="Dock">
-          <PanelIcon />
+          <PlacementIcon />
         </button>
       </Tooltip>
     </div>
+  );
+}
+
+/**
+ * What this chat has cost so far, in the unit every seat bills: tokens.
+ * One quiet figure (input + output); the tooltip breaks it down, cache
+ * included. No dollar figure: a subscription seat has none per chat, and a
+ * guessed one would be a lie.
+ */
+function UsageReadout({ session }: { session: VerseSession }) {
+  const u = session.usage;
+  const total = (u?.inputTokens ?? 0) + (u?.outputTokens ?? 0);
+  if (!u || total <= 0) return null;
+  const detail = `This chat so far: ${formatTokens(u.inputTokens)} in · ${formatTokens(u.outputTokens)} out`
+    + `${u.cacheReadTokens > 0 ? ` · ${formatTokens(u.cacheReadTokens)} read from cache` : ''}`
+    + ` · ${session.turnCount} turn${session.turnCount === 1 ? '' : 's'}`;
+  return (
+    <Tooltip label={detail} placement="bottom">
+      <span className={styles.usageReadout} tabIndex={0} role="group" aria-label={`Tokens used: ${formatTokens(total)}`} data-testid="chat-usage">
+        {formatTokens(total)}<span className={styles.usageUnit} aria-hidden="true"> tok</span>
+      </span>
+    </Tooltip>
   );
 }

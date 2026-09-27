@@ -194,6 +194,42 @@
 
 .streamState { flex-shrink: 0; font-size: var(--text-2xs-size, 11px); color: var(--text-tertiary); }
 
+/* What the chat has cost so far, in tokens: quiet, tabular, one tab stop (its tooltip is the breakdown). */
+.usageReadout {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: baseline;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: default;
+}
+.usageReadout:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.usageUnit { color: var(--text-tertiary); }
+
+/* Focus mode's one control: where the pane toggles were, so the way back is where you look. */
+.focusExit {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.focusExit:hover { background: var(--bg-hover); color: var(--text-primary); }
+.focusExit:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+
 /* ---- action cluster ----------------------------------------------------- */
 /*
  * flex-shrink: 0 is the whole contract of this strip's truncation behaviour:

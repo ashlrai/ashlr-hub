@@ -63,6 +63,7 @@ import { onActivityCompletions, useActivity } from './shell/useActivity.js';
 import { useViewport } from './shell/viewport.js';
 import type { WarmupOptions } from './shell/warmup.js';
 import { useVerseUi } from './useVerseUi.js';
+import { useFocusMode } from './shell/focus-mode.js';
 // rail-icons, not verse-icons: only the rail's glyphs belong in first paint.
 import { GearIcon, NeedsYouIcon, RAIL_ICON, VerseMark } from './rail-icons.js';
 import {
@@ -253,6 +254,8 @@ export function VerseApp() {
   const data = activity.data;
   const rail = useRailStatusModule();
   const resources = useResourcesUi();
+  // Focus mode (⇧⌘F) is the chat's: the rail steps aside only on the Chat surface.
+  const focus = useFocusMode() && ui.section === 'chat';
 
   useEffect(() => prefetchAfterFirstPaint(), []);
   // The gear tray is fetched right after mount (not on idle) and then stays
@@ -371,6 +374,7 @@ export function VerseApp() {
       data-rail={expanded ? 'expanded' : 'collapsed'}
       data-compact={compact || undefined}
       data-resources={resources.open && resources.pinned && !compact ? 'docked' : undefined}
+      data-focus={focus ? 'on' : undefined}
     >
       <nav className={styles.rail} data-rail={expanded ? 'expanded' : 'collapsed'} aria-label="Verse sections">
         {/*
