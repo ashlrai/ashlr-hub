@@ -26,12 +26,16 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
-import { VERSE_MCP_PROTOCOL_VERSIONS, VERSE_MCP_SERVER_INFO } from './verse-mcp.js';
+import {
+  VERSE_MCP_DIR_ENV,
+  VERSE_MCP_PROTOCOL_VERSIONS,
+  VERSE_MCP_RESOLVE_ENV,
+  VERSE_MCP_RUNNING_FILE_ENV,
+  VERSE_MCP_SERVER_INFO,
+  VERSE_MCP_TOKEN_FILE_ENV,
+} from './verse-mcp-types.js';
 
-export const VERSE_MCP_TOKEN_FILE_ENV = 'ASHLR_VERSE_MCP_TOKEN_FILE';
-export const VERSE_MCP_RESOLVE_ENV = 'ASHLR_VERSE_MCP_RESOLVE';
-export const VERSE_MCP_DIR_ENV = 'ASHLR_VERSE_MCP_DIR';
-export const VERSE_MCP_RUNNING_FILE_ENV = 'ASHLR_VERSE_RUNNING_FILE';
+export { VERSE_MCP_DIR_ENV, VERSE_MCP_RESOLVE_ENV, VERSE_MCP_RUNNING_FILE_ENV, VERSE_MCP_TOKEN_FILE_ENV };
 
 const URL_RE = /^http:\/\/127\.0\.0\.1:\d{1,5}\/api\/verse\/agent-tools\/mcp$/;
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;

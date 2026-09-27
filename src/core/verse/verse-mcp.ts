@@ -52,13 +52,11 @@ import { randomBytes } from 'node:crypto';
 
 import type { BrowserMcpDeps } from './browser-mcp.js';
 import type { VerseMcpConfirmOutcome, VerseMcpConfirmRequest } from './verse-mcp-grants.js';
-import type { VerseAgentAction, VerseMcpScope } from './verse-mcp-types.js';
+import { VERSE_MCP_PROTOCOL_VERSIONS, VERSE_MCP_SERVER_INFO, type VerseAgentAction, type VerseMcpScope } from './verse-mcp-types.js';
 
 export type { VerseMcpScope } from './verse-mcp-types.js';
 
-/** Newest first after the default. An unknown version is answered with the default (what every current seat speaks). */
-export const VERSE_MCP_PROTOCOL_VERSIONS = ['2025-06-18', '2026-07-28', '2025-03-26', '2024-11-05'] as const;
-export const VERSE_MCP_SERVER_INFO = { name: 'ashlr-verse', version: '1.0.0' };
+export { VERSE_MCP_PROTOCOL_VERSIONS, VERSE_MCP_SERVER_INFO } from './verse-mcp-types.js';
 
 export interface VerseMcpToolAnnotations {
   title: string;

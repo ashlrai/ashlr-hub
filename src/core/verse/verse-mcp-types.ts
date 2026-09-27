@@ -39,6 +39,20 @@ export const VERSE_MCP_TABS_PATH = `${VERSE_AGENT_TOOLS_PATH}/tabs`;
 /** The one server name every seat sees (`mcp__ashlr-verse__terminal_run`). */
 export const VERSE_MCP_SERVER_NAME = 'ashlr-verse';
 
+/** Newest-but-one first: an unknown version is answered with the first (what every current seat speaks). */
+export const VERSE_MCP_PROTOCOL_VERSIONS = ['2025-06-18', '2026-07-28', '2025-03-26', '2024-11-05'] as const;
+export const VERSE_MCP_SERVER_INFO = { name: VERSE_MCP_SERVER_NAME, version: '1.0.0' };
+
+/**
+ * How `ashlr verse-mcp-stdio` finds its turn (verse-mcp-stdio.ts). Kept here,
+ * with the other plain data, so the launch code (verse-mcp-launch.ts) names
+ * them without importing the bridge.
+ */
+export const VERSE_MCP_TOKEN_FILE_ENV = 'ASHLR_VERSE_MCP_TOKEN_FILE';
+export const VERSE_MCP_RESOLVE_ENV = 'ASHLR_VERSE_MCP_RESOLVE';
+export const VERSE_MCP_DIR_ENV = 'ASHLR_VERSE_MCP_DIR';
+export const VERSE_MCP_RUNNING_FILE_ENV = 'ASHLR_VERSE_RUNNING_FILE';
+
 export function isVerseMcpEndpointPath(path: string): boolean {
   return path === VERSE_MCP_PATH;
 }

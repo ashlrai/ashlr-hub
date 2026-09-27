@@ -46,9 +46,10 @@ import {
   VERSE_MCP_DIR_ENV,
   VERSE_MCP_RESOLVE_ENV,
   VERSE_MCP_RUNNING_FILE_ENV,
+  VERSE_MCP_SERVER_NAME,
   VERSE_MCP_TOKEN_FILE_ENV,
-} from './verse-mcp-stdio.js';
-import { VERSE_MCP_SERVER_NAME, type VerseMcpScope } from './verse-mcp-types.js';
+  type VerseMcpScope,
+} from './verse-mcp-types.js';
 
 /** Codex's per-call MCP timeout: the longest terminal_run (600 s) plus a confirmation (120 s) and slack. */
 export const CODEX_MCP_TOOL_TIMEOUT_SEC = 780;
