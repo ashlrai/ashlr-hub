@@ -91,3 +91,32 @@ degradation a schema prevents.
 
 Secondary, lower priority: `src/core/phantom.ts:804` `normalizeAgentReportCountKey` — four hardcoded
 synonym tables over third-party agent output where every unrecognized value collapses to 'other'.
+
+## The decision layer (`src/core/decide/**`)
+
+Every call site goes through `decide(kind, state, questions, { fallback, threshold?, interpret?, escalateOnly? })`
+or `decideEach(kind, items, question, …)` (N items, one call per 10). The layer supplies, for every site: a required
+deterministic fallback, a per-kind threshold (registry → `~/.ashlr/jev/config.json` `thresholds` → call override), an
+input-hash cache (6 h, in memory, successful answers only), a daily paid-call budget (`dailyCallBudget`, default 1500),
+kill switches (`ASHLR_JEV_DISABLE=1`, `ASHLR_CLASSIFY_DISABLE=1`, or `enabled: false` / `disabledKinds` in the config
+file — all checked before the cache), and a ledger at `~/.ashlr/jev/decisions/YYYY-MM-DD.jsonl` (path, reason,
+confidence, tokens, est. cost, latency — never the classified text or the key). Safety-adjacent kinds are advisory or
+escalate-only. Observability: `ashlr jev status`, `ashlr jev test "<text>"`, GET `/api/verse/jev`, the Resources (⌘.)
+Jev card and the Usage "Jev decisions" panel. Cost is an estimate at placeholder per-token rates until real ones are set
+(`inputUsdPerMTok` / `outputUsdPerMTok`).
+
+| Kind | Where | Threshold | Fallback | Bound |
+|---|---|---|---|---|
+| engine-error | `classify/engine-errors.ts` (sandboxed-engine diagnostics) | 0.75 | unified regex/substring table | retry Noul in the same call |
+| completion-claim | `classify/completion-claims.ts` | 0.75 | claim regexes | — |
+| task-class | skill-library `deriveTaskClass`, reflect `classifyGoal`, retro `classifyTaskKind` | 0.75 | each module's own keyword table | sync memo primed in one batched call by async parents |
+| judge-verdict | `fleet/manager.ts` before the reprompt | 0.9 | existing reprompt → tracked `parse` failure | verdict must be stated; no invented or negated `ship`; ship needs value≥3, correctness≥4 |
+| taste-verdict | `fleet/taste-critic.ts` | 0.9 | neutral score / verdict derived from score | — |
+| red-team-verdict | `fleet/red-team.ts` (prose replies only) | 0.85 | no finding | escalate-only: can only add a finding |
+| retro-root-cause | `learn/retro/sweep.ts` | 0.75 | fixed code → category table | adds `category`; codes/labels untouched |
+| needs-you-priority | `verse/activity.ts` (background, never awaited) | 0.75 | severity → expiry → age | re-ranks within a severity band only |
+| interrupt-worthiness | exported `worthInterrupting` | 0.8 | severity/expiry/quiet-hours rule | never suppresses high/blocking |
+| lane-choice | exported `chooseLane`; Devin fleet `laneAdvisor` | 0.8 | size/keyword heuristic over available lanes | advisor returns null on fallback; launcher only narrows |
+| trigger-triage | exported `triageTrigger` | 0.8 | label/keyword triage | every part must clear the gate |
+| action-class | exported `suggestActionClass` | 0.85 | the deterministic class | advisory, escalate-only; authority class unchanged |
+| operator-intent | exported `classifyOperatorIntent` | 0.8 | regex ladder | routing only; Jev can never introduce `approval` |

@@ -71,6 +71,9 @@ function decisiveYes(answers: Readonly<Record<string, TypeSafeAnswer>>, name: st
   return a.noul >= 0.5 ? a.noul : undefined;
 }
 
+/** "do not ship", "wouldn't ship this", "never ship": a ship extraction is refused outright. */
+const NEGATED_SHIP = /\b(?:not|n't|never|no)\s+(?:\w+\s+){0,2}ship\b/i;
+
 /** Deterministic rationale recovery — never sent anywhere, never invented. */
 export function recoverRationale(raw: string): string {
   const line = raw.match(/RATIONALE\s*[:=]\s*(.+)/i)?.[1]
@@ -132,7 +135,7 @@ export async function extractJudgeRubric(
       if (stated === undefined || !verdict || dims.some((d) => d === undefined)) return undefined;
       const [value, correctness, scope, alignment] = dims.map((d) => d!.score) as [number, number, number, number];
       // Deterministic guards on what Jev extracted (see module header).
-      if (verdict.label === 'ship' && (!/\bship\b/i.test(text) || value < 3 || correctness < 4)) return undefined;
+      if (verdict.label === 'ship' && (!/\bship\b/i.test(text) || NEGATED_SHIP.test(text) || value < 3 || correctness < 4)) return undefined;
       const confidence = Math.min(stated, verdict.confidence, ...dims.map((d) => d!.confidence));
       return {
         value: { verdict: verdict.label, value, correctness, scope, alignment, rationale: recoverRationale(text) },

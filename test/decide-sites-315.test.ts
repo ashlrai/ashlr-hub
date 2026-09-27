@@ -413,6 +413,8 @@ describe('verdict extraction', () => {
     fake.respond(() => judgeAnswers('ship', 0.95, ['2', '5', '4', '4']));
     expect((await extractJudgeRubric('ship it — value 2', { cfg })).value).toBeNull();
     fake.respond(() => judgeAnswers('ship'));
+    expect((await extractJudgeRubric("I would not ship this yet. value 4, correctness 5", { cfg })).value).toBeNull();
+    fake.respond(() => judgeAnswers('ship'));
     expect((await extractJudgeRubric('VERDICT: ship. value 4, correctness 5', { cfg })).value).toMatchObject({ verdict: 'ship' });
   });
 
