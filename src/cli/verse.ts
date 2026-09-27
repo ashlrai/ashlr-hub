@@ -152,6 +152,7 @@ export interface VerseBackgroundDeps {
   loadBudget?: () => Promise<{ startBudgetCapacityPublisher: (cfg: AshlrConfig) => () => void }>;
   loadApps?: () => Promise<{ warmVerseApps: (cfg: AshlrConfig) => Promise<void> }>;
   loadWiki?: () => Promise<{ scheduleWikiAutoRefresh: (cfg: AshlrConfig) => (() => void) | null }>;
+  loadAutomations?: () => Promise<{ scheduleAutomationsTick: () => (() => void) | null }>;
   /**
    * Run the services that probe or publish ACCOUNT state (health sweep,
    * budget capacity publisher). False under `--no-accounts`: that flag says
@@ -235,6 +236,14 @@ export async function startVerseBackgroundServices(
   if (accountServices) await attempt('wiki', async () => {
     const mod = await (deps.loadWiki ?? (() => import('../core/knowledge/wiki/jobs.js')))();
     return mod.scheduleWikiAutoRefresh(cfg);
+  });
+  // 3.15 automations: one tick a minute polls due triggers (labelled issues,
+  // red default branches, schedules) and hands queued firings to their lanes
+  // through the lanes' own entry points — grant, KILL and budgets included.
+  // Live console only (not --no-accounts); never in a test process.
+  if (accountServices) await attempt('automations', async () => {
+    const mod = await (deps.loadAutomations ?? (() => import('../core/automations/scheduler.js')))();
+    return mod.scheduleAutomationsTick();
   });
 
   let stopped = false;

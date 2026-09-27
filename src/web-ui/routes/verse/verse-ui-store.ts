@@ -93,6 +93,7 @@ export const VERSE_SECTIONS: readonly VerseSectionEntry[] = [
   { id: 'usage', label: 'Usage', module: 'UsageSection', placement: 'tray', blurb: 'Which account you can actually use right now, and what it costs.' },
   { id: 'wiki', label: 'Repo wiki', module: 'WikiSection', placement: 'tray', blurb: 'A private architecture wiki per repo, written on your own models — and Ask, with cited answers.' },
   { id: 'playbooks', label: 'Playbooks', module: 'PlaybooksSection', placement: 'tray', blurb: 'Versioned task templates every lane follows — `!macro` in any task — with how each version’s runs ended.' },
+  { id: 'automations', label: 'Automations', module: 'AutomationsSection', placement: 'tray', blurb: 'Labelled issues, a red main, schedules and webhooks become work on their own — within your limits and the grant.' },
 ];
 
 export const RAIL_SECTIONS: readonly VerseSectionEntry[] = VERSE_SECTIONS.filter((s) => s.placement === 'rail');

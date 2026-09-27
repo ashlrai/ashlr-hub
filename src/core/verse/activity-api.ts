@@ -117,6 +117,10 @@ async function importCloud(): Promise<ModuleExports | null> {
 async function importDevin(): Promise<ModuleExports | null> {
   try { return (await import('../devin/devin-api.js' as string)) as ModuleExports; } catch { return null; }
 }
+/** 3.15 automations: leader-review firings waiting for Approve / Reject (pure cached producer, no timer). */
+async function importAutomations(): Promise<ModuleExports | null> {
+  try { return (await import('../automations/needs-you.js' as string)) as ModuleExports; } catch { return null; }
+}
 
 function fn<T>(mod: ModuleExports | null, name: string): T | null {
   const value = mod?.[name];
@@ -124,10 +128,12 @@ function fn<T>(mod: ModuleExports | null, name: string): T | null {
 }
 
 export async function resolveTrackBHooks(): Promise<TrackBHooks> {
-  const [authority, fleet, leader, cloud, devin] = await Promise.all([importAuthority(), importFleetLive(), importLeader(), importCloud(), importDevin()]);
-  // The remote lanes (Claude cloud, Devin) file into the same sources with the same kinds.
+  const [authority, fleet, leader, cloud, devin, automations] = await Promise.all([importAuthority(), importFleetLive(), importLeader(), importCloud(), importDevin(), importAutomations()]);
+  // The remote lanes (Claude cloud, Devin) and automations' review items file
+  // into the same sources with the same kinds.
   const cloudItems = fn<() => NeedsYouItem[]>(cloud, 'needsYouItems');
   const devinItems = fn<() => NeedsYouItem[]>(devin, 'needsYouItems');
+  const automationItems = fn<() => NeedsYouItem[]>(automations, 'needsYouItems');
   return {
     producers: {
       authority: fn<() => NeedsYouItem[]>(authority, 'needsYouItems'),
@@ -143,7 +149,9 @@ export async function resolveTrackBHooks(): Promise<TrackBHooks> {
     },
     autonomy: fn<() => VerseAutonomyBadge | null>(authority, 'autonomyBadge'),
     latestMemoAt: fn<() => string | null>(leader, 'latestMemoAt'),
-    cloud: cloudItems || devinItems ? () => [...(cloudItems ? cloudItems() : []), ...(devinItems ? devinItems() : [])] : null,
+    cloud: cloudItems || devinItems || automationItems
+      ? () => [...(cloudItems ? cloudItems() : []), ...(devinItems ? devinItems() : []), ...(automationItems ? automationItems() : [])]
+      : null,
   };
 }
 

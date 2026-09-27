@@ -419,6 +419,9 @@ const WORKBENCH_IMPORTS: Readonly<Record<WorkbenchRouteFamilyId, () => Promise<W
   playbooks: async () => {
     try { return (await import('./playbooks-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'playbooks-api.js'); }
   },
+  automations: async () => {
+    try { return (await import('./automations-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'automations-api.js'); }
+  },
 };
 
 /** The importer table, for the contract test (every family has exactly one). */

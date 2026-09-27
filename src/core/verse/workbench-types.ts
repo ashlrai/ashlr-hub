@@ -46,8 +46,10 @@ export type WorkbenchSurfaceId = (typeof WORKBENCH_SURFACES)[number];
  * not a section). 3.15 adds the private repo wiki here — and to ⌘K — rather
  * than as a sixth rail slot: it is a reference you open, not a surface you watch.
  * Playbooks (3.15) join it for the same reason: a library you open and edit.
+ * Automations (3.15) sit here too: standing instructions you set up and check
+ * on, not a live surface.
  */
-export const WORKBENCH_TRAY_SECTIONS = ['settings', 'apps', 'usage', 'wiki', 'playbooks'] as const;
+export const WORKBENCH_TRAY_SECTIONS = ['settings', 'apps', 'usage', 'wiki', 'playbooks', 'automations'] as const;
 export type WorkbenchTraySectionId = (typeof WORKBENCH_TRAY_SECTIONS)[number];
 
 export type WorkbenchSectionId = WorkbenchSurfaceId | WorkbenchTraySectionId;
@@ -1245,6 +1247,13 @@ export const WORKBENCH_ROUTE_FAMILIES = [
     module: 'src/core/verse/playbooks-api.ts',
     handler: 'handlePlaybooksApi',
     prefixes: ['/api/verse/playbooks'],
+  },
+  {
+    id: 'automations',
+    owner: '3.15-automations',
+    module: 'src/core/verse/automations-api.ts',
+    handler: 'handleAutomationsApi',
+    prefixes: ['/api/verse/automations'],
   },
 ] as const satisfies readonly {
   id: string;

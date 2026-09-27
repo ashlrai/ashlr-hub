@@ -39,6 +39,8 @@ export const TOP_LEVEL_COMMANDS: string[] = [
   'cloud',
   // 3.15 Devin lane.
   'devin',
+  // 3.15 automations.
+  'automations',
   // 3.15 private repo wiki.
   'wiki',
   // 3.15 versioned playbooks.
@@ -109,6 +111,8 @@ const SUBCOMMANDS: Record<string, string[]> = {
   devin: ['connect', 'disconnect', 'enable', 'disable', 'fleet', 'status', 'launch', 'list', 'refresh', 'message', 'budget', 'help'],
   // Mirror the verb switch in src/cli/playbook.ts (runPlaybookCli).
   playbook: ['list', 'show', 'new', 'edit', 'run', 'help'],
+  // Mirror the verb switch in src/cli/automations.ts (runAutomationsCli).
+  automations: ['list', 'templates', 'add', 'enable', 'disable', 'remove', 'fire', 'help'],
   universe: ['demo', 'init', 'run', 'status', 'archive', 'campaign', 'portfolio', 'integration', 'deliver', 'deliveries', 'graph', 'compare', 'help'],
 };
 

@@ -184,6 +184,7 @@ export const WORKBENCH_COMMANDS = [
   { id: 'section.usage', title: 'Open Usage', scope: 'global', keys: [], group: 'go-to', section: 'Surfaces', keywords: ['capacity', 'spend', 'limits'] },
   { id: 'section.wiki', title: 'Open Repo wiki', scope: 'global', keys: [], group: 'go-to', section: 'Surfaces', keywords: ['wiki', 'docs', 'architecture', 'deepwiki', 'knowledge'] },
   { id: 'section.playbooks', title: 'Open Playbooks', scope: 'global', keys: [], group: 'go-to', section: 'Surfaces', keywords: ['playbook', 'playbooks', 'template', 'macro', 'procedure', 'recipe'] },
+  { id: 'section.automations', title: 'Open Automations', scope: 'global', keys: [], group: 'go-to', section: 'Surfaces', keywords: ['automations', 'triggers', 'schedule', 'cron', 'webhook', 'issues', 'label', 'red main', 'ci'] },
 
   // ── Navigation ───────────────────────────────────────────────────────────
   { ...bind('palette.open'), title: 'Command palette', group: null, section: 'Navigation' },
@@ -314,6 +315,9 @@ export const WORKBENCH_COMMANDS = [
   // Served by the shell (run-command.ts → playbooks/playbook-focus.ts): opens
   // Playbooks in "pick one to run" mode; Run… writes its !macro into the chat.
   { id: 'playbook.run', title: 'Run playbook…', scope: 'global', keys: [], group: 'actions', section: 'App', keywords: ['playbook', 'macro', 'template', 'run', 'fix bug', 'bump deps', 'add tests', 'docs sync', 'security fix'] },
+  // ── Automations (3.15) ─────────────────────────────────────────────────
+  // Served by the shell (run-command.ts → automations/automations-focus.ts).
+  { id: 'automations.new', title: 'New automation…', scope: 'global', keys: [], group: 'actions', section: 'App', keywords: ['automation', 'trigger', 'schedule', 'nightly', 'weekly', 'webhook', 'issues labeled', 'fix red main', 'rrule'] },
   { id: 'wiki.ask', title: 'Ask the codebase…', scope: 'global', keys: [], group: 'actions', section: 'App', keywords: ['ask', 'question', 'codebase', 'where', 'how', 'explain', 'wiki', 'search code'] },
   // Served by the shell (run-command.ts → copy-setup.ts), wherever you are.
   appAction('autonomy.copy-setup', 'Copy autonomy setup command', [AUTONOMY_SETUP_COMMAND, 'autonomy', 'turn on', 'clipboard']),
