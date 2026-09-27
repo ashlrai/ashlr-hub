@@ -27,10 +27,13 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   folds runs of clean reads into one "Read 6 files" row, names web calls by
   query or page and subagents by their brief, and counts a web search apart
   from a page fetch.
-- **Reasoning** and **Sources** sheets (from the transcript's strip) collect
-  the whole chat: sources de-duplicated across turns with the turns that cited
-  each, and every turn's reasoning in one scroll. Both are also exported as
-  session-id-only panes for the workbench pane registry.
+- **Sources** (⇧⌘S) and **Reasoning** (⇧⌘Y) panes replace the workbench
+  stubs: sources de-duplicated across the chat with the turns that cited each,
+  filters and "Cite" into your message; every turn's reasoning in one scroll
+  with what the turn did. The transcript's own toggles open the same panes.
+- Long chats stay light: past 40 turns, turns far from the viewport are held
+  as placeholders at their measured height (the newest 10 and the running
+  turn always render); jumping to any call, note or turn renders it first.
 - Local reasoning models that inline `<think>…</think>` (Qwen3, QwQ,
   DeepSeek-R1) now stream that as reasoning, not answer text; Codex
   `web_search` items are no longer dropped.
