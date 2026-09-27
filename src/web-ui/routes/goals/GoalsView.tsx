@@ -20,6 +20,7 @@ import { Epistemic } from '../../components/primitives/Epistemic.js';
 import { StatusBadge } from '../../components/primitives/StatusBadge.js';
 import { RefreshIndicator } from '../../components/primitives/RefreshIndicator.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
+import { usedPercentText } from '../verse/percent-text.js';
 import styles from './GoalsView.module.css';
 
 export function GoalsView() {
@@ -100,6 +101,9 @@ export function GoalsView() {
         <ul className={styles.list}>
           {goals.map((goal) => {
             const pct = Math.round((goal.progress.fractionDone ?? 0) * 100);
+            // The label follows the one percent rule: a goal 99.6% through
+            // must not read "100%" (done) while its last step is still open.
+            const pctText = usedPercentText((goal.progress.fractionDone ?? 0) * 100);
             return (
               <li key={goal.id} className={styles.goalCard} data-focus-key={`goal-${goal.id}`} tabIndex={0}>
                 <div className={styles.goalHeader}>
@@ -111,7 +115,7 @@ export function GoalsView() {
                   <div className={styles.progressTrack}>
                     <div className={styles.progressFill} style={{ width: `${pct}%` }} />
                   </div>
-                  <span className={styles.progressLabel}>{pct}%</span>
+                  <span className={styles.progressLabel}>{pctText}</span>
                 </div>
 
                 {/*

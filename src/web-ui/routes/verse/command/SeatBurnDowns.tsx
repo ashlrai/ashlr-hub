@@ -43,6 +43,7 @@ import { asSentence } from '../fleet/why-seat-model.js';
 import { WINDOW_MS, burnTimeFormat, resetWords, type SeatBurn } from './command-model.js';
 import { CardNote } from './Surface.js';
 import { useSeatBurns } from './useSeatBurns.js';
+import { usedPercentTextWithOverflow } from '../percent-text.js';
 import styles from './command.module.css';
 
 const WINDOW_WORD = { session: '5-hour', weekly: 'weekly' } as const;
@@ -64,7 +65,15 @@ const PAD_T = 16;
 const PAD_B = 26;
 const PAD_R = 14;
 const CHART_HEIGHT = 160;
-const pct = (v: number) => `${Math.round(v)}%`;
+/** Axis tick labels: round ticks on a nice scale, so plain rounding is exact. */
+const tickPct = (v: number) => `${Math.round(v)}%`;
+/**
+ * Readings (what is left): the one percent rule, so 0.4% left reads "<1%"
+ * rather than a spent-looking "0%", and 99.6% left reads "99%", not "100%".
+ * Above 100 it still reports the overflow, including 100.4%, which would
+ * otherwise round to a misleading 100%.
+ */
+const pct = usedPercentTextWithOverflow;
 /** The percent axis every seat card shares, so the cards compare at a glance. */
 const PERCENT_TICKS = niceTicks(0, 100, 4);
 /** A line that starts this far into the window did not see the window's start. */
@@ -124,7 +133,7 @@ function TrailingWindow({
   const inWindow = points.filter((p) => p.t >= from && p.t <= to).sort((a, b) => a.t - b.t);
   const textScale = useTextScale();
   // Same gutter rule as the chart kit, so Large/XLarge display sizes fit too.
-  const padL = tickGutter(PERCENT_TICKS.map((t) => pct(t)), 28, 56, textScale);
+  const padL = tickGutter(PERCENT_TICKS.map((t) => tickPct(t)), 28, 56, textScale);
   const plotW = Math.max(40, width - padL - PAD_R);
   const plotH = CHART_HEIGHT - PAD_T - PAD_B;
   const xs = linearScale(from, to, padL, padL + plotW);
@@ -157,7 +166,7 @@ function TrailingWindow({
           {PERCENT_TICKS.map((t) => (
             <g key={t}>
               <line className={plot.grid} x1={padL} x2={padL + plotW} y1={crisp(ys(t))} y2={crisp(ys(t))} />
-              <text className={plot.tick} x={padL - 6} y={ys(t)} dy="0.32em" textAnchor="end">{pct(t)}</text>
+              <text className={plot.tick} x={padL - 6} y={ys(t)} dy="0.32em" textAnchor="end">{tickPct(t)}</text>
             </g>
           ))}
           <line className={plot.axis} x1={padL} x2={padL + plotW} y1={crisp(ys(0))} y2={crisp(ys(0))} />

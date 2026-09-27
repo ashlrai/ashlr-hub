@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { usedPercentText } from './percent-text.js';
+import { usedPercentText, usedPercentTextWithOverflow } from './percent-text.js';
 import { percentText } from './autonomy/format.js';
 
 describe('usedPercentText — the one percent rule', () => {
@@ -18,5 +18,16 @@ describe('usedPercentText — the one percent rule', () => {
   });
   it('is the same rule the panels use', () => {
     for (const v of [0, 0.4, 1, 42.5, 99.2, 99.99, 100, Number.NaN]) expect(percentText(v)).toBe(usedPercentText(v));
+  });
+});
+
+describe('usedPercentTextWithOverflow', () => {
+  it('retains the one percent rule and never disguises a real overflow as 100%', () => {
+    expect(usedPercentTextWithOverflow(0.4)).toBe('<1%');
+    expect(usedPercentTextWithOverflow(99.6)).toBe('99%');
+    expect(usedPercentTextWithOverflow(100)).toBe('100%');
+    expect(usedPercentTextWithOverflow(100.4)).toBe('>100%');
+    expect(usedPercentTextWithOverflow(130)).toBe('130%');
+    expect(usedPercentTextWithOverflow(Number.NaN)).toBe('—');
   });
 });

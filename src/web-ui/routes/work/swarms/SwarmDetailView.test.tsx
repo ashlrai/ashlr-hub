@@ -67,5 +67,24 @@ describe('SwarmDetailView', () => {
     // Task list items are real elements with an id the DAG's <a> links target.
     expect(document.getElementById('dag-task-t1')).not.toBeNull();
     expect(document.getElementById('dag-task-t2')).not.toBeNull();
+    expect(screen.getByText('1/2 tasks done (50%)')).toBeInTheDocument();
+  });
+
+  it('prints progress by the one percent rule: 199 of 200 done is "99%", not "100%"', async () => {
+    const ids = Array.from({ length: 200 }, (_, i) => `t${i}`);
+    const big = {
+      ...SWARM,
+      plan: { ...SWARM.plan, tasks: ids.map((id) => ({ id, phase: 'build', goal: id, deps: [] })) },
+      tasks: ids.map((id, i) => ({ id, phase: 'build', status: i === 0 ? 'running' : 'done' })),
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(big), { status: 200 })));
+    render(
+      <MemoryRouter initialEntries={['/work/swarms/s1']}>
+        <Routes>
+          <Route path="/work/swarms/:id" element={<SwarmDetailView />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText('199/200 tasks done (99%)')).toBeInTheDocument());
   });
 });
