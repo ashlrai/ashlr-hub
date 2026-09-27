@@ -241,7 +241,10 @@ describe('conversation replies never use Claude (end to end through appendMasonM
       models: () => [],
       reasoning: async () => ({ generatedAt: 'x', window: { from: 'a', to: 'b' }, totals: { steps: 0, sessions: 0, byEngine: {} }, insights: [], trends: [] }),
     };
-    const seatD = { ...seatDeps(candidates, snapshot, calls), now: () => Date.now() };
+    // The seat router keeps the fixture clock (NOW): the capacity readings are
+    // stamped OBSERVED = NOW − 1 min, and routing refuses a reading older than
+    // 15 min — a wall-clock router here made this test fail later in the day.
+    const seatD = seatDeps(candidates, snapshot, calls);
     const deps: LeaderRunDeps = { cfg: FALLBACK_ON, now: () => Date.now(), sources, seat: seatD, apply };
     setLeaderThreadDepsForTest({ loadRunDeps: async () => deps });
     return { calls };
