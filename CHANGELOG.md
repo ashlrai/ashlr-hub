@@ -339,6 +339,80 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.14.0] — 2026-09-27 UTC — talk to the Leader anywhere, and a fleet that actually runs
+
+3.13.0 turned autonomy on: grant #1 signed, the switch Autonomous, the resident daemon under the grant. Running it
+live exposed what 3.14 fixes: paid seats were invisible to the fleet, the first tick stalled on a hung install, and
+there was no real way to talk to the Leader. Installing 3.14 changes authority code, so grant #1 pauses until
+`ashlr authority re-approve` (Touch ID); then `ashlr authority resident stop` / `start` puts the daemon on this build.
+
+### Talk to the Leader — Verse, Telegram and the CLI, one thread
+
+- One Leader brain. The legacy "Elon mode" dialogue and the Director are retired into it; free text from Telegram now
+  reaches the real Leader instead of a stateless side-brain reading a June briefing (#522).
+- A durable conversation thread (`~/.ashlr/vision/leader/thread.jsonl`, scrubbed, rotated). Replies come through the
+  Leader's own seat routing and budget (Grok, then local; no tools); when it can't think it says why, never silence.
+- Operator directives ("focus: …", "stop: …", "priority: …") become standing guidance fed into every memo run.
+  Questions in memos can be answered; answers feed the next run. Class-B actions can be approved early (same checks
+  as their window closing), class-C asks are recorded.
+- Mind (⌘4) is now the conversation: threaded messages with channel badges, memo cards with Approve/Veto and veto
+  countdowns, inline answers, directive chips; ⌘K "Message the Leader…" / "Add Leader directive…"; Needs-you
+  "Answer" jumps to the question (#519).
+- Telegram is a real two-way line: replies thread into the conversation, memos arrive with [Approve] [Veto] [Details],
+  `/leader`, `/directives`, `/status`, `/help`; informational messages never queue behind an unanswered question;
+  all text HTML-escaped and split safely; digests are change-driven (silent when nothing changed); a one-time
+  migration expires the stale legacy requests that had blocked the queue since June (#520).
+- `ashlr leader say | thread | answer | approve | directives`.
+
+### Leader reliability
+
+- The "zero active goals" memos were a read bug: three goal files with 1970 timestamps made the store read
+  incomplete and the Leader treated that as none. One shared definition of an open goal now; incomplete reads are
+  reported as "at least N" (#521).
+- Seat fallback: Grok → fast local (gpt-oss 20B) → the 27B → Claude only for the weekly deep run or by opt-in
+  (`foundry.leader.claudeFallback`). Local calls stream (the 09-26 memo failed on a 300 s non-streamed fetch). Failed
+  runs retry at 15 m / 45 m / 2 h. Health (healthy/degraded/down + why) in `GET /api/verse/leader`.
+- Check-ins every 2 h during working hours when evidence changed materially (`foundry.leader.checkinHours`), capped;
+  a cross-process lock and a stale-decision re-check stop double runs between the daemon and the comms poller.
+
+### The fleet, live
+
+- Accounts: the idle Verse sidecar kept the account-metadata lease and published an empty "fresh" snapshot, so the
+  daemon saw every paid seat as unknown and only local was eligible. Idle Verse now releases the lease and stops
+  publishing; the daemon reads its own or a live holder's evidence. The Resources drawer (⌘.) shows per account
+  "Chat: ready / why" and "Fleet: ready · reserve kept / why" with the fixing command; one Local card spans Ollama,
+  LM Studio and llama-server (#531).
+- The first tick stalled ~15 min: a sibling `file:../` dependency made `bun install` hang, and the old timeout then
+  deleted `node_modules` synchronously on the main thread. Installs now run in their own process group with a hard
+  timeout, cleanup is async, per-repo and per-tick deadlines keep one bad repo from holding the rest, and
+  `ashlr daemon status` shows "tick in progress: <phase> for <duration>" (#527).
+- Repos with `file:../<sibling>` dependencies resolve siblings to pinned snapshots of their enrolled fleet mirrors;
+  pins are part of the install key and the G3 digest, so a moved sibling invalidates the proof (#532).
+- Private repos on GitHub's free plan can't have rulesets or branch protection: new grants use local enforcement with
+  the fleet App's `ashlr/verify` there; status/setup explain the mismatch for an existing grant and re-approve
+  switches it (low risk, 4/day) (#524).
+- Command shows the rollout ladder while a grant is active (stage x of 8, progress to the next stage, grant countdown,
+  what happened last); Fleet lists every shadow decision with G0–G7 chips and why (#525).
+
+### A sidecar that can't freeze
+
+- A macOS privacy (TCC) prompt on ~/Desktop or ~/Documents froze every route for ~3 minutes after an install: a
+  synchronous folder read on the main thread waited on the dialog. The login-shell probe can no longer hang,
+  the Apps warm-up runs after startup (#518), and every Verse request path now reaches project folders
+  asynchronously with a bounded pool; `git` runs as `git -C <dir>` from `/`; routes that must start in a folder
+  check access first and answer 503 while a prompt is pending. `scripts/check-verse-sync-io.mjs` fails any new
+  `*Sync(` in a Verse API route. The Bun-only per-request usage rollup moved to the background worker (#523).
+
+### Charts
+
+- Monotone curves through every reading (no overshoot), per-series gradients, pixel-snapped hairlines, tabular
+  numerals, exact-value tooltips with local-time titles, keyboard reading, one-time draw-in (reduced-motion aware),
+  shape-matched skeletons, reserve bands on seat burn-downs, consistent provider colors (#528).
+
+Released with `npm run gate -- --base v3.13.0` (959 backend files, 22,464/22,551 tests; 218 web files,
+3,779/3,779) and a follow-up `--base a1a0b0ef` for #532 (GATE PASS). The one backend failure, a `verse-adapters`
+`elapsedMs` 0-vs-1 timing assertion in a file unchanged since 3.10, passed 51/51 in three solo reruns.
+
 ## [3.13.0] — 2026-09-26 UTC — autonomy you can actually turn on
 
 3.12.0 compiled in the operator's custody key. 3.13.0 closes the gaps that kept a signed grant from doing anything:
