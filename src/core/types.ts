@@ -1661,6 +1661,30 @@ export interface AshlrConfig {
      */
     director?: boolean;
     /**
+     * 3.15 the Leader line on Telegram (comms/leader-line.ts): scheduled
+     * briefs, event pings, intent routing ("status", "go build X"). Default on
+     * whenever the Telegram channel is configured; false turns the scheduled
+     * briefs / pings off (conversation still works). While it is on, the
+     * 6-hourly change digest stays silent — the briefs carry what shipped.
+     */
+    leaderLine?: boolean;
+    /**
+     * 3.15 brief times, local "HH:MM" in `timeZone`: the first is the morning
+     * brief, the second the evening recap. Default ["08:00", "19:00"].
+     */
+    briefTimes?: string[];
+    /** 3.15 IANA timezone for briefs and quiet hours. Default "America/New_York". */
+    timeZone?: string;
+    /**
+     * 3.15 quiet hours (local hours, [start, end)): only urgent pings go out;
+     * everything else waits for the morning brief. Default { start: 23, end: 7 }.
+     */
+    quietHours?: { start: number; end: number };
+    /** 3.15 most proactive (non-brief, non-reply) Leader pings per local day. Default 6. */
+    maxPingsPerDay?: number;
+    /** 3.15 the repo "go build X" targets when Mason names none. Default "ashlrai/ashlr-hub" (Ashlr Verse). */
+    leaderRepo?: string;
+    /**
      * M214: OTLP endpoint for fleet-pulse emit (GenAI-OTel spans).
      * Takes precedence over PULSE_OTLP_URL env and cfg.pulse.endpoint.
      * Example: 'https://pulse.example.com' (no trailing slash).

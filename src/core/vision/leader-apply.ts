@@ -95,6 +95,16 @@ import {
 } from './leader-types.js';
 import { leaderRoot, parseActionParams, readLeaderMemo, type AnyLeaderActionDraft } from './leader-memo.js';
 import { isOpenGoal } from '../goals/open-goals.js';
+import {
+  POWER_LOWERING_ONLY_OPS,
+  classifyPowerAction,
+  executePowerAction,
+  loadDefaultLeaderPowers,
+  powersContextOf,
+  runPowerInverse,
+  type LeaderPowersContext,
+  type LeaderPowersPorts,
+} from './leader-powers.js';
 
 // Ranks duplicated from authority/types.ts on purpose: that module is a leaf
 // of the authority surface, and this one must stay importable by the router
@@ -714,6 +724,11 @@ export interface LeaderApplyDeps {
   addPlaybookDelta(text: string): void;
   /** Tell Mason a class-B action is waiting (Telegram / iMessage via comms). Best-effort. */
   notify(action: LeaderAction): void;
+  /**
+   * 3.15 founder-mode lanes (leader-powers.ts): cloud / Devin launches, the
+   * cloud backlog, playbooks, automations. Absent = those kinds are refused.
+   */
+  powers?: LeaderPowersPorts;
 }
 
 let enrolledCache: string[] | null = null;
@@ -724,7 +739,7 @@ let enrolledCache: string[] | null = null;
  * `loadDefaultLeaderDeps()` once before using them.
  */
 export async function loadDefaultLeaderDeps(): Promise<LeaderApplyDeps> {
-  const [ledger, effective, quarantine, taskSource, hostMerge, experiments, registry, goalsStore, budgetStore, budgetPolicy, playbook, sandboxPolicy] =
+  const [ledger, effective, quarantine, taskSource, hostMerge, experiments, registry, goalsStore, budgetStore, budgetPolicy, playbook, sandboxPolicy, powers] =
     await Promise.all([
       import('../authority/ledger.js'),
       import('../authority/effective-config.js'),
@@ -738,6 +753,7 @@ export async function loadDefaultLeaderDeps(): Promise<LeaderApplyDeps> {
       import('../routing/policy.js'),
       import('./playbook.js'),
       import('../sandbox/policy.js'),
+      loadDefaultLeaderPowers(),
     ]);
   try {
     const enrollment = sandboxPolicy.readEnrollmentRegistry();
@@ -792,6 +808,7 @@ export async function loadDefaultLeaderDeps(): Promise<LeaderApplyDeps> {
         });
       }).catch(() => { /* Needs-you in Verse still shows it */ });
     },
+    powers,
   };
 }
 
@@ -856,6 +873,8 @@ export interface LeaderPolicyContext {
   goalCreatesLast24h: number;
   /** Ids of hypotheses this action's memo carries. */
   hypothesisIds: readonly string[];
+  /** 3.15: which founder-mode lanes exist (leader-powers.ts); absent = none. */
+  powers?: LeaderPowersContext;
 }
 
 export interface LeaderClassification {
@@ -892,6 +911,9 @@ function escalate(reason: string, spendRaising = false): LeaderClassification {
  */
 export function classifyLeaderAction(draft: AnyLeaderActionDraft, ctx: LeaderPolicyContext): LeaderClassification {
   const policy = ctx.policy;
+  // 3.15 founder-mode kinds: same purity, same context (leader-powers.ts).
+  const power = classifyPowerAction(draft, ctx);
+  if (power) return power;
   switch (draft.kind) {
     case 'escalate':
       return escalate('The Leader asked Mason directly.');
@@ -1326,8 +1348,11 @@ async function executeAction(deps: LeaderApplyDeps, action: LeaderAction): Promi
     }
     case 'escalate':
       return { status: 'refused', reason: 'Class C actions are never applied.' };
-    default:
-      return { status: 'refused', reason: 'Unknown action kind.' };
+    default: {
+      const power = await executePowerAction(deps.powers, action, nowMs);
+      if (!power) return { status: 'refused', reason: 'Unknown action kind.' };
+      return power.status === 'applied' ? { status: 'applied', inverse: power.inverse, restore: [], detail: power.detail } : power;
+    }
   }
 }
 
@@ -1456,6 +1481,7 @@ export function buildPolicyContext(deps: LeaderApplyDeps, hypothesisIds: readonl
     openGoalCount,
     goalCreatesLast24h: creates,
     hypothesisIds,
+    powers: powersContextOf(deps.powers),
   };
 }
 
@@ -1871,8 +1897,10 @@ async function runInverse(
         ? { restored: true, detail: 'The previous harness is active again.', ran: true }
         : { restored: false, detail: `The harness could not be rolled back: ${res.reason}`, ran: false };
     }
-    default:
-      return { restored: false, detail: 'Unknown inverse.', ran: false };
+    default: {
+      const power = await runPowerInverse(deps.powers, inverse, trusted, deps.now());
+      return power ?? { restored: false, detail: 'Unknown inverse.', ran: false };
+    }
   }
 }
 
@@ -1935,7 +1963,7 @@ async function vetoOne(deps: LeaderApplyDeps, stored: StoredLeaderAction, note: 
   const fromLedger = await ledgerRowFor(deps, action.id, 'applied');
   const trustedInverse = fromLedger !== 'unavailable' && fromLedger !== null && fromLedger.inverse ? fromLedger.inverse : null;
   const inverse = trustedInverse ?? action.inverse!;
-  if (!trustedInverse && !LOWERING_ONLY_OPS.has(inverse.op) && inverse.op !== 'restore-directives' && inverse.op !== 'restore-budget') {
+  if (!trustedInverse && !LOWERING_ONLY_OPS.has(inverse.op) && !POWER_LOWERING_ONLY_OPS.has(inverse.op) && inverse.op !== 'restore-directives' && inverse.op !== 'restore-budget') {
     // Leave the action applied: this veto cannot be confirmed and could raise autonomy.
     settleClaim(claimed, claimed.stored);
     const record: LeaderVetoRecord = { actionId: action.id, memoId: action.memoId, note, inverse: null, restored: false,

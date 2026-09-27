@@ -23,7 +23,14 @@
  *      Telegram reply to Mason's message.
  *
  * Inbound (buttons): `lt:<a|v|d>:<token>` → approveLeaderAction / veto /
- * full memo. Tokens resolve only to entries we created (see thread map).
+ * full memo; 3.15 `lt:<y|n|c>:<token>` → answer a Leader question (Yes / No /
+ * Your call). Tokens resolve only to entries we created (see thread map).
+ *
+ * 3.15 the Leader line (leader-line.ts) sits in front of the conversation:
+ * status / update / what's up → an instant brief, "more" → the rest of the
+ * last reply, approve / veto by id, "go build X" → real work at once. The
+ * thread drain asks it which proactive messages may go now (quiet hours, one
+ * question at a time). Replies are kept phone-sized (leader-persona.ts).
  *
  * SAFETY: messages reach here only from Mason's own chat (telegram.ts drops
  * every other chat id). Veto only lowers autonomy; Approve goes through the
@@ -54,6 +61,8 @@ import {
   type TelegramThreadKind,
 } from './telegram-thread-map.js';
 import type { LeaderThreadMessage } from '../vision/leader-thread.js';
+import { LEADER_TELEGRAM_DETAIL_MAX_LINES, LEADER_TELEGRAM_MAX_LINES, fitTelegram, guardPersonaText, wantsDetail } from '../vision/leader-persona.js';
+import { QUESTION_ANSWERS, instantBrief, rememberFullReply, routeLeaderText, type ThreadLineHooks } from './leader-line.js';
 
 export const LEADER_CALLBACK_PREFIX = 'lt:';
 const LEADER_MEMO_ID_RE = /^lm-\d{14}-[a-f0-9]{6}$/;
@@ -203,16 +212,20 @@ export async function sendReportViaTelegram(req: CommsRequest, cfg: AshlrConfig)
 
 /** How a Leader-thread message reads on the phone (plain text; escaped at the transport). */
 export function formatThreadMessage(msg: LeaderThreadMessage): string {
-  const body = scrubSecrets(msg.text ?? '').trim();
+  // 3.15: the Leader always speaks as itself (leader-persona.ts); Mason's own words are shown as written.
+  const body = scrubSecrets(msg.from === 'mason' ? (msg.text ?? '') : guardPersonaText(msg.text ?? '')).trim();
   // Mason's own words from another surface (e.g. Verse), mirrored so the
   // Leader's reply on Telegram has its context.
   if (msg.from === 'mason') return `You (in ${msg.channel === 'verse' ? 'Verse' : String(msg.channel)}):\n${body}`;
   switch (msg.kind) {
     case 'question':
       return `Leader asks:\n${body}\n\n(Reply to this message to answer.)`;
-    case 'memo':
-      // The thread's memo summary already opens with "Memo <id>".
-      return /^Memo /.test(body) ? `Leader ${body.replace(/^Memo /, 'memo ')}` : `Leader memo${msg.memoId ? ` ${msg.memoId}` : ''}\n${body}`;
+    case 'memo': {
+      // The thread's memo summary already opens with "Memo <id>". Phone-sized:
+      // the Details button carries the full memo.
+      const text = /^Memo /.test(body) ? `Leader ${body.replace(/^Memo /, 'memo ')}` : `Leader memo${msg.memoId ? ` ${msg.memoId}` : ''}\n${body}`;
+      return fitTelegram(text, LEADER_TELEGRAM_MAX_LINES + 2).text.replace('… (say "more" for the rest)', '… (tap Details for the full memo)');
+    }
     case 'action':
       return `Leader action:\n${body}`;
     case 'directive':
@@ -232,6 +245,7 @@ export async function sendThreadMessage(
   msg: LeaderThreadMessage,
   cfg: AshlrConfig,
   replyToTg?: number,
+  shape: { maxLines?: number; keyboard?: TelegramButton[][] | null } = {},
 ): Promise<boolean> {
   const opts: TelegramSendOpts = {};
   const replyTarget = replyToTg ?? telegramIdForThread(msg.replyTo);
@@ -255,9 +269,20 @@ export async function sendThreadMessage(
       { threadId: msg.id, ...(memoId ? { memoId } : {}), actionIds },
       { approve: true, veto: true },
     );
+  } else if (shape.keyboard) {
+    // 3.15: a yes/no Leader question gets Yes / No / Your call.
+    opts.keyboard = shape.keyboard;
   }
 
-  const res = await sendTelegramMessage(formatThreadMessage(msg), opts, cfg);
+  let text = formatThreadMessage(msg);
+  if (shape.maxLines !== undefined) {
+    const fit = fitTelegram(text, shape.maxLines);
+    if (fit.truncated) {
+      try { rememberFullReply(text); } catch { /* "more" just has nothing */ }
+    }
+    text = fit.text;
+  }
+  const res = await sendTelegramMessage(text, opts, cfg);
   if (res.ok) {
     recordTelegramMessages(sendResultIds(res), {
       threadId: msg.id,
@@ -282,7 +307,7 @@ export interface DrainResult {
  * a second send. Stops at the first transport failure (the rest retry next
  * cycle). Never throws.
  */
-export async function drainLeaderThread(cfg: AshlrConfig, pacer: SendPacer): Promise<DrainResult> {
+export async function drainLeaderThread(cfg: AshlrConfig, pacer: SendPacer, line?: ThreadLineHooks | null): Promise<DrainResult> {
   const out: DrainResult = { sent: 0, failed: 0, skipped: 0 };
   const mod = await thread();
   if (!mod) return out;
@@ -305,20 +330,28 @@ export async function drainLeaderThread(cfg: AshlrConfig, pacer: SendPacer): Pro
         out.skipped++;
         continue;
       }
+      // 3.15: quiet hours and one-question-at-a-time (leader-line.ts). Held
+      // messages stay pending and go out on a later cycle.
+      if (line && line.gate(msg) === 'hold') {
+        out.skipped++;
+        continue;
+      }
       if (!(await paceNext(pacer))) break;
-      const ok = await sendThreadMessage(msg, cfg);
+      const ok = await sendThreadMessage(msg, cfg, undefined, { keyboard: line?.questionKeyboard(msg) ?? null });
       recordPacedSend(pacer);
       await mod.markDelivered(msg.id, 'telegram', ok);
       if (!ok) {
         out.failed++;
         break;
       }
+      line?.sent(msg);
       out.sent++;
     } catch {
       out.failed++;
       break;
     }
   }
+  try { line?.flush(); } catch { /* best-effort */ }
   return out;
 }
 
@@ -349,6 +382,8 @@ function directiveText(directive: unknown): string | null {
  * to one. Never throws.
  */
 export async function converseWithLeader(event: InboundEvent, text: string, cfg: AshlrConfig): Promise<void> {
+  // 3.15: status, "more", approve / veto and "go build X" are the line's.
+  if (await routeLeaderText(event, text, cfg)) return;
   const mod = await thread();
   if (!mod) {
     await replyTo(event, 'The Leader thread is not available in this build — your message was not recorded.', cfg);
@@ -381,7 +416,9 @@ export async function converseWithLeader(event: InboundEvent, text: string, cfg:
     }
 
     if (reply && typeof reply.text === 'string' && reply.text.trim()) {
-      const ok = await sendThreadMessage(reply, cfg, event.messageId);
+      // Phone-sized unless he asked for detail; "more" sends the rest.
+      const maxLines = wantsDetail(text) ? LEADER_TELEGRAM_DETAIL_MAX_LINES : LEADER_TELEGRAM_MAX_LINES;
+      const ok = await sendThreadMessage(reply, cfg, event.messageId, { maxLines: maxLines + 1 });
       await mod.markDelivered(reply.id, 'telegram', ok);
       return;
     }
@@ -455,9 +492,9 @@ async function actionDetails(actionIds: string[]): Promise<string> {
  */
 export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig): Promise<boolean> {
   const data = event.data ?? '';
-  const m = /^lt:([avd]):(\d{1,12})$/.exec(data);
+  const m = /^lt:([avdync]):(\d{1,12})$/.exec(data);
   if (!m) return false;
-  const verb = m[1] as 'a' | 'v' | 'd';
+  const verb = m[1] as 'a' | 'v' | 'd' | 'y' | 'n' | 'c';
   const target = resolveButtonTarget(m[2]!);
   const ack = async (t: string): Promise<void> => {
     if (event.callbackQueryId) await answerCallbackQuery(event.callbackQueryId, cfg, t);
@@ -470,6 +507,24 @@ export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig):
   const actionIds = (target.actionIds ?? []).filter((id) => LEADER_ACTION_ID_RE.test(id)).slice(0, MAX_ACTIONS_PER_TAP);
 
   try {
+    if (verb === 'y' || verb === 'n' || verb === 'c') {
+      // 3.15: Yes / No / Your call on a Leader question.
+      const questionId = target.questionId;
+      const mod = await thread();
+      if (!questionId || !mod) {
+        await ack('That question is no longer open.');
+        return true;
+      }
+      await ack(verb === 'y' ? 'Yes' : verb === 'n' ? 'No' : 'Your call');
+      const { message, reply } = await mod.answerLeaderQuestion(questionId, QUESTION_ANSWERS[verb], { channel: 'telegram', cfg });
+      if (typeof event.messageId === 'number' && message?.id) recordTelegramMessages([event.messageId], { threadId: message.id, kind: 'answer', questionId });
+      if (reply && typeof reply.text === 'string' && reply.text.trim()) {
+        const ok = await sendThreadMessage(reply, cfg, event.messageId, { maxLines: LEADER_TELEGRAM_MAX_LINES + 1 });
+        await mod.markDelivered(reply.id, 'telegram', ok);
+      }
+      return true;
+    }
+
     if (verb === 'd') {
       await ack('Details');
       const text = memoId ? await memoDetails(memoId) : actionIds.length ? await actionDetails(actionIds) : 'No details on file.';
@@ -538,9 +593,13 @@ export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig):
 
 export const TELEGRAM_HELP_TEXT = [
   'Talk to the Leader: just type. Reply to a Leader message to answer it or follow up.',
+  '"status" / "update" / "what\'s up" — an instant brief. "more" — the rest of a long reply.',
+  '"build X" / "fix Y in owner/repo" — the Leader starts it now (cheapest lane that can do it) and pings you with the result.',
+  '"approve <id>" / "veto <id>" — or reply "approve" / "veto" to an action message.',
   '',
   'Commands',
-  '/status — fleet, autonomy and Leader status',
+  '/status — the instant brief (shipped, running, blockers, next)',
+  '/brief — same',
   '/leader — the latest Leader memo (or /leader <text> to message the Leader)',
   '/directives — the Leader\'s standing directives and standards',
   '/task <owner/repo> <what to do> — hand work to a Telegram automation',
@@ -669,7 +728,9 @@ export async function handleSlashCommand(event: InboundEvent, text: string, cfg:
       await replyTo(event, TELEGRAM_HELP_TEXT, cfg);
       return true;
     case 'status':
-      await replyTo(event, await buildStatusText(), cfg);
+    case 'brief':
+      // 3.15: the instant brief from recorded state (the model only for its narrative line).
+      await replyTo(event, await instantBrief(cfg), cfg);
       return true;
     case 'leader':
       if (rest) await converseWithLeader(event, rest, cfg);
