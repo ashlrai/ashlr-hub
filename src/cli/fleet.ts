@@ -119,7 +119,9 @@ export function formatFleetStatus(s: FleetStatus): string {
     lines.push(`  started:       ${s.daemon.startedAt}`);
   }
   lines.push(`  last tick:     ${s.daemon.lastTickAt ?? '—'}`);
-  if (s.daemon.tickInProgress) {
+  if (s.daemon.tickProgress) {
+    lines.push(`  current tick:  ${s.daemon.tickProgress.summary.replace(/^tick in progress: /, '')}`);
+  } else if (s.daemon.tickInProgress) {
     lines.push('  current tick:  in progress');
   }
   if (s.daemon.childActivity) {

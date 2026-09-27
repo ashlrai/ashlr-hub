@@ -182,6 +182,7 @@ import {
   type HeldItemRecord,
 } from './fleet-runtime-journal.js';
 import { repoIdentityOfPath, resolveRepoLabel } from './repo-identity.js';
+import { noteTickPhase } from '../daemon/tick-progress.js';
 import { FLEET_ENGINES, type DispatchOutcome, type FleetEngine, type LandingRecord, type RepoHold, type RepoHoldChange, type SetRepoHoldRequest } from './fleet-types.js';
 
 // ---------------------------------------------------------------------------
@@ -273,7 +274,7 @@ export interface LiveHooksDeps {
   shadow(input: Parameters<typeof recordShadowDecision>[0]): boolean;
   audit(entry: { action: string; repo: string | null; summary: string; result: 'ok' | 'refused' | 'error' }): void;
   /** U6 `prepareMirrorsForTick`: create / reset the stage's mirrors. */
-  prepareMirrors(policy: EffectivePolicy): Promise<MirrorTickPreparation>;
+  prepareMirrors(policy: EffectivePolicy, signal?: AbortSignal): Promise<MirrorTickPreparation>;
   /**
    * 3.13 fleet/cloud-intake.ts `ingestCloudPrs` over this tick's CURRENT
    * mirrors: cloud / self-improvement PRs become pending proposals the
@@ -659,7 +660,7 @@ export function defaultLiveHooksDeps(): LiveHooksDeps {
         audit({ action: entry.action, repo: entry.repo, sandboxId: null, summary: entry.summary, result: entry.result });
       } catch { /* audit is best effort */ }
     },
-    prepareMirrors: async (policy) => (await import('./mirrors.js')).prepareMirrorsForTick(policy),
+    prepareMirrors: async (policy, signal) => (await import('./mirrors.js')).prepareMirrorsForTick(policy, signal ? { signal } : {}),
     ingestCloudPrs: async (cfg, policy, mirrors) => (await import('./cloud-intake.js')).ingestCloudPrs(cfg, policy, { mirrors }),
     reconcileEnrollment: reconcileEnrollmentDefault,
     sweepHolds: (nowMs) => {
@@ -1139,7 +1140,8 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       let readyMirrors: MirrorTickPreparation['ready'] = [];
       if (!hookCtx.dryRun) {
         try {
-          const prep = await deps.prepareMirrors(policy);
+          noteTickPhase('mirror prep', `${policy.repos.length} repo(s)`);
+          const prep = await deps.prepareMirrors(policy, hookCtx.signal);
           readyMirrors = prep.ready;
           for (const failed of prep.failed) {
             if (!failed.path) continue;
@@ -1352,7 +1354,8 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       let watchReason: string | null = null;
       let watchHold: string | null = null;
       try {
-        const pass = await deps.advanceWatch();
+        noteTickPhase('post-merge watch');
+        const pass = await (hookCtx.signal ? deps.advanceWatch(hookCtx.signal) : deps.advanceWatch());
         if (!pass.ok) {
           watchHold = `The post-merge watch could not run (${pass.reason ?? 'no reason given'}); production holds until it can.`;
           watchReason = pass.reason;
@@ -1589,6 +1592,13 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
 
       if (budget === null) {
         return finish(heldResult(holdProduction ?? 'The budget is unavailable.', enrolled), state);
+      }
+      // The loop stopped waiting for this beforeTick (its deadline passed, or
+      // the daemon is stopping) and already held production: a context
+      // published now would be read by a tick that never asked for it.
+      if (hookCtx.signal?.aborted) {
+        const reason = 'The tick\'s preparation was cancelled before it finished (deadline or shutdown), so nothing is dispatched.';
+        return finish(heldResult(reason, enrolled), { ...state, holdProduction: reason });
       }
 
       ctx = {
