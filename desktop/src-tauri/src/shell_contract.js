@@ -84,6 +84,37 @@
     return true
   }
 
+  // Dictation (protocol v1, voice/mod.rs). Same rules as the browser channel:
+  // plain objects only, JSON round-tripped, size-capped; native parses the
+  // op strictly (voice/protocol.rs) and answers through
+  // window.__ASHLR_VOICE_EVENT__ below.
+  var VOICE_MESSAGE_MAX = 8192
+
+  function sendVoice(msg) {
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return false
+    var proto = Object.getPrototypeOf(msg)
+    if (proto !== Object.prototype && proto !== null) return false
+    var json
+    try {
+      json = JSON.stringify(msg)
+    } catch (_) {
+      return false
+    }
+    if (typeof json !== 'string' || json.length > VOICE_MESSAGE_MAX) return false
+    var internals = window.__TAURI_INTERNALS__
+    if (!internals || typeof internals.invoke !== 'function') return false
+    try {
+      var pending = internals.invoke('plugin:event|emit', {
+        event: 'shell-voice',
+        payload: JSON.parse(json)
+      })
+      if (pending && typeof pending.catch === 'function') pending.catch(function () {})
+    } catch (_) {
+      return false
+    }
+    return true
+  }
+
   window.__ASHLR_DESKTOP__ = Object.freeze({
     shell: 'tauri',
     platform: cfg.platform,
@@ -125,6 +156,13 @@
         text: true
       }),
       send: sendBrowser
+    }),
+    // Dictation: capture + transcription run natively (the WKWebView has no
+    // Web Speech API). Absent on older shells — that absence is the web UI's
+    // feature test, exactly like `browser`.
+    voice: Object.freeze({
+      version: 1,
+      send: sendVoice
     })
   })
 
@@ -138,6 +176,23 @@
         if (!detail || typeof detail !== 'object') return
         try {
           window.dispatchEvent(new CustomEvent('ashlr:browser', { detail: detail }))
+        } catch (_) {}
+      },
+      enumerable: false,
+      writable: false,
+      configurable: false
+    })
+  } catch (_) {}
+
+  // Native → page: dictation events (voice/protocol.rs event_script) —
+  // voice://state | level | partial | final | error. Locked like the browser
+  // channel so page code cannot intercept a transcript.
+  try {
+    Object.defineProperty(window, '__ASHLR_VOICE_EVENT__', {
+      value: function (detail) {
+        if (!detail || typeof detail !== 'object') return
+        try {
+          window.dispatchEvent(new CustomEvent('ashlr:voice', { detail: detail }))
         } catch (_) {}
       },
       enumerable: false,

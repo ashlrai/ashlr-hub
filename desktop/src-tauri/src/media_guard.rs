@@ -236,7 +236,9 @@ mod tests {
         // Before the idempotency guard, so it applies even if the tap's own
         // globals were somehow pre-seeded by the page.
         let neuter = tap.find("'getUserMedia'").unwrap();
-        let guard = tap.find("hasOwnProperty.call(window, '__ashlrTap')").unwrap();
+        let guard = tap
+            .find("hasOwnProperty.call(window, '__ashlrTap')")
+            .unwrap();
         assert!(neuter < guard);
     }
 
