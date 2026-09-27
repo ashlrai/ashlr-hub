@@ -144,6 +144,11 @@ export function hatchPatternId(reactId: string): string {
   return `chart-hatch-${reactId.replace(/[^A-Za-z0-9_-]/g, '')}`;
 }
 
+/** A document-safe id for one series' area gradient (ChartParts AreaGradient). */
+export function gradientId(reactId: string, key: string): string {
+  return `chart-grad-${reactId.replace(/[^A-Za-z0-9_-]/g, '')}-${key.replace(/[^A-Za-z0-9_-]/g, '_')}`;
+}
+
 /** Queued / parked work: an outline in this colour, no fill. */
 export const CHART_QUEUED_OUTLINE = 'var(--chart-queued-outline)';
 

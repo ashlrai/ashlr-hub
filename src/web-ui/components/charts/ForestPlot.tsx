@@ -182,6 +182,7 @@ export function ForestPlot({
       description={description}
       caveat={caveat}
       status={resolvedStatus}
+      skeleton="lanes"
       table={<TableView caption={title} columns={columns} rows={rows} rowKey={(r) => r.id} />}
       footer={
         <ChartLegend

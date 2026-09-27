@@ -1,3 +1,17 @@
+.box {
+  display: inline-block;
+  line-height: 0;
+  vertical-align: middle;
+}
+
+/* `width="fill"`: the sparkline spans its box (a stat tile's full width). */
+.fillBox {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  line-height: 0;
+}
+
 .sparkline {
   display: block;
   overflow: visible;
@@ -5,19 +19,19 @@
 
 .line {
   fill: none;
-  stroke: var(--text-tertiary);
   stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
+/* The latest point: the line's ink, ringed with the surface. */
 .dot {
-  fill: var(--chart-sequential);
+  stroke: var(--chart-surface);
+  stroke-width: 1.5;
 }
 
+/* The wash is a gradient (ChartParts AreaGradient); opacity lives in its stops. */
 .area {
-  fill: var(--chart-sequential);
-  opacity: 0.1;
   stroke: none;
 }
 

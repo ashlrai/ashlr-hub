@@ -464,6 +464,103 @@ export function round(v: number): number {
   return Math.round(v * 10) / 10;
 }
 
+/**
+ * A 1 px hairline's coordinate, snapped to the pixel grid: a 1 px stroke
+ * centred on an integer straddles two device pixels and paints as a blurry
+ * 2 px gray; centred on a half pixel it fills exactly one. Used for every
+ * gridline, axis and crosshair so they stay crisp at any measured size.
+ */
+export function crisp(v: number): number {
+  return Math.floor(v) + 0.5;
+}
+
+// ---------------------------------------------------------------------------
+// Monotone curves (visual polish that cannot lie)
+// ---------------------------------------------------------------------------
+
+/** One cubic Bézier segment: start, two control points, end. */
+export interface CurveSegment {
+  from: XY;
+  c1: XY;
+  c2: XY;
+  to: XY;
+}
+
+function sign(v: number): number {
+  return v < 0 ? -1 : 1;
+}
+
+/** Tangent at p1 from its two neighbours (Steffen / Fritsch–Carlson, as d3's curveMonotoneX). */
+function interiorTangent(p0: XY, p1: XY, p2: XY): number {
+  const h0 = p1.x - p0.x;
+  const h1 = p2.x - p1.x;
+  if (h0 === 0 || h1 === 0) return 0;
+  const s0 = (p1.y - p0.y) / h0;
+  const s1 = (p2.y - p1.y) / h1;
+  const p = (s0 * h1 + s1 * h0) / (h0 + h1);
+  return (sign(s0) + sign(s1)) * Math.min(Math.abs(s0), Math.abs(s1), 0.5 * Math.abs(p)) || 0;
+}
+
+/** Tangent at an end point, from its one neighbour and that neighbour's tangent. */
+function endTangent(p0: XY, p1: XY, t: number): number {
+  const h = p1.x - p0.x;
+  return h ? (3 * (p1.y - p0.y) / h - t) / 2 : t;
+}
+
+/**
+ * A monotone cubic through every point of a run (x ascending). WHY this curve
+ * and not a Catmull-Rom or basis spline: it passes EXACTLY through each
+ * reading and never overshoots between two of them — a segment's y always
+ * stays inside [y(i), y(i+1)] — so smoothing can never invent a peak, a dip
+ * below zero, or a crossing of the reserve line that the data does not have.
+ * Two points are a straight segment; one point has no segments.
+ */
+export function monotoneSegments(run: ReadonlyArray<XY>): CurveSegment[] {
+  const n = run.length;
+  if (n < 2) return [];
+  if (n === 2) {
+    const [a, b] = [run[0]!, run[1]!];
+    return [{ from: a, c1: { x: a.x + (b.x - a.x) / 3, y: a.y + (b.y - a.y) / 3 }, c2: { x: b.x - (b.x - a.x) / 3, y: b.y - (b.y - a.y) / 3 }, to: b }];
+  }
+  const t: number[] = new Array(n).fill(0);
+  for (let i = 1; i < n - 1; i++) t[i] = interiorTangent(run[i - 1]!, run[i]!, run[i + 1]!);
+  t[0] = endTangent(run[0]!, run[1]!, t[1]!);
+  t[n - 1] = endTangent(run[n - 1]!, run[n - 2]!, t[n - 2]!);
+  const out: CurveSegment[] = [];
+  for (let i = 0; i < n - 1; i++) {
+    const a = run[i]!;
+    const b = run[i + 1]!;
+    const dx = (b.x - a.x) / 3;
+    out.push({ from: a, c1: { x: a.x + dx, y: a.y + dx * t[i]! }, c2: { x: b.x - dx, y: b.y - dx * t[i + 1]! }, to: b });
+  }
+  return out;
+}
+
+function pt(p: XY): string {
+  return `${round(p.x)},${round(p.y)}`;
+}
+
+/** SVG path of the monotone curve through `run` (a lone point is just its M). */
+export function smoothPath(run: ReadonlyArray<XY>): string {
+  if (run.length === 0) return '';
+  return `M${pt(run[0]!)}` + monotoneSegments(run).map((s) => ` C${pt(s.c1)} ${pt(s.c2)} ${pt(s.to)}`).join('');
+}
+
+/**
+ * Closed area between a curved top run and a curved bottom run of equal x
+ * (a stacked layer's base is the layer below's top, so both edges use the
+ * SAME curve and adjacent layers meet without a sliver). The bottom is walked
+ * backwards by reversing each segment exactly — end, swapped controls, start.
+ */
+export function smoothAreaPath(top: ReadonlyArray<XY>, bottom: ReadonlyArray<XY>): string {
+  if (top.length === 0) return '';
+  const back = monotoneSegments(bottom).reverse();
+  const tail = back.length
+    ? `L${pt(back[0]!.to)}` + back.map((s) => ` C${pt(s.c2)} ${pt(s.c1)} ${pt(s.from)}`).join('')
+    : bottom.length ? `L${pt(bottom[0]!)}` : '';
+  return `${smoothPath(top)} ${tail} Z`;
+}
+
 // ---------------------------------------------------------------------------
 // Stacking
 // ---------------------------------------------------------------------------

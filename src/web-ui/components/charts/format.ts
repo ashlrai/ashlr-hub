@@ -176,3 +176,36 @@ export function timeLabelLadder(
   const distinctTimeOfDay = new Set(stamps.map(formatClockTime)).size > 1;
   return to - from < 6.5 * DAY_MS && distinctTimeOfDay ? [custom, formatWeekdayTime, formatTimeLabel] : [custom, formatTimeLabel];
 }
+
+// ---------------------------------------------------------------------------
+// Tooltip precision (verse-visual-quality)
+// ---------------------------------------------------------------------------
+
+/**
+ * The EXACT figure a tooltip prints: grouped digits, up to two decimals
+ * (three below 1) — "12,934" where the axis says "13K". An axis label rounds
+ * so ticks stay short; the tooltip is where a reader goes for the real number.
+ */
+export function formatExact(n: number): string {
+  if (!Number.isFinite(n)) return '—';
+  return n.toLocaleString('en-US', { maximumFractionDigits: Math.abs(n) < 1 && n !== 0 ? 3 : 2 });
+}
+
+/** "Fri, Sep 26" — a local calendar day with its weekday. */
+export const formatTooltipDay = localeFormatter({ weekday: 'short', month: 'short', day: 'numeric' });
+
+/** "Fri, Sep 26, 2:14 PM" — a local instant. */
+export const formatTooltipInstant = localeFormatter({ weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+
+/**
+ * The tooltip title for a time axis, in the VIEWER's zone: weekday and day
+ * for daily buckets (every stamp shares one clock time — local midnight),
+ * plus the clock time when readings fall at different times of day. An axis
+ * label is budgeted for width ("Sep 26"); the tooltip has room to say
+ * exactly which moment it describes.
+ */
+export function tooltipTimeFormatter(stamps: readonly number[]): (ms: number) => string {
+  const finite = stamps.filter((s) => Number.isFinite(s));
+  const sameClock = new Set(finite.map(formatClockTime)).size <= 1;
+  return sameClock && finite.length > 1 ? formatTooltipDay : formatTooltipInstant;
+}

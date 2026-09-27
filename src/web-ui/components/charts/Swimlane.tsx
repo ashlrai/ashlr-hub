@@ -17,14 +17,20 @@
  * that renders only the rows in view (plus overscan), so a 500-lane history
  * costs the same DOM as a 20-lane one. Each lane is a keyboard stop with a
  * spoken summary; every run is in the Table view.
+ *
+ * Polish (verse-visual-quality): runs grow from their start once on mount,
+ * lane by lane (not when virtualized — rows mounting on scroll must not
+ * replay it; static under reduced motion), hovering a run dims the others
+ * so the one being read stands out, and gridlines snap to the pixel grid.
  */
-import { useId, useMemo, useRef, useState, type UIEvent } from 'react';
+import { useId, useMemo, useRef, useState, type CSSProperties, type UIEvent } from 'react';
 import { CHART_QUEUED_OUTLINE, hatchPatternId, toneColor, type ChartEngine, type ChartTone } from './colors.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
 import { ChartLegend, ChartTooltip, EngineTick, HatchPattern, clampTooltipLeft, type ChartLegendItem } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
-import { MIN_TIME_SPAN_MS, ensureSpan, isPlausibleTime, labelCharPx, layoutAxisLabels, linearScale } from './chart-math.js';
+import { MIN_TIME_SPAN_MS, crisp, ensureSpan, isPlausibleTime, labelCharPx, layoutAxisLabels, linearScale } from './chart-math.js';
 import { useChartWidth } from './useChartWidth.js';
+import { useChartMotion } from './motion.js';
 import { useTextScale } from './useTextScale.js';
 import plot from './plot.module.css';
 import styles from './Swimlane.module.css';
@@ -175,6 +181,7 @@ export function Swimlane({
   const textScale = useTextScale();
   const [scrollTop, setScrollTop] = useState(0);
   const [hover, setHover] = useState<{ lane: number; item: number } | null>(null);
+  const motion = useChartMotion();
   const liveId = useId();
   const hatchId = hatchPatternId(useId());
   const nowMs = now ?? to;
@@ -260,6 +267,7 @@ export function Swimlane({
           const tone = toneOf(item.status);
           const outline = isOutline(item);
           const unknown = !outline && tone === 'unknown';
+          const dimmed = hover !== null && !(hover.lane === index && hover.item === itemIndex);
           return (
             <rect
               key={item.id}
@@ -267,7 +275,8 @@ export function Swimlane({
               data-status={item.status}
               data-open={item.end === null ? 'true' : undefined}
               data-style={outline ? 'outline' : unknown ? 'hatch' : 'fill'}
-              className={`${styles.bar} ${item.stale ? styles.stale : ''} ${item.end === null ? styles.open : ''} ${outline ? styles.outline : ''} ${unknown ? plot.unknownMark : ''}`}
+              className={`${styles.bar} ${plot.grow} ${dimmed ? styles.dimmed : ''} ${item.stale ? styles.stale : ''} ${item.end === null ? styles.open : ''} ${outline ? styles.outline : ''} ${unknown ? plot.unknownMark : ''}`}
+              style={{ '--chart-i': Math.min(index, 10) } as CSSProperties}
               x={outline ? x0 + 0.5 : x0}
               y={outline ? y + 5.5 : y + 5}
               width={outline ? Math.max(MIN_BAR_W, w - 1) : w}
@@ -316,10 +325,11 @@ export function Swimlane({
       description={description}
       caveat={caveat}
       status={resolvedStatus}
+      skeleton="lanes"
       table={<TableView caption={title} columns={columns} rows={flat} rowKey={(r) => r.id} />}
       footer={<ChartLegend min={1} items={legendItems} />}
     >
-      <div ref={wrapRef} className={plot.plotWrap}>
+      <div ref={wrapRef} className={plot.plotWrap} data-motion={virtual ? 'static' : motion}>
         {axis}
         <div
           className={virtual ? styles.scroller : undefined}
@@ -332,10 +342,10 @@ export function Swimlane({
               <HatchPattern id={hatchId} />
             </defs>
             {ticks.map((t) => (
-              <line key={t} className={plot.grid} x1={xs(t)} x2={xs(t)} y1={0} y2={bodyH} />
+              <line key={t} className={plot.grid} x1={crisp(xs(t))} x2={crisp(xs(t))} y1={0} y2={bodyH} />
             ))}
             {nowMs >= from && nowMs <= to ? (
-              <line className={styles.now} x1={xs(nowMs)} x2={xs(nowMs)} y1={0} y2={bodyH} />
+              <line className={styles.now} x1={crisp(xs(nowMs))} x2={crisp(xs(nowMs))} y1={0} y2={bodyH} />
             ) : null}
             {lanes.slice(first, last).map((lane, i) => renderLane(lane, first + i))}
           </svg>

@@ -146,6 +146,7 @@ export function CalendarHeatmap({
       description={description}
       caveat={caveat}
       status={resolvedStatus}
+      skeleton="heat"
       table={<TableView caption={title} columns={columns} rows={[...days].sort((a, b) => a.day.localeCompare(b.day))} rowKey={(d) => d.day} />}
       footer={
         <>

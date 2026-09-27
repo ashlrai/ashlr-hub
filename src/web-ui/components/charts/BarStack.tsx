@@ -16,14 +16,22 @@
  * slot 0 held; engine charts must pass engineColor(), status charts
  * toneColor(), identity charts seriesColor(slot) with a slot fixed per entity
  * (SPEC-310C §6). An all-unknown column is drawn with the unknown hatch.
+ *
+ * Polish (verse-visual-quality): columns rise from the baseline once on
+ * mount, staggered left to right (static under reduced motion — motion.ts);
+ * the hovered / focused column gets a soft slot band behind it while the
+ * others dim; gridlines snap to the pixel grid; the tooltip prints exact
+ * values (formatExact unless the caller formats them) with the total set
+ * apart; loading holds a column-shaped skeleton.
  */
-import { useId, useRef, useState, type KeyboardEvent } from 'react';
+import { useId, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import { hatchPatternId } from './colors.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
 import { ChartLegend, ChartTooltip, HatchPattern, clampTooltipLeft } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
-import { allIntegers, axisTicks, linearScale, roundedTopBar, stackColumn, thinIndexes, tickGutter, type StackedColumn } from './chart-math.js';
-import { formatCompact, formatPercent } from './format.js';
+import { allIntegers, axisTicks, crisp, linearScale, roundedTopBar, stackColumn, thinIndexes, tickGutter, type StackedColumn } from './chart-math.js';
+import { formatCompact, formatExact, formatPercent } from './format.js';
+import { useChartMotion } from './motion.js';
 import { useChartWidth } from './useChartWidth.js';
 import { useTextScale } from './useTextScale.js';
 import plot from './plot.module.css';
@@ -52,6 +60,8 @@ export interface BarStackProps {
   height?: number;
   width?: number;
   formatValue?: (v: number) => string;
+  /** Tooltip value format. Default: `formatValue` when given, else formatExact ("12,934", not "13K"). */
+  formatTooltip?: (v: number) => string;
   ariaLabel?: string;
 }
 
@@ -79,9 +89,12 @@ export function BarStack({
   height = 200,
   width: fixedWidth,
   formatValue: formatValueProp,
+  formatTooltip: formatTooltipProp,
   ariaLabel,
 }: BarStackProps) {
   const formatValue = formatValueProp ?? formatCompact;
+  const formatTip = formatTooltipProp ?? formatValueProp ?? formatExact;
+  const motion = useChartMotion();
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
   const textScale = useTextScale();
@@ -122,7 +135,10 @@ export function BarStack({
   // A category label gets 64 px at 12 px text, more at a larger Display size.
   const labelIdx = thinIndexes(rows.length, Math.max(2, Math.floor(plotW / (64 * textScale))));
 
-  const fmtTotal = (r: Row) => `${r.stack.incomplete && !r.stack.unknown ? '≥ ' : ''}${r.stack.unknown ? '—' : formatValue(r.stack.total)}`;
+  const fmtTotalWith = (fmt: (v: number) => string) => (r: Row) =>
+    `${r.stack.incomplete && !r.stack.unknown ? '≥ ' : ''}${r.stack.unknown ? '—' : fmt(r.stack.total)}`;
+  const fmtTotal = fmtTotalWith(formatValue);
+  const fmtTotalExact = fmtTotalWith(formatTip);
 
   function onKey(e: KeyboardEvent<HTMLDivElement>): void {
     if (rows.length === 0) return;
@@ -156,6 +172,8 @@ export function BarStack({
       description={description}
       caveat={caveat}
       status={resolvedStatus}
+      skeleton="bars"
+      skeletonHeight={height}
       table={<TableView caption={title} columns={columns} rows={rows} rowKey={(r, i) => `${i}:${r.label}`} />}
       footer={
         <ChartLegend
@@ -169,6 +187,7 @@ export function BarStack({
       <div
         ref={wrapRef}
         className={`${plot.plotWrap} ${plot.focusable}`}
+        data-motion={motion}
         tabIndex={0}
         role="group"
         aria-label={`${title}. Use the left and right arrow keys to read each column.`}
@@ -181,9 +200,12 @@ export function BarStack({
           <defs>
             <HatchPattern id={hatchId} />
           </defs>
+          {active !== null ? (
+            <rect data-role="hover-band" className={plot.hoverBand} x={padL + slot * active + 1} y={PAD_T} width={Math.max(0, slot - 2)} height={plotH} rx={4} />
+          ) : null}
           {ticks.map((t, i) => (
             <g key={t}>
-              <line className={plot.grid} x1={padL} x2={padL + plotW} y1={ys(t)} y2={ys(t)} />
+              <line className={plot.grid} x1={padL} x2={padL + plotW} y1={crisp(ys(t))} y2={crisp(ys(t))} />
               <text className={plot.tick} x={padL - 6} y={ys(t)} dy="0.32em" textAnchor="end">{yAxis.labels[i]}</text>
             </g>
           ))}
@@ -207,7 +229,13 @@ export function BarStack({
             }
             const last = r.stack.segments[r.stack.segments.length - 1];
             return (
-              <g key={i} data-column={i} opacity={active !== null && active !== i ? 0.55 : 1}>
+              <g
+                key={i}
+                data-column={i}
+                className={plot.rise}
+                style={{ '--chart-i': i } as CSSProperties}
+                opacity={active !== null && active !== i ? 0.55 : 1}
+              >
                 {r.stack.segments.map((seg) => {
                   const y1 = ys(seg.y1 / scaleTotal);
                   const y0 = ys(seg.y0 / scaleTotal);
@@ -227,7 +255,7 @@ export function BarStack({
               </g>
             );
           })}
-          <line className={plot.axis} x1={padL} x2={padL + plotW} y1={PAD_T + plotH} y2={PAD_T + plotH} />
+          <line className={plot.axis} x1={padL} x2={padL + plotW} y1={crisp(PAD_T + plotH)} y2={crisp(PAD_T + plotH)} />
           {labelIdx.map((i) => (
             <text key={i} className={plot.tick} x={xOf(i) + barW / 2} y={height - 8} textAnchor="middle">{rows[i]!.label}</text>
           ))}
@@ -246,7 +274,7 @@ export function BarStack({
         </svg>
         <span id={liveId} className={plot.srOnly} aria-live="polite">
           {activeRow
-            ? `${activeRow.label}: ${segments.map((s, i) => `${s.label} ${activeRow.values[i] === null ? 'no data' : formatValue(activeRow.values[i]!)}`).join(', ')}; total ${fmtTotal(activeRow)}`
+            ? `${activeRow.label}: ${segments.map((s, i) => `${s.label} ${activeRow.values[i] === null ? 'no data' : formatTip(activeRow.values[i]!)}`).join(', ')}; total ${fmtTotalExact(activeRow)}`
             : ''}
         </span>
         {activeRow && active !== null ? (
@@ -258,10 +286,10 @@ export function BarStack({
               ...segments.map((s, i) => ({
                 key: s.id,
                 label: s.label,
-                value: activeRow.values[i] === null || activeRow.values[i] === undefined ? null : formatValue(activeRow.values[i]!),
+                value: activeRow.values[i] === null || activeRow.values[i] === undefined ? null : formatTip(activeRow.values[i]!),
                 color: colors[i],
               })),
-              { key: '__t', label: 'Total', value: activeRow.stack.unknown ? null : fmtTotal(activeRow) },
+              { key: '__t', label: 'Total', value: activeRow.stack.unknown ? null : fmtTotalExact(activeRow), total: true },
             ]}
           />
         ) : null}

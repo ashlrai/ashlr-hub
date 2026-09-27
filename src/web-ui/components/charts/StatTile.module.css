@@ -36,6 +36,7 @@
 .trend {
   display: block;
   line-height: 0;
+  margin: var(--space-1) 0 2px;
 }
 
 .meta {
@@ -46,16 +47,31 @@
 }
 
 .delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
   font-size: var(--text-xs-size);
   line-height: var(--text-xs-line);
   font-variant-numeric: tabular-nums;
 }
 
+.arrow {
+  font-weight: var(--font-weight-semibold);
+}
+
+/* A judged delta sits on its status tint, so good / bad reads at a glance;
+   the words carry it too (never colour alone). */
 .deltaGood {
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--status-success-bg);
   color: var(--status-success-fg);
 }
 
 .deltaBad {
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--status-danger-bg);
   color: var(--status-danger-fg);
 }
 

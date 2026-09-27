@@ -9,34 +9,44 @@
  *
  * Interaction: crosshair + tooltip on hover; the plot is focusable and the
  * arrow keys (Home/End) walk the same crosshair, announced through a live
- * region. The Table view carries every value without hovering.
+ * region. The Table view carries every value without hovering. The tooltip
+ * prints EXACT values (format.ts formatExact unless the caller formats y)
+ * and, on a time axis, the local day or instant it describes.
+ *
+ * Polish (verse-visual-quality): lines are monotone curves through every
+ * reading (chart-math monotoneSegments — never overshoot, so no invented
+ * peaks), washes are a gradient of the series ink, gridlines snap to the
+ * pixel grid, the latest reading carries a ringed dot, and the plot draws
+ * itself in once on mount unless reduced motion is asked for (motion.ts).
  */
 import { useId, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
 import type { Series } from './types.js';
-import { seriesColor } from './colors.js';
+import { gradientId, seriesColor } from './colors.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
-import { ChartLegend, ChartTooltip, clampTooltipLeft } from './ChartParts.js';
+import { AreaGradient, ChartLegend, ChartTooltip, clampTooltipLeft } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
 import {
   MIN_TIME_SPAN_MS,
   allIntegers,
-  areaPath,
   axisTicks,
+  crisp,
   dodgeLabels,
   ensureSpan,
   isTimeAxis,
   labelCharPx,
   layoutAxisLabels,
-  linePath,
   linearScale,
   percentScale,
+  smoothAreaPath,
+  smoothPath,
   splitRuns,
   thinIndexes,
   tickGutter,
   xKeeper,
   type XY,
 } from './chart-math.js';
-import { formatCompact, formatTimeLabel, timeLabelLadder } from './format.js';
+import { formatCompact, formatExact, formatTimeLabel, timeLabelLadder, tooltipTimeFormatter } from './format.js';
+import { useChartMotion } from './motion.js';
 import { useChartWidth } from './useChartWidth.js';
 import { useTextScale } from './useTextScale.js';
 import plot from './plot.module.css';
@@ -59,6 +69,19 @@ export interface AreaTrendProps {
   width?: number;
   formatX?: (x: number) => string;
   formatY?: (y: number) => string;
+  /**
+   * The tooltip's value format. Default: the caller's `formatY` when given
+   * (a currency or percent is already exact), else formatExact — "12,934",
+   * never the axis's "13K".
+   */
+  formatTooltip?: (y: number) => string;
+  /**
+   * The tooltip's title format. Default: the caller's `formatX` when given
+   * ("Week of Sep 1" means what it says), else on a time axis the local day
+   * ("Fri, Sep 26") or instant ("Fri, Sep 26, 2:14 PM") — never just the
+   * axis's short "Sep 26".
+   */
+  formatTooltipX?: (x: number) => string;
   /** A labelled horizontal reference (a cap, a target). */
   threshold?: { value: number; label: string };
   /**
@@ -101,17 +124,22 @@ export function AreaTrend({
   width: fixedWidth,
   formatX: formatXProp,
   formatY: formatYProp,
+  formatTooltip: formatTooltipProp,
+  formatTooltipX: formatTooltipXProp,
   threshold,
   yDomain,
   ariaLabel,
 }: AreaTrendProps) {
   const formatX = formatXProp ?? formatTimeLabel;
   const formatY = formatYProp ?? formatCompact;
+  const formatTip = formatTooltipProp ?? formatYProp ?? formatExact;
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
   const textScale = useTextScale();
+  const motion = useChartMotion();
   const [active, setActive] = useState<number | null>(null);
   const liveId = useId();
+  const gradKey = useId();
 
   const colors = series.map((s, i) => s.color ?? seriesColor(i));
 
@@ -176,6 +204,7 @@ export function AreaTrend({
   const rawMin = rows.length ? rows[0]!.x : 0;
   const rawMax = rows.length ? rows[rows.length - 1]!.x : 1;
   const timeAxis = isTimeAxis(rows.map((r) => r.x));
+  const formatTipX = formatTooltipXProp ?? formatXProp ?? (timeAxis ? tooltipTimeFormatter(rows.map((r) => r.x)) : formatX);
   // A burst of readings seconds apart is widened to MIN_TIME_SPAN_MS around
   // itself, not stretched edge to edge (a lone point stays centred as before).
   const [xMin, xMax] = timeAxis && rawMax > rawMin ? ensureSpan(rawMin, rawMax, MIN_TIME_SPAN_MS) : [rawMin, rawMax];
@@ -288,6 +317,8 @@ export function AreaTrend({
       description={description}
       caveat={caveat}
       status={resolvedStatus}
+      skeleton="line"
+      skeletonHeight={height}
       table={<TableView caption={title} columns={columns} rows={rows} rowKey={(r) => String(r.x)} />}
       footer={
         <ChartLegend
@@ -298,6 +329,7 @@ export function AreaTrend({
       <div
         ref={wrapRef}
         className={`${plot.plotWrap} ${plot.focusable}`}
+        data-motion={motion}
         tabIndex={0}
         role="group"
         aria-label={`${title}. Use the left and right arrow keys to read values.`}
@@ -316,13 +348,20 @@ export function AreaTrend({
           onPointerMove={(e: PointerEvent<SVGSVGElement>) => setActive(indexAt(e.clientX))}
           onPointerLeave={() => setActive(null)}
         >
+          {!stacked ? (
+            <defs>
+              {series.map((s, si) => (
+                <AreaGradient key={s.id} id={gradientId(gradKey, s.id)} color={colors[si]!} top={PAD_T} bottom={PAD_T + plotH} from={series.length > 1 ? 0.16 : 0.22} />
+              ))}
+            </defs>
+          ) : null}
           {ticksY.map((t, i) => (
             <g key={t}>
-              <line className={plot.grid} x1={padL} x2={padL + plotW} y1={ys(t)} y2={ys(t)} />
+              <line className={plot.grid} x1={padL} x2={padL + plotW} y1={crisp(ys(t))} y2={crisp(ys(t))} />
               <text className={plot.tick} x={padL - 6} y={ys(t)} dy="0.32em" textAnchor="end">{yAxis.labels[i]}</text>
             </g>
           ))}
-          <line className={plot.axis} x1={padL} x2={padL + plotW} y1={ys(Math.max(yMin, 0))} y2={ys(Math.max(yMin, 0))} />
+          <line className={plot.axis} x1={padL} x2={padL + plotW} y1={crisp(ys(Math.max(yMin, 0)))} y2={crisp(ys(Math.max(yMin, 0)))} />
           {xLabels.map((l) => (
             <text key={l.key} data-axis-label={l.key} className={plot.tick} x={l.x} y={height - 8} textAnchor={l.anchor}>
               {l.text}
@@ -334,12 +373,13 @@ export function AreaTrend({
               {runs.map((run, ri) => (
                 <path
                   key={`a${ri}`}
-                  d={areaPath(run.top, run.bottom)}
-                  fill={colors[si]}
-                  className={stacked ? undefined : plot.wash}
+                  data-role="area"
+                  d={smoothAreaPath(run.top, run.bottom)}
+                  fill={stacked ? colors[si] : `url(#${gradientId(gradKey, series[si]!.id)})`}
+                  className={stacked ? plot.fadeIn : `${plot.area} ${plot.fadeIn}`}
                   opacity={stacked ? 0.85 : undefined}
                   stroke={stacked ? 'var(--chart-surface)' : undefined}
-                  strokeWidth={stacked ? 2 : undefined}
+                  strokeWidth={stacked ? 1.5 : undefined}
                 />
               ))}
               {!stacked
@@ -347,10 +387,18 @@ export function AreaTrend({
                     run.top.length === 1 ? (
                       <circle key={`p${ri}`} cx={run.top[0]!.x} cy={run.top[0]!.y} r={3} fill={colors[si]} />
                     ) : (
-                      <path key={`l${ri}`} d={linePath(run.top)} stroke={colors[si]} className={plot.line} />
+                      <path key={`l${ri}`} data-role="line" d={smoothPath(run.top)} pathLength={1} stroke={colors[si]} className={`${plot.line} ${plot.draw}`} />
                     ),
                   )
                 : null}
+              {!stacked && runs.length && activeRow === undefined ? (() => {
+                // The latest reading, ringed — the "you are here" of a trend.
+                const last = runs[runs.length - 1]!.top;
+                const end = last[last.length - 1]!;
+                return last.length > 1 ? (
+                  <circle data-role="end-dot" className={`${plot.endDot} ${plot.fadeIn}`} cx={end.x} cy={end.y} r={3.5} fill={colors[si]} />
+                ) : null;
+              })() : null}
               {showEndLabels && runs.length ? (() => {
                 const last = runs[runs.length - 1]!.top;
                 const end = last[last.length - 1]!;
@@ -372,7 +420,7 @@ export function AreaTrend({
 
           {activeRow ? (
             <g>
-              <line className={plot.crosshair} x1={xs(activeRow.x)} x2={xs(activeRow.x)} y1={PAD_T} y2={PAD_T + plotH} />
+              <line className={plot.crosshair} data-role="crosshair" x1={crisp(xs(activeRow.x))} x2={crisp(xs(activeRow.x))} y1={PAD_T} y2={PAD_T + plotH} />
               {series.map((s, si) => {
                 const v = stacked
                   ? (activeRow.total === null ? null : activeRow.values.slice(0, si + 1).reduce<number>((a, b) => a + (b ?? 0), 0))
@@ -387,23 +435,24 @@ export function AreaTrend({
         </svg>
         <span id={liveId} className={plot.srOnly} aria-live="polite">
           {activeRow
-            ? `${formatX(activeRow.x)}: ${series.map((s, i) => `${s.label} ${activeRow.values[i] === null ? 'no data' : formatY(activeRow.values[i]!)}`).join(', ')}`
+            ? `${formatTipX(activeRow.x)}: ${series.map((s, i) => `${s.label} ${activeRow.values[i] === null ? 'no data' : formatTip(activeRow.values[i]!)}`).join(', ')}`
             : ''}
         </span>
         {activeRow ? (
           <ChartTooltip
             left={clampTooltipLeft(xs(activeRow.x), width)}
             top={PAD_T}
-            title={formatX(activeRow.x)}
+            title={formatTipX(activeRow.x)}
             rows={[
               ...series.map((s, i) => ({
                 key: s.id,
                 label: s.label,
-                value: activeRow.values[i] === null ? null : formatY(activeRow.values[i]!),
+                value: activeRow.values[i] === null ? null : formatTip(activeRow.values[i]!),
                 color: colors[i],
+                kind: stacked ? ('swatch' as const) : ('line' as const),
               })),
               ...(stacked && series.length > 1
-                ? [{ key: '__t', label: 'Total', value: activeRow.total === null ? null : formatY(activeRow.total) }]
+                ? [{ key: '__t', label: 'Total', value: activeRow.total === null ? null : formatTip(activeRow.total), total: true }]
                 : []),
             ]}
           />

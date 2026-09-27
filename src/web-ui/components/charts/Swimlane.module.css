@@ -11,6 +11,12 @@
 
 .bar {
   cursor: default;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+/* Another run is hovered: step back so the one being read stands out. */
+.dimmed {
+  opacity: 0.45;
 }
 
 /* Running on disk but silent for a long time: faded, and said in words in
@@ -28,6 +34,7 @@
   stroke: var(--text-tertiary);
   stroke-width: 1;
   stroke-dasharray: 2 3;
+  shape-rendering: crispEdges;
 }
 
 .laneStops {

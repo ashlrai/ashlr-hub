@@ -40,6 +40,12 @@ export { ForestPlot, forestVerdict, type ForestRow, type ForestPlotProps, type F
 export { MatrixHeatmap, matrixTotals, type MatrixAxisItem, type MatrixHeatmapProps } from './MatrixHeatmap.js';
 export { StepBand, stepSpans, type StepPoint, type StepMarker, type StepBandProps, type StepSpan } from './StepBand.js';
 export { HatchPattern, EngineTick, engineLetter, type ChartLegendItem } from './ChartParts.js';
+
+// verse-visual-quality — the polish layer every chart shares: gradient
+// washes, shaped loading skeletons and the reduced-motion-aware entrance.
+export { AreaGradient, ChartSkeleton, ChartTooltip, clampTooltipLeft, type ChartSkeletonShape, type TooltipRow } from './ChartParts.js';
+export { useChartMotion, prefersReducedMotion, type ChartMotion } from './motion.js';
+export { gradientId } from './colors.js';
 export { deltaText } from './StatTile.js';
 export { OUTLINE_STATUSES } from './Swimlane.js';
 export { gaugeDiameter, MIN_GAUGE_SIZE } from './Gauge.js';
