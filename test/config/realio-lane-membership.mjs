@@ -528,4 +528,6 @@ export const REAL_IO_TEST_FILES = [
   'test/verse-multimodel-api-316.test.ts', // binds a real loopback HTTP server + real private store files (Verse multi-model routes)
   'test/verse-checkpoints-315.test.ts', // real temp repos: per-turn checkpoint snapshots, restores, hunk reverts, merge-file
   'test/verse-checkpoint-service-315.test.ts', // real temp repos: turn hooks, Changes diff, reject, three-way Undo/Redo, checkpoint routes
+  'test/verse-terminal-blocks-315.test.ts', // binds a real loopback HTTP server for the terminal block/redact/open-file routes
+  'test/verse-terminal-shell-integration-315.test.ts', // spawns real /bin/zsh and /bin/bash on the generated shell-integration scripts
 ];

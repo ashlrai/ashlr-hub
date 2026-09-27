@@ -12,6 +12,26 @@
  *                                           at the root (the pane's header, and its
  *                                           "needs the desktop app" fallback)
  *
+ * 3.15 — command blocks, links, and chat:
+ *   GET  /api/verse/terminal/:id/blocks                     → { blocks }
+ *   GET  /api/verse/terminal/:id/blocks/:blockId?format=ansi|text|chat
+ *                                                          → { block, command, output, truncated }
+ *   POST /api/verse/terminal/:id/open-file   { path, line?, column?, cwd? } → { ok } — a
+ *                                           `file:line` link, opened in the editor when it
+ *                                           resolves inside the chat's roots
+ *   POST /api/verse/terminal/redact          { text } → { text } — selection → chat, scrubbed
+ *
+ * NO SECRET REACHES A CHAT FROM HERE. Every JSON response passes
+ * sanitizePublicJson (sendJson); `format=chat` and /redact additionally run
+ * scrubSecrets on plain text first, so "Send to chat" and "Explain this
+ * error" carry `[REDACTED]` where a key was printed. The raw byte stream
+ * (output frames) is the only unscrubbed path, and it only ever reaches
+ * the operator's own terminal view.
+ *
+ * KILL. An agent launch (`appId`) is refused while ~/.ashlr/KILL is engaged
+ * (409 TERMINAL_KILL_SWITCH), and open agent tabs are hung up when it is
+ * engaged (terminal.ts). The operator's own shells are not agents and stay.
+ *
  * GATES. verse-api.ts runs the V1 dispatch + mutation-token gate before any
  * POST reaches this module, and the read session before any GET. Here:
  *   - unknown body keys are a 400 (a typo must not silently do something else);
@@ -32,9 +52,13 @@
  * the operator's own shell talking to the operator.
  */
 import { execFile } from 'node:child_process';
+import { stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { isAbsolute, join, sep } from 'node:path';
 
+import type { AshlrConfig } from '../types.js';
 import { sanitizePublicJson } from '../util/public-json.js';
+import { scrubSecrets } from '../util/scrub.js';
 import { deregisterSse, readBody, registerSse, sendJson, sseConnectionCapReached } from '../web/api.js';
 import type { ApiModule } from './api-modules.js';
 import { getAppsService, resolveAppLaunch, type AppsSnapshot } from './apps.js';
@@ -49,6 +73,7 @@ import {
   getTerminalManager,
   type TerminalManager,
 } from './terminal.js';
+import { terminalBytesToText } from './terminal-blocks.js';
 import type { VerseSession } from './types.js';
 import { getVerseEngine } from './verse-api.js';
 import { VERSE_SESSION_ID_RE } from './verse-stream.js';
@@ -56,6 +81,10 @@ import {
   VERSE_TERMINAL_INPUT_MAX_BYTES,
   VERSE_TERMINAL_OPEN_EXTERNAL_PATH,
   VERSE_TERMINAL_PATH,
+  VERSE_TERMINAL_REDACT_MAX_BYTES,
+  VERSE_TERMINAL_REDACT_PATH,
+  type VerseTerminalBlockOutputFormat,
+  type VerseTerminalBlockOutputResponse,
   type VerseTerminalLaunchVia,
   type VerseTerminalFrame,
   type VerseTerminalListResponse,
@@ -63,7 +92,11 @@ import {
 
 // Contract (workbench-types.ts §5); re-exported for existing importers.
 export { VERSE_TERMINAL_OPEN_EXTERNAL_PATH };
-const TAB_ROUTE_RE = /^\/api\/verse\/terminal\/([^/]+)\/(input|resize|kill|stream)$/;
+const TAB_ROUTE_RE = /^\/api\/verse\/terminal\/([^/]+)\/(input|resize|kill|stream|blocks|open-file)$/;
+const BLOCK_ROUTE_RE = /^\/api\/verse\/terminal\/([^/]+)\/blocks\/(b-\d{1,9})$/;
+const BLOCK_FORMATS: readonly VerseTerminalBlockOutputFormat[] = ['ansi', 'text', 'chat'];
+/** The redact body: 256 KB of text, JSON-escaped (control characters can triple it). */
+const REDACT_MAX_BODY_BYTES = VERSE_TERMINAL_REDACT_MAX_BYTES * 3 + 1024;
 /** Base64 of 16 KB is 21,848 characters; the JSON around it is small. */
 const MAX_BODY_BYTES = 32 * 1024;
 const MAX_BASE64_CHARS = Math.ceil(VERSE_TERMINAL_INPUT_MAX_BYTES / 3) * 4;
@@ -83,6 +116,14 @@ export interface TerminalApiDeps {
   openExternal?: (dir: string) => Promise<void>;
   devServers?: DevServerDiscoveryDeps;
   platform?: NodeJS.Platform;
+  /** Opens a file at a line in the operator's editor (default: cli/open.ts `openInEditorAt`). */
+  openInEditor?: (absPath: string, line: number, cfg: AshlrConfig) => Promise<void>;
+}
+
+async function defaultOpenInEditor(absPath: string, line: number, cfg: AshlrConfig): Promise<void> {
+  // Lazy, like the wiki's: the CLI opener is not part of the server's hot path.
+  const open = await import('../../cli/open.js');
+  open.openInEditorAt(absPath, line, cfg);
 }
 
 let deps: TerminalApiDeps = {};
@@ -112,10 +153,10 @@ class BadRequest extends Error {
   }
 }
 
-async function readJsonBody(req: IncomingMessage, allowed: readonly string[]): Promise<Record<string, unknown>> {
+async function readJsonBody(req: IncomingMessage, allowed: readonly string[], maxBytes = MAX_BODY_BYTES): Promise<Record<string, unknown>> {
   let raw: string;
   try {
-    raw = await readBody(req, MAX_BODY_BYTES);
+    raw = await readBody(req, maxBytes);
   } catch {
     throw new BadRequest(413, 'request body too large', 'VERSE_TOO_LARGE');
   }
@@ -193,7 +234,7 @@ function sendError(res: ServerResponse, err: unknown): void {
   }
   if (err instanceof TerminalError) {
     const status = err.code === 'TERMINAL_UNAVAILABLE' ? 503
-      : err.code === 'TERMINAL_LIMIT' || err.code === 'TERMINAL_EXITED' ? 409
+      : err.code === 'TERMINAL_LIMIT' || err.code === 'TERMINAL_EXITED' || err.code === 'TERMINAL_KILL_SWITCH' ? 409
         : err.code === 'TERMINAL_NOT_FOUND' ? 404
           : err.code === 'TERMINAL_INVALID' ? 400
             : 500;
@@ -246,8 +287,31 @@ async function appStartCommand(appId: string, via: VerseTerminalLaunchVia | unde
   return shellJoin(resolved.plan.display);
 }
 
+/**
+ * A requested starting directory: it must be the root itself or resolve (by
+ * PHYSICAL path, so a symlink cannot walk out) to a directory inside it.
+ * `~/…` is accepted: tab and block cwds reach the page spelled that way.
+ */
+async function resolveCwdWithin(root: string, raw: string): Promise<string> {
+  const expanded = expandHomePrefix(raw);
+  if (!isAbsolute(expanded) || expanded.includes('\0')) throw new BadRequest(400, 'cwd must be an absolute path');
+  const [physicalRoot, physicalCwd] = await withFolderIo(() => Promise.all([physicalPathAsync(root), physicalPathAsync(expanded)]));
+  if (!physicalRoot || !physicalCwd) throw new BadRequest(400, 'cwd must be an existing directory');
+  if (physicalCwd !== physicalRoot && !physicalCwd.startsWith(physicalRoot.endsWith(sep) ? physicalRoot : physicalRoot + sep)) {
+    throw new BadRequest(400, 'cwd must be inside the terminal\'s folder');
+  }
+  return physicalCwd;
+}
+
+function optionalBoolean(body: Record<string, unknown>, key: string): boolean | undefined {
+  const value = body[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'boolean') throw new BadRequest(400, `${key} must be true or false`);
+  return value;
+}
+
 async function handleCreate(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const body = await readJsonBody(req, ['sessionId', 'root', 'appId', 'via', 'model', 'devServerId', 'cols', 'rows']);
+  const body = await readJsonBody(req, ['sessionId', 'root', 'appId', 'via', 'model', 'devServerId', 'cwd', 'shellIntegration', 'cols', 'rows']);
   const cols = requiredDimension(body, 'cols');
   const rows = requiredDimension(body, 'rows');
   const session = await requireSession(body['sessionId']);
@@ -255,13 +319,18 @@ async function handleCreate(req: IncomingMessage, res: ServerResponse): Promise<
   const via = optionalVia(body);
   const model = optionalString(body, 'model');
   const devServerId = optionalString(body, 'devServerId');
+  const rawCwd = optionalString(body, 'cwd');
+  const shellIntegration = optionalBoolean(body, 'shellIntegration');
   if (appId && devServerId) throw new BadRequest(400, 'appId and devServerId cannot both be set');
+  // A dev server starts in its own record's directory.
+  if (rawCwd && devServerId) throw new BadRequest(400, 'cwd and devServerId cannot both be set');
   // How an app launches means nothing without the app: refused rather than ignored.
   if ((via !== undefined || model !== undefined) && !appId) throw new BadRequest(400, 'via and model need an appId');
   const m = manager();
   if (!m.available().available) throw new TerminalError('TERMINAL_UNAVAILABLE', m.available().reason ?? 'terminal unavailable');
 
   let root = await resolveRoot(session, optionalString(body, 'root'));
+  const cwd = rawCwd ? await resolveCwdWithin(root, rawCwd) : null;
   let startCommand: string | null = null;
   if (appId) startCommand = await appStartCommand(appId, via, model);
   if (devServerId) {
@@ -282,8 +351,113 @@ async function handleCreate(req: IncomingMessage, res: ServerResponse): Promise<
     appId: appId ?? null,
     devServerId: devServerId ?? null,
     startCommand,
+    cwd,
+    ...(shellIntegration === false ? { shellIntegration: false } : {}),
   });
   sendJson(res, 201, { tab });
+}
+
+// ---------------------------------------------------------------------------
+// 3.15: blocks, links, redaction
+// ---------------------------------------------------------------------------
+
+function parseFormat(req: IncomingMessage): VerseTerminalBlockOutputFormat {
+  let values: string[] = [];
+  try {
+    values = new URL(req.url ?? '/', 'http://localhost').searchParams.getAll('format');
+  } catch {
+    values = [];
+  }
+  if (values.length === 0) return 'text';
+  const value = values[0] as VerseTerminalBlockOutputFormat;
+  if (values.length !== 1 || !BLOCK_FORMATS.includes(value)) throw new BadRequest(400, 'format must be ansi, text or chat');
+  return value;
+}
+
+function handleBlockOutput(req: IncomingMessage, res: ServerResponse, id: string, blockId: string): void {
+  const format = parseFormat(req);
+  const found = manager().blockOutput(id, blockId);
+  if (!found) {
+    sendJson(res, 404, { code: 'TERMINAL_BLOCK_NOT_FOUND', error: 'block not found' });
+    return;
+  }
+  const { block, bytes, truncated } = found;
+  let output: string;
+  let command = block.command;
+  if (format === 'ansi') {
+    output = bytes.toString('utf8');
+  } else {
+    output = terminalBytesToText(bytes);
+    if (format === 'chat') {
+      // The only form a chat seat may receive: plain text, secrets out — the command line too.
+      output = scrubSecrets(output);
+      command = scrubSecrets(command);
+    }
+  }
+  const body: VerseTerminalBlockOutputResponse = { block, command, output, truncated };
+  sendJson(res, 200, body);
+}
+
+/** Every chat root of the session a tab belongs to, as physical paths. */
+async function tabRootsPhysical(tabSessionId: string | null, tabRoot: string): Promise<string[]> {
+  const roots = new Set<string>([tabRoot]);
+  if (tabSessionId) {
+    const session = (await getVerseEngine()).getSession(tabSessionId);
+    if (session) for (const r of sessionRoots(session)) roots.add(r);
+  }
+  const physical = await Promise.all([...roots].map((r) => withFolderIo(() => physicalPathAsync(r))));
+  return physical.filter((p): p is string => typeof p === 'string');
+}
+
+function positiveInt(body: Record<string, unknown>, key: string): number | undefined {
+  const value = body[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 10_000_000) {
+    throw new BadRequest(400, `${key} must be a positive integer`);
+  }
+  return value;
+}
+
+async function handleOpenFile(ctx: { cfg: AshlrConfig }, req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+  const body = await readJsonBody(req, ['path', 'line', 'column', 'cwd']);
+  const tab = manager().get(id);
+  if (!tab) throw new TerminalError('TERMINAL_NOT_FOUND', 'terminal not found');
+  const rawPath = optionalString(body, 'path');
+  if (!rawPath) throw new BadRequest(400, 'path is required');
+  const line = positiveInt(body, 'line') ?? 1;
+  positiveInt(body, 'column'); // validated; editors here open at a line
+  const base = expandHomePrefix(optionalString(body, 'cwd') ?? tab.cwd ?? tab.root);
+  const expanded = expandHomePrefix(rawPath);
+  const candidate = isAbsolute(expanded) ? expanded : join(base, expanded);
+  if (candidate.includes('\0')) throw new BadRequest(400, 'path is invalid');
+  const real = await withFolderIo(() => physicalPathAsync(candidate));
+  if (!real) {
+    sendJson(res, 404, { code: 'TERMINAL_FILE_NOT_FOUND', error: 'That file does not exist.' });
+    return;
+  }
+  const roots = await tabRootsPhysical(tab.sessionId, tab.root);
+  const inside = roots.some((root) => real === root || real.startsWith(root.endsWith(sep) ? root : root + sep));
+  if (!inside) {
+    sendJson(res, 403, { code: 'TERMINAL_FILE_OUTSIDE', error: 'Only files inside this chat\'s folders open from the terminal.' });
+    return;
+  }
+  let isFile = false;
+  try {
+    isFile = (await withFolderIo(() => stat(real))).isFile();
+  } catch {
+    isFile = false;
+  }
+  if (!isFile) throw new BadRequest(400, 'path must be a file');
+  await (deps.openInEditor ?? defaultOpenInEditor)(real, line, ctx.cfg);
+  sendJson(res, 200, { ok: true });
+}
+
+async function handleRedact(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readJsonBody(req, ['text'], REDACT_MAX_BODY_BYTES);
+  const text = body['text'];
+  if (typeof text !== 'string') throw new BadRequest(400, 'text must be a string');
+  if (Buffer.byteLength(text) > VERSE_TERMINAL_REDACT_MAX_BYTES) throw new BadRequest(413, 'text is limited to 256 KB', 'VERSE_TOO_LARGE');
+  sendJson(res, 200, { text: scrubSecrets(text) });
 }
 
 async function handleOpenExternal(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -409,9 +583,27 @@ export const handleTerminalApi: ApiModule = async (ctx, req, res, path, method) 
       return true;
     }
 
+    if (path === VERSE_TERMINAL_REDACT_PATH) {
+      if (method !== 'POST') return false;
+      await handleRedact(req, res);
+      return true;
+    }
+
+    const blockMatch = BLOCK_ROUTE_RE.exec(path);
+    if (blockMatch) {
+      const [, tabId, blockId] = blockMatch as unknown as [string, string, string];
+      if (method !== 'GET') return false;
+      if (!TERMINAL_TAB_ID_RE.test(tabId)) {
+        sendJson(res, 404, { code: 'TERMINAL_NOT_FOUND', error: 'terminal not found' });
+        return true;
+      }
+      handleBlockOutput(req, res, tabId, blockId);
+      return true;
+    }
+
     const match = TAB_ROUTE_RE.exec(path);
     if (!match) return false;
-    const [, id, action] = match as unknown as [string, string, 'input' | 'resize' | 'kill' | 'stream'];
+    const [, id, action] = match as unknown as [string, string, 'input' | 'resize' | 'kill' | 'stream' | 'blocks' | 'open-file'];
     if (!TERMINAL_TAB_ID_RE.test(id)) {
       sendJson(res, 404, { code: 'TERMINAL_NOT_FOUND', error: 'terminal not found' });
       return true;
@@ -422,7 +614,16 @@ export const handleTerminalApi: ApiModule = async (ctx, req, res, path, method) 
       handleStream(req, res, id, ctx.readSession);
       return true;
     }
+    if (action === 'blocks') {
+      if (method !== 'GET') return false;
+      sendJson(res, 200, { blocks: manager().blocks(id) });
+      return true;
+    }
     if (method !== 'POST') return false;
+    if (action === 'open-file') {
+      await handleOpenFile(ctx, req, res, id);
+      return true;
+    }
 
     if (action === 'input') {
       const body = await readJsonBody(req, ['dataBase64']);

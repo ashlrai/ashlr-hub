@@ -36,16 +36,27 @@
  */
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { lstat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join } from 'node:path';
 
+import { killSwitchPath } from '../sandbox/policy.js';
 import { childProcessEnv, pickLoginShell } from './login-path.js';
 import { createProcessRegistry, type VerseProcessRegistry } from './process-registry.js';
+import {
+  defaultShellIntegrationDir,
+  ensureIntegrationFiles,
+  integratedLaunch,
+  integratedShellKind,
+  newShellNonce,
+} from './shell-integration.js';
+import { createBlockTracker, type BlockTracker } from './terminal-blocks.js';
 import {
   VERSE_TERMINAL_IDLE_KILL_MS,
   VERSE_TERMINAL_MAX_FRAME_HZ,
   VERSE_TERMINAL_MAX_TABS,
   VERSE_TERMINAL_SCROLLBACK_BYTES,
+  type VerseTerminalBlock,
   type VerseTerminalFrame,
   type VerseTerminalTab,
 } from './workbench-types.js';
@@ -230,7 +241,29 @@ export type TerminalErrorCode =
   | 'TERMINAL_NOT_FOUND'
   | 'TERMINAL_EXITED'
   | 'TERMINAL_INVALID'
-  | 'TERMINAL_SPAWN_FAILED';
+  | 'TERMINAL_SPAWN_FAILED'
+  | 'TERMINAL_KILL_SWITCH';
+
+/** Said when an agent launch is refused, or an agent tab is hung up, because ~/.ashlr/KILL is engaged. */
+export const TERMINAL_KILL_SWITCH_REASON = 'The kill switch is engaged: agents cannot be started in the terminal until it is cleared.';
+/** While an agent tab is open, the kill switch is checked this often. */
+export const TERMINAL_KILL_CHECK_INTERVAL_MS = 3_000;
+
+/**
+ * Is the global kill switch (~/.ashlr/KILL) engaged? Async (a terminal
+ * request must not block the server on a stat), and conservative like
+ * sandbox/policy.ts `killSwitchOn`: only a PROVEN-absent sentinel reads as
+ * clear — an unreadable one counts as engaged.
+ */
+export async function killSwitchEngagedAsync(): Promise<boolean> {
+  try {
+    await lstat(killSwitchPath());
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    return !(code === 'ENOENT' || code === 'ENOTDIR');
+  }
+}
 
 export class TerminalError extends Error {
   constructor(public readonly code: TerminalErrorCode, message: string) {
@@ -265,6 +298,15 @@ export interface TerminalCreateOptions {
   devServerId?: string | null;
   /** Typed into the shell once it is ready, followed by Enter. Built by the API from a catalog / dev-server record. */
   startCommand?: string | null;
+  /** Start here instead of `root` (absolute; the API checked it is inside the chat's roots). */
+  cwd?: string | null;
+  /** false = start the shell without integration (no blocks). Default true. */
+  shellIntegration?: boolean;
+}
+
+/** Where the shell-integration scripts live; null in the options turns integration off for every tab. */
+export interface TerminalShellIntegrationOptions {
+  dir: () => string;
 }
 
 export type TerminalListener = (frame: VerseTerminalFrame) => void;
@@ -293,6 +335,11 @@ export interface TerminalManagerOptions {
   killGraceMs?: number;
   startCommandWaitMs?: number;
   log?: (message: string) => void;
+  /** undefined = scripts in the per-user temp dir; null = never inject (plain `shell -l`). */
+  shellIntegration?: TerminalShellIntegrationOptions | null;
+  /** The global kill switch (default: ~/.ashlr/KILL, async). */
+  killSwitch?: () => Promise<boolean>;
+  killCheckIntervalMs?: number;
 }
 
 interface OutputFrame {
@@ -319,6 +366,7 @@ interface TabRecord {
   sawOutput: boolean;
   onFirstOutput: (() => void) | null;
   removed: boolean;
+  blocks: BlockTracker;
 }
 
 export interface TerminalManager {
@@ -340,6 +388,15 @@ export interface TerminalManager {
   closeAll(): void;
   /** Kill tabs idle past the limit. Returns the ids removed (exported for tests; also runs on a timer). */
   sweepIdle(): string[];
+  /** The tab's command blocks, oldest first. */
+  blocks(id: string): VerseTerminalBlock[];
+  /** One block and its kept output bytes; null for an unknown block. */
+  blockOutput(id: string, blockId: string): { block: VerseTerminalBlock; bytes: Buffer; truncated: boolean } | null;
+  /**
+   * Hang up every agent tab (Apps [Launch ▸]) if the kill switch is engaged.
+   * Returns the ids removed (exported for tests; also runs on a timer while an agent tab is open).
+   */
+  enforceKillSwitch(): Promise<string[]>;
 }
 
 function clampInt(value: number, range: { min: number; max: number }): number {
@@ -465,8 +522,48 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
     return registry;
   };
 
+  const integration = opts.shellIntegration === undefined ? { dir: defaultShellIntegrationDir } : opts.shellIntegration;
+  const killSwitch = opts.killSwitch ?? killSwitchEngagedAsync;
+  const killCheckMs = opts.killCheckIntervalMs ?? TERMINAL_KILL_CHECK_INTERVAL_MS;
+
   const tabs = new Map<string, TabRecord>();
   let sweepTimer: ReturnType<typeof setInterval> | null = null;
+  let killTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** The kill-switch watch runs only while an agent tab is open. */
+  function syncKillWatch(): void {
+    const anyAgent = [...tabs.values()].some((rec) => rec.tab.agent === true && !rec.removed);
+    if (anyAgent && !killTimer) {
+      killTimer = setInterval(() => { void manager.enforceKillSwitch(); }, killCheckMs);
+      if (typeof killTimer.unref === 'function') killTimer.unref();
+    } else if (!anyAgent && killTimer) {
+      clearInterval(killTimer);
+      killTimer = null;
+    }
+  }
+
+  /**
+   * argv and extra env for a new shell: the injected integration when the
+   * shell is one we support and the scripts could be put in place safely,
+   * else the plain login shell exactly as before.
+   */
+  async function launchPlan(shell: string, env: Record<string, string>, wanted: boolean): Promise<{ argv: string[]; env: Record<string, string>; nonce: string | null }> {
+    const plain = { argv: [shell, '-l'], env, nonce: null };
+    if (!wanted || !integration) return plain;
+    const kind = integratedShellKind(shell);
+    if (!kind) return plain;
+    const dir = integration.dir();
+    try {
+      await ensureIntegrationFiles(dir, kind);
+    } catch (err) {
+      log(`terminal shell integration unavailable: ${(err as Error | undefined)?.message ?? 'error'}`);
+      return plain;
+    }
+    const nonce = newShellNonce();
+    const launch = integratedLaunch(shell, dir, nonce, env);
+    if (!launch) return plain;
+    return { argv: launch.argv, env: { ...env, ...launch.env }, nonce };
+  }
 
   function iso(ms: number): string {
     return new Date(ms).toISOString();
@@ -520,6 +617,9 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
       rec.frames.push(frame);
       rec.frameBytes += frame.data.length;
       emit(rec, { type: 'output', seq: frame.seq, dataBase64: frame.data.toString('base64') });
+      // After the output frame: a block frame names this seq, and the page
+      // must already have the bytes that hold its marker.
+      rec.blocks.feed(frame.data, frame.seq);
     }
     // The ring: oldest frames go first. A reattaching client that asks for a
     // seq older than the ring gets what is left (see subscribe).
@@ -576,6 +676,8 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
     rec.removed = true;
     tabs.delete(rec.tab.id);
     stopSweepIfIdle();
+    syncKillWatch();
+    rec.blocks.close();
     if (!rec.tab.exited) {
       const at = iso(now());
       rec.tab.exited = { code: null, signal: 'SIGHUP', at };
@@ -631,22 +733,28 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
         throw new TerminalError('TERMINAL_LIMIT', `${maxTabs} terminals are already open. Close one to open another.`);
       }
       if (typeof req.root !== 'string' || !isAbsolute(req.root)) throw new TerminalError('TERMINAL_INVALID', 'root must be an absolute path');
+      const startDir = req.cwd ?? req.root;
+      if (typeof startDir !== 'string' || !isAbsolute(startDir)) throw new TerminalError('TERMINAL_INVALID', 'cwd must be an absolute path');
+      // An agent launch (Apps [Launch ▸]) is an agent starting: the kill switch refuses it.
+      const agent = typeof req.appId === 'string' && req.appId.length > 0;
+      if (agent && (await killSwitch())) throw new TerminalError('TERMINAL_KILL_SWITCH', TERMINAL_KILL_SWITCH_REASON);
       // Off the event loop, then spawn: the shell starts IN the root, and a
       // spawn's chdir runs inside the parent's spawn call. A root behind an
       // unanswered macOS privacy prompt would park the whole server there
       // (folder-io.ts); a pending prompt refuses this one request instead.
-      if ((await probeFolderAccess(req.root)) === 'pending') {
-        throw new TerminalError('TERMINAL_UNAVAILABLE', folderAccessPendingMessage(req.root));
+      if ((await probeFolderAccess(startDir)) === 'pending') {
+        throw new TerminalError('TERMINAL_UNAVAILABLE', folderAccessPendingMessage(startDir));
       }
-      if (!(await withFolderIo(() => isDirectoryPathAsync(req.root)))) {
-        throw new TerminalError('TERMINAL_INVALID', 'root must be an existing directory');
+      if (!(await withFolderIo(() => isDirectoryPathAsync(startDir)))) {
+        throw new TerminalError('TERMINAL_INVALID', startDir === req.root ? 'root must be an existing directory' : 'cwd must be an existing directory');
       }
       const shell = shellFor();
       if (!shell) throw new TerminalError('TERMINAL_UNAVAILABLE', 'no login shell is available on this platform');
       const cols = clampInt(req.cols, TERMINAL_COLS_RANGE);
       const rows = clampInt(req.rows, TERMINAL_ROWS_RANGE);
 
-      const env = terminalEnv(await envFor({}), req.root);
+      const plan = await launchPlan(shell, terminalEnv(await envFor({}), startDir), req.shellIntegration !== false);
+      const env = plan.env;
       // The await above yields: re-check the cap so two concurrent creates
       // cannot both squeeze past it.
       if (tabs.size >= maxTabs) {
@@ -669,6 +777,9 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
           exited: null,
           appId: req.appId ?? null,
           devServerId: req.devServerId ?? null,
+          cwd: null,
+          shellIntegration: plan.nonce ? 'injected' : 'off',
+          agent,
         },
         pty: null,
         frames: [],
@@ -686,15 +797,33 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
         sawOutput: false,
         onFirstOutput: null,
         removed: false,
+        // Replaced below: the tracker's callbacks need `rec`.
+        blocks: null as unknown as BlockTracker,
       };
+      rec.blocks = createBlockTracker({
+        tabId: id,
+        nonce: plan.nonce,
+        now,
+        onBlock: (block) => emit(rec, { type: 'block', block }),
+        onCwd: (cwd) => {
+          rec.tab.cwd = cwd;
+          emit(rec, { type: 'cwd', cwd });
+        },
+        onActive: () => {
+          if (rec.tab.shellIntegration === 'active') return;
+          rec.tab.shellIntegration = 'active';
+          emit(rec, { type: 'integration', state: 'active' });
+        },
+      });
 
       let pty: PtyHandle;
       try {
-        // `-l`: a LOGIN shell, so the operator's profile builds PATH, aliases
+        // A LOGIN shell (`-l`, or for bash the init file that reads what a
+        // login shell reads), so the operator's profile builds PATH, aliases
         // and prompt exactly as Terminal.app would. The PTY makes it interactive.
         pty = spawner({
-          argv: [shell, '-l'],
-          cwd: req.root,
+          argv: plan.argv,
+          cwd: startDir,
           env,
           cols,
           rows,
@@ -707,6 +836,7 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
       rec.pty = pty;
       tabs.set(id, rec);
       ensureSweep();
+      syncKillWatch();
 
       const sessionKey = req.sessionId ?? 'terminal';
       // pgid === pid: a PTY child is a session leader (verified on Bun 1.3.14).
@@ -726,6 +856,8 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
           registryOf()?.remove(sessionKey, id);
           if (rec.removed) return;
           flush(rec);
+          // A command still open when the shell went away ends with it (no exit code).
+          rec.blocks.close();
           rec.tab.exited = { code: exit.code, signal: exit.signal, at: iso(now()) };
           touch(rec);
           emit(rec, { type: 'exit', code: exit.code, signal: exit.signal });
@@ -781,6 +913,11 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
         if (frame.seq > cursor) listener({ type: 'output', seq: frame.seq, dataBase64: frame.data.toString('base64') });
       }
       listener({ type: 'title', title: rec.tab.title });
+      // Blocks after the output they point into: a reattaching page places
+      // its markers while writing the replay, then learns what they were.
+      if (rec.tab.shellIntegration === 'active') listener({ type: 'integration', state: 'active' });
+      if (rec.tab.cwd) listener({ type: 'cwd', cwd: rec.tab.cwd });
+      for (const block of rec.blocks.list()) listener({ type: 'block', block });
       if (rec.tab.exited) listener({ type: 'exit', code: rec.tab.exited.code, signal: rec.tab.exited.signal });
       rec.listeners.add(listener);
       if (onClosed) rec.closers.add(onClosed);
@@ -793,6 +930,45 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
     closeAll() {
       for (const rec of [...tabs.values()]) terminate(rec);
       stopSweepIfIdle();
+      syncKillWatch();
+    },
+
+    blocks(id) {
+      return require(id).blocks.list();
+    },
+
+    blockOutput(id, blockId) {
+      const rec = require(id);
+      const block = rec.blocks.get(blockId);
+      const out = rec.blocks.output(blockId);
+      if (!block || !out) return null;
+      return { block, bytes: out.bytes, truncated: out.truncated || out.evicted };
+    },
+
+    async enforceKillSwitch() {
+      const agents = [...tabs.values()].filter((rec) => rec.tab.agent === true && !rec.removed);
+      if (agents.length === 0) {
+        syncKillWatch();
+        return [];
+      }
+      let engaged: boolean;
+      try {
+        engaged = await killSwitch();
+      } catch {
+        engaged = true;
+      }
+      if (!engaged) return [];
+      const removed: string[] = [];
+      for (const rec of agents) {
+        if (rec.removed) continue;
+        // Say why in the tab itself before it goes, for a page that is watching it.
+        onOutput(rec, new TextEncoder().encode(`\r\n\x1b[1m[ashlr] ${TERMINAL_KILL_SWITCH_REASON}\x1b[0m\r\n`));
+        flush(rec);
+        terminate(rec);
+        removed.push(rec.tab.id);
+        log(`terminal ${rec.tab.id} (agent) hung up: the kill switch is engaged`);
+      }
+      return removed;
     },
 
     sweepIdle() {
