@@ -54,6 +54,36 @@
     }
   }
 
+  // Integrated browser (protocol v1, browser_pane.rs). The page hands native a
+  // plain-object message; native parses it strictly (unknown ops or fields are
+  // dropped) and answers through window.__ASHLR_BROWSER_EVENT__ below.
+  var BROWSER_MESSAGE_MAX = 16384
+
+  function sendBrowser(msg) {
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return false
+    var proto = Object.getPrototypeOf(msg)
+    if (proto !== Object.prototype && proto !== null) return false
+    var json
+    try {
+      json = JSON.stringify(msg)
+    } catch (_) {
+      return false
+    }
+    if (typeof json !== 'string' || json.length > BROWSER_MESSAGE_MAX) return false
+    var internals = window.__TAURI_INTERNALS__
+    if (!internals || typeof internals.invoke !== 'function') return false
+    try {
+      var pending = internals.invoke('plugin:event|emit', {
+        event: 'shell-browser',
+        payload: JSON.parse(json)
+      })
+      if (pending && typeof pending.catch === 'function') pending.catch(function () {})
+    } catch (_) {
+      return false
+    }
+    return true
+  }
+
   window.__ASHLR_DESKTOP__ = Object.freeze({
     shell: 'tauri',
     platform: cfg.platform,
@@ -83,8 +113,38 @@
       patch[name] = value
       invoke('plugin:event|emit', { event: 'shell-prefs', payload: patch })
       return true
-    }
+    },
+    // Integrated browser pane. Absent on older shells: that absence is the
+    // feature test (the web UI then falls back to an <iframe>).
+    browser: Object.freeze({
+      version: 1,
+      capabilities: Object.freeze({
+        screenshot: cfg.browserScreenshot === true,
+        picker: true,
+        console: true,
+        text: true
+      }),
+      send: sendBrowser
+    })
   })
+
+  // Native → page: browser pane events (browser_pane::event_script). Defined
+  // non-writable and non-configurable so page code can neither replace nor
+  // wrap the channel. Re-running this script on the same page (tokens handed
+  // over late) throws here, harmlessly: the first definition stands.
+  try {
+    Object.defineProperty(window, '__ASHLR_BROWSER_EVENT__', {
+      value: function (detail) {
+        if (!detail || typeof detail !== 'object') return
+        try {
+          window.dispatchEvent(new CustomEvent('ashlr:browser', { detail: detail }))
+        } catch (_) {}
+      },
+      enumerable: false,
+      writable: false,
+      configurable: false
+    })
+  } catch (_) {}
 
   // Native → page: a new desktop state (desktop_prefs::state_script).
   window.__ASHLR_DESKTOP_STATE__ = function (next) {

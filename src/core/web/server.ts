@@ -29,6 +29,7 @@ import { serveStatic } from './static.js';
 import { gcRunStreams } from '../run/streaming.js';
 import { resetVerseEngine } from '../verse/verse-api.js';
 import { isPreviewFramePath } from '../verse/preview.js';
+import { isBrowserMcpPath } from '../verse/browser-types.js';
 import { closeVerseTerminals } from '../verse/terminal.js';
 import { VERSE_TERMINAL_PATH } from '../verse/workbench-types.js';
 
@@ -151,11 +152,18 @@ export async function startServer(
     // accompanied by the cookie of the read session that minted it
     // (core/verse/preview.ts redeemFrameTicket) — authority is still checked,
     // just by the one route that can check it.
+    //
+    // And (3.15) GET /api/verse/browser/mcp/<grant>: a chat seat's MCP client
+    // probes GET for an optional SSE stream. The route answers 405 to every
+    // GET without reading anything; a 401 here instead would send the client
+    // hunting for OAuth. Its POSTs are authenticated by the grant
+    // (core/verse/browser-api.ts).
     if (
       method === 'GET'
       && (path === '/api' || path.startsWith('/api/'))
       && !authority
       && !isPreviewFramePath(path)
+      && !isBrowserMcpPath(path)
     ) {
       sendJson(res, 401, { error: 'unauthorized: read session required' }, {
         Vary: 'Cookie, X-Ashlr-Token, X-Ashlr-Read-Client',

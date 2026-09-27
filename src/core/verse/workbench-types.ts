@@ -1255,6 +1255,15 @@ export const WORKBENCH_ROUTE_FAMILIES = [
     handler: 'handleAutomationsApi',
     prefixes: ['/api/verse/automations'],
   },
+  {
+    // The integrated Browser pane (3.15): the pane's policy / command relay,
+    // and the per-chat MCP endpoint seats reach it through (browser-types.ts).
+    id: 'browser',
+    owner: '3.15-browser',
+    module: 'src/core/verse/browser-api.ts',
+    handler: 'handleBrowserApi',
+    prefixes: ['/api/verse/browser'],
+  },
 ] as const satisfies readonly {
   id: string;
   owner: string;

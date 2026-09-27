@@ -644,6 +644,8 @@
     "src/core/verse/attachments.ts",
     "src/core/verse/authority-api.ts",
     "src/core/verse/autonomy-ladder.ts",
+    "src/core/verse/browser-bridge.ts",
+    "src/core/verse/browser-types.ts",
     "src/core/verse/codex-rollout.ts",
     "src/core/verse/compaction-point.ts",
     "src/core/verse/context-fit.ts",

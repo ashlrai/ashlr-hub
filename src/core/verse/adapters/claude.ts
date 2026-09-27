@@ -84,6 +84,7 @@ import type { VerseSeatLaunch } from '../session-engine.js';
 import { claudeEffortArgs, claudePermissionArgs } from '../session-controls.js';
 import type { VerseAdapter, VerseParsedEvent, VerseTurnParser } from './index.js';
 import { turnAttachmentDirs } from './turn-extras.js';
+import { browserSeatLaunch } from '../browser-bridge.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -1248,6 +1249,7 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
   // first and it is already the cwd, so only the tail needs a flag.
   const extraRoots = verseSessionRoots(session).slice(1);
   const memory = launchMemory(launch);
+  const browser = browserSeatLaunch(session.id);
   // The memory directory is granted only when the snapshot says this seat may
   // WRITE it: `--add-dir` has no read-only form, and a read-only seat already
   // has the file's contents in the appended block.
@@ -1279,7 +1281,13 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
     // only; nothing by default, so an untouched chat launches as before.
     ...claudeEffortArgs(session, session.engine === 'claude' ? pinnedClaudeVersion(launch) : null),
     '--strict-mcp-config',
-    '--mcp-config', '{"mcpServers":{}}',
+    // Empty — the seat loads NO MCP server — unless the operator switched the
+    // Browser pane's agent access on for THIS chat (3.15, browser-bridge.ts):
+    // then exactly one server, Verse's own browser tools, reached over
+    // loopback HTTP with the chat's grant, and pre-approved (a `-p` turn
+    // cannot stop to ask). Off → byte-identical to every turn before 3.15.
+    '--mcp-config', browser ? browser.mcpConfig : '{"mcpServers":{}}',
+    ...(browser ? [`--allowedTools=${browser.allowedTool}`] : []),
     ...autocompactArgs(session, launch),
     // Local only: move the per-launch sections (cwd, env, git status) out of
     // the system prompt so the local runner's prefix cache survives between

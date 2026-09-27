@@ -51,6 +51,9 @@
  *   /api/verse/authority* → authority-api.ts (B-U1)
  *   /api/verse/{overnight,fleet/live}*  → overnight-api.ts, fleet-live-api.ts (B-U5)
  *   /api/verse/leader*    → leader-api.ts (B-U8)   /api/verse/learning* → learning-api.ts (B-U9)
+ *   /api/verse/wiki*      → wiki-api.ts (3.15)     /api/verse/browser*  → browser-api.ts (3.15)
+ *  (`/api/verse/browser/mcp/<grant>` is the one POST that skips the token
+ *  gate: a chat seat calls it, authenticated by its per-chat grant.)
  *  Routed by PREFIX to exactly one family (dispatchWorkbenchModules), after
  *  every V1 route, with the same non-GET gate. They land at different times:
  *  a family whose module has not landed is a plain 404 that touches nothing
@@ -89,6 +92,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
 import { notifyVerseSessionsChanged, passesMutationGate, readBody, sendJson } from '../web/api.js';
+import { isBrowserMcpPath } from './browser-types.js';
 import { sanitizePublicJson } from '../util/public-json.js';
 import { budgetFor, canonicalModelId, hasExpansiveMode } from './context-math.js';
 import { estimateContextFit } from './context-fit.js';
@@ -422,6 +426,9 @@ const WORKBENCH_IMPORTS: Readonly<Record<WorkbenchRouteFamilyId, () => Promise<W
   automations: async () => {
     try { return (await import('./automations-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'automations-api.js'); }
   },
+  browser: async () => {
+    try { return (await import('./browser-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'browser-api.js'); }
+  },
 };
 
 /** The importer table, for the contract test (every family has exactly one). */
@@ -505,7 +512,13 @@ async function dispatchWorkbenchModules(
       sendJson(res, 404, { error: `not found: ${method} ${path}` });
       return true;
     }
-    if (!passesMutationGate(req, res, ctx.token)) return true;
+    // ONE exception to the token gate (3.15): the Browser pane's per-chat MCP
+    // endpoint, `/api/verse/browser/mcp/<grant>`. Its caller is a chat seat
+    // (a CLI), which never holds the operator's mutation token; the route
+    // authenticates the 32-byte grant in its path itself and refuses any
+    // request that carries a browser Origin (browser-api.ts handleMcp).
+    // Keyed on the exact path shape, so no other browser route is exempt.
+    if (!isBrowserMcpPath(path) && !passesMutationGate(req, res, ctx.token)) return true;
   }
   const entry = workbenchModules.find((m) => m.id === family.id);
   const loaded: WorkbenchLoad = entry ? await loadWorkbenchModule(entry) : { state: 'not-landed' };

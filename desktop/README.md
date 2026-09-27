@@ -220,6 +220,95 @@ setDesktopPreference('globalHotkey', true); // false in a browser
   also emits `shell-state-request` and gets the live one, so a reload after a
   change is never stale.
 
+### 7. Browser pane (shell contract v1)
+
+A real browser inside Verse's layout, for pages an `<iframe>` cannot show (any
+site that sends `X-Frame-Options` / `frame-ancestors`, and every non-loopback
+URL). Implemented in `src-tauri/src/browser_pane.rs` + `browser_tap.js`.
+
+**Feature test.** `window.__ASHLR_DESKTOP__.browser` exists only on a shell that
+implements it:
+
+```ts
+const browser = window.__ASHLR_DESKTOP__?.browser;
+// { version: 1,
+//   capabilities: { screenshot: boolean /* macOS only */, picker: true, console: true, text: true },
+//   send(msg): boolean /* true when handed to native */ }
+```
+
+An older shell has no `browser` key: the web UI falls back to an `<iframe>` for
+loopback URLs and "open externally" for everything else.
+
+**Page → native.** `send(msg)` accepts a plain object ≤ 16 KB of JSON and emits
+it as the `shell-browser` event (the event permission the page already has — no
+new capability, no new command). Native parses it strictly: an unknown `op` or
+an unknown field drops the whole message.
+
+| `op` | Fields | Effect |
+|---|---|---|
+| `open` | `tab`, `url`, `bounds` | Create tab window `browser-<tab>` at `url` if it does not exist (an existing one is **not** navigated), hide every other tab, place and show this one without taking focus. |
+| `navigate` | `tab`, `url` | Navigate the tab. |
+| `back` / `forward` / `reload` | `tab` | History back / forward, reload. |
+| `bounds` | `tab`, `bounds` | Store and apply the rectangle; show that tab, hide the others. |
+| `hide` | — | Hide every tab (pane hidden or unmounted, page hidden). |
+| `close` | `tab` | Close and forget the tab (answers `closed`). |
+| `zoom` | `tab`, `factor` | Page zoom, clamped to [0.25, 5]. |
+| `query` | `tab`, `req`, `what` | `what` ∈ `text` \| `console` \| `info` \| `pick-start` \| `pick-poll` \| `pick-cancel`. Answers `result` (5 s timeout → `error: "timeout"`). |
+| `screenshot` | `tab`, `req` | macOS: `{ mime: 'image/png' \| 'image/jpeg', base64, width, height }` (pixels; JPEG q0.8 when the PNG exceeds 4 MB). Elsewhere `error: "unsupported"`. |
+| `external` | `url` | Open in the system browser (same URL rule; at most one per second). |
+
+`tab` matches `^[a-z0-9]{1,16}$`, `req` `^[A-Za-z0-9_-]{1,40}$`. `bounds` is
+`{ x, y, width, height }` in CSS px relative to the Verse viewport (x, y ≥ 0;
+width, height in [1, 10000]; the tab is also kept inside the window). At most 8
+tab windows exist — opening a ninth closes the least recently used (it answers
+`closed`).
+
+**Native → page.** One window event:
+
+```ts
+window.addEventListener('ashlr:browser', (e) => {
+  const d = (e as CustomEvent).detail;
+  // { kind: 'nav', tab, url, loading }         page load started / finished
+  // { kind: 'title', tab, title }              ≤ 300 chars
+  // { kind: 'blocked', tab, url, reason }      a navigation the URL rule refused
+  // { kind: 'closed', tab }                    closed, evicted, ⌘W, or unknown tab
+  // { kind: 'result', req, ok: true, data } | { kind: 'result', req, ok: false, error }
+});
+```
+
+Native delivers it by evaluating `window.__ASHLR_BROWSER_EVENT__(<json>)`, which
+the shell script defines non-writable and non-configurable. Every value in
+`detail` — titles, URLs, page text, console lines, picked HTML — comes from an
+arbitrary website: render it as text, never as HTML.
+
+The tabs are hidden natively when Verse is closed to the tray and whenever the
+Verse page (re)loads; after either, the page should send `bounds` again once
+the pane is visible (e.g. on `visibilitychange`).
+
+**Security posture.**
+
+- Each tab is a separate window that **no capability matches** (capabilities
+  name `main` and `launch` exactly; a test fails if a pattern could match
+  `browser-*`), so a website gets zero IPC.
+- Native evaluates only fixed scripts in a tab: the constant `browser_tap.js`
+  and a query wrapper chosen from a closed enum. Nothing the Verse page or the
+  website sends ever becomes code; answers travel as JSON.
+- URL rule: `http`/`https` only, no `user:pass@`, never the Verse origin itself
+  (any loopback spelling on port 7777). Applied to requests and to every
+  navigation the website makes; `target=_blank` / `window.open` open in the
+  same tab; downloads are refused.
+- Tabs use their own website data store, never Verse's (macOS 14+: a fixed
+  store identifier, so pane logins persist; older macOS: a throwaway store;
+  elsewhere `<app local data>/browser`).
+- Native only navigates, reads and snapshots. It never types, fills or submits
+  a form, enters a credential or clicks; the tap never reads form-control
+  values. The element picker swallows only the operator's own picking click.
+
+**Shipping.** This is a change to the Rust binary, not the web bundle: it only
+reaches an installed app through `npm run ship:local -- --native`. A web-only
+ship leaves the old shell in place, and the web UI must keep working through
+the fallback above.
+
 ---
 
 ## Window behaviour
@@ -432,7 +521,12 @@ asks you to paste them:
   above; they are never logged, persisted, or emitted as events.
 - CSP restricts `default-src`, `connect-src`, `script-src`, `style-src`,
   `img-src`, and `font-src` to `self` and `http://127.0.0.1:7777`.
-- `shell.open` is disabled — the app cannot open arbitrary URLs in the browser.
+- `shell.open` is not granted to any page. The one Rust-side use is the
+  browser pane's `external` op, which opens only `http`/`https` URLs that pass
+  the pane's URL rule, at most one per second.
+- Browser pane tabs (§7) are separate `browser-<tab>` windows that no
+  capability matches — websites in them get no IPC — with their own website
+  data store, fixed read-only scripts, and the URL rule on every navigation.
 - **IPC granted to the remote page is exactly three commands**, in
   `capabilities/verse-remote.json`: `core:window:allow-start-dragging`,
   `core:window:allow-internal-toggle-maximize`, `core:event:allow-emit`. That is

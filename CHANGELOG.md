@@ -41,6 +41,32 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Typing `!` in the composer suggests playbook macros.
 - CLI: `ashlr playbook list|show|new|edit|run`.
 
+### Integrated browser for you and your agents
+
+- A Verse **Browser** pane that the workbench pane registry mounts:
+  - address bar, back, forward and reload;
+  - tabs, device sizes and zoom;
+  - open in your browser;
+  - the chat's dev servers, one click away.
+- In the desktop app each tab is a native webview, so any site loads. The
+  pane also captures screenshots (macOS), console output, uncaught errors
+  and failed requests, and has an element picker.
+- In a browser tab, or with an older desktop shell, the pane falls back to
+  an `<iframe>` for loopback pages and "Open in your browser" for other
+  sites.
+- **Send to chat** drafts the page, its logs, a picked element and an
+  attached screenshot into the message box. It never sends.
+- A per-chat **agent access** switch gives Claude and local seats five
+  read-mostly MCP tools: status, navigate, screenshot, read text and
+  console.
+  - The tools run in the pane you have open and only on localhost pages,
+    unless you allow an origin for that chat.
+  - Agents cannot click, type or submit.
+  - Access is off by default and forgotten when Verse restarts. See
+    `docs/VERSE-BROWSER.md`.
+- Native changes (`desktop/src-tauri`) reach an installed app only through
+  `npm run ship:local -- --native`.
+
 ### Private repo wiki and Ask
 
 - `ashlr wiki build|status|show|ask` and a Verse **Repo wiki** section (gear

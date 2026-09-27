@@ -47,6 +47,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItemBuilder, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
+    webview::PageLoadEvent,
     AppHandle, Emitter, Listener, LogicalPosition, LogicalSize, Manager, RunEvent,
     WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
@@ -59,6 +60,7 @@ use tauri_plugin_updater::UpdaterExt;
 
 mod activity_watch;
 mod app_menu;
+mod browser_pane;
 mod desktop_prefs;
 mod health_watch;
 mod hotkey;
@@ -671,7 +673,14 @@ fn create_main_window(handle: &AppHandle, startup: Option<&SidecarStartup>) {
         let mut builder = builder
             .initialization_script(script)
             .background_color(tauri_color(theme))
-            .inner_size(restored.width, restored.height);
+            .inner_size(restored.width, restored.height)
+            // A Verse (re)load orphans whatever browser tabs the old page was
+            // showing; hide them until the new page asks for one.
+            .on_page_load(|window, payload| {
+                if matches!(payload.event(), PageLoadEvent::Started) {
+                    browser_pane::hide_all(window.app_handle());
+                }
+            });
         builder = match (restored.x, restored.y) {
             (Some(x), Some(y)) => builder.position(x, y),
             _ => builder.center(),
@@ -1471,6 +1480,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     });
     app.manage(app_menu::ZoomLevel::default());
+    app.manage(browser_pane::BrowserPanes::default());
 
     // ── menu bar ─────────────────────────────────────────────────────────────
     // Built before any window so ⌘C / ⌘V / ⌘Z work in the composer from the
@@ -1572,6 +1582,16 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     {
         let handle = handle.clone();
         app.listen(desktop_prefs::STATE_REQUEST_EVENT, move |_| push_desktop_state(&handle));
+    }
+    // ── the integrated browser pane (shell contract v1, browser_pane.rs) ─────
+    // Parsed strictly here, then handled in order on the pane's own worker
+    // thread — never on this event thread (window creation from an event
+    // handler deadlocks on Windows).
+    {
+        let handle = handle.clone();
+        app.listen(browser_pane::BROWSER_EVENT, move |event| {
+            browser_pane::handle_event(&handle, event.payload());
+        });
     }
     if prefs.global_hotkey {
         let status = hotkey::apply(&handle, true);
@@ -2101,6 +2121,7 @@ fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
                 flush_window_state(&state, true);
             }
             api.prevent_close();
+            browser_pane::hide_all(&handle);
             let _ = window.hide();
         }
         // Closing the launch window before the app ever came up means "give up".
@@ -2116,6 +2137,7 @@ fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
             }
         }
         WindowEvent::Moved(_) | WindowEvent::Resized(_) if is_main => {
+            browser_pane::on_main_geometry_changed(&handle);
             let Some(state) = handle.try_state::<AppState>() else {
                 return;
             };
@@ -2130,6 +2152,14 @@ fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
                 capture_geometry(&win, &mut guard);
             }
             flush_window_state(&state, false);
+        }
+        WindowEvent::ScaleFactorChanged { .. } if is_main => {
+            browser_pane::on_main_geometry_changed(&handle);
+        }
+        // A browser tab window went away (closed by the pane, evicted, or ⌘W
+        // while it had focus): the page is told `closed`.
+        WindowEvent::Destroyed if browser_pane::is_browser_label(window.label()) => {
+            browser_pane::on_tab_destroyed(&handle, window.label());
         }
         WindowEvent::Focused(false) if is_main => {
             if let Some(state) = handle.try_state::<AppState>() {
