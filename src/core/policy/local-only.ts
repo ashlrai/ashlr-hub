@@ -420,6 +420,12 @@ export const CLI_AGENT_METEREDNESS: Readonly<Record<string, Meteredness>> = Obje
   // V3.10: the grok-a SuperGrok seat run through its native-profile launcher.
   // A subscription seat reached over the network — metered, like claude/codex.
   'grok-cli': 'metered',
+  // 3.15: the local Devin CLI. Its default model (SWE-2) is free on the plan,
+  // but inference runs on Devin's servers and other models are billed per
+  // token — a network vendor, so metered (refused under local-only). The $0
+  // for SWE-2 is the fleet lane's own rule (devin/cli-engine.ts), not a
+  // claim this table can make for every model the CLI accepts.
+  'devin-cli': 'metered',
 });
 
 /**

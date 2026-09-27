@@ -1239,6 +1239,11 @@
           "type": "string",
           "enum": ["normal", "fast", "lite", "ultra"],
           "description": "SessionCreateRequest.devin_mode, pinned so the producer is a known agent mode (fusion is not accepted). Default normal."
+        },
+        "fleetModel": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+          "description": "The model the fleet's local Devin CLI engine (devin-cli) runs. Default swe-2-high. Only the free SWE-2 models (swe-2-high, swe-2-medium, swe-2-max) run under autonomy; a billed model holds the lane because its spend cannot be read back."
         }
       }
     }

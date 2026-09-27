@@ -82,12 +82,14 @@ import type {
   LedgerReadOptions,
   LedgerReadResult,
 } from '../authority/types.js';
-import { applyStandingOverlay, clampBudgetPolicy, currentStandingPolicy, standingSeatFor } from '../authority/effective-config.js';
+import { applyStandingOverlay, clampBudgetPolicy, currentStandingPolicy, standingAuthorizesDevin, standingSeatFor } from '../authority/effective-config.js';
 import { revokeArmedMerges, type MergeRevocationOutcome } from '../authority/clamp.js';
 import { currentLedgerHead, readLedger } from '../authority/ledger.js';
 import { loadBudgetPolicy, readCapacitySnapshot, recordShadowDecision, type CapacitySnapshot } from '../routing/budget-store.js';
 import { assessSeat, type SeatCapacity } from '../routing/headroom.js';
-import { effectiveSeatPolicy } from '../routing/policy.js';
+import { DEVIN_SEAT_ID, effectiveSeatPolicy } from '../routing/policy.js';
+import { probeDevinCli, type DevinCliProbe } from '../devin/cli-probe.js';
+import { devinCliLaneVerdict, isDevinCliFreeModel, resolveDevinCliFleetModel } from '../devin/cli-engine.js';
 import type { BudgetPolicy } from '../routing/types.js';
 import type { ReasoningInsight } from '../reasoning/types.js';
 import type { LeaderDirectivesV1 } from '../vision/leader-types.js';
@@ -134,6 +136,7 @@ import {
   planLanes,
   planFanoutReserve,
   planStandingBestOfN,
+  grantHasDevinProducer,
   resolveLaneEngines,
   resolveRoutingWeights,
   routingRequestFor,
@@ -184,7 +187,7 @@ import {
 } from './fleet-runtime-journal.js';
 import { repoIdentityOfPath, resolveRepoLabel } from './repo-identity.js';
 import { noteTickPhase } from '../daemon/tick-progress.js';
-import { FLEET_ENGINES, type DispatchOutcome, type FleetEngine, type LandingRecord, type RepoHold, type RepoHoldChange, type SetRepoHoldRequest } from './fleet-types.js';
+import { DEVIN_CLI_LANE, FLEET_ENGINES, grantEngineOfLane, type DispatchOutcome, type FleetEngine, type LandingRecord, type RepoHold, type RepoHoldChange, type SetRepoHoldRequest } from './fleet-types.js';
 
 // ---------------------------------------------------------------------------
 // Dependencies
@@ -232,6 +235,12 @@ export interface LiveHooksDeps {
   loadBudget(): BudgetPolicy;
   capacitySnapshot(): CapacitySnapshot | null;
   probeLocalRuntime(cfg: AshlrConfig, snapshot: CapacitySnapshot | null): Promise<LocalRuntimeReading>;
+  /**
+   * 3.15: is the local Devin CLI installed and logged in (devin/cli-probe.ts)?
+   * Asked only when the Devin fleet opt-in and the grant already allow the
+   * Devin CLI lane. Optional: absent = not probed, so that lane stays closed.
+   */
+  probeDevinCli?(): Promise<DevinCliProbe>;
   presence(nowMs: number): Promise<OperatorPresence>;
   directives(): LeaderDirectivesV1 | null;
   listHolds(nowMs: number): RepoHold[];
@@ -638,6 +647,7 @@ export function defaultLiveHooksDeps(): LiveHooksDeps {
     loadBudget: () => loadBudgetPolicy(),
     capacitySnapshot: () => readCapacitySnapshot(),
     probeLocalRuntime: probeLocalRuntimeDefault,
+    probeDevinCli: () => probeDevinCli(),
     presence: (nowMs) => probeOperatorPresence(nowMs),
     directives: () => readLeaderDirectives(),
     listHolds: (nowMs) => listRepoHolds({ nowMs }),
@@ -777,6 +787,68 @@ function describeError(err: unknown): string {
   return scrubSecrets(err instanceof Error ? err.message : String(err)).slice(0, 200);
 }
 
+/**
+ * 3.15 — may the Devin CLI lane run this tick? devin/cli-engine.ts
+ * devinCliLaneVerdict over this tick's config, policy and (grant-clamped)
+ * budget. The CLI probe (two `access()` calls, cached 5 s) is asked only once
+ * every other check passed, so a fleet without the Devin opt-in never touches
+ * the Devin CLI's files. Never throws.
+ */
+export async function devinCliReadiness(
+  cfg: AshlrConfig,
+  policy: EffectivePolicy,
+  budget: BudgetPolicy | null,
+  deps: Pick<LiveHooksDeps, 'probeDevinCli'>,
+): Promise<{ ok: boolean; reason: string }> {
+  try {
+    const base = {
+      section: cfg.devin,
+      grant: standingAuthorizesDevin(policy),
+      budgetAllowsDevin: budget ? effectiveSeatPolicy(budget, DEVIN_SEAT_ID, 'devin').enabled : null,
+      budgetMode: budget?.mode ?? null,
+      model: resolveDevinCliFleetModel(cfg.devin),
+    };
+    const pre = devinCliLaneVerdict({ ...base, probe: { state: 'ready', reason: null } });
+    if (!pre.ok) return pre;
+    let probe: DevinCliProbe | null = null;
+    try {
+      probe = deps.probeDevinCli ? await deps.probeDevinCli() : null;
+    } catch {
+      probe = null;
+    }
+    return devinCliLaneVerdict({ ...base, probe });
+  } catch (err) {
+    return { ok: false, reason: `The Devin CLI lane could not be evaluated (${describeError(err)}).` };
+  }
+}
+
+/**
+ * 3.15 — the final seat gate for a Devin CLI dispatch (hooks.seatAllows).
+ * The Devin CLI has no capacity seat (no windows to read), so instead of
+ * seat headroom it re-checks what authorizes the lane — the grant's `devin`
+ * engine and producer-only Devin seat, the lane's slots this tick (which
+ * carry the opt-in, the free-model rule and CLI readiness), the budget mode
+ * and the free model — against THIS tick's context. It only ever narrows.
+ */
+function devinCliSeatAllows(current: TickContext): SubscriptionAllowResult {
+  if (!current.policy.engines.includes(grantEngineOfLane(DEVIN_CLI_LANE))) {
+    return { allowed: false, reason: "The grant's current rollout stage does not include Devin." };
+  }
+  if (!grantHasDevinProducer(current.policy)) return { allowed: false, reason: 'The grant gives Devin no producer seat.' };
+  const plan = current.lanes[DEVIN_CLI_LANE];
+  if (!plan || plan.slots <= 0) {
+    return { allowed: false, reason: plan?.capReason ?? `The ${FLEET_LANE_LABEL[DEVIN_CLI_LANE]} lane has no slots this tick.` };
+  }
+  if (!effectiveSeatPolicy(current.budget, DEVIN_SEAT_ID, 'devin').enabled) {
+    return { allowed: false, reason: `The ${current.budget.mode} budget mode keeps the Devin seat off for autonomy.` };
+  }
+  const model = resolveDevinCliFleetModel(current.cfg.devin);
+  if (!isDevinCliFreeModel(model)) {
+    return { allowed: false, reason: `devin.fleetModel "${model}" is billed by Devin, so autonomy holds it.` };
+  }
+  return { allowed: true, reason: `devin-cli (${model}, free) is open under the grant's Devin authorization.` };
+}
+
 /** Enrolled path's display label when it has no GitHub identity. */
 function dirLabel(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
@@ -845,7 +917,13 @@ export function grantAllowedBackends(
 ): string[] {
   return (allowed ?? ['builtin']).filter((engine) => {
     const lane = fleetLaneOf(engine, cfg);
-    return lane !== null && policy.engines.includes(lane);
+    // Exact lane ids only. 3.15: `devin-cli` is never a grant engine (the
+    // grant's `devin` authorizes it), so it never survives this filter — the
+    // Devin CLI is reachable only through the standing router's Devin CLI
+    // lane (dispatch-router devinCliOverflow), which re-checks the opt-in,
+    // the budget mode, the free model and CLI readiness. A path that reads
+    // this list directly (best-of-N candidates, quota fallbacks) must not.
+    return lane !== null && (policy.engines as readonly string[]).includes(lane);
   });
 }
 
@@ -1522,10 +1600,15 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         budgetProblem = `The budget could not be clamped to the grant (${describeError(err)}).`;
       }
       const allowed = cfg.foundry?.allowedBackends ?? ['builtin'];
+      // 3.15: the Devin CLI lane's readiness — the Devin fleet opt-in, the
+      // grant's Devin authorization, the budget mode, the free-model rule,
+      // then (only when all of those pass) the CLI probe.
+      const devinCli = await devinCliReadiness(cfg, policy, budget, deps);
       const laneEngines = resolveLaneEngines({
         allowedBackends: allowed as readonly string[],
         installed: (engine) => installed(engine, cfg, nowMs),
         localFleetEngine: deps.localFleetEngine(cfg),
+        devinCli,
         cfg,
       });
       const lanes = planLanes({
@@ -1790,7 +1873,8 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       if (lane === null) {
         return { allowed: false, reason: `${engine} is not a fleet lane under the standing grant (per-token APIs and agents whose spend cannot be read never are).` };
       }
-      if (!current.policy.engines.includes(lane)) {
+      if (lane === DEVIN_CLI_LANE) return devinCliSeatAllows(current);
+      if (!current.policy.engines.includes(grantEngineOfLane(lane))) {
         return { allowed: false, reason: `The grant's current rollout stage does not include ${FLEET_LANE_LABEL[lane]}.` };
       }
       const plan = current.lanes[lane];

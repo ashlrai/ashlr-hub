@@ -26,34 +26,60 @@ import type { RoutingDifficulty, SeatDecision } from '../routing/types.js';
 // ---------------------------------------------------------------------------
 
 /**
- * Engine families the fleet runs. They are also the fleet's LANES and the
- * values a standing grant's `engines` list may name. They are families, not
+ * Engine families the fleet runs — its dispatch LANES. They are families, not
  * `EngineId`s: `local` is whichever local runtime the local fleet dispatches
  * through, `grok-cli` the SuperGrok CLI seat (never the per-token xAI API),
- * `claude-cli` the capped claude-a slice, `codex` the Codex CLI seats.
+ * `claude-cli` the capped claude-a slice, `codex` the Codex CLI seats,
+ * `devin-cli` the local Devin CLI (3.15 — SWE-2, free on the Devin plan).
+ *
+ * Every lane but `devin-cli` is also a value a standing grant's `engines`
+ * list may name BY ITS OWN ID. `devin-cli` is authorized by the grant engine
+ * `devin` (grantEngineOfLane): the grant names the Devin FAMILY as a
+ * producer, whichever way the fleet reaches it (a hosted session through
+ * devin/fleet-launcher.ts, or the local CLI in a confined worktree). Keeping
+ * the grant vocabulary unchanged means the custody helper's contract
+ * (GrantContract.swift `fleetEngines`) and every signed grant keep their
+ * meaning — a grant can never name `devin-cli`, so it can never authorize the
+ * CLI apart from the rest of Devin's producer-only rules.
  */
-export type FleetEngine = 'local' | 'grok-cli' | 'claude-cli' | 'codex';
+export type FleetEngine = 'local' | 'grok-cli' | 'claude-cli' | 'codex' | 'devin-cli';
 
-export const FLEET_ENGINES: readonly FleetEngine[] = ['local', 'grok-cli', 'claude-cli', 'codex'];
+export const FLEET_ENGINES: readonly FleetEngine[] = ['local', 'grok-cli', 'claude-cli', 'codex', 'devin-cli'];
+
+/** 3.15: the local Devin CLI lane (authorized by the grant engine `devin`). */
+export const DEVIN_CLI_LANE = 'devin-cli' as const;
+
+/** Lanes a grant names by their own id (every lane but `devin-cli`). */
+export type GrantLaneEngine = Exclude<FleetEngine, typeof DEVIN_CLI_LANE>;
+
+export const GRANT_LANE_ENGINES: readonly GrantLaneEngine[] = ['local', 'grok-cli', 'claude-cli', 'codex'];
 
 /**
- * 3.15 — the engines a standing grant's `engines` list may name: every fleet
- * lane plus `devin`. Devin is NOT a dispatch lane (it never takes a pool slot
- * or runs in a checkout — it is a hosted session launched through
- * devin/fleet-launcher.ts), so it is kept out of FLEET_ENGINES, which every
- * lane plan iterates. Naming it in a grant is what lets the fleet launch
- * Devin sessions at all; it authorizes no other lane.
+ * 3.15 — the engines a standing grant's `engines` list may name: every lane
+ * a grant names by its own id, plus `devin`. Devin's hosted sessions are NOT
+ * a dispatch lane (they never take a pool slot or run in a checkout — they
+ * are launched through devin/fleet-launcher.ts); its local CLI is the
+ * `devin-cli` lane, authorized by this same `devin` entry. Naming it in a
+ * grant is what lets the fleet use Devin at all; it authorizes no other lane.
  *
  * Mirrored by GrantContract.swift `fleetEngines` (the custody helper refuses
  * to sign a grant naming an engine it does not know — an older helper
  * therefore refuses `devin`; authority-api only drafts it once the helper
  * reports support).
  */
-export type GrantEngine = FleetEngine | 'devin';
+export type GrantEngine = GrantLaneEngine | 'devin';
 
 export const DEVIN_GRANT_ENGINE = 'devin' as const;
 
-export const GRANT_ENGINES: readonly GrantEngine[] = [...FLEET_ENGINES, DEVIN_GRANT_ENGINE];
+export const GRANT_ENGINES: readonly GrantEngine[] = [...GRANT_LANE_ENGINES, DEVIN_GRANT_ENGINE];
+
+/**
+ * The grant engine that authorizes a lane: the lane's own id, except
+ * `devin-cli`, which the Devin family's `devin` entry authorizes. Pure.
+ */
+export function grantEngineOfLane(lane: FleetEngine): GrantEngine {
+  return lane === DEVIN_CLI_LANE ? DEVIN_GRANT_ENGINE : lane;
+}
 
 /** `propose` = PRs only; `merge` = the fleet may land merges (subject to every gate). */
 export type RepoStage = 'propose' | 'merge';

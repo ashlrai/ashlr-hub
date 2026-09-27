@@ -609,7 +609,7 @@ export interface FleetHistoryDayWithMetered extends FleetHistoryDay {
 
 /**
  * How a run's engine is billed, for the metered split.
- *   subscription — the seat CLIs (claude, codex, grok-cli): their cost is
+ *   subscription — the seat CLIs (claude, codex, grok-cli, devin-cli): their cost is
  *                  window usage on a flat plan, shown as percent elsewhere.
  *   free         — builtin or loopback-only (policy/local-only.ts decides).
  *   per-token    — everything else: api-model engines on a vendor endpoint
@@ -622,7 +622,9 @@ export interface FleetHistoryDayWithMetered extends FleetHistoryDay {
  */
 export type RunBilling = 'subscription' | 'free' | 'per-token';
 
-const SUBSCRIPTION_ENGINES: ReadonlySet<string> = new Set(['claude', 'codex', 'grok-cli']);
+// 3.15: devin-cli runs on the Devin plan (autonomy uses only its free SWE-2
+// models — devin/cli-engine.ts), so it is a flat-plan seat CLI too.
+const SUBSCRIPTION_ENGINES: ReadonlySet<string> = new Set(['claude', 'codex', 'grok-cli', 'devin-cli']);
 
 export function runBilling(engine: string): RunBilling {
   const id = engine.trim().toLowerCase();
