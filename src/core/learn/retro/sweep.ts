@@ -248,6 +248,12 @@ export function collectRetros(parts: {
       if (t.updatedAt < parts.sinceIso) continue;
       // Closed in favour of the fleet App PR that carries the same change: not an end, a hand-off.
       if (t.state === 'closed' && t.supersededBy) continue;
+      // A Devin CHAT (3.15 chat seat) is the operator's conversation, not a delivery:
+      // its session expiring or being terminated from Verse is not a failed task end,
+      // and scoring it as one taught "No PR delivered" / "Mason closed a Devin change"
+      // lessons from ordinary chats. Once a chat opened a PR, the PR's end is a delivery
+      // outcome like any other.
+      if (lane === 'devin' && t.origin === 'chat' && !t.pr) continue;
       add(withPlaybookRef(retroFromCloud({
         taskId: t.id, repo: t.repo, state: t.state, endedAt: t.updatedAt, title: t.title, prompt: t.prompt,
         stateReason: t.stateReason, failure: t.failure, report: t.report, origin: t.origin, lane,
