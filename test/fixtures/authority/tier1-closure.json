@@ -623,6 +623,7 @@
     "src/core/verse/fleet-history-worker-protocol.ts",
     "src/core/verse/fleet-history.ts",
     "src/core/verse/fleet-types.ts",
+    "src/core/verse/folder-io.ts",
     "src/core/verse/git-ops.ts",
     "src/core/verse/github-api.ts",
     "src/core/verse/github-proposal.ts",
