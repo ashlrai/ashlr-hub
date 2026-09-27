@@ -526,4 +526,6 @@ export const REAL_IO_TEST_FILES = [
   'test/wiki-api-315.test.ts', // binds a real loopback HTTP server over a real built wiki (Verse wiki routes)
   'test/verse-browser-api-315.test.ts', // 3.15: real loopback http server bind for the /api/verse/browser routes (incl. the grant-authenticated MCP endpoint)
   'test/verse-multimodel-api-316.test.ts', // binds a real loopback HTTP server + real private store files (Verse multi-model routes)
+  'test/verse-checkpoints-315.test.ts', // real temp repos: per-turn checkpoint snapshots, restores, hunk reverts, merge-file
+  'test/verse-checkpoint-service-315.test.ts', // real temp repos: turn hooks, Changes diff, reject, three-way Undo/Redo, checkpoint routes
 ];

@@ -1271,6 +1271,13 @@ export const WORKBENCH_ROUTE_FAMILIES = [
     handler: 'handleMultimodelApi',
     prefixes: ['/api/verse/multimodel'],
   },
+  {
+    id: 'checkpoints',
+    owner: '3.15-checkpoints',
+    module: 'src/core/verse/checkpoints-api.ts',
+    handler: 'handleCheckpointsApi',
+    prefixes: ['/api/verse/checkpoints'],
+  },
 ] as const satisfies readonly {
   id: string;
   owner: string;

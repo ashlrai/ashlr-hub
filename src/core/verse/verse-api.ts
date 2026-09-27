@@ -121,7 +121,7 @@ import {
   VerseWorkspaceError,
   type VerseWorkspaceStore,
 } from './workspaces.js';
-import type { VerseCreateOptions, VerseEngineHandle, VerseSeatLaunch } from './session-engine.js';
+import type { VerseCreateOptions, VerseEngineHandle, VerseSeatLaunch, VerseTurnHooks } from './session-engine.js';
 import {
   VERSE_CONTEXT_MODES,
   VERSE_MAX_TURN_TEXT_BYTES,
@@ -433,6 +433,9 @@ const WORKBENCH_IMPORTS: Readonly<Record<WorkbenchRouteFamilyId, () => Promise<W
   multimodel: async () => {
     try { return (await import('./multimodel-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'multimodel-api.js'); }
   },
+  checkpoints: async () => {
+    try { return (await import('./checkpoints-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'checkpoints-api.js'); }
+  },
 };
 
 /** The importer table, for the contract test (every family has exactly one). */
@@ -560,6 +563,21 @@ export function peekVerseEngine(): VerseEngineHandle | null {
 }
 
 /**
+ * 3.15 per-turn checkpoints (checkpoint-service.ts): a snapshot of every
+ * repository a chat can reach before each turn, and after it. Loaded on the
+ * first turn. `ASHLR_VERSE_CHECKPOINTS=0` turns them off.
+ */
+function checkpointTurnHooks(): VerseTurnHooks | null {
+  if (process.env['ASHLR_VERSE_CHECKPOINTS'] === '0') return null;
+  const service = async () => (await import('./checkpoint-service.js')).getCheckpointService();
+  return {
+    beforeTurn: async (info) => { await (await service()).beforeTurn(info); },
+    afterTurn: async (info) => { await (await service()).afterTurn(info); },
+    onSessionDeleted: async (info) => { await (await service()).forgetChat(info.sessionId, info.roots); },
+  };
+}
+
+/**
  * Lazily create the per-process engine. Root defaults to
  * ~/.ashlr/verse (resolved at first use, so a relocated HOME is honored).
  */
@@ -579,6 +597,8 @@ export async function getVerseEngine(): Promise<VerseEngineHandle> {
           // notifyVerseSessionsChanged is coalesced and a no-op with no
           // stream open, so calling it on every change is cheap.
           onSessionChange: () => { notifyVerseSessionsChanged(); },
+          // 3.15: a checkpoint of the chat's repositories before every turn.
+          turnHooks: checkpointTurnHooks(),
         });
         engineSingleton = created;
         return created;

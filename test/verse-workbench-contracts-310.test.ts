@@ -175,6 +175,8 @@ const EXPECTED_HANDLERS: Record<WorkbenchRouteFamilyId, string> = {
   browser: 'handleBrowserApi',
   // 3.16: every model working together (Auto seat, compare, escalation, meter).
   multimodel: 'handleMultimodelApi',
+  // 3.15: per-turn checkpoints, the Changes pane and Undo/Redo.
+  checkpoints: 'handleCheckpointsApi',
 };
 
 const allPrefixes = WORKBENCH_ROUTE_FAMILIES.flatMap((family) => family.prefixes.map((prefix) => ({ family: family.id, prefix })));
