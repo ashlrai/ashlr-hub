@@ -15,7 +15,9 @@
  * PROTOCOL (ACP v1, newline-delimited JSON-RPC 2.0 on stdio):
  *   → initialize {protocolVersion: 1, clientCapabilities: {fs: off, terminal: off}}
  *   → session/load {sessionId, cwd, mcpServers: []}   (resume; history replay is ignored)
- *     or session/new {cwd, mcpServers: []} → {sessionId}
+ *     or session/new {cwd, mcpServers: []} → {sessionId}   (model: `acp --model`)
+ *   → session/set_config_option {sessionId, configId, value}  (resume only: the
+ *     chat's model, when it differs from the loaded conversation's — nextDevinModelStep)
  *   → session/prompt {sessionId, prompt: [{type: 'text', text}]} → {stopReason}
  *   ← session/update notifications: agent_message_chunk, agent_thought_chunk,
  *     tool_call, tool_call_update (plan / commands / mode updates are ignored)
@@ -89,6 +91,113 @@ export function devinAcpArgs(payload: Pick<DevinTurnPayload, 'permissionMode' | 
       ? ['--permission-mode', 'dangerous']
       : ['--sandbox', '--permission-mode', 'accept-edits'];
   return [...permission, 'acp', ...(payload.model ? ['--model', payload.model] : [])];
+}
+
+// ---------------------------------------------------------------------------
+// Model switch on a resumed conversation
+// ---------------------------------------------------------------------------
+
+/** Effort words the CLI's model ids end with (`claude-opus-5-5-high`, `gpt-6-sol-none`). */
+const LEVEL_TOKENS = new Set(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
+/** Speed words (`…-high-fast`, `…-high-priority` — both "Fast" in the listing). */
+const FAST_TOKENS = new Set(['fast', 'priority']);
+const MAX_MODEL_STEPS = 6;
+
+interface ConfigSelect { id: string; category: string | null; current: string | null; values: string[] }
+
+function configSelects(configOptions: unknown): ConfigSelect[] {
+  if (!Array.isArray(configOptions)) return [];
+  const out: ConfigSelect[] = [];
+  for (const option of configOptions) {
+    if (!isRecord(option) || typeof option['id'] !== 'string' || !Array.isArray(option['options'])) continue;
+    out.push({
+      id: option['id'],
+      category: typeof option['category'] === 'string' ? option['category'] : null,
+      current: typeof option['currentValue'] === 'string' ? option['currentValue'] : null,
+      values: option['options'].filter(isRecord).map((o) => o['value']).filter((v): v is string => typeof v === 'string'),
+    });
+  }
+  return out;
+}
+
+/** A model id without its trailing effort / speed words: `claude-opus-5-5-high-fast` → `claude-opus-5-5`. */
+function modelStem(id: string): string {
+  const parts = id.split('-');
+  while (parts.length > 1 && (LEVEL_TOKENS.has(parts.at(-1)!) || FAST_TOKENS.has(parts.at(-1)!))) parts.pop();
+  return parts.join('-');
+}
+
+export type DevinModelStep =
+  | { kind: 'set'; configId: string; value: string }
+  | { kind: 'done' }
+  | { kind: 'unplannable'; reason: string };
+
+/**
+ * The next `session/set_config_option` that moves a session toward `target`
+ * (a `devin models list` id), from the session's current config options.
+ * Pure; exported for tests.
+ *
+ * WHY. `devin acp --model` sets the model of NEW sessions only: a loaded
+ * conversation keeps the model it was created with (checked on 3000.11.3 —
+ * session/load under `--model claude-opus-5-5-high-fast` still reported
+ * `swe-2-high`). Since 3000.11.1 the ACP server exposes the model as session
+ * config options instead (CLI changelog: "ACP clients can select Devin
+ * models, thinking effort, and speed through session configuration
+ * controls"), seen on 3000.11.3 as three selects:
+ *   model          (category `model`)        one value per family, named by
+ *                                             the family's default row: `swe-2-high`,
+ *                                             `claude-opus-5-5-medium`, …
+ *   thought_level  (category `thought_level`) low|medium|high|xhigh|max (per family)
+ *   speed          (category `model_config`)  standard|fast (families that have it)
+ * Setting `model` resets the other two to that family's defaults, and each
+ * answer carries the updated options — so this is asked once per step.
+ *
+ * DECOMPOSITION. The family is the `model` value whose stem (the id without
+ * effort/speed words) is the longest prefix of the target; the target's
+ * remaining words name the effort and, when `fast`/`priority`, the speed
+ * (none = standard). A word that is neither (e.g. `-1m`) makes the target
+ * unplannable unless it is itself a `model` value — the caller then leaves
+ * the conversation's model alone, exactly as before this existed.
+ */
+export function nextDevinModelStep(target: string, configOptions: unknown): DevinModelStep {
+  const selects = configSelects(configOptions);
+  const model = selects.find((s) => s.category === 'model') ?? selects.find((s) => s.id === 'model');
+  if (!model) return { kind: 'unplannable', reason: 'this Devin CLI exposes no model control' };
+  let family: string | null = null;
+  let familyStem = '';
+  for (const value of model.values) {
+    const stem = modelStem(value);
+    if ((target === stem || target.startsWith(`${stem}-`)) && stem.length > familyStem.length) {
+      family = value;
+      familyStem = stem;
+    }
+  }
+  if (family === null) return { kind: 'unplannable', reason: `the Devin CLI does not offer ${target} here` };
+  if (model.current !== family) return { kind: 'set', configId: model.id, value: family };
+
+  const rest = target.length > familyStem.length ? target.slice(familyStem.length + 1).split('-').filter(Boolean) : [];
+  const exactValue = model.values.includes(target);
+  let level: string | null = null;
+  let fast = false;
+  for (const word of rest) {
+    if (LEVEL_TOKENS.has(word)) level = word;
+    else if (FAST_TOKENS.has(word)) fast = true;
+    else if (!exactValue) return { kind: 'unplannable', reason: `cannot map "${word}" in ${target} to a Devin setting` };
+  }
+  const thought = selects.find((s) => s.category === 'thought_level') ?? selects.find((s) => s.id === 'thought_level');
+  if (level !== null && thought) {
+    if (!thought.values.includes(level)) return { kind: 'unplannable', reason: `${target}: effort ${level} is not offered` };
+    if (thought.current !== level) return { kind: 'set', configId: thought.id, value: level };
+  }
+  const speed = selects.find((s) => s.category === 'model_config' && s.values.includes('fast') && s.values.includes('standard'))
+    ?? selects.find((s) => s.id === 'speed');
+  if (speed) {
+    const want = fast ? 'fast' : 'standard';
+    if (speed.values.includes(want) && speed.current !== want) return { kind: 'set', configId: speed.id, value: want };
+  } else if (fast) {
+    return { kind: 'unplannable', reason: `${target}: no fast mode is offered` };
+  }
+  return { kind: 'done' };
 }
 
 /**
@@ -401,8 +510,9 @@ export async function runDevinCliTurn(payload: DevinTurnPayload, io: DevinTurnIo
         return await failWith('This Devin CLI cannot resume a conversation.', 'native-thread-missing');
       }
       replaying = true;
+      let loaded: unknown;
       try {
-        await request('session/load', { sessionId: payload.nativeId, cwd, mcpServers: [] });
+        loaded = await request('session/load', { sessionId: payload.nativeId, cwd, mcpServers: [] });
       } catch (error) {
         replaying = false;
         if (error instanceof AcpError && (error.rpcCode === -32000 || /auth|log ?in/i.test(error.message))) return await failWith(loginHint);
@@ -412,6 +522,24 @@ export async function runDevinCliTurn(payload: DevinTurnPayload, io: DevinTurnIo
       }
       replaying = false;
       sessionId = payload.nativeId;
+      // The chat's model, applied to the resumed conversation (`--model`
+      // only reaches new sessions; see nextDevinModelStep). A model the
+      // options cannot express is left as it is; a switch the CLI refuses
+      // fails the turn — never silently run a different (maybe paid) model.
+      if (payload.model) {
+        let options = isRecord(loaded) ? loaded['configOptions'] : undefined;
+        for (let step = 0; step < MAX_MODEL_STEPS; step++) {
+          const next = nextDevinModelStep(payload.model, options);
+          if (next.kind !== 'set') break;
+          try {
+            const answer = await request('session/set_config_option', { sessionId, configId: next.configId, value: next.value });
+            options = isRecord(answer) ? answer['configOptions'] : undefined;
+          } catch (error) {
+            const why = error instanceof AcpError ? error.message : 'no answer';
+            return await failWith(`The Devin CLI could not switch this chat to ${payload.model} (${why}). Pick another model, or start a new chat.`);
+          }
+        }
+      }
     } else {
       const created = await request('session/new', { cwd, mcpServers: [] });
       const id = isRecord(created) && typeof created['sessionId'] === 'string' ? created['sessionId'] : null;

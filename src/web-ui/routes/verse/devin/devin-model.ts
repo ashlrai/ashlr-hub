@@ -37,6 +37,25 @@ export function narrowDevinOverview(raw: unknown): DevinOverviewResponse | null 
   return raw as unknown as DevinOverviewResponse;
 }
 
+/**
+ * 3.15: the Devin CLI's model catalog in one line for the Resources card —
+ * "Models: SWE-2 (free) + 51 paid families" and "Default: SWE-2 High (Free)".
+ * Null when the server sent no (or a malformed) summary. Pure.
+ */
+export function devinModelsLines(models: unknown): { catalog: string; defaultLine: string; stale: boolean } | null {
+  if (!isRecord(models)) return null;
+  const free = Array.isArray(models['freeFamilies']) ? models['freeFamilies'].filter((f): f is string => typeof f === 'string' && f.length > 0 && f.length <= 120) : null;
+  const paid = models['paidFamilyCount'];
+  const def = models['defaultModel'];
+  if (free === null || typeof paid !== 'number' || !Number.isInteger(paid) || paid < 0 || !isRecord(def) || typeof def['label'] !== 'string') return null;
+  const freePart = free.length > 0 ? free.map((f) => `${f} (free)`).join(', ') : null;
+  const paidPart = paid > 0 ? `${paid} paid famil${paid === 1 ? 'y' : 'ies'}` : null;
+  const catalog = `Models: ${[freePart, paidPart].filter(Boolean).join(' + ') || 'none listed'}`;
+  const price = def['free'] === true ? 'Free' : typeof def['price'] === 'string' && def['price'] ? def['price'] : null;
+  const defaultLine = `Default: ${def['label']}${price ? ` (${price})` : ''}`;
+  return { catalog, defaultLine, stale: models['source'] === 'fallback' };
+}
+
 /** "12 ACUs", "1 ACU", "2.5 ACUs". */
 export function formatAcu(value: number): string {
   const v = Math.max(0, Math.round(value * 100) / 100);

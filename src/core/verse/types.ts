@@ -171,6 +171,14 @@ export interface VerseModelOption {
    * Listed rather than hidden so the operator learns WHY a model is missing.
    */
   unavailableReason?: string | null;
+  /**
+   * 3.15 ADDITIVE. The model family this option belongs to ("SWE-2",
+   * "Claude Opus 5.5") on a seat whose catalog is grouped by family (the
+   * Devin CLI seat). Pickers group consecutive options by it. Absent = none.
+   */
+  group?: string | null;
+  /** 3.15 ADDITIVE. What the model costs, as the vendor lists it ("Free", "$4 in · $20 out per 1M"). Absent = not known. */
+  priceNote?: string | null;
 }
 
 export interface VerseSeatHealth {

@@ -84,7 +84,7 @@ import { ComposerSeatBlock } from './health/ComposerSeatBlock.js';
 import type { SeatChoice } from './SeatSelector.js';
 import { useViewport } from './shell/viewport.js';
 import { getVerseSessionHead } from './verse-store.js';
-import { ENGINE_LABEL, modelLabel, seatPillLabel } from './verse-model.js';
+import { ENGINE_LABEL, modelLabel, modelPriceNote, seatPillLabel } from './verse-model.js';
 import { formatTokens } from './verse-readouts.js';
 import { matchPlaybookMacros, usePlaybookMacroSuggestions } from './playbooks/macro-suggest.js';
 import type { VerseFileMatch } from '../../../core/verse/workbench-types.js';
@@ -278,7 +278,12 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   const seatName = effectiveEngine === 'local'
     ? ENGINE_LABEL.local
     : seats.find((s) => s.id === seat.seatId)?.label ?? ENGINE_LABEL[effectiveEngine];
-  const modelName = view ? labelOf(view.options.models, view.controls.model) : modelLabel(seats, seat);
+  const baseModelName = view ? labelOf(view.options.models, view.controls.model) : modelLabel(seats, seat);
+  // 3.15 price-aware (the Devin CLI catalog): a free model says so on the
+  // button itself; a paid one's $/1M is in its accessible name and tooltip.
+  const modelPrice = modelPriceNote(seats, { seatId: seat.seatId, model: view?.controls.model ?? seat.model });
+  const modelName = modelPrice === 'Free' ? `${baseModelName} · Free` : baseModelName;
+  const modelTitle = modelPrice !== null && modelPrice !== 'Free' ? `${baseModelName} · ${modelPrice}` : modelName;
   const effortOn = view?.options.efforts.some((o) => o.available) === true;
   const effortName = view?.controls.effort ? labelOf(view.options.efforts, view.controls.effort) : 'Default';
   const footerRow = useRef<HTMLDivElement>(null);
@@ -858,7 +863,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
     ),
     model: (
       <ControlMenu<string> key="model" label="Model" variant={variant}
-        valueLabel={modelName}
+        valueLabel={modelName} valueTitle={modelTitle}
         options={view.options.models} value={view.controls.model}
         onChange={(model) => { void changeModel(model); }} disabled={controls.pending}
         shortcut={shortcutLabel('composer.model')} openRequest={openRequest.model} note={appliesNote}
@@ -957,7 +962,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
               {...(onHandoff && !handoffDisabledReason ? { onReviewHandoff: onHandoff } : {})} />
             {compact ? null : wide ? wide.model : (
               // No session controls (an older or read-only server, or still loading): the model, stated once, not a picker.
-              <span className={cstyles.controlStatic} title={`Model: ${modelName}`}>{modelName}</span>
+              <span className={cstyles.controlStatic} title={`Model: ${modelTitle}`}>{modelName}</span>
             )}
             {!compact && wide ? wide.effort : null}
             {!compact

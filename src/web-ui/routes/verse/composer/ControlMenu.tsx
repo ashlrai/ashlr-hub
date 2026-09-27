@@ -175,6 +175,15 @@ export function ControlMenu<T extends string>({
   // tabindex, so Tab walks list → list instead of through every option.
   const checkedId: string | null = value === null ? (defaultOption ? '__default' : null) : value;
   const tabStop = variant === 'list' ? (checkedId ?? (defaultOption ? '__default' : options[0]?.id ?? null)) : null;
+  const item = (option: VerseControlOption<T>) => (
+    <MenuItem key={option.id} label={option.label}
+      description={option.available
+        ? (option.danger ? 'Skips every permission check — confirmed for this chat only' : option.note ?? null)
+        : (option.reason ?? 'Unavailable on this seat')}
+      checked={value === option.id} available={option.available} danger={option.danger === true}
+      tabbable={tabStop === option.id}
+      onSelect={() => choose(option)} />
+  );
   const items = (
     <>
       {defaultOption ? (
@@ -182,12 +191,16 @@ export function ControlMenu<T extends string>({
           available danger={false} tabbable={tabStop === '__default'}
           onSelect={() => { if (variant === 'menu') close(true); defaultOption.onSelect(); }} />
       ) : null}
-      {options.map((option) => (
-        <MenuItem key={option.id} label={option.label} description={option.available ? (option.danger ? 'Skips every permission check — confirmed for this chat only' : null) : (option.reason ?? 'Unavailable on this seat')}
-          checked={value === option.id} available={option.available} danger={option.danger === true}
-          tabbable={tabStop === option.id}
-          onSelect={() => choose(option)} />
-      ))}
+      {/* 3.15: consecutive options sharing a `group` (a model family — "SWE-2 · Free")
+          sit under one labelled group; ungrouped options render as before. */}
+      {optionRuns(options).map((run, index) => (run.group === null
+        ? run.options.map(item)
+        : (
+          <div key={`group-${index}-${run.group}`} role="group" aria-label={run.group} className={styles.menuGroup}>
+            <p className={styles.menuGroupHeading} aria-hidden="true">{run.group}</p>
+            {run.options.map(item)}
+          </div>
+        )))}
     </>
   );
 
@@ -240,6 +253,18 @@ export function ControlMenu<T extends string>({
       ) : null}
     </div>
   );
+}
+
+/** Consecutive options with the same `group` (null = ungrouped), in order. Exported for tests. */
+export function optionRuns<T extends string>(options: readonly VerseControlOption<T>[]): Array<{ group: string | null; options: VerseControlOption<T>[] }> {
+  const runs: Array<{ group: string | null; options: VerseControlOption<T>[] }> = [];
+  for (const option of options) {
+    const group = typeof option.group === 'string' && option.group ? option.group : null;
+    const last = runs.at(-1);
+    if (last && last.group === group) last.options.push(option);
+    else runs.push({ group, options: [option] });
+  }
+  return runs;
 }
 
 interface MenuItemProps {

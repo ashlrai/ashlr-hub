@@ -578,6 +578,13 @@ export interface VerseControlOption<T extends string = string> {
   reason?: string;
   /** Painted red (bypass). */
   danger?: boolean;
+  /**
+   * 3.15. A heading this option sits under ("SWE-2 · Free"); consecutive
+   * options with the same group share one heading. Absent = ungrouped.
+   */
+  group?: string;
+  /** 3.15. A short line under an AVAILABLE option's label (a price that differs from its group's). */
+  note?: string;
 }
 
 /** GET|POST /api/verse/session-controls/:id */
