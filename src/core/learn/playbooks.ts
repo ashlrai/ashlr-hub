@@ -28,6 +28,7 @@ import { listSwarms } from '../swarm/store.js';
 import { appendHubEntry } from '../genome/store.js';
 import { getActiveClient } from '../run/provider-client.js';
 import { classifyGoal } from './reflect.js';
+import { primeTaskClasses } from '../decide/task-class.js';
 
 // ---------------------------------------------------------------------------
 // Bounds
@@ -239,7 +240,13 @@ export async function distillAndPersist(
     swarms = [];
   }
 
-  // 2. Deterministic distillation.
+  // 2. Deterministic distillation (classifyGoal consults Jev labels primed
+  //    here in one batched call; unkeyed, the keyword table decides).
+  try {
+    await primeTaskClasses(swarms.map((s) => s?.goal), { cfg });
+  } catch {
+    /* the keyword table decides */
+  }
   const playbooks = distillPlaybooks(swarms);
 
   // 3. OPTIONAL narrative polish — LOCAL-FIRST, mirrors M25 ask.ts.

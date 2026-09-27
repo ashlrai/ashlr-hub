@@ -28,7 +28,8 @@
  *      memory. Both mirror `run/provider-client.ts`.
  *   5. NO SECRET EVER LEAVES THIS MODULE. The key is resolved on demand through
  *      `resolveProviderKey` (phantom vault wins when installed, else
- *      `process.env.TYPESAFE_API_KEY`), used for exactly one Authorization
+ *      `process.env.TYPESAFE_API_KEY`), then the private 0600 file
+ *      `~/.ashlr/secrets/typesafe.env`, used for exactly one Authorization
  *      header, and never returned, cached, or written to a result field. No
  *      result string in this file is built from the key.
  *
@@ -42,6 +43,9 @@
  * set, so this speaks the documented REST shape over `fetch` directly.
  */
 
+import { lstatSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
 import { resolveProviderKey } from '../integrations/secrets.js';
 
@@ -220,11 +224,68 @@ function classifierDisabled(): boolean {
  */
 export function typeSafeAvailable(cfg: AshlrConfig): boolean {
   if (classifierDisabled()) return false;
+  return Boolean(resolveTypeSafeKey(cfg));
+}
+
+/**
+ * Where the credential lives when it is neither in the phantom vault nor the
+ * environment: `$ASHLR_HOME/secrets/typesafe.env` (default `~/.ashlr/...`),
+ * one `TYPESAFE_API_KEY=...` line, mode 0600. Resolved per call so a test HOME
+ * is honoured.
+ */
+export function typeSafeKeyFilePath(): string {
+  const configured = process.env['ASHLR_HOME'];
+  const home = typeof configured === 'string' && configured.trim() !== '' && isAbsolute(configured)
+    ? configured
+    : join(homedir(), '.ashlr');
+  return join(home, 'secrets', 'typesafe.env');
+}
+
+/**
+ * Read the key from the secrets file, refusing anything that is not a private,
+ * current-user-owned regular file. A group/world-readable credential file is
+ * treated as absent rather than used — using it would launder a permissions
+ * mistake into "working". The value is returned to exactly one caller
+ * (`resolveTypeSafeKey`) and never cached, logged, or copied into
+ * `process.env` (which would hand it to every engine subprocess).
+ */
+function readTypeSafeKeyFile(): string | undefined {
+  const path = typeSafeKeyFilePath();
   try {
-    return Boolean(resolveProviderKey(TYPESAFE_API_KEY_ENV, cfg)?.trim());
+    const st = lstatSync(path);
+    if (!st.isFile()) return undefined;
+    if ((st.mode & 0o077) !== 0) return undefined;
+    if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return undefined;
+    if (st.size > 16 * 1024) return undefined;
+    const text = readFileSync(path, 'utf8');
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim().replace(/^export\s+/, '');
+      if (!line.startsWith(`${TYPESAFE_API_KEY_ENV}=`)) continue;
+      let value = line.slice(TYPESAFE_API_KEY_ENV.length + 1).trim();
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1);
+      }
+      return value.trim() || undefined;
+    }
+    return undefined;
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+/**
+ * Phantom vault, then the environment (both via `resolveProviderKey`), then
+ * the private secrets file. Never throws; never exported — the key does not
+ * leave this module.
+ */
+function resolveTypeSafeKey(cfg: AshlrConfig): string | undefined {
+  try {
+    const resolved = resolveProviderKey(TYPESAFE_API_KEY_ENV, cfg)?.trim();
+    if (resolved) return resolved;
+  } catch {
+    /* fall through to the secrets file */
+  }
+  return readTypeSafeKeyFile();
 }
 
 // ---------------------------------------------------------------------------
@@ -385,22 +446,30 @@ export async function askTypeSafe(
   }
 
   // Resolved here, used once, never stored or returned.
-  let apiKey: string | undefined;
-  try {
-    apiKey = resolveProviderKey(TYPESAFE_API_KEY_ENV, cfg)?.trim();
-  } catch {
-    apiKey = undefined;
-  }
+  const apiKey = resolveTypeSafeKey(cfg);
   if (!apiKey) {
     return {
       ok: false,
       reason: 'no-key',
-      detail: `no ${TYPESAFE_API_KEY_ENV} in the phantom vault or the environment`,
+      detail: `no ${TYPESAFE_API_KEY_ENV} in the phantom vault, the environment, or the secrets file`,
       durationMs: elapsed(),
     };
   }
 
   const endpoint = opts.endpoint ?? process.env['ASHLR_TYPESAFE_ENDPOINT']?.trim() ?? DEFAULT_ENDPOINT;
+
+  // A test must never reach the paid production API — not even when the
+  // developer's shell happens to export TYPESAFE_API_KEY and a test that
+  // exercises a wired call site forgot to point it at a fake server. Under
+  // Vitest the real host is refused before the key is ever attached.
+  if (process.env['VITEST'] && refusesUnderTest(endpoint)) {
+    return {
+      ok: false,
+      reason: 'disabled',
+      detail: 'the production TypeSafe endpoint is refused under test',
+      durationMs: elapsed(),
+    };
+  }
   const timeoutMs = opts.timeoutMs && opts.timeoutMs > 0 ? opts.timeoutMs : DEFAULT_TIMEOUT_MS;
 
   const body = JSON.stringify({
@@ -546,6 +615,14 @@ export async function askTypeSafe(
     clearTimeout(timer);
     controller.signal.removeEventListener('abort', onDeadline);
     opts.signal?.removeEventListener('abort', forwardAbort);
+  }
+}
+
+function refusesUnderTest(endpoint: string): boolean {
+  try {
+    return new URL(endpoint).hostname.toLowerCase().endsWith('typesafe.ai');
+  } catch {
+    return true;
   }
 }
 

@@ -34,6 +34,7 @@ import type { AshlrConfig, Proposal } from '../types.js';
 import type { FrontierJudgeResolutionOptions } from './manager.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { isDestructiveDiff } from '../run/diff-safety.js';
+import { extractRedTeamSeverity } from '../decide/verdict.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -180,6 +181,17 @@ function parseFrontierAttacks(raw: string, maxAttacks: number): RedTeamAttack[] 
     return attacks;
   } catch {
     return [];
+  }
+}
+
+/** True when the reply is JSON (even an empty/odd shape) — only prose goes to Jev. */
+function frontierReplyParses(raw: unknown): boolean {
+  if (typeof raw !== 'string' || raw.trim() === '') return true;
+  try {
+    JSON.parse(raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim());
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -370,6 +382,20 @@ export async function redTeamProposal(
       try {
         const raw = await client.complete(RED_TEAM_SYSTEM_PROMPT, userPrompt);
         frontierAttacks = parseFrontierAttacks(raw, maxAttacks);
+        // JEV TYPED EXTRACTION for a reply that is not JSON at all (the
+        // parser above returns [] and the reply would read as "survived").
+        // Escalate-only (src/core/decide/verdict.ts): it can ADD one finding
+        // at the severity the reply reports, never remove or soften one.
+        if (frontierAttacks.length === 0 && !frontierReplyParses(raw)) {
+          const severity = await extractRedTeamSeverity(raw, { cfg }).catch(() => null);
+          if (severity && severity.path === 'jev' && severity.value !== 'none') {
+            frontierAttacks = [{
+              vector: 'frontier:unstructured-report',
+              finding: scrubSecrets(String(raw).replace(/\s+/g, ' ').trim()).slice(0, 300) || 'Red-team flagged a concern.',
+              severity: severity.value,
+            }];
+          }
+        }
         // A refused / unauthorized judge spawn resolves to '' rather than
         // throwing — that is not an answer, and must not be cached as one.
         frontier = typeof raw === 'string' && raw.trim() ? 'answered' : 'failed';

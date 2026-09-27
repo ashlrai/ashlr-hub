@@ -48,10 +48,8 @@
 import type { AshlrConfig } from '../types.js';
 import { classifyAgentDiagnosticError } from '../run/agent-diagnostics.js';
 import type { AgentDiagnosticErrorClass } from '../run/agent-diagnostics.js';
+import { decide } from '../decide/decide.js';
 import {
-  askTypeSafe,
-  choiceAnswer,
-  noulAnswer,
   type TypeSafeChoiceQuestion,
   type TypeSafeNoulQuestion,
   type TypeSafeUnavailableReason,
@@ -121,7 +119,14 @@ export interface EngineErrorClassification {
   readonly retryProbability?: number;
   readonly source: EngineErrorSource;
   /** Why the classifier was not used. Absent when `source` is 'classifier'. */
-  readonly unavailableReason?: TypeSafeUnavailableReason | 'below-threshold' | 'no-answer';
+  readonly unavailableReason?:
+    | TypeSafeUnavailableReason
+    | 'below-threshold'
+    | 'no-answer'
+    | 'killed'
+    | 'kind-disabled'
+    | 'budget-exhausted'
+    | 'no-input';
   /** Concrete model id that answered, e.g. "jev-1.13.0". */
   readonly model?: string;
   /** Wall-clock spent consulting the classifier. 0 when it was not consulted. */
@@ -381,63 +386,69 @@ export async function classifyEngineError(
   // Empty input is `none` by definition — never worth a paid call.
   if (heuristicKind === 'none' || typeof value !== 'string') return deterministic;
 
-  const threshold = opts.confidenceThreshold ?? ENGINE_ERROR_CONFIDENCE_THRESHOLD;
-
-  const result = await askTypeSafe(
-    { state: value, questions: buildQuestions(), model: 'jev-latest' },
+  // Routed through the shared decision layer (src/core/decide): same gate,
+  // same fallback, plus the input-hash cache (a crash loop printing the same
+  // stderr costs one call), the daily budget, the kill switch, and the ledger.
+  const d = await decide<EngineErrorKind>('engine-error', value, buildQuestions(), {
+    fallback: heuristicKind,
     cfg,
-    {
-      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-      ...(opts.signal ? { signal: opts.signal } : {}),
-      ...(opts.endpoint ? { endpoint: opts.endpoint } : {}),
+    ...(opts.confidenceThreshold !== undefined ? { threshold: opts.confidenceThreshold } : {}),
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    ...(opts.signal ? { signal: opts.signal } : {}),
+    ...(opts.endpoint ? { endpoint: opts.endpoint } : {}),
+    interpret: (answers) => {
+      const a = answers['error_kind'];
+      if (!a || a.type !== 'choice' || !(CLASSIFIER_LABELS as readonly string[]).includes(a.choice)) return undefined;
+      return { value: a.choice as EngineErrorKind, confidence: a.confidence, label: a.choice };
     },
-  );
+  });
 
-  if (!result.ok) {
-    return { ...deterministic, unavailableReason: result.reason, classifierMs: result.durationMs };
-  }
+  const retryAnswer = d.answers?.['retryable'];
+  const retryNoul = retryAnswer && retryAnswer.type === 'noul' ? retryAnswer.noul : undefined;
+  // Not consulted at all (unkeyed, switched off, budget spent) reports 0, as before.
+  const notConsulted = d.path === 'fallback' && !d.answers
+    && (d.reason === 'no-key' || d.reason === 'disabled' || d.reason === 'killed'
+      || d.reason === 'kind-disabled' || d.reason === 'budget-exhausted' || d.reason === 'no-input');
+  const classifierMs = notConsulted ? 0 : d.durationMs;
 
-  const kindAnswer = choiceAnswer(result, 'error_kind', CLASSIFIER_LABELS);
-  if (!kindAnswer) {
+  if (d.path === 'jev') {
     return {
-      ...deterministic,
-      unavailableReason: 'no-answer',
-      model: result.model,
-      classifierMs: result.durationMs,
+      kind: d.value,
+      // The Noul is a probability, not a confidence, so 0.5 is its decision
+      // boundary. If the Noul is missing (a malformed or partial answer set) the
+      // deterministic retryability of the accepted kind is used rather than a
+      // guess.
+      retryable: retryNoul !== undefined ? retryNoul >= 0.5 : isRetryableKind(d.value),
+      confidence: d.confidence,
+      classifierKind: d.value,
+      classifierConfidence: d.confidence,
+      ...(retryNoul !== undefined ? { retryProbability: retryNoul } : {}),
+      source: 'classifier',
+      ...(d.model ? { model: d.model } : {}),
+      classifierMs,
     };
   }
 
-  const retryNoul = noulAnswer(result, 'retryable')?.noul;
-
-  if (kindAnswer.confidence < threshold) {
+  if (d.reason === 'below-threshold') {
     // Below the gate the deterministic answer wins — but we keep what the
     // classifier said so the threshold can be re-tuned from recorded data.
     return {
       ...deterministic,
       source: 'heuristic',
       unavailableReason: 'below-threshold',
-      classifierKind: kindAnswer.choice,
-      classifierConfidence: kindAnswer.confidence,
+      ...(d.jevLabel ? { classifierKind: d.jevLabel as EngineErrorKind } : {}),
+      ...(d.jevConfidence !== undefined ? { classifierConfidence: d.jevConfidence } : {}),
       ...(retryNoul !== undefined ? { retryProbability: retryNoul } : {}),
-      model: result.model,
-      classifierMs: result.durationMs,
+      ...(d.model ? { model: d.model } : {}),
+      classifierMs,
     };
   }
 
   return {
-    kind: kindAnswer.choice,
-    // The Noul is a probability, not a confidence, so 0.5 is its decision
-    // boundary. If the Noul is missing (a malformed or partial answer set) the
-    // deterministic retryability of the accepted kind is used rather than a
-    // guess.
-    retryable: retryNoul !== undefined ? retryNoul >= 0.5 : isRetryableKind(kindAnswer.choice),
-    confidence: kindAnswer.confidence,
-    classifierKind: kindAnswer.choice,
-    classifierConfidence: kindAnswer.confidence,
-    ...(retryNoul !== undefined ? { retryProbability: retryNoul } : {}),
-    source: 'classifier',
-    model: result.model,
-    classifierMs: result.durationMs,
+    ...deterministic,
+    ...(d.reason ? { unavailableReason: d.reason === 'escalate-only' ? 'no-answer' : d.reason } : {}),
+    ...(d.model ? { model: d.model } : {}),
+    classifierMs,
   };
 }
 

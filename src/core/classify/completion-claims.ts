@@ -25,12 +25,8 @@
  * network when unkeyed or disabled.
  */
 
-import {
-  askTypeSafe,
-  choiceAnswer,
-  type TypeSafeChoiceQuestion,
-  type TypeSafeUnavailableReason,
-} from './typesafe-client.js';
+import type { TypeSafeChoiceQuestion, TypeSafeUnavailableReason } from './typesafe-client.js';
+import { decide } from '../decide/decide.js';
 import type { AshlrConfig } from '../types.js';
 
 /** What the closing message asserts about work performed. */
@@ -183,37 +179,39 @@ export async function classifyCompletionClaim(
   // Nothing to read is `unknown` by definition — never worth a paid call.
   if (typeof value !== 'string' || value.trim().length === 0) return deterministic;
 
-  const threshold = opts.confidenceThreshold ?? COMPLETION_CLAIM_CONFIDENCE_THRESHOLD;
-
-  const result = await askTypeSafe(
-    {
-      state: value.slice(0, MAX_CLAIM_CHARS),
-      questions: buildQuestions(),
-      model: 'jev-latest',
-    },
+  // Routed through the shared decision layer (src/core/decide): same gate and
+  // fallback, plus cache, daily budget, kill switch and the decision ledger.
+  const d = await decide<CompletionClaim>('completion-claim', value.slice(0, MAX_CLAIM_CHARS), buildQuestions(), {
+    fallback: heuristic,
     cfg,
-    {
-      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-      ...(opts.signal ? { signal: opts.signal } : {}),
-      ...(opts.endpoint ? { endpoint: opts.endpoint } : {}),
+    threshold: opts.confidenceThreshold ?? COMPLETION_CLAIM_CONFIDENCE_THRESHOLD,
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    ...(opts.signal ? { signal: opts.signal } : {}),
+    ...(opts.endpoint ? { endpoint: opts.endpoint } : {}),
+    interpret: (answers) => {
+      const a = answers['claim'];
+      if (!a || a.type !== 'choice' || !(CLAIM_LABELS as readonly string[]).includes(a.choice)) return undefined;
+      return { value: a.choice as CompletionClaim, confidence: a.confidence, label: a.choice };
     },
-  );
+  });
 
-  if (!result.ok) {
-    return { ...deterministic, unavailableReason: result.reason, classifierMs: result.durationMs };
+  if (d.path === 'jev') {
+    return { claim: d.value, confidence: d.confidence, source: 'classifier', classifierMs: d.durationMs };
   }
-
-  const answer = choiceAnswer(result, 'claim', CLAIM_LABELS);
-  if (!answer || answer.confidence < threshold) {
-    return { ...deterministic, classifierMs: result.durationMs };
-  }
-
+  const transportReason = d.reason && isUnavailableReason(d.reason) ? d.reason : undefined;
   return {
-    claim: answer.choice,
-    confidence: answer.confidence,
-    source: 'classifier',
-    classifierMs: result.durationMs,
+    ...deterministic,
+    ...(transportReason && !d.answers ? { unavailableReason: transportReason } : {}),
+    classifierMs: d.durationMs,
   };
+}
+
+const TRANSPORT_REASONS: ReadonlySet<string> = new Set([
+  'no-key', 'disabled', 'timeout', 'network', 'rate-limited', 'http-error', 'malformed-response', 'oversized-response',
+]);
+
+function isUnavailableReason(reason: string): reason is TypeSafeUnavailableReason {
+  return TRANSPORT_REASONS.has(reason);
 }
 
 /**

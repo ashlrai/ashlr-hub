@@ -41,6 +41,8 @@ export const TOP_LEVEL_COMMANDS: string[] = [
   'devin',
   // 3.15 automations.
   'automations',
+  // 3.15 Jev decision layer.
+  'jev',
   // 3.15 private repo wiki.
   'wiki',
   // 3.15 versioned playbooks.
@@ -107,6 +109,8 @@ const SUBCOMMANDS: Record<string, string[]> = {
   mirror: ['list', 'add', 'sync', 'path', 'remove', 'reconcile', 'help'],
   // Mirror the verb switch in src/cli/cloud.ts (runCloudCli).
   cloud: ['launch', 'list', 'refresh', 'improve', 'budget', 'backlog', 'help'],
+  // Mirror the verb switch in src/cli/jev.ts (runJevCli).
+  jev: ['status', 'test', 'help'],
   // Mirror the verb switch in src/cli/devin.ts (runDevinCli).
   devin: ['connect', 'disconnect', 'enable', 'disable', 'fleet', 'status', 'launch', 'list', 'refresh', 'message', 'budget', 'help'],
   // Mirror the verb switch in src/cli/playbook.ts (runPlaybookCli).

@@ -52,6 +52,7 @@ import { recordDecision } from './decisions-ledger.js';
 import { attestPostMergeCreditSkillCard, evaluatePostMergeCreditRelease } from './post-merge-credit.js';
 import { recordSkillCard, readSkillCards, sanitizeSkillCard } from './skill-records.js';
 import type { AshlrConfig, GenomeEntry, Proposal, SkillCard } from '../types.js';
+import { peekTaskClass, toSkillTaskClass } from '../decide/task-class.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -292,6 +293,11 @@ function skillCardFromVerified(input: VerifiedSkillInput, ts: string): SkillCard
  * Pure; never throws; returns a safe default on any input.
  */
 function deriveTaskClass(title: string): string {
+  // A Jev label primed by an async parent (src/core/decide/task-class.ts)
+  // wins, projected onto this module's persisted vocabulary; otherwise the
+  // keyword table below decides, exactly as before.
+  const primed = peekTaskClass(title);
+  if (primed) return toSkillTaskClass(primed);
   const t = title.toLowerCase();
   if (/\b(fix|bug|patch|crash|error|exception|broken)\b/.test(t)) return 'bug-fix';
   if (/\b(add|implement|feature|support|new)\b/.test(t)) return 'feature-add';

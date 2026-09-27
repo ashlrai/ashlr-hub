@@ -39,6 +39,7 @@ import {
   type KnowledgeTarget,
   type TaskKind,
 } from './types.js';
+import { peekTaskClass, toRetroTaskKind } from '../../decide/task-class.js';
 
 // ---------------------------------------------------------------------------
 // Task kind
@@ -48,6 +49,10 @@ import {
 export function classifyTaskKind(text: string | null | undefined): TaskKind {
   const t = (text ?? '').toLowerCase();
   if (!t.trim()) return 'other';
+  // A Jev label primed by the retro sweep (one batched call,
+  // src/core/decide/task-class.ts) wins, projected onto TaskKind.
+  const primed = peekTaskClass(text);
+  if (primed) return toRetroTaskKind(primed);
   if (/\brevert(s|ed|ing)?\b/.test(t)) return 'revert';
   if (/\b(bump|deps|dependency|dependencies|upgrade|renovate|dependabot|lockfile)\b/.test(t)) return 'deps';
   if (/\b(ci|workflow|workflows|github actions|pipeline)\b/.test(t)) return 'ci';

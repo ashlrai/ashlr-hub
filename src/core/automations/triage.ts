@@ -5,11 +5,9 @@
  * automation's own configuration as the deterministic answer
  * (docs/JEV-INTEGRATION.md rules 1–5).
  *
- * `AutomationDecider` is the seam. Today's default speaks to Jev through the
- * existing typed client (classify/typesafe-client.ts: one call, all three
- * questions, no retries, never throws). When the shared decision layer
- * (src/core/decide, `decide(...)`) lands, it replaces `defaultAutomationDecider`
- * with a same-shape adapter and nothing else here changes.
+ * `AutomationDecider` is the seam. The default is the shared decision layer's
+ * `triageTrigger` (src/core/decide) behind a same-shape adapter: one call,
+ * all three questions, never throws.
  *
  * What triage may do — and nothing more:
  *   - pick a lane from `triage.lanes` (the operator's allow-list, which
@@ -32,6 +30,8 @@ export interface AutomationTriageInput {
   state: string;
   lanes: readonly AutomationLane[];
   playbooks: readonly string[];
+  /** The automation's gate, passed through so the decision ledger records the same threshold. */
+  minConfidence?: number;
 }
 
 export interface AutomationTriageAnswer {
@@ -51,52 +51,15 @@ export interface TriageOutcome {
 }
 
 const STATE_MAX_CHARS = 6_000;
-const NO_PLAYBOOK = 'none';
-
-const LANE_CRITERIA: Record<AutomationLane, string> = {
-  fleet: 'small, well-scoped change (a bug fix, a test, a dependency bump) the local fleet can finish in one pass under tight size caps',
-  cloud: 'medium task that needs a full coding session with the repository checked out (Claude cloud session)',
-  devin: 'larger or long-running task that benefits from an autonomous engineer working for an hour or more (Devin session)',
-  'leader-review': 'ambiguous, risky, product-level or unclear request that a human should look at before any work starts',
-};
-
-/** Default decider: Jev via the typed client. Lazy imports keep this module free of network code. */
-export const defaultAutomationDecider: AutomationDecider = async (input) => {
-  const [{ askTypeSafe, choiceAnswer, noulAnswer }, { loadConfigReadOnly }] = await Promise.all([
-    import('../classify/typesafe-client.js'),
-    import('../config.js'),
-  ]);
-  const questions: Record<string, import('../classify/typesafe-client.js').TypeSafeQuestion> = {
-    worth: {
-      type: 'noul',
-      instructions: 'Is this a concrete, actionable software engineering task that an autonomous coding agent should work on (not spam, not a question, not a discussion)?',
-    },
-  };
-  if (input.lanes.length > 1) {
-    questions['lane'] = {
-      type: 'choice',
-      instructions: 'Which lane should handle this task?',
-      criteria: Object.fromEntries(input.lanes.map((l) => [l, LANE_CRITERIA[l]])),
-    };
-  }
-  if (input.playbooks.length > 0) {
-    questions['playbook'] = {
-      type: 'choice',
-      instructions: 'Which playbook (a named procedure) fits this task best, if any?',
-      criteria: Object.fromEntries([...input.playbooks.map((p) => [p, `the task matches the "${p}" playbook`]), [NO_PLAYBOOK, 'none of the playbooks fits']]),
-    };
-  }
-  const result = await askTypeSafe({ state: input.state.slice(0, STATE_MAX_CHARS), questions, model: 'jev-latest' }, loadConfigReadOnly(), { timeoutMs: 8_000 });
-  if (!result.ok) return { unavailable: result.reason };
-  const worth = noulAnswer(result, 'worth');
-  const lane = input.lanes.length > 1 ? choiceAnswer(result, 'lane', input.lanes) : undefined;
-  const playbook = input.playbooks.length > 0 ? choiceAnswer(result, 'playbook', [...input.playbooks, NO_PLAYBOOK]) : undefined;
-  return {
-    worth: worth ? worth.noul : null,
-    lane: lane ? { choice: lane.choice, confidence: lane.confidence } : null,
-    playbook: playbook && playbook.choice !== NO_PLAYBOOK ? { choice: playbook.choice, confidence: playbook.confidence } : null,
-  };
-};
+/**
+ * Default decider: the shared Jev decision layer's `triageTrigger`
+ * (src/core/decide/triage.ts `automationTriageDecider`) — one call, all three
+ * questions, through the layer's cache, daily budget, kill switch and ledger.
+ * It hands back the raw per-part answers; the gating in `triageFiring` is
+ * unchanged. The lazy import keeps this module free of network code.
+ */
+export const defaultAutomationDecider: AutomationDecider = async (input) =>
+  (await import('../decide/triage.js')).automationTriageDecider(input);
 
 function rules(automation: AutomationV1, note: string): TriageOutcome {
   return { lane: automation.lane, playbookId: automation.playbookId, record: { source: 'rules', confidence: null, worth: null, note } };
@@ -119,7 +82,7 @@ export async function triageFiring(
   if (!decider) return rules(automation, 'rules: no decider in this process');
   let answer: Awaited<ReturnType<AutomationDecider>>;
   try {
-    answer = await decider({ state: `${event.title}\n\n${event.text}`, lanes: config.lanes, playbooks: config.playbooks });
+    answer = await decider({ state: `${event.title}\n\n${event.text}`.slice(0, STATE_MAX_CHARS), lanes: config.lanes, playbooks: config.playbooks, minConfidence: config.minConfidence });
   } catch {
     answer = null;
   }

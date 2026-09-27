@@ -52,6 +52,7 @@ import { loadPreviousReport, saveReport } from './store.js';
 // used elsewhere in this codebase to avoid circular deps at module load
 // (e.g. feedback.ts's dynamic import of inbox/store.js).
 import type { PlaybookResult } from './playbooks.js';
+import { peekTaskClass, primeTaskClasses, toGoalCategory } from '../decide/task-class.js';
 
 // ---------------------------------------------------------------------------
 // Bounds
@@ -99,6 +100,11 @@ const GOAL_CATEGORIES = [
 export function classifyGoal(goal: string): (typeof GOAL_CATEGORIES)[number] {
   const g = (goal ?? '').toLowerCase();
   if (!g.trim()) return 'other';
+  // A Jev label primed by runReflectionCycle / distillAndPersist (one batched
+  // call, src/core/decide/task-class.ts) wins, projected onto GOAL_CATEGORIES;
+  // unprimed or unkeyed, the keyword table below decides exactly as before.
+  const primed = peekTaskClass(goal);
+  if (primed) return toGoalCategory(primed);
   // bugfix: fix / bug / crash / regression / hotfix
   if (/\b(fix|fixes|fixed|bug|bugs|crash|regression|hotfix|defect|broken)\b/.test(g)) {
     return 'bugfix';
@@ -520,10 +526,26 @@ export interface ReflectionCycleResult {
  * Never throws. On any distillation/persistence failure this still returns
  * the computed report (report generation is the part that must not be lost).
  */
+/**
+ * One batched Jev pass over recent swarm goals so classifyGoal can use typed
+ * labels. Never throws; with no key it does no I/O beyond reading config.
+ */
+export async function primeGoalClasses(cfg: AshlrConfig, maxRuns = 50): Promise<void> {
+  try {
+    const goals = listSwarms().slice(0, maxRuns).map((s) => s?.goal);
+    await primeTaskClasses(goals, { cfg });
+  } catch {
+    /* the keyword table decides */
+  }
+}
+
 export async function runReflectionCycle(
   cfg: AshlrConfig,
   opts: ReflectionOptions & { maxPlaybookRuns?: number } = {},
 ): Promise<ReflectionCycleResult> {
+  // Prime Jev task-class labels for the goals buildReflection will bucket.
+  // buildReflection itself stays network-free; it only consults the memo.
+  await primeGoalClasses(cfg);
   const report = buildReflection(cfg, opts);
 
   // Periodic write-back is autonomous learning authority, not read-only
