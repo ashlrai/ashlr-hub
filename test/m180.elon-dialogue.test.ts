@@ -125,7 +125,7 @@ describe('M180 dispatch.ts Telegram routing integration', () => {
 
     await runCommsCycle(makeCfg() as never);
 
-    expect(mockAppendMasonMessage).toHaveBeenCalledWith('what should we ship next?', { channel: 'telegram' });
+    expect(mockAppendMasonMessage).toHaveBeenCalledWith('what should we ship next?', expect.objectContaining({ channel: 'telegram' }));
     expect(mockHandleStrategicMessage).not.toHaveBeenCalled();
     expect(mockSendTelegramMessage).toHaveBeenCalledWith(
       expect.stringContaining('Bold move. Creating goal now.'),
@@ -191,7 +191,7 @@ describe('M180 dispatch.ts Telegram routing integration', () => {
 
     const result = await runCommsCycle(makeCfg() as never);
 
-    expect(mockAppendMasonMessage).toHaveBeenCalledWith('Tell me the strategy', { channel: 'telegram' });
+    expect(mockAppendMasonMessage).toHaveBeenCalledWith('Tell me the strategy', expect.objectContaining({ channel: 'telegram' }));
     expect(mockSendTelegramMessage).toHaveBeenCalledWith(expect.stringContaining('Here is my assessment.'), {}, expect.anything());
     expect(result.resolved).toBe(0);
   });
@@ -210,6 +210,6 @@ describe('M180 dispatch.ts Telegram routing integration', () => {
     const result = await runCommsCycle(makeCfg() as never);
     expect(result.resolved).toBe(0);
     expect(outstanding()).toBeDefined();
-    expect(mockAppendMasonMessage).toHaveBeenCalledWith('2 things: ship billing, then docs', { channel: 'telegram' });
+    expect(mockAppendMasonMessage).toHaveBeenCalledWith('2 things: ship billing, then docs', expect.objectContaining({ channel: 'telegram' }));
   });
 });

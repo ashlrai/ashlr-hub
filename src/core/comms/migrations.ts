@@ -11,9 +11,12 @@
  *      pending ones older than 24 h — the Strategist path no longer posts;
  *   2. expires pending `fleet-digest` reports older than 24 h — a digest about
  *      last week is noise, not news;
- *   3. re-posts only the NEWEST undelivered Leader memo as an informational
- *      `leader-memo` report (it never blocks, and carries Approve / Veto /
- *      Details buttons), expiring the older Leader-memo questions.
+ *   3. expires the pre-3.14 Leader-memo QUESTIONS ("Keep it / Veto / Show"):
+ *      memos now reach Mason through the Leader thread
+ *      (vision/leader-thread.ts syncs recent memos — summary plus one message
+ *      per question — and the comms cycle drains pendingOutbound('telegram')
+ *      with Approve / Veto / Details buttons), so re-posting them here would
+ *      deliver the same memo twice.
  *
  * Expiry is fail-closed (an expired question is never treated as a yes).
  * Everything expired is returned for logging and recorded in
@@ -24,11 +27,15 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { expireRequestsWhere, listRequests, postRequest, type CommsRequest } from './requests.js';
+import { expireRequestsWhere, type CommsRequest } from './requests.js';
 
 /** Persisted wire kind of the legacy Strategist briefing AND the pre-3.14 Leader memo question. */
 export const LEGACY_BRIEFING_KIND = 'elon-vision';
-/** 3.14 wire kind: a Leader memo delivered as an informational (non-blocking) message. */
+/**
+ * 3.14 wire kind of an informational (non-blocking) Leader-memo report. Memos
+ * normally arrive through the Leader thread; the comms layer still renders a
+ * report of this kind with memo buttons if one is ever queued.
+ */
 export const LEADER_MEMO_KIND = 'leader-memo';
 
 const MIGRATION_ID = 'telegram-leader-line-v1';
@@ -40,8 +47,6 @@ export interface CommsMigrationSummary {
   expiredLegacyBriefings: number;
   expiredStaleDigests: number;
   expiredLeaderMemoQuestions: number;
-  /** memoId re-posted as an informational leader-memo report, if any. */
-  repostedMemoId: string | null;
   /** Human-readable lines for the cycle log. */
   log: string[];
 }
@@ -116,38 +121,20 @@ export function runCommsMigrationsOnce(nowMs: number = Date.now()): CommsMigrati
       'migration: pending digest older than 24h (3.14)',
     );
 
-    // Leader memos queued as blocking questions: keep the newest one's content
-    // (re-posted below as a non-blocking memo message), expire the rest.
-    const openMemoQs = listRequests({ kind: LEGACY_BRIEFING_KIND, status: ['pending', 'sent'] }).filter(isLeaderMemoRequest);
-    const newest = [...openMemoQs].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
+    // Leader memos queued as blocking questions: the Leader thread delivers
+    // memos now, so these would only duplicate it.
     const memoQs = expireRequestsWhere(
       isLeaderMemoRequest,
       nowMs,
-      'migration: Leader memo moved to a non-blocking memo message (3.14)',
+      'migration: Leader memos are delivered through the Leader thread (3.14)',
     );
-    let repostedMemoId: string | null = null;
-    if (newest && newest.status === 'pending') {
-      const memoId = newest.meta!['memoId'] as string;
-      const already = listRequests({ kind: LEADER_MEMO_KIND }).some((r) => r.meta?.['memoId'] === memoId);
-      if (!already) {
-        postRequest({
-          kind: LEADER_MEMO_KIND,
-          type: 'report',
-          text: newest.text,
-          options: [],
-          meta: { source: 'leader', memoId, migratedFrom: newest.id },
-        });
-        repostedMemoId = memoId;
-      }
-    }
 
     for (const r of legacy) log.push(`expired legacy briefing: ${describe(r)}`);
     if (staleDigests.length > 0) {
       const oldest = staleDigests.map((r) => r.createdAt).sort()[0]!.slice(0, 10);
       log.push(`expired ${staleDigests.length} pending fleet digest(s) older than 24h (oldest ${oldest})`);
     }
-    for (const r of memoQs) log.push(`expired Leader memo question: ${describe(r)}`);
-    if (repostedMemoId) log.push(`re-queued Leader memo ${repostedMemoId} as a non-blocking message`);
+    for (const r of memoQs) log.push(`expired Leader memo question: ${describe(r)} — the Leader thread delivers memos now`);
     if (log.length === 0) log.push('nothing to migrate');
 
     const summary: CommsMigrationSummary = {
@@ -156,7 +143,6 @@ export function runCommsMigrationsOnce(nowMs: number = Date.now()): CommsMigrati
       expiredLegacyBriefings: legacy.length,
       expiredStaleDigests: staleDigests.length,
       expiredLeaderMemoQuestions: memoQs.length,
-      repostedMemoId,
       log,
     };
     file.done[MIGRATION_ID] = summary;

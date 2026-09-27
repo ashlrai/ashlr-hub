@@ -11,8 +11,8 @@
  *   - loadLatestBriefing     → vi.fn() (legacy; the cycle no longer reaches it)
  *   - runStrategist          → vi.fn() (legacy; the cycle no longer reaches it)
  *   - leaderTick / buildLeaderState → vi.fn() (V3.10: ask-vision is the Leader
- *     tick path; 3.14 queues the latest Leader memo as an informational
- *     'leader-memo' report)
+ *     tick path; 3.14: the Leader thread delivers the memo, no comms request
+ *     is posted)
  *   - judgeHealth            → vi.fn() (returns zeroed health)
  *   - runCommsCycle          → vi.fn() (returns {sent:1, resolved:0})
  *   - loadConfig             → vi.fn() (returns minimal cfgEnabled)
@@ -437,10 +437,8 @@ describe('cycle ask-vision cadence', () => {
 
     await cmdComms(['cycle']);
     expect(mockLeaderTick).toHaveBeenCalled();
-    const queued = listRequests({ kind: 'leader-memo' });
-    expect(queued.length).toBeGreaterThan(0);
-    // Informational, never a blocking question; nothing new under the legacy kind.
-    expect(queued[0]!.type).toBe('report');
+    // The Leader thread delivers the memo; no request (and nothing under the legacy kind).
+    expect(listRequests({ kind: 'leader-memo' })).toHaveLength(0);
     expect(listRequests({ kind: 'elon-vision' })).toHaveLength(0);
     expect(mockRunCommsCycle).toHaveBeenCalledOnce();
   });
@@ -459,8 +457,7 @@ describe('cycle ask-vision cadence', () => {
 
     await cmdComms(['cycle']);
     expect(mockLeaderTick).toHaveBeenCalled();
-    const queued = listRequests({ kind: 'leader-memo' });
-    expect(queued.length).toBeGreaterThan(0);
+    expect(getCadenceValue('last-askvision')).not.toBeNull();
   });
 });
 
@@ -571,9 +568,8 @@ describe('both stale', () => {
     expect(mockLeaderTick).toHaveBeenCalled();
 
     const digests = listRequests({ kind: 'fleet-digest' });
-    const visions = listRequests({ kind: 'leader-memo' });
     expect(digests.length).toBeGreaterThan(0);
-    expect(visions.length).toBeGreaterThan(0);
+    expect(getCadenceValue('last-askvision')).not.toBeNull();
 
     expect(mockRunCommsCycle).toHaveBeenCalledOnce();
   });

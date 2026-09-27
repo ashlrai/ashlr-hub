@@ -135,7 +135,11 @@ export function leaderKeyboard(target: Omit<TelegramButtonTarget, 'at'>, show: {
 
 interface MemoFacts {
   actionIds: string[];
-  /** Actions escalated to Mason (class C) — the ones Approve acts on. */
+  /**
+   * Actions awaiting Mason — a class-B action inside its veto window
+   * (Approve applies it now) or an escalated class-C one (Approve records
+   * it). Same rule as the Leader's own memo summary.
+   */
   approvable: string[];
   /** Applied or still inside their veto window — what Veto undoes. */
   live: number;
@@ -149,7 +153,9 @@ async function memoFacts(memoId: string): Promise<MemoFacts | null> {
     if (!memo) return null;
     return {
       actionIds: memo.actions.map((a) => a.id),
-      approvable: memo.actions.filter((a) => a.status === 'escalated').map((a) => a.id),
+      approvable: memo.actions
+        .filter((a) => (a.status === 'scheduled' && a.class === 'B') || a.status === 'escalated')
+        .map((a) => a.id),
       live: memo.actions.filter((a) => a.status === 'applied' || a.status === 'scheduled').length,
     };
   } catch {
@@ -205,7 +211,8 @@ export function formatThreadMessage(msg: LeaderThreadMessage): string {
     case 'question':
       return `Leader asks:\n${body}\n\n(Reply to this message to answer.)`;
     case 'memo':
-      return `Leader memo${msg.memoId ? ` ${msg.memoId}` : ''}\n${body}`;
+      // The thread's memo summary already opens with "Memo <id>".
+      return /^Memo /.test(body) ? `Leader ${body.replace(/^Memo /, 'memo ')}` : `Leader memo${msg.memoId ? ` ${msg.memoId}` : ''}\n${body}`;
     case 'action':
       return `Leader action:\n${body}`;
     case 'directive':
@@ -230,12 +237,23 @@ export async function sendThreadMessage(
   const replyTarget = replyToTg ?? telegramIdForThread(msg.replyTo);
   if (typeof replyTarget === 'number') opts.replyToMessageId = replyTarget;
 
-  const actionIds = (msg.actionIds ?? []).filter((id) => LEADER_ACTION_ID_RE.test(id));
+  let actionIds = (msg.actionIds ?? []).filter((id) => LEADER_ACTION_ID_RE.test(id));
   const memoId = msg.memoId && LEADER_MEMO_ID_RE.test(msg.memoId) ? msg.memoId : undefined;
-  if ((msg.kind === 'memo' || msg.kind === 'action') && (memoId || actionIds.length > 0)) {
+  if (msg.kind === 'memo' && memoId) {
+    // Approve only what still awaits Mason; Veto only when something is live.
+    const facts = await memoFacts(memoId);
+    const approvable = facts ? actionIds.filter((id) => facts.approvable.includes(id)) : [];
+    const listed = actionIds.length > 0 ? actionIds : (facts?.approvable ?? []);
+    actionIds = approvable.length > 0 ? approvable : listed.filter((id) => facts?.approvable.includes(id));
     opts.keyboard = leaderKeyboard(
-      { threadId: msg.id, ...(memoId ? { memoId } : {}), ...(actionIds.length ? { actionIds } : {}) },
-      { approve: actionIds.length > 0, veto: true },
+      { threadId: msg.id, memoId, ...(actionIds.length ? { actionIds } : {}) },
+      { approve: actionIds.length > 0, veto: (facts?.live ?? 0) > 0 },
+    );
+  } else if (msg.kind === 'action' && !msg.replyTo && actionIds.length > 0) {
+    // A proactive action notice (not the acknowledgement of Mason's own tap).
+    opts.keyboard = leaderKeyboard(
+      { threadId: msg.id, ...(memoId ? { memoId } : {}), actionIds },
+      { approve: true, veto: true },
     );
   }
 
@@ -342,13 +360,14 @@ export async function converseWithLeader(event: InboundEvent, text: string, cfg:
     let reply: LeaderThreadMessage | null = null;
     let directive: unknown;
     if (repliedTo?.kind === 'question' && repliedTo.questionId) {
-      ({ message, reply } = await mod.answerLeaderQuestion(repliedTo.questionId, text, { channel: 'telegram' }));
+      ({ message, reply } = await mod.answerLeaderQuestion(repliedTo.questionId, text, { channel: 'telegram', cfg }));
     } else {
       // A reply to a memo the comms queue delivered has no thread id: name
       // the memo so the Leader knows what Mason is answering.
       const body = !repliedTo?.threadId && repliedTo?.memoId ? `(re: Leader memo ${repliedTo.memoId}) ${text}` : text;
       const res = await mod.appendMasonMessage(body, {
         channel: 'telegram',
+        cfg,
         ...(repliedTo?.threadId ? { replyTo: repliedTo.threadId } : {}),
       });
       message = res.message;
@@ -374,9 +393,15 @@ export async function converseWithLeader(event: InboundEvent, text: string, cfg:
         : 'Noted — the Leader has it and will reply here.',
       cfg,
     );
-  } catch {
-    await replyTo(event, 'Could not reach the Leader just now — try again in a few minutes.', cfg);
+  } catch (err) {
+    await replyTo(event, `Could not pass that to the Leader: ${errorText(err)}`, cfg);
   }
+}
+
+/** A thread refusal (LeaderThreadError: bad input, unknown question) is worth showing; anything else is generic. */
+function errorText(err: unknown): string {
+  if (err instanceof Error && err.name === 'LeaderThreadError' && err.message) return scrubSecrets(err.message);
+  return 'the Leader is unreachable right now — try again in a few minutes.';
 }
 
 // ---------------------------------------------------------------------------
@@ -463,12 +488,25 @@ export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig):
         return true;
       }
       await ack('Approving…');
+      // One combined reply. Each approval also queues the Leader's
+      // acknowledgement in the thread (pending for Telegram); it is marked
+      // delivered only once this reply — which carries it — has landed, so
+      // the drain never sends it a second time.
       const lines: string[] = [];
+      const ackIds: string[] = [];
       for (const id of actionIds) {
-        const r = resultMessage(await mod.approveLeaderAction(id, { channel: 'telegram' }), 'approved');
-        lines.push(`${r.ok ? 'Approved' : 'Not approved'} ${id}: ${r.message}`);
+        try {
+          const res = await mod.approveLeaderAction(id, { channel: 'telegram', cfg });
+          const r = resultMessage(res, 'approved');
+          const leaderSays = res?.thread?.reply?.text;
+          lines.push(`${r.ok ? 'Approved' : 'Not approved'} ${id}: ${leaderSays && leaderSays.trim() ? leaderSays : r.message}`);
+          if (res?.thread?.reply?.id) ackIds.push(res.thread.reply.id);
+        } catch (err) {
+          lines.push(`Not approved ${id}: ${errorText(err)}`);
+        }
       }
-      await replyTo(event, scrubSecrets(lines.join('\n')), cfg);
+      const sent = await replyTo(event, scrubSecrets(lines.join('\n')), cfg);
+      for (const ackId of ackIds) await mod.markDelivered(ackId, 'telegram', sent.ok);
       return true;
     }
 

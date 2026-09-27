@@ -382,12 +382,12 @@ describe('Leader thread over Telegram', () => {
   });
 
   it('a reply to a Leader QUESTION → answerLeaderQuestion; the answer comes back as a reply to Mason', async () => {
-    thread.outbound = [leaderMsg({ id: 'q-msg', kind: 'question', questionId: 'q-7', text: 'Pause cortex for a week?' })];
+    thread.outbound = [leaderMsg({ id: 'q-msg', kind: 'question', questionId: `${MEMO_ID}:0`, text: 'Pause cortex for a week?' })];
     await runCommsCycle(cfg(), fastCycle);
     const questionTg = sends()[0]!;
     expect(questionTg.body['text']).toContain('Reply to this message to answer');
     const tgId = 1000;
-    expect(lookupTelegramMessage(tgId)).toMatchObject({ threadId: 'q-msg', kind: 'question', questionId: 'q-7' });
+    expect(lookupTelegramMessage(tgId)).toMatchObject({ threadId: 'q-msg', kind: 'question', questionId: `${MEMO_ID}:0` });
 
     // An unrelated button-question is outstanding: a bare "2" replying to the
     // Leader question must answer the Leader, not pick option 2.
@@ -401,7 +401,7 @@ describe('Leader thread over Telegram', () => {
     updates = [textUpdate('2', 610, tgId)];
     const result = await runCommsCycle(cfg(), fastCycle);
 
-    expect(thread.answerLeaderQuestion).toHaveBeenCalledWith('q-7', '2', { channel: 'telegram' });
+    expect(thread.answerLeaderQuestion).toHaveBeenCalledWith(`${MEMO_ID}:0`, '2', expect.objectContaining({ channel: 'telegram' }));
     expect(result.resolved).toBe(0);
     expect(outstanding()?.id).toBe(q);
     const reply = sends().find((c) => String(c.body['text']).includes('two weeks'))!;
@@ -418,8 +418,8 @@ describe('Leader thread over Telegram', () => {
     });
     updates = [textUpdate('nice — what next?', 700, 1000), textUpdate('focus on billing this week', 701)];
     await runCommsCycle(cfg(), fastCycle);
-    expect(thread.appendMasonMessage).toHaveBeenNthCalledWith(1, 'nice — what next?', { channel: 'telegram', replyTo: 'upd-1' });
-    expect(thread.appendMasonMessage).toHaveBeenNthCalledWith(2, 'focus on billing this week', { channel: 'telegram' });
+    expect(thread.appendMasonMessage).toHaveBeenNthCalledWith(1, 'nice — what next?', expect.objectContaining({ channel: 'telegram', replyTo: 'upd-1' }));
+    expect(thread.appendMasonMessage).toHaveBeenNthCalledWith(2, 'focus on billing this week', expect.not.objectContaining({ replyTo: expect.anything() }));
   });
 
   it('a directive with no immediate reply is acknowledged honestly', async () => {
@@ -459,7 +459,13 @@ describe('Leader memo buttons', () => {
   it('Details replies with the full memo; Veto vetoes the memo; Approve approves the escalated action', async () => {
     const { tg, data } = await deliverMemoReport();
     const [approve, veto, details] = data as [string, string, string];
-    thread.approveLeaderAction.mockResolvedValue({ ok: true, message: 'approved and applied' });
+    thread.approveLeaderAction.mockResolvedValue({
+      ok: true, code: 200, outcome: 'recorded-outside-grant', message: 'approval recorded', action: null,
+      thread: {
+        message: { id: 'lt-20260926070000-aaaaaa', from: 'mason', kind: 'action', text: 'Approve: Open billing repo' },
+        reply: { id: 'lt-20260926070000-bbbbbb', from: 'leader', kind: 'action', text: 'Recorded — outside the grant, I will ask for it next memo.' },
+      },
+    });
 
     calls = [];
     updates = [callbackUpdate(details, tg), callbackUpdate(veto, tg), callbackUpdate(approve, tg)];
@@ -469,11 +475,35 @@ describe('Leader memo buttons', () => {
     expect(out.find((t) => t.includes('BOTTLENECK'))).toContain('Review queue &lt;10 PRs&gt;');
     expect(apply.vetoLeaderMemo).toHaveBeenCalledWith({ fake: 'deps' }, MEMO_ID, 'Vetoed from Telegram');
     expect(out).toContain('Vetoed: memo vetoed, 1 action undone');
-    expect(thread.approveLeaderAction).toHaveBeenCalledWith(ACTION_ESCALATED, { channel: 'telegram' });
-    expect(out.find((t) => t.startsWith('Approved'))).toContain(ACTION_ESCALATED);
+    expect(thread.approveLeaderAction).toHaveBeenCalledWith(ACTION_ESCALATED, expect.objectContaining({ channel: 'telegram' }));
+    const approved = out.find((t) => t.startsWith('Approved'))!;
+    expect(approved).toContain(ACTION_ESCALATED);
+    expect(approved).toContain('Recorded — outside the grant');
+    // The Leader's acknowledgement rode in that reply: marked delivered, never sent twice.
+    expect(thread.delivered).toContainEqual({ id: 'lt-20260926070000-bbbbbb', channel: 'telegram', ok: true });
     // every reply threads under the tapped memo, and every tap is acked
     for (const c of sends()) expect(replyTarget(c)).toBe(tg);
     expect(calls.filter((c) => c.method === 'answerCallbackQuery')).toHaveLength(3);
+  });
+
+  it('a Leader-thread memo gets the buttons; Approve targets only actions still awaiting Mason', async () => {
+    writeLeaderMemo(memo());
+    thread.outbound = [leaderMsg({
+      id: 'lt-20260926063000-cccccc', kind: 'memo', memoId: MEMO_ID, channel: 'system',
+      text: `Memo ${MEMO_ID}\nBottleneck: review queue`, actionIds: [ACTION_APPLIED, ACTION_ESCALATED],
+    })];
+    await runCommsCycle(cfg(), fastCycle);
+    const [s] = sends();
+    expect(s!.body['text']).toBe(`Leader memo ${MEMO_ID}\nBottleneck: review queue`);
+    const data = keyboardData(s!);
+    expect(data.map((d) => d.slice(0, 5))).toEqual(['lt:a:', 'lt:v:', 'lt:d:']);
+    expect(lookupTelegramMessage(1000)).toMatchObject({ kind: 'memo', memoId: MEMO_ID, actionIds: [ACTION_ESCALATED] });
+
+    thread.approveLeaderAction.mockResolvedValue({ ok: true, code: 200, outcome: 'recorded-outside-grant', message: 'recorded', action: null, thread: null });
+    updates = [callbackUpdate(data[0]!, 1000)];
+    await runCommsCycle(cfg(), fastCycle);
+    expect(thread.approveLeaderAction).toHaveBeenCalledTimes(1);
+    expect(thread.approveLeaderAction).toHaveBeenCalledWith(ACTION_ESCALATED, expect.objectContaining({ channel: 'telegram' }));
   });
 
   it('a forged / unknown token does nothing but ack', async () => {
@@ -524,7 +554,7 @@ describe('slash commands and keywords', () => {
     });
     updates = [textUpdate('/leader are we on track?', 9)];
     await runCommsCycle(cfg(), fastCycle);
-    expect(thread.appendMasonMessage).toHaveBeenCalledWith('are we on track?', { channel: 'telegram' });
+    expect(thread.appendMasonMessage).toHaveBeenCalledWith('are we on track?', expect.objectContaining({ channel: 'telegram' }));
   });
 
   it('paused: inbound still works (resume arrives) but nothing informational goes out', async () => {
@@ -551,7 +581,7 @@ describe('one-time queue migration', () => {
   }
   const base = { options: [], type: 'report' };
 
-  it('expires the blocking legacy briefing + stale digests, delivers the newest Leader memo, logs it, runs once', async () => {
+  it('expires the blocking legacy briefing, stale digests and old memo questions; logs it; runs once', async () => {
     const now = Date.now();
     const iso = (hAgo: number) => new Date(now - hAgo * 3_600_000).toISOString();
     writeLeaderMemo(memo());
@@ -573,14 +603,14 @@ describe('one-time queue migration', () => {
     expect(byId.get('memo-old')!.status).toBe('expired');
     expect(byId.get('memo-new')!.status).toBe('expired');
     expect(byId.get('legacy-1')!.expiredReason).toMatch(/legacy Strategist/);
+    expect(byId.get('memo-new')!.expiredReason).toMatch(/Leader thread/);
     expect(byId.get('dig-new')!.status).toBe('answered');
-    const reposted = listRequests({ kind: 'leader-memo' });
-    expect(reposted).toHaveLength(1);
-    expect(reposted[0]!.meta).toMatchObject({ memoId: MEMO_ID, migratedFrom: 'memo-new' });
-    expect(reposted[0]!.status).toBe('answered');
-    expect(texts()).toEqual(['fresh digest', expect.stringContaining('Move: merge green PRs')]);
+    // Memos reach Mason through the Leader thread; nothing is re-posted as a request.
+    expect(listRequests({ kind: 'leader-memo' })).toHaveLength(0);
+    expect(texts()).toEqual(['fresh digest']);
+    expect(outstanding()).toBeUndefined(); // the question slot is free again
 
-    expect(result.migration).toMatchObject({ expiredLegacyBriefings: 1, expiredStaleDigests: 2, expiredLeaderMemoQuestions: 2, repostedMemoId: MEMO_ID });
+    expect(result.migration).toMatchObject({ expiredLegacyBriefings: 1, expiredStaleDigests: 2, expiredLeaderMemoQuestions: 2 });
     expect(result.migration!.log.join('\n')).toContain('expired legacy briefing: elon-vision sent legacy-1');
     const recorded = JSON.parse(readFileSync(join(home, '.ashlr', 'comms', 'migrations.json'), 'utf8'));
     expect(recorded.done['telegram-leader-line-v1'].expiredStaleDigests).toBe(2);

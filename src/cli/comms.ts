@@ -11,7 +11,7 @@
  *   cycle                            Run one runCommsCycle (send pending + poll replies).
  *   ask "<text>" -o "a" -o "b"       Post a test question with numbered options.
  *   digest [--force]                 Change-driven digest (silent when nothing changed).
- *   ask-vision                       Leader tick + queue the latest Leader memo.
+ *   ask-vision                       Leader tick + deliver the Leader thread (latest memo).
  *   ask-merges                       Post ship proposals for approval + run cycle.
  *   setup-telegram                   Print Telegram setup steps + discover chat id.
  *
@@ -25,8 +25,7 @@ import { listRequests, outstanding, postRequest } from '../core/comms/requests.j
 import { runCommsCycle } from '../core/comms/dispatch.js';
 import { registerCommsHandlers } from '../core/comms/handlers.js';
 import { runChangeDigest, readDigestState, type ChangeDigestResult } from '../core/comms/change-digest.js';
-import { LEADER_MEMO_KIND, LEGACY_BRIEFING_KIND, type CommsMigrationSummary } from '../core/comms/migrations.js';
-import { scrubSecrets } from '../core/util/scrub.js';
+import { LEGACY_BRIEFING_KIND, type CommsMigrationSummary } from '../core/comms/migrations.js';
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -109,16 +108,35 @@ async function sendDigest(opts: { nowMs?: number } = {}): Promise<ChangeDigestRe
 export const LEADER_BRIEFING_KIND = LEGACY_BRIEFING_KIND;
 
 /**
- * - `posted`    — the newest memo was queued for delivery now;
- * - `queued`    — it is already in the queue, not yet delivered;
- * - `delivered` — it already reached Mason (queue or Leader thread);
- * - `no-memo`   — there is no successful Leader memo yet.
+ * Where the newest Leader memo is on its way to Mason's phone:
+ * - `queued`        — in the Leader thread, pending for Telegram (the cycle drains it);
+ * - `delivered`     — already sent;
+ * - `failed`        — Telegram delivery gave up after its retries;
+ * - `not-in-thread` — the memo exists but the thread did not post it (older
+ *                     than 7 days, or skipped by the first-sync backlog limit);
+ * - `no-memo`       — there is no successful Leader memo yet.
  */
-export type LeaderBriefingOutcome = 'posted' | 'queued' | 'delivered' | 'no-memo';
+export type LeaderBriefingOutcome = 'queued' | 'delivered' | 'failed' | 'not-in-thread' | 'no-memo';
 
-function clipText(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, ' ').trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+export interface LeaderBriefingStatus {
+  outcome: LeaderBriefingOutcome;
+  memoId: string | null;
+  deliveredAt: string | null;
+}
+
+/** Where memo `memoId`'s summary message stands in the Leader thread (syncs recent memos first). */
+async function leaderMemoDelivery(memoId: string): Promise<LeaderBriefingStatus> {
+  const thread = await import('../core/vision/leader-thread.js');
+  thread.syncLeaderMemosToThread();
+  const msg = thread
+    .listThread({ limit: 200 })
+    .filter((m) => m.kind === 'memo' && m.memoId === memoId)
+    .pop();
+  const state = msg?.delivery?.telegram;
+  if (state === 'sent') return { outcome: 'delivered', memoId, deliveredAt: msg?.delivery?.sentAt ?? null };
+  if (state === 'pending') return { outcome: 'queued', memoId, deliveredAt: null };
+  if (state === 'failed') return { outcome: 'failed', memoId, deliveredAt: null };
+  return { outcome: 'not-in-thread', memoId, deliveredAt: null };
 }
 
 /**
@@ -129,45 +147,20 @@ function clipText(text: string, max: number): string {
  * not changed; routed seat, no cloud fallback, dry run without a grant). The
  * legacy Strategist path is never reached from comms.
  *
- * 3.14: the newest successful memo is queued once (deduped by memo id) as an
- * INFORMATIONAL `leader-memo` message — it never waits behind an unanswered
- * question — carrying [Approve] [Veto] [Details] buttons on Telegram. Mason
- * replies to it to talk to the Leader.
+ * 3.14: the memo is NOT posted as a comms request any more (the old
+ * "Keep it / Veto this memo / Show full memo" question is retired). The
+ * Leader thread owns memo delivery: syncLeaderMemosToThread() queues the memo
+ * summary plus one message per question for Telegram, and the comms cycle
+ * drains pendingOutbound('telegram') with [Approve] [Veto] [Details] buttons.
+ * This reports where the newest memo stands.
  */
-export async function sendLeaderBriefing(cfg: Awaited<ReturnType<typeof loadConfig>>): Promise<{ outcome: LeaderBriefingOutcome; memoId: string | null; deliveredAt: string | null }> {
+export async function sendLeaderBriefing(cfg: Awaited<ReturnType<typeof loadConfig>>): Promise<LeaderBriefingStatus> {
   const leader = await import('../core/vision/leader.js');
   const deps = await leader.loadDefaultLeaderRunDeps(cfg);
   await leader.leaderTick(deps, { awaitRun: true });
   const memo = leader.buildLeaderState(Date.now()).latest;
   if (!memo || memo.status !== 'ok') return { outcome: 'no-memo', memoId: null, deliveredAt: null };
-
-  const { memoDeliveredAt } = await import('../core/comms/telegram-thread-map.js');
-  const rows = listRequests().filter(
-    (r) => (r.kind === LEADER_MEMO_KIND || r.kind === LEGACY_BRIEFING_KIND) && r.meta?.['memoId'] === memo.id,
-  );
-  const deliveredRow = rows.find((r) => r.status === 'answered' || r.status === 'sent');
-  const deliveredAt = memoDeliveredAt(memo.id) ?? deliveredRow?.sentAt ?? null;
-  if (deliveredAt || deliveredRow) return { outcome: 'delivered', memoId: memo.id, deliveredAt };
-  if (rows.some((r) => r.status === 'pending')) return { outcome: 'queued', memoId: memo.id, deliveredAt: null };
-
-  const parts: string[] = [`Leader memo${memo.dryRun ? ' (dry run)' : ''} — ${memo.at.slice(0, 16).replace('T', ' ')}`];
-  if (memo.bottleneck) parts.push(`Bottleneck: ${clipText(memo.bottleneck.statement, 300)}`);
-  if (memo.move) parts.push(`Move: ${clipText(memo.move.statement, 300)}`);
-  const live = memo.actions.filter((a) => a.status === 'applied' || a.status === 'scheduled').length;
-  const escalated = memo.actions.filter((a) => a.status === 'escalated').length;
-  if (live > 0) parts.push(`${live} action(s) applied or inside their veto window`);
-  if (escalated > 0) parts.push(`${escalated} action(s) need your approval`);
-  if (memo.questionsForMason.length > 0) parts.push(`Question: ${clipText(memo.questionsForMason[0]!, 300)}`);
-
-  postRequest({
-    kind: LEADER_MEMO_KIND,
-    type: 'report',
-    // Model-authored text on its way to Mason's phone: scrubbed like every outbound message.
-    text: scrubSecrets(parts.join('\n')),
-    options: [],
-    meta: { source: 'leader', memoId: memo.id },
-  });
-  return { outcome: 'posted', memoId: memo.id, deliveredAt: null };
+  return leaderMemoDelivery(memo.id);
 }
 
 function logMigration(summary: CommsMigrationSummary | undefined): void {
@@ -318,7 +311,7 @@ async function cmdCycle(): Promise<number> {
         // Checked once per interval whatever the outcome: a missing memo is
         // not retried every poll (the daemon's own tick runs the Leader).
         writeLastSent('last-askvision', Date.now());
-        console.log(outcome === 'posted' ? `cycle: leader memo ${memoId} queued` : `cycle: leader memo not queued (${outcome})`);
+        console.log(`cycle: leader memo ${memoId ?? '(none)'}: ${outcome}`);
       } catch {
         // never-throws — ask-vision failure must not break the poll cycle
       }
@@ -402,38 +395,43 @@ async function cmdAskVision(): Promise<number> {
 
   try {
     console.log('Running a Leader tick (a due run on a local model can take several minutes)…');
-    const { outcome, memoId, deliveredAt } = await sendLeaderBriefing(cfg);
-    if (outcome === 'no-memo') {
+    const before = await sendLeaderBriefing(cfg);
+    const { memoId } = before;
+    if (before.outcome === 'no-memo' || !memoId) {
       console.error('No Leader memo yet — run `ashlr leader run` (or wait for the 06:30 run), then try again.');
       return 1;
     }
     // Say exactly where the memo is: "already posted" used to mean only
     // "queued", while the memo sat undelivered behind a blocked queue.
-    if (outcome === 'delivered') {
-      console.log(`Leader memo ${memoId} was already delivered${deliveredAt ? ` at ${deliveredAt}` : ''}; running a cycle for anything else pending.`);
-    } else if (outcome === 'queued') {
-      console.log(`Leader memo ${memoId} is queued but not delivered yet; sending now.`);
+    if (before.outcome === 'delivered') {
+      console.log(`Leader memo ${memoId} was already delivered${before.deliveredAt ? ` at ${before.deliveredAt}` : ''}; running a cycle for anything else pending.`);
+    } else if (before.outcome === 'queued') {
+      console.log(`Leader memo ${memoId} is queued in the Leader thread, not delivered yet; sending now.`);
+    } else if (before.outcome === 'failed') {
+      console.error(`Leader memo ${memoId}: Telegram delivery failed after its retries — see \`ashlr leader\` / Verse for the memo.`);
     } else {
-      console.log(`queued Leader memo ${memoId}`);
+      console.log(`Leader memo ${memoId} is not in the Leader thread (older than 7 days, or skipped as backlog) — nothing to deliver.`);
     }
     registerCommsHandlers(cfg);
     const result = await runCommsCycle(cfg);
     logMigration(result.migration);
     console.log(`cycle: sent=${result.sent} resolved=${result.resolved}`);
 
-    if (outcome === 'delivered') return 0;
-    const { memoDeliveredAt } = await import('../core/comms/telegram-thread-map.js');
-    const nowDelivered =
-      memoDeliveredAt(memoId ?? undefined) !== null ||
-      listRequests({ kind: LEADER_MEMO_KIND, status: 'answered' }).some((r) => r.meta?.['memoId'] === memoId);
-    if (nowDelivered) {
+    if (before.outcome === 'delivered' || before.outcome === 'not-in-thread') return 0;
+    if (before.outcome === 'failed') return 1;
+    const after = await leaderMemoDelivery(memoId);
+    if (after.outcome === 'delivered') {
       const dest = telegramEnabled(cfg)
         ? `Telegram (chat ${cfg.comms?.telegram?.chatId ?? '?'})`
         : cfg.comms?.imessageHandle ?? '?';
-      console.log(`Leader memo ${memoId} delivered to ${dest}. Reply to it to talk to the Leader${telegramEnabled(cfg) ? ', or tap Approve / Veto / Details' : ''}.`);
+      console.log(`Leader memo ${memoId} delivered to ${dest}. Reply to it to talk to the Leader, or tap Approve / Veto / Details.`);
       return 0;
     }
-    console.error(`Leader memo ${memoId} is queued but was not delivered — check the channel configuration (it retries on the next cycle).`);
+    if (!telegramEnabled(cfg)) {
+      console.log(`Leader memo ${memoId} is in the Leader thread; it is delivered over Telegram only (read it in Verse or \`ashlr leader\`).`);
+      return 0;
+    }
+    console.error(`Leader memo ${memoId} is queued but was not delivered — check the Telegram configuration (it retries on the next cycle).`);
     return 1;
   } catch (err) {
     console.error('ask-vision failed:', err instanceof Error ? err.message : String(err));
@@ -498,7 +496,7 @@ function printCommsHelp(): void {
   console.log('    cycle                        run one send-pending + poll-replies pass');
   console.log('    ask "<text>" -o a -o b       post a question with numbered options');
   console.log('    digest [--force]             send what changed since the last digest (silent if nothing)');
-  console.log('    ask-vision                   run a Leader tick + queue the latest Leader memo');
+  console.log('    ask-vision                   run a Leader tick + deliver the latest memo via the Leader thread');
   console.log('    ask-merges                   post ship proposals for approval + run cycle');
   console.log('    setup-telegram               print Telegram setup steps + discover chat id');
   console.log('');

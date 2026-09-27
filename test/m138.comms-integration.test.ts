@@ -24,9 +24,10 @@
  *   5. elon-vision handler never throws even when adoptBriefing rejects
  *   6. comms digest (3.14 change-driven) queues and delivers a report
  *   7. an idle digest is one honest line — no "nominal", κ or vision-% noise
- *   8. comms ask-vision runs the Leader tick path and queues the latest Leader
- *      memo as an INFORMATIONAL 'leader-memo' report (3.14 — it never waits
- *      behind an unanswered question; the text names no real person)
+ *   8. comms ask-vision runs the Leader tick path; the memo is delivered by
+ *      the Leader thread (3.14 — no comms request is posted, the old
+ *      "Keep it / Veto" question is retired) and the CLI reports honestly
+ *      whether it was delivered, queued or stuck
  *   9. comms ask-vision never reaches the legacy runStrategist / briefing path
  *  10. no Leader memo yet ⇒ nothing posted, exit 1; a memo is posted once
  */
@@ -129,6 +130,23 @@ vi.mock('../src/core/vision/strategist.js', () => ({
 // ---------------------------------------------------------------------------
 // Mock: the Leader (V3.10) — ask-vision runs `ashlr leader tick`'s path
 // ---------------------------------------------------------------------------
+const leaderThread = vi.hoisted(() => ({
+  memoState: null as null | 'pending' | 'sent' | 'failed',
+  sync: vi.fn(),
+}));
+vi.mock('../src/core/vision/leader-thread.js', () => ({
+  syncLeaderMemosToThread: leaderThread.sync,
+  listThread: vi.fn(() =>
+    leaderThread.memoState === null
+      ? []
+      : [{
+          id: 'lt-20260924063000-aaaaaa', at: '2026-09-24T06:30:00.000Z', from: 'leader', channel: 'system', kind: 'memo',
+          text: 'Memo lm-20260924063000-abcdef', memoId: 'lm-20260924063000-abcdef',
+          delivery: { telegram: leaderThread.memoState, ...(leaderThread.memoState === 'sent' ? { sentAt: '2026-09-24T06:33:00.000Z' } : {}) },
+        }],
+  ),
+}));
+
 vi.mock('../src/core/vision/leader.js', () => ({
   loadDefaultLeaderRunDeps: vi.fn(async () => ({ fake: 'deps' })),
   leaderTick: mockLeaderTick,
@@ -442,68 +460,82 @@ describe('comms ask-vision', () => {
       ...overrides,
     };
   }
+  function telegramCfg(): AshlrConfig {
+    return makeCfg({ comms: { enabled: true, channel: 'telegram', telegram: { botToken: 'fake-token', chatId: '42' } } });
+  }
+  function capture(): { logs: string[]; errors: string[]; restore: () => void } {
+    const logs: string[] = [];
+    const errors: string[] = [];
+    const l = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
+    const e = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => { errors.push(a.join(' ')); });
+    return { logs, errors, restore: () => { l.mockRestore(); e.mockRestore(); } };
+  }
 
   beforeEach(() => {
     mockLeaderTick.mockResolvedValue({ applied: [], graded: [], due: { due: false }, started: false, run: null });
     mockBuildLeaderState.mockReturnValue({ latest: leaderMemo() });
+    mockLoadConfig.mockResolvedValue(telegramCfg());
+    leaderThread.memoState = 'pending';
+    leaderThread.sync.mockClear();
   });
 
-  it('runs the Leader tick and queues the latest memo as an informational leader-memo report', async () => {
-    mockRunCommsCycle.mockImplementation(deliverPendingReports);
-
-    const exitCode = await cmdComms(['ask-vision']);
+  it('runs the Leader tick, lets the cycle drain the Leader thread, and posts NO comms request', async () => {
+    mockRunCommsCycle.mockImplementation(async () => {
+      leaderThread.memoState = 'sent';
+      return { sent: 1, resolved: 0 };
+    });
+    const out = capture();
+    let exitCode: number;
+    try {
+      exitCode = await cmdComms(['ask-vision']);
+    } finally {
+      out.restore();
+    }
     expect(exitCode).toBe(0);
     expect(mockLeaderTick).toHaveBeenCalledWith({ fake: 'deps' }, { awaitRun: true });
+    expect(leaderThread.sync).toHaveBeenCalled();
     expect(mockRunCommsCycle).toHaveBeenCalledOnce();
-
-    expect(listRequests({ kind: 'elon-vision' })).toHaveLength(0);
-    const all = listRequests({ kind: 'leader-memo' });
-    const r = all[all.length - 1]!;
-    expect(r.type).toBe('report');
-    expect(r.options).toEqual([]);
-    expect(r.meta).toEqual({ source: 'leader', memoId: MEMO_ID });
-    expect(r.text).toContain('Bottleneck: Too many open goals');
-    expect(r.text).toContain('Move: Prune to four goals');
-    expect(r.text).toContain('1 action(s) applied');
-    expect(r.text).toContain('Question: Should ashlr-cortex');
-    expect(r.text).not.toMatch(/elon|musk/i);
+    // The retired "Keep it / Veto this memo / Show full memo" question is gone.
+    expect(listRequests()).toHaveLength(0);
+    expect(out.logs.join('\n')).toContain(`Leader memo ${MEMO_ID} is queued in the Leader thread, not delivered yet`);
+    expect(out.logs.join('\n')).toContain(`Leader memo ${MEMO_ID} delivered to Telegram (chat 42)`);
   });
 
   it('never reaches the legacy Strategist path', async () => {
     mockRunCommsCycle.mockResolvedValue({ sent: 1, resolved: 0 });
-    await cmdComms(['ask-vision']);
+    const out = capture();
+    try { await cmdComms(['ask-vision']); } finally { out.restore(); }
     expect(mockRunStrategist).not.toHaveBeenCalled();
     expect(mockLoadLatestBriefing).not.toHaveBeenCalled();
   });
 
-  it('no ok memo yet ⇒ nothing posted, exit 1; the same memo is posted only once', async () => {
+  it('no ok memo yet ⇒ exit 1 and the thread is not consulted', async () => {
     mockBuildLeaderState.mockReturnValue({ latest: leaderMemo({ status: 'no-seat' }) });
-    expect(await cmdComms(['ask-vision'])).toBe(1);
-    expect(listRequests({ kind: 'leader-memo' })).toHaveLength(0);
+    const out = capture();
+    try { expect(await cmdComms(['ask-vision'])).toBe(1); } finally { out.restore(); }
+    expect(leaderThread.sync).not.toHaveBeenCalled();
+    expect(out.errors.join('\n')).toContain('No Leader memo yet');
+  });
 
-    mockBuildLeaderState.mockReturnValue({ latest: leaderMemo() });
-    mockRunCommsCycle.mockImplementation(deliverPendingReports);
-    expect(await cmdComms(['ask-vision'])).toBe(0);
-    expect(await cmdComms(['ask-vision'])).toBe(0);
-    expect(listRequests({ kind: 'leader-memo' })).toHaveLength(1);
+  it('an already-delivered memo says when (exit 0)', async () => {
+    leaderThread.memoState = 'sent';
+    mockRunCommsCycle.mockResolvedValue({ sent: 0, resolved: 0 });
+    const out = capture();
+    try { expect(await cmdComms(['ask-vision'])).toBe(0); } finally { out.restore(); }
+    expect(out.logs.join('\n')).toContain(`Leader memo ${MEMO_ID} was already delivered at 2026-09-24T06:33:00.000Z`);
   });
 
   it('says "queued, not delivered" (exit 1) instead of "already sent" when the memo is stuck', async () => {
     mockRunCommsCycle.mockResolvedValue({ sent: 0, resolved: 0 });
-    const errors: string[] = [];
-    const logs: string[] = [];
-    const errSpy = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => { errors.push(a.join(' ')); });
-    const logSpy = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
+    const out = capture();
     try {
       expect(await cmdComms(['ask-vision'])).toBe(1);
-      expect(await cmdComms(['ask-vision'])).toBe(1);
     } finally {
-      errSpy.mockRestore();
-      logSpy.mockRestore();
+      out.restore();
     }
-    expect(logs.join('\n')).toContain(`Leader memo ${MEMO_ID} is queued but not delivered yet`);
-    expect(logs.join('\n')).not.toMatch(/already sent/);
-    expect(errors.join('\n')).toContain('was not delivered');
+    expect(out.logs.join('\n')).toContain(`Leader memo ${MEMO_ID} is queued in the Leader thread, not delivered yet`);
+    expect(out.logs.join('\n')).not.toMatch(/already sent/);
+    expect(out.errors.join('\n')).toContain('was not delivered');
   });
 
   it('returns exit code 1 when comms is disabled', async () => {
