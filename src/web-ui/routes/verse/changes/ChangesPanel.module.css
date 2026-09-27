@@ -1,0 +1,298 @@
+/*
+ * Changes pane (3.15). The patch grid, file list, tints and container query
+ * come from ../git/DiffPane.module.css (so a change looks the same here and
+ * in Review); this file adds only the pane's own pieces: the review
+ * toolbar, per-file and per-hunk Accept/Reject, and the Undo dialog.
+ * Tokens only (style-scan-310).
+ */
+.panel { position: relative; }
+
+.head { flex-wrap: wrap; }
+.select {
+  min-height: var(--control-h-sm);
+  max-width: 28ch;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-sm-size);
+}
+.select:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.select:disabled { color: var(--text-tertiary); }
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---- toolbar: totals on the left, the turn's actions on the right --------- */
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-right: var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.toolbarActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) 0 var(--space-1) var(--space-2);
+}
+
+.banner,
+.notice {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.banner { background: var(--status-warning-bg); color: var(--status-warning-fg); }
+.notice { color: var(--text-secondary); }
+.notice[data-tone='error'] { color: var(--status-danger-fg); background: var(--status-danger-bg); }
+
+.body { flex: 1 1 auto; }
+
+/* ---- files ------------------------------------------------------------------ */
+
+.badge {
+  flex: none;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  background: var(--status-warning-bg);
+  color: var(--status-warning-fg);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  white-space: nowrap;
+}
+
+.fileActions {
+  flex: none;
+  display: inline-flex;
+  gap: var(--space-1);
+}
+.iconAction {
+  display: inline-grid;
+  place-items: center;
+  min-width: var(--control-h-xs);
+  height: var(--control-h-xs);
+  padding: 0 var(--space-1);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+}
+.iconAction:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); border-color: var(--border-default); }
+.iconAction:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.iconAction:disabled { cursor: default; opacity: 0.5; }
+.iconAction[data-tone='danger']:hover:not(:disabled) { color: var(--status-danger-fg); }
+.iconAction[data-armed='true'] {
+  color: var(--status-danger-fg);
+  border-color: var(--status-danger-fg);
+  background: var(--status-danger-bg);
+}
+/* An accepted file reads as done: dimmed, still selectable. */
+[data-accepted='true'] > [class] { opacity: 0.72; }
+
+/* ---- hunks -------------------------------------------------------------------- */
+
+.hunk[data-accepted='true'] td { opacity: 0.72; }
+.hunkBar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-xs);
+}
+.hunkLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reviewed {
+  flex: none;
+  font-family: var(--font-display);
+  color: var(--status-success-fg);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+.hunkActions { flex: none; display: inline-flex; gap: var(--space-1); }
+.hunkButton {
+  height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+}
+.hunkButton:hover:not(:disabled) { background: var(--bg-hover); }
+.hunkButton[data-tone='danger']:hover:not(:disabled) { color: var(--status-danger-fg); border-color: var(--status-danger-fg); }
+.hunkButton:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.hunkButton:disabled { cursor: default; opacity: 0.55; }
+
+/* ---- Undo / Redo dialog ----------------------------------------------------------- */
+
+.undoDialog { width: min(52rem, calc(100vw - 2 * var(--space-4))); max-width: none; }
+.undoBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.facts {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+.facts [data-tone='warning'] { color: var(--status-warning-fg); }
+.facts strong { color: var(--text-primary); font-weight: var(--font-weight-semibold); }
+
+.rootNote { margin: 0; color: var(--text-secondary); font-size: var(--text-sm-size); }
+.undoRoot { display: flex; flex-direction: column; gap: var(--space-2); }
+.undoRootName {
+  margin: 0;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: var(--font-weight-semibold);
+}
+.undoList summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+}
+.undoList ul {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-xs-size);
+}
+.undoList code { font-family: var(--font-mono); overflow-wrap: anywhere; }
+.undoList li { display: flex; gap: var(--space-2); align-items: baseline; }
+
+.conflict {
+  margin: 0;
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border: 1px solid var(--status-warning-fg);
+  border-radius: var(--radius-md);
+  min-width: 0;
+}
+.conflict[data-decided='true'] { border-color: var(--border-default); }
+.conflictPath {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  padding: 0 var(--space-1);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-semibold);
+  overflow-wrap: anywhere;
+}
+.conflictWhy { margin: 0; color: var(--text-secondary); font-size: var(--text-sm-size); }
+.conflictTabs { display: flex; gap: var(--space-1); }
+.tab {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+}
+.tab[aria-selected='true'] { background: var(--bg-selected); color: var(--text-primary); border-color: var(--border-default); }
+.tab:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.conflictText {
+  margin: 0;
+  max-height: 16rem;
+  overflow: auto;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--bg-code);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+  white-space: pre;
+}
+.conflictText:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.choices { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+.choice {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-sm-size);
+  cursor: pointer;
+}
+.choice[data-disabled='true'] { color: var(--text-tertiary); cursor: default; }
+
+.error { margin: 0; color: var(--status-danger-fg); font-size: var(--text-sm-size); }
+.hint { margin-right: auto; color: var(--text-secondary); font-size: var(--text-xs-size); }
+.dialogActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  /* Sticks to the bottom of the dialog's own scroll box (its padding included). */
+  position: sticky;
+  bottom: calc(var(--space-5) * -1);
+  margin-bottom: calc(var(--space-5) * -1);
+  padding: var(--space-3) 0 var(--space-5);
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-surface-raised);
+}
+
+/* ---- the pane host: Turns | Git over one body -------------------------------- */
+
+.host {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.hostBar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+.hostBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}

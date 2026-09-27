@@ -409,9 +409,41 @@ export function preflightLocalEndpoint(url: string, timeoutMs = VERSE_PREFLIGHT_
   });
 }
 
+/** What a turn hook is told: the chat, its turn, and every folder the turn can reach. */
+export interface VerseTurnHookInfo {
+  sessionId: string;
+  turnId: string;
+  roots: string[];
+  /**
+   * `beforeTurn` only: aborted when the engine stops waiting (its own
+   * VERSE_TURN_HOOK_TIMEOUT_MS, or the hook's promise settling) — always
+   * BEFORE the seat process is spawned. A hook must not record anything
+   * captured after this fires as "before the turn".
+   */
+  signal?: AbortSignal;
+}
+
+/**
+ * 3.15 per-turn checkpoints (checkpoint-service.ts). `beforeTurn` is AWAITED
+ * before the seat's process starts — so the snapshot never contains the
+ * agent's own edits — bounded by VERSE_TURN_HOOK_TIMEOUT_MS; `afterTurn` runs
+ * at every turn end and is not awaited. Neither may block the engine on a
+ * failure: a rejection is logged and the turn goes on.
+ */
+export interface VerseTurnHooks {
+  beforeTurn?: (info: VerseTurnHookInfo) => Promise<void>;
+  afterTurn?: (info: VerseTurnHookInfo & { outcome: VerseTurnOutcome }) => Promise<void> | void;
+  onSessionDeleted?: (info: { sessionId: string; roots: string[] }) => Promise<void> | void;
+}
+
+/** The engine's own ceiling on `beforeTurn` (the hook has a shorter one of its own). */
+export const VERSE_TURN_HOOK_TIMEOUT_MS = 15_000;
+
 export interface VerseEngineOptions {
   /** Store root. Default `~/.ashlr/verse`. */
   root?: string;
+  /** 3.15 checkpoint hooks (see VerseTurnHooks). Default none. */
+  turnHooks?: VerseTurnHooks | null;
   spawn?: typeof nodeSpawn;
   now?: () => Date;
   /** Per-turn wall clock limit. Default VERSE_TURN_TIMEOUT_MS. */
@@ -1010,6 +1042,13 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
   const log = opts.log ?? ((level: VerseLogLevel, message: string): void => { appendVerseLog(level, message, { root }); });
   const store: VerseSessionStore = createVerseSessionStore(root);
   const running = new Map<string, RunningTurn>();
+  const turnHooks = opts.turnHooks ?? null;
+  /**
+   * Turns admitted but waiting on `turnHooks.beforeTurn` (the checkpoint) —
+   * busy like a running turn; Stop sets `cancelled` and the turn closes as
+   * stopped without ever spawning.
+   */
+  const gating = new Map<string, { turnId: string; cancelled: boolean }>();
   const listeners = new Map<string, Set<(event: VerseEvent) => void>>();
   /** Sessions whose log write already failed this turn (one notice, not one per event). */
   const storageFailed = new Set<string>();
@@ -1246,6 +1285,13 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       turnCount: session?.turnCount ?? 0,
     });
     if (turnEnds.length > VERSE_TURN_END_BUFFER) turnEnds.splice(0, turnEnds.length - VERSE_TURN_END_BUFFER);
+    if (session && turnHooks?.afterTurn) {
+      // 3.15: the `post` checkpoint. Not awaited; the service serializes it
+      // ahead of the next turn's `pre`, so a queued follow-up still waits for it.
+      const hook = turnHooks.afterTurn;
+      const info = { sessionId: id, turnId, roots: verseSessionRoots(session), outcome };
+      void Promise.resolve().then(() => hook(info)).catch(() => { log('warn', `session ${id}: checkpoint after turn failed`); });
+    }
     if (!session) return;
     let size = 0;
     try { size = queue.size(id); } catch { size = 0; }
@@ -2066,7 +2112,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     seatLaunch: VerseSeatLaunch,
     launch: VerseTurnLaunch,
     redactions: Redaction[],
-    turnCtx: { text: string; userSeq: number; isRecovery: boolean },
+    turnCtx: { text: string; userSeq: number; isRecovery: boolean; gated?: boolean },
   ): void {
     const id = session.id;
 
@@ -2098,6 +2144,58 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       session.lastError = message;
       save(session);
       afterTurn(id, turnId, 'failed', 0);
+      return;
+    }
+
+    // ---- 3.15 CHECKPOINT: snapshot the chat's repositories BEFORE the seat
+    // can write to them. The spawn waits for it (bounded); a recovery retry
+    // is the same turn and keeps the checkpoint it already has.
+    if (turnHooks?.beforeTurn && !turnCtx.isRecovery && !turnCtx.gated) {
+      const gate = { turnId, cancelled: false };
+      gating.set(id, gate);
+      const hook = turnHooks.beforeTurn;
+      // ONE deadline for the hook: when it passes, `deadline` is aborted FIRST
+      // (the hook then drops any snapshot not already finished) and only then
+      // does the turn go on to spawn.
+      const deadline = new AbortController();
+      let timer: NodeJS.Timeout | undefined;
+      const bounded = Promise.race([
+        Promise.resolve()
+          .then(() => hook({ sessionId: id, turnId, roots: verseSessionRoots(session), signal: deadline.signal }))
+          .catch(() => { log('warn', `session ${id}: checkpoint before turn failed; the turn runs without one`); }),
+        new Promise<void>((resolveGate) => {
+          timer = setTimeout(() => {
+            deadline.abort();
+            resolveGate();
+          }, VERSE_TURN_HOOK_TIMEOUT_MS);
+          timer.unref?.();
+        }),
+      ]);
+      const proceed = (): void => {
+        if (timer) clearTimeout(timer);
+        // Whichever way the gate opened, the hook's budget is over now.
+        deadline.abort();
+        if (gating.get(id) === gate) gating.delete(id);
+        const current = store.get(id);
+        if (closed || !current) return;
+        if (gate.cancelled) {
+          // Stopped before it started: the same close-out a stopped turn gets.
+          emit(id, { type: 'cancelled', turnId });
+          emit(id, { type: 'turn-done', turnId, ok: false, nativeSessionId: current.nativeSessionId, durationMs: 0 });
+          current.status = 'idle';
+          current.lastError = null;
+          save(current);
+          afterTurn(id, turnId, 'cancelled', 0);
+          return;
+        }
+        startTurn(current, turnId, seatLaunch, launch, redactions, { ...turnCtx, gated: true });
+      };
+      void bounded.then(proceed).catch((err: unknown) => {
+        // Never an unhandled rejection: a throw here is logged, and a turn that
+        // could not start is not left busy forever.
+        if (gating.get(id) === gate) gating.delete(id);
+        log('error', `session ${id}: turn could not start after its checkpoint (${err instanceof Error ? err.name : 'error'})`);
+      });
       return;
     }
 
@@ -2329,7 +2427,13 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
   }
 
   function isBusy(id: string): boolean {
-    return running.has(id);
+    return running.has(id) || gating.has(id);
+  }
+
+  /** A turn still waiting on its checkpoint closes as stopped instead of starting (send-now, Stop). */
+  function stopGated(id: string): void {
+    const gate = gating.get(id);
+    if (gate) gate.cancelled = true;
   }
 
   /** Throws VERSE_SEAT_NOT_READY on an explicit refusal; admits on anything else. */
@@ -2692,6 +2796,13 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
 
     cancelTurn(id: string): boolean {
       require(id);
+      const gate = gating.get(id);
+      if (gate) {
+        // Still waiting on its checkpoint: it closes as stopped, never spawns.
+        if (gate.cancelled) return false;
+        gate.cancelled = true;
+        return true;
+      }
       const turn = running.get(id);
       if (!turn || turn.settled) return false;
       requestTermination(id, turn, 'cancelled');
@@ -2699,7 +2810,13 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     },
 
     deleteSession(id: string): void {
-      require(id);
+      const deleted = require(id);
+      gating.delete(id);
+      if (turnHooks?.onSessionDeleted) {
+        const hook = turnHooks.onSessionDeleted;
+        const info = { sessionId: id, roots: verseSessionRoots(deleted) };
+        void Promise.resolve().then(() => hook(info)).catch(() => { /* best effort: stale refs are harmless */ });
+      }
       const turn = running.get(id);
       if (turn && !turn.settled) {
         // Kill hard and settle synchronously so the files can go now.
@@ -2914,6 +3031,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         queue.markSendNow(id, item.id);
         const turn = running.get(id);
         if (turn && !turn.settled) requestTermination(id, turn, 'cancelled');
+        else stopGated(id);
       }
       return { ...queue.get(id), sentTurnId: null };
     },
@@ -2934,6 +3052,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         queue.markSendNow(id, queueId);
         const turn = running.get(id);
         if (turn && !turn.settled) requestTermination(id, turn, 'cancelled');
+        else stopGated(id);
         return { ...queue.get(id), sentTurnId: null };
       }
       const sentTurnId = drainOne(id, queueId);
