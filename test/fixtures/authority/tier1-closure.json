@@ -746,6 +746,7 @@
     "src/core/vision/leader-run-chain.ts",
     "src/core/vision/leader-seat-plan.ts",
     "src/core/vision/leader-seat.ts",
+    "src/core/vision/leader-thread-types.ts",
     "src/core/vision/leader-types.ts",
     "src/core/vision/leader.ts",
     "src/core/vision/mission-graph.ts",
