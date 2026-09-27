@@ -196,7 +196,8 @@ export function isDevinTask(value: unknown): value is DevinTaskV1 {
     && (value['intake'] === undefined || isIntakeMemo(value['intake']))
     && (value['playbookRef'] === undefined || isPlaybookRef(value['playbookRef']))
     && isNullableString(value['backlogItemId'])
-    && (value['messagesSent'] === undefined || (Number.isSafeInteger(value['messagesSent']) && (value['messagesSent'] as number) >= 0));
+    && (value['messagesSent'] === undefined || (Number.isSafeInteger(value['messagesSent']) && (value['messagesSent'] as number) >= 0))
+    && (value['verseSessionId'] === undefined || (isString(value['verseSessionId']) && /^[A-Za-z0-9-]{1,80}$/.test(value['verseSessionId'])));
 }
 
 // ---------------------------------------------------------------------------

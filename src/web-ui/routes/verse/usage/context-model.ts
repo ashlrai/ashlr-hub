@@ -95,6 +95,7 @@ export const ENGINE_CLI_NAME: Record<VerseEngine, string> = {
   codex: 'Codex CLI',
   grok: 'Grok CLI',
   local: 'Claude Code',
+  devin: 'Devin',
 };
 
 /** "Claude Code 2.1.257" — the binary this seat is pinned to; null when unknown (local seats, old servers). */

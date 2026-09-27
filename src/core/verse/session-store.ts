@@ -62,6 +62,7 @@ import { basename, dirname, join } from 'node:path';
 
 import {
   VERSE_CONTEXT_MODES,
+  VERSE_REMOTE_STATES,
   VERSE_EFFORTS,
   VERSE_MAX_EVENTS_PER_SESSION,
   VERSE_PERMISSION_MODES,
@@ -101,7 +102,8 @@ export const VERSE_APPEND_FD_CACHE_MAX = 8;
 export const VERSE_HISTORY_KEEP_RATIO = 0.75;
 
 const VERSE_STATUSES = new Set(['idle', 'running', 'error']);
-const VERSE_ENGINES = new Set(['claude', 'codex', 'grok', 'local']);
+const VERSE_ENGINES = new Set(['claude', 'codex', 'grok', 'local', 'devin']);
+const VERSE_REMOTE_STATE_SET = new Set<string>(VERSE_REMOTE_STATES);
 const VERSE_CONTEXT_MODE_SET = new Set<string>(VERSE_CONTEXT_MODES);
 /** Mirrors `VerseWindowSource` in types.ts — the store is the gate that keeps a hand-edited record honest. */
 const VERSE_WINDOW_SOURCES = new Set(['runtime', 'provider-catalog', 'cli-catalog', 'documented', 'fallback']);
@@ -191,7 +193,21 @@ function isV39SessionValid(value: Record<string, unknown>): boolean {
         && typeof handoff['sessionId'] === 'string' && handoff['sessionId'].length > 0
         && typeof handoff['title'] === 'string'))
     && isOptionalBoolean(value['memoryEnabled'])
-    && isOptionalControls(value['controls']);
+    && isOptionalControls(value['controls'])
+    && isOptionalRemote(value['remote']);
+}
+
+/** 3.15 `remote` (Devin chats) — same absent-or-exact rule. */
+function isOptionalRemote(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isObject(value)) return false;
+  const state = value['state'];
+  return value['provider'] === 'devin'
+    && (value['lane'] === 'cloud' || value['lane'] === 'cli')
+    && (value['url'] === null || typeof value['url'] === 'string')
+    && (state === null || (typeof state === 'string' && VERSE_REMOTE_STATE_SET.has(state)))
+    && isNullableNumber(value['acusConsumed'])
+    && isNullableNumber(value['acuCap']);
 }
 
 const VERSE_EFFORT_SET = new Set<string>(VERSE_EFFORTS);
@@ -296,6 +312,19 @@ function isEvent(value: unknown): value is VerseEvent {
         && isNullableNumber(value['preTokens'])
         && isNullableNumber(value['postTokens'])
         && isNullableNumber(value['durationMs']);
+    case 'remote-status':
+      return (turnId === null || typeof turnId === 'string')
+        && value['provider'] === 'devin'
+        && typeof value['state'] === 'string' && VERSE_REMOTE_STATE_SET.has(value['state'])
+        && typeof value['message'] === 'string'
+        && (value['url'] === null || typeof value['url'] === 'string')
+        && isNullableNumber(value['acusConsumed'])
+        && isNullableNumber(value['acuCap']);
+    case 'remote-pr':
+      return (turnId === null || typeof turnId === 'string')
+        && value['provider'] === 'devin'
+        && typeof value['url'] === 'string'
+        && (value['state'] === null || typeof value['state'] === 'string');
     case 'context':
       return (turnId === null || typeof turnId === 'string')
         && isFiniteNumber(value['contextTokens']) && value['contextTokens'] >= 0

@@ -92,7 +92,8 @@ import {
 // Model catalogue — built per seat by model-windows.ts
 // ---------------------------------------------------------------------------
 
-type NativeEngine = Exclude<VerseEngine, 'local'>;
+/** Engines backed by a connections.json account + native-profile launcher. Devin seats come from core/devin (see discoverDevinSeats). */
+type NativeEngine = Exclude<VerseEngine, 'local' | 'devin'>;
 
 /**
  * The BUILT-IN lists: what a native seat offers when nothing better is known
@@ -1103,7 +1104,9 @@ export function refreshSeatTelemetry(
   const telemetry = buildSeatTelemetry(accountsRoot, { collector: opts.collector });
 
   const seats = discovery.seats.map((seat) => {
-    if (seat.engine === 'local') return seat;
+    // Local: no subscription window. Devin: its own lane status and ACU
+    // budget (core/devin), not the account collector.
+    if (seat.engine === 'local' || seat.engine === 'devin') return seat;
     const facets = nativeSeatFacets(seat.accountId, seat.engine, telemetry, claudeUsage);
     const next: VerseSeat = { ...seat, health: facets.health };
     if (facets.capacity) next.capacity = facets.capacity;

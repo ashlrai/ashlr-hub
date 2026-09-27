@@ -627,6 +627,7 @@ function seatAccount(input: {
 }): { account: Account; sourceNote: string | null } | null {
   const { seat, control, frontier, engineSeatCount } = input;
   if (seat.engine === 'local') return null; // Local has its own panel and its own physics.
+  if (seat.engine === 'devin') return null; // Devin: ACUs, on the Devin card — no subscription window.
 
   const subscription = control?.subscriptionUsage?.find((e) => String(e.engine) === seat.engine);
   const engineUsage = frontier?.engines.find((e) => String(e.engine) === seat.engine);

@@ -170,6 +170,7 @@
 .engineTick[data-engine='codex']::before { background: var(--engine-codex); }
 .engineTick[data-engine='grok']::before { background: var(--engine-grok); }
 .engineTick[data-engine='local']::before { background: var(--engine-local); }
+.engineTick[data-engine='devin']::before { background: var(--engine-devin); }
 
 @keyframes pane-pulse {
   0%, 100% { opacity: 1; }

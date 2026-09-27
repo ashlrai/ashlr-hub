@@ -118,7 +118,9 @@ import {
   verseSessionRoots,
   type VerseContextMode,
   type VerseCreateSessionRequest,
+  type VerseDevinLane,
   type VerseEngine,
+  type VerseRemoteState,
   type VerseErrorCode as VerseEventErrorCode,
   type VerseEvent,
   type VerseModelOption,
@@ -262,6 +264,21 @@ export interface VerseSeatLaunch {
    * Absent = memory off for this session (and on every older record).
    */
   memory?: { dir: string; block: string; writable: boolean };
+  /**
+   * 3.15 ADDITIVE, Devin seats only. Which lane the seat's turn process drives
+   * and, on the CLI lane, the `devin` binary discovery found (pinned at
+   * creation like the launcher). `launcher` is then Verse's own turn process.
+   */
+  devin?: { lane: VerseDevinLane; cliPath?: string };
+}
+
+/** 3.15 — what `recordRemoteStatus` takes (the persisted event minus its envelope). */
+export interface VerseRemoteStatusInput {
+  state: VerseRemoteState;
+  message: string;
+  url: string | null;
+  acusConsumed: number | null;
+  acuCap: number | null;
 }
 
 /** V3.9 — creation-time extras the API resolves (preferences, provenance); never read off a request body. */
@@ -308,6 +325,12 @@ export interface VerseEngineHandle {
    */
   refreshLocalWindow(id: string, option: VerseModelOption): VerseSession;
   cancelTurn(id: string): boolean;
+  /**
+   * 3.15. Record a Devin chat's remote state from OUTSIDE a turn (Stop →
+   * terminate): one persisted `remote-status` event, folded into
+   * `session.remote`. Optional so test fakes and older handles conform.
+   */
+  recordRemoteStatus?(id: string, status: VerseRemoteStatusInput): VerseSession;
   deleteSession(id: string): void;
   renameSession(id: string, title: string): VerseSession;
   /**
@@ -474,7 +497,7 @@ export interface VerseEngineOptions {
    * refusal is the HTTP answer (409) to the turn request. A seat is refused
    * only on an explicit `ready: false`.
    */
-  readiness?: ((seatId: string) => SeatReadiness | null | undefined) | null;
+  readiness?: ((seatId: string, session?: VerseSession) => SeatReadiness | null | undefined) | null;
   /**
    * V3.10 local-seat endpoint preflight, run in parallel with the spawn; a
    * definite refusal stops the turn. `null` disables it. Default
@@ -621,6 +644,18 @@ const REDACT_ENV_MIN_CHARS = 8;
 const INTERRUPTED_MESSAGE = 'turn interrupted: server restarted';
 const INTERRUPTED_LAST_ERROR = 'interrupted by server restart';
 const DEFAULT_WATCHDOG_MS = 3 * 60_000;
+/**
+ * 3.15. A Devin CLOUD turn waits on a remote session that may work for hours
+ * before it hands back; its runner stops watching just under this and says
+ * so (core/devin/chat-runner.ts DEVIN_CLOUD_MAX_TURN_MS). Only when the
+ * engine runs with the default limit — an injected limit (tests) wins.
+ */
+export const VERSE_DEVIN_CLOUD_TURN_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+
+/** Engines whose vendor names the conversation (codex thread id, Devin task / ACP session): no pre-minted id. */
+function vendorNamesConversation(engine: VerseEngine): boolean {
+  return engine === 'codex' || engine === 'devin';
+}
 const DEFAULT_WATCHDOG_POLL_MS = 30_000;
 /** Module the default reasoning tap is loaded from (A7). A variable, so a missing module is a runtime miss, not a build error. */
 const REASONING_INGEST_MODULE = '../reasoning/ingest-verse.js';
@@ -668,6 +703,8 @@ interface Redaction {
 interface RunningTurn {
   turnId: string;
   child: ChildProcess;
+  /** This turn's wall-clock limit (engine default, or the Devin cloud limit). */
+  timeoutMs: number;
   pgid: number | null;
   startedAt: number;
   parser: VerseTurnParser;
@@ -747,7 +784,14 @@ function isSeatLaunch(value: unknown): value is VerseSeatLaunch {
     && (value['anthropicBaseUrl'] === undefined || typeof value['anthropicBaseUrl'] === 'string')
     // Absent is valid (memory off, or a pre-3.9 record). PRESENT but malformed
     // is not: a half-formed memory snapshot would feed a bogus `--add-dir`.
-    && (value['memory'] === undefined || isSessionMemory(value['memory']));
+    && (value['memory'] === undefined || isSessionMemory(value['memory']))
+    && (value['devin'] === undefined || isDevinLaunch(value['devin']));
+}
+
+function isDevinLaunch(value: unknown): boolean {
+  return isObject(value)
+    && (value['lane'] === 'cloud' || value['lane'] === 'cli')
+    && (value['cliPath'] === undefined || (typeof value['cliPath'] === 'string' && isAbsolute(value['cliPath'])));
 }
 
 function cloneSession(session: VerseSession): VerseSession {
@@ -1100,7 +1144,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
   // engine never has a hard import edge on them: account health (seats.ts)
   // and the reasoning store. Until they resolve, the gate is open and the tap
   // is off — neither may ever block or fail a turn.
-  let readiness: ((seatId: string) => unknown) | null = opts.readiness ?? null;
+  let readiness: ((seatId: string, session?: VerseSession) => unknown) | null = opts.readiness ?? null;
   if (opts.readiness === undefined) {
     void import('./seats.js')
       .then((mod) => {
@@ -1773,13 +1817,38 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
           durationMs: nonNegativeInt(event.durationMs),
         };
       }
+      case 'remote-status': {
+        // 3.15: the header's live Devin state and ACU meter. The adapter
+        // validated the fields; they are rebuilt here like every telemetry type.
+        const acus = typeof event.acusConsumed === 'number' && Number.isFinite(event.acusConsumed) && event.acusConsumed >= 0 ? event.acusConsumed : null;
+        const cap = typeof event.acuCap === 'number' && Number.isFinite(event.acuCap) && event.acuCap >= 0 ? event.acuCap : null;
+        const previous = session.remote;
+        session.remote = {
+          provider: 'devin',
+          lane: previous?.lane ?? (session.seatId === 'devin-cli' ? 'cli' : 'cloud'),
+          url: event.url ?? previous?.url ?? null,
+          state: event.state,
+          acusConsumed: acus ?? previous?.acusConsumed ?? null,
+          acuCap: cap ?? previous?.acuCap ?? null,
+        };
+        return {
+          type: 'remote-status',
+          turnId: typeof event.turnId === 'string' ? event.turnId : fallbackTurnId,
+          provider: 'devin',
+          state: event.state,
+          message: event.message,
+          url: event.url ?? null,
+          acusConsumed: acus,
+          acuCap: cap,
+        };
+      }
       default:
         return event;
     }
   }
 
   /** Event types whose application changes the session record. */
-  const SESSION_MUTATING_EVENTS = new Set<VerseEvent['type']>(['usage', 'context', 'compaction']);
+  const SESSION_MUTATING_EVENTS = new Set<VerseEvent['type']>(['usage', 'context', 'compaction', 'remote-status']);
 
   /**
    * Telemetry hooks may only contribute readings. An `error` or `turn-done`
@@ -1944,7 +2013,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       emit(id, { type: 'cancelled', turnId: turn.turnId });
     } else if (turn.termination === 'timeout') {
       ok = false;
-      lastError = `turn timed out after ${turnTimeoutMs}ms`;
+      lastError = `turn timed out after ${turn.timeoutMs}ms`;
       emit(id, { type: 'error', turnId: turn.turnId, message: lastError });
     } else if (turn.termination !== null) {
       // policy / storage / interrupted: the engine ended it, with its own words.
@@ -2067,7 +2136,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
           // No note: a bare new session still beats a dead chat.
         }
       }
-      const nativeSessionId = session.engine === 'codex' ? null : randomUUID();
+      const nativeSessionId = vendorNamesConversation(session.engine) ? null : randomUUID();
       const fresh: VerseSession = { ...cloneSession(session), nativeSessionId, turnCount: 0 };
       const turnLaunch = adapterFor(session.engine).buildLaunch(fresh, text, turn.seatLaunch);
       const lost = code === 'native-thread-missing'
@@ -2230,6 +2299,9 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     const turn: RunningTurn = {
       turnId,
       child,
+      timeoutMs: session.engine === 'devin' && seatLaunch.devin?.lane !== 'cli' && opts.turnTimeoutMs === undefined
+        ? VERSE_DEVIN_CLOUD_TURN_TIMEOUT_MS
+        : turnTimeoutMs,
       pgid: detached && typeof child.pid === 'number' && child.pid > 0 ? child.pid : null,
       startedAt,
       parser,
@@ -2333,7 +2405,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     turn.timeoutTimer = setTimeout(() => {
       turn.timeoutTimer = null;
       requestTermination(id, turn, 'timeout');
-    }, turnTimeoutMs);
+    }, turn.timeoutMs);
     if (turn.timeoutTimer.unref) turn.timeoutTimer.unref();
 
     // Live meter for CLIs that only record exact occupancy in their own files.
@@ -2437,12 +2509,14 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
   }
 
   /** Throws VERSE_SEAT_NOT_READY on an explicit refusal; admits on anything else. */
-  function admitSeat(seatId: string): void {
+  function admitSeat(seatId: string, session?: VerseSession): void {
     const fn = readiness;
     if (!fn) return;
     let verdict: unknown;
     try {
-      verdict = fn(seatId);
+      // 3.15: the session rides along (a Devin chat that already has its
+      // remote session is not a new launch); older gates ignore it.
+      verdict = fn(seatId, session ? cloneSession(session) : undefined);
     } catch (err) {
       log('warn', `readiness check for seat ${seatId} threw (${err instanceof Error ? err.name : 'error'}); admitting`);
       return;
@@ -2497,7 +2571,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     // leaves no trace in the chat — the 409 (with ranked alternatives) is
     // the whole answer. Only an explicit `ready: false` refuses; a seat
     // account health knows nothing about is admitted.
-    admitSeat(session.seatId);
+    admitSeat(session.seatId, session);
     // A memory snapshot pinned before control characters were stripped can
     // hold a NUL, which no OS accepts inside an argv entry — the session
     // could never start again. Repair the in-memory copy for this launch;
@@ -2590,7 +2664,11 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         throw new VerseError('VERSE_INVALID', `unknown seat: ${String(req.seatId)}`);
       }
       const engine = seat.engine;
-      if (engine !== 'local' && (!launch.launcher || launch.launcher.length === 0)) {
+      // 3.15: a Devin seat runs Verse's own turn process (resolved per turn by
+      // its adapter), so it carries a lane instead of an account launcher.
+      if (engine === 'devin') {
+        if (!launch.devin || !isDevinLaunch(launch.devin)) throw new VerseError('VERSE_INVALID', `seat ${seat.id} has no Devin lane`);
+      } else if (engine !== 'local' && (!launch.launcher || launch.launcher.length === 0)) {
         throw new VerseError('VERSE_INVALID', `seat ${seat.id} has no launcher`);
       }
 
@@ -2673,7 +2751,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         accountId: seat.accountId,
         seatId: seat.id,
         model,
-        nativeSessionId: engine === 'codex' ? null : randomUUID(),
+        nativeSessionId: vendorNamesConversation(engine) ? null : randomUUID(),
         createdAt: at,
         updatedAt: at,
         status: 'idle',
@@ -2712,6 +2790,8 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         // Pinned for the same reason, and so the block sent every turn is the
         // same bytes every turn (prompt-cache stable).
         ...(memory ? { memory } : {}),
+        // 3.15: a Devin seat's lane and CLI path, pinned like the launcher.
+        ...(launch.devin ? { devin: { lane: launch.devin.lane, ...(launch.devin.cliPath ? { cliPath: launch.devin.cliPath } : {}) } } : {}),
       } satisfies VerseSeatLaunch);
       // After the launch record: a listener that reacts by reading the new
       // session finds it complete.
@@ -2807,6 +2887,27 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       if (!turn || turn.settled) return false;
       requestTermination(id, turn, 'cancelled');
       return true;
+    },
+
+    recordRemoteStatus(id: string, status: VerseRemoteStatusInput): VerseSession {
+      const session = require(id);
+      if (session.engine !== 'devin') throw new VerseError('VERSE_INVALID', 'only a Devin chat has a remote status');
+      const applied = applyUsage(session, null, {
+        type: 'remote-status',
+        turnId: null,
+        provider: 'devin',
+        state: status.state,
+        message: status.message.slice(0, 500),
+        url: status.url,
+        acusConsumed: status.acusConsumed,
+        acuCap: status.acuCap,
+      }, '');
+      if (applied) {
+        // Outside any turn: `turnId` is null, never the fallback ''.
+        emit(id, { ...applied, turnId: null } as VerseParsedEvent);
+        if (store.get(id) === session) save(session);
+      }
+      return cloneSession(store.get(id) ?? session);
     },
 
     deleteSession(id: string): void {

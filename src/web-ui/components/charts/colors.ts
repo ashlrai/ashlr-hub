@@ -156,7 +156,7 @@ export const CHART_QUEUED_OUTLINE = 'var(--chart-queued-outline)';
 // Engines (identity only)
 // ---------------------------------------------------------------------------
 
-export type ChartEngine = 'claude' | 'codex' | 'grok' | 'local';
+export type ChartEngine = 'claude' | 'codex' | 'grok' | 'local' | 'devin';
 
 /**
  * An engine's identity colour. ONLY for charts that show nothing but engines

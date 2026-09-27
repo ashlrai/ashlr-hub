@@ -30,6 +30,7 @@ import { devinBudgetView } from './budget.js';
 import { DevinApiError, DevinClient, devinFailureSentence, type DevinFetch, type DevinSession } from './client.js';
 import { buildDevinPrompt, DEVIN_REPORT_SCHEMA } from './delivery-contract.js';
 import { playbookForLaunch } from '../playbooks/lanes.js';
+import { buildDevinChatPrompt } from './chat-contract.js';
 import { hasDevinKey, readDevinKey, removeDevinKey, storeDevinKey, type DevinKeyStoreDeps } from './secret.js';
 import {
   clearDevinConnection,
@@ -77,6 +78,13 @@ export interface DevinServiceDeps {
 
 /** Internal launches from the fleet carry their work item. */
 export type DevinInternalLaunch = Omit<DevinLaunchRequest, 'origin'> & { origin: 'fleet'; backlogItemId?: string | null };
+/**
+ * 3.15: the first message of a Verse chat on the Devin seat. Same gates, same
+ * budget (the operator's gate, never the fleet's), same task record — but the
+ * chat contract (chat-contract.ts) instead of the task contract, and no
+ * structured report: a chat may end without any pull request.
+ */
+export type DevinChatLaunch = Omit<DevinLaunchRequest, 'origin'> & { origin: 'chat'; contract: 'chat'; verseSessionId: string; planOnly?: boolean };
 
 export const DEVIN_TITLE_MAX_CHARS = 80;
 const OVERVIEW_TASK_LIMIT = 100;
@@ -154,14 +162,24 @@ async function keyPresent(deps: DevinServiceDeps): Promise<boolean> {
 
 const commandFix = (label: string, command: string): ReadinessFix => ({ kind: 'command', label, command });
 
-/** The chat verdict is always the same: Devin is a session lane, not a chat seat. */
-export const DEVIN_CHAT_VERDICT: ReadinessVerdict = Object.freeze({
-  ready: false,
-  tone: 'off',
-  word: 'n/a',
-  detail: 'Devin works in sessions, not chat turns. Use Run in Devin from a chat.',
-  fix: null,
-}) as ReadinessVerdict;
+/**
+ * 3.15: Devin is a chat seat ("Devin (cloud)" in New chat) when the lane is on
+ * and connected; otherwise the verdict says how to get there.
+ */
+export function devinChatVerdict(state: DevinStatus['state']): ReadinessVerdict {
+  if (state === 'ready') {
+    return { ready: true, tone: 'ok', word: 'Ready', detail: 'Pick “Devin (cloud)” in New chat. Each chat is one Devin session.', fix: null } as ReadinessVerdict;
+  }
+  if (state === 'unreachable') {
+    return { ready: false, tone: 'blocked', word: 'Key refused', detail: 'Devin refused the key; reconnect to chat with it.', fix: commandFix('Reconnect Devin', 'ashlr devin connect') } as ReadinessVerdict;
+  }
+  return state === 'disabled'
+    ? { ready: false, tone: 'off', word: 'Off', detail: 'Turn the Devin lane on to chat with Devin.', fix: commandFix('Turn on the Devin lane', 'ashlr devin enable') } as ReadinessVerdict
+    : { ready: false, tone: 'off', word: 'Off', detail: 'Connect Devin to chat with it.', fix: commandFix('Connect Devin', 'ashlr devin connect') } as ReadinessVerdict;
+}
+
+/** @deprecated 3.15 — kept for importers; the live answer is `devinChatVerdict(state)`. */
+export const DEVIN_CHAT_VERDICT: ReadinessVerdict = Object.freeze(devinChatVerdict('not-connected'));
 
 /**
  * The fleet verdict: why the fleet may or may not launch Devin sessions now.
@@ -238,10 +256,10 @@ export async function devinStatus(deps: DevinServiceDeps = {}, tasks: readonly D
     principal: connection?.principal ?? null,
     principalName: connection?.principalName ?? null,
     keyStore: connection?.keyStore ?? null,
-    chatLine: DEVIN_CHAT_LINE,
+    chatLine: state === 'ready' ? 'Chat: ready — pick “Devin (cloud)” in New chat' : `Chat: off — ${devinChatVerdict(state).detail}`,
     fleetLine: devinFleetLine(fleet),
     fleetReady: fleet.ready && state === 'ready',
-    chat: DEVIN_CHAT_VERDICT,
+    chat: devinChatVerdict(state),
     fleet: state === 'unreachable' ? { ...fleet, ready: false, tone: 'blocked', word: 'Key refused', detail: reason, fix: commandFix('Reconnect Devin', 'ashlr devin connect'), roles: [] } : fleet,
   };
 }
@@ -349,7 +367,7 @@ export function snapshotOf(session: DevinSession, now: Date): DevinSessionSnapsh
 
 const ORIGINS: readonly DevinTaskOrigin[] = ['chat', 'operator', 'cli', 'fleet'];
 
-export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLaunch, deps: DevinServiceDeps = {}): Promise<DevinLaunchResponse> {
+export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLaunch | DevinChatLaunch, deps: DevinServiceDeps = {}): Promise<DevinLaunchResponse> {
   const clock = deps.now ?? (() => new Date());
 
   // --- validate ---------------------------------------------------------
@@ -365,6 +383,8 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
   const givenBase = typeof req.baseBranch === 'string' ? req.baseBranch.trim() : '';
   if (givenBase !== '' && !isSafeBranchName(givenBase)) return refusal(`"${givenBase.slice(0, 80)}" isn't a branch name the Devin lane accepts.`);
   const internal = req as Partial<DevinInternalLaunch>;
+  const chatLaunch = req.origin === 'chat' && (req as Partial<DevinChatLaunch>).contract === 'chat';
+  const planOnly = chatLaunch && (req as Partial<DevinChatLaunch>).planOnly === true;
   const backlogItemId = typeof internal.backlogItemId === 'string' && REF_ID_RE.test(internal.backlogItemId) ? internal.backlogItemId : null;
 
   // --- lane gates (no network) --------------------------------------------
@@ -387,8 +407,13 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
   if ('error' in connected) return refusal(connected.error, connected.failure);
   const baseBranch = givenBase !== '' ? givenBase : (await defaultBranchOf(repo, deps)) ?? FALLBACK_BASE_BRANCH;
   // 3.15: the playbook (named, `!macro` in the text, or auto-matched). A named one that does not exist refuses.
-  const playbook = await playbookForLaunch({ explicit: req.playbook, title, prompt, repo });
-  if (!playbook.ok) return refusal(playbook.error);
+  const resolvedPlaybook = await playbookForLaunch({ explicit: req.playbook, title, prompt, repo });
+  if (!resolvedPlaybook.ok) return refusal(resolvedPlaybook.error);
+  // A chat is a conversation: it runs a playbook only when the operator typed
+  // its `!macro` (or named one) — never one auto-matched from the wording.
+  const playbook = chatLaunch && resolvedPlaybook.match === 'auto'
+    ? { ...resolvedPlaybook, ref: null, match: null, block: '' }
+    : resolvedPlaybook;
 
   // --- budget gate + persist queued (no await between them) ----------------
   const now = clock();
@@ -424,6 +449,7 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
     report: null,
     backlogItemId,
     ...(playbook.ref ? { playbookRef: playbook.ref } : {}),
+    ...(chatLaunch && typeof (req as DevinChatLaunch).verseSessionId === 'string' ? { verseSessionId: (req as DevinChatLaunch).verseSessionId } : {}),
   };
   try {
     writeDevinTask(task);
@@ -456,13 +482,15 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
     Object.assign(task, { state: 'launching' });
     writeDevinTask(task);
     const session = await client.createSession(orgId, {
-      prompt: buildDevinPrompt(task, playbook.block),
+      prompt: chatLaunch ? buildDevinChatPrompt(task, { planOnly, playbook: playbook.block }) : buildDevinPrompt(task, playbook.block),
       title: `${DEVIN_PR_TITLE_PREFIX} ${title}`,
       repos: [repo],
       tags: [DEVIN_SESSION_TAG, tag],
       maxAcuLimit: task.maxAcu,
-      structuredOutputSchema: DEVIN_REPORT_SCHEMA as Record<string, unknown>,
-      structuredOutputRequired: false,
+      ...(chatLaunch ? {} : {
+        structuredOutputSchema: DEVIN_REPORT_SCHEMA as Record<string, unknown>,
+        structuredOutputRequired: false,
+      }),
       devinMode: task.devinMode,
     });
     noteApiSuccess();

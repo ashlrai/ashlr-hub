@@ -487,7 +487,8 @@ function agentRow(snapshot: AppsSnapshot, entry: AppCatalogEntry): VerseAppRow {
           ? `Not installed. Running ${commandText(ollamaLaunch)} yourself can install it.`
           : 'Not installed.')],
     seatId: null,
-    detail: null,
+    // 3.15: the seat itself reports the login (a stat of the CLI's credentials file).
+    detail: installed && entry.engine === 'devin' ? 'Chat with it as “Devin (CLI)” in New chat — log in first with `devin auth login`.' : null,
   };
 }
 

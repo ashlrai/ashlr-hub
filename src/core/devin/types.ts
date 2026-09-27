@@ -174,6 +174,12 @@ export interface DevinTaskV1 {
    * message text is never stored.
    */
   messagesSent?: number;
+  /**
+   * 3.15 ADDITIVE. The Verse chat (session id) this task IS, when it was
+   * started from the Devin chat seat — the chat owns its conversation, so
+   * Needs-you does not repeat "Devin is waiting" for it. Absent otherwise.
+   */
+  verseSessionId?: string;
 }
 
 export interface DevinBudgetV1 {
@@ -273,7 +279,7 @@ export interface DevinStatus {
   principal: DevinConnectionV1['principal'] | null;
   principalName: string | null;
   keyStore: DevinConnectionV1['keyStore'] | null;
-  /** "Chat: n/a — Devin works in sessions" (always). */
+  /** "Chat: ready — …" when the Devin chat seat can be used (3.15), else "Chat: off — why". */
   chatLine: string;
   /** "Fleet: ready" or "Fleet: … — why". */
   fleetLine: string;

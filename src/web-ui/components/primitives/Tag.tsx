@@ -16,6 +16,7 @@ const ENGINE_COLOR: Record<VerseEngine, string> = {
   codex: 'var(--engine-codex)',
   grok: 'var(--engine-grok)',
   local: 'var(--engine-local)',
+  devin: 'var(--engine-devin)',
 };
 
 export interface TagProps {

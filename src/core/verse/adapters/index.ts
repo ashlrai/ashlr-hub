@@ -17,6 +17,7 @@ import type { VerseSeatLaunch } from '../session-engine.js';
 import { claudeAdapter } from './claude.js';
 import { codexAdapter } from './codex.js';
 import { grokAdapter } from './grok.js';
+import { devinAdapter } from './devin.js';
 
 /** Distributive Omit — `Omit` on a union would collapse it to the common keys. */
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -83,6 +84,8 @@ export function adapterFor(engine: VerseEngine): VerseAdapter {
       return codexAdapter;
     case 'grok':
       return grokAdapter;
+    case 'devin':
+      return devinAdapter;
     default: {
       const never: never = engine;
       throw new Error(`unknown verse engine: ${String(never)}`);

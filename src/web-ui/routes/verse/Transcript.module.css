@@ -407,6 +407,34 @@
 .noteRecovered { border-left-color: var(--status-info-solid); background: var(--status-info-bg); }
 .noteLead { color: var(--status-info-fg); font-weight: var(--font-weight-semibold); }
 
+/* 3.15 Devin: a status chip per state change, and a card per pull request. */
+.noteRemote {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  border-left-color: var(--engine-devin);
+  color: var(--text-secondary);
+}
+.noteRemote[data-state='waiting'] { color: var(--text-primary); }
+.noteRemote[data-state='error'] { border-left-color: var(--status-danger-solid); }
+.remoteLead { color: var(--text-primary); font-weight: var(--font-weight-semibold); }
+.remoteMeta { color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.remoteLink { color: var(--text-link); }
+.prCard {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--engine-devin);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-raised);
+  font-size: var(--text-sm-size);
+}
+.prTitle { font-weight: var(--font-weight-semibold); color: var(--text-primary); }
+.prState { color: var(--text-tertiary); }
+
 
 .jump {
   position: absolute;

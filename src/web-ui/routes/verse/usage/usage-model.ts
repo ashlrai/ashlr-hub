@@ -80,6 +80,7 @@ export const ENGINE_COLOR: Record<VerseEngine, string> = {
   codex: engineColor('codex'),
   grok: engineColor('grok'),
   local: engineColor('local'),
+  devin: engineColor('devin'),
 };
 
 // ---------------------------------------------------------------------------

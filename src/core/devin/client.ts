@@ -86,6 +86,19 @@ export interface DevinSession {
   structuredOutput: Record<string, unknown> | null;
 }
 
+/**
+ * SessionMessage (3.15, the chat seat) — GET …/sessions/{devin_id}/messages.
+ * https://docs.devin.ai/api-reference/v3/sessions/get-organizations-session-messages
+ * `source` is `devin` | `user`; `created_at` is an integer whose unit the docs
+ * do not state (kept as given, only for ordering).
+ */
+export interface DevinSessionMessage {
+  eventId: string;
+  source: 'devin' | 'user';
+  message: string;
+  createdAt: number | null;
+}
+
 /** SessionCreateRequest fields Verse sends. https://docs.devin.ai/api-reference/v3/sessions/post-organizations-sessions */
 export interface DevinCreateSessionInput {
   prompt: string;
@@ -214,6 +227,40 @@ export function parseDevinSessionPage(raw: unknown): { items: DevinSession[]; en
   };
 }
 
+const MAX_MESSAGE_CHARS = 100_000;
+
+/**
+ * PaginatedResponse[SessionMessage]. An item without an event id, a known
+ * source or a string message is dropped (never guessed); a very long message
+ * is clipped rather than refused, so one huge reply cannot wedge the stream.
+ */
+export function parseDevinMessagePage(raw: unknown): { items: DevinSessionMessage[]; endCursor: string | null; hasNextPage: boolean } | null {
+  if (!isRecord(raw) || !Array.isArray(raw['items'])) return null;
+  const items: DevinSessionMessage[] = [];
+  for (const item of raw['items'].slice(0, 500)) {
+    if (!isRecord(item)) continue;
+    const eventId = item['event_id'];
+    const source = item['source'];
+    const message = item['message'];
+    if (typeof eventId !== 'string' || eventId === '' || eventId.length > 200) continue;
+    if (source !== 'devin' && source !== 'user') continue;
+    if (typeof message !== 'string') continue;
+    const created = item['created_at'];
+    items.push({
+      eventId,
+      source,
+      message: message.length > MAX_MESSAGE_CHARS ? `${message.slice(0, MAX_MESSAGE_CHARS - 1)}…` : message,
+      createdAt: typeof created === 'number' && Number.isFinite(created) ? created : null,
+    });
+  }
+  const cursor = raw['end_cursor'];
+  return {
+    items,
+    endCursor: typeof cursor === 'string' && cursor !== '' && cursor.length <= 512 ? cursor : null,
+    hasNextPage: raw['has_next_page'] === true,
+  };
+}
+
 /** HTTP status → failure code (docs: overview#error-handling). */
 export function failureForStatus(status: number): DevinFailureCode {
   if (status === 401) return 'auth';
@@ -298,7 +345,7 @@ export class DevinClient {
     return `DevinClient(${this.baseUrl})`;
   }
 
-  private async request(method: 'GET' | 'POST', path: string, body: unknown, policy: RetryPolicy): Promise<unknown> {
+  private async request(method: 'GET' | 'POST' | 'DELETE', path: string, body: unknown, policy: RetryPolicy): Promise<unknown> {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = { Authorization: `Bearer ${this.apiKey}`, Accept: 'application/json' };
     let payload: string | undefined;
@@ -411,6 +458,41 @@ export class DevinClient {
     // A message is not idempotent either: retried only on 429, like create.
     await this.request('POST', `/organizations/${encodeURIComponent(org)}/sessions/${encodeURIComponent(sessionId)}/messages`, { message }, 'create');
   }
+
+  /**
+   * GET /v3/organizations/{org_id}/sessions/{devin_id}/messages?after=&first=
+   * (3.15, the chat seat) — chronological, cursor-paged: pass the previous
+   * page's `endCursor` as `after`.
+   * https://docs.devin.ai/api-reference/v3/sessions/get-organizations-session-messages
+   */
+  async listMessages(orgId: string, sessionId: string, opts: { after?: string | null; first?: number } = {}): Promise<{ items: DevinSessionMessage[]; endCursor: string | null; hasNextPage: boolean }> {
+    const org = checkOrg(orgId);
+    const id = checkSessionId(sessionId);
+    const first = Math.min(200, Math.max(1, Math.floor(opts.first ?? 100)));
+    const query = new URLSearchParams({ first: String(first) });
+    if (typeof opts.after === 'string' && opts.after !== '' && opts.after.length <= 512) query.set('after', opts.after);
+    const parsed = parseDevinMessagePage(await this.request('GET', `/organizations/${encodeURIComponent(org)}/sessions/${encodeURIComponent(id)}/messages?${query.toString()}`, undefined, 'read'));
+    if (!parsed) throw new DevinApiError('unparsed', STATUS_SENTENCES.unparsed);
+    return parsed;
+  }
+
+  /**
+   * DELETE /v3/organizations/{org_id}/sessions/{devin_id} (3.15) — terminate.
+   * "A terminated session cannot be resumed." Not retried on a network error
+   * (like create: the outcome is unknown, and the caller re-reads the session).
+   * https://docs.devin.ai/api-reference/v3/sessions/delete-organizations-sessions
+   */
+  async terminateSession(orgId: string, sessionId: string): Promise<DevinSession | null> {
+    const org = checkOrg(orgId);
+    const id = checkSessionId(sessionId);
+    const raw = await this.request('DELETE', `/organizations/${encodeURIComponent(org)}/sessions/${encodeURIComponent(id)}`, undefined, 'create');
+    return parseDevinSession(raw);
+  }
+}
+
+function checkSessionId(sessionId: string): string {
+  if (typeof sessionId !== 'string' || !DEVIN_SESSION_ID_PATTERN.test(sessionId)) throw new DevinApiError('invalid-request', 'That is not a Devin session id.');
+  return sessionId;
 }
 
 function checkOrg(orgId: string): string {

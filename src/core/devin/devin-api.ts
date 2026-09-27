@@ -234,12 +234,18 @@ export function devinNeedsYouItems(tasks: readonly DevinTaskV1[], now: Date, pre
         detail: clip(preview ? `${preview.reason} ${summary}${status}` : `${summary}${status}`, NEEDS_YOU_DETAIL_MAX) || null,
         since: isoOr(task.updatedAt, nowIso),
         expiresAt: null,
-        subject: { repo: task.repo, pr: task.pr.number, seatId: null, sessionId: null, engine: null },
+        // 3.15: a PR from a Devin CHAT names its chat, so Needs-you can open it.
+        subject: { repo: task.repo, pr: task.pr.number, seatId: task.verseSessionId ? 'devin' : null, sessionId: task.verseSessionId ?? null, engine: null },
         target: { kind: 'url', url: task.pr.url },
         actions: preview
           ? [...triageActions(task, preview, VERSE_DEVIN_TASKS_PATH), dismissAction(task, true, VERSE_DEVIN_TASKS_PATH, 'Devin task')]
           : [dismissAction(task, true, VERSE_DEVIN_TASKS_PATH, 'Devin task')],
       };
+    } else if (task.verseSessionId) {
+      // 3.15: a Devin CHAT's waiting / failed states live in its own
+      // transcript ("waiting for you" is how every chat turn ends); only its
+      // pull requests are Needs-you items.
+      continue;
     } else if (task.state === 'blocked' && task.sessionUrl) {
       item = {
         id: `chats:chat-failed:devin-${task.id}`,

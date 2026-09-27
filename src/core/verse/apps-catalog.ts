@@ -119,6 +119,9 @@ export const APPS_CATALOG: readonly AppCatalogEntry[] = [
   agent('claude-code', 'Claude Code', 'C', 'claude', 'Anthropic coding agent CLI', ['claude'], ['claude'], 'claude'),
   agent('codex', 'Codex', 'X', 'codex', 'OpenAI coding agent CLI', ['codex'], ['codex'], 'codex'),
   agent('grok', 'Grok', 'G', 'grok', 'xAI Grok coding agent CLI', ['grok'], ['grok'], null),
+  // 3.15: the Devin CLI (Cognition). Installed + logged in, it is the
+  // "Devin (CLI)" chat seat; `brew install --cask devin-cli` puts it on PATH.
+  agent('devin', 'Devin', 'D', 'devin', 'Cognition Devin agent CLI (local, or --cloud)', ['devin'], ['devin'], null),
   agent('hermes', 'Hermes', 'H', null, 'Hermes agent CLI', ['hermes'], ['hermes'], 'hermes'),
   agent('aider', 'Aider', 'A', null, 'Pair programming in the terminal', ['aider'], ['aider'], null),
   agent('goose', 'Goose', 'G', null, 'Open-source on-machine agent', ['goose'], ['goose'], null),

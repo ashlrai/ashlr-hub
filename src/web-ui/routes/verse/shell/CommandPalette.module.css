@@ -124,6 +124,7 @@
 .monogram[data-engine='codex'] { box-shadow: inset 2px 0 0 var(--engine-codex); }
 .monogram[data-engine='grok'] { box-shadow: inset 2px 0 0 var(--engine-grok); }
 .monogram[data-engine='local'] { box-shadow: inset 2px 0 0 var(--engine-local); }
+.monogram[data-engine='devin'] { box-shadow: inset 2px 0 0 var(--engine-devin); }
 
 .bullet {
   width: 6px;
