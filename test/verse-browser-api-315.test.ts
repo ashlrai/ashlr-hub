@@ -136,6 +136,21 @@ describe('browser routes through the real server', () => {
     expect(allow.json).toMatchObject({ allowedOrigins: ['https://example.com'] });
     expect((await request(handle.port, 'POST', '/api/verse/browser/allow', mutate, { sessionId: 's-1', origin: 'file:///etc', allowed: true })).status).toBe(400);
     expect((await request(handle.port, 'POST', '/api/verse/browser/result', mutate, { sessionId: 's-1', id: 'bc_AAAAAAAAAAAA', ok: true })).status).toBe(404);
+
+    // 3.15 P2/P3 scopes: acting comes on with access; scripts need their own switch.
+    expect(on.json).toMatchObject({ actAccess: true, scriptAccess: false, allowances: [] });
+    expect((await request(handle.port, 'POST', '/api/verse/browser/access', mutate, { sessionId: 's-1', enabled: true, scope: 'root' })).status).toBe(400);
+    expect((await request(handle.port, 'POST', '/api/verse/browser/access', {}, { sessionId: 's-1', enabled: true, scope: 'browser_script' })).status).toBe(401);
+    const scripts = await request(handle.port, 'POST', '/api/verse/browser/access', mutate, { sessionId: 's-1', enabled: true, scope: 'browser_script' });
+    expect(scripts.json).toMatchObject({ agentAccess: true, actAccess: true, scriptAccess: true });
+    const noAct = await request(handle.port, 'POST', '/api/verse/browser/access', mutate, { sessionId: 's-1', enabled: false, scope: 'browser_act' });
+    expect(noAct.json).toMatchObject({ agentAccess: true, actAccess: false });
+    expect((await request(handle.port, 'POST', '/api/verse/browser/allowance', mutate, { sessionId: 's-1', key: '' })).status).toBe(400);
+    expect((await request(handle.port, 'POST', '/api/verse/browser/allowance', mutate, { sessionId: 's-1', key: 'submit@http://localhost:5173', x: 1 })).status).toBe(400);
+    expect((await request(handle.port, 'POST', '/api/verse/browser/allowance', mutate, { sessionId: 's-1', key: 'submit@http://localhost:5173' })).json).toMatchObject({ allowances: [] });
+    // A scope cannot be switched on without the grant.
+    await request(handle.port, 'POST', '/api/verse/browser/access', mutate, { sessionId: 's-1', enabled: false });
+    expect((await request(handle.port, 'POST', '/api/verse/browser/access', mutate, { sessionId: 's-1', enabled: true, scope: 'browser_act' })).status).toBe(409);
   });
 
   it('a read-only server (no dispatch) refuses every POST, the MCP endpoint included', async () => {
@@ -194,7 +209,10 @@ describe('browser routes through the real server', () => {
     const answered = await request(handle.port, 'POST', '/api/verse/browser/result', mutate, { sessionId: 's-1', id: command!.id, ok: true, url: 'http://localhost:5173/settings', data: { title: 'Settings', loading: false } });
     expect(answered.status).toBe(200);
     const result = (await call).json as { result: { content: Array<{ text: string }> } };
-    expect(result.result.content[0]!.text).toBe('Opened http://localhost:5173/settings — "Settings".');
+    const opened = result.result.content[0]!.text;
+    expect(opened.startsWith('Opened http://localhost:5173/settings.\n')).toBe(true);
+    // The page's title is page content: framed, never bare.
+    expect(opened).toMatch(/<untrusted id=[a-z0-9]+>\ntitle: Settings\n<\/untrusted id=[a-z0-9]+>/);
 
     // An external URL is refused before it is ever queued, and shows up in the policy.
     const external = await request(handle.port, 'POST', mcp, {}, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'browser_navigate', arguments: { url: 'https://example.com/' } } });

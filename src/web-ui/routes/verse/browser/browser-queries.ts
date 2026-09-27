@@ -10,6 +10,7 @@ import { getMutationToken, hasMutationHold, touchMutationHold } from '../../../d
 import { apiGet, apiPost } from '../../../data/client.js';
 import {
   VERSE_BROWSER_ACCESS_PATH,
+  VERSE_BROWSER_ALLOWANCE_PATH,
   VERSE_BROWSER_ALLOW_PATH,
   VERSE_BROWSER_COMMANDS_PATH,
   VERSE_BROWSER_POLICY_PATH,
@@ -17,6 +18,7 @@ import {
   type VerseBrowserCommandResult,
   type VerseBrowserCommandsResponse,
   type VerseBrowserPolicy,
+  type VerseBrowserScope,
 } from '../../../../core/verse/browser-types.js';
 import type { VersePreviewTargetsResponse } from '../../../../core/verse/workbench-types.js';
 import { VERSE_PREVIEW_TARGETS_PATH } from '../../../../core/verse/workbench-types.js';
@@ -26,7 +28,10 @@ import { VerseMutationLockedError } from '../verse-queries.js';
 
 export interface BrowserApi {
   policy(sessionId: string, signal?: AbortSignal): Promise<VerseBrowserPolicy>;
-  setAccess(sessionId: string, enabled: boolean): Promise<VerseBrowserPolicy>;
+  /** Switch agent access (scope `browser`, the whole grant) or one of its parts. */
+  setAccess(sessionId: string, enabled: boolean, scope?: VerseBrowserScope): Promise<VerseBrowserPolicy>;
+  /** Forget one "Allow for this chat" answer. */
+  revokeAllowance(sessionId: string, key: string): Promise<VerseBrowserPolicy>;
   allowOrigin(sessionId: string, origin: string, allowed: boolean): Promise<VerseBrowserPolicy>;
   /** The long-poll. Resolves [] after the server's wait. */
   commands(sessionId: string, signal?: AbortSignal): Promise<VerseBrowserCommandsResponse>;
@@ -50,7 +55,8 @@ async function post<T>(path: string, body: unknown, signal?: AbortSignal): Promi
 
 export const browserApi: BrowserApi = {
   policy: (sessionId, signal) => apiGet(`${VERSE_BROWSER_POLICY_PATH}?${q({ sessionId })}`, signal),
-  setAccess: (sessionId, enabled) => post(VERSE_BROWSER_ACCESS_PATH, { sessionId, enabled }),
+  setAccess: (sessionId, enabled, scope) => post(VERSE_BROWSER_ACCESS_PATH, { sessionId, enabled, ...(scope && scope !== 'browser' ? { scope } : {}) }),
+  revokeAllowance: (sessionId, key) => post(VERSE_BROWSER_ALLOWANCE_PATH, { sessionId, key }),
   allowOrigin: (sessionId, origin, allowed) => post(VERSE_BROWSER_ALLOW_PATH, { sessionId, origin, allowed }),
   commands: (sessionId, signal) => apiGet(`${VERSE_BROWSER_COMMANDS_PATH}?${q({ sessionId })}`, signal),
   result: async (sessionId, result) => {

@@ -11,6 +11,10 @@
  *     it and drafts into the composer (never sends);
  *   - agent access: the switch goes through the token gate; a command from
  *     the agent runs in this pane and its answer is posted back;
+ *   - acting (3.15 P2/P3): an `act` command becomes a native query with the
+ *     validated spec; a `confirm` command shows the card and posts the
+ *     operator's answer; operator input while an agent works pauses it
+ *     until Resume; the recent-actions strip lists what the agent did;
  *   - the launcher offers the chat's dev servers.
  */
 import { act, render, screen, waitFor } from '@testing-library/react';
@@ -26,7 +30,10 @@ import { NATIVE_BROWSER_EVENT, type NativeBrowser, type NativeBrowserOp } from '
 const VERSE = 'http://127.0.0.1:7777';
 
 function policy(over: Partial<VerseBrowserPolicy> = {}): VerseBrowserPolicy {
-  return { sessionId: 's-1', agentAccess: false, allowedOrigins: [], blocked: [], toolEngines: ['claude', 'local'], paneSeenAt: null, ...over };
+  return {
+    sessionId: 's-1', agentAccess: false, actAccess: false, scriptAccess: false, allowances: [],
+    allowedOrigins: [], blocked: [], toolEngines: ['claude', 'local'], paneSeenAt: null, ...over,
+  };
 }
 
 function memoryStorage(initial: Record<string, string> = {}) {
@@ -34,12 +41,13 @@ function memoryStorage(initial: Record<string, string> = {}) {
   return { getItem: (k: string) => map.get(k) ?? null, setItem: (k: string, v: string) => { map.set(k, v); }, map };
 }
 
-function harness(opts: { native?: boolean; screenshot?: boolean; policy?: VerseBrowserPolicy; commands?: VerseBrowserAgentCommand[] } = {}) {
+function harness(opts: { native?: boolean; screenshot?: boolean; policy?: VerseBrowserPolicy; commands?: VerseBrowserAgentCommand[]; tabUrl?: string } = {}) {
   const sent: NativeBrowserOp[] = [];
   let pendingCommands = opts.commands ? [...opts.commands] : [];
   const api: BrowserApi = {
     policy: vi.fn(async () => opts.policy ?? policy()),
-    setAccess: vi.fn(async (_s: string, enabled: boolean) => policy({ agentAccess: enabled })),
+    setAccess: vi.fn(async (_s: string, enabled: boolean, scope?: string) => policy({ agentAccess: scope ? true : enabled, actAccess: scope === 'browser_act' ? enabled : enabled })),
+    revokeAllowance: vi.fn(async () => policy({ agentAccess: true, actAccess: true })),
     allowOrigin: vi.fn(async (_s: string, origin: string) => policy({ agentAccess: true, allowedOrigins: [origin] })),
     commands: vi.fn(async (_s: string, signal?: AbortSignal): Promise<VerseBrowserCommandsResponse> => {
       if (pendingCommands.length > 0) {
@@ -62,12 +70,15 @@ function harness(opts: { native?: boolean; screenshot?: boolean; policy?: VerseB
   };
   const bridge: NativeBrowser = {
     version: 1,
-    capabilities: { screenshot: opts.screenshot ?? true, picker: true, console: true, text: true },
+    capabilities: { screenshot: opts.screenshot ?? true, picker: true, console: true, text: true, act: true },
     send: (op) => {
       sent.push(op);
       // Answer requests the way the shell would.
       if (op.op === 'screenshot') {
         queueMicrotask(() => emit({ kind: 'result', req: op.req, ok: true, data: { mime: 'image/png', base64: 'iVBORw0KGgo=', width: 640, height: 400 } }));
+      }
+      if (op.op === 'query' && typeof op.what === 'object' && 'act' in op.what) {
+        queueMicrotask(() => emit({ kind: 'result', req: op.req, ok: true, data: { kind: 'click', x: 10, y: 20, native: true, url: 'http://localhost:5173/', title: 'App' } }));
       }
       if (op.op === 'query' && op.what === 'console') {
         queueMicrotask(() => emit({ kind: 'result', req: op.req, ok: true, data: { url: 'http://localhost:5173/', console: [{ t: 0, level: 'error', text: 'boom' }], network: [] } }));
@@ -77,7 +88,9 @@ function harness(opts: { native?: boolean; screenshot?: boolean; policy?: VerseB
   };
   const insert = vi.fn((_sessionId: string, _text: string) => true);
   const openExternal = vi.fn();
-  const storage = memoryStorage();
+  const storage = memoryStorage(opts.tabUrl
+    ? { [BROWSER_TABS_STORAGE_KEY]: JSON.stringify({ tabs: [{ id: 't1', url: opts.tabUrl, title: 'App' }], activeId: 't1', nextId: 2 }) }
+    : {});
   const deps: Partial<BrowserPanelDeps> = {
     api,
     native: () => (opts.native ? bridge : null),
@@ -311,6 +324,65 @@ describe('agent access', () => {
     expect(await screen.findByText(/Agent asked for https:\/\/example.com/)).toBeInTheDocument();
     await userEvent.setup().click(screen.getByRole('button', { name: 'Allow for this chat' }));
     await waitFor(() => expect(h.api.allowOrigin).toHaveBeenCalledWith('s-1', 'https://example.com', true));
+  });
+
+  const cmd = (op: VerseBrowserAgentCommand['op'], args: Record<string, unknown>, id = 'bc_AAAAAAAAAAAA'): VerseBrowserAgentCommand =>
+    ({ id, sessionId: 's-1', op, args, allowedOrigins: [], createdAt: 'now' });
+
+  it('an act command becomes one native query with the validated spec, and is listed in the strip', async () => {
+    const click = cmd('act', { kind: 'click', ref: 'e3', expect: 'abc123' });
+    const h = harness({ native: true, tabUrl: 'http://localhost:5173/', policy: policy({ agentAccess: true, actAccess: true }), commands: [click] });
+    render(<BrowserPanel sessionId="s-1" deps={h.deps} />);
+    await waitFor(() => expect(h.api.result).toHaveBeenCalledWith('s-1', expect.objectContaining({ id: click.id, ok: true })));
+    expect(h.sent).toContainEqual(expect.objectContaining({ op: 'query', tab: 't1', what: { act: { kind: 'click', ref: 'e3', expect: 'abc123' } } }));
+    expect(await screen.findByRole('list', { name: 'Recent agent actions' })).toHaveTextContent('Clicked e3');
+  });
+
+  it('refuses an act command whose arguments are not the closed shape (nothing reaches native)', async () => {
+    const bad = cmd('act', { kind: 'click', ref: 'e3', script: 'alert(1)' });
+    const h = harness({ native: true, tabUrl: 'http://localhost:5173/', policy: policy({ agentAccess: true, actAccess: true }), commands: [bad] });
+    render(<BrowserPanel sessionId="s-1" deps={h.deps} />);
+    await waitFor(() => expect(h.api.result).toHaveBeenCalledWith('s-1', expect.objectContaining({ id: bad.id, ok: false })));
+    expect(h.sent.some((op) => op.op === 'query')).toBe(false);
+  });
+
+  it('a confirm command shows the card and posts the operator\'s answer', async () => {
+    const ask = cmd('confirm', {
+      action: 'Click the Delete button', target: 'button "Delete project"', origin: 'http://localhost:5173',
+      reasons: ['the control is labelled "delete"'], tool: 'browser_click', expiresAt: new Date(Date.now() + 120_000).toISOString(),
+    });
+    const h = harness({ native: true, tabUrl: 'http://localhost:5173/', policy: policy({ agentAccess: true, actAccess: true }), commands: [ask] });
+    render(<BrowserPanel sessionId="s-1" deps={h.deps} />);
+    const card = await screen.findByRole('group', { name: 'The agent is asking to act' });
+    expect(card).toHaveTextContent('Click the Delete button');
+    expect(card).toHaveTextContent('button "Delete project"');
+    expect(card).toHaveTextContent('Asked because the control is labelled "delete".');
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Allow once' }));
+    await waitFor(() => expect(h.api.result).toHaveBeenCalledWith('s-1', { id: ask.id, ok: true, data: { decision: 'once' } }));
+    expect(screen.queryByRole('group', { name: 'The agent is asking to act' })).toBeNull();
+    expect(screen.getByRole('list', { name: 'Recent agent actions' })).toHaveTextContent('Asked you: Click the Delete button — allowed');
+  });
+
+  it('operator input while an agent works pauses it until Resume', async () => {
+    const first = cmd('act', { kind: 'scroll', direction: 'down' }, 'bc_AAAAAAAAAAA1');
+    const h = harness({ native: true, tabUrl: 'http://localhost:5173/', policy: policy({ agentAccess: true, actAccess: true }), commands: [first] });
+    render(<BrowserPanel sessionId="s-1" deps={h.deps} />);
+    await waitFor(() => expect(h.api.result).toHaveBeenCalledWith('s-1', expect.objectContaining({ id: first.id, ok: true })));
+    act(() => { emit({ kind: 'operator', tab: 't1' }); });
+    expect(await screen.findByText(/You took over\./)).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Resume agent' }));
+    expect(screen.queryByText(/You took over\./)).toBeNull();
+  });
+
+  it('with access on, the scope switches go through the gate with their scope', async () => {
+    const h = harness({ policy: policy({ agentAccess: true, actAccess: true }) });
+    setMutationToken('a'.repeat(64));
+    render(<BrowserPanel sessionId="s-1" deps={h.deps} />);
+    const scripts = await screen.findByRole('switch', { name: 'Run scripts (localhost)' });
+    await waitFor(() => expect(scripts).not.toBeDisabled());
+    await userEvent.setup().click(scripts);
+    await waitFor(() => expect(h.api.setAccess).toHaveBeenCalledWith('s-1', true, 'browser_script'));
+    expect(screen.getByRole('switch', { name: 'Click and type' })).toBeInTheDocument();
   });
 
   it('without a chat the pane still browses, with no agent controls', () => {
