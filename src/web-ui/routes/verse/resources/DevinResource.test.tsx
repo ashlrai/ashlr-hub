@@ -107,6 +107,31 @@ describe('DevinResource', () => {
     expect(screen.getByText('Connected')).toBeTruthy();
   });
 
+  it('the Devin CLI: says its usage is not reported (not counted) instead of implying it is — even with no API key (3.15)', async () => {
+    overview = { generatedAt: 'x', status: status(), budget: budget(), tasks: [], cli: { state: 'ready', usage: 'not-reported' } };
+    const { unmount } = mount();
+    const line = await screen.findByText(/usage not reported by the CLI/);
+    expect(line.closest('[data-devin-cli]')!.getAttribute('data-devin-cli')).toBe('ready');
+    unmount();
+    evictAll();
+
+    overview = {
+      generatedAt: 'x', tasks: [], budget: budget(), cli: { state: 'logged-out', usage: 'not-reported' },
+      status: status({ enabled: false, connected: false, state: 'disabled', reason: 'Not set up.' }),
+    };
+    mount();
+    const loggedOut = await screen.findByText(/usage not reported by the CLI/);
+    expect(loggedOut.textContent).toMatch(/logged out; run devin auth login/);
+    expect(screen.queryByRole('meter')).toBeNull();
+  });
+
+  it('no Devin CLI installed (or an older server): no CLI line', async () => {
+    overview = { generatedAt: 'x', status: status(), budget: budget(), tasks: [], cli: { state: 'missing', usage: 'not-reported' } };
+    mount();
+    await screen.findByText('38 ACUs of 50 ACUs left');
+    expect(screen.queryByText(/usage not reported by the CLI/)).toBeNull();
+  });
+
   it('paused: the pill and the budget\'s own reason', async () => {
     overview = { generatedAt: 'x', status: status(), tasks: [], budget: budget({ paused: true, canLaunch: { ok: false, reason: 'Paused: 45 ACUs of 50 ACUs used.' } }) };
     mount();

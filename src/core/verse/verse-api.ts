@@ -110,7 +110,7 @@ import {
 import { prepareProjectMemory, readProjectMemory, writeProjectMemory } from './project-memory.js';
 import { discoverProjectsAsync } from './projects.js';
 import { discoverSeats, getSeatReadiness, refreshSeatTelemetry, type VerseSeatDiscovery } from './seats.js';
-import { devinSeatReadiness, discoverDevinSeats, mergeDevinSeats, type DevinSeatDiscoveryOptions } from './devin-seats.js';
+import { DEVIN_CLI_SEAT_ID, devinCliTurnReadiness, devinSeatReadiness, discoverDevinSeats, mergeDevinSeats, type DevinSeatDiscoveryOptions } from './devin-seats.js';
 import { buildHandoffPreviewAsync } from './session-handoff.js';
 import { searchSessions } from './session-search.js';
 import {
@@ -2164,6 +2164,17 @@ export async function handleVerseApi(
           return true;
         }
         const current = engine.getSession(id);
+        // 3.15: a Devin CLI chat is checked before every turn (binary present,
+        // logged in — cli-probe.ts, cached a few seconds) and refused here with
+        // the fixing command, instead of failing inside Devin's own tool. Before
+        // the model check, whose "re-pin the seat's CLI" advice does not apply.
+        if (current?.seatId === DEVIN_CLI_SEAT_ID) {
+          const cli = await devinCliTurnReadiness(devinSeatOptions);
+          if (!cli.ready) {
+            sendJson(res, 409, { error: cli.reason ?? 'The Devin CLI cannot run a turn right now.', code: SEAT_NOT_READY_CODE, readiness: cli });
+            return true;
+          }
+        }
         const live = await liveModelFor(ctx.cfg, current);
         if (live.reason !== null) {
           // A distinct code, not VERSE_SESSION_BUSY's: the UI must be able to

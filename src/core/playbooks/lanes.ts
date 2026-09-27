@@ -1,12 +1,13 @@
 /**
  * The one-call hooks each lane uses. Kept here so the edits inside the lanes
- * (daemon loop, cloud service, Devin service, Leader) stay a line or two.
+ * (daemon loop, cloud service, Devin service, Leader, Verse chat turns) stay a
+ * line or two.
  *
  * Every hook is guidance only: it changes what the brief says, never a route,
  * gate, budget cap or authority. No playbook ⇒ the prompt is byte-identical.
  */
 import { listLatestPlaybooksSync, recordPlaybookUse } from './store.js';
-import { appendPlaybookBlock, renderPlaybookBlock, resolvePlaybook, resolvePlaybookSync } from './resolve.js';
+import { appendPlaybookBlock, findMacroMentions, renderPlaybookBlock, resolvePlaybook, resolvePlaybookSync } from './resolve.js';
 import type { PlaybookMatch, PlaybookRef, TaskKind } from './types.js';
 
 /**
@@ -46,6 +47,35 @@ export async function playbookForLaunch(input: { explicit?: unknown; title: stri
   const block = renderPlaybookBlock(outcome.resolved.playbook);
   if (!block) return { ok: true, ref: null, match: null, block: '' };
   return { ok: true, ref: outcome.resolved.ref, match: outcome.resolved.match, block };
+}
+
+/** A chat message's playbook: the block the seat reads, and what the transcript shows. */
+export interface ChatPlaybook {
+  block: string;
+  ref: PlaybookRef;
+  name: string;
+  macro: string;
+}
+
+/**
+ * Verse chats, every seat (3.15): the playbook the operator TYPED as a
+ * `!macro` in this message. Never an auto-match — a chat is a conversation,
+ * the same rule the Devin chat launch keeps (devin/service.ts). An unknown
+ * `!word` (or a pin to a version that does not exist) is not a playbook: the
+ * message goes as written. Synchronous (the engine's turn start is), and no
+ * disk read at all unless the text mentions a `!word`. Never throws.
+ */
+export function chatPlaybook(text: string, repo: string | null): ChatPlaybook | null {
+  try {
+    if (findMacroMentions(text).length === 0) return null;
+    const resolved = resolvePlaybookSync({ text, repo });
+    if (!resolved || resolved.match !== 'macro') return null;
+    const block = renderPlaybookBlock(resolved.playbook);
+    if (!block) return null;
+    return { block, ref: resolved.ref, name: resolved.playbook.meta.name, macro: resolved.playbook.meta.macro };
+  } catch {
+    return null;
+  }
 }
 
 /** What the Leader sees, so its work.dispatch can name a playbook. Bounded; [] on any failure. */

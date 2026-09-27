@@ -3,9 +3,10 @@
  * into the chat composer (never send it).
  *
  * A playbook reaches a task through its text: `!fix-bug` in the message is
- * resolved by whichever lane runs it (Run in cloud, Run in Devin, a fleet
- * goal). So "Use playbook…" and "Run…" only WRITE the macro at the front of
- * the draft — the operator still describes the task and picks the lane.
+ * resolved by whichever lane runs it (the chat itself on any seat, Run in
+ * cloud, Run in Devin, a fleet goal). So "Use playbook…" and "Run…" only
+ * WRITE the macro at the front of the draft — the operator still describes
+ * the task and picks the lane.
  *
  * Like cloud/composer-draft.ts, this goes through the box itself (native
  * setter + `input` event), which React's controlled textarea treats as the

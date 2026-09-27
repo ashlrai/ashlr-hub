@@ -68,6 +68,13 @@ export interface VerseAdapter {
    * `compaction` events read from the CLI's own session files.
    */
   afterTurn?(ctx: VerseAdapterTurnContext): VerseParsedEvent[];
+  /**
+   * 3.15, optional. True when this turn's own launch resolves a `!macro`
+   * playbook itself (a Devin cloud chat's first message starts a Devin task,
+   * whose launch does — and records the version on the task). The engine then
+   * still shows the chip but does not append the block a second time.
+   */
+  resolvesPlaybooks?(session: VerseSession, launch: VerseSeatLaunch): boolean;
 }
 
 export { turnAttachmentDirs, turnAttachmentImages, type VerseTurnExtras } from './turn-extras.js';

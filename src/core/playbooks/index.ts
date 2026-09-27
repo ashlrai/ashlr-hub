@@ -44,7 +44,7 @@ export {
   type PlaybookTarget,
   type ResolvedPlaybook,
 } from './resolve.js';
-export { leaderPlaybookCatalog, playbookForLaunch, withFleetPlaybook, type LaunchPlaybook } from './lanes.js';
+export { chatPlaybook, leaderPlaybookCatalog, playbookForLaunch, withFleetPlaybook, type ChatPlaybook, type LaunchPlaybook } from './lanes.js';
 export { countPlaybookOutcomes, playbookOutcomes } from './stats.js';
 
 /** Create v1 of a new playbook. Refuses an id that already exists. */

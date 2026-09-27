@@ -307,6 +307,13 @@ export interface DevinOverviewResponse {
   budget: DevinBudgetView;
   /** Newest first, at most 100. */
   tasks: DevinTaskV1[];
+  /**
+   * The local Devin CLI (the "Devin (CLI)" chat seat), from the shared probe
+   * (cli-probe.ts). `usage: 'not-reported'`: the CLI reports no ACU / usage
+   * numbers over ACP, so CLI chats are NOT in `budget` — the card says so.
+   * Optional: older servers omit it.
+   */
+  cli?: { state: 'ready' | 'missing' | 'logged-out'; usage: 'not-reported' };
 }
 
 /** POST /api/verse/devin/launch (write token + read session) */

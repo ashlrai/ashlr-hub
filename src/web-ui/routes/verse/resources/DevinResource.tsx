@@ -165,6 +165,14 @@ export function DevinResource() {
           </a>
         </>
       ) : null}
+      {overview.cli && overview.cli.state !== 'missing' ? (
+        // The CLI reports no ACU / usage numbers, so its chats are not in the
+        // budget above — say that instead of implying they are counted.
+        <p className={styles.fine} data-devin-cli={overview.cli.state}>
+          Devin (CLI){overview.cli.state === 'logged-out' ? <> — logged out; run <code>devin auth login</code></> : null}: usage not reported by the CLI,
+          so CLI chats are not counted here.
+        </p>
+      ) : null}
       <ReadinessLines row={devinReadinessRow(status)} />
     </li>
   );

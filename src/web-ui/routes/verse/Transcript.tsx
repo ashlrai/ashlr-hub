@@ -750,6 +750,12 @@ function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, e
       return (
         <li key={item.key} className={`${styles.item} ${styles.user}`} data-kind="user">
           <div className={styles.userText}>{item.text}</div>
+          {item.playbook ? (
+            <span className={styles.playbookChip} data-playbook={item.playbook.id}
+              title={`This message ran the playbook ${item.playbook.name} (${item.playbook.macro}, version ${item.playbook.version}): the seat got its steps after your text.`}>
+              Playbook: {item.playbook.name} · v{item.playbook.version}
+            </span>
+          ) : null}
         </li>
       );
     case 'assistant':

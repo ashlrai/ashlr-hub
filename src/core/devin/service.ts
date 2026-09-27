@@ -30,6 +30,7 @@ import { devinBudgetView } from './budget.js';
 import { DevinApiError, DevinClient, devinFailureSentence, type DevinFetch, type DevinSession } from './client.js';
 import { buildDevinPrompt, DEVIN_REPORT_SCHEMA } from './delivery-contract.js';
 import { playbookForLaunch } from '../playbooks/lanes.js';
+import { probeDevinCli, type DevinCliProbe } from './cli-probe.js';
 import { buildDevinChatPrompt } from './chat-contract.js';
 import { hasDevinKey, readDevinKey, removeDevinKey, storeDevinKey, type DevinKeyStoreDeps } from './secret.js';
 import {
@@ -74,6 +75,8 @@ export interface DevinServiceDeps {
   config?: () => AshlrConfig['devin'] | undefined;
   /** The live standing policy (default: currentStandingPolicy). */
   policy?: () => EffectivePolicy | null;
+  /** The local CLI's state for the overview (tests; default: the shared cli-probe). */
+  cliProbe?: () => Promise<Pick<DevinCliProbe, 'state'>>;
 }
 
 /** Internal launches from the fleet carry their work item. */
@@ -525,6 +528,7 @@ export async function devinOverview(deps: DevinServiceDeps = {}): Promise<DevinO
     status: await devinStatus(deps, tasks),
     budget: devinBudgetView(tasks, readDevinBudget(), now),
     tasks: tasks.slice(0, OVERVIEW_TASK_LIMIT),
+    cli: { state: (await (deps.cliProbe ?? (() => probeDevinCli()))()).state, usage: 'not-reported' },
   };
 }
 

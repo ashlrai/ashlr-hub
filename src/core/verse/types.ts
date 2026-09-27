@@ -636,9 +636,20 @@ export interface VerseSessionControls {
   permissionMode?: VersePermissionMode;
 }
 
+/**
+ * 3.15: the playbook a chat message's `!macro` ran (any seat). The message's
+ * `text` stays exactly as typed; the seat got the playbook's block appended.
+ */
+export interface VerseMessagePlaybook {
+  id: string;
+  version: number;
+  name: string;
+  macro: string;
+}
+
 /** Normalized event stream. `seq` is monotonic per session and is the SSE id. */
 export type VerseEvent =
-  | { seq: number; at: string; type: 'user-message'; turnId: string; text: string }
+  | { seq: number; at: string; type: 'user-message'; turnId: string; text: string; playbook?: VerseMessagePlaybook }
   | { seq: number; at: string; type: 'turn-started'; turnId: string; pid: number | null }
   | { seq: number; at: string; type: 'text-delta'; turnId: string; text: string }
   | { seq: number; at: string; type: 'assistant-message'; turnId: string; text: string }

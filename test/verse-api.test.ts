@@ -33,6 +33,7 @@ import type {
 import type { VerseParsedEvent } from '../src/core/verse/adapters/index.js';
 import type { VerseCreateOptions, VerseEngineHandle, VerseSeatLaunch } from '../src/core/verse/session-engine.js';
 import { resetVerseEngine, invalidateVerseSeatCache, expandHomePrefix, setVerseDevinSeatOptionsForTest } from '../src/core/verse/verse-api.js';
+import { resetDevinCliProbeForTest } from '../src/core/devin/cli-probe.js';
 import { readAuthHeaders, readSseAuth, startServer } from './helpers/authenticated-web-server.js';
 
 // ---------------------------------------------------------------------------
@@ -762,6 +763,51 @@ describe('engine reset hook', () => {
     expect(next.closed).toBe(false);
     resetVerseEngine(null);
     expect(next.closed).toBe(true);
+  });
+});
+
+describe('POST /api/verse/sessions/:id/turns on a Devin (CLI) chat (3.15)', () => {
+  it('checks the CLI before every turn and refuses up front with the fixing command', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-devin-cli-'));
+    const bin = path.join(dir, 'devin');
+    fs.writeFileSync(bin, '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(bin, 0o755);
+    const creds = path.join(dir, 'credentials.toml');
+    fs.writeFileSync(creds, 'x');
+    try {
+      setVerseDevinSeatOptionsForTest({ cliCandidates: [bin], cliCredentialsPath: creds });
+      resetDevinCliProbeForTest();
+      const { port, mutate } = await boot();
+      const now = new Date().toISOString();
+      engine.sessions.set('cli1', {
+        id: 'cli1', title: 'Devin CLI chat', projectPath: repo, engine: 'devin', accountId: 'devin-cli', seatId: 'devin-cli', model: 'devin',
+        nativeSessionId: 'brisk-otter', createdAt: now, updatedAt: now, status: 'idle', turnCount: 1, usage: zeroUsage(), lastError: null,
+      });
+      const send = () => request(port, 'POST', '/api/verse/sessions/cli1/turns', mutate, JSON.stringify({ text: 'next step' }));
+
+      const ok = await send();
+      expect(ok.status).toBe(202);
+      engine.sessions.get('cli1')!.status = 'idle';
+
+      // `devin auth logout` removes the credentials file: the next turn is refused
+      // before the engine runs anything, with the command that fixes it.
+      fs.rmSync(creds);
+      resetDevinCliProbeForTest(); // the probe's few-second cache, as if it had lapsed
+      const loggedOut = await send();
+      expect(loggedOut.status).toBe(409);
+      expect(loggedOut.json).toMatchObject({ code: 'seat-not-ready', readiness: { seatId: 'devin-cli', ready: false } });
+      expect((loggedOut.json as { error: string }).error).toMatch(/logged out.*`devin auth login`/);
+      expect(engine.events.get('cli1')?.filter((e) => e.type === 'user-message')).toHaveLength(1);
+
+      // The binary gone: refused with the install command.
+      setVerseDevinSeatOptionsForTest({ cliCandidates: [path.join(dir, 'nope')], cliCredentialsPath: creds });
+      resetDevinCliProbeForTest();
+      const missing = await send();
+      expect(missing.status).toBe(409);
+      expect((missing.json as { error: string }).error).toMatch(/`brew install --cask devin-cli`/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

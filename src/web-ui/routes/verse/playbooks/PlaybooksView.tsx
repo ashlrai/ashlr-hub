@@ -6,7 +6,8 @@
  * playbook as an engine reads it, its versions with what each version's
  * runs ended as (merged / refused / reverted / failed, from retros), and
  * "Run…" — which writes its `!macro` into the chat message so the operator
- * describes the task and picks the lane (Run in cloud, Run in Devin, …).
+ * describes the task and picks where it runs: sent in the chat (any seat
+ * expands it — session-engine.ts), Run in cloud, Run in Devin, ….
  *
  * Editing never rewrites: Save writes the next version (the server refuses
  * if someone saved in between). Viewing an older version and choosing
@@ -106,8 +107,9 @@ export function PlaybooksView() {
             <div className={styles.headerText}>
               <h2 className={styles.title}>Playbooks</h2>
               <p className={styles.lede}>
-                Reusable, versioned task templates. Type <code>!macro</code> in a goal, a Devin chat, Run in cloud or Run in Devin — and that lane
-                follows the playbook (other chats send the text as written). Every edit is a new version, and each version shows how its runs ended.
+                Reusable, versioned task templates. Type <code>!macro</code> in any chat — Claude Code, Codex, Grok, local or Devin — or in a goal,
+                Run in cloud or Run in Devin, and that run follows the playbook (a sent message shows which one). Every edit is a new version, and
+                each version shows how its fleet, cloud and Devin runs ended.
               </p>
             </div>
             <Button variant="subtle" size="sm" icon={<IconPlus size={14} />} onClick={() => { setEditing({ mode: 'new' }); setNotice(null); }}>

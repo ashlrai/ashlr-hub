@@ -42,6 +42,21 @@ describe('Transcript', () => {
     expect(within(log).getByText('2.3s')).toBeInTheDocument();
   });
 
+  it('shows which playbook a `!macro` message ran, under the message as typed (3.15)', () => {
+    const transcript = buildTranscript([
+      ev(1, 'user-message', { turnId: 't1', text: '!fix-bug the login 500s', playbook: { id: 'fix-issue', version: 2, name: 'Fix a reported bug', macro: '!fix-bug' } }),
+      ev(2, 'user-message', { turnId: 't2', text: 'plain', playbook: { id: 'x', version: 'two', name: 'Broken', macro: '!x' } }),
+    ]);
+    render(<Transcript transcript={transcript} loaded loadError={null} />);
+    const log = screen.getByRole('log');
+    const [first, second] = log.querySelectorAll('[data-kind="user"]');
+    expect(within(first as HTMLElement).getByText('!fix-bug the login 500s')).toBeInTheDocument();
+    expect(within(first as HTMLElement).getByText('Playbook: Fix a reported bug · v2')).toHaveAttribute('data-playbook', 'fix-issue');
+    // A malformed chip (another build's log) is dropped; the message still shows.
+    expect(within(second as HTMLElement).getByText('plain')).toBeInTheDocument();
+    expect((second as HTMLElement).querySelector('[data-playbook]')).toBeNull();
+  });
+
   it('keeps the failure line when a turn ends without any explanation', () => {
     const transcript = buildTranscript([
       ev(1, 'user-message', { turnId: 't1', text: 'hi' }),
