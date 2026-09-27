@@ -918,6 +918,35 @@ describe('ChatSection — the workbench (3.16)', () => {
     expect(chat()).not.toHaveAttribute('data-focus');
   });
 
+  it('a pane key in focus mode leaves focus mode and SHOWS the pane, even the one already active', async () => {
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    const user = userEvent.setup();
+    mount();
+    await user.click(await screen.findByRole('button', { name: /Fix the login bug/ }));
+    await screen.findByRole('heading', { name: 'Fix the login bug' });
+    act(() => { runCommand('dock.sources'); });
+    await screen.findByRole('complementary', { name: 'Dock: Sources' });
+
+    act(() => { setFocusMode(true); });
+    expect(chat()).toHaveAttribute('data-dock', 'closed');
+    // Sources is the (hidden) active pane: a plain toggle would have closed it unseen.
+    act(() => { runCommand('dock.sources'); });
+    expect(chat()).not.toHaveAttribute('data-focus');
+    expect(getDockSnapshot().state).toMatchObject({ open: true, active: 'sources' });
+    expect(screen.getByRole('complementary', { name: 'Dock: Sources' })).toBeInTheDocument();
+
+    // A pane that was not open opens, and focus mode ends.
+    act(() => { setFocusMode(true); });
+    act(() => { runCommand('dock.reasoning'); });
+    expect(chat()).not.toHaveAttribute('data-focus');
+    expect(getDockSnapshot().state).toMatchObject({ open: true, active: 'reasoning' });
+
+    // Outside focus mode the key still toggles.
+    act(() => { runCommand('dock.reasoning'); });
+    expect(getDockSnapshot().state.open).toBe(false);
+  });
+
   it('toggles a registered pane with its OWN shortcut (a key the catalog does not have)', async () => {
     const { registerPane } = await import('../panes/index.js');
     const dispose = registerPane({

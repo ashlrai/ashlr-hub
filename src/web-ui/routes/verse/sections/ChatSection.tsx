@@ -47,7 +47,8 @@ import { noteSessionSeen, useChatActivity } from '../chat/use-chat-activity.js';
 import { useSessionRoots } from '../chat/use-session-roots.js';
 import { ChatResizer, useChatPanelSizing } from '../ChatResizer.js';
 import { CHAT_PANEL_RANGES, MIN_TRANSCRIPT_WIDTH, setChatPanelFit } from '../chat-panel-sizing.js';
-import { activateDockChat, clearDockRequests, getDockState, requestTerminal, toggleDock, toggleDockPane, toggleDockPlacement, useDockValue } from '../dock/dock-store.js';
+import { activateDockChat, clearDockRequests, getDockState, openDockPane, requestTerminal, toggleDock, toggleDockPane, toggleDockPlacement, useDockValue } from '../dock/dock-store.js';
+import type { DockPaneId } from '../shell/dock-catalog.js';
 import type { SeatChoice } from '../SeatSelector.js';
 import { clampDockHeight, clampDockWidth, DOCK_LAYOUT, dockPresentation } from '../shell/dock-catalog.js';
 import { isFocusMode, setFocusMode, toggleFocusMode, useFocusMode } from '../shell/focus-mode.js';
@@ -236,6 +237,20 @@ function inTypingTarget(target: EventTarget | null): boolean {
 /** Is the key event aimed at an overlay that owns its own keys (a dialog, a menu, the palette)? */
 function inOverlay(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest('[role="dialog"], [role="menu"], [role="listbox"], [aria-modal="true"]') !== null;
+}
+
+/**
+ * A pane key (⇧⌘B, ⇧⌘D, ⇧⌘O, ⇧⌘S, ⇧⌘Y, a registered pane's own key). Focus mode hides the
+ * panel area, so toggling there flipped state nobody could see and the key looked dead:
+ * in focus mode it leaves focus mode and SHOWS the pane (never hides it).
+ */
+function showOrTogglePane(pane: DockPaneId): void {
+  if (isFocusMode()) {
+    setFocusMode(false);
+    openDockPane(pane);
+    return;
+  }
+  toggleDockPane(pane);
 }
 
 export function ChatSection() {
@@ -520,8 +535,13 @@ export function ChatSection() {
   // (TerminalPane resolves an empty request that way). Pressed again while
   // Terminal is on screen it hides it, like every editor's ⌃`.
   const openTerminal = useCallback(() => {
-    if (terminalShown) toggleDockPane('terminal');
-    else requestTerminal({});
+    // In focus mode the panel is hidden, so "shown" is not what the operator sees.
+    if (isFocusMode()) setFocusMode(false);
+    else if (terminalShown) {
+      toggleDockPane('terminal');
+      return;
+    }
+    requestTerminal({});
   }, [terminalShown]);
   // ⌃⇧` : always a NEW tab, in the active tab's root (else the chat's primary).
   const newTerminalTab = useCallback(() => requestTerminal({ newTab: true }), []);
@@ -573,11 +593,11 @@ export function ChatSection() {
     ['dock.toggle', toggleDock],
     ['dock.terminal', openTerminal],
     ['dock.terminal-new', newTerminalTab],
-    ['dock.preview', () => toggleDockPane('browser')],
-    ['dock.diff', () => toggleDockPane('diff')],
-    ['dock.files', () => toggleDockPane('files')],
-    ['dock.sources', () => toggleDockPane('sources')],
-    ['dock.reasoning', () => toggleDockPane('reasoning')],
+    ['dock.preview', () => showOrTogglePane('browser')],
+    ['dock.diff', () => showOrTogglePane('diff')],
+    ['dock.files', () => showOrTogglePane('files')],
+    ['dock.sources', () => showOrTogglePane('sources')],
+    ['dock.reasoning', () => showOrTogglePane('reasoning')],
     ['dock.placement', toggleDockPlacement],
     ['chat.focus-mode', toggleFocusMode],
   ];
@@ -629,7 +649,7 @@ export function ChatSection() {
         const pane = panesRef.current?.matchPaneShortcut(event);
         if (pane) {
           event.preventDefault();
-          toggleDockPane(pane.id);
+          showOrTogglePane(pane.id);
         }
         return;
       }
