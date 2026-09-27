@@ -65,6 +65,7 @@ mod desktop_prefs;
 mod health_watch;
 mod hotkey;
 mod launch_state;
+mod media_guard;
 mod notify;
 mod shell_contract;
 mod sidecar_guard;

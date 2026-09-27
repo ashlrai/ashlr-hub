@@ -85,7 +85,10 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "block2",
     "objc2-app-kit",
+    "WKFrameInfo",
+    "WKSecurityOrigin",
     "WKSnapshotConfiguration",
+    "WKUIDelegate",
     "WKWebView",
 ] }
 
