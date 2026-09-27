@@ -908,6 +908,13 @@ export interface G7ChecksInput {
    * name (which `ashlr authority protect` pins to this App).
    */
   fleetAppId?: string | null;
+  /**
+   * GitHub answered that rulesets are not on this plan for this repo (a
+   * private repo on GitHub Free; host-merge.ts readRequiredChecks). Only
+   * changes the owner-lane REASON for a server-enforcement repo with nothing
+   * required — never the verdict.
+   */
+  rulesetsUnavailable?: boolean;
 }
 
 const OK_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
@@ -943,6 +950,24 @@ export function evaluateG7Checks(input: G7ChecksInput): GateEvaluation & { state
   const latestRuns = [...latestRunByKey.values()];
   const states: { name: string; state: CheckState }[] = [];
   if (input.enforcement === 'server') {
+    // "Server enforcement declared, but GitHub protects nothing" stays in the
+    // OWNER LANE. Deliberately NOT re-read as local enforcement (all green +
+    // the App's ashlr/verify): the grant's server caps (medium risk, up to
+    // 12 merges a day) were signed on the premise that GitHub enforces the
+    // checks, and a local-enforcement grant is capped at low / 4 a day — so
+    // merging under server caps with only local proof would be weaker than
+    // what Mason signed AND than a local grant. The fix is a re-approval,
+    // which switches the repo to local enforcement at the local ceilings.
+    if (input.required.length === 0 && input.rulesetsUnavailable === true) {
+      return out(evaluation(
+        'owner-lane',
+        'server-enforcement-unavailable',
+        'the grant says server enforcement, but GitHub rulesets are unavailable on this plan for this private repo, so nothing ' +
+          'server-side can prove this PR green; it goes to the owner lane — re-approve the grant to switch the repo to local ' +
+          `enforcement (the App's host-verified ${ASHLR_VERIFY_CHECK_NAME})`,
+        { enforcement: 'server', required: [], rulesets: 'unavailable' },
+      ), 'none');
+    }
     if (input.required.length === 0) {
       return out(evaluation(
         'owner-lane',

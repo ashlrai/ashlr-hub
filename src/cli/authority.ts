@@ -33,6 +33,7 @@ import { createInterface } from 'node:readline';
 
 import { CUSTODY_HELPER_PATH } from '../core/authority/custody-client.js';
 import type { ResidentAdmission, ResidentPlistState } from '../core/authority/resident.js';
+import type { RepoEnforcement } from '../core/fleet/fleet-types.js';
 import type {
   AuthoritySetupNeed,
   AuthoritySetupReportV1,
@@ -453,11 +454,42 @@ async function cmdStatus(parsed: Parsed, deps: AuthorityCliDeps): Promise<number
     const merging = status.policy.repos.filter((repo) => repo.stage === 'merge').map((repo) => repo.nameWithOwner);
     deps.out(`Policy: ${status.policy.repos.length} repos (${merging.length} merging), engines ${status.policy.engines.join(', ')}, caps ${status.policy.merge.maxFiles}/${status.policy.merge.maxLines}`);
   }
+  for (const line of await enforcementStatusLines(deps)) deps.out(line);
   deps.out(`Ledger: ${status.ledger.state}${status.ledger.head ? `, ${status.ledger.head.seq + 1} entries, head ${status.ledger.head.hash.slice(0, 12)}` : ''}${status.ledger.reason ? ` — ${status.ledger.reason}` : ''}`);
   const c = status.custody;
   const yn = (v: boolean | null): string => (v === null ? 'unknown' : v ? 'yes' : 'no');
   deps.out(`Custody: installed ${yn(c.installed)}, key ${yn(c.keyInitialized)}, GitHub App ${yn(c.githubApp)}, Claude token ${yn(c.claudeToken)}`);
   return 0;
+}
+
+/**
+ * `status`: does GitHub still enforce what the installed grant says? Only the
+ * grant's `server` repos are read (local ones need nothing from GitHub). A
+ * mismatch is REPORTED, never fixed here — the signed grant is only ever
+ * changed by a re-approval, which switches such a repo to local enforcement.
+ */
+async function enforcementStatusLines(deps: AuthorityCliDeps): Promise<string[]> {
+  const { readInstalledGrant } = await import('../core/authority/standing-grant.js');
+  const installed = readInstalledGrant();
+  if (installed.state !== 'ok') return [];
+  const grant = installed.envelope.payload;
+  const server = grant.repos.filter((repo) => repo.enforcement === 'server');
+  if (server.length === 0) return [];
+  const { enforcementMismatch, probeServerEnforcementAll } = await import('../core/authority/server-enforcement.js');
+  const probes = await probeServerEnforcementAll(server.map((repo) => repo.nameWithOwner), ghGet(deps));
+  const lines: string[] = [];
+  const unread: string[] = [];
+  let enforced = 0;
+  for (const repo of server) {
+    const probe = probes.get(repo.nameWithOwner.toLowerCase());
+    const mismatch = enforcementMismatch(repo, probe, grant.grantSeq);
+    if (mismatch) lines.push(`  ${mismatch}`);
+    else if (probe?.state === 'enforced') enforced += 1;
+    else unread.push(repo.nameWithOwner);
+  }
+  const head = `Enforcement: ${enforced}/${server.length} server-enforced repo(s) protected by GitHub` +
+    `${unread.length > 0 ? `; could not check ${shortList(unread)}` : ''}${lines.length > 0 ? ` — ${lines.length} mismatch${lines.length === 1 ? '' : 'es'}:` : ''}`;
+  return [head, ...lines];
 }
 
 const SWITCHES: readonly AutonomySwitch[] = ['off', 'propose', 'autonomous'];
@@ -539,7 +571,7 @@ async function cmdRevoke(parsed: Parsed, deps: AuthorityCliDeps): Promise<number
 async function cmdDraft(parsed: Parsed, deps: AuthorityCliDeps): Promise<number> {
   const { buildStandingGrantDraft } = await import('../core/verse/authority-api.js');
   const kind = parsed.flags.has('--new') ? 'new' : parsed.flags.has('--reapprove') ? 'reapprove' : 'auto';
-  const draft = await buildStandingGrantDraft(kind);
+  const draft = await buildStandingGrantDraft(kind, Date.now(), { githubGet: ghGet(deps) });
   if (parsed.flags.has('--json')) {
     deps.out(JSON.stringify({ kind: draft.kind, digest: draft.digest, payload: draft.payload }, null, 2));
     return 0;
@@ -588,7 +620,7 @@ async function cmdGrant(parsed: Parsed, deps: AuthorityCliDeps, kind: 'new' | 'r
     payload = checked.value;
   } else {
     const { buildStandingGrantDraft } = await import('../core/verse/authority-api.js');
-    payload = (await buildStandingGrantDraft(kind)).payload;
+    payload = (await buildStandingGrantDraft(kind, Date.now(), { githubGet: ghGet(deps) })).payload;
   }
   deps.out(kind === 'new' ? 'You are about to sign this standing grant:' : 'You are about to re-approve (continue) this standing grant:');
   for (const line of describeGrantScope(payload)) deps.out(`  ${line}`);
@@ -747,6 +779,15 @@ interface RepoProtectPlan {
   upToDate: boolean;
   /** 3.13: why `ashlr/verify` is not required for a grant repo (null when it is, or the repo is not in the grant). */
   verifyNote?: string | null;
+  /** GitHub has no rulesets on this plan for this (private) repo — skipped, and not "unreadable". */
+  unavailable?: boolean;
+  /** The installed grant says `server` for a repo GitHub cannot protect (server-enforcement.ts enforcementMismatch). */
+  mismatch?: string | null;
+}
+
+/** A `gh api <path>` GET through the CLI's runner (tests inject it; the Verse probe's runner is read-only). */
+function ghGet(deps: AuthorityCliDeps): (path: string) => Promise<GhResult> {
+  return async (path) => deps.run('gh', ['api', path]);
 }
 
 async function ghJson(deps: AuthorityCliDeps, args: readonly string[]): Promise<unknown> {
@@ -864,8 +905,9 @@ interface SetupRepo {
 /**
  * The repos the fleet works in: the installed grant's, or — before the first
  * grant — the ones it would name (every enrolled checkout's GitHub repo plus
- * the canary; authority-api draftRepos), which are server-enforced until a
- * grant says otherwise. Read-only: no draft is built and the ledger is not
+ * the canary; authority-api draftRepos), whose enforcement is not known yet
+ * (null): the draft names `server` only where GitHub then enforces required
+ * checks (authority/server-enforcement.ts). Read-only: no draft is built and the ledger is not
  * touched, so a dry run (and Verse's checklist) can ask it freely.
  */
 async function setupTargetRepos(): Promise<SetupRepo[]> {
@@ -882,13 +924,13 @@ async function setupTargetRepos(): Promise<SetupRepo[]> {
     if (registry.state === 'ready') {
       for (const path of registry.repos) {
         const nameWithOwner = repoIdentityOfPath(path);
-        if (nameWithOwner && !byKey.has(nameWithOwner.toLowerCase())) byKey.set(nameWithOwner.toLowerCase(), { nameWithOwner, enforcement: 'server' });
+        if (nameWithOwner && !byKey.has(nameWithOwner.toLowerCase())) byKey.set(nameWithOwner.toLowerCase(), { nameWithOwner, enforcement: null });
       }
     }
   } catch {
     // An unreadable registry leaves the canary alone on the list.
   }
-  if (!byKey.has(FLEET_CANARY_REPO)) byKey.set(FLEET_CANARY_REPO, { nameWithOwner: FLEET_CANARY_REPO, enforcement: 'server' });
+  if (!byKey.has(FLEET_CANARY_REPO)) byKey.set(FLEET_CANARY_REPO, { nameWithOwner: FLEET_CANARY_REPO, enforcement: null });
   return [...byKey.values()];
 }
 
@@ -905,15 +947,53 @@ async function protectPlans(parsed: Parsed, deps: AuthorityCliDeps, given?: read
   const installed = readInstalledGrant();
   if (installed.state === 'ok') for (const r of installed.envelope.payload.repos) grantMembers.add(r.nameWithOwner.toLowerCase());
   if (byGrant) for (const r of targets) grantMembers.add(r.nameWithOwner.toLowerCase());
+  const grantEnforcement = new Map<string, RepoEnforcement>();
+  if (installed.state === 'ok') for (const r of installed.envelope.payload.repos) grantEnforcement.set(r.nameWithOwner.toLowerCase(), r.enforcement);
+  const grantSeq = installed.state === 'ok' ? installed.envelope.payload.grantSeq : null;
+  const { classifyGithubReadFailure, describeGithubReadFailure, enforcementMismatch } = await import('../core/authority/server-enforcement.js');
+  const unreadable = (repo: string, error: unknown): RepoProtectPlan => {
+    const message = (error as Error).message;
+    return { repo, skipped: `could not read it from GitHub (${describeGithubReadFailure(classifyGithubReadFailure({ message }))}): ${message}`, checks: [], ruleset: null, existingId: null, upToDate: false };
+  };
   let fleetApp: FleetAppInfo | null | undefined;
   const plans: RepoProtectPlan[] = [];
   for (const { nameWithOwner: repo, enforcement } of targets) {
     if (enforcement === 'local') {
-      plans.push({ repo, skipped: 'local enforcement (private free-plan repo: GitHub rulesets unavailable) — the daemon enforces its gates', checks: [], ruleset: null, existingId: null, upToDate: false });
+      plans.push({ repo, skipped: `local enforcement in the grant — GitHub protects nothing here; the daemon enforces its gates and G7 requires the App's host-verified ${ASHLR_VERIFY_CHECK}`, checks: [], ruleset: null, existingId: null, upToDate: false });
+      continue;
+    }
+    let info: { private?: boolean; default_branch?: string } | null;
+    try {
+      info = await ghJson(deps, ['api', `repos/${repo}`]) as { private?: boolean; default_branch?: string } | null;
+    } catch (error) {
+      plans.push(unreadable(repo, error));
+      continue;
+    }
+    // Rulesets before anything else: on GitHub Free a PRIVATE repo has neither
+    // rulesets nor classic branch protection (both answer 403 "Upgrade to
+    // GitHub Pro or make this repository public…", verified live), which is a
+    // plan limit — not a permission problem and not a network error — so it is
+    // reported as such, and only `local` enforcement can work there.
+    const listed = await deps.run('gh', ['api', `repos/${repo}/rulesets`]);
+    if (listed.status !== 0 && classifyGithubReadFailure({ message: listed.stderr }) === 'plan-unavailable') {
+      const kind = info?.private === false ? 'repo' : 'private repo';
+      const mismatch = grantEnforcement.get(repo.toLowerCase()) === 'server'
+        ? enforcementMismatch({ nameWithOwner: repo, enforcement: 'server' }, { nameWithOwner: repo, state: 'unavailable', private: info?.private ?? null, failure: 'plan-unavailable', detail: '' }, grantSeq)
+        : null;
+      plans.push({
+        repo,
+        skipped: mismatch ?? `rulesets unavailable on this plan for ${kind} ${repo} — using local enforcement with ${ASHLR_VERIFY_CHECK}`,
+        checks: [],
+        ruleset: null,
+        existingId: null,
+        upToDate: false,
+        unavailable: true,
+        mismatch,
+      });
       continue;
     }
     try {
-      const info = await ghJson(deps, ['api', `repos/${repo}`]) as { private?: boolean; default_branch?: string } | null;
+      if (listed.status !== 0) throw new Error(`gh api repos/${repo}/rulesets failed: ${listed.stderr.trim().slice(0, 200)}`);
       let verifyAppId: number | null = null;
       let verifyNote: string | null = null;
       if (grantMembers.has(repo.toLowerCase())) {
@@ -927,7 +1007,7 @@ async function protectPlans(parsed: Parsed, deps: AuthorityCliDeps, given?: read
       }
       const required = await discoverChecks(deps, repo, info?.default_branch ?? 'main', verifyAppId);
       const checks = required.map((check) => check.context);
-      const existing = await ghJson(deps, ['api', `repos/${repo}/rulesets`]) as { id?: number; name?: string }[] | null;
+      const existing = JSON.parse(listed.stdout || 'null') as { id?: number; name?: string }[] | null;
       const match = Array.isArray(existing) ? existing.find((r) => r.name === FLEET_RULESET_NAME) : undefined;
       const existingId = typeof match?.id === 'number' && Number.isSafeInteger(match.id) ? match.id : null;
       const ruleset = buildFleetRuleset(required);
@@ -944,7 +1024,7 @@ async function protectPlans(parsed: Parsed, deps: AuthorityCliDeps, given?: read
         verifyNote,
       });
     } catch (error) {
-      plans.push({ repo, skipped: `could not read it from GitHub: ${(error as Error).message}`, checks: [], ruleset: null, existingId: null, upToDate: false });
+      plans.push(unreadable(repo, error));
     }
   }
   return plans;
@@ -1835,9 +1915,16 @@ async function runSetup(parsed: Parsed, deps: AuthorityCliDeps, opts: SetupRunOp
       const stale = plans.filter((plan) => !plan.skipped && !plan.upToDate);
       const inPlace = plans.filter((plan) => !plan.skipped && plan.upToDate).length;
       const unreadable = plans.filter((plan) => plan.skipped?.startsWith('could not read')).map((plan) => plan.repo);
-      const byHand = plans.filter((plan) => plan.skipped && !plan.skipped.startsWith('could not read')).length;
+      const unavailable = plans.filter((plan) => plan.unavailable === true);
+      const mismatches = unavailable.map((plan) => plan.mismatch).filter((m): m is string => typeof m === 'string');
+      const byHand = plans.filter((plan) => plan.skipped && !plan.unavailable && !plan.skipped.startsWith('could not read')).length;
       const unread = unreadable.length > 0 ? `; could not read ${shortList(unreadable)} from GitHub` : '';
-      const left = byHand > 0 ? `; ${byHand} left to you (local enforcement or no CI)` : '';
+      // A plan limit is not a read failure: say which repos only local enforcement can protect.
+      const noRulesets = unavailable.length > 0
+        ? `; rulesets unavailable on this plan for private ${shortList(unavailable.map((plan) => plan.repo))} — ${mismatches.length > 0 ? mismatches.join('; ') : `using local enforcement with ${ASHLR_VERIFY_CHECK}`}`
+        : '';
+      const left = `${byHand > 0 ? `; ${byHand} left to you (local enforcement or no CI)` : ''}${noRulesets}`;
+      const inPlaceText = inPlace > 0 ? `the fleet ruleset is in place on ${inPlace === 1 ? '1 repo' : `${inPlace} repos`}` : 'no repo has the fleet ruleset';
       if (plans.length === 0) {
         // Nothing to look at yet — never "in place on 0 repos".
         if (canaryExists) note('rulesets', 'already', 'no server-enforced repo needs one');
@@ -1846,16 +1933,19 @@ async function runSetup(parsed: Parsed, deps: AuthorityCliDeps, opts: SetupRunOp
         const where = shortList(stale.map((plan) => plan.repo));
         if (await ask(`Apply the fleet ruleset to ${stale.length} repo(s) where it is missing or different (${where})?`)) {
           const failures = await applyProtectPlans(stale, deps);
-          note('rulesets', failures > 0 ? 'failed' : unreadable.length > 0 ? 'waiting-on-you' : 'done', failures === 0
+          note('rulesets', failures > 0 ? 'failed' : unreadable.length > 0 || mismatches.length > 0 ? 'waiting-on-you' : 'done', failures === 0
             ? `applied to ${where}${inPlace > 0 ? `; ${inPlace} already in place` : ''}${unread}${left}`
-            : `${failures} of ${stale.length} failed (see above)${unread}`);
+            : `${failures} of ${stale.length} failed (see above)${unread}${noRulesets}`);
         } else {
-          note('rulesets', dryRun ? 'skipped' : 'waiting-on-you', `${stale.length} repo(s) need the fleet ruleset (${where})${unread} — run \`ashlr authority protect --print\`, then \`--apply\``);
+          note('rulesets', dryRun ? 'skipped' : 'waiting-on-you', `${stale.length} repo(s) need the fleet ruleset (${where})${unread}${noRulesets} — run \`ashlr authority protect --print\`, then \`--apply\``);
         }
       } else if (unreadable.length > 0) {
-        note('rulesets', 'waiting-on-you', `could not read ${shortList(unreadable)} from GitHub — check \`gh auth status\`, then rerun setup${inPlace > 0 ? ` (${inPlace} already in place)` : ''}`);
+        note('rulesets', 'waiting-on-you', `could not read ${shortList(unreadable)} from GitHub — check \`gh auth status\`, then rerun setup${inPlace > 0 ? ` (${inPlace} already in place)` : ''}${noRulesets}`);
+      } else if (mismatches.length > 0) {
+        // The signed grant is never rewritten here: only a re-approval (Touch ID) switches the repo.
+        note('rulesets', 'waiting-on-you', `${inPlaceText}${left}`, { command: 'ashlr authority re-approve' });
       } else {
-        note('rulesets', 'already', `the fleet ruleset is in place on ${inPlace === 1 ? '1 repo' : `${inPlace} repos`}${left}`);
+        note('rulesets', 'already', `${inPlaceText}${left}`);
       }
     }
 
@@ -1913,7 +2003,7 @@ async function runSetup(parsed: Parsed, deps: AuthorityCliDeps, opts: SetupRunOp
     } else if (await ask('Sign the first standing grant now (Touch ID)?')) {
       try {
         const { buildStandingGrantDraft } = await import('../core/verse/authority-api.js');
-        const draft = await buildStandingGrantDraft('auto');
+        const draft = await buildStandingGrantDraft('auto', Date.now(), { githubGet: ghGet(deps) });
         for (const line of draft.summary) deps.out(`    ${line}`);
         const signed = await signAndInstall(draft.payload, deps);
         grantActive = signed.ok;

@@ -223,13 +223,14 @@ describe('drafts', () => {
     hostBinding: TEST_HOST,
     authoritySurfaceDigest: TEST_SURFACE,
     repos: [
-      { nameWithOwner: 'ashlrai/ashlr-hub', visibility: 'public' as const, hasVerify: true },
-      { nameWithOwner: 'ashlrai/ashlrcode', visibility: null, hasVerify: true },
-      { nameWithOwner: 'ashlrai/binshield', visibility: null, hasVerify: true },
-      { nameWithOwner: 'ashlrai/ashlr-pulse', visibility: null, hasVerify: false },
-      { nameWithOwner: 'ashlrai/measurably', visibility: 'private' as const, hasVerify: true },
-      { nameWithOwner: 'ashlrai/fleet-canary', visibility: 'public' as const, hasVerify: true },
-      { nameWithOwner: 'someone/unplanned', visibility: null, hasVerify: true },
+      // serverEnforcement: what GitHub enforces today (authority/server-enforcement.ts).
+      { nameWithOwner: 'ashlrai/ashlr-hub', visibility: 'public' as const, hasVerify: true, serverEnforcement: 'enforced' as const },
+      { nameWithOwner: 'ashlrai/ashlrcode', visibility: null, hasVerify: true, serverEnforcement: 'enforced' as const },
+      { nameWithOwner: 'ashlrai/binshield', visibility: null, hasVerify: true, serverEnforcement: 'enforced' as const },
+      { nameWithOwner: 'ashlrai/ashlr-pulse', visibility: null, hasVerify: false, serverEnforcement: 'enforced' as const },
+      { nameWithOwner: 'ashlrai/measurably', visibility: 'private' as const, hasVerify: true, serverEnforcement: 'unavailable' as const },
+      { nameWithOwner: 'ashlrai/fleet-canary', visibility: 'public' as const, hasVerify: true, serverEnforcement: 'enforced' as const },
+      { nameWithOwner: 'someone/unplanned', visibility: null, hasVerify: true, serverEnforcement: 'enforced' as const },
     ],
     seats: [
       { seatId: 'claude', engine: 'claude' as const },
