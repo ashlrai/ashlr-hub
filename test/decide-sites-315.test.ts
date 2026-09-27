@@ -461,6 +461,27 @@ describe('verdict extraction', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Contract check: the multi-model labeller (#547) against the REAL layer
+// ---------------------------------------------------------------------------
+
+describe('multimodel labelPrompt through the real decide()', () => {
+  it('its lazy loader resolves this module, and its own vocabulary is interpreted on its side', async () => {
+    const { loadDecide, labelPrompt, resetLabelCacheForTest } = await import('../src/core/verse/multimodel/label.js');
+    resetLabelCacheForTest();
+    const decideFn = await loadDecide();
+    expect(decideFn).toBeTypeOf('function');
+    fake.respond((req) => {
+      expect(Object.keys(req.questions).sort()).toEqual(['complexity', 'needs_frontier', 'task_class']);
+      return { task_class: choice('review', 0.94), complexity: choice('high', 0.94), needs_frontier: noul(0.83) };
+    });
+    const out = await labelPrompt('please take a careful look at this diff before I merge it', { decide: decideFn! });
+    expect(fake.fetch).toHaveBeenCalledTimes(1);
+    expect(out.classification).toMatchObject({ kind: 'review', decidedBy: 'jev' });
+    expect(readLedger().find((l) => l.kind === 'task-class')).toMatchObject({ path: 'jev', called: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Ledger coverage across sites
 // ---------------------------------------------------------------------------
 
