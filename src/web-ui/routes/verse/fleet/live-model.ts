@@ -235,7 +235,7 @@ export const GATE_LABEL: Readonly<Record<string, string>> = {
   G3: 'Verify',
   G4: 'Claims',
   G5: 'Blast radius',
-  G6: 'Judge',
+  G6: 'Judge or elite',
   G7: 'GitHub checks',
 };
 

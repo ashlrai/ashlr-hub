@@ -752,3 +752,115 @@ describe('standing merge pass — host-verified ashlr/verify (3.13)', () => {
     expect(verifyPosts(w)[0]!.body).toMatchObject({ conclusion: 'failure', output: expect.objectContaining({ title: 'Not host-verified' }) });
   });
 });
+
+describe('standing merge pass — elite self-land (3.15)', () => {
+  const ELITE = { engineModel: 'codex:gpt-6-sol', engineTier: 'frontier' as const };
+  const eliteStage = { stageId: 'elite-direct', stageIndex: 0, stageCount: 1, enteredAt: '2026-09-27T00:00:00.000Z' };
+
+  function eliteWorld(): World {
+    const w = world();
+    w.policy.current = { ...w.policy.current!, rollout: eliteStage };
+    w.availableLanes = []; // no judge seat anywhere: elite work must not need one
+    return w;
+  }
+
+  it('an elite model lands directly on green tests: no judge call, no judge seat, landing says so', async () => {
+    const w = eliteWorld();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...ELITE }));
+    await pass(w);
+    expect(w.ledger.kinds()).toEqual([
+      'gate:result:G0:pass',
+      'gate:result:G1:pass',
+      'gate:result:G1b:pass',
+      'gate:result:G2:pass',
+      'gate:result:G3:pass',
+      'gate:result:G4:pass',
+      'gate:result:G5:pass',
+      'gate:result:G6:pass',
+      'pr:opened',
+    ]);
+    expect(w.ledger.gateRows().find((r) => r.gate === 'G6')).toMatchObject({ code: 'elite-direct' });
+    expect(w.judgeCalls).toEqual([]);
+    const pr = prOf(w);
+    expect(pr.body).toContain('Elite self-land: elite model GPT-6 Sol');
+
+    // G7 still decides: nothing merges until every required check is green.
+    await pass(w);
+    expect(w.fake.mergeCalls()).toHaveLength(0);
+    w.fake.greenRequired(w.fake.headOfPull(pr.number)!);
+    w.clock.now += 10 * 60 * 1000;
+    const merged = await pass(w);
+    expect(merged.summary.merged).toBe(1);
+    expect(merged.out.landings![0]).toMatchObject({ proposalId: p.id, judgeId: null, eliteModel: 'GPT-6 Sol' });
+    expect(w.judgeCalls).toEqual([]);
+  });
+
+  it('if elite-direct lapses before the merge, the unjudged PR is held for Mason (would-merge), never merged', async () => {
+    const w = eliteWorld();
+    add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...ELITE }));
+    await pass(w);
+    const pr = prOf(w);
+    w.fake.greenRequired(w.fake.headOfPull(pr.number)!);
+    w.policy.current = { ...w.policy.current!, rollout: { stageId: '2b', stageIndex: 2, stageCount: 5, enteredAt: '2026-09-27T00:00:00.000Z' } };
+    w.clock.now += 10 * 60 * 1000;
+    await pass(w);
+    expect(w.fake.mergeCalls()).toHaveLength(0);
+    expect(w.ledger.of('gate:would-merge')).toEqual([expect.objectContaining({ withheldBecause: 'shadow' })]);
+  });
+
+  it('a non-elite producer is still judged under elite-direct', async () => {
+    const w = eliteWorld();
+    w.availableLanes = ['codex', 'claude-cli'];
+    add(w, fleetProposal(w.fake, { files: SRC_CHANGE, engineModel: 'claude:claude-opus-4-8', engineTier: 'frontier' }));
+    await pass(w);
+    expect(w.judgeCalls).toEqual([['codex']]); // Claude work → Codex judges first, never a Claude judge
+    expect(w.ledger.gateRows().find((r) => r.gate === 'G6')).toMatchObject({ code: 'judge-ship' });
+  });
+
+  it('Tier-1 work by an elite model still goes to the owner lane (self-protection is not judging)', async () => {
+    const w = eliteWorld();
+    add(w, fleetProposal(w.fake, { files: { ...SRC_CHANGE, 'package.json': '{ "name": "canary", "version": "1.0.1" }\n' }, ...ELITE }));
+    await pass(w);
+    expect(w.ledger.kinds()).toEqual(['gate:result:G0:pass', 'gate:result:G1:owner-lane', 'pr:opened']);
+    const pr = prOf(w);
+    w.fake.greenRequired(w.fake.headOfPull(pr.number)!);
+    w.clock.now += 60 * 60 * 1000;
+    await pass(w);
+    expect(w.fake.mergeCalls()).toHaveLength(0);
+  });
+});
+
+describe('standing merge pass — repo lanes run in parallel (3.15)', () => {
+  async function concurrency(repoLanes: number | undefined): Promise<number> {
+    const a = world();
+    const b = world();
+    const policy = standingPolicy([repoPolicy(a.repo), repoPolicy(b.repo)]);
+    a.policy.current = policy;
+    let inFlight = 0;
+    let peak = 0;
+    const deps: Partial<StandingPassDeps> = {
+      ...a.deps,
+      loadProposal: (id) => a.proposals.get(id) ?? b.proposals.get(id) ?? null,
+      verifyAndPersist: async () => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        inFlight--;
+        // Refused on purpose: this measures lanes, not landings.
+        return { verify: { ok: false, ran: [], detail: 'stub', failureCategory: 'test' }, persisted: true, authorityLive: true, reason: 'stub' } as never;
+      },
+    };
+    const pending = [
+      add(a, fleetProposal(a.fake, { files: SRC_CHANGE, ...GROK })),
+      add(b, fleetProposal(b.fake, { files: SRC_CHANGE, ...GROK })),
+    ];
+    const cfg = (repoLanes === undefined ? {} : { foundry: { autoMerge: { repoLanes } } }) as AshlrConfig;
+    await runStandingMergePass({ cfg, policy, pending, out: emptyOut(), deps });
+    return peak;
+  }
+
+  it('two repos verify at the same time by default; repoLanes: 1 restores one at a time', async () => {
+    expect(await concurrency(undefined)).toBe(2);
+    expect(await concurrency(1)).toBe(1);
+  });
+});

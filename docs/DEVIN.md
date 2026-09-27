@@ -12,9 +12,12 @@ Verse works with **Devin** (Cognition's hosted coding agent) in three places:
 
 Every Devin pull request reaches your repositories only through the same
 Needs-you triage and standing merge gates as cloud PRs. Under a grant, a Devin
-PR merges only when the grant's current stage names `devin` **and** judges
-from two different model families approved it. Otherwise the gates record a
-would-merge (shadow) and the PR waits for you.
+PR merges only when the grant's current stage names `devin` **and** either
+judges from two different model families approved it, or (3.15) Devin ran an
+**elite model** (SWE-2, GPT-6 Astra/Sol/Luna, or an elite Claude id) under an
+`elite-direct` grant. In the elite case green tests stand in for the judges
+([AUTHORITY.md §1a](AUTHORITY.md#1a-elite-self-land-315)). Otherwise the gates
+record a would-merge (shadow) and the PR waits for you.
 
 The lane is **off by default**; only the Devin (CLI) seat appears without it,
 once Cognition's `devin` CLI is installed. The code is in `src/core/devin/`, the CLI is
@@ -299,10 +302,19 @@ head and read twice, the report marked UNVERIFIED, then G0–G7 including
   different families** pass; one ship waits for a judge from another family;
   any eligible rejection refuses. One judge alone is not enough, because it
   may share Devin's undisclosed underlying model.
+  **Elite self-land (3.15).** When the producer identity names an elite
+  model, no judge is needed, not even one; this applies to the local CLI
+  lane's `devin-cli:swe-2-high` and `devin-cli:gpt-6-sol`, and to `devin:`
+  with the same ids. The current stage must be `elite-direct`. G3's tests and
+  G7's `ashlr/verify` decide. A cloud session records only its mode
+  (`devin:normal`), which names no model, so it still needs two judges. A
+  vendor-named suffix never changes Devin's family: `devin-cli:gpt-6-sol` is
+  family `devin`, not `openai`.
 - **Merging.** At merge time the standing pass merges a Devin PR only if the
-  live stage names `devin` and the recorded judges still satisfy the two-judge
-  rule. Otherwise it records the would-merge as `shadow` and the PR waits for
-  you. The legacy merge pass never merges Devin work.
+  live stage names `devin` and either the recorded judges still satisfy the
+  two-judge rule or, for elite work, the stage is still `elite-direct` and the
+  model still allowed. Otherwise it records the would-merge as `shadow` and
+  the PR waits for you. The legacy merge pass never merges Devin work.
 
 **API endpoints used** (Devin v3, `https://api.devin.ai/v3`, `Authorization:
 Bearer cog_…`): `GET /self`, and under `/organizations/{org_id}/sessions`
@@ -320,9 +332,9 @@ errors redact `cog_…` and `apk_…` keys.
 
 ## Limits
 
-- **Merging needs two judges and a grant that names Devin.** Without both,
-  Devin PRs are shadow: the gates record a would-merge and the PR waits for
-  you.
+- **Merging needs a grant that names Devin, and either two judges or an
+  elite model under `elite-direct`.** Otherwise Devin PRs are shadow: the
+  gates record a would-merge and the PR waits for you.
 - **Fleet use needs a new custody helper and a new grant.** Helpers before
   1.1.0 cannot sign a grant that names Devin.
 - **CLI chats are unmetered and unverified.** The CLI reports no usage, so its

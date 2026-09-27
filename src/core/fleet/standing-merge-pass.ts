@@ -29,6 +29,12 @@ import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 
 import { clampBudgetPolicy } from '../authority/effective-config.js';
+import {
+  ELITE_DIRECT_G6_CODE,
+  eliteDirectInForce,
+  eliteModelAllowFromConfig,
+  matchEliteModel,
+} from '../authority/elite-models.js';
 import { ledgerSnapshot } from '../authority/ledger.js';
 import {
   diffAddedLinesByPath,
@@ -133,7 +139,23 @@ import type {
   WouldMergeRecord,
 } from './fleet-types.js';
 
-const DEFAULT_VERIFY_PER_PASS = 2;
+/**
+ * Verifications per pass. 3.15: 4 (was 2), matching the legacy pass's
+ * default — with repo lanes running concurrently both machine verification
+ * slots (sandbox/execution-leases.ts VERIFICATION_MACHINE_SLOTS = 2) are
+ * used, twice per pass. Config `foundry.autoMerge.verifyBeforeJudgePerPass`.
+ */
+const DEFAULT_VERIFY_PER_PASS = 4;
+/**
+ * 3.15: repos progressed concurrently per pass (config
+ * `foundry.autoMerge.repoLanes`; 1 = strictly one at a time, as before).
+ * Within a repo everything stays sequential — one per-repo merge queue: a
+ * repo's open PRs first, then its pending proposals oldest first — so the
+ * daily cap, the per-repo verification slot and the base-moved rebuilds keep
+ * their order. What runs in parallel is independent repos.
+ */
+const DEFAULT_REPO_LANES = 4;
+const MAX_REPO_LANES = 16;
 const DEFAULT_JUDGE_PER_PASS = 8;
 const DEFAULT_PROPOSAL_TTL_DAYS = 7;
 const MIN_CHECK_BACKOFF_MS = 60_000;
@@ -710,23 +732,91 @@ export async function runStandingMergePass(input: {
     const keys = listFleetMergeStateKeys();
     if (keys === null) {
       note(ctx, 'the fleet merge state directory is unreadable; no fleet PR was progressed this pass');
-    } else {
-      for (const key of keys) {
-        if (ctx.deps.host.killActive()) break;
-        await progressFleetPr(key, ctx);
-      }
     }
     const pending = [...input.pending].sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
-    for (const proposal of pending) {
-      if (ctx.deps.host.killActive()) break;
-      await evaluateProposal(proposal, ctx);
-    }
+    const lanes = repoLanes(keys ?? [], pending);
+    const laneLimit = Math.min(MAX_REPO_LANES, Math.max(1, positiveIntConfig(autoMerge?.['repoLanes'], DEFAULT_REPO_LANES)));
+    await runLanes(lanes, laneLimit, async (work) => {
+      try {
+        if (work.kind === 'pr') await progressFleetPr(work.key, ctx);
+        else await evaluateProposal(work.proposal, ctx);
+      } catch (error) {
+        // Both fail closed internally; this only keeps one lane's surprise
+        // from abandoning the others mid-flight.
+        note(ctx, `${work.kind === 'pr' ? work.key : work.proposal.id} failed closed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }, () => ctx.deps.host.killActive());
   } catch (error) {
     note(ctx, `standing pass aborted: ${error instanceof Error ? error.message : String(error)}`);
   }
   input.out.standing = summary;
   input.out.landings = [...(input.out.landings ?? []), ...summary.landings];
   return summary;
+}
+
+// ---------------------------------------------------------------------------
+// Repo lanes (3.15 — parallel throughput)
+// ---------------------------------------------------------------------------
+
+type LaneWork = { kind: 'pr'; key: string } | { kind: 'proposal'; proposal: Proposal };
+
+/**
+ * Group this pass's work into one lane per repo (lowercase owner/name): each
+ * lane's open fleet PRs first (in key order), then its pending proposals
+ * (oldest first) — the order the sequential pass used, per repo. Work whose
+ * repo cannot be read shares one lane (it fails closed inside anyway).
+ * Lanes are ordered by their first item, so a single-repo fleet behaves
+ * exactly like the old loop.
+ */
+function repoLanes(keys: readonly string[], pending: readonly Proposal[]): LaneWork[][] {
+  const lanes = new Map<string, LaneWork[]>();
+  const push = (repo: string, work: LaneWork): void => {
+    const lane = lanes.get(repo);
+    if (lane) lane.push(work);
+    else lanes.set(repo, [work]);
+  };
+  const prs = new Map<string, LaneWork[]>();
+  for (const key of keys) {
+    let repo = '';
+    try {
+      const read = readFleetMergeState(key);
+      if (read.state === 'ok') repo = read.record.repo.toLowerCase();
+    } catch {
+      repo = '';
+    }
+    const list = prs.get(repo);
+    if (list) list.push({ kind: 'pr', key });
+    else prs.set(repo, [{ kind: 'pr', key }]);
+  }
+  for (const [repo, work] of prs) for (const item of work) push(repo, item);
+  for (const proposal of pending) push(fleetMirrorNameWithOwner(proposal.repo)?.toLowerCase() ?? '', { kind: 'proposal', proposal });
+  return [...lanes.values()];
+}
+
+/**
+ * Run lanes with at most `limit` in flight; items inside a lane run strictly
+ * one after another. `stop` (Stop / KILL) is checked before every item, as
+ * the sequential loop did. JavaScript runs each synchronous section (budget
+ * counters, ledger appends, state writes) to completion, so the per-pass
+ * verify / judge budgets stay exact across lanes.
+ */
+async function runLanes(
+  lanes: readonly LaneWork[][],
+  limit: number,
+  run: (work: LaneWork) => Promise<void>,
+  stop: () => boolean,
+): Promise<void> {
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < lanes.length) {
+      const lane = lanes[next++]!;
+      for (const work of lane) {
+        if (stop()) return;
+        await run(work);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, lanes.length) }, () => worker()));
 }
 
 // ---------------------------------------------------------------------------
@@ -861,13 +951,22 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
     // ── G0 — authority ───────────────────────────────────────────────────
     const producerFamily = producerModelFamily(proposal.engineModel);
     const decisionsSince = Number.isFinite(Date.parse(proposal.createdAt)) ? Date.parse(proposal.createdAt) - 60_000 : null;
+    // 3.15 elite self-land: read from the LIVE policy each time G6 is
+    // evaluated, so a stage change mid-pass is seen (never the pass snapshot).
+    const eliteDirect = (): { allow: readonly string[] | null } | null =>
+      eliteDirectInForce(deps.host.policy()) ? { allow: eliteModelAllowFromConfig(ctx.cfg) } : null;
     const g6Preview = evaluateG6({
       proposalId: proposal.id,
       producerModel: proposal.engineModel,
       diff,
       decisions: deps.readDecisions(proposal.id, decisionsSince),
       nowMs,
+      eliteDirect: eliteDirect(),
     });
+    // An elite self-land asks no model anything: no judge, and G5's red team
+    // (when enabled) runs its deterministic half only — secret and
+    // destructive-diff scans still block.
+    const eliteSelfLand = g6Preview.verdict === 'pass' && g6Preview.code === ELITE_DIRECT_G6_CODE;
     const waitSinceMs = state.judgeWaitSince ? Date.parse(state.judgeWaitSince) : null;
     // A judge seat matters only when no valid verdict exists yet.
     const seat = g6Preview.verdict !== 'pass' && g6Preview.needsJudge
@@ -1012,8 +1111,9 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
     // ── G5 — blast radius ────────────────────────────────────────────────
     const g5Checks = await deps.blastChecks(proposal, ctx.cfg);
     if ((ctx.cfg.foundry as Record<string, unknown> | undefined)?.['redTeam'] === true) {
-      g5Checks.push(await runRedTeam(ctx, state, proposal, diff, () =>
-        (seat ?? deps.judgeSeatLanes({ producerFamily, policy: livePolicy, waitSinceMs, nowMs })).lanes));
+      g5Checks.push(await runRedTeam(ctx, state, proposal, diff, () => eliteSelfLand
+        ? []
+        : (seat ?? deps.judgeSeatLanes({ producerFamily, policy: livePolicy, waitSinceMs, nowMs })).lanes));
     }
     const g5 = evaluateG5(g5Checks);
     if (!recordGate(ctx, state, 'G5', g5, null)) {
@@ -1023,12 +1123,15 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
     if (g5.verdict !== 'pass') return rejectProposal(ctx, state, proposal, 'G5', g5);
 
     // ── G6 — judge ───────────────────────────────────────────────────────
-    let g6 = g6Preview.verdict === 'pass' ? g6Preview : evaluateG6({
+    // A preview pass is re-checked against the live policy only when it was
+    // an elite pass (the stage could have changed during G3's verification).
+    let g6 = g6Preview.verdict === 'pass' && !eliteSelfLand ? g6Preview : evaluateG6({
       proposalId: proposal.id,
       producerModel: proposal.engineModel,
       diff,
       decisions: deps.readDecisions(proposal.id, decisionsSince),
       nowMs: deps.host.nowMs(),
+      eliteDirect: eliteDirect(),
     });
     const judgeCalledMs = state.judgeCalledAt ? Date.parse(state.judgeCalledAt) : Number.NaN;
     const judgeRecentlyCalled = Number.isFinite(judgeCalledMs) && deps.host.nowMs() - judgeCalledMs < JUDGE_RETRY_MS;
@@ -1045,6 +1148,7 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
           diff,
           decisions: deps.readDecisions(proposal.id, decisionsSince),
           nowMs: deps.host.nowMs(),
+          eliteDirect: eliteDirect(),
         });
         if (g6.verdict !== 'pass' && !judged.called) note(ctx, `${repo}: ${judged.reason}`);
       } else if (lanes.length === 0) {
@@ -1273,6 +1377,11 @@ async function postVerifyCheck(ctx: PassContext, state: FleetMergeStateV1): Prom
   return result;
 }
 
+/** The elite allowlist label for a proposal's signed producer, or null (compiled list — the label only). */
+function eliteLabel(proposal: Proposal): string | null {
+  return matchEliteModel(proposal.engineModel)?.entry.label ?? null;
+}
+
 function prBody(state: FleetMergeStateV1, proposal: Proposal, ownerLaneReason: string | null): string {
   const gateLine = (['G0', 'G1', 'G1b', 'G2', 'G3', 'G4', 'G5', 'G6'] as GateId[])
     .map((gate) => `${gate} ${state.gates[gate]?.code ?? '—'}`)
@@ -1284,9 +1393,11 @@ function prBody(state: FleetMergeStateV1, proposal: Proposal, ownerLaneReason: s
     `**ashlr fleet** · proposal \`${proposal.id}\` · producer \`${proposal.engineModel ?? 'unknown'}\` · ` +
       `${state.files ?? '?'} file(s), +${state.linesAdded ?? '?'}/−${state.linesDeleted ?? '?'}`,
     `Gates: ${gateLine}`,
-    ...((state.judgeIds?.length ?? 0) > 1
-      ? [`Judges: ${state.judgeIds!.map((id) => `\`${id}\``).join(', ')}`]
-      : state.judgeId ? [`Judge: \`${state.judgeId}\``] : []),
+    ...(state.gates['G6']?.code === ELITE_DIRECT_G6_CODE
+      ? [`Elite self-land: elite model ${eliteLabel(proposal) ?? 'unknown'} — tests, not a judge (G3 verified the exact tree; G7 needs \`ashlr/verify\` and every required check green).`]
+      : (state.judgeIds?.length ?? 0) > 1
+        ? [`Judges: ${state.judgeIds!.map((id) => `\`${id}\``).join(', ')}`]
+        : state.judgeId ? [`Judge: \`${state.judgeId}\``] : []),
     ownerLaneReason
       ? `**Owner lane** — ${ownerLaneReason}. The fleet never merges this PR; it is here for review.`
       : 'The ashlr-fleet App merges this PR (squash, pinned to its head SHA) once every required check is green. Close it to stop it.',
@@ -1681,11 +1792,22 @@ async function progressFleetPr(key: string, ctx: PassContext): Promise<void> {
     // every gate has passed, the would-merge is recorded, the PR waits for Mason.
     // Devin (3.15) merges only when the live stage names the `devin` engine
     // AND the judges recorded at G6 satisfy the two-judge rule; else shadow.
+    //
+    // 3.15 elite self-land: a G6 that passed with NO judge (elite-direct) is
+    // re-checked here, at merge time, against the LIVE policy and config —
+    // the stage must still be `elite-direct` and the signed producer model
+    // still on the (possibly narrowed) allowlist. If either lapsed, the PR is
+    // held (shadow) for Mason instead of merging unjudged work.
+    const eliteBasis = state.gates['G6']?.code === ELITE_DIRECT_G6_CODE;
+    const eliteStill = eliteBasis && eliteDirectInForce(livePolicy)
+      && matchEliteModel(proposal.engineModel, eliteModelAllowFromConfig(ctx.cfg)) !== null;
     const withheld = mergeWithheldBecause(livePolicy, repoPolicy)
+      ?? (eliteBasis && !eliteStill ? 'shadow' : null)
       ?? producerMergeWithheld(producerModelFamily(proposal.engineModel), {
         devinGranted: livePolicy.engines.includes('devin'),
         producerModel: proposal.engineModel ?? null,
         judgeIds: state.judgeIds ?? (state.judgeId ? [state.judgeId] : []),
+        eliteDirect: eliteStill,
       });
     if (withheld !== null) {
       recordWouldMerge(ctx, state, withheld);
@@ -1877,6 +1999,8 @@ function finishLanding(
     linesDeleted: state.linesDeleted ?? 0,
     producer: state.producer,
     judgeId: state.judgeId,
+    // 3.15: set only for an elite self-land (G6 passed on verification, no judge).
+    eliteModel: state.gates['G6']?.code === ELITE_DIRECT_G6_CODE ? eliteLabel(proposal) : null,
     proposedAt: proposal.createdAt ?? null,
     landedAt,
     watchUntil: iso(Date.parse(landedAt) + WATCH_WINDOW_MS),

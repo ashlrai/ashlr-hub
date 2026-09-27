@@ -14,13 +14,13 @@
  *
  * All copy is plain text; the draft is server data but rendered as text only.
  */
-import { useId } from 'react';
+import { useId, useState } from 'react';
 import type { AuthorityGrantDraft, RolloutStage, StandingGrantV1 } from '../../../../core/authority/types.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { Sheet } from '../../../components/primitives/Sheet.js';
 import { IconLock } from '../../../components/primitives/icons.js';
 import { useQuery } from '../../../data/hooks.js';
-import { authorityDraftQuery, type OptionalRead } from './surface-data.js';
+import { authorityDraftQuery, authorityEliteDraftQuery, type OptionalRead } from './surface-data.js';
 import { SWITCH_LABEL } from './authority-model.js';
 import { CardNote, MicroLabel } from './Surface.js';
 import type { AutonomySwitch } from '../../../../core/authority/types.js';
@@ -53,8 +53,19 @@ export function grantDays(g: Pick<StandingGrantV1, 'issuedAt' | 'expiresAt'>): n
   return Number.isFinite(a) && Number.isFinite(b) ? Math.round((b - a) / DAY) : null;
 }
 
+/** The reserved rung id (authority/elite-models.ts ELITE_DIRECT_STAGE_ID; the web bundle keeps its own copy). */
+const ELITE_DIRECT_STAGE_ID = 'elite-direct';
+
+/** One line the sheet shows for an elite-direct grant — what Mason is signing. */
+export const ELITE_DIRECT_SHEET_LINE =
+  'Elite models (Opus 5.5/5, Fable 5.1/5, Sonnet 5, GPT-6 Astra/Sol/Luna, Grok 4.7/4.6, SWE-2, Qwen 3.8 27B) land directly on green tests — no judge. '
+  + 'Other models still need an independent judge; changes to authority code still come to you.';
+
 function stageLine(s: RolloutStage): string {
   const c = s.criteria;
+  if (s.id === ELITE_DIRECT_STAGE_ID) {
+    return `${s.repos.filter((r) => r.stage === 'merge').length} of ${s.repos.length} repos merge · ${s.maxRisk} risk · ≤ ${s.maxFiles} files / ${s.maxLines} lines — one rung, no ramp; elite models land on green tests, no judge`;
+  }
   const parts = [
     `${s.repos.length} repo${s.repos.length === 1 ? '' : 's'}`,
     `${s.maxRisk} risk`,
@@ -136,7 +147,14 @@ export function DraftScope({ draft }: { draft: AuthorityGrantDraft }) {
       </section>
 
       <section className={styles.scopeBlock} aria-label="Rollout ladder">
-        <MicroLabel>Rollout ladder ({g.rollout.stages.length} stages, advances by itself)</MicroLabel>
+        {g.rollout.stages.some((s) => s.id === ELITE_DIRECT_STAGE_ID) ? (
+          <>
+            <MicroLabel>Elite direct</MicroLabel>
+            <p className={styles.scopeLead}>{ELITE_DIRECT_SHEET_LINE}</p>
+          </>
+        ) : (
+          <MicroLabel>Rollout ladder ({g.rollout.stages.length} stages, advances by itself)</MicroLabel>
+        )}
         <ol className={styles.ladder}>
           {g.rollout.stages.map((s) => (
             <li key={s.id}>
@@ -164,7 +182,11 @@ export function GrantSheet({ open, intent, then, busy, why, onApprove, onClose }
 }
 
 function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose }: Omit<GrantSheetProps, 'open'> & { titleId: string }) {
-  const read = useQuery(authorityDraftQuery, { freshMs: 0 });
+  // 3.15 elite self-land: the operator picks the draft; each is its own
+  // server draft (and digest), so what is approved is exactly what is shown.
+  const [elite, setElite] = useState(false);
+  const eliteHintId = useId();
+  const read = useQuery(elite ? authorityEliteDraftQuery : authorityDraftQuery, { freshMs: 0 });
   const draft = (read.data as OptionalRead<AuthorityGrantDraft> | undefined)?.value ?? null;
   const reason = read.data?.reason ?? null;
   return (
@@ -192,6 +214,13 @@ function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose }
         </div>
       }
     >
+      <label className={styles.eliteToggle}>
+        <input type="checkbox" checked={elite} onChange={(e) => setElite(e.target.checked)} aria-describedby={eliteHintId} />
+        Elite direct
+      </label>
+      <p id={eliteHintId} className={styles.scopeMeta}>
+        {ELITE_DIRECT_SHEET_LINE}
+      </p>
       {read.status === 'loading' && !read.data ? (
         <p className={styles.muted} aria-busy="true">Preparing the grant draft…</p>
       ) : draft ? (

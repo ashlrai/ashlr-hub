@@ -190,7 +190,9 @@ export const DEVIN_CHAT_VERDICT: ReadinessVerdict = Object.freeze(devinChatVerdi
  * current stage names the `devin` engine with a producer-only Devin seat
  * (3.15 — its own engine identity; see authority/effective-config.ts
  * standingAuthorizesDevin) and the budget's reserve and fleet caps. Devin PRs
- * then merge only under the two-judge rule (merge-gates.ts G6).
+ * then merge only under the two-judge rule (merge-gates.ts G6) — or, 3.15,
+ * on green tests alone when Devin ran an elite model (SWE-2, GPT-6) under an
+ * elite-direct grant (authority/elite-models.ts).
  */
 export function devinFleetVerdict(input: {
   enabled: boolean;
@@ -213,7 +215,7 @@ export function devinFleetVerdict(input: {
       commandFix('Draft a grant that includes Devin', 'ashlr authority draft'));
   }
   if (!input.fleetGate.ok) return v(false, 'warn', 'Paused', input.fleetGate.reason ?? 'The Devin budget refused another fleet session.');
-  return v(true, 'ok', 'Ready', 'The fleet may launch Devin on well-scoped backlog work. Its PRs pass every standing gate and merge only when two judges from different families ship them.');
+  return v(true, 'ok', 'Ready', 'The fleet may launch Devin on well-scoped backlog work. Its PRs pass every standing gate; on an elite model (SWE-2, GPT-6) under an elite-direct grant they land on green tests, otherwise they merge only when two judges from different families ship them.');
 }
 
 /** "Fleet: Ready — …" for the CLI. */
