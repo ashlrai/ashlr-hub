@@ -131,6 +131,29 @@ export async function apiPost<T>(
 }
 
 /**
+ * DELETE a mutating route with the raw mutation token — apiPost's twin, with
+ * the same refusal reading (a codeless 404 is the dispatch gate). Used where
+ * a route retires a thing by id (`DELETE /api/verse/leader/directives/<id>`).
+ */
+export async function apiDelete<T>(path: string, mutationToken: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(path, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+    headers: { 'x-ashlr-token': mutationToken },
+    signal,
+  });
+  if (res.status === 401) throw new ApiError('Mutation token was rejected.', 401, path);
+  if (!res.ok) {
+    const { detail, code } = await readRefusal(res);
+    if (res.status === 404 && code === null) throw new DispatchDisabledError(path);
+    throw new ApiError(`DELETE ${path} failed (HTTP ${res.status})${detail ? `: ${detail}` : ''}.`, res.status, path, detail || null, code);
+  }
+  if (res.status === 204) return undefined as T;
+  const text = await res.text();
+  return (text ? JSON.parse(text) : undefined) as T;
+}
+
+/**
  * The refusal sentence and code from a failed POST's body, if it had any.
  *
  * `error` is the documented refusal field, but the Verse control plane
@@ -142,8 +165,11 @@ export async function apiPost<T>(
  */
 async function readRefusal(res: Response): Promise<{ detail: string; code: string | null }> {
   try {
-    const j = (await res.json()) as { error?: unknown; note?: unknown; code?: unknown };
-    const detail = typeof j.error === 'string' && j.error ? j.error : typeof j.note === 'string' ? j.note : '';
+    const j = (await res.json()) as { error?: unknown; note?: unknown; message?: unknown; code?: unknown };
+    // `message`: a result body that explains itself (the Leader's approve
+    // route answers 409 with `{ ok: false, outcome, message, … }`).
+    const detail =
+      typeof j.error === 'string' && j.error ? j.error : typeof j.note === 'string' && j.note ? j.note : typeof j.message === 'string' ? j.message : '';
     const code = typeof j.code === 'string' && j.code ? j.code : null;
     return { detail, code };
   } catch {

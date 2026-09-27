@@ -52,6 +52,8 @@ import {
 import { matchCommand } from './command-catalog.js';
 import { isGuardOpen } from './guarded-action.js';
 import { markResolved, pruneResolved, runNeedsYouAction, useResolvedIds } from './needs-you-actions.js';
+import { requestLeaderFocus } from '../leader/leader-focus.js';
+import { needsYouQuestionText, questionIdOfNeedsYouItem } from '../leader/question-id.js';
 import { cleanLandable, cloudPreviewsQuery, runBatch, triageChip, type TriageChip } from './cloud-triage.js';
 import {
   actionOf,
@@ -267,6 +269,12 @@ export function NeedsYouDrawer() {
     const action = actionOf(item, kind);
     if (!action) {
       toast.show(`Nothing to ${kind} on this item.`, 'neutral');
+      return;
+    }
+    if (isAnswerAction(item, action)) {
+      // The server's "Answer" needs words the drawer cannot take: the answer
+      // box lives in Mind's conversation, opened on this question.
+      answerLeaderQuestion(item);
       return;
     }
     if (!dispatchEnabled && action.request) {
@@ -533,6 +541,20 @@ const TARGET_LABEL = (item: NeedsYouItem): string | null => {
   }
 };
 
+/**
+ * A Leader question's "Answer" (the server maps it to the button-only `fix`
+ * kind with no request: it needs free text).
+ */
+function isAnswerAction(item: NeedsYouItem, action: NeedsYouItem['actions'][number]): boolean {
+  return item.kind === 'leader-question' && action.kind === 'fix' && action.request === null;
+}
+
+/** Close the drawer and open this question's answer box in Mind's Leader conversation. */
+function answerLeaderQuestion(item: NeedsYouItem): void {
+  closeVerseOverlay();
+  requestLeaderFocus({ kind: 'question', questionId: questionIdOfNeedsYouItem(item.id), text: needsYouQuestionText(item) });
+}
+
 const NO_SEATS: readonly VerseSeat[] = [];
 const NO_PREVIEWS: ReadonlyMap<string, CloudPrPreview> = new Map();
 
@@ -676,6 +698,13 @@ function ItemDetail({
         {item.expiresAt ? (<><dt>Closes</dt><dd className={styles.deadline}>{until(item.expiresAt, now)}</dd></>) : null}
       </dl>
       <div className={styles.itemActions}>
+        {item.kind === 'leader-question' && !item.actions.some((a) => isAnswerAction(item, a)) ? (
+          // A server from before 3.14 sends no Answer action: offer the same
+          // jump to Mind's conversation with this question's answer box open.
+          <Button variant="primary" size="sm" onClick={() => answerLeaderQuestion(item)}>
+            Answer
+          </Button>
+        ) : null}
         {targetLabel ? (
           <Button variant="subtle" size="sm" onClick={() => onOpenTarget(item)} trailingIcon={item.target.kind === 'url' ? <IconExternalLink /> : undefined}>
             {targetLabel}
@@ -689,11 +718,12 @@ function ItemDetail({
         {item.actions.map((action) => {
           const key = NEEDS_YOU_ACTION_KEYS[action.kind];
           const needsDispatch = action.request !== null;
+          const primary = action.kind === 'approve' || isAnswerAction(item, action);
           return (
             <Button
               key={action.kind}
               size="sm"
-              variant={action.destructive ? 'danger' : action.kind === 'approve' ? 'primary' : 'subtle'}
+              variant={action.destructive ? 'danger' : primary ? 'primary' : 'subtle'}
               disabled={needsDispatch && !dispatchEnabled}
               onClick={() => onAct(item, action.kind)}
               aria-keyshortcuts={key}
