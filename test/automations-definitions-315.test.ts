@@ -88,6 +88,14 @@ describe('RRULE subset', () => {
     expect(Math.round((b.getTime() - a.getTime()) / 86_400_000)).toBe(2);
   });
 
+  it('every template names a playbook that exists (built-in)', async () => {
+    const { getPlaybook } = await import('../src/core/playbooks/index.js');
+    for (const t of AUTOMATION_TEMPLATES) {
+      expect(t.input.playbookId, t.id).not.toBeNull();
+      expect(await getPlaybook(t.input.playbookId!), t.id).not.toBeNull();
+    }
+  });
+
   it('describes a rule in operator language', () => {
     const r = parseRrule('FREQ=WEEKLY;BYDAY=MO;BYHOUR=6');
     if (!r.ok) throw new Error('parse');

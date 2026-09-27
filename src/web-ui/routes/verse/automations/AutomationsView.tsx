@@ -31,6 +31,7 @@ import { Switch } from '../../../components/primitives/Switch.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { describeContextError, useTokenGate } from '../context/use-token-gate.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
+import { playbooksQuery } from '../playbooks/playbooks-queries.js';
 import { getAutomationsFocus, isAutomationsFocusLive, subscribeAutomationsFocus, takeAutomationsFocus } from './automations-focus.js';
 import {
   FIRING_LABEL,
@@ -299,7 +300,7 @@ function AutomationEditor(props: {
           {AUTOMATION_LANES.map((l) => <option key={l} value={l}>{LANE_LABEL[l]}</option>)}
         </Select>
         <Input label="Repos" hint="owner/name, comma separated — or * for every repo in the standing grant" value={form.repos} onChange={(e) => set('repos', e.target.value)} />
-        <Input label="Playbook (optional)" hint="A playbook id" value={form.playbookId} onChange={(e) => set('playbookId', e.target.value)} />
+        <PlaybookField value={form.playbookId} onChange={(v) => set('playbookId', v)} />
         <Input label="Max in flight" type="number" min={1} value={form.maxConcurrent} onChange={(e) => set('maxConcurrent', e.target.value)} />
         <Input label="Max per day" type="number" min={1} value={form.maxPerDay} onChange={(e) => set('maxPerDay', e.target.value)} />
         <Input label="Queue depth" type="number" min={0} value={form.queueDepth} onChange={(e) => set('queueDepth', e.target.value)} />
@@ -318,6 +319,26 @@ function AutomationEditor(props: {
         <Button type="button" variant="ghost" size="sm" onClick={props.onCancel}>Cancel</Button>
       </div>
     </form>
+  );
+}
+
+/**
+ * The playbook every task from this automation runs under (src/core/playbooks).
+ * A picker over the library; free text (`id` or `id@vN`) when the library
+ * cannot be read, so a pinned version is always expressible.
+ */
+function PlaybookField({ value, onChange }: { value: string; onChange: (next: string) => void }) {
+  const read = useQuery(playbooksQuery);
+  const rows = read.data?.value ?? null;
+  const pinned = value !== '' && rows !== null && !rows.some((p) => p.id === value);
+  if (rows === null || pinned) {
+    return <Input label="Playbook (optional)" hint="A playbook id, e.g. fix-issue or fix-issue@v2" value={value} onChange={(e) => onChange(e.target.value)} />;
+  }
+  return (
+    <Select label="Playbook (optional)" hint="Every task runs under this playbook's procedure" value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">None</option>
+      {rows.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.macro})</option>)}
+    </Select>
   );
 }
 

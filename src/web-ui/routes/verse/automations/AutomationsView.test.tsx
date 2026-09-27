@@ -102,6 +102,9 @@ function server(over: { view?: () => AutomationsOverviewResponse; fire?: Automat
   return installFetch((call) => {
     if (call.method === 'POST') over.onPost?.(call);
     if (call.path === '/api/verse/automations' && call.method === 'GET') return json(over.view ? over.view() : overview());
+    if (call.path === '/api/verse/playbooks') {
+      return json({ playbooks: [{ id: 'fix-issue', name: 'Fix an issue', macro: '!fix-issue', description: '', taskKinds: [], auto: false, latest: 1, builtin: true, updatedAt: '' }] });
+    }
     if (call.path === '/api/verse/automations' && call.method === 'POST') return json({ automation: { ...automation, id: 'au_fix-issues-labeled-ashlr', name: (call.body as { name: string }).name, enabled: false } }, 201);
     if (call.path === '/api/verse/automations/au_nightly' && call.method === 'POST') return json({ automation });
     if (call.path === '/api/verse/automations/au_nightly/disable') return json({ automation: { ...automation, enabled: false } });
@@ -221,12 +224,15 @@ describe('<AutomationsView>', () => {
     const form = screen.getByRole('form', { name: 'New automation' });
     fireEvent.change(within(form).getByLabelText('Repos'), { target: { value: 'acme/app' } });
     fireEvent.change(within(form).getByLabelText('Name'), { target: { value: 'Fix ashlr issues' } });
+    const picker = (await within(form).findByRole('combobox', { name: 'Playbook (optional)' })) as HTMLSelectElement;
+    fireEvent.change(picker, { target: { value: 'fix-issue' } });
     fireEvent.click(within(form).getByRole('button', { name: 'Create' }));
     await waitFor(() => expect(posts.map((p) => p.path)).toEqual(['/api/verse/automations']));
     expect(posts[0]!.body).toMatchObject({
       name: 'Fix ashlr issues',
       lane: 'fleet',
       repos: ['acme/app'],
+      playbookId: 'fix-issue',
       trigger: { kind: 'github-issues', labels: ['ashlr'] },
     });
     expect(await screen.findByText(/Created Fix ashlr issues \(off/)).toBeTruthy();

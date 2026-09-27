@@ -19,9 +19,10 @@ import {
   setAutomationEnabled,
 } from './store.js';
 import type { AutomationInput, AutomationV1 } from './types.js';
+import { AutomationInputError, canonicalPlaybookRef } from './validate.js';
 
 export * from './types.js';
-export { AutomationInputError } from './validate.js';
+export { AutomationInputError, canonicalPlaybookRef } from './validate.js';
 export { AUTOMATION_TEMPLATES, automationTemplate } from './templates.js';
 export { parseRrule, nextOccurrence, describeRrule } from './rrule.js';
 export {
@@ -52,8 +53,35 @@ export async function getAutomation(id: string): Promise<AutomationV1 | null> {
   return (await readAutomations()).automations.find((a) => a.id === id) ?? null;
 }
 
-/** Throws AutomationInputError (plain sentence) on an invalid definition or an existing id. */
+/** Refs that name no playbook (src/core/playbooks: saved versions + built-ins). */
+async function missingPlaybooks(refs: readonly (string | null | undefined)[]): Promise<string[]> {
+  const wanted = [...new Set(refs.filter((r): r is string => typeof r === 'string' && r !== ''))];
+  if (wanted.length === 0) return [];
+  const [{ getPlaybook }, { parsePlaybookRefText }] = await Promise.all([import('../playbooks/store.js'), import('../playbooks/types.js')]);
+  const missing: string[] = [];
+  for (const ref of wanted) {
+    const canonical = canonicalPlaybookRef(ref);
+    const parsed = canonical ? parsePlaybookRefText(canonical) : null;
+    if (!parsed || !(await getPlaybook(parsed.id, parsed.version))) missing.push(ref);
+  }
+  return missing;
+}
+
+/** A named playbook must exist when the automation is saved — a lane would refuse it at launch anyway. */
+async function assertPlaybooksExist(input: Record<string, unknown>): Promise<void> {
+  const triage = input['triage'] as { playbooks?: unknown } | null | undefined;
+  const refs = [input['playbookId'], ...(Array.isArray(triage?.playbooks) ? triage!.playbooks : [])].filter((r): r is string => typeof r === 'string' && r !== '');
+  // Malformed refs get validation's own sentence (saveAutomation), not "no such playbook".
+  if (refs.some((r) => canonicalPlaybookRef(r) === null)) return;
+  const missing = await missingPlaybooks(refs);
+  if (missing.length > 0) {
+    throw new AutomationInputError(`No playbook ${missing.map((m) => `"${m.slice(0, 60)}"`).join(', ')} — create it in Verse → Playbooks or \`ashlr playbook new\` first.`);
+  }
+}
+
+/** Throws AutomationInputError (plain sentence) on an invalid definition, an existing id, or an unknown playbook. */
 export async function createAutomation(input: AutomationInput | Record<string, unknown>): Promise<AutomationV1> {
+  await assertPlaybooksExist(input as Record<string, unknown>);
   return (await saveAutomation(input, { mode: 'create' })).automation;
 }
 
@@ -63,7 +91,9 @@ export async function updateAutomation(id: string, patch: Partial<AutomationInpu
   if (!existing) return null;
   const { v: _v, createdAt: _c, updatedAt: _u, ...current } = existing;
   const { id: _ignored, ...rest } = patch as Record<string, unknown>;
-  return (await saveAutomation({ ...current, ...rest, id }, { mode: 'update' })).automation;
+  const merged: Record<string, unknown> = { ...current, ...rest, id };
+  await assertPlaybooksExist(merged);
+  return (await saveAutomation(merged, { mode: 'update' })).automation;
 }
 
 export function enableAutomation(id: string): Promise<AutomationV1 | null> {

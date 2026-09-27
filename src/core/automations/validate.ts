@@ -4,6 +4,7 @@
  * through `normaliseAutomation`, so a definition on disk is either fully
  * valid or ignored. Unknown keys are refused, never dropped silently.
  */
+import { parsePlaybookRefText } from '../playbooks/types.js';
 import { parseRrule } from './rrule.js';
 import {
   AUTOMATION_DEFAULTS,
@@ -11,7 +12,6 @@ import {
   AUTOMATION_LABEL_PATTERN,
   AUTOMATION_LANES,
   AUTOMATION_LIMITS,
-  AUTOMATION_PLAYBOOK_ID_PATTERN,
   AUTOMATION_REPO_PATTERN,
   AUTOMATION_SCHEMA_VERSION,
   AUTOMATION_TRIGGER_KINDS,
@@ -181,13 +181,21 @@ function normaliseTriage(value: unknown, lane: AutomationLane, playbookId: strin
   if (!Array.isArray(rawPlaybooks) || rawPlaybooks.length > 20) return fail('triage.playbooks must be a list of at most 20 playbook ids.');
   const playbooks: string[] = [];
   for (const p of rawPlaybooks) {
-    if (typeof p !== 'string' || !AUTOMATION_PLAYBOOK_ID_PATTERN.test(p)) return fail('triage.playbooks entries must be short ids without spaces.');
-    if (!playbooks.includes(p)) playbooks.push(p);
+    const ref = typeof p === 'string' ? canonicalPlaybookRef(p) : null;
+    if (!ref) return fail('triage.playbooks entries must be playbook ids (e.g. fix-bug or fix-bug@v2).');
+    if (!playbooks.includes(ref)) playbooks.push(ref);
   }
   if (playbookId && playbooks.length > 0 && !playbooks.includes(playbookId)) playbooks.unshift(playbookId);
   const rawMin = value['minConfidence'] ?? AUTOMATION_TRIAGE_DEFAULT_CONFIDENCE;
   if (typeof rawMin !== 'number' || !Number.isFinite(rawMin) || rawMin < 0.5 || rawMin > 1) return fail('triage.minConfidence must be between 0.5 and 1.');
   return { lanes, playbooks, minConfidence: rawMin };
+}
+
+/** `id`, `!macro`, `id@v3`, `id@3` → `id` / `id@v3` (the playbooks module's own parser); null when malformed. */
+export function canonicalPlaybookRef(value: string): string | null {
+  const parsed = parsePlaybookRefText(value);
+  if (!parsed) return null;
+  return parsed.version === null ? parsed.id : `${parsed.id}@v${parsed.version}`;
 }
 
 /**
@@ -228,8 +236,9 @@ export function normaliseAutomation(
   const rawPlaybook = body['playbookId'];
   let playbookId: string | null = null;
   if (rawPlaybook !== undefined && rawPlaybook !== null && rawPlaybook !== '') {
-    if (typeof rawPlaybook !== 'string' || !AUTOMATION_PLAYBOOK_ID_PATTERN.test(rawPlaybook)) return fail('playbookId must be a short id without spaces.');
-    playbookId = rawPlaybook;
+    const ref = typeof rawPlaybook === 'string' ? canonicalPlaybookRef(rawPlaybook) : null;
+    if (!ref) return fail('playbookId must be a playbook id, e.g. fix-bug, !fix-bug or fix-bug@v2.');
+    playbookId = ref;
   }
 
   const rawInstructions = body['instructions'] ?? '';

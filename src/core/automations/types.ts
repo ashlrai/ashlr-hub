@@ -77,7 +77,11 @@ export interface AutomationV1 {
   enabled: boolean;
   trigger: AutomationTrigger;
   lane: AutomationLane;
-  /** A playbook id (src/core/playbooks) carried to the task; never resolved here. */
+  /**
+   * A playbook (src/core/playbooks) every task runs under: `id` (latest) or
+   * `id@vN` (pinned). Checked to exist on create/update; the lane resolves
+   * and injects it (cloud/Devin explicitly, fleet via its `!macro`).
+   */
   playbookId: string | null;
   /** owner/name list, or `['*']` for every repo in the standing grant. */
   repos: string[];
@@ -184,7 +188,8 @@ export const AUTOMATION_ID_PATTERN = /^au_[a-z0-9][a-z0-9-]{1,47}$/;
 export const AUTOMATION_FIRING_ID_PATTERN = /^af_\d{8}T\d{6}_[a-z0-9]{6}$/;
 export const AUTOMATION_REPO_PATTERN = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 export const AUTOMATION_LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 :._/+-]{0,49}$/;
-export const AUTOMATION_PLAYBOOK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
+/** A playbook ref as src/core/playbooks writes it: `id` or `id@vN` (validate.ts canonicalises `!macro` / `id@N`). */
+export const AUTOMATION_PLAYBOOK_ID_PATTERN = /^[a-z0-9][a-z0-9-]{1,47}(?:@v\d{1,6})?$/;
 
 // ---------------------------------------------------------------------------
 // Firings
