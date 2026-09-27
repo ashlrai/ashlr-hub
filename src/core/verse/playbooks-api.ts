@@ -3,6 +3,8 @@
  * (src/core/playbooks/**). Mounted by verse-api.ts as the `playbooks` family.
  *
  *   GET  /api/verse/playbooks                  → PlaybooksListResponse
+ *        (each row carries `kind`; a command workflow's row also carries
+ *        its template + params, so a terminal picker needs one read)
  *   GET  /api/verse/playbooks/<id>[?version=N] → PlaybookDetailResponse
  *        (the version, rendered as an engine reads it, every version with
  *        its merged / refused / reverted / failed counts from retros)
@@ -90,18 +92,22 @@ async function readMutationBody(ctx: VerseApiContext, req: IncomingMessage, res:
 }
 
 async function detail(id: string, version: number | null): Promise<PlaybookDetailResponse | null> {
-  const [{ getPlaybook, listPlaybookVersions }, { renderPlaybookBlock }, { emptyOutcomes, playbookOutcomes }] = await Promise.all([
+  const [{ getPlaybook, listPlaybookVersions }, { renderPlaybookBlock }, { emptyOutcomes, playbookOutcomes }, { renderCommandWorkflowMarkdown }] = await Promise.all([
     import('../playbooks/store.js'),
     import('../playbooks/resolve.js'),
     import('../playbooks/stats.js'),
+    import('../playbooks/command-template.js'),
   ]);
   const playbook = await getPlaybook(id, version);
   if (!playbook) return null;
   const [versions, outcomes] = await Promise.all([listPlaybookVersions(id), playbookOutcomes(id)]);
+  const command = playbook.meta.kind === 'command' ? playbook.meta.command : undefined;
   return {
     v: 1,
     playbook,
-    rendered: renderPlaybookBlock(playbook),
+    // A command workflow never reaches an engine (renderPlaybookBlock is ''
+    // for one): show its command and parameters instead.
+    rendered: command ? renderCommandWorkflowMarkdown(playbook.meta.name, command) : renderPlaybookBlock(playbook),
     versions: versions.map((v) => ({ ...v, outcomes: outcomes.get(v.version) ?? emptyOutcomes() })),
   };
 }

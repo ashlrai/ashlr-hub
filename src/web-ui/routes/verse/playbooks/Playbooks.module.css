@@ -398,3 +398,106 @@
   outline: none;
   box-shadow: var(--shadow-focus-ring);
 }
+
+/* ── Command workflows (kind: command) ──────────────────────────────── */
+
+.kindBadge {
+  display: inline-flex;
+  align-items: center;
+  height: 1.25rem;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs-size);
+  line-height: 1;
+  color: var(--text-secondary);
+  vertical-align: middle;
+}
+.workflowForm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.workflowPreview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.commandBlock {
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-code);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.workflowPicker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-3);
+}
+.pickerHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.pickerTitle {
+  margin: 0;
+  font-size: var(--text-md-size);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-primary);
+}
+.pickerEmpty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+.pickerList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-px);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 20rem;
+  overflow-y: auto;
+}
+.pickerList button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-px);
+  width: 100%;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  text-align: left;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+.pickerList button:hover {
+  background: var(--bg-hover);
+}
+.pickerList button:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus-ring);
+}
+.rowCommand {
+  max-width: 100%;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

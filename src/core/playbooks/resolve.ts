@@ -14,6 +14,14 @@
  *
  * The rendered block is appended AFTER the task text and BEFORE any delivery
  * contract; with no playbook the prompt is returned byte-identical.
+ *
+ * COMMAND WORKFLOWS (`kind: command`) are never resolved for a task: they are
+ * shell templates an operator pastes into a terminal, not guidance for an
+ * engine. Their `!macro` in task text is plain text, the auto-matcher never
+ * sees them, naming one explicitly fails like an unknown playbook (with its
+ * own sentence), a pin to a command version resolves to nothing, and
+ * renderPlaybookBlock renders '' for one — so no path can put a command
+ * template into an engine's prompt.
  */
 import { classifyTaskKind, repoMatches } from '../learn/retro/inject.js';
 import { getPlaybook, getPlaybookSync, listLatestPlaybooks, listLatestPlaybooksSync } from './store.js';
@@ -22,6 +30,7 @@ import {
   PLAYBOOK_SECTIONS,
   formatPlaybookRef,
   parsePlaybookRefText,
+  playbookKindOf,
   type PlaybookMatch,
   type PlaybookRef,
   type PlaybookSectionName,
@@ -81,9 +90,15 @@ function globPrefix(glob: string): string {
   return (i === -1 ? glob : glob.slice(0, i)).toLowerCase().replace(/\/$/, '');
 }
 
+/** Can this playbook guide an engine? False for a command workflow. Pure. */
+export function isAgentPlaybook(pb: Pick<PlaybookV1, 'meta'>): boolean {
+  return playbookKindOf(pb.meta) === 'agent';
+}
+
 /** Does an auto playbook apply to this task? Pure. */
 export function autoMatches(pb: PlaybookV1, target: PlaybookTarget): boolean {
   const m = pb.meta;
+  if (!isAgentPlaybook(pb)) return false;
   if (!m.auto || (m.taskKinds.length === 0 && m.appliesTo.repos.length === 0)) return false;
   if (m.appliesTo.repos.length > 0 && !m.appliesTo.repos.some((r) => repoMatches(r, target.repo))) return false;
   if (m.taskKinds.length > 0) {
@@ -143,14 +158,17 @@ function specificity(pb: PlaybookV1): number {
  * silently running without the playbook it asked for.
  */
 export function choosePlaybook(
-  catalog: readonly PlaybookV1[],
+  fullCatalog: readonly PlaybookV1[],
   target: PlaybookTarget,
   matcher: RegisteredMatcher | null = registeredMatcher,
-): PlaybookChoice | { unknown: string } | null {
+): PlaybookChoice | { unknown: string; command?: true } | null {
+  // Only agent playbooks guide a task; a command workflow is never a candidate.
+  const catalog = fullCatalog.filter(isAgentPlaybook);
   const explicit = typeof target.explicit === 'string' ? target.explicit.trim() : '';
   if (explicit) {
     const parsed = parsePlaybookRefText(explicit);
     const pb = parsed ? byMacro(catalog, parsed.id) : null;
+    if (parsed && !pb && byMacro(fullCatalog, parsed.id)) return { unknown: explicit, command: true };
     if (!parsed || !pb) return { unknown: explicit };
     return { id: pb.meta.id, version: parsed.version, match: 'explicit' };
   }
@@ -187,6 +205,8 @@ function budgetLine(pb: PlaybookV1): string | null {
 
 /** The block an engine reads. Pure. Never exceeds PLAYBOOK_INJECT_CAP_BYTES. */
 export function renderPlaybookBlock(pb: PlaybookV1, capBytes: number = PLAYBOOK_INJECT_CAP_BYTES): string {
+  // A command workflow is never engine guidance: '' keeps any prompt byte-identical.
+  if (!isAgentPlaybook(pb)) return '';
   const build = (skip: ReadonlySet<PlaybookSectionName>): string => {
     const lines = [
       `## Playbook: ${pb.meta.name} (${pb.meta.macro} · ${formatPlaybookRef({ id: pb.meta.id, version: pb.version })})`,
@@ -236,6 +256,10 @@ function unknownError(name: string): string {
   return `There is no playbook called “${name.slice(0, 60)}”. Run \`ashlr playbook list\` or open Playbooks in Verse.`;
 }
 
+function commandError(name: string): string {
+  return `“${name.slice(0, 60)}” is a command workflow — it is pasted into a terminal, it cannot guide an agent. Name an agent playbook instead.`;
+}
+
 function versionError(id: string, version: number): string {
   return `The playbook “${id}” has no version ${version}.`;
 }
@@ -245,9 +269,11 @@ export async function resolvePlaybook(target: PlaybookTarget, catalog?: readonly
   try {
     const choice = choosePlaybook(catalog ?? (await listLatestPlaybooks()), target);
     if (!choice) return { ok: true, resolved: null };
-    if ('unknown' in choice) return { ok: false, error: unknownError(choice.unknown) };
+    if ('unknown' in choice) return { ok: false, error: choice.command ? commandError(choice.unknown) : unknownError(choice.unknown) };
     const pb = await getPlaybook(choice.id, choice.version);
     if (!pb) return choice.version !== null ? { ok: false, error: versionError(choice.id, choice.version) } : { ok: true, resolved: null };
+    // A pin to a version of another kind (kinds never change within an id — store.ts — but a record is read back from disk).
+    if (!isAgentPlaybook(pb)) return choice.match === 'explicit' ? { ok: false, error: commandError(choice.id) } : { ok: true, resolved: null };
     return { ok: true, resolved: { playbook: pb, ref: refOf(pb), match: choice.match } };
   } catch {
     return { ok: true, resolved: null };
@@ -260,7 +286,7 @@ export function resolvePlaybookSync(target: PlaybookTarget, catalog?: readonly P
     const choice = choosePlaybook(catalog ?? listLatestPlaybooksSync(), target);
     if (!choice || 'unknown' in choice) return null;
     const pb = getPlaybookSync(choice.id, choice.version);
-    return pb ? { playbook: pb, ref: refOf(pb), match: choice.match } : null;
+    return pb && isAgentPlaybook(pb) ? { playbook: pb, ref: refOf(pb), match: choice.match } : null;
   } catch {
     return null;
   }

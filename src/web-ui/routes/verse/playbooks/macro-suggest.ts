@@ -8,15 +8,20 @@
  * reason, not an error.
  */
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
-import type { PlaybookSummary } from '../../../../core/playbooks/types.js';
+import { playbookKindOf, type PlaybookSummary } from '../../../../core/playbooks/types.js';
 import { ensureQuery, getQuerySnapshot, subscribeQuery } from '../../../data/cache.js';
 import { playbooksQuery, type PlaybooksRead } from './playbooks-queries.js';
 
 /** How long a read list is reused before the next `!` re-reads it. */
 const LIST_MAX_AGE_MS = 60_000;
 
-/** Macro-prefix matches first, then id / name substrings; at most `limit`. Pure. */
-export function matchPlaybookMacros(rows: readonly PlaybookSummary[], query: string, limit = 8): PlaybookSummary[] {
+/**
+ * Macro-prefix matches first, then id / name substrings; at most `limit`.
+ * Command workflows are left out: no lane resolves their `!macro` (they are
+ * pasted into a terminal from Playbooks or the terminal's menu). Pure.
+ */
+export function matchPlaybookMacros(allRows: readonly PlaybookSummary[], query: string, limit = 8): PlaybookSummary[] {
+  const rows = allRows.filter((r) => playbookKindOf(r) === 'agent');
   const q = query.toLowerCase();
   const macroName = (r: PlaybookSummary) => r.macro.replace(/^!/, '');
   const prefix = rows.filter((r) => macroName(r).startsWith(q) || r.id.startsWith(q));

@@ -38,6 +38,7 @@ import { canonicalizePlaybook, parsePlaybook } from './parse.js';
 import {
   PLAYBOOK_ID_PATTERN,
   isPlaybookRef,
+  playbookKindOf,
   type PlaybookMatch,
   type PlaybookRef,
   type PlaybookSummary,
@@ -323,6 +324,8 @@ export function summarizePlaybook(pb: PlaybookV1): PlaybookSummary {
     latest: pb.version,
     builtin: pb.builtin,
     updatedAt: pb.createdAt,
+    kind: playbookKindOf(pb.meta),
+    ...(pb.meta.kind === 'command' && pb.meta.command ? { command: pb.meta.command } : {}),
   };
 }
 
@@ -396,6 +399,11 @@ export function savePlaybook(source: string, opts: SavePlaybookOptions = {}): Pr
     if (clash) return fail('macro', `\`${c.meta.macro}\` is already used by the playbook \`${clash.meta.id}\`.`);
     if (current && opts.baseVersion !== undefined && opts.baseVersion !== current.version) {
       return fail('version', `This playbook changed since you opened it (now v${current.version}). Reload and re-apply your edit.`);
+    }
+    // A version history is one kind: an agent playbook's retros and a command
+    // workflow's template must never be read as each other's versions.
+    if (current && playbookKindOf(current.meta) !== playbookKindOf(c.meta)) {
+      return fail('kind', `\`${id}\` is ${playbookKindOf(current.meta) === 'command' ? 'a command workflow' : 'an agent playbook'} — its kind cannot change. Save it under a new id instead.`);
     }
     if (current && current.sha === shaOf(c.source)) return fail('source', 'Nothing changed — the text matches the latest version.');
     if (current && current.version >= MAX_PLAYBOOK_VERSIONS) return fail('version', `At most ${MAX_PLAYBOOK_VERSIONS} versions per playbook.`);

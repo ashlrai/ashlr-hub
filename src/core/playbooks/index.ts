@@ -15,6 +15,14 @@ import { savePlaybook, type SavePlaybookOptions, type SavePlaybookResult } from 
 export * from './types.js';
 export { canonicalizePlaybook, parsePlaybook, playbookTemplate, serializePlaybook } from './parse.js';
 export {
+  CommandTemplateError,
+  commandValueIssues,
+  fillCommandTemplate,
+  parseCommandTemplate,
+  quoteShellValue,
+  type CommandTemplateParse,
+} from './command-template.js';
+export {
   builtinPlaybooks,
   getPlaybook,
   getPlaybookSync,
@@ -35,6 +43,7 @@ export {
   appendPlaybookBlock,
   choosePlaybook,
   findMacroMentions,
+  isAgentPlaybook,
   refOf,
   registerPlaybookAutoMatcher,
   renderPlaybookBlock,

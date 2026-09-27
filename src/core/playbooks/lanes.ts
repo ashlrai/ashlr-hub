@@ -7,7 +7,7 @@
  * gate, budget cap or authority. No playbook ⇒ the prompt is byte-identical.
  */
 import { listLatestPlaybooksSync, recordPlaybookUse } from './store.js';
-import { appendPlaybookBlock, findMacroMentions, renderPlaybookBlock, resolvePlaybook, resolvePlaybookSync } from './resolve.js';
+import { appendPlaybookBlock, findMacroMentions, isAgentPlaybook, renderPlaybookBlock, resolvePlaybook, resolvePlaybookSync } from './resolve.js';
 import type { PlaybookMatch, PlaybookRef, TaskKind } from './types.js';
 
 /**
@@ -88,7 +88,8 @@ export interface LeaderPlaybookRow {
 
 export function leaderPlaybookCatalog(limit = 30): LeaderPlaybookRow[] {
   try {
-    return listLatestPlaybooksSync().slice(0, limit).map((p) => ({
+    // Command workflows are terminal templates, never something a dispatch can run under.
+    return listLatestPlaybooksSync().filter(isAgentPlaybook).slice(0, limit).map((p) => ({
       id: p.meta.id,
       name: p.meta.name,
       kinds: p.meta.taskKinds,

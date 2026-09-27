@@ -6,7 +6,12 @@
  */
 import { setVerseSection } from '../verse-ui-store.js';
 
-export type PlaybookFocusTarget = { kind: 'run' };
+/**
+ * `run`: ⌘K "Run playbook…" — pick any playbook to run.
+ * `workflows`: ⌘K "Run command workflow…" when no terminal panel served it —
+ * the list narrows to command workflows (kind: command).
+ */
+export type PlaybookFocusTarget = { kind: 'run' } | { kind: 'workflows' };
 export type PlaybookFocusRequest = PlaybookFocusTarget & { seq: number; at: number };
 
 export const REQUEST_TTL_MS = 20_000;
