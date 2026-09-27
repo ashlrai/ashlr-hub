@@ -216,3 +216,17 @@ export function appendUserBacklogItems(items: readonly CloudBacklogItem[]): numb
   writePrivateFileAtomic(cloudBacklogPath(), `${JSON.stringify({ v: BACKLOG_VERSION, items: [...existing, ...accepted] }, null, 2)}\n`);
   return accepted.length;
 }
+
+/**
+ * 3.15: remove one user item by id (a vetoed Leader `backlog.add`). Built-in
+ * items cannot be removed. Returns whether an item was dropped.
+ */
+export function removeUserBacklogItem(itemId: string): boolean {
+  if (typeof itemId !== 'string' || itemId.length === 0) return false;
+  const existing = readUserBacklogItems();
+  const kept = existing.filter((item) => item.id !== itemId);
+  if (kept.length === existing.length) return false;
+  ensureCloudDirectory();
+  writePrivateFileAtomic(cloudBacklogPath(), `${JSON.stringify({ v: BACKLOG_VERSION, items: kept }, null, 2)}\n`);
+  return true;
+}

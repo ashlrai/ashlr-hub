@@ -429,9 +429,22 @@ export async function runCommsCycle(cfg: AshlrConfig, opts: CycleOptions = {}): 
         batchCap: opts.batchCap ?? DEFAULT_BATCH_CAP,
         ...(opts.sleep ? { sleep: opts.sleep } : {}),
       });
+      if (isTelegram) {
+        // 3.15 the Leader line: scheduled briefs, the self-improvement report,
+        // result pings and pings that matter (never nags — leader-line.ts).
+        try {
+          const { runLeaderLine } = await import('./leader-line.js');
+          const line = await runLeaderLine(cfg);
+          result.sent += line.pings + (line.brief ? 1 : 0);
+        } catch { /* the rest of the cycle still runs */ }
+      }
       await sendReports(cfg, isTelegram, pacer, result);
       if (isTelegram) {
-        const drained = await drainLeaderThread(cfg, pacer);
+        let hooks = null;
+        try {
+          hooks = await (await import('./leader-line.js')).threadLineHooks(cfg);
+        } catch { hooks = null; }
+        const drained = await drainLeaderThread(cfg, pacer, hooks);
         result.sent += drained.sent;
       }
       await sendNextQuestion(cfg, isTelegram, state, now, result);

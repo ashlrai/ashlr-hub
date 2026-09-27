@@ -110,6 +110,8 @@ import {
 } from './leader-cadence.js';
 import { runLeaderSeatChain } from './leader-run-chain.js';
 import { buildLeaderHealth } from './leader-health.js';
+import { LEADER_FOUNDER_VOICE } from './leader-persona.js';
+import { listSelfDirectives } from './leader-powers.js';
 import { isOpenGoal } from '../goals/open-goals.js';
 
 // ---------------------------------------------------------------------------
@@ -120,8 +122,16 @@ import { isOpenGoal } from '../goals/open-goals.js';
  * The Visionary persona. It keeps the Strategist's operating principles and
  * names no real person (SPEC-310B §4). The action catalogue below is the ONLY
  * way the Leader affects anything.
+ *
+ * 3.15 founder mode: the voice is leader-persona.ts's founder-operator — it
+ * owns making Ashlr Verse better every day, acts inside the grant without
+ * asking, and sizes every bet with numbers. Its wider action vocabulary
+ * (cloud / Devin launches, backlog, playbooks, automations, its own notes)
+ * is classified by leader-powers.ts under the same grant.
  */
-export const LEADER_SYSTEM_PROMPT = `You are the Leader of an autonomous AI software company — the Visionary. A fleet of coding agents works for you across a portfolio of repositories. You set direction, and you act through a small set of typed actions inside a standing grant signed by the owner, Mason.
+export const LEADER_SYSTEM_PROMPT = `You are the Leader of an autonomous AI software company — the Visionary. A fleet of coding agents works for you across a portfolio of repositories; the product that matters most is Ashlr Verse (repo ashlrai/ashlr-hub). You set direction, and you act through a small set of typed actions inside a standing grant signed by the owner, Mason.
+
+${LEADER_FOUNDER_VOICE}
 
 OPERATING PRINCIPLES
 - First principles: strip away assumptions; ask what the system is actually for.
@@ -146,7 +156,14 @@ You propose; the system classifies and applies. Class A applies at once (Mason c
 - budget.mode {to: reserve|balanced|all-in} (toward reserve = A; toward all-in = B, capped by the grant)
 - lanes.grok {slots: ${LEADER_LIMITS.grokLanes.min}-${LEADER_LIMITS.grokLanes.max}} · lanes.codex {enabled: true|false} (only after Codex usage resets)
 - harness.adopt {versionId, experimentId} (only a harness whose experiment passed its gate)
+- cloud.launch {repo, title, prompt (≥ 20 chars, a complete brief), purpose: task|self-improve} (class B: a paid Claude cloud session that delivers a draft PR; the cloud budget gates it)
+- devin.launch {repo, title, prompt} (class B: a paid Devin session; its PRs stay shadow-only; the Devin budget gates it)
+- backlog.add {repo, title, prompt, priority: 1|2|3} (class A: queue PR-sized work for the self-improvement scheduler — spends nothing now)
+- playbook.upsert {name: playbook id, outcome, procedure} (class B: a new version of a reusable task playbook — sharpen the procedure the fleet keeps getting wrong)
+- automation.upsert {name: slug, definition: {name, enabled, trigger: {kind: schedule|ci-red|github-issues|…}, lane, repos, instructions, maxConcurrent, maxPerDay, queueDepth, spendCapUsd, …}} (class B: a standing trigger that creates work; only where the automations API exists)
+- directive.self {text} (class A: a standing note to yourself — a commitment you will hold across memos)
 - escalate {request, argument} (anything else — Mason decides)
+Pick the cheapest lane that can do the job: small, well-specified changes → work.dispatch (local / grok fleet); PR-sized work → cloud.launch or devin.launch when the budget is not in reserve, else backlog.add.
 Hypotheses you list are started as experiments automatically; do not add experiment.start actions. Goals, standards and focus/pause/archive priority changes you list become actions automatically.
 
 UNTRUSTED DATA BOUNDARY
@@ -252,6 +269,12 @@ export interface LeaderEvidence {
   lessons?: LeaderLessonsEvidence;
   /** 3.15: playbooks a work.dispatch may name. Absent when there are none. */
   playbooks?: LeaderPlaybookRow[];
+  /**
+   * 3.15: the Leader's own standing notes (directive.self). Absent when there
+   * are none (the digest is unchanged for a Leader that set none). Model
+   * text: rendered as untrusted data, never as an operator directive.
+   */
+  selfDirectives?: { id: string; text: string; since: string }[];
   /** Sections whose source failed — reported so the model does not read them as zero. */
   unknown: string[];
 }
@@ -379,6 +402,8 @@ export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs
   const operator = attempt('operator', () => readLeaderOperatorContext(nowMs));
   const lessons = sources.lessons ? attempt('lessons', () => sources.lessons!()) : null;
   const playbooks = sources.playbooks ? attempt('playbooks', () => sources.playbooks!()) : null;
+  // 3.15: the Leader's own standing notes (directive.self) — its words, so untrusted data.
+  const selfNotes = attempt('self-directives', () => listSelfDirectives().map((d) => ({ id: d.id, text: d.text, since: d.createdAt.slice(0, 10) })));
   return {
     grant,
     budget,
@@ -401,6 +426,7 @@ export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs
     ...(operator ? { operator } : {}),
     ...(lessons ? { lessons } : {}),
     ...(playbooks && playbooks.length > 0 ? { playbooks } : {}),
+    ...(selfNotes && selfNotes.length > 0 ? { selfDirectives: selfNotes } : {}),
     unknown: [...new Set(unknown)].sort(),
   };
 }
@@ -461,6 +487,9 @@ export function buildLeaderPrompt(evidence: LeaderEvidence, opts: { dryRun: bool
   }
   if (evidence.playbooks) {
     blocks.push(untrustedBlock('PLAYBOOKS (name one in work.dispatch.playbook when it fits)', evidence.playbooks));
+  }
+  if (evidence.selfDirectives) {
+    blocks.push(untrustedBlock('YOUR OWN STANDING NOTES (directive.self — your commitments, not Mason\'s words)', evidence.selfDirectives));
   }
   if (evidence.operator) {
     blocks.unshift(operatorBlock(evidence.operator));
@@ -1219,6 +1248,13 @@ export async function leaderTick(deps: LeaderRunDeps, opts: { awaitRun?: boolean
   try {
     applied = await applyDueLeaderActions(deps.apply);
   } catch { /* retried next tick */ }
+  // 3.15: the daily self-improvement drive (once per local day, bounded by
+  // budget; its launches are ordinary actions under the grant). Never blocks the tick.
+  if (!runInFlight) {
+    void import('./leader-drive.js')
+      .then((drive) => drive.runLeaderDriveIfDue(deps))
+      .catch(() => undefined);
+  }
   let graded: LeaderOutcomeRecord[] = [];
   try {
     graded = await gradeLeaderOutcomes(deps);

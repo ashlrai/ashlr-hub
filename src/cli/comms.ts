@@ -294,7 +294,10 @@ async function cmdCycle(): Promise<number> {
     const digestIntervalHours = cfg.comms?.digestIntervalHours ?? 6;
     const askVisionIntervalHours = cfg.comms?.askVisionIntervalHours ?? 24;
 
-    if (isDue('last-digest', digestIntervalHours)) {
+    // 3.15: with the Leader line on, the morning brief / evening recap carry
+    // what shipped — the 6-hourly digest would repeat it, so it stays silent.
+    const { leaderLineEnabled } = await import('../core/comms/leader-line.js');
+    if (!leaderLineEnabled(cfg) && isDue('last-digest', digestIntervalHours)) {
       try {
         const digest = await sendDigest();
         // Evaluated once per interval whether or not it spoke.

@@ -52,6 +52,8 @@ export interface TelegramButtonTarget {
   threadId?: string;
   memoId?: string;
   actionIds?: string[];
+  /** 3.15: a Leader question the buttons answer (Yes / No / Your call). */
+  questionId?: string;
   at: string;
 }
 

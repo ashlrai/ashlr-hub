@@ -70,6 +70,15 @@ export type LeaderActionClass = 'A' | 'B' | 'C';
  *      lanes.grok above maxClassA, lanes.codex (after resetsAt, only if the grant
  *      lists codex), harness.adopt (gate passed).
  *   C: escalate — anything outside the grant.
+ *
+ * 3.15 founder mode (vision/leader-powers.ts decides these, same purity rules):
+ *   A: directive.self (the Leader's own standing note), backlog.add (a queued
+ *      cloud backlog suggestion — spends nothing).
+ *   B: cloud.launch / devin.launch (paid sessions: spend-raising, veto window,
+ *      each lane's own budget gate still applies at launch), playbook.upsert,
+ *      automation.upsert (standing config — only where that API exists).
+ *   C: a launch into a repo outside the grant, or any paid launch while the
+ *      budget is in reserve (reserve = Claude and paid lanes are Mason's).
  */
 export type LeaderActionKind =
   | 'goal.focus'
@@ -88,6 +97,12 @@ export type LeaderActionKind =
   | 'lanes.grok'
   | 'lanes.codex'
   | 'harness.adopt'
+  | 'cloud.launch'
+  | 'devin.launch'
+  | 'backlog.add'
+  | 'playbook.upsert'
+  | 'automation.upsert'
+  | 'directive.self'
   | 'escalate';
 
 export const LEADER_ACTION_KINDS: readonly LeaderActionKind[] = [
@@ -107,8 +122,37 @@ export const LEADER_ACTION_KINDS: readonly LeaderActionKind[] = [
   'lanes.grok',
   'lanes.codex',
   'harness.adopt',
+  'cloud.launch',
+  'devin.launch',
+  'backlog.add',
+  'playbook.upsert',
+  'automation.upsert',
+  'directive.self',
   'escalate',
 ];
+
+/** 3.15: the founder-mode kinds (vision/leader-powers.ts classifies and applies them). */
+export const LEADER_POWER_KINDS = [
+  'cloud.launch',
+  'devin.launch',
+  'backlog.add',
+  'playbook.upsert',
+  'automation.upsert',
+  'directive.self',
+] as const satisfies readonly LeaderActionKind[];
+
+export type LeaderPowerKind = (typeof LEADER_POWER_KINDS)[number];
+
+export function isLeaderPowerKind(kind: string): kind is LeaderPowerKind {
+  return (LEADER_POWER_KINDS as readonly string[]).includes(kind);
+}
+
+/**
+ * What a launch is for. `self-improve` puts a cloud launch behind the cloud
+ * budget's stricter self-improvement gate (reserve, per-day and open-PR caps)
+ * — a model choosing it can only tighten the gate, never loosen it.
+ */
+export type LeaderLaunchPurpose = 'task' | 'self-improve';
 
 /** A goal the Leader proposes (maps onto the strategist's ProposedGoal for adoption). */
 export interface LeaderGoalProposal {
@@ -150,6 +194,26 @@ export interface LeaderActionParamsMap {
   'lanes.grok': { slots: number };
   'lanes.codex': { enabled: boolean };
   'harness.adopt': { versionId: string; experimentId: string };
+  /** 3.15: a Claude cloud session that delivers a draft PR (cloud/service.ts launchCloudTask). */
+  'cloud.launch': { repo: string; title: string; prompt: string; purpose: LeaderLaunchPurpose };
+  /** 3.15: a Devin session (devin/service.ts, fleet origin); its PRs stay shadow-only at the gates. */
+  'devin.launch': { repo: string; title: string; prompt: string };
+  /** 3.15: a cloud backlog item (cloud/backlog.ts) the self-improvement scheduler can pick up. */
+  'backlog.add': { repo: string; title: string; prompt: string; priority: 1 | 2 | 3 };
+  /**
+   * 3.15: a new VERSION of a playbook (src/core/playbooks — versions are
+   * immutable): v1 of a new id, or v<N+1> of an existing one with its Outcome
+   * and Procedure replaced (other sections and front matter kept).
+   */
+  'playbook.upsert': { name: string; outcome: string; procedure: string };
+  /**
+   * 3.15: create or update automation `au_<name>` (src/core/automations, when
+   * present). `definition` is that module's AutomationInput (trigger, lane,
+   * repos, instructions, caps …) — it validates the whole definition.
+   */
+  'automation.upsert': { name: string; definition: Record<string, unknown> };
+  /** 3.15: a standing note the Leader sets for itself (never an operator directive). */
+  'directive.self': { text: string };
   /** Class C: what the Leader wants and its argument, for Mason. */
   'escalate': { request: string; argument: string };
 }
@@ -203,7 +267,23 @@ export type LeaderInverse =
   /** budget.mode — the exact prior BudgetPolicy */
   | { op: 'restore-budget'; before: BudgetPolicy }
   /** harness.adopt — back to the prior active version (null = baseline) */
-  | { op: 'rollback-harness'; toVersionId: string | null };
+  | { op: 'rollback-harness'; toVersionId: string | null }
+  /**
+   * 3.15 cloud.launch / devin.launch — a started session cannot be recalled
+   * (the spend is made); a veto records that and leaves its PR a draft for
+   * Mason to close. Lowering-only.
+   */
+  | { op: 'launch-recall'; lane: 'cloud' | 'devin'; taskId: string }
+  /** 3.15 backlog.add — drop the item from the user backlog. Lowering-only. */
+  | { op: 'drop-backlog'; itemId: string }
+  /** 3.15 directive.self — retire the Leader's own note. Lowering-only. */
+  | { op: 'retire-self-directive'; directiveId: string }
+  /**
+   * 3.15 playbook.upsert / automation.upsert — restore the prior definition
+   * (null = it did not exist). For playbooks `before` is the prior canonical
+   * source; restoring writes it back as a NEW version (versions are immutable).
+   */
+  | { op: 'restore-standing'; api: 'playbooks' | 'automations'; name: string; before: unknown };
 
 /**
  * - `scheduled` — class B inside its veto window (see `applyAfter`).

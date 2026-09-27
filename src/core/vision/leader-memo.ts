@@ -117,6 +117,8 @@ const GOAL_ID_RE = /^[\w.-]{1,200}$/;
 const NAME_WITH_OWNER_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
 const SEAT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,199}$/;
 const VERSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** 3.15: playbook / automation names — a short slug. */
+const STANDING_NAME_RE = /^[a-z0-9][a-z0-9-]{1,47}$/;
 const ISO_RE = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2}))?$/;
 const DIFFICULTIES: readonly RoutingDifficulty[] = ['low', 'medium', 'high'];
 const HARNESS_TARGETS: readonly HarnessTarget[] = ['prompt', 'effort', 'sampling', 'routing', 'skill'];
@@ -512,6 +514,57 @@ export function parseActionParams<K extends LeaderActionKind>(kind: K, raw: unkn
       if (typeof experimentId !== 'string' || !VERSION_ID_RE.test(experimentId)) return fail('experimentId is malformed');
       return done({ versionId, experimentId });
     }
+    // 3.15 founder mode (vision/leader-powers.ts classifies and applies these).
+    case 'cloud.launch':
+    case 'devin.launch': {
+      const optional = kind === 'cloud.launch' ? ['purpose'] : [];
+      if (!hasExactKeys(raw, ['repo', 'title', 'prompt'], optional)) return fail(`expected {repo, title, prompt${optional.length ? ', purpose?' : ''}}`);
+      const repo = raw['repo'];
+      const title = cleanModelText(raw['title'], 80);
+      const prompt = cleanModelText(raw['prompt'], TEXT.prompt);
+      if (typeof repo !== 'string' || !NAME_WITH_OWNER_RE.test(repo)) return fail('repo must be owner/name');
+      if (!title || !prompt || prompt.length < 20) return fail('title and a prompt of at least 20 characters are required');
+      if (kind === 'devin.launch') return done({ repo, title, prompt });
+      const purpose = raw['purpose'] ?? 'task';
+      if (purpose !== 'task' && purpose !== 'self-improve') return fail('purpose must be task or self-improve');
+      return done({ repo, title, prompt, purpose });
+    }
+    case 'backlog.add': {
+      if (!hasExactKeys(raw, ['repo', 'title', 'prompt'], ['priority'])) return fail('expected {repo, title, prompt, priority?}');
+      const repo = raw['repo'];
+      const title = cleanModelText(raw['title'], 200);
+      const prompt = cleanModelText(raw['prompt'], TEXT.prompt);
+      const priority = raw['priority'] ?? 2;
+      if (typeof repo !== 'string' || !NAME_WITH_OWNER_RE.test(repo)) return fail('repo must be owner/name');
+      if (!title || !prompt) return fail('title and prompt are required');
+      if (priority !== 1 && priority !== 2 && priority !== 3) return fail('priority must be 1, 2 or 3');
+      return done({ repo, title, prompt, priority });
+    }
+    case 'playbook.upsert': {
+      if (!hasExactKeys(raw, ['name', 'outcome', 'procedure'])) return fail('expected {name, outcome, procedure}');
+      const name = raw['name'];
+      const outcome = cleanModelText(raw['outcome'], TEXT.line);
+      const procedure = cleanModelText(raw['procedure'], TEXT.detail);
+      if (typeof name !== 'string' || !PLAYBOOK_ID_PATTERN.test(name)) return fail('name must be a playbook id (a short slug)');
+      if (!outcome || !procedure) return fail('outcome and procedure are required');
+      return done({ name, outcome, procedure });
+    }
+    case 'automation.upsert': {
+      if (!hasExactKeys(raw, ['name', 'definition'])) return fail('expected {name, definition}');
+      const name = raw['name'];
+      const definition = raw['definition'];
+      if (typeof name !== 'string' || !STANDING_NAME_RE.test(name)) return fail('name must be a short slug');
+      if (!isRecord(definition) || 'id' in definition) return fail('definition must be an automation definition object (no id — the name sets it)');
+      // The automations module validates the definition itself; here only its size is bounded (a ledger line is 64 KB).
+      if (Buffer.byteLength(JSON.stringify(definition), 'utf8') > 8 * 1024) return fail('definition is larger than 8 KB');
+      return done({ name, definition: JSON.parse(JSON.stringify(definition)) as Record<string, unknown> });
+    }
+    case 'directive.self': {
+      if (!hasExactKeys(raw, ['text'])) return fail('expected {text}');
+      const text = cleanModelText(raw['text'], TEXT.line);
+      if (!text || text.length < 8) return fail('text must be a sentence');
+      return done({ text });
+    }
     case 'escalate': {
       if (!hasExactKeys(raw, ['request', 'argument'])) return fail('expected {request, argument}');
       const request = cleanModelText(raw['request'], TEXT.line);
@@ -622,6 +675,12 @@ function defaultSummary(kind: LeaderActionKind, params: LeaderActionParamsMap[Le
     case 'lanes.grok': return `Grok lanes → ${String(p['slots'])}`;
     case 'lanes.codex': return p['enabled'] === true ? 'Enable Codex lanes' : 'Turn Codex lanes off';
     case 'harness.adopt': return `Adopt harness ${String(p['versionId'])}`;
+    case 'cloud.launch': return `Cloud task on ${String(p['repo'])}: ${String(p['title'])}`;
+    case 'devin.launch': return `Devin session on ${String(p['repo'])}: ${String(p['title'])}`;
+    case 'backlog.add': return `Backlog (${String(p['repo'])}): ${String(p['title'])}`;
+    case 'playbook.upsert': return `Playbook ${String(p['name'])}`;
+    case 'automation.upsert': return `Automation au_${String(p['name'])}`;
+    case 'directive.self': return `Leader note: ${String(p['text'])}`;
     case 'escalate': return `Needs Mason: ${String(p['request'])}`;
     default: return kind;
   }
@@ -640,6 +699,24 @@ function makeDraft<K extends LeaderActionKind>(
     summary: cleanModelText(cleanSummary, TEXT.short) ?? kind,
     why: why ?? '',
   };
+}
+
+/**
+ * 3.15: build a validated action draft outside a memo (Mason's Telegram task
+ * requests, the Leader's daily self-improvement drive). The params go through
+ * the SAME parser a memo's actions do, so nothing reaches leader-apply that a
+ * memo could not have said. Null when the params do not validate.
+ */
+export function buildLeaderActionDraft(
+  kind: LeaderActionKind,
+  rawParams: unknown,
+  summary: string | null,
+  why: string | null,
+): AnyLeaderActionDraft | null {
+  if (!(LEADER_ACTION_KINDS as readonly string[]).includes(kind) || kind === 'experiment.start') return null;
+  const params = parseActionParams(kind, rawParams);
+  if (!params.ok) return null;
+  return makeDraft(kind, params.params, cleanModelText(summary, TEXT.short), cleanModelText(why, TEXT.why)) as AnyLeaderActionDraft;
 }
 
 /**
