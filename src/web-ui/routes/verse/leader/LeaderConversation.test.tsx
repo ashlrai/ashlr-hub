@@ -18,7 +18,7 @@ import { leaderQuery } from '../command/surface-data.js';
 import { getVerseUiState, resetVerseUi } from '../verse-ui-store.js';
 import { LeaderConversation } from './LeaderConversation.js';
 import { getLeaderFocus, requestLeaderFocus, resetLeaderFocus } from './leader-focus.js';
-import { directives, msg, QUESTION_TEXT, threadMessages } from './thread-fixtures.test-support.js';
+import { directive, directives, msg, QUESTION_TEXT, threadMessages } from './thread-fixtures.test-support.js';
 import type { LeaderThreadMessage, OperatorDirective } from './thread-types.js';
 
 const TOKEN = 'a'.repeat(64);
@@ -332,13 +332,13 @@ describe('LeaderConversation — answers, approvals, vetoes, directives', () => 
     const s = stub({
       onPost: (url, body) =>
         url.includes('/questions/')
-          ? json({ message: msg({ id: 'a1', from: 'mason', kind: 'answer', questionId: 'q-memo-0924-0', replyTo: 't4', at: now(), text: String(body['text']) }), reply: msg({ id: 'r4', at: now(), text: 'Understood: propose-only.' }) })
+          ? json({ message: msg({ id: 'a1', from: 'mason', kind: 'answer', questionId: 'memo-0924:0', replyTo: 't4', at: now(), text: String(body['text']) }), reply: msg({ id: 'r4', at: now(), text: 'Understood: propose-only.' }) })
           : undefined,
     });
     const log = await mount();
     const q = await within(log).findByRole('article', { name: 'Leader question' });
     await userEvent.type(within(q).getByRole('textbox'), 'Propose-only until CI{Enter}');
-    await waitFor(() => expect(s.posts()).toEqual([{ url: '/api/verse/leader/questions/q-memo-0924-0/answer', method: 'POST', body: { text: 'Propose-only until CI' } }]));
+    await waitFor(() => expect(s.posts()).toEqual([{ url: '/api/verse/leader/questions/memo-0924:0/answer', method: 'POST', body: { text: 'Propose-only until CI' } }]));
     await within(q).findByText(/Answered/);
     expect(within(q).queryByRole('textbox')).toBeNull();
     await within(log).findByText('Understood: propose-only.');
@@ -369,7 +369,7 @@ describe('LeaderConversation — answers, approvals, vetoes, directives', () => 
 
   it('retires a directive and adds one', async () => {
     setMutationToken(TOKEN);
-    const s = stub({ onPost: (_u, body) => json({ directive: { id: 'd9', text: body['text'], at: now() } }) });
+    const s = stub({ onPost: (_u, body) => json({ directive: directive({ id: 'd9', text: String(body['text']) }), duplicate: false }, 201) });
     await mount();
     const strip = screen.getByRole('group', { name: 'Directives' });
     await userEvent.click(await within(strip).findByRole('button', { name: 'Retire directive: Ship binshield before new goals' }));
@@ -402,7 +402,7 @@ describe('LeaderConversation — focus requests', () => {
   it('a Needs-you "Answer" opens that question’s answer box', async () => {
     stub();
     // Asked before the panel mounted (the drawer closes, Mind's chunk loads).
-    requestLeaderFocus({ kind: 'question', questionId: 'leader:leader-question:memo-0924:0', memoId: 'memo-0924', index: 0, text: QUESTION_TEXT });
+    requestLeaderFocus({ kind: 'question', questionId: 'memo-0924:0', text: QUESTION_TEXT });
     const log = await mount();
     const q = await within(log).findByRole('article', { name: 'Leader question' });
     await waitFor(() => expect(within(q).getByRole('textbox')).toHaveFocus());
@@ -414,7 +414,7 @@ describe('LeaderConversation — focus requests', () => {
     const s = stub({ thread: threadMessages().filter((m) => m.kind !== 'question') });
     await mount();
     await screen.findByText('Status?');
-    act(() => requestLeaderFocus({ kind: 'question', questionId: 'leader:leader-question:memo-0924:1', memoId: 'memo-0924', index: 1, text: 'Keep Codex off?' }));
+    act(() => requestLeaderFocus({ kind: 'question', questionId: 'memo-0924:1', text: 'Keep Codex off?' }));
     await screen.findByText('Answering: Keep Codex off?');
     await waitFor(() => expect(composer()).toHaveFocus());
     await userEvent.type(composer(), 'Yes{Enter}');

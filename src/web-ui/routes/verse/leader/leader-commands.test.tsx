@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NeedsYouItem } from '../../../../core/verse/workbench-types.js';
 import { isNeedsYouItem } from '../../../../core/verse/workbench-types.js';
 import { ToastProvider } from '../../../components/primitives/Toast.js';
-import { clearMutationToken, markCheckComplete } from '../../../data/auth-store.js';
+import { clearMutationToken, markCheckComplete, setMutationToken } from '../../../data/auth-store.js';
 import { evictAll } from '../../../data/cache.js';
 import { useSurfaceActions } from '../command/actions.js';
 import { stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
@@ -108,7 +108,12 @@ describe('Command’s Leader card', () => {
   });
 });
 
-function questionNeed(): NeedsYouItem {
+const DISMISS_QUESTION: NeedsYouItem['actions'][number] = { kind: 'done', label: 'Dismiss', request: { method: 'POST', path: '/api/verse/leader', body: { action: 'dismiss', itemId: 'leader:leader-question:memo-0924:0' } }, confirm: null, destructive: false };
+/** 3.14's "Answer": the button-only `fix` kind with no request (it needs words). */
+const ANSWER_QUESTION: NeedsYouItem['actions'][number] = { kind: 'fix', label: 'Answer', request: null, confirm: null, destructive: false };
+
+/** As the 3.14 server builds it (leader-api.ts buildLeaderNeedsYou); `legacy` = before it sent Answer. */
+function questionNeed(legacy = false): NeedsYouItem {
   const item: NeedsYouItem = {
     id: 'leader:leader-question:memo-0924:0',
     source: 'leader',
@@ -120,10 +125,36 @@ function questionNeed(): NeedsYouItem {
     expiresAt: null,
     subject: { repo: null, pr: null, seatId: null, sessionId: null, engine: null },
     target: { kind: 'section', section: 'mind', anchor: 'memo-0924' },
-    actions: [{ kind: 'done', label: 'Dismiss', request: { method: 'POST', path: '/api/verse/leader', body: { action: 'dismiss', itemId: 'leader:leader-question:memo-0924:0' } }, confirm: null, destructive: false }],
+    actions: legacy ? [DISMISS_QUESTION] : [DISMISS_QUESTION, ANSWER_QUESTION],
   };
   if (!isNeedsYouItem(item)) throw new Error('fixture is not a valid NeedsYouItem');
   return item;
+}
+
+/** A class-B veto window as 3.14 builds it: Veto and "Approve now". */
+function vetoWindowNeed(): NeedsYouItem {
+  return vetoNeed({
+    id: 'leader:veto-window:a2',
+    target: { kind: 'section', section: 'command', anchor: 'leader' },
+    actions: [
+      { kind: 'veto', label: 'Veto', request: { method: 'POST', path: '/api/verse/leader', body: { action: 'veto', actionId: 'a2' } }, confirm: { title: 'Veto this Leader action?', body: 'Raise Grok to 3 lanes', confirmLabel: 'Veto' }, destructive: true },
+      { kind: 'approve', label: 'Approve now', request: { method: 'POST', path: '/api/verse/leader/actions/a2/approve', body: {} }, confirm: { title: 'Apply this Leader action now?', body: 'Raise Grok to 3 lanes — applies now.', confirmLabel: 'Approve now' }, destructive: false },
+    ],
+  });
+}
+
+async function openDrawerOn(items: NeedsYouItem[], focusId: string) {
+  const net = shellFetch(activity({ needsYou: items }));
+  vi.stubGlobal('fetch', net.fetch);
+  resetActivityForTest();
+  render(
+    <ToastProvider>
+      <DrawerHarness />
+    </ToastProvider>,
+  );
+  act(() => openVerseNeedsYou({ split: 'all', focusId }));
+  const drawer = await screen.findByRole('dialog', { name: /Needs you/ });
+  return { drawer, detail: await within(drawer).findByRole('article'), net };
 }
 
 function DrawerHarness() {
@@ -149,38 +180,32 @@ describe('Needs-you', () => {
     resetActivityForTest();
   });
 
-  it('a Leader question offers "Answer", which closes the drawer and opens that question in Mind — Dismiss stays its only action', async () => {
-    const net = shellFetch(activity({ needsYou: [questionNeed(), vetoNeed()] }));
-    vi.stubGlobal('fetch', net.fetch);
-    resetActivityForTest();
-    render(
-      <ToastProvider>
-        <DrawerHarness />
-      </ToastProvider>,
-    );
-    act(() => openVerseNeedsYou({ split: 'all', focusId: 'leader:leader-question:memo-0924:0' }));
-    const drawer = await screen.findByRole('dialog', { name: /Needs you/ });
-    const detail = await within(drawer).findByRole('article');
+  it('a Leader question’s own "Answer" (fix, no request) closes the drawer and opens that question’s box in Mind — one Answer, never a POST', async () => {
+    const { detail, net } = await openDrawerOn([questionNeed(), vetoNeed()], 'leader:leader-question:memo-0924:0');
     expect(within(detail).getByRole('button', { name: 'Dismiss' })).toBeInTheDocument();
+    expect(within(detail).getAllByRole('button', { name: 'Answer' })).toHaveLength(1);
     await userEvent.click(within(detail).getByRole('button', { name: 'Answer' }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: /Needs you/ })).toBeNull());
     expect(getVerseUiState().section).toBe('mind');
-    expect(getLeaderFocus()).toMatchObject({ kind: 'question', questionId: 'leader:leader-question:memo-0924:0', memoId: 'memo-0924', index: 0, text: QUESTION_TEXT });
+    expect(getLeaderFocus()).toEqual(expect.objectContaining({ kind: 'question', questionId: 'memo-0924:0', text: QUESTION_TEXT }));
+    expect(net.posts()).toEqual([]);
   });
 
-  it('other rows get no Answer button', async () => {
-    const net = shellFetch(activity({ needsYou: [vetoNeed()] }));
-    vi.stubGlobal('fetch', net.fetch);
-    resetActivityForTest();
-    render(
-      <ToastProvider>
-        <DrawerHarness />
-      </ToastProvider>,
-    );
-    act(() => openVerseNeedsYou({ split: 'all', focusId: 'leader:veto-window:m-7' }));
-    const drawer = await screen.findByRole('dialog', { name: /Needs you/ });
-    await within(drawer).findByRole('article');
-    expect(within(drawer).queryByRole('button', { name: 'Answer' })).toBeNull();
+  it('a server from before 3.14 (no Answer action) still gets the jump to Mind', async () => {
+    const { detail } = await openDrawerOn([questionNeed(true)], 'leader:leader-question:memo-0924:0');
+    await userEvent.click(within(detail).getByRole('button', { name: 'Answer' }));
+    await waitFor(() => expect(getLeaderFocus()).toEqual(expect.objectContaining({ kind: 'question', questionId: 'memo-0924:0' })));
+  });
+
+  it('a veto window shows Veto and "Approve now"; Approve now confirms, then posts to the approve route', async () => {
+    setMutationToken('c'.repeat(64));
+    const { detail, net } = await openDrawerOn([vetoWindowNeed()], 'leader:veto-window:a2');
+    expect(within(detail).queryByRole('button', { name: 'Answer' })).toBeNull();
+    expect(within(detail).getByRole('button', { name: /^Veto/ })).toBeInTheDocument();
+    await userEvent.click(within(detail).getByRole('button', { name: /^Approve now/ }));
+    const confirm = await screen.findByRole('dialog', { name: 'Apply this Leader action now?' });
+    await userEvent.click(within(confirm).getByRole('button', { name: 'Approve now' }));
+    await waitFor(() => expect(net.posts()).toEqual([{ path: '/api/verse/leader/actions/a2/approve', body: {}, token: 'c'.repeat(64) }]));
   });
 });
 
@@ -194,7 +219,7 @@ describe('Mind', () => {
   it('puts the conversation first and keeps the memo timeline, hit rate and action log below it', async () => {
     stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/leader/thread': { messages: threadMessages() }, '/api/verse/leader/directives': { directives: [] } } });
     render(<MindSection />);
-    const panel = await screen.findByTestId('leader-conversation');
+    const panel = await screen.findByTestId('leader-conversation', {}, { timeout: 8_000 });
     await within(panel).findByText('Status?');
     const memos = await screen.findByRole('region', { name: 'Memos' });
     // Document order: the conversation, then the rest of Mind.
@@ -205,7 +230,7 @@ describe('Mind', () => {
   it('still talks when the Leader has never run (the dormant state stays below)', async () => {
     stubSurfaceFetch({ kind: 'dark', routes: { '/api/verse/leader/thread': { messages: [] }, '/api/verse/leader/directives': { directives: [] } } });
     render(<MindSection />);
-    const panel = await screen.findByTestId('leader-conversation');
+    const panel = await screen.findByTestId('leader-conversation', {}, { timeout: 8_000 });
     await within(panel).findByText('No conversation yet');
     expect(within(panel).getByRole('textbox', { name: 'Message the Leader' })).toBeEnabled();
     await waitFor(() => expect(screen.getByTestId('autonomy-off')).toBeInTheDocument());

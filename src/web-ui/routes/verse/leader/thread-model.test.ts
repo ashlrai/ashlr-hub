@@ -9,16 +9,16 @@ import {
   latestLeaderMessage,
   mergeThread,
   narrowDirectives,
+  narrowApprovalThread,
   narrowMessage,
   narrowSendResult,
   narrowThreadPage,
-  parseNeedsYouQuestion,
   previewText,
   type PendingMessage,
   type ThreadEntry,
 } from './thread-model.js';
-import { needsYouQuestionText } from './question-id.js';
-import { msg, QUESTION_TEXT, threadMessages } from './thread-fixtures.test-support.js';
+import { needsYouQuestionText, questionIdOfNeedsYouItem } from './question-id.js';
+import { directive, msg, threadMessages } from './thread-fixtures.test-support.js';
 
 const NOW = Date.parse('2026-09-26T15:00:00Z');
 const iso = (t: number) => new Date(t).toISOString();
@@ -32,8 +32,10 @@ const keys = (entries: ThreadEntry[]) => entries.map((e) => e.key);
 
 describe('narrowing', () => {
   it('reads a contract message and keeps the optional fields it can trust', () => {
-    const m = narrowMessage({ id: 'x', at: iso(NOW), from: 'leader', channel: 'telegram', kind: 'memo', text: 'hi', memoId: 'm1', actionIds: ['a1', 3, ''], delivery: { telegram: 'sent', n: 2 } });
-    expect(m).toMatchObject({ id: 'x', channel: 'telegram', kind: 'memo', memoId: 'm1', actionIds: ['a1'], delivery: { telegram: 'sent' } });
+    const m = narrowMessage({ id: 'x', at: iso(NOW), from: 'leader', channel: 'telegram', kind: 'memo', text: 'hi', memoId: 'm1', questionId: '', actionIds: ['a1', 3, ''], delivery: { telegram: 'sent', sentAt: iso(NOW), n: 2 } });
+    expect(m).toEqual({ id: 'x', at: iso(NOW), from: 'leader', channel: 'telegram', kind: 'memo', text: 'hi', memoId: 'm1', actionIds: ['a1'], delivery: { telegram: 'sent', sentAt: iso(NOW) } });
+    // Only the contract's delivery states are kept.
+    expect(narrowMessage({ id: 'y', at: iso(NOW), from: 'mason', text: 'ok', delivery: { telegram: 'maybe' } })).not.toHaveProperty('delivery');
   });
 
   it('drops a message it cannot read — never guesses a sender or a time', () => {
@@ -59,19 +61,29 @@ describe('narrowing', () => {
     expect(narrowSendResult({ reply: null })).toBeNull();
   });
 
-  it('keeps only ACTIVE directives, oldest first, whatever the server calls the time', () => {
+  it('reads `{ directives, retired }` as the directives in force, oldest first', () => {
     const list = narrowDirectives({
       directives: [
-        { id: 'd2', text: 'Second', addedAt: iso(NOW) },
-        { id: 'd1', text: ' First ', at: iso(NOW - MIN), source: 'telegram' },
-        { id: 'd0', text: 'Gone', at: iso(NOW - 2 * MIN), retiredAt: iso(NOW) },
+        directive({ id: 'd2', text: 'Second', createdAt: iso(NOW) }),
+        directive({ id: 'd1', text: ' First ', createdAt: iso(NOW - MIN), channel: 'telegram' }),
+        // A retired one in the live list (a stale read) is still not a chip.
+        directive({ id: 'd0', text: 'Gone', createdAt: iso(NOW - 2 * MIN), retiredAt: iso(NOW) }),
         { id: 'd3', text: '   ' },
       ],
+      retired: [directive({ id: 'd9', text: 'Old', retiredAt: iso(NOW) })],
     });
     expect(list?.map((d) => [d.id, d.text, d.channel])).toEqual([
       ['d1', 'First', 'telegram'],
-      ['d2', 'Second', null],
+      ['d2', 'Second', 'verse'],
     ]);
+    expect(narrowDirectives([directive({ id: 'd1', text: 'x' })])).toBeNull();
+  });
+
+  it('reads an approval’s thread messages; a body without them is empty', () => {
+    const message = msg({ id: 'ap', from: 'mason', kind: 'action', actionIds: ['a2'], text: 'Approved.' });
+    const reply = msg({ id: 'ack', kind: 'action', actionIds: ['a2'], text: 'Applied now.' });
+    expect(narrowApprovalThread({ ok: true, code: 200, outcome: 'applied', message: 'Applied.', action: null, thread: { message, reply } }).map((m) => m.id)).toEqual(['ap', 'ack']);
+    expect(narrowApprovalThread({ ok: false, code: 404, outcome: null, message: 'Unknown.', action: null, thread: null })).toEqual([]);
   });
 });
 
@@ -163,25 +175,23 @@ describe('questions', () => {
 
   it('marks a question answered by its question id or by a reply to it', () => {
     expect(answeredQuestions(list).size).toBe(0);
-    const byId = [...list, msg({ id: 'a1', from: 'mason', kind: 'answer', questionId: 'q-memo-0924-0', text: 'Propose-only.' })];
+    const byId = [...list, msg({ id: 'a1', from: 'mason', kind: 'answer', questionId: 'memo-0924:0', text: 'Propose-only.' })];
     expect(answeredQuestions(byId).get('t4')?.id).toBe('a1');
     const byReply = [...list, msg({ id: 'a2', from: 'mason', replyTo: 't4', text: 'Propose-only.' })];
     expect(answeredQuestions(byReply).get('t4')?.id).toBe('a2');
   });
 
-  it('finds the question a Needs-you row means, most certain match first', () => {
-    const needsYouId = 'leader:leader-question:memo-0924:0';
-    expect(parseNeedsYouQuestion(needsYouId)).toEqual({ memoId: 'memo-0924', index: 0 });
-    expect(parseNeedsYouQuestion('leader:class-c:a4')).toBeNull();
-    // The server reused the Needs-you id as its question id.
-    expect(findQuestion([...list, msg({ id: 'q9', kind: 'question', questionId: needsYouId, text: 'x' })], { questionId: needsYouId })?.id).toBe('q9');
-    // A `<memoId>:<index>` spelling.
-    expect(findQuestion([msg({ id: 'q8', kind: 'question', questionId: 'lq:memo-0924:0', text: 'x' })], { questionId: needsYouId })?.id).toBe('q8');
-    // The memo's question with the same words.
-    expect(findQuestion(list, { questionId: needsYouId, text: QUESTION_TEXT.slice(0, 40) })?.id).toBe('t4');
-    // The memo's index-th question.
-    expect(findQuestion(list, { memoId: 'memo-0924', index: 0 })?.id).toBe('t4');
-    expect(findQuestion(list, { memoId: 'memo-0924', index: 3 })).toBeNull();
+  it('finds the question a Needs-you row means — exactly: the item id minus its prefix is the questionId', () => {
+    const questionId = questionIdOfNeedsYouItem('leader:leader-question:memo-0924:0');
+    expect(questionId).toBe('memo-0924:0');
+    expect(questionIdOfNeedsYouItem('leader:class-c:a4')).toBeNull();
+    expect(questionIdOfNeedsYouItem('leader:leader-question:memo-0924')).toBeNull();
+    expect(findQuestion(list, { questionId })?.id).toBe('t4');
+    // No fuzzy fallbacks: another question of the same memo is not this one.
+    expect(findQuestion(list, { questionId: 'memo-0924:1' })).toBeNull();
+    expect(findQuestion(list, { questionId: null })).toBeNull();
+    // An answer carries the questionId too; only a question matches.
+    expect(findQuestion([msg({ id: 'a', from: 'mason', kind: 'answer', questionId: 'memo-0924:0' })], { questionId })).toBeNull();
   });
 
   it('reads the question text from a Needs-you row', () => {

@@ -21,10 +21,8 @@ export type LeaderFocusTarget =
   | { kind: 'directive' }
   | {
       kind: 'question';
-      /** The Needs-you item id or the server's question id. */
+      /** The thread's questionId, `<memoId>:<index>`. */
       questionId: string | null;
-      memoId: string | null;
-      index: number | null;
       /** The question's words (a fallback when the thread has no question message for it). */
       text: string | null;
     };

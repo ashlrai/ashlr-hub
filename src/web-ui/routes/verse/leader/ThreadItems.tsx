@@ -42,13 +42,22 @@ export function ChannelBadge({ channel }: { channel: LeaderThreadChannel }) {
 }
 
 /** "Also sent to Telegram" / "Telegram: not delivered" — only what the server reported. */
-function deliveryNote(delivery: LeaderThreadMessage['delivery']): { text: string; failed: boolean } | null {
-  if (!delivery) return null;
-  const channels = Object.entries(delivery).filter(([ch]) => ch !== 'verse');
-  const failed = channels.filter(([, s]) => /fail|error|undeliver/i.test(s)).map(([ch]) => CHANNEL_LABEL[ch as LeaderThreadChannel] ?? ch);
-  if (failed.length) return { text: `${failed.join(', ')}: not delivered`, failed: true };
-  const sent = channels.filter(([, s]) => /sent|deliver|ok/i.test(s)).map(([ch]) => CHANNEL_LABEL[ch as LeaderThreadChannel] ?? ch);
-  return sent.length ? { text: `Also sent to ${sent.join(', ')}`, failed: false } : null;
+export function deliveryNote(delivery: LeaderThreadMessage['delivery']): { text: string; failed: boolean } | null {
+  switch (delivery?.telegram) {
+    case 'sent':
+      return { text: 'Also sent to Telegram', failed: false };
+    case 'failed':
+      return { text: 'Telegram: not delivered', failed: true };
+    case 'pending':
+      return { text: 'Sending to Telegram…', failed: false };
+    default:
+      return null;
+  }
+}
+
+function DeliveryNote({ message }: { message: LeaderThreadMessage }) {
+  const note = deliveryNote(message.delivery);
+  return note ? <span className={styles.delivery} data-failed={note.failed ? 'true' : undefined}>{note.text}</span> : null;
 }
 
 export interface ThreadContext {
@@ -211,13 +220,12 @@ function ActionNote({ message, ctx }: { message: LeaderThreadMessage; ctx: Threa
 
 function MasonBubble({ message, ctx }: { message: LeaderThreadMessage; ctx: ThreadContext }) {
   const question = message.kind === 'answer' || message.replyTo ? questionOf(message, ctx) : null;
-  const note = deliveryNote(message.delivery);
   return (
     <div className={styles.masonItem}>
       {question ? <span className={styles.replyTo} title={question.text}>Re: {previewText(question.text, 90)}</span> : null}
       {/* Mason's words, possibly from Telegram: plain text, never HTML. */}
       <p className={styles.bubble}>{message.text}</p>
-      {note ? <span className={styles.delivery} data-failed={note.failed ? 'true' : undefined}>{note.text}</span> : null}
+      <DeliveryNote message={message} />
     </div>
   );
 }
@@ -273,6 +281,7 @@ function EntryView({ entry, ctx }: { entry: ThreadEntry; ctx: ThreadContext }) {
           <div className={styles.prose}>
             <MessageMarkdown text={m.text} />
           </div>
+          <DeliveryNote message={m} />
         </div>
       );
   }

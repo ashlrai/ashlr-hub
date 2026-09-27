@@ -16,13 +16,13 @@ import type { SurfaceActions } from '../command/actions.js';
 import type { OptionalRead } from '../command/surface-data.js';
 import { addLeaderDirective, retireLeaderDirective } from './thread-data.js';
 import { CHANNEL_LABEL } from './thread-model.js';
-import type { OperatorDirective } from './thread-types.js';
+import type { DirectiveChip } from './thread-types.js';
 import styles from './leader.module.css';
 
 export const DIRECTIVE_MAX = 500;
 
 export interface DirectivesStripProps {
-  read: OptionalRead<OperatorDirective[]> | undefined;
+  read: OptionalRead<DirectiveChip[]> | undefined;
   actions: SurfaceActions;
   /** The inline add box is open (the panel opens it for ⌘K "Add Leader directive…"). */
   adding: boolean;

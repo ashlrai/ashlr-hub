@@ -25,11 +25,8 @@ import {
   type LeaderThreadKind,
   type LeaderThreadMessage,
   type LeaderThreadPage,
-  type OperatorDirective,
+  type DirectiveChip,
 } from './thread-types.js';
-import { parseNeedsYouQuestion } from './question-id.js';
-
-export { parseNeedsYouQuestion };
 
 // ---------------------------------------------------------------------------
 // Narrowing
@@ -52,25 +49,24 @@ export function narrowMessage(raw: unknown): LeaderThreadMessage | null {
   // An unknown channel or kind from a newer server still reads as a message.
   const ch = LEADER_THREAD_CHANNELS.includes(channel as LeaderThreadChannel) ? (channel as LeaderThreadChannel) : 'verse';
   const k = LEADER_THREAD_KINDS.includes(kind as LeaderThreadKind) ? (kind as LeaderThreadKind) : 'message';
-  const actionIds = Array.isArray(raw['actionIds']) ? raw['actionIds'].filter((a): a is string => typeof a === 'string' && a.length > 0) : null;
-  let delivery: Record<string, string> | null = null;
-  if (isRecord(raw['delivery'])) {
-    const entries = Object.entries(raw['delivery']).filter((e): e is [string, string] => typeof e[1] === 'string');
-    delivery = entries.length ? Object.fromEntries(entries) : null;
+  const out: LeaderThreadMessage = { id, at, from, channel: ch, kind: k, text };
+  // Optional fields are present only when the server sent a usable value.
+  const replyTo = optString(raw['replyTo']);
+  const memoId = optString(raw['memoId']);
+  const questionId = optString(raw['questionId']);
+  if (replyTo) out.replyTo = replyTo;
+  if (memoId) out.memoId = memoId;
+  if (questionId) out.questionId = questionId;
+  const actionIds = Array.isArray(raw['actionIds']) ? raw['actionIds'].filter((a): a is string => typeof a === 'string' && a.length > 0) : [];
+  if (actionIds.length) out.actionIds = actionIds;
+  const delivery = raw['delivery'];
+  if (isRecord(delivery)) {
+    const telegram = delivery['telegram'];
+    if (telegram === 'pending' || telegram === 'sent' || telegram === 'failed') {
+      out.delivery = { telegram, ...(optString(delivery['sentAt']) ? { sentAt: delivery['sentAt'] as string } : {}) };
+    }
   }
-  return {
-    id,
-    at,
-    from,
-    channel: ch,
-    kind: k,
-    text,
-    replyTo: optString(raw['replyTo']),
-    memoId: optString(raw['memoId']),
-    questionId: optString(raw['questionId']),
-    actionIds: actionIds && actionIds.length ? actionIds : null,
-    delivery,
-  };
+  return out;
 }
 
 /** `{ messages: [...] }` (or a bare array); null when neither. Unreadable messages are dropped. */
@@ -80,27 +76,23 @@ export function narrowThreadPage(raw: unknown): LeaderThreadPage | null {
   return { messages: list.flatMap((m) => narrowMessage(m) ?? []) };
 }
 
-export function narrowDirective(raw: unknown): OperatorDirective | null {
+/** An OperatorDirective in force, as a chip; null when unreadable or retired (`retiredAt` set). */
+export function narrowDirective(raw: unknown): DirectiveChip | null {
   if (!isRecord(raw)) return null;
   const { id, text } = raw;
   if (typeof id !== 'string' || id.length === 0 || typeof text !== 'string' || text.trim().length === 0) return null;
   // A retired directive is history, not a chip.
-  if (optString(raw['retiredAt']) !== null || raw['active'] === false) return null;
-  const at = optString(raw['at']) ?? optString(raw['addedAt']) ?? optString(raw['createdAt']);
-  const channel = LEADER_THREAD_CHANNELS.includes(raw['channel'] as LeaderThreadChannel)
-    ? (raw['channel'] as LeaderThreadChannel)
-    : LEADER_THREAD_CHANNELS.includes(raw['source'] as LeaderThreadChannel)
-      ? (raw['source'] as LeaderThreadChannel)
-      : null;
-  return { id, text: text.trim(), at, channel };
+  if (optString(raw['retiredAt']) !== null) return null;
+  const channel = LEADER_THREAD_CHANNELS.includes(raw['channel'] as LeaderThreadChannel) ? (raw['channel'] as LeaderThreadChannel) : null;
+  return { id, text: text.trim(), createdAt: optString(raw['createdAt']), channel };
 }
 
-/** `{ directives: [...] }` (or a bare array) → the ACTIVE ones, oldest first. */
-export function narrowDirectives(raw: unknown): OperatorDirective[] | null {
-  const list = Array.isArray(raw) ? raw : isRecord(raw) && Array.isArray(raw['directives']) ? raw['directives'] : null;
+/** GET /directives `{ directives, retired }` → the ones in force, oldest first (`retired` is history). */
+export function narrowDirectives(raw: unknown): DirectiveChip[] | null {
+  const list = isRecord(raw) && Array.isArray(raw['directives']) ? raw['directives'] : null;
   if (!list) return null;
   const out = list.flatMap((d) => narrowDirective(d) ?? []);
-  return out.sort((a, b) => (Date.parse(a.at ?? '') || 0) - (Date.parse(b.at ?? '') || 0));
+  return out.sort((a, b) => (Date.parse(a.createdAt ?? '') || 0) - (Date.parse(b.createdAt ?? '') || 0));
 }
 
 export function narrowSendResult(raw: unknown): LeaderSendResult | null {
@@ -108,6 +100,16 @@ export function narrowSendResult(raw: unknown): LeaderSendResult | null {
   const message = narrowMessage(raw['message']);
   if (!message) return null;
   return { message, reply: narrowMessage(raw['reply']), directive: narrowDirective(raw['directive']) };
+}
+
+/**
+ * POST /actions/<id>/approve → the approval's thread messages (Mason's
+ * approval and the Leader's acknowledgement), readable ones only.
+ */
+export function narrowApprovalThread(raw: unknown): LeaderThreadMessage[] {
+  if (!isRecord(raw) || !isRecord(raw['thread'])) return [];
+  const t = raw['thread'];
+  return [narrowMessage(t['message']), narrowMessage(t['reply'])].filter((m): m is LeaderThreadMessage => m !== null);
 }
 
 // ---------------------------------------------------------------------------
@@ -269,40 +271,18 @@ export function answeredQuestions(messages: readonly LeaderThreadMessage[]): Map
 }
 
 export interface QuestionTarget {
-  /** The Needs-you item id, or the server's own question id. */
-  questionId?: string | null;
-  memoId?: string | null;
-  index?: number | null;
-  text?: string | null;
+  /** The thread's questionId, `<memoId>:<index>` (question-id.ts derives it from a Needs-you item). */
+  questionId: string | null;
 }
 
 /**
- * Which question message a target means. Tried in order of certainty: the
- * exact question id; `<memoId>:<index>` in any spelling that ends with it;
- * the memo's question with the same words; the memo's index-th question.
+ * The question message a target means: the one whose questionId is exactly
+ * the target's (the server keys both off `<memoId>:<index>`). Null when the
+ * thread does not carry it — the caller then answers as a quoted message.
  */
 export function findQuestion(messages: readonly LeaderThreadMessage[], target: QuestionTarget): LeaderThreadMessage | null {
-  const questions = messages.filter((m) => m.kind === 'question');
-  if (target.questionId) {
-    const exact = questions.find((q) => q.questionId === target.questionId || q.id === target.questionId);
-    if (exact) return exact;
-  }
-  const parsed = target.questionId ? parseNeedsYouQuestion(target.questionId) : null;
-  const memoId = target.memoId ?? parsed?.memoId ?? null;
-  const index = target.index ?? parsed?.index ?? null;
-  if (memoId !== null && index !== null) {
-    const suffix = `${memoId}:${index}`;
-    const bySuffix = questions.find((q) => q.questionId === suffix || (q.questionId?.endsWith(`:${suffix}`) ?? false));
-    if (bySuffix) return bySuffix;
-  }
-  const ofMemo = memoId !== null ? questions.filter((q) => q.memoId === memoId) : [];
-  if (target.text) {
-    const want = norm(target.text).toLowerCase();
-    const byText = (ofMemo.length ? ofMemo : questions).find((q) => norm(q.text).toLowerCase() === want || norm(q.text).toLowerCase().includes(want));
-    if (byText) return byText;
-  }
-  if (index !== null && ofMemo[index]) return ofMemo[index]!;
-  return null;
+  if (!target.questionId) return null;
+  return messages.find((m) => m.kind === 'question' && m.questionId === target.questionId) ?? null;
 }
 
 // ---------------------------------------------------------------------------

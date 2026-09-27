@@ -165,8 +165,11 @@ export async function apiDelete<T>(path: string, mutationToken: string, signal?:
  */
 async function readRefusal(res: Response): Promise<{ detail: string; code: string | null }> {
   try {
-    const j = (await res.json()) as { error?: unknown; note?: unknown; code?: unknown };
-    const detail = typeof j.error === 'string' && j.error ? j.error : typeof j.note === 'string' ? j.note : '';
+    const j = (await res.json()) as { error?: unknown; note?: unknown; message?: unknown; code?: unknown };
+    // `message`: a result body that explains itself (the Leader's approve
+    // route answers 409 with `{ ok: false, outcome, message, … }`).
+    const detail =
+      typeof j.error === 'string' && j.error ? j.error : typeof j.note === 'string' && j.note ? j.note : typeof j.message === 'string' ? j.message : '';
     const code = typeof j.code === 'string' && j.code ? j.code : null;
     return { detail, code };
   } catch {

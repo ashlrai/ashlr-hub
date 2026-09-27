@@ -21,17 +21,22 @@ export function threadMessages(now = Date.now()): LeaderThreadMessage[] {
     msg({ id: 't1', at: iso(now - 60 * MIN), from: 'mason', channel: 'telegram', text: 'What is slowing merges this week?' }),
     msg({ id: 't2', at: iso(now - 58 * MIN), from: 'leader', channel: 'telegram', text: 'The **judge queue** on grok-a. I will write a memo.' }),
     msg({ id: 't3', at: iso(now - 50 * MIN), kind: 'memo', memoId: 'memo-0924', actionIds: ['a1', 'a2', 'a3', 'a4'], text: 'Memo: raise Grok to 3 lanes.' }),
-    msg({ id: 't4', at: iso(now - 49 * MIN), kind: 'question', memoId: 'memo-0924', questionId: 'q-memo-0924-0', text: QUESTION_TEXT }),
+    msg({ id: 't4', at: iso(now - 49 * MIN), kind: 'question', memoId: 'memo-0924', questionId: 'memo-0924:0', text: QUESTION_TEXT }),
     msg({ id: 't5', at: iso(now - 30 * MIN), from: 'mason', kind: 'directive', text: 'No spend raises overnight.' }),
     msg({ id: 't6', at: iso(now - 29 * MIN), channel: 'system', kind: 'update', text: 'Telegram connected.' }),
-    msg({ id: 't7', at: iso(now - 20 * MIN), from: 'mason', channel: 'cli', text: 'Status?', delivery: { telegram: 'sent' } }),
+    msg({ id: 't7', at: iso(now - 20 * MIN), from: 'mason', channel: 'cli', text: 'Status?', delivery: { telegram: 'sent', sentAt: iso(now - 20 * MIN) } }),
     msg({ id: 't8', at: iso(now - 19 * MIN), from: 'leader', channel: 'cli', kind: 'update', text: 'Grok lanes apply in 18 minutes unless you veto.' }),
   ];
 }
 
+export function directive(over: Partial<OperatorDirective> & Pick<OperatorDirective, 'id' | 'text'>): OperatorDirective {
+  return { v: 1, kind: 'guidance', source: 'direct', channel: 'verse', messageId: null, createdAt: iso(Date.now()), retiredAt: null, retiredVia: null, ...over };
+}
+
+/** GET /directives body: `{ directives, retired }`. */
 export function directives(now = Date.now()): OperatorDirective[] {
   return [
-    { id: 'd1', text: 'Ship binshield before new goals', at: iso(now - 2 * 86_400_000), channel: 'verse' },
-    { id: 'd2', text: 'No spend raises overnight', at: iso(now - 30 * MIN), channel: 'telegram' },
+    directive({ id: 'd1', text: 'Ship binshield before new goals', createdAt: iso(now - 2 * 86_400_000) }),
+    directive({ id: 'd2', text: 'No spend raises overnight', kind: 'stop', source: 'explicit', channel: 'telegram', messageId: 't5', createdAt: iso(now - 30 * MIN) }),
   ];
 }

@@ -1,22 +1,20 @@
 /**
- * routes/verse/leader/question-id.ts — reading a Needs-you Leader question
- * (core/verse/leader-api.ts buildLeaderNeedsYou) into what the conversation
- * needs to find it. Pure and tiny: the Needs-you drawer imports it.
+ * routes/verse/leader/question-id.ts — from a Needs-you Leader question to
+ * the thread's question. Pure and tiny: the Needs-you drawer imports it.
  *
- *   id     `leader:leader-question:<memoId>:<index>`
- *   title  `Leader question: <question>` (clipped); `detail` carries the
- *          whole question when the title had to be clipped
+ *   item id     `leader:leader-question:<memoId>:<index>`
+ *   questionId  `<memoId>:<index>` — the item id minus its prefix, exactly
+ *               (core/vision/leader-thread-types.ts LEADER_QUESTION_ITEM_PREFIX)
+ *   title       `Leader question: <question>` (clipped); `detail` carries the
+ *               whole question when the title had to be clipped
  */
+import { LEADER_QUESTION_ITEM_PREFIX } from './thread-types.js';
 
-export interface NeedsYouQuestionRef {
-  memoId: string;
-  index: number;
-}
-
-/** The memo and question index a Needs-you row names; null for any other row. */
-export function parseNeedsYouQuestion(itemId: string): NeedsYouQuestionRef | null {
-  const m = /^leader:leader-question:(.+):(\d+)$/.exec(itemId);
-  return m ? { memoId: m[1]!, index: Number(m[2]) } : null;
+/** The thread questionId a Needs-you row is about; null for any other row. */
+export function questionIdOfNeedsYouItem(itemId: string): string | null {
+  if (!itemId.startsWith(LEADER_QUESTION_ITEM_PREFIX)) return null;
+  const questionId = itemId.slice(LEADER_QUESTION_ITEM_PREFIX.length);
+  return /^.+:\d+$/.test(questionId) ? questionId : null;
 }
 
 /** The question's own words from a Needs-you row: the full detail when present, else the title without its prefix. */

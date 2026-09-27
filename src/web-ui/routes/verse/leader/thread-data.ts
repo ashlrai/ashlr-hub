@@ -23,7 +23,7 @@ import {
   LEADER_THREAD_PATH,
   type LeaderSendResult,
   type LeaderThreadMessage,
-  type OperatorDirective,
+  type DirectiveChip,
 } from './thread-types.js';
 
 /** One page: enough for a day of conversation; older pages load on request. */
@@ -41,6 +41,15 @@ export const leaderDirectivesQuery = optionalQuery(LEADER_THREAD_KEYS.directives
 export async function fetchOlderThread(beforeId: string, signal?: AbortSignal): Promise<LeaderThreadMessage[]> {
   const raw = await apiGet<unknown>(`${LEADER_THREAD_PATH}?limit=${THREAD_PAGE_SIZE}&before=${encodeURIComponent(beforeId)}`, signal);
   return narrowThreadPage(raw)?.messages ?? [];
+}
+
+/**
+ * One path segment. The server matches ids on the RAW path (no decoding), so
+ * a questionId's `:` (`<memoId>:<index>`) must go as-is — `:` is legal in a
+ * path segment; anything else unusual is still escaped.
+ */
+export function pathSegment(id: string): string {
+  return encodeURIComponent(id).replace(/%3A/gi, ':');
 }
 
 function token(): string {
@@ -66,22 +75,32 @@ export async function sendLeaderMessage(text: string, replyTo: string | null = n
 }
 
 export async function answerLeaderQuestion(questionId: string, text: string): Promise<LeaderSendResult | null> {
-  const result = narrowSendResult(await post(`${LEADER_QUESTIONS_PATH}/${encodeURIComponent(questionId)}/answer`, { text }));
+  const result = narrowSendResult(await post(`${LEADER_QUESTIONS_PATH}/${pathSegment(questionId)}/answer`, { text }));
   // The question's Needs-you row closes with its answer.
   void refreshActivity();
   return result;
 }
 
-/** Approve a class-B action now (skip the window) or a class-C ask. */
+/**
+ * Approve a class-B action now (skip the window) or a class-C ask.
+ * `{ ok, code, outcome, message, action, thread }`: a 409 (nothing to
+ * approve, or refused now) throws with the server's `message` as its reason
+ * (client.ts readRefusal); the approval and the Leader's acknowledgement
+ * reach the conversation through the thread refetch.
+ */
 export async function approveLeaderAction(actionId: string): Promise<unknown> {
-  const result = await post(`${LEADER_ACTIONS_PATH}/${encodeURIComponent(actionId)}/approve`, {});
+  const result = await post(`${LEADER_ACTIONS_PATH}/${pathSegment(actionId)}/approve`, {});
   invalidate(SURFACE_KEYS.leader);
   invalidate(LEADER_THREAD_KEYS.thread);
   void refreshActivity();
   return result;
 }
 
-export async function addLeaderDirective(text: string): Promise<OperatorDirective | null> {
+/**
+ * POST /directives → `{ directive, duplicate }` (201 new, 200 when the same
+ * words are already in force — either way the chip is there after the refetch).
+ */
+export async function addLeaderDirective(text: string): Promise<DirectiveChip | null> {
   const raw = await post(LEADER_DIRECTIVES_PATH, { text });
   invalidate(LEADER_THREAD_KEYS.directives);
   invalidate(LEADER_THREAD_KEYS.thread);
@@ -89,8 +108,9 @@ export async function addLeaderDirective(text: string): Promise<OperatorDirectiv
   return narrowDirective(record);
 }
 
+/** DELETE /directives/<id> → `{ directive }` (now retired). */
 export async function retireLeaderDirective(id: string): Promise<void> {
-  await apiDelete<unknown>(`${LEADER_DIRECTIVES_PATH}/${encodeURIComponent(id)}`, token());
+  await apiDelete<unknown>(`${LEADER_DIRECTIVES_PATH}/${pathSegment(id)}`, token());
   touchMutationHold();
   invalidate(LEADER_THREAD_KEYS.directives);
   invalidate(LEADER_THREAD_KEYS.thread);
