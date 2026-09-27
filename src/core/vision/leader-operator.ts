@@ -30,7 +30,7 @@ import { scrubPrivateText } from '../util/scrub.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
 import { leaderRoot } from './leader-memo.js';
-import type { OperatorChannel, OperatorDirective, OperatorDirectiveKind } from './leader-thread-types.js';
+import { OPERATOR_DIRECTIVE_MAX, type OperatorChannel, type OperatorDirective, type OperatorDirectiveKind } from './leader-thread-types.js';
 
 export type { OperatorChannel, OperatorDirective, OperatorDirectiveKind } from './leader-thread-types.js';
 
@@ -48,7 +48,8 @@ export const OPERATOR_LIMITS = Object.freeze({
   maxActiveDirectives: 20,
   /** Directive records kept (retired ones are trimmed oldest first). */
   keepDirectives: 200,
-  directiveMaxChars: 300,
+  /** Shared with the Verse directive box (leader-thread-types.ts). */
+  directiveMaxChars: OPERATOR_DIRECTIVE_MAX,
   keepQuestions: 300,
   answerMaxChars: 2_000,
   questionMaxChars: 500,

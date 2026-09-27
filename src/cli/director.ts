@@ -13,6 +13,10 @@
 
 import { loadConfig } from '../core/config.js';
 
+/** Printed (to stderr, so the snapshot on stdout stays script-clean) on every run. */
+export const DIRECTOR_RETIRED_NOTICE =
+  'ashlr director is retired — the Leader handles this. See `ashlr leader` (`ashlr leader show` for its memo, `ashlr leader say "…"` to talk to it).';
+
 export async function cmdDirector(args: string[]): Promise<number> {
   const isHelp = args.includes('--help') || args.includes('-h');
 
@@ -30,6 +34,8 @@ strategic brain. Read its memo with \`ashlr leader show\`; talk to it with
 `);
     return 0;
   }
+
+  console.error(DIRECTOR_RETIRED_NOTICE);
 
   let cfg;
   try {

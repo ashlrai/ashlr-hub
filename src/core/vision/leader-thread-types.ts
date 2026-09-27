@@ -50,6 +50,14 @@ export type LeaderThreadMessage = {
   delivery?: { telegram?: 'pending' | 'sent' | 'failed'; sentAt?: string };
 };
 
+/**
+ * The most characters one standing directive keeps. The server
+ * (leader-operator.ts OPERATOR_LIMITS.directiveMaxChars) truncates longer
+ * text with "…"; the Verse directive box counts against the same number, so
+ * the two can never drift apart again (the box once allowed 500).
+ */
+export const OPERATOR_DIRECTIVE_MAX = 300;
+
 export type OperatorDirectiveKind = 'focus' | 'stop' | 'priority' | 'guidance';
 export type OperatorChannel = LeaderThreadChannel;
 
