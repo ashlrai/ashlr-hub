@@ -20,7 +20,9 @@
  * WHO MAY START IT. Only an operator at an interactive terminal: never a
  * daemon/swarm child, never an agent harness shell, never a process whose
  * HOME was redirected (every autonomous run gets an ephemeral HOME), and
- * never without a TTY. That is a speed bump for UNCONFINED same-user
+ * never without a TTY — or, from the desktop app, without a click on a
+ * native confirm dialog (the one-time native gesture below, 3.15, which
+ * stands in for the TTY only). That is a speed bump for UNCONFINED same-user
  * processes, not the boundary — the boundary is that confined agents cannot
  * exec launchctl or write ~/Library/LaunchAgents at all (sandbox/confine.ts),
  * and that nothing started here can exceed the signed grant.
@@ -33,8 +35,9 @@
  * activation-permit.ts's resident-standing capability.
  */
 import { randomBytes } from 'node:crypto';
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync, unlinkSync } from 'node:fs';
 import { userInfo } from 'node:os';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { readBuildIdentity, type BuildIdentity } from '../build-identity.js';
 import { killSwitchOn } from '../sandbox/policy.js';
@@ -187,7 +190,100 @@ export interface OperatorContext {
   env: Readonly<Record<string, string | undefined>>;
   /** HOME from the password database (never $HOME); null when unknown. */
   passwdHome: string | null;
+  /**
+   * 3.15: the operator clicked a NATIVE confirm dialog in the desktop app
+   * (desktop/src-tauri/src/fleet_ops.rs), which minted a one-time gesture
+   * token for this process. It stands in for the TTY — and only for the TTY:
+   * the agent markers and the login-HOME check still apply. Absent = false.
+   */
+  nativeGesture?: boolean;
 }
+
+/**
+ * The native gesture (3.15). The desktop app shows a native modal dialog —
+ * page script can ask for it but cannot answer it, and no seat tool can reach
+ * the app's event bus — and only after Mason clicks it writes
+ * `~/.ashlr/authority/native-gestures/<32 hex>.json` (0600, create-new,
+ * no-follow) and runs `ashlr authority resident start` with
+ * `ASHLR_NATIVE_GESTURE=<32 hex>` in a scrubbed environment. The token is
+ * accepted only when the file is a regular file owned by this user, private,
+ * at most NATIVE_GESTURE_TTL_MS old, and names `resident-start`; it is
+ * deleted BEFORE it is trusted, so it works exactly once. Confined fleet
+ * agents cannot read or write `~/.ashlr/authority` at all (the sandbox
+ * profile's tripwire). The residual risk — an UNCONFINED same-user process
+ * forging the file — is the one docs/RESIDENT-RUNTIME.md already accepts for
+ * the TTY check, and it still gets only the daemon the grant authorizes.
+ */
+export const NATIVE_GESTURE_ENV = 'ASHLR_NATIVE_GESTURE';
+export const NATIVE_GESTURE_TTL_MS = 120_000;
+export const NATIVE_GESTURE_DIR_RELATIVE = join('.ashlr', 'authority', 'native-gestures');
+const NATIVE_GESTURE_RE = /^[a-f0-9]{32}$/u;
+const NATIVE_GESTURE_MAX_BYTES = 512;
+
+export type NativeGestureVerdict = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Consume the gesture named by `env` (reads the file, deletes it, then
+ * judges it). Pure apart from that one file. `absent` when no token was given.
+ */
+export function consumeNativeGesture(
+  env: Readonly<Record<string, string | undefined>>,
+  home: string | null,
+  op: 'resident-start',
+  nowMs: number = Date.now(),
+): NativeGestureVerdict {
+  const name = env[NATIVE_GESTURE_ENV];
+  if (name === undefined || name === '') return { ok: false, reason: 'absent' };
+  if (!NATIVE_GESTURE_RE.test(name)) return { ok: false, reason: 'the gesture token is malformed' };
+  if (!home) return { ok: false, reason: 'the login home is unknown' };
+  const path = join(home, NATIVE_GESTURE_DIR_RELATIVE, `${name}.json`);
+  let text: string;
+  let mtimeMs: number;
+  try {
+    const link = lstatSync(path);
+    if (!link.isFile()) return { ok: false, reason: 'the gesture token is not a regular file' };
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    const fd = openSync(path, fsConstants.O_RDONLY | noFollow);
+    try {
+      const stat = fstatSync(fd);
+      if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) return { ok: false, reason: 'the gesture token is not yours' };
+      if ((stat.mode & 0o077) !== 0) return { ok: false, reason: 'the gesture token is readable by others' };
+      if (stat.size > NATIVE_GESTURE_MAX_BYTES) return { ok: false, reason: 'the gesture token is too large' };
+      const buffer = Buffer.alloc(stat.size);
+      readSync(fd, buffer, 0, stat.size, 0);
+      text = buffer.toString('utf8');
+      mtimeMs = stat.mtimeMs;
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return { ok: false, reason: 'the gesture token was not found (it is used once and expires after two minutes)' };
+  } finally {
+    // Consumed whatever it said: a token is never read twice.
+    try {
+      unlinkSync(path);
+    } catch {
+      // already gone
+    }
+  }
+  let body: { v?: unknown; op?: unknown; createdAt?: unknown };
+  try {
+    body = JSON.parse(text) as typeof body;
+  } catch {
+    return { ok: false, reason: 'the gesture token is unreadable' };
+  }
+  if (body.v !== 1 || body.op !== op || typeof body.createdAt !== 'number') return { ok: false, reason: `the gesture token is not for ${op}` };
+  // Both the body's clock and the file's must be recent; a future stamp (more
+  // than clock skew) is refused too.
+  const fresh = (at: number): boolean => at <= nowMs + 5_000 && nowMs - at <= NATIVE_GESTURE_TTL_MS;
+  if (!fresh(body.createdAt) || !fresh(mtimeMs)) {
+    return { ok: false, reason: 'the gesture token expired (it is good for two minutes)' };
+  }
+  return { ok: true };
+}
+
+/** Consumed once per process: the CLI asks twice (refusal, then mint). */
+let nativeGestureMemo: NativeGestureVerdict | null = null;
 
 export function currentOperatorContext(): OperatorContext {
   let passwdHome: string | null = null;
@@ -196,12 +292,25 @@ export function currentOperatorContext(): OperatorContext {
   } catch {
     passwdHome = null;
   }
+  if (nativeGestureMemo === null) nativeGestureMemo = consumeNativeGesture(process.env, passwdHome, 'resident-start');
   return {
     stdinTTY: process.stdin.isTTY === true,
     stdoutTTY: process.stdout.isTTY === true,
     env: process.env,
     passwdHome,
+    nativeGesture: nativeGestureMemo.ok,
   };
+}
+
+/** Why a native gesture given to this process was refused; null when none was given or it was accepted. */
+export function nativeGestureRefusal(): string | null {
+  if (nativeGestureMemo === null || nativeGestureMemo.ok || nativeGestureMemo.reason === 'absent') return null;
+  return nativeGestureMemo.reason;
+}
+
+/** Test hook: forget the per-process gesture verdict. */
+export function resetNativeGestureForTest(): void {
+  nativeGestureMemo = null;
 }
 
 /** PURE: why this is not the operator at a terminal, or null when it is. */
@@ -216,8 +325,8 @@ export function operatorContextRefusal(ctx: OperatorContext): string | null {
   if (!ctx.passwdHome || !home || resolve(home) !== resolve(ctx.passwdHome)) {
     return 'HOME is not your login home (autonomous runs get an ephemeral HOME) — run it from your own terminal';
   }
-  if (!ctx.stdinTTY || !ctx.stdoutTTY) {
-    return 'not an interactive terminal — run it yourself in Terminal so you can confirm it';
+  if ((!ctx.stdinTTY || !ctx.stdoutTTY) && ctx.nativeGesture !== true) {
+    return 'not an interactive terminal — run it yourself in Terminal (or press Start in the desktop app\'s Fleet tab) so you can confirm it';
   }
   return null;
 }

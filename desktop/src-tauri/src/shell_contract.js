@@ -115,6 +115,32 @@
     return true
   }
 
+  // Fleet operations (protocol v1, fleet_ops.rs): resident start / restart /
+  // stop and the custody install, with no Terminal. The page names an op;
+  // native parses it strictly, confirms every raise in a NATIVE dialog the
+  // page cannot answer, and reports through window.__ASHLR_FLEET_EVENT__.
+  var FLEET_OPS = { 'resident-start': 1, 'resident-restart': 1, 'resident-stop': 1, 'custody-install': 1 }
+
+  function sendFleet(msg) {
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return false
+    if (typeof msg.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(msg.id)) return false
+    if (typeof msg.op !== 'string' || !Object.prototype.hasOwnProperty.call(FLEET_OPS, msg.op)) return false
+    var payload = { id: msg.id, op: msg.op }
+    if (msg.op === 'custody-install') {
+      if (typeof msg.checkout !== 'string' || msg.checkout.length === 0 || msg.checkout.length > 1024) return false
+      payload.checkout = msg.checkout
+    }
+    var internals = window.__TAURI_INTERNALS__
+    if (!internals || typeof internals.invoke !== 'function') return false
+    try {
+      var pending = internals.invoke('plugin:event|emit', { event: 'shell-fleet', payload: payload })
+      if (pending && typeof pending.catch === 'function') pending.catch(function () {})
+    } catch (_) {
+      return false
+    }
+    return true
+  }
+
   window.__ASHLR_DESKTOP__ = Object.freeze({
     shell: 'tauri',
     platform: cfg.platform,
@@ -163,6 +189,13 @@
     voice: Object.freeze({
       version: 1,
       send: sendVoice
+    }),
+    // Fleet operations. Absent on older shells: that absence is the feature
+    // test (the Fleet tab then shows the Terminal command instead).
+    fleet: Object.freeze({
+      version: 1,
+      ops: Object.freeze(Object.keys(FLEET_OPS)),
+      send: sendFleet
     })
   })
 
@@ -193,6 +226,22 @@
         if (!detail || typeof detail !== 'object') return
         try {
           window.dispatchEvent(new CustomEvent('ashlr:voice', { detail: detail }))
+        } catch (_) {}
+      },
+      enumerable: false,
+      writable: false,
+      configurable: false
+    })
+  } catch (_) {}
+
+  // Native → page: fleet operation progress (fleet_ops::event_script). Same
+  // non-writable, non-configurable definition as the browser channel.
+  try {
+    Object.defineProperty(window, '__ASHLR_FLEET_EVENT__', {
+      value: function (detail) {
+        if (!detail || typeof detail !== 'object') return
+        try {
+          window.dispatchEvent(new CustomEvent('ashlr:fleet', { detail: detail }))
         } catch (_) {}
       },
       enumerable: false,
