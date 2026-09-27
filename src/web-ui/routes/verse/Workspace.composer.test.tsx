@@ -125,7 +125,7 @@ describe('Workspace → Composer: handoff and Continue on', () => {
     expect(onHandoffOpenChange).not.toHaveBeenCalled();
   });
 
-  it('seat chip ▸ Continue on ‹seat› opens the handoff (idle) — and a new chat on that seat while a turn runs', async () => {
+  it('seat chip ▸ Continue on ‹seat› hands off in ONE click (idle), the reviewed note is one item below — and a new chat on that seat while a turn runs', async () => {
     seed('idle');
     const user = userEvent.setup();
     const onHandoffOpenChange = vi.fn();
@@ -133,8 +133,13 @@ describe('Workspace → Composer: handoff and Continue on', () => {
     const view = render(<Harness sessionId="vs_1" {...props({ onHandoffOpenChange, onSeatChange })} />);
     await user.click(screen.getByRole('button', { name: /^Seat: / }));
     await user.click(screen.getByRole('menuitem', { name: new RegExp(`Continue on ${LOCAL_SEAT.label.replace(/[()]/g, "\\$&")}`) }));
-    expect(onHandoffOpenChange).toHaveBeenCalledWith(true);
+    // 3.16: no dialog — the zero-spend note is built straight away (this stub server refuses it, which is said).
+    expect(onHandoffOpenChange).not.toHaveBeenCalled();
     expect(onSeatChange).not.toHaveBeenCalled();
+    expect(await screen.findByText(/Hand-off did not start/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^Seat: / }));
+    await user.click(screen.getByRole('menuitem', { name: /Hand off with a reviewed note/ }));
+    expect(onHandoffOpenChange).toHaveBeenCalledWith(true);
     view.unmount();
 
     resetVerseStore();

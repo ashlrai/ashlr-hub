@@ -7,7 +7,7 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { evictAll } from '../../../data/cache.js';
-import { CLAUDE_TIGHT_SEAT, UNREAD_SEAT } from '../seat-fixtures.test-support.js';
+import { CLAUDE_TIGHT_SEAT, GROK_SEAT, UNREAD_SEAT } from '../seat-fixtures.test-support.js';
 import { mockCompactViewport, type ViewportMock } from '../shell/viewport.test-support.js';
 import { SeatChip } from './SeatChip.js';
 
@@ -55,5 +55,34 @@ describe('SeatChip — the detail bubble', () => {
       engine="claude" label="Claude Max" compact onNewChat={vi.fn()} />);
     const button = screen.getByRole('button', { name: /^Seat: Claude Max/ });
     expect(button).not.toHaveTextContent('Claude Max');
+  });
+});
+
+describe('SeatChip — one-click handoff (3.16)', () => {
+  it('"Continue on ‹seat›" hands off in one click when wired; the reviewed-note path is one item below', async () => {
+    const user = userEvent.setup();
+    const quick = vi.fn();
+    const dialog = vi.fn();
+    const older = vi.fn();
+    render(<SeatChip seats={[CLAUDE_TIGHT_SEAT, GROK_SEAT]} seat={{ seatId: CLAUDE_TIGHT_SEAT.id, model: CLAUDE_TIGHT_SEAT.models[0]!.id }}
+      engine="claude" label="Claude Max" onNewChat={vi.fn()} onContinueOn={older} onQuickContinue={quick} onReviewHandoff={dialog} />);
+    await user.click(screen.getByRole('button', { name: /^Seat: Claude Max/ }));
+    await user.click(screen.getByRole('menuitem', { name: /Continue on Grok/ }));
+    expect(quick).toHaveBeenCalledWith({ seatId: 'grok', model: GROK_SEAT.models[0]!.id });
+    expect(older).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: /^Seat: Claude Max/ }));
+    await user.click(screen.getByRole('menuitem', { name: /Hand off with a reviewed note/ }));
+    expect(dialog).toHaveBeenCalledTimes(1);
+  });
+
+  it('without the one-click path the chip keeps its older behaviour and no reviewed-note item', async () => {
+    const user = userEvent.setup();
+    const older = vi.fn();
+    render(<SeatChip seats={[CLAUDE_TIGHT_SEAT, GROK_SEAT]} seat={{ seatId: CLAUDE_TIGHT_SEAT.id, model: CLAUDE_TIGHT_SEAT.models[0]!.id }}
+      engine="claude" label="Claude Max" onNewChat={vi.fn()} onContinueOn={older} />);
+    await user.click(screen.getByRole('button', { name: /^Seat: Claude Max/ }));
+    expect(screen.queryByRole('menuitem', { name: /reviewed note/ })).toBeNull();
+    await user.click(screen.getByRole('menuitem', { name: /Continue on Grok/ }));
+    expect(older).toHaveBeenCalledTimes(1);
   });
 });

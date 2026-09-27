@@ -17,9 +17,11 @@
  * - Hover or focus shows plan, every window with its reset, health, and what
  *   autonomy may take from this seat ("autonomy may use 60% · 40% reserved"),
  *   read from the Budget route (A9) only while the tooltip is open.
- * - Click opens the menu: "Continue on ‹seat›" (a prefilled handoff when the
- *   owner wires it; a new chat otherwise), a new chat on this seat, and
- *   Budget mode ▸ (A9's BudgetControl, loaded on demand).
+ * - Click opens the menu: "Continue on ‹seat›" (3.16: ONE click — the note is
+ *   built, the chat created and opened with the note prefilled, nothing spent
+ *   until Send; the older dialog path or a new chat when that is not wired),
+ *   "Hand off with a reviewed note…", a new chat on this seat, and Budget
+ *   mode ▸ (A9's BudgetControl, loaded on demand).
  *
  * A chat is bound to its seat; nothing here mutates the chat's seat.
  */
@@ -53,6 +55,14 @@ export interface SeatChipProps {
   compact?: boolean;
   /** "Continue on ‹seat›": a handoff prefilled for that seat. Falls back to onNewChat. */
   onContinueOn?: (choice: SeatChoice) => void;
+  /**
+   * 3.16 ONE-CLICK handoff: the note is built (free), the chat created on that
+   * seat and opened with the note prefilled — nothing spent until Send.
+   * Preferred over `onContinueOn` when given.
+   */
+  onQuickContinue?: (choice: SeatChoice) => void;
+  /** "Hand off with a reviewed note…": the handoff dialog, for when the note should be read first. */
+  onReviewHandoff?: () => void;
   onNewChat: (choice: SeatChoice) => void;
 }
 
@@ -170,7 +180,7 @@ function SeatTooltip({ seats, seat, label }: { seats: readonly VerseSeat[]; seat
   );
 }
 
-export function SeatChip({ seats, seat, engine, label, name = label, disabled = false, compact = false, onContinueOn, onNewChat }: SeatChipProps) {
+export function SeatChip({ seats, seat, engine, label, name = label, disabled = false, compact = false, onContinueOn, onQuickContinue, onReviewHandoff, onNewChat }: SeatChipProps) {
   const [open, setOpen] = useState(false);
   const [budgetOpen, setBudgetOpen] = useState(false);
   // The detail bubble is this component's own (not the Tooltip primitive):
@@ -270,16 +280,25 @@ export function SeatChip({ seats, seat, engine, label, name = label, disabled = 
             return (
               <button key={s.id} type="button" role="menuitem" className={`${styles.menuItem} ${styles[`engine-${s.engine}`] ?? ''}`}
                 data-capacity={cap.cls}
-                onClick={() => pick(() => (onContinueOn ?? onNewChat)({ seatId: s.id, model: model.id }))}>
+                onClick={() => pick(() => (onQuickContinue ?? onContinueOn ?? onNewChat)({ seatId: s.id, model: model.id }))}>
                 <span className={styles.monogram} aria-hidden="true"><ProviderLogo engine={s.engine} size={13} /></span>
                 <span className={styles.menuText}>
-                  <span className={styles.menuLabel}>{onContinueOn ? 'Continue on' : 'New chat on'} {s.label}</span>
+                  <span className={styles.menuLabel}>{onQuickContinue || onContinueOn ? 'Continue on' : 'New chat on'} {s.label}</span>
                   <span className={styles.menuDesc}>{model.label}{cap.cls === 'unread' ? '' : ` · ${SEAT_CAPACITY_WORD[cap.cls]}, ${cap.text}`}</span>
                 </span>
               </button>
             );
           })}
           {others.length === 0 ? <p className={styles.menuNote}>No other seat can take this chat right now.</p> : null}
+          {onReviewHandoff && others.length > 0 ? (
+            <button type="button" role="menuitem" className={styles.menuItem} onClick={() => pick(onReviewHandoff)}>
+              <span className={styles.menuCheck} aria-hidden="true" />
+              <span className={styles.menuText}>
+                <span className={styles.menuLabel}>Hand off with a reviewed note…</span>
+                <span className={styles.menuDesc}>Read and edit the note first, then pick the seat</span>
+              </span>
+            </button>
+          ) : null}
           <div className={styles.menuSeparator} role="separator" />
           <button type="button" role="menuitem" className={styles.menuItem}
             onClick={() => pick(() => onNewChat({ seatId: seat.seatId, model: seat.model }))}>

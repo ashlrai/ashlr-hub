@@ -1264,6 +1264,13 @@ export const WORKBENCH_ROUTE_FAMILIES = [
     handler: 'handleBrowserApi',
     prefixes: ['/api/verse/browser'],
   },
+  {
+    id: 'multimodel',
+    owner: '3.16-multimodel',
+    module: 'src/core/verse/multimodel-api.ts',
+    handler: 'handleMultimodelApi',
+    prefixes: ['/api/verse/multimodel'],
+  },
 ] as const satisfies readonly {
   id: string;
   owner: string;

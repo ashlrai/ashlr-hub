@@ -54,6 +54,7 @@
  *   /api/verse/wiki*      → wiki-api.ts (3.15)     /api/verse/browser*  → browser-api.ts (3.15)
  *  (`/api/verse/browser/mcp/<grant>` is the one POST that skips the token
  *  gate: a chat seat calls it, authenticated by its per-chat grant.)
+ *   /api/verse/multimodel* → multimodel-api.ts (3.16: Auto seat, compare, escalation, meter)
  *  Routed by PREFIX to exactly one family (dispatchWorkbenchModules), after
  *  every V1 route, with the same non-GET gate. They land at different times:
  *  a family whose module has not landed is a plain 404 that touches nothing
@@ -428,6 +429,9 @@ const WORKBENCH_IMPORTS: Readonly<Record<WorkbenchRouteFamilyId, () => Promise<W
   },
   browser: async () => {
     try { return (await import('./browser-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'browser-api.js'); }
+  },
+  multimodel: async () => {
+    try { return (await import('./multimodel-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'multimodel-api.js'); }
   },
 };
 
