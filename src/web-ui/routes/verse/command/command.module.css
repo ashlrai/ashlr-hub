@@ -766,3 +766,11 @@ button.chip:hover {
     transition: none;
   }
 }
+
+/* Held while the AutonomyStatus chunk loads (3.14), so the verdict does not jump. */
+.autonomyPlaceholder {
+  min-height: 132px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}

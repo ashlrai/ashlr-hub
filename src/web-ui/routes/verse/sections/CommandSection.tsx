@@ -27,12 +27,17 @@
  * stands in for the verdict line and the Since strip, and the KPI row and the
  * swimlane are left out while they would only draw zeros and dashes.
  *
+ * Autonomy ACTIVE (3.14): the banner's place goes to AutonomyStatus — the
+ * rollout ladder, progress to the next stage, the grant's expiry (Re-approve
+ * under 7 days, through the same sheet) and what the fleet decided last. It
+ * is a lazy chunk; the bar above keeps the switch and Stop.
+ *
  * Every source is optional (surface-data.ts): a Track B module that has not
  * landed is one card's designed "not in this build" state, never a blank
  * surface. Polling runs only while Command is the visible surface
  * (usePollWhileVisible), at ≥ 2 s per the performance budget.
  */
-import { useCallback, useMemo, useSyncExternalStore } from 'react';
+import { Suspense, lazy, useCallback, useMemo, useSyncExternalStore } from 'react';
 import { Swimlane } from '../../../components/charts/Swimlane.js';
 import type { ChartStatus } from '../../../components/charts/ChartFrame.js';
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
@@ -45,7 +50,8 @@ import { useNow } from '../autonomy/use-ticker.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { useViewport } from '../shell/viewport.js';
 import { ActionStatus, useSurfaceActions } from '../command/actions.js';
-import { AutonomyBar, useGrantFlow } from '../command/AutonomyBar.js';
+import { AutonomyBar, paletteBlock, useGrantFlow } from '../command/AutonomyBar.js';
+import { anchorId } from '../command/nav.js';
 import { AutonomyOffState, useSetupChecklist } from '../autonomy/AutonomyOffState.js';
 import { autonomyOffState } from '../autonomy/autonomy-off-model.js';
 import { buildKpis, claudeReserve, kpisSayNothing, seatNames, sinceYouLooked } from '../command/command-model.js';
@@ -69,6 +75,10 @@ import { laneRows, runTone } from '../fleet/live-model.js';
 import styles from '../command/command.module.css';
 
 const HOUR = 3_600_000;
+
+// The active fleet's ladder, progress and last decision (3.14): its own chunk,
+// loaded only while a grant is active — never on the chat first paint.
+const AutonomyStatus = lazy(() => import('../command/AutonomyStatus.js'));
 
 /** Fast reads: the switch, the fleet and the inbox move while nobody clicks. */
 export const COMMAND_FAST_POLL_MS = 10_000;
@@ -190,6 +200,19 @@ export function CommandSection() {
             <AutonomyOffState state={banner} here="command" onGrant={(intent) => grantFlow.open(intent, banner.why)} />
           ) : (
             <>
+              {auth && auth.grant.state === 'active' ? (
+                // Needs-you's rollout and Stop items point at this anchor.
+                <div id={anchorId('autonomy')}>
+                  <Suspense fallback={<div className={styles.autonomyPlaceholder} aria-busy="true" />}>
+                    <AutonomyStatus
+                      status={auth}
+                      now={now}
+                      onReapprove={(why) => grantFlow.open('re-approve', why)}
+                      blocked={paletteBlock({ status: auth, reason: null, readOnly: actions.readOnly, busy: actions.busy })}
+                    />
+                  </Suspense>
+                </div>
+              ) : null}
               <VerdictLine
                 authority={auth}
                 building={live?.summary.building ?? null}

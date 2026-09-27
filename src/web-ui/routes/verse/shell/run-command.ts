@@ -222,6 +222,8 @@ export function registerShellCommandHandlers(): () => void {
     }),
     registerCommandHandler('appearance.toggle-theme', () => cycleTheme()),
     registerCommandHandler('app.summon', () => requestVerseCommand('focus-composer')),
+    // The rollout ladder on Command (3.14); the status card carries the anchor.
+    registerCommandHandler('autonomy.status', () => setVerseSection('command', 'autonomy')),
     // The clipboard code loads when asked for (copy-setup.ts), not at first paint.
     registerCommandHandler('autonomy.copy-setup', () => { void import('./copy-setup.js').then((m) => m.copyAutonomySetupCommand()); }),
   ];

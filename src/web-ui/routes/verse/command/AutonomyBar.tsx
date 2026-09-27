@@ -19,7 +19,7 @@
  * and grant chip move under the verdict line (rendered by CommandSection).
  *
  * ⌘K reaches the same paths (usePaletteCommands below): "Autonomy: …",
- * "Approve grant…" and "Budget mode: …" run THROUGH this bar — the switch's
+ * "Approve grant…", "Re-approve grant…" and "Budget mode: …" run THROUGH this bar — the switch's
  * lower/raise/needs-grant classification, the grant chip's own intent, the
  * budget's grant ceiling, the token prompt, the read-only session — so the
  * palette can never be a shortcut around any of them. When the bar would
@@ -300,6 +300,32 @@ function usePaletteCommands({ read, status, budgetMode, actions, chip, onSwitch,
         return;
       }
       openGrant(chip.action, chip.detail);
+    },
+    ready,
+  );
+
+  // 3.14 "Re-approve grant…": renew a grant that is still continuable (active,
+  // paused, expired) through the SAME sheet — the server drafts it as a
+  // re-approval that continues the ladder. Nothing to continue → say so.
+  useCommandHandler(
+    'autonomy.reapprove',
+    () => {
+      const why = block();
+      if (why || !status) {
+        shellNotify(why ?? 'The autonomy state is unknown, so nothing was changed.', 'neutral');
+        return;
+      }
+      const state = status.grant.state;
+      if (state !== 'active' && state !== 'paused' && state !== 'expired') {
+        shellNotify('There is no grant to re-approve. Use "Approve grant…" to sign a new one.', 'neutral');
+        return;
+      }
+      openGrant(
+        're-approve',
+        state === 'active'
+          ? `${chip.detail} Re-approving signs a fresh 30 days and continues the rollout from its current stage.`
+          : chip.detail,
+      );
     },
     ready,
   );

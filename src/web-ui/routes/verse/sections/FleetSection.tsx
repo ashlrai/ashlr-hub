@@ -4,6 +4,7 @@
  * waiting, and per-repo control.
  *
  *   Live swimlane by lane × phase                                  (12)
+ *   Shadow decisions: G0–G7 per proposal, ladder regressions       (12)
  *   Gate funnel + refusal reasons (7) | Why this seat (5)
  *   Parked Gantt (7)                  | Overnight (5)
  *   Repo table: stage, last merge, green% sparkline, holds, pause/resume (12)
@@ -26,7 +27,7 @@ import { useNow } from '../autonomy/use-ticker.js';
 import { budgetPreviewQuery, budgetQuery } from '../budget/budget-queries.js';
 import { ActionStatus, useSurfaceActions } from '../command/actions.js';
 import { Cell, Surface } from '../command/Surface.js';
-import { fleetLiveQuery } from '../command/surface-data.js';
+import { authorityQuery, fleetLiveQuery } from '../command/surface-data.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { useViewport } from '../shell/viewport.js';
 import { GateFunnelCards, LanesStrip, LiveSwimlane, OvernightCard, ParkedCard, WhySeatCard } from '../fleet/FleetCards.js';
@@ -38,6 +39,10 @@ export const FLEET_POLL_MS = 5_000;
 export const FLEET_SLOW_POLL_MS = 30_000;
 
 // The legacy cockpit is ~74 KB of panels: its own chunk, loaded on open.
+// Shadow decisions (3.14): the gates' verdicts per proposal and ladder
+// regressions — its own chunk, loaded once a grant has ever been signed.
+const ShadowDecisions = lazy(() => import('../fleet/ShadowDecisions.js'));
+
 const FleetAdvanced = lazy(() => import('../fleet/Advanced.js').then((m) => ({ default: () => <m.FleetAdvanced embedded /> })));
 
 export function FleetSection() {
@@ -61,6 +66,11 @@ export function FleetSection() {
   const advancedId = useId();
   const live = fleet.data?.value ?? null;
   const off = useAutonomyOff();
+  // Same cache entry as the off-state's read (no extra request).
+  const authority = useQuery(authorityQuery, { freshMs: 30_000 });
+  const grantState = authority.data?.value?.grant.state ?? null;
+  // A grant (active, or lapsed with history) means the ledger has decisions to show.
+  const showDecisions = grantState !== null && grantState !== 'none';
   // Collapse only what would be empty: a fleet stopped an hour ago still
   // draws its last runs.
   const collapse = off != null && live !== null && nothingToDraw(live);
@@ -87,6 +97,13 @@ export function FleetSection() {
           <LiveSwimlane read={fleet.data} now={now} hours={compact ? 6 : 12} />
         </Cell>
       )}
+      {showDecisions ? (
+        <Cell span={12}>
+          <Suspense fallback={<p className={styles.muted} aria-busy="true">Loading shadow decisions…</p>}>
+            <ShadowDecisions now={now} />
+          </Suspense>
+        </Cell>
+      ) : null}
       {collapse ? null : (
         <Cell span={7}>
           <GateFunnelCards read={fleet.data} />
