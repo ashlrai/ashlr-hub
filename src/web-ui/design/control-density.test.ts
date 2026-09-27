@@ -115,6 +115,9 @@ const FILES = [
  * literal value, with the reason it does not scale with density.
  */
 const ALLOWED: Record<string, Record<string, string>> = {
+  'routes/verse/command/command.module.css': {
+    '132px': 'reserved height of the lazy AutonomyStatus card while its chunk loads — a layout placeholder, not a control',
+  },
   'routes/verse/VerseApp.module.css': {
     '32px': 'the brand mark in the rail head — a fixed 32px logo, never a control',
     // 3.10 phone layout (`.shell[data-compact]`): the rail becomes a bottom tab
