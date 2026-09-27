@@ -39,6 +39,10 @@
 //!   not exist and wry would silently fall back to the SHARED default store,
 //!   gets a non-persistent (incognito) store instead; other platforms use
 //!   `<app local data>/browser`.
+//! - **No microphone or camera.** Every tab's WKWebView gets a UI delegate
+//!   that denies media capture (`media_guard.rs`; wry's own grants it), and
+//!   the tap replaces `navigator.mediaDevices.getUserMedia` before the page
+//!   runs. Dictation captures audio in Rust for the Verse window only.
 //! - **Read, never act.** Native only navigates, reads (text, console,
 //!   network failures, page info, a picked element) and snapshots. It never
 //!   types, never fills or submits a form, never enters a credential, never
@@ -1080,7 +1084,18 @@ fn build_tab_window(
             .inner_size(bounds.width, bounds.height);
     }
 
-    separate_data_store(builder, app).build()
+    let window = separate_data_store(builder, app).build()?;
+    // Microphone / camera: wry's WKUIDelegate grants every WebKit capture
+    // request, so an arbitrary site in a tab would get the mic the moment the
+    // app holds the permission (dictation). Swap in the deny proxy
+    // (media_guard.rs); if that cannot be done, the tab does not exist.
+    if let Err(e) = crate::media_guard::apply(&window) {
+        let _ = window.destroy();
+        return Err(tauri::Error::Io(std::io::Error::other(format!(
+            "media-capture guard unavailable: {e}"
+        ))));
+    }
+    Ok(window)
 }
 
 #[cfg(target_os = "macos")]

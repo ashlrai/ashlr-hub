@@ -11,6 +11,28 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Dictation everywhere in Verse (desktop)
+
+- Hold **⌃⌥V** to talk (release inserts), tap it to dictate hands-free until
+  the next press, **Esc** cancels; **⌃⌥⇧V** turns the words into a ⌘K query.
+  A mic button sits in the chat composer, the Leader composer, ⌘K and the
+  terminal; the hotkey dictates into whichever of them is focused (or was
+  last).
+- Local and fast: NVIDIA Parakeet TDT 0.6B v3 on the CPU in the app itself,
+  downloaded once (~670 MB, checksum-verified) on first use. Partials stream
+  into a floating pill, dimmed; the final lands solid at the caret.
+- Your lexicon applies (`lexicon serve`, with the chat's repo), falling back
+  to a cached term map (a quiet **raw** badge) when the server is down.
+  Spoken file names ("browser pane dot rs") become `browser_pane.rs` when the
+  chat has exactly that file. The terminal gets the words verbatim and never
+  an Enter.
+- Every failure has a one-click fix: allow the mic, open Privacy ▸
+  Microphone or Sound, re-download the model.
+- Security: websites in the browser pane can never reach the microphone or
+  camera (a deny-all WebKit media delegate on every tab, plus the tap).
+- `ship:local` signs with a stable local identity ("Ashlr Local") so macOS
+  keeps the microphone permission across rebuilds.
+
 ### Reasoning, actions and sources in Verse chats
 
 - Every answer ends with numbered **Sources**: files the agent read, with the

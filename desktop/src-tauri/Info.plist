@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged by the Tauri bundler into Ashlr.app/Contents/Info.plist.
+  `scripts/ship-local.mjs` writes the same key into an already-installed
+  bundle (it patches /Applications/Ashlr.app instead of rebuilding it), and
+  `src/voice/permission.rs` refuses to touch the microphone when it is absent
+  (macOS kills a process that does).
+-->
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Verse transcribes your voice on this Mac when you hold the dictation key.</string>
+</dict>
+</plist>

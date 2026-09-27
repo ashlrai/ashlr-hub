@@ -18,6 +18,65 @@
 //   lie to it; native treats every answer as untrusted data, never as code.
 ;(function () {
   'use strict'
+
+  // No microphone, camera or screen capture for a page in the pane. Native
+  // denies it too (media_guard.rs swaps wry's grant-everything WKUIDelegate
+  // for a deny proxy, which also covers iframes); this layer makes the refusal
+  // immediate and covers the legacy callback APIs. Runs before the idempotency
+  // guard on purpose, and is itself idempotent: a second run's
+  // defineProperty on a locked property throws and is swallowed.
+  ;(function () {
+    var MESSAGE = 'Media capture is disabled in the Ashlr browser pane.'
+    function refusal() {
+      try {
+        var DomException = window.DOMException
+        if (typeof DomException === 'function') return new DomException(MESSAGE, 'NotAllowedError')
+      } catch (_) {}
+      var e = new Error(MESSAGE)
+      e.name = 'NotAllowedError'
+      return e
+    }
+    function denied() {
+      return Promise.reject(refusal())
+    }
+    function noDevices() {
+      return Promise.resolve([])
+    }
+    function legacyDenied(_constraints, _onSuccess, onError) {
+      if (typeof onError === 'function') {
+        try {
+          onError(refusal())
+        } catch (_) {}
+      }
+    }
+    function lock(target, name, fn) {
+      if (!target) return
+      try {
+        Object.defineProperty(target, name, {
+          value: fn,
+          writable: false,
+          configurable: false,
+          enumerable: false
+        })
+      } catch (_) {}
+    }
+    try {
+      var MD = window.MediaDevices
+      var targets = [MD && MD.prototype, navigator.mediaDevices]
+      for (var i = 0; i < targets.length; i++) {
+        lock(targets[i], 'getUserMedia', denied)
+        lock(targets[i], 'getDisplayMedia', denied)
+        lock(targets[i], 'enumerateDevices', noDevices)
+      }
+      var NP = window.Navigator && window.Navigator.prototype
+      var legacy = ['getUserMedia', 'webkitGetUserMedia']
+      for (var j = 0; j < legacy.length; j++) {
+        lock(NP, legacy[j], legacyDenied)
+        lock(navigator, legacy[j], legacyDenied)
+      }
+    } catch (_) {}
+  })()
+
   try {
     if (Object.prototype.hasOwnProperty.call(window, '__ashlrTap')) return
   } catch (_) {

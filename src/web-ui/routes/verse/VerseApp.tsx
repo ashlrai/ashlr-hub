@@ -173,6 +173,18 @@ const OnboardingGate = lazy(() => importOnboarding().then((m) => ({ default: m.O
 const ResourcesChrome = lazy(() => importResources().then((m) => ({ default: m.ResourcesChrome })));
 const ResourcesRailButton = lazy(() => importResources().then((m) => ({ default: m.ResourcesRailButton })));
 const ResourcesBar = lazy(() => importResources().then((m) => ({ default: m.ResourcesBar })));
+// Dictation's floating pill (voice/VoiceHud): its own chunk, fetched only
+// where dictation can exist (the desktop shell's voice bridge, or a browser
+// with the Web Speech API). Renders nothing until someone dictates.
+const VoiceHud = lazy(() => import('./voice/VoiceHud.js'));
+function dictationPossible(): boolean {
+  try {
+    const w = window as unknown as { __ASHLR_DESKTOP__?: { voice?: unknown }; SpeechRecognition?: unknown; webkitSpeechRecognition?: unknown };
+    return Boolean(w.__ASHLR_DESKTOP__?.voice || w.SpeechRecognition || w.webkitSpeechRecognition);
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The after-first-paint warm-up (shell/warmup.ts): the overlay chunks, then
@@ -265,6 +277,7 @@ export function VerseApp() {
   const platform = useMemo(() => detectKeyPlatform(), []);
   const gearRef = useRef<HTMLButtonElement>(null);
   const [trayOpen, setTrayOpen] = useState(false);
+  const [voiceHud] = useState(dictationPossible);
   const data = activity.data;
   const rail = useRailStatusModule();
   const resources = useResourcesUi();
@@ -522,6 +535,7 @@ export function VerseApp() {
         {ui.overlay === 'needs-you' ? <NeedsYouDrawer /> : null}
         {ui.overlay === 'shortcuts' ? <ShortcutsOverlay /> : null}
       </Suspense>
+      {voiceHud ? <Suspense fallback={null}><VoiceHud /></Suspense> : null}
       <GuardHost />
       {/*
         First run only, outside the surfaces: a docked card, not a modal, so

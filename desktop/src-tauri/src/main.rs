@@ -65,11 +65,14 @@ mod desktop_prefs;
 mod health_watch;
 mod hotkey;
 mod launch_state;
+mod media_guard;
 mod notify;
 mod shell_contract;
 mod sidecar_guard;
 mod sidecar_supervisor;
 mod tray;
+mod voice;
+mod voice_hotkey;
 mod window_state;
 
 use launch_state::{LaunchFailure, LaunchPayload, LaunchPhase};
@@ -1481,6 +1484,13 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     });
     app.manage(app_menu::ZoomLevel::default());
     app.manage(browser_pane::BrowserPanes::default());
+    // Dictation (voice/): models and the lexicon cache live in the app-data
+    // dir (~/Library/Application Support/ai.ashlr.desktop).
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("ai.ashlr.desktop"));
+    app.manage(voice::VoiceHub::new(app_data));
 
     // ── menu bar ─────────────────────────────────────────────────────────────
     // Built before any window so ⌘C / ⌘V / ⌘Z work in the composer from the
@@ -1593,6 +1603,15 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             browser_pane::handle_event(&handle, event.payload());
         });
     }
+    // ── dictation (shell contract v1 `voice`, voice/mod.rs) ─────────────────
+    // Parsed strictly here, handled in order on the voice control thread.
+    {
+        let handle = handle.clone();
+        app.listen(voice::VOICE_EVENT, move |event| {
+            voice::handle_event(&handle, event.payload());
+        });
+    }
+    voice::init(&handle);
     if prefs.global_hotkey {
         let status = hotkey::apply(&handle, true);
         if let Some(state) = handle.try_state::<AppState>() {
@@ -2203,6 +2222,10 @@ fn main() {
                 .with_handler(|app, shortcut, event| {
                     if hotkey::is_summon_press(shortcut, event.state()) {
                         summon(app);
+                    } else if let Some(chord) = voice_hotkey::classify(shortcut) {
+                        // ⌃⌥V / ⌃⌥⇧V / Esc-while-dictating: press AND release
+                        // both matter (hold = push-to-talk, tap = latch).
+                        voice::on_hotkey(app, chord, event.state());
                     }
                 })
                 .build(),

@@ -309,6 +309,39 @@ reaches an installed app through `npm run ship:local -- --native`. A web-only
 ship leaves the old shell in place, and the web UI must keep working through
 the fallback above.
 
+### 8. Dictation (shell contract v1 `voice`)
+
+Verse dictates into its own inputs — the chat composer, the Leader composer,
+⌘K and the terminal — with **local** speech recognition. Capture and
+transcription run in the app process (`src/voice/`): the launchd sidecar has
+no UI and cannot hold a microphone grant, and the WKWebView has no Web Speech
+API. Text only ever goes into Verse; nothing is typed into other apps, so no
+Accessibility permission is involved.
+
+| Piece | Where |
+|---|---|
+| Page → native | `window.__ASHLR_DESKTOP__.voice = { version: 1, send }` emits `shell-voice` (the event permission the page already has — no new capability, no command). Ops: `status`, `start {session, mode, cwd?}`, `context {session, mode, cwd?}`, `stop`, `cancel`, `fix {action}` — parsed strictly (`voice/protocol.rs`: closed op set, per-op key allow-list, bounded strings, absolute `cwd`). |
+| Native → page | the locked `window.__ASHLR_VOICE_EVENT__(<json>)` → `ashlr:voice` window event: `voice://state` (mic permission, engine + model download, hotkey, lexicon, live session), `voice://level` (~20 Hz), `voice://partial` (~every 400 ms), `voice://final`, `voice://error`. |
+| Capture | `cpal` default input → mono → 16 kHz (`voice/capture.rs`). |
+| Engine | NVIDIA **Parakeet TDT 0.6B v3** (int8 ONNX) via `transcribe-rs`, CPU. ~670 MB, downloaded **once, on first use** into `~/Library/Application Support/ai.ashlr.desktop/models/`, pinned to one Hugging Face revision and SHA-256-checked per file (`voice/model.rs`). Fallback: `whisper-cli` + a ggml model already on disk, biased with the lexicon's `whisper-prompt`. |
+| Streaming | the growing buffer is re-decoded ~every 400 ms for partials; long dictation commits its prefix at a real pause so each decode stays small; energy VAD skips silence and trims the final pass (`voice/stream.rs`). |
+| Lexicon | `lexicon serve` (127.0.0.1:41733, token from `~/.config/lexicon/serve.json`, read per request, never logged) normalizes finals with the chat's repo as `cwd`; its term map is cached to disk and applied locally when the server is down (the pill shows a quiet **raw** badge). The terminal is `verbatim`: no lexicon, no cleanup. |
+| Hotkeys | **⌃⌥V**: hold ≥250 ms = push-to-talk (listening starts on key-down), tap = latch until pressed again. **⌃⌥⇧V**: the words become the ⌘K query. **Esc** cancels — registered globally only while a dictation is live. Not fn (Wispr Flow's). |
+
+Permissions: `Info.plist` carries `NSMicrophoneUsageDescription` and
+`Entitlements.plist` `com.apple.security.device.audio-input`. macOS kills a
+process that opens the mic without the usage string, so native checks for it
+first and reports `no-usage-description` instead. The microphone grant is
+keyed to the code signature — see "stable local signing" in
+docs/RELEASING-LOCALLY.md.
+
+Web side: `src/web-ui/routes/verse/voice/` — `VoiceInput` (the mic button,
+lazy-loaded by each surface), `VoiceHud` (the one floating pill: waveform,
+"Listening · local Parakeet", dimmed partials, errors with a one-click fix),
+`voice-store` (routing: a hotkey dictation goes to the focused, else
+last-focused, input). In a plain browser the same UI runs on the Web Speech
+API.
+
 ---
 
 ## Window behaviour
@@ -527,6 +560,13 @@ asks you to paste them:
 - Browser pane tabs (§7) are separate `browser-<tab>` windows that no
   capability matches — websites in them get no IPC — with their own website
   data store, fixed read-only scripts, and the URL rule on every navigation.
+- **No website ever gets the microphone or camera.** wry's WKUIDelegate
+  grants every WebKit media-capture request; every browser tab gets a
+  delegate proxy that answers Deny (and forwards everything else to wry's),
+  installed when the tab is built — a tab whose guard cannot be installed is
+  destroyed (`src/media_guard.rs`). The tap also replaces `getUserMedia` /
+  `getDisplayMedia` before the page runs. Dictation captures in Rust for the
+  Verse window only.
 - **IPC granted to the remote page is exactly three commands**, in
   `capabilities/verse-remote.json`: `core:window:allow-start-dragging`,
   `core:window:allow-internal-toggle-maximize`, `core:event:allow-emit`. That is

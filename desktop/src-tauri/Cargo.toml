@@ -85,9 +85,23 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "block2",
     "objc2-app-kit",
+    "WKFrameInfo",
+    "WKSecurityOrigin",
     "WKSnapshotConfiguration",
+    "WKUIDelegate",
     "WKWebView",
 ] }
+# Dictation (`src/voice/`), macOS only — the app captures the microphone
+# itself (the launchd sidecar has no UI and cannot hold a TCC grant):
+# - `cpal`: CoreAudio input stream, downmixed and resampled to 16 kHz mono.
+# - `transcribe-rs` (`onnx`): NVIDIA Parakeet TDT 0.6B v3 (int8 ONNX) through
+#   ONNX Runtime. The model (~670 MB) is NOT bundled: it is downloaded on
+#   first use into the app-support dir and SHA-256 verified
+#   (`voice/model.rs`). ONNX Runtime itself is linked statically; `ort-sys`
+#   fetches its prebuilt, hash-pinned static library at BUILD time (network
+#   needed on a cold cache, cached under ~/Library/Caches/ort.pyke.io).
+cpal = "0.18.2"
+transcribe-rs = { version = "0.3.11", default-features = false, features = ["onnx"] }
 
 [profile.release]
 # Produce a smaller binary: strip debug info, enable LTO, single codegen unit.

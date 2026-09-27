@@ -7,11 +7,16 @@
 import { describe, expect, it } from 'vitest';
 import {
   APP_PATH,
+  ENTITLEMENTS,
   KEEP_BACKUPS,
+  MIC_USAGE,
   NATIVE_BUILD,
   Refusal,
   backupName,
+  codesignArgv,
+  ensureSigningIdentity,
   gatherContext,
+  parseIdentities,
   parseArgs,
   planShip,
   rotateBackups,
@@ -26,7 +31,8 @@ const HOME = '/isolated-home';
 const REPO = '/repo';
 
 type Entry = { name: string; mtimeMs: number };
-type Step = { id: string; title: string; argv?: string[]; wait?: { kind: string }; versions?: unknown };
+type Step = { id: string; title: string; argv?: string[]; wait?: { kind: string }; versions?: unknown; identity?: string; sign?: { identity: string | null; entitlements: string } };
+const HASH = 'F6674FDA4EDE6D75028DA2165382E629553DD6D6';
 
 function ctx(overrides: Record<string, unknown> = {}) {
   return {
@@ -49,6 +55,7 @@ function ctx(overrides: Record<string, unknown> = {}) {
       'Contents/Resources': [{ name: 'public', mtimeMs: 10 }, { name: 'icon.icns', mtimeMs: 10 }],
     } as Record<string, Entry[]>,
     loadedAgents: ['ai.ashlr.anthropic-proxy', 'ai.ashlr.serve'],
+    signing: { hash: HASH, name: 'Ashlr Local', valid: true } as { hash: string; name: string; valid: boolean } | null,
     nativeBuildMtime: null as number | null,
     installedNativeMtime: 10 as number | null,
     iconBuildMtime: null as number | null,
@@ -115,7 +122,7 @@ describe('planShip step list', () => {
     const steps = planShip(ctx()) as Step[];
     expect(ids(steps)).toEqual(expect.arrayContaining([
       'app-quit', 'app-wait-quit', 'backup-ashlr', 'install-ashlr', 'backup-public', 'install-public',
-      'codesign', 'codesign-verify', 'app-launch',
+      'plist-mic', 'codesign', 'codesign-verify', 'app-launch',
     ]));
     expect(step(steps, 'backup-ashlr')?.argv).toEqual([
       'mv', `${APP_PATH}/Contents/MacOS/ashlr`, `${APP_PATH}/Contents/MacOS/ashlr.prev-01234567`,
@@ -124,11 +131,19 @@ describe('planShip step list', () => {
       'mv', `${APP_PATH}/Contents/Resources/public`, `${APP_PATH}/Contents/Resources/public.prev-01234567`,
     ]);
     expect(step(steps, 'install-ashlr')?.argv).toEqual(['cp', '-R', `${REPO}/dist-bin/ashlr`, `${APP_PATH}/Contents/MacOS/ashlr`]);
-    expect(step(steps, 'codesign')?.argv).toEqual(['codesign', '--force', '--deep', '--sign', '-', APP_PATH]);
+    expect(step(steps, 'codesign')?.argv).toEqual([
+      'codesign', '--force', '--deep', '--sign', HASH, '--entitlements', `${REPO}/${ENTITLEMENTS}`, APP_PATH,
+    ]);
+    expect(step(steps, 'plist-mic')?.argv).toEqual([
+      'plutil', '-replace', 'NSMicrophoneUsageDescription', '-string', MIC_USAGE, `${APP_PATH}/Contents/Info.plist`,
+    ]);
     // Quit before touching the bundle; sign after the last copy; relaunch last.
     const order = ids(steps);
     expect(order.indexOf('app-wait-quit')).toBeLessThan(order.indexOf('backup-ashlr'));
     expect(order.indexOf('install-public')).toBeLessThan(order.indexOf('codesign'));
+    // The plist is part of what gets signed.
+    expect(order.indexOf('plist-mic')).toBeLessThan(order.indexOf('codesign'));
+    expect(ids(steps)).not.toContain('signing-identity');
     expect(order.indexOf('codesign-verify')).toBeLessThan(order.indexOf('app-launch'));
   });
 
@@ -243,6 +258,7 @@ function fakeIo(overrides: Record<string, unknown> = {}) {
       if (cmd === 'git' && argv[0] === 'status') return { status: 0, stdout: '' };
       if (cmd === 'launchctl' && argv[0] === 'print') return { status: argv[1].endsWith('ai.ashlr.serve') ? 0 : 113, stdout: '' };
       if (cmd === 'pgrep') return { status: 1, stdout: '' };
+      if (cmd === 'security') return { status: 0, stdout: `  1) ${HASH} "Ashlr Local"\n` };
       return { status: 0, stdout: 'ashlr 3.11.1\n' };
     },
     fetchStatus: async () => 200,
@@ -258,12 +274,15 @@ describe('gatherContext', () => {
         calls.push([cmd, ...argv]);
         if (cmd === 'git' && argv[0] === 'status') return { status: 0, stdout: ' M src/x.ts\n' };
         if (cmd === 'git') return { status: 0, stdout: `${SHA}\n` };
+        if (cmd === 'security') return { status: 0, stdout: `  1) ${HASH} "Ashlr Local"\n     1 identities found\n` };
         return { status: argv[1]?.endsWith('ai.ashlr.serve') ? 0 : 113, stdout: '' };
       },
     });
     const c = gatherContext({ dryRun: true, native: false, allowDirty: false }, io);
     expect(c).toMatchObject({ dirty: true, sha: SHA, version: '3.11.1', appExists: true, loadedAgents: ['ai.ashlr.serve'] });
-    expect(calls.map((c) => c[0])).toEqual(['git', 'git', 'launchctl', 'launchctl']);
+    expect(c.signing).toEqual({ hash: HASH, name: 'Ashlr Local', valid: true });
+    expect(calls.map((c) => c[0])).toEqual(['git', 'git', 'security', 'launchctl', 'launchctl']);
+    expect(calls.find((c) => c[0] === 'security')).toEqual(['security', 'find-identity', '-p', 'codesigning']);
     expect(() => planShip(c)).toThrow(/uncommitted/);
   });
 });
@@ -323,5 +342,142 @@ describe('the app icon (3.11.3)', () => {
     expect(ids(planShip(ctx({ iconBuildMtime: 99 })) as Step[])).not.toContain('install-icon.icns');
     expect(ids(planShip(ctx({ native: true, iconBuildMtime: 5 })) as Step[])).not.toContain('install-icon.icns');
     expect(ids(planShip(ctx({ native: true, iconBuildMtime: 5 })) as Step[])).not.toContain('touch-app');
+  });
+});
+
+describe('stable local code signing (dictation keeps its microphone grant)', () => {
+  it('parses the keychain listing, telling trusted from untrusted', () => {
+    expect(parseIdentities([
+      `  1) ${HASH} "Ashlr Local" (CSSMERR_TP_NOT_TRUSTED)`,
+      '  2) 0000000000000000000000000000000000000001 "Apple Development: Mason (X)"',
+      '     2 identities found',
+    ].join('\n'))).toEqual([
+      { hash: HASH, name: 'Ashlr Local', valid: false },
+      { hash: '0000000000000000000000000000000000000001', name: 'Apple Development: Mason (X)', valid: true },
+    ]);
+    expect(parseIdentities('0 identities found')).toEqual([]);
+  });
+
+  it('signs with the identity and the entitlements; ad-hoc only as the named fallback', () => {
+    expect(codesignArgv(HASH, '/e.plist')).toEqual(['codesign', '--force', '--deep', '--sign', HASH, '--entitlements', '/e.plist', APP_PATH]);
+    expect(codesignArgv(null, '/e.plist')).toEqual(['codesign', '--force', '--deep', '--sign', '-', '--entitlements', '/e.plist', APP_PATH]);
+  });
+
+  it('plans the one-time identity step before signing when there is no trusted identity', () => {
+    for (const signing of [null, { hash: HASH, name: 'Ashlr Local', valid: false }]) {
+      const steps = planShip(ctx({ signing })) as Step[];
+      const order = ids(steps);
+      expect(order.indexOf('signing-identity')).toBeGreaterThan(-1);
+      expect(order.indexOf('signing-identity')).toBeLessThan(order.indexOf('codesign'));
+      expect(step(steps, 'codesign')?.sign).toEqual({ identity: null, entitlements: `${REPO}/${ENTITLEMENTS}` });
+    }
+  });
+
+  function signingIo(script: (cmd: string, argv: string[]) => { status: number; stdout: string } | undefined) {
+    const calls: string[][] = [];
+    const logs: string[] = [];
+    const files = new Map<string, string>();
+    const removed: string[] = [];
+    const io = {
+      home: HOME,
+      log: (line: string) => logs.push(line),
+      mkdtemp: (prefix: string) => `/os-tmp/${prefix}xyz`,
+      writeFile: (path: string, text: string) => files.set(path, text),
+      removeDir: (dir: string) => removed.push(dir),
+      exec: (cmd: string, argv: string[]) => {
+        calls.push([cmd, ...argv]);
+        return script(cmd, argv) ?? { status: 0, stdout: '' };
+      },
+    };
+    return { io, calls, logs, files, removed };
+  }
+
+  it('returns an existing trusted identity without touching the keychain', () => {
+    const { io, calls } = signingIo(() => ({ status: 0, stdout: `  1) ${HASH} "Ashlr Local"\n` }));
+    expect(ensureSigningIdentity(io)).toBe(HASH);
+    expect(calls).toEqual([['security', 'find-identity', '-p', 'codesigning']]);
+  });
+
+  it('creates, imports and trusts a missing identity, then removes the key material', () => {
+    let trusted = false;
+    const { io, calls, files, removed } = signingIo((cmd, argv) => {
+      if (cmd === 'security' && argv[0] === 'find-identity') {
+        return { status: 0, stdout: trusted ? `  1) ${HASH} "Ashlr Local"\n` : '     0 identities found\n' };
+      }
+      if (cmd === 'security' && argv[0] === 'add-trusted-cert') trusted = true;
+      return undefined;
+    });
+    expect(ensureSigningIdentity(io)).toBe(HASH);
+    const cmds = calls.map((c) => `${c[0]} ${c[1]}`);
+    expect(cmds).toEqual([
+      'security find-identity',
+      '/usr/bin/openssl req',
+      '/usr/bin/openssl pkcs12',
+      'security import',
+      'security add-trusted-cert',
+      'security find-identity',
+    ]);
+    const req = calls[1]!;
+    expect(req).toEqual(expect.arrayContaining(['-x509', '-extensions', 'ext']));
+    expect([...files.values()][0]).toContain('extendedKeyUsage = critical,codeSigning');
+    const trust = calls.find((c) => c[1] === 'add-trusted-cert')!;
+    expect(trust).toEqual(['security', 'add-trusted-cert', '-r', 'trustRoot', '-p', 'codeSign', '-k', `${HOME}/Library/Keychains/login.keychain-db`, '/os-tmp/ashlr-sign-xyz/cert.pem']);
+    const imp = calls.find((c) => c[1] === 'import')!;
+    expect(imp).toEqual(expect.arrayContaining(['-T', '/usr/bin/codesign', '-k', `${HOME}/Library/Keychains/login.keychain-db`]));
+    expect(removed).toEqual(['/os-tmp/ashlr-sign-xyz']);
+  });
+
+  it('trusts an existing-but-untrusted identity instead of making a second one', () => {
+    let trusted = false;
+    const { io, calls } = signingIo((cmd, argv) => {
+      if (argv[0] === 'find-identity') return { status: 0, stdout: `  1) ${HASH} "Ashlr Local"${trusted ? '' : ' (CSSMERR_TP_NOT_TRUSTED)'}\n` };
+      if (argv[0] === 'find-certificate') return { status: 0, stdout: '-----BEGIN CERTIFICATE-----\nMII\n-----END CERTIFICATE-----\n' };
+      if (argv[0] === 'add-trusted-cert') trusted = true;
+      return undefined;
+    });
+    expect(ensureSigningIdentity(io)).toBe(HASH);
+    expect(calls.some((c) => c[0] === '/usr/bin/openssl')).toBe(false);
+  });
+
+  it('a cancelled trust prompt falls back: null, and the temp dir is still removed', () => {
+    const { io, logs, removed } = signingIo((cmd, argv) => {
+      if (argv[0] === 'find-identity') return { status: 0, stdout: '' };
+      if (argv[0] === 'add-trusted-cert') return { status: 1, stdout: '' };
+      return undefined;
+    });
+    expect(ensureSigningIdentity(io)).toBeNull();
+    expect(logs.at(-1)).toMatch(/not trusted for code signing/);
+    expect(removed).toHaveLength(1);
+  });
+
+  it('runSteps signs with the freshly made identity, or ad-hoc with a loud warning', async () => {
+    for (const makes of [true, false]) {
+      let trusted = false;
+      const { io: base, calls } = fakeIo();
+      const logs: string[] = [];
+      const io = {
+        ...base,
+        log: (line: string) => logs.push(line),
+        mkdtemp: () => '/os-tmp/ashlr-sign-1',
+        writeFile: () => {},
+        removeDir: () => {},
+        exec: (cmd: string, argv: string[]) => {
+          calls.push([cmd, ...argv]);
+          if (argv[0] === 'find-identity') return { status: 0, stdout: trusted ? `  1) ${HASH} "Ashlr Local"\n` : '' };
+          if (argv[0] === 'add-trusted-cert') {
+            trusted = makes;
+            return { status: makes ? 0 : 1, stdout: '' };
+          }
+          return base.exec(cmd, argv);
+        },
+      };
+      const steps = planShip(ctx({ signing: null })) as Step[];
+      calls.length = 0;
+      expect(await runSteps(steps, io, { dryRun: false })).toBe(0);
+      const sign = calls.find((c) => c[0] === 'codesign' && c[1] === '--force')!;
+      expect(sign[4]).toBe(makes ? HASH : '-');
+      expect(sign).toContain('--entitlements');
+      if (!makes) expect(logs.join('\n')).toMatch(/WARNING — signing ad-hoc/);
+    }
   });
 });

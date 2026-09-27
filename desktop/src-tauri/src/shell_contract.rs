@@ -31,6 +31,10 @@
 //!    replace the channel. `capabilities.screenshot` comes from
 //!    `ShellConfig::browser_screenshot` (macOS only). An older shell has no
 //!    `browser` key at all — that absence is the web UI's feature test.
+//! 7. Dictation (protocol v1, `voice/`): `window.__ASHLR_DESKTOP__.voice` =
+//!    `{ version: 1, send }` and the `ashlr:voice` event. The page emits
+//!    `shell-voice` (same event permission, no new capability); native
+//!    answers through the locked `window.__ASHLR_VOICE_EVENT__(<json>)`.
 //!
 //! The script is origin-gated to the sidecar origin. Token values are
 //! JSON-encoded into a config object, never string-interpolated, so no token
@@ -294,6 +298,22 @@ mod tests {
         // copy (what was measured is what is sent).
         assert!(script.contains("Object.getPrototypeOf(msg)"));
         assert!(script.contains("payload: JSON.parse(json)"));
+    }
+
+    #[test]
+    fn the_voice_contract_is_present() {
+        let script = init_script(ORIGIN, None);
+        for needle in [
+            "voice: Object.freeze(",
+            "send: sendVoice",
+            "event: 'shell-voice'",
+            "VOICE_MESSAGE_MAX = 8192",
+            "Object.defineProperty(window, '__ASHLR_VOICE_EVENT__'",
+            "new CustomEvent('ashlr:voice'",
+        ] {
+            assert!(script.contains(needle), "shell contract lost `{needle}`");
+        }
+        assert_eq!(crate::voice::VOICE_EVENT, "shell-voice");
     }
 
     #[test]

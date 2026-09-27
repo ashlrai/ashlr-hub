@@ -17,7 +17,7 @@
  * (focus never leaves the input); group headings are presentational labels
  * the options reference, and the result count is announced politely.
  */
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { useFocusTrap } from '../../../components/primitives/focus-trap.js';
 import { useQuery } from '../../../data/hooks.js';
@@ -25,12 +25,17 @@ import { verseBootstrapQuery, verseSessionsQuery } from '../verse-queries.js';
 import { useVerseUi } from '../useVerseUi.js';
 import { ReturnKeyIcon } from '../verse-icons.js';
 import { closeVerseOverlay, openVerseNeedsYou, openVerseSession, requestVerseCommand } from '../verse-ui-store.js';
+import { PALETTE_QUERY_EVENT, takePaletteQuery } from '../voice/palette-handoff.js';
+import { insertDictation } from '../voice/insert-text.js';
 import { detectKeyPlatform, findCommand, type WorkbenchCommand } from './command-catalog.js';
 import { argumentItems, buildPaletteItems, paletteView, type PaletteItem } from './palette-model.js';
 import { executeCatalogCommand } from './run-command.js';
 import { useActivity } from './useActivity.js';
 import styles from './CommandPalette.module.css';
 import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
+
+// Dictation (voice/): lazy, so the palette opens as fast as before.
+const VoiceInput = lazy(() => import('../voice/VoiceInput.js'));
 
 export interface CommandPaletteProps {
   onClose?: () => void;
@@ -42,7 +47,8 @@ export function CommandPalette({ onClose = closeVerseOverlay }: CommandPalettePr
   const sessions = useQuery(verseSessionsQuery);
   const bootstrap = useQuery(verseBootstrapQuery);
   const platform = useMemo(() => detectKeyPlatform(), []);
-  const [query, setQuery] = useState('');
+  // ⌃⌥⇧V (voice command mode) opens the palette with the spoken words as the query.
+  const [query, setQuery] = useState(() => takePaletteQuery() ?? '');
   const [active, setActive] = useState(0);
   const [argFor, setArgFor] = useState<WorkbenchCommand | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -86,7 +92,27 @@ export function CommandPalette({ onClose = closeVerseOverlay }: CommandPalettePr
   // A new query highlights its best match (see PaletteView.best); a data
   // refresh under an unchanged query only keeps the highlight on a real row,
   // so it never yanks a highlight the operator arrowed to.
-  const highlightBestRef = useRef(false);
+  const highlightBestRef = useRef(query !== '');
+  // A spoken command while the palette is already open replaces the query.
+  useEffect(() => {
+    function onSpoken(event: Event) {
+      const spoken = (event as CustomEvent<unknown>).detail;
+      takePaletteQuery();
+      if (typeof spoken !== 'string' || !spoken) return;
+      setArgFor(null);
+      setQuery(spoken);
+      highlightBestRef.current = true;
+      inputRef.current?.focus();
+    }
+    window.addEventListener(PALETTE_QUERY_EVENT, onSpoken);
+    return () => window.removeEventListener(PALETTE_QUERY_EVENT, onSpoken);
+  }, []);
+  // Dictating INTO the query (the mic in the field): appended at the caret.
+  const insertDictated = useCallback((chunk: string) => {
+    const node = inputRef.current;
+    setQuery((current) => insertDictation(current, chunk.replace(/[.!?]+$/, ''), node?.selectionStart ?? null, node?.selectionEnd ?? null).value);
+    highlightBestRef.current = true;
+  }, []);
   useEffect(() => {
     if (highlightBestRef.current) {
       highlightBestRef.current = false;
@@ -232,6 +258,9 @@ export function CommandPalette({ onClose = closeVerseOverlay }: CommandPalettePr
             }}
             onKeyDown={onKeyDown}
           />
+          <Suspense fallback={null}>
+            <VoiceInput surface="palette" targetRef={inputRef} onInsert={insertDictated} />
+          </Suspense>
         </div>
         <div ref={listRef} id={listId} className={styles.list} role="listbox" aria-label="Results">
           {view.flat.length === 0 ? (

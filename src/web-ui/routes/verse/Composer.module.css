@@ -76,38 +76,7 @@
 /* 3.10: the read-only seat pill and its menu became composer/SeatChip.tsx;
    every new control's styles live in composer/composer.module.css. */
 
-/* ---- dictation --------------------------------------------------------- */
-.dictationWrap { position: relative; display: inline-flex; align-items: center; }
-.dictation {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--control-h-sm);
-  height: var(--control-h-sm);
-  border-radius: var(--radius-xs);
-  color: var(--text-tertiary);
-  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
-}
-.dictation:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
-.dictation:active:not(:disabled) { background: var(--bg-active); }
-.dictation:disabled { opacity: 0.45; cursor: not-allowed; }
-.dictationLive { color: var(--status-running-fg); background: var(--status-running-bg); }
-.dictationPulse {
-  position: absolute;
-  inset: -2px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--status-running-solid);
-  animation: verse-ring 1.4s ease-out infinite;
-  pointer-events: none;
-}
-/* `.dictationHint` lived here: a hand-rolled tooltip that sat in the DOM
-   permanently at opacity 0, anchored to a wrapper that is itself inside the
-   composer's overflow, and revealed by a :hover rule. It is gone — the
-   Tooltip primitive carries the hint now, mounted only while open, so it can
-   neither be clipped by an ancestor nor left painted over the panel beside
-   it. */
-.dictationError { margin-left: var(--space-2); font-size: var(--text-xs-size); color: var(--status-danger-fg); }
+/* ---- dictation: voice/VoiceInput.module.css (the mic and the pill) ------- */
 
 /* ---- send / stop ------------------------------------------------------- */
 .send,
@@ -179,11 +148,9 @@
    whose OS says nothing. A persistent `animation` has a hardcoded duration, so
    collapsing --duration-* does NOT reach it — it needs both rules by name. */
 @media (prefers-reduced-motion: reduce) {
-  :root:not([data-motion="full"]) .dictationPulse { animation: none; }
   /* Still unmistakably busy without motion: the accent, held a step lighter, and the progress cursor. */
   :root:not([data-motion="full"]) .send[aria-busy='true']:disabled { animation: none; opacity: 0.8; }
 }
-:root[data-motion="reduce"] .dictationPulse { animation: none; }
 :root[data-motion="reduce"] .send[aria-busy='true']:disabled { animation: none; opacity: 0.8; }
 @media (max-width: 900px) {
   .composer { padding: 0 var(--space-4) var(--space-3); }
