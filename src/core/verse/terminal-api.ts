@@ -8,6 +8,9 @@
  *   POST /api/verse/terminal/:id/resize      { cols, rows } → 204
  *   POST /api/verse/terminal/:id/kill        {} → { ok }
  *   GET  /api/verse/terminal/:id/stream?after=<seq>  → SSE (scrollback first, ≤ 60 Hz)
+ *   GET  /api/verse/terminal/stream?tabs=<id>:<seq>,…  → ONE SSE for many tabs (3.15):
+ *                                           tab-tagged frames, each tab resumed past its
+ *                                           own seq (the panel's six panes share it)
  *   POST /api/verse/terminal/open-external   { sessionId, root? } → 202 — opens Terminal.app
  *                                           at the root (the pane's header, and its
  *                                           "needs the desktop app" fallback)
@@ -20,6 +23,16 @@
  *                                           `file:line` link, opened in the editor when it
  *                                           resolves inside the chat's roots
  *   POST /api/verse/terminal/redact          { text } → { text } — selection → chat, scrubbed
+ *
+ * 3.15 — history, settings, plain language:
+ *   GET  /api/verse/terminal/history?q=&cwd=&repo=&limit=  → { enabled, entries } (ranked)
+ *   POST /api/verse/terminal/history/clear   {} → { ok } — deletes the history file
+ *   GET  /api/verse/terminal/settings                       → { history, assist }
+ *   POST /api/verse/terminal/settings        { history?, assist? } → { history, assist }
+ *   POST /api/verse/terminal/assist          { request, tabId?, cwd?, blockIds? }
+ *                                           → { command, explanation, provider, risky }
+ *                                           (terminal-assist.ts: the local model first;
+ *                                           TEXT back, never typed, never run)
  *
  * NO SECRET REACHES A CHAT FROM HERE. Every JSON response passes
  * sanitizePublicJson (sendJson); `format=chat` and /redact additionally run
@@ -45,8 +58,9 @@
  * Agents and MCP cannot reach these routes (they hold no mutation token).
  *
  * THE STREAM is read with fetch() + the read-client header, not EventSource:
- * it therefore needs no query-proof allowance in read-session.ts, and only the
- * visible tab keeps a connection open (the browser allows ~6 per origin).
+ * it therefore needs no query-proof allowance in read-session.ts. The panel
+ * holds ONE connection for every visible pane (the multiplexed `/stream`),
+ * because the browser allows only ~6 per origin.
  * Output frames carry raw base64 bytes and deliberately skip the public-JSON
  * scrubber — scrubbing a terminal's byte stream would corrupt it, and it is
  * the operator's own shell talking to the operator.
@@ -74,20 +88,33 @@ import {
   type TerminalManager,
 } from './terminal.js';
 import { terminalBytesToText } from './terminal-blocks.js';
+import { runTerminalAssist, TerminalAssistError, type AssistBlockContext, type AssistDeps } from './terminal-assist.js';
+import { getTerminalHistory, type TerminalHistoryStore } from './terminal-history.js';
+import { loadTerminalSettings, parseTerminalSettingsUpdate, updateTerminalSettings } from './terminal-settings.js';
 import type { VerseSession } from './types.js';
 import { getVerseEngine } from './verse-api.js';
 import { VERSE_SESSION_ID_RE } from './verse-stream.js';
 import {
+  VERSE_TERMINAL_ASSIST_MAX_REQUEST_CHARS,
+  VERSE_TERMINAL_ASSIST_PATH,
+  VERSE_TERMINAL_HISTORY_CLEAR_PATH,
+  VERSE_TERMINAL_HISTORY_MAX_LIMIT,
+  VERSE_TERMINAL_HISTORY_PATH,
   VERSE_TERMINAL_INPUT_MAX_BYTES,
   VERSE_TERMINAL_OPEN_EXTERNAL_PATH,
   VERSE_TERMINAL_PATH,
   VERSE_TERMINAL_REDACT_MAX_BYTES,
   VERSE_TERMINAL_REDACT_PATH,
+  VERSE_TERMINAL_SETTINGS_PATH,
+  VERSE_TERMINAL_STREAM_MAX_TABS,
+  VERSE_TERMINAL_STREAM_PATH,
   type VerseTerminalBlockOutputFormat,
   type VerseTerminalBlockOutputResponse,
   type VerseTerminalLaunchVia,
   type VerseTerminalStreamFrame,
+  type VerseTerminalHistoryResponse,
   type VerseTerminalListResponse,
+  type VerseTerminalMuxFrame,
 } from './workbench-types.js';
 
 // Contract (workbench-types.ts §5); re-exported for existing importers.
@@ -118,6 +145,10 @@ export interface TerminalApiDeps {
   platform?: NodeJS.Platform;
   /** Opens a file at a line in the operator's editor (default: cli/open.ts `openInEditorAt`). */
   openInEditor?: (absPath: string, line: number, cfg: AshlrConfig) => Promise<void>;
+  /** The command history (default: the process's, under the current HOME). */
+  history?: () => TerminalHistoryStore;
+  /** Model seams for /assist (default: the local model, then Grok when configured). */
+  assist?: AssistDeps;
 }
 
 async function defaultOpenInEditor(absPath: string, line: number, cfg: AshlrConfig): Promise<void> {
@@ -230,6 +261,11 @@ async function resolveRoot(session: VerseSession, raw: string | undefined): Prom
 function sendError(res: ServerResponse, err: unknown): void {
   if (err instanceof BadRequest) {
     sendJson(res, err.status, { code: err.code, error: err.message });
+    return;
+  }
+  if (err instanceof TerminalAssistError) {
+    const status = err.code === 'ASSIST_OFF' ? 409 : err.code === 'ASSIST_NO_MODEL' ? 503 : 502;
+    sendJson(res, status, { code: `TERMINAL_${err.code}`, error: err.message });
     return;
   }
   if (err instanceof TerminalError) {
@@ -474,6 +510,92 @@ async function handleOpenExternal(req: IncomingMessage, res: ServerResponse): Pr
   sendJson(res, 202, { ok: true });
 }
 
+// ---------------------------------------------------------------------------
+// 3.15: history, settings, plain language
+// ---------------------------------------------------------------------------
+
+function history(): TerminalHistoryStore {
+  return (deps.history ?? getTerminalHistory)();
+}
+
+/** One query parameter: absent → undefined; repeated or too long → 400. */
+function queryParam(req: IncomingMessage, key: string, maxLength = 4096): string | undefined {
+  let values: string[];
+  try {
+    values = new URL(req.url ?? '/', 'http://localhost').searchParams.getAll(key);
+  } catch {
+    values = [];
+  }
+  if (values.length === 0) return undefined;
+  if (values.length > 1 || values[0]!.length > maxLength || values[0]!.includes('\0')) throw new BadRequest(400, `${key} is invalid`);
+  return values[0]!;
+}
+
+async function handleHistory(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const q = queryParam(req, 'q', 1024) ?? '';
+  const cwd = queryParam(req, 'cwd') ?? null;
+  const repo = queryParam(req, 'repo') ?? null;
+  const rawLimit = queryParam(req, 'limit');
+  let limit = 50;
+  if (rawLimit !== undefined) {
+    if (!/^\d{1,4}$/.test(rawLimit) || Number(rawLimit) < 1) throw new BadRequest(400, 'limit must be a positive integer');
+    limit = Math.min(VERSE_TERMINAL_HISTORY_MAX_LIMIT, Number(rawLimit));
+  }
+  const settings = await loadTerminalSettings();
+  const entries = settings.history ? await history().query({ q, cwd, repo, limit }) : [];
+  const body: VerseTerminalHistoryResponse = { enabled: settings.history, entries };
+  sendJson(res, 200, body);
+}
+
+async function handleSettings(req: IncomingMessage, res: ServerResponse, method: string): Promise<void> {
+  if (method === 'GET') {
+    sendJson(res, 200, await loadTerminalSettings());
+    return;
+  }
+  const body = await readJsonBody(req, ['history', 'assist']);
+  const patch = parseTerminalSettingsUpdate(body);
+  if (!patch) throw new BadRequest(400, "send history (true/false) and/or assist ('auto', 'local' or 'off')");
+  sendJson(res, 200, await updateTerminalSettings(patch));
+}
+
+async function handleAssist(ctx: { cfg: AshlrConfig }, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readJsonBody(req, ['request', 'tabId', 'cwd', 'blockIds']);
+  const request = body['request'];
+  if (typeof request !== 'string' || request.trim().length === 0) throw new BadRequest(400, 'request is required');
+  if (request.length > VERSE_TERMINAL_ASSIST_MAX_REQUEST_CHARS) throw new BadRequest(413, `request is limited to ${VERSE_TERMINAL_ASSIST_MAX_REQUEST_CHARS} characters`, 'VERSE_TOO_LARGE');
+  const tabId = optionalString(body, 'tabId');
+  const rawBlockIds = body['blockIds'];
+  if (rawBlockIds !== undefined && (!Array.isArray(rawBlockIds) || rawBlockIds.length > 10 || !rawBlockIds.every((b) => typeof b === 'string' && /^b-\d{1,9}$/.test(b)))) {
+    throw new BadRequest(400, 'blockIds must be up to 10 block ids');
+  }
+  const m = manager();
+  let cwd = optionalString(body, 'cwd') ?? null;
+  const blocks: AssistBlockContext[] = [];
+  if (tabId !== undefined) {
+    if (!TERMINAL_TAB_ID_RE.test(tabId)) throw new TerminalError('TERMINAL_NOT_FOUND', 'terminal not found');
+    const tab = m.get(tabId);
+    if (!tab) throw new TerminalError('TERMINAL_NOT_FOUND', 'terminal not found');
+    cwd ??= tab.cwd ?? tab.root;
+    const wanted = Array.isArray(rawBlockIds)
+      ? (rawBlockIds as string[])
+      : m.blocks(tabId).filter((b) => b.state === 'done' && b.command).slice(-3).map((b) => b.id);
+    for (const blockId of wanted) {
+      const found = m.blockOutput(tabId, blockId);
+      if (!found) continue;
+      blocks.push({
+        command: found.block.command,
+        exitCode: found.block.exitCode,
+        // Full-screen programs (vim, less) keep no transcript worth sending.
+        output: found.block.fullscreen ? '' : terminalBytesToText(found.bytes),
+      });
+    }
+  }
+  const settings = await loadTerminalSettings();
+  const shell = process.env['SHELL'] ? process.env['SHELL'].split('/').pop() ?? null : null;
+  const answer = await runTerminalAssist(ctx.cfg, { request, cwd: cwd ? expandHomePrefix(cwd) : null, shell, blocks }, settings.assist, deps.assist ?? {});
+  sendJson(res, 200, answer);
+}
+
 function noContent(res: ServerResponse): void {
   res.writeHead(204, { 'Cache-Control': 'no-store' });
   res.end();
@@ -497,6 +619,71 @@ export function formatTerminalSseFrame(frame: VerseTerminalStreamFrame): string 
   return `event: ${frame.type}\ndata: ${JSON.stringify(sanitizePublicJson(frame))}\n\n`;
 }
 
+interface SseChannel {
+  write(text: string): void;
+  close(): void;
+  readonly ended: boolean;
+}
+
+/**
+ * The SSE plumbing both streams share: headers, the `connected` comment, a
+ * keepalive, the read session's expiry, the server's live-connection registry,
+ * and backpressure — past TERMINAL_SSE_MAX_BUFFERED_BYTES unsent the stream
+ * is closed and the client resumes by seq. Null when the headers could not
+ * be written (the client already went).
+ */
+function openSseChannel(
+  req: IncomingMessage,
+  res: ServerResponse,
+  readSession: { id: string; expiresAt: number } | undefined,
+  onClose: () => void,
+): SseChannel | null {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-store',
+    Connection: 'keep-alive',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  try {
+    res.write(': connected\n\n');
+  } catch {
+    return null;
+  }
+  let ended = false;
+  const live: { keepalive?: ReturnType<typeof setInterval>; expiry?: ReturnType<typeof setTimeout>; sseId?: string } = {};
+  const close = (): void => {
+    if (ended) return;
+    ended = true;
+    try { onClose(); } catch { /* best effort */ }
+    if (live.keepalive) clearInterval(live.keepalive);
+    if (live.expiry) clearTimeout(live.expiry);
+    if (live.sseId !== undefined) deregisterSse(live.sseId);
+    try { res.end(); } catch { /* already ended */ }
+  };
+  const write = (text: string): void => {
+    if (ended) return;
+    try {
+      res.write(text);
+    } catch {
+      close();
+      return;
+    }
+    const buffered = typeof res.writableLength === 'number' ? res.writableLength : 0;
+    if (buffered > TERMINAL_SSE_MAX_BUFFERED_BYTES) close();
+  };
+  live.sseId = registerSse(close, readSession?.id ?? 'header');
+  if (readSession) live.expiry = setTimeout(close, Math.max(0, readSession.expiresAt - Date.now()));
+  live.keepalive = setInterval(() => write(': keepalive\n\n'), TERMINAL_SSE_KEEPALIVE_MS);
+  req.on('close', close);
+  req.on('error', close);
+  res.on('error', close);
+  return {
+    write,
+    close,
+    get ended() { return ended; },
+  };
+}
+
 function handleStream(
   req: IncomingMessage,
   res: ServerResponse,
@@ -512,55 +699,96 @@ function handleStream(
     sendJson(res, 503, { error: 'too many live connections' });
     return;
   }
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache, no-store',
-    Connection: 'keep-alive',
-    'X-Content-Type-Options': 'nosniff',
-  });
+  let unsubscribe: (() => void) | undefined;
+  const channel = openSseChannel(req, res, readSession, () => unsubscribe?.());
+  if (!channel) return;
   try {
-    res.write(': connected\n\n');
+    const off = m.subscribe(id, parseAfter(req), (frame) => channel.write(formatTerminalSseFrame(frame)), () => channel.close());
+    if (channel.ended) off();
+    else unsubscribe = off;
   } catch {
+    channel.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3.15: one stream, many tabs
+// ---------------------------------------------------------------------------
+
+/**
+ * `tabs=<id>:<after>,…` → [id, after] pairs. One `tabs` parameter, at most
+ * VERSE_TERMINAL_STREAM_MAX_TABS distinct well-formed ids; a bare id resumes
+ * from 0. Anything else is a 400: a malformed list must not half-subscribe.
+ */
+export function parseMuxTabs(rawUrl: string | undefined): Array<[string, number]> {
+  let values: string[];
+  try {
+    values = new URL(rawUrl ?? '/', 'http://localhost').searchParams.getAll('tabs');
+  } catch {
+    values = [];
+  }
+  if (values.length !== 1 || values[0]!.length === 0 || values[0]!.length > 1024) throw new BadRequest(400, 'tabs must list the terminals to stream');
+  const out = new Map<string, number>();
+  for (const part of values[0]!.split(',')) {
+    const m = /^(t-[a-z0-9]{1,32})(?::(\d{1,15}))?$/.exec(part);
+    if (!m || !TERMINAL_TAB_ID_RE.test(m[1]!)) throw new BadRequest(400, 'tabs must be <id>:<seq> pairs');
+    const after = m[2] === undefined ? 0 : Number(m[2]);
+    if (!Number.isSafeInteger(after)) throw new BadRequest(400, 'tabs must be <id>:<seq> pairs');
+    out.set(m[1]!, after);
+  }
+  if (out.size > VERSE_TERMINAL_STREAM_MAX_TABS) throw new BadRequest(400, `at most ${VERSE_TERMINAL_STREAM_MAX_TABS} terminals per stream`);
+  return [...out.entries()];
+}
+
+/**
+ * One multiplexed frame. Output keeps its raw bytes (never scrubbed: it is
+ * the operator's own terminal, exactly as the per-tab stream); every other
+ * frame goes through the public-JSON scrub like the per-tab stream's.
+ */
+export function formatTerminalMuxFrame(tab: string, frame: VerseTerminalStreamFrame | { type: 'gone' }): string {
+  const tagged: VerseTerminalMuxFrame = { tab, ...frame };
+  if (frame.type === 'output') return `event: output\ndata: ${JSON.stringify(tagged)}\n\n`;
+  return `event: ${frame.type}\ndata: ${JSON.stringify(sanitizePublicJson(tagged))}\n\n`;
+}
+
+function handleMuxStream(req: IncomingMessage, res: ServerResponse, readSession: { id: string; expiresAt: number } | undefined): void {
+  const cursors = parseMuxTabs(req.url);
+  if (sseConnectionCapReached()) {
+    sendJson(res, 503, { error: 'too many live connections' });
     return;
   }
-
-  let ended = false;
-  const live: { unsubscribe?: () => void; keepalive?: ReturnType<typeof setInterval>; expiry?: ReturnType<typeof setTimeout>; sseId?: string } = {};
-  const cleanup = (): void => {
-    if (ended) return;
-    ended = true;
-    live.unsubscribe?.();
-    if (live.keepalive) clearInterval(live.keepalive);
-    if (live.expiry) clearTimeout(live.expiry);
-    if (live.sseId !== undefined) deregisterSse(live.sseId);
-    try { res.end(); } catch { /* already ended */ }
+  const m = manager();
+  const subscriptions = new Map<string, () => void>();
+  const channel = openSseChannel(req, res, readSession, () => {
+    for (const off of subscriptions.values()) off();
+    subscriptions.clear();
+  });
+  if (!channel) return;
+  const gone = (tab: string): void => {
+    subscriptions.delete(tab);
+    channel.write(formatTerminalMuxFrame(tab, { type: 'gone' }));
+    // Nothing left to carry: end it (the page stops asking for gone tabs).
+    if (subscriptions.size === 0) channel.close();
   };
-  const write = (text: string): void => {
-    if (ended) return;
-    try {
-      res.write(text);
-    } catch {
-      cleanup();
-      return;
+  for (const [tab, after] of cursors) {
+    if (channel.ended) return;
+    if (!m.get(tab)) {
+      channel.write(formatTerminalMuxFrame(tab, { type: 'gone' }));
+      continue;
     }
-    const buffered = typeof res.writableLength === 'number' ? res.writableLength : 0;
-    if (buffered > TERMINAL_SSE_MAX_BUFFERED_BYTES) cleanup();
-  };
-
-  live.sseId = registerSse(cleanup, readSession?.id ?? 'header');
-  if (readSession) live.expiry = setTimeout(cleanup, Math.max(0, readSession.expiresAt - Date.now()));
-  live.keepalive = setInterval(() => write(': keepalive\n\n'), TERMINAL_SSE_KEEPALIVE_MS);
-  req.on('close', cleanup);
-  req.on('error', cleanup);
-  res.on('error', cleanup);
-
-  try {
-    const unsubscribe = m.subscribe(id, parseAfter(req), (frame) => write(formatTerminalSseFrame(frame)), cleanup);
-    if (ended) unsubscribe();
-    else live.unsubscribe = unsubscribe;
-  } catch {
-    cleanup();
+    try {
+      // Registered before subscribing: the replay is written synchronously
+      // inside subscribe(), and a close mid-replay must still unsubscribe it.
+      subscriptions.set(tab, () => {});
+      const off = m.subscribe(tab, after, (frame) => channel.write(formatTerminalMuxFrame(tab, frame)), () => gone(tab));
+      if (channel.ended || !subscriptions.has(tab)) off();
+      else subscriptions.set(tab, off);
+    } catch {
+      subscriptions.delete(tab);
+      channel.write(formatTerminalMuxFrame(tab, { type: 'gone' }));
+    }
   }
+  if (subscriptions.size === 0) channel.close();
 }
 
 export const handleTerminalApi: ApiModule = async (ctx, req, res, path, method) => {
@@ -575,6 +803,38 @@ export const handleTerminalApi: ApiModule = async (ctx, req, res, path, method) 
         return true;
       }
       return false;
+    }
+
+    if (path === VERSE_TERMINAL_STREAM_PATH) {
+      if (method !== 'GET') return false;
+      handleMuxStream(req, res, ctx.readSession);
+      return true;
+    }
+
+    if (path === VERSE_TERMINAL_HISTORY_PATH) {
+      if (method !== 'GET') return false;
+      await handleHistory(req, res);
+      return true;
+    }
+
+    if (path === VERSE_TERMINAL_HISTORY_CLEAR_PATH) {
+      if (method !== 'POST') return false;
+      await readJsonBody(req, []);
+      await history().clear();
+      sendJson(res, 200, { ok: true });
+      return true;
+    }
+
+    if (path === VERSE_TERMINAL_SETTINGS_PATH) {
+      if (method !== 'GET' && method !== 'POST') return false;
+      await handleSettings(req, res, method);
+      return true;
+    }
+
+    if (path === VERSE_TERMINAL_ASSIST_PATH) {
+      if (method !== 'POST') return false;
+      await handleAssist(ctx, req, res);
+      return true;
     }
 
     if (path === VERSE_TERMINAL_OPEN_EXTERNAL_PATH) {

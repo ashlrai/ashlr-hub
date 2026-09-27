@@ -915,6 +915,112 @@ export type VerseTerminalStreamFrame =
   /** Shell integration came up. */
   | { type: 'integration'; state: VerseTerminalShellIntegration };
 
+/**
+ * 3.15 — ONE stream for many shells.
+ *
+ *   GET /api/verse/terminal/stream?tabs=<id>:<after>,<id>:<after>,… → SSE
+ *
+ * Every frame of every listed tab, each tagged with its tab (`tab`), in one
+ * connection — so six visible panes cost one of the browser's ~6 connections
+ * per origin instead of six. Each tab resumes past its own `after` (a bare
+ * `<id>` is `<id>:0`: the whole scrollback). A tab that does not exist, or
+ * goes away while streamed, gets one `gone` frame; the stream ends when none
+ * is left. The per-tab `/:id/stream` route stays for older pages.
+ */
+export const VERSE_TERMINAL_STREAM_PATH = '/api/verse/terminal/stream';
+/** At most this many tabs on one multiplexed stream (every tab the server can hold). */
+export const VERSE_TERMINAL_STREAM_MAX_TABS = VERSE_TERMINAL_MAX_TABS;
+export type VerseTerminalMuxFrame = { tab: string } & (VerseTerminalStreamFrame | { type: 'gone' });
+
+// ---------------------------------------------------------------------------
+// 3.15 — command history (terminal-history.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * GET  /api/verse/terminal/history?q=&cwd=&repo=&limit= → VerseTerminalHistoryResponse
+ * POST /api/verse/terminal/history/clear    {}                 → { ok: true }
+ * GET  /api/verse/terminal/settings                            → VerseTerminalSettings
+ * POST /api/verse/terminal/settings { history?, assist? }      → VerseTerminalSettings
+ *
+ * Every command a shell finished (a closed block) — command, where, exit,
+ * duration, when — kept in ~/.ashlr/verse/terminal-history.jsonl (0600),
+ * secrets scrubbed BEFORE it is written. Ranked: prefix match → same cwd →
+ * same repo → succeeded → most recent; one row per distinct command.
+ */
+export const VERSE_TERMINAL_HISTORY_PATH = '/api/verse/terminal/history';
+export const VERSE_TERMINAL_HISTORY_CLEAR_PATH = '/api/verse/terminal/history/clear';
+export const VERSE_TERMINAL_SETTINGS_PATH = '/api/verse/terminal/settings';
+export const VERSE_TERMINAL_HISTORY_MAX_LIMIT = 500;
+
+/** One distinct command, aggregated over every time it ran. */
+export interface VerseTerminalHistoryEntry {
+  cmd: string;
+  /** Where it last ran. */
+  cwd: string | null;
+  repo: string | null;
+  /** The last run's exit code (null: the shell did not say). */
+  exit: number | null;
+  durMs: number | null;
+  /** ISO time of the last run. */
+  ts: string;
+  /** How many times it ran, and how many of those exited 0. */
+  count: number;
+  okCount: number;
+  /** Ran in the queried cwd / repo (ranking signals, shown as a hint). */
+  here: boolean;
+  sameRepo: boolean;
+}
+
+export interface VerseTerminalHistoryResponse {
+  enabled: boolean;
+  entries: VerseTerminalHistoryEntry[];
+}
+
+/** Server-side terminal settings (~/.ashlr/verse/terminal-settings.json). */
+export interface VerseTerminalSettings {
+  /** Record finished commands to disk (default true). Off also stops reading them back. */
+  history: boolean;
+  /**
+   * Plain language → command (terminal-assist.ts): `local` = the local model
+   * only; `auto` = the local model, then Grok when it is configured; `off` =
+   * never. Default `auto`.
+   */
+  assist: VerseTerminalAssistMode;
+}
+export type VerseTerminalAssistMode = 'auto' | 'local' | 'off';
+
+// ---------------------------------------------------------------------------
+// 3.15 — plain language → command (terminal-assist.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/verse/terminal/assist { tabId?, sessionId?, request, cwd?, blockIds? }
+ *   → VerseTerminalAssistResponse
+ *
+ * The operator's request plus the tab's cwd, OS, shell and its last few
+ * blocks (scrubbed text, capped) go to the LOCAL model by default. The reply
+ * is text for the operator to edit — the server never types or runs it.
+ */
+export const VERSE_TERMINAL_ASSIST_PATH = '/api/verse/terminal/assist';
+export const VERSE_TERMINAL_ASSIST_MAX_REQUEST_CHARS = 2_000;
+export interface VerseTerminalAssistRequest {
+  request: string;
+  tabId?: string;
+  cwd?: string;
+  /** Blocks to include as context (default: the tab's last few). */
+  blockIds?: string[];
+}
+export interface VerseTerminalAssistResponse {
+  /** The suggested command line(s), ready to edit. Never run by the server. */
+  command: string;
+  /** One short sentence on what it does, when the model gave one. */
+  explanation: string | null;
+  /** Which model answered: `local:<model>` or `grok:<model>`. */
+  provider: string;
+  /** The model flagged it as destructive (rm -rf, force-push, DROP …) or the server's own check did. */
+  risky: boolean;
+}
+
 // ===========================================================================
 // §6 Preview (C4)
 // ===========================================================================

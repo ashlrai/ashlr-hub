@@ -32,7 +32,13 @@
  *
  * NEVER A MODEL CALL, NEVER A PAID SEAT: this only starts the operator's own
  * shell. An Apps [Launch ▸] or a dev-server Start TYPES a command into that
- * shell on an explicit click; nothing here runs one on its own.
+ * shell on an explicit click; nothing here runs one on its own. (Plain
+ * language → command lives in terminal-assist.ts, which never types.)
+ *
+ * FINISHED COMMANDS. Each closed block is handed to `onCommandFinished` (the
+ * process's manager records it in terminal-history.ts) and to every
+ * `addTerminalCommandListener` — the hook other units reuse (error chips, an
+ * MCP tool) without reaching into the block tracker.
  */
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -51,6 +57,7 @@ import {
   newShellNonce,
 } from './shell-integration.js';
 import { createBlockTracker, type BlockTracker } from './terminal-blocks.js';
+import { getTerminalHistory } from './terminal-history.js';
 import {
   VERSE_TERMINAL_IDLE_KILL_MS,
   VERSE_TERMINAL_MAX_FRAME_HZ,
@@ -340,6 +347,26 @@ export interface TerminalManagerOptions {
   /** The global kill switch (default: ~/.ashlr/KILL, async). */
   killSwitch?: () => Promise<boolean>;
   killCheckIntervalMs?: number;
+  /**
+   * A command block closed (its exit code is known, or the shell never said).
+   * Called after the block frame went out; a throw or rejection is ignored.
+   * Default: none — the process's manager (getTerminalManager) records to history.
+   */
+  onCommandFinished?: (tab: VerseTerminalTab, block: VerseTerminalBlock) => void | Promise<unknown>;
+}
+
+export type TerminalCommandListener = (tab: VerseTerminalTab, block: VerseTerminalBlock) => void;
+const commandListeners = new Set<TerminalCommandListener>();
+
+/**
+ * Every command any tab of the process's manager finishes (a closed block,
+ * with a copy of its tab). Returns unsubscribe. The command line is exactly
+ * what the shell reported — scrub it (scrubSecrets) before it leaves the
+ * operator's machine or reaches a seat.
+ */
+export function addTerminalCommandListener(listener: TerminalCommandListener): () => void {
+  commandListeners.add(listener);
+  return () => { commandListeners.delete(listener); };
 }
 
 interface OutputFrame {
@@ -804,7 +831,14 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
         tabId: id,
         nonce: plan.nonce,
         now,
-        onBlock: (block) => emit(rec, { type: 'block', block }),
+        onBlock: (block) => {
+          emit(rec, { type: 'block', block });
+          if (block.state === 'done' && opts.onCommandFinished) {
+            try {
+              void Promise.resolve(opts.onCommandFinished({ ...rec.tab }, block)).catch(() => {});
+            } catch { /* never breaks the stream */ }
+          }
+        },
         onCwd: (cwd) => {
           rec.tab.cwd = cwd;
           emit(rec, { type: 'cwd', cwd });
@@ -992,9 +1026,28 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
 
 let singleton: TerminalManager | null = null;
 
+/**
+ * What the process's manager does with a finished command: the history
+ * (terminal-history.ts: scrubbed, off when the operator turned it off), then
+ * every listener.
+ */
+export async function recordFinishedCommand(tab: VerseTerminalTab, block: VerseTerminalBlock): Promise<void> {
+  for (const listener of [...commandListeners]) {
+    try { listener(tab, block); } catch { /* one listener never stops another */ }
+  }
+  if (!block.command) return;
+  await getTerminalHistory().record({
+    cmd: block.command,
+    cwd: block.cwd ?? tab.cwd ?? tab.root,
+    exit: block.exitCode,
+    durMs: block.durationMs,
+    ...(block.finishedAt ? { at: Date.parse(block.finishedAt) } : {}),
+  });
+}
+
 /** The server's terminal manager (created on first use). */
 export function getTerminalManager(): TerminalManager {
-  if (!singleton) singleton = createTerminalManager();
+  if (!singleton) singleton = createTerminalManager({ onCommandFinished: recordFinishedCommand });
   return singleton;
 }
 
