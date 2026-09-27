@@ -324,6 +324,22 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
             ) : null}
           </dd>
         </div>
+        <div className={styles.fact}>
+          <dt><MicroLabel>Custody</MicroLabel></dt>
+          <dd className={styles.factValue}>
+            {state.custody.installed === true
+              ? `Installed${state.custody.keyInitialized === true ? ' · key ready' : state.custody.keyInitialized === false ? ' · no key yet' : ''}`
+              : state.custody.installed === false ? 'Not installed' : 'unknown'}
+            <span className={styles.factSub}>Signs grants with Touch ID; holds the GitHub App key</span>
+            {nativeCapable && state.custody.hubCheckout ? (
+              <span className={styles.inlineButtons}>
+                <Button size="sm" variant="ghost" onClick={() => runNative('custody-install', state.custody.hubCheckout!)} disabled={busy}>
+                  {state.custody.installed === true ? 'Reinstall / upgrade' : 'Install'}
+                </Button>
+              </span>
+            ) : null}
+          </dd>
+        </div>
       </dl>
     </section>
   );

@@ -123,6 +123,73 @@ async function defaultService(): Promise<{ service: FleetDaemonServiceState; pli
   return { service, plist };
 }
 
+// The ashlr-hub checkout the custody helper is built from (tools/custody).
+// FULLY ASYNC on purpose: enrolled checkouts often live under ~/Desktop or
+// ~/Documents, and a synchronous read there from the sidecar's thread can
+// freeze it on a macOS privacy prompt (#518). Cached five minutes.
+const HUB_CHECKOUT_TTL_MS = 5 * 60_000;
+let hubCheckoutCache: { at: number; value: string | null } | null = null;
+
+async function readSmallAsync(path: string): Promise<string | null> {
+  try {
+    const info = await stat(path);
+    if (!info.isFile() || info.size > 64 * 1024) return null;
+    return await readFile(path, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+async function gitConfigTextAsync(repoPath: string): Promise<string | null> {
+  const { join, isAbsolute, resolve } = await import('node:path');
+  const dotGit = join(repoPath, '.git');
+  let info;
+  try {
+    info = await stat(dotGit);
+  } catch {
+    return null;
+  }
+  if (info.isDirectory()) return readSmallAsync(join(dotGit, 'config'));
+  const pointer = await readSmallAsync(dotGit);
+  const match = pointer ? /^gitdir:\s*(.+)$/mu.exec(pointer) : null;
+  if (!match) return null;
+  const gitdir = isAbsolute(match[1]!.trim()) ? match[1]!.trim() : resolve(repoPath, match[1]!.trim());
+  const common = await readSmallAsync(join(gitdir, 'commondir'));
+  return readSmallAsync(join(common ? resolve(gitdir, common.trim()) : gitdir, 'config'));
+}
+
+async function findHubCheckout(): Promise<string | null> {
+  const { originUrlFromConfig, nameWithOwnerFromRemote, fleetMirrorsDir } = await import('./repo-identity.js');
+  const { resolve, dirname } = await import('node:path');
+  const mirrors = resolve(fleetMirrorsDir());
+  for (const path of await defaultEnrolledPaths()) {
+    if (resolve(dirname(path)) === mirrors) continue; // the fleet's own clones
+    try {
+      await stat(`${path}/scripts/install-custody.sh`);
+      await stat(`${path}/tools/custody/Package.swift`);
+    } catch {
+      continue;
+    }
+    const text = await gitConfigTextAsync(path);
+    const url = text ? originUrlFromConfig(text) : null;
+    if (url && nameWithOwnerFromRemote(url)?.toLowerCase() === HUB) return path;
+  }
+  return null;
+}
+
+async function hubCheckoutCached(): Promise<string | null> {
+  const now = Date.now();
+  if (hubCheckoutCache && now - hubCheckoutCache.at < HUB_CHECKOUT_TTL_MS) return hubCheckoutCache.value;
+  let value: string | null = null;
+  try {
+    value = await findHubCheckout();
+  } catch {
+    value = null;
+  }
+  hubCheckoutCache = { at: now, value };
+  return value;
+}
+
 async function defaultEnrolledPaths(): Promise<string[]> {
   const { readEnrollmentRegistry } = await import('../sandbox/policy.js');
   const registry = readEnrollmentRegistry();
@@ -154,24 +221,7 @@ export function defaultFleetControlDeps(): FleetControlDeps {
         return { todayUsd: null, capUsd: null };
       }
     },
-    hubCheckout: async () => {
-      try {
-        const { repoIdentityOfPath } = await import('./repo-identity.js');
-        for (const path of await defaultEnrolledPaths()) {
-          if (repoIdentityOfPath(path)?.toLowerCase() !== HUB) continue;
-          try {
-            await stat(`${path}/scripts/install-custody.sh`);
-            await stat(`${path}/tools/custody/Package.swift`);
-            return path;
-          } catch {
-            // a mirror or an old checkout without the helper sources
-          }
-        }
-      } catch {
-        // none
-      }
-      return null;
-    },
+    hubCheckout: () => hubCheckoutCached(),
     trustRootsCompiled: () => trustRootsRead(),
     setPause: (paused) => pauseWrite(paused),
     stop: async () => {

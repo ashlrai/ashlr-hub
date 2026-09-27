@@ -161,11 +161,13 @@ step's command to copy.
 11. **First grant.** You sign the first grant (Touch ID). If you agree, setup
     then sets the switch to Autonomous; the ladder starts in shadow.
 
-12. **Resident daemon.** In your own terminal, `ashlr authority resident
-    start`. It refuses agents, a dirty build, Stop, the switch at Off and an
-    inactive grant, shows the release, plist and daily budget, and asks you
-    to confirm. Setup never does this step for you
-    ([RESIDENT-RUNTIME.md](RESIDENT-RUNTIME.md)).
+12. **Resident daemon.** Press **Start** in the desktop app's Fleet tab (3.15),
+    or run `ashlr authority resident start` in your own terminal. Either way
+    it refuses agents, a dirty build, Stop, the switch at Off and an inactive
+    grant, shows the release, plist and daily budget, and asks you to confirm
+    — in the app, in a native dialog no page script or agent can answer
+    ([desktop/README.md](../desktop/README.md), "Fleet operations"). Setup
+    never does this step for you ([RESIDENT-RUNTIME.md](RESIDENT-RUNTIME.md)).
 
 Your recurring actions after setup are one Touch ID per 30-day grant, and one
 after installing a release that changes authority code (`ashlr authority

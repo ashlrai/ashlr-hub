@@ -170,7 +170,8 @@ pub fn parse_request(payload: &str) -> Option<FleetRequest> {
         return None;
     }
     match (req.op, &req.checkout) {
-        (FleetOp::CustodyInstall, Some(path)) if !path.is_empty() && path.chars().count() <= MAX_PATH_CHARS => {}
+        (FleetOp::CustodyInstall, Some(path))
+            if !path.is_empty() && path.chars().count() <= MAX_PATH_CHARS => {}
         (FleetOp::CustodyInstall, _) => return None,
         (_, None) => {}
         (_, Some(_)) => return None,
@@ -215,7 +216,14 @@ pub fn handle_event(app: &AppHandle, payload: &str) {
         return;
     };
     if BUSY.swap(true, Ordering::SeqCst) {
-        send(app, event(&req, Phase::Failed, "Another fleet operation is already open — finish or cancel it first."));
+        send(
+            app,
+            event(
+                &req,
+                Phase::Failed,
+                "Another fleet operation is already open — finish or cancel it first.",
+            ),
+        );
         return;
     }
     let app = app.clone();
@@ -227,7 +235,14 @@ pub fn handle_event(app: &AppHandle, payload: &str) {
 
 fn run(app: &AppHandle, req: &FleetRequest) {
     if !cfg!(target_os = "macos") {
-        send(app, event(req, Phase::Failed, "Fleet operations need macOS (launchd and the Secure Enclave)."));
+        send(
+            app,
+            event(
+                req,
+                Phase::Failed,
+                "Fleet operations need macOS (launchd and the Secure Enclave).",
+            ),
+        );
         return;
     }
     match req.op {
@@ -257,13 +272,17 @@ pub fn home_dir() -> Option<PathBuf> {
     unsafe {
         let pw = libc::getpwuid(libc::geteuid());
         if !pw.is_null() && !(*pw).pw_dir.is_null() {
-            let dir = std::ffi::CStr::from_ptr((*pw).pw_dir).to_string_lossy().into_owned();
+            let dir = std::ffi::CStr::from_ptr((*pw).pw_dir)
+                .to_string_lossy()
+                .into_owned();
             if dir.starts_with('/') {
                 return Some(PathBuf::from(dir));
             }
         }
     }
-    std::env::var_os("HOME").map(PathBuf::from).filter(|p| p.is_absolute())
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
 }
 
 fn user_name() -> String {
@@ -271,7 +290,9 @@ fn user_name() -> String {
     unsafe {
         let pw = libc::getpwuid(libc::geteuid());
         if !pw.is_null() && !(*pw).pw_name.is_null() {
-            return std::ffi::CStr::from_ptr((*pw).pw_name).to_string_lossy().into_owned();
+            return std::ffi::CStr::from_ptr((*pw).pw_name)
+                .to_string_lossy()
+                .into_owned();
         }
     }
     std::env::var("USER").unwrap_or_default()
@@ -327,7 +348,8 @@ pub fn parse_cli_probe(stdout: &str) -> Option<(PathBuf, String)> {
 }
 
 pub fn resolve_cli(home: &Path) -> Result<Cli, String> {
-    let script = format!("printf '\\n{BIN_MARK}%s\\n{PATH_MARK}%s\\n' \"$(command -v ashlr)\" \"$PATH\"");
+    let script =
+        format!("printf '\\n{BIN_MARK}%s\\n{PATH_MARK}%s\\n' \"$(command -v ashlr)\" \"$PATH\"");
     let fallback_path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
     let out = run_child(
         Command::new(login_shell()).arg("-l").arg("-c").arg(&script),
@@ -344,7 +366,10 @@ pub fn resolve_cli(home: &Path) -> Result<Cli, String> {
     for candidate in ["/opt/homebrew/bin/ashlr", "/usr/local/bin/ashlr"] {
         let bin = PathBuf::from(candidate);
         if bin.is_file() {
-            return Ok(Cli { bin, path_env: fallback_path.to_string() });
+            return Ok(Cli {
+                bin,
+                path_env: fallback_path.to_string(),
+            });
         }
     }
     Err("The ashlr command-line tool was not found on your login PATH. Install it (npm i -g ashlr-hub) and try again.".to_string())
@@ -359,12 +384,18 @@ pub struct ChildResult {
     pub timed_out: bool,
 }
 
-fn run_child(cmd: &mut Command, env: &[(String, String)], timeout: Duration) -> Result<ChildResult, String> {
+fn run_child(
+    cmd: &mut Command,
+    env: &[(String, String)],
+    timeout: Duration,
+) -> Result<ChildResult, String> {
     cmd.env_clear();
     for (k, v) in env {
         cmd.env(k, v);
     }
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("could not start: {e}"))?;
     let mut out_pipe = child.stdout.take();
     let mut err_pipe = child.stderr.take();
@@ -398,7 +429,12 @@ fn run_child(cmd: &mut Command, env: &[(String, String)], timeout: Duration) -> 
     };
     let stdout = String::from_utf8_lossy(&out_reader.join().unwrap_or_default()).into_owned();
     let stderr = String::from_utf8_lossy(&err_reader.join().unwrap_or_default()).into_owned();
-    Ok(ChildResult { code: status.and_then(|s| s.code()), stdout, stderr, timed_out })
+    Ok(ChildResult {
+        code: status.and_then(|s| s.code()),
+        stdout,
+        stderr,
+        timed_out,
+    })
 }
 
 /// PURE: the last `max` bytes of `text`, on a char boundary.
@@ -428,8 +464,10 @@ fn combined(result: &ChildResult) -> String {
 
 fn random_hex(bytes: usize) -> Result<String, String> {
     let mut buf = vec![0u8; bytes];
-    let mut file = std::fs::File::open("/dev/urandom").map_err(|e| format!("no randomness: {e}"))?;
-    file.read_exact(&mut buf).map_err(|e| format!("no randomness: {e}"))?;
+    let mut file =
+        std::fs::File::open("/dev/urandom").map_err(|e| format!("no randomness: {e}"))?;
+    file.read_exact(&mut buf)
+        .map_err(|e| format!("no randomness: {e}"))?;
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -449,7 +487,10 @@ fn mint_gesture(home: &Path, op: &str) -> Result<String, String> {
         .create(&dir)
         .map_err(|e| format!("could not prepare the gesture directory: {e}"))?;
     let name = random_hex(16)?;
-    let created_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let created_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -495,7 +536,10 @@ pub fn parse_resident_status(stdout: &str) -> Option<ResidentPlan> {
     let service = value.get("service")?;
     let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
     Some(ResidentPlan {
-        admitted: admission.get("ok").and_then(Value::as_bool).unwrap_or(false),
+        admitted: admission
+            .get("ok")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         reason: s(admission, "reason").unwrap_or_default(),
         grant_seq: admission.get("grantSeq").and_then(Value::as_i64),
         expires_at: s(admission, "expiresAt"),
@@ -509,9 +553,20 @@ pub fn parse_resident_status(stdout: &str) -> Option<ResidentPlan> {
 
 /// PURE: the confirm dialog's text.
 pub fn resident_dialog_text(op: FleetOp, cli: &Path, plan: &ResidentPlan) -> (String, String) {
-    let title = if op == FleetOp::ResidentRestart { "Restart the fleet daemon?" } else { "Start the fleet daemon?" };
-    let rev = plan.revision.as_deref().map(|r| &r[..r.len().min(12)]).unwrap_or("?");
-    let budget = plan.budget_usd.map(|b| format!("${b}/day")).unwrap_or_else(|| "?".to_string());
+    let title = if op == FleetOp::ResidentRestart {
+        "Restart the fleet daemon?"
+    } else {
+        "Start the fleet daemon?"
+    };
+    let rev = plan
+        .revision
+        .as_deref()
+        .map(|r| &r[..r.len().min(12)])
+        .unwrap_or("?");
+    let budget = plan
+        .budget_usd
+        .map(|b| format!("${b}/day"))
+        .unwrap_or_else(|| "?".to_string());
     let action = if op == FleetOp::ResidentRestart {
         "ashlr authority resident stop, then ashlr authority resident start"
     } else {
@@ -541,7 +596,10 @@ fn resident_command(cli: &Cli, sub: &str) -> String {
 
 fn resident_stop(app: &AppHandle, req: &FleetRequest) {
     let Some(home) = home_dir() else {
-        send(app, event(req, Phase::Failed, "Your home folder could not be read."));
+        send(
+            app,
+            event(req, Phase::Failed, "Your home folder could not be read."),
+        );
         return;
     };
     let cli = match resolve_cli(&home) {
@@ -551,15 +609,34 @@ fn resident_stop(app: &AppHandle, req: &FleetRequest) {
     let mut running = event(req, Phase::Running, "Stopping the fleet daemon…");
     running.command = Some(resident_command(&cli, "stop"));
     send(app, running);
-    finish(app, req, &cli, "stop", None, &home, RESIDENT_TIMEOUT, "The fleet daemon is stopped and its service removed. Stop and the grant are unchanged.");
+    finish(
+        app,
+        req,
+        &cli,
+        "stop",
+        None,
+        &home,
+        RESIDENT_TIMEOUT,
+        "The fleet daemon is stopped and its service removed. Stop and the grant are unchanged.",
+    );
 }
 
 fn resident_start(app: &AppHandle, req: &FleetRequest) {
     let Some(home) = home_dir() else {
-        send(app, event(req, Phase::Failed, "Your home folder could not be read."));
+        send(
+            app,
+            event(req, Phase::Failed, "Your home folder could not be read."),
+        );
         return;
     };
-    send(app, event(req, Phase::Confirming, "Checking the grant and the release…"));
+    send(
+        app,
+        event(
+            req,
+            Phase::Confirming,
+            "Checking the grant and the release…",
+        ),
+    );
     let cli = match resolve_cli(&home) {
         Ok(cli) => cli,
         Err(message) => return send(app, event(req, Phase::Failed, message)),
@@ -569,10 +646,18 @@ fn resident_start(app: &AppHandle, req: &FleetRequest) {
         &base_env(&home, &cli.path_env),
         PROBE_TIMEOUT,
     );
-    let plan = match status.as_ref().ok().and_then(|r| parse_resident_status(&r.stdout)) {
+    let plan = match status
+        .as_ref()
+        .ok()
+        .and_then(|r| parse_resident_status(&r.stdout))
+    {
         Some(plan) => plan,
         None => {
-            let mut failed = event(req, Phase::Failed, "The resident status could not be read from the ashlr CLI.");
+            let mut failed = event(
+                req,
+                Phase::Failed,
+                "The resident status could not be read from the ashlr CLI.",
+            );
             failed.command = Some(resident_command(&cli, "status --json"));
             failed.output = status.ok().map(|r| combined(&r));
             return send(app, failed);
@@ -590,7 +675,12 @@ fn resident_start(app: &AppHandle, req: &FleetRequest) {
         .title(title)
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
-            if req.op == FleetOp::ResidentRestart { "Restart" } else { "Start" }.to_string(),
+            if req.op == FleetOp::ResidentRestart {
+                "Restart"
+            } else {
+                "Start"
+            }
+            .to_string(),
             "Cancel".to_string(),
         ))
         .blocking_show();
@@ -598,7 +688,11 @@ fn resident_start(app: &AppHandle, req: &FleetRequest) {
         return send(app, event(req, Phase::Cancelled, "Nothing was changed."));
     }
     if req.op == FleetOp::ResidentRestart {
-        let mut running = event(req, Phase::Running, "Stopping the fleet daemon before the restart…");
+        let mut running = event(
+            req,
+            Phase::Running,
+            "Stopping the fleet daemon before the restart…",
+        );
         running.command = Some(resident_command(&cli, "stop"));
         send(app, running);
         match run_child(
@@ -608,7 +702,11 @@ fn resident_start(app: &AppHandle, req: &FleetRequest) {
         ) {
             Ok(r) if r.code == Some(0) => {}
             Ok(r) => {
-                let mut failed = event(req, Phase::Failed, "The daemon could not be stopped, so it was not restarted.");
+                let mut failed = event(
+                    req,
+                    Phase::Failed,
+                    "The daemon could not be stopped, so it was not restarted.",
+                );
                 failed.exit_code = r.code;
                 failed.output = Some(combined(&r));
                 return send(app, failed);
@@ -652,11 +750,19 @@ fn finish(
     if let Some(g) = gesture {
         env.push(("ASHLR_NATIVE_GESTURE".to_string(), g.to_string()));
     }
-    let result = run_child(Command::new(&cli.bin).args(["authority", "resident", sub]), &env, timeout);
+    let result = run_child(
+        Command::new(&cli.bin).args(["authority", "resident", sub]),
+        &env,
+        timeout,
+    );
     let mut done = match &result {
         Ok(r) if r.code == Some(0) => event(req, Phase::Done, ok_message),
         Ok(r) if r.timed_out => event(req, Phase::Failed, "The ashlr CLI did not finish in time."),
-        Ok(_) => event(req, Phase::Failed, format!("ashlr authority resident {sub} did not succeed — see its output.")),
+        Ok(_) => event(
+            req,
+            Phase::Failed,
+            format!("ashlr authority resident {sub} did not succeed — see its output."),
+        ),
         Err(e) => event(req, Phase::Failed, e.clone()),
     };
     done.command = Some(resident_command(cli, sub));
@@ -693,9 +799,11 @@ pub fn validate_checkout(raw: &str) -> Result<Checkout, String> {
     if !path.is_absolute() {
         return Err("The checkout path must be absolute.".to_string());
     }
-    let root = std::fs::canonicalize(path).map_err(|_| "That checkout does not exist.".to_string())?;
+    let root =
+        std::fs::canonicalize(path).map_err(|_| "That checkout does not exist.".to_string())?;
     let script = root.join("scripts/install-custody.sh");
-    let meta = std::fs::symlink_metadata(&script).map_err(|_| "scripts/install-custody.sh is missing from that checkout.".to_string())?;
+    let meta = std::fs::symlink_metadata(&script)
+        .map_err(|_| "scripts/install-custody.sh is missing from that checkout.".to_string())?;
     if !meta.file_type().is_file() {
         return Err("scripts/install-custody.sh is not a regular file.".to_string());
     }
@@ -705,17 +813,24 @@ pub fn validate_checkout(raw: &str) -> Result<Checkout, String> {
     if !is_hub_checkout(&root) {
         return Err("That folder is not an ashlrai/ashlr-hub checkout.".to_string());
     }
-    let bytes = std::fs::read(&script).map_err(|_| "scripts/install-custody.sh could not be read.".to_string())?;
+    let bytes = std::fs::read(&script)
+        .map_err(|_| "scripts/install-custody.sh could not be read.".to_string())?;
     let digest = Sha256::digest(&bytes);
     let script_sha256 = digest.iter().map(|b| format!("{b:02x}")).collect();
-    Ok(Checkout { root, script, script_sha256 })
+    Ok(Checkout {
+        root,
+        script,
+        script_sha256,
+    })
 }
 
 /// PURE (given the text): does a git config name the ashlr-hub remote?
 pub fn config_names_hub(config: &str) -> bool {
     config.lines().any(|line| {
         let line = line.trim();
-        line.starts_with("url") && (line.contains("ashlrai/ashlr-hub.git") || line.trim_end().ends_with("ashlrai/ashlr-hub"))
+        line.starts_with("url")
+            && (line.contains("ashlrai/ashlr-hub.git")
+                || line.trim_end().ends_with("ashlrai/ashlr-hub"))
     })
 }
 
@@ -725,7 +840,9 @@ fn is_hub_checkout(root: &Path) -> bool {
         git.join("config")
     } else if let Ok(text) = std::fs::read_to_string(&git) {
         // A worktree: `.git` is a file `gitdir: <main>/.git/worktrees/<name>`.
-        let Some(dir) = text.trim().strip_prefix("gitdir:") else { return false };
+        let Some(dir) = text.trim().strip_prefix("gitdir:") else {
+            return false;
+        };
         let dir = PathBuf::from(dir.trim());
         match dir.parent().and_then(Path::parent) {
             Some(common) => common.join("config"),
@@ -734,7 +851,9 @@ fn is_hub_checkout(root: &Path) -> bool {
     } else {
         return false;
     };
-    std::fs::read_to_string(config).map(|t| config_names_hub(&t)).unwrap_or(false)
+    std::fs::read_to_string(config)
+        .map(|t| config_names_hub(&t))
+        .unwrap_or(false)
 }
 
 /// PURE: the AppleScript that asks macOS for an administrator and runs the
@@ -747,12 +866,18 @@ pub const CUSTODY_OSASCRIPT: [&str; 3] = [
 ];
 
 pub fn custody_command_line(checkout: &Checkout, user: &str) -> String {
-    format!("sudo SUDO_USER={user} /bin/bash {}", checkout.script.display())
+    format!(
+        "sudo SUDO_USER={user} /bin/bash {}",
+        checkout.script.display()
+    )
 }
 
 fn custody_install(app: &AppHandle, req: &FleetRequest) {
     let Some(home) = home_dir() else {
-        send(app, event(req, Phase::Failed, "Your home folder could not be read."));
+        send(
+            app,
+            event(req, Phase::Failed, "Your home folder could not be read."),
+        );
         return;
     };
     let checkout = match validate_checkout(req.checkout.as_deref().unwrap_or("")) {
@@ -761,10 +886,21 @@ fn custody_install(app: &AppHandle, req: &FleetRequest) {
     };
     let user = user_name();
     if user.is_empty() || user == "root" {
-        return send(app, event(req, Phase::Failed, "Run the app from your own account, not root."));
+        return send(
+            app,
+            event(
+                req,
+                Phase::Failed,
+                "Run the app from your own account, not root.",
+            ),
+        );
     }
     let command_line = custody_command_line(&checkout, &user);
-    let mut confirming = event(req, Phase::Confirming, "Waiting for you to confirm the install…");
+    let mut confirming = event(
+        req,
+        Phase::Confirming,
+        "Waiting for you to confirm the install…",
+    );
     confirming.command = Some(command_line.clone());
     send(app, confirming);
     let body = format!(
@@ -780,12 +916,19 @@ fn custody_install(app: &AppHandle, req: &FleetRequest) {
         .message(body)
         .title("Install the custody helper?")
         .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom("Continue".to_string(), "Cancel".to_string()))
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Continue".to_string(),
+            "Cancel".to_string(),
+        ))
         .blocking_show();
     if !confirmed {
         return send(app, event(req, Phase::Cancelled, "Nothing was changed."));
     }
-    let mut running = event(req, Phase::Running, "Building and installing the custody helper (this takes a few minutes)…");
+    let mut running = event(
+        req,
+        Phase::Running,
+        "Building and installing the custody helper (this takes a few minutes)…",
+    );
     running.command = Some(command_line.clone());
     send(app, running);
     let mut cmd = Command::new("/usr/bin/osascript");
@@ -795,13 +938,25 @@ fn custody_install(app: &AppHandle, req: &FleetRequest) {
     cmd.arg(&user)
         .arg(checkout.script.as_os_str())
         .arg("Ashlr wants to install the custody helper at /usr/local/libexec/ashlr-custody.");
-    let result = run_child(&mut cmd, &base_env(&home, "/usr/bin:/bin:/usr/sbin:/sbin"), CUSTODY_TIMEOUT);
+    let result = run_child(
+        &mut cmd,
+        &base_env(&home, "/usr/bin:/bin:/usr/sbin:/sbin"),
+        CUSTODY_TIMEOUT,
+    );
     let mut done = match &result {
         Ok(r) if r.code == Some(0) => event(req, Phase::Done, "The custody helper is installed."),
         // osascript's "User canceled." is error -128.
-        Ok(r) if r.stderr.contains("-128") => event(req, Phase::Cancelled, "The administrator prompt was cancelled; nothing was installed."),
+        Ok(r) if r.stderr.contains("-128") => event(
+            req,
+            Phase::Cancelled,
+            "The administrator prompt was cancelled; nothing was installed.",
+        ),
         Ok(r) if r.timed_out => event(req, Phase::Failed, "The install did not finish in time."),
-        Ok(_) => event(req, Phase::Failed, "The install did not succeed — see its output."),
+        Ok(_) => event(
+            req,
+            Phase::Failed,
+            "The install did not succeed — see its output.",
+        ),
         Err(e) => event(req, Phase::Failed, e.clone()),
     };
     done.command = Some(command_line);
@@ -849,7 +1004,9 @@ mod tests {
         assert_eq!(bin, PathBuf::from("/opt/homebrew/bin/ashlr"));
         assert_eq!(path, "/opt/homebrew/bin:/usr/bin");
         assert!(parse_cli_probe("__ASHLR_FLEET_BIN__\n__ASHLR_FLEET_PATH__/usr/bin\n").is_none());
-        assert!(parse_cli_probe("__ASHLR_FLEET_BIN__ashlr\n__ASHLR_FLEET_PATH__/usr/bin\n").is_none());
+        assert!(
+            parse_cli_probe("__ASHLR_FLEET_BIN__ashlr\n__ASHLR_FLEET_PATH__/usr/bin\n").is_none()
+        );
     }
 
     #[test]
@@ -859,7 +1016,11 @@ mod tests {
         assert!(plan.admitted);
         assert_eq!(plan.grant_seq, Some(2));
         assert_eq!(plan.budget_usd, Some(25.0));
-        let (title, body) = resident_dialog_text(FleetOp::ResidentStart, Path::new("/opt/homebrew/bin/ashlr"), &plan);
+        let (title, body) = resident_dialog_text(
+            FleetOp::ResidentStart,
+            Path::new("/opt/homebrew/bin/ashlr"),
+            &plan,
+        );
         assert_eq!(title, "Start the fleet daemon?");
         assert!(body.contains("Grant #2"));
         assert!(body.contains("abcdef012345"));
@@ -869,14 +1030,23 @@ mod tests {
 
     #[test]
     fn gesture_body_matches_the_cli_parser() {
-        assert_eq!(gesture_body("resident-start", 5), r#"{"v":1,"op":"resident-start","createdAt":5}"#);
+        assert_eq!(
+            gesture_body("resident-start", 5),
+            r#"{"v":1,"op":"resident-start","createdAt":5}"#
+        );
     }
 
     #[test]
     fn hub_remote_detection() {
-        assert!(config_names_hub("[remote \"origin\"]\n\turl = git@github.com:ashlrai/ashlr-hub.git\n"));
-        assert!(config_names_hub("[remote \"origin\"]\n\turl = https://github.com/ashlrai/ashlr-hub\n"));
-        assert!(!config_names_hub("[remote \"origin\"]\n\turl = https://github.com/evil/ashlr-hub-fork\n"));
+        assert!(config_names_hub(
+            "[remote \"origin\"]\n\turl = git@github.com:ashlrai/ashlr-hub.git\n"
+        ));
+        assert!(config_names_hub(
+            "[remote \"origin\"]\n\turl = https://github.com/ashlrai/ashlr-hub\n"
+        ));
+        assert!(!config_names_hub(
+            "[remote \"origin\"]\n\turl = https://github.com/evil/ashlr-hub-fork\n"
+        ));
     }
 
     #[test]
