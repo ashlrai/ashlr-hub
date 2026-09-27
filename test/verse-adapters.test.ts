@@ -912,8 +912,10 @@ describe('grok adapter — parser', () => {
 
   it('accepts the same events wrapped in claude\'s stream_event envelope', () => {
     const wrapped = GROK_TURN.map((ev) => (ev.type === 'user' ? ev : { type: 'stream_event', event: ev }));
-    const bare = feed(adapterFor('grok').createParser('g2'), GROK_TURN);
-    const viaWrapper = feed(adapterFor('grok').createParser('g2'), wrapped);
+    // Same clock for both: `progress.elapsedMs` is wall time, and comparing two
+    // runs on the real clock failed whenever one ms ticked between them.
+    const bare = feed(createAnthropicStreamParser('g2', 'grok', { now: () => 1_000 }), GROK_TURN);
+    const viaWrapper = feed(createAnthropicStreamParser('g2', 'grok', { now: () => 1_000 }), wrapped);
     expect(viaWrapper).toEqual(bare);
   });
 

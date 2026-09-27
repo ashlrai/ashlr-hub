@@ -70,6 +70,23 @@ export function citationSentence(citation: VerseCitation, shownPath: string | nu
   }
 }
 
+/**
+ * The live turn rebuilds its citation objects on every streamed token; the
+ * list re-renders only when what it SHOWS changed (the same rule the tool
+ * cards and activity groups follow).
+ */
+function sameCitations(a: readonly VerseCitation[], b: readonly VerseCitation[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (x.source.ref !== y.source.ref || x.count !== y.count || x.source.title !== y.source.title
+      || formatRanges(x.ranges) !== formatRanges(y.ranges)) return false;
+  }
+  return true;
+}
+
 export const SourceList = memo(function SourceList({ citations, openFile, jumpToTool, label = 'Sources' }: SourceListProps) {
   const [expanded, setExpanded] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -159,4 +176,4 @@ export const SourceList = memo(function SourceList({ citations, openFile, jumpTo
       {notice ? <p className={styles.notice} role="status">{notice}</p> : null}
     </section>
   );
-});
+}, (a, b) => a.openFile === b.openFile && a.jumpToTool === b.jumpToTool && a.label === b.label && sameCitations(a.citations, b.citations));

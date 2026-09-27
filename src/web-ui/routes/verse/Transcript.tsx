@@ -427,17 +427,24 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
   const liveThinking = running && reasoning !== 'hidden' && live?.thinking && live.thinking.turnId === live.turnId ? live.thinking : null;
   const lastTurn = turns.length > 0 ? turns[turns.length - 1]! : null;
 
-  // V3.15: the counts on the Reasoning / Sources toggles. Unique refs across
-  // the chat (the sheet numbers them); O(citations), cheap even per token.
+  // V3.15: the counts on the Reasoning / Sources toggles — unique refs across
+  // the chat (the sheet numbers them). `turns` is a new array on every
+  // streamed token, so the union is keyed on a cheap signature (per-turn
+  // totals) and rebuilt only when a citation or a thought actually lands.
+  let traceSignature = '';
+  for (const turn of turns) traceSignature += `${turn.citations.length}.${turn.reasoning.shown + turn.reasoning.hidden},`;
+  const turnsForTrace = useRef(turns);
+  turnsForTrace.current = turns;
   const traceCounts = useMemo(() => {
     const refs = new Set<string>();
     let thoughts = 0;
-    for (const turn of turns) {
+    for (const turn of turnsForTrace.current) {
       for (const citation of turn.citations) refs.add(citation.source.ref);
       thoughts += turn.reasoning.shown + turn.reasoning.hidden;
     }
     return { sources: refs.size, thoughts };
-  }, [turns]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the signature IS the dependency
+  }, [traceSignature]);
   const hasTrace = traceCounts.sources > 0 || traceCounts.thoughts > 0;
   // Read when the sheet renders (not subscribed): memory is pinned at creation.
   const sheetSessionId = sheet ? resolveSessionId() : null;
