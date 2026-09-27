@@ -223,6 +223,8 @@
 /test/daemon-resident-capacity-publisher-310.test.ts @masonwyatt23
 /test/decide-critics-315.test.ts @masonwyatt23
 /test/decide-judge-manager-315.test.ts @masonwyatt23
+/test/devin-cli-engine-315.test.ts @masonwyatt23
+/test/devin-cli-engine-realio-315.test.ts @masonwyatt23
 /test/devin-engine-identity-315.test.ts @masonwyatt23
 /test/devin-fleet-launcher-315.test.ts @masonwyatt23
 /test/devin-intake-315.test.ts @masonwyatt23
