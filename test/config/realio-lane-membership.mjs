@@ -518,4 +518,7 @@ export const REAL_IO_TEST_FILES = [
   'test/leader-local-transport-314.test.ts', // binds a real loopback HTTP server (streamed Ollama /api/chat, per-attempt timeout)
   'test/daemon-first-tick-314.test.ts', // real detached /bin/sh process groups killed on timeout + real mirror clones in h1 temp repos
   'test/mirror-sibling-deps-314.test.ts', // real mirror clones of sibling repos in h1 temp repos + one real frozen npm ci through ../<sibling>
+  'test/wiki-generate-315.test.ts', // real h1-fixture repos + a real commit per staleness case (repo wiki build/refresh)
+  'test/wiki-ask-315.test.ts', // real h1-fixture repos, wiki + knowledge-index builds per case (repo wiki Ask)
+  'test/wiki-api-315.test.ts', // binds a real loopback HTTP server over a real built wiki (Verse wiki routes)
 ];

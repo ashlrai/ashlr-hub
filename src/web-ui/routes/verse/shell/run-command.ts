@@ -200,6 +200,7 @@ export function registerShellCommandHandlers(): () => void {
     ['section.settings', 'settings'],
     ['section.apps', 'apps'],
     ['section.usage', 'usage'],
+    ['section.wiki', 'wiki'],
   ];
   const offs = [
     ...surfaces.map(([id, section]) => registerCommandHandler(id, () => setVerseSection(section))),
@@ -229,6 +230,12 @@ export function registerShellCommandHandlers(): () => void {
     registerCommandHandler('leader.message', () => { void import('../leader/leader-focus.js').then((m) => m.requestLeaderFocus({ kind: 'composer' })); }),
     registerCommandHandler('leader.directive', () => { void import('../leader/leader-focus.js').then((m) => m.requestLeaderFocus({ kind: 'directive' })); }),
     registerCommandHandler('autonomy.copy-setup', () => { void import('./copy-setup.js').then((m) => m.copyAutonomySetupCommand()); }),
+    // The repo wiki (3.15): the section takes the request once its chunk mounts (wiki-focus.ts).
+    registerCommandHandler('wiki.open', (inv) => {
+      const projectPath = inv.argument?.kind === 'project' ? inv.argument.id : null;
+      void import('../wiki/wiki-focus.js').then((m) => m.requestWikiFocus({ kind: 'repo', projectPath }));
+    }),
+    registerCommandHandler('wiki.ask', () => { void import('../wiki/wiki-focus.js').then((m) => m.requestWikiFocus({ kind: 'ask', projectPath: null })); }),
   ];
   return () => offs.forEach((off) => off());
 }

@@ -604,17 +604,20 @@ describe('cli/verse: background services', () => {
         // Never settles: proves the Apps warm-up is not awaited either.
         warmVerseApps: (cfg: AshlrConfig) => { order.push(`apps:warm:${cfg === OPEN_CFG}`); return new Promise<void>(() => {}); },
       }),
+      loadWiki: async () => ({
+        scheduleWikiAutoRefresh: (cfg: AshlrConfig) => { order.push(`wiki:start:${cfg === OPEN_CFG}`); return () => { order.push('wiki:stop'); }; },
+      }),
     };
   }
 
-  it('starts all five with the server config, without awaiting the usage prime or the Apps warm-up, and stops them newest first', async () => {
+  it('starts all six with the server config, without awaiting the usage prime or the Apps warm-up, and stops them newest first', async () => {
     const order: string[] = [];
     const services = await startVerseBackgroundServices(OPEN_CFG, fakes(order));
-    expect(services.started).toEqual(['health', 'claude-usage', 'reasoning', 'budget', 'apps']);
-    expect(order).toEqual(['health:start:true', 'usage:prime', 'reasoning:start', 'budget:start', 'apps:warm:true']);
+    expect(services.started).toEqual(['health', 'claude-usage', 'reasoning', 'budget', 'apps', 'wiki']);
+    expect(order).toEqual(['health:start:true', 'usage:prime', 'reasoning:start', 'budget:start', 'apps:warm:true', 'wiki:start:true']);
     services.stop();
     services.stop(); // idempotent
-    expect(order.slice(5)).toEqual(['budget:stop', 'reasoning:stop', 'health:stop']);
+    expect(order.slice(6)).toEqual(['wiki:stop', 'budget:stop', 'reasoning:stop', 'health:stop']);
   });
 
   it('a service that fails to load or start is reported and skipped; the rest still run', async () => {
@@ -629,16 +632,16 @@ describe('cli/verse: background services', () => {
       }),
       log,
     });
-    expect(services.started).toEqual(['claude-usage', 'budget', 'apps']);
+    expect(services.started).toEqual(['claude-usage', 'budget', 'apps', 'wiki']);
     expect(log.mock.calls.map(([m]) => m)).toEqual([
       'health did not start: module missing',
       'reasoning did not start: bad root',
     ]);
     services.stop();
-    expect(order).toEqual(['usage:prime', 'budget:start', 'apps:warm:true', 'budget:stop']);
+    expect(order).toEqual(['usage:prime', 'budget:start', 'apps:warm:true', 'wiki:start:true', 'wiki:stop', 'budget:stop']);
   });
 
-  it('skips the account services under --no-accounts', async () => {
+  it('skips the account services (and the wiki auto-refresh) under --no-accounts', async () => {
     const order: string[] = [];
     const services = await startVerseBackgroundServices(OPEN_CFG, { ...fakes(order), accountServices: false });
     expect(services.started).toEqual(['claude-usage', 'reasoning', 'apps']);

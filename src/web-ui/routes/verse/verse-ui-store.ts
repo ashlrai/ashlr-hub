@@ -91,6 +91,7 @@ export const VERSE_SECTIONS: readonly VerseSectionEntry[] = [
   { id: 'settings', label: 'Settings', module: 'SettingsSection', placement: 'tray', blurb: 'Theme, chat, desktop and keyboard — and this tour again.' },
   { id: 'apps', label: 'Apps & Accounts', module: 'AppsSection', placement: 'tray', blurb: 'Seats, terminal agents, local models and MCP servers in one list.' },
   { id: 'usage', label: 'Usage', module: 'UsageSection', placement: 'tray', blurb: 'Which account you can actually use right now, and what it costs.' },
+  { id: 'wiki', label: 'Repo wiki', module: 'WikiSection', placement: 'tray', blurb: 'A private architecture wiki per repo, written on your own models — and Ask, with cited answers.' },
 ];
 
 export const RAIL_SECTIONS: readonly VerseSectionEntry[] = VERSE_SECTIONS.filter((s) => s.placement === 'rail');

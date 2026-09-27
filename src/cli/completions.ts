@@ -39,6 +39,8 @@ export const TOP_LEVEL_COMMANDS: string[] = [
   'cloud',
   // 3.15 Devin lane.
   'devin',
+  // 3.15 private repo wiki.
+  'wiki',
 ];
 
 /** Subcommands per top-level command (first-position completion only). */
@@ -70,6 +72,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   ],
   recovery: ['list', 'inspect', 'attest', 'abandon'],
   knowledge: ['build', 'impact', 'graph'],
+  wiki: ['build', 'status', 'show', 'ask'],
   reflect: ['playbooks', 'propose'],
   health: ['propose'],
   goals: [

@@ -98,6 +98,20 @@ export function openInEditor(path: string, cfg: AshlrConfig): void {
 }
 
 /**
+ * The deep link for a file AT a line: Cursor and VS Code both accept a
+ * `:<line>` suffix after the (encoded) path — `vscode://file/a/b.ts:42`.
+ */
+export function editorDeepLinkAt(path: string, line: number, editor: AshlrConfig['editor']): string {
+  const base = editorDeepLink(path, editor);
+  return Number.isInteger(line) && line > 0 ? `${base}:${line}` : base;
+}
+
+/** Open `path` at `line` in the configured editor (the wiki's citations). */
+export function openInEditorAt(path: string, line: number, cfg: AshlrConfig): void {
+  openUrl(editorDeepLinkAt(path, line, cfg.editor));
+}
+
+/**
  * Reveal `path` in the OS file manager (Finder / Explorer / default handler).
  * Opens directories in the file manager and files with their default app.
  */
