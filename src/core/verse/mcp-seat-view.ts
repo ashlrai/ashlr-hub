@@ -167,7 +167,8 @@ export interface VerseMcpSnapshot {
 
 export const VERSE_MCP_ISOLATED_NOTE =
   'Every turn on this seat is launched with --strict-mcp-config and an empty --mcp-config, ' +
-  'so it loads no MCP servers at all regardless of what any config file holds.';
+  'so it loads no MCP servers at all regardless of what any config file holds. ' +
+  "The one exception is Verse's own browser tools, on a chat where you switched agent access on in the Browser pane.";
 
 export const VERSE_MCP_TOML_NOTE =
   'This account keeps its MCP servers in a TOML config, which is read by the provider CLI ' +

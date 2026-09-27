@@ -171,6 +171,8 @@ const EXPECTED_HANDLERS: Record<WorkbenchRouteFamilyId, string> = {
   // 3.15: versioned playbooks.
   playbooks: 'handlePlaybooksApi',
   automations: 'handleAutomationsApi',
+  // 3.15: the integrated Browser pane (policy, command relay, per-chat MCP).
+  browser: 'handleBrowserApi',
 };
 
 const allPrefixes = WORKBENCH_ROUTE_FAMILIES.flatMap((family) => family.prefixes.map((prefix) => ({ family: family.id, prefix })));

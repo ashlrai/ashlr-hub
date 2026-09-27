@@ -21,6 +21,16 @@
 //!    new state by evaluating `desktop_prefs::state_script`; the page changes a
 //!    preference by emitting `shell-prefs` over the event permission it
 //!    already has — no new capability.
+//! 6. The integrated browser (protocol v1, `browser_pane.rs`):
+//!    `window.__ASHLR_DESKTOP__.browser` = `{ version: 1, capabilities, send }`
+//!    and the `ashlr:browser` event. The page drives the pane by emitting
+//!    `shell-browser` over the same event permission (no new capability, no
+//!    new command); native answers by evaluating
+//!    `window.__ASHLR_BROWSER_EVENT__(<json>)`, which this script defines
+//!    non-writable and non-configurable so no page script can intercept or
+//!    replace the channel. `capabilities.screenshot` comes from
+//!    `ShellConfig::browser_screenshot` (macOS only). An older shell has no
+//!    `browser` key at all — that absence is the web UI's feature test.
 //!
 //! The script is origin-gated to the sidecar origin. Token values are
 //! JSON-encoded into a config object, never string-interpolated, so no token
@@ -83,6 +93,10 @@ struct ShellConfig<'a> {
     /// `shell-state-request` once it runs, since a reload re-runs this script
     /// with the creation-time value).
     desktop: Option<&'a crate::desktop_prefs::DesktopStateView>,
+    /// Whether the browser pane can take screenshots (`WKWebView` snapshot —
+    /// macOS only; elsewhere a `screenshot` request answers `unsupported`).
+    #[serde(rename = "browserScreenshot")]
+    browser_screenshot: bool,
 }
 
 /// Test convenience: the script without desktop state (`"desktop":null`).
@@ -110,6 +124,7 @@ pub fn init_script_with_state(
         traffic_light_inset: TRAFFIC_LIGHT_INSET,
         tokens,
         desktop,
+        browser_screenshot: cfg!(target_os = "macos"),
     };
     let json = serde_json::to_string(&config).unwrap_or_else(|_| "null".to_string());
     format!("var __ASHLR_SHELL_CONFIG = {json};\n{SHELL_JS}")
@@ -247,6 +262,38 @@ mod tests {
         // Only the two known preferences, booleans only, may be emitted.
         assert!(script.contains("name !== 'globalHotkey' && name !== 'notifications'"));
         assert!(script.contains("typeof value !== 'boolean'"));
+    }
+
+    #[test]
+    fn the_browser_pane_contract_is_present() {
+        let script = init_script(ORIGIN, None);
+        assert!(script.contains(&format!(
+            "\"browserScreenshot\":{}",
+            cfg!(target_os = "macos")
+        )));
+        for needle in [
+            "browser: Object.freeze(",
+            "version: 1",
+            "screenshot: cfg.browserScreenshot === true",
+            "picker: true",
+            "console: true",
+            "text: true",
+            "send: sendBrowser",
+            "event: 'shell-browser'",
+            "BROWSER_MESSAGE_MAX = 16384",
+            "Object.defineProperty(window, '__ASHLR_BROWSER_EVENT__'",
+            "writable: false",
+            "configurable: false",
+            "new CustomEvent('ashlr:browser'",
+        ] {
+            assert!(script.contains(needle), "shell contract lost `{needle}`");
+        }
+        // The page-side event name is the one native listens on.
+        assert_eq!(crate::browser_pane::BROWSER_EVENT, "shell-browser");
+        // Only plain objects are sent, and they are sent as a JSON round-trip
+        // copy (what was measured is what is sent).
+        assert!(script.contains("Object.getPrototypeOf(msg)"));
+        assert!(script.contains("payload: JSON.parse(json)"));
     }
 
     #[test]

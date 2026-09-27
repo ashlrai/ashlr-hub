@@ -793,7 +793,9 @@ panel's account view. Rows are grouped:
 - **Local models:** Ollama (version, models, last measured tok/s),
   llama-server's health, LM Studio.
 - **MCP servers**, per seat, with the same add flow as before. Claude and local
-  seats load no MCP servers (`--strict-mcp-config`); the page says so.
+  seats load no MCP servers (`--strict-mcp-config`); the page says so. The one
+  exception is Verse's own browser tools, on a chat where you switched agent
+  access on in the Browser pane ([VERSE-BROWSER.md](VERSE-BROWSER.md)).
 
 Nothing on this page spends: it runs status commands and loopback reads only,
 and Launch or a toggle opens a visible Terminal that you drive.
