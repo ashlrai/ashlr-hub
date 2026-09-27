@@ -1,0 +1,38 @@
+.kinds {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-xs, 12px);
+  font-variant-numeric: tabular-nums;
+}
+
+.kinds th,
+.kinds td {
+  padding: 3px 6px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.kinds th:first-child,
+.kinds td:first-child {
+  text-align: left;
+  white-space: normal;
+}
+
+.kinds thead th {
+  color: var(--text-secondary);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.25));
+}
+
+.kinds tbody tr + tr td {
+  border-top: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.12));
+}
+
+.scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.muted {
+  color: var(--text-secondary);
+}

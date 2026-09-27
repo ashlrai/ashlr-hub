@@ -51,6 +51,7 @@ import { LocalCard, LocalModelsPanel } from '../usage/LocalModelsPanel.js';
 import { SeriesPanel } from '../usage/SeriesPanel.js';
 import { SpendPanel } from '../usage/SpendPanel.js';
 import { CloudCreditsPanel } from '../cloud/CloudCreditsPanel.js';
+import { JevPanel } from '../jev/JevPanel.js';
 import { LiveSeatBurnDowns } from '../command/SeatBurnDowns.js';
 import {
   frontierUsageQuery,
@@ -587,6 +588,9 @@ export function UsageSection(): ReactNode {
 
             {/* 3.11: Claude Code cloud sessions' estimated credits and their budget. */}
             <CloudCreditsPanel />
+
+            {/* 3.15: Jev typed decisions — calls, fallback rate, confidence, est. cost. */}
+            <JevPanel />
 
             <LimitsPanel rows={limitRows} capsNote={caps.available ? null : caps.reason} />
 

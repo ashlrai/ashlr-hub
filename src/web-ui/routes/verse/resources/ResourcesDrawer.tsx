@@ -42,6 +42,7 @@ import { verseLocalModelsQuery } from '../usage/usage-queries.js';
 import { setVerseSection, type VerseSectionId } from '../verse-ui-store.js';
 import { CloudCredits } from './CloudCredits.js';
 import { DevinResource } from './DevinResource.js';
+import { JevResource } from './JevResource.js';
 import { LocalResources } from './LocalResources.js';
 import { ResourceCard } from './ResourceCard.js';
 import { cloudCreditsQuery, resourceReadinessQuery, RESOURCES_POLL_MS } from './resources-queries.js';
@@ -288,6 +289,7 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
               readinessBusy={busy !== null && busy.seatId === readinessById.get('cloud')?.chat.fix?.seatId}
             />
             <DevinResource />
+            <JevResource />
           </ul>
         </section>
       </div>

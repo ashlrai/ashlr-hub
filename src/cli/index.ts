@@ -33,6 +33,7 @@
  *   cloud <launch|list|refresh|improve|budget|backlog>  Claude Code cloud sessions that deliver draft PRs (3.11).
  *   devin <connect|status|launch|list|refresh|message|budget>  Devin sessions that deliver PRs through the gates (3.15).
  *   automations <list|templates|add|enable|disable|remove|fire>  Issues, red builds, schedules and webhooks become work (3.15).
+ *   jev <status|test>          Jev typed decisions: status by kind, and one live test decision (3.15).
  *   spec new "<goal>" [opts]   Author a versioned end-state spec artifact.
  *   spec list/show/refine      Manage spec artifacts.
  *   swarm "<goal>"|<specId>    Decompose a spec into a contracts-first agent swarm and run it.
@@ -695,6 +696,13 @@ const loadCloudCmd = lazyCmd(
   () => import('./cloud.js'),
   (m) => m.runCloudCli as Cmd,
   'cloud command requires a current build of src/cli/cloud.ts (3.11 cloud lane unit C2).',
+);
+
+// ─── 3.15 Jev decision layer ────────────────────────────────────────
+const loadJevCmd = lazyCmd(
+  () => import('./jev.js'),
+  (m) => m.runJevCli as Cmd,
+  'jev command requires a current build of src/cli/jev.ts (3.15 Jev decision layer).',
 );
 
 // ─── 3.15 Devin lane ────────────────────────────────────────────────
@@ -2278,6 +2286,14 @@ async function main(): Promise<void> {
         // services and every gate they hold; nothing merges from here.
         const cmdPlaybook = await loadPlaybookCmd();
         process.exitCode = await cmdPlaybook(rest);
+        break;
+      }
+
+      case 'jev': {
+        // 3.15: the Jev (TypeSafe) decision layer — status reads the local
+        // ledger; test makes one live decision (src/cli/jev.ts).
+        const cmdJev = await loadJevCmd();
+        process.exitCode = await cmdJev(rest);
         break;
       }
 

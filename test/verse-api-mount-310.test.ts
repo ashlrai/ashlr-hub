@@ -43,6 +43,7 @@ import { VERSE_BUDGET_PATH } from '../src/core/routing/types.js';
 import { REASONING_DIGEST_PATH, REASONING_STEPS_PATH } from '../src/core/reasoning/types.js';
 import { VERSE_CLOUD_PATH } from '../src/core/cloud/types.js';
 import { VERSE_DEVIN_PATH } from '../src/core/devin/types.js';
+import { VERSE_JEV_PATH } from '../src/core/decide/jev-types.js';
 import { cloudTimelinePath } from '../src/core/cloud/timeline-types.js';
 import { readAuthHeaders, startServer } from './helpers/authenticated-web-server.js';
 
@@ -185,9 +186,9 @@ async function boot(opts: Partial<WebServerOptions> = {}) {
 // ---------------------------------------------------------------------------
 
 describe('the real mount table', () => {
-  it('mounts health, reasoning, fleet history, budget, the cloud timeline, cloud and devin — in that order', () => {
+  it('mounts health, reasoning, fleet history, budget, the cloud timeline, cloud, devin and jev — in that order', () => {
     setMountedApiModulesForTest(null);
-    expect(mountedApiModules().map((m) => m.id)).toEqual(['health', 'reasoning', 'fleet-history', 'budget', 'cloud-timeline', 'cloud', 'devin']);
+    expect(mountedApiModules().map((m) => m.id)).toEqual(['health', 'reasoning', 'fleet-history', 'budget', 'cloud-timeline', 'cloud', 'devin', 'jev']);
   });
 
   it('every entry resolves to a handler function (the owning units exported what the contract names)', async () => {
@@ -223,6 +224,7 @@ describe('the real mount table', () => {
       'cloud-timeline': cloudTimelinePath('ct_20260926T0000_abc123'),
       cloud: VERSE_CLOUD_PATH,
       devin: VERSE_DEVIN_PATH,
+      jev: VERSE_JEV_PATH,
     };
     for (const [owner, p] of Object.entries(representative) as Array<[MountedApiModuleId, string]>) {
       for (const { id, handler } of handlers) {
