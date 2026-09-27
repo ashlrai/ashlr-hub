@@ -4,14 +4,14 @@
  *
  * WHAT IT IS
  *   - Tabs, each one shell or a SPLIT of up to six (⌘D right, ⌥⌘D down; side
- *     by side, stacked or tiled; ⌥⌘←→↑↓ between them, ⇧⌘↩ zooms one), laid
+ *     by side, stacked or tiled; ⌥⌘←→↑↓ between them, ⇧⌘Return zooms one), laid
  *     out per chat and restored after a reload — the shells themselves live
  *     on the server (core/verse/terminal.ts) and are reattached, scrollback
  *     and command blocks included. Every visible shell streams over ONE
  *     connection (panel-stream.ts, the multiplexer).
  *   - An INPUT EDITOR at each prompt (CommandInput.tsx): multi-line, bash
  *     highlighting, ghost text and ↑/↓ from the persistent history, path
- *     completion, ⌃R history palette, `#`/⌘I plain words → a command (local
+ *     completion, Ctrl+R history palette, `#`/⌘I plain words → a command (local
  *     model, never run on its own). Raw per shell turns it off.
  *   - Each shell: xterm.js on WebGL (DOM fallback), true colour, Unicode 11,
  *     ligatures, ⌘F find, ⌘-click links (URLs, and `file:line` into the
@@ -833,7 +833,7 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
     const raw = focusedTab ? rawTabs.has(focusedTab.id) : false;
     const items: ActionMenuItem[] = [
       { id: 'find', label: `Find… (${panelKeyLabel('find', deps.platform)})`, onSelect: () => focusedTab && leaves.current.get(focusedTab.id)?.openFind(), disabled: !focusedTab },
-      { id: 'history', label: 'Command history… (⌃R)', description: 'Search what you ran; ↩ puts it at the prompt without running it.', onSelect: () => openHistory(focusedTab?.id ?? null, '') },
+      { id: 'history', label: 'Command history… (Ctrl+R)', description: 'Search what you ran; Return puts it at the prompt without running it.', onSelect: () => openHistory(focusedTab?.id ?? null, '') },
       { id: 'assist', label: `Generate a command… (${panelKeyLabel('assist', deps.platform)})`, description: 'Describe it in words; the local model writes it for you to review.', onSelect: () => openAssist(focusedTab?.id ?? null), disabled: assistMode === 'off', reason: assistMode === 'off' ? 'Plain-English commands are turned off below.' : null },
       ...layoutItems,
       {
@@ -1152,7 +1152,7 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
             onPassThrough: (query: string) => {
               const leaf = leaves.current.get(palette.tabId!);
               if (!leaf) return;
-              // The shell's own ⌃R (fzf, atuin…), searching for what was typed.
+              // The shell's own Ctrl+R (fzf, atuin…), searching for what was typed.
               leaf.sendText(`\x12${query}`);
               setTimeout(() => leaf.focus(), 0);
             },

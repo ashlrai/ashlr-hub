@@ -2,11 +2,11 @@
  * terminal/panel-keys.ts — the Terminal panel's own keys (3.15), and which
  * keys leave the terminal for the page.
  *
- * While a terminal has focus it owns the keyboard (⌃C, ⌃R, Esc, ⌥-word
+ * While a terminal has focus it owns the keyboard (⌃C, Ctrl+R, Esc, ⌥-word
  * motion are the shell's). Three groups of keys are taken out of it:
  *
  *   1. the panel's own — ⌘F find, ⌘D split right, ⌥⌘D split down,
- *      ⌥⌘←→↑↓ focus the pane that way, ⇧⌘↩ zoom the pane (and back),
+ *      ⌥⌘←→↑↓ focus the pane that way, ⇧⌘Return zoom the pane (and back),
  *      ⌘↑ / ⌘↓ previous / next command block, ⇧⌘K blocks view,
  *      ⌘I describe a command in plain words;
  *   2. the app's catalog chords that use ⌘ (⌘K, ⌘J, ⌘1–5 …) or ⌃` / ⌃Tab
@@ -97,7 +97,7 @@ export function panelKeyLabel(action: PanelKeyAction, platform: KeyPlatform): st
     case 'focus-right': return mac ? '⌥⌘→' : 'Ctrl+Shift+Alt+→';
     case 'focus-up': return mac ? '⌥⌘↑' : 'Ctrl+Shift+Alt+↑';
     case 'focus-down': return mac ? '⌥⌘↓' : 'Ctrl+Shift+Alt+↓';
-    case 'zoom-pane': return mac ? '⇧⌘↩' : 'Ctrl+Shift+Enter';
+    case 'zoom-pane': return mac ? '⇧⌘Return' : 'Ctrl+Shift+Enter';
     case 'assist': return mac ? '⌘I' : 'Ctrl+Shift+Alt+I';
   }
 }

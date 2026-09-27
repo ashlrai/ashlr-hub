@@ -625,7 +625,7 @@ describe('TerminalPanel — the input editor', () => {
     await waitFor(() => expect(editor.text).toBe('du -sh * | sort -h'));
     expect(h.assists[0]).toEqual({ request: 'how big is everything here', tabId: 't-1', cwd: '~/code/app/pkg' });
     expect(h.inputs).toEqual([]);
-    expect(await screen.findByText(/Sizes of everything here\. · Review, then ↩ to run · from local:qwen/)).toBeInTheDocument();
+    expect(await screen.findByText(/Sizes of everything here\. · Review, then Return to run · from local:qwen/)).toBeInTheDocument();
     act(() => { editor.press('submit'); });
     await waitFor(() => expect(h.inputs).toEqual([['t-1', 'du -sh * | sort -h\r']]));
 
@@ -634,7 +634,7 @@ describe('TerminalPanel — the input editor', () => {
     act(() => { editor.press('assist'); });
     await waitFor(() => expect(editor.text).toBe('rm -rf build'));
     act(() => { editor.press('submit'); });
-    expect(await screen.findByText(/changes or deletes things\. Press ↩ again/)).toBeInTheDocument();
+    expect(await screen.findByText(/changes or deletes things\. Press Return again/)).toBeInTheDocument();
     expect(h.inputs).toHaveLength(1);
     act(() => { editor.press('submit'); });
     await waitFor(() => expect(h.inputs.at(-1)).toEqual(['t-1', 'rm -rf build\r']));

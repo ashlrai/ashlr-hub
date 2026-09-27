@@ -1,5 +1,5 @@
 /**
- * terminal/HistoryPalette.tsx — ⌃R for the Verse terminal (3.15), and the
+ * terminal/HistoryPalette.tsx — Ctrl+R for the Verse terminal (3.15), and the
  * "Generate command…" prompt. Built from the ⌘K palette's primitives (its
  * stylesheet, the focus trap, the combobox + listbox pattern), so it looks
  * and moves exactly like it.
@@ -7,8 +7,8 @@
  *   history  every command the operator's shells finished (the server's
  *            history, ranked for this shell's cwd: prefix → here → repo →
  *            succeeded → recent). ↩ puts the command in the input editor —
- *            it does NOT run it. ⌃R again gives the search to the shell's
- *            own ⌃R (fzf, atuin …) with what was typed.
+ *            it does NOT run it. Ctrl+R again gives the search to the shell's
+ *            own Ctrl+R (fzf, atuin …) with what was typed.
  *   assist   a request in plain words → the local model → ONE command, shown
  *            for review. ↩ inserts it for editing; nothing runs.
  */
@@ -17,6 +17,7 @@ import { createPortal } from 'react-dom';
 import type { VerseTerminalAssistResponse, VerseTerminalHistoryEntry } from '../../../data/api-types.js';
 import { ApiError } from '../../../data/client.js';
 import { useFocusTrap } from '../../../components/primitives/focus-trap.js';
+import { ReturnKeyIcon } from '../verse-icons.js';
 import type { PanelTerminalApi } from './panel-client.js';
 import { Button } from '../../../components/primitives/Button.js';
 import styles from '../shell/CommandPalette.module.css';
@@ -33,7 +34,7 @@ export interface HistoryPaletteProps {
   initialQuery: string;
   /** A command to put in the editor (or paste at the prompt). Never run. */
   onPick: (command: string) => void;
-  /** ⌃R again: hand the search to the shell's own ⌃R, with this text. */
+  /** Ctrl+R again: hand the search to the shell's own Ctrl+R, with this text. */
   onPassThrough?: (query: string) => void;
   onClose: () => void;
   /** Turn history on (shown when it is off). */
@@ -263,16 +264,16 @@ export function HistoryPalette({ mode, api, tabId, cwd, initialQuery, onPick, on
             </div>
           ) : (
             <p className={styles.empty}>
-              {api.assist ? 'Press ↩ to ask. The command comes back for you to read and edit — nothing runs until you run it.' : 'This server cannot generate commands.'}
+              {api.assist ? 'Press Return to ask. The command comes back for you to read and edit — nothing runs until you run it.' : 'This server cannot generate commands.'}
             </p>
           )}
         </div>
         <div className={styles.foot} aria-hidden="true">
           <span><kbd className={styles.key}>↑↓</kbd> move</span>
           {mode === 'history'
-            ? <span><kbd className={styles.key}>↩</kbd> insert (does not run)</span>
-            : <span><kbd className={styles.key}>↩</kbd> {assist.state === 'done' ? 'insert for review' : 'generate'}</span>}
-          {mode === 'history' && onPassThrough ? <span><kbd className={styles.key}>⌃R</kbd> shell’s own search</span> : null}
+            ? <span><kbd className={styles.key}><ReturnKeyIcon /></kbd> insert (does not run)</span>
+            : <span><kbd className={styles.key}><ReturnKeyIcon /></kbd> {assist.state === 'done' ? 'insert for review' : 'generate'}</span>}
+          {mode === 'history' && onPassThrough ? <span><kbd className={styles.key}>Ctrl+R</kbd> shell’s own search</span> : null}
           <span><kbd className={styles.key}>esc</kbd> close</span>
         </div>
         <p className="visually-hidden" role="status" aria-live="polite">

@@ -17,7 +17,7 @@
  *   ghost    the best history match, dim, after the cursor (→ / ⇥ take it);
  *   ↑ ↓      history, most recent first (starting with what is typed);
  *   paths    completions from the composer's file index as a path is typed;
- *   ⌃R       the history palette (⌃R again there: the shell's own ⌃R);
+ *   Ctrl+R       the history palette (Ctrl+R again there: the shell's own Ctrl+R);
  *   Esc / ⇥  hand the line to the shell's own editor (vi mode, fzf-tab …);
  *   ⌃C ⌃D ⌃L as a shell would: clear/interrupt, EOF, clear screen.
  *
@@ -67,10 +67,10 @@ export interface CommandInputProps {
   send: (text: string) => void;
   /** The line went to the shell's own editor: the terminal gets the keyboard until the next prompt. */
   onHandOff: () => void;
-  /** ⌃R, with what was typed. */
+  /** Ctrl+R, with what was typed. */
   onHistorySearch: (draft: string) => void;
   onError: (text: string) => void;
-  /** The panel's own keys (⌘D, ⌘F, ⌥⌘arrows, ⇧⌘↩ …) reach it from the editor too; true = taken. */
+  /** The panel's own keys (⌘D, ⌘F, ⌥⌘arrows, ⇧⌘Return …) reach it from the editor too; true = taken. */
   onPanelKey?: (event: KeyboardEvent) => boolean;
 }
 
@@ -333,10 +333,10 @@ export const CommandInput = forwardRef<CommandInputHandle, CommandInputProps>(fu
   if (failed) return null;
   const hint = assist.state === 'loading' ? 'Asking the local model…'
     : assist.state === 'error' ? assist.error
-      : riskyWarn ? 'This command changes or deletes things. Press ↩ again to run it.'
+      : riskyWarn ? 'This command changes or deletes things. Press Return again to run it.'
         : assist.state === 'done' && assist.result
-          ? [assist.result.explanation, `Review, then ↩ to run · from ${assist.result.provider}`].filter(Boolean).join(' · ')
-          : assistMode ? 'Describe what you want, then ↩ — the command comes back here to review. Nothing runs on its own.'
+          ? [assist.result.explanation, `Review, then Return to run · from ${assist.result.provider}`].filter(Boolean).join(' · ')
+          : assistMode ? 'Describe what you want, then Return — the command comes back here to review. Nothing runs on its own.'
             : null;
 
   return (
@@ -354,7 +354,7 @@ export const CommandInput = forwardRef<CommandInputHandle, CommandInputProps>(fu
         </div>
       ) : null}
       <div className={styles.inputRow}>
-        <span className={styles.inputPrompt} aria-hidden="true">{assistMode ? '#' : '❯'}</span>
+        <span className={styles.inputPrompt} aria-hidden="true">{assistMode ? '#' : '$'}</span>
         <div ref={hostRef} className={styles.inputEditor} />
       </div>
     </div>
@@ -363,5 +363,5 @@ export const CommandInput = forwardRef<CommandInputHandle, CommandInputProps>(fu
 
 function placeholderFor(platform: KeyPlatform): string {
   const assist = platform === 'mac' ? '⌘I' : 'Ctrl+Shift+Alt+I';
-  return `Type a command · # or ${assist} to describe it in words · ⌃R history · Esc hands off to the shell`;
+  return `Type a command · # or ${assist} to describe it in words · Ctrl+R history · Esc hands off to the shell`;
 }
