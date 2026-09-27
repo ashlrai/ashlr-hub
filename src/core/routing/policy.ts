@@ -41,10 +41,29 @@ import {
   type SeatBudgetPolicy,
 } from './types.js';
 
-/** The engines a seat can belong to (mirrors `VerseEngine`, kept local so this file has no verse import). */
-export type BudgetEngine = 'claude' | 'codex' | 'grok' | 'local';
+/**
+ * The engines a seat can belong to (mirrors `VerseEngine`, kept local so this
+ * file has no verse import).
+ *
+ * 3.15: `devin` is its OWN engine. It used to fall through `engineOfSeatId`
+ * to `claude`, so a Devin producer seat in a grant also authorized the
+ * claude-cli producer lane (dispatch-router `grantHasProducerFor`). Devin is a
+ * hosted session agent: it has no capacity windows, no dispatch lane and is
+ * never a judge; its spend is metered in ACUs by devin/budget.ts.
+ */
+export type BudgetEngine = 'claude' | 'codex' | 'grok' | 'local' | 'devin';
 
-export const BUDGET_ENGINES: readonly BudgetEngine[] = ['claude', 'codex', 'grok', 'local'];
+export const BUDGET_ENGINES: readonly BudgetEngine[] = ['claude', 'codex', 'grok', 'local', 'devin'];
+
+/**
+ * Engines that can have a CAPACITY seat (usage windows, the seat router, the
+ * Budget panel's rows): every engine but Devin. The capacity snapshot refuses
+ * a `devin` row (budget-store.ts), so no seat reading ever carries it.
+ */
+export type CapacityEngine = Exclude<BudgetEngine, 'devin'>;
+
+/** The seat id the Devin lane is granted under (`spend.seats.devin`). */
+export const DEVIN_SEAT_ID = 'devin';
 
 /** Same spelling rule the seat catalog and preferences use for seat ids. */
 export const BUDGET_SEAT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,199}$/;
@@ -61,7 +80,7 @@ export const DEFAULT_BUDGET_MODE: BudgetMode = 'balanced';
 export interface BudgetSeatInfo {
   seatId: string;
   label: string;
-  engine: BudgetEngine;
+  engine: CapacityEngine;
   /** True for local seats: $0, no provider window. */
   free: boolean;
 }
@@ -89,6 +108,10 @@ type EngineDefault = Omit<SeatBudgetPolicy, 'seatId'>;
  * Mode × engine defaults. Frozen so a caller can never mutate the table the
  * whole process reads.
  *
+ * Devin's column only answers "may the fleet launch Devin sessions in this
+ * mode at all": it has no windows, so `reservePercent` means nothing to it —
+ * the operator's reserve for Devin is kept in ACUs (DevinBudgetV1.reserveAcu).
+ *
  * Codex is `enabled: false` in every mode on purpose: on 2026-09-24 both Codex
  * accounts were at 100% with resets days away, and Mason turned Codex OFF for
  * autonomy "until usage returns". That is a standing choice, not a function of
@@ -101,18 +124,24 @@ export const MODE_DEFAULTS: Readonly<Record<BudgetMode, Readonly<Record<BudgetEn
       codex: Object.freeze({ enabled: false, reservePercent: 0 }),
       grok: Object.freeze({ enabled: true, reservePercent: 0 }),
       local: Object.freeze({ enabled: true, reservePercent: 0 }),
+      devin: Object.freeze({ enabled: true, reservePercent: 0 }),
     }),
     balanced: Object.freeze({
       claude: Object.freeze({ enabled: true, reservePercent: 40, maxSessionWindowPercent: 70 }),
       codex: Object.freeze({ enabled: false, reservePercent: 40, maxSessionWindowPercent: 70 }),
       grok: Object.freeze({ enabled: true, reservePercent: 0 }),
       local: Object.freeze({ enabled: true, reservePercent: 0 }),
+      devin: Object.freeze({ enabled: true, reservePercent: 0 }),
     }),
     reserve: Object.freeze({
       claude: Object.freeze({ enabled: true, reservePercent: 85, maxSessionWindowPercent: 50 }),
       codex: Object.freeze({ enabled: false, reservePercent: 85, maxSessionWindowPercent: 50 }),
       grok: Object.freeze({ enabled: true, reservePercent: 85 }),
       local: Object.freeze({ enabled: true, reservePercent: 0 }),
+      // Reserve mode is "free local models plus a small paid slice": a Devin
+      // session is paid and all-or-nothing (one session = its whole ACU cap),
+      // so the fleet launches none in this mode.
+      devin: Object.freeze({ enabled: false, reservePercent: 100 }),
     }),
   });
 
@@ -141,6 +170,9 @@ export function engineOfSeatId(seatId: string): BudgetEngine {
   if (id === 'local' || id.startsWith('local:')) return 'local';
   if (id.startsWith('codex')) return 'codex';
   if (id.startsWith('grok')) return 'grok';
+  // 3.15: Devin is its own engine — never the `claude` fallthrough below, or
+  // a Devin producer seat would open the claude-cli producer lane.
+  if (id.startsWith('devin')) return 'devin';
   return 'claude';
 }
 

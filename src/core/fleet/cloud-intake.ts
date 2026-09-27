@@ -75,8 +75,10 @@
  * producer identity the host vouches for, and the caller passes the lane's
  * task store through `deps`. Every rule above applies unchanged; only the
  * words and the identity differ. A Devin PR is signed `devin:<devin_mode>`,
- * family `devin` (reviewer-independence.ts), and the standing pass never
- * merges that family on its own (producerMergeWithheld: shadow-only).
+ * family `devin` (reviewer-independence.ts). G6 needs TWO judges of
+ * different families for it (merge-gates.ts evaluateG6), and the standing
+ * pass merges it only when the live stage names the `devin` engine and that
+ * two-judge rule holds (producerMergeWithheld); otherwise shadow.
  */
 import { existsSync } from 'node:fs';
 

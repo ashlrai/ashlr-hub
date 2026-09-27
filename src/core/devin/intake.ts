@@ -7,9 +7,11 @@
  * caps. Nothing here is a second copy of those rules.
  *
  * Identity the host vouches for: `devin:<devin_mode>` (tier frontier), family
- * `devin` (fleet/reviewer-independence.ts). G6 then needs a frontier judge of
- * another family, and the standing pass never merges `devin` work on its own
- * (producerMergeWithheld → a would-merge record; the App PR waits for Mason).
+ * `devin` (fleet/reviewer-independence.ts). G6 then needs TWO frontier judges
+ * from two different families (never Devin, never local), and the standing
+ * pass merges `devin` work only when the live stage also names the `devin`
+ * engine (producerMergeWithheld); otherwise it records a would-merge and the
+ * App PR waits for Mason.
  *
  * Kept deliberately lean (types + store + the intake): the daemon tick
  * imports this module, so everything it imports is Tier-1 authority surface.

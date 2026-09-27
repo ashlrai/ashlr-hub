@@ -35,6 +35,7 @@ import { userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { scrubPrivateText } from '../util/scrub.js';
+import { GRANT_ENGINES, type GrantEngine } from '../fleet/fleet-types.js';
 import { canonicalJson } from './canonical-json.js';
 import {
   STANDING_GRANT_PATTERNS,
@@ -68,6 +69,12 @@ export interface CustodyStatus {
   githubApp: boolean | null;
   /** The claude-a setup token is stored. */
   claudeToken: boolean | null;
+  /**
+   * 3.15: the grant engines this helper signs, as it reported them; null when
+   * it does not report them (helpers before 1.1.0 — they sign only the four
+   * fleet lanes and refuse `devin`). Optional so older fakes stay valid.
+   */
+  grantEngines?: readonly GrantEngine[] | null;
   checkedAt: string;
   /** Specific sentences for whatever is missing. */
   reasons: string[];
@@ -305,12 +312,38 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
     && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 }
 
-function exactKeys(value: Record<string, unknown>, keys: readonly string[], command: string): void {
-  const got = Object.keys(value).sort();
+function exactKeys(value: Record<string, unknown>, keys: readonly string[], command: string, optional: readonly string[] = []): void {
+  const got = Object.keys(value).filter((key) => !optional.includes(key)).sort();
   const want = [...keys].sort();
   if (got.length !== want.length || got.some((key, i) => key !== want[i])) {
     throw new CustodyError('bad-output', `ashlr-custody ${command} returned keys [${got.join(', ')}]; expected [${want.join(', ')}]`);
   }
+}
+
+/**
+ * 3.15: the grant engines the helper reports it signs (`status.grantEngines`),
+ * or null when it does not say — every helper before 1.1.0. Only known engine
+ * names are kept; a malformed value reads as "not reported" (the caller then
+ * drafts only what every helper accepts).
+ */
+function reportedGrantEngines(value: unknown): GrantEngine[] | null {
+  if (!Array.isArray(value) || value.length > GRANT_ENGINES.length * 2) return null;
+  const out: GrantEngine[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string') return null;
+    if ((GRANT_ENGINES as readonly string[]).includes(entry) && !out.includes(entry as GrantEngine)) out.push(entry as GrantEngine);
+  }
+  return out;
+}
+
+/**
+ * May a grant naming `devin` be sent to this helper for signing? Only when the
+ * helper itself reported it (status.grantEngines). A helper that predates
+ * Devin refuses such a grant outright at `sign-grant`; drafting Devin for it
+ * would only produce a draft Mason cannot sign.
+ */
+export function custodySignsDevin(status: Pick<CustodyStatus, 'grantEngines'> | null | undefined): boolean {
+  return Array.isArray(status?.grantEngines) && status!.grantEngines!.includes('devin');
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +419,9 @@ export async function custodyStatus(): Promise<CustodyStatus> {
   let value: CustodyStatus;
   try {
     const out = await runHelper(['status'], TIMEOUT_MS.quick);
-    exactKeys(out, ['v', 'version', 'secureEnclave', 'keyInitialized', 'keyId', 'githubApp', 'claudeToken'], 'status');
+    // `grantEngines` is optional: helpers since 1.1.0 report it (3.15), older
+    // ones do not — both must keep working (the reinstall is Mason's to do).
+    exactKeys(out, ['v', 'version', 'secureEnclave', 'keyInitialized', 'keyId', 'githubApp', 'claudeToken'], 'status', ['grantEngines']);
     const version = typeof out['version'] === 'string' && /^[0-9A-Za-z.+-]{1,32}$/.test(out['version']) ? out['version'] : null;
     const flag = (key: string): boolean | null => (typeof out[key] === 'boolean' ? (out[key] as boolean) : null);
     const keyId = typeof out['keyId'] === 'string' && STANDING_GRANT_PATTERNS.keyId.test(out['keyId']) ? out['keyId'] : null;
@@ -399,7 +434,8 @@ export async function custodyStatus(): Promise<CustodyStatus> {
     if (githubApp === false) reasons.push('The ashlr-fleet GitHub App key is not stored — run `ashlr authority github-app`.');
     const claudeToken = flag('claudeToken');
     if (claudeToken === false) reasons.push('No Claude token stored — run `claude setup-token`, then `ashlr-custody store-claude-token`.');
-    value = { installed: true, version, keyInitialized, keyId, githubApp, claudeToken, checkedAt, reasons };
+    const grantEngines = reportedGrantEngines(out['grantEngines']);
+    value = { installed: true, version, keyInitialized, keyId, githubApp, claudeToken, grantEngines, checkedAt, reasons };
   } catch (error) {
     const custody = error instanceof CustodyError ? error : new CustodyError('helper-failed', 'ashlr-custody status failed');
     const installed = custody.code === 'not-installed' || custody.code === 'not-root-owned' ? false : true;
@@ -410,6 +446,7 @@ export async function custodyStatus(): Promise<CustodyStatus> {
       keyId: null,
       githubApp: null,
       claudeToken: null,
+      grantEngines: null,
       checkedAt,
       reasons: [custody.message],
     };

@@ -24,14 +24,14 @@
  */
 import { loadConfigReadOnlyStrict } from '../config.js';
 import { killSwitchOn } from '../sandbox/policy.js';
-import { effectiveSeatPolicy, engineOfSeatId, type BudgetEngine } from '../routing/policy.js';
+import { DEVIN_SEAT_ID, effectiveSeatPolicy, engineOfSeatId, type BudgetEngine } from '../routing/policy.js';
 import type { BudgetPolicy, SeatBudgetPolicy } from '../routing/types.js';
 import {
-  FLEET_ENGINES,
+  GRANT_ENGINES,
   MERGE_RISK_RANK,
   REPO_STAGE_RANK,
   type FleetActor,
-  type FleetEngine,
+  type GrantEngine,
   type MergeRisk,
   type RepoStage,
 } from '../fleet/fleet-types.js';
@@ -129,8 +129,12 @@ export function configConstraints(cfg: AshlrConfig | null): ConfigConstraints {
   };
 }
 
-/** Which fleet engine family a seat belongs to. */
-export function fleetEngineOfSeat(seatId: string): FleetEngine {
+/**
+ * Which grant engine a seat belongs to. 3.15: a Devin seat is `devin` — its
+ * own grant engine — never `claude-cli` (the old fallthrough), so a grant
+ * that enables Devin authorizes nothing on the Claude lane and vice versa.
+ */
+export function fleetEngineOfSeat(seatId: string): GrantEngine {
   const engine: BudgetEngine = engineOfSeatId(seatId);
   switch (engine) {
     case 'local':
@@ -139,9 +143,29 @@ export function fleetEngineOfSeat(seatId: string): FleetEngine {
       return 'grok-cli';
     case 'codex':
       return 'codex';
+    case 'devin':
+      return 'devin';
     default:
       return 'claude-cli';
   }
+}
+
+/**
+ * 3.15: may autonomy LAUNCH Devin sessions under this policy? Only when the
+ * current stage (∩ grant) names the `devin` engine AND the grant's `devin`
+ * seat is enabled with the producer role. Devin is producer-only: a judge or
+ * leader role on it is refused at verification (standing-grant.ts), and this
+ * never reads those roles. Pure.
+ */
+export function standingAuthorizesDevin(policy: Pick<EffectivePolicy, 'engines' | 'spend'> | null): { ok: boolean; reason: string } {
+  if (!policy) return { ok: false, reason: 'No standing grant is in force.' };
+  if (!policy.engines.includes('devin')) {
+    return { ok: false, reason: "The grant's current rollout stage does not include Devin." };
+  }
+  const seat = standingSeatFor(policy.spend, DEVIN_SEAT_ID);
+  if (!seat || !seat.enabled) return { ok: false, reason: 'The grant does not let autonomy use Devin.' };
+  if (!seat.roles.includes('producer')) return { ok: false, reason: 'The grant gives Devin no producer role.' };
+  return { ok: true, reason: 'The grant lets the fleet launch Devin sessions (producer only).' };
 }
 
 /**
@@ -208,7 +232,9 @@ export function computeEffectivePolicy(input: EffectivePolicyInput): EffectivePo
     }];
   });
 
-  const engines = FLEET_ENGINES.filter((engine) =>
+  // GRANT_ENGINES = the fleet lanes + `devin`. `foundry.localOnly` keeps only
+  // `local` (a hosted agent like Devin is the opposite of local-only).
+  const engines = GRANT_ENGINES.filter((engine) =>
     stage.engines.includes(engine) && grant.engines.includes(engine) && (!cfg.localOnly || engine === 'local'));
 
   const seats: Record<string, EffectiveSeatPolicy> = {};

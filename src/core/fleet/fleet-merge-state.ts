@@ -153,6 +153,11 @@ export interface FleetMergeStateV1 {
   linesDeleted: number | null;
   producer: LandingProducer | null;
   judgeId: JudgeId | null;
+  /**
+   * 3.15: every judge whose ship G6 counted — two (different families) for a
+   * two-judge producer such as Devin. Absent on records written before 3.15.
+   */
+  judgeIds?: JudgeId[] | null;
   /** Combined digest of the G0–G6 rows the PR was opened under. */
   openGatesDigest: string | null;
   pr: FleetPrMemo | null;

@@ -48,6 +48,7 @@ import {
   isBudgetMode,
   sanitizeBudgetPolicy,
   type BudgetEngine,
+  type CapacityEngine,
   type ParsedBudgetUpdate,
 } from './policy.js';
 import { boundSeatReasons } from './seat-reasons.js';
@@ -318,6 +319,10 @@ export function sanitizeSeatCapacity(raw: unknown): SeatCapacity | null {
   const engine = raw['engine'];
   if (typeof seatId !== 'string' || !BUDGET_SEAT_ID_RE.test(seatId)) return null;
   if (typeof engine !== 'string' || !(BUDGET_ENGINES as readonly string[]).includes(engine)) return null;
+  // 3.15: Devin is an engine but never a capacity seat — it has no usage
+  // windows and is never routed (router.ts devinVerdict). A snapshot row
+  // claiming it is not ours: drop it.
+  if (engine === 'devin') return null;
   if (typeof raw['free'] !== 'boolean' || typeof raw['signedOut'] !== 'boolean') return null;
   // `free` is only believable for a local seat: a paid seat claiming it would
   // bypass every reserve.
@@ -339,7 +344,7 @@ export function sanitizeSeatCapacity(raw: unknown): SeatCapacity | null {
   }
   return {
     seatId,
-    engine: engine as BudgetEngine,
+    engine: engine as CapacityEngine,
     label: cleanText(raw['label'], 80) ?? seatId,
     free: raw['free'],
     windows,

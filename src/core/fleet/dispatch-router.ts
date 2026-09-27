@@ -38,7 +38,7 @@
 import type { AshlrConfig, EngineId, EngineTier, WorkItem, WorkSource } from '../types.js';
 import type { EffectivePolicy } from '../authority/types.js';
 import { describeExclusions, routeSeat, ROUTER_CONTEXT_FIT_FRACTION, type RouterWeights } from '../routing/router.js';
-import { engineOfSeatId } from '../routing/policy.js';
+import { engineOfSeatId, type BudgetEngine } from '../routing/policy.js';
 import { reasonSentences } from '../routing/seat-reasons.js';
 import type { SeatCapacity } from '../routing/headroom.js';
 import type {
@@ -120,8 +120,16 @@ export function fleetLaneOf(engine: string | null | undefined, cfg?: AshlrConfig
   return null;
 }
 
-/** The lane a Verse / routing seat belongs to. */
-export function laneOfSeat(seat: Pick<SeatCapacity, 'engine'>): FleetEngine {
+/**
+ * The lane a Verse / routing seat belongs to; null for a Devin seat.
+ *
+ * 3.15: Devin has no dispatch lane (it is a hosted session launched by
+ * devin/fleet-launcher.ts, see fleet-types.ts GrantEngine). It used to reach
+ * this switch as `claude` (engineOfSeatId's fallthrough), so a Devin producer
+ * seat in the grant opened the claude-cli producer lane. Every engine is now
+ * named explicitly: `local` is only ever the local engine, never a default.
+ */
+export function laneOfSeat(seat: { engine: BudgetEngine }): FleetEngine | null {
   switch (seat.engine) {
     case 'claude':
       return 'claude-cli';
@@ -129,8 +137,13 @@ export function laneOfSeat(seat: Pick<SeatCapacity, 'engine'>): FleetEngine {
       return 'codex';
     case 'grok':
       return 'grok-cli';
-    default:
+    case 'local':
       return 'local';
+    case 'devin':
+      return null;
+    default:
+      // An engine this build does not know is no lane at all (fail closed).
+      return null;
   }
 }
 
@@ -532,6 +545,13 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
     const seat = ctx.capacity.find((s) => s.seatId === seatId);
     if (!seat) continue;
     const lane = laneOfSeat(seat);
+    if (lane === null) {
+      // routeSeat never admits a Devin seat (router.ts devinVerdict); this
+      // keeps a laneless seat from ever being dispatched even if it did.
+      const detail: SeatReason = { kind: 'lane', text: 'This seat has no dispatch lane; the fleet never dispatches work to it.' };
+      extra.push({ seatId, reasons: reasonSentences([detail]), nextEligibleAt: null, details: [detail] });
+      continue;
+    }
     const grantSeat = grantSeatFor(ctx.policy.spend, seatId);
     // Each reason as data, plus the sentence the logs and CLI have always
     // printed (identical for all but a demotion, whose sentence keeps its

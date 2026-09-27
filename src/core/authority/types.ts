@@ -42,10 +42,10 @@
 import type { BudgetMode } from '../routing/types.js';
 import type {
   FleetActor,
-  FleetEngine,
   FleetPrChange,
   FleetPrRecord,
   GateResult,
+  GrantEngine,
   LandingRecord,
   MergeRisk,
   PostMergeResult,
@@ -201,7 +201,7 @@ export interface RolloutStage {
   /** e.g. `shadow`, `2a`, `2b`, `2c`, `full` (STANDING_GRANT_PATTERNS.stageId). */
   id: string;
   repos: RolloutStageRepo[];
-  engines: FleetEngine[];
+  engines: GrantEngine[];
   maxRisk: MergeRisk;
   maxFiles: number;
   maxLines: number;
@@ -235,7 +235,7 @@ export interface StandingGrantV1 {
   repos: StandingGrantRepo[];
   merge: StandingGrantMerge;
   spend: StandingGrantSpend;
-  engines: FleetEngine[];
+  engines: GrantEngine[];
   leader: StandingGrantLeader;
   /** Lets the goal / simple conductors run live (liveConductorActivationAuthorized). */
   conductorGoals: boolean;
@@ -464,7 +464,7 @@ export interface EffectivePolicy {
   merge: EffectiveMergePolicy;
   spend: EffectiveSpendPolicy;
   /** Stage engines ∩ grant engines. */
-  engines: readonly FleetEngine[];
+  engines: readonly GrantEngine[];
   leader: EffectiveLeaderPolicy;
   conductorGoals: boolean;
   /** When this value was computed (currentStandingPolicy caches ≤ 10 s). */
@@ -753,7 +753,7 @@ export interface AuthorityGrantView {
   expiresAt: string | null;
   /** [] when there is no grant. */
   repos: StandingGrantRepo[];
-  engines: FleetEngine[];
+  engines: GrantEngine[];
   maxMode: BudgetMode | null;
   stageIds: string[];
 }

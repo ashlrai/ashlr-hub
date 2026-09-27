@@ -202,6 +202,12 @@ public enum StandingGrantValidator {
         if roles.contains(role) { throw GrantRefusal(path: "\(p).roles[\(j)]", reason: "\(role) is listed twice") }
         roles.append(role)
       }
+      // 3.15: a Devin seat may only produce — a third-party agent with
+      // undisclosed models never judges and never runs the Leader
+      // (standing-grant.ts parseSeat refuses the same).
+      if member.key.lowercased().hasPrefix(GrantContract.producerOnlySeatPrefix) && roles != ["producer"] {
+        throw GrantRefusal(path: "\(p).roles", reason: "a Devin seat may only be a producer")
+      }
       seats.append(GrantSeat(id: member.key, enabled: enabled, reserveFloorPercent: floor, maxSessionWindowPercent: ceiling, roles: roles))
     }
     seats.sort { CanonicalJSON.lessByUTF16($0.id, $1.id) }

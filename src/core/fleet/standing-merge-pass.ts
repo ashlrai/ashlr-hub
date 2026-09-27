@@ -209,7 +209,17 @@ export interface StandingPassDeps {
   /** Throws when the hold store is unreadable (G0 then treats the repo as held). */
   listHolds: () => RepoHold[];
   mergeTimes24h: (repo: string, nowMs: number) => Promise<string[] | null>;
-  judgeSeatLanes: (input: { producerFamily: ReviewModelFamily; policy: EffectivePolicy; waitSinceMs: number | null; nowMs: number }) => JudgeSeatLanes;
+  /**
+   * `excludeFamilies` (3.15, two-judge producers): families that already
+   * shipped — the next judge must be from another one.
+   */
+  judgeSeatLanes: (input: {
+    producerFamily: ReviewModelFamily;
+    policy: EffectivePolicy;
+    waitSinceMs: number | null;
+    nowMs: number;
+    excludeFamilies?: readonly ReviewModelFamily[];
+  }) => JudgeSeatLanes;
   runJudge: (proposal: Proposal, cfg: AshlrConfig, lanes: readonly FleetEngine[]) => Promise<{ called: boolean; reason: string }>;
   /** null = the decisions ledger is degraded. */
   readDecisions: (proposalId: string, sinceMs: number | null) => DecisionEntry[] | null;
@@ -284,12 +294,18 @@ function hardenedGitRead(repoPath: string, args: readonly string[]): string | nu
   }
 }
 
-function laneForBudgetEngine(engine: BudgetEngine): FleetEngine {
+/**
+ * The judge lane a seat engine answers on; null for Devin, which never judges
+ * (3.15 — it used to fall through to `claude-cli`, which would have let a
+ * Devin seat stand in for a Claude judge seat).
+ */
+function laneForBudgetEngine(engine: BudgetEngine): FleetEngine | null {
   switch (engine) {
     case 'grok': return 'grok-cli';
     case 'codex': return 'codex';
     case 'local': return 'local';
-    default: return 'claude-cli';
+    case 'claude': return 'claude-cli';
+    default: return null;
   }
 }
 
@@ -305,8 +321,9 @@ export function defaultJudgeSeatLanes(input: {
   policy: EffectivePolicy;
   waitSinceMs: number | null;
   nowMs: number;
+  excludeFamilies?: readonly ReviewModelFamily[];
 }): JudgeSeatLanes {
-  const allowed = allowedJudgeLanes(input.producerFamily, input.waitSinceMs, input.nowMs)
+  const allowed = allowedJudgeLanes(input.producerFamily, input.waitSinceMs, input.nowMs, input.excludeFamilies ?? [])
     .filter((lane) => input.policy.engines.includes(lane));
   return routeJudgeLanes(
     allowed,
@@ -352,7 +369,10 @@ function routeJudgeLanes(
     if (allowed.length === 0) return { lanes: [], nextEligibleAt: null };
     const snapshot = readCapacitySnapshot();
     if (!snapshot) return { lanes: [], nextEligibleAt: null };
-    const seats = snapshot.seats.filter((seat) => allowed.includes(laneForBudgetEngine(seat.engine)) && seatAdmitted(seat.seatId));
+    const seats = snapshot.seats.filter((seat) => {
+      const lane = laneForBudgetEngine(seat.engine);
+      return lane !== null && allowed.includes(lane) && seatAdmitted(seat.seatId);
+    });
     if (seats.length === 0) return { lanes: [], nextEligibleAt: null };
     let budget;
     try {
@@ -361,7 +381,7 @@ function routeJudgeLanes(
       return { lanes: [], nextEligibleAt: null };
     }
     const decision = routeSeat({ task: 'review', difficulty: 'medium', autonomous: true }, seats, budget, { nowMs });
-    const admitted = new Set(decision.candidates.map((id) => laneForBudgetEngine(engineOfSeatId(id))));
+    const admitted = new Set(decision.candidates.map((id) => laneForBudgetEngine(engineOfSeatId(id))).filter((lane): lane is FleetEngine => lane !== null));
     const nextEligibleAt = decision.exclusions
       .map((exclusion) => exclusion.nextEligibleAt)
       .filter((at): at is string => typeof at === 'string')
@@ -851,7 +871,7 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
     const waitSinceMs = state.judgeWaitSince ? Date.parse(state.judgeWaitSince) : null;
     // A judge seat matters only when no valid verdict exists yet.
     const seat = g6Preview.verdict !== 'pass' && g6Preview.needsJudge
-      ? deps.judgeSeatLanes({ producerFamily, policy, waitSinceMs, nowMs })
+      ? deps.judgeSeatLanes({ producerFamily, policy, waitSinceMs, nowMs, excludeFamilies: g6Preview.judgedFamilies ?? [] })
       : null;
     let holds: RepoHold[] | null;
     try {
@@ -1013,7 +1033,7 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
     const judgeCalledMs = state.judgeCalledAt ? Date.parse(state.judgeCalledAt) : Number.NaN;
     const judgeRecentlyCalled = Number.isFinite(judgeCalledMs) && deps.host.nowMs() - judgeCalledMs < JUDGE_RETRY_MS;
     if (g6.verdict !== 'pass' && g6.needsJudge && !judgeRecentlyCalled) {
-      const lanes = (seat ?? deps.judgeSeatLanes({ producerFamily, policy: livePolicy, waitSinceMs, nowMs })).lanes;
+      const lanes = (seat ?? deps.judgeSeatLanes({ producerFamily, policy: livePolicy, waitSinceMs, nowMs, excludeFamilies: g6.judgedFamilies ?? [] })).lanes;
       if (lanes.length > 0 && ctx.budget.judge > 0) {
         ctx.budget.judge--;
         state.judgeCalledAt = iso(deps.host.nowMs());
@@ -1044,6 +1064,9 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
       return;
     }
     state.judgeId = g6.judgeId;
+    // 3.15: every judge whose ship this pass counted (two for Devin work) —
+    // the merge-time two-judge re-check reads exactly these.
+    state.judgeIds = g6.judgeIds ?? (g6.judgeId ? [g6.judgeId] : []);
     state.judgeWaitSince = null;
 
     // ── G7 — publish the verified tree and open the App PR ───────────────
@@ -1261,7 +1284,9 @@ function prBody(state: FleetMergeStateV1, proposal: Proposal, ownerLaneReason: s
     `**ashlr fleet** · proposal \`${proposal.id}\` · producer \`${proposal.engineModel ?? 'unknown'}\` · ` +
       `${state.files ?? '?'} file(s), +${state.linesAdded ?? '?'}/−${state.linesDeleted ?? '?'}`,
     `Gates: ${gateLine}`,
-    ...(state.judgeId ? [`Judge: \`${state.judgeId}\``] : []),
+    ...((state.judgeIds?.length ?? 0) > 1
+      ? [`Judges: ${state.judgeIds!.map((id) => `\`${id}\``).join(', ')}`]
+      : state.judgeId ? [`Judge: \`${state.judgeId}\``] : []),
     ownerLaneReason
       ? `**Owner lane** — ${ownerLaneReason}. The fleet never merges this PR; it is here for review.`
       : 'The ashlr-fleet App merges this PR (squash, pinned to its head SHA) once every required check is green. Close it to stop it.',
@@ -1652,10 +1677,16 @@ async function progressFleetPr(key: string, ctx: PassContext): Promise<void> {
       persist(ctx, state);
       return;
     }
-    // 3.15: some producers are shadow-only at every stage (producerMergeWithheld):
+    // 3.15: some producers are withheld (shadow) unless their own rule holds (producerMergeWithheld):
     // every gate has passed, the would-merge is recorded, the PR waits for Mason.
+    // Devin (3.15) merges only when the live stage names the `devin` engine
+    // AND the judges recorded at G6 satisfy the two-judge rule; else shadow.
     const withheld = mergeWithheldBecause(livePolicy, repoPolicy)
-      ?? producerMergeWithheld(producerModelFamily(proposal.engineModel));
+      ?? producerMergeWithheld(producerModelFamily(proposal.engineModel), {
+        devinGranted: livePolicy.engines.includes('devin'),
+        producerModel: proposal.engineModel ?? null,
+        judgeIds: state.judgeIds ?? (state.judgeId ? [state.judgeId] : []),
+      });
     if (withheld !== null) {
       recordWouldMerge(ctx, state, withheld);
       schedule(ctx, state, OWNER_LANE_RECHECK_MS);

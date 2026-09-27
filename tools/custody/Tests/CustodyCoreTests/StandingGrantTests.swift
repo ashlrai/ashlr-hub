@@ -144,6 +144,43 @@ final class StandingGrantTests: XCTestCase {
                   path: "spend.seats.grok-a.roles")
   }
 
+  // MARK: 3.15 — Devin: a grant engine, a producer-only seat
+
+  private func devinSeat(_ roles: [String]) -> JSONValue {
+    .object([
+      JSONMember(key: "enabled", value: .bool(true)),
+      JSONMember(key: "reserveFloorPercent", value: .integer(0)),
+      JSONMember(key: "roles", value: .array(roles.map { .string($0) })),
+    ])
+  }
+
+  private var enginesWithDevin: JSONValue {
+    .array(["local", "grok-cli", "claude-cli", "codex", "devin"].map { .string($0) })
+  }
+
+  func testAcceptsDevinAsAProducerOnlyEngine() throws {
+    let p = fx.payload
+      .replacing([.key("engines")], with: enginesWithDevin)
+      .replacing([.key("rollout"), .key("stages"), .index(1), .key("engines")], with: .array([.string("local"), .string("devin")]))
+      .replacing([.key("spend"), .key("seats"), .key("devin")], with: devinSeat(["producer"]))
+    let g = try StandingGrantValidator.validate(p, context: fixtureContext)
+    XCTAssertTrue(g.canonical.contains(#""devin":{"enabled":true,"reserveFloorPercent":0,"roles":["producer"]}"#))
+    XCTAssertTrue(g.canonical.contains(#""engines":["local","grok-cli","claude-cli","codex","devin"]"#))
+  }
+
+  func testRefusesADevinSeatThatJudgesOrLeads() {
+    let base = fx.payload.replacing([.key("engines")], with: enginesWithDevin)
+    for roles in [["producer", "judge"], ["judge"], ["leader"], ["producer", "leader"], []] {
+      assertRefused(base.replacing([.key("spend"), .key("seats"), .key("devin")], with: devinSeat(roles)), path: "spend.seats.devin.roles")
+      assertRefused(base.replacing([.key("spend"), .key("seats"), .key("Devin-b")], with: devinSeat(roles)), path: "spend.seats.Devin-b.roles")
+    }
+  }
+
+  func testDevinIsOnlyAnEngineNameNotAWildcard() {
+    assertRefused(fx.payload.replacing([.key("engines")], with: .array([.string("local"), .string("devin-cloud")])), path: "engines[1]")
+    assertRefused(fx.payload.replacing([.key("engines")], with: .array([.string("devin"), .string("devin")])), path: "engines[1]")
+  }
+
   func testSeatCountIsBounded() {
     var members: [JSONMember] = []
     for i in 0..<65 {
