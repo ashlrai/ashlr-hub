@@ -267,12 +267,14 @@ async function readCapacity(cfg: AshlrConfig, force = false): Promise<CapacityRe
 // ---------------------------------------------------------------------------
 
 export function buildBudgetView(policy: BudgetPolicy, reading: CapacityReading, nowMs: number): BudgetView {
-  const seatInfo: BudgetSeatInfo[] = reading.seats.map((seat) => ({
+  // The Budget panel lists capacity seats only: Devin budgets in ACUs
+  // (devin/budget.ts), and `discoverSeats` never lists a Devin seat anyway.
+  const seatInfo: BudgetSeatInfo[] = reading.seats.flatMap((seat) => (seat.engine === 'devin' ? [] : [{
     seatId: seat.seatId,
     label: seat.label,
     engine: seat.engine,
     free: seat.free,
-  }));
+  }]));
   const effective: Record<string, SeatBudgetPolicy> = {};
   const headroom = reading.seats.map((seat) => {
     const seatPolicy = effectiveSeatPolicy(policy, seat.seatId, seat.engine);

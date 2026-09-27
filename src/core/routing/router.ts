@@ -14,21 +14,28 @@
  *      only by what would make a turn fail: signed out, spent, unreachable.
  *   2. Fit. A request whose context estimate exceeds 80% of a seat's window
  *      is not sent there; the router never truncates silently.
- *   3. Rank. An explicit engine order per (mode, task, difficulty) — see
- *      `enginePreference` — then more headroom first, then seat id. An
- *      explicit order is less clever than a weighted score, and that is the
- *      point: every decision has a one-sentence "why" a person can check.
- *      The λ routing weights (`RouterWeights`, from the harness / Leader
- *      `router.tune`) tilt that order — see `seatScore` — and at their
- *      defaults they reproduce it exactly.
+ *   3. Rank. An explicit TIER order per (mode, task, difficulty) — see
+ *      `tierPreference` and routing/tiers.ts (elite · fast · free) — then,
+ *      inside a tier, more headroom first, then marginal cost (a subscription
+ *      turn before a credits turn), then latency, then seat id. There is NO
+ *      provider order: Claude, Codex and Devin are the same tier and nothing
+ *      but their live numbers separates them (3.15, "equal partners"). The λ
+ *      routing weights (`RouterWeights`, from the harness / Leader
+ *      `router.tune`) tilt that order — see `seatScore`.
  *
- * Local models are never excluded for quality; they are ranked after the paid
- * seats where quality matters (high difficulty, leader work), so work still
- * flows when the paid seats are held back for Mason.
+ * Local models are never excluded for quality; the free tier is ranked after
+ * the paid tiers where quality matters (high difficulty, leader work), so
+ * work still flows when the paid seats are held back for Mason.
+ *
+ * DEVIN. Mason's own chats may be routed to a Devin seat like any other
+ * elite seat. Autonomous (fleet) work never is: the fleet launches Devin
+ * only through devin/fleet-launcher.ts under its grant and ACU reserve, and
+ * the capacity snapshot refuses a Devin row — see `devinFleetVerdict`.
  */
 import { assessSeat, HEADROOM_READING_MAX_AGE_MS, type SeatCapacity } from './headroom.js';
-import { effectiveSeatPolicy, type BudgetEngine } from './policy.js';
+import { effectiveSeatPolicy } from './policy.js';
 import { listSeatIds, reasonSentences } from './seat-reasons.js';
+import { COST_BASIS_RANK, costBasisOf, engineTier, RESOURCE_TIERS, type ResourceTier } from './tiers.js';
 import type {
   BudgetMode,
   BudgetPolicy,
@@ -61,14 +68,16 @@ export interface RouteOptions {
  * learn/harness-types.ts `HarnessRoutingWeights` (restated structurally so
  * this browser-safe module does not import the harness). Each λ is ≥ 0.
  *
- *   lambdaCost     — how hard to lean on engine COST against the mode's
- *                    quality/cost order. 1 = the mode's own balance; above 1
- *                    leans toward cheaper engines, below 1 toward pricier
- *                    (higher-quality) ones.
- *   lambdaPressure — how much a seat's remaining HEADROOM counts. 1 = a
- *                    tie-breaker inside one engine (today); higher lets a
- *                    much emptier seat of a less-preferred engine win; 0
- *                    ignores headroom.
+ *   lambdaCost     — how hard to lean on COST against the mode's
+ *                    quality/cost tier order. 1 = the mode's own balance;
+ *                    above 1 leans toward cheaper tiers, below 1 toward
+ *                    pricier (higher-quality) ones. Inside a tier it also
+ *                    scales the marginal-cost term (subscription before
+ *                    credits).
+ *   lambdaPressure — how much a seat's remaining HEADROOM counts. 1 = the
+ *                    deciding key inside one tier; higher lets a much
+ *                    emptier seat of a less-preferred tier win; 0 ignores
+ *                    headroom.
  *   lambdaLatency  — how much observed LATENCY (`RouteOptions.latencyMs`)
  *                    counts. At the default 0.25 it only separates seats
  *                    whose headroom is equal.
@@ -81,8 +90,8 @@ export interface RouterWeights {
 
 /**
  * Defaults = the compiled baseline (`BASELINE_HARNESS_CONFIG.routing`; a test
- * pins the two together). At these values `rank` orders seats exactly as the
- * pre-λ router did.
+ * pins the two together). At these values `rank` orders seats by tier, then
+ * headroom, then marginal cost, then latency.
  */
 export const DEFAULT_ROUTER_WEIGHTS: Readonly<RouterWeights> = Object.freeze({
   lambdaCost: 1,
@@ -90,45 +99,70 @@ export const DEFAULT_ROUTER_WEIGHTS: Readonly<RouterWeights> = Object.freeze({
   lambdaLatency: 0.25,
 });
 
-const ENGINE_NAMES: Readonly<Record<BudgetEngine, string>> = {
-  claude: 'Claude',
-  codex: 'Codex',
-  grok: 'Grok',
-  local: 'local models',
-  devin: 'Devin',
-};
+/** How a tier is named inside a `why` sentence. */
+const TIER_WORDS: Readonly<Record<ResourceTier, string>> = { elite: 'elite', fast: 'fast', free: 'free' };
 
-const CHEAP_FIRST: readonly BudgetEngine[] = ['local', 'grok', 'codex', 'claude'];
-const QUALITY_FIRST: readonly BudgetEngine[] = ['claude', 'codex', 'grok', 'local'];
+/** Best tier first — interactive work and hard autonomous work. */
+const QUALITY_FIRST: readonly ResourceTier[] = RESOURCE_TIERS;
+/** Cheapest rung first — the cost ladder (free → fast → elite). */
+const CHEAP_FIRST: readonly ResourceTier[] = [...RESOURCE_TIERS].reverse();
 
-/**
- * Relative cost step per engine (0 = free). CHEAP_FIRST is exactly the cost
- * ladder, so it doubles as the table — one fact, not two.
- */
-function costStep(engine: BudgetEngine): number {
-  return CHEAP_FIRST.indexOf(engine);
+/** A seat's tier: what its capacity says (per model), else its engine's. */
+export function capacityTier(capacity: Pick<SeatCapacity, 'engine' | 'tier'>): ResourceTier {
+  return capacity.tier ?? engineTier(capacity.engine);
 }
 
 /**
- * Engine order for one request. Low-difficulty and bulk work always goes to
- * the cheapest capable seat first; quality-first ordering is reserved for
- * work that needs it. Interactive requests are ordered for "what else can I
- * use right now": other subscription seats, then Grok, then local (the order
- * the account-health research recommends for a blocked seat).
+ * A seat's rung on the COST ladder: `free` when a turn costs nothing (every
+ * local model — the elite Qwen included — and Devin's plan-included SWE),
+ * otherwise its tier. Tier and cost only differ for those free-but-strong
+ * seats, which is exactly why they are two axes.
  */
-export function enginePreference(mode: BudgetMode, req: RoutingRequest): readonly BudgetEngine[] {
-  if (!req.autonomous) return QUALITY_FIRST;
+export function costRung(capacity: Pick<SeatCapacity, 'engine' | 'tier' | 'costBasis' | 'free'>): ResourceTier {
+  if (capacity.free || (capacity.costBasis ?? costBasisOf(capacity.engine)) === 'free') return 'free';
+  return capacityTier(capacity);
+}
+
+/** Relative cost step (0 = free). CHEAP_FIRST is exactly the cost ladder, so it doubles as the table. */
+function costStep(capacity: SeatCapacity): number {
+  return CHEAP_FIRST.indexOf(costRung(capacity));
+}
+
+/**
+ * The mode's order for one request: over TIERS (quality) or over the COST
+ * ladder, never over providers — which seat of a rung wins is decided by
+ * headroom, marginal cost and latency (`seatScore`).
+ */
+export interface RankOrder {
+  /** `tier` ranks a seat by what it can do; `cost` by what a turn costs. */
+  by: 'tier' | 'cost';
+  order: readonly ResourceTier[];
+}
+
+/**
+ * Low-difficulty and bulk work always goes to the cheapest capable seat
+ * first (the cost ladder — so the free elite Qwen and Devin's free SWE lead);
+ * quality-first ordering is reserved for work that needs it. Interactive
+ * requests are ordered for "what else can I use right now": the elite
+ * partners, then fast, then free.
+ */
+export function tierPreference(mode: BudgetMode, req: RoutingRequest): RankOrder {
+  const quality: RankOrder = { by: 'tier', order: QUALITY_FIRST };
+  const cheap: RankOrder = { by: 'cost', order: CHEAP_FIRST };
+  if (!req.autonomous) return quality;
   const difficulty: RoutingDifficulty = req.task === 'leader' && req.difficulty !== 'high' ? 'high' : req.difficulty;
-  if (req.task === 'bulk' || difficulty === 'low') return CHEAP_FIRST;
+  if (req.task === 'bulk' || difficulty === 'low') return cheap;
   if (mode === 'reserve') {
     // Free first for everything but genuinely hard work, and even that only
     // reaches the small paid slice the reserve-mode ceilings leave.
-    return difficulty === 'high' ? ['grok', 'codex', 'claude', 'local'] : CHEAP_FIRST;
+    return difficulty === 'high' ? { by: 'tier', order: ['fast', 'elite', 'free'] } : cheap;
   }
   if (difficulty === 'medium') {
-    return mode === 'all-in' ? ['grok', 'codex', 'claude', 'local'] : ['grok', 'local', 'codex', 'claude'];
+    return mode === 'all-in'
+      ? { by: 'tier', order: ['fast', 'elite', 'free'] }
+      : { by: 'cost', order: ['fast', 'free', 'elite'] };
   }
-  return QUALITY_FIRST;
+  return quality;
 }
 
 interface Verdict {
@@ -204,8 +238,8 @@ function compareIds(a: string, b: string): number {
 
 /**
  * Scale of the headroom term at λ = 1: its whole range (100% left vs unknown)
- * is worth half an engine step, so at the default weight it can only order
- * seats of the SAME engine — exactly the old "then more headroom" key.
+ * is worth half a tier step, so at the default weight it can only order
+ * seats of the SAME tier — where it is the deciding key.
  */
 const PRESSURE_SCALE = 0.5;
 
@@ -215,9 +249,12 @@ const PRESSURE_SCALE = 0.5;
  * PRESSURE_SCALE / 101 ≈ 0.00495 at λ = 1. At the default λ = 0.25 the whole
  * latency range (0.25 × 0.019 = 0.00475) stays below that, which keeps
  * latency a pure tie-breaker; at λ = 10 it is worth ~38 points of headroom
- * and still never a whole engine step (0.5 + 0.19 < 1).
+ * and still never a whole tier step (0.5 + 0.1 + 0.19 < 1).
  */
 const LATENCY_SCALE = 0.019;
+
+/** The headroom a windowless seat is ranked with: the middle of the range. */
+const WINDOWLESS_HEADROOM = 50;
 
 /** Scores closer than this are a tie (they fall through to caller order, then id). */
 const SCORE_EPSILON = 1e-9;
@@ -274,24 +311,43 @@ function latencyTerms(verdicts: readonly Verdict[], latencyMs: RouteOptions['lat
 /**
  * The λ objective for one seat — LOWER is better:
  *
- *   position                              quality: the mode's engine order (fixed anchor)
- *   + (λcost − 1)   · costStep            cost:    one engine step per cost step per unit of λ
- *   + λpressure     · PRESSURE_SCALE · p  headroom: p = (100 − left%) / 101, unknown = 1
- *   + λlatency      · LATENCY_SCALE  · l  latency: l from `latencyTerms`
+ *   position                                  quality: the mode's TIER order (fixed anchor)
+ *   + (λcost − 1)   · costStep                cost:     one tier step per cost step per unit of λ
+ *   + λpressure     · PRESSURE_SCALE · p      headroom: p = (100 − left%) / 101, unknown = 1
+ *   + λcost         · MARGINAL_COST_SCALE · m marginal: m = 1 for credits / per-token, else 0
+ *   + λlatency      · LATENCY_SCALE  · l      latency:  l from `latencyTerms`
  *
- * Why `λcost − 1`: the engine order ALREADY prices cost in for the mode
- * (CHEAP_FIRST is literally the cost ladder), so λcost = 1 must add nothing —
- * the harness baseline documents "λ = 1 for cost and pressure keeps the A9
- * router's own ordering". At λcost = 2 a quality-first order flattens (every
- * engine ties and headroom decides); at 0 a cheap-first order does.
+ * Why `λcost − 1`: the tier order ALREADY prices cost in for the mode
+ * (CHEAP_FIRST is literally the cost ladder), so λcost = 1 must add nothing
+ * across tiers. At λcost = 2 a quality-first order flattens (every tier ties
+ * and headroom decides); at 0 a cheap-first order does. No term names a
+ * provider.
  */
 function seatScore(v: Verdict, position: number, w: RouterWeights, latency: number): number {
-  const left = v.headroom?.autonomyHeadroomPercent ?? -1;
+  // A windowless seat (Devin: ACUs / plan usage, no window) has no reading
+  // BY DESIGN — neutral, not the worst. Only interactive work reaches here
+  // with one (autonomous Devin is refused before ranking).
+  const left = v.headroom?.autonomyHeadroomPercent ?? (v.capacity.windowless ? WINDOWLESS_HEADROOM : -1);
   const pressure = (100 - left) / 101;
   return position
-    + (w.lambdaCost - 1) * costStep(v.capacity.engine)
+    + (w.lambdaCost - 1) * costStep(v.capacity)
     + w.lambdaPressure * PRESSURE_SCALE * pressure
+    + w.lambdaCost * MARGINAL_COST_SCALE * marginalCost(v.capacity)
     + w.lambdaLatency * LATENCY_SCALE * latency;
+}
+
+/**
+ * Marginal cost of one more turn inside a tier: 0 for a subscription (its
+ * window refills) or a free seat, 1 for a seat that spends a balance
+ * (credits, ACUs, per-token). Worth a tenth of the headroom range at λ = 1 —
+ * about 20 points of headroom — so a metered seat wins only when it has
+ * clearly more room than a subscription seat of the same tier.
+ */
+const MARGINAL_COST_SCALE = 0.1;
+
+function marginalCost(capacity: SeatCapacity): number {
+  const basis = capacity.costBasis ?? costBasisOf(capacity.engine);
+  return COST_BASIS_RANK[basis];
 }
 
 /**
@@ -299,17 +355,18 @@ function seatScore(v: Verdict, position: number, w: RouterWeights, latency: numb
  * discovery lists the operator's preferred local tags first —
  * `preferredLocalTags` in seats.ts — so two free local seats with equal
  * headroom resolve to the one he chose), then id. At the default weights this
- * is the old lexicographic order — engine, then more headroom — because the
- * headroom and latency terms together stay under one engine step.
+ * is a lexicographic order — tier, then headroom / marginal cost / latency —
+ * because those terms together stay under one tier step.
  */
-function rank(verdicts: Verdict[], order: readonly BudgetEngine[], w: RouterWeights, latencyMs: RouteOptions['latencyMs']): Verdict[] {
-  const position = (engine: BudgetEngine): number => {
-    const index = order.indexOf(engine);
-    return index === -1 ? order.length : index;
+function rank(verdicts: Verdict[], rankOrder: RankOrder, w: RouterWeights, latencyMs: RouteOptions['latencyMs']): Verdict[] {
+  const position = (capacity: SeatCapacity): number => {
+    const rung = rankOrder.by === 'cost' ? costRung(capacity) : capacityTier(capacity);
+    const index = rankOrder.order.indexOf(rung);
+    return index === -1 ? rankOrder.order.length : index;
   };
   const latency = latencyTerms(verdicts, latencyMs);
   const score = new Map(verdicts.map((v) => [
-    v, seatScore(v, position(v.capacity.engine), w, latency.get(v.capacity.seatId) ?? 0),
+    v, seatScore(v, position(v.capacity), w, latency.get(v.capacity.seatId) ?? 0),
   ]));
   return [...verdicts].sort((a, b) => {
     const diff = score.get(a)! - score.get(b)!;
@@ -347,17 +404,17 @@ export function describeExclusions(exclusions: readonly SeatExclusion[], max = 3
 }
 
 /**
- * 3.15: a Devin seat is never a routing candidate — not for fleet work, not
- * for review, not for chat. Devin is a hosted session agent with no windows
- * to assess; the fleet launches it only through devin/fleet-launcher.ts under
- * its own ACU budget, and it never judges. The capacity snapshot refuses a
- * `devin` seat (budget-store.ts sanitizeSeatCapacity); this is the second
- * lock, so a hand-built capacity list cannot route work to it either.
+ * 3.15: a Devin seat is never a candidate for AUTONOMOUS work. The fleet
+ * launches Devin only through devin/fleet-launcher.ts under its grant and its
+ * own ACU reserve; the capacity snapshot refuses a `devin` seat
+ * (budget-store.ts sanitizeSeatCapacity), and this is the second lock, so a
+ * hand-built capacity list cannot route fleet work to it either. Mason's own
+ * (interactive) work routes to Devin like any other elite seat.
  */
-function devinVerdict(capacity: SeatCapacity): Verdict {
+function devinFleetVerdict(capacity: SeatCapacity): Verdict {
   const details: SeatReason[] = [{
     kind: 'lane',
-    text: 'Devin runs as its own session lane under the Devin budget, never through the seat router.',
+    text: 'The fleet runs Devin as its own session lane under the Devin budget, not through the seat router.',
   }];
   return { capacity, index: 0, headroom: null, eligible: false, details, nextEligibleAt: null };
 }
@@ -374,9 +431,8 @@ export function routeSeat(
 ): SeatDecision {
   const readingMaxAgeMs = opts.readingMaxAgeMs ?? HEADROOM_READING_MAX_AGE_MS;
   const verdicts = capacity.map((seat, index) => ({
-    // The type already excludes Devin; the runtime check is for a hand-built list.
-    ...((seat.engine as BudgetEngine) === 'devin'
-      ? devinVerdict(seat)
+    ...(req.autonomous && seat.engine === 'devin'
+      ? devinFleetVerdict(seat)
       : applyFit(
         req.autonomous
           ? autonomousVerdict(seat, policy, opts.nowMs, readingMaxAgeMs)
@@ -386,7 +442,7 @@ export function routeSeat(
     index,
   }));
 
-  const order = enginePreference(policy.mode, req);
+  const order = tierPreference(policy.mode, req);
   const weights = resolveWeights(opts.weights);
   const eligible = rank(verdicts.filter((v) => v.eligible), order, weights, opts.latencyMs);
   const exclusions: SeatExclusion[] = verdicts
@@ -409,7 +465,7 @@ export function routeSeat(
   let why: string;
   let summary: string;
   if (chosen) {
-    const engine = ENGINE_NAMES[chosen.capacity.engine];
+    const tier = TIER_WORDS[order.by === 'cost' ? costRung(chosen.capacity) : capacityTier(chosen.capacity)];
     const room = chosen.headroom?.autonomyHeadroomPercent;
     const windowWord = chosen.headroom?.bindingWindow === 'session' ? '5-hour' : 'weekly';
     const hasRoom = req.autonomous && !chosen.capacity.free && typeof room === 'number';
@@ -424,13 +480,13 @@ export function routeSeat(
       : `; routing weights cost ×${formatWeight(weights.lambdaCost)}, headroom ×${formatWeight(weights.lambdaPressure)}, `
         + `latency ×${formatWeight(weights.lambdaLatency)}`;
     why = `Routed ${who}${describeWork(req)} to ${chosen.capacity.label} (${chosen.capacity.seatId})${roomText}: `
-      + `${policy.mode} mode prefers ${engine} first for this work${tuned}${held}.`;
+      + `${policy.mode} mode prefers the ${tier} tier first for this work${tuned}${held}.`;
     const lead = hasRoom
       ? ` — ${room}% of its ${windowWord} window left`
       : chosen.capacity.free ? ' — free, no usage window' : '';
     summary = lead
-      ? `${chosen.capacity.label}${lead}; ${policy.mode} mode prefers ${engine} for this work.`
-      : `${chosen.capacity.label} — ${policy.mode} mode prefers ${engine} for this work.`;
+      ? `${chosen.capacity.label}${lead}; ${policy.mode} mode prefers the ${tier} tier for this work.`
+      : `${chosen.capacity.label} — ${policy.mode} mode prefers the ${tier} tier for this work.`;
   } else if (capacity.length === 0) {
     why = `No seats are known, so ${who}${describeWork(req)} has nowhere to run.`;
     summary = 'No seats are known, so this work has nowhere to run.';

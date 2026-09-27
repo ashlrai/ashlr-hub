@@ -67,7 +67,8 @@ export interface ResourceReadinessRow {
   /** Account id (codex-personal, claude, …), `local`, or `cloud`. */
   id: string;
   label: string;
-  engine: 'claude' | 'codex' | 'grok' | 'local';
+  /** 3.15: `devin` for the Devin card (built from core/devin's own verdicts). */
+  engine: 'claude' | 'codex' | 'grok' | 'local' | 'devin';
   kind: 'subscription' | 'local' | 'cloud';
   reading: ResourceReading;
   chat: ReadinessVerdict;

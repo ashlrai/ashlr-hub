@@ -34,7 +34,8 @@
  * `nowMs`), no I/O.
  */
 import type { VerseSeat, VerseSeatCapacity } from '../verse/types.js';
-import type { BudgetEngine, CapacityEngine } from './policy.js';
+import type { BudgetEngine } from './policy.js';
+import { costBasisOf, isWindowlessEngine, seatTier, type CostBasis, type ResourceTier } from './tiers.js';
 import { reasonSentences } from './seat-reasons.js';
 import type { SeatBudgetPolicy, SeatHeadroom, SeatReason } from './types.js';
 
@@ -66,8 +67,13 @@ export interface CapacityWindow {
 /** What the budget layer needs to know about one seat. JSON-safe; persisted in the capacity snapshot. */
 export interface SeatCapacity {
   seatId: string;
-  /** Never `devin` (policy.ts CapacityEngine): Devin has no capacity seat. */
-  engine: CapacityEngine;
+  /**
+   * The seat's engine. A `devin` seat only ever reaches the router from an
+   * INTERACTIVE caller (the Auto seat, handoff alternatives): the capacity
+   * snapshot the fleet reads refuses a Devin row (budget-store.ts), and the
+   * router refuses one for autonomous work.
+   */
+  engine: BudgetEngine;
   label: string;
   /** True for local runtime seats: $0 and no provider window. */
   free: boolean;
@@ -82,6 +88,21 @@ export interface SeatCapacity {
   observedAt: string | null;
   /** Today's metered spend in USD; null when unknown or not metered. */
   spentTodayUsd: number | null;
+  /**
+   * 3.15 ADDITIVE (routing/tiers.ts). The seat's tier FOR THE MODEL it would
+   * run — the same Devin CLI seat is elite on its default model and fast on
+   * SWE. Absent = the engine's own tier (older snapshots, hand-built lists).
+   */
+  tier?: ResourceTier;
+  /** 3.15 ADDITIVE. What one more turn costs; absent = the engine's default basis. */
+  costBasis?: CostBasis;
+  /**
+   * 3.15 ADDITIVE. The provider exposes NO usage window by design (Devin
+   * meters in ACUs / plan usage, not windows). Interactive ranking then scores
+   * its headroom as neutral instead of the worst — "no window" is not "no
+   * room". Autonomy never reads this: unknown usage is still not headroom.
+   */
+  windowless?: boolean;
 }
 
 /** `SeatHeadroom` plus the facts the router needs but the wire shape does not carry. */
@@ -115,7 +136,10 @@ export interface AssessOptions {
  * replaces the seat's own (possibly cached) capacity — the caller re-reads
  * telemetry per request exactly as verse-api's `liveSeats` does.
  */
-export function capacityFromSeat(seat: VerseSeat, liveCapacity?: VerseSeatCapacity | null): SeatCapacity {
+export function capacityFromSeat(seat: VerseSeat, liveCapacity?: VerseSeatCapacity | null, modelId?: string | null): SeatCapacity {
+  // Tier and cost basis follow the model the turn would run (default: the
+  // seat's first runnable one) — see routing/tiers.ts.
+  const model = modelId ?? defaultModelId(seat);
   const free = seat.engine === 'local';
   const capacity = liveCapacity === undefined ? seat.capacity ?? null : liveCapacity;
   // A failed account check may retain a verified window for display until its
@@ -135,10 +159,10 @@ export function capacityFromSeat(seat: VerseSeat, liveCapacity?: VerseSeatCapaci
   const signedOut = !free && capacity?.usability === 'signed-out';
   return {
     seatId: seat.id,
-    // 3.15: `discoverSeats` never lists a Devin seat (verse-api merges the
-    // Devin CHAT seats for the chat UI only — verse/devin-seats.ts), so a
-    // seat reaching routing is always a capacity engine.
-    engine: seat.engine as CapacityEngine,
+    // 3.15: a Devin CHAT seat (verse/devin-seats.ts) projects like any
+    // other for Mason's own routing; the fleet's capacity snapshot refuses
+    // it (budget-store.ts) and the router refuses it for autonomous work.
+    engine: seat.engine,
     label: seat.label,
     free,
     windows,
@@ -150,7 +174,23 @@ export function capacityFromSeat(seat: VerseSeat, liveCapacity?: VerseSeatCapaci
     contextWindow: typeof seat.contextWindow === 'number' && seat.contextWindow > 0 ? seat.contextWindow : null,
     observedAt: current === null ? null : current.observedAt ?? seat.health.observedAt ?? null,
     spentTodayUsd: null,
+    ...tierFields(seat, model),
   };
+}
+
+/** The first runnable model's id (the one a new chat would use), else the first listed. */
+function defaultModelId(seat: VerseSeat): string | null {
+  const runnable = seat.models.find((m) => !(m as { unavailableReason?: unknown }).unavailableReason) ?? seat.models[0];
+  return runnable?.id ?? null;
+}
+
+function tierFields(seat: VerseSeat, model: string | null): Pick<SeatCapacity, 'tier' | 'costBasis' | 'windowless'> {
+  const out: Pick<SeatCapacity, 'tier' | 'costBasis' | 'windowless'> = {
+    tier: seatTier(seat.engine, model),
+    costBasis: seat.costBasis ?? costBasisOf(seat.engine, { modelId: model }),
+  };
+  if (isWindowlessEngine(seat.engine)) out.windowless = true;
+  return out;
 }
 
 // ---------------------------------------------------------------------------

@@ -145,7 +145,7 @@ describe('AccountsGroup', () => {
   it('an empty roster says what to do next', () => {
     const container = renderGroupInto([]);
     expect(within(container).getByText(ACCOUNTS_EMPTY_TEXT)).toBeInTheDocument();
-    expect(ACCOUNTS_EMPTY_TEXT).toMatch(/Sign in to Claude Code, Codex or Grok/);
+    expect(ACCOUNTS_EMPTY_TEXT).toMatch(/Sign in to Claude Code, Codex, Devin or Grok/);
   });
 });
 

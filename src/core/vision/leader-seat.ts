@@ -55,6 +55,7 @@ import { buildGrokCliHeadlessCommand, extractGrokStreamText, restrictClaudeComma
 import { assertPermitted, endpointPermitted, enginePermitted } from '../policy/local-only.js';
 import type { BudgetPolicy, RoutingRequest, SeatDecision } from '../routing/types.js';
 import type { SeatCapacity } from '../routing/headroom.js';
+import { engineTier } from '../routing/tiers.js';
 import type { EffectivePolicy } from '../authority/types.js';
 import type { VerseSeat } from '../verse/types.js';
 import type { LeaderRunMode, LeaderSeatAttempt } from './leader-types.js';
@@ -276,7 +277,12 @@ async function routeLeader(
 
   const snapshot = deps.capacitySnapshot();
   const byId = new Map((snapshot?.seats ?? []).map((s) => [s.seatId, s]));
-  const capacity = eligible.map((c) => (c.seat.engine === 'local' ? deps.capacityFromSeat(c.seat) : byId.get(c.seat.id) ?? unknownCapacity(c.seat)));
+  // 3.15: the Leader keeps its own documented chain (grok → local → Claude
+  // only for the deep run), so it ranks by ENGINE tier. The elite local Qwen
+  // (routing/tiers.ts) must not outrank the deep run's Claude or Grok here.
+  const capacity = eligible
+    .map((c) => (c.seat.engine === 'local' ? deps.capacityFromSeat(c.seat) : byId.get(c.seat.id) ?? unknownCapacity(c.seat)))
+    .map((c) => ({ ...c, tier: engineTier(c.engine) }));
   const request: RoutingRequest = {
     task: 'leader',
     difficulty: 'high',

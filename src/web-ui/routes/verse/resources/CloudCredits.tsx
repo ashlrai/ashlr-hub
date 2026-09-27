@@ -19,6 +19,8 @@ import { formatUsd, type CloudCreditsView } from './resources-model.js';
 import type { ReadinessFix, ResourceReadinessRow } from '../../../../core/routing/readiness-types.js';
 import { cloudCreditsQuery, RESOURCES_POLL_MS } from './resources-queries.js';
 import { ReadinessLines } from './ReadinessLines.js';
+import { ResourceFacts } from './ResourceFacts.js';
+import type { ResourceFactsView } from './resources-model.js';
 import styles from './ResourcesDrawer.module.css';
 
 /** Below this share of the total left, the meter turns amber. */
@@ -105,9 +107,11 @@ export interface CloudCreditsProps {
   readiness?: ResourceReadinessRow | null;
   onReadinessAction?: (fix: ReadinessFix, row: ResourceReadinessRow) => void;
   readinessBusy?: boolean;
+  /** 3.15: tier · cost basis · models — the facts row every card carries. */
+  facts?: ResourceFactsView | null;
 }
 
-export function CloudCredits({ readiness = null, onReadinessAction, readinessBusy = false }: CloudCreditsProps = {}) {
+export function CloudCredits({ readiness = null, onReadinessAction, readinessBusy = false, facts = null }: CloudCreditsProps = {}) {
   const read = useQuery(cloudCreditsQuery);
   const refetch = useRefetch(cloudCreditsQuery);
   usePollWhileVisible(refetch, RESOURCES_POLL_MS.cloud);
@@ -123,6 +127,7 @@ export function CloudCredits({ readiness = null, onReadinessAction, readinessBus
           <span className={styles.plan}>claude.ai</span>
         </h4>
       </div>
+      {facts !== null ? <ResourceFacts facts={facts} /> : null}
       {loading ? (
         <p className={styles.subtle} aria-busy="true">Reading cloud credits…</p>
       ) : !available ? (

@@ -33,6 +33,7 @@
  */
 import type { SeatConnection, SeatHealthReport, SeatReadiness } from './health-types.js';
 import type { VerseSeat } from './types.js';
+import { isWindowlessEngine } from '../routing/tiers.js';
 
 /** The only connections that refuse a turn. Everything else is a warning. */
 export const SEAT_BLOCKING_CONNECTIONS: ReadonlySet<SeatConnection> = new Set<SeatConnection>(['signed-out', 'exhausted']);
@@ -168,13 +169,20 @@ function hasRunnableModel(seat: VerseSeat): boolean {
   return seat.models.some((model) => !model.unavailableReason);
 }
 
-/** 0 = subscription seat with measured headroom, 1 = tight/unread subscription seat, 2 = local. */
+/**
+ * 0 = subscription seat with measured headroom (or a ready windowless seat —
+ * Devin has no window to measure, 3.15), 1 = tight/unread subscription seat,
+ * 2 = local.
+ */
 function tier(seat: VerseSeat): number {
   if (seat.engine === 'local') return 2;
+  if (isWindowlessEngine(seat.engine)) return seat.health.state === 'ready' ? 0 : 1;
   return seat.capacity?.usability === 'ready' ? 0 : 1;
 }
 
 function bindingPercent(seat: VerseSeat): number {
+  // A windowless seat ranks mid-range, like the router's neutral headroom.
+  if (isWindowlessEngine(seat.engine) && !seat.capacity) return 50;
   const used = seat.capacity?.binding?.usedPercent;
   // Unread sorts after every reading: no signal is not "0% used".
   return typeof used === 'number' && Number.isFinite(used) ? used : 101;

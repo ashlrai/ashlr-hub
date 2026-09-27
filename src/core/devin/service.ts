@@ -96,8 +96,6 @@ const REF_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 /** A session found by tag after an ambiguous create must have been created this recently. */
 const RECOVERY_LIST_SIZE = 50;
 
-export const DEVIN_CHAT_LINE = 'Chat: n/a — Devin works in sessions, not chat turns';
-
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
