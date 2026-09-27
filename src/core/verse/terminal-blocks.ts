@@ -16,6 +16,11 @@
  * and all of a tab's output together within VERSE_TERMINAL_BLOCKS_TOTAL_BYTES
  * — the oldest blocks lose their output first (`evicted`), keeping their
  * command, time and exit code.
+ *
+ * LOCAL URLS (3.15). A command that prints a loopback URL (`vite` →
+ * `http://localhost:5173/`) gets it recorded on its block (at most 3), and the
+ * block is re-emitted when one is found, so the page can offer "Open in
+ * Browser pane" while a dev server is still running.
  */
 import { createShellMarkParser, sanitizeCommandLine, type LocatedShellMark } from './shell-integration.js';
 import {
@@ -56,6 +61,34 @@ interface BlockRecord {
   chunks: Buffer[];
   keptBytes: number;
   startedMs: number;
+  /** The last bytes of output as text, so a URL split across two frames is still found. */
+  urlCarry: string;
+}
+
+export const BLOCK_LOCAL_URLS_MAX = 3;
+const URL_CARRY_CHARS = 256;
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[()][A-Za-z0-9]|.)/g;
+const LOCAL_URL_RE = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d{1,5})?(?:\/[^\s"'<>`)\]\x1b]*)?/gi;
+
+/**
+ * Loopback URLs in `text`, in order, de-duplicated: `0.0.0.0` (a server
+ * listening on every interface) is opened as `localhost`, and trailing
+ * sentence punctuation is not part of the URL.
+ */
+export function findLocalUrls(text: string, opts: { terminated?: boolean } = {}): string[] {
+  const out: string[] = [];
+  const plain = text.replace(ANSI_RE, '');
+  for (const m of plain.matchAll(LOCAL_URL_RE)) {
+    // Streaming: a URL that runs to the end of what has arrived may not be whole yet.
+    if (opts.terminated && (m.index ?? 0) + m[0].length >= plain.length) continue;
+    let url = m[0].replace(/[.,;:!?]+$/, '');
+    url = url.replace(/^(https?:\/\/)0\.0\.0\.0/i, '$1localhost');
+    const port = /:(\d{1,5})(?:\/|$)/.exec(url.replace(/^https?:\/\//i, ''));
+    if (port && Number(port[1]) > 65535) continue;
+    if (!out.includes(url)) out.push(url);
+  }
+  return out;
 }
 
 /** Input echo kept to recover a command line when the shell sent no E. */
@@ -152,7 +185,9 @@ export function createBlockTracker(opts: BlockTrackerOptions): BlockTracker {
   let pendingCommand: string | null = null;
 
   const iso = (ms: number) => new Date(ms).toISOString();
-  const snapshot = (rec: BlockRecord): VerseTerminalBlock => ({ ...rec.block });
+  const snapshot = (rec: BlockRecord): VerseTerminalBlock => (
+    rec.block.localUrls ? { ...rec.block, localUrls: [...rec.block.localUrls] } : { ...rec.block }
+  );
   const emit = (rec: BlockRecord) => {
     try { opts.onBlock?.(snapshot(rec)); } catch { /* a listener never breaks the tracker */ }
   };
@@ -175,6 +210,7 @@ export function createBlockTracker(opts: BlockTrackerOptions): BlockTracker {
       rec.keptBytes = 0;
     }
     if (rec.block.fullscreen) return;
+    noteLocalUrls(rec, buf);
     rec.chunks.push(buf);
     rec.keptBytes += buf.length;
     totalKept += buf.length;
@@ -194,6 +230,19 @@ export function createBlockTracker(opts: BlockTrackerOptions): BlockTracker {
       rec.block.truncated = true;
     }
     enforceTotal(rec);
+  }
+
+  function noteLocalUrls(rec: BlockRecord, buf: Buffer): void {
+    const known = rec.block.localUrls ?? [];
+    if (known.length >= BLOCK_LOCAL_URLS_MAX) return;
+    // latin1: a URL is ASCII, and any byte maps to one character (no decoding errors mid-sequence).
+    const text = rec.urlCarry + buf.toString('latin1');
+    rec.urlCarry = text.slice(-URL_CARRY_CHARS);
+    if (!/https?:/i.test(text)) return;
+    const fresh = findLocalUrls(text, { terminated: true }).filter((u) => !known.includes(u));
+    if (fresh.length === 0) return;
+    rec.block.localUrls = [...known, ...fresh].slice(0, BLOCK_LOCAL_URLS_MAX);
+    emit(rec);
   }
 
   /** Across blocks: the oldest lose their output first (never the one being written). */
@@ -247,6 +296,7 @@ export function createBlockTracker(opts: BlockTrackerOptions): BlockTracker {
       chunks: [],
       keptBytes: 0,
       startedMs: at,
+      urlCarry: '',
     };
     records.push(rec);
     byId.set(rec.block.id, rec);

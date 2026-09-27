@@ -35,7 +35,7 @@
  * shell on an explicit click; nothing here runs one on its own.
  */
 import { execFile } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { lstat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join } from 'node:path';
@@ -50,12 +50,27 @@ import {
   integratedShellKind,
   newShellNonce,
 } from './shell-integration.js';
-import { createBlockTracker, type BlockTracker } from './terminal-blocks.js';
+import { recordTerminalEvent, setAgentWaiting } from './terminal-activity.js';
+import {
+  agentKindForApp,
+  installAgentHooks,
+  needsYouLine,
+  newAgentToken,
+  removeAgentHooks,
+  shellJoinArgs,
+  type AgentHookInstall,
+  type AgentHookInstallOptions,
+} from './terminal-agent-hooks.js';
+import { createBlockTracker, terminalBytesToText, type BlockTracker } from './terminal-blocks.js';
 import {
   VERSE_TERMINAL_IDLE_KILL_MS,
+  VERSE_TERMINAL_LONG_COMMAND_MS,
   VERSE_TERMINAL_MAX_FRAME_HZ,
   VERSE_TERMINAL_MAX_TABS,
   VERSE_TERMINAL_SCROLLBACK_BYTES,
+  type VerseTerminalAgentKind,
+  type VerseTerminalAgentState,
+  type VerseTerminalAgentStateName,
   type VerseTerminalBlock,
   type VerseTerminalStreamFrame,
   type VerseTerminalTab,
@@ -302,6 +317,14 @@ export interface TerminalCreateOptions {
   cwd?: string | null;
   /** false = start the shell without integration (no blocks). Default true. */
   shellIntegration?: boolean;
+  /**
+   * 3.15: an `appId` launch of a status-reporting agent (Claude Code, Codex…):
+   * `hooksBaseUrl` is the server's loopback origin its per-launch hooks call
+   * back to (`http://127.0.0.1:<port>`); null = no hooks (a launch through
+   * Ollama, whose argv we do not extend) — the status is then read from the
+   * output. Ignored for any other tab.
+   */
+  agentStatus?: { hooksBaseUrl: string | null } | null;
 }
 
 /** Where the shell-integration scripts live; null in the options turns integration off for every tab. */
@@ -340,7 +363,21 @@ export interface TerminalManagerOptions {
   /** The global kill switch (default: ~/.ashlr/KILL, async). */
   killSwitch?: () => Promise<boolean>;
   killCheckIntervalMs?: number;
+  /** 3.15: writes an agent tab's per-launch hooks (default terminal-agent-hooks.ts; tests inject). */
+  installAgentHooks?: (opts: AgentHookInstallOptions) => Promise<AgentHookInstall | null>;
+  removeAgentHooks?: (dir: string) => Promise<void>;
+  /** 3.15: an agent tab whose output has been quiet this long is idle (heuristic channel). */
+  agentQuietMs?: number;
 }
+
+/** Output quiet this long after running reads as idle (heuristic channel). */
+export const TERMINAL_AGENT_QUIET_MS = 4_000;
+/** Output that arrives this soon after a keystroke is its echo, not the agent working. */
+export const TERMINAL_AGENT_ECHO_MS = 250;
+/** An agent that ran at least this long announces going idle (desktop notification). */
+export const TERMINAL_AGENT_IDLE_EVENT_MIN_MS = 15_000;
+/** Of an agent tab's output, the tail kept (as text) to look for a question. */
+const AGENT_TAIL_CHARS = 2_048;
 
 interface OutputFrame {
   seq: number;
@@ -367,6 +404,24 @@ interface TabRecord {
   onFirstOutput: (() => void) | null;
   removed: boolean;
   blocks: BlockTracker;
+  /** 3.15: the CLI agent's status plumbing; null for a plain shell or an agent without a status. */
+  agent: AgentRecord | null;
+}
+
+interface AgentRecord {
+  kind: VerseTerminalAgentKind;
+  channel: 'hooks' | 'heuristic';
+  /** The hooks' bearer token (never leaves the server except into the tab's private hook script). */
+  token: string | null;
+  hooksDir: string | null;
+  quietTimer: ReturnType<typeof setTimeout> | null;
+  lastInputAt: number;
+  runningSince: number | null;
+  /** The output's tail as plain text (heuristic needs-you). */
+  tail: string;
+  /** The block the agent's launch command runs in: when it finishes, the agent has exited. */
+  launchBlockId: string | null;
+  exited: boolean;
 }
 
 export interface TerminalManager {
@@ -392,6 +447,11 @@ export interface TerminalManager {
   blocks(id: string): VerseTerminalBlock[];
   /** One block and its kept output bytes; null for an unknown block. */
   blockOutput(id: string, blockId: string): { block: VerseTerminalBlock; bytes: Buffer; truncated: boolean } | null;
+  /**
+   * 3.15: an agent tab's hook reported its state. `token` must be the tab's own
+   * (constant-time compare); false = unknown tab, no hooks, or a wrong token.
+   */
+  reportAgentState(id: string, token: string, state: VerseTerminalAgentStateName, message: string | null): boolean;
   /**
    * Hang up every agent tab (Apps [Launch ▸]) if the kill switch is engaged.
    * Returns the ids removed (exported for tests; also runs on a timer while an agent tab is open).
@@ -525,6 +585,9 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
   const integration = opts.shellIntegration === undefined ? { dir: defaultShellIntegrationDir } : opts.shellIntegration;
   const killSwitch = opts.killSwitch ?? killSwitchEngagedAsync;
   const killCheckMs = opts.killCheckIntervalMs ?? TERMINAL_KILL_CHECK_INTERVAL_MS;
+  const installHooks = opts.installAgentHooks ?? installAgentHooks;
+  const removeHooks = opts.removeAgentHooks ?? removeAgentHooks;
+  const agentQuietMs = opts.agentQuietMs ?? TERMINAL_AGENT_QUIET_MS;
 
   const tabs = new Map<string, TabRecord>();
   let sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -641,6 +704,7 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
     if (rec.removed || chunk.length === 0) return;
     rec.pending.push(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength));
     rec.pendingBytes += chunk.byteLength;
+    if (rec.agent) onAgentOutput(rec, chunk);
     if (!rec.sawOutput) {
       rec.sawOutput = true;
       const ready = rec.onFirstOutput;
@@ -670,6 +734,132 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
     }
   }
 
+  // -------------------------------------------------------------------------
+  // 3.15: CLI agent status (terminal-agent-hooks.ts) and long commands
+  // -------------------------------------------------------------------------
+
+  function setAgentState(rec: TabRecord, state: VerseTerminalAgentStateName, source: 'hook' | 'output', message: string | null): void {
+    const agent = rec.agent;
+    if (!agent || agent.exited || rec.removed) return;
+    const prev = rec.tab.agentState ?? null;
+    const nextMessage = state === 'needs-you' ? message : null;
+    if (prev && prev.state === state && prev.message === nextMessage) return;
+    const at = now();
+    const ranFor = agent.runningSince !== null ? at - agent.runningSince : 0;
+    if (state === 'running') {
+      if (agent.runningSince === null) agent.runningSince = at;
+    } else {
+      agent.runningSince = null;
+    }
+    const next: VerseTerminalAgentState = {
+      agent: agent.kind,
+      state,
+      since: prev && prev.state === state ? prev.since : iso(at),
+      source,
+      channel: agent.channel,
+      message: nextMessage,
+    };
+    rec.tab.agentState = next;
+    emit(rec, { type: 'agent-state', agentState: next });
+    setAgentWaiting(rec.tab.id, state === 'needs-you'
+      ? { sessionId: rec.tab.sessionId, title: rec.tab.title, agent: agent.kind, since: next.since, message: nextMessage }
+      : null);
+    const base = { tabId: rec.tab.id, blockId: null, sessionId: rec.tab.sessionId, title: rec.tab.title, agent: agent.kind, exitCode: null };
+    if (state === 'needs-you' && prev?.state !== 'needs-you') {
+      recordTerminalEvent({ ...base, kind: 'agent-needs-you', durationMs: null });
+    } else if (state === 'idle' && prev?.state === 'running' && ranFor >= TERMINAL_AGENT_IDLE_EVENT_MIN_MS) {
+      recordTerminalEvent({ ...base, kind: 'agent-idle', durationMs: ranFor });
+    }
+  }
+
+  /** The agent's launch command finished (or the shell went away): the tab is a plain shell again. */
+  function agentExited(rec: TabRecord): void {
+    const agent = rec.agent;
+    if (!agent || agent.exited) return;
+    agent.exited = true;
+    if (agent.quietTimer) clearTimeout(agent.quietTimer);
+    agent.quietTimer = null;
+    setAgentWaiting(rec.tab.id, null);
+    if (rec.tab.agentState) {
+      rec.tab.agentState = null;
+      emit(rec, { type: 'agent-state', agentState: null });
+    }
+  }
+
+  /** The output went quiet: a question on screen, the CLI up and waiting, or (heuristic) done working. */
+  function onAgentQuiet(rec: TabRecord): void {
+    const agent = rec.agent;
+    if (!agent || agent.exited || rec.removed) return;
+    agent.quietTimer = null;
+    const state = rec.tab.agentState?.state ?? null;
+    // Claude Code says when it needs you (its Notification hook); the others are read from the screen.
+    if (agent.kind !== 'claude-code' || agent.channel === 'heuristic') {
+      const asks = needsYouLine(agent.tail);
+      if (asks) {
+        setAgentState(rec, 'needs-you', 'output', asks);
+        return;
+      }
+    }
+    if (state === null) setAgentState(rec, 'idle', 'output', null);
+    else if (agent.channel === 'heuristic' && state === 'running') setAgentState(rec, 'idle', 'output', null);
+  }
+
+  function onAgentOutput(rec: TabRecord, chunk: Uint8Array): void {
+    const agent = rec.agent;
+    if (!agent || agent.exited) return;
+    const text = terminalBytesToText(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+    if (text) agent.tail = `${agent.tail}\n${text}`.slice(-AGENT_TAIL_CHARS);
+    const echo = now() - agent.lastInputAt < TERMINAL_AGENT_ECHO_MS;
+    const state = rec.tab.agentState?.state ?? null;
+    // Output that is not a keystroke's echo means the agent is working — read
+    // that way only where no hook says so (a hook's "idle" is authoritative).
+    if (!echo && agent.channel === 'heuristic' && state !== null && state !== 'running') setAgentState(rec, 'running', 'output', null);
+    armAgentQuiet(rec, agent);
+  }
+
+  function armAgentQuiet(rec: TabRecord, agent: AgentRecord): void {
+    if (agent.quietTimer) clearTimeout(agent.quietTimer);
+    agent.quietTimer = setTimeout(() => onAgentQuiet(rec), agentQuietMs);
+    if (typeof agent.quietTimer.unref === 'function') agent.quietTimer.unref();
+  }
+
+  function onAgentInput(rec: TabRecord, data: Uint8Array): void {
+    const agent = rec.agent;
+    if (!agent || agent.exited) return;
+    agent.lastInputAt = now();
+    if (!data.includes(0x0d)) return;
+    // Enter: whatever question was on screen has been answered.
+    agent.tail = '';
+    // Claude Code's UserPromptSubmit / PostToolUse hooks say "running" themselves.
+    if (agent.kind === 'claude-code' && agent.channel === 'hooks') return;
+    const state = rec.tab.agentState?.state ?? null;
+    if (state !== null && state !== 'running') setAgentState(rec, 'running', 'output', null);
+    // An answer that prints nothing still settles back to idle (heuristic).
+    armAgentQuiet(rec, agent);
+  }
+
+  /** A block started or finished: the agent's own launch block, and long commands for the notifier. */
+  function onBlockSettled(rec: TabRecord, block: VerseTerminalBlock): void {
+    const agent = rec.agent;
+    if (agent && !agent.exited) {
+      if (agent.launchBlockId === null && block.state === 'running') agent.launchBlockId = block.id;
+      else if (agent.launchBlockId === block.id && block.state === 'done') agentExited(rec);
+      return;
+    }
+    if (rec.tab.agent) return;
+    if (block.state !== 'done' || block.fullscreen || block.durationMs === null || block.durationMs < VERSE_TERMINAL_LONG_COMMAND_MS) return;
+    recordTerminalEvent({
+      kind: 'command-finished',
+      tabId: rec.tab.id,
+      blockId: block.id,
+      sessionId: rec.tab.sessionId,
+      title: rec.tab.title,
+      agent: null,
+      exitCode: block.exitCode,
+      durationMs: block.durationMs,
+    });
+  }
+
   function removeRecord(rec: TabRecord): void {
     if (rec.removed) return;
     flush(rec);
@@ -677,6 +867,13 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
     tabs.delete(rec.tab.id);
     stopSweepIfIdle();
     syncKillWatch();
+    if (rec.agent) {
+      if (rec.agent.quietTimer) clearTimeout(rec.agent.quietTimer);
+      rec.agent.quietTimer = null;
+      rec.agent.exited = true;
+      setAgentWaiting(rec.tab.id, null);
+      if (rec.agent.hooksDir) void removeHooks(rec.agent.hooksDir);
+    }
     rec.blocks.close();
     if (!rec.tab.exited) {
       const at = iso(now());
@@ -762,6 +959,42 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
       }
 
       const id = `t-${randomBytes(6).toString('hex')}`;
+      let command = typeof req.startCommand === 'string' ? req.startCommand.replace(/[\r\n]+/g, ' ').trim() : '';
+      // 3.15: a status-reporting agent gets its per-launch hooks (or the output heuristic).
+      const agentKind = agent && req.agentStatus ? agentKindForApp(req.appId) : null;
+      let agentRec: AgentRecord | null = null;
+      if (agentKind && req.agentStatus) {
+        let install: AgentHookInstall | null = null;
+        let token: string | null = null;
+        if (req.agentStatus.hooksBaseUrl && command.length > 0) {
+          token = newAgentToken();
+          try {
+            install = await installHooks({ kind: agentKind, tabId: id, token, baseUrl: req.agentStatus.hooksBaseUrl });
+          } catch (err) {
+            log(`terminal agent hooks unavailable: ${(err as Error | undefined)?.message ?? 'error'}`);
+            install = null;
+          }
+          if (!install) token = null;
+        }
+        if (install) command = `${command} ${shellJoinArgs(install.args)}`;
+        agentRec = {
+          kind: agentKind,
+          channel: install ? 'hooks' : 'heuristic',
+          token,
+          hooksDir: install?.dir ?? null,
+          quietTimer: null,
+          lastInputAt: 0,
+          runningSince: null,
+          tail: '',
+          launchBlockId: null,
+          exited: false,
+        };
+        // The install awaited: the cap again.
+        if (tabs.size >= maxTabs) {
+          if (agentRec.hooksDir) void removeHooks(agentRec.hooksDir);
+          throw new TerminalError('TERMINAL_LIMIT', `${maxTabs} terminals are already open. Close one to open another.`);
+        }
+      }
       const createdAt = now();
       const defaultTitle = basename(req.root) || req.root;
       const rec: TabRecord = {
@@ -780,6 +1013,7 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
           cwd: null,
           shellIntegration: plan.nonce ? 'injected' : 'off',
           agent,
+          ...(agentRec ? { agentState: null } : {}),
         },
         pty: null,
         frames: [],
@@ -799,12 +1033,16 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
         removed: false,
         // Replaced below: the tracker's callbacks need `rec`.
         blocks: null as unknown as BlockTracker,
+        agent: agentRec,
       };
       rec.blocks = createBlockTracker({
         tabId: id,
         nonce: plan.nonce,
         now,
-        onBlock: (block) => emit(rec, { type: 'block', block }),
+        onBlock: (block) => {
+          emit(rec, { type: 'block', block });
+          onBlockSettled(rec, block);
+        },
         onCwd: (cwd) => {
           rec.tab.cwd = cwd;
           emit(rec, { type: 'cwd', cwd });
@@ -831,6 +1069,7 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
         });
       } catch (err) {
         log(`terminal spawn failed: ${(err as NodeJS.ErrnoException | undefined)?.code ?? 'error'}`);
+        if (agentRec?.hooksDir) void removeHooks(agentRec.hooksDir);
         throw new TerminalError('TERMINAL_SPAWN_FAILED', 'the shell could not be started');
       }
       rec.pty = pty;
@@ -858,6 +1097,7 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
           flush(rec);
           // A command still open when the shell went away ends with it (no exit code).
           rec.blocks.close();
+          agentExited(rec);
           rec.tab.exited = { code: exit.code, signal: exit.signal, at: iso(now()) };
           touch(rec);
           emit(rec, { type: 'exit', code: exit.code, signal: exit.signal });
@@ -865,7 +1105,6 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
         }, 30);
       });
 
-      const command = typeof req.startCommand === 'string' ? req.startCommand.replace(/[\r\n]+/g, ' ').trim() : '';
       if (command.length > 0) {
         // Typed once the shell has drawn its prompt (or after a short wait if
         // it never does): typeahead before a profile finishes can be eaten by
@@ -887,7 +1126,19 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
       const rec = require(id);
       if (rec.tab.exited || !rec.pty) throw new TerminalError('TERMINAL_EXITED', 'the shell has exited');
       touch(rec);
+      if (rec.agent) onAgentInput(rec, data);
       rec.pty.write(data);
+    },
+
+    reportAgentState(id, token, state, message) {
+      const rec = tabs.get(id);
+      const expected = rec?.agent?.token;
+      if (!rec || rec.removed || !expected || typeof token !== 'string') return false;
+      const a = Buffer.from(expected, 'utf8');
+      const b = Buffer.from(token, 'utf8');
+      if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
+      setAgentState(rec, state, 'hook', message);
+      return true;
     },
 
     resize(id, cols, rows) {

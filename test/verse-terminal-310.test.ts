@@ -730,7 +730,8 @@ describe('terminal routes through the real server', () => {
     const launch = await request(port, 'POST', '/api/verse/terminal', mutate, JSON.stringify({ sessionId: 's-1', cols: 80, rows: 24, appId: 'codex' }));
     expect(launch.status).toBe(201);
     await tick(50);
-    expect(new TextDecoder().decode(fake.spawned[0]!.written[0])).toBe('codex\r');
+    // 3.15: the catalog's command, plus this launch's own status hook (terminal-agent-hooks.ts).
+    expect(new TextDecoder().decode(fake.spawned[0]!.written[0])).toMatch(/^codex -c 'notify=\["\/bin\/sh","[^"]+\/hook\.sh","idle"\]'\r$/);
     expect((await request(port, 'POST', '/api/verse/terminal', mutate, JSON.stringify({ sessionId: 's-1', cols: 80, rows: 24, appId: 'claude-desktop' }))).status).toBe(400);
 
     const targets = await request(port, 'GET', '/api/verse/preview/targets?sessionId=s-1', readAuthHeaders(port));
