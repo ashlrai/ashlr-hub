@@ -56,6 +56,7 @@ export const NEW_310_UI_PATHS: readonly string[] = [
   'routes/verse/automations',
   'routes/verse/sections/AutomationsSection.tsx',
   'routes/verse/browser',
+  'routes/verse/multimodel',
   'routes/verse/chat/ActivityGroup.tsx',
   'routes/verse/chat/ActivityGroup.module.css',
   'routes/verse/chat/TasksTray.tsx',

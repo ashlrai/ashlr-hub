@@ -47,7 +47,7 @@
  * Kept from 3.9: per-chat drafts that survive a reload, ↑ history recall, the
  * pre-send cost hint, dictation, ⌘. to stop, and the seat-health block (A2).
  */
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import type { VerseSeat } from '../../data/api-types.js';
 import type { VerseEffort, VersePermissionMode } from '../../../core/verse/workbench-types.js';
@@ -83,12 +83,20 @@ import { DictationButton } from './DictationButton.js';
 import { ComposerSeatBlock } from './health/ComposerSeatBlock.js';
 import type { SeatChoice } from './SeatSelector.js';
 import { useViewport } from './shell/viewport.js';
+import { getVerseSessionHead } from './verse-store.js';
 import { ENGINE_LABEL, modelLabel, seatPillLabel } from './verse-model.js';
 import { formatTokens } from './verse-readouts.js';
 import { matchPlaybookMacros, usePlaybookMacroSuggestions } from './playbooks/macro-suggest.js';
 import type { VerseFileMatch } from '../../../core/verse/workbench-types.js';
+import type { SendInterceptor } from './multimodel/MultiModelBar.js';
 import styles from './Composer.module.css';
 import cstyles from './composer/composer.module.css';
+
+/**
+ * 3.16 multi-model line (Auto seat, Compare, cheap-first, meter) — its own
+ * lazy chunk, so the composer's first paint does not carry the advisor.
+ */
+const MultiModelBar = lazy(() => import('./multimodel/MultiModelBar.js'));
 
 export interface ComposerProps {
   /** Which chat this box belongs to — drafts, history, controls and the queue are per session. */
@@ -245,6 +253,9 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   const [sheetOpen, setSheetOpen] = useState(false);
   const [bypassAsk, setBypassAsk] = useState(false);
   const [dragging, setDragging] = useState(false);
+  /** Registered by the multi-model line; consulted before every non-queued send. */
+  const sendInterceptor = useRef<SendInterceptor | null>(null);
+  const registerInterceptor = useCallback((fn: SendInterceptor | null) => { sendInterceptor.current = fn; }, []);
 
   const text = interim ? `${draft}${draft && !draft.endsWith(' ') ? ' ' : ''}${interim}` : draft;
   const tooLong = useMemo(() => new TextEncoder().encode(text).length > MAX_TEXT_BYTES, [text]);
@@ -549,6 +560,38 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
     textarea.current?.focus();
   }
 
+  // ---- one-click handoff (3.16) -----------------------------------------------
+  /**
+   * "Continue on ‹seat›" from the seat chip in ONE click: the zero-spend note
+   * is built from this chat's log (plus its last answer when that is a plan),
+   * a chat is created on that seat and opened with the note in its box.
+   * Nothing is spent until Send. Where a handoff cannot run (a turn running,
+   * dispatch off) the chip keeps the older path.
+   */
+  const quickContinue = sessionId && onContinueOn && !handoffDisabledReason ? (choice: SeatChoice) => {
+    const record = getVerseSessionHead(sessionId).session;
+    if (!record) {
+      onContinueOn(choice); // not loaded here: the host's own handoff path
+      return;
+    }
+    if (record.turnCount === 0) {
+      onSeatChange(choice); // nothing to hand off yet: a plain new chat on that seat
+      return;
+    }
+    const target = seats.find((s) => s.id === choice.seatId);
+    const label = target?.label ?? choice.seatId;
+    setNote({ text: `Handing off to ${label} — building the note…`, error: false });
+    void import('./multimodel/multimodel-flows.js')
+      .then((flows) => flows.quickHandoffFromChat(sessionId, { seatId: choice.seatId, model: choice.model || null, label, engine: target?.engine ?? 'claude' }))
+      .then((created) => {
+        if (created) setNote(null);
+        else onSeatChange(choice);
+      })
+      .catch((err: unknown) => {
+        setNote({ text: `Hand-off did not start: ${err instanceof Error ? err.message : 'request failed'}. Try “Hand off with a reviewed note…”.`, error: true });
+      });
+  } : null;
+
   // ---- attachments ------------------------------------------------------------
   const addFiles = useCallback((files: readonly File[]) => {
     if (files.length === 0 || disabled) return;
@@ -630,6 +673,14 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
         return;
       }
       if (running) return; // older server: no queue, the box just keeps the draft
+      // Auto may send this to another seat (a handoff) — or hold it to show a
+      // changed choice first. Its absence (still loading, Auto off) = send here.
+      const route = sendInterceptor.current ? await sendInterceptor.current(value) : 'send-here';
+      if (route === 'handled') {
+        clearAfterSend(value);
+        return;
+      }
+      if (route === 'held') return;
       const ok = await onSend(value);
       if (ok) clearAfterSend(value);
     } finally {
@@ -844,6 +895,12 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
       onDrop={onDrop}>
       {disabled ? null : <ComposerSeatBlock seats={seats} seatId={seat.seatId} onSeatChange={onSeatChange} />}
+      {disabled || !sessionId ? null : (
+        <Suspense fallback={null}>
+          <MultiModelBar sessionId={sessionId} seats={seats} text={text} running={running}
+            registerInterceptor={registerInterceptor} onConsumeDraft={clearAfterSend} />
+        </Suspense>
+      )}
       {portalInto(queueSlot, (
         <QueueRow queue={queue} running={running} disabled={disabled}
           onEdit={(id, queued) => { void editQueued(id, queued); }}
@@ -892,7 +949,9 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
           <div className={cstyles.footerRight}>
             <SeatChip seats={seats} seat={{ seatId: seat.seatId, model: view?.controls.model ?? seat.model }} engine={effectiveEngine}
               label={chipLabel} name={seatName} disabled={disabled} compact={compact || fold >= 2}
-              {...(onContinueOn ? { onContinueOn } : {})} onNewChat={onSeatChange} />
+              {...(onContinueOn ? { onContinueOn } : {})} onNewChat={onSeatChange}
+              {...(quickContinue ? { onQuickContinue: quickContinue } : {})}
+              {...(onHandoff && !handoffDisabledReason ? { onReviewHandoff: onHandoff } : {})} />
             {compact ? null : wide ? wide.model : (
               // No session controls (an older or read-only server, or still loading): the model, stated once, not a picker.
               <span className={cstyles.controlStatic} title={`Model: ${modelName}`}>{modelName}</span>

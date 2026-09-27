@@ -173,6 +173,8 @@ const EXPECTED_HANDLERS: Record<WorkbenchRouteFamilyId, string> = {
   automations: 'handleAutomationsApi',
   // 3.15: the integrated Browser pane (policy, command relay, per-chat MCP).
   browser: 'handleBrowserApi',
+  // 3.16: every model working together (Auto seat, compare, escalation, meter).
+  multimodel: 'handleMultimodelApi',
 };
 
 const allPrefixes = WORKBENCH_ROUTE_FAMILIES.flatMap((family) => family.prefixes.map((prefix) => ({ family: family.id, prefix })));

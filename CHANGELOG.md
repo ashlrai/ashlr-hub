@@ -67,6 +67,43 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Native changes (`desktop/src-tauri`) reach an installed app only through
   `npm run ship:local -- --native`.
 
+### Every model working together in chat
+
+- **Auto seat.** While you type, the composer names the seat for this message
+  and the one reason ("Qwen 27B (local) — quick explanation — free and private
+  on this Mac.", "Staying on Claude Max — refactor, mid-conversation — moving
+  would re-send the whole context"). It asks the seat router itself
+  (interactive: fleet reserves are yours and never bind you), tilting its cost
+  weight per difficulty, then re-orders close calls by what you taught it
+  (thumbs, retries, switches, Compare picks, overrides, escalations) and by
+  fleet ship rate. "Send to" overrides it for one message. A message bound for
+  another seat continues the conversation there with the zero-spend handoff
+  note. On send the message is labelled once — by the Jev decision layer
+  (`task-class`) above its 75% confidence gate once it is installed, else by
+  the rules, and which path decided is recorded — and a
+  label that would move it somewhere not on screen is shown first, never sent.
+- **Compare and review.** Send one prompt to 2–3 seats side by side (default:
+  Claude + Codex + a local model) and continue with the answer you pick; ask a
+  different model family to review the last answer in one click.
+- **Cheap-first.** Local models draft; hard or large messages go straight to a
+  frontier seat, and a weak draft (failed, hedging, looping, cut off, no code
+  for a code request) escalates on its own with the draft quoted.
+- **One-click handoff.** Seat chip ▸ Continue on ‹seat› builds the note,
+  creates the chat and opens it with the note in the box (a plan in the last
+  answer rides along). Nothing is spent until Send; the reviewed-note dialog
+  is one item below.
+- **Local models first-class.** Warm up (load now, keep resident) with measured
+  tokens/s, context window and an "On this Mac · private" badge only for
+  loopback runtimes. A local-only repo (global local-only, `foundry.wiki.localOnly`,
+  `localOnlyRepos`, or the repo's `.ashlr/wiki.json`) is routed over local
+  seats only and never sent to the decision layer.
+- **Per-chat meter.** Tokens and API-list-price equivalents across every seat a
+  conversation touched (handoffs, Compare answers, reviews, drafts), what
+  cheap-first saved, each seat's window, and what the fleet may take from it.
+- Every turn these flows cause goes through the ordinary session routes, so the
+  spend chokepoint, readiness gate, local-only gate and mutation token apply
+  unchanged. No routing file and no fleet caller changed.
+
 ### Private repo wiki and Ask
 
 - `ashlr wiki build|status|show|ask` and a Verse **Repo wiki** section (gear

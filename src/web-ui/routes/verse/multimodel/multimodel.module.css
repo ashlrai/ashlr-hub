@@ -1,0 +1,127 @@
+/**
+ * routes/verse/multimodel/multimodel.module.css — the multi-model line above
+ * the composer box and the Compare dialog. Tokens only (DESIGN §13.10): no
+ * raw hex, no px font sizes, control heights from --control-h-*. Status
+ * colours appear only with words beside them; engines keep the monogram.
+ */
+
+/* ---- the line ------------------------------------------------------------ */
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  padding: 0 var(--space-1) var(--space-1);
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+  min-width: 0;
+}
+
+.group { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; }
+.grow { flex: 1 1 12rem; min-width: 0; }
+
+.why {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.whyStay { color: var(--text-tertiary); }
+
+.select {
+  height: var(--control-h-xs);
+  max-width: 14rem;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+}
+.select:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 1px; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  white-space: nowrap;
+  background: transparent;
+}
+button.chip:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+button.chip:disabled { opacity: 0.5; cursor: not-allowed; }
+.chipPrivate { border-color: var(--status-success-solid); color: var(--status-success-fg); }
+.chipWarn { border-color: var(--status-warning-solid); color: var(--status-warning-fg); }
+
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-h-xs);
+  height: var(--control-h-xs);
+  border-radius: var(--radius-xs);
+  color: var(--text-tertiary);
+}
+.iconButton:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.iconButton[aria-pressed='true'] { color: var(--accent-600); background: var(--bg-active); }
+
+.meter { color: var(--text-tertiary); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.notice { flex-basis: 100%; color: var(--text-secondary); }
+.noticeError { color: var(--status-danger-fg); }
+
+/* ---- Compare dialog ------------------------------------------------------- */
+.dialog { width: min(96vw, 72rem); }
+
+.pickList { display: grid; gap: var(--space-1); margin: 0 0 var(--space-3); padding: 0; list-style: none; }
+.pickRow { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm-size); }
+.pickNote { color: var(--text-tertiary); font-size: var(--text-xs-size); }
+
+.columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: var(--space-3);
+  max-height: 65vh;
+  overflow: auto;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+.columnHead { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); }
+.columnTitle { font-weight: 600; color: var(--text-primary); font-size: var(--text-sm-size); }
+.columnMeta { color: var(--text-tertiary); font-size: var(--text-xs-size); }
+.columnBody { min-height: 6rem; overflow-wrap: anywhere; font-size: var(--text-sm-size); }
+.columnActions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+.primary {
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-xs);
+  background: var(--accent-600);
+  color: var(--text-on-accent);
+  font-size: var(--text-sm-size);
+}
+.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.secondary {
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+}
+.secondary:hover:not(:disabled) { background: var(--bg-hover); }
+.footer { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-3); }
