@@ -97,7 +97,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { buildLinuxLauncher } from './confine-linux.js';
 import { currentStandingPolicy } from '../authority/effective-config.js';
 import { CUSTODY_DATA_DIR_RELATIVE, CUSTODY_HELPER_PATH } from '../authority/custody-client.js';
@@ -685,6 +685,23 @@ export function buildAutonomousSbplProfile(profile: ConfinementProfile, ctx: Con
   const reallowRead = [...writable, ...readOnly, ...gitDirs];
   const ancestors = new Set<string>();
   for (const p of reallowRead) for (const a of ancestorsOf(p)) ancestors.add(a);
+  // 3.14: a read-only grant given AS a symlink (a fleet mirror's
+  // `mirrors/<sibling>` link to its pinned snapshot, which npm links
+  // `file:../<sibling>` through). Its target is granted above as its real
+  // path; traversing the link needs only metadata on the link inode itself —
+  // never its directory, never a read of anything else. Emitted at its
+  // canonical parent (sandbox-exec matches the resolved path).
+  for (const p of overlay.readOnlyPaths) {
+    try {
+      if (!isAbsolute(p) || !lstatSync(p).isSymbolicLink()) continue;
+    } catch {
+      continue;
+    }
+    const link = join(resolveReal(dirname(p)), basename(p));
+    if (denied.some((d) => isInsidePath(link, d))) continue;
+    ancestors.add(link);
+    for (const a of ancestorsOf(link)) ancestors.add(a);
+  }
 
   const run = resolveReal(overlay.writablePaths[0] ?? worktree);
   const sub = (p: string): string => `(subpath ${sbplString(p)})`;

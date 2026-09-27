@@ -52,7 +52,7 @@ import { ensureDaemonCapacityPublisher, type PublisherStatus } from '../daemon/c
 import { engineOfSeatId, type BudgetEngine } from '../routing/policy.js';
 import { routeSeat } from '../routing/router.js';
 import { isSelfTargetProposal } from './self.js';
-import { fleetMirrorsRoot as u6FleetMirrorsRoot, mirrorNameForPath, readMirrorState } from './mirrors.js';
+import { fleetMirrorsRoot as u6FleetMirrorsRoot, mirrorNameForPath, mirrorSiblingPins, readMirrorState, type MirrorSiblingPinsRead } from './mirrors.js';
 import { listRepoHolds } from './quarantine.js';
 import { scrubSecrets } from '../util/scrub.js';
 import type { AshlrConfig, DecisionEntry, Proposal } from '../types.js';
@@ -235,6 +235,32 @@ export interface StandingPassDeps {
    * outside a daemon). Its status, when cold, becomes an operator note.
    */
   ensureCapacityPublisher: (cfg: AshlrConfig) => PublisherStatus | null;
+  /**
+   * 3.14: the mirror's current `file:../<sibling>` pins (default
+   * fleet/mirrors.ts mirrorSiblingPins). Optional so existing deps keep
+   * working; compared with the pins G3 verified against before publishing
+   * and before merging.
+   */
+  siblingPins?: (repoPath: string) => MirrorSiblingPinsRead;
+}
+
+/**
+ * The sibling-pin digest of the mirror right now: null = none; a string
+ * starting with `unreadable:` never equals a recorded digest (so a pin that
+ * cannot be read re-verifies, and verification then waits on it).
+ */
+function currentSiblingPins(ctx: PassContext, repoPath: string): string | null {
+  try {
+    const read = (ctx.deps.siblingPins ?? mirrorSiblingPins)(repoPath);
+    return read.ok ? read.digest : `unreadable: ${read.reason}`;
+  } catch (error) {
+    return `unreadable: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+/** True when the pins G3 verified against (state.siblingPins) are still the mirror's pins. */
+function siblingPinsCurrent(ctx: PassContext, state: FleetMergeStateV1): boolean {
+  return currentSiblingPins(ctx, state.repoPath) === (state.siblingPins ?? null);
 }
 
 function hardenedGitRead(repoPath: string, args: readonly string[]): string | null {
@@ -1141,6 +1167,7 @@ async function runG3(
       detail: stored.detail ?? 'verified earlier on the current base',
       ...(stored.baseBranch ? { baseBranch: stored.baseBranch } : {}),
       ...(stored.baseHead ? { baseHead: stored.baseHead } : {}),
+      ...(stored.siblingPins ? { siblingPins: stored.siblingPins } : {}),
       commandKinds: (stored.ran ?? []).map((command) => command.kind),
     };
   } else {
@@ -1160,6 +1187,7 @@ async function runG3(
           ...(transaction.verify.failureCategory ? { failureCategory: transaction.verify.failureCategory } : {}),
           ...(transaction.verify.baseBranch ? { baseBranch: transaction.verify.baseBranch } : {}),
           ...(transaction.verify.baseHead ? { baseHead: transaction.verify.baseHead } : {}),
+          ...(transaction.verify.siblingPins ? { siblingPins: transaction.verify.siblingPins } : {}),
           commandKinds: transaction.verify.ran.map((command) => command.kind),
         };
       } else {
@@ -1205,6 +1233,7 @@ async function runG3(
     state.diffHash = hashDiff(diff);
     state.verifyDigest = state.gates['G3']?.digest ?? null;
     state.verifyCommands = normalizeVerifyCommands(ranCommands);
+    state.siblingPins = verify.siblingPins ?? null;
   }
   return g3;
 }
@@ -1266,6 +1295,15 @@ async function openChangePr(
     persist(ctx, state);
     ctx.summary.waiting++;
     skip(ctx, proposal.id, 'standing-G7', `the base moved to ${remoteBase.sha?.slice(0, 12) ?? 'nothing'} since verification; re-verifying next pass`);
+    return;
+  }
+  if (!siblingPinsCurrent(ctx, state)) {
+    // 3.14: a `file:../<sibling>` mirror moved since verification — the proof
+    // was for other sibling code. Re-verified next pass, like a moved base.
+    state.gates['G3'] = undefined;
+    persist(ctx, state);
+    ctx.summary.waiting++;
+    skip(ctx, proposal.id, 'standing-G7', 'a sibling dependency moved since verification; re-verifying next pass');
     return;
   }
   const branch = `${FLEET_BRANCH_PREFIX}${state.key}`;
@@ -1500,6 +1538,13 @@ async function progressFleetPr(key: string, ctx: PassContext): Promise<void> {
       const opened = deps.openScratch(state.repoPath);
       scratch = typeof opened === 'string' ? null : opened;
       await rebuildOnNewBase(ctx, state, proposal, remoteBase.sha, scratch);
+      persist(ctx, state);
+      return;
+    }
+    if (!siblingPinsCurrent(ctx, state)) {
+      const opened = deps.openScratch(state.repoPath);
+      scratch = typeof opened === 'string' ? null : opened;
+      await reverifyOnSiblingMove(ctx, state, proposal, scratch);
       persist(ctx, state);
       return;
     }
@@ -1937,6 +1982,44 @@ async function closeForReason(ctx: PassContext, state: FleetMergeStateV1, reason
  * on the new head. Keeps "the landed tree is exactly the verified tree"
  * true without ever merging a stale PR.
  */
+/**
+ * 3.14: a `file:../<sibling>` mirror the open PR was verified against moved.
+ * Same base, same tree — only the sibling code differs — so G3 runs again
+ * (the stale binding forces a fresh verification) and the PR stands only if
+ * it passes on the SAME tree; a refusal closes it as after a moved base.
+ */
+async function reverifyOnSiblingMove(
+  ctx: PassContext,
+  state: FleetMergeStateV1,
+  proposal: Proposal,
+  scratch: FleetGitScratch | null,
+): Promise<void> {
+  const { deps } = ctx;
+  const pr = state.pr!;
+  if (!scratch) {
+    backoff(ctx, state);
+    ctx.summary.waiting++;
+    return;
+  }
+  const g3 = await runG3(ctx, state, proposal, scratch);
+  if (!g3) return;
+  if (g3.verdict === 'refuse') {
+    await commentOnPr(state.repo, pr.number, `A sibling dependency moved and this change no longer verifies: ${g3.reason}`, deps.host);
+    await closeForReason(ctx, state, `sibling dependency moved; re-verification refused (${g3.code})`, 'daemon');
+    deps.setStatus(proposal.id, 'rejected', `fleet gate G3 refused after a sibling dependency moved (${g3.code}): ${g3.reason}`, `standing gate G3: ${g3.code}`);
+    state.outcome = 'rejected';
+    ctx.summary.refused++;
+    return;
+  }
+  if (g3.verdict !== 'pass' || state.treeSha !== pr.treeSha || state.baseSha !== pr.baseSha) {
+    backoff(ctx, state);
+    ctx.summary.waiting++;
+    return;
+  }
+  schedule(ctx, state, MIN_CHECK_BACKOFF_MS);
+  note(ctx, `${state.repo}#${pr.number}: re-verified against the moved sibling dependencies`);
+}
+
 async function rebuildOnNewBase(
   ctx: PassContext,
   state: FleetMergeStateV1,

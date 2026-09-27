@@ -517,4 +517,5 @@ export const REAL_IO_TEST_FILES = [
   'test/verse-session-engine.test.ts', // real detached subprocesses (fake vendor CLIs) with process-group cancel/timeout kill paths
   'test/leader-local-transport-314.test.ts', // binds a real loopback HTTP server (streamed Ollama /api/chat, per-attempt timeout)
   'test/daemon-first-tick-314.test.ts', // real detached /bin/sh process groups killed on timeout + real mirror clones in h1 temp repos
+  'test/mirror-sibling-deps-314.test.ts', // real mirror clones of sibling repos in h1 temp repos + one real frozen npm ci through ../<sibling>
 ];

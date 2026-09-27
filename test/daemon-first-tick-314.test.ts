@@ -269,7 +269,7 @@ describe('B · installMirrorDependencies policy', () => {
 // ---------------------------------------------------------------------------
 
 describe('C · planMirrorDependencies refuses installs that cannot succeed in a mirror', () => {
-  it('refuses file:/link: dependencies outside the repository (ashlrai/ashlrcode) and allows ones inside it', () => {
+  it('refuses file:/link: dependencies outside the repository (ashlrai/ashlrcode, unless pinned — see mirror-sibling-deps-314) and allows ones inside it', () => {
     const dir = join(fx.home, 'plan');
     mkdirSync(dir, { recursive: true });
     const write = (pkg: Record<string, unknown>) => {
@@ -279,7 +279,8 @@ describe('C · planMirrorDependencies refuses installs that cannot succeed in a 
     write({ dependencies: { '@ashlr/auth': 'file:../ashlr-auth', zod: '^3.0.0' } });
     expect(planMirrorDependencies(dir)).toMatchObject({
       kind: 'refuse',
-      reason: expect.stringMatching(/installs @ashlr\/auth from "file:\.\.\/ashlr-auth", a path outside the repository/),
+      // 3.14: a direct sibling installs only against a pinned, enrolled sibling mirror.
+      reason: expect.stringMatching(/installs @ashlr\/auth from "file:\.\.\/ashlr-auth", a sibling repository; .*\.\.\/ashlr-auth was not resolved to one/),
     });
     write({ devDependencies: { tool: 'link:/opt/tool' } });
     expect(planMirrorDependencies(dir).kind).toBe('refuse');

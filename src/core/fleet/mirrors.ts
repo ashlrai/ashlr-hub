@@ -109,7 +109,8 @@
  * ~300, execFile's timeout killed only the direct children, and a synchronous
  * rmSync of the half-written node_modules then froze the daemon's event loop
  * for minutes):
- *   - out-of-repo local dependencies are refused at plan time;
+ *   - out-of-repo local dependencies are refused at plan time (except a
+ *     `file:../<dir>` sibling that resolves to an enrolled mirror — below);
  *   - each install is its own process group with a hard timeout that kills
  *     the whole group (SIGTERM, then SIGKILL), stdin at /dev/null, and a
  *     settle-anyway backstop (`runDependencyInstall`);
@@ -117,6 +118,55 @@
  *   - the tick's whole mirror phase has a deadline: a hung repo fails with
  *     "prep failed: <reason>" and the others go ahead
  *     (`prepareMirrorsForTick`).
+ *
+ * SIBLING DEPENDENCIES (3.14). ashlrai/ashlrcode installs four `@ashlr/*`
+ * packages from `file:../<sibling>` — paths relative to Mason's checkout
+ * layout (…/dev-tools/ashlrcode next to …/dev-tools/ashlr-auth). A mirror
+ * sits at ~/.ashlr/fleet/mirrors/<owner>__<name>, so `../<dir>` is
+ * ~/.ashlr/fleet/mirrors/<dir>, which never existed, and 3.14's first cut
+ * refused such repos outright. The design, chosen as the safest that works:
+ *   - RESOLUTION stays inside the fleet. `../<dir>` of `<owner>/<repo>` means
+ *     the GitHub repo `<owner>/<dir>` (the checkout convention: directory
+ *     name = repo name, same owner). It is used only when that repo is an
+ *     ENROLLED fleet mirror (in the grant), its last sync succeeded, its HEAD
+ *     and tracked tree match that sync, and its package.json `name` is the
+ *     package being installed. Nothing reads Mason's checkouts — not even
+ *     their git remotes — and an enrolled checkout never counts. Anything
+ *     else keeps refusing, with the reason ("depends on ../X which is not
+ *     enrolled — enroll it or vendor it"); so does every other out-of-repo
+ *     shape (absolute, `~/`, `../../x`, `../x/sub`).
+ *   - PINNED. Under the SIBLING's repo lease its tracked files at HEAD are
+ *     copied once per commit to ~/.ashlr/fleet/sibling-pins/<slug>/<sha>
+ *     (staged, then renamed: immutable once visible; no `.git`, no
+ *     node_modules, no symlink that leaves it). A dependent never installs
+ *     from a live mirror an agent's worktree or the next reset can change.
+ *   - LAID OUT, NOT REWRITTEN. `~/.ashlr/fleet/mirrors/<dir>` becomes a
+ *     relative symlink to the pin, so the committed `file:../<dir>` resolves
+ *     unchanged for npm, pnpm, yarn and bun: package.json and the lockfile
+ *     are never edited (the frozen-lockfile check still proves the mirror is
+ *     origin's tree, and no diff is ever dirtied). The alternative — moving
+ *     every mirror to <root>/<group>/<name> — would change every mirror path,
+ *     and mirror paths are enrollment keys, lease keys and fleet-merge state.
+ *     The link name can never read as a mirror (`__` refused), and a link
+ *     already naming another ENROLLED repo is never taken over.
+ *   - KEYED. The pins are part of the install key (only for repos that have
+ *     siblings — every other install keeps its key), so a sibling that moves
+ *     means a full clean and reinstall, and `MirrorDepsState.siblings`
+ *     records exactly what node_modules was installed against. bun, pnpm and
+ *     yarn copy the pin into node_modules; npm links through `../<dir>`, so
+ *     the link must still name the recorded pin — `mirrorSiblingPins`
+ *     checks that and G3 refuses to verify (verify-infra) while it does not.
+ *   - BOUND INTO THE PROOF. `siblingPinsDigest` is recorded on the
+ *     verification (inbox/merge.ts verifyProposal → ProposalVerifyResult
+ *     .siblingPins), is part of G3's hashed inputs (merge-gates.ts), is
+ *     compared by `hasCurrentVerificationBinding`, and the standing pass
+ *     re-verifies before publishing when it changed — a sibling change
+ *     invalidates the proof exactly like a base change.
+ *   - ORDERED. `prepareMirrorsForTick` syncs siblings before their
+ *     dependents (a repo waits only for siblings ordered before it, so a
+ *     cycle cannot deadlock); the sibling lease wait is bounded.
+ *   - Snapshots nothing records and no link names are pruned after an
+ *     install. Install timeouts and the process-group kill are unchanged.
  *
  * NOTHING HERE RUNS BY ITSELF. The daemon calls `prepareMirrorsForTick` from
  * its beforeTick hook (U5) only under a live standing policy; `ashlr mirror`
@@ -133,14 +183,16 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmSync,
   statSync,
+  symlinkSync,
 } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, rm, symlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { EffectivePolicy } from '../authority/types.js';
 import { withRepoLease, countLiveExecutionLeases } from '../sandbox/execution-leases.js';
 import { resolveGitExecutable, runSafeGit, SafeGitError } from '../sandbox/safe-git.js';
@@ -368,6 +420,8 @@ export interface MirrorDeps {
    * says what happened.
    */
   installDependencies?: (plan: MirrorDependencyInstallPlan, mirrorPath: string, signal?: AbortSignal) => Promise<MirrorInstallRun>;
+  /** Sibling-mirror lease wait override (tests; default MIRROR_SIBLING_LEASE_WAIT_MS). */
+  siblingLeaseWaitMs?: number;
 }
 
 interface GitRun {
@@ -643,6 +697,12 @@ export interface MirrorDepsState {
   nodeModulesMtimeMs: number | null;
   /** Scrubbed; null unless 'failed'. */
   error: string | null;
+  /**
+   * 3.14: the sibling mirrors (`file:../<dir>`) node_modules was installed
+   * against, at their pinned commits. Only on 'installed'; absent/empty when
+   * the repo has none. `mirrorSiblingPins` reads this for G3.
+   */
+  siblings?: SiblingPin[];
 }
 
 function statePath(nameWithOwner: string): string {
@@ -680,6 +740,12 @@ function parseDepsState(raw: unknown): MirrorDepsState | null {
     ? r['manager'] as MirrorPackageManager
     : null;
   const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const siblings = parseSiblingPins(r['siblings']);
+  if (siblings === 'invalid') {
+    // A record we cannot read the pins of cannot vouch for its install: treat
+    // it as never installed, so the next sync reinstalls (fail closed).
+    return null;
+  }
   return {
     status: r['status'],
     manager,
@@ -688,7 +754,28 @@ function parseDepsState(raw: unknown): MirrorDepsState | null {
     nodeModulesIno: num(r['nodeModulesIno']),
     nodeModulesMtimeMs: num(r['nodeModulesMtimeMs']),
     error: typeof r['error'] === 'string' ? r['error'].slice(0, 600) : null,
+    ...(siblings.length > 0 ? { siblings } : {}),
   };
+}
+
+function parseSiblingPins(raw: unknown): SiblingPin[] | 'invalid' {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw) || raw.length > MAX_SIBLINGS) return 'invalid';
+  const pins: SiblingPin[] = [];
+  for (const row of raw) {
+    if (typeof row !== 'object' || row === null || Array.isArray(row)) return 'invalid';
+    const r = row as Record<string, unknown>;
+    const identity = parseNameWithOwner(r['nameWithOwner']);
+    const dependencies = Array.isArray(r['dependencies']) && r['dependencies'].every((d) => typeof d === 'string' && d.length > 0 && d.length <= 214)
+      ? [...r['dependencies'] as string[]]
+      : null;
+    if (typeof r['dir'] !== 'string' || !isLayableSiblingDir(r['dir']) || !identity || identity.name.toLowerCase() !== r['dir'].toLowerCase()
+      || typeof r['headSha'] !== 'string' || !SHA_RE.test(r['headSha']) || !dependencies) {
+      return 'invalid';
+    }
+    pins.push({ dir: r['dir'], nameWithOwner: identity.nameWithOwner, headSha: r['headSha'], dependencies });
+  }
+  return sortPins(pins);
 }
 
 function writeMirrorState(state: MirrorState): void {
@@ -935,8 +1022,10 @@ export interface MirrorDependencyInstallPlan {
   lockfile: string;
   /** Binary name looked up on the daemon's PATH, then its arguments. */
   argv: readonly string[];
-  /** sha256 over manager, argv, lockfile and root package.json — a new key means a reinstall. */
+  /** sha256 over manager, argv, lockfile, root package.json and sibling pins — a new key means a reinstall. */
   key: string;
+  /** The sibling pins this install resolves `file:../<dir>` against; absent when there are none. */
+  siblings?: readonly SiblingPin[];
 }
 
 export type MirrorDependencyPlan =
@@ -973,18 +1062,39 @@ function declaresDependencies(pkg: Record<string, unknown>): boolean {
 
 const LOCAL_SPEC_RE = /^(?:file|link|portal):(.*)$/;
 
+/** A root dependency installed from the SIBLING directory `../<dir>` (see "SIBLING DEPENDENCIES"). */
+export interface SiblingDependency {
+  /** The package name (`@ashlr/auth`). */
+  dependency: string;
+  /** The spec as written (`file:../ashlr-auth`). */
+  spec: string;
+  /** `<dir>` in `../<dir>`: exactly one path segment. */
+  dir: string;
+}
+
+interface LocalDependencyScan {
+  /** `../<dir>` dependencies — installable only against an enrolled sibling's pinned mirror. */
+  siblings: SiblingDependency[];
+  /** The first out-of-repo local dependency of any other shape (absolute, `~/`, `../../x`, `../x/sub`) — never installable. */
+  outside: { name: string; spec: string } | null;
+}
+
 /**
- * A root dependency installed from a local path OUTSIDE the repository
- * (`"@ashlr/auth": "file:../ashlr-auth"`). A fleet mirror holds exactly one
- * repo, so that path never exists next to it and the install can never
- * succeed — and it does not always fail fast: on 2026-09-26 `bun install`
- * printed "ENOENT: failed opening cache/package/version dir" for four such
- * packages and then sat at 0% CPU until the 10-minute timeout killed it. The
- * plan refuses it up front instead. Paths inside the repo (workspace-style
+ * Root dependencies installed from a local path OUTSIDE the repository.
+ * A fleet mirror holds exactly one repo, so on its own that path never exists
+ * next to it — and the install does not always fail fast: on 2026-09-26 `bun
+ * install` printed "ENOENT: failed opening cache/package/version dir" for four
+ * `file:../<sibling>` packages and then sat at 0% CPU until the 10-minute
+ * timeout killed it. So the plan refuses every such path up front, EXCEPT the
+ * one shape the fleet can lay out deterministically: a direct sibling
+ * `../<dir>` (one segment), which `resolveSiblingPins` maps to an enrolled
+ * sibling's fleet mirror. Paths inside the repo (workspace-style
  * `file:./packages/x`) are fine. Peer dependencies are not installed from the
  * spec, so they are not checked.
  */
-function outOfRepoLocalDependency(root: string, pkg: Record<string, unknown>): { name: string; spec: string } | null {
+function scanLocalDependencies(root: string, pkg: Record<string, unknown>): LocalDependencyScan {
+  const scan: LocalDependencyScan = { siblings: [], outside: null };
+  const parent = resolve(root, '..');
   for (const field of ['dependencies', 'devDependencies', 'optionalDependencies']) {
     const value = pkg[field];
     if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
@@ -994,12 +1104,43 @@ function outOfRepoLocalDependency(root: string, pkg: Record<string, unknown>): {
       const local = LOCAL_SPEC_RE.exec(spec);
       const target = local ? local[1]! : /^(?:\.{1,2}\/|\/|~\/)/.test(spec) ? spec : null;
       if (target === null) continue;
-      if (target.startsWith('~/') || isAbsolute(target)) return { name, spec };
-      const rel = relative(root, resolve(root, target));
-      if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return { name, spec };
+      if (target.startsWith('~/') || isAbsolute(target)) {
+        scan.outside ??= { name, spec };
+        continue;
+      }
+      const absolute = resolve(root, target);
+      const rel = relative(root, absolute);
+      if (!(rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel))) continue; // inside the repo
+      // A direct sibling: written as `../<dir>` (optionally `./../<dir>` or a
+      // trailing slash) and resolving to exactly one segment under the parent.
+      const sibling = relative(parent, absolute);
+      if (/^(?:\.\/)?\.\.\/[^/\\]+\/?$/.test(target) && sibling.length > 0 && !sibling.includes(sep) && sibling !== '..') {
+        scan.siblings.push({ dependency: name, spec, dir: sibling });
+      } else {
+        scan.outside ??= { name, spec };
+      }
     }
   }
-  return null;
+  scan.siblings.sort((a, b) => a.dir.localeCompare(b.dir) || a.dependency.localeCompare(b.dependency));
+  return scan;
+}
+
+/**
+ * The `file:../<dir>` (and `link:` / `portal:` / bare `../<dir>`) root
+ * dependencies of the repo at `root` — what `resolveSiblingPins` must pin
+ * before the plan can install. Empty when package.json is absent or unreadable
+ * (the plan reports that on its own). Pure over the tree.
+ */
+export function siblingDependenciesOf(root: string): SiblingDependency[] {
+  const raw = readRootFile(root, 'package.json', 4 * 1024 * 1024);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw.toString('utf8')) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+    return scanLocalDependencies(root, parsed as Record<string, unknown>).siblings;
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -1010,11 +1151,16 @@ function outOfRepoLocalDependency(root: string, pkg: Record<string, unknown>): {
  *   - dependencies with no lockfile → refuse: the fleet installs only
  *     lockfile-pinned versions (an unpinned install is a different tree than
  *     the one CI and Mason test).
+ *   - a `file:../<dir>` sibling dependency installs only against `pins`
+ *     (`resolveSiblingPins`: an enrolled sibling's mirror at a pinned commit);
+ *     the pins are part of the key, so a sibling that moves means a reinstall.
+ *     Without a pin for every sibling it refuses; any other out-of-repo local
+ *     path always refuses.
  * Every install is frozen (the lockfile is never rewritten) and runs with
  * lifecycle scripts OFF: the daemon runs unconfined, and a dependency's
  * postinstall is exactly the supply-chain code it must not execute.
  */
-export function planMirrorDependencies(root: string): MirrorDependencyPlan {
+export function planMirrorDependencies(root: string, pins: readonly SiblingPin[] = []): MirrorDependencyPlan {
   const pkgRaw = readRootFile(root, 'package.json', 4 * 1024 * 1024);
   if (!pkgRaw) return { kind: 'none', reason: 'no package.json at the repo root' };
   let pkg: Record<string, unknown>;
@@ -1051,12 +1197,23 @@ export function planMirrorDependencies(root: string): MirrorDependencyPlan {
     if (!declaresDependencies(pkg)) return { kind: 'none', reason: 'package.json declares no dependencies' };
     return { kind: 'refuse', reason: 'package.json declares dependencies but no lockfile is committed; the fleet installs only lockfile-pinned dependencies' };
   }
-  const outside = outOfRepoLocalDependency(root, pkg);
-  if (outside) {
+  const local = scanLocalDependencies(root, pkg);
+  if (local.outside) {
     return {
       kind: 'refuse',
-      reason: `package.json installs ${outside.name} from ${JSON.stringify(outside.spec.slice(0, 120))}, a path outside the repository; a fleet mirror holds only this repo, so that install cannot succeed`,
+      reason: `package.json installs ${local.outside.name} from ${JSON.stringify(local.outside.spec.slice(0, 120))}, a path outside the repository; a fleet mirror holds only this repo, so that install cannot succeed`,
     };
+  }
+  const usedPins: SiblingPin[] = [];
+  for (const sibling of local.siblings) {
+    const pin = pins.find((row) => row.dir === sibling.dir);
+    if (!pin) {
+      return {
+        kind: 'refuse',
+        reason: `package.json installs ${sibling.dependency} from ${JSON.stringify(sibling.spec.slice(0, 120))}, a sibling repository; it installs only against an enrolled sibling's fleet mirror, and ../${sibling.dir} was not resolved to one`,
+      };
+    }
+    if (!usedPins.includes(pin)) usedPins.push(pin);
   }
   const lockBytes = readRootFile(root, chosen.lockfile);
   if (!lockBytes) return { kind: 'refuse', reason: `${chosen.lockfile} is not a regular file the fleet can read` };
@@ -1076,13 +1233,471 @@ export function planMirrorDependencies(root: string): MirrorDependencyPlan {
         return ['bun', 'install', '--frozen-lockfile', '--ignore-scripts'];
     }
   })();
-  const key = createHash('sha256')
+  const hash = createHash('sha256')
     .update(`ashlr:mirror-deps:v1\0${chosen.manager}\0${argv.join(' ')}\0${chosen.lockfile}\0`)
     .update(lockBytes)
     .update('\0')
-    .update(pkgRaw)
-    .digest('hex');
-  return { kind: 'install', manager: chosen.manager, lockfile: chosen.lockfile, argv, key };
+    .update(pkgRaw);
+  // Only repos WITH siblings hash pins, so every existing install keeps its
+  // key (no fleet-wide reinstall on upgrade).
+  if (usedPins.length > 0) hash.update(`\0ashlr:sibling-pins\0${canonicalPins(usedPins)}`);
+  const key = hash.digest('hex');
+  return {
+    kind: 'install',
+    manager: chosen.manager,
+    lockfile: chosen.lockfile,
+    argv,
+    key,
+    ...(usedPins.length > 0 ? { siblings: sortPins(usedPins) } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Sibling dependencies (3.14) — see "SIBLING DEPENDENCIES" in the header
+// ---------------------------------------------------------------------------
+
+/** How long a dependent's sync waits for a sibling mirror's lease (the sibling may be mid-sync). */
+export const MIRROR_SIBLING_LEASE_WAIT_MS = 2 * 60_000;
+const MAX_SIBLINGS = 16;
+/** Bounds on one sibling snapshot (a pathological repo must not fill the disk or stall the tick). */
+const SIBLING_PIN_MAX_FILES = 50_000;
+const SIBLING_PIN_MAX_BYTES = 512 * 1024 * 1024;
+/** A crashed snapshot's staging dir older than this is removed by the next prune. */
+const SIBLING_STAGING_STALE_MS = 60 * 60_000;
+const SIBLING_LINK_TARGET_RE = /^\.\.\/sibling-pins\/([^/]+)\/([0-9a-f]{40}(?:[0-9a-f]{24})?)$/;
+
+/** One `file:../<dir>` sibling, pinned: the enrolled mirror it resolves to and the exact commit installed. */
+export interface SiblingPin {
+  /** `<dir>` in `../<dir>` — also the link's name under the mirrors root. */
+  dir: string;
+  /** The sibling's GitHub identity (same owner as the dependent, name === dir). */
+  nameWithOwner: string;
+  /** The sibling mirror's HEAD the snapshot was taken at. */
+  headSha: string;
+  /** Package names installed from it (sorted). */
+  dependencies: string[];
+}
+
+/** ~/.ashlr/fleet/sibling-pins — immutable per-commit snapshots of sibling mirrors. */
+export function siblingPinsRoot(): string {
+  return join(canonicalHome(), '.ashlr', 'fleet', 'sibling-pins');
+}
+
+/** `~/.ashlr/fleet/sibling-pins/<owner>__<name>/<sha>` */
+export function siblingPinPath(pin: Pick<SiblingPin, 'nameWithOwner' | 'headSha'>): string {
+  return join(siblingPinsRoot(), mirrorSlug(pin.nameWithOwner), pin.headSha);
+}
+
+/** Where `../<dir>` lands for a mirror: `~/.ashlr/fleet/mirrors/<dir>`. */
+export function siblingLinkPath(dir: string): string {
+  return join(fleetMirrorsRoot(), dir);
+}
+
+/** The link's text — relative, so it can only ever name something under ~/.ashlr/fleet. */
+function siblingLinkTarget(pin: Pick<SiblingPin, 'nameWithOwner' | 'headSha'>): string {
+  return `../sibling-pins/${mirrorSlug(pin.nameWithOwner)}/${pin.headSha}`;
+}
+
+/**
+ * A `<dir>` the fleet may create next to its mirrors: a plain GitHub repo
+ * name that can never read as a mirror slug (`owner__name`), a dot entry
+ * (`.trash`, staging) or an option.
+ */
+function isLayableSiblingDir(dir: string): boolean {
+  return NAME_RE.test(dir) && !dir.startsWith('.') && !dir.startsWith('-') && !dir.includes(SLUG_SEPARATOR);
+}
+
+function sortPins(pins: readonly SiblingPin[]): SiblingPin[] {
+  return pins
+    .map((pin) => ({ ...pin, dependencies: [...new Set(pin.dependencies)].sort() }))
+    .sort((a, b) => a.dir.localeCompare(b.dir));
+}
+
+function canonicalPins(pins: readonly SiblingPin[]): string {
+  return JSON.stringify(sortPins(pins).map((pin) => [pin.dir, pin.nameWithOwner.toLowerCase(), pin.headSha, pin.dependencies]));
+}
+
+/**
+ * The digest G3 binds verification to (inbox/merge.ts, merge-gates.ts
+ * evaluateG3): null when the repo has no sibling dependencies, so every
+ * existing verification binding and gate digest is unchanged.
+ */
+export function siblingPinsDigest(pins: readonly SiblingPin[]): string | null {
+  if (pins.length === 0) return null;
+  return createHash('sha256').update(`ashlr:sibling-pins:v1\0${canonicalPins(pins)}`, 'utf8').digest('hex');
+}
+
+export type MirrorSiblingPinsRead =
+  | {
+    ok: true;
+    /** The pins the mirror's node_modules was installed against (empty: none, or not a mirror). */
+    pins: SiblingPin[];
+    /** `siblingPinsDigest(pins)`. */
+    digest: string | null;
+    /** What confined verification must read besides the mirror's node_modules: each pin snapshot and its link. */
+    readPaths: string[];
+  }
+  | { ok: false; reason: string };
+
+/**
+ * The sibling pins a mirror's installed dependencies rest on RIGHT NOW, for
+ * G3 (verify binding + digest) and the confined suites' read grants. Not a
+ * mirror, or no siblings ⇒ ok with nothing. Not ok when a `../<dir>` link no
+ * longer resolves to the recorded pin (another dependent's sync moved it to
+ * a newer sibling commit): npm links `file:` siblings through that path, so
+ * the install is no longer the pinned tree until this mirror's next sync
+ * reinstalls. Reads only ~/.ashlr/fleet; never throws.
+ */
+export function mirrorSiblingPins(repoPath: string): MirrorSiblingPinsRead {
+  const none: MirrorSiblingPinsRead = { ok: true, pins: [], digest: null, readPaths: [] };
+  let name: string | null;
+  try {
+    name = mirrorNameForPath(repoPath);
+  } catch {
+    name = null;
+  }
+  if (!name) return none;
+  const deps = readMirrorState(name)?.deps;
+  const pins = deps?.status === 'installed' ? deps.siblings ?? [] : [];
+  if (pins.length === 0) return none;
+  const readPaths: string[] = [];
+  try {
+    for (const pin of pins) {
+      const link = siblingLinkPath(pin.dir);
+      let current: string | null = null;
+      try {
+        current = readlinkSync(link);
+      } catch {
+        current = null;
+      }
+      if (current !== siblingLinkTarget(pin)) {
+        return {
+          ok: false,
+          reason: `../${pin.dir} no longer resolves to ${pin.nameWithOwner}@${pin.headSha.slice(0, 12)}, the pin ${name}'s dependencies were installed against; its next mirror sync reinstalls`,
+        };
+      }
+      const dir = siblingPinPath(pin);
+      const stat = lstatSync(dir);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`${dir} is not a directory`);
+      readPaths.push(dir, link);
+    }
+  } catch (error) {
+    return { ok: false, reason: `the sibling pins of ${name} cannot be read: ${(error as Error).message}` };
+  }
+  return { ok: true, pins, digest: siblingPinsDigest(pins), readPaths };
+}
+
+function readPackageName(root: string): string | null {
+  const raw = readRootFile(root, 'package.json', 4 * 1024 * 1024);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw.toString('utf8')) as { name?: unknown };
+    return typeof parsed?.name === 'string' ? parsed.name : null;
+  } catch {
+    return null;
+  }
+}
+
+function isInsideDir(child: string, parent: string): boolean {
+  const rel = relative(parent, child);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+/**
+ * Snapshot the sibling mirror's tracked files at its current HEAD into
+ * `siblingPinPath(pin)` — once per commit; an existing snapshot is reused.
+ * Runs under the SIBLING's lease with its HEAD and clean tree just verified,
+ * so the working tree is exactly `pin.headSha`. Copies only what git tracks
+ * (never `.git`, never its node_modules); a tracked symlink is kept only when
+ * it stays inside the snapshot; submodules are left out. Written to a staging
+ * dir and renamed into place, so a half-copied pin is never visible. Returns
+ * null, or why it could not.
+ */
+async function ensureSiblingSnapshot(
+  siblingMirror: string,
+  pin: SiblingPin,
+  git: (args: readonly string[]) => Promise<GitRun>,
+): Promise<string | null> {
+  const dest = siblingPinPath(pin);
+  try {
+    const stat = lstatSync(dest);
+    return !stat.isSymbolicLink() && stat.isDirectory() ? null : `${dest} exists and is not a pin directory`;
+  } catch { /* absent — take it */ }
+  const listed = await git(['ls-files', '-z', '-s']);
+  if (!listed.ok) return `git ls-files failed: ${listed.stderr || 'unknown error'}`;
+  let staging: string | null = null;
+  try {
+    ensurePrivateDir(join(canonicalHome(), '.ashlr', 'fleet'));
+    ensurePrivateDir(siblingPinsRoot());
+    ensurePrivateDir(join(siblingPinsRoot(), mirrorSlug(pin.nameWithOwner)));
+    staging = join(siblingPinsRoot(), `.staging-${mirrorSlug(pin.nameWithOwner)}-${randomBytes(6).toString('hex')}`);
+    await mkdir(staging, { mode: 0o700 });
+    const source = realpathSync(siblingMirror);
+    let files = 0;
+    let bytes = 0;
+    for (const entry of listed.stdout.split('\0')) {
+      if (entry.length === 0) continue;
+      const tab = entry.indexOf('\t');
+      const [mode, , stage] = entry.slice(0, Math.max(0, tab)).split(' ');
+      const rel = entry.slice(tab + 1);
+      if (tab < 0 || stage !== '0') throw new Error(`unexpected index entry ${JSON.stringify(entry.slice(0, 120))}`);
+      if (isAbsolute(rel) || rel.split('/').some((seg) => seg === '' || seg === '.' || seg === '..' || seg === '.git')) {
+        throw new Error(`refusing tracked path ${JSON.stringify(rel.slice(0, 120))}`);
+      }
+      if (mode === '160000') continue; // a submodule is not part of the package
+      if (++files > SIBLING_PIN_MAX_FILES) throw new Error(`more than ${SIBLING_PIN_MAX_FILES} tracked files`);
+      const from = join(source, rel);
+      const to = join(staging, rel);
+      await mkdir(dirname(to), { recursive: true, mode: 0o700 });
+      const stat = lstatSync(from);
+      if (mode === '120000') {
+        if (!stat.isSymbolicLink()) throw new Error(`${rel} is tracked as a symlink but is not one`);
+        const target = readlinkSync(from);
+        if (isAbsolute(target) || !isInsideDir(resolve(dirname(to), target), staging)) {
+          throw new Error(`${rel} is a symlink that leaves the repository (${JSON.stringify(target.slice(0, 120))})`);
+        }
+        await symlink(target, to);
+      } else if (mode === '100644' || mode === '100755') {
+        if (!stat.isFile()) throw new Error(`${rel} is tracked as a file but is not one`);
+        bytes += stat.size;
+        if (bytes > SIBLING_PIN_MAX_BYTES) throw new Error(`more than ${SIBLING_PIN_MAX_BYTES} bytes of tracked files`);
+        await copyFile(from, to, fsConstants.COPYFILE_EXCL);
+        await chmod(to, mode === '100755' ? 0o755 : 0o644);
+      } else {
+        throw new Error(`${rel} has unsupported mode ${String(mode)}`);
+      }
+    }
+    renameSync(staging, dest);
+    staging = null;
+    return null;
+  } catch (error) {
+    // Lost a race to an identical snapshot: theirs is as good as ours.
+    try {
+      if (lstatSync(dest).isDirectory()) return null;
+    } catch { /* still absent */ }
+    return (error as Error).message;
+  } finally {
+    if (staging) await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * Point `<mirrors root>/<dir>` at the pin (atomic rename of a fresh link).
+ * An entry the fleet did not make there is never replaced; a link that
+ * already resolves `../<dir>` to a DIFFERENT repository is taken over only
+ * when that repository is no longer an enrolled mirror (two siblings cannot
+ * share one name next to the mirrors).
+ */
+function layOutSiblingLink(pin: SiblingPin, enrolledMirrors: ReadonlySet<string>): string | null {
+  const link = siblingLinkPath(pin.dir);
+  const target = siblingLinkTarget(pin);
+  let current: string | null = null;
+  try {
+    const stat = lstatSync(link);
+    if (!stat.isSymbolicLink()) return `${link} exists and is not a link the fleet made; move it aside`;
+    current = readlinkSync(link);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return `${link} cannot be read: ${(error as Error).message}`;
+  }
+  if (current === target) return null;
+  if (current !== null) {
+    const match = SIBLING_LINK_TARGET_RE.exec(current);
+    const holder = match ? slugToIdentity(match[1]!) : null;
+    if (!holder) return `${link} points somewhere the fleet did not put it (${JSON.stringify(current.slice(0, 120))}); move it aside`;
+    if (holder.nameWithOwner.toLowerCase() !== pin.nameWithOwner.toLowerCase() && enrolledMirrors.has(holder.nameWithOwner.toLowerCase())) {
+      return `../${pin.dir} already resolves to ${holder.nameWithOwner}, another enrolled mirror; two sibling repositories cannot share the name ${pin.dir}`;
+    }
+  }
+  const tmp = join(fleetMirrorsRoot(), `.${pin.dir}.link-${randomBytes(6).toString('hex')}`);
+  try {
+    symlinkSync(target, tmp, 'dir');
+    renameSync(tmp, link);
+    return null;
+  } catch (error) {
+    rmSync(tmp, { force: true });
+    return `${link} could not be linked: ${(error as Error).message}`;
+  }
+}
+
+/**
+ * Resolve every `file:../<dir>` dependency of the mirror in `ctx` to a pinned
+ * sibling (see "SIBLING DEPENDENCIES"): the fleet mirror of `<owner>/<dir>`
+ * (same owner — the checkout layout convention of `../<dir>`), which must be
+ * an ENROLLED mirror, current, and whose package.json names the package.
+ * Each is snapshotted at its HEAD under its own lease and `../<dir>` is
+ * linked to the snapshot. Never reads outside ~/.ashlr/fleet.
+ */
+async function resolveSiblingPins(
+  ctx: SyncContext,
+  needed: readonly SiblingDependency[],
+): Promise<{ ok: true; pins: SiblingPin[] } | { ok: false; error: string }> {
+  const byDir = new Map<string, SiblingDependency[]>();
+  for (const sibling of needed) byDir.set(sibling.dir, [...(byDir.get(sibling.dir) ?? []), sibling]);
+  if (byDir.size > MAX_SIBLINGS) {
+    return { ok: false, error: `package.json installs from ${byDir.size} sibling repositories; the fleet pins at most ${MAX_SIBLINGS}` };
+  }
+  // Enrolled FLEET MIRRORS only, by canonical identity: a checkout of Mason's
+  // (enrolled or not) never counts, and is never read.
+  const enrolledMirrors = new Map<string, string>();
+  try {
+    for (const path of listEnrolled()) {
+      const name = mirrorNameForPath(path);
+      if (name) enrolledMirrors.set(name.toLowerCase(), name);
+    }
+  } catch (error) {
+    return { ok: false, error: `the enrollment registry could not be read: ${(error as Error).message}` };
+  }
+  const pins: SiblingPin[] = [];
+  for (const [dir, rows] of [...byDir].sort(([a], [b]) => a.localeCompare(b))) {
+    const first = rows[0]!;
+    const what = `package.json installs ${first.dependency} from ${JSON.stringify(first.spec.slice(0, 120))}`;
+    if (!isLayableSiblingDir(dir)) {
+      return { ok: false, error: `${what}: ../${dir} is not a plain repository name the fleet can lay out next to its mirrors — vendor it` };
+    }
+    const wanted = parseNameWithOwner(`${ctx.identity.owner}/${dir}`);
+    if (!wanted || wanted.nameWithOwner.toLowerCase() === ctx.identity.nameWithOwner.toLowerCase()) {
+      return { ok: false, error: `${what}: ../${dir} does not name a sibling repository` };
+    }
+    const enrolledName = enrolledMirrors.get(wanted.nameWithOwner.toLowerCase());
+    if (!enrolledName) {
+      return {
+        ok: false,
+        error: `${what}: depends on ../${dir} which is not enrolled — enroll it or vendor it (the fleet resolves ../${dir} to ${wanted.nameWithOwner}'s fleet mirror, so ${wanted.nameWithOwner} must be in the grant)`,
+      };
+    }
+    const sibling = requireIdentity(enrolledName);
+    const siblingPath = mirrorPathFor(sibling.nameWithOwner);
+    const git = (args: readonly string[]): Promise<GitRun> => runMirrorRepoGit(siblingPath, args, {
+      timeoutMs: MIRROR_LOCAL_TIMEOUT_MS,
+      allowLocalOrigin: ctx.deps.allowLocalOrigin === true,
+      ...(ctx.deps.signal ? { signal: ctx.deps.signal } : {}),
+    });
+    const leased = await withRepoLease(mirrorLeaseKey(siblingPath), async (): Promise<{ ok: true; pin: SiblingPin } | { ok: false; error: string }> => {
+      if (inspectMirrorLayout(siblingPath).state !== 'mirror') {
+        return { ok: false, error: `${what}: ../${dir} resolves to ${sibling.nameWithOwner}, which is enrolled but has no fleet mirror yet (it is created on its first sync)` };
+      }
+      const state = readMirrorState(sibling.nameWithOwner);
+      if (!state || state.lastSyncOk !== true || !state.headSha) {
+        return { ok: false, error: `${what}: ${sibling.nameWithOwner}'s fleet mirror is not current${state?.lastError ? ` (${state.lastError.slice(0, 200)})` : ''}` };
+      }
+      const head = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
+      if (!head.ok || head.stdout.trim() !== state.headSha) {
+        return { ok: false, error: `${what}: ${sibling.nameWithOwner}'s fleet mirror is not at its last synced commit ${state.headSha.slice(0, 12)}` };
+      }
+      const status = await git(['status', '--porcelain', '--untracked-files=no']);
+      if (!status.ok || status.stdout.trim().length > 0) {
+        return { ok: false, error: `${what}: ${sibling.nameWithOwner}'s fleet mirror does not match its commit ${state.headSha.slice(0, 12)}` };
+      }
+      // Proof it is the intended package, not merely a same-named repo.
+      const packageName = readPackageName(siblingPath);
+      const wrong = rows.find((row) => row.dependency !== packageName);
+      if (wrong) {
+        return { ok: false, error: `${what}: ${sibling.nameWithOwner}'s package.json is named ${JSON.stringify(packageName)}, not ${JSON.stringify(wrong.dependency)}` };
+      }
+      const pin: SiblingPin = { dir, nameWithOwner: sibling.nameWithOwner, headSha: state.headSha, dependencies: rows.map((row) => row.dependency) };
+      noteTickPhase('mirror prep', `${ctx.identity.nameWithOwner}: pinning ../${dir} to ${sibling.nameWithOwner}@${state.headSha.slice(0, 12)}`);
+      const snapshot = await ensureSiblingSnapshot(siblingPath, pin, git);
+      if (snapshot) return { ok: false, error: `${what}: could not pin ${sibling.nameWithOwner}@${state.headSha.slice(0, 12)}: ${snapshot}` };
+      return { ok: true, pin };
+    }, {
+      waitMs: ctx.deps.siblingLeaseWaitMs ?? MIRROR_SIBLING_LEASE_WAIT_MS,
+      ...(ctx.deps.signal ? { signal: ctx.deps.signal } : {}),
+    });
+    if (!leased.ok) return { ok: false, error: `${what}: ${sibling.nameWithOwner}'s fleet mirror stayed busy (${leased.reason})` };
+    if (!leased.value.ok) return leased.value;
+    pins.push(leased.value.pin);
+  }
+  const enrolledSet = new Set(enrolledMirrors.keys());
+  for (const pin of pins) {
+    const laid = layOutSiblingLink(pin, enrolledSet);
+    if (laid) return { ok: false, error: `could not lay out ../${pin.dir}: ${laid}` };
+  }
+  return { ok: true, pins: sortPins(pins) };
+}
+
+/**
+ * Remove snapshots of the siblings in `installed` that nothing uses any more:
+ * not a current `../<dir>` link target and not recorded by any mirror's
+ * installed deps (a dependent not yet reinstalled still needs its old pin).
+ * `self` just installed against `installed` — its state record, not yet
+ * rewritten, is read as those pins. Also clears crashed staging dirs. Best
+ * effort, async; never throws.
+ */
+async function pruneSiblingPins(self: string, installed: readonly SiblingPin[]): Promise<void> {
+  try {
+    const keep = new Set<string>(installed.map((pin) => `${mirrorSlug(pin.nameWithOwner)}/${pin.headSha}`));
+    for (const mirror of listMirrors()) {
+      if (mirror.nameWithOwner.toLowerCase() === self.toLowerCase()) continue;
+      for (const pin of mirror.state?.deps?.siblings ?? []) keep.add(`${mirrorSlug(pin.nameWithOwner)}/${pin.headSha}`);
+    }
+    for (const entry of readdirSync(fleetMirrorsRoot())) {
+      if (entry.startsWith('.')) continue;
+      try {
+        const match = SIBLING_LINK_TARGET_RE.exec(readlinkSync(join(fleetMirrorsRoot(), entry)));
+        if (match) keep.add(`${match[1]}/${match[2]}`);
+      } catch { /* not a link */ }
+    }
+    const root = siblingPinsRoot();
+    for (const entry of readdirSync(root)) {
+      if (entry.startsWith('.staging-')) {
+        const stat = lstatSync(join(root, entry));
+        if (Date.now() - stat.mtimeMs > SIBLING_STAGING_STALE_MS) await rm(join(root, entry), { recursive: true, force: true });
+      }
+    }
+    for (const nameWithOwner of new Set(installed.map((pin) => pin.nameWithOwner))) {
+      const slug = mirrorSlug(nameWithOwner);
+      let shas: string[] = [];
+      try {
+        shas = readdirSync(join(root, slug));
+      } catch {
+        continue;
+      }
+      for (const sha of shas) {
+        if (!SHA_RE.test(sha) || keep.has(`${slug}/${sha}`)) continue;
+        await rm(join(root, slug, sha), { recursive: true, force: true, maxRetries: 2 });
+      }
+    }
+  } catch { /* best effort: an unpruned pin is only disk */ }
+}
+
+/**
+ * Tick order with siblings first: returns `repos` topologically ordered so a
+ * sibling syncs before the repos that install from it, and for each repo the
+ * siblings (in this tick) it must wait for. Reads only the mirrors' current
+ * package.json; a cycle keeps the original order and never waits backwards
+ * (a repo only ever waits for repos ordered BEFORE it — no deadlock).
+ */
+function orderForSiblings(repos: readonly string[]): { order: string[]; waitsFor: Map<string, string[]> } {
+  const byLower = new Map(repos.map((repo) => [repo.toLowerCase(), repo]));
+  const edges = new Map<string, string[]>();
+  for (const repo of repos) {
+    const identity = parseNameWithOwner(repo);
+    let needs: string[] = [];
+    try {
+      if (identity) {
+        needs = siblingDependenciesOf(mirrorPathFor(identity.nameWithOwner))
+          .map((row) => byLower.get(`${identity.owner}/${row.dir}`.toLowerCase()))
+          .filter((name): name is string => name !== undefined && name !== repo);
+      }
+    } catch { /* unknown ⇒ no ordering constraint */ }
+    edges.set(repo, [...new Set(needs)]);
+  }
+  const order: string[] = [];
+  const state = new Map<string, 'visiting' | 'done'>();
+  const visit = (repo: string): void => {
+    if (state.has(repo)) return;
+    state.set(repo, 'visiting');
+    for (const next of edges.get(repo) ?? []) visit(next);
+    state.set(repo, 'done');
+    order.push(repo);
+  };
+  for (const repo of repos) visit(repo);
+  const position = new Map(order.map((repo, index) => [repo, index]));
+  const waitsFor = new Map<string, string[]>();
+  for (const repo of order) {
+    waitsFor.set(repo, (edges.get(repo) ?? []).filter((dep) => (position.get(dep) ?? Infinity) < position.get(repo)!));
+  }
+  return { order, waitsFor };
 }
 
 /**
@@ -1381,7 +1996,18 @@ async function prepareMirrorDependencies(
   previous: MirrorDepsState | null,
   nowIso: string,
 ): Promise<{ ok: true; deps: MirrorDepsState } | { ok: false; deps: MirrorDepsState; error: string }> {
-  const plan = planMirrorDependencies(ctx.path);
+  const repo = ctx.identity.nameWithOwner;
+  // 3.14: `file:../<dir>` siblings are pinned (and `../<dir>` laid out)
+  // BEFORE planning, so the plan's key carries the pins.
+  const needed = siblingDependenciesOf(ctx.path);
+  let plan: MirrorDependencyPlan;
+  if (needed.length > 0) {
+    noteTickPhase('mirror prep', `${repo}: resolving ${needed.length} sibling dependenc${needed.length === 1 ? 'y' : 'ies'}`);
+    const resolved = await resolveSiblingPins(ctx, needed);
+    plan = resolved.ok ? planMirrorDependencies(ctx.path, resolved.pins) : { kind: 'refuse', reason: resolved.error };
+  } else {
+    plan = planMirrorDependencies(ctx.path);
+  }
   const cleanAll = async (): Promise<string | null> => {
     const clean = await git(ctx, ['clean', '-ffdxq']);
     return clean.ok ? null : `clean before the dependency install failed: ${clean.stderr || 'git clean failed'}`;
@@ -1430,7 +2056,6 @@ async function prepareMirrorDependencies(
       deps: { status: 'failed', manager: plan.manager, key: plan.key, at: failedAtIso, nodeModulesIno: null, nodeModulesMtimeMs: null, error: scrubbed },
     };
   };
-  const repo = ctx.identity.nameWithOwner;
   noteTickPhase('mirror prep', `${repo}: cleaning before the ${plan.manager} install`);
   const cleaned = await cleanAll();
   if (cleaned) return failed(cleaned);
@@ -1458,10 +2083,28 @@ async function prepareMirrorDependencies(
   // (npm ci creates no node_modules for it) — recorded as ino null.
   // The install must not have rewritten the committed lockfile (frozen flags
   // say it cannot; this proves it) — verification must see origin's tree.
-  const after = planMirrorDependencies(ctx.path);
+  const siblings = plan.siblings ?? [];
+  const after = planMirrorDependencies(ctx.path, siblings);
   if (after.kind !== 'install' || after.key !== plan.key) {
     return failed(`the ${plan.manager} install changed ${plan.lockfile} or package.json; the mirror is not origin's tree`);
   }
+  // A `../<dir>` link moved during the install (another dependent pinned a
+  // newer sibling commit): what was installed may not be the pin. Not a
+  // failure of this lockfile — retried on the very next sync (no key, so no
+  // backoff).
+  const moved = siblings.find((pin) => {
+    try {
+      return readlinkSync(siblingLinkPath(pin.dir)) !== siblingLinkTarget(pin);
+    } catch {
+      return true;
+    }
+  });
+  if (moved) {
+    await rm(join(ctx.path, 'node_modules'), { recursive: true, force: true, maxRetries: 2 }).catch(() => undefined);
+    const error = `../${moved.dir} moved off ${moved.nameWithOwner}@${moved.headSha.slice(0, 12)} during the ${plan.manager} install; reinstalling on the next sync`;
+    return { ok: false, error, deps: { status: 'failed', manager: plan.manager, key: null, at: nowIso, nodeModulesIno: null, nodeModulesMtimeMs: null, error } };
+  }
+  if (siblings.length > 0) await pruneSiblingPins(repo, siblings);
   return {
     ok: true,
     deps: {
@@ -1472,6 +2115,7 @@ async function prepareMirrorDependencies(
       nodeModulesIno: installed === 'absent' ? null : installed.ino,
       nodeModulesMtimeMs: installed === 'absent' ? null : installed.mtimeMs,
       error: null,
+      ...(siblings.length > 0 ? { siblings: sortPins(siblings) } : {}),
     },
   };
 }
@@ -1798,7 +2442,21 @@ export async function prepareMirrorsForTick(
       result.failed.push({ nameWithOwner, path, reason: boundedScrub(reason) });
     };
     const inner: MirrorDeps = { ...deps, signal: controller.signal };
-    const queue = [...repos];
+    // 3.14: siblings sync before the repos that install from them, and a
+    // dependent starts only once its siblings' syncs this tick have settled,
+    // so it pins their fresh HEAD instead of waiting on their lease.
+    const { order, waitsFor } = orderForSiblings(repos);
+    const settled = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+    for (const repo of order) {
+      let resolveSettled!: () => void;
+      const promise = new Promise<void>((done) => { resolveSettled = done; });
+      settled.set(repo, { promise, resolve: resolveSettled });
+    }
+    const aborted = new Promise<void>((done) => {
+      if (controller.signal.aborted) done();
+      else controller.signal.addEventListener('abort', () => done(), { once: true });
+    });
+    const queue = [...order];
     const inFlight = new Set<string>();
     const workers = Array.from(
       { length: Math.min(queue.length, Math.max(1, Math.floor(deps.concurrency ?? MIRROR_TICK_CONCURRENCY))) },
@@ -1811,12 +2469,15 @@ export async function prepareMirrorsForTick(
           inFlight.add(next);
           let synced: MirrorSyncResult;
           try {
+            const before = (waitsFor.get(next) ?? []).map((sibling) => settled.get(sibling)!.promise);
+            if (before.length > 0) await Promise.race([Promise.all(before), aborted]);
             synced = await ensureMirror({ nameWithOwner: next }, inner);
           } catch (error) {
             // ensureMirror never throws by contract; a bug must not sink the others.
             synced = { ok: false, nameWithOwner: next, path: pathOf(next), base: null, headSha: null, created: false, changed: false, quarantinedTo: null, auth: null, reason: (error as Error).message, durationMs: 0 };
           } finally {
             inFlight.delete(next);
+            settled.get(next)?.resolve();
           }
           if (stopWaiting) return;
           if (synced.ok && synced.base && synced.headSha) {
