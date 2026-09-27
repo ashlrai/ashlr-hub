@@ -358,7 +358,7 @@ event permission the page already has (no new capability, no new command).
 |---|---|
 | `resident-start` | Reads `ashlr authority resident status --json`, shows a **native** confirm dialog (grant, release, plist, budget, the exact command), then runs `ashlr authority resident start` with a one-time gesture token |
 | `resident-restart` | The same dialog, then `resident stop` + `resident start` |
-| `resident-stop` | `ashlr authority resident stop` (lowering: no dialog, no token) |
+| `resident-stop` | A native confirm, then `ashlr authority resident stop` (lowering: no gesture token) |
 | `custody-install` | `checkout` (an ashlr-hub checkout the server found among the enrolled repos; `~/` allowed). Native re-validates it (absolute, `scripts/install-custody.sh` a regular file, `tools/custody/Package.swift`, an `ashlrai/ashlr-hub` remote), shows the command and the script's sha256 in a native dialog, then asks **macOS** for an administrator (`osascript … with administrator privileges`, every value passed as argv through `quoted form of`) |
 
 **Native → page.** `window.__ASHLR_FLEET_EVENT__(detail)` (non-writable) →

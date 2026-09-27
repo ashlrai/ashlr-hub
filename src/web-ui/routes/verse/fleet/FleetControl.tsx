@@ -166,17 +166,8 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
     runNative('resident-restart');
   }
   function stopDaemon(): void {
-    actions.act(async () => {
-      runNative('resident-stop');
-      return null;
-    }, 'Stop the fleet daemon', {
-      confirm: {
-        title: 'Stop the fleet daemon?',
-        body: 'The resident daemon (ai.ashlr.daemon) is booted out and its launchd plist removed. Stop, the grant and the switch are unchanged; Start brings it back.',
-        confirmLabel: 'Stop daemon',
-        destructive: true,
-      },
-    });
+    // The desktop app asks in its own native dialog (lowering: no token).
+    runNative('resident-stop');
   }
   function editGrant(): void {
     const active = state?.grant.state === 'active' || state?.grant.state === 'paused' || state?.grant.state === 'expired';
@@ -315,7 +306,7 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
                     <Button size="sm" variant="ghost" icon={<IconRefresh />} onClick={restartDaemon} disabled={busy}>
                       Restart
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={stopDaemon} disabled={busy || actions.readOnly}>
+                    <Button size="sm" variant="ghost" onClick={stopDaemon} disabled={busy}>
                       Stop daemon
                     </Button>
                   </>

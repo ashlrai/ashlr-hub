@@ -16,7 +16,7 @@
 //! |--------------------|------------------------------------------------------------------------|
 //! | `resident-start`   | native confirm → `ashlr authority resident start` with a gesture token |
 //! | `resident-restart` | native confirm → `resident stop`, then `resident start` (gesture)       |
-//! | `resident-stop`    | `ashlr authority resident stop` (lowering: no confirm, no gesture)      |
+//! | `resident-stop`    | native confirm → `ashlr authority resident stop` (lowering: no gesture) |
 //! | `custody-install`  | native confirm → macOS admin prompt → `install-custody.sh` as root       |
 //!
 //! Native answers through `window.__ASHLR_FLEET_EVENT__({ id, op, phase, … })`,
@@ -606,6 +606,28 @@ fn resident_stop(app: &AppHandle, req: &FleetRequest) {
         Ok(cli) => cli,
         Err(message) => return send(app, event(req, Phase::Failed, message)),
     };
+    // Lowering needs no gesture token, but it is still the operator's call:
+    // one native confirm naming exactly what runs (and what stays).
+    send(
+        app,
+        event(req, Phase::Confirming, "Waiting for you to confirm…"),
+    );
+    let confirmed = app
+        .dialog()
+        .message(format!(
+            "The resident daemon (ai.ashlr.daemon) is booted out of launchd and its plist removed. Stop, the grant and the switch are unchanged; Start in the Fleet tab brings it back.\n\nRuns: {}",
+            resident_command(&cli, "stop")
+        ))
+        .title("Stop the fleet daemon?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Stop daemon".to_string(),
+            "Cancel".to_string(),
+        ))
+        .blocking_show();
+    if !confirmed {
+        return send(app, event(req, Phase::Cancelled, "Nothing was changed."));
+    }
     let mut running = event(req, Phase::Running, "Stopping the fleet daemon…");
     running.command = Some(resident_command(&cli, "stop"));
     send(app, running);
