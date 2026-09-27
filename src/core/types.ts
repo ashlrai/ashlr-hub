@@ -1692,8 +1692,10 @@ export interface AshlrConfig {
     /**
      * Let the fleet launch Devin sessions without a click (origin `fleet`).
      * Default false. Even when true a fleet launch also needs a live standing
-     * grant with the repo in it and the budget's reserve intact, and every
-     * Devin PR is shadow-only at the standing gates (never auto-merged).
+     * grant whose current stage names the `devin` engine (producer-only Devin
+     * seat) and the repo, the budget mode, and the Devin budget's reserve and
+     * fleet caps (devin/fleet-launcher.ts). A Devin PR merges only when two
+     * judges from different families (never Devin) ship it (merge-gates.ts G6).
      */
     fleet?: boolean;
     /**

@@ -63,17 +63,24 @@ export function devinBudgetView(tasks: readonly DevinTaskV1[], budget: DevinBudg
   let usedToday = 0;
   let sessionsToday = 0;
   let running = 0;
+  let fleetRunning = 0;
+  let fleetSessionsToday = 0;
   for (const task of tasks) {
     const taskUsed = devinTaskAcuUsed(task);
     const headroom = devinTaskAcuHeadroom(task);
     used += taskUsed;
     inFlight += headroom;
     const active = devinTaskActive(task);
+    // Only sessions the FLEET launched count against the fleet's own caps;
+    // Mason's (chat / CLI / operator) count against the ACU budget only.
+    const fleet = task.origin === 'fleet';
     if (active) running += 1;
+    if (active && fleet) fleetRunning += 1;
     const spentSession = task.sessionId !== null || active;
     const at = Date.parse(task.launchedAt ?? task.createdAt);
     if (spentSession && Number.isFinite(at) && localDayKey(new Date(at)) === today) {
       sessionsToday += 1;
+      if (fleet) fleetSessionsToday += 1;
       usedToday += taskUsed;
     }
   }
@@ -104,6 +111,14 @@ export function devinBudgetView(tasks: readonly DevinTaskV1[], budget: DevinBudg
   if (canLaunch.ok && free - perSession < budget.reserveAcu) {
     // The reserve is the operator's: the fleet stops BEFORE a launch would dip into it.
     canFleetLaunch = refuse(`Another fleet session would dip into the ${acu(budget.reserveAcu)} kept for you.`);
+  } else if (canLaunch.ok && fleetRunning >= budget.fleetMaxConcurrent) {
+    canFleetLaunch = refuse(budget.fleetMaxConcurrent === 0
+      ? 'The fleet may run no Devin sessions at once (fleet concurrency is 0).'
+      : `${fleetRunning} of ${budget.fleetMaxConcurrent} fleet Devin ${plural(budget.fleetMaxConcurrent, 'session is', 'sessions are')} already running.`);
+  } else if (canLaunch.ok && fleetSessionsToday >= budget.fleetMaxSessionsPerDay) {
+    canFleetLaunch = refuse(budget.fleetMaxSessionsPerDay === 0
+      ? 'The fleet may launch no Devin sessions today (fleet daily cap is 0).'
+      : `${fleetSessionsToday} of ${budget.fleetMaxSessionsPerDay} fleet Devin ${plural(budget.fleetMaxSessionsPerDay, 'session', 'sessions')} used today.`);
   }
 
   return {
@@ -116,6 +131,8 @@ export function devinBudgetView(tasks: readonly DevinTaskV1[], budget: DevinBudg
     sessionsToday,
     running,
     paused,
+    fleetRunning,
+    fleetSessionsToday,
     canLaunch,
     canFleetLaunch,
     estimateNote: `ACUs come from Devin's own session readings; dollars are an estimate at $${round2(budget.usdPerAcu)} per ACU. Check real usage on app.devin.ai.`,

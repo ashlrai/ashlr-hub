@@ -165,6 +165,12 @@ export interface DevinTaskV1 {
   intake?: CloudIntakeMemo;
   /** Backlog / fleet work item this task came from, if any. */
   backlogItemId: string | null;
+  /**
+   * 3.15: messages Mason sent to the session from Verse (messageDevinTask).
+   * Absent on tasks written before 3.15 (read as 0). A count only — the
+   * message text is never stored.
+   */
+  messagesSent?: number;
 }
 
 export interface DevinBudgetV1 {
@@ -185,6 +191,14 @@ export interface DevinBudgetV1 {
   pauseAtFraction: number;
   maxConcurrent: number;
   maxSessionsPerDay: number;
+  /**
+   * 3.15 fleet launcher: at most this many FLEET-launched sessions in flight
+   * at once (default 1). Mason's own sessions (chat / CLI / operator) never
+   * count against it — only against the ACU budget itself.
+   */
+  fleetMaxConcurrent: number;
+  /** 3.15 fleet launcher: at most this many fleet-launched sessions per local day (default 3). 0 = none. */
+  fleetMaxSessionsPerDay: number;
   updatedAt: string;
 }
 
@@ -199,6 +213,8 @@ export const DEFAULT_DEVIN_BUDGET: Omit<DevinBudgetV1, 'updatedAt'> = Object.fre
   pauseAtFraction: 0.9,
   maxConcurrent: 2,
   maxSessionsPerDay: 10,
+  fleetMaxConcurrent: 1,
+  fleetMaxSessionsPerDay: 3,
 });
 
 export interface DevinGate {
@@ -218,8 +234,11 @@ export interface DevinBudgetView {
   running: number;
   /** Paused at the threshold (pauseAtFraction). */
   paused: boolean;
+  /** 3.15: fleet-launched sessions in flight / launched today (subsets of running / sessionsToday). */
+  fleetRunning: number;
+  fleetSessionsToday: number;
   canLaunch: DevinGate;
-  /** The fleet's gate: canLaunch plus the operator's reserve. */
+  /** The fleet's gate: canLaunch plus the operator's reserve and the fleet's own concurrency / daily caps. */
   canFleetLaunch: DevinGate;
   estimateNote: string;
   usageUrl: typeof DEVIN_USAGE_URL;
@@ -300,4 +319,4 @@ export interface DevinLaunchResponse {
 /** POST /api/verse/devin/budget — any subset; validated and clamped. */
 export type DevinBudgetUpdate = Partial<Pick<DevinBudgetV1,
   'acuBudgetTotal' | 'acuSpentAdjustment' | 'usdPerAcu' | 'maxAcuPerSession' | 'maxAcuPerDay' | 'reserveAcu' | 'pauseAtFraction'
-  | 'maxConcurrent' | 'maxSessionsPerDay'>>;
+  | 'maxConcurrent' | 'maxSessionsPerDay' | 'fleetMaxConcurrent' | 'fleetMaxSessionsPerDay'>>;

@@ -102,6 +102,7 @@ import {
 import type { AutonomousBestOfNPlan } from '../run/best-of-n-policy.js';
 import type { MirrorTickPreparation } from './mirrors.js';
 import type { CloudIntakeMirror, CloudIntakeResult } from './cloud-intake.js';
+import type { DevinFleetTickResult } from '../devin/fleet-launcher.js';
 import { overnightRunInProgress } from '../daemon/overnight-status.js';
 import { readLeaderDirectives } from '../vision/leader-apply.js';
 import { killSwitchOn, listEnrolled } from '../sandbox/policy.js';
@@ -281,6 +282,14 @@ export interface LiveHooksDeps {
    * standing pass (later this tick) judges like any other.
    */
   ingestCloudPrs(cfg: AshlrConfig, policy: EffectivePolicy, mirrors: readonly CloudIntakeMirror[]): Promise<CloudIntakeResult>;
+  /**
+   * 3.15 devin/fleet-launcher.ts: refresh the Devin sessions' status / ACUs
+   * (so the budget's in-flight and concurrency counts are current), then make
+   * ONE fleet decision — launch Devin on a well-scoped backlog item under the
+   * grant, or record why not. Every gate (KILL, grant, opt-in, Devin engine
+   * authorization, budget mode, ACU budget and fleet caps) is re-checked inside.
+   */
+  launchDevinFleet(opts: { refresh: boolean }): Promise<DevinFleetTickResult>;
   /** U6 `reconcileAutonomousEnrollment`, applied only when its plan is non-empty. */
   reconcileEnrollment(policy: EffectivePolicy, enrolled: readonly string[]): Promise<EnrollmentReconcile>;
   /** U4 `sweepExpiredRepoHolds`. */
@@ -321,6 +330,10 @@ export const HOLD_SWEEP_INTERVAL_MS = 10 * 60_000;
 export const LEADER_TICK_TIMEOUT_MS = 15_000;
 /** Bound on the cloud-PR intake per standing tick (it keeps running if it overruns; the tick does not wait). */
 export const CLOUD_INTAKE_TICK_TIMEOUT_MS = 90_000;
+/** Bound on the Devin fleet step per standing tick (refresh + at most one launch). */
+export const DEVIN_FLEET_TICK_TIMEOUT_MS = 60_000;
+/** Devin session status is re-read by the daemon at most this often (the Verse server polls it too when open). */
+export const DEVIN_FLEET_REFRESH_INTERVAL_MS = 2 * 60_000;
 /** An idle / overnight tick asks the experiment queue at most this often. */
 export const EXPERIMENT_POLL_INTERVAL_MS = 5 * 60_000;
 /** In-memory dedupe of credited verification verdicts (the ledger read is seq-based; this only guards re-reads). */
@@ -683,6 +696,14 @@ export function defaultLiveHooksDeps(): LiveHooksDeps {
         return cloud;
       }
     },
+    launchDevinFleet: async ({ refresh }) => {
+      if (refresh) {
+        try {
+          await (await import('../devin/tracker.js')).refreshDevinTasks();
+        } catch { /* a stale reading only makes the budget gate stricter (fail closed) */ }
+      }
+      return (await import('../devin/fleet-launcher.js')).runDevinFleetTick();
+    },
     reconcileEnrollment: reconcileEnrollmentDefault,
     sweepHolds: (nowMs) => {
       const swept = sweepExpiredRepoHolds({ nowMs });
@@ -904,6 +925,8 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
   const installCache = new Map<string, { atMs: number; value: boolean }>();
   let lastHoldSweepMs = Number.NEGATIVE_INFINITY;
   let leaderInFlight: Promise<unknown> | null = null;
+  let lastDevinRefreshMs = Number.NEGATIVE_INFINITY;
+  let devinInFlight: Promise<unknown> | null = null;
   let experiment: { controller: AbortController; promise: Promise<void> } | null = null;
   let lastExperimentPollMs = Number.NEGATIVE_INFINITY;
   let lastFleetQueueDepth = 0;
@@ -1229,6 +1252,39 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
           }
         } catch (err) {
           deps.audit({ action: 'daemon:cloud-intake', repo: null, summary: `the cloud-PR intake failed: ${describeError(err)}`, result: 'error' });
+        }
+      }
+
+      // ── Devin fleet launcher (3.15) ──────────────────────────────────────
+      // Only when Mason turned the lane on AND opted the fleet in, never under
+      // KILL, never on a dry run, one step in flight at a time. The step
+      // re-checks KILL, the live grant (its `devin` engine + producer seat),
+      // the budget mode and the ACU budget / fleet caps itself, launches at
+      // most ONE session, and ledgers every decision. Bounded; a failure is
+      // audited and never holds the tick.
+      if (!hookCtx.dryRun && devinInFlight === null && cfg.devin?.enabled === true && cfg.devin?.fleet === true && !deps.killActive()) {
+        const refresh = nowMs - lastDevinRefreshMs >= DEVIN_FLEET_REFRESH_INTERVAL_MS;
+        if (refresh) lastDevinRefreshMs = nowMs;
+        const devinRun = deps.launchDevinFleet({ refresh });
+        devinInFlight = devinRun.finally(() => {
+          devinInFlight = null;
+        }).catch(() => undefined);
+        try {
+          const outcome = await withTimeout(devinRun, DEVIN_FLEET_TICK_TIMEOUT_MS);
+          if (outcome === 'timeout') {
+            deps.audit({ action: 'daemon:devin-fleet', repo: null, summary: `the Devin fleet step exceeded ${DEVIN_FLEET_TICK_TIMEOUT_MS} ms; the tick continues without waiting`, result: 'error' });
+          } else if (outcome.outcome !== 'held') {
+            deps.audit({
+              action: 'daemon:devin-fleet',
+              repo: outcome.repo,
+              summary: outcome.outcome === 'launched'
+                ? `Devin launched ${outcome.taskId} for backlog item ${outcome.itemId}`
+                : `Devin launch for backlog item ${outcome.itemId} did not start: ${outcome.reason}`,
+              result: outcome.outcome === 'launched' ? 'ok' : 'refused',
+            });
+          }
+        } catch (err) {
+          deps.audit({ action: 'daemon:devin-fleet', repo: null, summary: `the Devin fleet step failed: ${describeError(err)}`, result: 'error' });
         }
       }
 

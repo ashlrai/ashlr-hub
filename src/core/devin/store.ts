@@ -193,7 +193,8 @@ export function isDevinTask(value: unknown): value is DevinTaskV1 {
     && (value['deliveryPin'] === undefined || isPin(value['deliveryPin'], repo))
     && (value['supersededBy'] === undefined || isSupersededBy(value['supersededBy'], repo))
     && (value['intake'] === undefined || isIntakeMemo(value['intake']))
-    && isNullableString(value['backlogItemId']);
+    && isNullableString(value['backlogItemId'])
+    && (value['messagesSent'] === undefined || (Number.isSafeInteger(value['messagesSent']) && (value['messagesSent'] as number) >= 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +293,9 @@ function mergeBudget(base: DevinBudgetV1, input: unknown): DevinBudgetV1 {
     pauseAtFraction: clampNumber(src['pauseAtFraction'], base.pauseAtFraction, 0.5, 1),
     maxConcurrent: clampCount(src['maxConcurrent'], base.maxConcurrent, 1, L.maxConcurrent),
     maxSessionsPerDay: clampCount(src['maxSessionsPerDay'], base.maxSessionsPerDay, 0, L.maxSessionsPerDay),
+    // 0 is a valid choice for both: "the fleet launches no Devin sessions".
+    fleetMaxConcurrent: clampCount(src['fleetMaxConcurrent'], base.fleetMaxConcurrent, 0, L.maxConcurrent),
+    fleetMaxSessionsPerDay: clampCount(src['fleetMaxSessionsPerDay'], base.fleetMaxSessionsPerDay, 0, L.maxSessionsPerDay),
     updatedAt: isIso(src['updatedAt']) ? (src['updatedAt'] as string) : base.updatedAt,
   };
 }

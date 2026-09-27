@@ -16,7 +16,7 @@
  * a failure whose spend counts the full cap until the operator checks
  * app.devin.ai (budget.ts, fail closed).
  */
-import { currentStandingPolicy } from '../authority/effective-config.js';
+import { currentStandingPolicy, standingAuthorizesDevin } from '../authority/effective-config.js';
 import type { EffectivePolicy } from '../authority/types.js';
 import { isSafeBranchName } from '../cloud/checkout.js';
 import { CLOUD_REPO_PATTERN } from '../cloud/store.js';
@@ -164,9 +164,11 @@ export const DEVIN_CHAT_VERDICT: ReadinessVerdict = Object.freeze({
 
 /**
  * The fleet verdict: why the fleet may or may not launch Devin sessions now.
- * Ready needs the lane on, a key, Mason's opt-in, a live standing grant and
- * the budget's reserve — and even then Devin PRs are shadow-only at the
- * standing gates (never merged by the fleet).
+ * Ready needs the lane on, a key, Mason's opt-in, a live standing grant whose
+ * current stage names the `devin` engine with a producer-only Devin seat
+ * (3.15 — its own engine identity; see authority/effective-config.ts
+ * standingAuthorizesDevin) and the budget's reserve and fleet caps. Devin PRs
+ * then merge only under the two-judge rule (merge-gates.ts G6).
  */
 export function devinFleetVerdict(input: {
   enabled: boolean;
@@ -183,8 +185,13 @@ export function devinFleetVerdict(input: {
     return v(false, 'off', 'Off', 'The fleet may not launch Devin sessions; you can still run them yourself.', commandFix('Let the fleet use Devin', 'ashlr devin fleet on'));
   }
   if (!input.policy) return v(false, 'warn', 'Waiting', 'No standing grant is in force.');
+  const granted = standingAuthorizesDevin(input.policy);
+  if (!granted.ok) {
+    return v(false, 'warn', 'Not in the grant', `${granted.reason} Draft a new grant (or re-approve) with the Devin fleet opt-in on.`,
+      commandFix('Draft a grant that includes Devin', 'ashlr authority draft'));
+  }
   if (!input.fleetGate.ok) return v(false, 'warn', 'Paused', input.fleetGate.reason ?? 'The Devin budget refused another fleet session.');
-  return v(true, 'ok', 'Ready', 'Devin PRs go through the standing gates and are shadow-only: the fleet never merges them.');
+  return v(true, 'ok', 'Ready', 'The fleet may launch Devin on well-scoped backlog work. Its PRs pass every standing gate and merge only when two judges from different families ship them.');
 }
 
 /** "Fleet: Ready — …" for the CLI. */
@@ -369,6 +376,11 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
     const policy = safePolicy(deps);
     if (!policy) return refusal('No standing grant is in force, so the fleet may not launch Devin sessions.', 'not-enabled');
     if (!repoPolicyFor(policy, repo)) return refusal(`${repo} is not in the standing grant.`, 'not-enabled');
+    // 3.15: Devin's own engine identity — the grant must name `devin` in its
+    // current stage AND give the Devin seat the producer role. A grant that
+    // authorizes Claude (or anything else) never authorizes Devin.
+    const granted = standingAuthorizesDevin(policy);
+    if (!granted.ok) return refusal(granted.reason, 'not-enabled');
   }
   const connected = await connectedClient(deps);
   if ('error' in connected) return refusal(connected.error, connected.failure);
@@ -508,11 +520,13 @@ export async function messageDevinTask(taskId: string, message: string, deps: De
     return { ok: false, status: 502, error: error instanceof DevinApiError ? error.message : devinFailureSentence('unknown') };
   }
   const current = readDevinTask(taskId) ?? task;
-  const next: DevinTaskV1 = current.state === 'blocked'
-    ? { ...current, state: 'running', stateReason: 'You replied; Devin is working again.' }
-    : current;
+  // 3.15: count what Verse sent (the evidence timeline shows it); never the text.
+  const counted: DevinTaskV1 = { ...current, messagesSent: (current.messagesSent ?? 0) + 1 };
+  const next: DevinTaskV1 = counted.state === 'blocked'
+    ? { ...counted, state: 'running', stateReason: 'You replied; Devin is working again.' }
+    : counted;
   try {
-    if (next !== current) writeDevinTask(next);
+    writeDevinTask(next);
   } catch { /* the message went; the tracker catches up */ }
   return { ok: true, task: next };
 }

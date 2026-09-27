@@ -13,7 +13,8 @@
  *   ashlr devin refresh [--json]
  *   ashlr devin message <task-id> "<text>"
  *   ashlr devin budget [--acu N] [--spent N] [--per-session N] [--per-day N] [--reserve N]
- *                      [--pause-at PCT] [--usd-per-acu N] [--max-concurrent N] [--max-per-day N] [--json]
+ *                      [--pause-at PCT] [--usd-per-acu N] [--max-concurrent N] [--max-per-day N]
+ *                      [--fleet-concurrent N] [--fleet-per-day N] [--json]
  *
  * In-process (src/core/devin/*), never through the Verse server, and never
  * imports devin-api.ts (that module starts the background refresher). The key
@@ -46,7 +47,9 @@ Usage:
   ashlr devin enable | disable
       Turn the Devin lane on or off (the key stays).
   ashlr devin fleet on | off
-      Let the fleet launch Devin sessions on its own (default off). Devin PRs are always shadow-only at the gates.
+      Let the fleet launch Devin on well-scoped backlog work (default off). Also needs a standing grant
+      that names Devin (\`ashlr authority draft\` includes it once this is on). Devin PRs merge only
+      when two judges from different families ship them.
   ashlr devin status [--json]
   ashlr devin launch "<task>" [--repo owner/name] [--base branch] [--title "short title"] [--json]
       Start a Devin session. The repo defaults to this folder's GitHub origin; the base to its default branch.
@@ -56,7 +59,8 @@ Usage:
   ashlr devin message <task-id> "<text>"
       Reply to a Devin session that is waiting for you.
   ashlr devin budget [--acu N] [--spent N] [--per-session N] [--per-day N] [--reserve N] [--pause-at PCT]
-                     [--usd-per-acu N] [--max-concurrent N] [--max-per-day N] [--json]
+                     [--usd-per-acu N] [--max-concurrent N] [--max-per-day N]
+                     [--fleet-concurrent N] [--fleet-per-day N] [--json]
       Show ACU use and limits; any flag updates them first.
 
 Dollar figures are estimates; ACUs come from Devin's own readings.`;
@@ -264,7 +268,7 @@ function cmdFleet(deps: DevinCliDeps, args: string[]): number {
   if (value !== 'on' && value !== 'off') throw new UsageError('Say `ashlr devin fleet on` or `ashlr devin fleet off`.');
   deps.setConfig({ fleet: value === 'on' });
   deps.out(value === 'on'
-    ? 'The fleet may launch Devin sessions (within the budget and its reserve, under a standing grant). Devin PRs stay shadow-only: never auto-merged.'
+    ? 'The fleet may launch Devin on well-scoped backlog work — within the ACU budget, its reserve and the fleet caps, under a standing grant that names Devin (run `ashlr authority draft` to include it). Devin PRs merge only when two judges from different families ship them.'
     : 'The fleet will not launch Devin sessions.');
   return 0;
 }
@@ -385,6 +389,8 @@ function cmdBudget(deps: DevinCliDeps, args: string[]): number {
   set('usdPerAcu', takeNumber(args, '--usd-per-acu'));
   set('maxConcurrent', takeNumber(args, '--max-concurrent', { whole: true }));
   set('maxSessionsPerDay', takeNumber(args, '--max-per-day', { whole: true }));
+  set('fleetMaxConcurrent', takeNumber(args, '--fleet-concurrent', { whole: true }));
+  set('fleetMaxSessionsPerDay', takeNumber(args, '--fleet-per-day', { whole: true }));
   rejectLeftovers(args);
   const budget = Object.keys(update).length > 0 ? deps.updateBudget(update) : deps.readBudget();
   const view = deps.budgetView(deps.listTasks(Number.MAX_SAFE_INTEGER), budget, deps.now());
@@ -395,6 +401,7 @@ function cmdBudget(deps: DevinCliDeps, args: string[]): number {
   deps.out(`Devin budget: ${acu(view.acuUsed)} of ${acu(view.acuBudgetTotal)} used · ${acu(view.acuRemaining)} left${view.paused ? ' · PAUSED' : ''}`);
   deps.out(`  Today: ${acu(view.acuToday)} of ${acu(budget.maxAcuPerDay)} (used + held by running sessions) · ${view.sessionsToday} of ${budget.maxSessionsPerDay} sessions`);
   deps.out(`  Each session capped at ${acu(budget.maxAcuPerSession)} · ${view.running} of ${budget.maxConcurrent} running · reserve ${acu(budget.reserveAcu)} kept for you · pauses at ${Math.round(budget.pauseAtFraction * 100)}%`);
+  deps.out(`  Fleet: ${view.fleetRunning} of ${budget.fleetMaxConcurrent} running · ${view.fleetSessionsToday} of ${budget.fleetMaxSessionsPerDay} today · ${view.canFleetLaunch.ok ? 'fleet launches allowed' : `fleet launches refused: ${view.canFleetLaunch.reason}`}`);
   deps.out(`  ≈ $${view.estimatedUsdUsed} at $${budget.usdPerAcu}/ACU (estimate). ${view.canLaunch.ok ? 'Launches allowed.' : `Launches refused: ${view.canLaunch.reason}`}`);
   return 0;
 }
