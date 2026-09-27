@@ -1,11 +1,13 @@
 /**
  * Authority API — V3.10 Track B (unit B-U1). Mounted by C0 in verse-api.ts.
  *
- *   GET  /api/verse/authority              → AuthorityStatusV1 (+ effectiveReason)
+ *   GET  /api/verse/authority              → AuthorityStatusV1 (+ effectiveReason, ladder)
  *   GET  /api/verse/authority/draft[?kind=new|reapprove]
  *                                          → AuthorityGrantDraft (+ kind, summary, startStageId)
  *   GET  /api/verse/authority/ledger[?limit=&kind=]
  *                                          → { entries, head, chain, brokenAtSeq, reason }
+ *   GET  /api/verse/authority/ledger?view=decisions[&limit=]
+ *                                          → ShadowDecisionsV1 (autonomy-ladder.ts, 3.14)
  *   GET  /api/verse/authority/setup        → AuthoritySetupReportV1 — `ashlr authority
  *                                            setup --dry-run --json`, read-only, cached 30 s
  *   POST /api/verse/authority              → one AuthorityActionRequest → AuthorityStatusV1 (+ result)
@@ -34,6 +36,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
 
 import type { ApiModule } from './api-modules.js';
+import { autonomyLadder, LEDGER_DECISIONS_VIEW, readShadowDecisions, resetShadowDecisionsCacheForTest, type AuthorityStatusWithLadder } from './autonomy-ladder.js';
 import type { VerseApiContext } from './verse-api.js';
 import type { NeedsYouItem, VerseAutonomyBadge } from './workbench-types.js';
 import { passesMutationGate, readBody } from '../web/api.js';
@@ -203,7 +206,7 @@ function grantView(ev: StandingEvaluation): AuthorityGrantView {
   };
 }
 
-function statusFrom(ev: StandingEvaluation, custody: AuthorityCustodyView): AuthorityStatusV1 {
+function statusFrom(ev: StandingEvaluation, custody: AuthorityCustodyView): AuthorityStatusWithLadder {
   return {
     v: 1,
     checkedAt: ev.checkedAt,
@@ -217,6 +220,8 @@ function statusFrom(ev: StandingEvaluation, custody: AuthorityCustodyView): Auth
     ledger: { state: ev.ledger.chain, head: ev.ledger.head, reason: ev.ledger.reason },
     custody,
     effectiveReason: ev.effectiveSwitch === ev.switch && ev.grantState === 'active' ? null : ev.inactiveReason ?? ev.grantReason,
+    // Additive (3.14): the signed ladder, where we stand on it, its last move.
+    ladder: autonomyLadder(ev),
   };
 }
 
@@ -225,7 +230,7 @@ function statusFrom(ev: StandingEvaluation, custody: AuthorityCustodyView): Auth
  * compiled one, else the installed daemon release (the desktop sidecar is a
  * single-file binary) — display only; the daemon verifies its own code.
  */
-export async function buildAuthorityStatus(): Promise<{ status: AuthorityStatusV1; evaluation: StandingEvaluation }> {
+export async function buildAuthorityStatus(): Promise<{ status: AuthorityStatusWithLadder; evaluation: StandingEvaluation }> {
   const custody = await custodySnapshot();
   const evaluation = evaluateStandingAuthority({ mode: 'cached', surface: displaySurfaceTarget() });
   const status = statusFrom(evaluation, custody.view);
@@ -451,6 +456,7 @@ export function resetAuthorityApiCachesForTest(): void {
   setupCache = null;
   setupInflight = null;
   setupPlanner = defaultSetupPlanner;
+  resetShadowDecisionsCacheForTest();
 }
 
 // ---------------------------------------------------------------------------
@@ -897,11 +903,23 @@ export const handleAuthorityApi: ApiModule = async (ctx, req, res, path, method)
       return true;
     }
     // VERSE_AUTHORITY_LEDGER_PATH
-    const params = readQuery(req, res, ['limit', 'kind']);
+    const params = readQuery(req, res, ['limit', 'kind', 'view']);
     if (!params) return true;
     const limitRaw = params.get('limit');
     if (limitRaw !== null && !/^\d{1,3}$/u.test(limitRaw)) {
       sendInvalid(res, 'limit must be a whole number from 1 to 500');
+      return true;
+    }
+    const view = params.get('view');
+    if (view !== null) {
+      // Additive (3.14): `view=decisions` — the shadow decisions and rollout
+      // moves, folded from the same ledger (core/verse/autonomy-ladder.ts).
+      if (view !== LEDGER_DECISIONS_VIEW || params.has('kind')) {
+        sendInvalid(res, 'view must be decisions, without kind');
+        return true;
+      }
+      const decisionsLimit = limitRaw === null ? 40 : Math.max(1, Math.min(200, Number(limitRaw)));
+      sendAuthorityJson(res, 200, await readShadowDecisions({ readLedger, head: () => ledgerSnapshot('cached').head }, decisionsLimit));
       return true;
     }
     const kindRaw = params.get('kind');

@@ -186,12 +186,13 @@ describe('command catalog — table integrity', () => {
   });
 
   it('offers the autonomy switch, the grant and the budget modes as palette actions served by Command — never by a key', () => {
-    const served = ['autonomy.off', 'autonomy.propose', 'autonomy.autonomous', 'autonomy.grant', 'budget.all-in', 'budget.balanced', 'budget.reserve'];
+    const served = ['autonomy.off', 'autonomy.propose', 'autonomy.autonomous', 'autonomy.grant', 'autonomy.reapprove', 'budget.all-in', 'budget.balanced', 'budget.reserve'];
     expect(served.map((id) => findCommand(id)?.title)).toEqual([
       'Autonomy: Off',
       'Autonomy: Propose',
       'Autonomy: Autonomous',
       'Approve grant…',
+      'Re-approve grant…',
       'Budget mode: All-in',
       'Budget mode: Balanced',
       'Budget mode: Reserve',
@@ -210,6 +211,14 @@ describe('command catalog — table integrity', () => {
     // Only these — and the Leader's two, served on Mind — are surface-served.
     expect(COMMANDS.filter((c) => c.surface === 'command').map((c) => c.id).sort()).toEqual([...served].sort());
     expect(COMMANDS.filter((c) => c.surface === 'mind').map((c) => c.id).sort()).toEqual(['leader.directive', 'leader.message']);
+  });
+
+  it('offers "Autonomy status" as a shell command that opens the ladder on Command (3.14)', () => {
+    const c = findCommand('autonomy.status')!;
+    expect(c).toMatchObject({ title: 'Autonomy status', scope: 'global', group: 'actions', keys: [] });
+    // Served by the shell (run-command.ts), not parked on a surface.
+    expect(c.surface).toBeUndefined();
+    expect(c.keywords).toEqual(expect.arrayContaining(['ladder', 'rollout', 'shadow']));
   });
 
   it('copies the autonomy setup command from the palette', () => {

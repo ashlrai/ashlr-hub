@@ -19,6 +19,7 @@ import {
   setupReport,
   type FixtureKind,
 } from './fixtures.test-support.js';
+import { EMPTY_DECISIONS } from './ladder-fixtures.test-support.js';
 
 export type RouteAnswer = unknown | ((url: string) => Response);
 
@@ -49,6 +50,8 @@ export function surfaceRoutes(kind: FixtureKind, now: number): Record<string, un
   return {
     '/api/verse/authority/draft': grantDraft(now),
     '/api/verse/authority/setup': setupReport(),
+    // 3.14 shadow decisions (…/ledger?view=decisions); empty unless a test says otherwise.
+    '/api/verse/authority/ledger': EMPTY_DECISIONS,
     '/api/verse/authority': authorityStatus(kind, now),
     '/api/verse/fleet/live': fleetLive(kind, now),
     '/api/verse/fleet/history': fleetHistory(kind, now),

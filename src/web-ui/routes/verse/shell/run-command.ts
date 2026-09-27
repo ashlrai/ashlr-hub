@@ -222,6 +222,8 @@ export function registerShellCommandHandlers(): () => void {
     }),
     registerCommandHandler('appearance.toggle-theme', () => cycleTheme()),
     registerCommandHandler('app.summon', () => requestVerseCommand('focus-composer')),
+    // The rollout ladder on Command (3.14); the status card carries the anchor.
+    registerCommandHandler('autonomy.status', () => setVerseSection('command', 'autonomy')),
     // The clipboard code loads when asked for (copy-setup.ts), not at first paint.
     // Mind's Leader panel takes these once it mounts (leader-focus.ts waits for it).
     registerCommandHandler('leader.message', () => { void import('../leader/leader-focus.js').then((m) => m.requestLeaderFocus({ kind: 'composer' })); }),

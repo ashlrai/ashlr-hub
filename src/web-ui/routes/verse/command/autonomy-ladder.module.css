@@ -1,0 +1,401 @@
+/*
+ * routes/verse/command/autonomy-ladder.module.css — Command's Autonomy status
+ * and Fleet's Shadow decisions (3.14). Tokens only (style-scan-310): no raw
+ * hex colours, no px font sizes.
+ */
+
+/* ---- Command: the status panel ----------------------------------------- */
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--card-pad);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  min-width: 0;
+}
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  min-width: 0;
+}
+
+.micro {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  flex: none;
+}
+
+.stage {
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.position {
+  font-weight: var(--font-weight-regular);
+  color: var(--text-secondary);
+}
+
+.switchState {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+
+.held {
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.grant {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.grant[data-tone='warning'] {
+  color: var(--status-warning-fg);
+}
+
+.grant[data-tone='danger'] {
+  color: var(--status-danger-fg);
+}
+
+/* The ladder: eight equal rungs, one row; the current one filled. */
+.ladder {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rungItem {
+  display: flex;
+  min-width: 0;
+}
+
+.rung {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+
+.rung[data-state='done'] {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.rung[data-state='current'] {
+  border-color: var(--accent-500);
+  background: var(--bg-selected);
+  color: var(--text-primary);
+  font-weight: var(--font-weight-semibold);
+}
+
+.rung[data-state='next'] {
+  border-style: dashed;
+  border-color: var(--border-default);
+  color: var(--text-secondary);
+}
+
+.rung:focus-visible,
+.linkButton:focus-visible,
+.decisionLink:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.rungTip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 320px;
+}
+
+.progress {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-2) var(--space-5);
+}
+
+.meter {
+  flex: 0 1 200px;
+  min-width: 140px;
+}
+
+.next {
+  flex: 1 1 240px;
+  margin: 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+
+.unmet {
+  color: var(--text-tertiary);
+}
+
+.last {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin: 0;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-primary);
+  min-width: 0;
+}
+
+.lastText {
+  flex: 1;
+  min-width: 0;
+}
+
+.last[data-tone='danger'] .lastText {
+  color: var(--status-danger-fg);
+}
+
+.when {
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.linkButton,
+.decisionLink {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-link);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.linkButton:hover,
+.decisionLink:hover {
+  text-decoration: underline;
+}
+
+
+/* ---- Fleet: shadow decisions ------------------------------------------- */
+.stackGap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.regressions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.regression {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--status-danger-solid);
+  border-radius: var(--radius-md);
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+
+.regressionTitle {
+  font-weight: var(--font-weight-semibold);
+}
+
+.decisions {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.decision {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+
+.decision:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.decisionHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+
+.repo {
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+
+.meta {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  font-variant-numeric: tabular-nums;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.outcome {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--status-neutral-bg);
+  color: var(--status-neutral-fg);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  white-space: nowrap;
+}
+
+.outcome[data-tone='success'],
+.gate[data-tone='success'] {
+  background: var(--status-success-bg);
+  color: var(--status-success-fg);
+}
+
+.outcome[data-tone='danger'],
+.gate[data-tone='danger'] {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+
+.outcome[data-tone='warning'],
+.gate[data-tone='warning'] {
+  background: var(--status-warning-bg);
+  color: var(--status-warning-fg);
+}
+
+.why {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.gates {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gate {
+  display: inline-flex;
+  align-items: center;
+  min-width: 2.5em;
+  justify-content: center;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--status-neutral-bg);
+  color: var(--status-neutral-fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+}
+
+.gate[data-tone='absent'] {
+  background: transparent;
+  border: 1px dashed var(--border-subtle);
+  color: var(--text-tertiary);
+}
+
+.links {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.muted {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+@media (max-width: 600px) {
+  .ladder {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .last {
+    flex-wrap: wrap;
+  }
+}

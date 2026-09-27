@@ -10,7 +10,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WORKBENCH_COMMAND_EVENT } from '../composer/composer-keys.js';
-import { getVerseUiState, resetVerseUi, setVerseSection } from '../verse-ui-store.js';
+import { getVerseUiState, resetVerseUi, setVerseSection, VERSE_ANCHOR_EVENT } from '../verse-ui-store.js';
 import { registerCommandHandler, resetCommandBus } from './command-bus.js';
 import {
   COMPOSER_LISTEN_GRACE_MS,
@@ -209,5 +209,23 @@ describe('the shell’s guarded runners (loaded on confirm, not at first paint)'
   it('an unknown id is a rejected run, never a silent success', async () => {
     const { runGuardedShellCommand } = await import('./guarded-runners.js');
     await expect(runGuardedShellCommand('nope')).rejects.toThrow('No shell runner for nope.');
+  });
+});
+
+describe('Autonomy status (3.14)', () => {
+  it('opens Command and asks the shell to reveal the ladder card', async () => {
+    const off = registerShellCommandHandlers();
+    const anchors: unknown[] = [];
+    const onAnchor = (event: Event) => { anchors.push((event as CustomEvent<unknown>).detail); };
+    window.addEventListener(VERSE_ANCHOR_EVENT, onAnchor);
+    try {
+      setVerseSection('chat');
+      expect(executeCatalogCommand('autonomy.status', { via: 'palette' })).toBe(true);
+      await vi.waitFor(() => expect(getVerseUiState().section).toBe('command'));
+      expect(anchors).toEqual([{ section: 'command', anchor: 'autonomy' }]);
+    } finally {
+      window.removeEventListener(VERSE_ANCHOR_EVENT, onAnchor);
+      off();
+    }
   });
 });

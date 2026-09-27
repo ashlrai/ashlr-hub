@@ -289,6 +289,11 @@ export const WORKBENCH_COMMANDS = [
   autonomySwitch('propose', 'Propose', ['proposals', 'review']),
   autonomySwitch('autonomous', 'Autonomous', ['auto', 'turn on', 'enable']),
   appAction('autonomy.grant', 'Approve grant…', ['touch id', 're-approve', 'renew', 'authority', 'autonomy'], 'command'),
+  // 3.14: renew the ACTIVE grant before it lapses (the bar's sheet, re-approve
+  // intent — continues the ladder from the current stage), and jump to the
+  // ladder itself. The status entry is the shell's (run-command.ts).
+  appAction('autonomy.reapprove', 'Re-approve grant…', ['renew', 'extend', 'touch id', 'expiry', 'authority', 'autonomy'], 'command'),
+  appAction('autonomy.status', 'Autonomy status', ['ladder', 'rollout', 'stage', 'shadow', 'progress', 'would merge', 'autonomy']),
   budgetMode('all-in', 'All-in', ['all in', 'max']),
   budgetMode('balanced', 'Balanced', ['default']),
   budgetMode('reserve', 'Reserve', ['save', 'conserve']),
