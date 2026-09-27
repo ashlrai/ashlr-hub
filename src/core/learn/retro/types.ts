@@ -98,6 +98,13 @@ export interface RetroRootCause {
   detail: string;
   /** Where the cause was read from (a gate memo, verify output, a close reason…). */
   evidence: string;
+  /**
+   * Cross-source root-cause CATEGORY (one vocabulary: decide/registry.ts
+   * RETRO_ROOT_CAUSES). Absent on retros written before it existed.
+   */
+  category?: string;
+  /** 'jev' = Jev named it from the detail above its gate; 'rule' = the fixed code table. */
+  categorySource?: 'jev' | 'rule';
 }
 
 /** A note the retro suggests; becomes a KnowledgeNoteV1 in the review queue. */

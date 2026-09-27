@@ -216,3 +216,77 @@ export async function worthInterrupting(
     },
   });
 }
+
+// ---------------------------------------------------------------------------
+// Sync ordering for a polled view (the Verse Needs-you list)
+// ---------------------------------------------------------------------------
+
+/**
+ * The Needs-you list is rebuilt on every Verse poll, which is exactly the
+ * "hot path" the contract keeps Jev off. So the view never awaits Jev: it
+ * orders synchronously with whatever ranking is already known for THIS exact
+ * set of items, and — when the set changed — kicks off one background
+ * `prioritizeNeedsYou` (single-flight, throttled) whose answer the next poll
+ * uses. Unkeyed, the background pass falls back with no network and the
+ * deterministic order is returned unchanged.
+ */
+const REFRESH_MIN_INTERVAL_MS = 60_000;
+let known: { signature: string; priorities: ReadonlyMap<string, NeedsYouPriority> } | null = null;
+let inflight: string | null = null;
+let lastRefreshAt = 0;
+
+function signatureOf(items: readonly AttentionItem[]): string {
+  return items
+    .map((i) => [i.id, i.severity ?? '', i.title, i.expiresAt ?? ''].join('|'))
+    .sort()
+    .join('\n');
+}
+
+/**
+ * Re-order an already deterministically sorted list using the last Jev
+ * ranking for this exact item set (within severity bands only). Pure except
+ * for scheduling the background refresh. Never throws; never awaits.
+ */
+export function orderNeedsYouWithJev<I extends AttentionItem>(sorted: readonly I[], nowMs: number = Date.now()): I[] {
+  try {
+    if (sorted.length < 2) return [...sorted];
+    const signature = signatureOf(sorted);
+    if (known && known.signature === signature) {
+      const priorities = known.priorities;
+      const position = new Map(sorted.map((item, i) => [item.id, i] as const));
+      return [...sorted].sort((a, b) => {
+        const sev = SEVERITY_RANK[a.severity ?? 'info'] - SEVERITY_RANK[b.severity ?? 'info'];
+        if (sev !== 0) return sev;
+        const pa = priorities.get(a.id);
+        const pb = priorities.get(b.id);
+        if (pa && pb && pa !== pb) return PRIORITY_RANK[pa] - PRIORITY_RANK[pb];
+        return (position.get(a.id) ?? 0) - (position.get(b.id) ?? 0);
+      });
+    }
+    if (inflight !== signature && nowMs - lastRefreshAt >= REFRESH_MIN_INTERVAL_MS) {
+      inflight = signature;
+      lastRefreshAt = nowMs;
+      void prioritizeNeedsYou(sorted, { nowMs })
+        .then((ranked) => {
+          // Only Jev-won priorities are worth remembering; an all-fallback
+          // answer would just restate the deterministic order.
+          const won = ranked.filter((r) => r.path === 'jev');
+          if (won.length > 0) known = { signature, priorities: new Map(won.map((r) => [r.item.id, r.priority])) };
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (inflight === signature) inflight = null;
+        });
+    }
+    return [...sorted];
+  } catch {
+    return [...sorted];
+  }
+}
+
+/** Test seam. */
+export function resetNeedsYouOrderingForTests(): void {
+  known = null;
+  inflight = null;
+  lastRefreshAt = 0;
+}

@@ -17,6 +17,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { AshlrConfig } from '../src/core/types.js';
 import { classifyAgentDiagnosticError } from '../src/core/run/agent-diagnostics.js';
 import { TYPESAFE_API_KEY_ENV, TYPESAFE_DISABLE_ENV } from '../src/core/classify/typesafe-client.js';
+import { clearDecisionCache } from '../src/core/decide/cache.js';
 import {
   ENGINE_ERROR_CONFIDENCE_THRESHOLD,
   ENGINE_ERROR_KINDS,
@@ -40,6 +41,9 @@ const savedDisable = process.env[TYPESAFE_DISABLE_ENV];
 let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
+  // Each test scripts its own classifier answer for the same stderr; the
+  // decision layer's input-hash cache would otherwise replay the first one.
+  clearDecisionCache();
   delete process.env[TYPESAFE_API_KEY_ENV];
   delete process.env[TYPESAFE_DISABLE_ENV];
   fetchMock = vi.fn();

@@ -58,6 +58,7 @@ import {
   type VerseMindBadge,
   type VerseTurnEnd,
 } from './workbench-types.js';
+import { orderNeedsYouWithJev } from '../decide/needs-you.js';
 
 // ===========================================================================
 // Inputs
@@ -581,7 +582,9 @@ export function createActivityReader(deps: ActivityDeps, bootId: string = random
 
       const unique = new Map<string, NeedsYouItem>();
       for (const item of items) if (!unique.has(item.id)) unique.set(item.id, item);
-      const needsYou = [...unique.values()].sort(compareNeedsYou);
+      // Deterministic order first; Jev may only re-rank WITHIN a severity band,
+      // from a ranking computed in the background (never awaited on a poll).
+      const needsYou = orderNeedsYouWithJev([...unique.values()].sort(compareNeedsYou));
 
       // ── badges ──────────────────────────────────────────────────────────
       let autonomy: VerseAutonomyBadge | null = null;

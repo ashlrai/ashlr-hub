@@ -62,6 +62,17 @@ export interface RetroSweepDeps {
    * attributed through the proposal's runId; absent = no attribution.
    */
   playbookUses?(): Promise<ReadonlyMap<string, { ref: PlaybookRef }>>;
+  /**
+   * Optional Jev pass (src/core/decide): prime typed task kinds for the texts
+   * the extractors classify, in one batched call. Absent = keyword table only.
+   */
+  primeTaskKinds?(texts: readonly string[]): Promise<unknown>;
+  /**
+   * Optional Jev pass: root-cause CATEGORIES for the retros about to be saved
+   * (generic codes via Jev, others via a fixed table). Never changes the
+   * deterministic `code`/`label`; only adds `category` + `categorySource`.
+   */
+  labelRootCauses?(retros: readonly RetroV1[]): Promise<ReadonlyMap<string, { category: string; source: 'jev' | 'rule' }>>;
 }
 
 export interface RetroSweepResult {
@@ -297,6 +308,18 @@ async function runSweep(deps: RetroSweepDeps, opts: { windowDays?: number; maxNe
   const devin = devinTasks ? guard('devin', () => devinTasks.call(deps)) : null;
   const leader = guard('leader', () => deps.leaderActions());
 
+  if (deps.primeTaskKinds) {
+    // The same strings extract.ts hands classifyTaskKind (fleet: title +
+    // summary; cloud/Devin: title + prompt), so its memo lookup hits.
+    const texts = [
+      ...(inbox ? fleetEndsFromInbox(inbox, sinceIso) : []),
+      ...(ledger ? fleetEndsFromLedger(ledger, (id) => deps.loadProposal(id)) : []),
+    ].map((e) => `${e.title ?? ''} ${e.summary ?? ''}`)
+      .concat([...(cloud ?? []), ...((devin ?? []) as ReadonlyArray<{ title?: string; prompt?: string }>)]
+        .map((t) => `${t.title ?? ''} ${t.prompt ?? ''}`));
+    await deps.primeTaskKinds(texts).catch(() => undefined);
+  }
+
   const all = collectRetros({ ledger, inbox, cloud, devin, leader, load: (id) => deps.loadProposal(id), sinceIso, nowIso });
   let uses: ReadonlyMap<string, { ref: PlaybookRef }> | null = null;
   const fleetPlaybook = async (proposalId: string): Promise<PlaybookRef | undefined> => {
@@ -315,10 +338,22 @@ async function runSweep(deps: RetroSweepDeps, opts: { windowDays?: number; maxNe
   let created = 0;
   let candidates = 0;
   let modelRefined = 0;
+  const fresh: RetroV1[] = [];
   for (const draft of all) {
-    if (created >= (opts.maxNew ?? RETRO_SWEEP_MAX_NEW)) break;
+    if (fresh.length >= (opts.maxNew ?? RETRO_SWEEP_MAX_NEW)) break;
     if (await retroExists(draft.id)) continue;
-    let retro = draft.source === 'fleet' ? withPlaybookRef(draft, await fleetPlaybook(draft.taskId)) : draft;
+    fresh.push(draft);
+  }
+  let categories: ReadonlyMap<string, { category: string; source: 'jev' | 'rule' }> = new Map();
+  if (deps.labelRootCauses && fresh.some((r) => r.rootCause)) {
+    categories = await deps.labelRootCauses(fresh).catch(() => new Map());
+  }
+  for (const draft of fresh) {
+    const cat = draft.rootCause ? categories.get(draft.id) : undefined;
+    const categorized: RetroV1 = cat && draft.rootCause
+      ? { ...draft, rootCause: { ...draft.rootCause, category: cat.category, categorySource: cat.source } }
+      : draft;
+    let retro = categorized.source === 'fleet' ? withPlaybookRef(categorized, await fleetPlaybook(categorized.taskId)) : categorized;
     if (deps.model && calls < RETRO_MODEL_CALLS_PER_DAY && retro.rootCause && retro.source !== 'leader') {
       calls += 1;
       const refined = await refineRetro(retro, deps.model, nowIso);
@@ -373,6 +408,9 @@ export async function loadDefaultRetroSweepDeps(cfg: unknown): Promise<RetroSwee
     leaderActions: () => leaderApply.listLeaderActions(300),
     model,
     playbookUses: () => playbookStore.readPlaybookUses(),
+    // Jev (src/core/decide): both answer deterministically when unkeyed.
+    primeTaskKinds: async (texts) => (await import('../../decide/task-class.js')).primeTaskClasses(texts, cfg ? { cfg: cfg as never } : {}),
+    labelRootCauses: async (retros) => (await import('../../decide/retro.js')).labelRetroRootCauses(retros, cfg ? { cfg: cfg as never } : {}),
   };
 }
 

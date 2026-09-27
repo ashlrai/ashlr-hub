@@ -26,6 +26,7 @@ import type { ProposalSourceQuality } from '../inbox/store.js';
 import { recordDecision } from './decisions-ledger.js';
 import { judgeDecisionReasonCode } from './judge-decision-metadata.js';
 import { recordJudgeTrace } from './judge-trace.js';
+import { extractJudgeRubric } from '../decide/verdict.js';
 import { hashDiff, signJudgeAttestation } from '../foundry/provenance.js';
 import { resolveAutoMergeScopePolicy } from '../foundry/automerge-scope-policy.js';
 import { measureAutoMergeDiffScopeForGate } from '../foundry/automerge-diff-scope.js';
@@ -742,7 +743,7 @@ export async function judgeProposal(
     if (rubric.answeredBy) clientStats.model = rubric.answeredBy;
   }
   if (rubric === null) {
-    const judged = await judgeRubricFromModel(client.complete, effectiveJudgeSystem, userPrompt, options.signal);
+    const judged = await judgeRubricFromModel(client.complete, effectiveJudgeSystem, userPrompt, options.signal, cfg);
     if (judged === 'network') return fallback('network');
     if (judged === 'parse') return fallback('parse');
     rubric = { ...judged, answeredBy: clientStats?.model ?? null };
@@ -834,6 +835,7 @@ async function judgeRubricFromModel(
   system: string,
   userPrompt: string,
   signal?: AbortSignal,
+  cfg?: AshlrConfig,
 ): Promise<Omit<JudgeRubric, 'answeredBy'> | 'network' | 'parse'> {
   let raw: string;
   let fullReasoning = '';
@@ -852,6 +854,27 @@ async function judgeRubricFromModel(
   // contradictory rubrics all get one strict JSON recovery attempt.
   if (!isCompleteStructuredRubric(obj, parseSource)) {
     throwIfJudgeCancelled(signal);
+    // JEV TYPED EXTRACTION before the paid reprompt: the judge already
+    // answered; ask Jev what it SAID (verdict + four 1-5 dimensions) as typed
+    // questions. Accepted only at >= 0.9 confidence, only when the reply
+    // states a verdict, and never an invented 'ship' (literal word + the same
+    // value>=3 / correctness>=4 rule as isCompleteStructuredRubric). Any
+    // fallback — unkeyed, offline, unsure — continues to the reprompt below
+    // exactly as before. See src/core/decide/verdict.ts.
+    const extracted = await extractJudgeRubric(raw, { ...(cfg ? { cfg } : {}), ...(signal ? { signal } : {}) })
+      .catch(() => null);
+    throwIfJudgeCancelled(signal);
+    if (extracted && extracted.path === 'jev' && extracted.value) {
+      const e = extracted.value;
+      return {
+        verdict: e.verdict,
+        value: e.value,
+        correctness: e.correctness,
+        scope: e.scope,
+        alignment: e.alignment,
+        rationale: `${e.rationale.slice(0, 180)} [jev-extracted]`,
+      };
+    }
     try {
       const retryPrompt = userPrompt + JUDGE_RETRY_SUFFIX;
       const raw2 = await complete(system, retryPrompt, signal);

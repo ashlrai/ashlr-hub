@@ -127,3 +127,55 @@ export async function chooseLane(
     },
   });
 }
+
+// ---------------------------------------------------------------------------
+// Adapter: the Devin fleet launcher's lane-advisor hook
+// ---------------------------------------------------------------------------
+
+/** Structurally the launcher's DevinLaneQuestion (kept local: decide never imports devin). */
+export interface DevinLaneQuestionLike {
+  readonly itemId: string;
+  readonly title: string;
+  readonly area: string;
+  readonly repo: string;
+  readonly priority: number;
+  readonly promptChars: number;
+}
+
+/** Structurally the launcher's DevinLaneAdvice. */
+export interface DevinLaneAdviceLike {
+  readonly lane: 'fleet' | 'cloud' | 'devin';
+  readonly confidence: number;
+  readonly reason?: string;
+}
+
+/**
+ * Lane advice for one Devin-fleet backlog candidate, in the launcher's own
+ * shape (src/core/devin/fleet-launcher.ts `laneAdvisor`). Returns null — "the
+ * heuristic stands" — whenever the decision fell back (unkeyed, off, slow,
+ * unsure): the launcher must only ever hear a lane Jev chose above its gate.
+ * The launcher itself can only NARROW on this advice (a confident non-Devin
+ * answer skips the item for the tick); it never launches anything the
+ * heuristic refused.
+ */
+export async function adviseDevinLane(
+  question: DevinLaneQuestionLike,
+  opts: ChooseLaneOptions = {},
+): Promise<DevinLaneAdviceLike | null> {
+  const decision = await chooseLane(
+    {
+      title: question.title,
+      body: `Backlog area: ${question.area}. Priority ${question.priority} (1 = highest). Brief length: ${question.promptChars} characters.`,
+      repo: question.repo,
+      githubRepo: true,
+    },
+    { available: { fleet: true, cloud: true, devin: true, interactive: false }, preferred: 'devin' },
+    opts,
+  );
+  if (decision.path !== 'jev' || decision.value === 'interactive') return null;
+  return {
+    lane: decision.value,
+    confidence: decision.confidence,
+    reason: `jev lane-choice ${decision.value} @ ${decision.confidence.toFixed(2)}`,
+  };
+}

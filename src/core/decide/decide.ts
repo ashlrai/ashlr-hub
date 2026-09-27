@@ -31,6 +31,7 @@ import {
 } from '../classify/typesafe-client.js';
 import { cacheGet, cacheKey, cacheSet } from './cache.js';
 import {
+  classifierKilledByEnv,
   estimateCostUsd,
   jevKilledByEnv,
   paidCallsToday,
@@ -114,6 +115,8 @@ async function askJev(
   if (typeof state !== 'string' || state.trim() === '') return { ok: false, reason: 'no-input', called: false };
   if (Object.keys(questions).length === 0) return { ok: false, reason: 'no-input', called: false };
 
+  // Switches are checked BEFORE the cache: off means off, even for an answer we already paid for.
+  if (classifierKilledByEnv()) return { ok: false, reason: 'disabled', called: false };
   const jc = readJevConfig();
   if (jevKilledByEnv() || !jc.enabled) return { ok: false, reason: 'killed', called: false };
   if (jc.disabledKinds.includes(kind)) return { ok: false, reason: 'kind-disabled', called: false };

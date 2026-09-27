@@ -397,5 +397,8 @@ export async function defaultDevinFleetTickDeps(): Promise<DevinFleetTickDeps> {
     launch: (req) => service.launchDevinTask(req),
     appendLedger: (input) => ledger.appendLedger(input),
     now: () => new Date(),
+    // The Jev lane-choice decision (src/core/decide/lane.ts). It answers null
+    // whenever Jev fell back (unkeyed, off, unsure), so the heuristic stands.
+    laneAdvisor: async (question) => (await import('../decide/lane.js')).adviseDevinLane(question),
   };
 }

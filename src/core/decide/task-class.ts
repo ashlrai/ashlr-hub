@@ -137,6 +137,8 @@ export const TASK_CLASS_QUESTION: TypeSafeChoiceQuestion = {
 
 const MEMO_MAX = 2_000;
 const memo = new Map<string, TaskClass>();
+/** Texts already asked in this process (confident or not) — never re-paid for. */
+const attempted = new Set<string>();
 
 function memoKey(text: string): string {
   return text.trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 500);
@@ -165,6 +167,7 @@ export function peekTaskClass(text: unknown): TaskClass | undefined {
 
 export function clearTaskClassMemo(): void {
   memo.clear();
+  attempted.clear();
 }
 
 export type LabelTaskClassOptions = Omit<DecideOptions<TaskClass>, 'fallback' | 'interpret' | 'escalateOnly'>;
@@ -199,7 +202,7 @@ export async function primeTaskClasses(texts: readonly unknown[], opts: LabelTas
   for (const t of texts) {
     if (typeof t !== 'string' || t.trim() === '') continue;
     const k = memoKey(t);
-    if (seen.has(k) || memo.has(k)) continue;
+    if (seen.has(k) || memo.has(k) || attempted.has(k)) continue;
     seen.add(k);
     todo.push(t.slice(0, 1_000));
     if (todo.length >= 50) break; // bound the spend of one priming pass
@@ -214,6 +217,12 @@ export async function primeTaskClasses(texts: readonly unknown[], opts: LabelTas
     );
     let accepted = 0;
     decisions.forEach((d, i) => {
+      // Only a real answer (or a confident miss) marks a text as asked; a
+      // transport failure leaves it eligible for the next pass.
+      if (d.path === 'jev' || d.reason === 'below-threshold' || d.reason === 'no-answer') {
+        if (attempted.size > MEMO_MAX * 2) attempted.clear();
+        attempted.add(memoKey(todo[i]!));
+      }
       if (d.path === 'jev') {
         remember(todo[i]!, d.value);
         accepted += 1;

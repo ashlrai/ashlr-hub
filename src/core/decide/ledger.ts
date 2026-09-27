@@ -130,9 +130,19 @@ export function readJevConfig(): JevConfig {
   }
 }
 
-export function jevKilledByEnv(): boolean {
-  const raw = process.env[JEV_DISABLE_ENV]?.trim().toLowerCase();
+function truthyEnv(name: string): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
   return raw === '1' || raw === 'true' || raw === 'yes';
+}
+
+/** Jev's own kill switch. */
+export function jevKilledByEnv(): boolean {
+  return truthyEnv(JEV_DISABLE_ENV);
+}
+
+/** The classifier client's process-wide switch (also honoured before the cache). */
+export function classifierKilledByEnv(): boolean {
+  return truthyEnv('ASHLR_CLASSIFY_DISABLE');
 }
 
 export function estimateCostUsd(inputTokens: number, outputTokens: number, cfg: JevConfig = readJevConfig()): number {

@@ -17,6 +17,7 @@
  */
 
 import type { AshlrConfig, Proposal } from '../types.js';
+import { extractTasteScore } from '../decide/verdict.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -168,6 +169,17 @@ Score this proposal on the three taste axes and return the JSON verdict.`;
 // Internal: parse the frontier response
 // ---------------------------------------------------------------------------
 
+/** Did the model give a valid verdict, or did we have to derive one from the score? */
+function statedVerdict(raw: string): boolean {
+  try {
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    const v = (JSON.parse(cleaned) as Record<string, unknown>)['verdict'];
+    return v === 'gold' || v === 'solid' || v === 'mediocre';
+  } catch {
+    return false;
+  }
+}
+
 function parseResponse(raw: string): TasteScore | null {
   try {
     // Strip markdown code fences if present
@@ -268,6 +280,27 @@ export async function scoreTaste(
   }
 
   const parsed = parseResponse(raw);
+  // JEV TYPED EXTRACTION (src/core/decide/verdict.ts) replaces the two silent
+  // degradations: an unparseable reply becoming a neutral 'solid', and a
+  // missing verdict being DERIVED from the numeric score. Jev reads what the
+  // critic said, accepted only at >= 0.9 confidence; any fallback (unkeyed,
+  // offline, unsure) keeps the previous behaviour exactly.
+  if (!parsed || !statedVerdict(raw)) {
+    const extracted = await extractTasteScore(raw, { cfg, ...(options.signal ? { signal: options.signal } : {}) })
+      .catch(() => null);
+    if (extracted && extracted.path === 'jev' && extracted.value) {
+      const e = extracted.value;
+      if (parsed) return { ...parsed, verdict: e.verdict };
+      return {
+        alignment: e.alignment,
+        ambition: e.ambition,
+        design: e.design,
+        overall: Math.round(((e.alignment + e.ambition + e.design) / 3) * 10) / 10,
+        verdict: e.verdict,
+        rationale: 'Recovered from an unstructured critic reply [jev-extracted].',
+      };
+    }
+  }
   if (!parsed) {
     return neutralScore(`Could not parse frontier response: ${raw.slice(0, 200)}`);
   }
