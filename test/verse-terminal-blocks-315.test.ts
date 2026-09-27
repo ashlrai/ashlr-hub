@@ -52,7 +52,7 @@ import {
 import { setTerminalApiDepsForTest } from '../src/core/verse/terminal-api.js';
 import { invalidateVerseSeatCache, resetVerseEngine } from '../src/core/verse/verse-api.js';
 import { resetPreviewCaches } from '../src/core/verse/preview.js';
-import type { VerseTerminalBlock, VerseTerminalFrame } from '../src/core/verse/workbench-types.js';
+import type { VerseTerminalBlock, VerseTerminalStreamFrame } from '../src/core/verse/workbench-types.js';
 import { findSyncIoInSource } from '../scripts/check-verse-sync-io.mjs';
 import { readAuthHeaders, startServer } from './helpers/authenticated-web-server.js';
 
@@ -454,7 +454,7 @@ describe('TerminalManager — blocks, integration, kill switch', () => {
     const { m, fake } = manager();
     const tab = await m.create({ sessionId: 's', root, cols: 80, rows: 24 });
     const pty = fake.spawned[0]!;
-    const frames: VerseTerminalFrame[] = [];
+    const frames: VerseTerminalStreamFrame[] = [];
     m.subscribe(tab.id, 0, (f) => frames.push(f));
     pty.emit(`${osc('633;P;Cwd=/work')}${PROMPT}`);
     await tick(5);
@@ -463,7 +463,7 @@ describe('TerminalManager — blocks, integration, kill switch', () => {
     const kinds = frames.map((f) => f.type);
     expect(kinds).toContain('integration');
     const firstBlock = kinds.indexOf('block');
-    const outputSeqs = frames.filter((f): f is Extract<VerseTerminalFrame, { type: 'output' }> => f.type === 'output').map((f) => f.seq);
+    const outputSeqs = frames.filter((f): f is Extract<VerseTerminalStreamFrame, { type: 'output' }> => f.type === 'output').map((f) => f.seq);
     const block = (frames.filter((f) => f.type === 'block').at(-1) as { block: VerseTerminalBlock }).block;
     expect(block).toMatchObject({ command: 'npm test', exitCode: 1, cwd: '/work', state: 'done' });
     // The frame it points into was sent before it.
@@ -484,7 +484,7 @@ describe('TerminalManager — blocks, integration, kill switch', () => {
     pty.emit(zshRun('cat nope', 'cat nope', 'cat: nope: No such file\r\n', 1, '/w', nonceOf(pty)));
     await tick(5);
 
-    const replay: VerseTerminalFrame[] = [];
+    const replay: VerseTerminalStreamFrame[] = [];
     m.subscribe(tab.id, 0, (f) => replay.push(f));
     const types = replay.map((f) => f.type);
     expect(types.lastIndexOf('output')).toBeLessThan(types.indexOf('block'));
@@ -495,7 +495,7 @@ describe('TerminalManager — blocks, integration, kill switch', () => {
 
     // A client that already has everything gets no output again — still the blocks.
     const lastSeq = Math.max(...replay.filter((f) => f.type === 'output').map((f) => (f as { seq: number }).seq));
-    const again: VerseTerminalFrame[] = [];
+    const again: VerseTerminalStreamFrame[] = [];
     m.subscribe(tab.id, lastSeq, (f) => again.push(f));
     expect(again.filter((f) => f.type === 'output')).toEqual([]);
     expect(again.filter((f) => f.type === 'block')).toHaveLength(2);
@@ -533,7 +533,7 @@ describe('TerminalManager — blocks, integration, kill switch', () => {
     const mine = await m.create({ sessionId: 's', root, cols: 80, rows: 24 });
     expect(agent.agent).toBe(true);
     expect(mine.agent).toBe(false);
-    const frames: VerseTerminalFrame[] = [];
+    const frames: VerseTerminalStreamFrame[] = [];
     m.subscribe(agent.id, 0, (f) => frames.push(f));
     expect(await m.enforceKillSwitch()).toEqual([]);
     setKill(true);

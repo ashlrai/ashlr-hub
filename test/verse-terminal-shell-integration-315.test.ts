@@ -42,14 +42,17 @@ async function runShell(shell: string, kind: IntegratedShell, script: string, us
   const launch = integratedLaunch(shell, dir, NONCE, userEnv)!;
   // Long options first (bash refuses `-i --init-file`).
   const argv = [...launch.argv.slice(1), '-i'];
-  const child = spawn(launch.argv[0]!, argv, {
+  // ONE pipe for both streams, as a PTY is: without a tty the shell draws its
+  // prompt (and our A/B marks in it) on stderr while the hooks print C/D on
+  // stdout, and two pipes would interleave them in arrival order, not in
+  // the order they were written.
+  const child = spawn('/bin/sh', ['-c', 'exec "$@" 2>&1', 'sh', launch.argv[0]!, ...argv], {
     cwd: home,
     env: { HOME: home, PATH: '/usr/bin:/bin', TERM: 'dumb', LANG: 'en_US.UTF-8', ...userEnv, ...launch.env },
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'ignore'],
   });
   const chunks: Buffer[] = [];
   child.stdout.on('data', (d: Buffer) => chunks.push(d));
-  child.stderr.on('data', (d: Buffer) => chunks.push(d));
   child.stdin.end(script);
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('shell did not exit')); }, 20_000);

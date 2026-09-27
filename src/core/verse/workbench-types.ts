@@ -898,12 +898,20 @@ export interface VerseTerminalResizeRequest {
 export type VerseTerminalFrame =
   | { type: 'output'; seq: number; dataBase64: string }
   | { type: 'title'; title: string }
-  | { type: 'exit'; code: number | null; signal: string | null }
-  /** 3.15: a block started or finished (the whole record each time). Replayed on subscribe. */
+  | { type: 'exit'; code: number | null; signal: string | null };
+
+/**
+ * 3.15 — everything the stream may carry: the 3.10 frames plus the shell
+ * integration's. A 3.10 client ignores the new event types (its parser
+ * returns null for them), so the stream stays compatible.
+ */
+export type VerseTerminalStreamFrame =
+  | VerseTerminalFrame
+  /** A block started or finished (the whole record each time). Replayed on subscribe. */
   | { type: 'block'; block: VerseTerminalBlock }
-  /** 3.15: the shell's directory changed (shell integration). */
+  /** The shell's directory changed. */
   | { type: 'cwd'; cwd: string }
-  /** 3.15: shell integration came up (or was found missing). */
+  /** Shell integration came up. */
   | { type: 'integration'; state: VerseTerminalShellIntegration };
 
 // ===========================================================================

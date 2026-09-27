@@ -317,6 +317,7 @@ export type {
   VerseTerminalFrame,
   VerseTerminalOpenFileRequest,
   VerseTerminalShellIntegration,
+  VerseTerminalStreamFrame,
   VerseTerminalInputRequest,
   VerseTerminalListResponse,
   VerseTerminalResizeRequest,

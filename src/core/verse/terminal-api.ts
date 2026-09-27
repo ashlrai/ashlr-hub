@@ -86,7 +86,7 @@ import {
   type VerseTerminalBlockOutputFormat,
   type VerseTerminalBlockOutputResponse,
   type VerseTerminalLaunchVia,
-  type VerseTerminalFrame,
+  type VerseTerminalStreamFrame,
   type VerseTerminalListResponse,
 } from './workbench-types.js';
 
@@ -490,7 +490,7 @@ function parseAfter(req: IncomingMessage): number {
 }
 
 /** One SSE frame. Output frames carry `id:` (the resume cursor); title and exit do not. */
-export function formatTerminalSseFrame(frame: VerseTerminalFrame): string {
+export function formatTerminalSseFrame(frame: VerseTerminalStreamFrame): string {
   if (frame.type === 'output') {
     return `id: ${frame.seq}\nevent: output\ndata: ${JSON.stringify(frame)}\n\n`;
   }

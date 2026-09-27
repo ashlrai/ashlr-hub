@@ -57,7 +57,7 @@ import {
   VERSE_TERMINAL_MAX_TABS,
   VERSE_TERMINAL_SCROLLBACK_BYTES,
   type VerseTerminalBlock,
-  type VerseTerminalFrame,
+  type VerseTerminalStreamFrame,
   type VerseTerminalTab,
 } from './workbench-types.js';
 import { folderAccessPendingMessage, probeFolderAccess, withFolderIo } from './folder-io.js';
@@ -309,7 +309,7 @@ export interface TerminalShellIntegrationOptions {
   dir: () => string;
 }
 
-export type TerminalListener = (frame: VerseTerminalFrame) => void;
+export type TerminalListener = (frame: VerseTerminalStreamFrame) => void;
 
 export interface TerminalManagerOptions {
   /** undefined = detect Bun; null = unavailable. */
@@ -588,7 +588,7 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
     return rec;
   }
 
-  function emit(rec: TabRecord, frame: VerseTerminalFrame): void {
+  function emit(rec: TabRecord, frame: VerseTerminalStreamFrame): void {
     for (const listener of [...rec.listeners]) {
       try { listener(frame); } catch { /* one broken stream never stops the others */ }
     }
