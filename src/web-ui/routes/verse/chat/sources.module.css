@@ -1,0 +1,126 @@
+/* chat/SourceList — numbered citations under an answer (V3.15).
+   Quiet by default: a hairline card like the file-activity summary, tertiary
+   text until hovered. Numbers are tabular so a list of 12 aligns. */
+
+.sources {
+  margin-top: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+  min-height: var(--control-h-xs);
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-canvas);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-regular);
+}
+.headLabel { font-weight: var(--font-weight-medium); color: var(--text-secondary); }
+.headCount {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+.list { list-style: none; margin: 0; padding: 0; }
+
+.row {
+  display: grid;
+  grid-template-columns: calc(var(--space-3) + 3ch) minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--density-row-sm);
+  padding: 0 var(--space-3) 0 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+.row:hover { background: var(--bg-hover); }
+.row:active { background: var(--bg-active); }
+.row:disabled { cursor: default; background: transparent; }
+.row:focus-visible { outline: 2px solid var(--border-focus); outline-offset: -2px; }
+
+.num {
+  padding-left: var(--space-3);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+.main {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-xs-size);
+}
+.name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.loc {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+.dir {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  color: var(--text-tertiary);
+}
+li[data-kind='url'] .name,
+li[data-kind='search'] .name { color: var(--text-link); }
+
+.meta,
+.times {
+  font-size: var(--text-2xs-size, 11px);
+  white-space: nowrap;
+  color: var(--text-tertiary);
+}
+.times { font-family: var(--font-display); font-variant-numeric: tabular-nums; }
+
+.more {
+  display: block;
+  width: 100%;
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-medium);
+  text-align: left;
+  cursor: pointer;
+}
+.more:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.notice {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--text-xs-size);
+  color: var(--text-secondary);
+}

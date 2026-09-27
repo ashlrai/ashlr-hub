@@ -12,6 +12,8 @@
  * fetching — so the numbers in the summary can be tested directly against an
  * event log.
  */
+import type { VerseSource } from '../../../../core/verse/types.js';
+import { collateSources, describeTurnWork, emptyTurnStats, type VerseCitation, type VerseTurnStats } from '../../../../core/verse/trace.js';
 import { parseUnifiedDiff } from '../../inbox/diff-parser.js';
 import type { ToolGroupItem, TranscriptItem, TranscriptRenderItem } from '../verse-store.js';
 import { readToolFacts, type ToolAction, type ToolFacts } from './tool-semantics.js';
@@ -103,6 +105,29 @@ export interface TurnBlock {
   firstErrorAnchor: string | null;
   status: TurnStatus;
   durationMs: number | null;
+  /**
+   * V3.15: what this turn drew on, numbered in order of first use — files
+   * read (with line ranges), pages fetched, searches run, plus any source the
+   * engine or seat reported. De-duplicated within the turn.
+   */
+  citations: VerseCitation[];
+  /** V3.15: counts behind the turn's one-line summary. */
+  stats: VerseTurnStats;
+  /** V3.15: "Read 8 files · edited 3 files (+42 −7) · ran 4 commands" — empty when the turn did no tool work. */
+  work: string;
+  /** V3.15: the turn's reasoning, totalled. Unknown figures are null, never 0. */
+  reasoning: TurnReasoning;
+}
+
+export interface TurnReasoning {
+  /** Blocks with text. */
+  shown: number;
+  /** Blocks the provider withheld (redacted markers). */
+  hidden: number;
+  /** Summed over blocks that reported a duration; null when none did. */
+  durationMs: number | null;
+  /** Summed reasoning tokens (the CLI's estimate, else ~chars/4); null when nothing to count. */
+  tokens: number | null;
 }
 
 export interface TurnModel {
@@ -168,6 +193,14 @@ function cachedDiffCounts(
   return counts;
 }
 
+function thinkingMembers(item: TranscriptRenderItem): Array<Extract<TranscriptItem, { kind: 'thinking' }>> {
+  if (item.kind === 'thinking') return [item];
+  if (item.kind === 'toolGroup') {
+    return (item as ToolGroupItem).items.filter((m): m is Extract<TranscriptItem, { kind: 'thinking' }> => m.kind === 'thinking');
+  }
+  return [];
+}
+
 function toolMembers(item: TranscriptRenderItem): Array<Extract<TranscriptItem, { kind: 'tool' }>> {
   if (item.kind === 'tool') return [item];
   if (item.kind === 'toolGroup') {
@@ -226,6 +259,10 @@ function makeTurn(
   let durationMs: number | null = null;
   let prompt: string | null = null;
 
+  const sources: VerseSource[] = [];
+  const stats = emptyTurnStats();
+  const reasoning: TurnReasoning = { shown: 0, hidden: 0, durationMs: null, tokens: null };
+
   const noteError = (anchor: string) => {
     errorCount++;
     if (!firstErrorAnchor) firstErrorAnchor = anchor;
@@ -235,12 +272,24 @@ function makeTurn(
   for (const item of items) {
     if (item.kind === 'user' && prompt === null) prompt = item.text;
 
+    for (const thought of thinkingMembers(item)) {
+      const hidden = thought.redacted || thought.text.trim().length === 0;
+      if (hidden) reasoning.hidden++;
+      else reasoning.shown++;
+      if (thought.durationMs !== null) reasoning.durationMs = (reasoning.durationMs ?? 0) + thought.durationMs;
+      const tokens = thought.estimatedTokens ?? (hidden ? null : Math.ceil(thought.text.trim().length / 4));
+      if (tokens !== null) reasoning.tokens = (reasoning.tokens ?? 0) + tokens;
+    }
+    if (item.kind === 'source' && item.turnId !== null) sources.push(item.source);
+
     for (const tool of toolMembers(item)) {
       toolCount++;
       const fact = cachedToolFacts(tool, cache);
       facts.set(tool.toolUseId, fact);
       if (fact.action === 'command') commandCount++;
       if (fact.failed) noteError(`verse-tool-${tool.toolUseId.replace(/[^A-Za-z0-9_-]/g, '')}`);
+      for (const source of fact.sources) sources.push(source.toolUseId ? source : { ...source, toolUseId: tool.toolUseId });
+      tallyAction(stats, fact);
 
       const action = fact.action;
       if (action !== 'read' && action !== 'edit' && action !== 'create' && action !== 'delete') continue;
@@ -296,12 +345,35 @@ function makeTurn(
     }
   }
 
+  let additions = 0;
+  let deletions = 0;
+  for (const entry of byPath.values()) {
+    if (entry.action === 'read') stats.filesRead++;
+    else if (entry.action === 'edit') stats.filesEdited++;
+    else if (entry.action === 'create') stats.filesCreated++;
+    else stats.filesDeleted++;
+    additions += entry.additions;
+    deletions += entry.deletions;
+  }
+  if (additions > 0 || deletions > 0) {
+    stats.additions = additions;
+    stats.deletions = deletions;
+  }
+  const citations = collateSources(sources);
+  stats.sources = citations.length;
+  stats.thoughts = reasoning.shown;
+  stats.hiddenThoughts = reasoning.hidden;
+
   return {
     key: first.key,
     turnId: 'turnId' in first ? first.turnId : null,
     items,
     prompt,
     at: first.at,
+    citations,
+    stats,
+    work: describeTurnWork(stats),
+    reasoning,
     // Strongest action first. The map is in first-touch order, and an agentic
     // turn reads widely before editing narrowly — so in read order the three
     // edits in a 40-file turn sit behind "Show 35 more files", hiding exactly
@@ -319,6 +391,31 @@ function makeTurn(
     status,
     durationMs,
   };
+}
+
+/** Count one tool call into the turn's summary (files are counted from the per-path map). */
+function tallyAction(stats: VerseTurnStats, fact: ToolFacts): void {
+  switch (fact.action) {
+    case 'command':
+      stats.commands++;
+      if (fact.failed) stats.commandsFailed++;
+      break;
+    case 'search':
+      stats.codeSearches++;
+      break;
+    case 'web':
+      stats.webLookups++;
+      break;
+    case 'task':
+      stats.subagents++;
+      break;
+    case 'other':
+      stats.otherTools++;
+      break;
+    default:
+      break;
+  }
+  if (fact.failed) stats.failed++;
 }
 
 /** `12 files · 4 edited, 8 read` — the one-line form for a collapsed summary. */

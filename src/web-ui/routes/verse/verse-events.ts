@@ -53,6 +53,8 @@ const EVENT_TYPES = [
   // V3.10 persisted.
   'recovered',
   'history-truncated',
+  // V3.15 persisted (additive): injected / seat-reported sources.
+  'source',
 ] as const satisfies readonly VerseEventType[];
 
 type UnlistedEventType = Exclude<VerseEventType, (typeof EVENT_TYPES)[number]>;
@@ -107,6 +109,13 @@ function v310FieldsValid(e: Record<string, unknown>): boolean {
       return (e.kind === 'retry' || e.kind === 'preflight' || e.kind === 'watchdog') && typeof e.message === 'string';
     case 'history-truncated':
       return typeof e.droppedBefore === 'number' && Number.isFinite(e.droppedBefore);
+    case 'source': {
+      // Kept inline (not core/verse/trace isVerseSource): this file is on the
+      // chat's first-paint path and must not pull the trace module in.
+      const s = e.source as Record<string, unknown> | null | undefined;
+      return !!s && typeof s === 'object' && typeof s.kind === 'string' && typeof s.ref === 'string' && s.ref.length > 0 &&
+        typeof s.title === 'string' && typeof s.origin === 'string';
+    }
     default:
       return true;
   }

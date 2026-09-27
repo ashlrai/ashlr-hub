@@ -19,7 +19,7 @@ function group(items: ToolGroupMember[], spanMs: number | null = 134_000): Pick<
 }
 
 function counts(over: Partial<ActionCounts>): ActionCounts {
-  return { read: 0, edit: 0, create: 0, delete: 0, command: 0, search: 0, task: 0, web: 0, other: 0, ...over };
+  return { read: 0, edit: 0, create: 0, delete: 0, command: 0, search: 0, task: 0, web: 0, websearch: 0, other: 0, ...over };
 }
 
 describe('describeWork', () => {
@@ -28,6 +28,8 @@ describe('describeWork', () => {
     expect(describeWork(counts({ command: 12, read: 8, edit: 3 }))).toBe('Ran 12 commands · read 8 files · edited 3 files');
     expect(describeWork(counts({ command: 1, read: 1 }))).toBe('Ran 1 command · read 1 file');
     expect(describeWork(counts({ read: 1 }))).toBe('Read 1 file');
+    // V3.15: a search is not a page fetch.
+    expect(describeWork(counts({ websearch: 2, web: 1 }))).toBe('Ran 2 web searches · fetched 1 page');
     expect(describeWork(counts({ read: 2, create: 1 }))).toBe('Read 2 files · created 1 file');
   });
 

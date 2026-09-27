@@ -640,3 +640,63 @@
   text-underline-offset: 2px;
 }
 .continuedLink:hover { text-decoration-color: var(--accent-500); }
+
+/* ---- V3.15: reasoning / sources ------------------------------------------ */
+/* The toggles ride the nav strip on long chats; a short chat gets this slim
+   right-aligned bar instead (no outline, no search — nothing to navigate). */
+.traceBar {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  min-height: var(--density-row-sm);
+  padding: 0 var(--space-3);
+}
+.traceToggles { display: inline-flex; gap: var(--space-1); }
+.traceToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.traceToggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+.traceToggle[aria-pressed='true'] { background: var(--bg-active); color: var(--text-primary); }
+.traceToggle:focus-visible { outline: 2px solid var(--border-focus); outline-offset: -2px; }
+.traceCount { font-family: var(--font-display); font-variant-numeric: tabular-nums; color: var(--text-tertiary); }
+
+/* A collapsed edit previews its first changed lines, indented under the
+   row's name so the eye reads it as part of that call, not a new item. */
+.miniDiff {
+  margin: 0 0 var(--space-1) calc(12px + var(--space-3));
+  padding: var(--space-1) var(--space-2);
+  border-left: 2px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+  overflow: hidden;
+}
+.miniAdd,
+.miniDel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+.miniAdd { color: var(--status-success-fg); }
+.miniDel { color: var(--status-danger-fg); }
+.miniSign { display: inline-block; width: 2ch; user-select: none; }
+.miniMore { font-family: var(--font-ui); color: var(--text-tertiary); }
+
+/* The turn's one-line summary leads its footer; the duration follows it. */
+.turnWork { color: inherit; }
+.turnQuiet { font-style: italic; }

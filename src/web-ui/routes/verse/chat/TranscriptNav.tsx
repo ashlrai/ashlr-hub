@@ -13,7 +13,7 @@
  * when the session is long enough to need it, so a two-turn chat stays as
  * bare as it is today.
  */
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { ChevronIcon, SearchIcon } from '../verse-icons.js';
 import { turnTitle, type TurnBlock, type TurnMatch } from './turn-model.js';
 import styles from './chat.module.css';
@@ -31,6 +31,8 @@ export interface TranscriptNavProps {
   onJumpTurn: (turnKey: string) => void;
   /** Focus hand-off: the transcript raises this when ⌘F is pressed. */
   focusToken: number;
+  /** V3.15: controls drawn at the right end of the strip (the Reasoning / Sources toggles). */
+  trailing?: ReactNode;
 }
 
 const STATUS_GLYPH: Record<TurnBlock['status'], string> = {
@@ -48,7 +50,7 @@ const STATUS_WORD: Record<TurnBlock['status'], string> = {
 };
 
 export function TranscriptNav(props: TranscriptNavProps) {
-  const { turns, query, onQuery, matches, matchIndex, onStepMatch, errorCount, onJumpError, onJumpTurn, focusToken } = props;
+  const { turns, query, onQuery, matches, matchIndex, onStepMatch, errorCount, onJumpError, onJumpTurn, focusToken, trailing = null } = props;
   const [outlineOpen, setOutlineOpen] = useState(false);
   const search = useRef<HTMLInputElement>(null);
   const outlineId = useId();
@@ -127,6 +129,7 @@ export function TranscriptNav(props: TranscriptNavProps) {
           <span className="visually-hidden"> — jump to the first one</span>
         </button>
       ) : null}
+      {trailing}
 
       {outlineOpen ? (
         <div id={outlineId} className={styles.outline} role="group" aria-label="Turns in this chat">
