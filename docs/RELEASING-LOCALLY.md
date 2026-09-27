@@ -64,14 +64,35 @@ its cause is fixed.
 4. if `/Applications/Ashlr.app` exists: quits it, moves `Contents/MacOS/ashlr` and
    `Contents/Resources/public` aside to `*.prev-<short sha>`, copies `dist-bin/ashlr` and
    `dist-bin/public` in (with `--native`, also `desktop/src-tauri/target/release/ashlr-desktop`
-   when it is newer than the installed one), ad-hoc signs and verifies the bundle, relaunches;
+   when it is newer than the installed one), writes `NSMicrophoneUsageDescription` into
+   `Contents/Info.plist`, signs the bundle with the stable local identity **"Ashlr Local"**
+   and `desktop/src-tauri/Entitlements.plist`, verifies, relaunches;
 5. `launchctl kickstart -k` on `ai.ashlr.anthropic-proxy` and `ai.ashlr.serve`, if loaded;
 6. waits for `http://127.0.0.1:7777/verse/` to answer 200 and prints the versions and the
    tarball path.
 
 Nothing is deleted. Only the three newest `*.prev-*` backups of each file stay in the bundle;
 older ones move to a dated folder under `~/.Trash`. To roll back, move a `.prev-` file back
-and re-run `codesign --force --deep --sign - /Applications/Ashlr.app`.
+and re-run `codesign --force --deep --sign "Ashlr Local" --entitlements desktop/src-tauri/Entitlements.plist /Applications/Ashlr.app`.
+
+### Stable local signing ("Ashlr Local")
+
+macOS keys the microphone permission (TCC) to the app's code signature. An ad-hoc
+signature (`--sign -`) is different after every build, so every `ship:local` used to make
+macOS forget that Ashlr may use the mic. `ship:local` now signs with a self-signed identity
+that never changes:
+
+- **First run only**: if the login keychain has no valid "Ashlr Local" code-signing
+  identity, `/usr/bin/openssl` makes one (10 years, codeSigning only), `security import`
+  adds it (codesign may use the key), and `security add-trusted-cert -p codeSign` trusts it
+  **for code signing, for your user only** — macOS asks for your login password once. The
+  private key exists only in a 0700 temp dir that is removed, and in the keychain.
+- The first `codesign` with it may show "codesign wants to access key 'Ashlr Local'":
+  click **Always Allow**.
+- If any of that fails (no GUI to answer the prompt, cancelled), `ship:local` signs ad-hoc
+  and says so loudly; rerun it from a terminal to finish the setup.
+- Then open Ashlr, dictate once (⌃⌥V or a mic button), and allow the microphone. It stays
+  allowed across rebuilds.
 `npm run ship:local -- --dry-run` prints every step and changes nothing.
 
 The sections below are the manual procedure these two scripts automate, and the traps

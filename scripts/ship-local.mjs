@@ -15,7 +15,10 @@
  *   4. `npm run build:binary` (dist-bin/ashlr + dist-bin/public).
  *   5. If /Applications/Ashlr.app exists: quit it, move Contents/MacOS/ashlr and
  *      Contents/Resources/public aside to *.prev-<short sha> (never deleted), copy the new
- *      ones in (and, with --native, ashlr-desktop), ad-hoc codesign, verify, relaunch.
+ *      ones in (and, with --native, ashlr-desktop), make sure Info.plist carries the
+ *      microphone usage string, codesign with the stable local identity "Ashlr Local"
+ *      (created + trusted once, see ensureSigningIdentity; ad-hoc with a warning if that
+ *      fails) and Entitlements.plist, verify, relaunch.
  *      Only the 3 newest *.prev-* of each kind stay in the bundle; older ones are moved into a
  *      dated folder under ~/.Trash.
  *   6. `launchctl kickstart -k` ai.ashlr.anthropic-proxy and ai.ashlr.serve, if loaded.
@@ -28,7 +31,8 @@
  * Exit: 0 shipped (or dry-run printed), 1 a step failed, 2 refused (platform, dirty tree, usage).
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -43,6 +47,19 @@ export const KEEP_BACKUPS = 3;
 export const NATIVE_BUILD = 'desktop/src-tauri/target/release/ashlr-desktop';
 /** The Dock/Finder icon, generated from icons/icon.svg by `cargo tauri icon`. */
 export const APP_ICON_BUILD = 'desktop/src-tauri/icons/icon.icns';
+
+/**
+ * Code signing. macOS keys the microphone grant (TCC) to the app's signature: an
+ * ad-hoc signature (`--sign -`) changes with every build, so every ship:local made
+ * macOS forget that Ashlr may use the mic. A self-signed identity that never changes
+ * keeps the grant. It lives in the login keychain, is created (and trusted for code
+ * signing — macOS asks for the login password once) by ensureSigningIdentity, and is
+ * only ever used to sign this app on this Mac.
+ */
+export const SIGNING_IDENTITY = 'Ashlr Local';
+export const ENTITLEMENTS = 'desktop/src-tauri/Entitlements.plist';
+/** Must match desktop/src-tauri/Info.plist (a Rust test pins that file's copy). */
+export const MIC_USAGE = 'Verse transcribes your voice on this Mac when you hold the dictation key.';
 
 /** The app-bundle files ship:local replaces, each backed up as <path>.prev-<short sha>. */
 export const BUNDLE_TARGETS = Object.freeze({
@@ -112,6 +129,7 @@ export function gatherContext(args, io) {
   if (appExists) {
     for (const dir of new Set(Object.values(BUNDLE_TARGETS).map((t) => t.dir))) listing[dir] = io.list(join(APP_PATH, dir));
   }
+  const signing = appExists ? findSigningIdentity(io) : null;
   const loadedAgents = LAUNCH_AGENTS.filter(
     (label) => io.exec('launchctl', ['print', `gui/${io.uid}/${label}`]).status === 0,
   );
@@ -128,6 +146,7 @@ export function gatherContext(args, io) {
     dirty: status.status !== 0 || status.stdout.trim().length > 0,
     appExists,
     listing,
+    signing,
     loadedAgents,
     nativeBuildMtime: io.mtime(join(io.repoRoot, NATIVE_BUILD)),
     installedNativeMtime: appExists ? io.mtime(join(APP_PATH, BUNDLE_TARGETS.native.dir, BUNDLE_TARGETS.native.name)) : null,
@@ -135,6 +154,100 @@ export function gatherContext(args, io) {
     installedIconMtime: appExists ? io.mtime(join(APP_PATH, BUNDLE_TARGETS.icon.dir, BUNDLE_TARGETS.icon.name)) : null,
     ...args,
   };
+}
+
+/**
+ * Pure: `security find-identity -p codesigning` output → [{ hash, name, valid }].
+ * Without `-v` the listing includes untrusted identities, marked `(CSSMERR_…)`.
+ */
+export function parseIdentities(stdout) {
+  const out = [];
+  for (const line of String(stdout).split('\n')) {
+    const m = /^\s*\d+\)\s+([0-9A-F]{40})\s+"([^"]+)"(.*)$/.exec(line);
+    if (m) out.push({ hash: m[1], name: m[2], valid: !/CSSMERR_|REVOKED|EXPIRED/i.test(m[3]) });
+  }
+  return out;
+}
+
+/** The "Ashlr Local" identity as the keychain reports it, or null. */
+export function findSigningIdentity(io) {
+  const res = io.exec('security', ['find-identity', '-p', 'codesigning']);
+  if (res.status !== 0) return null;
+  const all = parseIdentities(res.stdout).filter((i) => i.name === SIGNING_IDENTITY);
+  return all.find((i) => i.valid) ?? all[0] ?? null;
+}
+
+/** Pure: the codesign argv for an identity hash, or ad-hoc (`-`) when there is none. */
+export function codesignArgv(identity, entitlements, app = APP_PATH) {
+  return identity
+    ? ['codesign', '--force', '--deep', '--sign', identity, '--entitlements', entitlements, app]
+    : ['codesign', '--force', '--deep', '--sign', '-', '--entitlements', entitlements, app];
+}
+
+/** An X.509 v3 config for a leaf code-signing certificate (LibreSSL and OpenSSL 3). */
+const OPENSSL_CONFIG = `[req]
+distinguished_name = dn
+prompt = no
+[dn]
+CN = ${SIGNING_IDENTITY}
+O = Ashlr (this Mac only)
+[ext]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+extendedKeyUsage = critical,codeSigning
+`;
+
+/**
+ * Make sure a VALID "Ashlr Local" code-signing identity exists in the login keychain;
+ * returns its SHA-1 hash, or null (the caller falls back to ad-hoc and says why).
+ *
+ *   missing → /usr/bin/openssl makes a self-signed codeSigning cert (10 years),
+ *             `security import` puts cert + key in the login keychain (codesign allowed)
+ *   untrusted → `security add-trusted-cert -r trustRoot -p codeSign` trusts it for code
+ *             signing only, for this user only (macOS asks for the login password)
+ *
+ * The private key only ever exists in a 0700 temp dir that is removed afterwards, and in
+ * the keychain. Idempotent: an existing valid identity is returned untouched.
+ */
+export function ensureSigningIdentity(io) {
+  let identity = findSigningIdentity(io);
+  if (identity?.valid) return identity.hash;
+  const keychain = join(io.home, 'Library', 'Keychains', 'login.keychain-db');
+  const dir = io.mkdtemp('ashlr-sign-');
+  try {
+    const cert = join(dir, 'cert.pem');
+    if (!identity) {
+      const key = join(dir, 'key.pem');
+      const p12 = join(dir, 'identity.p12');
+      const cfg = join(dir, 'openssl.cnf');
+      const pass = randomBytes(16).toString('hex');
+      io.writeFile(cfg, OPENSSL_CONFIG);
+      const steps = [
+        ['/usr/bin/openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '3650', '-config', cfg, '-extensions', 'ext']],
+        ['/usr/bin/openssl', ['pkcs12', '-export', '-inkey', key, '-in', cert, '-out', p12, '-name', SIGNING_IDENTITY, '-passout', `pass:${pass}`]],
+        ['security', ['import', p12, '-k', keychain, '-P', pass, '-T', '/usr/bin/codesign']],
+      ];
+      for (const [cmd, argv] of steps) {
+        if (io.exec(cmd, argv).status !== 0) {
+          io.log(`ship:local: could not create the "${SIGNING_IDENTITY}" signing identity (${cmd} ${argv[0]} failed).`);
+          return null;
+        }
+      }
+    } else {
+      const pem = io.exec('security', ['find-certificate', '-c', SIGNING_IDENTITY, '-p', keychain]);
+      if (pem.status !== 0 || !pem.stdout.includes('BEGIN CERTIFICATE')) return null;
+      io.writeFile(cert, pem.stdout);
+    }
+    io.log(`      trusting "${SIGNING_IDENTITY}" for code signing — macOS will ask for your login password (once)`);
+    if (io.exec('security', ['add-trusted-cert', '-r', 'trustRoot', '-p', 'codeSign', '-k', keychain, cert], { stdio: 'inherit' }).status !== 0) {
+      io.log(`ship:local: "${SIGNING_IDENTITY}" exists but is not trusted for code signing (the prompt was cancelled or unavailable).`);
+      return null;
+    }
+    identity = findSigningIdentity(io);
+    return identity?.valid ? identity.hash : null;
+  } finally {
+    io.removeDir(dir);
+  }
 }
 
 /** `@ashlr/hub` + `3.11.0` → `ashlr-hub-3.11.0.tgz`, npm pack's naming. */
@@ -216,7 +329,19 @@ export function planShip(ctx) {
       steps.push({ id: 'trash-dir', title: `trash folder ${trashDir}`, argv: ['mkdir', '-p', trashDir] });
       steps.push({ id: 'rotate-backups', title: `keep ${KEEP_BACKUPS} newest backups; move ${trashMoves.length} older to the Trash`, argv: ['mv', ...trashMoves, trashDir] });
     }
-    steps.push({ id: 'codesign', title: 'ad-hoc codesign the bundle', argv: ['codesign', '--force', '--deep', '--sign', '-', APP_PATH] });
+    // Dictation: macOS kills an app that touches the mic without this key, and ship:local
+    // patches an installed bundle rather than rebuilding it, so write it every time.
+    steps.push({ id: 'plist-mic', title: 'Info.plist: NSMicrophoneUsageDescription', argv: ['plutil', '-replace', 'NSMicrophoneUsageDescription', '-string', MIC_USAGE, join(APP_PATH, 'Contents', 'Info.plist')] });
+    const valid = ctx.signing?.valid ? ctx.signing.hash : null;
+    if (!valid) {
+      steps.push({ id: 'signing-identity', title: `create / trust the "${SIGNING_IDENTITY}" code-signing identity (once; keeps the microphone permission across rebuilds)`, identity: SIGNING_IDENTITY });
+    }
+    steps.push({
+      id: 'codesign',
+      title: valid ? `codesign the bundle as "${SIGNING_IDENTITY}"` : `codesign the bundle as "${SIGNING_IDENTITY}" (ad-hoc if the identity is unavailable)`,
+      argv: codesignArgv(valid ?? SIGNING_IDENTITY, repo(ENTITLEMENTS)),
+      sign: { identity: valid, entitlements: repo(ENTITLEMENTS) },
+    });
     // Finder and the Dock cache the icon until the bundle's mtime changes.
     if (iconNewer) steps.push({ id: 'touch-app', title: 'touch the bundle so the Dock picks up the new icon', argv: ['touch', APP_PATH] });
     steps.push({ id: 'codesign-verify', title: 'verify the signature', argv: ['codesign', '--verify', '--deep', '--strict', APP_PATH] });
@@ -251,9 +376,28 @@ export function describeStep(step, index) {
  * (url → status | null), log. Returns 0 or 1.
  */
 export async function runSteps(steps, io, { dryRun }) {
+  let identity = null;
   for (const [index, step] of steps.entries()) {
     io.log(describeStep(step, index));
     if (dryRun) continue;
+    if (step.identity) {
+      identity = ensureSigningIdentity(io);
+      continue;
+    }
+    if (step.sign) {
+      const hash = step.sign.identity ?? identity;
+      if (!hash) {
+        io.log(`ship:local: WARNING — signing ad-hoc. macOS forgets Ashlr's microphone permission on every ad-hoc rebuild;`);
+        io.log(`           rerun ship:local in a terminal to create/trust the "${SIGNING_IDENTITY}" identity (docs/RELEASING-LOCALLY.md).`);
+      }
+      const argv = codesignArgv(hash, step.sign.entitlements);
+      const res = io.exec(argv[0], argv.slice(1), { cwd: io.repoRoot, stdio: 'inherit' });
+      if (res.status !== 0) {
+        io.log(`ship:local: step "${step.id}" failed (exit ${res.status}). Nothing after it ran.`);
+        return 1;
+      }
+      continue;
+    }
     if (step.argv) {
       const res = io.exec(step.argv[0], step.argv.slice(1), { cwd: io.repoRoot, stdio: 'inherit' });
       if (res.status !== 0) {
@@ -313,6 +457,13 @@ function realIo() {
     log: (line) => console.log(line),
     sleep: (ms) => delay(ms),
     readFile: (path) => readFileSync(path, 'utf8'),
+    writeFile: (path, text) => writeFileSync(path, text, { mode: 0o600 }),
+    mkdtemp: (prefix) => mkdtempSync(join(tmpdir(), prefix)),
+    removeDir: (dir) => {
+      // Only the signing scratch dir ensureSigningIdentity made (it held a private key).
+      if (!dir.startsWith(join(tmpdir(), 'ashlr-sign-'))) throw new Error(`refusing to remove ${dir}`);
+      rmSync(dir, { recursive: true, force: true });
+    },
     exists: (path) => existsSync(path),
     mtime: (path) => { try { return statSync(path).mtimeMs; } catch { return null; } },
     list: (dir) => {
