@@ -189,11 +189,13 @@
 /test/authority-codeowners-310b.test.ts @masonwyatt23
 /test/authority-effective-policy-310b.test.ts @masonwyatt23
 /test/authority-evidence-unknown-310.test.ts @masonwyatt23
+/test/authority-grant-scope-315.test.ts @masonwyatt23
 /test/authority-ledger-310b.test.ts @masonwyatt23
 /test/authority-no-file-trust-310b.test.ts @masonwyatt23
 /test/authority-release-truth.test.ts @masonwyatt23
 /test/authority-resident-admission.test.ts @masonwyatt23
 /test/authority-resident-cli.test.ts @masonwyatt23
+/test/authority-resident-native-gesture-315.test.ts @masonwyatt23
 /test/authority-review-fixes-310.test.ts @masonwyatt23
 /test/authority-rollout-310b.test.ts @masonwyatt23
 /test/authority-server-enforcement-314.test.ts @masonwyatt23
@@ -232,6 +234,7 @@
 /test/fixture-custody.test.ts @masonwyatt23
 /test/fixtures/m454/agent-skills-ff2df4c.provenance.json @masonwyatt23
 /test/fixtures/m518/visionquality-gate-robustness-false-positive-mer-c9c62c.json.b64 @masonwyatt23
+/test/fleet-control-315.test.ts @masonwyatt23
 /test/fleet-learning-loop-sweeps.test.ts @masonwyatt23
 /test/fleet-live-api-310b.test.ts @masonwyatt23
 /test/gate.test.ts @masonwyatt23
