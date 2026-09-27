@@ -1221,6 +1221,26 @@
           "description": "Also ingest interactive Codex Desktop rollouts, not just non-interactive `codex exec` ones. Default false (personal sessions need explicit opt-in); ASHLR_REASONING_CODEX_DESKTOP=1 also enables it."
         }
       }
+    },
+    "devin": {
+      "type": "object",
+      "description": "3.15 Devin lane (src/core/devin/). Off unless enabled is exactly true; `ashlr devin connect` turns it on after storing the API key in the macOS Keychain. The key is never read from or written to this file.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Turn the Devin lane on. Default false."
+        },
+        "fleet": {
+          "type": "boolean",
+          "description": "Let the fleet launch Devin sessions without a click (still needs a standing grant with the repo and the budget's reserve). Devin PRs are shadow-only at the standing gates. Default false."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["normal", "fast", "lite", "ultra"],
+          "description": "SessionCreateRequest.devin_mode, pinned so the producer is a known agent mode (fusion is not accepted). Default normal."
+        }
+      }
     }
   },
   "definitions": {

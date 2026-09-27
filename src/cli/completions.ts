@@ -37,6 +37,8 @@ export const TOP_LEVEL_COMMANDS: string[] = [
   'authority', 'leader', 'mirror',
   // 3.11 cloud lane.
   'cloud',
+  // 3.15 Devin lane.
+  'devin',
 ];
 
 /** Subcommands per top-level command (first-position completion only). */
@@ -98,6 +100,8 @@ const SUBCOMMANDS: Record<string, string[]> = {
   mirror: ['list', 'add', 'sync', 'path', 'remove', 'reconcile', 'help'],
   // Mirror the verb switch in src/cli/cloud.ts (runCloudCli).
   cloud: ['launch', 'list', 'refresh', 'improve', 'budget', 'backlog', 'help'],
+  // Mirror the verb switch in src/cli/devin.ts (runDevinCli).
+  devin: ['connect', 'disconnect', 'enable', 'disable', 'fleet', 'status', 'launch', 'list', 'refresh', 'message', 'budget', 'help'],
   universe: ['demo', 'init', 'run', 'status', 'archive', 'campaign', 'portfolio', 'integration', 'deliver', 'deliveries', 'graph', 'compare', 'help'],
 };
 

@@ -39,16 +39,59 @@ import {
 } from './pr-preview.js';
 import { readCloudTask, writeCloudTask } from './store.js';
 import { defaultCloudGh } from './tracker.js';
-import type { CloudTaskV1 } from './types.js';
+import type { CloudDeliveryPin, CloudSupersededBy, CloudTaskPr, CloudTaskReport, CloudTaskV1 } from './types.js';
 
 export type CloudGh = (args: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
 
-export interface CloudPrActionDeps {
+/**
+ * 3.15 — what the PR triage reads from a task. A cloud task (CloudTaskV1) and
+ * a Devin task (devin/types.ts DevinTaskV1) both carry exactly these fields
+ * with the same meaning, so one triage path — the same identity rules, the
+ * same pinned-head actions — serves both lanes instead of a copy per lane.
+ */
+export interface CloudDeliveryTask {
+  id: string;
+  repo: string;
+  branch: string;
+  baseBranch: string;
+  state: string;
+  stateReason: string | null;
+  pr: CloudTaskPr | null;
+  report: CloudTaskReport | null;
+  deliveryPin?: CloudDeliveryPin;
+  supersededBy?: CloudSupersededBy;
+}
+
+/** Where a lane keeps its tasks (default: the cloud store). */
+export interface CloudDeliveryStore<T extends CloudDeliveryTask> {
+  read: (id: string) => T | null;
+  write: (task: T) => void;
+  /** Noun used in refusals ("No cloud task with that id."). */
+  noun: string;
+}
+
+/** A lane's preview cache (the cloud lane uses the module default). */
+export interface CloudPrPreviewCache {
+  previews: Map<string, CloudPrPreview>;
+  diffChecksBySha: Map<string, { headSha: string; checks: CloudPrCheck[] }>;
+}
+
+export function createCloudPrPreviewCache(): CloudPrPreviewCache {
+  return { previews: new Map(), diffChecksBySha: new Map() };
+}
+
+export interface CloudPrActionDeps<T extends CloudDeliveryTask = CloudTaskV1> {
   gh?: CloudGh;
   /** The live standing policy (null = no grant): the preview's scope caps. */
   policy?: () => EffectivePolicy | null;
   now?: () => Date;
+  /** 3.15: another lane's task store (default: the cloud store). */
+  store?: CloudDeliveryStore<T>;
+  /** 3.15: another lane's preview cache (default: the cloud lane's). */
+  cache?: CloudPrPreviewCache;
 }
+
+const CLOUD_STORE: CloudDeliveryStore<CloudTaskV1> = { read: readCloudTask, write: writeCloudTask, noun: 'cloud task' };
 
 export const HEAD_SHA_PATTERN = /^[0-9a-f]{40}$/;
 /** The comment `close` leaves on the PR. */
@@ -67,7 +110,7 @@ function policyFor(repo: string, policy: EffectivePolicy | null): CloudPrPolicy 
   return policy && repoPolicy ? { repo: repoPolicy, merge: policy.merge } : null;
 }
 
-function safePolicy(deps: CloudPrActionDeps): EffectivePolicy | null {
+function safePolicy(deps: Pick<CloudPrActionDeps<CloudDeliveryTask>, 'policy'>): EffectivePolicy | null {
   try {
     return (deps.policy ?? currentStandingPolicy)();
   } catch {
@@ -130,7 +173,7 @@ export type CloudPrRead =
   | { ok: false; status: 404 | 409 | 502; error: string };
 
 /** The task's pinned, verified PR — or why it has none to act on. */
-function actionablePr(task: CloudTaskV1): { number: number; url: string } | string {
+function actionablePr(task: CloudDeliveryTask): { number: number; url: string } | string {
   if (task.state !== 'pr-open') return 'This cloud task has no open pull request.';
   // 3.13: the standing-pass intake closed this PR in favour of the fleet's App PR.
   if (task.supersededBy) return `This pull request was superseded by fleet PR #${task.supersededBy.number}; it lands through the standing gates.`;
@@ -143,7 +186,7 @@ function actionablePr(task: CloudTaskV1): { number: number; url: string } | stri
 }
 
 /** GitHub's view of the task's PR: identity-checked, then compared with its base. */
-export async function readCloudPrGithub(task: CloudTaskV1, gh: CloudGh): Promise<CloudPrRead> {
+export async function readCloudPrGithub(task: CloudDeliveryTask, gh: CloudGh): Promise<CloudPrRead> {
   const pr = actionablePr(task);
   if (typeof pr === 'string') return { ok: false, status: 409, error: pr };
   let view: { ok: boolean; stdout: string };
@@ -198,7 +241,7 @@ export async function readCloudPrGithub(task: CloudTaskV1, gh: CloudGh): Promise
  * head SHA changes, whatever is pushed while it downloads. Null when it
  * cannot be read in full (a truncated diff is never judged).
  */
-export async function readPinnedDiff(task: CloudTaskV1, mergeBase: string | null, headSha: string, gh: CloudGh): Promise<string | null> {
+export async function readPinnedDiff(task: Pick<CloudDeliveryTask, 'repo'>, mergeBase: string | null, headSha: string, gh: CloudGh): Promise<string | null> {
   if (!mergeBase || !HEAD_SHA_PATTERN.test(mergeBase) || !HEAD_SHA_PATTERN.test(headSha)) return null;
   try {
     const result = await gh(['api', '-H', 'Accept: application/vnd.github.diff', `repos/${task.repo}/compare/${mergeBase}...${headSha}`]);
@@ -217,37 +260,37 @@ export const CLOUD_PR_PREVIEW_TTL_MS = 5 * 60 * 1000;
 /** Bound on PRs previewed per refresh (each is two or three `gh` calls). */
 const MAX_PREVIEWS_PER_REFRESH = 12;
 
-const previews = new Map<string, CloudPrPreview>();
-const diffChecksBySha = new Map<string, { headSha: string; checks: CloudPrCheck[] }>();
+const defaultCache = createCloudPrPreviewCache();
 
-export function cachedCloudPrPreviews(): ReadonlyMap<string, CloudPrPreview> {
-  return previews;
+export function cachedCloudPrPreviews(cache: CloudPrPreviewCache = defaultCache): ReadonlyMap<string, CloudPrPreview> {
+  return cache.previews;
 }
 
-export function forgetCloudPrPreview(taskId: string): void {
-  previews.delete(taskId);
+export function forgetCloudPrPreview(taskId: string, cache: CloudPrPreviewCache = defaultCache): void {
+  cache.previews.delete(taskId);
 }
 
 /** Test seam. */
 export function resetCloudPrPreviewsForTest(): void {
-  previews.clear();
-  diffChecksBySha.clear();
+  defaultCache.previews.clear();
+  defaultCache.diffChecksBySha.clear();
 }
 
-export const previewable = (task: CloudTaskV1): boolean => task.state === 'pr-open' && task.pr !== null && task.pr.state === 'open';
+export const previewable = (task: CloudDeliveryTask): boolean => task.state === 'pr-open' && task.pr !== null && task.pr.state === 'open';
 
-/** Some open cloud PR has no preview, or one older than the TTL. */
-export function cloudPrPreviewsStale(tasks: readonly CloudTaskV1[], nowMs: number): boolean {
+/** Some open PR has no preview, or one older than the TTL. */
+export function cloudPrPreviewsStale(tasks: readonly CloudDeliveryTask[], nowMs: number, cache: CloudPrPreviewCache = defaultCache): boolean {
   return tasks.some((task) => {
     if (!previewable(task)) return false;
-    const cached = previews.get(task.id);
+    const cached = cache.previews.get(task.id);
     return !cached || nowMs - Date.parse(cached.computedAt) >= CLOUD_PR_PREVIEW_TTL_MS;
   });
 }
 
 /** Read one PR and judge it; the diff checks are reused while the head SHA is unchanged. */
-export async function previewCloudPr(task: CloudTaskV1, deps: CloudPrActionDeps = {}): Promise<CloudPrPreview | null> {
+export async function previewCloudPr<T extends CloudDeliveryTask>(task: T, deps: CloudPrActionDeps<T> = {}): Promise<CloudPrPreview | null> {
   const gh = deps.gh ?? defaultCloudGh;
+  const diffChecksBySha = (deps.cache ?? defaultCache).diffChecksBySha;
   const read = await readCloudPrGithub(task, gh);
   if (!read.ok) return null;
   const { github } = read;
@@ -277,13 +320,14 @@ export async function previewCloudPr(task: CloudTaskV1, deps: CloudPrActionDeps 
  * cannot be read keeps no preview — Needs-you then offers only Dismiss, never
  * a Land built on an old answer.
  */
-export async function refreshCloudPrPreviews(tasks: readonly CloudTaskV1[], deps: CloudPrActionDeps = {}): Promise<{ checked: number; updated: number }> {
+export async function refreshCloudPrPreviews<T extends CloudDeliveryTask>(tasks: readonly T[], deps: CloudPrActionDeps<T> = {}): Promise<{ checked: number; updated: number }> {
+  const { previews, diffChecksBySha } = deps.cache ?? defaultCache;
   const nowMs = (deps.now ?? (() => new Date()))().getTime();
   const open = tasks.filter(previewable);
   const openIds = new Set(open.map((t) => t.id));
   for (const id of [...previews.keys()]) if (!openIds.has(id)) previews.delete(id);
   for (const id of [...diffChecksBySha.keys()]) if (!openIds.has(id)) diffChecksBySha.delete(id);
-  const age = (task: CloudTaskV1): number => {
+  const age = (task: T): number => {
     const cached = previews.get(task.id);
     return cached ? nowMs - Date.parse(cached.computedAt) : Number.POSITIVE_INFINITY;
   };
@@ -308,8 +352,8 @@ export async function refreshCloudPrPreviews(tasks: readonly CloudTaskV1[], deps
 // Actions
 // ---------------------------------------------------------------------------
 
-export type CloudPrActionResult =
-  | { ok: true; task: CloudTaskV1; message: string }
+export type CloudPrActionResult<T extends CloudDeliveryTask = CloudTaskV1> =
+  | { ok: true; task: T; message: string }
   | { ok: false; status: 400 | 404 | 409 | 502; error: string };
 
 /** gh's stderr → one fixed sentence. Never forwarded verbatim (it can quote URLs, paths, tokens). */
@@ -328,15 +372,16 @@ export function ghRefusal(stderr: string, fallback: string): string {
 
 const inFlight = new Set<string>();
 
-async function withTask(
+async function withTask<T extends CloudDeliveryTask>(
   taskId: string,
   headSha: string,
-  deps: CloudPrActionDeps,
-  run: (task: CloudTaskV1, read: Extract<CloudPrRead, { ok: true }>, gh: CloudGh) => Promise<CloudPrActionResult>,
-): Promise<CloudPrActionResult> {
+  deps: CloudPrActionDeps<T>,
+  run: (task: T, read: Extract<CloudPrRead, { ok: true }>, gh: CloudGh) => Promise<CloudPrActionResult<T>>,
+): Promise<CloudPrActionResult<T>> {
   if (!HEAD_SHA_PATTERN.test(headSha)) return { ok: false, status: 400, error: 'A full 40-character head commit is required.' };
-  const task = readCloudTask(taskId);
-  if (!task) return { ok: false, status: 404, error: 'No cloud task with that id.' };
+  const store = storeOf(deps);
+  const task = store.read(taskId);
+  if (!task) return { ok: false, status: 404, error: `No ${store.noun} with that id.` };
   if (inFlight.has(taskId)) return { ok: false, status: 409, error: 'Another action on this pull request is still running.' };
   inFlight.add(taskId);
   try {
@@ -351,18 +396,22 @@ async function withTask(
     }
     return await run(task, read, gh);
   } finally {
-    forgetCloudPrPreview(taskId);
+    forgetCloudPrPreview(taskId, deps.cache ?? defaultCache);
     inFlight.delete(taskId);
   }
 }
 
+function storeOf<T extends CloudDeliveryTask>(deps: CloudPrActionDeps<T>): CloudDeliveryStore<T> {
+  return deps.store ?? (CLOUD_STORE as unknown as CloudDeliveryStore<T>);
+}
+
 /** Record an outcome on the task unless something else changed it meanwhile. */
-function recordOutcome(taskId: string, patch: (task: CloudTaskV1) => CloudTaskV1): CloudTaskV1 | null {
-  const current = readCloudTask(taskId);
+function recordOutcome<T extends CloudDeliveryTask>(store: CloudDeliveryStore<T>, taskId: string, patch: (task: T) => T): T | null {
+  const current = store.read(taskId);
   if (!current || current.state !== 'pr-open') return current;
   const next = patch(current);
   try {
-    writeCloudTask(next);
+    store.write(next);
   } catch {
     return current;
   }
@@ -370,7 +419,7 @@ function recordOutcome(taskId: string, patch: (task: CloudTaskV1) => CloudTaskV1
 }
 
 /** `gh pr ready` — cloud PRs arrive as drafts, and GitHub will not merge a draft. */
-export async function readyCloudPr(task: CloudTaskV1, prNumber: number, gh: CloudGh): Promise<{ ok: true } | { ok: false; error: string }> {
+export async function readyCloudPr(task: Pick<CloudDeliveryTask, 'repo'>, prNumber: number, gh: CloudGh): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const result = await gh(['pr', 'ready', String(prNumber), '--repo', task.repo]);
     return result.ok ? { ok: true } : { ok: false, error: ghRefusal(result.stderr, 'GitHub would not mark the draft ready for review.') };
@@ -385,8 +434,8 @@ export async function readyCloudPr(task: CloudTaskV1, prNumber: number, gh: Clou
  * merge it. The diff is re-read and re-judged here — a preview is advice, the
  * refusal is made on the commit being merged.
  */
-export async function landCloudPr(taskId: string, headSha: string, deps: CloudPrActionDeps = {}): Promise<CloudPrActionResult> {
-  return withTask(taskId, headSha, deps, async (task, read, gh) => {
+export async function landCloudPr<T extends CloudDeliveryTask = CloudTaskV1>(taskId: string, headSha: string, deps: CloudPrActionDeps<T> = {}): Promise<CloudPrActionResult<T>> {
+  return withTask<T>(taskId, headSha, deps, async (task, read, gh) => {
     const prNumber = task.pr!.number;
     const policy = safePolicy(deps);
     const diff = await readPinnedDiff(task, read.mergeBase, headSha, gh);
@@ -404,19 +453,19 @@ export async function landCloudPr(taskId: string, headSha: string, deps: CloudPr
       return { ok: false, status: 502, error: 'GitHub could not be reached.' };
     }
     if (!merged.ok) return { ok: false, status: 409, error: ghRefusal(merged.stderr, 'GitHub refused the merge.') };
-    const next = recordOutcome(taskId, (t) => ({
+    const next = recordOutcome(storeOf(deps), taskId, (t) => ({
       ...t,
       state: 'merged',
       pr: t.pr ? { ...t.pr, state: 'merged', draft: false } : t.pr,
       stateReason: CLOUD_LANDED_REASON(prNumber),
-    }));
+    }) as T);
     return { ok: true, task: next ?? task, message: `Landed #${prNumber}.` };
   });
 }
 
 /** Close without landing, leaving a short comment. The branch is kept. */
-export async function closeCloudPr(taskId: string, headSha: string, deps: CloudPrActionDeps = {}): Promise<CloudPrActionResult> {
-  return withTask(taskId, headSha, deps, async (task, _read, gh) => {
+export async function closeCloudPr<T extends CloudDeliveryTask = CloudTaskV1>(taskId: string, headSha: string, deps: CloudPrActionDeps<T> = {}): Promise<CloudPrActionResult<T>> {
+  return withTask<T>(taskId, headSha, deps, async (task, _read, gh) => {
     const prNumber = task.pr!.number;
     let closed: { ok: boolean; stderr: string };
     try {
@@ -425,19 +474,19 @@ export async function closeCloudPr(taskId: string, headSha: string, deps: CloudP
       return { ok: false, status: 502, error: 'GitHub could not be reached.' };
     }
     if (!closed.ok) return { ok: false, status: 409, error: ghRefusal(closed.stderr, 'GitHub would not close the pull request.') };
-    const next = recordOutcome(taskId, (t) => ({
+    const next = recordOutcome(storeOf(deps), taskId, (t) => ({
       ...t,
       state: 'closed',
       pr: t.pr ? { ...t.pr, state: 'closed' } : t.pr,
       stateReason: CLOUD_CLOSED_REASON,
-    }));
+    }) as T);
     return { ok: true, task: next ?? task, message: `Closed #${prNumber}.` };
   });
 }
 
 /** Merge the base branch into the PR branch on GitHub (only if its head is still `headSha`). */
-export async function updateCloudPrBranch(taskId: string, headSha: string, deps: CloudPrActionDeps = {}): Promise<CloudPrActionResult> {
-  return withTask(taskId, headSha, deps, async (task, read, gh) => {
+export async function updateCloudPrBranch<T extends CloudDeliveryTask = CloudTaskV1>(taskId: string, headSha: string, deps: CloudPrActionDeps<T> = {}): Promise<CloudPrActionResult<T>> {
+  return withTask<T>(taskId, headSha, deps, async (task, read, gh) => {
     const prNumber = task.pr!.number;
     if (read.github.behindBy === 0 && read.github.mergeStateStatus !== 'BEHIND') {
       return { ok: false, status: 409, error: `#${prNumber} is already up to date with ${task.baseBranch}.` };

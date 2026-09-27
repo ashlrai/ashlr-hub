@@ -31,6 +31,7 @@
  *                              actions, veto; print (never install) the nightly oversight plist.
  *   mirror <list|add|sync|path|remove|reconcile>  The fleet's own mirror clones (~/.ashlr/fleet/mirrors).
  *   cloud <launch|list|refresh|improve|budget|backlog>  Claude Code cloud sessions that deliver draft PRs (3.11).
+ *   devin <connect|status|launch|list|refresh|message|budget>  Devin sessions that deliver PRs through the gates (3.15).
  *   spec new "<goal>" [opts]   Author a versioned end-state spec artifact.
  *   spec list/show/refine      Manage spec artifacts.
  *   swarm "<goal>"|<specId>    Decompose a spec into a contracts-first agent swarm and run it.
@@ -680,6 +681,13 @@ const loadCloudCmd = lazyCmd(
   () => import('./cloud.js'),
   (m) => m.runCloudCli as Cmd,
   'cloud command requires a current build of src/cli/cloud.ts (3.11 cloud lane unit C2).',
+);
+
+// ─── 3.15 Devin lane ────────────────────────────────────────────────
+const loadDevinCmd = lazyCmd(
+  () => import('./devin.js'),
+  (m) => m.runDevinCli as Cmd,
+  'devin command requires a current build of src/cli/devin.ts (3.15 Devin lane).',
 );
 
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
@@ -2234,6 +2242,15 @@ async function main(): Promise<void> {
         // budget / backlog (src/cli/cloud.ts). Launches spend Claude credits.
         const cmdCloud = await loadCloudCmd();
         process.exitCode = await cmdCloud(rest);
+        break;
+      }
+
+      case 'devin': {
+        // 3.15: Devin (Cognition) sessions — connect / status / launch / list /
+        // refresh / message / budget (src/cli/devin.ts). Launches spend ACUs;
+        // nothing merges from here.
+        const cmdDevin = await loadDevinCmd();
+        process.exitCode = await cmdDevin(rest);
         break;
       }
 

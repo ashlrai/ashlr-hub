@@ -121,7 +121,7 @@ import {
   writeFleetMergeState,
   type FleetMergeStateV1,
 } from './fleet-merge-state.js';
-import { producerModelFamily, type ReviewModelFamily } from './reviewer-independence.js';
+import { producerMergeWithheld, producerModelFamily, type ReviewModelFamily } from './reviewer-independence.js';
 import { ensureFleetVerifyCheck, normalizeVerifyCommands, type VerifyCheckResult } from './verify-check-run.js';
 import type {
   FleetEngine,
@@ -1652,7 +1652,10 @@ async function progressFleetPr(key: string, ctx: PassContext): Promise<void> {
       persist(ctx, state);
       return;
     }
-    const withheld = mergeWithheldBecause(livePolicy, repoPolicy);
+    // 3.15: some producers are shadow-only at every stage (producerMergeWithheld):
+    // every gate has passed, the would-merge is recorded, the PR waits for Mason.
+    const withheld = mergeWithheldBecause(livePolicy, repoPolicy)
+      ?? producerMergeWithheld(producerModelFamily(proposal.engineModel));
     if (withheld !== null) {
       recordWouldMerge(ctx, state, withheld);
       schedule(ctx, state, OWNER_LANE_RECHECK_MS);

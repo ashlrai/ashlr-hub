@@ -36,6 +36,8 @@
  *      which rule 4 never matched because the closing quote sits between the
  *      name and the colon
  *  15. (3.10) Slack / Discord incoming-webhook URL paths
+ *  16. (3.15) Devin API credentials: `cog_…` (v3 service-user keys and
+ *      personal access tokens) and legacy `apk_…` / `apk_user_…` keys
  *
  * `scrubPrivateText` layers two PRIVACY redactions on top for free text that
  * is persisted or exported (reasoning store, session export, logs):
@@ -110,6 +112,14 @@ function redactTelegram(match: string, offset: number, whole: string): string {
  */
 const WEBHOOK_URL =
   /(https?:\/\/(?:hooks\.slack\.com\/(?:services|workflows|triggers)|(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/webhooks)\/)[A-Za-z0-9_/-]{8,}/gi;
+
+/**
+ * Devin (Cognition) API credentials. v3 keys and PATs are `cog_…`
+ * (https://docs.devin.ai/api-reference/authentication); legacy v1/v2 keys are
+ * `apk_user_…` / `apk_…`. The legacy tail is alphanumeric-only so an
+ * identifier such as `apk_version_code` is not mistaken for a key.
+ */
+const DEVIN_API_KEY = /(?<![A-Za-z0-9_-])(?:cog_[A-Za-z0-9_-]{20,}|apk_(?:user_)?[A-Za-z0-9]{24,})/g;
 
 /** xAI (Grok) API keys: `xai-` + ≥20 alphanumerics (80 in practice). */
 const XAI_API_KEY = /(?<![A-Za-z0-9_-])xai-[A-Za-z0-9]{20,}/g;
@@ -228,6 +238,8 @@ export function scrubSecrets(text: string): string {
       // 12. xAI keys — before rule 10 so the `xai-` prefix does not survive
       // next to a base64-redacted tail.
       .replace(XAI_API_KEY, REDACTED)
+      // 16. Devin keys — before rule 10 for the same reason.
+      .replace(DEVIN_API_KEY, REDACTED)
       // 1. sk- API keys (Anthropic, OpenAI, etc.)
       .replace(/\bsk-[A-Za-z0-9_-]{16,}/g, REDACTED)
       // 2. GitHub tokens (classic prefixes + fine-grained github_pat_<22>_<59>)

@@ -648,6 +648,11 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
         if (view) setSheetOpen(true);
         else setNote({ text: 'Run in cloud opens from a chat whose controls have loaded — open or start a chat first.', error: false });
         return;
+      // 3.15: "Run in Devin" sits in the same sheet, below "Run in cloud".
+      case 'composer.devin':
+        if (view) setSheetOpen(true);
+        else setNote({ text: 'Run in Devin opens from a chat whose controls have loaded — open or start a chat first.', error: false });
+        return;
       case 'composer.send': void submit('send'); return;
       case 'composer.stop-and-send': void submit('stop-and-send'); return;
       case 'composer.stop': if (running) onStop(); return;

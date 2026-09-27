@@ -115,7 +115,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function rejectUnknownKeys(body: Record<string, unknown>, allowed: ReadonlySet<string>, where = ''): void {
+export function rejectUnknownKeys(body: Record<string, unknown>, allowed: ReadonlySet<string>, where = ''): void {
   for (const key of Object.keys(body)) {
     if (!allowed.has(key)) throw new CloudInputError(`Unknown field ${where}${key}.`);
   }
@@ -276,14 +276,15 @@ function taskTitle(task: CloudTaskV1): string {
   return t.length > 0 ? t : 'Untitled cloud task';
 }
 
-function dismissAction(task: CloudTaskV1, confirmFirst: boolean): NeedsYouAction {
+/** 3.15: `tasksPath` lets the Devin lane reuse the same actions under /api/verse/devin/tasks. */
+export function dismissAction(task: Pick<CloudTaskV1, 'id'>, confirmFirst: boolean, tasksPath: string = VERSE_CLOUD_TASKS_PATH, noun = 'cloud task'): NeedsYouAction {
   return {
     kind: 'done',
     label: 'Dismiss',
-    request: { method: 'POST', path: `${VERSE_CLOUD_TASKS_PATH}/${task.id}/dismiss`, body: {} },
+    request: { method: 'POST', path: `${tasksPath}/${task.id}/dismiss`, body: {} },
     confirm: confirmFirst
       ? {
-        title: 'Stop tracking this cloud task?',
+        title: `Stop tracking this ${noun}?`,
         body: 'Verse marks it closed. The pull request on GitHub is not touched.',
         confirmLabel: 'Dismiss',
       }
@@ -292,12 +293,12 @@ function dismissAction(task: CloudTaskV1, confirmFirst: boolean): NeedsYouAction
   };
 }
 
-function taskRoute(task: CloudTaskV1, verb: 'land' | 'close' | 'update-branch', headSha: string): NeedsYouAction['request'] {
-  return { method: 'POST', path: `${VERSE_CLOUD_TASKS_PATH}/${task.id}/${verb}`, body: { headSha } };
+function taskRoute(task: Pick<CloudTaskV1, 'id'>, verb: 'land' | 'close' | 'update-branch', headSha: string, tasksPath: string): NeedsYouAction['request'] {
+  return { method: 'POST', path: `${tasksPath}/${task.id}/${verb}`, body: { headSha } };
 }
 
 /** Land / Close / Update branch for a previewed PR, pinned to the previewed head. */
-export function triageActions(task: CloudTaskV1, preview: CloudPrPreview): NeedsYouAction[] {
+export function triageActions(task: Pick<CloudTaskV1, 'id'>, preview: CloudPrPreview, tasksPath: string = VERSE_CLOUD_TASKS_PATH): NeedsYouAction[] {
   const n = preview.prNumber;
   const sha7 = preview.headSha.slice(0, 7);
   const out: NeedsYouAction[] = [];
@@ -305,7 +306,7 @@ export function triageActions(task: CloudTaskV1, preview: CloudPrPreview): Needs
     out.push({
       kind: 'approve',
       label: 'Land',
-      request: taskRoute(task, 'land', preview.headSha),
+      request: taskRoute(task, 'land', preview.headSha, tasksPath),
       confirm: {
         title: `Land #${n} on ${preview.baseBranch}?`,
         body: clip(`${preview.reason} Squash-merges exactly ${sha7}; GitHub refuses if the branch has moved.`, NEEDS_YOU_DETAIL_MAX),
@@ -317,7 +318,7 @@ export function triageActions(task: CloudTaskV1, preview: CloudPrPreview): Needs
   out.push({
     kind: 'reject',
     label: 'Close',
-    request: taskRoute(task, 'close', preview.headSha),
+    request: taskRoute(task, 'close', preview.headSha, tasksPath),
     confirm: {
       title: `Close #${n} without landing?`,
       body: 'Closes the pull request on GitHub with a short comment. The branch is kept.',
@@ -329,7 +330,7 @@ export function triageActions(task: CloudTaskV1, preview: CloudPrPreview): Needs
     out.push({
       kind: 'fix',
       label: 'Update branch',
-      request: taskRoute(task, 'update-branch', preview.headSha),
+      request: taskRoute(task, 'update-branch', preview.headSha, tasksPath),
       confirm: null,
       destructive: false,
     });
@@ -640,11 +641,11 @@ export function cloudSchedulerRunning(): boolean {
 // Request helpers
 // ---------------------------------------------------------------------------
 
-function sendInvalid(res: ServerResponse, message: string): void {
+export function sendInvalid(res: ServerResponse, message: string): void {
   sendJson(res, 400, { code: 'VERSE_INVALID', error: message });
 }
 
-function rejectQuery(req: IncomingMessage, res: ServerResponse): boolean {
+export function rejectQuery(req: IncomingMessage, res: ServerResponse): boolean {
   let params: URLSearchParams;
   try {
     params = new URL(req.url ?? '/', 'http://localhost').searchParams;
@@ -658,7 +659,7 @@ function rejectQuery(req: IncomingMessage, res: ServerResponse): boolean {
   return true;
 }
 
-async function readMutationBody(
+export async function readMutationBody(
   ctx: VerseApiContext,
   req: IncomingMessage,
   res: ServerResponse,

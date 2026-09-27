@@ -95,6 +95,14 @@ function reportFromBlock(text: string): CloudTaskReport | null {
   } catch {
     return null;
   }
+  return cloudReportFromValue(value);
+}
+
+/**
+ * The same validation for an already-parsed value (3.15: the Devin lane's
+ * structured output, SessionResponse.structured_output). Bounded, never trusted.
+ */
+export function cloudReportFromValue(value: unknown): CloudTaskReport | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   const status = record['status'];
@@ -116,15 +124,32 @@ function reportFromBlock(text: string): CloudTaskReport | null {
   return report;
 }
 
-/** Find tagged openings separately so an unclosed last attempt cannot expose an older report. */
-const REPORT_OPEN_RE = new RegExp(
-  String.raw`^[ \t]*(\`{3,})[ \t]*` + CLOUD_REPORT_FENCE + String.raw`(?=[ \t\n]|$)([^\n]*)(?:\n|$)`,
-  'gm',
-);
+/** Report fences other lanes use (3.15: the Devin lane's `ashlr-devin-report`); a fixed, regex-safe set. */
+const REPORT_FENCE_RE = /^ashlr-[a-z]+-report$/;
+const openPatterns = new Map<string, RegExp>();
 
-/** The newest tagged block is authoritative, including when malformed or unclosed. */
-export function parseCloudReport(prBody: string | null | undefined): CloudTaskReport | null {
+/** Find tagged openings separately so an unclosed last attempt cannot expose an older report. */
+function reportOpenRe(fence: string): RegExp {
+  let re = openPatterns.get(fence);
+  if (!re) {
+    re = new RegExp(
+      String.raw`^[ \t]*(\`{3,})[ \t]*` + fence + String.raw`(?=[ \t\n]|$)([^\n]*)(?:\n|$)`,
+      'gm',
+    );
+    openPatterns.set(fence, re);
+  }
+  return re;
+}
+
+/**
+ * The newest tagged block is authoritative, including when malformed or unclosed.
+ * `fence` defaults to the cloud lane's tag; another lane passes its own
+ * (`ashlr-<lane>-report` only) and gets exactly the same rules.
+ */
+export function parseCloudReport(prBody: string | null | undefined, fence: string = CLOUD_REPORT_FENCE): CloudTaskReport | null {
   if (typeof prBody !== 'string' || prBody === '') return null;
+  if (!REPORT_FENCE_RE.test(fence)) return null;
+  const REPORT_OPEN_RE = reportOpenRe(fence);
   // The contract puts the block at the END, so a giant body keeps its tail.
   const body = (prBody.length > MAX_BODY_CHARS ? prBody.slice(-MAX_BODY_CHARS) : prBody).replace(/\r\n?/g, '\n');
   let latest: RegExpExecArray | null = null;

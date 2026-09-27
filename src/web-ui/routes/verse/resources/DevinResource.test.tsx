@@ -1,0 +1,141 @@
+/**
+ * DevinResource.test.tsx — the Devin card in the Resources drawer (3.15):
+ * nothing on a server without the lane; "Not set up" with the connect command
+ * and Chat n/a; connected with the ACU meter, the paused state and the
+ * readiness lines; a waiting session's reply going through the token gate to
+ * POST /api/verse/devin/tasks/<id>/message. The page never asks for a key.
+ */
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
+import { evictAll } from '../../../data/cache.js';
+import { DevinResource } from './DevinResource.js';
+import { runInDevinBlock } from '../devin/devin-model.js';
+
+const TOKEN = 'test-token';
+let overview: unknown;
+let posts: Array<{ url: string; body: unknown; token: string | null }>;
+
+function json(value: unknown, status = 200): Response {
+  return new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
+}
+
+function status(over: Record<string, unknown> = {}) {
+  return {
+    enabled: true, connected: true, state: 'ready', reason: 'Connected. Devin sessions deliver pull requests through the standing gates.',
+    orgId: 'org-x', principal: 'service_user', principalName: 'Ashlr Verse', keyStore: 'keychain',
+    chatLine: 'Chat: n/a — Devin works in sessions, not chat turns', fleetLine: 'Fleet: Off', fleetReady: false,
+    chat: { ready: false, tone: 'off', word: 'n/a', detail: 'Devin works in sessions, not chat turns. Use Run in Devin from a chat.', fix: null },
+    fleet: { ready: false, tone: 'off', word: 'Off', detail: 'The fleet may not launch Devin sessions; you can still run them yourself.', fix: { kind: 'command', label: 'Let the fleet use Devin', command: 'ashlr devin fleet on' }, roles: [], reservePercent: null },
+    ...over,
+  };
+}
+
+function budget(over: Record<string, unknown> = {}) {
+  return {
+    acuBudgetTotal: 50, acuUsed: 12, acuRemaining: 38, acuToday: 12, acuInFlight: 4, estimatedUsdUsed: 27, sessionsToday: 2, running: 1, paused: false,
+    canLaunch: { ok: true, reason: null }, canFleetLaunch: { ok: true, reason: null },
+    estimateNote: 'ACUs come from Devin\'s own session readings; dollars are an estimate at $2.25 per ACU.',
+    usageUrl: 'https://app.devin.ai/settings/usage',
+    budget: { v: 1, acuBudgetTotal: 50, acuSpentAdjustment: 0, usdPerAcu: 2.25, maxAcuPerSession: 10, maxAcuPerDay: 30, reserveAcu: 10, pauseAtFraction: 0.9, maxConcurrent: 2, maxSessionsPerDay: 10, updatedAt: '2026-09-27T00:00:00.000Z' },
+    ...over,
+  };
+}
+
+function blockedTask() {
+  return {
+    v: 1, id: 'dv_20260927T0400_aaaaaa', repo: 'ashlrai/x', baseBranch: 'main', branch: 'ashlr-devin/dv_20260927T0400_aaaaaa', title: 'Add a helper', prompt: 'p',
+    origin: 'chat', requestedBy: 'mason', sessionId: 'devin-1', sessionUrl: 'https://app.devin.ai/sessions/devin-1', state: 'blocked',
+    stateReason: 'Devin is waiting for your reply.', failure: null, createdAt: '2026-09-27T00:00:00.000Z', launchedAt: null, updatedAt: '2026-09-27T00:00:00.000Z',
+    session: null, maxAcu: 10, devinMode: 'normal', pr: null, headSha: null, report: null, backlogItemId: null,
+  };
+}
+
+beforeEach(() => {
+  evictAll();
+  setMutationToken(TOKEN);
+  posts = [];
+  overview = { generatedAt: '2026-09-27T00:00:00.000Z', status: status(), budget: budget(), tasks: [] };
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if ((init?.method ?? 'GET').toUpperCase() === 'POST') {
+      posts.push({ url, body: JSON.parse(String(init?.body ?? '{}')), token: new Headers(init?.headers).get('x-ashlr-token') });
+      return json({ ok: true, task: blockedTask() });
+    }
+    if (url === '/api/verse/devin') return overview === 404 ? json({ error: 'not found' }, 404) : json(overview);
+    return json({ error: 'not found' }, 404);
+  }));
+});
+
+afterEach(() => {
+  clearMutationToken();
+  vi.unstubAllGlobals();
+});
+
+const mount = () => render(<ul><DevinResource /></ul>);
+
+describe('DevinResource', () => {
+  it('renders nothing on a server without the Devin lane', async () => {
+    overview = 404;
+    const { container } = mount();
+    await waitFor(() => expect(container.querySelector('[data-devin="loading"]')).toBeNull());
+    expect(container.querySelector('[data-resource="devin"]')).toBeNull();
+  });
+
+  it('not set up: says so, shows Chat n/a and the connect command — and never a key field', async () => {
+    overview = {
+      generatedAt: 'x', tasks: [], budget: budget(),
+      status: status({ enabled: false, connected: false, state: 'disabled', reason: 'Not set up. Run `ashlr devin connect` to add your Devin API key.', fleet: { ready: false, tone: 'off', word: 'Off', detail: 'Connect Devin first.', fix: { kind: 'command', label: 'Connect Devin', command: 'ashlr devin connect' }, roles: [], reservePercent: null } }),
+    };
+    mount();
+    const card = await screen.findByText('Not set up');
+    const li = card.closest('li')!;
+    expect(within(li).getByRole('group', { name: 'Devin: readiness' })).toBeTruthy();
+    expect(within(li).getByText('n/a')).toBeTruthy();
+    expect(within(li).getByText('ashlr devin connect')).toBeTruthy();
+    expect(within(li).queryByRole('meter')).toBeNull();
+    expect(li.querySelector('input[type="password"]')).toBeNull();
+  });
+
+  it('connected: ACUs left of the budget with an estimate note and the usage link', async () => {
+    mount();
+    expect(await screen.findByText('38 ACUs of 50 ACUs left')).toBeTruthy();
+    expect(screen.getByRole('img', { name: /Devin ACUs: 12 ACUs used of 50 ACUs, 38 ACUs left/ })).toBeTruthy();
+    expect(screen.getByText(/1 running · 2 today/)).toBeTruthy();
+    expect(screen.getByRole('link', { name: /Real usage on app\.devin\.ai/ }).getAttribute('href')).toBe('https://app.devin.ai/settings/usage');
+    expect(screen.getByText('Connected')).toBeTruthy();
+  });
+
+  it('paused: the pill and the budget\'s own reason', async () => {
+    overview = { generatedAt: 'x', status: status(), tasks: [], budget: budget({ paused: true, canLaunch: { ok: false, reason: 'Paused: 45 ACUs of 50 ACUs used.' } }) };
+    mount();
+    expect(await screen.findByText('paused')).toBeTruthy();
+    expect(screen.getByText('Paused: 45 ACUs of 50 ACUs used.')).toBeTruthy();
+  });
+
+  it('a waiting session gets a reply box that posts through the mutation token', async () => {
+    overview = { generatedAt: 'x', status: status(), budget: budget(), tasks: [blockedTask()] };
+    mount();
+    const box = await screen.findByRole('textbox', { name: 'Reply to Devin: Add a helper' });
+    await userEvent.type(box, 'Use the existing helper.');
+    await userEvent.click(screen.getByRole('button', { name: /Send/ }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]).toEqual({ url: '/api/verse/devin/tasks/dv_20260927T0400_aaaaaa/message', body: { message: 'Use the existing helper.' }, token: TOKEN });
+    expect(await screen.findByText(/Sent\. Devin picks it up/)).toBeTruthy();
+  });
+});
+
+describe('runInDevinBlock', () => {
+  const base = { overview: null, overviewReason: null, repo: 'ashlrai/x', rootsLoading: false, prompt: 'Do it' };
+  const ov = (s: Record<string, unknown>, b: Record<string, unknown> = {}) => ({ generatedAt: 'x', status: status(s), budget: budget(b), tasks: [] }) as never;
+  it('names the one reason it cannot run, in order', () => {
+    expect(runInDevinBlock({ ...base, overviewReason: 'The Devin lane is not in this build yet.' })).toBe('The Devin lane is not in this build yet.');
+    expect(runInDevinBlock({ ...base, overview: ov({ connected: false }) })).toMatch(/not connected/);
+    expect(runInDevinBlock({ ...base, overview: ov({ enabled: false }) })).toMatch(/turned off/);
+    expect(runInDevinBlock({ ...base, overview: ov({}), repo: null })).toMatch(/no GitHub origin/);
+    expect(runInDevinBlock({ ...base, overview: ov({}, { canLaunch: { ok: false, reason: 'Over the daily cap.' } }) })).toBe('Over the daily cap.');
+    expect(runInDevinBlock({ ...base, overview: ov({}), prompt: ' ' })).toMatch(/Type the task/);
+    expect(runInDevinBlock({ ...base, overview: ov({}) })).toBeNull();
+  });
+});

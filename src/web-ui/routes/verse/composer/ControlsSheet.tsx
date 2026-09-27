@@ -9,8 +9,9 @@
  * open, Esc and the backdrop close it, and focus returns to ⋯.
  *
  * Below the pickers: "Run in cloud" (3.11 cloud lane) — launches the typed
- * message as a cloud task. It is an import() loaded the first time the sheet
- * opens, so nothing cloud-related is on the chat's first-paint path.
+ * message as a cloud task — and "Run in Devin" (3.15 Devin lane). Both are
+ * import()s loaded the first time the sheet opens, so nothing cloud- or
+ * Devin-related is on the chat's first-paint path.
  */
 import { lazy, Suspense, useId, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
@@ -18,6 +19,7 @@ import { useFocusTrap } from '../../../components/primitives/focus-trap.js';
 import styles from './composer.module.css';
 
 const RunInCloudAction = lazy(() => import('../cloud/RunInCloudAction.js').then((m) => ({ default: m.RunInCloudAction })));
+const RunInDevinAction = lazy(() => import('../devin/RunInDevinAction.js').then((m) => ({ default: m.RunInDevinAction })));
 
 export interface ControlsSheetProps {
   open: boolean;
@@ -43,6 +45,9 @@ export function ControlsSheet({ open, onClose, children }: ControlsSheetProps) {
           {children}
           <Suspense fallback={null}>
             <RunInCloudAction />
+          </Suspense>
+          <Suspense fallback={null}>
+            <RunInDevinAction />
           </Suspense>
         </div>
       </div>

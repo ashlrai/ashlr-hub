@@ -2,7 +2,15 @@ import type { Proposal } from '../types.js';
 import type { FleetEngine, JudgeId } from './fleet-types.js';
 import { agentSemanticModelFamily } from '../learning/agent-semantic-events.js';
 
-export type ReviewModelFamily = ReturnType<typeof agentSemanticModelFamily>;
+/**
+ * 3.15: `devin` is a REVIEW family only — Devin (Cognition) is a hosted agent
+ * whose underlying models are not disclosed per session, so its work is
+ * neither `claude` nor `openai` for independence purposes: it is its own
+ * producer family. It is never a judge family (isFrontierJudgeId refuses the
+ * prefix) and never a learning-ledger family (agentSemanticModelFamily is
+ * unchanged), so no signed semantic event is re-labelled.
+ */
+export type ReviewModelFamily = ReturnType<typeof agentSemanticModelFamily> | 'devin';
 
 export interface ReviewerIndependenceVerdict {
   independent: boolean;
@@ -50,6 +58,9 @@ const REVIEW_ENGINE_FAMILIES: Readonly<Record<string, ReviewModelFamily>> = {
   mistral: 'local',
   moonshot: 'local',
   moonshotai: 'local',
+  // 3.15: the host-signed producer identity of a Devin PR taken in by the
+  // cloud intake (`devin:<devin_mode>`, fleet/cloud-intake.ts).
+  devin: 'devin',
 };
 
 /** Index of the first `:` or `/` (the engine/model separator), or -1. */
@@ -253,6 +264,23 @@ export function judgeLanePreference(producerFamily: ReviewModelFamily): readonly
     case 'xai': return ['claude-cli', 'codex'];
     case 'claude': return ['codex', 'grok-cli'];
     case 'openai': return ['claude-cli', 'grok-cli'];
+    // Devin's underlying models are undisclosed and may be Claude or OpenAI:
+    // xAI (the least likely vendor underneath) judges first, then the others.
+    case 'devin': return ['grok-cli', 'codex', 'claude-cli'];
     default: return [];
   }
+}
+
+/**
+ * 3.15 — producers whose work the fleet never merges on its own, whatever the
+ * rollout stage: every gate still runs (G0–G7, the verified-tree App PR) and
+ * the pass records a would-merge (`shadow`), then leaves the App PR for Mason.
+ *
+ *  - `devin`: a third-party hosted agent. No rollout stage admits it yet —
+ *    admitting it is a deliberate future change that must come with a
+ *    two-judge (two different families) rule, because a single judge may
+ *    share Devin's undisclosed underlying model.
+ */
+export function producerMergeWithheld(producerFamily: ReviewModelFamily): 'shadow' | null {
+  return producerFamily === 'devin' ? 'shadow' : null;
 }

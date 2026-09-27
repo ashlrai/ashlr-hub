@@ -126,7 +126,7 @@ export function parseGithubRepo(url: string): string | null {
   return `${m[1]}/${m[2]}`;
 }
 
-function readOriginRepo(cwd: string): string | null {
+export function readOriginRepo(cwd: string): string | null {
   try {
     const url = execFileSync('git', ['remote', 'get-url', 'origin'], {
       cwd,

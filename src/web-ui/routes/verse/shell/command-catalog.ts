@@ -243,6 +243,8 @@ export const WORKBENCH_COMMANDS = [
   // its own disabled reasons (no GitHub origin, seat not ready, budget gate,
   // empty box) and the token gate — the palette never launches by itself.
   { id: 'composer.cloud', title: 'Run in cloud…', scope: 'chat', keys: [], group: 'actions', section: 'Composer', keywords: ['cloud', 'remote', 'launch', 'draft pr'] },
+  // 3.15: the same sheet holds "Run in Devin" (its own disabled reasons and token gate).
+  { id: 'composer.devin', title: 'Run in Devin…', scope: 'chat', keys: [], group: 'actions', section: 'Composer', keywords: ['devin', 'cognition', 'remote', 'launch', 'pr', 'acu'] },
   { id: 'git.create-pr', title: 'Create pull request…', scope: 'chat', keys: [], group: 'actions', section: 'Chat', keywords: ['pr', 'github', 'git', 'open pull request'] },
   { id: 'git.merge-pr', title: 'Merge pull request…', scope: 'chat', keys: [], group: 'actions', section: 'Chat', keywords: ['pr', 'github', 'git', 'land', 'ship'] },
 
