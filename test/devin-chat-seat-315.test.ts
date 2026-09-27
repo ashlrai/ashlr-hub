@@ -19,6 +19,7 @@ import { remoteStateOf, runDevinCloudTurn, type DevinCloudTurnDeps, type DevinTu
 import { devinNeedsYouItems } from '../src/core/devin/devin-api.js';
 import { storeDevinKey } from '../src/core/devin/secret.js';
 import { resetDevinStatusCacheForTest } from '../src/core/devin/service.js';
+import { resetDevinCliProbeForTest } from '../src/core/devin/cli-probe.js';
 import { devinHome, listDevinTasks, readDevinBudget, readDevinTask, updateDevinBudget, writeDevinConnection, writeDevinTask } from '../src/core/devin/store.js';
 import { parseDevinTurnPayload, type DevinTurnLine, type DevinTurnPayload } from '../src/core/devin/turn-protocol.js';
 import { createDevinParser, devinAdapter, devinLineToEvent } from '../src/core/verse/adapters/devin.js';
@@ -109,6 +110,7 @@ beforeEach(() => {
   api = fakeDevin();
   keychain = fakeKeychain();
   resetDevinStatusCacheForTest();
+  resetDevinCliProbeForTest();
 });
 
 // ---------------------------------------------------------------------------

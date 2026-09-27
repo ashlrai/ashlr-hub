@@ -172,4 +172,8 @@ export function createDevinParser(turnId: string): VerseTurnParser {
 export const devinAdapter: VerseAdapter = {
   buildLaunch: buildDevinLaunch,
   createParser: createDevinParser,
+  // A cloud chat's FIRST message launches a Devin task (launchDevinTask), which
+  // resolves the `!macro` itself and pins the version on the task record.
+  // Follow-ups and every CLI turn get the block from the engine.
+  resolvesPlaybooks: (session, launch) => devinLaneOf(session, launch) === 'cloud' && !session.nativeSessionId,
 };

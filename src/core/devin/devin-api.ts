@@ -10,6 +10,7 @@
  *   POST /api/verse/devin/tasks/<id>/message    { message } → { ok, task }     (reply to a waiting session)
  *   POST /api/verse/devin/tasks/<id>/land|update-branch  { headSha } → { ok, task, message }
  *   POST /api/verse/devin/tasks/<id>/close      { headSha, reason? } → { ok, task, message }
+ *   POST /api/verse/devin/cli-prs/<chat id>/<n>/dismiss  {} → { ok }         (a Devin CLI chat's PR, cli-prs.ts)
  *
  * Same posture as the cloud module (cloud-api.ts, whose strict helpers this
  * reuses): GETs behind the read session; POSTs 404 unless dispatch is allowed,
@@ -64,6 +65,7 @@ import {
   type NeedsYouItem,
 } from '../verse/workbench-types.js';
 import { devinBudgetView, devinTaskActive } from './budget.js';
+import { DEVIN_CLI_PR_WINDOW_MS, devinCliPrKey, dismissDevinCliPr, listDevinCliPrs, readDismissedDevinCliPrs, type DevinCliChatPrs } from './cli-prs.js';
 import { devinOverview, launchDevinTask, messageDevinTask, devinEnabled, type DevinServiceDeps } from './service.js';
 import { listDevinTasks, readDevinTask, updateDevinBudget, writeDevinTask } from './store.js';
 import { refreshDevinTasks } from './tracker.js';
@@ -282,6 +284,47 @@ export function devinNeedsYouItems(tasks: readonly DevinTaskV1[], now: Date, pre
   return out;
 }
 
+export const VERSE_DEVIN_CLI_PRS_PATH = '/api/verse/devin/cli-prs' as const;
+
+/**
+ * PURE: a Devin (CLI) chat's pull requests as Needs-you items — the same
+ * `owner-lane-pr` a cloud chat's PR is, naming its chat the same way (seat +
+ * session), so the drawer and the chat list treat them alike. Verse did not
+ * open, verify or track these (cli-prs.ts), so the only action is Dismiss and
+ * an item leaves on its own after DEVIN_CLI_PR_WINDOW_MS.
+ */
+export function devinCliNeedsYouItems(chats: readonly DevinCliChatPrs[], dismissed: ReadonlySet<string>, now: Date): NeedsYouItem[] {
+  const out: NeedsYouItem[] = [];
+  for (const chat of chats) {
+    for (const pr of chat.prs) {
+      const seen = Date.parse(pr.seenAt);
+      if (!Number.isFinite(seen) || now.getTime() - seen > DEVIN_CLI_PR_WINDOW_MS) continue;
+      if (dismissed.has(devinCliPrKey(chat.sessionId, pr.url))) continue;
+      const item: NeedsYouItem = {
+        id: `fleet:owner-lane-pr:devin-cli-${chat.sessionId}-${pr.number}`,
+        source: 'fleet',
+        kind: 'owner-lane-pr',
+        severity: 'info',
+        title: clip(`Devin (CLI) pull request: ${pr.repo}#${pr.number}`, NEEDS_YOU_TITLE_MAX),
+        detail: 'Seen in a Devin (CLI) chat’s output. Verse did not open, verify or track it — review it on GitHub.',
+        since: new Date(seen).toISOString(),
+        expiresAt: new Date(seen + DEVIN_CLI_PR_WINDOW_MS).toISOString(),
+        subject: { repo: pr.repo, pr: pr.number, seatId: 'devin-cli', sessionId: chat.sessionId, engine: null },
+        target: { kind: 'url', url: pr.url },
+        actions: [{
+          kind: 'done',
+          label: 'Dismiss',
+          request: { method: 'POST', path: `${VERSE_DEVIN_CLI_PRS_PATH}/${chat.sessionId}/${pr.number}/dismiss`, body: {} },
+          confirm: null,
+          destructive: false,
+        }],
+      };
+      if (isNeedsYouItem(item)) out.push(item);
+    }
+  }
+  return out;
+}
+
 let needsYouCache: { at: number; items: NeedsYouItem[] } | null = null;
 let needsYouPending = false;
 let lastPreviewStartedAt = Number.NEGATIVE_INFINITY;
@@ -289,7 +332,11 @@ let lastPreviewStartedAt = Number.NEGATIVE_INFINITY;
 function rebuildNeedsYou(): void {
   try {
     const tasks = listDevinTasks(200);
-    needsYouCache = { at: Date.now(), items: devinNeedsYouItems(tasks, new Date(), cachedCloudPrPreviews(previewCache)) };
+    const now = new Date();
+    needsYouCache = {
+      at: Date.now(),
+      items: [...devinNeedsYouItems(tasks, now, cachedCloudPrPreviews(previewCache)), ...devinCliNeedsYouItems(listDevinCliPrs(), readDismissedDevinCliPrs(), now)],
+    };
     if (autoPreview && Date.now() - lastPreviewStartedAt >= PREVIEW_RETRY_MS && cloudPrPreviewsStale(tasks, Date.now(), previewCache)) {
       lastPreviewStartedAt = Date.now();
       void guarded('preview', () => refreshCloudPrPreviews<DevinTaskV1>(tasks, prActionDeps)).catch(() => undefined);
@@ -403,6 +450,7 @@ export function stopDevinScheduler(): void {
 const TASK_DISMISS_RE = /^\/api\/verse\/devin\/tasks\/([^/]+)\/dismiss$/;
 const TASK_MESSAGE_RE = /^\/api\/verse\/devin\/tasks\/([^/]+)\/message$/;
 const TASK_TRIAGE_RE = /^\/api\/verse\/devin\/tasks\/([^/]+)\/(land|close|update-branch)$/;
+const CLI_PR_DISMISS_RE = /^\/api\/verse\/devin\/cli-prs\/([A-Za-z0-9-]{1,80})\/(\d{1,9})\/dismiss$/;
 
 function ownsPath(path: string): boolean {
   return path === VERSE_DEVIN_PATH || path.startsWith(`${VERSE_DEVIN_PATH}/`);
@@ -469,6 +517,18 @@ export const handleDevinApi: ApiModule = async (ctx, req: IncomingMessage, res: 
       invalidateNeedsYou();
       if (!result.ok) sendJson(res, result.status, { error: result.error });
       else sendJson(res, 200, { ok: true, task: result.task });
+      return true;
+    }
+
+    const cliPr = CLI_PR_DISMISS_RE.exec(path);
+    if (cliPr) {
+      const body = await readMutationBody(ctx, req, res, SMALL_BODY_MAX_BYTES);
+      if (!body) return true;
+      rejectUnknownKeys(body, new Set());
+      const result = dismissDevinCliPr(cliPr[1]!, Number(cliPr[2]));
+      invalidateNeedsYou();
+      if (!result.ok) sendJson(res, result.status, { error: result.error });
+      else sendJson(res, 200, { ok: true });
       return true;
     }
 

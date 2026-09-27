@@ -149,6 +149,8 @@ import {
 } from './session-controls.js';
 import { createTurnQueue, VerseQueueError, type VerseTurnQueue } from './turn-queue.js';
 import type { VerseTurnExtras } from './adapters/turn-extras.js';
+import { appendPlaybookBlock } from '../playbooks/resolve.js';
+import { chatPlaybook, type ChatPlaybook } from '../playbooks/lanes.js';
 import {
   NEEDS_YOU_DETAIL_MAX,
   NEEDS_YOU_TITLE_MAX,
@@ -498,6 +500,13 @@ export interface VerseEngineOptions {
    * only on an explicit `ready: false`.
    */
   readiness?: ((seatId: string, session?: VerseSession) => SeatReadiness | null | undefined) | null;
+  /**
+   * 3.15: the playbook a message's `!macro` names, for every seat. Default
+   * `chatPlaybook` (playbooks/lanes.ts — the same resolver and renderer the
+   * fleet, cloud and Devin lanes use); `null` turns it off. Synchronous, never
+   * throws, and reads nothing unless the text mentions a `!word`.
+   */
+  playbookFor?: ((text: string, session: VerseSession) => ChatPlaybook | null) | null;
   /**
    * V3.10 local-seat endpoint preflight, run in parallel with the spawn; a
    * definite refusal stops the turn. `null` disables it. Default
@@ -1142,6 +1151,9 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
   // engine never has a hard import edge on them: account health (seats.ts)
   // and the reasoning store. Until they resolve, the gate is open and the tap
   // is off — neither may ever block or fail a turn.
+  const playbookFor = opts.playbookFor === undefined
+    ? (text: string, session: VerseSession) => chatPlaybook(text, session.projectPath)
+    : opts.playbookFor;
   let readiness: ((seatId: string, session?: VerseSession) => unknown) | null = opts.readiness ?? null;
   if (opts.readiness === undefined) {
     void import('./seats.js')
@@ -2580,10 +2592,24 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       launch.memory = { ...launch.memory, block: stripUnsafeControlChars(launch.memory.block) };
     }
 
+    // PLAYBOOKS (3.15). A `!macro` the operator typed runs that playbook on
+    // EVERY seat: the message is logged as typed, with a chip naming the
+    // playbook, and the seat gets the playbook's block after the text — the
+    // same block the fleet, cloud and Devin lanes append. An unknown `!word`
+    // is just text. A launch that resolves the macro itself (a Devin cloud
+    // chat's first message) keeps the chip but is not given the block twice.
+    let playbook: ChatPlaybook | null = null;
+    try {
+      playbook = playbookFor ? playbookFor(text, session) : null;
+    } catch {
+      playbook = null;
+    }
+    const chip = playbook ? { id: playbook.ref.id, version: playbook.ref.version, name: playbook.name, macro: playbook.macro } : null;
+
     const turnId = randomUUID();
     if (session.turnCount === 0 && session.title === DEFAULT_TITLE) session.title = autoTitle(text);
     storageFailed.delete(id);
-    const userMessage = emit(id, { type: 'user-message', turnId, text });
+    const userMessage = emit(id, { type: 'user-message', turnId, text, ...(chip ? { playbook: chip } : {}) });
     if (!userMessage) {
       // The log cannot be written (onStorageFailure already recorded it):
       // a turn nobody can ever see must not spend.
@@ -2601,11 +2627,14 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     resolved.text = expandHomeMentions(resolved.text, verseSessionRoots(session));
     const extras: VerseTurnExtras = { attachmentDirs: resolved.dirs, attachmentImages: resolved.files.filter(isImageAttachment) };
     const turnSeatLaunch: VerseSeatLaunch = resolved.files.length > 0 ? { ...launch, ...extras } : launch;
-    const cliText = resolved.text;
+    const adapter = adapterFor(session.engine);
+    const cliText = playbook && !adapter.resolvesPlaybooks?.(session, launch)
+      ? appendPlaybookBlock(resolved.text, playbook.block)
+      : resolved.text;
 
     let turnLaunch: VerseTurnLaunch;
     try {
-      turnLaunch = adapterFor(session.engine).buildLaunch(session, cliText, turnSeatLaunch);
+      turnLaunch = adapter.buildLaunch(session, cliText, turnSeatLaunch);
     } catch (err) {
       const message = redact(err instanceof Error ? err.message : String(err), redactionsFor(launch, null));
       emit(id, { type: 'error', turnId, message });

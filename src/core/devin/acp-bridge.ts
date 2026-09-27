@@ -27,6 +27,17 @@
  *     not advertise) → JSON-RPC "method not found".
  *   → session/cancel (notification) on Stop, then the process is killed.
  *
+ * PULL REQUESTS. The local agent opens PRs itself (`gh pr create`), so the
+ * only trace is the URL in what it prints. A GitHub PR URL in an agent message
+ * or a tool's output — and not already in the operator's own message — is
+ * recorded for the chat (cli-prs.ts, which feeds Needs-you) and, the first
+ * time this chat sees it, shown as the chat's PR card (`remote-pr`).
+ *
+ * USAGE. The CLI reports none over ACP (3000.11.3's `initialize` advertises
+ * no usage capability and prompt answers carry only `stopReason`), so a CLI
+ * turn is not counted against the Devin ACU budget; the Resources drawer says
+ * so rather than implying it is.
+ *
  * NOTHING FROM THE CLI'S STDERR IS FORWARDED. The CLI logs, among other
  * things, the commands it uses to start the operator's MCP servers (seen on
  * 3000.11.3), which can name secret-bearing wrappers. stderr is drained and
@@ -36,6 +47,7 @@
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 
 import { scrubSecrets } from '../util/scrub.js';
+import { findGithubPrUrls, recordDevinCliPrs, type DevinCliPr } from './cli-prs.js';
 import type { DevinTurnLine, DevinTurnPayload } from './turn-protocol.js';
 import { DEVIN_TURN_EXIT, type DevinTurnIo } from './chat-runner.js';
 
@@ -47,6 +59,8 @@ export interface DevinAcpDeps {
   requestTimeoutMs?: number;
   /** After session/cancel, how long to wait for the prompt to settle before killing. */
   cancelGraceMs?: number;
+  /** Record PRs the turn printed for this chat; returns the ones new to it (default: cli-prs.ts). */
+  recordPrs?: (verseSessionId: string, found: ReadonlyArray<Pick<DevinCliPr, 'url' | 'repo' | 'number'>>) => ReadonlyArray<Pick<DevinCliPr, 'url'>>;
 }
 
 const ACP_PROTOCOL_VERSION = 1;
@@ -173,10 +187,26 @@ export async function runDevinCliTurn(payload: DevinTurnPayload, io: DevinTurnIo
   const openTools = new Set<string>();
 
   const emit = (line: DevinTurnLine): void => io.emit(line);
+  const recordPrs = deps.recordPrs ?? ((chat, found) => recordDevinCliPrs(chat, found));
+  /** URLs the operator typed are theirs, not something this turn opened. */
+  const typedUrls = new Set(findGithubPrUrls(payload.text).map((p) => p.url.toLowerCase()));
+  const notePrs = (text: string): void => {
+    const found = findGithubPrUrls(text).filter((p) => !typedUrls.has(p.url.toLowerCase()));
+    if (found.length === 0) return;
+    let added: ReadonlyArray<Pick<DevinCliPr, 'url'>> = [];
+    try {
+      added = recordPrs(payload.verseSessionId, found);
+    } catch {
+      added = [];
+    }
+    for (const pr of added) emit({ type: 'remote-pr', url: pr.url, state: null });
+  };
   const flushMessage = (): void => {
     const text = clean(message).trim();
     message = '';
-    if (text) emit({ type: 'assistant-message', text });
+    if (!text) return;
+    emit({ type: 'assistant-message', text });
+    notePrs(text);
   };
   const flushThought = (): void => {
     const text = clean(thought).trim();
@@ -246,7 +276,9 @@ export async function runDevinCliTurn(payload: DevinTurnPayload, io: DevinTurnIo
         const status = update['status'];
         if (!id || !openTools.has(id) || (status !== 'completed' && status !== 'failed')) return;
         openTools.delete(id);
-        emit({ type: 'tool-result', toolUseId: id, output: toolOutputOf(update), isError: status === 'failed' });
+        const output = toolOutputOf(update);
+        emit({ type: 'tool-result', toolUseId: id, output, isError: status === 'failed' });
+        if (status === 'completed') notePrs(output);
         return;
       }
       default:

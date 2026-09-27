@@ -47,7 +47,7 @@ import { noteSessionSeen, useChatActivity } from '../chat/use-chat-activity.js';
 import { useSessionRoots } from '../chat/use-session-roots.js';
 import { ChatResizer, useChatPanelSizing } from '../ChatResizer.js';
 import { CHAT_PANEL_RANGES, MIN_TRANSCRIPT_WIDTH, setChatPanelFit } from '../chat-panel-sizing.js';
-import { activateDockChat, clearDockRequests, getDockState, openDockPane, requestTerminal, toggleDock, toggleDockPane, toggleDockPlacement, useDockValue } from '../dock/dock-store.js';
+import { activateDockChat, clearDockRequests, closeDock, getDockState, openDockPane, requestTerminal, toggleDock, toggleDockPane, toggleDockPlacement, useDockValue } from '../dock/dock-store.js';
 import type { DockPaneId } from '../shell/dock-catalog.js';
 import type { SeatChoice } from '../SeatSelector.js';
 import { clampDockHeight, clampDockWidth, DOCK_LAYOUT, dockPresentation } from '../shell/dock-catalog.js';
@@ -251,6 +251,35 @@ function showOrTogglePane(pane: DockPaneId): void {
     return;
   }
   toggleDockPane(pane);
+}
+
+/** The composer's message box (Composer.tsx `aria-label="Message"`). */
+function inComposerBox(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest('textarea[aria-label="Message"]') !== null;
+}
+
+/** The dock drawn as a modal sheet (below 1024px — Dock.tsx), if one is on screen. */
+function openDockSheet(): Element | null {
+  return document.querySelector('[data-dock-layer] [role="dialog"][aria-modal="true"]');
+}
+
+/**
+ * Esc from outside an open dock SHEET closes it, when nothing else wanted the
+ * key. A sheet takes focus when the operator opens it, but one RESTORED open —
+ * on page load, or by a chat switch bringing back that chat's layout — mounts
+ * alongside the composer, whose autofocus can win; the sheet only hears keys
+ * from inside itself, so Esc in the composer did nothing and the modal needed
+ * a click. The composer keeps every Esc it uses — dismissing its `!`/`@`
+ * menu (stopPropagation) and stopping a running turn from an empty box
+ * (preventDefault) never reach here — and ⌘. is untouched. Another field or a
+ * terminal keeps its Esc. Pure over the DOM; exported for tests.
+ */
+export function escClosesDockSheet(event: Pick<KeyboardEvent, 'key' | 'defaultPrevented' | 'target' | 'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey'>): boolean {
+  if (event.key !== 'Escape' || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return false;
+  if (isFocusMode()) return false; // focus mode hides the panel area; Esc leaves focus mode first
+  const sheet = openDockSheet();
+  if (!sheet || (event.target instanceof Node && sheet.contains(event.target))) return false;
+  return inComposerBox(event.target) || !inTypingTarget(event.target);
 }
 
 export function ChatSection() {
@@ -637,6 +666,11 @@ export function ChatSection() {
     if (!visible) return undefined;
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || inOverlay(event.target)) return;
+      if (escClosesDockSheet(event)) {
+        event.preventDefault();
+        closeDock();
+        return;
+      }
       // Esc leaves focus mode — except where Esc already means something (the composer's Stop, a field, a terminal).
       if (event.key === 'Escape' && isFocusMode() && !inTypingTarget(event.target)) {
         event.preventDefault();

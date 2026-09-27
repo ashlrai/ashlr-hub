@@ -27,7 +27,7 @@ import { CLAUDE_CONTEXT_SEAT } from '../seat-fixtures.test-support.js';
 import { resetVerseStore } from '../verse-store.js';
 import { getVerseUiState, openVerseSession, requestVerseCommand, resetVerseUi, VERSE_UI_STORAGE_KEY } from '../verse-ui-store.js';
 import { resetCommandBus, runCommand } from '../shell/command-bus.js';
-import { mockCompactViewport } from '../shell/viewport.test-support.js';
+import { mockCompactViewport, mockViewport } from '../shell/viewport.test-support.js';
 import { getDockSnapshot, requestTerminal, resetDockStore } from '../dock/dock-store.js';
 import { setFocusMode } from '../shell/focus-mode.js';
 import { resetLocalSeen } from '../chat/use-chat-activity.js';
@@ -832,6 +832,78 @@ describe('ChatSection — commands and keys (3.10)', () => {
       expect(document.querySelector('[data-dock]')).toHaveAttribute('data-dock', 'closed');
       await user.keyboard('{Escape}');
       expect(screen.queryByRole('dialog', { name: /^Dock/ })).not.toBeInTheDocument();
+    } finally {
+      vp.restore();
+    }
+  });
+});
+
+describe('ChatSection — a dock sheet restored open (900px, 3.15)', () => {
+  // The dock saved open (as a wide window left it), then the page loads at
+  // 900px: below 1024 the panel is a modal SHEET, and the composer's autofocus
+  // can hold focus outside it — where the sheet's own Esc never hears the key.
+  async function mountRestored() {
+    localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ dock: { open: true, tabs: ['tasks'], active: 'tasks', splitWith: null } }));
+    resetDockStore();
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    const user = userEvent.setup();
+    mount();
+    await user.click(await screen.findByRole('button', { name: /Fix the login bug/ }));
+    await screen.findByRole('heading', { name: 'Fix the login bug' });
+    const sheet = await screen.findByRole('dialog', { name: 'Dock: Tasks' });
+    expect(sheet).toHaveAttribute('data-presentation', 'sheet');
+    expect(sheet).toHaveAttribute('aria-modal', 'true');
+    const box = screen.getByRole('textbox', { name: 'Message' });
+    act(() => { box.focus(); }); // the race the composer's autofocus can win
+    return { box };
+  }
+
+  it('Esc in the composer (nothing there to dismiss or stop) closes the sheet', async () => {
+    const vp = mockViewport(900);
+    try {
+      const { box } = await mountRestored();
+      fireEvent.keyDown(box, { key: 'Escape' });
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: /^Dock/ })).not.toBeInTheDocument());
+      expect(getDockSnapshot().state).toMatchObject({ open: false, tabs: ['tasks'] });
+    } finally {
+      vp.restore();
+    }
+  });
+
+  it('an Esc the composer used (Stop, a menu) is the composer’s; a modified Esc or another field’s Esc is not the sheet’s', async () => {
+    const vp = mockViewport(900);
+    try {
+      const { box } = await mountRestored();
+      // The composer marks the Esc it uses — stopping a running turn from an empty box — handled.
+      const claim = (e: Event) => e.preventDefault();
+      box.addEventListener('keydown', claim, { once: true });
+      fireEvent.keyDown(box, { key: 'Escape' });
+      fireEvent.keyDown(box, { key: 'Escape', shiftKey: true });
+      const search = document.createElement('input');
+      document.body.appendChild(search);
+      fireEvent.keyDown(search, { key: 'Escape' });
+      search.remove();
+      expect(screen.getByRole('dialog', { name: 'Dock: Tasks' })).toBeInTheDocument();
+      expect(getDockSnapshot().state.open).toBe(true);
+    } finally {
+      vp.restore();
+    }
+  });
+
+  it('at 1440 the same restored panel is a docked column: Esc in the composer leaves it alone', async () => {
+    const vp = mockViewport(1440);
+    try {
+      localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ dock: { open: true, tabs: ['tasks'], active: 'tasks', splitWith: null } }));
+      resetDockStore();
+      const { fetch } = verseFetch();
+      vi.stubGlobal('fetch', fetch);
+      const user = userEvent.setup();
+      mount();
+      await user.click(await screen.findByRole('button', { name: /Fix the login bug/ }));
+      await screen.findByRole('complementary', { name: 'Dock: Tasks' });
+      fireEvent.keyDown(screen.getByRole('textbox', { name: 'Message' }), { key: 'Escape' });
+      expect(screen.getByRole('complementary', { name: 'Dock: Tasks' })).toBeInTheDocument();
     } finally {
       vp.restore();
     }

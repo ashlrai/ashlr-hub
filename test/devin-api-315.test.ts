@@ -14,6 +14,7 @@ import { handleDevinApi, setDevinApiDepsForTest } from '../src/core/devin/devin-
 import { storeDevinKey } from '../src/core/devin/secret.js';
 import { resetDevinStatusCacheForTest, type DevinServiceDeps } from '../src/core/devin/service.js';
 import { devinHome, writeDevinConnection } from '../src/core/devin/store.js';
+import { findGithubPrUrls, readDismissedDevinCliPrs, recordDevinCliPrs } from '../src/core/devin/cli-prs.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import type { VerseApiContext } from '../src/core/verse/verse-api.js';
 import { FAKE_KEY, FAKE_ORG, fakeDevin, type FakeDevin } from './helpers/fake-devin.js';
@@ -35,6 +36,8 @@ function serviceDeps(): DevinServiceDeps {
     gh: async (args) => (args[0] === 'repo' ? { ok: true, stdout: 'main\n', stderr: '' } : { ok: true, stdout: '[]', stderr: '' }),
     config: () => ({ enabled: true }),
     policy: () => null,
+    // The machine's Devin CLI install paths are not the test's business.
+    cliProbe: async () => ({ state: 'ready' }),
   };
 }
 
@@ -123,6 +126,20 @@ describe('/api/verse/devin', () => {
     expect((await post('/api/verse/devin/tasks/dv_20260925T1200_abc123/land', { headSha: 'x' })).status).toBe(400);
     expect((await post('/api/verse/devin/connect', { key: FAKE_KEY })).status).toBe(404);
     expect((await post('/api/verse/devin/key', { key: FAKE_KEY })).status).toBe(404);
+  });
+
+  it('a Devin CLI chat’s PR: dismiss is strict, 404s an unknown PR, and takes it out of Needs-you (3.15)', async () => {
+    const chat = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    recordDevinCliPrs(chat, findGithubPrUrls('https://github.com/ashlrai/devin-canary/pull/4'));
+    const url = `/api/verse/devin/cli-prs/${chat}/4/dismiss`;
+    expect((await post(url, {}, { 'x-ashlr-token': 'wrong' })).status).toBe(401);
+    expect((await post(url, { force: true })).status).toBe(400);
+    expect((await post(`/api/verse/devin/cli-prs/${chat}/5/dismiss`, {})).status).toBe(404);
+    expect((await post('/api/verse/devin/cli-prs/../x/4/dismiss', {})).status).toBe(404);
+    const ok = await post(url, {});
+    expect(ok).toMatchObject({ status: 200, body: { ok: true } });
+    expect(readDismissedDevinCliPrs().size).toBe(1);
+    expect(JSON.parse((await get('/api/verse/devin')).text).cli).toEqual({ state: 'ready', usage: 'not-reported' });
   });
 
   it('declines paths outside its prefix without writing', async () => {

@@ -5,8 +5,8 @@
  *
  * Choosing one writes its `!macro` at the front of the message (replacing a
  * macro already there). Nothing runs: the lane buttons below — or sending to
- * the chat — carry the macro, and that lane resolves the playbook. A build
- * with no playbooks route renders nothing.
+ * the chat, on any seat — carry the macro, and that lane resolves the
+ * playbook. A build with no playbooks route renders nothing.
  */
 import { useState } from 'react';
 import { useQuery } from '../../../data/hooks.js';
@@ -39,7 +39,7 @@ export function UsePlaybookAction({ root }: { root?: ParentNode } = {}) {
         ))}
       </select>
       <p className={styles.meta} role="status">
-        {note ?? 'Puts a playbook’s !macro in your message; Run in cloud, Run in Devin and fleet goals then follow it.'}
+        {note ?? 'Puts a playbook’s !macro in your message; sending it here, Run in cloud, Run in Devin and fleet goals all follow it.'}
       </p>
     </div>
   );

@@ -97,7 +97,7 @@
 /* ---- user turn: a quiet rounded block, right-aligned -------------------- */
 /* Placement and shape carry the role; the ground is the hover step, so it
    reads as "yours" in both themes without a colour of its own. */
-.user { display: flex; justify-content: flex-end; min-width: 0; }
+.user { display: flex; flex-direction: column; align-items: flex-end; gap: var(--space-1); min-width: 0; }
 .userText {
   max-width: 85%;
   min-width: 0;
@@ -109,6 +109,20 @@
   overflow-wrap: anywhere;
   font-size: var(--text-base-size);
   line-height: var(--text-base-line-relaxed);
+}
+
+/* 3.15: the playbook a message's `!macro` ran — a quiet tag under the message. */
+.playbookChip {
+  max-width: 85%;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- assistant turn: plain primary text at full measure ----------------- */

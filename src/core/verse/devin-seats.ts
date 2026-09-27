@@ -16,7 +16,9 @@
  *   ready              → `ready`, summary = today's ACUs and the per-chat cap
  * CLI seat: listed only when the `devin` binary is found; `unavailable`
  * ("Log in: `devin auth login`") until its credentials file exists. Found /
- * logged-in are read from disk (a stat each) — never by running the CLI.
+ * logged-in come from the shared CLI probe (core/devin/cli-probe.ts: an
+ * async `access()` each, never running the CLI) — the same answer the turns
+ * route and the readiness gate below refuse a CLI turn with.
  *
  * Context window: none. Devin manages its own context remotely, so the
  * seat's window is null and the UI says "remote".
@@ -27,11 +29,16 @@
  * fleet reserve). A chat that already has its session is admitted: its
  * session's own ACU cap bounds it.
  */
-import { access, constants as fsConstants } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-
 import { devinBudgetView } from '../devin/budget.js';
+import {
+  DEVIN_CLI_LOGIN_HINT,
+  defaultDevinCliCandidates,
+  devinCliCredentialsPath,
+  peekDevinCliProbe,
+  probeDevinCli,
+  type DevinCliProbe,
+  type DevinCliProbeOptions,
+} from '../devin/cli-probe.js';
 import { DEVIN_CLI_SEAT_ID, DEVIN_CLOUD_SEAT_ID, devinChatGate } from '../devin/chat.js';
 import { devinStatus } from '../devin/service.js';
 import { listDevinTasks, readDevinBudget } from '../devin/store.js';
@@ -42,22 +49,10 @@ import type { VerseSeatLaunch } from './session-engine.js';
 import type { VerseSeatDiscovery } from './seats.js';
 import type { VerseModelOption, VerseSeat, VerseSession } from './types.js';
 
-export { DEVIN_CLI_SEAT_ID, DEVIN_CLOUD_SEAT_ID };
+export { DEVIN_CLI_SEAT_ID, DEVIN_CLOUD_SEAT_ID, DEVIN_CLI_LOGIN_HINT, defaultDevinCliCandidates, devinCliCredentialsPath };
 
 export const DEVIN_CONNECT_HINT = 'Connect Devin: `ashlr devin connect`';
 export const DEVIN_ENABLE_HINT = 'Turn on Devin: `ashlr devin enable`';
-export const DEVIN_CLI_LOGIN_HINT = 'Log in: `devin auth login`';
-
-/** Where the documented installers put the binary (brew cask, curl installer). */
-export function defaultDevinCliCandidates(home: string = homedir()): string[] {
-  return ['/opt/homebrew/bin/devin', '/usr/local/bin/devin', join(home, '.local', 'bin', 'devin')];
-}
-
-/** `$XDG_DATA_HOME/devin/credentials.toml`, else `~/.local/share/devin/credentials.toml` (docs.devin.ai/cli/enterprise/devin-auth). */
-export function devinCliCredentialsPath(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
-  const xdg = env['XDG_DATA_HOME'];
-  return join(xdg && xdg.startsWith('/') ? xdg : join(home, '.local', 'share'), 'devin', 'credentials.toml');
-}
 
 export interface DevinSeatDiscoveryOptions {
   /** Lane status (tests); default: core/devin `devinStatus()` (Keychain presence is cached there). */
@@ -69,22 +64,28 @@ export interface DevinSeatDiscoveryOptions {
   now?: () => Date;
 }
 
-async function executable(path: string): Promise<boolean> {
-  try {
-    await access(path, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
+/** The CLI probe with this discovery's paths (tests pin them; production uses the install paths). */
+function cliProbeOptions(opts: Pick<DevinSeatDiscoveryOptions, 'cliCandidates' | 'cliCredentialsPath'>): DevinCliProbeOptions {
+  return {
+    ...(opts.cliCandidates ? { cliCandidates: opts.cliCandidates } : {}),
+    ...(opts.cliCredentialsPath ? { cliCredentialsPath: opts.cliCredentialsPath } : {}),
+  };
 }
 
-async function exists(path: string): Promise<boolean> {
-  try {
-    await access(path, fsConstants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
+/**
+ * Before a turn on a CLI chat: the probe (reused for a few seconds), as the
+ * readiness the turns route refuses with. Async — the route awaits it, and
+ * the engine's synchronous gate (`devinSeatReadiness`) then reads the same
+ * answer.
+ */
+export async function devinCliTurnReadiness(opts: Pick<DevinSeatDiscoveryOptions, 'cliCandidates' | 'cliCredentialsPath'> = {}): Promise<SeatReadiness> {
+  return readinessOf(await probeDevinCli(cliProbeOptions(opts)));
+}
+
+function readinessOf(probe: DevinCliProbe): SeatReadiness {
+  return probe.state === 'ready'
+    ? { seatId: DEVIN_CLI_SEAT_ID, ready: true, reason: null, alternatives: [] }
+    : { seatId: DEVIN_CLI_SEAT_ID, ready: false, reason: probe.reason, alternatives: [] };
 }
 
 const unknownWindows: VerseSeat['health']['windows'] = [];
@@ -167,15 +168,12 @@ export async function discoverDevinSeats(opts: DevinSeatDiscoveryOptions = {}): 
   launches.set(cloud.id, { seat: cloud, launcher: null, ollamaBaseUrl: '', devin: { lane: 'cloud' } });
 
   // ---- CLI --------------------------------------------------------------
-  let cliPath: string | null = null;
-  for (const candidate of opts.cliCandidates ?? defaultDevinCliCandidates()) {
-    if (candidate.startsWith('/') && await executable(candidate)) {
-      cliPath = candidate;
-      break;
-    }
-  }
+  // Always a fresh probe here (discovery is itself cached by the caller); the
+  // answer also refreshes what the turn gate reads.
+  const probe = await probeDevinCli({ ...cliProbeOptions(opts), maxAgeMs: 0 });
+  const cliPath = probe.cliPath;
   if (cliPath) {
-    const loggedIn = await exists(opts.cliCredentialsPath ?? devinCliCredentialsPath());
+    const loggedIn = probe.state === 'ready';
     const reason = loggedIn ? null : DEVIN_CLI_LOGIN_HINT;
     const cli: VerseSeat = {
       id: DEVIN_CLI_SEAT_ID,
@@ -212,9 +210,19 @@ export function mergeDevinSeats(discovery: VerseSeatDiscovery, devin: { seats: V
 /**
  * The engine's admission answer for a Devin seat, or null for any other seat
  * (the caller then asks the ordinary readiness gate). Sync — see the header.
+ *
+ * CLI seat: the latest CLI probe (the turns route awaits a fresh one before
+ * it calls the engine, so on that path this is never stale). With no recent
+ * answer — a queued turn long after the last probe — the turn is admitted and
+ * a probe starts in the background; the bridge still refuses a logged-out CLI
+ * with its own sentence.
  */
 export function devinSeatReadiness(seatId: string, session?: Pick<VerseSession, 'nativeSessionId'> | null): SeatReadiness | null {
-  if (seatId !== DEVIN_CLOUD_SEAT_ID) return seatId === DEVIN_CLI_SEAT_ID ? { seatId, ready: true, reason: null, alternatives: [] } : null;
+  if (seatId === DEVIN_CLI_SEAT_ID) {
+    const probe = peekDevinCliProbe();
+    return probe ? readinessOf(probe) : { seatId, ready: true, reason: null, alternatives: [] };
+  }
+  if (seatId !== DEVIN_CLOUD_SEAT_ID) return null;
   if (session && session.nativeSessionId) return { seatId, ready: true, reason: null, alternatives: [] };
   const gate = devinChatGate();
   return gate.ok

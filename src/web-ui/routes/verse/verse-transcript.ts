@@ -54,8 +54,27 @@ export function getVerseTranscript(sessionId: string | null): Transcript {
 // Transcript derivation
 // ---------------------------------------------------------------------------
 
+/** What a sent message's playbook chip shows ("Playbook: Fix a bug · !fix-bug v3"). */
+export interface MessagePlaybookChip {
+  id: string;
+  version: number;
+  name: string;
+  macro: string;
+}
+
+/** The event's `playbook`, if it is well formed (a log written by another build may not be). Pure. */
+export function messagePlaybookChip(value: unknown): MessagePlaybookChip | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  const str = (x: unknown, max: number): x is string => typeof x === 'string' && x.length > 0 && x.length <= max;
+  if (!str(v['id'], 80) || !str(v['name'], 120) || !str(v['macro'], 60)) return null;
+  if (typeof v['version'] !== 'number' || !Number.isInteger(v['version']) || v['version'] < 1) return null;
+  return { id: v['id'], version: v['version'], name: v['name'], macro: v['macro'] };
+}
+
 export type TranscriptItem =
-  | { kind: 'user'; key: string; turnId: string; at: string; text: string }
+  /** `playbook`: 3.15 — the playbook this message's `!macro` ran (a chip under the message). */
+  | { kind: 'user'; key: string; turnId: string; at: string; text: string; playbook?: MessagePlaybookChip }
   | { kind: 'assistant'; key: string; turnId: string; at: string; text: string; streaming: boolean }
   | {
       kind: 'thinking';
@@ -221,10 +240,12 @@ function buildSegment(
   for (let i = from; i < to; i += 1) {
     const e = events[i]!;
     switch (e.type) {
-      case 'user-message':
+      case 'user-message': {
         flushPending();
-        items.push({ kind: 'user', key: `u-${e.seq}`, turnId: e.turnId, at: e.at, text: e.text });
+        const playbook = messagePlaybookChip(e.playbook);
+        items.push({ kind: 'user', key: `u-${e.seq}`, turnId: e.turnId, at: e.at, text: e.text, ...(playbook ? { playbook } : {}) });
         break;
+      }
       case 'turn-started':
         liveEffect = true;
         break;
