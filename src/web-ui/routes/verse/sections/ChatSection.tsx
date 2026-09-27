@@ -47,7 +47,7 @@ import { noteSessionSeen, useChatActivity } from '../chat/use-chat-activity.js';
 import { useSessionRoots } from '../chat/use-session-roots.js';
 import { ChatResizer, useChatPanelSizing } from '../ChatResizer.js';
 import { CHAT_PANEL_RANGES, MIN_TRANSCRIPT_WIDTH, setChatPanelFit } from '../chat-panel-sizing.js';
-import { activateDockChat, clearDockRequests, requestTerminal, toggleDock, toggleDockPane, toggleDockPlacement, useDockValue } from '../dock/dock-store.js';
+import { activateDockChat, clearDockRequests, getDockState, requestTerminal, toggleDock, toggleDockPane, toggleDockPlacement, useDockValue } from '../dock/dock-store.js';
 import type { SeatChoice } from '../SeatSelector.js';
 import { clampDockHeight, clampDockWidth, DOCK_LAYOUT, dockPresentation } from '../shell/dock-catalog.js';
 import { isFocusMode, setFocusMode, toggleFocusMode, useFocusMode } from '../shell/focus-mode.js';
@@ -125,7 +125,7 @@ const SEAT_MODEL = preloadedModule(() => import('../verse-model.js').then((m) =>
  * `registerPane({ shortcut })`): loaded just after first paint, never on it.
  * Until it is in, such a key does nothing — a few milliseconds after paint.
  */
-const PANES = preloadedModule(() => import('../panes/index.js').then((m) => ({ matchPaneShortcut: m.matchPaneShortcut })));
+const PANES = preloadedModule(() => import('../panes/index.js').then((m) => ({ matchPaneShortcut: m.matchPaneShortcut, preloadPaneIds: m.preloadPaneIds })));
 const NO_TASKS: readonly ChatTask[] = [];
 const NO_TURN_FILES: TurnFileChange[] = [];
 
@@ -581,6 +581,12 @@ export function ChatSection() {
   const panes = PANES.useLoaded();
   const panesRef = useRef(panes);
   panesRef.current = panes;
+  // Once the registry is in, warm the code of the panes this chat is likely to
+  // show — its open tabs, and Tasks (what an empty panel opens on) — so the
+  // first ⌘\ or tab click draws the pane, not its skeleton. The rest stay lazy.
+  useEffect(() => {
+    if (panes) panes.preloadPaneIds([...getDockState().tabs, 'tasks']);
+  }, [panes]);
   useEffect(() => {
     if (!visible) return undefined;
     const onKey = (event: KeyboardEvent) => {

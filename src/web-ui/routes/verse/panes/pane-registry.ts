@@ -457,6 +457,11 @@ export function preloadPanes(panes: readonly RegisteredPane[] = snapshot): void 
   }
 }
 
+/** `preloadPanes` for just these ids (the chat surface warms the tabs a chat is likely to open). */
+export function preloadPaneIds(ids: readonly string[]): void {
+  preloadPanes(ids.map((id) => getPane(id)).filter((p): p is RegisteredPane => p !== null));
+}
+
 /** Test seam: forget every registration (builtin-panes' `registerBuiltinPanes()` puts the first-party ones back). */
 export function resetPaneRegistry(): void {
   stacks.clear();

@@ -331,7 +331,8 @@ describe('ChatSection layout', () => {
     // The dock loads on first open (lazy chunk).
     const dock = await screen.findByRole('complementary', { name: 'Dock: Tasks' });
     expect(within(dock).getByRole('tab', { name: 'Tasks' })).toHaveAttribute('aria-selected', 'true');
-    expect(within(dock).getByText('No tool calls in the latest turn.')).toBeInTheDocument();
+    // Each pane is its own lazy chunk (warmed after first paint): it may take a tick.
+    expect(await within(dock).findByText('No tool calls in the latest turn.')).toBeInTheDocument();
     expect(JSON.parse(localStorage.getItem(VERSE_UI_STORAGE_KEY) ?? '{}').dock).toMatchObject({ open: true, active: 'tasks', tabs: ['tasks'] });
 
     // "+" adds Context; it is the ResourcesPanel minus the accounts.
@@ -339,7 +340,7 @@ describe('ChatSection layout', () => {
     await user.click(screen.getByRole('menuitem', { name: 'Context' }));
     const context = screen.getByRole('complementary', { name: 'Dock: Context' });
     expect(within(context).getByRole('tab', { name: 'Context' })).toHaveAttribute('aria-selected', 'true');
-    expect(within(context).getByLabelText('Context efficiency')).toBeInTheDocument();
+    expect(await within(context).findByLabelText('Context efficiency')).toBeInTheDocument();
     expect(within(context).getByRole('button', { name: 'Accounts & capacity →' })).toBeInTheDocument();
     expect(within(context).queryByText('Personal Codex')).not.toBeInTheDocument();
 
@@ -793,7 +794,7 @@ describe('ChatSection — commands and keys (3.10)', () => {
     const dock = await screen.findByRole('complementary', { name: 'Dock: Tasks' });
     await user.click(within(dock).getByRole('button', { name: 'Add a pane' }));
     await user.click(screen.getByRole('menuitem', { name: 'Context' }));
-    await user.click(screen.getByRole('button', { name: 'Accounts & capacity →' }));
+    await user.click(await screen.findByRole('button', { name: 'Accounts & capacity →' }));
     expect(getVerseUiState().section).toBe('apps');
   });
 
