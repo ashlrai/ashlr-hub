@@ -60,6 +60,7 @@ import {
   type DraftRepoInput,
   type DraftSeatInput,
 } from '../authority/standing-grant.js';
+import { probeServerEnforcementAll, type GithubGet } from '../authority/server-enforcement.js';
 import { currentHostBinding, verifyAuthoritySurface } from '../authority/surface.js';
 import { STANDING_GRANT_TRUST_ROOTS } from '../authority/trust-roots.js';
 import { killSwitchPath, readEnrollmentRegistry } from '../sandbox/policy.js';
@@ -622,7 +623,12 @@ function nextGrantSeq(): number {
  * installed grant's ladder when it is active, paused or expired, and starts
  * the default ladder from its first rung otherwise (none, revoked, invalid).
  */
-export async function buildStandingGrantDraft(kind: DraftKind | 'auto' = 'auto', nowMs = Date.now()): Promise<AuthorityDraftResponse> {
+export async function buildStandingGrantDraft(
+  kind: DraftKind | 'auto' = 'auto',
+  nowMs = Date.now(),
+  /** How GitHub is read to decide server vs local enforcement (the CLI passes its own `gh`; tests inject). */
+  opts: { githubGet?: GithubGet } = {},
+): Promise<AuthorityDraftResponse> {
   const keyId = await signingKeyId();
   const hostBinding = currentHostBinding();
   if (!hostBinding) throw new AuthorityDraftError('host-unknown', "This Mac's hardware identity could not be read, so a grant cannot be bound to it.");
@@ -645,11 +651,24 @@ export async function buildStandingGrantDraft(kind: DraftKind | 'auto' = 'auto',
     authoritySurfaceDigest: surface.digest,
   };
   let payload: StandingGrantV1;
+  // Server enforcement only where GitHub enforces required checks today
+  // (authority/server-enforcement.ts): a re-approval switches a `server` repo
+  // GitHub cannot protect to `local`; a new grant names `server` only for
+  // repos GitHub already protects.
   if (resolved === 'reapprove' && installed.state === 'ok') {
     const position = evaluation.position?.stageIndex ?? ledgerPositionIndex(installed.envelope.payload);
-    payload = buildReapprovalGrantPayload(installed.envelope.payload, position, base);
+    const serverRepos = installed.envelope.payload.repos.filter((repo) => repo.enforcement === 'server').map((repo) => repo.nameWithOwner);
+    const probes = await probeServerEnforcementAll(serverRepos, opts.githubGet);
+    const serverEnforcement = new Map([...probes].map(([key, probe]) => [key, probe.state]));
+    payload = buildReapprovalGrantPayload(installed.envelope.payload, position, { ...base, serverEnforcement });
   } else {
-    payload = buildDefaultGrantPayload({ ...base, repos: await draftRepos(), seats: await draftSeats() });
+    const repos = await draftRepos();
+    const probes = await probeServerEnforcementAll(repos.map((repo) => repo.nameWithOwner), opts.githubGet);
+    payload = buildDefaultGrantPayload({
+      ...base,
+      repos: repos.map((repo) => ({ ...repo, serverEnforcement: probes.get(repo.nameWithOwner.toLowerCase())?.state ?? null })),
+      seats: await draftSeats(),
+    });
   }
   const digest = rememberDraft(payload, resolved);
   return { payload, digest, kind: resolved, summary: describeGrantScope(payload), startStageId: payload.rollout.stages[0]!.id };

@@ -60,6 +60,7 @@ import {
   authorityNeedsYouItems,
   autonomyBadge,
   buildAuthorityStatus,
+  buildStandingGrantDraft,
   handleAuthorityApi,
   needsYouItems,
   resetAuthorityApiCachesForTest,
@@ -293,5 +294,56 @@ describe('Needs-you and the rail badge (R1)', () => {
     const soon = authorityNeedsYouItems(status, evaluation, expiresMs - 10 * 3_600_000);
     expect(soon[0]).toMatchObject({ kind: 'grant', severity: 'warn', title: 'Standing grant expires in 10 h — renew' });
     expect(soon.every(isNeedsYouItem)).toBe(true);
+  });
+});
+
+describe('drafts name server enforcement only where GitHub enforces checks (3.14)', () => {
+  const CANARY = 'ashlrai/fleet-canary';
+  /** A GitHub whose canary either enforces a required check, is plan-gated, or cannot be read. */
+  function github(mode: 'enforced' | 'unavailable' | 'offline') {
+    const calls: string[] = [];
+    const get = async (path: string) => {
+      calls.push(path);
+      if (mode === 'offline') return { status: 1, stdout: '', stderr: 'error connecting to api.github.com' };
+      if (path === `repos/${CANARY}`) return { status: 0, stdout: JSON.stringify({ private: mode === 'unavailable', default_branch: 'main' }), stderr: '' };
+      if (path.startsWith(`repos/${CANARY}/rules/branches/main`)) {
+        return mode === 'unavailable'
+          ? { status: 1, stdout: '', stderr: 'gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)' }
+          : { status: 0, stdout: JSON.stringify([{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'test' }] } }]), stderr: '' };
+      }
+      if (path === `repos/${CANARY}/branches/main`) return { status: 0, stdout: JSON.stringify({ name: 'main', protection: { enabled: false } }), stderr: '' };
+      return { status: 1, stdout: '', stderr: `unexpected ${path}` };
+    };
+    return { get, calls };
+  }
+  const canaryOf = (payload: { repos: { nameWithOwner: string }[] }) => payload.repos.find((r) => r.nameWithOwner === CANARY);
+
+  it('a new grant: server where GitHub enforces checks, local where rulesets are unavailable or unreadable', async () => {
+    state.roots.push(TEST_ROOT);
+    expect(canaryOf((await buildStandingGrantDraft('new', Date.now(), { githubGet: github('enforced').get })).payload))
+      .toMatchObject({ enforcement: 'server', maxRisk: 'medium', maxMergesPerDay: 6 });
+    expect(canaryOf((await buildStandingGrantDraft('new', Date.now(), { githubGet: github('unavailable').get })).payload))
+      .toMatchObject({ enforcement: 'local', maxRisk: 'low', maxMergesPerDay: 4 });
+    expect(canaryOf((await buildStandingGrantDraft('new', Date.now(), { githubGet: github('offline').get })).payload))
+      .toMatchObject({ enforcement: 'local' });
+    // The route's default reader never reaches GitHub under tests: the stricter answer, local.
+    const routed = await call('GET', '/api/verse/authority/draft');
+    expect(canaryOf(routed!.body['payload'] as { repos: { nameWithOwner: string }[] })).toMatchObject({ enforcement: 'local' });
+  });
+
+  it('the signed grant is not changed in place; a re-approval switches a server repo GitHub cannot protect to local', async () => {
+    state.roots.push(TEST_ROOT);
+    const first = await buildStandingGrantDraft('new', Date.now(), { githubGet: github('enforced').get });
+    expect((await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: first.digest }))?.status).toBe(200);
+    // Offline during the re-approval: the signed choice stands (a flaky network never rewrites scope).
+    const offline = await buildStandingGrantDraft('reapprove', Date.now(), { githubGet: github('offline').get });
+    expect(offline.kind).toBe('reapprove');
+    expect(canaryOf(offline.payload)).toMatchObject({ enforcement: 'server', maxRisk: 'medium', maxMergesPerDay: 6 });
+    // GitHub definitively cannot protect it: local, at the local ceilings, shown in the Touch ID summary.
+    const unavailable = await buildStandingGrantDraft('reapprove', Date.now(), { githubGet: github('unavailable').get });
+    expect(canaryOf(unavailable.payload)).toMatchObject({ enforcement: 'local', maxRisk: 'low', maxMergesPerDay: 4 });
+    expect(unavailable.summary.some((line) => line.includes(`${CANARY}: up to merge, low risk, 4/day, local enforcement`))).toBe(true);
+    const reapproved = await call('POST', '/api/verse/authority', { action: 're-approve', draftDigest: unavailable.digest });
+    expect(reapproved?.status).toBe(200);
   });
 });

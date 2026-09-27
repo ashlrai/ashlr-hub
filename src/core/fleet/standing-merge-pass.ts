@@ -1530,6 +1530,7 @@ async function progressFleetPr(key: string, ctx: PassContext): Promise<void> {
       pendingSinceMs: Date.parse(state.pr.openedAt) || nowMs,
       nowMs,
       fleetAppId: state.pr.verifyCheck?.appId ?? null,
+      rulesetsUnavailable: typeof required === 'string' ? false : required.rulesetsUnavailable,
     });
     state.pr.checks = { state: g7c.state, detail: g7c.reason, at: iso(nowMs) };
     if (g7c.verdict === 'owner-lane') {

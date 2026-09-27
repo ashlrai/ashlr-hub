@@ -514,6 +514,46 @@ describe('setup is rerun-safe: rulesets', () => {
     expect(h.out.join('\n')).toMatch(/^✓ rulesets: applied to ashlrai\/fleet-canary$/m);
   });
 
+  it('a private repo on GitHub Free is a plan limit, not "could not read"; a grant that says server for it waits on a re-approval (3.14)', async () => {
+    const { canonicalJson } = await import('../src/core/authority/canonical-json.js');
+    const { ensureAuthorityDir } = await import('../src/core/authority/ledger.js');
+    const { installedGrantPath } = await import('../src/core/authority/standing-grant.js');
+    const { editGrant, makeGrant, signGrant } = await import('./helpers/authority-310b.js');
+    const PRIVATE = 'ashlrai/measurably';
+    const canary = fakeGitHub({ ruleset: asGitHubReturns(buildFleetRuleset(CANARY_CHECKS)) });
+    const run = (bin: string, args: readonly string[]): GhResult => {
+      const path = args[1] ?? '';
+      if (path === `repos/${PRIVATE}`) return ok(JSON.stringify({ default_branch: 'main', private: true }));
+      if (path.startsWith(`repos/${PRIVATE}/`)) return no('gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)');
+      return canary(bin, args);
+    };
+    const install = (enforcement: 'server' | 'local'): void => {
+      const grant = editGrant(makeGrant(), (g) => {
+        g.repos = [
+          { nameWithOwner: CANARY, stage: 'merge', enforcement: 'server', maxRisk: 'medium', maxMergesPerDay: 6 },
+          { nameWithOwner: PRIVATE, stage: 'merge', enforcement, maxRisk: 'low', maxMergesPerDay: 4 },
+        ];
+        g.rollout.stages = g.rollout.stages.map((stage) => ({ ...stage, repos: stage.repos.filter((r) => r.nameWithOwner === CANARY || r.nameWithOwner === PRIVATE) }));
+      });
+      ensureAuthorityDir();
+      writeFileSync(installedGrantPath(), `${canonicalJson(signGrant(grant))}\n`, { mode: 0o600 });
+    };
+
+    install('server');
+    const h = readyHarness({ run });
+    const step = (await dryRunReport(h)).steps.find((s) => s.id === 'rulesets');
+    expect(step).toMatchObject({ status: 'waiting-on-you', command: 'ashlr authority re-approve' });
+    expect(step?.detail).toMatch(/^the fleet ruleset is in place on 1 repo; rulesets unavailable on this plan for private ashlrai\/measurably — grant #1 says server enforcement for ashlrai\/measurably/);
+    expect(step?.detail).not.toMatch(/could not read/);
+    expect(writes(h.calls)).toEqual([]);
+
+    // Once the grant says local (the re-approval did its job) the step is simply in place.
+    install('local');
+    const settled = (await dryRunReport(h)).steps.find((s) => s.id === 'rulesets');
+    expect(settled).toMatchObject({ status: 'already' });
+    expect(settled?.detail).toBe('the fleet ruleset is in place on 1 repo; 1 left to you (local enforcement or no CI)');
+  });
+
   it('rulesetMatches: GitHub decorations and order are fine; any field we set, or an extra array entry, is drift', () => {
     const desired = buildFleetRuleset([{ context: 'test', integrationId: 15368 }, { context: 'lint', integrationId: null }]);
     expect(rulesetMatches(desired, asGitHubReturns(desired))).toBe(true);

@@ -47,6 +47,7 @@ import {
 import { appendLedger, currentLedgerHead } from '../authority/ledger.js';
 import { currentStandingPolicy } from '../authority/effective-config.js';
 import { githubToken } from '../authority/custody-client.js';
+import { isPlanUnavailable } from '../authority/server-enforcement.js';
 import type { EffectivePolicy, LedgerAppendInput, LedgerAppendResult, LedgerEventKind, LedgerHead } from '../authority/types.js';
 import { canonicalizeDaemonActivationValue } from '../daemon/activation-permit.js';
 import { verifyProposal } from '../inbox/merge.js';
@@ -652,15 +653,24 @@ export async function readPr(repo: string, number: number, deps: HostMergeDeps):
  * The checks GitHub requires on `baseBranch`: rulesets (`required_status_checks`
  * rules, readable with metadata permission) ∪ classic branch protection. The
  * digest binds the merge authority to the protection it was checked against.
+ *
+ * `rulesetsUnavailable`: GitHub answered that rulesets are not on this plan
+ * for this repo (a private repo on GitHub Free: 403 "Upgrade to GitHub Pro or
+ * make this repository public…", verified live). That is a definitive "no
+ * rules", like a 404 — NOT an unreadable read — so the repo stops waiting at
+ * G7 forever: a local-enforcement repo then needs the App's ashlr/verify, a
+ * server-enforcement one goes to the owner lane with a reason that says to
+ * re-approve. Any other 403 (permissions) is still an unreadable read.
  */
 export async function readRequiredChecks(
   repo: string,
   baseBranch: string,
   deps: HostMergeDeps,
-): Promise<{ required: RequiredCheck[]; protectionDigest: string; strict: boolean | null } | string> {
+): Promise<{ required: RequiredCheck[]; protectionDigest: string; strict: boolean | null; rulesetsUnavailable: boolean } | string> {
   if (!BRANCH_RE.test(baseBranch)) return 'invalid base branch';
   const rules = await gh(deps, repo, 'GET', `/rules/branches/${encodePathSegments(baseBranch)}?per_page=100`);
-  if (rules.status !== 200 && rules.status !== 404) return `rulesets: ${githubMessage(rules)}`;
+  const rulesetsUnavailable = rules.status === 403 && isPlanUnavailable({ status: 403, message: str(obj(rules.body)?.['message']) ?? '' });
+  if (rules.status !== 200 && rules.status !== 404 && !rulesetsUnavailable) return `rulesets: ${githubMessage(rules)}`;
   const branch = await gh(deps, repo, 'GET', `/branches/${encodePathSegments(baseBranch)}`);
   if (branch.status !== 200) return `branch protection: ${githubMessage(branch)}`;
   const byContext = new Map<string, Set<string | null>>();
@@ -721,7 +731,7 @@ export async function readRequiredChecks(
     protectedClassic: protection?.['enabled'] === true || classic !== null,
     strict,
   })}`, 'utf8').digest('hex');
-  return { required, protectionDigest, strict };
+  return { required, protectionDigest, strict, rulesetsUnavailable };
 }
 
 /** Check runs (≤ 300) and commit statuses on `oid`. */
@@ -1906,6 +1916,7 @@ async function waitForChecks(state: FleetMergeStateV1, deps: HostMergeDeps, dead
       pendingSinceMs: Date.parse(pr.openedAt) || deps.nowMs(),
       nowMs: deps.nowMs(),
       fleetAppId: pr.verifyCheck?.appId ?? null,
+      rulesetsUnavailable: required.rulesetsUnavailable,
     });
     pr.checks = { state: evaluation.state === 'none' ? 'none' : evaluation.state, detail: evaluation.reason, at: new Date(deps.nowMs()).toISOString() };
     if (evaluation.verdict === 'pass') return { kind: 'green', evaluation, protectionDigest: required.protectionDigest, strict: required.strict };

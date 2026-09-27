@@ -29,6 +29,7 @@ import type { BudgetEngine } from '../routing/policy.js';
 import { BUDGET_MODES, type BudgetMode } from '../routing/types.js';
 import { FLEET_ENGINES, MERGE_RISK_RANK, REPO_STAGE_RANK, type FleetEngine, type MergeRisk, type RepoEnforcement, type RepoStage } from '../fleet/fleet-types.js';
 import { canonicalJson } from './canonical-json.js';
+import { draftEnforcementFor, reapprovalDowngrades, type ServerEnforcementState } from './server-enforcement.js';
 import { keyIdForPublicKeyPem } from './custody-client.js';
 import {
   authorityDir,
@@ -505,10 +506,19 @@ export function verifyStandingGrant(
 
 export interface DraftRepoInput {
   nameWithOwner: string;
-  /** Private repos on the free plan cannot get server-side protection → local enforcement. null = unknown (treated as public). */
+  /** Private repos on the free plan cannot get server-side protection → local enforcement. null = unknown. */
   visibility: 'public' | 'private' | null;
   /** The checkout has a verify command (tests); null = unknown. */
   hasVerify: boolean | null;
+  /**
+   * What GitHub enforces on the default branch today (server-enforcement.ts
+   * probeServerEnforcement). The draft names `server` ONLY for 'enforced';
+   * absent / null (not probed) is `local` — the stricter mode. WHY: a repo
+   * named `server` that GitHub cannot protect (a private repo on Free has
+   * neither rulesets nor branch protection) sends every PR to the owner lane
+   * at G7 forever, while `local` gets the App's host-verified ashlr/verify.
+   */
+  serverEnforcement?: ServerEnforcementState | null;
 }
 
 export interface DraftSeatInput {
@@ -645,7 +655,8 @@ export function buildDefaultGrantPayload(input: GrantDraftInput): StandingGrantV
     if (seen.has(key)) continue;
     seen.add(key);
     const plan = DEFAULT_REPO_PLAN[repoName(candidate.nameWithOwner)];
-    const local = candidate.visibility === 'private';
+    const local = candidate.visibility === 'private'
+      || draftEnforcementFor(candidate.serverEnforcement ? { state: candidate.serverEnforcement } : null) === 'local';
     const canMerge = plan !== undefined && !(plan.needsVerify && candidate.hasVerify !== true);
     const risk: MergeRisk = local ? 'low' : plan?.risk ?? 'low';
     planned.push({
@@ -718,19 +729,41 @@ export function buildDefaultGrantPayload(input: GrantDraftInput): StandingGrantV
 
 /**
  * PURE: the grant that continues `current` after a pause, an expiry or a new
- * 30-day period. Same scope, fresh ids / dates / bindings, and its ladder
- * STARTS at the stage `current` had reached — a deploy does not restart the
+ * 30-day period. Same scope (except a `server` repo GitHub cannot protect,
+ * which becomes `local` — see `serverEnforcement`), fresh ids / dates /
+ * bindings, and its ladder STARTS at the stage `current` had reached — a deploy does not restart the
  * ramp from shadow. The start rung is inside the signed payload (the first
  * stage), so the Touch ID prompt shows exactly where autonomy resumes.
  */
 export function buildReapprovalGrantPayload(
   current: StandingGrantV1,
   currentStageIndex: number,
-  input: Omit<GrantDraftInput, 'repos' | 'seats'>,
+  input: Omit<GrantDraftInput, 'repos' | 'seats'> & {
+    /**
+     * What GitHub enforces per repo today (lower-cased owner/name → state).
+     * A `server` repo GitHub definitively cannot / does not protect
+     * ('unavailable' | 'no-required-checks') is switched to `local` at the
+     * local ceilings — the only scope change a re-approval makes, and always
+     * a narrowing. Unreadable or absent entries leave the signed choice alone.
+     */
+    serverEnforcement?: ReadonlyMap<string, ServerEnforcementState>;
+  },
 ): StandingGrantV1 {
   const from = Math.max(0, Math.min(currentStageIndex, current.rollout.stages.length - 1));
+  const ceiling = STANDING_GRANT_CEILINGS.localEnforcement;
+  const repos = current.repos.map((repo) => {
+    const state = input.serverEnforcement?.get(repo.nameWithOwner.toLowerCase());
+    if (repo.enforcement !== 'server' || !reapprovalDowngrades(state === undefined ? null : { state })) return structuredClone(repo);
+    return {
+      ...repo,
+      enforcement: 'local' as const,
+      maxRisk: MERGE_RISK_RANK[repo.maxRisk] > MERGE_RISK_RANK[ceiling.maxRisk] ? ceiling.maxRisk : repo.maxRisk,
+      maxMergesPerDay: Math.min(repo.maxMergesPerDay, ceiling.maxMergesPerDay),
+    };
+  });
   const payload: StandingGrantV1 = {
     ...structuredClone(current),
+    repos,
     grantId: input.grantId,
     grantSeq: input.grantSeq,
     keyId: input.keyId,
