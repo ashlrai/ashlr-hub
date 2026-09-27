@@ -27,6 +27,26 @@ chat's first paint. Keep the `.pane.tsx` file to the registration and a
 mount of a loaded chunk renders in the same frame (no skeleton flash), and a
 failed download is retried by "Try again". Plain `React.lazy` also works.
 
+### Or: a self-describing `register.ts`
+
+Units that shipped before the registry landed describe their pane in
+`routes/verse/<unit>/register.ts`; `panes/index.ts` discovers that file too
+and `register-adapter.ts` registers every export of this shape:
+
+```ts
+export const BROWSER_PANE = {
+  id: 'browser', label: 'Browser',
+  load: () => import('./BrowserPanel.js').then((m) => ({ default: m.BrowserPanel })),
+  // optional: commandId, keywords, defaultSlot, chatScoped, icon, shortcut, description
+};
+```
+
+It replaces the first-party pane of the same id (`changes`/`review` map to
+`diff`, `preview` to `browser`) and inherits its key, order, icon and header
+toggle. The component receives the full `PaneProps` (a `{ sessionId,
+visible }` component just ignores the rest) and gets `sessionId: null` when
+no chat is open.
+
 ## `registerPane(definition) → unregister`
 
 | field          | type                                   | notes |
