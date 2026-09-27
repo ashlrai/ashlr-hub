@@ -2,9 +2,10 @@
  * The seat router's λ objective weights (routing/router.ts `seatScore`).
  *
  *   - At the defaults (= BASELINE_HARNESS_CONFIG.routing) the ranking is
- *     exactly the pre-λ explicit order: engine, then more headroom, then the
- *     caller's order, then id — checked against a reference implementation
- *     over a generated grid of fleets, modes and requests.
+ *     exactly the explicit order: TIER (3.15 — elite · fast · free, never a
+ *     provider), then more headroom, then the caller's order, then id —
+ *     checked against a reference implementation over a generated grid of
+ *     fleets, modes and requests.
  *   - Table-driven: moving one λ moves the ranking in the documented
  *     direction (cost → cheaper / pricier, pressure → headroom counts more /
  *     less, latency → faster seats win ties, then more).
@@ -18,12 +19,13 @@ import { defaultBudgetPolicy, effectiveSeatPolicy } from '../src/core/routing/po
 import {
   DEFAULT_ROUTER_WEIGHTS,
   ROUTER_LAMBDA_MAX,
-  enginePreference,
   routeSeat,
+  tierPreference,
   type RouteOptions,
   type RouterWeights,
 } from '../src/core/routing/router.js';
 import { BASELINE_HARNESS_CONFIG, HARNESS_CONFIG_BOUNDS } from '../src/core/learn/harness-registry.js';
+import { engineTier } from '../src/core/routing/tiers.js';
 import type { BudgetMode, BudgetPolicy, RoutingRequest } from '../src/core/routing/types.js';
 
 const NOW = Date.parse('2026-09-24T12:00:00.000Z');
@@ -79,16 +81,18 @@ function route(
 // Defaults keep the explicit order
 // ---------------------------------------------------------------------------
 
-/** The pre-λ ranking, restated independently: engine order, more headroom, caller order, id. */
+/** The explicit ranking, restated independently: tier order, more headroom, caller order, id. */
 function legacyOrder(req: RoutingRequest, capacity: readonly SeatCapacity[], policy: BudgetPolicy, eligible: readonly string[]): string[] {
-  const order = enginePreference(policy.mode, req);
+  // Hand-built seats carry no tier fields, so a seat's tier and its cost
+  // rung coincide (engineTier) whichever ladder the mode ranks by.
+  const { order } = tierPreference(policy.mode, req);
   const rows = capacity
     .map((c, index) => {
       const seatPolicy = req.autonomous
         ? effectiveSeatPolicy(policy, c.seatId, c.engine)
         : { seatId: c.seatId, enabled: true, reservePercent: 0 };
       const headroom = assessSeat(c, seatPolicy, { nowMs: NOW }).headroom.autonomyHeadroomPercent ?? -1;
-      return { id: c.seatId, pos: order.indexOf(c.engine), headroom, index };
+      return { id: c.seatId, pos: order.indexOf(engineTier(c.engine)), headroom, index };
     })
     .filter((r) => eligible.includes(r.id));
   rows.sort((a, b) => a.pos - b.pos || b.headroom - a.headroom || a.index - b.index || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));

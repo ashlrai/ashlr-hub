@@ -82,7 +82,7 @@ export function devinReadinessRow(status: Pick<DevinStatus, 'chat' | 'fleet'>): 
   return {
     id: 'devin',
     label: 'Devin',
-    engine: 'local',
+    engine: 'devin',
     kind: 'cloud',
     reading: { state: 'live', at: null, note: null },
     chat: status.chat,

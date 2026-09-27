@@ -28,7 +28,7 @@ import {
   type CapacityWindow,
   type SeatCapacity,
 } from '../src/core/routing/headroom.js';
-import { enginePreference, rankAlternatives, routeSeat } from '../src/core/routing/router.js';
+import { rankAlternatives, routeSeat, tierPreference } from '../src/core/routing/router.js';
 import { boundSeatReasons, listSeatIds, reasonSentence, reasonSentences } from '../src/core/routing/seat-reasons.js';
 import { normalizeJournalRecord, type DispatchJournalRecord } from '../src/core/fleet/fleet-runtime-journal.js';
 import type { BudgetPolicy, RoutingRequest } from '../src/core/routing/types.js';
@@ -407,7 +407,7 @@ describe('routeSeat — today’s machine in balanced mode', () => {
     // Codex is OFF by policy — that is the first reason, and "off" has no reopening date.
     expect(d.exclusions[0]!.reasons[0]).toBe('Autonomy is switched off for this seat.');
     expect(d.exclusions[0]!.nextEligibleAt).toBeNull();
-    expect(d.why).toMatch(/^Routed autonomous medium-difficulty code work to grok \(grok\) with 88% of its weekly window left for autonomy: balanced mode prefers Grok first/);
+    expect(d.why).toMatch(/^Routed autonomous medium-difficulty code work to grok \(grok\) with 88% of its weekly window left for autonomy: balanced mode prefers the fast tier first/);
     expect(d.why.split('. ').length).toBe(1);
   });
 
@@ -504,12 +504,13 @@ describe('routeSeat — modes', () => {
     expect(routeSeat(auto('code', 'high'), [claude(100, 97), grok(10)], allIn, opts).seatId).toBe('grok');
   });
 
-  it('engine preference table', () => {
-    expect(enginePreference('balanced', auto('code', 'medium'))).toEqual(['grok', 'local', 'codex', 'claude']);
-    expect(enginePreference('all-in', auto('code', 'medium'))).toEqual(['grok', 'codex', 'claude', 'local']);
-    expect(enginePreference('balanced', auto('leader', 'low'))).toEqual(['claude', 'codex', 'grok', 'local']);
-    expect(enginePreference('reserve', auto('plan', 'high'))).toEqual(['grok', 'codex', 'claude', 'local']);
-    expect(enginePreference('reserve', { task: 'code', difficulty: 'high', autonomous: false })).toEqual(['claude', 'codex', 'grok', 'local']);
+  it('preference table — over tiers or the cost ladder, never providers', () => {
+    expect(tierPreference('balanced', auto('code', 'medium'))).toEqual({ by: 'cost', order: ['fast', 'free', 'elite'] });
+    expect(tierPreference('all-in', auto('code', 'medium'))).toEqual({ by: 'tier', order: ['fast', 'elite', 'free'] });
+    expect(tierPreference('balanced', auto('leader', 'low'))).toEqual({ by: 'tier', order: ['elite', 'fast', 'free'] });
+    expect(tierPreference('reserve', auto('plan', 'high'))).toEqual({ by: 'tier', order: ['fast', 'elite', 'free'] });
+    expect(tierPreference('balanced', auto('bulk', 'high'))).toEqual({ by: 'cost', order: ['free', 'fast', 'elite'] });
+    expect(tierPreference('reserve', { task: 'code', difficulty: 'high', autonomous: false })).toEqual({ by: 'tier', order: ['elite', 'fast', 'free'] });
   });
 });
 
@@ -579,9 +580,9 @@ describe('seat reasons as data (3.10.1)', () => {
 
   it('writes a short summary, and a why that names held-back seats without nesting their reasons', () => {
     const d = routeSeat(auto('code', 'medium'), [claude(15, 70), codexSpent('codex-cmp', 40), codexSpent('codex-personal', 30), grok(6)], balanced(), opts);
-    expect(d.summary).toBe('grok — 94% of its weekly window left; balanced mode prefers Grok for this work.');
+    expect(d.summary).toBe('grok — 94% of its weekly window left; balanced mode prefers the fast tier for this work.');
     expect(d.why).toBe('Routed autonomous medium-difficulty code work to grok (grok) with 94% of its weekly window left for autonomy: '
-      + 'balanced mode prefers Grok first for this work; held back 3 seats (claude, codex-cmp, codex-personal).');
+      + 'balanced mode prefers the fast tier first for this work; held back 3 seats (claude, codex-cmp, codex-personal).');
     expect(d.why).not.toMatch(/…|\(resets/);
   });
 

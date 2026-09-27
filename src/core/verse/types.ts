@@ -95,6 +95,13 @@ export interface VerseSeat {
    * Absent when there is nothing to say, so ordinary seats keep their shape.
    */
   notes?: string[];
+  /**
+   * 3.15 ADDITIVE (routing/tiers.ts `CostBasis`). What one more turn on this
+   * seat costs when it is NOT the engine's default basis — e.g. "Devin
+   * (cloud)" spends ACU credits. Absent = the engine default (local free,
+   * everything else subscription).
+   */
+  costBasis?: 'subscription' | 'credits' | 'per-token' | 'free';
 }
 
 /**

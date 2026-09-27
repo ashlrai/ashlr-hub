@@ -81,8 +81,7 @@ describe('a Devin chat’s header', () => {
 });
 
 describe('Auto seat on a Devin chat', () => {
-  it('is not offered: Auto only routes among Claude, Codex, Grok and local, so it would move the chat off Devin', async () => {
-    // Control: a Claude chat does get the Auto bar, so its absence below means something.
+  it('is offered exactly as on a Claude chat (3.15): Devin is a routable elite seat, so Auto can stay on it', async () => {
     const claude = session({ id: 'vs_claude', engine: 'claude', seatId: CLAUDE_SEAT.id, accountId: CLAUDE_SEAT.accountId, model: CLAUDE_SEAT.models[0]!.id, turnCount: 1 });
     const { unmount } = render(<Workspace {...props({ view: view(claude), seats: [CLAUDE_SEAT, DEVIN_SEAT] })} />);
     expect(await screen.findByRole('combobox', { name: 'Auto seat' })).toBeInTheDocument();
@@ -90,9 +89,7 @@ describe('Auto seat on a Devin chat', () => {
 
     render(<Workspace {...props({ seats: [CLAUDE_SEAT, DEVIN_SEAT] })} />);
     await waitFor(() => expect(screen.getByTestId('devin-meter')).toBeInTheDocument());
-    // Give the lazy bar the same chance it had above.
-    await new Promise((r) => setTimeout(r, 50));
-    expect(screen.queryByRole('combobox', { name: 'Auto seat' })).toBeNull();
+    expect(await screen.findByRole('combobox', { name: 'Auto seat' })).toBeInTheDocument();
   });
 });
 

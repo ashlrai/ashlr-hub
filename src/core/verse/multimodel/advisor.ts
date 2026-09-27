@@ -22,13 +22,23 @@
  *      None of these can make an ineligible seat eligible.
  *   4. Privacy: a local-only repo is routed over LOCAL seats only — the
  *      filter runs before the router sees anything.
+ *   5. Model fit inside a seat (3.15): a seat that also offers a cheaper-tier
+ *      model (Devin's free SWE on the Devin CLI) competes with THAT model for
+ *      cheap work, and with its default for everything else.
+ *
+ * EQUAL PARTNERS (3.15). Claude, Codex and Devin are one tier (routing/
+ * tiers.ts); nothing here or in the router prefers one provider. Devin seats
+ * are routable like any other. The one locality rule: for HARD work Mason is
+ * waiting on, a local model (even the elite Qwen) lines up behind the hosted
+ * elite seats — it is slower — but still ahead of everything else.
  *
  * PURE and deterministic (callers pass `nowMs`). BROWSER-SAFE: the composer
  * runs it per pause in typing over the seat list it already polls.
  */
 import { assessSeat, type SeatCapacity } from '../../routing/headroom.js';
 import type { BudgetEngine } from '../../routing/policy.js';
-import { DEFAULT_ROUTER_WEIGHTS, routeSeat, type RouterWeights } from '../../routing/router.js';
+import { COST_BASIS_LABELS, type CostBasis } from '../../routing/tiers.js';
+import { capacityTier, DEFAULT_ROUTER_WEIGHTS, routeSeat, type RouterWeights } from '../../routing/router.js';
 import type { BudgetPolicy, SeatDecision } from '../../routing/types.js';
 import { learnedTilt } from './learning.js';
 import type {
@@ -41,8 +51,11 @@ import type {
   SeatAdviceOption,
 } from './types.js';
 
-/** Engines the seat router ranks. Devin and the cloud lane are asynchronous agents, not chat seats: never auto-picked. */
-export const ROUTABLE_ENGINES: readonly BudgetEngine[] = ['claude', 'codex', 'grok', 'local'];
+/**
+ * Engines the Auto seat may pick — every chat engine (3.15: Devin is a chat
+ * seat and an equal partner, so it is routable like Claude and Codex).
+ */
+export const ROUTABLE_ENGINES: readonly BudgetEngine[] = ['claude', 'codex', 'devin', 'grok', 'local'];
 
 /**
  * Mid-conversation head start for the current seat, in ranking positions.
@@ -60,6 +73,13 @@ export const ROI_MAX_TILT = 0.75;
 export const ROI_MIN_DISPATCHES = 10;
 /** Where a tool-less local model lands for edit work: behind everything. */
 const NO_TOOLS_PENALTY = 3;
+/**
+ * Hard work Mason is waiting on: an elite local model (slower on this Mac)
+ * lines up just behind the LAST hosted elite seat — this far past it, in
+ * ranking positions. Latency, not quality: it still beats every fast / free
+ * seat, and a hosted elite seat that is held back leaves it first.
+ */
+export const LOCAL_HARD_OFFSET = 0.5;
 
 const EDIT_KINDS: ReadonlySet<PromptKind> = new Set(['code', 'debug', 'refactor', 'bulk']);
 const ROI_KINDS: ReadonlySet<PromptKind> = new Set(['code', 'debug', 'refactor', 'bulk', 'review']);
@@ -77,6 +97,12 @@ export interface AdvisorSeat {
   /** Can drive an agentic session; null = the runtime did not say (not "no"). */
   supportsTools: boolean | null;
   capacity: SeatCapacity;
+  /**
+   * 3.15: a runnable model of this seat in a CHEAPER tier than its default
+   * (Devin CLI's free SWE), with the capacity it would route as. Used for
+   * cheap work only; absent = the seat has one tier.
+   */
+  cheaper?: { model: string; capacity: SeatCapacity } | null;
 }
 
 export interface AdviseInput {
@@ -134,9 +160,17 @@ function windowWord(binding: 'session' | 'weekly' | null): string {
   return binding === 'session' ? '5-hour' : 'weekly';
 }
 
+/** How a windowless seat is described: it has no window to be "N% left" of. */
+function windowlessNote(basis: CostBasis | undefined): string {
+  if (basis === 'free') return 'free on your plan';
+  if (basis === 'credits') return 'spends credits (ACUs)';
+  return `${COST_BASIS_LABELS[basis ?? 'subscription']} · no usage window reported`;
+}
+
 /** "free · private on this Mac" / "62% of its 5-hour window left" / "no usage reading". */
 export function seatNote(seat: AdvisorSeat, nowMs: number): string {
   if (seat.local) return seat.private ? 'free · private on this Mac' : 'free · local runtime';
+  if (seat.capacity.windowless) return windowlessNote(seat.capacity.costBasis);
   const assessed = assessSeat(seat.capacity, { seatId: seat.seatId, enabled: true, reservePercent: 0 }, { nowMs });
   const left = assessed.headroom.autonomyHeadroomPercent;
   if (assessed.exhausted) return 'usage spent';
@@ -145,7 +179,10 @@ export function seatNote(seat: AdvisorSeat, nowMs: number): string {
 }
 
 function option(seat: AdvisorSeat, nowMs: number): SeatAdviceOption {
-  return { seatId: seat.seatId, label: seat.label, engine: seat.engine, model: seat.model, local: seat.local, note: seatNote(seat, nowMs) };
+  return {
+    seatId: seat.seatId, label: seat.label, engine: seat.engine, model: seat.model, local: seat.local, note: seatNote(seat, nowMs),
+    tier: capacityTier(seat.capacity),
+  };
 }
 
 interface Ranked {
@@ -155,11 +192,22 @@ interface Ranked {
   roi: number;
   sticky: number;
   tools: number;
+  local: number;
 }
 
 function total(r: Ranked, withLearned = true, withSticky = true): number {
-  return r.base + (withLearned ? r.learned.tilt : 0) + r.roi + (withSticky ? r.sticky : 0) + r.tools;
+  return r.base + (withLearned ? r.learned.tilt : 0) + r.roi + (withSticky ? r.sticky : 0) + r.tools + r.local;
 }
+
+/**
+ * The seat as it competes for THIS message: its cheaper-tier model for cheap
+ * work (when it has one), else itself.
+ */
+function forMessage(seat: AdvisorSeat, cheap: boolean): AdvisorSeat {
+  if (!cheap || !seat.cheaper) return seat;
+  return { ...seat, model: seat.cheaper.model, capacity: seat.cheaper.capacity };
+}
+
 
 function order(rows: Ranked[], withLearned = true, withSticky = true): Ranked[] {
   // Stable: equal totals keep the router's order.
@@ -174,7 +222,12 @@ function clip(text: string, max = 160): string {
 export function adviseSeat(input: AdviseInput): SeatAdvice {
   const { classification: cls, mode, nowMs } = input;
   const localOnly = { on: input.localOnly?.on === true, reason: input.localOnly?.reason ?? null };
-  const known = input.seats.filter((s) => (ROUTABLE_ENGINES as readonly string[]).includes(s.engine) && s.model !== null);
+  const hard = cls.difficulty === 'high' || (cls.needsFrontier ?? 0) >= 0.7;
+  // Cheap work may use a seat's cheaper-tier model (Devin SWE); hard work never does.
+  const cheap = !hard && (mode === 'cheap-first' || cls.difficulty === 'low' || cls.task === 'bulk');
+  const known = input.seats
+    .filter((s) => (ROUTABLE_ENGINES as readonly string[]).includes(s.engine) && s.model !== null)
+    .map((s) => forMessage(s, cheap));
   const pool = localOnly.on ? known.filter((s) => s.local && s.private) : known;
   const byId = new Map(pool.map((s) => [s.seatId, s]));
   const factors: string[] = [];
@@ -198,7 +251,6 @@ export function adviseSeat(input: AdviseInput): SeatAdvice {
   }));
 
   const midChat = (input.turnCount ?? 0) > 0 && typeof input.currentSeatId === 'string';
-  const hard = cls.difficulty === 'high' || (cls.needsFrontier ?? 0) >= 0.7;
   const stickiness = mode === 'cheap-first' || hard ? STICKINESS_WEAK : STICKINESS;
   const rows: Ranked[] = decision.candidates.flatMap((id, index) => {
     const seat = byId.get(id);
@@ -210,8 +262,18 @@ export function adviseSeat(input: AdviseInput): SeatAdvice {
       roi: roiTilt(input.roi, seat.engine, cls.kind),
       sticky: midChat && id === input.currentSeatId ? -stickiness : 0,
       tools: seat.local && seat.supportsTools === false && EDIT_KINDS.has(cls.kind) ? NO_TOOLS_PENALTY : 0,
+      local: 0,
     }];
   });
+  if (hard && !localOnly.on) {
+    // Only an ELITE local seat competes with hosted elite ones; a free-tier
+    // local seat is already behind them.
+    const isElite = (r: Ranked) => capacityTier(r.seat.capacity) === 'elite';
+    const lastHosted = rows.reduce((max, r) => (!r.seat.local && isElite(r) ? Math.max(max, r.base) : max), -1);
+    for (const r of rows) {
+      if (r.seat.local && isElite(r) && lastHosted > r.base) r.local = lastHosted - r.base + LOCAL_HARD_OFFSET;
+    }
+  }
 
   const empty = (why: string): SeatAdvice => ({
     choice: null, stay: false, why, factors, alternatives: [], held, classification: cls, mode, localOnly, routerWhy: decision.why,
@@ -234,6 +296,8 @@ export function adviseSeat(input: AdviseInput): SeatAdvice {
   const withoutSticky = order(rows, true, false)[0]!.seat.seatId;
   const toollessId = order(rows.map((r) => ({ ...r, tools: 0 })))[0]!.seat.seatId;
   const toolless = rows.find((r) => r.seat.seatId === toollessId)!;
+  const hostedFirstId = order(rows.map((r) => ({ ...r, local: 0 })))[0]!.seat.seatId;
+  const hostedFirst = rows.find((r) => r.seat.seatId === hostedFirstId)!;
   let reason: string;
   if (pinned) {
     reason = 'you pinned this seat';
@@ -245,9 +309,11 @@ export function adviseSeat(input: AdviseInput): SeatAdvice {
     reason = `${cls.label}; ${winner.learned.phrase}`;
   } else if (toolless.seat.seatId !== seat.seatId && toolless.tools > 0) {
     reason = `${cls.label} edits files, and ${toolless.seat.label} cannot use tools`;
+  } else if (hostedFirst.seat.seatId !== seat.seatId && hostedFirst.local > 0) {
+    reason = `${cls.label} needs the strongest model now — a hosted seat answers faster than ${hostedFirst.seat.label}`;
   } else if (seat.local) {
     reason = mode === 'cheap-first' ? `${cls.label} — local drafts first, escalates only if the draft is weak` : `${cls.label} — free and private on this Mac`;
-  } else if (cls.difficulty === 'high' || (cls.needsFrontier ?? 0) >= 0.7) {
+  } else if (hard) {
     reason = `${cls.label} needs the strongest model`;
   } else {
     reason = cls.label;

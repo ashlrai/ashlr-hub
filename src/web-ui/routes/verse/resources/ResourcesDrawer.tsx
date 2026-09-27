@@ -10,9 +10,20 @@
  *            it a grid track, so the surface shrinks rather than hides).
  *            Not modal — no trap, no backdrop, Esc is the surface's.
  *
- *   Accounts        one card per paid seat, usable first (orderAccountRows)
- *   Local models    the local seat, the serving runtime, installed models
- *   Cloud credits   GET /api/verse/cloud, or "Cloud lane not available yet"
+ * 3.15 — ONE TIER MODEL, ONE CARD ANATOMY. Cards are grouped by tier
+ * (routing/tiers.ts), never by provider or by when a provider was added:
+ *
+ *   Elite         Claude Code, every Codex account, Devin (cloud + CLI),
+ *                 Claude cloud credits — and the local runtime when it runs
+ *                 the elite Qwen 3.8 27B
+ *   Fast          Grok
+ *   Free · local  the local runtime otherwise
+ *   Decision layer  Jev (it routes; it is not a seat)
+ *
+ * Inside a tier: usable before not, a subscription before a metered balance,
+ * then roster order (`groupByTier`). Every card carries the same rows: facts
+ * (tier · cost basis · models · reserve), status, usage against its window
+ * or budget, and the Chat / Fleet readiness lines with their fixing command.
  *
  * Data is the app-wide caches (useCapacityData: bootstrap seats, /health,
  * /budget) plus the owners' local and cloud reads — nothing polls unless the
@@ -37,7 +48,8 @@ import { findCommand, formatChord } from '../shell/command-catalog.js';
 import { isGuardOpen, requestGuarded } from '../shell/guarded-action.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { ACCOUNT_CLOCK_MS, useCapacityData } from '../usage/CapacityStrip.js';
-import { accountStatus, buildCapacityRows, capacityHeadline, orderAccountRows, type CapacityRow } from '../usage/capacity-strip-model.js';
+import { accountStatus, accountStatusRank, buildCapacityRows, capacityHeadline, orderAccountRows, type CapacityRow } from '../usage/capacity-strip-model.js';
+import { COST_BASIS_RANK, costBasisOf, engineTier, TIER_BLURBS, TIER_LABELS, type ResourceTier } from '../../../../core/routing/tiers.js';
 import { verseLocalModelsQuery } from '../usage/usage-queries.js';
 import { setVerseSection, type VerseSectionId } from '../verse-ui-store.js';
 import { CloudCredits } from './CloudCredits.js';
@@ -46,11 +58,20 @@ import { JevResource } from './JevResource.js';
 import { LocalResources } from './LocalResources.js';
 import { ResourceCard } from './ResourceCard.js';
 import { cloudCreditsQuery, resourceReadinessQuery, RESOURCES_POLL_MS } from './resources-queries.js';
+import { costBases, groupByTier, mergedFacts, readinessStatusRank, seatFacts, type ResourceFactsView, type TierEntry } from './resources-model.js';
 import { closeResources, setResourcesBar, setResourcesPinned, useResourcesUi } from './resources-store.js';
 import styles from './ResourcesDrawer.module.css';
 
 export const RESOURCES_EMPTY_TEXT =
-  'No accounts connected yet. Sign in to Claude Code, Codex or Grok in a terminal — they show up here within a minute.';
+  'No accounts connected yet. Sign in to Claude Code, Codex, Devin or Grok in a terminal — they show up here within a minute.';
+
+/** One card in a tier section. */
+type DrawerEntry = TierEntry & (
+  | { kind: 'account'; row: CapacityRow; facts: ResourceFactsView }
+  | { kind: 'devin'; facts: ResourceFactsView; bases: ReturnType<typeof costBases> }
+  | { kind: 'cloud'; facts: ResourceFactsView }
+  | { kind: 'local'; facts: ResourceFactsView }
+);
 
 function PinIcon({ pinned }: { pinned: boolean }) {
   return (
@@ -102,9 +123,42 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
     () => buildCapacityRows(data.seats, { health: data.health, budget: data.budget, now }),
     [data.seats, data.health, data.budget, now],
   );
-  const paid = useMemo(() => orderAccountRows(rows.filter((r) => r.kind === 'subscription'), { healthRead, now }), [rows, healthRead, now]);
+  // Devin's two chat seats are ONE provider card (DevinResource), not two
+  // generic account cards; every other paid seat is a generic card.
+  const paid = useMemo(() => orderAccountRows(rows.filter((r) => r.kind === 'subscription' && r.engine !== 'devin'), { healthRead, now }), [rows, healthRead, now]);
+  const devinRows = useMemo(() => rows.filter((r) => r.engine === 'devin'), [rows]);
   const localRow = rows.find((r) => r.kind === 'local') ?? null;
   const mode_ = data.budget?.mode ?? null;
+
+  const sections = useMemo(() => {
+    const seats = data.seats;
+    const entries: DrawerEntry[] = [];
+    const marginal = (facts: ResourceFactsView) => COST_BASIS_RANK[facts.basis];
+    paid.forEach((row, index) => {
+      const seat = seats.find((s) => s.id === row.seatId);
+      const facts: ResourceFactsView = seat
+        ? seatFacts(seat)
+        : { tier: engineTier(row.engine), basis: costBasisOf(row.engine), models: [], reserve: null };
+      entries.push({ kind: 'account', key: `account:${row.seatId}`, row, facts, tier: facts.tier, index,
+        statusRank: accountStatusRank(accountStatus(row, { healthRead, now }).kind), marginal: marginal(facts) });
+    });
+    const devinSeats = seats.filter((s) => s.engine === 'devin');
+    const devinFacts = mergedFacts(devinSeats) ?? { tier: 'elite' as ResourceTier, basis: 'credits' as const, models: [], reserve: null };
+    const devinRank = devinRows.length > 0
+      ? Math.min(...devinRows.map((r) => accountStatusRank(accountStatus(r, { healthRead, now }).kind)))
+      : readinessStatusRank(null);
+    entries.push({ kind: 'devin', key: 'devin', facts: devinFacts, bases: costBases(devinSeats), tier: devinFacts.tier,
+      statusRank: devinRank, marginal: marginal(devinFacts), index: paid.length });
+    const cloudFacts: ResourceFactsView = { tier: 'elite', basis: 'credits', models: [], reserve: null };
+    entries.push({ kind: 'cloud', key: 'cloud', facts: cloudFacts, tier: 'elite', marginal: marginal(cloudFacts), index: paid.length + 1,
+      statusRank: readinessStatusRank(readinessById.get('cloud')?.chat.ready ?? null) });
+    // The local card lists its own models; its tier is the best local seat's
+    // (the elite Qwen 3.8 27B puts it in Elite, anything else in Free).
+    const localFacts = { ...(mergedFacts(seats.filter((s) => s.engine === 'local')) ?? { tier: 'free' as ResourceTier, basis: 'free' as const, models: [], reserve: null }), models: [] };
+    entries.push({ kind: 'local', key: 'local', facts: localFacts, tier: localFacts.tier, marginal: 0, index: paid.length + 2,
+      statusRank: localRow ? accountStatusRank(accountStatus(localRow, { healthRead, now }).kind) : readinessStatusRank(null) });
+    return groupByTier(entries);
+  }, [data.seats, paid, devinRows, localRow, readinessById, healthRead, now]);
 
   // ── close: Esc (overlay), outside click, the close button, ⌘. ─────────
   const close = useCallback(() => {
@@ -238,57 +292,73 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
       </header>
 
       <div className={styles.body}>
-        <section className={styles.group} aria-labelledby={`${titleId}-accounts`}>
-          <h3 id={`${titleId}-accounts`} className={styles.groupTitle}>Accounts</h3>
-          {data.loading ? (
-            <p className={styles.subtle} aria-busy="true">Reading accounts…</p>
-          ) : paid.length === 0 ? (
-            <p className={styles.subtle}>{RESOURCES_EMPTY_TEXT}</p>
-          ) : (
+        {data.loading ? (
+          <p className={styles.subtle} aria-busy="true">Reading accounts…</p>
+        ) : paid.length === 0 && devinRows.length === 0 ? (
+          <p className={styles.subtle}>{RESOURCES_EMPTY_TEXT}</p>
+        ) : null}
+        {sections.map((section) => (
+          <section key={section.tier} className={styles.group} aria-labelledby={`${titleId}-${section.tier}`} data-tier-section={section.tier}>
+            <h3 id={`${titleId}-${section.tier}`} className={styles.groupTitle}>{TIER_LABELS[section.tier]}</h3>
+            <p className={styles.groupBlurb}>{TIER_BLURBS[section.tier]}</p>
             <ul className={styles.cards}>
-              {paid.map((row) => {
-                const settled = accountStatus(row, { healthRead, now });
-                const checking = busy?.seatId === row.seatId && busy.kind === 'check-again';
-                const status = checking ? accountStatus(row, { healthRead, now, checking: true }) : settled;
-                return (
-                  <ResourceCard
-                    key={row.seatId}
-                    row={row}
-                    status={status}
-                    settled={settled}
-                    mode={mode_}
-                    busy={busy}
-                    onAction={onAction}
-                    readiness={readinessById.get(row.seatId) ?? null}
-                  />
-                );
+              {section.entries.map((entry) => {
+                switch (entry.kind) {
+                  case 'account': {
+                    const row = entry.row;
+                    if (data.loading) return null;
+                    const settled = accountStatus(row, { healthRead, now });
+                    const checking = busy?.seatId === row.seatId && busy.kind === 'check-again';
+                    const status = checking ? accountStatus(row, { healthRead, now, checking: true }) : settled;
+                    return (
+                      <ResourceCard
+                        key={entry.key}
+                        row={row}
+                        status={status}
+                        settled={settled}
+                        mode={mode_}
+                        busy={busy}
+                        onAction={onAction}
+                        readiness={readinessById.get(row.seatId) ?? null}
+                        facts={entry.facts}
+                      />
+                    );
+                  }
+                  case 'devin':
+                    return <DevinResource key={entry.key} facts={entry.facts} bases={entry.bases} />;
+                  case 'cloud':
+                    return (
+                      <CloudCredits
+                        key={entry.key}
+                        facts={entry.facts}
+                        readiness={readinessById.get('cloud') ?? null}
+                        onReadinessAction={onReadinessAction}
+                        readinessBusy={busy !== null && busy.seatId === readinessById.get('cloud')?.chat.fix?.seatId}
+                      />
+                    );
+                  case 'local':
+                    return (
+                      <LocalResources
+                        key={entry.key}
+                        facts={entry.facts}
+                        status={localRow ? accountStatus(localRow, { healthRead, now }) : null}
+                        onOpenUsage={() => go('usage')}
+                        now={now}
+                        readiness={readinessById.get('local') ?? null}
+                      />
+                    );
+                  default:
+                    return null;
+                }
               })}
             </ul>
-          )}
-          <p className={note ? styles.note : styles.visuallyHidden} data-tone={note?.tone} role="status" aria-live="polite">{note?.text ?? ''}</p>
-        </section>
+          </section>
+        ))}
+        <p className={note ? styles.note : styles.visuallyHidden} data-tone={note?.tone} role="status" aria-live="polite">{note?.text ?? ''}</p>
 
-        <section className={styles.group} aria-labelledby={`${titleId}-local`}>
-          <h3 id={`${titleId}-local`} className={styles.groupTitle}>Local</h3>
+        <section className={styles.group} aria-labelledby={`${titleId}-decisions`}>
+          <h3 id={`${titleId}-decisions`} className={styles.groupTitle}>Decision layer</h3>
           <ul className={styles.cards}>
-            <LocalResources
-              status={localRow ? accountStatus(localRow, { healthRead, now }) : null}
-              onOpenUsage={() => go('usage')}
-              now={now}
-              readiness={readinessById.get('local') ?? null}
-            />
-          </ul>
-        </section>
-
-        <section className={styles.group} aria-labelledby={`${titleId}-cloud`}>
-          <h3 id={`${titleId}-cloud`} className={styles.groupTitle}>Cloud</h3>
-          <ul className={styles.cards}>
-            <CloudCredits
-              readiness={readinessById.get('cloud') ?? null}
-              onReadinessAction={onReadinessAction}
-              readinessBusy={busy !== null && busy.seatId === readinessById.get('cloud')?.chat.fix?.seatId}
-            />
-            <DevinResource />
             <JevResource />
           </ul>
         </section>

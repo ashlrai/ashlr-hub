@@ -656,6 +656,11 @@ export function accountStatus(row: CapacityRow, opts: AccountStatusOptions): Acc
  * paid seats ahead of local ones of the same standing. Ordered on the settled
  * status (never on a running check), so a row does not jump while "Checking…".
  */
+/** Where a status sorts among cards: usable first, what needs you last (the `orderAccountRows` rank). */
+export function accountStatusRank(kind: AccountStatusKind): number {
+  return STATUS_RANK[kind];
+}
+
 export function orderAccountRows(rows: readonly CapacityRow[], opts: Omit<AccountStatusOptions, 'checking'>): CapacityRow[] {
   const ranked = rows.map((row, index) => ({
     row,
