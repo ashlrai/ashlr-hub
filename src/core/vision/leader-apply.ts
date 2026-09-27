@@ -84,6 +84,7 @@ import type {
   StartExperimentResult,
 } from '../learn/harness-types.js';
 import {
+  LEADER_GOAL_HYGIENE_KINDS,
   LEADER_LIMITS,
   type LeaderAction,
   type LeaderActionClass,
@@ -891,6 +892,22 @@ export function isLeaderDryRun(policy: EffectivePolicy | null): boolean {
   return policy === null || policy.switch !== 'autonomous' || policy.leader.classes.length === 0;
 }
 
+/**
+ * 3.15: goal hygiene applies whenever autonomy is ON (a standing grant is in
+ * force and Mason set the switch to Autonomous), independent of the rollout
+ * ladder's leaderClasses. The ladder paces CODE — which repos may be touched
+ * and merged, by which engines — and its early stages carry
+ * `leaderClasses: []`; read literally that froze the goal list too, so in
+ * shadow the Leader could not even pause the goals no granted repo can serve
+ * (live, 2026-09-27: 26 of 26 actions refused — 22 of them goal focus/pause/
+ * archive — with 21 goals open against a 4-goal focus limit). goal.focus of a
+ * paused goal re-activates it; like every class-A action it is vetoable. Everything else — work.dispatch, router and
+ * lane changes, goal.create (class B) — still waits for the ladder.
+ */
+export function leaderGoalHygieneApplies(policy: EffectivePolicy | null): boolean {
+  return policy !== null && policy.switch === 'autonomous';
+}
+
 function ok(cls: LeaderActionClass, spendRaising = false): LeaderClassification {
   return { class: cls, verdict: 'ok', reason: null, spendRaising };
 }
@@ -1019,6 +1036,8 @@ export interface PlannedActionMeta {
 
 /**
  * Plan one action: class, status and window. Pure over `ctx`.
+ *   goal hygiene    → scheduled (class A) whenever autonomy is on, whatever
+ *                     the stage (leaderGoalHygieneApplies);
  *   dry run         → refused ("dry run: …") — or escalated for class C;
  *   class not granted in the current stage → escalated (class C);
  *   Leader limit    → refused;
@@ -1049,6 +1068,9 @@ export function planLeaderAction(draft: AnyLeaderActionDraft, meta: PlannedActio
 
   if (c.verdict === 'refused') return build(c.class, 'refused', c.reason, null);
   if (c.class === 'C') return build('C', 'escalated', c.reason, null);
+  if (c.class === 'A' && LEADER_GOAL_HYGIENE_KINDS.has(draft.kind) && leaderGoalHygieneApplies(policy)) {
+    return build('A', 'scheduled', null, createdAt);
+  }
   if (isLeaderDryRun(policy)) {
     const why = policy === null
       ? 'dry run: no standing grant is in force, so the Leader only proposes.'

@@ -326,6 +326,7 @@ import { loadConfig, resolveSubscriptionMaxPercent } from '../config.js';
 import { hostname as osHostname } from 'node:os';
 import {
   buildResourceStrategyReport,
+  fleetStatusForDirection,
   resourceStrategyToDaemonPlan,
   type AutonomousDirectionMode,
   type ResourceStrategyDaemonPlan,
@@ -1999,6 +2000,7 @@ async function buildDaemonStrategyPlan(
   cfg: AshlrConfig,
   state: DaemonState,
   backlogItems: number,
+  direction: { standingTick: boolean },
 ): Promise<ResourceStrategyDaemonPlan> {
   const { diagnoseGuardHealth } = await import('./guard-health.js');
   const guardHealth = diagnoseGuardHealth();
@@ -2007,7 +2009,10 @@ async function buildDaemonStrategyPlan(
 	    maxOutcomes: 6,
 	    maxChecks: 1,
 	    deps: {
-      buildFleetStatus: async () => buildTickFleetStatus(cfg, state, backlogItems, guardHealth),
+      buildFleetStatus: async () => fleetStatusForDirection(
+        buildTickFleetStatus(cfg, state, backlogItems, guardHealth),
+        direction.standingTick,
+      ),
       runEcosystemDoctor: async (opts) => lightweightEcosystemReport(opts?.now, opts?.root),
       diagnoseGuardHealth: () => guardHealth,
       listOutcomeRecords: cfg.foundry?.autoMerge?.enabled === true
@@ -4950,7 +4955,7 @@ export async function tick(
   // -------------------------------------------------------------------------
   if (autonomyControlEnabled(liveCfg)) {
     try {
-      directionPlan = await buildDaemonStrategyPlan(liveCfg, state, cachedBacklogCountForEnrolledRepos(enrolled));
+      directionPlan = await buildDaemonStrategyPlan(liveCfg, state, cachedBacklogCountForEnrolledRepos(enrolled), { standingTick });
       directionMode = directionPlan.mode;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

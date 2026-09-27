@@ -34,6 +34,7 @@ import { isTrivialItem, isNonCodePath } from './value-filter.js';
 import { scoreItem } from './scoring.js';
 import { listGoals } from '../goals/store.js';
 import { createProposalMilestoneCompletionPredicate } from '../goals/completion.js';
+import { goalProjectMatchesRepo } from '../goals/project-match.js';
 import {
   compareGoalFocusCandidates,
   goalFocusSnapshot,
@@ -1847,7 +1848,9 @@ export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'
     const candidates: Array<{ goal: Goal; milestone: Milestone; item: WorkItem }> = [];
     let zeroMilestoneExpansions = 0;
     for (let goal of allGoals) {
-      if (!goal.project || resolve(goal.project) !== resolve(repo)) {
+      // Exact checkout, or (under a standing grant) the fleet mirror of the
+      // same GitHub repo — goals/project-match.ts.
+      if (!goalProjectMatchesRepo(goal.project, repo)) {
         continue;
       }
 

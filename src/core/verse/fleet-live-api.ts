@@ -80,7 +80,7 @@ import {
 } from '../fleet/fleet-types.js';
 import type { EffectivePolicy, LedgerEntry, LedgerReadOptions, LedgerReadResult } from '../authority/types.js';
 import { STANDING_GRANT_PATTERNS } from '../authority/types.js';
-import { currentStandingPolicy } from '../authority/effective-config.js';
+import { displayStandingPolicy } from './display-standing-policy.js';
 import { readLedger } from '../authority/ledger.js';
 import { listRepoHolds, setRepoHold } from '../fleet/quarantine.js';
 import { listPostMergeWatches, postMergeGreenPct, type PostMergeWatchView } from '../fleet/post-merge-watch.js';
@@ -490,7 +490,9 @@ const dispatchTail = createDispatchTail();
 function defaultDeps(): FleetLiveDeps {
   return {
     now: () => Date.now(),
-    policy: () => currentStandingPolicy(),
+    // Display only (nothing here authorizes): the sidecar is a single-file
+    // binary, so evaluate what the header chip evaluates (display-standing-policy.ts).
+    policy: () => displayStandingPolicy(),
     killSwitch: () => readKillSwitch().state,
     paused: () => daemonPaused(),
     liveness: () => probeDaemonLiveness(),

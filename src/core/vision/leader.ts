@@ -88,6 +88,7 @@ import {
   applyDueLeaderActions,
   enactLeaderActions,
   isLeaderDryRun,
+  leaderGoalHygieneApplies,
   listLeaderActions,
   loadDefaultLeaderDeps,
   readLeaderDirectives,
@@ -469,7 +470,15 @@ ${serialized}
 Honor every directive above in the bottleneck, the move, the kill list and every action; when evidence conflicts with a directive, follow the directive and say why in notes. Answers are Mason's replies to your earlier questions (joined by questionId to the data block below); approvals are actions he endorsed. None of this widens the standing grant — the policy check still classifies every action.`;
 }
 
-export function buildLeaderPrompt(evidence: LeaderEvidence, opts: { dryRun: boolean; nowIso: string }): string {
+export function buildLeaderPrompt(
+  evidence: LeaderEvidence,
+  opts: {
+    dryRun: boolean;
+    nowIso: string;
+    /** 3.15: goal hygiene applies even in a dry run (leader-apply.ts leaderGoalHygieneApplies). */
+    goalHygiene?: boolean;
+  },
+): string {
   const blocks = [
     untrustedBlock('STANDING GRANT (null = none: every action is a dry run)', evidence.grant),
     untrustedBlock('BUDGET POLICY', evidence.budget),
@@ -500,7 +509,12 @@ export function buildLeaderPrompt(evidence: LeaderEvidence, opts: { dryRun: bool
   const focus = openGoals !== null && openGoals > LEADER_LIMITS.maxActiveGoals
     ? `\nFOCUS FIRST: ${openGoals} goals are open; at most ${LEADER_LIMITS.maxActiveGoals} may be. Pause or archive the rest (priorityChanges or goal.pause / goal.archive actions) before anything else.`
     : '';
-  return `Today is ${opts.nowIso.slice(0, 10)}. ${opts.dryRun ? 'This is a DRY RUN: your actions will be shown to Mason, not applied.' : 'Your actions will be classified against the grant and applied.'}
+  const runLine = !opts.dryRun
+    ? 'Your actions will be classified against the grant and applied.'
+    : opts.goalHygiene
+      ? 'This is a DRY RUN for work and settings: goal hygiene (goal.focus / goal.pause / goal.archive / goal.reorder and priorityChanges) APPLIES now; every other action is shown to Mason, not applied.'
+      : 'This is a DRY RUN: your actions will be shown to Mason, not applied.';
+  return `Today is ${opts.nowIso.slice(0, 10)}. ${runLine}
 
 ${blocks.join('\n\n')}
 
@@ -980,7 +994,7 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
     try { return deps.sources.standingPolicy(); } catch { return null; }
   })();
   const dryRun = isLeaderDryRun(policy);
-  const basePrompt = buildLeaderPrompt(evidence, { dryRun, nowIso });
+  const basePrompt = buildLeaderPrompt(evidence, { dryRun, goalHygiene: leaderGoalHygieneApplies(policy), nowIso });
   const prompt = mode === 'checkin' ? `${basePrompt}\n\n${LEADER_CHECKIN_SUFFIX}` : basePrompt;
   // A retry of the 06:30 run is still that run (deep-eligible).
   const scheduled = trigger === 'schedule' || (trigger === 'retry' && state.retry?.of === 'schedule');

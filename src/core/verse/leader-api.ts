@@ -154,9 +154,19 @@ function dismissAction(itemId: string): NeedsYouItem['actions'][number] {
 /**
  * The Leader's Needs-you items. PURE over its inputs:
  *   - `veto-window`   — each class-B action still inside its window (Veto, Approve now);
- *   - `class-c`       — each ask outside the grant from the last 7 days (Approve, Dismiss);
+ *   - `class-c`       — each ask outside the grant from the last 7 days (Approve, Dismiss),
+ *                       until Mason approves it or a newer memo supersedes it;
  *   - `leader-question` — the newest memo's questionsForMason, for 7 days,
  *                       until answered (Answer, Dismiss).
+ *
+ * 3.15 supersede rule: every memo re-reads the whole state and re-asks what
+ * still matters, so a class-C ask carried by an OLDER memo (one written
+ * before the newest ok memo) is stale — it was answered by events or asked
+ * again. Live, 2026-09-27: the 09-24 memo's "designate a target repository
+ * for the fleet's first goal" sat in Needs-you for 3 days after two newer
+ * memos had moved on. Asks not carried by a memo (Leader-drive picks) keep
+ * the plain 7-day window. An approved ask is done: approving records the
+ * decision for the Leader (leader-operator.ts), so it leaves the drawer.
  */
 export function buildLeaderNeedsYou(
   actions: readonly LeaderAction[],
@@ -164,7 +174,22 @@ export function buildLeaderNeedsYou(
   dismissed: ReadonlySet<string>,
   nowMs: number,
   answeredQuestionIds: ReadonlySet<string> = new Set(),
+  resolved: {
+    /** Action ids Mason approved (operator-approvals.json). */
+    approvedActionIds?: ReadonlySet<string>;
+    /** Ids of memos on disk: an ask is superseded only when a memo carried it. */
+    memoIds?: ReadonlySet<string>;
+  } = {},
 ): NeedsYouItem[] {
+  const approved = resolved.approvedActionIds ?? new Set<string>();
+  const memoIds = resolved.memoIds ?? new Set<string>();
+  const latestOkAtMs = latestMemo && latestMemo.status === 'ok' ? Date.parse(latestMemo.at) : Number.NaN;
+  const superseded = (action: LeaderAction): boolean =>
+    latestMemo !== null
+    && Number.isFinite(latestOkAtMs)
+    && action.memoId !== latestMemo.id
+    && memoIds.has(action.memoId)
+    && Date.parse(action.createdAt) < latestOkAtMs;
   // Order: veto windows by how soon they apply (the most urgent first), then
   // asks newest first, then the memo's questions in the memo's order.
   const windows: NeedsYouItem[] = [];
@@ -194,7 +219,7 @@ export function buildLeaderNeedsYou(
     }
     if (action.status === 'escalated' && nowMs - Date.parse(action.createdAt) <= ITEM_WINDOW_MS) {
       const id = `leader:class-c:${action.id}`;
-      if (dismissed.has(id)) continue;
+      if (dismissed.has(id) || approved.has(action.id) || superseded(action)) continue;
       const p = action.params as unknown as Record<string, unknown>;
       const argument = typeof p['argument'] === 'string' ? p['argument'] : action.why;
       const why = [argument, action.statusReason].filter((s): s is string => typeof s === 'string' && s.length > 0).join(' — ');
@@ -250,6 +275,10 @@ interface LeaderCache {
   dismissed: Set<string>;
   /** 3.14: question ids Mason answered (their Needs-you items are done). */
   answered: Set<string>;
+  /** 3.15: action ids Mason approved (operator-approvals.json). */
+  approved: Set<string>;
+  /** 3.15: memo ids on disk (the supersede rule, buildLeaderNeedsYou). */
+  memoIds: Set<string>;
 }
 
 let cache: LeaderCache | null = null;
@@ -275,7 +304,8 @@ export function refreshLeaderCache(): Promise<void> {
       // Newest memo: ids sort by timestamp, so only the first readable one is opened.
       let latestMemo: LeaderMemo | null = null;
       let latestMemoAt: string | null = null;
-      for (const id of listMemoIds().slice(0, 5)) {
+      const allMemoIds = listMemoIds();
+      for (const id of allMemoIds.slice(0, 5)) {
         try {
           const memo = JSON.parse(await readFile(`${leaderRoot()}/memos/${id}.json`, 'utf8')) as LeaderMemo;
           if (latestMemoAt === null) latestMemoAt = memo.at;
@@ -290,7 +320,13 @@ export function refreshLeaderCache(): Promise<void> {
         const parsed = JSON.parse(await readFile(`${leaderRoot()}/operator-questions.json`, 'utf8')) as { questions?: { questionId?: unknown; answer?: unknown }[] };
         answered = new Set((parsed.questions ?? []).flatMap((q) => (typeof q.questionId === 'string' && q.answer ? [q.questionId] : [])));
       } catch { /* no answers yet */ }
-      cache = { loadedAt: Date.now(), root, actions, latestMemo, latestMemoAt, dismissed, answered };
+      let approved = new Set<string>();
+      try {
+        // A `refused` approval changed nothing, so the ask stays open.
+        const parsed = JSON.parse(await readFile(`${leaderRoot()}/operator-approvals.json`, 'utf8')) as { approvals?: { actionId?: unknown; outcome?: unknown }[] };
+        approved = new Set((parsed.approvals ?? []).flatMap((a) => (typeof a.actionId === 'string' && a.outcome !== 'refused' ? [a.actionId] : [])));
+      } catch { /* no approvals yet */ }
+      cache = { loadedAt: Date.now(), root, actions, latestMemo, latestMemoAt, dismissed, answered, approved, memoIds: new Set(allMemoIds) };
       refreshFailed = false;
     } catch (err) {
       refreshFailed = true;
@@ -358,7 +394,10 @@ export function needsYouItems(): NeedsYouItem[] {
     if (refreshFailed) throw new Error('leader state could not be read');
     return [];
   }
-  return buildLeaderNeedsYou(current.actions, current.latestMemo, current.dismissed, Date.now(), current.answered);
+  return buildLeaderNeedsYou(current.actions, current.latestMemo, current.dismissed, Date.now(), current.answered, {
+    approvedActionIds: current.approved,
+    memoIds: current.memoIds,
+  });
 }
 
 /**
