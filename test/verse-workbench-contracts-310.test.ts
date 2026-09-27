@@ -177,6 +177,8 @@ const EXPECTED_HANDLERS: Record<WorkbenchRouteFamilyId, string> = {
   multimodel: 'handleMultimodelApi',
   // 3.15: per-turn checkpoints, the Changes pane and Undo/Redo.
   checkpoints: 'handleCheckpointsApi',
+  // 3.15: open a cited source file in the editor.
+  sources: 'handleSourcesApi',
 };
 
 const allPrefixes = WORKBENCH_ROUTE_FAMILIES.flatMap((family) => family.prefixes.map((prefix) => ({ family: family.id, prefix })));

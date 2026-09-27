@@ -355,6 +355,64 @@ interface OpenBlock {
   startedAt: number;
   /** Thinking signature, when the stream carried one (dedupes a text-less block). */
   signature: string;
+  /** Inline `<think>` splitting state — local-model TEXT blocks only, else null. */
+  inline: InlineThink | null;
+}
+
+// ---------------------------------------------------------------------------
+// Inline `<think>` reasoning (local models)
+//
+// WHY: local reasoning models (Qwen3, QwQ, DeepSeek-R1 served by llama-server
+// or an older Ollama) have no thinking block on the wire — they inline their
+// chain of thought in the TEXT block as `<think>…</think>` before the answer.
+// Left alone, the raw tags and the whole chain of thought land in the chat
+// bubble. So for a LOCAL turn only (the same rule `thinkingKindFor` uses for
+// 'raw'), a text block is split: reasoning → `thinking-delta` / `thinking`,
+// the rest → `text-delta` / `assistant-message`. Claude and grok text is never
+// touched: a Claude answer that discusses `<think>` tags is content.
+// ---------------------------------------------------------------------------
+
+const THINK_OPEN = '<think>';
+const THINK_CLOSE = '</think>';
+
+interface InlineThink {
+  /** detect: still deciding whether the block opens with `<think>`; lead: trimming whitespace after `</think>`. */
+  mode: 'detect' | 'think' | 'lead' | 'text';
+  /** The minimal ambiguous tail held back (a possibly split tag, or leading whitespace). */
+  pending: string;
+  /** Whether a non-whitespace reasoning chunk was streamed (an empty `<think>\n\n</think>` streams nothing). */
+  reasoned: boolean;
+  thinkStartedAt: number | null;
+  thinkEndedAt: number | null;
+}
+
+/** Length of the longest suffix of `s` that is a proper prefix of `tag` — the part that may finish in the next delta. */
+function partialTagSuffix(s: string, tag: string): number {
+  for (let n = Math.min(s.length, tag.length - 1); n > 0; n -= 1) {
+    if (tag.startsWith(s.slice(s.length - n))) return n;
+  }
+  return 0;
+}
+
+/**
+ * A local text block's FINAL text → reasoning + answer, or null when it holds
+ * no think section. `<think>` must open the block (after whitespace); an
+ * unclosed one is all reasoning. With no opening tag, a `</think>` still
+ * splits it — chat templates that put `<think>` in the PROMPT emit only the
+ * close. Pure and deterministic, so the streamed block and the `assistant`
+ * envelope repeating it always split identically (and so dedupe).
+ */
+function splitInlineThink(text: string): { reasoning: string; answer: string } | null {
+  const lead = text.trimStart();
+  if (lead.startsWith(THINK_OPEN)) {
+    const body = lead.slice(THINK_OPEN.length);
+    const close = body.indexOf(THINK_CLOSE);
+    if (close < 0) return { reasoning: body.trim(), answer: '' };
+    return { reasoning: body.slice(0, close).trim(), answer: body.slice(close + THINK_CLOSE.length).trimStart() };
+  }
+  const close = text.indexOf(THINK_CLOSE);
+  if (close < 0) return null;
+  return { reasoning: text.slice(0, close).trim(), answer: text.slice(close + THINK_CLOSE.length).trimStart() };
 }
 
 /** Options for the shared parser. `now` is the clock (a test seam). */
@@ -555,11 +613,113 @@ export function createAnthropicStreamParser(
     out.push({ type: 'assistant-message', turnId, text });
   }
 
+  /** A local model behind the claude CLI (its reasoning is raw, and may be inlined as `<think>`). */
+  function isLocalTurn(): boolean {
+    return thinkingKindFor(engineLabel, initModel ?? frameModel) === 'raw';
+  }
+
+  function newInlineThink(blockType: string): InlineThink | null {
+    return blockType === 'text' && isLocalTurn()
+      ? { mode: 'detect', pending: '', reasoned: false, thinkStartedAt: null, thinkEndedAt: null }
+      : null;
+  }
+
+  /**
+   * Stream one text chunk of a local block: reasoning inside `<think>` as
+   * `thinking-delta`, the answer after `</think>` as `text-delta`. Only the
+   * minimal ambiguous tail is held back, and tag characters are never emitted.
+   * `block.text` already holds the raw chunk (the final split reads it).
+   */
+  function streamInlineText(out: VerseParsedEvent[], block: OpenBlock, chunk: string): void {
+    const s = block.inline!;
+    let buf = s.pending + chunk;
+    s.pending = '';
+    while (buf) {
+      if (s.mode === 'detect') {
+        const lead = buf.trimStart();
+        if (lead.startsWith(THINK_OPEN)) {
+          s.mode = 'think';
+          s.thinkStartedAt = now();
+          buf = lead.slice(THINK_OPEN.length);
+        } else if (lead === '' || THINK_OPEN.startsWith(lead)) {
+          s.pending = buf; // whitespace or `<th…` so far: undecided
+          return;
+        } else {
+          s.mode = 'text';
+        }
+      } else if (s.mode === 'think') {
+        const close = buf.indexOf(THINK_CLOSE);
+        const keep = close >= 0 ? 0 : partialTagSuffix(buf, THINK_CLOSE);
+        let reasoning = close >= 0 ? buf.slice(0, close) : buf.slice(0, buf.length - keep);
+        if (!s.reasoned) reasoning = reasoning.trimStart();
+        if (reasoning) {
+          s.reasoned = true;
+          setPhase(out, 'thinking');
+          out.push({ type: 'thinking-delta', turnId, text: reasoning });
+        }
+        if (close < 0) {
+          s.pending = buf.slice(buf.length - keep);
+          return;
+        }
+        s.thinkEndedAt = now();
+        s.mode = 'lead';
+        buf = buf.slice(close + THINK_CLOSE.length);
+      } else if (s.mode === 'lead') {
+        buf = buf.trimStart();
+        if (buf) s.mode = 'text';
+      } else {
+        // Close-only template (no opening tag): the text streams as-is, but
+        // note when `</think>` went by so the split at close has a duration.
+        if (s.thinkEndedAt === null && block.text.slice(-(chunk.length + THINK_CLOSE.length - 1)).includes(THINK_CLOSE)) {
+          s.thinkEndedAt = now();
+        }
+        setPhase(out, 'writing');
+        out.push({ type: 'text-delta', turnId, text: buf });
+        return;
+      }
+    }
+  }
+
+  /**
+   * A text block's final text. On a local turn an inline think section is
+   * persisted as `thinking` (raw) BEFORE the answer, which alone becomes the
+   * `assistant-message`; `startedAt`/`endedAt` time the think section (null
+   * start = envelope-only, duration unknown).
+   */
+  function emitAnswerText(out: VerseParsedEvent[], raw: string, startedAt: number | null, endedAt: number | null): void {
+    const split = isLocalTurn() ? splitInlineThink(raw) : null;
+    if (!split) {
+      emitText(out, raw);
+      return;
+    }
+    // An empty think section (Qwen3's non-thinking mode emits `<think>\n\n</think>`) is no reasoning at all.
+    if (split.reasoning) emitThinking(out, split.reasoning, '', startedAt, endedAt);
+    emitText(out, split.answer);
+  }
+
+  /** The think-section clock of a streamed text block. */
+  function textBlockTiming(block: OpenBlock): [number | null, number | null] {
+    return [block.inline?.thinkStartedAt ?? block.startedAt, block.inline?.thinkEndedAt ?? null];
+  }
+
+  /** An envelope's text: borrow the clock of the streamed block it duplicates, if one is open. */
+  function emitEnvelopeText(out: VerseParsedEvent[], raw: string): void {
+    for (const block of open.values()) {
+      if (block.type === 'text' && block.text === raw) {
+        emitAnswerText(out, raw, ...textBlockTiming(block));
+        return;
+      }
+    }
+    emitAnswerText(out, raw, null, null);
+  }
+
   /**
    * Persist one thinking block. `startedAt` is when its stream opened (null
-   * for an envelope-only block, whose duration is unknown and so omitted).
+   * for an envelope-only block, whose duration is unknown and so omitted);
+   * `endedAt` is when it finished, when that was before now (an inline
+   * `</think>` arrives before its text block closes).
    */
-  function emitThinking(out: VerseParsedEvent[], text: string, signature: string, startedAt: number | null): void {
+  function emitThinking(out: VerseParsedEvent[], text: string, signature: string, startedAt: number | null, endedAt: number | null = null): void {
     const redacted = text.length === 0;
     const callKey = `call:${currentCall ?? ''}`;
     const key = redacted ? (signature ? `sig:${signature}` : callKey) : `text:${text}`;
@@ -571,7 +731,7 @@ export function createAnthropicStreamParser(
     flushThinkingProgress(out);
     const event: Extract<VerseParsedEvent, { type: 'thinking' }> = { type: 'thinking', turnId, text };
     if (redacted) event.redacted = true;
-    if (startedAt !== null) event.durationMs = Math.max(0, Math.round(now() - startedAt));
+    if (startedAt !== null) event.durationMs = Math.max(0, Math.round((endedAt ?? now()) - startedAt));
     const kind = redacted ? undefined : thinkingKindFor(engineLabel, initModel ?? frameModel);
     if (kind) event.kind = kind;
     out.push(event);
@@ -609,7 +769,7 @@ export function createAnthropicStreamParser(
 
   function emitBlock(out: VerseParsedEvent[], block: JsonObject): void {
     const type = str(block['type']);
-    if (type === 'text') emitText(out, str(block['text']));
+    if (type === 'text') emitEnvelopeText(out, str(block['text']));
     else if (type === 'thinking') emitEnvelopeThinking(out, str(block['thinking']), str(block['signature']));
     else if (type === 'redacted_thinking') emitEnvelopeThinking(out, '', str(block['data']));
     else if (type === 'tool_use') emitToolUse(out, str(block['id']), str(block['name']), block['input']);
@@ -622,7 +782,7 @@ export function createAnthropicStreamParser(
     const block = open.get(index);
     if (!block) return;
     open.delete(index);
-    if (block.type === 'text') emitText(out, block.text);
+    if (block.type === 'text') emitAnswerText(out, block.text, ...textBlockTiming(block));
     else if (block.type === 'thinking' || block.type === 'redacted_thinking') {
       emitThinking(out, block.type === 'thinking' ? block.text : '', block.signature, block.startedAt);
     } else if (block.type === 'tool_use') {
@@ -677,9 +837,11 @@ export function createAnthropicStreamParser(
           input: cb['input'],
           startedAt,
           signature: str(cb['signature']) || (blockType === 'redacted_thinking' ? str(cb['data']) : ''),
+          inline: newInlineThink(blockType),
         });
         if (blockType === 'thinking' || blockType === 'redacted_thinking') setPhase(out, 'thinking');
-        else if (blockType === 'text') setPhase(out, 'writing');
+        // A local text block may open with `<think>`: its first chunk sets the phase.
+        else if (blockType === 'text' && !open.get(index)?.inline) setPhase(out, 'writing');
         else if (blockType === 'tool_use') setPhase(out, 'tool', str(cb['name']) || null);
         return;
       }
@@ -692,8 +854,9 @@ export function createAnthropicStreamParser(
           // Delta without a start (e.g. we joined mid-stream): open an implicit block.
           const startedAt = now();
           if (currentCallFirstBlockAt === null) currentCallFirstBlockAt = startedAt;
+          const implicitType = deltaType === 'thinking_delta' || deltaType === 'signature_delta' ? 'thinking' : 'text';
           block = {
-            type: deltaType === 'thinking_delta' || deltaType === 'signature_delta' ? 'thinking' : 'text',
+            type: implicitType,
             id: '',
             name: '',
             text: '',
@@ -701,6 +864,7 @@ export function createAnthropicStreamParser(
             input: undefined,
             startedAt,
             signature: '',
+            inline: newInlineThink(implicitType),
           };
           open.set(index, block);
         }
@@ -708,8 +872,12 @@ export function createAnthropicStreamParser(
           const text = str(delta['text']);
           if (text) {
             block.text += text;
-            setPhase(out, 'writing');
-            out.push({ type: 'text-delta', turnId, text });
+            if (block.inline) {
+              streamInlineText(out, block, text);
+            } else {
+              setPhase(out, 'writing');
+              out.push({ type: 'text-delta', turnId, text });
+            }
           }
         } else if (deltaType === 'thinking_delta') {
           const text = str(delta['thinking']);
@@ -833,7 +1001,7 @@ export function createAnthropicStreamParser(
         }
         const content = message['content'];
         if (typeof content === 'string') {
-          if (type === 'assistant') emitText(out, content);
+          if (type === 'assistant') emitEnvelopeText(out, content);
         } else if (Array.isArray(content)) {
           for (const block of content) if (isObject(block)) emitBlock(out, block);
         }

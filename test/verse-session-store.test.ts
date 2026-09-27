@@ -350,6 +350,19 @@ describe('seq → offset index', () => {
     ].map((l) => JSON.stringify(l)).join('\n') + '\n');
     expect(store.readEvents('s5').map((e) => e.seq)).toEqual([1, 2, 4]);
   });
+
+  it('persists a V3.15 `source` event and drops a malformed one on read', () => {
+    appendAll(store, 's6', [
+      { type: 'user-message', turnId: 't', text: 'x' },
+      { type: 'source', turnId: 't', source: { kind: 'memory', ref: 'memory:/p', title: 'Shared project memory', origin: 'engine' } },
+    ]);
+    appendFileSync(eventsFile('s6'), [
+      { seq: 3, at: AT, type: 'source', turnId: null, source: { kind: 'url', ref: 'https://a.dev', title: 'A', origin: 'agent', url: 'https://a.dev' } },
+      { seq: 4, at: AT, type: 'source', turnId: 't', source: { kind: 'rumour', ref: 'x', title: 'x', origin: 'agent' } },
+      { seq: 5, at: AT, type: 'source', turnId: 't' },
+    ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+    expect(store.readEvents('s6').map((e) => e.seq)).toEqual([1, 2, 3]);
+  });
 });
 
 describe('compactEvents', () => {

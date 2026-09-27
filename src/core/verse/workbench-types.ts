@@ -1278,6 +1278,13 @@ export const WORKBENCH_ROUTE_FAMILIES = [
     handler: 'handleCheckpointsApi',
     prefixes: ['/api/verse/checkpoints'],
   },
+  {
+    id: 'sources',
+    owner: 'R1',
+    module: 'src/core/verse/sources-api.ts',
+    handler: 'handleSourcesApi',
+    prefixes: ['/api/verse/sources'],
+  },
 ] as const satisfies readonly {
   id: string;
   owner: string;

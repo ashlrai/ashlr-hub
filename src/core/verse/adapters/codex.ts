@@ -25,7 +25,7 @@
  * normaliseEngineOutputLine and src/core/resources/worker.ts parseCodex):
  *   thread.started{thread_id}
  *   item.started/item.completed{item:{id,type:'agent_message'|'command_execution'|
- *     'file_change'|'mcp_tool_call'|'reasoning', ...}}
+ *     'file_change'|'mcp_tool_call'|'web_search'|'reasoning', ...}}
  *   turn.completed{usage:{input_tokens,cached_input_tokens,[cache_write_input_tokens],output_tokens}}
  *   turn.failed{error:{message}} / error{message}
  *
@@ -343,9 +343,34 @@ function buildCodexLaunch(session: VerseSession, text: string, launch: VerseSeat
   return { argv, cwd: session.projectPath, env: {}, stdin: text };
 }
 
+/**
+ * A codex `web_search` item's facts. Older builds carry only `query`; newer
+ * ones add `action: {type:'search', query} | {type:'open_page', url} |
+ * {type:'find_in_page', url, pattern}`. Empty strings count as absent (an
+ * `item.started` may not know the query yet).
+ */
+function webSearchFacts(item: JsonObject): { query: string; url: string; action: string; pattern: string } {
+  const action = isObject(item['action']) ? item['action'] : {};
+  const queries = Array.isArray(action['queries']) ? action['queries'] : [];
+  return {
+    query: str(item['query']) || str(action['query']) || queries.map(str).find((q) => q.length > 0) || '',
+    url: str(action['url']) || str(item['url']),
+    action: str(action['type']),
+    pattern: str(action['pattern']),
+  };
+}
+
 /** Describe a tool-like codex item for the `tool-use` event. */
 function describeItem(item: JsonObject): { name: string; input: unknown } {
   const type = str(item['type']);
+  if (type === 'web_search') {
+    const facts = webSearchFacts(item);
+    const input: { query?: string; url?: string; action?: string } = {};
+    if (facts.query) input.query = facts.query;
+    if (facts.url) input.url = facts.url;
+    if (facts.action) input.action = facts.action;
+    return { name: 'web_search', input };
+  }
   if (type === 'command_execution') {
     return { name: 'command_execution', input: { command: item['command'] ?? '', cwd: item['cwd'] ?? undefined } };
   }
@@ -379,6 +404,16 @@ function describeResult(item: JsonObject): { output: string; isError: boolean } 
       .join('\n');
     return { output: summary || (failed ? 'file change failed' : 'file change applied'), isError: failed };
   }
+  if (type === 'web_search') {
+    // Codex returns no page content on stdout — the line says what was looked up.
+    const facts = webSearchFacts(item);
+    const output = facts.action === 'find_in_page' && facts.url
+      ? `Searched ${facts.url}${facts.pattern ? ` for: ${facts.pattern}` : ''}`
+      : facts.action === 'open_page' && facts.url ? `Opened: ${facts.url}`
+        : facts.query ? `Searched: ${facts.query}`
+          : facts.url ? `Opened: ${facts.url}` : 'Searched the web';
+    return { output, isError: failed };
+  }
   if (type === 'mcp_tool_call') {
     const result = item['result'];
     const error = item['error'];
@@ -390,7 +425,7 @@ function describeResult(item: JsonObject): { output: string; isError: boolean } 
   return { output: safeJson(item), isError: failed };
 }
 
-const TOOL_ITEM_TYPES = new Set(['command_execution', 'file_change', 'mcp_tool_call']);
+const TOOL_ITEM_TYPES = new Set(['command_execution', 'file_change', 'mcp_tool_call', 'web_search']);
 
 /** Options for the codex parser. `now` is the clock (a test seam). */
 export interface CodexParserOptions {
