@@ -23,6 +23,7 @@
  */
 
 import { existsSync, realpathSync, statSync } from 'node:fs';
+import { realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve as resolvePath, sep } from 'node:path';
 
@@ -56,6 +57,34 @@ export function isDirectoryPath(path: string): boolean {
 export function physicalPath(path: string): string | null {
   try {
     return existsSync(path) ? realpathSync.native(path) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * {@link isDirectoryPath} off the event loop. The request-path twin: a stat
+ * into a folder macOS guards with a privacy prompt (~/Desktop, ~/Documents,
+ * removable volumes) parks the calling thread until the prompt is answered,
+ * so a server route must never make it synchronously. Never rejects.
+ */
+export async function isDirectoryPathAsync(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * {@link physicalPath} off the event loop. `fs.promises.realpath` is the
+ * native realpath(3), the same resolver as `realpathSync.native`; a path that
+ * does not exist fails it exactly as the sync version's `existsSync` guard
+ * would, so both answer null. Never rejects.
+ */
+export async function physicalPathAsync(path: string): Promise<string | null> {
+  try {
+    return await realpath(path);
   } catch {
     return null;
   }
@@ -158,6 +187,61 @@ export interface GuardedPathOptions {
  * value listed are the same spelling and no caller has to reconcile two.
  */
 export function checkGuardedPath(raw: string, opts: GuardedPathOptions): GuardedPathCheck {
+  const lexical = lexicalGuard(raw, opts);
+  if (!lexical.ok) return lexical;
+
+  // Physical identity: resolves symlinks, so an escape into a forbidden root
+  // is caught even when the spelling hides it. Both sides are resolved — the
+  // home directory itself can sit behind a symlink (macOS /var → /private/var),
+  // and comparing a resolved path against an unresolved root would miss.
+  const physical = physicalPath(lexical.path);
+  if (physical !== null) {
+    const physicalRoots = lexical.roots.map((root) => ({
+      ...root,
+      path: physicalPath(root.path) ?? root.path,
+    }));
+    const physicalDenial = deniedScopeRoot(physical, physicalRoots, 'resolves', opts.phrasing);
+    if (physicalDenial !== null) return { ok: false, error: physicalDenial };
+  }
+
+  if (opts.requireDirectory && !isDirectoryPath(lexical.path)) {
+    return { ok: false, error: 'path must be an existing directory' };
+  }
+  return { ok: true, path: physical ?? lexical.path };
+}
+
+/**
+ * {@link checkGuardedPath} with every filesystem touch off the event loop,
+ * for the HTTP routes that validate a project path per request. Same checks,
+ * same order, same answer and error text; only the waiting moves to libuv, so
+ * a pending macOS privacy prompt on the folder holds this one request rather
+ * than the whole server. Never rejects.
+ */
+export async function checkGuardedPathAsync(raw: string, opts: GuardedPathOptions): Promise<GuardedPathCheck> {
+  const lexical = lexicalGuard(raw, opts);
+  if (!lexical.ok) return lexical;
+
+  const physical = await physicalPathAsync(lexical.path);
+  if (physical !== null) {
+    const physicalRoots = await Promise.all(lexical.roots.map(async (root) => ({
+      ...root,
+      path: (await physicalPathAsync(root.path)) ?? root.path,
+    })));
+    const physicalDenial = deniedScopeRoot(physical, physicalRoots, 'resolves', opts.phrasing);
+    if (physicalDenial !== null) return { ok: false, error: physicalDenial };
+  }
+
+  if (opts.requireDirectory && !(await isDirectoryPathAsync(lexical.path))) {
+    return { ok: false, error: 'path must be an existing directory' };
+  }
+  return { ok: true, path: physical ?? lexical.path };
+}
+
+/** The filesystem-free half of the guard: shape, absoluteness and the lexical deny pass. */
+function lexicalGuard(
+  raw: string,
+  opts: GuardedPathOptions,
+): { ok: true; path: string; roots: ScopeDenyRoot[] } | { ok: false; error: string } {
   if (typeof raw !== 'string' || raw.length === 0) {
     return { ok: false, error: 'path is required' };
   }
@@ -174,28 +258,10 @@ export function checkGuardedPath(raw: string, opts: GuardedPathOptions): Guarded
 
   const lexical = resolvePath(expanded);
   const artifactsRoot = opts.artifactsRoot ?? join(homedir(), '.codex', 'artifacts');
-  const lexicalRoots = scopeDenyRoots(artifactsRoot);
-  const lexicalDenial = deniedScopeRoot(lexical, lexicalRoots, 'is', opts.phrasing);
+  const roots = scopeDenyRoots(artifactsRoot);
+  const lexicalDenial = deniedScopeRoot(lexical, roots, 'is', opts.phrasing);
   if (lexicalDenial !== null) return { ok: false, error: lexicalDenial };
-
-  // Physical identity: resolves symlinks, so an escape into a forbidden root
-  // is caught even when the spelling hides it. Both sides are resolved — the
-  // home directory itself can sit behind a symlink (macOS /var → /private/var),
-  // and comparing a resolved path against an unresolved root would miss.
-  const physical = physicalPath(lexical);
-  if (physical !== null) {
-    const physicalRoots = lexicalRoots.map((root) => ({
-      ...root,
-      path: physicalPath(root.path) ?? root.path,
-    }));
-    const physicalDenial = deniedScopeRoot(physical, physicalRoots, 'resolves', opts.phrasing);
-    if (physicalDenial !== null) return { ok: false, error: physicalDenial };
-  }
-
-  if (opts.requireDirectory && !isDirectoryPath(lexical)) {
-    return { ok: false, error: 'path must be an existing directory' };
-  }
-  return { ok: true, path: physical ?? lexical };
+  return { ok: true, path: lexical, roots };
 }
 
 /** Phrasing for the enrollment registry — the pre-existing copy, verbatim. */
@@ -219,9 +285,18 @@ export const WORKSPACE_ROOT_PHRASING: DenyPhrasing = {
  * `~/.ashlr/enrollment.json` and refuses anything absent from it.
  */
 export function checkWorkspaceRootPath(raw: string, artifactsRoot?: string): GuardedPathCheck {
-  return checkGuardedPath(raw, {
+  return checkGuardedPath(raw, workspaceRootOptions(artifactsRoot));
+}
+
+/** {@link checkWorkspaceRootPath} off the event loop (see {@link checkGuardedPathAsync}). */
+export function checkWorkspaceRootPathAsync(raw: string, artifactsRoot?: string): Promise<GuardedPathCheck> {
+  return checkGuardedPathAsync(raw, workspaceRootOptions(artifactsRoot));
+}
+
+function workspaceRootOptions(artifactsRoot: string | undefined): GuardedPathOptions {
+  return {
     requireDirectory: true,
     phrasing: WORKSPACE_ROOT_PHRASING,
     ...(artifactsRoot === undefined ? {} : { artifactsRoot }),
-  });
+  };
 }

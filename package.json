@@ -113,8 +113,9 @@
     "gate": "node scripts/gate.mjs",
     "gate:full": "node scripts/gate.mjs --full",
     "ship:local": "node scripts/ship-local.mjs",
-    "lint": "eslint . && npm run lint:realio-lane",
+    "lint": "eslint . && npm run lint:realio-lane && npm run lint:verse-sync-io",
     "lint:realio-lane": "node scripts/check-realio-lane-membership.mjs",
+    "lint:verse-sync-io": "node scripts/check-verse-sync-io.mjs",
     "typecheck": "tsc --noEmit && npm run typecheck:web",
     "typecheck:web": "tsc --noEmit -p src/web-ui/tsconfig.json"
   },

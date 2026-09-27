@@ -49,7 +49,7 @@
 import { constants as fsConstants } from 'node:fs';
 import { lstat, open, opendir } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 import type { ApiModule } from './api-modules.js';
 import type { VerseApiContext } from './verse-api.js';
@@ -98,6 +98,7 @@ import { probeDaemonLiveness, type DaemonLivenessV1 } from '../daemon/liveness.j
 import { daemonPaused } from '../daemon/pause.js';
 import { listEnrolled, readKillSwitch } from '../sandbox/policy.js';
 import { isMirrorPath } from '../fleet/mirrors.js';
+import { pendingFolders } from './folder-io.js';
 import { audit } from '../sandbox/audit.js';
 import { scrubSecrets } from '../util/scrub.js';
 
@@ -863,15 +864,20 @@ export async function buildFleetLiveSnapshot(d: FleetLiveDeps = deps): Promise<B
   }
   const inFlight = (inFlightRaw ?? []).filter((f) => nowMs - msOf(f.startedAt) <= IN_FLIGHT_MAX_AGE_MS);
 
+  const enrolledRead = safely<string[] | null>(() => d.enrolled(), null);
+  const enrolledAll = enrolledRead ?? [];
+  // repoIdentity reads each checkout's .git config SYNCHRONOUSLY, and the
+  // checkouts are operator folders: one behind an unanswered macOS privacy
+  // prompt would park the whole server (folder-io.ts). Probe them off the
+  // loop first; a still-pending one is labelled by its directory name.
+  const pending = await pendingFolders(enrolledAll.filter((path) => typeof path === 'string' && isAbsolute(path)));
   // Enrolled path → owner/name.
   const identity = new Map<string, string | null>();
   const repoLabel = (path: string | null): string => {
     if (!path) return 'unknown';
-    if (!identity.has(path)) identity.set(path, safely(() => d.repoIdentity(path), null));
+    if (!identity.has(path)) identity.set(path, pending.has(path) ? null : safely(() => d.repoIdentity(path), null));
     return identity.get(path) ?? dirLabel(path);
   };
-  const enrolledRead = safely<string[] | null>(() => d.enrolled(), null);
-  const enrolledAll = enrolledRead ?? [];
   // WHY MIRRORS ARE SPLIT OUT (R3f): since the standing fleet stopped
   // unenrolling Mason's checkouts, the registry holds BOTH his checkouts and
   // the fleet's mirror clones of them. The repo table is "Mason's repos": a
@@ -879,7 +885,9 @@ export async function buildFleetLiveSnapshot(d: FleetLiveDeps = deps): Promise<B
   // policy), and a mirror left enrolled after its repo left the grant would
   // otherwise show up as a phantom row. Mirror paths are still labelled, so a
   // run that worked in one reads as its owner/name.
-  const mirrorPaths = new Set(enrolledAll.filter((path) => safely(() => d.isMirror(path), false)));
+  // A path still behind a pending prompt is an operator folder, never a mirror
+  // (mirrors live under ~/.ashlr); isMirror would canonicalise it synchronously.
+  const mirrorPaths = new Set(enrolledAll.filter((path) => !pending.has(path) && safely(() => d.isMirror(path), false)));
   const enrolled = enrolledAll.filter((path) => !mirrorPaths.has(path));
   for (const path of enrolledAll) repoLabel(path);
   // The mirrors themselves are shown APART (snapshot.mirrors), so the UI can

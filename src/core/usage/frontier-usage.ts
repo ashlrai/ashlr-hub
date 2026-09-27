@@ -27,7 +27,7 @@
  *  - Bounded: reads ledger + session files only; no git, no network.
  */
 
-import type { AshlrConfig, EngineId } from '../types.js';
+import type { ActivityRollup, AshlrConfig, EngineId } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -203,17 +203,7 @@ function readRollupTotals(
         cfg: AshlrConfig,
       ) => { byModel: Array<{ model: string; tokensIn: number; tokensOut: number; estCostUsd: number; calls: number }> };
     };
-    const rollup = buildRollup('1d', cfg);
-    const prefix = engineToModelPrefix(engine).toLowerCase();
-    let tokensToday = 0;
-    let costToday = 0;
-    for (const m of rollup.byModel) {
-      if (m.model.toLowerCase().startsWith(prefix)) {
-        tokensToday += m.tokensIn + m.tokensOut;
-        costToday   += m.estCostUsd;
-      }
-    }
-    return { tokensToday, costToday };
+    return totalsFor(engine, buildRollup('1d', cfg).byModel);
   } catch {
     return { tokensToday: 0, costToday: 0 };
   }
@@ -226,7 +216,22 @@ function readRollupTotals(
 /** Default throttle threshold — matches subscription-usage.ts DEFAULT_MAX_PERCENT. */
 const DEFAULT_MAX_PERCENT = 90;
 
-function buildEngineUsage(engine: EngineId, cfg: AshlrConfig): FrontierEngineUsage {
+/** Where buildEngineUsage gets its three readings (sync `require` path vs async `import` path). */
+interface UsageSources {
+  quotaCalls: (engine: EngineId, windowMs: number) => number;
+  rollupTotals: (engine: EngineId) => { tokensToday: number; costToday: number };
+  subscriptionWindow: (engine: EngineId) => ReturnType<typeof readSubscriptionWindow>;
+}
+
+function syncSources(cfg: AshlrConfig): UsageSources {
+  return {
+    quotaCalls: readQuotaCalls,
+    rollupTotals: (engine) => readRollupTotals(engine, cfg),
+    subscriptionWindow: (engine) => readSubscriptionWindow(engine, cfg),
+  };
+}
+
+function buildEngineUsage(engine: EngineId, cfg: AshlrConfig, sources: UsageSources = syncSources(cfg)): FrontierEngineUsage {
   // ── Limit config ──────────────────────────────────────────────────────────
   const limitCfg = (cfg as unknown as {
     foundry?: { limits?: Record<string, { max: number; window: string }> };
@@ -237,13 +242,13 @@ function buildEngineUsage(engine: EngineId, cfg: AshlrConfig): FrontierEngineUsa
   const windowMs    = windowToMs(limitWindow);
 
   // ── Quota ledger — calls in the accounting window ────────────────────────
-  const callsToday = readQuotaCalls(engine, windowMs);
+  const callsToday = sources.quotaCalls(engine, windowMs);
 
   // ── Observability rollup — tokens + cost today ───────────────────────────
-  const { tokensToday, costToday } = readRollupTotals(engine, cfg);
+  const { tokensToday, costToday } = sources.rollupTotals(engine);
 
   // ── Subscription tracker — real window utilization ───────────────────────
-  const subWindow = readSubscriptionWindow(engine, cfg);
+  const subWindow = sources.subscriptionWindow(engine);
 
   // ── Subscription window state ─────────────────────────────────────────────
   let windowState: FrontierEngineWindowState;
@@ -311,15 +316,16 @@ function buildEngineUsage(engine: EngineId, cfg: AshlrConfig): FrontierEngineUsa
  *  - ~/.config/codex/sessions/*.jsonl      (subscription rate-limits, synchronous)
  *  - ~/.claude/projects/{project}/*.jsonl + runs  (observability rollup, synchronous)
  */
-export async function getFrontierUsage(cfg: AshlrConfig): Promise<FrontierUsage> {
+export async function getFrontierUsage(cfg: AshlrConfig, opts: FrontierUsageAsyncOptions = {}): Promise<FrontierUsage> {
   const generatedAt = new Date().toISOString();
   const engines: FrontierEngineUsage[] = [];
 
   const engineIds = frontierEngines(cfg);
+  const sources = await asyncSources(cfg, opts);
 
   for (const engine of engineIds) {
     try {
-      engines.push(buildEngineUsage(engine, cfg));
+      engines.push(buildEngineUsage(engine, cfg, sources));
     } catch {
       // Degrade to a zero record — never block the whole snapshot.
       engines.push({
@@ -331,6 +337,87 @@ export async function getFrontierUsage(cfg: AshlrConfig): Promise<FrontierUsage>
   }
 
   return { generatedAt, engines };
+}
+
+export interface FrontierUsageAsyncOptions {
+  /**
+   * Computes the 1d rollup when the shared cache (observability/rollup.ts
+   * getCachedRollup) needs a refresh. A server passes its read-projection
+   * worker here (`reader.read('pulse', { window: '1d' })`) so the rollup's
+   * per-repo git reads never run on the request thread. Default:
+   * buildRollupAsync on the calling thread.
+   */
+  rollup?: () => Promise<ActivityRollup>;
+  /**
+   * False: never wait for the rollup — use whatever the shared cache holds
+   * (peekCachedRollup) and let `rollup`, when given, refresh it in the
+   * background; with no cached value the token/cost fields are omitted, as
+   * when the rollup is unreadable. For request paths polled by a UI (the
+   * Verse cockpit), which must never compute or wait on it. Default true.
+   */
+  waitForRollup?: boolean;
+}
+
+/**
+ * The async path's sources. Modules load through `await import()`, which
+ * behaves the same under Node, vitest and the Bun-compiled sidecar — unlike
+ * the sync path's bare `require`, which exists only under Bun (under Node ESM
+ * it throws and every reading silently degrades to zero, so tests never ran
+ * the code production runs). The rollup is read ONCE for all engines, from
+ * the stale-while-revalidate cache: a request never recomputes it inline
+ * when a value under ROLLUP_CACHE_MAX_STALE_MS exists. Each source degrades
+ * independently, as the sync readers do.
+ */
+async function asyncSources(cfg: AshlrConfig, opts: FrontierUsageAsyncOptions): Promise<UsageSources> {
+  const [quota, subscription, rollupModule] = await Promise.all([
+    import('../fleet/quota.js').catch(() => null),
+    import('../fleet/subscription-usage.js').catch(() => null),
+    import('../observability/rollup.js').catch(() => null),
+  ]);
+  let byModel: ActivityRollup['byModel'] | null = null;
+  if (rollupModule) {
+    try {
+      const compute = opts.rollup ? { compute: opts.rollup } : {};
+      byModel = opts.waitForRollup === false
+        ? rollupModule.peekCachedRollup('1d', cfg, compute)?.rollup.byModel ?? null
+        : (await rollupModule.getCachedRollup('1d', cfg, compute)).rollup.byModel;
+    } catch {
+      byModel = null;
+    }
+  }
+  return {
+    quotaCalls: (engine, windowMs) => {
+      try {
+        return quota ? quota.usesInWindow(engine, windowMs) : 0;
+      } catch {
+        return 0;
+      }
+    },
+    rollupTotals: (engine) => (byModel ? totalsFor(engine, byModel) : { tokensToday: 0, costToday: 0 }),
+    subscriptionWindow: (engine) => {
+      try {
+        return subscription ? subscription.subscriptionUsage(engine, { cfg }) : null;
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+function totalsFor(
+  engine: EngineId,
+  byModel: ReadonlyArray<{ model: string; tokensIn: number; tokensOut: number; estCostUsd: number }>,
+): { tokensToday: number; costToday: number } {
+  const prefix = engineToModelPrefix(engine).toLowerCase();
+  let tokensToday = 0;
+  let costToday = 0;
+  for (const m of byModel) {
+    if (m.model.toLowerCase().startsWith(prefix)) {
+      tokensToday += m.tokensIn + m.tokensOut;
+      costToday   += m.estCostUsd;
+    }
+  }
+  return { tokensToday, costToday };
 }
 
 // ---------------------------------------------------------------------------

@@ -28,7 +28,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { sendJson } from '../web/api.js';
 import { loadProposal } from '../inbox/store.js';
 import type { VerseControlErrorCode } from './control-types.js';
-import { discoverProjects } from './projects.js';
+import { discoverProjectsAsync } from './projects.js';
 import { expandHomePrefix, peekVerseEngine } from './verse-api.js';
 import { describeVersePrPlans, type VersePrPlanProposal } from './github-proposal.js';
 import {
@@ -74,7 +74,7 @@ export interface VerseGithubApiDeps {
   ) => VerseGithubSnapshot | Promise<VerseGithubSnapshot>;
   describePlans?: typeof describeVersePrPlans;
   loadProposal?: (id: string) => VersePrPlanProposal | null;
-  knownRoots?: () => string[];
+  knownRoots?: () => string[] | Promise<string[]>;
   readOptions?: VerseGithubReadOptions;
 }
 
@@ -106,7 +106,7 @@ function queryParam(req: IncomingMessage, key: string): string | null {
  * `peekVerseEngine()` is used rather than `getVerseEngine()` on purpose — a
  * read must never be the thing that creates the session engine.
  */
-function defaultKnownRoots(): string[] {
+async function defaultKnownRoots(): Promise<string[]> {
   let sessions: { projectPath: string }[] = [];
   try {
     sessions = peekVerseEngine()?.listSessions() ?? [];
@@ -114,7 +114,8 @@ function defaultKnownRoots(): string[] {
     sessions = [];
   }
   try {
-    return discoverProjects({ sessions }).map((p) => p.path);
+    // Async: project paths sit in privacy-guarded folders (folder-io.ts).
+    return (await discoverProjectsAsync({ sessions })).map((p) => p.path);
   } catch {
     return [];
   }
@@ -176,7 +177,7 @@ async function handleRepos(
   // 8 s ceiling on the server's only thread (3.10 perf budget: no handler may
   // block > 20 ms). The async path runs `gh` off-thread and yields between roots.
   const read = deps.read ?? readVerseGithubSnapshotAsync;
-  const known = (deps.knownRoots ?? defaultKnownRoots)();
+  const known = await (deps.knownRoots ?? defaultKnownRoots)();
 
   const requested = queryParam(req, 'repo');
   let roots: string[];

@@ -20,6 +20,8 @@ export interface ReadProjectionResults {
   pulse: ActivityRollup;
   'fleet-activity': FleetActivitySnapshot;
   proposals: Proposal[];
+  /** `pendingCount()`: validating each proposal canonicalises its repo path, i.e. touches operator folders. */
+  'pending-count': number;
   runs: ReturnType<typeof listRuns>;
   swarms: ReturnType<typeof listSwarms>;
   'daemon-observation': PublicDaemonObservation;
@@ -33,6 +35,7 @@ export interface ReadProjectionPayloads {
   pulse: { window: '1d' | '7d' | '30d'; project?: string };
   'fleet-activity': undefined;
   proposals: undefined;
+  'pending-count': undefined;
   runs: undefined;
   swarms: undefined;
   'daemon-observation': undefined;
@@ -64,8 +67,8 @@ export interface ReadProjectionRequest {
 }
 
 const KINDS: ReadonlySet<string> = new Set<ReadProjectionKind>([
-  'snapshot', 'control', 'fleet', 'pulse', 'fleet-activity', 'proposals', 'runs', 'swarms', 'daemon-observation',
-  'universe-campaign-readiness',
+  'snapshot', 'control', 'fleet', 'pulse', 'fleet-activity', 'proposals', 'pending-count', 'runs', 'swarms',
+  'daemon-observation', 'universe-campaign-readiness',
 ]);
 
 /** Shared validation keeps even malformed internal messages inside the read allowlist. */

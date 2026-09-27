@@ -249,6 +249,7 @@ let refreshFailed = false;
 
 function killSince(fallback: string): string {
   try {
+    // sync-io-ok: lstat of ~/.ashlr/KILL, a private control sentinel, never an operator folder
     return lstatSync(killSwitchPath()).mtime.toISOString();
   } catch {
     return fallback;

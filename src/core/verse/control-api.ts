@@ -69,7 +69,7 @@ import { passesMutationGate, readBody, sendJson } from '../web/api.js';
 import { buildControlEssentials, type ControlEssentials } from '../web/control.js';
 import type { CachedFleetStatus } from '../web/fleet-status-cache.js';
 import type { ReadProjectionReader } from '../web/read-projections.js';
-import { getFrontierUsageSync } from '../usage/frontier-usage.js';
+import { getFrontierUsage } from '../usage/frontier-usage.js';
 import { inboxDir, pendingCount } from '../inbox/store.js';
 import { readAudit, audit } from '../sandbox/audit.js';
 import {
@@ -91,10 +91,13 @@ import { getCachedRollup } from '../observability/rollup.js';
 import type { ActivityRollup } from '../types.js';
 import {
   checkGuardedPath,
+  checkGuardedPathAsync,
   ENROLLMENT_PHRASING,
   isDirectoryPath,
+  isDirectoryPathAsync,
   type GuardedPathCheck,
 } from './path-guard.js';
+import { mapLimited, withFolderIo } from './folder-io.js';
 import { buildVerseAccountsSnapshot, getVerseAccountCollector } from './accounts.js';
 import { collectVerseLocalModels } from './local-models.js';
 import {
@@ -719,7 +722,38 @@ export function readVerseScope(): VerseScope {
     repos: snapshot.repos.map((path) => ({
       path,
       name: basename(path) || path,
+      // sync-io-ok: the synchronous twin, kept for non-server callers; routes use readVerseScopeAsync
       exists: isDirectoryPath(path),
+    })),
+  };
+}
+
+/** Enrolled repos' existence is checked this many at a time (each is a stat into an operator folder). */
+const SCOPE_STAT_CONCURRENCY = 4;
+
+/**
+ * {@link readVerseScope} for the routes (GET /api/verse/control, GET
+ * /api/verse/scope, the enroll/unenroll echo, daemon start): the registry is
+ * read as before (it lives in ~/.ashlr), but each repo's existence check —
+ * a stat INTO an operator folder, which a pending macOS privacy prompt parks
+ * (folder-io.ts) — runs off the event loop. Same view. Never throws.
+ */
+export async function readVerseScopeAsync(): Promise<VerseScope> {
+  let snapshot;
+  try {
+    snapshot = readEnrollmentRegistry();
+  } catch {
+    return { repos: [], degradedReason: 'unreadable-registry' };
+  }
+  if (snapshot.state === 'degraded') {
+    return { repos: [], degradedReason: snapshot.reason };
+  }
+  const exists = await mapLimited(snapshot.repos, SCOPE_STAT_CONCURRENCY, (path) => withFolderIo(() => isDirectoryPathAsync(path)));
+  return {
+    repos: snapshot.repos.map((path, index) => ({
+      path,
+      name: basename(path) || path,
+      exists: exists[index]!,
     })),
   };
 }
@@ -749,11 +783,24 @@ export function checkVerseScopePath(
   raw: string,
   opts: { requireDirectory: boolean; artifactsRoot?: string },
 ): VerseScopePathCheck {
+  // sync-io-ok: the synchronous twin, kept for non-server callers; the route uses checkVerseScopePathAsync
   return checkGuardedPath(raw, {
     requireDirectory: opts.requireDirectory,
     phrasing: ENROLLMENT_PHRASING,
     ...(opts.artifactsRoot === undefined ? {} : { artifactsRoot: opts.artifactsRoot }),
   });
+}
+
+/** {@link checkVerseScopePath} off the event loop (path-guard.ts checkGuardedPathAsync). Same answer. */
+export function checkVerseScopePathAsync(
+  raw: string,
+  opts: { requireDirectory: boolean; artifactsRoot?: string },
+): Promise<VerseScopePathCheck> {
+  return withFolderIo(() => checkGuardedPathAsync(raw, {
+    requireDirectory: opts.requireDirectory,
+    phrasing: ENROLLMENT_PHRASING,
+    ...(opts.artifactsRoot === undefined ? {} : { artifactsRoot: opts.artifactsRoot }),
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,7 +1071,7 @@ export async function runVerseDaemonAction(
     return { status: 409, body: daemonResult(action, false, note) };
   }
 
-  const scope = readVerseScope();
+  const scope = await readVerseScopeAsync();
   if (scope.degradedReason !== undefined) {
     const note = `Refused: the enrollment registry could not be read (${scope.degradedReason}).`;
     auditDaemonAction(action, `verse control plane refused daemon ${action}: enrollment ${scope.degradedReason}`, false);
@@ -1104,6 +1151,7 @@ const PENDING_FULL_CHECK_MS = 10_000;
 /** Inbox directory identity + nanosecond mtime: one lstat. */
 function inboxDirKey(): string | null {
   try {
+    // sync-io-ok: lstat of ~/.ashlr/inbox, the private proposal store, never an operator folder
     const st = lstatSync(inboxDir(), { bigint: true });
     return `${st.dev}:${st.ino}:${st.mtimeNs}`;
   } catch {
@@ -1121,9 +1169,11 @@ function inboxSignature(): string | null {
   try {
     const dir = inboxDir();
     const parts: string[] = [];
+    // sync-io-ok: readdir of ~/.ashlr/inbox, the private proposal store, never an operator folder
     for (const name of readdirSync(dir).sort()) {
       if (!name.endsWith('.json')) continue;
       try {
+        // sync-io-ok: lstat of one ~/.ashlr/inbox/*.json proposal file, never an operator folder
         const st = lstatSync(join(dir, name));
         parts.push(`${name}:${st.ino}:${st.size}:${st.mtimeMs}`);
       } catch {
@@ -1153,10 +1203,63 @@ export function cachedPendingCount(): number {
     pendingMemo = { ...pendingMemo, dirKey, fullCheckedAt: now };
     return pendingMemo.count;
   }
+  // sync-io-ok: the synchronous twin, kept for non-server callers; routes pass a worker to cachedPendingCountAsync
   const count = pendingCount();
   pendingMemo = dirKey === null || signature === null ? null : { dirKey, signature, fullCheckedAt: now, count };
   return count;
 }
+
+/**
+ * {@link cachedPendingCount} for the request path: the same memo (its stamps
+ * are lstat/readdir of ~/.ashlr/inbox, never an operator folder), but a
+ * recount runs on the read-projection worker when there is one. The recount
+ * validates every proposal, and validation canonicalises each proposal's
+ * repo path (lstat + realpath INTO the operator's project folder), which
+ * must not happen on the request thread (verse/folder-io.ts). Same count.
+ */
+export async function cachedPendingCountAsync(reader?: ReadProjectionReader): Promise<number> {
+  // sync-io-ok: only without a read-projection worker (tests, embedded callers); the servers always pass one
+  if (!reader) return cachedPendingCount();
+  const dirKey = inboxDirKey();
+  const now = Date.now();
+  if (dirKey !== null && pendingMemo && pendingMemo.dirKey === dirKey &&
+      now - pendingMemo.fullCheckedAt < PENDING_FULL_CHECK_MS) {
+    return pendingMemo.count;
+  }
+  const signature = inboxSignature();
+  if (dirKey !== null && signature !== null && pendingMemo?.signature === signature) {
+    pendingMemo = { ...pendingMemo, dirKey, fullCheckedAt: now };
+    return pendingMemo.count;
+  }
+  // Stale-while-revalidate, like the worker fleet read: the worker runs its
+  // projections one at a time, so a slow one ahead of ours must not stall the
+  // cockpit. Only the very first count waits.
+  let entry = workerPending.get(reader);
+  if (!entry) {
+    entry = { value: null, inFlight: null };
+    workerPending.set(reader, entry);
+  }
+  const current = entry;
+  if (!current.inFlight) {
+    current.inFlight = reader.read('pending-count')
+      .then((count) => {
+        current.value = count;
+        pendingMemo = dirKey === null || signature === null ? null : { dirKey, signature, fullCheckedAt: now, count };
+        return count;
+      })
+      .finally(() => {
+        current.inFlight = null;
+      });
+  }
+  if (current.value !== null) {
+    void current.inFlight.catch(() => { /* keep the last good count */ });
+    return current.value;
+  }
+  return current.inFlight;
+}
+
+/** The last pending count each worker answered, and its in-flight recount. */
+const workerPending = new WeakMap<ReadProjectionReader, { value: number | null; inFlight: Promise<number> | null }>();
 
 /** Fresh window for the worker-backed fleet read; the worker has its own cache behind it. */
 const WORKER_FLEET_FRESH_MS = 5_000;
@@ -1258,7 +1361,7 @@ function invalidateRuntimeProbe(): void {
  *
  * Every field is a PROJECTION of a snapshot the hub already computes —
  * buildControlSnapshot (which itself reuses the shared fleet-status cache),
- * getFrontierUsageSync, pendingCount, the enrollment registry, the kill
+ * getFrontierUsage, pendingCount, the enrollment registry, the kill
  * switch, and the config. Nothing here recomputes fleet status or re-walks a
  * repo. Every section degrades independently: a failure in one never blanks
  * the rest.
@@ -1283,14 +1386,22 @@ export async function buildVerseControlSnapshot(
 
   let pending = 0;
   try {
-    pending = cachedPendingCount();
+    pending = await cachedPendingCountAsync(opts.readProjections);
   } catch {
     pending = 0;
   }
 
+  // The 1d rollup behind the token/cost fields reads git state inside every
+  // indexed repo (operator folders). Never computed or awaited here: whatever
+  // the rollup cache holds, refreshed in the background on the
+  // read-projection worker when there is one (peekCachedRollup).
   let quota: VerseControlSnapshot['quota'] = [];
   try {
-    quota = getFrontierUsageSync(config).engines;
+    const reader = opts.readProjections;
+    quota = (await getFrontierUsage(config, {
+      waitForRollup: false,
+      ...(reader ? { rollup: () => reader.read('pulse', { window: '1d' }) } : {}),
+    })).engines;
   } catch {
     quota = [];
   }
@@ -1326,7 +1437,7 @@ export async function buildVerseControlSnapshot(
           freshness: { stale: true, ageMs: 0 },
         },
     caps,
-    scope: readVerseScope(),
+    scope: await readVerseScopeAsync(),
     killSwitch: currentKillSwitch(),
     // Its OWN field, never merged into killSwitch: the two sentinels have
     // different blast radii and the cockpit exists to tell them apart.
@@ -1436,7 +1547,7 @@ export async function handleVerseControlApi(
     // ── /api/verse/scope ─────────────────────────────────────────────────
     if (path === `${CONTROL_PREFIX}/scope`) {
       if (method === 'GET') {
-        sendJson(res, 200, readVerseScope());
+        sendJson(res, 200, await readVerseScopeAsync());
         return true;
       }
       if (method === 'POST') {
@@ -1459,7 +1570,11 @@ export async function handleVerseControlApi(
           sendInvalid(res, 'path is required');
           return true;
         }
-        const check = checkVerseScopePath(rawPath, { requireDirectory: action === 'enroll' });
+        // Validated off the loop first; enroll()/unenroll() then canonicalise
+        // the same path synchronously under the policy fence (an atomic
+        // registry write), by which time any privacy prompt for the folder
+        // has been answered.
+        const check = await checkVerseScopePathAsync(rawPath, { requireDirectory: action === 'enroll' });
         if (!check.ok) {
           sendInvalid(res, check.error);
           return true;
@@ -1472,7 +1587,7 @@ export async function handleVerseControlApi(
           path: check.path,
           changed: mutation.changed,
           reason: mutation.reason,
-          scope: readVerseScope(),
+          scope: await readVerseScopeAsync(),
         };
         // enroll()/unenroll() audit themselves; a refusal is a 409, not a 500.
         sendJson(res, mutation.ok ? 200 : 409, result);

@@ -48,11 +48,11 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, relative, isAbsolute, sep } from 'node:path';
 
-import { discoverMcpServers, redactEnv } from '../mcp-registry.js';
+import { discoverMcpServers, discoverMcpServersAsync, redactEnv } from '../mcp-registry.js';
 import type { McpServerSpec } from '../types.js';
 import type { VerseEngine } from './types.js';
 import { readVerseAccountIdentities, type VerseAccountIdentity, type VerseAccountProvider } from './accounts.js';
-import { readVerseMcpScope, type VerseMcpScope } from './mcp-scope.js';
+import { readVerseMcpScope, readVerseMcpScopeAsync, type VerseMcpScope } from './mcp-scope.js';
 
 // ---------------------------------------------------------------------------
 // Verified facts about the adapters, encoded once
@@ -410,8 +410,19 @@ export function buildVerseMcpMachineRegistry(
   paths?: string[],
   home: string = homedir(),
 ): VerseMcpMachineRegistry {
-  const registry = discoverMcpServers(paths);
-  const servers = registry.servers.map((spec) => projectMcpServerView(spec, home));
+  return machineRegistryFrom(discoverMcpServers(paths).servers, home);
+}
+
+/** {@link buildVerseMcpMachineRegistry} with the config reads off the event loop (and cached; mcp-registry.ts). */
+export async function buildVerseMcpMachineRegistryAsync(
+  paths?: string[],
+  home: string = homedir(),
+): Promise<VerseMcpMachineRegistry> {
+  return machineRegistryFrom((await discoverMcpServersAsync(paths)).servers, home);
+}
+
+function machineRegistryFrom(specs: readonly McpServerSpec[], home: string): VerseMcpMachineRegistry {
+  const servers = specs.map((spec) => projectMcpServerView(spec, home));
   return {
     servers,
     configured: servers.length > 0,
@@ -444,7 +455,32 @@ export function buildVerseMcpSnapshot(options: VerseMcpSnapshotOptions): VerseMc
   const seats = options.seats.map((seat) => deriveVerseMcpSeatView(seat, stateRoots, home));
   const machine = buildVerseMcpMachineRegistry(options.machineConfigPaths, home);
   const scope = options.scope ?? readVerseMcpScope();
+  return snapshotFrom(seats, machine, scope);
+}
 
+/**
+ * {@link buildVerseMcpSnapshot} for GET /api/verse/mcp: the machine registry
+ * (a multi-MB ~/.claude.json among others) is read off the event loop and
+ * reused while unchanged, and the Locus scope probe is awaited rather than
+ * spawned synchronously (up to 12 s). The per-seat views read small files
+ * under the accounts root (~/.ashlr) as before. Same snapshot.
+ */
+export async function buildVerseMcpSnapshotAsync(options: VerseMcpSnapshotOptions): Promise<VerseMcpSnapshot> {
+  const home = options.home ?? homedir();
+  const stateRoots = resolveAccountStateRoots(options.accountsRoot);
+  const seats = options.seats.map((seat) => deriveVerseMcpSeatView(seat, stateRoots, home));
+  const [machine, scope] = await Promise.all([
+    buildVerseMcpMachineRegistryAsync(options.machineConfigPaths, home),
+    options.scope ?? readVerseMcpScopeAsync(),
+  ]);
+  return snapshotFrom(seats, machine, scope);
+}
+
+function snapshotFrom(
+  seats: VerseMcpSnapshot['seats'],
+  machine: VerseMcpMachineRegistry,
+  scope: VerseMcpScope,
+): VerseMcpSnapshot {
   const notes: string[] = [];
   if (machine.configured && seats.every((seat) => seat.servers.length === 0)) {
     notes.push(

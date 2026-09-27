@@ -36,7 +36,8 @@ import type { Readable } from 'node:stream';
 import { basename, extname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 
 import { estimateTokensFromChars } from './context-math.js';
-import { isDirectoryPath, physicalPath } from './path-guard.js';
+import { withFolderIo } from './folder-io.js';
+import { isDirectoryPathAsync, physicalPathAsync } from './path-guard.js';
 import { VerseServiceError } from './preferences.js';
 import { VERSE_MAX_WORKSPACE_ROOTS, type VerseContextFit, type VerseContextFitRoot } from './types.js';
 
@@ -335,15 +336,16 @@ async function measureRoot(root: string, maxFiles: number, timeoutMs: number): P
   };
 }
 
-function canonicalRoot(raw: string): string {
+/** Off the event loop: roots are operator folders (folder-io.ts). Same checks and answer as before. */
+async function canonicalRoot(raw: string): Promise<string> {
   if (typeof raw !== 'string' || raw.length === 0 || raw.includes('\0') || !isAbsolute(raw)) {
     throw new VerseServiceError('VERSE_INVALID', `context-fit root must be an absolute path: ${String(raw)}`);
   }
   const lexical = resolvePath(raw);
-  if (!isDirectoryPath(lexical)) {
+  if (!(await withFolderIo(() => isDirectoryPathAsync(lexical)))) {
     throw new VerseServiceError('VERSE_INVALID', `context-fit root must be an existing directory: ${raw}`);
   }
-  return physicalPath(lexical) ?? lexical;
+  return (await withFolderIo(() => physicalPathAsync(lexical))) ?? lexical;
 }
 
 /**
@@ -364,7 +366,7 @@ export async function estimateContextFit(roots: string[], opts: ContextFitOption
 
   const unique: string[] = [];
   for (const raw of roots) {
-    const root = canonicalRoot(raw);
+    const root = await canonicalRoot(raw);
     if (!unique.includes(root)) unique.push(root);
   }
 

@@ -1,5 +1,6 @@
 /** Shared foreground quota ownership; a pending fence survives uncertain cleanup. */
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, unlinkSync, writeFileSync, type BigIntStats } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, join, parse, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -296,8 +297,46 @@ export function inspectResourceQuotaRefreshOwner(root: string): ResourceQuotaRef
 }
 
 /** One explicit private root, shared by console and bounded metadata collectors. */
+/**
+ * A cheap, ASYNC look at whether another live process visibly holds the
+ * lease lock under `root`: the lock file names its owner's pid, and that pid
+ * answers signal 0. A HINT, never a grant — it only lets a caller that is
+ * about to retry skip an attempt that would be refused anyway, without the
+ * attempt's synchronous lock bookkeeping (and the `ps` identity probe a
+ * contended lock triggers) on its thread. False whenever it cannot tell;
+ * the acquisition itself stays the authority. Never rejects.
+ */
+export async function resourceQuotaRefreshLeaseLooksHeld(root: string): Promise<boolean> {
+  try {
+    const raw = await readFile(join(root, '.resource-quota-refresh.lock'), 'utf8');
+    if (raw.length < 2 || raw.length > 512) return false;
+    const owner = JSON.parse(raw) as { pid?: unknown };
+    if (!Number.isInteger(owner.pid) || Number(owner.pid) < 1 || owner.pid === process.pid) return false;
+    try {
+      process.kill(Number(owner.pid), 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+    }
+  } catch {
+    return false;
+  }
+}
+
 export async function acquireResourceQuotaRefreshLease(root: string,
-  options: { waitMs?: number; signal?: AbortSignal; scope?: 'codex-native-metadata' | 'native-connection-metadata'; trackNativeActivity?: boolean } = {}): Promise<ResourceQuotaRefreshLease> {
+  options: {
+    waitMs?: number;
+    signal?: AbortSignal;
+    scope?: 'codex-native-metadata' | 'native-connection-metadata';
+    trackNativeActivity?: boolean;
+    /**
+     * Only when `waitMs` is 0 (no deadline): how long the lock attempt may
+     * wait, SYNCHRONOUSLY, for a contended lock (default 500 ms). A server
+     * retrying on a request path passes 0: one immediate attempt, never a
+     * blocked event loop; a contended lock is simply retried later.
+     */
+    contendedWaitMs?: 0 | 500;
+  } = {}): Promise<ResourceQuotaRefreshLease> {
   if (typeof root !== 'string' || !isAbsolute(root) || resolve(root) !== root || root === parse(root).root ||
       root.length > 4096 || [...root].some((character) => character.charCodeAt(0) < 32 ||
         character.charCodeAt(0) >= 127 && character.charCodeAt(0) <= 159)) {
@@ -311,6 +350,8 @@ export async function acquireResourceQuotaRefreshLease(root: string,
   if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 60_000) {
     throw new Error('Invalid resource quota collector wait budget');
   }
+  const contendedWaitMs = options.contendedWaitMs === undefined ? 500 : options.contendedWaitMs;
+  if (contendedWaitMs !== 0 && contendedWaitMs !== 500) throw new Error('Invalid resource quota collector lock wait');
   const deadline = waitMs > 0 ? performance.now() + waitMs : null;
   let failureCode: ResourceQuotaRefreshLeaseErrorCode = 'collector-unavailable';
   let recoveryStarted = false;
@@ -328,7 +369,7 @@ export async function acquireResourceQuotaRefreshLease(root: string,
     const lockPath = join(root, '.resource-quota-refresh.lock');
     const lockOptions = { anchorPath: root, exactPrivateStorage: true };
     if (deadline === null) {
-      const attempt = acquireLocalStoreLockWithOutcome(lockPath, 500, lockOptions);
+      const attempt = acquireLocalStoreLockWithOutcome(lockPath, contendedWaitMs, lockOptions);
       lock = attempt.lock;
       failureCode = attempt.state === 'contended' ? 'collector-owned' : 'collector-unavailable';
     }

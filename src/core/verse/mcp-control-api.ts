@@ -40,8 +40,8 @@ import type { AshlrConfig } from '../types.js';
 import { buildVerseAccountsSnapshot, readVerseAccountIdentities } from './accounts.js';
 import { getVerseAccountCollector } from './accounts.js';
 import { defaultAccountsRoot, resolveAccountsRoot } from './seats.js';
-import { buildVerseMcpSnapshot, type VerseMcpSeatInput } from './mcp-seat-view.js';
-import { readVerseMcpScopeGate } from './mcp-scope.js';
+import { buildVerseMcpSnapshotAsync, type VerseMcpSeatInput } from './mcp-seat-view.js';
+import { readVerseMcpScopeGateAsync } from './mcp-scope.js';
 import {
   buildVerseCliHealth,
   probeVerseAccountCliVersions,
@@ -213,7 +213,7 @@ export async function handleVerseMcpApi(
         sendJson(res, 404, { error: `not found: ${method} ${path}` });
         return true;
       }
-      sendJson(res, 200, buildVerseMcpSnapshot({
+      sendJson(res, 200, await buildVerseMcpSnapshotAsync({
         accountsRoot,
         seats: verseMcpSeatInputs(accountsRoot),
       }));
@@ -313,7 +313,7 @@ export async function handleVerseMcpApi(
         return true;
       }
 
-      const scope = readVerseMcpScopeGate();
+      const scope = await readVerseMcpScopeGateAsync();
 
       if (!applying) {
         const proposal = buildVerseMcpProposal({

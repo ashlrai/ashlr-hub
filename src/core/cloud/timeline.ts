@@ -29,7 +29,7 @@
  * answers and the merge-record index are cached; a whole timeline is cached
  * briefly per task revision so a re-opened panel costs nothing.
  */
-import { existsSync, statSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { readLedger } from '../authority/ledger.js';
@@ -41,7 +41,7 @@ import { mirrorPathFor } from '../fleet/mirrors.js';
 import { listPostMergeWatches, type PostMergeWatchView } from '../fleet/post-merge-watch.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { defaultGitRunner, type GitRunner } from '../verse/git-ops.js';
-import { discoverProjects } from '../verse/projects.js';
+import { discoverProjectsAsync } from '../verse/projects.js';
 import { readCloudTask } from './store.js';
 import {
   CLOUD_TIMELINE_SCHEMA_VERSION,
@@ -851,9 +851,15 @@ async function releaseFor(git: GitRunner, cwd: string, sha: string): Promise<Rel
   return { state: 'contained', latestTag: latest, firstTag: released[0] ?? null };
 }
 
-function isGitDir(path: string): boolean {
+/**
+ * A directory holding a `.git`. Async: enrolled projects are operator folders
+ * behind macOS privacy prompts, and a synchronous stat there would park the
+ * whole server (verse/folder-io.ts). Never rejects.
+ */
+async function isGitDir(path: string): Promise<boolean> {
   try {
-    return existsSync(join(path, '.git')) && statSync(path).isDirectory();
+    await stat(join(path, '.git'));
+    return (await stat(path)).isDirectory();
   } catch {
     return false;
   }
@@ -870,11 +876,11 @@ export function defaultCheckoutFor(git: GitRunner): (repo: string) => Promise<st
   return async (repo) => {
     try {
       const mirror = mirrorPathFor(repo);
-      if (isGitDir(mirror)) return mirror;
+      if (await isGitDir(mirror)) return mirror;
     } catch { /* not a valid owner/name — fall through */ }
     const want = repo.toLowerCase();
-    for (const project of discoverProjects().filter((p) => p.enrolled).slice(0, MAX_PROJECTS_PROBED)) {
-      if (!isGitDir(project.path)) continue;
+    for (const project of (await discoverProjectsAsync()).filter((p) => p.enrolled).slice(0, MAX_PROJECTS_PROBED)) {
+      if (!(await isGitDir(project.path))) continue;
       const origin = await gitLines(git, project.path, ['remote', 'get-url', 'origin']);
       if (origin.ok && origin.lines[0] && githubNameFromRemote(origin.lines[0]) === want) return project.path;
     }

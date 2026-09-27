@@ -42,8 +42,9 @@ import {
   type AppsActionResult,
   type AppsService,
 } from './apps.js';
-import { checkWorkspaceRootPath } from './path-guard.js';
-import { discoverProjects } from './projects.js';
+import { withFolderIo } from './folder-io.js';
+import { checkWorkspaceRootPathAsync } from './path-guard.js';
+import { discoverProjectsAsync } from './projects.js';
 import { resolveOllamaBaseUrl } from './seats.js';
 import { peekVerseEngine } from './verse-api.js';
 import { VERSE_APPS_PATH } from './workbench-types.js';
@@ -69,17 +70,18 @@ function ensureService(cfg: AshlrConfig): AppsService {
       if (!engine) return null;
       return lastLocalThroughput(engine.listSessions(), (id) => engine.getEvents(id));
     },
-    allowedRoots: () => {
+    // Both async: project folders sit behind macOS privacy prompts (folder-io.ts).
+    allowedRoots: async () => {
       const sessions = peekVerseEngine()?.listSessions() ?? [];
       const roots = new Set<string>();
       for (const s of sessions) {
         roots.add(s.projectPath);
         for (const extra of s.extraRoots ?? []) roots.add(extra);
       }
-      for (const p of discoverProjects({ sessions })) roots.add(p.path);
+      for (const p of await discoverProjectsAsync({ sessions })) roots.add(p.path);
       return [...roots];
     },
-    checkRoot: (raw) => checkWorkspaceRootPath(raw),
+    checkRoot: (raw) => withFolderIo(() => checkWorkspaceRootPathAsync(raw)),
   }));
   setAppsService(created);
   return created;

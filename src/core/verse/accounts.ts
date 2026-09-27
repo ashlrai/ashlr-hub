@@ -69,6 +69,7 @@ import {
   acquireResourceQuotaRefreshLease,
   ResourceQuotaRefreshLeaseError,
   type ResourceQuotaRefreshLease,
+  resourceQuotaRefreshLeaseLooksHeld,
 } from '../resources/quota-refresh-lease.js';
 import {
   publishSharedQuotaEvidence,
@@ -1290,6 +1291,11 @@ export async function startVerseAccountCollector(
         ...(options.signal ? { signal: options.signal } : {}),
         trackNativeActivity: true,
         scope: config.connections ? 'native-connection-metadata' : 'codex-native-metadata',
+        // A retry runs in a live server: one immediate attempt, never the
+        // 500 ms synchronous wait a contended lock otherwise gets (it froze
+        // every route for that long). Contended now means "try again at the
+        // next retry", which is what read-only already means.
+        ...(retry ? { contendedWaitMs: 0 as const } : {}),
       });
     } catch (error) {
       // Only a typed, cleanly released refusal may degrade to read-only.
@@ -1365,7 +1371,15 @@ export async function startVerseAccountCollector(
     if (closing || closed || mode !== 'read-only' || leaseRetry) return;
     if (Date.now() - lastLeaseAttemptAt < VERSE_ACCOUNTS_LEASE_RETRY_MS) return;
     lastLeaseAttemptAt = Date.now();
-    leaseRetry = acquireLease(true)
+    // Off the request path: `touch()` is called while a route builds its
+    // answer, and the attempt's lock bookkeeping is synchronous file work.
+    // It starts on a later macrotask, after that response has been written.
+    const ledgerRoot = config?.ledgerRoot;
+    leaseRetry = new Promise<void>((resolve) => { setImmediate(resolve); })
+      // Still visibly held by a live owner (the usual case): skip the
+      // attempt, and with it the lock's synchronous `ps` identity probe.
+      .then(async () => (ledgerRoot ? resourceQuotaRefreshLeaseLooksHeld(ledgerRoot) : false))
+      .then((held) => (held || closing || closed || mode !== 'read-only' ? undefined : acquireLease(true)))
       .catch(() => { /* acquireLease never throws; defensive */ })
       .finally(() => { leaseRetry = null; });
   }

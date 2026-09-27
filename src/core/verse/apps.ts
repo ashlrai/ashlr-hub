@@ -654,6 +654,9 @@ export type CommandRunner = (
   opts: { timeoutMs: number; env: Record<string, string> },
 ) => Promise<RunResult>;
 
+/** What `AppsDeps.checkRoot` answers for one requested root. */
+export type RootCheck = { ok: true; path: string } | { ok: false; error: string };
+
 /** Everything the service touches, injectable (tests never touch a real shell, network or Terminal). */
 export interface AppsDeps {
   loginPath: (refresh: boolean) => Promise<LoginPathResult>;
@@ -676,9 +679,9 @@ export interface AppsDeps {
   /** The newest local turn's throughput; null when unknown (no engine yet, no local turn). */
   localThroughput: () => LocalThroughput | null;
   /** Folders a Launch may start in: session roots and discovered projects, already guarded. */
-  allowedRoots: () => readonly string[];
+  allowedRoots: () => readonly string[] | Promise<readonly string[]>;
   /** Validate one root (checkWorkspaceRootPath); returns the resolved path or an error sentence. */
-  checkRoot: (raw: string) => { ok: true; path: string } | { ok: false; error: string };
+  checkRoot: (raw: string) => RootCheck | Promise<RootCheck>;
 }
 
 export type AppsActionResult =
@@ -999,9 +1002,9 @@ export function createAppsService(deps: AppsDeps): AppsService {
       return { ok: true, status: 202, body: { ok: true, opened: 'terminal-app', command: display } };
     },
     async launch(appId, opts) {
-      const root = deps.checkRoot(opts.root);
+      const root = await deps.checkRoot(opts.root);
       if (!root.ok) return { ok: false, status: 400, code: 'VERSE_INVALID', error: root.error };
-      const allowed = deps.allowedRoots().map((r) => resolvePath(r));
+      const allowed = (await deps.allowedRoots()).map((r) => resolvePath(r));
       if (!allowed.includes(resolvePath(root.path))) {
         return { ok: false, status: 400, code: 'VERSE_INVALID', error: 'root must be a chat folder or a discovered project' };
       }
@@ -1117,7 +1120,7 @@ export interface DefaultAppsDepsOptions {
   llamaServerBaseUrl?: string;
   lmStudioBaseUrl?: string;
   localThroughput?: () => LocalThroughput | null;
-  allowedRoots?: () => readonly string[];
+  allowedRoots?: AppsDeps['allowedRoots'];
   checkRoot?: AppsDeps['checkRoot'];
 }
 

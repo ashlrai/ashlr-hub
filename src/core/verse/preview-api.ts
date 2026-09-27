@@ -50,6 +50,7 @@ import {
   VERSE_PREVIEW_TARGETS_PATH,
   type VersePreviewTargetsResponse,
 } from './workbench-types.js';
+import { firstPendingFolder, folderAccessPendingMessage } from './folder-io.js';
 
 let discoveryDeps: DevServerDiscoveryDeps | undefined;
 
@@ -74,6 +75,21 @@ function queryOf(req: IncomingMessage): Map<string, string> | null {
   return out;
 }
 
+/**
+ * Everything below reads the chat's roots synchronously (launch.json,
+ * package.json and lockfiles for discovery; realpath + stat to resolve an
+ * artifact). Enter the roots off the event loop first: while a macOS privacy
+ * prompt for one is unanswered, refuse this request (503) rather than park
+ * the whole server on it (folder-io.ts). False after responding.
+ */
+async function rootsReady(res: ServerResponse, roots: readonly string[]): Promise<boolean> {
+  const pending = await firstPendingFolder(roots);
+  if (pending === null) return true;
+  res.setHeader('Retry-After', '5');
+  sendJson(res, 503, { code: 'VERSE_FOLDER_ACCESS_PENDING', error: folderAccessPendingMessage(pending) });
+  return false;
+}
+
 async function sessionFor(res: ServerResponse, rawId: string | undefined): Promise<VerseSession | null> {
   if (typeof rawId !== 'string' || !VERSE_SESSION_ID_RE.test(rawId)) {
     sendJson(res, 400, { code: 'VERSE_INVALID', error: 'sessionId is required' });
@@ -94,6 +110,7 @@ function dispositionName(path: string): string {
 }
 
 async function serveArtifact(res: ServerResponse, session: VerseSession, relPath: string): Promise<void> {
+  if (!(await rootsReady(res, sessionRoots(session)))) return;
   const resolved = resolveArtifactFile(sessionRoots(session), relPath);
   if (!resolved.ok) {
     sendJson(res, resolved.status, { code: resolved.status === 413 ? 'VERSE_TOO_LARGE' : 'VERSE_INVALID', error: resolved.error });
@@ -165,6 +182,7 @@ export const handlePreviewApi: ApiModule = async (ctx, req, res, path, method) =
     const session = await sessionFor(res, query.get('sessionId'));
     if (!session) return true;
     const roots = sessionRoots(session);
+    if (!(await rootsReady(res, roots))) return true;
     const engine = await getVerseEngine();
     // Verse's own port is never offered: framing Verse inside itself is refused
     // by its own frame-ancestors, and would only ever confuse.
@@ -204,6 +222,7 @@ export const handlePreviewApi: ApiModule = async (ctx, req, res, path, method) =
     sendJson(res, 400, { code: 'VERSE_INVALID', error: 'a preview link needs a browser read session' });
     return true;
   }
+  if (!(await rootsReady(res, sessionRoots(session)))) return true;
   const resolved = resolveArtifactFile(sessionRoots(session), relPath);
   if (!resolved.ok) {
     sendJson(res, resolved.status, { code: resolved.status === 413 ? 'VERSE_TOO_LARGE' : 'VERSE_INVALID', error: resolved.error });

@@ -9,7 +9,8 @@
  *
  * GitHub Actions is off, so this is what verifies a release (docs/RELEASING-LOCALLY.md).
  *
- * Phase A (parallel): root build, web typecheck, eslint (cached), the real-io lane guard,
+ * Phase A (parallel): root build, web typecheck, eslint (cached), the real-io lane guard, the
+ * Verse route sync-I/O guard (scripts/check-verse-sync-io.mjs),
  * the docs check. Then the web build + first-paint budget. Then Phase B: backend and web
  * vitest, in parallel.
  *
@@ -355,6 +356,7 @@ function staticSteps() {
     { name: 'typecheck-web', cmd: node, args: [bin.tsc, '--noEmit', '-p', 'src/web-ui/tsconfig.json', '--incremental', '--tsBuildInfoFile', gate('tsc-web.tsbuildinfo')] },
     { name: 'eslint', cmd: node, args: [bin.eslint, '--cache', '--cache-location', gate('eslintcache'), '.'] },
     { name: 'realio-lane', cmd: npm, args: ['run', '--silent', 'lint:realio-lane'] },
+    { name: 'verse-sync-io', cmd: npm, args: ['run', '--silent', 'lint:verse-sync-io'] },
     { name: 'docs', cmd: npm, args: ['run', '--silent', 'check:docs'] },
   ];
 }
@@ -447,7 +449,7 @@ async function main() {
     return step;
   };
 
-  say('phase A: build, typecheck-web, eslint, realio-lane, docs (parallel)');
+  say('phase A: build, typecheck-web, eslint, realio-lane, verse-sync-io, docs (parallel)');
   const phaseA = await Promise.all(staticSteps().map((step) => runStatic(step).then(record)));
   const buildFailed = phaseA.find((step) => step.name === 'build').status === 'fail';
   const phaseAFailed = phaseA.some((step) => step.status === 'fail');

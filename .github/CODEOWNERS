@@ -733,6 +733,7 @@
 /test/verify-confinement-310b.test.ts @masonwyatt23
 /test/verify-mirror-bins-310.test.ts @masonwyatt23
 /test/verse-api-mount-310.test.ts @masonwyatt23
+/test/verse-async-folder-access-314.test.ts @masonwyatt23
 /test/verse-contracts-310.test.ts @masonwyatt23
 /test/verse-control-api.test.ts @masonwyatt23
 /test/verse-daemon-pause.test.ts @masonwyatt23
