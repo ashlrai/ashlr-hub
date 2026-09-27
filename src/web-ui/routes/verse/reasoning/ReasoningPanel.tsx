@@ -10,15 +10,15 @@
  * a seat that never shares its reasoning, that fact, in words, instead of an
  * empty space that looks like a bug.
  *
- * `ReasoningPanel` is presentational over derived turns; `ReasoningPane` is
- * the registry adapter (just `{sessionId}`).
+ * `ReasoningPanel` is presentational over derived turns; the dock pane is
+ * dock-panes.tsx `ReasoningDockPane`, registered by reasoning.pane.tsx.
  */
 import { useMemo } from 'react';
+import { EmptyState } from '../../../components/primitives/EmptyState.js';
 import { reasoningPolicyFor } from '../../../../core/verse/trace.js';
 import { formatThinkingDuration, formatThinkingTokens, ThinkingBlock } from '../chat/ThinkingBlock.js';
 import type { TurnBlock } from '../chat/turn-model.js';
 import { buildReasoningTrail, reasoningTotals } from './reasoning-model.js';
-import { useChatTurns, usePaneActions, useSessionRecord } from './pane-data.js';
 import styles from './reasoning.module.css';
 
 export interface ReasoningPanelProps {
@@ -39,7 +39,12 @@ export function ReasoningPanel({ turns, engine = null, jumpToTurn }: ReasoningPa
   if (totals.hidden > 0) parts.push(`${totals.hidden} withheld by the provider`);
 
   if (trail.length === 0) {
-    return <div className={styles.panel}><p className={styles.empty}>Reasoning appears here as the agent works.</p></div>;
+    return (
+      <div className={styles.panel}>
+        <EmptyState compact title="No reasoning yet"
+          body="When the model thinks before it answers, its reasoning streams here, turn by turn, with what each turn did — so you can follow why without scrolling the answer away." />
+      </div>
+    );
   }
 
   return (
@@ -67,12 +72,4 @@ export function ReasoningPanel({ turns, engine = null, jumpToTurn }: ReasoningPa
       </ol>
     </div>
   );
-}
-
-/** Pane-registry adapter: everything from the session id. */
-export function ReasoningPane({ sessionId }: { sessionId: string }) {
-  const turns = useChatTurns(sessionId);
-  const session = useSessionRecord(sessionId);
-  const { jumpToTurn } = usePaneActions(sessionId);
-  return <ReasoningPanel turns={turns} engine={session?.engine ?? null} jumpToTurn={jumpToTurn} />;
 }

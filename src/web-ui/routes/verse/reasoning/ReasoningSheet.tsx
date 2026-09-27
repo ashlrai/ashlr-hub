@@ -1,12 +1,14 @@
 /**
- * routes/verse/reasoning/ReasoningSheet.tsx — the Sources and Reasoning panes,
- * hosted by the transcript itself (V3.15).
+ * routes/verse/reasoning/ReasoningSheet.tsx — the Sources and Reasoning
+ * panels, hosted by the transcript itself when there is no dock to open them
+ * in (V3.15).
  *
- * The workbench shell's pane registry is the long-term home for both panes
- * (reasoning/pane-adapter.ts describes them for it). Until a build carries
- * that registry, the transcript opens them here: a sheet over the right edge
- * of the conversation, two tabs, Escape to close, focus returned to the
- * button that opened it. Lazy — nothing here loads until the sheet opens.
+ * In the chat, the transcript's Reasoning / Sources toggles open the dock
+ * panes (reasoning.pane.tsx registers them for ⇧⌘Y / ⇧⌘S). A transcript
+ * rendered where no dock handles those commands falls back to this sheet: a
+ * panel over the right edge of the conversation, two tabs, Escape to close,
+ * focus returned to the button that opened it. Lazy — nothing here loads
+ * until it opens.
  */
 import { useEffect, useRef } from 'react';
 import type { VerseSession } from '../../../../core/verse/types.js';

@@ -126,6 +126,20 @@ a.sourceMain:focus-visible { outline: 2px solid var(--border-focus); outline-off
 .sourceLoc { font-family: var(--font-mono); color: var(--text-secondary); }
 .sourceSub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-tertiary); font-size: var(--text-2xs-size, 11px); }
 .sourceKind { grid-area: kind; white-space: nowrap; color: var(--text-tertiary); font-size: var(--text-2xs-size, 11px); }
+.cite {
+  margin-left: var(--space-2);
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs-size, 11px);
+  cursor: pointer;
+}
+.cite:hover { background: var(--bg-hover); color: var(--text-primary); }
+.cite:focus-visible { outline: 2px solid var(--border-focus); outline-offset: -2px; }
 .sourceTurns { grid-area: turns; display: flex; flex-wrap: nowrap; gap: var(--space-1); }
 .turnChip {
   min-height: var(--control-h-xs);

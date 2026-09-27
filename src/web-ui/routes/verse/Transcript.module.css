@@ -697,6 +697,10 @@
 .miniSign { display: inline-block; width: 2ch; user-select: none; }
 .miniMore { font-family: var(--font-ui); color: var(--text-tertiary); }
 
+/* A windowed-out turn (chat/turn-window.ts): an empty box at the height the
+   turn last had, so the scrollbar and the reading position do not move. */
+.turnPlaceholder { contain: strict; }
+
 /* The turn's one-line summary leads its footer; the duration follows it. */
 .turnWork { color: inherit; }
 .turnQuiet { font-style: italic; }

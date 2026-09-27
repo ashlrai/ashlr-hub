@@ -10,27 +10,30 @@
  * click in a pane lands on the call or turn with the same reveal machinery
  * (opening a folded activity group, the locator flash).
  */
-import { useCallback, useMemo, useRef, useSyncExternalStore } from 'react';
-import type { VerseSession } from '../../../../core/verse/types.js';
+import { useCallback, useMemo, useRef } from 'react';
 import { requestTranscriptJump } from '../chat/transcript-jump.js';
 import { toolAnchorId } from '../chat/tool-semantics.js';
-import { buildTurns, createTurnCache, turnAnchorId, type TurnBlock } from '../chat/turn-model.js';
-import { useSessionSubscription } from '../useVerseSession.js';
+import { buildTurns, createTurnCache, turnAnchorId, type TurnBlock, type TurnCache } from '../chat/turn-model.js';
 import { useVerseTranscript } from '../useVerseTranscript.js';
-import { getVerseSessionHead } from '../verse-store.js';
 import { groupTranscriptItems } from '../verse-transcript.js';
 import { openSourceFile } from './sources-queries.js';
 
-export function useChatTurns(sessionId: string | null): TurnBlock[] {
-  const transcript = useVerseTranscript(sessionId);
-  const cache = useRef(createTurnCache());
-  return useMemo(() => buildTurns(groupTranscriptItems(transcript.items), cache.current).turns, [transcript]);
-}
-
-export function useSessionRecord(sessionId: string | null): VerseSession | null {
-  const subscribe = useSessionSubscription(sessionId);
-  const read = () => getVerseSessionHead(sessionId).session;
-  return useSyncExternalStore(subscribe, read, read);
+/**
+ * The chat's turns. `active: false` (a pane kept alive behind another tab)
+ * unsubscribes from the stream and keeps the last turns it derived, so a
+ * hidden pane does no work per token; it catches up when shown again.
+ */
+export function useChatTurns(sessionId: string | null, active = true): TurnBlock[] {
+  const transcript = useVerseTranscript(active ? sessionId : null);
+  const cache = useRef<{ sessionId: string | null; cache: TurnCache }>({ sessionId, cache: createTurnCache() });
+  const last = useRef<{ sessionId: string | null; turns: TurnBlock[] }>({ sessionId, turns: [] });
+  return useMemo(() => {
+    if (!active) return last.current.sessionId === sessionId ? last.current.turns : [];
+    if (cache.current.sessionId !== sessionId) cache.current = { sessionId, cache: createTurnCache() };
+    const turns = buildTurns(groupTranscriptItems(transcript.items), cache.current.cache).turns;
+    last.current = { sessionId, turns };
+    return turns;
+  }, [transcript, active, sessionId]);
 }
 
 export interface PaneActions {

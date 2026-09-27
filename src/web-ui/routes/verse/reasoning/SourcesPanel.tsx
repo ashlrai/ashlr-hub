@@ -11,10 +11,11 @@
  * Two exports:
  *  - `SourcesPanel` — presentational, over already-derived turns (the
  *    transcript's sheet passes its own, so nothing is derived twice);
- *  - `SourcesPane`  — the self-contained adapter a pane registry mounts with
- *    just `{sessionId}` (reasoning/pane-adapter.ts).
+ *  - the dock pane (dock-panes.tsx `SourcesDockPane`), registered for the
+ *    `sources` id by reasoning.pane.tsx.
  */
 import { useMemo, useState } from 'react';
+import { EmptyState } from '../../../components/primitives/EmptyState.js';
 import type { VerseSession, VerseSourceKind } from '../../../../core/verse/types.js';
 import { formatRanges } from '../../../../core/verse/trace.js';
 import { useDisplayPath } from '../chat/path-display.js';
@@ -22,7 +23,6 @@ import { fileBasename, fileDirname } from '../chat/tool-semantics.js';
 import type { SourceActions } from '../chat/SourceList.js';
 import type { TurnBlock } from '../chat/turn-model.js';
 import { buildChatSources, injectedSources, type ChatSourceEntry } from './reasoning-model.js';
-import { useChatTurns, usePaneActions, useSessionRecord } from './pane-data.js';
 import styles from './reasoning.module.css';
 
 type Filter = 'all' | 'files' | 'web' | 'docs';
@@ -43,9 +43,11 @@ export interface SourcesPanelProps extends SourceActions {
   turns: readonly TurnBlock[];
   session?: Pick<VerseSession, 'memoryEnabled' | 'projectPath'> | null;
   jumpToTurn: (turnKey: string) => void;
+  /** "Cite" a source into the message being written (the dock's `host.addToMessage`). Absent → no Cite action. */
+  onCite?: (text: string) => void;
 }
 
-export function SourcesPanel({ turns, session = null, openFile, jumpToTool, jumpToTurn }: SourcesPanelProps) {
+export function SourcesPanel({ turns, session = null, openFile, jumpToTool, jumpToTurn, onCite }: SourcesPanelProps) {
   const [filter, setFilter] = useState<Filter>('all');
   const [query, setQuery] = useState('');
   const show = useDisplayPath();
@@ -69,7 +71,8 @@ export function SourcesPanel({ turns, session = null, openFile, jumpToTool, jump
   if (model.entries.length === 0) {
     return (
       <div className={styles.panel}>
-        <p className={styles.empty}>No sources yet. Files the agent reads, pages it fetches and searches it runs are listed here as it works.</p>
+        <EmptyState compact title="No sources yet"
+          body="Files the agent reads (with the lines it saw), pages it fetches, searches it runs and docs it consults are listed here as it works — so you can check what an answer rests on." />
       </div>
     );
   }
@@ -91,7 +94,7 @@ export function SourcesPanel({ turns, session = null, openFile, jumpToTool, jump
         <ol className={styles.sourceList}>
           {visible.map((entry) => (
             <SourceRow key={entry.citation.source.ref} entry={entry} show={show} turnIndex={turnIndex}
-              openFile={openFile} jumpToTool={jumpToTool} jumpToTurn={jumpToTurn} />
+              openFile={openFile} jumpToTool={jumpToTool} jumpToTurn={jumpToTurn} onCite={onCite} />
           ))}
         </ol>
       )}
@@ -99,11 +102,20 @@ export function SourcesPanel({ turns, session = null, openFile, jumpToTool, jump
   );
 }
 
-function SourceRow({ entry, show, turnIndex, openFile, jumpToTool, jumpToTurn }: {
+/** What "Cite" puts in the message: `@path:12-40` for a file, the address for a page. Null = nothing citable. */
+export function citeText(entry: ChatSourceEntry, show: (path: string) => string): string | null {
+  const s = entry.citation.source;
+  if (s.url) return s.url;
+  if (s.path) return `@${show(s.path)}${entry.citation.ranges.length > 0 ? `:${formatRanges(entry.citation.ranges)}` : ''}`;
+  return null;
+}
+
+function SourceRow({ entry, show, turnIndex, openFile, jumpToTool, jumpToTurn, onCite }: {
   entry: ChatSourceEntry;
   show: (path: string) => string;
   turnIndex: ReadonlyMap<string, number>;
   jumpToTurn: (turnKey: string) => void;
+  onCite?: (text: string) => void;
 } & SourceActions) {
   const { citation, turnKeys } = entry;
   const s = citation.source;
@@ -146,11 +158,17 @@ function SourceRow({ entry, show, turnIndex, openFile, jumpToTool, jumpToTurn }:
     );
   }
 
+  const cite = onCite ? citeText(entry, show) : null;
   return (
     <li className={styles.sourceRow} data-kind={s.kind}>
       <span className={styles.sourceNum} aria-hidden="true">{citation.n}</span>
       {primary}
-      <span className={styles.sourceKind}>{KIND_WORD[s.kind]}{citation.count > 1 ? ` ×${citation.count}` : ''}</span>
+      <span className={styles.sourceKind}>
+        {KIND_WORD[s.kind]}{citation.count > 1 ? ` ×${citation.count}` : ''}
+        {cite && onCite ? (
+          <button type="button" className={styles.cite} onClick={() => onCite(cite)} aria-label={`Cite ${s.title} in your message`}>Cite</button>
+        ) : null}
+      </span>
       {turnKeys.length > 0 ? (
         <span className={styles.sourceTurns}>
           {turnKeys.slice(0, 4).map((key) => (
@@ -164,12 +182,4 @@ function SourceRow({ entry, show, turnIndex, openFile, jumpToTool, jumpToTurn }:
       ) : null}
     </li>
   );
-}
-
-/** Pane-registry adapter: everything from the session id. */
-export function SourcesPane({ sessionId }: { sessionId: string }) {
-  const turns = useChatTurns(sessionId);
-  const session = useSessionRecord(sessionId);
-  const actions = usePaneActions(sessionId);
-  return <SourcesPanel turns={turns} session={session} {...actions} />;
 }

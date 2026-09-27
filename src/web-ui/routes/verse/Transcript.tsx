@@ -52,7 +52,7 @@
  * Follows the newest message unless the operator scrolled up, in which case
  * a "Jump to latest" control appears.
  */
-import { Suspense, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { Suspense, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react';
 import type { VerseEngine, VerseSession } from '../../data/api-types.js';
 import { reasoningPolicyFor } from '../../../core/verse/trace.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
@@ -65,6 +65,7 @@ import { SourceList } from './chat/SourceList.js';
 import { useReasoningDisplay, type ReasoningDisplay } from './chat/reasoning-pref.js';
 import { ThinkingBlock } from './chat/ThinkingBlock.js';
 import { onTranscriptFind, onTranscriptJump, onTranscriptStep } from './chat/transcript-jump.js';
+import { anchorTurnKey, useTurnWindow } from './chat/turn-window.js';
 import { TranscriptNav } from './chat/TranscriptNav.js';
 import { TurnAnnouncer } from './chat/TurnAnnouncer.js';
 import { toolAnchorId, type ToolFacts } from './chat/tool-semantics.js';
@@ -76,6 +77,8 @@ import { ToolUseCard, type ToolUseCardProps } from './ToolUseCard.js';
 import { ArrowDownIcon } from './verse-icons.js';
 import { ENGINE_LABEL, formatDuration } from './verse-model.js';
 import { formatTokens } from './verse-readouts.js';
+import { getDockSnapshot, subscribeDockState } from './dock/dock-store.js';
+import { runCommand } from './shell/command-bus.js';
 import { getVerseSessionHead, type VerseLiveState } from './verse-store.js';
 import { getVerseUiState } from './verse-ui-store.js';
 import {
@@ -88,6 +91,14 @@ import {
   type TranscriptSegment,
 } from './verse-transcript.js';
 import styles from './Transcript.module.css';
+
+/** The dock's open/active pair as a primitive-stable snapshot (a new object per call would re-render forever). */
+let dockFocusCache: { open: boolean; active: string | null } = { open: false, active: null };
+function getDockPaneFocus(): { open: boolean; active: string | null } {
+  const { open, active } = getDockSnapshot().state;
+  if (open !== dockFocusCache.open || active !== dockFocusCache.active) dockFocusCache = { open, active };
+  return dockFocusCache;
+}
 
 // V3.15: the Sources / Reasoning sheet loads only when first opened.
 const ReasoningSheet = lazy(() => import('./reasoning/ReasoningSheet.js').then((m) => ({ default: m.ReasoningSheet })));
@@ -227,6 +238,11 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
     return model;
   }), [segments]);
   const turns = useMemo(() => perSegment.flatMap((m) => m.turns), [perSegment]);
+  // V3.15: a long chat renders only the turns near the viewport (chat/turn-window.ts).
+  const win = useTurnWindow(scroller, turns.length);
+  const { pin: pinTurn, observe: observeTurn } = win;
+  const turnsNow = useRef(turns);
+  turnsNow.current = turns;
   /** Index of each segment's first turn in `turns` (for the per-turn ordinal). */
   const turnOffsets = useMemo(() => {
     const out: number[] = [];
@@ -287,8 +303,13 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
   }, []);
 
   const jumpToTurn = useCallback((turnKey: string) => {
+    // A windowed-out turn is a placeholder: render it in full, then land on it.
+    if (pinTurn(turnKey)) {
+      requestAnimationFrame(() => reveal(turnNodes.current.get(turnKey) ?? null));
+      return;
+    }
     reveal(turnNodes.current.get(turnKey) ?? null);
-  }, [reveal]);
+  }, [reveal, pinTurn]);
 
   /**
    * Open the disclosure chain around a tool call before revealing it. A call
@@ -296,14 +317,18 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
    * group is asked to open (revealAnchorInGroups) and the jump retried on
    * the next frame, once it has rendered its members.
    */
-  const jumpToAnchor = useCallback((id: string, retried = false): boolean => {
+  const jumpToAnchor = useCallback((id: string, attempt = 0): boolean => {
     const node = scroller.current?.ownerDocument?.getElementById(id) ?? null;
-    if (!node) {
-      if (!retried && revealAnchorInGroups(id)) {
-        requestAnimationFrame(() => { jumpToAnchor(id, true); });
+    if (!node || node.hasAttribute('data-turn-placeholder')) {
+      // Two things can keep an anchor out of the DOM: its turn is windowed
+      // out (render it in full) and its call is folded in a group (open it).
+      // One per frame, so each step sees the other's render.
+      const windowKey = attempt < 3 ? anchorTurnKey(turnsNow.current, id) : null;
+      if (attempt < 3 && ((windowKey !== null && pinTurn(windowKey)) || revealAnchorInGroups(id))) {
+        requestAnimationFrame(() => { jumpToAnchor(id, attempt + 1); });
         return true;
       }
-      return false;
+      if (!node) return false;
     }
     for (let el: Element | null = node; el; el = el.parentElement) {
       if (el instanceof HTMLDetailsElement) el.open = true;
@@ -311,7 +336,7 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
     }
     reveal(node);
     return true;
-  }, [reveal]);
+  }, [reveal, pinTurn]);
 
   // The dock's Tasks pane (and anything else outside this subtree) jumps
   // through the bus; ⌘K "Find in chat" focuses the search the same way ⌘F does.
@@ -342,9 +367,10 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
   }, [errorAnchors, jumpToAnchor]);
 
   const registerTurn = useCallback((key: string, node: HTMLElement | null) => {
+    observeTurn(key, node);
     if (node) turnNodes.current.set(key, node);
-    else turnNodes.current.delete(key);
-  }, []);
+    else if (turnNodes.current.get(key)) turnNodes.current.delete(key);
+  }, [observeTurn]);
 
   const stepMatch = useCallback((delta: number) => {
     if (matches.length === 0) return;
@@ -446,6 +472,8 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the signature IS the dependency
   }, [traceSignature]);
   const hasTrace = traceCounts.sources > 0 || traceCounts.thoughts > 0;
+  // Whether the dock already shows one of these panes (the toggles' pressed state).
+  const dock = useSyncExternalStore(subscribeDockState, getDockPaneFocus, getDockPaneFocus);
   // Read when the sheet renders (not subscribed): memory is pinned at creation.
   const sheetSessionId = sheet ? resolveSessionId() : null;
   const sheetSession = useMemo(
@@ -493,15 +521,25 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
   }
 
   const activeMatchKey = matchIndex >= 0 ? matches[matchIndex]?.turnKey ?? null : null;
-  const openSheet = (tab: ReasoningSheetTab) => setSheet((current) => (current === tab ? null : tab));
+  // In the chat these open the dock's Sources / Reasoning panes (⇧⌘S / ⇧⌘Y,
+  // reasoning/reasoning.pane.tsx); where no dock handles the command, the
+  // transcript's own sheet shows the same panels.
+  const openSheet = (tab: ReasoningSheetTab) => {
+    if (runCommand(tab === 'sources' ? 'dock.sources' : 'dock.reasoning')) {
+      setSheet(null);
+      return;
+    }
+    setSheet((current) => (current === tab ? null : tab));
+  };
+  const pressed = (tab: ReasoningSheetTab) => sheet === tab || (dock.open && dock.active === tab);
   const sheetToggles = hasTrace ? (
     <span className={styles.traceToggles}>
-      <button type="button" className={styles.traceToggle} aria-pressed={sheet === 'reasoning'} onClick={() => openSheet('reasoning')}
-        title="Every turn's reasoning in one place">
+      <button type="button" className={styles.traceToggle} aria-pressed={pressed('reasoning')} onClick={() => openSheet('reasoning')}
+        title="Every turn's reasoning in one place (⇧⌘Y)">
         Reasoning{traceCounts.thoughts > 0 ? <span className={styles.traceCount}>{traceCounts.thoughts}</span> : null}
       </button>
-      <button type="button" className={styles.traceToggle} aria-pressed={sheet === 'sources'} onClick={() => openSheet('sources')}
-        title="Every file, page and search this chat drew on">
+      <button type="button" className={styles.traceToggle} aria-pressed={pressed('sources')} onClick={() => openSheet('sources')}
+        title="Every file, page and search this chat drew on (⇧⌘S)">
         Sources{traceCounts.sources > 0 ? <span className={styles.traceCount}>{traceCounts.sources}</span> : null}
       </button>
     </span>
@@ -542,12 +580,14 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
           </div>
         ) : null}
         <ol className={styles.list} onKeyDown={onListKeyDown}>
-          {perSegment.map((segment, s) => segment.turns.map((turn, t) => (
+          {perSegment.map((segment, s) => segment.turns.map((turn, t) => (!win.isFull(turn.key, turnOffsets[s]! + t, turn.status === 'running') ? (
+            <TurnPlaceholder key={turn.key} turnKey={turn.key} index={turnOffsets[s]! + t} height={win.heightOf(turn.key)} registerNode={registerTurn} />
+          ) : (
             <TurnView key={turn.key} turn={turn} index={turnOffsets[s]! + t} facts={segment.facts} explained={segment.explained}
               engine={engine} match={matchKeys.has(turn.key) ? (turn.key === activeMatchKey ? 'active' : 'true') : undefined}
               reasoning={reasoning} onJumpTool={jumpToTool} onJumpAnchor={jumpToAnchor} registerNode={registerTurn}
               openFile={openFile} silentNote={silentNote} />
-          )))}
+          ))))}
           {/* The reasoning streaming right now — it becomes an ordinary
               thinking item the moment its persisted block lands. */}
           {liveThinking ? (
@@ -601,6 +641,24 @@ interface TurnViewProps {
 }
 
 /**
+ * A windowed-out turn (chat/turn-window.ts): its anchor id, its place in the
+ * turn order and the height it last had — no content. It becomes a TurnView
+ * again as it nears the viewport, or the moment a jump targets it.
+ */
+const TurnPlaceholder = memo(function TurnPlaceholder({ turnKey, index, height, registerNode }: {
+  turnKey: string;
+  index: number;
+  height: number;
+  registerNode: (key: string, node: HTMLElement | null) => void;
+}) {
+  const nodeRef = useCallback((node: HTMLElement | null) => registerNode(turnKey, node), [registerNode, turnKey]);
+  return (
+    <li id={turnAnchorId(turnKey)} ref={nodeRef} className={`${styles.turn} ${styles.turnPlaceholder}`} data-turn-key={turnKey}
+      data-turn-placeholder="" tabIndex={-1} aria-label={`Turn ${index + 1}`} style={{ height }} />
+  );
+});
+
+/**
  * Memoized on its props, all of which are stable for a finished turn: the
  * TurnBlock comes from a cached segment model, the callbacks are stable, and
  * `match` only changes for turns a search touches. So a streamed token
@@ -609,6 +667,8 @@ interface TurnViewProps {
 const TurnView = memo(function TurnView({ turn, index, facts, explained, engine, match, reasoning, onJumpTool, onJumpAnchor, registerNode,
   openFile, silentNote }: TurnViewProps) {
   const running = turn.status === 'running';
+  // Stable, so a streamed token's re-render does not detach and re-observe the node.
+  const nodeRef = useCallback((node: HTMLElement | null) => registerNode(turn.key, node), [registerNode, turn.key]);
   // How long a settled turn took (turn-model: from its turn-done; unknown →
   // null, never 0). The turn's footer, not a line of its own between turns.
   const tookMs = running ? null : turn.durationMs;
@@ -621,7 +681,7 @@ const TurnView = memo(function TurnView({ turn, index, facts, explained, engine,
   return (
     <li
       id={turnAnchorId(turn.key)}
-      ref={(node) => registerNode(turn.key, node)}
+      ref={nodeRef}
       // A settled turn no longer changes: let the browser skip its layout
       // and paint while it is off screen (Transcript.module.css .turnSettled).
       className={`${styles.turn} ${running ? '' : styles.turnSettled}`}

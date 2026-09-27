@@ -11,10 +11,10 @@ import { foldReadRuns } from '../chat/activity-model.js';
 import { ev, session } from '../fixtures.test-support.js';
 import { resetVerseStore, seedVerseSession } from '../verse-store.js';
 import { buildTranscript, groupTranscriptItems, type ToolGroupItem } from '../verse-transcript.js';
-import { REASONING_PANES } from './pane-adapter.js';
+import { getPane, type PaneProps } from '../panes/pane-registry.js';
+import { ReasoningDockPane, SourcesDockPane } from './dock-panes.js';
 import { buildChatSources, buildReasoningTrail, injectedSources, reasoningTotals } from './reasoning-model.js';
-import { SourcesPane } from './SourcesPanel.js';
-import { ReasoningPane } from './ReasoningPanel.js';
+import './reasoning.pane.js';
 
 function turnsOf(events: VerseEvent[]) {
   return buildTurns(groupTranscriptItems(buildTranscript(events).items), createTurnCache()).turns;
@@ -110,27 +110,53 @@ describe('foldReadRuns', () => {
   });
 });
 
+function paneProps(over: Partial<PaneProps> = {}): PaneProps {
+  const noop = () => {};
+  return {
+    paneId: 'sources', sessionId: 's1', session: null, roots: ['/r'], events: [], turnFiles: [], visible: true, presentation: 'column',
+    requests: {} as PaneProps['requests'],
+    host: { sendToChat: noop, addToMessage: noop, openPane: noop, closePane: noop, openTerminal: noop, openTerminalBelow: noop, openDiff: noop, openSession: noop } as unknown as PaneProps['host'],
+    ...over,
+  };
+}
+
 describe('registry panes', () => {
-  it('describes both panes with lazy loaders', async () => {
-    expect(REASONING_PANES.map((p) => p.id)).toEqual(['sources', 'reasoning']);
-    const mod = await REASONING_PANES[0]!.load();
-    expect(mod.default).toBe(SourcesPane);
+  it('replace the first-party sources / reasoning stubs and keep their keys', () => {
+    expect(getPane('sources')).toMatchObject({ title: 'Sources' });
+    expect(getPane('reasoning')).toMatchObject({ title: 'Reasoning' });
+    expect(getPane('sources')!.description).toMatch(/numbered/);
+    expect(getPane('reasoning')!.description).toMatch(/what each turn did/);
   });
 
-  it('SourcesPane and ReasoningPane need nothing but the session id', async () => {
+  it('SourcesDockPane lists the chat’s sources with injected memory, filters, and cites into the message', async () => {
     const user = userEvent.setup();
-    seedVerseSession('s1', session({ id: 's1', engine: 'grok', memoryEnabled: true, projectPath: '/r' }), LOG);
-    const { unmount } = render(<SourcesPane sessionId="s1" />);
+    const cited: string[] = [];
+    const s1 = session({ id: 's1', engine: 'grok', memoryEnabled: true, projectPath: '/r' });
+    seedVerseSession('s1', s1, LOG);
+    render(<SourcesDockPane {...paneProps({ session: s1, host: { ...paneProps().host, addToMessage: (t: string) => cited.push(t) } })} />);
     expect(screen.getByText('Shared project memory (MEMORY.md)')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^All 4/ })).toHaveAttribute('aria-pressed', 'true');
+    await user.click(screen.getByRole('button', { name: 'Cite parser.ts in your message' }));
+    expect(cited).toEqual(['@/r/src/parser.ts:1-20, 40-49']);
     await user.click(screen.getByRole('button', { name: /^Docs & memory 2/ }));
     expect(document.querySelectorAll('li[data-kind]')).toHaveLength(2);
     await user.type(screen.getByRole('searchbox', { name: 'Filter sources' }), 'readme');
     expect(document.querySelectorAll('li[data-kind]')).toHaveLength(1);
-    unmount();
+  });
 
-    render(<ReasoningPane sessionId="s1" />);
+  it('ReasoningDockPane says what the provider withheld; a hidden pane stops following the stream', () => {
+    const s1 = session({ id: 's1', engine: 'grok' });
+    seedVerseSession('s1', s1, LOG);
+    const { rerender } = render(<ReasoningDockPane {...paneProps({ paneId: 'reasoning', session: s1 })} />);
     const turn2 = screen.getByRole('button', { name: /Turn 2: and the tests/ });
     expect(within(turn2.closest('li')!).getByText(/reasoning hidden by the provider/)).toBeInTheDocument();
+    // Hidden behind another tab: keeps what it showed.
+    rerender(<ReasoningDockPane {...paneProps({ paneId: 'reasoning', session: s1, visible: false })} />);
+    expect(screen.getByRole('button', { name: /Turn 2: and the tests/ })).toBeInTheDocument();
+  });
+
+  it('shows the teaching empty state before the chat has any', () => {
+    render(<SourcesDockPane {...paneProps({ sessionId: null })} />);
+    expect(screen.getByText('No sources yet')).toBeInTheDocument();
   });
 });
