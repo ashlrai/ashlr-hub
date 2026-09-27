@@ -506,6 +506,14 @@ fn finish(hub: &VoiceHub, id: &str, control: Control) -> bool {
 
 /// Reset the hotkey gesture after a start that did not happen, so the
 /// release of that press does not look like the end of a latch.
+/// Something can transcribe: an engine is loaded, Parakeet is on disk, or
+/// whisper-cli + a ggml model are.
+fn engine_available(hub: &VoiceHub) -> bool {
+    lock(&hub.engine_info).is_some()
+        || model::is_installed(&hub.parakeet_dir(), &model::PARAKEET_FILES)
+        || hub.whisper_available()
+}
+
 fn abandon(app: &AppHandle, hub: &VoiceHub) {
     lock(&hub.tracker).reset();
     emit_state(app);
@@ -546,6 +554,11 @@ fn start(
                 }
                 emit_state(&asked);
             }));
+            // First dictation on this Mac: fetch the model while the operator
+            // answers the prompt, so the second press just works.
+            if !engine_available(hub) {
+                start_download(app, hub);
+            }
             emit_error(
                 app,
                 Some(&id),
@@ -594,9 +607,7 @@ fn start(
 
     // 2. An engine: loaded, or Parakeet on disk, or whisper as a fallback.
     //    Otherwise start the one-time model download.
-    let engine_loaded = lock(&hub.engine_info).is_some();
-    let parakeet_ready = model::is_installed(&hub.parakeet_dir(), &model::PARAKEET_FILES);
-    if !engine_loaded && !parakeet_ready && !hub.whisper_available() {
+    if !engine_available(hub) {
         start_download(app, hub);
         emit_error(
             app,
