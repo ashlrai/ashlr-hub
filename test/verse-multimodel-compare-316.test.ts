@@ -99,6 +99,12 @@ describe('cross-family review', () => {
     const long = reviewPrompt({ answer: 'x'.repeat(30_000), authorLabel: 'A' });
     expect(long).toContain('…(truncated for review)');
   });
+
+  it('fences a diff longer than any backtick run inside it (a Markdown diff cannot close it early)', () => {
+    const text = reviewPrompt({ diff: '+```ts\n+const a = 1;\n+```', authorLabel: 'A' });
+    expect(text).toContain('````diff\n+```ts\n+const a = 1;\n+```\n````');
+    expect(reviewPrompt({ diff: '+x', authorLabel: 'A' })).toContain('```diff\n+x\n```');
+  });
 });
 
 describe('cheap-first escalation', () => {

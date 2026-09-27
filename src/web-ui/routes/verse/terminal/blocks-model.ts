@@ -33,6 +33,8 @@ export interface BlockView {
   fullscreen: boolean;
   /** Agent blocks: the tool that ran it (Bash, command_execution…). */
   tool?: string;
+  /** 3.15, terminal blocks: loopback URLs the command printed ("Open in Browser pane"). */
+  localUrls?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -72,6 +74,7 @@ export function terminalBlockView(block: VerseTerminalBlock): BlockView {
     output: null,
     truncated: block.truncated || block.evicted,
     fullscreen: block.fullscreen,
+    ...(block.localUrls && block.localUrls.length > 0 ? { localUrls: block.localUrls } : {}),
   };
 }
 

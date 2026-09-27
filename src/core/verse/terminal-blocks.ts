@@ -69,6 +69,7 @@ export const BLOCK_LOCAL_URLS_MAX = 3;
 const URL_CARRY_CHARS = 256;
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[()][A-Za-z0-9]|.)/g;
+// eslint-disable-next-line no-control-regex
 const LOCAL_URL_RE = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d{1,5})?(?:\/[^\s"'<>`)\]\x1b]*)?/gi;
 
 /**

@@ -140,7 +140,14 @@ export function reviewPrompt(subject: ReviewSubject): string {
   ];
   if (subject.question) parts.push('', 'The request was:', '', cap(subject.question.trim(), 4_000));
   if (subject.answer) parts.push('', 'The answer to review:', '', cap(subject.answer.trim(), REVIEW_MAX_CHARS));
-  if (subject.diff) parts.push('', 'The changes to review:', '', '```diff', cap(subject.diff.trim(), REVIEW_MAX_CHARS), '```');
+  if (subject.diff) {
+    const diff = cap(subject.diff.trim(), REVIEW_MAX_CHARS);
+    // A fence longer than any backtick run inside: a diff of Markdown that
+    // itself holds ``` must not close the block early.
+    const longest = Math.max(0, ...Array.from(diff.matchAll(/`+/g), (m) => m[0].length));
+    const fence = '`'.repeat(Math.max(3, longest + 1));
+    parts.push('', 'The changes to review:', '', `${fence}diff`, diff, fence);
+  }
   return parts.join('\n');
 }
 

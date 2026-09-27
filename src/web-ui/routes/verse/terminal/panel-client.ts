@@ -8,12 +8,16 @@ import type {
   VerseTerminalBlockOutputResponse,
   VerseTerminalBlocksResponse,
   VerseTerminalCreateRequest,
+  VerseTerminalFixResponse,
+  VerseTerminalLaunchListResponse,
+  VerseTerminalLaunchRequest,
+  VerseTerminalLaunchResponse,
   VerseTerminalOpenFileRequest,
   VerseTerminalTab,
 } from '../../../data/api-types.js';
 import { getMutationToken, touchMutationHold } from '../../../data/auth-store.js';
 import { apiGet, apiPost } from '../../../data/client.js';
-import { VERSE_TERMINAL_PATH, VERSE_TERMINAL_REDACT_PATH } from '../../../../core/verse/workbench-types.js';
+import { VERSE_TERMINAL_LAUNCH_PATH, VERSE_TERMINAL_PATH, VERSE_TERMINAL_REDACT_PATH } from '../../../../core/verse/workbench-types.js';
 import { TerminalLockedError, terminalApi, type TerminalApi } from '../dock/terminal/terminal-client.js';
 
 export interface PanelTerminalApi extends TerminalApi {
@@ -23,6 +27,12 @@ export interface PanelTerminalApi extends TerminalApi {
   /** Text → the same secret scrub a block gets on its way to a chat. */
   redact(text: string): Promise<string>;
   openFile(tabId: string, req: VerseTerminalOpenFileRequest): Promise<void>;
+  /** 3.15: the local model's candidate commands for a failed block (optional: older fakes). */
+  fix?(tabId: string, blockId: string): Promise<VerseTerminalFixResponse>;
+  /** 3.15: the chat's launch configurations. */
+  launchList?(sessionId: string): Promise<VerseTerminalLaunchListResponse>;
+  /** 3.15: open a launch configuration's tabs (its commands come from the file on the server). */
+  launch?(req: VerseTerminalLaunchRequest): Promise<VerseTerminalLaunchResponse>;
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
@@ -42,4 +52,7 @@ export const panelTerminalApi: PanelTerminalApi = {
     apiGet<VerseTerminalBlockOutputResponse>(`${tabBase(tabId)}/blocks/${encodeURIComponent(blockId)}?format=${format}`),
   redact: async (text) => (await post<{ text: string }>(VERSE_TERMINAL_REDACT_PATH, { text })).text,
   openFile: async (tabId, req) => { await post<unknown>(`${tabBase(tabId)}/open-file`, req); },
+  fix: (tabId, blockId) => post<VerseTerminalFixResponse>(`${tabBase(tabId)}/blocks/${encodeURIComponent(blockId)}/fix`, {}),
+  launchList: (sessionId) => apiGet<VerseTerminalLaunchListResponse>(`${VERSE_TERMINAL_LAUNCH_PATH}?sessionId=${encodeURIComponent(sessionId)}`),
+  launch: (req) => post<VerseTerminalLaunchResponse>(VERSE_TERMINAL_LAUNCH_PATH, req),
 };

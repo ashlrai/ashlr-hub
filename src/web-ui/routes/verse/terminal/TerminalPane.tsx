@@ -8,6 +8,7 @@
  */
 import { EmptyState } from '../../../components/primitives/EmptyState.js';
 import type { PaneProps } from '../panes/pane-registry.js';
+import { useChatPaneData } from '../panes/chat-pane-data.js';
 import type { TerminalPaneProps } from '../shell/slots.js';
 import { TerminalGlyph } from '../dock/terminal/terminal-icons.js';
 import { TerminalPanel, type TerminalPanelProps } from './TerminalPanel.js';
@@ -17,7 +18,9 @@ import { TerminalPanel, type TerminalPanelProps } from './TerminalPanel.js';
  * `sessionId: null` when no chat is open: the terminal belongs to a chat
  * (its tabs, layout and Agent tab are the chat's), so it says so instead.
  */
-export function TerminalRegistryPane({ sessionId, roots, requests, host, visible }: PaneProps) {
+export function TerminalRegistryPane({ sessionId, session, roots, requests, host, visible }: PaneProps) {
+  // 3.15: every seat, for a block's "Ask…" (the dock provides them; empty elsewhere).
+  const { seats } = useChatPaneData();
   if (!sessionId) {
     return (
       <EmptyState compact icon={<TerminalGlyph size={20} />} title="Open a chat to use the terminal"
@@ -31,6 +34,9 @@ export function TerminalRegistryPane({ sessionId, roots, requests, host, visible
       request={requests.terminal}
       onSendToChat={host.sendToChat}
       visible={visible}
+      session={session}
+      seats={seats}
+      onOpenSession={host.openSession}
     />
   );
 }
