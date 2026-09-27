@@ -33,8 +33,10 @@ const STATUSES: readonly CloudTaskReport['status'][] = ['done', 'partial', 'bloc
  *
  * `knowledge` (3.15) is the approved-lessons block for this task; it sits
  * between the task text and the contract. Empty ⇒ the prompt is unchanged.
+ * `playbook` (3.15) is the rendered playbook block (playbooks/resolve.ts);
+ * it follows the task text, before the lessons. Empty ⇒ unchanged.
  */
-export function buildCloudPrompt(task: CloudTaskV1, knowledge = ''): string {
+export function buildCloudPrompt(task: CloudTaskV1, knowledge = '', playbook = ''): string {
   const example = JSON.stringify({
     status: 'done',
     summary: 'One or two plain sentences on what changed and why.',
@@ -44,6 +46,8 @@ export function buildCloudPrompt(task: CloudTaskV1, knowledge = ''): string {
   }, null, 2);
   return [
     task.prompt.trim(),
+    // 3.15: the playbook this task runs under (playbooks/), before lessons and the contract.
+    ...(playbook.trim() ? ['', playbook.trim()] : []),
     // 3.15: approved lessons for this repo / kind of task (learn/retro/inject.ts), before the contract.
     ...(knowledge.trim() ? ['', knowledge.trim()] : []),
     '',

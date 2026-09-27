@@ -375,6 +375,7 @@ import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readStableRegularFile } from '../util/stable-file-read.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { withApprovedKnowledge } from '../learn/retro/inject.js';
+import { withFleetPlaybook } from '../playbooks/lanes.js';
 
 type FleetQuotaReservationRefusal = Extract<
   FleetQuotaReservationResult,
@@ -7077,7 +7078,10 @@ export async function tick(
       }
       // V3.10 (B-U9): a standing tick's producers run with the active harness —
       // its producer prompt overlay rides on the goal (baseline: none).
-      const baseGoal = standingTick ? withHarnessProducerPrompt(buildItemGoal(item), hooks) : buildItemGoal(item);
+      const harnessGoal = standingTick ? withHarnessProducerPrompt(buildItemGoal(item), hooks) : buildItemGoal(item);
+      // 3.15: the playbook the item names (`!macro`) or auto-matches, recorded
+      // against this runId for retros (playbooks/lanes.ts). None ⇒ byte-identical.
+      const baseGoal = withFleetPlaybook(harnessGoal, item, attemptId);
       // 3.15: Mason-approved, trigger-scoped lessons from earlier task ends
       // (learn/retro/inject.ts; ≤ 16 KiB). Guidance only — it changes no
       // route, gate or authority. Nothing approved/matching ⇒ byte-identical goal.

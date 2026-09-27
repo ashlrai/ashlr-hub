@@ -36,9 +36,10 @@ import { enqueueCandidates } from './knowledge.js';
 import { RETRO_MODEL_CALLS_PER_DAY, loadRetroModel, refineRetro, type RetroModel } from './model.js';
 import { pruneRetros, readSweepState, retroExists, retroIdFor, saveRetro, writeSweepState } from './store.js';
 import type { RetroV1 } from './types.js';
+import { isPlaybookRef, type PlaybookRef } from '../../playbooks/types.js';
 
 export type SweepProposal = Pick<Proposal, 'id' | 'title' | 'summary' | 'status' | 'createdAt'> &
-  Partial<Pick<Proposal, 'diff' | 'verifyResult' | 'decidedAt' | 'result' | 'decisionReason' | 'engineModel'>>;
+  Partial<Pick<Proposal, 'diff' | 'verifyResult' | 'decidedAt' | 'result' | 'decisionReason' | 'engineModel' | 'runId'>>;
 
 export interface RetroSweepDeps {
   now(): number;
@@ -56,6 +57,11 @@ export interface RetroSweepDeps {
   leaderActions(): LeaderAction[];
   /** null = deterministic only. */
   model: RetroModel | null;
+  /**
+   * Playbook uses by `lane:key` (playbooks/store.ts). Fleet retros are
+   * attributed through the proposal's runId; absent = no attribution.
+   */
+  playbookUses?(): Promise<ReadonlyMap<string, { ref: PlaybookRef }>>;
 }
 
 export interface RetroSweepResult {
@@ -231,10 +237,10 @@ export function collectRetros(parts: {
       if (t.updatedAt < parts.sinceIso) continue;
       // Closed in favour of the fleet App PR that carries the same change: not an end, a hand-off.
       if (t.state === 'closed' && t.supersededBy) continue;
-      add(retroFromCloud({
+      add(withPlaybookRef(retroFromCloud({
         taskId: t.id, repo: t.repo, state: t.state, endedAt: t.updatedAt, title: t.title, prompt: t.prompt,
         stateReason: t.stateReason, failure: t.failure, report: t.report, origin: t.origin, lane,
-      }, parts.nowIso));
+      }, parts.nowIso), t.playbookRef));
     }
   }
   for (const a of parts.leader ?? []) {
@@ -247,6 +253,11 @@ export function collectRetros(parts: {
     }, parts.nowIso));
   }
   return [...out.values()].sort((a, b) => b.endedAt.localeCompare(a.endedAt));
+}
+
+/** Attach the playbook version a task ran under (absent ⇒ the retro is unchanged). */
+export function withPlaybookRef(retro: RetroV1, ref: unknown): RetroV1 {
+  return isPlaybookRef(ref) ? { ...retro, playbookRef: { id: ref.id, version: ref.version, sha: ref.sha } } : retro;
 }
 
 let sweepInFlight: Promise<RetroSweepResult> | null = null;
@@ -287,6 +298,17 @@ async function runSweep(deps: RetroSweepDeps, opts: { windowDays?: number; maxNe
   const leader = guard('leader', () => deps.leaderActions());
 
   const all = collectRetros({ ledger, inbox, cloud, devin, leader, load: (id) => deps.loadProposal(id), sinceIso, nowIso });
+  let uses: ReadonlyMap<string, { ref: PlaybookRef }> | null = null;
+  const fleetPlaybook = async (proposalId: string): Promise<PlaybookRef | undefined> => {
+    if (!deps.playbookUses) return undefined;
+    try {
+      uses ??= await deps.playbookUses();
+      const runId = deps.loadProposal(proposalId)?.runId;
+      return runId ? uses.get(`fleet:${runId}`)?.ref : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   const state = await readSweepState();
   const day = localDay(nowMs);
   let calls = state.modelCalls[day] ?? 0;
@@ -296,7 +318,7 @@ async function runSweep(deps: RetroSweepDeps, opts: { windowDays?: number; maxNe
   for (const draft of all) {
     if (created >= (opts.maxNew ?? RETRO_SWEEP_MAX_NEW)) break;
     if (await retroExists(draft.id)) continue;
-    let retro = draft;
+    let retro = draft.source === 'fleet' ? withPlaybookRef(draft, await fleetPlaybook(draft.taskId)) : draft;
     if (deps.model && calls < RETRO_MODEL_CALLS_PER_DAY && retro.rootCause && retro.source !== 'leader') {
       calls += 1;
       const refined = await refineRetro(retro, deps.model, nowIso);
@@ -327,13 +349,14 @@ async function runSweep(deps: RetroSweepDeps, opts: { windowDays?: number; maxNe
 
 /** The production sources, loaded lazily so importing this module stays cheap. */
 export async function loadDefaultRetroSweepDeps(cfg: unknown): Promise<RetroSweepDeps> {
-  const [ledger, inbox, cloudStore, devinStore, leaderApply, model] = await Promise.all([
+  const [ledger, inbox, cloudStore, devinStore, leaderApply, model, playbookStore] = await Promise.all([
     import('../../authority/ledger.js'),
     import('../../inbox/store.js'),
     import('../../cloud/store.js'),
     import('../../devin/store.js'),
     import('../../vision/leader-apply.js'),
     loadRetroModel(cfg),
+    import('../../playbooks/store.js'),
   ]);
   return {
     now: () => Date.now(),
@@ -349,6 +372,7 @@ export async function loadDefaultRetroSweepDeps(cfg: unknown): Promise<RetroSwee
     devinTasks: () => devinStore.listDevinTasks(500),
     leaderActions: () => leaderApply.listLeaderActions(300),
     model,
+    playbookUses: () => playbookStore.readPlaybookUses(),
   };
 }
 

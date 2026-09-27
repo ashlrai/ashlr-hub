@@ -22,6 +22,7 @@ import { readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 
+import { isPlaybookRef } from '../playbooks/types.js';
 import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
 import {
   CLOUD_BRANCH_PREFIX,
@@ -208,6 +209,7 @@ export function isCloudTask(value: unknown): value is CloudTaskV1 {
     && (value['deliveryPin'] === undefined || isDeliveryPin(value['deliveryPin'], value['repo'] as string))
     && (value['supersededBy'] === undefined || isSupersededBy(value['supersededBy'], value['repo'] as string))
     && (value['intake'] === undefined || isIntakeMemo(value['intake']))
+    && (value['playbookRef'] === undefined || isPlaybookRef(value['playbookRef']))
     && typeof value['estimatedCostUsd'] === 'number' && Number.isFinite(value['estimatedCostUsd']) && value['estimatedCostUsd'] >= 0
     && isNullableString(value['backlogItemId'])
     && isNullableString(value['needsYouId']);

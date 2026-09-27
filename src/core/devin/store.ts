@@ -17,6 +17,7 @@ import { join } from 'node:path';
 
 import { ashlrHome, CLOUD_REPO_PATTERN } from '../cloud/store.js';
 import type { CloudTaskPr, CloudTaskReport } from '../cloud/types.js';
+import { isPlaybookRef } from '../playbooks/types.js';
 import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
 import {
   DEFAULT_DEVIN_BUDGET,
@@ -193,6 +194,7 @@ export function isDevinTask(value: unknown): value is DevinTaskV1 {
     && (value['deliveryPin'] === undefined || isPin(value['deliveryPin'], repo))
     && (value['supersededBy'] === undefined || isSupersededBy(value['supersededBy'], repo))
     && (value['intake'] === undefined || isIntakeMemo(value['intake']))
+    && (value['playbookRef'] === undefined || isPlaybookRef(value['playbookRef']))
     && isNullableString(value['backlogItemId'])
     && (value['messagesSent'] === undefined || (Number.isSafeInteger(value['messagesSent']) && (value['messagesSent'] as number) >= 0));
 }

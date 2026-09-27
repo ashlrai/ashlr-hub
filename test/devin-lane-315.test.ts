@@ -228,6 +228,23 @@ describe('launch', () => {
     expect(String(body['prompt'])).toContain(`Create branch \`ashlr-devin/${t.id}\` from \`main\``);
     expect(String(body['prompt'])).toContain('Never merge anything');
     expect(readDevinTask(t.id)).toMatchObject({ state: 'running', sessionId: t.sessionId });
+    // 3.15: no playbook ⇒ no ref, no block.
+    expect(t).not.toHaveProperty('playbookRef');
+    expect(String(body['prompt'])).not.toContain('## Playbook:');
+  });
+
+  it('3.15: a named playbook is pinned on the task and inlined before the contract; an unknown one refuses first', async () => {
+    await connect();
+    const res = await launchDevinTask({ repo: REPO, prompt: 'Bump vitest to 4.2', origin: 'cli', playbook: '!bump-deps' }, deps());
+    expect(res.ok).toBe(true);
+    expect(res.task!.playbookRef).toMatchObject({ id: 'dependency-bump', version: 1 });
+    const prompt = String((api.requests.find((r) => r.method === 'POST')!.body as Record<string, unknown>)['prompt']);
+    expect(prompt.indexOf('## Playbook: Bump a dependency')).toBeGreaterThan(0);
+    expect(prompt.indexOf('## Playbook:')).toBeLessThan(prompt.indexOf('DELIVERY CONTRACT'));
+    const posts = () => api.requests.filter((r) => r.method === 'POST').length;
+    const before = posts();
+    expect(await launchDevinTask({ repo: REPO, prompt: 'x', origin: 'cli', playbook: 'no-such-one' }, deps())).toMatchObject({ ok: false });
+    expect(posts()).toBe(before);
   });
 
   it('adopts the session by its task tag when the create answer was lost, instead of launching twice', async () => {

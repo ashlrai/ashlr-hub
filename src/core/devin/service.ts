@@ -29,6 +29,7 @@ import { scrubSecrets } from '../util/scrub.js';
 import { devinBudgetView } from './budget.js';
 import { DevinApiError, DevinClient, devinFailureSentence, type DevinFetch, type DevinSession } from './client.js';
 import { buildDevinPrompt, DEVIN_REPORT_SCHEMA } from './delivery-contract.js';
+import { playbookForLaunch } from '../playbooks/lanes.js';
 import { hasDevinKey, readDevinKey, removeDevinKey, storeDevinKey, type DevinKeyStoreDeps } from './secret.js';
 import {
   clearDevinConnection,
@@ -385,6 +386,9 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
   const connected = await connectedClient(deps);
   if ('error' in connected) return refusal(connected.error, connected.failure);
   const baseBranch = givenBase !== '' ? givenBase : (await defaultBranchOf(repo, deps)) ?? FALLBACK_BASE_BRANCH;
+  // 3.15: the playbook (named, `!macro` in the text, or auto-matched). A named one that does not exist refuses.
+  const playbook = await playbookForLaunch({ explicit: req.playbook, title, prompt, repo });
+  if (!playbook.ok) return refusal(playbook.error);
 
   // --- budget gate + persist queued (no await between them) ----------------
   const now = clock();
@@ -419,6 +423,7 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
     headSha: null,
     report: null,
     backlogItemId,
+    ...(playbook.ref ? { playbookRef: playbook.ref } : {}),
   };
   try {
     writeDevinTask(task);
@@ -451,7 +456,7 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
     Object.assign(task, { state: 'launching' });
     writeDevinTask(task);
     const session = await client.createSession(orgId, {
-      prompt: buildDevinPrompt(task),
+      prompt: buildDevinPrompt(task, playbook.block),
       title: `${DEVIN_PR_TITLE_PREFIX} ${title}`,
       repos: [repo],
       tags: [DEVIN_SESSION_TAG, tag],

@@ -26,6 +26,7 @@ import { cloudBudgetView } from './budget.js';
 import { ensureCloudCheckout, isSafeBranchName, KeyedMutex, type CloudCheckoutDeps } from './checkout.js';
 import { buildCloudPrompt } from './delivery-contract.js';
 import { knowledgeBlockFor } from '../learn/retro/inject.js';
+import { playbookForLaunch } from '../playbooks/lanes.js';
 import { launchCloudSession, readCloudSeatArgv, SEAT_NOT_READY_REASON, type CloudLaunchDeps } from './launcher.js';
 import { CLOUD_REPO_PATTERN, listCloudTasks, newCloudTaskId, readCloudBudget, writeCloudTask } from './store.js';
 import { defaultCloudGh, type CloudTrackerDeps } from './tracker.js';
@@ -122,6 +123,10 @@ async function launchWithGate(req: CloudLaunchRequest | CloudInternalLaunch, gat
   const needsYouId = typeof internal.needsYouId === 'string' && REF_ID_RE.test(internal.needsYouId) ? internal.needsYouId : null;
   // Resolved before the gate so no await separates the gate from the queued write.
   const baseBranch = givenBase !== '' ? givenBase : (await defaultBranchOf(repo, deps)) ?? FALLBACK_BASE_BRANCH;
+  // 3.15: the playbook (named, `!macro` in the text, or auto-matched) — resolved
+  // here for the same reason. A named playbook that does not exist refuses.
+  const playbook = await playbookForLaunch({ explicit: req.playbook, title, prompt, repo });
+  if (!playbook.ok) return refusal(playbook.error);
 
   // --- gates (seat, then budget) -----------------------------------------
   const seatArgv = (deps.launcher?.seatArgv ?? (() => readCloudSeatArgv(CLOUD_SEAT_ID)))();
@@ -159,6 +164,7 @@ async function launchWithGate(req: CloudLaunchRequest | CloudInternalLaunch, gat
     estimatedCostUsd: budget.estimatedCostPerSessionUsd,
     backlogItemId,
     needsYouId,
+    ...(playbook.ref ? { playbookRef: playbook.ref } : {}),
   };
   try {
     writeCloudTask(task);
@@ -182,7 +188,7 @@ async function launchWithGate(req: CloudLaunchRequest | CloudInternalLaunch, gat
         { repo: task.repo, paths: [], kind: null, text: `${task.title}\n${task.prompt}` },
         { fromLeader: task.origin === 'leader' },
       ).text;
-      const launched = await launchCloudSession({ cwd: checkout.path, prompt: buildCloudPrompt(task, lessons) }, deps.launcher);
+      const launched = await launchCloudSession({ cwd: checkout.path, prompt: buildCloudPrompt(task, lessons, playbook.block) }, deps.launcher);
       if (!launched.ok) return fail(launched.failure, launched.message);
       Object.assign(task, {
         state: 'running',

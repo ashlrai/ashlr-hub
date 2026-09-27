@@ -1238,6 +1238,13 @@ export const WORKBENCH_ROUTE_FAMILIES = [
     handler: 'handleWikiApi',
     prefixes: ['/api/verse/wiki'],
   },
+  {
+    id: 'playbooks',
+    owner: '3.15-playbooks',
+    module: 'src/core/verse/playbooks-api.ts',
+    handler: 'handlePlaybooksApi',
+    prefixes: ['/api/verse/playbooks'],
+  },
 ] as const satisfies readonly {
   id: string;
   owner: string;
