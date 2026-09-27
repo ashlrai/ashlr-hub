@@ -32,8 +32,9 @@ npm publish <tarball> --access public   # the path ship:local printed; see Publi
 **`npm run gate`** (`scripts/gate.mjs`) runs, and prints one table with a final
 `GATE PASS` or `GATE FAIL`:
 
-- in parallel: the root build, the web typecheck, eslint (cached), the real-I/O lane guard
-  and the docs check;
+- in parallel: the root build (tsc, then `scripts/copy-assets.mjs` from `npm run build`, so
+  `dist/core/web/public/` exists in a fresh worktree), the web typecheck, eslint (cached), the
+  real-I/O lane guard and the docs check;
 - then the web build and the first-paint budget;
 - then backend and web vitest in parallel, limited to the tests whose import graph reaches a
   file changed since the merge-base with `origin/master` (`--base <ref>` to change that),

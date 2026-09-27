@@ -142,7 +142,9 @@ type AshlrConfig = import('../core/types.js').AshlrConfig;
  *   - reasoning maintenance (A7): ingest + retention every 10 minutes;
  *   - budget capacity publisher (A9): the snapshot the fleet's fail-closed
  *     budget gate reads — without it Claude autonomy is blocked whenever
- *     nobody has the budget panel open.
+ *     nobody has the budget panel open;
+ *   - retro sweep (3.15): task ends → Lessons, hourly, even when nobody opens
+ *     Lessons.
  * Every loader is a seam for tests; the defaults are the real modules.
  */
 export interface VerseBackgroundDeps {
@@ -153,6 +155,7 @@ export interface VerseBackgroundDeps {
   loadApps?: () => Promise<{ warmVerseApps: (cfg: AshlrConfig) => Promise<void> }>;
   loadWiki?: () => Promise<{ scheduleWikiAutoRefresh: (cfg: AshlrConfig) => (() => void) | null }>;
   loadAutomations?: () => Promise<{ scheduleAutomationsTick: () => (() => void) | null }>;
+  loadRetroSweep?: () => Promise<{ scheduleRetroSweep: (cfg: AshlrConfig) => (() => void) | null }>;
   /**
    * Run the services that probe or publish ACCOUNT state (health sweep,
    * budget capacity publisher). False under `--no-accounts`: that flag says
@@ -244,6 +247,14 @@ export async function startVerseBackgroundServices(
   if (accountServices) await attempt('automations', async () => {
     const mod = await (deps.loadAutomations ?? (() => import('../core/automations/scheduler.js')))();
     return mod.scheduleAutomationsTick();
+  });
+  // 3.15 Lessons: sweep task ends into retros + suggested knowledge without
+  // waiting for someone to open Lessons. First tick minutes after start (never
+  // during startup), then hourly; skips while a user sweep runs. Live console
+  // only; never in a test process. server.ts close() also stops it.
+  if (accountServices) await attempt('retro-sweep', async () => {
+    const mod = await (deps.loadRetroSweep ?? (() => import('../core/learn/retro/sweep-timer.js')))();
+    return mod.scheduleRetroSweep(cfg);
   });
 
   let stopped = false;

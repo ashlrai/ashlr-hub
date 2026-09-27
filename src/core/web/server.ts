@@ -259,7 +259,13 @@ export async function startServer(
       const closeFleetHistory = import('../verse/fleet-history.js')
         .then((mod) => mod.closeFleetHistoryService())
         .catch(() => undefined);
-      await Promise.all([readProjections?.close(), closeFleetHistory, new Promise<void>((resolve) => {
+      // 3.15: the background retro sweep `ashlr verse` schedules (a module
+      // singleton, like the history service). Clears its timer and waits,
+      // bounded, for a sweep in flight; a no-op when none was scheduled.
+      const closeRetroSweep = import('../learn/retro/sweep-timer.js')
+        .then((mod) => mod.stopRetroSweepSchedule())
+        .catch(() => undefined);
+      await Promise.all([readProjections?.close(), closeFleetHistory, closeRetroSweep, new Promise<void>((resolve) => {
         // Drain all open SSE response streams registered by handleApi, then
         // close the HTTP server (stops accepting new connections).
         drainSseConnections();

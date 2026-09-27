@@ -7,6 +7,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  GATE_BUILD_ASSET_SCRIPTS,
+  buildCommands,
   evaluateVitest,
   formatDuration,
   loadKnownFailures,
@@ -197,6 +199,25 @@ describe('gate data files', () => {
       expect(existsSync(join(repoRoot, file)), file).toBe(true);
       expect(reason.length, file).toBeGreaterThan(10);
     }
+  });
+
+  it('the build step runs tsc, then the asset copy from `npm run build` (dist/core/web/public/ in a fresh worktree)', () => {
+    const commands = buildCommands({ nodeBin: 'node', tscBin: 'TSC', tsBuildInfoFile: '.ashlr-gate/tsc.tsbuildinfo' });
+    expect(commands[0]).toEqual({ cmd: 'node', args: ['TSC', '-p', 'tsconfig.json', '--incremental', '--tsBuildInfoFile', '.ashlr-gate/tsc.tsbuildinfo'] });
+    expect(commands.slice(1).map((c) => c.args)).toEqual(GATE_BUILD_ASSET_SCRIPTS.map((script) => [script]));
+    // test/activation-readiness-package.test.ts reads dist/core/web/public/app.js; copy-assets writes it.
+    expect(GATE_BUILD_ASSET_SCRIPTS).toContain('scripts/copy-assets.mjs');
+    expect(readFileSync(join(repoRoot, 'scripts/copy-assets.mjs'), 'utf8')).toContain("join(repoRoot, 'dist', 'core', 'web', 'public')");
+  });
+
+  it('every gate build asset script is still a step of `npm run build` (reused, never forked)', () => {
+    const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+    const buildSteps = String(pkg.scripts.build).split('&&').map((step) => step.trim());
+    // tsc runs first in both; every asset step the gate runs must appear after it, in the same order.
+    expect(buildSteps[0]).toBe('tsc -p tsconfig.json');
+    const positions = GATE_BUILD_ASSET_SCRIPTS.map((script) => buildSteps.indexOf(`node ${script}`));
+    for (const [i, pos] of positions.entries()) expect(pos, GATE_BUILD_ASSET_SCRIPTS[i]).toBeGreaterThan(0);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
   });
 
   it('npm scripts point at the gate and ship scripts', () => {

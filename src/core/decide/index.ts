@@ -18,7 +18,7 @@
  *   prioritizeNeedsYou(items)               Needs-you ordering
  *   chooseLane(task, context)               Devin fleet / orchestration
  *   triageTrigger(trigger, context)         automations
- *   suggestActionClass(action, class)       Leader (advisory, escalate-only)
+ *   suggestActionClass(action, class)       Leader memo via vision/leader-advice.ts (advisory, escalate-only)
  *   labelTaskClass(text) / primeTaskClasses orchestration task typing
  *   decide / decideEach                     anything new
  */

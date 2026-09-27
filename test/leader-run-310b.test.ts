@@ -150,6 +150,37 @@ describe('runLeader', () => {
     expect(readLeaderDirectives()?.grokLanes).toBe(1);
   });
 
+  it('3.15: Jev class advice is asked only AFTER enactment and labels the memo; it never changes the class, status or effect', async () => {
+    const { deps } = world({ now: () => T0, policy: () => makePolicy() });
+    const seen: Array<{ status: string; cls: string; lanes: number | undefined }> = [];
+    deps.adviseActionClass = async (action) => {
+      // By the time Jev is asked, the deterministic plan has already applied it.
+      seen.push({ status: action.status, cls: action.class, lanes: readLeaderDirectives()?.grokLanes });
+      return { actionId: action.id, deterministic: action.class, suggested: 'C', stricter: true, confidence: 0.97, source: 'jev' };
+    };
+    const r = await runLeader(deps, 'manual');
+    expect(seen).toEqual([{ status: 'applied', cls: 'A', lanes: 1 }]);
+    expect(r.memo!.actions[0]).toMatchObject({ kind: 'lanes.grok', class: 'A', status: 'applied' });
+    expect(readLeaderDirectives()?.grokLanes).toBe(1);
+    expect(r.memo!.actionAdvice).toEqual([
+      { actionId: r.memo!.actions[0]!.id, deterministic: 'A', suggested: 'C', stricter: true, confidence: 0.97, source: 'jev' },
+    ]);
+    // Persisted on the memo file Verse and the thread read.
+    const { readLeaderMemo } = await import('../src/core/vision/leader-memo.js');
+    expect(readLeaderMemo(r.memo!.id)?.actionAdvice).toEqual(r.memo!.actionAdvice);
+    // The ledger saw the action exactly as planned: no row mentions the advice.
+    expect(JSON.stringify(ledger.rows('leader:memo'))).not.toContain('actionAdvice');
+  });
+
+  it('3.15: a failing advisor leaves the memo without advice and the run ok', async () => {
+    const failing = world({ now: () => T0, policy: () => makePolicy() });
+    failing.deps.adviseActionClass = async () => { throw new Error('jev down'); };
+    const r1 = await runLeader(failing.deps, 'manual');
+    expect(r1.outcome).toBe('ok');
+    expect(r1.memo!.actionAdvice).toBeUndefined();
+    expect(r1.memo!.actions[0]).toMatchObject({ class: 'A', status: 'applied' });
+  });
+
   it('skips when the evidence has not changed, and caps model runs at 3 per day', async () => {
     let now = T0;
     const { deps, calls } = world({ now: () => now, replies: [reply(), reply(), reply(), reply()] });

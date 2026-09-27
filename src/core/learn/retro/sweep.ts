@@ -279,6 +279,11 @@ export function withPlaybookRef(retro: RetroV1, ref: unknown): RetroV1 {
 
 let sweepInFlight: Promise<RetroSweepResult> | null = null;
 
+/** True while a sweep is running in this process (the background timer skips then). */
+export function isRetroSweepInFlight(): boolean {
+  return sweepInFlight !== null;
+}
+
 /** Run one sweep (concurrent callers share the one in flight). */
 export function sweepRetros(deps: RetroSweepDeps, opts: { windowDays?: number; maxNew?: number } = {}): Promise<RetroSweepResult> {
   if (sweepInFlight) return sweepInFlight;

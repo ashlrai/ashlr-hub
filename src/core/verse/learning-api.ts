@@ -12,7 +12,8 @@
  *
  *   3.15 Lessons (retros + suggested knowledge, learn/retro/**):
  *   GET  /api/verse/learning/lessons            → LessonsStateV1 (kicks a
- *        background sweep when the last one is older than 10 minutes)
+ *        background sweep when the last one is older than 10 minutes; `ashlr
+ *        verse` also sweeps hourly on its own — learn/retro/sweep-timer.ts)
  *   POST /api/verse/learning/lessons/sweep      {}                      → {ok, created, …}
  *   POST /api/verse/learning/lessons/knowledge  {id, decision, text?, scope?} → {ok, note}
  *   POST /api/verse/learning/lessons/agents-md  {id}                    → {ok, note, taskId}
