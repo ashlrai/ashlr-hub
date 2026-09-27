@@ -9,7 +9,10 @@ import type {
 } from '../../../../core/verse/checkpoint-types.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { status as gitStatus } from '../git/git-fixtures.test-support.js';
-import { ChangesPanel } from './ChangesPanel.js';
+import { CLAUDE_1M_SEAT, CLAUDE_SEAT, CODEX_SEAT, GROK_SEAT, session as sessionFixture } from '../fixtures.test-support.js';
+import { VerseMutationLockedError } from '../verse-queries.js';
+import { ChangesPanel, type AskFn } from './ChangesPanel.js';
+import { storageKey } from './review-comments.js';
 import type { CheckpointClient } from './checkpoint-queries.js';
 
 const ROOT = 'aaaabbbbcccc';
@@ -260,6 +263,163 @@ describe('ChangesPanel', () => {
     const client = fakeClient();
     render(<ChangesPanel sessionId="chat-1" client={client} visible={false} />);
     expect(client.list).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChangesPanel review comments', () => {
+  const CHAT = sessionFixture({ id: 'chat-1', seatId: 'claude-main', title: 'Fix the login bug' });
+  const SEATS = [CLAUDE_SEAT, CODEX_SEAT, CLAUDE_1M_SEAT, GROK_SEAT];
+  const KEY = storageKey('chat-1', 'turn-2');
+
+  function askMock(): ReturnType<typeof vi.fn> & AskFn {
+    return vi.fn(async (input: Parameters<AskFn>[0]) => (input.target.seatId === CHAT.seatId
+      ? { sessionId: 'chat-1', created: false, label: input.target.label }
+      : { sessionId: 'vs_review', created: true, label: input.target.label })) as never;
+  }
+
+  async function openAppTs() {
+    await userEvent.click(await screen.findByRole('option', { name: /src\/app\.ts/ }));
+    return screen.findByRole('table', { name: 'Changes in src/app.ts' });
+  }
+
+  beforeEach(() => localStorage.clear());
+
+  it('comments on a picked line from the hunk bar; the draft survives a reload, can be edited and deleted', async () => {
+    const client = fakeClient();
+    const { unmount } = render(<ChangesPanel sessionId="chat-1" client={client} session={CHAT} seats={SEATS} ask={askMock()} />);
+    await openAppTs();
+    await userEvent.click(screen.getByRole('button', { name: 'Comment on the change at Line 1 in src/app.ts' }));
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Anchor' }), '2');
+    await userEvent.type(screen.getByRole('textbox', { name: 'Comment on line 2 of src/app.ts' }), 'Use a clearer name.');
+    await userEvent.click(screen.getByRole('button', { name: 'Add comment' }));
+    const thread = await screen.findByRole('group', { name: 'Review comments on Line 2 of src/app.ts' });
+    expect(within(thread).getByText('Use a clearer name.')).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem(KEY) ?? '[]')).toEqual([
+      expect.objectContaining({
+        path: 'src/app.ts',
+        hunk: '@@ -1,3 +1,3 @@',
+        line: 2,
+        side: 'new',
+        body: 'Use a clearer name.',
+        excerpt: [' import x from "x";', '-const total = count + 1;', '+const total = counts + 2;', ' export default total;'],
+        excerptAt: 2,
+      }),
+    ]);
+    unmount();
+
+    // A reload: the draft is back, under its line.
+    render(<ChangesPanel sessionId="chat-1" client={client} session={CHAT} seats={SEATS} ask={askMock()} />);
+    await screen.findByText('1 draft comment on turn 2');
+    await openAppTs();
+    await screen.findByRole('group', { name: 'Review comments on Line 2 of src/app.ts' });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit the comment on line 2 of src/app.ts' }));
+    const edit = screen.getByRole('textbox', { name: 'Edit the comment on line 2' });
+    await userEvent.clear(edit);
+    await userEvent.type(edit, 'Call it totalCount.');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findAllByText('Call it totalCount.');
+    expect(localStorage.getItem(KEY)).toContain('Call it totalCount.');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Delete the comment on line 2 of src/app.ts' }));
+    await waitFor(() => expect(screen.queryByRole('group', { name: /Review comments on/ })).toBeNull());
+    expect(localStorage.getItem(KEY)).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Draft review comments' })).toBeNull();
+  });
+
+  it('"Send N comments" sends ONE turn to the chat’s own seat with path:line anchors, then clears the drafts', async () => {
+    const client = fakeClient();
+    const ask = askMock();
+    render(<ChangesPanel sessionId="chat-1" client={client} session={CHAT} seats={SEATS} ask={ask} />);
+    await openAppTs();
+    // The pointer's path: the gutter "+" on a removed line.
+    await userEvent.click(screen.getByRole('button', { name: 'Comment on removed line 2 of src/app.ts' }));
+    await userEvent.type(screen.getByRole('textbox', { name: 'Comment on removed line 2 of src/app.ts' }), 'Why drop the +1?');
+    await userEvent.click(screen.getByRole('button', { name: 'Add comment' }));
+    // A whole-hunk comment, plus a second comment in the same thread.
+    await userEvent.click(screen.getByRole('button', { name: 'Comment on the change at Line 20 · function tail in src/app.ts' }));
+    await userEvent.type(screen.getByRole('textbox', { name: 'Comment on lines 20-22 of src/app.ts' }), 'Needs a test.');
+    await userEvent.click(screen.getByRole('button', { name: 'Add comment' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Add another comment on lines 20-22 of src/app.ts' }));
+    await userEvent.type(screen.getByRole('textbox', { name: 'Another comment on lines 20-22 of src/app.ts' }), 'And a doc line.');
+    await userEvent.click(screen.getByRole('button', { name: 'Add comment' }));
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Send 3 comments' }));
+    await waitFor(() => expect(ask).toHaveBeenCalledTimes(1));
+    const input = ask.mock.calls[0]![0] as Parameters<AskFn>[0];
+    expect(input.source).toBe(CHAT);
+    expect(input.target).toMatchObject({ seatId: 'claude-main', label: 'Claude Max' });
+    expect(input.relation).toBeUndefined();
+    expect(input.text).toMatch(/^Review comments on your changes in turn 2 \(3 comments/);
+    expect(input.text).toContain('src/app.ts:2 (removed line) — Why drop the +1?\n```diff\n import x from "x";\n-const total = count + 1;');
+    expect(input.text).toContain('src/app.ts:20-22 — Needs a test.\nsrc/app.ts:20-22 — And a doc line.\n```diff\n a\n b\n+c\n```');
+    await screen.findByText('Sent 3 comments to Claude Max.');
+    expect(screen.queryByRole('region', { name: 'Draft review comments' })).toBeNull();
+    expect(localStorage.getItem(KEY)).toBeNull();
+  });
+
+  it('a locked send says so and keeps the drafts', async () => {
+    const client = fakeClient();
+    const ask = vi.fn(async () => { throw new VerseMutationLockedError(); });
+    render(<ChangesPanel sessionId="chat-1" client={client} session={CHAT} seats={SEATS} ask={ask as never} />);
+    await openAppTs();
+    await userEvent.click(screen.getByRole('button', { name: 'Comment on the change at Line 1 in src/app.ts' }));
+    await userEvent.type(screen.getByRole('textbox', { name: 'Comment on lines 1-3 of src/app.ts' }), 'Hmm.');
+    await userEvent.click(screen.getByRole('button', { name: 'Add comment' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Send 1 comment' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Unlock actions with the mutation token first.');
+    expect(screen.getByRole('button', { name: 'Send 1 comment' })).toBeEnabled();
+    expect(localStorage.getItem(KEY)).toContain('Hmm.');
+  });
+
+  it('"Re-review with…" asks ANOTHER seat for a read-only review of the diff, in a new chat it can open', async () => {
+    const client = fakeClient();
+    const ask = askMock();
+    const onOpenSession = vi.fn();
+    render(<ChangesPanel sessionId="chat-1" client={client} session={CHAT} seats={SEATS} ask={ask} onOpenSession={onOpenSession} />);
+    await openAppTs();
+    await userEvent.click(screen.getByRole('button', { name: 'Comment on the change at Line 1 in src/app.ts' }));
+    await userEvent.type(screen.getByRole('textbox', { name: 'Comment on lines 1-3 of src/app.ts' }), 'Is counts right?');
+    await userEvent.click(screen.getByRole('button', { name: 'Add comment' }));
+
+    const trigger = screen.getByRole('button', { name: 'Re-review with…' });
+    trigger.focus();
+    await userEvent.keyboard('{ArrowDown}');
+    const menu = await screen.findByRole('menu', { name: 'Re-review with' });
+    // Not its own seat, not an unavailable one; a seat not reported ready says so.
+    expect(within(menu).getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['Claude A', 'GrokNot reported ready — it may decline']);
+    expect(within(menu).getByRole('menuitem', { name: 'Claude A' })).toHaveFocus();
+    await userEvent.keyboard('{ArrowDown}{Enter}');
+
+    await waitFor(() => expect(ask).toHaveBeenCalledTimes(1));
+    const input = ask.mock.calls[0]![0] as Parameters<AskFn>[0];
+    expect(input.target).toMatchObject({ seatId: 'grok-a', label: 'Grok' });
+    expect(input.relation).toBe('review');
+    expect(input.title).toBe('Review · Fix the login bug');
+    expect(input.text).toMatch(/^You are reviewing work produced by another model \(Claude Max\)/);
+    expect(input.text).toContain('change nothing');
+    expect(input.text).toContain('The changes to review: everything since before turn 2, 2 files (+6 −1).');
+    expect(input.text).toContain('diff --git a/README.md b/README.md');
+    expect(input.text).toContain('diff --git a/src/app.ts b/src/app.ts');
+    expect(input.text).toContain('src/app.ts:1-3 — Is counts right?');
+    expect(client.diff).toHaveBeenCalledWith(expect.objectContaining({ file: 'README.md', mode: 'since' }));
+
+    await screen.findByText(/Asked Grok to review everything since before turn 2 in a new chat\./);
+    await userEvent.click(screen.getByRole('button', { name: 'Open Grok’s review' }));
+    expect(onOpenSession).toHaveBeenCalledWith('vs_review');
+    // A review request is not the operator's send: the drafts stay.
+    expect(localStorage.getItem(KEY)).toContain('Is counts right?');
+  });
+
+  it('without the chat record there is nothing to send to', async () => {
+    const client = fakeClient();
+    render(<ChangesPanel sessionId="chat-1" client={client} />);
+    await openAppTs();
+    await userEvent.click(screen.getByRole('button', { name: 'Comment on the change at Line 1 in src/app.ts' }));
+    await userEvent.type(screen.getByRole('textbox', { name: 'Comment on lines 1-3 of src/app.ts' }), 'Later.');
+    await userEvent.click(screen.getByRole('button', { name: 'Add comment' }));
+    expect(await screen.findByRole('button', { name: 'Send 1 comment' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Re-review with…' })).toBeNull();
   });
 });
 

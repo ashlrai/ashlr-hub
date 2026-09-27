@@ -10,12 +10,29 @@
  * Hunks are matched to the server's by position AND header: the server hashes
  * each hunk and a Reject names that hash, so a hunk that moved since the diff
  * was read is refused by the server instead of misapplied.
+ *
+ * REVIEW COMMENTS (optional `review`): "Comment" on a hunk's bar opens an
+ * editor with a line picker (keyboard path); the pointer gets a "+" in the
+ * gutter of the hovered line. Threads render under their line (or the hunk
+ * bar for a whole-hunk comment); comments whose hunk is no longer in this
+ * diff are listed above it, still editable.
  */
-import { useMemo, useState } from 'react';
+import { Fragment, useEffect, useId, useMemo, useState, type ReactNode } from 'react';
 import type { VerseCheckpointDecision, VerseCheckpointHunkInfo } from '../../../../core/verse/checkpoint-types.js';
 import { parseUnifiedDiff, toSplitRows, type DiffLine } from '../../inbox/diff-parser.js';
 import { languageForPath, tokenizeLine, type LangFamily } from '../../inbox/highlight.js';
 import { wordDiff, type Span } from './changes-model.js';
+import { CommentEditor, ReviewThread, type ThreadActions } from './ReviewThread.js';
+import {
+  anchorWhere,
+  excerptFor,
+  groupThreads,
+  hunkCore,
+  lineAnchor,
+  lineKey,
+  type CommentAnchor,
+  type ReviewComment,
+} from './review-comments.js';
 import review from '../git/DiffPane.module.css';
 import styles from './ChangesPanel.module.css';
 
@@ -36,11 +53,31 @@ export interface HunkPatchProps {
   /** The hunk hash whose action is in flight. */
   busyHunk: string | null;
   onHunk: (hash: string, decision: VerseCheckpointDecision) => void;
+  /** Review comments on this file; absent = no commenting. */
+  review?: HunkReview;
 }
+
+export interface HunkReview {
+  /** This file's drafted comments. */
+  comments: readonly ReviewComment[];
+  onAdd: (anchor: CommentAnchor, body: string) => void;
+  onEdit: (id: string, body: string) => void;
+  onDelete: (id: string) => void;
+}
+
+/** An open "new comment" editor: where it is drawn, and what it is anchored to. */
+type Composer =
+  /** From the hunk bar or a gutter "+": the line is picked (null = the whole hunk). */
+  | { kind: 'new'; hunk: string; at: string; index: number | null }
+  /** "Add a comment" under a thread: the thread's own anchor. */
+  | { kind: 'reply'; at: string; anchor: CommentAnchor };
 
 interface HunkView {
   key: string;
   label: string;
+  /** Header core, the comment anchor. */
+  core: string;
+  lines: DiffLine[];
   info: VerseCheckpointHunkInfo | null;
   unified: Array<{ key: string; line: DiffLine; spans: Span[] }>;
   split: Array<{ key: string; left: DiffLine | null; right: DiffLine | null; leftSpans: Span[]; rightSpans: Span[] }>;
@@ -76,6 +113,8 @@ function build(text: string, infos: readonly VerseCheckpointHunkInfo[]): { hunks
     return {
       key: `h${h}`,
       label: hunkLabel(hunk.header, h),
+      core: hunkCore(hunk.header),
+      lines: hunk.lines,
       info,
       unified: hunk.lines.map((line, i) => ({ key: `h${h}l${i}`, line, spans: spansOf.get(line) ?? [] })),
       split: pairs.map((p, i) => ({
@@ -90,10 +129,42 @@ function build(text: string, infos: readonly VerseCheckpointHunkInfo[]): { hunks
   return { hunks, notice: file.unparsedNotice, status: file.status };
 }
 
-export function HunkPatch({ path, text, truncated, binary, hunks, layout, actionable, busyHunk, onHunk }: HunkPatchProps) {
+export function HunkPatch({ path, text, truncated, binary, hunks, layout, actionable, busyHunk, onHunk, review: commenting }: HunkPatchProps) {
   const lang = languageForPath(path);
   const built = useMemo(() => build(text, hunks), [text, hunks]);
   const [showAll, setShowAll] = useState(false);
+  const [composer, setComposer] = useState<Composer | null>(null);
+  const pickerId = useId();
+
+  // A new layout or a new diff redraws every row: an open editor would point nowhere.
+  useEffect(() => setComposer(null), [layout, text]);
+
+  /** Where each thread is drawn: under its line's row, else its hunk's bar; else above the grid (its hunk is gone). */
+  const placed = useMemo(() => {
+    const at = new Map<string, ReviewComment[][]>();
+    const orphans: ReviewComment[][] = [];
+    if (!commenting) return { at, orphans };
+    const byCore = new Map<string, HunkView>();
+    for (const h of built.hunks) if (!byCore.has(h.core)) byCore.set(h.core, h);
+    for (const thread of groupThreads(commenting.comments)) {
+      const head = thread[0]!;
+      const hunk = byCore.get(head.hunk);
+      if (!hunk) {
+        orphans.push(thread);
+        continue;
+      }
+      let loc = barKey(hunk);
+      if (head.line !== null) {
+        const want = lineKey(head);
+        const row = layout === 'split'
+          ? hunk.split.find((r) => (r.right && lineKey(lineAnchor(r.right)) === want) || (r.left && lineKey(lineAnchor(r.left)) === want))
+          : hunk.unified.find((r) => lineKey(lineAnchor(r.line)) === want);
+        if (row) loc = row.key;
+      }
+      at.set(loc, [...(at.get(loc) ?? []), thread]);
+    }
+    return { at, orphans };
+  }, [built, commenting, layout]);
 
   if (binary) return <p className={review.patchNotice}>Binary file — accept or reject it as a whole.</p>;
   if (built.hunks.length === 0) {
@@ -109,12 +180,135 @@ export function HunkPatch({ path, text, truncated, binary, hunks, layout, action
   let cut = false;
   const totalRows = built.hunks.reduce((n, h) => n + (layout === 'split' ? h.split.length : h.unified.length), 0);
 
+  const close = () => setComposer(null);
+  const startAt = (hunk: HunkView, at: string, index: number | null) => setComposer({ kind: 'new', hunk: hunk.key, at, index });
+
+  const actionsAt = (loc: string): ThreadActions | null => (commenting
+    ? {
+      onEdit: commenting.onEdit,
+      onDelete: commenting.onDelete,
+      onReply: (head) => setComposer({ kind: 'reply', at: loc, anchor: anchorOf(head) }),
+    }
+    : null);
+
+  const editorAt = (hunk: HunkView, loc: string): ReactNode => {
+    if (!commenting || !composer || composer.at !== loc) return null;
+    if (composer.kind === 'reply') {
+      const anchor = composer.anchor;
+      return (
+        <CommentEditor
+          label={`Another comment on ${anchorWhere(anchor).toLowerCase()} of ${path}`}
+          submitLabel="Add comment"
+          onCancel={close}
+          onSave={(body) => {
+            commenting.onAdd(anchor, body);
+            close();
+          }}
+        />
+      );
+    }
+    if (composer.hunk !== hunk.key) return null;
+    const index = composer.index;
+    const line = index === null ? null : hunk.lines[index] ?? null;
+    const anchor = line ? lineAnchor(line) : { line: null, side: 'new' as const };
+    const where = anchorWhere({ hunk: hunk.core, ...anchor });
+    const picker = (
+      <div className={styles.picker}>
+        <label htmlFor={pickerId} className={review.editorLabel}>Anchor</label>
+        <select
+          id={pickerId}
+          className={styles.select}
+          value={line ? String(index) : ''}
+          onChange={(e) => setComposer({ ...composer, index: e.target.value === '' ? null : Number(e.target.value) })}
+        >
+          <option value="">Whole change · {anchorWhere({ hunk: hunk.core, line: null, side: 'new' })}</option>
+          {hunk.lines.map((l, i) => {
+            const a = lineAnchor(l);
+            if (a.line === null) return null;
+            return (
+              <option key={i} value={i}>
+                {anchorWhere({ hunk: hunk.core, ...a })}: {l.kind === 'add' ? '+' : l.kind === 'del' ? '−' : ' '}{l.text.trim().slice(0, 60)}
+              </option>
+            );
+          })}
+        </select>
+      </div>
+    );
+    return (
+      <CommentEditor
+        label={`Comment on ${where.toLowerCase()} of ${path}`}
+        submitLabel="Add comment"
+        picker={picker}
+        onCancel={close}
+        onSave={(body) => {
+          commenting.onAdd({ path, hunk: hunk.core, line: anchor.line, side: anchor.side, ...excerptFor(hunk.lines, line ? index : null) }, body);
+          close();
+        }}
+      />
+    );
+  };
+
+  /** The row under a line (or a hunk bar) holding its threads and any open editor. */
+  const threadRow = (hunk: HunkView, loc: string): ReactNode => {
+    const actions = actionsAt(loc);
+    if (!actions) return null;
+    const threads = placed.at.get(loc) ?? [];
+    const editor = editorAt(hunk, loc);
+    if (threads.length === 0 && !editor) return null;
+    return (
+      <tr className={review.threadRow}>
+        <td colSpan={5}>
+          {threads.map((t) => (
+            <ReviewThread
+              key={t[0]!.id}
+              path={path}
+              comments={t}
+              actions={actions}
+              replying={composer?.kind === 'reply' && composer.at === loc && sameAnchor(composer.anchor, t[0]!)}
+            />
+          ))}
+          {editor}
+        </td>
+      </tr>
+    );
+  };
+
+  const gutter = (hunk: HunkView, rowKey: string, line: DiffLine | null): ReactNode => {
+    const a = line ? lineAnchor(line) : null;
+    if (!commenting || !line || !a || a.line === null) return <td className={review.gutter} aria-hidden="true" />;
+    const where = anchorWhere({ hunk: hunk.core, ...a }).toLowerCase();
+    return (
+      <td className={review.gutter}>
+        {/* The pointer's path. One tab stop per line would bury the keyboard; the hunk bar's Comment is its path. */}
+        <button
+          type="button"
+          className={review.gutterAdd}
+          tabIndex={-1}
+          onClick={() => startAt(hunk, rowKey, hunk.lines.indexOf(line))}
+          aria-label={`Comment on ${where} of ${path}`}
+          title={`Comment on ${where}`}
+        >
+          +
+        </button>
+      </td>
+    );
+  };
+
+  const orphanActions = actionsAt('orphans');
   return (
     <div className={review.patch}>
       {truncated ? (
         <p className={review.truncated} role="note">
           Showing the first 256 KB of this file’s changes. Reject it as a whole, or open it in your editor for the rest.
         </p>
+      ) : null}
+      {orphanActions && placed.orphans.length > 0 ? (
+        <div className={styles.orphans}>
+          <p className={styles.orphansTitle}>Comments on changes no longer in this diff</p>
+          {placed.orphans.map((t) => (
+            <ReviewThread key={t[0]!.id} path={path} comments={t} actions={orphanActions} replying />
+          ))}
+        </div>
       ) : null}
       <table className={review.grid} data-layout={layout} aria-label={`Changes in ${path}`}>
         {built.hunks.map((hunk) => {
@@ -135,6 +329,16 @@ export function HunkPatch({ path, text, truncated, binary, hunks, layout, action
                   <div className={styles.hunkBar}>
                     <span className={styles.hunkLabel}>{hunk.label}</span>
                     {accepted ? <span className={styles.reviewed}>Accepted</span> : null}
+                    {commenting ? (
+                      <button
+                        type="button"
+                        className={styles.hunkButton}
+                        onClick={() => startAt(hunk, barKey(hunk), null)}
+                        aria-label={`Comment on the change at ${hunk.label} in ${path}`}
+                      >
+                        Comment
+                      </button>
+                    ) : null}
                     {actionable && hunk.info ? (
                       <span className={styles.hunkActions}>
                         {!accepted ? (
@@ -164,32 +368,39 @@ export function HunkPatch({ path, text, truncated, binary, hunks, layout, action
                   </div>
                 </td>
               </tr>
+              {threadRow(hunk, barKey(hunk))}
               {layout === 'unified'
                 ? (shown as HunkView['unified']).map((row) => (
-                  <tr key={row.key} className={review.lineRow} data-kind={row.line.kind}>
-                    <td className={review.no} aria-hidden="true">{row.line.oldLineNo ?? ''}</td>
-                    <td className={review.no} aria-hidden="true">{row.line.newLineNo ?? ''}</td>
-                    <td className={review.gutter} aria-hidden="true" />
-                    <td className={review.marker} aria-hidden="true">
-                      {row.line.kind === 'add' ? '+' : row.line.kind === 'del' ? '−' : ''}
-                    </td>
-                    <td className={review.code} aria-label={lineLabel(row.line)}>
-                      <Code text={row.line.text} lang={lang} spans={row.line.kind === 'context' ? [] : row.spans} />
-                    </td>
-                  </tr>
+                  <Fragment key={row.key}>
+                    <tr className={review.lineRow} data-kind={row.line.kind}>
+                      <td className={review.no} aria-hidden="true">{row.line.oldLineNo ?? ''}</td>
+                      <td className={review.no} aria-hidden="true">{row.line.newLineNo ?? ''}</td>
+                      {gutter(hunk, row.key, row.line)}
+                      <td className={review.marker} aria-hidden="true">
+                        {row.line.kind === 'add' ? '+' : row.line.kind === 'del' ? '−' : ''}
+                      </td>
+                      <td className={review.code} aria-label={lineLabel(row.line)}>
+                        <Code text={row.line.text} lang={lang} spans={row.line.kind === 'context' ? [] : row.spans} />
+                      </td>
+                    </tr>
+                    {threadRow(hunk, row.key)}
+                  </Fragment>
                 ))
                 : (shown as HunkView['split']).map((row) => (
-                  <tr key={row.key} className={review.lineRow} data-kind="pair">
-                    <td className={review.no} aria-hidden="true">{row.left?.oldLineNo ?? ''}</td>
-                    <td className={review.half} data-kind={row.left?.kind ?? 'empty'} aria-label={row.left ? lineLabel(row.left) : undefined}>
-                      {row.left ? <Code text={row.left.text} lang={lang} spans={row.left.kind === 'context' ? [] : row.leftSpans} /> : null}
-                    </td>
-                    <td className={review.gutter} aria-hidden="true" />
-                    <td className={review.no} aria-hidden="true">{row.right?.newLineNo ?? ''}</td>
-                    <td className={review.half} data-kind={row.right?.kind ?? 'empty'} aria-label={row.right && row.right !== row.left ? lineLabel(row.right) : undefined}>
-                      {row.right ? <Code text={row.right.text} lang={lang} spans={row.right.kind === 'context' ? [] : row.rightSpans} /> : null}
-                    </td>
-                  </tr>
+                  <Fragment key={row.key}>
+                    <tr className={review.lineRow} data-kind="pair">
+                      <td className={review.no} aria-hidden="true">{row.left?.oldLineNo ?? ''}</td>
+                      <td className={review.half} data-kind={row.left?.kind ?? 'empty'} aria-label={row.left ? lineLabel(row.left) : undefined}>
+                        {row.left ? <Code text={row.left.text} lang={lang} spans={row.left.kind === 'context' ? [] : row.leftSpans} /> : null}
+                      </td>
+                      {gutter(hunk, row.key, row.right ?? row.left)}
+                      <td className={review.no} aria-hidden="true">{row.right?.newLineNo ?? ''}</td>
+                      <td className={review.half} data-kind={row.right?.kind ?? 'empty'} aria-label={row.right && row.right !== row.left ? lineLabel(row.right) : undefined}>
+                        {row.right ? <Code text={row.right.text} lang={lang} spans={row.right.kind === 'context' ? [] : row.rightSpans} /> : null}
+                      </td>
+                    </tr>
+                    {threadRow(hunk, row.key)}
+                  </Fragment>
                 ))}
             </tbody>
           );
@@ -202,6 +413,18 @@ export function HunkPatch({ path, text, truncated, binary, hunks, layout, action
       ) : null}
     </div>
   );
+}
+
+function barKey(hunk: HunkView): string {
+  return `${hunk.key}:bar`;
+}
+
+function anchorOf(c: CommentAnchor): CommentAnchor {
+  return { path: c.path, hunk: c.hunk, line: c.line, side: c.side, excerpt: c.excerpt, excerptAt: c.excerptAt };
+}
+
+function sameAnchor(a: CommentAnchor, b: CommentAnchor): boolean {
+  return a.path === b.path && a.hunk === b.hunk && lineKey(a) === lineKey(b);
 }
 
 function lineLabel(line: DiffLine): string {
