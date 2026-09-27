@@ -414,6 +414,13 @@ export interface VerseTurnHookInfo {
   sessionId: string;
   turnId: string;
   roots: string[];
+  /**
+   * `beforeTurn` only: aborted when the engine stops waiting (its own
+   * VERSE_TURN_HOOK_TIMEOUT_MS, or the hook's promise settling) — always
+   * BEFORE the seat process is spawned. A hook must not record anything
+   * captured after this fires as "before the turn".
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -2147,18 +2154,27 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       const gate = { turnId, cancelled: false };
       gating.set(id, gate);
       const hook = turnHooks.beforeTurn;
+      // ONE deadline for the hook: when it passes, `deadline` is aborted FIRST
+      // (the hook then drops any snapshot not already finished) and only then
+      // does the turn go on to spawn.
+      const deadline = new AbortController();
       let timer: NodeJS.Timeout | undefined;
       const bounded = Promise.race([
         Promise.resolve()
-          .then(() => hook({ sessionId: id, turnId, roots: verseSessionRoots(session) }))
+          .then(() => hook({ sessionId: id, turnId, roots: verseSessionRoots(session), signal: deadline.signal }))
           .catch(() => { log('warn', `session ${id}: checkpoint before turn failed; the turn runs without one`); }),
         new Promise<void>((resolveGate) => {
-          timer = setTimeout(resolveGate, VERSE_TURN_HOOK_TIMEOUT_MS);
+          timer = setTimeout(() => {
+            deadline.abort();
+            resolveGate();
+          }, VERSE_TURN_HOOK_TIMEOUT_MS);
           timer.unref?.();
         }),
       ]);
-      void bounded.then(() => {
+      const proceed = (): void => {
         if (timer) clearTimeout(timer);
+        // Whichever way the gate opened, the hook's budget is over now.
+        deadline.abort();
         if (gating.get(id) === gate) gating.delete(id);
         const current = store.get(id);
         if (closed || !current) return;
@@ -2172,11 +2188,13 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
           afterTurn(id, turnId, 'cancelled', 0);
           return;
         }
-        try {
-          startTurn(current, turnId, seatLaunch, launch, redactions, { ...turnCtx, gated: true });
-        } catch (err) {
-          log('error', `session ${id}: turn could not start after its checkpoint (${err instanceof Error ? err.name : 'error'})`);
-        }
+        startTurn(current, turnId, seatLaunch, launch, redactions, { ...turnCtx, gated: true });
+      };
+      void bounded.then(proceed).catch((err: unknown) => {
+        // Never an unhandled rejection: a throw here is logged, and a turn that
+        // could not start is not left busy forever.
+        if (gating.get(id) === gate) gating.delete(id);
+        log('error', `session ${id}: turn could not start after its checkpoint (${err instanceof Error ? err.name : 'error'})`);
       });
       return;
     }
@@ -2410,6 +2428,12 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
 
   function isBusy(id: string): boolean {
     return running.has(id) || gating.has(id);
+  }
+
+  /** A turn still waiting on its checkpoint closes as stopped instead of starting (send-now, Stop). */
+  function stopGated(id: string): void {
+    const gate = gating.get(id);
+    if (gate) gate.cancelled = true;
   }
 
   /** Throws VERSE_SEAT_NOT_READY on an explicit refusal; admits on anything else. */
@@ -3007,6 +3031,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         queue.markSendNow(id, item.id);
         const turn = running.get(id);
         if (turn && !turn.settled) requestTermination(id, turn, 'cancelled');
+        else stopGated(id);
       }
       return { ...queue.get(id), sentTurnId: null };
     },
@@ -3027,6 +3052,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         queue.markSendNow(id, queueId);
         const turn = running.get(id);
         if (turn && !turn.settled) requestTermination(id, turn, 'cancelled');
+        else stopGated(id);
         return { ...queue.get(id), sentTurnId: null };
       }
       const sentTurnId = drainOne(id, queueId);

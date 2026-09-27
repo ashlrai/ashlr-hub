@@ -118,6 +118,56 @@ describe('turn hooks and the Changes list', () => {
   });
 });
 
+describe('the pre-turn budget', () => {
+  it('counts the wait behind a slow reject/undo: when it runs out, no late snapshot is recorded as "pre"', async () => {
+    // Turn 1 with the normal budget (its journal is on disk for the next service).
+    await agentTurn('t1', () => write('a.txt', 'agent one\n'));
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const slow = createCheckpointService({
+      stateDir,
+      timeoutMs: 250,
+      // The repository lock a reject takes: held until the test lets go.
+      lock: async (_root, fn) => { await held; return fn(); },
+    });
+    const rejecting = slow.review(chat, { turnId: 't1', rootId: ROOT(), file: 'a.txt', hunk: null, decision: 'reject' });
+
+    const t0 = Date.now();
+    await slow.beforeTurn({ sessionId: chat.id, turnId: 't2', roots: [repo] });
+    // Returned on ITS budget (from call entry), not after the reject.
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    // The "agent" of turn 2 writes as soon as beforeTurn returns.
+    write('b.txt', 'written by the turn-2 agent\n');
+    release();
+    await rejecting;
+    await slow.idle(chat.id);
+
+    const t2 = (await slow.list(chat)).turns.find((t) => t.turnId === 't2')!;
+    expect(t2.roots[0]!.pre).toMatchObject({ commit: null, error: expect.stringMatching(/too long/) });
+    expect(git(repo, 'for-each-ref', '--format=%(refname)', 'refs/ashlr').split('\n').filter((r) => r.includes('/t2/'))).toEqual([]);
+  });
+
+  it('the engine\'s signal ends the budget: an abort before the snapshot finishes records no "pre"', async () => {
+    const ctl = new AbortController();
+    const pending = service.beforeTurn({ sessionId: chat.id, turnId: 't1', roots: [repo], signal: ctl.signal });
+    ctl.abort();
+    await pending;
+    write('a.txt', 'agent\n');
+    await service.idle(chat.id);
+    const t1 = (await service.list(chat)).turns[0]!;
+    expect(t1.roots[0]!.pre?.commit).toBeNull();
+    expect(git(repo, 'for-each-ref', 'refs/ashlr')).toBe('');
+  });
+
+  it('a snapshot that finished inside the budget is kept', async () => {
+    const ctl = new AbortController();
+    await service.beforeTurn({ sessionId: chat.id, turnId: 't1', roots: [repo], signal: ctl.signal });
+    ctl.abort();
+    const pre = (await service.list(chat)).turns[0]!.roots[0]!.pre!.commit!;
+    expect(git(repo, 'show', `${pre}:a.txt`)).toBe(BASE_A);
+  });
+});
+
 describe('review: accept and reject', () => {
   it('rejects one hunk (restored from the checkpoint), records accepts, and rejects a whole file', async () => {
     await agentTurn('t1', () => {
@@ -381,6 +431,30 @@ describe('engine gate', () => {
     expect(events.map((e) => e.type)).toEqual(['user-message', 'cancelled', 'turn-done']);
     expect(existsSync(join(repo, 'agent-wrote.txt'))).toBe(false);
     expect(engine.getSession(session.id)?.status).toBe('idle');
+  });
+
+  it('hands beforeTurn a signal that is aborted before the agent is spawned', async () => {
+    let seen: AbortSignal | undefined;
+    let abortedAtSpawn: boolean | null = null;
+    engine = createVerseEngine({
+      root: join(work, 'verse'),
+      readiness: null,
+      reasoningTap: null,
+      preflight: null,
+      turnHooks: {
+        beforeTurn: async (info) => {
+          seen = info.signal;
+          info.signal?.addEventListener('abort', () => { abortedAtSpawn = !existsSync(join(repo, 'agent-wrote.txt')); });
+        },
+      },
+    });
+    const session = engine.createSession({ projectPath: repo, seatId: 'claude-max' }, launch);
+    const done = untilTurnDone(engine, session.id);
+    engine.sendTurn(session.id, 'go');
+    await done;
+    expect(seen).toBeInstanceOf(AbortSignal);
+    expect(seen!.aborted).toBe(true);
+    expect(abortedAtSpawn).toBe(true);
   });
 
   it('a hook that fails never blocks the turn', async () => {

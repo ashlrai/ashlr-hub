@@ -239,6 +239,8 @@ export interface TurnHookInfo {
   sessionId: string;
   turnId: string;
   roots: readonly string[];
+  /** The engine's own deadline for `beforeTurn`: aborted before the agent may start. */
+  signal?: AbortSignal;
 }
 
 interface PreviewRoot {
@@ -307,18 +309,12 @@ export function createCheckpointService(opts: CheckpointServiceOptions = {}): Ch
   // ---- per-chat serial queue: hooks and mutations never interleave ----------
 
   /**
-   * Mutations (reject, apply) in flight per chat. A turn that starts while one
-   * runs waits for it WITHOUT the checkpoint deadline: the agent must never
-   * write into files an Undo is still restoring.
+   * Reject/Undo/Redo writes. They run in the chat's serial queue, so a turn's
+   * `pre` snapshot always runs AFTER a write already in flight (never in the
+   * middle of it) — but it waits for it inside the same checkpoint budget.
    */
-  const mutations = new Map<string, Promise<unknown>>();
-
   function mutation<T>(chatId: string, fn: () => Promise<T>): Promise<T> {
-    const p = serial(chatId, fn);
-    const settled = p.then(() => undefined, () => undefined);
-    mutations.set(chatId, settled);
-    void settled.then(() => { if (mutations.get(chatId) === settled) mutations.delete(chatId); });
-    return p;
+    return serial(chatId, fn);
   }
 
   function serial<T>(chatId: string, fn: () => Promise<T>): Promise<T> {
@@ -409,45 +405,61 @@ export function createCheckpointService(opts: CheckpointServiceOptions = {}): Ch
 
   // ---- hooks -----------------------------------------------------------------------
 
+  /**
+   * The `pre` checkpoint. ONE budget, started at call entry, covers everything
+   * — waiting behind a reject/undo already queued for this chat, resolving the
+   * repositories, and the snapshot itself. It ends at whichever comes first:
+   * this service's `timeoutMs`, or the engine's `info.signal` (the engine's own
+   * ceiling). Either way `aborted` is set BEFORE this call returns / the signal
+   * handler returns, i.e. before the engine can spawn the agent; from then on
+   * no snapshot is recorded as `pre` unless it had already finished (so it
+   * cannot hold a single byte the agent wrote).
+   */
   async function beforeTurn(info: TurnHookInfo): Promise<void> {
-    const pending = mutations.get(info.sessionId);
-    if (pending) await pending;
-    let aborted = false;
+    const budget = { aborted: false };
+    let wake: () => void = () => undefined;
+    const stopped = new Promise<'aborted'>((resolve) => { wake = () => resolve('aborted'); });
+    const abort = (): void => {
+      if (budget.aborted) return;
+      budget.aborted = true;
+      wake();
+    };
+    const signal = info.signal;
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(abort, timeoutMs);
+    timer.unref?.();
+    const skipped = 'The checkpoint took too long; this turn ran without one.';
+
+    // Queued at once (not after an await), so this turn's `pre` is always
+    // ordered before its own `post` in the chat's queue.
     const work = serial(info.sessionId, async () => {
       const repos = await reposOf(info.roots);
       if (repos.size === 0) return;
-      const snaps = await snapRoots(repos, `Ashlr Verse checkpoint: before turn ${info.turnId}`, () => aborted);
+      const snaps = budget.aborted
+        ? [...repos].map(([rootId, path]) => ({ rootId, path, commit: null, error: skipped, skipped: 0, ms: 0, snap: null }))
+        : await snapRoots(repos, `Ashlr Verse checkpoint: before turn ${info.turnId}`, () => budget.aborted);
       for (const s of snaps) {
-        if (s.commit && !aborted) {
-          try {
-            await setCheckpointRef(s.path, checkpointRefName(info.sessionId, info.turnId, s.rootId, 'pre'), s.commit, run);
-          } catch (err) {
-            s.commit = null;
-            s.error = operatorMessage(err);
-          }
-        }
-        if (aborted && s.commit) {
+        // A commit here finished before the budget ran out (snapRoots drops
+        // any that finished later), so its content predates the agent.
+        if (!s.commit) continue;
+        try {
+          await setCheckpointRef(s.path, checkpointRefName(info.sessionId, info.turnId, s.rootId, 'pre'), s.commit, run);
+        } catch (err) {
           s.commit = null;
-          s.error = 'The checkpoint took too long; this turn ran without one.';
+          s.error = operatorMessage(err);
         }
       }
       await record(info.sessionId, { kind: 'turn-start', at: nowIso(clock()), turnId: info.turnId, roots: snaps.map(({ snap: _snap, ...r }) => r) });
     });
-    let timer: NodeJS.Timeout | undefined;
-    const deadline = new Promise<'timeout'>((resolve) => {
-      timer = setTimeout(() => resolve('timeout'), timeoutMs);
-      timer.unref?.();
-    });
     try {
-      const outcome = await Promise.race([work.then(() => 'done' as const, () => 'done' as const), deadline]);
-      if (outcome === 'timeout') {
-        // The turn goes ahead; a snapshot finishing later must not be mistaken
-        // for "before the turn" (it could hold the agent's first edits).
-        aborted = true;
-        log(`checkpoints: turn ${info.turnId} started without a checkpoint (timeout)`);
-      }
+      const outcome = await Promise.race([work.then(() => 'done' as const, () => 'done' as const), stopped]);
+      if (outcome === 'aborted') log(`checkpoints: turn ${info.turnId} started without a checkpoint (timeout)`);
     } finally {
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      // Whatever happens next happens after the engine may have spawned.
+      if (!budget.aborted) budget.aborted = true;
     }
   }
 
