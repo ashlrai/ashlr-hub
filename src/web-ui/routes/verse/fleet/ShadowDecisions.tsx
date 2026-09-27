@@ -132,7 +132,7 @@ export function ShadowDecisions({ now }: { now: number }) {
           ))}
         </ul>
       ) : null}
-      <Card title="Shadow decisions" caption={caption}>
+      <Card title="Merge decisions" caption={caption}>
         {!read.data ? (
           <p className={styles.muted} aria-busy="true">Reading the gate decisions…</p>
         ) : !value ? (

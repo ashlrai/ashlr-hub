@@ -38,6 +38,7 @@ import {
   type RepoStage,
 } from '../fleet/fleet-types.js';
 import { canonicalJson } from './canonical-json.js';
+import { ELITE_DIRECT_ONE_LINE, ELITE_DIRECT_STAGE_ID, grantHasEliteDirect } from './elite-models.js';
 import { draftEnforcementFor, reapprovalDowngrades, type ServerEnforcementState } from './server-enforcement.js';
 import { keyIdForPublicKeyPem } from './custody-client.js';
 import {
@@ -560,6 +561,43 @@ export interface GrantDraftInput {
    * refuses them). Absent / false = no Devin anywhere in the draft.
    */
   devin?: boolean;
+  /**
+   * 3.15 elite self-land: the ladder is ONE signed `elite-direct` rung
+   * (eliteDirectStage) instead of shadow → 3d. Absent / false = the default
+   * ladder. Mason opts in at `ashlr authority setup` / `grant` / `re-approve`.
+   */
+  eliteDirect?: boolean;
+}
+
+/**
+ * 3.15 — the `elite-direct` rung (Mason, 2026-09-27): every granted repo at
+ * the stage the grant signs for it (merging repos merge from day one), every
+ * granted engine (so Codex's GPT-6 produces from the start), the grant's own
+ * size caps, and a per-repo daily cap left to each repo's signed
+ * `maxMergesPerDay`. While it is the CURRENT stage, an elite model's work
+ * passes G6 on deterministic verification (authority/elite-models.ts,
+ * fleet/merge-gates.ts); every other producer still needs its judge. It is
+ * the only rung, so it never advances; a breach (sandbox violation, reserve
+ * breach, reverts above 10%) restarts its evidence window, and Stop, holds
+ * and the post-merge revert are untouched. `leaderClasses` is passed in so
+ * choosing elite-direct never widens the Leader: a new grant gets none (as
+ * shadow), a re-approval keeps the rung it had reached.
+ */
+export function eliteDirectStage(
+  scope: Pick<StandingGrantV1, 'repos' | 'engines' | 'merge'>,
+  leaderClasses: readonly LeaderGrantClass[],
+): RolloutStage {
+  return {
+    id: ELITE_DIRECT_STAGE_ID,
+    repos: scope.repos.map((repo) => ({ nameWithOwner: repo.nameWithOwner, stage: repo.stage })),
+    engines: [...scope.engines],
+    maxRisk: STANDING_GRANT_CEILINGS.maxRisk,
+    maxFiles: scope.merge.maxFiles,
+    maxLines: scope.merge.maxLines,
+    maxMergesPerRepoPerDay: STANDING_GRANT_CEILINGS.maxMergesPerRepoPerDay,
+    leaderClasses: [...leaderClasses],
+    criteria: criteria(10, 90, 10, 24),
+  };
 }
 
 /** ashlr-hub's own repo (package.json repository) — the grant's `merge.selfRepo` rule applies to it. */
@@ -759,6 +797,14 @@ export function buildDefaultGrantPayload(input: GrantDraftInput): StandingGrantV
     });
   });
 
+  if (input.eliteDirect === true) {
+    // One rung: the grant's own scope, no ramp (see eliteDirectStage).
+    const engines = devin ? withDevin(PHASE3_ENGINES) : [...PHASE3_ENGINES];
+    const repos = planned.map((p) => p.repo);
+    const merge = { maxFiles: STANDING_GRANT_CEILINGS.maxFiles, maxLines: STANDING_GRANT_CEILINGS.maxLines, selfRepo: 'merge-non-authority' as const };
+    stages.splice(0, stages.length, eliteDirectStage({ repos, engines, merge }, []));
+  }
+
   const payload: StandingGrantV1 = {
     v: 1,
     grantId: input.grantId,
@@ -808,6 +854,13 @@ export function buildReapprovalGrantPayload(
      * Touch ID sheet's scope lines name it), absent keeps the signed choice.
      */
     devin?: boolean;
+    /**
+     * 3.15: true replaces the ladder with the one `elite-direct` rung
+     * (keeping the Leader classes of the rung `current` had reached); absent
+     * keeps the signed ladder (an elite-direct grant stays elite-direct).
+     * Leaving elite-direct is a NEW grant (the ladder restarts at shadow).
+     */
+    eliteDirect?: boolean;
   },
 ): StandingGrantV1 {
   const from = Math.max(0, Math.min(currentStageIndex, current.rollout.stages.length - 1));
@@ -846,6 +899,10 @@ export function buildReapprovalGrantPayload(
     payload.rollout.stages = payload.rollout.stages.map((stage) => ({ ...stage, engines: withDevin(stage.engines) }));
     payload.spend = { ...payload.spend, seats: { ...payload.spend.seats, [DEVIN_SEAT_ID]: defaultSeat('devin') } };
   }
+  if (input.eliteDirect === true) {
+    const reached = current.rollout.stages[from]!;
+    payload.rollout = { stages: [eliteDirectStage(payload, reached.leaderClasses)], autoAdvance: true };
+  }
   const checked = parseStandingGrantPayload(payload);
   if (!checked.ok) throw new Error(`re-approval draft is invalid: ${checked.reason}`);
   return checked.value;
@@ -858,6 +915,7 @@ export function describeGrantScope(grant: StandingGrantV1): string[] {
     `Engines: ${grant.engines.join(', ')} · budget up to ${grant.spend.maxMode} · metered spend $${grant.spend.meteredUsdPerDay}/day`,
     `Merge caps: ${grant.merge.maxFiles} files / ${grant.merge.maxLines} lines · ashlr-hub: ${grant.merge.selfRepo}`,
     `Leader: class ${grant.leader.classes.length > 0 ? grant.leader.classes.join('+') : 'none'} · veto window ${grant.leader.vetoMinutes} min · conductors ${grant.conductorGoals ? 'live' : 'dry-run'}`,
+    ...(grantHasEliteDirect(grant) ? [ELITE_DIRECT_ONE_LINE] : []),
   ];
   for (const repo of grant.repos) {
     lines.push(`  ${repo.nameWithOwner}: up to ${repo.stage}, ${repo.maxRisk} risk, ${repo.maxMergesPerDay}/day, ${repo.enforcement} enforcement`);
@@ -872,6 +930,10 @@ export function describeGrantScope(grant: StandingGrantV1): string[] {
   }
   grant.rollout.stages.forEach((stage, i) => {
     const merging = stage.repos.filter((r) => r.stage === 'merge').map((r) => r.nameWithOwner.split('/')[1]);
+    if (stage.id === ELITE_DIRECT_STAGE_ID) {
+      lines.push(`  stage ${i + 1} ${stage.id}: ${stage.repos.length} repos (${merging.length > 0 ? `merging ${merging.join(', ')}` : 'propose only'}), ${stage.maxRisk} risk ${stage.maxFiles}/${stage.maxLines} — elite models land on green tests, no judge; no ramp`);
+      return;
+    }
     lines.push(`  stage ${i + 1} ${stage.id}: ${stage.repos.length} repos (${merging.length > 0 ? `merging ${merging.join(', ')}` : 'propose only'}), ${stage.maxRisk} risk ${stage.maxFiles}/${stage.maxLines}, ≥${stage.criteria.minHours} h to advance`);
   });
   return lines;

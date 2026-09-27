@@ -44,6 +44,7 @@ import { sanitizePublicJson } from '../util/public-json.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { clearStop, revokeStandingAndDrain, stopAutonomyAndDrain } from '../authority/clamp.js';
 import { custodyStatus, signGrant, type CustodyStatus } from '../authority/custody-client.js';
+import { grantHasEliteDirect } from '../authority/elite-models.js';
 import {
   displaySurfaceTarget,
   evaluateStandingAuthority,
@@ -535,6 +536,8 @@ export interface AuthorityDraftResponse extends AuthorityGrantDraft {
   summary: string[];
   /** The rung autonomy starts on once signed. */
   startStageId: string;
+  /** 3.15: the draft's ladder is the one `elite-direct` rung (elite models land on green tests, no judge). */
+  eliteDirect: boolean;
 }
 
 const DRAFT_TTL_MS = 15 * 60 * 1000;
@@ -675,7 +678,16 @@ export async function buildStandingGrantDraft(
   kind: DraftKind | 'auto' = 'auto',
   nowMs = Date.now(),
   /** How GitHub is read to decide server vs local enforcement (the CLI passes its own `gh`; tests inject). */
-  opts: { githubGet?: GithubGet; devin?: () => Promise<DevinDraftChoice> } = {},
+  opts: {
+    githubGet?: GithubGet;
+    devin?: () => Promise<DevinDraftChoice>;
+    /**
+     * 3.15 elite self-land: true drafts the one `elite-direct` rung; false
+     * (or absent) drafts the default ladder for a new grant and keeps the
+     * signed ladder for a re-approval. Leaving elite-direct is a new grant.
+     */
+    eliteDirect?: boolean;
+  } = {},
 ): Promise<AuthorityDraftResponse> {
   const keyId = await signingKeyId();
   const hostBinding = currentHostBinding();
@@ -689,6 +701,12 @@ export async function buildStandingGrantDraft(
   const resolved: DraftKind = kind === 'auto' ? (continuable ? 'reapprove' : 'new') : kind;
   if (resolved === 'reapprove' && !continuable) {
     throw new AuthorityDraftError('nothing-to-reapprove', 'There is no active, paused or expired grant to continue — draft a new grant instead.');
+  }
+  if (resolved === 'reapprove' && opts.eliteDirect === false && installed.state === 'ok' && grantHasEliteDirect(installed.envelope.payload)) {
+    throw new AuthorityDraftError(
+      'elite-direct-reapprove',
+      'This grant is elite-direct; a re-approval continues it. To go back to the judged ladder, sign a new grant (`ashlr authority grant`) — it starts at shadow.',
+    );
   }
   const base = {
     nowMs,
@@ -711,7 +729,12 @@ export async function buildStandingGrantDraft(
     const serverEnforcement = new Map([...probes].map(([key, probe]) => [key, probe.state]));
     // Devin follows the current opt-in: a re-approval strips it when Mason
     // turned it off (or the helper cannot sign it) and adds it when he opted in.
-    payload = buildReapprovalGrantPayload(installed.envelope.payload, position, { ...base, serverEnforcement, devin: devin.include });
+    payload = buildReapprovalGrantPayload(installed.envelope.payload, position, {
+      ...base,
+      serverEnforcement,
+      devin: devin.include,
+      ...(opts.eliteDirect === true ? { eliteDirect: true } : {}),
+    });
   } else {
     const repos = await draftRepos();
     const probes = await probeServerEnforcementAll(repos.map((repo) => repo.nameWithOwner), opts.githubGet);
@@ -720,12 +743,20 @@ export async function buildStandingGrantDraft(
       repos: repos.map((repo) => ({ ...repo, serverEnforcement: probes.get(repo.nameWithOwner.toLowerCase())?.state ?? null })),
       seats: await draftSeats(),
       devin: devin.include,
+      eliteDirect: opts.eliteDirect === true,
     });
   }
   const digest = rememberDraft(payload, resolved);
   const summary = describeGrantScope(payload);
   if (devin.note) summary.push(devin.note);
-  return { payload, digest, kind: resolved, summary, startStageId: payload.rollout.stages[0]!.id };
+  return {
+    payload,
+    digest,
+    kind: resolved,
+    summary,
+    startStageId: payload.rollout.stages[0]!.id,
+    eliteDirect: grantHasEliteDirect(payload),
+  };
 }
 
 /** Rollout position straight from the ledger for a grant that no longer verifies (paused / expired). */
@@ -924,15 +955,21 @@ export const handleAuthorityApi: ApiModule = async (ctx, req, res, path, method)
       return true;
     }
     if (path === VERSE_AUTHORITY_DRAFT_PATH) {
-      const params = readQuery(req, res, ['kind']);
+      const params = readQuery(req, res, ['kind', 'eliteDirect']);
       if (!params) return true;
       const kind = params.get('kind') ?? 'auto';
       if (kind !== 'auto' && kind !== 'new' && kind !== 'reapprove') {
         sendInvalid(res, 'kind must be new or reapprove');
         return true;
       }
+      // 3.15: `eliteDirect=1` drafts the elite-direct rung; `0` / absent does not.
+      const eliteRaw = params.get('eliteDirect');
+      if (eliteRaw !== null && eliteRaw !== '0' && eliteRaw !== '1') {
+        sendInvalid(res, 'eliteDirect must be 0 or 1');
+        return true;
+      }
       try {
-        sendAuthorityJson(res, 200, await buildStandingGrantDraft(kind));
+        sendAuthorityJson(res, 200, await buildStandingGrantDraft(kind, Date.now(), eliteRaw === null ? {} : { eliteDirect: eliteRaw === '1' }));
       } catch (error) {
         if (error instanceof AuthorityDraftError) sendAuthorityJson(res, error.status, { code: error.code, error: error.message });
         else sendAuthorityJson(res, 500, { code: 'draft-failed', error: 'the grant draft could not be built' });

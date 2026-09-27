@@ -237,6 +237,28 @@ describe('actions', () => {
     expect((await call('GET', '/api/verse/authority/ledger?limit=abc'))?.status).toBe(400);
   });
 
+  it('elite-direct (3.15): the draft is one signed rung, and once granted it is the live stage', async () => {
+    state.roots.push(TEST_ROOT);
+    expect((await call('GET', '/api/verse/authority/draft?eliteDirect=2'))?.status).toBe(400);
+    const plain = await call('GET', '/api/verse/authority/draft');
+    expect(plain!.body).toMatchObject({ startStageId: 'shadow', eliteDirect: false });
+    const draft = await call('GET', '/api/verse/authority/draft?eliteDirect=1');
+    expect(draft?.status).toBe(200);
+    expect(draft!.body).toMatchObject({ kind: 'new', startStageId: 'elite-direct', eliteDirect: true });
+    expect(((draft!.body['payload'] as { rollout: { stages: unknown[] } }).rollout.stages)).toHaveLength(1);
+    expect((draft!.body['summary'] as string[]).some((line) => line.includes('no judge'))).toBe(true);
+    const granted = await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: draft!.body['digest'] });
+    expect(granted?.status).toBe(200);
+    const switched = await call('POST', '/api/verse/authority', { action: 'switch', to: 'autonomous' });
+    expect(switched?.body).toMatchObject({ rollout: { stageId: 'elite-direct', stageIndex: 0 } });
+    // A re-approval continues elite-direct; asking to leave it that way is refused (a new grant does that).
+    const again = await call('GET', '/api/verse/authority/draft?kind=reapprove');
+    expect(again!.body).toMatchObject({ kind: 'reapprove', startStageId: 'elite-direct', eliteDirect: true });
+    const leave = await call('GET', '/api/verse/authority/draft?kind=reapprove&eliteDirect=0');
+    expect(leave?.status).toBe(409);
+    expect(leave?.body).toMatchObject({ code: 'elite-direct-reapprove' });
+  });
+
   it('refuses a digest it never served, a helper that signed something else, and a cancelled Touch ID', async () => {
     state.roots.push(TEST_ROOT);
     expect((await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: 'f'.repeat(64) }))?.body).toMatchObject({ code: 'draft-expired' });

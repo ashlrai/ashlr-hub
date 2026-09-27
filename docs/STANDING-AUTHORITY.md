@@ -124,6 +124,16 @@ the Command bar) drafts the same scope with fresh dates and bindings, and its
 ladder starts at the stage you had reached — so a deploy never restarts the
 ramp from shadow. The starting stage is inside what you sign.
 
+**The `elite-direct` rung (3.15).** `draft`, `grant` and `re-approve` accept
+`--elite-direct`, which replaces the ladder with one rung, `elite-direct`:
+every granted repo at its signed stage, every granted engine and the grant's
+caps. A new grant gets no Leader classes; a re-approval keeps those of the
+rung you had reached. While that rung is current, an elite model's work
+passes G6 on deterministic verification instead of a judge
+([AUTHORITY.md §1a](AUTHORITY.md#1a-elite-self-land-315)). Its criteria only
+matter for a breach, which restarts the rung. It is an ordinary stage id, so
+the existing custody helper signs it.
+
 ## The authority surface
 
 `npm run build` runs `scripts/authority-surface.mjs` after `tsc`. It walks the
@@ -172,9 +182,9 @@ ashlr authority status [--json]
 ashlr authority switch <off|propose|autonomous>
 ashlr authority stop [--no-wait] | clear-stop
 ashlr authority revoke [--reason <text>] [--no-wait]
-ashlr authority draft [--new|--reapprove] [--json]
-ashlr authority grant [--yes] [--payload <file>] [--switch <mode>]
-ashlr authority re-approve [--yes] [--switch <mode>]
+ashlr authority draft [--new|--reapprove] [--elite-direct] [--json]
+ashlr authority grant [--yes] [--payload <file>] [--switch <mode>] [--elite-direct|--no-elite-direct]
+ashlr authority re-approve [--yes] [--switch <mode>] [--elite-direct]
 ashlr authority ledger verify | tail [--limit N] [--kind K]
 ashlr authority surface [--installed]
 ashlr authority protect --print | --apply [--repo owner/name]

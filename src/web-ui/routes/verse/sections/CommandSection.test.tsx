@@ -324,6 +324,23 @@ describe('CommandSection — raising past the grant', () => {
     expect(posted[0]!.body['draftDigest']).toMatch(/^[0-9a-f]{64}$/);
     expect(posted[1]!.body).toEqual({ action: 'switch', to: 'autonomous' });
   });
+
+  it('offers Elite direct in one line; ticking it reads the elite-direct draft (3.15)', async () => {
+    setMutationToken(TOKEN);
+    const now = Date.now();
+    const { fetchMock, posted } = stubSurfaceFetch({ kind: 'sparse', now });
+    const user = userEvent.setup();
+    render(<CommandSection />);
+    await ready();
+    await user.click(screen.getByRole('radio', { name: 'Autonomous (needs a new grant — Touch ID)' }));
+    const sheet = await screen.findByRole('dialog', { name: 'Approve a standing grant' });
+    const toggle = within(sheet).getByRole('checkbox', { name: 'Elite direct' });
+    expect(toggle).not.toBeChecked();
+    expect(within(sheet).getAllByText(/land directly on green tests — no judge/).length).toBeGreaterThan(0);
+    await user.click(toggle);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u) === '/api/verse/authority/draft?eliteDirect=1')).toBe(true));
+    expect(posted).toEqual([]);
+  });
 });
 
 describe('CommandSection — autonomy off', () => {

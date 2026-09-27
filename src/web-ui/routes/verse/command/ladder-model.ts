@@ -70,6 +70,8 @@ export function narrowDecisions(raw: unknown): ShadowDecisionsV1 | null {
 
 /** "shadow" → "Shadow"; "2a" stays "2a". */
 export function stageLabel(id: string): string {
+  // 3.15: the elite self-land rung reads as words, not an id.
+  if (id === 'elite-direct') return 'Elite direct';
   return /^[a-z]/.test(id) ? id[0]!.toUpperCase() + id.slice(1) : id;
 }
 
@@ -314,7 +316,10 @@ function decisionText(d: ShadowDecisionV1): LastEvent {
     case 'would-merge':
       return { text: `Would merge ${what} — every gate passed.`, tone, at: d.at };
     case 'merged':
-      return { text: `Merged ${what}.`, tone, at: d.at };
+      // 3.15 elite self-land: tests, not a judge, carried it.
+      return d.eliteModel
+        ? { text: `Landed directly · elite model ${d.eliteModel} · tests green — ${what}.`, tone, at: d.at }
+        : { text: `Merged ${what}.`, tone, at: d.at };
     default:
       return { text: `${what}: ${d.why}`, tone, at: d.at };
   }

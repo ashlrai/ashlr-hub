@@ -41,19 +41,22 @@ What Mason must do to move this forward:
 1. Install the 3.15 release. It changes authority code (the lessons and Devin
    work grew the authority surface), so the grant pauses.
 2. `ashlr authority re-approve` (Touch ID). The ladder continues from the stage
-   it had reached.
+   it had reached. With `--elite-direct` (or answering yes when asked), the
+   ladder becomes the one `elite-direct` rung, and elite models land on green
+   tests with no judge ([AUTHORITY.md §1a](AUTHORITY.md#1a-elite-self-land-315)).
 3. `ashlr authority resident stop`, then `ashlr authority resident start`, typed
    in his own terminal, so the resident daemon runs the new build with a
    regenerated plist.
-4. Watch Fleet ▸ Shadow decisions and Command's ladder. The ladder advances by
+4. Watch Fleet ▸ Merge decisions and Command's ladder. The ladder advances by
    itself when the stage's criteria are met in the ledger; nothing skips a
    stage, and no stage past what the grant signs is reachable.
 5. Optionally, for Devin: `ashlr devin connect` and a budget, then
    `ashlr devin fleet on`, `sudo scripts/install-custody.sh` (the helper must
    be 1.1.0 or later to sign a grant that names Devin) and a new grant or
    re-approval that adds Devin as a producer. Steps 2 and this re-approval can
-   be the same Touch ID. Devin PRs merge only at a stage that names Devin and
-   with two judges from different families.
+   be the same Touch ID. Devin PRs merge only at a stage that names Devin, and
+   either with two judges from different families or, under `elite-direct`,
+   on an elite model such as SWE-2 or GPT-6 with green tests.
 
 ## Classification
 
