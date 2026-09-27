@@ -21,6 +21,16 @@
  * never appears in a response to the page. Switching access off (or a
  * restart) makes it worthless.
  *
+ * ACTING (3.15 P2/P3). Also held here, memory only, per chat: the two extra
+ * scopes (`browser_act` comes on with access and can be switched off alone;
+ * `browser_script` stays off until switched on), the operator's "Allow for
+ * this chat" answers, the TAINT of the current turn (it read content from
+ * outside the machine — reset when the chat's next turn launches), the page
+ * load the last snapshot's refs belong to, and the last screenshot's
+ * geometry (so image coordinates map back to the page). A confirmation card
+ * is just another command for the pane (`confirm`), answered by the
+ * operator, with a 120 s budget instead of 45 s.
+ *
  * No node:fs, no child processes: pure state plus node:crypto.
  */
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -33,7 +43,10 @@ import {
   type VerseBrowserAgentOp,
   type VerseBrowserBlockedRequest,
   type VerseBrowserCommandResult,
+  type VerseBrowserConfirmRequest,
+  type VerseBrowserDecision,
   type VerseBrowserPolicy,
+  type VerseBrowserScope,
 } from './browser-types.js';
 
 /** A pane that has not polled for this long is treated as closed. */
@@ -44,8 +57,11 @@ export const BROWSER_CLAIM_TIMEOUT_MS = 8_000;
 export const BROWSER_RESULT_TIMEOUT_MS = 45_000;
 /** The pane's long-poll is answered after at most this long. */
 export const BROWSER_POLL_MAX_WAIT_MS = 20_000;
+/** How long a confirmation card waits for the operator. */
+export const BROWSER_CONFIRM_TIMEOUT_MS = 120_000;
 const MAX_QUEUE = 16;
 const MAX_ALLOWED_ORIGINS = 32;
+const MAX_ALLOWANCES = 32;
 const MAX_BLOCKED = 5;
 
 /** Seat engines whose launch loads the browser tools (adapters/claude.ts serves both). */
@@ -63,8 +79,32 @@ interface PendingCommand {
   resultMs: number;
 }
 
+/** The last screenshot's geometry (browser-act-policy.ts `BrowserShotGeometry`). */
+export interface BrowserShotRecord {
+  scale: number;
+  originX: number;
+  originY: number;
+  width: number;
+  height: number;
+  url: string;
+}
+
+/** Content from outside this machine read during the current turn. */
+export interface BrowserTurnTaint {
+  origin: string;
+  at: number;
+}
+
+export type BrowserConfirmOutcome = VerseBrowserDecision | 'timeout' | 'unavailable';
+
 interface ChatBrowserState {
   grant: string | null;
+  actAccess: boolean;
+  scriptAccess: boolean;
+  allowances: string[];
+  taint: BrowserTurnTaint | null;
+  snapshotLoadId: string | null;
+  lastShot: BrowserShotRecord | null;
   /** `http://127.0.0.1:<port>` of the sidecar that minted the grant (the MCP URL's base). */
   sidecarOrigin: string | null;
   allowedOrigins: string[];
@@ -84,6 +124,12 @@ function stateFor(sessionId: string): ChatBrowserState {
   if (!state) {
     state = {
       grant: null,
+      actAccess: false,
+      scriptAccess: false,
+      allowances: [],
+      taint: null,
+      snapshotLoadId: null,
+      lastShot: null,
       sidecarOrigin: null,
       allowedOrigins: [],
       blocked: [],
@@ -107,6 +153,9 @@ export function browserPolicy(sessionId: string): VerseBrowserPolicy {
   return {
     sessionId,
     agentAccess: state?.grant != null,
+    actAccess: state?.grant != null && state.actAccess,
+    scriptAccess: state?.grant != null && state.scriptAccess,
+    allowances: [...(state?.allowances ?? [])],
     allowedOrigins: [...(state?.allowedOrigins ?? [])],
     blocked: [...(state?.blocked ?? [])],
     toolEngines: [...BROWSER_TOOL_ENGINES],
@@ -127,14 +176,117 @@ export function allowedOriginsFor(sessionId: string): string[] {
 export function setBrowserAgentAccess(sessionId: string, enabled: boolean, sidecarOrigin: string): VerseBrowserPolicy {
   const state = stateFor(sessionId);
   if (enabled) {
-    if (!state.grant || state.sidecarOrigin !== sidecarOrigin) state.grant = randomBytes(32).toString('base64url');
+    if (!state.grant || state.sidecarOrigin !== sidecarOrigin) {
+      state.grant = randomBytes(32).toString('base64url');
+      // A fresh grant starts from the defaults: acting on, scripts off.
+      state.actAccess = true;
+      state.scriptAccess = false;
+    }
     state.sidecarOrigin = sidecarOrigin;
   } else {
     state.grant = null;
     state.sidecarOrigin = null;
+    state.actAccess = false;
+    state.scriptAccess = false;
+    state.allowances = [];
+    state.taint = null;
+    state.snapshotLoadId = null;
+    state.lastShot = null;
     failAll(state, { ok: false, code: 'access-off', message: 'The operator switched browser access off for this chat.' });
   }
   return browserPolicy(sessionId);
+}
+
+/**
+ * Switch one scope. `browser` is the whole grant (setBrowserAgentAccess);
+ * `browser_act` / `browser_script` need the grant to be on, and switching
+ * one ON without it is refused (null). Switching acting off also forgets the
+ * chat's "Allow for this chat" answers.
+ */
+export function setBrowserScope(sessionId: string, scope: VerseBrowserScope, enabled: boolean, sidecarOrigin: string): VerseBrowserPolicy | null {
+  if (scope === 'browser') return setBrowserAgentAccess(sessionId, enabled, sidecarOrigin);
+  const state = chats.get(sessionId);
+  if (!state?.grant) return enabled ? null : browserPolicy(sessionId);
+  if (scope === 'browser_act') {
+    state.actAccess = enabled;
+    if (!enabled) state.allowances = [];
+  } else {
+    state.scriptAccess = enabled;
+  }
+  return browserPolicy(sessionId);
+}
+
+/** What this chat's agents may do right now. */
+export function browserScopes(sessionId: string): { access: boolean; act: boolean; script: boolean } {
+  const state = chats.get(sessionId);
+  if (!state?.grant) return { access: false, act: false, script: false };
+  return { access: true, act: state.actAccess, script: state.scriptAccess };
+}
+
+// ---------------------------------------------------------------------------
+// "Allow for this chat", the turn's taint, refs and screenshot geometry
+// ---------------------------------------------------------------------------
+
+export function browserAllowances(sessionId: string): string[] {
+  return [...(chats.get(sessionId)?.allowances ?? [])];
+}
+
+export function addBrowserAllowances(sessionId: string, keys: readonly string[]): void {
+  const state = chats.get(sessionId);
+  if (!state?.grant) return;
+  for (const key of keys) {
+    if (typeof key !== 'string' || key.length === 0 || key.length > 600 || state.allowances.includes(key)) continue;
+    if (state.allowances.length >= MAX_ALLOWANCES) state.allowances.shift();
+    state.allowances.push(key);
+  }
+}
+
+export function revokeBrowserAllowance(sessionId: string, key: string): VerseBrowserPolicy {
+  const state = chats.get(sessionId);
+  if (state) state.allowances = state.allowances.filter((k) => k !== key);
+  return browserPolicy(sessionId);
+}
+
+/**
+ * A new turn for this chat is launching: forget what the last one read. The
+ * seat adapter calls this next to `browserSeatLaunch`, so the taint is
+ * exactly "this turn's".
+ */
+export function beginBrowserTurn(sessionId: string): void {
+  const state = chats.get(sessionId);
+  if (state) state.taint = null;
+}
+
+/** This turn read content from `origin` (outside the machine). The first origin is kept. */
+export function markBrowserTaint(sessionId: string, origin: string): void {
+  const state = chats.get(sessionId);
+  if (!state?.grant || state.taint) return;
+  state.taint = { origin: origin.slice(0, 300), at: clock() };
+}
+
+export function browserTaint(sessionId: string): BrowserTurnTaint | null {
+  const taint = chats.get(sessionId)?.taint;
+  return taint ? { ...taint } : null;
+}
+
+/** The page load (tap `loadId`) the last snapshot's refs belong to. */
+export function setBrowserSnapshotLoad(sessionId: string, loadId: string | null): void {
+  const state = chats.get(sessionId);
+  if (state) state.snapshotLoadId = loadId;
+}
+
+export function browserSnapshotLoad(sessionId: string): string | null {
+  return chats.get(sessionId)?.snapshotLoadId ?? null;
+}
+
+export function setBrowserShot(sessionId: string, shot: BrowserShotRecord | null): void {
+  const state = chats.get(sessionId);
+  if (state) state.lastShot = shot ? { ...shot } : null;
+}
+
+export function browserShot(sessionId: string): BrowserShotRecord | null {
+  const shot = chats.get(sessionId)?.lastShot;
+  return shot ? { ...shot } : null;
 }
 
 export function setBrowserOriginAllowed(sessionId: string, rawOrigin: string, allowed: boolean): VerseBrowserPolicy | null {
@@ -228,7 +380,7 @@ const PANE_NOT_OPEN =
 export function runBrowserCommand(
   sessionId: string,
   op: VerseBrowserAgentOp,
-  args: { url?: string; limit?: number } = {},
+  args: { url?: string; limit?: number; args?: Record<string, unknown> } = {},
   timeouts: { claimMs?: number; resultMs?: number } = {},
 ): Promise<BrowserOutcome> {
   const state = stateFor(sessionId);
@@ -247,6 +399,7 @@ export function runBrowserCommand(
     op,
     ...(args.url !== undefined ? { url: args.url } : {}),
     ...(args.limit !== undefined ? { limit: args.limit } : {}),
+    ...(args.args !== undefined ? { args: args.args } : {}),
     allowedOrigins: [...state.allowedOrigins],
     createdAt: new Date(clock()).toISOString(),
   };
@@ -270,6 +423,25 @@ export function runBrowserCommand(
     state.queue.push(pending);
     wake(state);
   });
+}
+
+/**
+ * Ask the OPERATOR, on the pane's confirmation card, whether an action may go
+ * ahead. Resolves — never rejects — with their answer, `timeout` after
+ * BROWSER_CONFIRM_TIMEOUT_MS, or `unavailable` when no pane can show it.
+ * Anything but `once` / `chat` means no.
+ */
+export async function requestBrowserConfirmation(
+  sessionId: string,
+  request: Omit<VerseBrowserConfirmRequest, 'expiresAt'>,
+  timeoutMs = BROWSER_CONFIRM_TIMEOUT_MS,
+): Promise<BrowserConfirmOutcome> {
+  const expiresAt = new Date(clock() + timeoutMs).toISOString();
+  const outcome = await runBrowserCommand(sessionId, 'confirm', { args: { ...request, expiresAt } }, { resultMs: timeoutMs });
+  if (!outcome.ok) return outcome.code === 'timeout' ? 'timeout' : 'unavailable';
+  const data = outcome.data;
+  const decision = typeof data === 'object' && data !== null ? (data as Record<string, unknown>)['decision'] : null;
+  return decision === 'once' || decision === 'chat' ? decision : 'deny';
 }
 
 function claimQueued(state: ChatBrowserState): VerseBrowserAgentCommand[] {

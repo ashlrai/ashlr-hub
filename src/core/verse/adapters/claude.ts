@@ -84,7 +84,7 @@ import type { VerseSeatLaunch } from '../session-engine.js';
 import { claudeEffortArgs, claudePermissionArgs } from '../session-controls.js';
 import type { VerseAdapter, VerseParsedEvent, VerseTurnParser } from './index.js';
 import { turnAttachmentDirs } from './turn-extras.js';
-import { browserSeatLaunch } from '../browser-bridge.js';
+import { beginBrowserTurn, browserSeatLaunch } from '../browser-bridge.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -1418,6 +1418,9 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
   const extraRoots = verseSessionRoots(session).slice(1);
   const memory = launchMemory(launch);
   const browser = browserSeatLaunch(session.id);
+  // A new turn: what the last one read from outside the machine no longer
+  // counts against this one's browser actions (browser-act-policy.ts taint).
+  if (browser) beginBrowserTurn(session.id);
   // The memory directory is granted only when the snapshot says this seat may
   // WRITE it: `--add-dir` has no read-only form, and a read-only seat already
   // has the file's contents in the appended block.

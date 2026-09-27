@@ -15,7 +15,16 @@
  * PROTOCOL. The page sends a closed set of ops (`send`); native answers with
  * `ashlr:browser` window events. Requests that expect an answer carry a
  * `req` id and resolve through `request()` (or time out). Native never runs
- * page-supplied script in a tab: `query` names one of six fixed scripts.
+ * page-supplied script in a tab: `query` names one fixed tap function, and
+ * its arguments travel as JSON that native re-validates against closed
+ * shapes (browser_pane.rs). The one exception, `evaluate`, is loopback-only
+ * and needs the operator's per-chat "scripts" switch upstream.
+ *
+ * ACTING (`act` capability, macOS): `{ act: { kind, … } }` makes native
+ * synthesise real mouse / key events into the tab's webview at the element
+ * the tap located — the page sees trusted input, exactly as if the operator
+ * had clicked. Native reports genuine operator input in a tab as an
+ * `operator` event, which pauses the agent (BrowserPanel).
  */
 
 export const NATIVE_BROWSER_EVENT = 'ashlr:browser';
@@ -26,6 +35,8 @@ export interface NativeBrowserCapabilities {
   picker: boolean;
   console: boolean;
   text: boolean;
+  /** Snapshot, resolve, act (synthesised input) and evaluate — a shell that implements them. */
+  act: boolean;
 }
 
 export interface Bounds {
@@ -35,7 +46,28 @@ export interface Bounds {
   height: number;
 }
 
-export type NativeQuery = 'text' | 'console' | 'info' | 'pick-start' | 'pick-poll' | 'pick-cancel';
+/** One agent action for native to perform (desktop/src-tauri/src/browser_pane.rs `ActSpec`). */
+export type NativeActSpec =
+  | { kind: 'click'; ref?: string; x?: number; y?: number; button?: 'left' | 'right'; double?: boolean; modifiers?: string[]; expect?: string }
+  | { kind: 'type'; ref: string; text: string; submit?: boolean; clear?: boolean; expect?: string }
+  | { kind: 'select'; ref: string; values: string[]; expect?: string }
+  | { kind: 'hover'; ref?: string; x?: number; y?: number; expect?: string }
+  | { kind: 'key'; key: string }
+  | { kind: 'scroll'; ref?: string; direction?: 'up' | 'down' | 'left' | 'right'; amount?: number; expect?: string };
+
+export type NativeQuery =
+  | 'text'
+  | 'console'
+  | 'info'
+  | 'pick-start'
+  | 'pick-poll'
+  | 'pick-cancel'
+  | 'resume'
+  | { snapshot: { max_nodes?: number; root_ref?: string } }
+  | { network: { limit?: number } }
+  | { resolve: { ref: string } | { x: number; y: number } | { focused: true } }
+  | { act: NativeActSpec }
+  | { evaluate: { expression: string } };
 
 export type NativeBrowserOp =
   | { op: 'open'; tab: string; url: string; bounds: Bounds }
@@ -46,7 +78,7 @@ export type NativeBrowserOp =
   | { op: 'close'; tab: string }
   | { op: 'zoom'; tab: string; factor: number }
   | { op: 'query'; tab: string; req: string; what: NativeQuery }
-  | { op: 'screenshot'; tab: string; req: string }
+  | { op: 'screenshot'; tab: string; req: string; clip?: Bounds }
   | { op: 'external'; url: string };
 
 export type NativeBrowserEvent =
@@ -54,6 +86,8 @@ export type NativeBrowserEvent =
   | { kind: 'title'; tab: string; title: string }
   | { kind: 'blocked'; tab: string; url: string; reason: string }
   | { kind: 'closed'; tab: string }
+  /** Genuine operator input (a click or key press) reached a tab — never the agent's synthesised input. */
+  | { kind: 'operator'; tab: string }
   | { kind: 'result'; req: string; ok: true; data: unknown }
   | { kind: 'result'; req: string; ok: false; error: string };
 
@@ -93,6 +127,7 @@ export function nativeBrowser(win: Window = window): NativeBrowser | null {
       picker: caps['picker'] !== false,
       console: caps['console'] !== false,
       text: caps['text'] !== false,
+      act: caps['act'] === true,
     },
     send(op) {
       try {
@@ -121,6 +156,8 @@ export function parseNativeBrowserEvent(detail: unknown): NativeBrowserEvent | n
         : null;
     case 'closed':
       return tab ? { kind: 'closed', tab } : null;
+    case 'operator':
+      return tab ? { kind: 'operator', tab } : null;
     case 'result': {
       if (typeof detail['req'] !== 'string') return null;
       if (detail['ok'] === true) return { kind: 'result', req: detail['req'], ok: true, data: detail['data'] };

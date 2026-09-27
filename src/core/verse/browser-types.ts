@@ -20,10 +20,12 @@
 export const VERSE_BROWSER_PATH = '/api/verse/browser';
 /** GET ?sessionId= → VerseBrowserPolicy */
 export const VERSE_BROWSER_POLICY_PATH = `${VERSE_BROWSER_PATH}/policy`;
-/** POST { sessionId, enabled } → VerseBrowserPolicy */
+/** POST { sessionId, enabled, scope? } → VerseBrowserPolicy (scope defaults to `browser`, the whole grant) */
 export const VERSE_BROWSER_ACCESS_PATH = `${VERSE_BROWSER_PATH}/access`;
 /** POST { sessionId, origin, allowed } → VerseBrowserPolicy */
 export const VERSE_BROWSER_ALLOW_PATH = `${VERSE_BROWSER_PATH}/allow`;
+/** POST { sessionId, key } → VerseBrowserPolicy (forget one "Allow for this chat" answer) */
+export const VERSE_BROWSER_ALLOWANCE_PATH = `${VERSE_BROWSER_PATH}/allowance`;
 /** GET ?sessionId=&wait= → VerseBrowserCommandsResponse (long-poll, ≤ 20 s) */
 export const VERSE_BROWSER_COMMANDS_PATH = `${VERSE_BROWSER_PATH}/commands`;
 /** POST VerseBrowserCommandResult → { ok: true } */
@@ -48,10 +50,65 @@ export function isBrowserMcpPath(path: string): boolean {
 /** The MCP server name a seat sees (`mcp__ashlr-browser__browser_navigate`). */
 export const BROWSER_MCP_SERVER_NAME = 'ashlr-browser';
 
-/** What an agent may ask the pane to do. None of them types, clicks or submits. */
-export type VerseBrowserAgentOp = 'status' | 'navigate' | 'screenshot' | 'read-text' | 'console';
+/**
+ * What an agent may ask the pane to do.
+ *
+ * Reading (scope `browser`): status, navigate, screenshot, read-text,
+ * console, snapshot, network, tabs, history. Acting (scope `browser_act`):
+ * resolve (what a ref is, for the sidecar's safety decision) and act (one
+ * click / type / select / hover / key / scroll, performed natively as real
+ * input). Script (scope `browser_script`, off by default, loopback only):
+ * evaluate. `confirm` is the sidecar asking the OPERATOR, through the pane,
+ * whether an action that matters may go ahead.
+ */
+export type VerseBrowserAgentOp =
+  | 'status'
+  | 'navigate'
+  | 'screenshot'
+  | 'read-text'
+  | 'console'
+  | 'snapshot'
+  | 'network'
+  | 'tabs'
+  | 'history'
+  | 'resolve'
+  | 'act'
+  | 'evaluate'
+  | 'confirm';
 
-export const VERSE_BROWSER_AGENT_OPS: readonly VerseBrowserAgentOp[] = ['status', 'navigate', 'screenshot', 'read-text', 'console'];
+export const VERSE_BROWSER_AGENT_OPS: readonly VerseBrowserAgentOp[] = [
+  'status', 'navigate', 'screenshot', 'read-text', 'console',
+  'snapshot', 'network', 'tabs', 'history', 'resolve', 'act', 'evaluate', 'confirm',
+];
+
+/**
+ * The three things an operator can switch on for a chat's agents. `browser`
+ * is the whole grant (look + navigate); `browser_act` (click, type, …) comes
+ * on with it and can be switched off alone; `browser_script` (run a JS
+ * expression in a localhost page) stays off until switched on.
+ */
+export type VerseBrowserScope = 'browser' | 'browser_act' | 'browser_script';
+export const VERSE_BROWSER_SCOPES: readonly VerseBrowserScope[] = ['browser', 'browser_act', 'browser_script'];
+
+/** The operator's answer to a confirmation card. */
+export type VerseBrowserDecision = 'once' | 'chat' | 'deny';
+export const VERSE_BROWSER_DECISIONS: readonly VerseBrowserDecision[] = ['once', 'chat', 'deny'];
+
+/** `confirm` command args: what the card shows. All of it is display text. */
+export interface VerseBrowserConfirmRequest {
+  /** "Click", "Type into", "Press Enter in", … */
+  action: string;
+  /** The element as the page names it (untrusted page text, rendered as text). */
+  target: string | null;
+  /** The origin it happens on. */
+  origin: string;
+  /** Why it needs the operator (one line each). */
+  reasons: string[];
+  /** The tool the agent called. */
+  tool: string;
+  /** When the sidecar stops waiting (ISO). */
+  expiresAt: string;
+}
 
 /** One agent request, as the pane receives it. */
 export interface VerseBrowserAgentCommand {
@@ -62,6 +119,13 @@ export interface VerseBrowserAgentCommand {
   url?: string;
   /** read-text: max characters; console: max entries. */
   limit?: number;
+  /**
+   * The op's arguments (snapshot, network, tabs, history, resolve, act,
+   * evaluate, confirm, screenshot). Plain JSON built by the sidecar; the pane
+   * re-validates every field against a closed shape before anything reaches
+   * the page, and the desktop shell validates again.
+   */
+  args?: Record<string, unknown>;
   /**
    * The origins (besides loopback) this chat may observe, so the pane can
    * refuse BEFORE capturing a page the agent may not see. The sidecar checks
@@ -112,6 +176,12 @@ export interface VerseBrowserPolicy {
   sessionId: string;
   /** The operator switched agent access on for this chat (until Verse restarts). */
   agentAccess: boolean;
+  /** Agents may click, type, select, press keys and scroll (on with access; can be switched off alone). */
+  actAccess: boolean;
+  /** Agents may run a JS expression in a localhost page (off until switched on). */
+  scriptAccess: boolean;
+  /** "Allow for this chat" answers given on confirmation cards, oldest first. */
+  allowances: string[];
   /** Origins beyond loopback this chat's agent may open and observe. */
   allowedOrigins: string[];
   /** Recent agent requests refused because their origin is not allowed (newest first, ≤ 5). */

@@ -528,3 +528,57 @@
   cursor: pointer;
 }
 .chipAction:hover { background: var(--bg-active); }
+.chip[data-kind='allowance'] { border-style: dashed; }
+
+/* ---- agents acting: the confirmation card, the pause, recent actions ----- */
+
+.note[data-kind='paused'] {
+  background: var(--status-warning-bg, var(--bg-code));
+  color: var(--text-primary);
+}
+.noteAction { margin-left: auto; }
+
+.confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  flex: none;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--status-warning-solid);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+.confirmHead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-primary);
+}
+.confirmHead > svg { flex: none; color: var(--status-warning-solid); }
+.confirmHead > span { margin-left: auto; font-variant-numeric: tabular-nums; }
+.confirmBody { margin: 0; overflow-wrap: anywhere; }
+.confirmBody code { font-family: var(--font-mono); }
+.confirmReasons { margin: 0; padding-left: var(--space-4); }
+.confirmActions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  flex: none;
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  list-style: none;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-code);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+.action { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 32ch; }
+.action::before { content: '•'; margin-right: var(--space-1); color: var(--accent-500); }
+.action[data-outcome='failed']::before,
+.action[data-outcome='declined']::before { color: var(--status-warning-solid); }

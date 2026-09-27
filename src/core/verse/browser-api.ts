@@ -4,8 +4,9 @@
  * workbench family.
  *
  *   GET  /api/verse/browser/policy?sessionId=          → VerseBrowserPolicy
- *   POST /api/verse/browser/access {sessionId, enabled} → VerseBrowserPolicy
+ *   POST /api/verse/browser/access {sessionId, enabled, scope?} → VerseBrowserPolicy
  *   POST /api/verse/browser/allow  {sessionId, origin, allowed} → VerseBrowserPolicy
+ *   POST /api/verse/browser/allowance {sessionId, key}  → VerseBrowserPolicy (forget one "Allow for this chat")
  *   GET  /api/verse/browser/commands?sessionId=&wait=  → { commands } (the pane's long-poll, ≤ 20 s)
  *   POST /api/verse/browser/result {sessionId, id, ok, url?, data?, error?} → { ok: true }
  *   POST /api/verse/browser/mcp/<grant>                → MCP JSON-RPC (browser-mcp.ts)
@@ -38,20 +39,24 @@ import {
   claimBrowserCommands,
   completeBrowserCommand,
   recordBrowserBlocked,
+  revokeBrowserAllowance,
   runBrowserCommand,
   sessionForBrowserGrant,
-  setBrowserAgentAccess,
   setBrowserOriginAllowed,
+  setBrowserScope,
 } from './browser-bridge.js';
 import { handleBrowserMcpBody, type BrowserMcpDeps } from './browser-mcp.js';
 import {
   VERSE_BROWSER_ACCESS_PATH,
+  VERSE_BROWSER_ALLOWANCE_PATH,
   VERSE_BROWSER_ALLOW_PATH,
+  VERSE_BROWSER_SCOPES,
   VERSE_BROWSER_COMMANDS_PATH,
   VERSE_BROWSER_MCP_PATH_RE,
   VERSE_BROWSER_POLICY_PATH,
   VERSE_BROWSER_RESULT_PATH,
   type VerseBrowserCommandResult,
+  type VerseBrowserScope,
 } from './browser-types.js';
 import { firstPendingFolder } from './folder-io.js';
 import { discoverDevServers, sessionRoots } from './preview.js';
@@ -198,7 +203,7 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse, grant: strin
   }
   const versePort = localPort(req);
   const deps: BrowserMcpDeps = {
-    run: (sid, op, args) => runBrowserCommand(sid, op, args),
+    run: (sid, op, args, timeouts) => runBrowserCommand(sid, op, args, timeouts),
     versePort,
     allowedOrigins: allowedOriginsFor,
     recordBlocked: recordBrowserBlocked,
@@ -260,15 +265,19 @@ export const handleBrowserApi: ApiModule = async (_ctx, req, res, path, method) 
     return true;
   }
 
-  if (path === VERSE_BROWSER_ACCESS_PATH || path === VERSE_BROWSER_ALLOW_PATH || path === VERSE_BROWSER_RESULT_PATH) {
+  if (path === VERSE_BROWSER_ACCESS_PATH || path === VERSE_BROWSER_ALLOW_PATH || path === VERSE_BROWSER_ALLOWANCE_PATH || path === VERSE_BROWSER_RESULT_PATH) {
     if (method !== 'POST') return false;
     const body = await readJsonObject(req, res, path === VERSE_BROWSER_RESULT_PATH ? RESULT_BODY_BYTES : SMALL_BODY_BYTES);
     if (!body) return true;
 
     if (path === VERSE_BROWSER_ACCESS_PATH) {
-      const extra = onlyKeys(body, ['sessionId', 'enabled']);
+      const extra = onlyKeys(body, ['sessionId', 'enabled', 'scope']);
       if (extra) return invalid(res, `unknown field: ${extra.slice(0, 40)}`);
       if (typeof body['enabled'] !== 'boolean') return invalid(res, 'enabled must be a boolean');
+      const scope = body['scope'] === undefined ? 'browser' : body['scope'];
+      if (typeof scope !== 'string' || !(VERSE_BROWSER_SCOPES as readonly string[]).includes(scope)) {
+        return invalid(res, `scope must be one of ${VERSE_BROWSER_SCOPES.join(', ')}`);
+      }
       const sessionId = await knownSession(res, body['sessionId']);
       if (!sessionId) return true;
       const port = localPort(req);
@@ -276,7 +285,22 @@ export const handleBrowserApi: ApiModule = async (_ctx, req, res, path, method) 
         sendJson(res, 503, { code: 'VERSE_UNAVAILABLE', error: 'could not tell which port Verse is serving on' });
         return true;
       }
-      sendJson(res, 200, setBrowserAgentAccess(sessionId, body['enabled'], `http://127.0.0.1:${port}`));
+      const policy = setBrowserScope(sessionId, scope as VerseBrowserScope, body['enabled'], `http://127.0.0.1:${port}`);
+      if (!policy) {
+        sendJson(res, 409, { code: 'VERSE_BROWSER_ACCESS_OFF', error: 'switch agent access on for this chat first' });
+        return true;
+      }
+      sendJson(res, 200, policy);
+      return true;
+    }
+
+    if (path === VERSE_BROWSER_ALLOWANCE_PATH) {
+      const extra = onlyKeys(body, ['sessionId', 'key']);
+      if (extra) return invalid(res, `unknown field: ${extra.slice(0, 40)}`);
+      if (typeof body['key'] !== 'string' || body['key'].length === 0 || body['key'].length > 600) return invalid(res, 'key is required');
+      const sessionId = await knownSession(res, body['sessionId']);
+      if (!sessionId) return true;
+      sendJson(res, 200, revokeBrowserAllowance(sessionId, body['key']));
       return true;
     }
 
