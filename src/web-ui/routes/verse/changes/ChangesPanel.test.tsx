@@ -10,7 +10,6 @@ import type {
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { status as gitStatus } from '../git/git-fixtures.test-support.js';
 import { ChangesPanel } from './ChangesPanel.js';
-import { ChangesPaneAdapter, CHANGES_PANE } from './changes-pane.js';
 import type { CheckpointClient } from './checkpoint-queries.js';
 
 const ROOT = 'aaaabbbbcccc';
@@ -264,10 +263,3 @@ describe('ChangesPanel', () => {
   });
 });
 
-describe('changes pane adapter', () => {
-  it('describes itself for a pane registry and handles "no chat"', () => {
-    expect(CHANGES_PANE).toMatchObject({ id: 'changes', title: 'Changes' });
-    render(<ChangesPaneAdapter sessionId={null} visible />);
-    expect(screen.getByText('No chat open')).toBeInTheDocument();
-  });
-});

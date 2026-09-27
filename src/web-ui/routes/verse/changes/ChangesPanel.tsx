@@ -20,8 +20,8 @@
  * always opens a preview first (UndoDialog) — later edits are never silently
  * overwritten. A file reject asks for a second click.
  *
- * Self-contained: it needs only the chat id. `changes-pane.ts` adapts it to
- * a pane host.
+ * Self-contained: it needs only the chat id. register.ts registers it with the
+ * pane registry (⇧⌘D) through ChangesPaneHost.
  */
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type {
