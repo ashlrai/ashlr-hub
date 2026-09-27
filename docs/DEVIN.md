@@ -285,6 +285,34 @@ when that changes. The daemon re-reads Devin session status at most every 2
 minutes. The Leader's `devin.launch` action and automations with the `devin`
 lane use the same fleet entry point and gates.
 
+**The Devin CLI as a fleet producer (`devin-cli`).** The fleet can also run
+the local Devin CLI on SWE-2, which is free on the Devin plan. It works like
+the Codex and Claude Code CLI engines: each run gets a sandbox worktree, and
+its edit is captured as a pending proposal. The command is
+`devin -p --model <m> --permission-mode smart --respect-workspace-trust false -- <goal>`.
+
+- **Permission mode.** `smart` is the least permissive mode that can both
+  edit and run tests: `auto` is read-only and `accept-edits` has no shell.
+  `dangerous` and Devin's own `--sandbox` are never used; the run's OS
+  confinement is the containment.
+- **Authorization.** It is the `devin-cli` lane, but the grant still names
+  only `devin`. The same switches as the fleet launcher apply: the lane on
+  (`devin.enabled`), the fleet opt-in (`devin.fleet`), and the grant's stage
+  naming `devin` with a producer Devin seat. The budget mode must also allow
+  the Devin seat.
+- **Model.** Set it with `devin.fleetModel`; the default is `swe-2-high`.
+  Only the free models (`swe-2-high`, `swe-2-medium`, `swe-2-max`) run under
+  autonomy, because a billed model's spend cannot be read back.
+- **Readiness.** The CLI must be installed and logged in (the same probe the
+  CLI chat seat uses). If it is not, the lane is closed with the fixing
+  command.
+- **Routing.** The lane has one slot. It takes work that no other seat can
+  take right now.
+- **Recording and cost.** Runs are recorded as `devin-cli:<model>` and cost
+  $0.
+- **Login.** An autonomous run gets a private copy of the CLI's login.
+  Nothing is written back to your real login.
+
 **Intake into the standing gates.** When a standing grant is in force and the
 lane is on, each standing tick runs the same intake as cloud PRs
 ([Intake into the standing gates](CLOUD.md#intake-into-the-standing-gates-313)):
