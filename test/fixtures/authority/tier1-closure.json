@@ -326,6 +326,7 @@
     "src/core/integrations/pulse-exporter.ts",
     "src/core/integrations/pulse-sync.ts",
     "src/core/integrations/secrets.ts",
+    "src/core/integrations/telegram-format.ts",
     "src/core/integrations/telegram.ts",
     "src/core/knowledge/ask.ts",
     "src/core/knowledge/graph.ts",

@@ -15,6 +15,7 @@
 
 import type { AshlrConfig } from '../types.js';
 import { sendTelegramMessage, telegramEnabled } from '../integrations/telegram.js';
+import { escapeTelegramHtml } from '../integrations/telegram-format.js';
 import type { VisibilitySnapshot } from '../web/visibility.js';
 
 // ---------------------------------------------------------------------------
@@ -47,12 +48,8 @@ function fmtTokens(tokens: number): string {
   return String(tokens);
 }
 
-function html(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
+/** Dynamic text inside the pulse's Telegram HTML — the shared escaper. */
+const html = escapeTelegramHtml;
 
 function postureHeader(posture: string): string {
   switch (posture) {
@@ -203,7 +200,7 @@ export async function sendFleetPulse(
     if (!telegramEnabled(cfg)) return;
 
     const text = buildFleetPulseMessage(snap);
-    await sendTelegramMessage(text, {}, cfg);
+    await sendTelegramMessage(text, { html: true }, cfg);
   } catch {
     // Never throws — fire-and-forget
   }

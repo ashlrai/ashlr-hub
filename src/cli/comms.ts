@@ -10,8 +10,8 @@
  *   send-test                        Post + send a test 'report' to verify the channel.
  *   cycle                            Run one runCommsCycle (send pending + poll replies).
  *   ask "<text>" -o "a" -o "b"       Post a test question with numbered options.
- *   digest                           Build oversight snapshot + send summary.
- *   ask-vision                       Leader tick + post the latest Leader memo.
+ *   digest [--force]                 Change-driven digest (silent when nothing changed).
+ *   ask-vision                       Leader tick + deliver the Leader thread (latest memo).
  *   ask-merges                       Post ship proposals for approval + run cycle.
  *   setup-telegram                   Print Telegram setup steps + discover chat id.
  *
@@ -24,9 +24,8 @@ import { telegramEnabled } from '../core/integrations/telegram.js';
 import { listRequests, outstanding, postRequest } from '../core/comms/requests.js';
 import { runCommsCycle } from '../core/comms/dispatch.js';
 import { registerCommsHandlers } from '../core/comms/handlers.js';
-import { buildOversightSnapshot } from '../core/fleet/oversight-export.js';
-import { scrubSecrets } from '../core/util/scrub.js';
-import { judgeHealth } from '../core/fleet/judge-calibration.js';
+import { runChangeDigest, readDigestState, type ChangeDigestResult } from '../core/comms/change-digest.js';
+import { LEGACY_BRIEFING_KIND, type CommsMigrationSummary } from '../core/comms/migrations.js';
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -87,136 +86,87 @@ function isDue(name: 'last-digest' | 'last-askvision', intervalHours: number): b
 }
 
 // ---------------------------------------------------------------------------
-// M177: sendDigest / sendAskVision — callable helpers (no enabled guard,
-//       no top-level try/catch — callers handle that)
+// 3.14: change-driven digest + Leader memo delivery — callable helpers (no
+//       enabled guard, no top-level try/catch — callers handle that)
 // ---------------------------------------------------------------------------
 
-async function sendDigest(cfg: Awaited<ReturnType<typeof loadConfig>>): Promise<void> {
-  const snap = buildOversightSnapshot(cfg);
-  const m = snap.scorecard;
-
-  const lines: string[] = [];
-  lines.push(`Fleet 24h: ${m.proposalsCreated} proposals, ${(m.acceptRate * 100).toFixed(0)}% accept, trivial ${(m.trivialRatio * 100).toFixed(0)}%.`);
-
-  if (snap.goals.active > 0 || snap.goals.done > 0) {
-    lines.push(`Goals: ${snap.goals.active} active, ${snap.goals.done} done (${snap.goals.progressPct}% complete).`);
-  }
-
-  if (snap.manager) {
-    lines.push(`Judge: ${snap.manager.shipped} ship, ${snap.manager.review} review, ${snap.manager.noise} noise.`);
-  }
-
-  const topConcern = snap.manager?.recommendations?.[0]
-    ?? (m.trivialRatio > 0.5 ? 'High trivial ratio — proposal quality may be low.'
-      : m.emptyRate > 0.3 ? 'High empty-diff rate — engine may be stalling.'
-        : 'Fleet operating normally.');
-  lines.push(`Top concern: ${topConcern}`);
-
-  if (snap.vision) {
-    lines.push(`Vision progress: ${snap.vision.progressPct}%.`);
-  }
-
-  try {
-    const jh = await judgeHealth(cfg);
-    let judgeLine: string;
-    if (jh.sampleSize === 0) {
-      const traceMatch = jh.flags[0]?.match(/found (\d+)/);
-      const n = traceMatch ? traceMatch[1] : '0';
-      judgeLine = `Judge: calibrating (${n} traces)`;
-    } else {
-      const kappaStr = jh.kappaVsOutcome !== null
-        ? `κ=${jh.kappaVsOutcome.toFixed(2)} vs outcomes`
-        : 'κ=n/a';
-      const firstDc = jh.darkCurrent[0];
-      const shipBiasPct = firstDc
-        ? `ship-bias ${((firstDc.verdictDistribution['ship'] ?? 0) * 100).toFixed(0)}%`
-        : null;
-      const parts = [kappaStr, shipBiasPct, `${jh.sampleSize} traces`].filter(Boolean);
-      judgeLine = `Judge: ${parts.join(', ')}`;
-      if (jh.flags.length > 0) {
-        const flagStr = jh.flags
-          .map((f) => {
-            if (f.includes('low-kappa') || f.includes('< 0.20') || f.includes('< 0.40')) return '⚠ low-kappa';
-            if (f.includes('rubber-stamp')) return '⚠ ship-bias';
-            if (f.includes('over-filtering')) return '⚠ noise-bias';
-            if (f.includes('insufficient outcome')) return '⚠ few-outcomes';
-            return '⚠ ' + f.slice(0, 30);
-          })
-          .filter((v, i, arr) => arr.indexOf(v) === i)
-          .slice(0, 2)
-          .join(' ');
-        judgeLine += ` ${flagStr}`;
-      }
-    }
-    lines.push(judgeLine);
-  } catch {
-    // judgeHealth failure must never break the digest — silently skip.
-  }
-
-  const text = lines.join(' ');
-
-  postRequest({
-    kind: 'fleet-digest',
-    type: 'report',
-    text,
-    options: [],
-    meta: { source: 'digest', generatedAt: snap.generatedAt },
-  });
-}
-
 /**
- * The comms kind for the Leader's briefing question. `elon-vision` is a
- * PERSISTED wire value (rows in ~/.ashlr/comms/requests.jsonl and the
- * resolution-handler registry key in comms/handlers.ts), kept so requests
- * already posted still resolve. It is an identifier only: nothing shown to
- * Mason (message text, options, CLI output) names a real person.
+ * Queue the change-driven digest (comms/change-digest.ts): a message only
+ * when something changed since the last one — merges, PRs, reverts, seats,
+ * cloud tasks, a new Leader memo — and at most one honest idle line per idle
+ * stretch. Silent otherwise. Returns what happened, for the log.
  */
-export const LEADER_BRIEFING_KIND = 'elon-vision';
-
-export type LeaderBriefingOutcome = 'posted' | 'already-posted' | 'no-memo';
-
-function clipText(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, ' ').trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+async function sendDigest(opts: { nowMs?: number } = {}): Promise<ChangeDigestResult> {
+  return runChangeDigest(opts);
 }
 
 /**
- * V3.10: the daily "vision question" is the Leader's, not the legacy
- * Strategist's. It runs the SAME path as `ashlr leader tick` — due class-B
- * actions apply, due moves are graded, and a Leader run starts only when one
- * is due (06:30 cadence / merge, revert, seat-reset, insight triggers; at
- * most 3 a day; skipped when the evidence has not changed; routed seat, no
- * cloud fallback, dry run without a grant). The legacy runStrategist path
- * went to the Claude CLI first with no budget gate; it is no longer reached
- * from comms.
+ * Wire kind of the pre-3.14 Leader briefing QUESTION (and the legacy
+ * Strategist briefing). A persisted value — rows in requests.jsonl still
+ * resolve through comms/handlers.ts — but nothing new is posted under it.
+ */
+export const LEADER_BRIEFING_KIND = LEGACY_BRIEFING_KIND;
+
+/**
+ * Where the newest Leader memo is on its way to Mason's phone:
+ * - `queued`        — in the Leader thread, pending for Telegram (the cycle drains it);
+ * - `delivered`     — already sent;
+ * - `failed`        — Telegram delivery gave up after its retries;
+ * - `not-in-thread` — the memo exists but the thread did not post it (older
+ *                     than 7 days, or skipped by the first-sync backlog limit);
+ * - `no-memo`       — there is no successful Leader memo yet.
+ */
+export type LeaderBriefingOutcome = 'queued' | 'delivered' | 'failed' | 'not-in-thread' | 'no-memo';
+
+export interface LeaderBriefingStatus {
+  outcome: LeaderBriefingOutcome;
+  memoId: string | null;
+  deliveredAt: string | null;
+}
+
+/** Where memo `memoId`'s summary message stands in the Leader thread (syncs recent memos first). */
+async function leaderMemoDelivery(memoId: string): Promise<LeaderBriefingStatus> {
+  const thread = await import('../core/vision/leader-thread.js');
+  thread.syncLeaderMemosToThread();
+  const msg = thread
+    .listThread({ limit: 200 })
+    .filter((m) => m.kind === 'memo' && m.memoId === memoId)
+    .pop();
+  const state = msg?.delivery?.telegram;
+  if (state === 'sent') return { outcome: 'delivered', memoId, deliveredAt: msg?.delivery?.sentAt ?? null };
+  if (state === 'pending') return { outcome: 'queued', memoId, deliveredAt: null };
+  if (state === 'failed') return { outcome: 'failed', memoId, deliveredAt: null };
+  return { outcome: 'not-in-thread', memoId, deliveredAt: null };
+}
+
+/**
+ * The daily "vision question" is the Leader's. It runs the SAME path as
+ * `ashlr leader tick` — due class-B actions apply, due moves are graded, and a
+ * Leader run starts only when one is due (06:30 cadence / merge, revert,
+ * seat-reset, insight triggers; at most 3 a day; skipped when the evidence has
+ * not changed; routed seat, no cloud fallback, dry run without a grant). The
+ * legacy Strategist path is never reached from comms.
  *
- * Then the newest successful memo is posted once (deduped by memo id):
- * Keep it / Veto this memo / Show full memo.
+ * 3.14: the memo is NOT posted as a comms request any more (the old
+ * "Keep it / Veto this memo / Show full memo" question is retired). The
+ * Leader thread owns memo delivery: syncLeaderMemosToThread() queues the memo
+ * summary plus one message per question for Telegram, and the comms cycle
+ * drains pendingOutbound('telegram') with [Approve] [Veto] [Details] buttons.
+ * This reports where the newest memo stands.
  */
-export async function sendLeaderBriefing(cfg: Awaited<ReturnType<typeof loadConfig>>): Promise<LeaderBriefingOutcome> {
+export async function sendLeaderBriefing(cfg: Awaited<ReturnType<typeof loadConfig>>): Promise<LeaderBriefingStatus> {
   const leader = await import('../core/vision/leader.js');
   const deps = await leader.loadDefaultLeaderRunDeps(cfg);
   await leader.leaderTick(deps, { awaitRun: true });
   const memo = leader.buildLeaderState(Date.now()).latest;
-  if (!memo || memo.status !== 'ok') return 'no-memo';
-  if (listRequests({ kind: LEADER_BRIEFING_KIND }).some((r) => r.meta?.['memoId'] === memo.id)) return 'already-posted';
+  if (!memo || memo.status !== 'ok') return { outcome: 'no-memo', memoId: null, deliveredAt: null };
+  return leaderMemoDelivery(memo.id);
+}
 
-  const parts: string[] = [`Leader memo${memo.dryRun ? ' (dry run)' : ''}`];
-  if (memo.bottleneck) parts.push(`Bottleneck: ${clipText(memo.bottleneck.statement, 240)}`);
-  if (memo.move) parts.push(`Move: ${clipText(memo.move.statement, 240)}`);
-  const live = memo.actions.filter((a) => a.status === 'applied' || a.status === 'scheduled').length;
-  if (live > 0) parts.push(`${live} action(s) applied or waiting on their veto window`);
-  if (memo.questionsForMason.length > 0) parts.push(`Question: ${clipText(memo.questionsForMason[0]!, 240)}`);
-
-  postRequest({
-    kind: LEADER_BRIEFING_KIND,
-    type: 'question',
-    // Model-authored text on its way to Mason's phone: scrubbed like every outbound message.
-    text: scrubSecrets(parts.join(' | ')),
-    options: ['Keep it', 'Veto this memo', 'Show full memo'],
-    meta: { source: 'leader', memoId: memo.id },
-  });
-  return 'posted';
+function logMigration(summary: CommsMigrationSummary | undefined): void {
+  if (!summary) return;
+  console.log(`comms migration ${summary.id}:`);
+  for (const line of summary.log) console.log(`  ${line}`);
 }
 
 function parseArgs(args: string[]): { sub: string; text: string; options: string[] } {
@@ -324,6 +274,7 @@ async function cmdSendTest(): Promise<number> {
 
   console.log(`posted test report: ${id}`);
   const result = await runCommsCycle(cfg);
+  logMigration(result.migration);
   console.log(`cycle: sent=${result.sent} resolved=${result.resolved}`);
 
   if (result.sent > 0) {
@@ -345,9 +296,10 @@ async function cmdCycle(): Promise<number> {
 
     if (isDue('last-digest', digestIntervalHours)) {
       try {
-        await sendDigest(cfg);
+        const digest = await sendDigest();
+        // Evaluated once per interval whether or not it spoke.
         writeLastSent('last-digest', Date.now());
-        console.log('cycle: digest queued');
+        console.log(digest.posted ? `cycle: digest queued (${digest.reason})` : `cycle: digest silent (${digest.reason})`);
       } catch {
         // never-throws — digest failure must not break the poll cycle
       }
@@ -355,11 +307,11 @@ async function cmdCycle(): Promise<number> {
 
     if (isDue('last-askvision', askVisionIntervalHours)) {
       try {
-        const outcome = await sendLeaderBriefing(cfg);
+        const { outcome, memoId } = await sendLeaderBriefing(cfg);
         // Checked once per interval whatever the outcome: a missing memo is
         // not retried every poll (the daemon's own tick runs the Leader).
         writeLastSent('last-askvision', Date.now());
-        console.log(outcome === 'posted' ? 'cycle: leader memo queued' : `cycle: leader memo not queued (${outcome})`);
+        console.log(`cycle: leader memo ${memoId ?? '(none)'}: ${outcome}`);
       } catch {
         // never-throws — ask-vision failure must not break the poll cycle
       }
@@ -375,6 +327,7 @@ async function cmdCycle(): Promise<number> {
   // Register M138 resolution handlers before the cycle polls/resolves.
   registerCommsHandlers(cfg);
   const result = await runCommsCycle(cfg);
+  logMigration(result.migration);
   console.log(`cycle complete: sent=${result.sent} resolved=${result.resolved}`);
   return 0;
 }
@@ -383,7 +336,7 @@ async function cmdCycle(): Promise<number> {
 // M138: digest — build oversight snapshot → send SMS-sized summary
 // ---------------------------------------------------------------------------
 
-async function cmdDigest(): Promise<number> {
+async function cmdDigest(force: boolean): Promise<number> {
   const cfg = await loadConfig();
 
   if (!channelEnabled(cfg)) {
@@ -392,23 +345,36 @@ async function cmdDigest(): Promise<number> {
   }
 
   try {
-    await sendDigest(cfg);
-
-    // Post as a report (no reply needed), then run one cycle to send it.
-    const pending = listRequests({ kind: 'fleet-digest', status: 'pending' });
-    const id = pending[pending.length - 1]?.id ?? '(unknown)';
-    console.log(`posted digest report: ${id}`);
+    const digest = await sendDigest();
+    let requestId = digest.requestId;
+    if (!digest.posted) {
+      if (!force) {
+        const last = readDigestState()?.lastSentAt;
+        console.log(`Nothing changed since the last digest${last ? ` (${last})` : ''} — nothing sent. Use --force to send the current state anyway.`);
+        return 0;
+      }
+      const { buildStatusText } = await import('../core/comms/telegram-channel.js');
+      requestId = postRequest({
+        kind: 'fleet-digest',
+        type: 'report',
+        text: `No fleet changes since the last digest.\n${await buildStatusText()}`,
+        options: [],
+        meta: { source: 'digest', reason: 'forced' },
+      });
+    }
+    console.log(`queued digest: ${requestId ?? '(unknown)'} (${digest.posted ? digest.reason : 'forced'})`);
     registerCommsHandlers(cfg);
     const result = await runCommsCycle(cfg);
+    logMigration(result.migration);
     console.log(`cycle: sent=${result.sent} resolved=${result.resolved}`);
 
-    if (result.sent > 0) {
+    const delivered = requestId ? listRequests({ status: 'answered' }).some((r) => r.id === requestId) : false;
+    if (delivered) {
       console.log('Digest sent.');
       return 0;
-    } else {
-      console.error('Send failed — check channel configuration or an outstanding request may be blocking.');
-      return 1;
     }
+    console.error('Digest queued but not sent yet — check the channel configuration (it retries on the next cycle).');
+    return 1;
   } catch (err) {
     console.error('digest failed:', err instanceof Error ? err.message : String(err));
     return 1;
@@ -429,32 +395,44 @@ async function cmdAskVision(): Promise<number> {
 
   try {
     console.log('Running a Leader tick (a due run on a local model can take several minutes)…');
-    const outcome = await sendLeaderBriefing(cfg);
-    if (outcome === 'no-memo') {
+    const before = await sendLeaderBriefing(cfg);
+    const { memoId } = before;
+    if (before.outcome === 'no-memo' || !memoId) {
       console.error('No Leader memo yet — run `ashlr leader run` (or wait for the 06:30 run), then try again.');
       return 1;
     }
-    if (outcome === 'already-posted') console.log('The latest Leader memo was already sent; sending anything still pending.');
-    else {
-      const pending = listRequests({ kind: LEADER_BRIEFING_KIND, status: 'pending' });
-      console.log(`posted Leader memo: ${pending[pending.length - 1]?.id ?? '(unknown)'}`);
+    // Say exactly where the memo is: "already posted" used to mean only
+    // "queued", while the memo sat undelivered behind a blocked queue.
+    if (before.outcome === 'delivered') {
+      console.log(`Leader memo ${memoId} was already delivered${before.deliveredAt ? ` at ${before.deliveredAt}` : ''}; running a cycle for anything else pending.`);
+    } else if (before.outcome === 'queued') {
+      console.log(`Leader memo ${memoId} is queued in the Leader thread, not delivered yet; sending now.`);
+    } else if (before.outcome === 'failed') {
+      console.error(`Leader memo ${memoId}: Telegram delivery failed after its retries — see \`ashlr leader\` / Verse for the memo.`);
+    } else {
+      console.log(`Leader memo ${memoId} is not in the Leader thread (older than 7 days, or skipped as backlog) — nothing to deliver.`);
     }
     registerCommsHandlers(cfg);
     const result = await runCommsCycle(cfg);
+    logMigration(result.migration);
     console.log(`cycle: sent=${result.sent} resolved=${result.resolved}`);
 
-    if (outcome === 'already-posted' || result.sent > 0) {
-      if (result.sent > 0) {
-        const dest = telegramEnabled(cfg)
-          ? `Telegram (chat ${cfg.comms?.telegram?.chatId ?? '?'})`
-          : cfg.comms?.imessageHandle ?? '?';
-        console.log(`Leader memo sent to ${dest}. Reply 1/2/3 (or tap a button on Telegram).`);
-      }
+    if (before.outcome === 'delivered' || before.outcome === 'not-in-thread') return 0;
+    if (before.outcome === 'failed') return 1;
+    const after = await leaderMemoDelivery(memoId);
+    if (after.outcome === 'delivered') {
+      const dest = telegramEnabled(cfg)
+        ? `Telegram (chat ${cfg.comms?.telegram?.chatId ?? '?'})`
+        : cfg.comms?.imessageHandle ?? '?';
+      console.log(`Leader memo ${memoId} delivered to ${dest}. Reply to it to talk to the Leader, or tap Approve / Veto / Details.`);
       return 0;
-    } else {
-      console.error('Send failed — check channel config or an existing outstanding question may be blocking.');
-      return 1;
     }
+    if (!telegramEnabled(cfg)) {
+      console.log(`Leader memo ${memoId} is in the Leader thread; it is delivered over Telegram only (read it in Verse or \`ashlr leader\`).`);
+      return 0;
+    }
+    console.error(`Leader memo ${memoId} is queued but was not delivered — check the Telegram configuration (it retries on the next cycle).`);
+    return 1;
   } catch (err) {
     console.error('ask-vision failed:', err instanceof Error ? err.message : String(err));
     return 1;
@@ -488,6 +466,7 @@ async function cmdAsk(text: string, options: string[]): Promise<number> {
 
   console.log(`posted question: ${id}`);
   const result = await runCommsCycle(cfg);
+  logMigration(result.migration);
   console.log(`cycle: sent=${result.sent} resolved=${result.resolved}`);
 
   if (result.sent > 0) {
@@ -516,8 +495,8 @@ function printCommsHelp(): void {
   console.log('    send-test                    post + send a test report to verify the channel');
   console.log('    cycle                        run one send-pending + poll-replies pass');
   console.log('    ask "<text>" -o a -o b       post a question with numbered options');
-  console.log('    digest                       build oversight snapshot + send summary');
-  console.log('    ask-vision                   run a Leader tick + post the latest Leader memo');
+  console.log('    digest [--force]             send what changed since the last digest (silent if nothing)');
+  console.log('    ask-vision                   run a Leader tick + deliver the latest memo via the Leader thread');
   console.log('    ask-merges                   post ship proposals for approval + run cycle');
   console.log('    setup-telegram               print Telegram setup steps + discover chat id');
   console.log('');
@@ -540,7 +519,7 @@ export async function cmdComms(args: string[]): Promise<number> {
     case 'ask':
       return cmdAsk(text, options);
     case 'digest':
-      return cmdDigest();
+      return cmdDigest(args.includes('--force'));
     case 'ask-vision':
       return cmdAskVision();
     case 'ask-merges':
@@ -695,6 +674,7 @@ async function cmdAskMerges(): Promise<number> {
 
     registerCommsHandlers(cfg);
     const result = await runCommsCycle(cfg);
+    logMigration(result.migration);
     console.log(`cycle: sent=${result.sent} resolved=${result.resolved}`);
 
     return 0;
