@@ -5,6 +5,9 @@
  *   Merges / week (8)                        | Cost per merge (4)
  *   Pipeline funnel (4) | Model outcomes (4) | Merges by day (4)
  *   Harness level with 95% band + ▼ rollbacks (8) | Experiments forest plot (4)
+ *   Lessons (12, 3.15): recurring failure causes, suggested knowledge to
+ *   approve, recent retros, approved knowledge with hit counts — its own
+ *   lazy chunk and its own read, so Growth's first paint never waits on it.
  *
  * Sources: fleet history (A8), per-model economics (/api/models), learning
  * (B-U9). Each can be missing on its own; its cards say so. History and
@@ -18,7 +21,7 @@
  * they have something real to draw — one clear state instead of six
  * identical empty cards.
  */
-import { useMemo } from 'react';
+import { lazy, Suspense, useMemo } from 'react';
 import { AreaTrend } from '../../../components/charts/AreaTrend.js';
 import { BarStack } from '../../../components/charts/BarStack.js';
 import { CalendarHeatmap } from '../../../components/charts/CalendarHeatmap.js';
@@ -42,6 +45,9 @@ import { OUTCOME_SEGMENTS, costPerMerge, forestRows, harnessSteps, modelOutcomes
 import { HARNESS_ADOPTION_GATE } from '../../../../core/learn/harness-types.js';
 
 export const GROWTH_POLL_MS = 300_000;
+
+/** Lessons (3.15) is a separate chunk: loaded the first time Growth renders, never on app start. */
+const LessonsPanel = lazy(() => import('../growth/LessonsPanel.js').then((m) => ({ default: m.LessonsPanel })));
 
 const models30 = modelsQuery('30d');
 
@@ -211,6 +217,11 @@ export function GrowthSection() {
           </div>
         </Cell>
       ) : null}
+      <Cell span={12}>
+        <Suspense fallback={null}>
+          <LessonsPanel />
+        </Suspense>
+      </Cell>
     </Surface>
   );
 }

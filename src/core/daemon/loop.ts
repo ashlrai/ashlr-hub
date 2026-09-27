@@ -374,6 +374,7 @@ import {
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readStableRegularFile } from '../util/stable-file-read.js';
 import { fsyncDirectory } from '../util/durability.js';
+import { withApprovedKnowledge } from '../learn/retro/inject.js';
 
 type FleetQuotaReservationRefusal = Extract<
   FleetQuotaReservationResult,
@@ -7076,7 +7077,15 @@ export async function tick(
       }
       // V3.10 (B-U9): a standing tick's producers run with the active harness —
       // its producer prompt overlay rides on the goal (baseline: none).
-      const goal = standingTick ? withHarnessProducerPrompt(buildItemGoal(item), hooks) : buildItemGoal(item);
+      const baseGoal = standingTick ? withHarnessProducerPrompt(buildItemGoal(item), hooks) : buildItemGoal(item);
+      // 3.15: Mason-approved, trigger-scoped lessons from earlier task ends
+      // (learn/retro/inject.ts; ≤ 16 KiB). Guidance only — it changes no
+      // route, gate or authority. Nothing approved/matching ⇒ byte-identical goal.
+      const goal = withApprovedKnowledge(
+        baseGoal,
+        { repo: item.repo, paths: [], kind: null, text: `${item.title}\n${item.detail}` },
+        { fromLeader: item.tags.includes('fleet-source:leader') },
+      );
       // …and its effort / sampling ride on the engine invocation itself.
       const dispatchHarness = standingTick ? standingDispatchHarness(hooks) : null;
       const dispatchCfg = dispatchConfigForItem(item, routingCfg);

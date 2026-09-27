@@ -51,6 +51,7 @@ import type { SeatCapacity } from '../routing/headroom.js';
 import type { EffectivePolicy, LedgerEntry, LedgerReadOptions, LedgerReadResult } from '../authority/types.js';
 import type { RepoHold } from '../fleet/fleet-types.js';
 import type { ReasoningDigest } from '../reasoning/types.js';
+import type { LeaderLessonsEvidence } from '../learn/retro/inject.js';
 import {
   LEADER_ACTION_KINDS,
   LEADER_LIMITS,
@@ -192,6 +193,12 @@ export interface LeaderEvidenceSources {
   quality7d(): LeaderQualitySnapshot;
   models(): LeaderModelRow[];
   reasoning(): Promise<ReasoningDigest>;
+  /**
+   * 3.15 (optional): the veto lessons the veto path stored as playbook deltas
+   * (read back at last) and Mason's approved knowledge notes, within 16 KiB
+   * (learn/retro/inject.ts). null / absent = none.
+   */
+  lessons?(): LeaderLessonsEvidence | null;
 }
 
 export interface LeaderEvidence {
@@ -234,6 +241,12 @@ export interface LeaderEvidence {
    * own words and `untrusted` (the Leader's earlier wording) as data.
    */
   operator?: LeaderOperatorContext;
+  /**
+   * 3.15: veto lessons (playbook deltas) and approved knowledge. Absent when
+   * there are none, so the evidence digest of a Leader with no lessons is
+   * unchanged. Rendered as untrusted data like every other block.
+   */
+  lessons?: LeaderLessonsEvidence;
   /** Sections whose source failed — reported so the model does not read them as zero. */
   unknown: string[];
 }
@@ -359,6 +372,7 @@ export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs
   const actions = listLeaderActions(200);
   // 3.14 operator input (additive): unreadable is reported, never read as "no guidance".
   const operator = attempt('operator', () => readLeaderOperatorContext(nowMs));
+  const lessons = sources.lessons ? attempt('lessons', () => sources.lessons!()) : null;
   return {
     grant,
     budget,
@@ -379,6 +393,7 @@ export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs
     recentVetoes: actions.filter((a) => a.status === 'vetoed').slice(0, 5).map((a) => ({ summary: a.summary, note: a.vetoNote })),
     directives: directives ? { grokLanes: directives.grokLanes, codexEnabled: directives.codexEnabled, routerTuning: directives.routerTuning } : null,
     ...(operator ? { operator } : {}),
+    ...(lessons ? { lessons } : {}),
     unknown: [...new Set(unknown)].sort(),
   };
 }
@@ -434,6 +449,9 @@ export function buildLeaderPrompt(evidence: LeaderEvidence, opts: { dryRun: bool
     untrustedBlock('YOUR STANDING DIRECTIVES', evidence.directives),
     untrustedBlock('UNKNOWN SECTIONS (sources that failed — not zero)', evidence.unknown),
   ];
+  if (evidence.lessons) {
+    blocks.push(untrustedBlock('LESSONS: MASON\'S VETOES (with repeats) AND HIS APPROVED KNOWLEDGE', evidence.lessons));
+  }
   if (evidence.operator) {
     blocks.unshift(operatorBlock(evidence.operator));
     blocks.push(untrustedBlock('YOUR EARLIER WORDING THAT MASON ANSWERED OR APPROVED', evidence.operator.untrusted));
@@ -756,7 +774,7 @@ export interface LeaderRunDeps {
 }
 
 export async function loadDefaultLeaderRunDeps(cfg: AshlrConfig): Promise<LeaderRunDeps> {
-  const [apply, seat, budgetStore, quarantine, quality, modelStats, reasoningApi, goalsStore, ledger, effective, cloudBacklog] = await Promise.all([
+  const [apply, seat, budgetStore, quarantine, quality, modelStats, reasoningApi, goalsStore, ledger, effective, cloudBacklog, lessons] = await Promise.all([
     loadDefaultLeaderDeps(),
     loadDefaultLeaderSeatDeps(cfg),
     import('../routing/budget-store.js'),
@@ -768,6 +786,7 @@ export async function loadDefaultLeaderRunDeps(cfg: AshlrConfig): Promise<Leader
     import('../authority/ledger.js'),
     import('../authority/effective-config.js'),
     import('../cloud/backlog.js'),
+    import('../learn/retro/inject.js'),
   ]);
   return {
     cfg,
@@ -809,6 +828,7 @@ export async function loadDefaultLeaderRunDeps(cfg: AshlrConfig): Promise<Leader
           costUsd: Math.round(m.costUsd * 100) / 100,
         })),
       reasoning: () => reasoningApi.computeReasoningDigest(14),
+      lessons: () => lessons.leaderLessons(),
     },
   };
 }
