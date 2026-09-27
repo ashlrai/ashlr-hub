@@ -29,12 +29,12 @@
     var MESSAGE = 'Media capture is disabled in the Ashlr browser pane.'
     function refusal() {
       try {
-        return new DOMException(MESSAGE, 'NotAllowedError')
-      } catch (_) {
-        var e = new Error(MESSAGE)
-        e.name = 'NotAllowedError'
-        return e
-      }
+        var DomException = window.DOMException
+        if (typeof DomException === 'function') return new DomException(MESSAGE, 'NotAllowedError')
+      } catch (_) {}
+      var e = new Error(MESSAGE)
+      e.name = 'NotAllowedError'
+      return e
     }
     function denied() {
       return Promise.reject(refusal())
