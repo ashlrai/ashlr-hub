@@ -136,22 +136,114 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   spend chokepoint, readiness gate, local-only gate and mutation token apply
   unchanged. No routing file and no fleet caller changed.
 
+### The workbench panel: terminal, browser, changes
+
+- The chat's panel sits beside the conversation or under it and holds tabs and
+  splits from one pane registry: Terminal (⌃`), Browser (⇧⌘B), Changes (⇧⌘D),
+  Files (⇧⌘O), Sources (⇧⌘S), Reasoning (⇧⌘Y), Tasks and Context. Each chat
+  remembers its layout (the 40 most recent). Focus mode (⇧⌘F) leaves only the
+  conversation; a pane key leaves it and shows the pane. `?chat=<id>&pane=<id>`
+  opens a chat with a pane. A panel sheet restored open on a narrow window now
+  closes with Esc.
+- **Terminal.** xterm on WebGL with command blocks from the shell's own marks
+  in zsh, bash and fish (no dotfile edits): exit code, duration and output per
+  block, ⌘↑/⌘↓ between commands, a Blocks view (⇧⌘K) with Send to chat and
+  Explain and fix, two panes per tab (⌘D / ⌥⌘D), and a read-only **Agent** tab
+  of every command the chat's agents ran. KILL refuses and hangs up agent tabs.
+- **Checkpoints and Changes.** Every agent turn, on every seat, is bracketed by
+  hidden `pre`/`post` commits under `refs/ashlr/checkpoints/`, never touching
+  your index, stash, HEAD or branches. The Changes pane reviews This turn,
+  Since turn or All turns with word-level diffs, Accept/Reject per file or
+  hunk, and Undo, Rewind and Redo behind a preview with a three-way choice for
+  files you edited since. `ASHLR_VERSE_CHECKPOINTS=0` turns it off.
+
+### Devin: chat seats, a fleet producer and the two-judge rule
+
+- **Devin as a resource.** `ashlr devin connect` stores a `cog_…` key in the
+  macOS Keychain; an ACU budget with a per-session hard cap and a reserve; Run
+  in Devin and `ashlr devin launch`; a Devin card in Resources; Devin PRs in
+  Needs you and the standing intake. Off by default.
+- **Chat seats.** **Devin (cloud)** runs one Devin session per chat (replies,
+  status, PR cards, an ACU reading, Stop watching or terminate). **Devin
+  (CLI)** drives the local `devin` agent over ACP. The CLI seat checks that the
+  binary is installed and logged in before every turn (409 with "Run `devin
+  auth login`…" or the install command). PR links a CLI turn prints reach
+  Needs you with Dismiss only; CLI usage is not reported, so it is not counted.
+- **Its own engine.** `devin` is a grant engine that may only produce. The
+  fleet launcher can start Devin on bounded backlog work under a grant that
+  names it (default 1 at a time, 3 a day; `--fleet-concurrent`,
+  `--fleet-per-day`). Signing such a grant needs custody helper 1.1.0
+  (`sudo scripts/install-custody.sh`).
+- **Two judges.** A Devin PR passes G6 only with ships from judges of two
+  different families, and merges only when the live stage names `devin`;
+  otherwise the would-merge is recorded as shadow.
+- Needs you gives Devin PRs the Clean/Held verdict, Land all clean and an
+  Evidence timeline. Close on both lanes takes an optional reason.
+
+### Playbooks in every chat, automations
+
+- A `!macro` typed in any chat, on any seat, runs its playbook; the message
+  shows a **Playbook: ‹name› · vN** chip. Chats never auto-match.
+- **Automations** turn GitHub issues and PRs, a red default branch, RRULE
+  schedules, a local webhook and Telegram `/task` into one task in one lane
+  (fleet, cloud, Devin or leader-review), through that lane's own gates.
+  Gear ▸ Automations, ⌘K and `ashlr automations`. Four templates, all
+  disabled. `ASHLR_AUTOMATIONS_AUTO=0` stops the per-minute check.
+
+### Retros, lessons and the Jev decision layer
+
+- Every task end (fleet, cloud, Devin, Leader) becomes a retro; suggested
+  knowledge is used only after you approve it in Growth ▸ Lessons. `ashlr
+  verse` now sweeps hourly (first after 5 minutes);
+  `ASHLR_RETRO_SWEEP_TIMER=0` turns that off.
+- `src/core/decide` is one typed decision layer for Jev (TypeSafe AI) with a
+  deterministic fallback, per-kind confidence gates, a cache, a daily paid-call
+  budget and kill switches at every call site: engine errors, completion
+  claims, task classes, judge/taste/red-team extraction, retro root causes,
+  Needs-you order, interrupt-worthiness, lane choice, automation triage,
+  operator intent and advisory action classes on Leader memos. `ashlr jev
+  status|test`, a Resources card and a Usage panel.
+
+### A founder-mode Leader
+
+- One founder-operator voice across memos, Mind and Telegram, guarded against
+  claiming to be a real person; Telegram replies cut to 6 lines with "more".
+- The Leader line on Telegram: a morning brief and evening recap, an instant
+  brief on "status" or `/status`/`/brief`, result and revert pings, quiet
+  hours, a daily ping cap and one question at a time with Yes / No / Your call.
+- "Go build X" becomes work at once in the cheapest lane that can do it. New
+  actions (cloud and Devin launches, backlog items, its own notes, playbook
+  and automation versions) are classed and vetoable like every other.
+- A daily self-improvement drive picks up to 3 Ashlr Verse improvements (at
+  most 1 paid); `foundry.leader.selfImprove: false` turns it off.
+
+### 3.15 integration
+
+- Lazy imports in the sidecar are literal, so the Bun binary bundles them (a
+  test now forbids computed `import()` in `src/core` and `src/cli`, outside operator plugins).
+- A deleted chat's Browser-pane grant is revoked; `ashlr verse` exits cleanly
+  once the Fleet surface has loaded; the gate's build step also copies the web
+  assets.
+
 ### Documentation and verse.ashlr.ai for 3.15
 
-- New guides: `docs/LEADER.md` (Mind, Telegram commands and buttons, the CLI,
-  directives, approvals, check-ins; written for the fixed Telegram
-  `/directives` and `/settings` from the leader-conversation-gaps change) and `docs/DEVIN.md` (plan,
-  training opt-out, GitHub integration, service user, `ashlr devin connect`, ACU
-  budget, delivery, shadow-only intake, limits).
+- New guides: `docs/LEADER.md` (Mind, Telegram commands, buttons and briefs,
+  founder mode, the CLI, directives, approvals, check-ins; its Telegram
+  `/directives` and `/settings`, Approve wording, directive counter and
+  Claude-free replies describe the leader-conversation-gaps change) and
+  `docs/DEVIN.md` (setup, the chat seats, the CLI, ACU budget, delivery, the
+  fleet launcher, the two-judge rule, limits).
 - `docs/VERSE.md` covers every surface and shortcut as of 3.15: the ladder and
   shadow decisions, Lessons, the Leader conversation, Resources readiness lines,
-  the repo wiki and Ask, the Devin lane and the ⌘K catalog. `docs/CLOUD.md`
-  compares the cloud and Devin lanes. `docs/AUTHORITY.md` and
+  the workbench panel, every seat together, the repo wiki and Ask, playbooks,
+  automations, the Jev decision layer, Devin and the ⌘K catalog.
+  `docs/CLOUD.md` compares the cloud and Devin lanes. `docs/AUTHORITY.md` and
   `docs/AUTONOMY-GAP.md` state the current activation (grant active, ladder at
   shadow) and what the operator must still do.
 - The site describes the Leader, autonomy with custody (grant, ladder, gates),
-  the multi-seat workbench, the wiki and lessons, and the cloud and Devin lanes,
-  with the fleet's real status (stage 1 of 8, shadow, 0 repos merging).
+  the multi-seat workbench and its panel, the wiki and lessons, and the cloud
+  and Devin lanes, with the fleet's real status (stage 1 of 8, shadow, 0 repos
+  merging).
 
 ### Private repo wiki and Ask
 

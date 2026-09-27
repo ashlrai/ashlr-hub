@@ -22,9 +22,10 @@ The contracts live in `src/core/cloud/types.ts`. The user guide in Verse is
 
 **A second lane: Devin (3.15).** Devin sessions follow the same pattern: a
 task, a branch per task, one PR with a report block, the same Needs-you triage
-and the same intake into the standing gates. Devin PRs are shadow-only at every
-rollout stage. See [The Devin lane](#the-devin-lane-315) below and
-[DEVIN.md](DEVIN.md).
+and the same intake into the standing gates. A Devin PR merges only when the
+grant's stage names Devin and judges from two different model families
+approved it; otherwise it is shadow. See [The Devin lane](#the-devin-lane-315)
+below and [DEVIN.md](DEVIN.md).
 
 ---
 
@@ -300,7 +301,9 @@ action carries the head commit it was checked on, so a push in between is
 refused, not landed. Every action asks for the mutation token.
 
 The same actions are routes: `POST /api/verse/cloud/tasks/<id>/land`,
-`/close` and `/update-branch`, each with `{"headSha": "<40 hex>"}`, and
+`/close` and `/update-branch`, each with `{"headSha": "<40 hex>"}` (Close
+also takes an optional `reason`, up to 200 characters, recorded as "Closed in
+Verse: <reason>" and included in the GitHub comment), and
 `GET /api/verse/cloud/previews` for the verdicts.
 
 ### Intake into the standing gates (3.13)
@@ -376,26 +379,33 @@ Devin is the second lane with this shape. Its setup, budget and limits are in
 | | Cloud lane | Devin lane |
 |---|---|---|
 | Runs on | Claude Code cloud sessions, your Claude credits | Devin sessions, your Devin ACUs |
-| Started from | Command's Cloud card, Run in cloud, `ashlr cloud launch`, self-improvement | Run in Devin, `ashlr devin launch` |
-| Started by Verse on its own | Yes, self-improvement under a daily cap | No. `ashlr devin fleet on` is an opt-in, but no fleet dispatcher calls it yet |
+| Started from | Command's Cloud card, Run in cloud, `ashlr cloud launch`, self-improvement | Run in Devin, `ashlr devin launch`, a Devin (cloud) chat |
+| Started by Verse on its own | Yes, self-improvement under a daily cap | Only under a grant that names Devin, with `ashlr devin fleet on`: the fleet launcher (default 1 at a time, 3 a day), the Leader's `devin.launch`, and automations on the `devin` lane |
 | Branch and report | `ashlr-cloud/<taskId>`, `ashlr-cloud-report` | `ashlr-devin/<taskId>`, `ashlr-devin-report` |
 | Budget | Dollars, estimated per session | ACUs from Devin, with a per-session hard cap; dollars are an estimate |
-| Needs you | Clean/Held verdict, Land, Close, Update branch, Land all clean | Land, Close, Update branch, Dismiss (no inline verdict panel or Land all clean yet) |
-| Standing gates | G0–G7; the judge must not be Claude-family | G0–G7; the judge must not be the `devin` family |
-| May merge under a grant | Yes, from the fleet App's PR, when the ladder stage merges | **Never.** Shadow-only: a would-merge is recorded and the PR waits for you |
+| Needs you | Clean/Held verdict, Land, Close, Update branch, Land all clean, Evidence | The same |
+| Standing gates | G0–G7; the judge must not be Claude-family | G0–G7; two judges from two different families, neither `devin` |
+| May merge under a grant | Yes, from the fleet App's PR, when the ladder stage merges | Only when the live stage names `devin` and the two-judge rule holds; otherwise a would-merge is recorded as shadow and the PR waits for you |
 
 **Triage.** A Devin task with an open PR appears in Needs you as "Devin task
 ready for review", with its report marked unverified. The actions are the same
 head-pinned routes as the cloud lane's, under `/api/verse/devin/tasks/<id>/`
 (`land`, `close`, `update-branch`, `dismiss`, and `message` to reply to a
-waiting session).
+waiting session), `GET /api/verse/devin/tasks/<id>/timeline` for Evidence, and
+`GET /api/verse/devin/previews` for the verdicts. Close, on both lanes, takes
+an optional one-line reason (up to 200 characters) that the task records as
+"Closed in Verse: <reason>" and the GitHub close comment includes. PRs that a
+Devin (CLI) chat opened are listed with Dismiss only
+(`POST /api/verse/devin/cli-prs/<chat>/<n>/dismiss`).
 
 **Intake.** `src/core/fleet/cloud-intake.ts` takes a *source*, so cloud and
 Devin PRs go through one intake. For Devin the head must be exactly
 `ashlr-devin/<taskId>`, the producer is `devin:<mode>`, and it runs only when
 the Devin lane is on. Everything else in [Intake into the standing
-gates](#intake-into-the-standing-gates-313) applies unchanged, up to the
-merge, which the standing pass withholds for Devin.
+gates](#intake-into-the-standing-gates-313) applies, except G6 and the
+merge: G6 needs ships from judges of two different families, and the standing
+pass merges only when the live stage names `devin` and the recorded judges
+still satisfy that rule. The legacy merge pass never merges Devin work.
 
 ---
 

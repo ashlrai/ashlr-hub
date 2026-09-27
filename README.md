@@ -44,19 +44,21 @@ The user guide is [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/ma
 
 | | What you get | Guide |
 |---|---|---|
-| **Talk to the Leader** | One conversation across Mind (⌘4), Telegram and `ashlr leader say`. Standing directives (`focus:`, `stop:`, `priority:`), answers to its questions, early approval or veto of its actions, Telegram buttons and change-driven digests. Seat fallback, retries and check-ins keep it answering. | [LEADER.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md) |
+| **Talk to the Leader** | One conversation across Mind (⌘4), Telegram and `ashlr leader say`. Standing directives (`focus:`, `stop:`, `priority:`), answers to its questions, early approval or veto of its actions and Telegram buttons. In 3.15 it runs in founder mode: morning and evening briefs, an instant brief on "status", "go build X" turned into work under the grant, one question at a time, and a daily self-improvement pick. | [LEADER.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md) |
 | **Autonomy with custody** | A Touch ID standing grant names repos, engines, caps and spend. Every change passes gates G0–G7 and a judge from another model family; merges are SHA-pinned, watched for two hours and reverted if red. Command shows the rollout ladder (stage x of 8); Fleet shows every shadow decision and why. | [STANDING-AUTHORITY.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md) |
-| **A multi-seat workbench** | Claude Code, several Codex accounts, Grok and local models side by side, each pinned to its own profile. Queue, attach, `@` files, a Terminal/Preview/Review dock, live reasoning, a context meter that reads the real window. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) |
+| **A multi-seat workbench** | Claude Code, several Codex accounts, Grok, local models and Devin side by side, each pinned to its own profile. Auto seat, Compare, cheap-first and one-click handoff across seats. A panel of Terminal (command blocks, an Agent tab), Browser (agents can look, never click), Changes (a checkpoint before every turn, Accept/Reject, Undo/Redo), Sources and Reasoning, plus focus mode. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) |
 | **Resources, ready or not** | ⌘. shows every account, local runtime, cloud credits and Devin, each with a "Chat: ready" and a "Fleet: ready · reserve kept" line and the command that fixes it. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#resources-the-drawer-and-the-bar-311) |
-| **Cloud and Devin lanes** | Hand a task to a Claude Code cloud session or a Devin session. Each delivers one PR with a report; Needs you shows a gate verdict and Land, Close, Update branch. Devin PRs are shadow-only. | [CLOUD.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md), [DEVIN.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md) |
+| **Cloud and Devin** | Hand a task to a Claude Code cloud session or a Devin session, or chat with Devin (cloud or CLI). Each task delivers one PR with a report; Needs you shows a gate verdict and Land, Close, Update branch. A Devin PR merges only at a grant stage that names Devin, with two judges from different families. | [CLOUD.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md), [DEVIN.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md) |
 | **A private repo wiki** | An architecture wiki per repo with verified `file:line` citations, and Ask the codebase, written by your local models (Grok only if the grant allows, never Claude) and stored only on your Mac. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#repo-wiki-and-ask-315) |
-| **Lessons** | Every task end becomes a retro with a root cause. Knowledge it suggests is used only after you approve it, and only where its scope matches. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#lessons-retros-and-approved-knowledge-315) |
+| **Lessons** | Every task end becomes a retro with a root cause, swept hourly. Knowledge it suggests is used only after you approve it, and only where its scope matches. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#lessons-retros-and-approved-knowledge-315) |
+| **Playbooks and automations** | Versioned task templates, run with a `!macro` in any chat or lane; issues, red builds, schedules and webhooks that become work, through each lane's own gates. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#playbooks-315) |
+| **Jev decisions** | One fast, typed decision layer with a rules fallback at every call site, advisory or escalate-only where safety is near. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#the-jev-decision-layer-315) |
 
 **Status, plainly.** Autonomy ships dormant. It turns on only after you install
 the custody helper, sign a grant and start the resident daemon yourself, and it
 is macOS-only. On the maintainer's Mac a grant is active and the ladder is at
-stage 1 of 8, shadow, where nothing merges. Devin is a resource, not a chat
-seat, and the fleet does not start Devin sessions on its own yet. What is
+stage 1 of 8, shadow, where nothing merges. That grant does not name Devin,
+so the fleet starts no Devin sessions and Devin PRs stay shadow. What is
 activated where is kept current in
 [AUTONOMY-GAP.md](docs/AUTONOMY-GAP.md#current-activation-state-315).
 
@@ -190,7 +192,8 @@ ID).
 6. **Optionally hand work to the cloud or to Devin.** **New cloud task** on
    Command, or `ashlr cloud launch "<task>" --repo owner/name`
    ([cloud lane](#the-cloud-lane)). For Devin, `ashlr devin connect` once,
-   then **Run in Devin** from a chat or `ashlr devin launch "<task>"`.
+   then a **Devin (cloud)** chat, **Run in Devin** from a chat, or
+   `ashlr devin launch "<task>"`.
 7. **Talk to the Leader.** Open Mind (⌘4), or `ashlr leader say "focus: …"`.
    `ashlr comms setup-telegram` adds a two-way Telegram line.
 8. **Inspect autonomy preparation** with `ashlr authority setup --dry-run --json`
@@ -354,17 +357,21 @@ How it works, the delivery contract, the budget math and every failure code:
 
 ### The Devin lane (3.15)
 
-Devin (Cognition) is a resource beside the cloud lane, **off by default**.
+Devin (Cognition) sits beside the cloud lane, **off by default**.
 `ashlr devin connect` verifies a `cog_…` key (a service user with the Member
 role, or a personal access token) and stores it in the macOS Keychain;
 `ashlr devin budget --acu <n>` sets an ACU budget with a per-session hard cap
-and a reserve. Then **Run in Devin** (composer ⋯ sheet or ⌘K) or
-`ashlr devin launch "<task>"` starts a session that must deliver one PR from
-`ashlr-devin/<taskId>`. Devin PRs come to Needs you and go through the same
-standing gates as cloud PRs, where they are **shadow-only at every stage**:
-nothing Devin writes is merged automatically. Devin is not a chat seat, and the
-fleet does not start Devin sessions on its own yet. Setup (including Devin's
-training opt-out and GitHub integration) and limits:
+and a reserve. Then pick **Devin (cloud)** in New chat for a Devin session per
+chat, or **Devin (CLI)** to drive the `devin` agent on this Mac (after
+`devin auth login`). **Run in Devin** (composer ⋯ sheet or ⌘K) or
+`ashlr devin launch "<task>"` hands off a task that must deliver one PR from
+`ashlr-devin/<taskId>`. With `ashlr devin fleet on`, custody helper 1.1.0 or
+later and a grant that names Devin, the fleet may launch Devin on well-scoped
+backlog work. Devin PRs come to Needs you and go through the same standing
+gates as cloud PRs, where a Devin PR merges only at a stage that names Devin
+and with judges from two different model families; otherwise it is shadow and
+waits for you. Setup (including Devin's training opt-out and GitHub
+integration) and limits:
 [`docs/DEVIN.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md).
 
 ---
@@ -1052,7 +1059,7 @@ preflight soft-warns *consider locus.firm for production* (non-blocking).
 | **3.11** | The cloud lane: Claude Code cloud sessions on Claude credits, with an estimated budget and self-improvement. Also the Resources drawer (⌘.) and the always-on resource bar, provider logos, the Ashlr.AI mark, a 349 KB first paint, and `npm run gate` / `npm run ship:local` | 3.11.5 source; verify npm publication separately |
 | **3.12–3.13** | Your key is the trust root; guided `ashlr authority setup`; the host-verified `ashlr/verify` check; cloud PRs into the standing gates; the resident runtime under a standing grant (`ashlr authority resident start`) | Shipped |
 | **3.14** | Talk to the Leader in Verse, Telegram and the CLI; Leader reliability; accounts ready in both chat and fleet; the rollout ladder on Command and shadow decisions on Fleet; local enforcement for free-plan private repos; `file:../` sibling dependencies; a sidecar that cannot freeze; chart polish | Shipped |
-| **3.15** | Retros and approved knowledge (Growth ▸ Lessons); a private repo wiki and Ask; Devin as a resource with shadow-only PRs | In source on master; verify npm publication separately |
+| **3.15** | Founder-mode Leader; Devin as chat seats, a lane and a fleet producer under a two-judge rule; the workbench panel (terminal blocks, browser, checkpoints, sources and reasoning); every seat together; playbooks and automations; the Jev decision layer; retros and approved knowledge (Growth ▸ Lessons); a private repo wiki and Ask | In source on master; verify npm publication separately |
 
 Releases are built and published locally (GitHub Actions is off); the procedure
 is in [Releasing without CI](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
@@ -1076,8 +1083,8 @@ Star and source-maintainer references. Start with these canonical guides:
 |-----|----------------|
 | [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) | The Verse user guide: every surface and shortcut, chat workbench, seats, Resources, Lessons, the repo wiki, autonomy, the cloud and Devin lanes, the desktop app |
 | [`docs/CLOUD.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md) | The cloud lane: launch mechanics, delivery contract, estimated budget, self-improvement, failure codes, and how the Devin lane compares |
-| [`docs/LEADER.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md) | Talking to the Leader: Mind, Telegram commands and buttons, the CLI, directives, approvals, check-ins |
-| [`docs/DEVIN.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md) | Devin as a resource: setup, ACU budget, delivery contract, shadow-only intake, limits |
+| [`docs/LEADER.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md) | Talking to the Leader: Mind, Telegram commands, buttons and briefs, founder mode, the CLI, directives, approvals, check-ins |
+| [`docs/DEVIN.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md) | Devin: chat seats, setup, ACU budget, delivery contract, the fleet launcher, the two-judge rule, limits |
 | [`docs/AUTHORITY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTHORITY.md) | The owner's contract: custody, Stop and Revoke, setup, the resident step, residual risks |
 | [`docs/VERSE-CONTEXT.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-CONTEXT.md) | Context windows, compaction, standard and expansive modes, handoff and shared memory |
 | [`docs/STANDING-AUTHORITY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md) | Touch ID grants, the rollout ladder, merge gates and the ledger |

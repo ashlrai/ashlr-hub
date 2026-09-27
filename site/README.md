@@ -42,7 +42,9 @@ not estimated, and each one is reproducible from the repo:
 | Leader: directive prefixes, action classes, Telegram commands and buttons, seat fallback, retries, check-ins | CHANGELOG 3.14.0; `docs/LEADER.md` |
 | Wiki: verified citations, local-first engines (never Claude), storage only on this Mac | CHANGELOG [Unreleased] "Private repo wiki and Ask"; `docs/VERSE.md` |
 | Lessons: approval before use, 16 KiB cap, byte-identical prompts on no match | PR #535; `docs/VERSE.md` "Lessons" |
-| Devin: shadow-only at every stage, Keychain key, not a chat seat, no fleet dispatcher yet | PR #536; `docs/DEVIN.md` "Limits" |
+| Devin: Keychain key, chat seats (cloud and CLI), fleet launches only under a grant that names Devin, a merge needs a stage that names Devin and two judges from different families | PRs #536, #540, #545, #556; `docs/DEVIN.md`; `requiresTwoJudges` / `producerMergeWithheld` in `src/core/fleet/reviewer-independence.ts` |
+| Leader founder mode: briefs, instant brief on "status", "go build X", one question at a time, new powers with classes and veto windows | PR #550; `docs/LEADER.md` "Founder mode"; `src/core/comms/leader-line.ts`, `src/core/vision/leader-powers.ts` |
+| Panel: terminal blocks and Agent tab, browser agents cannot click in, per-turn checkpoints with Accept/Reject/Undo/Redo | PRs #541, #546, #549, #551, #553; `docs/VERSE.md` "The workbench panel"; `docs/VERSE-BROWSER.md` |
 
 The Leader conversation in the page is marked **illustrative**: the surfaces are
 real, the words are an example. Keep that label if you change it.
@@ -72,9 +74,9 @@ do not draw one from memory.
 **No claims about unbuilt features.** This rule stands; the example it used to
 give has expired. Multi-folder workspaces, GitHub surfacing and MCP management
 were listed here as unbuilt — all three now ship, and the page says so. What the
-page still does not claim: autonomous merges (the ladder is at shadow), Devin as
-a chat seat or a fleet that starts Devin sessions on its own, Devin PRs being
-merged automatically, autonomy on Linux or Windows, a Linux or Windows desktop
+page still does not claim: autonomous merges (the ladder is at shadow), that
+our own fleet launches or merges Devin work (our grant does not name Devin),
+autonomy on Linux or Windows, a Linux or Windows desktop
 package, a notarized macOS build, or a readable Claude credit balance (the cloud
 lane's spend is an estimate, and the page labels it as one). Check this section against the product before a release rather than
 assuming the omission still holds.

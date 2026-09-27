@@ -32,8 +32,9 @@ As of 2026-09-27, on the maintainer's Mac:
   drifted from config, so the daemon was not confirmed running the current
   release.
 - **Lanes:** the cloud lane's PRs go through the standing intake. Devin PRs go
-  through the same intake but are shadow-only at every stage, and no fleet
-  dispatcher starts Devin sessions yet ([DEVIN.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md#limits)).
+  through the same intake; the grant above does not name Devin, so they stay
+  shadow and the fleet launches no Devin sessions
+  ([DEVIN.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md#limits)).
 
 What Mason must do to move this forward:
 
@@ -47,8 +48,12 @@ What Mason must do to move this forward:
 4. Watch Fleet ▸ Shadow decisions and Command's ladder. The ladder advances by
    itself when the stage's criteria are met in the ledger; nothing skips a
    stage, and no stage past what the grant signs is reachable.
-5. Optionally, for Devin: `ashlr devin connect` and a budget. Setting
-   `ashlr devin fleet on` changes nothing until a dispatcher is built.
+5. Optionally, for Devin: `ashlr devin connect` and a budget, then
+   `ashlr devin fleet on`, `sudo scripts/install-custody.sh` (the helper must
+   be 1.1.0 or later to sign a grant that names Devin) and a new grant or
+   re-approval that adds Devin as a producer. Steps 2 and this re-approval can
+   be the same Touch ID. Devin PRs merge only at a stage that names Devin and
+   with two judges from different families.
 
 ## Classification
 

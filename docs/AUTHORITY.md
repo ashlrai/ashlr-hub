@@ -17,8 +17,11 @@ resident daemon yourself (`ashlr authority resident start`). A grant starts on
 the **shadow** stage, where every proposal goes through the gates and nothing
 merges. On the maintainer's Mac a grant is active and the ladder is at shadow;
 the dated details, and what is left to do, are in
-[AUTONOMY-GAP.md](AUTONOMY-GAP.md#current-activation-state-315). Devin PRs
-are shadow-only at every stage ([DEVIN.md](DEVIN.md)). You can talk to the
+[AUTONOMY-GAP.md](AUTONOMY-GAP.md#current-activation-state-315). Devin is
+its own engine: a grant may name it only as a producer, and a Devin PR merges
+only when the stage names `devin` and judges from two different families
+approved it; otherwise it is shadow ([DEVIN.md](DEVIN.md)). Signing a grant
+that names Devin needs custody helper 1.1.0 or later. You can talk to the
 Leader and set directives ([LEADER.md](LEADER.md)), but nothing said in that
 conversation widens the grant.
 

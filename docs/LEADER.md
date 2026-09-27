@@ -149,7 +149,8 @@ it. Directive prefixes work here too.
 |---|---|
 | `/leader` | The latest memo, with buttons |
 | `/leader <text>` | Message the Leader |
-| `/status` | Fleet status, read locally with no model call |
+| `/status`, `/brief` | The instant brief: shipped, running, blockers, next ([Founder mode](#founder-mode-315)) |
+| `/task <owner/repo> <text>` | Hand work to an enabled Telegram automation ([Automations](VERSE.md#automations-315)) |
 | `/directives` | Your standing directives: id, kind and text |
 | `/settings` | The Leader's settings and the standards it set |
 | `/help`, `/start` | Help |
@@ -168,6 +169,86 @@ merges, fleet PRs opened, reverts, seats exhausted or reset, cloud tasks
 finished. When nothing changed it stays silent, apart from at most one line
 after a day idle. Informational messages never queue behind an unanswered
 question. Everything is HTML-escaped and long messages are split safely.
+While the Leader line is on (the default with Telegram), this 6-hourly digest
+stays silent, because the morning and evening briefs carry what shipped.
+
+---
+
+## Founder mode (3.15)
+
+**The voice.** The memo prompt, the conversation and the Telegram line share
+one founder-operator voice: first principles, ownership and urgency, bias to
+action, "the best part is no part", bets sized with numbers, blunt and brief,
+and every reply ends with the next move. It is the Leader, an AI; any line in
+which it claims to be a real person or a human is rewritten before it is
+sent. On Telegram a reply is cut to 6 lines, ending `… (say "more" for the
+rest)`; "more" sends the rest (up to 30 lines), and asking for detail gets
+the longer reply at once.
+
+**The Leader line on Telegram.** On by default whenever Telegram is
+configured; `comms.leaderLine: false` turns the scheduled briefs and pings
+off (the conversation still works). It runs from `ashlr comms cycle`, the
+poller's job.
+
+- **Briefs.** A morning brief and an evening recap at `comms.briefTimes`
+  (default `["08:00", "19:00"]`) in `comms.timeZone` (default
+  `America/New_York`): what shipped with PR links, what is running, blockers,
+  the next moves and one question. A slot missed by more than 3 hours is
+  skipped.
+- **Instant brief.** "status", "update", "what's up", `/status` or `/brief`
+  gets the same brief at once, built from recorded state (the ledger, the
+  cloud and Devin stores, the Leader's state and questions). A model writes
+  only its one-line narrative, and the brief goes without it after 8 seconds.
+- **Pings.** A result ping for work you asked for ("PR is up …"). Event pings
+  only for a revert (when Jev, if set up, thinks it is worth the
+  interruption), a failed revert (urgent) and the Leader being down (at most
+  once a day).
+- **Limits.** Quiet hours `comms.quietHours` (default `{ "start": 23, "end": 7
+  }`, local hours) hold everything but urgent pings. At most
+  `comms.maxPingsPerDay` (default 6) ordinary pings a day, 20 minutes apart,
+  and at most 4 urgent ones.
+- **Questions.** One at a time; the next waits until you answer, or for 24
+  hours. A yes/no question gets **Yes**, **No** and **Your call** buttons.
+
+**What you say, and what it does.** Each message is read as one of status,
+detail ("more"), approve, veto, answer, directive, task or chat. Rules decide,
+and Jev may classify first when it is set up; approve and veto always need an
+action id (`la-…`) or a reply to a message that carries actions, and are
+never taken from a model's guess. "Go build X" or "fix Y in owner/repo"
+becomes work at once, in `comms.leaderRepo` (default `ashlrai/ashlr-hub`)
+when you name no repo: small work goes to the fleet; larger work to a cloud
+session, then Devin, when the budget allows and the mode is not reserve; and
+back to the fleet if a paid lane refuses, which the reply says. Your request
+counts as your approval, through the same path as an Approve tap.
+
+**Actions it may take**, each classed by the same policy as every other
+action, with the same dry-run rule, veto windows and ledger:
+
+| Action | Class |
+|---|---|
+| `directive.self`: a standing note to itself, fed back to it as untrusted data, never mixed with your directives | A |
+| `backlog.add`: queue work in the cloud backlog (spends nothing) | A (C outside the grant) |
+| `cloud.launch`: a Claude cloud session | B, spend-raising (C outside the grant or in reserve mode) |
+| `devin.launch`: a Devin session through the fleet entry point (needs `devin.fleet` and a grant that names Devin) | B, spend-raising (C outside the grant or in reserve mode) |
+| `playbook.upsert`: a new playbook version; a veto writes the prior text back as a new version | B |
+| `automation.upsert`: create or update an automation; a veto restores or deletes it | B |
+
+Every paid lane still applies its own budget gate at launch.
+
+**Self-improvement.** Once a day, from 09:00 local time, the Leader ranks
+Ashlr Verse improvements from recurring retro causes, its own failures,
+Needs-you friction, usage and the open gates in
+`docs/VERSE-COMPETITIVE-ACCEPTANCE.md`, and routes each pick to the cheapest
+capable lane: at most 3 a day, at most 1 paid, a 7-day cooldown per idea, no
+paid lanes in reserve, nothing enacted in a dry run. The line posts the report
+with Approve and Veto. `foundry.leader.selfImprove: false` turns it off.
+
+**Jev's advice on memos.** After a memo's actions are classed and applied, Jev
+(when set up) is asked about up to 8 class-A and class-B actions. When it
+thinks one deserves a stricter class, the memo says so ("— Jev suggests class
+B (advisory; the class above stands)") and records it in `actionAdvice`. The
+advice never lowers or changes a class, never approves anything, and no gate
+reads it.
 
 ---
 
