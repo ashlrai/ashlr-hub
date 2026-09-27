@@ -95,6 +95,15 @@ export function PlaybooksIcon(props: IconProps) {
   );
 }
 
+/** Automations — a lightning bolt: work that arrives on its own. */
+export function AutomationsIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M9 1.8 3.5 9h4l-1 5.2L12.5 7h-4z" />
+    </Icon>
+  );
+}
+
 /** Every section's glyph: the rail's, plus the tray's. */
 export const SECTION_ICON: Readonly<Record<VerseSectionId, ComponentType<IconProps>>> = {
   command: RAIL_ICON.command!,
@@ -107,6 +116,7 @@ export const SECTION_ICON: Readonly<Record<VerseSectionId, ComponentType<IconPro
   usage: UsageIcon,
   wiki: WikiIcon,
   playbooks: PlaybooksIcon,
+  automations: AutomationsIcon,
 };
 
 /**

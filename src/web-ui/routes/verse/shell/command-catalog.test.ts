@@ -248,7 +248,7 @@ describe('command catalog — table integrity', () => {
     expect(PALETTE_RECENT_LIMIT).toBe(5);
     expect(paletteCommands('go-to').map((c) => c.id)).toEqual([
       'surface.command', 'surface.fleet', 'surface.growth', 'surface.mind', 'surface.chat', 'section.settings', 'section.apps', 'section.usage', 'section.wiki',
-      'section.playbooks',
+      'section.playbooks', 'section.automations',
     ]);
     // ⌘K never lists itself.
     expect(COMMANDS.find((c) => c.id === 'palette.open')!.group).toBeNull();
