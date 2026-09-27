@@ -217,19 +217,16 @@ export function setJevForTest(port: JevPort | null | undefined): void {
   jevCache = null;
 }
 
-/**
- * TODO(3.15): switch to a literal `import('../decide/index.js')` once the Jev
- * branch (src/core/decide) is merged. The specifier is a variable only so
- * this compiles before that module exists.
- */
-const JEV_ENTRY = '../decide/index.js';
+// A LITERAL specifier on purpose: the desktop sidecar is built with
+// `bun build --compile`, which only bundles literal dynamic imports — a
+// variable specifier would leave Jev out of the app and silently fall back.
 
 export async function loadJev(): Promise<JevPort | null> {
   if (jevOverride !== undefined) return jevOverride;
   if (!jevCache) {
     jevCache = (async () => {
       try {
-        const mod = (await import(JEV_ENTRY)) as Record<string, unknown>;
+        const mod = (await import('../decide/index.js')) as Record<string, unknown>;
         const port: JevPort = {};
         if (typeof mod['classifyOperatorIntent'] === 'function') port.classifyOperatorIntent = mod['classifyOperatorIntent'] as JevPort['classifyOperatorIntent'];
         if (typeof mod['worthInterrupting'] === 'function') port.worthInterrupting = mod['worthInterrupting'] as JevPort['worthInterrupting'];
