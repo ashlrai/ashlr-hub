@@ -13,9 +13,17 @@
  * TINY ON PURPOSE: a registration and a lazy import. The panel — xterm, its
  * addons, the block view — is its own chunk, loaded when the pane first shows
  * (terminal-lazy.test.ts).
+ *
+ * 3.15: it also serves ⌘K "Generate command…" and "Search terminal history…"
+ * (catalog ids terminal.generate / terminal.history) — here rather than in
+ * ChatSection, so the chat's first paint carries none of it. Both go to Chat
+ * and ask the panel for its prompt; the panel does the rest (nothing runs).
  */
+import { requestTerminal } from '../dock/dock-store.js';
 import { TerminalGlyph } from '../dock/dock-icons.js';
 import { lazyPane, registerPane } from '../panes/pane-registry.js';
+import { registerCommandHandler } from '../shell/command-bus.js';
+import { getVerseUiState, setVerseSection } from '../verse-ui-store.js';
 
 export const TERMINAL_PANE_ID = 'terminal';
 
@@ -25,3 +33,10 @@ registerPane({
   icon: TerminalGlyph,
   component: lazyPane(() => import('./TerminalPane.js').then((m) => m.TerminalRegistryPane)),
 });
+
+function openTerminalPrompt(request: { assist: true } | { history: true }): void {
+  if (getVerseUiState().section !== 'chat') setVerseSection('chat');
+  requestTerminal(request);
+}
+registerCommandHandler('terminal.generate', () => openTerminalPrompt({ assist: true }));
+registerCommandHandler('terminal.history', () => openTerminalPrompt({ history: true }));

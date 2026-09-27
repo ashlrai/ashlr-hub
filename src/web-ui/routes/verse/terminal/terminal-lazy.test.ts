@@ -70,8 +70,11 @@ describe('the terminal loads lazily', () => {
 
   it('the registration names the panel only through import()', () => {
     const reg = readFileSync(join(HERE, 'terminal.pane.tsx'), 'utf8');
-    // The registry API and a glyph the first-party panes already load: nothing of the panel.
-    expect(staticValueImports(reg).sort()).toEqual(['../dock/dock-icons.js', '../panes/pane-registry.js']);
+    // The registry API, a glyph the first-party panes already load, and (3.15) the command bus,
+    // dock store and UI store the chat already loads — for ⌘K's two terminal commands: nothing of the panel.
+    expect(staticValueImports(reg).sort()).toEqual([
+      '../dock/dock-icons.js', '../dock/dock-store.js', '../panes/pane-registry.js', '../shell/command-bus.js', '../verse-ui-store.js',
+    ]);
     expect(reg).toContain("import('./TerminalPane.js')");
   });
 
