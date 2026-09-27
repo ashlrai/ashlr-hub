@@ -688,6 +688,7 @@
 /test/routing-budget-store.test.ts @masonwyatt23
 /test/routing-capacity-history.test.ts @masonwyatt23
 /test/routing-interactive-scope.test.ts @masonwyatt23
+/test/routing-readiness-314.test.ts @masonwyatt23
 /test/routing-router-weights.test.ts @masonwyatt23
 /test/routing-seat-router.test.ts @masonwyatt23
 /test/routing-subscription-failclosed.test.ts @masonwyatt23
@@ -745,6 +746,7 @@
 /test/verse-fleet-types.test.ts @masonwyatt23
 /test/verse-local-fleet.test.ts @masonwyatt23
 /test/verse-reliability.test.ts @masonwyatt23
+/test/verse-resources-ready-314.test.ts @masonwyatt23
 /test/verse-server-wiring-310.test.ts @masonwyatt23
 /test/verse-workbench-contracts-310.test.ts @masonwyatt23
 /test/vision-review-leader-310b.test.ts @masonwyatt23
