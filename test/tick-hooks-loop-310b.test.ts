@@ -96,6 +96,21 @@ vi.mock('../src/core/daemon/local-fleet.js', async (importOriginal) => {
   };
 });
 
+/** 3.14: shrink the tick's preparation deadline for the hung-beforeTick case only. */
+const deadlineHarness = vi.hoisted(() => ({ deadlineMs: undefined as number | undefined, graceMs: undefined as number | undefined }));
+vi.mock('../src/core/daemon/tick-deadline.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/daemon/tick-deadline.js')>();
+  return {
+    ...actual,
+    boundedBeforeTick: (run: Parameters<typeof actual.boundedBeforeTick>[0], opts: Parameters<typeof actual.boundedBeforeTick>[1] = {}) =>
+      actual.boundedBeforeTick(run, {
+        ...opts,
+        ...(deadlineHarness.deadlineMs !== undefined ? { deadlineMs: deadlineHarness.deadlineMs } : {}),
+        ...(deadlineHarness.graceMs !== undefined ? { graceMs: deadlineHarness.graceMs } : {}),
+      }),
+  };
+});
+
 const mockRunSwarm = vi.hoisted(() => vi.fn());
 vi.mock('../src/core/swarm/runner.js', () => ({ runSwarm: (...args: unknown[]) => mockRunSwarm(...args) }));
 
@@ -154,6 +169,8 @@ beforeEach(() => {
   standingHarness.open = false;
   standingHarness.mintOk = true;
   standingHarness.mints = 0;
+  deadlineHarness.deadlineMs = undefined;
+  deadlineHarness.graceMs = undefined;
   mockRunSwarm.mockImplementation(async () => ({ id: 'swarm', status: 'done', goal: '', result: '', usage: { totalTokens: 1, estCostUsd: 0.001, steps: 1 } }));
   mockBuildBacklog.mockImplementation(async (opts?: { repos?: string[] }) => ({
     generatedAt: new Date().toISOString(),
@@ -293,6 +310,37 @@ describe('B · a standing tick runs through the hooks', () => {
     expect(result.reason).toBe('production-held');
     expect(result.directionReason).toMatch(/waiting for verification/);
     expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('a beforeTick that never settles (a hung mirror install) is cancelled at its deadline; the tick holds production and is still recorded', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    deadlineHarness.deadlineMs = 100;
+    deadlineHarness.graceMs = 100;
+    let hookSignal: AbortSignal | undefined;
+    const { hooks } = standingHooks({
+      beforeTick: (ctx) => {
+        hookSignal = ctx.signal;
+        return new Promise(() => undefined);
+      },
+    });
+    const started = Date.now();
+    const result = await tick(cfgFor(), { dryRun: false, activationCapability: STANDING, hooks });
+    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(hookSignal?.aborted).toBe(true);
+    expect(result.reason).toBe('production-held');
+    expect(result.directionReason).toMatch(/tick preparation exceeded its 100 ms deadline/);
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    const { loadDaemonState } = await import('../src/core/daemon/state.js');
+    const recorded = loadDaemonState().ticks.at(-1);
+    expect(recorded?.reason).toBe('production-held');
+    expect(recorded?.ts).toBe(result.ts);
+    // The abandoned hook is not stacked: the next tick holds without calling it again.
+    const again = await tick(cfgFor(), { dryRun: false, activationCapability: STANDING, hooks });
+    expect(again.reason).toBe('production-held');
+    expect(again.directionReason).toMatch(/previous tick's preparation has not finished/);
+    const { resetBoundedBeforeTickForTests } = await import('../src/core/daemon/tick-deadline.js');
+    resetBoundedBeforeTickForTests();
   });
 
   it('refuses a dispatch whose lane changed after routing (a quota fallback to local)', async () => {

@@ -1527,6 +1527,23 @@ export interface FleetStatus {
     lastTickAt: string | null;
     lockHeartbeatAt?: string | null;
     tickInProgress?: boolean;
+    /**
+     * Additive (observational, authority none): what the running daemon's
+     * current tick is doing and for how long — present only while a tick is
+     * open (daemon/tick-progress.ts). Unlike `tickInProgress` it does not
+     * need a fresh activity heartbeat, so a tick whose event loop is stuck
+     * still says where it is.
+     */
+    tickProgress?: {
+      phase: string;
+      detail: string | null;
+      tickStartedAt: string;
+      phaseStartedAt: string;
+      tickAgeMs: number;
+      phaseAgeMs: number;
+      /** `tick in progress: <phase> for <duration>`. */
+      summary: string;
+    };
     childActivity?: boolean;
     activity?: {
       source: 'daemon-activity';
@@ -2373,6 +2390,26 @@ export async function readFleetDaemonStatus(): Promise<FleetDaemonStatusRead> {
       activityRead.sourceState !== 'degraded' &&
       !liveLockContradiction;
     const tickInProgress = activityHealthy && activity?.phase === 'tick';
+    let tickProgress: FleetStatus['daemon']['tickProgress'] | null = null;
+    if (ds.running === true && typeof ds.pid === 'number') {
+      try {
+        const { readTickProgress, describeTickProgress } = await import('../daemon/tick-progress.js');
+        const read = readTickProgress({ expectPid: ds.pid });
+        if (read) {
+          tickProgress = {
+            phase: read.progress.phase,
+            detail: read.progress.detail,
+            tickStartedAt: read.progress.tickStartedAt,
+            phaseStartedAt: read.progress.phaseStartedAt,
+            tickAgeMs: read.tickAgeMs,
+            phaseAgeMs: read.phaseAgeMs,
+            summary: describeTickProgress(read),
+          };
+        }
+      } catch {
+        tickProgress = null;
+      }
+    }
     const childActivity = activityHealthy && activity?.phase === 'post-tick' &&
       typeof activity.activeChildren === 'number' && activity.activeChildren > 0;
     daemon = {
@@ -2389,6 +2426,7 @@ export async function readFleetDaemonStatus(): Promise<FleetDaemonStatusRead> {
       lastTickAt,
       ...(lockHeartbeatAt ? { lockHeartbeatAt } : {}),
       ...(tickInProgress ? { tickInProgress } : {}),
+      ...(tickProgress ? { tickProgress } : {}),
       ...(childActivity ? { childActivity } : {}),
       activity: {
         source: 'daemon-activity',

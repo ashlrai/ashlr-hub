@@ -935,6 +935,30 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
     liveness = null;
   }
 
+  // What the running daemon's CURRENT tick is doing (observational only):
+  // "last tick 25d ago" alone hid a first tick that spent 15 minutes in
+  // mirror prep (2026-09-26). Only for the daemon this record says is running.
+  let tickProgress: { phase: string; detail: string | null; tickStartedAt: string; phaseStartedAt: string; tickAgeMs: number; phaseAgeMs: number; summary: string } | null = null;
+  if (stateKnown && state.running === true && liveness?.alive !== false) {
+    try {
+      const mod = await import('../core/daemon/tick-progress.js');
+      const read = mod.readTickProgress({ expectPid: typeof state.pid === 'number' ? state.pid : null });
+      if (read) {
+        tickProgress = {
+          phase: read.progress.phase,
+          detail: read.progress.detail,
+          tickStartedAt: read.progress.tickStartedAt,
+          phaseStartedAt: read.progress.phaseStartedAt,
+          tickAgeMs: read.tickAgeMs,
+          phaseAgeMs: read.phaseAgeMs,
+          summary: mod.describeTickProgress(read),
+        };
+      }
+    } catch {
+      tickProgress = null;
+    }
+  }
+
   // pendingCount is READ-ONLY; degrade to 0 if the inbox store is absent.
   const pendingCount = await importPendingCount();
   let pending = 0;
@@ -994,6 +1018,8 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
           pid: stateKnown ? state.pid : null,
           startedAt: stateKnown ? state.startedAt : null,
           lastTickAt: stateKnown ? state.lastTickAt : null,
+          // Additive: the tick in progress right now, or null.
+          tickInProgress: tickProgress,
           todayDate: stateKnown ? state.todayDate : null,
           todaySpentUsd: stateKnown ? state.todaySpentUsd : null,
           dailyBudgetUsd: dailyCap ?? null,
@@ -1036,6 +1062,9 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
   }
   console.log('  ' + col.bold('started:        ') + col.dim(stateKnown ? relAge(state.startedAt) : 'unknown'));
   console.log('  ' + col.bold('last tick:      ') + col.dim(stateKnown ? relAge(state.lastTickAt) : 'unknown'));
+  if (tickProgress) {
+    console.log('  ' + col.bold('now:            ') + col.cyan(tickProgress.summary));
+  }
   const capStr = dailyCap !== undefined ? ` / $${dailyCap}` : '';
   console.log(
     '  ' + col.bold("today's spend:  ") +

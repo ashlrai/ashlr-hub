@@ -62,6 +62,13 @@ export interface TickHookContext {
   dryRun: boolean;
   /** The activation capability this tick holds; null for dry-run ticks. */
   capabilityKind: DaemonCapabilityKind | null;
+  /**
+   * Aborts when the tick's preparation deadline passes or the daemon stops
+   * (loop.ts `boundedBeforeTick`). Long work (mirror prep, the post-merge
+   * watch) should stop on it; a beforeTick that sees it aborted must not
+   * publish state for dispatch — the loop has already held production.
+   */
+  signal?: AbortSignal;
 }
 
 export interface BeforeTickResult {

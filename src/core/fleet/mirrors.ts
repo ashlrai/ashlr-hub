@@ -92,11 +92,37 @@
  * with no lockfile, or with ambiguous lockfiles — is NOT current: its sync
  * fails with the reason, which pauses the repo (fail closed, never a guess).
  *
+ * THE INSTALL IS THE DESIGNED NETWORK EXCEPTION. Agents and verification run
+ * confined (sandbox-exec, network denied); this install does not, and must
+ * not: it has to reach the registry, and it is not agent code. What makes it
+ * safe is what it runs, not where: only the lockfile-pinned tree the repo
+ * committed (frozen flags, and the lockfile is re-hashed afterwards), with
+ * EVERY lifecycle script off (flags + npm_config_ignore_scripts /
+ * YARN_ENABLE_SCRIPTS), from a manager binary resolved outside ~/.ashlr, in
+ * an env built from nothing (no git / npm / model tokens; proxy and CA
+ * settings pass through). Confining it would not add safety — nothing in it
+ * executes repo code — it would only make every install fail.
+ *
+ * BOUNDED (3.14, after the first live tick on 2026-09-26 spent 15 minutes
+ * here: `bun install` hung on `file:../<sibling>` packages that never exist
+ * next to a mirror, `pnpm install` stalled silently on a machine at load
+ * ~300, execFile's timeout killed only the direct children, and a synchronous
+ * rmSync of the half-written node_modules then froze the daemon's event loop
+ * for minutes):
+ *   - out-of-repo local dependencies are refused at plan time;
+ *   - each install is its own process group with a hard timeout that kills
+ *     the whole group (SIGTERM, then SIGKILL), stdin at /dev/null, and a
+ *     settle-anyway backstop (`runDependencyInstall`);
+ *   - the partial tree is removed asynchronously;
+ *   - the tick's whole mirror phase has a deadline: a hung repo fails with
+ *     "prep failed: <reason>" and the others go ahead
+ *     (`prepareMirrorsForTick`).
+ *
  * NOTHING HERE RUNS BY ITSELF. The daemon calls `prepareMirrorsForTick` from
  * its beforeTick hook (U5) only under a live standing policy; `ashlr mirror`
  * (src/cli/mirror.ts) is Mason's manual surface.
  */
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   accessSync,
@@ -112,6 +138,7 @@ import {
   rmSync,
   statSync,
 } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { EffectivePolicy } from '../authority/types.js';
@@ -127,6 +154,7 @@ import {
   unenrollAndDrain,
   type EnrollmentLens,
 } from '../sandbox/policy.js';
+import { noteTickPhase } from '../daemon/tick-progress.js';
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { scrubSecrets } from '../util/scrub.js';
 
@@ -142,8 +170,28 @@ export const MIRROR_LOCAL_TIMEOUT_MS = 2 * 60_000;
 export const MIRROR_LEASE_WAIT_MS = 5 * 60_000;
 /** Mirrors synced in parallel by `prepareMirrorsForTick` (network-bound, but gentle on the machine). */
 export const MIRROR_TICK_CONCURRENCY = 2;
-/** A lockfile install (first install of a large monorepo is the slow case). */
+/**
+ * A lockfile install (first install of a large monorepo is the slow case).
+ * HARD: at the deadline the install's whole process group gets SIGTERM, then
+ * SIGKILL after MIRROR_DEPS_KILL_GRACE_MS (see `runDependencyInstall`).
+ */
 export const MIRROR_DEPS_INSTALL_TIMEOUT_MS = 10 * 60_000;
+/** SIGTERM → SIGKILL grace for an install's process group. */
+export const MIRROR_DEPS_KILL_GRACE_MS = 5_000;
+/**
+ * The whole mirror phase of ONE tick (every repo's fetch/reset + install).
+ * When it passes, in-flight syncs are cancelled (their installs' process
+ * groups killed) and repos not yet reached are reported "prep failed" — the
+ * tick goes on with the mirrors that ARE current instead of waiting.
+ * (2026-09-26: the first live tick spent 15 minutes here.)
+ */
+export const MIRROR_TICK_PREP_DEADLINE_MS = 15 * 60_000;
+/**
+ * After the prep deadline aborts in-flight syncs, how long prep waits for them
+ * to settle before it stops waiting and reports them failed anyway (their
+ * repo leases keep any late finisher from racing the next tick).
+ */
+export const MIRROR_TICK_ABORT_GRACE_MS = 30_000;
 /**
  * After a failed install for a given lockfile, how long later syncs report the
  * recorded failure instead of re-running the same doomed install every tick.
@@ -923,6 +971,37 @@ function declaresDependencies(pkg: Record<string, unknown>): boolean {
   return Array.isArray(workspaces) ? workspaces.length > 0 : !!(workspaces && typeof workspaces === 'object');
 }
 
+const LOCAL_SPEC_RE = /^(?:file|link|portal):(.*)$/;
+
+/**
+ * A root dependency installed from a local path OUTSIDE the repository
+ * (`"@ashlr/auth": "file:../ashlr-auth"`). A fleet mirror holds exactly one
+ * repo, so that path never exists next to it and the install can never
+ * succeed — and it does not always fail fast: on 2026-09-26 `bun install`
+ * printed "ENOENT: failed opening cache/package/version dir" for four such
+ * packages and then sat at 0% CPU until the 10-minute timeout killed it. The
+ * plan refuses it up front instead. Paths inside the repo (workspace-style
+ * `file:./packages/x`) are fine. Peer dependencies are not installed from the
+ * spec, so they are not checked.
+ */
+function outOfRepoLocalDependency(root: string, pkg: Record<string, unknown>): { name: string; spec: string } | null {
+  for (const field of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+    const value = pkg[field];
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof raw !== 'string') continue;
+      const spec = raw.trim();
+      const local = LOCAL_SPEC_RE.exec(spec);
+      const target = local ? local[1]! : /^(?:\.{1,2}\/|\/|~\/)/.test(spec) ? spec : null;
+      if (target === null) continue;
+      if (target.startsWith('~/') || isAbsolute(target)) return { name, spec };
+      const rel = relative(root, resolve(root, target));
+      if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return { name, spec };
+    }
+  }
+  return null;
+}
+
 /**
  * Which install (if any) the mirror at `root` needs. Pure over the tree:
  *   - no root package.json → nothing to install;
@@ -971,6 +1050,13 @@ export function planMirrorDependencies(root: string): MirrorDependencyPlan {
   } else {
     if (!declaresDependencies(pkg)) return { kind: 'none', reason: 'package.json declares no dependencies' };
     return { kind: 'refuse', reason: 'package.json declares dependencies but no lockfile is committed; the fleet installs only lockfile-pinned dependencies' };
+  }
+  const outside = outOfRepoLocalDependency(root, pkg);
+  if (outside) {
+    return {
+      kind: 'refuse',
+      reason: `package.json installs ${outside.name} from ${JSON.stringify(outside.spec.slice(0, 120))}, a path outside the repository; a fleet mirror holds only this repo, so that install cannot succeed`,
+    };
   }
   const lockBytes = readRootFile(root, chosen.lockfile);
   if (!lockBytes) return { kind: 'refuse', reason: `${chosen.lockfile} is not a regular file the fleet can read` };
@@ -1050,41 +1136,228 @@ function installEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+export interface DependencyInstallProcessResult {
+  ok: boolean;
+  /** Exit code when the process exited by itself. */
+  code: number | null;
+  /** The signal that ended it, when one did. */
+  signal: NodeJS.Signals | null;
+  /** The hard deadline passed and the process group was killed. */
+  timedOut: boolean;
+  /** The caller's signal aborted it (tick deadline or daemon shutdown); the group was killed. */
+  cancelled: boolean;
+  /** It never exited even after SIGKILL + grace; the daemon stopped waiting for it. */
+  abandoned: boolean;
+  /** Spawn failed (ENOENT, EACCES …). */
+  spawnError: string | null;
+  /** The last few non-empty lines of stderr, else stdout (pnpm reports errors on stdout). Unscrubbed. */
+  outputTail: string;
+  durationMs: number;
+}
+
+const INSTALL_OUTPUT_TAIL_BYTES = 16 * 1024;
+/** Process groups of installs still running in this process — killed if the daemon exits under them. */
+const liveInstallGroups = new Set<number>();
+let exitReaperInstalled = false;
+
+function installExitReaper(): void {
+  if (exitReaperInstalled) return;
+  exitReaperInstalled = true;
+  // Installs run in their OWN process group (so a timeout can kill the whole
+  // tree), which also means launchd's job teardown no longer reaches them. A
+  // daemon that exits mid-install takes its installs with it.
+  process.once('exit', () => {
+    for (const pgid of liveInstallGroups) {
+      try { process.kill(-pgid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+  });
+}
+
+/**
+ * Run one dependency install as its own process group with a HARD deadline.
+ * Never throws; always settles.
+ *
+ *   - stdin is /dev/null: nothing can wait on a prompt (CI=1 and the
+ *     managers' non-interactive flags already say so; this makes it true —
+ *     `execFile` left stdin an open pipe nobody ever wrote to or closed).
+ *   - `detached` puts the manager in a new process group; at the deadline (or
+ *     on abort) the WHOLE group gets SIGTERM, then SIGKILL after `killGraceMs`
+ *     — a manager's worker or a stray child cannot outlive it. `execFile`'s
+ *     own `timeout` signals only the direct child.
+ *   - when the leader exits by itself, any straggler left in its group is
+ *     SIGKILLed too (a finished install leaves nothing running).
+ *   - if even SIGKILL does not produce an exit within the grace (a process in
+ *     uninterruptible I/O on an overloaded machine), the promise settles
+ *     anyway with `abandoned` — the tick never waits on the kernel forever.
+ *   - output is kept as a bounded tail, never buffered whole.
+ */
+export function runDependencyInstall(
+  bin: string,
+  args: readonly string[],
+  opts: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    timeoutMs: number;
+    killGraceMs?: number;
+    signal?: AbortSignal;
+  },
+): Promise<DependencyInstallProcessResult> {
+  const started = Date.now();
+  const grace = Math.max(50, opts.killGraceMs ?? MIRROR_DEPS_KILL_GRACE_MS);
+  const base = (): DependencyInstallProcessResult => ({
+    ok: false, code: null, signal: null, timedOut: false, cancelled: false, abandoned: false,
+    spawnError: null, outputTail: '', durationMs: Date.now() - started,
+  });
+  if (opts.signal?.aborted) return Promise.resolve({ ...base(), cancelled: true });
+  return new Promise((resolveRun) => {
+    const useGroup = process.platform !== 'win32';
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(bin, [...args], {
+        cwd: opts.cwd,
+        env: opts.env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: useGroup,
+        windowsHide: true,
+      });
+    } catch (error) {
+      resolveRun({ ...base(), spawnError: (error as Error).message });
+      return;
+    }
+    const pid = child.pid;
+    if (useGroup && typeof pid === 'number') {
+      installExitReaper();
+      liveInstallGroups.add(pid);
+    }
+    let stdoutTail = '';
+    let stderrTail = '';
+    const keep = (tail: string, chunk: Buffer | string): string => {
+      const next = tail + String(chunk);
+      return next.length > INSTALL_OUTPUT_TAIL_BYTES ? next.slice(-INSTALL_OUTPUT_TAIL_BYTES) : next;
+    };
+    child.stdout?.on('data', (chunk: Buffer) => { stdoutTail = keep(stdoutTail, chunk); });
+    child.stderr?.on('data', (chunk: Buffer) => { stderrTail = keep(stderrTail, chunk); });
+
+    let timedOut = false;
+    let cancelled = false;
+    let settled = false;
+    let exit: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const later = (ms: number, fn: () => void): void => {
+      timers.push(setTimeout(fn, ms));
+    };
+    const signalGroup = (sig: NodeJS.Signals): void => {
+      if (typeof pid !== 'number') return;
+      try {
+        if (useGroup) process.kill(-pid, sig);
+        else child.kill(sig);
+      } catch { /* the group is already gone */ }
+    };
+    const tail = (): string => {
+      const lines = (stderrTail.trim() || stdoutTail.trim()).split('\n').map((line) => line.trim()).filter(Boolean);
+      return lines.slice(-4).join(' ');
+    };
+    const onAbort = (): void => {
+      if (exit || cancelled || timedOut) return;
+      cancelled = true;
+      stop();
+    };
+    const finish = (extra: Partial<DependencyInstallProcessResult>): void => {
+      if (settled) return;
+      settled = true;
+      for (const timer of timers) clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
+      if (typeof pid === 'number') liveInstallGroups.delete(pid);
+      resolveRun({
+        ...base(),
+        ...(exit ? { code: exit.code, signal: exit.signal } : {}),
+        timedOut,
+        cancelled,
+        outputTail: tail(),
+        ...extra,
+      });
+    };
+    function stop(): void {
+      signalGroup('SIGTERM');
+      later(grace, () => {
+        signalGroup('SIGKILL');
+        // Last resort: still no exit a full grace after SIGKILL — stop waiting.
+        later(grace, () => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          child.unref();
+          finish({ abandoned: true });
+        });
+      });
+    }
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+    later(Math.max(1, opts.timeoutMs), () => {
+      if (exit || cancelled) return;
+      timedOut = true;
+      stop();
+    });
+    child.once('error', (error) => {
+      if (exit) return;
+      finish({ spawnError: error.message });
+    });
+    child.once('exit', (code, sig) => {
+      exit = { code, signal: sig };
+      // Reap stragglers left in the group; their closing pipes then let
+      // 'close' fire. If a straggler escaped the group and holds a pipe,
+      // settle shortly anyway.
+      signalGroup('SIGKILL');
+      later(grace, () => finish({ ok: !timedOut && !cancelled && code === 0 }));
+    });
+    child.once('close', () => {
+      if (!exit) return;
+      finish({ ok: !timedOut && !cancelled && exit.code === 0 });
+    });
+  });
+}
+
 /** Production installer: spawn the planned package manager in the mirror. Never throws. */
-export function installMirrorDependencies(
+export async function installMirrorDependencies(
   plan: MirrorDependencyInstallPlan,
   mirrorPath: string,
   signal?: AbortSignal,
+  limits: { timeoutMs?: number; killGraceMs?: number } = {},
 ): Promise<MirrorInstallRun> {
-  return new Promise((resolveRun) => {
-    if (signal?.aborted) {
-      resolveRun({ ok: false, reason: 'cancelled' });
-      return;
-    }
-    const [name, ...args] = plan.argv;
-    const bin = name ? resolveManagerBinary(name) : null;
-    if (!bin) {
-      resolveRun({ ok: false, reason: `${name ?? 'the package manager'} is not installed on the daemon's PATH, so ${plan.lockfile} cannot be installed` });
-      return;
-    }
-    execFile(bin, args, {
-      cwd: mirrorPath,
-      env: installEnv(),
-      timeout: MIRROR_DEPS_INSTALL_TIMEOUT_MS,
-      killSignal: 'SIGKILL',
-      maxBuffer: MAX_GIT_OUTPUT,
-      windowsHide: true,
-      encoding: 'utf8',
-      ...(signal ? { signal } : {}),
-    }, (error, _stdout, stderr) => {
-      if (!error) {
-        resolveRun({ ok: true, reason: `${plan.argv.slice(0, 2).join(' ')} installed ${plan.lockfile}` });
-        return;
-      }
-      const tail = String(stderr ?? '').trim().split('\n').slice(-4).join(' ').trim() || String(error.message ?? '');
-      resolveRun({ ok: false, reason: boundedScrub(`${plan.argv.slice(0, 2).join(' ')} failed: ${tail}`) });
-    });
+  if (signal?.aborted) return { ok: false, reason: 'cancelled' };
+  const [name, ...args] = plan.argv;
+  const bin = name ? resolveManagerBinary(name) : null;
+  if (!bin) {
+    return { ok: false, reason: `${name ?? 'the package manager'} is not installed on the daemon's PATH, so ${plan.lockfile} cannot be installed` };
+  }
+  const label = plan.argv.slice(0, 2).join(' ');
+  const timeoutMs = limits.timeoutMs ?? MIRROR_DEPS_INSTALL_TIMEOUT_MS;
+  const run = await runDependencyInstall(bin, args, {
+    cwd: mirrorPath,
+    env: installEnv(),
+    timeoutMs,
+    ...(limits.killGraceMs !== undefined ? { killGraceMs: limits.killGraceMs } : {}),
+    ...(signal ? { signal } : {}),
   });
+  if (run.ok) return { ok: true, reason: `${label} installed ${plan.lockfile}` };
+  return { ok: false, reason: boundedScrub(`${label} ${describeInstallFailure(run, timeoutMs)}`) };
+}
+
+/** "10 min", "30 s", "300 ms" — for failure sentences. */
+function describeLimit(ms: number): string {
+  if (ms >= 60_000) return `${Math.round(ms / 60_000)} min`;
+  if (ms >= 1_000) return `${Math.round(ms / 1_000)} s`;
+  return `${Math.max(0, Math.round(ms))} ms`;
+}
+
+/** "timed out after 10 min and its process group was killed; it printed nothing" … */
+export function describeInstallFailure(run: DependencyInstallProcessResult, timeoutMs: number): string {
+  const output = run.outputTail ? `; last output: ${run.outputTail}` : '; it printed nothing';
+  const limit = describeLimit(timeoutMs);
+  if (run.spawnError) return `could not start: ${run.spawnError}`;
+  if (run.timedOut) {
+    return `timed out after ${limit} and its process group was killed${run.abandoned ? ' (it had not exited even after SIGKILL)' : ''}${output}`;
+  }
+  if (run.cancelled) return `was cancelled and its process group was killed${output}`;
+  return `failed: exited ${run.code !== null ? `with code ${run.code}` : `on ${run.signal ?? 'an unknown signal'}`}${output}`;
 }
 
 function nodeModulesIdentity(mirrorPath: string): { ino: number; mtimeMs: number } | 'absent' | 'not-a-directory' {
@@ -1148,19 +1421,34 @@ async function prepareMirrorDependencies(
   }
   const failed = (error: string): { ok: false; deps: MirrorDepsState; error: string } => {
     const scrubbed = boundedScrub(error);
+    // The retry window runs from when the install FAILED, not from when the
+    // sync began: a 10-minute timeout must not eat a third of the backoff.
+    const failedAtIso = (ctx.deps.now ? ctx.deps.now() : new Date()).toISOString();
     return {
       ok: false,
       error: scrubbed,
-      deps: { status: 'failed', manager: plan.manager, key: plan.key, at: nowIso, nodeModulesIno: null, nodeModulesMtimeMs: null, error: scrubbed },
+      deps: { status: 'failed', manager: plan.manager, key: plan.key, at: failedAtIso, nodeModulesIno: null, nodeModulesMtimeMs: null, error: scrubbed },
     };
   };
+  const repo = ctx.identity.nameWithOwner;
+  noteTickPhase('mirror prep', `${repo}: cleaning before the ${plan.manager} install`);
   const cleaned = await cleanAll();
   if (cleaned) return failed(cleaned);
+  noteTickPhase('mirror prep', `${repo}: installing dependencies with ${plan.manager} (${plan.lockfile})`);
   const run = await (ctx.deps.installDependencies ?? installMirrorDependencies)(plan, ctx.path, ctx.deps.signal);
   if (!run.ok) {
-    // A half-written tree is worse than none: verification would run against it.
-    rmSync(join(ctx.path, 'node_modules'), { recursive: true, force: true });
-    return failed(`dependencies could not be installed from ${plan.lockfile}: ${run.reason}`);
+    // A half-written tree is worse than none: verification would run against
+    // it. ASYNC on purpose: on 2026-09-26 a synchronous rmSync of a killed
+    // pnpm install's node_modules held the daemon's event loop for minutes on
+    // an overloaded machine (no heartbeat, the killed child left unreaped).
+    noteTickPhase('mirror prep', `${repo}: removing the partial node_modules after a failed ${plan.manager} install`);
+    let leftover = '';
+    try {
+      await rm(join(ctx.path, 'node_modules'), { recursive: true, force: true, maxRetries: 2 });
+    } catch (error) {
+      leftover = `; the partial node_modules could not be removed (${(error as Error).message})`;
+    }
+    return failed(`dependencies could not be installed from ${plan.lockfile}: ${run.reason}${leftover}`);
   }
   const installed = nodeModulesIdentity(ctx.path);
   if (installed === 'not-a-directory') {
@@ -1253,6 +1541,7 @@ export async function ensureMirror(
     let outcome: { headSha: string } | { error: string };
     let created = false;
     if (layout.state === 'mirror') {
+      noteTickPhase('mirror prep', `${identity.nameWithOwner}: fetching and resetting to origin/${base}`);
       outcome = await fetchAndReset(ctx, base);
     } else {
       if (layout.state === 'invalid') {
@@ -1262,6 +1551,7 @@ export async function ensureMirror(
           return fail(`mirror path holds something that is not a mirror (${layout.reason}) and could not be moved aside: ${(error as Error).message}`, { path, base, auth });
         }
       }
+      noteTickPhase('mirror prep', `${identity.nameWithOwner}: cloning ${base}`);
       outcome = await cloneInto(ctx, base);
       created = !('error' in outcome);
     }
@@ -1461,12 +1751,20 @@ export interface MirrorTickPreparation {
  * Create and reset every mirror the standing policy's current stage names
  * (SPEC-310B §2: "reset to origin/<base> every tick"), at most
  * MIRROR_TICK_CONCURRENCY at a time. A repo whose mirror is not current is
- * reported for pausing rather than dispatched on stale code. Under KILL it
- * does nothing and pauses everything.
+ * reported for pausing ("prep failed: <reason>") rather than dispatched on
+ * stale code; the others go ahead. Under KILL it does nothing and pauses
+ * everything.
+ *
+ * BOUNDED: the whole phase has a deadline (MIRROR_TICK_PREP_DEADLINE_MS).
+ * At the deadline — or when `deps.signal` aborts (daemon shutdown, the tick's
+ * own deadline) — in-flight syncs are cancelled (an install's process group
+ * is killed), repos not yet reached fail at once, and after a short grace
+ * prep returns with whatever is current even if a cancelled sync has not
+ * settled. One stuck repo can no longer hold the tick.
  */
 export async function prepareMirrorsForTick(
   policy: Pick<EffectivePolicy, 'repos'>,
-  deps: MirrorDeps & { concurrency?: number } = {},
+  deps: MirrorDeps & { concurrency?: number; deadlineMs?: number; abortGraceMs?: number } = {},
 ): Promise<MirrorTickPreparation> {
   const repos = [...new Set(policy.repos.map((repo) => repo.nameWithOwner))];
   const result: MirrorTickPreparation = { ready: [], failed: [], pausedRepoPaths: [] };
@@ -1477,27 +1775,85 @@ export async function prepareMirrorsForTick(
     for (const nameWithOwner of repos) {
       result.failed.push({ nameWithOwner, path: pathOf(nameWithOwner), reason: 'kill switch armed; mirrors not synced' });
     }
-  } else {
+  } else if (repos.length > 0) {
+    const deadlineMs = Math.max(1, deps.deadlineMs ?? MIRROR_TICK_PREP_DEADLINE_MS);
+    const graceMs = Math.max(0, deps.abortGraceMs ?? MIRROR_TICK_ABORT_GRACE_MS);
+    const limit = describeLimit(deadlineMs);
+    const controller = new AbortController();
+    let deadlineHit = false;
+    let stopWaiting = false;
+    const onParentAbort = (): void => controller.abort();
+    if (deps.signal?.aborted) controller.abort();
+    else deps.signal?.addEventListener('abort', onParentAbort, { once: true });
+    const deadlineTimer = setTimeout(() => {
+      deadlineHit = true;
+      controller.abort();
+    }, deadlineMs);
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    const why = (): string => (deadlineHit
+      ? `the tick's mirror-prep deadline (${limit}) passed`
+      : 'mirror prep was cancelled (the daemon is stopping or the tick ran out of time)');
+    const fail = (nameWithOwner: string, path: string, reason: string): void => {
+      if (stopWaiting) return;
+      result.failed.push({ nameWithOwner, path, reason: boundedScrub(reason) });
+    };
+    const inner: MirrorDeps = { ...deps, signal: controller.signal };
     const queue = [...repos];
+    const inFlight = new Set<string>();
     const workers = Array.from(
       { length: Math.min(queue.length, Math.max(1, Math.floor(deps.concurrency ?? MIRROR_TICK_CONCURRENCY))) },
       async () => {
         for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
-          const synced = await ensureMirror({ nameWithOwner: next }, deps);
+          if (controller.signal.aborted) {
+            fail(next, pathOf(next), `prep failed: ${why()} before ${next} was synced`);
+            continue;
+          }
+          inFlight.add(next);
+          let synced: MirrorSyncResult;
+          try {
+            synced = await ensureMirror({ nameWithOwner: next }, inner);
+          } catch (error) {
+            // ensureMirror never throws by contract; a bug must not sink the others.
+            synced = { ok: false, nameWithOwner: next, path: pathOf(next), base: null, headSha: null, created: false, changed: false, quarantinedTo: null, auth: null, reason: (error as Error).message, durationMs: 0 };
+          } finally {
+            inFlight.delete(next);
+          }
+          if (stopWaiting) return;
           if (synced.ok && synced.base && synced.headSha) {
             result.ready.push({ nameWithOwner: synced.nameWithOwner, path: synced.path, base: synced.base, headSha: synced.headSha });
           } else {
-            result.failed.push({ nameWithOwner: next, path: synced.path || pathOf(next), reason: synced.reason });
+            fail(next, synced.path || pathOf(next), controller.signal.aborted
+              ? `prep failed: ${why()}: ${synced.reason}`
+              : `prep failed: ${synced.reason}`);
           }
         }
       },
     );
-    await Promise.all(workers);
+    const stopped = new Promise<'stopped'>((resolveStopped) => {
+      const arm = (): void => { graceTimer = setTimeout(() => resolveStopped('stopped'), graceMs); };
+      if (controller.signal.aborted) arm();
+      else controller.signal.addEventListener('abort', arm, { once: true });
+    });
+    const outcome = await Promise.race([Promise.all(workers).then(() => 'done' as const), stopped]);
+    clearTimeout(deadlineTimer);
+    if (graceTimer) clearTimeout(graceTimer);
+    deps.signal?.removeEventListener('abort', onParentAbort);
+    if (outcome === 'stopped') {
+      // Stop waiting: a cancelled sync that has not settled (its repo lease
+      // keeps a late finisher from racing the next tick) and any repo not
+      // reached are reported now.
+      for (const nameWithOwner of inFlight) {
+        fail(nameWithOwner, pathOf(nameWithOwner), `prep failed: ${why()} and its sync had not stopped ${describeLimit(graceMs)} after being cancelled`);
+      }
+      for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+        fail(next, pathOf(next), `prep failed: ${why()} before ${next} was synced`);
+      }
+      stopWaiting = true;
+    }
   }
-  result.ready.sort((a, b) => a.nameWithOwner.localeCompare(b.nameWithOwner));
-  result.failed.sort((a, b) => a.nameWithOwner.localeCompare(b.nameWithOwner));
-  result.pausedRepoPaths = result.failed.map((row) => row.path).filter((path) => path.length > 0);
-  return result;
+  const failed = [...result.failed].sort((a, b) => a.nameWithOwner.localeCompare(b.nameWithOwner));
+  const ready = [...result.ready].sort((a, b) => a.nameWithOwner.localeCompare(b.nameWithOwner));
+  return { ready, failed, pausedRepoPaths: failed.map((row) => row.path).filter((path) => path.length > 0) };
 }
 
 // ---------------------------------------------------------------------------

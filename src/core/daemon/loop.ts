@@ -162,6 +162,8 @@ import {
   writeDaemonActivity,
   type DaemonActivityPhase,
 } from './activity.js';
+import { beginTickProgress, noteTickPhase } from './tick-progress.js';
+import { boundedBeforeTick } from './tick-deadline.js';
 import {
   consumeDaemonActivationPermit,
   isDaemonActivationCapability,
@@ -4845,13 +4847,23 @@ export async function tick(
   // standing tick advances its post-merge watch (a red merge is reverted)
   // even on a day whose metered budget is spent. A hook that throws fails
   // CLOSED: nothing new is produced this tick. Default hooks: no constraints.
+  //
+  // Bounded (tick-deadline.ts): past its deadline the hook is cancelled and
+  // this tick holds production and is still recorded, instead of the whole
+  // tick waiting on one stuck mirror install (2026-09-26). The default hooks
+  // resolve at once, so master's path is unchanged.
+  noteTickPhase('tick hooks', 'mirrors, post-merge watch, ledger and budget reads');
   try {
-    tickConstraints = await hooks.beforeTick({
-      nowMs: Date.now(),
-      cfg: liveCfg,
-      dryRun: opts.dryRun,
-      capabilityKind: capabilityKind as DaemonCapabilityKind | null,
-    });
+    tickConstraints = await boundedBeforeTick(
+      (signal) => hooks.beforeTick({
+        nowMs: Date.now(),
+        cfg: liveCfg,
+        dryRun: opts.dryRun,
+        capabilityKind: capabilityKind as DaemonCapabilityKind | null,
+        signal,
+      }),
+      opts.signal ? { parentSignal: opts.signal } : {},
+    );
   } catch (err) {
     tickConstraints = {
       pausedRepos: [],
@@ -4859,6 +4871,7 @@ export async function tick(
       holdProduction: `tick hooks failed before the tick (${boundedText(err instanceof Error ? err.message : String(err), 160)})`,
     };
   }
+  noteTickPhase('selection and dispatch');
   // Live hooks can take as long as a post-merge suite run: re-prove ownership.
   if (hooks !== DEFAULT_TICK_HOOKS && !stillOwnsTick()) {
     return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
@@ -9511,6 +9524,8 @@ async function runDaemonInEnrollmentScope(
       if (!shutdown.signal.aborted && ownsDaemonLock() && (onceStanding === null || onceStanding.ok)) {
         transitionActivity('tick');
         const headSeqBefore = standing ? standing.headSeq() : null;
+        // What this tick is doing, for `ashlr daemon status` (tick-progress.ts).
+        const endTickProgress = beginTickProgress();
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
           ...(activation.capability ? { activationCapability: activation.capability } : {}),
@@ -9520,7 +9535,7 @@ async function runDaemonInEnrollmentScope(
           signal: shutdown.signal,
           ownerLock: daemonLock,
           onOwnershipLost: requestOwnershipLoss,
-        });
+        }).finally(endTickProgress);
         if (standing) await standing.notifyLedgerRows(await standing.rowsSince(headSeqBefore));
         if (tickResult.reason === 'state-persistence-failed' &&
           tickResult.residentSafePersistenceFailure !== 'repair-treatment') {
@@ -9830,6 +9845,8 @@ async function runDaemonInEnrollmentScope(
         const standingHeadSeq = standing ? standing.headSeq() : null;
 
         transitionActivity('tick');
+        // What this tick is doing, for `ashlr daemon status` (tick-progress.ts).
+        const endTickProgress = beginTickProgress();
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
           ...(standingCapability && standing ? { activationCapability: standingCapability, hooks: standing.hooks } : {}),
@@ -9838,7 +9855,7 @@ async function runDaemonInEnrollmentScope(
           signal: shutdown.signal,
           ownerLock: daemonLock,
           onOwnershipLost: requestOwnershipLoss,
-        });
+        }).finally(endTickProgress);
         completedTicks++;
         // V3.10 (U5): landings this tick made go to hooks.afterLanding (the
         // post-merge watch registers them), and — in a run window — into the
