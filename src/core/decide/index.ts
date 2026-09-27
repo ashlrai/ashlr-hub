@@ -72,7 +72,7 @@ export type { ClassifyOperatorIntentOptions, OperatorIntent, OperatorIntentConte
 export { availableLanes, chooseLane, chooseLaneHeuristic } from './lane.js';
 export type { ChooseLaneOptions, LaneContext, LaneTask, WorkLane } from './lane.js';
 
-export { triageTrigger, triageTriggerHeuristic } from './triage.js';
+export { automationTriageDecider, triageTrigger, triageTriggerHeuristic } from './triage.js';
 export type { TriageContext, TriagePlaybook, TriageTriggerOptions, TriggerInput, TriggerTriage } from './triage.js';
 
 export {

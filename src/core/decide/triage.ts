@@ -159,3 +159,73 @@ export async function triageTrigger(
     },
   });
 }
+
+// ---------------------------------------------------------------------------
+// Adapter: the automations engine's `AutomationDecider` seam
+// ---------------------------------------------------------------------------
+
+/** Structurally automations/types.ts AutomationLane (kept local: decide never imports automations). */
+export type AutomationLaneLike = 'fleet' | 'cloud' | 'devin' | 'leader-review';
+
+export interface AutomationTriageInputLike {
+  readonly state: string;
+  readonly lanes: readonly AutomationLaneLike[];
+  readonly playbooks: readonly string[];
+  /** The automation's own gate (triage.minConfidence); used as this decision's threshold. */
+  readonly minConfidence?: number;
+}
+
+export interface AutomationTriageAnswerLike {
+  worth: number | null;
+  lane: { choice: AutomationLaneLike; confidence: number } | null;
+  playbook: { choice: string; confidence: number } | null;
+}
+
+const toWorkLane = (l: AutomationLaneLike): WorkLane => (l === 'leader-review' ? 'interactive' : l);
+const toAutomationLane = (l: WorkLane): AutomationLaneLike => (l === 'interactive' ? 'leader-review' : l);
+
+/**
+ * `triageTrigger` behind the automations engine's decider seam
+ * (src/core/automations/triage.ts). One Jev call through the decision layer
+ * (cache, budget, kill switch, ledger), then the RAW per-part answers are
+ * handed back: `triageFiring` applies its own per-part gate and its
+ * escalate-only "doubt → leader-review" rule, exactly as before. Returns
+ * `{ unavailable }` whenever Jev did not answer at all. Never throws.
+ *
+ * 'leader-review' is offered to Jev as the 'interactive' lane (a human looks
+ * first) and mapped back; only lanes in `input.lanes` are ever offered.
+ */
+export async function automationTriageDecider(
+  input: AutomationTriageInputLike,
+  opts: TriageTriggerOptions = {},
+): Promise<AutomationTriageAnswerLike | { unavailable: string }> {
+  const [title, ...rest] = input.state.split('\n');
+  const available: Partial<Record<WorkLane, boolean>> = { fleet: false, cloud: false, devin: false, interactive: false };
+  for (const l of input.lanes) available[toWorkLane(l)] = true;
+  const d = await triageTrigger(
+    { source: 'automation', title: (title ?? '').trim() || input.state.slice(0, 200), body: rest.join('\n').trim() || null },
+    {
+      lanes: { available },
+      playbooks: input.playbooks.map((p) => ({ id: p, when: `The task matches the "${p}" playbook.` })),
+    },
+    {
+      ...opts,
+      ...(typeof input.minConfidence === 'number' && opts.threshold === undefined ? { threshold: input.minConfidence } : {}),
+    },
+  );
+  const answers = d.answers;
+  if (!answers) return { unavailable: d.reason ?? 'no-answer' };
+  const w = answers['work'];
+  const l = answers['lane'];
+  const p = answers['playbook'];
+  const offered = input.lanes.map(toWorkLane);
+  return {
+    worth: w && w.type === 'noul' ? w.noul : null,
+    lane: l && l.type === 'choice' && offered.includes(l.choice as WorkLane)
+      ? { choice: toAutomationLane(l.choice as WorkLane), confidence: l.confidence }
+      : null,
+    playbook: p && p.type === 'choice' && p.choice !== 'none' && input.playbooks.includes(p.choice)
+      ? { choice: p.choice, confidence: p.confidence }
+      : null,
+  };
+}

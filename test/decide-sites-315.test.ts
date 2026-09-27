@@ -14,7 +14,7 @@ import { clearDecisionCache } from '../src/core/decide/cache.js';
 import { readLedger, resetLedgerCountersForTests } from '../src/core/decide/ledger.js';
 import { classifyOperatorIntent, classifyOperatorIntentHeuristic, type OperatorIntent } from '../src/core/decide/intent.js';
 import { adviseDevinLane, chooseLane, chooseLaneHeuristic } from '../src/core/decide/lane.js';
-import { triageTrigger, triageTriggerHeuristic } from '../src/core/decide/triage.js';
+import { automationTriageDecider, triageTrigger, triageTriggerHeuristic } from '../src/core/decide/triage.js';
 import {
   needsYouPriorityHeuristic,
   orderNeedsYouWithJev,
@@ -223,6 +223,28 @@ describe('triageTrigger', () => {
     const d = await triageTrigger({ source: 'issue', title: 'Support SSO', body: 'Customers want SAML' }, { playbooks }, { cfg });
     expect(d).toMatchObject({ path: 'fallback', reason: 'below-threshold' });
     expect(d.value).toEqual(triageTriggerHeuristic({ source: 'issue', title: 'Support SSO', body: 'Customers want SAML' }, { playbooks }));
+  });
+
+  it('automations adapter: one call, raw per-part answers, leader-review ↔ interactive', async () => {
+    fake.respond((req) => {
+      expect(Object.keys(req.questions['lane']!.criteria!)).toEqual(['fleet', 'interactive']);
+      expect(req.state).toContain('Title: Login page 500s');
+      return { work: noul(0.1), lane: choice('interactive', 0.6), playbook: choice('flaky-test', 0.95) };
+    });
+    const a = await automationTriageDecider(
+      { state: 'Login page 500s\n\nsince the deploy', lanes: ['fleet', 'leader-review'], playbooks: ['flaky-test'], minConfidence: 0.75 },
+      { cfg },
+    );
+    expect(fake.fetch).toHaveBeenCalledTimes(1);
+    // Below the combined gate, but the engine gates each part itself — so the raw parts come back.
+    expect(a).toEqual({ worth: 0.1, lane: { choice: 'leader-review', confidence: 0.6 }, playbook: { choice: 'flaky-test', confidence: 0.95 } });
+    expect(readLedger().find((l) => l.kind === 'trigger-triage')).toMatchObject({ path: 'fallback', reason: 'below-threshold' });
+  });
+
+  it('automations adapter: unkeyed is unavailable (the engine keeps its rules path)', async () => {
+    unkeyed();
+    expect(await automationTriageDecider({ state: 'x', lanes: ['fleet'], playbooks: [] }, { cfg })).toEqual({ unavailable: 'no-key' });
+    expect(fake.fetch).not.toHaveBeenCalled();
   });
 
   it('an unknown playbook id is no answer', async () => {
