@@ -201,6 +201,15 @@ describe('VoiceInput — desktop (native engine)', () => {
     expect(screen.queryByText(/Listening/)).toBeNull();
   });
 
+  it('adopts a live dictation it did not start (a reload mid-dictation) so it can be stopped', () => {
+    const sent = installBridge();
+    render(<><Box /><VoiceHud /></>);
+    nativeEvent({ event: 'voice://state', state: state({ session: { id: 'v-old-1', origin: 'button', mode: 'prose', phase: 'listening', latched: true } }) });
+    expect(screen.getByText('Listening · local Parakeet')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel dictation' }));
+    expect(sent.at(-1)).toEqual({ op: 'cancel', session: 'v-old-1' });
+  });
+
   it('keeps a dictation with nowhere to go, with Copy', () => {
     installBridge();
     render(<VoiceHud />);

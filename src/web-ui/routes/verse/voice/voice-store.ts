@@ -413,7 +413,14 @@ function onNativeState(state: NativeVoiceState): void {
       latched: remote.latched,
     });
     nativeVoice()?.send({ op: 'context', session: remote.id, mode, ...(cwd ? { cwd } : {}) });
+    return;
   }
+  // A mic-button dictation this page did not start (the page reloaded while
+  // it ran): adopt it so the pill can stop or cancel it; its words, having
+  // no input, stay in the pill with Copy.
+  if (local?.phase === 'starting') return;
+  if (local) endSession();
+  beginSession({ id: remote.id, targetId: null, origin: 'button', mode: remote.mode, phase: remote.phase, partial: '', latched: true });
 }
 
 async function deliverFinal(
