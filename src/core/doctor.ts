@@ -146,11 +146,10 @@ async function tryBuildBudgetRollup(
 ): Promise<import('./types.js').ActivityRollup | null> {
   try {
     const win: '1d' | '7d' | '30d' = cfg.telemetry?.budgetWindow ?? '7d';
-    // Defeat static resolution so tsc doesn't error when the M5 module is not
-    // yet built. Same pattern used for the M3 mcp-registry / tools-registry
-    // dynamic imports above. At runtime Node resolves the real .js path.
-    const specifier = './observability/rollup.js';
-    const mod = await import(/* @vite-ignore */ specifier) as {
+    // Literal specifiers throughout this file: the Bun-compiled binary bundles
+    // only what it can see, and a variable specifier always misses there (the
+    // section silently came back empty). Every module these load now exists.
+    const mod = await import('./observability/rollup.js') as {
       buildRollup: (
         window: '1d' | '7d' | '30d',
         cfg: AshlrConfig,
@@ -172,8 +171,7 @@ async function tryEvalGovernance(
   cfg: AshlrConfig,
 ): Promise<import('./types.js').GovernanceStatus | null> {
   try {
-    const specifier = './observability/governance.js';
-    const mod = await import(/* @vite-ignore */ specifier) as {
+    const mod = await import('./observability/governance.js') as {
       evalGovernance: (cfg: AshlrConfig) => import('./types.js').GovernanceStatus;
     };
     return mod.evalGovernance(cfg);
@@ -191,8 +189,7 @@ async function tryGetTelemetrySinkInfo(
   cfg: AshlrConfig,
 ): Promise<{ sinkType: 'local' | 'otlp'; endpointConfigured: boolean; patConfigured: boolean } | null> {
   try {
-    const specifier = './observability/telemetry-sink.js';
-    const mod = await import(/* @vite-ignore */ specifier) as {
+    const mod = await import('./observability/telemetry-sink.js') as {
       patAvailable: (cfg: AshlrConfig) => boolean;
     };
     const endpointConfigured = Boolean(cfg.telemetry?.pulse);
@@ -213,8 +210,7 @@ async function tryGetGenomeHealth(
   cfg: AshlrConfig,
 ): Promise<import('./types.js').GenomeHealth | null> {
   try {
-    const specifier = './genome/store.js';
-    const mod = await import(/* @vite-ignore */ specifier) as {
+    const mod = await import('./genome/store.js') as {
       genomeHealth: (cfg: AshlrConfig) => import('./types.js').GenomeHealth;
     };
     return mod.genomeHealth(cfg);
@@ -230,8 +226,7 @@ async function tryGetGenomeHealth(
  */
 async function tryGetIdentity(): Promise<import('./types.js').Identity | null> {
   try {
-    const specifier = './integrations/identity.js';
-    const mod = await import(/* @vite-ignore */ specifier) as {
+    const mod = await import('./integrations/identity.js') as {
       getIdentity: () => import('./types.js').Identity;
     };
     return mod.getIdentity();
