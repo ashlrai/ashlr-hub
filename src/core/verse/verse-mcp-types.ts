@@ -160,8 +160,22 @@ export interface VerseAgentTabInfo {
   takenOverAt: string | null;
 }
 
+/** The seat's name as the sheet and the Terminal pane say it ("Share this shell with Codex"). */
+export function verseSeatToolLabel(engine: string): string {
+  switch (engine) {
+    case 'claude': return 'Claude';
+    case 'local': return 'the local model';
+    case 'codex': return 'Codex';
+    case 'grok': return 'Grok';
+    case 'devin': return 'Devin';
+    default: return 'the agent';
+  }
+}
+
 export interface VerseAgentToolsState {
   sessionId: string;
+  /** verseSeatToolLabel(engine) for the chat's seat. */
+  seatLabel: string;
   grant: VerseAgentToolsGrant;
   scopes: VerseMcpScope[];
   /** Operator shells of this chat shared with its agent (tab ids). */

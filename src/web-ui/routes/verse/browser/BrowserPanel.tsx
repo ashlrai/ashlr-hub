@@ -1024,7 +1024,7 @@ function AgentAccessBar({ policy, busy, activity, mode, onToggle, onAllow, curre
         <span className={styles.muted}>
           {on
             ? activity ?? `Localhost only${allowed.length ? ` + ${allowed.length} allowed` : ''} · look, navigate, screenshot, read — never click, type or submit.`
-            : `Gives ${engines.includes('claude') ? 'Claude and local' : engines.join(', ')} seats browser tools from their next turn.`}
+            : `Gives ${engines.length >= 5 ? 'this chat\'s seat' : engines.includes('claude') ? 'Claude and local' : engines.join(', ')} browser tools from its next turn (Devin cloud excepted). More in the chat's Agent tools.`}
           {on && mode === 'frame' ? ' In the web UI agents can only navigate.' : ''}
         </span>
       </div>

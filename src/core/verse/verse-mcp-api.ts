@@ -78,6 +78,7 @@ import {
   VERSE_MCP_SHARE_PATH,
   VERSE_MCP_TABS_PATH,
   verseMcpSeatSupport,
+  verseSeatToolLabel,
   type VerseAgentToolsActivity,
   type VerseAgentToolsGrant,
   type VerseAgentToolsState,
@@ -215,6 +216,7 @@ function stateOf(session: VerseSession): VerseAgentToolsState {
   const lane = session.engine === 'devin' ? (session.seatId === 'devin-cli' ? 'cli' : 'cloud') : null;
   return {
     sessionId: session.id,
+    seatLabel: verseSeatToolLabel(session.engine),
     grant: agentToolsGrant(session.id),
     scopes: agentToolScopes(session.id),
     sharedTabs: sharedTabsOf(session.id),

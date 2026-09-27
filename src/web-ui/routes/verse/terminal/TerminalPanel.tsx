@@ -63,6 +63,8 @@ import {
   type TerminalLayout,
 } from './layout-model.js';
 import { panelTerminalApi, type PanelTerminalApi } from './panel-client.js';
+import { agentToolsApi, type AgentToolsApi } from '../agent-tools/agent-tools-client.js';
+import type { VerseAgentTabInfo } from '../../../../core/verse/verse-mcp-types.js';
 import { panelKeyLabel, type PanelKeyAction } from './panel-keys.js';
 import { TerminalLeaf, type LeafDeps, type LeafHandle, type LeafNotice, type LeafPrefs } from './TerminalLeaf.js';
 import { createPanelXtermView, type PanelViewFactory } from './xterm-view.js';
@@ -112,6 +114,8 @@ export interface TerminalPanelProps {
 
 export interface TerminalPanelDeps extends LeafDeps {
   api: PanelTerminalApi;
+  /** 3.15 agent tools: which tabs an agent drives, sharing and takeover (optional; absent = no agent-tools UI). */
+  agentTools?: AgentToolsApi;
   createView: PanelViewFactory;
   storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null;
 }
@@ -126,6 +130,7 @@ function safeLocalStorage(): Storage | null {
 
 const DEFAULT_DEPS: TerminalPanelDeps = {
   api: panelTerminalApi,
+  agentTools: agentToolsApi,
   createView: createPanelXtermView,
   openStream: openPanelStream,
   platform: detectKeyPlatform(),
@@ -197,6 +202,8 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
   const [loadError, setLoadError] = useState<string | null>(null);
   const [layout, setLayout] = useState<TerminalLayout>(() => loadLayout(sessionId, deps.storage));
   const [notice, setNotice] = useState<LeafNotice | null>(null);
+  // 3.15 agent tools: tabs an agent drives (its own, or a shell you shared), and takeovers.
+  const [agentTabs, setAgentTabs] = useState<ReadonlyMap<string, VerseAgentTabInfo>>(new Map());
   const [creating, setCreating] = useState(false);
   const [streamStates, setStreamStates] = useState<ReadonlyMap<string, TerminalStreamState>>(() => new Map());
   const [selection, setSelection] = useState<{ tabId: string; text: string } | null>(null);
@@ -265,7 +272,13 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
     } catch (err) {
       if (mounted.current) setLoadError(errorText(err, 'The terminal list could not be loaded.'));
     }
-  }, [deps.api]);
+    if (deps.agentTools) {
+      try {
+        const { tabs: infos } = await deps.agentTools.tabs();
+        if (mounted.current) setAgentTabs(new Map(infos.map((info) => [info.tabId, info])));
+      } catch { /* optional: no agent-tools marks this round */ }
+    }
+  }, [deps.api, deps.agentTools]);
 
   useEffect(() => { void refresh(); }, [refresh]);
   usePollWhileVisible(() => { void refresh(); }, TERMINAL_PANEL_LIST_POLL_MS, { enabled: visible });
@@ -663,8 +676,38 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
       { id: 'gpu', label: prefs.gpu ? 'Turn GPU rendering off' : 'Turn GPU rendering on', description: 'Applies to terminals opened from now on.', onSelect: () => updatePrefs({ gpu: !prefs.gpu }) },
       { id: 'sr', label: prefs.screenReader ? 'Turn screen reader mode off' : 'Turn screen reader mode on', onSelect: () => updatePrefs({ screenReader: !prefs.screenReader }) },
       ...(deps.platform === 'mac' ? [{ id: 'external', label: 'Open in Terminal.app', onSelect: () => void openExternal() }] : []),
+      ...shareMenuItems(),
     ];
     setMenu({ kind: 'more', anchor: anchorBelow(from), from, items, label: 'Terminal' });
+  };
+
+  // 3.15 agent tools: share one of YOUR shells in this chat with its agent (the
+  // chat's Agent tools must be on "Share my shells"). Never an agent's own tab
+  // or an Apps launch.
+  const shareMenuItems = (): ActionMenuItem[] => {
+    const api = deps.agentTools;
+    if (!api || !focusedTab || focusedTab.agent || focusedTab.appId || focusedTab.sessionId !== sessionId) return [];
+    const shared = agentTabs.get(focusedTab.id)?.kind === 'shared';
+    return [{
+      id: 'share-agent',
+      label: shared ? 'Stop sharing this shell with the agent' : 'Share this shell with the agent…',
+      description: shared
+        ? 'The agent can no longer type here or read this shell.'
+        : 'The chat\'s agent may run commands here and read the output. Typing yourself pauses it.',
+      onSelect: () => {
+        void api.share(sessionId, focusedTab.id, !shared).then(
+          () => { setNotice({ tone: 'info', text: shared ? 'This shell is yours alone again.' : 'Shared with this chat\'s agent. Type in it to take it back over.' }); void refresh(); },
+          (err: unknown) => setNotice({ tone: 'error', text: errorText(err, 'Switch this chat\'s Agent tools to "Share my shells" first (Chat actions → Agent tools).') }),
+        );
+      },
+    }];
+  };
+
+  const resumeAgent = (tabId: string) => {
+    void deps.agentTools?.resume(tabId).then(
+      () => { setNotice({ tone: 'info', text: 'Handed back to the agent.' }); void refresh(); },
+      (err: unknown) => setNotice({ tone: 'error', text: errorText(err, 'The terminal could not be handed back.') }),
+    );
   };
 
   const openRootMenu = (from: HTMLElement) => {
@@ -752,6 +795,8 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
                 >
                   <span className={styles.tabTitle}>{title}</span>
                   {first.agent ? <span className={styles.tabMeta}>agent</span> : null}
+                  {agentTabs.get(first.id)?.kind === 'shared' ? <span className={styles.tabMeta}>shared</span> : null}
+                  {agentTabs.get(first.id)?.takenOverAt ? <span className={styles.tabMeta}>you have it</span> : null}
                   {exited ? <span className={styles.tabMeta}>exited</span> : null}
                   {unseen ? <span className={styles.unseen} aria-label="new output" role="img" /> : null}
                 </button>
@@ -826,6 +871,13 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
             <IconButton variant="ghost" size="sm" icon={<MoreGlyph />} aria-label="More terminal options" aria-haspopup="menu"
               aria-expanded={menu?.kind === 'more'} title="More" onClick={(event) => openMoreMenu(event.currentTarget)} />
           </div>
+        </div>
+      ) : null}
+
+      {!agentSelected && focusedTab && agentTabs.get(focusedTab.id)?.takenOverAt ? (
+        <div className={styles.notice} data-tone="info" role="status" data-testid="terminal-takeover">
+          <span>You took over this terminal, so the agent is paused here.</span>
+          <Button size="sm" variant="subtle" onClick={() => resumeAgent(focusedTab.id)}>Resume agent</Button>
         </div>
       ) : null}
 
