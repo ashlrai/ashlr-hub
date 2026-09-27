@@ -22,7 +22,7 @@
 import { useId, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
 import { CHART_SEQUENTIAL, gradientId, toneColor } from './colors.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
-import { AreaGradient, ChartLegend, ChartTooltip, clampTooltipLeft } from './ChartParts.js';
+import { AreaGradient, ChartLegend, ChartTooltip, clampTooltipLeft, tooltipSide } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
 import {
   MIN_TIME_SPAN_MS,
@@ -401,7 +401,8 @@ export function BurnDown({
         </span>
         {activePoint ? (
           <ChartTooltip
-            left={clampTooltipLeft(xs(clampX(activePoint.t)), width)}
+            left={tooltipSide(xs(clampX(activePoint.t)), width) ? xs(clampX(activePoint.t)) : clampTooltipLeft(xs(clampX(activePoint.t)), width)}
+            side={tooltipSide(xs(clampX(activePoint.t)), width)}
             top={PAD_T}
             title={formatTooltipInstant(activePoint.t)}
             rows={[

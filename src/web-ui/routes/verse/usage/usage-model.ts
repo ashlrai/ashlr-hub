@@ -56,6 +56,7 @@ import type { ControlSnapshot, SourceQuality, VerseEngine, VerseSeat } from '../
 import type { FrontierEngineUsage } from '../../../../core/usage/frontier-usage.js';
 import { localDateKey } from '../autonomy/format.js';
 import { calendarDayStart } from '../growth/calendar-day.js';
+import { engineColor } from '../../../components/charts/colors.js';
 
 type SubscriptionEngineUsage = ControlSnapshot['subscriptionUsage'][number];
 type ControlLimit = ControlSnapshot['limits'][number];
@@ -68,15 +69,17 @@ type DaemonObservation = ControlSnapshot['daemonObservation'];
 
 /**
  * One hue per provider (docs/VERSE-DESIGN-V2.md §2 "Engine identity"). Used
- * ONLY for the 2px seat marker and the window bar, never for text. Written
- * with a literal fallback so the section is correct before owner A lands the
- * tokens in design/tokens.css.
+ * ONLY for the 2px seat marker and the window bar, never for text. The chart
+ * kit's engineColor() is the one source (design/tokens.css --engine-*): the
+ * literal fallbacks this map used to carry were the pre-3.10 Codex green and
+ * Grok mid-gray, so a seat bar and a chart could have named one provider in
+ * two colours had the token ever failed to resolve.
  */
 export const ENGINE_COLOR: Record<VerseEngine, string> = {
-  claude: 'var(--engine-claude, #c96442)',
-  codex: 'var(--engine-codex, #10a37f)',
-  grok: 'var(--engine-grok, #6b7280)',
-  local: 'var(--engine-local, #7c5cff)',
+  claude: engineColor('claude'),
+  codex: engineColor('codex'),
+  grok: engineColor('grok'),
+  local: engineColor('local'),
 };
 
 // ---------------------------------------------------------------------------

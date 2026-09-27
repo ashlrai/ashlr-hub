@@ -90,10 +90,19 @@
 .meter {
   position: relative;
   display: block;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--bg-hover);
-  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  height: 6px;
+  border-radius: 3px;
+  background: var(--meter-track);
+}
+
+/* The operator's reserve: a faint band of the warning tint from empty up to
+   the reserve tick — the part of the window autonomy stays out of. */
+.reserveZone {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--reserve, 0%);
+  border-radius: 3px 0 0 3px;
+  background: var(--status-warning-bg);
 }
 
 .fill {
@@ -102,7 +111,20 @@
   width: var(--fill, 0%);
   border-radius: inherit;
   background: var(--level);
+  transform-origin: 0 50%;
   transition: width var(--duration-base) var(--ease-standard);
+  /* Fills in from empty once, on mount; the motion tokens collapse this to
+     ~1 ms under reduced motion, and the media block below removes it. */
+  animation: seat-fill-in calc(var(--duration-slow) * 3) var(--ease-decelerate) both;
+}
+
+@keyframes seat-fill-in {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
 }
 
 /* A free local seat has no quota: a quiet full track, never a "100% left" claim. */
@@ -114,6 +136,7 @@
   position: absolute;
   top: -2px;
   bottom: -2px;
+  z-index: 1;
   left: var(--reserve);
   width: 2px;
   margin-left: -1px;
@@ -167,6 +190,14 @@
   .fill {
     transition: none;
   }
+
+  :global(:root:not([data-motion='full'])) .fill {
+    animation: none;
+  }
+}
+
+:global(:root[data-motion='reduce']) .fill {
+  animation: none;
 }
 
 /* Hover card — the rail's, so the two read as one family. */

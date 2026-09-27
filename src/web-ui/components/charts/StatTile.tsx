@@ -95,3 +95,21 @@ export function StatTile({
     </div>
   );
 }
+
+/**
+ * A stat tile's loading placeholder in the tile's own shape — label, number
+ * and sparkline bars on the same box — so a KPI row does not jump when its
+ * figures land. Uses the app's shared `.skeleton` shimmer (design/global.css),
+ * which already stops under reduced motion. Presentation only: the caller
+ * announces the loading state once for the whole row.
+ */
+export function StatTileSkeleton({ trend = true }: { trend?: boolean }) {
+  return (
+    <div className={styles.tile} data-stat-tile-skeleton="" aria-hidden="true">
+      <span className={`skeleton ${styles.skLabel}`} />
+      <span className={`skeleton ${styles.skValue}`} />
+      {trend ? <span className={`skeleton ${styles.skTrend}`} /> : null}
+      <span className={`skeleton ${styles.skMeta}`} />
+    </div>
+  );
+}

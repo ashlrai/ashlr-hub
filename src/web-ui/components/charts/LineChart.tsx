@@ -29,7 +29,7 @@
 import { useId, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
 import type { Series } from './types.js';
 import { gradientId, seriesColor, CHART_GRID, CHART_AXIS } from './colors.js';
-import { AreaGradient, ChartTooltip, clampTooltipLeft } from './ChartParts.js';
+import { AreaGradient, ChartTooltip, clampTooltipLeft, tooltipSide } from './ChartParts.js';
 import { Legend } from './Legend.js';
 import {
   MIN_TIME_SPAN_MS,
@@ -451,7 +451,8 @@ export function LineChart({
       </span>
       {hoverPoints && hoverX !== null ? (
         <ChartTooltip
-          left={clampTooltipLeft(xScale(hoverX), width)}
+          left={tooltipSide(xScale(hoverX), width) ? xScale(hoverX) : clampTooltipLeft(xScale(hoverX), width)}
+          side={tooltipSide(xScale(hoverX), width)}
           top={PAD_T}
           title={formatTipX(hoverX)}
           rows={hoverPoints.map(({ series: s, point }, i) => ({

@@ -8,7 +8,7 @@ export { Legend, type LegendItem } from './Legend.js';
 export { LineChart } from './LineChart.js';
 export { BarChart } from './BarChart.js';
 export { Sparkline, sparklineSummary } from './Sparkline.js';
-export { StatTile, type StatTileDelta } from './StatTile.js';
+export { StatTile, StatTileSkeleton, type StatTileDelta } from './StatTile.js';
 export { TableView, type TableColumn } from './TableView.js';
 export type { Series, SeriesPoint, CategoricalDatum } from './types.js';
 export {

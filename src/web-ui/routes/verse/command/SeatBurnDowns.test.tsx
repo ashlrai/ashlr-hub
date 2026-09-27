@@ -60,8 +60,16 @@ function percentTicks(container: HTMLElement): { min: number; max: number } {
 }
 
 /** The x of every vertex in an "M x,y L x,y …" path. */
+/**
+ * The x of every vertex a path passes through — M/L points and each curve
+ * segment's END point. The remaining line is a monotone curve through the
+ * readings (verse-visual-quality); its control points are not readings.
+ */
 function pathXs(d: string): number[] {
-  return Array.from(d.matchAll(/[ML](-?[\d.]+),/g)).map((m) => Number(m[1]));
+  return Array.from(d.matchAll(/[MLC]([^MLCZ]*)/g)).map((m) => {
+    const pairs = m[1]!.trim().split(/\s+/);
+    return Number(pairs[pairs.length - 1]!.split(',')[0]);
+  });
 }
 
 describe('SeatBurnCard', () => {

@@ -15,12 +15,18 @@
  *     line at a null by contract.
  *
  * Charts are the existing primitives only — no new chart code, no library.
+ * The axis rounds ("13K"); the tooltips print the exact count and the local
+ * day ("Fri, Sep 26") — formatTooltip / the kit's time-axis default. While
+ * the rollup loads, the panel holds skeletons in the tiles' and charts' own
+ * shapes, so nothing jumps when the numbers land.
  */
 import type { ReactNode } from 'react';
 import {
   ChartContainer,
+  ChartSkeleton,
   LineChart,
   StatTile,
+  StatTileSkeleton,
   TableView,
   chartFormat,
   type TableColumn,
@@ -141,9 +147,17 @@ export function SeriesPanel({
           {unavailableReason} No token or spend series can be drawn, and none is invented in its place.
         </p>
       ) : loading && series === null ? (
-        <p className={styles.muted} aria-busy="true">
-          Loading the {WINDOW_LABEL[window].toLowerCase()} rollup…
-        </p>
+        <div role="status" aria-busy="true" data-series-loading="">
+          <span className="visually-hidden">Loading the {WINDOW_LABEL[window].toLowerCase()} rollup…</span>
+          <div className={styles.tiles}>
+            {[0, 1, 2, 3].map((i) => (
+              <StatTileSkeleton key={i} />
+            ))}
+          </div>
+          <div className={styles.charts}>
+            <ChartSkeleton shape="line" height={200} />
+          </div>
+        </div>
       ) : series === null || series.days.length === 0 ? (
         <p className={styles.muted}>
           No days in the {WINDOW_LABEL[window].toLowerCase()} rollup.
@@ -226,8 +240,9 @@ export function SeriesPanel({
               {tokens.available ? (
                 <LineChart
                   series={tokens.series}
-                  formatX={(x) => chartFormat.formatTimeLabel(x)}
+                  area
                   formatY={(y) => chartFormat.formatCompact(y)}
+                  formatTooltip={chartFormat.formatExact}
                   ariaLabel={`Tokens in and out per day over ${WINDOW_LABEL[window].toLowerCase()}`}
                 />
               ) : null}
@@ -252,7 +267,6 @@ export function SeriesPanel({
                 <LineChart
                   series={spend.series}
                   area
-                  formatX={(x) => chartFormat.formatTimeLabel(x)}
                   formatY={(y) => chartFormat.formatUsd(y)}
                   ariaLabel={`Estimated spend per day over ${WINDOW_LABEL[window].toLowerCase()}`}
                 />
@@ -279,8 +293,8 @@ export function SeriesPanel({
               {cache.available ? (
                 <LineChart
                   series={cache.series}
-                  formatX={(x) => chartFormat.formatTimeLabel(x)}
                   formatY={(y) => chartFormat.formatPercent(y)}
+                  formatTooltip={(y) => chartFormat.formatPercent(y, 1)}
                   ariaLabel={`Cache hit rate per day over ${WINDOW_LABEL[window].toLowerCase()}`}
                 />
               ) : null}
@@ -306,8 +320,8 @@ export function SeriesPanel({
               {cacheTokens.available ? (
                 <LineChart
                   series={cacheTokens.series}
-                  formatX={(x) => chartFormat.formatTimeLabel(x)}
                   formatY={(y) => chartFormat.formatCompact(y)}
+                  formatTooltip={chartFormat.formatExact}
                   ariaLabel={`Cache read and write tokens per day over ${WINDOW_LABEL[window].toLowerCase()}`}
                 />
               ) : null}

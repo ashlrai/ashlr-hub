@@ -23,7 +23,7 @@ import { useId, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent
 import type { Series } from './types.js';
 import { gradientId, seriesColor } from './colors.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
-import { AreaGradient, ChartLegend, ChartTooltip, clampTooltipLeft } from './ChartParts.js';
+import { AreaGradient, ChartLegend, ChartTooltip, clampTooltipLeft, tooltipSide } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
 import {
   MIN_TIME_SPAN_MS,
@@ -440,7 +440,8 @@ export function AreaTrend({
         </span>
         {activeRow ? (
           <ChartTooltip
-            left={clampTooltipLeft(xs(activeRow.x), width)}
+            left={tooltipSide(xs(activeRow.x), width) ? xs(activeRow.x) : clampTooltipLeft(xs(activeRow.x), width)}
+            side={tooltipSide(xs(activeRow.x), width)}
             top={PAD_T}
             title={formatTipX(activeRow.x)}
             rows={[

@@ -45,6 +45,9 @@ export const GROWTH_POLL_MS = 300_000;
 
 const models30 = modelsQuery('30d');
 
+/** One series of weekly merge counts: the quantity ink, no legend needed. */
+const MERGE_SEGMENTS = [{ id: 'merges', label: 'Merges', color: CHART_SEQUENTIAL }];
+
 function unknownFrom(reason: string | null | undefined, fallback: string): ChartStatus {
   return { kind: 'unknown', reason: reason ?? fallback };
 }
@@ -114,13 +117,18 @@ export function GrowthSection() {
       ) : null}
       {dormant ? null : (
         <Cell span={8}>
-          <AreaTrend
+          {/* Columns, not an area: each week is a separate count, and a
+              line between two weekly totals would draw merges that happened
+              on no particular day. An unknown week is the kit's hatch. */}
+          <BarStack
             title="Merges per week"
             description="Rolling 7-day windows ending today"
             caveat={mergesCaveat}
             status={weeklyStatus}
-            series={[{ id: 'merges', label: 'Merges', color: CHART_SEQUENTIAL, points: bins.map((b) => ({ x: b.end, y: b.merges })) }]}
-            formatX={weekLabel}
+            categories={bins.map((b) => weekLabel(b.end))}
+            segments={MERGE_SEGMENTS}
+            values={bins.map((b) => [b.merges])}
+            height={200}
           />
         </Cell>
       )}

@@ -57,9 +57,28 @@ export interface TooltipRow {
  * axis's rounded tick. Presentation only: the same text reaches a screen
  * reader through each chart's live region, and the Table twin.
  */
-export function ChartTooltip({ left, top, title, rows }: { left: number; top: number; title: string; rows: TooltipRow[] }) {
+export function ChartTooltip({
+  left,
+  top,
+  title,
+  rows,
+  side,
+}: {
+  left: number;
+  top: number;
+  title: string;
+  rows: TooltipRow[];
+  /**
+   * Beside the crosshair instead of centred above the mark: `right` / `left`
+   * of `left`, top-aligned at `top` INSIDE the plot (tooltipSide picks one).
+   * A time series uses this so the tooltip never covers the card's title or
+   * the point being read, and is never clipped by a scrolling container.
+   */
+  side?: 'left' | 'right';
+}) {
+  const cls = side === 'right' ? `${plot.tooltip} ${plot.tooltipRight}` : side === 'left' ? `${plot.tooltip} ${plot.tooltipLeft}` : plot.tooltip;
   return (
-    <div className={plot.tooltip} style={{ left, top }} role="presentation" data-chart-tooltip="">
+    <div className={cls} style={{ left, top }} role="presentation" data-chart-tooltip={side ?? 'above'}>
       <div className={plot.tooltipTitle}>{title}</div>
       {rows.map((row) => (
         <div key={row.key} className={row.total ? `${plot.tooltipRow} ${plot.tooltipTotal}` : plot.tooltipRow}>
@@ -80,6 +99,20 @@ export function ChartTooltip({ left, top, title, rows }: { left: number; top: nu
       ))}
     </div>
   );
+}
+
+/** Estimated width of a tooltip, for choosing its side (it grows with its rows' text). */
+const TOOLTIP_EST_W = 172;
+const TOOLTIP_GAP = 12;
+
+/**
+ * Which side of the crosshair at `x` a tooltip fits on in a `width`-wide plot:
+ * right while it fits, else left, else undefined (centred above, clamped).
+ */
+export function tooltipSide(x: number, width: number, estimate = TOOLTIP_EST_W): 'left' | 'right' | undefined {
+  if (x + TOOLTIP_GAP + estimate <= width) return 'right';
+  if (x - TOOLTIP_GAP - estimate >= 0) return 'left';
+  return undefined;
 }
 
 /** Keep a centred tooltip inside [margin, width - margin]. */

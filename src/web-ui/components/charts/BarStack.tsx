@@ -29,7 +29,7 @@ import { hatchPatternId } from './colors.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
 import { ChartLegend, ChartTooltip, HatchPattern, clampTooltipLeft } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
-import { allIntegers, axisTicks, crisp, linearScale, roundedTopBar, stackColumn, thinIndexes, tickGutter, type StackedColumn } from './chart-math.js';
+import { allIntegers, axisTicks, crisp, labelCharPx, linearScale, roundedTopBar, stackColumn, thinIndexes, tickGutter, type StackedColumn } from './chart-math.js';
 import { formatCompact, formatExact, formatPercent } from './format.js';
 import { useChartMotion } from './motion.js';
 import { useChartWidth } from './useChartWidth.js';
@@ -132,8 +132,11 @@ export function BarStack({
   const barW = Math.max(2, Math.min(BAR_MAX, slot * 0.66));
   const ys = linearScale(0, top, PAD_T + plotH, PAD_T);
   const xOf = (i: number) => padL + slot * i + (slot - barW) / 2;
-  // A category label gets 64 px at 12 px text, more at a larger Display size.
-  const labelIdx = thinIndexes(rows.length, Math.max(2, Math.floor(plotW / (64 * textScale))));
+  // A category label gets 64 px at 12 px text (more at a larger Display
+  // size), or its own estimated width plus air when the labels are longer
+  // ("wk to Sep 18"): thinned to what fits, never printed over each other.
+  const widestLabel = Math.max(0, ...rows.map((r) => r.label.length)) * labelCharPx(textScale) + 12;
+  const labelIdx = thinIndexes(rows.length, Math.max(2, Math.floor(plotW / Math.max(64 * textScale, widestLabel))));
 
   const fmtTotalWith = (fmt: (v: number) => string) => (r: Row) =>
     `${r.stack.incomplete && !r.stack.unknown ? '≥ ' : ''}${r.stack.unknown ? '—' : fmt(r.stack.total)}`;

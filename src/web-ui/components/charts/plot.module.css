@@ -189,6 +189,15 @@
   animation: chart-tooltip-in var(--duration-fast) var(--ease-decelerate);
 }
 
+/* Beside the crosshair, inside the plot (ChartParts tooltipSide). */
+.tooltipRight {
+  transform: translate(12px, 0);
+}
+
+.tooltipLeft {
+  transform: translate(calc(-100% - 12px), 0);
+}
+
 @keyframes chart-tooltip-in {
   from {
     opacity: 0;
