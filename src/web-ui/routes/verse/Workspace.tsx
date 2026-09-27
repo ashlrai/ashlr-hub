@@ -537,7 +537,10 @@ export function Workspace(props: WorkspaceProps) {
         </div>
       </header>
 
-      <LiveTranscript key={view.sessionId} sessionId={view.sessionId} transcriptOverride={view.transcript} loaded={view.loaded}
+      {/* The transcript and the composer are siblings keyed per chat (a new chat remounts
+          both). The keys are namespaced so they never collide: two siblings with the same
+          key make React's reconciler drop or duplicate one of them. */}
+      <LiveTranscript key={`transcript:${view.sessionId}`} sessionId={view.sessionId} transcriptOverride={view.transcript} loaded={view.loaded}
         loadError={view.loadError} onRetry={onRetry} engine={session?.engine} handoffFrom={session?.handoffFrom ?? null}
         onOpenSession={onOpenSession} />
 
@@ -562,7 +565,7 @@ export function Workspace(props: WorkspaceProps) {
       ) : null}
 
       {session ? (
-        <Composer key={session.id} sessionId={session.id} seats={seats} seat={{ seatId: session.seatId, model: session.model }}
+        <Composer key={`composer:${session.id}`} sessionId={session.id} seats={seats} seat={{ seatId: session.seatId, model: session.model }}
           engine={session.engine} running={running} disabled={!dispatchEnabled} disabledReason={disabledReason} locked={locked}
           hintSeen={session.turnCount > 0} contextTokens={budget?.contextTokens ?? null} contextWindow={budget?.contextWindow ?? null}
           autoCompactAt={budget?.autoCompactAt ?? null} contextExact={budget?.exact ?? true}

@@ -125,6 +125,24 @@ describe('ChatSection bootstrap', () => {
 });
 
 describe('ChatSection sessions', () => {
+  it('an open chat renders no duplicate sibling keys (transcript and composer are keyed apart)', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { fetch } = verseFetch();
+      vi.stubGlobal('fetch', fetch);
+      setMutationToken(TOKEN);
+      const user = userEvent.setup();
+      mount();
+      await user.click(await screen.findByRole('button', { name: /Fix the login bug/ }));
+      await screen.findByRole('heading', { name: 'Fix the login bug' });
+      expect(screen.getByRole('textbox', { name: 'Message' })).toBeInTheDocument();
+      const duplicateKeys = errors.mock.calls.map((args) => args.map(String).join(' ')).filter((line) => /same key/.test(line));
+      expect(duplicateKeys).toEqual([]);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it('creates a session with the contract body and selects it', async () => {
     const { fetch, state } = verseFetch();
     vi.stubGlobal('fetch', fetch);
