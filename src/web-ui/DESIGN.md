@@ -660,3 +660,32 @@ rules there shape the UI:
 - **The terminal stream is a `fetch`, not an `EventSource`.** It carries the
   read-client header, so it needs no query-proof allowance. Only the visible
   tab holds a connection open, because the browser allows about 6 per origin.
+
+### 13.13 Verse on a phone (`/verse/m`, 3.15)
+
+A separate app, not the workbench squeezed: `app/VerseMobileApp.tsx` →
+`routes/verse/mobile/`. `main.tsx` picks it for `/verse/m`, and for `/verse`
+on a coarse-pointer narrow screen (`console-mode.ts` `prefersVerseMobile`;
+never inside the desktop wrapper; the device can choose the workbench from
+More, stored as layout state only).
+
+- **Same APIs, same auth.** Every read is an existing QueryDef on the same
+  cache key the workbench uses; every write goes through
+  `mobile-actions.ts` → `shell/guard-store.ts` (confirm → token → POST), drawn
+  by `MobileGuardSheet`. Nothing new is stored. Transport seams (device
+  scopes, step-up) are in `mobile/device-permissions.ts`; they can only take
+  authority away.
+- **Two budgets.** `check-first-paint-budget.mjs` measures the phone's own
+  first paint (`--mobile-budget-kb`, 250) from `VerseMobileApp` + the Home
+  frame. React is ~220 KB of it, so the first paint is a frame of skeletons;
+  the runtime (activity loop, permissions, sheet, toasts), Home's cards and
+  every other screen are preloaded chunks that download in parallel with the
+  session probe they would have to wait for anyway.
+- **Layout rules** (`mobile-overflow.test.ts`): type in em from the
+  platform body font (Dynamic Type), 44 pt targets, no fixed widths, no
+  horizontal scroll containers — code and diffs wrap. Safe-area insets pad
+  the top bar, tab bar, sheets and toasts.
+- **Installable.** `pwa.ts` writes the head tags at runtime (never in the
+  shared `index.html`); the worker is `public/verse-m/sw.js`, served at
+  `/verse/m/sw.js` so its scope is exactly `/verse/m/`. It caches the shell
+  and hashed assets, never `/api/`.

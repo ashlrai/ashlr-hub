@@ -1,0 +1,98 @@
+/*
+ * routes/verse/mobile/MobileShell.module.css — the tab bar and the strip
+ * that says the Mac is out of reach. Everything else is ui.module.css.
+ */
+
+.stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.tabbar {
+  flex: none;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background: color-mix(in srgb, var(--bg-surface) 88%, transparent);
+  backdrop-filter: saturate(1.6) blur(18px);
+  -webkit-backdrop-filter: saturate(1.6) blur(18px);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.tab {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.15rem;
+  min-height: 3.1rem;
+  min-width: 2.75rem;
+  padding: var(--space-1) 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 0.66em;
+  font-weight: var(--font-weight-medium);
+  touch-action: manipulation;
+}
+
+.tab[aria-current='page'] {
+  color: var(--accent-600);
+}
+
+.tabLabel {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tabBadge {
+  position: absolute;
+  top: 0.25rem;
+  left: calc(50% + 0.35rem);
+  min-width: 1.15rem;
+  height: 1.15rem;
+  padding: 0 0.3rem;
+  border-radius: var(--radius-full);
+  background: var(--status-danger-solid);
+  color: var(--text-on-accent);
+  font-size: 0.72rem;
+  line-height: 1.15rem;
+  font-weight: var(--font-weight-bold);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.tabBadge[data-tone='running'] {
+  background: var(--status-running-solid);
+}
+
+.reach {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 2rem;
+  padding: var(--space-1) var(--space-4);
+  font-size: 0.8em;
+  font-weight: var(--font-weight-medium);
+  background: var(--status-warning-bg);
+  color: var(--status-warning-fg);
+  text-align: center;
+}
+
+.reach[data-state='offline'] {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+
+.boot {
+  display: grid;
+  gap: var(--space-4);
+  padding: calc(env(safe-area-inset-top) + var(--space-8)) var(--space-4) var(--space-4);
+}

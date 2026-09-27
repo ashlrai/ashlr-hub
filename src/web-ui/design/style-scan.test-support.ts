@@ -58,6 +58,8 @@ export const NEW_310_UI_PATHS: readonly string[] = [
   'routes/verse/sections/AutomationsSection.tsx',
   'routes/verse/browser',
   'routes/verse/multimodel',
+  // Verse on a phone (3.15): every file of it, stylesheets included.
+  'routes/verse/mobile',
   'routes/verse/chat/ActivityGroup.tsx',
   'routes/verse/chat/ActivityGroup.module.css',
   'routes/verse/chat/TasksTray.tsx',

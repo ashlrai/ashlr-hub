@@ -19,62 +19,17 @@
  * (close-reason.tsx) that rides in the POST body as `reason` — only for that
  * one route, and only when something was typed.
  */
-import { useSyncExternalStore } from 'react';
 import { isSafeApiRoute, type NeedsYouAction, type NeedsYouItem } from '../../../../core/verse/workbench-types.js';
 import { getMutationToken, touchMutationHold } from '../../../data/auth-store.js';
 import { invalidate, invalidatePrefix } from '../../../data/cache.js';
 import { ApiError, apiPost } from '../../../data/client.js';
 import { closeReasonBody, isCloseTriageAction, withCloseReason, type CloseReasonHolder } from './close-reason.js';
-import { requestGuarded } from './guarded-action.js';
+import { requestGuarded } from './guard-store.js';
 import { ALWAYS_CONFIRM, confirmCopy, readableItemTitle } from './needs-you-model.js';
+import { markResolved } from './resolved-store.js';
 import { refreshActivity } from './useActivity.js';
 
-/** How long an acted-on item stays hidden while the server catches up. */
-export const RESOLVED_HIDE_MS = 60_000;
-
-let resolved = new Map<string, number>();
-const listeners = new Set<() => void>();
-
-function emit(): void {
-  for (const l of [...listeners]) l();
-}
-
-export function markResolved(id: string, at: number = Date.now()): void {
-  resolved = new Map(resolved).set(id, at);
-  emit();
-}
-
-/** Drop marks the server has caught up with (the id is gone) or that are too old. */
-export function pruneResolved(liveIds: ReadonlySet<string>, now: number = Date.now()): void {
-  let changed = false;
-  const next = new Map(resolved);
-  for (const [id, at] of next) {
-    if (!liveIds.has(id) || now - at > RESOLVED_HIDE_MS) {
-      next.delete(id);
-      changed = true;
-    }
-  }
-  if (changed) {
-    resolved = next;
-    emit();
-  }
-}
-
-export function useResolvedIds(): ReadonlyMap<string, number> {
-  return useSyncExternalStore(
-    (l) => {
-      listeners.add(l);
-      return () => listeners.delete(l);
-    },
-    () => resolved,
-    () => resolved,
-  );
-}
-
-export function resetResolvedForTest(): void {
-  resolved = new Map();
-  emit();
-}
+export { markResolved, pruneResolved, resetResolvedForTest, RESOLVED_HIDE_MS, useResolvedIds } from './resolved-store.js';
 
 export interface ActionContext {
   /** Open the item's target (for an action with no route). */
