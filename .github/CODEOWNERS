@@ -227,6 +227,7 @@
 /test/devin-fleet-launcher-315.test.ts @masonwyatt23
 /test/devin-intake-315.test.ts @masonwyatt23
 /test/dispatch-router-310b.test.ts @masonwyatt23
+/test/elite-self-land-315.test.ts @masonwyatt23
 /test/engines-judges-310b.test.ts @masonwyatt23
 /test/execution-leases-310b.test.ts @masonwyatt23
 /test/fixture-custody.test.ts @masonwyatt23
