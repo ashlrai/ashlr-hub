@@ -237,6 +237,7 @@
 /test/gate.test.ts @masonwyatt23
 /test/goal-loop.result.test.ts @masonwyatt23
 /test/goal-loop.runner.test.ts @masonwyatt23
+/test/grok-capacity-publish-e2e-315.test.ts @masonwyatt23
 /test/h1.apply-guardrails.test.ts @masonwyatt23
 /test/h1.audit.test.ts @masonwyatt23
 /test/h1.chain.test.ts @masonwyatt23
