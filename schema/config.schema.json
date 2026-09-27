@@ -1233,7 +1233,7 @@
         },
         "fleet": {
           "type": "boolean",
-          "description": "Let the fleet launch Devin sessions without a click (still needs a standing grant with the repo and the budget's reserve). Devin PRs are shadow-only at the standing gates. Default false."
+          "description": "Let the fleet launch Devin on well-scoped backlog work without a click. Still needs a standing grant whose stage names the devin engine (producer-only seat) and the repo, the budget mode, and the Devin budget's reserve and fleet caps. Devin PRs merge only when two judges from different families (never Devin) ship them. Default false."
         },
         "mode": {
           "type": "string",

@@ -68,7 +68,12 @@ public enum GrantContract {
   public static let selfRepoModes = ["propose-only", "merge-non-authority"]
   public static let budgetModes = ["reserve", "balanced", "all-in"]
   public static let seatRoles = ["producer", "judge", "leader"]
-  public static let fleetEngines = ["local", "grok-cli", "claude-cli", "codex"]
+  // 3.15: `devin` is a grant engine (fleet-types.ts GRANT_ENGINES) — not a
+  // dispatch lane. Reported by `status.grantEngines` so the TS side drafts it
+  // only for a helper that signs it.
+  public static let fleetEngines = ["local", "grok-cli", "claude-cli", "codex", "devin"]
+  /// Seat ids with this prefix (lower-cased) are Devin seats: producer ONLY (never judge / leader).
+  public static let producerOnlySeatPrefix = "devin"
   public static let leaderGrantClasses = ["A", "B"]
 
   /// JavaScript's Number.MAX_SAFE_INTEGER: every number in a grant is a safe integer.

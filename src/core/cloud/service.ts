@@ -20,7 +20,8 @@ import type {
   CloudTaskV1,
 } from './types.js';
 import { CLOUD_BRANCH_PREFIX, CLOUD_PROMPT_MAX_CHARS, CLOUD_SEAT_ID, CLOUD_TASK_SCHEMA_VERSION } from './types.js';
-import { readCloudBacklog, nextBacklogItem } from './backlog.js';
+import { readCloudBacklog, nextBacklogItem, type BacklogClaimTask } from './backlog.js';
+import { listDevinTasks } from '../devin/store.js';
 import { cloudBudgetView } from './budget.js';
 import { ensureCloudCheckout, isSafeBranchName, KeyedMutex, type CloudCheckoutDeps } from './checkout.js';
 import { buildCloudPrompt } from './delivery-contract.js';
@@ -222,7 +223,8 @@ export async function runSelfImprove(opts: { count?: number; auto: boolean }, de
   const repo = readCloudBudget().selfImprove.repo;
   for (let i = 0; i < count; i += 1) {
     // Re-read each round: the previous launch's task now claims its item.
-    const item = nextBacklogItem(listCloudTasks(), repo, clock());
+    // Claims span both delivery lanes (3.15): an item a Devin session holds is not the cloud's to take.
+    const item = nextBacklogItem([...listCloudTasks(), ...backlogClaimsFromDevin()], repo, clock());
     if (!item) break;
     const res = await launchWithGate({
       repo: item.repo ?? repo,
@@ -243,6 +245,20 @@ export async function runSelfImprove(opts: { count?: number; auto: boolean }, de
   return { launched, skipped };
 }
 
+/**
+ * 3.15: Devin tasks as backlog claims (the Devin fleet launcher takes items
+ * from the same backlog). Unreadable ⇒ none: the Devin store never blocks the
+ * cloud lane, and a claim it cannot see is at worst one duplicate PR the
+ * standing intake supersedes.
+ */
+function backlogClaimsFromDevin(): BacklogClaimTask[] {
+  try {
+    return listDevinTasks(Number.MAX_SAFE_INTEGER).filter((task) => task.backlogItemId !== null);
+  } catch {
+    return [];
+  }
+}
+
 /** Cheap: reads disk only — no gh, no git, no CLI. Refreshing is the scheduler's and the refresh route's job. */
 export async function cloudOverview(deps: CloudServiceDeps = {}): Promise<CloudOverviewResponse> {
   const now = (deps.now ?? (() => new Date()))();
@@ -252,6 +268,6 @@ export async function cloudOverview(deps: CloudServiceDeps = {}): Promise<CloudO
     seat: cloudSeatStatus(),
     budget: cloudBudgetView(tasks, readCloudBudget(), now),
     tasks: tasks.slice(0, OVERVIEW_TASK_LIMIT),
-    backlog: readCloudBacklog(tasks, now),
+    backlog: readCloudBacklog([...tasks, ...backlogClaimsFromDevin()], now),
   };
 }

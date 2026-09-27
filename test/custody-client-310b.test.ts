@@ -24,6 +24,7 @@ import {
   custodyHelperInstallProblem,
   custodyInit,
   custodyPublicKey,
+  custodySignsDevin,
   custodyStatus,
   githubToken,
   keyIdForPublicKeyPem,
@@ -114,6 +115,29 @@ describe('custodyStatus — a probe that never throws', () => {
     expect(status.reasons.join(' ')).toMatch(/ashlr-custody init/);
     expect(status.reasons.join(' ')).toMatch(/github-app/);
     expect(status.reasons.join(' ')).not.toMatch(/Claude token/);
+  });
+
+  it('3.15: reads the grant engines a 1.1.0 helper reports; an older helper reports none (null)', async () => {
+    install(() => ok({ v: 1, version: '1.1.0', secureEnclave: true, keyInitialized: true, keyId: 'se-p256-0123456789abcdef', githubApp: true, claudeToken: true,
+      grantEngines: ['local', 'grok-cli', 'claude-cli', 'codex', 'devin', 'future-engine'] }));
+    const fresh = await custodyStatus();
+    expect(fresh.grantEngines).toEqual(['local', 'grok-cli', 'claude-cli', 'codex', 'devin']);
+    expect(fresh.keyInitialized).toBe(true);
+    expect(custodySignsDevin(fresh)).toBe(true);
+  });
+
+  it('3.15: an older helper without grantEngines still parses — and never signs Devin', async () => {
+    install(() => ok({ v: 1, version: '1.0.0', secureEnclave: true, keyInitialized: true, keyId: 'se-p256-0123456789abcdef', githubApp: true, claudeToken: true }));
+    const old = await custodyStatus();
+    expect(old).toMatchObject({ installed: true, keyInitialized: true, grantEngines: null });
+    expect(custodySignsDevin(old)).toBe(false);
+  });
+
+  it('3.15: a malformed grantEngines reads as not reported (never as support)', async () => {
+    install(() => ok({ v: 1, version: '1.1.0', secureEnclave: true, keyInitialized: true, keyId: 'se-p256-0123456789abcdef', githubApp: true, claudeToken: true, grantEngines: 'devin' }));
+    const status = await custodyStatus();
+    expect(status.grantEngines).toBeNull();
+    expect(custodySignsDevin(status)).toBe(false);
   });
 
   it('treats malformed helper output as unknown, not as healthy', async () => {

@@ -95,6 +95,7 @@ const ENGINE_NAMES: Readonly<Record<BudgetEngine, string>> = {
   codex: 'Codex',
   grok: 'Grok',
   local: 'local models',
+  devin: 'Devin',
 };
 
 const CHEAP_FIRST: readonly BudgetEngine[] = ['local', 'grok', 'codex', 'claude'];
@@ -346,6 +347,22 @@ export function describeExclusions(exclusions: readonly SeatExclusion[], max = 3
 }
 
 /**
+ * 3.15: a Devin seat is never a routing candidate — not for fleet work, not
+ * for review, not for chat. Devin is a hosted session agent with no windows
+ * to assess; the fleet launches it only through devin/fleet-launcher.ts under
+ * its own ACU budget, and it never judges. The capacity snapshot refuses a
+ * `devin` seat (budget-store.ts sanitizeSeatCapacity); this is the second
+ * lock, so a hand-built capacity list cannot route work to it either.
+ */
+function devinVerdict(capacity: SeatCapacity): Verdict {
+  const details: SeatReason[] = [{
+    kind: 'lane',
+    text: 'Devin runs as its own session lane under the Devin budget, never through the seat router.',
+  }];
+  return { capacity, index: 0, headroom: null, eligible: false, details, nextEligibleAt: null };
+}
+
+/**
  * Decide which seat `req` should use. Pure. Every seat in `capacity` ends up
  * in exactly one of `candidates` or `exclusions`.
  */
@@ -357,12 +374,15 @@ export function routeSeat(
 ): SeatDecision {
   const readingMaxAgeMs = opts.readingMaxAgeMs ?? HEADROOM_READING_MAX_AGE_MS;
   const verdicts = capacity.map((seat, index) => ({
-    ...applyFit(
-      req.autonomous
-        ? autonomousVerdict(seat, policy, opts.nowMs, readingMaxAgeMs)
-        : interactiveVerdict(seat, opts.nowMs, readingMaxAgeMs),
-      req.contextTokens,
-    ),
+    // The type already excludes Devin; the runtime check is for a hand-built list.
+    ...((seat.engine as BudgetEngine) === 'devin'
+      ? devinVerdict(seat)
+      : applyFit(
+        req.autonomous
+          ? autonomousVerdict(seat, policy, opts.nowMs, readingMaxAgeMs)
+          : interactiveVerdict(seat, opts.nowMs, readingMaxAgeMs),
+        req.contextTokens,
+      )),
     index,
   }));
 

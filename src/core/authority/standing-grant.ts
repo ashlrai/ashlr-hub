@@ -25,9 +25,18 @@ import { createHash, createPublicKey, verify as verifySignature, type KeyObject 
 import { mkdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 
-import type { BudgetEngine } from '../routing/policy.js';
+import { DEVIN_SEAT_ID, engineOfSeatId, type BudgetEngine } from '../routing/policy.js';
 import { BUDGET_MODES, type BudgetMode } from '../routing/types.js';
-import { FLEET_ENGINES, MERGE_RISK_RANK, REPO_STAGE_RANK, type FleetEngine, type MergeRisk, type RepoEnforcement, type RepoStage } from '../fleet/fleet-types.js';
+import {
+  DEVIN_GRANT_ENGINE,
+  GRANT_ENGINES,
+  MERGE_RISK_RANK,
+  REPO_STAGE_RANK,
+  type GrantEngine,
+  type MergeRisk,
+  type RepoEnforcement,
+  type RepoStage,
+} from '../fleet/fleet-types.js';
 import { canonicalJson } from './canonical-json.js';
 import { draftEnforcementFor, reapprovalDowngrades, type ServerEnforcementState } from './server-enforcement.js';
 import { keyIdForPublicKeyPem } from './custody-client.js';
@@ -164,6 +173,14 @@ function parseSeat(value: unknown, seatId: string): StandingGrantSeat {
   if (Object.prototype.hasOwnProperty.call(seat, 'maxSessionWindowPercent')) {
     parsed.maxSessionWindowPercent = intIn(seat['maxSessionWindowPercent'], 1, 100, `${where}.maxSessionWindowPercent`);
   }
+  // 3.15: Devin is a PRODUCER only. A third-party hosted agent whose
+  // underlying models are undisclosed can never judge work (it may share a
+  // family with the producer it judges) and never runs the Leader. The Swift
+  // helper refuses the same (StandingGrant.swift parseSeat), so no signed
+  // grant can ever carry it.
+  if (engineOfSeatId(seatId) === 'devin' && (parsed.roles.length !== 1 || parsed.roles[0] !== 'producer')) {
+    fail(`${where}.roles: a Devin seat may only be a producer`);
+  }
   return parsed;
 }
 
@@ -207,7 +224,7 @@ function parseStage(
   });
   const names = repos.map((repo) => repo.nameWithOwner);
   if (new Set(names).size !== names.length) fail(`${where}.repos lists a repo twice`);
-  const engines = uniqueList(stage['engines'], FLEET_ENGINES, 1, FLEET_ENGINES.length, `${where}.engines`);
+  const engines = uniqueList(stage['engines'], GRANT_ENGINES, 1, GRANT_ENGINES.length, `${where}.engines`);
   for (const engine of engines) {
     if (!grant.engines.includes(engine)) fail(`${where}.engines: "${engine}" is not in the grant's engines`);
   }
@@ -270,7 +287,7 @@ function parsePayload(value: unknown): StandingGrantV1 {
     seats,
   };
 
-  const engines = uniqueList(grant['engines'], FLEET_ENGINES, 1, FLEET_ENGINES.length, 'engines');
+  const engines = uniqueList(grant['engines'], GRANT_ENGINES, 1, GRANT_ENGINES.length, 'engines');
   const leader = record(grant['leader'], 'leader');
   exactKeys(leader, STANDING_GRANT_KEYS.leader, [], 'leader');
   const parsedLeader = {
@@ -535,6 +552,14 @@ export interface GrantDraftInput {
   authoritySurfaceDigest: string;
   repos: readonly DraftRepoInput[];
   seats: readonly DraftSeatInput[];
+  /**
+   * 3.15: draft Devin as an OPT-IN producer engine. The caller
+   * (verse/authority-api.ts) sets it only when `devin.enabled` and
+   * `devin.fleet` are on, a Devin key is connected, AND the installed custody
+   * helper reports that it signs grants naming `devin` (an older helper
+   * refuses them). Absent / false = no Devin anywhere in the draft.
+   */
+  devin?: boolean;
 }
 
 /** ashlr-hub's own repo (package.json repository) — the grant's `merge.selfRepo` rule applies to it. */
@@ -577,7 +602,7 @@ const DEFAULT_REPO_PLAN: Readonly<Record<string, PlannedRepo>> = Object.freeze({
 
 interface PlannedStage {
   id: string;
-  engines: FleetEngine[];
+  engines: GrantEngine[];
   maxRisk: MergeRisk;
   maxFiles: number;
   maxLines: number;
@@ -589,8 +614,8 @@ interface PlannedStage {
 const criteria = (minMerges: number, minPostMergeGreenPct: number, maxRevertRatePct: number, minHours: number): RolloutCriteria =>
   ({ minMerges, minPostMergeGreenPct, maxRevertRatePct, minHours, maxSandboxViolations: 0, reserveBreaches: 0 });
 
-const PHASE2_ENGINES: FleetEngine[] = ['local', 'grok-cli', 'claude-cli'];
-const PHASE3_ENGINES: FleetEngine[] = ['local', 'grok-cli', 'claude-cli', 'codex'];
+const PHASE2_ENGINES: GrantEngine[] = ['local', 'grok-cli', 'claude-cli'];
+const PHASE3_ENGINES: GrantEngine[] = ['local', 'grok-cli', 'claude-cli', 'codex'];
 
 /**
  * Stage parameters. Shadow proposes only (5 complete would-merge digests,
@@ -627,9 +652,31 @@ function defaultSeat(engine: BudgetEngine): StandingGrantSeat {
       return { enabled: true, reserveFloorPercent: 0, roles: ['producer', 'judge', 'leader'] };
     case 'local':
       return { enabled: true, reserveFloorPercent: 0, roles: ['producer', 'leader'] };
+    case 'devin':
+      // Producer ONLY — never judge, never Leader (parseSeat refuses more).
+      // No window to keep a percentage of: the operator's Devin reserve is
+      // kept in ACUs by the Devin budget (DevinBudgetV1.reserveAcu), which
+      // the fleet launcher checks before every launch.
+      return { enabled: true, reserveFloorPercent: 0, roles: ['producer'] };
     default:
       return { enabled: false, reserveFloorPercent: 100, roles: ['producer'] };
   }
+}
+
+/** `engines` plus `devin` (appended once, in GRANT_ENGINES order). */
+function withDevin(engines: readonly GrantEngine[]): GrantEngine[] {
+  return engines.includes(DEVIN_GRANT_ENGINE) ? [...engines] : [...engines, DEVIN_GRANT_ENGINE];
+}
+
+/** `engines` without `devin`. */
+function withoutDevin(engines: readonly GrantEngine[]): GrantEngine[] {
+  return engines.filter((engine) => engine !== DEVIN_GRANT_ENGINE);
+}
+
+/** Does this grant let autonomy launch Devin at all (engine named, seat present)? */
+export function grantNamesDevin(grant: Pick<StandingGrantV1, 'engines' | 'spend'>): boolean {
+  return grant.engines.includes(DEVIN_GRANT_ENGINE)
+    || Object.keys(grant.spend.seats).some((seatId) => engineOfSeatId(seatId) === 'devin');
 }
 
 /**
@@ -681,10 +728,14 @@ export function buildDefaultGrantPayload(input: GrantDraftInput): StandingGrantV
       sawLocal = true;
       continue;
     }
+    // Devin enters a draft only through the explicit opt-in below.
+    if (seat.engine === 'devin') continue;
     if (!STANDING_GRANT_PATTERNS.seatId.test(seat.seatId) || seats[seat.seatId]) continue;
     seats[seat.seatId] = defaultSeat(seat.engine);
   }
   if (sawLocal || Object.keys(seats).length === 0) seats[LOCAL_SEAT_WILDCARD] = defaultSeat('local');
+  const devin = input.devin === true;
+  if (devin) seats[DEVIN_SEAT_ID] = defaultSeat('devin');
 
   const stages: RolloutStage[] = [];
   DEFAULT_ROLLOUT_STAGES.forEach((stage, index) => {
@@ -695,7 +746,10 @@ export function buildDefaultGrantPayload(input: GrantDraftInput): StandingGrantV
     stages.push({
       id: stage.id,
       repos,
-      engines: [...stage.engines],
+      // An opted-in Devin is in every rung: it launches under the ACU budget
+      // from the first stage, and its PRs merge only where the stage merges
+      // AND two independent non-Devin judges ship (merge-gates.ts G6).
+      engines: devin ? withDevin(stage.engines) : [...stage.engines],
       maxRisk: stage.maxRisk,
       maxFiles: stage.maxFiles,
       maxLines: stage.maxLines,
@@ -717,7 +771,7 @@ export function buildDefaultGrantPayload(input: GrantDraftInput): StandingGrantV
     repos: planned.map((p) => p.repo),
     merge: { maxFiles: STANDING_GRANT_CEILINGS.maxFiles, maxLines: STANDING_GRANT_CEILINGS.maxLines, selfRepo: 'merge-non-authority' },
     spend: { maxMode: 'balanced', meteredUsdPerDay: 0, seats },
-    engines: [...PHASE3_ENGINES],
+    engines: devin ? withDevin(PHASE3_ENGINES) : [...PHASE3_ENGINES],
     leader: { classes: ['A', 'B'], vetoMinutes: 30 },
     conductorGoals: true,
     rollout: { stages, autoAdvance: true },
@@ -747,6 +801,13 @@ export function buildReapprovalGrantPayload(
      * a narrowing. Unreadable or absent entries leave the signed choice alone.
      */
     serverEnforcement?: ReadonlyMap<string, ServerEnforcementState>;
+    /**
+     * 3.15: Devin follows Mason's CURRENT opt-in (same rule as a new draft):
+     * false strips the `devin` engine and seat (a narrowing), true adds them
+     * as a producer-only engine to the grant and every remaining stage (the
+     * Touch ID sheet's scope lines name it), absent keeps the signed choice.
+     */
+    devin?: boolean;
   },
 ): StandingGrantV1 {
   const from = Math.max(0, Math.min(currentStageIndex, current.rollout.stages.length - 1));
@@ -773,6 +834,18 @@ export function buildReapprovalGrantPayload(
     authoritySurfaceDigest: input.authoritySurfaceDigest,
     rollout: { stages: structuredClone(current.rollout.stages.slice(from)), autoAdvance: true },
   };
+  if (input.devin === false) {
+    payload.engines = withoutDevin(payload.engines);
+    payload.rollout.stages = payload.rollout.stages.map((stage) => ({ ...stage, engines: withoutDevin(stage.engines) }));
+    payload.spend = {
+      ...payload.spend,
+      seats: Object.fromEntries(Object.entries(payload.spend.seats).filter(([seatId]) => engineOfSeatId(seatId) !== 'devin')),
+    };
+  } else if (input.devin === true) {
+    payload.engines = withDevin(payload.engines);
+    payload.rollout.stages = payload.rollout.stages.map((stage) => ({ ...stage, engines: withDevin(stage.engines) }));
+    payload.spend = { ...payload.spend, seats: { ...payload.spend.seats, [DEVIN_SEAT_ID]: defaultSeat('devin') } };
+  }
   const checked = parseStandingGrantPayload(payload);
   if (!checked.ok) throw new Error(`re-approval draft is invalid: ${checked.reason}`);
   return checked.value;
@@ -790,6 +863,11 @@ export function describeGrantScope(grant: StandingGrantV1): string[] {
     lines.push(`  ${repo.nameWithOwner}: up to ${repo.stage}, ${repo.maxRisk} risk, ${repo.maxMergesPerDay}/day, ${repo.enforcement} enforcement`);
   }
   for (const [seatId, seat] of Object.entries(grant.spend.seats)) {
+    if (engineOfSeatId(seatId) === 'devin') {
+      // No window to keep a percentage of: say where Devin's limits live.
+      lines.push(`  seat ${seatId}: ${seat.enabled ? 'on' : 'off'}, Devin sessions (${seat.roles.join('/')} only, never a judge) within the Devin ACU budget and its reserve for Mason`);
+      continue;
+    }
     lines.push(`  seat ${seatId}: ${seat.enabled ? 'on' : 'off'}, keep ${seat.reserveFloorPercent}% for Mason${seat.maxSessionWindowPercent !== undefined ? `, idle while 5 h > ${seat.maxSessionWindowPercent}%` : ''}, ${seat.roles.join('/')}`);
   }
   grant.rollout.stages.forEach((stage, i) => {

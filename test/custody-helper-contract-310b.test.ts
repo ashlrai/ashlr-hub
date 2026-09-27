@@ -31,7 +31,8 @@ import {
   type SelfRepoMode,
   type StandingGrantV1,
 } from '../src/core/authority/types.js';
-import { FLEET_ENGINES, MERGE_RISK_RANK, REPO_STAGE_RANK, type MergeRisk, type RepoEnforcement } from '../src/core/fleet/fleet-types.js';
+import { GRANT_ENGINES, MERGE_RISK_RANK, REPO_STAGE_RANK, type MergeRisk, type RepoEnforcement } from '../src/core/fleet/fleet-types.js';
+import { engineOfSeatId } from '../src/core/routing/policy.js';
 
 const swiftPath = fileURLToPath(new URL('../tools/custody/Sources/CustodyCore/GrantContract.swift', import.meta.url));
 const swift = readFileSync(swiftPath, 'utf8');
@@ -114,7 +115,13 @@ describe('GrantContract.swift mirrors authority/types.ts', () => {
   });
 
   it('enum vocab', () => {
-    expect(swiftList('fleetEngines')).toEqual([...FLEET_ENGINES]);
+    // 3.15: the grant engines (fleet lanes + devin), in GRANT_ENGINES order.
+    expect(swiftList('fleetEngines')).toEqual([...GRANT_ENGINES]);
+    expect(swiftList('fleetEngines')).toContain('devin');
+    // The Swift producer-only seat rule keys on the same prefix engineOfSeatId maps to `devin`.
+    const prefix = swiftString('producerOnlySeatPrefix');
+    expect(engineOfSeatId(prefix)).toBe('devin');
+    expect(engineOfSeatId(`${prefix}-a`)).toBe('devin');
     expect(swiftList('repoStages').sort()).toEqual(Object.keys(REPO_STAGE_RANK).sort());
     expect(swiftList('budgetModes').sort()).toEqual(Object.keys(BUDGET_MODE_RANK).sort());
     // MERGE_RISK_RANK also ranks the never-mergeable 'high'.

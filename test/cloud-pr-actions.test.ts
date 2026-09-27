@@ -229,6 +229,47 @@ describe('close and update-branch', () => {
     expect(readCloudTask(ID)!.stateReason).toBe('Closed in Verse without landing.');
   });
 
+  it('3.15: a close reason is scrubbed, recorded as `Closed in Verse: …` and carried in the GitHub comment', async () => {
+    const secret = `ghp_${'a'.repeat(36)}`;
+    const { status, body } = await post<{ ok: boolean; task: CloudTaskV1 }>(`/api/verse/cloud/tasks/${ID}/close`, {
+      headSha: HEAD,
+      reason: `  Wrong approach:\nthe drawer\u2028should reuse the list ${secret}  `,
+    });
+    expect(status).toBe(200);
+    const expected = 'Wrong approach: the drawer should reuse the list [REDACTED]';
+    expect(mutations()).toEqual([['pr', 'close', '42', '--repo', REPO, '--comment', `Closed from Ashlr Verse (Needs you) without landing. Reason: ${expected}`]]);
+    expect(body.task.stateReason).toBe(`Closed in Verse: ${expected}`);
+    expect(readCloudTask(ID)!.stateReason).toBe(`Closed in Verse: ${expected}`);
+    expect(JSON.stringify(gh.calls)).not.toContain(secret);
+  });
+
+  it('3.15: a blank reason is no reason; a non-string or over-long one is a 400 and nothing is sent', async () => {
+    const blank = await post<{ task: CloudTaskV1 }>(`/api/verse/cloud/tasks/${ID}/close`, { headSha: HEAD, reason: '   ' });
+    expect(blank.status).toBe(200);
+    expect(blank.body.task.stateReason).toBe('Closed in Verse without landing.');
+    expect(mutations()).toEqual([['pr', 'close', '42', '--repo', REPO, '--comment', CLOUD_CLOSE_COMMENT]]);
+    writeCloudTask(task());
+    gh.calls = [];
+    const notText = await post<{ error: string }>(`/api/verse/cloud/tasks/${ID}/close`, { headSha: HEAD, reason: 7 });
+    expect(notText.status).toBe(400);
+    expect(notText.body.error).toBe('The close reason must be text.');
+    const long = await post<{ error: string }>(`/api/verse/cloud/tasks/${ID}/close`, { headSha: HEAD, reason: 'x'.repeat(201) });
+    expect(long.status).toBe(400);
+    expect(long.body.error).toBe('The close reason must be at most 200 characters.');
+    expect(gh.calls).toEqual([]);
+    expect(readCloudTask(ID)!.state).toBe('pr-open');
+  });
+
+  it('3.15: land and update-branch still refuse a reason (close is the only body that takes one)', async () => {
+    gh.behindBy = 3;
+    for (const verb of ['land', 'update-branch']) {
+      const res = await post<{ error: string }>(`/api/verse/cloud/tasks/${ID}/${verb}`, { headSha: HEAD, reason: 'because' });
+      expect(res.status, verb).toBe(400);
+      expect(res.body.error).toBe('Unknown field reason.');
+    }
+    expect(mutations()).toEqual([]);
+  });
+
   it('updates a branch that is behind, pinned to the reviewed head', async () => {
     gh.behindBy = 3;
     const { status, body } = await post<{ message: string }>(`/api/verse/cloud/tasks/${ID}/update-branch`, { headSha: HEAD });

@@ -70,6 +70,9 @@ enum Runner {
       }
       line.bool("githubApp", SecretStore.exists(.githubApp))
       line.bool("claudeToken", SecretStore.exists(.claudeToken))
+      // 3.15: which grant engines this build signs — the TS side drafts
+      // `devin` only when it is listed here (older helpers omit the key).
+      line.strings("grantEngines", GrantContract.fleetEngines)
       IO.out(line.text)
 
     case let .initKey(rotate):

@@ -173,6 +173,42 @@ describe('cloud ends', () => {
   });
 });
 
+describe('3.15: Mason’s close reason and the Devin lane', () => {
+  it('`Closed in Verse: <reason>` is closed:by-mason with the reason itself as the lesson', () => {
+    const r = retroFromCloud(cloud({ stateReason: 'Closed in Verse: Duplicates the retry already on main.' }), NOW);
+    expect(r.rootCause).toMatchObject({ code: 'closed:by-mason', detail: 'Duplicates the retry already on main.', evidence: 'Mason’s close reason' });
+    expect(r.doDifferently[0]).toBe('Address the close reason before retrying: Duplicates the retry already on main.');
+    expect(r.candidates).toHaveLength(1);
+    expect(r.candidates[0]!.text).toBe('Mason closed a cloud feature change in ashlrai/widget without landing: Duplicates the retry already on main.');
+    expect(r.betterPrompt).toContain('Mason closed the last attempt because: Duplicates the retry already on main.');
+  });
+
+  it('Mason’s reason outranks a blocked report (the one human judgement about the attempt)', () => {
+    const r = retroFromCloud(cloud({
+      stateReason: 'Closed in Verse: wrong module, the uploader lives in src/io',
+      report: { status: 'blocked', summary: 'No harness.', testsRun: [], risks: [] },
+    }), NOW);
+    expect(r.rootCause).toMatchObject({ code: 'closed:by-mason', detail: 'wrong module, the uploader lives in src/io' });
+  });
+
+  it('a Devin end has its own key, its own words and its own failure codes; source stays cloud', () => {
+    const closed = retroFromCloud(cloud({ taskId: 'dv_20260920T1000_abcdef', lane: 'devin', stateReason: 'Closed in Verse: too broad' }), NOW);
+    expect(closed).toMatchObject({ source: 'cloud', sourceKey: 'devin:dv_20260920T1000_abcdef:closed', id: retroIdFor('devin:dv_20260920T1000_abcdef:closed') });
+    expect(closed.candidates[0]!.text).toMatch(/^Mason closed a Devin /);
+    const failed = retroFromCloud(cloud({ taskId: 'dv_20260920T1000_abcdef', lane: 'devin', state: 'failed', failure: 'session-error', stateReason: null }), NOW);
+    expect(failed.rootCause).toMatchObject({ code: 'devin:session-error', label: 'Devin session errored' });
+    expect(failed.happened).toMatch(/^The Devin launch failed/);
+    expect(failed.candidates).toEqual([]);
+    const expired = retroFromCloud(cloud({ taskId: 'dv_20260920T1000_abcdef', lane: 'devin', state: 'expired' }), NOW);
+    expect(expired.rootCause!.code).toBe('devin:no-pr');
+    const blocked = retroFromCloud(cloud({ taskId: 'dv_20260920T1000_abcdef', lane: 'devin', report: { status: 'partial', summary: 'Half done.', testsRun: [], risks: [] } }), NOW);
+    expect(blocked.rootCause!.code).toBe('devin:partial');
+    expect(blocked.candidates[0]!.text).toMatch(/^Devin /);
+    // An unknown Devin code falls back to the Devin lane's own unknown, never the cloud table.
+    expect(retroFromCloud(cloud({ lane: 'devin', state: 'failed', failure: 'seat-unavailable' }), NOW).rootCause!.label).toBe('Devin launch failed');
+  });
+});
+
 describe('leader ends', () => {
   it('vetoed: the veto note is the cause; no candidates (the playbook delta already carries it)', () => {
     const r = retroFromLeader({

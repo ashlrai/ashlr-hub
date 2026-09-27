@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { LedgerEntry } from '../src/core/authority/types.js';
 import type { CloudTaskV1 } from '../src/core/cloud/types.js';
+import type { DevinTaskV1 } from '../src/core/devin/types.js';
 import type { LeaderAction } from '../src/core/vision/leader-types.js';
 import { applyModelReply, loadRetroModel, type RetroModel } from '../src/core/learn/retro/model.js';
 import { fleetEndsFromLedger, sweepRetros, type RetroSweepDeps, type SweepProposal } from '../src/core/learn/retro/sweep.js';
@@ -165,6 +166,53 @@ describe('sweep', () => {
     expect(r.created).toBe(2);
     const keys = (await listRetros()).map((x) => x.sourceKey).sort();
     expect(keys).toEqual(['fleet:p-refused:verify-failed', 'fleet:p-x:closed']);
+  });
+});
+
+describe('3.15: Devin task ends', () => {
+  function devinTask(over: Partial<DevinTaskV1>): DevinTaskV1 {
+    return {
+      v: 1, id: 'dv_20260926T1000_aaaaaa', repo: 'ashlrai/widget', baseBranch: 'main', branch: 'ashlr-devin/dv_20260926T1000_aaaaaa', title: 'Add a CSV export',
+      prompt: 'Add a CSV export to the report page', origin: 'operator', requestedBy: 'mason', sessionId: 'devin-1', sessionUrl: 'https://app.devin.ai/sessions/devin-1',
+      state: 'closed', stateReason: 'Closed in Verse: export belongs in the API, not the page', failure: null, createdAt: iso(NOW - 2 * DAY), launchedAt: iso(NOW - 2 * DAY),
+      updatedAt: iso(NOW - DAY), session: null, maxAcu: 10, devinMode: 'normal', pr: null, headSha: null, report: null, backlogItemId: null,
+      ...over,
+    };
+  }
+  const quiet = {
+    readLedger: async () => ({ entries: [], head: null, chain: 'empty', brokenAtSeq: null, reason: null }) as never,
+    cloudTasks: () => [],
+    leaderActions: () => [],
+  };
+
+  it('ends become retros keyed devin:<id>:<state> (superseded, live and out-of-window tasks are not ends)', async () => {
+    const r = await sweepRetros(deps({
+      ...quiet,
+      devinTasks: () => [
+        devinTask({}),
+        devinTask({ id: 'dv_20260926T1000_bbbbbb', state: 'failed', failure: 'auth', stateReason: 'Devin refused the API key (401).' }),
+        devinTask({ id: 'dv_20260926T1000_cccccc', state: 'closed', supersededBy: { repo: 'ashlrai/widget', number: 12 } }),
+        devinTask({ id: 'dv_20260926T1000_dddddd', state: 'pr-open' }),
+        devinTask({ id: 'dv_20260801T1000_eeeeee', updatedAt: iso(NOW - 60 * DAY) }),
+      ],
+    }));
+    expect(r).toMatchObject({ created: 2, unavailable: [] });
+    const retros = await listRetros();
+    const byKey = Object.fromEntries(retros.map((x) => [x.sourceKey, x]));
+    expect(Object.keys(byKey).sort()).toEqual(['devin:dv_20260926T1000_aaaaaa:closed', 'devin:dv_20260926T1000_bbbbbb:failed']);
+    expect(byKey['devin:dv_20260926T1000_aaaaaa:closed']!.rootCause).toMatchObject({ code: 'closed:by-mason', detail: 'export belongs in the API, not the page' });
+    expect(byKey['devin:dv_20260926T1000_bbbbbb:failed']!.rootCause!.code).toBe('devin:auth');
+    // Mason's reason is queued as a candidate note for review.
+    expect((await readKnowledge()).some((n) => n.text.includes('export belongs in the API'))).toBe(true);
+    // Idempotent like every other source.
+    expect((await sweepRetros(deps({ ...quiet, devinTasks: () => [devinTask({})] }))).created).toBe(0);
+  });
+
+  it('a failing Devin store is reported as `devin`; a caller without the dep reads no Devin store', async () => {
+    const r = await sweepRetros(deps({ ...quiet, devinTasks: () => { throw new Error('EACCES'); } }));
+    expect(r.unavailable).toEqual(['devin']);
+    const none = await sweepRetros(deps(quiet));
+    expect(none.unavailable).toEqual([]);
   });
 });
 

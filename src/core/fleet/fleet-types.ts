@@ -36,6 +36,25 @@ export type FleetEngine = 'local' | 'grok-cli' | 'claude-cli' | 'codex';
 
 export const FLEET_ENGINES: readonly FleetEngine[] = ['local', 'grok-cli', 'claude-cli', 'codex'];
 
+/**
+ * 3.15 — the engines a standing grant's `engines` list may name: every fleet
+ * lane plus `devin`. Devin is NOT a dispatch lane (it never takes a pool slot
+ * or runs in a checkout — it is a hosted session launched through
+ * devin/fleet-launcher.ts), so it is kept out of FLEET_ENGINES, which every
+ * lane plan iterates. Naming it in a grant is what lets the fleet launch
+ * Devin sessions at all; it authorizes no other lane.
+ *
+ * Mirrored by GrantContract.swift `fleetEngines` (the custody helper refuses
+ * to sign a grant naming an engine it does not know — an older helper
+ * therefore refuses `devin`; authority-api only drafts it once the helper
+ * reports support).
+ */
+export type GrantEngine = FleetEngine | 'devin';
+
+export const DEVIN_GRANT_ENGINE = 'devin' as const;
+
+export const GRANT_ENGINES: readonly GrantEngine[] = [...FLEET_ENGINES, DEVIN_GRANT_ENGINE];
+
 /** `propose` = PRs only; `merge` = the fleet may land merges (subject to every gate). */
 export type RepoStage = 'propose' | 'merge';
 

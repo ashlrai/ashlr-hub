@@ -271,16 +271,83 @@ export function judgeLanePreference(producerFamily: ReviewModelFamily): readonly
   }
 }
 
+/** The review family a judge LANE answers with (the judge client's own mapping, manager.ts). */
+export function judgeLaneFamily(lane: FleetEngine): ReviewModelFamily {
+  switch (lane) {
+    case 'claude-cli': return 'claude';
+    case 'codex': return 'openai';
+    case 'grok-cli': return 'xai';
+    default: return 'local';
+  }
+}
+
+/**
+ * 3.15 — the TWO-JUDGE RULE for producers whose underlying model is
+ * undisclosed (today: `devin`). Devin may run on Claude or OpenAI models, so
+ * one "independent" judge may in fact share its model. Its work may merge
+ * only when judges from at least DEVIN_MIN_JUDGE_FAMILIES DIFFERENT families
+ * each shipped it, every one of them a frontier judge eligible for this
+ * producer (evaluateJudgeEligibility — never local, never Devin, never the
+ * producer's own family). Two ids of the same family count once.
+ */
+export const DEVIN_MIN_JUDGE_FAMILIES = 2;
+
+/** Does this producer family need the two-judge rule (and never a single judge)? */
+export function requiresTwoJudges(producerFamily: ReviewModelFamily): boolean {
+  return producerFamily === 'devin';
+}
+
+export interface TwoJudgeVerdict {
+  satisfied: boolean;
+  /** Distinct eligible judge families, in first-seen order. */
+  families: ReviewModelFamily[];
+  reason: string;
+}
+
+/** PURE: do these judge ids satisfy the two-judge rule for `producerModel`? */
+export function evaluateTwoJudgeRule(
+  producerModel: Pick<Proposal, 'engineModel'> | string | null | undefined,
+  judgeIds: readonly unknown[] | null | undefined,
+): TwoJudgeVerdict {
+  const families: ReviewModelFamily[] = [];
+  for (const judgeId of judgeIds ?? []) {
+    if (!evaluateJudgeEligibility(producerModel, judgeId).eligible) continue;
+    const family = reviewModelFamily(judgeId);
+    // Belt and braces: isFrontierJudgeId already refuses a Devin or local judge.
+    if (family === 'devin' || family === 'unknown' || family === 'local') continue;
+    if (!families.includes(family)) families.push(family);
+  }
+  const satisfied = families.length >= DEVIN_MIN_JUDGE_FAMILIES;
+  return {
+    satisfied,
+    families,
+    reason: satisfied
+      ? `two-judge rule met: ${families.join(' and ')} judges both shipped it`
+      : families.length === 1
+        ? `two-judge rule: only a ${families[0]} judge has shipped it; a judge from a second family must too`
+        : 'two-judge rule: no eligible judge has shipped it yet',
+  };
+}
+
 /**
  * 3.15 — producers whose work the fleet never merges on its own, whatever the
- * rollout stage: every gate still runs (G0–G7, the verified-tree App PR) and
- * the pass records a would-merge (`shadow`), then leaves the App PR for Mason.
+ * rollout stage, UNLESS their own rule is met: every gate still runs (G0–G7,
+ * the verified-tree App PR) and the pass records a would-merge (`shadow`),
+ * then leaves the App PR for Mason.
  *
- *  - `devin`: a third-party hosted agent. No rollout stage admits it yet —
- *    admitting it is a deliberate future change that must come with a
- *    two-judge (two different families) rule, because a single judge may
- *    share Devin's undisclosed underlying model.
+ *  - `devin`: a third-party hosted agent. It merges only when (a) the live
+ *    grant's current stage names the `devin` engine (Mason signed Devin in)
+ *    AND (b) the two-judge rule holds for the judges recorded when G6 passed
+ *    (evaluateTwoJudgeRule: two eligible frontier judges from two different
+ *    families, neither Devin). G6 itself already refuses to pass a Devin
+ *    proposal on one judge (merge-gates.ts evaluateG6); this re-check at
+ *    merge time is the second lock. Anything missing ⇒ shadow.
  */
-export function producerMergeWithheld(producerFamily: ReviewModelFamily): 'shadow' | null {
-  return producerFamily === 'devin' ? 'shadow' : null;
+export function producerMergeWithheld(
+  producerFamily: ReviewModelFamily,
+  evidence: { devinGranted?: boolean; producerModel?: string | null; judgeIds?: readonly unknown[] | null } = {},
+): 'shadow' | null {
+  if (producerFamily !== 'devin') return null;
+  if (evidence.devinGranted !== true) return 'shadow';
+  return evaluateTwoJudgeRule(evidence.producerModel, evidence.judgeIds).satisfied ? null : 'shadow';
 }

@@ -890,3 +890,58 @@ describe('reserve breaches are checked once per standing tick, after dispatch', 
     expect(h.audits.some((a) => /reserve breaches could not be checked after the tick: ledger refused/.test(a))).toBe(true);
   });
 });
+
+describe('beforeTick — the Devin fleet step (3.15)', () => {
+  const DEVIN_CFG = { ...CFG, devin: { enabled: true, fleet: true } } as AshlrConfig;
+  const devinCtx = { ...hookCtx, cfg: DEVIN_CFG };
+
+  function withDevin(result: { outcome: 'launched' | 'held' | 'failed' } = { outcome: 'held' }) {
+    const calls: Array<{ refresh: boolean }> = [];
+    h.deps.launchDevinFleet = async (opts) => {
+      calls.push(opts);
+      return {
+        outcome: result.outcome,
+        code: result.outcome === 'launched' ? 'launched' : 'no-work',
+        reason: 'r',
+        repo: REPO,
+        itemId: 'fix-1',
+        taskId: result.outcome === 'launched' ? 'dv_20260927T0400_aaaaaa' : null,
+      };
+    };
+    return calls;
+  }
+
+  it('runs once per tick when the lane is on and the fleet opted in; refreshes sessions at most every 2 minutes', async () => {
+    const calls = withDevin({ outcome: 'launched' });
+    const hooks = createLiveTickHooks({ deps: h.deps });
+    hooks.effectiveConfig(DEVIN_CFG);
+    await hooks.beforeTick(devinCtx);
+    await hooks.beforeTick(devinCtx);
+    expect(calls).toEqual([{ refresh: true }, { refresh: false }]);
+    expect(h.audits.some((a) => /Devin launched dv_20260927T0400_aaaaaa for backlog item fix-1/.test(a))).toBe(true);
+  });
+
+  it('never runs on a dry run, under KILL, without a grant, or without the opt-in', async () => {
+    const calls = withDevin();
+    const run = async (cfg: AshlrConfig, ctx: typeof hookCtx, deps: Partial<typeof h.deps> = {}) => {
+      const hooks = createLiveTickHooks({ deps: { ...h.deps, ...deps } });
+      hooks.effectiveConfig(cfg);
+      await hooks.beforeTick({ ...ctx, cfg });
+    };
+    await run(DEVIN_CFG, { ...hookCtx, dryRun: true });
+    await run(DEVIN_CFG, hookCtx, { killActive: () => true });
+    await run({ ...CFG, devin: { enabled: true, fleet: false } } as AshlrConfig, hookCtx);
+    await run({ ...CFG, devin: { enabled: false, fleet: true } } as AshlrConfig, hookCtx);
+    policy = null;
+    await run(DEVIN_CFG, hookCtx);
+    expect(calls).toEqual([]);
+  });
+
+  it('a held decision is not audited every tick (the launcher ledgers holds when they change)', async () => {
+    withDevin({ outcome: 'held' });
+    const hooks = createLiveTickHooks({ deps: h.deps });
+    hooks.effectiveConfig(DEVIN_CFG);
+    await hooks.beforeTick(devinCtx);
+    expect(h.audits.some((a) => /Devin/.test(a))).toBe(false);
+  });
+});

@@ -67,6 +67,16 @@ function deps(extra: Partial<DevinServiceDeps> = {}): DevinServiceDeps {
   };
 }
 
+/** A standing policy whose stage names the `devin` engine with a Devin seat (producer by default). */
+function devinPolicy(repos: Parameters<typeof standingPolicy>[0], roles: Array<'producer' | 'judge' | 'leader'> = ['producer']) {
+  const base = standingPolicy(repos);
+  return {
+    ...base,
+    engines: [...base.engines, 'devin' as const],
+    spend: { ...base.spend, seats: { ...base.spend.seats, devin: { seatId: 'devin', enabled: true, reserveFloorPercent: 0, maxSessionWindowPercent: null, roles } } },
+  };
+}
+
 async function connect(): Promise<void> {
   await storeDevinKey(FAKE_KEY, { run: keychain.run, platform: 'darwin' });
   writeDevinConnection({ orgId: FAKE_ORG, principal: 'service_user', principalName: 'Ashlr Verse', keyStore: 'keychain', connectedAt: new Date().toISOString() });
@@ -182,14 +192,18 @@ describe('status and readiness lines', () => {
     expect(ready.fleet).toMatchObject({ ready: false, word: 'Off', fix: { command: 'ashlr devin fleet on' } });
   });
 
-  it('fleet verdict: opt-in, then a grant, then the reserve; ready says shadow-only', () => {
+  it('fleet verdict: opt-in, then a grant that names Devin, then the reserve; ready names the two-judge rule', () => {
     const gate = { ok: true, reason: null };
-    const policy = standingPolicy([repoPolicy(REPO)]);
+    const withoutDevin = standingPolicy([repoPolicy(REPO)]);
+    const policy = devinPolicy([repoPolicy(REPO)]);
     expect(devinFleetVerdict({ enabled: true, connected: true, optIn: true, policy: null, fleetGate: gate })).toMatchObject({ ready: false, word: 'Waiting' });
+    // 3.15: a grant that does not name the `devin` engine never lets the fleet launch Devin.
+    expect(devinFleetVerdict({ enabled: true, connected: true, optIn: true, policy: withoutDevin, fleetGate: gate }))
+      .toMatchObject({ ready: false, word: 'Not in the grant', fix: { command: 'ashlr authority draft' } });
     expect(devinFleetVerdict({ enabled: true, connected: true, optIn: true, policy, fleetGate: { ok: false, reason: 'reserve' } })).toMatchObject({ ready: false, word: 'Paused', detail: 'reserve' });
     const ready = devinFleetVerdict({ enabled: true, connected: true, optIn: true, policy, fleetGate: gate });
     expect(ready).toMatchObject({ ready: true, word: 'Ready', roles: ['producer'] });
-    expect(ready.detail).toMatch(/shadow-only/);
+    expect(ready.detail).toMatch(/two judges from different families/);
   });
 });
 
@@ -258,7 +272,14 @@ describe('launch', () => {
     const policy = standingPolicy([repoPolicy('ashlrai/other')]);
     expect(await launchDevinTask(fleet, deps({ config: () => ({ enabled: true, fleet: true }), policy: () => policy }))).toMatchObject({ ok: false, error: expect.stringMatching(/not in the standing grant/) });
     updateDevinBudget({ acuBudgetTotal: 15, reserveAcu: 10, maxAcuPerSession: 10 });
-    const inGrant = standingPolicy([repoPolicy(REPO)]);
+    // 3.15: the repo being in the grant is not enough — the stage must name `devin` with a producer seat.
+    const repoOnly = standingPolicy([repoPolicy(REPO)]);
+    expect(await launchDevinTask(fleet, deps({ config: () => ({ enabled: true, fleet: true }), policy: () => repoOnly })))
+      .toMatchObject({ ok: false, failure: 'not-enabled', error: expect.stringMatching(/does not include Devin/) });
+    const judgeOnly = devinPolicy([repoPolicy(REPO)], ['judge']);
+    expect(await launchDevinTask(fleet, deps({ config: () => ({ enabled: true, fleet: true }), policy: () => judgeOnly })))
+      .toMatchObject({ ok: false, failure: 'not-enabled', error: expect.stringMatching(/no producer role/) });
+    const inGrant = devinPolicy([repoPolicy(REPO)]);
     expect(await launchDevinTask(fleet, deps({ config: () => ({ enabled: true, fleet: true }), policy: () => inGrant }))).toMatchObject({ ok: false, failure: 'budget', error: expect.stringMatching(/kept for you/) });
     expect(api.requests.filter((r) => r.method === 'POST')).toEqual([]);
   });

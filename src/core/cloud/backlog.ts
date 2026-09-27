@@ -96,9 +96,21 @@ interface Claim {
   lastState: CloudTaskState | null;
 }
 
+/**
+ * 3.15: what a claim is computed from — a task of EITHER delivery lane (a
+ * cloud CloudTaskV1 or a devin/types.ts DevinTaskV1; both share these
+ * fields and the same state words). Claims span both lanes, so an item a
+ * Devin session is working on is never also handed to a cloud session, and
+ * the reverse.
+ */
+export type BacklogClaimTask = Pick<CloudTaskV1, 'id' | 'backlogItemId' | 'createdAt' | 'updatedAt'> & {
+  /** A cloud state, or Devin's extra in-progress `blocked` (waiting for Mason). */
+  state: CloudTaskState | 'blocked';
+};
+
 /** Newest task per backlog item id. */
-function newestTaskByItem(tasks: readonly CloudTaskV1[]): Map<string, CloudTaskV1> {
-  const newest = new Map<string, CloudTaskV1>();
+function newestTaskByItem<T extends BacklogClaimTask>(tasks: readonly T[]): Map<string, T> {
+  const newest = new Map<string, T>();
   for (const task of tasks) {
     if (!task.backlogItemId) continue;
     const seen = newest.get(task.backlogItemId);
@@ -107,16 +119,18 @@ function newestTaskByItem(tasks: readonly CloudTaskV1[]): Map<string, CloudTaskV
   return newest;
 }
 
-function claimOf(task: CloudTaskV1 | undefined, nowMs: number): Claim {
+function claimOf(task: BacklogClaimTask | undefined, nowMs: number): Claim {
   if (!task) return { claimedBy: null, lastState: null };
-  if (RETRYABLE.includes(task.state)) {
+  // A Devin session waiting for Mason is still in progress.
+  const state: CloudTaskState = task.state === 'blocked' ? 'running' : task.state;
+  if (RETRYABLE.includes(state)) {
     // updatedAt is when the task last changed — for a terminal task, when it ended.
     const endedAt = Date.parse(task.updatedAt);
     const released = Number.isFinite(endedAt) && nowMs - endedAt >= CLOUD_BACKLOG_RETRY_MS;
-    return { claimedBy: released ? null : task.id, lastState: task.state };
+    return { claimedBy: released ? null : task.id, lastState: state };
   }
   // Non-terminal: in progress. Merged: done for good.
-  return { claimedBy: task.id, lastState: task.state };
+  return { claimedBy: task.id, lastState: state };
 }
 
 function ordered<T extends CloudBacklogItem>(items: readonly T[]): T[] {
@@ -125,7 +139,7 @@ function ordered<T extends CloudBacklogItem>(items: readonly T[]): T[] {
     .map(({ item }) => item);
 }
 
-export function readCloudBacklog(tasks: readonly CloudTaskV1[], now: Date): CloudBacklogView {
+export function readCloudBacklog(tasks: readonly BacklogClaimTask[], now: Date): CloudBacklogView {
   const newest = newestTaskByItem(tasks);
   const nowMs = now.getTime();
   const items = ordered(allItems()).map((item) => ({ ...item, ...claimOf(newest.get(item.id), nowMs) }));
@@ -133,7 +147,7 @@ export function readCloudBacklog(tasks: readonly CloudTaskV1[], now: Date): Clou
 }
 
 /** Next unclaimed item for `repo`, highest priority first, then built-in order. */
-export function nextBacklogItem(tasks: readonly CloudTaskV1[], repo: string, now: Date): CloudBacklogItem | null {
+export function nextBacklogItem(tasks: readonly BacklogClaimTask[], repo: string, now: Date): CloudBacklogItem | null {
   const newest = newestTaskByItem(tasks);
   const nowMs = now.getTime();
   const target = repo.toLowerCase();
@@ -141,6 +155,30 @@ export function nextBacklogItem(tasks: readonly CloudTaskV1[], repo: string, now
   const match = ordered(allItems()).find((item) =>
     (item.repo === undefined || item.repo.toLowerCase() === target) && claimOf(newest.get(item.id), nowMs).claimedBy === null);
   return match ?? null;
+}
+
+/**
+ * 3.15: the next unclaimed item (claims across every lane's `tasks`) that
+ * `accept` takes, highest priority first, then built-in order. `accept`
+ * receives the item and the repo it resolves to — its own `repo`, else
+ * `defaultRepo` (null = an item without a repo is skipped). Used by the Devin
+ * fleet launcher to pick well-scoped work for a repo the grant covers.
+ */
+export function nextBacklogItemWhere(
+  tasks: readonly BacklogClaimTask[],
+  now: Date,
+  defaultRepo: string | null,
+  accept: (item: CloudBacklogItem, repo: string) => boolean,
+): { item: CloudBacklogItem; repo: string } | null {
+  const newest = newestTaskByItem(tasks);
+  const nowMs = now.getTime();
+  for (const item of ordered(allItems())) {
+    const repo = item.repo ?? defaultRepo;
+    if (repo === null) continue;
+    if (claimOf(newest.get(item.id), nowMs).claimedBy !== null) continue;
+    if (accept(item, repo)) return { item, repo };
+  }
+  return null;
 }
 
 /** Adds items (dedupe by id and by normalised title); returns how many were new. Leader/operator entry point. */

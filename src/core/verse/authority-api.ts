@@ -43,7 +43,7 @@ import { passesMutationGate, readBody } from '../web/api.js';
 import { sanitizePublicJson } from '../util/public-json.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { clearStop, revokeStandingAndDrain, stopAutonomyAndDrain } from '../authority/clamp.js';
-import { custodyStatus, signGrant } from '../authority/custody-client.js';
+import { custodyStatus, signGrant, type CustodyStatus } from '../authority/custody-client.js';
 import {
   displaySurfaceTarget,
   evaluateStandingAuthority,
@@ -613,6 +613,48 @@ async function draftSeats(): Promise<DraftSeatInput[]> {
   ];
 }
 
+/**
+ * 3.15 — whether a draft names Devin, and the sentence saying why not.
+ *
+ * Devin is drafted ONLY when Mason opted in (`devin.enabled` + `devin.fleet`),
+ * a Devin key is connected, AND the installed custody helper reports that it
+ * signs grants naming `devin` (status.grantEngines, helper ≥ 1.1.0). An older
+ * helper refuses such a grant at `sign-grant`, so drafting it there would only
+ * make an unsignable draft; the note tells Mason how to fix it instead.
+ */
+export interface DevinDraftChoice {
+  include: boolean;
+  /** A line for the draft summary when Devin was wanted but left out; null otherwise. */
+  note: string | null;
+}
+
+export const DEVIN_CUSTODY_REINSTALL_NOTE =
+  'Devin is not in this grant: the installed custody helper cannot sign a grant that names Devin yet. '
+  + 'Reinstall it with `sudo scripts/install-custody.sh` (from the ashlr-hub checkout), then draft again.';
+
+export interface DevinDraftChoiceDeps {
+  config?: () => { enabled?: boolean; fleet?: boolean } | undefined;
+  connected?: () => boolean;
+  hasKey?: () => Promise<boolean>;
+  custody?: () => Promise<Pick<CustodyStatus, 'grantEngines'>>;
+}
+
+export async function devinDraftChoice(deps: DevinDraftChoiceDeps = {}): Promise<DevinDraftChoice> {
+  try {
+    const section = deps.config ? deps.config() : (await import('../config.js')).loadConfigReadOnly().devin;
+    if (section?.enabled !== true || section?.fleet !== true) return { include: false, note: null };
+    const connected = deps.connected ? deps.connected() : (await import('../devin/store.js')).readDevinConnection() !== null;
+    const keyed = connected && (deps.hasKey ? await deps.hasKey() : await (await import('../devin/secret.js')).hasDevinKey());
+    if (!keyed) return { include: false, note: 'Devin is not in this grant: no Devin key is connected (`ashlr devin connect`).' };
+    const { custodySignsDevin } = await import('../authority/custody-client.js');
+    if (!custodySignsDevin(await (deps.custody ?? custodyStatus)())) return { include: false, note: DEVIN_CUSTODY_REINSTALL_NOTE };
+    return { include: true, note: null };
+  } catch {
+    // Anything unreadable leaves Devin out — the narrower grant.
+    return { include: false, note: null };
+  }
+}
+
 /** The next grantSeq: above every grant any chain (even a broken one) accepted or revoked. */
 function nextGrantSeq(): number {
   const result = withLedgerTransaction((tx) => {
@@ -633,7 +675,7 @@ export async function buildStandingGrantDraft(
   kind: DraftKind | 'auto' = 'auto',
   nowMs = Date.now(),
   /** How GitHub is read to decide server vs local enforcement (the CLI passes its own `gh`; tests inject). */
-  opts: { githubGet?: GithubGet } = {},
+  opts: { githubGet?: GithubGet; devin?: () => Promise<DevinDraftChoice> } = {},
 ): Promise<AuthorityDraftResponse> {
   const keyId = await signingKeyId();
   const hostBinding = currentHostBinding();
@@ -657,6 +699,7 @@ export async function buildStandingGrantDraft(
     authoritySurfaceDigest: surface.digest,
   };
   let payload: StandingGrantV1;
+  const devin = await (opts.devin ?? devinDraftChoice)();
   // Server enforcement only where GitHub enforces required checks today
   // (authority/server-enforcement.ts): a re-approval switches a `server` repo
   // GitHub cannot protect to `local`; a new grant names `server` only for
@@ -666,7 +709,9 @@ export async function buildStandingGrantDraft(
     const serverRepos = installed.envelope.payload.repos.filter((repo) => repo.enforcement === 'server').map((repo) => repo.nameWithOwner);
     const probes = await probeServerEnforcementAll(serverRepos, opts.githubGet);
     const serverEnforcement = new Map([...probes].map(([key, probe]) => [key, probe.state]));
-    payload = buildReapprovalGrantPayload(installed.envelope.payload, position, { ...base, serverEnforcement });
+    // Devin follows the current opt-in: a re-approval strips it when Mason
+    // turned it off (or the helper cannot sign it) and adds it when he opted in.
+    payload = buildReapprovalGrantPayload(installed.envelope.payload, position, { ...base, serverEnforcement, devin: devin.include });
   } else {
     const repos = await draftRepos();
     const probes = await probeServerEnforcementAll(repos.map((repo) => repo.nameWithOwner), opts.githubGet);
@@ -674,10 +719,13 @@ export async function buildStandingGrantDraft(
       ...base,
       repos: repos.map((repo) => ({ ...repo, serverEnforcement: probes.get(repo.nameWithOwner.toLowerCase())?.state ?? null })),
       seats: await draftSeats(),
+      devin: devin.include,
     });
   }
   const digest = rememberDraft(payload, resolved);
-  return { payload, digest, kind: resolved, summary: describeGrantScope(payload), startStageId: payload.rollout.stages[0]!.id };
+  const summary = describeGrantScope(payload);
+  if (devin.note) summary.push(devin.note);
+  return { payload, digest, kind: resolved, summary, startStageId: payload.rollout.stages[0]!.id };
 }
 
 /** Rollout position straight from the ledger for a grant that no longer verifies (paused / expired). */

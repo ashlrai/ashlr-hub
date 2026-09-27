@@ -34,7 +34,7 @@
  * `nowMs`), no I/O.
  */
 import type { VerseSeat, VerseSeatCapacity } from '../verse/types.js';
-import type { BudgetEngine } from './policy.js';
+import type { BudgetEngine, CapacityEngine } from './policy.js';
 import { reasonSentences } from './seat-reasons.js';
 import type { SeatBudgetPolicy, SeatHeadroom, SeatReason } from './types.js';
 
@@ -66,7 +66,8 @@ export interface CapacityWindow {
 /** What the budget layer needs to know about one seat. JSON-safe; persisted in the capacity snapshot. */
 export interface SeatCapacity {
   seatId: string;
-  engine: BudgetEngine;
+  /** Never `devin` (policy.ts CapacityEngine): Devin has no capacity seat. */
+  engine: CapacityEngine;
   label: string;
   /** True for local runtime seats: $0 and no provider window. */
   free: boolean;

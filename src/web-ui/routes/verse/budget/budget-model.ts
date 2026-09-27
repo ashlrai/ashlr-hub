@@ -18,7 +18,7 @@
  */
 import {
   MODE_DESCRIPTIONS,
-  type BudgetEngine,
+  type CapacityEngine,
   type BudgetView,
 } from '../../../../core/routing/policy.js';
 import type { BudgetMode, SeatBudgetPolicy, SeatHeadroom } from '../../../../core/routing/types.js';
@@ -50,7 +50,7 @@ export interface BudgetBar {
 export interface BudgetSeatRow {
   seatId: string;
   label: string;
-  engine: BudgetEngine;
+  engine: CapacityEngine;
   free: boolean;
   policy: SeatBudgetPolicy;
   headroom: SeatHeadroom | null;
@@ -96,7 +96,7 @@ function statusOf(free: boolean, policy: SeatBudgetPolicy, headroom: SeatHeadroo
   return 'held';
 }
 
-function barsFor(engine: BudgetEngine, free: boolean, policy: SeatBudgetPolicy, h: SeatHeadroom | null): BudgetBar[] {
+function barsFor(engine: CapacityEngine, free: boolean, policy: SeatBudgetPolicy, h: SeatHeadroom | null): BudgetBar[] {
   if (free || h === null) return [];
   const bars: BudgetBar[] = [];
   const reserveCeiling = 100 - policy.reservePercent;

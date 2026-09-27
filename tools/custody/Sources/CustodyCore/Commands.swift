@@ -67,7 +67,8 @@ public struct CustodyFailure: Error, Equatable, CustomStringConvertible {
 }
 
 public enum CustodyCLI {
-  public static let version = "1.0.0"
+  // 1.1.0 (3.15): `status` reports `grantEngines`; grants may name `devin`.
+  public static let version = "1.1.0"
 
   public static let usageText = """
   usage: ashlr-custody <command>
@@ -142,6 +143,18 @@ public struct JSONLine {
     var out = ""
     CanonicalJSON.writeString(key, into: &out)
     out += ":" + (value.map { $0 ? "true" : "false" } ?? "null")
+    parts.append(out)
+  }
+
+  public mutating func strings(_ key: String, _ values: [String]) {
+    var out = ""
+    CanonicalJSON.writeString(key, into: &out)
+    out += ":["
+    for (i, value) in values.enumerated() {
+      if i > 0 { out += "," }
+      CanonicalJSON.writeString(value, into: &out)
+    }
+    out += "]"
     parts.append(out)
   }
 

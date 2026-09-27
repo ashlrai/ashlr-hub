@@ -221,6 +221,8 @@
 /test/daemon-first-tick-314.test.ts @masonwyatt23
 /test/daemon-liveness-310b.test.ts @masonwyatt23
 /test/daemon-resident-capacity-publisher-310.test.ts @masonwyatt23
+/test/devin-engine-identity-315.test.ts @masonwyatt23
+/test/devin-fleet-launcher-315.test.ts @masonwyatt23
 /test/devin-intake-315.test.ts @masonwyatt23
 /test/dispatch-router-310b.test.ts @masonwyatt23
 /test/engines-judges-310b.test.ts @masonwyatt23

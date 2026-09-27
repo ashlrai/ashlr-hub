@@ -2,6 +2,7 @@
  * Cloud task evidence timeline — the HTTP contract (3.13).
  *
  *   GET /api/verse/cloud/tasks/<id>/timeline  → CloudTimelineResponse
+ *   GET /api/verse/devin/tasks/<id>/timeline  → CloudTimelineResponse (3.15, a Devin task)
  *
  * One ordered chain per cloud task, from the objective to what it cost:
  *
@@ -23,6 +24,8 @@
  *
  * NODE-FREE on purpose: the web UI imports these types and the path helper.
  */
+import { CLOUD_TASK_ID_PATTERN } from './types.js';
+import { DEVIN_TASK_ID_PATTERN } from '../devin/types.js';
 
 export const CLOUD_TIMELINE_SCHEMA_VERSION = 1 as const;
 
@@ -31,6 +34,28 @@ export const CLOUD_TIMELINE_PATH_RE = /^\/api\/verse\/cloud\/tasks\/([^/]+)\/tim
 
 export function cloudTimelinePath(taskId: string): string {
   return `/api/verse/cloud/tasks/${encodeURIComponent(taskId)}/timeline`;
+}
+
+/**
+ * 3.15: `/api/verse/devin/tasks/<id>/timeline` — checked against
+ * DEVIN_TASK_ID_PATTERN by the route. Served by the same 'cloud-timeline'
+ * module (timeline-api.ts), which is mounted before 'devin'.
+ */
+export const DEVIN_TIMELINE_PATH_RE = /^\/api\/verse\/devin\/tasks\/([^/]+)\/timeline$/;
+
+export function devinTimelinePath(taskId: string): string {
+  return `/api/verse/devin/tasks/${encodeURIComponent(taskId)}/timeline`;
+}
+
+/**
+ * The evidence path for a task id Verse issued — cloud (`ct_…`) or Devin
+ * (`dv_…`) — or null for anything else, so a caller can never splice an id
+ * Verse did not issue into a request path.
+ */
+export function evidenceTimelinePath(taskId: string): string | null {
+  if (CLOUD_TASK_ID_PATTERN.test(taskId)) return cloudTimelinePath(taskId);
+  if (DEVIN_TASK_ID_PATTERN.test(taskId)) return devinTimelinePath(taskId);
+  return null;
 }
 
 export type TimelineStepKind =
@@ -55,7 +80,7 @@ export const TIMELINE_STEP_ORDER: readonly TimelineStepKind[] = [
 export type TimelineVerified = true | false | 'unknown';
 
 export interface TimelineLink {
-  /** https only: claude.ai, github.com. */
+  /** https only: claude.ai, github.com, and app.devin.ai (a Devin session, 3.15). */
   href: string;
   label: string;
 }

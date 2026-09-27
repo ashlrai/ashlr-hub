@@ -6,10 +6,12 @@
  * producer identity `devin:<mode>` (family `devin`, never unknown), G6 needing
  * a frontier judge of another family (Devin itself never judges), the
  * UNVERIFIED report in Devin's words, the source/store mismatch refusal, the
- * disabled lane — and one end-to-end run through runStandingMergePass (a real
- * bare repo via FakeGithub): every gate passes, the would-merge is recorded as
- * `shadow`, and NOTHING merges (producerMergeWithheld). The legacy pass skips
- * Devin proposals too.
+ * disabled lane — and end-to-end runs through runStandingMergePass (a real
+ * bare repo via FakeGithub) under the 3.15 TWO-JUDGE RULE: one judge never
+ * passes G6 for Devin work; a second judge of a different family does; the
+ * App PR then merges only when the live stage names the `devin` engine —
+ * otherwise the would-merge is recorded as `shadow` and nothing merges
+ * (producerMergeWithheld). The legacy pass skips Devin proposals too.
  */
 import { rmSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -145,11 +147,20 @@ describe('Devin family and G6', () => {
 
   it('G6 waits for a judge, and passes nothing on its own', () => {
     const g6 = evaluateG6({ proposalId: 'p', producerModel: 'devin:normal', diff: DIFF, decisions: [], nowMs: Date.now() });
-    expect(g6).toMatchObject({ verdict: 'wait', code: 'awaiting-judge', needsJudge: true });
+    expect(g6).toMatchObject({ verdict: 'wait', code: 'awaiting-judge', needsJudge: true, judgedFamilies: [] });
   });
 
-  it('shadow-only: the fleet never merges Devin work on its own, whatever the stage', () => {
+  it('withheld (shadow) unless the stage names Devin AND two judges of different families shipped', () => {
     expect(producerMergeWithheld('devin')).toBe('shadow');
+    const two = ['grok-cli:grok-4.7', 'gpt-5.5'];
+    expect(producerMergeWithheld('devin', { devinGranted: true, producerModel: 'devin:normal', judgeIds: two })).toBeNull();
+    expect(producerMergeWithheld('devin', { devinGranted: false, producerModel: 'devin:normal', judgeIds: two })).toBe('shadow');
+    expect(producerMergeWithheld('devin', { devinGranted: true, producerModel: 'devin:normal', judgeIds: ['grok-cli:grok-4.7'] })).toBe('shadow');
+    // Same family twice counts once; Devin, local and unknown judges never count.
+    expect(producerMergeWithheld('devin', { devinGranted: true, producerModel: 'devin:normal', judgeIds: ['claude-opus-4-8', 'claude-sonnet-5'] })).toBe('shadow');
+    expect(producerMergeWithheld('devin', { devinGranted: true, producerModel: 'devin:normal', judgeIds: ['gpt-5.5', 'devin:normal'] })).toBe('shadow');
+    expect(producerMergeWithheld('devin', { devinGranted: true, producerModel: 'devin:normal', judgeIds: ['gpt-5.5', 'qwen2.5:72b'] })).toBe('shadow');
+    expect(producerMergeWithheld('devin', { devinGranted: true, producerModel: 'devin:normal', judgeIds: ['gpt-5.5', 'grok-4.7'] })).toBe('shadow'); // bare Grok never judges
     for (const f of ['claude', 'openai', 'xai', 'local', 'unknown'] as const) expect(producerMergeWithheld(f)).toBeNull();
   });
 });
@@ -231,8 +242,17 @@ describe('Devin PR end to end through the standing merge pass — shadow-only', 
     };
   }
 
-  it('passes G0–G7 with an xAI judge, records a `shadow` would-merge, and never merges', async () => {
-    const repo = 'ashlrai/devin-e2e';
+  interface E2EOptions {
+    /** Does the live stage name the `devin` engine (Mason signed Devin in)? */
+    devinGranted: boolean;
+    /** The verdict of each judge call, in order (default: every judge ships). */
+    verdicts?: Array<'ship' | 'review'>;
+  }
+
+  let e2eRuns = 0;
+
+  async function runDevinE2E(opts: E2EOptions) {
+    const repo = `ashlrai/devin-e2e-${++e2eRuns}`;
     fake = new FakeGithub({ repo });
     const f = fake;
     const task = seedTask({ repo, pr: { number: PR, url: `https://github.com/${repo}/pull/${PR}`, state: 'open', draft: false, title: 't' }, deliveryPin: { number: PR, url: `https://github.com/${repo}/pull/${PR}` } });
@@ -261,7 +281,16 @@ describe('Devin PR end to end through the standing merge pass — shadow-only', 
       return { ok: false, stdout: '', stderr: 'unexpected' };
     };
 
-    const livePolicy = { current: standingPolicy([repoPolicy(repo)], { engines: ['local', 'grok-cli', 'claude-cli', 'codex'] }) as EffectivePolicy };
+    const base = standingPolicy([repoPolicy(repo)], { engines: ['local', 'grok-cli', 'claude-cli', 'codex'] });
+    const livePolicy = {
+      current: (opts.devinGranted
+        ? {
+            ...base,
+            engines: [...base.engines, 'devin'],
+            spend: { ...base.spend, seats: { ...base.spend.seats, devin: { seatId: 'devin', enabled: true, reserveFloorPercent: 0, maxSessionWindowPercent: null, roles: ['producer'] } } },
+          }
+        : base) as EffectivePolicy,
+    };
     const intake = await ingestDevinPrs(cfg, livePolicy.current, { mirrors: [{ nameWithOwner: repo, path: f.mirror, base: 'main' }], deps: { gh } });
     expect(intake.outcomes).toMatchObject([{ action: 'ingested', headSha: devinHead }]);
     const proposal = loadProposal(intake.outcomes[0]!.proposalId!)!;
@@ -272,6 +301,7 @@ describe('Devin PR end to end through the standing merge pass — shadow-only', 
     const proposals = new Map<string, Proposal>([[proposal.id, proposal]]);
     const decisions = new Map<string, DecisionEntry[]>();
     const judgeCalls: FleetEngine[][] = [];
+    const verdicts = [...(opts.verdicts ?? [])];
     const host: HostMergeDeps = {
       transport: f.transport,
       token: async () => ({ token: 'ghs_test_installation_token', expiresAt: null }),
@@ -302,14 +332,15 @@ describe('Devin PR end to end through the standing merge pass — shadow-only', 
       isSelfRepo: () => false,
       listHolds: () => [],
       mergeTimes24h: async () => ledger.of('merge:landed').map((l) => (l as LandingRecord).landedAt),
-      judgeSeatLanes: ({ producerFamily, waitSinceMs, nowMs }) => ({
-        lanes: allowedJudgeLanes(producerFamily, waitSinceMs, nowMs).filter((lane) => ['codex', 'grok-cli', 'claude-cli'].includes(lane)),
+      judgeSeatLanes: ({ producerFamily, waitSinceMs, nowMs, excludeFamilies }) => ({
+        lanes: allowedJudgeLanes(producerFamily, waitSinceMs, nowMs, excludeFamilies ?? []).filter((lane) => ['codex', 'grok-cli', 'claude-cli'].includes(lane)),
         nextEligibleAt: null,
       }),
       runJudge: async (p, _cfg, lanes) => {
         judgeCalls.push([...lanes]);
         const judge = JUDGE_FOR_LANE[lanes[0]!];
-        decisions.set(p.id, [...(decisions.get(p.id) ?? []), judgedDecision(p, judge, 'ship', new Date(clock.now))]);
+        const verdict = verdicts.shift() ?? 'ship';
+        decisions.set(p.id, [...(decisions.get(p.id) ?? []), judgedDecision(p, judge, verdict, new Date(clock.now))]);
         return { called: true, reason: `judged by ${judge}` };
       },
       readDecisions: (id) => decisions.get(id) ?? [],
@@ -321,24 +352,67 @@ describe('Devin PR end to end through the standing merge pass — shadow-only', 
       const pending = [...proposals.values()].filter((p) => p.status === 'pending');
       return runStandingMergePass({ cfg, policy: livePolicy.current, pending, out: emptyOut(), deps });
     };
+    return { f, ledger, clock, pass, judgeCalls, proposal };
+  }
 
-    const first = await pass();
-    expect(ledger.kinds()).toEqual([
-      'gate:result:G0:pass', 'gate:result:G1:pass', 'gate:result:G1b:pass', 'gate:result:G2:pass', 'gate:result:G3:pass',
-      'gate:result:G4:pass', 'gate:result:G5:pass', 'gate:result:G6:pass', 'pr:opened',
-    ]);
-    expect(first.prsOpened).toBe(1);
-    expect(judgeCalls).toEqual([['grok-cli']]);
-    const appPr = [...f.pulls.values()][0]!;
+  /** Past the pass's 15-minute "do not re-ask a paid judge" window. */
+  const JUDGE_RETRY_WAIT_MS = 16 * 60 * 1000;
 
-    // The App PR goes green. The stage allows merging — but Devin work is shadow-only.
-    f.greenRequired(f.headOfPull(appPr.number)!);
-    clock.now += 10 * 60 * 1000;
-    const second = await pass();
-    expect(second.merged).toBe(0);
-    expect(f.mergeCalls()).toHaveLength(0);
-    const wouldMerge = ledger.of('gate:would-merge') as Array<{ withheldBecause: string }>;
+  it('one judge never passes G6 for Devin work: it waits for a judge of ANOTHER family', async () => {
+    const run = await runDevinE2E({ devinGranted: true });
+    const first = await run.pass();
+    expect(first.prsOpened).toBe(0);
+    expect(run.judgeCalls).toEqual([['grok-cli']]);
+    expect(run.ledger.kinds()).toContain('gate:result:G6:wait');
+    expect(run.ledger.kinds()).not.toContain('pr:opened');
+    // Within the retry window no second paid judge is asked.
+    await run.pass();
+    expect(run.judgeCalls).toHaveLength(1);
+  });
+
+  it('two judges of different families pass G6; still `shadow` when the stage does not name Devin', async () => {
+    const run = await runDevinE2E({ devinGranted: false });
+    await run.pass();
+    run.clock.now += JUDGE_RETRY_WAIT_MS;
+    const second = await run.pass();
+    // The second judge is asked ONLY on lanes of other families (never xAI again).
+    expect(run.judgeCalls).toEqual([['grok-cli'], ['codex', 'claude-cli']]);
+    expect(second.prsOpened).toBe(1);
+    expect(run.ledger.kinds()).toContain('gate:result:G6:pass');
+    const appPr = [...run.f.pulls.values()][0]!;
+
+    run.f.greenRequired(run.f.headOfPull(appPr.number)!);
+    run.clock.now += 10 * 60 * 1000;
+    const third = await run.pass();
+    expect(third.merged).toBe(0);
+    expect(run.f.mergeCalls()).toHaveLength(0);
+    const wouldMerge = run.ledger.of('gate:would-merge') as Array<{ withheldBecause: string }>;
     expect(wouldMerge).toHaveLength(1);
     expect(wouldMerge[0]!.withheldBecause).toBe('shadow');
+  });
+
+  it('merges only when the stage names Devin AND two independent non-Devin judges shipped', async () => {
+    const run = await runDevinE2E({ devinGranted: true });
+    await run.pass();
+    run.clock.now += JUDGE_RETRY_WAIT_MS;
+    await run.pass();
+    expect(run.judgeCalls).toEqual([['grok-cli'], ['codex', 'claude-cli']]);
+    const appPr = [...run.f.pulls.values()][0]!;
+    run.f.greenRequired(run.f.headOfPull(appPr.number)!);
+    run.clock.now += 10 * 60 * 1000;
+    const merged = await run.pass();
+    expect(merged.merged).toBe(1);
+    expect(run.f.mergeCalls()).toHaveLength(1);
+    expect(run.ledger.of('gate:would-merge')).toHaveLength(0);
+  });
+
+  it('a rejection from the second judge refuses it, whatever the first judge said', async () => {
+    const run = await runDevinE2E({ devinGranted: true, verdicts: ['ship', 'review'] });
+    await run.pass();
+    run.clock.now += JUDGE_RETRY_WAIT_MS;
+    await run.pass();
+    expect(run.ledger.kinds()).toContain('gate:result:G6:refuse');
+    expect(run.ledger.kinds()).not.toContain('pr:opened');
+    expect(run.proposal.status).toBe('rejected');
   });
 });

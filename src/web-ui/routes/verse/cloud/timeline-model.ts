@@ -9,8 +9,12 @@
  *     server sends: the badge is derived from `verified`, and `false` can only
  *     ever read as Claim / Estimate;
  *   - times are local and relative; a step with no recorded time shows none
- *     (it is never back-filled from a neighbour).
+ *     (it is never back-filled from a neighbour);
+ *   - (3.15) a Devin task's timeline has the same shape; its links may point
+ *     at app.devin.ai (its session, its usage page) — and only a Devin
+ *     task's may: a cloud timeline keeps github.com and claude.ai.
  */
+import { DEVIN_TASK_ID_PATTERN } from '../../../../core/devin/types.js';
 import {
   TIMELINE_STEP_ORDER,
   type CloudTimelineResponse,
@@ -35,7 +39,7 @@ export const BADGE_WORD: Record<TimelineBadge, string> = {
 export const BADGE_MEANING: Record<TimelineBadge, string> = {
   verified: 'Read from a record Verse or GitHub wrote, not from the session.',
   claim: 'The cloud session’s own say-so. Nothing checked it.',
-  estimate: 'An estimate fixed at launch; the real balance is on claude.ai.',
+  estimate: 'An estimate, not a bill; the real usage is on the provider’s own page (this step links it).',
   unknown: 'Nothing was recorded, or the record could not be read.',
 };
 
@@ -66,7 +70,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function narrowStep(raw: unknown): TimelineStep | null {
+type LinkHost = 'github.com' | 'claude.ai' | 'app.devin.ai';
+
+/** Hosts a timeline's links may point at: its lane's own, and GitHub. */
+function linkHostsFor(taskId: string): readonly LinkHost[] {
+  return DEVIN_TASK_ID_PATTERN.test(taskId) ? ['github.com', 'app.devin.ai'] : ['github.com', 'claude.ai'];
+}
+
+function narrowStep(raw: unknown, hosts: readonly LinkHost[]): TimelineStep | null {
   if (!isRecord(raw)) return null;
   const kind = raw['kind'];
   if (typeof kind !== 'string' || !(TIMELINE_STEP_ORDER as readonly string[]).includes(kind)) return null;
@@ -85,7 +96,8 @@ function narrowStep(raw: unknown): TimelineStep | null {
   const link = raw['link'];
   if (isRecord(link) && typeof link['href'] === 'string' && typeof link['label'] === 'string') {
     // Only these hosts ever become links, whatever the server sent.
-    const href = safeHref(link['href'], 'github.com') ?? safeHref(link['href'], 'claude.ai');
+    let href: string | null = null;
+    for (const host of hosts) href = href ?? safeHref(link['href'], host);
     if (href) step.link = { href, label: link['label'] };
   }
   return step;
@@ -98,7 +110,8 @@ function narrowStep(raw: unknown): TimelineStep | null {
  */
 export function narrowTimeline(raw: unknown): CloudTimelineResponse | null {
   if (!isRecord(raw) || raw['v'] !== 1 || typeof raw['taskId'] !== 'string' || !Array.isArray(raw['steps'])) return null;
-  const steps = raw['steps'].map(narrowStep).filter((s): s is TimelineStep => s !== null);
+  const hosts = linkHostsFor(raw['taskId']);
+  const steps = raw['steps'].map((s) => narrowStep(s, hosts)).filter((s): s is TimelineStep => s !== null);
   return {
     v: 1,
     generatedAt: typeof raw['generatedAt'] === 'string' ? raw['generatedAt'] : '',

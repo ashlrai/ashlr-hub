@@ -52,8 +52,10 @@ import { scrubSecrets } from '../util/scrub.js';
 import type { DecisionEntry } from '../types.js';
 import {
   evaluateJudgeEligibility,
+  judgeLaneFamily,
   judgeLanePreference,
   producerModelFamily,
+  requiresTwoJudges,
   reviewModelFamily,
   type ReviewModelFamily,
 } from './reviewer-independence.js';
@@ -769,9 +771,18 @@ export function allowedJudgeLanes(
   producerFamily: ReviewModelFamily,
   waitSinceMs: number | null,
   nowMs: number,
+  /**
+   * 3.15: judge families that already shipped this proposal (G6Evaluation
+   * `judgedFamilies`, the two-judge rule). Their lanes are dropped — the next
+   * judge must come from ANOTHER family — and the remaining lanes are all
+   * offered at once: the second judge's job is to be different, and the
+   * family preference already chose the first.
+   */
+  excludeFamilies: readonly ReviewModelFamily[] = [],
 ): readonly FleetEngine[] {
-  const lanes = judgeLanePreference(producerFamily);
+  const lanes = judgeLanePreference(producerFamily).filter((lane) => !excludeFamilies.includes(judgeLaneFamily(lane)));
   if (lanes.length === 0) return [];
+  if (excludeFamilies.length > 0) return lanes;
   const widened = waitSinceMs !== null && nowMs - waitSinceMs >= JUDGE_PREFERENCE_WAIT_MS;
   return widened ? lanes : lanes.slice(0, 1);
 }
@@ -789,10 +800,91 @@ export interface G6Evaluation extends GateEvaluation {
   judgeId: JudgeId | null;
   /** The latest verdict is missing / stale / from an ineligible judge — the pass may call a judge. */
   needsJudge: boolean;
+  /**
+   * 3.15 (two-judge producers only): every judge whose valid ship counts —
+   * both judges on a pass, the first one while a second is awaited.
+   */
+  judgeIds?: JudgeId[];
+  /** 3.15: families with a valid ship already — the next judge must be of another family. */
+  judgedFamilies?: ReviewModelFamily[];
 }
 
 function g6(e: GateEvaluation, judgeId: JudgeId | null, needsJudge: boolean): G6Evaluation {
   return { ...e, judgeId, needsJudge };
+}
+
+type JudgeVerdictAssessment =
+  | { kind: 'ship'; judgeId: JudgeId; family: ReviewModelFamily; issuedAt: string; eligibilityReason: string; inputs: Record<string, unknown>; attestation: string }
+  | { kind: 'other'; evaluation: G6Evaluation };
+
+/**
+ * One recorded verdict, judged on its own: is it a valid, attested, fresh,
+ * merge-intent ship from an eligible frontier judge for THIS diff? Every
+ * non-ship outcome is returned as the G6 evaluation it has always produced.
+ */
+function assessJudgeVerdict(latest: DecisionEntry, input: G6Input, base: Record<string, unknown>): JudgeVerdictAssessment {
+  const other = (e: G6Evaluation): JudgeVerdictAssessment => ({ kind: 'other', evaluation: e });
+  const judgeEngine = latest.engine ?? latest.model ?? '';
+  const judgeFamily = reviewModelFamily(judgeEngine);
+  const inputs = { ...base, judge: judgeEngine, judgeFamily, verdict: latest.verdict ?? null, at: latest.ts };
+  if (latest.verdict !== 'ship') {
+    const failure = latest.detail === 'judge-network-failure' || latest.detail === 'judge-parse-failure';
+    if (failure) {
+      return other(g6(evaluation('wait', 'judge-failed', `the last judge call failed (${latest.detail}); it will be retried`, inputs), null, true));
+    }
+    const eligibility = evaluateJudgeEligibility(input.producerModel, judgeEngine);
+    if (!eligibility.eligible) {
+      return other(g6(evaluation('wait', 'judge-ineligible', `${eligibility.reason}; an eligible judge must review it`, inputs), null, true));
+    }
+    return other(g6(evaluation(
+      'refuse',
+      'judge-rejected',
+      `judge ${judgeEngine} returned "${latest.verdict ?? 'unknown'}" — a newer non-ship verdict overrides any older ship`,
+      inputs,
+    ), null, false));
+  }
+  const eligibility = evaluateJudgeEligibility(input.producerModel, judgeEngine);
+  if (!eligibility.eligible) {
+    // A ship from a local or same-family judge is never accepted and never
+    // "downgraded into" a pass: the proposal waits for an eligible judge.
+    return other(g6(evaluation('wait', 'judge-ineligible', eligibility.reason, inputs), null, true));
+  }
+  if (latest.detail !== 'would-merge' || latest.judgeAttestationIntent !== 'would-merge') {
+    return other(g6(evaluation('refuse', 'judge-no-merge-intent', `judge ${judgeEngine} shipped without merge intent`, inputs), null, false));
+  }
+  const issuedAt = latest.judgeAttestationIssuedAt;
+  const issuedMs = typeof issuedAt === 'string' ? Date.parse(issuedAt) : Number.NaN;
+  if (typeof issuedAt !== 'string' || issuedAt !== latest.ts || !Number.isFinite(issuedMs) || issuedMs > input.nowMs + 60_000) {
+    return other(g6(evaluation('wait', 'judge-attestation-invalid', 'the ship verdict carries no well-formed attestation time; re-judging', inputs), null, true));
+  }
+  if (input.nowMs - issuedMs > JUDGE_VERDICT_MAX_AGE_MS) {
+    return other(g6(evaluation('wait', 'judge-stale', 'the ship verdict is older than 24 h; re-judging', inputs), null, true));
+  }
+  const attestation = verifyJudgeAttestation(latest.judgeAttestation, {
+    proposalId: input.proposalId,
+    judgeEngine,
+    verdict: 'ship',
+    diffHash: hashDiff(input.diff),
+    issuedAt,
+    mergeIntent: 'would-merge',
+  });
+  if (!attestation.ok) {
+    return other(g6(evaluation(
+      'wait',
+      'judge-attestation-invalid',
+      `the ship verdict's HMAC attestation does not verify for this exact diff (${attestation.reason ?? 'mismatch'}); re-judging`,
+      inputs,
+    ), null, true));
+  }
+  return {
+    kind: 'ship',
+    judgeId: judgeEngine as JudgeId,
+    family: judgeFamily,
+    issuedAt,
+    eligibilityReason: eligibility.reason,
+    inputs,
+    attestation: sha256(latest.judgeAttestation ?? ''),
+  };
 }
 
 export function evaluateG6(input: G6Input): G6Evaluation {
@@ -809,70 +901,91 @@ export function evaluateG6(input: G6Input): G6Evaluation {
       if (av && bv && a.ms !== b.ms) return b.ms - a.ms;
       if (av !== bv) return av ? -1 : 1;
       return b.index - a.index;
-    });
-  const latest = judged[0]?.decision;
+    })
+    .map((entry) => entry.decision);
+  if (requiresTwoJudges(producerFamily)) return evaluateTwoJudgeG6(input, judged, base);
+  const latest = judged[0];
   if (!latest) {
     return g6(evaluation('wait', 'awaiting-judge', 'no judge has reviewed this proposal yet', base), null, true);
   }
-  const judgeEngine = latest.engine ?? latest.model ?? '';
-  const judgeFamily = reviewModelFamily(judgeEngine);
-  const inputs = { ...base, judge: judgeEngine, judgeFamily, verdict: latest.verdict ?? null, at: latest.ts };
-  if (latest.verdict !== 'ship') {
-    const failure = latest.detail === 'judge-network-failure' || latest.detail === 'judge-parse-failure';
-    if (failure) {
-      return g6(evaluation('wait', 'judge-failed', `the last judge call failed (${latest.detail}); it will be retried`, inputs), null, true);
-    }
-    const eligibility = evaluateJudgeEligibility(input.producerModel, judgeEngine);
-    if (!eligibility.eligible) {
-      return g6(evaluation('wait', 'judge-ineligible', `${eligibility.reason}; an eligible judge must review it`, inputs), null, true);
-    }
-    return g6(evaluation(
-      'refuse',
-      'judge-rejected',
-      `judge ${judgeEngine} returned "${latest.verdict ?? 'unknown'}" — a newer non-ship verdict overrides any older ship`,
-      inputs,
-    ), null, false);
-  }
-  const eligibility = evaluateJudgeEligibility(input.producerModel, judgeEngine);
-  if (!eligibility.eligible) {
-    // A ship from a local or same-family judge is never accepted and never
-    // "downgraded into" a pass: the proposal waits for an eligible judge.
-    return g6(evaluation('wait', 'judge-ineligible', eligibility.reason, inputs), null, true);
-  }
-  if (latest.detail !== 'would-merge' || latest.judgeAttestationIntent !== 'would-merge') {
-    return g6(evaluation('refuse', 'judge-no-merge-intent', `judge ${judgeEngine} shipped without merge intent`, inputs), null, false);
-  }
-  const issuedAt = latest.judgeAttestationIssuedAt;
-  const issuedMs = typeof issuedAt === 'string' ? Date.parse(issuedAt) : Number.NaN;
-  if (typeof issuedAt !== 'string' || issuedAt !== latest.ts || !Number.isFinite(issuedMs) || issuedMs > input.nowMs + 60_000) {
-    return g6(evaluation('wait', 'judge-attestation-invalid', 'the ship verdict carries no well-formed attestation time; re-judging', inputs), null, true);
-  }
-  if (input.nowMs - issuedMs > JUDGE_VERDICT_MAX_AGE_MS) {
-    return g6(evaluation('wait', 'judge-stale', 'the ship verdict is older than 24 h; re-judging', inputs), null, true);
-  }
-  const attestation = verifyJudgeAttestation(latest.judgeAttestation, {
-    proposalId: input.proposalId,
-    judgeEngine,
-    verdict: 'ship',
-    diffHash: hashDiff(input.diff),
-    issuedAt,
-    mergeIntent: 'would-merge',
-  });
-  if (!attestation.ok) {
-    return g6(evaluation(
-      'wait',
-      'judge-attestation-invalid',
-      `the ship verdict's HMAC attestation does not verify for this exact diff (${attestation.reason ?? 'mismatch'}); re-judging`,
-      inputs,
-    ), null, true);
-  }
-  const judgeId = judgeEngine as JudgeId;
+  const assessed = assessJudgeVerdict(latest, input, base);
+  if (assessed.kind === 'other') return assessed.evaluation;
   return g6(evaluation(
     'pass',
     'judge-ship',
-    `independent ${judgeFamily} judge ${judgeEngine} shipped it (attested ${issuedAt}); ${eligibility.reason}`,
-    { ...inputs, attestation: sha256(latest.judgeAttestation ?? '') },
-  ), judgeId, false);
+    `independent ${assessed.family} judge ${assessed.judgeId} shipped it (attested ${assessed.issuedAt}); ${assessed.eligibilityReason}`,
+    { ...assessed.inputs, attestation: assessed.attestation },
+  ), assessed.judgeId, false);
+}
+
+/**
+ * 3.15 — G6 for a two-judge producer (Devin, reviewer-independence.ts
+ * requiresTwoJudges). Each judge FAMILY's newest verdict is assessed on its
+ * own with exactly the single-judge rules (eligible frontier judge of another
+ * family, merge intent, fresh, HMAC-attested for this diff):
+ *  - any family's newest verdict an eligible rejection ⇒ refuse (one "no"
+ *    from any independent judge is enough — never outvoted);
+ *  - valid ships from ≥ 2 different families ⇒ pass (`two-judge-ship`);
+ *  - one ⇒ wait for a judge of ANOTHER family (`judgedFamilies` steers the
+ *    pass's next call away from the family that already shipped);
+ *  - none ⇒ whatever the newest verdict says (awaiting / failed / stale …).
+ * A single judge can never pass a Devin proposal, however many times it ships.
+ */
+function evaluateTwoJudgeG6(input: G6Input, judged: readonly DecisionEntry[], base: Record<string, unknown>): G6Evaluation {
+  const rule = { ...base, rule: 'two-judge', minFamilies: 2 };
+  const newest = judged[0];
+  if (!newest) {
+    const e = g6(evaluation('wait', 'awaiting-judge', 'no judge has reviewed this proposal yet; Devin work needs judges from two different families', rule), null, true);
+    return { ...e, judgeIds: [], judgedFamilies: [] };
+  }
+  const newestByFamily = new Map<ReviewModelFamily, DecisionEntry>();
+  for (const decision of judged) {
+    const family = reviewModelFamily(decision.engine ?? decision.model ?? '');
+    if (!newestByFamily.has(family)) newestByFamily.set(family, decision);
+  }
+  const ships: Extract<JudgeVerdictAssessment, { kind: 'ship' }>[] = [];
+  for (const decision of newestByFamily.values()) {
+    const assessed = assessJudgeVerdict(decision, input, rule);
+    if (assessed.kind === 'ship') {
+      ships.push(assessed);
+    } else if (assessed.evaluation.verdict === 'refuse') {
+      return { ...assessed.evaluation, judgeIds: [], judgedFamilies: [] };
+    }
+  }
+  ships.sort((a, b) => (a.issuedAt < b.issuedAt ? 1 : a.issuedAt > b.issuedAt ? -1 : 0));
+  const families = ships.map((ship) => ship.family);
+  const judgeIds = ships.map((ship) => ship.judgeId);
+  if (ships.length >= 2) {
+    const [first, second] = ships as [typeof ships[number], typeof ships[number]];
+    const e = g6(evaluation(
+      'pass',
+      'two-judge-ship',
+      `two independent judges shipped it: ${first.family} judge ${first.judgeId} (attested ${first.issuedAt}) and `
+        + `${second.family} judge ${second.judgeId} (attested ${second.issuedAt})`,
+      {
+        ...rule,
+        judges: [first.judgeId, second.judgeId],
+        families: [first.family, second.family],
+        attestations: [first.attestation, second.attestation],
+      },
+    ), first.judgeId, false);
+    return { ...e, judgeIds: [first.judgeId, second.judgeId], judgedFamilies: [first.family, second.family] };
+  }
+  if (ships.length === 1) {
+    const only = ships[0]!;
+    const e = g6(evaluation(
+      'wait',
+      'second-judge-needed',
+      `${only.family} judge ${only.judgeId} shipped it; Devin work also needs a judge from a different family (never Devin, never local)`,
+      { ...rule, judges: [only.judgeId], families: [only.family], attestations: [only.attestation] },
+    ), null, true);
+    return { ...e, judgeIds, judgedFamilies: families };
+  }
+  const assessed = assessJudgeVerdict(newest, input, rule);
+  const fallback = assessed.kind === 'other'
+    ? assessed.evaluation
+    : g6(evaluation('wait', 'awaiting-judge', 'no judge has reviewed this proposal yet', rule), null, true);
+  return { ...fallback, judgeIds: [], judgedFamilies: [] };
 }
 
 // ---------------------------------------------------------------------------
