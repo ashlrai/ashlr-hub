@@ -254,7 +254,12 @@ export async function startServer(
       // Terminal-pane shells (V3.10) die with the server that owns their PTYs.
       // A no-op when no terminal was ever opened (it never creates a manager).
       closeVerseTerminals();
-      await Promise.all([readProjections?.close(), new Promise<void>((resolve) => {
+      // The Fleet surface's history service owns a worker thread (lazily, on its
+      // first GET); a live worker keeps the process from exiting after close.
+      const closeFleetHistory = import('../verse/fleet-history.js')
+        .then((mod) => mod.closeFleetHistoryService())
+        .catch(() => undefined);
+      await Promise.all([readProjections?.close(), closeFleetHistory, new Promise<void>((resolve) => {
         // Drain all open SSE response streams registered by handleApi, then
         // close the HTTP server (stops accepting new connections).
         drainSseConnections();
