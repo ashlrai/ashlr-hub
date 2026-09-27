@@ -324,3 +324,46 @@ describe('Grok probe ownership and caller validation', () => {
     rmSync(scratch, { recursive: true });
   });
 });
+
+/**
+ * 3.15 regression: Grok's meter went blank after its 2026-09-26 12:43Z weekly
+ * reset. xAI's credits config is proto3 JSON, which OMITS a zero
+ * `creditUsagePercent`, so until the first metered turn of a new period the
+ * reply carries the period and no percent. The probe read that as "no signal",
+ * every downstream surface honestly said "—", and autonomy saw "unknown usage".
+ * Upstream's own pager renders the same reply as 0% (billing.rs / helpers.rs).
+ */
+describe('Grok usage right after a weekly reset (creditUsagePercent omitted)', () => {
+  const iso = (ms: number) => new Date(ms).toISOString().replace('Z', '000+00:00').replace(/\.(\d{3})000/, '.$1076');
+  // The exact shape Grok 0.2.118 returned on this Mac after the reset, with the
+  // period moved to bracket "now": no percent, zero Cents as {val: 0}, no history.
+  const postReset = (startMs: number, endMs: number) => ({
+    config: { currentPeriod: { type: 'USAGE_PERIOD_TYPE_WEEKLY', start: iso(startMs), end: iso(endMs) },
+      onDemandCap: { val: 0 }, onDemandUsed: { val: 0 }, prepaidBalance: { val: 0 }, isUnifiedBillingUser: true,
+      billingPeriodStart: iso(startMs), billingPeriodEnd: iso(endMs) },
+    subscription_tier: 'SuperGrok',
+  });
+
+  it('reads an omitted percent inside the current period as 0% used, with the reset', async () => {
+    const start = Date.now() - 86_400_000; const end = Date.now() + 6 * 86_400_000;
+    const result = await probeGrokAccount(options({ billing: postReset(start, end) }));
+    expect(result).toMatchObject({ status: 'observed', loggedIn: true, planType: 'SuperGrok',
+      windows: [{ id: 'grok_unified_weekly', usedPercent: 0, resetsAt: new Date(end).toISOString() }] });
+  });
+
+  it('keeps an omitted percent unknown when the period has already ended or is not bracketed', async () => {
+    const ended = await probeGrokAccount(options({ billing: postReset(Date.now() - 8 * 86_400_000, Date.now() - 86_400_000) }));
+    expect(ended.windows).toEqual([{ id: 'grok_unified_weekly', usedPercent: null, resetsAt: expect.any(String) }]);
+    const future = await probeGrokAccount(options({ billing: postReset(Date.now() + 86_400_000, Date.now() + 8 * 86_400_000) }));
+    expect(future.windows[0]!.usedPercent).toBeNull();
+    const openEnded = await probeGrokAccount(options({ billing: { config: { isUnifiedBillingUser: true,
+      currentPeriod: { type: 'USAGE_PERIOD_TYPE_WEEKLY', start: iso(Date.now() - 86_400_000) } } } }));
+    expect(openEnded.windows).toEqual([{ id: 'grok_unified_weekly', usedPercent: null, resetsAt: null }]);
+  });
+
+  it('still reports a sent percent verbatim inside the same period', async () => {
+    const billing = postReset(Date.now() - 86_400_000, Date.now() + 6 * 86_400_000);
+    const result = await probeGrokAccount(options({ billing: { ...billing, config: { ...billing.config, creditUsagePercent: 12.5 } } }));
+    expect(result.windows[0]!.usedPercent).toBe(12.5);
+  });
+});

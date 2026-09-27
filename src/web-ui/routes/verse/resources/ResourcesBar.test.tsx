@@ -4,7 +4,8 @@
  * as empty red batteries, and the bar's on/off choice persists.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import type { CapacityRow, CapacityWindowRow } from '../usage/capacity-strip-model.js';
+import { buildCapacityRows, type CapacityRow, type CapacityWindowRow } from '../usage/capacity-strip-model.js';
+import { capacity, nativeSeat, seatWindow } from '../seat-fixtures.test-support.js';
 import { barRows } from './ResourcesBar.js';
 import { getResourcesUi, reloadResourcesUiForTest, RESOURCES_STORAGE_KEY, setResourcesBar } from './resources-store.js';
 
@@ -52,6 +53,30 @@ describe('barRows', () => {
     const local = row({ seatId: 'local', label: 'Local', engine: 'local', kind: 'local', localCount: 3, windows: [], summary: 'ready' });
     const [l] = barRows([local], { healthRead: true, now: NOW });
     expect(l).toMatchObject({ engine: 'local', name: 'Local models (3)', leftPercent: null, level: 'idle', value: 'ready' });
+  });
+});
+
+// 3.15: after a weekly reset Grok's probe now reports a measured 0% (xAI omits
+// a zero percent); through the one capacity projection that must read as a
+// full battery with its reset — not the "—" Mason's rail showed.
+describe('Grok right after its weekly reset', () => {
+  const grokSeat = (usedPercent: number | null) => {
+    const window = seatWindow({ id: 'grok_unified_weekly', usedPercent, resetsAt: '2026-10-03T12:43:50.367Z' });
+    return nativeSeat(capacity({ planType: 'SuperGrok', windows: [window], binding: usedPercent === null ? null : window,
+      usability: usedPercent === null ? 'unknown' : 'ready', observedAt: new Date(NOW - 30_000).toISOString() }),
+    { id: 'grok', engine: 'grok', label: 'Grok', accountId: 'grok' });
+  };
+
+  it('shows a full battery, "100% left" and the reset', () => {
+    const [grok] = barRows(buildCapacityRows([grokSeat(0)], { now: NOW }), { healthRead: false, now: NOW });
+    expect(grok).toMatchObject({ engine: 'grok', leftPercent: 100, level: 'ok', value: '100% left' });
+    expect(grok!.detail[0]).toMatch(/weekly window: 0% used · resets \S/);
+  });
+
+  it('still says "—" only when the provider truly gave no percent', () => {
+    const [grok] = barRows(buildCapacityRows([grokSeat(null)], { now: NOW }), { healthRead: false, now: NOW });
+    expect(grok!.leftPercent).toBeNull();
+    expect(grok!.value).toBe('—');
   });
 });
 

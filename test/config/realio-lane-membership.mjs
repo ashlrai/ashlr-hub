@@ -421,6 +421,7 @@ export const REAL_IO_TEST_FILES = [
   'test/local-eval-heldout.test.ts', // spawns real `node` held-out checkers, like local-eval.test.ts
   'test/verse-accounts-limit-reached.test.ts', // private 0600/0700 ledger evidence files round-tripped in a tmp root (sibling of verse-accounts)
   'test/verse-resources-ready-314.test.ts', // 3.14: real collector lease acquire / idle hand-back / re-acquire under a tmp root (sibling of verse-accounts)
+  'test/verse-grok-usage-reset-315.test.ts', // 3.15: private 0600/0700 connections + capacity snapshot round-tripped in a tmp root (sibling of verse-accounts)
   'test/verse-fleet-history.test.ts', // one real worker thread + an event-loop budget assertion over on-disk fixtures
   'test/routing-budget-api.test.ts', // real web server bind for /api/verse/budget* under a relocated HOME
   'test/harness-dispatch-311.test.ts', // 3.11: temp source repo + sandbox worktree + a spawned fake codex / claude recording its argv, behind a cache-busted re-import of the sandboxed-engine graph
