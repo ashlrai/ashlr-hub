@@ -84,6 +84,10 @@ import type { SeatChoice } from './SeatSelector.js';
 import { useViewport } from './shell/viewport.js';
 import { getVerseSessionHead } from './verse-store.js';
 import { insertDictation } from './voice/insert-text.js';
+// Dictation (voice/). Static here on purpose: the composer is not in the
+// first-paint closure (Workspace is preloaded, not imported), and a second
+// lazy boundary inside the chat measurably delayed the dock's own lazy panes.
+import { VoiceInput } from './voice/VoiceInput.js';
 import { ENGINE_LABEL, modelLabel, seatPillLabel } from './verse-model.js';
 import { formatTokens } from './verse-readouts.js';
 import { matchPlaybookMacros, usePlaybookMacroSuggestions } from './playbooks/macro-suggest.js';
@@ -97,8 +101,6 @@ import cstyles from './composer/composer.module.css';
  * lazy chunk, so the composer's first paint does not carry the advisor.
  */
 const MultiModelBar = lazy(() => import('./multimodel/MultiModelBar.js'));
-// Dictation (voice/): lazy, so none of it is in the composer's own chunk.
-const VoiceInput = lazy(() => import('./voice/VoiceInput.js'));
 
 export interface ComposerProps {
   /** Which chat this box belongs to — drafts, history, controls and the queue are per session. */
@@ -967,12 +969,10 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
                 <IconPlus width={16} height={16} aria-hidden="true" />
               </button>
             </Tooltip>
-            <Suspense fallback={null}>
-              <VoiceInput surface="composer" targetRef={textarea} disabled={disabled}
-                onInsert={insertDictated} cwd={dictationCwd}
-                {...(sessionId ? { lookupIdentifiers: lookupChatFiles } : {})}
-                onListeningChange={setListening} />
-            </Suspense>
+            <VoiceInput surface="composer" targetRef={textarea} disabled={disabled}
+              onInsert={insertDictated} cwd={dictationCwd}
+              {...(sessionId ? { lookupIdentifiers: lookupChatFiles } : {})}
+              onListeningChange={setListening} />
             {!compact && wide ? wide.permission : null}
           </div>
           <div className={cstyles.footerRight}>
