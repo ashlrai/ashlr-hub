@@ -5,7 +5,9 @@
  * chart never draws empty axes: it says what the emptiness means.
  *
  *   loading  — the previous render is held when there is one (no skeleton
- *              flash on refetch); otherwise a quiet placeholder.
+ *              flash on refetch); otherwise a skeleton in the chart's own
+ *              shape and height (`skeleton`), so the card does not jump
+ *              when the data lands, announced as "Loading…".
  *   empty    — "No runs in this window." A genuine, known zero.
  *   dark     — "Fleet dark since Sep 1": nothing has happened since a date.
  *   unknown  — the source could not be read. Never drawn as zeros.
@@ -21,7 +23,7 @@
  * tests assert the two stay the same key.
  */
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
-import { MoreGlyph } from './ChartParts.js';
+import { ChartSkeleton, MoreGlyph, type ChartSkeletonShape } from './ChartParts.js';
 import { formatDayLabel, formatTimeLabel } from './format.js';
 import './chart-tokens.css';
 import styles from './ChartFrame.module.css';
@@ -54,6 +56,10 @@ export interface ChartFrameProps {
   table: ReactNode;
   /** Rendered under the plot in chart view (legends, notes). */
   footer?: ReactNode;
+  /** The loading placeholder's outline — the chart's own shape (default: line). */
+  skeleton?: ChartSkeletonShape;
+  /** The loading placeholder's height in px — the plot's own height. */
+  skeletonHeight?: number;
 }
 
 /**
@@ -68,10 +74,23 @@ export function sinceLabel(since: string): string {
   return Number.isFinite(ms) ? formatTimeLabel(ms) : formatDayLabel(since.slice(0, 10));
 }
 
-function StatusMessage({ status }: { status: Exclude<ChartStatus, { kind: 'ready' }> }): ReactNode {
+function StatusMessage({
+  status,
+  skeleton,
+  skeletonHeight,
+}: {
+  status: Exclude<ChartStatus, { kind: 'ready' }>;
+  skeleton?: ChartSkeletonShape;
+  skeletonHeight?: number;
+}): ReactNode {
   switch (status.kind) {
     case 'loading':
-      return <p className={styles.state} aria-busy="true">Loading…</p>;
+      return (
+        <div className={styles.loading} role="status" aria-busy="true">
+          <ChartSkeleton shape={skeleton} height={skeletonHeight} />
+          <span className="visually-hidden">Loading…</span>
+        </div>
+      );
     case 'empty':
       return <p className={styles.state}>{status.message ?? 'Nothing happened in this window.'}</p>;
     case 'dark':
@@ -225,6 +244,8 @@ export function ChartFrame({
   children,
   table,
   footer,
+  skeleton,
+  skeletonHeight,
 }: ChartFrameProps) {
   const [view, setView] = useState<ChartView>(defaultView);
   const titleId = useId();
@@ -259,7 +280,7 @@ export function ChartFrame({
         </p>
       ) : null}
       {!ready ? (
-        <StatusMessage status={status} />
+        <StatusMessage status={status} skeleton={skeleton} skeletonHeight={skeletonHeight} />
       ) : view === 'table' ? (
         <div className={styles.table}>{table}</div>
       ) : (

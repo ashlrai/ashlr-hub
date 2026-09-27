@@ -238,6 +238,7 @@ export function StepBand({
       description={description}
       caveat={caveat}
       status={resolvedStatus}
+      skeleton="line"
       table={<TableView caption={title} columns={columns} rows={tableRows} rowKey={(r) => r.id} />}
       footer={
         <ChartLegend

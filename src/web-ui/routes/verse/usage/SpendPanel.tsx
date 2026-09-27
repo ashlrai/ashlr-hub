@@ -113,7 +113,6 @@ export function SpendPanel({
                 },
               ]}
               area
-              formatX={(x) => chartFormat.formatTimeLabel(x)}
               formatY={(y) => chartFormat.formatUsd(y)}
               ariaLabel="Autonomous loop spend per day"
             />

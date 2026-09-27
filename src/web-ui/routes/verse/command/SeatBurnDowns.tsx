@@ -23,13 +23,15 @@
  * history — the page has only been watching since it opened. A local seat
  * has no window: it gets a quiet "free" tile, not an empty chart.
  */
-import { useRef } from 'react';
+import { useId, useRef } from 'react';
 import type { BudgetView } from '../../../../core/routing/policy.js';
 import { BurnDown } from '../../../components/charts/BurnDown.js';
 import { ChartFrame } from '../../../components/charts/ChartFrame.js';
 import { TableView, type TableColumn } from '../../../components/charts/TableView.js';
-import { CHART_SEQUENTIAL } from '../../../components/charts/colors.js';
-import { areaPath, linePath, linearScale, niceTicks, splitRuns, tickGutter, type BurnPoint } from '../../../components/charts/chart-math.js';
+import { CHART_SEQUENTIAL, gradientId } from '../../../components/charts/colors.js';
+import { AreaGradient } from '../../../components/charts/ChartParts.js';
+import { useChartMotion } from '../../../components/charts/motion.js';
+import { crisp, linearScale, niceTicks, smoothAreaPath, smoothPath, splitRuns, tickGutter, type BurnPoint } from '../../../components/charts/chart-math.js';
 import { useChartWidth } from '../../../components/charts/useChartWidth.js';
 import { useTextScale } from '../../../components/charts/useTextScale.js';
 import plot from '../../../components/charts/plot.module.css';
@@ -88,6 +90,9 @@ function lateStartNote(burn: SeatBurn, firstSeen: number | null, formatTime: (ms
  * projection or reset marker — each would point at an instant nobody
  * published. WHY not a kit chart: BurnDown needs a reset, and AreaTrend sizes
  * both axes to the data — which is what drew Claude's one-minute, 0–40% card.
+ * It wears the kit's polish all the same (verse-visual-quality): the reserve
+ * band, a gradient wash under a monotone curve, crisp gridlines and the
+ * reduced-motion-aware entrance — so it reads as a sibling of BurnDown.
  */
 function TrailingWindow({
   title,
@@ -114,6 +119,8 @@ function TrailingWindow({
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
+  const motion = useChartMotion();
+  const gid = gradientId(useId(), 'remaining');
   const inWindow = points.filter((p) => p.t >= from && p.t <= to).sort((a, b) => a.t - b.t);
   const textScale = useTextScale();
   // Same gutter rule as the chart kit, so Large/XLarge display sizes fit too.
@@ -135,23 +142,31 @@ function TrailingWindow({
       description={description}
       caveat={caveat}
       status={latest ? { kind: 'ready' } : { kind: 'empty', message: 'No reading inside this window.' }}
+      skeleton="line"
+      skeletonHeight={CHART_HEIGHT}
       table={<TableView caption={title} columns={columns} rows={inWindow} rowKey={(p) => String(p.t)} />}
     >
-      <div ref={wrapRef} className={plot.plotWrap}>
+      <div ref={wrapRef} className={plot.plotWrap} data-motion={motion}>
         <svg className={plot.svg} width={width} height={CHART_HEIGHT} viewBox={`0 0 ${width} ${CHART_HEIGHT}`} role="img" aria-label={ariaLabel}>
+          <defs>
+            <AreaGradient id={gid} color={CHART_SEQUENTIAL} top={PAD_T} bottom={PAD_T + plotH} />
+          </defs>
+          {line && line.value > 0 ? (
+            <rect data-role="reserve-band" className={`${plot.reserveBand} ${plot.fadeIn}`} x={padL} y={y(line.value)} width={plotW} height={Math.max(0, ys(0) - y(line.value))} />
+          ) : null}
           {PERCENT_TICKS.map((t) => (
             <g key={t}>
-              <line className={plot.grid} x1={padL} x2={padL + plotW} y1={ys(t)} y2={ys(t)} />
+              <line className={plot.grid} x1={padL} x2={padL + plotW} y1={crisp(ys(t))} y2={crisp(ys(t))} />
               <text className={plot.tick} x={padL - 6} y={ys(t)} dy="0.32em" textAnchor="end">{pct(t)}</text>
             </g>
           ))}
-          <line className={plot.axis} x1={padL} x2={padL + plotW} y1={ys(0)} y2={ys(0)} />
+          <line className={plot.axis} x1={padL} x2={padL + plotW} y1={crisp(ys(0))} y2={crisp(ys(0))} />
           {/* Two labels only, one per end: the window's start and "Now". */}
           <text className={plot.tick} x={padL} y={CHART_HEIGHT - 8} textAnchor="start">{formatTime(from)}</text>
           <text className={plot.tick} x={padL + plotW} y={CHART_HEIGHT - 8} textAnchor="end">Now</text>
           {line ? (
             <g data-role="reserve">
-              <line className={plot.reference} x1={padL} x2={padL + plotW} y1={ys(line.value)} y2={ys(line.value)} />
+              <line className={plot.reference} x1={padL} x2={padL + plotW} y1={crisp(ys(line.value))} y2={crisp(ys(line.value))} />
               <text data-role="reserve-label" className={`${plot.tick} ${plot.halo}`} x={padL + 4} y={ys(line.value) - 5} textAnchor="start">
                 {line.label} · {pct(line.value)}
               </text>
@@ -159,8 +174,8 @@ function TrailingWindow({
           ) : null}
           {runs.map((run, i) => (
             <g key={i} data-role="remaining">
-              <path className={plot.wash} fill={CHART_SEQUENTIAL} d={areaPath(run, run.map((p) => ({ x: p.x, y: ys(0) })))} />
-              <path className={plot.line} stroke={CHART_SEQUENTIAL} d={linePath(run)} />
+              <path data-role="area" className={`${plot.area} ${plot.fadeIn}`} fill={`url(#${gid})`} d={smoothAreaPath(run, run.map((p) => ({ x: p.x, y: ys(0) })))} />
+              {run.length > 1 ? <path data-role="line" className={`${plot.line} ${plot.draw}`} pathLength={1} stroke={CHART_SEQUENTIAL} d={smoothPath(run)} /> : null}
             </g>
           ))}
           {latest && latest.remaining !== null ? (

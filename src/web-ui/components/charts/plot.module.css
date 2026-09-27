@@ -10,6 +10,9 @@
   display: block;
   overflow: visible;
   max-width: 100%;
+  /* Every number drawn in a plot — ticks, direct labels, funnel counts —
+     aligns digit for digit (inherited by each <text>). */
+  font-variant-numeric: tabular-nums;
 }
 
 .grid {
@@ -78,7 +81,42 @@
 .crosshair {
   stroke: var(--chart-axis);
   stroke-width: 1;
+  shape-rendering: crispEdges;
   pointer-events: none;
+}
+
+/* The gradient wash under a line (fill is url(#AreaGradient)). */
+.area {
+  stroke: none;
+}
+
+/* The hovered / focused column's slot, behind its bars (BarStack). */
+.hoverBand {
+  fill: var(--bg-hover);
+  pointer-events: none;
+}
+
+/* BurnDown: the reserve kept for interactive use, as a band from empty up
+   to the reserve line — the region autonomy must stay out of, not just a
+   line to squint at. The line and its label still carry the meaning. */
+.reserveBand {
+  fill: var(--status-warning-bg);
+  pointer-events: none;
+}
+
+/* "Now" on a time window: a quiet dashed rule with its label. */
+.now {
+  stroke: var(--text-tertiary);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+  shape-rendering: crispEdges;
+  pointer-events: none;
+}
+
+/* The last reading's dot: a ring of surface around the series ink. */
+.endDot {
+  stroke: var(--chart-surface);
+  stroke-width: 2;
 }
 
 .hit {
@@ -135,18 +173,43 @@
   z-index: var(--z-dropdown);
   pointer-events: none;
   transform: translate(-50%, calc(-100% - 8px));
-  padding: var(--space-2);
+  min-width: 140px;
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--chart-tooltip-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--chart-tooltip-bg);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-menu);
   color: var(--text-primary);
   font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  /* Opacity only: `transform` is the positioning. The duration token
+     collapses to 1 ms under reduced motion. */
+  animation: chart-tooltip-in var(--duration-fast) var(--ease-decelerate);
+}
+
+/* Beside the crosshair, inside the plot (ChartParts tooltipSide). */
+.tooltipRight {
+  transform: translate(12px, 0);
+}
+
+.tooltipLeft {
+  transform: translate(calc(-100% - 12px), 0);
+}
+
+@keyframes chart-tooltip-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .tooltipTitle {
   color: var(--text-tertiary);
+  font-weight: var(--font-weight-medium);
   margin-bottom: var(--space-1);
 }
 
@@ -154,12 +217,37 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  min-height: calc(var(--text-xs-line) + 2px);
+}
+
+.tooltipLabel {
+  color: var(--text-secondary);
+}
+
+/* A summary row (Total): a hairline above, the label at full ink. */
+.tooltipTotal {
+  margin-top: var(--space-1);
+  padding-top: var(--space-1);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.tooltipTotal .tooltipLabel {
+  color: var(--text-primary);
+  font-weight: var(--font-weight-medium);
 }
 
 .tooltipKey {
   width: 8px;
   height: 8px;
   border-radius: 2px;
+  flex: none;
+}
+
+/* A line series' key: the stroke it is drawn with, not a filled square. */
+.tooltipKeyLine {
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
   flex: none;
 }
 
@@ -231,9 +319,134 @@
   border: 0;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .animated {
-    transition: opacity 120ms ease;
+/* ---------------------------------------------------------------------------
+   Entrance (verse-visual-quality) — once, on mount, never on hover or refetch.
+   Keyed off the plot wrapper's data-motion="enter", which motion.ts only
+   writes when neither Settings (data-motion="reduce" on <html>) nor the OS
+   asks for reduced motion. Durations are the motion tokens, so they also
+   collapse to ~1 ms under reduced motion (the entrance is three times the
+   slow token: long enough to read as a line being drawn); the media block
+   below is the same
+   two-trigger guard as the skeleton shimmer in design/global.css.
+   ------------------------------------------------------------------------- */
+
+/* A solid line draws itself left to right (the path carries pathLength=1). */
+[data-motion='enter'] .draw {
+  animation: chart-draw calc(var(--duration-slow) * 3) var(--ease-decelerate) both;
+}
+
+/* A wash, a band or a label fades up just behind the line. */
+[data-motion='enter'] .fadeIn {
+  animation: chart-fade calc(var(--duration-slow) * 3) var(--ease-standard) both;
+  animation-delay: var(--duration-fast);
+}
+
+/* Columns rise from the baseline, staggered by --chart-i (their index). */
+[data-motion='enter'] .rise {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  animation: chart-rise calc(var(--duration-slow) * 3) var(--ease-decelerate) both;
+  animation-delay: calc(var(--chart-i, 0) * var(--duration-instant) / 5);
+}
+
+/* Horizontal bars (Funnel stages) grow from their start edge. */
+[data-motion='enter'] .grow {
+  transform-box: fill-box;
+  transform-origin: 0 50%;
+  animation: chart-grow calc(var(--duration-slow) * 3) var(--ease-decelerate) both;
+  animation-delay: calc(var(--chart-i, 0) * var(--duration-instant) / 2);
+}
+
+@keyframes chart-draw {
+  /* 1.02, not 1: at exactly 1 a round cap still paints a dot at the start. */
+  from {
+    stroke-dasharray: 1 1;
+    stroke-dashoffset: 1.02;
+  }
+  to {
+    stroke-dasharray: 1 1;
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes chart-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes chart-rise {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes chart-grow {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :global(:root:not([data-motion='full'])) .draw,
+  :global(:root:not([data-motion='full'])) .fadeIn,
+  :global(:root:not([data-motion='full'])) .rise,
+  :global(:root:not([data-motion='full'])) .grow,
+  :global(:root:not([data-motion='full'])) .tooltip,
+  :global(:root:not([data-motion='full'])) .skeleton {
+    animation: none;
+  }
+}
+
+:global(:root[data-motion='reduce']) .draw,
+:global(:root[data-motion='reduce']) .fadeIn,
+:global(:root[data-motion='reduce']) .rise,
+:global(:root[data-motion='reduce']) .grow,
+:global(:root[data-motion='reduce']) .tooltip,
+:global(:root[data-motion='reduce']) .skeleton {
+  animation: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Loading skeleton (ChartParts ChartSkeleton) — the final chart's outline in
+   the neutral hover tint, breathing slowly; static under reduced motion.
+   ------------------------------------------------------------------------- */
+.skeleton {
+  display: block;
+  animation: chart-skeleton-pulse 1.6s var(--ease-standard) infinite;
+}
+
+.skeletonMark {
+  fill: var(--bg-active);
+}
+
+.skeletonTrack {
+  fill: var(--bg-hover);
+}
+
+.skeletonGrid {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  shape-rendering: crispEdges;
+}
+
+@keyframes chart-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
   }
 }
 

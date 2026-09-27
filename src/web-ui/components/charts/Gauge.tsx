@@ -164,6 +164,7 @@ export function Gauge({
       description={description}
       caveat={caveat}
       status={status ?? { kind: 'ready' }}
+      skeleton="gauge"
       table={<TableView caption={title} columns={columns} rows={rows} rowKey={(row) => row.key} />}
     >
       <div ref={fitRef} className={styles.fit}>

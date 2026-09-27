@@ -80,6 +80,10 @@ function SeatItem({ item }: { item: SeatStripItem }) {
           <span className={styles.value}>{item.value}</span>
         </span>
         <span className={styles.meter} style={meterStyle} aria-hidden="true">
+          {/* The reserve as a ZONE (empty → the reserve line), then the fill,
+              then the tick — so "how close to the reserve" reads as distance
+              to a region, as on the Usage burn-downs' reserve band. */}
+          {item.reservePercent !== null ? <span className={styles.reserveZone} /> : null}
           <span className={styles.fill} />
           {item.reservePercent !== null ? <span className={styles.reserve} /> : null}
         </span>

@@ -11,6 +11,11 @@
  * sentence fragment with its unit and its comparison — "+5 merges vs prior
  * 7d", never a bare "-1". In dark the tile gets the 4% top hairline
  * (`--hairline-lift`, transparent in light) so a KPI row lifts off the canvas.
+ *
+ * Polish (verse-visual-quality): the sparkline spans the tile (`fill`), in
+ * the quantity ink with a gradient wash; a judged delta sits on a tinted pill
+ * with a direction arrow (the arrow is decoration — the signed number and
+ * its words still say which way it went).
  */
 import type { ReactNode } from 'react';
 import { formatSignedCompact } from './format.js';
@@ -65,21 +70,46 @@ export function StatTile({
           ? styles.deltaGood
           : styles.deltaBad;
 
+  const arrow = delta == null || delta.value === 0 || !Number.isFinite(delta.value) ? null : delta.value > 0 ? '↑' : '↓';
+
   return (
     <div className={styles.tile} data-stat-tile="">
       <span className={styles.label}>{label}</span>
       <span className={styles.value}>{value}</span>
       {trend ? (
         <span className={styles.trend}>
-          <Sparkline points={trend} width={112} height={24} area ariaLabel={trendLabel ?? `${label} trend`} describe={describeTrend} />
+          <Sparkline points={trend} width="fill" height={28} area ariaLabel={trendLabel ?? `${label} trend`} describe={describeTrend} />
         </span>
       ) : null}
       {delta || caption ? (
         <div className={styles.meta}>
-          {delta ? <span className={`${styles.delta} ${deltaTone}`}>{deltaText(delta)}</span> : null}
+          {delta ? (
+            <span className={`${styles.delta} ${deltaTone}`} data-delta-tone={deltaTone === styles.deltaGood ? 'good' : deltaTone === styles.deltaBad ? 'bad' : 'neutral'}>
+              {arrow ? <span className={styles.arrow} aria-hidden="true">{arrow}</span> : null}
+              <span>{deltaText(delta)}</span>
+            </span>
+          ) : null}
           {caption ? <span className={styles.caption}>{caption}</span> : null}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * A stat tile's loading placeholder in the tile's own shape — label, number
+ * and sparkline bars on the same box — so a KPI row does not jump when its
+ * figures land. Uses the app's shared `.skeleton` shimmer (design/global.css),
+ * which already stops under reduced motion. Presentation only: the caller
+ * announces the loading state once for the whole row.
+ */
+export function StatTileSkeleton({ trend = true }: { trend?: boolean }) {
+  return (
+    <div className={styles.tile} data-stat-tile-skeleton="" aria-hidden="true">
+      <span className={`skeleton ${styles.skLabel}`} />
+      <span className={`skeleton ${styles.skValue}`} />
+      {trend ? <span className={`skeleton ${styles.skTrend}`} /> : null}
+      <span className={`skeleton ${styles.skMeta}`} />
     </div>
   );
 }

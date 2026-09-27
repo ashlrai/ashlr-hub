@@ -8,14 +8,18 @@
  * Honesty: an unknown stage (null) draws a dashed placeholder and "unknown",
  * and the conversions on either side of it are "—", never a guessed rate.
  * Works at 375 px: below 480 px the stage label moves above its bar.
+ *
+ * Polish (verse-visual-quality): each stage's bar grows from its start edge
+ * once on mount, top stage first (static under reduced motion — motion.ts).
  */
-import { useRef } from 'react';
+import { useRef, type CSSProperties } from 'react';
 import { CHART_SEQUENTIAL } from './colors.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
 import { TableView, type TableColumn } from './TableView.js';
 import { funnelSteps, roundedRightBar, type FunnelStep } from './chart-math.js';
 import { formatCompact, formatPercent } from './format.js';
 import { useChartWidth } from './useChartWidth.js';
+import { useChartMotion } from './motion.js';
 import plot from './plot.module.css';
 
 export interface FunnelStage {
@@ -61,6 +65,7 @@ export function Funnel({
 }: FunnelProps) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
+  const motion = useChartMotion();
   const steps = funnelSteps(stages.map((s) => s.value));
   const rows: Row[] = stages.map((stage, i) => ({ ...steps[i]!, stage }));
   const first = stages[0]?.value ?? null;
@@ -100,9 +105,10 @@ export function Funnel({
       description={description}
       caveat={caveat}
       status={resolvedStatus}
+      skeleton="funnel"
       table={<TableView caption={title} columns={columns} rows={rows} rowKey={(r) => r.stage.id} />}
     >
-      <div ref={wrapRef} className={plot.plotWrap}>
+      <div ref={wrapRef} className={plot.plotWrap} data-motion={motion}>
         <svg className={plot.svg} width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={summary}>
           {rows.map((r, i) => {
             const y = i * rowH + (narrow ? 18 : 7);
@@ -121,7 +127,7 @@ export function Funnel({
                 {r.value === null ? (
                   <rect data-unknown="true" className={plot.noData} x={labelW} y={y} width={Math.min(plotW, 48)} height={BAR_H} rx={4} />
                 ) : barW > 0 ? (
-                  <path data-role="bar" d={roundedRightBar(labelW, y, barW, BAR_H)} fill={color} />
+                  <path data-role="bar" className={plot.grow} style={{ '--chart-i': i } as CSSProperties} d={roundedRightBar(labelW, y, barW, BAR_H)} fill={color} />
                 ) : null}
                 <text className={plot.labelStrong} x={labelW + plotW + 10} y={textY} dy="0.32em">
                   {r.value === null ? 'unknown' : formatValue(r.value)}

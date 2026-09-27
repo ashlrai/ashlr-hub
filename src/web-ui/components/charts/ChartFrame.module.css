@@ -160,6 +160,13 @@
   font-size: var(--text-sm-size);
 }
 
+/* The loading skeleton sits exactly where the plot will. */
+.loading {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
 .dark {
   display: flex;
   flex-direction: column;

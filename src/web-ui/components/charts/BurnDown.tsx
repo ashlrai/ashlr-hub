@@ -11,16 +11,23 @@
  * rather than drawing a guess — and with no plausible reset (0 / NaN /
  * pre-2000) it draws neither pace nor projection and says the reset is
  * unknown, rather than projecting to an invented one.
+ *
+ * Polish (verse-visual-quality): the reserve is a BAND from empty up to the
+ * reserve line (the region autonomy stays out of), the remaining line is a
+ * monotone curve over a gradient wash, "now" is a labelled dashed rule, and
+ * the plot is hoverable and a keyboard stop — the crosshair snaps to each
+ * reading and the tooltip gives its local time, the exact remaining and,
+ * with a known reset, where even pace would have it.
  */
-import { useRef } from 'react';
-import { CHART_SEQUENTIAL, toneColor } from './colors.js';
+import { useId, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
+import { CHART_SEQUENTIAL, gradientId, toneColor } from './colors.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
-import { ChartLegend } from './ChartParts.js';
+import { AreaGradient, ChartLegend, ChartTooltip, clampTooltipLeft, tooltipSide } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
 import {
   MIN_TIME_SPAN_MS,
-  areaPath,
   axisTicks,
+  crisp,
   ensureSpan,
   isPlausibleTime,
   labelCharPx,
@@ -28,11 +35,14 @@ import {
   linePath,
   linearScale,
   projectBurnDown,
+  smoothAreaPath,
+  smoothPath,
   splitRuns,
   tickGutter,
   type BurnPoint,
 } from './chart-math.js';
-import { formatCompact, timeLabelLadder } from './format.js';
+import { formatCompact, formatTooltipInstant, timeLabelLadder } from './format.js';
+import { useChartMotion } from './motion.js';
 import { useChartWidth } from './useChartWidth.js';
 import { useTextScale } from './useTextScale.js';
 import plot from './plot.module.css';
@@ -141,6 +151,10 @@ export function BurnDown({
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
   const textScale = useTextScale();
+  const motion = useChartMotion();
+  const gradKey = useId();
+  const liveId = useId();
+  const [active, setActive] = useState<number | null>(null);
   // A reading stamped 0 / NaN / pre-2000 is a null timestamp that leaked
   // through: it is not on this window's time axis, and it would drag both
   // the axis and the projection's slope back to 1970.
@@ -202,6 +216,42 @@ export function BurnDown({
   const runs = splitRuns(sorted.map((p) => ({ x: clampX(p.t), y: p.remaining })))
     .map((run) => run.map((p) => ({ x: xs(p.x), y: ys(Math.max(0, p.y)) })));
 
+  // Where even pace would have the window at `t`: full at the start, empty
+  // at the reset — the same straight reference the dashed line draws.
+  const paceAt = (t: number): number | null =>
+    resetKnown && xEnd > x0 ? Math.max(0, Math.min(capacity, capacity * (1 - (t - x0) / (xEnd - x0)))) : null;
+
+  function indexAt(clientX: number): number | null {
+    const el = wrapRef.current;
+    if (!el || sorted.length === 0) return null;
+    const px = clientX - el.getBoundingClientRect().left;
+    let best = 0;
+    let bestD = Infinity;
+    sorted.forEach((p, i) => {
+      const d = Math.abs(xs(clampX(p.t)) - px);
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    });
+    return best;
+  }
+
+  function onKey(e: KeyboardEvent<HTMLDivElement>): void {
+    if (sorted.length === 0) return;
+    const cur = active ?? sorted.length - 1;
+    const next = e.key === 'ArrowLeft' ? cur - 1 : e.key === 'ArrowRight' ? cur + 1 : e.key === 'Home' ? 0 : e.key === 'End' ? sorted.length - 1 : null;
+    if (next === null) return;
+    e.preventDefault();
+    setActive(Math.max(0, Math.min(sorted.length - 1, next)));
+  }
+
+  const activePoint = active !== null ? sorted[active] : undefined;
+  const activePace = activePoint ? paceAt(activePoint.t) : null;
+  const nowX = now > x0 && now < xEnd ? xs(now) : null;
+  // "Now" is labelled only where it cannot collide with the plot's edges.
+  const nowLabel = nowX !== null && nowX - padL > 24 && padL + plotW - nowX > 24;
+
   let projectionPath = '';
   if (reset !== null && projection.from && projection.slopePerMs !== null) {
     const endT = projection.exhaustAt ?? reset;
@@ -236,6 +286,8 @@ export function BurnDown({
       description={description}
       caveat={caveat}
       status={resolvedStatus}
+      skeleton="line"
+      skeletonHeight={height}
       table={<TableView caption={title} columns={columns} rows={sorted} rowKey={(p) => String(p.t)} />}
       footer={
         <>
@@ -244,15 +296,48 @@ export function BurnDown({
         </>
       }
     >
-      <div ref={wrapRef} className={plot.plotWrap}>
-        <svg className={plot.svg} width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={summary}>
+      <div
+        ref={wrapRef}
+        className={`${plot.plotWrap} ${plot.focusable}`}
+        data-motion={motion}
+        tabIndex={0}
+        role="group"
+        aria-label={`${title}. Use the left and right arrow keys to read each reading.`}
+        aria-describedby={liveId}
+        onFocus={() => setActive((a) => a ?? (sorted.length ? sorted.length - 1 : null))}
+        onBlur={() => setActive(null)}
+        onKeyDown={onKey}
+      >
+        <svg
+          className={plot.svg}
+          width={width}
+          height={height}
+          viewBox={`0 0 ${width} ${height}`}
+          role="img"
+          aria-label={summary}
+          onPointerMove={(e: PointerEvent<SVGSVGElement>) => setActive(indexAt(e.clientX))}
+          onPointerLeave={() => setActive(null)}
+        >
+          <defs>
+            <AreaGradient id={gradientId(gradKey, 'remaining')} color={CHART_SEQUENTIAL} top={PAD_T} bottom={PAD_T + plotH} />
+          </defs>
+          {reserve && reserve.value > 0 ? (
+            <rect
+              data-role="reserve-band"
+              className={`${plot.reserveBand} ${plot.fadeIn}`}
+              x={padL}
+              y={ys(Math.min(top, reserve.value))}
+              width={plotW}
+              height={Math.max(0, ys(0) - ys(Math.min(top, reserve.value)))}
+            />
+          ) : null}
           {ticks.map((t, i) => (
             <g key={t}>
-              <line className={plot.grid} x1={padL} x2={padL + plotW} y1={ys(t)} y2={ys(t)} />
+              <line className={plot.grid} x1={padL} x2={padL + plotW} y1={crisp(ys(t))} y2={crisp(ys(t))} />
               <text className={plot.tick} x={padL - 6} y={ys(t)} dy="0.32em" textAnchor="end">{yAxis.labels[i]}</text>
             </g>
           ))}
-          <line className={plot.axis} x1={padL} x2={padL + plotW} y1={ys(0)} y2={ys(0)} />
+          <line className={plot.axis} x1={padL} x2={padL + plotW} y1={crisp(ys(0))} y2={crisp(ys(0))} />
           {xLabels.map((l) => (
             <text key={l.key} data-axis-label={l.key} className={plot.tick} x={l.x} y={height - 8} textAnchor={l.anchor}>{l.text}</text>
           ))}
@@ -262,7 +347,7 @@ export function BurnDown({
           ) : null}
           {reserve ? (
             <g data-role="reserve">
-              <line className={plot.reference} x1={padL} x2={padL + plotW} y1={ys(reserve.value)} y2={ys(reserve.value)} />
+              <line className={plot.reference} x1={padL} x2={padL + plotW} y1={crisp(ys(reserve.value))} y2={crisp(ys(reserve.value))} />
               {/* Above-left of the line, over a surface halo (SPEC-310C §6): the
                   window's start is the one place the remaining line is always
                   high, and the projection only ever runs to the right, so the
@@ -272,13 +357,25 @@ export function BurnDown({
               </text>
             </g>
           ) : null}
-          {now > x0 && now < xEnd ? (
-            <line className={plot.crosshair} x1={xs(now)} x2={xs(now)} y1={PAD_T} y2={PAD_T + plotH} />
+          {nowX !== null ? (
+            <g data-role="now">
+              <line className={plot.now} x1={crisp(nowX)} x2={crisp(nowX)} y1={PAD_T} y2={PAD_T + plotH} />
+              {nowLabel ? (
+                <text data-role="now-label" className={`${plot.tick} ${plot.halo}`} x={nowX} y={PAD_T - 4} textAnchor="middle">Now</text>
+              ) : null}
+            </g>
           ) : null}
           {runs.map((run, i) => (
             <g key={i} data-role="remaining">
-              <path className={plot.wash} fill={CHART_SEQUENTIAL} d={areaPath(run, run.map((p) => ({ x: p.x, y: ys(0) })))} />
-              <path className={plot.line} stroke={CHART_SEQUENTIAL} d={linePath(run)} />
+              <path
+                data-role="area"
+                className={`${plot.area} ${plot.fadeIn}`}
+                fill={`url(#${gradientId(gradKey, 'remaining')})`}
+                d={smoothAreaPath(run, run.map((p) => ({ x: p.x, y: ys(0) })))}
+              />
+              {run.length > 1 ? (
+                <path data-role="line" className={`${plot.line} ${plot.draw}`} pathLength={1} stroke={CHART_SEQUENTIAL} d={smoothPath(run)} />
+              ) : null}
             </g>
           ))}
           {projectionPath ? (
@@ -287,7 +384,33 @@ export function BurnDown({
           {projection.from ? (
             <circle className={plot.marker} cx={xs(clampX(projection.from.t))} cy={ys(projection.from.remaining)} r={4} fill={CHART_SEQUENTIAL} />
           ) : null}
+          {activePoint ? (
+            <g data-role="hover">
+              <line className={plot.crosshair} data-role="crosshair" x1={crisp(xs(clampX(activePoint.t)))} x2={crisp(xs(clampX(activePoint.t)))} y1={PAD_T} y2={PAD_T + plotH} />
+              {activePoint.remaining !== null ? (
+                <circle className={plot.marker} cx={xs(clampX(activePoint.t))} cy={ys(Math.max(0, activePoint.remaining))} r={4} fill={CHART_SEQUENTIAL} />
+              ) : null}
+            </g>
+          ) : null}
         </svg>
+        <span id={liveId} className={plot.srOnly} aria-live="polite">
+          {activePoint
+            ? `${formatTooltipInstant(activePoint.t)}: ${activePoint.remaining === null ? 'no reading' : `${formatValue(activePoint.remaining)} remaining`}` +
+              (activePace !== null ? `; even pace ${formatValue(activePace)}` : '')
+            : ''}
+        </span>
+        {activePoint ? (
+          <ChartTooltip
+            left={tooltipSide(xs(clampX(activePoint.t)), width) ? xs(clampX(activePoint.t)) : clampTooltipLeft(xs(clampX(activePoint.t)), width)}
+            side={tooltipSide(xs(clampX(activePoint.t)), width)}
+            top={PAD_T}
+            title={formatTooltipInstant(activePoint.t)}
+            rows={[
+              { key: 'r', label: 'Remaining', value: activePoint.remaining === null ? null : formatValue(activePoint.remaining), color: CHART_SEQUENTIAL, kind: 'line' },
+              ...(activePace !== null ? [{ key: 'p', label: 'Even pace', value: formatValue(activePace), color: 'var(--text-tertiary)', kind: 'line' as const }] : []),
+            ]}
+          />
+        ) : null}
       </div>
     </ChartFrame>
   );

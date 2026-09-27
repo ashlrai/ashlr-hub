@@ -195,6 +195,7 @@ export function MatrixHeatmap({
       description={description}
       caveat={caveat}
       status={resolvedStatus}
+      skeleton="heat"
       defaultView={defaultView}
       actions={actions}
       table={<TableView caption={title} columns={tableColumns} rows={tableRows} rowKey={(r) => r.id} />}
