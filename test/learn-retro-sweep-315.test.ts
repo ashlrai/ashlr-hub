@@ -208,6 +208,21 @@ describe('3.15: Devin task ends', () => {
     expect((await sweepRetros(deps({ ...quiet, devinTasks: () => [devinTask({})] }))).created).toBe(0);
   });
 
+  it('a Devin CHAT that ended without a PR is not a task end; one that opened a PR is', async () => {
+    const pr = { number: 7, url: 'https://github.com/ashlrai/widget/pull/7', state: 'closed' } as unknown as DevinTaskV1['pr'];
+    const r = await sweepRetros(deps({
+      ...quiet,
+      devinTasks: () => [
+        devinTask({ id: 'dv_20260926T1000_chat01', origin: 'chat', state: 'expired', stateReason: null }),
+        devinTask({ id: 'dv_20260926T1000_chat02', origin: 'chat', state: 'closed', stateReason: 'Terminated from its Verse chat.' }),
+        devinTask({ id: 'dv_20260926T1000_chat03', origin: 'chat', state: 'closed', stateReason: 'Closed in Verse: wrong approach', pr }),
+      ],
+    }));
+    expect(r).toMatchObject({ created: 1, unavailable: [] });
+    expect((await listRetros()).map((x) => x.sourceKey)).toEqual(['devin:dv_20260926T1000_chat03:closed']);
+    expect((await readKnowledge()).some((n) => n.text.includes('Terminated from its Verse chat'))).toBe(false);
+  });
+
   it('a failing Devin store is reported as `devin`; a caller without the dep reads no Devin store', async () => {
     const r = await sweepRetros(deps({ ...quiet, devinTasks: () => { throw new Error('EACCES'); } }));
     expect(r.unavailable).toEqual(['devin']);

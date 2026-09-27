@@ -58,6 +58,7 @@ import type { EffectiveConfigSnapshot, EffectiveConfigValue } from '../core/effe
 import { buildIndex, loadIndex, writeIndex } from '../core/index-engine.js';
 import { PROBE_HELPER_FLAGS } from '../core/resources/probe-helper-invocation.js';
 import { ANTHROPIC_PROXY_HOST_FLAG } from '../core/local-runtime/llama/proxy-invocation.js';
+import { DEVIN_CHAT_TURN_FLAG } from '../core/devin/chat-turn-invocation.js';
 import { planTidy, applyTidy } from '../core/tidy.js';
 import { openInEditor } from './open.js';
 import { pick } from './picker.js';
@@ -1739,7 +1740,10 @@ async function main(): Promise<void> {
     }
     // 3.15: the Devin chat turn process (core/devin/chat-turn-invocation.ts).
     // Same contract: operand-free, the request arrives on stdin.
-    if (argv[0] === '--_devin-chat-turn') {
+    // The flag is the invocation module's constant, so the child argv and this
+    // dispatch cannot drift apart (a mismatch would drop every Devin chat turn
+    // in the Bun binary into the ordinary CLI parser).
+    if (argv[0] === DEVIN_CHAT_TURN_FLAG) {
       await import('../core/devin/chat-turn-process.js');
       return;
     }

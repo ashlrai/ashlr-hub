@@ -253,11 +253,11 @@ async function loadM21(): Promise<void> {
   if (_m21Loaded) return;
   _m21Loaded = true;
   try {
-    // Store the specifier in a variable so TypeScript does not attempt static
-    // module resolution on a module that may not exist yet (M21 worktree.ts is
-    // built by a sibling agent). The try/catch degrades gracefully if absent.
-    const wtSpec = '../sandbox/worktree.js';
-    const wt = await import(/* @vite-ignore */ wtSpec) as {
+    // Literal specifiers (all three loads): the Bun-compiled binary bundles only
+    // what it can see, and a variable specifier always misses there — which
+    // silently turned sandbox mode into a no-op in the binary. The modules all
+    // exist now; the try/catch still degrades gracefully if one fails to load.
+    const wt = await import('../sandbox/worktree.js') as {
       createSandbox: CreateSandboxFn;
       sandboxDiff: SandboxDiffFn;
       removeSandbox: RemoveSandboxFn;
@@ -273,8 +273,7 @@ async function loadM21(): Promise<void> {
     // worktree.ts not built yet — sandbox mode degrades to no-op (default behavior)
   }
   try {
-    const auSpec = '../sandbox/audit.js';
-    const au = await import(/* @vite-ignore */ auSpec) as { audit: AuditFn };
+    const au = await import('../sandbox/audit.js') as { audit: AuditFn };
     _audit = au.audit;
   } catch (err) {
     // audit.ts exists in the repo. Every call site already treats _audit?.()
@@ -289,8 +288,7 @@ async function loadM21(): Promise<void> {
   }
   try {
     // M24: the inbox proposal sink — used ONLY when opts.propose is set.
-    const ibSpec = '../inbox/store.js';
-    const ib = await import(/* @vite-ignore */ ibSpec) as {
+    const ib = await import('../inbox/store.js') as {
       createProposal: CreateProposalFn;
       loadProposal: LoadProposalFn;
       setStatus: SetProposalStatusFn;

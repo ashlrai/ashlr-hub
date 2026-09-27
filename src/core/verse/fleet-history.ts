@@ -1237,6 +1237,17 @@ export function getFleetHistoryService(): FleetHistoryService {
   return serviceSingleton;
 }
 
+/**
+ * Server shutdown: close the service if one was ever created (never creates one).
+ * Its scorecard reader owns a worker thread; left open, that worker's MessagePort
+ * kept `ashlr verse` alive after SIGINT/SIGTERM once the Fleet surface had loaded.
+ */
+export async function closeFleetHistoryService(): Promise<void> {
+  const previous = serviceSingleton;
+  serviceSingleton = null;
+  await previous?.close().catch(() => undefined);
+}
+
 /** Test/reset hook: close the current service and optionally install another. */
 export async function resetFleetHistoryServiceForTests(next: FleetHistoryService | null = null): Promise<void> {
   const previous = serviceSingleton;

@@ -49,8 +49,10 @@ export const handleJevApi: ApiModule = async (ctx, _req: IncomingMessage, res: S
     const now = Date.now();
     if (!cached || now - cached.at > CACHE_MS) cached = { at: now, body: buildJevResponse(ctx.cfg) };
     sendJson(res, 200, cached.body);
-  } catch (error) {
-    sendJson(res, 500, { error: `jev status unavailable: ${error instanceof Error ? error.message : String(error)}` });
+  } catch {
+    // A fixed message, like every other Verse module: error text can carry file paths
+    // (the ledger lives under ~/.ashlr) and this route is read-only-cookie reachable.
+    sendJson(res, 500, { error: 'jev status unavailable' });
   }
   return true;
 };

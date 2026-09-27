@@ -341,6 +341,21 @@ export function completeBrowserCommand(sessionId: string, result: VerseBrowserCo
   return true;
 }
 
+/**
+ * A deleted chat: revoke its grant (the MCP URL stops resolving), fail every command
+ * still waiting, release the pane's long-poll and drop the chat's state. Without this a
+ * deleted chat's grant stayed valid for the life of the server. Idempotent.
+ */
+export function forgetBrowserChat(sessionId: string): void {
+  const state = chats.get(sessionId);
+  if (!state) return;
+  state.grant = null;
+  state.sidecarOrigin = null;
+  failAll(state, { ok: false, code: 'access-off', message: 'This chat was deleted.' });
+  for (const waker of [...state.wakers]) waker();
+  chats.delete(sessionId);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

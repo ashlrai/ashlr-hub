@@ -571,15 +571,24 @@ export function peekVerseEngine(): VerseEngineHandle | null {
 /**
  * 3.15 per-turn checkpoints (checkpoint-service.ts): a snapshot of every
  * repository a chat can reach before each turn, and after it. Loaded on the
- * first turn. `ASHLR_VERSE_CHECKPOINTS=0` turns them off.
+ * first turn. `ASHLR_VERSE_CHECKPOINTS=0` turns them off. Deleting a chat
+ * also revokes its Browser-pane grant, with or without checkpoints.
  */
-function checkpointTurnHooks(): VerseTurnHooks | null {
-  if (process.env['ASHLR_VERSE_CHECKPOINTS'] === '0') return null;
+export function verseTurnHooks(env: NodeJS.ProcessEnv = process.env): VerseTurnHooks {
+  // A deleted chat also loses its Browser-pane grant (browser-bridge.ts), whatever the
+  // checkpoint setting: the grant is the MCP endpoint's only credential.
+  const forgetBrowser = async (sessionId: string) => { (await import('./browser-bridge.js')).forgetBrowserChat(sessionId); };
+  if (env['ASHLR_VERSE_CHECKPOINTS'] === '0') {
+    return { onSessionDeleted: async (info) => { await forgetBrowser(info.sessionId); } };
+  }
   const service = async () => (await import('./checkpoint-service.js')).getCheckpointService();
   return {
     beforeTurn: async (info) => { await (await service()).beforeTurn(info); },
     afterTurn: async (info) => { await (await service()).afterTurn(info); },
-    onSessionDeleted: async (info) => { await (await service()).forgetChat(info.sessionId, info.roots); },
+    onSessionDeleted: async (info) => {
+      await forgetBrowser(info.sessionId);
+      await (await service()).forgetChat(info.sessionId, info.roots);
+    },
   };
 }
 
@@ -607,7 +616,7 @@ export async function getVerseEngine(): Promise<VerseEngineHandle> {
           // stream open, so calling it on every change is cheap.
           onSessionChange: () => { notifyVerseSessionsChanged(); },
           // 3.15: a checkpoint of the chat's repositories before every turn.
-          turnHooks: checkpointTurnHooks(),
+          turnHooks: verseTurnHooks(),
         });
         engineSingleton = created;
         return created;

@@ -657,8 +657,6 @@ function vendorNamesConversation(engine: VerseEngine): boolean {
   return engine === 'codex' || engine === 'devin';
 }
 const DEFAULT_WATCHDOG_POLL_MS = 30_000;
-/** Module the default reasoning tap is loaded from (A7). A variable, so a missing module is a runtime miss, not a build error. */
-const REASONING_INGEST_MODULE = '../reasoning/ingest-verse.js';
 
 /**
  * Fallback classification of vendor failure text, for when the adapter did
@@ -1156,8 +1154,10 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
   let reasoningTap: ((event: VerseEvent, session: VerseSession) => void) | null = opts.reasoningTap ?? null;
   let reasoningFlush: (() => void) | null = opts.reasoningFlush ?? null;
   if (opts.reasoningTap === undefined) {
-    const specifier: string = REASONING_INGEST_MODULE;
-    void (import(specifier) as Promise<unknown>)
+    // A LITERAL specifier: the Bun-compiled sidecar bundles only what it can see, and a
+    // variable specifier resolves against its virtual FS at runtime and always misses —
+    // the desktop app silently ran with no reasoning tap. Still lazy and still caught.
+    void (import('../reasoning/ingest-verse.js') as Promise<unknown>)
       .then((mod) => {
         const fn = isObject(mod) ? mod['recordVerseReasoning'] : undefined;
         if (typeof fn === 'function' && reasoningTap === null) reasoningTap = fn as (event: VerseEvent, session: VerseSession) => void;
