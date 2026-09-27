@@ -295,6 +295,7 @@
 /test/leader-cloud-311.test.ts @masonwyatt23
 /test/leader-comms-310b.test.ts @masonwyatt23
 /test/leader-integration-310b.test.ts @masonwyatt23
+/test/leader-lessons-315.test.ts @masonwyatt23
 /test/leader-local-transport-314.test.ts @masonwyatt23
 /test/leader-reliability-314.test.ts @masonwyatt23
 /test/leader-run-310b.test.ts @masonwyatt23
@@ -305,6 +306,7 @@
 /test/leader-thread-routes-314.test.ts @masonwyatt23
 /test/learn-experiments-310b.test.ts @masonwyatt23
 /test/learn-harness-310b.test.ts @masonwyatt23
+/test/learn-retro-sweep-315.test.ts @masonwyatt23
 /test/legacy-collector-reconciliation-driver.test.ts @masonwyatt23
 /test/legacy-judge-lanes-310.test.ts @masonwyatt23
 /test/legacy-red-team-routing-310.test.ts @masonwyatt23
