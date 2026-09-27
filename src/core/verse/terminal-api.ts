@@ -43,6 +43,9 @@
  *     a dev server Preview discovered for THIS chat — the command typed into
  *     the shell is always built server-side, never taken from the request.
  * Agents and MCP cannot reach these routes (they hold no mutation token).
+ * 3.15 agent tools reach the SAME manager through Verse's MCP server instead
+ * (verse-mcp-terminal.ts), under its own rules; the one link back is here:
+ * operator input to a tab an agent drives is a takeover (verse-mcp-grants.ts).
  *
  * THE STREAM is read with fetch() + the read-client header, not EventSource:
  * it therefore needs no query-proof allowance in read-session.ts, and only the
@@ -74,6 +77,7 @@ import {
   type TerminalManager,
 } from './terminal.js';
 import { terminalBytesToText } from './terminal-blocks.js';
+import { noteOperatorInput } from './verse-mcp-grants.js';
 import type { VerseSession } from './types.js';
 import { getVerseEngine } from './verse-api.js';
 import { VERSE_SESSION_ID_RE } from './verse-stream.js';
@@ -634,7 +638,11 @@ export const handleTerminalApi: ApiModule = async (ctx, req, res, path, method) 
       if (data.length > MAX_BASE64_CHARS) throw new BadRequest(413, 'input is limited to 16 KB per request', 'VERSE_TOO_LARGE');
       const bytes = Buffer.from(data, 'base64');
       if (bytes.length > VERSE_TERMINAL_INPUT_MAX_BYTES) throw new BadRequest(413, 'input is limited to 16 KB per request', 'VERSE_TOO_LARGE');
-      manager().write(id, new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+      const input = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      manager().write(id, input);
+      // 3.15 agent tools: the operator typing in a tab an agent is driving
+      // takes it over — the agent is paused there until "Resume agent".
+      noteOperatorInput(id, input);
       noContent(res);
       return true;
     }

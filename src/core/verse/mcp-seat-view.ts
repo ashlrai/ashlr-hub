@@ -27,6 +27,12 @@
  *     :108). That directory is per ACCOUNT, so two Codex accounts already
  *     cannot share a server by accident. Their config is `config.toml` —
  *     TOML, which `discoverMcpServers()` (JSON only) cannot read.
+ *   - 3.15 agent tools: on a chat where the operator switched agent tools
+ *     on, EVERY seat also loads exactly one Verse-owned server, `ashlr-verse`
+ *     (verse-mcp-launch.ts): Claude/local through a private per-turn config
+ *     file instead of the empty one, Codex through per-turn `-c` overrides,
+ *     Grok through one entry Verse keeps in the account's private profile
+ *     config.toml (it serves no tools to a turn Verse did not grant them).
  *
  * Reporting a machine-wide server list as "what this seat runs" would
  * therefore be a lie in every direction at once: it would show servers no
@@ -168,12 +174,14 @@ export interface VerseMcpSnapshot {
 export const VERSE_MCP_ISOLATED_NOTE =
   'Every turn on this seat is launched with --strict-mcp-config and an empty --mcp-config, ' +
   'so it loads no MCP servers at all regardless of what any config file holds. ' +
-  "The one exception is Verse's own browser tools, on a chat where you switched agent access on in the Browser pane.";
+  "The one exception is Verse's own server (ashlr-verse: terminal and browser tools), on a chat where you switched agent tools on.";
 
 export const VERSE_MCP_TOML_NOTE =
   'This account keeps its MCP servers in a TOML config, which is read by the provider CLI ' +
-  'itself and is not parsed here. Hub cannot list or change it without rewriting the ' +
-  "operator's TOML, which it deliberately does not do.";
+  'itself and is not parsed here. Hub does not change the servers listed there. ' +
+  "Verse's own server (ashlr-verse) reaches Codex per turn on the command line, and a Grok " +
+  "account through one entry Verse keeps in that account's private profile — only on chats " +
+  'where you switched agent tools on.';
 
 export const VERSE_MCP_PER_ACCOUNT_NOTE =
   'This account runs against its own private state directory, so a server configured for ' +

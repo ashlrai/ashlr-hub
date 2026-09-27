@@ -173,6 +173,8 @@ const EXPECTED_HANDLERS: Record<WorkbenchRouteFamilyId, string> = {
   automations: 'handleAutomationsApi',
   // 3.15: the integrated Browser pane (policy, command relay, per-chat MCP).
   browser: 'handleBrowserApi',
+  // 3.15 agent tools: Verse's one MCP server for every seat, and the Agent tools sheet.
+  'agent-tools': 'handleVerseMcpApi',
   // 3.16: every model working together (Auto seat, compare, escalation, meter).
   multimodel: 'handleMultimodelApi',
   // 3.15: per-turn checkpoints, the Changes pane and Undo/Redo.

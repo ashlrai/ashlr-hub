@@ -51,6 +51,36 @@ export interface DevinTurnPayload {
   cliPath: string | null;
   /** CLI lane: the model the chat runs (`--model`); null = the CLI's default. */
   model: string | null;
+  /**
+   * 3.15 agent tools, CLI lane only, absent when the chat has none on: this
+   * turn's route to Verse's MCP server (verse-mcp-launch.ts). The token is
+   * the one secret this payload may carry — stdin never shows in `ps`. The
+   * bridge offers the server to Devin (http, else the stdio bridge with the
+   * token FILE) and, with the terminal scope, serves Devin's terminal/*
+   * requests in a visible Verse tab.
+   */
+  verseMcp?: DevinTurnVerseMcp | null;
+}
+
+export interface DevinTurnVerseMcp {
+  url: string;
+  token: string;
+  tokenFile: string;
+  /** argv of `ashlr verse-mcp-stdio` for this runtime. */
+  stdio: string[];
+  scopes: string[];
+}
+
+function parseVerseMcp(raw: unknown): DevinTurnVerseMcp | null | undefined {
+  if (raw === undefined || raw === null) return null;
+  if (!isRecord(raw)) return undefined;
+  const { url, token, tokenFile, stdio, scopes } = raw;
+  if (typeof url !== 'string' || !/^http:\/\/127\.0\.0\.1:\d{1,5}\/api\/verse\/agent-tools\/mcp$/.test(url)) return undefined;
+  if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return undefined;
+  if (typeof tokenFile !== 'string' || !tokenFile.startsWith('/') || tokenFile.length > 4096) return undefined;
+  if (!Array.isArray(stdio) || stdio.length === 0 || stdio.length > 8 || !stdio.every((a) => typeof a === 'string' && a.length <= 8192)) return undefined;
+  if (!Array.isArray(scopes) || scopes.length > 8 || !scopes.every((s) => typeof s === 'string' && /^[a-z_]{1,30}$/.test(s))) return undefined;
+  return { url, token, tokenFile, stdio: stdio as string[], scopes: scopes as string[] };
 }
 
 export const DEVIN_TURN_PAYLOAD_MAX_BYTES = 1024 * 1024;
@@ -80,6 +110,8 @@ export function parseDevinTurnPayload(raw: unknown): DevinTurnPayload | null {
   if (lane === 'cli' && cliPath === null) return null;
   const model = raw['model'];
   if (model !== null && (typeof model !== 'string' || !/^[A-Za-z0-9._:/-]{1,120}$/.test(model))) return null;
+  const verseMcp = parseVerseMcp(raw['verseMcp']);
+  if (verseMcp === undefined) return null;
   return {
     v: 1,
     lane,
@@ -90,5 +122,6 @@ export function parseDevinTurnPayload(raw: unknown): DevinTurnPayload | null {
     permissionMode: mode,
     cliPath: cliPath as string | null,
     model: model as string | null,
+    ...(verseMcp && lane === 'cli' ? { verseMcp } : {}),
   };
 }

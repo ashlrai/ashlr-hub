@@ -18,6 +18,7 @@
 import { devinChatTurnArgv } from '../../devin/chat-turn-invocation.js';
 import type { DevinTurnPayload } from '../../devin/turn-protocol.js';
 import { effectiveControls } from '../session-controls.js';
+import { devinVerseMcpPayload } from '../verse-mcp-launch.js';
 import { VERSE_REMOTE_STATES, type VerseDevinLane, type VerseRemoteState, type VerseSession, type VerseTurnLaunch } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
 import type { VerseAdapter, VerseParsedEvent, VerseTurnParser } from './index.js';
@@ -55,6 +56,11 @@ function buildDevinLaunch(session: VerseSession, text: string, launch: VerseSeat
     cliPath,
     model: lane === 'cli' && session.model && session.model !== DEVIN_DEFAULT_MODEL_ID ? session.model : null,
   };
+  // 3.15 agent tools: the CLI lane runs on this Mac and can reach Verse's MCP
+  // server; the cloud lane runs on Cognition's machines and cannot (the sheet
+  // says so). The token rides in the stdin payload, never argv or env.
+  const verseMcp = lane === 'cli' ? devinVerseMcpPayload(session.id) : null;
+  if (verseMcp) payload.verseMcp = verseMcp;
   const env: Record<string, string> = {};
   for (const key of PASS_ENV) {
     const value = process.env[key];

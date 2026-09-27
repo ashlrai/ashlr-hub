@@ -59,6 +59,7 @@ import { buildIndex, loadIndex, writeIndex } from '../core/index-engine.js';
 import { PROBE_HELPER_FLAGS } from '../core/resources/probe-helper-invocation.js';
 import { ANTHROPIC_PROXY_HOST_FLAG } from '../core/local-runtime/llama/proxy-invocation.js';
 import { DEVIN_CHAT_TURN_FLAG } from '../core/devin/chat-turn-invocation.js';
+import { VERSE_MCP_STDIO_COMMAND } from '../core/verse/verse-mcp-stdio-invocation.js';
 import { planTidy, applyTidy } from '../core/tidy.js';
 import { openInEditor } from './open.js';
 import { pick } from './picker.js';
@@ -1745,6 +1746,14 @@ async function main(): Promise<void> {
     // in the Bun binary into the ordinary CLI parser).
     if (argv[0] === DEVIN_CHAT_TURN_FLAG) {
       await import('../core/devin/chat-turn-process.js');
+      return;
+    }
+    // 3.15 agent tools: `ashlr verse-mcp-stdio`, the stdio bridge a seat
+    // loads to reach Verse's MCP server (core/verse/verse-mcp-stdio.ts). Same
+    // contract: operand-free, the credential comes through the environment
+    // (a token FILE path, or the parent-process lookup), never argv.
+    if (argv[0] === VERSE_MCP_STDIO_COMMAND) {
+      await import('../core/verse/verse-mcp-stdio-process.js');
       return;
     }
   }

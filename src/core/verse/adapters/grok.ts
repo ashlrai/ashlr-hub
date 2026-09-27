@@ -52,6 +52,7 @@ import type { VerseSession, VerseTurnLaunch } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
 import type { VerseAdapter } from './index.js';
 import { grokEffortArgs, grokPermissionArgs } from '../session-controls.js';
+import { ensureGrokVerseMcp } from '../verse-mcp-launch.js';
 import {
   chooseNativeSession,
   createAnthropicStreamParser,
@@ -82,6 +83,12 @@ function buildGrokLaunch(session: VerseSession, text: string, launch: VerseSeatL
   }
   const prefix = launch.launcher ? [...launch.launcher] : ['grok'];
   const memoryBlock = launchMemoryBlock(launch);
+  // 3.15 agent tools. Grok has no per-run MCP flag: when the operator switched
+  // tools on for this chat, the seat's OWN Verse-owned GROK_HOME (never
+  // ~/.grok: a launcher-less seat gets nothing) loads the stdio bridge, which
+  // finds this turn by its parent pid (verse-mcp-launch.ts). The argv is
+  // unchanged either way.
+  ensureGrokVerseMcp(session.id, launch.launcher ? nativeStateDir(launch.launcher, 'grok', join(homedir(), '.grok')) : null);
   const argv = [
     ...prefix,
     '--no-auto-update',

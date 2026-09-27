@@ -302,6 +302,14 @@ export interface TerminalCreateOptions {
   cwd?: string | null;
   /** false = start the shell without integration (no blocks). Default true. */
   shellIntegration?: boolean;
+  /**
+   * 3.15 agent tools: a tab a chat's AGENT opened (verse-mcp-terminal.ts). It
+   * carries the Agent badge and, like an Apps launch, is refused while the
+   * kill switch is engaged and hung up when it is engaged.
+   */
+  agent?: boolean;
+  /** The tab strip's title until the shell sets one (default: the root's name). */
+  title?: string | null;
 }
 
 /** Where the shell-integration scripts live; null in the options turns integration off for every tab. */
@@ -392,6 +400,12 @@ export interface TerminalManager {
   blocks(id: string): VerseTerminalBlock[];
   /** One block and its kept output bytes; null for an unknown block. */
   blockOutput(id: string, blockId: string): { block: VerseTerminalBlock; bytes: Buffer; truncated: boolean } | null;
+  /**
+   * 3.15 agent tools: show `text` in the tab's view (and scrollback) WITHOUT
+   * sending it to the shell — the marker an agent-typed command carries so the
+   * operator can tell it from their own. Never reaches the PTY.
+   */
+  annotate(id: string, text: string): void;
   /**
    * Hang up every agent tab (Apps [Launch ▸]) if the kill switch is engaged.
    * Returns the ids removed (exported for tests; also runs on a timer while an agent tab is open).
@@ -735,8 +749,8 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
       if (typeof req.root !== 'string' || !isAbsolute(req.root)) throw new TerminalError('TERMINAL_INVALID', 'root must be an absolute path');
       const startDir = req.cwd ?? req.root;
       if (typeof startDir !== 'string' || !isAbsolute(startDir)) throw new TerminalError('TERMINAL_INVALID', 'cwd must be an absolute path');
-      // An agent launch (Apps [Launch ▸]) is an agent starting: the kill switch refuses it.
-      const agent = typeof req.appId === 'string' && req.appId.length > 0;
+      // An agent launch (Apps [Launch ▸], or a chat agent's own tab) is an agent starting: the kill switch refuses it.
+      const agent = (typeof req.appId === 'string' && req.appId.length > 0) || req.agent === true;
       if (agent && (await killSwitch())) throw new TerminalError('TERMINAL_KILL_SWITCH', TERMINAL_KILL_SWITCH_REASON);
       // Off the event loop, then spawn: the shell starts IN the root, and a
       // spawn's chdir runs inside the parent's spawn call. A root behind an
@@ -763,7 +777,7 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
 
       const id = `t-${randomBytes(6).toString('hex')}`;
       const createdAt = now();
-      const defaultTitle = basename(req.root) || req.root;
+      const defaultTitle = (typeof req.title === 'string' ? sanitizeTerminalTitle(req.title) : null) ?? (basename(req.root) || req.root);
       const rec: TabRecord = {
         tab: {
           id,
@@ -943,6 +957,12 @@ export function createTerminalManager(opts: TerminalManagerOptions = {}): Termin
       const out = rec.blocks.output(blockId);
       if (!block || !out) return null;
       return { block, bytes: out.bytes, truncated: out.truncated || out.evicted };
+    },
+
+    annotate(id, text) {
+      const rec = require(id);
+      if (rec.removed) return;
+      onOutput(rec, new TextEncoder().encode(text));
     },
 
     async enforceKillSwitch() {

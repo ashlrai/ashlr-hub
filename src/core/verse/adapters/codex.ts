@@ -71,6 +71,7 @@ import type { VerseSeatLaunch } from '../session-engine.js';
 import type { VerseAdapter, VerseAdapterTurnContext, VerseParsedEvent, VerseTurnParser } from './index.js';
 import { turnAttachmentImages } from './turn-extras.js';
 import { codexEffortArgs, codexPermission } from '../session-controls.js';
+import { codexVerseMcpOverrides } from '../verse-mcp-launch.js';
 import { cliErrorEvent, classifyVerseCliError, nativeSessionOverride, parseJsonObjectLine, thinkingDisplayEnabled } from './claude.js';
 import type { VerseProgressPhase } from '../types.js';
 
@@ -270,6 +271,23 @@ export const strictConfigVerified: readonly string[] = [
   // config loading, `"bogusvalue"` fails with "unknown variant `bogusvalue`,
   // expected one of `auto`, `concise`, `detailed`, `none`".
   'model_reasoning_summary',
+  // 3.15 agent tools (verse-mcp-launch.ts codexVerseMcpOverrides), same
+  // method on 0.136.0 and 0.158.0-alpha.2, exec AND exec resume (2026-09-27):
+  // all pass config loading; `mcp_servers.ashlr-verse.zzz_nope` fails with
+  // "unknown configuration field", `default_tools_approval_mode="bogus"` and
+  // `env=5` fail on type. `url` / `bearer_token_env_var` also pass, but a
+  // token in the env never reaches codex through the native-profile launcher
+  // (it forwards only PATH, HOME, TMPDIR, LANG, LC_ALL), so the stdio bridge
+  // with a token FILE is what Verse uses.
+  'mcp_servers.ashlr-verse.command',
+  'mcp_servers.ashlr-verse.args',
+  'mcp_servers.ashlr-verse.env.ASHLR_VERSE_MCP_TOKEN_FILE',
+  'mcp_servers.ashlr-verse.default_tools_approval_mode',
+  'mcp_servers.ashlr-verse.startup_timeout_sec',
+  'mcp_servers.ashlr-verse.tool_timeout_sec',
+  'mcp_servers.ashlr-verse.url',
+  'mcp_servers.ashlr-verse.bearer_token_env_var',
+  'mcp_servers.ashlr-verse.enabled_tools',
 ];
 
 /**
@@ -332,6 +350,10 @@ function buildCodexLaunch(session: VerseSession, text: string, launch: VerseSeat
     ...memory.config,
     ...codexReasoningOverrides(launch),
     ...codexEffortArgs(session),
+    // 3.15 agent tools: Verse's MCP server through the stdio bridge, only
+    // when the operator switched tools on for this chat (verse-mcp-launch.ts).
+    // Nothing otherwise, so an untouched chat's argv is unchanged.
+    ...codexVerseMcpOverrides(session.id),
   ];
   // Always the CANONICAL id: a stored alias (e.g. a pre-3.9 record) must
   // reach the CLI as the model the label promised.

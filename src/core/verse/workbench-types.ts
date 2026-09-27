@@ -1385,6 +1385,15 @@ export const WORKBENCH_ROUTE_FAMILIES = [
     prefixes: ['/api/verse/browser'],
   },
   {
+    // 3.15 agent tools: Verse's one MCP server for every seat (bearer per
+    // turn) and the chat's Agent tools sheet (verse-mcp-types.ts).
+    id: 'agent-tools',
+    owner: '3.15-agent-tools',
+    module: 'src/core/verse/verse-mcp-api.ts',
+    handler: 'handleVerseMcpApi',
+    prefixes: ['/api/verse/agent-tools'],
+  },
+  {
     id: 'multimodel',
     owner: '3.16-multimodel',
     module: 'src/core/verse/multimodel-api.ts',

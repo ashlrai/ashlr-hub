@@ -48,8 +48,13 @@ const MAX_QUEUE = 16;
 const MAX_ALLOWED_ORIGINS = 32;
 const MAX_BLOCKED = 5;
 
-/** Seat engines whose launch loads the browser tools (adapters/claude.ts serves both). */
-export const BROWSER_TOOL_ENGINES: readonly string[] = ['claude', 'local'];
+/**
+ * Seat engines whose launch loads the browser tools. Since the agent-tools
+ * release every seat reaches them through Verse's one MCP server
+ * (verse-mcp.ts, injected per seat by verse-mcp-launch.ts); a Devin CLOUD
+ * chat cannot (it runs remotely) and the sheet says so.
+ */
+export const BROWSER_TOOL_ENGINES: readonly string[] = ['claude', 'local', 'codex', 'grok', 'devin'];
 
 export type BrowserOutcome =
   | { ok: true; url?: string; data: unknown }
@@ -112,6 +117,12 @@ export function browserPolicy(sessionId: string): VerseBrowserPolicy {
     toolEngines: [...BROWSER_TOOL_ENGINES],
     paneSeenAt: state?.paneSeenAt != null ? new Date(state.paneSeenAt).toISOString() : null,
   };
+}
+
+/** The sidecar origin the chat's grant was minted against (the MCP URL's base), or null. */
+export function browserSidecarOrigin(sessionId: string): string | null {
+  const state = chats.get(sessionId);
+  return state?.grant ? state.sidecarOrigin : null;
 }
 
 /** The allow-list the gate reads (loopback is always allowed and never listed). */

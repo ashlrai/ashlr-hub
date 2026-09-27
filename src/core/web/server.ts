@@ -30,6 +30,7 @@ import { gcRunStreams } from '../run/streaming.js';
 import { resetVerseEngine } from '../verse/verse-api.js';
 import { isPreviewFramePath } from '../verse/preview.js';
 import { isBrowserMcpPath } from '../verse/browser-types.js';
+import { isVerseMcpEndpointPath } from '../verse/verse-mcp-types.js';
 import { closeVerseTerminals } from '../verse/terminal.js';
 import { VERSE_TERMINAL_PATH } from '../verse/workbench-types.js';
 
@@ -157,13 +158,16 @@ export async function startServer(
     // probes GET for an optional SSE stream. The route answers 405 to every
     // GET without reading anything; a 401 here instead would send the client
     // hunting for OAuth. Its POSTs are authenticated by the grant
-    // (core/verse/browser-api.ts).
+    // (core/verse/browser-api.ts). Same for (3.15 agent tools) exactly
+    // GET /api/verse/agent-tools/mcp, Verse's one MCP server: 405, never 401;
+    // its POSTs carry the turn's bearer token (core/verse/verse-mcp-api.ts).
     if (
       method === 'GET'
       && (path === '/api' || path.startsWith('/api/'))
       && !authority
       && !isPreviewFramePath(path)
       && !isBrowserMcpPath(path)
+      && !isVerseMcpEndpointPath(path)
     ) {
       sendJson(res, 401, { error: 'unauthorized: read session required' }, {
         Vary: 'Cookie, X-Ashlr-Token, X-Ashlr-Read-Client',

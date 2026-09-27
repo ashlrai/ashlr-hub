@@ -196,16 +196,19 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse, grant: strin
     writeRaw(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } });
     return;
   }
-  const versePort = localPort(req);
-  const deps: BrowserMcpDeps = {
+  const answer = await handleBrowserMcpBody(sessionId, body, browserMcpDepsFor(localPort(req)));
+  writeRaw(res, answer.status, answer.body);
+}
+
+/** The Browser pane relay as the MCP tools see it — shared with Verse's one MCP server (verse-mcp-api.ts). */
+export function browserMcpDepsFor(versePort: number | null): BrowserMcpDeps {
+  return {
     run: (sid, op, args) => runBrowserCommand(sid, op, args),
     versePort,
     allowedOrigins: allowedOriginsFor,
     recordBlocked: recordBrowserBlocked,
     devServers: devServerLister ?? ((sid) => defaultDevServers(sid, versePort)),
   };
-  const answer = await handleBrowserMcpBody(sessionId, body, deps);
-  writeRaw(res, answer.status, answer.body);
 }
 
 function parseResult(body: Record<string, unknown>): VerseBrowserCommandResult | string {
