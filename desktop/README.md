@@ -232,7 +232,8 @@ implements it:
 ```ts
 const browser = window.__ASHLR_DESKTOP__?.browser;
 // { version: 1,
-//   capabilities: { screenshot: boolean /* macOS only */, picker: true, console: true, text: true },
+//   capabilities: { screenshot: boolean /* macOS only */, picker: true, console: true, text: true,
+//                   act: boolean /* macOS only: snapshot, resolve, act, network, evaluate */ },
 //   send(msg): boolean /* true when handed to native */ }
 ```
 
@@ -253,9 +254,28 @@ an unknown field drops the whole message.
 | `hide` | — | Hide every tab (pane hidden or unmounted, page hidden). |
 | `close` | `tab` | Close and forget the tab (answers `closed`). |
 | `zoom` | `tab`, `factor` | Page zoom, clamped to [0.25, 5]. |
-| `query` | `tab`, `req`, `what` | `what` ∈ `text` \| `console` \| `info` \| `pick-start` \| `pick-poll` \| `pick-cancel`. Answers `result` (5 s timeout → `error: "timeout"`). |
-| `screenshot` | `tab`, `req` | macOS: `{ mime: 'image/png' \| 'image/jpeg', base64, width, height }` (pixels; JPEG q0.8 when the PNG exceeds 4 MB). Elsewhere `error: "unsupported"`. |
+| `query` | `tab`, `req`, `what` | `what` ∈ `text` \| `console` \| `info` \| `pick-start` \| `pick-poll` \| `pick-cancel` \| `resume`, or one of the argument forms below. Answers `result` (5 s timeout → `error: "timeout"`; an act gets 5 s + 20 ms per typed character). |
+| `screenshot` | `tab`, `req`, `clip?` | macOS: `{ mime: 'image/png' \| 'image/jpeg', base64, width, height, scale, origin: {x, y}, css: {width, height} }` — at most 1280×800 **pixels**; `scale` = CSS px per image px, `origin` = the image's top-left in CSS px (a `clip` in CSS px captures one rectangle of the viewport; the page beyond the viewport cannot be captured). JPEG q0.8 when the PNG exceeds 4 MB. Elsewhere `error: "unsupported"`. |
 | `external` | `url` | Open in the system browser (same URL rule; at most one per second). |
+
+**Query argument forms** (every struct rejects unknown fields; refs match
+`^e[1-9][0-9]{0,6}$`, signatures `^[a-z0-9]{1,16}$`):
+
+| `what` | Does |
+|---|---|
+| `{ snapshot: { max_nodes?, root_ref? } }` | Accessibility-style outline of what is visible (role, name, state, ref per element); password / payment / secret values read `[redacted]`; hidden and `aria-hidden` content left out. |
+| `{ network: { limit? } }` | Every fetch / XHR since load: method, URL, status, ms, sizes. No bodies, no headers. |
+| `{ resolve: { ref } \| { x, y } \| { focused: true } }` | What an element is: role, name, signature, form / link / download / sensitive flags, rect. |
+| `{ act: { kind, … } }` | `click` (`ref` or `x,y`; `button`, `double`, `modifiers`, `expect`), `type` (`ref`, `text` ≤ 2000, `submit`, `clear`), `select` (`ref`, `values`), `hover`, `key` (closed table: one printable character or Enter / Tab / Escape / Backspace / Delete / arrows / Home / End / PageUp / PageDown / Space, with Shift / Alt / Control; Meta only with `a` / `z`), `scroll` (`ref` and/or `direction`, `amount`). |
+| `{ evaluate: { expression } }` | Loopback pages only (checked natively and again in the page). The one form whose text runs as code — see below. |
+
+An act runs as: the tap's `prepare` (finds the point, re-checks `expect`,
+refuses what must never be done) → **real AppKit mouse / key events** sent into
+the tab's own window with `NSWindow sendEvent:` (trusted input: `isTrusted`
+is true; no Accessibility permission, no `CGEventPost`, never another window)
+→ the tap's `after`. `select`, `scroll` and a right click are done by the tap
+(a native popup or context menu would block the app). The typed text travels
+only as key events, never through a script.
 
 `tab` matches `^[a-z0-9]{1,16}$`, `req` `^[A-Za-z0-9_-]{1,40}$`. `bounds` is
 `{ x, y, width, height }` in CSS px relative to the Verse viewport (x, y ≥ 0;
@@ -272,6 +292,8 @@ window.addEventListener('ashlr:browser', (e) => {
   // { kind: 'title', tab, title }              ≤ 300 chars
   // { kind: 'blocked', tab, url, reason }      a navigation the URL rule refused
   // { kind: 'closed', tab }                    closed, evicted, ⌘W, or unknown tab
+  // { kind: 'operator', tab }                  genuine operator input in the tab (≤ 1 per 500 ms);
+  //                                            synthesized agent input never produces it
   // { kind: 'result', req, ok: true, data } | { kind: 'result', req, ok: false, error }
 });
 ```
@@ -291,8 +313,12 @@ the pane is visible (e.g. on `visibilitychange`).
   name `main` and `launch` exactly; a test fails if a pattern could match
   `browser-*`), so a website gets zero IPC.
 - Native evaluates only fixed scripts in a tab: the constant `browser_tap.js`
-  and a query wrapper chosen from a closed enum. Nothing the Verse page or the
-  website sends ever becomes code; answers travel as JSON.
+  and a tap call chosen from a closed enum, whose arguments are JSON built by
+  `serde_json` from validated values. Nothing the Verse page or the website
+  sends ever becomes code; answers travel as JSON. The single exception is
+  `evaluate`: loopback pages only, checked natively and against
+  `location.origin` in the page, and off unless the operator switched scripts
+  on for the chat.
 - URL rule: `http`/`https` only, no `user:pass@`, never the Verse origin itself
   (any loopback spelling on port 7777). Applied to requests and to every
   navigation the website makes; `target=_blank` / `window.open` open in the
@@ -300,9 +326,14 @@ the pane is visible (e.g. on `visibilitychange`).
 - Tabs use their own website data store, never Verse's (macOS 14+: a fixed
   store identifier, so pane logins persist; older macOS: a throwaway store;
   elsewhere `<app local data>/browser`).
-- Native only navigates, reads and snapshots. It never types, fills or submits
-  a form, enters a credential or clicks; the tap never reads form-control
-  values. The element picker swallows only the operator's own picking click.
+- Native acts only when the page asks with an `act` query, and only as real
+  input into the tab's own window. It never types into a password, payment,
+  SSN or secret field (the tap refuses in `prepare`, before any event), never
+  picks a file, and never sends ⌘V (the operator's clipboard). The tap reads a
+  field's content in one place, and never for a sensitive field. After an
+  agent click that made the tab key, key status goes straight back to the Verse
+  window, so the operator's typing never lands in the page. The element picker
+  swallows only the operator's own picking click.
 
 **Shipping.** This is a change to the Rust binary, not the web bundle: it only
 reaches an installed app through `npm run ship:local -- --native`. A web-only

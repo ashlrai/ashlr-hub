@@ -53,12 +53,26 @@ sha2 = "0.10"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# The browser pane's screenshot (`browser_pane.rs`, macOS only):
-# `WKWebView takeSnapshotWithConfiguration:` → NSImage → PNG/JPEG → base64, and
-# showing a tab window without stealing focus (`NSWindow addChildWindow:` +
-# `orderFront:`). Every crate here is already in Cargo.lock as a wry/tao
-# dependency at these exact versions — this adds root edges, not packages —
-# and default features are off so nothing new is compiled in.
+# The browser pane's native half (`browser_pane.rs` / `browser_input.rs`, macOS
+# only):
+# - screenshots: `WKWebView takeSnapshotWithConfiguration:` (with a clip rect —
+#   hence objc2-web-kit's `objc2-core-foundation` for `CGRect`) → NSImage →
+#   PNG/JPEG → base64;
+# - showing a tab window without stealing focus (`NSWindow addChildWindow:` +
+#   `orderFront:`);
+# - acting: synthesizing TRUSTED input into our OWN tab WKWebView —
+#   `NSEvent mouseEventWithType:…` / `keyEventWithType:…` (`NSEvent`,
+#   `NSGraphicsContext` for the unused context argument, `NSView` for point
+#   conversion) delivered with `NSWindow sendEvent:`. No Accessibility
+#   permission and no `CGEventPost`: nothing reaches the window server or any
+#   other app;
+# - operator takeover: one `NSEvent addLocalMonitorForEventsMatchingMask:`
+#   (`block2`) that sees only genuine input;
+# - no microphone / camera for a page (`media_guard.rs`: a `WKUIDelegate`
+#   deny proxy, reading `WKFrameInfo` / `WKSecurityOrigin`).
+# Every crate here is already in Cargo.lock as a wry/tao dependency at these
+# exact versions — this adds root edges and features, not packages — and
+# default features are off so nothing new is compiled in.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 block2 = "0.6.2"
@@ -66,19 +80,25 @@ base64 = "0.22.1"
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSData",
+    "NSDate",
     "NSDictionary",
     "NSError",
+    "NSGeometry",
     "NSProcessInfo",
     "NSString",
     "NSValue",
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
+    "block2",
     "NSBitmapImageRep",
+    "NSEvent",
     "NSGraphics",
+    "NSGraphicsContext",
     "NSImage",
     "NSImageRep",
     "NSResponder",
+    "NSView",
     "NSWindow",
 ] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = [
@@ -87,6 +107,7 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
     "objc2-app-kit",
     "WKFrameInfo",
     "WKSecurityOrigin",
+    "objc2-core-foundation",
     "WKSnapshotConfiguration",
     "WKUIDelegate",
     "WKWebView",
