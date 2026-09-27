@@ -103,6 +103,9 @@ export const SESSION_BASE_OVERHEAD_BY_ENGINE: Readonly<Record<VerseEngine, numbe
   codex: 15_000,
   grok: 20_000,
   local: 15_000,
+  // 3.15: Devin runs remotely (or behind ACP) and never reports a window or a
+  // base prompt; the fit verdicts have nothing to measure against.
+  devin: 0,
 };
 
 /** Fallback overhead when the engine is unknown (the largest estimate). */

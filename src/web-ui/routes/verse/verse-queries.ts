@@ -95,6 +95,17 @@ export async function cancelVerseTurn(sessionId: string): Promise<void> {
   invalidate(VERSE_SESSIONS_KEY);
 }
 
+/**
+ * 3.15: Stop in a Devin chat, confirmed — end the Devin session for good
+ * (the server also stops watching a running turn). Irreversible, so the body
+ * must carry `confirm: true`.
+ */
+export async function terminateVerseDevinSession(sessionId: string): Promise<{ cancelled: boolean; terminated: boolean }> {
+  const response = await post<{ ok: true; cancelled: boolean; terminated: boolean }>(verseSessionPath(sessionId, '/terminate'), { confirm: true });
+  invalidate(VERSE_SESSIONS_KEY);
+  return { cancelled: response.cancelled, terminated: response.terminated };
+}
+
 export async function deleteVerseSession(sessionId: string): Promise<void> {
   await post<{ ok: true }>(verseSessionPath(sessionId, '/delete'), {});
   invalidateVerseLists();

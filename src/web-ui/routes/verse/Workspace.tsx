@@ -117,6 +117,8 @@ export interface WorkspaceProps {
   onRename: (title: string) => Promise<boolean>;
   /** Asks for confirmation (ChatSection's dialog), then deletes. */
   onRequestDelete: () => void;
+  /** 3.15: a Devin (cloud) chat — open the "stop watching / terminate" confirmation. */
+  onRequestDevinStop?: () => void;
   onSeatChange: (choice: SeatChoice) => void;
   onNew: () => void;
   onRetry: () => void;
@@ -138,7 +140,7 @@ export interface WorkspaceProps {
 export function Workspace(props: WorkspaceProps) {
   const { view, seats, projects, dispatchEnabled, locked, hasAnySessions, onSend, onStop, onRename, onRequestDelete,
     onSeatChange, onNew, onRetry, sidebarCollapsed, onToggleSidebar, onOpenSession, handoffOpen, onHandoffOpenChange,
-    otherRunning } = props;
+    otherRunning, onRequestDevinStop } = props;
   const session = view.session;
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
@@ -430,6 +432,18 @@ export function Workspace(props: WorkspaceProps) {
         }, () => undefined);
       },
     });
+    if (session.engine === 'devin' && session.seatId !== 'devin-cli' && session.nativeSessionId && onRequestDevinStop
+      && session.remote?.state !== 'terminated') {
+      menuItems.push({
+        id: 'devin-terminate',
+        label: 'End the Devin session…',
+        danger: true,
+        separated: true,
+        disabled: !dispatchEnabled,
+        reason: disabledReason,
+        onSelect: onRequestDevinStop,
+      });
+    }
     menuItems.push({
       id: 'delete',
       label: 'Delete chat…',
@@ -502,7 +516,8 @@ export function Workspace(props: WorkspaceProps) {
         <div className={styles.actions}>
           {view.stream === 'reconnecting' ? <span className={styles.streamState} role="status">reconnecting…</span> : null}
           {session ? <UsageReadout session={session} /> : null}
-          {session && budget ? (
+          {session && session.engine === 'devin' ? <DevinMeter session={session} /> : null}
+          {session && budget && session.engine !== 'devin' ? (
             <ContextMeter variant="ring" contextTokens={budget.contextTokens} contextWindow={budget.contextWindow} autoCompactAt={budget.autoCompactAt}
               exact={budget.exact} source={budget.source} mode={modesAvailable ? mode : null} engine={session.engine}
               compactionCount={session.compactionCount ?? 0} />
@@ -882,3 +897,29 @@ function UsageReadout({ session }: { session: VerseSession }) {
     </Tooltip>
   );
 }
+
+/**
+ * 3.15: a Devin chat's header meter in place of the context ring — Devin
+ * manages its own context remotely, so the reading that matters is the ACUs
+ * its session has used against its cap (cloud lane), live from
+ * `remote-status` events.
+ */
+function DevinMeter({ session }: { session: VerseSession }) {
+  const remote = session.remote;
+  const cli = session.seatId === 'devin-cli' || remote?.lane === 'cli';
+  const acus = remote?.acusConsumed ?? null;
+  const cap = remote?.acuCap ?? null;
+  const fmt = (n: number): string => (Math.round(n * 10) / 10).toString();
+  const label = cli ? 'remote ctx' : acus === null ? 'remote' : `${fmt(acus)}${cap !== null ? `/${fmt(cap)}` : ''} ACU`;
+  const ratio = acus !== null && cap !== null && cap > 0 ? acus / cap : null;
+  const tone = ratio === null ? 'ok' : ratio >= 0.9 ? 'danger' : ratio >= 0.7 ? 'warn' : 'ok';
+  const tip = cli
+    ? 'Context: remote — the Devin CLI manages its own context. Usage counts against your Devin plan (see /usage in Devin).'
+    : `Context: remote — Devin manages its own context. ${acus === null ? 'ACUs: not read yet.' : `This chat’s Devin session has used ${fmt(acus)} ACU${cap !== null ? ` of its ${fmt(cap)} cap` : ''}.`}`;
+  return (
+    <Tooltip label={tip} placement="bottom">
+      <span className={styles.devinMeter} data-tone={tone} tabIndex={0} role="img" aria-label={tip} data-testid="devin-meter">{label}</span>
+    </Tooltip>
+  );
+}
+

@@ -68,6 +68,7 @@ import {
   renameVerseSession,
   sendVerseTurn,
   setVerseSessionMeta,
+  terminateVerseDevinSession,
   verseBootstrapQuery,
   verseSessionsQuery,
   verseWorkspacesQuery,
@@ -89,6 +90,8 @@ import styles from './ChatSection.module.css';
 // new-chat dialog opens on request (SPEC-310C budget: chat critical JS).
 const DockHost = lazy(() => import('../dock/DockHost.js').then((m) => ({ default: m.DockHost })));
 const NewChatDialog = lazy(() => import('../NewChatDialog.js').then((m) => ({ default: m.NewChatDialog })));
+// 3.15: Stop in a Devin (cloud) chat asks "stop watching or terminate?" — lazy, never first paint.
+const DevinStopDialog = lazy(() => import('../devin/DevinStopDialog.js').then((m) => ({ default: m.DevinStopDialog })));
 
 const WorkspaceModule = preloadedLazy<ComponentProps<typeof WorkspaceComponent>>(() => import('../Workspace.js').then((m) => m.Workspace));
 const Workspace = WorkspaceModule.Slot;
@@ -264,6 +267,8 @@ export function ChatSection() {
   const [tokenPrompt, setTokenPrompt] = useState<{ open: boolean; reason: string }>({ open: false, reason: '' });
   const [handoffFor, setHandoffFor] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<VerseSession | null>(null);
+  /** 3.15: the Devin chat whose Stop is being confirmed (stop watching / terminate). */
+  const [devinStop, setDevinStop] = useState<VerseSession | null>(null);
   const [chatWidth, setChatWidth] = useState(0);
   const [chatHeight, setChatHeight] = useState(0);
   const pendingAction = useRef<{ run: () => void; cancel: () => void } | null>(null);
@@ -410,8 +415,7 @@ export function ChatSection() {
     return result === true;
   }, [selectedId, withToken, fail]);
 
-  const stop = useCallback((id: string | null = selectedId) => {
-    if (!id) return;
+  const cancelTurn = useCallback((id: string) => {
     void withToken('Stopping the running turn.', async () => {
       try {
         await cancelVerseTurn(id);
@@ -419,7 +423,29 @@ export function ChatSection() {
         fail(err);
       }
     });
-  }, [selectedId, withToken, fail]);
+  }, [withToken, fail]);
+
+  const stop = useCallback((id: string | null = selectedId) => {
+    if (!id) return;
+    // 3.15: a Devin (cloud) chat with a live session asks first — Stop could
+    // mean "stop watching" or "terminate the Devin session" (irreversible).
+    const open = view.session && view.session.id === id ? view.session : null;
+    if (open && open.engine === 'devin' && open.seatId !== 'devin-cli' && open.nativeSessionId) {
+      setDevinStop(open);
+      return;
+    }
+    cancelTurn(id);
+  }, [selectedId, view.session, cancelTurn]);
+
+  const terminateDevin = useCallback((id: string) => {
+    void withToken('Terminating the Devin session.', async () => {
+      try {
+        await terminateVerseDevinSession(id);
+      } catch (err) {
+        fail(err);
+      }
+    });
+  }, [withToken, fail]);
 
   const renameChat = useCallback(async (id: string, title: string) => {
     const result = await withToken('Renaming a chat.', async () => {
@@ -733,6 +759,7 @@ export function ChatSection() {
           hasAnySessions={sessions.length > 0} onSend={send} onStop={() => stop()}
           onRename={(title) => (selectedId ? renameChat(selectedId, title) : Promise.resolve(false))}
           onRequestDelete={() => { if (selectedId) requestDelete(selectedId); }}
+          onRequestDevinStop={() => { if (view.session) setDevinStop(view.session); }}
           onSeatChange={changeSeat} onNew={() => openNewChat()} onRetry={() => setReload((n) => n + 1)}
           sidebarCollapsed={sidebarCollapsed} onToggleSidebar={() => setVerseSidebarCollapsed(!sidebarCollapsed)}
           onOpenSession={setSelectedId}
@@ -759,6 +786,14 @@ export function ChatSection() {
             // The dialog's one write of its own (a seat's default context mode)
             // goes through the same token guard as every other chat mutation.
             runMutation={withToken} />
+        </Suspense>
+      ) : null}
+      {devinStop ? (
+        <Suspense fallback={null}>
+          <DevinStopDialog open chatLabel={devinStop.title} running={devinStop.status === 'running'}
+            onCancel={() => setDevinStop(null)}
+            onStopWatching={() => { const id = devinStop.id; setDevinStop(null); cancelTurn(id); }}
+            onTerminate={() => { const id = devinStop.id; setDevinStop(null); terminateDevin(id); }} />
         </Suspense>
       ) : null}
       {/* Closed dialogs render nothing, so a not-yet-loaded one (fallback null) looks the same. */}

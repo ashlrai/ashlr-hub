@@ -55,6 +55,9 @@ const EVENT_TYPES = [
   'history-truncated',
   // V3.15 persisted (additive): injected / seat-reported sources.
   'source',
+  // 3.15 persisted (Devin seats).
+  'remote-status',
+  'remote-pr',
 ] as const satisfies readonly VerseEventType[];
 
 type UnlistedEventType = Exclude<VerseEventType, (typeof EVENT_TYPES)[number]>;

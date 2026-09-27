@@ -724,6 +724,26 @@ const MemoToolUseCard = memo(ToolUseCard, (a: ToolUseCardProps, b: ToolUseCardPr
   a.facts === b.facts && a.result?.output === b.result?.output && a.result?.isError === b.result?.isError &&
   (a.result === null) === (b.result === null));
 
+/** 3.15: only https links leave the transcript (a Devin session URL). */
+function httpsHref(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).protocol === 'https:' ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 3.15: a GitHub pull request URL → its link and "owner/name#12" label; null for anything else. */
+function githubPr(url: string): { href: string; label: string } | null {
+  const m = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)$/.exec(url);
+  return m ? { href: url, label: `${m[1]}/${m[2]}#${m[3]}` } : null;
+}
+
+function formatAcus(n: number): string {
+  return (Math.round(n * 10) / 10).toString();
+}
+
 function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, explained: ReadonlySet<string>, reasoning: ReasoningDisplay, engine?: VerseEngine) {
   switch (item.kind) {
     case 'user':
@@ -813,6 +833,34 @@ function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, e
           <div className={styles.note}>Stopped.</div>
         </li>
       );
+    case 'remote': {
+      const href = httpsHref(item.url);
+      const acus = item.acusConsumed === null
+        ? null
+        : `${formatAcus(item.acusConsumed)}${item.acuCap !== null ? ` of ${formatAcus(item.acuCap)}` : ''} ACU`;
+      return (
+        <li key={item.key} className={styles.item} data-kind="remote" data-state={item.state}>
+          <div className={`${styles.note} ${styles.noteRemote}`} role="status" data-state={item.state}>
+            <span className={styles.remoteLead}>{item.message}</span>
+            {acus ? <span className={styles.remoteMeta}>{acus}</span> : null}
+            {href ? <a className={styles.remoteLink} href={href} target="_blank" rel="noopener noreferrer">Open in Devin ↗</a> : null}
+          </div>
+        </li>
+      );
+    }
+    case 'remote-pr': {
+      const pr = githubPr(item.url);
+      if (!pr) return null;
+      return (
+        <li key={item.key} className={styles.item} data-kind="remote-pr">
+          <div className={styles.prCard}>
+            <span className={styles.prTitle}>Devin opened a pull request</span>
+            <a className={styles.remoteLink} href={pr.href} target="_blank" rel="noopener noreferrer">{pr.label} ↗</a>
+            {item.state ? <span className={styles.prState}>{item.state}</span> : null}
+          </div>
+        </li>
+      );
+    }
     case 'turn-done':
       // A clean (or already-explained) end is not a line of its own, and how
       // long ANY turn took is its footer (TurnView), never this item.

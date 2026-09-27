@@ -110,6 +110,7 @@ import {
 import { prepareProjectMemory, readProjectMemory, writeProjectMemory } from './project-memory.js';
 import { discoverProjectsAsync } from './projects.js';
 import { discoverSeats, getSeatReadiness, refreshSeatTelemetry, type VerseSeatDiscovery } from './seats.js';
+import { devinSeatReadiness, discoverDevinSeats, mergeDevinSeats, type DevinSeatDiscoveryOptions } from './devin-seats.js';
 import { buildHandoffPreviewAsync } from './session-handoff.js';
 import { searchSessions } from './session-search.js';
 import {
@@ -596,7 +597,10 @@ export async function getVerseEngine(): Promise<VerseEngineHandle> {
           // Explicit, not the engine's lazy default: until that dynamic import
           // resolved, the gate was open and a turn on a signed-out seat could
           // slip through as the server's very first request.
-          readiness: getSeatReadiness,
+          // 3.15: Devin seats answer from the Devin budget (a chat with no
+          // session yet may not start one past the daily cap); every other
+          // seat from account health.
+          readiness: (seatId: string, session?: VerseSession) => devinSeatReadiness(seatId, session) ?? getSeatReadiness(seatId),
           // Turn start/end change the sidebar with no HTTP request to mark
           // them; push the list now instead of on the next /api/events tick.
           // notifyVerseSessionsChanged is coalesced and a no-op with no
@@ -639,13 +643,23 @@ async function cachedSeats(cfg: AshlrConfig): Promise<VerseSeatDiscovery> {
   const now = Date.now();
   if (seatCache && seatCache.cfg === cfg && now < seatCache.expiresAt) return seatCache.value;
   if (seatInFlight) return seatInFlight;
-  seatInFlight = discoverSeats(cfg)
+  // 3.15: the Devin chat seats join HERE, for the chat UI only — never in
+  // `discoverSeats`, which also feeds routing and the fleet (devin-seats.ts).
+  seatInFlight = Promise.all([discoverSeats(cfg), discoverDevinSeats(devinSeatOptions).catch(() => null)])
+    .then(([base, devin]) => (devin ? mergeDevinSeats(base, devin) : base))
     .then((value) => {
       seatCache = { value, expiresAt: Date.now() + SEAT_CACHE_MS, cfg };
       return value;
     })
     .finally(() => { seatInFlight = null; });
   return seatInFlight;
+}
+
+/** 3.15 test seam: where Devin seat discovery looks (the CLI's install paths are machine-wide). */
+let devinSeatOptions: DevinSeatDiscoveryOptions = {};
+export function setVerseDevinSeatOptionsForTest(opts: DevinSeatDiscoveryOptions | null): void {
+  devinSeatOptions = opts ?? {};
+  seatCache = null;
 }
 
 /** Drop the cached seat discovery (after account changes, or in tests). */
@@ -1253,7 +1267,9 @@ function resolveCreation(
   //    what the session was given rather than leaving it unknown — absent is
   //    reserved for callers that never decided (pre-3.9 records).
   let memory: VerseCreateOptions['memory'] = null;
-  if (memoryEnabledFor(prefs, request.projectPath)) {
+  // 3.15: a Devin seat is never offered the local memory directory — the
+  // cloud lane works in Devin's own machine, the CLI lane reads its own rules.
+  if (seat.engine !== 'devin' && memoryEnabledFor(prefs, request.projectPath)) {
     try {
       memory = prepareProjectMemory(request.projectPath, { writable: seat.engine !== 'grok' });
     } catch {
@@ -1491,7 +1507,10 @@ const SESSION_POST_ACTIONS: ReadonlySet<string> = new Set([
   'rename',
   'context-mode',
   'handoff-preview',
+  // 3.15: Stop in a Devin chat — terminate the remote session (confirmed).
+  'terminate',
 ]);
+const TERMINATE_KEYS: ReadonlySet<string> = new Set(['confirm']);
 
 /**
  * The gate every POST in this file sits behind, in the same order: 404 unless
@@ -2169,6 +2188,49 @@ export async function handleVerseApi(
         }
         const cancelled = engine.cancelTurn(id);
         sendJson(res, 200, { ok: true, cancelled });
+        return true;
+      }
+
+      // POST /api/verse/sessions/:id/terminate {confirm: true} — 3.15, Devin
+      // chats only. Stops watching (cancels a running turn), then ends the
+      // Devin session for good (DELETE; "a terminated session cannot be
+      // resumed"). `confirm` is required because it cannot be undone; the UI
+      // asks first. The CLI lane has no remote session: it only cancels.
+      if (action === 'terminate') {
+        if (rejectUnknownKeys(body, TERMINATE_KEYS, res)) return true;
+        if (body['confirm'] !== true) {
+          sendInvalid(res, 'confirm must be true: terminating a Devin session cannot be undone');
+          return true;
+        }
+        const session = engine.getSession(id);
+        if (!session) {
+          sendJson(res, 404, { code: 'VERSE_SESSION_NOT_FOUND', error: `session not found: ${id}` });
+          return true;
+        }
+        if (session.engine !== 'devin') {
+          sendInvalid(res, 'only a Devin chat has a remote session to terminate');
+          return true;
+        }
+        const cancelled = engine.cancelTurn(id);
+        const taskId = session.nativeSessionId;
+        if (session.seatId === 'devin-cli' || session.remote?.lane === 'cli' || !taskId) {
+          sendJson(res, 200, { ok: true, cancelled, terminated: false });
+          return true;
+        }
+        const { terminateDevinChat } = await import('../devin/chat.js');
+        const result = await terminateDevinChat(taskId);
+        if (!result.ok) {
+          sendJson(res, result.status, { code: 'VERSE_DEVIN_TERMINATE_FAILED', error: result.error, cancelled });
+          return true;
+        }
+        engine.recordRemoteStatus?.(id, {
+          state: 'terminated',
+          message: 'You terminated the Devin session.',
+          url: result.task.sessionUrl,
+          acusConsumed: result.task.session?.acusConsumed ?? null,
+          acuCap: result.task.maxAcu,
+        });
+        sendJson(res, 200, { ok: true, cancelled, terminated: true });
         return true;
       }
 

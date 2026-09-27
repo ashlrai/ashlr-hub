@@ -165,6 +165,16 @@ export function permissionOptionsFor(engine: VerseEngine): VerseControlOption<Ve
         : permissionOption(id, true)));
     case 'grok':
       return VERSE_PERMISSION_MODES.map((id) => permissionOption(id, true));
+    case 'devin':
+      // 3.15. Nobody is at the keyboard to answer Devin's approvals, so the
+      // runner answers them (core/devin/acp-bridge.ts): Plan allows only
+      // read-only tools, Accept edits runs sandboxed and approves the rest,
+      // Bypass approves everything unsandboxed. There is no separate auto mode
+      // to switch to. On the cloud lane Devin works in its own machine; Plan
+      // is passed to it as an instruction.
+      return VERSE_PERMISSION_MODES.map((id) => (id === 'auto'
+        ? permissionOption(id, false, 'Devin never asks in a chat — Accept edits already runs on its own (sandboxed).')
+        : permissionOption(id, true)));
     default: {
       const never: never = engine;
       return [permissionOption(never, false)];
@@ -194,6 +204,8 @@ export function effortOptionsFor(engine: VerseEngine, ctx: ControlOptionsContext
       return VERSE_EFFORTS.map((id) => effortOption(id, CODEX_EFFORTS.has(id), 'Codex’s highest effort is Extra high.'));
     case 'grok':
       return VERSE_EFFORTS.map((id) => effortOption(id, GROK_EFFORTS.has(id), 'Grok offers Low, Medium and High.'));
+    case 'devin':
+      return VERSE_EFFORTS.map((id) => effortOption(id, false, 'Devin runs without an effort setting.'));
     default: {
       const never: never = engine;
       return VERSE_EFFORTS.map((id) => effortOption(id, false, `unknown engine ${String(never)}`));
@@ -401,6 +413,28 @@ const GROK_PERMISSION_FLAG: Readonly<Record<VersePermissionMode, string>> = {
 
 export function grokPermissionArgs(session: Pick<VerseSession, 'controls'>): string[] {
   return ['--permission-mode', GROK_PERMISSION_FLAG[modeOf(session)]];
+}
+
+/**
+ * 3.15. The Devin CLI's root flags for a chat's permission mode (placed BEFORE
+ * `acp`; checked on devin 3000.11.3: `devin --sandbox --permission-mode
+ * dangerous acp --help` parses). The ACP bridge ALSO answers every
+ * `session/request_permission` by the same rule, so a flag the ACP server
+ * ignores never turns into a stuck turn.
+ */
+export function devinCliPermissionArgs(session: Pick<VerseSession, 'controls'>): string[] {
+  switch (modeOf(session)) {
+    case 'plan':
+      // "auto" = the CLI auto-approves read-only tools; the bridge refuses the rest.
+      return ['--permission-mode', 'auto'];
+    case 'bypass':
+      return ['--permission-mode', 'dangerous'];
+    case 'accept-edits':
+    case 'auto':
+    default:
+      // Exec-tool processes may write only inside the workspace (Seatbelt).
+      return ['--sandbox', '--permission-mode', 'accept-edits'];
+  }
 }
 
 /** `--reasoning-effort=<level>` (the `=` spelling clap always binds), or nothing by default. */

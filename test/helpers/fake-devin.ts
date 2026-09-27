@@ -30,10 +30,22 @@ export interface RecordedRequest {
   body: unknown;
 }
 
+/** SessionMessage (3.15 chat seat): GET …/messages returns these, cursor = index. */
+export interface FakeMessage {
+  event_id: string;
+  source: 'devin' | 'user';
+  message: string;
+  created_at: number;
+}
+
 export interface FakeDevin {
   fetch: DevinFetch;
   requests: RecordedRequest[];
   sessions: Map<string, FakeSession>;
+  /** 3.15: each session's message stream (chronological). */
+  messages: Map<string, FakeMessage[]>;
+  /** 3.15: append a Devin message to a session (a test's "Devin said …"). */
+  say(sessionId: string, text: string): void;
   /** The key the server accepts. */
   key: string;
   orgId: string;
@@ -54,12 +66,22 @@ export function fakeDevin(opts: { key?: string; orgId?: string; self?: Record<st
     fetch: null as unknown as DevinFetch,
     requests: [],
     sessions: new Map(),
+    messages: new Map(),
+    say: () => undefined,
     key: opts.key ?? FAKE_KEY,
     orgId: opts.orgId ?? FAKE_ORG,
     self: opts.self ?? { principal_type: 'service_user', service_user_id: 'su-1', service_user_name: 'Ashlr Verse', org_id: null },
     forced: [],
     onCreate: null,
   };
+  let eventCounter = 0;
+  const push = (sessionId: string, source: 'devin' | 'user', message: string): void => {
+    eventCounter += 1;
+    const list = f.messages.get(sessionId) ?? [];
+    list.push({ event_id: `ev-${eventCounter}`, source, message, created_at: eventCounter });
+    f.messages.set(sessionId, list);
+  };
+  f.say = (sessionId, text) => push(sessionId, 'devin', text);
   const respond = (status: number, body: unknown, headers: Record<string, string> = {}) => ({
     status,
     headers: { get: (name: string) => headers[name.toLowerCase()] ?? null },
@@ -101,6 +123,7 @@ export function fakeDevin(opts: { key?: string; orgId?: string; self?: Record<st
         org_id: f.orgId, created_at: 1, updated_at: 1,
       };
       f.sessions.set(id, session);
+      push(id, 'user', String(request['prompt'] ?? ''));
       // The docs' own example create response carries only these three fields.
       return respond(200, { session_id: id, url: session.url, status: 'new' });
     }
@@ -110,7 +133,24 @@ export function fakeDevin(opts: { key?: string; orgId?: string; self?: Record<st
     const session = sessionId ? f.sessions.get(sessionId) : undefined;
     if (!session) return respond(404, { title: 'Not Found', status: 404, detail: 'no such session' });
     if (orgMatch[3] && init.method === 'POST') {
+      if (session.status === 'exit') return respond(409, { title: 'Conflict', status: 409, detail: 'session has ended' });
       if (session.status === 'suspended') session.status = 'running';
+      push(session.session_id, 'user', String((body as Record<string, unknown>)['message'] ?? ''));
+      return respond(200, session);
+    }
+    if (orgMatch[3] && init.method === 'GET') {
+      // PaginatedResponse[SessionMessage]: `after` is the previous end_cursor (an index here).
+      const list = f.messages.get(session.session_id) ?? [];
+      const after = parsed.searchParams.get('after');
+      const first = Number(parsed.searchParams.get('first') ?? '100');
+      const start = after === null ? 0 : Number(after);
+      const items = list.slice(start, start + first);
+      const end = start + items.length;
+      return respond(200, { items, end_cursor: String(end), has_next_page: end < list.length });
+    }
+    if (init.method === 'DELETE') {
+      session.status = 'exit';
+      session.status_detail = null;
       return respond(200, session);
     }
     if (init.method === 'GET') return respond(200, session);

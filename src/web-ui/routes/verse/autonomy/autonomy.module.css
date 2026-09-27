@@ -339,6 +339,7 @@
 .seatEngine[data-engine="codex"] { --engine-color: var(--engine-codex); }
 .seatEngine[data-engine="grok"] { --engine-color: var(--engine-grok); }
 .seatEngine[data-engine="local"] { --engine-color: var(--engine-local); }
+.seatEngine[data-engine="devin"] { --engine-color: var(--engine-devin); }
 .seatLabel { font-size: var(--text-sm-size); line-height: var(--text-sm-line); color: var(--text-primary); min-width: 0; overflow-wrap: anywhere; }
 .seatRefusal { grid-column: 2; font-family: var(--font-mono); font-size: var(--text-2xs-size, 11px); line-height: var(--text-xs-line); color: var(--text-tertiary); overflow-wrap: anywhere; }
 

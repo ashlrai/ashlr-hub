@@ -100,11 +100,12 @@ export function migrateSectionId(value: unknown): SectionMigration | null {
  * logo (SPEC-310C §6). One table so the rail, sidebar, Apps and the native
  * notifications all print the same letter.
  */
-export const ENGINE_MONOGRAM: Readonly<Record<VerseEngine, 'C' | 'X' | 'G' | 'L'>> = {
+export const ENGINE_MONOGRAM: Readonly<Record<VerseEngine, 'C' | 'X' | 'G' | 'L' | 'D'>> = {
   claude: 'C',
   codex: 'X',
   grok: 'G',
   local: 'L',
+  devin: 'D',
 };
 
 // ===========================================================================

@@ -1737,6 +1737,12 @@ async function main(): Promise<void> {
       await import('../core/local-runtime/llama/anthropic-proxy-process.js');
       return;
     }
+    // 3.15: the Devin chat turn process (core/devin/chat-turn-invocation.ts).
+    // Same contract: operand-free, the request arrives on stdin.
+    if (argv[0] === '--_devin-chat-turn') {
+      await import('../core/devin/chat-turn-process.js');
+      return;
+    }
   }
 
   if (argv[0] === '--_cutoff-checkpoint-supervisor') {

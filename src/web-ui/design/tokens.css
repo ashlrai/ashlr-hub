@@ -176,6 +176,8 @@
   --engine-codex: #0e9aa7;
   --engine-grok: var(--gray-800);
   --engine-local: #7c5cff;
+  /* 3.15 Devin (Cognition): magenta — not an existing engine, status or data hue. */
+  --engine-devin: #b8407a;
 
   /* ---------------------------------------------------------------------
    * Data encoding (V3.10). Raw values live HERE, because this is the only
@@ -563,6 +565,7 @@
     --engine-claude: #d97757;
     --engine-codex: #32adba;
     --engine-local: #9b82ff;
+    --engine-devin: #e27aad;
 
     --data-seq-1: hsl(214 55% 22%);
     --data-seq-2: hsl(214 62% 30%);
@@ -683,6 +686,7 @@
   --engine-claude: #d97757;
   --engine-codex: #32adba;
   --engine-local: #9b82ff;
+  --engine-devin: #e27aad;
 
   --data-seq-1: hsl(214 55% 22%);
   --data-seq-2: hsl(214 62% 30%);

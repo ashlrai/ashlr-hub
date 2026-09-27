@@ -182,13 +182,14 @@ describe('connect', () => {
 describe('status and readiness lines', () => {
   it('disabled / not connected / ready, with Chat n/a and the fleet verdict', async () => {
     const off = await devinStatus(deps({ config: () => undefined }));
-    expect(off).toMatchObject({ state: 'disabled', connected: false, chatLine: expect.stringMatching(/^Chat: n\/a/) });
+    expect(off).toMatchObject({ state: 'disabled', connected: false, chatLine: expect.stringMatching(/^Chat: off/) });
     expect(off.fleet).toMatchObject({ ready: false, fix: { kind: 'command', command: 'ashlr devin connect' } });
     await connect();
     resetDevinStatusCacheForTest();
     const ready = await devinStatus(deps());
     expect(ready).toMatchObject({ state: 'ready', connected: true, enabled: true, orgId: FAKE_ORG });
-    expect(ready.chat).toMatchObject({ ready: false, word: 'n/a' });
+    // 3.15: Devin is a chat seat once ready.
+    expect(ready.chat).toMatchObject({ ready: true, word: 'Ready' });
     expect(ready.fleet).toMatchObject({ ready: false, word: 'Off', fix: { command: 'ashlr devin fleet on' } });
   });
 

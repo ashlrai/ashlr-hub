@@ -11,13 +11,14 @@ import { budgetFor, canonicalModelId, claudeAutocompactFlag, reconcileAutoCompac
 import { usedPercentText } from './percent-text.js';
 import { formatTokens } from './verse-readouts.js';
 
-export const ENGINE_ORDER: readonly VerseEngine[] = ['claude', 'codex', 'grok', 'local'];
+export const ENGINE_ORDER: readonly VerseEngine[] = ['claude', 'codex', 'grok', 'devin', 'local'];
 
 export const ENGINE_LABEL: Record<VerseEngine, string> = {
   claude: 'Claude',
   codex: 'Codex',
   grok: 'Grok',
   local: 'Local',
+  devin: 'Devin',
 };
 
 export function isVerseEngine(value: string): value is VerseEngine {

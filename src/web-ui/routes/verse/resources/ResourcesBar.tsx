@@ -35,7 +35,7 @@ type Level = 'ok' | 'low' | 'out' | 'idle' | 'unknown';
 
 export interface BarRow {
   key: string;
-  engine: 'claude' | 'codex' | 'grok' | 'local';
+  engine: 'claude' | 'codex' | 'grok' | 'local' | 'devin';
   name: string;
   /** 0–100 left in the binding window; null when there is no reading. */
   leftPercent: number | null;

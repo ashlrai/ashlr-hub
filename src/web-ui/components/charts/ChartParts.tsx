@@ -145,7 +145,7 @@ export function HatchPattern({ id }: { id: string }) {
 // Engine identity (V3.10) — a 2px tick plus a one-letter monogram
 // ---------------------------------------------------------------------------
 
-const ENGINE_LETTER: Readonly<Record<ChartEngine, string>> = { claude: 'C', codex: 'X', grok: 'G', local: 'L' };
+const ENGINE_LETTER: Readonly<Record<ChartEngine, string>> = { claude: 'C', codex: 'X', grok: 'G', local: 'L', devin: 'D' };
 
 /** The monogram letter for an engine (mirrors workbench-types ENGINE_MONOGRAM; charts stay core-free). */
 export function engineLetter(engine: ChartEngine): string {

@@ -32,7 +32,7 @@ import type {
 } from '../src/core/verse/types.js';
 import type { VerseParsedEvent } from '../src/core/verse/adapters/index.js';
 import type { VerseCreateOptions, VerseEngineHandle, VerseSeatLaunch } from '../src/core/verse/session-engine.js';
-import { resetVerseEngine, invalidateVerseSeatCache, expandHomePrefix } from '../src/core/verse/verse-api.js';
+import { resetVerseEngine, invalidateVerseSeatCache, expandHomePrefix, setVerseDevinSeatOptionsForTest } from '../src/core/verse/verse-api.js';
 import { readAuthHeaders, readSseAuth, startServer } from './helpers/authenticated-web-server.js';
 
 // ---------------------------------------------------------------------------
@@ -335,6 +335,8 @@ beforeEach(() => {
   engine = new FakeEngine();
   resetVerseEngine(engine);
   invalidateVerseSeatCache();
+  // 3.15: the Devin CLI's install paths are machine-wide; keep the roster hermetic.
+  setVerseDevinSeatOptionsForTest({ cliCandidates: [] });
   handles = [];
 });
 
@@ -381,7 +383,10 @@ describe('GET /api/verse/bootstrap', () => {
       localRuntime: { ollama: { reachable: boolean; baseUrl: string; models: string[] } };
     };
     expect(Object.keys(body).sort()).toEqual(['dispatchEnabled', 'localRuntime', 'projects', 'seats', 'sessions']);
-    expect(body.seats.map((s) => s.id)).toEqual(['claude']);
+    // 3.15: the Devin (cloud) chat seat is always listed — disabled until connected.
+    expect(body.seats.map((s) => s.id)).toEqual(['claude', 'devin']);
+    const devin = body.seats[1] as unknown as { engine: string; health: { state: string; summary: string }; contextWindow: number | null };
+    expect(devin).toMatchObject({ engine: 'devin', contextWindow: null, health: { state: 'unavailable', summary: 'Connect Devin: `ashlr devin connect`' } });
     // The FIRST model is what a new session defaults to, so it must be the
     // newest the catalog offers — not whichever was newest when this was
     // written. Pinning a specific id here is how this test broke the moment
@@ -757,5 +762,52 @@ describe('engine reset hook', () => {
     expect(next.closed).toBe(false);
     resetVerseEngine(null);
     expect(next.closed).toBe(true);
+  });
+});
+
+describe('POST /api/verse/sessions/:id/terminate (3.15, Devin chats)', () => {
+  function devinSession(id: string, patch: Partial<VerseSession> = {}): VerseSession {
+    const now = new Date().toISOString();
+    const session: VerseSession = {
+      id, title: 'Devin chat', projectPath: repo, engine: 'devin', accountId: 'devin', seatId: 'devin', model: 'devin',
+      nativeSessionId: null, createdAt: now, updatedAt: now, status: 'idle', turnCount: 0, usage: zeroUsage(), lastError: null, ...patch,
+    };
+    engine.sessions.set(id, session);
+    return session;
+  }
+
+  it('requires confirm: true, refuses non-Devin chats, and never calls Devin without a bound session', async () => {
+    const { port, mutate } = await boot();
+    const other = await createSession(port, mutate);
+    const url = (id: string) => `/api/verse/sessions/${id}/terminate`;
+
+    devinSession('d1', { status: 'running' });
+    const unconfirmed = await request(port, 'POST', url('d1'), mutate, '{}');
+    expect(unconfirmed.status).toBe(400);
+    expect(engine.getSession('d1')?.status).toBe('running');
+    const extraKey = await request(port, 'POST', url('d1'), mutate, JSON.stringify({ confirm: true, force: true }));
+    expect(extraKey.status).toBe(400);
+
+    const notDevin = await request(port, 'POST', url(other.id), mutate, JSON.stringify({ confirm: true }));
+    expect(notDevin.status).toBe(400);
+
+    // No Devin session yet: stops watching, terminates nothing.
+    const noNative = await request(port, 'POST', url('d1'), mutate, JSON.stringify({ confirm: true }));
+    expect(noNative.status).toBe(200);
+    expect(noNative.json).toEqual({ ok: true, cancelled: true, terminated: false });
+
+    // The CLI lane has no remote session to end.
+    devinSession('d2', { seatId: 'devin-cli', nativeSessionId: 'brisk-otter' });
+    const cli = await request(port, 'POST', url('d2'), mutate, JSON.stringify({ confirm: true }));
+    expect(cli.json).toEqual({ ok: true, cancelled: false, terminated: false });
+
+    // A task id this machine has no record of: refused, with no API call possible.
+    devinSession('d3', { nativeSessionId: 'dv_20260927T0400_aaaaaa' });
+    const unknownTask = await request(port, 'POST', url('d3'), mutate, JSON.stringify({ confirm: true }));
+    expect(unknownTask.status).toBe(404);
+    expect((unknownTask.json as { code: string }).code).toBe('VERSE_DEVIN_TERMINATE_FAILED');
+
+    const missing = await request(port, 'POST', url('nope'), mutate, JSON.stringify({ confirm: true }));
+    expect(missing.status).toBe(404);
   });
 });

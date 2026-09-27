@@ -384,7 +384,8 @@ describe('APPS_CATALOG', () => {
 
   it('lists the SPEC-310C §4 terminal agents in order', () => {
     expect(APPS_CATALOG.filter((e) => e.group === 'terminal-agents').map((e) => e.name)).toEqual([
-      'Claude Code', 'Codex', 'Grok', 'Hermes', 'Aider', 'Goose', 'OpenCode', 'Droid', 'Pi', 'Cline',
+      // 3.15: Devin's CLI joins after Grok — it is the "Devin (CLI)" chat seat.
+      'Claude Code', 'Codex', 'Grok', 'Devin', 'Hermes', 'Aider', 'Goose', 'OpenCode', 'Droid', 'Pi', 'Cline',
     ]);
   });
 

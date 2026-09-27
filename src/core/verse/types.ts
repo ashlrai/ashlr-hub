@@ -17,7 +17,42 @@
  */
 import type { TRANSIENT_EVENT_TYPE_LIST } from './transient-events.js';
 
-export type VerseEngine = 'claude' | 'codex' | 'grok' | 'local';
+export type VerseEngine = 'claude' | 'codex' | 'grok' | 'local' | 'devin';
+
+/**
+ * 3.15. Devin (Cognition) seats. Unlike the other engines Devin is not one CLI
+ * spawned per turn in the project folder — or not only:
+ *   devin      (lane `cloud`) — an async remote session via the v3 API; the
+ *                turn process is Verse's own runner (core/devin/chat-turn.ts),
+ *                which creates / messages the session and streams its messages
+ *                back by polling.
+ *   devin-cli  (lane `cli`)   — the local `devin` CLI driven over the Agent
+ *                Client Protocol (`devin acp`, JSON-RPC on stdio) by the same
+ *                runner, in the project folder.
+ * Both are the operator's own chats: they never count as fleet work.
+ */
+export type VerseDevinLane = 'cloud' | 'cli';
+
+/** 3.15. Where a remote (Devin) session stands, as the transcript and header show it. */
+export const VERSE_REMOTE_STATES = ['starting', 'working', 'waiting', 'suspended', 'finished', 'terminated', 'error'] as const;
+export type VerseRemoteState = (typeof VERSE_REMOTE_STATES)[number];
+
+/**
+ * 3.15 ADDITIVE. What a Devin chat's header shows: the live remote state, the
+ * link to the session and (cloud lane) the ACU meter. Absent on every other
+ * engine's records.
+ */
+export interface VerseRemoteInfo {
+  provider: 'devin';
+  lane: VerseDevinLane;
+  /** https URL of the Devin session (cloud lane), else null. */
+  url: string | null;
+  state: VerseRemoteState | null;
+  /** ACUs the session has used, as Devin reports them; null = not read yet / not reported (CLI lane). */
+  acusConsumed: number | null;
+  /** The session's hard cap (max_acu_limit); null when none applies. */
+  acuCap: number | null;
+}
 
 export type VerseSessionStatus = 'idle' | 'running' | 'error';
 
@@ -566,6 +601,8 @@ export interface VerseSession {
    * which every launch already reads — one field, one truth.
    */
   controls?: VerseSessionControls;
+  /** 3.15 ADDITIVE. Devin seats only — the latest `remote-status` reading (see VerseRemoteInfo). */
+  remote?: VerseRemoteInfo;
 }
 
 /**
@@ -726,7 +763,36 @@ export type VerseEvent =
    * `sourcesFromToolCall`) and never persisted twice. `turnId` null = the
    * whole chat. Older clients drop an unknown type; older logs never carry it.
    */
-  | { seq: number; at: string; type: 'source'; turnId: string | null; source: VerseSource };
+  | { seq: number; at: string; type: 'source'; turnId: string | null; source: VerseSource }
+  // ── 3.15 PERSISTED events (Devin seats) ───────────────────────────────────
+  /**
+   * The remote session changed state ("Devin is working…", "waiting for you",
+   * finished, suspended, terminated) and/or reported ACUs. Persisted so a
+   * reload shows where the session stood; the engine folds the latest one into
+   * `VerseSession.remote` for the header meter.
+   */
+  | {
+    seq: number;
+    at: string;
+    type: 'remote-status';
+    turnId: string | null;
+    provider: 'devin';
+    state: VerseRemoteState;
+    message: string;
+    url: string | null;
+    acusConsumed: number | null;
+    acuCap: number | null;
+  }
+  /** Devin opened (or updated) a pull request. `url` is always an https GitHub URL. */
+  | {
+    seq: number;
+    at: string;
+    type: 'remote-pr';
+    turnId: string | null;
+    provider: 'devin';
+    url: string;
+    state: string | null;
+  };
 
 export type VerseEventType = VerseEvent['type'];
 

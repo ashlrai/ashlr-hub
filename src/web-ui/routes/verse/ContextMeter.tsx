@@ -60,6 +60,8 @@ const COMPACTOR: Record<VerseEngine, string> = {
   local: 'Claude Code (driving the local model)',
   codex: 'Codex',
   grok: 'Grok',
+  // 3.15: Devin manages its own context remotely; Verse never compacts it.
+  devin: 'Devin',
 };
 
 /** Full-precision figure for the tooltip, where `367k` would hide the digits. */

@@ -495,6 +495,20 @@ function sessionAfter(session: VerseSession, event: VerseEvent): VerseSession {
       return { ...session, status: 'error', lastError: event.message, updatedAt: event.at };
     case 'cancelled':
       return { ...session, status: 'idle', updatedAt: event.at };
+    case 'remote-status':
+      // 3.15: the header's Devin state + ACU meter — the server's own fold.
+      return {
+        ...session,
+        remote: {
+          provider: 'devin',
+          lane: session.remote?.lane ?? (session.seatId === 'devin-cli' ? 'cli' : 'cloud'),
+          url: event.url ?? session.remote?.url ?? null,
+          state: event.state,
+          acusConsumed: event.acusConsumed ?? session.remote?.acusConsumed ?? null,
+          acuCap: event.acuCap ?? session.remote?.acuCap ?? null,
+        },
+        updatedAt: event.at,
+      };
     default:
       return session;
   }

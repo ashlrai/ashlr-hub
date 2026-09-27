@@ -895,7 +895,10 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
       onDrop={onDrop}>
       {disabled ? null : <ComposerSeatBlock seats={seats} seatId={seat.seatId} onSeatChange={onSeatChange} />}
-      {disabled || !sessionId ? null : (
+      {/* 3.15: never on a Devin chat — Auto routes only among Claude, Codex,
+          Grok and local seats, so on Devin it would always propose moving the
+          conversation away from the seat the operator chose. */}
+      {disabled || !sessionId || effectiveEngine === 'devin' ? null : (
         <Suspense fallback={null}>
           <MultiModelBar sessionId={sessionId} seats={seats} text={text} running={running}
             registerInterceptor={registerInterceptor} onConsumeDraft={clearAfterSend} />
@@ -957,7 +960,12 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
               <span className={cstyles.controlStatic} title={`Model: ${modelName}`}>{modelName}</span>
             )}
             {!compact && wide ? wide.effort : null}
-            {!compact ? <ContextRing contextTokens={contextTokens} contextWindow={contextWindow} autoCompactAt={autoCompactAt} exact={contextExact} engine={effectiveEngine} /> : null}
+            {!compact
+              // 3.15: Devin keeps its context remotely — no window to draw.
+              ? effectiveEngine === 'devin'
+                ? <span className={cstyles.contextRing} title="Devin manages its own context remotely" data-tone="unknown">remote</span>
+                : <ContextRing contextTokens={contextTokens} contextWindow={contextWindow} autoCompactAt={autoCompactAt} exact={contextExact} engine={effectiveEngine} />
+              : null}
             {compact && view ? (
               <button ref={moreButton} type="button" className={`${cstyles.iconButton} ${bypassOn ? cstyles.iconButtonDanger : ''}`}
                 aria-haspopup="dialog" aria-label={`Chat settings: ${labelOf(view.options.permissionModes, view.controls.permissionMode)}, ${modelName}`}

@@ -17,7 +17,7 @@
  * log, rebuilding only the turn segments that changed.
  */
 import type { VerseEvent, VerseUsage } from '../../data/api-types.js';
-import type { VerseRecoveryHow, VerseSource, VerseThinkingKind } from '../../../core/verse/types.js';
+import type { VerseRecoveryHow, VerseRemoteState, VerseSource, VerseThinkingKind } from '../../../core/verse/types.js';
 import { getVerseSessionState, getVerseThinkingStats, subscribeVerseStoreLifecycle, type VerseThinkingStat } from './verse-store.js';
 
 // ---------------------------------------------------------------------------
@@ -106,7 +106,21 @@ export type TranscriptItem =
    * seat reported. Renders nothing in place; the turn's citation list and the
    * Sources pane read it. `turnId` null = the whole chat.
    */
-  | { kind: 'source'; key: string; turnId: string | null; at: string; source: VerseSource };
+  | { kind: 'source'; key: string; turnId: string | null; at: string; source: VerseSource }
+  /** 3.15: a Devin session's state ("working…", "waiting for you", ACUs). */
+  | {
+      kind: 'remote';
+      key: string;
+      turnId: string | null;
+      at: string;
+      state: VerseRemoteState;
+      message: string;
+      url: string | null;
+      acusConsumed: number | null;
+      acuCap: number | null;
+    }
+  /** 3.15: Devin opened a pull request (a card with the link). */
+  | { kind: 'remote-pr'; key: string; turnId: string | null; at: string; url: string; state: string | null };
 
 /**
  * One turn's worth of items — the log cut at each `user-message`. Unchanged
@@ -322,6 +336,24 @@ function buildSegment(
       case 'source':
         // No flush: a source is metadata about the turn, not a break in its prose.
         items.push({ kind: 'source', key: `src-${e.seq}`, turnId: e.turnId, at: e.at, source: e.source });
+        break;
+      case 'remote-status':
+        // A Devin reply arrives whole (assistant-message) before the status
+        // that ends the turn, so nothing streamed is pending here.
+        items.push({
+          kind: 'remote',
+          key: `rs-${e.seq}`,
+          turnId: e.turnId,
+          at: e.at,
+          state: e.state,
+          message: e.message,
+          url: e.url,
+          acusConsumed: e.acusConsumed,
+          acuCap: e.acuCap,
+        });
+        break;
+      case 'remote-pr':
+        items.push({ kind: 'remote-pr', key: `rp-${e.seq}`, turnId: e.turnId, at: e.at, url: e.url, state: e.state });
         break;
       default:
         break;

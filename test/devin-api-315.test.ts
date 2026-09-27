@@ -87,7 +87,7 @@ describe('/api/verse/devin', () => {
     const { status, text } = await get('/api/verse/devin');
     expect(status).toBe(200);
     const body = JSON.parse(text) as { status: Record<string, unknown>; budget: Record<string, unknown>; tasks: unknown[] };
-    expect(body.status).toMatchObject({ state: 'ready', connected: true, orgId: FAKE_ORG, chat: { word: 'n/a' } });
+    expect(body.status).toMatchObject({ state: 'ready', connected: true, orgId: FAKE_ORG, chat: { word: 'Ready' } }); // 3.15: Devin is a chat seat
     expect(body.budget).toMatchObject({ acuBudgetTotal: 50, canLaunch: { ok: true } });
     expect(text).not.toContain(FAKE_KEY);
   });

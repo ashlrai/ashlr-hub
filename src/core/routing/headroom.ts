@@ -135,7 +135,10 @@ export function capacityFromSeat(seat: VerseSeat, liveCapacity?: VerseSeatCapaci
   const signedOut = !free && capacity?.usability === 'signed-out';
   return {
     seatId: seat.id,
-    engine: seat.engine,
+    // 3.15: `discoverSeats` never lists a Devin seat (verse-api merges the
+    // Devin CHAT seats for the chat UI only — verse/devin-seats.ts), so a
+    // seat reaching routing is always a capacity engine.
+    engine: seat.engine as CapacityEngine,
     label: seat.label,
     free,
     windows,
