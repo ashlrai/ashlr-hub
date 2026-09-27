@@ -640,6 +640,7 @@
 /test/m98.cross-platform-confine.test.ts @masonwyatt23
 /test/mcp-firm-resources.test.ts @masonwyatt23
 /test/merge-gates-310b.test.ts @masonwyatt23
+/test/mirror-sibling-deps-314.test.ts @masonwyatt23
 /test/mirrors-310b.test.ts @masonwyatt23
 /test/orchestrator-bash-standing-310b.test.ts @masonwyatt23
 /test/overnight-api-310b.test.ts @masonwyatt23
