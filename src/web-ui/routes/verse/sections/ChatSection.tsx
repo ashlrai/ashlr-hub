@@ -574,6 +574,9 @@ export function ChatSection() {
   }, [terminalShown]);
   // ⌃⇧` : always a NEW tab, in the active tab's root (else the chat's primary).
   const newTerminalTab = useCallback(() => requestTerminal({ newTab: true }), []);
+  // ⌘K "Generate command…" / "Search terminal history…": the Terminal panel opens its own prompt.
+  const generateCommand = useCallback(() => requestTerminal({ assist: true }), []);
+  const searchTerminalHistory = useCallback(() => requestTerminal({ history: true }), []);
 
   // The shell's one-shot command, consumed once by nonce.
   const handledCommand = useRef(0);
@@ -622,6 +625,8 @@ export function ChatSection() {
     ['dock.toggle', toggleDock],
     ['dock.terminal', openTerminal],
     ['dock.terminal-new', newTerminalTab],
+    ['terminal.generate', generateCommand],
+    ['terminal.history', searchTerminalHistory],
     ['dock.preview', () => showOrTogglePane('browser')],
     ['dock.diff', () => showOrTogglePane('diff')],
     ['dock.files', () => showOrTogglePane('files')],
@@ -638,6 +643,8 @@ export function ChatSection() {
   useCommandHandler('dock.toggle', handlerMap.get('dock.toggle')!);
   useCommandHandler('dock.terminal', handlerMap.get('dock.terminal')!);
   useCommandHandler('dock.terminal-new', handlerMap.get('dock.terminal-new')!);
+  useCommandHandler('terminal.generate', handlerMap.get('terminal.generate')!);
+  useCommandHandler('terminal.history', handlerMap.get('terminal.history')!);
   useCommandHandler('dock.preview', handlerMap.get('dock.preview')!);
   useCommandHandler('dock.diff', handlerMap.get('dock.diff')!);
   useCommandHandler('dock.files', handlerMap.get('dock.files')!);

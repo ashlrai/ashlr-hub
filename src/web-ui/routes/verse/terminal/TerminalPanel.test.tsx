@@ -6,12 +6,19 @@
  * send to chat through the server's scrub, explain → the chat seat), send
  * selection through /redact, the Agent tab (read-only, nothing re-runs),
  * ⌘D / ⌘F from inside the terminal, and the Node fallback.
+ *
+ * 3.15 input editor / six panes: the editor at a prompt (and only there), ↩
+ * writes text + CR, hand-off when the operator types into the terminal, Raw,
+ * ghost text and ↑ from history, ⌃R palette (inserts, never runs; ⌃R again →
+ * the shell's), `#` → a generated command to review (risky needs two ↩),
+ * ⌘K "Generate command…", six panes in one tab, ⌥⌘arrows, zoom.
  */
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   VerseEvent,
+  VerseTerminalAssistRequest,
   VerseTerminalBlock,
   VerseTerminalBlockOutputFormat,
   VerseTerminalCreateRequest,
@@ -26,6 +33,8 @@ import type { PanelTerminalApi } from './panel-client.js';
 import type { PanelStreamHandlers } from './panel-stream.js';
 import { resetTerminalPanelForTest, TerminalPanel, type TerminalPanelDeps, type TerminalPanelRequest } from './TerminalPanel.js';
 import type { FindOptions, LineMark, LinkHandlers, PanelView, PanelViewOptions } from './xterm-view.js';
+import type { InputEditor, InputEditorOptions, InputKeyIntent } from './input-editor.js';
+import { resetCommandInputHistoryCache } from './CommandInput.js';
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -112,6 +121,31 @@ class FakeView implements PanelView {
   select(text: string) { this.selection = text; for (const cb of this.selectionCbs) cb(); }
 }
 
+/** The input editor's seam, without CodeMirror: text, ghost, and the intents its keys raise. */
+class FakeEditor implements InputEditor {
+  text = '';
+  ghost: string | null = null;
+  placeholder: string;
+  focused = 0;
+  disposed = false;
+  constructor(public opts: InputEditorOptions) {
+    this.placeholder = opts.placeholder;
+    const el = document.createElement('div');
+    el.setAttribute('data-testid', 'fake-editor');
+    opts.host.appendChild(el);
+  }
+  getText() { return this.text; }
+  setText(text: string) { this.text = text; this.opts.onChange(text); }
+  focus() { this.focused += 1; }
+  hasFocus() { return this.focused > 0; }
+  setGhost(g: string | null) { this.ghost = g; }
+  setPlaceholder(t: string) { this.placeholder = t; }
+  dispose() { this.disposed = true; }
+  // drivers
+  type(text: string) { this.setText(text); }
+  press(intent: InputKeyIntent) { return this.opts.onKey(intent); }
+}
+
 interface FakeStream { tabId: string; after: () => number; handlers: PanelStreamHandlers; closed: boolean }
 
 function tabOf(id: string, over: Partial<VerseTerminalTab> = {}): VerseTerminalTab {
@@ -151,6 +185,13 @@ function harness(initial: Partial<VerseTerminalListResponse> = {}) {
   const creates: VerseTerminalCreateRequest[] = [];
   const clipboard: string[] = [];
   const outputs: Array<[string, string, VerseTerminalBlockOutputFormat]> = [];
+  const editors: FakeEditor[] = [];
+  const assists: Array<Record<string, unknown>> = [];
+  const history = {
+    enabled: true,
+    entries: [] as Array<{ cmd: string; ts: string; exit: number | null }>,
+  };
+  let assistReply = { command: 'du -sh * | sort -h', explanation: 'Sizes of everything here.', provider: 'local:qwen', risky: false };
   const { store, storage } = makeStorage();
   const api: PanelTerminalApi = {
     list: vi.fn(async () => ({ ...state, tabs: [...state.tabs] })),
@@ -173,6 +214,20 @@ function harness(initial: Partial<VerseTerminalListResponse> = {}) {
     }),
     redact: vi.fn(async (text: string) => text.replace(/sk-\w+/g, '[REDACTED]')),
     openFile: vi.fn(async () => {}),
+    history: vi.fn(async (query: { q?: string }) => ({
+      enabled: history.enabled,
+      entries: history.entries.filter((e) => !query.q || e.cmd.includes(query.q)).map((e) => ({
+        cmd: e.cmd, cwd: '~/code/app', repo: null, exit: e.exit, durMs: 10, ts: e.ts, count: 1, okCount: e.exit === 0 ? 1 : 0, here: true, sameRepo: false,
+      })),
+    })),
+    clearHistory: vi.fn(async () => { history.entries = []; }),
+    settings: vi.fn(async () => ({ history: history.enabled, assist: 'auto' as const })),
+    updateSettings: vi.fn(async (patch: { history?: boolean }) => {
+      if (patch.history !== undefined) history.enabled = patch.history;
+      return { history: history.enabled, assist: 'auto' as const };
+    }),
+    assist: vi.fn(async (req: VerseTerminalAssistRequest) => { assists.push({ ...req }); return assistReply; }),
+    files: vi.fn(async () => [{ root: '~/code/app', path: 'src/config.ts' }]),
   };
   const deps: Partial<TerminalPanelDeps> = {
     api,
@@ -191,11 +246,18 @@ function harness(initial: Partial<VerseTerminalListResponse> = {}) {
     writeClipboard: async (text) => { clipboard.push(text); },
     openUrl: vi.fn(),
     storage,
+    createInputEditor: async (opts) => {
+      const editor = new FakeEditor(opts);
+      editors.push(editor);
+      return editor;
+    },
+    preloadInputEditor: () => {},
   };
   const liveStream = (tabId: string) => streams.filter((s) => s.tabId === tabId && !s.closed).at(-1);
   const emit = (tabId: string, frame: VerseTerminalStreamFrame) => act(() => { liveStream(tabId)!.handlers.onFrame(frame); });
   const output = (tabId: string, seq: number, text: string) => emit(tabId, { type: 'output', seq, dataBase64: btoa(text) });
-  return { state, api, deps, views, streams, inputs, creates, clipboard, outputs, store, storage, liveStream, emit, output };
+  const setAssistReply = (reply: typeof assistReply) => { assistReply = reply; };
+  return { state, api, deps, views, streams, inputs, creates, clipboard, outputs, store, storage, liveStream, emit, output, editors, assists, history, setAssistReply };
 }
 
 type Harness = ReturnType<typeof harness>;
@@ -221,6 +283,7 @@ const PROMPT = '\x1b]133;A\x07% \x1b]133;B\x07';
 beforeEach(() => {
   resetTerminalPanelForTest();
   resetVerseStore();
+  resetCommandInputHistoryCache();
 });
 
 afterEach(() => {
@@ -410,5 +473,271 @@ describe('TerminalPanel', () => {
     expect(await screen.findByText('Agent')).toBeInTheDocument();
     expect(screen.getByTestId('agent-terminal')).toBeInTheDocument();
     expect(h.api.create).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3.15 — the input editor
+// ---------------------------------------------------------------------------
+
+const RUN = '\x1b]133;C\x07';
+
+async function atPrompt(h: Harness, tabId = 't-1', seq = 1) {
+  await waitFor(() => expect(h.liveStream(tabId)).toBeDefined());
+  h.output(tabId, seq, PROMPT);
+  await waitFor(() => expect(h.editors.length).toBeGreaterThan(0));
+  const input = screen.getByTestId(`command-input-${tabId}`);
+  await waitFor(() => expect(input).not.toHaveAttribute('hidden'));
+  return { editor: h.editors.at(-1)!, input };
+}
+
+describe('TerminalPanel — the input editor', () => {
+  it('shows at a prompt (after B), takes the keyboard, runs ↩ as text + CR, and hides while the command runs', async () => {
+    const h = harness({ tabs: [tabOf('t-1')] });
+    renderPanel(h);
+    await waitFor(() => expect(h.liveStream('t-1')).toBeDefined());
+    // Before any prompt: no editor.
+    h.output('t-1', 1, 'Last login: today\r\n');
+    expect(screen.queryByTestId('fake-editor')).toBeNull();
+    const { editor, input } = await atPrompt(h, 't-1', 2);
+    await waitFor(() => expect(editor.focused).toBeGreaterThan(0));
+    act(() => editor.type('ls -la'));
+    act(() => { editor.press('submit'); });
+    await waitFor(() => expect(h.inputs).toEqual([['t-1', 'ls -la\r']]));
+    expect(editor.text).toBe('');
+    h.output('t-1', 3, `ls -la\r\n${RUN}total 0\r\n`);
+    await waitFor(() => expect(input).toHaveAttribute('hidden'));
+    // The next prompt brings it back (the same editor, kept between prompts).
+    h.output('t-1', 4, `\x1b]133;D;0\x07${PROMPT}`);
+    await waitFor(() => expect(input).not.toHaveAttribute('hidden'));
+    expect(h.editors).toHaveLength(1);
+  });
+
+  it('several lines go as ONE bracketed paste; ⌃C clears, then interrupts; ⌃D and ⌃L are the shell\'s', async () => {
+    const h = harness({ tabs: [tabOf('t-1')] });
+    renderPanel(h);
+    const { editor } = await atPrompt(h);
+    act(() => editor.type('for f in *; do\n  echo $f\ndone'));
+    act(() => { editor.press('submit'); });
+    await waitFor(() => expect(h.inputs.at(-1)).toEqual(['t-1', '\x1b[200~for f in *; do\n  echo $f\ndone\x1b[201~\r']));
+    act(() => editor.type('half typed'));
+    act(() => { editor.press('interrupt'); });
+    expect(editor.text).toBe('');
+    act(() => { editor.press('interrupt'); });
+    act(() => { editor.press('eof'); });
+    act(() => { editor.press('clear-screen'); });
+    // Single-flight input may coalesce them: what matters is the bytes, in order.
+    await waitFor(() => expect(h.inputs.map(([, d]) => d).join('').endsWith('\x03\x04\x0c')).toBe(true));
+  });
+
+  it('typing into the terminal itself hands the prompt to the shell until the next one; terminal replies do not', async () => {
+    const h = harness({ tabs: [tabOf('t-1')] });
+    renderPanel(h);
+    const { input } = await atPrompt(h);
+    act(() => h.views[0]!.type('\x1b[12;1R'));
+    expect(input).not.toHaveAttribute('hidden');
+    act(() => h.views[0]!.type('l'));
+    await waitFor(() => expect(input).toHaveAttribute('hidden'));
+    await waitFor(() => expect(h.inputs.map(([, d]) => d)).toContain('l'));
+    h.output('t-1', 2, `s\r\n${RUN}x\r\n\x1b]133;D;0\x07${PROMPT}`);
+    await waitFor(() => expect(input).not.toHaveAttribute('hidden'));
+  });
+
+  it('Esc and ⇥ give the line to the shell\'s own editor (vi mode, fzf-tab) and the terminal the keyboard', async () => {
+    const h = harness({ tabs: [tabOf('t-1')] });
+    renderPanel(h);
+    const { editor, input } = await atPrompt(h);
+    const before = h.views[0]!.focused;
+    act(() => editor.type('git ch'));
+    act(() => { editor.press('tab'); });
+    await waitFor(() => expect(h.inputs.at(-1)).toEqual(['t-1', 'git ch\t']));
+    await waitFor(() => expect(input).toHaveAttribute('hidden'));
+    expect(h.views[0]!.focused).toBeGreaterThan(before);
+  });
+
+  it('Raw input for a shell (⋯ menu) turns the editor off for it — and it stays off after a reload', async () => {
+    const user = userEvent.setup();
+    const h = harness({ tabs: [tabOf('t-1')] });
+    const first = renderPanel(h);
+    const { input } = await atPrompt(h);
+    await user.click(screen.getByRole('button', { name: 'More terminal options' }));
+    await user.click(screen.getByRole('menuitem', { name: /^Raw input for this shell/ }));
+    await waitFor(() => expect(screen.queryByTestId('command-input-t-1')).toBeNull());
+    expect(input.isConnected).toBe(false);
+    first.unmount();
+    renderPanel(h);
+    await waitFor(() => expect(h.liveStream('t-1')).toBeDefined());
+    h.output('t-1', 1, PROMPT);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByTestId('command-input-t-1')).toBeNull();
+  });
+
+  it('ghost text and ↑ come from the persistent history', async () => {
+    const h = harness({ tabs: [tabOf('t-1')] });
+    h.history.entries = [
+      { cmd: 'git status', ts: '2026-09-27T09:00:00.000Z', exit: 0 },
+      { cmd: 'npm test', ts: '2026-09-27T09:30:00.000Z', exit: 1 },
+    ];
+    renderPanel(h);
+    const { editor } = await atPrompt(h);
+    await waitFor(() => expect(h.api.history).toHaveBeenCalledWith({ cwd: '~/code/app/pkg', limit: 300 }));
+    act(() => editor.type('git s'));
+    expect(editor.ghost).toBe('git status');
+    act(() => editor.type(''));
+    act(() => { editor.press('history-prev'); });
+    // ↑ is most recent first.
+    expect(editor.text).toBe('npm test');
+    act(() => { editor.press('history-prev'); });
+    expect(editor.text).toBe('git status');
+    act(() => { editor.press('history-next'); });
+    expect(editor.text).toBe('npm test');
+  });
+
+  it('⌃R: the history palette inserts the command (never runs it); ⌃R again hands the search to the shell', async () => {
+    const user = userEvent.setup();
+    const h = harness({ tabs: [tabOf('t-1')] });
+    h.history.entries = [{ cmd: 'docker compose up -d', ts: '2026-09-27T09:00:00.000Z', exit: 0 }];
+    renderPanel(h);
+    const { editor } = await atPrompt(h);
+    act(() => editor.type('docker'));
+    act(() => { editor.press('history-search'); });
+    const dialog = await screen.findByRole('dialog', { name: 'Command history' });
+    const option = await within(dialog).findByRole('option', { name: /docker compose up -d/ });
+    expect(option).toHaveAttribute('aria-selected', 'true');
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(editor.text).toBe('docker compose up -d'));
+    expect(h.inputs).toEqual([]);
+
+    act(() => { editor.press('history-search'); });
+    const again = await screen.findByRole('dialog', { name: 'Command history' });
+    const box = within(again).getByRole('combobox');
+    fireEvent.keyDown(box, { key: 'r', ctrlKey: true });
+    await waitFor(() => expect(h.inputs.at(-1)).toEqual(['t-1', '\x12docker compose up -d']));
+    expect(screen.queryByRole('dialog', { name: 'Command history' })).toBeNull();
+  });
+
+  it('# plain words → the local model → a command to REVIEW; a risky one needs a second ↩', async () => {
+    const h = harness({ tabs: [tabOf('t-1')] });
+    renderPanel(h);
+    const { editor } = await atPrompt(h);
+    act(() => editor.type('# how big is everything here'));
+    act(() => { editor.press('submit'); });
+    await waitFor(() => expect(editor.text).toBe('du -sh * | sort -h'));
+    expect(h.assists[0]).toEqual({ request: 'how big is everything here', tabId: 't-1', cwd: '~/code/app/pkg' });
+    expect(h.inputs).toEqual([]);
+    expect(await screen.findByText(/Sizes of everything here\. · Review, then ↩ to run · from local:qwen/)).toBeInTheDocument();
+    act(() => { editor.press('submit'); });
+    await waitFor(() => expect(h.inputs).toEqual([['t-1', 'du -sh * | sort -h\r']]));
+
+    h.setAssistReply({ command: 'rm -rf build', explanation: 'Deletes build.', provider: 'local:qwen', risky: true });
+    act(() => editor.type('clean the build'));
+    act(() => { editor.press('assist'); });
+    await waitFor(() => expect(editor.text).toBe('rm -rf build'));
+    act(() => { editor.press('submit'); });
+    expect(await screen.findByText(/changes or deletes things\. Press ↩ again/)).toBeInTheDocument();
+    expect(h.inputs).toHaveLength(1);
+    act(() => { editor.press('submit'); });
+    await waitFor(() => expect(h.inputs.at(-1)).toEqual(['t-1', 'rm -rf build\r']));
+  });
+
+  it('⌘K "Generate command…" opens the editor\'s # mode at a prompt; with no editor, a palette whose command is pasted, not run', async () => {
+    const user = userEvent.setup();
+    const h = harness({ tabs: [tabOf('t-1')] });
+    const view = renderPanel(h, { request: { nonce: 1 } });
+    const { editor } = await atPrompt(h);
+    view.rerender(
+      <TerminalPanel sessionId="s-1" roots={['~/code/app']} request={{ nonce: 2, assist: true }} onSendToChat={vi.fn()} visible deps={h.deps} />,
+    );
+    await waitFor(() => expect(editor.text).toBe('# '));
+
+    // A shell without integration: no editor, so the palette asks instead.
+    const h2 = harness({ tabs: [tabOf('t-9', { shellIntegration: 'off' })] });
+    resetTerminalPanelForTest();
+    view.unmount();
+    renderPanel(h2, { request: { nonce: 3, assist: true } });
+    const dialog = await screen.findByRole('dialog', { name: 'Generate a command' });
+    await user.type(within(dialog).getByRole('combobox'), 'list open ports');
+    await user.keyboard('{Enter}');
+    await within(dialog).findByRole('option', { name: /du -sh/ });
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(h2.views[0]!.pasted).toEqual(['du -sh * | sort -h']));
+    expect(h2.inputs).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3.15 — six panes
+// ---------------------------------------------------------------------------
+
+describe('TerminalPanel — six panes in a tab', () => {
+  it('⌘D up to six shells in one tab (one stream subscription each, all on the shared connection), ⌥⌘← moves focus, ⇧⌘↩ zooms', async () => {
+    const h = harness({ tabs: [tabOf('t-1')] });
+    renderPanel(h);
+    await waitFor(() => expect(h.views[0]?.keyFilter).toBeTruthy());
+    for (let i = 0; i < 5; i++) {
+      act(() => { h.views[0]!.keyFilter!(new KeyboardEvent('keydown', { key: 'd', metaKey: true, cancelable: true })); });
+      await waitFor(() => expect(h.api.create).toHaveBeenCalledTimes(i + 1));
+      await waitFor(() => expect(screen.getByTestId(`terminal-leaf-t-new${i + 1}`)).toBeInTheDocument());
+    }
+    const group = document.querySelector('[data-split]')!;
+    expect(group.querySelectorAll('[data-testid^="terminal-leaf-"]')).toHaveLength(6);
+    await waitFor(() => expect(new Set(h.streams.filter((s) => !s.closed).map((s) => s.tabId)).size).toBe(6));
+    // A seventh is refused with a reason.
+    act(() => { h.views[0]!.keyFilter!(new KeyboardEvent('keydown', { key: 'd', metaKey: true, cancelable: true })); });
+    expect(await screen.findByText('A tab holds 6 terminals at most. Open a new tab instead.')).toBeInTheDocument();
+    expect(h.api.create).toHaveBeenCalledTimes(5);
+
+    // Focus is on the newest pane; ⌥⌘← moves it one to the left.
+    const leaf = (id: string) => screen.getByTestId(`terminal-leaf-${id}`);
+    await waitFor(() => expect(leaf('t-new5')).toHaveAttribute('data-focused'));
+    const newest = h.views.at(-1)!;
+    act(() => { newest.keyFilter!(new KeyboardEvent('keydown', { key: 'ArrowLeft', metaKey: true, altKey: true, cancelable: true })); });
+    await waitFor(() => expect(leaf('t-new4')).toHaveAttribute('data-focused'));
+
+    // ⇧⌘↩ in the focused pane: it alone; again: all of them.
+    const focusedView = h.views[4]!; // t-new4's
+    act(() => { focusedView.keyFilter!(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, shiftKey: true, cancelable: true })); });
+    await waitFor(() => expect(leaf('t-1')).toHaveAttribute('hidden'));
+    expect(leaf('t-new4')).not.toHaveAttribute('hidden');
+    expect(leaf('t-new5')).toHaveAttribute('hidden');
+    act(() => { focusedView.keyFilter!(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, shiftKey: true, cancelable: true })); });
+    await waitFor(() => expect(leaf('t-1')).not.toHaveAttribute('hidden'));
+  });
+
+  it('the panel\'s keys work from the input editor too (⌘D splits, ⇧⌘↩ zooms); ⌘I stays the editor\'s', async () => {
+    const h = harness({ tabs: [tabOf('t-1')] });
+    renderPanel(h);
+    const { editor } = await atPrompt(h);
+    const box = screen.getByTestId('fake-editor');
+    fireEvent.keyDown(box, { key: 'd', code: 'KeyD', metaKey: true });
+    await waitFor(() => expect(h.api.create).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByTestId('terminal-leaf-t-new1')).toBeInTheDocument());
+    fireEvent.keyDown(box, { key: 'Enter', metaKey: true, shiftKey: true });
+    await waitFor(() => expect(screen.getByTestId('terminal-leaf-t-new1')).toHaveAttribute('hidden'));
+    // ⌘I is not taken by the panel here: the editor's own keymap turns it into "describe it".
+    const cmdI = new KeyboardEvent('keydown', { key: 'i', metaKey: true, bubbles: true, cancelable: true });
+    box.dispatchEvent(cmdI);
+    expect(cmdI.defaultPrevented).toBe(false);
+    expect(editor.text).toBe('');
+  });
+
+  it('a split tab can be tiled from the ⋯ menu, and the grid survives a reload', async () => {
+    const user = userEvent.setup();
+    const h = harness({ tabs: [tabOf('t-1'), tabOf('t-2'), tabOf('t-3')] });
+    h.store.set(layoutStorageKey('s-1'), JSON.stringify({
+      groups: [{ id: 'g-1', panes: ['t-1', 't-2', 't-3'], direction: 'row', focused: 't-1' }], active: 'g-1', modes: {},
+    }));
+    const first = renderPanel(h);
+    await waitFor(() => expect(document.getElementById('terminal-group-g-1')).toHaveAttribute('data-direction', 'row'));
+    await user.click(screen.getByRole('button', { name: 'More terminal options' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Grid' }));
+    const group = document.getElementById('terminal-group-g-1')!;
+    await waitFor(() => expect(group).toHaveAttribute('data-direction', 'grid'));
+    expect(group).toHaveAttribute('data-cols', '2');
+    // The third pane spans the last row.
+    expect(screen.getByTestId('terminal-leaf-t-3')).toHaveAttribute('data-span', '2');
+    first.unmount();
+    renderPanel(h);
+    await waitFor(() => expect(document.getElementById('terminal-group-g-1')).toHaveAttribute('data-direction', 'grid'));
   });
 });

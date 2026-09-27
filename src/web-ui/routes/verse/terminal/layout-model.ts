@@ -2,33 +2,41 @@
  * terminal/layout-model.ts — tabs and splits (3.15).
  *
  * The SERVER owns shells (tabs, PTYs, scrollback); the PAGE owns how they are
- * laid out. A strip tab is a GROUP of one or two shells side by side (row) or
- * stacked (column). The layout is kept per chat in localStorage, so a reload
- * reattaches to the same shells in the same arrangement; shells the layout
- * does not know yet (opened elsewhere) get a group of their own, and groups
- * whose shells are gone disappear.
+ * laid out. A strip tab is a GROUP of up to six shells: side by side (row),
+ * stacked (column), or tiled (grid — ⌈√n⌉ columns). One pane can be ZOOMED
+ * to fill the group for a moment. The layout is kept per chat in
+ * localStorage, so a reload reattaches to the same shells in the same
+ * arrangement; shells the layout does not know yet (opened elsewhere) get a
+ * group of their own, and groups whose shells are gone disappear.
  *
- * WHY AT MOST TWO PANES. Every visible shell holds one streaming connection
- * (terminal-stream.ts), and a browser allows about six per origin to the
- * sidecar — Verse already holds two (app events, the open chat) and needs
- * one free for ordinary requests. Two visible shells is the ceiling that
- * keeps keystrokes snappy.
+ * WHY SIX NOW. Until 3.15 every visible shell held its own streaming
+ * connection and a browser allows ~6 per origin, so a group stopped at two.
+ * The panel now reads every visible shell over ONE multiplexed connection
+ * (panel-stream.ts `createTerminalStreamMux`), so a group's size is a
+ * question of screen space, not connections.
  */
 
+/** Where a split puts the new pane, relative to the focused one. */
 export type SplitDirection = 'row' | 'column';
+/** How a group lays its panes out. */
+export type GroupArrangement = 'row' | 'column' | 'grid';
 export type LeafMode = 'terminal' | 'blocks';
+export type PaneDirection = 'left' | 'right' | 'up' | 'down';
 
 export interface TerminalGroup {
   id: string;
-  /** Shell ids, 1 or 2. */
+  /** Shell ids, 1 to MAX_PANES_PER_GROUP. */
   panes: string[];
-  direction: SplitDirection;
+  direction: GroupArrangement;
   /** The pane keystrokes go to. */
   focused: string;
+  /** A pane shown alone, filling the group; absent = every pane. */
+  zoomed?: string | null;
 }
 
 export const AGENT_GROUP_ID = 'agent';
-export const MAX_PANES_PER_GROUP = 2;
+export const MAX_PANES_PER_GROUP = 6;
+const ARRANGEMENTS: readonly GroupArrangement[] = ['row', 'column', 'grid'];
 
 export interface TerminalLayout {
   groups: TerminalGroup[];
@@ -60,8 +68,9 @@ export function reconcileLayout(layout: TerminalLayout, liveTabIds: readonly str
     for (const id of panes) seen.add(id);
     if (panes.length === 0) continue;
     const focused = panes.includes(g.focused) ? g.focused : panes[0]!;
-    const direction: SplitDirection = g.direction === 'column' ? 'column' : 'row';
-    groups.push({ id: g.id, panes, direction, focused });
+    const direction: GroupArrangement = ARRANGEMENTS.includes(g.direction) ? g.direction : 'row';
+    const zoomed = g.zoomed && panes.length > 1 && panes.includes(g.zoomed) ? g.zoomed : null;
+    groups.push({ id: g.id, panes, direction, focused, ...(zoomed ? { zoomed } : {}) });
   }
   for (const id of liveTabIds) {
     if (seen.has(id)) continue;
@@ -78,7 +87,8 @@ export function reconcileLayout(layout: TerminalLayout, liveTabIds: readonly str
     && groups.length === layout.groups.length
     && groups.every((g, i) => {
       const o = layout.groups[i]!;
-      return o.id === g.id && o.focused === g.focused && o.direction === g.direction && o.panes.join() === g.panes.join();
+      return o.id === g.id && o.focused === g.focused && o.direction === g.direction && o.panes.join() === g.panes.join()
+        && (o.zoomed ?? null) === (g.zoomed ?? null);
     })
     && Object.keys(modes).length === Object.keys(layout.modes).length;
   return unchanged ? layout : { groups, active, modes };
@@ -90,14 +100,24 @@ export function addGroup(layout: TerminalLayout, tabId: string): TerminalLayout 
   return { ...layout, groups: [...layout.groups.filter((g) => !g.panes.includes(tabId)), group], active: group.id };
 }
 
-/** Put `tabId` beside the group's focused pane. False when the group is full. */
+/**
+ * The arrangement after a split: the first split picks it; splitting again
+ * the same way keeps it; splitting the OTHER way (a row split down) tiles.
+ */
+export function arrangementAfterSplit(current: GroupArrangement, panes: number, direction: SplitDirection): GroupArrangement {
+  if (panes <= 1) return direction;
+  if (current === 'grid' || current === direction) return current;
+  return 'grid';
+}
+
+/** Put `tabId` beside the group's focused pane (un-zooming it). Null when the group is full. */
 export function splitGroup(layout: TerminalLayout, groupId: string, tabId: string, direction: SplitDirection): TerminalLayout | null {
   const group = layout.groups.find((g) => g.id === groupId);
   if (!group || group.panes.length >= MAX_PANES_PER_GROUP) return null;
   const at = group.panes.indexOf(group.focused);
   const panes = [...group.panes];
   panes.splice(at + 1, 0, tabId);
-  const next: TerminalGroup = { ...group, panes, direction, focused: tabId };
+  const next: TerminalGroup = { id: group.id, panes, direction: arrangementAfterSplit(group.direction, group.panes.length, direction), focused: tabId };
   return {
     ...layout,
     groups: layout.groups.filter((g) => !g.panes.includes(tabId) || g.id === groupId).map((g) => (g.id === groupId ? next : g)),
@@ -119,7 +139,9 @@ export function removePane(layout: TerminalLayout, tabId: string): TerminalLayou
       removedGroupIndex = index;
       return;
     }
-    groups.push({ ...g, panes, focused: g.focused === tabId ? panes[0]! : g.focused });
+    const { zoomed, ...rest } = g;
+    const keepZoom = zoomed && zoomed !== tabId && panes.length > 1;
+    groups.push({ ...rest, panes, focused: g.focused === tabId ? panes[0]! : g.focused, ...(keepZoom ? { zoomed } : {}) });
   });
   const modes = { ...layout.modes };
   delete modes[tabId];
@@ -134,6 +156,89 @@ export function focusPane(layout: TerminalLayout, groupId: string, tabId: string
   const group = layout.groups.find((g) => g.id === groupId);
   if (!group || !group.panes.includes(tabId) || (group.focused === tabId && layout.active === groupId)) return layout;
   return { ...layout, active: groupId, groups: layout.groups.map((g) => (g.id === groupId ? { ...g, focused: tabId } : g)) };
+}
+
+/** Lay a group out as a row, a column or a grid. */
+export function setArrangement(layout: TerminalLayout, groupId: string, direction: GroupArrangement): TerminalLayout {
+  const group = layout.groups.find((g) => g.id === groupId);
+  if (!group || group.direction === direction) return layout;
+  return { ...layout, groups: layout.groups.map((g) => (g.id === groupId ? { ...g, direction } : g)) };
+}
+
+/** Row → column → grid → row. */
+export function nextArrangement(direction: GroupArrangement): GroupArrangement {
+  return ARRANGEMENTS[(ARRANGEMENTS.indexOf(direction) + 1) % ARRANGEMENTS.length]!;
+}
+
+/** Zoom the focused pane to fill its group, or put it back. A single pane never zooms. */
+export function toggleZoom(layout: TerminalLayout, groupId: string): TerminalLayout {
+  const group = layout.groups.find((g) => g.id === groupId);
+  if (!group) return layout;
+  const zoomed = group.zoomed ? null : group.panes.length > 1 ? group.focused : null;
+  if ((group.zoomed ?? null) === zoomed) return layout;
+  return {
+    ...layout,
+    groups: layout.groups.map((g) => {
+      if (g.id !== groupId) return g;
+      const { zoomed: _previous, ...rest } = g;
+      return zoomed ? { ...rest, zoomed } : rest;
+    }),
+  };
+}
+
+/** Columns × rows of a grid of `n` panes: ⌈√n⌉ columns (2 → 2×1, 3–4 → 2×2, 5–6 → 3×2). */
+export function gridShape(n: number): { cols: number; rows: number } {
+  const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
+  return { cols, rows: Math.max(1, Math.ceil(n / cols)) };
+}
+
+/** Each pane's cell: its row and column, and how many columns it spans (a short last row's final pane stretches). */
+export function paneCells(group: Pick<TerminalGroup, 'panes' | 'direction'>): Array<{ id: string; row: number; col: number; span: number }> {
+  const n = group.panes.length;
+  if (group.direction === 'row') return group.panes.map((id, i) => ({ id, row: 0, col: i, span: 1 }));
+  if (group.direction === 'column') return group.panes.map((id, i) => ({ id, row: i, col: 0, span: 1 }));
+  const { cols } = gridShape(n);
+  return group.panes.map((id, i) => {
+    const row = Math.floor(i / cols);
+    const col = i % cols;
+    // Three panes: two on top, the third full-width below — no hole in the grid.
+    const span = i === n - 1 ? cols - col : 1;
+    return { id, row, col, span };
+  });
+}
+
+/**
+ * The pane beside `from` in a direction (⌥⌘←→↑↓), or null at the edge. Up and
+ * down pick the nearest row, then the pane most in line with this one.
+ */
+export function neighborPane(group: Pick<TerminalGroup, 'panes' | 'direction'>, from: string, direction: PaneDirection): string | null {
+  const cells = paneCells(group);
+  const here = cells.find((c) => c.id === from);
+  if (!here) return null;
+  const center = (c: { col: number; span: number }) => c.col + c.span / 2;
+  let best: { id: string; primary: number; secondary: number } | null = null;
+  for (const c of cells) {
+    if (c.id === from) continue;
+    let primary: number;
+    let secondary = 0;
+    if (direction === 'left' || direction === 'right') {
+      if (c.row !== here.row) continue;
+      primary = direction === 'left' ? here.col - c.col : c.col - here.col;
+    } else {
+      primary = direction === 'up' ? here.row - c.row : c.row - here.row;
+      secondary = Math.abs(center(c) - center(here));
+    }
+    if (primary <= 0) continue;
+    if (!best || primary < best.primary || (primary === best.primary && secondary < best.secondary)) best = { id: c.id, primary, secondary };
+  }
+  return best?.id ?? null;
+}
+
+/** The next / previous pane in order, wrapping. */
+export function cyclePane(group: Pick<TerminalGroup, 'panes'>, from: string, delta: 1 | -1): string {
+  const i = group.panes.indexOf(from);
+  if (i < 0) return group.panes[0] ?? from;
+  return group.panes[(i + delta + group.panes.length) % group.panes.length]!;
 }
 
 export function setMode(layout: TerminalLayout, tabId: string, mode: LeafMode): TerminalLayout {
@@ -154,7 +259,8 @@ export function layoutStorageKey(sessionId: string): string {
 function isGroup(value: unknown): value is TerminalGroup {
   const g = value as TerminalGroup | null;
   return !!g && typeof g.id === 'string' && Array.isArray(g.panes) && g.panes.every((p) => typeof p === 'string')
-    && typeof g.focused === 'string' && (g.direction === 'row' || g.direction === 'column');
+    && typeof g.focused === 'string' && ARRANGEMENTS.includes(g.direction)
+    && (g.zoomed === undefined || g.zoomed === null || typeof g.zoomed === 'string');
 }
 
 export function parseLayout(raw: string | null): TerminalLayout {

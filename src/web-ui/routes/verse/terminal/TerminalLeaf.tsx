@@ -13,6 +13,12 @@
  * server gives the block. When the block's frame arrives it finds its line:
  * a status dot beside it (click for its actions), a tick in the scrollbar's
  * overview ruler, ⌘↑/⌘↓ to walk them, and "Show in terminal" from the list.
+ *
+ * INPUT EDITOR (3.15). The same marks say where the shell is (input-model.ts
+ * PromptPhase): at a prompt — after B, before C, not in the alternate screen
+ * — the leaf docks CommandInput under the terminal and gives it the keyboard.
+ * Typing into the terminal itself at that prompt hands the prompt to the
+ * shell's own line editor until the next one; a Raw shell never shows it.
  */
 import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import type { VerseTerminalBlock, VerseTerminalStreamFrame, VerseTerminalTab } from '../../../data/api-types.js';
@@ -31,6 +37,9 @@ import type { LeafMode } from './layout-model.js';
 import type { PanelTerminalApi } from './panel-client.js';
 import { keyPassesToPage, panelKeyAction, panelKeyLabel, type PanelKeyAction } from './panel-keys.js';
 import { resolvePanelColors, type LineMark, type PanelView, type PanelViewFactory, type ViewDisposable } from './xterm-view.js';
+import { CommandInput, type CommandInputHandle } from './CommandInput.js';
+import type { InputEditorFactory } from './input-editor.js';
+import { inputVisible, isOperatorKeystroke, nextPromptPhase, type PromptPhase } from './input-model.js';
 import styles from './TerminalPanel.module.css';
 
 // Dictation (voice/): lazy. The terminal is the `verbatim` surface — the
@@ -44,12 +53,18 @@ export interface LeafDeps {
   platform: KeyPlatform;
   writeClipboard: (text: string) => Promise<void>;
   openUrl: (url: string) => void;
+  /** 3.15: the input editor (CodeMirror, lazily). Absent = no input editor (raw terminal only). */
+  createInputEditor?: InputEditorFactory;
+  /** Start fetching the editor's chunk (a shell whose integration just came up). */
+  preloadInputEditor?: () => void;
 }
 
 export interface LeafPrefs {
   screenReader: boolean;
   ligatures: boolean;
   gpu: boolean;
+  /** 3.15: the input editor at shell prompts (default on; Raw per shell overrides). */
+  inputEditor: boolean;
 }
 
 export type LeafNotice = { tone: 'error' | 'info'; text: string };
@@ -65,6 +80,14 @@ export interface LeafHandle {
   paste(text: string): void;
   /** The shell has printed something (its prompt): a paste will land at a prompt. */
   hasOutput(): boolean;
+  /** 3.15: the input editor is showing (at a prompt). */
+  inputActive(): boolean;
+  /** Put a command where the operator will type next: the input editor, else pasted at the prompt. Never run. */
+  insertCommand(text: string): void;
+  /** ⌘I: plain words → a command, in the input editor. False when the editor is not showing. */
+  openAssist(): boolean;
+  /** Write bytes to the shell as if typed (in order with the rest), e.g. a ⌃R handed to the shell. */
+  sendText(text: string): void;
 }
 
 export interface TerminalLeafProps {
@@ -89,6 +112,14 @@ export interface TerminalLeafProps {
   onRestart: (tab: VerseTerminalTab) => void;
   onClose: (tab: VerseTerminalTab) => void;
   onError: (err: unknown, fallback: string) => string;
+  /** 3.15: this shell uses its own line editor only (no input editor). */
+  raw?: boolean;
+  /** 3.15: another pane of its group is zoomed: this one is kept (and its view) but not shown. */
+  concealed?: boolean;
+  /** 3.15: in a grid, how many columns this pane spans (a short last row stretches). */
+  gridSpan?: number;
+  /** 3.15: ⌃R in the input editor — the panel opens the history palette. */
+  onHistorySearch?: (tabId: string, draft: string) => void;
 }
 
 interface MarkRecord {
@@ -121,6 +152,23 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
   exitedRef.current = tab.exited !== null;
   const propsRef = useRef(props);
   propsRef.current = props;
+
+  // Where the shell is (its OSC 133 marks), for the input editor.
+  const [phase, setPhase] = useState<PromptPhase>('unknown');
+  const [alternate, setAlternate] = useState(false);
+  const [handedOff, setHandedOff] = useState(false);
+  const inputRef = useRef<CommandInputHandle>(null);
+  const showInput = Boolean(deps.createInputEditor) && prefs.inputEditor && inputVisible({
+    phase,
+    integration: tab.shellIntegration === 'active',
+    alternateScreen: alternate,
+    exited: tab.exited !== null,
+    raw: props.raw === true,
+    handedOff,
+    terminalMode: mode === 'terminal',
+  });
+  const showInputRef = useRef(showInput);
+  showInputRef.current = showInput;
 
   // Seq bookkeeping for markers: frames queued into xterm, C marks seen per frame.
   const writing = useRef<number[]>([]);
@@ -197,6 +245,19 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
     else if (direction > 0) view.scrollToBottom();
   });
 
+  /**
+   * The panel's own keys, from the terminal or from its input editor. From
+   * the editor, ⌘I stays the editor's ("describe it" in place).
+   */
+  const panelKeyRef = useRef((event: KeyboardEvent, fromTerminal: boolean): boolean => {
+    const action = panelKeyAction(event, propsRef.current.deps.platform);
+    if (!action || (!fromTerminal && action === 'assist')) return false;
+    event.preventDefault();
+    if (action === 'prev-block' || action === 'next-block') walkRef.current(action === 'prev-block' ? -1 : 1);
+    else propsRef.current.onKeyAction(propsRef.current.tab.id, action);
+    return true;
+  });
+
   // -------------------------------------------------------------------------
   // The view
   // -------------------------------------------------------------------------
@@ -225,7 +286,13 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
       });
       queueRef.current = queue;
       const d = disposers.current;
-      d.push(view.onData((data) => { if (!exitedRef.current) queue.pushText(data); }));
+      d.push(view.onData((data) => {
+        if (exitedRef.current) return;
+        // Typed into the terminal itself at a prompt the editor was showing: this prompt is the shell's.
+        if (showInputRef.current && isOperatorKeystroke(data)) setHandedOff(true);
+        queue.pushText(data);
+      }));
+      if (view.onBufferChange) d.push(view.onBufferChange((alt) => setAlternate(alt)));
       d.push(view.onBinary((data) => { if (!exitedRef.current) queue.pushBinary(data); }));
       d.push(view.onSelectionChange(() => {
         const has = view.hasSelection();
@@ -235,6 +302,9 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
       d.push(view.onShellMark((payload) => {
         const seq = writing.current[0];
         const code = payload.split(';', 1)[0];
+        setPhase((prev) => nextPromptPhase(prev, payload));
+        // A new prompt: whoever had the last one, the editor is offered again.
+        if (code === 'A') setHandedOff(false);
         if (code === 'A') {
           promptMark.current?.dispose();
           promptMark.current = view.markCursorLine();
@@ -276,13 +346,7 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
         },
       });
       view.setKeyFilter((event) => {
-        const action = panelKeyAction(event, deps.platform);
-        if (action) {
-          event.preventDefault();
-          if (action === 'prev-block' || action === 'next-block') walkRef.current(action === 'prev-block' ? -1 : 1);
-          else propsRef.current.onKeyAction(tab.id, action);
-          return false;
-        }
+        if (panelKeyRef.current(event, true)) return false;
         return !keyPassesToPage(event, deps.platform);
       });
       setFailed(false);
@@ -429,10 +493,17 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
     return () => stream.close();
   }, [shown, ready, tab.id, deps, decorate, disposeMarks]);
 
-  // Focus follows the pane that should have the keyboard.
+  // Focus follows the pane that should have the keyboard: its input editor at a prompt, else the terminal.
   useEffect(() => {
-    if (shown && focused && ready && mode === 'terminal') viewRef.current?.focus();
-  }, [shown, focused, ready, mode]);
+    if (!(shown && focused && ready && mode === 'terminal')) return;
+    if (showInput) inputRef.current?.focus();
+    else viewRef.current?.focus();
+  }, [shown, focused, ready, mode, showInput]);
+
+  // Fetch the editor's chunk once a shell's integration is up (it will be needed at its first prompt).
+  useEffect(() => {
+    if (tab.shellIntegration === 'active' && prefs.inputEditor && !props.raw) deps.preloadInputEditor?.();
+  }, [tab.shellIntegration, prefs.inputEditor, props.raw, deps]);
 
   // -------------------------------------------------------------------------
   // Find
@@ -473,8 +544,13 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
     setHighlight(blockId);
   }, []);
 
-  /** Insert text at the prompt — never a trailing newline, so nothing runs. */
-  const pasteText = useCallback((text: string) => {
+  const sendText = useCallback((text: string) => {
+    if (exitedRef.current) return;
+    queueRef.current?.pushText(text);
+  }, []);
+
+  /** Insert text at the shell's own prompt — never a trailing newline, so nothing runs. */
+  const pasteAtPrompt = useCallback((text: string) => {
     const view = viewRef.current;
     if (!view) return;
     const clean = text.replace(/[\r\n]+$/, '');
@@ -489,11 +565,23 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
     }
     view.focus();
   }, [deps]);
-  // Dictated words: one line, verbatim, typed at the prompt (no Enter).
+
+  /**
+   * Text for where the operator types next — the input editor at a prompt,
+   * else the shell's own prompt. Never run: no Enter is added.
+   */
+  const pasteText = useCallback((text: string) => {
+    if (showInputRef.current && inputRef.current) inputRef.current.insert(text);
+    else pasteAtPrompt(text);
+  }, [pasteAtPrompt]);
+  // Dictated words: one line, verbatim, where the operator types next (no Enter).
   const insertDictated = useCallback((text: string) => pasteText(text.replace(/\s*[\r\n]+\s*/g, ' ').trim()), [pasteText]);
 
   useImperativeHandle(ref, () => ({
-    focus: () => viewRef.current?.focus(),
+    focus: () => {
+      if (showInputRef.current) inputRef.current?.focus();
+      else viewRef.current?.focus();
+    },
     getSelection: () => viewRef.current?.getSelection() ?? '',
     clear: () => {
       viewRef.current?.clear();
@@ -505,8 +593,17 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
     jumpTo,
     size: () => (viewRef.current && viewRef.current.cols > 1 ? { cols: viewRef.current.cols, rows: viewRef.current.rows } : null),
     hasOutput: () => writtenSeq.current > 0,
+    // At a prompt with the editor showing, a paste lands in the editor (still not run).
     paste: pasteText,
-  }), [jumpTo, pasteText]);
+    inputActive: () => showInputRef.current,
+    insertCommand: pasteText,
+    openAssist: () => {
+      if (!showInputRef.current || !inputRef.current) return false;
+      inputRef.current.openAssist();
+      return true;
+    },
+    sendText,
+  }), [jumpTo, pasteText, sendText]);
 
   const blockViews = useMemo(() => blocks.map(terminalBlockView), [blocks]);
   const loadOutput = useCallback(async (block: BlockView) =>
@@ -522,6 +619,8 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
     <div
       ref={leafRef}
       className={styles.leaf}
+      hidden={props.concealed || undefined}
+      data-span={props.gridSpan && props.gridSpan > 1 ? props.gridSpan : undefined}
       data-focused={focused || undefined}
       data-testid={`terminal-leaf-${tab.id}`}
       onMouseDown={() => { if (!focused) props.onFocus(); }}
@@ -561,7 +660,15 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
         </div>
       ) : null}
 
-      <div className={styles.viewport} hidden={mode !== 'terminal'}>
+      <div
+        className={styles.viewport}
+        hidden={mode !== 'terminal'}
+        onMouseUp={(event) => {
+          // A click in the terminal at a prompt (not a selection, not a control like the mic) keeps typing in the editor, as in Warp.
+          if ((event.target as HTMLElement | null)?.closest?.('button, a, input, [role="button"]')) return;
+          if (showInputRef.current && !viewRef.current?.hasSelection()) setTimeout(() => inputRef.current?.focus(), 0);
+        }}
+      >
         <div className={styles.host} ref={hostRef} data-testid={`terminal-host-${tab.id}`} />
         {ready && !exited ? (
           <span className={styles.voiceSlot}>
@@ -578,6 +685,29 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
           </div>
         ) : null}
       </div>
+
+      {deps.createInputEditor && prefs.inputEditor && !props.raw && tab.shellIntegration === 'active' ? (
+        <CommandInput
+          ref={inputRef}
+          tabId={tab.id}
+          sessionId={tab.sessionId}
+          cwd={tab.cwd ?? tab.root}
+          visible={showInput}
+          focusWanted={shown && focused}
+          api={deps.api}
+          createEditor={deps.createInputEditor}
+          platform={deps.platform}
+          bracketedPaste={() => viewRef.current?.bracketedPaste() ?? false}
+          send={sendText}
+          onHandOff={() => {
+            setHandedOff(true);
+            viewRef.current?.focus();
+          }}
+          onHistorySearch={(draft) => propsRef.current.onHistorySearch?.(tab.id, draft)}
+          onError={(text) => propsRef.current.onNotice({ tone: 'error', text })}
+          onPanelKey={(event) => panelKeyRef.current(event, false)}
+        />
+      ) : null}
 
       {mode === 'blocks' && !replayed && blockViews.length === 0 ? (
         <div className={styles.loading} role="status" aria-label="Loading commands"><SkeletonLine width="60%" /><SkeletonLine width="40%" /></div>

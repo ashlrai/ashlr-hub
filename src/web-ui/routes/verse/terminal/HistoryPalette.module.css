@@ -1,0 +1,7 @@
+/*
+ * terminal/HistoryPalette.module.css — what the terminal's ⌃R / "Generate
+ * command" palette adds to the ⌘K palette's own stylesheet: commands read in
+ * the terminal's font. Tokens only.
+ */
+.command { font-family: var(--font-mono); }
+.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
