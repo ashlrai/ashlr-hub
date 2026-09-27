@@ -113,6 +113,10 @@ async function importLeader(): Promise<ModuleExports | null> {
 async function importCloud(): Promise<ModuleExports | null> {
   try { return (await import('../cloud/cloud-api.js' as string)) as ModuleExports; } catch { return null; }
 }
+/** 3.15 Devin lane module (starts its own refresher, never under a test runner). */
+async function importDevin(): Promise<ModuleExports | null> {
+  try { return (await import('../devin/devin-api.js' as string)) as ModuleExports; } catch { return null; }
+}
 
 function fn<T>(mod: ModuleExports | null, name: string): T | null {
   const value = mod?.[name];
@@ -120,7 +124,10 @@ function fn<T>(mod: ModuleExports | null, name: string): T | null {
 }
 
 export async function resolveTrackBHooks(): Promise<TrackBHooks> {
-  const [authority, fleet, leader, cloud] = await Promise.all([importAuthority(), importFleetLive(), importLeader(), importCloud()]);
+  const [authority, fleet, leader, cloud, devin] = await Promise.all([importAuthority(), importFleetLive(), importLeader(), importCloud(), importDevin()]);
+  // The remote lanes (Claude cloud, Devin) file into the same sources with the same kinds.
+  const cloudItems = fn<() => NeedsYouItem[]>(cloud, 'needsYouItems');
+  const devinItems = fn<() => NeedsYouItem[]>(devin, 'needsYouItems');
   return {
     producers: {
       authority: fn<() => NeedsYouItem[]>(authority, 'needsYouItems'),
@@ -136,7 +143,7 @@ export async function resolveTrackBHooks(): Promise<TrackBHooks> {
     },
     autonomy: fn<() => VerseAutonomyBadge | null>(authority, 'autonomyBadge'),
     latestMemoAt: fn<() => string | null>(leader, 'latestMemoAt'),
-    cloud: fn<() => NeedsYouItem[]>(cloud, 'needsYouItems'),
+    cloud: cloudItems || devinItems ? () => [...(cloudItems ? cloudItems() : []), ...(devinItems ? devinItems() : [])] : null,
   };
 }
 

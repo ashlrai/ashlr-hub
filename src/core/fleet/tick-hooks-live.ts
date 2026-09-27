@@ -661,7 +661,28 @@ export function defaultLiveHooksDeps(): LiveHooksDeps {
       } catch { /* audit is best effort */ }
     },
     prepareMirrors: async (policy, signal) => (await import('./mirrors.js')).prepareMirrorsForTick(policy, signal ? { signal } : {}),
-    ingestCloudPrs: async (cfg, policy, mirrors) => (await import('./cloud-intake.js')).ingestCloudPrs(cfg, policy, { mirrors }),
+    ingestCloudPrs: async (cfg, policy, mirrors) => {
+      const started = Date.now();
+      const cloud = await (await import('./cloud-intake.js')).ingestCloudPrs(cfg, policy, { mirrors });
+      // 3.15: Devin PRs through the SAME intake (devin/intake.ts), only when
+      // Mason turned the lane on, never after KILL, and only while this
+      // tick's intake budget has room (a slow cloud pass defers Devin a tick).
+      if (cfg.devin?.enabled !== true || cloud.killed || Date.now() - started > CLOUD_INTAKE_TICK_TIMEOUT_MS / 3) return cloud;
+      try {
+        const devin = await (await import('../devin/intake.js')).ingestDevinPrs(cfg, policy, { mirrors });
+        return {
+          checked: cloud.checked + devin.checked,
+          ingested: cloud.ingested + devin.ingested,
+          superseded: cloud.superseded + devin.superseded,
+          refused: cloud.refused + devin.refused,
+          deferred: cloud.deferred + devin.deferred,
+          killed: cloud.killed || devin.killed,
+          outcomes: [...cloud.outcomes, ...devin.outcomes],
+        };
+      } catch {
+        return cloud;
+      }
+    },
     reconcileEnrollment: reconcileEnrollmentDefault,
     sweepHolds: (nowMs) => {
       const swept = sweepExpiredRepoHolds({ nowMs });

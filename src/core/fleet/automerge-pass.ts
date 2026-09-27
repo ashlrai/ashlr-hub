@@ -80,6 +80,7 @@ import { causalMetadataFromProposal } from '../learning/causal.js';
 import { isApprovedRemoteHandoffRetryCandidate } from '../inbox/remote-handoff.js';
 import {
   evaluateReviewerIndependence,
+  producerMergeWithheld,
   producerModelFamily,
   reviewModelFamily,
 } from './reviewer-independence.js';
@@ -918,6 +919,8 @@ export async function runAutoMergePass(
   // grant) lands only through that PR, never through the legacy path.
   pending = pending.filter((proposal) => !proposalHasFleetPr(proposal.id));
   recovered = recovered.filter((proposal) => !proposalHasFleetPr(proposal.id));
+  // 3.15: shadow-only producers (Devin) never land through the legacy path either.
+  pending = pending.filter((proposal) => producerMergeWithheld(producerModelFamily(proposal.engineModel)) === null);
 
   // The opt-in controls new judge/merge progression, not repair of projections
   // for an already-authenticated merge receipt.
@@ -972,7 +975,8 @@ export async function runAutoMergePass(
   if (pending.some((proposal) => isEphemeralRegressionGoalProposal(proposal) || isTtlExpired(proposal))) {
     queues = readHealthyAutoMergeQueues();
     if (queues === null) return out;
-    pending = queues.pending.filter((proposal) => !proposalHasFleetPr(proposal.id));
+    pending = queues.pending.filter((proposal) => !proposalHasFleetPr(proposal.id)
+      && producerMergeWithheld(producerModelFamily(proposal.engineModel)) === null);
     recovered = queues.recovered.filter((proposal) => !proposalHasFleetPr(proposal.id));
   }
 

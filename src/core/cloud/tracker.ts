@@ -59,7 +59,7 @@ export const STALE_LAUNCH_MS = 10 * CLOUD_LAUNCH_TIMEOUT_MS;
 const MAX_CHECKS_PER_REFRESH = 50;
 const GH_TIMEOUT_MS = 30_000;
 /** A full page is uncertain: another matching PR might have been truncated. */
-const GH_PR_LIMIT = 100;
+export const GH_PR_LIMIT = 100;
 
 /** Production gh: argv only, bounded, never prompts (git-ops' runner and env). */
 export async function defaultCloudGh(args: string[]): Promise<{ ok: boolean; stdout: string; stderr: string }> {
@@ -67,7 +67,8 @@ export async function defaultCloudGh(args: string[]): Promise<{ ok: boolean; std
   return { ok: result.code === 0 && !result.timedOut && !result.truncated, stdout: result.stdout, stderr: result.stderr };
 }
 
-interface GhPr {
+/** 3.15: exported with the helpers below so the Devin tracker applies the SAME GitHub identity rules. */
+export interface GhPr {
   number: number;
   url: string;
   state: 'OPEN' | 'MERGED' | 'CLOSED';
@@ -79,10 +80,15 @@ interface GhPr {
   headRepository: { name: string };
   headRepositoryOwner: { login: string };
   isCrossRepository: false;
+  /** Present only when requested (`headRefOid` in --json); 40 hex or absent. */
+  headRefOid?: string;
 }
 
+/** The `gh pr list --json` fields every lane's tracker requests. */
+export const GH_PR_LIST_FIELDS = 'number,url,state,isDraft,title,body,headRefName,baseRefName,headRepository,headRepositoryOwner,isCrossRepository';
+
 /** A malformed or full result is unknown, never evidence that a task has no PR. */
-function parseGhPrList(stdout: string): GhPr[] | undefined {
+export function parseGhPrList(stdout: string): GhPr[] | undefined {
   let value: unknown;
   try {
     value = JSON.parse(stdout);
@@ -113,7 +119,7 @@ function parseGhPrList(stdout: string): GhPr[] | undefined {
 }
 
 /** The URL and both refs must be the task's, even if gh's branch filter returned it. */
-function matchesTask(gh: GhPr, task: CloudTaskV1): boolean {
+export function matchesTask(gh: GhPr, task: Pick<CloudTaskV1, 'repo' | 'branch' | 'baseBranch'>): boolean {
   const [owner, repo] = task.repo.split('/');
   return gh.url.toLowerCase() === `https://github.com/${task.repo}/pull/${gh.number}`.toLowerCase()
     && gh.headRefName === task.branch
@@ -122,12 +128,12 @@ function matchesTask(gh: GhPr, task: CloudTaskV1): boolean {
     && gh.headRepository.name.toLowerCase() === repo!.toLowerCase();
 }
 
-function prFrom(gh: GhPr): CloudTaskPr {
+export function prFrom(gh: GhPr): CloudTaskPr {
   const state: CloudTaskPr['state'] = gh.state === 'OPEN' ? 'open' : gh.state === 'MERGED' ? 'merged' : 'closed';
   return { number: gh.number, url: gh.url, state, draft: gh.isDraft, title: gh.title.slice(0, 300) };
 }
 
-function stateFor(pr: CloudTaskPr): { state: CloudTaskState; reason: string } {
+export function stateFor(pr: CloudTaskPr): { state: CloudTaskState; reason: string } {
   if (pr.state === 'merged') return { state: 'merged', reason: `Pull request #${pr.number} was merged.` };
   if (pr.state === 'closed') return { state: 'closed', reason: `Pull request #${pr.number} was closed without merging.` };
   return { state: 'pr-open', reason: `${pr.draft ? 'Draft pull request' : 'Pull request'} #${pr.number} is open for review.` };
@@ -186,6 +192,40 @@ function supersededStateFor(number: number, state: 'OPEN' | 'MERGED' | 'CLOSED')
 }
 
 /**
+ * Where a superseded task stands now, read from its fleet App PR — or null
+ * when the answer is unreadable or foreign (the task then keeps its last
+ * verified state). Shared with the Devin tracker (3.15).
+ */
+export async function readSupersedingState(
+  task: Pick<CloudTaskV1, 'repo' | 'supersededBy'>,
+  gh: NonNullable<CloudTrackerDeps['gh']>,
+): Promise<{ state: CloudTaskState; reason: string } | null> {
+  const by = task.supersededBy;
+  if (!by) return null;
+  let result: { ok: boolean; stdout: string };
+  try {
+    result = await gh(['pr', 'view', String(by.number), '--repo', by.repo, '--json', 'number,url,state,headRefName']);
+  } catch {
+    return null;
+  }
+  if (!result.ok) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(result.stdout);
+  } catch {
+    return null;
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const pr = raw as Record<string, unknown>;
+  if (pr['number'] !== by.number
+    || by.repo.toLowerCase() !== task.repo.toLowerCase()
+    || typeof pr['url'] !== 'string' || pr['url'].toLowerCase() !== `https://github.com/${task.repo}/pull/${by.number}`.toLowerCase()
+    || typeof pr['headRefName'] !== 'string' || !pr['headRefName'].startsWith(FLEET_BRANCH_PREFIX)
+    || !['OPEN', 'MERGED', 'CLOSED'].includes(pr['state'] as string)) return null;
+  return supersededStateFor(by.number, pr['state'] as 'OPEN' | 'MERGED' | 'CLOSED');
+}
+
+/**
  * Follow the fleet App PR that superseded the task's cloud PR. An unreadable
  * or foreign answer changes nothing (the task keeps its last verified state).
  */
@@ -193,28 +233,9 @@ async function followSupersedingPr(
   task: CloudTaskV1,
   gh: NonNullable<CloudTrackerDeps['gh']>,
 ): Promise<boolean> {
-  const by = task.supersededBy!;
-  let result: { ok: boolean; stdout: string };
-  try {
-    result = await gh(['pr', 'view', String(by.number), '--repo', by.repo, '--json', 'number,url,state,headRefName']);
-  } catch {
-    return false;
-  }
-  if (!result.ok) return false;
-  let raw: unknown;
-  try {
-    raw = JSON.parse(result.stdout);
-  } catch {
-    return false;
-  }
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
-  const pr = raw as Record<string, unknown>;
-  if (pr['number'] !== by.number
-    || by.repo.toLowerCase() !== task.repo.toLowerCase()
-    || typeof pr['url'] !== 'string' || pr['url'].toLowerCase() !== canonicalPrUrl(task, by.number).toLowerCase()
-    || typeof pr['headRefName'] !== 'string' || !pr['headRefName'].startsWith(FLEET_BRANCH_PREFIX)
-    || !['OPEN', 'MERGED', 'CLOSED'].includes(pr['state'] as string)) return false;
-  const { state, reason } = supersededStateFor(by.number, pr['state'] as 'OPEN' | 'MERGED' | 'CLOSED');
+  const next = await readSupersedingState(task, gh);
+  if (!next) return false;
+  const { state, reason } = next;
   if (state === task.state && reason === task.stateReason) return false;
   try {
     return commit(task, { ...task, state, stateReason: reason, failure: null });
@@ -272,7 +293,7 @@ export async function refreshCloudTasks(deps: CloudTrackerDeps = {}): Promise<{ 
     let result: { ok: boolean; stdout: string; stderr: string };
     try {
       result = await gh(['pr', 'list', '--repo', task.repo, '--head', task.branch, '--state', 'all',
-        '--json', 'number,url,state,isDraft,title,body,headRefName,baseRefName,headRepository,headRepositoryOwner,isCrossRepository',
+        '--json', GH_PR_LIST_FIELDS,
         '--limit', String(GH_PR_LIMIT)]);
     } catch {
       if (clearUnverifiedDelivery(task, PR_LOOKUP_UNAVAILABLE_REASON)) updated += 1;

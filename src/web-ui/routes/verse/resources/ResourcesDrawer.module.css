@@ -429,6 +429,33 @@
 .external:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
 .external svg { width: 12px; height: 12px; }
 
+/* ── Devin (3.15): sessions waiting for a reply ─────────────────────── */
+
+.devinWaitingList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.devinWaiting {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.devinReply {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 /* ── Foot ───────────────────────────────────────────────────────────── */
 
 .foot {

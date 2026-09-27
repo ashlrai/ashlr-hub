@@ -26,6 +26,8 @@ import { bindingLeftPercent } from '../usage/binding-left.js';
 import { accountStatus, buildCapacityRows, type AccountStatus, type CapacityRow } from '../usage/capacity-strip-model.js';
 import { formatUsd } from './resources-model.js';
 import { cloudCreditsQuery } from './resources-queries.js';
+import { formatAcu } from '../devin/devin-model.js';
+import { devinQuery } from '../devin/devin-queries.js';
 import { openResources } from './resources-store.js';
 import styles from './ResourcesBar.module.css';
 
@@ -145,8 +147,14 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   const cloud = cloudRead.data?.credits ?? null;
   const cloudLeft = cloud && cloud.totalUsd > 0 ? (cloud.remainingUsd / cloud.totalUsd) * 100 : null;
   const cloudLevel: Level = !cloud ? 'unknown' : cloud.remainingUsd <= 0 ? 'out' : (cloudLeft ?? 0) < 20 ? 'low' : 'ok';
+  // 3.15: Devin joins the bar only once it is connected and turned on.
+  const devinRead = useQuery(devinQuery);
+  const devin = devinRead.data?.value ?? null;
+  const devinShown = devin !== null && devin.status.enabled && devin.status.connected;
+  const devinLeft = devin && devin.budget.acuBudgetTotal > 0 ? (devin.budget.acuRemaining / devin.budget.acuBudgetTotal) * 100 : null;
+  const devinLevel: Level = !devin ? 'unknown' : devin.budget.paused || devin.budget.acuRemaining <= 0 ? 'out' : (devinLeft ?? 0) < 20 ? 'low' : 'ok';
 
-  if (rows.length === 0 && !cloud) return null;
+  if (rows.length === 0 && !cloud && !devinShown) return null;
   return (
     <div className={styles.bar} data-expanded={expanded || undefined} role="group" aria-label="Resources at a glance">
       {rows.map((row) => (
@@ -212,6 +220,46 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
               <>
                 <span className={styles.cloudLogo}><ProviderLogo engine="claude" size={14} className={styles.logo} /></span>
                 <Battery left={cloudLeft} level={cloudLevel} vertical />
+              </>
+            )}
+          </button>
+        </Tooltip>
+      ) : null}
+      {devinShown && devin ? (
+        <Tooltip
+          content={
+            <div className={styles.tip}>
+              <div className={styles.tipHead}><span className={styles.devinMark} aria-hidden="true">D</span><strong>Devin</strong></div>
+              <div className={styles.tipSummary}>{formatAcu(devin.budget.acuRemaining)} of {formatAcu(devin.budget.acuBudgetTotal)} left{devin.budget.paused ? ' · paused' : ''}</div>
+              <div className={styles.tipLine}>{devin.budget.running} running · {devin.budget.sessionsToday} today</div>
+              <div className={styles.tipHint}>Click for Resources · ⌘.</div>
+            </div>
+          }
+          placement="right"
+        >
+          <button
+            type="button"
+            className={styles.row}
+            data-level={devinLevel}
+            data-resource="devin"
+            aria-label={`Devin: ${formatAcu(devin.budget.acuRemaining)} of ${formatAcu(devin.budget.acuBudgetTotal)} left. Open Resources`}
+            onClick={() => openResources()}
+          >
+            {expanded ? (
+              <>
+                <span className={styles.line}>
+                  <span className={styles.devinMark} aria-hidden="true">D</span>
+                  <span className={styles.name}>Devin</span>
+                </span>
+                <span className={styles.line}>
+                  <Battery left={devinLeft} level={devinLevel} vertical={false} />
+                  <span className={styles.value}>{formatAcu(devin.budget.acuRemaining)}</span>
+                </span>
+              </>
+            ) : (
+              <>
+                <span className={styles.devinMark} aria-hidden="true">D</span>
+                <Battery left={devinLeft} level={devinLevel} vertical />
               </>
             )}
           </button>

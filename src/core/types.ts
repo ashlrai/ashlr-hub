@@ -1682,6 +1682,27 @@ export interface AshlrConfig {
      */
     codexDesktop?: boolean;
   };
+  /**
+   * 3.15 Devin lane (src/core/devin/). Off unless `enabled` is exactly true —
+   * `ashlr devin connect` turns it on after storing the key in the macOS
+   * Keychain. The API key is NEVER read from or written to this file.
+   */
+  devin?: {
+    enabled?: boolean;
+    /**
+     * Let the fleet launch Devin sessions without a click (origin `fleet`).
+     * Default false. Even when true a fleet launch also needs a live standing
+     * grant with the repo in it and the budget's reserve intact, and every
+     * Devin PR is shadow-only at the standing gates (never auto-merged).
+     */
+    fleet?: boolean;
+    /**
+     * SessionCreateRequest.devin_mode, pinned so the producer is a known
+     * agent mode (`fusion` — multi-model routing — is deliberately not
+     * accepted). Default 'normal'.
+     */
+    mode?: 'normal' | 'fast' | 'lite' | 'ultra';
+  };
 }
 
 // ---------------------------------------------------------------------------

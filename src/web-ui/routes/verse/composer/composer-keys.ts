@@ -19,6 +19,7 @@ export const COMPOSER_COMMAND_IDS = [
   'composer.effort',
   'composer.attach',
   'composer.cloud',
+  'composer.devin',
   'composer.send',
   'composer.stop-and-send',
   'composer.stop',
