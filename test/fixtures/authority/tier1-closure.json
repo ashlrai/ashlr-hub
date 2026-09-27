@@ -679,6 +679,8 @@
     "src/core/verse/checkpoints.ts",
     "src/core/verse/codex-rollout.ts",
     "src/core/verse/compaction-point.ts",
+    "src/core/verse/computer-bridge.ts",
+    "src/core/verse/computer-types.ts",
     "src/core/verse/context-fit.ts",
     "src/core/verse/context-math.ts",
     "src/core/verse/control-api.ts",
