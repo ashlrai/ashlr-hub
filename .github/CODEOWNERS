@@ -754,6 +754,7 @@
 /test/verse-contracts-310.test.ts @masonwyatt23
 /test/verse-control-api.test.ts @masonwyatt23
 /test/verse-daemon-pause.test.ts @masonwyatt23
+/test/verse-equal-partners-315.test.ts @masonwyatt23
 /test/verse-fleet-dispatch.test.ts @masonwyatt23
 /test/verse-fleet-history.test.ts @masonwyatt23
 /test/verse-fleet-types.test.ts @masonwyatt23
