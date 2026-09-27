@@ -20,11 +20,24 @@
 //!   page in a tab can call no command, emit no event and listen to nothing
 //!   (a test below reads `capabilities/*.json` and fails if that changes).
 //! - **Fixed scripts only.** Native evaluates exactly two kinds of script in a
-//!   tab: the constant `browser_tap.js` (init script) and the constant query
-//!   wrappers built by [`query_script`] from a closed enum. No string from the
-//!   Verse page or from the tab ever becomes code. The tab's answers come back
-//!   as JSON, are decoded by [`decode_tap_result`], and are forwarded to the
-//!   Verse page JSON-encoded by [`event_script`] — data, never code.
+//!   tab: the constant `browser_tap.js` (init script) and the tap calls built
+//!   by [`tap_script`] from a closed enum. Every call names a CONSTANT tap
+//!   function; its argument, when it has one, is a JSON object serialized by
+//!   `serde_json` from a VALIDATED Rust value (refs, sigs, numbers, and the
+//!   `select` option strings as JSON string literals), with U+2028/U+2029
+//!   escaped exactly as [`event_script`] does. No string from the Verse page
+//!   or from the tab ever becomes code. The tab's answers come back as JSON,
+//!   are decoded by [`decode_tap_result`], and are forwarded to the Verse page
+//!   JSON-encoded by [`event_script`] — data, never code.
+//! - **The one exception: `evaluate`.** [`evaluate_script`] hands an
+//!   operator-supplied expression to the page's own indirect `eval` — the
+//!   expression is still a JSON string LITERAL (data) in our script, but the
+//!   page then runs it as code, by design. It exists for debugging the
+//!   operator's own dev server, so it is refused unless the tab is on a
+//!   loopback URL (checked here natively AND re-checked against
+//!   `location.origin` inside the script, so a navigation racing the check
+//!   cannot redirect it), and it is off by default upstream (the operator
+//!   opts in per chat). Nothing else in this file evaluates caller text.
 //! - **URL rule** ([`check_url`] / [`url_rule`]): http and https only, no
 //!   userinfo, and never the Verse origin itself (loopback on the Verse port),
 //!   so a tab can never become a second, token-less Verse. Applied to what the
@@ -39,17 +52,27 @@
 //!   not exist and wry would silently fall back to the SHARED default store,
 //!   gets a non-persistent (incognito) store instead; other platforms use
 //!   `<app local data>/browser`.
-//! - **Read, never act.** Native only navigates, reads (text, console,
-//!   network failures, page info, a picked element) and snapshots. It never
-//!   types, never fills or submits a form, never enters a credential, never
-//!   clicks. The tap never reads form-control values. The operator can of
-//!   course click and type in the pane themselves.
+//! - **Acting, as the operator would (macOS).** Besides navigating, reading
+//!   (text, console, network, an accessibility-style snapshot, page info, a
+//!   picked element) and screenshots, the pane now ACTS: `{"act": …}` clicks,
+//!   types, hovers, presses a key, selects an option or scrolls. Clicks and
+//!   key presses are real AppKit events delivered into the tab's own window
+//!   (`browser_input.rs`) — trusted input, no Accessibility permission, no
+//!   `CGEventPost`, never another window. The tap first `prepare`s each act:
+//!   it finds the point, re-checks the element is the one the caller judged
+//!   (`expect`), and REFUSES password / payment / secret fields — native never
+//!   types into those, and the typed text itself never enters a script (only
+//!   its length does). The key table is closed (no ⌘V: the operator's
+//!   clipboard never reaches a page). Genuine operator input in a tab — seen
+//!   by an AppKit event monitor that synthesized events never pass — is
+//!   reported as `{kind:"operator"}` so the Verse page can pause the agent.
 //!
 //! Requests are handled on ONE worker thread, in the order the page sent them
 //! (a burst of `bounds` during a resize must not be applied out of order, and
 //! creating a window from the event-handler thread deadlocks on Windows).
-//! Queries and screenshots never block that worker: their answers arrive on a
-//! callback, raced against a timeout.
+//! Queries never block that worker: their answers arrive on a callback, raced
+//! against a timeout. Acts and screenshots, which need several round trips,
+//! each run on a thread of their own (acts one at a time, in arrival order).
 
 use std::{
     collections::HashMap,
@@ -96,9 +119,25 @@ const EXTERNAL_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const TITLE_MAX_CHARS: usize = 300;
 const BLOCKED_URL_MAX_CHARS: usize = 2048;
 const NAV_URL_MAX_CHARS: usize = 4096;
-/// Largest snapshot width, in points (WebKit scales the snapshot to it).
-#[cfg(target_os = "macos")]
-const SNAPSHOT_MAX_WIDTH: f64 = 1280.0;
+/// Largest screenshot, in output PIXELS (a model reads it; more pixels cost
+/// tokens and add nothing a model can use).
+pub const SNAPSHOT_MAX_PX_WIDTH: f64 = 1280.0;
+pub const SNAPSHOT_MAX_PX_HEIGHT: f64 = 800.0;
+/// An act's fixed time budget; `type` adds [`ACT_PER_CHAR`] per character.
+pub const ACT_BASE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const ACT_PER_CHAR: Duration = Duration::from_millis(20);
+/// Wire limits of the new query forms.
+pub const SNAPSHOT_MAX_NODES: u32 = 2000;
+pub const NETWORK_MAX_LIMIT: u32 = 500;
+pub const TYPE_TEXT_MAX_CHARS: usize = 2000;
+pub const SELECT_MAX_VALUES: usize = 50;
+pub const SELECT_VALUE_MAX_CHARS: usize = 200;
+pub const EVALUATE_MAX_CHARS: usize = 10_000;
+pub const SCROLL_MAX_AMOUNT: f64 = 20_000.0;
+/// Coordinates the page may name (CSS px), like `sanitize_bounds`' offsets.
+pub const COORD_MAX: f64 = 100_000.0;
+/// `evaluate` answers at most this many characters of the value.
+pub const EVALUATE_VALUE_MAX_CHARS: usize = 20_000;
 /// Above this a PNG snapshot is re-encoded as JPEG (quality 0.8).
 #[cfg(target_os = "macos")]
 const SNAPSHOT_PNG_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -122,9 +161,12 @@ pub struct Bounds {
     pub height: f64,
 }
 
-/// The fixed read-only queries. A closed enum: the page picks one by name and
-/// can never supply script text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// What a `query` asks of a tab. A closed enum, externally tagged: the plain
+/// queries are bare strings (`"text"`), the ones with arguments are one-key
+/// objects (`{"snapshot":{"max_nodes":300}}`). The page picks a tap function
+/// by variant and can never supply script text (`evaluate` is the documented
+/// exception, see the module header).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum QueryWhat {
     Text,
@@ -133,19 +175,355 @@ pub enum QueryWhat {
     PickStart,
     PickPoll,
     PickCancel,
+    /// Hand control back after an operator takeover (clears the tap's
+    /// "the agent is acting" window).
+    Resume,
+    Snapshot(SnapshotArgs),
+    Network(NetworkArgs),
+    Resolve(Target),
+    /// Not a plain query: see [`ActSpec`].
+    Act(ActSpec),
+    /// Loopback-only, see [`evaluate_script`].
+    Evaluate(EvaluateArgs),
+}
+
+/// `{"max_nodes"?: 1..=2000, "root_ref"?: Ref}`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotArgs {
+    pub max_nodes: Option<u32>,
+    pub root_ref: Option<String>,
+}
+
+/// `{"limit"?: 1..=500}`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkArgs {
+    pub limit: Option<u32>,
+}
+
+/// An element: exactly one of `ref`, `x`+`y` (CSS px in the viewport), or
+/// `focused: true` (the document's focused element; `resolve` only).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Target {
+    #[serde(rename = "ref")]
+    pub reference: Option<String>,
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub focused: Option<bool>,
+}
+
+/// `{"expression": 1..=10000 chars}`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluateArgs {
+    pub expression: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MouseButton {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScrollDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// One act, internally tagged by `kind`. Every field is validated by
+/// [`validate`] before anything reaches the tab; see the module header for
+/// what each does and what is refused.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ActSpec {
+    Click {
+        #[serde(rename = "ref")]
+        reference: Option<String>,
+        x: Option<f64>,
+        y: Option<f64>,
+        button: Option<MouseButton>,
+        #[serde(default)]
+        double: bool,
+        modifiers: Option<Vec<crate::browser_input::Modifier>>,
+        expect: Option<String>,
+    },
+    Type {
+        #[serde(rename = "ref")]
+        reference: String,
+        text: String,
+        #[serde(default)]
+        submit: bool,
+        #[serde(default)]
+        clear: bool,
+        expect: Option<String>,
+    },
+    Select {
+        #[serde(rename = "ref")]
+        reference: String,
+        values: Vec<String>,
+        expect: Option<String>,
+    },
+    Hover {
+        #[serde(rename = "ref")]
+        reference: Option<String>,
+        x: Option<f64>,
+        y: Option<f64>,
+        expect: Option<String>,
+    },
+    Key {
+        key: String,
+    },
+    Scroll {
+        #[serde(rename = "ref")]
+        reference: Option<String>,
+        direction: Option<ScrollDirection>,
+        amount: Option<f64>,
+    },
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl ActSpec {
+    fn kind(&self) -> &'static str {
+        match self {
+            ActSpec::Click { .. } => "click",
+            ActSpec::Type { .. } => "type",
+            ActSpec::Select { .. } => "select",
+            ActSpec::Hover { .. } => "hover",
+            ActSpec::Key { .. } => "key",
+            ActSpec::Scroll { .. } => "scroll",
+        }
+    }
+
+    fn reference(&self) -> Option<&str> {
+        match self {
+            ActSpec::Click { reference, .. }
+            | ActSpec::Hover { reference, .. }
+            | ActSpec::Scroll { reference, .. } => reference.as_deref(),
+            ActSpec::Type { reference, .. } | ActSpec::Select { reference, .. } => {
+                Some(reference.as_str())
+            }
+            ActSpec::Key { .. } => None,
+        }
+    }
+
+    /// Characters to type (0 for every kind but `type`).
+    fn text_chars(&self) -> usize {
+        match self {
+            ActSpec::Type { text, .. } => text.chars().count(),
+            _ => 0,
+        }
+    }
+}
+
+/// The whole act, answer included, must finish within this.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn act_budget(spec: &ActSpec) -> Duration {
+    ACT_BASE_TIMEOUT + ACT_PER_CHAR * spec.text_chars() as u32
+}
+
+/// How long the tap should treat trusted input as the agent's own.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn act_tap_ms(spec: &ActSpec) -> u64 {
+    (1500 + 40 * spec.text_chars() as u64).min(60_000)
+}
+
+/// `^e[1-9][0-9]{0,6}$` — an element ref the tap handed out.
+pub fn valid_ref(r: &str) -> bool {
+    let b = r.as_bytes();
+    (2..=8).contains(&b.len())
+        && b[0] == b'e'
+        && (b'1'..=b'9').contains(&b[1])
+        && b[2..].iter().all(u8::is_ascii_digit)
+}
+
+/// `^[a-z0-9]{1,16}$` — an element signature (`expect`).
+pub fn valid_sig(s: &str) -> bool {
+    valid_tab(s)
+}
+
+fn valid_coord(v: f64) -> bool {
+    v.is_finite() && (0.0..=COORD_MAX).contains(&v)
+}
+
+/// Exactly one of `ref` / (`x` and `y`); `focused` only where allowed.
+fn valid_target(
+    reference: Option<&str>,
+    x: Option<f64>,
+    y: Option<f64>,
+    focused: Option<bool>,
+    allow_focused: bool,
+) -> bool {
+    let by_ref = reference.is_some();
+    let by_point = match (x, y) {
+        (Some(x), Some(y)) => {
+            if !(valid_coord(x) && valid_coord(y)) {
+                return false;
+            }
+            true
+        }
+        (None, None) => false,
+        _ => return false,
+    };
+    let by_focus = match focused {
+        None => false,
+        Some(true) if allow_focused => true,
+        Some(_) => return false,
+    };
+    if reference.is_some_and(|r| !valid_ref(r)) {
+        return false;
+    }
+    [by_ref, by_point, by_focus].iter().filter(|b| **b).count() == 1
+}
+
+fn valid_expect(expect: &Option<String>) -> bool {
+    expect.as_deref().map_or(true, valid_sig)
+}
+
+fn valid_act(spec: &ActSpec) -> bool {
+    match spec {
+        ActSpec::Click {
+            reference,
+            x,
+            y,
+            modifiers,
+            expect,
+            ..
+        } => {
+            let mods_ok = modifiers.as_ref().map_or(true, |m| {
+                m.len() <= 4 && m.iter().enumerate().all(|(i, a)| !m[..i].contains(a))
+            });
+            mods_ok
+                && valid_expect(expect)
+                && valid_target(reference.as_deref(), *x, *y, None, false)
+        }
+        ActSpec::Hover {
+            reference,
+            x,
+            y,
+            expect,
+        } => valid_expect(expect) && valid_target(reference.as_deref(), *x, *y, None, false),
+        ActSpec::Type {
+            reference,
+            text,
+            expect,
+            ..
+        } => {
+            let n = text.chars().count();
+            valid_ref(reference)
+                && valid_expect(expect)
+                && (1..=TYPE_TEXT_MAX_CHARS).contains(&n)
+                && text.chars().all(crate::browser_input::text_char_allowed)
+        }
+        ActSpec::Select {
+            reference,
+            values,
+            expect,
+        } => {
+            valid_ref(reference)
+                && valid_expect(expect)
+                && (1..=SELECT_MAX_VALUES).contains(&values.len())
+                && values
+                    .iter()
+                    .all(|v| v.chars().count() <= SELECT_VALUE_MAX_CHARS)
+        }
+        ActSpec::Key { key } => crate::browser_input::parse_key_combo(key).is_some(),
+        ActSpec::Scroll {
+            reference,
+            direction,
+            amount,
+        } => {
+            (reference.is_some() || direction.is_some())
+                && reference.as_deref().map_or(true, valid_ref)
+                && amount.map_or(true, |a| {
+                    a.is_finite() && (1.0..=SCROLL_MAX_AMOUNT).contains(&a)
+                })
+        }
+    }
+}
+
+fn valid_what(what: &QueryWhat) -> bool {
+    match what {
+        QueryWhat::Text
+        | QueryWhat::Console
+        | QueryWhat::Info
+        | QueryWhat::PickStart
+        | QueryWhat::PickPoll
+        | QueryWhat::PickCancel
+        | QueryWhat::Resume => true,
+        QueryWhat::Snapshot(a) => {
+            a.max_nodes
+                .map_or(true, |n| (1..=SNAPSHOT_MAX_NODES).contains(&n))
+                && a.root_ref.as_deref().map_or(true, valid_ref)
+        }
+        QueryWhat::Network(a) => a
+            .limit
+            .map_or(true, |n| (1..=NETWORK_MAX_LIMIT).contains(&n)),
+        QueryWhat::Resolve(t) => valid_target(t.reference.as_deref(), t.x, t.y, t.focused, true),
+        QueryWhat::Act(spec) => valid_act(spec),
+        QueryWhat::Evaluate(a) => (1..=EVALUATE_MAX_CHARS).contains(&a.expression.chars().count()),
+    }
+}
+
+/// A JSON value as a JavaScript expression: `serde_json` output (a JSON text
+/// is a valid JS literal) with U+2028/U+2029 escaped, as [`event_script`]
+/// does. This is the ONLY way data enters a script this file builds.
+pub fn js_json(value: &Value) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| "null".to_string())
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }
 
 impl QueryWhat {
-    /// The `__ashlrTap` call, arguments included. Constants only.
-    fn call(self) -> &'static str {
-        match self {
-            QueryWhat::Text => "text(20000)",
-            QueryWhat::Console => "dump(200)",
-            QueryWhat::Info => "info()",
-            QueryWhat::PickStart => "pickStart()",
-            QueryWhat::PickPoll => "pickPoll()",
-            QueryWhat::PickCancel => "pickCancel()",
-        }
+    /// The `__ashlrTap` call, arguments included: a constant function name
+    /// and, for the forms with arguments, one JSON object built from the
+    /// validated fields. `None` for `act` and `evaluate`, which are not plain
+    /// tap calls.
+    fn call(&self) -> Option<String> {
+        use serde_json::{json, Map};
+        let call = match self {
+            QueryWhat::Text => "text(20000)".to_string(),
+            QueryWhat::Console => "dump(200)".to_string(),
+            QueryWhat::Info => "info()".to_string(),
+            QueryWhat::PickStart => "pickStart()".to_string(),
+            QueryWhat::PickPoll => "pickPoll()".to_string(),
+            QueryWhat::PickCancel => "pickCancel()".to_string(),
+            QueryWhat::Resume => "resume()".to_string(),
+            QueryWhat::Snapshot(a) => {
+                let mut o = Map::new();
+                if let Some(n) = a.max_nodes {
+                    o.insert("maxNodes".into(), json!(n));
+                }
+                if let Some(r) = &a.root_ref {
+                    o.insert("rootRef".into(), json!(r));
+                }
+                format!("snapshot({})", js_json(&Value::Object(o)))
+            }
+            QueryWhat::Network(a) => {
+                let mut o = Map::new();
+                if let Some(n) = a.limit {
+                    o.insert("limit".into(), json!(n));
+                }
+                format!("network({})", js_json(&Value::Object(o)))
+            }
+            QueryWhat::Resolve(t) => {
+                let arg = match (&t.reference, t.x, t.y) {
+                    (Some(r), _, _) => json!({ "ref": r }),
+                    (None, Some(x), Some(y)) => json!({ "x": x, "y": y }),
+                    _ => json!({ "focused": true }),
+                };
+                format!("resolve({})", js_json(&arg))
+            }
+            QueryWhat::Act(_) | QueryWhat::Evaluate(_) => return None,
+        };
+        Some(call)
     }
 }
 
@@ -190,9 +568,13 @@ pub enum BrowserRequest {
         req: String,
         what: QueryWhat,
     },
+    /// `clip`: a rectangle in CSS px of the page's viewport (only the
+    /// visible viewport can be captured — WebKit renders anything beyond it
+    /// blank).
     Screenshot {
         tab: String,
         req: String,
+        clip: Option<Bounds>,
     },
     External {
         url: String,
@@ -218,6 +600,11 @@ pub enum BrowserEvent {
         reason: String,
     },
     Closed {
+        tab: String,
+    },
+    /// The operator pressed a mouse button or a key in this tab (genuine
+    /// input — see `browser_input.rs`): the agent should pause.
+    Operator {
         tab: String,
     },
     Result {
@@ -256,6 +643,12 @@ impl BrowserEvent {
 
     fn closed(tab: &str) -> Self {
         BrowserEvent::Closed {
+            tab: tab.to_string(),
+        }
+    }
+
+    fn operator(tab: &str) -> Self {
+        BrowserEvent::Operator {
             tab: tab.to_string(),
         }
     }
@@ -377,6 +770,15 @@ pub fn parse_request(payload: &str) -> Option<BrowserRequest> {
     if !value.is_object() {
         return None;
     }
+    // serde reads `{"text": null}` or `{"text": {}}` as the unit variant
+    // `"text"`; only the forms that take arguments may be objects, so every
+    // query has exactly one spelling.
+    if let Some(Value::Object(what)) = value.get("what") {
+        const ARG_FORMS: [&str; 5] = ["snapshot", "network", "resolve", "act", "evaluate"];
+        if !what.keys().all(|k| ARG_FORMS.contains(&k.as_str())) {
+            return None;
+        }
+    }
     let request: BrowserRequest = serde_json::from_value(value).ok()?;
     validate(request)
 }
@@ -406,10 +808,20 @@ fn validate(request: BrowserRequest) -> Option<BrowserRequest> {
             })
         }
         BrowserRequest::Query {
-            ref tab, ref req, ..
-        }
-        | BrowserRequest::Screenshot { ref tab, ref req } => {
-            (valid_tab(tab) && valid_req(req)).then_some(request)
+            ref tab,
+            ref req,
+            ref what,
+        } => (valid_tab(tab) && valid_req(req) && valid_what(what)).then_some(request),
+        BrowserRequest::Screenshot { tab, req, clip } => {
+            let clip = match clip {
+                Some(c) => Some(sanitize_bounds(c)?),
+                None => None,
+            };
+            (valid_tab(&tab) && valid_req(&req)).then_some(BrowserRequest::Screenshot {
+                tab,
+                req,
+                clip,
+            })
         }
         BrowserRequest::External { ref url } => url_ok(url).then_some(request),
         BrowserRequest::Hide {} => Some(request),
@@ -504,11 +916,41 @@ pub fn navigation_decision(url: &Url, verse_origin: &str) -> NavDecision {
     }
 }
 
-/// The script a `query` evaluates in the tab. Built only from constants.
-pub fn query_script(what: QueryWhat) -> String {
+/// The script that makes one tap call (`call` = a constant function name
+/// plus, at most, a [`js_json`] argument) and returns its JSON string answer.
+pub fn tap_script(call: &str) -> String {
     format!(
-        "(function(){{try{{var t=window.__ashlrTap;return t?t.{call}:JSON.stringify({{error:'tap-missing'}})}}catch(e){{return JSON.stringify({{error:String(e&&e.message||e)}})}}}})()",
-        call = what.call()
+        "(function(){{try{{var t=window.__ashlrTap;return t?t.{call}:JSON.stringify({{error:'tap-missing'}})}}catch(e){{return JSON.stringify({{error:String(e&&e.message||e)}})}}}})()"
+    )
+}
+
+/// The script a plain `query` evaluates in the tab; `None` for `act` and
+/// `evaluate`, which have their own paths.
+pub fn query_script(what: &QueryWhat) -> Option<String> {
+    what.call().map(|call| tap_script(&call))
+}
+
+/// The script for `evaluate` — THE deliberate exception to "no caller text
+/// becomes code" (see the module header). `expression` is embedded as a JSON
+/// string literal and handed to the page's indirect `eval`, so it runs as a
+/// global-scope script in the page, exactly as if the operator had typed it
+/// into the page's devtools console; it cannot break out of OUR wrapper,
+/// which runs first and decides what comes back. `origin` (the loopback
+/// origin native just checked) is re-checked against `location.origin`
+/// before anything runs, so a navigation between the check and the eval is
+/// refused rather than evaluated on another site. A page whose CSP forbids
+/// `unsafe-eval` answers with the CSP error. Promises are not awaited.
+///
+/// Why this is safe enough: the operator opts in per chat upstream (off by
+/// default), the target is the operator's OWN loopback dev server (never a
+/// third-party site with the operator's logins), the tab has zero IPC, and
+/// the answer comes back as data through [`decode_tap_result`] like any other.
+pub fn evaluate_script(expression: &str, origin: &str) -> String {
+    let expr = js_json(&Value::String(expression.to_string()));
+    let origin = js_json(&Value::String(origin.to_string()));
+    format!(
+        "(function(){{var S=JSON.stringify;try{{if(location.origin!=={origin})return S({{error:'not-loopback'}});var r=(0,eval)({expr});if(r!==null&&(typeof r==='object'||typeof r==='function')&&typeof r.then==='function')return S({{value:'(a Promise \\u2014 await is not supported)',type:'promise'}});var v;if(typeof r==='string'){{v=r}}else{{try{{v=S(r)}}catch(e){{v=undefined}}if(typeof v!=='string')v=String(r)}}var cut=v.length>{max};return S({{value:cut?v.slice(0,{max}):v,type:typeof r,truncated:cut}})}}catch(e){{var m;try{{m=String(e&&e.message||e)}}catch(_){{m='error'}}return S({{error:m}})}}}})()",
+        max = EVALUATE_VALUE_MAX_CHARS
     )
 }
 
@@ -675,6 +1117,7 @@ pub fn on_tab_destroyed(app: &AppHandle, label: &str) {
     let Some(tab) = tab_from_label(label) else {
         return;
     };
+    crate::browser_input::forget_tab(tab);
     if let Some(panes) = app.try_state::<BrowserPanes>() {
         enqueue(app, &panes, Job::Destroyed(tab.to_string()));
     }
@@ -718,6 +1161,15 @@ fn emit(app: &AppHandle, event: &BrowserEvent) {
     }
 }
 
+/// Genuine operator input in `tab` (from `browser_input`'s event monitor, on
+/// the main thread; `eval` only queues the script, it never blocks).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn emit_operator(app: &AppHandle, tab: &str) {
+    if valid_tab(tab) {
+        emit(app, &BrowserEvent::operator(tab));
+    }
+}
+
 fn run_job(app: &AppHandle, job: Job) {
     let Some(panes) = app.try_state::<BrowserPanes>() else {
         return;
@@ -732,6 +1184,23 @@ fn run_job(app: &AppHandle, job: Job) {
             handle_request(app, &panes, request, current);
         }
     }
+}
+
+/// `evaluate` runs only on the operator's own loopback server: the tab's
+/// CURRENT URL (not what was asked for — the page may have navigated) must be
+/// loopback and pass the URL rule (so never the Verse origin). Answers the
+/// origin the script re-checks in the page.
+fn evaluate_target(window: &WebviewWindow, verse_origin: &str) -> Result<String, &'static str> {
+    let url = window.url().map_err(|_| "no-url")?;
+    loopback_origin(&url, verse_origin)
+}
+
+/// The origin of `url` if it may be evaluated on (see [`evaluate_target`]).
+pub fn loopback_origin(url: &Url, verse_origin: &str) -> Result<String, &'static str> {
+    if !is_loopback_host(url) || url_rule(url, verse_origin).is_err() {
+        return Err("not-loopback");
+    }
+    Ok(url.origin().ascii_serialization())
 }
 
 fn handle_request(app: &AppHandle, panes: &BrowserPanes, request: BrowserRequest, current: bool) {
@@ -823,21 +1292,41 @@ fn handle_request(app: &AppHandle, panes: &BrowserPanes, request: BrowserRequest
                 reply.send(Err("no-tab".to_string()));
                 return;
             };
+            let script = match what {
+                QueryWhat::Act(spec) => {
+                    start_act(window, reply, spec);
+                    return;
+                }
+                QueryWhat::Evaluate(args) => match evaluate_target(&window, origin) {
+                    Ok(page_origin) => evaluate_script(&args.expression, &page_origin),
+                    Err(reason) => {
+                        reply.send(Err(reason.to_string()));
+                        return;
+                    }
+                },
+                other => match query_script(&other) {
+                    Some(script) => script,
+                    None => {
+                        reply.send(Err("unsupported".to_string()));
+                        return;
+                    }
+                },
+            };
             reply.arm_timeout(QUERY_TIMEOUT);
             let on_answer = reply.clone();
-            if let Err(e) = window.eval_with_callback(query_script(what), move |raw| {
+            if let Err(e) = window.eval_with_callback(script, move |raw| {
                 on_answer.send(decode_tap_result(&raw));
             }) {
                 reply.send(Err(format!("eval-failed: {e}")));
             }
         }
-        BrowserRequest::Screenshot { tab, req } => {
+        BrowserRequest::Screenshot { tab, req, clip } => {
             let reply = Reply::new(app, &req);
             let Some(window) = app.get_webview_window(&label_for(&tab)) else {
                 reply.send(Err("no-tab".to_string()));
                 return;
             };
-            screenshot(panes, &tab, &window, reply);
+            screenshot(window, clip, reply);
         }
         BrowserRequest::External { url } => {
             let url = match check_url(&url, origin) {
@@ -929,7 +1418,7 @@ fn show_only(app: &AppHandle, panes: &BrowserPanes, tab: &str) {
     }
     apply_geometry(&main, &window, bounds);
     if !window.is_visible().unwrap_or(false) {
-        show_without_focus(&main, &window);
+        show_without_focus(&main, &window, tab);
     }
     if let Some(state) = lock(&panes.tabs).get_mut(tab) {
         state.visible = true;
@@ -957,9 +1446,10 @@ fn apply_geometry(main: &WebviewWindow, window: &WebviewWindow, bounds: Bounds) 
 /// tab switch, and ordering a child window out detaches it from its parent.
 /// So the tab is (re)attached to the Verse window and ordered front without
 /// becoming key; the operator's first click in it focuses it
-/// (`accept_first_mouse`).
+/// (`accept_first_mouse`). Once ordered in, the window has its window number,
+/// which the operator-input monitor needs to recognise the tab.
 #[cfg(target_os = "macos")]
-fn show_without_focus(main: &WebviewWindow, window: &WebviewWindow) {
+fn show_without_focus(main: &WebviewWindow, window: &WebviewWindow, tab: &str) {
     use objc2_app_kit::{NSWindow, NSWindowOrderingMode};
     // The Verse window is never destroyed while the app runs (closing it hides
     // it to the tray), so its NSWindow pointer stays valid.
@@ -967,6 +1457,7 @@ fn show_without_focus(main: &WebviewWindow, window: &WebviewWindow) {
         let _ = window.show();
         return;
     };
+    let tab = tab.to_string();
     let result = window.with_webview(move |webview| {
         let child = webview.ns_window() as *const NSWindow;
         let parent = parent as *const NSWindow;
@@ -978,6 +1469,7 @@ fn show_without_focus(main: &WebviewWindow, window: &WebviewWindow) {
             };
             parent.addChildWindow_ordered(child, NSWindowOrderingMode::Above);
             child.orderFront(None);
+            crate::browser_input::register_tab_window(child.windowNumber(), &tab);
         }
     });
     if result.is_err() {
@@ -986,7 +1478,7 @@ fn show_without_focus(main: &WebviewWindow, window: &WebviewWindow) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn show_without_focus(main: &WebviewWindow, window: &WebviewWindow) {
+fn show_without_focus(main: &WebviewWindow, window: &WebviewWindow, _tab: &str) {
     let refocus = main.is_focused().unwrap_or(false);
     let _ = window.show();
     if refocus {
@@ -1142,6 +1634,14 @@ impl Reply {
         emit(&self.app, &BrowserEvent::result(&self.req, outcome));
     }
 
+    /// Already answered (by the result or by the timeout). A long-running act
+    /// checks this before every step: once the page was told `timeout`, it
+    /// must not go on clicking or typing behind the caller's back.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn is_done(&self) -> bool {
+        self.done.load(Ordering::SeqCst)
+    }
+
     fn arm_timeout(&self, after: Duration) {
         let reply = self.clone();
         let _ = thread::Builder::new()
@@ -1153,34 +1653,541 @@ impl Reply {
     }
 }
 
+// ── acting ───────────────────────────────────────────────────────────────────
+
+/// Acts run one at a time, in arrival order: two acts interleaving their key
+/// presses in one page would type garbage.
+#[cfg(target_os = "macos")]
+static ACT_LOCK: Mutex<()> = Mutex::new(());
+
+/// Characters sent per main-thread batch while typing, and the pause per
+/// character between batches (taken on the act's own thread, so the main
+/// thread is never held up). Real typing is slower; this is fast enough to be
+/// practical and slow enough for input handlers that debounce.
+#[cfg(target_os = "macos")]
+const TYPE_BATCH: usize = 20;
+#[cfg(target_os = "macos")]
+const TYPE_PACE: Duration = Duration::from_millis(4);
+/// Between the focusing click and the first key press.
+#[cfg(target_os = "macos")]
+const TYPE_FOCUS_SETTLE: Duration = Duration::from_millis(50);
+
+/// `t.<name>(<json>)`: a constant tap function and one [`js_json`] argument.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn tap_call(name: &'static str, arg: &Value) -> String {
+    tap_script(&format!("{name}({})", js_json(arg)))
+}
+
+/// The argument of the tap's `prepare`: the validated act EXCEPT the text to
+/// type — only its length and whether it contains a newline. What is typed
+/// travels as key events, never through a script.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn prepare_args(spec: &ActSpec) -> Value {
+    use serde_json::{json, Map};
+    let mut o = Map::new();
+    o.insert("kind".into(), json!(spec.kind()));
+    if let Some(r) = spec.reference() {
+        o.insert("ref".into(), json!(r));
+    }
+    let mut put_point = |x: &Option<f64>, y: &Option<f64>| {
+        if let (Some(x), Some(y)) = (x, y) {
+            o.insert("x".into(), json!(x));
+            o.insert("y".into(), json!(y));
+        }
+    };
+    match spec {
+        ActSpec::Click { x, y, .. } | ActSpec::Hover { x, y, .. } => put_point(x, y),
+        _ => {}
+    }
+    match spec {
+        ActSpec::Click {
+            button,
+            double,
+            modifiers,
+            expect,
+            ..
+        } => {
+            if let Some(b) = button {
+                o.insert("button".into(), json!(b));
+            }
+            if *double {
+                o.insert("double".into(), json!(true));
+            }
+            if let Some(m) = modifiers {
+                o.insert("modifiers".into(), json!(m));
+            }
+            if let Some(e) = expect {
+                o.insert("expect".into(), json!(e));
+            }
+        }
+        ActSpec::Type {
+            text,
+            submit,
+            clear,
+            expect,
+            ..
+        } => {
+            if let Some(e) = expect {
+                o.insert("expect".into(), json!(e));
+            }
+            if *clear {
+                o.insert("clear".into(), json!(true));
+            }
+            if *submit {
+                o.insert("submit".into(), json!(true));
+            }
+            o.insert("textLength".into(), json!(text.chars().count()));
+            o.insert("hasNewline".into(), json!(text.contains('\n')));
+        }
+        ActSpec::Select { values, expect, .. } => {
+            o.insert("values".into(), json!(values));
+            if let Some(e) = expect {
+                o.insert("expect".into(), json!(e));
+            }
+        }
+        ActSpec::Hover { expect, .. } => {
+            if let Some(e) = expect {
+                o.insert("expect".into(), json!(e));
+            }
+        }
+        ActSpec::Key { key } => {
+            o.insert("key".into(), json!(key));
+        }
+        ActSpec::Scroll {
+            direction, amount, ..
+        } => {
+            if let Some(d) = direction {
+                o.insert("direction".into(), json!(d));
+            }
+            if let Some(a) = amount {
+                o.insert("amount".into(), json!(a));
+            }
+        }
+    }
+    o.insert("ms".into(), json!(act_tap_ms(spec)));
+    Value::Object(o)
+}
+
+/// The argument of the tap's `after`: `{kind, ref?}`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn after_args(spec: &ActSpec) -> Value {
+    let mut o = serde_json::Map::new();
+    o.insert("kind".into(), Value::from(spec.kind()));
+    if let Some(r) = spec.reference() {
+        o.insert("ref".into(), Value::from(r));
+    }
+    Value::Object(o)
+}
+
+/// An act's answer: what the tap reported while preparing, then after (its
+/// fresher keys win), then what native owns — `kind`, the point it acted at
+/// (`x`, `y` in CSS px, `null` when the tap did the act itself without one)
+/// and whether native input was synthesized (`native`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn act_reply(spec: &ActSpec, prepared: Value, after: Value, native: bool) -> Value {
+    let x = prepared.get("x").cloned().unwrap_or(Value::Null);
+    let y = prepared.get("y").cloned().unwrap_or(Value::Null);
+    let mut out = serde_json::Map::new();
+    for part in [prepared, after] {
+        if let Value::Object(map) = part {
+            out.extend(map);
+        }
+    }
+    out.remove("error");
+    out.insert("kind".into(), Value::from(spec.kind()));
+    out.insert("x".into(), x);
+    out.insert("y".into(), y);
+    out.insert("native".into(), Value::Bool(native));
+    Value::Object(out)
+}
+
+/// Start an act on its own thread. The reply's timeout covers the whole act
+/// (including waiting for an earlier act to finish).
+fn start_act(window: WebviewWindow, reply: Reply, spec: ActSpec) {
+    #[cfg(target_os = "macos")]
+    {
+        let budget = act_budget(&spec);
+        reply.arm_timeout(budget);
+        let deadline = Instant::now() + budget;
+        let worker = reply.clone();
+        let spawned = thread::Builder::new()
+            .name("ashlr-browser-act".into())
+            .spawn(move || {
+                let _serial = lock(&ACT_LOCK);
+                if worker.is_done() {
+                    return;
+                }
+                let outcome = act::run(&window, &spec, deadline, &worker);
+                worker.send(outcome);
+            });
+        if spawned.is_err() {
+            reply.send(Err("spawn-failed".to_string()));
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, spec);
+        reply.send(Err("unsupported".to_string()));
+    }
+}
+
+/// Evaluate a tap call and wait — on the calling thread, never the main
+/// thread — for its decoded answer.
+#[cfg(target_os = "macos")]
+fn eval_blocking(
+    window: &WebviewWindow,
+    script: String,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let (tx, rx) = mpsc::channel::<String>();
+    window
+        .eval_with_callback(script, move |raw| {
+            let _ = tx.send(raw);
+        })
+        .map_err(|e| format!("eval-failed: {e}"))?;
+    match rx.recv_timeout(timeout) {
+        Ok(raw) => decode_tap_result(&raw),
+        Err(_) => Err("timeout".to_string()),
+    }
+}
+
+/// The act itself (macOS): `prepare` in the page → native input unless the
+/// tap already did it → `after` in the page.
+#[cfg(target_os = "macos")]
+mod act {
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use objc2_app_kit::NSWindow;
+    use objc2_web_kit::WKWebView;
+    use serde_json::{json, Value};
+    use tauri::WebviewWindow;
+
+    use super::{
+        act_reply, after_args, eval_blocking, prepare_args, tap_call, ActSpec, MouseButton, Reply,
+        TYPE_BATCH, TYPE_FOCUS_SETTLE, TYPE_PACE,
+    };
+    use crate::browser_input::{self as input, native, Stroke};
+
+    /// Time left, or `timeout` once the deadline passed or the caller was
+    /// already told `timeout` — no further input after that.
+    fn left(deadline: Instant, reply: &Reply) -> Result<Duration, String> {
+        if reply.is_done() {
+            return Err("timeout".to_string());
+        }
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or_else(|| "timeout".to_string())
+    }
+
+    /// Run `f` on the main thread with the tab's view and window.
+    fn on_main<F>(
+        window: &WebviewWindow,
+        deadline: Instant,
+        reply: &Reply,
+        f: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce(&WKWebView, &NSWindow) -> Result<(), &'static str> + Send + 'static,
+    {
+        let wait = left(deadline, reply)?;
+        native::on_main(window, wait, f)?.map_err(str::to_string)
+    }
+
+    /// The point `prepare` answered: `((x, y), innerWidth)` in CSS px.
+    fn point(prepared: &Value) -> Result<((f64, f64), f64), String> {
+        let num = |key: &str| {
+            prepared
+                .get(key)
+                .and_then(Value::as_f64)
+                .filter(|n| n.is_finite())
+                .ok_or_else(|| "bad-prepare".to_string())
+        };
+        Ok(((num("x")?, num("y")?), num("vw")?))
+    }
+
+    fn stroke(combo: &str) -> Result<Stroke, String> {
+        input::parse_key_combo(combo).ok_or_else(|| "bad-key".to_string())
+    }
+
+    pub fn run(
+        window: &WebviewWindow,
+        spec: &ActSpec,
+        deadline: Instant,
+        reply: &Reply,
+    ) -> Result<Value, String> {
+        let prepared = eval_blocking(
+            window,
+            tap_call("prepare", &prepare_args(spec)),
+            left(deadline, reply)?,
+        )?;
+        let done = prepared.get("done") == Some(&Value::Bool(true));
+        if !done {
+            perform(window, spec, &prepared, deadline, reply)?;
+        }
+        let after = eval_blocking(
+            window,
+            tap_call("after", &after_args(spec)),
+            left(deadline, reply)?,
+        )?;
+        Ok(act_reply(spec, prepared, after, !done))
+    }
+
+    fn perform(
+        window: &WebviewWindow,
+        spec: &ActSpec,
+        prepared: &Value,
+        deadline: Instant,
+        reply: &Reply,
+    ) -> Result<(), String> {
+        match spec {
+            // A native right click opens AppKit's context menu, which runs a
+            // modal loop on the main thread until someone dismisses it. The
+            // tap answers a right click itself (a `contextmenu` event); if it
+            // did not, refuse rather than freeze the app.
+            ActSpec::Click {
+                button: Some(MouseButton::Right),
+                ..
+            } => Err("right-click-needs-tap".to_string()),
+            ActSpec::Click {
+                double, modifiers, ..
+            } => {
+                let (css, vw) = point(prepared)?;
+                let flags = input::modifier_flags(modifiers.as_deref().unwrap_or(&[]));
+                let double = *double;
+                on_main(window, deadline, reply, move |view, win| {
+                    native::click(view, win, css, vw, flags, double)
+                })
+            }
+            ActSpec::Hover { .. } => {
+                let (css, vw) = point(prepared)?;
+                on_main(window, deadline, reply, move |view, win| {
+                    native::hover(view, win, css, vw)
+                })
+            }
+            ActSpec::Type {
+                reference,
+                text,
+                submit,
+                clear,
+                ..
+            } => {
+                // Everything that can refuse is decided before the first event.
+                let multiline = prepared.get("multiline") == Some(&Value::Bool(true));
+                let strokes = input::strokes_for_text(text, multiline).map_err(str::to_string)?;
+                let (css, vw) = point(prepared)?;
+                let enter = stroke("Enter")?;
+                let backspace = stroke("Backspace")?;
+                // Focus the field the way a person would: click it.
+                on_main(window, deadline, reply, move |view, win| {
+                    native::click(view, win, css, vw, 0, false)
+                })?;
+                thread::sleep(TYPE_FOCUS_SETTLE);
+                if *clear {
+                    // The tap selects the field's content; Backspace deletes it.
+                    eval_blocking(
+                        window,
+                        tap_call("clear", &json!({ "ref": reference })),
+                        left(deadline, reply)?,
+                    )?;
+                    on_main(window, deadline, reply, move |view, win| {
+                        native::focus_webview(view, win);
+                        native::keys(win, &[backspace])
+                    })?;
+                }
+                for chunk in strokes.chunks(TYPE_BATCH) {
+                    let batch = chunk.to_vec();
+                    on_main(window, deadline, reply, move |_, win| {
+                        native::keys(win, &batch)
+                    })?;
+                    thread::sleep(TYPE_PACE * chunk.len() as u32);
+                }
+                if *submit {
+                    on_main(window, deadline, reply, move |_, win| {
+                        native::keys(win, &[enter])
+                    })?;
+                }
+                Ok(())
+            }
+            ActSpec::Key { key } => {
+                let combo = stroke(key)?;
+                on_main(window, deadline, reply, move |view, win| {
+                    native::focus_webview(view, win);
+                    native::keys(win, &[combo])
+                })
+            }
+            // `select` (a native popup menu would block the app) and `scroll`
+            // are done by the tap; an answer without `done` is a tap fault.
+            ActSpec::Select { .. } | ActSpec::Scroll { .. } => Err("tap-did-not-act".to_string()),
+        }
+    }
+}
+
 // ── screenshot ───────────────────────────────────────────────────────────────
 
+/// How to take one screenshot (pure; see [`snapshot_plan`]).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapshotPlan {
+    /// The rectangle captured, in view points (top-left origin).
+    pub rect: Bounds,
+    /// Whether a clip was asked for (then `rect` goes to
+    /// `WKSnapshotConfiguration.rect`; otherwise the whole view is taken).
+    pub clipped: bool,
+    /// `WKSnapshotConfiguration.snapshotWidth`, in points. WebKit renders at
+    /// the window's backing scale, so the image is `width_pts × backing` px.
+    pub width_pts: f64,
+    /// `rect` in CSS px of the page's viewport.
+    pub css: Bounds,
+}
+
+/// Size a screenshot so its OUTPUT PIXELS fit 1280×800.
+///
+/// `view_w`/`view_h`: the webview's size in points; `vw_css`: the page's
+/// `innerWidth` in CSS px (so `view_w / vw_css` folds in the page zoom);
+/// `clip`: CSS px within the viewport, intersected with it; `backing`: the
+/// window's backing scale factor (1 when unknown). `None` for a degenerate
+/// view or an empty intersection.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn snapshot_plan(
+    view_w: f64,
+    view_h: f64,
+    vw_css: f64,
+    clip: Option<Bounds>,
+    backing: f64,
+) -> Option<SnapshotPlan> {
+    if ![view_w, view_h, vw_css].iter().all(|v| v.is_finite())
+        || view_w <= 0.0
+        || view_h <= 0.0
+        || vw_css <= 0.0
+    {
+        return None;
+    }
+    let backing = if backing.is_finite() && backing > 0.0 {
+        backing
+    } else {
+        1.0
+    };
+    let ratio = view_w / vw_css;
+    if !ratio.is_finite() || ratio <= 0.0 {
+        return None;
+    }
+    let rect = match clip {
+        Some(c) => {
+            if ![c.x, c.y, c.width, c.height].iter().all(|v| v.is_finite()) {
+                return None;
+            }
+            let x0 = (c.x * ratio).max(0.0);
+            let y0 = (c.y * ratio).max(0.0);
+            let x1 = ((c.x + c.width) * ratio).min(view_w);
+            let y1 = ((c.y + c.height) * ratio).min(view_h);
+            Bounds {
+                x: x0,
+                y: y0,
+                width: x1 - x0,
+                height: y1 - y0,
+            }
+        }
+        None => Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: view_w,
+            height: view_h,
+        },
+    };
+    if !(rect.width > 0.0 && rect.height > 0.0) {
+        return None;
+    }
+    let width_pts = rect
+        .width
+        .min(SNAPSHOT_MAX_PX_WIDTH / backing)
+        .min(SNAPSHOT_MAX_PX_HEIGHT / backing * rect.width / rect.height);
+    if !(width_pts.is_finite() && width_pts > 0.0) {
+        return None;
+    }
+    Some(SnapshotPlan {
+        rect,
+        clipped: clip.is_some(),
+        width_pts,
+        css: Bounds {
+            x: rect.x / ratio,
+            y: rect.y / ratio,
+            width: rect.width / ratio,
+            height: rect.height / ratio,
+        },
+    })
+}
+
+/// The screenshot answer: the image, its ACTUAL pixel size, and how its
+/// pixels map back onto the page — `scale` = CSS px per image px, `origin` =
+/// the captured rectangle's top-left in CSS px, `css` = its size in CSS px.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn screenshot_reply(
+    mime: &str,
+    base64: String,
+    width_px: isize,
+    height_px: isize,
+    plan: &SnapshotPlan,
+) -> Value {
+    let scale = if width_px > 0 {
+        Value::from(plan.css.width / width_px as f64)
+    } else {
+        Value::Null
+    };
+    serde_json::json!({
+        "mime": mime,
+        "base64": base64,
+        "width": width_px,
+        "height": height_px,
+        "scale": scale,
+        "origin": { "x": plan.css.x, "y": plan.css.y },
+        "css": { "width": plan.css.width, "height": plan.css.height },
+    })
+}
+
 #[cfg(target_os = "macos")]
-fn screenshot(panes: &BrowserPanes, tab: &str, window: &WebviewWindow, reply: Reply) {
-    let width = lock(&panes.tabs)
-        .get(tab)
-        .and_then(|s| s.bounds)
-        .map_or(SNAPSHOT_MAX_WIDTH, |b| b.width.min(SNAPSHOT_MAX_WIDTH));
+fn screenshot(window: WebviewWindow, clip: Option<Bounds>, reply: Reply) {
     reply.arm_timeout(SCREENSHOT_TIMEOUT);
-    let on_image = reply.clone();
-    let started = snapshot::take(window, width, move |outcome| {
-        on_image.send(outcome.map(|shot| {
-            use base64::Engine;
-            serde_json::json!({
-                "mime": shot.mime,
-                "base64": base64::engine::general_purpose::STANDARD.encode(&shot.bytes),
-                "width": shot.width,
-                "height": shot.height,
-            })
-        }));
-    });
-    if let Err(e) = started {
-        reply.send(Err(format!("snapshot-failed: {e}")));
+    let worker = reply.clone();
+    let spawned = thread::Builder::new()
+        .name("ashlr-browser-shot".into())
+        .spawn(move || {
+            // The page's viewport width in CSS px maps view points to CSS px.
+            // Without it (no tap on this page) a whole-view shot still works,
+            // assuming no page zoom; a clip cannot be placed.
+            let info = query_script(&QueryWhat::Info)
+                .ok_or_else(|| "unsupported".to_string())
+                .and_then(|script| eval_blocking(&window, script, QUERY_TIMEOUT));
+            let vw = info
+                .ok()
+                .and_then(|i| i.get("vw").and_then(Value::as_f64))
+                .filter(|v| v.is_finite() && *v > 0.0);
+            if vw.is_none() && clip.is_some() {
+                worker.send(Err("no-viewport".to_string()));
+                return;
+            }
+            let on_image = worker.clone();
+            let started = snapshot::take(&window, vw, clip, move |outcome| {
+                on_image.send(outcome.map(|(shot, plan)| {
+                    use base64::Engine;
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(&shot.bytes);
+                    screenshot_reply(shot.mime, encoded, shot.width, shot.height, &plan)
+                }));
+            });
+            if let Err(e) = started {
+                worker.send(Err(format!("snapshot-failed: {e}")));
+            }
+        });
+    if spawned.is_err() {
+        reply.send(Err("spawn-failed".to_string()));
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn screenshot(_panes: &BrowserPanes, _tab: &str, _window: &WebviewWindow, reply: Reply) {
+fn screenshot(_window: WebviewWindow, _clip: Option<Bounds>, reply: Reply) {
     reply.send(Err("unsupported".to_string()));
 }
 
@@ -1192,13 +2199,13 @@ mod snapshot {
     use block2::RcBlock;
     use objc2::{runtime::AnyObject, MainThreadMarker};
     use objc2_app_kit::{
-        NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSImageCompressionFactor,
+        NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSImageCompressionFactor, NSWindow,
     };
-    use objc2_foundation::{NSDictionary, NSError, NSNumber, NSString};
+    use objc2_foundation::{NSDictionary, NSError, NSNumber, NSPoint, NSRect, NSSize, NSString};
     use objc2_web_kit::{WKSnapshotConfiguration, WKWebView};
     use tauri::WebviewWindow;
 
-    use super::SNAPSHOT_PNG_MAX_BYTES;
+    use super::{snapshot_plan, Bounds, SnapshotPlan, SNAPSHOT_PNG_MAX_BYTES};
 
     pub struct Shot {
         pub mime: &'static str,
@@ -1208,16 +2215,19 @@ mod snapshot {
     }
 
     /// Start a snapshot; `done` runs once, on the main thread, with the image
-    /// or the reason there is none. (If the window disappears first, `done`
-    /// never runs and the caller's timeout answers.)
+    /// and the plan it was taken with, or the reason there is none. (If the
+    /// window disappears first, `done` never runs and the caller's timeout
+    /// answers.) `vw_css`: the page's `innerWidth`, or `None` to assume the
+    /// view is 1:1 with CSS px.
     pub fn take(
         window: &WebviewWindow,
-        width_points: f64,
-        done: impl FnOnce(Result<Shot, String>) + Send + 'static,
+        vw_css: Option<f64>,
+        clip: Option<Bounds>,
+        done: impl FnOnce(Result<(Shot, SnapshotPlan), String>) + Send + 'static,
     ) -> tauri::Result<()> {
         let done = Mutex::new(Some(done));
         window.with_webview(move |platform| {
-            let finish = move |outcome: Result<Shot, String>| {
+            let finish = move |outcome: Result<(Shot, SnapshotPlan), String>| {
                 let callback = match done.lock() {
                     Ok(mut guard) => guard.take(),
                     Err(poisoned) => poisoned.into_inner().take(),
@@ -1231,20 +2241,43 @@ mod snapshot {
                 return;
             };
             let pointer = platform.inner() as *const WKWebView;
+            let ns_window = platform.ns_window() as *const NSWindow;
             // SAFETY: on macOS PlatformWebview::inner() is the live WKWebView
-            // wry created for this window; with_webview runs on the main thread.
-            let Some(webview) = (unsafe { pointer.as_ref() }) else {
+            // wry created for this window and ns_window() its live NSWindow;
+            // with_webview runs on the main thread.
+            let (Some(webview), ns_window) =
+                (unsafe { pointer.as_ref() }, unsafe { ns_window.as_ref() })
+            else {
                 finish(Err("no-webview".to_string()));
+                return;
+            };
+            let bounds = webview.bounds();
+            let (view_w, view_h) = (bounds.size.width, bounds.size.height);
+            let backing = ns_window.map_or(1.0, |w| w.backingScaleFactor());
+            let Some(plan) = snapshot_plan(view_w, view_h, vw_css.unwrap_or(view_w), clip, backing)
+            else {
+                finish(Err(if clip.is_some() {
+                    "empty-clip".to_string()
+                } else {
+                    "empty-view".to_string()
+                }));
                 return;
             };
             // SAFETY: plain property setters on a fresh configuration object.
             let config = unsafe { WKSnapshotConfiguration::new(mtm) };
-            let width = NSNumber::new_f64(width_points.max(1.0));
+            let width = NSNumber::new_f64(plan.width_pts);
             unsafe { config.setSnapshotWidth(Some(&width)) };
+            if plan.clipped {
+                let r = plan.rect;
+                let rect = NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.width, r.height));
+                // SAFETY: a rect inside the view's bounds (snapshot_plan
+                // intersected it), in the view's own (flipped) coordinates.
+                unsafe { config.setRect(rect) };
+            }
             let block = RcBlock::new(move |image: *mut NSImage, _error: *mut NSError| {
                 // SAFETY: WebKit passes a valid NSImage or null.
                 let outcome = match unsafe { image.as_ref() } {
-                    Some(image) => encode(image),
+                    Some(image) => encode(image).map(|shot| (shot, plan)),
                     None => Err("snapshot-failed".to_string()),
                 };
                 finish(outcome);
@@ -1743,8 +2776,9 @@ mod tests {
             (QueryWhat::PickStart, "t.pickStart()"),
             (QueryWhat::PickPoll, "t.pickPoll()"),
             (QueryWhat::PickCancel, "t.pickCancel()"),
+            (QueryWhat::Resume, "t.resume()"),
         ] {
-            let script = query_script(what);
+            let script = query_script(&what).unwrap();
             assert_eq!(
                 script,
                 format!("(function(){{try{{var t=window.__ashlrTap;return t?{call}:JSON.stringify({{error:'tap-missing'}})}}catch(e){{return JSON.stringify({{error:String(e&&e.message||e)}})}}}})()")
@@ -1752,24 +2786,665 @@ mod tests {
         }
     }
 
+    // ── new query forms ──────────────────────────────────────────────────────
+
+    fn what(json: &str) -> Option<QueryWhat> {
+        match parse(&format!(
+            r#"{{"op":"query","tab":"t1","req":"r1","what":{json}}}"#
+        ))? {
+            BrowserRequest::Query { what, .. } => Some(what),
+            _ => None,
+        }
+    }
+
+    /// The single JSON argument of a `t.<name>(<json>)` tap script, parsed
+    /// back: proves the argument is exactly one JSON literal.
+    fn tap_arg(script: &str, name: &str) -> Value {
+        let open = format!("t.{name}(");
+        let start = script.find(&open).expect("tap call") + open.len();
+        let end = script
+            .find("):JSON.stringify({error:'tap-missing'})")
+            .expect("wrapper tail");
+        serde_json::from_str(&script[start..end]).expect("one JSON literal")
+    }
+
+    #[test]
+    fn every_new_query_form_parses() {
+        use serde_json::json;
+        assert_eq!(what(r#""resume""#), Some(QueryWhat::Resume));
+        assert_eq!(
+            what(r#"{"snapshot":{"max_nodes":300,"root_ref":"e12"}}"#),
+            Some(QueryWhat::Snapshot(SnapshotArgs {
+                max_nodes: Some(300),
+                root_ref: Some("e12".into())
+            }))
+        );
+        assert!(what(r#"{"snapshot":{}}"#).is_some());
+        assert!(what(r#"{"network":{"limit":500}}"#).is_some());
+        assert!(what(r#"{"network":{}}"#).is_some());
+        assert!(what(r#"{"resolve":{"ref":"e1"}}"#).is_some());
+        assert!(what(r#"{"resolve":{"x":0,"y":100000}}"#).is_some());
+        assert!(what(r#"{"resolve":{"focused":true}}"#).is_some());
+        assert!(what(r#"{"evaluate":{"expression":"document.title"}}"#).is_some());
+        for act in [
+            json!({"kind":"click","ref":"e1"}),
+            json!({"kind":"click","x":10.5,"y":20,"button":"left","double":true,"modifiers":["Shift","Meta"],"expect":"ab12"}),
+            json!({"kind":"click","ref":"e9999999","button":"right"}),
+            json!({"kind":"type","ref":"e2","text":"hello é 👍","submit":true,"clear":true,"expect":"z"}),
+            json!({"kind":"type","ref":"e2","text":"a\nb\tc"}),
+            json!({"kind":"select","ref":"e3","values":["One",""]}),
+            json!({"kind":"hover","ref":"e4"}),
+            json!({"kind":"hover","x":1,"y":2,"expect":"s1"}),
+            json!({"kind":"key","key":"Enter"}),
+            json!({"kind":"key","key":"Meta+a"}),
+            json!({"kind":"scroll","direction":"down"}),
+            json!({"kind":"scroll","ref":"e5"}),
+            json!({"kind":"scroll","ref":"e5","direction":"left","amount":20000}),
+        ] {
+            let json = format!(r#"{{"act":{act}}}"#);
+            assert!(
+                matches!(what(&json), Some(QueryWhat::Act(_))),
+                "should parse: {json}"
+            );
+        }
+        assert_eq!(
+            what(r#"{"act":{"kind":"type","ref":"e2","text":"hi"}}"#),
+            Some(QueryWhat::Act(ActSpec::Type {
+                reference: "e2".into(),
+                text: "hi".into(),
+                submit: false,
+                clear: false,
+                expect: None
+            }))
+        );
+        // Screenshot with and without a clip; the clip is sanitised.
+        assert_eq!(
+            parse(
+                r#"{"op":"screenshot","tab":"t1","req":"r","clip":{"x":-5,"y":10,"width":0,"height":50}}"#
+            ),
+            Some(BrowserRequest::Screenshot {
+                tab: "t1".into(),
+                req: "r".into(),
+                clip: Some(Bounds {
+                    x: 0.0,
+                    y: 10.0,
+                    width: 1.0,
+                    height: 50.0
+                })
+            })
+        );
+        assert!(parse(r#"{"op":"screenshot","tab":"t1","req":"r"}"#).is_some());
+    }
+
+    #[test]
+    fn malformed_new_query_forms_are_rejected() {
+        let long_text = "a".repeat(TYPE_TEXT_MAX_CHARS + 1);
+        let long_value = "v".repeat(SELECT_VALUE_MAX_CHARS + 1);
+        let many_values = serde_json::to_string(&vec!["v"; SELECT_MAX_VALUES + 1]).unwrap();
+        let long_expr = "1".repeat(EVALUATE_MAX_CHARS + 1);
+        let cases = [
+            // bare strings for forms that need an object, and vice versa
+            r#""snapshot""#.to_string(),
+            r#""act""#.to_string(),
+            r#""evaluate""#.to_string(),
+            r#"{"resume":{}}"#.to_string(),
+            r#"{"text":null}"#.to_string(),
+            r#"{"info":{}}"#.to_string(),
+            // two keys in one externally tagged value
+            r#"{"snapshot":{},"network":{}}"#.to_string(),
+            // unknown fields
+            r#"{"snapshot":{"max_nodes":5,"depth":2}}"#.to_string(),
+            r#"{"network":{"limit":5,"all":true}}"#.to_string(),
+            r#"{"resolve":{"ref":"e1","why":1}}"#.to_string(),
+            r#"{"evaluate":{"expression":"1","await":true}}"#.to_string(),
+            r#"{"act":{"kind":"click","ref":"e1","bogus":1}}"#.to_string(),
+            r#"{"act":{"kind":"type","ref":"e1","text":"x","js":"alert(1)"}}"#.to_string(),
+            r#"{"act":{"kind":"key","key":"Enter","ref":"e1"}}"#.to_string(),
+            r#"{"act":{"kind":"select","ref":"e1","values":["a"],"text":"x"}}"#.to_string(),
+            // unknown kinds / missing kind
+            r#"{"act":{"kind":"submit","ref":"e1"}}"#.to_string(),
+            r#"{"act":{"kind":"Click","ref":"e1"}}"#.to_string(),
+            r#"{"act":{"ref":"e1"}}"#.to_string(),
+            // bad refs
+            r#"{"act":{"kind":"click","ref":"e0"}}"#.to_string(),
+            r#"{"act":{"kind":"click","ref":"e01"}}"#.to_string(),
+            r#"{"act":{"kind":"click","ref":"e12345678"}}"#.to_string(),
+            r#"{"act":{"kind":"click","ref":"E1"}}"#.to_string(),
+            r#"{"act":{"kind":"click","ref":"e1'"}}"#.to_string(),
+            r#"{"act":{"kind":"click","ref":""}}"#.to_string(),
+            r#"{"snapshot":{"root_ref":"x1"}}"#.to_string(),
+            r#"{"resolve":{"ref":"e-1"}}"#.to_string(),
+            // bad sigs
+            r#"{"act":{"kind":"click","ref":"e1","expect":"AB"}}"#.to_string(),
+            r#"{"act":{"kind":"click","ref":"e1","expect":""}}"#.to_string(),
+            r#"{"act":{"kind":"click","ref":"e1","expect":"abcdefghijklmnopq"}}"#.to_string(),
+            // both / neither targets
+            r#"{"act":{"kind":"click","ref":"e1","x":1,"y":2}}"#.to_string(),
+            r#"{"act":{"kind":"click"}}"#.to_string(),
+            r#"{"act":{"kind":"click","x":1}}"#.to_string(),
+            r#"{"act":{"kind":"hover","y":1}}"#.to_string(),
+            r#"{"act":{"kind":"hover","ref":"e1","x":1,"y":1}}"#.to_string(),
+            r#"{"resolve":{}}"#.to_string(),
+            r#"{"resolve":{"ref":"e1","focused":true}}"#.to_string(),
+            r#"{"resolve":{"x":1,"y":1,"focused":true}}"#.to_string(),
+            r#"{"resolve":{"focused":false}}"#.to_string(),
+            r#"{"act":{"kind":"click","focused":true}}"#.to_string(),
+            r#"{"act":{"kind":"scroll"}}"#.to_string(),
+            r#"{"act":{"kind":"scroll","amount":5}}"#.to_string(),
+            // text / values / expression sizes and content
+            format!(r#"{{"act":{{"kind":"type","ref":"e1","text":"{long_text}"}}}}"#),
+            r#"{"act":{"kind":"type","ref":"e1","text":""}}"#.to_string(),
+            r#"{"act":{"kind":"type","ref":"e1","text":"a\rb"}}"#.to_string(),
+            r#"{"act":{"kind":"type","ref":"e1","text":"\u007f"}}"#.to_string(),
+            r#"{"act":{"kind":"type","ref":"e1","text":""}}"#.to_string(),
+            r#"{"act":{"kind":"type","text":"x"}}"#.to_string(),
+            format!(r#"{{"act":{{"kind":"select","ref":"e1","values":["{long_value}"]}}}}"#),
+            format!(r#"{{"act":{{"kind":"select","ref":"e1","values":{many_values}}}}}"#),
+            r#"{"act":{"kind":"select","ref":"e1","values":[]}}"#.to_string(),
+            r#"{"act":{"kind":"select","ref":"e1","values":[1]}}"#.to_string(),
+            r#"{"evaluate":{"expression":""}}"#.to_string(),
+            format!(r#"{{"evaluate":{{"expression":"{long_expr}"}}}}"#),
+            // modifiers
+            r#"{"act":{"kind":"click","ref":"e1","modifiers":["Shift","Shift"]}}"#.to_string(),
+            r#"{"act":{"kind":"click","ref":"e1","modifiers":["Cmd"]}}"#.to_string(),
+            r#"{"act":{"kind":"click","ref":"e1","modifiers":"Shift"}}"#.to_string(),
+            r#"{"act":{"kind":"click","ref":"e1","button":"middle"}}"#.to_string(),
+            // keys outside the table
+            r#"{"act":{"kind":"key","key":"Meta+v"}}"#.to_string(),
+            r#"{"act":{"kind":"key","key":"Meta+q"}}"#.to_string(),
+            r#"{"act":{"kind":"key","key":"F12"}}"#.to_string(),
+            // numbers: out of range, wrong type, non-finite literals
+            r#"{"snapshot":{"max_nodes":0}}"#.to_string(),
+            r#"{"snapshot":{"max_nodes":2001}}"#.to_string(),
+            r#"{"snapshot":{"max_nodes":-1}}"#.to_string(),
+            r#"{"snapshot":{"max_nodes":1.5}}"#.to_string(),
+            r#"{"network":{"limit":0}}"#.to_string(),
+            r#"{"network":{"limit":501}}"#.to_string(),
+            r#"{"resolve":{"x":-1,"y":0}}"#.to_string(),
+            r#"{"resolve":{"x":100001,"y":0}}"#.to_string(),
+            r#"{"resolve":{"x":1e400,"y":0}}"#.to_string(),
+            r#"{"resolve":{"x":"1","y":0}}"#.to_string(),
+            r#"{"resolve":{"x":NaN,"y":0}}"#.to_string(),
+            r#"{"act":{"kind":"scroll","direction":"down","amount":0}}"#.to_string(),
+            r#"{"act":{"kind":"scroll","direction":"down","amount":20001}}"#.to_string(),
+            r#"{"act":{"kind":"scroll","direction":"sideways"}}"#.to_string(),
+        ];
+        for case in &cases {
+            assert_eq!(what(case), None, "should reject: {case}");
+        }
+        // A screenshot clip with a non-finite or wrongly typed number.
+        assert_eq!(
+            parse(
+                r#"{"op":"screenshot","tab":"t1","req":"r","clip":{"x":1e400,"y":0,"width":1,"height":1}}"#
+            ),
+            None
+        );
+        assert_eq!(
+            parse(r#"{"op":"screenshot","tab":"t1","req":"r","clip":{"x":0,"y":0,"width":1}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn refs_and_sigs_are_validated() {
+        for ok in ["e1", "e9", "e10", "e1234567"] {
+            assert!(valid_ref(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "e",
+            "e0",
+            "e01",
+            "e12345678",
+            "E1",
+            "f1",
+            "e1a",
+            "e 1",
+            "1",
+        ] {
+            assert!(!valid_ref(bad), "{bad}");
+        }
+        assert!(valid_sig("a1b2"));
+        assert!(!valid_sig("A"));
+        assert!(!valid_sig(""));
+    }
+
+    #[test]
+    fn data_query_scripts_carry_exactly_one_json_argument() {
+        let wrap = |call: &str| {
+            format!("(function(){{try{{var t=window.__ashlrTap;return t?t.{call}:JSON.stringify({{error:'tap-missing'}})}}catch(e){{return JSON.stringify({{error:String(e&&e.message||e)}})}}}})()")
+        };
+        let q = |json: &str| query_script(&what(json).unwrap()).unwrap();
+        assert_eq!(
+            q(r#"{"snapshot":{"max_nodes":300,"root_ref":"e12"}}"#),
+            wrap(r#"snapshot({"maxNodes":300,"rootRef":"e12"})"#)
+        );
+        assert_eq!(q(r#"{"snapshot":{}}"#), wrap("snapshot({})"));
+        assert_eq!(
+            q(r#"{"network":{"limit":50}}"#),
+            wrap(r#"network({"limit":50})"#)
+        );
+        assert_eq!(q(r#"{"network":{}}"#), wrap("network({})"));
+        assert_eq!(
+            q(r#"{"resolve":{"ref":"e7"}}"#),
+            wrap(r#"resolve({"ref":"e7"})"#)
+        );
+        assert_eq!(
+            q(r#"{"resolve":{"x":10,"y":20.5}}"#),
+            wrap(r#"resolve({"x":10.0,"y":20.5})"#)
+        );
+        assert_eq!(
+            q(r#"{"resolve":{"focused":true}}"#),
+            wrap(r#"resolve({"focused":true})"#)
+        );
+        assert_eq!(q(r#""resume""#), wrap("resume()"));
+        // act and evaluate are not plain tap calls.
+        assert_eq!(
+            query_script(&what(r#"{"act":{"kind":"key","key":"a"}}"#).unwrap()),
+            None
+        );
+        assert_eq!(
+            query_script(&what(r#"{"evaluate":{"expression":"1"}}"#).unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn hostile_strings_stay_inside_one_json_literal() {
+        let hostile = "\"})alert(1)//\u{2028}</script>\u{2029}'";
+        let spec = ActSpec::Select {
+            reference: "e3".into(),
+            values: vec![hostile.to_string(), "ok".into()],
+            expect: None,
+        };
+        let script = tap_call("prepare", &prepare_args(&spec));
+        assert!(!script.contains('\u{2028}') && !script.contains('\u{2029}'));
+        assert!(script.contains("\\u2028") && script.contains("\\u2029"));
+        let arg = tap_arg(&script, "prepare");
+        assert_eq!(arg["values"][0], hostile);
+        assert_eq!(arg["values"][1], "ok");
+        assert_eq!(arg["kind"], "select");
+        // Exactly one tap call, and the wrapper's tail is intact.
+        assert_eq!(script.matches("t.prepare(").count(), 1);
+        assert!(script
+            .ends_with("catch(e){return JSON.stringify({error:String(e&&e.message||e)})}})()"));
+        // The same holds for any JSON argument the query forms build.
+        let s = js_json(&serde_json::json!({ "rootRef": hostile }));
+        assert_eq!(
+            serde_json::from_str::<Value>(&s).unwrap()["rootRef"],
+            hostile
+        );
+        assert!(!s.contains('\u{2028}'));
+    }
+
+    #[test]
+    fn prepare_never_carries_the_typed_text() {
+        let secret = "correct horse battery staple\nline two";
+        let spec = ActSpec::Type {
+            reference: "e2".into(),
+            text: secret.into(),
+            submit: true,
+            clear: true,
+            expect: Some("sig1".into()),
+        };
+        let args = prepare_args(&spec);
+        let rendered = tap_call("prepare", &args);
+        for part in ["correct", "horse", "staple", "line two"] {
+            assert!(
+                !rendered.contains(part),
+                "prepare leaked `{part}`: {rendered}"
+            );
+        }
+        assert_eq!(
+            args,
+            serde_json::json!({
+                "kind": "type", "ref": "e2", "expect": "sig1", "clear": true, "submit": true,
+                "textLength": secret.chars().count(), "hasNewline": true,
+                "ms": 1500 + 40 * secret.chars().count() as u64,
+            })
+        );
+        assert!(!after_args(&spec).to_string().contains("horse"));
+        assert_eq!(
+            after_args(&spec),
+            serde_json::json!({"kind":"type","ref":"e2"})
+        );
+    }
+
+    #[test]
+    fn prepare_args_carry_each_kind_faithfully() {
+        use serde_json::json;
+        let act = |j: &str| match what(&format!(r#"{{"act":{j}}}"#)).unwrap() {
+            QueryWhat::Act(spec) => spec,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            prepare_args(&act(
+                r#"{"kind":"click","x":5,"y":6,"button":"right","double":true,"modifiers":["Alt"],"expect":"k"}"#
+            )),
+            json!({"kind":"click","x":5.0,"y":6.0,"button":"right","double":true,"modifiers":["Alt"],"expect":"k","ms":1500})
+        );
+        assert_eq!(
+            prepare_args(&act(r#"{"kind":"key","key":"Shift+Tab"}"#)),
+            json!({"kind":"key","key":"Shift+Tab","ms":1500})
+        );
+        assert_eq!(
+            prepare_args(&act(
+                r#"{"kind":"scroll","ref":"e4","direction":"up","amount":300}"#
+            )),
+            json!({"kind":"scroll","ref":"e4","direction":"up","amount":300.0,"ms":1500})
+        );
+        assert_eq!(
+            prepare_args(&act(r#"{"kind":"hover","ref":"e8","expect":"q"}"#)),
+            json!({"kind":"hover","ref":"e8","expect":"q","ms":1500})
+        );
+        // The tap's "acting" window and the act's budget grow with the text.
+        let long = act(&format!(
+            r#"{{"kind":"type","ref":"e1","text":"{}"}}"#,
+            "x".repeat(2000)
+        ));
+        assert_eq!(act_tap_ms(&long), 60_000);
+        assert_eq!(
+            act_budget(&long),
+            Duration::from_secs(5) + Duration::from_millis(40_000)
+        );
+        assert_eq!(
+            act_budget(&act(r#"{"kind":"key","key":"a"}"#)),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn act_replies_merge_tap_answers_under_native_keys() {
+        use serde_json::json;
+        let spec = ActSpec::Click {
+            reference: Some("e1".into()),
+            x: None,
+            y: None,
+            button: None,
+            double: false,
+            modifiers: None,
+            expect: None,
+        };
+        let reply = act_reply(
+            &spec,
+            json!({"x":12,"y":34,"vw":800,"vh":600,"url":"https://a.b/","native":"lie","kind":"lie"}),
+            json!({"url":"https://a.b/next","focused":"e1"}),
+            true,
+        );
+        assert_eq!(
+            reply,
+            json!({"x":12,"y":34,"vw":800,"vh":600,"url":"https://a.b/next","focused":"e1","kind":"click","native":true})
+        );
+        let done = act_reply(
+            &ActSpec::Scroll {
+                reference: None,
+                direction: Some(ScrollDirection::Down),
+                amount: None,
+            },
+            json!({"done":true,"sy":400}),
+            json!({"url":"u"}),
+            false,
+        );
+        assert_eq!(
+            done,
+            json!({"done":true,"sy":400,"url":"u","kind":"scroll","x":null,"y":null,"native":false})
+        );
+    }
+
+    #[test]
+    fn evaluate_wraps_the_expression_as_one_string_literal() {
+        let hostile = "1})();alert(1);(function(){//\u{2028}\"'`${x}";
+        let script = evaluate_script(hostile, "http://127.0.0.1:3000");
+        assert!(!script.contains('\u{2028}'));
+        let open = "(0,eval)(";
+        let start = script.find(open).unwrap() + open.len();
+        let end = script[start..].find(");if(r!==null").unwrap() + start;
+        let literal: Value = serde_json::from_str(&script[start..end]).unwrap();
+        assert_eq!(literal, Value::String(hostile.to_string()));
+        // The origin is re-checked in the page before anything runs.
+        assert!(script.starts_with(
+            r#"(function(){var S=JSON.stringify;try{if(location.origin!=="http://127.0.0.1:3000")return S({error:'not-loopback'});var r=(0,eval)("#
+        ));
+        assert!(script.contains("type:'promise'"));
+        assert!(script.contains(&format!("v.slice(0,{EVALUATE_VALUE_MAX_CHARS})")));
+        assert!(script.ends_with("return S({error:m})}})()"));
+    }
+
+    #[test]
+    fn evaluate_is_only_for_loopback_pages() {
+        let o = |u: &str| loopback_origin(&Url::parse(u).unwrap(), ORIGIN);
+        assert_eq!(
+            o("http://127.0.0.1:3000/app"),
+            Ok("http://127.0.0.1:3000".into())
+        );
+        assert_eq!(
+            o("http://localhost:5173/"),
+            Ok("http://localhost:5173".into())
+        );
+        assert_eq!(o("http://[::1]:8080/"), Ok("http://[::1]:8080".into()));
+        for bad in [
+            "https://example.com/",
+            "http://10.0.0.5:3000/",
+            "http://127.0.0.1:7777/verse/",
+            "http://localhost:7777/",
+            "file:///etc/passwd",
+            "about:blank",
+            "http://user:pw@127.0.0.1:3000/",
+        ] {
+            assert_eq!(o(bad), Err("not-loopback"), "{bad}");
+        }
+    }
+
+    // ── screenshot sizing ────────────────────────────────────────────────────
+
+    fn px(plan: &SnapshotPlan, backing: f64) -> (f64, f64) {
+        let w = plan.width_pts * backing;
+        (w, w * plan.rect.height / plan.rect.width)
+    }
+
+    #[test]
+    fn snapshots_fit_1280_by_800_pixels() {
+        let eps = 1e-9;
+        // Retina 2×, a 1000×700 pt view at 100 % zoom: height-bound.
+        let p = snapshot_plan(1000.0, 700.0, 1000.0, None, 2.0).unwrap();
+        let (w, h) = px(&p, 2.0);
+        assert!((h - 800.0).abs() < eps && w <= 1280.0 + eps, "{w}x{h}");
+        assert!(!p.clipped);
+        assert_eq!(
+            p.css,
+            Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 1000.0,
+                height: 700.0
+            }
+        );
+        // A wide, short view at 1×: width-bound.
+        let p = snapshot_plan(2000.0, 400.0, 2000.0, None, 1.0).unwrap();
+        assert!((p.width_pts - 1280.0).abs() < eps);
+        let (_, h) = px(&p, 1.0);
+        assert!(h <= 800.0 + eps);
+        // A tall, narrow view: height-bound.
+        let p = snapshot_plan(400.0, 3000.0, 400.0, None, 2.0).unwrap();
+        let (w, h) = px(&p, 2.0);
+        assert!((h - 800.0).abs() < eps && w < 1280.0, "{w}x{h}");
+        // A small view is never upscaled.
+        let p = snapshot_plan(300.0, 200.0, 300.0, None, 2.0).unwrap();
+        assert_eq!(p.width_pts, 300.0);
+        // The cap holds over a sweep of shapes, scales and zooms.
+        for (vw, vh, css, b) in [
+            (1440.0, 900.0, 1440.0, 2.0),
+            (1440.0, 900.0, 720.0, 3.0),
+            (5000.0, 10.0, 5000.0, 1.0),
+            (10.0, 5000.0, 10.0, 1.5),
+            (1280.0, 800.0, 1280.0, 1.0),
+        ] {
+            let p = snapshot_plan(vw, vh, css, None, b).unwrap();
+            let (w, h) = px(&p, b);
+            assert!(
+                w <= 1280.0 + 1e-6 && h <= 800.0 + 1e-6,
+                "{vw}x{vh}@{b}: {w}x{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_clips_map_css_px_to_view_points() {
+        // Page zoomed 200 %: innerWidth 500 CSS px in a 1000 pt view.
+        let clip = Bounds {
+            x: 100.0,
+            y: 50.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let p = snapshot_plan(1000.0, 800.0, 500.0, Some(clip), 2.0).unwrap();
+        assert!(p.clipped);
+        assert_eq!(
+            p.rect,
+            Bounds {
+                x: 200.0,
+                y: 100.0,
+                width: 400.0,
+                height: 200.0
+            }
+        );
+        assert_eq!(p.css, clip);
+        // 400 pt at 2× would be 800 px wide: under both caps, so unscaled.
+        assert_eq!(p.width_pts, 400.0);
+        // A clip overrunning the view is intersected with it.
+        let over = Bounds {
+            x: 400.0,
+            y: 300.0,
+            width: 900.0,
+            height: 900.0,
+        };
+        let p = snapshot_plan(1000.0, 800.0, 1000.0, Some(over), 1.0).unwrap();
+        assert_eq!(
+            p.rect,
+            Bounds {
+                x: 400.0,
+                y: 300.0,
+                width: 600.0,
+                height: 500.0
+            }
+        );
+        assert_eq!(p.css.width, 600.0);
+        // Entirely outside, or degenerate inputs → no plan.
+        let outside = Bounds {
+            x: 2000.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        assert_eq!(
+            snapshot_plan(1000.0, 800.0, 1000.0, Some(outside), 1.0),
+            None
+        );
+        for (w, h, vw) in [
+            (0.0, 800.0, 1000.0),
+            (1000.0, -1.0, 1000.0),
+            (1000.0, 800.0, 0.0),
+            (f64::NAN, 800.0, 1000.0),
+            (1000.0, f64::INFINITY, 1000.0),
+            (1000.0, 800.0, 1e-320),
+        ] {
+            assert_eq!(snapshot_plan(w, h, vw, None, 2.0), None, "{w}x{h} vw={vw}");
+        }
+        // An unknown backing scale counts as 1×.
+        let p = snapshot_plan(2000.0, 400.0, 2000.0, None, f64::NAN).unwrap();
+        assert_eq!(p.width_pts, 1280.0);
+    }
+
+    #[test]
+    fn screenshot_replies_report_actual_pixels_and_the_mapping() {
+        let clip = Bounds {
+            x: 100.0,
+            y: 50.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let plan = snapshot_plan(1000.0, 800.0, 500.0, Some(clip), 2.0).unwrap();
+        let reply = screenshot_reply("image/png", "QUJD".into(), 800, 400, &plan);
+        assert_eq!(
+            reply,
+            serde_json::json!({
+                "mime": "image/png", "base64": "QUJD", "width": 800, "height": 400,
+                "scale": 0.25, "origin": {"x": 100.0, "y": 50.0},
+                "css": {"width": 200.0, "height": 100.0},
+            })
+        );
+        assert_eq!(
+            screenshot_reply("image/png", String::new(), 0, 0, &plan)["scale"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn the_operator_event_has_its_shape() {
+        assert_eq!(
+            serde_json::to_value(BrowserEvent::operator("t1")).unwrap(),
+            serde_json::json!({"kind":"operator","tab":"t1"})
+        );
+        let script = event_script(&BrowserEvent::operator("t1"));
+        assert!(script.contains(r#"__ASHLR_BROWSER_EVENT__({"kind":"operator","tab":"t1"})"#));
+    }
+
     // ── the tap ──────────────────────────────────────────────────────────────
 
     #[test]
-    fn the_tap_is_read_only_and_locked_down() {
-        // Never reads what was typed, never acts on the page.
+    fn the_tap_prepares_input_but_never_submits_evaluates_or_leaks_secrets() {
+        // Native synthesises the agent's clicks and keys; the tap never calls
+        // an element's click / submit, never evaluates a string.
         for forbidden in [
-            ".value",
             ".submit(",
             ".click(",
-            "dispatchEvent(",
             "requestSubmit",
             "eval(",
             "new Function",
+            "document.cookie",
+            "localStorage",
+            "sessionStorage",
         ] {
             assert!(
                 !TAP_JS.contains(forbidden),
                 "browser_tap.js must not contain `{forbidden}`"
             );
+        }
+        // A field's content is read in exactly one place, after the
+        // sensitive-field check has had its say.
+        assert_eq!(
+            TAP_JS.matches(".value").count(),
+            1,
+            "browser_tap.js may read a field's content only in fieldValue"
+        );
+        let field_value = TAP_JS
+            .find("function fieldValue(el)")
+            .expect("fieldValue");
+        let redacted = TAP_JS[field_value..]
+            .find("if (sensitive(el)) return '[redacted]'")
+            .expect("fieldValue checks sensitive first");
+        let read = TAP_JS[field_value..].find("var v = el.value").expect("the one read");
+        assert!(redacted < read, "the sensitive check must come before the read");
+        // Exactly three event dispatches: a <select>'s input + change (a
+        // native popup would block the app) and a right click's contextmenu
+        // (so would a native context menu).
+        assert_eq!(TAP_JS.matches("dispatchEvent(").count(), 3);
+        assert!(TAP_JS.contains("el.dispatchEvent(new window.Event('input', { bubbles: true }))"));
+        assert!(TAP_JS.contains("el.dispatchEvent(new window.Event('change', { bubbles: true }))"));
+        assert!(TAP_JS.contains("el.dispatchEvent(new window.MouseEvent('contextmenu'"));
+        // Typing into a secret field is refused here too, and a changed
+        // element (its signature) is refused rather than acted on.
+        for needle in [
+            "if (sensitive(el)) return fail('sensitive-field')",
+            "return fail('changed')",
+            "return fail('file-input')",
+            "return fail('use-select')",
+            "return { error: 'obscured' }",
+            "if (el.tagName === 'INPUT' && inputType(el) === 'password') return true",
+            "attr(el, 'aria-hidden') === 'true'",
+            "data-ashlr-ring",
+        ] {
+            assert!(TAP_JS.contains(needle), "browser_tap.js lost `{needle}`");
         }
         for needle in [
             "Object.defineProperty(window, '__ashlrTap'",
@@ -1798,6 +3473,13 @@ mod tests {
             "dump:",
             "text:",
             "info:",
+            "network:",
+            "snapshot:",
+            "resolve:",
+            "prepare:",
+            "clear:",
+            "after:",
+            "resume:",
             "pickStart:",
             "pickPoll:",
             "pickCancel:",
@@ -1807,6 +3489,7 @@ mod tests {
         // Buffer sizes the protocol promises.
         assert!(TAP_JS.contains("CONSOLE_MAX = 200"));
         assert!(TAP_JS.contains("NETWORK_MAX = 100"));
+        assert!(TAP_JS.contains("REQUEST_MAX = 300"));
         assert!(TAP_JS.contains("ENTRY_TEXT_MAX = 2000"));
         assert!(TAP_JS.contains("URL_MAX = 500"));
     }

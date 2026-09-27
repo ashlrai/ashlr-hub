@@ -115,11 +115,14 @@
       return true
     },
     // Integrated browser pane. Absent on older shells: that absence is the
-    // feature test (the web UI then falls back to an <iframe>).
+    // feature test (the web UI then falls back to an <iframe>). `act` (the
+    // pane can click and type — macOS) is feature-detected; the protocol
+    // version does not change.
     browser: Object.freeze({
       version: 1,
       capabilities: Object.freeze({
         screenshot: cfg.browserScreenshot === true,
+        act: cfg.browserAct === true,
         picker: true,
         console: true,
         text: true

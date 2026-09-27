@@ -60,6 +60,7 @@ use tauri_plugin_updater::UpdaterExt;
 
 mod activity_watch;
 mod app_menu;
+mod browser_input;
 mod browser_pane;
 mod desktop_prefs;
 mod health_watch;
@@ -1593,6 +1594,10 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             browser_pane::handle_event(&handle, event.payload());
         });
     }
+    // Genuine operator input in a browser tab pauses the agent. One AppKit
+    // event monitor, installed here on the main thread; the agent's own
+    // synthesized input never passes through it (see browser_input.rs).
+    browser_input::install(&handle);
     if prefs.global_hotkey {
         let status = hotkey::apply(&handle, true);
         if let Some(state) = handle.try_state::<AppState>() {
