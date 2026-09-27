@@ -113,6 +113,9 @@ pub struct VoiceHub {
     /// decode that holds `engine`.
     engine_info: Mutex<Option<(&'static str, &'static str)>>,
     engine_used: Mutex<Instant>,
+    /// Held while an engine loads, so a download's warm-up and a first
+    /// dictation never load the model twice.
+    loading: Mutex<()>,
     lexicon: Arc<lexicon::Lexicon>,
     download_cancel: Arc<AtomicBool>,
     tracker: Mutex<Tracker>,
@@ -147,6 +150,7 @@ impl VoiceHub {
             engine: Arc::new(Mutex::new(None)),
             engine_info: Mutex::new(None),
             engine_used: Mutex::new(Instant::now()),
+            loading: Mutex::new(()),
             lexicon: Arc::new(lexicon),
             download_cancel: Arc::new(AtomicBool::new(false)),
             tracker: Mutex::new(Tracker::default()),
@@ -426,15 +430,23 @@ fn run_job(app: &AppHandle, job: Job) {
                 });
             }
         }
-        Job::Request(VoiceRequest::Stop { session }) => finish(&hub, &session, Control::Finish),
-        Job::Request(VoiceRequest::Cancel { session }) => finish(&hub, &session, Control::Abort),
+        Job::Request(VoiceRequest::Stop { session }) => {
+            if finish(&hub, &session, Control::Finish) {
+                emit_state(app);
+            }
+        }
+        Job::Request(VoiceRequest::Cancel { session }) => {
+            finish(&hub, &session, Control::Abort);
+        }
         Job::Request(VoiceRequest::Fix { action }) => fix(app, &hub, action),
         Job::Hotkey(action) => match action {
             Action::Start { command } => {
                 // ⌃⌥V while the mic button is dictating ends that dictation.
                 if let Some(id) = active_id(&hub) {
                     lock(&hub.tracker).reset();
-                    finish(&hub, &id, Control::Finish);
+                    if finish(&hub, &id, Control::Finish) {
+                        emit_state(app);
+                    }
                     return;
                 }
                 bring_forward(app);
@@ -443,8 +455,9 @@ fn run_job(app: &AppHandle, job: Job) {
                 start(app, &hub, id, Origin::Hotkey, mode, None);
             }
             Action::Stop => {
-                if let Some(id) = active_id(&hub) {
-                    finish(&hub, &id, Control::Finish);
+                // "Transcribing…" shows the moment the key comes up.
+                if active_id(&hub).is_some_and(|id| finish(&hub, &id, Control::Finish)) {
+                    emit_state(app);
                 }
             }
             Action::Cancel => {
@@ -478,14 +491,17 @@ fn active_id(hub: &VoiceHub) -> Option<String> {
     lock(&hub.inner).session.as_ref().map(|a| a.id.clone())
 }
 
-fn finish(hub: &VoiceHub, id: &str, control: Control) {
+/// Ask the session thread to finalise (or abort). True when it was asked.
+fn finish(hub: &VoiceHub, id: &str, control: Control) -> bool {
     let mut inner = lock(&hub.inner);
     if let Some(active) = inner.session.as_mut().filter(|a| a.id == id) {
         if active.phase == Phase::Listening || matches!(control, Control::Abort) {
             active.phase = Phase::Finalizing;
             let _ = active.control.send(control);
+            return true;
         }
     }
+    false
 }
 
 /// Reset the hotkey gesture after a start that did not happen, so the
@@ -666,6 +682,10 @@ fn ensure_engine(
     if lock(&hub.engine_info).is_some() {
         return Ok(());
     }
+    let _loading = lock(&hub.loading);
+    if lock(&hub.engine_info).is_some() {
+        return Ok(()); // loaded by whoever held the lock
+    }
     let dir = hub.parakeet_dir();
     if model::is_installed(&dir, &model::PARAKEET_FILES) {
         lock(&hub.inner).model = ModelPhase::Loading;
@@ -776,7 +796,12 @@ fn run_session(
     let (_, cwd) = session_context(&hub, id);
     let engine_ok = ensure_engine(app, &hub, cwd.as_deref());
     if let Err((code, message)) = &engine_ok {
+        // Nothing can transcribe: stop the mic now rather than listen to
+        // audio that will be thrown away.
         emit_error(app, Some(id), *code, message.clone());
+        meter_stop.store(true, Ordering::SeqCst);
+        capture.stop();
+        return;
     }
     let interval = lock(&hub.engine)
         .as_ref()

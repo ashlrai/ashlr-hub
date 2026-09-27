@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { useRef, useState } from 'react';
 import { VoiceInput } from './VoiceInput.js';
 import { VoiceHud } from './VoiceHud.js';
-import { resetVoiceStoreForTests } from './voice-store.js';
+import { resetVoiceStoreForTests, type VoiceSurface } from './voice-store.js';
 import { takePaletteQuery } from './palette-handoff.js';
 import type { NativeVoiceState } from './voice-bridge.js';
 
@@ -38,7 +38,14 @@ function state(overrides: Partial<NativeVoiceState> = {}): NativeVoiceState {
 }
 
 /** A textarea with a mic, the way the composers wire it. */
-function Box({ surface = 'composer' as const, mode = 'prose' as const, cwd = '/Users/m/repo', label = 'Message' }) {
+interface BoxProps {
+  surface?: VoiceSurface;
+  mode?: 'prose' | 'verbatim';
+  cwd?: string;
+  label?: string;
+}
+
+function Box({ surface = 'composer', mode = 'prose', cwd = '/Users/m/repo', label = 'Message' }: BoxProps) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState('');
   return (

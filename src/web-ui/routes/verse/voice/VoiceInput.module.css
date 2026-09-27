@@ -83,7 +83,7 @@
   color: var(--status-running-fg);
 }
 .hudDot[data-tone='danger'] { background: var(--status-danger-bg); color: var(--status-danger-fg); }
-.hudLabel { flex: none; font-weight: var(--font-weight-medium); white-space: nowrap; }
+.hudLabel { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: var(--font-weight-medium); white-space: nowrap; }
 .hudWhere { color: var(--text-tertiary); font-weight: var(--font-weight-regular); }
 .hudHint { flex: 1 1 auto; min-width: 0; color: var(--text-tertiary); font-size: var(--text-xs-size); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hudMessage { flex: 1 1 auto; min-width: 0; }
@@ -171,5 +171,7 @@
 
 @media (max-width: 520px) {
   .hud { min-width: 0; width: calc(100vw - 2 * var(--space-4)); }
-  .hudHint { display: none; }
+  .hudHint, .hudWhere { display: none; }
+  .wave { display: none; }
+  .hudModelText { white-space: normal; }
 }

@@ -145,6 +145,21 @@ export function VoiceHud() {
     );
   }
 
+  // The first dictation on a new Mac starts the one-time model download:
+  // that is progress, not a failure — no red.
+  if (error?.code === 'model-missing' && model) {
+    return (
+      <div className={styles.hud} data-state="model" role="status">
+        <div className={styles.hudRow}>
+          <span className={styles.hudDot} aria-hidden="true"><MicIcon /></span>
+          <span className={styles.hudMessage}>{error.message}</span>
+          <button type="button" className={styles.hudIcon} aria-label="Dismiss" onClick={dismissVoiceError}>×</button>
+        </div>
+        <ModelRow text={model.text} progress={model.progress} cancellable={model.cancellable} />
+      </div>
+    );
+  }
+
   if (error) {
     const fix = fixFor(error);
     return (
