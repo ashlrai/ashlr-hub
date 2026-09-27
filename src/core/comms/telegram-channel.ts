@@ -47,6 +47,7 @@ import {
   type TelegramSendOpts,
   type TelegramSendResult,
 } from '../integrations/telegram.js';
+import { escapeTelegramHtml } from '../integrations/telegram-format.js';
 import { scrubSecrets } from '../util/scrub.js';
 import type { CommsRequest } from './requests.js';
 import {
@@ -359,9 +360,13 @@ export async function drainLeaderThread(cfg: AshlrConfig, pacer: SendPacer, line
 // Inbound: conversation with the Leader
 // ---------------------------------------------------------------------------
 
-async function replyTo(event: InboundEvent, text: string, cfg: AshlrConfig): Promise<TelegramSendResult> {
-  const opts = typeof event.messageId === 'number' ? { replyToMessageId: event.messageId } : undefined;
-  return sendTelegramMessage(text, opts, cfg);
+/** `html: true` = `text` is already Telegram HTML (every dynamic part escaped by the caller). */
+async function replyTo(event: InboundEvent, text: string, cfg: AshlrConfig, format?: { html: true }): Promise<TelegramSendResult> {
+  const opts: TelegramSendOpts = {
+    ...(typeof event.messageId === 'number' ? { replyToMessageId: event.messageId } : {}),
+    ...(format?.html ? { html: true } : {}),
+  };
+  return sendTelegramMessage(text, Object.keys(opts).length > 0 ? opts : undefined, cfg);
 }
 
 function directiveText(directive: unknown): string | null {
@@ -601,13 +606,14 @@ export const TELEGRAM_HELP_TEXT = [
   '/status — the instant brief (shipped, running, blockers, next)',
   '/brief — same',
   '/leader — the latest Leader memo (or /leader <text> to message the Leader)',
-  '/directives — the Leader\'s standing directives and standards',
+  '/directives — your standing directives to the Leader',
+  '/settings — the Leader\'s settings (lanes, router tuning) and standards',
   '/task <owner/repo> <what to do> — hand work to a Telegram automation',
   '/help — this list',
   'pause / resume — hold or restart messages from the fleet',
   'snapshot — full fleet snapshot',
   '',
-  'Buttons: Approve (an escalated action), Veto (undo a memo\'s actions), Details (the full memo).',
+  'Buttons: Approve (apply a scheduled class-B action now, or record your approval of a class-C ask), Veto (undo a memo\'s actions), Details (the full memo).',
 ].join('\n');
 
 function ago(iso: string | null | undefined, nowMs: number): string {
@@ -689,11 +695,35 @@ async function sendLatestMemo(event: InboundEvent, cfg: AshlrConfig): Promise<vo
   }
 }
 
-async function directivesText(): Promise<string> {
+export const DIRECTIVES_EMPTY_HTML =
+  'No standing directives — send <code>focus: …</code>, <code>stop: …</code>, <code>priority: …</code> or <code>directive: …</code>';
+
+/**
+ * /directives — Mason's ACTIVE standing directives (leader-operator.ts,
+ * operator-directives.json), newest first, as Telegram HTML: id, kind, text.
+ * Every stored value is escaped here (the reply goes out with html: true).
+ */
+export async function directivesHtml(): Promise<string> {
+  try {
+    const { listOperatorDirectives } = await import('../vision/leader-operator.js');
+    const active = listOperatorDirectives();
+    if (active.length === 0) return DIRECTIVES_EMPTY_HTML;
+    const lines = [`<b>Standing directives (${active.length})</b>`];
+    for (const d of active) {
+      lines.push(`• <code>${escapeTelegramHtml(d.id)}</code> [${escapeTelegramHtml(d.kind)}] ${escapeTelegramHtml(scrubSecrets(d.text))}`);
+    }
+    return lines.join('\n');
+  } catch {
+    return escapeTelegramHtml('Could not read your standing directives.');
+  }
+}
+
+/** /settings — the Leader's own settings (lanes, router tuning) and standards. */
+async function settingsText(): Promise<string> {
   try {
     const { readLeaderDirectives, readStandards } = await import('../vision/leader-apply.js');
     const d = readLeaderDirectives();
-    const lines: string[] = ['Directives'];
+    const lines: string[] = ['Leader settings'];
     if (!d) {
       lines.push('  none set (lane and router defaults apply)');
     } else {
@@ -709,7 +739,7 @@ async function directivesText(): Promise<string> {
     if (standards.length > 12) lines.push(`  …and ${standards.length - 12} more`);
     return scrubSecrets(lines.join('\n'));
   } catch {
-    return 'Could not read the Leader directives.';
+    return 'Could not read the Leader settings.';
   }
 }
 
@@ -737,7 +767,10 @@ export async function handleSlashCommand(event: InboundEvent, text: string, cfg:
       else await sendLatestMemo(event, cfg);
       return true;
     case 'directives':
-      await replyTo(event, await directivesText(), cfg);
+      await replyTo(event, await directivesHtml(), cfg, { html: true });
+      return true;
+    case 'settings':
+      await replyTo(event, await settingsText(), cfg);
       return true;
     case 'task': {
       // 3.15 automations: routed by an enabled Telegram automation covering

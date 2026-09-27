@@ -9,6 +9,11 @@
  * opens an inline box: Enter adds, Escape cancels. Both go through the
  * surface's actions (token prompt, read-only explanation, the server's own
  * refusal sentence on the Mind action line).
+ *
+ * The box counts against the server's own limit (OPERATOR_DIRECTIVE_MAX,
+ * shared with leader-operator.ts): "142/300", amber near the limit, red and
+ * Add disabled over it. No `maxLength` on the input — a paste that runs long
+ * stays visible and editable instead of being silently cut.
  */
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { IconPlus, IconX } from '../../../components/primitives/icons.js';
@@ -16,10 +21,13 @@ import type { SurfaceActions } from '../command/actions.js';
 import type { OptionalRead } from '../command/surface-data.js';
 import { addLeaderDirective, retireLeaderDirective } from './thread-data.js';
 import { CHANNEL_LABEL } from './thread-model.js';
-import type { DirectiveChip } from './thread-types.js';
+import { OPERATOR_DIRECTIVE_MAX, type DirectiveChip } from './thread-types.js';
 import styles from './leader.module.css';
 
-export const DIRECTIVE_MAX = 500;
+/** The server's limit (leader-thread-types.ts) — one number for both sides. */
+export const DIRECTIVE_MAX = OPERATOR_DIRECTIVE_MAX;
+/** The counter turns to a warning at this share of the limit. */
+const DIRECTIVE_NEAR = 0.9;
 
 export interface DirectivesStripProps {
   read: OptionalRead<DirectiveChip[]> | undefined;
@@ -38,6 +46,9 @@ export function DirectivesStrip({ read, actions, adding, onAddingChange }: Direc
 
   const list = read?.value ?? null;
   const disabled = actions.busy || actions.readOnly;
+  const length = draft.trim().length;
+  const over = length > DIRECTIVE_MAX;
+  const near = !over && length >= Math.floor(DIRECTIVE_MAX * DIRECTIVE_NEAR);
 
   function add() {
     const text = draft.trim();
@@ -101,7 +112,8 @@ export function DirectivesStrip({ read, actions, adding, onAddingChange }: Direc
             aria-label="New directive"
             placeholder="e.g. No new goals until binshield ships"
             value={draft}
-            maxLength={DIRECTIVE_MAX}
+            aria-invalid={over || undefined}
+            aria-describedby="leader-directive-counter"
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={onKeyDown}
             onBlur={() => {
@@ -109,7 +121,16 @@ export function DirectivesStrip({ read, actions, adding, onAddingChange }: Direc
               if (!draft.trim()) onAddingChange(false);
             }}
           />
-          <button type="button" className={styles.textButton} disabled={disabled || !draft.trim()} onClick={add}>
+          <span
+            id="leader-directive-counter"
+            className={styles.counter}
+            data-near={near ? 'true' : undefined}
+            data-over={over ? 'true' : undefined}
+            aria-live="polite"
+          >
+            {length}/{DIRECTIVE_MAX}
+          </span>
+          <button type="button" className={styles.textButton} disabled={disabled || length === 0 || over} onClick={add}>
             Add
           </button>
         </span>

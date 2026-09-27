@@ -786,7 +786,9 @@ type Mind =
 /**
  * The Leader's seat for conversation: the memo run's own routing
  * (resolveLeaderSeat → routeSeat over the budget clamped to the grant),
- * `deep: false` so Claude is never a candidate, plus the daily call cap.
+ * `deep: false` and `purpose: 'reply'` so Claude is never a candidate — not
+ * even with `foundry.leader.claudeFallback` on (that opt-in is for memo runs
+ * only) — plus the daily call cap.
  */
 async function resolveMind(d: LeaderThreadDeps, rd: LeaderRunDeps, promptChars: number): Promise<Mind> {
   const calls = readIndex().modelCalls[localDay(d.now())] ?? 0;
@@ -796,7 +798,7 @@ async function resolveMind(d: LeaderThreadDeps, rd: LeaderRunDeps, promptChars: 
   let seat: LeaderSeatResolution;
   try {
     const { resolveLeaderSeat } = await import('./leader-seat.js');
-    seat = await resolveLeaderSeat(rd.seat, { deep: false, promptChars });
+    seat = await resolveLeaderSeat(rd.seat, { deep: false, promptChars, purpose: 'reply' });
   } catch (err) {
     return { ok: false, reason: `seat routing failed (${err instanceof Error ? err.message : 'error'})` };
   }

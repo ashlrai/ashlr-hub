@@ -71,6 +71,15 @@ export interface LeaderSeatChoice {
   deep: boolean;
 }
 
+/**
+ * What a seat is for. `memo` (the default) — a memo run or check-in, under the
+ * rules above, including the opt-in Claude fallback. `reply` — a conversation
+ * reply (leader-thread.ts): NEVER Claude, whatever `foundry.leader.claudeFallback`
+ * says. That opt-in covers memo runs only; conversation is not the weekly deep
+ * run and must not spend Mason's reserve (PR #522's stated default).
+ */
+export type LeaderSeatPurpose = 'memo' | 'reply';
+
 export type LeaderSeatResolution =
   | { ok: true; choice: LeaderSeatChoice; complete: LeaderComplete; decision: SeatDecision }
   | { ok: false; reason: string; decision: SeatDecision | null };
@@ -184,7 +193,7 @@ function skippedSeat(c: LeaderSeatCandidate, reason: string): LeaderSeatAttempt 
  */
 async function routeLeader(
   deps: LeaderSeatDeps,
-  opts: { deep: boolean; promptChars: number; mode: LeaderRunMode; localOnly?: boolean },
+  opts: { deep: boolean; promptChars: number; mode: LeaderRunMode; localOnly?: boolean; purpose?: LeaderSeatPurpose },
 ): Promise<{ ok: true; routing: LeaderRouting } | { ok: false; reason: string; decision: SeatDecision | null; ruledOut: LeaderSeatAttempt[] }> {
   const nowMs = deps.now();
   let candidates: LeaderSeatCandidate[];
@@ -196,7 +205,9 @@ async function routeLeader(
   const standing = deps.standingPolicy();
   // Claude: the weekly deep run (3.10), or — opt-in, 3.14 — the last fallback
   // of a full run. A check-in is cheap by definition: grok or local only.
-  const claudeRun = opts.mode === 'full' && !opts.localOnly && (opts.deep || claudeFallbackEnabled(deps.cfg));
+  // A conversation reply never uses Claude — not even with the opt-in fallback.
+  const reply = opts.purpose === 'reply';
+  const claudeRun = !reply && opts.mode === 'full' && !opts.localOnly && (opts.deep || claudeFallbackEnabled(deps.cfg));
   const engines = new Set<string>(opts.localOnly ? ['local'] : ['grok', 'local']);
   if (claudeRun && deps.claudeCredential) engines.add('claude');
 
@@ -207,6 +218,8 @@ async function routeLeader(
         ? 'Budget mode is reserve: this run uses free local models only.'
         : c.seat.engine !== 'claude'
         ? `The Leader never uses ${c.seat.engine}.`
+        : reply
+          ? 'Conversation replies never use Claude.'
         : opts.mode === 'checkin'
           ? 'A check-in never uses Claude.'
           : !claudeRun
@@ -228,7 +241,9 @@ async function routeLeader(
   if (eligible.length === 0) {
     return {
       ok: false,
-      reason: standing
+      reason: reply && candidates.some((c) => c.seat.engine === 'claude')
+        ? 'Conversation replies never use Claude, and no grok or local seat is available.'
+        : standing
         ? 'No seat is available to the Leader: no local model is running and the grant lists no paid seat for the leader role.'
         : 'No local model is running, and without a standing grant the Leader may not use a paid seat.',
       decision: null,
@@ -306,7 +321,7 @@ function buildSeat(deps: LeaderSeatDeps, chosen: LeaderSeatCandidate, opts: { mo
  */
 export async function resolveLeaderSeat(
   deps: LeaderSeatDeps,
-  opts: { deep: boolean; promptChars: number; mode?: LeaderRunMode },
+  opts: { deep: boolean; promptChars: number; mode?: LeaderRunMode; purpose?: LeaderSeatPurpose },
 ): Promise<LeaderSeatResolution> {
   const mode = opts.mode ?? 'full';
   const routed = await routeLeader(deps, { ...opts, mode });
@@ -314,6 +329,8 @@ export async function resolveLeaderSeat(
   const { eligible, decision } = routed.routing;
   const chosen = eligible.find((c) => c.seat.id === decision.seatId);
   if (!chosen) return { ok: false, reason: `Seat ${decision.seatId} has no runnable model.`, decision };
+  // Belt and braces: routeLeader already removed Claude for a reply.
+  if (opts.purpose === 'reply' && chosen.seat.engine === 'claude') return { ok: false, reason: 'Conversation replies never use Claude.', decision };
   const built = buildSeat(deps, chosen, { mode, promptChars: opts.promptChars });
   if (!built.ok) return { ok: false, reason: built.reason, decision };
   return { ok: true, choice: built.choice, complete: built.complete, decision };

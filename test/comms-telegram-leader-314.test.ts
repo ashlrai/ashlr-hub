@@ -540,7 +540,7 @@ describe('slash commands and keywords', () => {
     expect(s.map(replyTarget)).toEqual([1, 2, 3, 4, 5]);
     expect(texts()[0]).toContain('/status');
     expect(texts()[1]).toMatch(/Autonomy: off — next step: `ashlr authority setup`/);
-    expect(texts()[2]).toContain('Directives');
+    expect(texts()[2]).toMatch(/No standing directives/);
     expect(texts()[3]).toContain(MEMO_ID);
     expect(keyboardData(s[3]!).some((d) => d.startsWith('lt:d:'))).toBe(true);
     expect(texts()[4]).toContain('Unknown command /bogus');

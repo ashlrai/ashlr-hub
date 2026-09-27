@@ -2220,7 +2220,7 @@ async function main(): Promise<void> {
       }
 
       case 'director': {
-        // M257: Elon Director — strategic reasoning cycle (read+reason+communicate).
+        // M257 → 3.14: retired (the Leader handles this); prints a notice and the read-only god-view.
         const cmdDirector = await loadDirectorCmd();
         process.exitCode = await cmdDirector(rest);
         break;

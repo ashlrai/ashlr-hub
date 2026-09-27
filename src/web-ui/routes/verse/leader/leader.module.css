@@ -221,6 +221,13 @@
   outline: none;
 }
 
+/* The directive box's "142/300" (warning / over colours: .counter below). */
+.addDirective .counter {
+  flex: none;
+  color: var(--text-tertiary);
+  font-size: var(--text-2xs-size);
+}
+
 /* ---- the log ----------------------------------------------------------- */
 .log {
   display: flex;
@@ -837,6 +844,10 @@
 
 .counter {
   font-variant-numeric: tabular-nums;
+}
+
+.counter[data-near='true'] {
+  color: var(--status-warning-fg);
 }
 
 .counter[data-over='true'] {
