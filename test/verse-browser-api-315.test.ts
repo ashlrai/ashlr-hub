@@ -221,7 +221,7 @@ describe('browser routes through the real server', () => {
     expect((await request(handle.port, 'POST', '/api/verse/browser/dispatch', mutate, { sessionId: 's-1', id: command!.id })).json).toEqual({ allowed: false });
     const result = (await call).json as { result: { content: Array<{ text: string }> } };
     const opened = result.result.content[0]!.text;
-    expect(opened).toBe('Opened http://localhost:5173/settings — "Settings".');
+    expect(opened).toMatch(/^Opened http:\/\/localhost:5173\/settings\.\nTitle: [^\n]+\n<untrusted id=[a-f0-9]+>\nSettings\n<\/untrusted id=[a-f0-9]+>$/);
 
     // An external URL is refused before it is ever queued, and shows up in the policy.
     const external = await request(handle.port, 'POST', mcp, {}, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'browser_navigate', arguments: { url: 'https://example.com/' } } });

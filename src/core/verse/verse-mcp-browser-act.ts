@@ -580,7 +580,7 @@ const tabsTool: VerseMcpTool = {
       const seen = tabUrl ? observe(ctx, tabUrl) : null;
       const where = !tabUrl ? 'new tab' : seen?.ok ? shownUrl(seen.url) : '(a page this chat may not observe)';
       const title = seen?.ok ? str(tab['title'], 200) : '';
-      if (seen?.ok && title) noteRead(ctx, seen);
+      if (seen?.ok) noteRead(ctx, seen);
       lines.push(`${i}${tab['active'] === true ? ' (active)' : ''}: ${where}${title ? ` — title: ${title}` : ''}`);
     }
     const head = action === 'list' ? `${tabs.length} tab${tabs.length === 1 ? '' : 's'}:` : action === 'new' ? 'Opened a new tab. Tabs now:' : action === 'select' ? `Switched to tab ${index}. Tabs now:` : `Closed tab ${index}. Tabs now:`;
@@ -609,6 +609,7 @@ function historyTool(direction: 'back' | 'forward'): VerseMcpTool {
       const seen = outcome.url ? observe(ctx, outcome.url) : null;
       if (!seen) return ok(`Went ${direction}.`);
       if (!seen.ok) return ok(`Went ${direction}; the tab now shows a page this chat may not observe.`);
+      noteRead(ctx, seen);
       return ok(`Went ${direction} to ${shownUrl(seen.url)}.${data['loading'] === true ? ' (still loading)' : ''}`);
     },
   };
@@ -886,6 +887,7 @@ const waitForTool: VerseMcpTool = {
       if (!outcome.ok) return failure(outcome);
       const seen = observe(ctx, outcome.url);
       if (!seen.ok) return toolError(seen.message);
+      noteRead(ctx, seen);
       const data = isRecord(outcome.data) ? outcome.data : {};
       const body = str(data['text'], 50_000);
       // Only a yes / no leaves this loop: the page text itself never reaches the model here.
