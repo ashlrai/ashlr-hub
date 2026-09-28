@@ -14,6 +14,7 @@ import type { OutcomeRecord } from '../src/core/autonomy/outcome-records.js';
 import type { ResourceStrategyReadDeps } from '../src/core/autonomy/resource-strategy.js';
 import {
   buildResourceStrategyReport,
+  fleetStatusForDirection,
   resourceStrategyToDaemonPlan,
 } from '../src/core/autonomy/resource-strategy.js';
 import type { AshlrConfig } from '../src/core/types.js';
@@ -729,5 +730,60 @@ describe('resourceStrategyToDaemonPlan', () => {
       forceLocalOnly: true,
       runAutoMergeMaintenance: true,
     });
+  });
+});
+
+describe('3.15: a standing tick is not held at verify-only by pending proposals', () => {
+  // Live, 2026-09-27: one legacy 2026-08-18 binshield proposal (on Mason's own
+  // checkout, which the standing lane never touches) kept every standing tick
+  // at verify-only — 1,092 ticks, 0 proposals. Standing queue depth is the
+  // standing backpressure's job (fleet/backpressure.ts), not this rule's.
+  const pendingOne = (): FleetStatus => fleet({ proposals: proposals({ pending: 1, frontierPending: 1 }) });
+
+  it('non-standing ticks keep the legacy rule: verify-only, no dispatch', async () => {
+    const report = await buildResourceStrategyReport(cfg(), {
+      deps: deps({ buildFleetStatus: async () => fleetStatusForDirection(pendingOne(), false) }),
+    });
+    expect(report.mode).toBe('verify-only');
+    expect(resourceStrategyToDaemonPlan(report).allowDispatch).toBe(false);
+  });
+
+  it('standing ticks dispatch past a pending proposal', async () => {
+    const report = await buildResourceStrategyReport(cfg(), {
+      deps: deps({ buildFleetStatus: async () => fleetStatusForDirection(pendingOne(), true) }),
+    });
+    expect(report.mode).toBe('backlog-build');
+    expect(resourceStrategyToDaemonPlan(report).allowDispatch).toBe(true);
+  });
+
+  it('standing ticks still stop for everything else (failed verification, guard health)', async () => {
+    const failed = outcome({
+      proposal: { ...outcome().proposal, id: 'prop-failed', verifyResult: { passed: false } },
+      evidencePacks: [],
+    });
+    const verify = await buildResourceStrategyReport(cfg(), {
+      deps: deps({
+        buildFleetStatus: async () => fleetStatusForDirection(pendingOne(), true),
+        listOutcomeRecords: () => [failed],
+      }),
+    });
+    expect(verify.mode).toBe('verify-only');
+    const guarded = await buildResourceStrategyReport(cfg(), {
+      deps: deps({
+        buildFleetStatus: async () => fleetStatusForDirection(pendingOne(), true),
+        diagnoseGuardHealth: () => guard(true),
+      }),
+    });
+    expect(guarded.mode).toBe('pause');
+  });
+
+  it('is the identity when nothing is pending or the tick is not standing', () => {
+    const none = fleet();
+    expect(fleetStatusForDirection(none, true)).toBe(none);
+    const one = pendingOne();
+    expect(fleetStatusForDirection(one, false)).toBe(one);
+    expect(fleetStatusForDirection(one, true).proposals).toMatchObject({ pending: 0, frontierPending: 0 });
+    // The input is never mutated.
+    expect(one.proposals.pending).toBe(1);
   });
 });

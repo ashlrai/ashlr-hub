@@ -358,6 +358,7 @@
     "src/core/goals/conductor-quota.ts",
     "src/core/goals/focus.ts",
     "src/core/goals/open-goals.ts",
+    "src/core/goals/project-match.ts",
     "src/core/goals/store.ts",
     "src/core/inbox/apply.ts",
     "src/core/inbox/merge.ts",
