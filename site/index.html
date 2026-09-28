@@ -10,7 +10,7 @@
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://verse.ashlr.ai/">
 <meta property="og:title" content="Ashlr Verse">
-<meta property="og:description" content="Every coding agent in one console, a Leader you can talk to in Verse, Telegram or the terminal, and autonomy that starts in shadow under a grant you sign.">
+<meta property="og:description" content="Every coding agent in one console, a Leader you can talk to in Verse, Telegram or the terminal, and autonomy within a grant you sign.">
 <meta name="twitter:card" content="summary_large_image">
 <style>
   html { -webkit-text-size-adjust: 100%; }
@@ -42,7 +42,7 @@
     --surface-2: #F5F8FA;
     --ink:       #0F1822;
     --muted:     #58657A;
-    --faint:     #8593A6;
+    --faint:     #5F6C80;
     --line:      #D3DBE4;
     --line-soft: #E3E9EF;
     --accent:    hsl(245 72% 50%);
@@ -69,7 +69,7 @@
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg:#0C121A; --surface:#121A24; --surface-2:#17212C;
-      --ink:#E7EDF4; --muted:#93A1B4; --faint:#6B7B8F;
+      --ink:#E7EDF4; --muted:#93A1B4; --faint:#7B8EA4;
       --line:#22303F; --line-soft:#1B2734;
       --accent:hsl(245 72% 66%); --accent-dim:hsl(245 40% 20%);
       --live:#44CBD8; --live-dim:#0F3239; --warn:#E0A93B;
@@ -77,7 +77,7 @@
   }
   :root[data-theme="dark"] {
     --bg:#0C121A; --surface:#121A24; --surface-2:#17212C;
-    --ink:#E7EDF4; --muted:#93A1B4; --faint:#6B7B8F;
+    --ink:#E7EDF4; --muted:#93A1B4; --faint:#7B8EA4;
     --line:#22303F; --line-soft:#1B2734;
     --accent:hsl(245 72% 66%); --accent-dim:hsl(245 40% 20%);
     --live:#44CBD8; --live-dim:#0F3239; --warn:#E0A93B;
@@ -96,6 +96,9 @@
     text-transform: uppercase; color: var(--faint); margin: 0;
   }
   a:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+  .skip-link { position: fixed; z-index: 30; top: -100px; left: var(--gutter); padding: 10px 14px; background: var(--ink); color: var(--surface); border-radius: 3px; font-weight: 600; text-decoration: none; }
+  .skip-link:focus { top: max(12px, env(safe-area-inset-top)); }
+  main, section, #mobile-index { scroll-margin-top: 72px; }
 
   /* masthead */
   .masthead {
@@ -112,6 +115,16 @@
   .masthead nav a { color: var(--muted); text-decoration: none; }
   .masthead nav a:hover { color: var(--ink); }
   @media (max-width: 860px) { .masthead nav { display: none; } }
+
+  .mobile-jump, .mobile-index { display: none; }
+  @media (max-width: 860px) {
+    .mobile-jump { display: flex; align-items: center; min-height: 44px; padding: 0 10px; color: var(--ink); font-size: var(--step--1); font-weight: 600; text-decoration: none; }
+    .mobile-index { display: block; margin-top: 28px; padding: 16px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); }
+    .mobile-index .label { display: block; margin-bottom: 10px; color: var(--faint); font: 500 var(--step--1) var(--f-mono); letter-spacing: .06em; text-transform: uppercase; }
+    .mobile-index .links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+    .mobile-index a { display: flex; align-items: center; min-height: 44px; padding: 8px 10px; border-radius: 3px; color: var(--ink); background: var(--surface-2); font-size: var(--step--1); font-weight: 500; line-height: 1.3; text-decoration: none; }
+    .mobile-index a:hover { color: var(--accent); }
+  }
 
   /* hero */
   .hero { padding-block: clamp(44px, 7vw, 84px) clamp(28px, 4vw, 44px); }
@@ -284,10 +297,11 @@
 
 </head>
 <body>
+<a class="skip-link" href="#main-content">Skip to content</a>
 <header class="masthead">
   <div class="wrap">
     <div class="brand"><svg class="mark" viewBox="54 67 146 124" width="24" height="24" role="img" aria-label="Ashlr.AI"><path class="legs" d="M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z"/><path fill="#2563EB" d="M110 121H143L133 152H120Z"/></svg>Ashlr&nbsp;<span class="sub">Verse</span></div>
-    <nav>
+    <nav aria-label="Page sections">
       <a href="#leader">Leader</a>
       <a href="#autonomy">Autonomy</a>
       <a href="#workbench">Workbench</a>
@@ -297,11 +311,12 @@
       <a href="#platforms">Platforms</a>
       <a href="#start">Start</a>
     </nav>
+    <a class="mobile-jump" href="#mobile-index">Sections <span aria-hidden="true">&darr;</span></a>
   </div>
 </header>
 
 
-<main>
+<main id="main-content" tabindex="-1">
   <div class="wrap hero">
     <p class="eyebrow">Ashlr Verse 3.15 &middot; Operator console for coding agents</p>
     <h1>Every coding agent in one console. A Leader you can talk to.</h1>
@@ -309,14 +324,24 @@
       Your Claude Code, Codex and Grok accounts and your local models become seats in one workbench.
       Claude cloud sessions and Devin take tasks off your hands and come back with pull requests.
       A <strong>Leader</strong> plans the fleet's work and talks with you in Verse, on Telegram or in
-      the terminal. And the fleet merges <strong>only inside a scope you sign with Touch ID</strong>,
-      starting in shadow, where it records what it would merge before it merges anything.
+      the terminal. The fleet merges <strong>only inside a scope you sign with Touch ID</strong>.
+      The default rollout starts in shadow; a separate elite-direct grant can enable verified merges sooner.
     </p>
 
     <div class="cta-row">
       <a class="btn btn-primary" href="#start">Get started</a>
       <a class="btn btn-ghost" href="https://github.com/ashlrai/ashlr-hub">View on GitHub</a>
     </div>
+
+    <nav id="mobile-index" class="mobile-index" aria-label="Explore page sections">
+      <span class="label">Explore Verse</span>
+      <div class="links">
+        <a href="#leader">Leader</a><a href="#autonomy">Autonomy</a>
+        <a href="#workbench">Workbench</a><a href="#knowledge">Wiki &amp; lessons</a>
+        <a href="#lanes-cloud">Cloud &amp; Devin</a><a href="#measured">Measured</a>
+        <a href="#platforms">Platforms</a><a href="#start">Start</a>
+      </div>
+    </nav>
 
     <p class="status" role="note"><span><span class="dot" aria-hidden="true"></span><b>Our own fleet, today:</b></span><span>standing grant active</span><span>ladder stage <b>1 of 8</b>, shadow</span><span><b>0</b> repos merging yet</span></p>
 
@@ -343,7 +368,7 @@
         <div class="prov"><span class="phead"><svg class="plogo" viewBox="0 0 34 33" width="20" height="20" aria-hidden="true"><path d="M13.2371 21.0407L24.3186 12.8506C24.8619 12.4491 25.6384 12.6057 25.8973 13.2294C27.2597 16.5185 26.651 20.4712 23.9403 23.1851C21.2297 25.8989 17.4581 26.4941 14.0108 25.1386L10.2449 26.8843C15.6463 30.5806 22.2053 29.6665 26.304 25.5601C29.5551 22.3051 30.562 17.8683 29.6205 13.8673L29.629 13.8758C28.2637 7.99809 29.9647 5.64871 33.449 0.844576C33.5314 0.730667 33.6139 0.616757 33.6964 0.5L29.1113 5.09055V5.07631L13.2343 21.0436"/><path d="M10.9503 23.0313C7.07343 19.3235 7.74185 13.5853 11.0498 10.2763C13.4959 7.82722 17.5036 6.82767 21.0021 8.2971L24.7595 6.55998C24.0826 6.07017 23.215 5.54334 22.2195 5.17313C17.7198 3.31926 12.3326 4.24192 8.67479 7.90126C5.15635 11.4239 4.0499 16.8403 5.94992 21.4622C7.36924 24.9165 5.04257 27.3598 2.69884 29.826C1.86829 30.7002 1.0349 31.5745 0.36364 32.5L10.9474 23.0341"/></svg><span class="nm">Grok</span></span><span class="via">grok &middot; GROK_HOME</span><span class="mdl">Grok 4.7, 4.7 Fast, 4.6, 4.5</span></div>
         <div class="prov"><span class="phead"><svg class="plogo" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M16.361 10.26a.894.894 0 0 0-.558.47l-.072.148.001.207c0 .193.004.217.059.353.076.193.152.312.291.448.24.238.51.3.872.205a.86.86 0 0 0 .517-.436.752.752 0 0 0 .08-.498c-.064-.453-.33-.782-.724-.897a1.06 1.06 0 0 0-.466 0zm-9.203.005c-.305.096-.533.32-.65.639a1.187 1.187 0 0 0-.06.52c.057.309.31.59.598.667.362.095.632.033.872-.205.14-.136.215-.255.291-.448.055-.136.059-.16.059-.353l.001-.207-.072-.148a.894.894 0 0 0-.565-.472 1.02 1.02 0 0 0-.474.007Zm4.184 2c-.131.071-.223.25-.195.383.031.143.157.288.353.407.105.063.112.072.117.136.004.038-.01.146-.029.243-.02.094-.036.194-.036.222.002.074.07.195.143.253.064.052.076.054.255.059.164.005.198.001.264-.03.169-.082.212-.234.15-.525-.052-.243-.042-.28.087-.355.137-.08.281-.219.324-.314a.365.365 0 0 0-.175-.48.394.394 0 0 0-.181-.033c-.126 0-.207.03-.355.124l-.085.053-.053-.032c-.219-.13-.259-.145-.391-.143a.396.396 0 0 0-.193.032zm.39-2.195c-.373.036-.475.05-.654.086-.291.06-.68.195-.951.328-.94.46-1.589 1.226-1.787 2.114-.04.176-.045.234-.045.53 0 .294.005.357.043.524.264 1.16 1.332 2.017 2.714 2.173.3.033 1.596.033 1.896 0 1.11-.125 2.064-.727 2.493-1.571.114-.226.169-.372.22-.602.039-.167.044-.23.044-.523 0-.297-.005-.355-.045-.531-.288-1.29-1.539-2.304-3.072-2.497a6.873 6.873 0 0 0-.855-.031zm.645.937a3.283 3.283 0 0 1 1.44.514c.223.148.537.458.671.662.166.251.26.508.303.82.02.143.01.251-.043.482-.08.345-.332.705-.672.957a3.115 3.115 0 0 1-.689.348c-.382.122-.632.144-1.525.138-.582-.006-.686-.01-.853-.042-.57-.107-1.022-.334-1.35-.68-.264-.28-.385-.535-.45-.946-.03-.192.025-.509.137-.776.136-.326.488-.73.836-.963.403-.269.934-.46 1.422-.512.187-.02.586-.02.773-.002zm-5.503-11a1.653 1.653 0 0 0-.683.298C5.617.74 5.173 1.666 4.985 2.819c-.07.436-.119 1.04-.119 1.503 0 .544.064 1.24.155 1.721.02.107.031.202.023.208a8.12 8.12 0 0 1-.187.152 5.324 5.324 0 0 0-.949 1.02 5.49 5.49 0 0 0-.94 2.339 6.625 6.625 0 0 0-.023 1.357c.091.78.325 1.438.727 2.04l.13.195-.037.064c-.269.452-.498 1.105-.605 1.732-.084.496-.095.629-.095 1.294 0 .67.009.803.088 1.266.095.555.288 1.143.503 1.534.071.128.243.393.264.407.007.003-.014.067-.046.141a7.405 7.405 0 0 0-.548 1.873c-.062.417-.071.552-.071.991 0 .56.031.832.148 1.279L3.42 24h1.478l-.05-.091c-.297-.552-.325-1.575-.068-2.597.117-.472.25-.819.498-1.296l.148-.29v-.177c0-.165-.003-.184-.057-.293a.915.915 0 0 0-.194-.25 1.74 1.74 0 0 1-.385-.543c-.424-.92-.506-2.286-.208-3.451.124-.486.329-.918.544-1.154a.787.787 0 0 0 .223-.531c0-.195-.07-.355-.224-.522a3.136 3.136 0 0 1-.817-1.729c-.14-.96.114-2.005.69-2.834.563-.814 1.353-1.336 2.237-1.475.199-.033.57-.028.776.01.226.04.367.028.512-.041.179-.085.268-.19.374-.431.093-.215.165-.333.36-.576.234-.29.46-.489.822-.729.413-.27.884-.467 1.352-.561.17-.035.25-.04.569-.04.319 0 .398.005.569.04a4.07 4.07 0 0 1 1.914.997c.117.109.398.457.488.602.034.057.095.177.132.267.105.241.195.346.374.43.14.068.286.082.503.045.343-.058.607-.053.943.016 1.144.23 2.14 1.173 2.581 2.437.385 1.108.276 2.267-.296 3.153-.097.15-.193.27-.333.419-.301.322-.301.722-.001 1.053.493.539.801 1.866.708 3.036-.062.772-.26 1.463-.533 1.854a2.096 2.096 0 0 1-.224.258.916.916 0 0 0-.194.25c-.054.109-.057.128-.057.293v.178l.148.29c.248.476.38.823.498 1.295.253 1.008.231 2.01-.059 2.581a.845.845 0 0 0-.044.098c0 .006.329.009.732.009h.73l.02-.074.036-.134c.019-.076.057-.3.088-.516.029-.217.029-1.016 0-1.258-.11-.875-.295-1.57-.597-2.226-.032-.074-.053-.138-.046-.141.008-.005.057-.074.108-.152.376-.569.607-1.284.724-2.228.031-.26.031-1.378 0-1.628-.083-.645-.182-1.082-.348-1.525a6.083 6.083 0 0 0-.329-.7l-.038-.064.131-.194c.402-.604.636-1.262.727-2.04a6.625 6.625 0 0 0-.024-1.358 5.512 5.512 0 0 0-.939-2.339 5.325 5.325 0 0 0-.95-1.02 8.097 8.097 0 0 1-.186-.152.692.692 0 0 1 .023-.208c.208-1.087.201-2.443-.017-3.503-.19-.924-.535-1.658-.98-2.082-.354-.338-.716-.482-1.15-.455-.996.059-1.8 1.205-2.116 3.01a6.805 6.805 0 0 0-.097.726c0 .036-.007.066-.015.066a.96.96 0 0 1-.149-.078A4.857 4.857 0 0 0 12 3.03c-.832 0-1.687.243-2.456.698a.958.958 0 0 1-.148.078c-.008 0-.015-.03-.015-.066a6.71 6.71 0 0 0-.097-.725C8.997 1.392 8.337.319 7.46.048a2.096 2.096 0 0 0-.585-.041Zm.293 1.402c.248.197.523.759.682 1.388.03.113.06.244.069.292.007.047.026.152.041.233.067.365.098.76.102 1.24l.002.475-.12.175-.118.178h-.278c-.324 0-.646.041-.954.124l-.238.06c-.033.007-.038-.003-.057-.144a8.438 8.438 0 0 1 .016-2.323c.124-.788.413-1.501.696-1.711.067-.05.079-.049.157.013zm9.825-.012c.17.126.358.46.498.888.28.854.36 2.028.212 3.145-.019.14-.024.151-.057.144l-.238-.06a3.693 3.693 0 0 0-.954-.124h-.278l-.119-.178-.119-.175.002-.474c.004-.669.066-1.19.214-1.772.157-.623.434-1.185.68-1.382.078-.062.09-.063.159-.012z"/></svg><span class="nm">Ollama</span></span><span class="via">/api/tags &middot; /api/show</span><span class="mdl">Local model discovery and tool-capability checks</span></div>
         <div class="prov"><span class="phead"><svg class="plogo" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 7h18M3 12h18M3 17h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span class="nm">llama.cpp</span></span><span class="via">llama-server &middot; slots</span><span class="mdl">Local turn dispatch, Qwen3.8 27B and anything else you load</span></div>
-        <div class="prov"><span class="phead"><svg class="plogo" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="2.5" y="4.5" width="19" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 10l3 2-3 2M12 15h5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="nm">Devin</span></span><span class="via">Devin API v3 &middot; sessions &middot; ACUs</span><span class="mdl">Chat seats (cloud and CLI), tasks and fleet work; a merge needs two judges</span></div>
+        <div class="prov"><span class="phead"><svg class="plogo" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="2.5" y="4.5" width="19" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 10l3 2-3 2M12 15h5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="nm">Devin</span></span><span class="via">Devin API v3 &middot; sessions &middot; ACUs</span><span class="mdl">Cloud and CLI seats; cloud PRs need two judges, eligible CLI PRs can use a signed elite-direct grant</span></div>
     </div>
   </div>
 
@@ -396,7 +421,7 @@
     <div class="wrap">
       <div class="sec-head">
         <p class="eyebrow">Autonomy with custody</p>
-        <h2>It merges only inside a scope you sign, and it starts in shadow.</h2>
+        <h2>It merges only inside a scope you sign.</h2>
         <p>
           Autonomy ships dormant. You install a custody helper, create a key in your Mac's Secure
           Enclave and sign a standing grant with Touch ID: which repositories, which engines, what risk
@@ -417,16 +442,17 @@
         <li><span class="st">8 &middot; 3d</span><span class="ds">Last signed stage</span></li>
       </ol>
       <p style="color:var(--muted);max-width:68ch;margin-top:14px;font-size:var(--step--1)">
-        The default ladder the grant draft proposes. It advances one stage when that stage's criteria are
-        met in the ledger (shadow: 5 would-merges and 12 hours), drops back one on any breach, and can never
-        pass the last stage you signed. Command shows the stage, the progress to the next and the grant's
-        countdown.
+        The default grant draft starts in shadow. The ladder advances when each stage's criteria are met
+        in the ledger (shadow: 5 would-merges and 12 hours), drops back one on a breach, and cannot pass
+        the last stage you signed. A separately signed <code>elite-direct</code> grant uses one rung instead:
+        eligible elite models may land verified PRs immediately, and a breach restarts that rung's evidence
+        window. Command shows the current stage, progress and the grant's countdown.
       </p>
 
       <h3 class="sub-h">Every change, through the same gates</h3>
       <ul class="gates" aria-label="Merge gates G0 to G7">
         <li><b>G0</b>Authority</li><li><b>G1</b>Protected paths</li><li><b>G1b</b>Tamper</li><li><b>G2</b>Scope</li>
-        <li><b>G3</b>Verify</li><li><b>G4</b>Claims</li><li><b>G5</b>Blast radius</li><li><b>G6</b>Cross-family judge</li><li><b>G7</b>GitHub checks</li>
+        <li><b>G3</b>Verify</li><li><b>G4</b>Claims</li><li><b>G5</b>Blast radius</li><li><b>G6</b>Judge or signed elite-direct</li><li><b>G7</b>GitHub checks</li>
       </ul>
       <p style="color:var(--muted);max-width:68ch;margin-top:14px;font-size:var(--step--1)">
         Fleet lists every shadow decision with these chips and a one-sentence reason, so you can read what
@@ -599,7 +625,7 @@ ashlr wiki ask "where are standing grants verified?"</pre>
       </div>
 
       <figure>
-        <svg viewBox="0 0 700 220" width="100%" role="img" aria-label="Verse launches a Claude cloud session or a Devin session. Each delivers one pull request from its own branch with a report. Pull requests are triaged in Needs you or taken into the standing gates; a Devin pull request needs two judges from different families and a stage that names Devin.">
+        <svg viewBox="0 0 700 220" width="100%" role="img" aria-label="Verse launches a Claude cloud session or a Devin session. Each delivers one pull request from its own branch with a report. Pull requests are triaged in Needs you or taken into the standing gates. Cloud Devin pull requests need two judges from different families; eligible Devin CLI work can use a signed elite-direct grant.">
           <rect x="8" y="80" width="112" height="54" rx="3" fill="var(--surface-2)" stroke="var(--line)"/>
           <text x="64" y="103" text-anchor="middle" font-size="12" fill="var(--ink)">Verse</text>
           <text x="64" y="120" text-anchor="middle" font-size="9" fill="var(--muted)">chat, Command, CLI</text>
@@ -631,7 +657,7 @@ ashlr wiki ask "where are standing grants verified?"</pre>
 
           <rect x="586" y="122" width="108" height="50" rx="3" fill="var(--live-dim)" stroke="var(--live)"/>
           <text x="640" y="144" text-anchor="middle" font-size="12" fill="var(--ink)">G0&ndash;G7</text>
-          <text x="640" y="160" text-anchor="middle" font-size="9" fill="var(--muted)">Devin: two judges</text>
+          <text x="640" y="160" text-anchor="middle" font-size="9" fill="var(--muted)">Cloud Devin: two judges</text>
 
           <text x="350" y="208" text-anchor="middle" font-size="10" fill="var(--faint)">tracked with gh &middot; merged only by the gates or by you &middot; never by the session</text>
         </svg>
@@ -655,9 +681,10 @@ ashlr wiki ask "where are standing grants verified?"</pre>
             to the macOS Keychain. Chat with <b>Devin (cloud)</b> or <b>Devin (CLI)</b>, or hand off a task
             with <b>Run in Devin</b> or <code>ashlr devin launch</code>. Each session has a hard ACU cap, and
             a daily cap and a reserve bound the rest. Under a grant that names Devin, the fleet may launch it
-            on well-scoped backlog work. Devin PRs go through G0&ndash;G7 and merge only at a stage that names
-            Devin, approved by judges from <b>two different model families</b>; otherwise they are shadow and
-            wait for you.
+            on well-scoped backlog work. Cloud Devin PRs need judges from <b>two different model families</b>
+            before a granted stage may merge them. An eligible Devin CLI model can instead pass G6 without
+            judges under a Touch ID-signed <code>elite-direct</code> grant. Every other gate still applies;
+            work outside the signed scope waits for you.
           </p>
         </div>
       </div>
@@ -997,7 +1024,7 @@ ashlr comms setup-telegram</pre>
           </div></div>
           <div class="step"><span class="n"></span><div>
             <h3>Turn on autonomy</h3>
-            <p>macOS only. Setup does what it can and stops for what only you may do: the custody install, Touch ID, two GitHub clicks. Then you start the resident daemon in your own terminal. It begins in shadow.</p>
+            <p>macOS only. Setup does what it can and stops for what only you may do: the custody install, Touch ID, two GitHub clicks. Then you start the resident daemon in your own terminal. The default signed ladder begins in shadow; a separately signed elite-direct grant can begin verified merges immediately.</p>
             <pre>ashlr authority setup --dry-run
 ashlr authority setup
 ashlr authority resident start</pre>
