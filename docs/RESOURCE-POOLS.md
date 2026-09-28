@@ -2618,7 +2618,8 @@ Research checked September 7, 2026; provider rules and models can change.
   describes its own usage pool; a public Hub-controllable Bot API and this user's
   exact entitlement have not been established. Do not infer either from a Grok
   subscription. [Grok Bot plan announcement](https://x.ai/news/grok-bot-more-plans),
-  [Grok Bot FAQ](https://docs.x.ai/grok-bot/faq).
+  [Grok Bot FAQ](https://docs.x.ai/grok-bot/faq). For an evidence-gated companion
+  workflow using its documented plugins, see [Grok Bot beside Ashlr Verse](GROK-BOT-COMPANION.md).
 - Consumer access, native Build access, and an xAI API-key billing account are
   distinct integration choices. The documented API route uses API credentials
   and metered billing; confirm any account-specific included credits, overage,
