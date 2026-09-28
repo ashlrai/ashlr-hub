@@ -20,6 +20,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   Other query shapes remain denied.
 - Declare local networking for the native macOS WebView and preserve it when
   updating an installed app, so Verse can load its loopback server.
+- Give each native release a fresh Verse window URL and serve HTML without
+  storing it, so WebKit cannot reopen an old shell with removed script files.
 - Cap an Ollama-backed fleet lane at its effective one serving slot and reserve
   seats across each selected batch, allowing later items to use other signed
   engines instead of piling onto the same local model.
