@@ -333,6 +333,20 @@
 }
 .group[hidden] { display: none; }
 .group[data-direction='column'] { flex-direction: column; }
+/* Tiled: ⌈√n⌉ columns, rows share the height; hairlines are the gap over the border colour. */
+.group[data-direction='grid'] {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 1px;
+  background: var(--border-subtle);
+}
+.group[data-direction='grid'][data-cols='3'] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.group[data-direction='grid'] > .leaf { background: var(--term-bg); }
+.group[data-direction='grid'] > .leaf + .leaf { border: 0; }
+.leaf[data-span='2'] { grid-column: span 2; }
+.leaf[data-span='3'] { grid-column: span 3; }
+.leaf[hidden] { display: none; }
 
 .leaf {
   position: relative;
@@ -409,6 +423,83 @@
   color: var(--text-secondary);
 }
 .exitBar > span { flex: 1; min-width: 0; }
+
+/* ---- the input editor (CommandInput + command-editor.ts) ------------------ */
+
+.inputDock {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-surface) 70%, var(--term-bg));
+}
+.inputDock[hidden] { display: none; }
+.inputDock[data-assist] { box-shadow: inset 2px 0 0 var(--accent-500); }
+
+.inputHint {
+  padding: var(--space-1) var(--space-3) 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+.inputHint[data-tone='warn'] { color: var(--status-warning-fg); }
+
+.inputRow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+}
+
+.inputPrompt {
+  flex: none;
+  color: var(--accent-500);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm-size);
+  line-height: 1.5;
+  user-select: none;
+}
+.inputDock[data-assist] .inputPrompt { color: var(--status-running-fg); }
+
+.inputEditor {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 40vh;
+  overflow: auto;
+}
+.inputEditor :global(.cm-editor) {
+  background: transparent;
+  color: var(--term-fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm-size);
+}
+.inputEditor :global(.cm-editor.cm-focused) { outline: none; }
+.inputEditor :global(.cm-scroller) { font-family: var(--font-mono); line-height: 1.5; }
+.inputEditor :global(.cm-content) { padding: 0; caret-color: var(--term-cursor); }
+.inputEditor :global(.cm-line) { padding: 0; }
+.inputEditor :global(.cm-cursor) { border-left-color: var(--term-cursor); }
+.inputEditor :global(.cm-placeholder) { color: var(--text-tertiary); }
+.inputEditor :global(.cm-selectionBackground),
+.inputEditor :global(.cm-editor.cm-focused .cm-selectionBackground) { background: var(--term-selection); }
+.inputEditor :global(.cm-ghost) { color: var(--text-tertiary); opacity: 0.8; }
+.inputEditor :global(.cm-sh-keyword) { color: var(--term-magenta); }
+.inputEditor :global(.cm-sh-string) { color: var(--term-green); }
+.inputEditor :global(.cm-sh-comment) { color: var(--text-tertiary); font-style: italic; }
+.inputEditor :global(.cm-sh-variable) { color: var(--term-cyan); }
+.inputEditor :global(.cm-sh-builtin) { color: var(--term-blue); }
+.inputEditor :global(.cm-sh-flag) { color: var(--term-yellow); }
+.inputEditor :global(.cm-sh-number) { color: var(--term-bright-magenta); }
+.inputEditor :global(.cm-sh-operator) { color: var(--term-bright-black); }
+.inputEditor :global(.cm-tooltip) {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-raised);
+  box-shadow: var(--shadow-md);
+}
+.inputEditor :global(.cm-tooltip-autocomplete > ul) { font-family: var(--font-mono); font-size: var(--text-xs-size); max-height: 16em; }
+.inputEditor :global(.cm-tooltip-autocomplete > ul > li) { padding: var(--space-1) var(--space-2); color: var(--text-primary); }
+.inputEditor :global(.cm-tooltip-autocomplete > ul > li[aria-selected]) { background: var(--bg-selected); color: var(--text-primary); }
 
 /* ---- block markers in the terminal (xterm decorations) -------------------- */
 

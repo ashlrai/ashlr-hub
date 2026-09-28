@@ -328,7 +328,7 @@ only mounts them. Each module's header comment lists its own routes and is the a
 |---|---|
 | activity (C1, `verse/activity-api.ts`) | `GET /api/verse/activity[?since=<cursor>]`; `POST /api/verse/activity/seen` (`{sessionId, turnCount}` or `{surface:'mind'}`); `GET /api/verse/session-meta`; `GET /api/verse/session-meta/:id`; `POST /api/verse/session-meta/:id {pinned?, archived?}` |
 | session-controls (C3, `verse/session-controls-api.ts`) | `GET\|POST /api/verse/session-controls/defaults`; `GET\|POST /api/verse/session-controls/:id` (`{model?, effort?, permissionMode?, confirmBypass?}`); `GET\|POST /api/verse/attachments/:id`, `POST …/:id/:attachmentId/delete`; `GET\|POST /api/verse/queue/:id`, `POST …/:id/:queueId/delete`, `POST …/:id/:queueId/send`; `GET /api/verse/files?sessionId=&q=` |
-| terminal (C4, `verse/terminal-api.ts`) | `GET\|POST /api/verse/terminal`; `POST /api/verse/terminal/:id/{input,resize,kill}`; `GET /api/verse/terminal/:id/stream?after=<seq>` (SSE via `fetch` + the read-client header); `POST /api/verse/terminal/open-external` → 202 |
+| terminal (C4, `verse/terminal-api.ts`) | `GET\|POST /api/verse/terminal`; `POST /api/verse/terminal/:id/{input,resize,kill}`; `GET /api/verse/terminal/:id/stream?after=<seq>` (SSE via `fetch` + the read-client header); `GET /api/verse/terminal/stream?tabs=<id>:<seq>,…` (3.15: one SSE for many tabs, tab-tagged frames, per-tab `gone`); `GET /api/verse/terminal/history?q=&cwd=&limit=`, `POST /api/verse/terminal/history/clear`, `GET\|POST /api/verse/terminal/settings`, `POST /api/verse/terminal/assist` (3.15); `POST /api/verse/terminal/open-external` → 202 |
 | preview (C4, `verse/preview-api.ts`) | `GET /api/verse/preview/targets?sessionId=`; `GET /api/verse/preview/raw?sessionId=&path=`; `GET /api/verse/preview/ticket?sessionId=&path=` → `{url, expiresAt}`; `GET /api/verse/preview/frame/<ticket>` |
 | git (C5, `verse/git-api.ts`) | `GET /api/verse/git/status?root=`; `GET /api/verse/git/diff?root=&scope=working\|branch[&file=]`; `POST /api/verse/git/{commit,push,pr,pr/merge,worktree}` |
 | apps (C6, `verse/apps-api.ts`) | `GET /api/verse/apps`; `POST /api/verse/apps/refresh`; `POST /api/verse/apps/:id/toggle {enabled, confirm:true}` → 202; `POST /api/verse/apps/:id/launch {root, via?, model?}` → 202 |
@@ -343,6 +343,12 @@ only mounts them. Each module's header comment lists its own routes and is the a
   chat's roots or a discovered project and pass `checkWorkspaceRootPath` (never `/`, `~`, `~/.ashlr`). Output frames are
   raw base64 bytes and **skip the public-JSON scrubber** on purpose: scrubbing a byte stream would corrupt it, and it is
   the operator's own shell. Needs Bun (the desktop sidecar); under Node, `GET` reports `available: false` with the reason.
+  3.15: finished commands (never their output) are kept in `~/.ashlr/verse/terminal-history.jsonl` (0600, every field
+  through `scrubSecrets` before it is written, ~50k lines, off and clear from the panel). `assist` is the terminal's only
+  model call (`terminal-assist.ts`): local-only by default. Grok is possible only after the operator selects `auto`
+  and that request explicitly allows cloud fallback, when an xAI key is configured and the local-only policy permits it.
+  The request, folder and recent command/output tails are disclosed before sending. It returns TEXT the page puts in the
+  editor, and never types into or runs a shell.
 - **preview.** `frame/<ticket>` is the **one path `server.ts` lets past its read boundary**: an `<iframe src>` can carry
   neither the read-client header nor the query proof, so it answers only a live ticket presented with the cookie of the
   read session that minted it. Every file is served under CSP `sandbox` (an opaque origin), `nosniff`, framable by Verse

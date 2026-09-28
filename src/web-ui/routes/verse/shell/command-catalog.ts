@@ -276,6 +276,9 @@ export const WORKBENCH_COMMANDS = [
   { id: 'dock.placement', title: 'Move the panel (beside or below the chat)', scope: 'chat', keys: [], group: 'actions', section: 'Dock', keywords: ['bottom', 'right', 'layout', 'dock position'] },
   { ...bind('dock.terminal'), title: 'Terminal', group: 'actions', section: 'Dock', keywords: ['shell', 'console'] },
   { ...bind('dock.terminal-new'), title: 'New terminal tab', group: 'actions', section: 'Dock' },
+  // 3.15: the terminal's input editor. Plain words → a command the operator reviews (never run on its own).
+  { id: 'terminal.generate', title: 'Generate command…', scope: 'chat', keys: [], group: 'actions', section: 'Dock', keywords: ['terminal', 'shell', 'command', 'plain english', 'natural language', 'ai', 'bash', 'how do i'] },
+  { id: 'terminal.history', title: 'Search terminal history…', scope: 'chat', keys: [], group: 'actions', section: 'Dock', keywords: ['terminal', 'shell', 'history', 'ctrl r', 'reverse search', 'previous command'] },
   { ...bind('dock.preview'), title: 'Browser', group: 'actions', section: 'Dock', keywords: ['preview', 'dev server', 'localhost', 'web'] },
   { ...bind('dock.diff'), title: 'Changes', group: 'actions', section: 'Dock', keywords: ['diff', 'git', 'review'] },
   { ...bind('dock.files'), title: 'Files', group: 'actions', section: 'Dock', keywords: ['explorer', 'tree', 'touched'] },

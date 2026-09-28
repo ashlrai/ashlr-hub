@@ -3,10 +3,16 @@
  * terminal the operator and the agents share.
  *
  * WHAT IT IS
- *   - Tabs, each one shell or a SPLIT of two (⌘D right, ⌥⌘D down), laid out
- *     per chat and restored after a reload — the shells themselves live on
- *     the server (core/verse/terminal.ts) and are reattached, scrollback and
- *     command blocks included.
+ *   - Tabs, each one shell or a SPLIT of up to six (⌘D right, ⌥⌘D down; side
+ *     by side, stacked or tiled; ⌥⌘←→↑↓ between them, ⇧⌘Return zooms one), laid
+ *     out per chat and restored after a reload — the shells themselves live
+ *     on the server (core/verse/terminal.ts) and are reattached, scrollback
+ *     and command blocks included. Every visible shell streams over ONE
+ *     connection (panel-stream.ts, the multiplexer).
+ *   - An INPUT EDITOR at each prompt (CommandInput.tsx): multi-line, bash
+ *     highlighting, ghost text and ↑/↓ from the persistent history, path
+ *     completion, Ctrl+R history palette, `#`/⌘I plain words → a command (local
+ *     model, never run on its own). Raw per shell turns it off.
  *   - Each shell: xterm.js on WebGL (DOM fallback), true colour, Unicode 11,
  *     ligatures, ⌘F find, ⌘-click links (URLs, and `file:line` into the
  *     editor), copy on select, 10k lines of scrollback.
@@ -41,7 +47,7 @@ import { useViewport } from '../shell/viewport.js';
 import { projectName } from '../verse-model.js';
 import type { VerseTerminalLaunchVia } from '../../../../core/verse/workbench-types.js';
 import { TerminalLockedError } from '../dock/terminal/terminal-client.js';
-import { openPanelStream, type TerminalStreamState } from './panel-stream.js';
+import { openMuxedPanelStream, type TerminalStreamState } from './panel-stream.js';
 import { ChevronDownGlyph, TerminalGlyph } from '../dock/terminal/terminal-icons.js';
 import { AgentTerminal } from './AgentTerminal.js';
 import type { BlockAction } from './BlockList.js';
@@ -50,18 +56,29 @@ import {
   addGroup,
   AGENT_GROUP_ID,
   focusPane,
+  gridShape,
   loadLayout,
   MAX_PANES_PER_GROUP,
+  neighborPane,
+  paneCells,
   reconcileLayout,
   removePane,
   saveLayout,
+  setArrangement,
   setMode,
   splitGroup,
+  toggleZoom,
+  type GroupArrangement,
   type LeafMode,
+  type PaneDirection,
   type SplitDirection,
   type TerminalGroup,
   type TerminalLayout,
 } from './layout-model.js';
+import { resetCommandInputHistoryCache } from './CommandInput.js';
+import { HistoryPalette, type TerminalPaletteMode } from './HistoryPalette.js';
+import { createLazyInputEditor, preloadInputEditor } from './input-editor.js';
+import type { VerseTerminalAssistMode, VerseTerminalSettings } from '../../../data/api-types.js';
 import { panelTerminalApi, type PanelTerminalApi } from './panel-client.js';
 import { agentToolsApi, type AgentToolsApi } from '../agent-tools/agent-tools-client.js';
 import type { VerseAgentTabInfo } from '../../../../core/verse/verse-mcp-types.js';
@@ -91,6 +108,10 @@ export interface TerminalPanelRequest {
   devServerId?: string;
   /** 3.15: show the Agent tab (e.g. from a transcript command's "Show in terminal"). */
   agent?: boolean;
+  /** 3.15: ⌘K "Generate command…" — plain words → a command in the focused shell's editor. */
+  assist?: boolean;
+  /** 3.15: ⌘K "Search terminal history…". */
+  history?: boolean;
 }
 
 export interface TerminalPanelProps {
@@ -132,7 +153,10 @@ const DEFAULT_DEPS: TerminalPanelDeps = {
   api: panelTerminalApi,
   agentTools: agentToolsApi,
   createView: createPanelXtermView,
-  openStream: openPanelStream,
+  // Every pane on one connection (panel-stream.ts): six panes, one of the browser's ~6 slots.
+  openStream: openMuxedPanelStream,
+  createInputEditor: createLazyInputEditor,
+  preloadInputEditor,
   platform: detectKeyPlatform(),
   writeClipboard: async (text) => { await navigator.clipboard.writeText(text); },
   openUrl: (url) => {
@@ -144,6 +168,8 @@ const DEFAULT_DEPS: TerminalPanelDeps = {
 
 export const TERMINAL_PANEL_LIST_POLL_MS = 3_000;
 const PREFS_KEY = 'ashlr.verse.terminal.prefs.v1';
+/** Per chat: the shells set to Raw input (their own line editor only). */
+const RAW_KEY_PREFIX = 'ashlr.verse.terminal.raw.v1:';
 /** Shared with the 3.10 pane, so the choice carries over. */
 const SCREEN_READER_KEY = 'ashlr.verse.terminal.screenReader';
 
@@ -153,13 +179,14 @@ export function resetTerminalPanelForTest(): void {
 }
 
 function readPrefs(storage: TerminalPanelDeps['storage']): LeafPrefs {
-  const prefs: LeafPrefs = { screenReader: false, ligatures: true, gpu: true };
+  const prefs: LeafPrefs = { screenReader: false, ligatures: true, gpu: true, inputEditor: true };
   try {
     const raw = storage?.getItem(PREFS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<LeafPrefs>;
       if (typeof parsed.ligatures === 'boolean') prefs.ligatures = parsed.ligatures;
       if (typeof parsed.gpu === 'boolean') prefs.gpu = parsed.gpu;
+      if (typeof parsed.inputEditor === 'boolean') prefs.inputEditor = parsed.inputEditor;
     }
     prefs.screenReader = storage?.getItem(SCREEN_READER_KEY) === '1';
   } catch {
@@ -170,12 +197,36 @@ function readPrefs(storage: TerminalPanelDeps['storage']): LeafPrefs {
 
 function writePrefs(storage: TerminalPanelDeps['storage'], prefs: LeafPrefs): void {
   try {
-    storage?.setItem(PREFS_KEY, JSON.stringify({ ligatures: prefs.ligatures, gpu: prefs.gpu }));
+    storage?.setItem(PREFS_KEY, JSON.stringify({ ligatures: prefs.ligatures, gpu: prefs.gpu, inputEditor: prefs.inputEditor }));
     storage?.setItem(SCREEN_READER_KEY, prefs.screenReader ? '1' : '0');
   } catch {
     /* this page only */
   }
 }
+
+function readRaw(storage: TerminalPanelDeps['storage'], sessionId: string): ReadonlySet<string> {
+  try {
+    const parsed = JSON.parse(storage?.getItem(`${RAW_KEY_PREFIX}${sessionId}`) ?? '[]') as unknown;
+    return new Set(Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string').slice(0, 64) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeRaw(storage: TerminalPanelDeps['storage'], sessionId: string, raw: ReadonlySet<string>): void {
+  try {
+    if (raw.size === 0) storage?.removeItem(`${RAW_KEY_PREFIX}${sessionId}`);
+    else storage?.setItem(`${RAW_KEY_PREFIX}${sessionId}`, JSON.stringify([...raw]));
+  } catch {
+    /* this page only */
+  }
+}
+
+const ASSIST_MODE_LABELS: Readonly<Record<VerseTerminalAssistMode, string>> = {
+  auto: 'Local model, then cloud Grok (shares terminal context)',
+  local: 'Local model only',
+  off: 'Off',
+};
 
 function errorText(err: unknown, fallback: string): string {
   if (err instanceof TerminalLockedError) return err.message;
@@ -213,6 +264,10 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
   const [seen, setSeen] = useState<ReadonlyMap<string, string>>(() => new Map());
   const [agentHighlight, setAgentHighlight] = useState<string | null>(null);
   const [pasteTick, setPasteTick] = useState(0);
+  const [rawTabs, setRawTabs] = useState<ReadonlySet<string>>(() => readRaw(deps.storage, sessionId));
+  const [palette, setPalette] = useState<{ mode: TerminalPaletteMode; tabId: string | null; draft: string } | null>(null);
+  const [settings, setSettings] = useState<VerseTerminalSettings | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   const leaves = useRef(new Map<string, LeafHandle>());
   const leafRefs = useRef(new Map<string, (handle: LeafHandle | null) => void>());
@@ -238,6 +293,7 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
   }
   useEffect(() => {
     setLayout(loadLayout(sessionId, deps.storage));
+    setRawTabs(readRaw(deps.storage, sessionId));
   }, [sessionId, deps.storage]);
 
   const allTabs = useMemo(() => list?.tabs ?? [], [list]);
@@ -253,6 +309,16 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
   useEffect(() => {
     if (list) saveLayout(sessionId, layout, deps.storage);
   }, [layout, list, sessionId, deps.storage]);
+  useEffect(() => {
+    if (!list) return;
+    const live = new Set(tabIdsKey ? tabIdsKey.split(',') : []);
+    setRawTabs((prev) => {
+      const next = new Set([...prev].filter((id) => live.has(id)));
+      if (next.size === prev.size) return prev;
+      writeRaw(deps.storage, sessionId, next);
+      return next;
+    });
+  }, [list, tabIdsKey, sessionId, deps.storage]);
 
   const activeGroup: TerminalGroup | null = layout.active === AGENT_GROUP_ID ? null : layout.groups.find((g) => g.id === layout.active) ?? null;
   const agentActive = layout.active === AGENT_GROUP_ID || (list !== null && !list.available && layout.groups.length === 0);
@@ -353,12 +419,12 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
   const split = useCallback(async (direction: SplitDirection) => {
     if (!activeGroup) return;
     if (activeGroup.panes.length >= MAX_PANES_PER_GROUP) {
-      setNotice({ tone: 'info', text: 'A tab holds two terminals at most. Open a new tab instead.' });
+      setNotice({ tone: 'info', text: `A tab holds ${MAX_PANES_PER_GROUP} terminals at most. Open a new tab instead.` });
       return;
     }
     const groupId = activeGroup.id;
-    // Start the shell at the size it will have (half of its neighbour), so its
-    // first prompt is not drawn for a wider screen than the one it lands in.
+    // Start the shell at about the size it will have, so its first prompt is
+    // not drawn for a wider screen than the one it lands in (the first fit corrects it).
     const here = focusedTab ? leaves.current.get(focusedTab.id)?.size() ?? null : null;
     const size = here
       ? direction === 'row' ? { cols: Math.max(20, Math.floor((here.cols - 1) / 2)), rows: here.rows } : { cols: here.cols, rows: Math.max(5, Math.floor((here.rows - 1) / 2)) }
@@ -415,6 +481,81 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
   // Requests (from the dock / registry)
   // -------------------------------------------------------------------------
 
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
+
+  /** ⌥⌘←→↑↓: the neighbouring pane in its group gets the keyboard. */
+  const focusToward = useCallback((tabId: string, direction: PaneDirection) => {
+    const group = layoutRef.current.groups.find((g) => g.panes.includes(tabId));
+    if (!group || group.zoomed) return;
+    const target = neighborPane(group, tabId, direction);
+    if (!target) return;
+    setLayout((prev) => focusPane(prev, group.id, target));
+    leaves.current.get(target)?.focus();
+  }, []);
+
+  /** ⌘I / "Generate command…": in the shell's input editor when it shows, else the palette (its result is pasted, never run). */
+  const openAssist = useCallback((tabId: string | null) => {
+    const leaf = tabId ? leaves.current.get(tabId) : undefined;
+    if (leaf?.openAssist()) return;
+    setPalette({ mode: 'assist', tabId, draft: '' });
+  }, []);
+
+  const openHistory = useCallback((tabId: string | null, draft: string) => {
+    setPalette({ mode: 'history', tabId, draft });
+  }, []);
+
+  const onHistorySearch = useCallback((tabId: string, draft: string) => openHistory(tabId, draft), [openHistory]);
+
+  const setRaw = useCallback((tabId: string, on: boolean) => {
+    setRawTabs((prev) => {
+      if (prev.has(tabId) === on) return prev;
+      const next = new Set(prev);
+      if (on) next.add(tabId);
+      else next.delete(tabId);
+      writeRaw(deps.storage, sessionId, next);
+      return next;
+    });
+    setTimeout(() => leaves.current.get(tabId)?.focus(), 0);
+  }, [deps.storage, sessionId]);
+
+  const loadSettings = useCallback(async () => {
+    if (!deps.api.settings) return;
+    try {
+      const next = await deps.api.settings();
+      if (mounted.current) setSettings(next);
+    } catch {
+      /* the menu shows what it can */
+    }
+  }, [deps.api]);
+
+  const updateSettings = useCallback(async (patch: Partial<VerseTerminalSettings>) => {
+    if (!deps.api.updateSettings) return;
+    try {
+      const next = await deps.api.updateSettings(patch);
+      if (!mounted.current) return;
+      setSettings(next);
+      if (patch.history !== undefined) {
+        resetCommandInputHistoryCache();
+        setNotice({ tone: 'info', text: next.history ? 'Command history is on: commands you finish are remembered (secrets removed).' : 'Command history is off: nothing new is recorded.' });
+      }
+    } catch (err) {
+      setNotice({ tone: 'error', text: errorText(err, 'That setting could not be changed.') });
+    }
+  }, [deps.api]);
+
+  const clearHistory = useCallback(async () => {
+    setConfirmClear(false);
+    if (!deps.api.clearHistory) return;
+    try {
+      await deps.api.clearHistory();
+      resetCommandInputHistoryCache();
+      setNotice({ tone: 'info', text: 'Command history cleared.' });
+    } catch (err) {
+      setNotice({ tone: 'error', text: errorText(err, 'The history could not be cleared.') });
+    }
+  }, [deps.api]);
+
   const pasteInto = useCallback((tabId: string, text: string) => {
     pendingPaste.current = { tabId, text };
     setPasteTick((n) => n + 1);
@@ -423,6 +564,12 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
   const handleRequest = useCallback(async (req: TerminalPanelRequest) => {
     if (req.agent) {
       setLayout((prev) => ({ ...prev, active: AGENT_GROUP_ID }));
+      return;
+    }
+    if (req.assist || req.history) {
+      const target = focusedTab && !focusedTab.exited ? focusedTab : tabs.find((t) => !t.exited) ?? null;
+      if (req.assist) openAssist(target?.id ?? null);
+      else openHistory(target?.id ?? null, '');
       return;
     }
     const wantsNew = req.newTab === true || Boolean(req.appId) || Boolean(req.devServerId);
@@ -446,7 +593,7 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
     if (!target) return;
     if (req.paste) pasteInto(target.id, req.paste);
     else leaves.current.get(target.id)?.focus();
-  }, [focusedTab, layout.groups, openInNewGroup, pasteInto, roots, tabs]);
+  }, [focusedTab, layout.groups, openAssist, openHistory, openInNewGroup, pasteInto, roots, tabs]);
 
   useEffect(() => {
     if (!request || !list || request.nonce <= lastHandledNonce) return;
@@ -575,8 +722,22 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
       case 'toggle-blocks':
         setLayout((prev) => setMode(prev, tabId, (prev.modes[tabId] ?? 'terminal') === 'terminal' ? 'blocks' : 'terminal'));
         return;
+      case 'focus-left':
+      case 'focus-right':
+      case 'focus-up':
+      case 'focus-down':
+        focusToward(tabId, action.slice('focus-'.length) as PaneDirection);
+        return;
+      case 'zoom-pane': {
+        const group = layoutRef.current.groups.find((g) => g.panes.includes(tabId));
+        if (group) setLayout((prev) => toggleZoom(focusPane(prev, group.id, tabId), group.id));
+        return;
+      }
+      case 'assist':
+        openAssist(tabId);
+        return;
     }
-  }, [split]);
+  }, [split, focusToward, openAssist]);
 
   const onSelection = useCallback((tabId: string, has: boolean, text: string) => {
     setSelection(has ? { tabId, text } : null);
@@ -669,9 +830,43 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
   };
 
   const openMoreMenu = (from: HTMLElement) => {
+    void loadSettings();
+    const group = activeGroup;
+    const layoutItems: ActionMenuItem[] = group && group.panes.length > 1 ? [
+      ...(['row', 'column', 'grid'] as GroupArrangement[]).map((arrangement) => ({
+        id: `layout-${arrangement}`,
+        ...(arrangement === 'row' ? { separated: true } : {}),
+        label: `${arrangement === group.direction ? '✓ ' : ''}${arrangement === 'row' ? 'Side by side' : arrangement === 'column' ? 'Stacked' : 'Grid'}`,
+        onSelect: () => setLayout((prev) => setArrangement(prev, group.id, arrangement)),
+      })),
+      { id: 'zoom', label: `${group.zoomed ? 'Show every pane' : 'Zoom this pane'} (${panelKeyLabel('zoom-pane', deps.platform)})`, onSelect: () => setLayout((prev) => toggleZoom(prev, group.id)) },
+    ] : [];
+    const history = settings?.history ?? true;
+    const assistMode = settings?.assist ?? 'local';
+    const raw = focusedTab ? rawTabs.has(focusedTab.id) : false;
     const items: ActionMenuItem[] = [
       { id: 'find', label: `Find… (${panelKeyLabel('find', deps.platform)})`, onSelect: () => focusedTab && leaves.current.get(focusedTab.id)?.openFind(), disabled: !focusedTab },
-      { id: 'clear', label: 'Clear screen and scrollback', onSelect: () => focusedTab && leaves.current.get(focusedTab.id)?.clear(), disabled: !focusedTab },
+      { id: 'history', label: 'Command history… (Ctrl+R)', description: 'Search what you ran; Return puts it at the prompt without running it.', onSelect: () => openHistory(focusedTab?.id ?? null, '') },
+      { id: 'assist', label: `Generate a command… (${panelKeyLabel('assist', deps.platform)})`, description: assistMode === 'auto' ? 'Local model first; Grok may receive the request and recent terminal context.' : 'Describe it in words; the configured local model writes it for you to review.', onSelect: () => openAssist(focusedTab?.id ?? null), disabled: assistMode === 'off', reason: assistMode === 'off' ? 'Plain-English commands are turned off below.' : null },
+      ...layoutItems,
+      {
+        id: 'raw',
+        separated: true,
+        label: raw ? 'Use the input editor in this shell' : 'Raw input for this shell',
+        description: raw ? 'Back to the editor at each prompt: history, completion, plain words.' : 'Keys go straight to the shell: your zsh-autosuggestions, fzf and prompt, untouched.',
+        onSelect: () => focusedTab && setRaw(focusedTab.id, !raw),
+        disabled: !focusedTab || !prefs.inputEditor,
+      },
+      { id: 'input-editor', label: prefs.inputEditor ? 'Turn the input editor off' : 'Turn the input editor on', description: 'For every shell: a prompt editor with history, completion and plain words.', onSelect: () => updatePrefs({ inputEditor: !prefs.inputEditor }) },
+      { id: 'history-toggle', separated: true, label: history ? 'Stop recording command history' : 'Record command history', description: 'Kept in ~/.ashlr/verse on this Mac, secrets removed.', onSelect: () => void updateSettings({ history: !history }), disabled: !deps.api.updateSettings },
+      { id: 'history-clear', label: 'Clear command history…', danger: true, onSelect: () => setConfirmClear(true), disabled: !deps.api.clearHistory },
+      ...(['auto', 'local', 'off'] as VerseTerminalAssistMode[]).map((mode) => ({
+        id: `assist-${mode}`,
+        label: `${mode === assistMode ? '✓ ' : ''}Plain-English commands: ${ASSIST_MODE_LABELS[mode]}`,
+        onSelect: () => void updateSettings({ assist: mode }),
+        disabled: !deps.api.updateSettings,
+      })),
+      { id: 'clear', separated: true, label: 'Clear screen and scrollback', onSelect: () => focusedTab && leaves.current.get(focusedTab.id)?.clear(), disabled: !focusedTab },
       { id: 'ligatures', label: prefs.ligatures ? 'Turn ligatures off' : 'Turn ligatures on', description: 'For fonts that have them (Fira Code, JetBrains Mono…), with GPU rendering.', onSelect: () => updatePrefs({ ligatures: !prefs.ligatures }) },
       { id: 'gpu', label: prefs.gpu ? 'Turn GPU rendering off' : 'Turn GPU rendering on', description: 'Applies to terminals opened from now on.', onSelect: () => updatePrefs({ gpu: !prefs.gpu }) },
       { id: 'sr', label: prefs.screenReader ? 'Turn screen reader mode off' : 'Turn screen reader mode on', onSelect: () => updatePrefs({ screenReader: !prefs.screenReader }) },
@@ -890,6 +1085,14 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
         </div>
       ) : null}
 
+      {confirmClear ? (
+        <div className={styles.notice} role="alertdialog" aria-label="Clear command history">
+          <span>Clear every command in the history? This cannot be undone.</span>
+          <Button size="sm" variant="subtle" onClick={() => void clearHistory()}>Clear</Button>
+          <Button size="sm" variant="ghost" onClick={() => setConfirmClear(false)}>Cancel</Button>
+        </div>
+      ) : null}
+
       <div className={styles.body}>
         {!list.available && !agentSelected ? (
           <EmptyState
@@ -913,6 +1116,8 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
 
         {layout.groups.map((group) => {
           const selected = !agentSelected && group.id === layout.active;
+          const cells = new Map(paneCells(group).map((c) => [c.id, c]));
+          const zoomed = group.zoomed && group.panes.includes(group.zoomed) ? group.zoomed : null;
           return (
             <div
               key={group.id}
@@ -920,23 +1125,31 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
               role="tabpanel"
               aria-labelledby={`terminal-tab-${group.id}`}
               className={styles.group}
-              data-direction={group.direction}
-              data-split={group.panes.length > 1 || undefined}
+              data-direction={zoomed ? 'row' : group.direction}
+              data-cols={group.direction === 'grid' && !zoomed ? gridShape(group.panes.length).cols : undefined}
+              data-split={(group.panes.length > 1 && !zoomed) || undefined}
+              data-zoomed={zoomed ? true : undefined}
               hidden={!selected}
             >
               {group.panes.map((id) => {
                 const tab = tabById.get(id);
                 if (!tab) return null;
+                const concealed = zoomed !== null && zoomed !== id;
                 return (
                   <TerminalLeaf
                     key={id}
                     ref={leafRef(id)}
                     tab={tab}
                     deps={deps}
-                    shown={shown && selected}
+                    shown={shown && selected && !concealed}
+                    concealed={concealed}
+                    gridSpan={group.direction === 'grid' && !zoomed ? cells.get(id)?.span ?? 1 : 1}
+                    raw={rawTabs.has(id)}
+                    onHistorySearch={onHistorySearch}
                     focused={group.focused === id}
                     mode={layout.modes[id] ?? 'terminal'}
                     prefs={prefs}
+                    assistMode={settings?.assist ?? 'local'}
                     onFocus={() => setLayout((prev) => focusPane(prev, group.id, id))}
                     onMeta={onMeta}
                     onBlockAction={(tabId, action, block) => void runBlockAction(tabId, action, block)}
@@ -971,6 +1184,35 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
 
       {menu ? (
         <ActionMenu label={menu.label} anchor={menu.anchor} returnFocus={menu.from} onClose={() => setMenu(null)} items={menu.items} />
+      ) : null}
+
+      {palette ? (
+        <HistoryPalette
+          mode={palette.mode}
+          assistMode={settings?.assist ?? 'local'}
+          api={deps.api}
+          tabId={palette.tabId}
+          cwd={(palette.tabId ? tabById.get(palette.tabId)?.cwd ?? tabById.get(palette.tabId)?.root : null) ?? null}
+          initialQuery={palette.draft}
+          onClose={() => setPalette(null)}
+          onPick={(command) => {
+            const target = palette.tabId ?? focusedTab?.id ?? null;
+            const leaf = target ? leaves.current.get(target) : undefined;
+            // Into the editor (or pasted at the prompt) — never run.
+            if (leaf) setTimeout(() => leaf.insertCommand(command), 0);
+            else void openInNewGroup({}).then((tab) => { if (tab) pasteInto(tab.id, command); });
+          }}
+          {...(palette.mode === 'history' && palette.tabId ? {
+            onPassThrough: (query: string) => {
+              const leaf = leaves.current.get(palette.tabId!);
+              if (!leaf) return;
+              // The shell's own Ctrl+R (fzf, atuin…), searching for what was typed.
+              leaf.sendText(`\x12${query}`);
+              setTimeout(() => leaf.focus(), 0);
+            },
+          } : {})}
+          {...(settings?.history === false || deps.api.updateSettings ? { onEnableHistory: () => void updateSettings({ history: true }) } : {})}
+        />
       ) : null}
     </div>
   );
