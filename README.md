@@ -21,7 +21,7 @@ ashlr verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 The macOS arm64 desktop DMG is attached to the
-[v3.16.0 GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.0).
+[v3.16.1 GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.1).
 It is locally signed and not notarized. See [The desktop app](#the-desktop-app-macos)
 or follow the [Quickstart](#quickstart).
 
@@ -92,7 +92,7 @@ separate Node.js install to run.
 
 ### Install
 
-The [v3.16.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.0)
+The [v3.16.1 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.1)
 includes an arm64 DMG. It is locally signed, not Apple Developer ID notarized,
 so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable

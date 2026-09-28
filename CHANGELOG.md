@@ -11,6 +11,14 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+## [3.16.1] — 2026-09-28
+
+### Fixed
+
+- Keep the paired phone's Needs You feed live after its first read by allowing
+  the activity route's validated cursor query through the remote gateway.
+  Other query shapes remain denied.
+
 ## [3.16.0] — 2026-09-28
 
 ### Verse release integration

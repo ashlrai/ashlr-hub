@@ -47,6 +47,8 @@ const AGENT_ID = /^ag_[a-z0-9]{8,32}$/;
 const QUEUE_ID = /^[0-9a-f]{12}$/;
 const HEAD_SHA = /^[0-9a-f]{40}$/;
 const REPO = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
+// Match the opaque cursor emitted by the activity route without accepting arbitrary query strings.
+const ACTIVITY_CURSOR = /^v1\.[0-9a-f]{8}\.[et]\.\d{1,15}$/;
 
 function exactParams(params: URLSearchParams, shape: Record<string, (value: string) => boolean>): boolean {
   const keys = [...params.keys()];
@@ -110,6 +112,8 @@ export function classifyRemoteRoute(method: string | undefined, rawTarget: strin
   }
   if (query === undefined) return { kind: 'deny' };
   const params = new URLSearchParams(query);
+  if (path === '/api/verse/activity'
+    && exactParams(params, { since: (v) => ACTIVITY_CURSOR.test(v) })) return { kind: 'read', path };
   if (path === '/api/verse/authority/ledger'
     && exactParams(params, { view: (v) => v === 'decisions', limit: (v) => v === '40' })) return { kind: 'read', path };
   if (path === '/api/verse/leader/thread' && (
