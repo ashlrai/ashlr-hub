@@ -173,9 +173,11 @@ describe('FleetSection — dark and absent', () => {
   it('says it once — lanes, the one state, the repos — and leaves the empty charts out', async () => {
     stubSurfaceFetch({ kind: 'dark' });
     render(<FleetSection />);
-    const state = await screen.findByRole('region', { name: 'Autonomy is off' });
-    expect(state).toHaveTextContent('Approve a standing grant to let the fleet work.');
-    expect(within(state).getByRole('button', { name: 'Approve in Command' })).toBeInTheDocument();
+    // 3.15: the one state is the control surface's single blocker + button.
+    const control = await screen.findByRole('region', { name: 'Fleet control' });
+    await waitFor(() => expect(control).toHaveTextContent('No standing grant is in force.'));
+    expect(within(control).getByRole('button', { name: 'Approve a grant with Touch ID' })).toBeInTheDocument();
+    expect(screen.queryByTestId('autonomy-off')).toBeNull();
     expect(screen.getAllByText(`Fleet dark since ${darkSinceLabel(DARK_SINCE)}`)).toHaveLength(1);
     for (const name of ['Live fleet', 'Gate funnel', 'Refusals by gate', 'Parked']) expect(screen.queryByRole('figure', { name })).toBeNull();
     expect(screen.getByRole('list', { name: 'Lanes: busy of slots' })).toBeInTheDocument();
@@ -190,8 +192,8 @@ describe('FleetSection — dark and absent', () => {
     const darkSince = '2026-08-30T15:00:00.000Z';
     stubSurfaceFetch({ kind: 'dark', routes: { '/api/verse/fleet/live': { ...fleetLive('dark'), darkSince } } });
     render(<FleetSection />);
-    const state = await screen.findByRole('region', { name: 'Autonomy is off' });
-    expect(state).toHaveTextContent(`Fleet dark since ${darkSinceLabel(darkSince)}`);
+    const control = await screen.findByRole('region', { name: 'Fleet control' });
+    await waitFor(() => expect(control).toHaveTextContent(`Fleet dark since ${darkSinceLabel(darkSince)}`));
     expect(screen.queryByText(`Fleet dark since ${darkSinceLabel(DARK_SINCE)}`)).toBeNull();
   });
 
@@ -199,7 +201,8 @@ describe('FleetSection — dark and absent', () => {
     const dark = fleetLive('dark');
     stubSurfaceFetch({ kind: 'dark', routes: { '/api/verse/fleet/live': { ...dark, darkSince: null } } });
     render(<FleetSection />);
-    await screen.findByRole('region', { name: 'Autonomy is off' });
+    const control = await screen.findByRole('region', { name: 'Fleet control' });
+    await waitFor(() => expect(control).toHaveTextContent('Blocked'));
     expect(screen.queryByText(/Fleet dark since/)).toBeNull();
   });
 
@@ -208,8 +211,8 @@ describe('FleetSection — dark and absent', () => {
     const live = fleetLive('live', now);
     stubSurfaceFetch({ kind: 'dark', now, routes: { '/api/verse/fleet/live': { ...fleetLive('dark', now), runs: live.runs, funnel: live.funnel } } });
     render(<FleetSection />);
-    await screen.findByRole('region', { name: 'Autonomy is off' });
-    expect(screen.getByRole('figure', { name: 'Live fleet' })).toBeInTheDocument();
+    await screen.findByRole('region', { name: 'Fleet control' });
+    await waitFor(() => expect(screen.getByRole('figure', { name: 'Live fleet' })).toBeInTheDocument());
     expect(screen.getByRole('figure', { name: 'Gate funnel' })).toBeInTheDocument();
   });
 

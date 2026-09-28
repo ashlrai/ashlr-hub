@@ -74,8 +74,6 @@ export interface VerseSectionEntry {
   fallbackModules?: readonly string[];
   /** Rail (⌘1–⌘5) or gear tray. */
   placement: 'rail' | 'tray';
-  /** One line for the onboarding tour and the palette. */
-  blurb: string;
 }
 
 /**
@@ -83,17 +81,18 @@ export interface VerseSectionEntry {
  * section missing from this list is unreachable however complete it is.
  */
 export const VERSE_SECTIONS: readonly VerseSectionEntry[] = [
-  { id: 'command', label: 'Command', module: 'CommandSection', placement: 'rail', blurb: 'What the fleet did, what needs you, and the autonomy switch — the morning read.' },
-  { id: 'fleet', label: 'Fleet', module: 'FleetSection', fallbackModules: ['AutonomySection'], placement: 'rail', blurb: 'Every lane live: what is building, what the gates refused, and why each seat was chosen.' },
-  { id: 'growth', label: 'Growth', module: 'GrowthSection', placement: 'rail', blurb: 'Is the fleet getting better? Merges, cost per merge and the experiments behind them.' },
-  { id: 'mind', label: 'Mind', module: 'MindSection', placement: 'rail', blurb: "The Leader's memos, what came of each move, and what the reasoning shows." },
-  { id: 'chat', label: 'Chat', module: 'ChatSection', placement: 'rail', blurb: 'Talk to a seat. Chats are grouped by project and resume where they stopped.' },
-  { id: 'settings', label: 'Settings', module: 'SettingsSection', placement: 'tray', blurb: 'Theme, chat, desktop and keyboard — and this tour again.' },
-  { id: 'apps', label: 'Apps & Accounts', module: 'AppsSection', placement: 'tray', blurb: 'Seats, terminal agents, local models and MCP servers in one list.' },
-  { id: 'usage', label: 'Usage', module: 'UsageSection', placement: 'tray', blurb: 'Which account you can actually use right now, and what it costs.' },
-  { id: 'wiki', label: 'Repo wiki', module: 'WikiSection', placement: 'tray', blurb: 'A private architecture wiki per repo, written on your own models — and Ask, with cited answers.' },
-  { id: 'playbooks', label: 'Playbooks', module: 'PlaybooksSection', placement: 'tray', blurb: 'Versioned task templates any chat, goal, cloud or Devin run follows — `!macro` in the message — with how each version’s runs ended.' },
-  { id: 'automations', label: 'Automations', module: 'AutomationsSection', placement: 'tray', blurb: 'Labelled issues, a red main, schedules and webhooks become work on their own — within your limits and the grant.' },
+  { id: 'command', label: 'Command', module: 'CommandSection', placement: 'rail' },
+  { id: 'fleet', label: 'Fleet', module: 'FleetSection', fallbackModules: ['AutonomySection'], placement: 'rail' },
+  { id: 'growth', label: 'Growth', module: 'GrowthSection', placement: 'rail' },
+  { id: 'mind', label: 'Mind', module: 'MindSection', placement: 'rail' },
+  { id: 'chat', label: 'Chat', module: 'ChatSection', placement: 'rail' },
+  { id: 'agents', label: 'Agents', module: 'AgentsSection', placement: 'rail' },
+  { id: 'settings', label: 'Settings', module: 'SettingsSection', placement: 'tray' },
+  { id: 'apps', label: 'Apps & Accounts', module: 'AppsSection', placement: 'tray' },
+  { id: 'usage', label: 'Usage', module: 'UsageSection', placement: 'tray' },
+  { id: 'wiki', label: 'Repo wiki', module: 'WikiSection', placement: 'tray' },
+  { id: 'playbooks', label: 'Playbooks', module: 'PlaybooksSection', placement: 'tray' },
+  { id: 'automations', label: 'Automations', module: 'AutomationsSection', placement: 'tray' },
 ];
 
 export const RAIL_SECTIONS: readonly VerseSectionEntry[] = VERSE_SECTIONS.filter((s) => s.placement === 'rail');

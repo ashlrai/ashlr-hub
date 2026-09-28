@@ -248,6 +248,10 @@ export function observePostMergeStability(
         stableAtMs: inspection.followUpWindowEndMs,
         windowMs,
         verificationDigest: input.greenObservation.manifestDigest,
+        verifiedAt: input.greenObservation.verifiedAt,
+        verificationIsolation: input.greenObservation.isolation,
+        workspaceClean: true,
+        requiredCommandCount: input.greenObservation.requiredCommandCount,
       });
     }
     if (stableCandidates.length === 0) return result;

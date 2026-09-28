@@ -32,6 +32,7 @@ import { buildDevinPrompt, DEVIN_REPORT_SCHEMA } from './delivery-contract.js';
 import { playbookForLaunch } from '../playbooks/lanes.js';
 import { probeDevinCli, type DevinCliProbe } from './cli-probe.js';
 import { buildDevinChatPrompt } from './chat-contract.js';
+import { getDevinModelCatalog, summarizeDevinModels, type DevinModelCatalog } from './models.js';
 import { hasDevinKey, readDevinKey, removeDevinKey, storeDevinKey, type DevinKeyStoreDeps } from './secret.js';
 import {
   clearDevinConnection,
@@ -76,7 +77,9 @@ export interface DevinServiceDeps {
   /** The live standing policy (default: currentStandingPolicy). */
   policy?: () => EffectivePolicy | null;
   /** The local CLI's state for the overview (tests; default: the shared cli-probe). */
-  cliProbe?: () => Promise<Pick<DevinCliProbe, 'state'>>;
+  cliProbe?: () => Promise<Pick<DevinCliProbe, 'state'> & { cliPath?: string | null }>;
+  /** The CLI's model catalog for the overview (tests; default: models.ts, never listing on the request). */
+  modelCatalog?: () => Promise<DevinModelCatalog>;
 }
 
 /** Internal launches from the fleet carry their work item. */
@@ -95,8 +98,6 @@ const FALLBACK_BASE_BRANCH = 'main';
 const REF_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 /** A session found by tag after an ambiguous create must have been created this recently. */
 const RECOVERY_LIST_SIZE = 50;
-
-export const DEVIN_CHAT_LINE = 'Chat: n/a — Devin works in sessions, not chat turns';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -190,7 +191,9 @@ export const DEVIN_CHAT_VERDICT: ReadinessVerdict = Object.freeze(devinChatVerdi
  * current stage names the `devin` engine with a producer-only Devin seat
  * (3.15 — its own engine identity; see authority/effective-config.ts
  * standingAuthorizesDevin) and the budget's reserve and fleet caps. Devin PRs
- * then merge only under the two-judge rule (merge-gates.ts G6).
+ * then merge only under the two-judge rule (merge-gates.ts G6) — or, 3.15,
+ * on green tests alone when Devin ran an elite model (SWE-2, GPT-6) under an
+ * elite-direct grant (authority/elite-models.ts).
  */
 export function devinFleetVerdict(input: {
   enabled: boolean;
@@ -213,7 +216,7 @@ export function devinFleetVerdict(input: {
       commandFix('Draft a grant that includes Devin', 'ashlr authority draft'));
   }
   if (!input.fleetGate.ok) return v(false, 'warn', 'Paused', input.fleetGate.reason ?? 'The Devin budget refused another fleet session.');
-  return v(true, 'ok', 'Ready', 'The fleet may launch Devin on well-scoped backlog work. Its PRs pass every standing gate and merge only when two judges from different families ship them.');
+  return v(true, 'ok', 'Ready', 'The fleet may launch Devin on well-scoped backlog work. Its PRs pass every standing gate; on an elite model (SWE-2, GPT-6) under an elite-direct grant they land on green tests, otherwise they merge only when two judges from different families ship them.');
 }
 
 /** "Fleet: Ready — …" for the CLI. */
@@ -523,12 +526,24 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
 export async function devinOverview(deps: DevinServiceDeps = {}): Promise<DevinOverviewResponse> {
   const now = (deps.now ?? (() => new Date()))();
   const tasks = listDevinTasks();
+  const probe: Pick<DevinCliProbe, 'state'> & { cliPath?: string | null } = await (deps.cliProbe ?? (() => probeDevinCli()))();
+  let models: DevinOverviewResponse['models'];
+  if (probe.state !== 'missing') {
+    try {
+      // At once: memory / disk / the SWE-2 fallback; a due listing runs in the background.
+      const catalog = await (deps.modelCatalog ?? (() => getDevinModelCatalog({ cliPath: probe.state === 'ready' ? probe.cliPath ?? null : null })))();
+      models = summarizeDevinModels(catalog, readConfig(deps));
+    } catch {
+      models = undefined;
+    }
+  }
   return {
     generatedAt: now.toISOString(),
     status: await devinStatus(deps, tasks),
     budget: devinBudgetView(tasks, readDevinBudget(), now),
     tasks: tasks.slice(0, OVERVIEW_TASK_LIMIT),
-    cli: { state: (await (deps.cliProbe ?? (() => probeDevinCli()))()).state, usage: 'not-reported' },
+    cli: { state: probe.state, usage: 'not-reported' },
+    ...(models ? { models } : {}),
   };
 }
 

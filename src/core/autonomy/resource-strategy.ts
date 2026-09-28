@@ -716,6 +716,35 @@ export async function buildResourceStrategyReport(
 }
 
 /**
+ * The fleet status the resource DIRECTION reads on this tick.
+ *
+ * On a standing tick (`resident-standing` capability) the pending-proposal
+ * count is withheld from the direction. The legacy rule — "any pending
+ * proposal ⇒ verify-only, dispatch nothing" — predates the standing lane and
+ * deadlocks it:
+ *   - a standing proposal stays `pending` while its PR waits (in shadow the
+ *     merge is withheld by design), so the FIRST shadow proposal would stop
+ *     all production and the ladder could never collect the would-merge
+ *     digests it needs to advance;
+ *   - a legacy proposal on a checkout the standing lane never touches (Mason's
+ *     own clone, not a fleet mirror) can never be verified by this lane, so it
+ *     blocked every standing tick forever (live, 2026-09-27: one 2026-08-18
+ *     binshield proposal held 1,092 consecutive ticks at verify-only).
+ * The standing lane's queue depth is governed by its own backpressure
+ * (fleet/backpressure.ts → the standing beforeTick's holdProduction:
+ * waiting-verify and open-PR caps per repo), which still runs. Every other direction input —
+ * kill, guard health, budget, degraded sources, failed verification, the
+ * ecosystem doctor — is unchanged, and non-standing ticks are untouched.
+ */
+export function fleetStatusForDirection(status: FleetStatus, standingTick: boolean): FleetStatus {
+  if (!standingTick || status.proposals.pending === 0) return status;
+  return {
+    ...status,
+    proposals: { ...status.proposals, pending: 0, frontierPending: 0 },
+  };
+}
+
+/**
  * Convert the advisory report into a tiny daemon policy. This is pure so the
  * opt-in daemon control loop can be tested independently from the readers.
  */

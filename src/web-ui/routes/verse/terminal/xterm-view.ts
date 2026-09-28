@@ -85,6 +85,9 @@ export interface PanelView {
   find(term: string, opts?: FindOptions): Promise<boolean>;
   clearFind(): void;
   onFindResults(cb: (r: { index: number; count: number }) => void): ViewDisposable;
+  /** 3.15: the alternate screen (vim, less, htop) came or went. Optional: older fakes omit it. */
+  onBufferChange?(cb: (alternate: boolean) => void): ViewDisposable;
+  isAlternateScreen?(): boolean;
   dispose(): void;
 }
 
@@ -335,6 +338,8 @@ export const createPanelXtermView: PanelViewFactory = async (opts) => {
       findListeners.add(cb);
       return { dispose: () => { findListeners.delete(cb); } };
     },
+    onBufferChange: (cb) => term.buffer.onBufferChange((buffer) => cb(buffer.type === 'alternate')),
+    isAlternateScreen: () => term.buffer.active.type === 'alternate',
     dispose() {
       findListeners.clear();
       try { webgl?.dispose(); } catch { /* already gone */ }

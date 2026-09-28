@@ -51,6 +51,7 @@ import {
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { CUSTODY_DATA_DIR_RELATIVE, CUSTODY_HELPER_PATH } from '../authority/custody-client.js';
+import { devinCliCredentialsPath } from '../devin/cli-probe.js';
 
 export interface AutonomousEnvInput {
   /** Engine id as the registry knows it (e.g. `claude`, `grok-cli`, `local-coder`). */
@@ -72,6 +73,12 @@ export interface AutonomousEnvInput {
   executables?: readonly string[];
   /** ADDITIVE. The PATH to sanitize; defaults to process.env.PATH. */
   path?: string;
+  /**
+   * ADDITIVE (3.15). devin-cli: the Devin CLI's real credentials file.
+   * Absent → `$XDG_DATA_HOME/devin/credentials.toml` of the daemon's env,
+   * else `<home>/.local/share/devin/credentials.toml` (devin/cli-probe.ts).
+   */
+  devinCredentialsPath?: string;
 }
 
 /** A per-run copy of a seat's vendor home (grok-cli / codex). */
@@ -110,12 +117,16 @@ export interface AutonomousEnvOverlay {
  * mapping does not recognise is `local` — the class with no network egress —
  * so an unknown engine fails closed rather than open.
  */
-export type AutonomousEngineClass = 'local' | 'grok-cli' | 'claude-cli' | 'codex';
+export type AutonomousEngineClass = 'local' | 'grok-cli' | 'claude-cli' | 'codex' | 'devin-cli';
 
 export function autonomousEngineClass(engine: string): AutonomousEngineClass {
   switch (engine) {
     case 'grok-cli':
       return 'grok-cli';
+    // 3.15: the local Devin CLI — inference on Devin's servers, so the class
+    // needs network egress like the other vendor CLIs.
+    case 'devin-cli':
+      return 'devin-cli';
     case 'claude':
     case 'claude-cli':
       return 'claude-cli';
@@ -437,6 +448,33 @@ export function buildAutonomousEnvOverlay(input: AutonomousEnvInput): Autonomous
       snapshot: Object.freeze({ ...snapshot }),
       writeBack: spec.writeBack,
     });
+  }
+
+  // 3.15 — DEVIN CLI STATE: a per-run copy of ONE file. The CLI keeps its
+  // login in `$XDG_DATA_HOME/devin/credentials.toml` (devin/cli-probe.ts);
+  // this run's XDG_DATA_HOME is its own ephemeral dir, so the CLI would read
+  // as logged out. The copy is the whole login (an API key plus the server
+  // URLs — no refresh token), so nothing is ever written back: whatever the
+  // agent does to its copy dies with the run dir, and Mason's real file is
+  // denied to the agent outright. Missing / odd → the run is refused (fail
+  // closed), never run logged-out or against the real directory.
+  if (engineClass === 'devin-cli') {
+    const real = input.devinCredentialsPath ?? devinCliCredentialsPath(process.env, home);
+    if (!isAbsolute(real)) throw new AutonomousEnvError('the Devin CLI credentials path must be absolute');
+    if (regularFile(real, MAX_AUTH_FILE_BYTES) === null) {
+      throw new AutonomousEnvError('the Devin CLI is logged out (no credentials file) — run `devin auth login`');
+    }
+    if (isInside(real, run) || isInside(run, dirname(real))) {
+      throw new AutonomousEnvError('the Devin CLI credentials must not overlap runTmpDir');
+    }
+    const devinData = ensurePrivateDir(join(xdg.data, 'devin'));
+    const target = join(devinData, 'credentials.toml');
+    copyFileSync(real, target, fsConstants.COPYFILE_EXCL);
+    chmodSync(target, 0o600);
+    deniedReadPaths.push(dirname(real));
+    // No DEVIN_* variable reaches the run: buildContainedEnv is an allowlist,
+    // so DEVIN_PERMISSION_MODE / DEVIN_SANDBOX / DEVIN_MODEL from the daemon's
+    // env can never override the registry argv.
   }
 
   const readOnlyPaths: string[] = [...toolchains];

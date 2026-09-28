@@ -12,6 +12,7 @@ import {
   reportSessionExpired,
   setMutationToken,
 } from './auth-store.js';
+import { clearRemoteSessionForTest, probeRemoteSession } from './remote-session.js';
 
 const READ = 'e'.repeat(64);
 const MUT = 'f'.repeat(64);
@@ -38,6 +39,30 @@ describe('auth-store protected-state eviction', () => {
     await clearReadSession();
     expect(getQuerySnapshot('protected').data).toBeUndefined();
     expect(getMutationToken()).toBeNull();
+  });
+
+  it('evicts a remote phone’s local authority even when the Mac cannot confirm logout', async () => {
+    document.head.innerHTML = '<meta name="ashlr-remote-gateway" content="v1">';
+    const csrfToken = 'c'.repeat(40);
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/remote/session') return Response.json({
+        authenticated: true, deviceId: 'device-1', label: 'My phone', scopes: { read: true, act: true },
+        csrfToken, expiresAt: Date.now() + 60_000, capabilities: { pairing: true, writes: true, push: true },
+      });
+      throw new Error('Mac offline');
+    }));
+    try {
+      await probeRemoteSession();
+      await runQuery('protected', async () => ({ secret: true }));
+      await expect(clearReadSession()).rejects.toThrow('Mac offline');
+      expect(getAuthSnapshot().phase).toBe('unauthenticated');
+      expect(getQuerySnapshot('protected').data).toBeUndefined();
+      expect(getMutationToken()).toBeNull();
+    } finally {
+      clearRemoteSessionForTest();
+      document.head.innerHTML = '';
+      vi.unstubAllGlobals();
+    }
   });
 });
 

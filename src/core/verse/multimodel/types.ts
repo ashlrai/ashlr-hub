@@ -110,6 +110,8 @@ export interface SeatAdviceOption {
   local: boolean;
   /** One short clause: "free · private", "5-hour 88% used". */
   note: string;
+  /** 3.15: the tier this seat competes in for this message (routing/tiers.ts); absent on older callers. */
+  tier?: 'elite' | 'fast' | 'free';
 }
 
 export interface SeatAdvice {

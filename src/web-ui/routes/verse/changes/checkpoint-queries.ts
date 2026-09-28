@@ -11,8 +11,9 @@
  * Everything is gathered in one `CheckpointClient` object so tests (and a
  * future pane host) can hand the panel a fake.
  */
-import { ApiError, apiPost } from '../../../data/client.js';
+import { ApiError, apiGet, apiPost } from '../../../data/client.js';
 import { getMutationToken, getReadClientProof, reportSessionExpired, touchMutationHold } from '../../../data/auth-store.js';
+import { isRemoteMobileMode } from '../../../data/remote-mode.js';
 import type {
   VerseCheckpointApplyResponse,
   VerseCheckpointDecision,
@@ -28,10 +29,11 @@ import { VerseMutationLockedError } from '../verse-queries.js';
 export const CHECKPOINTS_API = '/api/verse/checkpoints';
 
 async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+  if (isRemoteMobileMode()) return apiGet<T>(path, signal);
   const res = await fetch(path, {
     method: 'GET',
     credentials: 'same-origin',
-    headers: { 'x-ashlr-read-client': getReadClientProof() },
+    headers: isRemoteMobileMode() ? {} : { 'x-ashlr-read-client': getReadClientProof() },
     signal,
   });
   if (res.status === 401) {

@@ -9,11 +9,13 @@
  *   npm run ship:local -- --allow-dirty    ship uncommitted work (installed as <sha>-dirty-<time>)
  *
  * Steps, in order (docs/RELEASING-LOCALLY.md):
- *   1. `npm run build` on a clean dist/.
- *   2. `npm pack --ignore-scripts` into OS temp (the tarball you then `npm publish`).
- *   3. Extract into ~/.local/share/ashlr/releases/<sha>; `ln -sfn` it to ~/.local/share/ashlr/current.
- *   4. `npm run build:binary` (dist-bin/ashlr + dist-bin/public).
- *   5. If /Applications/Ashlr.app exists: quit it, move Contents/MacOS/ashlr and
+ *   1. If an app is installed, prove the entitlements can actually be signed
+ *      on a disposable Mach-O before changing any release or app file.
+ *   2. `npm run build` on a clean dist/.
+ *   3. `npm pack --ignore-scripts` into OS temp (the tarball you then `npm publish`).
+ *   4. Extract into ~/.local/share/ashlr/releases/<sha>; `ln -sfn` it to ~/.local/share/ashlr/current.
+ *   5. `npm run build:binary` (dist-bin/ashlr + dist-bin/public).
+ *   6. If /Applications/Ashlr.app exists: quit it, move Contents/MacOS/ashlr and
  *      Contents/Resources/public aside to *.prev-<short sha> (never deleted), copy the new
  *      ones in (and, with --native, ashlr-desktop), make sure Info.plist carries the
  *      microphone usage string, codesign with the stable local identity "Ashlr Local"
@@ -21,8 +23,8 @@
  *      fails) and Entitlements.plist, verify, relaunch.
  *      Only the 3 newest *.prev-* of each kind stay in the bundle; older ones are moved into a
  *      dated folder under ~/.Trash.
- *   6. `launchctl kickstart -k` ai.ashlr.anthropic-proxy and ai.ashlr.serve, if loaded.
- *   7. Wait for http://127.0.0.1:7777/verse/ to answer 200 and print versions.
+ *   7. `launchctl kickstart -k` ai.ashlr.anthropic-proxy and ai.ashlr.serve, if loaded.
+ *   8. Wait for http://127.0.0.1:7777/verse/ to answer 200 and print versions.
  *
  * Nothing here deletes a user file: the only removal is the repo's own dist/ before the build.
  * Everything that touches the machine goes through the injected `io`, so the planning logic
@@ -125,6 +127,11 @@ export function gatherContext(args, io) {
   const sha = io.exec('git', ['rev-parse', 'HEAD'], { cwd: io.repoRoot }).stdout.trim();
   const pkg = JSON.parse(io.readFile(join(io.repoRoot, 'package.json')));
   const appExists = io.exists(APP_PATH);
+  const installedPlistVersion = (key) => {
+    if (!appExists || !args.native) return null;
+    const result = io.exec('plutil', ['-extract', key, 'raw', '-o', '-', join(APP_PATH, 'Contents', 'Info.plist')]);
+    return result.status === 0 ? result.stdout.trim() || null : null;
+  };
   const listing = {};
   if (appExists) {
     for (const dir of new Set(Object.values(BUNDLE_TARGETS).map((t) => t.dir))) listing[dir] = io.list(join(APP_PATH, dir));
@@ -150,6 +157,8 @@ export function gatherContext(args, io) {
     loadedAgents,
     nativeBuildMtime: io.mtime(join(io.repoRoot, NATIVE_BUILD)),
     installedNativeMtime: appExists ? io.mtime(join(APP_PATH, BUNDLE_TARGETS.native.dir, BUNDLE_TARGETS.native.name)) : null,
+    installedNativeShortVersion: installedPlistVersion('CFBundleShortVersionString'),
+    installedNativeBundleVersion: installedPlistVersion('CFBundleVersion'),
     iconBuildMtime: io.mtime(join(io.repoRoot, APP_ICON_BUILD)),
     installedIconMtime: appExists ? io.mtime(join(APP_PATH, BUNDLE_TARGETS.icon.dir, BUNDLE_TARGETS.icon.name)) : null,
     ...args,
@@ -282,6 +291,7 @@ export function planShip(ctx) {
   const repo = (rel) => join(ctx.repoRoot, rel);
 
   const steps = [
+    ...(ctx.appExists ? [{ id: 'entitlements-preflight', title: 'prove codesign accepts the app entitlements before touching the release', argv: ['node', repo('scripts/check-macos-entitlements.mjs')] }] : []),
     { id: 'clean-dist', title: 'remove the repo\'s dist/ so the build is clean', argv: ['rm', '-rf', repo('dist')] },
     { id: 'build', title: 'npm run build', argv: ['npm', 'run', 'build'] },
     { id: 'pack-dir', title: `pack destination ${packDir}`, argv: ['mkdir', '-p', packDir] },
@@ -295,7 +305,8 @@ export function planShip(ctx) {
   if (ctx.appExists) {
     const targets = [BUNDLE_TARGETS.sidecar, BUNDLE_TARGETS.public];
     const nativeNewer = ctx.native && ctx.nativeBuildMtime != null &&
-      (ctx.installedNativeMtime == null || ctx.nativeBuildMtime > ctx.installedNativeMtime);
+      (ctx.installedNativeMtime == null || ctx.nativeBuildMtime > ctx.installedNativeMtime ||
+        ctx.installedNativeShortVersion !== ctx.version || ctx.installedNativeBundleVersion !== ctx.version);
     if (nativeNewer) targets.push(BUNDLE_TARGETS.native);
     // --native also refreshes the Dock/Finder icon when a newer one was generated.
     const iconNewer = ctx.native && ctx.iconBuildMtime != null &&
@@ -328,6 +339,13 @@ export function planShip(ctx) {
     if (trashMoves.length > 0) {
       steps.push({ id: 'trash-dir', title: `trash folder ${trashDir}`, argv: ['mkdir', '-p', trashDir] });
       steps.push({ id: 'rotate-backups', title: `keep ${KEEP_BACKUPS} newest backups; move ${trashMoves.length} older to the Trash`, argv: ['mv', ...trashMoves, trashDir] });
+    }
+    // The native binary and its Info.plist version must advance together. A sidecar-only
+    // update leaves the native binary in place, so it must not claim the new package version.
+    if (nativeNewer) {
+      const plist = join(APP_PATH, 'Contents', 'Info.plist');
+      steps.push({ id: 'plist-short-version', title: 'Info.plist: CFBundleShortVersionString', argv: ['plutil', '-replace', 'CFBundleShortVersionString', '-string', ctx.version, plist] });
+      steps.push({ id: 'plist-bundle-version', title: 'Info.plist: CFBundleVersion', argv: ['plutil', '-replace', 'CFBundleVersion', '-string', ctx.version, plist] });
     }
     // Dictation: macOS kills an app that touches the mic without this key, and ship:local
     // patches an installed bundle rather than rebuilding it, so write it every time.

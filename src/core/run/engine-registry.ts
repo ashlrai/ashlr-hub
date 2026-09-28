@@ -34,6 +34,11 @@ import type {
 } from '../types.js';
 import { DEFAULT_LOCAL_MODEL_TAG, GROK_CLI_DEFAULT_MODEL } from './model-catalog.js';
 import { resolveNativeSeatLaunch, type NativeSeatLaunchResult } from '../resources/native-profile.js';
+import {
+  DEVIN_CLI_ENGINE_ID,
+  DEVIN_CLI_FLEET_DEFAULT_MODEL,
+  DEVIN_CLI_PERMISSION_MODE,
+} from '../devin/cli-engine.js';
 // The serving runtime owns where llama-server actually is; resolving it here
 // as well would let dispatch and supervision disagree about the endpoint.
 import {
@@ -407,6 +412,50 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
     capabilities: ['agent', 'edit', 'architecture'],
     defaultModel: GROK_CLI_DEFAULT_MODEL,
   },
+
+  // ---------------------------------------------------------------------------
+  // 3.15: devin-cli — the local Devin CLI (SWE-2, free on the Devin plan) as a
+  // fleet producer. devin/cli-engine.ts explains the choices; in short:
+  //
+  //  - `-p` (print mode) with the goal as ONE element after `--`, so a goal
+  //    that starts with a dash is still the prompt, never a flag. `-p` takes
+  //    an optional inline value, but clap never binds a following `--model`
+  //    to it (measured on 3000.11.3: `-p --model swe-2-medium … -- <goal>`
+  //    ran the goal).
+  //  - `--permission-mode smart`: the least-permissive mode that can edit the
+  //    workspace AND run tests (auto: read-only; accept-edits: no shell). Never
+  //    `dangerous`. Fixed in `argv` (not autonomousArgv) so no caller can get
+  //    a more permissive Devin run from this registry.
+  //  - `--respect-workspace-trust false`: print mode cannot show the trust
+  //    prompt and fails in an untrusted (new) worktree.
+  //  - no `--sandbox`: Devin's own seatbelt cannot nest inside the run's
+  //    sandbox-exec profile; the OS confinement every autonomous run gets is
+  //    the containment.
+  //  - cwd is the worktree (buildEngineCommand's `cwd`): the CLI has no
+  //    `--cwd`, it works in its working directory.
+  //
+  // Tier 'mid': branch-eligible after verification; tier never merges anything
+  // (the grant's stages and gates G0–G7 do). Cannot be redefined from config
+  // (resolveEngineRegistry), like grok-cli: a config-authored spec could swap
+  // the binary or the permission mode.
+  // ---------------------------------------------------------------------------
+  'devin-cli': {
+    id: DEVIN_CLI_ENGINE_ID,
+    kind: 'cli-agent',
+    tier: 'mid',
+    bin: 'devin',
+    bins: ['devin'],
+    argv: [
+      '-p',
+      { optModel: ['--model', '$MODEL'] },
+      '--permission-mode', DEVIN_CLI_PERMISSION_MODE,
+      '--respect-workspace-trust', 'false',
+      '--',
+      '$GOAL',
+    ],
+    capabilities: ['agent', 'edit', 'tools'],
+    defaultModel: DEVIN_CLI_FLEET_DEFAULT_MODEL,
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -735,6 +784,9 @@ export function resolveEngineRegistry(cfg?: AshlrConfig): Record<string, EngineS
       // spec could point a merge-authority judge identity at any binary.
       // Config may tighten authority, never widen it (SPEC-310B I3).
       if (key === GROK_CLI_ENGINE_ID) continue;
+      // 3.15: nor devin-cli — its permission mode and binary are authority
+      // (devin/cli-engine.ts); config may not widen them.
+      if (key === DEVIN_CLI_ENGINE_ID) continue;
       // Honor the map key as the id when the spec omits/!matches it.
       const candidate = { ...(spec as EngineSpec), id: (spec as EngineSpec)?.id ?? key };
       if (isValidSpec(candidate)) merged[key] = candidate;
@@ -1056,11 +1108,12 @@ export function grokStreamUsage(output: string): { tokensIn: number; tokensOut: 
  * maps to the parallel llama-server lane unless the caller names Ollama.
  */
 export function registryEngineForFleetEngine(
-  lane: 'local' | 'grok-cli' | 'claude-cli' | 'codex',
+  lane: 'local' | 'grok-cli' | 'claude-cli' | 'codex' | 'devin-cli',
   localEngine: 'llama-server' | 'local-coder' = 'llama-server',
 ): string {
   switch (lane) {
     case 'grok-cli': return GROK_CLI_ENGINE_ID;
+    case 'devin-cli': return DEVIN_CLI_ENGINE_ID;
     case 'claude-cli': return 'claude';
     case 'codex': return 'codex';
     default: return localEngine;

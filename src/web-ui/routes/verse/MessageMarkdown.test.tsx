@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { loadMarkdownRenderer, MessageMarkdown, splitStreamingBlocks } from './MessageMarkdown.js';
 import { renderMarkdown } from './MessageMarkdownRenderer.js';
+import { subscribeOpenTerminal, type OpenTerminalRequest } from './shell/open-terminal-request.js';
 
 // The renderer is its own chunk (3.10 first paint); these tests are about
 // what it renders, so it is in before they mount.
@@ -24,6 +25,35 @@ describe('MessageMarkdown', () => {
     expect(html).toContain('href="https://example.com"');
     expect(html).toContain('target="_blank"');
     expect(html).toContain('rel="noopener noreferrer"');
+  });
+
+  it('keeps a verse://terminal link in the app and strips every other verse: href (3.15)', () => {
+    const html = renderMarkdown('[the build](verse://terminal/t-ab12/b-3) [tab](verse://terminal/t-ab12) [bad](verse://settings) [shout](VERSE://terminal/t-ab12) [x](verse://terminal/t-ab12/b-1/../x)');
+    const box = document.createElement('div');
+    box.innerHTML = html;
+    const [build, tab, bad, shout, x] = [...box.querySelectorAll('a')];
+    expect(build!.getAttribute('href')).toBe('verse://terminal/t-ab12/b-3');
+    expect(build!.hasAttribute('data-verse-terminal')).toBe(true);
+    expect(build!.hasAttribute('target')).toBe(false);
+    expect(tab!.getAttribute('href')).toBe('verse://terminal/t-ab12');
+    for (const a of [bad, shout, x]) {
+      expect(a!.hasAttribute('href'), a!.textContent ?? '').toBe(false);
+    }
+  });
+
+  it('a click on a verse://terminal link opens the tab through the shell, never navigating', () => {
+    const requests: OpenTerminalRequest[] = [];
+    const off = subscribeOpenTerminal((r) => requests.push(r));
+    try {
+      render(<MessageMarkdown text={'See [the failing test](verse://terminal/t-ab12/b-3).'} />);
+      const link = screen.getByRole('link', { name: 'the failing test' });
+      const event = new MouseEvent('click', { bubbles: true, cancelable: true });
+      link.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      expect(requests).toEqual([{ tabId: 't-ab12', blockId: 'b-3', sessionId: null }]);
+    } finally {
+      off();
+    }
   });
 
   it('adds a copy button to fenced code blocks that copies the code text', async () => {

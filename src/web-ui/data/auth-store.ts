@@ -32,6 +32,7 @@ import { evictAll, invalidateObserved } from './cache.js';
 // The composer owns its own storage format, so the key names live with it
 // rather than being duplicated here where they could drift.
 import { clearComposerMemory } from '../routes/verse/chat/composer-memory.js';
+import { isRemoteMobileMode } from './remote-mode.js';
 
 const READ_CLIENT_STORAGE_KEY = 'ashlr.readClientProof.v1';
 const READ_CLIENT_RE = /^[a-f0-9]{64}$/;
@@ -53,6 +54,7 @@ function randomHex64(): string {
 }
 
 function loadOrCreateClientProof(): string {
+  if (isRemoteMobileMode()) return '';
   try {
     const existing = sessionStorage.getItem(READ_CLIENT_STORAGE_KEY);
     if (existing && READ_CLIENT_RE.test(existing)) return existing;
@@ -80,6 +82,8 @@ let mutationHoldTimer: ReturnType<typeof setTimeout> | null = null;
  * than clear it — a cleared hold would ask for a token nobody can paste.
  */
 let mutationHeldByHost = false;
+/** A paired remote session may act only when the gateway advertises writes. */
+let remoteActGranted = false;
 
 /**
  * Last read token that the server accepted (typed or host-injected). Memory
@@ -113,6 +117,7 @@ export function getAuthSnapshot(): AuthState {
 }
 
 export function getReadClientProof(): string {
+  if (isRemoteMobileMode()) throw new Error('Local read-client proof is unavailable on the phone gateway.');
   return clientProof;
 }
 
@@ -132,6 +137,7 @@ export function resetReadClientProof(): string {
  * message safe to show the operator. The raw token never leaves this call.
  */
 export async function establishReadSession(rawReadToken: string): Promise<void> {
+  if (isRemoteMobileMode()) throw new Error('Hub read tokens are unavailable on the phone gateway.');
   const trimmed = rawReadToken.trim();
   if (!/^[a-f0-9]{64}$/.test(trimmed)) {
     throw new Error('That does not look like a read token — expected 64 hex characters.');
@@ -156,6 +162,11 @@ export async function establishReadSession(rawReadToken: string): Promise<void> 
 }
 
 export async function clearReadSession(): Promise<void> {
+  if (isRemoteMobileMode()) {
+    try { await (await import('./remote-session.js')).logoutRemoteDevice(); }
+    finally { expireNow(); }
+    return;
+  }
   try {
     await fetch('/api/session', {
       method: 'DELETE',
@@ -190,6 +201,7 @@ function expireNow(): void {
  */
 export function reportSessionExpired(): void {
   if (state.phase !== 'authenticated') return;
+  if (isRemoteMobileMode()) { expireNow(); return; }
   if (rememberedReadToken) {
     void renewReadSession();
     return;
@@ -286,6 +298,7 @@ export function takeInjectedTokens(): InjectedTokens | null {
  * the token in it).
  */
 export async function adoptInjectedTokens(): Promise<boolean> {
+  if (isRemoteMobileMode()) return false;
   const injected = takeInjectedTokens();
   if (!injected) return false;
   try {
@@ -304,11 +317,19 @@ export async function adoptInjectedTokens(): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 export function getMutationToken(): string | null {
+  if (isRemoteMobileMode()) return remoteActGranted ? '*' : null;
   return mutationToken;
 }
 
 export function hasMutationHold(): boolean {
+  if (isRemoteMobileMode()) return remoteActGranted;
   return mutationToken !== null;
+}
+
+/** A capability flag for UI guards, never a substitute for server policy. */
+export function setRemoteActGranted(value: boolean): void {
+  remoteActGranted = value;
+  emit();
 }
 
 function armIdleClear(): void {
@@ -325,6 +346,7 @@ function armIdleClear(): void {
  * `host` marks a token injected by the desktop wrapper (see adoptInjectedTokens).
  */
 export function setMutationToken(token: string, opts: { host?: boolean } = {}): void {
+  if (isRemoteMobileMode()) throw new Error('Hub mutation tokens are unavailable on the phone gateway.');
   mutationToken = token;
   mutationHeldByHost = opts.host === true;
   const heldUntil = Date.now() + MUTATION_HOLD_MS;
@@ -341,6 +363,7 @@ export function touchMutationHold(): void {
 }
 
 export function clearMutationToken(): void {
+  remoteActGranted = false;
   mutationToken = null;
   mutationHeldByHost = false;
   if (mutationHoldTimer) {

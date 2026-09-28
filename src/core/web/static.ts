@@ -55,6 +55,8 @@ const CONTENT_TYPES: Record<string, string> = {
   '.ttf': 'font/ttf',
   '.txt': 'text/plain; charset=utf-8',
   '.map': 'application/json; charset=utf-8',
+  // The installable phone surface's web app manifest (/verse/m, src/web-ui/public/verse-m/).
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
 };
 
 function contentTypeFor(filePath: string): string {
@@ -65,6 +67,9 @@ function contentTypeFor(filePath: string): string {
 // ---------------------------------------------------------------------------
 // Cache policy, validators, compression
 // ---------------------------------------------------------------------------
+
+/** Where the /verse/m service worker is served (see serveStatic's path map). */
+export const VERSE_MOBILE_SW_PATH = '/verse/m/sw.js';
 
 export const IMMUTABLE_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 export const REVALIDATE_CACHE_CONTROL = 'no-cache';
@@ -78,7 +83,7 @@ export function isImmutableAssetPath(pathname: string): boolean {
 }
 
 // TTF and ICO are uncompressed formats (woff/woff2 and raster images are not).
-const COMPRESSIBLE_EXTENSIONS = new Set(['.html', '.js', '.mjs', '.css', '.json', '.svg', '.txt', '.map', '.ttf', '.ico']);
+const COMPRESSIBLE_EXTENSIONS = new Set(['.html', '.js', '.mjs', '.css', '.json', '.svg', '.txt', '.map', '.ttf', '.ico', '.webmanifest']);
 /** Below this, encoding overhead outweighs the saving. */
 const MIN_COMPRESS_BYTES = 1024;
 /** Upper bound on the encoded-body cache. */
@@ -219,11 +224,18 @@ export function serveStatic(
     if (pathname === null) return false;
 
     // "/" (or empty) -> index.html (SPA shell).
-    // "/next" and "/verse" (Ashlr Verse console, src/web-ui/routes/verse/)
-    // both resolve to the new console shell; the SPA picks the app by pathname.
+    // "/next", "/verse" (Ashlr Verse console, src/web-ui/routes/verse/) and
+    // "/verse/m" (Verse on a phone, routes/verse/mobile/) all resolve to the
+    // new console shell; the SPA picks the app by pathname.
     let rel = pathname === '/' ? '/index.html'
       : (pathname === '/next' || pathname === '/next/') ? '/next/index.html'
       : (pathname === '/verse' || pathname === '/verse/') ? '/next/index.html'
+      : (pathname === '/verse/m' || pathname === '/verse/m/') ? '/next/index.html'
+      // The phone surface's service worker is served from INSIDE the scope it
+      // controls: a worker's maximum scope is its own script's directory, so
+      // this path (not /next/verse-m/sw.js) is what lets it cover /verse/m/
+      // without a Service-Worker-Allowed header widening anything.
+      : pathname === VERSE_MOBILE_SW_PATH ? '/next/verse-m/sw.js'
       : pathname;
 
     // Reject null bytes anywhere in the relative path.

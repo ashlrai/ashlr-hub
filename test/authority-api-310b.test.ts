@@ -237,6 +237,64 @@ describe('actions', () => {
     expect((await call('GET', '/api/verse/authority/ledger?limit=abc'))?.status).toBe(400);
   });
 
+  it('3.15 grant editor: POST /draft applies a scope edit within the draft, diffs it, and the edited draft is what gets signed', async () => {
+    state.roots.push(TEST_ROOT);
+    const plain = await call('GET', '/api/verse/authority/draft');
+    expect(plain?.status).toBe(200);
+    const editable = plain!.body['editable'] as { repos: string[]; engines: string[]; leaderClasses: string[]; maxDays: number };
+    expect(editable.leaderClasses).toEqual(['A', 'B']);
+    expect(editable.maxDays).toBe(30);
+    expect(editable.repos).toContain('ashlrai/fleet-canary');
+    // No grant in force: every diff line is new.
+    expect((plain!.body['diff'] as { direction: string }[]).some((line) => line.direction === 'wider')).toBe(true);
+
+    // The mutation token is required (the draft store feeds the next approve).
+    expect((await call('POST', '/api/verse/authority/draft', { scope: {} }, { 'x-ashlr-token': 'wrong' }))?.status).toBe(401);
+    expect((await call('POST', '/api/verse/authority/draft', { scope: { nope: 1 } }))?.status).toBe(400);
+    expect((await call('POST', '/api/verse/authority/draft', { scope: { repos: ['evil/repo'] } }))?.body).toMatchObject({ code: 'scope-invalid' });
+
+    const edited = await call('POST', '/api/verse/authority/draft', { kind: 'new', scope: { leaderClasses: ['A'], days: 7, maxMode: 'reserve' } });
+    expect(edited?.status).toBe(200);
+    const payload = edited!.body['payload'] as { leader: { classes: string[] }; spend: { maxMode: string } };
+    expect(payload.leader.classes).toEqual(['A']);
+    expect(payload.spend.maxMode).toBe('reserve');
+    const digest = edited!.body['digest'] as string;
+    const granted = await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: digest });
+    expect(granted?.status).toBe(200);
+    expect(granted?.body).toMatchObject({ grant: { state: 'active', maxMode: 'reserve' } });
+
+    // Re-approving now diffs against the grant in force.
+    const again = await call('POST', '/api/verse/authority/draft', { kind: 'reapprove', scope: { leaderClasses: ['A', 'B'] } });
+    expect(again?.status).toBe(200);
+    expect((again!.body['diff'] as { label: string; direction: string }[]).find((line) => line.label === 'Leader classes')).toMatchObject({ direction: 'wider' });
+  });
+
+  it('elite-direct (3.15): the draft is one signed rung, and once granted it is the live stage', async () => {
+    state.roots.push(TEST_ROOT);
+    expect((await call('GET', '/api/verse/authority/draft?eliteDirect=2'))?.status).toBe(400);
+    const plain = await call('GET', '/api/verse/authority/draft');
+    expect(plain!.body).toMatchObject({ startStageId: 'shadow', eliteDirect: false });
+    const draft = await call('GET', '/api/verse/authority/draft?eliteDirect=1');
+    expect(draft?.status).toBe(200);
+    expect(draft!.body).toMatchObject({ kind: 'new', startStageId: 'elite-direct', eliteDirect: true });
+    expect(((draft!.body['payload'] as { rollout: { stages: unknown[] } }).rollout.stages)).toHaveLength(1);
+    expect((draft!.body['summary'] as string[]).some((line) => line.includes('no judge'))).toBe(true);
+    expect((await call('POST', '/api/verse/authority/draft', { kind: 'new', scope: {}, eliteDirect: 'yes' }))?.status).toBe(400);
+    const edited = await call('POST', '/api/verse/authority/draft', { kind: 'new', scope: { leaderClasses: ['A'] }, eliteDirect: true });
+    expect(edited?.body).toMatchObject({ startStageId: 'elite-direct', eliteDirect: true });
+    expect(((edited!.body['payload'] as { leader: { classes: string[] } }).leader.classes)).toEqual(['A']);
+    const granted = await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: edited!.body['digest'] });
+    expect(granted?.status).toBe(200);
+    const switched = await call('POST', '/api/verse/authority', { action: 'switch', to: 'autonomous' });
+    expect(switched?.body).toMatchObject({ rollout: { stageId: 'elite-direct', stageIndex: 0 } });
+    // A re-approval continues elite-direct; asking to leave it that way is refused (a new grant does that).
+    const again = await call('GET', '/api/verse/authority/draft?kind=reapprove');
+    expect(again!.body).toMatchObject({ kind: 'reapprove', startStageId: 'elite-direct', eliteDirect: true });
+    const leave = await call('GET', '/api/verse/authority/draft?kind=reapprove&eliteDirect=0');
+    expect(leave?.status).toBe(409);
+    expect(leave?.body).toMatchObject({ code: 'elite-direct-reapprove' });
+  });
+
   it('refuses a digest it never served, a helper that signed something else, and a cancelled Touch ID', async () => {
     state.roots.push(TEST_ROOT);
     expect((await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: 'f'.repeat(64) }))?.body).toMatchObject({ code: 'draft-expired' });

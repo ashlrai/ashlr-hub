@@ -167,8 +167,8 @@ describe('a pane\'s own shortcut', () => {
     expect(shortcutProblem('t', 'x')).toMatch(/bare key/);
     expect(shortcutProblem('shift+t', 'x')).toMatch(/bare key/);
     expect(shortcutProblem('hyper+t', 'x')).toMatch(/not a chord/);
-    registerPane(pane({ id: 'first', title: 'First', shortcut: 'mod+alt+p' }));
-    registerPane(pane({ id: 'second', title: 'Second', shortcut: 'mod+alt+p' }));
+    registerPane(pane({ id: 'first', title: 'First', shortcut: 'mod+alt+u' }));
+    registerPane(pane({ id: 'second', title: 'Second', shortcut: 'mod+alt+u' }));
     expect(getPane('first')!.shortcut).not.toBeNull();
     expect(getPane('second')!.shortcut).toBeNull();
     expect(getPane('second')).not.toBeNull();

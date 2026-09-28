@@ -21,13 +21,24 @@ this project made against.
 
 ## The fast path
 
-Three commands, in order. Each one stops on its own failure.
+Run these commands in order from the final clean release commit. Each stops on
+its own failure. A tarball publish does **not** run `prepublishOnly` on npm 11,
+so run it explicitly before packaging.
 
 ```sh
-npm run gate          # a few minutes: static checks + the tests your change can reach
-npm run ship:local    # macOS: build, pack, install, update Ashlr.app, restart, check /verse/
+npm ci
+npm run gate:full
+npm run prepublishOnly
+# If native desktop code changed: npm run build:binary; node desktop/scripts/prepare-sidecar.mjs; (cd desktop && cargo tauri build)
+npm run ship:local -- --native  # uses a PREBUILT native binary; verify it was copied
 npm publish <tarball> --access public   # the path ship:local printed; see Publishing
 ```
+
+`ship:local --native` does not compile Rust. It skips the native replacement
+when `desktop/src-tauri/target/release/ashlr-desktop` is missing or older than
+the installed binary. Check its build timestamp and the installed app after
+shipping. Native builds and stable local signing can require interaction with
+macOS and the login keychain.
 
 **`npm run gate`** (`scripts/gate.mjs`) runs, and prints one table with a final
 `GATE PASS` or `GATE FAIL`:
@@ -198,6 +209,10 @@ npm publish /tmp/ashlr-hub-<version>.tgz --access public
 
 `--ignore-scripts` on the pack skips `prepack`, which would rebuild everything
 again. Only use it when you have *just* built; otherwise drop it.
+
+On npm 11, publishing an existing tarball skips this package's
+`prepublishOnly` lifecycle. Run `npm run prepublishOnly` on the exact final
+commit before `ship:local`, then publish only the tarball it printed.
 
 **The 2FA window is about four minutes, and it is not a background job.**
 `auth-type` is `web`, so the publish prints a `npmjs.com/auth/cli/<uuid>` URL

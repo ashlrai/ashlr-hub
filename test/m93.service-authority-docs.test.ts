@@ -10,7 +10,7 @@ function read(relativePath: string): string {
 }
 
 describe('resident service release-truth documentation', () => {
-  it.each(['README.md', 'docs/RELIABILITY.md', 'docs/WORKER.md', 'CHANGELOG.md'])(
+  it.each(['docs/AUTONOMY-SETUP.md', 'docs/RELIABILITY.md', 'docs/WORKER.md', 'CHANGELOG.md'])(
     '%s states the temporary production restriction',
     (relativePath) => {
       const text = read(relativePath);
@@ -21,6 +21,12 @@ describe('resident service release-truth documentation', () => {
       expect(text).toMatch(/compiled daemon and conductor trust roots are empty/is);
     },
   );
+
+  it('links the moved restriction from the install-first README', () => {
+    const readme = read('README.md');
+    expect(readme).toContain('docs/AUTONOMY-SETUP.md');
+    expect(readme).toMatch(/Autonomy ships \*\*dormant\*\*/i);
+  });
 
   it('documents the installed-service update block and read-only check mode', () => {
     const reliability = read('docs/RELIABILITY.md');

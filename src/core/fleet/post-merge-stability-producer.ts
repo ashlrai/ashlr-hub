@@ -21,6 +21,10 @@ export interface StableWindowCandidate {
   windowMs: number;
   /** Same-run green verification manifest supplied by the stability observer. */
   verificationDigest: string;
+  verifiedAt: string;
+  verificationIsolation: 'clean-workspace' | 'detached-worktree';
+  workspaceClean: true;
+  requiredCommandCount: number;
 }
 
 export interface StableWindowProductionResult {
@@ -50,11 +54,21 @@ function qualifiedWitness(candidate: StableWindowCandidate): Omit<PostMergeStabi
   if (!candidate || !isAbsolute(candidate.repo) || !candidate.proposalId || candidate.proposalId.length > 240 ||
     !GIT_SHA_RE.test(candidate.mergeCommit) || !GIT_SHA_RE.test(candidate.observedHead) ||
     !Number.isSafeInteger(candidate.windowMs) || candidate.windowMs < 1 ||
-    !/^[a-f0-9]{64}$/.test(candidate.verificationDigest)) return null;
+    !/^[a-f0-9]{64}$/.test(candidate.verificationDigest) ||
+    (candidate.verificationIsolation !== 'clean-workspace' &&
+      candidate.verificationIsolation !== 'detached-worktree') ||
+    candidate.workspaceClean !== true ||
+    !Number.isSafeInteger(candidate.requiredCommandCount) ||
+    candidate.requiredCommandCount < 1) return null;
   const windowStartedAt = canonicalTimestamp(candidate.windowStartedAtMs);
   const stableAt = canonicalTimestamp(candidate.stableAtMs);
-  if (!windowStartedAt || !stableAt || candidate.stableAtMs - candidate.windowStartedAtMs < candidate.windowMs) return null;
+  const verifiedAtMs = Date.parse(candidate.verifiedAt);
+  const verifiedAt = canonicalTimestamp(verifiedAtMs);
+  if (!windowStartedAt || !stableAt || !verifiedAt || candidate.verifiedAt !== verifiedAt ||
+    verifiedAtMs < candidate.stableAtMs ||
+    candidate.stableAtMs - candidate.windowStartedAtMs < candidate.windowMs) return null;
   return {
+    schemaVersion: 2,
     repo: resolve(candidate.repo),
     proposalId: candidate.proposalId,
     mergeCommit: candidate.mergeCommit,
@@ -63,6 +77,10 @@ function qualifiedWitness(candidate: StableWindowCandidate): Omit<PostMergeStabi
     stableAt,
     windowMs: candidate.windowMs,
     verificationDigest: candidate.verificationDigest,
+    verifiedAt,
+    verificationIsolation: candidate.verificationIsolation,
+    workspaceClean: true,
+    requiredCommandCount: candidate.requiredCommandCount,
   };
 }
 
@@ -132,7 +150,7 @@ export function recordStableWindowWitnesses(
     try {
       written = writer({
         cohortId: id,
-        completedAt: witness.stableAt,
+        completedAt: witness.verifiedAt!,
         witnesses: [{ ...witness, cohortId: id }],
       });
     } catch {

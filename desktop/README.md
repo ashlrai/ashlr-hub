@@ -31,22 +31,24 @@ or an installation channel.
 That policy is about *publishing*. Building Ashlr for your own Mac and keeping
 it in the Dock is supported and is what the rest of this document describes:
 
-1. [Build it](#the-exact-steps-on-this-mac) — `cargo tauri build`.
-2. Copy it into place, replacing any previous copy:
+1. [Build it](#the-exact-steps-on-this-mac), including the current CLI sidecar
+   and `cargo tauri build`.
+2. From the clean repository root, seed a first install if needed, then update
+   the prebuilt native binary and sign the app locally:
    ```sh
-   REPO=/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub
-   rm -rf /Applications/Ashlr.app
-   cp -R "$REPO/desktop/src-tauri/target/release/bundle/macos/Ashlr.app" /Applications/
+   test -d /Applications/Ashlr.app || ditto desktop/src-tauri/target/release/bundle/macos/Ashlr.app /Applications/Ashlr.app
+   npm run ship:local -- --native
    ```
-3. Open it **once** with right-click → Open, because the build is unsigned —
-   see [First open on an unsigned build](#first-open-on-an-unsigned-build-gatekeeper).
+3. Check that the installed app and bundled server report this release.
+   Gatekeeper may ask you to right-click → Open on first launch; see
+   [First open on a local build](#first-open-on-an-unsigned-build-gatekeeper).
 4. With Ashlr running, right-click its Dock icon → **Options → Keep in Dock**.
 
-To update later, quit Ashlr, repeat steps 1–2, and launch again. The
-right-click-Open exemption is remembered per app path, so a rebuild copied over
-`/Applications/Ashlr.app` normally opens straight away; if a macOS update
-resets that, do step 3 again. Nothing in `~/.ashlr` is touched by installing or
-replacing the bundle — your config, seats and window state all survive.
+To update later, repeat steps 1–3 from the new clean release checkout.
+`ship:local` backs up replaced files and uses the stable "Ashlr Local"
+code-signing identity so macOS permissions can survive rebuilds. Its first
+signing setup may ask for your login password and **Always Allow** for the key.
+Nothing in `~/.ashlr` is removed; config, seats and window state survive.
 
 ---
 
@@ -232,7 +234,8 @@ implements it:
 ```ts
 const browser = window.__ASHLR_DESKTOP__?.browser;
 // { version: 1,
-//   capabilities: { screenshot: boolean /* macOS only */, picker: true, console: true, text: true },
+//   capabilities: { screenshot: boolean /* macOS only */, picker: true, console: true, text: true,
+//                   act: boolean /* macOS only: snapshot, resolve, act, network, evaluate */ },
 //   send(msg): boolean /* true when handed to native */ }
 ```
 
@@ -253,9 +256,28 @@ an unknown field drops the whole message.
 | `hide` | — | Hide every tab (pane hidden or unmounted, page hidden). |
 | `close` | `tab` | Close and forget the tab (answers `closed`). |
 | `zoom` | `tab`, `factor` | Page zoom, clamped to [0.25, 5]. |
-| `query` | `tab`, `req`, `what` | `what` ∈ `text` \| `console` \| `info` \| `pick-start` \| `pick-poll` \| `pick-cancel`. Answers `result` (5 s timeout → `error: "timeout"`). |
-| `screenshot` | `tab`, `req` | macOS: `{ mime: 'image/png' \| 'image/jpeg', base64, width, height }` (pixels; JPEG q0.8 when the PNG exceeds 4 MB). Elsewhere `error: "unsupported"`. |
+| `query` | `tab`, `req`, `what` | `what` ∈ `text` \| `console` \| `info` \| `pick-start` \| `pick-poll` \| `pick-cancel` \| `resume`, or one of the argument forms below. Answers `result` (5 s timeout → `error: "timeout"`; an act gets 5 s + 20 ms per typed character). |
+| `screenshot` | `tab`, `req`, `clip?` | macOS: `{ mime: 'image/png' \| 'image/jpeg', base64, width, height, scale, origin: {x, y}, css: {width, height} }` — at most 1280×800 **pixels**; `scale` = CSS px per image px, `origin` = the image's top-left in CSS px (a `clip` in CSS px captures one rectangle of the viewport; the page beyond the viewport cannot be captured). JPEG q0.8 when the PNG exceeds 4 MB. Elsewhere `error: "unsupported"`. |
 | `external` | `url` | Open in the system browser (same URL rule; at most one per second). |
+
+**Query argument forms** (every struct rejects unknown fields; refs match
+`^e[1-9][0-9]{0,6}$`, signatures `^[a-z0-9]{1,16}$`):
+
+| `what` | Does |
+|---|---|
+| `{ snapshot: { max_nodes?, root_ref? } }` | Accessibility-style outline of what is visible (role, name, state, ref per element); password / payment / secret values read `[redacted]`; hidden and `aria-hidden` content left out. |
+| `{ network: { limit? } }` | Every fetch / XHR since load: method, URL, status, ms, sizes. No bodies, no headers. |
+| `{ resolve: { ref } \| { x, y } \| { focused: true } }` | What an element is: role, name, signature, form / link / download / sensitive flags, rect. |
+| `{ act: { kind, … } }` | `click` (`ref` or `x,y`; `button`, `double`, `modifiers`, `expect`), `type` (`ref`, `text` ≤ 2000, `submit`, `clear`), `select` (`ref`, `values`), `hover`, `key` (closed table: one printable character or Enter / Tab / Escape / Backspace / Delete / arrows / Home / End / PageUp / PageDown / Space, with Shift / Alt / Control; Meta only with `a` / `z`), `scroll` (`ref` and/or `direction`, `amount`). |
+| `{ evaluate: { expression } }` | Loopback pages only (checked natively and again in the page). The one form whose text runs as code — see below. |
+
+An act runs as: the tap's `prepare` (finds the point, re-checks `expect`,
+refuses what must never be done) → **real AppKit mouse / key events** sent into
+the tab's own window with `NSWindow sendEvent:` (trusted input: `isTrusted`
+is true; no Accessibility permission, no `CGEventPost`, never another window)
+→ the tap's `after`. `select`, `scroll` and a right click are done by the tap
+(a native popup or context menu would block the app). The typed text travels
+only as key events, never through a script.
 
 `tab` matches `^[a-z0-9]{1,16}$`, `req` `^[A-Za-z0-9_-]{1,40}$`. `bounds` is
 `{ x, y, width, height }` in CSS px relative to the Verse viewport (x, y ≥ 0;
@@ -272,6 +294,8 @@ window.addEventListener('ashlr:browser', (e) => {
   // { kind: 'title', tab, title }              ≤ 300 chars
   // { kind: 'blocked', tab, url, reason }      a navigation the URL rule refused
   // { kind: 'closed', tab }                    closed, evicted, ⌘W, or unknown tab
+  // { kind: 'operator', tab }                  genuine operator input in the tab (≤ 1 per 500 ms);
+  //                                            synthesized agent input never produces it
   // { kind: 'result', req, ok: true, data } | { kind: 'result', req, ok: false, error }
 });
 ```
@@ -291,8 +315,12 @@ the pane is visible (e.g. on `visibilitychange`).
   name `main` and `launch` exactly; a test fails if a pattern could match
   `browser-*`), so a website gets zero IPC.
 - Native evaluates only fixed scripts in a tab: the constant `browser_tap.js`
-  and a query wrapper chosen from a closed enum. Nothing the Verse page or the
-  website sends ever becomes code; answers travel as JSON.
+  and a tap call chosen from a closed enum, whose arguments are JSON built by
+  `serde_json` from validated values. Nothing the Verse page or the website
+  sends ever becomes code; answers travel as JSON. The single exception is
+  `evaluate`: loopback pages only, checked natively and against
+  `location.origin` in the page, and off unless the operator switched scripts
+  on for the chat.
 - URL rule: `http`/`https` only, no `user:pass@`, never the Verse origin itself
   (any loopback spelling on port 7777). Applied to requests and to every
   navigation the website makes; `target=_blank` / `window.open` open in the
@@ -300,9 +328,14 @@ the pane is visible (e.g. on `visibilitychange`).
 - Tabs use their own website data store, never Verse's (macOS 14+: a fixed
   store identifier, so pane logins persist; older macOS: a throwaway store;
   elsewhere `<app local data>/browser`).
-- Native only navigates, reads and snapshots. It never types, fills or submits
-  a form, enters a credential or clicks; the tap never reads form-control
-  values. The element picker swallows only the operator's own picking click.
+- Native acts only when the page asks with an `act` query, and only as real
+  input into the tab's own window. It never types into a password, payment,
+  SSN or secret field (the tap refuses in `prepare`, before any event), never
+  picks a file, and never sends ⌘V (the operator's clipboard). The tap reads a
+  field's content in one place, and never for a sensitive field. After an
+  agent click that made the tab key, key status goes straight back to the Verse
+  window, so the operator's typing never lands in the page. The element picker
+  swallows only the operator's own picking click.
 
 **Shipping.** This is a change to the Rust binary, not the web bundle: it only
 reaches an installed app through `npm run ship:local -- --native`. A web-only
@@ -341,6 +374,129 @@ lazy-loaded by each surface), `VoiceHud` (the one floating pill: waveform,
 `voice-store` (routing: a hotkey dictation goes to the focused, else
 last-focused, input). In a plain browser the same UI runs on the Web Speech
 API.
+
+### 9. Fleet operations (shell contract v1 `fleet`, 3.15)
+
+The Fleet tab starts, restarts and stops the resident daemon and installs the
+custody helper **without Terminal**. Implemented in `src-tauri/src/fleet_ops.rs`.
+
+**Feature test.** `window.__ASHLR_DESKTOP__.fleet` = `{ version: 1, ops, send }`.
+An older shell has no `fleet` key; the Fleet tab then shows the Terminal command.
+
+**Page → native.** `send({ id, op, checkout? })` emits `shell-fleet` over the
+event permission the page already has (no new capability, no new command).
+`id` matches `^[A-Za-z0-9_-]{1,64}$`; native drops anything else unparsed.
+
+| `op` | Effect |
+|---|---|
+| `resident-start` | Reads `ashlr authority resident status --json`, shows a **native** confirm dialog (grant, release, plist, budget, the exact command), then runs `ashlr authority resident start` with a one-time gesture token |
+| `resident-restart` | The same dialog, then `resident stop` + `resident start` |
+| `resident-stop` | A native confirm, then `ashlr authority resident stop` (lowering: no gesture token) |
+| `custody-install` | `checkout` (an ashlr-hub checkout the server found among the enrolled repos; `~/` allowed). Native re-validates it (absolute, `scripts/install-custody.sh` a regular file, `tools/custody/Package.swift`, an `ashlrai/ashlr-hub` remote), shows the command and the script's sha256 in a native dialog, then asks **macOS** for an administrator (`osascript … with administrator privileges`, every value passed as argv through `quoted form of`) |
+
+**Native → page.** `window.__ASHLR_FLEET_EVENT__(detail)` (non-writable) →
+the `ashlr:fleet` window event: `{ id, op, phase, message, command?, exitCode?, output? }`
+with `phase` ∈ `confirming | running | done | failed | cancelled`.
+
+**Why this is Mason and not an agent.** `resident start` in a terminal refuses
+anything without a TTY. Here the proof is a native modal dialog: page script
+can ask for it but cannot answer it, and a seat's tools (CLI processes, MCP
+servers) cannot reach this event bus at all. Only after the click does native
+write `~/.ashlr/authority/native-gestures/<32 hex>.json` (0600, create-new,
+no-follow; a directory every confined fleet agent is denied) and pass its name
+in `ASHLR_NATIVE_GESTURE`. The CLI (`authority/resident.ts consumeNativeGesture`)
+accepts it in place of the TTY only when it is fresh (≤ 120 s), private, owned
+by this user and names `resident-start`, and deletes it before trusting it.
+The child runs the operator's own `ashlr` (resolved by a login shell, never the
+bundled sidecar and never a page-supplied path) in a scrubbed environment, so
+the agent-marker and login-HOME checks still apply. Nothing here signs, raises
+or widens anything: the CLI still re-verifies the Touch-ID grant, the clean
+build, Stop and the switch, and mints its own single-use capability.
+
+### 10. Computer use (shell contract v1)
+
+Desktop control for Verse's agents: screenshots, the accessibility tree, and
+clicks / typing / keys / scroll / drag in apps the operator granted to a chat.
+The shared contract (ops, tiers, bundle lists, error codes) is
+`src/core/verse/computer-types.ts`; the native half is
+`src-tauri/src/computer.rs`. macOS only.
+
+**Feature test.**
+
+```ts
+const computer = window.__ASHLR_DESKTOP__?.computer;
+// { version: 1, capabilities: { supported: boolean /* macOS */ }, send(msg): boolean }
+```
+
+**Page → native.** `send(msg)` takes a plain object ≤ 16 KB of JSON and emits
+`shell-computer` over the event permission the page already has (no new
+capability, no new command). Parsed strictly: an unknown `op` or field, a bad
+`req` (`^[A-Za-z0-9_-]{1,40}$`), a bad bundle id, a non-finite number or an
+out-of-range value drops the message (answered `invalid` when its `req` is
+readable).
+
+| `op` | Fields | Answer `data` |
+|---|---|---|
+| `permissions` | `req` | `{ supported, macos, screen, accessibility, postEvents }` |
+| `request-permission` | `req`, `kind`: `screen` \| `accessibility` \| `post-events` | same (after the system prompt) |
+| `open-settings` | `kind`: `screen` \| `accessibility` | none (opens the Privacy pane from a closed enum) |
+| `list-apps` | `req` | `{ apps: [{ bundleId, name, pid, active, hidden, path }] }` (Dock apps) |
+| `screenshot` | `req`, `grants`, `app?`, `display?`, `scale?` (0.25–1) | `{ mime, base64, width, height, frame, display, apps: [{ bundleId, name }] }` |
+| `zoom` | `req`, `grants`, `frame`, `region: [x0,y0,x1,y1]` | `{ mime, base64, width, height }` |
+| `ax-tree` | `req`, `grants`, `app`, `maxDepth` (1–12), `frame?` | `{ app, nodes: [{ ref, depth, role, subrole?, title?, description?, value?, enabled, focused, secure, frame? }], truncated }` |
+| `probe` | `req`, `grants`, `frame?`, `target`: point \| ref \| focus | `{ app \| null, role, subrole, label, secure, windowTitle }` |
+| `ax-press` | `req`, `grants`, `app`, `ref` | `{ app, role, label }` |
+| `click` | `req`, `grants`, `frame`, `x`, `y`, `button`, `count` (1–3), `modifiers` | `{ app, role, label }` |
+| `type` | `req`, `grants`, `text` (≤ 2000 chars) | `{ app, chars }` |
+| `key` | `req`, `grants`, `keys` (e.g. `cmd+shift+t`, `Return`, `F5`) | `{ app }` |
+| `scroll` | `req`, `grants`, `frame`, `x`, `y`, `dx`, `dy` (lines, ±50; +dy = down) | `{ app, role, label }` |
+| `drag` | `req`, `grants`, `frame`, `from`, `to` | `{ app, role, label }` |
+| `resume` / `kill` / `arm` | — | a `state` event |
+
+`app` in answers is `{ bundleId, name, pid }`. Captures fit ≈1280×800 (times
+`scale`), never upscaled; `frame` maps screenshot pixels to global points
+(`origin + px * scale`). Refs (`e1`…) are valid until the next `ax-tree` for
+that app (`stale-ref` after).
+
+**Native → page.** `window.__ASHLR_COMPUTER_EVENT__(<json>)` (non-writable,
+non-configurable) dispatches `ashlr:computer`:
+
+```ts
+// { kind: 'result', req, ok: true, data } | { kind: 'result', req, ok: false, code, error }
+// { kind: 'state', state: 'idle' | 'active' | 'paused' | 'killed', app?, reason? }
+```
+
+Screen text in `data` (labels, values, titles) comes from other apps: render it
+as text and frame it as untrusted for the agent.
+
+**What native enforces** (whatever the page sends):
+
+- Grants are clamped to each app's ceiling — browsers `read`, terminals / IDEs
+  `click`, the rest `full` — and never widened. The hard denylist (password
+  managers, Keychain / Passwords, authentication prompts, the custody helper,
+  Ashlr itself, anything without a bundle id) is never captured or driven.
+- The target is resolved natively: the app under the point for mouse ops, the
+  frontmost app for `type` / `key`.
+- Secure text fields: never read, never typed into (nor while any app holds
+  secure input); only Tab, Shift+Tab and Escape are sent there.
+- System Settings' Privacy & Security / Passwords / Users & Groups / Login
+  Items panes are refused per action (an unreadable title counts as denied).
+- Takeover: hardware input more than 350 ms after the last synthetic event
+  pauses control (`operator-took-over`) until `resume`. Esc — registered as a
+  global shortcut only while the HUD shows — or `kill` stops it until `arm`.
+  Hiding, closing or reloading the Verse window pauses active control; acting
+  needs the Verse window visible. Ten idle seconds end the active state.
+- While an agent acts, an orange screen-edge border and a pill ("Agent
+  controlling <App> — Esc to stop") float above everything, ignore the mouse,
+  never take focus, and are excluded from sharing. Screenshots include only
+  granted apps' windows, so the HUD and Verse never appear in them.
+
+**Permissions.** Screen Recording (captures) and Accessibility (tree, input)
+are the operator's to grant in System Settings; `open-settings` deep-links
+there. Screenshots use ScreenCaptureKit's `SCScreenshotManager` (macOS 14+,
+loaded at run time); older macOS answers `unsupported`.
+
+**Shipping.** Rust binary change: `npm run ship:local -- --native`.
 
 ---
 
@@ -557,6 +713,10 @@ asks you to paste them:
 - `shell.open` is not granted to any page. The one Rust-side use is the
   browser pane's `external` op, which opens only `http`/`https` URLs that pass
   the pane's URL rule, at most one per second.
+- Computer use (§8) adds no capability or command: the page emits
+  `shell-computer`, and native re-checks every grant against the tier
+  ceilings, the hard denylist, secure fields, System Settings' privacy panes,
+  takeover and the kill switch before it captures or posts an event.
 - Browser pane tabs (§7) are separate `browser-<tab>` windows that no
   capability matches — websites in them get no IPC — with their own website
   data store, fixed read-only scripts, and the URL rule on every navigation.
@@ -610,7 +770,7 @@ asks you to paste them:
 | Rust + Cargo | 1.95 (min 1.85) | `curl https://sh.rustup.rs -sSf \| sh` |
 | Tauri CLI | 2.10.1 (2.x) | `cargo install tauri-cli --version "^2"` |
 | Bun | 1.x | `curl -fsSL https://bun.sh/install \| bash` |
-| Node.js | 18+ | https://nodejs.org |
+| Node.js | 22.15+ | https://nodejs.org |
 | Xcode command line tools | — | `xcode-select --install` |
 
 ### The exact steps on this Mac
@@ -652,7 +812,7 @@ needs to be redone. Nothing in step 4 needs the network.
 Output under `desktop/src-tauri/target/release/bundle/`:
 
 - `macos/Ashlr.app` — the installable app
-- `dmg/Ashlr_0.1.0_aarch64.dmg` — the disk image
+- `dmg/Ashlr_<version>_aarch64.dmg` — the disk image; `<version>` matches the root package version
 
 A debug bundle (unoptimized, faster to build, under `target/debug/bundle/`):
 
@@ -668,7 +828,7 @@ cd desktop && cargo tauri build --debug
 
 ### Is the DMG step broken?
 
-**No.** `cargo tauri build` on this Mac completes `Bundling Ashlr.app` →
+**No.** An earlier `cargo tauri build` on this Mac completed `Bundling Ashlr.app` →
 `Bundling Ashlr_0.1.0_aarch64.dmg` → `Running bundle_dmg.sh` → `Finished 2
 bundles`, exit code 0, in about 90 seconds once the Rust crate is compiled.
 
@@ -742,11 +902,12 @@ the failure is only about the disk image wrapped around it.
 
 ### First open on an unsigned build (Gatekeeper)
 
-Locally built apps are **unsigned and un-notarized**. macOS will refuse the
-first open with *"Ashlr" cannot be opened because the developer cannot be
-verified* — or, if you opened it from the DMG you just built, *"Ashlr" is
-damaged and can't be opened*, which is the same quarantine flag with a worse
-message.
+The raw `cargo tauri build` artifact may be unsigned. The supported local
+install through `ship:local --native` signs `/Applications/Ashlr.app` with
+"Ashlr Local", a stable identity trusted for code signing on this Mac. It is
+**not** an Apple Developer ID signature or notarization. Gatekeeper can still
+block its first open with *"Ashlr" cannot be opened because the developer
+cannot be verified*; a quarantined DMG may show a different warning.
 
 Do this once, after copying `Ashlr.app` to `/Applications`:
 
@@ -761,10 +922,9 @@ Do this once, after copying `Ashlr.app` to `/Applications`:
   xattr -dr com.apple.quarantine /Applications/Ashlr.app
   ```
 
-This is expected for any unsigned build and is not a bug in the app. It goes
-away only with an Apple Developer ID signature plus notarization, which is out
-of scope here (see [Auto-update](#auto-update-tauri-updater-plugin) for where
-signing secrets would go).
+This can occur with a local signature and is not a bug in the app. A public
+installer without that prompt would require Apple Developer ID signing and
+notarization, which this release does not provide.
 
 ### CI / automated releases
 

@@ -1,0 +1,23 @@
+{
+  "name": "Ashlr Verse",
+  "short_name": "Verse",
+  "description": "Run your Mac's agents, approvals, fleet and Leader from your phone.",
+  "id": "/verse/m/",
+  "start_url": "/verse/m/",
+  "scope": "/verse/m/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#fafafa",
+  "theme_color": "#fafafa",
+  "categories": ["developer", "productivity"],
+  "icons": [
+    { "src": "/next/verse-m/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/next/verse-m/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/next/verse-m/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/next/verse-m/apple-touch-icon.png", "sizes": "180x180", "type": "image/png", "purpose": "any" }
+  ],
+  "shortcuts": [
+    { "name": "Needs you", "url": "/verse/m/#/needs", "icons": [{ "src": "/next/verse-m/icon-192.png", "sizes": "192x192" }] },
+    { "name": "New agent", "url": "/verse/m/#/new", "icons": [{ "src": "/next/verse-m/icon-192.png", "sizes": "192x192" }] }
+  ]
+}

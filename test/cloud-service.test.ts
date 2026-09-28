@@ -61,6 +61,7 @@ function harness(opts: {
   seat?: string[] | null;
   defaultBranch?: string | null;
   runDelayMs?: number;
+  allowedRepos?: string[];
 } = {}): Harness {
   const events: string[] = [];
   const prompts: string[] = [];
@@ -93,7 +94,9 @@ function harness(opts: {
         // The launch must happen in the prepared checkout, and the task must already be persisted as launching.
         const persisted = listCloudTasks().find((t) => t.state === 'launching');
         events.push(`persisted:${persisted ? 'launching' : 'none'}`);
-        expect(runOpts.cwd).toBe(path.join(home, '.ashlr', 'cloud', 'checkouts', 'ashlrai__ashlr-hub'));
+        expect((opts.allowedRepos ?? ['ashlrai/ashlr-hub']).map((repo) =>
+          path.join(home, '.ashlr', 'cloud', 'checkouts', repo.replace('/', '__')),
+        )).toContain(runOpts.cwd);
         if (opts.runDelayMs) await new Promise((r) => setTimeout(r, opts.runDelayMs));
         const output = typeof opts.output === 'function' ? opts.output(runs) : opts.output ?? SUCCESS(`session_${runs}`);
         return { output, code: opts.timedOut ? null : 0, timedOut: opts.timedOut ?? false };
@@ -225,7 +228,7 @@ describe('launchCloudTask — gates come before persisting and launching', () =>
 
   it('two racing launches cannot both pass a concurrency cap of one', async () => {
     updateCloudBudget({ maxConcurrent: 1 });
-    const h = harness({ runDelayMs: 20 });
+    const h = harness({ runDelayMs: 20, allowedRepos: ['ashlrai/ashlr-hub', 'ashlrai/other'] });
     const [a, b] = await Promise.all([
       launchCloudTask({ ...REQ, baseBranch: 'master' }, h.deps),
       launchCloudTask({ ...REQ, repo: 'ashlrai/other', baseBranch: 'master' }, h.deps),

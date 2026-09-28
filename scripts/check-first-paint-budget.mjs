@@ -18,6 +18,18 @@
  * chunk. If one of them becomes a static import again, it joins a closure and
  * this check catches the regression.
  *
+ * VERSE ON A PHONE has its own budget (default 250 KB, `--mobile-budget-kb`),
+ * measured the same way from its own roots:
+ *
+ *   index.html                     the HTML entry (main.tsx)
+ *   app/VerseMobileApp.tsx         main.tsx's lazy() pick for /verse/m
+ *   routes/verse/mobile/screens/HomeScreen.tsx
+ *                                  the screen a cold launch paints
+ *
+ * Both budgets are checked on the one build; either over fails the script.
+ * The desktop figure is unchanged by the phone app: it is a separate lazy
+ * chunk no desktop root imports statically.
+ *
  * The build goes to a scratch outDir (never dist/), so running this cannot
  * clobber the served bundle.
  *
@@ -26,6 +38,7 @@
  *   node scripts/check-first-paint-budget.mjs --out-dir DIR   # build into DIR and keep it
  *   node scripts/check-first-paint-budget.mjs --no-build --out-dir DIR   # re-check an existing build
  *   node scripts/check-first-paint-budget.mjs --budget-kb 350 --json
+ *   node scripts/check-first-paint-budget.mjs --mobile-budget-kb 250
  *
  * Exit: 0 within budget, 1 over budget, 2 build/manifest error.
  */
@@ -45,6 +58,15 @@ export const CHAT_FIRST_PAINT_ROOTS = Object.freeze([
 ]);
 
 export const DEFAULT_BUDGET_KB = 350;
+
+/** Manifest keys on the phone app's first-paint path (/verse/m, Home). */
+export const MOBILE_FIRST_PAINT_ROOTS = Object.freeze([
+  'index.html',
+  'app/VerseMobileApp.tsx',
+  'routes/verse/mobile/screens/HomeScreen.tsx',
+]);
+
+export const DEFAULT_MOBILE_BUDGET_KB = 250;
 
 /**
  * Pure: `manifest` with every root that has no key of its own aliased to the
@@ -100,16 +122,18 @@ export function criticalFiles(manifest, roots = CHAT_FIRST_PAINT_ROOTS) {
 }
 
 function parseArgs(argv) {
-  const out = { build: true, outDir: null, budgetKb: DEFAULT_BUDGET_KB, json: false };
+  const out = { build: true, outDir: null, budgetKb: DEFAULT_BUDGET_KB, mobileBudgetKb: DEFAULT_MOBILE_BUDGET_KB, json: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--no-build') out.build = false;
     else if (arg === '--json') out.json = true;
     else if (arg === '--out-dir') out.outDir = resolve(argv[++i] ?? '');
     else if (arg === '--budget-kb') out.budgetKb = Number(argv[++i]);
+    else if (arg === '--mobile-budget-kb') out.mobileBudgetKb = Number(argv[++i]);
     else throw new Error(`unknown argument ${arg}`);
   }
   if (!Number.isFinite(out.budgetKb) || out.budgetKb <= 0) throw new Error('--budget-kb must be a positive number');
+  if (!Number.isFinite(out.mobileBudgetKb) || out.mobileBudgetKb <= 0) throw new Error('--mobile-budget-kb must be a positive number');
   if (!out.build && !out.outDir) throw new Error('--no-build needs --out-dir');
   return out;
 }
@@ -145,18 +169,28 @@ function main() {
         return [];
       }
     };
-    const manifest = aliasGroupedRoots(JSON.parse(readFileSync(manifestPath, 'utf8')), sourcesOf);
-    const rows = [...criticalFiles(manifest)]
-      .map((file) => ({ file, bytes: statSync(join(outDir, file)).size }))
-      .sort((a, b) => b.bytes - a.bytes);
-    const totalBytes = rows.reduce((sum, r) => sum + r.bytes, 0);
-    const totalKb = totalBytes / 1024;
-    const ok = totalKb <= args.budgetKb;
+    const raw = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    const measure = (roots, budgetKb) => {
+      const manifest = aliasGroupedRoots(raw, sourcesOf, roots);
+      const rows = [...criticalFiles(manifest, roots)]
+        .map((file) => ({ file, bytes: statSync(join(outDir, file)).size }))
+        .sort((a, b) => b.bytes - a.bytes);
+      const totalBytes = rows.reduce((sum, r) => sum + r.bytes, 0);
+      const totalKb = totalBytes / 1024;
+      return { ok: totalKb <= budgetKb, totalBytes, totalKb, budgetKb, files: rows };
+    };
+    const desktop = measure(CHAT_FIRST_PAINT_ROOTS, args.budgetKb);
+    const mobile = measure(MOBILE_FIRST_PAINT_ROOTS, args.mobileBudgetKb);
+    const ok = desktop.ok && mobile.ok;
     if (args.json) {
-      console.log(JSON.stringify({ ok, totalBytes, totalKb: Number(totalKb.toFixed(1)), budgetKb: args.budgetKb, files: rows }, null, 2));
+      const shape = (m) => ({ ok: m.ok, totalBytes: m.totalBytes, totalKb: Number(m.totalKb.toFixed(1)), budgetKb: m.budgetKb, files: m.files });
+      // Top-level fields stay the desktop chat figure (existing readers); the phone app rides under `mobile`.
+      console.log(JSON.stringify({ ...shape(desktop), ok, desktopOk: desktop.ok, mobile: shape(mobile) }, null, 2));
     } else {
-      for (const r of rows) console.log(`${(r.bytes / 1024).toFixed(1).padStart(8)} KB  ${r.file}`);
-      console.log(`${ok ? 'OK' : 'OVER BUDGET'}: chat first-paint critical JS ${totalKb.toFixed(1)} KB (budget ${args.budgetKb} KB)`);
+      for (const r of desktop.files) console.log(`${(r.bytes / 1024).toFixed(1).padStart(8)} KB  ${r.file}`);
+      console.log(`${desktop.ok ? 'OK' : 'OVER BUDGET'}: chat first-paint critical JS ${desktop.totalKb.toFixed(1)} KB (budget ${desktop.budgetKb} KB)`);
+      for (const r of mobile.files) console.log(`${(r.bytes / 1024).toFixed(1).padStart(8)} KB  ${r.file}`);
+      console.log(`${mobile.ok ? 'OK' : 'OVER BUDGET'}: phone (/verse/m) first-paint critical JS ${mobile.totalKb.toFixed(1)} KB (budget ${mobile.budgetKb} KB)`);
     }
     return ok ? 0 : 1;
   } catch (err) {

@@ -38,7 +38,7 @@ import { commandText } from './launch.js';
 import styles from './Apps.module.css';
 
 export const ACCOUNTS_EMPTY_TEXT =
-  'No accounts connected yet. Sign in to Claude Code, Codex or Grok in a terminal, or start Ollama for local models — they show up here within a minute.';
+  'No accounts connected yet. Sign in to Claude Code, Codex, Devin or Grok in a terminal, or start Ollama for local models — they show up here within a minute.';
 
 export function AccountsGroup({
   seats,

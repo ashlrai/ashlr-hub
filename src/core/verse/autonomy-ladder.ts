@@ -118,6 +118,12 @@ export interface ShadowDecisionV1 {
   gates: ShadowGateVerdictV1[];
   /** One sentence: why it would (or would not) merge. */
   why: string;
+  /**
+   * 3.15 elite self-land: the elite model's label when G6 passed on tests
+   * alone (no judge) — "Landed directly · elite model <label> · tests green".
+   * Absent / null otherwise (additive).
+   */
+  eliteModel?: string | null;
   /** The ladder stage current when the latest row was written; null = no grant was in force. */
   stageId: string | null;
   grantId: string | null;
@@ -221,19 +227,52 @@ interface Building {
   gates: Map<GateId, ShadowGateVerdictV1>;
   wouldMerge: WouldMergeRecord | null;
   landed: boolean;
+  /** 3.15: from the landing row (LandingRecord.eliteModel). */
+  landedElite: string | null;
   stageId: string | null;
   grantId: string | null;
   at: string;
   seq: number;
 }
 
-function decide(b: Building): Pick<ShadowDecisionV1, 'outcome' | 'why'> {
+
+/**
+ * authority/elite-models.ts ELITE_DIRECT_G6_CODE / ELITE_DIRECT_STAGE_ID,
+ * copied (not imported) so this stays a types-only leaf; a test pins them equal.
+ */
+export const LADDER_ELITE_G6_CODE = 'elite-direct';
+export const LADDER_ELITE_STAGE_ID = 'elite-direct';
+
+/**
+ * 3.15: the elite model's label when this proposal passed G6 on tests alone —
+ * from the landing row, else from the G6 row's reason ("elite model <label>
+ * (engine:model) under …"); null when it was judged (or is unknown).
+ */
+function eliteModelOf(b: Building): string | null {
+  if (b.landedElite) return b.landedElite;
+  const g6 = b.gates.get('G6');
+  if (!g6 || g6.verdict !== 'pass' || g6.code !== LADDER_ELITE_G6_CODE) return null;
+  return /^elite model (.{1,60}?) \(/u.exec(g6.reason)?.[1] ?? 'unnamed';
+}
+
+function decide(b: Building): Pick<ShadowDecisionV1, 'outcome' | 'why' | 'eliteModel'> {
   const ordered = GATES.map((g) => b.gates.get(g)).filter((v): v is ShadowGateVerdictV1 => v !== undefined);
   // A later would-merge / landing supersedes any earlier refusal only when the
   // gates that refused were re-run and passed: the last verdict per gate wins.
   const stop = ordered.find((v) => v.verdict !== 'pass') ?? null;
-  if (b.landed) return { outcome: 'merged', why: 'Every gate passed and it merged.' };
+  const eliteModel = eliteModelOf(b);
+  if (b.landed) {
+    return eliteModel
+      ? { outcome: 'merged', why: `Landed directly · elite model ${eliteModel} · tests green.`, eliteModel }
+      : { outcome: 'merged', why: 'Every gate passed and it merged.', eliteModel: null };
+  }
   if (b.wouldMerge && (!stop || Date.parse(b.wouldMerge.at) >= Date.parse(stop.at))) {
+    if (eliteModel) {
+      const held = b.wouldMerge.withheldBecause === 'shadow' && b.stageId !== LADDER_ELITE_STAGE_ID
+        ? 'elite-direct is no longer the current stage, so this unjudged change waits for you'
+        : WITHHELD_WHY[b.wouldMerge.withheldBecause] ?? 'the merge was withheld';
+      return { outcome: 'would-merge', why: `Every gate passed on tests alone (elite model ${eliteModel}, no judge); held because ${held}.`, eliteModel };
+    }
     return { outcome: 'would-merge', why: `Every gate passed; held because ${WITHHELD_WHY[b.wouldMerge.withheldBecause] ?? 'the merge was withheld'}.` };
   }
   if (stop) {
@@ -268,7 +307,7 @@ export function shadowDecisionsFromLedger(
   const touch = (proposalId: string, repo: string, entry: LedgerEntry): Building => {
     let b = byProposal.get(proposalId);
     if (!b) {
-      b = { proposalId, repo, headSha: null, prNumber: null, gates: new Map(), wouldMerge: null, landed: false, stageId: null, grantId: null, at: entry.at, seq: entry.seq };
+      b = { proposalId, repo, headSha: null, prNumber: null, gates: new Map(), wouldMerge: null, landed: false, landedElite: null, stageId: null, grantId: null, at: entry.at, seq: entry.seq };
       byProposal.set(proposalId, b);
     }
     b.at = entry.at;
@@ -328,6 +367,7 @@ export function shadowDecisionsFromLedger(
         if (!r.proposalId) break;
         const b = touch(r.proposalId, r.repo, entry);
         b.landed = true;
+        if (typeof r.eliteModel === 'string') b.landedElite = r.eliteModel.trim().replace(/\s+/g, ' ').slice(0, 60) || null;
         if (typeof r.prNumber === 'number') b.prNumber = r.prNumber;
         break;
       }
@@ -340,7 +380,7 @@ export function shadowDecisionsFromLedger(
     .sort((a, b) => b.seq - a.seq)
     .slice(0, limit)
     .map((b): ShadowDecisionV1 => {
-      const { outcome, why } = decide(b);
+      const { outcome, why, eliteModel } = decide(b);
       const w = b.wouldMerge;
       return {
         proposalId: b.proposalId,
@@ -355,6 +395,7 @@ export function shadowDecisionsFromLedger(
         linesDeleted: w?.linesDeleted ?? null,
         gates: GATES.map((g) => b.gates.get(g)).filter((v): v is ShadowGateVerdictV1 => v !== undefined),
         why,
+        ...(eliteModel ? { eliteModel } : {}),
         stageId: b.stageId,
         grantId: b.grantId,
         at: b.at,

@@ -1,0 +1,138 @@
+/*
+ * routes/verse/mobile/screens/NeedsYouScreen.module.css — Needs-you cards.
+ *
+ * A card sits in a clipping frame (.swipe): while it is dragged, the frame
+ * shows what letting go will do behind it, and nothing ever overflows the
+ * page sideways. The drag itself is direct manipulation (the card follows
+ * the finger); there is no animation, and under reduced motion no drag.
+ */
+
+.splits {
+  margin: 0 0 var(--space-4);
+}
+
+.list {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-6);
+  padding: 0;
+  list-style: none;
+}
+
+.swipe {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: var(--radius-xl);
+}
+
+.hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-5);
+  background: var(--accent-500);
+  color: var(--text-on-accent);
+  font-weight: var(--font-weight-semibold);
+}
+
+.hint[data-side='left'] {
+  justify-content: flex-end;
+  background: var(--status-danger-solid);
+}
+
+.hint[data-side='hide'] {
+  justify-content: flex-end;
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+.card {
+  position: relative;
+  display: grid;
+  gap: var(--space-2);
+  /* Vertical scrolling stays the browser's; a sideways drag is the card's. */
+  touch-action: pan-y;
+}
+
+.card[data-dragging] {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.age {
+  color: var(--text-tertiary);
+  font-size: 0.8em;
+  flex: none;
+}
+
+.title {
+  margin: 0;
+  font-size: 1.02em;
+  font-weight: var(--font-weight-semibold);
+  line-height: 1.3;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-3);
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.82em;
+  min-width: 0;
+}
+
+.expires {
+  color: var(--status-warning-fg);
+  font-weight: var(--font-weight-medium);
+}
+
+.detail {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.9em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.consequence {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--bg-canvas);
+  color: var(--text-secondary);
+  font-size: 0.82em;
+}
+
+.note {
+  margin: 0 var(--space-2) var(--space-4);
+  color: var(--text-tertiary);
+  font-size: 0.82em;
+}
+
+.undo {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) max(var(--space-4), env(safe-area-inset-right)) var(--space-2) max(var(--space-4), env(safe-area-inset-left));
+  background: var(--bg-surface-raised);
+  border-top: 1px solid var(--border-subtle);
+  font-size: 0.9em;
+}
+
+.undo > span {
+  flex: 1;
+  min-width: 0;
+}

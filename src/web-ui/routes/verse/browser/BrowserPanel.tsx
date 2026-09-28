@@ -15,11 +15,16 @@
  *     features say so instead of pretending.
  *
  * AGENTS. With "Agent access" on for this chat, the chat's Claude / local
- * seats get five browser tools (core/verse/browser-mcp.ts). Their commands
- * arrive here (long-poll, browser-queries.ts) and run in THIS pane —
- * agent-runner.ts — so an agent only ever sees what Mason sees. Localhost is
- * allowed; other origins only when Mason allows them below. No agent can
- * click, type, fill or submit anything.
+ * seats get browser tools (core/verse/browser-mcp.ts + verse-mcp-browser-
+ * act.ts). Their commands arrive here (long-poll, browser-queries.ts) and run
+ * in THIS pane — agent-runner.ts — so an agent only ever sees and touches
+ * what Mason sees. Localhost is allowed; other origins only when Mason allows
+ * them below. In the desktop app agents can also click, type, select, press
+ * keys and scroll (as real input, drawn as a ring in the page, listed in the
+ * strip under it); anything that matters shows a card here first — Allow
+ * once / Allow for this chat / Deny. Mason clicking or typing in the page
+ * while an agent is working pauses it ("You took over") until Resume. They
+ * never type into password or payment fields, pick files or download.
  *
  * Props are the pane contract the workbench pane registry mounts
  * (register.ts): the chat it serves, and whether it is on screen.
@@ -31,12 +36,21 @@ import { Button, IconButton } from '../../../components/primitives/Button.js';
 import { Segmented } from '../../../components/primitives/Segmented.js';
 import { Switch } from '../../../components/primitives/Switch.js';
 import { IconPlus, IconX } from '../../../components/primitives/icons.js';
-import type { VerseBrowserConsoleEntry, VerseBrowserNetworkEntry, VerseBrowserPolicy } from '../../../../core/verse/browser-types.js';
+import type {
+  VerseBrowserAgentCommand,
+  VerseBrowserCommandResult,
+  VerseBrowserConfirmRequest,
+  VerseBrowserConsoleEntry,
+  VerseBrowserDecision,
+  VerseBrowserNetworkEntry,
+  VerseBrowserPolicy,
+  VerseBrowserScope,
+} from '../../../../core/verse/browser-types.js';
 import { asConsoleEntries, asNetworkEntries, formatBrowserConsole, isLoopbackHost } from '../../../../core/verse/browser-types.js';
 import type { VersePreviewDevServer } from '../../../../core/verse/workbench-types.js';
 import { insertIntoComposer } from '../chat/composer-bridge.js';
 import { useTokenGate } from '../context/use-token-gate.js';
-import { executeAgentCommand, type BrowserExecutor } from './agent-runner.js';
+import { executeAgentCommand, type BrowserClip, type BrowserExecutor } from './agent-runner.js';
 import { originOf, parseBrowserAddress, shortAddress, type BrowserAddress } from './browser-address.js';
 import { DEVICE_SIZES, frameRect, isUsableRect, sameRect, stepZoom, zoomLabel, type DevicePreset, type Rect } from './browser-geometry.js';
 import {
@@ -65,11 +79,13 @@ import {
   restoreTabs,
   serializeTabs,
   type BrowserTab,
+  type BrowserTabsAction,
 } from './browser-tabs.js';
 import {
   nativeBrowser,
   nativeRequest,
   subscribeNativeBrowser,
+  type ApprovedPage,
   type NativeBrowser,
   type NativeQuery,
 } from './native-browser.js';
@@ -126,6 +142,9 @@ const BOUNDS_POLL_MS = 400;
 const PICK_POLL_MS = 400;
 const PICK_TIMEOUT_MS = 90_000;
 const NAV_WAIT_MS = 15_000;
+/** Operator input within this long of an agent command counts as taking over. */
+const AGENT_ACTIVE_MS = 120_000;
+const RECENT_ACTIONS_MAX = 6;
 /** Anything portalled onto <body> that a native layer would otherwise cover. */
 const OVERLAY_SELECTOR = '[role="dialog"],[role="alertdialog"],[aria-modal="true"],[role="menu"],[role="listbox"]';
 
@@ -144,17 +163,57 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function asScreenshot(value: unknown): BrowserScreenshot | null {
+function asScreenshot(value: unknown): (BrowserScreenshot & { scale?: number; origin?: { x: number; y: number } }) | null {
   if (!isRecord(value)) return null;
   const mime = value['mime'];
   const base64 = value['base64'];
   if ((mime !== 'image/png' && mime !== 'image/jpeg') || typeof base64 !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) return null;
+  const origin = isRecord(value['origin']) ? value['origin'] : null;
   return {
     mime,
     base64,
     width: typeof value['width'] === 'number' ? value['width'] : null,
     height: typeof value['height'] === 'number' ? value['height'] : null,
+    // Newer desktop shells say how image pixels map back to the page (≤ 1280×800 images).
+    ...(typeof value['scale'] === 'number' && Number.isFinite(value['scale']) && value['scale'] > 0 ? { scale: value['scale'] } : {}),
+    ...(origin && typeof origin['x'] === 'number' && typeof origin['y'] === 'number' ? { origin: { x: origin['x'], y: origin['y'] } } : {}),
   };
+}
+
+/** One line of the recent-actions strip. */
+interface AgentActionRow {
+  id: string;
+  at: number;
+  label: string;
+  outcome: 'done' | 'failed' | 'allowed' | 'declined';
+}
+
+/** What the strip says an agent command did, or null for pure reads (they are not actions). */
+function actionLabel(command: VerseBrowserAgentCommand): string | null {
+  const args = isRecord(command.args) ? command.args : {};
+  const target = typeof args['ref'] === 'string' ? ` ${args['ref']}` : typeof args['x'] === 'number' ? ` at ${Math.round(args['x'])},${Math.round(args['y'] as number)}` : '';
+  switch (command.op) {
+    case 'navigate':
+      return command.url ? `Opened ${shortAddress(command.url)}` : 'Opened a page';
+    case 'history':
+      return args['direction'] === 'forward' ? 'Went forward' : 'Went back';
+    case 'tabs':
+      return args['action'] === 'list' ? null : `Tabs: ${String(args['action'])}${typeof args['index'] === 'number' ? ` ${args['index']}` : ''}`;
+    case 'evaluate':
+      return 'Ran a script';
+    case 'act':
+      switch (args['kind']) {
+        case 'click': return `${args['double'] === true ? 'Double-clicked' : 'Clicked'}${target}`;
+        case 'type': return `Typed ${typeof args['text'] === 'string' ? args['text'].length : 0} chars into${target}${args['submit'] === true ? ' + Enter' : ''}`;
+        case 'select': return `Selected in${target}`;
+        case 'hover': return `Hovered${target}`;
+        case 'key': return `Pressed ${String(args['key'] ?? '')}`;
+        case 'scroll': return `Scrolled${args['direction'] ? ` ${String(args['direction'])}` : ''}${target}`;
+        default: return 'Acted';
+      }
+    default:
+      return null;
+  }
 }
 
 function tabLabel(tab: BrowserTab): string {
@@ -220,7 +279,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
   const mode: 'native' | 'frame' = native ? 'native' : 'frame';
   const gate = useTokenGate();
 
-  const [tabsState, dispatch] = useReducer(browserTabsReducer, undefined, () => {
+  const [tabsState, rawDispatch] = useReducer(browserTabsReducer, undefined, () => {
     let raw: string | null = null;
     try {
       raw = deps.storage()?.getItem(BROWSER_TABS_STORAGE_KEY) ?? null;
@@ -229,6 +288,14 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
     }
     return restoreTabs(raw);
   });
+  const tabsStateRef = useRef(tabsState);
+  tabsStateRef.current = tabsState;
+  // Native navigation events and agent commands can dispatch before React's
+  // next render. Keep the action fence's tab view current within that gap.
+  const dispatch = useCallback((action: BrowserTabsAction) => {
+    tabsStateRef.current = browserTabsReducer(tabsStateRef.current, action);
+    rawDispatch(action);
+  }, [rawDispatch]);
   const tab = selectActiveTab(tabsState);
 
   const [device, setDevice] = useState<DevicePreset>('fill');
@@ -246,6 +313,15 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
   const [policy, setPolicy] = useState<VerseBrowserPolicy | null>(null);
   const [servers, setServers] = useState<VersePreviewDevServer[] | null>(null);
   const [agentActivity, setAgentActivity] = useState<string | null>(null);
+  // The operator took the pane over while an agent was working: agent commands wait for Resume.
+  const [paused, setPaused] = useState(false);
+  const pausedRef = useRef(false);
+  pausedRef.current = paused;
+  const [confirmCard, setConfirmCard] = useState<{ request: VerseBrowserConfirmRequest; answer: (d: VerseBrowserDecision) => void } | null>(null);
+  const confirmAnswerRef = useRef<((d: VerseBrowserDecision) => void) | null>(null);
+  const [recentActions, setRecentActions] = useState<AgentActionRow[]>([]);
+  const lastAgentAtRef = useRef(0);
+  const agentOnRef = useRef(false);
 
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [stageEl, setStageEl] = useState<HTMLDivElement | null>(null);
@@ -285,10 +361,19 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
   const lastBoundsRef = useRef<Rect | null>(null);
   const shownRef = useRef<string | null>(null);
 
+  /** Mason used the pane while an agent was working: pause the agent until he presses Resume. */
+  const noteOperatorInput = useCallback(() => {
+    if (agentOnRef.current && Date.now() - lastAgentAtRef.current < AGENT_ACTIVE_MS) setPaused(true);
+  }, []);
+
   useEffect(() => {
     if (!native) return undefined;
     return subscribeNativeBrowser((event) => {
       switch (event.kind) {
+        case 'operator':
+          // Genuine input only: native never reports the agent's own synthesised events.
+          if (event.tab === activeIdRef.current) noteOperatorInput();
+          break;
         case 'nav':
           dispatch({ type: 'native-nav', id: event.tab, url: event.url, loading: event.loading });
           break;
@@ -313,7 +398,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
           break;
       }
     });
-  }, [native]);
+  }, [native, noteOperatorInput, dispatch]);
 
   const showNative = mode === 'native' && visible && docVisible && !overlayOpen && tab.url !== null && !gate.dialog.open;
 
@@ -380,7 +465,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
   const navigateTab = useCallback((id: string, url: string) => {
     dispatch({ type: 'navigate', id, url });
     if (native && openedRef.current.has(id)) native.send({ op: 'navigate', tab: id, url });
-  }, [native]);
+  }, [native, dispatch]);
 
   const submitAddress = (event: FormEvent) => {
     event.preventDefault();
@@ -396,6 +481,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
     addressFocused.current = false;
     const input = (event.currentTarget as HTMLFormElement).querySelector('input');
     input?.blur();
+    noteOperatorInput();
     navigateTab(tab.id, parsed.url);
   };
 
@@ -408,14 +494,17 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
   };
 
   const goBack = () => {
+    noteOperatorInput();
     if (native && openedRef.current.has(tab.id)) native.send({ op: 'back', tab: tab.id });
     else dispatch({ type: 'step', id: tab.id, delta: -1 });
   };
   const goForward = () => {
+    noteOperatorInput();
     if (native && openedRef.current.has(tab.id)) native.send({ op: 'forward', tab: tab.id });
     else dispatch({ type: 'step', id: tab.id, delta: 1 });
   };
   const reload = () => {
+    noteOperatorInput();
     if (!tab.url) {
       void refreshServers();
       return;
@@ -467,10 +556,10 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
   // Capture: console, screenshot, picker
   // -------------------------------------------------------------------------
 
-  const queryTab = useCallback((what: NativeQuery, timeoutMs = 6_000): Promise<unknown> => {
+  const queryTab = useCallback((what: NativeQuery, timeoutMs = 6_000, approved?: ApprovedPage): Promise<unknown> => {
     if (!native) return Promise.reject(new Error('Needs the Ashlr desktop app.'));
     if (!openedRef.current.has(tab.id)) return Promise.reject(new Error('No page is open.'));
-    return nativeRequest(native, (req) => ({ op: 'query', tab: tab.id, req, what }), timeoutMs);
+    return nativeRequest(native, (req) => ({ op: 'query', tab: tab.id, req, what, ...(approved ? { approved } : {}) }), timeoutMs);
   }, [native, tab.id]);
 
   const readConsole = useCallback(async () => {
@@ -505,11 +594,11 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
     };
   }, [devtoolsOpen, mode, visible, tab.url, readConsole]);
 
-  const takeScreenshot = useCallback(async (): Promise<BrowserScreenshot> => {
+  const takeScreenshot = useCallback(async (clip?: BrowserClip): Promise<BrowserScreenshot & { scale?: number; origin?: { x: number; y: number } }> => {
     if (!native) throw new Error('Screenshots need the Ashlr desktop app — a web page cannot capture another site\'s frame.');
     if (!native.capabilities.screenshot) throw new Error('This desktop shell cannot take screenshots on this platform yet (macOS only).');
     if (!openedRef.current.has(tab.id)) throw new Error('No page is open.');
-    const data = await nativeRequest(native, (req) => ({ op: 'screenshot', tab: tab.id, req }), 20_000);
+    const data = await nativeRequest(native, (req) => ({ op: 'screenshot', tab: tab.id, req, ...(clip ? { clip } : {}) }), 20_000);
     const parsed = asScreenshot(data);
     if (!parsed) throw new Error('The screenshot could not be read.');
     return parsed;
@@ -655,6 +744,32 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
     }
   };
 
+  const setScope = async (scope: VerseBrowserScope, enabled: boolean) => {
+    if (!sessionId) return;
+    setBusy('access');
+    try {
+      const reason = scope === 'browser_act'
+        ? (enabled ? 'Let this chat\'s agents click and type in the browser' : 'Stop agents clicking and typing')
+        : (enabled ? 'Let this chat\'s agents run full-privilege scripts in localhost pages, including access to cookies and stored credentials' : 'Stop agents running page scripts');
+      const next = await gate.run(reason, () => api.setAccess(sessionId, enabled, scope));
+      if (next) setPolicy(next);
+    } catch (err) {
+      setNotice(errorText(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const revokeAllowance = async (key: string) => {
+    if (!sessionId) return;
+    try {
+      const next = await gate.run('Forget an "Allow for this chat" answer', () => api.revokeAllowance(sessionId, key));
+      if (next) setPolicy(next);
+    } catch (err) {
+      setNotice(errorText(err));
+    }
+  };
+
   const allowOrigin = async (origin: string, allowed: boolean) => {
     if (!sessionId) return;
     try {
@@ -665,6 +780,28 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
     }
   };
 
+  /** Resolves when the tab's next page load finishes (or after NAV_WAIT_MS, still loading). */
+  const waitForLoad = useCallback((id: string, fallbackUrl: string | null): Promise<{ url: string | null; title: string | null; loading: boolean }> => {
+    return new Promise((resolve) => {
+      let last = fallbackUrl;
+      let title: string | null = null;
+      const stop = subscribeNativeBrowser((event) => {
+        if (event.kind === 'title' && event.tab === id) title = event.title;
+        if (event.kind !== 'nav' || event.tab !== id) return;
+        last = event.url;
+        if (!event.loading) {
+          stop();
+          clearTimeout(timer);
+          resolve({ url: last, title, loading: false });
+        }
+      });
+      const timer = setTimeout(() => {
+        stop();
+        resolve({ url: last, title, loading: true });
+      }, NAV_WAIT_MS);
+    });
+  }, []);
+
   // The executor sees the CURRENT pane every time a command runs.
   const executorRef = useRef<BrowserExecutor | null>(null);
   executorRef.current = {
@@ -673,8 +810,9 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
       screenshot: mode === 'native' && native?.capabilities.screenshot === true,
       text: mode === 'native' && native?.capabilities.text !== false,
       console: mode === 'native' && native?.capabilities.console !== false,
+      act: mode === 'native' && native?.capabilities.act === true,
     },
-    current: () => ({ url: tab.url, title: tab.title, tabs: tabsState.tabs.length }),
+    current: () => ({ tabId: tab.id, url: tab.url, title: tab.title, tabs: tabsState.tabs.length }),
     navigate: async (url) => {
       const id = tab.id;
       navigateTab(id, url);
@@ -682,25 +820,56 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
         await new Promise((resolve) => setTimeout(resolve, 1_000));
         return { url, title: null, loading: false };
       }
-      return new Promise((resolve) => {
-        let last = url;
-        let title: string | null = null;
-        const stop = subscribeNativeBrowser((event) => {
-          if (event.kind === 'title' && event.tab === id) title = event.title;
-          if (event.kind !== 'nav' || event.tab !== id) return;
-          last = event.url;
-          if (!event.loading) {
-            stop();
-            clearTimeout(timer);
-            resolve({ url: last, title, loading: false });
-          }
-        });
-        const timer = setTimeout(() => {
-          stop();
-          resolve({ url: last, title, loading: true });
-        }, NAV_WAIT_MS);
-      });
+      const landed = await waitForLoad(id, url);
+      return { url: landed.url ?? url, title: landed.title, loading: landed.loading };
     },
+    query: (what, timeoutMs, approved) => queryTab(what, timeoutMs, approved),
+    history: async (direction) => {
+      const id = tab.id;
+      if (native && openedRef.current.has(id)) {
+        const waiting = waitForLoad(id, tab.url);
+        native.send({ op: direction, tab: id });
+        return waiting;
+      }
+      dispatch({ type: 'step', id, delta: direction === 'back' ? -1 : 1 });
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      return { url: null, title: null, loading: false };
+    },
+    tabs: () => tabsStateRef.current.tabs.map((t, index) => ({ id: t.id, index, url: t.url, title: t.title, active: t.id === tabsStateRef.current.activeId })),
+    openTab: async (url) => {
+      dispatch({ type: 'new-tab', url });
+      await new Promise((resolve) => setTimeout(resolve, url ? 1_500 : 0));
+    },
+    selectTab: (index) => {
+      const target = tabsStateRef.current.tabs[index];
+      if (!target) return false;
+      dispatch({ type: 'activate', id: target.id });
+      return true;
+    },
+    closeTab: (index) => {
+      const target = tabsStateRef.current.tabs[index];
+      if (!target) return false;
+      closeTab(target.id);
+      return true;
+    },
+    confirm: (request) => new Promise<VerseBrowserDecision>((resolve) => {
+      const expires = Date.parse(request.expiresAt);
+      // Answer a little before the sidecar gives up, so a late click never races it.
+      const ms = Math.max(1_000, Math.min(118_000, (Number.isFinite(expires) ? expires - Date.now() : 118_000) - 2_000));
+      let done = false;
+      const finish = (decision: VerseBrowserDecision): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        confirmAnswerRef.current = null;
+        setConfirmCard(null);
+        resolve(decision);
+      };
+      const timer = setTimeout(() => finish('deny'), ms);
+      confirmAnswerRef.current = finish;
+      setConfirmCard({ request, answer: finish });
+    }),
+    paused: () => pausedRef.current,
     screenshot: takeScreenshot,
     text: async (limit) => {
       const data = await queryTab('text');
@@ -717,6 +886,24 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
   };
 
   const agentOn = policy?.agentAccess === true;
+  agentOnRef.current = agentOn;
+  useEffect(() => {
+    if (!agentOn) setPaused(false);
+  }, [agentOn]);
+
+  const recordAction = useCallback((command: VerseBrowserAgentCommand, result: VerseBrowserCommandResult) => {
+    let label = actionLabel(command);
+    let outcome: AgentActionRow['outcome'] = result.ok ? 'done' : 'failed';
+    if (command.op === 'confirm') {
+      const args = isRecord(command.args) ? command.args : {};
+      const decision = isRecord(result.data) ? result.data['decision'] : null;
+      label = `Asked you: ${typeof args['action'] === 'string' ? args['action'].slice(0, 80) : 'an action'}`;
+      outcome = decision === 'once' || decision === 'chat' ? 'allowed' : 'declined';
+    }
+    if (!label) return;
+    setRecentActions((rows) => [{ id: command.id, at: Date.now(), label, outcome }, ...rows].slice(0, RECENT_ACTIONS_MAX));
+  }, []);
+
   useEffect(() => {
     if (!sessionId || !visible || !agentOn) return undefined;
     const ctrl = new AbortController();
@@ -732,8 +919,12 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
           const { commands } = await api.commands(sessionId, ctrl.signal);
           for (const command of commands) {
             if (stopped) break;
-            setAgentActivity(command.op === 'navigate' && command.url ? `Agent opened ${shortAddress(command.url)}` : `Agent: ${command.op.replace('-', ' ')}`);
-            const result = await executeAgentCommand(command, executorRef.current!, verseOrigin);
+            if (command.op !== 'status') lastAgentAtRef.current = Date.now();
+            setAgentActivity(command.op === 'navigate' && command.url
+              ? `Agent opened ${shortAddress(command.url)}`
+              : command.op === 'confirm' ? 'Agent is waiting for your answer' : `Agent: ${command.op.replace('-', ' ')}`);
+            const result = await executeAgentCommand(command, executorRef.current!, verseOrigin, (id) => api.canDispatch(sessionId, id));
+            recordAction(command, result);
             await api.result(sessionId, result).catch(() => {});
           }
         } catch {
@@ -746,8 +937,10 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
       stopped = true;
       ctrl.abort();
       setAgentActivity(null);
+      // A card nobody can answer any more is a no.
+      confirmAnswerRef.current?.('deny');
     };
-  }, [sessionId, visible, agentOn, api, verseOrigin]);
+  }, [sessionId, visible, agentOn, api, verseOrigin, recordAction]);
 
   // -------------------------------------------------------------------------
   // Render
@@ -769,11 +962,11 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
             return (
               <div key={t.id} className={styles.tab} data-selected={selected || undefined} role="presentation">
                 <button type="button" role="tab" aria-selected={selected} aria-controls="browser-stage" tabIndex={selected ? 0 : -1}
-                  className={styles.tabButton} title={t.url ?? 'New tab'} onClick={() => dispatch({ type: 'activate', id: t.id })}>
+                  className={styles.tabButton} title={t.url ?? 'New tab'} onClick={() => { noteOperatorInput(); dispatch({ type: 'activate', id: t.id }); }}>
                   {t.loading ? <span className={styles.spinner} aria-hidden="true" /> : <GlobeGlyph size={12} />}
                   <span className={styles.tabTitle}>{label}</span>
                 </button>
-                <button type="button" className={styles.tabClose} aria-label={`Close ${label}`} title="Close tab" onClick={() => closeTab(t.id)}>
+                <button type="button" className={styles.tabClose} aria-label={`Close ${label}`} title="Close tab" onClick={() => { noteOperatorInput(); closeTab(t.id); }}>
                   <IconX size={12} />
                 </button>
               </div>
@@ -781,7 +974,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
           })}
         </div>
         <IconButton variant="ghost" size="sm" icon={<IconPlus />} aria-label="New tab" title="New tab" className={styles.newTab}
-          disabled={tabsState.tabs.length >= MAX_BROWSER_TABS} onClick={() => dispatch({ type: 'new-tab' })} />
+          disabled={tabsState.tabs.length >= MAX_BROWSER_TABS} onClick={() => { noteOperatorInput(); dispatch({ type: 'new-tab' }); }} />
       </div>
 
       <div className={styles.toolbar}>
@@ -857,6 +1050,13 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
         </div>
       ) : null}
       {picking ? <div className={styles.note} role="status">Click an element in the page to pick it — Esc cancels.</div> : null}
+      {confirmCard ? <ConfirmCard request={confirmCard.request} onAnswer={confirmCard.answer} /> : null}
+      {paused ? (
+        <div className={styles.note} role="status" data-kind="paused">
+          <strong>You took over.</strong> The agent is paused while you use the page.
+          <Button size="sm" variant="subtle" className={styles.noteAction} onClick={() => setPaused(false)}>Resume agent</Button>
+        </div>
+      ) : null}
 
       {shot || element ? (
         <div className={styles.tray} aria-label="Captured for the chat">
@@ -943,14 +1143,28 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
         ) : null}
       </div>
 
+      {sessionId && agentOn && recentActions.length > 0 ? (
+        <ol className={styles.actions} aria-label="Recent agent actions">
+          {recentActions.map((row) => (
+            <li key={row.id} className={styles.action} data-outcome={row.outcome} title={new Date(row.at).toLocaleTimeString()}>
+              {row.label}
+              {row.outcome === 'failed' ? ' — failed' : row.outcome === 'declined' ? ' — declined' : row.outcome === 'allowed' ? ' — allowed' : ''}
+            </li>
+          ))}
+        </ol>
+      ) : null}
+
       {sessionId ? (
         <AgentAccessBar
           policy={policy}
           busy={busy === 'access'}
-          activity={agentActivity}
+          activity={paused ? 'Paused — you took over.' : agentActivity}
           mode={mode}
+          canAct={mode === 'native' && native?.capabilities.act === true}
           onToggle={(on) => void setAccess(on)}
+          onScope={(scope, on) => void setScope(scope, on)}
           onAllow={(origin, allowed) => void allowOrigin(origin, allowed)}
+          onRevoke={(key) => void revokeAllowance(key)}
           currentOrigin={tab.url ? originOf(tab.url) : null}
         />
       ) : null}
@@ -994,16 +1208,58 @@ function Launcher({ servers, hasChat, onOpen }: { servers: VersePreviewDevServer
   );
 }
 
-function AgentAccessBar({ policy, busy, activity, mode, onToggle, onAllow, currentOrigin }: {
+/**
+ * The operator's say over one agent action. The page's own words for the
+ * element (untrusted) are shown as plain text, next to — never instead of —
+ * what Verse knows: the action, the origin and why it is being asked.
+ */
+function ConfirmCard({ request, onAnswer }: { request: VerseBrowserConfirmRequest; onAnswer: (decision: VerseBrowserDecision) => void }) {
+  const [left, setLeft] = useState(() => Math.max(0, Math.round((Date.parse(request.expiresAt) - Date.now()) / 1000)));
+  useEffect(() => {
+    const timer = setInterval(() => setLeft(Math.max(0, Math.round((Date.parse(request.expiresAt) - Date.now()) / 1000))), 1_000);
+    return () => clearInterval(timer);
+  }, [request.expiresAt]);
+  return (
+    <section className={styles.confirm} role="group" aria-label="The agent is asking to act">
+      <div className={styles.confirmHead}>
+        <ShieldGlyph size={14} />
+        <strong>The agent wants to: {request.action}</strong>
+        <span className={styles.muted}>{Number.isFinite(left) ? `${left}s` : ''}</span>
+      </div>
+      <p className={styles.confirmBody}>
+        On <code>{request.origin}</code>
+        {request.target ? <> · the page calls it <q>{request.target}</q></> : null}
+      </p>
+      {request.reasons.length > 0 ? (
+        <ul className={styles.confirmReasons}>
+          {request.reasons.map((reason) => <li key={reason}>Asked because {reason}.</li>)}
+        </ul>
+      ) : null}
+      <div className={styles.confirmActions}>
+        <Button size="sm" variant="primary" onClick={() => onAnswer('once')}>Allow once</Button>
+        <Button size="sm" variant="subtle" onClick={() => onAnswer('chat')}>Allow for this chat</Button>
+        <Button size="sm" variant="ghost" onClick={() => onAnswer('deny')}>Deny</Button>
+      </div>
+    </section>
+  );
+}
+
+function AgentAccessBar({ policy, busy, activity, mode, canAct, onToggle, onScope, onAllow, onRevoke, currentOrigin }: {
   policy: VerseBrowserPolicy | null;
   busy: boolean;
   activity: string | null;
   mode: 'native' | 'frame';
+  canAct: boolean;
   onToggle: (on: boolean) => void;
+  onScope: (scope: VerseBrowserScope, on: boolean) => void;
   onAllow: (origin: string, allowed: boolean) => void;
+  onRevoke: (key: string) => void;
   currentOrigin: string | null;
 }) {
   const on = policy?.agentAccess === true;
+  const act = policy?.actAccess === true;
+  const script = policy?.scriptAccess === true;
+  const allowances = policy?.allowances ?? [];
   const allowed = policy?.allowedOrigins ?? [];
   const blocked = policy?.blocked ?? [];
   const engines = policy?.toolEngines ?? ['claude', 'local'];
@@ -1023,11 +1279,29 @@ function AgentAccessBar({ policy, busy, activity, mode, onToggle, onAllow, curre
         <Switch checked={on} disabled={busy || policy === null} onChange={onToggle} label="Agents in this chat can use this browser" />
         <span className={styles.muted}>
           {on
-            ? activity ?? `Localhost only${allowed.length ? ` + ${allowed.length} allowed` : ''} · look, navigate, screenshot, read — never click, type or submit.`
+            ? activity ?? `Localhost only${allowed.length ? ` + ${allowed.length} allowed` : ''} · ${act && canAct ? 'look, click and type — asks you before anything that matters' : 'look, navigate, screenshot, read'} · never passwords, payments, files or downloads.`
             : `Gives ${engines.includes('claude') ? 'Claude and local' : engines.join(', ')} seats browser tools from their next turn.`}
+
           {on && mode === 'frame' ? ' In the web UI agents can only navigate.' : ''}
+          {on && mode === 'native' && !canAct ? ' Update the desktop app to let agents click and type.' : ''}
         </span>
       </div>
+      {on ? (
+        <div className={styles.agentRow}>
+          <Switch checked={act} disabled={busy} onChange={(next) => onScope('browser_act', next)} label="Click and type" />
+          <Switch checked={script} disabled={busy || !act} onChange={(next) => onScope('browser_script', next)} label="Run scripts (localhost)" />
+        </div>
+      ) : null}
+      {on && allowances.length > 0 ? (
+        <div className={styles.agentOrigins} aria-label="Allowed for this chat">
+          {allowances.map((key) => (
+            <span key={`k-${key}`} className={styles.chip} data-kind="allowance">
+              {key}
+              <button type="button" className={styles.noteClose} aria-label={`Stop allowing ${key}`} onClick={() => onRevoke(key)}><IconX size={12} /></button>
+            </span>
+          ))}
+        </div>
+      ) : null}
       {on && (blocked.length > 0 || allowed.length > 0 || offer) ? (
         <div className={styles.agentOrigins}>
           {blocked.map((b) => (

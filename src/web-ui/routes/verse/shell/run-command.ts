@@ -41,7 +41,7 @@ import {
 import { COMPOSER_COMMAND_IDS, WORKBENCH_COMMAND_EVENT } from '../composer/composer-keys.js';
 import { PARKED_COMMAND_TTL_MS, registerCommandHandler, runCommand, runCommandWhenReady, type CommandInvocation } from './command-bus.js';
 import { commandCatalogLoaded, keyBinding, loadedCommand } from './command-keys.js';
-import { requestGuarded } from './guarded-action.js';
+import { requestGuarded } from './guard-store.js';
 
 export type ShellNotify = (message: string, tone?: 'neutral' | 'success' | 'danger') => void;
 
@@ -190,6 +190,11 @@ export function executeCatalogCommand(id: string, invocation: CommandInvocation 
  * The GLOBAL commands the shell itself serves (every other id belongs to the
  * unit that owns the behaviour). Returns the unregister function.
  */
+/** The Agents board (3.16) takes New agent once its lazy chunk mounts (agents-focus.ts). */
+function agentsFocus(kind: 'new' | 'new-multi'): void {
+  void import('../agents/agents-focus.js').then((m) => m.requestAgentsFocus(kind));
+}
+
 export function registerShellCommandHandlers(): () => void {
   const surfaces: Array<[string, VerseSectionId]> = [
     ['surface.command', 'command'],
@@ -197,6 +202,7 @@ export function registerShellCommandHandlers(): () => void {
     ['surface.growth', 'growth'],
     ['surface.mind', 'mind'],
     ['surface.chat', 'chat'],
+    ['surface.agents', 'agents'],
     ['section.settings', 'settings'],
     ['section.apps', 'apps'],
     ['section.usage', 'usage'],
@@ -218,15 +224,21 @@ export function registerShellCommandHandlers(): () => void {
     registerCommandHandler('chat.recent-next', () => { cycleVerseRecentChat(1); }),
     registerCommandHandler('chat.recent-prev', () => { cycleVerseRecentChat(-1); }),
     registerCommandHandler('rail.toggle-labels', () => toggleVerseRail()),
-    registerCommandHandler('chat.new', () => requestVerseCommand('new-chat')),
+    // ⌘N on the Agents board starts an agent in its own workspace; anywhere else, a chat.
+    registerCommandHandler('chat.new', () => {
+      if (getVerseUiState().section === 'agents') agentsFocus('new');
+      else requestVerseCommand('new-chat');
+    }),
+    registerCommandHandler('agents.new', () => agentsFocus('new')),
+    registerCommandHandler('agents.new-multi', () => agentsFocus('new-multi')),
     registerCommandHandler('chat.new-on', (inv) => {
       const seat = inv.argument?.kind === 'seat' ? inv.argument.id : undefined;
       requestVerseCommand('new-chat', seat ? { seatId: seat } : {});
     }),
     registerCommandHandler('appearance.toggle-theme', () => cycleTheme()),
     registerCommandHandler('app.summon', () => requestVerseCommand('focus-composer')),
-    // The rollout ladder on Command (3.14); the status card carries the anchor.
-    registerCommandHandler('autonomy.status', () => setVerseSection('command', 'autonomy')),
+    // The rollout ladder — on Fleet since 3.15; the status card carries the anchor.
+    registerCommandHandler('autonomy.status', () => setVerseSection('fleet', 'autonomy')),
     // The clipboard code loads when asked for (copy-setup.ts), not at first paint.
     // Mind's Leader panel takes these once it mounts (leader-focus.ts waits for it).
     registerCommandHandler('leader.message', () => { void import('../leader/leader-focus.js').then((m) => m.requestLeaderFocus({ kind: 'composer' })); }),
@@ -240,6 +252,20 @@ export function registerShellCommandHandlers(): () => void {
     registerCommandHandler('wiki.ask', () => { void import('../wiki/wiki-focus.js').then((m) => m.requestWikiFocus({ kind: 'ask', projectPath: null })); }),
     // Playbooks (3.15): the section takes the request once its chunk mounts (playbook-focus.ts).
     registerCommandHandler('playbook.run', () => { void import('../playbooks/playbook-focus.js').then((m) => m.requestPlaybookFocus({ kind: 'run' })); }),
+    // Command workflows: the FALLBACK. The terminal panel registers its own
+    // handler (its picker) later, and the newest handler is asked first, so
+    // this only runs when no terminal panel is mounted (or it declines):
+    // Playbooks, narrowed to command workflows, pastes into the chat's terminal.
+    registerCommandHandler('terminal.workflows', () => { void import('../playbooks/playbook-focus.js').then((m) => m.requestPlaybookFocus({ kind: 'workflows' })); }),
+    // Launch configurations: the FALLBACK, same pattern — the terminal panel's
+    // own handler wins when it is mounted; otherwise open the Terminal pane
+    // with its launch dialog requested (it lists; nothing is typed until Launch).
+    registerCommandHandler('terminal.launch', () => {
+      void import('../dock/dock-store.js').then((m) => {
+        m.openDockPane('terminal');
+        m.requestTerminal({ launch: true });
+      });
+    }),
     // Automations (3.15): the section opens the New form once its chunk mounts.
     registerCommandHandler('automations.new', () => { void import('../automations/automations-focus.js').then((m) => m.requestAutomationsFocus('new')); }),
   ];

@@ -127,6 +127,7 @@ const KEYS = {
     'surface.growth': 'mod+3',
     'surface.mind': 'mod+4',
     'surface.chat': 'mod+5',
+    'surface.agents': 'mod+6',
     'section.settings': 'mod+,',
     // Navigation
     'palette.open': 'mod+k',
@@ -141,6 +142,16 @@ const KEYS = {
     'rail.toggle-labels': 'mod+shift+\\',
     // Chats
     'chat.new': 'mod+n',
+    // The fleet (3.15): Start / Pause / Resume / Stop from anywhere. Start
+    // and Stop still confirm on screen — raising authority is never ONE key.
+    'fleet.start': 'mod+alt+s',
+    'fleet.pause': 'mod+alt+p',
+    'fleet.resume': 'mod+alt+r',
+    // Not `fleet.stop` (the shell's guarded palette row, which stays keyless):
+    // this key opens the Fleet tab's own Stop confirmation.
+    'fleet.halt': 'mod+alt+.',
+    // 3.16: one task on several seats, each in its own workspace (the Agents board).
+    'agents.new-multi': 'mod+shift+n',
     // App
     'appearance.toggle-theme': 'mod+shift+l',
     'app.summon': 'ctrl+alt+space',
@@ -289,10 +300,19 @@ export const OPEN_SESSION_COMMAND_RE = /^open-session:([A-Za-z0-9._-]{1,128})$/;
  */
 export const OPEN_PANE_COMMAND_RE = /^open-pane:([a-z][a-z0-9-]{0,39})(?:@([A-Za-z0-9._-]{1,128}))?$/;
 
+/**
+ * `open-terminal:<tabId>` or `open-terminal:<tabId>/<blockId>` — a terminal
+ * tab (in its chat, the Terminal pane showing it) and optionally one of its
+ * command blocks: the notification for a long command or a CLI agent that
+ * needs you (3.15; desktop notify.rs `ClickTarget::Terminal`).
+ */
+export const OPEN_TERMINAL_COMMAND_RE = /^open-terminal:(t-[a-z0-9]{1,32})(?:\/(b-\d{1,9}))?$/;
+
 export type ParsedDesktopCommand =
   | { kind: 'command'; name: DesktopCommandName; commandId: KeyedCommandId }
   | { kind: 'open-session'; sessionId: string }
-  | { kind: 'open-pane'; paneId: string; sessionId: string | null };
+  | { kind: 'open-pane'; paneId: string; sessionId: string | null }
+  | { kind: 'open-terminal'; tabId: string; blockId: string | null };
 
 /** Parse a raw desktop command string; null for anything unknown (never guessed). */
 export function parseDesktopCommand(raw: unknown): ParsedDesktopCommand | null {
@@ -303,6 +323,8 @@ export function parseDesktopCommand(raw: unknown): ParsedDesktopCommand | null {
   }
   const pane = OPEN_PANE_COMMAND_RE.exec(raw);
   if (pane) return { kind: 'open-pane', paneId: pane[1]!, sessionId: pane[2] ?? null };
+  const terminal = OPEN_TERMINAL_COMMAND_RE.exec(raw);
+  if (terminal) return { kind: 'open-terminal', tabId: terminal[1]!, blockId: terminal[2] ?? null };
   const session = OPEN_SESSION_COMMAND_RE.exec(raw);
   return session ? { kind: 'open-session', sessionId: session[1]! } : null;
 }

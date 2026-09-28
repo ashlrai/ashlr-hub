@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import type { VerseSeat, VerseSession } from '../../../data/api-types.js';
 import { capacityFromSeat } from '../../../../core/routing/headroom.js';
+import { seatTier, tierRank } from '../../../../core/routing/tiers.js';
 import type { BudgetPolicy } from '../../../../core/routing/types.js';
 import { adviseSeat, type AdvisorSeat } from '../../../../core/verse/multimodel/advisor.js';
 import { classifyPrompt } from '../../../../core/verse/multimodel/classify.js';
@@ -72,7 +73,18 @@ function isLoopback(seat: VerseSeat, badges: readonly LocalModelBadge[] | undefi
   return badges?.find((b) => b.seatId === seat.id)?.private === true;
 }
 
-/** Project the polled seats into what the advisor ranks. */
+/**
+ * The seat's first runnable model in a CHEAPER tier than `defaultId`'s — the
+ * Devin CLI's free SWE next to its elite default (routing/tiers.ts). Null
+ * when the seat has one tier.
+ */
+function cheaperModel(seat: VerseSeat, defaultId: string): string | null {
+  const base = tierRank(seatTier(seat.engine, defaultId));
+  const found = seat.models.find((m) => !m.unavailableReason && tierRank(seatTier(seat.engine, m.id)) > base);
+  return found?.id ?? null;
+}
+
+/** Project the polled seats into what the advisor ranks. Every chat engine, Devin included. */
 export function toAdvisorSeats(seats: readonly VerseSeat[], badges?: readonly LocalModelBadge[]): AdvisorSeat[] {
   return seats.flatMap((seat) => {
     if (seat.health.state === 'unavailable') return [];
@@ -80,6 +92,7 @@ export function toAdvisorSeats(seats: readonly VerseSeat[], badges?: readonly Lo
     if (!model) return [];
     const local = seat.engine === 'local';
     const badge = badges?.find((b) => b.seatId === seat.id);
+    const cheaper = cheaperModel(seat, model.id);
     return [{
       seatId: seat.id,
       engine: seat.engine,
@@ -88,7 +101,8 @@ export function toAdvisorSeats(seats: readonly VerseSeat[], badges?: readonly Lo
       local,
       private: local && isLoopback(seat, badges),
       supportsTools: badge?.supportsTools ?? null,
-      capacity: capacityFromSeat(seat),
+      capacity: capacityFromSeat(seat, undefined, model.id),
+      ...(cheaper ? { cheaper: { model: cheaper, capacity: capacityFromSeat(seat, undefined, cheaper) } } : {}),
     }];
   });
 }

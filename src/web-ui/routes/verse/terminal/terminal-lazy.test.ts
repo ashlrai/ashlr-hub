@@ -56,10 +56,25 @@ describe('the terminal loads lazily', () => {
     }
   });
 
+  it('CodeMirror (the input editor) is a chunk of its own: one file imports it, and only through import() is that file reached', () => {
+    const editorFile = join(HERE, 'command-editor.ts');
+    for (const file of own) {
+      const statics = staticValueImports(readFileSync(file, 'utf8'));
+      const cm = statics.filter((s) => s.startsWith('@codemirror/') || s.startsWith('@lezer/'));
+      if (file === editorFile) expect(cm.length, 'command-editor.ts').toBeGreaterThan(0);
+      else expect(cm, relative(WEB, file)).toEqual([]);
+      expect(statics.filter((s) => /(^|\/)command-editor\.js$/.test(s)), relative(WEB, file)).toEqual([]);
+    }
+    expect(readFileSync(join(HERE, 'input-editor.ts'), 'utf8')).toContain("import('./command-editor.js')");
+  });
+
   it('the registration names the panel only through import()', () => {
     const reg = readFileSync(join(HERE, 'terminal.pane.tsx'), 'utf8');
-    // The registry API and a glyph the first-party panes already load: nothing of the panel.
-    expect(staticValueImports(reg).sort()).toEqual(['../dock/dock-icons.js', '../panes/pane-registry.js']);
+    // The registry API, a glyph the first-party panes already load, and (3.15) the command bus,
+    // dock store and UI store the chat already loads — for ⌘K's two terminal commands: nothing of the panel.
+    expect(staticValueImports(reg).sort()).toEqual([
+      '../dock/dock-icons.js', '../dock/dock-store.js', '../panes/pane-registry.js', '../shell/command-bus.js', '../verse-ui-store.js',
+    ]);
     expect(reg).toContain("import('./TerminalPane.js')");
   });
 

@@ -11,6 +11,41 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+## [3.16.0] — 2026-09-28
+
+### Verse release integration
+
+- A phone layout is available at `/verse/m/` for chat, fleet review,
+  approvals, and dictation on supported browsers. Optional remote access uses
+  a separate loopback gateway behind Cloudflare Access, Mac-approved passkey
+  pairing, bounded sessions, and step-up approval for control actions. It is
+  off until the operator supplies a private gateway configuration and enables
+  the desktop sidecar; the local Verse server keeps its own startup token.
+  When configured, private push notifications reach paired iPhone Home Screen apps.
+- The Agents board, computer control HUD, terminal workbench, and native
+  Browser pane are integrated with turn-scoped authority. Agents board code
+  auto-merge stays off by default and requires exact code gate evidence.
+- Browser actions require the chat's live access and matching act or script
+  scope. The old persistent Browser MCP grant route returns 410. Agent history
+  back and forward are unavailable until the native pane can inspect the
+  destination before navigation. Local-only act access cannot switch to or
+  close a remote tab.
+- Terminal assist defaults to local models. Sending terminal context to Grok
+  requires a saved auto preference, an explicit per-request allowance, and a
+  visible pre-send disclosure. Launching seats from a repo file binds the
+  reviewed configuration to a digest checked before any shell opens. The
+  interactive `terminal_send_keys` agent tool is unavailable while safe
+  command submission is being implemented.
+- Signed elite-direct grants can let eligible local CLI models land at G6
+  within their signed ceiling. Cloud Devin still requires two independent
+  judge families. Leader goal changes require signed class A authority.
+- Learning recall validates anti-playbook matches before prompt injection.
+  Signed post-merge observations and stable-window identity are visible as
+  evidence, while positive outcomes remain inconclusive for credit and do not
+  expand merge, dispatch, or policy authority.
+- The native app bundle now carries the same 3.16.0 version as the CLI, with a
+  prebundle version check. The Grok Bot companion workflow is documented.
+
 ### Dictation everywhere in Verse (desktop)
 
 - Hold **⌃⌥V** to talk (release inserts), tap it to dictate hands-free until
@@ -110,14 +145,11 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   sites.
 - **Send to chat** drafts the page, its logs, a picked element and an
   attached screenshot into the message box. It never sends.
-- A per-chat **agent access** switch gives Claude and local seats five
-  read-mostly MCP tools: status, navigate, screenshot, read text and
-  console.
-  - The tools run in the pane you have open and only on localhost pages,
-    unless you allow an origin for that chat.
-  - Agents cannot click, type or submit.
-  - Access is off by default and forgotten when Verse restarts. See
-    `docs/VERSE-BROWSER.md`.
+- Per-chat **agent access** grants turn-scoped MCP tools for observing and
+  navigating. Separate act and script scopes permit guarded native clicks,
+  typing and page scripts. External origins need an explicit per-chat allow;
+  local-only act grants cannot act on remote tabs. Access is off by default
+  and forgotten when Verse restarts. See `docs/VERSE-BROWSER.md`.
 - Native changes (`desktop/src-tauri`) reach an installed app only through
   `npm run ship:local -- --native`.
 
@@ -196,9 +228,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   names it (default 1 at a time, 3 a day; `--fleet-concurrent`,
   `--fleet-per-day`). Signing such a grant needs custody helper 1.1.0
   (`sudo scripts/install-custody.sh`).
-- **Two judges.** A Devin PR passes G6 only with ships from judges of two
-  different families, and merges only when the live stage names `devin`;
-  otherwise the would-merge is recorded as shadow.
+- **Two judges.** Cloud Devin PRs need ships from judges of two different
+  families at G6. An eligible local Devin CLI seat can follow the signed
+  elite-direct path. Merges remain bounded by the live grant; otherwise the
+  would-merge is recorded as shadow.
 - Needs you gives Devin PRs the Clean/Held verdict, Land all clean and an
   Evidence timeline. Close on both lanes takes an optional reason.
 

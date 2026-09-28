@@ -208,4 +208,26 @@ export default tseslint.config(
       '@typescript-eslint/no-unused-vars': 'off',
     },
   },
+  {
+    // The phone app's service worker (src/web-ui/public/verse-m/sw.js): copied
+    // verbatim by Vite, served at /verse/m/sw.js, runs in a ServiceWorker
+    // global scope — no window, no document.
+    files: ['src/web-ui/public/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: {
+        self: 'readonly',
+        caches: 'readonly',
+        fetch: 'readonly',
+        Request: 'readonly',
+        Response: 'readonly',
+        URL: 'readonly',
+        Promise: 'readonly',
+      },
+    },
+    rules: {
+      '@typescript-eslint/no-unused-vars': 'off',
+    },
+  },
 );

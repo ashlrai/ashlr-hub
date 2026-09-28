@@ -73,6 +73,13 @@ import {
   summarizeDelegationScope,
 } from './delegation-scope.js';
 import { buildEngineCommand, spawnEngine, describeRunEventForStream, resolveBinAbsolute } from './engines.js';
+import {
+  DEVIN_CLI_ENGINE_ID,
+  DEVIN_CLI_FREE_MODELS,
+  DEVIN_CLI_STALL_IDLE_MS,
+  isDevinCliFreeModel,
+  resolveDevinCliFleetModel,
+} from '../devin/cli-engine.js';
 import { cliVersionFromExecutable } from '../verse/model-windows.js';
 import {
   nullSink,
@@ -181,6 +188,7 @@ import {
 } from './local-context.js';
 import { causalMetadata, runEventSummary, routeSnapshot } from '../learning/causal.js';
 import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
+import { runCancelRequested } from '../fleet/run-cancel.js';
 import { classifyDiff, isTrivialProposal } from '../../planning/triviality.js';
 import { isDiffDedupResult } from '../inbox/store.js';
 
@@ -1163,12 +1171,18 @@ function sandboxLeaseRepoKey(sourceRepo: string): string {
  * Errors read as "no stop" — the fence re-check before filing is the gate;
  * the probe only makes the stop prompt.
  */
-function executionLeaseStopProbe(sourceRepo: string): () => string | null {
+function executionLeaseStopProbe(sourceRepo: string, runId?: string): () => string | null {
   const allowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1';
   return () => {
     try {
       if (killSwitchOn() === true) return 'kill switch armed';
     } catch { /* see above */ }
+    // 3.15: Mason stopped THIS run from the Fleet tab (fleet/run-cancel.ts).
+    // Lowering only — it can make the run stop sooner, never do more.
+    if (runId) {
+      const cancel = runCancelRequested(runId);
+      if (cancel) return `stopped by you: ${cancel.reason}`;
+    }
     if (!allowAnyRepo) {
       try {
         if (isEnrolled(sourceRepo) === false) return 'repo unenrolled';
@@ -1277,7 +1291,7 @@ class ProducerAuthority {
         repoKey: this.repoKey,
         engine: spec.engine,
         ...(spec.parentSignal ? { parentSignal: spec.parentSignal } : {}),
-        shouldAbort: executionLeaseStopProbe(this.sourceRepo),
+        shouldAbort: executionLeaseStopProbe(this.sourceRepo, spec.runId),
       });
       if (!registration.ok) throw new Error(`execution lease unavailable: ${registration.reason}`);
       this.lease = registration.lease;
@@ -1421,7 +1435,8 @@ export async function captureSandboxedProposal(
   opts: CaptureSandboxedProposalOptions,
 ): Promise<SandboxedEngineResult> {
   const model = opts.model ?? cfg.foundry?.models?.[engine];
-  const engineModel = `${engine}:${resolveConcreteModel(engine, cfg, model)}`;
+  // 3.15: record the model that ran (see runEngineSandboxed).
+  const engineModel = `${engine}:${model ?? resolveConcreteModel(engine, cfg)}`;
   const tier = engineTierOf(engine, cfg);
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -1785,6 +1800,17 @@ export function grokNoDiffMinEvents(cfg: AshlrConfig): number {
 }
 
 /**
+ * 3.15: the idle-stall window for a Devin CLI spawn — the configured
+ * `foundry.stallIdleMs` when it is longer, else DEVIN_CLI_STALL_IDLE_MS.
+ */
+export function devinCliStallIdleMs(cfg: AshlrConfig): number {
+  const configured = (cfg.foundry as Record<string, unknown> | undefined)?.['stallIdleMs'];
+  return typeof configured === 'number' && Number.isFinite(configured) && configured > DEVIN_CLI_STALL_IDLE_MS
+    ? configured
+    : DEVIN_CLI_STALL_IDLE_MS;
+}
+
+/**
  * V3.11: the claude build `bin` resolves to, or null when unknown. The native
  * installer links `claude` to `…/claude/versions/<X.Y.Z>`, so the version is
  * read from the resolved file name (verse/model-windows.ts, the same reading
@@ -1814,9 +1840,20 @@ export async function runEngineSandboxed(
 ): Promise<SandboxedEngineResult> {
   // V3.10 (INT4): a seat CLI gets its model NAMED (grok-cli's default when
   // nothing else says), so the argv and the recorded `grok-cli:<model>` agree.
-  const model = opts.model ?? cfg.foundry?.models?.[engine] ??
-    ((engine as string) === GROK_CLI_ENGINE_ID ? resolveEngineSpec(engine, cfg)?.defaultModel : undefined);
-  const engineModel = `${engine}:${resolveConcreteModel(engine, cfg, model)}`;
+  // 3.15: the Devin CLI's model has ONE source — the run's own override, else
+  // devin.fleetModel, else swe-2-high (devin/cli-engine.ts) — and the recorded
+  // identity is exactly the model passed to `--model` (`devin-cli:swe-2-high`),
+  // never a foundry.models / ASHLR_MODEL stand-in: the merge path keys on it.
+  const isDevinCli = (engine as string) === DEVIN_CLI_ENGINE_ID;
+  const model = isDevinCli
+    ? resolveDevinCliFleetModel(cfg.devin, opts.model)
+    : opts.model ?? cfg.foundry?.models?.[engine] ??
+      ((engine as string) === GROK_CLI_ENGINE_ID ? resolveEngineSpec(engine, cfg)?.defaultModel : undefined);
+  // 3.15: when a model is NAMED on the argv, the signed identity records that
+  // model — never a config pin the argv overrode (opts.model wins on argv).
+  // Elite self-land trusts this identity in place of a judge, so it must say
+  // what actually ran. With no model on argv, M127's resolution is unchanged.
+  const engineModel = isDevinCli ? `${engine}:${model}` : `${engine}:${model ?? resolveConcreteModel(engine, cfg)}`;
   const tier = engineTierOf(engine, cfg);
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -2265,6 +2302,12 @@ export async function runEngineSandboxed(
       if (confinementProfile.networkEgress && (engineKey === 'claude' || engineKey === 'claude-cli')) {
         return refuse('engine-unsupported', 'claude producers are not run under a standing policy until the 3.11 credential proxy (the claude-a token only reaches restricted, tool-less judge / Leader calls)');
       }
+      // 3.15: autonomy runs the Devin CLI on a FREE SWE-2 model only. A billed
+      // Devin model's spend cannot be read back (the CLI prints no usage), so
+      // no budget gate could meter it — the run is refused, not unmetered.
+      if (engineKey === DEVIN_CLI_ENGINE_ID && !isDevinCliFreeModel(model)) {
+        return refuse('engine-unsupported', `devin-cli model "${model ?? ''}" is billed by Devin; autonomous runs use a free SWE-2 model only (${DEVIN_CLI_FREE_MODELS.join(', ')})`);
+      }
       let seatId: string | null = opts.seatId ?? null;
       let nativeStatePath: string | null = null;
       if (engineKey === GROK_CLI_ENGINE_ID) {
@@ -2345,9 +2388,16 @@ export async function runEngineSandboxed(
     // (400, tuned for claude/codex whole-message lines) could kill a grok run
     // mid-way through writing its FIRST edit. The factor keeps the detector
     // meaningful (a read-only spinner still stops) without that false kill.
+    //
+    // 3.15: the Devin CLI's print mode writes NOTHING until its final answer
+    // (measured), so the shared 3-minute idle window would kill every real
+    // run; it gets DEVIN_CLI_STALL_IDLE_MS as a floor (the wall-clock
+    // backstop still bounds a hung run).
     const spawnCfg: AshlrConfig = engineKey === GROK_CLI_ENGINE_ID
       ? { ...cfg, foundry: { ...(cfg.foundry ?? {}), noDiffMinEvents: grokNoDiffMinEvents(cfg) } as NonNullable<AshlrConfig['foundry']> }
-      : cfg;
+      : engineKey === DEVIN_CLI_ENGINE_ID
+        ? { ...cfg, foundry: { ...(cfg.foundry ?? {}), stallIdleMs: devinCliStallIdleMs(cfg) } as NonNullable<AshlrConfig['foundry']> }
+        : cfg;
     let res: SpawnEngineResult = { ok: false, output: '', error: 'engine did not run' };
     let _spawnDurationMs = 0;
     const usage = newUsage();
@@ -2371,6 +2421,14 @@ export async function runEngineSandboxed(
           if (described) emitSinkEvent(streamSink, described);
         },
       });
+      if (engineKey === DEVIN_CLI_ENGINE_ID && res.usage && isDevinCliFreeModel(model)) {
+        // 3.15: the Devin CLI reports no token usage; a usage-shaped line in
+        // its output is the model's own prose, and pricing it would invent
+        // spend for a FREE model. Runs and minutes are still counted. (A
+        // billed model — Mason's own runs only — keeps the generic reading.)
+        const { usage: _ignored, ...rest } = res;
+        res = rest;
+      }
       if (engineKey === GROK_CLI_ENGINE_ID) {
         // V3.10 (INT4): grok-cli's Anthropic-wire NDJSON — its own run total
         // when the stream carries one, else per-message usage summed
@@ -3156,7 +3214,8 @@ export async function runApiModelSandboxed(
 
   const modelFromCfg = opts.model ?? cfg.foundry?.models?.[engine] ?? spec.api.defaultModel ?? '';
   const model = modelFromCfg || (spec.api.defaultModel ?? '');
-  const engineModel = `${engine}:${resolveConcreteModel(engine, cfg, model || undefined)}`;
+  // 3.15: the identity names the model this API call uses (see runEngineSandboxed).
+  const engineModel = `${engine}:${model || resolveConcreteModel(engine, cfg)}`;
   const tier = engineTierOf(engine, cfg);
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,

@@ -13,6 +13,8 @@
  * Pure data (no vitest import) so the scratch screenshot harness can load
  * it too. Times are relative to `now` so a fixture never goes stale.
  */
+import { buildFleetControlState, type FleetControlInputs } from '../../../../core/fleet/fleet-control-model.js';
+import type { FleetControlQueueV1, FleetControlStateV1 } from '../../../../core/fleet/fleet-control-types.js';
 import type {
   AuthorityGrantDraft,
   AuthoritySetupReportV1,
@@ -795,3 +797,56 @@ export function seatHistory(kind: FixtureKind = 'live', now = Date.now()): Capac
 }
 
 export const SEAT_DECISION_FIXTURE: SeatDecision = decision;
+
+// ---------------------------------------------------------------------------
+// 3.15 — the Fleet control surface (GET /api/verse/fleet/control, …/queue)
+// ---------------------------------------------------------------------------
+
+/** The control state as the server builds it (the real pure model), per shape. */
+export function fleetControl(kind: FixtureKind = 'live', now = Date.now(), over: Partial<FleetControlInputs> = {}): FleetControlStateV1 {
+  const dark = kind === 'dark';
+  const inputs: FleetControlInputs = {
+    nowMs: now,
+    grant: {
+      state: dark ? 'none' : 'active',
+      seq: dark ? null : 2,
+      repos: dark ? [] : ['ashlrai/fleet-canary', 'ashlrai/ashlrcode'],
+      engines: dark ? [] : ['local', 'grok-cli', 'claude-cli'],
+      expiresAt: dark ? null : new Date(now + 20 * 86_400_000).toISOString(),
+      daysLeft: dark ? null : 20,
+      stageId: dark ? null : '2a',
+      stageIndex: dark ? null : 1,
+      stageCount: dark ? null : 4,
+      switch: dark ? 'off' : 'autonomous',
+      effectiveSwitch: dark ? 'off' : 'autonomous',
+      maxSwitchWithoutGrant: dark ? 'off' : 'autonomous',
+      reason: dark ? 'No standing grant is installed — autonomy is dark.' : null,
+    },
+    custody: { installed: true, keyInitialized: true, hubCheckout: '~/code/ashlr-hub' },
+    trustRootsCompiled: true,
+    kill: false,
+    paused: false,
+    pausedAt: null,
+    liveness: dark
+      ? { state: 'stopped', pid: null, lastTickAt: null, reason: 'the daemon is not running' }
+      : { state: 'alive', pid: 4242, lastTickAt: new Date(now - 60_000).toISOString(), reason: 'the daemon is running' },
+    service: dark ? 'absent' : 'running',
+    plist: dark ? 'absent' : 'current',
+    working: kind === 'live' ? 2 : 0,
+    spend: { todayUsd: kind === 'live' ? 3.5 : 0, capUsd: 20 },
+    ...over,
+  };
+  return buildFleetControlState(inputs);
+}
+
+export function fleetQueue(kind: FixtureKind = 'live', now = Date.now()): FleetControlQueueV1 {
+  return {
+    v: 1,
+    tasks: kind === 'dark'
+      ? []
+      : [{ id: '11111111-2222-3333-4444-555555555555', repo: 'ashlrai/ashlrcode', title: 'Add tests for the parser', status: 'queued', value: 3, source: 'leader', updatedAt: new Date(now - 600_000).toISOString() }],
+    goals: [],
+    targets: { paths: ['~/code/ashlrcode'], repos: ['ashlrai/fleet-canary', 'ashlrai/ashlrcode'] },
+    reason: null,
+  };
+}

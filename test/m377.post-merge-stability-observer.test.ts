@@ -89,6 +89,10 @@ describe('M377 same-run green stable-window observer', () => {
       mergeCommit: 'a'.repeat(40),
       observedHead: green().head,
       verificationDigest: green().manifestDigest,
+      verifiedAt: green().verifiedAt,
+      verificationIsolation: green().isolation,
+      workspaceClean: true,
+      requiredCommandCount: green().requiredCommandCount,
       stableAtMs: Date.parse('2026-07-08T12:00:00.000Z'),
     })]);
   });

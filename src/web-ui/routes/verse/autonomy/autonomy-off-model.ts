@@ -71,8 +71,10 @@ export interface AutonomyOffInputs {
   setup?: AuthoritySetupReportV1 | null;
 }
 
-const GO_COMMAND = { section: 'command', anchor: null, label: 'Open Command' } as const;
+// 3.15: the fleet is operated on the Fleet tab (its control surface: Start,
+// the grant sheet and editor, the daemon), so every off state points there.
 const GO_FLEET = { section: 'fleet', anchor: null, label: 'Open Fleet' } as const;
+const GO_FLEET_CONTROL = { section: 'fleet', anchor: 'fleet-control' } as const;
 
 function sentence(text: string | null | undefined): string | null {
   const t = text?.trim();
@@ -93,7 +95,7 @@ export function autonomyOffState({ authority, live, quietSince = null, readiness
   const base = { since, tone: 'neutral' as const, command: null, go: null, grant: null, setup: null };
 
   if (authority?.kill || live?.state === 'stopped') {
-    return { ...base, kind: 'stopped', tone: 'danger', title: 'Fleet stopped', why: 'Nothing new starts until you resume it.', go: GO_COMMAND };
+    return { ...base, kind: 'stopped', tone: 'danger', title: 'Fleet stopped', why: 'Nothing new starts until you resume it.', go: { ...GO_FLEET_CONTROL, label: 'Start in Fleet' } };
   }
 
   if (authority) {
@@ -114,7 +116,7 @@ export function autonomyOffState({ authority, live, quietSince = null, readiness
         kind: 'grant',
         title: 'Autonomy is off',
         why: 'Approve a standing grant to let the fleet work.',
-        go: { ...GO_COMMAND, label: 'Approve in Command' },
+        go: { ...GO_FLEET_CONTROL, label: 'Approve in Fleet' },
         grant: { intent: 'grant', label: 'Approve grant' },
         setup,
       };
@@ -127,7 +129,7 @@ export function autonomyOffState({ authority, live, quietSince = null, readiness
         tone: 'warning',
         title: GRANT_TITLE[grant],
         why: paused ? 'Autonomy is off until you re-approve it.' : 'Autonomy is off until you approve a new grant.',
-        go: { ...GO_COMMAND, label: paused ? 'Re-approve in Command' : 'Approve in Command' },
+        go: { ...GO_FLEET_CONTROL, label: paused ? 'Re-approve in Fleet' : 'Approve in Fleet' },
         grant: paused ? { intent: 're-approve', label: 'Re-approve grant' } : { intent: 'grant', label: 'Approve grant' },
       };
     }
@@ -137,7 +139,7 @@ export function autonomyOffState({ authority, live, quietSince = null, readiness
         kind: 'off',
         title: 'Autonomy is off',
         why: authority.switch === 'off' ? 'Switch it to Propose or Autonomous to start the fleet.' : (sentence(authority.effectiveReason) ?? 'Something holds the switch at Off.'),
-        go: GO_COMMAND,
+        go: { ...GO_FLEET_CONTROL, label: 'Start in Fleet' },
       };
     }
   }

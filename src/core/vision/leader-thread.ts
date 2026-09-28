@@ -60,7 +60,7 @@ import type { AshlrConfig } from '../types.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
 import { cleanModelText, extractMemoJson, leaderRoot, listMemoIds, readLeaderMemo, readRecentMemos } from './leader-memo.js';
-import type { LeaderAction, LeaderActionAdvice, LeaderMemo } from './leader-types.js';
+import { LEADER_GOAL_HYGIENE_KINDS, type LeaderAction, type LeaderActionAdvice, type LeaderMemo } from './leader-types.js';
 import { stricterAdviceFor } from './leader-advice.js';
 import type { LeaderEvidence, LeaderRunDeps } from './leader.js';
 import type { LeaderComplete, LeaderSeatResolution } from './leader-seat.js';
@@ -560,7 +560,15 @@ function actionLine(a: LeaderAction, advice?: readonly LeaderActionAdvice[]): st
 
 /** The concise memo message: bottleneck, move, top actions with class and veto window. */
 export function memoSummaryText(memo: LeaderMemo): string {
-  const lines: string[] = [`Memo ${memo.id}${memo.dryRun ? ' (dry run — nothing applies without a grant)' : ''}`];
+  // Historical memos can contain applied goal changes even if the present
+  // grant is a dry run; report their actual recorded outcome.
+  const hygieneApplied = (memo.actions ?? []).some((a) => LEADER_GOAL_HYGIENE_KINDS.has(a.kind) && a.status === 'applied');
+  const dryNote = !memo.dryRun
+    ? ''
+    : hygieneApplied
+      ? ' (dry run for work and settings — goal hygiene applied)'
+      : ' (dry run — no Leader actions apply under this grant)';
+  const lines: string[] = [`Memo ${memo.id}${dryNote}`];
   if (memo.bottleneck) lines.push(`Bottleneck: ${clip(memo.bottleneck.statement, 240)}`);
   if (memo.move) {
     const d = memo.move.expectedDelta;

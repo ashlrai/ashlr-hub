@@ -30,6 +30,7 @@ import { postNeedsYouAction } from './surface-data.js';
 import type { ActivityState } from '../shell/useActivity.js';
 import { needsYouRowView, readableItemTitle, type NeedsYouRowView } from '../shell/needs-you-model.js';
 import { NeedsYouRunFacts } from '../shell/NeedsYouList.js';
+import { requestOpenTerminal } from '../shell/open-terminal-request.js';
 import { Card, CardNote } from './Surface.js';
 import type { ConfirmSpec, SurfaceActions } from './actions.js';
 import styles from './command.module.css';
@@ -68,6 +69,8 @@ function targetLink(item: NeedsYouItem): { label: string; onOpen?: () => void; h
       return { label: 'Show', onOpen: () => goToSection(t.section, t.anchor) };
     case 'session':
       return { label: 'Open chat', onOpen: () => openChat(t.sessionId) };
+    case 'terminal':
+      return { label: 'Open terminal', onOpen: () => requestOpenTerminal({ tabId: t.tabId, blockId: null, sessionId: t.sessionId }) };
     case 'approval':
     case 'seat':
       return { label: 'Open', onOpen: () => openNeedsYou(item.id) };

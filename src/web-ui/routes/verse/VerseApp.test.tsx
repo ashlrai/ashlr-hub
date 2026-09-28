@@ -23,6 +23,7 @@ import { mockCompactViewport, type ViewportMock } from './shell/viewport.test-su
 import { MissingSection, SECTION_MODULES, VerseApp } from './VerseApp.js';
 import { getResourcesUi, reloadResourcesUiForTest, RESOURCES_STORAGE_KEY, setResourcesBar, setResourcesSummary } from './resources/resources-store.js';
 import { resetVerseStore } from './verse-store.js';
+import { getDockSnapshot, resetDockStore } from './dock/dock-store.js';
 import {
   getVerseUiState,
   landedModule,
@@ -667,6 +668,27 @@ describe('announcements and the native bridge', () => {
     // Unknown commands are inert.
     act(() => { window.dispatchEvent(new CustomEvent('ashlr:desktop-command', { detail: { command: 'rm -rf' } })); });
     expect(getVerseUiState().section).toBe('chat');
+  });
+
+  it('a notified terminal command opens that tab in its chat — or says the tab is gone (3.15)', async () => {
+    resetDockStore();
+    let tabs: unknown[] = [{ id: 't-ab12', sessionId: 'vs_2', root: '/tmp/r', title: 'r', cols: 80, rows: 24, createdAt: '2026-09-27T10:00:00.000Z', lastActivityAt: '2026-09-27T10:00:00.000Z', exited: null, appId: null, devServerId: null }];
+    const base = net.fetch.getMockImplementation()!;
+    net.fetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/verse/terminal') {
+        return new Response(JSON.stringify({ available: true, reason: null, tabs }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return base(input, init);
+    });
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    act(() => { window.dispatchEvent(new CustomEvent('ashlr:desktop-command', { detail: { command: 'open-terminal:t-ab12/b-2' } })); });
+    await waitFor(() => expect(getVerseUiState()).toMatchObject({ section: 'chat', activeSessionId: 'vs_2' }));
+    await waitFor(() => expect(getDockSnapshot().requests.terminal).toMatchObject({ tabId: 't-ab12', blockId: 'b-2' }), { timeout: 3000 });
+
+    tabs = [];
+    act(() => { window.dispatchEvent(new CustomEvent('ashlr:desktop-command', { detail: { command: 'open-terminal:t-ab12' } })); });
+    expect(await screen.findByText(/That terminal is closed/)).toBeInTheDocument();
   });
 
   it('the tray’s New chat and the hotkey land in Chat, closing an open palette first (C8)', async () => {

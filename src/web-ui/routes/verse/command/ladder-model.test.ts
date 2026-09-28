@@ -113,6 +113,13 @@ describe('lastEvent', () => {
     expect(lastEvent(ladder, decisionsView(NOW, { decisions: [refusedDecision(NOW)] })).text).toBe('fleet-canary: Refused at G2: The diff touches a protected path.');
   });
 
+  it('an elite self-land reads "Landed directly · elite model <name> · tests green" (3.15)', () => {
+    const landed = { ...wouldMergeDecision(NOW), outcome: 'merged' as const, withheldBecause: null, eliteModel: 'GPT-6 Sol' };
+    expect(lastEvent(ladder, decisionsView(NOW, { decisions: [landed] })).text).toBe('Landed directly · elite model GPT-6 Sol · tests green — ashlrcode #12.');
+    const judged = { ...landed, eliteModel: null };
+    expect(lastEvent(ladder, decisionsView(NOW, { decisions: [judged] })).text).toBe('Merged ashlrcode #12.');
+  });
+
   it('is honest about loading, unavailable and empty', () => {
     expect(lastEvent(ladder, undefined).text).toBe('Reading the latest decision…');
     expect(lastEvent(ladder, null).text).toBe('The latest decision could not be read.');
@@ -124,6 +131,7 @@ describe('small words', () => {
   it('formats stage names, ages, sizes and links', () => {
     expect(stageLabel('shadow')).toBe('Shadow');
     expect(stageLabel('2a')).toBe('2a');
+    expect(stageLabel('elite-direct')).toBe('Elite direct');
     expect(ago(new Date(NOW - 30_000).toISOString(), NOW)).toBe('just now');
     expect(ago(new Date(NOW - 3 * HOUR).toISOString(), NOW)).toBe('3 h ago');
     expect(ago('nope', NOW)).toBe('at an unknown time');

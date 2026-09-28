@@ -160,6 +160,40 @@
   font-weight: var(--font-weight-regular);
 }
 
+/* ── Facts: tier · cost basis · models · reserve (every card, 3.15) ─── */
+
+.groupBlurb {
+  margin: calc(-1 * var(--space-1)) var(--space-1) var(--space-2);
+  color: var(--text-tertiary);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--space-2);
+  row-gap: 2px;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.facts > span + span::before {
+  content: '·';
+  margin-right: var(--space-2);
+  color: var(--text-tertiary);
+}
+
+.tierChip {
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+
+.tierChip[data-tier='free'] { color: var(--status-success-fg); }
+
 /* ── Status ─────────────────────────────────────────────────────────── */
 
 .status {

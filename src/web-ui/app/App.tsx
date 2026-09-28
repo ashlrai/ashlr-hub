@@ -42,6 +42,9 @@ function useBootstrapSessionProbe(phase: ReturnType<typeof useAuthPhase>) {
 export function App() {
   const phase = useAuthPhase();
   useBootstrapSessionProbe(phase);
+  // The global Hub event feed is only needed after the root mounts. Scoped
+  // consoles (including the phone) do not subscribe to this channel.
+  useEffect(() => { void import('../data/sse.js'); }, []);
 
   return (
     <ToastProvider>

@@ -162,7 +162,7 @@ describe('MindSection', () => {
     render(<MindSection />);
     const leader = await screen.findByRole('region', { name: "The Leader hasn't written a memo yet." });
     expect(leader).toHaveTextContent('No eligible seat for the Leader: grok-a signed out, local Qwen offline. Autonomy is off.');
-    await waitFor(() => expect(within(leader).getByRole('button', { name: 'Approve in Command' })).toBeInTheDocument());
+    await waitFor(() => expect(within(leader).getByRole('button', { name: 'Approve in Fleet' })).toBeInTheDocument());
     for (const name of ['Memos', 'Standards', 'Action log']) expect(screen.queryByRole('region', { name })).toBeNull();
     expect(screen.queryByRole('meter', { name: 'Leader hit rate' })).toBeNull();
     // The digest that has not landed still says so on its own cards.

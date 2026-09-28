@@ -1,10 +1,10 @@
 # Autonomy setup
 
-> Moved from the top-level [README](../README.md) to keep the README short. Content is unchanged apart from link paths.
+> Moved from the top-level [README](../README.md) to keep the README short.
 
 ## Autonomy commissioning path
 
-**Current release status (3.15):** `ashlr authority setup` is a resumable preparation
+**Current release status (3.16):** `ashlr authority setup` is a resumable preparation
 workflow. Its dry run is read-only; a live run can create custody, GitHub and
 grant state after your explicit actions. Setup itself never installs or restarts
 the daemon. The legacy service paths (`ashlr daemon install`, `ashlr setup`,
@@ -62,15 +62,16 @@ copy.
     service.
 
 Standing grants require Touch ID reapproval every 30 days or after authority
-code changes; until then the resident daemon parks without working. 3.15
+code changes; until then the resident daemon parks without working. 3.16
 changes authority code, so after installing it run `ashlr authority re-approve`,
 then `ashlr authority resident stop` and `start` to put the daemon on the new
 build.
 
-**Where it stands.** On the maintainer's Mac a standing grant is active and the
-rollout ladder is at stage 1 of 8, shadow: the gates run and record
-would-merges, and no repository merges yet. Command shows the ladder and grant
-countdown; Fleet lists every shadow decision with its G0–G7 chips. Private
+**Where to check.** `ashlr authority status` and `ashlr authority resident status`
+report this Mac's live grant, switch, rollout stage, and daemon state. A new
+grant begins in shadow, recording would-merges without merging. Command shows
+the ladder and grant countdown; Fleet lists shadow decisions with their G0–G7
+chips. Private
 repositories on GitHub's free plan, which cannot have rulesets, use local
 enforcement with the App's host-verified `ashlr/verify` check. Dated details:
 [AUTONOMY-GAP.md](AUTONOMY-GAP.md#current-activation-state-315).

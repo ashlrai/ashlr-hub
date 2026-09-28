@@ -3,7 +3,11 @@
  *
  *   GET  /api/verse/authority              → AuthorityStatusV1 (+ effectiveReason, ladder)
  *   GET  /api/verse/authority/draft[?kind=new|reapprove]
- *                                          → AuthorityGrantDraft (+ kind, summary, startStageId)
+ *                                          → AuthorityGrantDraft (+ kind, summary, startStageId,
+ *                                            diff vs the installed grant, editable choices)
+ *   POST /api/verse/authority/draft {kind?, scope?}
+ *                                          → the same, with Mason's scope edits applied
+ *                                            (authority/grant-scope.ts; 3.15 grant editor)
  *   GET  /api/verse/authority/ledger[?limit=&kind=]
  *                                          → { entries, head, chain, brokenAtSeq, reason }
  *   GET  /api/verse/authority/ledger?view=decisions[&limit=]
@@ -44,6 +48,7 @@ import { sanitizePublicJson } from '../util/public-json.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { clearStop, revokeStandingAndDrain, stopAutonomyAndDrain } from '../authority/clamp.js';
 import { custodyStatus, signGrant, type CustodyStatus } from '../authority/custody-client.js';
+import { grantHasEliteDirect } from '../authority/elite-models.js';
 import {
   displaySurfaceTarget,
   evaluateStandingAuthority,
@@ -63,6 +68,8 @@ import {
   type DraftRepoInput,
   type DraftSeatInput,
 } from '../authority/standing-grant.js';
+import { applyGrantScopeEdit, editableEngines, grantScopeDiff, parseGrantScopeEdit, type GrantDiffLine, type GrantScopeEdit } from '../authority/grant-scope.js';
+import type { GrantDraftEditable } from '../authority/grant-scope-types.js';
 import { probeServerEnforcementAll, type GithubGet } from '../authority/server-enforcement.js';
 import { currentHostBinding, verifyAuthoritySurface } from '../authority/surface.js';
 import { STANDING_GRANT_TRUST_ROOTS } from '../authority/trust-roots.js';
@@ -70,6 +77,7 @@ import { killSwitchPath, readEnrollmentRegistry } from '../sandbox/policy.js';
 import {
   AUTONOMY_SWITCHES,
   LEDGER_EVENT_KINDS,
+  STANDING_GRANT_CEILINGS,
   VERSE_AUTHORITY_PATH,
   VERSE_AUTHORITY_SETUP_PATH,
   type AuthoritySetupReportV1,
@@ -245,7 +253,9 @@ export async function buildAuthorityStatus(): Promise<{ status: AuthorityStatusW
 const REFRESH_AFTER_MS = 15_000;
 const EXPIRY_WARNING_MS = 72 * 60 * 60 * 1000;
 const REGRESSION_VISIBLE_MS = 24 * 60 * 60 * 1000;
-const SECTION_TARGET = { kind: 'section', section: 'command', anchor: 'autonomy' } as const;
+// 3.15: autonomy is operated on the Fleet tab (its control surface carries
+// the `fleet-control`, `authority-grant` and `autonomy` ladder anchors).
+const SECTION_TARGET = { kind: 'section', section: 'fleet', anchor: 'autonomy' } as const;
 const EMPTY_SUBJECT = Object.freeze({ repo: null, pr: null, seatId: null, sessionId: null, engine: null });
 
 let statusCache: { at: number; status: AuthorityStatusV1; items: NeedsYouItem[]; badge: VerseAutonomyBadge } | null = null;
@@ -311,7 +321,7 @@ export function authorityNeedsYouItems(status: AuthorityStatusV1, ev: StandingEv
       since: status.checkedAt,
       expiresAt: grant.expiresAt,
       subject: { ...EMPTY_SUBJECT },
-      target: { kind: 'section', section: 'command', anchor: 'authority-grant' },
+      target: { kind: 'section', section: 'fleet', anchor: 'authority-grant' },
       actions: renew,
     });
   } else if (grant.state === 'expired' || grant.state === 'invalid') {
@@ -325,7 +335,7 @@ export function authorityNeedsYouItems(status: AuthorityStatusV1, ev: StandingEv
       since: grant.state === 'expired' && grant.expiresAt ? grant.expiresAt : status.checkedAt,
       expiresAt: null,
       subject: { ...EMPTY_SUBJECT },
-      target: { kind: 'section', section: 'command', anchor: 'authority-grant' },
+      target: { kind: 'section', section: 'fleet', anchor: 'authority-grant' },
       actions: renew,
     });
   } else if (grant.state === 'active' && grant.expiresAt) {
@@ -342,7 +352,7 @@ export function authorityNeedsYouItems(status: AuthorityStatusV1, ev: StandingEv
         since: new Date(Date.parse(grant.expiresAt) - EXPIRY_WARNING_MS).toISOString(),
         expiresAt: grant.expiresAt,
         subject: { ...EMPTY_SUBJECT },
-        target: { kind: 'section', section: 'command', anchor: 'authority-grant' },
+        target: { kind: 'section', section: 'fleet', anchor: 'authority-grant' },
         actions: renew,
       });
     }
@@ -535,6 +545,16 @@ export interface AuthorityDraftResponse extends AuthorityGrantDraft {
   summary: string[];
   /** The rung autonomy starts on once signed. */
   startStageId: string;
+  /**
+   * 3.15 (additive): what signing this draft changes vs the grant installed
+   * now (authority/grant-scope.ts `grantScopeDiff`; every line `wider` when
+   * none is installed).
+   */
+  diff?: GrantDiffLine[];
+  /** 3.15 (additive): what the grant editor may choose from for this draft. */
+  editable?: GrantDraftEditable;
+  /** 3.15: the draft's ladder is the one `elite-direct` rung (elite models land on green tests, no judge). */
+  eliteDirect: boolean;
 }
 
 const DRAFT_TTL_MS = 15 * 60 * 1000;
@@ -675,7 +695,17 @@ export async function buildStandingGrantDraft(
   kind: DraftKind | 'auto' = 'auto',
   nowMs = Date.now(),
   /** How GitHub is read to decide server vs local enforcement (the CLI passes its own `gh`; tests inject). */
-  opts: { githubGet?: GithubGet; devin?: () => Promise<DevinDraftChoice> } = {},
+  opts: {
+    githubGet?: GithubGet;
+    devin?: () => Promise<DevinDraftChoice>;
+    scope?: GrantScopeEdit;
+    /**
+     * 3.15 elite self-land: true drafts the one `elite-direct` rung; false
+     * (or absent) drafts the default ladder for a new grant and keeps the
+     * signed ladder for a re-approval. Leaving elite-direct is a new grant.
+     */
+    eliteDirect?: boolean;
+  } = {},
 ): Promise<AuthorityDraftResponse> {
   const keyId = await signingKeyId();
   const hostBinding = currentHostBinding();
@@ -689,6 +719,12 @@ export async function buildStandingGrantDraft(
   const resolved: DraftKind = kind === 'auto' ? (continuable ? 'reapprove' : 'new') : kind;
   if (resolved === 'reapprove' && !continuable) {
     throw new AuthorityDraftError('nothing-to-reapprove', 'There is no active, paused or expired grant to continue — draft a new grant instead.');
+  }
+  if (resolved === 'reapprove' && opts.eliteDirect === false && installed.state === 'ok' && grantHasEliteDirect(installed.envelope.payload)) {
+    throw new AuthorityDraftError(
+      'elite-direct-reapprove',
+      'This grant is elite-direct; a re-approval continues it. To go back to the judged ladder, sign a new grant (`ashlr authority grant`) — it starts at shadow.',
+    );
   }
   const base = {
     nowMs,
@@ -711,7 +747,12 @@ export async function buildStandingGrantDraft(
     const serverEnforcement = new Map([...probes].map(([key, probe]) => [key, probe.state]));
     // Devin follows the current opt-in: a re-approval strips it when Mason
     // turned it off (or the helper cannot sign it) and adds it when he opted in.
-    payload = buildReapprovalGrantPayload(installed.envelope.payload, position, { ...base, serverEnforcement, devin: devin.include });
+    payload = buildReapprovalGrantPayload(installed.envelope.payload, position, {
+      ...base,
+      serverEnforcement,
+      devin: devin.include,
+      ...(opts.eliteDirect === true ? { eliteDirect: true } : {}),
+    });
   } else {
     const repos = await draftRepos();
     const probes = await probeServerEnforcementAll(repos.map((repo) => repo.nameWithOwner), opts.githubGet);
@@ -720,12 +761,36 @@ export async function buildStandingGrantDraft(
       repos: repos.map((repo) => ({ ...repo, serverEnforcement: probes.get(repo.nameWithOwner.toLowerCase())?.state ?? null })),
       seats: await draftSeats(),
       devin: devin.include,
+      eliteDirect: opts.eliteDirect === true,
     });
+  }
+  // 3.15: the grant editor's choices, applied to the server's own draft —
+  // only a choice WITHIN it (authority/grant-scope.ts); invalid is refused.
+  const editable = {
+    repos: payload.repos.map((repo) => repo.nameWithOwner),
+    engines: editableEngines(payload),
+    leaderClasses: ['A', 'B'],
+    maxDays: Math.floor(STANDING_GRANT_CEILINGS.maxTtlMs / 86_400_000),
+  };
+  if (opts.scope && Object.keys(opts.scope).length > 0) {
+    const edited = applyGrantScopeEdit(payload, opts.scope);
+    if (!edited.ok) throw new AuthorityDraftError('scope-invalid', edited.reason, 400);
+    payload = edited.payload;
   }
   const digest = rememberDraft(payload, resolved);
   const summary = describeGrantScope(payload);
   if (devin.note) summary.push(devin.note);
-  return { payload, digest, kind: resolved, summary, startStageId: payload.rollout.stages[0]!.id };
+  const current = installed.state === 'ok' && evaluation.grantState !== 'none' ? installed.envelope.payload : null;
+  return {
+    payload,
+    digest,
+    kind: resolved,
+    summary,
+    startStageId: payload.rollout.stages[0]!.id,
+    eliteDirect: grantHasEliteDirect(payload),
+    diff: grantScopeDiff(current, payload),
+    editable,
+  };
 }
 
 /** Rollout position straight from the ledger for a grant that no longer verifies (paused / expired). */
@@ -919,20 +984,60 @@ export const handleAuthorityApi: ApiModule = async (ctx, req, res, path, method)
       sendAuthorityJson(res, 404, { error: `not found: ${method} ${path}` });
       return true;
     }
+    if (path === VERSE_AUTHORITY_DRAFT_PATH && method === 'POST') {
+      // 3.15: a draft with Mason's scope edits (the grant editor). Mutation
+      // token like every write — it stores a draft the next approve signs.
+      const body = await readMutationBody(ctx, req, res);
+      if (!body) return true;
+      for (const key of Object.keys(body)) {
+        if (key !== 'kind' && key !== 'scope' && key !== 'eliteDirect') {
+          sendInvalid(res, `unknown key: ${key}`);
+          return true;
+        }
+      }
+      const kind = body['kind'] ?? 'auto';
+      if (kind !== 'auto' && kind !== 'new' && kind !== 'reapprove') {
+        sendInvalid(res, 'kind must be new or reapprove');
+        return true;
+      }
+      const eliteDirect = body['eliteDirect'];
+      if (eliteDirect !== undefined && typeof eliteDirect !== 'boolean') {
+        sendInvalid(res, 'eliteDirect must be a boolean');
+        return true;
+      }
+      const scope = parseGrantScopeEdit(body['scope']);
+      if (!scope.ok) {
+        sendInvalid(res, scope.reason);
+        return true;
+      }
+      try {
+        sendAuthorityJson(res, 200, await buildStandingGrantDraft(kind, Date.now(), { scope: scope.edit, ...(eliteDirect === undefined ? {} : { eliteDirect }) }));
+      } catch (error) {
+        if (error instanceof AuthorityDraftError) sendAuthorityJson(res, error.status, { code: error.code, error: error.message });
+        else sendAuthorityJson(res, 500, { code: 'draft-failed', error: 'the grant draft could not be built' });
+      }
+      return true;
+    }
     if (method !== 'GET') {
       sendAuthorityJson(res, 404, { error: `not found: ${method} ${path}` });
       return true;
     }
     if (path === VERSE_AUTHORITY_DRAFT_PATH) {
-      const params = readQuery(req, res, ['kind']);
+      const params = readQuery(req, res, ['kind', 'eliteDirect']);
       if (!params) return true;
       const kind = params.get('kind') ?? 'auto';
       if (kind !== 'auto' && kind !== 'new' && kind !== 'reapprove') {
         sendInvalid(res, 'kind must be new or reapprove');
         return true;
       }
+      // 3.15: `eliteDirect=1` drafts the elite-direct rung; `0` / absent does not.
+      const eliteRaw = params.get('eliteDirect');
+      if (eliteRaw !== null && eliteRaw !== '0' && eliteRaw !== '1') {
+        sendInvalid(res, 'eliteDirect must be 0 or 1');
+        return true;
+      }
       try {
-        sendAuthorityJson(res, 200, await buildStandingGrantDraft(kind));
+        sendAuthorityJson(res, 200, await buildStandingGrantDraft(kind, Date.now(), eliteRaw === null ? {} : { eliteDirect: eliteRaw === '1' }));
       } catch (error) {
         if (error instanceof AuthorityDraftError) sendAuthorityJson(res, error.status, { code: error.code, error: error.message });
         else sendAuthorityJson(res, 500, { code: 'draft-failed', error: 'the grant draft could not be built' });

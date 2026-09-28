@@ -27,7 +27,7 @@ import {
 } from '../src/core/authority/standing-grant.js';
 import type { EffectivePolicy, StandingGrantV1 } from '../src/core/authority/types.js';
 import { laneOfSeat, planLanes, type LanePlanInput } from '../src/core/fleet/dispatch-router.js';
-import { FLEET_ENGINES, GRANT_ENGINES } from '../src/core/fleet/fleet-types.js';
+import { FLEET_ENGINES, GRANT_ENGINES, GRANT_LANE_ENGINES } from '../src/core/fleet/fleet-types.js';
 import { allowedJudgeLanes, evaluateG6 } from '../src/core/fleet/merge-gates.js';
 import { evaluateTwoJudgeRule, judgeLaneFamily, requiresTwoJudges } from '../src/core/fleet/reviewer-independence.js';
 import { sanitizeSeatCapacity } from '../src/core/routing/budget-store.js';
@@ -57,7 +57,12 @@ describe('seat → engine → lane: Devin is Devin', () => {
     expect(fleetEngineOfSeat('devin')).toBe('devin');
     expect(fleetEngineOfSeat('claude-a')).toBe('claude-cli');
     expect(FLEET_ENGINES).not.toContain('devin');
-    expect(GRANT_ENGINES).toEqual([...FLEET_ENGINES, 'devin']);
+    // 3.15 devin-cli: the local Devin CLI is a LANE, never a grant engine —
+    // the grant vocabulary (and GrantContract.swift's mirror) is unchanged.
+    expect(FLEET_ENGINES).toContain('devin-cli');
+    expect(GRANT_ENGINES).toEqual(['local', 'grok-cli', 'claude-cli', 'codex', 'devin']);
+    expect(GRANT_ENGINES).toEqual([...GRANT_LANE_ENGINES, 'devin']);
+    expect(GRANT_ENGINES as readonly string[]).not.toContain('devin-cli');
   });
 
   it('budget modes: Devin may launch in all-in / balanced, never in reserve', () => {

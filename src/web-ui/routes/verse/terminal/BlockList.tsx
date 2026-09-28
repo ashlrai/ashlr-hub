@@ -8,24 +8,66 @@
  * The same list shows the operator's own terminal blocks and, read-only,
  * the commands the chat's agents ran (the Agent tab).
  *
+ * 3.15 "many agents" additions (terminal blocks only — `extras`):
+ *   - ⇧-click / ⌘-click a card's head to select several; the selection bar
+ *     copies, sends or asks a seat about all of them at once;
+ *   - the RUNNING block's head sticks to the top while its output scrolls;
+ *   - Filter-in-block: keep (or, inverted, drop) the lines matching a text
+ *     or a regular expression;
+ *   - bookmarks (★, per tab, this device) and "Bookmarked only";
+ *   - Ask… (any seat), Re-run, Copy link (verse://terminal/<tab>/<block>);
+ *   - a loopback URL the command printed → "Open in Browser pane";
+ *   - a failed command: the local model's fix chips (Paste, never run).
+ *
  * Output of a terminal block is fetched when the card opens (the server
  * keeps it; the stream only carries metadata) and refetched while the
  * command is still running.
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react';
+import type { VerseTerminalFixResponse } from '../../../data/api-types.js';
 import { EmptyState } from '../../../components/primitives/EmptyState.js';
-import { IconChevronRight, IconCopy, IconSend } from '../../../components/primitives/icons.js';
+import { IconChevronRight, IconCopy, IconSend, IconX } from '../../../components/primitives/icons.js';
 import { parseAnsi, runCss } from './ansi-spans.js';
+import { EMPTY_FILTER, filterOutputLines, urlLabel, type BlockSelection, type OutputFilter } from './block-tools.js';
 import { blockStatus, formatDuration, type BlockView } from './blocks-model.js';
+import { AskGlyph, BrowserGlyph, FilterGlyph, LinkGlyph, RerunGlyph, StarGlyph } from './extra-glyphs.js';
+import { FixChips, type AskTarget } from './FixChips.js';
 import styles from './TerminalPanel.module.css';
+import extra from './TerminalExtras.module.css';
 
-export type BlockAction = 'copy-output' | 'copy-command' | 'send' | 'explain' | 'paste' | 'jump';
+export type BlockAction =
+  | 'copy-output' | 'copy-command' | 'send' | 'explain' | 'paste' | 'jump'
+  // 3.15 many-agents actions
+  | 'ask' | 'ask-seat' | 'rerun' | 'bookmark' | 'copy-link' | 'open-url' | 'paste-text';
+
+/** What some actions need besides the block: where to anchor a menu, which URL, which text, which seat. */
+export interface BlockActionExtra {
+  anchor?: HTMLElement;
+  url?: string;
+  text?: string;
+  seatId?: string;
+}
+
+/** The terminal-only additions (the Agent tab's list has none). */
+export interface BlockListExtras {
+  selection: BlockSelection;
+  /** A modifier-click on a card's head. */
+  onSelect: (id: string, gesture: { range: boolean; toggle: boolean }) => void;
+  onClearSelection: () => void;
+  onSelectionAction: (action: 'copy-output' | 'send' | 'ask', anchor?: HTMLElement) => void;
+  bookmarks: ReadonlySet<string>;
+  /** Null = fix suggestions are off. */
+  loadFix: ((block: BlockView) => Promise<VerseTerminalFixResponse>) | null;
+  askTargets: readonly AskTarget[];
+  /** Re-run is offered (a live, plain shell with no command running). */
+  canRerun: boolean;
+}
 
 export interface BlockListProps {
   blocks: readonly BlockView[];
   /** Terminal blocks: the output as the shell wrote it. Agent blocks carry theirs. */
   loadOutput?: (block: BlockView) => Promise<string>;
-  onAction: (action: BlockAction, block: BlockView) => void;
+  onAction: (action: BlockAction, block: BlockView, extra?: BlockActionExtra) => void;
   /** Which actions this list offers (the Agent tab has no "Jump to"). */
   actions: readonly BlockAction[];
   emptyTitle: string;
@@ -33,6 +75,7 @@ export interface BlockListProps {
   /** Scroll to and ring this block (⌘↑/⌘↓ from the terminal, a gutter dot). */
   highlightId?: string | null;
   label: string;
+  extras?: BlockListExtras;
 }
 
 /** Cards open at first: the latest few, and any that failed. */
@@ -76,15 +119,20 @@ interface CardProps {
   open: boolean;
   onToggle: (id: string) => void;
   loadOutput?: (block: BlockView) => Promise<string>;
-  onAction: (action: BlockAction, block: BlockView) => void;
+  onAction: (action: BlockAction, block: BlockView, extra?: BlockActionExtra) => void;
   actions: readonly BlockAction[];
   highlighted: boolean;
   now: number;
+  extras?: BlockListExtras;
+  selected: boolean;
+  bookmarked: boolean;
 }
 
-const BlockCard = memo(function BlockCard({ block, open, onToggle, loadOutput, onAction, actions, highlighted, now }: CardProps) {
+const BlockCard = memo(function BlockCard({ block, open, onToggle, loadOutput, onAction, actions, highlighted, now, extras, selected, bookmarked }: CardProps) {
   const [fetched, setFetched] = useState<{ text: string; at: string } | null>(null);
   const [error, setError] = useState(false);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [filter, setFilter] = useState<OutputFilter>(EMPTY_FILTER);
   const ref = useRef<HTMLLIElement>(null);
   const status = blockStatus(block);
   const output = block.output ?? fetched?.text ?? null;
@@ -114,17 +162,37 @@ const BlockCard = memo(function BlockCard({ block, open, onToggle, loadOutput, o
     if (highlighted) ref.current?.scrollIntoView({ block: 'nearest' });
   }, [highlighted]);
 
+  const filtered = useMemo(() => (output !== null && filter.pattern ? filterOutputLines(output, filter) : null), [output, filter]);
+  const loadFix = extras?.loadFix ?? null;
+  // Keyed on the block's id and exit: re-renders of the same finished block never ask the model again.
+  const blockRef = useRef(block);
+  blockRef.current = block;
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the block's identity; the block is read through the ref
+  const fixLoader = useMemo(() => (loadFix ? () => loadFix(blockRef.current) : null), [loadFix, block.id, block.exitCode]);
+
   const cwdName = folderName(block.cwd);
   const offerExplain = actions.includes('explain') && (status.tone === 'error');
+  const terminal = block.source === 'terminal' && extras !== undefined;
+  const onHead = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    if (extras && (event.shiftKey || event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      extras.onSelect(block.id, { range: event.shiftKey, toggle: event.metaKey || event.ctrlKey });
+      return;
+    }
+    onToggle(block.id);
+  };
+  const urls = block.localUrls ?? [];
   return (
-    <li ref={ref} className={styles.block} data-tone={status.tone} data-highlight={highlighted || undefined} data-testid={`block-${block.id}`}>
-      <div className={styles.blockTop}>
-        <button type="button" className={styles.blockHead} aria-expanded={open} onClick={() => onToggle(block.id)}
-          title={block.command || 'Command'}>
+    <li ref={ref} className={`${styles.block}${selected ? ` ${extra.selected}` : ''}`} data-tone={status.tone} data-highlight={highlighted || undefined}
+      data-selected={selected || undefined} data-testid={`block-${block.id}`} aria-selected={extras ? selected : undefined}>
+      <div className={`${styles.blockTop}${block.running && terminal ? ` ${extra.runningTop}` : ''}`}>
+        <button type="button" className={styles.blockHead} aria-expanded={open} onClick={onHead}
+          title={extras ? `${block.command || 'Command'} — ⇧-click or ⌘-click to select several` : block.command || 'Command'}>
           <span className={styles.chevron} aria-hidden="true"><IconChevronRight size={12} /></span>
           <span className={styles.prompt} aria-hidden="true">$</span>
           <span className={styles.command} data-empty={block.command ? undefined : true}>{block.command || 'command'}</span>
           <span className={styles.meta}>
+            {bookmarked ? <span className={extra.bookmarked} aria-label="Bookmarked"><StarGlyph filled size={12} /></span> : null}
             {cwdName ? <span title={block.cwd ?? undefined}>{cwdName}</span> : null}
             {block.durationMs !== null ? <span>{formatDuration(block.durationMs)}</span> : null}
             <span>{relativeTime(block.startedAt, now)}</span>
@@ -150,10 +218,35 @@ const BlockCard = memo(function BlockCard({ block, open, onToggle, loadOutput, o
               <IconSend size={14} />
             </button>
           ) : null}
+          {actions.includes('ask') ? (
+            <button type="button" className={styles.iconBtn} aria-label="Ask a seat about this command" aria-haspopup="menu"
+              title="Ask… — Claude Code, Codex, Devin, Grok, a local model, or all of them side by side"
+              onClick={(e) => onAction('ask', block, { anchor: e.currentTarget })}>
+              <AskGlyph />
+            </button>
+          ) : null}
           {offerExplain ? (
             <button type="button" className={styles.iconBtn} aria-label="Explain and fix this error" title="Ask the chat to explain and fix this error"
               onClick={() => onAction('explain', block)}>
               <span aria-hidden="true" style={{ fontSize: 'var(--text-2xs-size)', fontWeight: 600 }}>Fix</span>
+            </button>
+          ) : null}
+          {actions.includes('rerun') && extras?.canRerun && block.command && !block.running ? (
+            <button type="button" className={styles.iconBtn} aria-label="Re-run this command" title="Re-run: type it at the prompt and press Enter"
+              onClick={() => onAction('rerun', block)}>
+              <RerunGlyph />
+            </button>
+          ) : null}
+          {actions.includes('bookmark') ? (
+            <button type="button" className={styles.iconBtn} aria-pressed={bookmarked} aria-label={bookmarked ? 'Remove bookmark' : 'Bookmark this block'}
+              title={bookmarked ? 'Remove bookmark' : 'Bookmark'} onClick={() => onAction('bookmark', block)}>
+              <StarGlyph filled={bookmarked} />
+            </button>
+          ) : null}
+          {actions.includes('copy-link') ? (
+            <button type="button" className={styles.iconBtn} aria-label="Copy link to this block" title="Copy a verse://terminal link to this block"
+              onClick={() => onAction('copy-link', block)}>
+              <LinkGlyph />
             </button>
           ) : null}
           {actions.includes('jump') ? (
@@ -168,8 +261,41 @@ const BlockCard = memo(function BlockCard({ block, open, onToggle, loadOutput, o
               <PasteGlyph />
             </button>
           ) : null}
+          {terminal && open && output !== null && output.trim().length > 0 ? (
+            <button type="button" className={styles.iconBtn} aria-pressed={filterOpen} aria-label="Filter output lines" title="Filter the output's lines"
+              onClick={() => { setFilterOpen((o) => !o); if (filterOpen) setFilter(EMPTY_FILTER); }}>
+              <FilterGlyph />
+            </button>
+          ) : null}
         </div>
       </div>
+      {terminal && urls.length > 0 ? (
+        <div className={extra.bar}>
+          {urls.map((url) => (
+            <button key={url} type="button" className={extra.chip} onClick={() => onAction('open-url', block, { url })}
+              title={`Open ${url} in the Browser pane`}>
+              <BrowserGlyph size={12} /><span className={extra.chipCode}>{urlLabel(url)}</span><span className={extra.chipVerb}>Open in Browser</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {open && filterOpen ? (
+        <div className={extra.filterRow} role="search" aria-label="Filter output">
+          <input className={extra.filterInput} aria-label="Filter lines" placeholder={filter.regex ? 'Regular expression' : 'Text to match'}
+            value={filter.pattern} autoFocus aria-invalid={filtered?.error ? true : undefined}
+            onChange={(e) => setFilter((f) => ({ ...f, pattern: e.target.value }))}
+            onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); setFilter(EMPTY_FILTER); setFilterOpen(false); } }} />
+          <button type="button" className={styles.toggle} aria-pressed={filter.regex} aria-label="Regular expression" title="Regular expression"
+            onClick={() => setFilter((f) => ({ ...f, regex: !f.regex }))}>.*</button>
+          <button type="button" className={styles.toggle} aria-pressed={filter.caseSensitive} aria-label="Match case" title="Match case"
+            onClick={() => setFilter((f) => ({ ...f, caseSensitive: !f.caseSensitive }))}>Aa</button>
+          <button type="button" className={styles.toggle} aria-pressed={filter.invert} aria-label="Invert: hide matching lines" title="Invert: show the lines that do NOT match"
+            onClick={() => setFilter((f) => ({ ...f, invert: !f.invert }))}>!</button>
+          <span className={extra.filterCount} aria-live="polite">
+            {filtered?.error ? 'Invalid pattern' : filtered ? `${filtered.shown} of ${filtered.total} lines` : ''}
+          </span>
+        </div>
+      ) : null}
       {open ? (
         block.fullscreen ? (
           <p className={styles.outputNote}>A full-screen program (an editor, a pager): its screen is not kept as output.</p>
@@ -179,17 +305,30 @@ const BlockCard = memo(function BlockCard({ block, open, onToggle, loadOutput, o
           <p className={styles.outputNote}>{block.running ? 'No output yet.' : 'No output.'}</p>
         ) : (
           <>
-            <pre className={styles.output} tabIndex={0} aria-label={`Output of ${block.command || 'the command'}`}><AnsiOutput text={output} /></pre>
+            <pre className={styles.output} tabIndex={0} aria-label={`Output of ${block.command || 'the command'}`}>
+              <AnsiOutput text={filtered && !filtered.error ? filtered.text : output} />
+            </pre>
             {block.truncated ? <p className={styles.outputNote}>Only the last part of this output is kept.</p> : null}
           </>
         )
+      ) : null}
+      {terminal && status.tone === 'error' && block.exitCode !== null && open ? (
+        <FixChips
+          variant="card"
+          load={fixLoader}
+          askTargets={extras!.askTargets}
+          onPaste={(text) => onAction('paste-text', block, { text })}
+          onAsk={(seatId) => onAction('ask-seat', block, { seatId })}
+          onAskMore={(anchor) => onAction('ask', block, { anchor })}
+        />
       ) : null}
     </li>
   );
 });
 
-export function BlockList({ blocks, loadOutput, onAction, actions, emptyTitle, emptyBody, highlightId = null, label }: BlockListProps) {
+export function BlockList({ blocks, loadOutput, onAction, actions, emptyTitle, emptyBody, highlightId = null, label, extras }: BlockListProps) {
   const [toggled, setToggled] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+  const [bookmarkedOnly, setBookmarkedOnly] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const [now, setNow] = useState(() => Date.now());
@@ -198,6 +337,11 @@ export function BlockList({ blocks, loadOutput, onAction, actions, emptyTitle, e
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
   }, []);
+
+  const shown = useMemo(
+    () => (bookmarkedOnly && extras ? blocks.filter((b) => extras.bookmarks.has(b.id)) : blocks),
+    [blocks, bookmarkedOnly, extras],
+  );
 
   const onToggle = useCallback((id: string) => {
     setToggled((prev) => {
@@ -224,25 +368,56 @@ export function BlockList({ blocks, loadOutput, onAction, actions, emptyTitle, e
     );
   }
 
+  const selectedCount = extras ? extras.selection.ids.size : 0;
+  const bookmarkCount = extras ? blocks.filter((b) => extras.bookmarks.has(b.id)).length : 0;
+
   return (
     <div className={styles.blocks} ref={scroller} onScroll={(e) => {
       const el = e.currentTarget;
       pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
     }}>
-      <ol className={styles.blockList} aria-label={label}>
-        {blocks.map((block, index) => (
-          <BlockCard
-            key={block.id}
-            block={block}
-            open={toggled.get(block.id) ?? defaultOpen(blocks, index)}
-            onToggle={onToggle}
-            {...(loadOutput ? { loadOutput } : {})}
-            onAction={onAction}
-            actions={actions}
-            highlighted={highlightId === block.id}
-            now={now}
-          />
-        ))}
+      {extras && (selectedCount > 0 || bookmarkCount > 0) ? (
+        <div className={extra.listTools} role="toolbar" aria-label={selectedCount > 0 ? 'Selected blocks' : 'Blocks'}>
+          {selectedCount > 0 ? (
+            <>
+              <span aria-live="polite">{selectedCount} selected</span>
+              <button type="button" className={extra.chip} onClick={() => extras.onSelectionAction('copy-output')}>Copy outputs</button>
+              <button type="button" className={extra.chip} onClick={() => extras.onSelectionAction('send')}>Send to chat</button>
+              <button type="button" className={extra.chip} aria-haspopup="menu" onClick={(e) => extras.onSelectionAction('ask', e.currentTarget)}>Ask…</button>
+              <button type="button" className={extra.chip} aria-label="Clear selection" title="Clear selection" onClick={extras.onClearSelection}>
+                <IconX size={10} />
+              </button>
+            </>
+          ) : <span>⇧/⌘-click blocks to select several</span>}
+          <span className={extra.barSpacer} />
+          {bookmarkCount > 0 ? (
+            <button type="button" className={styles.toggle} aria-pressed={bookmarkedOnly} title="Show only bookmarked blocks"
+              onClick={() => setBookmarkedOnly((v) => !v)}>
+              <StarGlyph filled={bookmarkedOnly} size={12} /> {bookmarkCount}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      <ol className={styles.blockList} aria-label={label} aria-multiselectable={extras ? true : undefined}>
+        {shown.map((block) => {
+          const index = blocks.indexOf(block);
+          return (
+            <BlockCard
+              key={block.id}
+              block={block}
+              open={toggled.get(block.id) ?? defaultOpen(blocks, index)}
+              onToggle={onToggle}
+              {...(loadOutput ? { loadOutput } : {})}
+              onAction={onAction}
+              actions={actions}
+              highlighted={highlightId === block.id}
+              now={now}
+              {...(extras ? { extras } : {})}
+              selected={extras?.selection.ids.has(block.id) ?? false}
+              bookmarked={extras?.bookmarks.has(block.id) ?? false}
+            />
+          );
+        })}
       </ol>
     </div>
   );

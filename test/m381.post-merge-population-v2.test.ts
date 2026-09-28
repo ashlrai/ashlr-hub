@@ -210,6 +210,28 @@ describe('M381 denominator-complete post-merge population v2', () => {
     expect(heuristic.ok && heuristic.population.members[0]?.reason).toBe('heuristic-adverse');
   });
 
+  it('binds v2 verification identity without granting positive credit', () => {
+    const verified = stableWitness(legacyRepoDigest(), {
+      schemaVersion: 2,
+      verifiedAt: '2026-06-17T00:01:00.000Z',
+      verificationIsolation: 'detached-worktree',
+      workspaceClean: true,
+      requiredCommandCount: 3,
+    });
+    const first = build([proposal()], [], [verified]);
+    const changed = build([proposal()], [], [
+      { ...verified, verificationIsolation: 'clean-workspace' },
+    ]);
+    expect(first.ok && first.population.members[0]).toMatchObject({
+      classification: 'inconclusive', reason: 'denominator-incomplete',
+    });
+    expect(changed.ok && changed.population.members[0]?.reason).toBe('verification-not-detached');
+    expect(first.ok && first.population.policyEligible).toBe(false);
+    expect(first.ok && first.population.denominatorComplete).toBe(false);
+    expect(first.ok && first.population.stabilitySourceDigest)
+      .not.toBe(changed.ok && changed.population.stabilitySourceDigest);
+  });
+
   it('binds excluded proposals into the source digest and accounts exclusion reasons', () => {
     const pending = proposal({ id: 'pending', status: 'pending' });
     const notEnrolled = proposal({ id: 'other', repo: resolve('/tmp/other') });

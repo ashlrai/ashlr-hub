@@ -145,6 +145,8 @@ let calls: Call[];
 let cloud: unknown;
 let readiness: unknown;
 let localModels: unknown;
+let devin: unknown;
+let roster: unknown[];
 
 function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
@@ -164,9 +166,11 @@ function stubFetch() {
     }
     switch (url) {
       case '/api/verse/bootstrap':
-        return json({ seats: ROSTER, projects: [], sessions: [], dispatchEnabled: true, localRuntime: {} });
+        return json({ seats: roster, projects: [], sessions: [], dispatchEnabled: true, localRuntime: {} });
       case '/api/verse/seats':
-        return json({ sampledAt: CHECKED, seats: ROSTER, localRuntime: {} });
+        return json({ sampledAt: CHECKED, seats: roster, localRuntime: {} });
+      case '/api/verse/devin':
+        return devin === 404 ? json({ error: 'not found' }, 404) : json(devin);
       case '/api/verse/health':
         return json({ checkedAt: CHECKED, seats: HEALTH });
       case '/api/verse/budget':
@@ -196,6 +200,8 @@ beforeEach(() => {
   cloud = 404;
   readiness = 404;
   localModels = LOCAL_MODELS;
+  devin = 404;
+  roster = ROSTER;
   stubFetch();
 });
 
@@ -210,10 +216,18 @@ describe('ResourcesDrawer — accounts', () => {
   it('leads every account with the shared status wording, usable first', async () => {
     render(<ResourcesDrawer mode="docked" now={NOW} />);
     await screen.findByRole('heading', { name: /^Cash Margin Partners/ });
-    const accounts = within(screen.getByRole('region', { name: 'Accounts' }));
-    const names = accounts.getAllByRole('heading', { level: 4 }).map((h) => h.textContent);
-    // usable (CMP) → tight (Claude) → spent (Personal) → signed out (Grok)
-    expect(names.map((n) => n!.replace(/(max|pro|plus|SuperGrok)$/, ''))).toEqual(['Cash Margin Partners', 'Claude Max', 'Personal Codex', 'Grok']);
+    // 3.15: grouped by TIER, never by provider. Elite: usable (CMP) → tight
+    // (Claude) → spent (Personal), with Claude's cloud credits placed by the
+    // same status rule; Fast: Grok (signed out).
+    const elite = within(screen.getByRole('region', { name: 'Elite' }));
+    const names = elite.getAllByRole('heading', { level: 4 }).map((h) => h.textContent!.replace(/(max|pro|plus|SuperGrok|claude\.ai)$/, ''));
+    expect(names.filter((n) => n !== 'Claude cloud credits')).toEqual(['Cash Margin Partners', 'Claude Max', 'Personal Codex']);
+    const fast = within(screen.getByRole('region', { name: 'Fast' }));
+    expect(fast.getAllByRole('heading', { level: 4 }).map((h) => h.textContent!.replace(/SuperGrok$/, ''))).toEqual(['Grok']);
+    // The same facts row on every card: tier · cost basis · models.
+    expect(within(cardOf('Cash Margin Partners')).getByText('Elite')).toBeInTheDocument();
+    expect(within(cardOf('Cash Margin Partners')).getByText('subscription')).toBeInTheDocument();
+    expect(within(cardOf('Grok')).getByText('Fast')).toBeInTheDocument();
 
     expect(within(cardOf('Cash Margin Partners')).getByText('Connected')).toBeInTheDocument();
     expect(within(cardOf('Cash Margin Partners')).getByText('· usable now')).toBeInTheDocument();
@@ -281,7 +295,7 @@ describe('ResourcesDrawer — local', () => {
   it('shows the runtime, the context each model runs at, and starts a supervised runtime', async () => {
     const user = userEvent.setup();
     render(<ResourcesDrawer mode="docked" now={NOW} />);
-    const local = within(await screen.findByRole('region', { name: 'Local' }));
+    const local = within(await screen.findByRole('region', { name: 'Free · local' }));
     expect(await local.findByText('Qwen3 32B')).toBeInTheDocument();
     expect(local.getByTitle('qwen3:32b')).toBeInTheDocument();
     expect(local.getByText('64k of 256k context')).toBeInTheDocument();
@@ -300,7 +314,7 @@ describe('ResourcesDrawer — local', () => {
 describe('ResourcesDrawer — cloud credits', () => {
   it('says "Cloud lane not available yet" while GET /api/verse/cloud 404s', async () => {
     render(<ResourcesDrawer mode="docked" now={NOW} />);
-    const card = within(screen.getByRole('region', { name: 'Cloud' }));
+    const card = within(cardOf('Claude cloud credits'));
     expect(await card.findByText('Cloud lane not available yet')).toBeInTheDocument();
     expect(card.queryByText(/\$/)).toBeNull();
   });
@@ -308,7 +322,7 @@ describe('ResourcesDrawer — cloud credits', () => {
   it('shows the estimated remaining of the total, running sessions and the real-balance link', async () => {
     cloud = CLOUD;
     render(<ResourcesDrawer mode="docked" now={NOW} />);
-    const card = within(screen.getByRole('region', { name: 'Cloud' }));
+    const card = within(cardOf('Claude cloud credits'));
     expect(await card.findByText('$212 of $250 left')).toBeInTheDocument();
     expect(card.getByText('estimate')).toBeInTheDocument();
     expect(card.getByText('2 running · 5 of 20 today')).toBeInTheDocument();
@@ -325,12 +339,12 @@ describe('ResourcesDrawer — cloud credits', () => {
       budget: { ...CLOUD.budget, estimatedSpentUsd: 0, estimatedRemainingUsd: 250, running: 0, sessionsToday: 0 },
     };
     render(<ResourcesDrawer mode="docked" now={NOW} />);
-    const card = within(screen.getByRole('region', { name: 'Cloud' }));
+    const card = within(cardOf('Claude cloud credits'));
     expect(await card.findByText('Not set up')).toBeInTheDocument();
     expect(card.getByText('· ~$250 credits')).toBeInTheDocument();
     expect(card.getByText('estimate')).toBeInTheDocument();
     expect(card.getByText("The Claude seat isn't set up on this Mac.")).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Cloud' }).textContent).not.toMatch(/of \$250 left/);
+    expect(cardOf('Claude cloud credits').textContent).not.toMatch(/of \$250 left/);
     expect(card.getByTitle('Cloud: not set up · ~$250 credits')).toBeInTheDocument();
     expect(card.getByRole('link', { name: /Real balance on claude\.ai/ })).toBeInTheDocument();
   });
@@ -368,7 +382,7 @@ describe('ResourcesDrawer — readiness for chat and the fleet (3.14)', () => {
       llamaServer: { reachable: false, baseUrl: 'http://127.0.0.1:8080', status: 'down', models: [], modelCount: null, slots: null, reason: 'llama-server-timeout' },
     };
     render(<ResourcesDrawer mode="docked" now={NOW} />);
-    const local = within(await screen.findByRole('region', { name: 'Local' }));
+    const local = within(await screen.findByRole('region', { name: 'Free · local' }));
     expect(await local.findByRole('group', { name: 'Local models: readiness' })).toBeInTheDocument();
     const runtimes = within(await local.findByRole('list', { name: 'Local runtimes' }));
     expect(runtimes.getByText('Ollama')).toBeInTheDocument();
@@ -477,5 +491,68 @@ describe('ResourcesDrawer — overlay', () => {
     await user.click(screen.getByRole('button', { name: 'Apps & Accounts' }));
     expect(getResourcesUi().open).toBe(false);
     expect(getVerseUiState().section).toBe('apps');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3.15 — equal partners: Devin is an Elite card like Claude and Codex
+// ---------------------------------------------------------------------------
+
+const DEVIN_HEALTH = { state: 'ready' as const, summary: null, windows: [], observedAt: CHECKED };
+const DEVIN_CLOUD_SEAT = {
+  id: 'devin', engine: 'devin', label: 'Devin (cloud)', accountId: 'devin', contextWindow: null, health: DEVIN_HEALTH, costBasis: 'credits',
+  models: [{ id: 'devin', label: 'Devin', contextWindow: null, windowSource: 'fallback' }],
+};
+const DEVIN_CLI_SEAT = {
+  id: 'devin-cli', engine: 'devin', label: 'Devin (CLI)', accountId: 'devin-cli', contextWindow: null, health: DEVIN_HEALTH,
+  models: [
+    { id: 'devin', label: 'Devin default', contextWindow: null, windowSource: 'fallback' },
+    { id: 'swe', label: 'SWE (latest)', contextWindow: null, windowSource: 'fallback' },
+  ],
+};
+const DEVIN_OVERVIEW = {
+  generatedAt: CHECKED,
+  status: {
+    enabled: true, connected: true, state: 'ready', reason: 'Connected.', orgId: 'org-x', principal: 'service_user', principalName: 'Ashlr Verse', keyStore: 'keychain',
+    chatLine: 'Chat: ready', fleetLine: 'Fleet: Off', fleetReady: false,
+    chat: { ready: true, tone: 'ok', word: 'Ready', detail: '', fix: null },
+    fleet: { ready: false, tone: 'off', word: 'Off', detail: 'The fleet may not launch Devin sessions.', fix: { kind: 'command', label: 'Let the fleet use Devin', command: 'ashlr devin fleet on' }, roles: [], reservePercent: null },
+  },
+  budget: {
+    acuBudgetTotal: 50, acuUsed: 12, acuRemaining: 38, acuToday: 12, acuInFlight: 0, estimatedUsdUsed: 27, sessionsToday: 2, running: 0, paused: false,
+    canLaunch: { ok: true, reason: null }, canFleetLaunch: { ok: true, reason: null }, estimateNote: 'Estimate.', usageUrl: 'https://app.devin.ai/settings/usage',
+    budget: { v: 1, acuBudgetTotal: 50, acuSpentAdjustment: 0, usdPerAcu: 2.25, maxAcuPerSession: 10, maxAcuPerDay: 30, reserveAcu: 10, pauseAtFraction: 0.9, maxConcurrent: 2, maxSessionsPerDay: 10, updatedAt: CHECKED },
+  },
+  tasks: [],
+};
+
+describe('ResourcesDrawer — equal partners (3.15)', () => {
+  it('Devin is ONE Elite card beside Claude and Codex, with the same facts row — never two generic account cards', async () => {
+    roster = [...ROSTER, DEVIN_CLOUD_SEAT, DEVIN_CLI_SEAT];
+    devin = DEVIN_OVERVIEW;
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    const elite = within(await screen.findByRole('region', { name: 'Elite' }));
+    const heading = await elite.findByRole('heading', { name: /^Devin/ });
+    const card = within(heading.closest('li')!);
+    expect(card.getByText('Elite')).toBeInTheDocument();
+    // Cloud spends ACU credits; the CLI rides the Devin plan.
+    expect(card.getByText('credits + subscription')).toBeInTheDocument();
+    expect(card.getByText('10 ACUs kept for you')).toBeInTheDocument();
+    expect(card.getByTitle('Devin, Devin default, SWE (latest)')).toBeInTheDocument();
+    // The Devin chat seats are not ALSO drawn as generic account cards.
+    expect(screen.queryByRole('heading', { name: /^Devin \(cloud\)/ })).toBeNull();
+    expect(screen.queryByRole('heading', { name: /^Devin \(CLI\)/ })).toBeNull();
+    // Every elite card carries the same facts row.
+    for (const name of ['Cash Margin Partners', 'Claude Max', 'Personal Codex']) {
+      expect(within(cardOf(name)).getByText('Elite')).toBeInTheDocument();
+    }
+  });
+
+  it('each tier section says what the tier means, and the sections come in tier order', async () => {
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    await screen.findByRole('heading', { name: /^Cash Margin Partners/ });
+    const titles = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent);
+    expect(titles).toEqual(['Elite', 'Fast', 'Free · local', 'Decision layer']);
+    expect(within(screen.getByRole('region', { name: 'Elite' })).getByText(/equal partners/)).toBeInTheDocument();
   });
 });

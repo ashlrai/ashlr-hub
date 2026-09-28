@@ -5,7 +5,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VerseBrowserAgentCommand } from '../../../../core/verse/browser-types.js';
-import { executeAgentCommand, versePortOf, type BrowserExecutor } from './agent-runner.js';
+import { executeAgentCommand as executeWithFence, parseActArgs, parseResolveArgs, versePortOf, type BrowserExecutor } from './agent-runner.js';
 import { SEARCH_URL, parseBrowserAddress, shortAddress } from './browser-address.js';
 import { frameRect, isUsableRect, stepZoom, zoomLabel } from './browser-geometry.js';
 import { MAX_BROWSER_TABS, activeTab, browserTabsReducer, initialTabsState, restoreTabs, serializeTabs } from './browser-tabs.js';
@@ -13,6 +13,12 @@ import { NATIVE_BROWSER_EVENT, nativeBrowser, nativeRequest, parseNativeBrowserE
 import { base64Bytes, buildSendToChatText, fence, screenshotName, sendCaptureToChat } from './send-to-chat.js';
 
 const VERSE = 'http://127.0.0.1:7777';
+const executeAgentCommand = (
+  command: VerseBrowserAgentCommand,
+  executor: BrowserExecutor,
+  origin: string,
+  canDispatch: (id: string) => Promise<boolean> = async () => true,
+) => executeWithFence(command, executor, origin, canDispatch);
 
 describe('the address bar', () => {
   it('expands shorthands and classifies loopback / frameable', () => {
@@ -109,7 +115,7 @@ describe('the native bridge (feature-detected)', () => {
       browser: { version: 1, capabilities: { screenshot: false }, send: (m: unknown) => { sent.push(m); return true; } },
     };
     const bridge = nativeBrowser()!;
-    expect(bridge.capabilities).toEqual({ screenshot: false, picker: true, console: true, text: true });
+    expect(bridge.capabilities).toEqual({ screenshot: false, picker: true, console: true, text: true, act: false });
     const pending = nativeRequest(bridge, (req) => ({ op: 'query', tab: 't1', req, what: 'info' }));
     const req = (sent[0] as { req: string }).req;
     window.dispatchEvent(new CustomEvent(NATIVE_BROWSER_EVENT, { detail: { kind: 'result', req, ok: true, data: { url: 'http://localhost:1/' } } }));
@@ -123,7 +129,7 @@ describe('the native bridge (feature-detected)', () => {
   it('times out, and refuses when the shell refuses the send', async () => {
     vi.useFakeTimers();
     try {
-      const bridge = { version: 1, capabilities: { screenshot: true, picker: true, console: true, text: true }, send: () => true };
+      const bridge = { version: 1, capabilities: { screenshot: true, picker: true, console: true, text: true, act: true }, send: () => true };
       const pending = nativeRequest(bridge, (req) => ({ op: 'query', tab: 't1', req, what: 'text' }), 1_000);
       vi.advanceTimersByTime(1_001);
       await expect(pending).rejects.toThrow(/did not answer/);
@@ -138,6 +144,8 @@ describe('the native bridge (feature-detected)', () => {
     expect(parseNativeBrowserEvent({ kind: 'weird' })).toBeNull();
     expect(parseNativeBrowserEvent(null)).toBeNull();
     expect(parseNativeBrowserEvent({ kind: 'title', tab: 't1', title: 'x'.repeat(500) })).toMatchObject({ title: 'x'.repeat(300) });
+    expect(parseNativeBrowserEvent({ kind: 'operator', tab: 't1' })).toEqual({ kind: 'operator', tab: 't1' });
+    expect(parseNativeBrowserEvent({ kind: 'operator' })).toBeNull();
   });
 });
 
@@ -204,12 +212,20 @@ describe('the agent runner re-applies the gate in the pane', () => {
     return {
       calls,
       mode: 'native',
-      capabilities: { screenshot: true, text: true, console: true },
-      current: () => ({ url: over.url === undefined ? 'http://localhost:5173/' : over.url, title: 'App', tabs: 1 }),
+      capabilities: { screenshot: true, text: true, console: true, act: true },
+      current: () => ({ tabId: 't1', url: over.url === undefined ? 'http://localhost:5173/' : over.url, title: 'App', tabs: 1 }),
       navigate: async (url) => { calls.push(`navigate ${url}`); return { url, title: 'App', loading: false }; },
       screenshot: async () => { calls.push('screenshot'); return { mime: 'image/png', base64: 'AA==', width: 1, height: 1 }; },
       text: async () => { calls.push('text'); return { url: 'http://localhost:5173/', title: 'App', text: 'hello', truncated: false }; },
       console: async () => { calls.push('console'); return { url: 'http://localhost:5173/', console: [], network: [] }; },
+      query: async (what) => { calls.push(`query ${JSON.stringify(what)}`); return { url: 'http://localhost:5173/', ok: true }; },
+      history: async (direction) => { calls.push(`history ${direction}`); return { url: 'http://localhost:5173/', title: 'App', loading: false }; },
+      tabs: () => [{ id: 't1', index: 0, url: 'http://localhost:5173/', title: 'App', active: true }, { id: 't2', index: 1, url: 'https://mail.example/', title: 'Inbox', active: false }],
+      openTab: async (url) => { calls.push(`open ${url}`); },
+      selectTab: (index) => { calls.push(`select ${index}`); return true; },
+      closeTab: (index) => { calls.push(`close ${index}`); return true; },
+      confirm: async () => { calls.push('confirm'); return 'once'; },
+      paused: () => false,
       ...over,
     };
   }
@@ -241,7 +257,7 @@ describe('the agent runner re-applies the gate in the pane', () => {
   });
 
   it('in the web UI (frame mode) it can navigate but says capture needs the desktop app', async () => {
-    const exec = executor({ mode: 'frame', capabilities: { screenshot: false, text: false, console: false } });
+    const exec = executor({ mode: 'frame', capabilities: { screenshot: false, text: false, console: false, act: false } });
     const shot = await executeAgentCommand(cmd('screenshot'), exec, VERSE);
     expect(shot).toMatchObject({ ok: false });
     expect(shot.error).toMatch(/desktop app/);
@@ -251,9 +267,176 @@ describe('the agent runner re-applies the gate in the pane', () => {
   it('turns executor failures into answers, and caps limits', async () => {
     const exec = executor({ screenshot: async () => { throw new Error('snapshot failed'); } });
     expect(await executeAgentCommand(cmd('screenshot'), exec, VERSE)).toMatchObject({ ok: false, error: 'snapshot failed' });
-    const noShots = executor({ capabilities: { screenshot: false, text: true, console: true } });
+    const noShots = executor({ capabilities: { screenshot: false, text: true, console: true, act: true } });
     expect((await executeAgentCommand(cmd('screenshot'), noShots, VERSE)).error).toMatch(/macOS only/);
     expect(versePortOf('http://127.0.0.1:7777')).toBe(7777);
     expect(versePortOf('https://verse.test')).toBe(443);
+  });
+});
+
+describe('the agent runner — acting (closed shapes, pause, confirm)', () => {
+  const APPROVED = { tab: 't1', url: 'http://localhost:5173/', origin: 'http://localhost:5173', loadId: 'L1' };
+  function executor(over: Partial<BrowserExecutor> & { url?: string | null } = {}): BrowserExecutor & { calls: string[] } {
+    const calls: string[] = [];
+    return {
+      calls,
+      mode: 'native',
+      capabilities: { screenshot: true, text: true, console: true, act: true },
+      current: () => ({ tabId: 't1', url: over.url === undefined ? 'http://localhost:5173/' : over.url, title: 'App', tabs: 2 }),
+      navigate: async (url) => ({ url, title: null, loading: false }),
+      screenshot: async (clip) => { calls.push(`screenshot ${JSON.stringify(clip ?? null)}`); return { mime: 'image/png', base64: 'AA==', width: 1, height: 1, scale: 1.5, origin: { x: 0, y: 0 } }; },
+      text: async () => ({ url: 'http://localhost:5173/', title: 'App', text: '', truncated: false }),
+      console: async () => ({ url: 'http://localhost:5173/', console: [], network: [] }),
+      query: async (what) => { calls.push(JSON.stringify(what)); return { url: 'http://localhost:5173/', kind: 'click', native: true }; },
+      history: async () => ({ url: 'https://mail.example/inbox', title: 'Inbox', loading: false }),
+      tabs: () => [{ id: 't1', index: 0, url: 'http://localhost:5173/', title: 'App', active: true }, { id: 't2', index: 1, url: 'https://mail.example/', title: 'Inbox', active: false }],
+      openTab: async (url) => { calls.push(`open ${url}`); },
+      selectTab: (index) => { calls.push(`select ${index}`); return true; },
+      closeTab: (index) => { calls.push(`close ${index}`); return true; },
+      confirm: async (request) => { calls.push(`confirm ${request.action}`); return 'chat'; },
+      paused: () => false,
+      ...over,
+    };
+  }
+  const cmd = (op: VerseBrowserAgentCommand['op'], args?: Record<string, unknown>): VerseBrowserAgentCommand =>
+    ({ id: 'bc_AAAAAAAAAAAA', sessionId: 's-1', op, ...(args ? { args: { ...args, ...((op === 'act' || op === 'evaluate') ? { approved: APPROVED } : {}) } } : {}), allowedOrigins: [], createdAt: 'now' });
+
+  it('rebuilds act specs from closed shapes — extra keys, bad refs and bad kinds are refused', () => {
+    expect(parseActArgs({ kind: 'click', ref: 'e12', expect: 'k2x', double: true })).toEqual({ kind: 'click', ref: 'e12', expect: 'k2x', double: true });
+    expect(parseActArgs({ kind: 'click', x: 10.5, y: 20 })).toEqual({ kind: 'click', x: 10.5, y: 20 });
+    expect(parseActArgs({ kind: 'type', ref: 'e1', text: 'hi', submit: true })).toEqual({ kind: 'type', ref: 'e1', text: 'hi', submit: true });
+    expect(parseActArgs({ kind: 'key', key: 'Enter' })).toEqual({ kind: 'key', key: 'Enter' });
+    expect(parseActArgs({ kind: 'scroll', direction: 'down', amount: 400 })).toEqual({ kind: 'scroll', direction: 'down', amount: 400 });
+    for (const bad of [
+      { kind: 'click', ref: 'e1', script: 'x' },
+      { kind: 'click', ref: '#login' },
+      { kind: 'click', ref: 'e1', x: 1, y: 1 },
+      { kind: 'click' },
+      { kind: 'click', ref: 'e1', modifiers: ['Meta', 'Meta'] },
+      { kind: 'click', ref: 'e1', button: 'middle' },
+      { kind: 'type', ref: 'e1', text: '' },
+      { kind: 'type', ref: 'e1', text: 'x'.repeat(2001) },
+      { kind: 'select', ref: 'e1', values: [] },
+      { kind: 'scroll' },
+      { kind: 'scroll', direction: 'sideways' },
+      { kind: 'eval', expression: '1' },
+      { kind: 'click', ref: 'e1', expect: 'NOT-A-SIG' },
+      null,
+    ]) {
+      expect([bad, parseActArgs(bad)]).toEqual([bad, null]);
+    }
+    expect(parseResolveArgs({ ref: 'e5' })).toEqual({ ref: 'e5' });
+    expect(parseResolveArgs({ focused: true })).toEqual({ focused: true });
+    expect(parseResolveArgs({ ref: 'e5', x: 1 })).toBeNull();
+    expect(parseResolveArgs({ focused: 'yes' })).toBeNull();
+  });
+
+  it('acts through one native query on an observable page', async () => {
+    const exec = executor();
+    const r = await executeAgentCommand(cmd('act', { kind: 'click', ref: 'e3', expect: 'abc' }), exec, VERSE);
+    expect(r).toMatchObject({ ok: true, url: 'http://localhost:5173/' });
+    expect(exec.calls).toEqual(['{"act":{"kind":"click","ref":"e3","expect":"abc"}}']);
+  });
+
+  it('refuses a claimed action when the turn was revoked before native dispatch', async () => {
+    const exec = executor();
+    const result = await executeAgentCommand(cmd('act', { kind: 'click', ref: 'e3' }), exec, VERSE, async () => false);
+    expect(result).toMatchObject({ ok: false });
+    expect(result.error).toMatch(/turn ended/);
+    expect(exec.calls).toEqual([]);
+  });
+
+  it('rejects a switched tab or missing page approval before native input', async () => {
+    const exec = executor();
+    const changed = await executeAgentCommand({ ...cmd('act', { kind: 'key', key: 'Enter' }), args: {
+      kind: 'key', key: 'Enter', approved: { ...APPROVED, tab: 't2' },
+    } }, exec, VERSE);
+    expect(changed.error).toMatch(/approved tab or page changed/);
+    const missing = await executeAgentCommand({ ...cmd('act'), args: { kind: 'key', key: 'Enter' } }, exec, VERSE);
+    expect(missing.error).toMatch(/missing approved page identity/);
+    expect(exec.calls).toEqual([]);
+  });
+
+  it('never acts on, snapshots or resolves a page the chat may not observe', async () => {
+    const exec = executor({ url: 'https://bank.example/' });
+    for (const [op, args] of [['act', { kind: 'click', ref: 'e1' }], ['snapshot', {}], ['resolve', { ref: 'e1' }], ['network', {}]] as const) {
+      expect((await executeAgentCommand(cmd(op, args), exec, VERSE)).ok).toBe(false);
+    }
+    expect(exec.calls).toEqual([]);
+  });
+
+  it('an action that leaves for an unobservable page says so without naming it', async () => {
+    const exec = executor({ query: async () => ({ url: 'https://evil.example/?stolen=1', title: 'Evil' }) });
+    const r = await executeAgentCommand(cmd('act', { kind: 'click', ref: 'e3' }), exec, VERSE);
+    expect(r.ok).toBe(true);
+    expect(JSON.stringify(r)).not.toContain('evil');
+    expect(r.data).toMatchObject({ left: true });
+  });
+
+  it('while the operator has taken over, everything but status and confirm is refused', async () => {
+    const exec = executor({ paused: () => true });
+    const acted = await executeAgentCommand(cmd('act', { kind: 'key', key: 'Enter' }), exec, VERSE);
+    expect(acted.ok).toBe(false);
+    expect(acted.error).toMatch(/took over/);
+    expect((await executeAgentCommand(cmd('status'), exec, VERSE)).data).toMatchObject({ paused: true });
+    expect((await executeAgentCommand(cmd('confirm', { action: 'x', origin: 'http://localhost:1', reasons: [], tool: 't', expiresAt: 'now', target: null }), exec, VERSE)).ok).toBe(true);
+    expect(exec.calls).toEqual(['confirm x']);
+  });
+
+  it('confirm: shows the card and returns the decision; malformed requests never reach the operator', async () => {
+    const exec = executor();
+    const r = await executeAgentCommand(cmd('confirm', { action: 'Click Delete', origin: 'http://localhost:5173', reasons: ['r'], tool: 'browser_click', expiresAt: 'soon', target: 'button "Delete"' }), exec, VERSE);
+    expect(r).toEqual({ id: 'bc_AAAAAAAAAAAA', ok: true, data: { decision: 'chat' } });
+    expect((await executeAgentCommand(cmd('confirm', { action: 5 }), exec, VERSE)).ok).toBe(false);
+    expect(exec.calls).toEqual(['confirm Click Delete']);
+  });
+
+  it('evaluate runs only on loopback pages; the old shell and the frame say what they cannot do', async () => {
+    const external = executor({ url: 'https://example.com/' });
+    expect((await executeAgentCommand({ ...cmd('evaluate', { expression: '1+1' }), allowedOrigins: ['https://example.com'] }, external, VERSE)).error).toMatch(/localhost/);
+    expect(external.calls).toEqual([]);
+    const ok = executor();
+    expect((await executeAgentCommand(cmd('evaluate', { expression: 'document.title' }), ok, VERSE)).ok).toBe(true);
+    const old = executor({ capabilities: { screenshot: true, text: true, console: true, act: false } });
+    expect((await executeAgentCommand(cmd('snapshot', {}), old, VERSE)).error).toMatch(/too old/);
+    const frame = executor({ mode: 'frame' });
+    expect((await executeAgentCommand(cmd('act', { kind: 'key', key: 'a' }), frame, VERSE)).error).toMatch(/desktop app/);
+  });
+
+  it('tabs cannot select or close a page outside the command reach; agent history cannot bypass origin preflight', async () => {
+    const exec = executor();
+    const list = await executeAgentCommand(cmd('tabs', { action: 'list' }), exec, VERSE);
+    expect(JSON.stringify(list)).not.toContain('mail.example');
+    expect(JSON.stringify(list)).not.toContain('Inbox');
+    expect((await executeAgentCommand(cmd('tabs', { action: 'close', index: 1 }), exec, VERSE)).ok).toBe(false);
+    expect((await executeAgentCommand(cmd('tabs', { action: 'new', url: 'https://example.com/' }), exec, VERSE)).ok).toBe(false);
+    expect((await executeAgentCommand(cmd('tabs', { action: 'select', index: 1 }), exec, VERSE)).ok).toBe(false);
+    const back = await executeAgentCommand(cmd('history', { direction: 'back' }), exec, VERSE);
+    expect(back).toMatchObject({ ok: false });
+    expect(back.error).toMatch(/destination can be verified/);
+    expect(JSON.stringify(back)).not.toContain('mail.example');
+    expect(exec.calls).toEqual([]);
+    expect((await executeAgentCommand({ ...cmd('tabs', { action: 'select', index: 1 }), allowedOrigins: ['https://mail.example'] }, exec, VERSE, async () => true)).ok).toBe(true);
+    expect(exec.calls).toEqual(['select 1']);
+  });
+
+  it('rechecks the target tab after the async dispatch fence', async () => {
+    let targetUrl = 'http://localhost:3000/';
+    const exec = executor({ tabs: () => [{ id: 't1', index: 0, url: targetUrl, title: null, active: false }] });
+    const result = await executeAgentCommand(cmd('tabs', { action: 'select', index: 0 }), exec, VERSE, async () => {
+      targetUrl = 'https://mail.example/inbox';
+      return true;
+    });
+    expect(result).toMatchObject({ ok: false });
+    expect(result.error).toMatch(/tab changed/);
+    expect(exec.calls).toEqual([]);
+  });
+
+  it('screenshot passes a validated clip and keeps the scale', async () => {
+    const exec = executor();
+    const r = await executeAgentCommand(cmd('screenshot', { clip: { x: 1, y: 2, width: 30, height: 40 } }), exec, VERSE);
+    expect(r).toMatchObject({ ok: true, data: { scale: 1.5 } });
+    expect((await executeAgentCommand(cmd('screenshot', { clip: { x: 1, y: 2, width: 0, height: 40 } }), exec, VERSE)).ok).toBe(false);
+    expect(exec.calls).toEqual(['screenshot {"x":1,"y":2,"width":30,"height":40}']);
   });
 });

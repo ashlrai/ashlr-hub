@@ -27,7 +27,7 @@ function healthyControl() {
 }
 
 describe('notification refresh channel', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     // Keep the recorded failure inside the production 24-hour notification
     // window; the test exercises refresh behavior, not the wall-clock date.
     vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-06T12:05:00.000Z'));
@@ -35,6 +35,9 @@ describe('notification refresh channel', () => {
     evictAll();
     __resetNotificationStoreForTests();
     vi.stubGlobal('EventSource', EventSourceStub);
+    // The app loads its global SSE channel after first paint; mount it here
+    // explicitly so this test exercises the real invalidation channel.
+    await import('../../data/sse.js');
     markCheckComplete(true);
   });
   afterEach(() => {

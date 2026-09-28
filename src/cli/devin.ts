@@ -48,7 +48,8 @@ Usage:
       Turn the Devin lane on or off (the key stays).
   ashlr devin fleet on | off
       Let the fleet launch Devin on well-scoped backlog work (default off). Also needs a standing grant
-      that names Devin (\`ashlr authority draft\` includes it once this is on). Devin PRs merge only
+      that names Devin (\`ashlr authority draft\` includes it once this is on). On an elite model (SWE-2,
+      GPT-6) under an elite-direct grant Devin PRs land on green tests; otherwise they merge only
       when two judges from different families ship them.
   ashlr devin status [--json]
   ashlr devin launch "<task>" [--repo owner/name] [--base branch] [--title "short title"] [--json]
@@ -268,7 +269,7 @@ function cmdFleet(deps: DevinCliDeps, args: string[]): number {
   if (value !== 'on' && value !== 'off') throw new UsageError('Say `ashlr devin fleet on` or `ashlr devin fleet off`.');
   deps.setConfig({ fleet: value === 'on' });
   deps.out(value === 'on'
-    ? 'The fleet may launch Devin on well-scoped backlog work — within the ACU budget, its reserve and the fleet caps, under a standing grant that names Devin (run `ashlr authority draft` to include it). Devin PRs merge only when two judges from different families ship them.'
+    ? 'The fleet may launch Devin on well-scoped backlog work — within the ACU budget, its reserve and the fleet caps, under a standing grant that names Devin (run `ashlr authority draft` to include it). On an elite model (SWE-2, GPT-6) under an elite-direct grant its PRs land on green tests; otherwise they merge only when two judges from different families ship them.'
     : 'The fleet will not launch Devin sessions.');
   return 0;
 }

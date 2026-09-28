@@ -12,11 +12,12 @@ public enum GitHubApp {
   public static let apiBase = "https://api.github.com"
   public static let apiVersion = "2022-11-28"
 
-  /// SPEC-310B §1: read/write contents + pull requests; read checks, statuses
-  /// and metadata. No workflows, no administration — requesting exactly this
-  /// set means even a misconfigured App cannot hand the fleet more.
+  /// SPEC-310B §1: write contents, pull requests, and checks (to post
+  /// ashlr/verify); read statuses and metadata. No workflows, no
+  /// administration — requesting exactly this set means even a misconfigured
+  /// App cannot hand the fleet more.
   public static let fleetPermissions: [(String, String)] = [
-    ("checks", "read"),
+    ("checks", "write"),
     ("contents", "write"),
     ("metadata", "read"),
     ("pull_requests", "write"),
@@ -141,8 +142,13 @@ public enum GitHubApp {
     do { value = try StrictJSONParser.parse(data, maxBytes: 1024 * 1024) } catch {
       throw ResponseError(reason: "GitHub returned malformed JSON for the access token")
     }
-    guard let token = value["token"]?.stringValue, token.hasPrefix("ghs_"), token.count >= 24, token.count <= 255,
-          token.utf8.allSatisfy({ ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x41 && $0 <= 0x5A) || ($0 >= 0x61 && $0 <= 0x7A) || $0 == 0x5F }) else {
+    // Installation tokens are opaque: GitHub may return a short legacy token
+    // or a longer stateless token containing dots and hyphens. Bound the
+    // single-line ASCII value without assuming its internal JWT structure.
+    guard let token = value["token"]?.stringValue, token.hasPrefix("ghs_"),
+          token.utf8.count >= 24, token.utf8.count <= 4096,
+          token.utf8.allSatisfy({ ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x41 && $0 <= 0x5A) ||
+                                    ($0 >= 0x61 && $0 <= 0x7A) || $0 == 0x5F || $0 == 0x2D || $0 == 0x2E }) else {
       throw ResponseError(reason: "GitHub did not return an installation token")
     }
     guard let rawExpiry = value["expires_at"]?.stringValue, let expiry = parseGitHubInstant(rawExpiry) else {

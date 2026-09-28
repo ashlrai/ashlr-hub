@@ -20,6 +20,7 @@
  */
 import type { VerseEvent, VerseEventType } from '../../data/api-types.js';
 import { getAuthSnapshot, getReadClientProof } from '../../data/auth-store.js';
+import { isRemoteMobileMode } from '../../data/remote-mode.js';
 import { invalidateVerseLists } from './verse-queries.js';
 
 /**
@@ -149,6 +150,9 @@ export const VERSE_LIST_TOPICS = 'verse-sessions';
  * also what the refusal fallback below falls back to.
  */
 export function verseListEventsUrl(withTopics = true): string {
+  // The gateway accepts only the scoped topic and adds the Hub client proof
+  // on its private hop. A phone must never construct or send that proof.
+  if (isRemoteMobileMode()) return `/api/events?topics=${VERSE_LIST_TOPICS}`;
   const topics = withTopics ? `topics=${VERSE_LIST_TOPICS}&` : '';
   return `/api/events?${topics}client=${encodeURIComponent(getReadClientProof())}`;
 }
@@ -184,7 +188,7 @@ export function openVerseListChannel(): () => void {
   const connect = () => {
     if (disposed || typeof EventSource === 'undefined') return;
     if (getAuthSnapshot().phase !== 'authenticated') return;
-    const withTopics = !topicsRefused && !probing;
+    const withTopics = isRemoteMobileMode() || (!topicsRefused && !probing);
     const es = new EventSource(verseListEventsUrl(withTopics), { withCredentials: true });
     let opened = false;
     source = es;
@@ -201,7 +205,7 @@ export function openVerseListChannel(): () => void {
       es.close();
       if (source === es) source = null;
       if (disposed || getAuthSnapshot().phase !== 'authenticated') return;
-      if (!opened && withTopics) {
+      if (!opened && withTopics && !isRemoteMobileMode()) {
         // Refused before it opened, with `topics`: find out at once whether
         // the parameter is what was refused (see topicsRefused). One probe,
         // no delay — a real outage fails the probe too and falls through to

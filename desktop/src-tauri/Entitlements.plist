@@ -1,13 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!--
-  Ashlr.app entitlements (tauri.conf.json bundle.macOS.entitlements, and
-  `codesign --entitlements` in scripts/ship-local.mjs).
-
-  com.apple.security.device.audio-input: dictation captures the microphone in
-  the app process (src/voice/capture.rs). Required under the hardened runtime
-  (notarized builds); harmless without it. Nothing else is granted.
--->
 <plist version="1.0">
 <dict>
 	<key>com.apple.security.device.audio-input</key>

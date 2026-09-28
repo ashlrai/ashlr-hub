@@ -27,6 +27,14 @@ import {
   layoutStorageKey,
   loadLayout,
   MAX_PANES_PER_GROUP,
+  arrangementAfterSplit,
+  cyclePane,
+  gridShape,
+  neighborPane,
+  nextArrangement,
+  paneCells,
+  setArrangement,
+  toggleZoom,
   parseLayout,
   reconcileLayout,
   removePane,
@@ -178,18 +186,63 @@ describe('layout: tabs and splits', () => {
     expect(reconcileLayout(next, ['t-a', 't-b', 't-c'])).toBe(next);
   });
 
-  it('splits hold at most two shells; closing one hands focus to its neighbour; an empty tab goes', () => {
+  it('splits hold up to six shells (one multiplexed stream carries them); closing one hands focus to its neighbour; an empty tab goes', () => {
     let l = addGroup(EMPTY_LAYOUT, 't-a');
     const g = l.groups[0]!.id;
     l = splitGroup(l, g, 't-b', 'column')!;
     expect(l.groups[0]).toMatchObject({ panes: ['t-a', 't-b'], direction: 'column', focused: 't-b' });
-    expect(MAX_PANES_PER_GROUP).toBe(2);
-    expect(splitGroup(l, g, 't-c', 'row')).toBeNull();
+    expect(MAX_PANES_PER_GROUP).toBe(6);
+    // Splitting the other way tiles the group.
+    l = splitGroup(l, g, 't-c', 'row')!;
+    expect(l.groups[0]).toMatchObject({ panes: ['t-a', 't-b', 't-c'], direction: 'grid', focused: 't-c' });
+    for (const id of ['t-d', 't-e', 't-f']) l = splitGroup(l, g, id, 'row')!;
+    expect(l.groups[0]!.panes).toHaveLength(6);
+    expect(splitGroup(l, g, 't-g', 'row')).toBeNull();
+    for (const id of ['t-c', 't-d', 't-e', 't-f']) l = removePane(l, id);
     l = removePane(l, 't-b');
     expect(l.groups[0]).toMatchObject({ panes: ['t-a'], focused: 't-a' });
     l = removePane(l, 't-a');
     expect(l.groups).toEqual([]);
     expect(l.active).toBeNull();
+  });
+
+  it('grids: ⌈√n⌉ columns, a short last row stretches, arrows find the neighbour in any arrangement', () => {
+    expect([1, 2, 3, 4, 5, 6].map((n) => gridShape(n))).toEqual([
+      { cols: 1, rows: 1 }, { cols: 2, rows: 1 }, { cols: 2, rows: 2 }, { cols: 2, rows: 2 }, { cols: 3, rows: 2 }, { cols: 3, rows: 2 },
+    ]);
+    const three = { panes: ['a', 'b', 'c'], direction: 'grid' as const };
+    expect(paneCells(three)).toEqual([
+      { id: 'a', row: 0, col: 0, span: 1 }, { id: 'b', row: 0, col: 1, span: 1 }, { id: 'c', row: 1, col: 0, span: 2 },
+    ]);
+    expect(neighborPane(three, 'a', 'right')).toBe('b');
+    expect(neighborPane(three, 'b', 'down')).toBe('c');
+    expect(neighborPane(three, 'c', 'up')).toBe('a');
+    expect(neighborPane(three, 'a', 'left')).toBeNull();
+    const six = { panes: ['a', 'b', 'c', 'd', 'e', 'f'], direction: 'grid' as const };
+    expect(neighborPane(six, 'e', 'up')).toBe('b');
+    expect(neighborPane(six, 'c', 'down')).toBe('f');
+    expect(neighborPane({ panes: ['a', 'b'], direction: 'row' }, 'a', 'right')).toBe('b');
+    expect(neighborPane({ panes: ['a', 'b'], direction: 'row' }, 'a', 'down')).toBeNull();
+    expect(neighborPane({ panes: ['a', 'b'], direction: 'column' }, 'b', 'up')).toBe('a');
+    expect(cyclePane({ panes: ['a', 'b', 'c'] }, 'c', 1)).toBe('a');
+    expect(nextArrangement('row')).toBe('column');
+    expect(arrangementAfterSplit('row', 2, 'row')).toBe('row');
+    expect(arrangementAfterSplit('row', 1, 'column')).toBe('column');
+  });
+
+  it('zoom shows one pane; it survives a reload, and ends when that pane closes or is the only one', () => {
+    let l = addGroup(EMPTY_LAYOUT, 't-a');
+    const g = l.groups[0]!.id;
+    l = splitGroup(l, g, 't-b', 'row')!;
+    l = setArrangement(l, g, 'grid');
+    expect(l.groups[0]!.direction).toBe('grid');
+    l = toggleZoom(l, g);
+    expect(l.groups[0]!.zoomed).toBe('t-b');
+    expect(reconcileLayout(parseLayout(JSON.stringify(l)), ['t-a', 't-b']).groups[0]!.zoomed).toBe('t-b');
+    expect(toggleZoom(l, g).groups[0]!.zoomed).toBeUndefined();
+    const closed = removePane(l, 't-b');
+    expect(closed.groups[0]!.zoomed).toBeUndefined();
+    expect(toggleZoom(closed, g)).toBe(closed); // a single pane never zooms
   });
 
   it('focus and mode are per pane; the Agent tab is a valid active tab', () => {
@@ -239,6 +292,19 @@ describe('panel keys', () => {
     expect(panelKeyAction(key('f', { ctrlKey: true }), 'other')).toBeNull();
     expect(panelKeyAction(key('d', { ctrlKey: true }), 'other')).toBeNull();
     expect(panelKeyAction(key('F', { ctrlKey: true, shiftKey: true }), 'other')).toBe('find');
+  });
+
+  it('3.15: ⌥⌘arrows move between panes, ⇧⌘↩ zooms, ⌘I describes a command (and ⌘↑ is still the block walk)', () => {
+    expect(panelKeyAction(key('ArrowLeft', { metaKey: true, altKey: true }), 'mac')).toBe('focus-left');
+    expect(panelKeyAction(key('ArrowDown', { metaKey: true, altKey: true }), 'mac')).toBe('focus-down');
+    expect(panelKeyAction(key('ArrowUp', { metaKey: true }), 'mac')).toBe('prev-block');
+    expect(panelKeyAction(key('Enter', { metaKey: true, shiftKey: true }), 'mac')).toBe('zoom-pane');
+    expect(panelKeyAction(key('i', { metaKey: true }), 'mac')).toBe('assist');
+    expect(panelKeyAction(key('ArrowRight', { ctrlKey: true, shiftKey: true, altKey: true }), 'other')).toBe('focus-right');
+    expect(panelKeyAction(key('Enter', { ctrlKey: true, shiftKey: true }), 'other')).toBe('zoom-pane');
+    // Alt+arrows alone (word motion) stay the shell's.
+    expect(panelKeyAction(key('ArrowLeft', { altKey: true }), 'mac')).toBeNull();
+    expect(panelKeyAction(key('ArrowLeft', { ctrlKey: true, altKey: true }), 'other')).toBeNull();
   });
 
   it('app chords with ⌘ pass to the page; ⌃C stays in the shell', () => {

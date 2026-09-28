@@ -41,6 +41,7 @@ import { constants as fsConstants, accessSync, lstatSync, readFileSync, realpath
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import { STANDING_GRANT_PATTERNS } from '../authority/types.js';
+import { isGitHubInstallationToken } from '../util/github-installation-token.js';
 
 export interface SafeGitTarget {
   /** Absolute working tree (possibly agent-touched). */
@@ -273,7 +274,7 @@ export function safeGitConfigArgs(allowProtocols: readonly 'file'[] = [], object
 
 /** GitHub's documented form for an installation token over https. */
 function authHeader(token: string): string {
-  if (!/^[A-Za-z0-9_]{20,255}$/.test(token)) throw new SafeGitError('the auth token has an unexpected shape');
+  if (!isGitHubInstallationToken(token)) throw new SafeGitError('the auth token has an unexpected shape');
   return `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`, 'utf8').toString('base64')}`;
 }
 

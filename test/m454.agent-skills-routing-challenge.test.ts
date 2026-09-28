@@ -549,7 +549,7 @@ describe('M454 pinned upstream routing challenge', () => {
       exports?: Record<string, unknown>;
     };
     // The exact published allowlist. It grew with the builtin preparation
-    // verification helpers and two shipped docs, each of which the release
+    // verification helpers and reviewed shipped docs, each of which the release
     // inventory admits individually (m482); none is an m454 consumer, and the
     // canary scan above covers every script here. Any further addition must be
     // reviewed against that scan, not appended to make this pass.
@@ -579,6 +579,7 @@ describe('M454 pinned upstream routing challenge', () => {
       'docs/NORTH-STAR.md',
       'docs/ELITE-AGENT-EFFICIENCY.md',
       'docs/RUNTIME_ACTIVATION_AUTHORITY.md',
+      'docs/REMOTE-PHONE.md',
       'docs/contracts/CONTRACT-M515.md',
       'docs/contracts/CONTRACT-M521.md',
       'docs/contracts/CONTRACT-M568.md',
@@ -604,6 +605,7 @@ describe('M454 pinned upstream routing challenge', () => {
       const packedPaths = archive?.files.map((entry) => entry.path) ?? [];
       expect(packedPaths.length).toBeGreaterThan(0);
       expect(packedPaths).toContain('docs/RUNTIME_ACTIVATION_AUTHORITY.md');
+      expect(packedPaths).toContain('docs/REMOTE-PHONE.md');
       expect(packedPaths).toContain('docs/contracts/CONTRACT-M521.md');
       expect(packedPaths).toContain('docs/contracts/CONTRACT-M568.md');
       expect(packedPaths.filter((path) => /(?:m454|agent-skills|generate-m454)/u.test(path))).toEqual([]);

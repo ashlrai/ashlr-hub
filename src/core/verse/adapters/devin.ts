@@ -16,8 +16,10 @@
  * until the first turn prints `native-session`.
  */
 import { devinChatTurnArgv } from '../../devin/chat-turn-invocation.js';
+import { DEVIN_MODEL_ID_RE, peekDevinModelCatalog, resolveDevinModel } from '../../devin/models.js';
 import type { DevinTurnPayload } from '../../devin/turn-protocol.js';
 import { effectiveControls } from '../session-controls.js';
+import { devinVerseMcpPayload } from '../verse-mcp-launch.js';
 import { VERSE_REMOTE_STATES, type VerseDevinLane, type VerseRemoteState, type VerseSession, type VerseTurnLaunch } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
 import type { VerseAdapter, VerseParsedEvent, VerseTurnParser } from './index.js';
@@ -33,6 +35,20 @@ const GITHUB_PR = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pul
 
 /** Env the turn process needs besides the engine's base set: where Ashlr and the Devin CLI keep their state. */
 const PASS_ENV = ['ASHLR_HOME', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME'] as const;
+
+/**
+ * The `--model` a CLI chat's turn runs: the chat's model, with a family slug
+ * or alias (`swe`, `opus` — chats made before the catalog) resolved to that
+ * family's default row by the latest catalog in memory, so the bridge can
+ * switch a resumed conversation to exactly that model (acp-bridge.ts). The
+ * legacy `devin` choice ("the CLI's own default") stays null. Exported for tests.
+ */
+export function devinCliModelFor(model: string | null | undefined): string | null {
+  if (!model || model === DEVIN_DEFAULT_MODEL_ID) return null;
+  const resolved = resolveDevinModel(model, peekDevinModelCatalog());
+  const id = resolved?.id ?? model;
+  return DEVIN_MODEL_ID_RE.test(id) ? id : null;
+}
 
 export function devinLaneOf(session: Pick<VerseSession, 'seatId'>, launch: Pick<VerseSeatLaunch, 'devin'>): VerseDevinLane {
   const lane = launch.devin?.lane;
@@ -53,8 +69,13 @@ function buildDevinLaunch(session: VerseSession, text: string, launch: VerseSeat
     text,
     permissionMode: effectiveControls(session).permissionMode,
     cliPath,
-    model: lane === 'cli' && session.model && session.model !== DEVIN_DEFAULT_MODEL_ID ? session.model : null,
+    model: lane === 'cli' ? devinCliModelFor(session.model) : null,
   };
+  // 3.15 agent tools: the CLI lane runs on this Mac and can reach Verse's MCP
+  // server; the cloud lane runs on Cognition's machines and cannot (the sheet
+  // says so). The token rides in the stdin payload, never argv or env.
+  const verseMcp = lane === 'cli' ? devinVerseMcpPayload(session.id) : null;
+  if (verseMcp) payload.verseMcp = verseMcp;
   const env: Record<string, string> = {};
   for (const key of PASS_ENV) {
     const value = process.env[key];

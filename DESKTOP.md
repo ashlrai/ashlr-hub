@@ -24,6 +24,39 @@ See `desktop/README.md` for full setup, build, and open-item details, and
 - The webview only ever loads `http://127.0.0.1:7777`; the CSP and the
   init-script origin check both pin it there.
 
+## Desktop control ("computer use", macOS)
+
+Chat seats can drive apps on this Mac through the `computer_*` tools
+(`src/core/verse/verse-mcp-computer.ts`; native side
+`desktop/src-tauri/src/computer.rs`). What keeps it safe:
+
+- **Per-app grants, per chat, memory only.** The agent calls
+  `computer_request_access`; you tick apps in a Verse sheet. Browsers can only be
+  granted *read only* (the Verse Browser pane is how agents use the web),
+  terminals and editors *click only*, everything else *full*. Password managers,
+  Keychain Access / Passwords, macOS authentication prompts, the custody
+  helper, System Settings' Privacy & Security panes and Ashlr itself are never
+  available. Grants end with the chat, a restart, or **KILL**.
+- **Visible control.** While an agent acts, an always-on-top orange border and
+  an "Agent controlling <app> — Esc to stop" pill sit on every screen (never in
+  a screenshot). **Esc** is KILL: every grant of every chat is revoked.
+- **Instant takeover.** Touch the mouse or keyboard and the agent pauses; its
+  calls answer "Operator took over" until you press **Resume** in Verse.
+- **Confirmation.** Acting on a control labelled delete / send / pay / publish
+  / confirm / buy (and kin), or any action after the turn read another app's
+  or a web page's content, waits for [Allow once] [Allow for chat] [Deny].
+  Password fields are never typed into.
+- **The Verse window must be open.** The relay runs through it; closed Verse →
+  the tools fail at once.
+
+**One-time setup.** macOS needs two grants for Ashlr: *Screen Recording*
+(System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording) and
+*Accessibility*. Verse's onboarding sheet deep-links to both. Screen Recording
+only takes effect after Ashlr **quits and relaunches**, and macOS re-asks about
+it roughly monthly. Grants stick across rebuilds only because `ship:local`
+signs every build with the stable "Ashlr Local" identity
+(`docs/RELEASING-LOCALLY.md`).
+
 macOS build (from the repo root): `npm run build:binary` →
 `node desktop/scripts/prepare-sidecar.mjs` → `cd desktop && npm run icons`
 (once) → `npm run build:debug` or `npm run build`. The `.app` lands in

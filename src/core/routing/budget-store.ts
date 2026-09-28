@@ -52,6 +52,7 @@ import {
   type ParsedBudgetUpdate,
 } from './policy.js';
 import { boundSeatReasons } from './seat-reasons.js';
+import { COST_BASIS_RANK, RESOURCE_TIERS, type CostBasis, type ResourceTier } from './tiers.js';
 import type { BudgetPolicy, BudgetUpdateRequest, RoutingRequest, SeatDecision } from './types.js';
 
 export const BUDGET_FILE = 'budget.json';
@@ -319,9 +320,9 @@ export function sanitizeSeatCapacity(raw: unknown): SeatCapacity | null {
   const engine = raw['engine'];
   if (typeof seatId !== 'string' || !BUDGET_SEAT_ID_RE.test(seatId)) return null;
   if (typeof engine !== 'string' || !(BUDGET_ENGINES as readonly string[]).includes(engine)) return null;
-  // 3.15: Devin is an engine but never a capacity seat — it has no usage
-  // windows and is never routed (router.ts devinVerdict). A snapshot row
-  // claiming it is not ours: drop it.
+  // 3.15: Devin is an engine but never a FLEET capacity seat — it has no
+  // usage windows and the fleet never routes to it (router.ts
+  // devinFleetVerdict). A snapshot row claiming it is not ours: drop it.
   if (engine === 'devin') return null;
   if (typeof raw['free'] !== 'boolean' || typeof raw['signedOut'] !== 'boolean') return null;
   // `free` is only believable for a local seat: a paid seat claiming it would
@@ -342,7 +343,7 @@ export function sanitizeSeatCapacity(raw: unknown): SeatCapacity | null {
     if (!clean) return null;
     windows.push(clean);
   }
-  return {
+  const out: SeatCapacity = {
     seatId,
     engine: engine as CapacityEngine,
     label: cleanText(raw['label'], 80) ?? seatId,
@@ -354,6 +355,18 @@ export function sanitizeSeatCapacity(raw: unknown): SeatCapacity | null {
     observedAt,
     spentTodayUsd: spent,
   };
+  // 3.15 tier fields (routing/tiers.ts): optional, and dropped rather than
+  // trusted when implausible — only a local seat can be the free tier or
+  // cost nothing, the same rule as `free` above.
+  const tier = raw['tier'];
+  if (typeof tier === 'string' && (RESOURCE_TIERS as readonly string[]).includes(tier) && (tier !== 'free' || engine === 'local')) {
+    out.tier = tier as ResourceTier;
+  }
+  const basis = raw['costBasis'];
+  if (typeof basis === 'string' && basis in COST_BASIS_RANK && (basis !== 'free' || engine === 'local')) {
+    out.costBasis = basis as CostBasis;
+  }
+  return out;
 }
 
 function buildSnapshot(seats: readonly SeatCapacity[], now: Date): CapacitySnapshot {

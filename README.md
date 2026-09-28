@@ -6,10 +6,12 @@
 
 **[verse.ashlr.ai](https://verse.ashlr.ai)**
 
+
+
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D22-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.15-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org)
 
 ## Install
 
@@ -18,20 +20,24 @@ npm install -g @ashlr/hub   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Li
 ashlr verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
-The macOS desktop app is built from source for now (no public installer yet):
-see [The desktop app](#the-desktop-app-macos). Then follow the [Quickstart](#quickstart).
+The macOS arm64 desktop DMG is attached to the
+[v3.16.0 GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.0).
+It is locally signed and not notarized. See [The desktop app](#the-desktop-app-macos)
+or follow the [Quickstart](#quickstart).
 
-![Ashlr Verse — the operator console: an expandable section rail, a project sidebar, and every connected account with its live usage windows](docs/images/verse-console.png)
+![Ashlr Verse — the operator console: an expandable section rail, a project sidebar, and every connected account with its live usage windows](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/verse-console.png)
 
 ---
 
 ## What it is
 
 **Ashlr Verse** is an operator console for coding agents. Every Claude Code,
-Codex and Grok account you own becomes a *seat*, and so does every tool-capable
-local model. You chat with any of them in one workbench. You hand work to
-Claude Code cloud sessions, which keep running on your Claude credits after the
-subscription window is spent, and to Devin. A **Leader** plans the fleet's work
+Codex, Devin and Grok account you own becomes a *seat*, and so does every
+tool-capable local model. Claude Code, Codex and Devin are equal partners:
+routing picks among them by fit, headroom, cost and latency, never by brand. You
+chat with any of them in one workbench. You hand work to Claude Code cloud
+sessions, which keep running on your Claude credits after the subscription
+window is spent, and to Devin sessions. A **Leader** plans the fleet's work
 and talks with you in Verse, on Telegram or in the terminal. And the fleet works
 your enrolled repositories only inside a standing grant you sign with Touch ID:
 it starts in shadow, recording what it would merge, and climbs a rollout ladder
@@ -49,27 +55,31 @@ manifests, schemas and stores need no naming migration.
 
 The user guide is [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
 
-### What's in Verse 3.15
+### What's in Verse 3.16
+
+Verse 3.16 adds the native Agents workbench, guarded computer and browser tools,
+an optional phone gateway, and learning with reviewable evidence. The 3.15
+capabilities below remain part of this release.
 
 | | What you get | Guide |
 |---|---|---|
 | **Talk to the Leader** | One conversation across Mind (⌘4), Telegram and `ashlr leader say`. Standing directives (`focus:`, `stop:`, `priority:`), answers to its questions, early approval or veto of its actions and Telegram buttons. In 3.15 it runs in founder mode: morning and evening briefs, an instant brief on "status", "go build X" turned into work under the grant, one question at a time, and a daily self-improvement pick. | [LEADER.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md) |
 | **Autonomy with custody** | A Touch ID standing grant names repos, engines, caps and spend. Every change passes gates G0–G7 and a judge from another model family; merges are SHA-pinned, watched for two hours and reverted if red. Command shows the rollout ladder (stage x of 8); Fleet shows every shadow decision and why. | [STANDING-AUTHORITY.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md) |
-| **A multi-seat workbench** | Claude Code, several Codex accounts, Grok, local models and Devin side by side, each pinned to its own profile. Auto seat, Compare, cheap-first and one-click handoff across seats. A panel of Terminal (command blocks, an Agent tab), Browser (agents can look, never click), Changes (a checkpoint before every turn, Accept/Reject, Undo/Redo), Sources and Reasoning, plus focus mode. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) |
+| **A multi-seat workbench** | Claude Code, several Codex accounts, Grok, local models and Devin side by side, each pinned to its own profile. Auto seat, Compare, cheap-first and one-click handoff across seats. A panel of Terminal (command blocks, an Agent tab), Browser (observation by default; guarded actions under a separate grant), Changes (a checkpoint before every turn, Accept/Reject, Undo/Redo), Sources and Reasoning, plus focus mode. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) |
 | **Resources, ready or not** | ⌘. shows every account, local runtime, cloud credits and Devin, each with a "Chat: ready" and a "Fleet: ready · reserve kept" line and the command that fixes it. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#resources-the-drawer-and-the-bar-311) |
-| **Cloud and Devin** | Hand a task to a Claude Code cloud session or a Devin session, or chat with Devin (cloud or CLI). Each task delivers one PR with a report; Needs you shows a gate verdict and Land, Close, Update branch. A Devin PR merges only at a grant stage that names Devin, with two judges from different families. | [CLOUD.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md), [DEVIN.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md) |
-| **A private repo wiki** | An architecture wiki per repo with verified `file:line` citations, and Ask the codebase, written by your local models (Grok only if the grant allows, never Claude) and stored only on your Mac. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#repo-wiki-and-ask-315) |
+| **Cloud and Devin** | Hand a scoped task to a Claude Code cloud or Devin lane for a reported PR, or chat in a separate Devin cloud or CLI seat. The signed-in Devin CLI defaults to Cognition SWE-2 High; cloud sessions use ACUs and do not report an underlying model. Lane PRs reach Needs you and the standing gates. Cloud Devin needs two judge families; eligible local CLI work can use a signed elite-direct grant. | [CLOUD.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md), [DEVIN.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md) |
+| **A private repo wiki** | An architecture wiki per repo with verified `file:line` citations and Ask the codebase. Pages are stored on your Mac; generation prefers local models, but may send repository context to Grok when the grant and repository policy allow it. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#repo-wiki-and-ask-315) |
 | **Lessons** | Every task end becomes a retro with a root cause, swept hourly. Knowledge it suggests is used only after you approve it, and only where its scope matches. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#lessons-retros-and-approved-knowledge-315) |
 | **Playbooks and automations** | Versioned task templates, run with a `!macro` in any chat or lane; issues, red builds, schedules and webhooks that become work, through each lane's own gates. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#playbooks-315) |
 | **Jev decisions** | One fast, typed decision layer with a rules fallback at every call site, advisory or escalate-only where safety is near. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#the-jev-decision-layer-315) |
 
-**Status, plainly.** Autonomy ships dormant. It turns on only after you install
-the custody helper, sign a grant and start the resident daemon yourself, and it
-is macOS-only. On the maintainer's Mac a grant is active and the ladder is at
-stage 1 of 8, shadow, where nothing merges. That grant does not name Devin,
-so the fleet starts no Devin sessions and Devin PRs stay shadow. What is
-activated where is kept current in
-[AUTONOMY-GAP.md](docs/AUTONOMY-GAP.md#current-activation-state-315).
+**Status, plainly.** Autonomy ships dormant and is macOS-only. It turns on
+only after you install the custody helper, sign a grant and start the resident
+daemon yourself. A new grant starts at stage 1 of 8, shadow, where nothing
+merges. A release that changes authority code pauses an existing grant until
+Touch ID reapproval. Check the live grant, switch, Stop state and rollout stage
+with `ashlr authority status`; a source document cannot establish that the
+resident daemon is active on a particular Mac.
 
 ---
 
@@ -82,29 +92,35 @@ separate Node.js install to run.
 
 ### Install
 
-There is no public installer and the build is unsigned. You build it once on
-your Mac and keep it in the Dock. The full sequence, prerequisites (Rust with
-`tauri-cli` 2, Bun, Node, Xcode command line tools) and the checks that the
-bundle carries the current assets are in
-[Desktop app](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#desktop-app-macos).
-In short, from the repository root:
+The [v3.16.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.0)
+includes an arm64 DMG. It is locally signed, not Apple Developer ID notarized,
+so macOS may require **Open Anyway** on first launch. To build from source on a
+trusted macOS checkout, use the local release script with the stable
+"Ashlr Local" code-signing identity. The prerequisites, exact build order and
+verification steps are in [Releasing without CI](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md)
+and [Desktop app](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#desktop-app-macos). In short, from a clean
+repository root:
 
 ```sh
 npm ci
-npm run build:binary                       # the CLI as one executable, web assets included
-node desktop/scripts/prepare-sidecar.mjs   # stage it inside the app
-cd desktop && npm run icons && CI=true cargo tauri build
-rm -rf /Applications/Ashlr.app
-cp -R src-tauri/target/release/bundle/macos/Ashlr.app /Applications/
+npm run build:binary
+node desktop/scripts/prepare-sidecar.mjs
+(cd desktop && CI=true cargo tauri build)
+test -d /Applications/Ashlr.app || ditto desktop/src-tauri/target/release/bundle/macos/Ashlr.app /Applications/Ashlr.app
+npm run ship:local -- --native
 ```
 
-Run all of those steps every time. A bare `cargo tauri build` wraps a new shell
-around whatever web assets an earlier build left behind.
+The `ditto` step seeds a first install only; `ship:local --native` updates an
+existing app with the prebuilt native binary and local signature. It does not
+compile Rust. Verify that it copied the new binary and that the installed app
+reports this release. A bare `cargo tauri build` can wrap stale web assets.
 
 ### Open
 
-The first time, right-click `Ashlr.app` and choose **Open**, because the build is
-unsigned. After that it opens normally. A small launch window says what is
+The local build is signed with "Ashlr Local", not Apple Developer ID notarized.
+macOS may still require right-click **Open** or **Open Anyway** on first launch.
+The first signing setup may also ask for your login password and **Always Allow**
+for the signing key. A small launch window says what is
 happening while the bundled server starts on `127.0.0.1:7777`. The Verse window
 then opens with its tokens already handed over, so there is nothing to paste.
 Closing the window hides it to the menu bar; **Quit** stops the server.
@@ -154,7 +170,7 @@ credential; each vendor CLI signs itself in.
 Local models need no sign-in. If Ollama is running, every tag that supports tool
 use becomes a local seat. The account commissioning details, including how to
 check identity and quota, are in
-[Resource Pools](docs/RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity).
+[Resource Pools](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity).
 
 ---
 
@@ -220,17 +236,22 @@ yourself. Inspect it with `ashlr authority setup --dry-run` and
 `ashlr authority status`. The full commissioning path, grant limits and budget
 modes are in [Autonomy setup](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTONOMY-SETUP.md).
 
----
+Verse 3.16 changes authority code. After installing, reapprove an existing
+grant with `ashlr authority re-approve` and restart the resident service from
+your terminal. Check its actual state with `ashlr authority resident status`;
+source documentation cannot establish that it is active on a particular Mac.
 
+---
 
 ## Resources, on every page
 
 Press **⌘.** (or click the tab on the right edge, or run "Open Resources" from ⌘K) to open the Resources drawer:
-every Claude, Codex and Grok account with its live 5-hour and weekly windows, the share kept for you, reset times
-and Reconnect / Check again; your local models (one card for Ollama, LM Studio and llama-server) with runtime
-state and context windows; your cloud credits; and Devin, when connected. Every card carries two readiness lines,
-"Chat: ready / why" and "Fleet: ready · reserve kept / why", with the command that fixes it. It opens over your
-work or pins as a column beside it, and a dot on the edge tab tells you at a glance whether everything is usable.
+every resource grouped by tier — **Elite** (Claude Code, every Codex account, Devin, Claude cloud credits),
+**Fast** (Grok) and **Free · local** (one card for Ollama, LM Studio and llama-server). Every card reads the same
+way: tier, cost basis, models, status, usage against its window or budget, the share kept for you, and two
+readiness lines, "Chat: ready / why" and "Fleet: ready · reserve kept / why", with the command that fixes it. It
+opens over your work or pins as a column beside it, and a dot on the edge tab tells you at a glance whether
+everything is usable.
 
 Without opening anything, the **resource bar** in the rail foot keeps every resource in view. It shows one battery
 per account with how much of its window is left, plus your local models and your cloud credits. Each row carries
@@ -242,7 +263,7 @@ and the share kept for you, or click it to open the drawer. **Hide resource bar*
 
 ```sh
 npm run gate          # minutes, not half an hour: static checks + the tests your change can reach
-npm run ship:local    # build, install as your CLI, update Ashlr.app (--native: shell + icon), restart, verify
+npm run ship:local -- --native  # after a native build: install CLI and locally sign Ashlr.app
 ```
 
 Then `npm publish` the tarball `ship:local` prints. `npm run gate:full` runs every suite. See
@@ -256,8 +277,12 @@ Verse can hand a task to a **Claude Code cloud session** (`ashlr cloud launch
 nothing in the cloud lane merges. Overview: [Cloud and Devin lanes](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD-LANES.md);
 details: [`docs/CLOUD.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md) and [`docs/DEVIN.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md).
 
----
+The local Devin CLI seat defaults to Cognition SWE-2 High; the ACU-metered cloud
+seat does not identify its underlying model. Cloud Devin still needs the signed
+stage and two independent judge families for a merge. Eligible CLI work can
+use a separately signed elite-direct ceiling.
 
+---
 
 ## Reference
 
@@ -266,10 +291,9 @@ the legacy enrolled-repository fleet and its activation runbook, the kill
 switch, backends, sandboxing, the command reference, the safety model, the
 `~/.ashlr/` layout and configuration) is documented in
 [Hub reference](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md). Start with the
-[executable Universe demo](docs/DEMO.md), which needs no model account.
+[executable Universe demo](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEMO.md), which needs no model account.
 
 ---
-
 
 ## Version history
 
@@ -291,7 +315,8 @@ switch, backends, sandboxing, the command reference, the safety model, the
 | **3.11** | The cloud lane: Claude Code cloud sessions on Claude credits, with an estimated budget and self-improvement. Also the Resources drawer (⌘.) and the always-on resource bar, provider logos, the Ashlr.AI mark, a 349 KB first paint, and `npm run gate` / `npm run ship:local` | 3.11.5 source; verify npm publication separately |
 | **3.12–3.13** | Your key is the trust root; guided `ashlr authority setup`; the host-verified `ashlr/verify` check; cloud PRs into the standing gates; the resident runtime under a standing grant (`ashlr authority resident start`) | Shipped |
 | **3.14** | Talk to the Leader in Verse, Telegram and the CLI; Leader reliability; accounts ready in both chat and fleet; the rollout ladder on Command and shadow decisions on Fleet; local enforcement for free-plan private repos; `file:../` sibling dependencies; a sidecar that cannot freeze; chart polish | Shipped |
-| **3.15** | Founder-mode Leader; Devin as chat seats, a lane and a fleet producer under a two-judge rule; the workbench panel (terminal blocks, browser, checkpoints, sources and reasoning); every seat together; playbooks and automations; the Jev decision layer; retros and approved knowledge (Growth ▸ Lessons); a private repo wiki and Ask | In source on master; verify npm publication separately |
+| **3.15** | Founder-mode Leader; Devin as chat seats, a lane and a fleet producer under a two-judge rule; the workbench panel (terminal blocks, browser, checkpoints, sources and reasoning); every seat together; playbooks and automations; the Jev decision layer; retros and approved knowledge (Growth ▸ Lessons); a private repo wiki and Ask | Included in the 3.16 source; verify npm publication separately |
+| **3.16** | Native Agents workbench and guarded computer tools; optional authenticated phone gateway; reviewable learning evidence; Devin CLI SWE-2 High default; local signing and release fixes | Release source; verify npm publication separately |
 
 Releases are built and published locally (GitHub Actions is off); the procedure
 is in [Releasing without CI](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
@@ -308,7 +333,7 @@ See [`docs/ECOSYSTEM-MAP.md`](https://github.com/ashlrai/ashlr-hub/blob/master/d
 
 ## Documentation
 
-The [documentation map](docs/README.md) separates current operation, the North
+The [documentation map](https://github.com/ashlrai/ashlr-hub/blob/master/docs/README.md) separates current operation, the North
 Star and source-maintainer references. Start with these canonical guides:
 
 | Doc | What it covers |
@@ -317,22 +342,23 @@ Star and source-maintainer references. Start with these canonical guides:
 | [`docs/HUB-REFERENCE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md) | The Hub underneath the console: Universe experiments, resource pools, the legacy fleet and its activation runbook, kill switch, backends, sandboxing, command reference, safety model, configuration |
 | [`docs/AUTONOMY-SETUP.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTONOMY-SETUP.md) | The autonomy commissioning path, what a grant allows, and budget modes |
 | [`docs/CLOUD-LANES.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD-LANES.md) | Overview of the Claude Code cloud lane and the Devin lane |
+| [`docs/REMOTE-PHONE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/REMOTE-PHONE.md) | Optional phone gateway, Access enrollment, and local setup; remote access remains off until configured |
 | [`docs/CLOUD.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md) | The cloud lane: launch mechanics, delivery contract, estimated budget, self-improvement, failure codes, and how the Devin lane compares |
 | [`docs/LEADER.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md) | Talking to the Leader: Mind, Telegram commands, buttons and briefs, founder mode, the CLI, directives, approvals, check-ins |
 | [`docs/DEVIN.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md) | Devin: chat seats, setup, ACU budget, delivery contract, the fleet launcher, the two-judge rule, limits |
 | [`docs/AUTHORITY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTHORITY.md) | The owner's contract: custody, Stop and Revoke, setup, the resident step, residual risks |
 | [`docs/VERSE-CONTEXT.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-CONTEXT.md) | Context windows, compaction, standard and expansive modes, handoff and shared memory |
 | [`docs/STANDING-AUTHORITY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md) | Touch ID grants, the rollout ladder, merge gates and the ledger |
-| [`docs/NORTH-STAR.md`](docs/NORTH-STAR.md) | Target outcome: verified engineering yield, evolving objectives and independent ecosystem products |
-| [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Run the current local kernel, inspect results and choose the correct commissioning path |
-| [`docs/ASHLR-UNIVERSE.md`](docs/ASHLR-UNIVERSE.md) | Experiments, campaigns, portfolio orchestration, evidence graphs and pinned local runtime |
-| [`docs/RESOURCE-POOLS.md`](docs/RESOURCE-POOLS.md) | Native account/local worker commissioning, quotas, foreground queue, fleet map and calibration |
+| [`docs/NORTH-STAR.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/NORTH-STAR.md) | Target outcome: verified engineering yield, evolving objectives and independent ecosystem products |
+| [`docs/QUICKSTART.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/QUICKSTART.md) | Run the current local kernel, inspect results and choose the correct commissioning path |
+| [`docs/ASHLR-UNIVERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ASHLR-UNIVERSE.md) | Experiments, campaigns, portfolio orchestration, evidence graphs and pinned local runtime |
+| [`docs/RESOURCE-POOLS.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESOURCE-POOLS.md) | Native account/local worker commissioning, quotas, foreground queue, fleet map and calibration |
 | [Local verification and release](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING.md) | Source-maintainer procedure; local candidate, npm publication and runtime activation remain distinct |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, the autonomous loop, engine tiers, safety gates, the `~/.ashlr/` layout |
+| [`docs/ARCHITECTURE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ARCHITECTURE.md) | Module map, the autonomous loop, engine tiers, safety gates, the `~/.ashlr/` layout |
 | [`docs/MILESTONE-INDEX.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/MILESTONE-INDEX.md) | Historical milestone ID → subject → status lookup, including confirmed ID collisions; not runtime activation evidence |
-| [`docs/MISSION-OS.md`](docs/MISSION-OS.md) | Mission DAG, receipts, shadow workflow, Cortex/Locus boundaries, privacy, and troubleshooting |
-| [`docs/ELITE-AGENT-EFFICIENCY.md`](docs/ELITE-AGENT-EFFICIENCY.md) | Current primary-source research translated into Hub efficiency priorities and measurable autonomy gates |
-| [`docs/RUNTIME_ACTIVATION_AUTHORITY.md`](docs/RUNTIME_ACTIVATION_AUTHORITY.md) | Signed read-only resident activation admission, explicit mutation refusal, and native launchd v2 requirements |
+| [`docs/MISSION-OS.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/MISSION-OS.md) | Mission DAG, receipts, shadow workflow, Cortex/Locus boundaries, privacy, and troubleshooting |
+| [`docs/ELITE-AGENT-EFFICIENCY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ELITE-AGENT-EFFICIENCY.md) | Current primary-source research translated into Hub efficiency priorities and measurable autonomy gates |
+| [`docs/RUNTIME_ACTIVATION_AUTHORITY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RUNTIME_ACTIVATION_AUTHORITY.md) | Signed read-only resident activation admission, explicit mutation refusal, and native launchd v2 requirements |
 | [`docs/ECOSYSTEM-MAP.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ECOSYSTEM-MAP.md) | Independent product capabilities and composition bets |
 | [`docs/LOCUS-FIRM-FLEET.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LOCUS-FIRM-FLEET.md) | Production fleet checklist — `locus.firm`, `LOCUS_ENFORCE`, `LOCUS_CI_BINDING` (default off) |
 | [`docs/FOUNDRY-CONFIG.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/FOUNDRY-CONFIG.md) | Full `cfg.foundry` reference — engines, tiers, confinement, auto-merge |
@@ -345,7 +371,7 @@ See [CONTRIBUTING.md](https://github.com/ashlrai/ashlr-hub/blob/master/CONTRIBUT
 
 ## Architecture
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map, the autonomous loop, engine tiers, safety gates, and the self-improvement layer.
+See [docs/ARCHITECTURE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ARCHITECTURE.md) — module map, the autonomous loop, engine tiers, safety gates, and the self-improvement layer.
 
 ## License
 

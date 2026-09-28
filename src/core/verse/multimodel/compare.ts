@@ -82,8 +82,12 @@ export async function fanOut(targets: readonly CompareTarget[], text: string, de
 
 /**
  * Default Compare set: the Auto choice plus the best seats of OTHER engines
- * (a second account of the same provider is not a second opinion), with one
- * local model when there is one — so a typical set is Claude + Codex + local.
+ * (a second account of the same provider is not a second opinion).
+ *
+ *   - Elite work (the Auto choice is a hosted elite seat): the elite partners
+ *     against each other — typically Claude + Codex + Devin (3.15).
+ *   - Everything else: with one local model when there is one — so a typical
+ *     set is two hosted seats + local.
  */
 export function defaultCompareSet(choice: SeatAdviceOption | null, alternatives: readonly SeatAdviceOption[], max = COMPARE_MAX_SEATS): SeatAdviceOption[] {
   const pool = [...(choice ? [choice] : []), ...alternatives];
@@ -94,6 +98,12 @@ export function defaultCompareSet(choice: SeatAdviceOption | null, alternatives:
     out.push(o);
     engines.add(o.engine);
   };
+  if (choice && choice.tier === 'elite' && !choice.local) {
+    for (const o of pool) if (!engines.has(o.engine) && o.tier === 'elite' && !o.local) take(o);
+    for (const o of pool) if (!engines.has(o.engine)) take(o);
+    for (const o of pool) take(o);
+    return out.slice(0, max);
+  }
   for (const o of pool) if (!engines.has(o.engine) && !o.local) take(o);
   const local = pool.find((o) => o.local);
   if (local && !out.some((o) => o.local)) {
@@ -110,9 +120,16 @@ export function defaultCompareSet(choice: SeatAdviceOption | null, alternatives:
  * differs from the author's. Claude-on-Ollama (`local`) counts as a different
  * family from `claude` — it is a different model. Null when every candidate
  * shares the author's engine.
+ *
+ * Devin REVIEWS nothing here: its answers are reviewed like anyone's, but it
+ * is never auto-picked to deliver a verdict ("Verdict: ship") on another
+ * model's work — the same producer-not-judge line the fleet holds (a decision
+ * left to Mason, 3.15).
  */
+export const NEVER_AUTO_REVIEWER_ENGINES: ReadonlySet<string> = new Set(['devin']);
+
 export function crossFamilyReviewer(authorEngine: string, ranked: readonly SeatAdviceOption[]): SeatAdviceOption | null {
-  return ranked.find((o) => o.engine !== authorEngine) ?? null;
+  return ranked.find((o) => o.engine !== authorEngine && !NEVER_AUTO_REVIEWER_ENGINES.has(o.engine)) ?? null;
 }
 
 export interface ReviewSubject {
@@ -140,7 +157,14 @@ export function reviewPrompt(subject: ReviewSubject): string {
   ];
   if (subject.question) parts.push('', 'The request was:', '', cap(subject.question.trim(), 4_000));
   if (subject.answer) parts.push('', 'The answer to review:', '', cap(subject.answer.trim(), REVIEW_MAX_CHARS));
-  if (subject.diff) parts.push('', 'The changes to review:', '', '```diff', cap(subject.diff.trim(), REVIEW_MAX_CHARS), '```');
+  if (subject.diff) {
+    const diff = cap(subject.diff.trim(), REVIEW_MAX_CHARS);
+    // A fence longer than any backtick run inside: a diff of Markdown that
+    // itself holds ``` must not close the block early.
+    const longest = Math.max(0, ...Array.from(diff.matchAll(/`+/g), (m) => m[0].length));
+    const fence = '`'.repeat(Math.max(3, longest + 1));
+    parts.push('', 'The changes to review:', '', `${fence}diff`, diff, fence);
+  }
   return parts.join('\n');
 }
 

@@ -53,6 +53,7 @@ import {
   type VerseActivityResponse,
   type VerseActivityRunning,
   type VerseActivitySources,
+  type VerseActivityTerminal,
   type VerseAutonomyBadge,
   type VerseCapacityBadge,
   type VerseMindBadge,
@@ -123,6 +124,12 @@ export interface ActivityDeps {
    * or null = the cloud module is not wired.
    */
   cloud?: (() => NeedsYouItem[]) | null;
+  /**
+   * 3.15 terminal events (terminal-activity.ts `terminalActivitySnapshot`),
+   * served as the response's `terminal` field for the desktop notifier.
+   * Absent / null / throwing = `terminal: null` (unknown), never an error.
+   */
+  terminal?: (() => VerseActivityTerminal | null) | null;
   now?: () => number;
 }
 
@@ -603,6 +610,11 @@ export function createActivityReader(deps: ActivityDeps, bootId: string = random
         }
       }
 
+      let terminal: VerseActivityTerminal | null = null;
+      if (deps.terminal) {
+        try { terminal = deps.terminal() ?? null; } catch { terminal = null; }
+      }
+
       let unread = 0;
       for (const s of sessions) {
         if (s.status === 'running' || deps.meta.isArchived(s.id)) continue;
@@ -623,6 +635,7 @@ export function createActivityReader(deps: ActivityDeps, bootId: string = random
           autonomy,
           capacity: health.capacity,
           mind,
+          terminal,
         },
       };
     },

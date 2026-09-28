@@ -173,12 +173,20 @@ const EXPECTED_HANDLERS: Record<WorkbenchRouteFamilyId, string> = {
   automations: 'handleAutomationsApi',
   // 3.15: the integrated Browser pane (policy, command relay, per-chat MCP).
   browser: 'handleBrowserApi',
+  // 3.15 agent tools: Verse's one MCP server for every seat, and the Agent tools sheet.
+  'agent-tools': 'handleVerseMcpApi',
+  // 3.15: desktop control for agents (the Verse window's relay, grants, KILL).
+  computer: 'handleComputerApi',
   // 3.16: every model working together (Auto seat, compare, escalation, meter).
   multimodel: 'handleMultimodelApi',
   // 3.15: per-turn checkpoints, the Changes pane and Undo/Redo.
   checkpoints: 'handleCheckpointsApi',
   // 3.15: open a cited source file in the editor.
   sources: 'handleSourcesApi',
+  // 3.15: the Fleet tab's control surface (Start / Pause / Stop, steering).
+  'fleet-control': 'handleFleetControlApi',
+  // 3.16: run many agents — the board, agent workspaces, Checks, Plan first, spend caps.
+  agents: 'handleAgentsApi',
 };
 
 const allPrefixes = WORKBENCH_ROUTE_FAMILIES.flatMap((family) => family.prefixes.map((prefix) => ({ family: family.id, prefix })));
@@ -281,7 +289,10 @@ describe('the real workbench mount table', () => {
   });
 
   it("imports each family's OWN module by a literal specifier inside a try (what bun --compile needs)", () => {
-    const source = fs.readFileSync(VERSE_API_SOURCE, 'utf8');
+    const fullSource = fs.readFileSync(VERSE_API_SOURCE, 'utf8');
+    // Other code may import the same module for a separate guarded operation.
+    // This contract governs the workbench importer table itself.
+    const source = fullSource.split('const WORKBENCH_IMPORTS:')[1]?.split('/** The importer table,')[0] ?? '';
     for (const family of WORKBENCH_ROUTE_FAMILIES) {
       const file = path.basename(family.module).replace(/\.ts$/, '.js');
       const literal = `import('./${file}' as string)`;
@@ -719,8 +730,8 @@ describe('NeedsYouItem (R1)', () => {
 });
 
 describe('information architecture', () => {
-  it('orders the rail ⌘1 Command … ⌘5 Chat', () => {
-    expect(WORKBENCH_SURFACES).toEqual(['command', 'fleet', 'growth', 'mind', 'chat']);
+  it('orders the rail ⌘1 Command … ⌘5 Chat, ⌘6 Agents (3.16)', () => {
+    expect(WORKBENCH_SURFACES).toEqual(['command', 'fleet', 'growth', 'mind', 'chat', 'agents']);
   });
 
   it('migrates every v2 section: autonomy → fleet, approvals → command + drawer, mcp → apps', () => {

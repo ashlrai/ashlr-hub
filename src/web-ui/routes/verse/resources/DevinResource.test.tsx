@@ -125,6 +125,33 @@ describe('DevinResource', () => {
     expect(screen.queryByRole('meter')).toBeNull();
   });
 
+  it('the Devin CLI\'s models: SWE-2 (free) + the paid families, and the default (3.15)', async () => {
+    overview = {
+      generatedAt: 'x', status: status(), budget: budget(), tasks: [], cli: { state: 'ready', usage: 'not-reported' },
+      models: { source: 'cli', fetchedAt: '2026-09-27T12:00:00.000Z', freeFamilies: ['SWE-2'], paidFamilyCount: 51, defaultModel: { id: 'swe-2-high', label: 'SWE-2 High', free: true, price: 'Free' } },
+    };
+    const { unmount } = mount();
+    const line = await screen.findByText('Models: SWE-2 (free) + 51 paid families · Default: SWE-2 High (Free)');
+    expect(line.getAttribute('data-devin-models')).toBe('cli');
+    unmount();
+    evictAll();
+
+    // A paid default names its price; a malformed summary shows nothing.
+    overview = {
+      generatedAt: 'x', status: status(), budget: budget(), tasks: [], cli: { state: 'ready', usage: 'not-reported' },
+      models: { source: 'cache', fetchedAt: null, freeFamilies: ['SWE-2'], paidFamilyCount: 1, defaultModel: { id: 'claude-opus-5-5-high', label: 'Claude Opus 5.5 High', free: false, price: '$4 in · $20 out per 1M' } },
+    };
+    const again = mount();
+    expect(await screen.findByText('Models: SWE-2 (free) + 1 paid family · Default: Claude Opus 5.5 High ($4 in · $20 out per 1M)')).toBeTruthy();
+    again.unmount();
+    evictAll();
+
+    overview = { generatedAt: 'x', status: status(), budget: budget(), tasks: [], cli: { state: 'ready', usage: 'not-reported' }, models: { freeFamilies: 'SWE-2' } };
+    mount();
+    await screen.findByText(/usage not reported by the CLI/);
+    expect(screen.queryByText(/^Models:/)).toBeNull();
+  });
+
   it('no Devin CLI installed (or an older server): no CLI line', async () => {
     overview = { generatedAt: 'x', status: status(), budget: budget(), tasks: [], cli: { state: 'missing', usage: 'not-reported' } };
     mount();

@@ -80,6 +80,7 @@ export const SEAT_HISTORY_PATH = '/api/verse/budget/history?days=8';
 export const SURFACE_KEYS = Object.freeze({
   authority: 'verse-authority',
   authorityDraft: 'verse-authority-draft',
+  authorityEliteDraft: 'verse-authority-draft-elite',
   fleetLive: 'verse-fleet-live',
   leader: 'verse-leader',
   learning: 'verse-learning',
@@ -169,6 +170,8 @@ export function optionalQuery<T>(key: string, path: string | (() => string), wha
 
 export const authorityQuery = optionalQuery(SURFACE_KEYS.authority, AUTHORITY_PATH, 'The authority service', narrow.authority);
 export const authorityDraftQuery = optionalQuery(SURFACE_KEYS.authorityDraft, AUTHORITY_DRAFT_PATH, 'The grant draft', narrow.draft);
+/** 3.15: the same draft with the one `elite-direct` rung (elite models land on green tests, no judge). */
+export const authorityEliteDraftQuery = optionalQuery(SURFACE_KEYS.authorityEliteDraft, `${AUTHORITY_DRAFT_PATH}?eliteDirect=1`, 'The elite-direct grant draft', narrow.draft);
 export const fleetLiveQuery = optionalQuery(SURFACE_KEYS.fleetLive, FLEET_LIVE_PATH, 'The live fleet view', narrow.fleetLive);
 export const leaderQuery = optionalQuery(SURFACE_KEYS.leader, LEADER_PATH, 'The Leader', narrow.leader);
 export const learningQuery = optionalQuery(SURFACE_KEYS.learning, LEARNING_PATH, 'Self-improvement', narrow.learning);
@@ -200,7 +203,10 @@ export async function postAuthority(action: AuthorityActionRequest): Promise<Aut
   invalidate(SURFACE_KEYS.authority);
   invalidate(SURFACE_KEYS.fleetLive);
   void refreshActivity();
-  if (action.action === 'grant' || action.action === 're-approve') invalidate(SURFACE_KEYS.authorityDraft);
+  if (action.action === 'grant' || action.action === 're-approve') {
+    invalidate(SURFACE_KEYS.authorityDraft);
+    invalidate(SURFACE_KEYS.authorityEliteDraft);
+  }
   return narrow.authority(result);
 }
 

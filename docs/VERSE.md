@@ -34,7 +34,8 @@ It is served by the normal `ashlr serve` server at `/verse/`, opened by
 - The Jev decision layer, its call sites and its bounds:
   [`docs/JEV-INTEGRATION.md`](JEV-INTEGRATION.md).
 
-This page is the user guide. It describes 3.15.
+This page is the user guide for Verse 3.16. Sections marked 3.15 describe
+features introduced in that release and retained here.
 
 **At a glance.**
 
@@ -311,10 +312,14 @@ ratio, average and peak context per turn, compactions, and a warning once the
 session has been idle past the one-hour prompt-cache lifetime — the next turn
 re-reads the whole context at full cost.
 
-**Dictation.** The microphone uses the browser's Web Speech API when the runtime
-provides it. WKWebView — which is what the desktop app is — does not, so there
-the button explains itself and you use system dictation (Wispr Flow,
-Superwhisper, macOS dictation) into the composer, which is an ordinary textarea.
+**Dictation.** In the 3.16 desktop build, the microphone button and ⌃⌥V use
+native capture and local transcription in the app. The first use may ask for
+macOS Microphone permission and download the Parakeet model (about 670 MB);
+the voice HUD shows the model, permission state and any recovery action. Hold
+the shortcut to talk until release, or tap it to keep listening until the next
+tap. ⌃⌥⇧V dictates into the command palette; Esc cancels an active dictation.
+In a regular browser, the microphone uses the Web Speech API when available.
+System dictation can still type into the composer when neither path is ready.
 
 ### The 3.10 chat workbench
 
@@ -442,10 +447,14 @@ output, errors and failed requests, and pick an element. In a browser tab or
 an older desktop shell it falls back to an `<iframe>` for loopback pages.
 **Send to chat** drafts the page, its logs, a picked element and a screenshot
 into the message box; it never sends. A per-chat switch, off by default, lets
-the chat's **Claude and local seats** look through the pane with five
-read-mostly tools (status, navigate, screenshot, read text, console), on
-localhost unless you allow another origin for that chat. Agents cannot click,
-type or submit. Details: [VERSE-BROWSER.md](VERSE-BROWSER.md).
+the chat's eligible local seats look through the pane (status,
+navigate, an accessibility snapshot, screenshots, text, console, network,
+tabs) and, in the desktop app, act in it (click, type, select, keys, scroll,
+wait), on localhost unless you allow another origin for that chat. Submitting
+a form, delete / pay / send-style buttons, leaving for another site and any
+action after the turn read an outside page ask you first; secret fields,
+uploads and downloads are never touched; clicking in the page yourself pauses
+the agent. Details: [VERSE-BROWSER.md](VERSE-BROWSER.md).
 
 **Changes and checkpoints.** Before every agent turn, on every seat, Verse
 snapshots each repository the chat can reach into a hidden commit
@@ -658,15 +667,15 @@ the operator's view of it.
   the authority surface pauses autonomy ("authority code changed — re-approve")
   until one more Touch ID.
 
-**Current status (3.15).** Autonomy ships dormant and is turned on by you, on
+**Release behavior (3.16).** Autonomy ships dormant and is turned on by you, on
 macOS, in three moves: `ashlr authority setup` (custody helper, Secure
 Enclave key, trust root, `ashlr-fleet` App, Claude token, rulesets or local
 enforcement, first grant), then `ashlr authority resident start` typed in your
 own terminal, which installs the resident daemon under the grant
 ([RESIDENT-RUNTIME.md](RESIDENT-RUNTIME.md)). A new grant starts on the
 **shadow** stage: the gates run on every proposal and record would-merges,
-and no repository merges until the ladder advances. On the maintainer's Mac a
-standing grant is active and the ladder is at stage 1 of 8 (shadow).
+and no repository merges until the ladder advances. Use `ashlr authority status`
+to inspect the live grant, switch, Stop state and rollout stage on this Mac.
 
 ```sh
 ashlr authority setup --dry-run   # print every step and what it would do
@@ -682,7 +691,7 @@ the two GitHub browser clicks for the `ashlr-fleet` App, `claude
 setup-token`, and confirming the archive of the old `~/.ashlr/activation/`. It
 prints exactly what it did. Afterwards the recurring steps are one Touch ID per
 30-day grant, and one after installing a release that changed authority code
-(3.15 does: the lessons and Devin work grew the authority surface), followed by
+(3.16 does), followed by
 `ashlr authority resident stop` and `start` so the daemon runs the new build.
 The resident daemon still re-verifies the grant, Stop and the switch on every
 tick.
@@ -824,6 +833,13 @@ server's environment turns the timer off. Opening Lessons also starts a sweep
 when the last one is over 10 minutes old, and **Sweep now** runs one
 immediately. Everything is stored under `~/.ashlr/learn/` (0700/0600), scrubbed
 of secrets, home paths and emails.
+
+`ashlr fleet status` also shows signed post-merge stable-window witnesses and
+adverse observations when both evidence stores read completely. Missing or
+degraded evidence is shown as unknown, not zero. These are observations of
+merged work, not released accepted-work credit: the cohort denominator and
+independent verification binding needed to let positive outcomes steer routing
+or populate reusable skill cards remain incomplete.
 
 ## Repo wiki and Ask (3.15)
 
@@ -1001,19 +1017,43 @@ it is doing; the Resources drawer has a Jev card and Usage a "Jev decisions"
 panel. Cost figures are estimates. Thresholds, bounds and file locations:
 [JEV-INTEGRATION.md](JEV-INTEGRATION.md#the-decision-layer-srccoredecide).
 
+## Equal partners: one tier model (3.15)
+
+Claude Code, Codex (both accounts) and Devin (cloud and CLI) are one **elite** tier. Grok and Devin's SWE models
+(free on the Devin plan) are **fast**; local models are **free** — except Qwen 3.8 27B, which counts as elite while
+staying free. Tier is per model, and cost basis (subscription, credits, per token, free) is a separate axis. The
+table lives in `src/core/routing/tiers.ts`, and the router, the Auto seat, Compare, the handoff menu, the New chat
+picker and the Resources drawer all read it.
+
+- **Routing** ranks tiers, never providers. Inside a tier it prefers more headroom, then a subscription turn over a
+  metered one, then lower latency. Cheap work climbs the cost ladder from free seats upward. Reserves and budget
+  modes are still per seat, so the Claude reserve Mason keeps for himself is a configured reserve, not a preference.
+- **Devin** is routable for your own chats, just like Claude and Codex. The Auto seat can pick it or stay on it,
+  Compare can pit Claude against Codex and Devin, and handoff offers it. A seat that also has a cheaper-tier model,
+  such as the Devin CLI's SWE, uses that model for cheap work. The fleet still runs Devin only through its own
+  lane, grant and ACU reserve. Devin is never auto-picked to review another model's answer.
+- **Hard work you are waiting on** goes to a hosted elite seat before an elite local model, because local models
+  are slower on this Mac. The local model is still ahead of every fast or free seat.
+
 ## Resources: the drawer and the bar (3.11)
 
 - **Resources drawer (⌘.).** Open it from the edge tab, the rail button or "Open Resources" in ⌘K. It holds one
-  card per resource:
-  - every Claude, Codex and Grok account, with its 5-hour and weekly windows, the share kept for you, reset times,
-    and Reconnect / Check again;
-  - the local runtime and its models, with their context windows (one Local card
-    spans Ollama, LM Studio and llama-server);
-  - the cloud credits, the **Devin** card (3.15; see [Devin](#devin-315)) and
-    the **Jev** card (decisions today by kind, confidence, fallback rate and
-    estimated cost; see [The Jev decision layer](#the-jev-decision-layer-315)).
-  It opens as an overlay or pins as a column, and remembers which. While a chat
-  turn is running, ⌘. in the composer stops the turn instead.
+  card per resource, grouped by tier (3.15) — never by provider:
+  - **Elite:** every Claude and Codex account, **Devin** (cloud and CLI on one
+    card; see [Devin](#devin-315)), and the Claude cloud credits — plus the
+    local runtime while it runs Qwen 3.8 27B;
+  - **Fast:** Grok;
+  - **Free · local:** the local runtime and its models, with their context
+    windows (one Local card spans Ollama, LM Studio and llama-server);
+  - **Decision layer:** the **Jev** card (decisions today by kind, confidence,
+    fallback rate and estimated cost; see
+    [The Jev decision layer](#the-jev-decision-layer-315)).
+  Every card has the same rows: a facts line (tier · cost basis · models ·
+  reserve), status, usage against its window or budget, and the readiness
+  lines. Inside a tier, usable cards come first, then a subscription before a
+  metered balance. It opens as an overlay or pins as a column, and remembers
+  which. While a chat turn is running, ⌘. in the composer stops the turn
+  instead.
 - **Readiness lines (3.14).** Every card says whether the resource is usable in
   each place, with the fixing command when it is not: "Chat: ready / why" and
   "Fleet: ready · reserve kept / why". A seat can be ready for your chats but
@@ -1100,9 +1140,10 @@ binary is installed.
   well-scoped backlog work, at most 1 at a time and 3 a day by default.
 - **Needs you.** Devin PRs get the same Clean or Held verdict, Land, Close,
   Update branch, Land all clean and Evidence as cloud PRs. Under a grant they
-  go through the standing gates, where a Devin PR merges only if the stage
-  names Devin and judges from two different model families approved it;
-  otherwise the gates record a would-merge and the PR waits for you.
+  go through the standing gates. Cloud Devin PRs need a stage that names
+  Devin and judges from two different model families; eligible local CLI
+  work can follow a signed elite-direct grant. Otherwise the gates record
+  a would-merge and the PR waits for you.
 
 Setup (plan, training opt-out, GitHub integration, service user, `ashlr devin
 connect`, ACU budget, the CLI) and limits: [`docs/DEVIN.md`](DEVIN.md).
@@ -1347,7 +1388,8 @@ default; Settings ▸ Desktop): it brings Verse forward and focuses the composer
 ## Desktop app (macOS)
 
 The Tauri app in `desktop/` is a native window around Verse plus a menu-bar
-item. It is a source-only draft — there is no public installer (see
+item. It is locally buildable and installable; there is no notarized public
+installer (see
 `DESKTOP.md`). Full detail, including the native↔web shell contract, is in
 [`desktop/README.md`](../desktop/README.md).
 
@@ -1395,42 +1437,36 @@ tray and the Dock badge are the reliable signals there. Details:
 
 ### Install it on this Mac
 
-There is no public installer (that policy is unchanged), but building Ashlr for
-your own Mac and keeping it in the Dock is supported:
+There is no notarized public installer, but building Ashlr for your own Mac
+and keeping it in the Dock is supported. Use a clean release checkout:
 
 ```sh
-REPO=/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub
-
-# 1. Build. Run the WHOLE sequence in "Build it" below, not just the last step:
-#    npm run build:binary → prepare-sidecar.mjs → CI=true cargo tauri build.
-#    A bare `cargo tauri build` rebuilds the Rust shell around whatever web
-#    assets were already staged, which is how a stale UI gets installed.
-cd "$REPO/desktop" && CI=true cargo tauri build
-
-# 2. Verify the bundle carries this build's assets (see "Verify the bundle"
-#    below) BEFORE replacing a copy you are relying on.
-
-# 3. Install, replacing any previous copy.
-rm -rf /Applications/Ashlr.app
-cp -R "$REPO/desktop/src-tauri/target/release/bundle/macos/Ashlr.app" /Applications/
+npm ci
+npm run build:binary
+node desktop/scripts/prepare-sidecar.mjs
+(cd desktop && CI=true cargo tauri build)
+test -d /Applications/Ashlr.app || ditto desktop/src-tauri/target/release/bundle/macos/Ashlr.app /Applications/Ashlr.app
+npm run ship:local -- --native
 ```
 
-Then, **once**: the build is unsigned, so macOS refuses an ordinary
-double-click. Right-click (or Control-click) `Ashlr.app` → **Open** → **Open**.
-If no Open button appears, use System Settings → Privacy & Security →
-**Open Anyway**, or `xattr -dr com.apple.quarantine /Applications/Ashlr.app`.
+The `ditto` command seeds a first install only; `ship:local --native` updates
+an existing app with the prebuilt native binary and locally signs it with the
+stable "Ashlr Local" identity. It does not notarize the
+app with Apple Developer ID. The first signing setup may ask for your login
+password and **Always Allow** for the signing key. If Gatekeeper blocks the
+first open, right-click (or Control-click) `Ashlr.app` → **Open**, or use
+System Settings → Privacy & Security → **Open Anyway**.
 With Ashlr running, right-click its Dock icon → **Options → Keep in Dock**.
 
-**To update:** quit Ashlr, repeat steps 1–3, launch again. The Gatekeeper
-exemption is remembered per app path, so a rebuild copied over the same location
-normally opens straight away. Nothing in `~/.ashlr` is touched by installing or
-replacing the bundle — config, seats, autonomy state and window geometry all
-survive.
+**To update:** repeat the build and `ship:local --native` from the new clean
+release checkout, then verify the installed version. The script backs up the
+replaced binary and assets. Nothing in `~/.ashlr` is removed: config, seats,
+autonomy state and window geometry survive.
 
 ### Build it
 
 Prerequisites: Rust ≥ 1.85 with `cargo install tauri-cli --version "^2"`, Bun
-1.x, Node ≥ 18, Xcode command line tools. From the repo root:
+1.x, Node ≥ 22.15, Xcode command line tools. From the repo root:
 
 ```sh
 # 1. Compile the CLI into a single Bun executable (runs the web build first)
@@ -1580,8 +1616,10 @@ launches the staged sidecar, so run steps 1–2 first.
   Node the pane says so. A terminal tab holds at most two visible panes.
 - The Browser pane loads any site only in the desktop app with the current
   shell; elsewhere it frames loopback dev servers and opens anything else in
-  your browser. Agents get its tools only on Claude and local seats, and
-  cannot click or type. See [VERSE-BROWSER.md](VERSE-BROWSER.md).
+  your browser. Eligible local seats get its tools through the unified
+  per-turn MCP grant; they
+  act in the page only in the desktop app on macOS. See
+  [VERSE-BROWSER.md](VERSE-BROWSER.md).
 - The Files pane is a simple list of folders and touched files, not a file
   browser yet. Side chats and split sessions are not built yet.
 - Past 40 turns the transcript renders far-away turns as placeholders, but a
@@ -1604,8 +1642,10 @@ launches the staged sidecar, so run steps 1–2 first.
 - Local seats need the `claude` binary on `PATH` and an Anthropic-compatible
   Ollama; models without tool-use support are not offered as seats, because
   they could chat but never edit.
-- Dictation depends on the runtime. WKWebView has no `SpeechRecognition`; use
-  system dictation in the desktop app.
+- Native dictation in the 3.16 desktop build requires macOS Microphone
+  permission, a working input device and a local speech model. First use may
+  download Parakeet; the voice HUD names any missing permission or model.
+  A regular browser needs its Web Speech API for the in-app microphone.
 
 **Autonomy**
 - Autonomy is dormant until you act: it needs the custody helper, your key
@@ -1637,10 +1677,25 @@ launches the staged sidecar, so run steps 1–2 first.
 - Claude has no local utilization signal and Grok's probe is not on
   `/api/usage`. Both are shown as unknown. Nothing is estimated to fill the gap.
 
+**Agents board auto-merge**
+- Auto-merge is off for each agent until the operator enables it. It also needs
+  `ASHLR_VERSE_AUTOMERGE_CHECKS` set to the exact, comma-separated names of
+  required code checks (for example, `CI, Typecheck`). An unset or malformed
+  setting holds every automatic merge. A green Vercel preview alone does not
+  count as code verification.
+- Verse reads those checks again on the PR's current head immediately before
+  its SHA-pinned squash merge. Each named check must appear exactly once and
+  have succeeded. GitHub branch protection should require the same checks;
+  a check name by itself does not authenticate which GitHub App reported it.
+- Repositories without live code CI should leave auto-merge off. The current
+  ashlr-hub GitHub Actions workflows must be enabled and passing before their
+  names can serve as auto-merge gates.
+
 **Desktop**
 - macOS only. Linux Tauri builds are quarantined (`GHSA-wrw7-89jp-8q8g` /
   `RUSTSEC-2024-0429`); see `DESKTOP.md`.
-- Unsigned and un-notarized — expect the one-time Gatekeeper prompt.
+- Locally signed with "Ashlr Local" after `ship:local`; not Apple Developer ID
+  notarized. Gatekeeper may still prompt on first open.
 - The port is fixed at 7777. If something else holds it, the app tells you and
   offers to adopt it, but it cannot move to another port.
 - Tokens are held in memory only and are not persisted between launches.

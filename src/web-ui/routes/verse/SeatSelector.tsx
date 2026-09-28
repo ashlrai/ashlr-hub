@@ -64,6 +64,9 @@ import {
 import { ENGINE_LABEL, groupSeats, seatUnavailableReason } from './verse-model.js';
 import styles from './Composer.module.css';
 
+/** What `modelContextPhrase` says for a model with no known window. */
+const WINDOW_UNKNOWN = 'window unknown';
+
 export interface SeatChoice {
   seatId: string;
   model: string;
@@ -177,7 +180,41 @@ export function seatOptionText(input: {
   const verdict = modelFit(input.workingSetTokens, input.model, input.mode, input.seat.engine);
   const fit = verdict === null ? '' : ` · ${FIT_SHORT[verdict]}`;
   const note = input.note === null ? '' : ` (${input.note})`;
-  return `${input.seat.label} — ${input.model.label} · ${modelContextPhrase(input.model, input.mode)}${fit}${note}`;
+  // 3.15: a priced model says what it costs ("Free", "$4 in · $20 out per 1M");
+  // one whose window the vendor manages (Devin) drops the bare "window unknown".
+  const price = typeof input.model.priceNote === 'string' && input.model.priceNote ? input.model.priceNote : null;
+  const context = modelContextPhrase(input.model, input.mode);
+  const tail = [price, price !== null && context === WINDOW_UNKNOWN ? null : context].filter((part) => part !== null).join(' · ');
+  return `${input.seat.label} — ${input.model.label} · ${tail}${fit}${note}`;
+}
+
+/**
+ * The native <optgroup>s of one engine: normally one ("Devin"); a seat whose
+ * models carry a family `group` (the Devin CLI catalog) gets one optgroup per
+ * family instead ("Devin (CLI) · SWE-2"), since optgroups cannot nest. Pure.
+ */
+export function seatOptionGroups(engineLabel: string, seats: readonly VerseSeat[]): Array<{ key: string; label: string; rows: Array<{ seat: VerseSeat; model: VerseModelOption }> }> {
+  const out: Array<{ key: string; label: string; rows: Array<{ seat: VerseSeat; model: VerseModelOption }> }> = [];
+  let plain: (typeof out)[number] | null = null;
+  for (const seat of seats) {
+    const grouped = seat.models.some((m) => typeof m.group === 'string' && m.group);
+    if (!grouped) {
+      if (!plain) {
+        plain = { key: engineLabel, label: engineLabel, rows: [] };
+        out.push(plain);
+      }
+      for (const model of seat.models) plain.rows.push({ seat, model });
+      continue;
+    }
+    for (const model of seat.models) {
+      const family = typeof model.group === 'string' && model.group ? model.group : 'Other';
+      const key = `${seat.id}\u0000${family}`;
+      const last = out.at(-1);
+      if (last && last.key === key) last.rows.push({ seat, model });
+      else out.push({ key, label: `${seat.label} · ${family}`, rows: [{ seat, model }] });
+    }
+  }
+  return out;
 }
 
 /**
@@ -188,6 +225,7 @@ export function seatOptionTitle(seat: VerseSeat, model: VerseModelOption, note: 
   const lines: string[] = [];
   if (note !== null) lines.push(note.charAt(0).toUpperCase() + note.slice(1));
   lines.push(modelContextSentence(model));
+  if (typeof model.priceNote === 'string' && model.priceNote) lines.push(`Price: ${model.priceNote}.`);
   const cli = seatCliLine(seat);
   if (cli !== null) lines.push(`Runs ${cli}.`);
   lines.push(...seatContextNotes(seat));
@@ -221,21 +259,27 @@ export function SeatSelector({
           if (choice) onChange(choice);
         }}>
         {!known ? <option value="" disabled>{groups.length === 0 ? 'No seats discovered' : 'Choose a seat…'}</option> : null}
-        {groups.map((group) => (
-          <optgroup key={group.engine} label={ENGINE_LABEL[group.engine]}>
-            {group.seats.flatMap((seat) => {
-              // Reachability first, then the engine's own refusal (V3.10).
-              const seatReason = seatUnavailableReason(seat) ?? seatBlockedNote(seat, seats, healthReports);
-              const capacity = seatSubscription(seat);
-              // `unread` is left unsaid: "no reading" on every Claude row
-              // would be noise, and the absent figure already says it. A local
-              // seat is left unsaid too — it has no subscription to report,
-              // and its readiness is already carried by the disabled state.
-              const capacityNote =
-                capacity.cls === 'unread' || capacity.kind === 'local'
-                  ? null
-                  : `${capacity.plan === null ? '' : `${capacity.plan} · `}${capacity.word} · ${capacity.summary}`;
-              return seat.models.map((model) => {
+        {groups.flatMap((group) => {
+          // Per seat, computed once for all its rows.
+          const seatNotes = new Map<string, { seatReason: string | null; capacityNote: string | null }>();
+          for (const seat of group.seats) {
+            // Reachability first, then the engine's own refusal (V3.10).
+            const seatReason = seatUnavailableReason(seat) ?? seatBlockedNote(seat, seats, healthReports);
+            const capacity = seatSubscription(seat);
+            // `unread` is left unsaid: "no reading" on every Claude row
+            // would be noise, and the absent figure already says it. A local
+            // seat is left unsaid too — it has no subscription to report,
+            // and its readiness is already carried by the disabled state.
+            const capacityNote =
+              capacity.cls === 'unread' || capacity.kind === 'local'
+                ? null
+                : `${capacity.plan === null ? '' : `${capacity.plan} · `}${capacity.word} · ${capacity.summary}`;
+            seatNotes.set(seat.id, { seatReason, capacityNote });
+          }
+          return seatOptionGroups(ENGINE_LABEL[group.engine], group.seats).map((optgroup) => (
+            <optgroup key={`${group.engine}:${optgroup.key}`} label={optgroup.label}>
+              {optgroup.rows.map(({ seat, model }) => {
+                const { seatReason, capacityNote } = seatNotes.get(seat.id)!;
                 // The seat's outage outranks the model's own reason: nothing
                 // on an unreachable seat runs, whatever its CLI version.
                 const reason = seatReason ?? modelUnavailableReason(seat, model);
@@ -250,10 +294,10 @@ export function SeatSelector({
                     {seatOptionText({ seat, model, mode, workingSetTokens, note })}
                   </option>
                 );
-              });
-            })}
-          </optgroup>
-        ))}
+              })}
+            </optgroup>
+          ));
+        })}
       </select>
     </label>
   );

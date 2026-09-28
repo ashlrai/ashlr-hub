@@ -22,9 +22,10 @@ The contracts live in `src/core/cloud/types.ts`. The user guide in Verse is
 
 **A second lane: Devin (3.15).** Devin sessions follow the same pattern: a
 task, a branch per task, one PR with a report block, the same Needs-you triage
-and the same intake into the standing gates. A Devin PR merges only when the
-grant's stage names Devin and judges from two different model families
-approved it; otherwise it is shadow. See [The Devin lane](#the-devin-lane-315)
+and the same intake into the standing gates. Cloud Devin PRs need a live stage
+that names Devin and judges from two different model families; eligible local
+CLI work can follow a signed elite-direct grant. Otherwise the PR is shadow.
+See [The Devin lane](#the-devin-lane-315)
 below and [DEVIN.md](DEVIN.md).
 
 ---

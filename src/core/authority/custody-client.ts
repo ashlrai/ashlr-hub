@@ -34,6 +34,7 @@ import { lstatSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 
+import { isGitHubInstallationToken } from '../util/github-installation-token.js';
 import { scrubPrivateText } from '../util/scrub.js';
 import { GRANT_ENGINES, type GrantEngine } from '../fleet/fleet-types.js';
 import { canonicalJson } from './canonical-json.js';
@@ -577,7 +578,7 @@ export async function githubToken(repo: string): Promise<CustodyToken> {
     exactKeys(out, ['token', 'expiresAt'], 'gh-token');
     const token = out['token'];
     const expiresAt = out['expiresAt'];
-    if (typeof token !== 'string' || !/^ghs_[A-Za-z0-9_]{20,251}$/.test(token)) {
+    if (!isGitHubInstallationToken(token)) {
       throw new CustodyError('bad-output', 'ashlr-custody gh-token did not return an installation token');
     }
     const expiresAtMs = typeof expiresAt === 'string' && STANDING_GRANT_PATTERNS.isoInstant.test(expiresAt) ? Date.parse(expiresAt) : NaN;

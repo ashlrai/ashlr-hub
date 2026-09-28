@@ -259,6 +259,23 @@ describe('resident start', () => {
     expect(h.out.join('\n')).toMatch(/✓ ai\.ashlr\.daemon is running under grant #7/);
   });
 
+  it('3.15: a start confirmed in the desktop app\'s native dialog prints the plan and does not ask again', async () => {
+    const h = harness({ confirm: false, observed: { state: 'absent', plist: 'absent', installedBudgetUsd: null } });
+    (h.resident as ResidentCliDeps).confirmedNatively = async () => true;
+    expect(await runAuthorityCli(['resident', 'start'], h.deps)).toBe(0);
+    expect(h.questions).toEqual([]);
+    expect(h.out.join('\n')).toMatch(/confirmed in the desktop app \(native dialog\) — install and start/);
+    expect(h.resident.calls).toEqual(['start']);
+  });
+
+  it('3.15: without a native confirmation the terminal prompt still decides', async () => {
+    const h = harness({ confirm: false, observed: { state: 'absent', plist: 'absent', installedBudgetUsd: null } });
+    (h.resident as ResidentCliDeps).confirmedNatively = async () => false;
+    expect(await runAuthorityCli(['resident', 'start'], h.deps)).toBe(1);
+    expect(h.questions).toEqual(['Install and start ai.ashlr.daemon now?']);
+    expect(h.resident.calls).toEqual([]);
+  });
+
   it('reports a failed start (the real start re-verifies and can still refuse)', async () => {
     const h = harness({ confirm: true, observed: { state: 'absent', plist: 'absent' } });
     (h.resident as ResidentCliDeps).start = async () => ({ ok: false, reason: 'HOME is not your login home' });

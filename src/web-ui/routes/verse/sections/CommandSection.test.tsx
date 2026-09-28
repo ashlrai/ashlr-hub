@@ -12,6 +12,7 @@ import { DARK_SINCE, activitySnapshot, authorityStatus, fleetHistory, fleetLive,
 import { resetActivityForTest } from '../shell/useActivity.js';
 import { overview as cloudOverview, task as cloudTask } from '../cloud/cloud-fixtures.test-support.js';
 import { mockCompactViewport, mockWideViewport, type ViewportMock } from '../shell/viewport.test-support.js';
+import { getVerseUiState, setVerseSection } from '../verse-ui-store.js';
 
 const TOKEN = 'a'.repeat(64);
 const HOUR = 3_600_000;
@@ -324,10 +325,27 @@ describe('CommandSection — raising past the grant', () => {
     expect(posted[0]!.body['draftDigest']).toMatch(/^[0-9a-f]{64}$/);
     expect(posted[1]!.body).toEqual({ action: 'switch', to: 'autonomous' });
   });
+
+  it('offers Elite direct in one line; ticking it reads the elite-direct draft (3.15)', async () => {
+    setMutationToken(TOKEN);
+    const now = Date.now();
+    const { fetchMock, posted } = stubSurfaceFetch({ kind: 'sparse', now });
+    const user = userEvent.setup();
+    render(<CommandSection />);
+    await ready();
+    await user.click(screen.getByRole('radio', { name: 'Autonomous (needs a new grant — Touch ID)' }));
+    const sheet = await screen.findByRole('dialog', { name: 'Approve a standing grant' });
+    const toggle = within(sheet).getByRole('checkbox', { name: 'Elite direct' });
+    expect(toggle).not.toBeChecked();
+    expect(within(sheet).getAllByText(/land directly on green tests — no judge/).length).toBeGreaterThan(0);
+    await user.click(toggle);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u) === '/api/verse/authority/draft?eliteDirect=1')).toBe(true));
+    expect(posted).toEqual([]);
+  });
 });
 
 describe('CommandSection — autonomy off', () => {
-  it('says it ONCE, under the bar, with Approve grant — no verdict, Since strip, empty KPIs or empty swimlane', async () => {
+  it('says it ONCE, under the bar, linking to Fleet to approve — no verdict, Since strip, empty KPIs or empty swimlane', async () => {
     const now = Date.now();
     const { fetchMock } = stubSurfaceFetch({ kind: 'dark', now, routes: { '/api/verse/fleet/history': emptyHistory(now) } });
     const user = userEvent.setup();
@@ -348,11 +366,12 @@ describe('CommandSection — autonomy off', () => {
     // Nothing drafts a grant on load: only the sheet does, once it is opened.
     await within(banner).findByTestId('setup-checklist');
     expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith('/api/verse/authority/draft'))).toBe(false);
-    // The one action opens the bar's own Touch ID sheet.
-    await user.click(within(banner).getByRole('button', { name: 'Approve grant' }));
-    const sheet = await screen.findByRole('dialog', { name: 'Approve a standing grant' });
-    expect(sheet).toHaveTextContent('Approve a standing grant to let the fleet work.');
-    expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith('/api/verse/authority/draft'))).toBe(true);
+    // 3.15: the fleet is operated on Fleet — the one action goes there (to its
+    // control surface, which holds the Touch ID sheet), not a second sheet here.
+    setVerseSection('command');
+    await user.click(within(banner).getByRole('button', { name: 'Approve in Fleet' }));
+    expect(getVerseUiState().section).toBe('fleet');
+    expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith('/api/verse/authority/draft'))).toBe(false);
   });
 
   it('asks for the next setup step instead while the trust root is not in this build — and never asks for a draft', async () => {

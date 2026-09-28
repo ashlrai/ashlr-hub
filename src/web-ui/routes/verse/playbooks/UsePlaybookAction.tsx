@@ -9,6 +9,7 @@
  * playbook. A build with no playbooks route renders nothing.
  */
 import { useState } from 'react';
+import { playbookKindOf } from '../../../../core/playbooks/types.js';
 import { useQuery } from '../../../data/hooks.js';
 import { putMacroInComposerNow } from './playbook-composer.js';
 import { playbooksQuery } from './playbooks-queries.js';
@@ -18,7 +19,8 @@ export function UsePlaybookAction({ root }: { root?: ParentNode } = {}) {
   const read = useQuery(playbooksQuery, { freshMs: 60_000 });
   const [chosen, setChosen] = useState('');
   const [note, setNote] = useState<string | null>(null);
-  const rows = read.data?.value ?? null;
+  // Command workflows are pasted into a terminal, never a macro in a message.
+  const rows = read.data?.value?.filter((r) => playbookKindOf(r) === 'agent') ?? null;
   if (read.data && !rows) return null;
 
   const use = (macro: string) => {

@@ -5,9 +5,10 @@
  *   switch <off|propose|autonomous>       lower instantly; raise within the grant (past it: Touch ID)
  *   stop [--no-wait] | clear-stop         ~/.ashlr/KILL on (drains agents, revokes armed merges) / off
  *   revoke [--reason <text>] [--no-wait]  Stop + switch off + minGrantSeq bump; resuming needs a new grant
- *   draft [--new|--reapprove] [--json]    the grant you would be asked to sign
- *   grant [--yes] [--payload <file>] [--switch <mode>]   sign (Touch ID) + install a new grant
- *   re-approve [--yes] [--switch <mode>]  sign a continuation (after a deploy, expiry, …)
+ *   draft [--new|--reapprove] [--elite-direct] [--json]   the grant you would be asked to sign
+ *   grant [--yes] [--payload <file>] [--switch <mode>] [--elite-direct|--no-elite-direct]
+ *                                         sign (Touch ID) + install a new grant
+ *   re-approve [--yes] [--switch <mode>] [--elite-direct]  sign a continuation (after a deploy, expiry, …)
  *   ledger verify [--json]                full chain verification
  *   ledger tail [--limit N] [--kind K] [--json]
  *   surface [--installed] [--json]        the authority-surface digest and verification
@@ -100,6 +101,13 @@ export interface ResidentCliDeps {
   observe(): Promise<ResidentServiceObservation>;
   /** Why this process is not the operator at a terminal; null when it is. */
   operatorRefusal(): Promise<string | null>;
+  /**
+   * 3.15: the operator already confirmed in the desktop app's native dialog
+   * (a consumed native gesture — authority/resident.ts). Then the plan is
+   * printed but not asked again (there is no terminal to ask in). Optional so
+   * existing fakes keep the terminal prompt.
+   */
+  confirmedNatively?(): Promise<boolean>;
   /** Mint the capability (re-verifying everything), record it, install / restart the service. */
   start(): Promise<ResidentEffectResult>;
   /** Lowering: boot the service out and remove its plist. Never touches Stop or the grant. */
@@ -114,7 +122,12 @@ export type DaemonServiceState = 'running' | 'loaded' | 'not-loaded' | 'absent' 
 // `cached` (the Verse probe) reuses a launchd read up to 15 s old.
 async function realDaemonService(cached = false): Promise<DaemonServiceState> {
   const { serviceStatus, serviceStatusCached } = await import('../core/daemon/service.js');
-  const status = cached ? serviceStatusCached() : serviceStatus();
+  // The strict launchd contract includes the service's configured budget and
+  // interval. Querying with serviceStatus() defaults reports a healthy custom
+  // service as "unknown" even when its installed plist matches config.
+  const prepared = await residentServiceOptions();
+  if (!prepared.ok) return 'unknown';
+  const status = cached ? serviceStatusCached(prepared.opts) : serviceStatus(prepared.opts);
   if (status.running) return 'running';
   if (status.registrationState === 'absent') return 'absent';
   if (status.runtimeState === 'ready') return 'loaded';
@@ -253,8 +266,14 @@ const realResidentDeps: ResidentCliDeps = {
     };
   },
   operatorRefusal: async () => {
-    const { operatorContextRefusal, currentOperatorContext } = await import('../core/authority/resident.js');
-    return operatorContextRefusal(currentOperatorContext());
+    const { operatorContextRefusal, currentOperatorContext, nativeGestureRefusal } = await import('../core/authority/resident.js');
+    const refusal = operatorContextRefusal(currentOperatorContext());
+    const gesture = nativeGestureRefusal();
+    return refusal && gesture ? `${refusal} (the desktop app's confirmation was not accepted: ${gesture})` : refusal;
+  },
+  confirmedNatively: async () => {
+    const { currentOperatorContext } = await import('../core/authority/resident.js');
+    return currentOperatorContext().nativeGesture === true;
   },
   start: async () => {
     const resident = await import('../core/authority/resident.js');
@@ -351,10 +370,13 @@ const USAGE = `Usage: ashlr authority <command>
   switch <off|propose|autonomous>        Lower instantly; raise up to what the grant allows
   stop [--no-wait] | clear-stop          Engage Stop (~/.ashlr/KILL): halt agents, cancel armed merges / clear it
   revoke [--reason <text>] [--no-wait]   Stop, switch off, and require a new grant (Touch ID) to resume
-  draft [--new|--reapprove] [--json]     Show the grant you would sign
-  grant [--yes] [--payload <file>] [--switch <mode>]
+  draft [--new|--reapprove] [--elite-direct] [--json]
+                                         Show the grant you would sign
+  grant [--yes] [--payload <file>] [--switch <mode>] [--elite-direct|--no-elite-direct]
                                          Sign a new grant with Touch ID and install it
-  re-approve [--yes] [--switch <mode>]   Sign a continuation (after an authority deploy, expiry, …)
+  re-approve [--yes] [--switch <mode>] [--elite-direct]
+                                         Sign a continuation (after an authority deploy, expiry, …)
+  (--elite-direct: elite models land on green tests with no judge; see docs/AUTHORITY.md §1a)
   ledger verify [--json]                 Verify the whole authority ledger chain
   ledger tail [--limit N] [--kind K] [--json]
   surface [--installed] [--json]         Authority-surface digest of this / the installed release
@@ -568,10 +590,29 @@ async function cmdRevoke(parsed: Parsed, deps: AuthorityCliDeps): Promise<number
 // draft / grant / re-approve
 // ---------------------------------------------------------------------------
 
+/**
+ * 3.15 elite self-land: `--elite-direct` / `--no-elite-direct` decide; with
+ * neither, an interactive run asks (one line of explanation first) and a
+ * `--yes` / `--payload` run keeps the default (a new grant: the judged
+ * ladder; a re-approval: whatever the signed grant already is).
+ */
+async function eliteDirectChoice(parsed: Parsed, deps: AuthorityCliDeps, interactive: boolean): Promise<boolean | undefined> {
+  if (parsed.flags.has('--elite-direct')) return true;
+  if (parsed.flags.has('--no-elite-direct')) return false;
+  if (!interactive) return undefined;
+  const { ELITE_DIRECT_ONE_LINE } = await import('../core/authority/elite-models.js');
+  deps.out(ELITE_DIRECT_ONE_LINE);
+  return deps.confirm('Make this grant elite-direct (one rung, no ramp; you can always Stop, switch down or revoke)?');
+}
+
 async function cmdDraft(parsed: Parsed, deps: AuthorityCliDeps): Promise<number> {
   const { buildStandingGrantDraft } = await import('../core/verse/authority-api.js');
   const kind = parsed.flags.has('--new') ? 'new' : parsed.flags.has('--reapprove') ? 'reapprove' : 'auto';
-  const draft = await buildStandingGrantDraft(kind, Date.now(), { githubGet: ghGet(deps) });
+  const eliteDirect = await eliteDirectChoice(parsed, deps, false);
+  const draft = await buildStandingGrantDraft(kind, Date.now(), {
+    githubGet: ghGet(deps),
+    ...(eliteDirect !== undefined ? { eliteDirect } : {}),
+  });
   if (parsed.flags.has('--json')) {
     deps.out(JSON.stringify({ kind: draft.kind, digest: draft.digest, payload: draft.payload }, null, 2));
     return 0;
@@ -620,7 +661,11 @@ async function cmdGrant(parsed: Parsed, deps: AuthorityCliDeps, kind: 'new' | 'r
     payload = checked.value;
   } else {
     const { buildStandingGrantDraft } = await import('../core/verse/authority-api.js');
-    payload = (await buildStandingGrantDraft(kind, Date.now(), { githubGet: ghGet(deps) })).payload;
+    const eliteDirect = await eliteDirectChoice(parsed, deps, !parsed.flags.has('--yes'));
+    payload = (await buildStandingGrantDraft(kind, Date.now(), {
+      githubGet: ghGet(deps),
+      ...(eliteDirect !== undefined ? { eliteDirect } : {}),
+    })).payload;
   }
   deps.out(kind === 'new' ? 'You are about to sign this standing grant:' : 'You are about to re-approve (continue) this standing grant:');
   for (const line of describeGrantScope(payload)) deps.out(`  ${line}`);
@@ -1989,8 +2034,8 @@ async function runSetup(parsed: Parsed, deps: AuthorityCliDeps, opts: SetupRunOp
     // touches launchd: it names the one command that does.
     const DAEMON_DETAIL = 'would check that the ai.ashlr.daemon service is loaded and running (each tick re-verifies the grant)';
     if (planning) {
-      note('standing grant', 'skipped', 'would sign the first standing grant (Touch ID)');
-      note('autonomy switch', 'skipped', 'would offer to set the autonomy switch to Autonomous (the ladder starts in shadow)');
+      note('standing grant', 'skipped', 'would sign the first standing grant (Touch ID), offering elite-direct: elite models land on green tests with no judge');
+      note('autonomy switch', 'skipped', 'would offer to set the autonomy switch to Autonomous (the ladder starts in shadow, or at elite-direct)');
       note('daemon service', 'skipped', DAEMON_DETAIL);
       return done();
     }
@@ -1998,15 +2043,26 @@ async function runSetup(parsed: Parsed, deps: AuthorityCliDeps, opts: SetupRunOp
     const { evaluateStandingAuthority, displaySurfaceTarget } = await import('../core/authority/effective-config.js');
     const evaluation = evaluateStandingAuthority({ mode: 'cached', surface: displaySurfaceTarget() });
     let grantActive = evaluation.grantState === 'active';
+    let startStage: string | null = evaluation.position?.stageId ?? null;
     if (grantActive) {
       note('standing grant', 'already', `grant #${evaluation.grant?.grantSeq ?? '?'} is active`);
     } else if (await ask('Sign the first standing grant now (Touch ID)?')) {
       try {
         const { buildStandingGrantDraft } = await import('../core/verse/authority-api.js');
-        const draft = await buildStandingGrantDraft('auto', Date.now(), { githubGet: ghGet(deps) });
+        // 3.15: offer elite self-land, explained in one line (--elite-direct /
+        // --no-elite-direct decide without asking; --yes answers yes, like
+        // every other setup question).
+        let eliteDirect = parsed.flags.has('--elite-direct') ? true : parsed.flags.has('--no-elite-direct') ? false : undefined;
+        if (eliteDirect === undefined) {
+          const { ELITE_DIRECT_ONE_LINE } = await import('../core/authority/elite-models.js');
+          deps.out(`    ${ELITE_DIRECT_ONE_LINE}`);
+          eliteDirect = await ask('Make the grant elite-direct (one rung, no ramp)?');
+        }
+        const draft = await buildStandingGrantDraft('auto', Date.now(), { githubGet: ghGet(deps), eliteDirect });
         for (const line of draft.summary) deps.out(`    ${line}`);
         const signed = await signAndInstall(draft.payload, deps);
         grantActive = signed.ok;
+        if (signed.ok) startStage = signed.grant.rollout.stages[0]!.id;
         note('standing grant', signed.ok ? 'done' : 'failed', signed.ok ? `grant #${signed.grant.grantSeq} installed, starting at ${signed.grant.rollout.stages[0]!.id}` : signed.reason);
       } catch (error) {
         note('standing grant', 'failed', `no grant was drafted (${failure(error)}) — rerun setup, or run \`ashlr authority grant\``);
@@ -2021,7 +2077,7 @@ async function runSetup(parsed: Parsed, deps: AuthorityCliDeps, opts: SetupRunOp
       note('autonomy switch', dryRun ? 'skipped' : 'waiting-on-you', 'needs an active standing grant first');
     } else if (evaluation.switch === 'autonomous') {
       note('autonomy switch', 'already', 'Autonomous');
-    } else if (await ask('Set the autonomy switch to Autonomous (the ladder starts in shadow)?')) {
+    } else if (await ask(`Set the autonomy switch to Autonomous (the grant is at ${startStage ?? 'its first stage'})?`)) {
       const { requestAutonomySwitch } = await import('../core/authority/effective-config.js');
       const switched = requestAutonomySwitch('autonomous', 'mason', 'ashlr authority setup');
       note('autonomy switch', switched.ok ? 'done' : 'failed', switched.ok ? 'Autonomous' : switched.reason);
@@ -2181,7 +2237,10 @@ async function cmdResidentStart(parsed: Parsed, deps: AuthorityCliDeps): Promise
   deps.out(`  service   ai.ashlr.daemon → ${observed.plistPath?.replace(homedir(), '~') ?? '?'} (${observed.state}, plist ${observed.plist})`);
   deps.out(`  budget    $${observed.expectedBudgetUsd ?? '?'}/day from config daemon.dailyBudgetUsd${observed.installedBudgetUsd !== null && observed.installedBudgetUsd !== observed.expectedBudgetUsd ? ` (installed: $${observed.installedBudgetUsd})` : ''}`);
   deps.out('  launchd   enable + bootstrap (RunAtLoad); every tick re-verifies the grant, Stop and the switch');
-  if (!(await deps.confirm(`${action[0]!.toUpperCase()}${action.slice(1)} ai.ashlr.daemon now?`))) {
+  const native = (await deps.resident.confirmedNatively?.()) === true;
+  if (native) {
+    deps.out(`  confirmed in the desktop app (native dialog) — ${action}.`);
+  } else if (!(await deps.confirm(`${action[0]!.toUpperCase()}${action.slice(1)} ai.ashlr.daemon now?`))) {
     deps.out('Nothing was changed.');
     return 1;
   }

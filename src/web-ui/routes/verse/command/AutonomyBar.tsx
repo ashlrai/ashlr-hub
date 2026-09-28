@@ -74,14 +74,17 @@ export function ChipDot({ tone }: { tone: ChipTone }) {
  * banner (autonomy/AutonomyOffState) — one sheet, one approve path.
  */
 export interface GrantFlow {
-  /** `then`: the switch position to apply after signing, if the new grant allows it. */
-  open: (intent: GrantIntent, why: string, then?: AutonomySwitch | null) => void;
+  /**
+   * `then`: the switch position to apply after signing, if the new grant allows it.
+   * `edit` (3.15): open straight into the scope editor.
+   */
+  open: (intent: GrantIntent, why: string, then?: AutonomySwitch | null, opts?: { edit?: boolean }) => void;
   /** Render once (the bar does unless its owner passes the flow in). */
   sheet: ReactNode;
 }
 
 export function useGrantFlow(actions: SurfaceActions): GrantFlow {
-  const [sheet, setSheet] = useState<{ intent: GrantIntent; then: AutonomySwitch | null; why: string } | null>(null);
+  const [sheet, setSheet] = useState<{ intent: GrantIntent; then: AutonomySwitch | null; why: string; edit: boolean } | null>(null);
 
   function approve(draft: AuthorityGrantDraft): void {
     if (!sheet) return;
@@ -107,7 +110,7 @@ export function useGrantFlow(actions: SurfaceActions): GrantFlow {
   }
 
   return {
-    open: (intent, why, then = null) => setSheet({ intent, then, why }),
+    open: (intent, why, then = null, opts = {}) => setSheet({ intent, then, why, edit: opts.edit === true }),
     sheet: (
       <GrantSheet
         open={sheet !== null}
@@ -117,6 +120,8 @@ export function useGrantFlow(actions: SurfaceActions): GrantFlow {
         busy={actions.busy}
         onApprove={approve}
         onClose={() => setSheet(null)}
+        act={actions.act}
+        startEditing={sheet?.edit === true}
       />
     ),
   };

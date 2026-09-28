@@ -18,6 +18,9 @@
  *   G5  Blast radius unchanged (flag-gated blast radius / red team / spec).
  *   G6  Judge        an eligible frontier judge of a DIFFERENT family, HMAC
  *                    attested; waits (never downgrades) when no seat is free.
+ *                    3.15 elite self-land: under the signed `elite-direct`
+ *                    stage, work by an elite model (authority/elite-models.ts)
+ *                    passes G6 on deterministic verification — no judge.
  *   G7  GitHub       App PR; every required check green on the head SHA; no
  *                    checks ⇒ owner lane; SHA-pinned squash merge. On a
  *                    local-enforcement repo the App's own host-verified
@@ -47,6 +50,7 @@ import {
   protectedPathHits,
   type ProtectedPathHit,
 } from '../authority/protected-paths.js';
+import { ELITE_DIRECT_G6_CODE, ELITE_DIRECT_STAGE_ID, matchEliteModel } from '../authority/elite-models.js';
 import { hashDiff, verifyJudgeAttestation } from '../foundry/provenance.js';
 import { scrubSecrets } from '../util/scrub.js';
 import type { DecisionEntry } from '../types.js';
@@ -794,6 +798,13 @@ export interface G6Input {
   /** Decisions for this proposal; null = the decisions ledger is degraded (fail closed). */
   decisions: readonly DecisionEntry[] | null;
   nowMs: number;
+  /**
+   * 3.15 elite self-land: present only while the live grant's CURRENT stage
+   * is `elite-direct` (authority/elite-models.ts eliteDirectInForce). `allow`
+   * is the config narrowing of the compiled allowlist (null = all of it).
+   * Absent / null ⇒ today's judge rules, unchanged.
+   */
+  eliteDirect?: { allow: readonly string[] | null } | null;
 }
 
 export interface G6Evaluation extends GateEvaluation {
@@ -890,6 +901,8 @@ function assessJudgeVerdict(latest: DecisionEntry, input: G6Input, base: Record<
 export function evaluateG6(input: G6Input): G6Evaluation {
   const producerFamily = producerModelFamily(input.producerModel);
   const base = { producerFamily };
+  const elite = evaluateEliteDirect(input, base);
+  if (elite) return elite;
   if (input.decisions === null) {
     return g6(evaluation('wait', 'decisions-degraded', 'the decisions ledger is degraded; no judge verdict can be trusted', base), null, false);
   }
@@ -916,6 +929,34 @@ export function evaluateG6(input: G6Input): G6Evaluation {
     `independent ${assessed.family} judge ${assessed.judgeId} shipped it (attested ${assessed.issuedAt}); ${assessed.eligibilityReason}`,
     { ...assessed.inputs, attestation: assessed.attestation },
   ), assessed.judgeId, false);
+}
+
+/**
+ * 3.15 — elite self-land (Mason, 2026-09-27: "all codex, claude code, grok,
+ * and devin should be able to push directly to production when using the
+ * elite models"). Under the signed `elite-direct` stage, a proposal whose
+ * SIGNED producer identity is an elite model (authority/elite-models.ts —
+ * engine prefix and exact model id; unknown ⇒ not elite) passes G6 without a
+ * judge: no judge seat, no cross-family rule, no two-judge rule for Devin.
+ * What stands in for the judge is deterministic: G3 already ran the repo's
+ * own verify commands on the exact tree (it precedes G6 in GATE_ORDER, so a
+ * G6 row is only ever reached after a G3 pass), and G7 still requires every
+ * required check — including the App's host-verified `ashlr/verify` — green
+ * on the PR head. Recorded verdicts are not consulted: no judge is asked,
+ * so none can be waited on. Returns null when elite-direct does not apply.
+ */
+function evaluateEliteDirect(input: G6Input, base: Record<string, unknown>): G6Evaluation | null {
+  if (!input.eliteDirect) return null;
+  const match = matchEliteModel(input.producerModel, input.eliteDirect.allow);
+  if (!match) return null;
+  const e = g6(evaluation(
+    'pass',
+    ELITE_DIRECT_G6_CODE,
+    `elite model ${match.entry.label} (${match.engine}:${match.model}) under the ${ELITE_DIRECT_STAGE_ID} stage: `
+      + 'deterministic verification stands in for a judge (G3 tests green on the exact tree; G7 still requires ashlr/verify and every required check)',
+    { ...base, rule: ELITE_DIRECT_G6_CODE, eliteModel: match.entry.id, engine: match.engine, model: match.model },
+  ), null, false);
+  return { ...e, judgeIds: [], judgedFamilies: [] };
 }
 
 /**

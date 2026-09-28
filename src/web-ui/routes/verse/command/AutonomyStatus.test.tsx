@@ -1,9 +1,9 @@
 /**
- * Command's Autonomy status (3.14), against the real CommandSection, the real
- * authority and decisions reads (stubbed fetch) and the real Touch ID sheet:
- * the active fleet's ladder replaces the "Autonomy is off" banner, Re-approve
- * appears under 7 days and opens the ONE grant sheet, and ⌘K "Re-approve
- * grant…" runs the same path.
+ * The Autonomy status card (3.14) — on the Fleet tab since 3.15, where the
+ * fleet is operated — against the real FleetSection (and CommandSection for
+ * the bar's ⌘K path), the real authority and decisions reads (stubbed fetch)
+ * and the real Touch ID sheet: the active fleet's ladder, Re-approve under 7
+ * days opens the ONE grant sheet, and ⌘K "Re-approve grant…" runs the bar's path.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
@@ -11,6 +11,7 @@ import userEvent from '@testing-library/user-event';
 import { evictAll } from '../../../data/cache.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { CommandSection } from '../sections/CommandSection.js';
+import { FleetSection } from '../sections/FleetSection.js';
 import { resetCommandBus } from '../shell/command-bus.js';
 import { executeCatalogCommand, setShellNotifier } from '../shell/run-command.js';
 import { resetActivityForTest } from '../shell/useActivity.js';
@@ -48,7 +49,7 @@ async function panel(): Promise<HTMLElement> {
   return screen.findByRole('region', { name: 'Autonomy' }, { timeout: 3_000 });
 }
 
-describe('Autonomy status on Command', () => {
+describe('Autonomy status (on Fleet since 3.15)', () => {
   it('shows the shadow stage, the 8-rung ladder, progress, grant time, switch state and the last decision — and no off-state', async () => {
     const now = Date.now();
     stubSurfaceFetch({
@@ -58,7 +59,7 @@ describe('Autonomy status on Command', () => {
         '/api/verse/authority': shadowStatus(now, { digests: 2, hours: 3 }),
       },
     });
-    render(<CommandSection />);
+    render(<FleetSection />);
     const card = await panel();
     expect(card).toHaveTextContent('Shadow · 1 of 8');
     expect(card).toHaveTextContent('Autonomous');
@@ -93,7 +94,7 @@ describe('Autonomy status on Command', () => {
         '/api/verse/authority': shadowStatus(now, { lastMove: { move: 'regressed', fromStageId: '2a', toStageId: 'shadow', at, breach: '1 sandbox violation in stage 2a.' } }),
       },
     });
-    render(<CommandSection />);
+    render(<FleetSection />);
     const card = await panel();
     const last = within(card).getByRole('status');
     expect(last).toHaveTextContent('Dropped back to Shadow from 2a: 1 sandbox violation in stage 2a. · 30 m ago');
@@ -105,7 +106,7 @@ describe('Autonomy status on Command', () => {
     const now = Date.now();
     const { posted } = stubSurfaceFetch({ now, routes: { '/api/verse/authority': shadowStatus(now, { expiresInMs: 5 * DAY }) } });
     const user = userEvent.setup();
-    render(<CommandSection />);
+    render(<FleetSection />);
     const card = await panel();
     expect(card).toHaveTextContent(/Grant [45] d( \d+ h)? left/);
     await user.click(within(card).getByRole('button', { name: 'Re-approve' }));
@@ -119,7 +120,8 @@ describe('Autonomy status on Command', () => {
     const now = Date.now();
     stubSurfaceFetch({ now, routes: { '/api/verse/authority': shadowStatus(now) } });
     render(<CommandSection />);
-    await panel();
+    // The bar serves the palette entry once the authority read has answered.
+    await waitFor(() => expect(screen.getByTestId('verdict')).toBeInTheDocument());
     act(() => { executeCatalogCommand('autonomy.reapprove', { via: 'palette' }); });
     expect(await screen.findByRole('dialog', { name: 'Re-approve the standing grant' })).toHaveTextContent(/continues the rollout from its current stage/);
   });
@@ -159,7 +161,7 @@ describe('Autonomy status on Command', () => {
     vp = mockCompactViewport();
     const now = Date.now();
     stubSurfaceFetch({ now, routes: { '/api/verse/authority': shadowStatus(now, { digests: 1, hours: 2 }) } });
-    render(<CommandSection />);
+    render(<FleetSection />);
     const card = await panel();
     expect(within(card).getAllByRole('listitem')).toHaveLength(8);
     expect(within(card).getByRole('meter', { name: 'Would-merge digests: 1 / 5' })).toBeInTheDocument();

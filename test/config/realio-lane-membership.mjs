@@ -43,6 +43,8 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/remote-gateway-auth.test.ts', // real loopback gateway and Mac-only Unix socket pairing ceremony
+  'test/remote-gateway-http.test.ts', // real loopback Hub and gateway servers, Access assertion and SSE lifecycle
   'test/builtin-activity-pgid-reuse.test.ts', // private activity journals with synthetic identity reuse probes
   'test/builtin-activity-settlement-witness.test.ts', // private journals and one real owned subprocess
   'test/resource-quota-cleanup-diagnostics.test.ts', // private real collector leases with inert failure witnesses
@@ -445,12 +447,15 @@ export const REAL_IO_TEST_FILES = [
   'test/host-merge-310b.test.ts', // real git through FakeGithub (test/helpers/fleet-github-310b.ts) — guard cannot see it
   'test/standing-merge-pass-310b.test.ts', // real git rebase/squash through FakeGithub — guard cannot see it
   'test/verse-sources-api.test.ts', // 3.15: real loopback http server bind for POST /api/verse/sources/open
+  'test/verse-agents-workspace-316.test.ts', // 3.16: real git worktrees, snapshot refs, archive/restore under a temp HOME
+  'test/verse-agents-api-316.test.ts', // 3.16: real git worktree per agent behind /api/verse/agents (temp HOME + temp repo)
   'test/verse-retro-sweep-close-315.test.ts', // 3.15: real loopback startServer bind; close() stops the retro sweep schedule
   'test/devin-api-315.test.ts', // 3.15: real loopback http server bind for the /api/verse/devin routes
   'test/automations-api-315.test.ts', // 3.15: real loopback http server bind for the /api/verse/automations routes
   'test/cloud-pr-actions.test.ts', // 3.13: real loopback http server bind for the Needs-you land/close/update-branch routes
   'test/devin-evidence-triage-315.test.ts', // 3.15: real loopback http server bind for the Devin previews / close-with-reason / timeline routes
   'test/verse-devin-engine-315.test.ts', // 3.15: the session engine spawns a real fake Devin turn process (node) — guard cannot see it
+  'test/devin-cli-engine-realio-315.test.ts', // 3.15: a fake `devin` on PATH in a real sandbox worktree + proposal capture, a real process-group kill, real sandbox-exec children (macOS)
   'test/verse-chat-playbooks-315.test.ts', // 3.15: the session engine spawns a real (trivial node) turn process per seat — guard cannot see it
   'test/cloud-intake-313.test.ts', // 3.13: its end-to-end block runs real git through FakeGithub — guard cannot see it
   'test/verse-async-folder-access-314.test.ts', // 3.14: real temp repos + a slowed fake `git` behind a real server, a fake `locus`, real spawns
@@ -530,10 +535,14 @@ export const REAL_IO_TEST_FILES = [
   'test/wiki-generate-315.test.ts', // real h1-fixture repos + a real commit per staleness case (repo wiki build/refresh)
   'test/wiki-ask-315.test.ts', // real h1-fixture repos, wiki + knowledge-index builds per case (repo wiki Ask)
   'test/wiki-api-315.test.ts', // binds a real loopback HTTP server over a real built wiki (Verse wiki routes)
+  'test/verse-computer-api-315.test.ts', // 3.15: real loopback http server bind for the /api/verse/computer routes (desktop-control relay)
   'test/verse-browser-api-315.test.ts', // 3.15: real loopback http server bind for the /api/verse/browser routes (incl. the grant-authenticated MCP endpoint)
+  'test/verse-agent-tools-api-315.test.ts', // 3.15 agent tools: real loopback http server bind for /api/verse/agent-tools (bearer MCP endpoint + stdio bridge relay)
   'test/verse-multimodel-api-316.test.ts', // binds a real loopback HTTP server + real private store files (Verse multi-model routes)
   'test/verse-checkpoints-315.test.ts', // real temp repos: per-turn checkpoint snapshots, restores, hunk reverts, merge-file
   'test/verse-checkpoint-service-315.test.ts', // real temp repos: turn hooks, Changes diff, reject, three-way Undo/Redo, checkpoint routes
   'test/verse-terminal-blocks-315.test.ts', // binds a real loopback HTTP server for the terminal block/redact/open-file routes
   'test/verse-terminal-shell-integration-315.test.ts', // spawns real /bin/zsh and /bin/bash on the generated shell-integration scripts
+  'test/verse-terminal-mux-315.test.ts', // binds a real loopback HTTP server for the multiplexed stream, history, settings and assist routes
+  'test/verse-terminal-agents-routes-315.test.ts', // binds a real loopback HTTP server and runs the generated agent hook script (/bin/sh + curl) against it
 ];

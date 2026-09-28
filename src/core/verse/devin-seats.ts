@@ -40,6 +40,16 @@ import {
   type DevinCliProbeOptions,
 } from '../devin/cli-probe.js';
 import { DEVIN_CLI_SEAT_ID, DEVIN_CLOUD_SEAT_ID, devinChatGate } from '../devin/chat.js';
+import { loadConfigReadOnly } from '../config.js';
+import {
+  devinDefaultModelId,
+  devinPriceNote,
+  fallbackDevinModelCatalog,
+  getDevinModelCatalog,
+  resolveDevinModel,
+  type DevinModelCatalog,
+  type DevinModelFamily,
+} from '../devin/models.js';
 import { devinStatus } from '../devin/service.js';
 import { listDevinTasks, readDevinBudget } from '../devin/store.js';
 import type { DevinStatus } from '../devin/types.js';
@@ -61,6 +71,10 @@ export interface DevinSeatDiscoveryOptions {
   cliCandidates?: readonly string[];
   /** Where the CLI keeps its login (tests). */
   cliCredentialsPath?: string;
+  /** The CLI's model catalog (tests; default: core/devin/models.ts, which never lists on this path). */
+  modelCatalog?: () => Promise<DevinModelCatalog>;
+  /** `devin.defaultModel` (tests; default: ~/.ashlr/config.json, read-only). */
+  defaultModel?: () => string | null;
   now?: () => Date;
 }
 
@@ -106,18 +120,48 @@ function cloudModel(unavailableReason: string | null): VerseModelOption {
 }
 
 /**
- * The CLI's model families. The docs say these short names "always resolve to
- * the latest version in that model family" (docs.devin.ai/cli/models), so the
- * list never goes stale; `devin` = the CLI's own default.
+ * 3.15: the CLI seat's models come from the account's own catalog
+ * (`devin models list`, core/devin/models.ts — cached, refreshed in the
+ * background, never listed on this path). Grouped by family; the configured
+ * default (`devin.defaultModel`, SWE-2 High unless set) and its family come
+ * first, then SWE-2, then the rest in the CLI's order, so the picker's
+ * default choice (its first runnable model) is the default model. Each row
+ * says what it costs ("Free" / "$4 in · $20 out per 1M").
+ *
+ * Fusion is left out of the chat picker: it is a composite (a main model plus
+ * a "sidekick"), listed as hundreds of pairings, and it is the mode the cloud
+ * lane deliberately refuses as a producer too (types.ts `devin.mode`).
  */
-const CLI_MODELS: ReadonlyArray<{ id: string; label: string }> = [
-  { id: DEVIN_DEFAULT_MODEL_ID, label: 'Devin default' },
-  { id: 'opus', label: 'Claude Opus (latest)' },
-  { id: 'sonnet', label: 'Claude Sonnet (latest)' },
-  { id: 'swe', label: 'SWE (latest)' },
-  { id: 'codex', label: 'Codex (latest)' },
-  { id: 'gemini', label: 'Gemini (latest)' },
-];
+export const DEVIN_PICKER_EXCLUDED_FAMILIES: ReadonlySet<string> = new Set(['fusion']);
+
+export function devinCliModelOptions(catalog: DevinModelCatalog, defaultId: string, unavailableReason: string | null): VerseModelOption[] {
+  const families = catalog.families.filter((f) => !DEVIN_PICKER_EXCLUDED_FAMILIES.has(f.id));
+  const defaultModel = resolveDevinModel(defaultId, catalog);
+  const rank = (family: DevinModelFamily): number => (family.id === defaultModel?.family ? 0 : family.id === 'swe-2' ? 1 : 2);
+  const ordered = families
+    .map((family, index) => ({ family, index }))
+    .sort((a, b) => rank(a.family) - rank(b.family) || a.index - b.index)
+    .map(({ family }) => family);
+  const options: VerseModelOption[] = [];
+  for (const family of ordered) {
+    const models = defaultModel && family.id === defaultModel.family
+      ? [defaultModel, ...family.models.filter((m) => m.id !== defaultModel.id)]
+      : family.models;
+    for (const model of models) {
+      const price = devinPriceNote(model);
+      options.push({
+        id: model.id,
+        label: model.label,
+        contextWindow: null,
+        windowSource: 'fallback',
+        group: family.label,
+        ...(price ? { priceNote: price } : {}),
+        ...(unavailableReason ? { unavailableReason } : {}),
+      });
+    }
+  }
+  return options;
+}
 
 export async function discoverDevinSeats(opts: DevinSeatDiscoveryOptions = {}): Promise<{ seats: VerseSeat[]; launches: Map<string, VerseSeatLaunch> }> {
   const seats: VerseSeat[] = [];
@@ -158,6 +202,9 @@ export async function discoverDevinSeats(opts: DevinSeatDiscoveryOptions = {}): 
     accountId: DEVIN_CLOUD_SEAT_ID,
     models: [cloudModel(unavailable)],
     contextWindow: null,
+    // 3.15 (routing/tiers.ts): a cloud turn spends ACU credits — the router's
+    // marginal-cost rule and the Resources card both read this.
+    costBasis: 'credits',
     health,
     notes: [
       'Runs in Devin’s own cloud machine on this folder’s GitHub repository (its `origin` remote); Devin manages its own context.',
@@ -175,12 +222,27 @@ export async function discoverDevinSeats(opts: DevinSeatDiscoveryOptions = {}): 
   if (cliPath) {
     const loggedIn = probe.state === 'ready';
     const reason = loggedIn ? null : DEVIN_CLI_LOGIN_HINT;
+    // Returns at once (memory / disk / the SWE-2 fallback); a due listing runs in the background.
+    let catalog: DevinModelCatalog;
+    try {
+      catalog = await (opts.modelCatalog ?? (() => getDevinModelCatalog({ cliPath: loggedIn ? cliPath : null })))();
+    } catch {
+      catalog = fallbackDevinModelCatalog();
+    }
+    let configured: string | null = null;
+    try {
+      // Private state (~/.ashlr/config.json), read the same way devinStatus() above reads it.
+      configured = (opts.defaultModel ?? (() => loadConfigReadOnly().devin?.defaultModel ?? null))();
+    } catch {
+      configured = null;
+    }
+    const defaultModelId = devinDefaultModelId(configured ? { defaultModel: configured } : undefined, catalog);
     const cli: VerseSeat = {
       id: DEVIN_CLI_SEAT_ID,
       engine: 'devin',
       label: 'Devin (CLI)',
       accountId: DEVIN_CLI_SEAT_ID,
-      models: CLI_MODELS.map((m) => ({ id: m.id, label: m.label, contextWindow: null, windowSource: 'fallback', ...(reason ? { unavailableReason: reason } : {}) })),
+      models: devinCliModelOptions(catalog, defaultModelId, reason),
       contextWindow: null,
       health: loggedIn
         ? { state: 'ready', summary: 'Local Devin agent in this folder; usage counts against your Devin plan.', windows: unknownWindows, observedAt: now.toISOString() }

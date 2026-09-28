@@ -117,6 +117,32 @@ describe('M374 post-merge stable-after-window cohorts', () => {
     expect(buildPostMergeStabilityWitness(witness())).toBeNull();
   });
 
+  it('signs v2 verification identity and keeps legacy v1 readable without upgrading its evidence', () => {
+    key();
+    const legacy = buildPostMergeStabilityWitness(witness())!;
+    const verified = buildPostMergeStabilityWitness(witness({
+      schemaVersion: 2,
+      verifiedAt: '2026-07-11T12:01:00.000Z',
+      verificationIsolation: 'detached-worktree',
+      workspaceClean: true,
+      requiredCommandCount: 3,
+    }))!;
+    expect(legacy.schemaVersion).toBe(1);
+    expect(legacy).not.toHaveProperty('verificationIsolation');
+    expect(verified).toMatchObject({
+      schemaVersion: 2, verificationIsolation: 'detached-worktree',
+      workspaceClean: true, requiredCommandCount: 3,
+    });
+    expect(verifyPostMergeStabilityWitness(legacy)).toBe(true);
+    expect(verifyPostMergeStabilityWitness(verified)).toBe(true);
+    expect(verifyPostMergeStabilityWitness({ ...verified, verificationIsolation: 'clean-workspace' })).toBe(false);
+    expect(verifyPostMergeStabilityWitness({ ...verified, requiredCommandCount: 4 })).toBe(false);
+    expect(buildPostMergeStabilityWitness(witness({
+      schemaVersion: 2, verifiedAt: '2026-07-11T11:59:59.000Z',
+      verificationIsolation: 'detached-worktree', workspaceClean: true, requiredCommandCount: 3,
+    }))).toBeNull();
+  });
+
   it('durably writes all witnesses before one complete manifest and summarizes the cohort', () => {
     key();
     expect(recordPostMergeStabilityCohort(cohort())).toMatchObject({

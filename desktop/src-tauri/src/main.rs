@@ -33,7 +33,7 @@
 
 use std::{
     net::TcpStream,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -60,8 +60,11 @@ use tauri_plugin_updater::UpdaterExt;
 
 mod activity_watch;
 mod app_menu;
+mod browser_input;
 mod browser_pane;
+mod computer;
 mod desktop_prefs;
+mod fleet_ops;
 mod health_watch;
 mod hotkey;
 mod launch_state;
@@ -83,6 +86,9 @@ use window_state::{MonitorRect, ShellTheme, WindowState};
 
 const SERVE_HOST: &str = "127.0.0.1";
 const SERVE_PORT: u16 = 7777;
+/// Creating this private file is the desktop's explicit opt-in to the phone
+/// gateway. The CLI validates its owner, mode, and contents before binding.
+const REMOTE_CONFIG_FILE: &str = "verse-remote.json";
 /// Origin the sidecar server listens on. The window only ever loads this origin
 /// (see the CSP in tauri.conf.json) and the shell-contract script only runs on it.
 const SERVE_ORIGIN: &str = "http://127.0.0.1:7777";
@@ -210,6 +216,52 @@ impl SidecarMode {
             SidecarMode::Serve => "ashlr serve --allow-dispatch",
         }
     }
+}
+
+fn remote_config_path_for(home: &Path) -> Option<PathBuf> {
+    if !home.is_absolute() {
+        return None;
+    }
+    Some(home.join(".ashlr").join(REMOTE_CONFIG_FILE))
+}
+
+fn remote_config_path() -> Option<PathBuf> {
+    remote_config_path_for(&PathBuf::from(std::env::var_os("HOME")?))
+}
+
+fn enabled_remote_config_path_at(path: &Path) -> Option<String> {
+    // Only a definitely absent file leaves the gateway off. Permission and
+    // other metadata errors still pass the path to the CLI, whose stricter
+    // lstat/0600/owner check fails visibly instead of silently dropping phone.
+    if std::fs::symlink_metadata(path)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return None;
+    }
+    Some(path.to_string_lossy().into_owned())
+}
+
+fn enabled_remote_config_path() -> Option<String> {
+    enabled_remote_config_path_at(&remote_config_path()?)
+}
+
+fn sidecar_args(mode: SidecarMode, remote_config: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = mode.args().iter().map(|arg| (*arg).to_owned()).collect();
+    if mode == SidecarMode::Verse {
+        if let Some(path) = remote_config {
+            args.push("--remote-config".to_owned());
+            args.push(path.to_owned());
+            // Remote CLI output omits Hub tokens by default. This app owns the
+            // sidecar's private stdout and consumes its startup line before
+            // any diagnostics or UI event can see it.
+            args.push("--desktop-token-handoff".to_owned());
+        }
+    }
+    args
+}
+
+fn fallback_to_serve(mode: SidecarMode, remote_config_enabled: bool) -> bool {
+    mode == SidecarMode::Verse && !remote_config_enabled
 }
 
 /// The machine-readable startup record both `ashlr verse --json` and
@@ -682,6 +734,9 @@ fn create_main_window(handle: &AppHandle, startup: Option<&SidecarStartup>) {
             .on_page_load(|window, payload| {
                 if matches!(payload.event(), PageLoadEvent::Started) {
                     browser_pane::hide_all(window.app_handle());
+                    // "Verse window present" is an invariant for desktop
+                    // control: a reload pauses it and hides the HUD.
+                    computer::on_verse_window_gone(window.app_handle());
                 }
             });
         builder = match (restored.x, restored.y) {
@@ -917,7 +972,14 @@ fn sweep_orphans() {
     let Some(bin) = sidecar_binary_path() else {
         return;
     };
-    let arg_sets = [SidecarMode::Verse.args(), SidecarMode::Serve.args()];
+    // Include the opted-in form even after the file was removed. Otherwise an
+    // orphaned gateway would keep 7777 and prevent the now-disabled app boot.
+    let mut known_args = vec![sidecar_args(SidecarMode::Verse, None), sidecar_args(SidecarMode::Serve, None)];
+    if let Some(path) = remote_config_path().and_then(|path| path.to_str().map(str::to_owned)) {
+        known_args.push(sidecar_args(SidecarMode::Verse, Some(&path)));
+    }
+    let refs: Vec<Vec<&str>> = known_args.iter().map(|args| args.iter().map(String::as_str).collect()).collect();
+    let arg_sets: Vec<&[&str]> = refs.iter().map(Vec::as_slice).collect();
     let report = sidecar_supervisor::sweep_orphaned_sidecars(&bin, &arg_sets, None);
     for pid in &report.reaped {
         eprintln!("[ashlr-desktop] reaped an orphaned sidecar (pid {pid}) left by an earlier run");
@@ -978,8 +1040,9 @@ enum SpawnKind {
 ///      exchanges the read token for its cookie without a paste prompt.
 ///
 /// If the sidecar exits before printing the record (e.g. a CLI without the
-/// `verse` command), `Verse` falls back to `Serve` once; if that also fails the
-/// launch window explains why.
+/// `verse` command), `Verse` falls back to `Serve` once unless the phone
+/// gateway was explicitly opted in. An opted-in failure stays visible in the
+/// launch window; silently dropping its gateway would misstate remote access.
 ///
 /// Once a sidecar has served, an exit nobody asked for (see
 /// `AppState::live_generation`) goes to [`handle_unexpected_exit`], which
@@ -991,11 +1054,17 @@ fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64, kind
         mode.label()
     );
 
+    // Re-read on every spawn, including crash restarts. Removing the file and
+    // reopening the app disables remote access; a failed opt-in never falls
+    // back to the legacy `serve` mode without a gateway.
+    let remote_config = if mode == SidecarMode::Verse { enabled_remote_config_path() } else { None };
+    let args = sidecar_args(mode, remote_config.as_deref());
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut command = handle
         .shell()
         .sidecar("ashlr")
         .expect("ashlr sidecar not configured")
-        .args(mode.args());
+        .args(&arg_refs);
     match web_public_dir(&handle) {
         Some(public) => {
             eprintln!("[ashlr-desktop] serving web assets from {}", public.display());
@@ -1038,7 +1107,7 @@ fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64, kind
 
     // Record who owns this sidecar before anything else can go wrong, so a
     // crash from here on is repairable by the next launch.
-    sidecar_guard::record(pid, SERVE_PORT, mode.args());
+    sidecar_guard::record(pid, SERVE_PORT, &arg_refs);
 
     // Take a generation and store the child so we can kill it on exit
     // (replacing a previous one on fallback).
@@ -1231,7 +1300,7 @@ fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64, kind
                     }
                     if served.load(Ordering::SeqCst) || kind == SpawnKind::Restart {
                         handle_unexpected_exit(&handle, mode, attempt, generation, spawned_at.elapsed());
-                    } else if !ready.load(Ordering::SeqCst) && mode == SidecarMode::Verse {
+                    } else if !ready.load(Ordering::SeqCst) && fallback_to_serve(mode, remote_config.is_some()) {
                         eprintln!(
                             "[ashlr-desktop] `ashlr verse` unavailable in this build — falling back to `ashlr serve --allow-dispatch`"
                         );
@@ -1491,6 +1560,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir().join("ai.ashlr.desktop"));
     app.manage(voice::VoiceHub::new(app_data));
+    app.manage(computer::ComputerState::default());
 
     // ── menu bar ─────────────────────────────────────────────────────────────
     // Built before any window so ⌘C / ⌘V / ⌘Z work in the composer from the
@@ -1612,6 +1682,30 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     voice::init(&handle);
+    // ── fleet operations without Terminal (shell contract v1, fleet_ops.rs) ──
+    // Resident start / restart / stop and the custody install. Every raise is
+    // confirmed in a NATIVE dialog the page cannot answer; the work runs on
+    // fleet_ops' own thread, never on this event thread.
+    {
+        let handle = handle.clone();
+        app.listen(fleet_ops::FLEET_EVENT, move |event| {
+            fleet_ops::handle_event(&handle, event.payload());
+        });
+    }
+    // ── computer use (shell contract v1, computer.rs) ────────────────────────
+    // Same shape: parsed strictly here, handled in order on its own worker
+    // thread; resume / kill / arm apply at once. Native re-checks every grant.
+    {
+        let handle = handle.clone();
+        app.listen(computer::COMPUTER_EVENT, move |event| {
+            computer::handle_event(&handle, event.payload());
+        });
+    }
+    // Genuine operator input in a browser tab pauses the agent. One AppKit
+    // event monitor, installed here on the main thread; the agent's own
+    // synthesized input never passes through it (see browser_input.rs).
+    browser_input::install(&handle);
+
     if prefs.global_hotkey {
         let status = hotkey::apply(&handle, true);
         if let Some(state) = handle.try_state::<AppState>() {
@@ -1700,6 +1794,7 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             let app = tray.app_handle();
             if let Some(win) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                 if win.is_visible().unwrap_or(false) {
+                    computer::on_verse_window_gone(app);
                     let _ = win.hide();
                 } else {
                     let _ = win.show();
@@ -2141,6 +2236,7 @@ fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
             }
             api.prevent_close();
             browser_pane::hide_all(&handle);
+            computer::on_verse_window_gone(&handle);
             let _ = window.hide();
         }
         // Closing the launch window before the app ever came up means "give up".
@@ -2216,7 +2312,8 @@ fn main() {
         // Rust-only (see Cargo.toml): no window is granted `notification:*`.
         .plugin(tauri_plugin_notification::init())
         // Rust-only too; `hotkey::apply` registers ⌃⌥Space when Settings ▸
-        // Desktop turns it on. Key-up events are ignored (`is_summon_press`).
+        // Desktop turns it on, and `computer.rs` registers Esc only while its
+        // HUD shows. Key-up events are ignored (`is_summon_press`).
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -2227,6 +2324,9 @@ fn main() {
                         // both matter (hold = push-to-talk, tap = latch).
                         voice::on_hotkey(app, chord, event.state());
                     }
+                    // Esc while an agent drives the desktop = KILL (only
+                    // registered while the computer-use HUD is showing).
+                    computer::on_global_shortcut(app, shortcut, event.state());
                 })
                 .build(),
         )
@@ -2368,6 +2468,36 @@ mod tests {
     }
 
     #[test]
+    fn phone_gateway_is_opt_in_and_rechecked_on_restart() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("ashlr-remote-sidecar-{}-{nonce}", std::process::id()));
+        let config = remote_config_path_for(&home).expect("absolute test home");
+        std::fs::create_dir_all(config.parent().expect("config parent")).expect("create test dir");
+
+        let disabled = sidecar_args(SidecarMode::Verse, enabled_remote_config_path_at(&config).as_deref());
+        assert_eq!(disabled, sidecar_args(SidecarMode::Verse, None));
+        assert!(fallback_to_serve(SidecarMode::Verse, false));
+
+        std::fs::write(&config, b"{}").expect("create opt-in marker");
+        let enabled = sidecar_args(SidecarMode::Verse, enabled_remote_config_path_at(&config).as_deref());
+        assert_eq!(&enabled[..disabled.len()], &disabled[..]);
+        assert_eq!(enabled[disabled.len()], "--remote-config");
+        assert_eq!(enabled[disabled.len() + 1], config.to_str().expect("utf8 test path"));
+        assert_eq!(enabled[disabled.len() + 2], "--desktop-token-handoff");
+        assert_eq!(enabled, sidecar_args(SidecarMode::Verse, enabled_remote_config_path_at(&config).as_deref()), "restart re-reads opt-in");
+        assert!(!fallback_to_serve(SidecarMode::Verse, true), "invalid opted-in gateway cannot silently fall back");
+        assert_eq!(sidecar_args(SidecarMode::Serve, enabled_remote_config_path_at(&config).as_deref()), sidecar_args(SidecarMode::Serve, None));
+
+        std::fs::remove_file(&config).expect("disable gateway");
+        assert_eq!(sidecar_args(SidecarMode::Verse, enabled_remote_config_path_at(&config).as_deref()), disabled,
+            "reopen after removal returns to the default-off sidecar");
+        std::fs::remove_dir_all(home).expect("clean test dir");
+    }
+
+    #[test]
     fn the_startup_theme_prefers_what_the_ui_last_reported() {
         // Saved wins even when the OS disagrees — that is the white-flash case.
         assert_eq!(
@@ -2421,19 +2551,22 @@ mod tests {
     #[test]
     fn the_orphan_sweep_recognises_exactly_the_argument_lists_we_spawn() {
         let bin = "/Applications/Ashlr.app/Contents/MacOS/ashlr";
-        let arg_sets = [SidecarMode::Verse.args(), SidecarMode::Serve.args()];
-        for mode in [SidecarMode::Verse, SidecarMode::Serve] {
+        let remote = sidecar_args(SidecarMode::Verse, Some("/Users/mason/.ashlr/verse-remote.json"));
+        let remote_refs: Vec<&str> = remote.iter().map(String::as_str).collect();
+        let arg_sets = [SidecarMode::Verse.args(), SidecarMode::Serve.args(), remote_refs.as_slice()];
+        for args in arg_sets {
             let row = sidecar_supervisor::ProcInfo {
                 pid: 500,
                 ppid: 1,
                 started: "Wed Sep 23 21:22:29 2026".to_string(),
-                args: format!("{bin} {}", mode.args().join(" ")),
+                args: format!("{bin} {}", args.join(" ")),
             };
             assert!(
                 sidecar_supervisor::is_orphaned_sidecar(&row, bin, 42, &arg_sets),
-                "{:?} must be recognised as ours",
-                mode
+                "{} must be recognised as ours",
+                args.join(" ")
             );
+            assert_eq!(sidecar_guard::binary_path_from_argv(&row.args, args).as_deref(), Some(bin));
         }
     }
 

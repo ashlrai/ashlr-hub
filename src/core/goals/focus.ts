@@ -7,8 +7,8 @@
  * concrete active goal work is already available.
  */
 
-import { resolve } from 'node:path';
 import type { AshlrConfig, Goal, Milestone } from '../types.js';
+import { goalProjectMatchesRepo } from './project-match.js';
 
 export const DEFAULT_GOAL_FOCUS_ACTIVE_THRESHOLD = 4;
 
@@ -53,12 +53,10 @@ function goalMatchesScope(
 ): boolean {
   if (!goal.project) return false;
   try {
-    const project = resolve(goal.project);
-    if (opts?.repo) return project === resolve(opts.repo);
-    if (opts?.repos) {
-      const repoSet = new Set(opts.repos.map((repo) => resolve(repo)));
-      return repoSet.has(project);
-    }
+    const project = goal.project;
+    // Exact checkout, or the fleet mirror of the same GitHub repo (project-match.ts).
+    if (opts?.repo) return goalProjectMatchesRepo(project, opts.repo);
+    if (opts?.repos) return opts.repos.some((repo) => goalProjectMatchesRepo(project, repo));
     return true;
   } catch {
     return false;

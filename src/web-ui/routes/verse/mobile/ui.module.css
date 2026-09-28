@@ -1,0 +1,278 @@
+/*
+ * routes/verse/mobile/ui.module.css — the phone app's visual language.
+ *
+ * Type follows the phone's text size: the root takes the platform body font
+ * (-apple-system-body scales with iOS Dynamic Type) and everything inside is
+ * sized in em from it, so a larger reading size grows the whole app instead
+ * of truncating it. Colours, radii and motion are design/tokens.css tokens,
+ * so light, dark and the accent all follow the workbench.
+ *
+ * Rules every screen keeps (checked by mobile-overflow.test.ts):
+ *   - no horizontal scroll at 375px: nothing has a fixed width, long words
+ *     wrap (overflow-wrap: anywhere), code wraps instead of scrolling;
+ *   - every control is at least 44pt (2.75rem) tall and wide;
+ *   - motion is a short fade/slide and disappears under reduced motion.
+ */
+
+.app {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-size: 1.0625rem;
+  line-height: 1.35;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+  overflow-wrap: anywhere;
+}
+
+@supports (font: -apple-system-body) {
+  .app {
+    font: -apple-system-body;
+    font-family: var(--font-ui);
+  }
+}
+
+.app :is(button, a, input, textarea, select) {
+  font: inherit;
+}
+
+/* ---- screens ------------------------------------------------------------ */
+
+.screen {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.scroller {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 max(var(--space-4), env(safe-area-inset-right)) var(--space-6) max(var(--space-4), env(safe-area-inset-left));
+}
+
+.enter {
+  animation: screen-in var(--duration-slow) var(--ease-decelerate);
+}
+
+@keyframes screen-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.5rem);
+  }
+}
+
+.topbar {
+  position: relative;
+  z-index: var(--z-sticky);
+  display: grid;
+  grid-template-columns: minmax(2.75rem, 1fr) auto minmax(2.75rem, 1fr);
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 2.75rem;
+  padding: env(safe-area-inset-top) max(var(--space-2), env(safe-area-inset-right)) 0 max(var(--space-2), env(safe-area-inset-left));
+  background: color-mix(in srgb, var(--bg-canvas) 86%, transparent);
+  backdrop-filter: saturate(1.6) blur(18px);
+  -webkit-backdrop-filter: saturate(1.6) blur(18px);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.topbarTitle {
+  margin: 0;
+  font-size: 1em;
+  font-weight: var(--font-weight-semibold);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.topbarLead {
+  justify-self: start;
+  min-width: 0;
+}
+
+.topbarTrail {
+  justify-self: end;
+  display: flex;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.largeTitle {
+  margin: var(--space-4) 0 var(--space-3);
+  font-family: var(--font-display);
+  font-size: 1.9em;
+  line-height: 1.12;
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--tracking-display);
+}
+
+.subtitle {
+  margin: calc(var(--space-2) * -1) 0 var(--space-4);
+  color: var(--text-secondary);
+  font-size: 0.88em;
+}
+
+/* ---- pull to refresh ---------------------------------------------------- */
+
+.pull {
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 0.8em;
+  height: 0;
+}
+
+.pullArmed {
+  color: var(--accent-600);
+}
+
+.spinner {
+  width: 1.25em;
+  height: 1.25em;
+  border-radius: 50%;
+  border: 2px solid var(--border-default);
+  border-top-color: var(--accent-500);
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- buttons ------------------------------------------------------------ */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 2.75rem;
+  min-width: 2.75rem;
+  padding: 0 var(--space-5);
+  border-radius: var(--radius-full);
+  border: 1px solid transparent;
+  font-weight: var(--font-weight-semibold);
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform var(--duration-instant) var(--ease-standard), opacity var(--duration-fast) var(--ease-standard);
+  touch-action: manipulation;
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  transform: none;
+}
+
+.block {
+  width: 100%;
+}
+
+.primary {
+  background: var(--accent-500);
+  color: var(--text-on-accent);
+}
+
+.secondary {
+  background: var(--bg-surface-raised);
+  border-color: var(--border-default);
+  color: var(--text-primary);
+}
+
+.tinted {
+  background: var(--accent-50);
+  color: var(--accent-700);
+}
+
+.destructive {
+  background: var(--status-danger-solid);
+  color: var(--text-on-accent);
+}
+
+.destructiveTinted {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+
+.plain {
+  background: transparent;
+  color: var(--accent-600);
+  padding: 0 var(--space-3);
+}
+
+.iconBtn {
+  padding: 0;
+  width: 2.75rem;
+  background: transparent;
+  color: var(--accent-600);
+}
+
+
+
+/* ---- cards, skeletons, helpers --------------------------------------- */
+
+.group {
+  background: var(--bg-surface);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+}
+
+.card {
+  background: var(--bg-surface);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border-subtle);
+  padding: var(--space-4);
+  min-width: 0;
+}
+
+.skeletonRow {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+}
+
+.skeletonLine {
+  height: 0.8em;
+  border-radius: var(--radius-sm);
+}
+
+.muted {
+  color: var(--text-secondary);
+}
+
+
+
+
+
+/* ---- reduced motion ----------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) :is(.enter, .spinner, .btn) {
+    animation: none;
+    transition: none;
+  }
+}
+
+:root[data-motion='reduce'] :is(.enter, .spinner, .btn) {
+  animation: none;
+  transition: none;
+}

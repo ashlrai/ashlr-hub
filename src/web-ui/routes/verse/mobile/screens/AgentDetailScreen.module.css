@@ -1,0 +1,352 @@
+/*
+ * routes/verse/mobile/screens/AgentDetailScreen.module.css — one agent on a
+ * phone: the header's seat line and Transcript | Changes switch, the compact
+ * transcript (bubbles, one-line tool chips, system lines, the typing line,
+ * "Jump to latest"), and the read-only diff.
+ *
+ * Nothing scrolls sideways: code, tool output and diff lines wrap
+ * (pre-wrap + break-word). One-line chips clip with an ellipsis instead.
+ */
+
+/* ---- header ---------------------------------------------------------------- */
+
+.header {
+  flex: none;
+  display: grid;
+  gap: var(--space-2);
+  padding: 0 max(var(--space-4), env(safe-area-inset-right)) var(--space-2) max(var(--space-4), env(safe-area-inset-left));
+}
+
+.header > * {
+  margin: 0;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 0.85em;
+}
+
+.who {
+  min-width: 0;
+}
+
+.segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-raised);
+  border: 1px solid var(--border-subtle);
+}
+
+.segment {
+  min-height: 2.75rem;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+}
+
+.segment[aria-pressed='true'] {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  box-shadow: 0 0 0 1px var(--border-default);
+}
+
+/* ---- transcript ------------------------------------------------------------- */
+
+.log {
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  min-width: 0;
+}
+
+.userRow {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.userBubble {
+  max-width: 85%;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-xl);
+  background: var(--accent-500);
+  color: var(--text-on-accent);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.assistant {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.prose {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.code,
+.output {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--bg-code);
+  border: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: 0.8em;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: hidden;
+}
+
+.output[data-error] {
+  border-color: var(--status-danger-solid);
+}
+
+.tool {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.toolChip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  justify-self: start;
+  max-width: 100%;
+  min-height: 2.75rem;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 0.85em;
+  text-align: left;
+  cursor: pointer;
+}
+
+.toolChip[data-state='error'] {
+  border-color: var(--status-danger-solid);
+  color: var(--status-danger-fg);
+}
+
+.toolChip[aria-expanded='true'] {
+  border-color: var(--border-default);
+  color: var(--text-primary);
+}
+
+.toolText {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+}
+
+.toolState {
+  flex: none;
+  color: var(--text-tertiary);
+  font-size: 0.9em;
+}
+
+.thinkingChip .toolText {
+  font-family: inherit;
+  font-style: italic;
+}
+
+.thinkingText {
+  margin: 0;
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--border-default);
+  color: var(--text-secondary);
+  font-size: 0.9em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.system {
+  margin: 0;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 0.8em;
+}
+
+.system[data-tone='danger'] {
+  color: var(--status-danger-fg);
+}
+
+.system[data-tone='info'] {
+  color: var(--status-info-fg);
+}
+
+.link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: var(--text-link);
+}
+
+.note {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.8em;
+}
+
+.typing {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--status-running-fg);
+  font-size: 0.85em;
+}
+
+.jumpWrap {
+  position: sticky;
+  bottom: var(--space-3);
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.jump {
+  pointer-events: auto;
+  box-shadow: 0 0.25rem 0.75rem color-mix(in srgb, var(--text-primary) 18%, transparent);
+}
+
+.modeChip {
+  flex: 1 1 0;
+}
+
+/* ---- changes --------------------------------------------------------------- */
+
+.changes {
+  padding-top: var(--space-3);
+  min-width: 0;
+}
+
+.summary {
+  margin: 0 var(--space-2) var(--space-3);
+  color: var(--text-secondary);
+  font-weight: var(--font-weight-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.rootName {
+  font-family: var(--font-display);
+  margin: 0 var(--space-2) var(--space-2);
+  color: var(--text-secondary);
+  font-size: 0.8em;
+  font-weight: var(--font-weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+}
+
+.fileBlock {
+  display: grid;
+  min-width: 0;
+}
+
+.fileBlock + .fileBlock {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.fileRow {
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.fileStatus {
+  flex: none;
+  min-width: 1.6em;
+  text-align: center;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 0.8em;
+  font-weight: var(--font-weight-semibold);
+  background: var(--status-neutral-bg);
+  color: var(--status-neutral-fg);
+}
+
+.fileStatus[data-status='A'] { background: var(--status-success-bg); color: var(--status-success-fg); }
+.fileStatus[data-status='D'] { background: var(--status-danger-bg); color: var(--status-danger-fg); }
+.fileStatus[data-status='R'] { background: var(--status-info-bg); color: var(--status-info-fg); }
+
+.filePath {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  word-break: break-word;
+}
+
+.fileCounts {
+  flex: none;
+  font-size: 0.8em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+.add {
+  color: var(--status-success-fg);
+}
+
+.del {
+  color: var(--status-danger-fg);
+}
+
+.patch {
+  margin: 0 var(--space-3) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-code);
+  overflow-x: hidden;
+  font-family: var(--font-mono);
+  font-size: 0.75em;
+  line-height: 1.45;
+}
+
+.line {
+  padding: 0 var(--space-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-width: 0;
+}
+
+.line[data-kind='add'] {
+  background: var(--status-success-bg);
+  color: var(--status-success-fg);
+}
+
+.line[data-kind='del'] {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+
+.line[data-kind='hunk'] {
+  color: var(--text-tertiary);
+  background: var(--status-neutral-bg);
+}
+
+.line[data-kind='meta'] {
+  color: var(--text-tertiary);
+}
+
+.fileBlock > .note {
+  margin: 0 var(--space-4) var(--space-3);
+}

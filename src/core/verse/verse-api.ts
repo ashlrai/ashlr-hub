@@ -52,8 +52,9 @@
  *   /api/verse/{overnight,fleet/live}*  → overnight-api.ts, fleet-live-api.ts (B-U5)
  *   /api/verse/leader*    → leader-api.ts (B-U8)   /api/verse/learning* → learning-api.ts (B-U9)
  *   /api/verse/wiki*      → wiki-api.ts (3.15)     /api/verse/browser*  → browser-api.ts (3.15)
- *  (`/api/verse/browser/mcp/<grant>` is the one POST that skips the token
- *  gate: a chat seat calls it, authenticated by its per-chat grant.)
+ *  (`/api/verse/agent-tools/mcp` is the live seat POST authenticated by its
+ *  per-turn bearer token; the retired browser grant path only answers 410.)
+ *   /api/verse/agent-tools* → verse-mcp-api.ts (3.15 agent tools)
  *   /api/verse/multimodel* → multimodel-api.ts (3.16: Auto seat, compare, escalation, meter)
  *  Routed by PREFIX to exactly one family (dispatchWorkbenchModules), after
  *  every V1 route, with the same non-GET gate. They land at different times:
@@ -94,6 +95,8 @@ import { isAbsolute, join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
 import { notifyVerseSessionsChanged, passesMutationGate, readBody, sendJson } from '../web/api.js';
 import { isBrowserMcpPath } from './browser-types.js';
+import { forgetAgentToolsChat, revokeVerseMcpTurn, verseMcpMintSeq, verseMcpTurnActive } from './verse-mcp-grants.js';
+import { isVerseMcpEndpointPath } from './verse-mcp-types.js';
 import { sanitizePublicJson } from '../util/public-json.js';
 import { budgetFor, canonicalModelId, hasExpansiveMode } from './context-math.js';
 import { estimateContextFit } from './context-fit.js';
@@ -156,6 +159,7 @@ import { handleVerseEventsSse, VERSE_EVENTS_PATH_RE, VERSE_SESSION_ID_RE } from 
 import type { ApiModule } from './api-modules.js';
 import { REASONING_API_PREFIX } from '../reasoning/types.js';
 import {
+  VERSE_TERMINAL_AGENT_STATE_PATH_RE,
   WORKBENCH_ROUTE_FAMILIES,
   workbenchFamilyFor,
   type WorkbenchRouteFamilyId,
@@ -415,6 +419,9 @@ const WORKBENCH_IMPORTS: Readonly<Record<WorkbenchRouteFamilyId, () => Promise<W
   'fleet-live': async () => {
     try { return (await import('./fleet-live-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'fleet-live-api.js'); }
   },
+  'fleet-control': async () => {
+    try { return (await import('./fleet-control-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'fleet-control-api.js'); }
+  },
   leader: async () => {
     try { return (await import('./leader-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'leader-api.js'); }
   },
@@ -433,6 +440,12 @@ const WORKBENCH_IMPORTS: Readonly<Record<WorkbenchRouteFamilyId, () => Promise<W
   browser: async () => {
     try { return (await import('./browser-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'browser-api.js'); }
   },
+  'agent-tools': async () => {
+    try { return (await import('./verse-mcp-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'verse-mcp-api.js'); }
+  },
+  computer: async () => {
+    try { return (await import('./computer-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'computer-api.js'); }
+  },
   multimodel: async () => {
     try { return (await import('./multimodel-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'multimodel-api.js'); }
   },
@@ -441,6 +454,9 @@ const WORKBENCH_IMPORTS: Readonly<Record<WorkbenchRouteFamilyId, () => Promise<W
   },
   sources: async () => {
     try { return (await import('./sources-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'sources-api.js'); }
+  },
+  agents: async () => {
+    try { return (await import('./agents-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'agents-api.js'); }
   },
 };
 
@@ -525,13 +541,17 @@ async function dispatchWorkbenchModules(
       sendJson(res, 404, { error: `not found: ${method} ${path}` });
       return true;
     }
-    // ONE exception to the token gate (3.15): the Browser pane's per-chat MCP
-    // endpoint, `/api/verse/browser/mcp/<grant>`. Its caller is a chat seat
-    // (a CLI), which never holds the operator's mutation token; the route
-    // authenticates the 32-byte grant in its path itself and refuses any
-    // request that carries a browser Origin (browser-api.ts handleMcp).
-    // Keyed on the exact path shape, so no other browser route is exempt.
-    if (!isBrowserMcpPath(path) && !passesMutationGate(req, res, ctx.token)) return true;
+    // The retired Browser grant path is exempt only so it can answer 410 to
+    // old clients. It never reads a grant, parses a body or queues a command.
+    // Verse's one live MCP server, exactly
+    // `/api/verse/agent-tools/mcp`: a seat's endpoint, authenticated by the
+    // turn's bearer token (verse-mcp-api.ts handleEndpoint), Origin refused.
+    // And ONE more of the same kind (3.15): a terminal agent tab's status
+    // callback, `/api/verse/terminal/<tab>/agent-state`. Its caller is the
+    // per-launch hook a CLI agent (Claude Code, Codex) runs in that tab — it
+    // never holds the mutation token; the route checks the tab's own random
+    // token (constant time) and refuses a browser Origin (terminal-api.ts).
+    if (!isBrowserMcpPath(path) && !isVerseMcpEndpointPath(path) && !VERSE_TERMINAL_AGENT_STATE_PATH_RE.test(path) && !passesMutationGate(req, res, ctx.token)) return true;
   }
   const entry = workbenchModules.find((m) => m.id === family.id);
   const loaded: WorkbenchLoad = entry ? await loadWorkbenchModule(entry) : { state: 'not-landed' };
@@ -575,18 +595,47 @@ export function peekVerseEngine(): VerseEngineHandle | null {
  * also revokes its Browser-pane grant, with or without checkpoints.
  */
 export function verseTurnHooks(env: NodeJS.ProcessEnv = process.env): VerseTurnHooks {
-  // A deleted chat also loses its Browser-pane grant (browser-bridge.ts), whatever the
-  // checkpoint setting: the grant is the MCP endpoint's only credential.
-  const forgetBrowser = async (sessionId: string) => { (await import('./browser-bridge.js')).forgetBrowserChat(sessionId); };
+  // A deleted chat also loses its Browser-pane grant (browser-bridge.ts) and
+  // its agent-tools grant, whatever the checkpoint setting: they are the MCP
+  // endpoints' only credentials.
+  const forgetBrowser = async (sessionId: string) => {
+    (await import('./browser-bridge.js')).forgetBrowserChat(sessionId);
+    forgetAgentToolsChat(sessionId);
+    await (await import('./verse-mcp-launch.js')).removeVerseMcpTurnFiles(sessionId);
+  };
+  // 3.15 agent tools: every turn end — clean, failed, stopped — revokes the
+  // turn's MCP token and removes its private launch files. The mint counter is
+  // read before anything is awaited: a queued follow-up that starts meanwhile
+  // mints a newer token, which this must not revoke.
+  const endTurnTools = async (sessionId: string) => {
+    const mintedUpTo = verseMcpMintSeq();
+    revokeVerseMcpTurn(sessionId, 'The turn ended.', { mintedUpTo });
+    if (verseMcpTurnActive(sessionId)) return;
+    await (await import('./verse-mcp-launch.js')).removeVerseMcpTurnFiles(sessionId);
+  };
+  // Desktop control (computer-bridge.ts): a deleted chat loses its app grants,
+  // and every turn END clears the "this turn read untrusted content" mark.
+  // afterTurn, not beforeTurn: a beforeTurn hook makes the engine gate every
+  // spawn on it, which only the checkpoint service should do.
+  const forgetComputer = async (sessionId: string) => { (await import('./computer-bridge.js')).forgetComputerChat(sessionId); };
+  const endComputerTurn = async (sessionId: string) => { (await import('./computer-bridge.js')).endComputerTurn(sessionId); };
   if (env['ASHLR_VERSE_CHECKPOINTS'] === '0') {
-    return { onSessionDeleted: async (info) => { await forgetBrowser(info.sessionId); } };
+    return {
+      afterTurn: async (info) => { await endTurnTools(info.sessionId); await endComputerTurn(info.sessionId); },
+      onSessionDeleted: async (info) => { await forgetBrowser(info.sessionId); await forgetComputer(info.sessionId); },
+    };
   }
   const service = async () => (await import('./checkpoint-service.js')).getCheckpointService();
   return {
     beforeTurn: async (info) => { await (await service()).beforeTurn(info); },
-    afterTurn: async (info) => { await (await service()).afterTurn(info); },
+    afterTurn: async (info) => {
+      await endTurnTools(info.sessionId);
+      await endComputerTurn(info.sessionId);
+      await (await service()).afterTurn(info);
+    },
     onSessionDeleted: async (info) => {
       await forgetBrowser(info.sessionId);
+      await forgetComputer(info.sessionId);
       await (await service()).forgetChat(info.sessionId, info.roots);
     },
   };
@@ -2196,6 +2245,14 @@ export async function handleVerseApi(
         // The CLI is spawned with the primary root as its cwd (and granted
         // the rest): never inside a pending privacy prompt (rootsSettled).
         if (current && !(await rootsSettled(res, verseSessionRoots(current)))) return true;
+        // 3.16: an agent at its spend cap takes no further turn until the cap
+        // is raised on the Agents board (agents-api.ts). A missing module never blocks a chat.
+        let capRefusal: string | null = null;
+        try { capRefusal = await (await import('./agents-api.js' as string) as typeof import('./agents-api.js')).agentSpendCapRefusal(id); } catch { capRefusal = null; }
+        if (capRefusal) {
+          sendJson(res, 409, { code: 'AGENT_SPEND_CAP', error: capRefusal });
+          return true;
+        }
         const result: VerseTurnResponse = engine.sendTurn(id, text);
         sendJson(res, 202, result);
         return true;

@@ -128,7 +128,13 @@ const mirrors = (): CloudIntakeMirror[] => [{ nameWithOwner: REPO, path: mirrorP
 describe('Devin family and G6', () => {
   it('devin:<mode> is family `devin` — never unknown, never claude', () => {
     for (const mode of ['normal', 'fast', 'lite', 'ultra']) expect(producerModelFamily(`devin:${mode}`)).toBe('devin');
-    expect(producerModelFamily('devin:claude-opus-4-8')).toBe('unknown'); // a contradicting suffix fails closed
+    // 3.15 elite self-land: Devin HOSTS other vendors' models (SWE-2, GPT-6,
+    // Claude), so a vendor-named suffix keeps the family `devin` — with its
+    // two-judge rule and the "Devin must be signed in" merge lock — instead
+    // of turning into `unknown` (which no Devin-specific rule would cover).
+    expect(producerModelFamily('devin:claude-opus-4-8')).toBe('devin');
+    expect(producerModelFamily('devin-cli:gpt-6-sol')).toBe('devin');
+    expect(producerModelFamily('devin-cli:swe-2-high')).toBe('devin');
   });
 
   it('a frontier judge of another family is eligible; Devin never judges; a same-family judge never exists', () => {

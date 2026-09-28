@@ -105,7 +105,7 @@ export interface WorkbenchCommand {
    * so the shell brings it forward and parks the command until the surface
    * registers its handler (run-command.ts). The palette says where it runs.
    */
-  surface?: 'command' | 'mind';
+  surface?: 'command' | 'mind' | 'fleet';
 }
 
 /** A keyed row's id, scope, keys and native binding — from command-keys.ts, never re-declared here. */
@@ -141,7 +141,7 @@ export const AUTONOMY_SETUP_COMMAND = 'ashlr authority setup';
  * A palette-only App action (no key) — shared shape of the autonomy, grant,
  * budget and setup entries below.
  */
-const appAction = (id: string, title: string, keywords: readonly string[], surface?: 'command'): WorkbenchCommand => ({
+const appAction = (id: string, title: string, keywords: readonly string[], surface?: 'command' | 'fleet'): WorkbenchCommand => ({
   id,
   title,
   scope: 'global',
@@ -179,6 +179,7 @@ export const WORKBENCH_COMMANDS = [
   surface('surface.growth', 'Growth'),
   surface('surface.mind', 'Mind'),
   surface('surface.chat', 'Chat'),
+  surface('surface.agents', 'Agents'),
   { ...bind('section.settings'), title: 'Open Settings', group: 'go-to', section: 'Surfaces', keywords: ['preferences', 'appearance'] },
   { id: 'section.apps', title: 'Open Apps & Accounts', scope: 'global', keys: [], group: 'go-to', section: 'Surfaces', keywords: ['mcp', 'accounts', 'seats', 'integrations', 'ollama'] },
   { id: 'section.usage', title: 'Open Usage', scope: 'global', keys: [], group: 'go-to', section: 'Surfaces', keywords: ['capacity', 'spend', 'limits'] },
@@ -228,6 +229,24 @@ export const WORKBENCH_COMMANDS = [
     argument: { kind: 'seat', prompt: 'Seat' },
     keywords: ['seat', 'account', 'engine'],
   },
+  // ── Agents (3.16): the board serves these; ⌘N on the board is "New agent" ──
+  {
+    id: 'agents.new',
+    title: 'New agent in its own workspace…',
+    scope: 'global',
+    keys: [],
+    group: 'actions',
+    section: 'Chat',
+    note: '⌘N on the Agents board',
+    keywords: ['agent', 'worktree', 'workspace', 'branch', 'parallel', 'background', 'conductor'],
+  },
+  {
+    ...bind('agents.new-multi'),
+    title: 'Same task on several seats…',
+    group: 'actions',
+    section: 'Chat',
+    keywords: ['agents', 'best of n', 'fan out', 'parallel', 'worktrees', 'compare', 'race'],
+  },
   { ...bind('chat.sidebar'), title: 'Show or hide the chat list', group: 'actions', section: 'Chat' },
   { ...bind('chat.find'), title: 'Find in chat', group: 'actions', section: 'Chat', keywords: ['search'] },
   { ...bind('chat.turn-prev'), title: 'Previous turn', group: null, section: 'Chat' },
@@ -257,6 +276,9 @@ export const WORKBENCH_COMMANDS = [
   { id: 'dock.placement', title: 'Move the panel (beside or below the chat)', scope: 'chat', keys: [], group: 'actions', section: 'Dock', keywords: ['bottom', 'right', 'layout', 'dock position'] },
   { ...bind('dock.terminal'), title: 'Terminal', group: 'actions', section: 'Dock', keywords: ['shell', 'console'] },
   { ...bind('dock.terminal-new'), title: 'New terminal tab', group: 'actions', section: 'Dock' },
+  // 3.15: the terminal's input editor. Plain words → a command the operator reviews (never run on its own).
+  { id: 'terminal.generate', title: 'Generate command…', scope: 'chat', keys: [], group: 'actions', section: 'Dock', keywords: ['terminal', 'shell', 'command', 'plain english', 'natural language', 'ai', 'bash', 'how do i'] },
+  { id: 'terminal.history', title: 'Search terminal history…', scope: 'chat', keys: [], group: 'actions', section: 'Dock', keywords: ['terminal', 'shell', 'history', 'ctrl r', 'reverse search', 'previous command'] },
   { ...bind('dock.preview'), title: 'Browser', group: 'actions', section: 'Dock', keywords: ['preview', 'dev server', 'localhost', 'web'] },
   { ...bind('dock.diff'), title: 'Changes', group: 'actions', section: 'Dock', keywords: ['diff', 'git', 'review'] },
   { ...bind('dock.files'), title: 'Files', group: 'actions', section: 'Dock', keywords: ['explorer', 'tree', 'touched'] },
@@ -291,6 +313,19 @@ export const WORKBENCH_COMMANDS = [
   { ...bind('appearance.toggle-theme'), title: 'Toggle light / dark', group: 'actions', section: 'App', keywords: ['theme', 'dark mode'] },
   { ...bind('app.summon'), title: 'Show Verse and focus the composer', group: null, section: 'App', note: 'system-wide; turn on in Settings ▸ Desktop' },
   { id: 'fleet.stop', title: 'Stop the fleet…', scope: 'global', keys: [], group: 'actions', section: 'App', guard: STOP_FLEET_GUARD, keywords: ['kill', 'halt', 'autonomy'] },
+  // ── The fleet's control surface (3.15; the Fleet tab serves these) ──────
+  // Start confirms on the Fleet tab (it clears Stop, resumes and raises the
+  // switch within the grant); the resident daemon and the custody helper
+  // run through the desktop app's native confirm dialog.
+  { ...bind('fleet.start'), title: 'Start the fleet…', group: 'actions', section: 'App', surface: 'fleet', keywords: ['run', 'go', 'turn on', 'autonomy', 'daemon'] },
+  { ...bind('fleet.pause'), title: 'Pause the fleet', group: 'actions', section: 'App', surface: 'fleet', keywords: ['hold', 'finish in-flight', 'dispatch', 'autonomy'], note: 'runs in flight finish; nothing new starts' },
+  { ...bind('fleet.resume'), title: 'Resume the fleet', group: 'actions', section: 'App', surface: 'fleet', keywords: ['continue', 'unpause', 'dispatch', 'autonomy'] },
+  // The key for Stop: the Fleet tab's own confirmation (same words as the
+  // guarded palette row above), so it is never one keystroke either.
+  { ...bind('fleet.halt'), title: 'Stop the fleet (asks first)', group: null, section: 'App', surface: 'fleet' },
+  appAction('fleet.restart-daemon', 'Restart the fleet daemon…', ['resident', 'launchd', 'service', 'reload', 'new release', 'daemon'], 'fleet'),
+  appAction('fleet.edit-grant', 'Edit the grant scope…', ['grant scope', 'repos', 'engines', 'leader classes', 'caps', 'narrow', 'widen'], 'fleet'),
+  appAction('fleet.install-custody', 'Install the custody helper…', ['custody', 'sudo', 'admin', 'secure enclave', 'upgrade', 'helper'], 'fleet'),
 
   // ── Autonomy (Command's AutonomyBar serves these) ────────────────────────
   // No keys on purpose: raising authority is never one keystroke away, and
@@ -320,6 +355,16 @@ export const WORKBENCH_COMMANDS = [
   // Served by the shell (run-command.ts → playbooks/playbook-focus.ts): opens
   // Playbooks in "pick one to run" mode; Run… writes its !macro into the chat.
   { id: 'playbook.run', title: 'Run playbook…', scope: 'global', keys: [], group: 'actions', section: 'App', keywords: ['playbook', 'macro', 'template', 'run', 'fix bug', 'bump deps', 'add tests', 'docs sync', 'security fix'] },
+  // Command workflows (kind: command playbooks): fill a command's {{params}}
+  // and PASTE it at a terminal prompt — never run. The terminal panel serves
+  // it with its picker (CommandWorkflowPicker) when it is mounted; otherwise
+  // the shell's fallback (run-command.ts) opens Playbooks narrowed to them.
+  { id: 'terminal.workflows', title: 'Run command workflow…', scope: 'global', keys: [], group: 'actions', section: 'Dock', keywords: ['command workflow', 'workflow', 'terminal', 'shell', 'command', 'snippet', 'template', 'paste', 'params', 'playbook'] },
+  // Launch configurations (.ashlr/verse/launch.json): named terminal layouts —
+  // tabs, splits, cwd, commands. The terminal panel serves it (its dialog);
+  // the shell's fallback opens the Terminal pane with the dialog requested.
+  // The dialog shows every command; nothing is typed until one is launched.
+  { id: 'terminal.launch', title: 'Launch terminal configuration…', scope: 'global', keys: [], group: 'actions', section: 'Dock', keywords: ['launch', 'launch.json', 'layout', 'terminal', 'dev server', 'test watcher', 'tabs', 'splits', 'claude code'] },
   // ── Automations (3.15) ─────────────────────────────────────────────────
   // Served by the shell (run-command.ts → automations/automations-focus.ts).
   { id: 'automations.new', title: 'New automation…', scope: 'global', keys: [], group: 'actions', section: 'App', keywords: ['automation', 'trigger', 'schedule', 'nightly', 'weekly', 'webhook', 'issues labeled', 'fix red main', 'rrule'] },

@@ -3,6 +3,8 @@
  *
  * Usage:
  *   ashlr verse [--port N] [--no-open] [--json]
+ *   ashlr verse --remote-config <private-json-file>  (explicit phone gateway)
+ *   ashlr verse remote <invite|pending|approve|deny|revoke|devices>
  *
  * This is `ashlr serve` with dispatch forced ON (Verse sessions are
  * mutations: they spawn vendor CLIs that edit the chosen project), serving
@@ -60,6 +62,9 @@ export interface VerseOptions {
   accountsPollSeconds: number;
   /** Suspend polling after this many minutes with no client interest. */
   accountsIdleMinutes: number;
+  remoteConfig: string | null;
+  /** Private startup-token handshake for the native app's own sidecar. */
+  desktopTokenHandoff: boolean;
 }
 
 /** The existing collector cadence, in seconds. */
@@ -73,6 +78,8 @@ export function parseVerseArgs(args: string[]): VerseOptions | { error: string; 
   let accounts = true;
   let accountsPollSeconds = VERSE_DEFAULT_ACCOUNTS_POLL_SECONDS;
   let accountsIdleMinutes = VERSE_DEFAULT_ACCOUNTS_IDLE_MINUTES;
+  let remoteConfig: string | null = null;
+  let desktopTokenHandoff = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -104,6 +111,14 @@ export function parseVerseArgs(args: string[]): VerseOptions | { error: string; 
     } else if (arg === '--no-open') {
       open = false;
 
+    } else if (arg === '--remote-config') {
+      const path = args[++i];
+      if (!path || path.startsWith('-')) return { error: '--remote-config requires a private JSON file path', code: 2 };
+      remoteConfig = path;
+
+    } else if (arg === '--desktop-token-handoff') {
+      desktopTokenHandoff = true;
+
     } else if (arg === '--open' || arg === '-o') {
       open = true;
 
@@ -118,7 +133,20 @@ export function parseVerseArgs(args: string[]): VerseOptions | { error: string; 
     }
   }
 
-  return { port, open, json, accounts, accountsPollSeconds, accountsIdleMinutes };
+  if (desktopTokenHandoff && (!json || !remoteConfig)) {
+    return { error: '--desktop-token-handoff requires --json and --remote-config', code: 2 };
+  }
+  return { port, open, json, accounts, accountsPollSeconds, accountsIdleMinutes, remoteConfig, desktopTokenHandoff };
+}
+
+/** Remote service logs omit Hub tokens; only the native app's private stdout
+ * handshake may receive them when it owns both the desktop and phone gateway. */
+export function verseStartupTokenFields(remote: boolean, desktopTokenHandoff: boolean,
+  tokens: { readToken: string; token: string }) {
+  return remote && !desktopTokenHandoff ? {} : {
+    readToken: tokens.readToken, readTokenHeader: 'X-Ashlr-Token',
+    token: tokens.token, tokenHeader: 'X-Ashlr-Token',
+  };
 }
 
 export function verseUrlFor(baseUrl: string): string {
@@ -277,6 +305,10 @@ export async function startVerseBackgroundServices(
 // ---------------------------------------------------------------------------
 
 export async function cmdVerse(args: string[]): Promise<number> {
+  if (args[0] === 'remote') {
+    const { cmdVerseRemote } = await import('./verse-remote.js');
+    return cmdVerseRemote(args.slice(1));
+  }
   const parsed = parseVerseArgs(args);
 
   if ('error' in parsed) {
@@ -289,7 +321,7 @@ export async function cmdVerse(args: string[]): Promise<number> {
     return parsed.code;
   }
 
-  const { port, open, json, accounts, accountsPollSeconds, accountsIdleMinutes } = parsed;
+  const { port, open, json, accounts, accountsPollSeconds, accountsIdleMinutes, remoteConfig, desktopTokenHandoff } = parsed;
 
   let loadConfig: Awaited<ReturnType<typeof importLoadConfig>>;
   try {
@@ -317,6 +349,18 @@ export async function cmdVerse(args: string[]): Promise<number> {
   } catch (err) {
     console.error(red('error: ') + 'Failed to start server: ' + String(err));
     return 1;
+  }
+
+  let remote: Awaited<ReturnType<typeof import('../core/web/remote-runtime.js')['startRemoteRuntime']>> | null = null;
+  if (remoteConfig) {
+    try {
+      const { startRemoteRuntime } = await import('../core/web/remote-runtime.js');
+      remote = await startRemoteRuntime(remoteConfig, handle);
+    } catch (error) {
+      console.error(red('error: ') + 'Remote gateway could not start: ' + String(error));
+      await handle.close();
+      return 1;
+    }
   }
 
   const verseUrl = verseUrlFor(handle.url);
@@ -409,12 +453,11 @@ export async function cmdVerse(args: string[]): Promise<number> {
       consoleUrl: `${handle.url}/next/`,
       port: handle.port,
       allowDispatch,
-      readToken: handle.readToken,
-      readTokenHeader: 'X-Ashlr-Token',
-      token: handle.token,
-      tokenHeader: 'X-Ashlr-Token',
+      ...verseStartupTokenFields(remote !== null, desktopTokenHandoff, handle),
       accountTelemetry: accounts,
       accountTelemetryNote: collectorBanner,
+      remoteGateway: remote ? { url: remote.gateway.url, publicOrigin: remote.publicOrigin,
+        operatorSocket: remote.admin.path } : null,
     };
     console.log(JSON.stringify(out));
   } else {
@@ -425,16 +468,27 @@ export async function cmdVerse(args: string[]): Promise<number> {
     console.log(`  ${dim('Bound to 127.0.0.1 only — not externally reachable.')}`);
     console.log('');
 
-    console.log(`  ${dim('Read token')}  ${bold(handle.readToken)}`);
-    console.log(`  ${dim('Read header:')} X-Ashlr-Token: ${handle.readToken}`);
-    console.log(`  ${dim('The browser exchanges it for a short-lived, read-only HttpOnly cookie.')}`);
+    if (remote) {
+      console.log(`  ${dim('Local Hub credentials are withheld from remote service output.')}`);
+    } else {
+      console.log(`  ${dim('Read token')}  ${bold(handle.readToken)}`);
+      console.log(`  ${dim('Read header:')} X-Ashlr-Token: ${handle.readToken}`);
+      console.log(`  ${dim('The browser exchanges it for a short-lived, read-only HttpOnly cookie.')}`);
+      console.log('');
+      console.log(`  ${yellow('⚠')}  ${bold('Dispatch enabled')} ${gray('(always on for Verse — sessions edit the chosen project)')}`);
+      console.log(`  ${dim('Mutation token')}  ${bold(handle.token)}`);
+      console.log(`  ${dim('Mutations require this separate token; the read token and cookie cannot mutate.')}`);
+      console.log(`  ${dim('Never share either token or expose the server to other hosts.')}`);
+    }
     console.log('');
 
-    console.log(`  ${yellow('⚠')}  ${bold('Dispatch enabled')} ${gray('(always on for Verse — sessions edit the chosen project)')}`);
-    console.log(`  ${dim('Mutation token')}  ${bold(handle.token)}`);
-    console.log(`  ${dim('Mutations require this separate token; the read token and cookie cannot mutate.')}`);
-    console.log(`  ${dim('Never share either token or expose the server to other hosts.')}`);
-    console.log('');
+    if (remote) {
+      console.log(`  ${green('✓')} Phone gateway on ${cyan(remote.gateway.url)} (loopback only)`);
+      console.log(`  ${dim('Public Access origin:')} ${remote.publicOrigin}`);
+      console.log(`  ${dim('Mac operator commands:')} ashlr verse remote pending | invite | approve | revoke`);
+      console.log(`  ${dim('Tunnel and DNS require separate provisioning; this listener is not public by itself.')}`);
+      console.log('');
+    }
 
     if (collectorBanner) {
       console.log(`  ${dim('Account telemetry')}  ${gray(collectorBanner)}`);
@@ -477,6 +531,7 @@ export async function cmdVerse(args: string[]): Promise<number> {
         // `uncertain`. That is logged inside the collector; exit cleanly.
       }
       try {
+        if (remote) await remote.close();
         await handle.close();
       } catch {
         // ignore close errors on shutdown
@@ -511,6 +566,8 @@ function printUsage(): void {
   console.log(`    ${cyan('--port N')}     TCP port to bind on 127.0.0.1 (default ${DEFAULT_PORT})`);
   console.log(`    ${cyan('--no-open')}    Do not open the browser automatically`);
   console.log(`    ${cyan('--json')}       Print startup info (url, verseUrl, tokens) as JSON`);
+  console.log(`    ${cyan('--remote-config FILE')}  Start separate loopback phone gateway with private Access config`);
+  console.log(`    ${cyan('remote <command>')}  Mac-only invite, inspect, approve, deny, or revoke phone devices`);
   console.log(`    ${cyan('--no-accounts')}      Do not run the native account-metadata collectors`);
   console.log(`    ${cyan('--accounts-poll S')}  Collector cadence in seconds (30-3600, default ${VERSE_DEFAULT_ACCOUNTS_POLL_SECONDS})`);
   console.log(`    ${cyan('--accounts-idle M')}  Pause polling after M idle minutes (1-720, default ${VERSE_DEFAULT_ACCOUNTS_IDLE_MINUTES})`);

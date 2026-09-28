@@ -9,13 +9,18 @@
  * describes the task and picks where it runs: sent in the chat (any seat
  * expands it — session-engine.ts), Run in cloud, Run in Devin, ….
  *
+ * Command workflows (`kind: command`) live here too, badged "Command": a
+ * shell command with `{{param}}` holes. Their "Use…" opens a small form
+ * (CommandWorkflowForm) and pastes the filled command into the open chat's
+ * Terminal pane — pasted at the prompt, never run.
+ *
  * Editing never rewrites: Save writes the next version (the server refuses
  * if someone saved in between). Viewing an older version and choosing
  * "Edit from vN" is how a version is restored — as a new one.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { parsePlaybook, playbookTemplate } from '../../../../core/playbooks/parse.js';
-import type { PlaybookDetailResponse, PlaybookSummary, PlaybookValidationIssue } from '../../../../core/playbooks/types.js';
+import { playbookKindOf, type PlaybookDetailResponse, type PlaybookKind, type PlaybookSummary, type PlaybookValidationIssue } from '../../../../core/playbooks/types.js';
 import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { EmptyState } from '../../../components/primitives/EmptyState.js';
@@ -24,13 +29,18 @@ import { SkeletonLine } from '../../../components/primitives/Skeleton.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { describeContextError, useTokenGate, type TokenGate } from '../context/use-token-gate.js';
 import { renderMarkdown } from '../MessageMarkdownRenderer.js';
+import { useVerseUi } from '../useVerseUi.js';
+import { commandPasteUnavailableReason, pasteIntoChatTerminal } from './command-workflow-paste.js';
+import { CommandWorkflowForm } from './CommandWorkflowForm.js';
 import { putMacroInComposer } from './playbook-composer.js';
 import { getPlaybookFocus, isPlaybookFocusLive, subscribePlaybookFocus, takePlaybookFocus } from './playbook-focus.js';
 import { playbookDetailQuery, playbooksQuery, savePlaybookSource } from './playbooks-queries.js';
 import styles from './Playbooks.module.css';
 
 type Notice = { tone: 'neutral' | 'danger' | 'success'; text: string } | null;
-type Editing = { mode: 'new' } | { mode: 'edit'; id: string; baseVersion: number; source: string; from: number } | null;
+type Editing = { mode: 'new'; kind: PlaybookKind } | { mode: 'edit'; id: string; baseVersion: number; source: string; from: number } | null;
+/** ⌘K hand-offs: "Run playbook…" (any playbook) or "Run command workflow…" (command workflows only). */
+type PickMode = 'run' | 'workflows' | null;
 
 const SELECTED_STORAGE_KEY = 'verse.playbooks.selected';
 
@@ -66,11 +76,15 @@ export function PlaybooksView() {
   const [filter, setFilter] = useState('');
   const [notice, setNotice] = useState<Notice>(null);
   const [editing, setEditing] = useState<Editing>(null);
-  const [runMode, setRunMode] = useState(false);
+  const [pickMode, setPickMode] = useState<PickMode>(null);
   const filterRef = useRef<HTMLInputElement>(null);
 
-  const visible = useMemo(() => filterPlaybooks(rows, filter), [rows, filter]);
-  const selected = rows.find((r) => r.id === chosen) ?? rows[0] ?? null;
+  const visible = useMemo(() => {
+    const matching = filterPlaybooks(rows, filter);
+    return pickMode === 'workflows' ? matching.filter((r) => playbookKindOf(r) === 'command') : matching;
+  }, [rows, filter, pickMode]);
+  const selected = (pickMode === 'workflows' ? visible.find((r) => r.id === chosen) ?? visible[0] : null)
+    ?? rows.find((r) => r.id === chosen) ?? rows[0] ?? null;
 
   const choose = useCallback((id: string) => {
     setChosen(id);
@@ -83,7 +97,7 @@ export function PlaybooksView() {
   useEffect(() => {
     if (!focus) return;
     if (isPlaybookFocusLive(focus)) {
-      setRunMode(true);
+      setPickMode(focus.kind);
       setEditing(null);
       filterRef.current?.focus();
     }
@@ -93,7 +107,7 @@ export function PlaybooksView() {
   const run = useCallback(async (macro: string) => {
     setNotice(null);
     const ok = await putMacroInComposer(macro);
-    if (ok) setRunMode(false);
+    if (ok) setPickMode(null);
     else setNotice({ tone: 'neutral', text: `Open a chat first, then run ${macro} from its message box.` });
   }, []);
 
@@ -112,14 +126,23 @@ export function PlaybooksView() {
                 each version shows how its fleet, cloud and Devin runs ended.
               </p>
             </div>
-            <Button variant="subtle" size="sm" icon={<IconPlus size={14} />} onClick={() => { setEditing({ mode: 'new' }); setNotice(null); }}>
-              New playbook
-            </Button>
+            <div className={styles.actions}>
+              <Button variant="subtle" size="sm" icon={<IconPlus size={14} />} onClick={() => { setEditing({ mode: 'new', kind: 'command' }); setNotice(null); }}>
+                New command workflow
+              </Button>
+              <Button variant="subtle" size="sm" icon={<IconPlus size={14} />} onClick={() => { setEditing({ mode: 'new', kind: 'agent' }); setNotice(null); }}>
+                New playbook
+              </Button>
+            </div>
           </header>
 
-          {runMode ? (
+          {pickMode === 'run' ? (
             <p className={styles.banner} role="status">
               Pick a playbook and choose <strong>Run…</strong>: its macro goes into your chat message, where you describe the task and choose where it runs.
+            </p>
+          ) : pickMode === 'workflows' ? (
+            <p className={styles.banner} role="status">
+              Pick a command workflow and choose <strong>Use…</strong>: fill it in and it is pasted into your chat’s terminal — you press Enter.
             </p>
           ) : null}
           <p className={notice ? styles.banner : styles.visuallyHidden} data-tone={notice?.tone} role="status" aria-live="polite">{notice?.text ?? ''}</p>
@@ -133,10 +156,10 @@ export function PlaybooksView() {
             <p className={styles.banner} data-tone="danger">{unavailable ?? describeContextError(list.error)}</p>
           ) : editing?.mode === 'new' ? (
             <PlaybookEditor
-              key="new"
-              initial={playbookTemplate('my-playbook')}
+              key={`new:${editing.kind}`}
+              initial={editing.kind === 'command' ? playbookTemplate('my-command', 'command') : playbookTemplate('my-playbook')}
               baseVersion={null}
-              title="New playbook"
+              title={editing.kind === 'command' ? 'New command workflow' : 'New playbook'}
               gate={gate}
               onCancel={() => setEditing(null)}
               onSaved={(id, version) => {
@@ -166,12 +189,19 @@ export function PlaybooksView() {
                       <button type="button" aria-current={selected.id === r.id ? 'page' : undefined} onClick={() => choose(r.id)}>
                         <span className={styles.rowName}>{r.name}</span>
                         <span className={styles.rowMeta}>
-                          <code>{r.macro}</code> · v{r.latest}{r.auto ? ' · auto' : ''}{r.builtin ? ' · built-in' : ''}
+                          {playbookKindOf(r) === 'command'
+                            ? <><span className={styles.kindBadge}>Command</span> · v{r.latest}</>
+                            : <><code>{r.macro}</code> · v{r.latest}{r.auto ? ' · auto' : ''}</>}
+                          {r.builtin ? ' · built-in' : ''}
                         </span>
                       </button>
                     </li>
                   ))}
-                  {visible.length === 0 ? <li className={styles.meta}>No playbook matches “{filter}”.</li> : null}
+                  {visible.length === 0 ? (
+                    <li className={styles.meta}>
+                      {pickMode === 'workflows' && !filter.trim() ? 'No command workflows yet — create one with New command workflow.' : `No playbook matches “${filter}”.`}
+                    </li>
+                  ) : null}
                 </ul>
               </nav>
               {editing?.mode === 'edit' && editing.id === selected.id ? (
@@ -193,6 +223,7 @@ export function PlaybooksView() {
                   key={`${selected.id}:${selected.latest}`}
                   summary={selected}
                   onRun={(macro) => void run(macro)}
+                  onPasted={() => setPickMode(null)}
                   onEdit={(source, from) => setEditing({ mode: 'edit', id: selected.id, baseVersion: selected.latest, source, from })}
                 />
               )}
@@ -220,8 +251,19 @@ function outcomeCell(n: number) {
   return n === 0 ? <span className={styles.zero}>0</span> : n;
 }
 
-function PlaybookPanel({ summary, onRun, onEdit }: { summary: PlaybookSummary; onRun: (macro: string) => void; onEdit: (source: string, from: number) => void }) {
+interface PanelProps {
+  summary: PlaybookSummary;
+  onRun: (macro: string) => void;
+  onEdit: (source: string, from: number) => void;
+  /** A command workflow was pasted into the chat's terminal. */
+  onPasted: () => void;
+}
+
+function PlaybookPanel({ summary, onRun, onEdit, onPasted }: PanelProps) {
   const [version, setVersion] = useState<number | null>(null);
+  const [using, setUsing] = useState(false);
+  const { activeSessionId } = useVerseUi();
+  const isCommand = playbookKindOf(summary) === 'command';
   const def = useMemo(() => playbookDetailQuery(summary.id, version), [summary.id, version]);
   const q = useQuery(def, { freshMs: 30_000 });
   const data: PlaybookDetailResponse | undefined = q.data;
@@ -229,6 +271,8 @@ function PlaybookPanel({ summary, onRun, onEdit }: { summary: PlaybookSummary; o
   const shown = data?.playbook.version ?? summary.latest;
   const isLatest = shown === summary.latest;
   const macro = isLatest ? summary.macro : `${summary.macro}@v${shown}`;
+  // The version on screen (an older one can be used too); the list row's until the detail arrives.
+  const command = (data?.playbook.meta.kind === 'command' ? data.playbook.meta.command : undefined) ?? (isLatest ? summary.command : undefined);
 
   return (
     <article className={styles.detail} aria-label={summary.name}>
@@ -236,7 +280,8 @@ function PlaybookPanel({ summary, onRun, onEdit }: { summary: PlaybookSummary; o
         <div className={styles.detailTitle}>
           <h3>{summary.name}</h3>
           <p className={styles.meta}>
-            <code>{summary.macro}</code> · {summary.id}@v{shown}{summary.auto ? ' · auto-matches' : ''}{summary.builtin ? ' · shipped with ashlr' : ''}
+            {isCommand ? <span className={styles.kindBadge}>Command</span> : <code>{summary.macro}</code>}
+            {' '}· {summary.id}@v{shown}{summary.auto ? ' · auto-matches' : ''}{summary.builtin ? ' · shipped with ashlr' : ''}
           </p>
         </div>
         <label className={styles.picker}>
@@ -247,12 +292,33 @@ function PlaybookPanel({ summary, onRun, onEdit }: { summary: PlaybookSummary; o
             ))}
           </select>
         </label>
-        <Button variant="primary" size="sm" icon={<IconPlay size={14} />} onClick={() => onRun(macro)}>Run…</Button>
+        {isCommand ? (
+          <Button variant="primary" size="sm" icon={<IconPlay size={14} />} disabled={!command} aria-expanded={using} onClick={() => setUsing((u) => !u)}>
+            Use…
+          </Button>
+        ) : (
+          <Button variant="primary" size="sm" icon={<IconPlay size={14} />} onClick={() => onRun(macro)}>Run…</Button>
+        )}
         <Button variant="subtle" size="sm" disabled={!data} onClick={() => data && onEdit(data.playbook.source, shown)}>
           {isLatest ? 'Edit' : `Edit from v${shown}`}
         </Button>
       </div>
       {summary.description ? <p className={styles.description}>{summary.description}</p> : null}
+      {isCommand && using && command ? (
+        <CommandWorkflowForm
+          key={`${summary.id}@${shown}`}
+          name={summary.name}
+          template={command.template}
+          params={command.params}
+          pasteDisabledReason={commandPasteUnavailableReason({ activeSessionId })}
+          onCancel={() => setUsing(false)}
+          onPaste={(text) => {
+            pasteIntoChatTerminal(text);
+            setUsing(false);
+            onPasted();
+          }}
+        />
+      ) : null}
 
       {data === undefined && !q.error ? (
         <div aria-busy="true">
@@ -261,6 +327,11 @@ function PlaybookPanel({ summary, onRun, onEdit }: { summary: PlaybookSummary; o
         </div>
       ) : q.error || !data ? (
         <p className={styles.banner} data-tone="danger">{q.error ? describeContextError(q.error) : 'This playbook could not be read.'}</p>
+      ) : isCommand ? (
+        <>
+          <h4 className={styles.subhead}>The command</h4>
+          <div className={styles.markdown} aria-label="Rendered playbook" dangerouslySetInnerHTML={{ __html: html }} />
+        </>
       ) : (
         <>
           <table className={styles.outcomes} aria-label="Outcomes by version">
@@ -320,6 +391,7 @@ function PlaybookEditor({ initial, baseVersion, title, gate, onCancel, onSaved }
   const [failure, setFailure] = useState<string | null>(null);
   const parsed = useMemo(() => parsePlaybook(source), [source]);
   const errors = serverErrors ?? (parsed.ok ? [] : parsed.errors);
+  const commandKind = parsed.ok ? parsed.meta.kind === 'command' : /^kind:\s*command\s*$/m.test(source);
   const warnings = parsed.ok ? parsed.warnings : [];
 
   const save = async () => {
@@ -347,7 +419,12 @@ function PlaybookEditor({ initial, baseVersion, title, gate, onCancel, onSaved }
           <h3>{title}</h3>
           <p className={styles.meta}>
             {baseVersion === null ? 'Saved as v1.' : `Saved as v${baseVersion + 1}; v${baseVersion} and earlier stay exactly as they were.`}
-            {' '}Sections: Outcome, Procedure (required), Specifications, Advice, Forbidden actions, Required from user.
+            {commandKind ? (
+              <>
+                {' '}One section, <code>## Command</code>, holding one code block; <code>{'{{name}}'}</code> and <code>{'{{name:default}}'}</code> become
+                the form’s fields, each filled in as one quoted shell word.
+              </>
+            ) : ' Sections: Outcome, Procedure (required), Specifications, Advice, Forbidden actions, Required from user.'}
           </p>
         </div>
       </div>

@@ -36,7 +36,10 @@
  * system-wide hotkey arrive through app/desktop-shell.ts
  * `subscribeShellCommands` — the one web seam to the desktop app — already
  * parsed by the catalog: `open-needs-you`, `new-chat`, `focus-composer`,
- * `open-session:<id>` (and the 3.9 menu's two). Anchors ("go to that card")
+ * `open-session:<id>`, `open-terminal:<tab>[/<block>]` (and the 3.9 menu's
+ * two). Every pointer at a terminal tab — that command, a `?terminal=` link,
+ * a `verse://terminal/…` link in chat, a Needs-you row — arrives as one
+ * request (shell/open-terminal-request.ts) served by a lazy chunk. Anchors ("go to that card")
  * arrive as VERSE_ANCHOR_EVENT and are revealed by shell/reveal-anchor.ts
  * (listened for by shell/anchor-requests.ts).
  */
@@ -52,7 +55,7 @@ import { useTheme } from '../../data/hooks.js';
 import { VERSE_ACTIVITY_SEEN_PATH, type VerseActivityCompletion } from '../../../core/verse/workbench-types.js';
 import { useResourcesUi } from './resources/resources-store.js';
 import { commandChord, detectKeyPlatform, formatChord, matchKey } from './shell/command-keys.js';
-import { GuardHost } from './shell/guarded-action.js';
+import { useGuardState } from './shell/guard-store.js';
 import type { RailBadge } from './shell/RailStatus.js';
 import { subscribeAnchorRequests } from './shell/anchor-requests.js';
 import { executeCatalogCommand, useShellCommands } from './shell/run-command.js';
@@ -65,6 +68,8 @@ import type { WarmupOptions } from './shell/warmup.js';
 import { useVerseUi } from './useVerseUi.js';
 import { useFocusMode } from './shell/focus-mode.js';
 import { openPaneInChat } from './dock/dock-store.js';
+// Only the event name: validation and the handler are the lazy open-terminal chunk.
+import { VERSE_OPEN_TERMINAL_EVENT } from './shell/open-terminal-event.js';
 // rail-icons, not verse-icons: only the rail's glyphs belong in first paint.
 import { GearIcon, NeedsYouIcon, RAIL_ICON, VerseMark } from './rail-icons.js';
 import {
@@ -104,16 +109,18 @@ function sectionLoader(id: VerseSectionId): () => Promise<{ default: ComponentTy
   return async () => {
     const module = landedModule(id);
     const importer = module ? sectionImporter(module) : undefined;
-    if (!module || !importer) return { default: () => <MissingSection label={entry.label} blurb={entry.blurb} /> };
-    try {
-      const mod = (await importer()) as Record<string, unknown>;
-      const exported = mod[module] ?? mod.default;
-      if (typeof exported === 'function') return { default: exported as ComponentType };
-      console.error(`[verse] ${module} exports no ${module} component`);
-    } catch (err) {
-      console.error(`[verse] ${entry.label} failed to load`, err);
+    if (module && importer) {
+      try {
+        const mod = (await importer()) as Record<string, unknown>;
+        const exported = mod[module] ?? mod.default;
+        if (typeof exported === 'function') return { default: exported as ComponentType };
+        console.error(`[verse] ${module} exports no ${module} component`);
+      } catch (err) {
+        console.error(`[verse] ${entry.label} failed to load`, err);
+      }
     }
-    return { default: () => <MissingSection label={entry.label} blurb={entry.blurb} /> };
+    const { SECTION_BLURBS } = await import('./section-blurbs.js');
+    return { default: () => <MissingSection label={entry.label} blurb={SECTION_BLURBS[id]} /> };
   };
 }
 
@@ -184,6 +191,24 @@ function dictationPossible(): boolean {
   } catch {
     return false;
   }
+}
+
+// Computer use (3.15 P4): the relay poller, access / confirmation sheets and
+// the control pill. Desktop-only, so a browser tab never even fetches it.
+const importComputer = () => import('./computer/ComputerControl.js');
+const ComputerControl = lazy(() => importComputer().then((m) => ({ default: m.ComputerControl })));
+// Confirmation UI is needed only after a guarded action; its store is still
+// available immediately to palette and drawer actions.
+const GuardHost = lazy(() => import('./shell/guarded-action.js').then((m) => ({ default: m.GuardHost })));
+
+/**
+ * Does this shell implement computer use on this platform? The same test as
+ * computer/native-computer.ts `hasNativeComputer`, inlined so first paint
+ * does not carry that module; ComputerControl re-checks with the real one.
+ */
+function shellSupportsComputerUse(): boolean {
+  const bridge = (window as unknown as { __ASHLR_DESKTOP__?: { computer?: { version?: unknown; send?: unknown; capabilities?: { supported?: unknown } } } }).__ASHLR_DESKTOP__?.computer;
+  return typeof bridge?.version === 'number' && bridge.version >= 1 && typeof bridge.send === 'function' && bridge.capabilities?.supported === true;
 }
 
 /**
@@ -269,6 +294,7 @@ function openWorkbenchLink(sessionId: string | null, paneId: string | null): voi
 }
 
 export function VerseApp() {
+  const guardOpen = useGuardState().request !== null;
   const ui = useVerseUi();
   const theme = useTheme();
   const toast = useToast();
@@ -283,6 +309,7 @@ export function VerseApp() {
   const resources = useResourcesUi();
   // Focus mode (⇧⌘F) is the chat's: the rail steps aside only on the Chat surface.
   const focus = useFocusMode() && ui.section === 'chat';
+  const [computerUse] = useState(shellSupportsComputerUse);
 
   useEffect(() => prefetchAfterFirstPaint(), []);
   // The gear tray is fetched right after mount (not on idle) and then stays
@@ -334,6 +361,10 @@ export function VerseApp() {
           openWorkbenchLink(command.sessionId, command.paneId);
           return;
         }
+        if (command.kind === 'open-terminal') {
+          window.dispatchEvent(new CustomEvent(VERSE_OPEN_TERMINAL_EVENT, { detail: { tabId: command.tabId, blockId: command.blockId } }));
+          return;
+        }
         // The tray's "New chat" and the hotkey's "focus the composer" must
         // land in the composer: an open palette or shortcuts sheet would keep
         // focus (and every key) for itself. The drawer opener, the theme and
@@ -343,13 +374,28 @@ export function VerseApp() {
       }),
     [],
   );
-  // A link into the workbench (?chat=…&pane=…): opened once, then stripped
-  // from the address bar. The parser loads only when the URL carries one.
+  // "Open this terminal tab", from wherever (see the header): the handler —
+  // the tab's chat, the Terminal pane, the block — is its own chunk.
   useEffect(() => {
-    if (typeof window === 'undefined' || !/[?&](?:chat|pane)=/.test(window.location.search)) return;
+    function onRequest(event: Event): void {
+      const request: unknown = (event as CustomEvent<unknown>).detail;
+      void import('./shell/open-terminal.js').then(
+        ({ openTerminalTarget }) => openTerminalTarget(request, { toast: toast.show }),
+        (err) => console.error('[verse] terminal link failed to load', err),
+      );
+    }
+    window.addEventListener(VERSE_OPEN_TERMINAL_EVENT, onRequest);
+    return () => window.removeEventListener(VERSE_OPEN_TERMINAL_EVENT, onRequest);
+  }, [toast]);
+  // A link into the workbench (?chat=…&pane=…, ?terminal=…&block=…): opened
+  // once, then stripped from the address bar. The parser loads only when the
+  // URL carries one.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !/[?&](?:chat|pane|terminal)=/.test(window.location.search)) return;
     void import('./shell/deep-link.js').then(({ consumeDeepLink }) => {
       const link = consumeDeepLink();
-      if (link) openWorkbenchLink(link.sessionId, link.paneId);
+      if (link?.terminal) window.dispatchEvent(new CustomEvent(VERSE_OPEN_TERMINAL_EVENT, { detail: { ...link.terminal, sessionId: link.sessionId } }));
+      else if (link) openWorkbenchLink(link.sessionId, link.paneId);
     }, () => undefined);
   }, []);
   // "Go to that card": whoever raises it (drawer, Command, Mind), the shell reveals it.
@@ -536,7 +582,12 @@ export function VerseApp() {
         {ui.overlay === 'shortcuts' ? <ShortcutsOverlay /> : null}
       </Suspense>
       {voiceHud ? <Suspense fallback={null}><VoiceHud /></Suspense> : null}
-      <GuardHost />
+      {guardOpen ? <Suspense fallback={null}><GuardHost /></Suspense> : null}
+      {computerUse ? (
+        <Suspense fallback={null}>
+          <ComputerControl />
+        </Suspense>
+      ) : null}
       {/*
         First run only, outside the surfaces: a docked card, not a modal, so
         the rail and the surface stay usable while it is open.
