@@ -1728,6 +1728,13 @@ export interface AshlrConfig {
      * accepted). Default 'normal'.
      */
     mode?: 'normal' | 'fast' | 'lite' | 'ultra';
+    /**
+     * The model a NEW Devin (CLI) chat starts on — any id, family slug or
+     * alias `devin models list` prints (core/devin/models.ts resolves it).
+     * Default 'swe-2-high' (SWE-2, listed Free). Each chat can still pick
+     * another model; this only decides the picker's default.
+     */
+    defaultModel?: string;
   };
 }
 

@@ -32,6 +32,7 @@ import { buildDevinPrompt, DEVIN_REPORT_SCHEMA } from './delivery-contract.js';
 import { playbookForLaunch } from '../playbooks/lanes.js';
 import { probeDevinCli, type DevinCliProbe } from './cli-probe.js';
 import { buildDevinChatPrompt } from './chat-contract.js';
+import { getDevinModelCatalog, summarizeDevinModels, type DevinModelCatalog } from './models.js';
 import { hasDevinKey, readDevinKey, removeDevinKey, storeDevinKey, type DevinKeyStoreDeps } from './secret.js';
 import {
   clearDevinConnection,
@@ -76,7 +77,9 @@ export interface DevinServiceDeps {
   /** The live standing policy (default: currentStandingPolicy). */
   policy?: () => EffectivePolicy | null;
   /** The local CLI's state for the overview (tests; default: the shared cli-probe). */
-  cliProbe?: () => Promise<Pick<DevinCliProbe, 'state'>>;
+  cliProbe?: () => Promise<Pick<DevinCliProbe, 'state'> & { cliPath?: string | null }>;
+  /** The CLI's model catalog for the overview (tests; default: models.ts, never listing on the request). */
+  modelCatalog?: () => Promise<DevinModelCatalog>;
 }
 
 /** Internal launches from the fleet carry their work item. */
@@ -523,12 +526,24 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
 export async function devinOverview(deps: DevinServiceDeps = {}): Promise<DevinOverviewResponse> {
   const now = (deps.now ?? (() => new Date()))();
   const tasks = listDevinTasks();
+  const probe: Pick<DevinCliProbe, 'state'> & { cliPath?: string | null } = await (deps.cliProbe ?? (() => probeDevinCli()))();
+  let models: DevinOverviewResponse['models'];
+  if (probe.state !== 'missing') {
+    try {
+      // At once: memory / disk / the SWE-2 fallback; a due listing runs in the background.
+      const catalog = await (deps.modelCatalog ?? (() => getDevinModelCatalog({ cliPath: probe.state === 'ready' ? probe.cliPath ?? null : null })))();
+      models = summarizeDevinModels(catalog, readConfig(deps));
+    } catch {
+      models = undefined;
+    }
+  }
   return {
     generatedAt: now.toISOString(),
     status: await devinStatus(deps, tasks),
     budget: devinBudgetView(tasks, readDevinBudget(), now),
     tasks: tasks.slice(0, OVERVIEW_TASK_LIMIT),
-    cli: { state: (await (deps.cliProbe ?? (() => probeDevinCli()))()).state, usage: 'not-reported' },
+    cli: { state: probe.state, usage: 'not-reported' },
+    ...(models ? { models } : {}),
   };
 }
 

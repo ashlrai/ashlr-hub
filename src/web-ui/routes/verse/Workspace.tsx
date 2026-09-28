@@ -90,7 +90,7 @@ import { seatHealthIssues } from './health/health-model.js';
 import { SeatHealthBannerView } from './health/SeatHealthBanner.js';
 import { useSeatHealth } from './health/useSeatHealth.js';
 import { seatSubscription, seatSubscriptionSentence, worthFlagging } from './seat-subscription.js';
-import { projectName, seatById, seatPillLabel, sessionContextBudget, type SessionContextBudget } from './verse-model.js';
+import { modelPriceNote, projectName, seatById, seatPillLabel, sessionContextBudget, type SessionContextBudget } from './verse-model.js';
 import { invalidateVerseLists } from './verse-queries.js';
 import { formatTokens, lastTurnActivityAt } from './verse-readouts.js';
 import { setVerseSession, type VerseLiveNotice } from './verse-store.js';
@@ -332,9 +332,11 @@ export function Workspace(props: WorkspaceProps) {
   const capacityLine = activeSeat === null || capacity === null
     ? null
     : seatSubscriptionSentence(activeSeat, capacity).replace(`${activeSeat.label} · `, '');
+  // 3.15: a priced catalog (Devin CLI) — "Free" / "$4 in · $20 out per 1M".
+  const priceLine = session === null ? null : modelPriceNote(seats, session);
   const seatTitle = session === null
     ? ''
-    : `Runs on ${seatPillLabel(seats, session)}${capacityLine ? ` — ${capacityLine}` : ''}`;
+    : `Runs on ${seatPillLabel(seats, session)}${priceLine ? ` · ${priceLine}` : ''}${capacityLine ? ` — ${capacityLine}` : ''}`;
   const disabledReason = !dispatchEnabled ? 'Sending is disabled: this server was started without dispatch.' : null;
   const runningReason = 'Available when the current turn finishes.';
   const compactable = session !== null && canCompactNow(session.engine);

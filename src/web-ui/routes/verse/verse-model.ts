@@ -45,6 +45,15 @@ export function modelLabel(seats: readonly VerseSeat[], session: Pick<VerseSessi
 }
 
 /**
+ * 3.15: what the session's model costs, when its seat lists a price (the
+ * Devin CLI catalog: "Free", "$4 in · $20 out per 1M"); null otherwise.
+ */
+export function modelPriceNote(seats: readonly VerseSeat[], session: Pick<VerseSession, 'seatId' | 'model'>): string | null {
+  const price = modelOptionFor(seats, session)?.priceNote;
+  return typeof price === 'string' && price ? price : null;
+}
+
+/**
  * The seat's catalog entry for a session's model. Exact id first; then the
  * canonical form, because a session created before the alias fix stores
  * `claude-opus-5.5` while today's catalog lists `claude-opus-5-5` (context-math

@@ -314,6 +314,19 @@ export interface DevinOverviewResponse {
    * Optional: older servers omit it.
    */
   cli?: { state: 'ready' | 'missing' | 'logged-out'; usage: 'not-reported' };
+  /**
+   * The CLI's model catalog, summarised (models.ts `summarizeDevinModels`):
+   * the free families (SWE-2), how many paid ones, and the default a new
+   * Devin (CLI) chat starts on. Present only when the CLI is installed.
+   * Optional: older servers omit it.
+   */
+  models?: {
+    source: 'cli' | 'cache' | 'fallback';
+    fetchedAt: string | null;
+    freeFamilies: string[];
+    paidFamilyCount: number;
+    defaultModel: { id: string; label: string; free: boolean; price: string | null };
+  };
 }
 
 /** POST /api/verse/devin/launch (write token + read session) */

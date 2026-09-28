@@ -24,7 +24,7 @@ import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { MonogramTile } from '../apps/MonogramTile.js';
 import { describeContextError, useTokenGate } from '../context/use-token-gate.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
-import { acuLevel, devinHeadline, devinReadinessRow, DEVIN_USAGE_LINK, formatAcu, safeDevinHref, waitingTasks } from '../devin/devin-model.js';
+import { acuLevel, devinHeadline, devinModelsLines, devinReadinessRow, DEVIN_USAGE_LINK, formatAcu, safeDevinHref, waitingTasks } from '../devin/devin-model.js';
 import { DEVIN_POLL_MS, devinQuery, messageDevinTask } from '../devin/devin-queries.js';
 import { ReadinessLines } from './ReadinessLines.js';
 import styles from './ResourcesDrawer.module.css';
@@ -115,6 +115,7 @@ export function DevinResource() {
   const level = acuLevel(budget);
   const leftPercent = budget.acuBudgetTotal > 0 ? Math.max(0, Math.min(100, (budget.acuRemaining / budget.acuBudgetTotal) * 100)) : 0;
   const waiting = waitingTasks(overview.tasks);
+  const modelLines = overview.cli && overview.cli.state !== 'missing' ? devinModelsLines(overview.models) : null;
   return (
     <li className={styles.card} data-resource="devin" data-devin={status.state}>
       <div className={styles.cardHead}>
@@ -164,6 +165,14 @@ export function DevinResource() {
             <span className={styles.visuallyHidden}> (opens in a new tab)</span>
           </a>
         </>
+      ) : null}
+      {modelLines ? (
+        // 3.15: the CLI's own catalog (`devin models list`), summarised; the
+        // default is what a new Devin (CLI) chat starts on (devin.defaultModel).
+        <p className={styles.subtle} data-devin-models={overview.models?.source ?? 'unknown'}
+          title={modelLines.stale ? 'Not listed yet — the full list appears after the CLI is asked (in the background).' : undefined}>
+          {modelLines.catalog} · {modelLines.defaultLine}
+        </p>
       ) : null}
       {overview.cli && overview.cli.state !== 'missing' ? (
         // The CLI reports no ACU / usage numbers, so its chats are not in the
