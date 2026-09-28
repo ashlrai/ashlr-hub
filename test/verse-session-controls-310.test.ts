@@ -571,10 +571,13 @@ describe('@ file finder', () => {
     expect(calls).toBe(3);
   });
 
-  it('scores 20,000 paths inside the 20 ms handler budget', () => {
+  it('scores 20,000 paths inside the handler CPU budget', () => {
     const many = Array.from({ length: 20_000 }, (_, i) => ({ path: `src/module-${i % 97}/deep/path/file-${i}.ts`, root: '/r' }));
-    const started = performance.now();
+    // Wall time includes descheduling by the resident model and other release
+    // tests on this Mac. CPU time keeps the bound on ranking work itself.
+    const started = process.cpuUsage();
     rankFiles(many, 'mod9file');
-    expect(performance.now() - started).toBeLessThan(60); // 3× headroom for a loaded CI box
+    const used = process.cpuUsage(started);
+    expect((used.user + used.system) / 1000).toBeLessThan(60); // 3× headroom
   });
 });
