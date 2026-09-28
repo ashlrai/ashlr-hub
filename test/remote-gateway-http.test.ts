@@ -54,6 +54,12 @@ async function fixture() {
     if (req.url === '/api/verse/sessions/long' && req.headers['x-ashlr-token'] === TOKEN) {
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ events: 'x'.repeat(3 * 1024 * 1024) })); return;
     }
+    if (req.url === '/api/verse/sessions/oversize' && req.headers['x-ashlr-token'] === TOKEN) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.write('{"events":"');
+      for (let i = 0; i < 17; i++) res.write('x'.repeat(1024 * 1024));
+      res.end('"}'); return;
+    }
     res.writeHead(401, { 'Content-Type': 'application/json' }); res.end('{}');
   });
   active.add(hub);
@@ -102,6 +108,7 @@ describe('dormant remote read gateway HTTP boundary', () => {
       const long = await f.get('/api/verse/sessions/long');
       expect(long.status).toBe(200);
       expect(((await long.json()) as { events: string }).events).toHaveLength(3 * 1024 * 1024);
+      expect((await f.get('/api/verse/sessions/oversize')).status).toBe(502);
       expect((await f.get('/api/session')).status).toBe(404);
       expect((await f.get('/api/verse/agent-tools/mcp')).status).toBe(404);
       expect((await f.get('/verse/m/')).status).toBe(404);

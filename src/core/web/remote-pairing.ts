@@ -101,12 +101,14 @@ export function createRemotePairing(
   const now = options.now ?? Date.now;
   const invitations = new Map<string, Invitation>();
   const registrations = new Map<string, Registering>();
+  const registrationResults = new Map<string, { subject: string; state: 'approved' | 'denied'; deviceId?: string; expiresAt: number }>();
   const assertions = new Map<string, Assertion>();
 
   function pruneExpired(): void {
     const at = now();
     for (const [key, value] of invitations) if (value.expiresAt <= at) invitations.delete(key);
     for (const [key, value] of registrations) if (value.expiresAt <= at) registrations.delete(key);
+    for (const [key, value] of registrationResults) if (value.expiresAt <= at) registrationResults.delete(key);
     for (const [key, value] of assertions) if (value.expiresAt <= at) assertions.delete(key);
   }
 
@@ -194,12 +196,28 @@ export function createRemotePairing(
         const device: RemoteDevice = { ...pending.credential, id: randomUUID(), createdAt: at, lastUsedAt: null, revokedAt: null };
         store.add(device);
         registrations.delete(id);
+        registrationResults.set(id, { subject: pending.subject, state: 'approved', deviceId: device.id, expiresAt: now() + PAIR_TTL_MS });
         return device;
       },
-      denyPairing(id: string): void { registrations.delete(id); },
+      denyPairing(id: string): void {
+        const pending = registrations.get(id);
+        if (pending) registrationResults.set(id, { subject: pending.subject, state: 'denied', expiresAt: now() + PAIR_TTL_MS });
+        registrations.delete(id);
+      },
       revokeDevice(id: string): boolean { return store.revoke(id, now()); },
     },
     phone: {
+      registrationStatus(identity: RemoteAccessIdentity, pendingId: string) {
+        pruneExpired();
+        if (!validIdentity(identity)) return null;
+        const pending = registrations.get(pendingId);
+        if (pending?.subject === identity.subject) return { state: 'pending' as const };
+        const result = registrationResults.get(pendingId);
+        if (result?.subject !== identity.subject) return null;
+        return result.state === 'approved'
+          ? { state: 'approved' as const, deviceId: result.deviceId! }
+          : { state: 'denied' as const };
+      },
       async claimInvitation(identity: RemoteAccessIdentity, code: string, label: string) {
         pruneExpired();
         if (!validIdentity(identity) || typeof code !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(code)

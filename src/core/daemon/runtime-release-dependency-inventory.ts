@@ -504,6 +504,7 @@ function rootPackageIsPortable(
     'docs/NORTH-STAR.md',
     'docs/RESOURCE-POOLS.md',
     'docs/RUNTIME_ACTIVATION_AUTHORITY.md',
+    'docs/REMOTE-PHONE.md',
     'docs/contracts/CONTRACT-M515.md',
     'docs/contracts/CONTRACT-M521.md',
     'docs/contracts/CONTRACT-M568.md',
