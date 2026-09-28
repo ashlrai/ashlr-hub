@@ -29,7 +29,8 @@ afterEach(async () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-function fixture(descendantMs = 350) {
+// Leave clear scheduling margin below the runner's fixed 1,000 ms group drain.
+function fixture(descendantMs = 100) {
   const script = join(root, 'native.cjs'), log = join(root, 'requests.jsonl');
   const account = { requiresOpenaiAuth: true, account: { type: 'chatgpt', email: 'fixture@example.invalid', planType: 'pro' } };
   const hint = digest(canonical({ schemaVersion: 1, ...account.account }));
