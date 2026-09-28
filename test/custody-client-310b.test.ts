@@ -252,6 +252,7 @@ describe('signGrant — only the requested grant, only a verifying signature', (
 
 describe('tokens — shape-checked, cached in memory, never echoed', () => {
   const ghs = `ghs_${'A1b2C3d4'.repeat(5)}`;
+  const stateless = `ghs_5089472_${'Aa_1-'.repeat(40)}.${'Bb_2-'.repeat(40)}.${'Cc_3-'.repeat(24)}`;
 
   it('mints a one-repo GitHub token once per hour window and dedupes concurrent callers', async () => {
     const expiresAt = new Date(Date.now() + 60 * 60_000).toISOString();
@@ -267,12 +268,25 @@ describe('tokens — shape-checked, cached in memory, never echoed', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('accepts a bounded stateless installation token without assuming its JWT structure', async () => {
+    const expiresAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    expect(stateless.length).toBeGreaterThan(255);
+    install(() => ok({ token: stateless, expiresAt }));
+    await expect(githubToken('ashlrai/stateless')).resolves.toEqual({ token: stateless, expiresAt });
+  });
+
   it('refuses bad repos, token shapes and expiries without leaking the value', async () => {
     await expect(githubToken('not a repo')).rejects.toMatchObject({ code: 'refused' });
     install(() => ok({ token: 'gho_personalTokenThatMustNeverBeUsed123456', expiresAt: new Date(Date.now() + 3_000_000).toISOString() }));
     const wrong = await githubToken('ashlrai/x').catch((e: unknown) => e as Error);
     expect(wrong).toMatchObject({ code: 'bad-output' });
     expect(String((wrong as Error).message)).not.toContain('gho_');
+    for (const malformed of [`${stateless} bad`, `${stateless}\nInjected: yes`, `ghs_${'A'.repeat(4093)}`]) {
+      install(() => ok({ token: malformed, expiresAt: new Date(Date.now() + 3_000_000).toISOString() }));
+      const error = await githubToken('ashlrai/bad-shape').catch((e: unknown) => e as Error);
+      expect(error).toMatchObject({ code: 'bad-output' });
+      expect(error.message).not.toContain(malformed);
+    }
     install(() => ok({ token: ghs, expiresAt: new Date(Date.now() + 5 * 60 * 60_000).toISOString() }));
     await expect(githubToken('ashlrai/y')).rejects.toMatchObject({ code: 'bad-output' });
     install(() => ok({ token: ghs, expiresAt: 'tomorrow' }));

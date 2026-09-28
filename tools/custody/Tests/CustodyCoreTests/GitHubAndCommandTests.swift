@@ -73,7 +73,7 @@ final class GitHubAndCommandTests: XCTestCase {
 
   func testTokenRequestIsOneRepoWithExactlyTheFleetPermissions() throws {
     XCTAssertEqual(String(decoding: GitHubApp.accessTokenBody(repoName: "fleet-canary"), as: UTF8.self),
-                   #"{"permissions":{"checks":"read","contents":"write","metadata":"read","pull_requests":"write","statuses":"read"},"repositories":["fleet-canary"]}"#)
+                   #"{"permissions":{"checks":"write","contents":"write","metadata":"read","pull_requests":"write","statuses":"read"},"repositories":["fleet-canary"]}"#)
     XCTAssertEqual(GitHubApp.installationURL(repo: "ashlrai/fleet-canary")?.absoluteString, "https://api.github.com/repos/ashlrai/fleet-canary/installation")
     XCTAssertNil(GitHubApp.installationURL(repo: "ashlrai/../../app"))
     XCTAssertNil(GitHubApp.installationURL(repo: "ashlrai"))
@@ -82,7 +82,7 @@ final class GitHubAndCommandTests: XCTestCase {
   }
 
   func tokenResponse(token: String = "ghs_" + String(repeating: "A", count: 36), expires: String = "2026-09-24T13:00:00Z",
-                     perms: String = #"{"checks":"read","contents":"write","metadata":"read","pull_requests":"write","statuses":"read"}"#,
+                     perms: String = #"{"checks":"write","contents":"write","metadata":"read","pull_requests":"write","statuses":"read"}"#,
                      selection: String = "selected", repos: String = #"[{"full_name":"ashlrai/fleet-canary","name":"fleet-canary"}]"#) -> Data {
     Data("{\"token\":\"\(token)\",\"expires_at\":\"\(expires)\",\"permissions\":\(perms),\"repository_selection\":\"\(selection)\",\"repositories\":\(repos)}".utf8)
   }
@@ -92,17 +92,23 @@ final class GitHubAndCommandTests: XCTestCase {
     let ok = try GitHubApp.parseAccessToken(tokenResponse(), repo: "ashlrai/fleet-canary", now: now)
     XCTAssertEqual(ok.expiresAt, "2026-09-24T13:00:00.000Z")
     XCTAssertTrue(ok.token.hasPrefix("ghs_"))
+    let stateless = "ghs_5089472_" + String(repeating: "Aa_1-", count: 40) + "." +
+      String(repeating: "Bb_2-", count: 40) + "." + String(repeating: "Cc_3-", count: 24)
+    XCTAssertGreaterThan(stateless.count, 255)
+    XCTAssertEqual(try GitHubApp.parseAccessToken(tokenResponse(token: stateless), repo: "ashlrai/fleet-canary", now: now).token, stateless)
     // Fewer permissions than asked is fine (still a subset).
     XCTAssertNoThrow(try GitHubApp.parseAccessToken(tokenResponse(perms: #"{"contents":"write","metadata":"read"}"#), repo: "ashlrai/fleet-canary", now: now))
     let refusals: [(Data, String)] = [
       (tokenResponse(perms: #"{"contents":"write","workflows":"write"}"#), "workflows"),
       (tokenResponse(perms: #"{"administration":"read"}"#), "administration"),
-      (tokenResponse(perms: #"{"checks":"write"}"#), "write on checks"),
+      (tokenResponse(perms: #"{"statuses":"write"}"#), "write on statuses"),
       (tokenResponse(selection: "all"), "selected"),
       (tokenResponse(repos: #"[{"full_name":"ashlrai/other"}]"#), "exactly"),
       (tokenResponse(repos: #"[{"full_name":"ashlrai/fleet-canary"},{"full_name":"ashlrai/x"}]"#), "exactly"),
       (tokenResponse(token: "gho_" + String(repeating: "A", count: 36)), "installation token"),
       (tokenResponse(token: "ghs_short"), "installation token"),
+      (tokenResponse(token: "ghs_" + String(repeating: "A", count: 40) + " B"), "installation token"),
+      (tokenResponse(token: "ghs_" + String(repeating: "A", count: 4093)), "installation token"),
       (tokenResponse(expires: "2026-09-24T14:30:00Z"), "hour"),
       (tokenResponse(expires: "2026-09-24T11:00:00Z"), "hour"),
     ]

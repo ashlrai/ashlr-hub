@@ -242,8 +242,9 @@ export function scrubSecrets(text: string): string {
       .replace(DEVIN_API_KEY, REDACTED)
       // 1. sk- API keys (Anthropic, OpenAI, etc.)
       .replace(/\bsk-[A-Za-z0-9_-]{16,}/g, REDACTED)
-      // 2. GitHub tokens (classic prefixes + fine-grained github_pat_<22>_<59>)
-      .replace(/\bgh[poursa]_[A-Za-z0-9]{16,}/g, REDACTED)
+      // 2. GitHub tokens (including long, dotted stateless installation
+      // tokens); consume the entire value so no JWT segment survives.
+      .replace(/\bgh[poursa]_[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]+)*/g, REDACTED)
       .replace(/\bgithub_pat_[A-Za-z0-9_]{22,}/g, REDACTED)
       // 3. Bearer / Token / Authorization header values
       .replace(/\b(Bearer|Token|Authorization)\s+[A-Za-z0-9\-._~+/]+=*/gi, '$1 [REDACTED]')
