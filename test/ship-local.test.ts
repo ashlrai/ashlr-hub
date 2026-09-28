@@ -97,9 +97,10 @@ describe('refusals', () => {
 describe('planShip step list', () => {
   it('builds, packs, installs and repoints current in order', () => {
     const steps = planShip(ctx()) as Step[];
-    expect(ids(steps).slice(0, 8)).toEqual([
-      'clean-dist', 'build', 'pack-dir', 'pack', 'release-dir', 'extract', 'current', 'build-binary',
+    expect(ids(steps).slice(0, 9)).toEqual([
+      'entitlements-preflight', 'clean-dist', 'build', 'pack-dir', 'pack', 'release-dir', 'extract', 'current', 'build-binary',
     ]);
+    expect(step(steps, 'entitlements-preflight')?.argv).toEqual(['node', `${REPO}/scripts/check-macos-entitlements.mjs`]);
     expect(step(steps, 'clean-dist')?.argv).toEqual(['rm', '-rf', `${REPO}/dist`]);
     expect(step(steps, 'pack')?.argv).toEqual(['npm', 'pack', '--ignore-scripts', '--pack-destination', '/os-tmp/ashlr-ship-01234567']);
     expect(step(steps, 'extract')?.argv).toEqual([
@@ -139,6 +140,7 @@ describe('planShip step list', () => {
     ]);
     // Quit before touching the bundle; sign after the last copy; relaunch last.
     const order = ids(steps);
+    expect(order.indexOf('entitlements-preflight')).toBeLessThan(order.indexOf('clean-dist'));
     expect(order.indexOf('app-wait-quit')).toBeLessThan(order.indexOf('backup-ashlr'));
     expect(order.indexOf('install-public')).toBeLessThan(order.indexOf('codesign'));
     // The plist is part of what gets signed.
@@ -156,6 +158,7 @@ describe('planShip step list', () => {
   it('skips the bundle when the app is not installed', () => {
     const steps = planShip(ctx({ appExists: false, listing: {} })) as Step[];
     expect(ids(steps)).toContain('app-absent');
+    expect(ids(steps)).not.toContain('entitlements-preflight');
     expect(ids(steps).some((id) => id.startsWith('backup-') || id === 'codesign')).toBe(false);
   });
 
@@ -307,7 +310,9 @@ describe('runSteps', () => {
       return { status: cmd === 'npm' && argv[1] === 'build' ? 2 : 0, stdout: '' };
     };
     expect(await runSteps(steps, io, { dryRun: false })).toBe(1);
-    expect(calls.map((c) => c.slice(0, 3).join(' '))).toEqual(['rm -rf /repo/dist', 'npm run build']);
+    expect(calls.map((c) => c.slice(0, 3).join(' '))).toEqual([
+      'node /repo/scripts/check-macos-entitlements.mjs', 'rm -rf /repo/dist', 'npm run build',
+    ]);
     expect(logs.at(-1)).toMatch(/step "build" failed/);
   });
 

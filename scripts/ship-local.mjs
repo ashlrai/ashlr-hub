@@ -9,11 +9,13 @@
  *   npm run ship:local -- --allow-dirty    ship uncommitted work (installed as <sha>-dirty-<time>)
  *
  * Steps, in order (docs/RELEASING-LOCALLY.md):
- *   1. `npm run build` on a clean dist/.
- *   2. `npm pack --ignore-scripts` into OS temp (the tarball you then `npm publish`).
- *   3. Extract into ~/.local/share/ashlr/releases/<sha>; `ln -sfn` it to ~/.local/share/ashlr/current.
- *   4. `npm run build:binary` (dist-bin/ashlr + dist-bin/public).
- *   5. If /Applications/Ashlr.app exists: quit it, move Contents/MacOS/ashlr and
+ *   1. If an app is installed, prove the entitlements can actually be signed
+ *      on a disposable Mach-O before changing any release or app file.
+ *   2. `npm run build` on a clean dist/.
+ *   3. `npm pack --ignore-scripts` into OS temp (the tarball you then `npm publish`).
+ *   4. Extract into ~/.local/share/ashlr/releases/<sha>; `ln -sfn` it to ~/.local/share/ashlr/current.
+ *   5. `npm run build:binary` (dist-bin/ashlr + dist-bin/public).
+ *   6. If /Applications/Ashlr.app exists: quit it, move Contents/MacOS/ashlr and
  *      Contents/Resources/public aside to *.prev-<short sha> (never deleted), copy the new
  *      ones in (and, with --native, ashlr-desktop), make sure Info.plist carries the
  *      microphone usage string, codesign with the stable local identity "Ashlr Local"
@@ -21,8 +23,8 @@
  *      fails) and Entitlements.plist, verify, relaunch.
  *      Only the 3 newest *.prev-* of each kind stay in the bundle; older ones are moved into a
  *      dated folder under ~/.Trash.
- *   6. `launchctl kickstart -k` ai.ashlr.anthropic-proxy and ai.ashlr.serve, if loaded.
- *   7. Wait for http://127.0.0.1:7777/verse/ to answer 200 and print versions.
+ *   7. `launchctl kickstart -k` ai.ashlr.anthropic-proxy and ai.ashlr.serve, if loaded.
+ *   8. Wait for http://127.0.0.1:7777/verse/ to answer 200 and print versions.
  *
  * Nothing here deletes a user file: the only removal is the repo's own dist/ before the build.
  * Everything that touches the machine goes through the injected `io`, so the planning logic
@@ -282,6 +284,7 @@ export function planShip(ctx) {
   const repo = (rel) => join(ctx.repoRoot, rel);
 
   const steps = [
+    ...(ctx.appExists ? [{ id: 'entitlements-preflight', title: 'prove codesign accepts the app entitlements before touching the release', argv: ['node', repo('scripts/check-macos-entitlements.mjs')] }] : []),
     { id: 'clean-dist', title: 'remove the repo\'s dist/ so the build is clean', argv: ['rm', '-rf', repo('dist')] },
     { id: 'build', title: 'npm run build', argv: ['npm', 'run', 'build'] },
     { id: 'pack-dir', title: `pack destination ${packDir}`, argv: ['mkdir', '-p', packDir] },
