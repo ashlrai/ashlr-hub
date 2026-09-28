@@ -62,6 +62,7 @@
   ],
   "bundledDependencies": [
     "@modelcontextprotocol/sdk",
+    "@simplewebauthn/browser",
     "@simplewebauthn/server",
     "jose",
     "marked",
@@ -179,6 +180,7 @@
   },
   "bundleDependencies": [
     "@modelcontextprotocol/sdk",
+    "@simplewebauthn/browser",
     "@simplewebauthn/server",
     "jose",
     "marked",
