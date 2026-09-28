@@ -608,6 +608,21 @@ describe('merge', () => {
     expect(result.pr.number).toBe(463);
   });
 
+  it('rechecks autonomous code gates on the exact head immediately before merging', async () => {
+    const green = fakeGit(scenario({ ghView: view({ statusCheckRollup: [{ name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' }] }) }));
+    await mergePullRequest(REPO, { number: 463, headSha: HEAD_SHA, requiredChecks: ['CI'] }, green.opts);
+    expect(green.calls.some((c) => c.bin === 'gh' && c.args[1] === 'merge')).toBe(true);
+    for (const checks of [
+      [{ name: 'Vercel', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+      [{ name: 'CI', status: 'COMPLETED', conclusion: 'NEUTRAL' }],
+      [{ name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' }, { name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+    ]) {
+      const f = fakeGit(scenario({ ghView: view({ statusCheckRollup: checks }) }));
+      await expect(mergePullRequest(REPO, { number: 463, headSha: HEAD_SHA, requiredChecks: ['CI'] }, f.opts)).rejects.toThrow(/Required code check/);
+      expect(f.calls.some((c) => c.bin === 'gh' && c.args[1] === 'merge')).toBe(false);
+    }
+  });
+
   const refusals: Array<[string, Partial<Record<string, unknown>>, string, string]> = [
     ['checks pending', { statusCheckRollup: [{ status: 'IN_PROGRESS' }] }, HEAD_SHA, 'still running'],
     ['checks failing', { statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'FAILURE' }] }, HEAD_SHA, 'failing'],

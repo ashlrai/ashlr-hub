@@ -24,7 +24,7 @@
  * A step that fails leaves a one-sentence `loopNote` on the agent (shown on
  * its card and in Checks) and is retried on a later tick — never in a burst.
  */
-import { GitOpError, mergePullRequest, type GitOpsOptions } from '../git-ops.js';
+import { GitOpError, mergePullRequest, type GitOpsOptions, type MergeInput } from '../git-ops.js';
 import type { ListPrice } from '../multimodel/escalation.js';
 import {
   archiveAgent,
@@ -36,7 +36,7 @@ import {
   type AgentEngine,
 } from './actions.js';
 import { sessionSpend } from './board.js';
-import { failingCiReport, readAgentChecks, type AgentChecksRead, type ChecksDeps } from './checks.js';
+import { failingCiReport, readAgentChecks, requiredAutoMergeChecks, type AgentChecksRead, type ChecksDeps } from './checks.js';
 import type { ScriptLauncher } from './scripts.js';
 import type { AgentStore } from './store.js';
 import { MAX_AUTO_FIX_ATTEMPTS, SPEND_WARN_FRACTION, type AgentChecksSummary, type AgentRecord } from './types.js';
@@ -53,7 +53,7 @@ export interface SupervisorDeps {
   priceOf: (engine: string, model: string) => ListPrice | null;
   readChecks?: typeof readAgentChecks;
   failingReport?: typeof failingCiReport;
-  merge?: (root: string, input: { number: number; headSha: string }) => Promise<unknown>;
+  merge?: (root: string, input: MergeInput) => Promise<unknown>;
   checksDeps?: ChecksDeps;
   /** Runs after each timed pass (the API rebuilds its board cache here). */
   afterTick?: () => Promise<void>;
@@ -221,7 +221,8 @@ export async function superviseAgent(deps: SupervisorDeps, initial: AgentRecord)
     if (mergeTried.get(agent.id) === pr.headSha) return agent;
     mergeTried.set(agent.id, pr.headSha);
     try {
-      await (deps.merge ?? ((root, input) => mergePullRequest(root, input, deps.ops)))(agent.workspace.path, { number: pr.number, headSha: pr.headSha });
+      const requiredChecks = (deps.checksDeps?.requiredAutoMergeChecks ?? (() => requiredAutoMergeChecks(process.env['ASHLR_VERSE_AUTOMERGE_CHECKS'])))();
+      await (deps.merge ?? ((root, input) => mergePullRequest(root, input, deps.ops)))(agent.workspace.path, { number: pr.number, headSha: pr.headSha, requiredChecks });
     } catch (err) {
       agent = (await note(store, agent.id, `Auto-merge was refused: ${describe(err)}`)) ?? agent;
       return agent;

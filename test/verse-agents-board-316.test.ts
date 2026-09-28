@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { buildBoard, agentNeedsYouItems, placeCard, sessionSpend, countColumns, type BoardInput } from '../src/core/verse/agents/board.js';
-import { autoMergeVerdict, actionsRunId, checkRows, prComments, type MergeVerdictInput } from '../src/core/verse/agents/checks.js';
+import { autoMergeVerdict, actionsRunId, checkRows, prComments, requiredAutoMergeChecks, type MergeVerdictInput } from '../src/core/verse/agents/checks.js';
 import { extractPlan, lastActivityLine, planApprovedPrompt, planRequestPrompt } from '../src/core/verse/agents/actions.js';
 import { scriptEnv, terminalCommand } from '../src/core/verse/agents/scripts.js';
 import { blankAgent, normalizeAgentRecord } from '../src/core/verse/agents/store.js';
@@ -244,7 +244,7 @@ describe('workspace.json', () => {
 
 describe('Auto-merge verdict', () => {
   const pr: VerseGitPr = { number: 7, title: 't', url: 'https://github.com/o/r/pull/7', state: 'open', checks: 'passing', mergeable: true, headSha: 'a'.repeat(40), baseRef: 'main', headRef: 'verse/x' };
-  const base: MergeVerdictInput = { autoMerge: true, killOn: false, pr, branch: 'verse/x', files: ['src/a.ts'], selfRepo: false, selfRepoMode: null, protectedHit: null };
+  const base: MergeVerdictInput = { autoMerge: true, killOn: false, pr, branch: 'verse/x', files: ['src/a.ts'], selfRepo: false, selfRepoMode: null, protectedHit: null, requiredChecks: ['CI'], checks: [{ name: 'CI', state: 'passing', url: null }] };
 
   it('allows only a green, mergeable, unprotected PR — in words either way', () => {
     expect(autoMergeVerdict(base)).toMatchObject({ allowed: true });
@@ -261,6 +261,19 @@ describe('Auto-merge verdict', () => {
     expect(autoMergeVerdict({ ...base, selfRepo: true, selfRepoMode: null }).reason).toMatch(/no standing grant/);
     expect(autoMergeVerdict({ ...base, selfRepo: true, selfRepoMode: 'propose-only' }).reason).toMatch(/propose-only/);
     expect(autoMergeVerdict({ ...base, selfRepo: true, selfRepoMode: 'merge-non-authority' }).allowed).toBe(true);
+  });
+
+  it('holds auto-merge when only preview checks passed or a required code check is stale', () => {
+    expect(autoMergeVerdict({ ...base, requiredChecks: [], checks: [{ name: 'Vercel', state: 'passing', url: null }] }).reason).toMatch(/preview deployment/);
+    expect(autoMergeVerdict({ ...base, checks: [{ name: 'Vercel', state: 'passing', url: null }] }).reason).toMatch(/CI has not passed/);
+    expect(autoMergeVerdict({ ...base, checks: [{ name: 'CI', state: 'pending', url: null }] }).allowed).toBe(false);
+    expect(autoMergeVerdict({ ...base, checks: [...base.checks, ...base.checks] }).allowed).toBe(false);
+  });
+
+  it('treats a missing or malformed owner code-gate setting as auto-merge off', () => {
+    expect(requiredAutoMergeChecks(undefined)).toEqual([]);
+    expect(requiredAutoMergeChecks('CI, Typecheck')).toEqual(['CI', 'Typecheck']);
+    expect(requiredAutoMergeChecks('CI,')).toEqual([]);
   });
 
   it('reads CI rows, run ids and review comments', () => {

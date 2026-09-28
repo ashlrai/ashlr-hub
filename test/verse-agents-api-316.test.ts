@@ -402,8 +402,8 @@ describe('the post-PR loop', () => {
 
   it('Auto-merge merges only on an allowed verdict, then archives the workspace (worktree and branch)', async () => {
     let agent = await readyAgent({ autoMerge: true });
-    const merges: Array<{ number: number; headSha: string }> = [];
-    const merge = async (_root: string, input: { number: number; headSha: string }) => { merges.push(input); };
+    const merges: Array<{ number: number; headSha: string; requiredChecks?: readonly string[] }> = [];
+    const merge = async (_root: string, input: { number: number; headSha: string; requiredChecks?: readonly string[] }) => { merges.push(input); };
     checksRead = readOf(detail({ ci: 'passing', mergeVerdict: { allowed: false, reason: 'It touches .github/workflows/ci.yml — CI config. That merge is yours, never automatic.' } }));
     agent = await superviseAgent(supervisorDeps({ merge }), agent);
     expect(merges).toEqual([]);
@@ -411,8 +411,8 @@ describe('the post-PR loop', () => {
 
     resetSupervisorCachesForTest();
     checksRead = readOf(detail({ ci: 'passing', mergeVerdict: { allowed: true, reason: 'ok' } }));
-    agent = await superviseAgent(supervisorDeps({ merge }), agent);
-    expect(merges).toEqual([{ number: 9, headSha: 'a'.repeat(40) }]);
+    agent = await superviseAgent(supervisorDeps({ merge, checksDeps: { requiredAutoMergeChecks: () => ['CI'] } }), agent);
+    expect(merges).toEqual([{ number: 9, headSha: 'a'.repeat(40), requiredChecks: ['CI'] }]);
     expect(agent.archived).toMatchObject({ reason: 'merged', branchDeleted: true });
     expect(existsSync(join(home, '.ashlr-worktrees', 'repo', 'fix-login'))).toBe(false);
     expect(git(repo, 'branch', '--list', 'verse/fix-login')).toBe('');

@@ -127,6 +127,17 @@ export interface MergeVerdictInput {
   selfRepoMode: 'propose-only' | 'merge-non-authority' | null;
   /** First protected-path hit among `files`, when any. */
   protectedHit: { path: string; why: string } | null;
+  /** Owner-configured code gates, never inferred from a green preview deployment. */
+  requiredChecks: readonly string[];
+  checks: readonly CheckRow[];
+}
+
+/** An unset or malformed owner configuration disables automatic merging. */
+export function requiredAutoMergeChecks(raw: string | undefined): string[] {
+  if (!raw || raw.length > 1024) return [];
+  const names = raw.split(',').map((name) => name.trim());
+  if (names.length > 8 || names.some((name) => !/^[A-Za-z0-9][A-Za-z0-9 _./:-]{0,119}$/.test(name))) return [];
+  return [...new Set(names)];
 }
 
 /** Would Auto-merge merge this PR now? One sentence either way. PURE. */
@@ -148,6 +159,15 @@ export function autoMergeVerdict(input: MergeVerdictInput): { allowed: boolean; 
         : 'This is ashlr-hub itself, and the grant’s self-land policy is propose-only: Verse opens the PR and leaves the merge to you.',
     };
   }
+  if (input.requiredChecks.length === 0) {
+    return { allowed: false, reason: 'Auto-merge needs owner-configured code checks; preview deployment success alone is not a code gate.' };
+  }
+  for (const name of input.requiredChecks) {
+    const matches = input.checks.filter((check) => check.name === name);
+    if (matches.length !== 1 || matches[0]?.state !== 'passing') {
+      return { allowed: false, reason: `Required code check ${name} has not passed on this PR head.` };
+    }
+  }
   return { allowed: true, reason: 'Green and mergeable: Auto-merge squash-merges it (GitHub’s branch rules still apply).' };
 }
 
@@ -167,6 +187,7 @@ export interface ChecksDeps extends GitOpsOptions {
   selfRepoMode?: () => Promise<'propose-only' | 'merge-non-authority' | null>;
   protectedHit?: (files: readonly string[], selfRepo: boolean) => Promise<{ path: string; why: string } | null>;
   isSelfRepo?: (root: string) => Promise<boolean>;
+  requiredAutoMergeChecks?: () => readonly string[];
 }
 
 async function defaultKillOn(): Promise<boolean> {
@@ -251,6 +272,8 @@ export async function readAgentChecks(
     selfRepo,
     selfRepoMode: input.autoMerge && selfRepo ? await (deps.selfRepoMode ?? defaultSelfRepoMode)() : null,
     protectedHit: input.autoMerge && files.length > 0 ? await (deps.protectedHit ?? defaultProtectedHit)(files, selfRepo) : null,
+    requiredChecks: (deps.requiredAutoMergeChecks ?? (() => requiredAutoMergeChecks(process.env['ASHLR_VERSE_AUTOMERGE_CHECKS'])))(),
+    checks: rows,
   });
   const checkedAt = new Date().toISOString();
   const prWire = pr
