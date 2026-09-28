@@ -24,7 +24,7 @@
         "resizable": true,
         "fullscreen": false,
         "center": false,
-        "url": "http://127.0.0.1:7777/verse/",
+        "url": "http://127.0.0.1:7777/verse/?v=3.16.1",
         "visible": false,
         "create": false,
         "titleBarStyle": "Overlay",

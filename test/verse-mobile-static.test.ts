@@ -61,8 +61,8 @@ describe('serveStatic — Verse on a phone', () => {
       expect(r.handled).toBe(true);
       expect(r.body).toContain('id="root"');
       expect(r.headers['content-type']).toContain('text/html');
-      // The shell is never immutable: a new build must reach the phone.
-      expect(r.headers['cache-control']).toBe('no-cache');
+      // A new build must replace the shell even if its old chunks were removed.
+      expect(r.headers['cache-control']).toBe('no-store');
     }
   });
 

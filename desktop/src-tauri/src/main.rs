@@ -93,7 +93,7 @@ const REMOTE_CONFIG_FILE: &str = "verse-remote.json";
 /// (see the CSP in tauri.conf.json) and the shell-contract script only runs on it.
 const SERVE_ORIGIN: &str = "http://127.0.0.1:7777";
 /// The Verse console the main window opens (tauri.conf.json `app.windows[0].url`).
-const VERSE_URL: &str = "http://127.0.0.1:7777/verse/";
+const VERSE_URL: &str = "http://127.0.0.1:7777/verse/?v=3.16.1";
 /// Label of the Verse window declared in tauri.conf.json (`create: false`,
 /// built here once the sidecar has printed its tokens).
 const MAIN_WINDOW_LABEL: &str = "main";

@@ -1,8 +1,8 @@
 /**
  * 3.10 server performance (unit A3) — static asset caching + compression.
  *
- * Hashed Vite chunks are immutable; everything else revalidates via a strong
- * ETag (bodyless 304). Text assets are brotli/gzip-encoded per Accept-Encoding
+ * Hashed Vite chunks are immutable; HTML is never stored, and other stable
+ * assets revalidate via a strong ETag (bodyless 304). Text assets are encoded
  * from a threadpool-built cache — the first hit is served identity-encoded.
  */
 
@@ -86,27 +86,37 @@ describe('cache policy', () => {
     expect(isImmutableAssetPath('/next/assets/sub/App-D2P1AJiD.js')).toBe(false);
   });
 
-  it('serves hashed chunks immutable and the shell no-cache, both with a strong ETag', async () => {
+  it('serves hashed chunks immutable and the shell no-store, both with a strong ETag', async () => {
     const chunk = await get('/next/assets/App-D2P1AJiD.js');
     expect(chunk.status).toBe(200);
     expect(chunk.headers['cache-control']).toBe(IMMUTABLE_CACHE_CONTROL);
     expect(chunk.headers['etag']).toMatch(/^"[0-9a-z]+-[0-9a-z]+-[0-9a-z]+"$/);
     const shell = await get('/verse/');
-    expect(shell.headers['cache-control']).toBe('no-cache');
+    expect(shell.headers['cache-control']).toBe('no-store');
     expect(shell.headers['etag']).toBeTruthy();
     expect(shell.headers['x-content-type-options']).toBe('nosniff');
   });
 
+  it('always returns the HTML shell body, even with a matching validator', async () => {
+    const first = await get('/verse/?v=3.16.1');
+    expect(first.status).toBe(200);
+    expect(first.headers['cache-control']).toBe('no-store');
+    const again = await get('/verse/?v=3.16.1', { 'If-None-Match': String(first.headers['etag']) });
+    expect(again.status).toBe(200);
+    expect(again.body.equals(first.body)).toBe(true);
+  });
+
   it('answers a matching If-None-Match with a bodyless 304', async () => {
-    const first = await get('/next/index.html');
+    const path = '/next/assets/logo.png';
+    const first = await get(path);
     const etag = String(first.headers['etag']);
-    const again = await get('/next/index.html', { 'If-None-Match': etag });
+    const again = await get(path, { 'If-None-Match': etag });
     expect(again.status).toBe(304);
     expect(again.body.byteLength).toBe(0);
     expect(again.headers['etag']).toBe(etag);
-    const weak = await get('/next/index.html', { 'If-None-Match': `W/${etag}, "other"` });
+    const weak = await get(path, { 'If-None-Match': `W/${etag}, "other"` });
     expect(weak.status).toBe(304);
-    const miss = await get('/next/index.html', { 'If-None-Match': '"nope"' });
+    const miss = await get(path, { 'If-None-Match': '"nope"' });
     expect(miss.status).toBe(200);
   });
 
