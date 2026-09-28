@@ -311,10 +311,14 @@ ratio, average and peak context per turn, compactions, and a warning once the
 session has been idle past the one-hour prompt-cache lifetime — the next turn
 re-reads the whole context at full cost.
 
-**Dictation.** The microphone uses the browser's Web Speech API when the runtime
-provides it. WKWebView — which is what the desktop app is — does not, so there
-the button explains itself and you use system dictation (Wispr Flow,
-Superwhisper, macOS dictation) into the composer, which is an ordinary textarea.
+**Dictation.** In the 3.16 desktop build, the microphone button and ⌃⌥V use
+native capture and local transcription in the app. The first use may ask for
+macOS Microphone permission and download the Parakeet model (about 670 MB);
+the voice HUD shows the model, permission state and any recovery action. Hold
+the shortcut to talk until release, or tap it to keep listening until the next
+tap. ⌃⌥⇧V dictates into the command palette; Esc cancels an active dictation.
+In a regular browser, the microphone uses the Web Speech API when available.
+System dictation can still type into the composer when neither path is ready.
 
 ### The 3.10 chat workbench
 
@@ -1635,8 +1639,10 @@ launches the staged sidecar, so run steps 1–2 first.
 - Local seats need the `claude` binary on `PATH` and an Anthropic-compatible
   Ollama; models without tool-use support are not offered as seats, because
   they could chat but never edit.
-- Dictation depends on the runtime. WKWebView has no `SpeechRecognition`; use
-  system dictation in the desktop app.
+- Native dictation in the 3.16 desktop build requires macOS Microphone
+  permission, a working input device and a local speech model. First use may
+  download Parakeet; the voice HUD names any missing permission or model.
+  A regular browser needs its Web Speech API for the in-app microphone.
 
 **Autonomy**
 - Autonomy is dormant until you act: it needs the custody helper, your key
