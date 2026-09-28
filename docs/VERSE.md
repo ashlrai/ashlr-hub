@@ -34,7 +34,8 @@ It is served by the normal `ashlr serve` server at `/verse/`, opened by
 - The Jev decision layer, its call sites and its bounds:
   [`docs/JEV-INTEGRATION.md`](JEV-INTEGRATION.md).
 
-This page is the user guide. It describes 3.15.
+This page is the user guide for Verse 3.16. Sections marked 3.15 describe
+features introduced in that release and retained here.
 
 **At a glance.**
 
@@ -666,15 +667,15 @@ the operator's view of it.
   the authority surface pauses autonomy ("authority code changed — re-approve")
   until one more Touch ID.
 
-**Current status (3.15).** Autonomy ships dormant and is turned on by you, on
+**Release behavior (3.16).** Autonomy ships dormant and is turned on by you, on
 macOS, in three moves: `ashlr authority setup` (custody helper, Secure
 Enclave key, trust root, `ashlr-fleet` App, Claude token, rulesets or local
 enforcement, first grant), then `ashlr authority resident start` typed in your
 own terminal, which installs the resident daemon under the grant
 ([RESIDENT-RUNTIME.md](RESIDENT-RUNTIME.md)). A new grant starts on the
 **shadow** stage: the gates run on every proposal and record would-merges,
-and no repository merges until the ladder advances. On the maintainer's Mac a
-standing grant is active and the ladder is at stage 1 of 8 (shadow).
+and no repository merges until the ladder advances. Use `ashlr authority status`
+to inspect the live grant, switch, Stop state and rollout stage on this Mac.
 
 ```sh
 ashlr authority setup --dry-run   # print every step and what it would do
@@ -690,7 +691,7 @@ the two GitHub browser clicks for the `ashlr-fleet` App, `claude
 setup-token`, and confirming the archive of the old `~/.ashlr/activation/`. It
 prints exactly what it did. Afterwards the recurring steps are one Touch ID per
 30-day grant, and one after installing a release that changed authority code
-(3.15 does: the lessons and Devin work grew the authority surface), followed by
+(3.16 does), followed by
 `ashlr authority resident stop` and `start` so the daemon runs the new build.
 The resident daemon still re-verifies the grant, Stop and the switch on every
 tick.
@@ -1387,7 +1388,8 @@ default; Settings ▸ Desktop): it brings Verse forward and focuses the composer
 ## Desktop app (macOS)
 
 The Tauri app in `desktop/` is a native window around Verse plus a menu-bar
-item. It is a source-only draft — there is no public installer (see
+item. It is locally buildable and installable; there is no notarized public
+installer (see
 `DESKTOP.md`). Full detail, including the native↔web shell contract, is in
 [`desktop/README.md`](../desktop/README.md).
 
@@ -1435,37 +1437,31 @@ tray and the Dock badge are the reliable signals there. Details:
 
 ### Install it on this Mac
 
-There is no public installer (that policy is unchanged), but building Ashlr for
-your own Mac and keeping it in the Dock is supported:
+There is no notarized public installer, but building Ashlr for your own Mac
+and keeping it in the Dock is supported. Use a clean release checkout:
 
 ```sh
-REPO=/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub
-
-# 1. Build. Run the WHOLE sequence in "Build it" below, not just the last step:
-#    npm run build:binary → prepare-sidecar.mjs → CI=true cargo tauri build.
-#    A bare `cargo tauri build` rebuilds the Rust shell around whatever web
-#    assets were already staged, which is how a stale UI gets installed.
-cd "$REPO/desktop" && CI=true cargo tauri build
-
-# 2. Verify the bundle carries this build's assets (see "Verify the bundle"
-#    below) BEFORE replacing a copy you are relying on.
-
-# 3. Install, replacing any previous copy.
-rm -rf /Applications/Ashlr.app
-cp -R "$REPO/desktop/src-tauri/target/release/bundle/macos/Ashlr.app" /Applications/
+npm ci
+npm run build:binary
+node desktop/scripts/prepare-sidecar.mjs
+(cd desktop && CI=true cargo tauri build)
+test -d /Applications/Ashlr.app || ditto desktop/src-tauri/target/release/bundle/macos/Ashlr.app /Applications/Ashlr.app
+npm run ship:local -- --native
 ```
 
-Then, **once**: the build is unsigned, so macOS refuses an ordinary
-double-click. Right-click (or Control-click) `Ashlr.app` → **Open** → **Open**.
-If no Open button appears, use System Settings → Privacy & Security →
-**Open Anyway**, or `xattr -dr com.apple.quarantine /Applications/Ashlr.app`.
+The `ditto` command seeds a first install only; `ship:local --native` updates
+an existing app with the prebuilt native binary and locally signs it with the
+stable "Ashlr Local" identity. It does not notarize the
+app with Apple Developer ID. The first signing setup may ask for your login
+password and **Always Allow** for the signing key. If Gatekeeper blocks the
+first open, right-click (or Control-click) `Ashlr.app` → **Open**, or use
+System Settings → Privacy & Security → **Open Anyway**.
 With Ashlr running, right-click its Dock icon → **Options → Keep in Dock**.
 
-**To update:** quit Ashlr, repeat steps 1–3, launch again. The Gatekeeper
-exemption is remembered per app path, so a rebuild copied over the same location
-normally opens straight away. Nothing in `~/.ashlr` is touched by installing or
-replacing the bundle — config, seats, autonomy state and window geometry all
-survive.
+**To update:** repeat the build and `ship:local --native` from the new clean
+release checkout, then verify the installed version. The script backs up the
+replaced binary and assets. Nothing in `~/.ashlr` is removed: config, seats,
+autonomy state and window geometry survive.
 
 ### Build it
 
@@ -1698,7 +1694,8 @@ launches the staged sidecar, so run steps 1–2 first.
 **Desktop**
 - macOS only. Linux Tauri builds are quarantined (`GHSA-wrw7-89jp-8q8g` /
   `RUSTSEC-2024-0429`); see `DESKTOP.md`.
-- Unsigned and un-notarized — expect the one-time Gatekeeper prompt.
+- Locally signed with "Ashlr Local" after `ship:local`; not Apple Developer ID
+  notarized. Gatekeeper may still prompt on first open.
 - The port is fixed at 7777. If something else holds it, the app tells you and
   offers to adopt it, but it cannot move to another port.
 - Tokens are held in memory only and are not persisted between launches.

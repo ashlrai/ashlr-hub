@@ -31,22 +31,24 @@ or an installation channel.
 That policy is about *publishing*. Building Ashlr for your own Mac and keeping
 it in the Dock is supported and is what the rest of this document describes:
 
-1. [Build it](#the-exact-steps-on-this-mac) — `cargo tauri build`.
-2. Copy it into place, replacing any previous copy:
+1. [Build it](#the-exact-steps-on-this-mac), including the current CLI sidecar
+   and `cargo tauri build`.
+2. From the clean repository root, seed a first install if needed, then update
+   the prebuilt native binary and sign the app locally:
    ```sh
-   REPO=/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub
-   rm -rf /Applications/Ashlr.app
-   cp -R "$REPO/desktop/src-tauri/target/release/bundle/macos/Ashlr.app" /Applications/
+   test -d /Applications/Ashlr.app || ditto desktop/src-tauri/target/release/bundle/macos/Ashlr.app /Applications/Ashlr.app
+   npm run ship:local -- --native
    ```
-3. Open it **once** with right-click → Open, because the build is unsigned —
-   see [First open on an unsigned build](#first-open-on-an-unsigned-build-gatekeeper).
+3. Check that the installed app and bundled server report this release.
+   Gatekeeper may ask you to right-click → Open on first launch; see
+   [First open on a local build](#first-open-on-an-unsigned-build-gatekeeper).
 4. With Ashlr running, right-click its Dock icon → **Options → Keep in Dock**.
 
-To update later, quit Ashlr, repeat steps 1–2, and launch again. The
-right-click-Open exemption is remembered per app path, so a rebuild copied over
-`/Applications/Ashlr.app` normally opens straight away; if a macOS update
-resets that, do step 3 again. Nothing in `~/.ashlr` is touched by installing or
-replacing the bundle — your config, seats and window state all survive.
+To update later, repeat steps 1–3 from the new clean release checkout.
+`ship:local` backs up replaced files and uses the stable "Ashlr Local"
+code-signing identity so macOS permissions can survive rebuilds. Its first
+signing setup may ask for your login password and **Always Allow** for the key.
+Nothing in `~/.ashlr` is removed; config, seats and window state survive.
 
 ---
 
@@ -900,11 +902,12 @@ the failure is only about the disk image wrapped around it.
 
 ### First open on an unsigned build (Gatekeeper)
 
-Locally built apps are **unsigned and un-notarized**. macOS will refuse the
-first open with *"Ashlr" cannot be opened because the developer cannot be
-verified* — or, if you opened it from the DMG you just built, *"Ashlr" is
-damaged and can't be opened*, which is the same quarantine flag with a worse
-message.
+The raw `cargo tauri build` artifact may be unsigned. The supported local
+install through `ship:local --native` signs `/Applications/Ashlr.app` with
+"Ashlr Local", a stable identity trusted for code signing on this Mac. It is
+**not** an Apple Developer ID signature or notarization. Gatekeeper can still
+block its first open with *"Ashlr" cannot be opened because the developer
+cannot be verified*; a quarantined DMG may show a different warning.
 
 Do this once, after copying `Ashlr.app` to `/Applications`:
 
@@ -919,10 +922,9 @@ Do this once, after copying `Ashlr.app` to `/Applications`:
   xattr -dr com.apple.quarantine /Applications/Ashlr.app
   ```
 
-This is expected for any unsigned build and is not a bug in the app. It goes
-away only with an Apple Developer ID signature plus notarization, which is out
-of scope here (see [Auto-update](#auto-update-tauri-updater-plugin) for where
-signing secrets would go).
+This can occur with a local signature and is not a bug in the app. A public
+installer without that prompt would require Apple Developer ID signing and
+notarization, which this release does not provide.
 
 ### CI / automated releases
 

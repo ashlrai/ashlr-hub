@@ -42,7 +42,11 @@ manifests, schemas and stores need no naming migration.
 
 The user guide is [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
 
-### What's in Verse 3.15
+### What's in Verse 3.16
+
+Verse 3.16 adds the native Agents workbench, guarded computer and browser tools,
+an optional phone gateway, and learning with reviewable evidence. The 3.15
+capabilities below remain part of this release.
 
 | | What you get | Guide |
 |---|---|---|
@@ -50,19 +54,19 @@ The user guide is [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/ma
 | **Autonomy with custody** | A Touch ID standing grant names repos, engines, caps and spend. Every change passes gates G0–G7 and a judge from another model family; merges are SHA-pinned, watched for two hours and reverted if red. Command shows the rollout ladder (stage x of 8); Fleet shows every shadow decision and why. | [STANDING-AUTHORITY.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md) |
 | **A multi-seat workbench** | Claude Code, several Codex accounts, Grok, local models and Devin side by side, each pinned to its own profile. Auto seat, Compare, cheap-first and one-click handoff across seats. A panel of Terminal (command blocks, an Agent tab), Browser (observation by default; guarded actions under a separate grant), Changes (a checkpoint before every turn, Accept/Reject, Undo/Redo), Sources and Reasoning, plus focus mode. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) |
 | **Resources, ready or not** | ⌘. shows every account, local runtime, cloud credits and Devin, each with a "Chat: ready" and a "Fleet: ready · reserve kept" line and the command that fixes it. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#resources-the-drawer-and-the-bar-311) |
-| **Cloud and Devin** | Hand a task to a Claude Code cloud session or a Devin session, or chat with Devin (cloud or CLI). Each task delivers one PR with a report; Needs you shows a gate verdict and Land, Close, Update branch. Cloud Devin needs two judge families; eligible local CLI work can use a signed elite-direct grant. | [CLOUD.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md), [DEVIN.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md) |
-| **A private repo wiki** | An architecture wiki per repo with verified `file:line` citations, and Ask the codebase, written by your local models (Grok only if the grant allows, never Claude) and stored only on your Mac. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#repo-wiki-and-ask-315) |
+| **Cloud and Devin** | Hand a scoped task to a Claude Code cloud or Devin lane for a reported PR, or chat in a separate Devin cloud or CLI seat. The signed-in Devin CLI defaults to Cognition SWE-2 High; cloud sessions use ACUs and do not report an underlying model. Lane PRs reach Needs you and the standing gates. Cloud Devin needs two judge families; eligible local CLI work can use a signed elite-direct grant. | [CLOUD.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md), [DEVIN.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md) |
+| **A private repo wiki** | An architecture wiki per repo with verified `file:line` citations and Ask the codebase. Pages are stored on your Mac; generation prefers local models, but may send repository context to Grok when the grant and repository policy allow it. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#repo-wiki-and-ask-315) |
 | **Lessons** | Every task end becomes a retro with a root cause, swept hourly. Knowledge it suggests is used only after you approve it, and only where its scope matches. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#lessons-retros-and-approved-knowledge-315) |
 | **Playbooks and automations** | Versioned task templates, run with a `!macro` in any chat or lane; issues, red builds, schedules and webhooks that become work, through each lane's own gates. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#playbooks-315) |
 | **Jev decisions** | One fast, typed decision layer with a rules fallback at every call site, advisory or escalate-only where safety is near. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#the-jev-decision-layer-315) |
 
-**Status, plainly.** Autonomy ships dormant. It turns on only after you install
-the custody helper, sign a grant and start the resident daemon yourself, and it
-is macOS-only. On the maintainer's Mac a grant is active and the ladder is at
-stage 1 of 8, shadow, where nothing merges. That grant does not name Devin,
-so the fleet starts no Devin sessions and Devin PRs stay shadow. What is
-activated where is kept current in
-[AUTONOMY-GAP.md](docs/AUTONOMY-GAP.md#current-activation-state-315).
+**Status, plainly.** Autonomy ships dormant and is macOS-only. It turns on
+only after you install the custody helper, sign a grant and start the resident
+daemon yourself. A new grant starts at stage 1 of 8, shadow, where nothing
+merges. A release that changes authority code pauses an existing grant until
+Touch ID reapproval. Check the live grant, switch, Stop state and rollout stage
+with `ashlr authority status`; a source document cannot establish that the
+resident daemon is active on a particular Mac.
 
 ---
 
@@ -75,29 +79,33 @@ separate Node.js install to run.
 
 ### Install
 
-There is no public installer and the build is unsigned. You build it once on
-your Mac and keep it in the Dock. The full sequence, prerequisites (Rust with
-`tauri-cli` 2, Bun, Node, Xcode command line tools) and the checks that the
-bundle carries the current assets are in
-[Desktop app](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#desktop-app-macos).
-In short, from the repository root:
+There is no notarized public installer. On a trusted macOS checkout, build the
+native app and use the local release script to install it with the stable
+"Ashlr Local" code-signing identity. The prerequisites, exact build order and
+verification steps are in [Releasing without CI](docs/RELEASING-LOCALLY.md)
+and [Desktop app](docs/VERSE.md#desktop-app-macos). In short, from a clean
+repository root:
 
 ```sh
 npm ci
-npm run build:binary                       # the CLI as one executable, web assets included
-node desktop/scripts/prepare-sidecar.mjs   # stage it inside the app
-cd desktop && npm run icons && CI=true cargo tauri build
-rm -rf /Applications/Ashlr.app
-cp -R src-tauri/target/release/bundle/macos/Ashlr.app /Applications/
+npm run build:binary
+node desktop/scripts/prepare-sidecar.mjs
+(cd desktop && CI=true cargo tauri build)
+test -d /Applications/Ashlr.app || ditto desktop/src-tauri/target/release/bundle/macos/Ashlr.app /Applications/Ashlr.app
+npm run ship:local -- --native
 ```
 
-Run all of those steps every time. A bare `cargo tauri build` wraps a new shell
-around whatever web assets an earlier build left behind.
+The `ditto` step seeds a first install only; `ship:local --native` updates an
+existing app with the prebuilt native binary and local signature. It does not
+compile Rust. Verify that it copied the new binary and that the installed app
+reports this release. A bare `cargo tauri build` can wrap stale web assets.
 
 ### Open
 
-The first time, right-click `Ashlr.app` and choose **Open**, because the build is
-unsigned. After that it opens normally. A small launch window says what is
+The local build is signed with "Ashlr Local", not Apple Developer ID notarized.
+macOS may still require right-click **Open** or **Open Anyway** on first launch.
+The first signing setup may also ask for your login password and **Always Allow**
+for the signing key. A small launch window says what is
 happening while the bundled server starts on `127.0.0.1:7777`. The Verse window
 then opens with its tokens already handed over, so there is nothing to paste.
 Closing the window hides it to the menu bar; **Quit** stops the server.
@@ -207,7 +215,7 @@ ID).
 
 ## Autonomy commissioning path
 
-**Current release status (3.15):** `ashlr authority setup` is a resumable preparation
+**Release status (3.16):** `ashlr authority setup` is a resumable preparation
 workflow. Its dry run is read-only; a live run can create custody, GitHub and
 grant state after your explicit actions. Setup itself never installs or restarts
 the daemon. The legacy service paths (`ashlr daemon install`, `ashlr setup`,
@@ -265,18 +273,17 @@ copy.
     service.
 
 Standing grants require Touch ID reapproval every 30 days or after authority
-code changes; until then the resident daemon parks without working. 3.15
+code changes; until then the resident daemon parks without working. This release
 changes authority code, so after installing it run `ashlr authority re-approve`,
 then `ashlr authority resident stop` and `start` to put the daemon on the new
 build.
 
-**Where it stands.** On the maintainer's Mac a standing grant is active and the
-rollout ladder is at stage 1 of 8, shadow: the gates run and record
-would-merges, and no repository merges yet. Command shows the ladder and grant
-countdown; Fleet lists every shadow decision with its G0–G7 chips. Private
+**Where to check.** `ashlr authority status` and the Command and Fleet views
+show the current grant, switch, rollout stage, grant countdown and decisions.
+A new grant starts in shadow and cannot merge until its ladder advances. Private
 repositories on GitHub's free plan, which cannot have rulesets, use local
-enforcement with the App's host-verified `ashlr/verify` check. Dated details:
-[AUTONOMY-GAP.md](docs/AUTONOMY-GAP.md#current-activation-state-315).
+enforcement with the App's host-verified `ashlr/verify` check. Historical
+commissioning evidence is in [AUTONOMY-GAP.md](docs/AUTONOMY-GAP.md).
 
 **What a grant allows.** A standing grant names the repositories, engines, risk
 and size caps, spend ceiling and Leader classes, and is valid for at most 30
@@ -320,7 +327,7 @@ and the share kept for you, or click it to open the drawer. **Hide resource bar*
 
 ```sh
 npm run gate          # minutes, not half an hour: static checks + the tests your change can reach
-npm run ship:local    # build, install as your CLI, update Ashlr.app (--native: shell + icon), restart, verify
+npm run ship:local -- --native  # after a native build: install CLI and locally sign Ashlr.app
 ```
 
 Then `npm publish` the tarball `ship:local` prints. `npm run gate:full` runs every suite. See
@@ -358,7 +365,7 @@ credits, so they keep working after the subscription window is spent.
 How it works, the delivery contract, the budget math and every failure code:
 [`docs/CLOUD.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md).
 
-### The Devin lane (3.15)
+### The Devin lane
 
 Devin (Cognition) sits beside the cloud lane, **off by default**.
 `ashlr devin connect` verifies a `cog_…` key (a service user with the Member
@@ -366,7 +373,10 @@ role, or a personal access token) and stores it in the macOS Keychain;
 `ashlr devin budget --acu <n>` sets an ACU budget with a per-session hard cap
 and a reserve. Then pick **Devin (cloud)** in New chat for a Devin session per
 chat, or **Devin (CLI)** to drive the `devin` agent on this Mac (after
-`devin auth login`). **Run in Devin** (composer ⋯ sheet or ⌘K) or
+`devin auth login`). The CLI seat defaults to Cognition SWE-2 High; the cloud
+seat is ACU metered and does not identify its underlying model. A CLI chat can
+show a PR link, but is separate from the reported, gated lane. **Run in Devin**
+(composer ⋯ sheet or ⌘K) or
 `ashlr devin launch "<task>"` hands off a task that must deliver one PR from
 `ashlr-devin/<taskId>`. With `ashlr devin fleet on`, custody helper 1.1.0 or
 later and a grant that names Devin, the fleet may launch Devin on well-scoped
@@ -1063,7 +1073,8 @@ preflight soft-warns *consider locus.firm for production* (non-blocking).
 | **3.11** | The cloud lane: Claude Code cloud sessions on Claude credits, with an estimated budget and self-improvement. Also the Resources drawer (⌘.) and the always-on resource bar, provider logos, the Ashlr.AI mark, a 349 KB first paint, and `npm run gate` / `npm run ship:local` | 3.11.5 source; verify npm publication separately |
 | **3.12–3.13** | Your key is the trust root; guided `ashlr authority setup`; the host-verified `ashlr/verify` check; cloud PRs into the standing gates; the resident runtime under a standing grant (`ashlr authority resident start`) | Shipped |
 | **3.14** | Talk to the Leader in Verse, Telegram and the CLI; Leader reliability; accounts ready in both chat and fleet; the rollout ladder on Command and shadow decisions on Fleet; local enforcement for free-plan private repos; `file:../` sibling dependencies; a sidecar that cannot freeze; chart polish | Shipped |
-| **3.15** | Founder-mode Leader; Devin as chat seats, a lane and a fleet producer under a two-judge rule; the workbench panel (terminal blocks, browser, checkpoints, sources and reasoning); every seat together; playbooks and automations; the Jev decision layer; retros and approved knowledge (Growth ▸ Lessons); a private repo wiki and Ask | In source on master; verify npm publication separately |
+| **3.15** | Founder-mode Leader; Devin as chat seats, a lane and a fleet producer under a two-judge rule; the workbench panel (terminal blocks, browser, checkpoints, sources and reasoning); every seat together; playbooks and automations; the Jev decision layer; retros and approved knowledge (Growth ▸ Lessons); a private repo wiki and Ask | Included in the 3.16 source; verify npm publication separately |
+| **3.16** | Native Agents workbench and guarded computer tools; optional authenticated phone gateway; reviewable learning evidence; Devin CLI SWE-2 High default; local signing and release fixes | Release source; verify npm publication separately |
 
 Releases are built and published locally (GitHub Actions is off); the procedure
 is in [Releasing without CI](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
