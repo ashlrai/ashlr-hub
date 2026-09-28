@@ -27,7 +27,13 @@ function validActivity(value: unknown): value is Activity {
     const entry = item as Record<string, unknown>;
     return typeof entry.id === 'string' && entry.id.length > 0 && entry.id.length <= 512
       && NEEDS_YOU_SOURCES.includes(entry.source as NeedsYouSource);
-  }) && row.completions.every((item: unknown) => item !== null && typeof item === 'object' && !Array.isArray(item));
+  }) && row.completions.every((item: unknown) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+    const entry = item as Record<string, unknown>;
+    return typeof entry.sessionId === 'string' && entry.sessionId.length > 0
+      && typeof entry.at === 'string' && Number.isFinite(Date.parse(entry.at))
+      && ['ok', 'failed', 'cancelled'].includes(String(entry.outcome));
+  });
 }
 
 export function createRemotePushWatcher(options: RemotePushWatcherOptions) {
@@ -58,7 +64,7 @@ export function createRemotePushWatcher(options: RemotePushWatcherOptions) {
         known.set(source, next);
         healthy.add(source);
       }
-      const newCompletion = initialized && result.completions.length > 0;
+      const newCompletion = initialized && result.sources.chats === 'ok' && result.completions.length > 0;
       // Advance before the network calls: a failed push must not replay old work.
       cursor = result.cursor;
       initialized = true;

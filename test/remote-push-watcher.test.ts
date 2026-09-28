@@ -23,10 +23,10 @@ function fixture() {
 describe('remote push activity watcher', () => {
   it('baselines history, then sends one content-free category for new work and completion', async () => {
     const f = fixture();
-    f.set(f.row('c1', ['old'], [{ sessionId: 'history' }]));
+    f.set(f.row('c1', ['old'], [{ sessionId: 'history', at: new Date().toISOString(), outcome: 'ok' }]));
     expect(await f.watcher.pollOnce()).toBe(true);
     expect(f.sent).toEqual([]);
-    f.set(f.row('c2', ['old', 'new'], [{ sessionId: 'finished' }]));
+    f.set(f.row('c2', ['old', 'new'], [{ sessionId: 'finished', at: new Date().toISOString(), outcome: 'ok' }]));
     expect(await f.watcher.pollOnce()).toBe(true);
     expect(f.sent).toEqual(['needs-you', 'completed']);
     expect(f.seen).toEqual([null, 'c1']);
