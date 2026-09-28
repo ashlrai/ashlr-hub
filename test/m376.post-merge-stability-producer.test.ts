@@ -22,6 +22,10 @@ function candidate(overrides: Partial<StableWindowCandidate> = {}): StableWindow
     stableAtMs,
     windowMs: DAY,
     verificationDigest: 'd'.repeat(64),
+    verifiedAt: new Date(stableAtMs + 60_000).toISOString(),
+    verificationIsolation: 'detached-worktree',
+    workspaceClean: true,
+    requiredCommandCount: 3,
     ...overrides,
   };
 }
@@ -38,6 +42,7 @@ describe('M376 stable-window witness production', () => {
       mergeCommit: 'c'.repeat(40),
       stableAtMs: Date.parse('2026-07-13T12:00:00.000Z'),
       windowStartedAtMs: Date.parse('2026-07-12T12:00:00.000Z'),
+      verifiedAt: '2026-07-13T12:01:00.000Z',
     });
 
     expect(recordStableWindowWitnesses([candidate(), second], writer)).toMatchObject({
@@ -51,7 +56,11 @@ describe('M376 stable-window witness production', () => {
       expect(input.witnesses[0]).not.toHaveProperty('diff');
       expect(input.witnesses[0]).not.toHaveProperty('output');
       expect(input.witnesses[0].verificationDigest).toMatch(/^[a-f0-9]{64}$/);
-      expect(input.completedAt.slice(0, 10)).toBe(input.witnesses[0].stableAt.slice(0, 10));
+      expect(input.witnesses[0]).toMatchObject({
+        schemaVersion: 2, verificationIsolation: 'detached-worktree',
+        workspaceClean: true, requiredCommandCount: 3,
+      });
+      expect(input.completedAt).toBe(input.witnesses[0].verifiedAt);
     }
   });
 
@@ -77,10 +86,12 @@ describe('M376 stable-window witness production', () => {
       candidate({ proposalId: 'proposal-2', mergeCommit: 'c'.repeat(40), verificationDigest: 'D'.repeat(64) }),
       candidate({ proposalId: 'proposal-3', mergeCommit: 'C'.repeat(40) }),
       candidate({ proposalId: 'proposal-4', mergeCommit: 'd'.repeat(40), stableAtMs: stableAtMs - 1 }),
+      candidate({ proposalId: 'proposal-5', mergeCommit: 'e'.repeat(40), workspaceClean: false as true }),
+      candidate({ proposalId: 'proposal-6', mergeCommit: 'f'.repeat(40), verifiedAt: new Date(stableAtMs - 1).toISOString() }),
     ];
 
     expect(recordStableWindowWitnesses(invalid, writer)).toMatchObject({
-      candidates: 4, eligible: 0, ineligible: 4, cohortsAttempted: 0,
+      candidates: 6, eligible: 0, ineligible: 6, cohortsAttempted: 0,
     });
     expect(writer).not.toHaveBeenCalled();
   });
@@ -123,6 +134,10 @@ describe('M376 stable-window witness production', () => {
       expect(readPostMergeStability({ requireComplete: true })).toMatchObject({
         sourceState: 'healthy', complete: true, releasedCohorts: 1,
         cohortSummary: { completeCohorts: 1, releasedWitnesses: 1 },
+        witnesses: [{
+          schemaVersion: 2, verificationIsolation: 'detached-worktree',
+          workspaceClean: true, requiredCommandCount: 3,
+        }],
       });
     } finally {
       if (previous === undefined) delete process.env.ASHLR_HOME;
