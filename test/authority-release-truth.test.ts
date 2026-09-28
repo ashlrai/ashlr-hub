@@ -32,11 +32,12 @@ describe('emergency authority release truth', () => {
     const failed = releaseBlock('3.3.1');
     const release = releaseBlock('3.3.2');
 
-    // Development entries can accumulate without becoming published-release evidence.
-    const unreleased = releaseBlock('Unreleased');
-    expect(unreleased).toMatch(/Verification[\s\S]{0,80}runs locally without GitHub Actions/);
-    expect(unreleased).toMatch(/receipt does not certify these new source changes/);
-    expect(unreleased).toMatch(/does not activate accounts, publish a registry release, or start a resident\s+scheduler/);
+    // The old source notes now sit in the 3.16 entry. They still distinguish
+    // earlier receipts from changes that arrived later.
+    const laterRelease = releaseBlock('3.16.0');
+    expect(laterRelease).toMatch(/Verification[\s\S]{0,80}runs locally without GitHub Actions/);
+    expect(laterRelease).toMatch(/receipt does not certify these new source changes/);
+    expect(laterRelease).toMatch(/does not activate accounts, publish a registry release, or start a resident\s+scheduler/);
 
     expect(historical).toContain('Fleet activation unblocked, autonomous merge wired, learning loop closed');
     expect(createHash('sha256').update(historical).digest('hex'))
