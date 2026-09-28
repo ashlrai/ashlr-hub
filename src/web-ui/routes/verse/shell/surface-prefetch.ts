@@ -30,6 +30,7 @@ import {
   reasoningDigestQuery,
 } from '../command/surface-data.js';
 import { leaderDirectivesQuery, leaderThreadQuery } from '../leader/thread-data.js';
+import { fleetControlQuery, fleetQueueQuery } from '../fleet/fleet-control-queries.js';
 import { verseBootstrapQuery, verseSessionsQuery, verseWorkspacesQuery } from '../verse-queries.js';
 import type { VerseSectionId } from '../verse-ui-store.js';
 
@@ -42,10 +43,12 @@ export const SURFACE_PREFETCH: Readonly<Partial<Record<VerseSectionId, readonly 
   // cloudQuery (3.11): the Cloud card's overview — without it a first visit
   // paints "Reading the cloud lane…" under the seat strip.
   // leaderThreadQuery: the Leader card's latest-message line (leader/LeaderLine).
-  command: [authorityQuery, fleetLiveQuery, leaderQuery, learningQuery, fleetHistoryQuery, budgetQuery, cloudQuery, leaderThreadQuery],
+  // fleetControlQuery (3.15): Command's one line about the fleet (fleet/FleetStatusLink).
+  command: [authorityQuery, fleetLiveQuery, leaderQuery, learningQuery, fleetHistoryQuery, budgetQuery, cloudQuery, leaderThreadQuery, fleetControlQuery],
   // authorityQuery + fleetLiveQuery on Fleet, Growth and Mind: the shared
   // "Autonomy is off" state (autonomy/AutonomyOffState) reads both.
-  fleet: [fleetLiveQuery, authorityQuery, overnightQuery, budgetQuery, budgetPreviewQuery],
+  // fleetControlQuery + fleetQueueQuery (3.15): the control surface and the steer panel.
+  fleet: [fleetLiveQuery, authorityQuery, overnightQuery, budgetQuery, budgetPreviewQuery, fleetControlQuery, fleetQueueQuery],
   growth: [fleetHistoryQuery, learningQuery, modelsQuery('30d'), authorityQuery, fleetLiveQuery],
   // The conversation (leader/LeaderConversation) reads the thread and the directives.
   mind: [leaderQuery, leaderThreadQuery, leaderDirectivesQuery, reasoningDigestQuery, verseBootstrapQuery, verseWorkspacesQuery, authorityQuery, fleetLiveQuery],

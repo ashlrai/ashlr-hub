@@ -14,7 +14,7 @@
  *
  * All copy is plain text; the draft is server data but rendered as text only.
  */
-import { useId } from 'react';
+import { useId, useState } from 'react';
 import type { AuthorityGrantDraft, RolloutStage, StandingGrantV1 } from '../../../../core/authority/types.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { Sheet } from '../../../components/primitives/Sheet.js';
@@ -24,6 +24,8 @@ import { authorityDraftQuery, type OptionalRead } from './surface-data.js';
 import { SWITCH_LABEL } from './authority-model.js';
 import { CardNote, MicroLabel } from './Surface.js';
 import type { AutonomySwitch } from '../../../../core/authority/types.js';
+import type { SurfaceActions } from './actions.js';
+import { GrantDiff, GrantScopeEditor, postGrantDraft, type EditableGrantDraft } from './GrantScopeEditor.js';
 import styles from './command.module.css';
 
 export type GrantIntent = 'grant' | 're-approve';
@@ -38,6 +40,14 @@ export interface GrantSheetProps {
   why: string;
   onApprove: (draft: AuthorityGrantDraft) => void;
   onClose: () => void;
+  /**
+   * 3.15: the surface's guarded action. With it the sheet can EDIT the draft's
+   * scope (repos, engines, Leader classes, caps, days) before signing — the
+   * token prompt comes first, like every write. Without it, view-only.
+   */
+  act?: SurfaceActions['act'];
+  /** 3.15: open straight into the scope editor (Fleet's "Edit scope"). */
+  startEditing?: boolean;
 }
 
 const DAY = 86_400_000;
@@ -155,18 +165,51 @@ export function DraftScope({ draft }: { draft: AuthorityGrantDraft }) {
   );
 }
 
-export function GrantSheet({ open, intent, then, busy, why, onApprove, onClose }: GrantSheetProps) {
+export function GrantSheet({ open, intent, then, busy, why, onApprove, onClose, act, startEditing }: GrantSheetProps) {
   const titleId = useId();
   // Only read the draft while the sheet is open: drafting is cheap on the
   // server, but a draft read while the sheet is closed would be stale by the
   // time anyone approved it.
-  return open ? <GrantSheetBody titleId={titleId} intent={intent} then={then} busy={busy} why={why} onApprove={onApprove} onClose={onClose} /> : null;
+  return open ? <GrantSheetBody titleId={titleId} intent={intent} then={then} busy={busy} why={why} onApprove={onApprove} onClose={onClose} {...(act ? { act } : {})} startEditing={startEditing === true} /> : null;
 }
 
-function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose }: Omit<GrantSheetProps, 'open'> & { titleId: string }) {
+function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose, act, startEditing }: Omit<GrantSheetProps, 'open'> & { titleId: string }) {
   const read = useQuery(authorityDraftQuery, { freshMs: 0 });
-  const draft = (read.data as OptionalRead<AuthorityGrantDraft> | undefined)?.value ?? null;
+  const served = (read.data as OptionalRead<AuthorityGrantDraft> | undefined)?.value ?? null;
+  // 3.15: Mason's edited draft (the server's answer to the editor) replaces
+  // the served one; approving signs exactly the draft on screen (its digest).
+  const [edited, setEdited] = useState<EditableGrantDraft | null>(null);
+  const [editing, setEditing] = useState(startEditing === true);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const draft: EditableGrantDraft | null = edited ?? (served as EditableGrantDraft | null);
   const reason = read.data?.reason ?? null;
+  const canEdit = act !== undefined && (served as EditableGrantDraft | null)?.editable !== undefined;
+
+  function preview(scope: Parameters<typeof postGrantDraft>[1]): void {
+    if (!act || !served) return;
+    const kind = (served as EditableGrantDraft).kind ?? 'auto';
+    setEditError(null);
+    setPreviewing(true);
+    act(
+      async () => {
+        try {
+          return await postGrantDraft(kind, scope);
+        } catch (error) {
+          setEditError(error instanceof Error ? error.message : String(error));
+          return null;
+        } finally {
+          setPreviewing(false);
+        }
+      },
+      'Preview the edited grant',
+      {
+        onDone: (next) => {
+          if (next && typeof next === 'object' && typeof next.digest === 'string') setEdited(next);
+        },
+      },
+    );
+  }
   return (
     <Sheet
       open
@@ -195,7 +238,31 @@ function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose }
       {read.status === 'loading' && !read.data ? (
         <p className={styles.muted} aria-busy="true">Preparing the grant draft…</p>
       ) : draft ? (
-        <DraftScope draft={draft} />
+        <>
+          {canEdit ? (
+            <div className={styles.scopeEditToggle}>
+              <Button variant="ghost" size="sm" aria-expanded={editing} onClick={() => setEditing((e) => !e)}>
+                {editing ? 'Hide the scope editor' : 'Edit scope'}
+              </Button>
+              {edited ? <span className={styles.scopeMeta}>Showing your edited draft.</span> : null}
+            </div>
+          ) : null}
+          {canEdit && editing && served ? (
+            <GrantScopeEditor
+              draft={served as EditableGrantDraft}
+              busy={previewing}
+              edited={edited !== null}
+              onPreview={preview}
+              onReset={() => {
+                setEdited(null);
+                setEditError(null);
+              }}
+            />
+          ) : null}
+          {editError ? <CardNote tone="danger">{editError}</CardNote> : null}
+          <GrantDiff lines={draft.diff} />
+          <DraftScope draft={draft} />
+        </>
       ) : (
         <CardNote tone="unknown">{reason ?? 'Grant draft unreadable — nothing to approve.'}</CardNote>
       )}

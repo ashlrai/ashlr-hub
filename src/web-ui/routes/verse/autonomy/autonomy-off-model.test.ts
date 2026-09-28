@@ -37,7 +37,8 @@ describe('autonomyOffState', () => {
       expect(s.kind).toBe('grant');
       expect(`${s.title}. ${s.why}`).toBe('Autonomy is off. Approve a standing grant to let the fleet work.');
       expect(s.grant).toEqual({ intent: 'grant', label: 'Approve grant' });
-      expect(s.go).toEqual({ section: 'command', anchor: null, label: 'Approve in Command' });
+      // 3.15: the fleet is operated on Fleet — its control surface opens the sheet.
+      expect(s.go).toEqual({ section: 'fleet', anchor: 'fleet-control', label: 'Approve in Fleet' });
       expect(s.command).toBeNull();
     }
   });
@@ -58,7 +59,7 @@ describe('autonomyOffState', () => {
 
   it('puts Stop first, whatever the grant says', () => {
     const s = autonomyOffState({ authority: authorityStatus('live', NOW, { kill: true }), live: { ...fleetLive('live', NOW), state: 'stopped' } })!;
-    expect(s).toMatchObject({ kind: 'stopped', title: 'Fleet stopped', go: { section: 'command' } });
+    expect(s).toMatchObject({ kind: 'stopped', title: 'Fleet stopped', go: { section: 'fleet', label: 'Start in Fleet' } });
   });
 
   it('says the switch holds autonomy at Off under an active grant', () => {

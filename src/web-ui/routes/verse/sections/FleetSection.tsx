@@ -1,8 +1,13 @@
 /**
  * routes/verse/sections/FleetSection.tsx — ⌘2 Fleet (SPEC-310B §6,
- * SPEC-310C §5; unit C7). What is running where, why that seat, what is
- * waiting, and per-repo control.
+ * SPEC-310C §5; unit C7). THE place to operate the fleet (3.15): what it is
+ * doing and the one thing in its way, Start / Pause / Resume / Stop, the grant
+ * (and editing it), steering runs and the queue — then what is running where,
+ * why that seat, what is waiting, and per-repo control.
  *
+ *   Fleet control: one sentence, one blocker, the controls, the facts (lead)
+ *   Rollout ladder (while a grant is active)                       (12)
+ *   Steer: working runs (log / interject / stop), queue, goals, Leader (12)
  *   Live swimlane by lane × phase                                  (12)
  *   Shadow decisions: G0–G7 per proposal, ladder regressions       (12)
  *   Gate funnel + refusal reasons (7) | Why this seat (5)
@@ -26,6 +31,10 @@ import { overnightQuery } from '../autonomy/overnight-queries.js';
 import { useNow } from '../autonomy/use-ticker.js';
 import { budgetPreviewQuery, budgetQuery } from '../budget/budget-queries.js';
 import { ActionStatus, useSurfaceActions } from '../command/actions.js';
+import { paletteBlock, useGrantFlow } from '../command/AutonomyBar.js';
+import { anchorId } from '../command/nav.js';
+import { FleetControl } from '../fleet/FleetControl.js';
+import { SteerPanel } from '../fleet/SteerPanel.js';
 import { Cell, Surface } from '../command/Surface.js';
 import { authorityQuery, fleetLiveQuery } from '../command/surface-data.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
@@ -33,6 +42,7 @@ import { useViewport } from '../shell/viewport.js';
 import { GateFunnelCards, LanesStrip, LiveSwimlane, OvernightCard, ParkedCard, WhySeatCard } from '../fleet/FleetCards.js';
 import { RepoTable } from '../fleet/RepoTable.js';
 import { nothingToDraw } from '../fleet/live-model.js';
+import { fleetDarkSince } from '../fleet/dark-since.js';
 import styles from '../fleet/fleet.module.css';
 
 export const FLEET_POLL_MS = 5_000;
@@ -44,6 +54,8 @@ export const FLEET_SLOW_POLL_MS = 30_000;
 const ShadowDecisions = lazy(() => import('../fleet/ShadowDecisions.js'));
 
 const FleetAdvanced = lazy(() => import('../fleet/Advanced.js').then((m) => ({ default: () => <m.FleetAdvanced embedded /> })));
+// The rollout ladder (3.14) lives here since 3.15 — Command links to it.
+const AutonomyStatus = lazy(() => import('../command/AutonomyStatus.js'));
 
 export function FleetSection() {
   const { compact } = useViewport();
@@ -62,13 +74,16 @@ export function FleetSection() {
 
   const now = useNow(15_000);
   const actions = useSurfaceActions();
+  // One Touch ID sheet for Start's grant step, the blocker and "Edit scope".
+  const grantFlow = useGrantFlow(actions);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const advancedId = useId();
   const live = fleet.data?.value ?? null;
   const off = useAutonomyOff();
   // Same cache entry as the off-state's read (no extra request).
   const authority = useQuery(authorityQuery, { freshMs: 30_000 });
-  const grantState = authority.data?.value?.grant.state ?? null;
+  const auth = authority.data?.value ?? null;
+  const grantState = auth?.grant.state ?? null;
   // A grant (active, or lapsed with history) means the ledger has decisions to show.
   const showDecisions = grantState !== null && grantState !== 'none';
   // Collapse only what would be empty: a fleet stopped an hour ago still
@@ -87,11 +102,35 @@ export function FleetSection() {
       lead={
         <>
           <ActionStatus actions={actions} />
+          <div id={anchorId('fleet-control')}>
+            <span id={anchorId('authority-grant')} />
+            <FleetControl actions={actions} grantFlow={grantFlow} darkSince={fleetDarkSince(live)} setupShownBelow={off?.kind === 'setup'} />
+          </div>
+          {/* The one-time setup checklist (the only step list left); every other
+              off state is FleetControl's single blocker + button. */}
+          {off && off.kind === 'setup' ? <AutonomyOffState state={off} here="fleet" /> : null}
           <LanesStrip live={live} />
-          {off ? <AutonomyOffState state={off} here="fleet" /> : null}
         </>
       }
     >
+      {auth && auth.grant.state === 'active' ? (
+        // Needs-you's rollout and Stop items, and ⌘K "Autonomy status", point here.
+        <Cell span={12}>
+          <div id={anchorId('autonomy')}>
+            <Suspense fallback={<p className={styles.muted} aria-busy="true">Loading the rollout ladder…</p>}>
+              <AutonomyStatus
+                status={auth}
+                now={now}
+                onReapprove={(why) => grantFlow.open('re-approve', why)}
+                blocked={paletteBlock({ status: auth, reason: null, readOnly: actions.readOnly, busy: actions.busy })}
+              />
+            </Suspense>
+          </div>
+        </Cell>
+      ) : null}
+      <Cell span={12}>
+        <SteerPanel live={live} actions={actions} now={now} />
+      </Cell>
       {collapse ? null : (
         <Cell span={12}>
           <LiveSwimlane read={fleet.data} now={now} hours={compact ? 6 : 12} />
@@ -145,6 +184,7 @@ export function FleetSection() {
           </div>
         </div>
       </Cell>
+      {grantFlow.sheet}
       {actions.dialogs}
     </Surface>
   );

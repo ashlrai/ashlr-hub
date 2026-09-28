@@ -407,6 +407,88 @@ export function cancelTask(req: CancelTaskRequest, opts: TaskStoreOptions = {}):
 }
 
 // ---------------------------------------------------------------------------
+// Operator edits (3.15 — the Fleet control surface)
+// ---------------------------------------------------------------------------
+
+/**
+ * Mason's edits to one unfinished task, from the Fleet tab. Additive to the
+ * frozen API above. Each is a single read-modify-write under the queue lock.
+ *
+ *   - `value`    reprioritize (1–5; the score is value × P(ship) ÷ cost);
+ *   - `repo`     retarget to another granted repo (nameWithOwner);
+ *   - `note`     steer: append Mason's note to the brief the producer reads
+ *                (always as DATA, like every task detail) and, for a task
+ *                already dispatched, put it back in the queue — the run was
+ *                stopped so the next attempt starts from the note.
+ *
+ * A finished (done / failed / cancelled) task is not edited: `ok: false`.
+ */
+export interface TaskOperatorEdit {
+  taskId: string;
+  value?: number;
+  repo?: string;
+  note?: string;
+  /** Put a `dispatched` task back to `queued` (its run was stopped). */
+  requeue?: boolean;
+}
+
+const NAME_WITH_OWNER_RE = STANDING_GRANT_PATTERNS.nameWithOwner;
+
+export function editTaskAsOperator(edit: TaskOperatorEdit, opts: TaskStoreOptions = {}): CancelTaskResult {
+  if (typeof edit !== 'object' || edit === null || typeof edit.taskId !== 'string' || !/^[a-f0-9-]{36}$/.test(edit.taskId)) {
+    return { ok: false, reason: 'taskId must be a task id.' };
+  }
+  if (edit.value !== undefined && (typeof edit.value !== 'number' || !Number.isInteger(edit.value) || edit.value < 1 || edit.value > 5)) {
+    return { ok: false, reason: 'value must be a whole number from 1 to 5.' };
+  }
+  if (edit.repo !== undefined && (typeof edit.repo !== 'string' || !NAME_WITH_OWNER_RE.test(edit.repo))) {
+    return { ok: false, reason: 'repo must be owner/name.' };
+  }
+  const note = edit.note === undefined ? null : cleanTaskText(String(edit.note), 1_000, false);
+  if (edit.note !== undefined && !note) return { ok: false, reason: 'The note is empty.' };
+  if (edit.value === undefined && edit.repo === undefined && note === null && edit.requeue !== true) {
+    return { ok: false, reason: 'Nothing to change.' };
+  }
+  const nowMs = opts.nowMs ?? Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  type EditOutcome = { kind: 'missing' } | { kind: 'finished'; task: FleetTask } | { kind: 'edited'; task: FleetTask };
+  const outcome = withQueue<EditOutcome>(opts.file ?? taskQueuePath(), nowMs, (tasks) => {
+    const index = tasks.findIndex((t) => t.id === edit.taskId);
+    if (index === -1) return { tasks, result: { kind: 'missing' }, write: false };
+    const task = tasks[index]!;
+    if (!OPEN_STATUSES.has(task.status)) return { tasks, result: { kind: 'finished', task }, write: false };
+    const next: FleetTask = { ...task, updatedAt: nowIso };
+    if (edit.value !== undefined) next.value = edit.value;
+    if (edit.repo !== undefined && edit.repo.toLowerCase() !== task.repo.toLowerCase()) {
+      next.repo = edit.repo;
+      // A retargeted task is sliced to the NEW repo's caps.
+      next.sizeBudget = (() => {
+        const budget = opts.sizeBudget ?? sizeBudgetFor(edit.repo);
+        return {
+          files: Math.max(1, Math.min(STANDING_GRANT_CEILINGS.maxFiles, Math.floor(budget.files))),
+          lines: Math.max(1, Math.min(STANDING_GRANT_CEILINGS.maxLines, Math.floor(budget.lines))),
+        };
+      })();
+    }
+    if (note !== null) {
+      next.detail = cleanTaskText(`${task.detail}\n\nNote from Mason (${nowIso}): ${note}`, TASK_QUEUE_LIMITS.maxDetailChars, false);
+    }
+    if (edit.requeue === true && task.status !== 'queued') {
+      next.status = 'queued';
+      next.parkedUntil = null;
+    }
+    const copy = [...tasks];
+    copy[index] = next;
+    return { tasks: copy, result: { kind: 'edited', task: next }, write: true };
+  });
+  if (!outcome.ok) return { ok: false, reason: outcome.reason };
+  const result = outcome.result;
+  if (result.kind === 'missing') return { ok: false, reason: `No task ${edit.taskId} exists.` };
+  if (result.kind === 'finished') return { ok: false, reason: `Task ${edit.taskId} is ${result.task.status}; it can no longer be edited.` };
+  return { ok: true, task: result.task };
+}
+
+// ---------------------------------------------------------------------------
 // Daemon-side updates
 // ---------------------------------------------------------------------------
 

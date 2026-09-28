@@ -213,7 +213,7 @@ describe('the shell’s guarded runners (loaded on confirm, not at first paint)'
 });
 
 describe('Autonomy status (3.14)', () => {
-  it('opens Command and asks the shell to reveal the ladder card', async () => {
+  it('opens Fleet (3.15: the ladder lives there) and asks the shell to reveal the ladder card', async () => {
     const off = registerShellCommandHandlers();
     const anchors: unknown[] = [];
     const onAnchor = (event: Event) => { anchors.push((event as CustomEvent<unknown>).detail); };
@@ -221,8 +221,8 @@ describe('Autonomy status (3.14)', () => {
     try {
       setVerseSection('chat');
       expect(executeCatalogCommand('autonomy.status', { via: 'palette' })).toBe(true);
-      await vi.waitFor(() => expect(getVerseUiState().section).toBe('command'));
-      expect(anchors).toEqual([{ section: 'command', anchor: 'autonomy' }]);
+      await vi.waitFor(() => expect(getVerseUiState().section).toBe('fleet'));
+      expect(anchors).toEqual([{ section: 'fleet', anchor: 'autonomy' }]);
     } finally {
       window.removeEventListener(VERSE_ANCHOR_EVENT, onAnchor);
       off();

@@ -188,6 +188,7 @@ import {
 } from './local-context.js';
 import { causalMetadata, runEventSummary, routeSnapshot } from '../learning/causal.js';
 import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
+import { runCancelRequested } from '../fleet/run-cancel.js';
 import { classifyDiff, isTrivialProposal } from '../../planning/triviality.js';
 import { isDiffDedupResult } from '../inbox/store.js';
 
@@ -1170,12 +1171,18 @@ function sandboxLeaseRepoKey(sourceRepo: string): string {
  * Errors read as "no stop" — the fence re-check before filing is the gate;
  * the probe only makes the stop prompt.
  */
-function executionLeaseStopProbe(sourceRepo: string): () => string | null {
+function executionLeaseStopProbe(sourceRepo: string, runId?: string): () => string | null {
   const allowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1';
   return () => {
     try {
       if (killSwitchOn() === true) return 'kill switch armed';
     } catch { /* see above */ }
+    // 3.15: Mason stopped THIS run from the Fleet tab (fleet/run-cancel.ts).
+    // Lowering only — it can make the run stop sooner, never do more.
+    if (runId) {
+      const cancel = runCancelRequested(runId);
+      if (cancel) return `stopped by you: ${cancel.reason}`;
+    }
     if (!allowAnyRepo) {
       try {
         if (isEnrolled(sourceRepo) === false) return 'repo unenrolled';
@@ -1284,7 +1291,7 @@ class ProducerAuthority {
         repoKey: this.repoKey,
         engine: spec.engine,
         ...(spec.parentSignal ? { parentSignal: spec.parentSignal } : {}),
-        shouldAbort: executionLeaseStopProbe(this.sourceRepo),
+        shouldAbort: executionLeaseStopProbe(this.sourceRepo, spec.runId),
       });
       if (!registration.ok) throw new Error(`execution lease unavailable: ${registration.reason}`);
       this.lease = registration.lease;

@@ -221,6 +221,17 @@ unless all of the following hold, in this order:
 
    There is no `--yes`. Mason confirms in the terminal after seeing the grant,
    release, plist target and budget.
+
+   **3.15 — the desktop app.** The Fleet tab's Start runs this same command
+   from the app. A click on a NATIVE confirm dialog (showing the same grant,
+   release, plist and budget) stands in for the TTY: only after it does the
+   app write a one-time gesture token (`~/.ashlr/authority/native-gestures/`,
+   0600, ≤ 120 s, consumed on read) and pass its name in
+   `ASHLR_NATIVE_GESTURE` (`consumeNativeGesture` in `authority/resident.ts`).
+   The agent markers and the login-HOME check are unchanged, and the token
+   replaces only the TTY. The residual risk is the same one this document
+   already accepts for the TTY: an unconfined same-UID process could forge
+   the file, and would get only the daemon the grant authorizes.
 2. The admission verdict above is `admitted`.
 3. `mintResidentServiceCapability` in `src/core/authority/resident.ts`
    re-verifies 1-2 itself and returns a **single-use, WeakMap-branded**

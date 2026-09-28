@@ -62,6 +62,7 @@ mod activity_watch;
 mod app_menu;
 mod browser_pane;
 mod desktop_prefs;
+mod fleet_ops;
 mod health_watch;
 mod hotkey;
 mod launch_state;
@@ -1612,6 +1613,16 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     voice::init(&handle);
+    // ── fleet operations without Terminal (shell contract v1, fleet_ops.rs) ──
+    // Resident start / restart / stop and the custody install. Every raise is
+    // confirmed in a NATIVE dialog the page cannot answer; the work runs on
+    // fleet_ops' own thread, never on this event thread.
+    {
+        let handle = handle.clone();
+        app.listen(fleet_ops::FLEET_EVENT, move |event| {
+            fleet_ops::handle_event(&handle, event.payload());
+        });
+    }
     if prefs.global_hotkey {
         let status = hotkey::apply(&handle, true);
         if let Some(state) = handle.try_state::<AppState>() {

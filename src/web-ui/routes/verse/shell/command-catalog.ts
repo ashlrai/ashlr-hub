@@ -105,7 +105,7 @@ export interface WorkbenchCommand {
    * so the shell brings it forward and parks the command until the surface
    * registers its handler (run-command.ts). The palette says where it runs.
    */
-  surface?: 'command' | 'mind';
+  surface?: 'command' | 'mind' | 'fleet';
 }
 
 /** A keyed row's id, scope, keys and native binding — from command-keys.ts, never re-declared here. */
@@ -141,7 +141,7 @@ export const AUTONOMY_SETUP_COMMAND = 'ashlr authority setup';
  * A palette-only App action (no key) — shared shape of the autonomy, grant,
  * budget and setup entries below.
  */
-const appAction = (id: string, title: string, keywords: readonly string[], surface?: 'command'): WorkbenchCommand => ({
+const appAction = (id: string, title: string, keywords: readonly string[], surface?: 'command' | 'fleet'): WorkbenchCommand => ({
   id,
   title,
   scope: 'global',
@@ -291,6 +291,19 @@ export const WORKBENCH_COMMANDS = [
   { ...bind('appearance.toggle-theme'), title: 'Toggle light / dark', group: 'actions', section: 'App', keywords: ['theme', 'dark mode'] },
   { ...bind('app.summon'), title: 'Show Verse and focus the composer', group: null, section: 'App', note: 'system-wide; turn on in Settings ▸ Desktop' },
   { id: 'fleet.stop', title: 'Stop the fleet…', scope: 'global', keys: [], group: 'actions', section: 'App', guard: STOP_FLEET_GUARD, keywords: ['kill', 'halt', 'autonomy'] },
+  // ── The fleet's control surface (3.15; the Fleet tab serves these) ──────
+  // Start confirms on the Fleet tab (it clears Stop, resumes and raises the
+  // switch within the grant); the resident daemon and the custody helper
+  // run through the desktop app's native confirm dialog.
+  { ...bind('fleet.start'), title: 'Start the fleet…', group: 'actions', section: 'App', surface: 'fleet', keywords: ['run', 'go', 'turn on', 'autonomy', 'daemon'] },
+  { ...bind('fleet.pause'), title: 'Pause the fleet', group: 'actions', section: 'App', surface: 'fleet', keywords: ['hold', 'finish in-flight', 'dispatch', 'autonomy'], note: 'runs in flight finish; nothing new starts' },
+  { ...bind('fleet.resume'), title: 'Resume the fleet', group: 'actions', section: 'App', surface: 'fleet', keywords: ['continue', 'unpause', 'dispatch', 'autonomy'] },
+  // The key for Stop: the Fleet tab's own confirmation (same words as the
+  // guarded palette row above), so it is never one keystroke either.
+  { ...bind('fleet.halt'), title: 'Stop the fleet (asks first)', group: null, section: 'App', surface: 'fleet' },
+  appAction('fleet.restart-daemon', 'Restart the fleet daemon…', ['resident', 'launchd', 'service', 'reload', 'new release', 'daemon'], 'fleet'),
+  appAction('fleet.edit-grant', 'Edit the grant scope…', ['grant scope', 'repos', 'engines', 'leader classes', 'caps', 'narrow', 'widen'], 'fleet'),
+  appAction('fleet.install-custody', 'Install the custody helper…', ['custody', 'sudo', 'admin', 'secure enclave', 'upgrade', 'helper'], 'fleet'),
 
   // ── Autonomy (Command's AutonomyBar serves these) ────────────────────────
   // No keys on purpose: raising authority is never one keystroke away, and

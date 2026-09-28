@@ -1,0 +1,390 @@
+/*
+ * routes/verse/fleet/fleet-control.module.css — the Fleet tab's control
+ * surface (3.15): the header, the blocker, the facts row, the runs and queue.
+ * Tokens only (style-scan-310).
+ */
+.control {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+
+.control[data-state='blocked'],
+.control[data-state='stopped'] {
+  border-color: var(--status-danger-solid);
+}
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.headline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  min-width: 0;
+  font-size: var(--text-lg-size);
+  line-height: var(--text-lg-line);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.stateWord {
+  font-weight: var(--font-weight-semibold);
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: var(--radius-full);
+  background: var(--status-neutral-solid);
+}
+
+.dot[data-tone='running'] {
+  background: var(--status-running-solid);
+}
+.dot[data-tone='ok'] {
+  background: var(--status-success-solid);
+}
+.dot[data-tone='warning'] {
+  background: var(--status-warning-solid);
+}
+.dot[data-tone='danger'] {
+  background: var(--status-danger-solid);
+}
+.dot[data-tone='muted'] {
+  background: var(--status-unknown-solid);
+}
+
+.buttons,
+.inlineButtons {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.kbd {
+  margin-left: var(--space-2);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+}
+
+.blocker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+
+.blockerReason {
+  margin: 0;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+
+.blockerCommand {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.did {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+
+.muted {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: var(--space-2);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-link);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+}
+
+.link:hover {
+  text-decoration: underline;
+}
+
+.link:disabled {
+  color: var(--text-disabled);
+  cursor: default;
+  text-decoration: none;
+}
+
+.link:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-raised);
+}
+
+.progress[data-phase='failed'] {
+  border-color: var(--status-danger-solid);
+}
+
+.progress[data-phase='done'] {
+  border-color: var(--status-success-solid);
+}
+
+.progressLine {
+  margin: 0;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-primary);
+}
+
+.command {
+  display: block;
+  overflow-x: auto;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-code);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  white-space: pre;
+}
+
+.output pre {
+  max-height: 240px;
+  overflow: auto;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-code);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.output summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.fact {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.fact dt,
+.fact dd {
+  margin: 0;
+}
+
+.factValue {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-variant-numeric: tabular-nums;
+}
+
+.factSub {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.factValue .link {
+  margin-left: 0;
+  align-self: flex-start;
+}
+
+/* ---- runs, queue, goals ------------------------------------------------ */
+.list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.row:first-child {
+  border-top: 0;
+}
+
+.rowHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.rowTitle {
+  margin: 0;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  overflow-wrap: anywhere;
+}
+
+.rowMeta {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.rowControls {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.log {
+  max-height: 280px;
+  overflow: auto;
+  margin: 0;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-code);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.interject {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.textarea {
+  width: 100%;
+  min-height: 64px;
+  padding: var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-sm-size);
+  resize: vertical;
+}
+
+.textarea:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.directive {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.directive > :first-child {
+  flex: 1 1 240px;
+}
+
+.sectionLabel {
+  margin: var(--space-3) 0 0;
+}
+
+@media (max-width: 480px) {
+  .control {
+    padding: var(--space-3);
+  }
+  .buttons {
+    width: 100%;
+  }
+}
+
+/* ---- Command's one line about the fleet (FleetStatusLink.tsx) ---------- */
+.statusLink {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+
+.statusLink[data-state='blocked'],
+.statusLink[data-state='stopped'] {
+  border-color: var(--status-danger-solid);
+}
+
+.statusLinkLine {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}

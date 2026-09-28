@@ -100,6 +100,13 @@ export interface ResidentCliDeps {
   observe(): Promise<ResidentServiceObservation>;
   /** Why this process is not the operator at a terminal; null when it is. */
   operatorRefusal(): Promise<string | null>;
+  /**
+   * 3.15: the operator already confirmed in the desktop app's native dialog
+   * (a consumed native gesture — authority/resident.ts). Then the plan is
+   * printed but not asked again (there is no terminal to ask in). Optional so
+   * existing fakes keep the terminal prompt.
+   */
+  confirmedNatively?(): Promise<boolean>;
   /** Mint the capability (re-verifying everything), record it, install / restart the service. */
   start(): Promise<ResidentEffectResult>;
   /** Lowering: boot the service out and remove its plist. Never touches Stop or the grant. */
@@ -253,8 +260,14 @@ const realResidentDeps: ResidentCliDeps = {
     };
   },
   operatorRefusal: async () => {
-    const { operatorContextRefusal, currentOperatorContext } = await import('../core/authority/resident.js');
-    return operatorContextRefusal(currentOperatorContext());
+    const { operatorContextRefusal, currentOperatorContext, nativeGestureRefusal } = await import('../core/authority/resident.js');
+    const refusal = operatorContextRefusal(currentOperatorContext());
+    const gesture = nativeGestureRefusal();
+    return refusal && gesture ? `${refusal} (the desktop app's confirmation was not accepted: ${gesture})` : refusal;
+  },
+  confirmedNatively: async () => {
+    const { currentOperatorContext } = await import('../core/authority/resident.js');
+    return currentOperatorContext().nativeGesture === true;
   },
   start: async () => {
     const resident = await import('../core/authority/resident.js');
@@ -2181,7 +2194,10 @@ async function cmdResidentStart(parsed: Parsed, deps: AuthorityCliDeps): Promise
   deps.out(`  service   ai.ashlr.daemon → ${observed.plistPath?.replace(homedir(), '~') ?? '?'} (${observed.state}, plist ${observed.plist})`);
   deps.out(`  budget    $${observed.expectedBudgetUsd ?? '?'}/day from config daemon.dailyBudgetUsd${observed.installedBudgetUsd !== null && observed.installedBudgetUsd !== observed.expectedBudgetUsd ? ` (installed: $${observed.installedBudgetUsd})` : ''}`);
   deps.out('  launchd   enable + bootstrap (RunAtLoad); every tick re-verifies the grant, Stop and the switch');
-  if (!(await deps.confirm(`${action[0]!.toUpperCase()}${action.slice(1)} ai.ashlr.daemon now?`))) {
+  const native = (await deps.resident.confirmedNatively?.()) === true;
+  if (native) {
+    deps.out(`  confirmed in the desktop app (native dialog) — ${action}.`);
+  } else if (!(await deps.confirm(`${action[0]!.toUpperCase()}${action.slice(1)} ai.ashlr.daemon now?`))) {
     deps.out('Nothing was changed.');
     return 1;
   }

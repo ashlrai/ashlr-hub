@@ -35,6 +35,13 @@
 //!    `{ version: 1, send }` and the `ashlr:voice` event. The page emits
 //!    `shell-voice` (same event permission, no new capability); native
 //!    answers through the locked `window.__ASHLR_VOICE_EVENT__(<json>)`.
+//! 8. Fleet operations (protocol v1, `fleet_ops.rs`):
+//!    `window.__ASHLR_DESKTOP__.fleet` = `{ version: 1, ops, send }` and the
+//!    `ashlr:fleet` event. The page emits `shell-fleet` over the same event
+//!    permission (no new capability, no new command); native confirms every
+//!    raise in a native dialog and answers by evaluating
+//!    `window.__ASHLR_FLEET_EVENT__(<json>)`, defined non-writable like the
+//!    browser channel.
 //!
 //! The script is origin-gated to the sidecar origin. Token values are
 //! JSON-encoded into a config object, never string-interpolated, so no token

@@ -342,6 +342,44 @@ lazy-loaded by each surface), `VoiceHud` (the one floating pill: waveform,
 last-focused, input). In a plain browser the same UI runs on the Web Speech
 API.
 
+### 9. Fleet operations (shell contract v1 `fleet`, 3.15)
+
+The Fleet tab starts, restarts and stops the resident daemon and installs the
+custody helper **without Terminal**. Implemented in `src-tauri/src/fleet_ops.rs`.
+
+**Feature test.** `window.__ASHLR_DESKTOP__.fleet` = `{ version: 1, ops, send }`.
+An older shell has no `fleet` key; the Fleet tab then shows the Terminal command.
+
+**Page → native.** `send({ id, op, checkout? })` emits `shell-fleet` over the
+event permission the page already has (no new capability, no new command).
+`id` matches `^[A-Za-z0-9_-]{1,64}$`; native drops anything else unparsed.
+
+| `op` | Effect |
+|---|---|
+| `resident-start` | Reads `ashlr authority resident status --json`, shows a **native** confirm dialog (grant, release, plist, budget, the exact command), then runs `ashlr authority resident start` with a one-time gesture token |
+| `resident-restart` | The same dialog, then `resident stop` + `resident start` |
+| `resident-stop` | A native confirm, then `ashlr authority resident stop` (lowering: no gesture token) |
+| `custody-install` | `checkout` (an ashlr-hub checkout the server found among the enrolled repos; `~/` allowed). Native re-validates it (absolute, `scripts/install-custody.sh` a regular file, `tools/custody/Package.swift`, an `ashlrai/ashlr-hub` remote), shows the command and the script's sha256 in a native dialog, then asks **macOS** for an administrator (`osascript … with administrator privileges`, every value passed as argv through `quoted form of`) |
+
+**Native → page.** `window.__ASHLR_FLEET_EVENT__(detail)` (non-writable) →
+the `ashlr:fleet` window event: `{ id, op, phase, message, command?, exitCode?, output? }`
+with `phase` ∈ `confirming | running | done | failed | cancelled`.
+
+**Why this is Mason and not an agent.** `resident start` in a terminal refuses
+anything without a TTY. Here the proof is a native modal dialog: page script
+can ask for it but cannot answer it, and a seat's tools (CLI processes, MCP
+servers) cannot reach this event bus at all. Only after the click does native
+write `~/.ashlr/authority/native-gestures/<32 hex>.json` (0600, create-new,
+no-follow; a directory every confined fleet agent is denied) and pass its name
+in `ASHLR_NATIVE_GESTURE`. The CLI (`authority/resident.ts consumeNativeGesture`)
+accepts it in place of the TTY only when it is fresh (≤ 120 s), private, owned
+by this user and names `resident-start`, and deletes it before trusting it.
+The child runs the operator's own `ashlr` (resolved by a login shell, never the
+bundled sidecar and never a page-supplied path) in a scrubbed environment, so
+the agent-marker and login-HOME checks still apply. Nothing here signs, raises
+or widens anything: the CLI still re-verifies the Touch-ID grant, the clean
+build, Stop and the switch, and mints its own single-use capability.
+
 ---
 
 ## Window behaviour

@@ -1348,6 +1348,16 @@ export const WORKBENCH_ROUTE_FAMILIES = [
     prefixes: ['/api/verse/fleet/live'],
   },
   {
+    // 3.15: the Fleet tab's control surface (Start / Pause / Resume / Stop,
+    // per-run stop and interject, task and goal edits). Its own prefix, so it
+    // never shadows /api/verse/fleet (V2.2) or /api/verse/fleet/live.
+    id: 'fleet-control',
+    owner: 'fleet-control',
+    module: 'src/core/verse/fleet-control-api.ts',
+    handler: 'handleFleetControlApi',
+    prefixes: ['/api/verse/fleet/control'],
+  },
+  {
     id: 'leader',
     owner: 'B-U8',
     module: 'src/core/verse/leader-api.ts',

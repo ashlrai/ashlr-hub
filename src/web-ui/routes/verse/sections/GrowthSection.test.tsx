@@ -78,7 +78,7 @@ describe('GrowthSection', () => {
     expect(state).toHaveTextContent('Autonomy is off. Approve a standing grant to let the fleet work.');
     // THE dark-since day (the live view's), as the viewer's local day.
     expect(state).toHaveTextContent(`Fleet dark since ${darkSinceLabel(DARK_SINCE)}`);
-    expect(within(state).getByRole('button', { name: 'Approve in Command' })).toBeInTheDocument();
+    expect(within(state).getByRole('button', { name: 'Approve in Fleet' })).toBeInTheDocument();
     expect(screen.queryAllByRole('figure')).toHaveLength(0);
     expect(screen.queryByText(/No fleet runs or proposals|Nothing produced since/)).toBeNull();
   });
