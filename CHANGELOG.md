@@ -15,9 +15,13 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Verse release integration
 
-- A phone layout is available at `/verse/m/` on the same local Verse server.
-  It supports chat, fleet review, approvals, and dictation on supported
-  browsers. Remote phone pairing and transport are not part of this release.
+- A phone layout is available at `/verse/m/` for chat, fleet review,
+  approvals, and dictation on supported browsers. Optional remote access uses
+  a separate loopback gateway behind Cloudflare Access, Mac-approved passkey
+  pairing, bounded sessions, and step-up approval for control actions. It is
+  off until the operator supplies a private gateway configuration and enables
+  the desktop sidecar; the local Verse server keeps its own startup token.
+  When configured, private push notifications reach paired iPhone Home Screen apps.
 - The Agents board, computer control HUD, terminal workbench, and native
   Browser pane are integrated with turn-scoped authority. Agents board code
   auto-merge stays off by default and requires exact code gate evidence.
@@ -35,6 +39,12 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Signed elite-direct grants can let eligible local CLI models land at G6
   within their signed ceiling. Cloud Devin still requires two independent
   judge families. Leader goal changes require signed class A authority.
+- Learning recall validates anti-playbook matches before prompt injection.
+  Signed post-merge observations and stable-window identity are visible as
+  evidence, while positive outcomes remain inconclusive for credit and do not
+  expand merge, dispatch, or policy authority.
+- The native app bundle now carries the same 3.16.0 version as the CLI, with a
+  prebundle version check. The Grok Bot companion workflow is documented.
 
 ### Dictation everywhere in Verse (desktop)
 
