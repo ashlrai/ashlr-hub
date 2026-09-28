@@ -291,7 +291,7 @@
   .status .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--live); margin-right: 7px; vertical-align: 1px; }
   kbd { font-family: var(--f-mono); font-size: .8125em; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 5px; background: var(--surface); }
   .sub-h { font-size: var(--step-1); margin: 38px 0 14px; }
-  .note a { color: var(--accent); text-underline-offset: 2px; }
+  .note a, .status a { color: var(--accent); text-underline-offset: 2px; }
 
 </style>
 
@@ -305,6 +305,7 @@
       <a href="#leader">Leader</a>
       <a href="#autonomy">Autonomy</a>
       <a href="#workbench">Workbench</a>
+      <a href="#phone">Phone</a>
       <a href="#knowledge">Wiki &amp; lessons</a>
       <a href="#lanes-cloud">Cloud &amp; Devin</a>
       <a href="#measured">Measured</a>
@@ -337,7 +338,8 @@
       <span class="label">Explore Verse</span>
       <div class="links">
         <a href="#leader">Leader</a><a href="#autonomy">Autonomy</a>
-        <a href="#workbench">Workbench</a><a href="#knowledge">Wiki &amp; lessons</a>
+        <a href="#workbench">Workbench</a><a href="#phone">Phone</a>
+        <a href="#knowledge">Wiki &amp; lessons</a>
         <a href="#lanes-cloud">Cloud &amp; Devin</a><a href="#measured">Measured</a>
         <a href="#platforms">Platforms</a><a href="#start">Start</a>
       </div>
@@ -564,6 +566,36 @@
           <p>Claude, Codex and Grok stream their reasoning, then collapse it to &ldquo;Thought 12s, ~1.8k tok&rdquo;. Every figure on the status line is measured from the CLI's own events.</p>
         </div>
       </div>
+    </div>
+  </section>
+
+
+  <section id="phone">
+    <div class="wrap">
+      <div class="sec-head">
+        <p class="eyebrow">Optional phone access</p>
+        <h2>Your fleet, in your pocket.</h2>
+        <p>
+          Open Verse in an iPhone browser from anywhere after you opt in on your Mac. A separate
+          phone gateway sits behind Cloudflare Access; only a Mac-approved passkey can pair a device.
+          The main console and its tokens stay on the Mac.
+        </p>
+      </div>
+      <div class="seats">
+        <div class="seat">
+          <span class="tag">See</span><h3>Know what needs you</h3>
+          <p>Read fleet activity, chats and the Needs you queue in a mobile layout. Optional push notifications carry no task content.</p>
+        </div>
+        <div class="seat">
+          <span class="tag">Act</span><h3>Approve with your device</h3>
+          <p>Stop an agent, approve a plan or land an eligible pull request with fresh device authentication. Standing grants are still signed on your Mac with Touch ID.</p>
+        </div>
+        <div class="seat">
+          <span class="tag">Own</span><h3>Keep control on the Mac</h3>
+          <p>The gateway is off until you configure it. Pairing approval and device revocation happen locally; live access needs the Mac awake and online.</p>
+        </div>
+      </div>
+      <p class="status" role="note"><span><b>Operator setup:</b> Access, a private gateway config and Mac approval are required.</span><span><a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/REMOTE-PHONE.md">Read the phone runbook</a></span></p>
     </div>
   </section>
 
@@ -1018,7 +1050,7 @@ ashlr verse</pre>
           </div></div>
           <div class="step"><span class="n"></span><div>
             <h3>Talk to the Leader</h3>
-            <p>Open Mind with <kbd>&#8984;4</kbd>, or from the terminal. Add Telegram for a two-way line on your phone.</p>
+            <p>Open Mind with <kbd>&#8984;4</kbd>, or from the terminal. Add Telegram for a two-way line on your phone, or configure the separate <a href="#phone">phone gateway</a> for browser access.</p>
             <pre>ashlr leader say "focus: the flaky retry test"
 ashlr comms setup-telegram</pre>
           </div></div>
@@ -1047,9 +1079,9 @@ ashlr devin budget --acu 50</pre>
             that.
           </p>
           <p style="margin-top:14px">
-            Verse never asks for your credentials. It drives each CLI with its own pinned profile, and
-            the console itself is loopback-only: it prints a token at startup and will not answer a
-            request that does not carry it.
+            Verse never asks for your provider credentials. It drives each CLI with its own pinned profile.
+            The main console is loopback-only and requires its startup token; optional phone access uses
+            a separate Access-protected gateway and a Mac-approved device.
           </p>
           <p style="margin-top:14px">
             Guides: <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md">Verse</a>,
