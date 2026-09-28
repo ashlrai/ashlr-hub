@@ -79,6 +79,7 @@ import {
   restoreTabs,
   serializeTabs,
   type BrowserTab,
+  type BrowserTabsAction,
 } from './browser-tabs.js';
 import {
   nativeBrowser,
@@ -278,7 +279,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
   const mode: 'native' | 'frame' = native ? 'native' : 'frame';
   const gate = useTokenGate();
 
-  const [tabsState, dispatch] = useReducer(browserTabsReducer, undefined, () => {
+  const [tabsState, rawDispatch] = useReducer(browserTabsReducer, undefined, () => {
     let raw: string | null = null;
     try {
       raw = deps.storage()?.getItem(BROWSER_TABS_STORAGE_KEY) ?? null;
@@ -289,6 +290,12 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
   });
   const tabsStateRef = useRef(tabsState);
   tabsStateRef.current = tabsState;
+  // Native navigation events and agent commands can dispatch before React's
+  // next render. Keep the action fence's tab view current within that gap.
+  const dispatch = useCallback((action: BrowserTabsAction) => {
+    tabsStateRef.current = browserTabsReducer(tabsStateRef.current, action);
+    rawDispatch(action);
+  }, [rawDispatch]);
   const tab = selectActiveTab(tabsState);
 
   const [device, setDevice] = useState<DevicePreset>('fill');
@@ -391,7 +398,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
           break;
       }
     });
-  }, [native, noteOperatorInput]);
+  }, [native, noteOperatorInput, dispatch]);
 
   const showNative = mode === 'native' && visible && docVisible && !overlayOpen && tab.url !== null && !gate.dialog.open;
 
@@ -458,7 +465,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
   const navigateTab = useCallback((id: string, url: string) => {
     dispatch({ type: 'navigate', id, url });
     if (native && openedRef.current.has(id)) native.send({ op: 'navigate', tab: id, url });
-  }, [native]);
+  }, [native, dispatch]);
 
   const submitAddress = (event: FormEvent) => {
     event.preventDefault();
