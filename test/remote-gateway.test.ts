@@ -18,14 +18,29 @@ function request(method = 'GET', headers: RemoteRequest['headers'] = {}): Remote
 }
 
 describe('unstarted remote gateway policy', () => {
-  it('allows only explicitly reviewed query-free reads', () => {
+  it('allows only reviewed mobile reads and bounded stream query shapes', () => {
     expect(classifyRemoteRoute('GET', '/api/verse/activity')).toEqual({ kind: 'read', path: '/api/verse/activity' });
     for (const target of [
+      '/api/verse/seats', '/api/verse/session-meta', '/api/verse/cloud', '/api/verse/leader',
+      '/api/verse/leader/directives', '/api/verse/sessions/vs_1',
+      '/api/verse/authority/ledger?view=decisions&limit=40',
+      '/api/verse/leader/thread?limit=50&before=msg-1',
+      '/api/verse/checkpoints?chatId=vs_1',
+      '/api/verse/checkpoints/diff?chatId=vs_1&turnId=t1&rootId=1234abcd&mode=since&file=src%2Findex.ts',
+    ]) expect(classifyRemoteRoute('GET', target)).toEqual({ kind: 'read', path: target.split('?')[0] });
+    expect(classifyRemoteRoute('GET', '/api/events?topics=verse-sessions')).toEqual({ kind: 'stream', path: '/api/events' });
+    expect(classifyRemoteRoute('GET', '/api/verse/sessions/vs_1/events?after=42')).toEqual({ kind: 'stream', path: '/api/verse/sessions/vs_1/events' });
+    for (const target of [
       '/api/verse/agent-tools/mcp', '/api/session', '/api/verse/terminal', '/api/verse/browser',
-      '/api/verse/computer', '/api/verse/sessions/s1', '/api/verse/authority/ledger?view=decisions',
+      '/api/verse/computer', '/api/verse/sessions/.', '/api/verse/authority/ledger?view=decisions',
       '/api/verse/activity?x=1', '/api/verse/%61ctivity', '/api/verse/../activity',
       '/api//verse/activity', '//phone.example.com/api/verse/activity', '/verse/m/',
       'https://phone.example.com/api/verse/activity', '/api/verse/activity#fragment',
+      '/api/verse/leader/thread?limit=50&limit=50',
+      '/api/verse/leader/thread?limit=50&before=..%2Fsecret',
+      '/api/verse/checkpoints/diff?chatId=s1&turnId=t1&rootId=1234abcd&mode=since&file=..%2Fsecret',
+      '/api/events?topics=all', '/api/events?topics=verse-sessions&client=raw-local-proof',
+      '/api/verse/sessions/s1/events?after=1&client=raw-local-proof',
     ]) expect(classifyRemoteRoute('GET', target)).toEqual({ kind: 'deny' });
     expect(classifyRemoteRoute('POST', '/api/verse/activity')).toEqual({ kind: 'deny' });
     expect(classifyRemoteRoute('DELETE', '/api/verse/activity')).toEqual({ kind: 'deny' });

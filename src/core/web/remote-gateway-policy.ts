@@ -11,14 +11,7 @@ export interface RemoteRequest {
   headers: Record<string, string | string[] | undefined>;
 }
 
-export type RemoteReadRoute =
-  | '/api/verse/bootstrap'
-  | '/api/verse/activity'
-  | '/api/verse/sessions'
-  | '/api/verse/control'
-  | '/api/verse/fleet/live'
-  | '/api/verse/authority'
-  | '/api/verse/budget';
+export type RemoteReadRoute = string;
 
 const READ_ROUTES = new Set<RemoteReadRoute>([
   '/api/verse/bootstrap',
@@ -28,20 +21,70 @@ const READ_ROUTES = new Set<RemoteReadRoute>([
   '/api/verse/fleet/live',
   '/api/verse/authority',
   '/api/verse/budget',
+  '/api/verse/seats',
+  '/api/verse/session-meta',
+  '/api/verse/cloud',
+  '/api/verse/leader',
+  '/api/verse/leader/directives',
 ]);
 
-export type RemoteRouteDecision = { kind: 'read'; path: RemoteReadRoute } | { kind: 'deny' };
+export type RemoteRouteDecision = { kind: 'read' | 'stream'; path: RemoteReadRoute } | { kind: 'deny' };
 
-/** Exact, query-free reads only. Every future route needs its own reviewed shape. */
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const CHECKPOINT_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const ROOT_ID = /^[0-9a-f]{8,64}$/;
+const THREAD_ID = /^[A-Za-z0-9_:-]{1,128}$/;
+
+function exactParams(params: URLSearchParams, shape: Record<string, (value: string) => boolean>): boolean {
+  const keys = [...params.keys()];
+  return keys.length === Object.keys(shape).length
+    && keys.every((key) => shape[key]?.(params.get(key) ?? '') === true && params.getAll(key).length === 1);
+}
+
+function safeFile(path: string): boolean {
+  return path.length > 0 && path.length <= 1024 && !path.startsWith('/') && !path.includes('\\')
+    && !path.split('/').some((part) => part === '' || part === '.' || part === '..')
+    && ![...path].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
+}
+
+/** Every path and query shape here is reviewed separately; no general /api/* proxy. */
 export function classifyRemoteRoute(method: string | undefined, rawTarget: string | undefined): RemoteRouteDecision {
-  if (method !== 'GET' || !rawTarget || !rawTarget.startsWith('/')) return { kind: 'deny' };
+  if (method !== 'GET' || !rawTarget || !rawTarget.startsWith('/') || rawTarget.length > 2048) return { kind: 'deny' };
   // Reject alternate URL spellings before URL normalization can hide them.
-  if (/[?#%\\]/.test(rawTarget) || rawTarget.includes('//')
+  const [path, query, ...rest] = rawTarget.split('?');
+  if (!path || rest.length > 0 || /[#%\\]/.test(path) || rawTarget.includes('#') || path.includes('//')
     || [...rawTarget].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) return { kind: 'deny' };
-  if (rawTarget.split('/').some((segment) => segment === '.' || segment === '..')) return { kind: 'deny' };
-  return READ_ROUTES.has(rawTarget as RemoteReadRoute)
-    ? { kind: 'read', path: rawTarget as RemoteReadRoute }
-    : { kind: 'deny' };
+  if (path.split('/').some((segment) => segment === '.' || segment === '..')) return { kind: 'deny' };
+  if (query === undefined && READ_ROUTES.has(path)) return { kind: 'read', path };
+  if (/^\/api\/verse\/sessions\/([^/]+)$/.test(path) && query === undefined) {
+    const id = path.slice('/api/verse/sessions/'.length);
+    if (SESSION_ID.test(id)) return { kind: 'read', path };
+  }
+  if (query === undefined) return { kind: 'deny' };
+  const params = new URLSearchParams(query);
+  if (path === '/api/verse/authority/ledger'
+    && exactParams(params, { view: (v) => v === 'decisions', limit: (v) => v === '40' })) return { kind: 'read', path };
+  if (path === '/api/verse/leader/thread' && (
+    exactParams(params, { limit: (v) => v === '50' })
+    || exactParams(params, { limit: (v) => v === '50', before: (v) => THREAD_ID.test(v) })
+  )) return { kind: 'read', path };
+  if (path === '/api/verse/checkpoints'
+    && exactParams(params, { chatId: (v) => CHECKPOINT_ID.test(v) })) return { kind: 'read', path };
+  if (path === '/api/verse/checkpoints/diff') {
+    const shape = {
+      chatId: (v: string) => CHECKPOINT_ID.test(v),
+      turnId: (v: string) => CHECKPOINT_ID.test(v),
+      rootId: (v: string) => ROOT_ID.test(v),
+      mode: (v: string) => v === 'since' || v === 'turn',
+    };
+    if (exactParams(params, shape) || exactParams(params, { ...shape, file: safeFile })) return { kind: 'read', path };
+  }
+  if (path === '/api/events' && exactParams(params, { topics: (v) => v === 'verse-sessions' })) return { kind: 'stream', path };
+  const tail = /^\/api\/verse\/sessions\/([^/]+)\/events$/.exec(path);
+  if (tail && SESSION_ID.test(tail[1]!) && (
+    params.size === 0 || exactParams(params, { after: (v) => /^\d{1,15}$/.test(v) })
+  )) return { kind: 'stream', path };
+  return { kind: 'deny' };
 }
 
 function oneHeader(value: string | string[] | undefined): string | null {
