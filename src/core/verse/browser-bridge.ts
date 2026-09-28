@@ -77,6 +77,8 @@ interface PendingCommand {
   timer: ReturnType<typeof setTimeout> | null;
   /** How long the pane has to answer once it claimed the command. */
   resultMs: number;
+  signal?: AbortSignal;
+  onAbort?: () => void;
 }
 
 /** The last screenshot's geometry (browser-act-policy.ts `BrowserShotGeometry`). */
@@ -102,6 +104,7 @@ interface ChatBrowserState {
   actAccess: boolean;
   scriptAccess: boolean;
   allowances: string[];
+  allowanceRevision: number;
   taint: BrowserTurnTaint | null;
   snapshotLoadId: string | null;
   lastShot: BrowserShotRecord | null;
@@ -127,6 +130,7 @@ function stateFor(sessionId: string): ChatBrowserState {
       actAccess: false,
       scriptAccess: false,
       allowances: [],
+      allowanceRevision: 0,
       taint: null,
       snapshotLoadId: null,
       lastShot: null,
@@ -189,6 +193,7 @@ export function setBrowserAgentAccess(sessionId: string, enabled: boolean, sidec
     state.actAccess = false;
     state.scriptAccess = false;
     state.allowances = [];
+    state.allowanceRevision++;
     state.taint = null;
     state.snapshotLoadId = null;
     state.lastShot = null;
@@ -209,9 +214,16 @@ export function setBrowserScope(sessionId: string, scope: VerseBrowserScope, ena
   if (!state?.grant) return enabled ? null : browserPolicy(sessionId);
   if (scope === 'browser_act') {
     state.actAccess = enabled;
-    if (!enabled) state.allowances = [];
+    if (!enabled) {
+      state.allowances = [];
+      state.allowanceRevision++;
+    }
   } else {
     state.scriptAccess = enabled;
+    if (!enabled) {
+      state.allowances = [];
+      state.allowanceRevision++;
+    }
   }
   return browserPolicy(sessionId);
 }
@@ -231,6 +243,11 @@ export function browserAllowances(sessionId: string): string[] {
   return [...(chats.get(sessionId)?.allowances ?? [])];
 }
 
+/** Invalidates a confirmation opened before an allowance was revoked. */
+export function browserAllowanceRevision(sessionId: string): number {
+  return chats.get(sessionId)?.allowanceRevision ?? 0;
+}
+
 export function addBrowserAllowances(sessionId: string, keys: readonly string[]): void {
   const state = chats.get(sessionId);
   if (!state?.grant) return;
@@ -243,7 +260,10 @@ export function addBrowserAllowances(sessionId: string, keys: readonly string[])
 
 export function revokeBrowserAllowance(sessionId: string, key: string): VerseBrowserPolicy {
   const state = chats.get(sessionId);
-  if (state) state.allowances = state.allowances.filter((k) => k !== key);
+  if (state) {
+    state.allowances = state.allowances.filter((k) => k !== key);
+    state.allowanceRevision++;
+  }
   return browserPolicy(sessionId);
 }
 
@@ -363,7 +383,6 @@ function wake(state: ChatBrowserState): void {
 
 function failAll(state: ChatBrowserState, outcome: BrowserOutcome): void {
   for (const pending of [...state.queue, ...state.inflight.values()]) {
-    if (pending.timer) clearTimeout(pending.timer);
     pending.settle(outcome);
   }
   state.queue = [];
@@ -381,9 +400,10 @@ export function runBrowserCommand(
   sessionId: string,
   op: VerseBrowserAgentOp,
   args: { url?: string; limit?: number; args?: Record<string, unknown> } = {},
-  timeouts: { claimMs?: number; resultMs?: number } = {},
+  timeouts: { claimMs?: number; resultMs?: number; signal?: AbortSignal } = {},
 ): Promise<BrowserOutcome> {
   const state = stateFor(sessionId);
+  if (timeouts.signal?.aborted) return Promise.resolve({ ok: false, code: 'access-off', message: 'This browser turn ended before the command could run.' });
   if (!state.grant) {
     return Promise.resolve({ ok: false, code: 'access-off', message: 'Browser access is off for this chat.' });
   }
@@ -409,12 +429,22 @@ export function runBrowserCommand(
       command,
       timer: null,
       resultMs,
+      signal: timeouts.signal,
       settle: (outcome) => {
         if (settled) return;
         settled = true;
+        if (pending.timer) clearTimeout(pending.timer);
+        pending.signal?.removeEventListener('abort', pending.onAbort!);
         resolve(outcome);
       },
     };
+    pending.onAbort = () => {
+      state.queue = state.queue.filter((p) => p !== pending);
+      state.inflight.delete(command.id);
+      pending.settle({ ok: false, code: 'access-off', message: 'This browser turn ended before the command could run.' });
+    };
+    pending.signal?.addEventListener('abort', pending.onAbort, { once: true });
+    if (pending.signal?.aborted) { pending.onAbort(); return; }
     pending.timer = setTimeout(() => {
       state.queue = state.queue.filter((p) => p !== pending);
       pending.settle({ ok: false, code: 'pane-not-open', message: PANE_NOT_OPEN });
@@ -447,6 +477,10 @@ export async function requestBrowserConfirmation(
 function claimQueued(state: ChatBrowserState): VerseBrowserAgentCommand[] {
   const taken = state.queue.splice(0, state.queue.length);
   for (const pending of taken) {
+    if (pending.signal?.aborted) {
+      pending.settle({ ok: false, code: 'access-off', message: 'This browser turn ended before the command could run.' });
+      continue;
+    }
     if (pending.timer) clearTimeout(pending.timer);
     pending.timer = setTimeout(() => {
       state.inflight.delete(pending.command.id);
@@ -454,7 +488,17 @@ function claimQueued(state: ChatBrowserState): VerseBrowserAgentCommand[] {
     }, pending.resultMs);
     state.inflight.set(pending.command.id, pending);
   }
-  return taken.map((p) => p.command);
+  return taken.filter((p) => state.inflight.has(p.command.id)).map((p) => p.command);
+}
+
+/** Called by the pane immediately before an effect. Claim alone is not authority. */
+export function canDispatchBrowserCommand(sessionId: string, id: string): boolean {
+  const state = chats.get(sessionId);
+  const pending = state?.inflight.get(id);
+  if (!state?.grant || !pending || pending.signal?.aborted) return false;
+  if (pending.command.op === 'act' && !state.actAccess) return false;
+  if (pending.command.op === 'evaluate' && !state.scriptAccess) return false;
+  return true;
 }
 
 /**

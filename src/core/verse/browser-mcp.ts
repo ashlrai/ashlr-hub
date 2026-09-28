@@ -37,6 +37,7 @@ import { UNTRUSTED_PREFACE, classifyBrowserAction, frameUntrusted, neutralisePag
 import {
   addBrowserAllowances,
   browserAllowances,
+  browserAllowanceRevision,
   browserScopes,
   browserShot,
   browserSnapshotLoad,
@@ -164,6 +165,7 @@ function toolDeps(deps: BrowserMcpDeps): BrowserToolDeps {
     taint: o.taint ?? browserTaint,
     markTaint: o.markTaint ?? markBrowserTaint,
     allowances: o.allowances ?? browserAllowances,
+    allowanceRevision: o.allowanceRevision ?? browserAllowanceRevision,
     addAllowances: o.addAllowances ?? addBrowserAllowances,
     snapshotLoad: o.snapshotLoad ?? browserSnapshotLoad,
     setSnapshotLoad: o.setSnapshotLoad ?? setBrowserSnapshotLoad,

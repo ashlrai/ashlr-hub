@@ -114,6 +114,7 @@ export interface BrowserToolDeps {
   taint(sessionId: string): BrowserTaint | null;
   markTaint(sessionId: string, origin: string): void;
   allowances(sessionId: string): string[];
+  allowanceRevision(sessionId: string): number;
   addAllowances(sessionId: string, keys: readonly string[]): void;
   snapshotLoad(sessionId: string): string | null;
   setSnapshotLoad(sessionId: string, loadId: string | null): void;
@@ -268,6 +269,7 @@ async function decide(
 ): Promise<VerseMcpToolResult | null> {
   if (verdict.decision === 'refuse') return toolError(verdict.message);
   if (verdict.decision === 'auto') return null;
+  const allowanceRevision = ctx.deps.allowanceRevision(ctx.sessionId);
   const answer = await ctx.deps.confirm(ctx.sessionId, {
     action: card.action.slice(0, 200),
     target: card.target ? neutralisePageText(card.target).slice(0, 200) : null,
@@ -275,6 +277,9 @@ async function decide(
     reasons: verdict.reasons.map((r) => r.text),
     tool,
   });
+  if (ctx.deps.allowanceRevision(ctx.sessionId) !== allowanceRevision) {
+    return toolError('Browser approval changed while the confirmation was open. Nothing was done; ask the operator again.');
+  }
   if (answer === 'chat') ctx.deps.addAllowances(ctx.sessionId, verdict.reasons.map((r) => r.allowKey));
   if (answer === 'once' || answer === 'chat') return null;
   const why = verdict.reasons.map((r) => r.text).join('; ');

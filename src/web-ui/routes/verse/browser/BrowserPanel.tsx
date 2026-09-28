@@ -914,7 +914,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
             setAgentActivity(command.op === 'navigate' && command.url
               ? `Agent opened ${shortAddress(command.url)}`
               : command.op === 'confirm' ? 'Agent is waiting for your answer' : `Agent: ${command.op.replace('-', ' ')}`);
-            const result = await executeAgentCommand(command, executorRef.current!, verseOrigin);
+            const result = await executeAgentCommand(command, executorRef.current!, verseOrigin, (id) => api.canDispatch(sessionId, id));
             recordAction(command, result);
             await api.result(sessionId, result).catch(() => {});
           }

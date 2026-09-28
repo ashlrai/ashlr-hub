@@ -16,6 +16,9 @@
  * every command but `status` and `confirm` is refused until they press
  * Resume. What the sidecar decided needs the operator arrives as a `confirm`
  * command, answered by the card the executor shows.
+ * A claimed command is not authority to mutate: the pane checks the sidecar
+ * again immediately before each effect. An operation already dispatched after
+ * that check may finish if Stop arrives while the native call is running.
  */
 import {
   agentUrlVerdict,
@@ -279,6 +282,7 @@ export async function executeAgentCommand(
   command: VerseBrowserAgentCommand,
   exec: BrowserExecutor,
   verseOrigin: string,
+  canDispatch: (id: string) => Promise<boolean>,
 ): Promise<VerseBrowserCommandResult> {
   const gate = { versePort: versePortOf(verseOrigin), allowedOrigins: command.allowedOrigins };
   const here = exec.current();
@@ -330,6 +334,7 @@ export async function executeAgentCommand(
       case 'navigate': {
         const verdict = agentUrlVerdict(command.url ?? '', gate);
         if (!verdict.ok) return fail(command.id, verdict.message);
+        if (!(await canDispatch(command.id))) return fail(command.id, 'This browser turn ended before navigation could start.');
         const landed = await exec.navigate(verdict.url);
         return { id: command.id, ok: true, url: landed.url, data: { title: seen(landed.url) ? landed.title : null, loading: landed.loading } };
       }
@@ -386,6 +391,7 @@ export async function executeAgentCommand(
         const spec = parseActArgs(rawSpec);
         if (!spec || !approved) return fail(command.id, 'Invalid action or missing approved page identity.');
         if (approved.tab !== here.tabId || approved.url !== here.url) return fail(command.id, 'The approved tab or page changed before the action.');
+        if (!(await canDispatch(command.id))) return fail(command.id, 'This browser turn ended before the action could start.');
         const data = await exec.query({ act: spec }, ACT_TIMEOUT_MS, approved);
         const record = isRecord(data) ? data : {};
         // An action can take the page somewhere this chat may not observe:
@@ -408,6 +414,7 @@ export async function executeAgentCommand(
           return fail(command.id, 'Scripts only run on localhost pages.');
         }
         if (approved.tab !== here.tabId || approved.url !== here.url) return fail(command.id, 'The approved tab or page changed before the script.');
+        if (!(await canDispatch(command.id))) return fail(command.id, 'This browser turn ended before the script could start.');
         const data = await exec.query({ evaluate: { expression } }, 15_000, approved);
         return { id: command.id, ok: true, url: here.url!, data };
       }
@@ -422,6 +429,7 @@ export async function executeAgentCommand(
             if (!verdict.ok) return fail(command.id, verdict.message);
             url = verdict.url;
           }
+          if (!(await canDispatch(command.id))) return fail(command.id, 'This browser turn ended before the tab could change.');
           await exec.openTab(url);
         } else if (action === 'select' || action === 'close') {
           const index = int(args['index'], 0, 31);
@@ -431,6 +439,7 @@ export async function executeAgentCommand(
           if (action === 'close' && tab.url !== null && !seen(tab.url)) {
             return fail(command.id, 'That tab shows a page this chat may not observe; only the operator can close it.');
           }
+          if (!(await canDispatch(command.id))) return fail(command.id, 'This browser turn ended before the tab could change.');
           if (!(action === 'select' ? exec.selectTab(index) : exec.closeTab(index))) return fail(command.id, `Tab ${index} could not be ${action === 'select' ? 'selected' : 'closed'}.`);
         } else if (action !== 'list') {
           return fail(command.id, 'Invalid tabs action.');
@@ -443,6 +452,7 @@ export async function executeAgentCommand(
         const direction = args['direction'];
         if ((direction !== 'back' && direction !== 'forward') || !only(args, ['direction'])) return fail(command.id, 'Invalid direction.');
         if (!here.url) return fail(command.id, 'No page is open in the Browser pane.');
+        if (!(await canDispatch(command.id))) return fail(command.id, 'This browser turn ended before navigation could start.');
         const landed = await exec.history(direction);
         if (landed.url && !seen(landed.url)) return { id: command.id, ok: true, data: { hidden: true, loading: landed.loading } };
         return { id: command.id, ok: true, ...(landed.url ? { url: landed.url } : {}), data: { title: landed.title, loading: landed.loading } };

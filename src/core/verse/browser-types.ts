@@ -28,6 +28,8 @@ export const VERSE_BROWSER_ALLOW_PATH = `${VERSE_BROWSER_PATH}/allow`;
 export const VERSE_BROWSER_ALLOWANCE_PATH = `${VERSE_BROWSER_PATH}/allowance`;
 /** GET ?sessionId=&wait= → VerseBrowserCommandsResponse (long-poll, ≤ 20 s) */
 export const VERSE_BROWSER_COMMANDS_PATH = `${VERSE_BROWSER_PATH}/commands`;
+/** POST { sessionId, id } → { allowed: boolean }; the pane's effect fence. */
+export const VERSE_BROWSER_DISPATCH_PATH = `${VERSE_BROWSER_PATH}/dispatch`;
 /** POST VerseBrowserCommandResult → { ok: true } */
 export const VERSE_BROWSER_RESULT_PATH = `${VERSE_BROWSER_PATH}/result`;
 /** POST (MCP streamable HTTP, stateless) — authenticated by the grant in the path, not the mutation token. */

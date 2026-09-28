@@ -18,6 +18,7 @@ import { claudeAdapter } from '../src/core/verse/adapters/claude.js';
 import {
   allowedOriginsFor,
   browserPolicy,
+  canDispatchBrowserCommand,
   browserSeatLaunch,
   claimBrowserCommands,
   completeBrowserCommand,
@@ -27,6 +28,7 @@ import {
   sessionForBrowserGrant,
   setBrowserAgentAccess,
   setBrowserOriginAllowed,
+  setBrowserScope,
   type BrowserOutcome,
 } from '../src/core/verse/browser-bridge.js';
 import { BROWSER_MCP_TOOLS, handleBrowserMcpBody, type BrowserMcpDeps } from '../src/core/verse/browser-mcp.js';
@@ -188,6 +190,37 @@ describe('the command relay', () => {
     expect(await pending).toEqual({ ok: true, url: 'http://localhost:5173/', data: { title: 'App' } });
     // A second answer to the same command is refused.
     expect(completeBrowserCommand('s1', { id: commands[0]!.id, ok: true })).toBe(false);
+  });
+
+  it('aborting a turn removes queued and claimed commands before dispatch', async () => {
+    setBrowserAgentAccess('s1', true, SIDECAR);
+    await claimBrowserCommands('s1', { waitMs: 0 });
+    const queuedAbort = new AbortController();
+    const queued = runBrowserCommand('s1', 'navigate', { url: 'http://localhost:5173/' }, { signal: queuedAbort.signal });
+    queuedAbort.abort();
+    expect(await queued).toMatchObject({ ok: false, code: 'access-off' });
+    expect(await claimBrowserCommands('s1', { waitMs: 0 })).toEqual([]);
+
+    const claimedAbort = new AbortController();
+    const claimed = runBrowserCommand('s1', 'act', {}, { signal: claimedAbort.signal });
+    const [command] = await claimBrowserCommands('s1', { waitMs: 0 });
+    expect(canDispatchBrowserCommand('s1', command!.id)).toBe(true);
+    claimedAbort.abort();
+    expect(canDispatchBrowserCommand('s1', command!.id)).toBe(false);
+    expect(completeBrowserCommand('s1', { id: command!.id, ok: true })).toBe(false);
+    expect(await claimed).toMatchObject({ ok: false, code: 'access-off' });
+  });
+
+  it('checks live scope again at the claimed command dispatch fence', async () => {
+    setBrowserAgentAccess('s1', true, SIDECAR);
+    await claimBrowserCommands('s1', { waitMs: 0 });
+    const pending = runBrowserCommand('s1', 'act');
+    const [command] = await claimBrowserCommands('s1', { waitMs: 0 });
+    expect(canDispatchBrowserCommand('s1', command!.id)).toBe(true);
+    setBrowserScope('s1', 'browser_act', false, SIDECAR);
+    expect(canDispatchBrowserCommand('s1', command!.id)).toBe(false);
+    completeBrowserCommand('s1', { id: command!.id, ok: false, error: 'scope disabled' });
+    await pending;
   });
 
   it('a queued command waits for the next poll within the claim window', async () => {

@@ -13,6 +13,7 @@ import {
   VERSE_BROWSER_ALLOWANCE_PATH,
   VERSE_BROWSER_ALLOW_PATH,
   VERSE_BROWSER_COMMANDS_PATH,
+  VERSE_BROWSER_DISPATCH_PATH,
   VERSE_BROWSER_POLICY_PATH,
   VERSE_BROWSER_RESULT_PATH,
   type VerseBrowserCommandResult,
@@ -35,6 +36,8 @@ export interface BrowserApi {
   allowOrigin(sessionId: string, origin: string, allowed: boolean): Promise<VerseBrowserPolicy>;
   /** The long-poll. Resolves [] after the server's wait. */
   commands(sessionId: string, signal?: AbortSignal): Promise<VerseBrowserCommandsResponse>;
+  /** Recheck a claimed command's live authority immediately before an effect. */
+  canDispatch(sessionId: string, id: string): Promise<boolean>;
   result(sessionId: string, result: VerseBrowserCommandResult): Promise<void>;
   /** Dev servers found for the chat's folders (the Preview pane's discovery). */
   targets(sessionId: string, signal?: AbortSignal): Promise<VersePreviewTargetsResponse>;
@@ -59,6 +62,7 @@ export const browserApi: BrowserApi = {
   revokeAllowance: (sessionId, key) => post(VERSE_BROWSER_ALLOWANCE_PATH, { sessionId, key }),
   allowOrigin: (sessionId, origin, allowed) => post(VERSE_BROWSER_ALLOW_PATH, { sessionId, origin, allowed }),
   commands: (sessionId, signal) => apiGet(`${VERSE_BROWSER_COMMANDS_PATH}?${q({ sessionId })}`, signal),
+  canDispatch: async (sessionId, id) => (await post<{ allowed: boolean }>(VERSE_BROWSER_DISPATCH_PATH, { sessionId, id })).allowed === true,
   result: async (sessionId, result) => {
     await post(VERSE_BROWSER_RESULT_PATH, { sessionId, ...result });
   },

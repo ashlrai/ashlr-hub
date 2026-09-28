@@ -59,6 +59,7 @@ function harness(opts: { native?: boolean; screenshot?: boolean; policy?: VerseB
       // Park like the real long-poll until aborted.
       return new Promise<VerseBrowserCommandsResponse>((resolve) => signal?.addEventListener('abort', () => resolve({ commands: [] })));
     }),
+    canDispatch: vi.fn(async () => true),
     result: vi.fn(async () => {}),
     targets: vi.fn(async () => ({
       devServers: [

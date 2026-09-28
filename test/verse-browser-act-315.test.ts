@@ -29,6 +29,7 @@ import {
 } from '../src/core/verse/browser-act-policy.js';
 import {
   addBrowserAllowances,
+  browserAllowanceRevision,
   beginBrowserTurn,
   browserPolicy,
   browserScopes,
@@ -451,8 +452,31 @@ describe('acting through the MCP handler', () => {
     setBrowserAgentAccess('s1', true, SIDECAR);
     expect(setBrowserScope('s1', 'browser_script', true, SIDECAR)).toMatchObject({ scriptAccess: true });
     addBrowserAllowances('s1', ['y']);
+    const revision = browserAllowanceRevision('s1');
+    expect(setBrowserScope('s1', 'browser_script', false, SIDECAR)).toMatchObject({ scriptAccess: false, allowances: [] });
+    expect(browserAllowanceRevision('s1')).toBeGreaterThan(revision);
+    setBrowserScope('s1', 'browser_script', true, SIDECAR);
+    addBrowserAllowances('s1', ['y']);
     expect(setBrowserScope('s1', 'browser_act', false, SIDECAR)).toMatchObject({ actAccess: false, allowances: [] });
     expect(browserScopes('s1')).toEqual({ access: true, act: false, script: true });
+  });
+
+  it('does not restore a revoked chat allowance from an old confirmation card', async () => {
+    setBrowserAgentAccess('s1', true, SIDECAR);
+    const h = harness({ targets: { e7: target({ submits: true, name: 'Delete' }) } });
+    h.setLoad('L1');
+    let answer: ((decision: 'chat') => void) | undefined;
+    h.deps.tools!.confirm = async () => new Promise((resolve) => { answer = resolve; });
+    const pending = call(h.deps, 'browser_click', { ref: 'e7', element: 'Delete' });
+    for (let i = 0; i < 20 && !answer; i++) await Promise.resolve();
+    expect(answer).toBeDefined();
+    revokeBrowserAllowance('s1', 'submit@http://localhost:5173');
+    answer!('chat');
+    const result = await pending;
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/approval changed/);
+    expect(acts(h.pane)).toEqual([]);
+    expect(browserPolicy('s1').allowances).toEqual([]);
   });
 
   it('screenshot: ≤1280×800 with its scale; clicking by pixel maps back to CSS px; a scroll invalidates it', async () => {

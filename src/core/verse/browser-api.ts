@@ -8,6 +8,7 @@
  *   POST /api/verse/browser/allow  {sessionId, origin, allowed} → VerseBrowserPolicy
  *   POST /api/verse/browser/allowance {sessionId, key}  → VerseBrowserPolicy (forget one "Allow for this chat")
  *   GET  /api/verse/browser/commands?sessionId=&wait=  → { commands } (the pane's long-poll, ≤ 20 s)
+ *   POST /api/verse/browser/dispatch {sessionId, id}   → { allowed } (live claim fence before an effect)
  *   POST /api/verse/browser/result {sessionId, id, ok, url?, data?, error?} → { ok: true }
  *   POST /api/verse/browser/mcp/<grant>                → MCP JSON-RPC (browser-mcp.ts)
  *   GET|DELETE /api/verse/browser/mcp/<grant>          → 405 (stateless: no SSE stream, no session)
@@ -36,6 +37,7 @@ import {
   BROWSER_POLL_MAX_WAIT_MS,
   allowedOriginsFor,
   browserPolicy,
+  canDispatchBrowserCommand,
   claimBrowserCommands,
   completeBrowserCommand,
   recordBrowserBlocked,
@@ -52,6 +54,7 @@ import {
   VERSE_BROWSER_ALLOW_PATH,
   VERSE_BROWSER_SCOPES,
   VERSE_BROWSER_COMMANDS_PATH,
+  VERSE_BROWSER_DISPATCH_PATH,
   VERSE_BROWSER_MCP_PATH_RE,
   VERSE_BROWSER_POLICY_PATH,
   VERSE_BROWSER_RESULT_PATH,
@@ -265,10 +268,20 @@ export const handleBrowserApi: ApiModule = async (_ctx, req, res, path, method) 
     return true;
   }
 
-  if (path === VERSE_BROWSER_ACCESS_PATH || path === VERSE_BROWSER_ALLOW_PATH || path === VERSE_BROWSER_ALLOWANCE_PATH || path === VERSE_BROWSER_RESULT_PATH) {
+  if (path === VERSE_BROWSER_ACCESS_PATH || path === VERSE_BROWSER_ALLOW_PATH || path === VERSE_BROWSER_ALLOWANCE_PATH || path === VERSE_BROWSER_RESULT_PATH || path === VERSE_BROWSER_DISPATCH_PATH) {
     if (method !== 'POST') return false;
     const body = await readJsonObject(req, res, path === VERSE_BROWSER_RESULT_PATH ? RESULT_BODY_BYTES : SMALL_BODY_BYTES);
     if (!body) return true;
+
+    if (path === VERSE_BROWSER_DISPATCH_PATH) {
+      const extra = onlyKeys(body, ['sessionId', 'id']);
+      if (extra) return invalid(res, `unknown field: ${extra.slice(0, 40)}`);
+      const sessionId = await knownSession(res, body['sessionId']);
+      if (!sessionId) return true;
+      if (typeof body['id'] !== 'string' || !/^bc_[A-Za-z0-9_-]{12}$/.test(body['id'])) return invalid(res, 'invalid command id');
+      sendJson(res, 200, { allowed: canDispatchBrowserCommand(sessionId, body['id']) });
+      return true;
+    }
 
     if (path === VERSE_BROWSER_ACCESS_PATH) {
       const extra = onlyKeys(body, ['sessionId', 'enabled', 'scope']);

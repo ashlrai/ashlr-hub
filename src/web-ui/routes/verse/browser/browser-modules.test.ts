@@ -5,7 +5,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VerseBrowserAgentCommand } from '../../../../core/verse/browser-types.js';
-import { executeAgentCommand, parseActArgs, parseResolveArgs, versePortOf, type BrowserExecutor } from './agent-runner.js';
+import { executeAgentCommand as executeWithFence, parseActArgs, parseResolveArgs, versePortOf, type BrowserExecutor } from './agent-runner.js';
 import { SEARCH_URL, parseBrowserAddress, shortAddress } from './browser-address.js';
 import { frameRect, isUsableRect, stepZoom, zoomLabel } from './browser-geometry.js';
 import { MAX_BROWSER_TABS, activeTab, browserTabsReducer, initialTabsState, restoreTabs, serializeTabs } from './browser-tabs.js';
@@ -13,6 +13,12 @@ import { NATIVE_BROWSER_EVENT, nativeBrowser, nativeRequest, parseNativeBrowserE
 import { base64Bytes, buildSendToChatText, fence, screenshotName, sendCaptureToChat } from './send-to-chat.js';
 
 const VERSE = 'http://127.0.0.1:7777';
+const executeAgentCommand = (
+  command: VerseBrowserAgentCommand,
+  executor: BrowserExecutor,
+  origin: string,
+  canDispatch: (id: string) => Promise<boolean> = async () => true,
+) => executeWithFence(command, executor, origin, canDispatch);
 
 describe('the address bar', () => {
   it('expands shorthands and classifies loopback / frameable', () => {
@@ -330,6 +336,14 @@ describe('the agent runner — acting (closed shapes, pause, confirm)', () => {
     const r = await executeAgentCommand(cmd('act', { kind: 'click', ref: 'e3', expect: 'abc' }), exec, VERSE);
     expect(r).toMatchObject({ ok: true, url: 'http://localhost:5173/' });
     expect(exec.calls).toEqual(['{"act":{"kind":"click","ref":"e3","expect":"abc"}}']);
+  });
+
+  it('refuses a claimed action when the turn was revoked before native dispatch', async () => {
+    const exec = executor();
+    const result = await executeAgentCommand(cmd('act', { kind: 'click', ref: 'e3' }), exec, VERSE, async () => false);
+    expect(result).toMatchObject({ ok: false });
+    expect(result.error).toMatch(/turn ended/);
+    expect(exec.calls).toEqual([]);
   });
 
   it('rejects a switched tab or missing page approval before native input', async () => {

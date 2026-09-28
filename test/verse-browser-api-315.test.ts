@@ -206,8 +206,11 @@ describe('browser routes through the real server', () => {
     expect(polled.status).toBe(200);
     const [command] = (polled.json as { commands: Array<{ id: string; op: string; url: string }> }).commands;
     expect(command).toMatchObject({ op: 'navigate', url: 'http://localhost:5173/settings' });
+    expect((await request(handle.port, 'POST', '/api/verse/browser/dispatch', {}, { sessionId: 's-1', id: command!.id })).status).toBe(401);
+    expect((await request(handle.port, 'POST', '/api/verse/browser/dispatch', mutate, { sessionId: 's-1', id: command!.id })).json).toEqual({ allowed: true });
     const answered = await request(handle.port, 'POST', '/api/verse/browser/result', mutate, { sessionId: 's-1', id: command!.id, ok: true, url: 'http://localhost:5173/settings', data: { title: 'Settings', loading: false } });
     expect(answered.status).toBe(200);
+    expect((await request(handle.port, 'POST', '/api/verse/browser/dispatch', mutate, { sessionId: 's-1', id: command!.id })).json).toEqual({ allowed: false });
     const result = (await call).json as { result: { content: Array<{ text: string }> } };
     const opened = result.result.content[0]!.text;
     expect(opened.startsWith('Opened http://localhost:5173/settings.\n')).toBe(true);
