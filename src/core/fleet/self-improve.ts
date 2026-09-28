@@ -344,11 +344,10 @@ export function sweepRejectionLearning(
 
 /**
  * Filter a list of genome entries to anti-playbook entries suitable for
- * inject-time grounding. Applies:
- *   1. Tag filter: only entries tagged 'm235:anti-playbook'.
- *   2. Stale-archive: skip entries older than STALE_DAYS.
- *   3. Char cap: accumulate entries (most-recent first) until
- *      ANTI_PLAYBOOK_INJECT_CAP chars would be exceeded.
+ * inject-time grounding. Genome entries are unsigned and can also come from
+ * project files, so the tag alone cannot authorize arbitrary prompt text.
+ * Only the writer's finite, deterministic verdict lessons are admitted.
+ * Repeated lessons for the same verdict add no information; retain the newest.
  *
  * Returns a subset of the input, safe to prepend to agent prompts.
  * Pure; never throws.
@@ -357,18 +356,24 @@ export function curateAntiPlaybooks(entries: GenomeEntry[]): GenomeEntry[] {
   try {
     if (!Array.isArray(entries) || entries.length === 0) return [];
 
-    const cutoffMs = Date.now() - STALE_DAYS * 86_400_000;
+    const nowMs = Date.now();
+    const cutoffMs = nowMs - STALE_DAYS * 86_400_000;
 
-    // Filter to anti-playbook entries that are fresh.
+    // The exact title/body are reconstructed from a closed vocabulary. A
+    // project genome entry or edited hub row carrying this tag cannot inject
+    // new instructions into a future run.
     const fresh = entries.filter((e) => {
-      if (!e.tags.includes(TAG)) return false;
-      try {
-        const ms = Date.parse(e.ts);
-        if (!Number.isFinite(ms)) return true; // no valid ts — keep it
-        return ms >= cutoffMs;
-      } catch {
-        return true;
-      }
+      if (e?.source !== 'hub' || e.project !== null || !Array.isArray(e.tags) ||
+        !e.tags.every((tag) => typeof tag === 'string') ||
+        !e.tags.includes(TAG) || typeof e.ts !== 'string') return false;
+      const verdict = e.tags.find((tag) => tag === 'verdict:review' ||
+        tag === 'verdict:noise' || tag === 'verdict:harmful')?.slice('verdict:'.length);
+      if (!verdict || !isRejection(verdict) ||
+        e.title !== `Anti-playbook observation: ${verdict}` ||
+        e.text !== deriveLesson(verdict, '', '')) return false;
+      const ms = Date.parse(e.ts);
+      return Number.isFinite(ms) && new Date(ms).toISOString() === e.ts &&
+        ms >= cutoffMs && ms <= nowMs;
     });
 
     // Sort most-recent first.
@@ -381,10 +386,13 @@ export function curateAntiPlaybooks(entries: GenomeEntry[]): GenomeEntry[] {
     // Accumulate up to ANTI_PLAYBOOK_INJECT_CAP chars.
     const result: GenomeEntry[] = [];
     let charCount = 0;
+    const seenVerdicts = new Set<string>();
     for (const e of fresh) {
+      if (seenVerdicts.has(e.title)) continue;
       const size = e.title.length + e.text.length;
       if (charCount + size > ANTI_PLAYBOOK_INJECT_CAP) break;
       charCount += size;
+      seenVerdicts.add(e.title);
       result.push(e);
     }
     return result;

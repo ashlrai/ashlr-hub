@@ -399,6 +399,17 @@ describe('recall — keyword path (offline, no fetch)', () => {
     expect(hits.find((hit) => hit.entry.id === 'legacy-internal-skill')).toBeUndefined();
   });
 
+  it('keeps tagged anti-playbooks on their validated curator path', async () => {
+    const common = { title: 'Retry scheduler', text: 'Retry scheduler with bounded backoff.' };
+    writeHubEntries(tmpHome, [
+      makeEntry({ id: 'tagged-lesson', ...common, tags: ['m235:anti-playbook'] }),
+      makeEntry({ id: 'ordinary-note', ...common, tags: [] }),
+    ]);
+
+    const hits = await recall('retry scheduler bounded backoff', makeConfig(), { embeddings: false });
+    expect(hits.map((hit) => hit.entry.id)).toEqual(['ordinary-note']);
+  });
+
   it('leaves ordinary genome keyword scoring unchanged', async () => {
     const entry = makeEntry({
       id: 'ordinary-memory',

@@ -13,6 +13,7 @@ import type { AshlrConfig, GenomeEntry, RecallHit } from '../types.js';
 import { loadGenome } from './store.js';
 
 const SKILL_TAG = 'm243:skill';
+const ANTI_PLAYBOOK_TAG = 'm235:anti-playbook';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -212,11 +213,15 @@ function entryToEmbedText(entry: GenomeEntry): string {
   return parts.join(' ').slice(0, 2000);
 }
 
-/** Skill rows need a future release-proof verifier before entering recall. */
+/**
+ * Skill rows need a future release-proof verifier. Anti-playbook rows have a
+ * separate finite-vocabulary curator in fleet/self-improve.ts; ordinary recall
+ * would bypass it and could inject arbitrary text from an unsigned tagged row.
+ */
 function isRecallEligibleEntry(entry: GenomeEntry): boolean {
   try {
     const tags = new Set(entry.tags.map((tag) => tag.trim().toLowerCase()));
-    return !tags.has(SKILL_TAG);
+    return !tags.has(SKILL_TAG) && !tags.has(ANTI_PLAYBOOK_TAG);
   } catch {
     return false;
   }
@@ -225,7 +230,6 @@ function isRecallEligibleEntry(entry: GenomeEntry): boolean {
 function memoryTierMultiplier(entry: GenomeEntry): number {
   const tags = new Set(entry.tags.map((tag) => tag.trim().toLowerCase()));
   if (tags.has('m26') && tags.has('playbook')) return 1.7;
-  if (tags.has('m235:anti-playbook')) return 1.5;
   if (tags.has('reflection') || tags.has('compaction')) return 1.35;
   if (tags.has('run') || tags.has('swarm')) return 0.9;
   return 1;
