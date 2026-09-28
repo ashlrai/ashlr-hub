@@ -46,9 +46,11 @@ describe('dormant remote Web Push sender', () => {
     expect(f.calls[0]?.options).toMatchObject({ TTL: 300, urgency: 'high', topic: 'ashlr-needs-you' });
     expect(f.calls[0]?.payload).not.toContain(SUBJECT);
     expect(await f.push.send('needs-you')).toEqual({ attempted: 0, delivered: 0, retired: 0 });
+    expect(f.push.subscribe(DEVICE, SUBJECT, f.subscription)).toBe(true);
+    expect(await f.push.send('needs-you')).toEqual({ attempted: 1, delivered: 1, retired: 0 });
     f.advance(60_001);
     expect(await f.push.send('completed')).toEqual({ attempted: 1, delivered: 1, retired: 0 });
-    expect(f.calls[1]?.payload).toBe('{"kind":"completed"}');
+    expect(f.calls[2]?.payload).toBe('{"kind":"completed"}');
     f.push.close();
   });
 

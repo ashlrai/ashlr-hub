@@ -147,6 +147,8 @@ export function createRemotePush(config: RemotePushConfig, devices: RemoteDevice
         if (registry.entries.length >= MAX_SUBSCRIPTIONS) throw new Error('Remote push subscriptions are full');
         registry.entries.push(entry);
       });
+      lastSent.delete(`${deviceId}:needs-you`);
+      lastSent.delete(`${deviceId}:completed`);
       return true;
     },
     unsubscribe(deviceId: string, subject: string): boolean {
