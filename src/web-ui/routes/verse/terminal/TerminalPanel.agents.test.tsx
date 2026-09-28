@@ -185,7 +185,7 @@ function harness(initial: Partial<VerseTerminalListResponse> = {}) {
     openFile: vi.fn(async () => {}),
     fix: vi.fn(async () => ({ suggestions: [{ command: 'npm install', why: 'A dependency is missing.' }], model: 'qwen-test' })),
     launchList: vi.fn(async () => ({
-      configs: [{ name: 'Dev', root: '~/code/app', tabs: [{ split: 'down' as const, panes: [{ cwd: 'web', command: 'npm run dev', agent: null }, { cwd: null, command: 'npm test -- --watch', agent: null }] }] }],
+      configs: [{ name: 'Dev', root: '~/code/app', digest: 'a'.repeat(64), tabs: [{ split: 'down' as const, panes: [{ cwd: 'web', command: 'npm run dev', agent: null }, { cwd: null, command: 'npm test -- --watch', agent: null }] }] }],
       errors: [],
     })),
     launch: vi.fn(async () => {
@@ -463,7 +463,7 @@ describe('TerminalPanel — many agents', () => {
     expect(await within(dialog).findByText('npm run dev')).toBeInTheDocument();
     expect(h.api.launch).not.toHaveBeenCalled();
     await user.click(within(dialog).getByRole('button', { name: 'Launch Dev' }));
-    await waitFor(() => expect(h.api.launch).toHaveBeenCalledWith({ sessionId: 's-1', root: '~/code/app', name: 'Dev', cols: 80, rows: 24 }));
+    await waitFor(() => expect(h.api.launch).toHaveBeenCalledWith({ sessionId: 's-1', root: '~/code/app', name: 'Dev', digest: 'a'.repeat(64), cols: 80, rows: 24 }));
     await waitFor(() => expect(screen.getAllByRole('tab').map((t) => t.textContent)).toContain('dev +1'));
     const group = screen.getByTestId('terminal-leaf-t-l2').parentElement!;
     expect(group).toHaveAttribute('data-direction', 'column');

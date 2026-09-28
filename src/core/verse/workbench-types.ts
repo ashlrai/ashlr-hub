@@ -1025,12 +1025,13 @@ export interface VerseTerminalFixResponse {
  *       { "panes": [ { "agent": "claude-code" } ] } ] } ] }
  *
  * GET  /api/verse/terminal/launch?sessionId=…  → VerseTerminalLaunchListResponse
- * POST /api/verse/terminal/launch { sessionId, root, name, cols, rows } → VerseTerminalLaunchResponse
+ * POST /api/verse/terminal/launch { sessionId, root, name, digest, cols, rows } → VerseTerminalLaunchResponse
  *
  * Nothing is typed on load: the configurations are listed (their commands
  * shown), and a named one's commands are typed only when the operator clicks
- * it. The POST names a configuration; the commands come from the file on the
- * server, never from the request.
+ * it. The POST names a configuration and presents the digest of exactly what
+ * the operator reviewed; a changed file is refused before any shell starts.
+ * Commands still come from the file on the server, never from the request.
  */
 export const VERSE_TERMINAL_LAUNCH_PATH = '/api/verse/terminal/launch';
 export const VERSE_TERMINAL_LAUNCH_FILE = '.ashlr/verse/launch.json';
@@ -1054,6 +1055,8 @@ export interface VerseTerminalLaunchConfig {
   /** The chat root whose launch.json declared it. */
   root: string;
   tabs: VerseTerminalLaunchTab[];
+  /** Server digest binding the displayed commands, agent IDs, and cwds. */
+  digest: string;
 }
 export interface VerseTerminalLaunchListResponse {
   configs: VerseTerminalLaunchConfig[];
@@ -1064,6 +1067,7 @@ export interface VerseTerminalLaunchRequest {
   sessionId: string;
   root: string;
   name: string;
+  digest: string;
   cols: number;
   rows: number;
 }

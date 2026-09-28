@@ -400,6 +400,7 @@ describe('launch configurations — .ashlr/verse/launch.json', () => {
     expect(parseLaunchFile(JSON.stringify(valid), '/p')).toEqual([{
       name: 'Dev',
       root: '/p',
+      digest: expect.stringMatching(/^(?:[a-f0-9]{8}-){7}[a-f0-9]{8}$/),
       tabs: [
         { split: 'down', panes: [{ cwd: 'web', command: 'npm run dev', agent: null }, { cwd: null, command: 'npm test -- --watch', agent: null }] },
         { split: 'right', panes: [{ cwd: null, command: null, agent: 'claude-code' }] },

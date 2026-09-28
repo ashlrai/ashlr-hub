@@ -13,16 +13,19 @@
  *           { "panes": [ { "agent": "claude-code" } ] } ] } ] }
  *
  * A REPO FILE IS NOT AN INSTRUCTION. Reading a launch.json runs nothing: the
- * configurations are listed, each with the exact commands it would type, and
- * a configuration's commands are typed only when the operator launches that
- * one by name. The launch route re-reads the file and takes the commands from
- * it — never from the request — so the page cannot smuggle a command in.
+ * configurations are listed, each with the exact commands it would type and
+ * a digest of that reviewed config. Commands are typed only when the operator
+ * launches that config. The launch route re-reads the file and requires the
+ * digest to match before opening any tab, so neither the page nor a repo file
+ * changed after review can smuggle in a different command.
  *
  * Validation is strict and total: an unknown key, a multi-line command, a cwd
  * that climbs out of the root or an agent the catalog does not know makes the
  * whole file unusable (one error line, shown to the operator) rather than
- * half-applied. Paths are re-checked against the root's PHYSICAL path at launch.
+ * half-applied. Paths are re-checked against the root's PHYSICAL path at launch,
+ * and all panes are preflighted before any tab is created.
  */
+import { createHash } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute, join, normalize, sep } from 'node:path';
 
@@ -43,6 +46,14 @@ export const LAUNCH_NAME_MAX_CHARS = 60;
 export const LAUNCH_COMMAND_MAX_CHARS = 1_000;
 /** A tab holds two terminals at most (the panel's MAX_PANES_PER_GROUP). */
 export const LAUNCH_MAX_PANES_PER_TAB = 2;
+
+/** Binds the operator's displayed config to the command the server will type. */
+export function launchConfigDigest(config: Omit<VerseTerminalLaunchConfig, 'digest'>): string {
+  const hex = createHash('sha256').update('ashlr:verse-terminal-launch:v1\0').update(JSON.stringify(config)).digest('hex');
+  // Public JSON scrubs bare 64-hex strings as possible API keys. Segment this
+  // non-secret digest so it survives that boundary without weakening it.
+  return hex.match(/.{8}/g)!.join('-');
+}
 
 class LaunchFileError extends Error {}
 
@@ -134,7 +145,8 @@ export function parseLaunchFile(text: string, root: string): VerseTerminalLaunch
     if (!Array.isArray(tabs) || tabs.length === 0 || tabs.length > VERSE_TERMINAL_LAUNCH_MAX_TABS) {
       fail(`${where}.tabs must list 1–${VERSE_TERMINAL_LAUNCH_MAX_TABS} tabs`);
     }
-    return { name: name.trim(), root, tabs: tabs.map((t, j) => tabOf(t, `${where}.tabs[${j}]`)) };
+    const config = { name: name.trim(), root, tabs: tabs.map((t, j) => tabOf(t, `${where}.tabs[${j}]`)) };
+    return { ...config, digest: launchConfigDigest(config) };
   });
 }
 

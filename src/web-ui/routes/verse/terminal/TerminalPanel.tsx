@@ -813,7 +813,7 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
     if (!deps.api.launch) throw new Error('Launch configurations need a newer server.');
     let res;
     try {
-      res = await deps.api.launch({ sessionId, root: config.root, name: config.name, ...sizeHint() });
+      res = await deps.api.launch({ sessionId, root: config.root, name: config.name, digest: config.digest, ...sizeHint() });
     } catch (err) {
       throw new Error(errorText(err, 'That configuration could not be launched.'));
     }

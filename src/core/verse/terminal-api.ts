@@ -32,9 +32,9 @@
  *                                           model's ≤ 3 candidate commands for a failed block
  *                                           (terminal-assist.ts); chips on the page, never run
  *   GET  /api/verse/terminal/launch?sessionId=…        → the chat roots' launch configurations
- *   POST /api/verse/terminal/launch          { sessionId, root, name, cols, rows } → 201 — opens
- *                                           that configuration's tabs and types its commands
- *                                           (from the file, never the request)
+ *   POST /api/verse/terminal/launch          { sessionId, root, name, digest, cols, rows } → 201 — opens
+ *                                           the exact configuration shown in the dialog;
+ *                                           a changed file is refused before any tab opens
  *
  * NO SECRET REACHES A CHAT FROM HERE. Every JSON response passes
  * sanitizePublicJson (sendJson); `format=chat` and /redact additionally run
@@ -513,12 +513,14 @@ async function handleLaunchList(req: IncomingMessage, res: ServerResponse): Prom
 }
 
 async function handleLaunch(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const body = await readJsonBody(req, ['sessionId', 'root', 'name', 'cols', 'rows']);
+  const body = await readJsonBody(req, ['sessionId', 'root', 'name', 'digest', 'cols', 'rows']);
   const cols = requiredDimension(body, 'cols');
   const rows = requiredDimension(body, 'rows');
   const session = await requireSession(body['sessionId']);
   const name = optionalString(body, 'name');
   if (!name) throw new BadRequest(400, 'name is required');
+  const digest = optionalString(body, 'digest');
+  if (!digest || !/^(?:[a-f0-9]{8}-){7}[a-f0-9]{8}$/.test(digest)) throw new BadRequest(400, 'the reviewed launch digest is required');
   const m = manager();
   if (!m.available().available) throw new TerminalError('TERMINAL_UNAVAILABLE', m.available().reason ?? 'terminal unavailable');
   const root = await resolveRoot(session, optionalString(body, 'root'));
@@ -530,15 +532,37 @@ async function handleLaunch(req: IncomingMessage, res: ServerResponse): Promise<
     sendJson(res, 404, { code: 'TERMINAL_LAUNCH_NOT_FOUND', error: why ? `That launch configuration cannot be used: ${why}` : 'No launch configuration by that name in this folder.' });
     return;
   }
+  if (config.digest !== digest) {
+    throw new BadRequest(409, 'This launch configuration changed since you reviewed it. Reopen the dialog and review the new commands.', 'TERMINAL_LAUNCH_CHANGED');
+  }
   const out: VerseTerminalLaunchResponse = { groups: [], errors: [] };
   const hooksBaseUrl = loopbackOrigin(req);
-  outer: for (const tab of config.tabs) {
-    const opened: VerseTerminalTab[] = [];
+  // Resolve every cwd and catalog command before the first shell starts. A
+  // broken later pane must not leave earlier commands running unexpectedly.
+  const planned: Array<{ split: 'right' | 'down'; panes: Array<{ label: string; cwd: string | null; startCommand: string | null; agent: string | null }> }> = [];
+  for (const tab of config.tabs) {
+    const panes: (typeof planned)[number]['panes'] = [];
     for (const pane of tab.panes) {
       const label = pane.agent ?? pane.command ?? 'shell';
       try {
         const cwd = pane.cwd ? await resolveCwdWithin(root, join(root, pane.cwd)) : null;
         const startCommand = pane.agent ? await appStartCommand(pane.agent, undefined, undefined) : pane.command;
+        panes.push({ label, cwd, startCommand, agent: pane.agent });
+      } catch (err) {
+        const text = err instanceof BadRequest || err instanceof TerminalError ? err.message : 'could not be validated';
+        out.errors.push(`${label.slice(0, 60)}: ${text}`);
+      }
+    }
+    planned.push({ split: tab.split, panes });
+  }
+  if (out.errors.length > 0) {
+    sendJson(res, 409, { code: 'TERMINAL_LAUNCH_INVALID', error: 'The launch configuration has invalid panes. No terminals were opened.', errors: out.errors });
+    return;
+  }
+  outer: for (const tab of planned) {
+    const opened: VerseTerminalTab[] = [];
+    for (const pane of tab.panes) {
+      try {
         opened.push(await m.create({
           sessionId: session.id,
           root,
@@ -546,13 +570,13 @@ async function handleLaunch(req: IncomingMessage, res: ServerResponse): Promise<
           rows,
           appId: pane.agent,
           devServerId: null,
-          startCommand,
-          cwd,
+          startCommand: pane.startCommand,
+          cwd: pane.cwd,
           ...(pane.agent ? { agentStatus: { hooksBaseUrl } } : {}),
         }));
       } catch (err) {
         const text = err instanceof BadRequest || err instanceof TerminalError ? err.message : 'could not be opened';
-        out.errors.push(`${label.slice(0, 60)}: ${text}`);
+        out.errors.push(`${pane.label.slice(0, 60)}: ${text}`);
         if (err instanceof TerminalError && (err.code === 'TERMINAL_LIMIT' || err.code === 'TERMINAL_UNAVAILABLE')) {
           if (opened.length > 0) out.groups.push({ split: tab.split, tabs: opened });
           break outer;

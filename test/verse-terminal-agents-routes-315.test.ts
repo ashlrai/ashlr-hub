@@ -292,7 +292,7 @@ describe('terminal 3.15 agents, fixes and launch configurations through the real
       version: 1,
       configurations: [
         { name: 'Dev', tabs: [{ split: 'down', panes: [{ cwd: 'web', command: 'npm run dev' }, { command: 'npm test -- --watch' }] }, { panes: [{ agent: 'claude-code' }] }] },
-        { name: 'Missing dir', tabs: [{ panes: [{ cwd: 'nope', command: 'ls' }] }] },
+        { name: 'Missing dir', tabs: [{ panes: [{ command: 'echo first' }, { cwd: 'nope', command: 'ls' }] }] },
       ],
     }));
     const listed = await request(port, 'GET', '/api/verse/terminal/launch?sessionId=s-1', read);
@@ -300,10 +300,24 @@ describe('terminal 3.15 agents, fixes and launch configurations through the real
     const list = listed.json as VerseTerminalLaunchListResponse;
     expect(list.errors).toEqual([]);
     expect(list.configs.map((c) => c.name)).toEqual(['Dev', 'Missing dir']);
+    const devDigest = list.configs[0]!.digest;
+    const missingDigest = list.configs[1]!.digest;
+    expect(devDigest).toMatch(/^(?:[a-f0-9]{8}-){7}[a-f0-9]{8}$/);
     // Listing typed nothing.
     expect(fake.spawned).toHaveLength(0);
 
-    const launched = await request(port, 'POST', '/api/verse/terminal/launch', mutate, JSON.stringify({ sessionId: 's-1', root: project, name: 'Dev', cols: 100, rows: 30 }));
+    const launchPath = path.join(project, '.ashlr', 'verse', 'launch.json');
+    const reviewedFile = fs.readFileSync(launchPath, 'utf8');
+    fs.writeFileSync(launchPath, reviewedFile.replace('npm run dev', 'echo changed'));
+    const changed = await request(port, 'POST', '/api/verse/terminal/launch', mutate, JSON.stringify({ sessionId: 's-1', root: project, name: 'Dev', digest: devDigest, cols: 100, rows: 30 }));
+    expect(changed.status).toBe(409);
+    expect(changed.json).toMatchObject({ code: 'TERMINAL_LAUNCH_CHANGED' });
+    expect(fake.spawned).toHaveLength(0);
+    fs.writeFileSync(launchPath, reviewedFile);
+    expect((await request(port, 'POST', '/api/verse/terminal/launch', mutate, JSON.stringify({ sessionId: 's-1', root: project, name: 'Dev', cols: 100, rows: 30 }))).status).toBe(400);
+    expect(fake.spawned).toHaveLength(0);
+
+    const launched = await request(port, 'POST', '/api/verse/terminal/launch', mutate, JSON.stringify({ sessionId: 's-1', root: project, name: 'Dev', digest: devDigest, cols: 100, rows: 30 }));
     expect(launched.status).toBe(201);
     const body = launched.json as VerseTerminalLaunchResponse;
     expect(body.errors).toEqual([]);
@@ -314,12 +328,15 @@ describe('terminal 3.15 agents, fixes and launch configurations through the real
     expect(fake.spawned.map((p) => p.written.join('').replace(/ --settings \S+/, ' --settings …'))).toEqual(['npm run dev\r', 'npm test -- --watch\r', 'claude --settings …\r']);
     expect(body.groups[1]!.tabs[0]!.agent).toBe(true);
 
-    const missing = await request(port, 'POST', '/api/verse/terminal/launch', mutate, JSON.stringify({ sessionId: 's-1', root: project, name: 'Missing dir', cols: 80, rows: 24 }));
+    const spawnedBeforeInvalid = fake.spawned.length;
+    const missing = await request(port, 'POST', '/api/verse/terminal/launch', mutate, JSON.stringify({ sessionId: 's-1', root: project, name: 'Missing dir', digest: missingDigest, cols: 80, rows: 24 }));
+    expect(missing.status).toBe(409);
     expect((missing.json as VerseTerminalLaunchResponse).errors[0]).toMatch(/^ls: cwd must be an existing directory/);
-    expect((await request(port, 'POST', '/api/verse/terminal/launch', mutate, JSON.stringify({ sessionId: 's-1', root: project, name: 'Nope', cols: 80, rows: 24 }))).status).toBe(404);
+    expect(fake.spawned).toHaveLength(spawnedBeforeInvalid);
+    expect((await request(port, 'POST', '/api/verse/terminal/launch', mutate, JSON.stringify({ sessionId: 's-1', root: project, name: 'Nope', digest: devDigest, cols: 80, rows: 24 }))).status).toBe(404);
     // The request cannot carry a command.
-    expect((await request(port, 'POST', '/api/verse/terminal/launch', mutate, JSON.stringify({ sessionId: 's-1', root: project, name: 'Dev', cols: 80, rows: 24, command: 'rm -rf ~' }))).status).toBe(400);
-    expect((await request(port, 'POST', '/api/verse/terminal/launch', { 'content-type': 'application/json' }, JSON.stringify({ sessionId: 's-1', root: project, name: 'Dev', cols: 80, rows: 24 }))).status).toBe(401);
+    expect((await request(port, 'POST', '/api/verse/terminal/launch', mutate, JSON.stringify({ sessionId: 's-1', root: project, name: 'Dev', digest: devDigest, cols: 80, rows: 24, command: 'rm -rf ~' }))).status).toBe(400);
+    expect((await request(port, 'POST', '/api/verse/terminal/launch', { 'content-type': 'application/json' }, JSON.stringify({ sessionId: 's-1', root: project, name: 'Dev', digest: devDigest, cols: 80, rows: 24 }))).status).toBe(401);
 
     fs.writeFileSync(path.join(project, '.ashlr', 'verse', 'launch.json'), '{"version":1,"configurations":[{"name":"x","tabs":[{"panes":[{"command":"a\\nb"}]}]}]}');
     const bad = (await request(port, 'GET', '/api/verse/terminal/launch?sessionId=s-1', read)).json as VerseTerminalLaunchListResponse;
