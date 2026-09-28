@@ -18,6 +18,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Keep the paired phone's Needs You feed live after its first read by allowing
   the activity route's validated cursor query through the remote gateway.
   Other query shapes remain denied.
+- Declare local networking for the native macOS WebView and preserve it when
+  updating an installed app, so Verse can load its loopback server.
 
 ## [3.16.0] — 2026-09-28
 
