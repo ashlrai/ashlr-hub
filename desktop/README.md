@@ -810,7 +810,7 @@ needs to be redone. Nothing in step 4 needs the network.
 Output under `desktop/src-tauri/target/release/bundle/`:
 
 - `macos/Ashlr.app` — the installable app
-- `dmg/Ashlr_0.1.0_aarch64.dmg` — the disk image
+- `dmg/Ashlr_<version>_aarch64.dmg` — the disk image; `<version>` matches the root package version
 
 A debug bundle (unoptimized, faster to build, under `target/debug/bundle/`):
 
@@ -826,7 +826,7 @@ cd desktop && cargo tauri build --debug
 
 ### Is the DMG step broken?
 
-**No.** `cargo tauri build` on this Mac completes `Bundling Ashlr.app` →
+**No.** An earlier `cargo tauri build` on this Mac completed `Bundling Ashlr.app` →
 `Bundling Ashlr_0.1.0_aarch64.dmg` → `Running bundle_dmg.sh` → `Finished 2
 bundles`, exit code 0, in about 90 seconds once the Rust crate is compiled.
 
