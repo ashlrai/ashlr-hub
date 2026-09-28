@@ -892,20 +892,9 @@ export function isLeaderDryRun(policy: EffectivePolicy | null): boolean {
   return policy === null || policy.switch !== 'autonomous' || policy.leader.classes.length === 0;
 }
 
-/**
- * 3.15: goal hygiene applies whenever autonomy is ON (a standing grant is in
- * force and Mason set the switch to Autonomous), independent of the rollout
- * ladder's leaderClasses. The ladder paces CODE — which repos may be touched
- * and merged, by which engines — and its early stages carry
- * `leaderClasses: []`; read literally that froze the goal list too, so in
- * shadow the Leader could not even pause the goals no granted repo can serve
- * (live, 2026-09-27: 26 of 26 actions refused — 22 of them goal focus/pause/
- * archive — with 21 goals open against a 4-goal focus limit). goal.focus of a
- * paused goal re-activates it; like every class-A action it is vetoable. Everything else — work.dispatch, router and
- * lane changes, goal.create (class B) — still waits for the ladder.
- */
+/** Goal changes are class A and require that class in the effective signed grant. */
 export function leaderGoalHygieneApplies(policy: EffectivePolicy | null): boolean {
-  return policy !== null && policy.switch === 'autonomous';
+  return policy !== null && policy.switch === 'autonomous' && policy.leader.classes.includes('A');
 }
 
 function ok(cls: LeaderActionClass, spendRaising = false): LeaderClassification {
@@ -1036,8 +1025,7 @@ export interface PlannedActionMeta {
 
 /**
  * Plan one action: class, status and window. Pure over `ctx`.
- *   goal hygiene    → scheduled (class A) whenever autonomy is on, whatever
- *                     the stage (leaderGoalHygieneApplies);
+ *   goal hygiene    → scheduled only with autonomous class A authority;
  *   dry run         → refused ("dry run: …") — or escalated for class C;
  *   class not granted in the current stage → escalated (class C);
  *   Leader limit    → refused;
@@ -1408,14 +1396,13 @@ function settleNotApplied(deps: LeaderApplyDeps, claimed: Claimed, next: LeaderA
  */
 async function applyClaimed(deps: LeaderApplyDeps, claimed: Claimed, opts: { approvedVia?: string } = {}): Promise<LeaderAction> {
   const action = claimed.stored.action;
-  // Goal hygiene may be scheduled in a shadow stage. Read the live policy at
-  // the mutation fence so lowering the switch or revoking the grant after the
-  // memo was planned cannot still change the goal list.
+  // Read the live policy at the mutation fence so revoking the grant, lowering
+  // the switch, or removing class A after planning cannot change the goal list.
   if (LEADER_GOAL_HYGIENE_KINDS.has(action.kind)) {
     let live: EffectivePolicy | null = null;
     try { live = deps.standingPolicy(); } catch { /* unavailable means no authority */ }
     if (!leaderGoalHygieneApplies(live)) {
-      return settleNotApplied(deps, claimed, { ...action, status: 'refused', statusReason: 'The standing grant or autonomy switch changed before goal hygiene could apply.' } as LeaderAction);
+      return settleNotApplied(deps, claimed, { ...action, status: 'refused', statusReason: 'Autonomous class A authority is no longer granted for this goal change.' } as LeaderAction);
     }
   }
   let outcome: ApplyOutcome;

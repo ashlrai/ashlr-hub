@@ -8,10 +8,10 @@
  * yet", and a 3-day-old class-C ask from a superseded memo stayed in
  * Needs-you.
  *
- *   - goal hygiene (focus / pause / reorder / archive) applies whenever
- *     autonomy is on, independent of the rollout ladder;
- *   - everything else still waits for the ladder (work.dispatch, router,
- *     lanes, goal.create) and no grant / Propose is still a full dry run;
+ *   - goal hygiene (focus / pause / reorder / archive) requires signed class A
+ *     authority; shadow with no Leader classes remains a full dry run;
+ *   - work.dispatch, router, lanes and goal.create still wait for their own
+ *     signed classes;
  *   - a class-C ask carried by an older memo is superseded by the newest ok
  *     memo; an approved ask leaves the drawer.
  *
@@ -53,6 +53,10 @@ const SHADOW = makePolicy({
   leader: { classes: [], vetoMinutes: 30 },
   rollout: { stageId: 'shadow', stageIndex: 0, stageCount: 8, enteredAt: '2026-09-27T05:53:40.399Z' },
 });
+const CLASS_A = makePolicy({
+  leader: { classes: ['A'], vetoMinutes: 30 },
+  rollout: { stageId: 'class-a', stageIndex: 1, stageCount: 8, enteredAt: '2026-09-27T05:53:40.399Z' },
+});
 
 function draft<K extends AnyLeaderActionDraft['kind']>(kind: K, params: Extract<AnyLeaderActionDraft, { kind: K }>['params']): AnyLeaderActionDraft {
   return { kind, params, summary: `${kind} test`, why: 'the data says so' } as AnyLeaderActionDraft;
@@ -74,14 +78,14 @@ function ctx(overrides: Partial<LeaderPolicyContext> = {}): LeaderPolicyContext 
 
 const meta = { id: 'la-x', memoId: MEMO, createdAtMs: NOW };
 
-describe('Leader goal hygiene applies whenever autonomy is on', () => {
+describe('Leader goal hygiene requires autonomous class A authority', () => {
   it('names exactly the four goal-list kinds', () => {
     expect([...LEADER_GOAL_HYGIENE_KINDS].sort()).toEqual(['goal.archive', 'goal.focus', 'goal.pause', 'goal.reorder']);
   });
 
-  it('shadow stage + Autonomous: goal hygiene is scheduled (class A, applies at once)', () => {
+  it('shadow stage + Autonomous: goal hygiene is refused without signed class A', () => {
     expect(isLeaderDryRun(SHADOW)).toBe(true);
-    expect(leaderGoalHygieneApplies(SHADOW)).toBe(true);
+    expect(leaderGoalHygieneApplies(SHADOW)).toBe(false);
     for (const d of [
       draft('goal.focus', { goalId: 'g-a-111111' }),
       draft('goal.pause', { goalId: 'g-a-111111', until: null }),
@@ -89,8 +93,15 @@ describe('Leader goal hygiene applies whenever autonomy is on', () => {
       draft('goal.reorder', { goalIds: ['g-a-111111', 'g-b-222222'] }),
     ]) {
       const a = planLeaderAction(d, meta, ctx());
-      expect(a).toMatchObject({ class: 'A', status: 'scheduled', applyAfter: new Date(NOW).toISOString() });
+      expect(a).toMatchObject({ class: 'A', status: 'refused', applyAfter: null });
+      expect(a.statusReason).toBe('dry run: stage shadow does not let the Leader act yet.');
     }
+  });
+
+  it('schedules goal hygiene only when class A is granted', () => {
+    expect(leaderGoalHygieneApplies(CLASS_A)).toBe(true);
+    const action = planLeaderAction(draft('goal.pause', { goalId: 'g-a-111111', until: null }), meta, ctx({ policy: CLASS_A }));
+    expect(action).toMatchObject({ class: 'A', status: 'scheduled', applyAfter: new Date(NOW).toISOString() });
   });
 
   it('everything else still waits for the ladder in shadow', () => {
@@ -123,16 +134,15 @@ describe('Leader goal hygiene applies whenever autonomy is on', () => {
     expect(planLeaderAction(g, meta, ctx()).status).toBe('refused');
   });
 
-  it('enacts in shadow: the goal is really paused / archived, with a ledger row and an inverse', async () => {
+  it('enacts with class A: the goal is paused / archived, with a ledger row and an inverse', async () => {
     const g1 = goalsStore.createGoal('Out-of-grant goal on ashlr-md', { now: '2026-08-18T00:00:00.000Z' });
     const g2 = goalsStore.createGoal('Meta goal superseded by the focus limit', { now: '2026-08-18T00:00:00.000Z' });
-    const { deps } = makeApplyDeps({ ledger, now: () => NOW, policy: () => SHADOW });
+    const { deps } = makeApplyDeps({ ledger, now: () => NOW, policy: () => CLASS_A });
     const actions = await enactLeaderActions(deps, MEMO, [
       draft('goal.pause', { goalId: g1.id, until: null }),
       draft('goal.archive', { goalId: g2.id }),
-      draft('router.tune', { tuning: { lambdaCost: 2 } }),
     ], [], { idFor: (i) => actionIdFor(MEMO, i) });
-    expect(actions.map((a) => a.status)).toEqual(['applied', 'applied', 'refused']);
+    expect(actions.map((a) => a.status)).toEqual(['applied', 'applied']);
     expect(goalsStore.loadGoal(g1.id)?.status).toBe('paused');
     expect(goalsStore.loadGoal(g2.id)?.status).toBe('archived');
     expect(actions[0]!.inverse).toMatchObject({ op: 'restore-goals' });
@@ -140,11 +150,11 @@ describe('Leader goal hygiene applies whenever autonomy is on', () => {
     expect(rows.filter((r) => r.status === 'applied').map((r) => r.kind)).toEqual(['goal.pause', 'goal.archive']);
   });
 
-  it('refuses a goal mutation when the switch is lowered after planning', async () => {
+  it('refuses a goal mutation when class A is removed after planning', async () => {
     const g = goalsStore.createGoal('Keep this goal active', { now: '2026-08-18T00:00:00.000Z' });
     const before = goalsStore.loadGoal(g.id)?.status;
     let reads = 0;
-    const { deps } = makeApplyDeps({ ledger, now: () => NOW, policy: () => (++reads === 1 ? SHADOW : null) });
+    const { deps } = makeApplyDeps({ ledger, now: () => NOW, policy: () => (++reads === 1 ? CLASS_A : SHADOW) });
     const [action] = await enactLeaderActions(deps, MEMO, [
       draft('goal.pause', { goalId: g.id, until: null }),
     ], [], { idFor: (i) => actionIdFor(MEMO, i) });
@@ -158,7 +168,7 @@ describe('Leader goal hygiene applies whenever autonomy is on', () => {
       seatId: 'claude', model: 'm', evidenceDigest: 'd'.repeat(64), bottleneck: null, move: null, killList: [],
       goals: [], priorityChanges: [], standards: [], critiques: [], seatPlan: [], hypotheses: [], questionsForMason: [],
     } as unknown as LeaderMemo;
-    expect(memoSummaryText({ ...base, actions: [] })).toContain('(dry run — nothing applies without a grant)');
+    expect(memoSummaryText({ ...base, actions: [] })).toContain('(dry run — no Leader actions apply under this grant)');
     const applied = { kind: 'goal.pause', status: 'applied', class: 'A', summary: 's', id: 'la-1' } as unknown as LeaderAction;
     expect(memoSummaryText({ ...base, actions: [applied] })).toContain('goal hygiene applied');
   });

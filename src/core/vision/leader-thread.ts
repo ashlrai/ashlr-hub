@@ -560,14 +560,14 @@ function actionLine(a: LeaderAction, advice?: readonly LeaderActionAdvice[]): st
 
 /** The concise memo message: bottleneck, move, top actions with class and veto window. */
 export function memoSummaryText(memo: LeaderMemo): string {
-  // 3.15: goal hygiene applies even in a dry run (leader-apply.ts
-  // leaderGoalHygieneApplies) — say so when it did, rather than "nothing applies".
+  // Historical memos can contain applied goal changes even if the present
+  // grant is a dry run; report their actual recorded outcome.
   const hygieneApplied = (memo.actions ?? []).some((a) => LEADER_GOAL_HYGIENE_KINDS.has(a.kind) && a.status === 'applied');
   const dryNote = !memo.dryRun
     ? ''
     : hygieneApplied
       ? ' (dry run for work and settings — goal hygiene applied)'
-      : ' (dry run — nothing applies without a grant)';
+      : ' (dry run — no Leader actions apply under this grant)';
   const lines: string[] = [`Memo ${memo.id}${dryNote}`];
   if (memo.bottleneck) lines.push(`Bottleneck: ${clip(memo.bottleneck.statement, 240)}`);
   if (memo.move) {

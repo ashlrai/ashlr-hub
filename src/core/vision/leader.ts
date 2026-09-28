@@ -475,7 +475,7 @@ export function buildLeaderPrompt(
   opts: {
     dryRun: boolean;
     nowIso: string;
-    /** 3.15: goal hygiene applies even in a dry run (leader-apply.ts leaderGoalHygieneApplies). */
+    /** Goal changes apply only with autonomous class A authority. */
     goalHygiene?: boolean;
   },
 ): string {

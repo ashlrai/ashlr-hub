@@ -134,9 +134,8 @@ export const LEADER_ACTION_KINDS: readonly LeaderActionKind[] = [
 /**
  * 3.15 goal hygiene: the class-A kinds that only re-rank the goal list. They
  * write ~/.ashlr/goals status/order and nothing else — no code, no dispatch,
- * no spend, no merge — and each is vetoable with an exact inverse. They apply
- * whenever autonomy is on, whatever the rollout stage (leader-apply.ts
- * leaderGoalHygieneApplies).
+ * no spend, no merge — and each is vetoable with an exact inverse. They
+ * require autonomous class A authority (leaderGoalHygieneApplies).
  */
 export const LEADER_GOAL_HYGIENE_KINDS: ReadonlySet<LeaderActionKind> = new Set<LeaderActionKind>([
   'goal.focus',
