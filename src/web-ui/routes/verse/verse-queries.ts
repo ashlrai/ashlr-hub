@@ -9,7 +9,6 @@
  */
 import type {
   VerseAutonomyScopeView,
-  VerseBootstrap,
   VerseCreateSessionRequest,
   VerseRootPriority,
   VerseSession,
@@ -35,13 +34,11 @@ import { ApiError, apiGet, apiPost } from '../../data/client.js';
 import { invalidate } from '../../data/cache.js';
 import type { QueryDef } from '../../data/queries.js';
 
-export const VERSE_BOOTSTRAP_KEY = 'verse-bootstrap';
+// The bootstrap read has a module of its own (the phone app's first paint
+// needs it without the rest of this file); re-exported here unchanged.
+import { VERSE_BOOTSTRAP_KEY } from './verse-bootstrap-query.js';
+export { VERSE_BOOTSTRAP_KEY, verseBootstrapQuery } from './verse-bootstrap-query.js';
 export const VERSE_SESSIONS_KEY = 'verse-sessions';
-
-export const verseBootstrapQuery: QueryDef<VerseBootstrap> = {
-  key: VERSE_BOOTSTRAP_KEY,
-  fetch: (signal) => apiGet<VerseBootstrap>('/api/verse/bootstrap', signal),
-};
 
 export const verseSessionsQuery: QueryDef<VerseSession[]> = {
   key: VERSE_SESSIONS_KEY,

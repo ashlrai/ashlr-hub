@@ -47,6 +47,7 @@ import {
 } from '../../../components/primitives/icons.js';
 import { useQuery } from '../../../data/hooks.js';
 import { SECTION_ICON } from '../verse-icons.js';
+import { SECTION_BLURBS } from '../section-blurbs.js';
 import { RAIL_SECTIONS, requestVerseCommand, setVerseSection } from '../verse-ui-store.js';
 import { LiveCapacityStrip } from '../usage/CapacityStrip.js';
 import { tidyProse } from '../autonomy/format.js';
@@ -107,7 +108,7 @@ function WelcomeStep() {
       <p className={styles.lead}>Verse runs your chats and this machine’s agent fleet from one local server.</p>
       {/*
         The five rail surfaces, in ⌘1–⌘5 order, with the same one-line blurbs
-        the palette uses (VERSE_SECTIONS) — one description per surface, not
+        the missing-section fallback uses — one description per surface, not
         a second copy that drifts. Settings, Apps and Usage live in the gear.
       */}
       <ul className={styles.sections}>
@@ -122,7 +123,7 @@ function WelcomeStep() {
                 <span className={styles.sectionName}>
                   {entry.label} <kbd className={styles.kbd}>⌘{index + 1}</kbd>
                 </span>
-                <span className={styles.sectionBlurb}>{entry.blurb}</span>
+                <span className={styles.sectionBlurb}>{SECTION_BLURBS[entry.id]}</span>
               </span>
             </li>
           );

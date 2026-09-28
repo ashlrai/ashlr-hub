@@ -67,6 +67,19 @@ const webUiRoot = fileURLToPath(new URL('./src/web-ui', import.meta.url));
  *    name; check-first-paint-budget.mjs finds `app/VerseConsoleApp.tsx` in it
  *    through its sourcemap (aliasGroupedRoots).
  *
+ * 1b. What the workbench shares with the phone app ships as ONE more chunk.
+ *
+ *    Verse on a phone (app/VerseMobileApp.tsx) is its own lazy app, but its
+ *    screens read the same stores as the workbench (the session stream, the
+ *    activity loop, the chat list's model …). Every such module is shared,
+ *    so §1 must leave it out of the shell group — and Rolldown then cut each
+ *    into a chunk of its own, every one paying request and import/export
+ *    glue on the WORKBENCH's first paint. `VerseShared` collects exactly the
+ *    shell's first-paint modules that the phone app also reaches (lazily),
+ *    minus the phone's own first-paint closure (the phone must not download
+ *    the workbench's share to paint its frame). The other consoles' code is
+ *    still never captured.
+ *
  * 2. Preload lists skip what the importing chunk has already loaded.
  *
  *    When a chunk runs, every chunk in its own static-import closure has
@@ -76,7 +89,10 @@ const webUiRoot = fileURLToPath(new URL('./src/web-ui', import.meta.url));
  *    are never passed to it (Vite appends them afterwards) and are unchanged.
  */
 const VERSE_SHELL_ROOT = fileURLToPath(new URL('./src/web-ui/app/VerseConsoleApp.tsx', import.meta.url));
+const VERSE_MOBILE_ROOT = fileURLToPath(new URL('./src/web-ui/app/VerseMobileApp.tsx', import.meta.url));
 const verseShellModules = new Set<string>();
+/** FIRST-PAINT CHUNKING §1b: the workbench shell's first-paint modules the phone app also reaches. */
+const verseSharedModules = new Set<string>();
 /** chunk file name → the chunk file names it imports statically, as Vite's preload pass sees the bundle. */
 const staticChunkImports = new Map<string, readonly string[]>();
 
@@ -86,27 +102,33 @@ function verseFirstPaintChunks(): Plugin {
     apply: 'build',
     buildEnd() {
       verseShellModules.clear();
+      verseSharedModules.clear();
       const info = (id: string) => this.getModuleInfo(id);
-      // Everything reachable — statically or lazily — from the entry without
-      // passing through the Verse console: the other consoles' code.
-      const elsewhere = new Set<string>();
-      const walk = [...this.getModuleIds()].filter((id) => info(id)?.isEntry);
-      while (walk.length > 0) {
-        const id = walk.pop()!;
-        if (id === VERSE_SHELL_ROOT || elsewhere.has(id)) continue;
-        elsewhere.add(id);
-        const mod = info(id);
-        walk.push(...(mod?.importedIds ?? []), ...(mod?.dynamicallyImportedIds ?? []));
-      }
-      // The console's static closure, minus anything shared with them.
-      const seen = new Set<string>();
-      const stack = [VERSE_SHELL_ROOT];
-      while (stack.length > 0) {
-        const id = stack.pop()!;
-        if (seen.has(id)) continue;
-        seen.add(id);
-        if (!elsewhere.has(id)) verseShellModules.add(id);
-        stack.push(...(info(id)?.importedIds ?? []));
+      /** Everything reachable from `roots` (lazily too, unless `staticOnly`), never passing through `stop`. */
+      const reach = (roots: string[], stop: ReadonlySet<string>, staticOnly = false): Set<string> => {
+        const out = new Set<string>();
+        const walk = [...roots];
+        while (walk.length > 0) {
+          const id = walk.pop()!;
+          if (stop.has(id) || out.has(id)) continue;
+          out.add(id);
+          const mod = info(id);
+          walk.push(...(mod?.importedIds ?? []), ...(staticOnly ? [] : (mod?.dynamicallyImportedIds ?? [])));
+        }
+        return out;
+      };
+      const entries = [...this.getModuleIds()].filter((id) => info(id)?.isEntry);
+      // The other consoles' code: reachable from the entry through neither Verse app.
+      const elsewhere = reach(entries, new Set([VERSE_SHELL_ROOT, VERSE_MOBILE_ROOT]));
+      // The phone app: everything it may load, and what its first paint loads.
+      const mobileAll = reach([VERSE_MOBILE_ROOT], new Set([VERSE_SHELL_ROOT]));
+      const mobileFirstPaint = reach([VERSE_MOBILE_ROOT], new Set([VERSE_SHELL_ROOT]), true);
+      // The console's static closure, minus anything the other consoles share (§1),
+      // with what the phone app also reaches split off into the shared group (§1b).
+      for (const id of reach([VERSE_SHELL_ROOT], new Set(), true)) {
+        if (elsewhere.has(id)) continue;
+        if (!mobileAll.has(id)) verseShellModules.add(id);
+        else if (!mobileFirstPaint.has(id)) verseSharedModules.add(id);
       }
     },
     generateBundle: {
@@ -164,6 +186,12 @@ export default defineConfig(({ mode }) => {
                 test: (id: string) => verseShellModules.has(id),
                 // Only the modules the test names. The default would also
                 // pull in their dependencies — the shared ones included.
+                includeDependenciesRecursively: false,
+              },
+              {
+                // FIRST-PAINT CHUNKING §1b.
+                name: 'VerseShared',
+                test: (id: string) => verseSharedModules.has(id),
                 includeDependenciesRecursively: false,
               },
             ],

@@ -55,7 +55,7 @@ import { useTheme } from '../../data/hooks.js';
 import { VERSE_ACTIVITY_SEEN_PATH, type VerseActivityCompletion } from '../../../core/verse/workbench-types.js';
 import { useResourcesUi } from './resources/resources-store.js';
 import { commandChord, detectKeyPlatform, formatChord, matchKey } from './shell/command-keys.js';
-import { GuardHost } from './shell/guarded-action.js';
+import { useGuardState } from './shell/guard-store.js';
 import type { RailBadge } from './shell/RailStatus.js';
 import { subscribeAnchorRequests } from './shell/anchor-requests.js';
 import { executeCatalogCommand, useShellCommands } from './shell/run-command.js';
@@ -109,16 +109,18 @@ function sectionLoader(id: VerseSectionId): () => Promise<{ default: ComponentTy
   return async () => {
     const module = landedModule(id);
     const importer = module ? sectionImporter(module) : undefined;
-    if (!module || !importer) return { default: () => <MissingSection label={entry.label} blurb={entry.blurb} /> };
-    try {
-      const mod = (await importer()) as Record<string, unknown>;
-      const exported = mod[module] ?? mod.default;
-      if (typeof exported === 'function') return { default: exported as ComponentType };
-      console.error(`[verse] ${module} exports no ${module} component`);
-    } catch (err) {
-      console.error(`[verse] ${entry.label} failed to load`, err);
+    if (module && importer) {
+      try {
+        const mod = (await importer()) as Record<string, unknown>;
+        const exported = mod[module] ?? mod.default;
+        if (typeof exported === 'function') return { default: exported as ComponentType };
+        console.error(`[verse] ${module} exports no ${module} component`);
+      } catch (err) {
+        console.error(`[verse] ${entry.label} failed to load`, err);
+      }
     }
-    return { default: () => <MissingSection label={entry.label} blurb={entry.blurb} /> };
+    const { SECTION_BLURBS } = await import('./section-blurbs.js');
+    return { default: () => <MissingSection label={entry.label} blurb={SECTION_BLURBS[id]} /> };
   };
 }
 
@@ -195,6 +197,9 @@ function dictationPossible(): boolean {
 // the control pill. Desktop-only, so a browser tab never even fetches it.
 const importComputer = () => import('./computer/ComputerControl.js');
 const ComputerControl = lazy(() => importComputer().then((m) => ({ default: m.ComputerControl })));
+// Confirmation UI is needed only after a guarded action; its store is still
+// available immediately to palette and drawer actions.
+const GuardHost = lazy(() => import('./shell/guarded-action.js').then((m) => ({ default: m.GuardHost })));
 
 /**
  * Does this shell implement computer use on this platform? The same test as
@@ -202,12 +207,8 @@ const ComputerControl = lazy(() => importComputer().then((m) => ({ default: m.Co
  * does not carry that module; ComputerControl re-checks with the real one.
  */
 function shellSupportsComputerUse(): boolean {
-  try {
-    const bridge = (window as unknown as { __ASHLR_DESKTOP__?: { computer?: { version?: unknown; send?: unknown; capabilities?: { supported?: unknown } } } }).__ASHLR_DESKTOP__?.computer;
-    return typeof bridge?.version === 'number' && bridge.version >= 1 && typeof bridge.send === 'function' && bridge.capabilities?.supported === true;
-  } catch {
-    return false;
-  }
+  const bridge = (window as unknown as { __ASHLR_DESKTOP__?: { computer?: { version?: unknown; send?: unknown; capabilities?: { supported?: unknown } } } }).__ASHLR_DESKTOP__?.computer;
+  return typeof bridge?.version === 'number' && bridge.version >= 1 && typeof bridge.send === 'function' && bridge.capabilities?.supported === true;
 }
 
 /**
@@ -293,6 +294,7 @@ function openWorkbenchLink(sessionId: string | null, paneId: string | null): voi
 }
 
 export function VerseApp() {
+  const guardOpen = useGuardState().request !== null;
   const ui = useVerseUi();
   const theme = useTheme();
   const toast = useToast();
@@ -580,7 +582,7 @@ export function VerseApp() {
         {ui.overlay === 'shortcuts' ? <ShortcutsOverlay /> : null}
       </Suspense>
       {voiceHud ? <Suspense fallback={null}><VoiceHud /></Suspense> : null}
-      <GuardHost />
+      {guardOpen ? <Suspense fallback={null}><GuardHost /></Suspense> : null}
       {computerUse ? (
         <Suspense fallback={null}>
           <ComputerControl />

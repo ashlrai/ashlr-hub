@@ -1,0 +1,85 @@
+/* routes/verse/mobile/screens/NewAgentScreen.module.css — the repo radio rows, the several-seats switch, the prompt and the Start bar. */
+
+.choice[aria-checked='true'] {
+  background: var(--accent-50);
+}
+
+/* A drawn check (no glyph: UI text stays inside the Ashlr Sans subset). */
+.check {
+  display: inline-block;
+  width: 1.2em;
+  height: 1.2em;
+  flex: none;
+}
+
+.check[data-on]::after {
+  content: '';
+  display: block;
+  width: 0.35em;
+  height: 0.7em;
+  margin: 0.1em auto 0;
+  border: solid var(--accent-600);
+  border-width: 0 0.15em 0.15em 0;
+  transform: rotate(45deg);
+}
+
+.switchRow {
+  padding: var(--space-3) var(--space-4);
+  cursor: pointer;
+}
+
+.switchTrack {
+  flex: none;
+  position: relative;
+  width: 3.1rem;
+  height: 1.9rem;
+  border-radius: var(--radius-full);
+  background: var(--bg-active);
+  border: 1px solid var(--border-default);
+}
+
+.switchTrack[data-on] {
+  background: var(--accent-500);
+  border-color: var(--accent-500);
+}
+
+.switchThumb {
+  position: absolute;
+  top: 0.15rem;
+  left: 0.15rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  background: var(--bg-surface-raised);
+  box-shadow: var(--shadow-toast);
+}
+
+.switchTrack[data-on] .switchThumb {
+  transform: translateX(1.2rem);
+}
+
+.reasons {
+  margin: 0;
+  padding: 0 0 0 var(--space-5);
+  display: grid;
+  gap: var(--space-1);
+  color: var(--text-secondary);
+  font-size: 0.85em;
+}
+
+.prompt {
+  min-height: 8rem;
+  max-height: 20rem;
+  resize: none;
+}
+
+.startBar {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.hint {
+  margin: 0;
+  text-align: center;
+}

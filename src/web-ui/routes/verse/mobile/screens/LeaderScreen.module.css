@@ -1,0 +1,236 @@
+/*
+ * routes/verse/mobile/screens/LeaderScreen.module.css — the Leader thread as
+ * chat bubbles (Mason right, the Leader left), the directives strip under
+ * the top bar, and the composer's quick replies.
+ *
+ * Text is plain and wraps (pre-wrap, break-word): a long path or URL in a
+ * message never widens the page.
+ */
+
+/* ---- directives strip -------------------------------------------------- */
+
+.directives {
+  flex: none;
+  padding: 0 max(var(--space-4), env(safe-area-inset-right)) 0 max(var(--space-4), env(safe-area-inset-left));
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-canvas);
+}
+
+.directivesToggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-size: 0.85em;
+  font-weight: var(--font-weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  cursor: pointer;
+}
+
+.count {
+  margin-left: var(--space-1);
+  color: var(--text-tertiary);
+}
+
+.toggleWord {
+  color: var(--accent-600);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.directivesBody {
+  display: grid;
+  gap: var(--space-2);
+  max-height: 40dvh;
+  overflow-y: auto;
+  padding-bottom: var(--space-3);
+}
+
+.directiveList {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.directive {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 0 0 0 var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+}
+
+.directiveText {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.92em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---- thread ----------------------------------------------------------- */
+
+.older {
+  display: flex;
+  justify-content: center;
+  margin: 0 0 var(--space-2);
+}
+
+.thread {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.day {
+  margin: var(--space-2) 0 0;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 0.78em;
+  font-weight: var(--font-weight-semibold);
+}
+
+.system {
+  margin: 0;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 0.82em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.group[data-from='mason'] {
+  align-items: flex-end;
+}
+
+.groupHead {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-2);
+  margin: 0 var(--space-2);
+  color: var(--text-tertiary);
+  font-size: 0.78em;
+}
+
+.who {
+  color: var(--text-secondary);
+  font-weight: var(--font-weight-semibold);
+}
+
+.channel {
+  color: var(--status-info-fg);
+}
+
+.bubble {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+  max-width: 88%;
+  min-width: 0;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-xl);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+}
+
+.bubble[data-from='mason'] {
+  background: var(--accent-50);
+  border-color: transparent;
+  color: var(--text-primary);
+}
+
+.bubble[data-answering] {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.4;
+}
+
+.replyTo {
+  color: var(--text-tertiary);
+  font-size: 0.8em;
+}
+
+.answered {
+  color: var(--status-success-fg);
+  font-size: 0.82em;
+  font-weight: var(--font-weight-semibold);
+}
+
+.delivery {
+  color: var(--status-warning-fg);
+  font-size: 0.78em;
+}
+
+.approvals {
+  display: grid;
+  gap: var(--space-2);
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.approval {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.approvalText {
+  flex: 1 1 10rem;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 0.88em;
+}
+
+/* ---- composer extras ---------------------------------------------------- */
+
+.quick {
+  min-width: 0;
+}
+
+.answering {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--accent-500);
+}
+
+.answeringText {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 0.85em;
+}

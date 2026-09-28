@@ -41,7 +41,7 @@ import {
 import { COMPOSER_COMMAND_IDS, WORKBENCH_COMMAND_EVENT } from '../composer/composer-keys.js';
 import { PARKED_COMMAND_TTL_MS, registerCommandHandler, runCommand, runCommandWhenReady, type CommandInvocation } from './command-bus.js';
 import { commandCatalogLoaded, keyBinding, loadedCommand } from './command-keys.js';
-import { requestGuarded } from './guarded-action.js';
+import { requestGuarded } from './guard-store.js';
 
 export type ShellNotify = (message: string, tone?: 'neutral' | 'success' | 'danger') => void;
 

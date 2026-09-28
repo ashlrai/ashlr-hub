@@ -1,0 +1,31 @@
+/* routes/verse/mobile/screens/AgentsScreen.module.css — the Agents tab's chip counts, column title and two-line rows. */
+
+.chipCount {
+  margin-left: var(--space-1);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.columnTitle {
+  font-family: var(--font-display);
+  margin: var(--space-5) var(--space-2) var(--space-2);
+  color: var(--text-secondary);
+  font-size: 0.8em;
+  font-weight: var(--font-weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+}
+
+.who,
+.status {
+  display: block;
+  min-width: 0;
+}
+
+.status {
+  color: var(--text-tertiary);
+}
+
+.failed {
+  color: var(--status-danger-fg);
+}
