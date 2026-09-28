@@ -6,7 +6,7 @@
  * contract of the build.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 import { buildKnowledge, type KnowledgeProgress } from '../src/core/knowledge/index.js';
@@ -16,9 +16,16 @@ let fx: H1Fixture;
 beforeEach(() => {
   expect.hasAssertions();
   fx = makeFixture();
+  // Progress is the contract under test. Keep a resident Ollama model from
+  // turning this fixture into live embedding I/O and a machine-load timeout.
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+    JSON.stringify({ models: [] }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  ));
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   fx.cleanup();
 });
 
