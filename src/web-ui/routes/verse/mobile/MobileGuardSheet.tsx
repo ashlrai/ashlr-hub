@@ -17,7 +17,7 @@
  */
 import { useEffect, useId, useState } from 'react';
 import { setMutationToken } from '../../../data/auth-store.js';
-import { cancelGuard, confirmGuard, guardTokenClosed, useGuardState } from '../shell/guard-store.js';
+import { cancelGuard, confirmGuard, guardTokenClosed, isCurrentGuardRequest, useGuardState } from '../shell/guard-store.js';
 import { requestStepUp } from './device-permissions.js';
 import { BottomSheet } from './sheet.js';
 import { Button } from './ui.js';
@@ -104,12 +104,13 @@ export function MobileGuardSheet() {
     setStepUpError(null);
     setChecking(true);
     const ok = await requestStepUp({ action: request.confirmLabel, irreversible: true });
+    if (!isCurrentGuardRequest(request)) return;
     setChecking(false);
     if (!ok) {
-      setStepUpError('This device could not confirm it is you, so nothing was sent.');
+      setStepUpError('The extra device check did not complete, so nothing was sent.');
       return;
     }
-    confirmGuard();
+    confirmGuard(request);
   };
   const message = stepUpError ?? error;
   return (

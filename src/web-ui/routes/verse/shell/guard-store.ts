@@ -67,6 +67,11 @@ export function isGuardOpen(): boolean {
   return state.request !== null;
 }
 
+/** Bind an asynchronous device check to the confirmation it displayed. */
+export function isCurrentGuardRequest(request: GuardedRequest): boolean {
+  return state.request === request && state.phase === 'confirm';
+}
+
 /** Test hygiene. */
 export function resetGuard(): void {
   set(IDLE);
@@ -97,9 +102,11 @@ async function execute(request: GuardedRequest): Promise<void> {
 }
 
 /** The confirm step's primary button. */
-export function confirmGuard(): void {
+export function confirmGuard(expectedRequest?: GuardedRequest): void {
   const { request } = state;
-  if (!request || state.phase === 'running') return;
+  // A phone's optional device check is asynchronous. A cancelled check must
+  // never confirm a different request opened while that promise was pending.
+  if (!request || state.phase !== 'confirm' || (expectedRequest && request !== expectedRequest)) return;
   if (request.token && !hasMutationHold()) {
     set({ request, phase: 'token', error: null });
     return;

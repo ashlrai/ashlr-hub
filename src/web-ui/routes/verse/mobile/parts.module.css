@@ -410,6 +410,10 @@ a.row:active {
   width: 100%;
 }
 
+.micWrap[data-size='inline'] {
+  position: relative;
+}
+
 .mic {
   background: var(--bg-surface-raised);
   border-color: var(--border-default);
@@ -436,6 +440,19 @@ a.row:active {
   color: var(--text-tertiary);
   font-size: 0.8em;
   text-align: center;
+}
+
+.micNote[data-size='inline'] {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + var(--space-2));
+  width: min(18rem, 72vw);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-raised);
+  box-shadow: var(--shadow-lg);
+  z-index: 2;
 }
 
 /* ---- bottom composer ---------------------------------------------------- */

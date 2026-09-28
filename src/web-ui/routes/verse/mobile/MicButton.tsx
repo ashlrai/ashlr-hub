@@ -7,44 +7,19 @@
  * microphone — the button says so and points at the keyboard's own dictation
  * key, which types straight into the same box, so nothing is lost.
  *
- * Deliberately self-contained (a few lines of recognizer handling) rather than
- * importing the workbench's DictationButton, whose tooltip and composer
- * stylesheet would ride into every phone screen. The shared VoiceInput being
- * built for the workbench can replace this in one place.
- *
- * NOTE for the server: `Permissions-Policy: microphone=()` (core/web/server.ts)
- * blocks recognition in browsers that enforce it; the phone then shows the
- * keyboard-dictation hint. Loosening it to `microphone=(self)` is a separate,
- * deliberate decision (see the PR notes).
+ * Use the workbench's Web Speech engine: it keeps the final result until the
+ * recognizer ends, including when a tap to stop produces the last phrase.
+ * The phone's small status bubble is its VoiceHud; the desktop VoiceHud is
+ * tied to native capture and workbench targets and is not mounted here.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { getSpeechRecognition, startWebSpeech, type WebSpeechSession } from '../voice/web-speech.js';
 import { MicGlyph } from './mobile-icons.js';
 import styles from './parts.module.css';
 import core from './ui.module.css';
 
-interface RecognitionResultLike {
-  isFinal: boolean;
-  0: { transcript: string };
-}
-interface RecognitionLike {
-  lang: string;
-  continuous: boolean;
-  interimResults: boolean;
-  onresult: ((event: { resultIndex: number; results: ArrayLike<RecognitionResultLike> }) => void) | null;
-  onend: (() => void) | null;
-  onerror: ((event: { error?: string }) => void) | null;
-  start(): void;
-  stop(): void;
-  abort(): void;
-}
-type RecognitionCtor = new () => RecognitionLike;
-
-export function speechRecognition(): RecognitionCtor | null {
-  const w = globalThis as unknown as { SpeechRecognition?: RecognitionCtor; webkitSpeechRecognition?: RecognitionCtor };
-  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
-}
-
 export const KEYBOARD_DICTATION_HINT = 'Tap the microphone on your keyboard to dictate into this box.';
+export const BROWSER_SPEECH_DISCLOSURE = 'Browser dictation may send audio to your browser’s speech service. Tap again to start.';
 
 export interface MicButtonProps {
   /** Words still being heard (replace, don't append). '' when none. */
@@ -57,82 +32,60 @@ export interface MicButtonProps {
 }
 
 export function MicButton({ onInterim, onFinal, disabled = false, size = 'inline' }: MicButtonProps) {
-  const Ctor = speechRecognition();
+  const available = getSpeechRecognition() !== null;
   const [listening, setListening] = useState(false);
-  const [note, setNote] = useState<string | null>(Ctor ? null : KEYBOARD_DICTATION_HINT);
-  const active = useRef<RecognitionLike | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [note, setNote] = useState<string | null>(available ? null : KEYBOARD_DICTATION_HINT);
+  const active = useRef<WebSpeechSession | null>(null);
   const cb = useRef({ onInterim, onFinal });
   cb.current = { onInterim, onFinal };
 
-  const stop = useCallback(() => {
-    const r = active.current;
-    active.current = null;
-    if (r) {
-      r.onresult = null;
-      r.onend = null;
-      r.onerror = null;
-      try {
-        r.stop();
-      } catch {
-        /* already stopped */
-      }
-    }
-    setListening(false);
-    cb.current.onInterim('');
-  }, []);
+  const start = () => {
+    if (!available || active.current) return;
+    const session = startWebSpeech({
+      onPartial: (text) => cb.current.onInterim(text),
+      onFinal: (text) => cb.current.onFinal(text),
+      onError: (code, message) => {
+        if (code !== 'no-speech') setNote(`${message} ${KEYBOARD_DICTATION_HINT}`);
+      },
+      onEnd: () => {
+        active.current = null;
+        setListening(false);
+        setStopping(false);
+        cb.current.onInterim('');
+      },
+    });
+    if (!session) return;
+    active.current = session;
+    setNote(null);
+    setListening(true);
+  };
 
-  const start = useCallback(() => {
-    if (!Ctor || active.current) return;
-    let r: RecognitionLike;
-    try {
-      r = new Ctor();
-    } catch {
-      setNote(KEYBOARD_DICTATION_HINT);
+  const stop = () => {
+    if (!active.current || stopping) return;
+    setStopping(true);
+    // Keep callbacks attached: some browsers deliver the last final only
+    // between stop() and onend.
+    active.current.stop();
+  };
+
+  const toggle = () => {
+    if (listening) return stop();
+    // The Web Speech API's audio processing is browser-dependent. Show the
+    // disclosure before the first capture, while the mic is still off.
+    if (!acknowledged) {
+      setAcknowledged(true);
+      setNote(BROWSER_SPEECH_DISCLOSURE);
       return;
     }
-    r.lang = navigator.language || 'en-US';
-    r.continuous = true;
-    r.interimResults = true;
-    r.onresult = (event) => {
-      let interim = '';
-      let final = '';
-      for (let i = event.resultIndex; i < event.results.length; i += 1) {
-        const res = event.results[i];
-        if (!res) continue;
-        if (res.isFinal) final += res[0].transcript;
-        else interim += res[0].transcript;
-      }
-      if (final.trim()) cb.current.onFinal(final.trim());
-      cb.current.onInterim(interim);
-    };
-    r.onerror = (event) => {
-      const code = event.error ?? '';
-      if (code === 'not-allowed' || code === 'service-not-allowed') setNote(`Microphone access is off for this page. ${KEYBOARD_DICTATION_HINT}`);
-      else if (code && code !== 'aborted' && code !== 'no-speech') setNote(`Dictation stopped (${code}).`);
-      stop();
-    };
-    r.onend = () => {
-      if (active.current === r) stop();
-    };
-    active.current = r;
-    setNote(null);
-    try {
-      r.start();
-      setListening(true);
-    } catch {
-      active.current = null;
-      setNote(KEYBOARD_DICTATION_HINT);
-    }
-  }, [Ctor, stop]);
+    start();
+  };
 
   useEffect(() => () => {
-    const r = active.current;
+    const session = active.current;
     active.current = null;
-    try {
-      r?.abort();
-    } catch {
-      /* ignore */
-    }
+    session?.cancel();
   }, []);
 
   return (
@@ -142,15 +95,16 @@ export function MicButton({ onInterim, onFinal, disabled = false, size = 'inline
         className={`${core.btn} ${styles.mic}`}
         data-size={size}
         data-live={listening ? '' : undefined}
-        disabled={!Ctor || (disabled && !listening)}
-        aria-pressed={Ctor ? listening : undefined}
-        aria-label={!Ctor ? 'Dictation unavailable in this browser' : listening ? 'Stop dictation' : 'Dictate'}
-        onClick={() => (listening ? stop() : start())}
+        disabled={!available || stopping || (disabled && !listening)}
+        aria-pressed={available ? listening : undefined}
+        aria-label={!available ? 'Dictation unavailable in this browser' : listening ? 'Stop dictation' : acknowledged ? 'Dictate' : 'Review browser dictation'}
+        onClick={toggle}
       >
         <MicGlyph size={size === 'large' ? 30 : 20} />
-        {size === 'large' ? <span>{listening ? 'Listening… tap to stop' : 'Tap to talk'}</span> : null}
+        {size === 'large' ? <span>{stopping ? 'Finishing…' : listening ? 'Listening… tap to stop' : acknowledged ? 'Tap to talk' : 'Browser dictation'}</span> : null}
       </button>
-      {note && size === 'large' ? <span className={styles.micNote} role="status">{note}</span> : null}
+      {listening && size === 'inline' ? <span className={styles.micNote} data-size={size} role="status">{stopping ? 'Finishing…' : 'Listening… tap to stop'}</span> : null}
+      {!listening && note ? <span className={styles.micNote} data-size={size} role="status">{note}</span> : null}
     </span>
   );
 }

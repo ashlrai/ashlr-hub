@@ -131,6 +131,11 @@ export async function startServer(
     }
     const path = url.pathname;
     const method = (req.method ?? 'GET').toUpperCase();
+    // Browser speech is available only to the phone document itself. Keep the
+    // default deny policy on the workbench, APIs, worker, and static assets.
+    if (method === 'GET' && (path === '/verse/m' || path === '/verse/m/')) {
+      res.setHeader('Permissions-Policy', 'camera=(), microphone=(self), geolocation=()');
+    }
     const authority = sessions.authority(req, url);
 
     if (sessions.handleSession(req, res, url)) return;

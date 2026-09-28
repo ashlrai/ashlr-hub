@@ -76,8 +76,12 @@ describe('device permissions', () => {
     expect(noRead).toMatchObject({ read: false, act: 'unavailable' });
   });
 
-  it('dispatch not yet known reads as locked (the bootstrap has not answered)', () => {
-    expect(resolveDevicePermissions({ ...base, dispatchEnabled: null, holdsMutation: false }).act).toBe('locked');
+  it('dispatch not yet known hides action controls even when the token is held', () => {
+    for (const holdsMutation of [false, true]) {
+      const permissions = resolveDevicePermissions({ ...base, dispatchEnabled: null, holdsMutation });
+      expect(permissions.act).toBe('unavailable');
+      expect(canShowActions(permissions)).toBe(false);
+    }
   });
 });
 

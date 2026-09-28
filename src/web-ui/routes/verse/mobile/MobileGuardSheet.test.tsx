@@ -81,8 +81,28 @@ describe('MobileGuardSheet', () => {
       runMobileAction({ ...LAND, run });
     });
     fireEvent.click(screen.getByRole('button', { name: 'Land' }));
-    expect(await screen.findByText(/could not confirm it is you/)).toBeInTheDocument();
+    expect(await screen.findByText(/extra device check did not complete/)).toBeInTheDocument();
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it('a late device check cannot approve a different action', async () => {
+    setMutationToken(TOKEN);
+    let approve!: (result: boolean) => void;
+    registerStepUpProvider(() => new Promise<boolean>((resolve) => { approve = resolve; }));
+    const first = vi.fn(async () => undefined);
+    const second = vi.fn(async () => undefined);
+    mount();
+    act(() => { runMobileAction({ ...LAND, run: first }); });
+    fireEvent.click(screen.getByRole('button', { name: 'Land' }));
+    act(() => {
+      resetGuard();
+      runMobileAction({ title: 'Stop fleet?', consequences: 'Stops the daemon.', confirmLabel: 'Stop fleet', run: second });
+    });
+    await act(async () => { approve(true); });
+    expect(first).not.toHaveBeenCalled();
+    expect(second).not.toHaveBeenCalled();
+    expect(screen.getByRole('alertdialog', { name: 'Stop fleet?' })).toBeInTheDocument();
+    expect(screen.queryByText(/extra device check did not complete/)).not.toBeInTheDocument();
   });
 
   it('a failure comes back with the server’s sentence, and Try again retries', async () => {

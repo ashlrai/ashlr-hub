@@ -18,6 +18,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { AshlrConfig } from '../src/core/types.js';
+import { startServer } from '../src/core/web/server.js';
 import { serveStatic, VERSE_MOBILE_SW_PATH } from '../src/core/web/static.js';
 
 let assetsDir: string;
@@ -87,4 +89,24 @@ describe('serveStatic — Verse on a phone', () => {
       expect(get(url).handled).toBe(false);
     }
   });
+});
+
+it('permits the microphone only on the phone document, not APIs, worker, or desktop', async () => {
+  const cfg: AshlrConfig = {
+    version: 1, roots: [], editor: 'cursor', staleDays: 30, categories: {}, tidyRules: [], keepers: [],
+    models: { lmstudio: '', ollama: '', providerChain: [] }, telemetry: {}, tools: {},
+  };
+  const server = await startServer(cfg, { port: 0, open: false, allowDispatch: false }, { readProjections: null });
+  try {
+    for (const url of ['/verse/m', '/verse/m/']) {
+      const response = await fetch(`${server.url}${url}`, { signal: AbortSignal.timeout(2000) });
+      expect(response.headers.get('permissions-policy')).toBe('camera=(), microphone=(self), geolocation=()');
+    }
+    for (const url of ['/verse/', '/verse/m/sw.js', '/api/health']) {
+      const response = await fetch(`${server.url}${url}`, { signal: AbortSignal.timeout(2000) });
+      expect(response.headers.get('permissions-policy')).toBe('camera=(), microphone=(), geolocation=()');
+    }
+  } finally {
+    await server.close();
+  }
 });
