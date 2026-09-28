@@ -51,6 +51,10 @@ macOS and the login keychain.
   file changed since the merge-base with `origin/master` (`--base <ref>` to change that),
   plus a smoke set that always runs (`scripts/gate-smoke.json`).
 
+`gate:full` runs the complete backend suite before the complete web suite.
+The full-suite web timing assertions are load-sensitive, so they run without
+the backend workers competing for the same Mac.
+
 A version bump (in `package.json` and `package-lock.json`) or a script edit does not widen
 the run; a dependency change in either file, or a change to a vitest config or vitest setup
 file, runs that suite in full. Logs, the eslint cache and vitest JSON reports go to `.ashlr-gate/` (gitignored).
