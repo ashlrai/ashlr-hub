@@ -23,6 +23,7 @@ describe('unstarted remote gateway policy', () => {
     for (const target of [
       '/api/verse/seats', '/api/verse/session-meta', '/api/verse/cloud', '/api/verse/leader',
       '/api/verse/leader/directives', '/api/verse/sessions/vs_1',
+      '/api/verse/cloud/previews', '/api/verse/devin/previews',
       '/api/verse/authority/ledger?view=decisions&limit=40',
       '/api/verse/leader/thread?limit=50&before=msg-1',
       '/api/verse/checkpoints?chatId=vs_1',
@@ -72,6 +73,11 @@ describe('unstarted remote gateway policy', () => {
       ['POST', '/api/verse/authority', { action: 'stop' }, true],
       ['POST', '/api/verse/leader/actions/a1/approve', {}, true],
       ['POST', '/api/inbox/p1/approve', {}, true],
+      ['POST', '/api/inbox/p.1/reject', {}, true],
+      ['POST', '/api/verse/cloud/tasks/ct_20260927T2305_abcdef/land', { headSha: 'a'.repeat(40) }, true],
+      ['POST', '/api/verse/devin/tasks/dv_20260927T2305_abcdef/close', { headSha: 'a'.repeat(40), reason: 'Needs revision' }, true],
+      ['POST', '/api/verse/cloud/tasks/ct_20260927T2305_abcdef/dismiss', {}, false],
+      ['POST', '/api/verse/fleet/live', { action: 'resume-repo', repo: 'ashlrai/ashlr-hub', kind: 'owner-hold' }, true],
       ['POST', '/api/verse/sessions/vs_1/cancel', {}, true],
       ['DELETE', '/api/verse/leader/directives/d1', undefined, true],
     ] as const;
@@ -93,6 +99,10 @@ describe('unstarted remote gateway policy', () => {
     for (const body of [{ action: 'grant', draftDigest: 'x' }, { action: 'clear-stop' },
       { action: 'switch', to: 'autonomous', draftDigest: 'x' }]) expect(validateRemoteMutation(authority, body)).toBe(false);
     expect(validateRemoteMutation(classifyRemoteRoute('POST', '/api/inbox/p1/approve'), { reason: 'skip' })).toBe(false);
+    const cloudLand = classifyRemoteRoute('POST', '/api/verse/cloud/tasks/ct_20260927T2305_abcdef/land');
+    expect(validateRemoteMutation(cloudLand, { headSha: 'a'.repeat(40), reason: 'smuggled' })).toBe(false);
+    expect(validateRemoteMutation(cloudLand, { headSha: 'a'.repeat(39) })).toBe(false);
+    expect(classifyRemoteRoute('POST', '/api/verse/cloud/tasks/../land')).toEqual({ kind: 'deny' });
     expect(validateRemoteMutation(classifyRemoteRoute('GET', '/api/verse/activity'), {})).toBe(false);
   });
 

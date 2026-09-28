@@ -26,6 +26,8 @@ const READ_ROUTES = new Set<RemoteReadRoute>([
   '/api/verse/cloud',
   '/api/verse/leader',
   '/api/verse/leader/directives',
+  '/api/verse/cloud/previews',
+  '/api/verse/devin/previews',
 ]);
 
 export type RemoteRouteDecision =
@@ -38,6 +40,11 @@ const CHECKPOINT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const ROOT_ID = /^[0-9a-f]{8,64}$/;
 const THREAD_ID = /^[A-Za-z0-9_:-]{1,128}$/;
 const ACTION_ID = /^[A-Za-z0-9_:-]{1,128}$/;
+const PROPOSAL_ID = /^[A-Za-z0-9._-]{1,160}$/;
+const CLOUD_TASK_ID = /^ct_\d{8}T\d{4}_[a-z0-9]{6}$/;
+const DEVIN_TASK_ID = /^dv_\d{8}T\d{4}_[a-z0-9]{6}$/;
+const HEAD_SHA = /^[0-9a-f]{40}$/;
+const REPO = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
 
 function exactParams(params: URLSearchParams, shape: Record<string, (value: string) => boolean>): boolean {
   const keys = [...params.keys()];
@@ -67,9 +74,14 @@ export function classifyRemoteRoute(method: string | undefined, rawTarget: strin
     if (path === '/api/verse/activity/seen' || path === '/api/verse/sessions'
       || path === '/api/verse/leader/thread' || path === '/api/verse/leader/directives') return { kind: 'write', path, stepUp: false };
     if (path === '/api/verse/daemon' || path === '/api/verse/budget' || path === '/api/verse/authority'
+      || path === '/api/verse/fleet/live'
       || path === '/api/verse/leader') return { kind: 'write', path, stepUp: true };
     const inbox = /^\/api\/inbox\/([^/]+)\/(approve|reject)$/.exec(path);
-    if (inbox && ACTION_ID.test(inbox[1]!)) return { kind: 'write', path, stepUp: true };
+    if (inbox && PROPOSAL_ID.test(inbox[1]!)) return { kind: 'write', path, stepUp: true };
+    const task = /^\/api\/verse\/(cloud|devin)\/tasks\/([^/]+)\/(land|close|update-branch|dismiss)$/.exec(path);
+    if (task && (task[1] === 'cloud' ? CLOUD_TASK_ID : DEVIN_TASK_ID).test(task[2]!)) {
+      return { kind: 'write', path, stepUp: task[3] !== 'dismiss' };
+    }
     const sessionAction = /^\/api\/verse\/sessions\/([^/]+)\/(turns|cancel|terminate)$/.exec(path);
     if (sessionAction && SESSION_ID.test(sessionAction[1]!)) {
       return { kind: 'write', path, stepUp: sessionAction[2] !== 'turns' };
@@ -146,6 +158,10 @@ export function validateRemoteMutation(decision: RemoteRouteDecision, body: unkn
   if (path === '/api/verse/authority') return (keys(body, ['action']) && body.action === 'stop')
     || (keys(body, ['action', 'to']) && body.action === 'switch'
       && typeof body.to === 'string' && ['off', 'propose', 'autonomous'].includes(body.to));
+  if (path === '/api/verse/fleet/live') return keys(body, ['action', 'repo', 'kind'])
+    && body.action === 'resume-repo' && typeof body.repo === 'string' && REPO.test(body.repo)
+    && (body.kind === undefined || (typeof body.kind === 'string'
+      && ['quarantine', 'owner-hold', 'leader-pause', 'cooldown'].includes(body.kind)));
   if (path === '/api/verse/leader') return (keys(body, ['action', 'actionId'])
     && body.action === 'veto' && boundedText(body.actionId, 128))
     || (keys(body, ['action', 'itemId']) && body.action === 'dismiss' && boundedText(body.itemId, 256));
@@ -157,6 +173,13 @@ export function validateRemoteMutation(decision: RemoteRouteDecision, body: unkn
     || /^\/api\/verse\/leader\/actions\/[^/]+\/approve$/.test(path)
     || /^\/api\/verse\/sessions\/[^/]+\/cancel$/.test(path)) return keys(body, []) && Object.keys(body).length === 0;
   if (/^\/api\/verse\/sessions\/[^/]+\/terminate$/.test(path)) return keys(body, ['confirm']) && body.confirm === true;
+  const task = /^\/api\/verse\/(cloud|devin)\/tasks\/[^/]+\/(land|close|update-branch|dismiss)$/.exec(path);
+  if (task) {
+    if (task[2] === 'dismiss') return keys(body, []) && Object.keys(body).length === 0;
+    return keys(body, task[2] === 'close' ? ['headSha', 'reason'] : ['headSha'])
+      && typeof body.headSha === 'string' && HEAD_SHA.test(body.headSha)
+      && (body.reason === undefined || (task[2] === 'close' && boundedText(body.reason, 200)));
+  }
   if (/^\/api\/verse\/sessions\/[^/]+\/turns$/.test(path)
     || /^\/api\/verse\/leader\/questions\/[^/]+\/answer$/.test(path)) return keys(body, ['text']) && boundedText(body.text, 64_000);
   if (/^\/api\/verse\/queue\/[^/]+$/.test(path)) return keys(body, ['text', 'sendNow'])
