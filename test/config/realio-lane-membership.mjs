@@ -445,6 +445,8 @@ export const REAL_IO_TEST_FILES = [
   'test/host-merge-310b.test.ts', // real git through FakeGithub (test/helpers/fleet-github-310b.ts) — guard cannot see it
   'test/standing-merge-pass-310b.test.ts', // real git rebase/squash through FakeGithub — guard cannot see it
   'test/verse-sources-api.test.ts', // 3.15: real loopback http server bind for POST /api/verse/sources/open
+  'test/verse-agents-workspace-316.test.ts', // 3.16: real git worktrees, snapshot refs, archive/restore under a temp HOME
+  'test/verse-agents-api-316.test.ts', // 3.16: real git worktree per agent behind /api/verse/agents (temp HOME + temp repo)
   'test/verse-retro-sweep-close-315.test.ts', // 3.15: real loopback startServer bind; close() stops the retro sweep schedule
   'test/devin-api-315.test.ts', // 3.15: real loopback http server bind for the /api/verse/devin routes
   'test/automations-api-315.test.ts', // 3.15: real loopback http server bind for the /api/verse/automations routes

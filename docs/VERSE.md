@@ -1661,6 +1661,20 @@ launches the staged sidecar, so run steps 1–2 first.
 - Claude has no local utilization signal and Grok's probe is not on
   `/api/usage`. Both are shown as unknown. Nothing is estimated to fill the gap.
 
+**Agents board auto-merge**
+- Auto-merge is off for each agent until the operator enables it. It also needs
+  `ASHLR_VERSE_AUTOMERGE_CHECKS` set to the exact, comma-separated names of
+  required code checks (for example, `CI, Typecheck`). An unset or malformed
+  setting holds every automatic merge. A green Vercel preview alone does not
+  count as code verification.
+- Verse reads those checks again on the PR's current head immediately before
+  its SHA-pinned squash merge. Each named check must appear exactly once and
+  have succeeded. GitHub branch protection should require the same checks;
+  a check name by itself does not authenticate which GitHub App reported it.
+- Repositories without live code CI should leave auto-merge off. The current
+  ashlr-hub GitHub Actions workflows must be enabled and passing before their
+  names can serve as auto-merge gates.
+
 **Desktop**
 - macOS only. Linux Tauri builds are quarantined (`GHSA-wrw7-89jp-8q8g` /
   `RUSTSEC-2024-0429`); see `DESKTOP.md`.

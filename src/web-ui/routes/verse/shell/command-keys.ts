@@ -127,6 +127,7 @@ const KEYS = {
     'surface.growth': 'mod+3',
     'surface.mind': 'mod+4',
     'surface.chat': 'mod+5',
+    'surface.agents': 'mod+6',
     'section.settings': 'mod+,',
     // Navigation
     'palette.open': 'mod+k',
@@ -149,6 +150,8 @@ const KEYS = {
     // Not `fleet.stop` (the shell's guarded palette row, which stays keyless):
     // this key opens the Fleet tab's own Stop confirmation.
     'fleet.halt': 'mod+alt+.',
+    // 3.16: one task on several seats, each in its own workspace (the Agents board).
+    'agents.new-multi': 'mod+shift+n',
     // App
     'appearance.toggle-theme': 'mod+shift+l',
     'app.summon': 'ctrl+alt+space',

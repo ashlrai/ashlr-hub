@@ -1163,14 +1163,16 @@ export function isSafeBranchName(name: string): boolean {
     && ![...name].some((ch) => ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f);
 }
 
-async function freshPr(ctx: Ctx, gitRoot: string, selector: string): Promise<{ pr: VerseGitPr; counts: VerseGitCheckCounts } | null> {
+async function freshPr(ctx: Ctx, gitRoot: string, selector: string): Promise<{ pr: VerseGitPr; counts: VerseGitCheckCounts; rollup: unknown } | null> {
   const res = await ctx.run('gh', ['pr', 'view', selector, '--json', GH_PR_FIELDS], { cwd: gitRoot, maxStdoutBytes: 1024 * 1024 });
   if (res.code !== 0) {
     if (/no pull requests found/i.test(res.stderr)) return null;
     throw classifyGitFailure('Reading the PR from GitHub', res);
   }
   try {
-    return parseGhPr(JSON.parse(res.stdout));
+    const raw: unknown = JSON.parse(res.stdout);
+    const parsed = parseGhPr(raw);
+    return parsed ? { ...parsed, rollup: (raw as Record<string, unknown>)['statusCheckRollup'] } : null;
   } catch {
     throw new GitOpError('VERSE_GIT_FAILED', 'GitHub answered with something that is not a PR.');
   }
@@ -1220,6 +1222,28 @@ export async function openPullRequest(root: string, input: PrInput, opts: GitOps
 export interface MergeInput {
   number: number;
   headSha: string;
+  /** Only the autonomous caller sets these owner-approved code gates. */
+  requiredChecks?: readonly string[];
+}
+
+function requiredChecksRefusal(rollup: unknown, names: readonly string[]): string | null {
+  if (names.length === 0 || !Array.isArray(rollup)) return 'Automatic merging requires passing owner-configured code checks.';
+  for (const name of names) {
+    const matches = rollup.filter((entry: unknown) => {
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return false;
+      const check = entry as Record<string, unknown>;
+      return (check['name'] ?? check['context'] ?? check['workflowName']) === name;
+    });
+    if (matches.length !== 1) return `Required code check ${name} is missing or ambiguous on this PR head.`;
+    const check = matches[0] as Record<string, unknown>;
+    const status = typeof check['status'] === 'string' ? check['status'].toUpperCase() : '';
+    const conclusion = typeof check['conclusion'] === 'string' ? check['conclusion'].toUpperCase() : '';
+    const state = typeof check['state'] === 'string' ? check['state'].toUpperCase() : '';
+    if ((status && status !== 'COMPLETED') || !(conclusion === 'SUCCESS' || state === 'SUCCESS')) {
+      return `Required code check ${name} has not passed on this PR head.`;
+    }
+  }
+  return null;
 }
 
 /** Everything that must hold before a merge — pure, so the refusal table is testable on its own. */
@@ -1250,6 +1274,10 @@ export async function mergePullRequest(root: string, input: MergeInput, opts: Gi
     if (!read) throw new GitOpError('VERSE_GIT_REFUSED', 'GitHub has no such PR for this repository.');
     const refusal = mergeRefusal(read.pr, porcelain.branch, input.headSha);
     if (refusal) throw new GitOpError('VERSE_GIT_REFUSED', refusal);
+    if (input.requiredChecks) {
+      const checkRefusal = requiredChecksRefusal(read.rollup, input.requiredChecks);
+      if (checkRefusal) throw new GitOpError('VERSE_GIT_REFUSED', checkRefusal);
+    }
     const args = ['pr', 'merge', String(input.number), '--squash', '--match-head-commit', read.pr.headSha!];
     const res = await ctx.run('gh', args, { cwd: gitRoot });
     if (res.code !== 0) throw classifyGitFailure('Merging', res);

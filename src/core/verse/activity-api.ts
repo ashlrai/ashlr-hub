@@ -122,18 +122,29 @@ async function importAutomations(): Promise<ModuleExports | null> {
   try { return (await import('../automations/needs-you.js' as string)) as ModuleExports; } catch { return null; }
 }
 
+/**
+ * 3.16 agents: plan approvals, spend warnings, red CI and failed setups file
+ * under `chats`. Importing it also starts the agents' post-PR loop (never
+ * under a test runner) — like the cloud lane, the first activity poll is
+ * what brings it up.
+ */
+async function importAgents(): Promise<ModuleExports | null> {
+  try { return (await import('./agents-api.js' as string)) as ModuleExports; } catch { return null; }
+}
+
 function fn<T>(mod: ModuleExports | null, name: string): T | null {
   const value = mod?.[name];
   return typeof value === 'function' ? (value as T) : null;
 }
 
 export async function resolveTrackBHooks(): Promise<TrackBHooks> {
-  const [authority, fleet, leader, cloud, devin, automations] = await Promise.all([importAuthority(), importFleetLive(), importLeader(), importCloud(), importDevin(), importAutomations()]);
-  // The remote lanes (Claude cloud, Devin) and automations' review items file
-  // into the same sources with the same kinds.
+  const [authority, fleet, leader, cloud, devin, automations, agents] = await Promise.all([importAuthority(), importFleetLive(), importLeader(), importCloud(), importDevin(), importAutomations(), importAgents()]);
+  // The remote lanes (Claude cloud, Devin), automations' review items and the
+  // agents board file into the same sources (fleet / chats).
   const cloudItems = fn<() => NeedsYouItem[]>(cloud, 'needsYouItems');
   const devinItems = fn<() => NeedsYouItem[]>(devin, 'needsYouItems');
   const automationItems = fn<() => NeedsYouItem[]>(automations, 'needsYouItems');
+  const agentItems = fn<() => NeedsYouItem[]>(agents, 'needsYouItems');
   return {
     producers: {
       authority: fn<() => NeedsYouItem[]>(authority, 'needsYouItems'),
@@ -149,8 +160,13 @@ export async function resolveTrackBHooks(): Promise<TrackBHooks> {
     },
     autonomy: fn<() => VerseAutonomyBadge | null>(authority, 'autonomyBadge'),
     latestMemoAt: fn<() => string | null>(leader, 'latestMemoAt'),
-    cloud: cloudItems || devinItems || automationItems
-      ? () => [...(cloudItems ? cloudItems() : []), ...(devinItems ? devinItems() : []), ...(automationItems ? automationItems() : [])]
+    cloud: cloudItems || devinItems || automationItems || agentItems
+      ? () => [
+          ...(cloudItems ? cloudItems() : []),
+          ...(devinItems ? devinItems() : []),
+          ...(automationItems ? automationItems() : []),
+          ...(agentItems ? agentItems() : []),
+        ]
       : null,
   };
 }

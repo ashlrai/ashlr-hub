@@ -452,6 +452,9 @@ const WORKBENCH_IMPORTS: Readonly<Record<WorkbenchRouteFamilyId, () => Promise<W
   sources: async () => {
     try { return (await import('./sources-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'sources-api.js'); }
   },
+  agents: async () => {
+    try { return (await import('./agents-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'agents-api.js'); }
+  },
 };
 
 /** The importer table, for the contract test (every family has exactly one). */
@@ -2230,6 +2233,14 @@ export async function handleVerseApi(
         // The CLI is spawned with the primary root as its cwd (and granted
         // the rest): never inside a pending privacy prompt (rootsSettled).
         if (current && !(await rootsSettled(res, verseSessionRoots(current)))) return true;
+        // 3.16: an agent at its spend cap takes no further turn until the cap
+        // is raised on the Agents board (agents-api.ts). A missing module never blocks a chat.
+        let capRefusal: string | null = null;
+        try { capRefusal = await (await import('./agents-api.js' as string) as typeof import('./agents-api.js')).agentSpendCapRefusal(id); } catch { capRefusal = null; }
+        if (capRefusal) {
+          sendJson(res, 409, { code: 'AGENT_SPEND_CAP', error: capRefusal });
+          return true;
+        }
         const result: VerseTurnResponse = engine.sendTurn(id, text);
         sendJson(res, 202, result);
         return true;

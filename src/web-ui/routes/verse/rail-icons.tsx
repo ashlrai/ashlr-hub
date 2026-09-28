@@ -98,6 +98,17 @@ export function MindIcon(props: IconProps) {
   );
 }
 
+/** Agents — a board of cards in columns (the attention board, ⌘6). */
+export function AgentsIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="2" y="2.5" width="3.4" height="11" rx="1" />
+      <rect x="6.3" y="2.5" width="3.4" height="7" rx="1" />
+      <rect x="10.6" y="2.5" width="3.4" height="9" rx="1" />
+    </Icon>
+  );
+}
+
 /** The gear tray (Settings, Apps, Usage, Shortcuts). */
 export function GearIcon(props: IconProps) {
   return (
@@ -119,4 +130,5 @@ export const RAIL_ICON: Readonly<Partial<Record<VerseSectionId, ComponentType<Ic
   growth: GrowthIcon,
   mind: MindIcon,
   chat: ChatIcon,
+  agents: AgentsIcon,
 };

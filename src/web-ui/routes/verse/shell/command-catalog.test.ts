@@ -247,7 +247,7 @@ describe('command catalog — table integrity', () => {
     expect(PALETTE_PREFIXES).toEqual({ '>': 'actions', '#': 'chats' });
     expect(PALETTE_RECENT_LIMIT).toBe(5);
     expect(paletteCommands('go-to').map((c) => c.id)).toEqual([
-      'surface.command', 'surface.fleet', 'surface.growth', 'surface.mind', 'surface.chat', 'section.settings', 'section.apps', 'section.usage', 'section.wiki',
+      'surface.command', 'surface.fleet', 'surface.growth', 'surface.mind', 'surface.chat', 'surface.agents', 'section.settings', 'section.apps', 'section.usage', 'section.wiki',
       'section.playbooks', 'section.automations',
     ]);
     // ⌘K never lists itself.
@@ -313,9 +313,9 @@ describe('command catalog — keys', () => {
     }
   });
 
-  it('keeps the page-owned keys the Rust test reserves (⌘1–⌘5, ⌘K, ⌘N) bound on the page', () => {
+  it('keeps the page-owned keys the Rust test reserves (⌘1–⌘6, ⌘K, ⌘N) bound on the page', () => {
     const reserved = [...APP_MENU.matchAll(/"CmdOrCtrl\+([0-9A-Z])",/g)].map((m) => chordId({ key: m[1]!.toLowerCase(), mod: true }));
-    expect(reserved.length).toBe(7);
+    expect(reserved.length).toBe(8);
     const pageKeys = new Set(COMMANDS.filter((c) => c.scope === 'global').flatMap((c) => c.keys.map(chordId)));
     for (const id of reserved) expect(pageKeys.has(id), id).toBe(true);
   });

@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn the_web_uis_own_shortcuts_are_not_claimed_natively() {
-        // docs/VERSE-CONTRACT-V2.md gives the page ⌘1–⌘5, ⌘K and ⌘N. A native
+        // docs/VERSE-CONTRACT-V2.md gives the page ⌘1–⌘5 (⌘6 since 3.16), ⌘K and ⌘N. A native
         // accelerator would swallow them before the webview ever sees them.
         let source = include_str!("app_menu.rs");
         for reserved in [
@@ -263,6 +263,7 @@ mod tests {
             "CmdOrCtrl+3",
             "CmdOrCtrl+4",
             "CmdOrCtrl+5",
+            "CmdOrCtrl+6",
             "CmdOrCtrl+K",
             "CmdOrCtrl+N",
         ] {
