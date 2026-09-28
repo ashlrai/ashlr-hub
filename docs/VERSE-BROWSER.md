@@ -171,11 +171,11 @@ It follows the same rules as Claude's own in-app browser.
   action already past that fence may finish. The older
   `/api/verse/browser/mcp/<grant>` endpoint is retired and returns 410.
   Browser `Origin` headers are refused on the unified MCP route.
-- **Output hygiene.** Everything that comes from the page — text, titles,
-  element names, URLs, console lines, script results — is secret-scrubbed,
-  stripped of invisible characters (bidi overrides, zero-width), and wrapped
-  in an `<untrusted id=…>` block whose id is random per call, so a page cannot
-  forge the closing tag. Secret-looking URL query values are redacted.
+- **Output hygiene.** Page text, titles, element names, console lines and
+  script results are secret-scrubbed, stripped of invisible characters (bidi
+  overrides, zero-width), and framed as untrusted output. The block id is
+  random per call, so a page cannot forge the closing tag. Displayed URLs are
+  scrubbed and neutralised, with secret-looking query values redacted.
 - **Isolation in the desktop app.**
   - Browser tabs are separate windows that no Tauri capability matches, so
     websites get no IPC.
