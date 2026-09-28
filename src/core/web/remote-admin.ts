@@ -24,6 +24,45 @@ function privateDirectory(root: string): void {
   }
 }
 
+function existingSocket(path: string) {
+  try { return lstatSync(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+/** A killed sidecar leaves its Unix socket pathname behind. Reclaim only a
+ * private socket owned by this user after a connection proves no listener is
+ * alive; never remove a regular file, symlink, or another process's socket. */
+async function clearStaleSocket(root: string, path: string): Promise<void> {
+  const before = existingSocket(path);
+  if (!before) return;
+  if (!before.isSocket() || (before.mode & 0o077) !== 0
+    || (typeof process.getuid === 'function' && before.uid !== process.getuid())) {
+    throw new Error('Remote admin socket path is not a private owned socket');
+  }
+  const stale = await new Promise<boolean>((resolve, reject) => {
+    const probe = createConnection(path);
+    probe.setTimeout(1_000, () => probe.destroy(new Error('Remote admin socket probe timed out')));
+    probe.once('connect', () => { probe.destroy(); resolve(false); });
+    probe.once('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ECONNREFUSED') resolve(true);
+      else reject(error);
+    });
+  });
+  if (!stale) throw new Error('Remote admin socket already has a live listener');
+  privateDirectory(root);
+  const after = existingSocket(path);
+  if (!after) return;
+  if (!after.isSocket() || (after.mode & 0o077) !== 0
+    || (typeof process.getuid === 'function' && after.uid !== process.getuid())
+    || after.ino !== before.ino || after.dev !== before.dev) {
+    throw new Error('Remote admin socket changed during stale recovery');
+  }
+  unlinkSync(path);
+}
+
 /** A same-UID agent can reach a user socket, so require a visible Mac choice. */
 async function confirmMacOperator(action: OperatorAction, id: string): Promise<boolean> {
   if (process.platform !== 'darwin') return false;
@@ -72,6 +111,7 @@ export async function startRemoteAdminSocket(pairing: Pairing, devices: RemoteDe
   confirmOperator: ConfirmMacOperator = confirmMacOperator) {
   privateDirectory(root);
   const path = remoteAdminSocketPath(root);
+  await clearStaleSocket(root, path);
   let confirmationBusy = false;
   const guardedConfirm: ConfirmMacOperator = async (action, id) => {
     if (confirmationBusy) return false;
