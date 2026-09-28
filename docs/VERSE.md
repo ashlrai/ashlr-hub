@@ -1001,19 +1001,43 @@ it is doing; the Resources drawer has a Jev card and Usage a "Jev decisions"
 panel. Cost figures are estimates. Thresholds, bounds and file locations:
 [JEV-INTEGRATION.md](JEV-INTEGRATION.md#the-decision-layer-srccoredecide).
 
+## Equal partners: one tier model (3.15)
+
+Claude Code, Codex (both accounts) and Devin (cloud and CLI) are one **elite** tier. Grok and Devin's SWE models
+(free on the Devin plan) are **fast**; local models are **free** — except Qwen 3.8 27B, which counts as elite while
+staying free. Tier is per model, and cost basis (subscription, credits, per token, free) is a separate axis. The
+table lives in `src/core/routing/tiers.ts`, and the router, the Auto seat, Compare, the handoff menu, the New chat
+picker and the Resources drawer all read it.
+
+- **Routing** ranks tiers, never providers. Inside a tier it prefers more headroom, then a subscription turn over a
+  metered one, then lower latency. Cheap work climbs the cost ladder from free seats upward. Reserves and budget
+  modes are still per seat, so the Claude reserve Mason keeps for himself is a configured reserve, not a preference.
+- **Devin** is routable for your own chats, just like Claude and Codex. The Auto seat can pick it or stay on it,
+  Compare can pit Claude against Codex and Devin, and handoff offers it. A seat that also has a cheaper-tier model,
+  such as the Devin CLI's SWE, uses that model for cheap work. The fleet still runs Devin only through its own
+  lane, grant and ACU reserve. Devin is never auto-picked to review another model's answer.
+- **Hard work you are waiting on** goes to a hosted elite seat before an elite local model, because local models
+  are slower on this Mac. The local model is still ahead of every fast or free seat.
+
 ## Resources: the drawer and the bar (3.11)
 
 - **Resources drawer (⌘.).** Open it from the edge tab, the rail button or "Open Resources" in ⌘K. It holds one
-  card per resource:
-  - every Claude, Codex and Grok account, with its 5-hour and weekly windows, the share kept for you, reset times,
-    and Reconnect / Check again;
-  - the local runtime and its models, with their context windows (one Local card
-    spans Ollama, LM Studio and llama-server);
-  - the cloud credits, the **Devin** card (3.15; see [Devin](#devin-315)) and
-    the **Jev** card (decisions today by kind, confidence, fallback rate and
-    estimated cost; see [The Jev decision layer](#the-jev-decision-layer-315)).
-  It opens as an overlay or pins as a column, and remembers which. While a chat
-  turn is running, ⌘. in the composer stops the turn instead.
+  card per resource, grouped by tier (3.15) — never by provider:
+  - **Elite:** every Claude and Codex account, **Devin** (cloud and CLI on one
+    card; see [Devin](#devin-315)), and the Claude cloud credits — plus the
+    local runtime while it runs Qwen 3.8 27B;
+  - **Fast:** Grok;
+  - **Free · local:** the local runtime and its models, with their context
+    windows (one Local card spans Ollama, LM Studio and llama-server);
+  - **Decision layer:** the **Jev** card (decisions today by kind, confidence,
+    fallback rate and estimated cost; see
+    [The Jev decision layer](#the-jev-decision-layer-315)).
+  Every card has the same rows: a facts line (tier · cost basis · models ·
+  reserve), status, usage against its window or budget, and the readiness
+  lines. Inside a tier, usable cards come first, then a subscription before a
+  metered balance. It opens as an overlay or pins as a column, and remembers
+  which. While a chat turn is running, ⌘. in the composer stops the turn
+  instead.
 - **Readiness lines (3.14).** Every card says whether the resource is usable in
   each place, with the fixing command when it is not: "Chat: ready / why" and
   "Fleet: ready · reserve kept / why". A seat can be ready for your chats but

@@ -27,6 +27,9 @@ import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { acuLevel, devinHeadline, devinModelsLines, devinReadinessRow, DEVIN_USAGE_LINK, formatAcu, safeDevinHref, waitingTasks } from '../devin/devin-model.js';
 import { DEVIN_POLL_MS, devinQuery, messageDevinTask } from '../devin/devin-queries.js';
 import { ReadinessLines } from './ReadinessLines.js';
+import { ResourceFacts } from './ResourceFacts.js';
+import type { ResourceFactsView } from './resources-model.js';
+import type { CostBasis } from '../../../../core/routing/tiers.js';
 import styles from './ResourcesDrawer.module.css';
 
 /** The evidence sheet is its own chunk, fetched the first time a row's Evidence opens. */
@@ -89,7 +92,14 @@ function Reply({ task }: { task: DevinTaskV1 }) {
   );
 }
 
-export function DevinResource() {
+export interface DevinResourceProps {
+  /** 3.15: tier · cost basis · models — the facts row every card carries (the drawer builds it from the Devin seats). */
+  facts?: ResourceFactsView | null;
+  /** Every cost basis the Devin seats span (cloud ACU credits, the CLI's plan). */
+  bases?: readonly CostBasis[];
+}
+
+export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) {
   const read = useQuery(devinQuery);
   const refetch = useRefetch(devinQuery);
   usePollWhileVisible(refetch, DEVIN_POLL_MS);
@@ -125,6 +135,12 @@ export function DevinResource() {
           <span className={styles.plan}>{status.principalName ?? 'Cognition'}</span>
         </h4>
       </div>
+      {facts !== null ? (
+        <ResourceFacts
+          facts={{ ...facts, reserve: live && budget.budget.reserveAcu > 0 ? `${formatAcu(budget.budget.reserveAcu)} kept for you` : facts.reserve }}
+          {...(bases ? { bases } : {})}
+        />
+      ) : null}
       <p className={styles.status} data-tone={head.tone} title={status.reason}>
         <span className={styles.statusDot} aria-hidden="true" />
         <span className={styles.statusLabel}>{head.word}</span>

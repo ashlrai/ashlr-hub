@@ -8,10 +8,30 @@ import type { Tone } from '../../components/primitives/StatusBadge.js';
 // context-math is PURE and browser-safe by contract (its only import is
 // type-only), so a value import here does not drag node into the bundle.
 import { budgetFor, canonicalModelId, claudeAutocompactFlag, reconcileAutoCompactAt } from '../../../core/verse/context-math.js';
+import { engineTier, orderByTier, seatTier } from '../../../core/routing/tiers.js';
 import { usedPercentText } from './percent-text.js';
 import { formatTokens } from './verse-readouts.js';
 
-export const ENGINE_ORDER: readonly VerseEngine[] = ['claude', 'codex', 'grok', 'devin', 'local'];
+/**
+ * Engines in TIER order (routing/tiers.ts, 3.15): the elite partners —
+ * Claude, Codex, Devin, alphabetically, because none of them outranks the
+ * others — then fast (Grok), then local. Pickers, the handoff menu and the
+ * default seat all read this; it is never a provider preference.
+ */
+export const ENGINE_ORDER: readonly VerseEngine[] = orderByTier(
+  ['claude', 'codex', 'devin', 'grok', 'local'] as const satisfies readonly VerseEngine[],
+  (engine) => engineTier(engine),
+);
+
+/** Seats in tier order (per seat's default model), keeping the server's order inside a tier. */
+export function orderSeatsByTier<T extends Pick<VerseSeat, 'engine' | 'models'>>(seats: readonly T[]): T[] {
+  return orderByTier(seats, (seat) => seatTierOf(seat));
+}
+
+function seatTierOf(seat: Pick<VerseSeat, 'engine' | 'models'>) {
+  const model = seat.models.find((m) => !m.unavailableReason) ?? seat.models[0];
+  return seatTier(seat.engine, model?.id ?? null);
+}
 
 export const ENGINE_LABEL: Record<VerseEngine, string> = {
   claude: 'Claude',

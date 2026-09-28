@@ -202,6 +202,9 @@ export async function discoverDevinSeats(opts: DevinSeatDiscoveryOptions = {}): 
     accountId: DEVIN_CLOUD_SEAT_ID,
     models: [cloudModel(unavailable)],
     contextWindow: null,
+    // 3.15 (routing/tiers.ts): a cloud turn spends ACU credits — the router's
+    // marginal-cost rule and the Resources card both read this.
+    costBasis: 'credits',
     health,
     notes: [
       'Runs in Devin’s own cloud machine on this folder’s GitHub repository (its `origin` remote); Devin manages its own context.',

@@ -234,7 +234,7 @@ describe('GET /api/verse/budget/preview', () => {
     const { status, body } = await get<SeatDecision>('/api/verse/budget/preview?task=code&difficulty=medium&autonomous=true');
     expect(status).toBe(200);
     expect(body.seatId).toBe('grok');
-    expect(body.why).toContain('balanced mode prefers Grok');
+    expect(body.why).toContain('balanced mode prefers the fast tier');
     expect(readShadowDecisions(10)).toEqual([]);
   });
 

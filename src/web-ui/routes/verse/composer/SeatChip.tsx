@@ -35,7 +35,7 @@ import { budgetQuery } from '../budget/budget-queries.js';
 import { useSeatHealth } from '../health/useSeatHealth.js';
 import { capacityRowFor, windowSentence } from '../usage/capacity-strip-model.js';
 import type { SeatChoice } from '../SeatSelector.js';
-import { firstRunnableModel, seatCapacity, SEAT_CAPACITY_WORD, seatWindowLabel } from '../verse-model.js';
+import { firstRunnableModel, orderSeatsByTier, seatCapacity, SEAT_CAPACITY_WORD, seatWindowLabel } from '../verse-model.js';
 import styles from './composer.module.css';
 import { usedPercentText } from '../percent-text.js';
 import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
@@ -195,7 +195,8 @@ export function SeatChip({ seats, seat, engine, label, name = label, disabled = 
   const budgetTitleId = useId();
   const current = seats.find((s) => s.id === seat.seatId);
   const ring = engine === 'local' ? null : ringWindow(current);
-  const others = seats.filter((s) => s.id !== seat.seatId && s.health.state !== 'unavailable' && firstRunnableModel(s) !== null);
+  // Tier order (elite partners first), never the roster's legacy order.
+  const others = orderSeatsByTier(seats.filter((s) => s.id !== seat.seatId && s.health.state !== 'unavailable' && firstRunnableModel(s) !== null));
   const ringText = ring && (ring.usedPercent !== null || ring.limitReached)
     ? `${seatWindowLabel(ring.id)} ${ring.limitReached ? 'limit reached' : `${usedPercentText(ring.usedPercent ?? 0)} used`}`
     : engine === 'local' ? 'no usage limits' : 'no capacity reading';

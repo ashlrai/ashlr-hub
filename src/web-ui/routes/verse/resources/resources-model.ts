@@ -15,8 +15,9 @@
  *   - short sentences for the serving runtime and each local model's context.
  */
 import { CLOUD_BALANCE_URL, type CloudOverviewResponse } from '../../../../core/cloud/types.js';
-import type { ServingRuntimeSnapshot } from '../../../data/api-types.js';
-import { accountStatus, type AccountStatusKind, type CapacityRow } from '../usage/capacity-strip-model.js';
+import { costBasisOf, seatTier, tierRank, type CostBasis, type ResourceTier } from '../../../../core/routing/tiers.js';
+import type { ServingRuntimeSnapshot, VerseSeat } from '../../../data/api-types.js';
+import { accountStatus, accountStatusRank, type AccountStatusKind, type CapacityRow } from '../usage/capacity-strip-model.js';
 import { modelNameInText, type LocalModelRow } from '../usage/local-model.js';
 import { formatContextWindow } from '../verse-model.js';
 
@@ -307,4 +308,102 @@ export function localRuntimeLines(raw: unknown): LocalRuntimeLine[] {
     catalogLine('lmstudio', 'LM Studio', root['lmStudio']),
     llamaLine(root['llamaServer']),
   ].filter((line): line is LocalRuntimeLine => line !== null);
+}
+
+// ---------------------------------------------------------------------------
+// One card anatomy, one tier model (3.15, "equal partners")
+// ---------------------------------------------------------------------------
+
+/**
+ * The facts line every card carries, whatever the provider: its TIER
+ * (routing/tiers.ts), what one more turn costs, the models it offers and —
+ * when there is one — the reserve kept for Mason. Status, usage and the
+ * Chat / Fleet readiness lines are the card's other rows.
+ */
+export interface ResourceFactsView {
+  tier: ResourceTier;
+  basis: CostBasis;
+  /** Runnable model labels, default first; empty when the card lists its own models. */
+  models: string[];
+  /** "10 ACUs kept for you", when the reserve is not already on a meter; null otherwise. */
+  reserve: string | null;
+}
+
+/** Shown before "+N more". */
+export const FACTS_MODELS_SHOWN = 3;
+
+/** "Opus 5.5, Sonnet 5, Haiku +2 more" — never empty-looking, never a bare "…". */
+export function modelsLine(labels: readonly string[], max = FACTS_MODELS_SHOWN): string | null {
+  const unique = [...new Set(labels.filter((l) => l.trim().length > 0))];
+  if (unique.length === 0) return null;
+  const shown = unique.slice(0, max).join(', ');
+  return unique.length > max ? `${shown} +${unique.length - max} more` : shown;
+}
+
+function runnable(seat: Pick<VerseSeat, 'models'>) {
+  const models = seat.models.filter((m) => !m.unavailableReason);
+  return models.length > 0 ? models : seat.models.slice(0, 1);
+}
+
+/** The facts for one seat (its default model decides the tier). */
+export function seatFacts(seat: Pick<VerseSeat, 'engine' | 'models' | 'costBasis'>): ResourceFactsView {
+  const models = runnable(seat);
+  const first = models[0]?.id ?? null;
+  return {
+    tier: seatTier(seat.engine, first),
+    basis: seat.costBasis ?? costBasisOf(seat.engine, { modelId: first }),
+    models: models.map((m) => m.label),
+    reserve: null,
+  };
+}
+
+/**
+ * The facts for a PROVIDER card that covers several seats (Devin cloud + CLI,
+ * the local runtime): the best tier any of them offers, and every cost basis
+ * worded once ("credits · subscription").
+ */
+export function mergedFacts(seats: ReadonlyArray<Pick<VerseSeat, 'engine' | 'models' | 'costBasis'>>): ResourceFactsView | null {
+  if (seats.length === 0) return null;
+  const all = seats.map(seatFacts);
+  const tier = all.reduce<ResourceTier>((best, f) => (tierRank(f.tier) < tierRank(best) ? f.tier : best), all[0]!.tier);
+  return { tier, basis: all[0]!.basis, models: all.flatMap((f) => f.models), reserve: null };
+}
+
+/** Every cost basis a provider card spans, in first-seen order. */
+export function costBases(seats: ReadonlyArray<Pick<VerseSeat, 'engine' | 'models' | 'costBasis'>>): CostBasis[] {
+  return [...new Set(seats.map((s) => seatFacts(s).basis))];
+}
+
+/** One card in a tier section, ranked by status the same way for every provider. */
+export interface TierEntry<K extends string = string> {
+  key: K;
+  tier: ResourceTier;
+  /** `accountStatusRank` of the card's status; lower = more usable. */
+  statusRank: number;
+  /** 0 subscription / free, 1 credits / per-token — the router's marginal-cost rule. */
+  marginal: number;
+  index: number;
+}
+
+/**
+ * Cards per tier, best tier first; inside a tier usable before not, a
+ * subscription before a metered balance, then the caller's order. Empty tiers
+ * are dropped. No provider is named anywhere in this ordering.
+ */
+export function groupByTier<E extends TierEntry>(entries: readonly E[]): Array<{ tier: ResourceTier; entries: E[] }> {
+  const tiers: ResourceTier[] = ['elite', 'fast', 'free'];
+  return tiers
+    .map((tier) => ({
+      tier,
+      entries: entries
+        .filter((e) => e.tier === tier)
+        .sort((a, b) => a.statusRank - b.statusRank || a.marginal - b.marginal || a.index - b.index),
+    }))
+    .filter((g) => g.entries.length > 0);
+}
+
+/** A status rank for a card that has no capacity row (cloud credits, Devin): from its Chat verdict. */
+export function readinessStatusRank(chatReady: boolean | null): number {
+  if (chatReady === null) return accountStatusRank('not-checked');
+  return accountStatusRank(chatReady ? 'usable' : 'unavailable');
 }

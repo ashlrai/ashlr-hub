@@ -19,10 +19,12 @@
 ## What it is
 
 **Ashlr Verse** is an operator console for coding agents. Every Claude Code,
-Codex and Grok account you own becomes a *seat*, and so does every tool-capable
-local model. You chat with any of them in one workbench. You hand work to
-Claude Code cloud sessions, which keep running on your Claude credits after the
-subscription window is spent, and to Devin. A **Leader** plans the fleet's work
+Codex, Devin and Grok account you own becomes a *seat*, and so does every
+tool-capable local model. Claude Code, Codex and Devin are equal partners:
+routing picks among them by fit, headroom, cost and latency, never by brand. You
+chat with any of them in one workbench. You hand work to Claude Code cloud
+sessions, which keep running on your Claude credits after the subscription
+window is spent, and to Devin sessions. A **Leader** plans the fleet's work
 and talks with you in Verse, on Telegram or in the terminal. And the fleet works
 your enrolled repositories only inside a standing grant you sign with Touch ID:
 it starts in shadow, recording what it would merge, and climbs a rollout ladder
@@ -301,11 +303,12 @@ Your own chats ignore reserves.
 ## Resources, on every page
 
 Press **⌘.** (or click the tab on the right edge, or run "Open Resources" from ⌘K) to open the Resources drawer:
-every Claude, Codex and Grok account with its live 5-hour and weekly windows, the share kept for you, reset times
-and Reconnect / Check again; your local models (one card for Ollama, LM Studio and llama-server) with runtime
-state and context windows; your cloud credits; and Devin, when connected. Every card carries two readiness lines,
-"Chat: ready / why" and "Fleet: ready · reserve kept / why", with the command that fixes it. It opens over your
-work or pins as a column beside it, and a dot on the edge tab tells you at a glance whether everything is usable.
+every resource grouped by tier — **Elite** (Claude Code, every Codex account, Devin, Claude cloud credits),
+**Fast** (Grok) and **Free · local** (one card for Ollama, LM Studio and llama-server). Every card reads the same
+way: tier, cost basis, models, status, usage against its window or budget, the share kept for you, and two
+readiness lines, "Chat: ready / why" and "Fleet: ready · reserve kept / why", with the command that fixes it. It
+opens over your work or pins as a column beside it, and a dot on the edge tab tells you at a glance whether
+everything is usable.
 
 Without opening anything, the **resource bar** in the rail foot keeps every resource in view. It shows one battery
 per account with how much of its window is left, plus your local models and your cloud credits. Each row carries

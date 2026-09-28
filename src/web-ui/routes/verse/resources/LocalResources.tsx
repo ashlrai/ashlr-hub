@@ -29,6 +29,8 @@ import type { ReadinessFix, ResourceReadinessRow } from '../../../../core/routin
 import { LOCAL_MODELS_SHOWN, localRuntimeLines, modelContextText, runtimeView } from './resources-model.js';
 import { RESOURCES_POLL_MS } from './resources-queries.js';
 import { ReadinessLines } from './ReadinessLines.js';
+import { ResourceFacts } from './ResourceFacts.js';
+import type { ResourceFactsView } from './resources-model.js';
 import { StatusLine } from './ResourceCard.js';
 import styles from './ResourcesDrawer.module.css';
 
@@ -44,9 +46,11 @@ export interface LocalResourcesProps {
   /** The `local` row of GET /api/verse/budget/readiness, when this server has it. */
   readiness?: ResourceReadinessRow | null;
   onReadinessAction?: (fix: ReadinessFix, row: ResourceReadinessRow) => void;
+  /** 3.15: tier · cost basis — the facts row every card carries (its models are listed below). */
+  facts?: ResourceFactsView | null;
 }
 
-export function LocalResources({ status, onOpenUsage, now, readiness = null, onReadinessAction }: LocalResourcesProps) {
+export function LocalResources({ status, onOpenUsage, now, readiness = null, onReadinessAction, facts = null }: LocalResourcesProps) {
   const models = useQuery(verseLocalModelsQuery);
   const runtimeRead = useQuery(servingRuntimeQuery);
   const refetchModels = useRefetch(verseLocalModelsQuery);
@@ -97,6 +101,7 @@ export function LocalResources({ status, onOpenUsage, now, readiness = null, onR
           <span className={styles.plan}>this machine</span>
         </h4>
       </div>
+      {facts ? <ResourceFacts facts={facts} /> : null}
       {status !== null ? (
         <StatusLine status={status} />
       ) : view !== null && !view.reachable ? (

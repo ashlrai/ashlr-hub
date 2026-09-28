@@ -115,6 +115,7 @@ export function foldRoiByEngine(rows: ReadonlyArray<{ engine: string; dispatches
   for (const r of rows) {
     // Fleet lanes name engines differently (grok-cli, claude-cli, local-coder).
     const engine = r.engine.startsWith('claude') ? 'claude' : r.engine.startsWith('grok') ? 'grok' : r.engine.startsWith('codex') ? 'codex'
+      : r.engine.startsWith('devin') ? 'devin'
       : r.engine.startsWith('local') || r.engine.startsWith('llama') || r.engine === 'ollama' ? 'local' : r.engine;
     const a = acc.get(engine) ?? { dispatches: 0, judged: 0, ship: 0, latSum: 0, latN: 0 };
     a.dispatches += r.dispatches;

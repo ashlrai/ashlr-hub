@@ -26,6 +26,8 @@ import { usedPercentText } from '../percent-text.js';
 import { windowSentence, type AccountStatus, type CapacityRow, type CapacityWindowRow } from '../usage/capacity-strip-model.js';
 import type { ResourceReadinessRow } from '../../../../core/routing/readiness-types.js';
 import { ReadinessLines } from './ReadinessLines.js';
+import { ResourceFacts } from './ResourceFacts.js';
+import type { ResourceFactsView } from './resources-model.js';
 import styles from './ResourcesDrawer.module.css';
 
 /** Above this share of a window the meter turns amber (the capacity strip's own line). */
@@ -105,9 +107,11 @@ export interface ResourceCardProps {
    * already offers them below — only a literal command is.
    */
   readiness?: ResourceReadinessRow | null;
+  /** 3.15: tier · cost basis · models — the facts row every card carries. */
+  facts?: ResourceFactsView | null;
 }
 
-export function ResourceCard({ row, status, settled, mode, busy, onAction, readiness = null }: ResourceCardProps) {
+export function ResourceCard({ row, status, settled, mode, busy, onAction, readiness = null, facts = null }: ResourceCardProps) {
   // Budget editing lives in Apps & Accounts; the drawer offers what the seat needs now.
   const actions = accountActions(row, settled).filter((a) => a.kind !== 'edit-budget');
   const reserve = row.reserve;
@@ -121,6 +125,7 @@ export function ResourceCard({ row, status, settled, mode, busy, onAction, readi
           {row.plan !== null ? <span className={styles.plan}>{row.plan}</span> : null}
         </h4>
       </div>
+      {facts !== null ? <ResourceFacts facts={facts} /> : null}
       <StatusLine status={status} />
       {status.checked !== null ? (
         <p className={styles.stamp} title={status.checkedTitle ?? undefined}>{status.checked}</p>
