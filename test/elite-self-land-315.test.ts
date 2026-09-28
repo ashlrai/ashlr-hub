@@ -59,14 +59,14 @@ describe('the elite allowlist — one source of truth, fail closed', () => {
     ['codex:gpt-6-sol', 'gpt-6-sol'],
     ['codex:gpt-6-luna', 'gpt-6-luna'],
     ['devin-cli:gpt-6-sol-high', 'gpt-6-sol'],
-    ['devin:gpt-6-astra-max', 'gpt-6-astra'],
+    ['devin-cli:gpt-6-astra-max', 'gpt-6-astra'],
     ['grok-cli:grok-4.7', 'grok-4.7'],
     ['grok-cli:grok-4.7-build-fast', 'grok-4.7'],
     ['grok-cli:grok-4.6', 'grok-4.6'],
     ['devin-cli:swe-2', 'swe-2'],
     ['devin-cli:swe-2-high', 'swe-2'],
     ['devin-cli:swe-2-medium', 'swe-2'],
-    ['devin:swe-2-max', 'swe-2'],
+    ['devin-cli:swe-2-max', 'swe-2'],
     ['devin-cli:swe', 'swe-2'],
     ['local-coder:qwen3.8:27b-ctx64k', 'qwen3.8-27b'],
     ['ollama:qwen3.8:27b', 'qwen3.8-27b'],
@@ -90,6 +90,8 @@ describe('the elite allowlist — one source of truth, fail closed', () => {
     'xai:grok-4.7',
     'grok-cli:grok-4.5',
     'devin:normal', // the cloud intake records a MODE, not a model
+    'devin:swe-2', // even a claimed model on cloud intake is not host-verified
+    'devin:gpt-6-astra-max',
     'devin-cli:opus', // version-less
     'llama-server:qwen3.8:27b-ctx64k', // serves whatever it loaded
     'local-coder:claude-opus-5-5', // a local runtime serving a vendor-named model

@@ -28,6 +28,7 @@
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 
+import { loadConfigReadOnlyStrict } from '../config.js';
 import { clampBudgetPolicy } from '../authority/effective-config.js';
 import {
   ELITE_DIRECT_G6_CODE,
@@ -222,6 +223,8 @@ type StandingMergeState = FleetMergeStateV1 & { redTeam?: RedTeamMemo | null };
 
 export interface StandingPassDeps {
   host: HostMergeDeps;
+  /** Fresh strict read for merge-time config narrowing; unreadable means no elite merge. */
+  readLiveConfig: () => AshlrConfig;
   loadProposal: (id: string) => Proposal | null;
   setStatus: (id: string, status: 'applied' | 'rejected', result: string, reason: string) => boolean;
   verifyAndPersist: (proposal: Proposal, cfg: AshlrConfig) => Promise<VerifyAndPersistProposalResult>;
@@ -532,6 +535,7 @@ async function defaultBlastChecks(proposal: Proposal, cfg: AshlrConfig): Promise
 export function defaultStandingPassDeps(): StandingPassDeps {
   return {
     host: defaultHostMergeDeps(),
+    readLiveConfig: loadConfigReadOnlyStrict,
     loadProposal: (id) => loadProposal(id),
     setStatus: (id, status, result, reason) => setStatus(id, status, result, reason, undefined, {}, 'pending'),
     verifyAndPersist: (proposal, cfg) => verifyAndPersistProposal(proposal, cfg, 'auto-merge'),
@@ -1799,8 +1803,7 @@ async function progressFleetPr(key: string, ctx: PassContext): Promise<void> {
     // still on the (possibly narrowed) allowlist. If either lapsed, the PR is
     // held (shadow) for Mason instead of merging unjudged work.
     const eliteBasis = state.gates['G6']?.code === ELITE_DIRECT_G6_CODE;
-    const eliteStill = eliteBasis && eliteDirectInForce(livePolicy)
-      && matchEliteModel(proposal.engineModel, eliteModelAllowFromConfig(ctx.cfg)) !== null;
+    const eliteStill = eliteBasis && eliteDirectStillAllowed(livePolicy, proposal, deps);
     const withheld = mergeWithheldBecause(livePolicy, repoPolicy)
       ?? (eliteBasis && !eliteStill ? 'shadow' : null)
       ?? producerMergeWithheld(producerModelFamily(proposal.engineModel), {
@@ -1870,6 +1873,16 @@ function gateMemoRows(state: FleetMergeStateV1): { gate: GateId; digest: string;
   });
 }
 
+/** Read the owner's current narrowing each time an unjudged merge approaches a mutation. */
+function eliteDirectStillAllowed(policy: EffectivePolicy | null, proposal: Proposal, deps: StandingPassDeps): boolean {
+  if (!eliteDirectInForce(policy)) return false;
+  try {
+    return matchEliteModel(proposal.engineModel, eliteModelAllowFromConfig(deps.readLiveConfig())) !== null;
+  } catch {
+    return false;
+  }
+}
+
 async function landPr(
   ctx: PassContext,
   state: FleetMergeStateV1,
@@ -1916,7 +1929,13 @@ async function landPr(
       protectionPolicyDigest: protectionDigest,
       policyEpoch: epoch,
     },
-    currentPolicyEpoch: () => policyEpochDigest(deps.host.policy(), state.repo),
+    currentPolicyEpoch: () => {
+      const livePolicy = deps.host.policy();
+      // The host-merge fence calls this again after its last async hook and
+      // immediately before consuming authority, including changes during G7.
+      if (state.gates['G6']?.code === ELITE_DIRECT_G6_CODE && !eliteDirectStillAllowed(livePolicy, proposal, deps)) return null;
+      return policyEpochDigest(livePolicy, state.repo);
+    },
     recheck: async () => {
       if (deps.host.killActive()) return 'Stop is on';
       let holds: RepoHold[] | null;
@@ -1943,6 +1962,9 @@ async function landPr(
       if (live.labels.includes(OWNER_LANE_LABEL)) return `PR #${pr.number} was labelled ${OWNER_LANE_LABEL}`;
       const base = await readBranchHead(state.repo, pr.baseBranch, deps.host);
       if (typeof base === 'string' || base.sha !== pr.baseSha) return 'the base branch moved; the PR is rebuilt on the new base';
+      if (state.gates['G6']?.code === ELITE_DIRECT_G6_CODE && !eliteDirectStillAllowed(deps.host.policy(), proposal, deps)) {
+        return 'elite model permission changed before the merge';
+      }
       return null;
     },
   }, deps.host);

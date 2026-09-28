@@ -26,7 +26,7 @@ Leader and set directives ([LEADER.md](LEADER.md)), but nothing said in that
 conversation widens the grant. **Elite self-land:** under a grant whose stage
 is `elite-direct`, work by an elite model (Opus 5.5/5, Fable 5.1/5, Sonnet 5,
 GPT-6 Astra/Sol/Luna, Grok 4.7/4.6, SWE-2, Qwen 3.8 27B) lands on green tests
-with no judge, Devin's included (§1a).
+with no judge. Devin CLI can qualify; Devin cloud still needs two judges (§1a).
 
 ## 1. The model
 
@@ -65,10 +65,11 @@ neither the Leader nor config can skip a rung or edit one.
 
 ## 1a. Elite self-land (3.15)
 
-**Elite models land directly on green tests. Nothing else needs a judge.**
-This is your decision of 2026-09-27: Codex, Claude Code, Grok and Devin push
-straight to production when they run an elite model. It is on only while the
-grant's **current stage is `elite-direct`**, and only you can sign that stage,
+**Eligible elite models land directly on green tests without a judge.**
+This is your decision of 2026-09-27: Codex, Claude Code, Grok and Devin CLI can
+self-merge verified PRs when they run an elite model. A repository's deploy
+pipeline determines when that merge reaches production. This path is on only
+while the grant's **current stage is `elite-direct`**, and only you can sign that stage,
 with Touch ID.
 
 **What changes.** When the signed producer identity (`proposal.engineModel`,
@@ -104,15 +105,15 @@ trailing context tag such as `[1m]` is ignored.
 
 | Model | Engines | Model ids matched |
 |---|---|---|
-| Claude Opus 5.5 | `claude`, `claude-cli`, `anthropic`, `devin`, `devin-cli` | `claude-opus-5-5`, `opus-5-5` |
+| Claude Opus 5.5 | `claude`, `claude-cli`, `anthropic`, `devin-cli` | `claude-opus-5-5`, `opus-5-5` |
 | Claude Opus 5 | same | `claude-opus-5`, `opus-5`, `claude-opus-5.5` (the retired alias that ran Opus 5) |
 | Claude Fable 5.1 | same | `claude-fable-5-1`, `fable-5-1` |
 | Claude Fable 5 | same | `claude-fable-5`, `fable-5` |
 | Claude Sonnet 5 | same | `claude-sonnet-5`, `sonnet-5` |
-| GPT-6 Astra / Sol / Luna | `codex`, `openai`, `devin`, `devin-cli` | `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, each also with `-minimal`, `-low`, `-medium`, `-high`, `-xhigh` or `-max` |
+| GPT-6 Astra / Sol / Luna | `codex`, `openai`, `devin-cli` | `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, each also with `-minimal`, `-low`, `-medium`, `-high`, `-xhigh` or `-max` |
 | Grok 4.7 | `grok-cli` | `grok-4.7`, `grok-4.7-build-fast` |
 | Grok 4.6 | `grok-cli` | `grok-4.6`, `grok-4.6-build` |
-| SWE-2 | `devin`, `devin-cli` | `swe-2`, `swe-2-high`, `swe-2-medium`, `swe-2-max`, `swe` |
+| SWE-2 | `devin-cli` | `swe-2`, `swe-2-high`, `swe-2-medium`, `swe-2-max`, `swe` |
 | Qwen 3.8 27B | `local`, `local-coder`, `ollama` | `qwen3.8:27b`, `qwen3.8:27b-ctx64k`, `qwen3.8:27b-q8_0` |
 
 These are **never** elite, and fail closed:
@@ -124,13 +125,14 @@ These are **never** elite, and fail closed:
 - `llama-server:`, which serves whatever weights it loaded whatever tag the
   record carries.
 - A local runtime serving a vendor-named model.
-- `claude:cloud` and `devin:<mode>`: the cloud intakes record no model.
+- `claude:cloud` and every `devin:` identity: the cloud intakes do not provide
+  host-verifiable model identity.
 - Any id not listed.
 
 **Configuration only narrows it.** `foundry.autoMerge.eliteModels` can list
 entry ids (`["gpt-6-sol", "grok-4.7"]`) to keep only those, or be `false` to
-turn elite self-land off. Unknown ids are ignored. Adding a model means
-editing the Tier-1 file in your own PR.
+turn elite self-land off. Unknown ids are ignored; a malformed explicit value
+also turns it off. Adding a model means editing the Tier-1 file in your own PR.
 
 **Turning it on.** Several commands offer it, each with a one-line
 explanation:

@@ -45,7 +45,7 @@ export const ELITE_DIRECT_G6_CODE = 'elite-direct';
 
 /** One line for setup / re-approve / the Touch ID sheet. */
 export const ELITE_DIRECT_ONE_LINE =
-  'Elite direct: work by an elite model (Opus 5.5/5, Fable 5.1/5, Sonnet 5, GPT-6 Astra/Sol/Luna, Grok 4.7/4.6, SWE-2, Qwen 3.8 27B) '
+  'Elite direct: work by an elite model (Opus 5.5/5, Fable 5.1/5, Sonnet 5, GPT-6 Astra/Sol/Luna, Grok 4.7/4.6, SWE-2 via Devin CLI, Qwen 3.8 27B) '
   + 'lands on green tests with no judge; other models still need an independent judge, and Tier-1 changes still go to you.';
 
 export type EliteVendor = 'anthropic' | 'openai' | 'xai' | 'cognition' | 'qwen';
@@ -71,8 +71,8 @@ const OPENAI_ENGINES = ['codex', 'openai'] as const;
  * carries merge authority (engine-registry M298) and is not elite either.
  */
 const XAI_ENGINES = ['grok-cli'] as const;
-/** Devin: the cloud intake (`devin:`) and the local CLI adapter (`devin-cli:`). */
-const DEVIN_ENGINES = ['devin', 'devin-cli'] as const;
+/** Devin CLI names the selected model; cloud intake signs only a mode, so it cannot prove an elite model. */
+const DEVIN_ENGINES = ['devin-cli'] as const;
 /** Local runtimes that request the model by tag per call (never llama-server — see header). */
 const LOCAL_ENGINES = ['local', 'local-coder', 'ollama'] as const;
 

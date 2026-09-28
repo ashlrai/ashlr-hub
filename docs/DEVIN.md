@@ -11,13 +11,14 @@ Verse works with **Devin** (Cognition's hosted coding agent) in three places:
   launch Devin sessions on well-scoped backlog work.
 
 Every Devin pull request reaches your repositories only through the same
-Needs-you triage and standing merge gates as cloud PRs. Under a grant, a Devin
-PR merges only when the grant's current stage names `devin` **and** either
-judges from two different model families approved it, or (3.15) Devin ran an
-**elite model** (SWE-2, GPT-6 Astra/Sol/Luna, or an elite Claude id) under an
-`elite-direct` grant. In the elite case green tests stand in for the judges
-([AUTHORITY.md §1a](AUTHORITY.md#1a-elite-self-land-315)). Otherwise the gates
-record a would-merge (shadow) and the PR waits for you.
+Needs-you triage and standing merge gates as cloud PRs. Under a grant,
+**Devin cloud** PRs merge only when the current stage names `devin` and judges
+from two different model families approve. Cloud intake records a mode, not
+the model that ran. **Devin CLI** work using a host-signed elite model (SWE-2,
+GPT-6 Astra/Sol/Luna, or an elite Claude id) can pass on green tests without
+judges under an `elite-direct` grant. Otherwise the gates record a would-merge
+(shadow) and the PR waits for you
+([AUTHORITY.md §1a](AUTHORITY.md#1a-elite-self-land-315)).
 
 The lane is **off by default**; only the Devin (CLI) seat appears without it,
 once Cognition's `devin` CLI is installed. The code is in `src/core/devin/`, the CLI is
@@ -332,9 +333,10 @@ errors redact `cog_…` and `apk_…` keys.
 
 ## Limits
 
-- **Merging needs a grant that names Devin, and either two judges or an
-  elite model under `elite-direct`.** Otherwise Devin PRs are shadow: the
-  gates record a would-merge and the PR waits for you.
+- **Merging needs a grant that names Devin, and either two judges or a verified
+  elite Devin CLI model under `elite-direct`.** Cloud Devin still needs two
+  judges. Otherwise Devin PRs are shadow: the gates record a would-merge and
+  the PR waits for you.
 - **Fleet use needs a new custody helper and a new grant.** Helpers before
   1.1.0 cannot sign a grant that names Devin.
 - **CLI chats are unmetered and unverified.** The CLI reports no usage, so its

@@ -61,6 +61,7 @@ interface World {
   availableLanes: FleetEngine[];
   /** Lets a test make the (stubbed) judge answer as someone else. */
   judgeOverride: string | null;
+  liveConfig: AshlrConfig;
   deps: Partial<StandingPassDeps>;
 }
 
@@ -86,6 +87,7 @@ function world(opts: { required?: { context: string; appId: number | null }[]; s
     judgeCalls: [],
     availableLanes: ['grok-cli', 'claude-cli'],
     judgeOverride: null,
+    liveConfig: {} as AshlrConfig,
     deps: {},
   };
   const host: HostMergeDeps = {
@@ -101,6 +103,7 @@ function world(opts: { required?: { context: string; appId: number | null }[]; s
   };
   w.deps = {
     host,
+    readLiveConfig: () => w.liveConfig,
     loadProposal: (id) => w.proposals.get(id) ?? null,
     setStatus: (id, status, _result, reason) => {
       w.statuses.push({ id, status, reason });
@@ -806,6 +809,38 @@ describe('standing merge pass — elite self-land (3.15)', () => {
     await pass(w);
     expect(w.fake.mergeCalls()).toHaveLength(0);
     expect(w.ledger.of('gate:would-merge')).toEqual([expect.objectContaining({ withheldBecause: 'shadow' })]);
+  });
+
+  it('a live allowlist narrowing while G7 waits holds an unjudged PR', async () => {
+    const w = eliteWorld();
+    add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...ELITE }));
+    await pass(w);
+    const pr = prOf(w);
+    await pass(w); // G7 is pending; the pass-start config still allows every elite model.
+    expect(w.fake.mergeCalls()).toHaveLength(0);
+    w.liveConfig = { foundry: { autoMerge: { eliteModels: [] } } } as unknown as AshlrConfig;
+    w.fake.greenRequired(w.fake.headOfPull(pr.number)!);
+    w.clock.now += 10 * 60 * 1000;
+    const result = await pass(w);
+    expect(result.summary.merged).toBe(0);
+    expect(w.fake.mergeCalls()).toHaveLength(0);
+    expect(w.ledger.of('gate:would-merge')).toEqual([expect.objectContaining({ withheldBecause: 'shadow' })]);
+  });
+
+  it('a live allowlist narrowing inside the host merge fence revokes an unjudged PR', async () => {
+    const w = eliteWorld();
+    add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...ELITE }));
+    await pass(w);
+    const pr = prOf(w);
+    w.fake.greenRequired(w.fake.headOfPull(pr.number)!);
+    w.deps.host = {
+      ...w.deps.host!,
+      beforeConsume: () => { w.liveConfig = { foundry: { autoMerge: { eliteModels: [] } } } as unknown as AshlrConfig; },
+    };
+    w.clock.now += 10 * 60 * 1000;
+    const result = await pass(w);
+    expect(result.summary.merged).toBe(0);
+    expect(w.fake.mergeCalls()).toHaveLength(0);
   });
 
   it('a non-elite producer is still judged under elite-direct', async () => {
