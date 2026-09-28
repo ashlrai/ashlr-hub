@@ -464,6 +464,7 @@ export function requestAgentConfirmation(
 export function answerAgentConfirmation(sessionId: string, id: string, answer: VerseMcpConfirmAnswer): boolean {
   const pending = chats.get(sessionId)?.pending.get(id);
   if (!pending) return false;
+  if (answer === 'chat' && pending.info.rule.startsWith('terminal-run-')) return false;
   pending.settle(answer);
   return true;
 }

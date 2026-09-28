@@ -35,11 +35,13 @@
  *
  * Desktop only: under Node there is no PTY, and every tool here says so.
  */
+import { randomBytes } from 'node:crypto';
 import type { TerminalManager } from './terminal.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { terminalBytesToText } from './terminal-blocks.js';
 import { classifyCommand, confirmationFor, fetchesRemote } from './verse-mcp-destructive.js';
 import {
+  agentToolsGrant,
   agentTabOwner,
   agentTabsOf,
   forgetAgentTab,
@@ -61,7 +63,10 @@ export const MAX_AGENT_TABS_PER_CHAT = 4;
 const RUN_OUTPUT_TAIL_CHARS = 8_000;
 const MAX_COMMAND_CHARS = 8_000;
 const MAX_CAPTURE_BYTES = 1024 * 1024;
-const SEND_KEYS_SETTLE_MS = 400;
+
+function liveTerminalAccess(ctx: VerseMcpToolContext): boolean {
+  return !ctx.signal.aborted && agentToolsGrant(ctx.sessionId).terminal !== 'off';
+}
 
 export interface VerseMcpTerminalDeps {
   manager(): TerminalManager;
@@ -173,19 +178,23 @@ function runningBlock(m: TerminalManager, tabId: string): VerseTerminalBlock | n
   return last && last.state === 'running' ? last : null;
 }
 
-/** Ask the operator when the text about to be submitted is destructive. Null = go ahead. */
+/** Every command gets a fresh operator decision; shell syntax defeats a static denylist. */
 async function gate(ctx: VerseMcpToolContext, tool: string, command: string, tabId: string): Promise<VerseMcpToolResult | null> {
   const confirmation = confirmationFor(classifyCommand(command, { remoteRead: ctx.remoteRead() }));
-  if (!confirmation) return null;
+  if (!liveTerminalAccess(ctx)) return toolError('This turn no longer has terminal access.');
   const shown = scrubSecrets(command);
   const actionId = ctx.record({ tool, summary: `asks to run: ${shown}`, tabId, outcome: 'pending' });
-  const answer = await ctx.confirm({ tool, rule: confirmation.rule, reason: confirmation.reason, command: shown, tabId });
+  // A unique rule prevents "Allow for chat" from silently approving later
+  // commands. The UI offers only one-shot approval for terminal_run.
+  const rule = `terminal-run-${randomBytes(12).toString('hex')}`;
+  const reason = confirmation?.reason ?? 'A shell command may read, change, or send data. Review this exact command before allowing it once.';
+  const answer = await ctx.confirm({ tool, rule, reason, command: shown, tabId });
   if (answer === 'once' || answer === 'chat') {
     ctx.settle(actionId, 'ok');
     return null;
   }
   ctx.settle(actionId, 'denied');
-  if (answer === 'deny') return toolError(`The operator denied this command (${confirmation.reason}) It was not run. Do not retry it; ask the operator how they want to proceed.`);
+  if (answer === 'deny') return toolError(`The operator denied this command (${reason}) It was not run. Do not retry it; ask the operator how they want to proceed.`);
   if (answer === 'timeout') return toolError('The operator did not answer the confirmation within 120 seconds, so the command was not run. Ask them in the chat before trying again.');
   return toolError('This turn ended before the operator answered, so the command was not run.');
 }
@@ -267,6 +276,7 @@ async function openAgentTab(m: TerminalManager, ctx: VerseMcpToolContext, rootAr
     if (!hit) return { error: toolError(`root must be one of this chat's folders: ${roots.join(', ')}`) };
     root = hit.r;
   }
+  if (!liveTerminalAccess(ctx)) return { error: toolError('This turn no longer has terminal access.') };
   let tab: VerseTerminalTab;
   try {
     tab = await m.create({
@@ -279,6 +289,10 @@ async function openAgentTab(m: TerminalManager, ctx: VerseMcpToolContext, rootAr
     });
   } catch (err) {
     return { error: toolError(`The terminal could not be opened: ${err instanceof Error ? err.message : String(err)}`) };
+  }
+  if (!liveTerminalAccess(ctx)) {
+    m.kill(tab.id);
+    return { error: toolError('This turn lost terminal access while the tab was opening.') };
   }
   registerAgentTab(tab.id, ctx.sessionId);
   // Give the shell its first prompt (and the integration its first marker),
@@ -295,6 +309,11 @@ async function openAgentTab(m: TerminalManager, ctx: VerseMcpToolContext, rootAr
   } finally {
     watch.stop();
   }
+  if (!liveTerminalAccess(ctx)) {
+    m.kill(tab.id);
+    forgetAgentTab(tab.id);
+    return { error: toolError('This turn lost terminal access while the tab was opening.') };
+  }
   return { tab: m.get(tab.id) ?? tab };
 }
 
@@ -302,7 +321,7 @@ function tabLine(m: TerminalManager, tab: VerseTerminalTab, access: 'agent' | 's
   const running = tab.shellIntegration === 'active' ? runningBlock(m, tab.id) : null;
   const bits = [
     `${tab.id}`,
-    access === 'agent' ? 'yours' : 'shared by the operator',
+    access === 'agent' ? 'yours' : 'shared by the operator (read-only)',
     `"${tab.title}"`,
     `cwd ${tab.cwd ?? tab.root}`,
     tab.exited ? 'EXITED' : running ? `running: ${scrubSecrets(running.command).slice(0, 120)}` : 'idle',
@@ -318,6 +337,7 @@ function tabLine(m: TerminalManager, tab: VerseTerminalTab, access: 'agent' | 's
 
 async function terminalList(_args: Record<string, unknown>, ctx: VerseMcpToolContext): Promise<VerseMcpToolResult> {
   const m = await manager();
+  if (!liveTerminalAccess(ctx)) return toolError('This turn no longer has terminal access.');
   pruneGone(m, ctx.sessionId);
   const mine = agentTabsOf(ctx.sessionId).map((id) => m.get(id)).filter((t): t is VerseTerminalTab => t !== null);
   const shared = sharedTabsOf(ctx.sessionId).map((id) => m.get(id)).filter((t): t is VerseTerminalTab => t !== null);
@@ -373,6 +393,7 @@ async function terminalRun(args: Record<string, unknown>, ctx: VerseMcpToolConte
   if (requested) {
     const check = usableTab(m, ctx, requested, { write: true });
     if (!check.ok) return check.result;
+    if (check.access !== 'agent') return toolError('Commands may run only in agent-owned tabs. Open one with terminal_open. Shared operator tabs are read-only to agents.');
     tab = check.tab;
   } else {
     const chosen = await defaultRunTab(m, ctx);
@@ -383,16 +404,22 @@ async function terminalRun(args: Record<string, unknown>, ctx: VerseMcpToolConte
   if (busy) {
     return toolError(`A command is still running in ${tab.id} (${busy.id}: ${scrubSecrets(busy.command).slice(0, 120)}). Wait for it (terminal_wait_for / terminal_read), stop it (terminal_interrupt), or run in another tab.`);
   }
+  if (tab.shellIntegration !== 'active') return toolError('This shell has no active command boundary, so Verse cannot safely submit a command. Open a new agent tab.');
 
   const refused = await gate(ctx, 'terminal_run', command, tab.id);
   if (refused) return refused;
-  if (tabTakenOver(tab.id)) return toolError(TAKEN_OVER);
-  if (ctx.signal.aborted) return toolError('This turn\'s access to Verse tools has ended.');
+  if (!liveTerminalAccess(ctx)) return toolError('This turn\'s terminal access has ended.');
+  const current = usableTab(m, ctx, tab.id, { write: true });
+  if (!current.ok) return current.result;
+  if (current.access !== 'agent' || current.tab.shellIntegration !== 'active' || runningBlock(m, tab.id)) return toolError('The agent tab changed while approval was pending. Open a new tab and try again.');
 
   const actionId = ctx.record({ tool: 'terminal_run', summary: scrubSecrets(command), tabId: tab.id, outcome: 'pending' });
   const watch = capture(m, tab.id, ctx);
   const started = deps.now();
   try {
+    // Cancel any pending input line before submitting the reviewed command.
+    // A pretyped prefix must never change what the operator just approved.
+    m.write(tab.id, new Uint8Array([3]));
     m.annotate(tab.id, `\r\n\x1b[2;3m▸ ${seatLabel(ctx)} typed:\x1b[0m\r\n`);
     m.write(tab.id, new TextEncoder().encode(`${command}\r`));
   } catch (err) {
@@ -407,6 +434,7 @@ async function terminalRun(args: Record<string, unknown>, ctx: VerseMcpToolConte
   let note: string | null = null;
   try {
     for (;;) {
+      if (!liveTerminalAccess(ctx)) { note = 'Terminal access was revoked while the command ran.'; break; }
       const elapsed = deps.now() - started;
       const block = watch.newBlock();
       if (block?.state === 'done') { stillRunning = false; break; }
@@ -424,6 +452,10 @@ async function terminalRun(args: Record<string, unknown>, ctx: VerseMcpToolConte
     }
   } finally {
     watch.stop();
+  }
+  if (!liveTerminalAccess(ctx)) {
+    ctx.settle(actionId, 'denied');
+    return toolError('Terminal access was revoked while the command ran; no output was returned.');
   }
 
   const block = watch.newBlock();
@@ -452,6 +484,7 @@ async function terminalRun(args: Record<string, unknown>, ctx: VerseMcpToolConte
 
 async function terminalRead(args: Record<string, unknown>, ctx: VerseMcpToolContext): Promise<VerseMcpToolResult> {
   const m = await manager();
+  if (!liveTerminalAccess(ctx)) return toolError('This turn no longer has terminal access.');
   const check = usableTab(m, ctx, strArg(args, 'tab_id', 40), { write: false });
   if (!check.ok) return check.result;
   const maxChars = intArg(args, 'max_chars', 200, 100_000, 20_000);
@@ -506,43 +539,11 @@ export function keyBytes(name: string): string | null {
   return null;
 }
 
-async function terminalSendKeys(args: Record<string, unknown>, ctx: VerseMcpToolContext): Promise<VerseMcpToolResult> {
-  const m = await manager();
-  const check = usableTab(m, ctx, strArg(args, 'tab_id', 40), { write: true });
-  if (!check.ok) return check.result;
-  const text = typeof args['text'] === 'string' ? args['text'] : '';
-  if (text.length > 4_000) return toolError('text is limited to 4000 characters.');
-  const keys = Array.isArray(args['keys']) ? args['keys'] : [];
-  if (keys.length > 50) return toolError('keys is limited to 50 entries.');
-  let sequence = '';
-  for (const k of keys) {
-    const bytes = typeof k === 'string' ? keyBytes(k) : null;
-    if (bytes === null) return toolError(`Unknown key: ${String(k).slice(0, 30)}. Use names like enter, tab, escape, up, down, left, right, backspace, ctrl-c, ctrl-d.`);
-    sequence += bytes;
-  }
-  if (!text && !sequence) return toolError('Give text, keys, or both.');
-  // Text that is submitted (a newline in it, or an Enter key) is a command line: classify it.
-  const submitted = /[\r\n]/.test(text) || sequence.includes('\r');
-  if (submitted) {
-    const line = text.replace(/\r\n?/g, '\n').split('\n').filter((l) => l.trim().length > 0).join('; ');
-    if (line) {
-      const refused = await gate(ctx, 'terminal_send_keys', line, check.tab.id);
-      if (refused) return refused;
-      if (fetchesRemote(line)) ctx.markRemoteRead();
-    }
-  }
-  const watch = capture(m, check.tab.id, ctx);
-  try {
-    m.write(check.tab.id, new TextEncoder().encode(text.replace(/\r?\n/g, '\r') + sequence));
-    ctx.record({ tool: 'terminal_send_keys', summary: `typed ${scrubSecrets(text).slice(0, 80)}${keys.length ? ` + ${keys.join(' ')}` : ''}`, tabId: check.tab.id, outcome: 'ok' });
-    await watch.wait(SEND_KEYS_SETTLE_MS);
-  } catch (err) {
-    return toolError(`The keys could not be sent: ${err instanceof Error ? err.message : String(err)}`);
-  } finally {
-    watch.stop();
-  }
-  const cut = tail(terminalBytesToText(watch.bytes()), 4_000);
-  return withOutput({ tab_id: check.tab.id, sent: true }, 'The terminal output since the keys were sent', cut.text, ctx);
+async function terminalSendKeys(_args: Record<string, unknown>, _ctx: VerseMcpToolContext): Promise<VerseMcpToolResult> {
+  // A PTY does not expose its pending input line. Splitting text and Enter
+  // across calls, recalling history, or submitting through a control key can
+  // execute a command different from the one the confirmation showed.
+  return toolError('Raw terminal keys are unavailable to agents. Use terminal_run for a reviewed command or terminal_interrupt for Ctrl-C.');
 }
 
 function compilePattern(raw: string): RegExp {
@@ -563,6 +564,7 @@ function matchLine(text: string, pattern: RegExp): string | null {
 
 async function terminalWaitFor(args: Record<string, unknown>, ctx: VerseMcpToolContext): Promise<VerseMcpToolResult> {
   const m = await manager();
+  if (!liveTerminalAccess(ctx)) return toolError('This turn no longer has terminal access.');
   const check = usableTab(m, ctx, strArg(args, 'tab_id', 40), { write: false });
   if (!check.ok) return check.result;
   const raw = strArg(args, 'pattern', 300);
@@ -580,12 +582,14 @@ async function terminalWaitFor(args: Record<string, unknown>, ctx: VerseMcpToolC
   const recentText = terminalBytesToText(Buffer.concat(chunks));
   const recent = typeof afterArg === 'number' ? recentText : recentText.slice(-8_000);
   const already = matchLine(scrubSecrets(recent), pattern);
+  if (!liveTerminalAccess(ctx)) return toolError('This turn no longer has terminal access.');
   if (already !== null) return withOutput({ tab_id: check.tab.id, matched: true }, 'The matching line', already, ctx);
 
   const watch = capture(m, check.tab.id, ctx);
   const started = deps.now();
   try {
     for (;;) {
+      if (!liveTerminalAccess(ctx)) return toolError('This turn no longer has terminal access.');
       const text = scrubSecrets(terminalBytesToText(watch.bytes()));
       const hit = matchLine(text, pattern);
       if (hit !== null) return withOutput({ tab_id: check.tab.id, matched: true }, 'The matching line', hit, ctx);
@@ -605,8 +609,10 @@ async function terminalWaitFor(args: Record<string, unknown>, ctx: VerseMcpToolC
 
 async function terminalInterrupt(args: Record<string, unknown>, ctx: VerseMcpToolContext): Promise<VerseMcpToolResult> {
   const m = await manager();
+  if (!liveTerminalAccess(ctx)) return toolError('This turn no longer has terminal access.');
   const check = usableTab(m, ctx, strArg(args, 'tab_id', 40), { write: true });
   if (!check.ok) return check.result;
+  if (check.access !== 'agent') return toolError('Shared operator tabs are read-only to agents.');
   m.write(check.tab.id, new Uint8Array([3]));
   ctx.record({ tool: 'terminal_interrupt', summary: 'pressed Ctrl-C', tabId: check.tab.id, outcome: 'ok' });
   return { content: [textContent(`Sent Ctrl-C to ${check.tab.id}.`)] };
@@ -614,6 +620,7 @@ async function terminalInterrupt(args: Record<string, unknown>, ctx: VerseMcpToo
 
 async function terminalClose(args: Record<string, unknown>, ctx: VerseMcpToolContext): Promise<VerseMcpToolResult> {
   const m = await manager();
+  if (!liveTerminalAccess(ctx)) return toolError('This turn no longer has terminal access.');
   const check = usableTab(m, ctx, strArg(args, 'tab_id', 40), { write: false });
   if (!check.ok) return check.result;
   if (check.access !== 'agent') return toolError('That is the operator\'s own shell, shared with you: you cannot close it.');
@@ -666,7 +673,7 @@ export const tools: VerseMcpTool[] = [
     name: 'terminal_run',
     scope: 'terminal',
     desktopOnly: true,
-    description: 'Type a one-line shell command into a terminal tab and wait for it to finish. Returns the exit code, the directory it ran in and the end of its output. Without tab_id it uses (or opens) a tab of your own. For a long-running process (a dev server, a watcher) pass wait:"none" and follow it with terminal_wait_for / terminal_read. Destructive commands wait for the operator to allow them.',
+    description: 'Submit one reviewed shell command in an agent-owned tab, with a fresh operator approval every time. Returns the exit code, directory, and output. Without tab_id it uses or opens an agent tab. Shared operator tabs are read-only. Long-running commands can use wait:"none" and terminal_wait_for / terminal_read.',
     annotations: ann('Run a command', { destructive: true, openWorld: true }),
     inputSchema: {
       type: 'object',
@@ -704,7 +711,7 @@ export const tools: VerseMcpTool[] = [
     name: 'terminal_send_keys',
     scope: 'terminal',
     desktopOnly: true,
-    description: 'Type raw text and/or named keys into a terminal tab — for interactive programs (answering a prompt, a REPL, a TUI). Keys: enter, tab, escape, backspace, delete, up, down, left, right, home, end, pageup, pagedown, space, ctrl-<letter>. Returns the output that followed.',
+    description: 'Raw terminal keys are temporarily unavailable to agents because pending input and shell history cannot be verified. Use terminal_run for a reviewed command or terminal_interrupt for Ctrl-C.',
     annotations: ann('Send keys', { destructive: true, openWorld: true }),
     inputSchema: {
       type: 'object',

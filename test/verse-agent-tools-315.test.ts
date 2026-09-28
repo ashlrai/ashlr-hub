@@ -591,7 +591,7 @@ describe('terminal tools', () => {
     expect(r.text).not.toContain('sk-ant-api03');
     const tab = m._tabs.get('t-1')!;
     expect(tab.tab.agent).toBe(true);
-    expect(tab.typed).toEqual(['npm test\r']);
+    expect(tab.typed).toEqual(['\x03', 'npm test\r']);
     expect(tab.frames[0]!.data).toMatch(/Claude typed:/);
     expect(tabAccess('s1', 't-1')).toBe('agent');
     // A failing command is not a tool error: the exit code says it.
@@ -611,7 +611,7 @@ describe('terminal tools', () => {
     expect(read.isError).toBe(true);
   });
 
-  it('a shared operator shell is usable only in "share my shells" mode, and cannot be closed by the agent', async () => {
+  it('a shared operator shell is readable but cannot run commands or be closed by the agent', async () => {
     const operator = await m.create({ sessionId: 's1', root: '/tmp/project' });
     expect(setTabShared('s1', operator.id, true)).toBe(false); // mode is "agent tabs"
     terminalOn('s1', 'shared');
@@ -619,7 +619,11 @@ describe('terminal tools', () => {
     expect(tabAccess('s1', operator.id)).toBe('shared');
     expect(tabAccess('s2', operator.id)).toBeNull();
     const r = await call('terminal_run', { command: 'ls', tab_id: operator.id }, toolCtx());
-    expect(r.isError).toBeUndefined();
+    expect(r.isError).toBe(true);
+    expect(m._tabs.get(operator.id)!.typed).toEqual([]);
+    expect((await call('terminal_read', { tab_id: operator.id }, toolCtx())).isError).toBeUndefined();
+    expect((await call('terminal_interrupt', { tab_id: operator.id }, toolCtx())).isError).toBe(true);
+    expect(m._tabs.get(operator.id)!.typed).toEqual([]);
     const close = await call('terminal_close', { tab_id: operator.id }, toolCtx());
     expect(close.isError).toBe(true);
     // Back to agent-only: the share is dropped.
@@ -627,10 +631,12 @@ describe('terminal tools', () => {
     expect(tabAccess('s1', operator.id)).toBeNull();
   });
 
-  it('destructive commands wait for the operator: deny and timeout never type; once runs; chat remembers the rule', async () => {
-    const answers: Array<'deny' | 'once' | 'chat' | 'timeout'> = [];
+  it('every command needs a fresh one-shot approval; denied and timed-out commands never type', async () => {
+    const answers: Array<'deny' | 'once' | 'timeout'> = [];
+    const requestedRules: string[] = [];
     const ctx = toolCtx({
       confirm: (req) => {
+        requestedRules.push(req.rule);
         const p = requestAgentConfirmation('s1', req, { timeoutMs: 30 });
         const next = answers.shift();
         if (next && next !== 'timeout') queueMicrotask(() => answerAgentConfirmation('s1', pendingConfirmations('s1')[0]!.id, next));
@@ -649,14 +655,35 @@ describe('terminal tools', () => {
 
     answers.push('once');
     expect((await call('terminal_run', { command: 'rm -rf build' }, ctx)).isError).toBeUndefined();
-    answers.push('chat');
+    answers.push('once');
     expect((await call('terminal_run', { command: 'rm -rf dist', tab_id: 't-1' }, ctx)).isError).toBeUndefined();
-    // Allowed for the chat: no question the next time.
+    answers.push('once');
     expect((await call('terminal_run', { command: 'rm -rf out', tab_id: 't-1' }, ctx)).isError).toBeUndefined();
+    expect(requestedRules).toHaveLength(5);
+    expect(new Set(requestedRules).size).toBe(5);
     expect(pendingConfirmations('s1')).toEqual([]);
-    // send_keys cannot smuggle it past the gate either.
-    const keys = await call('terminal_send_keys', { tab_id: 't-1', text: 'git push --force\n' }, toolCtx({ confirm: async () => 'deny' }));
-    expect(keys.isError).toBe(true);
+  });
+
+  it('raw keys cannot stage and submit a command across calls or recall shell history', async () => {
+    await call('terminal_open', {}, toolCtx());
+    const tab = m._tabs.get('t-1')!;
+    for (const input of [
+      { text: 'rm -rf work; ' },
+      { keys: ['enter'] },
+      { keys: ['up', 'enter'] },
+      { text: 'git push --force\n' },
+    ]) expect((await call('terminal_send_keys', { tab_id: 't-1', ...input }, toolCtx())).isError).toBe(true);
+    expect(tab.typed).toEqual([]);
+  });
+
+  it('revoking terminal scope during approval prevents the write even when another tool scope remains', async () => {
+    await call('terminal_open', {}, toolCtx());
+    const ctx = toolCtx({ confirm: async () => {
+      setAgentToolsGrant('s1', { terminal: 'off', browser: 'look' }, SIDECAR);
+      return 'once';
+    } });
+    expect((await call('terminal_run', { command: 'echo unsafe', tab_id: 't-1' }, ctx)).isError).toBe(true);
+    expect(m._tabs.get('t-1')!.typed).toEqual([]);
   });
 
   it('an operator keystroke takes the tab over: the agent is refused until Resume, and terminal responses do not count', async () => {

@@ -26,7 +26,7 @@
  */
 import { BUDGET_MODES, type BudgetMode } from '../routing/types.js';
 import { engineOfSeatId } from '../routing/policy.js';
-import { FLEET_ENGINES, DEVIN_GRANT_ENGINE, type GrantEngine } from '../fleet/fleet-types.js';
+import { GRANT_LANE_ENGINES, DEVIN_GRANT_ENGINE, type GrantEngine } from '../fleet/fleet-types.js';
 import { parseStandingGrantPayload } from './standing-grant.js';
 import { STANDING_GRANT_CEILINGS, type LeaderGrantClass, type StandingGrantV1 } from './types.js';
 import type { GrantDiffLine, GrantScopeEdit } from './grant-scope-types.js';
@@ -103,7 +103,7 @@ export function parseGrantScopeEdit(value: unknown): { ok: true; edit: GrantScop
 
 /** PURE: the engines an edit may choose from, given the server's draft. */
 export function editableEngines(draft: Pick<StandingGrantV1, 'engines'>): GrantEngine[] {
-  const out: GrantEngine[] = [...FLEET_ENGINES];
+  const out: GrantEngine[] = [...GRANT_LANE_ENGINES];
   if (draft.engines.includes(DEVIN_GRANT_ENGINE)) out.push(DEVIN_GRANT_ENGINE);
   // Any engine a newer draft names (e.g. a lane this build does not list yet) stays choosable.
   for (const engine of draft.engines) if (!out.includes(engine)) out.push(engine);

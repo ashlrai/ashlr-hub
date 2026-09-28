@@ -50,6 +50,9 @@ describe('applyGrantScopeEdit', () => {
     expect(applyGrantScopeEdit(draft, { engines: ['codex'] })).toMatchObject({ ok: false });
     // devin is choosable only when the draft already named it.
     expect(applyGrantScopeEdit(draft, { engines: ['local', 'devin'] })).toMatchObject({ ok: false });
+    const cliLane = parseGrantScopeEdit({ engines: ['local', 'devin-cli'] });
+    expect(cliLane.ok).toBe(true);
+    if (cliLane.ok) expect(applyGrantScopeEdit(draft, cliLane.edit)).toMatchObject({ ok: false });
     expect(editableEngines(draft)).not.toContain('devin');
   });
 

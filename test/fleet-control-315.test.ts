@@ -332,14 +332,21 @@ describe('/api/verse/fleet/control', () => {
     s.service = 'absent';
     const started = await call('POST', '/api/verse/fleet/control', { action: 'start' });
     expect(started?.body).toMatchObject({
-      did: ['Cleared Stop.', 'Resumed dispatch.', 'Switched to Autonomous.'],
+      did: ['Switched to Autonomous.', 'Cleared Stop.', 'Resumed dispatch.'],
       needs: { kind: 'resident-start', native: true },
       state: { kill: false, paused: false, state: 'blocked' },
     });
-    // With no grant, Start clears what it can, then asks for the Touch ID sheet.
-    s.grant = 'none';
-    s.kill = true;
-    expect((await call('POST', '/api/verse/fleet/control', { action: 'start' }))?.body).toMatchObject({ did: ['Cleared Stop.'], needs: { kind: 'grant' } });
+    // An unusable grant must leave both safety clamps in place.
+    for (const grant of ['none', 'revoked', 'invalid', 'expired', 'paused']) {
+      s.grant = grant;
+      s.kill = true;
+      s.paused = true;
+      s.switch = 'off';
+      s.calls.length = 0;
+      const result = await call('POST', '/api/verse/fleet/control', { action: 'start' });
+      expect(result?.body).toMatchObject({ did: [], needs: { kind: grant === 'expired' || grant === 'paused' ? 're-approve' : 'grant' } });
+      expect(s).toMatchObject({ kill: true, paused: true, switch: 'off', calls: [] });
+    }
   });
 
   it('stop-run and interject stop the run and requeue with the note', async () => {
@@ -352,6 +359,9 @@ describe('/api/verse/fleet/control', () => {
     expect(s.calls).toContain(`edit:${taskId}:requeue`);
     const followUp = await call('POST', '/api/verse/fleet/control', { action: 'interject', repo: 'ashlrai/fleet-canary', title: 'Fix lint', note: 'only the web folder' });
     expect(followUp?.body).toMatchObject({ mode: 'requeue', did: ['Queued a follow-up task carrying your note.'] });
+    const before = s.calls.length;
+    expect((await call('POST', '/api/verse/fleet/control', { action: 'interject', runId: 'run-9', repo: 'someone/else', title: 'Unsafe', note: 'no' }))?.body).toMatchObject({ code: 'repo-not-granted' });
+    expect(s.calls).toHaveLength(before);
   });
 
   it('a task may be retargeted only to a granted repo', async () => {

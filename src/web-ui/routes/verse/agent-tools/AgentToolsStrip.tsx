@@ -103,8 +103,8 @@ export function AgentToolsStrip({ sessionId, onOpenSheet, api = agentToolsApi, n
             </div>
             <div className={styles.confirmActions}>
               <button type="button" className={styles.smallButton} onClick={() => void answer(p.id, 'once')}>Allow once</button>
-              <button type="button" className={styles.smallButton} onClick={() => void answer(p.id, 'chat')}
-                title="Allow commands like this for the rest of this chat">Allow for chat</button>
+              {!p.rule.startsWith('terminal-run-') ? <button type="button" className={styles.smallButton} onClick={() => void answer(p.id, 'chat')}
+                title="Allow commands like this for the rest of this chat">Allow for chat</button> : null}
               <button type="button" className={`${styles.smallButton} ${styles.deny}`} onClick={() => void answer(p.id, 'deny')}>Deny</button>
             </div>
           </div>

@@ -38,4 +38,3 @@ export interface GrantDiffLine {
   after: string;
   direction: GrantDiffDirection;
 }
-

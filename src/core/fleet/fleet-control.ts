@@ -573,16 +573,6 @@ export async function applyFleetControlAction(action: FleetControlAction, deps: 
     }
     case 'start': {
       const before = await deps.authority();
-      if (before.kill) {
-        const r = deps.clearStop();
-        if (!r.ok) throw new FleetControlError(409, 'clear-stop-failed', `Stop could not be cleared: ${r.reason}`);
-        did.push('Cleared Stop.');
-      }
-      if (deps.pause().paused) {
-        const r = deps.setPause(false);
-        if (!r.ok) throw new FleetControlError(503, 'resume-failed', `Resume could not be written: ${r.reason}`);
-        if (r.changed) did.push('Resumed dispatch.');
-      }
       const g = before.grant;
       if (g.state === 'none' || g.state === 'revoked' || g.state === 'invalid') {
         needs = FLEET_ACTIONS.grant;
@@ -592,7 +582,8 @@ export async function applyFleetControlAction(action: FleetControlAction, deps: 
         needs = FLEET_ACTIONS.reapprove;
         break;
       }
-      // Only Off is raised: Propose is a running mode Mason chose on purpose.
+      // Validate authority before touching Stop or dispatch pause. Only Off is
+      // raised: Propose is a running mode Mason chose on purpose.
       if (before.switch === 'off') {
         const r = deps.raiseSwitch();
         if (r.ok) did.push('Switched to Autonomous.');
@@ -600,6 +591,24 @@ export async function applyFleetControlAction(action: FleetControlAction, deps: 
           needs = FLEET_ACTIONS.grant;
           break;
         } else throw new FleetControlError(409, r.code ?? 'switch-failed', r.reason);
+      }
+      // Raising the switch re-evaluates the grant internally. Read it again
+      // before removing either safety clamp in case authority changed meanwhile.
+      const current = await deps.authority();
+      if (current.grant.state !== 'active') {
+        needs = current.grant.state === 'expired' || current.grant.state === 'paused'
+          ? FLEET_ACTIONS.reapprove : FLEET_ACTIONS.grant;
+        break;
+      }
+      if (current.kill) {
+        const r = deps.clearStop();
+        if (!r.ok) throw new FleetControlError(409, 'clear-stop-failed', `Stop could not be cleared: ${r.reason}`);
+        did.push('Cleared Stop.');
+      }
+      if (deps.pause().paused) {
+        const r = deps.setPause(false);
+        if (!r.ok) throw new FleetControlError(503, 'resume-failed', `Resume could not be written: ${r.reason}`);
+        if (r.changed) did.push('Resumed dispatch.');
       }
       if (!daemonRunning({ liveness: deps.liveness(), service: (await deps.service()).service })) needs = FLEET_ACTIONS.residentStart;
       break;
@@ -617,6 +626,10 @@ export async function applyFleetControlAction(action: FleetControlAction, deps: 
     case 'interject': {
       // No fleet engine takes input mid-run (they run headless), so steering
       // is always: stop the run, put the note in the brief, queue it again.
+      if (!action.taskId) {
+        const granted = (await deps.grantedRepos()).map((r) => r.toLowerCase());
+        if (!granted.includes(action.repo!.toLowerCase())) throw new FleetControlError(409, 'repo-not-granted', `${action.repo} is not in the standing grant, so the fleet cannot work on it.`);
+      }
       mode = action.runId ? 'stop-and-requeue' : 'requeue';
       if (action.runId && !action.runId.startsWith('task:')) {
         const r = deps.cancelRun(action.runId, `interjected: ${action.note.slice(0, 200)}`);
