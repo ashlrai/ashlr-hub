@@ -122,7 +122,12 @@ export type DaemonServiceState = 'running' | 'loaded' | 'not-loaded' | 'absent' 
 // `cached` (the Verse probe) reuses a launchd read up to 15 s old.
 async function realDaemonService(cached = false): Promise<DaemonServiceState> {
   const { serviceStatus, serviceStatusCached } = await import('../core/daemon/service.js');
-  const status = cached ? serviceStatusCached() : serviceStatus();
+  // The strict launchd contract includes the service's configured budget and
+  // interval. Querying with serviceStatus() defaults reports a healthy custom
+  // service as "unknown" even when its installed plist matches config.
+  const prepared = await residentServiceOptions();
+  if (!prepared.ok) return 'unknown';
+  const status = cached ? serviceStatusCached(prepared.opts) : serviceStatus(prepared.opts);
   if (status.running) return 'running';
   if (status.registrationState === 'absent') return 'absent';
   if (status.runtimeState === 'ready') return 'loaded';
