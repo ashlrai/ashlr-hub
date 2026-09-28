@@ -58,6 +58,8 @@ function ctx(overrides: Record<string, unknown> = {}) {
     signing: { hash: HASH, name: 'Ashlr Local', valid: true } as { hash: string; name: string; valid: boolean } | null,
     nativeBuildMtime: null as number | null,
     installedNativeMtime: 10 as number | null,
+    installedNativeShortVersion: '3.11.1',
+    installedNativeBundleVersion: '3.11.1',
     iconBuildMtime: null as number | null,
     installedIconMtime: 10 as number | null,
     ...overrides,
@@ -169,11 +171,34 @@ describe('planShip step list', () => {
       'cp', '-R', `${REPO}/${NATIVE_BUILD}`, `${APP_PATH}/Contents/MacOS/ashlr-desktop`,
     ]);
     expect(step(newer, 'backup-ashlr-desktop')).toBeDefined();
+    expect(step(newer, 'plist-short-version')?.argv).toEqual([
+      'plutil', '-replace', 'CFBundleShortVersionString', '-string', '3.11.1', `${APP_PATH}/Contents/Info.plist`,
+    ]);
+    expect(step(newer, 'plist-bundle-version')?.argv).toEqual([
+      'plutil', '-replace', 'CFBundleVersion', '-string', '3.11.1', `${APP_PATH}/Contents/Info.plist`,
+    ]);
+    const order = ids(newer);
+    expect(order.indexOf('install-ashlr-desktop')).toBeLessThan(order.indexOf('plist-short-version'));
+    expect(order.indexOf('plist-short-version')).toBeLessThan(order.indexOf('plist-bundle-version'));
+    expect(order.indexOf('plist-bundle-version')).toBeLessThan(order.indexOf('codesign'));
     const older = planShip(ctx({ native: true, nativeBuildMtime: 5 })) as Step[];
     expect(ids(older)).not.toContain('install-ashlr-desktop');
+    expect(ids(older)).not.toContain('plist-short-version');
+    expect(ids(older)).not.toContain('plist-bundle-version');
     expect(step(older, 'native-skip')?.title).toMatch(/not newer/);
+    const interrupted = planShip(ctx({ native: true, nativeBuildMtime: 5, installedNativeBundleVersion: '0.1.0' })) as Step[];
+    expect(ids(interrupted)).toContain('install-ashlr-desktop');
+    expect(ids(interrupted)).toContain('plist-short-version');
+    expect(ids(interrupted)).toContain('plist-bundle-version');
+    const shortVersionDrift = planShip(ctx({ native: true, nativeBuildMtime: 5, installedNativeShortVersion: '0.1.0' })) as Step[];
+    expect(ids(shortVersionDrift)).toContain('install-ashlr-desktop');
     const missing = planShip(ctx({ native: true, nativeBuildMtime: null })) as Step[];
+    expect(ids(missing)).not.toContain('plist-short-version');
+    expect(ids(missing)).not.toContain('plist-bundle-version');
     expect(step(missing, 'native-skip')?.title).toMatch(/missing/);
+    const cliOnly = planShip(ctx({ nativeBuildMtime: 99 })) as Step[];
+    expect(ids(cliOnly)).not.toContain('plist-short-version');
+    expect(ids(cliOnly)).not.toContain('plist-bundle-version');
   });
 
   it('kickstarts only the launch agents that are loaded', () => {
@@ -288,6 +313,27 @@ describe('gatherContext', () => {
     expect(calls.find((c) => c[0] === 'security')).toEqual(['security', 'find-identity', '-p', 'codesigning']);
     expect(() => planShip(c)).toThrow(/uncommitted/);
   });
+
+  it('reads both installed app versions for a native retry', () => {
+    const { io, calls } = fakeIo();
+    const originalExec = io.exec;
+    io.exec = (cmd: string, argv: string[]) => {
+      if (cmd === 'plutil') {
+        calls.push([cmd, ...argv]);
+        return { status: 0, stdout: argv[1] === 'CFBundleShortVersionString' ? '0.1.0\n' : '3.11.1\n' };
+      }
+      return originalExec(cmd, argv);
+    };
+    const native = gatherContext({ dryRun: true, native: true, allowDirty: false }, io);
+    expect(native.installedNativeShortVersion).toBe('0.1.0');
+    expect(native.installedNativeBundleVersion).toBe('3.11.1');
+    expect(calls.filter((call) => call[0] === 'plutil').map((call) => call[2])).toEqual([
+      'CFBundleShortVersionString', 'CFBundleVersion',
+    ]);
+    calls.length = 0;
+    gatherContext({ dryRun: true, native: false, allowDirty: false }, io);
+    expect(calls.some((call) => call[0] === 'plutil')).toBe(false);
+  });
 });
 
 describe('runSteps', () => {
@@ -314,6 +360,24 @@ describe('runSteps', () => {
       'node /repo/scripts/check-macos-entitlements.mjs', 'rm -rf /repo/dist', 'npm run build',
     ]);
     expect(logs.at(-1)).toMatch(/step "build" failed/);
+  });
+
+  it('stops before signing if an installed native app version cannot be updated', async () => {
+    const { io, calls, logs } = fakeIo();
+    const originalExec = io.exec;
+    io.exec = (cmd: string, argv: string[]) => {
+      if (cmd === 'plutil' && argv[1] === 'CFBundleVersion') {
+        calls.push([cmd, ...argv]);
+        return { status: 1, stdout: '' };
+      }
+      return originalExec(cmd, argv);
+    };
+    const steps = planShip(ctx({ native: true, nativeBuildMtime: 99 }));
+    expect(await runSteps(steps, io, { dryRun: false })).toBe(1);
+    expect(calls.some((call) => call[0] === 'plutil' && call[2] === 'CFBundleShortVersionString')).toBe(true);
+    expect(calls.some((call) => call[0] === 'plutil' && call[2] === 'CFBundleVersion')).toBe(true);
+    expect(calls.some((call) => call[0] === 'codesign')).toBe(false);
+    expect(logs.at(-1)).toMatch(/step "plist-bundle-version" failed/);
   });
 
   it('completes a full run against the fake io and waits for /verse/', async () => {

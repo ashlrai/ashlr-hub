@@ -127,6 +127,11 @@ export function gatherContext(args, io) {
   const sha = io.exec('git', ['rev-parse', 'HEAD'], { cwd: io.repoRoot }).stdout.trim();
   const pkg = JSON.parse(io.readFile(join(io.repoRoot, 'package.json')));
   const appExists = io.exists(APP_PATH);
+  const installedPlistVersion = (key) => {
+    if (!appExists || !args.native) return null;
+    const result = io.exec('plutil', ['-extract', key, 'raw', '-o', '-', join(APP_PATH, 'Contents', 'Info.plist')]);
+    return result.status === 0 ? result.stdout.trim() || null : null;
+  };
   const listing = {};
   if (appExists) {
     for (const dir of new Set(Object.values(BUNDLE_TARGETS).map((t) => t.dir))) listing[dir] = io.list(join(APP_PATH, dir));
@@ -152,6 +157,8 @@ export function gatherContext(args, io) {
     loadedAgents,
     nativeBuildMtime: io.mtime(join(io.repoRoot, NATIVE_BUILD)),
     installedNativeMtime: appExists ? io.mtime(join(APP_PATH, BUNDLE_TARGETS.native.dir, BUNDLE_TARGETS.native.name)) : null,
+    installedNativeShortVersion: installedPlistVersion('CFBundleShortVersionString'),
+    installedNativeBundleVersion: installedPlistVersion('CFBundleVersion'),
     iconBuildMtime: io.mtime(join(io.repoRoot, APP_ICON_BUILD)),
     installedIconMtime: appExists ? io.mtime(join(APP_PATH, BUNDLE_TARGETS.icon.dir, BUNDLE_TARGETS.icon.name)) : null,
     ...args,
@@ -298,7 +305,8 @@ export function planShip(ctx) {
   if (ctx.appExists) {
     const targets = [BUNDLE_TARGETS.sidecar, BUNDLE_TARGETS.public];
     const nativeNewer = ctx.native && ctx.nativeBuildMtime != null &&
-      (ctx.installedNativeMtime == null || ctx.nativeBuildMtime > ctx.installedNativeMtime);
+      (ctx.installedNativeMtime == null || ctx.nativeBuildMtime > ctx.installedNativeMtime ||
+        ctx.installedNativeShortVersion !== ctx.version || ctx.installedNativeBundleVersion !== ctx.version);
     if (nativeNewer) targets.push(BUNDLE_TARGETS.native);
     // --native also refreshes the Dock/Finder icon when a newer one was generated.
     const iconNewer = ctx.native && ctx.iconBuildMtime != null &&
@@ -331,6 +339,13 @@ export function planShip(ctx) {
     if (trashMoves.length > 0) {
       steps.push({ id: 'trash-dir', title: `trash folder ${trashDir}`, argv: ['mkdir', '-p', trashDir] });
       steps.push({ id: 'rotate-backups', title: `keep ${KEEP_BACKUPS} newest backups; move ${trashMoves.length} older to the Trash`, argv: ['mv', ...trashMoves, trashDir] });
+    }
+    // The native binary and its Info.plist version must advance together. A sidecar-only
+    // update leaves the native binary in place, so it must not claim the new package version.
+    if (nativeNewer) {
+      const plist = join(APP_PATH, 'Contents', 'Info.plist');
+      steps.push({ id: 'plist-short-version', title: 'Info.plist: CFBundleShortVersionString', argv: ['plutil', '-replace', 'CFBundleShortVersionString', '-string', ctx.version, plist] });
+      steps.push({ id: 'plist-bundle-version', title: 'Info.plist: CFBundleVersion', argv: ['plutil', '-replace', 'CFBundleVersion', '-string', ctx.version, plist] });
     }
     // Dictation: macOS kills an app that touches the mic without this key, and ship:local
     // patches an installed bundle rather than rebuilding it, so write it every time.
