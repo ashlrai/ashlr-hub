@@ -184,6 +184,20 @@ describe('remote pairing and one-use WebAuthn HTTP writes', () => {
       expect((await f.send('POST', '/remote/step-up/finish', authCookie, logged.csrfToken,
         { ...operation, challengeId: thirdId, response: authResponse })).status).toBe(403);
       expect(f.mutations).toHaveLength(2);
+      for (const guarded of [
+        { path: '/api/verse/agents/ag_12345678/plan', body: { action: 'approve' } },
+        { path: '/api/verse/queue/vs_1/012345abcdef/send', body: {} },
+      ]) {
+        expect((await f.send('POST', guarded.path, authCookie, logged.csrfToken, guarded.body)).status).toBe(403);
+        const exact = { method: 'POST', path: guarded.path, body: JSON.stringify(guarded.body) };
+        const begun = await f.send('POST', '/remote/step-up/begin', authCookie, logged.csrfToken, exact);
+        expect(begun.status).toBe(200);
+        const { challengeId: exactId } = await begun.json() as { challengeId: string };
+        expect((await f.send('POST', '/remote/step-up/finish', authCookie, logged.csrfToken,
+          { ...exact, challengeId: exactId, response: authResponse })).status).toBe(200);
+        expect(f.mutations.at(-1)).toMatchObject({ path: guarded.path, body: exact.body });
+      }
+      expect(f.mutations).toHaveLength(4);
       f.devices.revoke(approved.id, Date.now());
       expect((await f.send('POST', '/api/verse/leader/thread', authCookie, logged.csrfToken, { text: 'After revoke' })).status).toBe(403);
       expect((await f.send('GET', '/remote/push/config', authCookie)).status).toBe(401);

@@ -150,6 +150,12 @@ function remoteNeedsYouRequestSupported(action: NeedsYouAction): boolean {
   if (/^\/api\/verse\/(cloud|devin)\/tasks\/[^/?#]+\/(land|close|update-branch|dismiss)$/.test(path)) return true;
   if (/^\/api\/verse\/sessions\/[^/?#]+\/(turns|cancel|terminate)$/.test(path)) return true;
   if (/^\/api\/verse\/queue\/[^/?#]+$/.test(path)) return true;
+  if (/^\/api\/verse\/agents\/ag_[a-z0-9]{8,32}\/plan$/.test(path)) {
+    return Object.keys(body).length === 1 && (body['action'] === 'approve' || body['action'] === 'discard');
+  }
+  if (/^\/api\/verse\/queue\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/[0-9a-f]{12}\/send$/.test(path)) {
+    return Object.keys(body).length === 0;
+  }
   return false;
 }
 
@@ -199,6 +205,9 @@ const SPECIFIC: Readonly<Partial<Record<`${NeedsYouKind}/${NeedsYouActionKind}`,
   'veto-window/veto': 'Cancels the Leader’s action before it applies.',
   'class-c/approve': 'Records your go-ahead for the Leader. Nothing applies until its next run, and the server re-checks your grant.',
   'kill/resume': 'Clears Stop: autonomy resumes within what the current grant allows.',
+  'agent-plan/approve': 'Sends the approved plan to the agent, which can then edit its workspace.',
+  'agent-plan/reject': 'Discards this plan; the agent will wait for another instruction.',
+  'queue-held/resume': 'Sends the held message to the agent now.',
 };
 
 const GENERIC: Readonly<Record<NeedsYouActionKind, string>> = {
