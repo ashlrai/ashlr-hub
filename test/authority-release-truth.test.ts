@@ -98,9 +98,14 @@ describe('emergency authority release truth', () => {
 
   it('documents dormant production execution and the exact new-console auth lifecycle', () => {
     const readme = read('README.md');
+    const hubReference = read('docs/HUB-REFERENCE.md');
     const quickstart = read('docs/QUICKSTART.md');
 
-    for (const doc of [readme, quickstart]) {
+    // The install-first README links to the detailed Hub reference where this
+    // legacy console contract now lives.
+    expect(readme).toContain('docs/HUB-REFERENCE.md');
+    expect(readme).toMatch(/Autonomy ships \*\*dormant\*\*/i);
+    for (const doc of [hubReference, quickstart]) {
       expect(doc).toMatch(/compiled\s+(?:daemon and conductor\s+)?trust roots\s+are empty/i);
       expect(doc).toMatch(/live non-dry[^.\n]*(?:dormant|refuse)/i);
       expect(doc).toContain('/next/');
@@ -240,9 +245,12 @@ describe('emergency authority release truth', () => {
 
   it('distinguishes live owner goals from dormant resident loop execution', () => {
     const readme = read('README.md');
+    const hubReference = read('docs/HUB-REFERENCE.md');
     const architecture = read('docs/ARCHITECTURE.md');
 
-    for (const source of [readme, architecture]) {
+    expect(readme).toContain('docs/HUB-REFERENCE.md');
+    expect(readme).toMatch(/Autonomy ships \*\*dormant\*\*/i);
+    for (const source of [hubReference, architecture]) {
       expect(source).toMatch(/`ashlr goal "<objective>"`[^.]*live[^.]*owner-invoked/i);
       expect(source).toMatch(/proposal-only/i);
       expect(source).toMatch(/(?:resident )?loop[^.\n]*(?:dormant|refuse)/i);
