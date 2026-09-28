@@ -110,7 +110,10 @@ describe('the elite allowlist — one source of truth, fail closed', () => {
     expect(eliteModelAllowFromConfig({})).toBeNull();
     expect(eliteModelAllowFromConfig({ foundry: { autoMerge: {} } })).toBeNull();
     expect(eliteModelAllowFromConfig({ foundry: { autoMerge: { eliteModels: false } } })).toEqual([]);
-    expect(eliteModelAllowFromConfig({ foundry: { autoMerge: { eliteModels: 'yes' } } })).toBeNull(); // mangled ⇒ ignored
+    // A malformed explicit narrowing must fail closed, not restore every model.
+    for (const malformed of ['yes', null, true, 0]) {
+      expect(eliteModelAllowFromConfig({ foundry: { autoMerge: { eliteModels: malformed } } })).toEqual([]);
+    }
     // Unknown ids are dropped — config never adds a model.
     const allow = eliteModelAllowFromConfig({ foundry: { autoMerge: { eliteModels: ['gpt-6-sol', 'gpt-7-omega', 3] } } });
     expect(allow).toEqual(['gpt-6-sol']);

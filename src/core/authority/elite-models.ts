@@ -165,7 +165,8 @@ export function matchEliteModel(
  * The config narrowing (`foundry.autoMerge.eliteModels`): null = the whole
  * compiled list; [] = elite self-land off; otherwise the listed ids that the
  * compiled list knows (an unknown id is ignored — config never widens).
- * A mangled value is ignored like every other mangled tighten-only key.
+ * A present but malformed value turns elite self-land off. A typo in a
+ * tightening control must never restore the full compiled allowlist.
  */
 export function eliteModelAllowFromConfig(cfg: unknown): readonly string[] | null {
   if (!cfg || typeof cfg !== 'object') return null;
@@ -173,9 +174,10 @@ export function eliteModelAllowFromConfig(cfg: unknown): readonly string[] | nul
   if (!foundry || typeof foundry !== 'object') return null;
   const autoMerge = (foundry as Record<string, unknown>)['autoMerge'];
   if (!autoMerge || typeof autoMerge !== 'object') return null;
+  if (!Object.prototype.hasOwnProperty.call(autoMerge, 'eliteModels')) return null;
   const value = (autoMerge as Record<string, unknown>)['eliteModels'];
   if (value === false) return [];
-  if (!Array.isArray(value)) return null;
+  if (!Array.isArray(value)) return [];
   return value.filter((id): id is string => typeof id === 'string' && ELITE_MODEL_IDS.includes(id));
 }
 
