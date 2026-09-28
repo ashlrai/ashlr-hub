@@ -37,17 +37,22 @@ async function fixture() {
   const devices = createRemoteDeviceStore(root);
   devices.add(device());
   const received: { path: string; headers: Record<string, unknown> }[] = [];
+  const control = { rejectNextSse: false };
   const hub = createServer((req, res) => {
     received.push({ path: req.url ?? '', headers: { ...req.headers } });
     if (req.url === '/api/session' && req.method === 'POST' && req.headers['x-ashlr-token'] === TOKEN) {
       res.writeHead(204, { 'Set-Cookie': `ashlr_read_session=${'z'.repeat(80)}; Path=/api/; HttpOnly` }); res.end(); return;
     }
     if (req.url?.startsWith('/api/events?topics=verse-sessions&client=') && req.headers.cookie?.startsWith('ashlr_read_session=')) {
+      if (control.rejectNextSse) { control.rejectNextSse = false; res.writeHead(401, { 'Content-Type': 'application/json' }); res.end('{}'); return; }
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       res.write(`event: tick\ndata: ${'x'.repeat(128)}\n\n`); return;
     }
     if (req.url === '/api/verse/activity' && req.headers['x-ashlr-token'] === TOKEN) {
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true })); return;
+    }
+    if (req.url === '/api/verse/sessions/long' && req.headers['x-ashlr-token'] === TOKEN) {
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ events: 'x'.repeat(3 * 1024 * 1024) })); return;
     }
     res.writeHead(401, { 'Content-Type': 'application/json' }); res.end('{}');
   });
@@ -78,7 +83,7 @@ async function fixture() {
       outgoing.end();
     });
   }
-  return { gateway, devices, received, headers, get, sign, session };
+  return { gateway, devices, received, headers, get, sign, session, control };
 }
 
 describe('dormant remote read gateway HTTP boundary', () => {
@@ -94,6 +99,9 @@ describe('dormant remote read gateway HTTP boundary', () => {
       expect(response.headers.get('set-cookie')).toBeNull();
       expect(response.headers.get('x-ashlr-token')).toBeNull();
       expect(f.received.at(-1)?.headers['x-ashlr-token']).toBe(TOKEN);
+      const long = await f.get('/api/verse/sessions/long');
+      expect(long.status).toBe(200);
+      expect(((await long.json()) as { events: string }).events).toHaveLength(3 * 1024 * 1024);
       expect((await f.get('/api/session')).status).toBe(404);
       expect((await f.get('/api/verse/agent-tools/mcp')).status).toBe(404);
       expect((await f.get('/verse/m/')).status).toBe(404);
@@ -147,6 +155,22 @@ describe('dormant remote read gateway HTTP boundary', () => {
       const closed = await Promise.race([reader.read(), new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 3_000))]);
       expect(closed).not.toBe('timeout');
       expect((closed as ReadableStreamReadResult<Uint8Array>).done).toBe(true);
+    } finally { await f.gateway.close(); }
+  });
+
+  it('replaces old device sessions and renews a rejected local SSE ticket', async () => {
+    const f = await fixture();
+    try {
+      const replacement = f.gateway.issueDeviceSession({ subject: SUBJECT, email: 'owner@example.com',
+        expiresAt: Date.now() + 600_000 }, DEVICE_ID)!;
+      expect((await f.get('/api/verse/activity')).status).toBe(401);
+      const cookie = replacement.cookie.split(';', 1)[0]!;
+      f.control.rejectNextSse = true;
+      expect((await f.get('/api/events?topics=verse-sessions', { cookie })).status).toBe(502);
+      const response = await f.get('/api/events?topics=verse-sessions', { cookie });
+      expect(response.status).toBe(200);
+      await response.body?.cancel();
+      expect(f.received.filter((r) => r.path === '/api/session')).toHaveLength(2);
     } finally { await f.gateway.close(); }
   });
 });

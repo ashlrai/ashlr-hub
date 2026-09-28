@@ -16,7 +16,10 @@ import { serveStatic } from './static.js';
 
 const COOKIE_NAME = '__Host-ashlr-remote';
 const SESSION_MS = 15 * 60_000;
-const MAX_JSON_BYTES = 2 * 1024 * 1024;
+// A single session detail can contain 5,000 events; retain a hard bound while
+// allowing a real long-running chat to load on the phone.
+const MAX_JSON_BYTES = 16 * 1024 * 1024;
+const MAX_SSE_CHUNK_BYTES = 1024 * 1024;
 const REMOTE_MARKER = '<meta name="ashlr-remote-gateway" content="v1">';
 type AccessVerifier = ReturnType<typeof createRemoteAccessVerifier>;
 
@@ -92,6 +95,7 @@ export async function startRemoteReadGateway(options: RemoteReadGatewayOptions) 
   }
 
   function liveSession(req: IncomingMessage, identity: RemoteAccessIdentity): DeviceSession | null {
+    for (const [key, value] of sessions) if (value.expiresAt <= now()) sessions.delete(key);
     const value = cookieValue(req);
     const session = value ? sessions.get(hash(value)) : undefined;
     if (!session || session.expiresAt <= now() || session.subject !== identity.subject) return null;
@@ -179,6 +183,7 @@ export async function startRemoteReadGateway(options: RemoteReadGatewayOptions) 
           res.writeHead(upstream.status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
           res.end(bytes); return;
         }
+        if (upstream.status === 401) { localCookie = ''; localCookieUntil = 0; }
         if (upstream.status !== 200 || !upstream.headers.get('content-type')?.startsWith('text/event-stream') || !upstream.body) {
           json(res, 502, { code: 'HUB_BAD_RESPONSE', error: 'Local Hub stream unavailable' }); return;
         }
@@ -188,10 +193,19 @@ export async function startRemoteReadGateway(options: RemoteReadGatewayOptions) 
         let pending = Buffer.alloc(0);
         for await (const chunk of upstream.body) {
           if (controller.signal.aborted || res.writableEnded) break;
+          if (chunk.byteLength > MAX_SSE_CHUNK_BYTES) { controller.abort(); break; }
           pending = Buffer.concat([pending, Buffer.from(chunk)]);
           if (pending.includes(options.hub.readToken)) { controller.abort(); break; }
           const safeLength = pending.length - options.hub.readToken.length + 1;
-          if (safeLength > 0) { res.write(pending.subarray(0, safeLength)); pending = pending.subarray(safeLength); }
+          if (safeLength > 0) {
+            const writable = res.write(pending.subarray(0, safeLength));
+            pending = pending.subarray(safeLength);
+            if (!writable) await new Promise<void>((resolve) => {
+              const done = () => { res.off('drain', done); controller.signal.removeEventListener('abort', done); resolve(); };
+              res.once('drain', done);
+              controller.signal.addEventListener('abort', done, { once: true });
+            });
+          }
         }
         if (!controller.signal.aborted && !pending.includes(options.hub.readToken) && !res.writableEnded) res.write(pending);
         if (!res.writableEnded) res.end();
@@ -220,6 +234,9 @@ export async function startRemoteReadGateway(options: RemoteReadGatewayOptions) 
       const secret = randomBytes(32).toString('base64url');
       const csrfToken = randomBytes(32).toString('base64url');
       const expiresAt = Math.min(identity.expiresAt, now() + SESSION_MS);
+      // One live browser session per device. Renewal replaces the old ticket.
+      for (const [key, value] of sessions) if (value.expiresAt <= now()
+        || (value.deviceId === deviceId && value.subject === identity.subject)) sessions.delete(key);
       sessions.set(hash(secret), { subject: identity.subject, deviceId, csrf: csrfToken, expiresAt });
       return { cookie: `${COOKIE_NAME}=${secret}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${Math.max(1, Math.floor((expiresAt - now()) / 1000))}`,
         csrfToken, expiresAt };
