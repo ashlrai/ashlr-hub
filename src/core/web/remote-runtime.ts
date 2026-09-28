@@ -6,6 +6,9 @@ import { createRemoteDeviceStore } from './remote-device-store.js';
 import { createRemotePairing } from './remote-pairing.js';
 import { startRemoteReadGateway } from './remote-gateway.js';
 import { startRemoteAdminSocket } from './remote-admin.js';
+import { createRemotePush } from './remote-push.js';
+import { createRemotePushWatcher } from './remote-push-watcher.js';
+import { loadOrCreateRemoteVapid } from './remote-push-vapid.js';
 import { assetsDir } from './server.js';
 
 function readConfig(path: string) {
@@ -35,12 +38,52 @@ export async function startRemoteRuntime(configPath: string, hub: { port: number
   if (!shell.isFile() || shell.isSymbolicLink()) throw new Error('Phone shell assets are unavailable');
   const devices = createRemoteDeviceStore();
   const pairing = createRemotePairing(access, devices);
-  const gateway = await startRemoteReadGateway({ access, hub: { port: hub.port, readToken: hub.readToken,
-    mutationToken: hub.token }, devices, pairing, assetsDir: publicDir, mobileAssetsEnabled: true, port: gatewayPort });
+  // Explicit remote startup creates a stable private VAPID identity once.
+  // Only its public half is exposed by the authenticated gateway route.
+  const push = createRemotePush(loadOrCreateRemoteVapid(access.publicOrigin), devices);
+  let gateway: Awaited<ReturnType<typeof startRemoteReadGateway>>;
   try {
-    const admin = await startRemoteAdminSocket(pairing, devices);
-    return { gateway, admin, publicOrigin: access.publicOrigin, async close() {
-      await admin.close(); await gateway.close();
+    gateway = await startRemoteReadGateway({ access, hub: { port: hub.port, readToken: hub.readToken,
+      mutationToken: hub.token }, devices, pairing, push, assetsDir: publicDir, mobileAssetsEnabled: true, port: gatewayPort });
+  } catch (error) { push.close(); throw error; }
+  let admin: Awaited<ReturnType<typeof startRemoteAdminSocket>> | null = null;
+  try {
+    admin = await startRemoteAdminSocket(pairing, devices);
+    const watcher = createRemotePushWatcher({
+      read: async (since) => {
+        const target = `/api/verse/activity${since ? `?since=${encodeURIComponent(since)}` : ''}`;
+        const response = await fetch(`http://127.0.0.1:${hub.port}${target}`, {
+          headers: { 'x-ashlr-token': hub.readToken }, redirect: 'manual', signal: AbortSignal.timeout(5_000),
+        });
+        if (response.status !== 200 || !response.headers.get('content-type')?.startsWith('application/json') || !response.body) {
+          throw new Error('Local activity unavailable');
+        }
+        const reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            size += value.byteLength;
+            if (size > 1024 * 1024) { await reader.cancel(); throw new Error('Local activity too large'); }
+            chunks.push(value);
+          }
+        } finally { reader.releaseLock(); }
+        return JSON.parse(Buffer.concat(chunks.map((part) => Buffer.from(part)), size).toString('utf8')) as unknown;
+      },
+      send: (kind) => push.send(kind),
+    });
+    watcher.start();
+    const activeAdmin = admin;
+    return { gateway, admin: activeAdmin, publicOrigin: access.publicOrigin, async close() {
+      watcher.stop();
+      try { await activeAdmin.close(); }
+      finally { await gateway.close(); push.close(); }
     } };
-  } catch (error) { await gateway.close(); throw error; }
+  } catch (error) {
+    try { await admin?.close(); }
+    finally { await gateway.close(); push.close(); }
+    throw error;
+  }
 }

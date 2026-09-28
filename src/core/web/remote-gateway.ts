@@ -15,6 +15,7 @@ import { createRemoteAccessVerifier, parseRemoteAccessConfig, verifyRemoteAccess
 import { checkRemoteEnvelope, classifyRemoteRoute, validateRemoteMutation, type RemoteRouteDecision } from './remote-gateway-policy.js';
 import type { RemoteDeviceStore } from './remote-device-store.js';
 import type { createRemotePairing } from './remote-pairing.js';
+import type { createRemotePush } from './remote-push.js';
 import { serveStatic } from './static.js';
 
 const COOKIE_NAME = '__Host-ashlr-remote';
@@ -34,6 +35,7 @@ export interface RemoteReadGatewayOptions {
   hub: { port: number; readToken: string; mutationToken?: string };
   devices: RemoteDeviceStore;
   pairing?: ReturnType<typeof createRemotePairing>;
+  push?: ReturnType<typeof createRemotePush>;
   /** Bundled web public dir. Assets stay off until the remote client is ready. */
   assetsDir?: string;
   mobileAssetsEnabled?: boolean;
@@ -201,7 +203,7 @@ export async function startRemoteReadGateway(options: RemoteReadGatewayOptions) 
 
   function capabilities() {
     return { writes: !!(options.pairing && options.hub.mutationToken),
-      pairing: !!options.pairing, push: false };
+      pairing: !!options.pairing, push: !!options.push };
   }
 
   async function forwardMutation(method: string, target: string, body: string): Promise<{ status: number; body: string } | null> {
@@ -252,6 +254,23 @@ export async function startRemoteReadGateway(options: RemoteReadGatewayOptions) 
         json(res, 200, { authenticated: true, deviceId: device.id, label: device.label, scopes: device.scopes,
           csrfToken: session.csrf, expiresAt: Math.min(session.expiresAt, identity.expiresAt), capabilities: capabilities() });
         return;
+      }
+      if (options.push && req.method === 'GET' && target === '/remote/push/config') {
+        if (!session) { json(res, 401, { code: 'DEVICE_SESSION_REQUIRED', error: 'Device authentication required' }); return; }
+        json(res, 200, { publicKey: options.push.publicKey }); return;
+      }
+      if (options.push && (req.method === 'POST' || req.method === 'DELETE') && target === '/remote/push/subscribe') {
+        if (!session) { json(res, 401, { code: 'DEVICE_SESSION_REQUIRED', error: 'Device authentication required' }); return; }
+        if (req.method === 'DELETE') {
+          const removed = options.push.unsubscribe(session.deviceId, identity.subject);
+          if (!removed) { json(res, 403, { code: 'DEVICE_REVOKED', error: 'Device unavailable' }); return; }
+          res.writeHead(204); res.end(); return;
+        }
+        const subscription = await jsonBody(req);
+        if (!subscription || !options.push.subscribe(session.deviceId, identity.subject, subscription)) {
+          json(res, 400, { code: 'INVALID_SUBSCRIPTION', error: 'Subscription denied' }); return;
+        }
+        res.writeHead(204); res.end(); return;
       }
       if (options.pairing && req.method === 'GET' && target.startsWith('/remote/pair/status?')) {
         if (!preauth) { json(res, 401, { code: 'PREAUTH_REQUIRED', error: 'Pairing session required' }); return; }

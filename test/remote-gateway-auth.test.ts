@@ -13,6 +13,8 @@ import { createRemoteDeviceStore } from '../src/core/web/remote-device-store.js'
 import { createRemotePairing } from '../src/core/web/remote-pairing.js';
 import { startRemoteReadGateway } from '../src/core/web/remote-gateway.js';
 import { sendRemoteAdminCommand, startRemoteAdminSocket } from '../src/core/web/remote-admin.js';
+import { createRemotePush } from '../src/core/web/remote-push.js';
+import { loadOrCreateRemoteVapid } from '../src/core/web/remote-push-vapid.js';
 
 const ORIGIN = 'https://phone.example.com';
 const SUBJECT = '7335d417-61da-459d-899c-0a01c76a2f94';
@@ -29,10 +31,11 @@ afterEach(async () => {
   roots.length = 0;
 });
 
-async function setup(mobileAssets = false) {
+async function setup(mobileAssets = false, withPush = false) {
   const root = mkdtempSync(join(tmpdir(), 'ashlr-remote-auth-'));
   roots.push(root);
   const devices = createRemoteDeviceStore(root);
+  const push = withPush ? createRemotePush(loadOrCreateRemoteVapid(ORIGIN, root), devices, { root }) : undefined;
   if (mobileAssets) {
     mkdirSync(join(root, 'next', 'assets'), { recursive: true });
     writeFileSync(join(root, 'next', 'index.html'), '<!doctype html><html><head></head><body><script src="/next/assets/index-ABCDEFGH.js"></script></body></html>');
@@ -68,7 +71,7 @@ async function setup(mobileAssets = false) {
     .setProtectedHeader({ alg: 'RS256', kid: 'test' }).setIssuer(CONFIG.teamDomain).setAudience(CONFIG.audience)
     .setSubject(SUBJECT).setIssuedAt().setNotBefore('0s').setExpirationTime('10m').sign(privateKey);
   const gateway = await startRemoteReadGateway({ access: CONFIG, hub: { port: (hub.address() as { port: number }).port,
-    readToken: READ_TOKEN, mutationToken: ACT_TOKEN }, devices, pairing, verifier,
+    readToken: READ_TOKEN, mutationToken: ACT_TOKEN }, devices, pairing, push, verifier,
     ...(mobileAssets ? { assetsDir: root, mobileAssetsEnabled: true } : {}) });
   async function send(method: string, path: string, cookie = '', csrf = '', body?: unknown, override: Record<string, string> = {}) {
     const bytes = body === undefined ? undefined : JSON.stringify(body);
@@ -77,14 +80,14 @@ async function setup(mobileAssets = false) {
       ...(bytes !== undefined ? { 'content-type': 'application/json' } : {}), ...override };
     return new Promise<Response>((resolve, reject) => {
       const outgoing = httpRequest(`${gateway.url}${path}`, { method, headers }, (incoming) => {
-        resolve(new Response(Readable.toWeb(incoming) as ReadableStream<Uint8Array>, {
+        resolve(new Response(incoming.statusCode === 204 ? null : Readable.toWeb(incoming) as ReadableStream<Uint8Array>, {
           status: incoming.statusCode, headers: incoming.headers as HeadersInit,
         }));
       });
       outgoing.on('error', reject); outgoing.end(bytes);
     });
   }
-  return { gateway, pairing, devices, mutations, send, verifyAuthenticationResponse, root };
+  return { gateway, pairing, devices, push, mutations, send, verifyAuthenticationResponse, root };
 }
 
 describe('remote pairing and one-use WebAuthn HTTP writes', () => {
@@ -119,11 +122,12 @@ describe('remote pairing and one-use WebAuthn HTTP writes', () => {
   });
 
   it('requires Mac approval, Access-bound preauth CSRF, login, live scope and single-use exact operation', async () => {
-    const f = await setup();
+    const f = await setup(false, true);
     try {
       const initial = await f.send('GET', '/remote/session');
       const probe = await initial.json() as { authenticated: boolean; csrfToken: string; capabilities: { pairing: boolean; writes: boolean } };
-      expect(probe).toMatchObject({ authenticated: false, capabilities: { pairing: true, writes: true } });
+      expect(probe).toMatchObject({ authenticated: false, capabilities: { pairing: true, writes: true, push: true } });
+      expect((await f.send('GET', '/remote/push/config')).status).toBe(401);
       const preauth = initial.headers.get('set-cookie')!.split(';', 1)[0]!;
       expect((await f.send('POST', '/remote/pair/claim', preauth, 'wrong', { code: 'x', label: 'Phone' })).status).toBe(403);
       const invitation = f.pairing.mac.issueInvitation(SUBJECT, { read: true, act: true })!;
@@ -148,6 +152,12 @@ describe('remote pairing and one-use WebAuthn HTTP writes', () => {
       const logged = await login.json() as { csrfToken: string; capabilities: { writes: boolean } };
       expect(logged.capabilities.writes).toBe(true);
       const authCookie = login.headers.get('set-cookie')!.split(';', 1)[0]!;
+      const pushConfig = await f.send('GET', '/remote/push/config', authCookie);
+      expect(await pushConfig.json()).toEqual({ publicKey: f.push!.publicKey });
+      const subscription = { endpoint: 'https://web.push.apple.com/QvMqW-123456789012345678901234567890',
+        keys: { p256dh: Buffer.alloc(65, 1).toString('base64url'), auth: Buffer.alloc(16, 2).toString('base64url') } };
+      expect((await f.send('POST', '/remote/push/subscribe', authCookie, '', subscription)).status).toBe(403);
+      expect((await f.send('POST', '/remote/push/subscribe', authCookie, logged.csrfToken, subscription)).status).toBe(204);
       const low = await f.send('POST', '/api/verse/leader/thread', authCookie, logged.csrfToken, { text: 'Hello' });
       expect(low.status).toBe(200);
       expect(f.mutations.at(-1)?.headers['x-ashlr-token']).toBe(ACT_TOKEN);
@@ -176,6 +186,8 @@ describe('remote pairing and one-use WebAuthn HTTP writes', () => {
       expect(f.mutations).toHaveLength(2);
       f.devices.revoke(approved.id, Date.now());
       expect((await f.send('POST', '/api/verse/leader/thread', authCookie, logged.csrfToken, { text: 'After revoke' })).status).toBe(403);
-    } finally { await f.gateway.close(); }
+      expect((await f.send('GET', '/remote/push/config', authCookie)).status).toBe(401);
+      expect(await f.push!.send('needs-you')).toEqual({ attempted: 0, delivered: 0, retired: 0 });
+    } finally { await f.gateway.close(); f.push?.close(); }
   });
 });

@@ -65,7 +65,8 @@
     "@simplewebauthn/server",
     "jose",
     "marked",
-    "tar"
+    "tar",
+    "web-push"
   ],
   "exports": {
     ".": {
@@ -180,6 +181,7 @@
     "@simplewebauthn/server",
     "jose",
     "marked",
-    "tar"
+    "tar",
+    "web-push"
   ]
 }
