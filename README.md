@@ -7,7 +7,7 @@
 **[verse.ashlr.ai](https://verse.ashlr.ai)**
 
 
-![Ashlr Verse — the operator console: an expandable section rail, a project sidebar, and every connected account with its live usage windows](docs/images/verse-console.png)
+![Ashlr Verse — the operator console: an expandable section rail, a project sidebar, and every connected account with its live usage windows](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/verse-console.png)
 
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
@@ -82,8 +82,8 @@ separate Node.js install to run.
 There is no notarized public installer. On a trusted macOS checkout, build the
 native app and use the local release script to install it with the stable
 "Ashlr Local" code-signing identity. The prerequisites, exact build order and
-verification steps are in [Releasing without CI](docs/RELEASING-LOCALLY.md)
-and [Desktop app](docs/VERSE.md#desktop-app-macos). In short, from a clean
+verification steps are in [Releasing without CI](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md)
+and [Desktop app](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#desktop-app-macos). In short, from a clean
 repository root:
 
 ```sh
@@ -155,7 +155,7 @@ credential; each vendor CLI signs itself in.
 Local models need no sign-in. If Ollama is running, every tag that supports tool
 use becomes a local seat. The account commissioning details, including how to
 check identity and quota, are in
-[Resource Pools](docs/RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity).
+[Resource Pools](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity).
 
 ---
 
@@ -221,7 +221,7 @@ grant state after your explicit actions. Setup itself never installs or restarts
 the daemon. The legacy service paths (`ashlr daemon install`, `ashlr setup`,
 `worker setup`, `update`) remain temporarily unavailable for install, reinstall, repair and restart and support status and uninstall only; the permit-based compiled daemon and conductor trust roots are empty.
 The resident runtime instead runs under your **standing grant**
-([docs/RESIDENT-RUNTIME.md](docs/RESIDENT-RUNTIME.md)): with a Touch-ID-signed
+([docs/RESIDENT-RUNTIME.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESIDENT-RUNTIME.md)): with a Touch-ID-signed
 grant active, `ashlr authority resident start`, typed by you in your own
 terminal, installs `ai.ashlr.daemon` from a clean release with its plist
 regenerated from config. Every tick re-verifies the grant, Stop and the switch.
@@ -283,7 +283,7 @@ show the current grant, switch, rollout stage, grant countdown and decisions.
 A new grant starts in shadow and cannot merge until its ladder advances. Private
 repositories on GitHub's free plan, which cannot have rulesets, use local
 enforcement with the App's host-verified `ashlr/verify` check. Historical
-commissioning evidence is in [AUTONOMY-GAP.md](docs/AUTONOMY-GAP.md).
+commissioning evidence is in [AUTONOMY-GAP.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTONOMY-GAP.md).
 
 **What a grant allows.** A standing grant names the repositories, engines, risk
 and size caps, spend ceiling and Leader classes, and is valid for at most 30
@@ -402,10 +402,10 @@ Universe turns a pinned Git seed, an objective and a resource budget into
 competing, evaluated artifacts. It runs isolated variants, freezes their
 artifacts, evaluates them against a fixed comparator, keeps the best result in
 each niche, and reuses those winners as parents in later generations. Its
-[North Star](docs/NORTH-STAR.md) is useful accepted engineering changes per token
+[North Star](https://github.com/ashlrai/ashlr-hub/blob/master/docs/NORTH-STAR.md) is useful accepted engineering changes per token
 and hour, not more generated code.
 
-Start with the [executable demo](docs/DEMO.md): two generations, three competing
+Start with the [executable demo](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEMO.md): two generations, three competing
 variants, seven correctness cases, two retained niches and a deliberately broken
 candidate that must lose. It runs real code without a model account. The
 candidate transformations are scripted, so it demonstrates the mechanism, not AI
@@ -415,7 +415,7 @@ productivity.
 
 Recorded deterministic fixture at source `914ebd1f566c0dc4f0a95479d9c4f464289e736e`.
 Arrows show parent reuse; byte reductions are not measured AI engineering yield.
-Read the [demo evidence and reproduction guide](docs/DEMO.md#recorded-example).
+Read the [demo evidence and reproduction guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEMO.md#recorded-example).
 
 From a trusted checkout on **macOS with Node.js 24+ and Git**:
 
@@ -429,26 +429,26 @@ node bin/ashlr universe console --root "$ASHLR_DEMO_ROOT"
 
 Open the printed loopback URL and enter its private read token to inspect
 trials, parents and the evidence graph. The console observes; it does not launch
-work. See the [demo guide](docs/DEMO.md) for expected results and recovery.
+work. See the [demo guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEMO.md) for expected results and recovery.
 
 | Build your next step | Guide |
 |---------------------|-------|
-| Understand the demo and its evidence | [Demo walkthrough](docs/DEMO.md) |
-| Configure your own experiments and campaigns | [Ashlrverse operator guide](docs/ASHLR-UNIVERSE.md) |
-| Connect native/local workers and budget their usage | [Resource Pools](docs/RESOURCE-POOLS.md) |
-| Run a verified package independently of this checkout | [Pinned local runtime](docs/ASHLR-UNIVERSE.md#install-a-pinned-local-runtime) |
-| Understand the components or contribute | [Architecture](docs/ARCHITECTURE.md#current-runtime-map) · [Documentation map](docs/README.md) |
+| Understand the demo and its evidence | [Demo walkthrough](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEMO.md) |
+| Configure your own experiments and campaigns | [Ashlrverse operator guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ASHLR-UNIVERSE.md) |
+| Connect native/local workers and budget their usage | [Resource Pools](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESOURCE-POOLS.md) |
+| Run a verified package independently of this checkout | [Pinned local runtime](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ASHLR-UNIVERSE.md#install-a-pinned-local-runtime) |
+| Understand the components or contribute | [Architecture](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ARCHITECTURE.md#current-runtime-map) · [Documentation map](https://github.com/ashlrai/ashlr-hub/blob/master/docs/README.md) |
 
 ### Resource pools
 
 For explicitly enrolled account and local-model tasks, the
-[resource pool runner](docs/RESOURCE-POOLS.md) combines quota windows, rolling
+[resource pool runner](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESOURCE-POOLS.md) combines quota windows, rolling
 task caps and shared-account concurrency before dispatch. `ashlr resources pool`
 records assignments and reported usage without switching credentials or starting
 a daemon. It is separate from Universe's evaluator.
 
 `ashlr resources pool console` opens its
-[operations desk](docs/RESOURCE-POOLS.md#operate-the-resource-console): account
+[operations desk](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESOURCE-POOLS.md#operate-the-resource-console): account
 capacity lanes, routing exclusions, dispatch activity and token evidence. Adding
 `--execute --workspace /absolute/worktree` enables a durable foreground queue with
 task submission, pause/resume, cancellation and session-local output.
@@ -522,7 +522,7 @@ End-State Spec (your vision)
 
 **Legacy fleet properties:** The following policy describes the enrolled-repo
 daemon/swarm path, not every Hub command. Universe and Resource Pools have
-separate [execution boundaries](docs/ARCHITECTURE.md#current-runtime-map).
+separate [execution boundaries](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ARCHITECTURE.md#current-runtime-map).
 
 - **Preflight-first activation.** `ashlr preflight` verifies daemon readiness, backend connectivity, and key configuration before you enroll any repos. Run it once before your first enroll.
 - **Proposal-only generation floor.** The daemon's generation path emits pending proposals and imports no apply, push, PR, or deploy primitive. Manual inbox approval and the separate default-off auto-merge subsystem are the only code-change authority paths.
@@ -538,9 +538,9 @@ separate [execution boundaries](docs/ARCHITECTURE.md#current-runtime-map).
 ## Legacy fleet quickstart
 
 For Universe experiments and the resource fleet map, follow the
-[current-source quickstart](docs/QUICKSTART.md#run-the-current-universe-kernel).
+[current-source quickstart](https://github.com/ashlrai/ashlr-hub/blob/master/docs/QUICKSTART.md#run-the-current-universe-kernel).
 It needs no provider account for the deterministic demonstration. Real workers
-have a separate [commissioning procedure](docs/RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity).
+have a separate [commissioning procedure](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity).
 
 The instructions below cover the **general Hub and legacy fleet configuration**.
 They do not install an unreleased source feature or activate the dormant daemon.
@@ -712,9 +712,9 @@ starts a run only when one is due and only on a seat the budget mode admits.
 Preview, shadow, approve and reconcile still read the latest briefing already
 on disk. The nightly job that ran the old review is replaced by the plist that
 `ashlr leader oversight-plist --print` prints; you install it by hand
-([Authority](docs/AUTHORITY.md), "Nightly oversight").
+([Authority](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTHORITY.md), "Nightly oversight").
 
-See the [Mission OS operator guide](docs/MISSION-OS.md) for exact effects,
+See the [Mission OS operator guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/MISSION-OS.md) for exact effects,
 receipt privacy, Cortex/Locus boundaries, JSON output, and troubleshooting.
 
 The fleet doesn't only fix rot — it can invent. The generative engine proposes bold, net-new features for a repo:
@@ -778,7 +778,7 @@ containment contract for every Hub operation. Universe runs candidates and a
 pinned evaluator through its own isolation profile. Resource Pool native workers
 run in the explicitly selected `cwd` using the native adapter's read-only or
 workspace-write controls, not an automatically created Hub worktree. Consult
-[Universe](docs/ASHLR-UNIVERSE.md) and [Resource Pools](docs/RESOURCE-POOLS.md#run-one-task)
+[Universe](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ASHLR-UNIVERSE.md) and [Resource Pools](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESOURCE-POOLS.md#run-one-task)
 before authorizing either path.
 
 ---
@@ -1091,7 +1091,7 @@ See [`docs/ECOSYSTEM-MAP.md`](https://github.com/ashlrai/ashlr-hub/blob/master/d
 
 ## Documentation
 
-The [documentation map](docs/README.md) separates current operation, the North
+The [documentation map](https://github.com/ashlrai/ashlr-hub/blob/master/docs/README.md) separates current operation, the North
 Star and source-maintainer references. Start with these canonical guides:
 
 | Doc | What it covers |
@@ -1103,16 +1103,16 @@ Star and source-maintainer references. Start with these canonical guides:
 | [`docs/AUTHORITY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTHORITY.md) | The owner's contract: custody, Stop and Revoke, setup, the resident step, residual risks |
 | [`docs/VERSE-CONTEXT.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-CONTEXT.md) | Context windows, compaction, standard and expansive modes, handoff and shared memory |
 | [`docs/STANDING-AUTHORITY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md) | Touch ID grants, the rollout ladder, merge gates and the ledger |
-| [`docs/NORTH-STAR.md`](docs/NORTH-STAR.md) | Target outcome: verified engineering yield, evolving objectives and independent ecosystem products |
-| [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Run the current local kernel, inspect results and choose the correct commissioning path |
-| [`docs/ASHLR-UNIVERSE.md`](docs/ASHLR-UNIVERSE.md) | Experiments, campaigns, portfolio orchestration, evidence graphs and pinned local runtime |
-| [`docs/RESOURCE-POOLS.md`](docs/RESOURCE-POOLS.md) | Native account/local worker commissioning, quotas, foreground queue, fleet map and calibration |
+| [`docs/NORTH-STAR.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/NORTH-STAR.md) | Target outcome: verified engineering yield, evolving objectives and independent ecosystem products |
+| [`docs/QUICKSTART.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/QUICKSTART.md) | Run the current local kernel, inspect results and choose the correct commissioning path |
+| [`docs/ASHLR-UNIVERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ASHLR-UNIVERSE.md) | Experiments, campaigns, portfolio orchestration, evidence graphs and pinned local runtime |
+| [`docs/RESOURCE-POOLS.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESOURCE-POOLS.md) | Native account/local worker commissioning, quotas, foreground queue, fleet map and calibration |
 | [Local verification and release](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING.md) | Source-maintainer procedure; local candidate, npm publication and runtime activation remain distinct |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, the autonomous loop, engine tiers, safety gates, the `~/.ashlr/` layout |
+| [`docs/ARCHITECTURE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ARCHITECTURE.md) | Module map, the autonomous loop, engine tiers, safety gates, the `~/.ashlr/` layout |
 | [`docs/MILESTONE-INDEX.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/MILESTONE-INDEX.md) | Historical milestone ID → subject → status lookup, including confirmed ID collisions; not runtime activation evidence |
-| [`docs/MISSION-OS.md`](docs/MISSION-OS.md) | Mission DAG, receipts, shadow workflow, Cortex/Locus boundaries, privacy, and troubleshooting |
-| [`docs/ELITE-AGENT-EFFICIENCY.md`](docs/ELITE-AGENT-EFFICIENCY.md) | Current primary-source research translated into Hub efficiency priorities and measurable autonomy gates |
-| [`docs/RUNTIME_ACTIVATION_AUTHORITY.md`](docs/RUNTIME_ACTIVATION_AUTHORITY.md) | Signed read-only resident activation admission, explicit mutation refusal, and native launchd v2 requirements |
+| [`docs/MISSION-OS.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/MISSION-OS.md) | Mission DAG, receipts, shadow workflow, Cortex/Locus boundaries, privacy, and troubleshooting |
+| [`docs/ELITE-AGENT-EFFICIENCY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ELITE-AGENT-EFFICIENCY.md) | Current primary-source research translated into Hub efficiency priorities and measurable autonomy gates |
+| [`docs/RUNTIME_ACTIVATION_AUTHORITY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RUNTIME_ACTIVATION_AUTHORITY.md) | Signed read-only resident activation admission, explicit mutation refusal, and native launchd v2 requirements |
 | [`docs/ECOSYSTEM-MAP.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ECOSYSTEM-MAP.md) | Independent product capabilities and composition bets |
 | [`docs/LOCUS-FIRM-FLEET.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LOCUS-FIRM-FLEET.md) | Production fleet checklist — `locus.firm`, `LOCUS_ENFORCE`, `LOCUS_CI_BINDING` (default off) |
 | [`docs/FOUNDRY-CONFIG.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/FOUNDRY-CONFIG.md) | Full `cfg.foundry` reference — engines, tiers, confinement, auto-merge |
@@ -1125,7 +1125,7 @@ See [CONTRIBUTING.md](https://github.com/ashlrai/ashlr-hub/blob/master/CONTRIBUT
 
 ## Architecture
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map, the autonomous loop, engine tiers, safety gates, and the self-improvement layer.
+See [docs/ARCHITECTURE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ARCHITECTURE.md) — module map, the autonomous loop, engine tiers, safety gates, and the self-improvement layer.
 
 ## License
 

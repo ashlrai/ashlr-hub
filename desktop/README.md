@@ -770,7 +770,7 @@ asks you to paste them:
 | Rust + Cargo | 1.95 (min 1.85) | `curl https://sh.rustup.rs -sSf \| sh` |
 | Tauri CLI | 2.10.1 (2.x) | `cargo install tauri-cli --version "^2"` |
 | Bun | 1.x | `curl -fsSL https://bun.sh/install \| bash` |
-| Node.js | 18+ | https://nodejs.org |
+| Node.js | 22.15+ | https://nodejs.org |
 | Xcode command line tools | — | `xcode-select --install` |
 
 ### The exact steps on this Mac

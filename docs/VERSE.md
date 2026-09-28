@@ -1466,7 +1466,7 @@ autonomy state and window geometry survive.
 ### Build it
 
 Prerequisites: Rust ≥ 1.85 with `cargo install tauri-cli --version "^2"`, Bun
-1.x, Node ≥ 18, Xcode command line tools. From the repo root:
+1.x, Node ≥ 22.15, Xcode command line tools. From the repo root:
 
 ```sh
 # 1. Compile the CLI into a single Bun executable (runs the web build first)
