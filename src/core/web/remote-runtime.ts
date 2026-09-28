@@ -3,7 +3,6 @@ import { lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseRemoteAccessConfig } from './remote-access.js';
 import { createRemoteDeviceStore } from './remote-device-store.js';
-import { createRemotePairing } from './remote-pairing.js';
 import { startRemoteReadGateway } from './remote-gateway.js';
 import { startRemoteAdminSocket } from './remote-admin.js';
 import { createRemotePush } from './remote-push.js';
@@ -37,6 +36,10 @@ export async function startRemoteRuntime(configPath: string, hub: { port: number
   const shell = lstatSync(join(publicDir, 'next', 'index.html'));
   if (!shell.isFile() || shell.isSymbolicLink()) throw new Error('Phone shell assets are unavailable');
   const devices = createRemoteDeviceStore();
+  // Bun's compiled sidecar can evaluate tsyringe before SimpleWebAuthn's
+  // transitive polyfill import. Finish this import before loading pairing.
+  await import('reflect-metadata');
+  const { createRemotePairing } = await import('./remote-pairing.js');
   const pairing = createRemotePairing(access, devices);
   // Explicit remote startup creates a stable private VAPID identity once.
   // Only its public half is exposed by the authenticated gateway route.
