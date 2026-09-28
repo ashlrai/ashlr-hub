@@ -18,7 +18,7 @@
  */
 'use strict';
 
-var VERSION = 'v1';
+var VERSION = 'v2';
 var SHELL_CACHE = 'ashlr-verse-m-shell-' + VERSION;
 var ASSET_CACHE = 'ashlr-verse-m-assets-' + VERSION;
 var SHELL_URL = '/verse/m/';
@@ -45,7 +45,8 @@ self.addEventListener('install', function (event) {
     caches
       .open(SHELL_CACHE)
       .then(function (cache) {
-        return cache.add(new Request(SHELL_URL, { cache: 'reload', credentials: 'same-origin' }));
+        var request = new Request(SHELL_URL, { cache: 'reload', credentials: 'same-origin' });
+        return fetch(request).then(function (response) { return cacheShellResponse(cache, response, request.url); });
       })
       .catch(function () {
         /* offline at install: the first online launch fills it */
@@ -96,16 +97,30 @@ function trimAssets(cache) {
   });
 }
 
+function cacheShellResponse(cache, response, requestUrl) {
+  if (!response.ok || !response.headers.get('content-type')?.includes('text/html')) return Promise.resolve();
+  var finalUrl = new URL(response.url || requestUrl);
+  if (finalUrl.origin !== self.location.origin || finalUrl.pathname !== '/verse/m/') return Promise.resolve();
+  return Promise.all([response.clone().text(), cache.match(SHELL_URL)]).then(function (parts) {
+    var html = parts[0];
+    var previous = parts[1];
+    if (!/<div\s+id=["']root["']/.test(html)) return undefined;
+    return (previous ? previous.text() : Promise.resolve('')).then(function (oldHtml) {
+      var marker = 'name="ashlr-remote-gateway" content="v1"';
+      // A previously paired remote origin must never replace its shell with
+      // unmarked Access/login HTML, even if that page happened to use #root.
+      if (oldHtml.includes(marker) && !html.includes(marker)) return undefined;
+      return cache.put(SHELL_URL, response.clone());
+    });
+  });
+}
+
 function navigate(request) {
   return fetch(request)
     .then(function (response) {
-      if (response.ok) {
-        var copy = response.clone();
-        caches.open(SHELL_CACHE).then(function (cache) {
-          return cache.put(SHELL_URL, copy);
-        });
-      }
-      return response;
+      return caches.open(SHELL_CACHE).then(function (cache) {
+        return cacheShellResponse(cache, response, request.url).then(function () { return response; });
+      });
     })
     .catch(function () {
       return caches.open(SHELL_CACHE).then(function (cache) {
@@ -168,6 +183,38 @@ self.addEventListener('fetch', function (event) {
   if (route === 'shell') event.respondWith(navigate(request));
   else if (route === 'asset') event.respondWith(hashedAsset(request));
   else event.respondWith(staleWhileRevalidate(request));
+});
+
+/* Only the bounded kind affects fixed copy. All other payload fields are ignored. */
+self.addEventListener('push', function (event) {
+  var kind = '';
+  try {
+    var payload = event.data && event.data.json();
+    if (payload && (payload.kind === 'needs-you' || payload.kind === 'completed')) kind = payload.kind;
+  } catch { /* malformed payload gets a generic alert */ }
+  var completed = kind === 'completed';
+  event.waitUntil(self.registration.showNotification('Ashlr Verse', {
+    body: completed ? 'A run completed. Open Verse for details.' : kind === 'needs-you'
+      ? 'Something needs you. Open Verse for details.' : 'Verse has an update. Open the app to see it.',
+    tag: 'ashlr-verse-update',
+    icon: '/next/verse-m/icon-192.png',
+    data: { path: completed ? '/verse/m/#/' : '/verse/m/#/needs' },
+  }));
+});
+
+self.addEventListener('notificationclick', function (event) {
+  event.notification.close();
+  var suggested = event.notification.data && event.notification.data.path;
+  var target = suggested === '/verse/m/#/' ? suggested : '/verse/m/#/needs';
+  event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (clients) {
+    for (var i = 0; i < clients.length; i += 1) {
+      var url = new URL(clients[i].url);
+      if (url.origin === self.location.origin && url.pathname === '/verse/m/') {
+        return clients[i].navigate(target).then(function (client) { return client && client.focus(); });
+      }
+    }
+    return self.clients.openWindow(target);
+  }));
 });
 
 self.__ashlrVerseSw = { routeFor: routeFor, OFFLINE_HTML: OFFLINE_HTML, SHELL_URL: SHELL_URL };

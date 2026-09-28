@@ -16,7 +16,8 @@
  */
 import { getMutationToken, getReadClientProof, reportSessionExpired, touchMutationHold } from '../../../data/auth-store.js';
 import { invalidate } from '../../../data/cache.js';
-import { ApiError, apiPost } from '../../../data/client.js';
+import { ApiError, apiGet, apiPost } from '../../../data/client.js';
+import { isRemoteMobileMode } from '../../../data/remote-mode.js';
 import type {
   VerseAttachment,
   VerseAttachmentUpload,
@@ -52,10 +53,11 @@ async function refusalDetail(res: Response): Promise<{ detail: string | null; co
 }
 
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  if (isRemoteMobileMode()) return apiGet<T>(path, signal);
   const res = await fetch(path, {
     method: 'GET',
     credentials: 'same-origin',
-    headers: { 'x-ashlr-read-client': getReadClientProof() },
+    headers: isRemoteMobileMode() ? {} : { 'x-ashlr-read-client': getReadClientProof() },
     ...(signal ? { signal } : {}),
   });
   if (res.status === 401) {

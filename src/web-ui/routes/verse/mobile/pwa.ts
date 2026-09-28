@@ -95,3 +95,20 @@ export function isStandalone(win: Window = window): boolean {
   const iosStandalone = (win.navigator as Navigator & { standalone?: boolean }).standalone === true;
   return iosStandalone || (typeof win.matchMedia === 'function' && win.matchMedia('(display-mode: standalone)').matches);
 }
+
+/** Only called from an explicit tap after the paired gateway advertises push. */
+export async function enableRemotePush(publicKey: string): Promise<PushSubscription> {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+    throw new Error('Push notifications are unavailable on this browser.');
+  }
+  if (Notification.permission === 'denied') throw new Error('Notifications are blocked in this phone’s settings.');
+  const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
+  if (permission !== 'granted') throw new Error('Notification permission was not granted.');
+  const normalized = publicKey.replace(/-/g, '+').replace(/_/g, '/');
+  const decoded = atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '='));
+  const key = new Uint8Array(decoded.length);
+  for (let i = 0; i < decoded.length; i += 1) key[i] = decoded.charCodeAt(i);
+  const registration = await navigator.serviceWorker.ready;
+  const existing = await registration.pushManager.getSubscription();
+  return existing ?? registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+}

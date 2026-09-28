@@ -36,6 +36,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  document.head.querySelector('meta[name="ashlr-remote-gateway"]')?.remove();
   resetVerseListChannelCapabilities();
   markCheckComplete(false);
   vi.useRealTimers();
@@ -49,6 +50,11 @@ describe('verseListEventsUrl', () => {
   });
   it('without topics is the historical request', () => {
     expect(verseListEventsUrl(false)).toMatch(/^\/api\/events\?client=[a-f0-9]{64}$/);
+  });
+  it('uses only the gateway-approved topic and never a client proof on a paired phone', () => {
+    document.head.insertAdjacentHTML('beforeend', '<meta name="ashlr-remote-gateway" content="v1">');
+    expect(verseListEventsUrl()).toBe('/api/events?topics=verse-sessions');
+    expect(verseListEventsUrl(false)).toBe('/api/events?topics=verse-sessions');
   });
 });
 

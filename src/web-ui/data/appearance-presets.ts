@@ -3,10 +3,8 @@
  * and compares against: the accent presets, "is anything customized", "which
  * preset is this".
  *
- * Split from appearance-store.ts, which every view imports (it applies the
- * stored appearance before the first paint) — so every value exported there
- * is first-paint JS for every console, while these are read only by the
- * Settings panel.
+ * Split from appearance-store.ts. Settings loads the full store and presets
+ * together; appearance-boot.ts applies stored attributes before first paint.
  */
 import { defaultAppearance, getAppearance, type Appearance } from './appearance-store.js';
 

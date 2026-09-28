@@ -8,7 +8,8 @@
  * is reported as a read-only server.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, apiPost, DispatchDisabledError, readFailureReason } from './client.js';
+import { ApiError, apiGet, apiPost, DispatchDisabledError, readFailureReason } from './client.js';
+import { markCheckComplete } from './auth-store.js';
 
 function respond(status: number, body: unknown): void {
   vi.stubGlobal('fetch', vi.fn(async () => new Response(
@@ -28,6 +29,23 @@ async function refusal(): Promise<unknown> {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  markCheckComplete(false);
+  document.head.innerHTML = '';
+  window.history.replaceState(null, '', '/');
+});
+
+it('expires a remote phone read on an Access HTML response without forwarding Hub headers', async () => {
+  window.history.replaceState(null, '', '/verse/m/');
+  document.head.innerHTML = '<meta name="ashlr-remote-gateway" content="v1">';
+  markCheckComplete(true);
+  const fetch = vi.fn(async (_path: string, _init?: RequestInit) => new Response('<html>Access login</html>', { headers: { 'Content-Type': 'text/html' } }));
+  vi.stubGlobal('fetch', fetch);
+  await expect(apiGet('/api/verse/bootstrap')).rejects.toMatchObject({ status: 401 });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch.mock.calls[0]![1]).toMatchObject({ redirect: 'manual', cache: 'no-store' });
+  const headers = new Headers(fetch.mock.calls[0]![1]?.headers);
+  expect(headers.has('x-ashlr-token')).toBe(false);
+  expect(headers.has('x-ashlr-read-client')).toBe(false);
 });
 
 describe('apiPost — refusals', () => {

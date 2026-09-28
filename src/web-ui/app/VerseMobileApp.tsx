@@ -17,17 +17,19 @@
  */
 import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { adoptInjectedTokens, markCheckComplete } from '../data/auth-store.js';
+import { isRemoteMobileMode } from '../data/remote-mode.js';
 import { getQuerySnapshot, runQuery } from '../data/cache.js';
 import { ApiError } from '../data/client.js';
 import { useAuthPhase } from '../data/hooks.js';
 import { MobileShell } from '../routes/verse/mobile/MobileShell.js';
-import { SkeletonList, ui } from '../routes/verse/mobile/ui.js';
+import { Button, SkeletonList, ui } from '../routes/verse/mobile/ui.js';
 import { verseBootstrapQuery } from '../routes/verse/verse-bootstrap-query.js';
 import { VERSE_MOBILE_PATH } from './console-mode.js';
 import '../design/global.css';
 
 const importSessionGate = () => import('../components/auth/SessionGate.js');
 const SessionGate = lazy(() => importSessionGate().then((m) => ({ default: m.SessionGate })));
+const RemoteMobileApp = lazy(() => import('../routes/verse/mobile/RemoteMobileApp.js').then((m) => ({ default: m.RemoteMobileApp })));
 
 /** `/verse/m` → `/verse/m/`, keeping the hash (the screen). */
 export function canonicalizeMobilePath(win: Window = window): void {
@@ -81,14 +83,8 @@ const CONNECTING = (
 );
 
 export function VerseMobileApp() {
-  const phase = useAuthPhase();
-  const [unreachable, setUnreachable] = useState(false);
-  const [attempt, setAttempt] = useState(0);
-
   useEffect(() => {
     canonicalizeMobilePath();
-    // Head tags and the worker matter from the SECOND launch on (install,
-    // offline), never to this paint: their module loads after it.
     void import('../routes/verse/mobile/pwa.js')
       .then((pwa) => {
         pwa.installMobileHead(document);
@@ -96,6 +92,17 @@ export function VerseMobileApp() {
       })
       .catch(() => undefined);
   }, []);
+  // The gateway marker is injected by the gateway into this HTML response.
+  // Decide before mounting the local token gate or starting its read probe.
+  return isRemoteMobileMode()
+    ? <Suspense fallback={<Boot>{CONNECTING}</Boot>}><RemoteMobileApp shell={<MobileShell />} Button={Button} ui={ui} /></Suspense>
+    : <LocalVerseMobileApp />;
+}
+
+function LocalVerseMobileApp() {
+  const phase = useAuthPhase();
+  const [unreachable, setUnreachable] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (phase !== 'checking') return;

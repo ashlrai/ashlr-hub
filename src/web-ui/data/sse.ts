@@ -171,3 +171,7 @@ subscribeAuth(() => {
     teardown();
   }
 });
+
+// Dynamic loading may finish after the session probe. Join the live feed in
+// that case too; otherwise it would wait for the next auth state change.
+if (getAuthSnapshot().phase === 'authenticated') connect();

@@ -7,9 +7,8 @@
  *
  * Same shape as ./theme-store.ts on purpose — module-level state + a
  * listener set, zero React — so it is unit-testable without a DOM renderer
- * and usable from non-component code (the command palette's closures, the
- * rail's quick-toggle). data/hooks.ts binds it into React via
- * `useAppearance()`, exactly as it does for the theme.
+ * and usable from non-component code. appearance-hooks.ts binds it into React
+ * only for Settings; appearance-boot.ts applies stored attributes at startup.
  *
  * THEME IS NOT FORKED. `theme-store.ts` remains the single authority for the
  * light/dark/system preference (key `ashlr.theme.v1`, already read by the
@@ -17,9 +16,9 @@
  * the appearance snapshot and delegates writes to `setTheme`. Two stores
  * writing `data-theme` would race; one store that owns it does not.
  *
- * Everything is applied at MODULE LOAD (before React's first render, since
- * hooks.ts imports this and every view imports hooks.ts), so the app never
- * paints the default accent for a frame before swapping to the chosen one.
+ * The small appearance-boot module applies stored settings before React's
+ * first render. This full store loads with Settings and then applies its
+ * normalized snapshot again, keeping the control panel in sync.
  */
 import {
   getTheme,
