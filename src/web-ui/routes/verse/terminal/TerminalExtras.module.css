@@ -1,0 +1,234 @@
+/*
+ * terminal/TerminalExtras.module.css — the 3.15 "many agents" additions to the
+ * terminal: agent status badges, the running block's sticky header, fix
+ * chips, the local-URL bar, block selection, filter-in-block, bookmarks and
+ * the launch dialog. Same tokens as TerminalPanel.module.css.
+ */
+
+/* ---- agent status badge (tab strip) -------------------------------------- */
+
+.agentBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  white-space: nowrap;
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+.agentBadge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.agentBadge[data-state='running'] { color: var(--status-running-fg); background: var(--status-running-bg); }
+.agentBadge[data-state='running']::before { animation: pulse 1.2s var(--ease-standard) infinite; }
+.agentBadge[data-state='needs-you'] { color: var(--status-warning-fg); background: var(--status-warning-bg); font-weight: 600; }
+.agentBadge[data-state='idle'] { color: var(--status-success-fg); background: var(--status-success-bg); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* ---- bars over the terminal view ------------------------------------------ */
+
+.stickyRun {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 2px var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--status-running-solid);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-sm);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+}
+.stickyCommand {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+.stickyMeta {
+  flex: none;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  color: var(--text-secondary);
+}
+.barLabel { flex: none; color: var(--text-tertiary); }
+.barSpacer { flex: 1 1 auto; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  cursor: pointer;
+}
+.chip:hover { background: var(--bg-hover); }
+.chip:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.chip:disabled { opacity: 0.5; cursor: default; }
+.chipCode {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+.chipVerb { flex: none; color: var(--text-tertiary); }
+.chip[data-kind='ask'] { color: var(--text-secondary); }
+
+.fixes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-1) var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  color: var(--text-secondary);
+}
+.fixRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+.fixWhy {
+  color: var(--text-tertiary);
+  min-width: 0;
+}
+
+/* ---- block list additions -------------------------------------------------- */
+
+.listTools {
+  position: sticky;
+  top: calc(-1 * var(--space-2));
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: calc(-1 * var(--space-2)) calc(-1 * var(--space-2)) var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  color: var(--text-secondary);
+}
+
+/* The running block's head stays in view while its output scrolls under it. */
+.runningTop {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-surface);
+}
+
+.selected {
+  outline: 2px solid var(--accent-500);
+  outline-offset: -2px;
+}
+
+.bookmarked { color: var(--status-warning-fg); }
+
+.filterRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--text-2xs-size);
+}
+.filterInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size);
+}
+.filterInput:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+.filterInput[aria-invalid='true'] { border-color: var(--status-danger-solid); }
+.filterCount { flex: none; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+
+/* ---- launch dialog ---------------------------------------------------------- */
+
+.launchList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.launchItem {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.launchHead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.launchName { flex: 1 1 auto; font-weight: 600; }
+.launchPanes {
+  margin: 0;
+  padding-left: var(--space-3);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  color: var(--text-secondary);
+}
+.launchPanes code { font-family: var(--font-mono); color: var(--text-primary); }
+.launchError { color: var(--status-danger-fg); font-size: var(--text-2xs-size); }
+
+@media (prefers-reduced-motion: reduce) {
+  .agentBadge[data-state='running']::before { animation: none; }
+}

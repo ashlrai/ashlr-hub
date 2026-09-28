@@ -24,6 +24,25 @@
  *   ## Procedure
  *   …
  *
+ * A COMMAND WORKFLOW (`kind: command`, 3.15) has a smaller shape: the same
+ * id / name / description, and one `## Command` section holding one fenced
+ * code block — the shell command template with `{{param:default}}` holes
+ * (command-template.ts). Outcome / Procedure are not required (nor allowed);
+ * `auto: true` is refused (no lane ever resolves a command workflow); the
+ * agent-only keys (kinds, repos, globs, budget, done-when) are dropped with
+ * a warning.
+ *
+ *   ---
+ *   id: new-branch
+ *   name: New branch from main
+ *   kind: command
+ *   ---
+ *   ## Command
+ *
+ *   ```sh
+ *   git switch main && git pull && git switch -c {{branch}}
+ *   ```
+ *
  * WHY a hand-rolled front-matter reader instead of YAML: the grammar is a
  * dozen flat keys, `yaml` is a dev dependency only, and a strict small reader
  * gives precise errors ("line 4: unknown key") instead of YAML's surprises
@@ -33,12 +52,16 @@
  * that differ only in spacing or key order produce the same sha.
  */
 import { TASK_KINDS, type TaskKind } from '../learn/retro/types.js';
+import { commandFenceFor, extractCommandFence, parseCommandTemplate } from './command-template.js';
 import {
+  COMMAND_SECTION,
+  PLAYBOOK_KINDS,
   PLAYBOOK_ID_PATTERN,
   PLAYBOOK_MACRO_PATTERN,
   PLAYBOOK_MAX_BYTES,
   PLAYBOOK_SECTIONS,
   REQUIRED_PLAYBOOK_SECTIONS,
+  type PlaybookKind,
   type PlaybookMeta,
   type PlaybookParseResult,
   type PlaybookSectionName,
@@ -47,7 +70,7 @@ import {
 } from './types.js';
 
 const KNOWN_KEYS = new Set([
-  'id', 'name', 'macro', 'description', 'kinds', 'repos', 'globs', 'auto', 'budget-usd', 'budget-minutes', 'done-when',
+  'id', 'name', 'macro', 'description', 'kind', 'kinds', 'repos', 'globs', 'auto', 'budget-usd', 'budget-minutes', 'done-when',
 ]);
 const LIST_KEYS = new Set(['kinds', 'repos', 'globs', 'done-when']);
 
@@ -137,14 +160,29 @@ function readFrontMatter(lines: string[], errors: PlaybookValidationIssue[]): { 
   return { raw, bodyStart: end + 1 };
 }
 
-function canonicalSection(heading: string): PlaybookSectionName | null {
+type SectionName = PlaybookSectionName | typeof COMMAND_SECTION;
+
+function canonicalSection(heading: string): SectionName | null {
   const h = heading.trim().replace(/:$/, '').toLowerCase();
+  if (h === COMMAND_SECTION.toLowerCase()) return COMMAND_SECTION;
   return PLAYBOOK_SECTIONS.find((s) => s.toLowerCase() === h) ?? null;
 }
 
-function readSections(lines: string[], start: number, errors: PlaybookValidationIssue[], warnings: PlaybookValidationIssue[]): PlaybookSections {
-  const sections: PlaybookSections = {};
-  let current: PlaybookSectionName | null = null;
+/** A fence line: its character, run length, and whether nothing follows the run. */
+function fenceOf(line: string): { ch: string; len: number; bare: boolean } | null {
+  const m = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+  return m ? { ch: m[1]![0]!, len: m[1]!.length, bare: !m[2]!.trim() } : null;
+}
+
+/**
+ * Every `## ` section by canonical name (`Command` included — the caller
+ * decides per kind whether it belongs). A `##` inside a fenced block is
+ * text. A fence closes only on the same character, at least as long, with
+ * nothing after it (CommonMark), so a ```` block can quote a ``` one.
+ */
+function readSections(lines: string[], start: number, errors: PlaybookValidationIssue[], warnings: PlaybookValidationIssue[]): Partial<Record<SectionName, string>> {
+  const sections: Partial<Record<SectionName, string>> = {};
+  let current: SectionName | null = null;
   let buf: string[] = [];
   const flush = () => {
     if (current) {
@@ -154,11 +192,21 @@ function readSections(lines: string[], start: number, errors: PlaybookValidation
     buf = [];
   };
   let preamble = false;
-  let inFence = false;
+  let fence: { ch: string; len: number } | null = null;
   for (let i = start; i < lines.length; i += 1) {
     const line = lines[i]!;
-    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
-    const h2 = inFence ? null : /^##\s+(.+?)\s*#*\s*$/.exec(line);
+    const f = fenceOf(line);
+    let fenceLine = false;
+    if (fence) {
+      if (f && f.ch === fence.ch && f.len >= fence.len && f.bare) {
+        fence = null;
+        fenceLine = true;
+      }
+    } else if (f) {
+      fence = { ch: f.ch, len: f.len };
+      fenceLine = true;
+    }
+    const h2 = fence || fenceLine ? null : /^##\s+(.+?)\s*#*\s*$/.exec(line);
     if (h2 && !/^###/.test(line)) {
       flush();
       const name = canonicalSection(h2[1]!);
@@ -222,6 +270,11 @@ export function parsePlaybook(source: string): PlaybookParseResult {
   const name = (scalars.get('name') ?? '').trim();
   if (!name) errors.push({ field: 'name', message: '`name` is required.' });
   else if (name.length > MAX_NAME) errors.push({ field: 'name', message: `\`name\` is at most ${MAX_NAME} characters.` });
+  const kindRaw = (scalars.get('kind') ?? '').trim().toLowerCase() || 'agent';
+  if (!(PLAYBOOK_KINDS as readonly string[]).includes(kindRaw)) {
+    errors.push({ field: 'kind', message: `\`kind\` is ${PLAYBOOK_KINDS.map((k) => `\`${k}\``).join(' or ')}.` });
+  }
+  const kind: PlaybookKind = kindRaw === 'command' ? 'command' : 'agent';
   const macroRaw = (scalars.get('macro') ?? '').trim();
   const macro = (macroRaw ? (macroRaw.startsWith('!') ? macroRaw : `!${macroRaw}`) : `!${id}`).toLowerCase();
   if (!PLAYBOOK_MACRO_PATTERN.test(macro)) {
@@ -249,11 +302,22 @@ export function parsePlaybook(source: string): PlaybookParseResult {
     usd: numberOrNull(scalars.get('budget-usd'), 'budget-usd', 1000, errors),
     minutes: numberOrNull(scalars.get('budget-minutes'), 'budget-minutes', 24 * 60, errors),
   };
+  const found = readSections(lines, fm.bodyStart, errors, warnings);
+  if (kind === 'command') {
+    return finishCommandWorkflow({ id, name, macro, description, auto, kinds, repos, globs, doneWhen, budget }, found, errors, warnings);
+  }
+
   if (auto && kinds.length === 0 && repos.length === 0) {
     errors.push({ field: 'auto', message: '`auto: true` needs `kinds` or `repos` — a playbook that matches every task is not a playbook.' });
   }
-
-  const sections = readSections(lines, fm.bodyStart, errors, warnings);
+  if (found[COMMAND_SECTION] !== undefined) {
+    errors.push({ field: 'sections', message: `“## ${COMMAND_SECTION}” belongs to a command workflow — add \`kind: command\` to the front matter.` });
+  }
+  const sections: PlaybookSections = {};
+  for (const name of PLAYBOOK_SECTIONS) {
+    const text = found[name];
+    if (text !== undefined) sections[name] = text;
+  }
   for (const required of REQUIRED_PLAYBOOK_SECTIONS) {
     if (!sections[required]) errors.push({ field: required, message: `“## ${required}” is required.` });
   }
@@ -269,8 +333,81 @@ export function parsePlaybook(source: string): PlaybookParseResult {
     doneWhen,
     budget,
     auto,
+    kind: 'agent',
   };
   return { ok: true, meta, sections, warnings };
+}
+
+interface CommonFrontMatter {
+  id: string;
+  name: string;
+  macro: string;
+  description: string;
+  auto: boolean;
+  kinds: string[];
+  repos: string[];
+  globs: string[];
+  doneWhen: string[];
+  budget: PlaybookMeta['budget'];
+}
+
+/**
+ * The `kind: command` half of parsePlaybook: one `## Command` section with
+ * one code block, a template that parses, never auto; agent-only keys are
+ * dropped (with a warning) so the stored form round-trips exactly.
+ */
+function finishCommandWorkflow(
+  fm: CommonFrontMatter,
+  found: Partial<Record<SectionName, string>>,
+  errors: PlaybookValidationIssue[],
+  warnings: PlaybookValidationIssue[],
+): PlaybookParseResult {
+  if (fm.auto) {
+    errors.push({ field: 'auto', message: 'A command workflow is never auto-matched — it is pasted into a terminal by hand. Remove `auto: true`.' });
+  }
+  const agentOnly = [
+    fm.kinds.length ? 'kinds' : null, fm.repos.length ? 'repos' : null, fm.globs.length ? 'globs' : null,
+    fm.doneWhen.length ? 'done-when' : null, fm.budget.usd !== null ? 'budget-usd' : null, fm.budget.minutes !== null ? 'budget-minutes' : null,
+  ].filter((k): k is string => k !== null);
+  if (agentOnly.length > 0) {
+    warnings.push({
+      field: 'kind',
+      message: `${agentOnly.map((k) => `\`${k}\``).join(', ')} ${agentOnly.length === 1 ? 'does' : 'do'} not apply to a command workflow and will be dropped.`,
+    });
+  }
+  const extra = PLAYBOOK_SECTIONS.filter((name) => found[name] !== undefined);
+  if (extra.length > 0) {
+    errors.push({ field: 'sections', message: `A command workflow has one section, “## ${COMMAND_SECTION}” — not ${extra.map((n) => `“## ${n}”`).join(', ')}.` });
+  }
+  const body = found[COMMAND_SECTION];
+  let command: PlaybookMeta['command'];
+  if (body === undefined) {
+    errors.push({ field: COMMAND_SECTION, message: `“## ${COMMAND_SECTION}” is required: one fenced code block with the command.` });
+  } else {
+    const fence = extractCommandFence(body);
+    if (!fence.ok) {
+      errors.push({ field: COMMAND_SECTION, message: fence.error });
+    } else {
+      const template = parseCommandTemplate(fence.template);
+      for (const message of template.errors) errors.push({ field: COMMAND_SECTION, message });
+      command = { template: fence.template, params: template.params };
+    }
+  }
+  if (errors.length > 0 || !command) return { ok: false, errors };
+  const meta: PlaybookMeta = {
+    id: fm.id,
+    name: fm.name,
+    macro: fm.macro,
+    description: fm.description,
+    appliesTo: { repos: [], globs: [] },
+    taskKinds: [],
+    doneWhen: [],
+    budget: { usd: null, minutes: null },
+    auto: false,
+    kind: 'command',
+    command,
+  };
+  return { ok: true, meta, sections: {}, warnings };
 }
 
 function listLines(key: string, values: readonly string[]): string[] {
@@ -280,6 +417,20 @@ function listLines(key: string, values: readonly string[]): string[] {
 
 /** The canonical markdown for a playbook. Pure; `parse(serialize(x))` round-trips. */
 export function serializePlaybook(meta: PlaybookMeta, sections: PlaybookSections): string {
+  if (meta.kind === 'command' && meta.command) {
+    // Only what a command workflow uses; the macro only when it is not the default.
+    const fence = commandFenceFor(meta.command.template);
+    const head = [
+      '---',
+      `id: ${meta.id}`,
+      `name: ${meta.name}`,
+      ...(meta.macro !== `!${meta.id}` ? [`macro: ${meta.macro}`] : []),
+      ...(meta.description ? [`description: ${meta.description}`] : []),
+      'kind: command',
+      '---',
+    ];
+    return `${head.join('\n')}\n\n## ${COMMAND_SECTION}\n\n${fence}sh\n${meta.command.template}\n${fence}\n`;
+  }
   const fm = [
     '---',
     `id: ${meta.id}`,
@@ -314,8 +465,27 @@ export function canonicalizePlaybook(source: string): PlaybookParseResult & { so
   return { ...parsed, source: serializePlaybook(parsed.meta, parsed.sections) };
 }
 
-/** A blank playbook for "New playbook". Pure. */
-export function playbookTemplate(id = 'my-playbook'): string {
+/** A blank playbook for "New playbook" (with `kind: 'command'`, for "New command workflow"). Pure. */
+export function playbookTemplate(id = 'my-playbook', kind: PlaybookKind = 'agent'): string {
+  if (kind === 'command') {
+    const template = 'git switch -c {{branch}} && git push -u {{remote:origin}} {{branch}}';
+    return serializePlaybook(
+      {
+        id,
+        name: 'New command workflow',
+        macro: `!${id}`,
+        description: 'What this command does, in one line. It is pasted into your terminal, never run.',
+        appliesTo: { repos: [], globs: [] },
+        taskKinds: [],
+        doneWhen: [],
+        budget: { usd: null, minutes: null },
+        auto: false,
+        kind: 'command',
+        command: { template, params: parseCommandTemplate(template).params },
+      },
+      {},
+    );
+  }
   return serializePlaybook(
     {
       id,

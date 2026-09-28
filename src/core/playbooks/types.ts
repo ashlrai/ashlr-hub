@@ -18,8 +18,9 @@
  * BROWSER-SAFE: the Playbooks view imports this — type-only imports, plain consts.
  */
 import type { TaskKind } from '../learn/retro/types.js';
+import type { CommandParam } from './command-template.js';
 
-export type { TaskKind };
+export type { TaskKind, CommandParam };
 
 export const VERSE_PLAYBOOKS_PATH = '/api/verse/playbooks';
 
@@ -36,6 +37,30 @@ export type PlaybookSectionName = (typeof PLAYBOOK_SECTIONS)[number];
 
 /** A playbook without these is rejected: an engine needs a goal and a way there. */
 export const REQUIRED_PLAYBOOK_SECTIONS: readonly PlaybookSectionName[] = ['Outcome', 'Procedure'];
+
+/**
+ * What a playbook is (the `kind` front-matter key):
+ *   agent    guidance an engine follows — every playbook before this key
+ *            existed, and the default when it is absent.
+ *   command  a COMMAND WORKFLOW: a shell command template with
+ *            `{{param:default}}` holes (command-template.ts). The operator
+ *            fills a form and the command is pasted at a terminal prompt —
+ *            never run, never sent to an engine. No lane resolves one: not
+ *            by `!macro`, not explicitly, not by auto-match (resolve.ts).
+ */
+export const PLAYBOOK_KINDS = ['agent', 'command'] as const;
+export type PlaybookKind = (typeof PLAYBOOK_KINDS)[number];
+
+/** A command workflow's body: the `## Command` code block and its holes. */
+export interface PlaybookCommandSpec {
+  /** The command template, exactly as in the code block (no trailing newline). */
+  template: string;
+  /** Distinct `{{name[:default]}}` holes, in first-appearance order. */
+  params: CommandParam[];
+}
+
+/** The one section of a `kind: command` playbook (its code block is the template). */
+export const COMMAND_SECTION = 'Command';
 
 /** Ids are path segments: lowercase, digits, dashes; 2–48 chars. */
 export const PLAYBOOK_ID_PATTERN = /^[a-z0-9][a-z0-9-]{1,47}$/;
@@ -80,6 +105,18 @@ export interface PlaybookMeta {
    * a task only when asked for, until Mason turns this on.
    */
   auto: boolean;
+  /**
+   * `agent` or `command` (see PLAYBOOK_KINDS). The parser always sets it;
+   * absent (a record from an older build, a hand-built meta) means `agent`.
+   */
+  kind?: PlaybookKind;
+  /** kind `command` only: the template and its holes. */
+  command?: PlaybookCommandSpec;
+}
+
+/** A playbook's kind; absent ⇒ `agent` (every playbook written before 3.15's command workflows). Pure. */
+export function playbookKindOf(meta: { kind?: PlaybookKind } | null | undefined): PlaybookKind {
+  return meta?.kind === 'command' ? 'command' : 'agent';
 }
 
 export type PlaybookSections = Partial<Record<PlaybookSectionName, string>>;
@@ -130,6 +167,10 @@ export interface PlaybookSummary {
   latest: number;
   builtin: boolean;
   updatedAt: string;
+  /** `agent` | `command`; absent (an older server) ⇒ `agent`. */
+  kind?: PlaybookKind;
+  /** kind `command` only: the template and its holes, so a picker fills without a second read. */
+  command?: PlaybookCommandSpec;
 }
 
 /** Outcomes per version, counted from retros that carry this playbook. */
@@ -166,7 +207,10 @@ export interface PlaybooksListResponse {
 export interface PlaybookDetailResponse {
   v: 1;
   playbook: PlaybookV1;
-  /** Rendered as an engine sees it. */
+  /**
+   * Rendered as an engine sees it. A command workflow never reaches an
+   * engine: for one this is its command block and parameters, for reading.
+   */
   rendered: string;
   versions: (PlaybookVersionInfo & { outcomes: PlaybookOutcomeCounts })[];
 }

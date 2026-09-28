@@ -32,6 +32,7 @@ import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { describeContextError, useTokenGate } from '../context/use-token-gate.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { playbooksQuery } from '../playbooks/playbooks-queries.js';
+import { playbookKindOf } from '../../../../core/playbooks/types.js';
 import { getAutomationsFocus, isAutomationsFocusLive, subscribeAutomationsFocus, takeAutomationsFocus } from './automations-focus.js';
 import {
   FIRING_LABEL,
@@ -329,7 +330,9 @@ function AutomationEditor(props: {
  */
 function PlaybookField({ value, onChange }: { value: string; onChange: (next: string) => void }) {
   const read = useQuery(playbooksQuery);
-  const rows = read.data?.value ?? null;
+  // Agent playbooks only: a command workflow is pasted into a terminal, never a task's procedure.
+  const all = read.data?.value ?? null;
+  const rows = all === null ? null : all.filter((p) => playbookKindOf(p) === 'agent');
   const pinned = value !== '' && rows !== null && !rows.some((p) => p.id === value);
   if (rows === null || pinned) {
     return <Input label="Playbook (optional)" hint="A playbook id, e.g. fix-issue or fix-issue@v2" value={value} onChange={(e) => onChange(e.target.value)} />;

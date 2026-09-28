@@ -160,6 +160,7 @@ import { handleVerseEventsSse, VERSE_EVENTS_PATH_RE, VERSE_SESSION_ID_RE } from 
 import type { ApiModule } from './api-modules.js';
 import { REASONING_API_PREFIX } from '../reasoning/types.js';
 import {
+  VERSE_TERMINAL_AGENT_STATE_PATH_RE,
   WORKBENCH_ROUTE_FAMILIES,
   workbenchFamilyFor,
   type WorkbenchRouteFamilyId,
@@ -550,7 +551,12 @@ async function dispatchWorkbenchModules(
     // And (3.15 agent tools) Verse's one MCP server, exactly
     // `/api/verse/agent-tools/mcp`: a seat's endpoint, authenticated by the
     // turn's bearer token (verse-mcp-api.ts handleEndpoint), Origin refused.
-    if (!isBrowserMcpPath(path) && !isVerseMcpEndpointPath(path) && !passesMutationGate(req, res, ctx.token)) return true;
+    // And ONE more of the same kind (3.15): a terminal agent tab's status
+    // callback, `/api/verse/terminal/<tab>/agent-state`. Its caller is the
+    // per-launch hook a CLI agent (Claude Code, Codex) runs in that tab — it
+    // never holds the mutation token; the route checks the tab's own random
+    // token (constant time) and refuses a browser Origin (terminal-api.ts).
+    if (!isBrowserMcpPath(path) && !isVerseMcpEndpointPath(path) && !VERSE_TERMINAL_AGENT_STATE_PATH_RE.test(path) && !passesMutationGate(req, res, ctx.token)) return true;
   }
   const entry = workbenchModules.find((m) => m.id === family.id);
   const loaded: WorkbenchLoad = entry ? await loadWorkbenchModule(entry) : { state: 'not-landed' };

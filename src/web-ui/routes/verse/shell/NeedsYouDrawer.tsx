@@ -53,6 +53,7 @@ import {
 import { matchCommand } from './command-catalog.js';
 import { isGuardOpen } from './guarded-action.js';
 import { markResolved, pruneResolved, runNeedsYouAction, useResolvedIds } from './needs-you-actions.js';
+import { requestOpenTerminal } from './open-terminal-request.js';
 import { requestLeaderFocus } from '../leader/leader-focus.js';
 import { needsYouQuestionText, questionIdOfNeedsYouItem } from '../leader/question-id.js';
 import {
@@ -261,6 +262,12 @@ export function NeedsYouDrawer() {
         closeVerseOverlay();
         setVerseSection('apps', `seat:${target.seatId}`);
         return;
+      case 'terminal':
+        // An agent tab waiting on the operator: its chat, the Terminal pane,
+        // that tab (the shell's one terminal handler, open-terminal-request.ts).
+        closeVerseOverlay();
+        requestOpenTerminal({ tabId: target.tabId, blockId: null, sessionId: target.sessionId });
+        return;
       case 'url':
         // https only (isNeedsYouItem), a new browsing context with no opener.
         window.open(target.url, '_blank', 'noopener,noreferrer');
@@ -269,6 +276,16 @@ export function NeedsYouDrawer() {
         return;
     }
   }, []);
+
+  /**
+   * ↩ / a click on a row: its detail — except an agent waiting in a terminal
+   * tab, which has nothing to decide here: the answer is typed in that tab,
+   * so it goes straight there.
+   */
+  const openItem = useCallback((item: NeedsYouItem) => {
+    if (item.target.kind === 'terminal') openTarget(item);
+    else setDetailId(item.id);
+  }, [openTarget]);
 
   const act = useCallback((item: NeedsYouItem, kind: NeedsYouActionKind) => {
     const action = actionOf(item, kind);
@@ -343,7 +360,7 @@ export function NeedsYouDrawer() {
         stepSplit(-1);
         return;
       case 'drawer.open':
-        if (current) setDetailId(current.id);
+        if (current) openItem(current);
         return;
       case 'drawer.select':
         if (current && !detailId) togglePick(current.id);
@@ -479,7 +496,8 @@ export function NeedsYouDrawer() {
               // the keyboard moves the selection without opening.
               onOpen={(id) => {
                 setSelectedId(id);
-                setDetailId(id);
+                const item = items.find((i) => i.id === id);
+                if (item) openItem(item);
               }}
               now={now}
               label={`${SPLIT_LABEL[split]} needing you`}
@@ -539,6 +557,8 @@ const TARGET_LABEL = (item: NeedsYouItem): string | null => {
       return `Open ${sectionEntry(item.target.section).label}`;
     case 'seat':
       return 'Open Apps & Accounts';
+    case 'terminal':
+      return 'Open terminal';
     case 'url':
       return 'Open on GitHub';
     default:

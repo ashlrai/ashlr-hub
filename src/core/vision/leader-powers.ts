@@ -483,6 +483,8 @@ export function composeLeaderPlaybook(parse: PlaybookParseModule, id: string, be
   if (before !== null) {
     const prior = parse.parsePlaybook(before);
     if (!prior.ok) return null;
+    // A command workflow (kind: command) is a terminal template, not an agent procedure: never the Leader's to rewrite.
+    if (prior.meta.kind === 'command') return null;
     meta = prior.meta;
     sections = { ...prior.sections, Outcome: outcome, Procedure: procedure };
   } else {

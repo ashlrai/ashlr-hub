@@ -33,6 +33,20 @@
  *                                           → { command, explanation, provider, risky }
  *                                           (terminal-assist.ts: the local model first;
  *                                           TEXT back, never typed, never run)
+ * 3.15 — agents, fixes, launch configurations:
+ *   POST /api/verse/terminal/:id/agent-state?state=running|idle|needs-you
+ *                                           the per-launch hook of a CLI agent in that tab
+ *                                           (terminal-agent-hooks.ts). NOT behind the
+ *                                           mutation token (verse-api.ts exempts exactly this
+ *                                           path shape): authenticated by the tab's own
+ *                                           random token header, refused with a browser Origin.
+ *   POST /api/verse/terminal/:id/blocks/:blockId/fix  {} → { suggestions, model } — the LOCAL
+ *                                           model's ≤ 3 candidate commands for a failed block
+ *                                           (terminal-assist.ts); chips on the page, never run
+ *   GET  /api/verse/terminal/launch?sessionId=…        → the chat roots' launch configurations
+ *   POST /api/verse/terminal/launch          { sessionId, root, name, digest, cols, rows } → 201 — opens
+ *                                           the exact configuration shown in the dialog;
+ *                                           a changed file is refused before any tab opens
  *
  * NO SECRET REACHES A CHAT FROM HERE. Every JSON response passes
  * sanitizePublicJson (sendJson); `format=chat` and /redact additionally run
@@ -92,9 +106,11 @@ import {
 } from './terminal.js';
 import { terminalBytesToText } from './terminal-blocks.js';
 import { noteOperatorInput } from './verse-mcp-grants.js';
-import { effectiveAssistMode, runTerminalAssist, TerminalAssistError, type AssistBlockContext, type AssistDeps } from './terminal-assist.js';
+import { effectiveAssistMode, runTerminalAssist, TerminalAssistError, localAssistComplete, suggestFixCommands, type AssistBlockContext, type AssistDeps, type AssistComplete } from './terminal-assist.js';
 import { getTerminalHistory, type TerminalHistoryStore } from './terminal-history.js';
 import { loadTerminalSettings, parseTerminalSettingsUpdate, updateTerminalSettings } from './terminal-settings.js';
+import { cleanAgentMessage, readHookBody } from './terminal-agent-hooks.js';
+import { readLaunchConfigs } from './terminal-launch.js';
 import type { VerseSession } from './types.js';
 import { getVerseEngine } from './verse-api.js';
 import { VERSE_SESSION_ID_RE } from './verse-stream.js';
@@ -104,7 +120,10 @@ import {
   VERSE_TERMINAL_HISTORY_CLEAR_PATH,
   VERSE_TERMINAL_HISTORY_MAX_LIMIT,
   VERSE_TERMINAL_HISTORY_PATH,
+  VERSE_TERMINAL_AGENT_STATE_PATH_RE,
+  VERSE_TERMINAL_AGENT_TOKEN_HEADER,
   VERSE_TERMINAL_INPUT_MAX_BYTES,
+  VERSE_TERMINAL_LAUNCH_PATH,
   VERSE_TERMINAL_OPEN_EXTERNAL_PATH,
   VERSE_TERMINAL_PATH,
   VERSE_TERMINAL_REDACT_MAX_BYTES,
@@ -114,6 +133,10 @@ import {
   VERSE_TERMINAL_STREAM_PATH,
   type VerseTerminalBlockOutputFormat,
   type VerseTerminalBlockOutputResponse,
+  type VerseTerminalAgentStateName,
+  type VerseTerminalFixResponse,
+  type VerseTerminalLaunchResponse,
+  type VerseTerminalTab,
   type VerseTerminalLaunchVia,
   type VerseTerminalStreamFrame,
   type VerseTerminalHistoryResponse,
@@ -125,6 +148,12 @@ import {
 export { VERSE_TERMINAL_OPEN_EXTERNAL_PATH };
 const TAB_ROUTE_RE = /^\/api\/verse\/terminal\/([^/]+)\/(input|resize|kill|stream|blocks|open-file)$/;
 const BLOCK_ROUTE_RE = /^\/api\/verse\/terminal\/([^/]+)\/blocks\/(b-\d{1,9})$/;
+const FIX_ROUTE_RE = /^\/api\/verse\/terminal\/([^/]+)\/blocks\/(b-\d{1,9})\/fix$/;
+/** A hook's event JSON (Claude's hook input, Codex's notify payload): read for two fields, capped. */
+const AGENT_STATE_MAX_BODY_BYTES = 16 * 1024;
+const AGENT_STATES: readonly VerseTerminalAgentStateName[] = ['running', 'idle', 'needs-you'];
+/** Fix suggestions kept per (tab, block): a re-render or a second click does not ask the model again. */
+const FIX_CACHE_MAX = 64;
 const BLOCK_FORMATS: readonly VerseTerminalBlockOutputFormat[] = ['ansi', 'text', 'chat'];
 /** The redact body: 256 KB of text, JSON-escaped (control characters can triple it). */
 const REDACT_MAX_BODY_BYTES = VERSE_TERMINAL_REDACT_MAX_BYTES * 3 + 1024;
@@ -153,6 +182,8 @@ export interface TerminalApiDeps {
   history?: () => TerminalHistoryStore;
   /** Model seams for /assist (default: the local model, then Grok when configured). */
   assist?: AssistDeps;
+  /** 3.15: the local model behind fix chips (default: terminal-assist.ts `localAssistComplete`). */
+  fixAssist?: (cfg: AshlrConfig) => { complete: AssistComplete; model: string };
 }
 
 async function defaultOpenInEditor(absPath: string, line: number, cfg: AshlrConfig): Promise<void> {
@@ -166,7 +197,12 @@ let deps: TerminalApiDeps = {};
 /** Test hook (null restores the defaults). */
 export function setTerminalApiDepsForTest(next: TerminalApiDeps | null): void {
   deps = next ?? {};
+  fixCache.clear();
+  fixInflight.clear();
 }
+
+const fixCache = new Map<string, VerseTerminalFixResponse>();
+const fixInflight = new Map<string, Promise<VerseTerminalFixResponse>>();
 
 function manager(): TerminalManager {
   return (deps.manager ?? getTerminalManager)();
@@ -373,6 +409,9 @@ async function handleCreate(req: IncomingMessage, res: ServerResponse): Promise<
   const cwd = rawCwd ? await resolveCwdWithin(root, rawCwd) : null;
   let startCommand: string | null = null;
   if (appId) startCommand = await appStartCommand(appId, via, model);
+  // 3.15: hooks extend the agent's OWN argv only; a launch through Ollama is read from its output.
+  const native = (via === undefined || via === 'native') && model === undefined;
+  const agentStatus = appId ? { hooksBaseUrl: native ? loopbackOrigin(req) : null } : null;
   if (devServerId) {
     const servers = await discoverDevServers(sessionRoots(session), deps.devServers ? { deps: deps.devServers } : {});
     const server = servers.find((s) => s.id === devServerId);
@@ -393,8 +432,198 @@ async function handleCreate(req: IncomingMessage, res: ServerResponse): Promise<
     startCommand,
     cwd,
     ...(shellIntegration === false ? { shellIntegration: false } : {}),
+    ...(agentStatus ? { agentStatus } : {}),
   });
   sendJson(res, 201, { tab });
+}
+
+/**
+ * The server's own loopback origin, as the request arrived on it — where an
+ * agent tab's hooks call back. Null when the listener is not IPv4 loopback
+ * (the hooks then stay off and the tab's status is read from its output).
+ */
+function loopbackOrigin(req: IncomingMessage): string | null {
+  const address = req.socket?.localAddress ?? '';
+  const port = req.socket?.localPort;
+  if (typeof port !== 'number' || port <= 0) return null;
+  if (address === '127.0.0.1' || address === '::ffff:127.0.0.1') return `http://127.0.0.1:${port}`;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// 3.15: agent status callbacks, fix suggestions, launch configurations
+// ---------------------------------------------------------------------------
+
+async function handleAgentState(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+  // A hook script is not a page: anything a browser sends carries an Origin.
+  if (req.headers['origin'] !== undefined || req.headers['sec-fetch-site'] !== undefined) {
+    sendJson(res, 403, { code: 'TERMINAL_AGENT_FORBIDDEN', error: 'not from a page' });
+    return;
+  }
+  const token = req.headers[VERSE_TERMINAL_AGENT_TOKEN_HEADER];
+  let state: string | null = null;
+  try {
+    const values = new URL(req.url ?? '/', 'http://localhost').searchParams.getAll('state');
+    state = values.length === 1 ? values[0]! : null;
+  } catch {
+    state = null;
+  }
+  if (!state || !(AGENT_STATES as readonly string[]).includes(state)) throw new BadRequest(400, 'state must be running, idle or needs-you');
+  let raw: string;
+  try {
+    raw = await readBody(req, AGENT_STATE_MAX_BODY_BYTES);
+  } catch {
+    throw new BadRequest(413, 'body too large', 'VERSE_TOO_LARGE');
+  }
+  let parsed: unknown = null;
+  try {
+    parsed = raw.trim().length > 0 ? JSON.parse(raw) : null;
+  } catch {
+    parsed = null;
+  }
+  const read = readHookBody(parsed, state as VerseTerminalAgentStateName);
+  const message = read.message ? cleanAgentMessage(scrubSecrets(read.message)) : null;
+  // Unknown tab, a tab without hooks and a wrong token all look the same.
+  if (typeof token !== 'string' || !manager().reportAgentState(id, token, read.state, message)) {
+    sendJson(res, 404, { code: 'TERMINAL_NOT_FOUND', error: 'terminal not found' });
+    return;
+  }
+  noContent(res);
+}
+
+async function handleFix(ctx: { cfg: AshlrConfig }, req: IncomingMessage, res: ServerResponse, tabId: string, blockId: string): Promise<void> {
+  await readJsonBody(req, []);
+  const found = manager().blockOutput(tabId, blockId);
+  if (!found) {
+    sendJson(res, 404, { code: 'TERMINAL_BLOCK_NOT_FOUND', error: 'block not found' });
+    return;
+  }
+  const { block, bytes } = found;
+  if (block.state !== 'done' || block.exitCode === null || block.exitCode === 0) {
+    throw new BadRequest(400, 'only a command that failed has fixes to suggest');
+  }
+  const key = `${tabId}:${blockId}`;
+  const cached = fixCache.get(key);
+  if (cached) {
+    sendJson(res, 200, cached);
+    return;
+  }
+  let pending = fixInflight.get(key);
+  if (!pending) {
+    const assist = (deps.fixAssist ?? localAssistComplete)(ctx.cfg);
+    // The chat form, scrubbed — the model is local, but a suggestion is shown on screen.
+    const input = {
+      command: scrubSecrets(block.command),
+      output: scrubSecrets(terminalBytesToText(bytes)),
+      exitCode: block.exitCode,
+      cwd: block.cwd,
+    };
+    pending = suggestFixCommands(input, assist.complete).then((suggestions) => ({ suggestions, model: assist.model }));
+    fixInflight.set(key, pending);
+    void pending.finally(() => fixInflight.delete(key)).catch(() => undefined);
+  }
+  let result: VerseTerminalFixResponse;
+  try {
+    result = await pending;
+  } catch {
+    sendJson(res, 503, { code: 'TERMINAL_ASSIST_UNAVAILABLE', error: 'The local model did not answer. Is Ollama running?' });
+    return;
+  }
+  fixCache.set(key, result);
+  while (fixCache.size > FIX_CACHE_MAX) fixCache.delete(fixCache.keys().next().value!);
+  sendJson(res, 200, result);
+}
+
+async function handleLaunchList(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let sessionId: string | null = null;
+  try {
+    const params = new URL(req.url ?? '/', 'http://localhost').searchParams;
+    const extra = [...params.keys()].filter((k) => k !== 'sessionId');
+    if (extra.length > 0) throw new BadRequest(400, `unknown query parameter: ${extra[0]!.slice(0, 40)}`);
+    const values = params.getAll('sessionId');
+    sessionId = values.length === 1 ? values[0]! : null;
+  } catch (err) {
+    if (err instanceof BadRequest) throw err;
+    sessionId = null;
+  }
+  const session = await requireSession(sessionId);
+  sendJson(res, 200, await readLaunchConfigs(sessionRoots(session)));
+}
+
+async function handleLaunch(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readJsonBody(req, ['sessionId', 'root', 'name', 'digest', 'cols', 'rows']);
+  const cols = requiredDimension(body, 'cols');
+  const rows = requiredDimension(body, 'rows');
+  const session = await requireSession(body['sessionId']);
+  const name = optionalString(body, 'name');
+  if (!name) throw new BadRequest(400, 'name is required');
+  const digest = optionalString(body, 'digest');
+  if (!digest || !/^(?:[a-f0-9]{8}-){7}[a-f0-9]{8}$/.test(digest)) throw new BadRequest(400, 'the reviewed launch digest is required');
+  const m = manager();
+  if (!m.available().available) throw new TerminalError('TERMINAL_UNAVAILABLE', m.available().reason ?? 'terminal unavailable');
+  const root = await resolveRoot(session, optionalString(body, 'root'));
+  // Re-read from disk: the commands typed are the file's, never the request's.
+  const { configs, errors } = await readLaunchConfigs([root]);
+  const config = configs.find((c) => c.name === name);
+  if (!config) {
+    const why = errors[0]?.error;
+    sendJson(res, 404, { code: 'TERMINAL_LAUNCH_NOT_FOUND', error: why ? `That launch configuration cannot be used: ${why}` : 'No launch configuration by that name in this folder.' });
+    return;
+  }
+  if (config.digest !== digest) {
+    throw new BadRequest(409, 'This launch configuration changed since you reviewed it. Reopen the dialog and review the new commands.', 'TERMINAL_LAUNCH_CHANGED');
+  }
+  const out: VerseTerminalLaunchResponse = { groups: [], errors: [] };
+  const hooksBaseUrl = loopbackOrigin(req);
+  // Resolve every cwd and catalog command before the first shell starts. A
+  // broken later pane must not leave earlier commands running unexpectedly.
+  const planned: Array<{ split: 'right' | 'down'; panes: Array<{ label: string; cwd: string | null; startCommand: string | null; agent: string | null }> }> = [];
+  for (const tab of config.tabs) {
+    const panes: (typeof planned)[number]['panes'] = [];
+    for (const pane of tab.panes) {
+      const label = pane.agent ?? pane.command ?? 'shell';
+      try {
+        const cwd = pane.cwd ? await resolveCwdWithin(root, join(root, pane.cwd)) : null;
+        const startCommand = pane.agent ? await appStartCommand(pane.agent, undefined, undefined) : pane.command;
+        panes.push({ label, cwd, startCommand, agent: pane.agent });
+      } catch (err) {
+        const text = err instanceof BadRequest || err instanceof TerminalError ? err.message : 'could not be validated';
+        out.errors.push(`${label.slice(0, 60)}: ${text}`);
+      }
+    }
+    planned.push({ split: tab.split, panes });
+  }
+  if (out.errors.length > 0) {
+    sendJson(res, 409, { code: 'TERMINAL_LAUNCH_INVALID', error: 'The launch configuration has invalid panes. No terminals were opened.', errors: out.errors });
+    return;
+  }
+  outer: for (const tab of planned) {
+    const opened: VerseTerminalTab[] = [];
+    for (const pane of tab.panes) {
+      try {
+        opened.push(await m.create({
+          sessionId: session.id,
+          root,
+          cols,
+          rows,
+          appId: pane.agent,
+          devServerId: null,
+          startCommand: pane.startCommand,
+          cwd: pane.cwd,
+          ...(pane.agent ? { agentStatus: { hooksBaseUrl } } : {}),
+        }));
+      } catch (err) {
+        const text = err instanceof BadRequest || err instanceof TerminalError ? err.message : 'could not be opened';
+        out.errors.push(`${pane.label.slice(0, 60)}: ${text}`);
+        if (err instanceof TerminalError && (err.code === 'TERMINAL_LIMIT' || err.code === 'TERMINAL_UNAVAILABLE')) {
+          if (opened.length > 0) out.groups.push({ split: tab.split, tabs: opened });
+          break outer;
+        }
+      }
+    }
+    if (opened.length > 0) out.groups.push({ split: tab.split, tabs: opened });
+  }
+  sendJson(res, 201, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -852,6 +1081,37 @@ export const handleTerminalApi: ApiModule = async (ctx, req, res, path, method) 
     if (path === VERSE_TERMINAL_REDACT_PATH) {
       if (method !== 'POST') return false;
       await handleRedact(req, res);
+      return true;
+    }
+
+    if (path === VERSE_TERMINAL_LAUNCH_PATH) {
+      if (method === 'GET') {
+        await handleLaunchList(req, res);
+        return true;
+      }
+      if (method === 'POST') {
+        await handleLaunch(req, res);
+        return true;
+      }
+      return false;
+    }
+
+    const agentMatch = VERSE_TERMINAL_AGENT_STATE_PATH_RE.exec(path);
+    if (agentMatch) {
+      if (method !== 'POST') return false;
+      await handleAgentState(req, res, agentMatch[1]!);
+      return true;
+    }
+
+    const fixMatch = FIX_ROUTE_RE.exec(path);
+    if (fixMatch) {
+      const [, tabId, blockId] = fixMatch as unknown as [string, string, string];
+      if (method !== 'POST') return false;
+      if (!TERMINAL_TAB_ID_RE.test(tabId)) {
+        sendJson(res, 404, { code: 'TERMINAL_NOT_FOUND', error: 'terminal not found' });
+        return true;
+      }
+      await handleFix(ctx, req, res, tabId, blockId);
       return true;
     }
 

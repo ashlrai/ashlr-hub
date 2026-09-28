@@ -444,6 +444,7 @@
     "src/core/orient.ts",
     "src/core/phantom.ts",
     "src/core/playbooks/builtins.ts",
+    "src/core/playbooks/command-template.ts",
     "src/core/playbooks/lanes.ts",
     "src/core/playbooks/parse.ts",
     "src/core/playbooks/resolve.ts",

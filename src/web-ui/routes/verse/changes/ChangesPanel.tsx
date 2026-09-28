@@ -20,8 +20,17 @@
  * always opens a preview first (UndoDialog) — later edits are never silently
  * overwritten. A file reject asks for a second click.
  *
- * Self-contained: it needs only the chat id. register.ts registers it with the
- * pane registry (⇧⌘D) through ChangesPaneHost.
+ * REVIEW COMMENTS. Comment on a hunk or a line (HunkPatch + ReviewThread);
+ * drafts persist per chat + turn (review-comments.ts). "Send N comments" is
+ * ONE turn to this chat's own seat with `path:line — comment` anchors and
+ * short excerpts; "Re-review with…" asks ANOTHER seat for a read-only review
+ * of the diff (plus the drafts as context) in a new, linked chat. Both go
+ * through ask-seat.ts, so the spend chokepoint, readiness gate and mutation
+ * token apply exactly as to a typed message.
+ *
+ * Self-contained: it needs only the chat id (sending needs the chat record
+ * and seats too). register.ts registers it with the pane registry (⇧⌘D)
+ * through ChangesPaneHost.
  */
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type {
@@ -38,7 +47,11 @@ import { EmptyState } from '../../../components/primitives/EmptyState.js';
 import { Segmented } from '../../../components/primitives/Segmented.js';
 import { SkeletonLine } from '../../../components/primitives/Skeleton.js';
 import { IconCheck, IconRefresh, IconX } from '../../../components/primitives/icons.js';
-import { useTokenGate } from '../context/use-token-gate.js';
+import type { VerseSeat, VerseSession } from '../../../data/api-types.js';
+import { describeContextError, useTokenGate } from '../context/use-token-gate.js';
+import { askableSeats, askSeat, type AskSeatResult } from '../multimodel/ask-seat.js';
+import { DEFAULT_FLOW_API, type FlowTarget } from '../multimodel/multimodel-flows.js';
+import type { ThreadRelation } from '../../../../core/verse/multimodel/types.js';
 import { CommitDialog, CreatePrDialog } from '../git/GitDialogs.js';
 import { describeGitError, type GitStatusView } from '../git/git-model.js';
 import { commitGit, fetchGitStatus, openGitPr } from '../git/git-queries.js';
@@ -53,7 +66,22 @@ import {
   type Resolutions,
 } from './changes-model.js';
 import { checkpointClient, describeCheckpointError, errorCode, type CheckpointClient } from './checkpoint-queries.js';
-import { HunkPatch, type PatchLayout } from './HunkPatch.js';
+import { HunkPatch, type HunkReview, type PatchLayout } from './HunkPatch.js';
+import { ReReviewMenu } from './ReReviewMenu.js';
+import {
+  MESSAGE_MAX_BYTES,
+  anchorLabel,
+  buildCommentsMessage,
+  buildReReviewMessage,
+  loadComments,
+  newCommentId,
+  saveComments,
+  sortComments,
+  utf8Bytes,
+  type CommentAnchor,
+  type ReviewComment,
+  type ReviewFilePatch,
+} from './review-comments.js';
 import { UndoDialog } from './UndoDialog.js';
 import chrome from '../dock/pane-chrome.module.css';
 import review from '../git/DiffPane.module.css';
@@ -75,7 +103,24 @@ export interface ChangesPanelProps {
   };
   /** Poll interval while a turn runs (ms). */
   pollMs?: number;
+  /** The chat's record — needed to send review comments (its seat, folders, title). */
+  session?: VerseSession | null;
+  /** The bootstrap's seats: labels, and the "Re-review with…" menu. */
+  seats?: readonly VerseSeat[];
+  /** Open another chat (the reviewer's) — PaneHost.openSession. */
+  onOpenSession?: (sessionId: string) => void;
+  /** Test seam: sends a message to a seat (default: ask-seat.ts over the real session calls). */
+  ask?: AskFn;
 }
+
+export type AskFn = (input: { source: VerseSession; target: FlowTarget; text: string; title?: string; relation?: ThreadRelation }) => Promise<AskSeatResult>;
+
+const defaultAsk: AskFn = (input) => askSeat(DEFAULT_FLOW_API, input);
+
+const NO_SEATS: readonly VerseSeat[] = [];
+const NO_COMMENTS: readonly ReviewComment[] = [];
+/** Files fetched for one "Re-review with…" before the rest are only named. */
+const REVIEW_MAX_FILES = 60;
 
 type Load<T> = { state: 'idle' } | { state: 'loading' } | { state: 'ready'; data: T } | { state: 'error'; message: string; code: string | null };
 
@@ -91,7 +136,17 @@ type GitDialog = { kind: 'commit' | 'pr'; root: string; status: GitStatusView } 
 
 const DEFAULT_GIT = { status: fetchGitStatus, commit: commitGit, openPr: openGitPr };
 
-export function ChangesPanel({ sessionId, visible = true, client = checkpointClient, git = DEFAULT_GIT, pollMs = 3_000 }: ChangesPanelProps) {
+export function ChangesPanel({
+  sessionId,
+  visible = true,
+  client = checkpointClient,
+  git = DEFAULT_GIT,
+  pollMs = 3_000,
+  session = null,
+  seats = NO_SEATS,
+  onOpenSession,
+  ask = defaultAsk,
+}: ChangesPanelProps) {
   const [list, setList] = useState<Load<VerseCheckpointListResponse>>({ state: 'idle' });
   const [turnId, setTurnId] = useState<string | null>(null);
   const [rootId, setRootId] = useState<string | null>(null);
@@ -103,7 +158,10 @@ export function ChangesPanel({ sessionId, visible = true, client = checkpointCli
   const [reload, setReload] = useState(0);
   const [busy, setBusy] = useState<{ file: string; hunk: string | null } | null>(null);
   const [armed, setArmed] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ text: string; tone: 'ok' | 'error' } | null>(null);
+  const [notice, setNotice] = useState<{ text: string; tone: 'ok' | 'error'; open?: { sessionId: string; label: string } } | null>(null);
+  /** Drafted review comments, tagged with the turn they belong to (loaded from storage on a turn change). */
+  const [drafts, setDrafts] = useState<{ turnId: string | null; list: readonly ReviewComment[] }>({ turnId: null, list: NO_COMMENTS });
+  const [sending, setSending] = useState<'comments' | 'review' | null>(null);
   const [undo, setUndo] = useState<UndoState>(null);
   const [gitDialog, setGitDialog] = useState<GitDialog>(null);
   const [gitBusy, setGitBusy] = useState(false);
@@ -326,6 +384,135 @@ export function ChangesPanel({ sessionId, visible = true, client = checkpointCli
     }
   };
 
+  // ---- review comments -----------------------------------------------------------
+
+  useEffect(() => {
+    if (turnId === null || drafts.turnId === turnId) return;
+    setDrafts({ turnId, list: loadComments(sessionId, turnId) });
+  }, [sessionId, turnId, drafts.turnId]);
+
+  const comments = turnId !== null && drafts.turnId === turnId ? drafts.list : NO_COMMENTS;
+
+  /**
+   * Change the drafts of turn `t` — the one on screen or, after a send that
+   * outlived a turn switch, the one that was: its stored list is edited then.
+   */
+  const updateDrafts = useCallback((t: string, fn: (list: readonly ReviewComment[]) => readonly ReviewComment[]) => {
+    setDrafts((prev) => {
+      const base = prev.turnId === t ? prev.list : loadComments(sessionId, t);
+      const next = fn(base);
+      // A refused write (private window, full quota) only loses persistence.
+      saveComments(sessionId, t, next);
+      return prev.turnId === t ? { turnId: t, list: next } : prev;
+    });
+  }, [sessionId]);
+
+  const hunkReview = (path: string): HunkReview | undefined => {
+    if (turnId === null) return undefined;
+    const t = turnId;
+    return {
+      comments: comments.filter((c) => c.path === path),
+      onAdd: (anchor: CommentAnchor, body: string) =>
+        updateDrafts(t, (list) => [...list, { ...anchor, id: newCommentId(), body, at: new Date().toISOString() }]),
+      onEdit: (id, body) => updateDrafts(t, (list) => list.map((c) => (c.id === id ? { ...c, body } : c))),
+      onDelete: (id) => updateDrafts(t, (list) => list.filter((c) => c.id !== id)),
+    };
+  };
+
+  const ownLabel = (session ? seats.find((s) => s.id === session.seatId)?.label : null) ?? 'this chat’s agent';
+  const reviewers = useMemo(
+    () => (session ? askableSeats(seats).filter((s) => s.seatId !== session.seatId) : []),
+    [seats, session],
+  );
+
+  const sendComments = async () => {
+    if (!session || turnId === null || comments.length === 0) return;
+    const t = turnId;
+    const built = buildCommentsMessage(comments, { turnLabel: turn ? turnLabelShort(turn) : 'the last turn' });
+    if (built.included.length === 0) {
+      say('These comments are too long to send in one message. Shorten them and send again.', 'error');
+      return;
+    }
+    // The chat's own seat: a turn cannot change seats, so this is the next turn of this chat.
+    const target: FlowTarget = { seatId: session.seatId, model: session.model || null, label: ownLabel, engine: session.engine };
+    const n = built.included.length;
+    setSending('comments');
+    setNotice(null);
+    try {
+      const result = await gate.run(
+        `Send ${plural(n, 'review comment')} to ${ownLabel} as the next turn in this chat.`,
+        () => ask({ source: session, target, text: built.text }),
+      );
+      if (result === null) return;
+      const sent = new Set(built.included);
+      updateDrafts(t, (list) => list.filter((c) => !sent.has(c.id)));
+      say(built.omitted > 0
+        ? `Sent ${plural(n, 'comment')} to ${ownLabel}. ${plural(built.omitted, 'comment')} did not fit in one message and ${built.omitted === 1 ? 'is' : 'are'} still drafted — send again for the rest.`
+        : `Sent ${plural(n, 'comment')} to ${ownLabel}.`);
+      refresh();
+    } catch (err) {
+      say(describeContextError(err), 'error');
+    } finally {
+      setSending(null);
+    }
+  };
+
+  const reReview = async (target: FlowTarget) => {
+    if (!session || !baseTurn || !rootId || diff.state !== 'ready') return;
+    const scope = view === 'turn'
+      ? turnLabelShort(baseTurn)
+      : view === 'all' ? 'everything this chat changed' : `everything since before ${turnLabelShort(baseTurn)}`;
+    setSending('review');
+    setNotice(null);
+    // The diff, file by file in list order, until the message budget is spent;
+    // the rest are only named (the reviewer is on the same folders).
+    const patches: ReviewFilePatch[] = [];
+    const unshown: string[] = [];
+    try {
+      let bytes = 0;
+      const byPath = new Map(files.map((f) => [f.path, f]));
+      for (const path of flat) {
+        const f = byPath.get(path);
+        if (!f) continue;
+        if (f.binary || !f.captured || bytes > MESSAGE_MAX_BYTES || patches.length >= REVIEW_MAX_FILES) {
+          unshown.push(path);
+          continue;
+        }
+        const cached = patch.state === 'ready' && patch.data.patch?.path === path ? patch.data.patch : null;
+        const p = cached ?? (await client.diff({ chatId: sessionId, turnId: baseTurn.turnId, rootId, mode, file: path })).patch;
+        if (!p || p.binary || !p.text.trim()) {
+          unshown.push(path);
+          continue;
+        }
+        patches.push({ path, text: p.text });
+        bytes += utf8Bytes(p.text);
+      }
+    } catch (err) {
+      say(describeCheckpointError(err), 'error');
+      setSending(null);
+      return;
+    }
+    const built = buildReReviewMessage({ authorLabel: ownLabel, scopeLabel: scope, patches, unshown, totals: totals(files), comments });
+    try {
+      const title = `Review · ${session.title.trim().slice(0, 80) || scope}`;
+      const result = await gate.run(
+        `Ask ${target.label} for a read-only review of ${scope}, in a new chat on the same folders.`,
+        () => ask({ source: session, target, text: built.text, relation: 'review', title }),
+      );
+      if (result === null) return;
+      const partial = built.shownFiles < files.length ? ` (${plural(built.shownFiles, 'file')} of ${files.length} in the message; it can read the rest)` : '';
+      setNotice({
+        text: `Asked ${result.label} to review ${scope} in a new chat${partial}.`,
+        tone: 'ok',
+        open: { sessionId: result.sessionId, label: result.label },
+      });
+    } catch (err) {
+      say(describeContextError(err), 'error');
+    } finally {
+      setSending(null);
+    }
+  };
+
   // ---- keyboard: ↑ ↓ Home End walk the file list --------------------------------
 
   const onListKey = (e: ReactKeyboardEvent<HTMLUListElement>) => {
@@ -462,6 +649,15 @@ export function ChangesPanel({ sessionId, visible = true, client = checkpointCli
           ) : null}
           <Button size="sm" variant="ghost" disabled={running || !rootId} onClick={() => void openGit('commit')}>Commit…</Button>
           <Button size="sm" variant="ghost" disabled={running || !rootId} onClick={() => void openGit('pr')}>Open PR…</Button>
+          {session ? (
+            <ReReviewMenu
+              seats={reviewers}
+              onPick={(seat) => void reReview(seat)}
+              disabled={sending !== null || diff.state !== 'ready' || files.length === 0}
+              busy={sending === 'review'}
+              disabledReason={reviewers.length === 0 ? 'No other seat is available to review' : files.length === 0 ? 'No changes to review' : undefined}
+            />
+          ) : null}
         </div>
       </div>
 
@@ -469,7 +665,48 @@ export function ChangesPanel({ sessionId, visible = true, client = checkpointCli
         <p className={styles.banner} role="status">A turn is running. Changes update when it ends; restoring waits until then.</p>
       ) : null}
       {notice ? (
-        <p className={styles.notice} role={notice.tone === 'error' ? 'alert' : 'status'} data-tone={notice.tone}>{notice.text}</p>
+        <p className={styles.notice} role={notice.tone === 'error' ? 'alert' : 'status'} data-tone={notice.tone}>
+          {notice.text}
+          {notice.open && onOpenSession ? (
+            <>
+              {' '}
+              <button type="button" className={review.linkButton} onClick={() => onOpenSession(notice.open!.sessionId)}>
+                Open {notice.open.label}’s review
+              </button>
+            </>
+          ) : null}
+        </p>
+      ) : null}
+      {comments.length > 0 ? (
+        <div className={styles.drafts} role="region" aria-label="Draft review comments">
+          <details className={styles.draftList}>
+            <summary>{plural(comments.length, 'draft comment')}{turn ? ` on ${turnLabelShort(turn)}` : ''}</summary>
+            <ul>
+              {sortComments(comments).map((c) => (
+                <li key={c.id}>
+                  <button type="button" className={review.linkButton} disabled={!flat.includes(c.path)}
+                    onClick={() => setFile(c.path)} aria-label={`Show ${anchorLabel(c)}`} title={flat.includes(c.path) ? undefined : 'Not in this view'}>
+                    <code>{anchorLabel(c)}</code>
+                  </button>
+                  <span className={styles.draftBody}>{c.body}</span>
+                  <button type="button" className={review.linkButton} data-tone="danger"
+                    onClick={() => turnId !== null && updateDrafts(turnId, (list) => list.filter((x) => x.id !== c.id))}
+                    aria-label={`Delete the comment at ${anchorLabel(c)}`}>Delete</button>
+                </li>
+              ))}
+            </ul>
+          </details>
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={!session || running || sending !== null}
+            busy={sending === 'comments'}
+            title={!session ? 'Open the chat to send comments' : running ? 'Wait for the running turn to finish' : `Send them to ${ownLabel} as the next turn`}
+            onClick={() => void sendComments()}
+          >
+            Send {plural(comments.length, 'comment')}
+          </Button>
+        </div>
       ) : null}
 
       {noCheckpoint ? (
@@ -557,6 +794,7 @@ export function ChangesPanel({ sessionId, visible = true, client = checkpointCli
                 actionable={actionable}
                 busyHunk={busy && busy.file === patchData.path ? busy.hunk : null}
                 onHunk={(hash, decision) => void reviewAction({ file: patchData.path, hunk: hash }, decision)}
+                review={hunkReview(patchData.path)}
               />
             )}
           </div>

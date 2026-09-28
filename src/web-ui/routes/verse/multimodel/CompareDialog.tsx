@@ -30,7 +30,12 @@ import { formatTokens } from '../verse-readouts.js';
 import { DEFAULT_FLOW_API, pickWinner, startCompare, startReview, type FlowTarget } from './multimodel-flows.js';
 import styles from './multimodel.module.css';
 
-type CompareProps = { mode: 'compare'; prompt: string };
+/**
+ * `selectAll` (3.15, the terminal's "Ask all"): every candidate seat starts
+ * chosen and the cap rises to `maxSeats` — the operator still presses the
+ * button that says how many seats it goes to.
+ */
+type CompareProps = { mode: 'compare'; prompt: string; selectAll?: boolean; maxSeats?: number };
 type ReviewProps = { mode: 'review'; reviewer: SeatAdviceOption; question: string | null; answer: string; authorLabel: string };
 
 export type CompareDialogProps = (CompareProps | ReviewProps) & {
@@ -54,6 +59,9 @@ interface Column {
   /** A fixed text (the answer under review) instead of a live chat. */
   staticText?: string;
 }
+
+/** "Ask all" from the terminal: every ready seat, within reason (each is a real chat and a real turn). */
+const COMPARE_ALL_MAX_SEATS = 8;
 
 function toTarget(o: SeatAdviceOption): FlowTarget {
   return { seatId: o.seatId, model: o.model, label: o.label, engine: o.engine };
@@ -83,7 +91,10 @@ export function CompareDialog(props: CompareDialogProps) {
       seatId: s.seatId, label: s.label, engine: s.engine, model: s.model, local: s.local, note: s.local ? 'free · local' : '',
     }));
   }, [advice, props.advisorSeats]);
-  const [chosen, setChosen] = useState<string[]>(() => defaultCompareSet(advice?.choice ?? null, candidates).map((o) => o.seatId));
+  const maxSeats = props.mode === 'compare' && props.maxSeats ? Math.max(2, Math.min(props.maxSeats, COMPARE_ALL_MAX_SEATS)) : COMPARE_MAX_SEATS;
+  const [chosen, setChosen] = useState<string[]>(() => (props.mode === 'compare' && props.selectAll
+    ? candidates.slice(0, maxSeats).map((o) => o.seatId)
+    : defaultCompareSet(advice?.choice ?? null, candidates).map((o) => o.seatId)));
   const [columns, setColumns] = useState<Column[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -125,7 +136,7 @@ export function CompareDialog(props: CompareDialogProps) {
   }
 
   function toggle(seatId: string) {
-    setChosen((cur) => (cur.includes(seatId) ? cur.filter((id) => id !== seatId) : cur.length >= COMPARE_MAX_SEATS ? cur : [...cur, seatId]));
+    setChosen((cur) => (cur.includes(seatId) ? cur.filter((id) => id !== seatId) : cur.length >= maxSeats ? cur : [...cur, seatId]));
   }
 
   async function choose(column: Column) {
@@ -151,7 +162,7 @@ export function CompareDialog(props: CompareDialogProps) {
               <li key={c.seatId} className={styles.pickRow}>
                 <label>
                   <input type="checkbox" checked={chosen.includes(c.seatId)} onChange={() => toggle(c.seatId)}
-                    disabled={!chosen.includes(c.seatId) && chosen.length >= COMPARE_MAX_SEATS} />
+                    disabled={!chosen.includes(c.seatId) && chosen.length >= maxSeats} />
                   {' '}{c.label}
                 </label>
                 <span className={styles.pickNote}>{c.note}</span>

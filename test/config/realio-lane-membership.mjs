@@ -542,4 +542,5 @@ export const REAL_IO_TEST_FILES = [
   'test/verse-terminal-blocks-315.test.ts', // binds a real loopback HTTP server for the terminal block/redact/open-file routes
   'test/verse-terminal-shell-integration-315.test.ts', // spawns real /bin/zsh and /bin/bash on the generated shell-integration scripts
   'test/verse-terminal-mux-315.test.ts', // binds a real loopback HTTP server for the multiplexed stream, history, settings and assist routes
+  'test/verse-terminal-agents-routes-315.test.ts', // binds a real loopback HTTP server and runs the generated agent hook script (/bin/sh + curl) against it
 ];

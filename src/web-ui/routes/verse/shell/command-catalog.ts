@@ -355,6 +355,16 @@ export const WORKBENCH_COMMANDS = [
   // Served by the shell (run-command.ts → playbooks/playbook-focus.ts): opens
   // Playbooks in "pick one to run" mode; Run… writes its !macro into the chat.
   { id: 'playbook.run', title: 'Run playbook…', scope: 'global', keys: [], group: 'actions', section: 'App', keywords: ['playbook', 'macro', 'template', 'run', 'fix bug', 'bump deps', 'add tests', 'docs sync', 'security fix'] },
+  // Command workflows (kind: command playbooks): fill a command's {{params}}
+  // and PASTE it at a terminal prompt — never run. The terminal panel serves
+  // it with its picker (CommandWorkflowPicker) when it is mounted; otherwise
+  // the shell's fallback (run-command.ts) opens Playbooks narrowed to them.
+  { id: 'terminal.workflows', title: 'Run command workflow…', scope: 'global', keys: [], group: 'actions', section: 'Dock', keywords: ['command workflow', 'workflow', 'terminal', 'shell', 'command', 'snippet', 'template', 'paste', 'params', 'playbook'] },
+  // Launch configurations (.ashlr/verse/launch.json): named terminal layouts —
+  // tabs, splits, cwd, commands. The terminal panel serves it (its dialog);
+  // the shell's fallback opens the Terminal pane with the dialog requested.
+  // The dialog shows every command; nothing is typed until one is launched.
+  { id: 'terminal.launch', title: 'Launch terminal configuration…', scope: 'global', keys: [], group: 'actions', section: 'Dock', keywords: ['launch', 'launch.json', 'layout', 'terminal', 'dev server', 'test watcher', 'tabs', 'splits', 'claude code'] },
   // ── Automations (3.15) ─────────────────────────────────────────────────
   // Served by the shell (run-command.ts → automations/automations-focus.ts).
   { id: 'automations.new', title: 'New automation…', scope: 'global', keys: [], group: 'actions', section: 'App', keywords: ['automation', 'trigger', 'schedule', 'nightly', 'weekly', 'webhook', 'issues labeled', 'fix red main', 'rrule'] },

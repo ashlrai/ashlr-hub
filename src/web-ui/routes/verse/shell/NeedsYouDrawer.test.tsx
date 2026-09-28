@@ -22,7 +22,9 @@ import { getVerseUiState, openVerseNeedsYou, resetVerseUi } from '../verse-ui-st
 import { GuardHost, resetGuard } from './guarded-action.js';
 import { resetResolvedForTest } from './needs-you-actions.js';
 import { NeedsYouDrawer } from './NeedsYouDrawer.js';
-import { activity, approvalNeed, chatFailedNeed, shellFetch, TOKEN, vetoNeed, type ShellFetch } from './shell-fixtures.test-support.js';
+import { isNeedsYouItem, type NeedsYouItem } from '../../../../core/verse/workbench-types.js';
+import { subscribeOpenTerminal, type OpenTerminalRequest } from './open-terminal-request.js';
+import { activity, approvalNeed, chatFailedNeed, fixtureNow, shellFetch, TOKEN, vetoNeed, type ShellFetch } from './shell-fixtures.test-support.js';
 import { resetActivityForTest } from './useActivity.js';
 import { mockCompactViewport, type ViewportMock } from './viewport.test-support.js';
 
@@ -75,6 +77,25 @@ afterEach(() => {
   vi.unstubAllGlobals();
   resetActivityForTest();
 });
+
+/** 3.15: a CLI agent in a terminal tab waiting on the operator (terminal-activity.ts's shape). */
+function agentWaitingNeed(tabId = 't-ab12', sessionId: string | null = 's-7'): NeedsYouItem {
+  const item: NeedsYouItem = {
+    id: `chats:agent-waiting:${tabId}`,
+    source: 'chats',
+    kind: 'agent-waiting',
+    severity: 'warn',
+    title: 'Claude Code needs you · ashlr-hub',
+    detail: 'Approve the edit to package.json?',
+    since: new Date(fixtureNow() - 30_000).toISOString(),
+    expiresAt: null,
+    subject: { repo: null, pr: null, seatId: null, sessionId, engine: 'claude' },
+    target: { kind: 'terminal', sessionId, tabId },
+    actions: [],
+  };
+  if (!isNeedsYouItem(item)) throw new Error('not a valid NeedsYouItem');
+  return item;
+}
 
 const selected = () => screen.getByRole('listbox').querySelector('[aria-selected="true"]')?.textContent ?? '';
 
@@ -274,6 +295,38 @@ describe('NeedsYouDrawer', () => {
     const other = await screen.findByLabelText('Item detail');
     expect(await within(other).findByText('claude-z')).not.toHaveAttribute('title');
     expect(within(other).getByText('claude:claude-fable-9')).not.toHaveAttribute('title');
+  });
+
+  it('↩ on an agent waiting in a terminal goes straight to that tab, in its chat', async () => {
+    setup(activity({ needsYou: [agentWaitingNeed()] }));
+    const requests: OpenTerminalRequest[] = [];
+    const off = subscribeOpenTerminal((r) => requests.push(r));
+    try {
+      const user = userEvent.setup();
+      await openDrawer();
+      await screen.findByRole('listbox');
+      expect(selected()).toContain('Claude Code needs you');
+      await user.keyboard('{Enter}');
+      expect(requests).toEqual([{ tabId: 't-ab12', blockId: null, sessionId: 's-7' }]);
+      await waitFor(() => expect(getVerseUiState().overlay).toBeNull());
+    } finally {
+      off();
+    }
+  });
+
+  it('a click on a terminal row does the same, for a tab with no chat too', async () => {
+    setup(activity({ needsYou: [agentWaitingNeed('t-zz9', null)] }));
+    const requests: OpenTerminalRequest[] = [];
+    const off = subscribeOpenTerminal((r) => requests.push(r));
+    try {
+      const user = userEvent.setup();
+      await openDrawer();
+      const list = await screen.findByRole('listbox');
+      await user.click(within(list).getByText(/Claude Code needs you/));
+      expect(requests).toEqual([{ tabId: 't-zz9', blockId: null, sessionId: null }]);
+    } finally {
+      off();
+    }
   });
 
   it('says "All clear" only when every producer answered', async () => {

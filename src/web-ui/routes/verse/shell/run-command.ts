@@ -252,6 +252,20 @@ export function registerShellCommandHandlers(): () => void {
     registerCommandHandler('wiki.ask', () => { void import('../wiki/wiki-focus.js').then((m) => m.requestWikiFocus({ kind: 'ask', projectPath: null })); }),
     // Playbooks (3.15): the section takes the request once its chunk mounts (playbook-focus.ts).
     registerCommandHandler('playbook.run', () => { void import('../playbooks/playbook-focus.js').then((m) => m.requestPlaybookFocus({ kind: 'run' })); }),
+    // Command workflows: the FALLBACK. The terminal panel registers its own
+    // handler (its picker) later, and the newest handler is asked first, so
+    // this only runs when no terminal panel is mounted (or it declines):
+    // Playbooks, narrowed to command workflows, pastes into the chat's terminal.
+    registerCommandHandler('terminal.workflows', () => { void import('../playbooks/playbook-focus.js').then((m) => m.requestPlaybookFocus({ kind: 'workflows' })); }),
+    // Launch configurations: the FALLBACK, same pattern — the terminal panel's
+    // own handler wins when it is mounted; otherwise open the Terminal pane
+    // with its launch dialog requested (it lists; nothing is typed until Launch).
+    registerCommandHandler('terminal.launch', () => {
+      void import('../dock/dock-store.js').then((m) => {
+        m.openDockPane('terminal');
+        m.requestTerminal({ launch: true });
+      });
+    }),
     // Automations (3.15): the section opens the New form once its chunk mounts.
     registerCommandHandler('automations.new', () => { void import('../automations/automations-focus.js').then((m) => m.requestAutomationsFocus('new')); }),
   ];

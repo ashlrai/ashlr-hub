@@ -16,6 +16,10 @@ import type {
   VerseTerminalBlocksResponse,
   VerseTerminalCreateRequest,
   VerseTerminalHistoryResponse,
+  VerseTerminalFixResponse,
+  VerseTerminalLaunchListResponse,
+  VerseTerminalLaunchRequest,
+  VerseTerminalLaunchResponse,
   VerseTerminalOpenFileRequest,
   VerseTerminalSettings,
   VerseTerminalTab,
@@ -26,6 +30,7 @@ import {
   VERSE_TERMINAL_ASSIST_PATH,
   VERSE_TERMINAL_HISTORY_CLEAR_PATH,
   VERSE_TERMINAL_HISTORY_PATH,
+  VERSE_TERMINAL_LAUNCH_PATH,
   VERSE_TERMINAL_PATH,
   VERSE_TERMINAL_REDACT_PATH,
   VERSE_TERMINAL_SETTINGS_PATH,
@@ -55,6 +60,12 @@ export interface PanelTerminalApi extends TerminalApi {
   assist?(req: VerseTerminalAssistRequest): Promise<VerseTerminalAssistResponse>;
   /** Files in the chat's folders matching `query` (the composer's `@` index). */
   files?(sessionId: string, query: string, signal?: AbortSignal): Promise<Array<{ path: string; root: string }>>;
+  /** 3.15: the local model's candidate commands for a failed block (optional: older fakes). */
+  fix?(tabId: string, blockId: string): Promise<VerseTerminalFixResponse>;
+  /** 3.15: the chat's launch configurations. */
+  launchList?(sessionId: string): Promise<VerseTerminalLaunchListResponse>;
+  /** 3.15: open a launch configuration's tabs (its commands come from the file on the server). */
+  launch?(req: VerseTerminalLaunchRequest): Promise<VerseTerminalLaunchResponse>;
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
@@ -89,4 +100,7 @@ export const panelTerminalApi: PanelTerminalApi = {
   updateSettings: (patch) => post<VerseTerminalSettings>(VERSE_TERMINAL_SETTINGS_PATH, patch),
   assist: (req) => post<VerseTerminalAssistResponse>(VERSE_TERMINAL_ASSIST_PATH, req),
   files: async (sessionId, query, signal) => (await searchSessionFiles(sessionId, query, signal)).files,
+  fix: (tabId, blockId) => post<VerseTerminalFixResponse>(`${tabBase(tabId)}/blocks/${encodeURIComponent(blockId)}/fix`, {}),
+  launchList: (sessionId) => apiGet<VerseTerminalLaunchListResponse>(`${VERSE_TERMINAL_LAUNCH_PATH}?sessionId=${encodeURIComponent(sessionId)}`),
+  launch: (req) => post<VerseTerminalLaunchResponse>(VERSE_TERMINAL_LAUNCH_PATH, req),
 };

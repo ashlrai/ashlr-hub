@@ -19,9 +19,15 @@
  * — the leaf docks CommandInput under the terminal and gives it the keyboard.
  * Typing into the terminal itself at that prompt hands the prompt to the
  * shell's own line editor until the next one; a Raw shell never shows it.
+ * 3.15 MANY AGENTS. Over the terminal view: the RUNNING command's sticky
+ * header (once its prompt line has scrolled away), a bar offering to open a
+ * loopback URL the command printed in the Browser pane, and — after a command
+ * fails — the local model's fix chips. Selection of several blocks lives
+ * here (its blocks are here); what to do with them is the panel's.
+
  */
 import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import type { VerseTerminalBlock, VerseTerminalStreamFrame, VerseTerminalTab } from '../../../data/api-types.js';
+import type { VerseTerminalBlock, VerseTerminalFixResponse, VerseTerminalStreamFrame, VerseTerminalTab } from '../../../data/api-types.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { SkeletonLine } from '../../../components/primitives/Skeleton.js';
 import { IconChevronDown, IconChevronUp, IconX } from '../../../components/primitives/icons.js';
@@ -30,8 +36,12 @@ import { createInputQueue, type InputQueue } from '../dock/terminal/input-queue.
 import { base64ToBytes } from '../dock/terminal/terminal-client.js';
 import type { PanelStreamOpener, TerminalStreamState } from './panel-stream.js';
 import { resolveTerminalFont, resolveTerminalTheme, watchThemeChanges } from '../dock/terminal/terminal-view.js';
-import { BlockList, type BlockAction } from './BlockList.js';
+import { BlockList, type BlockAction, type BlockActionExtra, type BlockListExtras } from './BlockList.js';
 import { blockStatus, markerKey, terminalBlockView, upsertBlock, type BlockView } from './blocks-model.js';
+import { elapsedLabel, EMPTY_SELECTION, pruneSelection, selectBlock, urlLabel, type BlockSelection } from './block-tools.js';
+import { BrowserGlyph } from './extra-glyphs.js';
+import { FixChips, type AskTarget } from './FixChips.js';
+import extra from './TerminalExtras.module.css';
 import type { FileLink } from './file-links.js';
 import type { LeafMode } from './layout-model.js';
 import type { PanelTerminalApi } from './panel-client.js';
@@ -70,6 +80,18 @@ export interface LeafPrefs {
 
 export type LeafNotice = { tone: 'error' | 'info'; text: string };
 
+/** 3.15: what the panel lends every leaf for the many-agents block actions. */
+export interface LeafExtras {
+  /** This tab's bookmarked block ids. */
+  bookmarks: ReadonlySet<string>;
+  /** Null = fix suggestions are off. */
+  loadFix: ((tabId: string, block: BlockView) => Promise<VerseTerminalFixResponse>) | null;
+  askTargets: readonly AskTarget[];
+  onOpenUrl: (url: string) => void;
+  /** Several selected blocks: copy / send / ask about them together. */
+  onSelectionAction: (tabId: string, action: 'copy-output' | 'send' | 'ask', blocks: BlockView[], anchor?: HTMLElement) => void;
+}
+
 /** What the panel can ask of a leaf. */
 export interface LeafHandle {
   focus(): void;
@@ -89,6 +111,9 @@ export interface LeafHandle {
   openAssist(): boolean;
   /** Write bytes to the shell as if typed (in order with the rest), e.g. a ⌃R handed to the shell. */
   sendText(text: string): void;
+  /** 3.15: this tab's blocks as the list shows them (for a link or a request naming one). */
+  blocks(): BlockView[];
+
 }
 
 export interface TerminalLeafProps {
@@ -104,7 +129,7 @@ export interface TerminalLeafProps {
   onFocus: () => void;
   /** Title, exit, cwd, integration: the panel keeps the tab list. */
   onMeta: (tabId: string, frame: Exclude<VerseTerminalStreamFrame, { type: 'output' } | { type: 'block' }>) => void;
-  onBlockAction: (tabId: string, action: BlockAction, block: BlockView) => void;
+  onBlockAction: (tabId: string, action: BlockAction, block: BlockView, extra?: BlockActionExtra) => void;
   /** A block's dot in the terminal was clicked: its actions, anchored there. */
   onBlockMenu: (tabId: string, block: BlockView, anchor: HTMLElement) => void;
   onKeyAction: (tabId: string, action: PanelKeyAction) => void;
@@ -122,6 +147,9 @@ export interface TerminalLeafProps {
   gridSpan?: number;
   /** 3.15: ⌃R in the input editor — the panel opens the history palette. */
   onHistorySearch?: (tabId: string, draft: string) => void;
+  /** 3.15: the many-agents block actions; absent = the 3.15.0 list. */
+  extras?: LeafExtras;
+
 }
 
 interface MarkRecord {
@@ -154,6 +182,10 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
   exitedRef.current = tab.exited !== null;
   const propsRef = useRef(props);
   propsRef.current = props;
+  const [selection, setSelection] = useState<BlockSelection>(EMPTY_SELECTION);
+  /** Fix chips / URL bar dismissed for these blocks (terminal view). */
+  const [dismissed, setDismissed] = useState<ReadonlySet<string>>(() => new Set());
+  const [clock, setClock] = useState(() => Date.now());
 
   // Where the shell is (its OSC 133 marks), for the input editor.
   const [phase, setPhase] = useState<PromptPhase>('unknown');
@@ -595,7 +627,9 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
     jumpTo,
     size: () => (viewRef.current && viewRef.current.cols > 1 ? { cols: viewRef.current.cols, rows: viewRef.current.rows } : null),
     hasOutput: () => writtenSeq.current > 0,
+    blocks: () => blocksRef.current.map(terminalBlockView),
     // At a prompt with the editor showing, a paste lands in the editor (still not run).
+
     paste: pasteText,
     inputActive: () => showInputRef.current,
     insertCommand: pasteText,
@@ -610,9 +644,64 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
   const blockViews = useMemo(() => blocks.map(terminalBlockView), [blocks]);
   const loadOutput = useCallback(async (block: BlockView) =>
     (await deps.api.blockOutput(tab.id, block.id, 'ansi')).output, [deps.api, tab.id]);
-  const onListAction = useCallback((action: BlockAction, block: BlockView) => {
-    propsRef.current.onBlockAction(tab.id, action, block);
+  const onListAction = useCallback((action: BlockAction, block: BlockView, more?: BlockActionExtra) => {
+    propsRef.current.onBlockAction(tab.id, action, block, more);
   }, [tab.id]);
+
+  // -------------------------------------------------------------------------
+  // 3.15: selection, sticky header, URL bar, fix chips
+  // -------------------------------------------------------------------------
+
+  const order = useMemo(() => blockViews.map((b) => b.id), [blockViews]);
+  useEffect(() => { setSelection((sel) => pruneSelection(sel, order)); }, [order]);
+  const extrasProp = props.extras;
+  const listExtras = useMemo<BlockListExtras | undefined>(() => {
+    if (!extrasProp) return undefined;
+    const loadFix = extrasProp.loadFix;
+    return {
+      selection,
+      onSelect: (id, gesture) => setSelection((sel) => selectBlock(sel, order, id, gesture) ?? sel),
+      onClearSelection: () => setSelection(EMPTY_SELECTION),
+      onSelectionAction: (action, anchor) => {
+        const picked = blockViews.filter((b) => selection.ids.has(b.id));
+        if (picked.length > 0) extrasProp.onSelectionAction(tab.id, action, picked, anchor);
+      },
+      bookmarks: extrasProp.bookmarks,
+      loadFix: loadFix ? (block) => loadFix(tab.id, block) : null,
+      askTargets: extrasProp.askTargets,
+      canRerun: !tab.exited && !tab.agent && !blockViews.some((b) => b.running),
+    };
+  }, [extrasProp, selection, order, blockViews, tab.id, tab.exited, tab.agent]);
+
+  const latest = blockViews.at(-1) ?? null;
+  const running = latest && latest.running && !latest.fullscreen && !tab.agent ? latest : null;
+  // The sticky header and its clock tick only while a command runs on screen.
+  useEffect(() => {
+    if (!running || !shown || mode !== 'terminal') return undefined;
+    setClock(Date.now());
+    const timer = setInterval(() => setClock(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [running, shown, mode]);
+  let stickyVisible = false;
+  if (running && ready) {
+    const block = blocksRef.current.find((b) => b.id === running.id);
+    const rec = block ? marks.current.get(markerKey(block.startSeq, block.ordinal)) : undefined;
+    const view = viewRef.current;
+    // Shown once the command's own prompt line has scrolled out of view (clock re-evaluates it).
+    stickyVisible = Boolean(rec && !rec.mark.isDisposed && view && rec.mark.line < view.viewportY());
+  }
+  const urlBlock = extrasProp && latest && (latest.localUrls?.length ?? 0) > 0 && !dismissed.has(`url:${latest.id}`) ? latest : null;
+  const fixBlock = extrasProp && latest && !latest.running && latest.exitCode !== null && latest.exitCode !== 0 && !tab.agent && !dismissed.has(`fix:${latest.id}`) ? latest : null;
+  const fixLoadFn = extrasProp?.loadFix ?? null;
+  // Keyed on the block's id: a later frame for another block must not ask the model again.
+  const fixBlockRef = useRef(fixBlock);
+  fixBlockRef.current = fixBlock;
+  const fixBlockId = fixBlock?.id ?? null;
+  const fixLoad = useMemo(
+    () => (fixLoadFn && fixBlockId ? () => fixLoadFn(tab.id, fixBlockRef.current!) : null),
+    [fixLoadFn, fixBlockId, tab.id],
+  );
+  const dismiss = (key: string) => setDismissed((prev) => new Set(prev).add(key));
 
   const findKey = panelKeyLabel('find', deps.platform);
   const exited = tab.exited;
@@ -671,6 +760,16 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
           if (showInputRef.current && !viewRef.current?.hasSelection()) setTimeout(() => inputRef.current?.focus(), 0);
         }}
       >
+        {running && stickyVisible ? (
+          <div className={extra.stickyRun} role="status" aria-label={`Running: ${running.command || 'command'}`}>
+            <span className={styles.prompt} aria-hidden="true">$</span>
+            <span className={extra.stickyCommand}>{running.command || 'command'}</span>
+            <span className={extra.stickyMeta}>{elapsedLabel(clock - Date.parse(running.startedAt))}</span>
+            <button type="button" className={styles.iconBtn} aria-label="Jump to the running command" title="Jump to where it started"
+              onClick={() => jumpTo(running.id)}>↑</button>
+          </div>
+        ) : null}
+
         <div className={styles.host} ref={hostRef} data-testid={`terminal-host-${tab.id}`} />
         {ready && !exited ? (
           <span className={styles.voiceSlot}>
@@ -711,6 +810,33 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
           onPanelKey={(event) => panelKeyRef.current(event, false)}
         />
       ) : null}
+      {mode === 'terminal' && urlBlock ? (
+        <div className={extra.bar} role="group" aria-label="A local server is up">
+          <span className={extra.barLabel}>Serving</span>
+          {(urlBlock.localUrls ?? []).map((url) => (
+            <button key={url} type="button" className={extra.chip} onClick={() => extrasProp!.onOpenUrl(url)} title={`Open ${url} in the Browser pane`}>
+              <BrowserGlyph size={12} /><span className={extra.chipCode}>{urlLabel(url)}</span><span className={extra.chipVerb}>Open in Browser</span>
+            </button>
+          ))}
+          <span className={extra.barSpacer} />
+          <button type="button" className={extra.chip} aria-label="Dismiss" title="Dismiss" onClick={() => dismiss(`url:${urlBlock.id}`)}>
+            <IconX size={10} />
+          </button>
+        </div>
+      ) : null}
+      {mode === 'terminal' && fixBlock ? (
+        <FixChips
+          key={fixBlock.id}
+          variant="bar"
+          load={fixLoad}
+          askTargets={extrasProp!.askTargets}
+          onPaste={(text) => props.onBlockAction(tab.id, 'paste-text', fixBlock, { text })}
+          onAsk={(seatId) => props.onBlockAction(tab.id, 'ask-seat', fixBlock, { seatId })}
+          onAskMore={(anchor) => props.onBlockAction(tab.id, 'ask', fixBlock, { anchor })}
+          onDismiss={() => dismiss(`fix:${fixBlock.id}`)}
+
+        />
+      ) : null}
 
       {mode === 'blocks' && !replayed && blockViews.length === 0 ? (
         <div className={styles.loading} role="status" aria-label="Loading commands"><SkeletonLine width="60%" /><SkeletonLine width="40%" /></div>
@@ -719,7 +845,10 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
           blocks={blockViews}
           loadOutput={loadOutput}
           onAction={onListAction}
-          actions={['copy-output', 'send', 'explain', 'jump', 'paste']}
+          actions={extrasProp
+            ? ['copy-output', 'send', 'ask', 'explain', 'rerun', 'bookmark', 'copy-link', 'jump', 'paste']
+            : ['copy-output', 'send', 'explain', 'jump', 'paste']}
+          {...(listExtras ? { extras: listExtras } : {})}
           highlightId={highlight}
           label={`Commands in ${tab.title}`}
           emptyTitle={tab.shellIntegration === 'off' ? 'No command blocks for this shell' : 'No commands yet'}

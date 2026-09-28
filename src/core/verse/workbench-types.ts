@@ -151,6 +151,7 @@ export const NEEDS_YOU_KINDS = [
   'agent-spend', // 3.16: an agent is at 80% of its spend cap, or reached it
   'agent-ci', // 3.16: an agent's PR is red with no auto-fix left, or cannot merge
   'agent-setup', // 3.16: an agent workspace's setup script failed (its prompt is held)
+  'agent-waiting', // 3.15: a CLI agent in a terminal tab is waiting on the operator (Claude Code, Codex…)
   // accounts split
   'reconnect', // a seat is signed out or its credential is expiring
   'repin', // a seat is pinned to an older CLI than the newest installed
@@ -179,6 +180,7 @@ export const NEEDS_YOU_KIND_CATEGORY: Readonly<Record<NeedsYouKind, NeedsYouCate
   'agent-spend': 'chats',
   'agent-ci': 'chats',
   'agent-setup': 'chats',
+  'agent-waiting': 'chats',
   reconnect: 'accounts',
   repin: 'accounts',
 };
@@ -237,6 +239,8 @@ export type NeedsYouTarget =
   | { kind: 'approval'; proposalId: string }
   | { kind: 'section'; section: WorkbenchSectionId; anchor: string | null }
   | { kind: 'seat'; seatId: string }
+  /** 3.15: a terminal tab (and the chat it belongs to): the Terminal pane opens on it. */
+  | { kind: 'terminal'; sessionId: string | null; tabId: string }
   /** Opened outside the app (a GitHub PR). https only. */
   | { kind: 'url'; url: string };
 
@@ -339,6 +343,9 @@ function isTarget(value: unknown): value is NeedsYouTarget {
       return typeof value['seatId'] === 'string' && value['seatId'].length > 0;
     case 'url':
       return typeof value['url'] === 'string' && /^https:\/\/[^\s]+$/.test(value['url']) && value['url'].length <= 2048;
+    case 'terminal':
+      return typeof value['tabId'] === 'string' && /^t-[a-z0-9]{1,32}$/.test(value['tabId'])
+        && (value['sessionId'] === null || (typeof value['sessionId'] === 'string' && value['sessionId'].length > 0));
     default:
       return false;
   }
@@ -389,7 +396,7 @@ export function isNeedsYouItem(value: unknown): value is NeedsYouItem {
     if (!isNullableString(subject[key], 300)) return false;
   }
   if (subject['pr'] !== null && !(Number.isInteger(subject['pr']) && (subject['pr'] as number) > 0)) return false;
-  if (subject['engine'] !== null && !['claude', 'codex', 'grok', 'local'].includes(subject['engine'] as string)) return false;
+  if (subject['engine'] !== null && !['claude', 'codex', 'grok', 'local', 'devin'].includes(subject['engine'] as string)) return false;
   if (!isTarget(value['target'])) return false;
   const actions = value['actions'];
   return Array.isArray(actions) && actions.length <= 6 && actions.every(isAction);
@@ -543,6 +550,40 @@ export interface VerseActivityResponse {
   autonomy: VerseAutonomyBadge | null;
   capacity: VerseCapacityBadge | null;
   mind: VerseMindBadge | null;
+  /**
+   * 3.15 — terminal events for the desktop notifier: long commands that
+   * finished, CLI agents that went idle or need the operator. Absent from
+   * servers without it; see VerseActivityTerminal.
+   */
+  terminal?: VerseActivityTerminal | null;
+}
+
+/**
+ * 3.15 — the last few terminal events (newest last). NOT cursor-filtered: the
+ * consumer remembers the highest `seq` it has seen for this `boot` and treats
+ * the first response of a boot as history (never announced).
+ */
+export interface VerseActivityTerminal {
+  /** Changes when the server restarts (seqs restart with it). */
+  boot: string;
+  /** The newest event's seq (0 = none yet). */
+  seq: number;
+  events: VerseTerminalActivityEvent[];
+}
+export type VerseTerminalActivityKind = 'command-finished' | 'agent-idle' | 'agent-needs-you';
+export interface VerseTerminalActivityEvent {
+  seq: number;
+  kind: VerseTerminalActivityKind;
+  tabId: string;
+  /** command-finished: the block. */
+  blockId: string | null;
+  sessionId: string | null;
+  /** The tab's title (never the command line: it can hold a secret). */
+  title: string;
+  agent: VerseTerminalAgentKind | null;
+  exitCode: number | null;
+  durationMs: number | null;
+  at: string;
 }
 
 /** POST /api/verse/activity/seen — the operator has looked at this chat up to `turnCount`. */
@@ -767,7 +808,45 @@ export interface VerseTerminalTab {
   shellIntegration?: VerseTerminalShellIntegration;
   /** 3.15: the tab runs an agent (Apps [Launch ▸]) — hung up when the kill switch is engaged. */
   agent?: boolean;
+  /**
+   * 3.15: what the CLI agent in this tab is doing (running / idle / needs you),
+   * for a tab launched as one of VERSE_TERMINAL_AGENT_KINDS. Null for a plain
+   * shell, and until the agent's first signal.
+   */
+  agentState?: VerseTerminalAgentState | null;
 }
+
+/** 3.15 — the CLI agents whose terminal tabs report a live status. */
+export const VERSE_TERMINAL_AGENT_KINDS = ['claude-code', 'codex', 'devin', 'grok'] as const;
+export type VerseTerminalAgentKind = (typeof VERSE_TERMINAL_AGENT_KINDS)[number];
+export type VerseTerminalAgentStateName = 'running' | 'idle' | 'needs-you';
+
+/**
+ * 3.15 — a terminal agent tab's status. `channel` says how the tab learns it:
+ * `hooks` — per-launch hooks were installed (Claude Code's Stop / Notification
+ * hooks through a temporary `--settings` file, Codex's `notify` through `-c`),
+ * which POST to `/api/verse/terminal/:id/agent-state` with the tab's own
+ * token; `heuristic` — read from the tab's output only (Devin, Grok, or a
+ * launch through Ollama). The operator's global CLI configs are never touched.
+ */
+export interface VerseTerminalAgentState {
+  agent: VerseTerminalAgentKind;
+  state: VerseTerminalAgentStateName;
+  /** ISO time the state began. */
+  since: string;
+  /** Who said so this time: the CLI's hook, or the output heuristic. */
+  source: 'hook' | 'output';
+  channel: 'hooks' | 'heuristic';
+  /** Why it needs you, when the CLI said (one line, ≤ 200 chars); null otherwise. */
+  message: string | null;
+}
+
+/** POST /api/verse/terminal/:id/agent-state?state=… — the hook callback (token-bound, NOT the mutation token). */
+export const VERSE_TERMINAL_AGENT_STATE_PATH_RE = /^\/api\/verse\/terminal\/(t-[a-z0-9]{1,32})\/agent-state$/;
+/** The header the per-launch hook scripts carry their tab's token in. */
+export const VERSE_TERMINAL_AGENT_TOKEN_HEADER = 'x-ashlr-agent-token';
+/** A command at least this long that ends while the app is not in front is announced (desktop notification). */
+export const VERSE_TERMINAL_LONG_COMMAND_MS = 30_000;
 
 export type VerseTerminalShellIntegration = 'active' | 'injected' | 'off';
 
@@ -812,6 +891,11 @@ export interface VerseTerminalBlock {
   evicted: boolean;
   /** The command switched to the alternate screen (vim, less, htop): its output is not a transcript. */
   fullscreen: boolean;
+  /**
+   * 3.15: loopback URLs the command printed (`http://localhost:5173/` …), first
+   * seen first, at most 3 — "Open in Browser pane". Absent on older servers.
+   */
+  localUrls?: string[];
 }
 
 /** GET /api/verse/terminal/:id/blocks */
@@ -931,7 +1015,86 @@ export type VerseTerminalStreamFrame =
   /** The shell's directory changed. */
   | { type: 'cwd'; cwd: string }
   /** Shell integration came up. */
-  | { type: 'integration'; state: VerseTerminalShellIntegration };
+  | { type: 'integration'; state: VerseTerminalShellIntegration }
+  /** 3.15: the tab's CLI agent changed state (null: the agent exited; the tab is a plain shell again). */
+  | { type: 'agent-state'; agentState: VerseTerminalAgentState | null };
+
+/**
+ * 3.15 — POST /api/verse/terminal/:id/blocks/:blockId/fix {} → the LOCAL
+ * model's candidate commands for a block that exited non-zero (terminal-assist.ts).
+ * Never run: the page shows them as chips ([Paste] types one at a prompt).
+ * 503 TERMINAL_ASSIST_UNAVAILABLE when no local model answers.
+ */
+export interface VerseTerminalFixSuggestion {
+  command: string;
+  why: string;
+}
+export interface VerseTerminalFixResponse {
+  suggestions: VerseTerminalFixSuggestion[];
+  /** The local model tag that answered. */
+  model: string;
+}
+
+/**
+ * 3.15 — launch configurations: `.ashlr/verse/launch.json` in a chat's root.
+ *
+ *   { "version": 1, "configurations": [ { "name": "Dev", "tabs": [
+ *       { "split": "right", "panes": [ { "cwd": "web", "command": "npm run dev" }, { "command": "npm test -- --watch" } ] },
+ *       { "panes": [ { "agent": "claude-code" } ] } ] } ] }
+ *
+ * GET  /api/verse/terminal/launch?sessionId=…  → VerseTerminalLaunchListResponse
+ * POST /api/verse/terminal/launch { sessionId, root, name, digest, cols, rows } → VerseTerminalLaunchResponse
+ *
+ * Nothing is typed on load: the configurations are listed (their commands
+ * shown), and a named one's commands are typed only when the operator clicks
+ * it. The POST names a configuration and presents the digest of exactly what
+ * the operator reviewed; a changed file is refused before any shell starts.
+ * Commands still come from the file on the server, never from the request.
+ */
+export const VERSE_TERMINAL_LAUNCH_PATH = '/api/verse/terminal/launch';
+export const VERSE_TERMINAL_LAUNCH_FILE = '.ashlr/verse/launch.json';
+export const VERSE_TERMINAL_LAUNCH_MAX_CONFIGS = 20;
+export const VERSE_TERMINAL_LAUNCH_MAX_TABS = 4;
+export interface VerseTerminalLaunchPane {
+  /** Relative to the root (default: the root). */
+  cwd: string | null;
+  /** Typed (with Enter) when the configuration is launched; null = just a shell. */
+  command: string | null;
+  /** A catalog agent to start instead of a command (its hooks installed like Apps [Launch ▸]). */
+  agent: string | null;
+}
+export interface VerseTerminalLaunchTab {
+  split: 'right' | 'down';
+  /** One or two panes (a tab holds two terminals at most). */
+  panes: VerseTerminalLaunchPane[];
+}
+export interface VerseTerminalLaunchConfig {
+  name: string;
+  /** The chat root whose launch.json declared it. */
+  root: string;
+  tabs: VerseTerminalLaunchTab[];
+  /** Server digest binding the displayed commands, agent IDs, and cwds. */
+  digest: string;
+}
+export interface VerseTerminalLaunchListResponse {
+  configs: VerseTerminalLaunchConfig[];
+  /** A launch.json that exists but could not be used: which root, and why (one line). */
+  errors: Array<{ root: string; error: string }>;
+}
+export interface VerseTerminalLaunchRequest {
+  sessionId: string;
+  root: string;
+  name: string;
+  digest: string;
+  cols: number;
+  rows: number;
+}
+export interface VerseTerminalLaunchResponse {
+  /** Per launched tab, its shells in pane order. A pane that failed to open is left out. */
+  groups: Array<{ split: 'right' | 'down'; tabs: VerseTerminalTab[] }>;
+  /** Panes that could not be opened (one line each). */
+  errors: string[];
+}
 
 /**
  * 3.15 — ONE stream for many shells.

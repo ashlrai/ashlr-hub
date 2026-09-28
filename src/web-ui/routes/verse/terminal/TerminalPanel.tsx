@@ -25,16 +25,41 @@
  *   - Everything sent to a chat — a block, a selection — goes through the
  *     server's secret scrub first (format=chat, /redact).
  *
+ * 3.15 — THE TERMINAL FOR MANY AGENTS
+ *   - Ask any seat: a block's "Ask…" lists every seat (Claude Code, both
+ *     Codex accounts, Grok, Devin CLI / cloud, local models) and sends the
+ *     scrubbed block to that seat's chat — this chat when it is on that seat,
+ *     otherwise a new chat on the same folders (multimodel/ask-seat.ts).
+ *     "Ask all ready seats" opens Compare with every ready seat side by side.
+ *   - Error-fix chips: a failed command gets the LOCAL model's ≤ 3 candidate
+ *     commands ([Paste] types one; nothing runs), opt-out in More.
+ *   - Agent tabs (Claude Code, Codex, Devin, Grok launched here) show live
+ *     status — running / idle / needs you — from per-launch hooks or their
+ *     output (server: terminal-agent-hooks.ts); "needs you" also reaches the
+ *     Needs-you drawer and the desktop notifier.
+ *   - Blocks: multi-select, sticky running header, re-run, filter-in-block,
+ *     bookmarks, verse://terminal links, "Open in Browser pane" for a local URL.
+ *   - Launch configurations (.ashlr/verse/launch.json), typed only on Launch.
+ *
  * CONTRACT. `TerminalPanelProps` below is the whole interface; it is a
  * superset of the dock's 3.10 `TerminalPaneProps`, so the adapter
  * (./TerminalPane.tsx) maps one onto the other and the pane registry (or the
  * dock's slot) mounts it lazily. This file is never imported statically from
  * the chat's first-paint path (terminal-lazy.test.ts).
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import type { VerseTerminalStreamFrame, VerseTerminalListResponse, VerseTerminalTab } from '../../../data/api-types.js';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import type {
+  VerseSeat,
+  VerseSession,
+  VerseTerminalAgentState,
+  VerseTerminalLaunchConfig,
+  VerseTerminalStreamFrame,
+  VerseTerminalListResponse,
+  VerseTerminalTab,
+} from '../../../data/api-types.js';
 import { ApiError } from '../../../data/client.js';
 import { Button, IconButton } from '../../../components/primitives/Button.js';
+import { Dialog } from '../../../components/primitives/Dialog.js';
 import { EmptyState } from '../../../components/primitives/EmptyState.js';
 import { SkeletonLine } from '../../../components/primitives/Skeleton.js';
 import { IconExternalLink, IconPlus, IconSearch, IconSend, IconX } from '../../../components/primitives/icons.js';
@@ -43,6 +68,7 @@ import { ActionMenu, anchorBelow, type ActionMenuItem, type MenuAnchor } from '.
 import { cleanTerminalOutput } from '../chat/ansi.js';
 import { detectKeyPlatform } from '../shell/command-keys.js';
 import { usePollWhileVisible, useSectionVisible } from '../shell/section-visibility.js';
+import { useCommandHandler } from '../shell/command-bus.js';
 import { useViewport } from '../shell/viewport.js';
 import { projectName } from '../verse-model.js';
 import type { VerseTerminalLaunchVia } from '../../../../core/verse/workbench-types.js';
@@ -50,8 +76,22 @@ import { TerminalLockedError } from '../dock/terminal/terminal-client.js';
 import { openMuxedPanelStream, type TerminalStreamState } from './panel-stream.js';
 import { ChevronDownGlyph, TerminalGlyph } from '../dock/terminal/terminal-icons.js';
 import { AgentTerminal } from './AgentTerminal.js';
-import type { BlockAction } from './BlockList.js';
+import type { BlockAction, BlockActionExtra } from './BlockList.js';
 import { blockChatText, fenceFor, type BlockView, type ChatIntent } from './blocks-model.js';
+import {
+  blocksChatText,
+  loadBookmarks,
+  loadFixChipsEnabled,
+  saveFixChipsEnabled,
+  terminalBlockLink,
+  toggleBookmark,
+} from './block-tools.js';
+import { askableSeats, askSeat, firstSeatPerEngine } from '../multimodel/ask-seat.js';
+import { DEFAULT_FLOW_API, type FlowTarget } from '../multimodel/multimodel-flows.js';
+import { toAdvisorSeats } from '../multimodel/useAutoSeat.js';
+import { requestPreview } from '../dock/dock-store.js';
+import { getVerseSessionHead } from '../verse-store.js';
+import extra from './TerminalExtras.module.css';
 import {
   addGroup,
   AGENT_GROUP_ID,
@@ -83,9 +123,13 @@ import { panelTerminalApi, type PanelTerminalApi } from './panel-client.js';
 import { agentToolsApi, type AgentToolsApi } from '../agent-tools/agent-tools-client.js';
 import type { VerseAgentTabInfo } from '../../../../core/verse/verse-mcp-types.js';
 import { panelKeyLabel, type PanelKeyAction } from './panel-keys.js';
-import { TerminalLeaf, type LeafDeps, type LeafHandle, type LeafNotice, type LeafPrefs } from './TerminalLeaf.js';
+import { TerminalLeaf, type LeafDeps, type LeafExtras, type LeafHandle, type LeafNotice, type LeafPrefs } from './TerminalLeaf.js';
 import { createPanelXtermView, type PanelViewFactory } from './xterm-view.js';
 import styles from './TerminalPanel.module.css';
+
+const CompareDialog = lazy(async () => ({ default: (await import('../multimodel/CompareDialog.js')).CompareDialog }));
+const LaunchDialog = lazy(async () => ({ default: (await import('./LaunchDialog.js')).LaunchDialog }));
+const CommandWorkflowPicker = lazy(async () => ({ default: (await import('../playbooks/CommandWorkflowPicker.js')).CommandWorkflowPicker }));
 
 // ===========================================================================
 // Contract
@@ -112,6 +156,12 @@ export interface TerminalPanelRequest {
   assist?: boolean;
   /** 3.15: ⌘K "Search terminal history…". */
   history?: boolean;
+  /** 3.15: focus this tab (a verse://terminal link, a notification, Needs you) and, with blockId, show that block. */
+  tabId?: string;
+  blockId?: string;
+  /** 3.15: open the launch-configuration dialog. */
+  launch?: boolean;
+
 }
 
 export interface TerminalPanelProps {
@@ -129,9 +179,38 @@ export interface TerminalPanelProps {
   onAskChat?: (text: string) => void;
   /** False while the panel is a background tab — stop timers, skip work. */
   visible: boolean;
+  /** 3.15: the chat record ("Ask…" routes from it; default: the store's). */
+  session?: VerseSession | null;
+  /** 3.15: every seat, for "Ask…" (the dock's ChatPaneData). */
+  seats?: readonly VerseSeat[];
+  /** 3.15: switch to another chat (a seat's answer landed in a new chat). */
+  onOpenSession?: (sessionId: string) => void;
   /** Test / host seams. */
   deps?: Partial<TerminalPanelDeps>;
 }
+
+/** The fix chips' "Ask …" row: one seat per family, the ones that fix code. */
+const FIX_ASK_ENGINES = ['claude', 'codex', 'devin'] as const;
+
+/** A tab strip badge for an agent tab's live status. */
+function agentBadge(state: VerseTerminalAgentState | null | undefined): { state: string; label: string; title: string } | null {
+  if (!state) return null;
+  const who = state.agent === 'claude-code' ? 'Claude Code' : state.agent === 'codex' ? 'Codex' : state.agent === 'devin' ? 'Devin' : 'Grok';
+  const how = state.channel === 'hooks' ? 'from its hooks' : 'read from its output';
+  if (state.state === 'needs-you') return { state: 'needs-you', label: 'needs you', title: `${who} needs you${state.message ? `: ${state.message}` : ''} (${how})` };
+  if (state.state === 'running') return { state: 'running', label: 'working', title: `${who} is working (${how})` };
+  return { state: 'idle', label: 'idle', title: `${who} is idle (${how})` };
+}
+
+/** The most urgent status among a tab's panes. */
+function groupAgentState(states: ReadonlyArray<VerseTerminalAgentState | null | undefined>): VerseTerminalAgentState | null {
+  const rank = { 'needs-you': 3, running: 2, idle: 1 } as const;
+  let best: VerseTerminalAgentState | null = null;
+  for (const s of states) if (s && (!best || rank[s.state] > rank[best.state])) best = s;
+  return best;
+}
+
+type AskSource = { tabId: string | null; blocks: BlockView[] };
 
 export interface TerminalPanelDeps extends LeafDeps {
   api: PanelTerminalApi;
@@ -243,7 +322,7 @@ type OpenOptions = { root?: string; cwd?: string; appId?: string; via?: VerseTer
 // Component
 // ===========================================================================
 
-export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskChat, visible, deps: override }: TerminalPanelProps) {
+export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskChat, visible, session: sessionProp, seats = [], onOpenSession, deps: override }: TerminalPanelProps) {
   const deps = useMemo<TerminalPanelDeps>(() => ({ ...DEFAULT_DEPS, ...override }), [override]);
   const sectionVisible = useSectionVisible();
   const shown = visible && sectionVisible;
@@ -268,6 +347,14 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
   const [palette, setPalette] = useState<{ mode: TerminalPaletteMode; tabId: string | null; draft: string } | null>(null);
   const [settings, setSettings] = useState<VerseTerminalSettings | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  // 3.15 many agents
+  const [bookmarks, setBookmarks] = useState<Record<string, string[]>>(() => loadBookmarks(deps.storage));
+  const [fixChips, setFixChips] = useState(() => loadFixChipsEnabled(deps.storage));
+  const [compare, setCompare] = useState<{ prompt: string } | null>(null);
+  const [launchOpen, setLaunchOpen] = useState(false);
+  const [workflowsOpen, setWorkflowsOpen] = useState(false);
+  const [asked, setAsked] = useState<{ text: string; sessionId: string | null } | null>(null);
+
 
   const leaves = useRef(new Map<string, LeafHandle>());
   const leafRefs = useRef(new Map<string, (handle: LeafHandle | null) => void>());
@@ -572,6 +659,29 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
       else openHistory(target?.id ?? null, '');
       return;
     }
+    if (req.launch) {
+      setLaunchOpen(true);
+      return;
+    }
+    if (req.tabId) {
+      // A verse://terminal link, a notification, a Needs-you row: that tab (and block), if it is still open.
+      const tabId = req.tabId;
+      const group = layout.groups.find((g) => g.panes.includes(tabId));
+      if (!group || !tabById.has(tabId)) {
+        setNotice({ tone: 'info', text: 'That terminal is no longer open.' });
+        return;
+      }
+      setLayout((prev) => focusPane(prev, group.id, tabId));
+      const blockId = req.blockId;
+      if (blockId) {
+        setLayout((prev) => setMode(prev, tabId, 'blocks'));
+        setTimeout(() => leaves.current.get(tabId)?.jumpTo(blockId), 0);
+      } else {
+        setTimeout(() => leaves.current.get(tabId)?.focus(), 0);
+      }
+
+      return;
+    }
     const wantsNew = req.newTab === true || Boolean(req.appId) || Boolean(req.devServerId);
     let target: VerseTerminalTab | null = null;
     if (!wantsNew) {
@@ -593,7 +703,8 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
     if (!target) return;
     if (req.paste) pasteInto(target.id, req.paste);
     else leaves.current.get(target.id)?.focus();
-  }, [focusedTab, layout.groups, openAssist, openHistory, openInNewGroup, pasteInto, roots, tabs]);
+  }, [focusedTab, layout.groups, openAssist, openHistory, openInNewGroup, pasteInto, roots, tabs, tabById]);
+
 
   useEffect(() => {
     if (!request || !list || request.nonce <= lastHandledNonce) return;
@@ -607,11 +718,45 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
   // Chat hand-off (always scrubbed by the server first)
   // -------------------------------------------------------------------------
 
+  const currentSession = useCallback((): VerseSession | null => sessionProp ?? getVerseSessionHead(sessionId).session ?? null, [sessionProp, sessionId]);
+  const askTargetsAll = useMemo(() => askableSeats(seats), [seats]);
+
+  /** Send `text` to a seat's chat: this chat on that seat, else a new chat on the same folders. */
+  const sendToSeat = useCallback(async (target: FlowTarget, text: string, title: string) => {
+    const source = currentSession();
+    if (!source) {
+      onSendToChat(text);
+      setNotice({ tone: 'info', text: 'Added to the chat’s message box.' });
+      return;
+    }
+    setAsked({ text: `Asking ${target.label}…`, sessionId: null });
+    try {
+      const res = await askSeat(DEFAULT_FLOW_API, { source, target, text, title, relation: 'compare' });
+      if (!mounted.current) return;
+      setAsked({ text: res.created ? `Sent to ${res.label} in a new chat.` : `Sent to ${res.label} in this chat.`, sessionId: res.created ? res.sessionId : null });
+    } catch (err) {
+      if (!mounted.current) return;
+      setAsked(null);
+      setNotice({ tone: 'error', text: errorText(err, `${target.label} could not be asked.`) });
+    }
+  }, [currentSession, onSendToChat]);
+
   const deliver = useCallback((text: string, intent: ChatIntent) => {
-    if (intent === 'explain' && onAskChat) onAskChat(text);
-    else onSendToChat(text);
-    setNotice({ tone: 'info', text: intent === 'explain' && onAskChat ? 'Sent to the chat.' : 'Added to the chat’s message box.' });
-  }, [onAskChat, onSendToChat]);
+    if (intent === 'explain' && onAskChat) {
+      onAskChat(text);
+      setNotice({ tone: 'info', text: 'Sent to the chat.' });
+      return;
+    }
+    const source = intent === 'explain' ? currentSession() : null;
+    if (source) {
+      const own = askTargetsAll.find((t) => t.seatId === source.seatId)
+        ?? { seatId: source.seatId, model: source.model, label: 'this chat’s seat', engine: source.engine };
+      void sendToSeat(own, text, source.title);
+      return;
+    }
+    onSendToChat(text);
+    setNotice({ tone: 'info', text: 'Added to the chat’s message box.' });
+  }, [askTargetsAll, currentSession, onAskChat, onSendToChat, sendToSeat]);
 
   const flashCopied = useCallback((what: string) => {
     setCopied(what);
@@ -624,9 +769,103 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
     return { command: res.command, output: res.output };
   }, [deps.api]);
 
-  const runBlockAction = useCallback(async (tabId: string | null, action: BlockAction, block: BlockView) => {
+  /** Blocks → their scrubbed chat text (agent blocks were scrubbed on the way to the page). */
+  const chatTextFor = useCallback(async (source: AskSource, intent: ChatIntent): Promise<string> => {
+    const items = await Promise.all(source.blocks.map(async (block) => {
+      if (block.source === 'agent' || source.tabId === null) return { block, command: block.command, output: cleanTerminalOutput(block.output ?? '') };
+      const { command, output } = await terminalBlockText(source.tabId, block, 'chat');
+      return { block, command, output };
+    }));
+    return blocksChatText(items, intent);
+  }, [terminalBlockText]);
+
+  const askAbout = useCallback(async (source: AskSource, target: FlowTarget) => {
+    try {
+      const text = await chatTextFor(source, 'explain');
+      const first = source.blocks[0];
+      await sendToSeat(target, text, `Terminal · ${(first?.command || 'command').slice(0, 60)}`);
+    } catch (err) {
+      setNotice({ tone: 'error', text: errorText(err, 'That did not work.') });
+    }
+  }, [chatTextFor, sendToSeat]);
+
+  const askAll = useCallback(async (source: AskSource) => {
+    try {
+      setCompare({ prompt: await chatTextFor(source, 'explain') });
+    } catch (err) {
+      setNotice({ tone: 'error', text: errorText(err, 'That did not work.') });
+    }
+  }, [chatTextFor]);
+
+  /** "Ask…": every seat, then "all ready seats side by side". */
+  const openAskMenu = useCallback((anchorEl: HTMLElement, source: AskSource) => {
+    const hasSession = currentSession() !== null;
+    const ready = askTargetsAll.filter((t) => t.ready);
+    const items: ActionMenuItem[] = askTargetsAll.map((t) => ({
+      id: `ask:${t.seatId}`,
+      label: `Ask ${t.label}`,
+      description: t.ready ? (currentSession()?.seatId === t.seatId ? 'In this chat.' : 'In a new chat on the same folders.') : 'May be busy or signed out.',
+      onSelect: () => void askAbout(source, t),
+      disabled: !hasSession,
+      reason: hasSession ? null : 'Open a chat first.',
+    }));
+    items.push({
+      id: 'ask-all',
+      label: `Ask all ready seats (${ready.length})`,
+      description: 'Their proposed fixes side by side (Compare). Nothing is sent until you confirm.',
+      onSelect: () => void askAll(source),
+      disabled: !hasSession || ready.length < 2,
+      reason: ready.length < 2 ? 'Needs at least two ready seats.' : !hasSession ? 'Open a chat first.' : null,
+      separated: true,
+    });
+    if (askTargetsAll.length === 0) {
+      items.unshift({ id: 'none', label: 'No seats are connected', onSelect: () => undefined, disabled: true, reason: 'Connect an account in Apps & Accounts.' });
+    }
+    setMenu({ kind: 'block', anchor: anchorBelow(anchorEl, 'end'), from: anchorEl, items, label: source.blocks.length > 1 ? `Ask about ${source.blocks.length} commands` : 'Ask a seat' });
+  }, [askAbout, askAll, askTargetsAll, currentSession]);
+
+  const runBlockAction = useCallback(async (tabId: string | null, action: BlockAction, block: BlockView, more?: BlockActionExtra) => {
     try {
       switch (action) {
+        case 'ask':
+          if (more?.anchor) openAskMenu(more.anchor, { tabId, blocks: [block] });
+          return;
+        case 'ask-seat': {
+          const target = askTargetsAll.find((t) => t.seatId === more?.seatId);
+          if (target) await askAbout({ tabId, blocks: [block] }, target);
+          return;
+        }
+        case 'rerun': {
+          const tab = tabId ? tabById.get(tabId) : null;
+          if (!tab || tab.exited || !block.command) return;
+          // An explicit click on Re-run: the command line, then Enter — exactly as if retyped.
+          const bytes = new TextEncoder().encode(`${block.command.replace(/[\r\n]+/g, ' ')}\r`);
+          let bin = '';
+          for (const b of bytes) bin += String.fromCharCode(b);
+          await deps.api.input(tab.id, btoa(bin));
+          setLayout((prev) => setMode(prev, tab.id, 'terminal'));
+          return;
+        }
+        case 'bookmark':
+          if (tabId) setBookmarks(toggleBookmark(deps.storage, tabId, block.id));
+          return;
+        case 'copy-link': {
+          const link = tabId ? terminalBlockLink(tabId, block.id) : null;
+          if (!link) return;
+          await deps.writeClipboard(link);
+          flashCopied('Link copied');
+          return;
+        }
+        case 'open-url':
+          if (more?.url && /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(more.url)) requestPreview({ url: more.url });
+          return;
+        case 'paste-text':
+          if (tabId && more?.text) {
+            const group = layout.groups.find((g) => g.panes.includes(tabId));
+            if (group) setLayout((prev) => setMode(focusPane(prev, group.id, tabId), tabId, 'terminal'));
+            pasteInto(tabId, more.text);
+          }
+          return;
         case 'copy-command':
           await deps.writeClipboard(block.command);
           flashCopied('Command copied');
@@ -672,7 +911,93 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
     } catch (err) {
       setNotice({ tone: 'error', text: errorText(err, 'That did not work.') });
     }
-  }, [deliver, deps, flashCopied, focusedTab, layout.groups, openInNewGroup, pasteInto, tabs, terminalBlockText]);
+  }, [askAbout, askTargetsAll, deliver, deps, flashCopied, focusedTab, layout.groups, openAskMenu, openInNewGroup, pasteInto, tabById, tabs, terminalBlockText]);
+
+  const onSelectionAction = useCallback(async (tabId: string, action: 'copy-output' | 'send' | 'ask', blocks: BlockView[], anchor?: HTMLElement) => {
+    const source: AskSource = { tabId, blocks };
+    try {
+      if (action === 'ask') {
+        if (anchor) openAskMenu(anchor, source);
+        return;
+      }
+      if (action === 'send') {
+        onSendToChat(await chatTextFor(source, 'send'));
+        setNotice({ tone: 'info', text: `${blocks.length} commands added to the chat’s message box.` });
+        return;
+      }
+      const texts = await Promise.all(blocks.map(async (b) => `$ ${b.command}\n${(await terminalBlockText(tabId, b, 'text')).output}`));
+      await deps.writeClipboard(texts.join('\n\n'));
+      flashCopied(`${blocks.length} outputs copied`);
+    } catch (err) {
+      setNotice({ tone: 'error', text: errorText(err, 'That did not work.') });
+    }
+  }, [chatTextFor, deps, flashCopied, onSendToChat, openAskMenu, terminalBlockText]);
+
+  const fixTargets = useMemo(() => firstSeatPerEngine(seats, FIX_ASK_ENGINES).map((t) => ({ seatId: t.seatId, label: t.label })), [seats]);
+  const bookmarkSets = useMemo(() => new Map(Object.entries(bookmarks).map(([tab, ids]) => [tab, new Set(ids)] as const)), [bookmarks]);
+  const emptyBookmarks = useMemo(() => new Set<string>(), []);
+  const fixApi = deps.api.fix;
+  const loadFix = useMemo(() => (fixChips && fixApi ? (tabId: string, block: BlockView) => fixApi(tabId, block.id) : null), [fixChips, fixApi]);
+  const leafExtrasFor = useCallback((tabId: string): LeafExtras => ({
+    bookmarks: bookmarkSets.get(tabId) ?? emptyBookmarks,
+    loadFix,
+    askTargets: fixTargets,
+    onOpenUrl: (url) => requestPreview({ url }),
+    onSelectionAction: (id, action, blocks, anchor) => void onSelectionAction(id, action, blocks, anchor),
+  }), [bookmarkSets, emptyBookmarks, fixTargets, loadFix, onSelectionAction]);
+  const leafExtras = useMemo(() => new Map(tabs.map((t) => [t.id, leafExtrasFor(t.id)] as const)), [tabs, leafExtrasFor]);
+
+  // -------------------------------------------------------------------------
+  // Launch configurations, command workflows (palette + More menu)
+  // -------------------------------------------------------------------------
+
+  // The palette's entries: served here while the panel is shown (the shell's fallbacks otherwise).
+  useCommandHandler('terminal.launch', () => { setLaunchOpen(true); return true; }, shown && Boolean(list?.available));
+  useCommandHandler('terminal.workflows', () => { setWorkflowsOpen(true); return true; }, shown);
+
+  /** A filled workflow: pasted at the focused (or any live) shell's prompt — never run. */
+  const pasteWorkflow = useCallback(async (text: string) => {
+    const target = focusedTab && !focusedTab.exited ? focusedTab : tabs.find((t) => !t.exited) ?? null;
+    if (target) {
+      const group = layout.groups.find((g) => g.panes.includes(target.id));
+      if (group) setLayout((prev) => setMode(focusPane(prev, group.id, target.id), target.id, 'terminal'));
+      pasteInto(target.id, text);
+      return;
+    }
+    const tab = await openInNewGroup({});
+    if (tab) pasteInto(tab.id, text);
+  }, [focusedTab, layout.groups, openInNewGroup, pasteInto, tabs]);
+
+  const loadLaunchConfigs = useCallback(async () => {
+    if (!deps.api.launchList) throw new Error('Launch configurations need a newer server.');
+    return deps.api.launchList(sessionId);
+  }, [deps.api, sessionId]);
+
+  const launchConfig = useCallback(async (config: VerseTerminalLaunchConfig) => {
+    if (!deps.api.launch) throw new Error('Launch configurations need a newer server.');
+    let res;
+    try {
+      res = await deps.api.launch({ sessionId, root: config.root, name: config.name, digest: config.digest, ...sizeHint() });
+    } catch (err) {
+      throw new Error(errorText(err, 'That configuration could not be launched.'));
+    }
+    if (!mounted.current) return;
+    const opened = res.groups.flatMap((g) => g.tabs);
+    setList((prev) => (prev ? { ...prev, tabs: [...prev.tabs.filter((t) => !opened.some((o) => o.id === t.id)), ...opened] } : prev));
+    setLayout((prev) => {
+      let next = prev;
+      for (const group of res.groups) {
+        const [first, second] = group.tabs;
+        if (!first) continue;
+        next = addGroup(next, first.id);
+        const added = next.groups.find((g) => g.panes.includes(first.id));
+        if (second && added) next = splitGroup(next, added.id, second.id, group.split === 'down' ? 'column' : 'row') ?? addGroup(next, second.id);
+      }
+      return next;
+    });
+    if (res.errors.length > 0) setNotice({ tone: 'error', text: `Launched with problems: ${res.errors.join('; ')}` });
+    else setNotice({ tone: 'info', text: `Launched “${config.name}”.` });
+  }, [deps.api, sessionId, sizeHint]);
 
   const sendSelection = useCallback(async () => {
     const tabId = selection?.tabId ?? focusedTab?.id;
@@ -700,6 +1025,8 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
         case 'exit': return { ...t, exited: { code: frame.code, signal: frame.signal, at: new Date().toISOString() } };
         case 'cwd': return t.cwd === frame.cwd ? t : { ...t, cwd: frame.cwd };
         case 'integration': return t.shellIntegration === frame.state ? t : { ...t, shellIntegration: frame.state };
+        case 'agent-state': return { ...t, agentState: frame.agentState };
+        default: return t;
       }
     });
   }, [patchTab]);
@@ -763,11 +1090,14 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
       { id: 'copy-output', label: 'Copy output', onSelect: () => void runBlockAction(tabId, 'copy-output', block), disabled: block.fullscreen, reason: block.fullscreen ? 'A full-screen program keeps no output.' : null },
       { id: 'send', label: 'Send to chat', description: 'Adds the command and its output to the message box (secrets removed).', onSelect: () => void runBlockAction(tabId, 'send', block) },
       ...(failed ? [{ id: 'explain', label: 'Explain and fix this error', description: onAskChat ? 'Sends it to this chat’s seat.' : 'Drafts the question in the message box.', onSelect: () => void runBlockAction(tabId, 'explain', block) }] : []),
+      { id: 'ask', label: 'Ask…', description: 'Any seat — Claude Code, Codex, Devin, Grok, a local model — or all of them side by side.', onSelect: () => setTimeout(() => openAskMenu(anchorEl, { tabId, blocks: [block] }), 0) },
       { id: 'copy-command', label: 'Copy command', onSelect: () => void runBlockAction(tabId, 'copy-command', block), disabled: !block.command },
+      { id: 'copy-link', label: 'Copy link', description: 'A verse://terminal link to this block.', onSelect: () => void runBlockAction(tabId, 'copy-link', block) },
+      { id: 'bookmark', label: bookmarkSets.get(tabId)?.has(block.id) ? 'Remove bookmark' : 'Bookmark', onSelect: () => void runBlockAction(tabId, 'bookmark', block) },
       { id: 'blocks', label: 'Show in Blocks', onSelect: () => setLayout((prev) => setMode(prev, tabId, 'blocks')) },
     ];
     setMenu({ kind: 'block', anchor: anchorBelow(anchorEl, 'end'), from: null, items, label: `Command: ${block.command || 'command'}` });
-  }, [onAskChat, runBlockAction]);
+  }, [bookmarkSets, onAskChat, openAskMenu, runBlockAction]);
 
   const leafRef = (tabId: string) => {
     let ref = leafRefs.current.get(tabId);
@@ -872,6 +1202,22 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
       { id: 'sr', label: prefs.screenReader ? 'Turn screen reader mode off' : 'Turn screen reader mode on', onSelect: () => updatePrefs({ screenReader: !prefs.screenReader }) },
       ...(deps.platform === 'mac' ? [{ id: 'external', label: 'Open in Terminal.app', onSelect: () => void openExternal() }] : []),
       ...shareMenuItems(),
+      {
+        id: 'launch', label: 'Launch configuration…', separated: true,
+        description: 'Tabs, splits and commands from .ashlr/verse/launch.json — typed only when you launch one.',
+        onSelect: () => setLaunchOpen(true), disabled: !list?.available || !deps.api.launchList,
+      },
+      {
+        id: 'workflows', label: 'Command workflow…',
+        description: 'Fill a saved command’s parameters and paste it at the prompt (it does not run).',
+        onSelect: () => setWorkflowsOpen(true), disabled: !list?.available,
+      },
+      {
+        id: 'fix-chips', label: fixChips ? 'Stop suggesting fixes' : 'Suggest fixes with the local model',
+        description: 'When a command fails, the local model offers up to three commands to paste. Free, and nothing leaves this Mac.',
+        onSelect: () => { saveFixChipsEnabled(deps.storage, !fixChips); setFixChips(!fixChips); },
+      },
+
     ];
     setMenu({ kind: 'more', anchor: anchorBelow(from), from, items, label: 'Terminal' });
   };
@@ -989,9 +1335,14 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
                   onKeyDown={(event) => onTabKeyDown(event, index)}
                 >
                   <span className={styles.tabTitle}>{title}</span>
-                  {first.agent ? <span className={styles.tabMeta}>agent</span> : null}
+                  {(() => {
+                    const badge = agentBadge(groupAgentState(group.panes.map((id) => tabById.get(id)?.agentState)));
+                    if (badge) return <span className={extra.agentBadge} data-state={badge.state} title={badge.title} aria-label={badge.title}>{badge.label}</span>;
+                    return first.agent ? <span className={styles.tabMeta}>agent</span> : null;
+                  })()}
                   {agentTabs.get(first.id)?.kind === 'shared' ? <span className={styles.tabMeta}>shared</span> : null}
                   {agentTabs.get(first.id)?.takenOverAt ? <span className={styles.tabMeta}>you have it</span> : null}
+
                   {exited ? <span className={styles.tabMeta}>exited</span> : null}
                   {unseen ? <span className={styles.unseen} aria-label="new output" role="img" /> : null}
                 </button>
@@ -1090,6 +1441,19 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
           <span>Clear every command in the history? This cannot be undone.</span>
           <Button size="sm" variant="subtle" onClick={() => void clearHistory()}>Clear</Button>
           <Button size="sm" variant="ghost" onClick={() => setConfirmClear(false)}>Cancel</Button>
+
+        </div>
+      ) : null}
+      {asked ? (
+        <div className={styles.notice} role="status">
+          <span>{asked.text}</span>
+          {asked.sessionId && onOpenSession ? (
+            <Button size="sm" variant="ghost" onClick={() => { const id = asked.sessionId!; setAsked(null); onOpenSession(id); }}>Open chat</Button>
+          ) : null}
+          <button type="button" className={styles.noticeClose} aria-label="Dismiss" title="Dismiss" onClick={() => setAsked(null)}>
+            <IconX size={12} />
+          </button>
+
         </div>
       ) : null}
 
@@ -1152,7 +1516,8 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
                     assistMode={settings?.assist ?? 'local'}
                     onFocus={() => setLayout((prev) => focusPane(prev, group.id, id))}
                     onMeta={onMeta}
-                    onBlockAction={(tabId, action, block) => void runBlockAction(tabId, action, block)}
+                    onBlockAction={(tabId, action, block, more) => void runBlockAction(tabId, action, block, more)}
+                    {...(leafExtras.get(id) ? { extras: leafExtras.get(id)! } : {})}
                     onBlockMenu={onBlockMenu}
                     onKeyAction={onKeyAction}
                     onSelection={onSelection}
@@ -1213,6 +1578,38 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
           } : {})}
           {...(settings?.history === false || deps.api.updateSettings ? { onEnableHistory: () => void updateSettings({ history: true }) } : {})}
         />
+      ) : null}
+      {compare && currentSession() ? (
+        <Suspense fallback={null}>
+          <CompareDialog
+            mode="compare"
+            prompt={compare.prompt}
+            selectAll
+            maxSeats={askTargetsAll.filter((t) => t.ready).length}
+            source={currentSession()!}
+            seats={seats}
+            advisorSeats={toAdvisorSeats(seats.filter((s) => s.health.state === 'ready'))}
+            advice={null}
+            onStarted={() => undefined}
+            onClose={() => setCompare(null)}
+          />
+        </Suspense>
+      ) : null}
+
+      {launchOpen ? (
+        <Suspense fallback={null}>
+          <LaunchDialog load={loadLaunchConfigs} onLaunch={launchConfig} onClose={() => setLaunchOpen(false)} />
+        </Suspense>
+      ) : null}
+
+      {workflowsOpen ? (
+        <Dialog open onClose={() => setWorkflowsOpen(false)} titleId="terminal-workflows-title" title="Command workflows"
+          description="Fill the parameters; the command is pasted at the prompt and runs only when you press Enter.">
+          <Suspense fallback={<SkeletonLine width="50%" />}>
+            <CommandWorkflowPicker onPaste={(text) => void pasteWorkflow(text)} onClose={() => setWorkflowsOpen(false)} />
+          </Suspense>
+        </Dialog>
+
       ) : null}
     </div>
   );

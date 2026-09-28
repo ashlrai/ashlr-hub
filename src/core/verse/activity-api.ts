@@ -60,6 +60,7 @@ import {
   VERSE_ACTIVITY_SEEN_PATH,
   VERSE_SESSION_META_PATH,
   type NeedsYouItem,
+  type VerseActivityTerminal,
   type VerseAutonomyBadge,
 } from './workbench-types.js';
 
@@ -83,6 +84,8 @@ interface TrackBHooks {
   latestMemoAt: (() => string | null) | null;
   /** 3.11 cloud lane producer (core/cloud/cloud-api.ts); optional so older hooks / test fakes still conform. */
   cloud?: (() => NeedsYouItem[]) | null;
+  /** 3.15 terminal events for the desktop notifier (terminal-activity.ts); optional like `cloud`. */
+  terminal?: (() => VerseActivityTerminal) | null;
 }
 
 const NO_HOOKS: TrackBHooks = { producers: { authority: null, fleet: null, leader: null }, states: {}, autonomy: null, latestMemoAt: null };
@@ -121,6 +124,14 @@ async function importDevin(): Promise<ModuleExports | null> {
 async function importAutomations(): Promise<ModuleExports | null> {
   try { return (await import('../automations/needs-you.js' as string)) as ModuleExports; } catch { return null; }
 }
+/**
+ * 3.15 terminal: agent tabs waiting on the operator (Needs-you `chats` /
+ * `agent-waiting`) and the recent terminal events the desktop notifier reads.
+ * Pure in-memory reads (terminal-activity.ts), no timer, no I/O.
+ */
+async function importTerminalActivity(): Promise<ModuleExports | null> {
+  try { return (await import('./terminal-activity.js' as string)) as ModuleExports; } catch { return null; }
+}
 
 /**
  * 3.16 agents: plan approvals, spend warnings, red CI and failed setups file
@@ -138,13 +149,16 @@ function fn<T>(mod: ModuleExports | null, name: string): T | null {
 }
 
 export async function resolveTrackBHooks(): Promise<TrackBHooks> {
-  const [authority, fleet, leader, cloud, devin, automations, agents] = await Promise.all([importAuthority(), importFleetLive(), importLeader(), importCloud(), importDevin(), importAutomations(), importAgents()]);
-  // The remote lanes (Claude cloud, Devin), automations' review items and the
-  // agents board file into the same sources (fleet / chats).
+  const [authority, fleet, leader, cloud, devin, automations, agents, terminal] = await Promise.all([
+    importAuthority(), importFleetLive(), importLeader(), importCloud(), importDevin(), importAutomations(), importAgents(), importTerminalActivity(),
+  ]);
+  // The remote lanes, agents board, and terminal's waiting agents share the inbox.
   const cloudItems = fn<() => NeedsYouItem[]>(cloud, 'needsYouItems');
   const devinItems = fn<() => NeedsYouItem[]>(devin, 'needsYouItems');
   const automationItems = fn<() => NeedsYouItem[]>(automations, 'needsYouItems');
   const agentItems = fn<() => NeedsYouItem[]>(agents, 'needsYouItems');
+  const terminalItems = fn<() => NeedsYouItem[]>(terminal, 'needsYouItems');
+  const lanes = [cloudItems, devinItems, automationItems, agentItems, terminalItems].filter((f): f is () => NeedsYouItem[] => f !== null);
   return {
     producers: {
       authority: fn<() => NeedsYouItem[]>(authority, 'needsYouItems'),
@@ -160,14 +174,8 @@ export async function resolveTrackBHooks(): Promise<TrackBHooks> {
     },
     autonomy: fn<() => VerseAutonomyBadge | null>(authority, 'autonomyBadge'),
     latestMemoAt: fn<() => string | null>(leader, 'latestMemoAt'),
-    cloud: cloudItems || devinItems || automationItems || agentItems
-      ? () => [
-          ...(cloudItems ? cloudItems() : []),
-          ...(devinItems ? devinItems() : []),
-          ...(automationItems ? automationItems() : []),
-          ...(agentItems ? agentItems() : []),
-        ]
-      : null,
+    cloud: lanes.length > 0 ? () => lanes.flatMap((lane) => lane()) : null,
+    terminal: fn<() => VerseActivityTerminal>(terminal, 'terminalActivitySnapshot'),
   };
 }
 
@@ -221,6 +229,7 @@ function currentWiring(): Wiring {
     autonomy: () => (w.hooks.autonomy ? w.hooks.autonomy() : null),
     latestMemoAt: () => (w.hooks.latestMemoAt ? w.hooks.latestMemoAt() : null),
     cloud: () => (w.hooks.cloud ? w.hooks.cloud() : []),
+    terminal: () => (w.hooks.terminal ? w.hooks.terminal() : null),
     ...depsOverride,
   });
   // Mind is only a badge once the Leader module exists; until then the
