@@ -251,6 +251,10 @@ fn sidecar_args(mode: SidecarMode, remote_config: Option<&str>) -> Vec<String> {
         if let Some(path) = remote_config {
             args.push("--remote-config".to_owned());
             args.push(path.to_owned());
+            // Remote CLI output omits Hub tokens by default. This app owns the
+            // sidecar's private stdout and consumes its startup line before
+            // any diagnostics or UI event can see it.
+            args.push("--desktop-token-handoff".to_owned());
         }
     }
     args
@@ -2482,6 +2486,7 @@ mod tests {
         assert_eq!(&enabled[..disabled.len()], &disabled[..]);
         assert_eq!(enabled[disabled.len()], "--remote-config");
         assert_eq!(enabled[disabled.len() + 1], config.to_str().expect("utf8 test path"));
+        assert_eq!(enabled[disabled.len() + 2], "--desktop-token-handoff");
         assert_eq!(enabled, sidecar_args(SidecarMode::Verse, enabled_remote_config_path_at(&config).as_deref()), "restart re-reads opt-in");
         assert!(!fallback_to_serve(SidecarMode::Verse, true), "invalid opted-in gateway cannot silently fall back");
         assert_eq!(sidecar_args(SidecarMode::Serve, enabled_remote_config_path_at(&config).as_deref()), sidecar_args(SidecarMode::Serve, None));

@@ -63,6 +63,8 @@ export interface VerseOptions {
   /** Suspend polling after this many minutes with no client interest. */
   accountsIdleMinutes: number;
   remoteConfig: string | null;
+  /** Private startup-token handshake for the native app's own sidecar. */
+  desktopTokenHandoff: boolean;
 }
 
 /** The existing collector cadence, in seconds. */
@@ -77,6 +79,7 @@ export function parseVerseArgs(args: string[]): VerseOptions | { error: string; 
   let accountsPollSeconds = VERSE_DEFAULT_ACCOUNTS_POLL_SECONDS;
   let accountsIdleMinutes = VERSE_DEFAULT_ACCOUNTS_IDLE_MINUTES;
   let remoteConfig: string | null = null;
+  let desktopTokenHandoff = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -113,6 +116,9 @@ export function parseVerseArgs(args: string[]): VerseOptions | { error: string; 
       if (!path || path.startsWith('-')) return { error: '--remote-config requires a private JSON file path', code: 2 };
       remoteConfig = path;
 
+    } else if (arg === '--desktop-token-handoff') {
+      desktopTokenHandoff = true;
+
     } else if (arg === '--open' || arg === '-o') {
       open = true;
 
@@ -127,7 +133,20 @@ export function parseVerseArgs(args: string[]): VerseOptions | { error: string; 
     }
   }
 
-  return { port, open, json, accounts, accountsPollSeconds, accountsIdleMinutes, remoteConfig };
+  if (desktopTokenHandoff && (!json || !remoteConfig)) {
+    return { error: '--desktop-token-handoff requires --json and --remote-config', code: 2 };
+  }
+  return { port, open, json, accounts, accountsPollSeconds, accountsIdleMinutes, remoteConfig, desktopTokenHandoff };
+}
+
+/** Remote service logs omit Hub tokens; only the native app's private stdout
+ * handshake may receive them when it owns both the desktop and phone gateway. */
+export function verseStartupTokenFields(remote: boolean, desktopTokenHandoff: boolean,
+  tokens: { readToken: string; token: string }) {
+  return remote && !desktopTokenHandoff ? {} : {
+    readToken: tokens.readToken, readTokenHeader: 'X-Ashlr-Token',
+    token: tokens.token, tokenHeader: 'X-Ashlr-Token',
+  };
 }
 
 export function verseUrlFor(baseUrl: string): string {
@@ -302,7 +321,7 @@ export async function cmdVerse(args: string[]): Promise<number> {
     return parsed.code;
   }
 
-  const { port, open, json, accounts, accountsPollSeconds, accountsIdleMinutes, remoteConfig } = parsed;
+  const { port, open, json, accounts, accountsPollSeconds, accountsIdleMinutes, remoteConfig, desktopTokenHandoff } = parsed;
 
   let loadConfig: Awaited<ReturnType<typeof importLoadConfig>>;
   try {
@@ -434,8 +453,7 @@ export async function cmdVerse(args: string[]): Promise<number> {
       consoleUrl: `${handle.url}/next/`,
       port: handle.port,
       allowDispatch,
-      ...(remote ? {} : { readToken: handle.readToken, readTokenHeader: 'X-Ashlr-Token',
-        token: handle.token, tokenHeader: 'X-Ashlr-Token' }),
+      ...verseStartupTokenFields(remote !== null, desktopTokenHandoff, handle),
       accountTelemetry: accounts,
       accountTelemetryNote: collectorBanner,
       remoteGateway: remote ? { url: remote.gateway.url, publicOrigin: remote.publicOrigin,
