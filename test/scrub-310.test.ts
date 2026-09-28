@@ -24,6 +24,7 @@ const TELEGRAM = '123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawQ'; // 35-char sec
 const TELEGRAM_DOC = '110201543:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw'; // 34-char (Telegram docs example)
 const XAI = `xai-${'Ab3Cd4Ef5Gh6'.repeat(6)}AbCdEfGh`;
 const GH_FINE = `github_pat_11ABCDEFG0123456789abc_${'aB3dE6gH9j'.repeat(5)}KlMnOpQrS`;
+const GH_STATELESS = `ghs_5089472_${'Aa_1-'.repeat(40)}.${'Bb_2-'.repeat(40)}.${'Cc_3-'.repeat(24)}`;
 const SLACK_HOOK = 'https://hooks.slack.com/services/T0000AAAA/B0000BBBB/XXxxYYyyZZzz00112233';
 const DISCORD_HOOK = 'https://discord.com/api/webhooks/123456789012345678/aBcDeFgHiJkLmNoPqRsTuVwXyZ012345';
 
@@ -56,6 +57,14 @@ describe('scrubSecrets — 3.10 patterns', () => {
     expectGone(scrubSecrets(`GH=${GH_FINE}`), GH_FINE);
     expectGone(scrubSecrets(`push with ${GH_FINE} now`), GH_FINE);
     expectGone(scrubSecrets('ghp_AbCdEf0123456789GhIjKlMnOpQr'), 'ghp_AbCdEf0123456789GhIjKlMnOpQr');
+  });
+
+  it('redacts the whole stateless GitHub token without leaving JWT segments', () => {
+    const once = scrubSecrets(`issued ${GH_STATELESS} for one repository`);
+    expect(once).toBe('issued [REDACTED] for one repository');
+    expect(once).not.toContain('ghs_');
+    expect(once).not.toContain(GH_STATELESS.split('.')[1]);
+    expect(scrubSecrets(once)).toBe(once);
   });
 
   it('redacts SCREAMING env-var, snake_case and camelCase secret assignments', () => {

@@ -201,9 +201,10 @@ describe('planted hooks stay inert', () => {
 });
 
 describe('ephemeral token headers', () => {
-  const token = `ghs_${'Zz09'.repeat(9)}`;
+  const token = `ghs_5089472_${'Zz_0-'.repeat(40)}.${'Yy_1-'.repeat(40)}.${'Xx_2-'.repeat(24)}`;
 
   it('carries the token only in the child env, as a github.com-scoped header, resetting planted headers', () => {
+    expect(token.length).toBeGreaterThan(255);
     git(w.mirror, 'config', 'http.extraHeader', 'X-Planted: 1');
     const cmd = safeGitCommand({ workTree: w.worktree, gitDir: w.gitDir, args: ['config', '--get-all', 'http.extraheader'], auth: { token } });
     expect(cmd.args.join(' ')).not.toContain(token);
@@ -233,8 +234,12 @@ describe('ephemeral token headers', () => {
   });
 
   it('refuses malformed tokens and global-option injection', () => {
+    expect(() => safeGitCommand({ workTree: w.worktree, gitDir: w.gitDir, args: ['status'], auth: { token: `ghs_${'Zz09'.repeat(9)}` } })).not.toThrow();
     expect(() => safeGitCommand({ workTree: w.worktree, gitDir: w.gitDir, args: ['status'], auth: { token: 'has spaces and\nnewlines' } }))
       .toThrow(/token/);
+    for (const malformed of [`${token}\nInjected: yes`, `ghs_${'A'.repeat(4093)}`, `gho_${'A'.repeat(40)}`]) {
+      expect(() => safeGitCommand({ workTree: w.worktree, gitDir: w.gitDir, args: ['status'], auth: { token: malformed } })).toThrow(/token/);
+    }
     for (const args of [['-c', 'core.fsmonitor=x', 'status'], ['--git-dir=/elsewhere', 'status'], ['--exec-path=/x', 'status'], []]) {
       expect(() => safeGitCommand({ workTree: w.worktree, gitDir: w.gitDir, args })).toThrow(SafeGitError);
     }
