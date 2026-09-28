@@ -17,6 +17,8 @@
  */
 import { useEffect, useState } from 'react';
 import { clearMutationToken, clearReadSession } from '../../../../data/auth-store.js';
+import { isRemoteMobileMode } from '../../../../data/remote-mode.js';
+import { currentRemoteSession, remotePushPublicKey, subscribeRemotePush } from '../../../../data/remote-session.js';
 import { useMutationHold, useTheme } from '../../../../data/hooks.js';
 import type { ThemePreference } from '../../../../data/theme-store.js';
 import { writeVerseLayoutPreference } from '../../../../app/console-mode.js';
@@ -25,6 +27,7 @@ import { APP_NAME, APP_VERSION } from '../../sections/app-version.js';
 import type { Reachability } from '../connectivity.js';
 import { canShowActions, useMobile } from '../mobile-context.js';
 import { showMobileToast } from '../mobile-toast.js';
+import { enableRemotePush } from '../pwa.js';
 import { BottomSheet } from '../sheet.js';
 import { Button, Screen } from '../ui.js';
 import { Badge, Row, Section, ui, type Tone } from '../ui-parts.js';
@@ -73,11 +76,26 @@ export function MoreScreen() {
   const standalone = useStandalone();
   const [signOutOpen, setSignOutOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushKey, setPushKey] = useState<string | null>(null);
+  const [pushMessage, setPushMessage] = useState<string | null>(null);
+  const remote = isRemoteMobileMode();
+  const pushAvailable = remote && currentRemoteSession()?.capabilities.push === true;
+  useEffect(() => {
+    if (!pushAvailable) return;
+    let live = true;
+    void remotePushPublicKey().then((key) => { if (live) setPushKey(key); })
+      .catch(() => { if (live) setPushMessage('The gateway notification key is unavailable.'); });
+    return () => { live = false; };
+  }, [pushAvailable]);
   const canAct = canShowActions(permissions);
 
-  const actWord = permissions.act === 'unlocked' ? 'Unlocked' : permissions.act === 'locked' ? 'Locked' : 'Not on this device';
+  const actWord = permissions.act === 'unavailable' ? 'Not on this device' : remote ? 'Passkey required' : permissions.act === 'unlocked' ? 'Unlocked' : 'Locked';
   const actTone: Tone = permissions.act === 'unlocked' ? 'success' : permissions.act === 'locked' ? 'warning' : 'neutral';
-  const actDetail = permissions.act === 'unlocked'
+  const actDetail = remote && permissions.act !== 'unavailable'
+    ? 'Higher-risk actions ask for a fresh passkey on this phone. Authority changes stay on your Mac.'
+    : permissions.act === 'unlocked'
     ? hold.heldUntil !== null
       ? `Actions stay unlocked until ${clockText(hold.heldUntil)} if nothing is done — each action extends it.`
       : 'Actions are unlocked.'
@@ -112,12 +130,27 @@ export function MoreScreen() {
 
   const signOut = async () => {
     setSigningOut(true);
+    setSignOutError(null);
     try {
       await clearReadSession();
+      setSignOutOpen(false);
+    } catch {
+      setSignOutError('This phone could not sign out. Check the connection and try again.');
     } finally {
       setSigningOut(false);
-      setSignOutOpen(false);
     }
+  };
+
+  const enablePush = async () => {
+    if (!pushAvailable || !pushKey || pushBusy) return;
+    setPushBusy(true);
+    setPushMessage(null);
+    try {
+      await subscribeRemotePush(await enableRemotePush(pushKey));
+      setPushMessage('Notifications are on. They only say that Verse has an update.');
+    } catch (error) {
+      setPushMessage(error instanceof Error ? error.message : 'Notifications could not be enabled.');
+    } finally { setPushBusy(false); }
   };
 
   const reach = REACH[reachability];
@@ -132,18 +165,24 @@ export function MoreScreen() {
           trailing={permissions.source === 'device' ? permissions.deviceLabel ?? 'A paired device' : 'This browser session'}
         />
       </Section>
-      {permissions.act === 'unlocked' ? (
+      {!remote && permissions.act === 'unlocked' ? (
         <div className={styles.actions}><Button variant="secondary" block onClick={lock}>Lock now</Button></div>
-      ) : permissions.act === 'locked' ? (
+      ) : !remote && permissions.act === 'locked' ? (
         <div className={styles.actions}><Button variant="tinted" block onClick={unlock}>Unlock</Button></div>
       ) : null}
 
       <Section title="Go to">
-        <Row title="Fleet" subtitle="Start, pause or stop; budget mode; the grant" onClick={() => navigate({ screen: 'fleet' })} />
+        <Row title="Fleet" subtitle={remote ? 'Status, budget and actions allowed by this gateway' : 'Start, pause or stop; budget mode; the grant'} onClick={() => navigate({ screen: 'fleet' })} />
         {canAct ? <Row title="New agent" subtitle="Start an agent on one of your repos" onClick={() => navigate({ screen: 'new' })} /> : null}
         <Row title="Needs you" subtitle="Approvals and questions waiting on you" onClick={() => navigate({ screen: 'needs' })} />
-        <Row title="Use the desktop layout" subtitle="Open the full workbench in this browser" onClick={openDesktop} />
+        {!remote ? <Row title="Use the desktop layout" subtitle="Open the full workbench in this browser" onClick={openDesktop} /> : null}
       </Section>
+
+      {pushAvailable ? <Section title="Notifications" flat>
+        <p className={ui.card}>Verse can send a generic alert when something needs you or a run completes. The alert contains no agent or repository details.</p>
+        <Button variant="tinted" block disabled={pushBusy || !pushKey} onClick={() => void enablePush()}>{pushBusy ? 'Enabling…' : pushKey ? 'Enable notifications' : 'Preparing notifications…'}</Button>
+        {pushMessage ? <p role="status">{pushMessage}</p> : null}
+      </Section> : null}
 
       <Section title="Appearance" flat>
         <div className={ui.chips} role="group" aria-label="Theme">
@@ -193,7 +232,8 @@ export function MoreScreen() {
           </>
         )}
       >
-        <p className={ui.consequence}>Signs this phone out. You’ll need the read token again. Nothing on your Mac changes.</p>
+        <p className={ui.consequence}>{remote ? 'Signs this phone out. Use its approved passkey to sign in again. Nothing on your Mac changes.' : 'Signs this phone out. You’ll need the read token again. Nothing on your Mac changes.'}</p>
+        {signOutError ? <p role="alert">{signOutError}</p> : null}
       </BottomSheet>
     </Screen>
   );

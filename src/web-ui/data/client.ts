@@ -4,6 +4,7 @@
  * interfaces re-exported from ./api-types.ts.
  */
 import { getReadClientProof, reportSessionExpired } from './auth-store.js';
+import { isRemoteMobileMode } from './remote-mode.js';
 
 export class ApiError extends Error {
   constructor(
@@ -66,6 +67,7 @@ export function readFailureReason(err: unknown): string {
 
 /** GET an authenticated read route. 401 reports session-expired and throws. */
 export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
+  if (isRemoteMobileMode()) return (await import('./remote-session.js')).remoteApiGet<T>(path, signal);
   const res = await fetch(path, {
     method: 'GET',
     credentials: 'same-origin',
@@ -96,6 +98,7 @@ export async function apiPost<T>(
   mutationToken: string,
   signal?: AbortSignal,
 ): Promise<T> {
+  if (isRemoteMobileMode()) return (await import('./remote-session.js')).remoteMutate<T>('POST', path, body);
   const res = await fetch(path, {
     method: 'POST',
     credentials: 'same-origin',
@@ -136,6 +139,7 @@ export async function apiPost<T>(
  * a route retires a thing by id (`DELETE /api/verse/leader/directives/<id>`).
  */
 export async function apiDelete<T>(path: string, mutationToken: string, signal?: AbortSignal): Promise<T> {
+  if (isRemoteMobileMode()) return (await import('./remote-session.js')).remoteMutate<T>('DELETE', path, {});
   const res = await fetch(path, {
     method: 'DELETE',
     credentials: 'same-origin',
@@ -153,27 +157,15 @@ export async function apiDelete<T>(path: string, mutationToken: string, signal?:
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
-/**
- * The refusal sentence and code from a failed POST's body, if it had any.
- *
- * `error` is the documented refusal field, but the Verse control plane
- * answers a refused daemon/scope action with a full result body whose
- * plain-language sentence lives in `note` and which has NO `error` key at all
- * (see VerseDaemonActionResult). Reading only `error` threw away sentences
- * like "no repositories are enrolled, so the loop would do nothing" and left
- * the caller with a bare status code to guess from.
- */
+/** A route's own refusal sentence and code, including daemon `note` bodies. */
 async function readRefusal(res: Response): Promise<{ detail: string; code: string | null }> {
   try {
     const j = (await res.json()) as { error?: unknown; note?: unknown; message?: unknown; code?: unknown };
-    // `message`: a result body that explains itself (the Leader's approve
-    // route answers 409 with `{ ok: false, outcome, message, … }`).
-    const detail =
-      typeof j.error === 'string' && j.error ? j.error : typeof j.note === 'string' && j.note ? j.note : typeof j.message === 'string' ? j.message : '';
-    const code = typeof j.code === 'string' && j.code ? j.code : null;
-    return { detail, code };
+    const detail = typeof j.error === 'string' && j.error ? j.error
+      : typeof j.note === 'string' && j.note ? j.note
+        : typeof j.message === 'string' ? j.message : '';
+    return { detail, code: typeof j.code === 'string' && j.code ? j.code : null };
   } catch {
-    /* body wasn't JSON */
     return { detail: '', code: null };
   }
 }

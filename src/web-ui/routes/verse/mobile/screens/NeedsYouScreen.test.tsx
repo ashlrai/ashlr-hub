@@ -25,7 +25,7 @@ import {
   stubFetch,
   TOKEN,
 } from '../mobile.test-support.js';
-import { consequenceLine, destructiveAction, NeedsYouScreen, primaryAction, resetHiddenForTest } from './NeedsYouScreen.js';
+import { consequenceLine, destructiveAction, macOnlyRemoteAction, NeedsYouScreen, primaryAction, resetHiddenForTest } from './NeedsYouScreen.js';
 
 function Harness() {
   return (
@@ -81,6 +81,18 @@ afterEach(() => {
   resetHiddenForTest();
   resetMobileToastsForTest();
   vi.unstubAllGlobals();
+  document.head.innerHTML = '';
+  window.history.replaceState(null, '', '/');
+});
+
+it('labels local authority actions Mac-only on a paired remote phone', () => {
+  window.history.replaceState(null, '', '/verse/m/');
+  document.head.innerHTML = '<meta name="ashlr-remote-gateway" content="v1">';
+  const item = needsItem({ kind: 'kill', actions: [{ kind: 'resume', label: 'Clear Stop', request: { method: 'POST', path: '/api/verse/authority/clear-stop', body: {} }, confirm: null, destructive: false }] });
+  expect(macOnlyRemoteAction(item, item.actions[0]!)).toBe(true);
+  renderMobile(<NeedsYouScreen />, { activity: withItems([item]), permissions: permissionsFor('unlocked') });
+  expect(screen.getByText('Authority changes for this item are available on your Mac.')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Clear Stop/ })).not.toBeInTheDocument();
 });
 
 describe('NeedsYouScreen — states', () => {

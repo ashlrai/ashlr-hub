@@ -43,6 +43,8 @@ export interface DeviceScopes {
   act: boolean;
   /** How the transport names this device ("Mason's iPhone"), shown on More. */
   label?: string;
+  /** An act grant does not imply the remote gateway has mounted writes. */
+  gatewayWritesEnabled?: boolean;
 }
 
 export interface DevicePermissions {
@@ -68,6 +70,7 @@ export function resolveDevicePermissions(input: PermissionInput): DevicePermissi
   const read = authenticated && (scopes?.read ?? true);
   const base = { read, source: scopes ? ('device' as const) : ('session' as const), deviceLabel: scopes?.label ?? null };
   if (!read) return { ...base, act: 'unavailable', actReason: 'This device is not signed in to your Mac.' };
+  if (scopes?.gatewayWritesEnabled === false) return { ...base, act: 'unavailable', actReason: 'The phone gateway is read-only. Actions are available on your Mac.' };
   if (scopes && !scopes.act) return { ...base, act: 'unavailable', actReason: 'This device was paired read-only. Pair it again with act permission to approve or start work.' };
   if (dispatchEnabled === null) return { ...base, act: 'unavailable', actReason: 'Checking whether this Mac allows actions. Wait for it to answer.' };
   if (dispatchEnabled === false) return { ...base, act: 'unavailable', actReason: 'Your Mac started Verse without dispatch, so nothing can be changed from here. Run `ashlr verse` on the Mac to act.' };

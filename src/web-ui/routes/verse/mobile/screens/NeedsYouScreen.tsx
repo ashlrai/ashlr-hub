@@ -35,6 +35,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 import type { NeedsYouAction, NeedsYouActionKind, NeedsYouItem, NeedsYouKind, NeedsYouSeverity } from '../../../../../core/verse/workbench-types.js';
+import { isRemoteMobileMode } from '../../../../data/remote-mode.js';
 import { answerLeaderQuestion } from '../../leader/thread-data.js';
 import { needsYouQuestionText, questionIdOfNeedsYouItem } from '../../leader/question-id.js';
 import { runNeedsYouAction } from '../../shell/needs-you-actions.js';
@@ -127,6 +128,12 @@ export function primaryAction(item: NeedsYouItem): NeedsYouAction | null {
 
 export function destructiveAction(item: NeedsYouItem): NeedsYouAction | null {
   return firstOf(item, DESTRUCTIVE_ORDER);
+}
+
+/** Authority changes require the Mac's local owner presence. */
+export function macOnlyRemoteAction(item: NeedsYouItem, action: NeedsYouAction): boolean {
+  return isRemoteMobileMode() && (item.kind === 'grant' || item.kind === 'kill'
+    || action.request?.path.startsWith('/api/verse/authority') === true);
 }
 
 const KIND_NAME: Readonly<Record<NeedsYouKind, string>> = {
@@ -328,14 +335,16 @@ interface CardProps {
 function NeedsCard({ item, canAct, offline, reduced, onAction, onOpen, onHide }: CardProps) {
   const titleId = useId();
   const row = needsYouRowView(item);
-  const primary = canAct ? primaryAction(item) : null;
-  const destructive = canAct ? destructiveAction(item) : null;
+  const allowedActions = item.actions.filter((action) => !macOnlyRemoteAction(item, action));
+  const macOnly = allowedActions.length !== item.actions.length;
+  const primary = canAct ? firstOf({ ...item, actions: allowedActions }, PRIMARY_ORDER) : null;
+  const destructive = canAct ? firstOf({ ...item, actions: allowedActions }, DESTRUCTIVE_ORDER) : null;
   const actionsLive = canAct && !offline;
   const rightAction = actionsLive ? primary : null;
   const leftAction = actionsLive ? destructive : null;
   const open = openLabel(item);
   // An action with no route already opens the target: no second Open button.
-  const showOpen = open !== null && !item.actions.some((a) => a.request === null && canAct);
+  const showOpen = open !== null && !allowedActions.some((a) => a.request === null && canAct);
 
   const { dx, handlers } = useSwipe({ right: !reduced && rightAction !== null, left: !reduced }, (dir) => {
     if (dir === 'right' && rightAction) onAction(item, rightAction);
@@ -377,10 +386,11 @@ function NeedsCard({ item, canAct, offline, reduced, onAction, onOpen, onHide }:
           </p>
         ) : null}
         {row.detail ? <p className={styles.detail}>{row.detail}</p> : null}
+        {macOnly ? <p className={styles.consequence}>Authority changes for this item are available on your Mac.</p> : null}
         {primary ? <p className={styles.consequence}>{consequenceLine(item, primary)}</p> : null}
         <div className={ui.buttonRow}>
           {canAct
-            ? item.actions.map((action, i) => {
+            ? allowedActions.map((action, i) => {
               const isPrimary = action === primary;
               const isNo = action.kind === 'veto' || action.kind === 'reject';
               return (
@@ -462,6 +472,10 @@ export function NeedsYouScreen() {
 
   const onAction = useCallback(
     (item: NeedsYouItem, action: NeedsYouAction) => {
+      if (macOnlyRemoteAction(item, action)) {
+        showMobileToast('This authority change must be made on your Mac.', 'neutral');
+        return;
+      }
       // A Leader question's Answer has no route of its own: the phone collects the words here.
       if (item.kind === 'leader-question' && action.request === null && questionIdOfNeedsYouItem(item.id)) {
         setInterim('');

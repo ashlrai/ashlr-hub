@@ -20,6 +20,7 @@ import {
   subscribeAppearance,
 } from './appearance-store.js';
 import { ACCENT_PRESETS, isDefaultAppearance, matchingAccentPreset } from './appearance-presets.js';
+import { bootAppearance } from './appearance-boot.js';
 
 const root = () => document.documentElement;
 
@@ -57,6 +58,22 @@ describe('appearance-store', () => {
     expect(root().style.getPropertyValue('--accent-l')).toBe('58%');
     // grotesk is the token default, so no inline override is written.
     expect(root().style.getPropertyValue('--font-display')).toBe('');
+  });
+
+  it('applies stored preferences before Settings loads, with the same safe coercion', () => {
+    localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify({
+      accentH: 400, accentS: 999, accentL: 5, density: 'compact', uiScale: 'xlarge',
+      displayFont: 'mono', radius: 'soft', motion: 'reduce', reduceMotion: false,
+    }));
+    bootAppearance();
+    expect(root().style.getPropertyValue('--accent-h')).toBe('40');
+    expect(root().style.getPropertyValue('--accent-s')).toBe('100%');
+    expect(root().style.getPropertyValue('--accent-l')).toBe('30%');
+    expect(root().style.getPropertyValue('--font-display')).toBe('var(--font-mono)');
+    expect(root().getAttribute('data-density')).toBe('compact');
+    expect(root().getAttribute('data-ui-scale')).toBe('xlarge');
+    expect(root().getAttribute('data-radius')).toBe('soft');
+    expect(root().getAttribute('data-motion')).toBe('reduce');
   });
 
   it('writes the accent as the three raw channels tokens.css derives from', () => {

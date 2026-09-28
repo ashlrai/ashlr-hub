@@ -143,6 +143,7 @@ function loadWorker(network: (req: Request) => Promise<Response>) {
   };
   const self = {
     location: { origin: 'https://mac.local' },
+    registration: { showNotification: vi.fn(async () => undefined) },
     addEventListener: (type: string, fn: (e: unknown) => void) => listeners.set(type, fn),
     skipWaiting: vi.fn(async () => undefined),
     clients: { claim: vi.fn(async () => undefined) },
@@ -174,12 +175,38 @@ function loadWorker(network: (req: Request) => Promise<Response>) {
     listeners.get(type)!({ waitUntil: (p: Promise<unknown>) => { wait = p; } });
     await wait;
   }
-  return { api, dispatchFetch, lifecycle, caches, self };
+  async function dispatchPush(data: unknown) {
+    let wait: Promise<unknown> = Promise.resolve();
+    listeners.get('push')!({ data, waitUntil: (p: Promise<unknown>) => { wait = p; } });
+    await wait;
+  }
+  return { api, dispatchFetch, dispatchPush, lifecycle, caches, self };
 }
 
 const ok = (body: string, type = 'text/html') => new Response(body, { status: 200, headers: { 'Content-Type': type } });
 
 describe('the service worker', () => {
+  it('never displays an untrusted push payload or private agent details', async () => {
+    const { dispatchPush, self } = loadWorker(async () => ok(''));
+    const payload = { text: 'PRIVATE agent transcript', repo: 'secret-repo', json: () => { throw new Error('payload read'); } };
+    await dispatchPush(payload);
+    const show = (self.registration as { showNotification: ReturnType<typeof vi.fn> }).showNotification;
+    expect(show).toHaveBeenCalledTimes(1);
+    const displayed = JSON.stringify(show.mock.calls[0]);
+    expect(displayed).toContain('Verse has an update');
+    expect(displayed).not.toContain('PRIVATE');
+    expect(displayed).not.toContain('secret-repo');
+  });
+
+  it('uses fixed copy and fixed routes for needs-you and completion signals', async () => {
+    const { dispatchPush, self } = loadWorker(async () => ok(''));
+    const show = (self.registration as { showNotification: ReturnType<typeof vi.fn> }).showNotification;
+    await dispatchPush({ json: () => ({ kind: 'needs-you', title: 'PRIVATE approval', body: 'secret transcript' }) });
+    await dispatchPush({ json: () => ({ kind: 'completed', title: 'PRIVATE repo', body: 'secret result' }) });
+    expect(show.mock.calls[0]![1]).toMatchObject({ body: 'Something needs you. Open Verse for details.', data: { path: '/verse/m/#/needs' } });
+    expect(show.mock.calls[1]![1]).toMatchObject({ body: 'A run completed. Open Verse for details.', data: { path: '/verse/m/#/' } });
+    expect(JSON.stringify(show.mock.calls)).not.toMatch(/PRIVATE|secret/);
+  });
   it('routes: never /api/, never another origin or method; shell, hashed assets and its own files only', () => {
     const { api } = loadWorker(async () => ok(''));
     const o = 'https://mac.local';
@@ -222,6 +249,24 @@ describe('the service worker', () => {
     expect(await warm.text()).toContain('id="root"');
   });
 
+  it('never replaces a paired remote shell with Access HTML or an unmarked page', async () => {
+    const remoteHtml = '<meta name="ashlr-remote-gateway" content="v1"><div id="root"></div>';
+    let answer: Response | null = ok(remoteHtml);
+    const { dispatchFetch, lifecycle } = loadWorker(async () => {
+      if (!answer) throw new TypeError('offline');
+      return answer;
+    });
+    await lifecycle('install');
+    answer = ok('<div id="root"></div>');
+    await (await dispatchFetch('https://mac.local/verse/m/', { mode: 'navigate' }))!;
+    answer = ok('<div id="root"></div>');
+    Object.defineProperty(answer, 'url', { value: 'https://login.cloudflareaccess.com/sign-in' });
+    await (await dispatchFetch('https://mac.local/verse/m/', { mode: 'navigate' }))!;
+    answer = null;
+    const cached = await (await dispatchFetch('https://mac.local/verse/m/', { mode: 'navigate' }))!;
+    expect(await cached.text()).toContain('ashlr-remote-gateway');
+  });
+
   it('caches hashed assets first, and activate drops old versions only', async () => {
     const network = vi.fn(async () => ok('code', 'application/javascript'));
     const { dispatchFetch, lifecycle, caches, self } = loadWorker(network);
@@ -233,7 +278,7 @@ describe('the service worker', () => {
     caches.set('ashlr-verse-m-shell-v0', {} as FakeCache);
     caches.set('someone-elses-cache', {} as FakeCache);
     await lifecycle('activate');
-    expect([...caches.keys()].sort()).toEqual(['ashlr-verse-m-assets-v1', 'someone-elses-cache']);
+    expect([...caches.keys()].sort()).toEqual(['ashlr-verse-m-assets-v2', 'someone-elses-cache']);
     expect((self.clients as { claim: ReturnType<typeof vi.fn> }).claim).toHaveBeenCalled();
   });
 });

@@ -11,6 +11,7 @@ import { bootstrap } from '../routes/verse/fixtures.test-support.js';
 import { activityResponse, stubFetch } from '../routes/verse/mobile/mobile.test-support.js';
 import { resetActivityForTest } from '../routes/verse/shell/useActivity.js';
 import { ApiError } from '../data/client.js';
+import { clearRemoteSessionForTest } from '../data/remote-session.js';
 import { canonicalizeMobilePath, coverViewport, probeOutcome, VerseMobileApp } from './VerseMobileApp.js';
 
 beforeEach(() => {
@@ -19,6 +20,7 @@ beforeEach(() => {
   clearMutationToken();
   localStorage.clear();
   sessionStorage.clear();
+  clearRemoteSessionForTest();
 });
 
 afterEach(() => {
@@ -58,6 +60,21 @@ describe('the session probe', () => {
 });
 
 describe('VerseMobileApp', () => {
+  it('uses the gateway session before any local token gate when its HTML marker is present', async () => {
+    window.history.replaceState(null, '', '/verse/m/');
+    document.head.innerHTML = '<meta name="ashlr-remote-gateway" content="v1">';
+    const fetch = vi.fn(async (_path: string, _init?: RequestInit) => Response.json({ authenticated: false, csrfToken: 'c'.repeat(40), capabilities: { writes: false, pairing: false } }));
+    vi.stubGlobal('fetch', fetch);
+    act(() => markCheckComplete(false));
+    render(<VerseMobileApp />);
+    expect(await screen.findByText('Phone pairing is not enabled on this Mac yet. Open Verse on your Mac to finish gateway setup.')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Connect to your Mac' })).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0]![0]).toBe('/remote/session');
+    const headers = new Headers(fetch.mock.calls[0]![1]?.headers);
+    expect(headers.has('x-ashlr-token')).toBe(false);
+    expect(headers.has('x-ashlr-read-client')).toBe(false);
+  });
   it('without a session shows the same gate as the workbench, and fetches nothing', async () => {
     window.history.replaceState(null, '', '/verse/m');
     const fetch = vi.fn(async () => new Response(null, { status: 401 }));

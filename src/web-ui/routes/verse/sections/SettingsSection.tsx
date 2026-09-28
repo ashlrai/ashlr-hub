@@ -12,7 +12,7 @@
  *
  * 3.10: reached from the gear tray (⌘,), not the rail.
  */
-import { useAppearance } from '../../../data/hooks.js';
+import { useAppearance } from '../../../data/appearance-hooks.js';
 import { OnboardingPanel } from '../onboarding/OnboardingPanel.js';
 import { AboutPanel } from './AboutPanel.js';
 import { AppearancePanel } from './AppearancePanel.js';

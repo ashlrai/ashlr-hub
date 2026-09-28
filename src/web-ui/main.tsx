@@ -1,6 +1,7 @@
 import { lazy, StrictMode, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
 import { autoSelectVerseMobile, isResourceConsolePath, isUniverseConsolePath, isVerseConsolePath, isVerseMobilePath } from './app/console-mode.js';
+import './data/appearance-boot.js';
 
 // The scoped console must not evaluate the general shell's observer modules.
 // Verse on a phone is its own chunk: /verse/m, or /verse opened on a phone
