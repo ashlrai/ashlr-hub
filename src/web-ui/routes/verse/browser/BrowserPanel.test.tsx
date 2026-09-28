@@ -28,6 +28,7 @@ import { BROWSER_TABS_STORAGE_KEY } from './browser-tabs.js';
 import { NATIVE_BROWSER_EVENT, type NativeBrowser, type NativeBrowserOp } from './native-browser.js';
 
 const VERSE = 'http://127.0.0.1:7777';
+const APPROVED = { tab: 't1', url: 'http://localhost:5173/', origin: 'http://localhost:5173', loadId: 'L1' };
 
 function policy(over: Partial<VerseBrowserPolicy> = {}): VerseBrowserPolicy {
   return {
@@ -327,14 +328,14 @@ describe('agent access', () => {
   });
 
   const cmd = (op: VerseBrowserAgentCommand['op'], args: Record<string, unknown>, id = 'bc_AAAAAAAAAAAA'): VerseBrowserAgentCommand =>
-    ({ id, sessionId: 's-1', op, args, allowedOrigins: [], createdAt: 'now' });
+    ({ id, sessionId: 's-1', op, args: { ...args, ...((op === 'act' || op === 'evaluate') ? { approved: APPROVED } : {}) }, allowedOrigins: [], createdAt: 'now' });
 
   it('an act command becomes one native query with the validated spec, and is listed in the strip', async () => {
     const click = cmd('act', { kind: 'click', ref: 'e3', expect: 'abc123' });
     const h = harness({ native: true, tabUrl: 'http://localhost:5173/', policy: policy({ agentAccess: true, actAccess: true }), commands: [click] });
     render(<BrowserPanel sessionId="s-1" deps={h.deps} />);
     await waitFor(() => expect(h.api.result).toHaveBeenCalledWith('s-1', expect.objectContaining({ id: click.id, ok: true })));
-    expect(h.sent).toContainEqual(expect.objectContaining({ op: 'query', tab: 't1', what: { act: { kind: 'click', ref: 'e3', expect: 'abc123' } } }));
+    expect(h.sent).toContainEqual(expect.objectContaining({ op: 'query', tab: 't1', what: { act: { kind: 'click', ref: 'e3', expect: 'abc123' } }, approved: APPROVED }));
     expect(await screen.findByRole('list', { name: 'Recent agent actions' })).toHaveTextContent('Clicked e3');
   });
 

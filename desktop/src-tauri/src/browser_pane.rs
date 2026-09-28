@@ -225,6 +225,16 @@ pub struct EvaluateArgs {
     pub expression: String,
 }
 
+/// The tab and page load whose action the operator allowed.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApprovedPage {
+    pub tab: String,
+    pub url: String,
+    pub origin: String,
+    pub load_id: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MouseButton {
@@ -571,6 +581,7 @@ pub enum BrowserRequest {
         tab: String,
         req: String,
         what: QueryWhat,
+        approved: Option<ApprovedPage>,
     },
     /// `clip`: a rectangle in CSS px of the page's viewport (only the
     /// visible viewport can be captured — WebKit renders anything beyond it
@@ -815,7 +826,16 @@ fn validate(request: BrowserRequest) -> Option<BrowserRequest> {
             ref tab,
             ref req,
             ref what,
-        } => (valid_tab(tab) && valid_req(req) && valid_what(what)).then_some(request),
+            ref approved,
+        } => {
+            let gate = match what {
+                QueryWhat::Act(_) | QueryWhat::Evaluate(_) => {
+                    approved.as_ref().is_some_and(|a| valid_approved(tab, a))
+                }
+                _ => approved.is_none(),
+            };
+            (valid_tab(tab) && valid_req(req) && valid_what(what) && gate).then_some(request)
+        }
         BrowserRequest::Screenshot { tab, req, clip } => {
             let clip = match clip {
                 Some(c) => Some(sanitize_bounds(c)?),
@@ -896,6 +916,21 @@ pub fn check_url(raw: &str, verse_origin: &str) -> Result<Url, &'static str> {
     Ok(url)
 }
 
+fn valid_approved(tab: &str, approved: &ApprovedPage) -> bool {
+    if approved.tab != tab
+        || !valid_tab(&approved.tab)
+        || approved.url.len() > MAX_URL_LEN
+        || !(1..=40).contains(&approved.load_id.len())
+        || !approved.load_id.bytes().all(|b| b.is_ascii_alphanumeric())
+    {
+        return false;
+    }
+    let Ok(url) = check_url(&approved.url, crate::SERVE_ORIGIN) else {
+        return false;
+    };
+    url.origin().ascii_serialization() == approved.origin
+}
+
 /// What `on_navigation` does with a navigation the tab's page started.
 #[derive(Debug, PartialEq, Eq)]
 pub enum NavDecision {
@@ -949,11 +984,13 @@ pub fn query_script(what: &QueryWhat) -> Option<String> {
 /// default), the target is the operator's OWN loopback dev server (never a
 /// third-party site with the operator's logins), the tab has zero IPC, and
 /// the answer comes back as data through [`decode_tap_result`] like any other.
-pub fn evaluate_script(expression: &str, origin: &str) -> String {
+pub fn evaluate_script(expression: &str, approved: &ApprovedPage) -> String {
     let expr = js_json(&Value::String(expression.to_string()));
-    let origin = js_json(&Value::String(origin.to_string()));
+    let origin = js_json(&Value::String(approved.origin.clone()));
+    let url = js_json(&Value::String(approved.url.clone()));
+    let load_id = js_json(&Value::String(approved.load_id.clone()));
     format!(
-        "(function(){{var S=JSON.stringify;try{{if(location.origin!=={origin})return S({{error:'not-loopback'}});var r=(0,eval)({expr});if(r!==null&&(typeof r==='object'||typeof r==='function')&&typeof r.then==='function')return S({{value:'(a Promise \\u2014 await is not supported)',type:'promise'}});var v;if(typeof r==='string'){{v=r}}else{{try{{v=S(r)}}catch(e){{v=undefined}}if(typeof v!=='string')v=String(r)}}var cut=v.length>{max};return S({{value:cut?v.slice(0,{max}):v,type:typeof r,truncated:cut}})}}catch(e){{var m;try{{m=String(e&&e.message||e)}}catch(_){{m='error'}}return S({{error:m}})}}}})()",
+        "(function(){{var S=JSON.stringify;try{{if(location.origin!=={origin}||location.href!=={url}||!window.__ashlrTap||JSON.parse(window.__ashlrTap.info()).loadId!=={load_id})return S({{error:'approved-page-changed'}});var r=(0,eval)({expr});if(r!==null&&(typeof r==='object'||typeof r==='function')&&typeof r.then==='function')return S({{value:'(a Promise \\u2014 await is not supported)',type:'promise'}});var v;if(typeof r==='string'){{v=r}}else{{try{{v=S(r)}}catch(e){{v=undefined}}if(typeof v!=='string')v=String(r)}}var cut=v.length>{max};return S({{value:cut?v.slice(0,{max}):v,type:typeof r,truncated:cut}})}}catch(e){{var m;try{{m=String(e&&e.message||e)}}catch(_){{m='error'}}return S({{error:m}})}}}})()",
         max = EVALUATE_VALUE_MAX_CHARS
     )
 }
@@ -1199,6 +1236,13 @@ fn evaluate_target(window: &WebviewWindow, verse_origin: &str) -> Result<String,
     loopback_origin(&url, verse_origin)
 }
 
+fn page_matches(window: &WebviewWindow, approved: &ApprovedPage) -> bool {
+    window.label() == label_for(&approved.tab)
+        && window.url().ok().is_some_and(|url| {
+            url.as_str() == approved.url && url.origin().ascii_serialization() == approved.origin
+        })
+}
+
 /// The origin of `url` if it may be evaluated on (see [`evaluate_target`]).
 pub fn loopback_origin(url: &Url, verse_origin: &str) -> Result<String, &'static str> {
     if !is_loopback_host(url) || url_rule(url, verse_origin).is_err() {
@@ -1290,7 +1334,12 @@ fn handle_request(app: &AppHandle, panes: &BrowserPanes, request: BrowserRequest
                 let _ = window.set_zoom(clamp_zoom(factor));
             }
         }
-        BrowserRequest::Query { tab, req, what } => {
+        BrowserRequest::Query {
+            tab,
+            req,
+            what,
+            approved,
+        } => {
             let reply = Reply::new(app, &req);
             let Some(window) = app.get_webview_window(&label_for(&tab)) else {
                 reply.send(Err("no-tab".to_string()));
@@ -1298,16 +1347,31 @@ fn handle_request(app: &AppHandle, panes: &BrowserPanes, request: BrowserRequest
             };
             let script = match what {
                 QueryWhat::Act(spec) => {
-                    start_act(window, reply, spec);
+                    let Some(approved) = approved else {
+                        reply.send(Err("missing-approved-page".into()));
+                        return;
+                    };
+                    start_act(window, reply, spec, approved);
                     return;
                 }
-                QueryWhat::Evaluate(args) => match evaluate_target(&window, origin) {
-                    Ok(page_origin) => evaluate_script(&args.expression, &page_origin),
-                    Err(reason) => {
-                        reply.send(Err(reason.to_string()));
+                QueryWhat::Evaluate(args) => {
+                    let Some(approved) = approved.as_ref() else {
+                        reply.send(Err("missing-approved-page".into()));
+                        return;
+                    };
+                    let page_origin = match evaluate_target(&window, origin) {
+                        Ok(page_origin) => page_origin,
+                        Err(reason) => {
+                            reply.send(Err(reason.into()));
+                            return;
+                        }
+                    };
+                    if page_origin != approved.origin || !page_matches(&window, approved) {
+                        reply.send(Err("approved-page-changed".into()));
                         return;
                     }
-                },
+                    evaluate_script(&args.expression, approved)
+                }
                 other => match query_script(&other) {
                     Some(script) => script,
                     None => {
@@ -1818,7 +1882,7 @@ pub fn act_reply(spec: &ActSpec, prepared: Value, after: Value, native: bool) ->
 
 /// Start an act on its own thread. The reply's timeout covers the whole act
 /// (including waiting for an earlier act to finish).
-fn start_act(window: WebviewWindow, reply: Reply, spec: ActSpec) {
+fn start_act(window: WebviewWindow, reply: Reply, spec: ActSpec, approved: ApprovedPage) {
     #[cfg(target_os = "macos")]
     {
         let budget = act_budget(&spec);
@@ -1832,7 +1896,7 @@ fn start_act(window: WebviewWindow, reply: Reply, spec: ActSpec) {
                 if worker.is_done() {
                     return;
                 }
-                let outcome = act::run(&window, &spec, deadline, &worker);
+                let outcome = act::run(&window, &spec, &approved, deadline, &worker);
                 worker.send(outcome);
             });
         if spawned.is_err() {
@@ -1841,7 +1905,7 @@ fn start_act(window: WebviewWindow, reply: Reply, spec: ActSpec) {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (window, spec);
+        let _ = (window, spec, approved);
         reply.send(Err("unsupported".to_string()));
     }
 }
@@ -1881,8 +1945,8 @@ mod act {
     use tauri::WebviewWindow;
 
     use super::{
-        act_reply, after_args, eval_blocking, prepare_args, tap_call, ActSpec, MouseButton, Reply,
-        TYPE_BATCH, TYPE_FOCUS_SETTLE, TYPE_PACE,
+        act_reply, after_args, eval_blocking, page_matches, prepare_args, tap_call, ActSpec,
+        ApprovedPage, MouseButton, Reply, TYPE_BATCH, TYPE_FOCUS_SETTLE, TYPE_PACE,
     };
     use crate::browser_input::{self as input, native, Stroke};
 
@@ -1901,15 +1965,35 @@ mod act {
     /// Run `f` on the main thread with the tab's view and window.
     fn on_main<F>(
         window: &WebviewWindow,
+        approved: &ApprovedPage,
         deadline: Instant,
         reply: &Reply,
         f: F,
     ) -> Result<(), String>
     where
-        F: FnOnce(&WKWebView, &NSWindow) -> Result<(), &'static str> + Send + 'static,
+        F: FnOnce(&WKWebView, &NSWindow, &dyn Fn() -> bool) -> Result<(), &'static str>
+            + Send
+            + 'static,
     {
+        // The tap reports the live document load; the Tauri URL is checked
+        // again on the main thread immediately before dispatching input.
+        let info = eval_blocking(window, tap_call("info", &json!({})), left(deadline, reply)?)?;
+        if info.get("url").and_then(Value::as_str) != Some(approved.url.as_str())
+            || info.get("loadId").and_then(Value::as_str) != Some(approved.load_id.as_str())
+        {
+            return Err("approved-page-changed".into());
+        }
         let wait = left(deadline, reply)?;
-        native::on_main(window, wait, f)?.map_err(str::to_string)
+        let check_window = window.clone();
+        let check_page = approved.clone();
+        native::on_main(window, wait, move |view, win| {
+            let ready = || page_matches(&check_window, &check_page);
+            if !ready() {
+                return Err("approved-page-changed");
+            }
+            f(view, win, &ready)
+        })?
+        .map_err(str::to_string)
     }
 
     /// The point `prepare` answered: `((x, y), innerWidth)` in CSS px.
@@ -1931,17 +2015,28 @@ mod act {
     pub fn run(
         window: &WebviewWindow,
         spec: &ActSpec,
+        approved: &ApprovedPage,
         deadline: Instant,
         reply: &Reply,
     ) -> Result<Value, String> {
-        let prepared = eval_blocking(
-            window,
-            tap_call("prepare", &prepare_args(spec)),
-            left(deadline, reply)?,
-        )?;
+        if !page_matches(window, approved) {
+            return Err("approved-page-changed".into());
+        }
+        let mut args = prepare_args(spec);
+        let Value::Object(ref mut fields) = args else {
+            return Err("bad-prepare".into());
+        };
+        fields.insert("approvedUrl".into(), json!(approved.url));
+        fields.insert("approvedLoadId".into(), json!(approved.load_id));
+        let prepared = eval_blocking(window, tap_call("prepare", &args), left(deadline, reply)?)?;
+        if prepared.get("url").and_then(Value::as_str) != Some(approved.url.as_str())
+            || prepared.get("loadId").and_then(Value::as_str) != Some(approved.load_id.as_str())
+        {
+            return Err("approved-page-changed".into());
+        }
         let done = prepared.get("done") == Some(&Value::Bool(true));
         if !done {
-            perform(window, spec, &prepared, deadline, reply)?;
+            perform(window, spec, approved, &prepared, deadline, reply)?;
         }
         let after = eval_blocking(
             window,
@@ -1954,6 +2049,7 @@ mod act {
     fn perform(
         window: &WebviewWindow,
         spec: &ActSpec,
+        approved: &ApprovedPage,
         prepared: &Value,
         deadline: Instant,
         reply: &Reply,
@@ -1973,15 +2069,25 @@ mod act {
                 let (css, vw) = point(prepared)?;
                 let flags = input::modifier_flags(modifiers.as_deref().unwrap_or(&[]));
                 let double = *double;
-                on_main(window, deadline, reply, move |view, win| {
-                    native::click(view, win, css, vw, flags, double)
-                })
+                on_main(
+                    window,
+                    approved,
+                    deadline,
+                    reply,
+                    move |view, win, ready| {
+                        native::click(view, win, css, vw, flags, double, || ready())
+                    },
+                )
             }
             ActSpec::Hover { .. } => {
                 let (css, vw) = point(prepared)?;
-                on_main(window, deadline, reply, move |view, win| {
-                    native::hover(view, win, css, vw)
-                })
+                on_main(
+                    window,
+                    approved,
+                    deadline,
+                    reply,
+                    move |view, win, ready| native::hover(view, win, css, vw, || ready()),
+                )
             }
             ActSpec::Type {
                 reference,
@@ -1997,42 +2103,61 @@ mod act {
                 let enter = stroke("Enter")?;
                 let backspace = stroke("Backspace")?;
                 // Focus the field the way a person would: click it.
-                on_main(window, deadline, reply, move |view, win| {
-                    native::click(view, win, css, vw, 0, false)
-                })?;
+                on_main(
+                    window,
+                    approved,
+                    deadline,
+                    reply,
+                    move |view, win, ready| native::click(view, win, css, vw, 0, false, || ready()),
+                )?;
                 thread::sleep(TYPE_FOCUS_SETTLE);
                 if *clear {
                     // The tap selects the field's content; Backspace deletes it.
                     eval_blocking(
                         window,
-                        tap_call("clear", &json!({ "ref": reference })),
+                        tap_call(
+                            "clear",
+                            &json!({ "ref": reference, "approvedUrl": approved.url, "approvedLoadId": approved.load_id }),
+                        ),
                         left(deadline, reply)?,
                     )?;
-                    on_main(window, deadline, reply, move |view, win| {
-                        native::focus_webview(view, win);
-                        native::keys(win, &[backspace])
-                    })?;
+                    on_main(
+                        window,
+                        approved,
+                        deadline,
+                        reply,
+                        move |view, win, ready| {
+                            native::focus_webview(view, win);
+                            native::keys(win, &[backspace], || ready())
+                        },
+                    )?;
                 }
                 for chunk in strokes.chunks(TYPE_BATCH) {
                     let batch = chunk.to_vec();
-                    on_main(window, deadline, reply, move |_, win| {
-                        native::keys(win, &batch)
+                    on_main(window, approved, deadline, reply, move |_, win, ready| {
+                        native::keys(win, &batch, || ready())
                     })?;
                     thread::sleep(TYPE_PACE * chunk.len() as u32);
                 }
                 if *submit {
-                    on_main(window, deadline, reply, move |_, win| {
-                        native::keys(win, &[enter])
+                    on_main(window, approved, deadline, reply, move |_, win, ready| {
+                        native::keys(win, &[enter], || ready())
                     })?;
                 }
                 Ok(())
             }
             ActSpec::Key { key } => {
                 let combo = stroke(key)?;
-                on_main(window, deadline, reply, move |view, win| {
-                    native::focus_webview(view, win);
-                    native::keys(win, &[combo])
-                })
+                on_main(
+                    window,
+                    approved,
+                    deadline,
+                    reply,
+                    move |view, win, ready| {
+                        native::focus_webview(view, win);
+                        native::keys(win, &[combo], || ready())
+                    },
+                )
             }
             // `select` (a native popup menu would block the app) and `scroll`
             // are done by the tap; an answer without `done` is a tap fault.
@@ -2382,9 +2507,47 @@ mod tests {
             Some(BrowserRequest::Query {
                 tab: "t1".into(),
                 req: "r".into(),
-                what: QueryWhat::PickPoll
+                what: QueryWhat::PickPoll,
+                approved: None,
             })
         );
+    }
+
+    #[test]
+    fn actions_require_a_matching_approved_tab_origin_and_load() {
+        let base = serde_json::json!({
+            "op": "query", "tab": "t1", "req": "r1",
+            "what": { "act": { "kind": "key", "key": "Enter" } },
+        });
+        let mut request = base.clone();
+        assert!(parse(&request.to_string()).is_none());
+        request["approved"] = serde_json::json!({
+            "tab": "t1", "url": "http://localhost:3000/", "origin": "http://localhost:3000", "loadId": "L1",
+        });
+        assert!(parse(&request.to_string()).is_some());
+        for (field, bad) in [
+            ("tab", "t2"),
+            ("origin", "https://localhost:3000"),
+            ("loadId", "bad load"),
+            ("url", "javascript:alert(1)"),
+        ] {
+            let mut changed = request.clone();
+            changed["approved"][field] = serde_json::Value::String(bad.into());
+            assert!(
+                parse(&changed.to_string()).is_none(),
+                "accepted changed {field}"
+            );
+        }
+        let mut query = request.clone();
+        query["what"] = serde_json::json!("info");
+        assert!(
+            parse(&query.to_string()).is_none(),
+            "read queries must not carry an action approval"
+        );
+        request["what"] = serde_json::json!({ "evaluate": { "expression": "1" } });
+        assert!(parse(&request.to_string()).is_some());
+        request.as_object_mut().unwrap().remove("approved");
+        assert!(parse(&request.to_string()).is_none());
     }
 
     #[test]
@@ -2804,8 +2967,13 @@ mod tests {
     // ── new query forms ──────────────────────────────────────────────────────
 
     fn what(json: &str) -> Option<QueryWhat> {
+        let approved = if json.contains("\"act\"") || json.contains("\"evaluate\"") {
+            r#", "approved":{"tab":"t1","url":"http://localhost:3000/","origin":"http://localhost:3000","loadId":"L1"}"#
+        } else {
+            ""
+        };
         match parse(&format!(
-            r#"{{"op":"query","tab":"t1","req":"r1","what":{json}}}"#
+            r#"{{"op":"query","tab":"t1","req":"r1","what":{json}{approved}}}"#
         ))? {
             BrowserRequest::Query { what, .. } => Some(what),
             _ => None,
@@ -3209,7 +3377,15 @@ mod tests {
     #[test]
     fn evaluate_wraps_the_expression_as_one_string_literal() {
         let hostile = "1})();alert(1);(function(){//\u{2028}\"'`${x}";
-        let script = evaluate_script(hostile, "http://127.0.0.1:3000");
+        let script = evaluate_script(
+            hostile,
+            &ApprovedPage {
+                tab: "t1".into(),
+                url: "http://127.0.0.1:3000/".into(),
+                origin: "http://127.0.0.1:3000".into(),
+                load_id: "L1".into(),
+            },
+        );
         assert!(!script.contains('\u{2028}'));
         let open = "(0,eval)(";
         let start = script.find(open).unwrap() + open.len();
@@ -3217,9 +3393,9 @@ mod tests {
         let literal: Value = serde_json::from_str(&script[start..end]).unwrap();
         assert_eq!(literal, Value::String(hostile.to_string()));
         // The origin is re-checked in the page before anything runs.
-        assert!(script.starts_with(
-            r#"(function(){var S=JSON.stringify;try{if(location.origin!=="http://127.0.0.1:3000")return S({error:'not-loopback'});var r=(0,eval)("#
-        ));
+        assert!(script.contains(r#"location.origin!=="http://127.0.0.1:3000""#));
+        assert!(script.contains(r#"location.href!=="http://127.0.0.1:3000/""#));
+        assert!(script.contains(r#".loadId!=="L1""#));
         assert!(script.contains("type:'promise'"));
         assert!(script.contains(&format!("v.slice(0,{EVALUATE_VALUE_MAX_CHARS})")));
         assert!(script.ends_with("return S({error:m})}})()"));
@@ -3432,14 +3608,17 @@ mod tests {
             1,
             "browser_tap.js may read a field's content only in fieldValue"
         );
-        let field_value = TAP_JS
-            .find("function fieldValue(el)")
-            .expect("fieldValue");
+        let field_value = TAP_JS.find("function fieldValue(el)").expect("fieldValue");
         let redacted = TAP_JS[field_value..]
             .find("if (sensitive(el)) return '[redacted]'")
             .expect("fieldValue checks sensitive first");
-        let read = TAP_JS[field_value..].find("var v = el.value").expect("the one read");
-        assert!(redacted < read, "the sensitive check must come before the read");
+        let read = TAP_JS[field_value..]
+            .find("var v = el.value")
+            .expect("the one read");
+        assert!(
+            redacted < read,
+            "the sensitive check must come before the read"
+        );
         // Exactly three event dispatches: a <select>'s input + change (a
         // native popup would block the app) and a right click's contextmenu
         // (so would a native context menu).

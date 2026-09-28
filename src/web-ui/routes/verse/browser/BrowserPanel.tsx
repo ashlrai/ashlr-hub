@@ -84,6 +84,7 @@ import {
   nativeBrowser,
   nativeRequest,
   subscribeNativeBrowser,
+  type ApprovedPage,
   type NativeBrowser,
   type NativeQuery,
 } from './native-browser.js';
@@ -546,10 +547,10 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
   // Capture: console, screenshot, picker
   // -------------------------------------------------------------------------
 
-  const queryTab = useCallback((what: NativeQuery, timeoutMs = 6_000): Promise<unknown> => {
+  const queryTab = useCallback((what: NativeQuery, timeoutMs = 6_000, approved?: ApprovedPage): Promise<unknown> => {
     if (!native) return Promise.reject(new Error('Needs the Ashlr desktop app.'));
     if (!openedRef.current.has(tab.id)) return Promise.reject(new Error('No page is open.'));
-    return nativeRequest(native, (req) => ({ op: 'query', tab: tab.id, req, what }), timeoutMs);
+    return nativeRequest(native, (req) => ({ op: 'query', tab: tab.id, req, what, ...(approved ? { approved } : {}) }), timeoutMs);
   }, [native, tab.id]);
 
   const readConsole = useCallback(async () => {
@@ -740,7 +741,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
     try {
       const reason = scope === 'browser_act'
         ? (enabled ? 'Let this chat\'s agents click and type in the browser' : 'Stop agents clicking and typing')
-        : (enabled ? 'Let this chat\'s agents run scripts in localhost pages' : 'Stop agents running page scripts');
+        : (enabled ? 'Let this chat\'s agents run full-privilege scripts in localhost pages, including access to cookies and stored credentials' : 'Stop agents running page scripts');
       const next = await gate.run(reason, () => api.setAccess(sessionId, enabled, scope));
       if (next) setPolicy(next);
     } catch (err) {
@@ -802,7 +803,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
       console: mode === 'native' && native?.capabilities.console !== false,
       act: mode === 'native' && native?.capabilities.act === true,
     },
-    current: () => ({ url: tab.url, title: tab.title, tabs: tabsState.tabs.length }),
+    current: () => ({ tabId: tab.id, url: tab.url, title: tab.title, tabs: tabsState.tabs.length }),
     navigate: async (url) => {
       const id = tab.id;
       navigateTab(id, url);
@@ -813,7 +814,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
       const landed = await waitForLoad(id, url);
       return { url: landed.url ?? url, title: landed.title, loading: landed.loading };
     },
-    query: (what, timeoutMs) => queryTab(what, timeoutMs),
+    query: (what, timeoutMs, approved) => queryTab(what, timeoutMs, approved),
     history: async (direction) => {
       const id = tab.id;
       if (native && openedRef.current.has(id)) {

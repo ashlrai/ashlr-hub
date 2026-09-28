@@ -207,7 +207,7 @@ describe('the agent runner re-applies the gate in the pane', () => {
       calls,
       mode: 'native',
       capabilities: { screenshot: true, text: true, console: true, act: true },
-      current: () => ({ url: over.url === undefined ? 'http://localhost:5173/' : over.url, title: 'App', tabs: 1 }),
+      current: () => ({ tabId: 't1', url: over.url === undefined ? 'http://localhost:5173/' : over.url, title: 'App', tabs: 1 }),
       navigate: async (url) => { calls.push(`navigate ${url}`); return { url, title: 'App', loading: false }; },
       screenshot: async () => { calls.push('screenshot'); return { mime: 'image/png', base64: 'AA==', width: 1, height: 1 }; },
       text: async () => { calls.push('text'); return { url: 'http://localhost:5173/', title: 'App', text: 'hello', truncated: false }; },
@@ -269,13 +269,14 @@ describe('the agent runner re-applies the gate in the pane', () => {
 });
 
 describe('the agent runner — acting (closed shapes, pause, confirm)', () => {
+  const APPROVED = { tab: 't1', url: 'http://localhost:5173/', origin: 'http://localhost:5173', loadId: 'L1' };
   function executor(over: Partial<BrowserExecutor> & { url?: string | null } = {}): BrowserExecutor & { calls: string[] } {
     const calls: string[] = [];
     return {
       calls,
       mode: 'native',
       capabilities: { screenshot: true, text: true, console: true, act: true },
-      current: () => ({ url: over.url === undefined ? 'http://localhost:5173/' : over.url, title: 'App', tabs: 2 }),
+      current: () => ({ tabId: 't1', url: over.url === undefined ? 'http://localhost:5173/' : over.url, title: 'App', tabs: 2 }),
       navigate: async (url) => ({ url, title: null, loading: false }),
       screenshot: async (clip) => { calls.push(`screenshot ${JSON.stringify(clip ?? null)}`); return { mime: 'image/png', base64: 'AA==', width: 1, height: 1, scale: 1.5, origin: { x: 0, y: 0 } }; },
       text: async () => ({ url: 'http://localhost:5173/', title: 'App', text: '', truncated: false }),
@@ -292,7 +293,7 @@ describe('the agent runner — acting (closed shapes, pause, confirm)', () => {
     };
   }
   const cmd = (op: VerseBrowserAgentCommand['op'], args?: Record<string, unknown>): VerseBrowserAgentCommand =>
-    ({ id: 'bc_AAAAAAAAAAAA', sessionId: 's-1', op, ...(args ? { args } : {}), allowedOrigins: [], createdAt: 'now' });
+    ({ id: 'bc_AAAAAAAAAAAA', sessionId: 's-1', op, ...(args ? { args: { ...args, ...((op === 'act' || op === 'evaluate') ? { approved: APPROVED } : {}) } } : {}), allowedOrigins: [], createdAt: 'now' });
 
   it('rebuilds act specs from closed shapes — extra keys, bad refs and bad kinds are refused', () => {
     expect(parseActArgs({ kind: 'click', ref: 'e12', expect: 'k2x', double: true })).toEqual({ kind: 'click', ref: 'e12', expect: 'k2x', double: true });
@@ -329,6 +330,17 @@ describe('the agent runner — acting (closed shapes, pause, confirm)', () => {
     const r = await executeAgentCommand(cmd('act', { kind: 'click', ref: 'e3', expect: 'abc' }), exec, VERSE);
     expect(r).toMatchObject({ ok: true, url: 'http://localhost:5173/' });
     expect(exec.calls).toEqual(['{"act":{"kind":"click","ref":"e3","expect":"abc"}}']);
+  });
+
+  it('rejects a switched tab or missing page approval before native input', async () => {
+    const exec = executor();
+    const changed = await executeAgentCommand({ ...cmd('act', { kind: 'key', key: 'Enter' }), args: {
+      kind: 'key', key: 'Enter', approved: { ...APPROVED, tab: 't2' },
+    } }, exec, VERSE);
+    expect(changed.error).toMatch(/approved tab or page changed/);
+    const missing = await executeAgentCommand({ ...cmd('act'), args: { kind: 'key', key: 'Enter' } }, exec, VERSE);
+    expect(missing.error).toMatch(/missing approved page identity/);
+    expect(exec.calls).toEqual([]);
   });
 
   it('never acts on, snapshots or resolves a page the chat may not observe', async () => {

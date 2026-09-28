@@ -13,12 +13,12 @@
  *     (or pressing a printable key while one is focused), clicking a file
  *     input or a download link, key combinations outside the closed table
  *     (⌘V would paste the operator's clipboard into a page), a newline into
- *     a single-line field (that is a submit — say `submit: true`), and a
- *     script that names cookies or storage;
+ *     a single-line field (that is a submit — say `submit: true`);
  *   - confirm with the operator ([Allow once] [Allow for chat] [Deny]): a
  *     form submission, a control labelled delete / pay / buy / send /
  *     publish / post / confirm (and a few kin), leaving for another origin,
- *     acting on a page outside this machine, and ANY action after this turn
+ *     acting on a page outside this machine, running a page script (which
+ *     has the page's full credentials and storage access), and ANY action after this turn
  *     read content from outside this machine (the "taint": that content may
  *     be steering the agent);
  *   - otherwise auto: acting on the operator's own localhost pages is what
@@ -232,7 +232,7 @@ export interface BrowserActionInput {
 }
 
 export interface BrowserActionReason {
-  code: 'submit' | 'consequential' | 'new-origin' | 'site' | 'tainted';
+  code: 'submit' | 'consequential' | 'new-origin' | 'site' | 'tainted' | 'script';
   text: string;
   /** What "Allow for this chat" remembers. */
   allowKey: string;
@@ -242,9 +242,6 @@ export type BrowserActionVerdict =
   | { decision: 'auto'; reasons: [] }
   | { decision: 'confirm'; reasons: BrowserActionReason[] }
   | { decision: 'refuse'; code: string; message: string };
-
-/** Mentions of cookies or storage in a script: refused outright (this is a speed bump, not a sandbox — see the tool). */
-export const STORAGE_ACCESS = /\b(document\s*\.\s*cookie|cookieStore|localStorage|sessionStorage|indexedDB|caches)\b/;
 
 export function originOf(url: string | null | undefined): string | null {
   if (typeof url !== 'string' || !url) return null;
@@ -302,11 +299,6 @@ export function classifyBrowserAction(input: BrowserActionInput): BrowserActionV
       }
       break;
     }
-    case 'evaluate':
-      if (STORAGE_ACCESS.test(input.text ?? '')) {
-        return refuse('storage', 'Scripts may not touch cookies or storage (document.cookie, localStorage, sessionStorage, indexedDB, caches).');
-      }
-      break;
     default:
       break;
   }
@@ -315,6 +307,17 @@ export function classifyBrowserAction(input: BrowserActionInput): BrowserActionV
   const add = (reason: BrowserActionReason): void => {
     if (!reasons.some((r) => r.allowKey === reason.allowKey)) reasons.push(reason);
   };
+
+  // Evaluating arbitrary JavaScript is equivalent to using the page's own
+  // developer console. A source-text filter cannot confine its storage or
+  // network access, so make the privilege explicit at the operator gate.
+  if (input.kind === 'evaluate') {
+    add({
+      code: 'script',
+      text: `it can read and change the entire ${page} page, including its cookies, credentialed storage and network access`,
+      allowKey: `script:${page}`,
+    });
+  }
 
   // Form submission, in its three shapes.
   const combo = input.kind === 'key' ? parseKeyCombo(input.key) : null;

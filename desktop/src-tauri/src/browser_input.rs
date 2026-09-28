@@ -496,6 +496,7 @@ pub mod native {
         vw: f64,
         flags: usize,
         double: bool,
+        mut approved: impl FnMut() -> bool,
     ) -> Result<(), &'static str> {
         let at = window_point(webview, css.0, css.1, vw)?;
         let rounds: &[isize] = if double { &[1, 2] } else { &[1] };
@@ -530,8 +531,18 @@ pub mod native {
         // WebKit keeps the page's focused element and still accepts our key
         // events in a non-key window.
         let was_key = window.isKeyWindow();
+        let mut pressed = false;
         for event in &events {
+            if !approved() {
+                // If navigation began after mouse-down, release the button
+                // before aborting so the webview cannot remain in a drag.
+                if pressed {
+                    window.sendEvent(event);
+                }
+                return Err("approved-page-changed");
+            }
             window.sendEvent(event);
+            pressed = !pressed;
         }
         if !was_key && window.isKeyWindow() {
             if let Some(parent) = window.parentWindow() {
@@ -548,11 +559,18 @@ pub mod native {
         window: &NSWindow,
         css: (f64, f64),
         vw: f64,
+        mut approved: impl FnMut() -> bool,
     ) -> Result<(), &'static str> {
         let at = window_point(webview, css.0, css.1, vw)?;
         window.setAcceptsMouseMovedEvents(true);
         let event = mouse(NSEventType::MouseMoved, at, 0, window, 0, 0.0).ok_or("event-failed")?;
+        if !approved() {
+            return Err("approved-page-changed");
+        }
         window.sendEvent(&event);
+        if !approved() {
+            return Err("approved-page-changed");
+        }
         webview.mouseMoved(&event);
         Ok(())
     }
@@ -570,7 +588,11 @@ pub mod native {
     }
 
     /// Key presses (keyDown + keyUp each), in order.
-    pub fn keys(window: &NSWindow, strokes: &[Stroke]) -> Result<(), &'static str> {
+    pub fn keys(
+        window: &NSWindow,
+        strokes: &[Stroke],
+        mut approved: impl FnMut() -> bool,
+    ) -> Result<(), &'static str> {
         let number = window.windowNumber();
         let mut events = Vec::with_capacity(strokes.len() * 2);
         for s in strokes {
@@ -592,8 +614,18 @@ pub mod native {
                 events.push(event.ok_or("event-failed")?);
             }
         }
+        let mut pressed = false;
         for event in &events {
+            if !approved() {
+                // A matching key-up is still needed after key-down, even if
+                // the page changed in between.
+                if pressed {
+                    window.sendEvent(event);
+                }
+                return Err("approved-page-changed");
+            }
             window.sendEvent(event);
+            pressed = !pressed;
         }
         Ok(())
     }

@@ -185,6 +185,7 @@ function shownUrl(url: string): string {
 }
 
 type Observed = { ok: true; url: string; origin: string; loopback: boolean } | { ok: false; message: string };
+type ActionPage = Extract<Observed, { ok: true }> & { tabId: string; loadId: string };
 
 function observe(ctx: BrowserToolContext, url: unknown): Observed {
   if (typeof url !== 'string' || url.length === 0) {
@@ -238,13 +239,21 @@ function failure(outcome: Extract<BrowserOutcome, { ok: false }>): VerseMcpToolR
   return toolError(FAILURES[code] ?? outcome.message);
 }
 
-async function currentPage(ctx: BrowserToolContext): Promise<Observed | VerseMcpToolResult> {
+async function currentPage(ctx: BrowserToolContext): Promise<ActionPage | VerseMcpToolResult> {
   const status = await ctx.deps.run(ctx.sessionId, 'status', {});
   if (!status.ok) return failure(status);
   const data = isRecord(status.data) ? status.data : {};
   if (data['hidden'] === true) return toolError('The active tab shows a page this chat may not observe, so nothing was done.');
   if (!status.url) return toolError('No page is open in the Browser pane. Open one with browser_navigate first.');
-  return observe(ctx, status.url);
+  const seen = observe(ctx, status.url);
+  if (!seen.ok) return toolError(seen.message);
+  const tabId = data['tabId'];
+  const loadId = data['loadId'];
+  if (typeof tabId !== 'string' || !/^[a-z0-9]{1,16}$/.test(tabId)
+    || typeof loadId !== 'string' || !/^[a-zA-Z0-9]{1,40}$/.test(loadId)) {
+    return toolError('The Browser pane could not verify the active tab and page load. Wait for it to finish loading, then try again.');
+  }
+  return { ...seen, tabId, loadId };
 }
 
 /**
@@ -297,7 +306,7 @@ interface Target {
   target: BrowserResolvedTarget;
   /** What the act command names the element by. */
   spec: { ref: string } | { x: number; y: number };
-  page: Extract<Observed, { ok: true }>;
+  page: ActionPage;
 }
 
 function refArg(args: Record<string, unknown>, key = 'ref'): string | null | VerseMcpToolResult {
@@ -334,10 +343,14 @@ async function resolveTarget(ctx: BrowserToolContext, args: Record<string, unkno
   }
   const outcome = await ctx.deps.run(ctx.sessionId, 'resolve', { args: spec });
   if (!outcome.ok) return failure(outcome);
-  const page = observe(ctx, outcome.url);
-  if (!page.ok) return toolError(page.message);
+  const resolvedPage = observe(ctx, outcome.url);
+  if (!resolvedPage.ok) return toolError(resolvedPage.message);
+  const page = await currentPage(ctx);
+  if (isResult(page)) return page;
+  if (page.url !== outcome.url) return toolError('The tab navigated while resolving the element. Take a new browser_snapshot.');
   const target = asResolvedTarget(outcome.data);
   if (!target) return toolError('The page gave an unreadable answer about that element.');
+  if (target.loadId !== page.loadId) return toolError('The page reloaded while resolving the element. Take a new browser_snapshot.');
   if (shotUrl !== null && shotUrl !== page.url) {
     ctx.deps.setShot(ctx.sessionId, null);
     return toolError('The page has changed since your last browser_screenshot, so its pixels no longer line up. Take a new screenshot.');
@@ -362,8 +375,10 @@ function landed(ctx: BrowserToolContext, before: string, data: Record<string, un
   return seen.ok ? ` The page is now ${shownUrl(seen.url)}.` : ' The page moved to one this chat may not observe.';
 }
 
-async function act(ctx: BrowserToolContext, spec: Record<string, unknown>): Promise<BrowserOutcome> {
-  return ctx.deps.run(ctx.sessionId, 'act', { args: spec }, { resultMs: ACT_RESULT_MS });
+async function act(ctx: BrowserToolContext, spec: Record<string, unknown>, page: ActionPage): Promise<BrowserOutcome> {
+  return ctx.deps.run(ctx.sessionId, 'act', {
+    args: { ...spec, approved: { tab: page.tabId, url: page.url, origin: page.origin, loadId: page.loadId } },
+  }, { resultMs: ACT_RESULT_MS });
 }
 
 // ---------------------------------------------------------------------------
@@ -576,7 +591,6 @@ function historyTool(direction: 'back' | 'forward'): VerseMcpTool {
     async handler(_args, ctx) {
       const page = await currentPage(ctx);
       if (isResult(page)) return page;
-      if (!page.ok) return toolError(page.message);
       const gate = await decide(ctx, `browser_${direction}`, classify(ctx, { kind: 'history', pageUrl: page.url, loopback: page.loopback }), {
         action: `Go ${direction}`, target: null, origin: page.origin,
       });
@@ -638,7 +652,7 @@ const clickTool: VerseMcpTool = {
       ...(button === 'right' ? { button: 'right' } : {}),
       ...(args['double'] === true ? { double: true } : {}),
       ...(modifiers.length ? { modifiers } : {}),
-    });
+    }, page);
     if (!outcome.ok) return failure(outcome);
     const data = isRecord(outcome.data) ? outcome.data : {};
     const how = args['double'] === true ? 'Double-clicked' : button === 'right' ? 'Right-clicked' : 'Clicked';
@@ -688,7 +702,7 @@ const typeTool: VerseMcpTool = {
       kind: 'type', ...spec, text: value, expect: target.sig,
       ...(submit ? { submit: true } : {}),
       ...(args['clear'] === true ? { clear: true } : {}),
-    });
+    }, page);
     if (!outcome.ok) return failure(outcome);
     const data = isRecord(outcome.data) ? outcome.data : {};
     return ok(`Typed ${value.length} character${value.length === 1 ? '' : 's'} into ${describe(target)}${args['clear'] === true ? ' (replacing its text)' : ''}${submit ? ' and pressed Enter' : ''}.${landed(ctx, page.url, data)}`);
@@ -722,7 +736,7 @@ const selectTool: VerseMcpTool = {
       origin: page.origin,
     });
     if (gate) return gate;
-    const outcome = await act(ctx, { kind: 'select', ...spec, values, expect: target.sig });
+    const outcome = await act(ctx, { kind: 'select', ...spec, values, expect: target.sig }, page);
     if (!outcome.ok) return failure(outcome);
     const data = isRecord(outcome.data) ? outcome.data : {};
     const selected = Array.isArray(data['selected']) ? data['selected'].filter((s): s is string => typeof s === 'string').slice(0, 20) : [];
@@ -746,7 +760,7 @@ const hoverTool: VerseMcpTool = {
       action: `Hover over ${str(args['element'], 200) || 'an element'}`, target: `${target.role}${target.name ? ` "${target.name}"` : ''}`, origin: page.origin,
     });
     if (gate) return gate;
-    const outcome = await act(ctx, { kind: 'hover', ...spec, expect: target.sig });
+    const outcome = await act(ctx, { kind: 'hover', ...spec, expect: target.sig }, page);
     if (!outcome.ok) return failure(outcome);
     const data = isRecord(outcome.data) ? outcome.data : {};
     const note = data['hovered'] === false ? ' The page did not register the hover (the desktop app may be in the background); a snapshot will show whether a menu opened.' : '';
@@ -775,15 +789,10 @@ const pressKeyTool: VerseMcpTool = {
     } else if (focused.message.trim() !== 'nothing-focused') {
       return failure(focused);
     }
-    let page: Observed;
-    if (pageUrl) {
-      page = observe(ctx, pageUrl);
-    } else {
-      const current = await currentPage(ctx);
-      if (isResult(current)) return current;
-      page = current;
-    }
-    if (!page.ok) return toolError(page.message);
+    const page = await currentPage(ctx);
+    if (isResult(page)) return page;
+    if (pageUrl && pageUrl !== page.url) return toolError('The tab navigated while checking keyboard focus. Try again.');
+    if (target && target.loadId !== page.loadId) return toolError('The page reloaded while checking keyboard focus. Try again.');
     const verdict = classify(ctx, { kind: 'key', pageUrl: page.url, loopback: page.loopback, target, key });
     const gate = await decide(ctx, 'browser_press_key', verdict, {
       action: `Press ${key}${target ? ' in the focused element' : ''}`,
@@ -791,7 +800,7 @@ const pressKeyTool: VerseMcpTool = {
       origin: page.origin,
     });
     if (gate) return gate;
-    const outcome = await act(ctx, { kind: 'key', key });
+    const outcome = await act(ctx, { kind: 'key', key }, page);
     if (!outcome.ok) return failure(outcome);
     const data = isRecord(outcome.data) ? outcome.data : {};
     return ok(`Pressed ${key}${target ? ` in ${describe(target)}` : ''}.${landed(ctx, page.url, data)}`);
@@ -819,28 +828,27 @@ const scrollTool: VerseMcpTool = {
     if (isResult(ref)) return ref;
     if (!ref && direction === undefined) return toolError('Pass a direction, a ref, or both.');
     const amount = typeof args['amount'] === 'number' && Number.isFinite(args['amount']) ? Math.max(1, Math.min(20000, args['amount'])) : undefined;
-    let pageUrl: string;
+    let page: ActionPage;
     let spec: Record<string, unknown> = { kind: 'scroll', ...(direction ? { direction } : {}), ...(amount !== undefined ? { amount } : {}) };
     if (ref) {
       const resolved = await resolveTarget(ctx, { ref }, false);
       if (isResult(resolved)) return resolved;
-      pageUrl = resolved.page.url;
+      page = resolved.page;
       spec = { ...spec, ref, expect: resolved.target.sig };
     } else {
-      const page = await currentPage(ctx);
-      if (isResult(page)) return page;
-      if (!page.ok) return toolError(page.message);
-      pageUrl = page.url;
+      const current = await currentPage(ctx);
+      if (isResult(current)) return current;
+      page = current;
     }
     // Scrolling changes nothing on the page's server; it is exempt from the taint rule.
-    const outcome = await act(ctx, spec);
+    const outcome = await act(ctx, spec, page);
     // The viewport moved: the last screenshot's pixels no longer match the page.
     ctx.deps.setShot(ctx.sessionId, null);
     if (!outcome.ok) return failure(outcome);
     const data = isRecord(outcome.data) ? outcome.data : {};
     const sy = typeof data['sy'] === 'number' ? data['sy'] : null;
     const dh = typeof data['dh'] === 'number' ? data['dh'] : null;
-    return ok(`Scrolled${direction ? ` ${String(direction)}` : ` ${ref} into view`}.${sy !== null && dh !== null ? ` Now at y=${sy} of ${dh} px.` : ''}${landed(ctx, pageUrl, data)}`);
+    return ok(`Scrolled${direction ? ` ${String(direction)}` : ` ${ref} into view`}.${sy !== null && dh !== null ? ` Now at y=${sy} of ${dh} px.` : ''}${landed(ctx, page.url, data)}`);
   },
 };
 
@@ -892,7 +900,7 @@ const evaluateTool: VerseMcpTool = {
   name: 'browser_evaluate',
   scope: 'browser_script',
   description:
-    'Evaluate one JavaScript expression in the page and return its value (as text, at most 20000 characters). Only on localhost pages, only when the operator switched scripts on for this chat, and never touching cookies or storage. Promises are not awaited.',
+    'Evaluate JavaScript in a localhost page, with that page\'s full privileges including cookies, credentialed storage and network access. Requires the operator to enable scripts and confirm this origin. Returns at most 20000 characters; Promises are not awaited.',
   annotations: { title: 'Evaluate', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   inputSchema: schema({ expression: { type: 'string', minLength: 1, maxLength: 10000 } }, ['expression']),
   async handler(args, ctx) {
@@ -902,13 +910,14 @@ const evaluateTool: VerseMcpTool = {
     if (!expression || expression.length > 10_000) return toolError('expression must be 1–10000 characters.');
     const page = await currentPage(ctx);
     if (isResult(page)) return page;
-    if (!page.ok) return toolError(page.message);
     if (!page.loopback) return toolError('Scripts only run on localhost pages (the operator\'s own dev servers).');
     const gate = await decide(ctx, 'browser_evaluate', classify(ctx, { kind: 'evaluate', pageUrl: page.url, loopback: true, text: expression }), {
       action: 'Run a script in the page', target: expression.slice(0, 200), origin: page.origin,
     });
     if (gate) return gate;
-    const outcome = await ctx.deps.run(ctx.sessionId, 'evaluate', { args: { expression } }, { resultMs: 15_000 });
+    const outcome = await ctx.deps.run(ctx.sessionId, 'evaluate', {
+      args: { expression, approved: { tab: page.tabId, url: page.url, origin: page.origin, loadId: page.loadId } },
+    }, { resultMs: 15_000 });
     if (!outcome.ok) return failure(outcome);
     const seen = observe(ctx, outcome.url ?? page.url);
     if (!seen.ok) return toolError(seen.message);

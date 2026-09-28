@@ -934,6 +934,7 @@
 
   function prepare(spec) {
     var s = spec || {}
+    if (pageUrl() !== s.approvedUrl || loadId !== s.approvedLoadId) return fail('approved-page-changed')
     var ms = typeof s.ms === 'number' && s.ms > 0 ? Math.min(s.ms, 60000) : 1500
     actingUntil = now() + ms
     var kind = String(s.kind || '')
@@ -947,7 +948,7 @@
     }
     if (el && s.expect && sigOf(el) !== s.expect) return fail('changed')
     var v = viewport()
-    var base = { url: pageUrl(), vw: v.vw, vh: v.vh }
+    var base = { url: pageUrl(), loadId: loadId, vw: v.vw, vh: v.vh }
 
     if (kind === 'key') {
       var focused = document.activeElement
@@ -1089,6 +1090,7 @@
 
   // Select the field's existing content so native's Backspace replaces it.
   function clear(spec) {
+    if (!spec || pageUrl() !== spec.approvedUrl || loadId !== spec.approvedLoadId) return fail('approved-page-changed')
     var el = spec && spec.ref ? elForRef(spec.ref) : document.activeElement
     if (!el) return fail('stale-ref')
     if (sensitive(el)) return fail('sensitive-field')

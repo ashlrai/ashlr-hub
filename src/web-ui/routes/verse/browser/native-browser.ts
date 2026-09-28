@@ -55,6 +55,14 @@ export type NativeActSpec =
   | { kind: 'key'; key: string }
   | { kind: 'scroll'; ref?: string; direction?: 'up' | 'down' | 'left' | 'right'; amount?: number; expect?: string };
 
+/** The tab and page load the operator approved before an agent action. */
+export interface ApprovedPage {
+  tab: string;
+  url: string;
+  origin: string;
+  loadId: string;
+}
+
 export type NativeQuery =
   | 'text'
   | 'console'
@@ -77,7 +85,7 @@ export type NativeBrowserOp =
   | { op: 'hide' }
   | { op: 'close'; tab: string }
   | { op: 'zoom'; tab: string; factor: number }
-  | { op: 'query'; tab: string; req: string; what: NativeQuery }
+  | { op: 'query'; tab: string; req: string; what: NativeQuery; approved?: ApprovedPage }
   | { op: 'screenshot'; tab: string; req: string; clip?: Bounds }
   | { op: 'external'; url: string };
 

@@ -27,7 +27,7 @@ import {
   type VerseBrowserDecision,
   type VerseBrowserNetworkEntry,
 } from '../../../../core/verse/browser-types.js';
-import type { NativeActSpec, NativeQuery } from './native-browser.js';
+import type { ApprovedPage, NativeActSpec, NativeQuery } from './native-browser.js';
 import type { BrowserScreenshot } from './send-to-chat.js';
 
 export interface BrowserExecutorCapabilities {
@@ -57,13 +57,13 @@ export interface BrowserExecutor {
   mode: 'native' | 'frame';
   capabilities: BrowserExecutorCapabilities;
   /** The active tab's page, or nulls when no page is open. */
-  current(): { url: string | null; title: string | null; tabs: number };
+  current(): { tabId: string; url: string | null; title: string | null; tabs: number };
   navigate(url: string): Promise<{ url: string; title: string | null; loading: boolean }>;
   screenshot(clip?: BrowserClip): Promise<BrowserScreenshot & { scale?: number; origin?: { x: number; y: number } }>;
   text(limit: number): Promise<{ url: string; title: string | null; text: string; truncated: boolean }>;
   console(): Promise<{ url: string; console: VerseBrowserConsoleEntry[]; network: VerseBrowserNetworkEntry[] }>;
   /** A tap query / native action in the active tab (snapshot, network, resolve, act, evaluate). */
-  query(what: Exclude<NativeQuery, string>, timeoutMs: number): Promise<unknown>;
+  query(what: NativeQuery, timeoutMs: number, approved?: ApprovedPage): Promise<unknown>;
   history(direction: 'back' | 'forward'): Promise<{ url: string | null; title: string | null; loading: boolean }>;
   tabs(): BrowserTabSummary[];
   openTab(url: string | null): Promise<void>;
@@ -124,6 +124,18 @@ function coord(value: unknown): number | null {
 
 function refOf(value: unknown): string | null {
   return typeof value === 'string' && REF_RE.test(value) ? value : null;
+}
+
+function approvedPage(value: unknown): ApprovedPage | null {
+  if (!isRecord(value) || !only(value, ['tab', 'url', 'origin', 'loadId'])) return null;
+  const { tab, url, origin, loadId } = value;
+  if (typeof tab !== 'string' || !/^[a-z0-9]{1,16}$/.test(tab)
+    || typeof url !== 'string' || url.length > 4096
+    || typeof origin !== 'string' || typeof loadId !== 'string' || !/^[a-z0-9A-Z]{1,40}$/.test(loadId)) return null;
+  try {
+    if (new URL(url).origin !== origin) return null;
+  } catch { return null; }
+  return { tab, url, origin, loadId };
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +297,18 @@ export async function executeAgentCommand(
     }
 
     switch (command.op) {
-      case 'status':
+      case 'status': {
+        let loadId: string | null = null;
+        if (observable && exec.mode === 'native' && exec.capabilities.act && !exec.paused()) {
+          try {
+            const info = exec.current();
+            const page = await exec.query('info', QUERY_TIMEOUT_MS);
+            const record = isRecord(page) ? page : {};
+            if (info.tabId === here.tabId && info.url === here.url && record['url'] === here.url && typeof record['loadId'] === 'string') {
+              loadId = record['loadId'];
+            }
+          } catch { /* Status still reports the pane; actions require a page identity. */ }
+        }
         return {
           id: command.id,
           ok: true,
@@ -298,8 +321,11 @@ export async function executeAgentCommand(
             capabilities: exec.capabilities,
             tabs: here.tabs,
             paused: exec.paused(),
+            tabId: here.tabId,
+            loadId,
           },
         };
+      }
 
       case 'navigate': {
         const verdict = agentUrlVerdict(command.url ?? '', gate);
@@ -355,9 +381,12 @@ export async function executeAgentCommand(
       }
 
       case 'act': {
-        const spec = parseActArgs(args);
-        if (!spec) return fail(command.id, 'Invalid action.');
-        const data = await exec.query({ act: spec }, ACT_TIMEOUT_MS);
+        const approved = approvedPage(args['approved']);
+        const { approved: _approved, ...rawSpec } = args;
+        const spec = parseActArgs(rawSpec);
+        if (!spec || !approved) return fail(command.id, 'Invalid action or missing approved page identity.');
+        if (approved.tab !== here.tabId || approved.url !== here.url) return fail(command.id, 'The approved tab or page changed before the action.');
+        const data = await exec.query({ act: spec }, ACT_TIMEOUT_MS, approved);
         const record = isRecord(data) ? data : {};
         // An action can take the page somewhere this chat may not observe:
         // say so without naming it.
@@ -369,7 +398,8 @@ export async function executeAgentCommand(
 
       case 'evaluate': {
         const expression = args['expression'];
-        if (typeof expression !== 'string' || expression.length === 0 || expression.length > 10_000 || !only(args, ['expression'])) {
+        const approved = approvedPage(args['approved']);
+        if (typeof expression !== 'string' || expression.length === 0 || expression.length > 10_000 || !only(args, ['expression', 'approved']) || !approved) {
           return fail(command.id, 'Invalid expression.');
         }
         try {
@@ -377,7 +407,8 @@ export async function executeAgentCommand(
         } catch {
           return fail(command.id, 'Scripts only run on localhost pages.');
         }
-        const data = await exec.query({ evaluate: { expression } }, 15_000);
+        if (approved.tab !== here.tabId || approved.url !== here.url) return fail(command.id, 'The approved tab or page changed before the script.');
+        const data = await exec.query({ evaluate: { expression } }, 15_000, approved);
         return { id: command.id, ok: true, url: here.url!, data };
       }
 

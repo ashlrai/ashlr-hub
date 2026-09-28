@@ -95,7 +95,7 @@ function harness(over: Partial<Pane> = {}, scopes = { access: true, act: true, s
     const a = args.args ?? {};
     switch (op) {
       case 'status':
-        return { ok: true, url: pane.page, data: { title: 'Settings', native: true, capabilities: { act: true } } };
+        return { ok: true, url: pane.page, data: { title: 'Settings', native: true, capabilities: { act: true }, tabId: 't1', loadId: 'L1' } };
       case 'snapshot':
         return { ok: true, url: String(pane.snapshot['url']), data: pane.snapshot };
       case 'resolve': {
@@ -166,7 +166,10 @@ async function call(deps: BrowserMcpDeps, name: string, args: unknown = {}) {
   return { ...result, text: result.content.filter((c) => c['type'] === 'text').map((c) => String(c['text'])).join('\n') };
 }
 
-const acts = (pane: Pane) => pane.calls.filter((c) => c.op === 'act');
+const acts = (pane: Pane) => pane.calls.filter((c) => c.op === 'act').map((c) => {
+  const { approved: _approved, ...args } = c.args as Record<string, unknown>;
+  return { ...c, args };
+});
 
 // ---------------------------------------------------------------------------
 // The registry
@@ -242,7 +245,7 @@ describe('classifyBrowserAction', () => {
     expect(classifyBrowserAction({ ...base, kind: 'key', key: 'Escape' }).decision).toBe('auto');
   });
 
-  it('never: secret fields, file pickers, downloads, <select> clicks, forbidden keys, storage scripts, a newline that would submit', () => {
+  it('never: secret fields, file pickers, downloads, <select> clicks, forbidden keys, a newline that would submit', () => {
     const refuse = (verdict: ReturnType<typeof classifyBrowserAction>) => (verdict.decision === 'refuse' ? verdict.code : verdict.decision);
     expect(refuse(classifyBrowserAction({ ...base, kind: 'type', target: t({ editable: true, sensitive: true }), text: 'x' }))).toBe('sensitive-field');
     // A field the page failed to mark but whose label says password.
@@ -256,8 +259,9 @@ describe('classifyBrowserAction', () => {
     expect(refuse(classifyBrowserAction({ ...base, kind: 'key', key: 'Meta+v' }))).toBe('key');
     expect(refuse(classifyBrowserAction({ ...base, kind: 'key', key: 'a', target: t({ sensitive: true }) }))).toBe('sensitive-field');
     expect(classifyBrowserAction({ ...base, kind: 'key', key: 'Backspace', target: t({ sensitive: true }) }).decision).toBe('auto');
-    expect(refuse(classifyBrowserAction({ ...base, kind: 'evaluate', text: 'document . cookie' }))).toBe('storage');
-    expect(refuse(classifyBrowserAction({ ...base, kind: 'evaluate', text: 'localStorage.getItem("t")' }))).toBe('storage');
+    const script = classifyBrowserAction({ ...base, kind: 'evaluate', text: "document['cookie']" });
+    expect(script.decision).toBe('confirm');
+    if (script.decision === 'confirm') expect(script.reasons[0]!.text).toMatch(/cookies, credentialed storage and network access/);
   });
 
   it('asks for submissions, consequential labels, other origins, outside pages and tainted turns — with keys "allow for chat" remembers', () => {
@@ -363,7 +367,7 @@ describe('acting through the MCP handler', () => {
     h.pane.targets['e7'] = target({ loadId: 'L2' });
     const stale = await call(h.deps, 'browser_click', { ref: 'e7', element: 'Save' });
     expect(stale.isError).toBe(true);
-    expect(stale.text).toMatch(/reloaded or navigated/);
+    expect(stale.text).toMatch(/reloaded/);
     expect(acts(h.pane)).toEqual([]);
   });
 
@@ -492,13 +496,15 @@ describe('acting through the MCP handler', () => {
     expect(acts(h.pane)).toEqual([]);
   });
 
-  it('evaluate: localhost only, no storage, result framed as untrusted', async () => {
+  it('evaluate: localhost only, full page privilege needs confirmation, result framed as untrusted', async () => {
     const off = harness();
     expect((await call(off.deps, 'browser_evaluate', { expression: 'document.title' })).isError).toBe(true);
-    const h = harness({}, { access: true, act: true, script: true });
-    expect((await call(h.deps, 'browser_evaluate', { expression: 'localStorage.token' })).text).toMatch(/cookies or storage/);
+    const h = harness({ decisions: ['deny', 'once'] }, { access: true, act: true, script: true });
+    expect((await call(h.deps, 'browser_evaluate', { expression: "document['cookie']" })).text).toMatch(/operator declined/);
+    expect(h.pane.confirms[0]!.reasons.join(' ')).toMatch(/cookies, credentialed storage and network access/);
     const res = await call(h.deps, 'browser_evaluate', { expression: 'document.title' });
     expect(res.text).toContain('Result (string):');
+    expect((h.pane.calls.find((c) => c.op === 'evaluate')!.args as Record<string, unknown>)['approved']).toEqual({ tab: 't1', url: PAGE, origin: 'http://localhost:5173', loadId: 'L1' });
     expect(res.text.match(/<\/untrusted/g)).toHaveLength(1);
     const outside = harness({ page: 'https://app.example/' }, { access: true, act: true, script: true });
     outside.allowed.push('https://app.example');
