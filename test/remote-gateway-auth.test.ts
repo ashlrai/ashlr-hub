@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, request as httpRequest, type Server } from 'node:http';
+import { createServer as createNetServer } from 'node:net';
+import { spawnSync } from 'node:child_process';
 import { Readable } from 'node:stream';
-import { lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -12,7 +14,7 @@ import { createRemoteAccessVerifier } from '../src/core/web/remote-access.js';
 import { createRemoteDeviceStore } from '../src/core/web/remote-device-store.js';
 import { createRemotePairing } from '../src/core/web/remote-pairing.js';
 import { startRemoteReadGateway } from '../src/core/web/remote-gateway.js';
-import { sendRemoteAdminCommand, startRemoteAdminSocket } from '../src/core/web/remote-admin.js';
+import { remoteAdminSocketPath, sendRemoteAdminCommand, startRemoteAdminSocket } from '../src/core/web/remote-admin.js';
 import { createRemotePush } from '../src/core/web/remote-push.js';
 import { loadOrCreateRemoteVapid } from '../src/core/web/remote-push-vapid.js';
 
@@ -91,6 +93,42 @@ async function setup(mobileAssets = false, withPush = false) {
 }
 
 describe('remote pairing and one-use WebAuthn HTTP writes', () => {
+  it('recovers a private admin socket left by SIGKILL but refuses a live listener or file', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-remote-admin-restart-'));
+    roots.push(root);
+    const path = remoteAdminSocketPath(root);
+    const devices = createRemoteDeviceStore(root);
+    const pairing = createRemotePairing(CONFIG, devices);
+    const killed = spawnSync(process.execPath, ['-e', `
+      const net = require('node:net');
+      const fs = require('node:fs');
+      net.createServer().listen(process.argv[1], () => {
+        fs.chmodSync(process.argv[1], 0o600);
+        process.kill(process.pid, 'SIGKILL');
+      });
+    `, path], { timeout: 5_000 });
+    expect(killed.signal).toBe('SIGKILL');
+    expect(lstatSync(path).isSocket()).toBe(true);
+    const restarted = await startRemoteAdminSocket(pairing, devices, root, async () => false);
+    try {
+      expect(await sendRemoteAdminCommand({ action: 'pending' }, root)).toEqual({ approvals: [] });
+    } finally { await restarted.close(); }
+
+    const live = createNetServer();
+    await new Promise<void>((resolve) => live.listen(path, resolve));
+    chmodSync(path, 0o600);
+    try {
+      await expect(startRemoteAdminSocket(pairing, devices, root, async () => false))
+        .rejects.toThrow(/live listener/);
+      expect(lstatSync(path).isSocket()).toBe(true);
+    } finally { await new Promise<void>((resolve) => live.close(() => resolve())); }
+
+    writeFileSync(path, 'operator data', { mode: 0o600 });
+    await expect(startRemoteAdminSocket(pairing, devices, root, async () => false))
+      .rejects.toThrow(/not a private owned socket/);
+    expect(lstatSync(path).isFile()).toBe(true);
+  });
+
   it('serves only the marked mobile shell and hashed assets to an Access user before pairing', async () => {
     const f = await setup(true);
     try {
