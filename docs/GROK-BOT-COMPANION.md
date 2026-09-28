@@ -47,6 +47,23 @@ does not inherit the Mac's private Verse filesystem or its Touch ID grant.
 `remote.ashlr.ai` is the human phone surface; do not hand the Bot a paired phone
 session or use a human browser cookie as an agent credential.
 
+### Optional one-way webhook handoff
+
+[Grok Bot routines](https://cursor.com/help/grok-bot/routines) can start a named
+Bot from an authenticated webhook. Ask the Bot to add a webhook trigger to a
+narrow review routine. The Grok Bot **desktop** app shows the routine's POST URL
+and secret key; the sender uses `Authorization: Bearer <key>` and may include a
+JSON body with the exact repository, PR number, head SHA, and review scope.
+Keep the key in a secret store, never in a repository, task prompt, or browser
+URL. The phone app shows routine run history, but Cursor documents the URL and
+key in the desktop routine details.
+
+HTTP 200 means Grok Bot **accepted and started** a run. It is not completion,
+review evidence, or a result. Read the Bot's chat and run history for the
+outcome; no documented Bot result-polling API exists. Verse 3.16 does not yet
+send these webhooks or import Bot results, so use the Bot app directly until a
+separate connector is implemented and accepted end to end.
+
 ## Durable learning with evidence
 
 Grok Bot's role memory can retain review preferences. Keep changing product
@@ -60,11 +77,13 @@ turning one Bot's recollection into authority.
 
 ## A possible future Verse connector
 
-Grok Bot supports plugins and the user's Cursor MCP policy can admit a custom
-MCP server. That is an **incoming tool surface** for a Bot, not an API that lets
-Verse create Bots, send them work, read their conversations, or count their
-usage. A Verse connector should ship only after a real Grok Bot plugin test and
-an independently reviewed security contract:
+The webhook above is a supported **one-way dispatch** path, not a Bot
+conversation, completion, or usage API. Grok Bot also supports plugins and the
+user's Cursor MCP policy can admit a custom MCP server. That is an **incoming
+tool surface** for a Bot, not an API that lets Verse create Bots or read their
+conversations. A two-way Verse connector needs a separately authenticated
+result callback, a real Grok Bot plugin test, and an independently reviewed
+security contract:
 
 - Give it a separate service identity and a small read-only projection of
   agent state, PR evidence, and needs-you summaries. Do not reuse phone pairing,
@@ -92,6 +111,8 @@ an independently reviewed security contract:
   plugins, the Cursor MCP policy, and the Admin API's settings scope.
 - [Approvals, security, and privacy](https://docs.x.ai/grok-bot/approvals-security-and-privacy)
   describes Bot approval boundaries.
+- [Grok Bot routines](https://cursor.com/help/grok-bot/routines) documents
+  webhook triggers, desktop URL/key access, and the start-only meaning of 200.
 
-No public Grok Bot task dispatch or status API is documented in these sources
-as of 2026-09-28. Recheck vendor documentation before building an adapter.
+No public Grok Bot result or status API is documented in these sources as of
+2026-09-28. Recheck vendor documentation before building a two-way adapter.
