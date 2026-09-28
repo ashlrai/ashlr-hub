@@ -177,7 +177,7 @@ The following invariants are enforced by named adversarial tests. A PR that weak
 5. **Git push blocked from sandbox.** The pre-push hook + credential strip must fail every push from a worktree. Test: `test/m45.*` pre-push test.
 6. **Only the diff is consumed.** No transcript, no live-tree write escapes the sandbox. Test: `test/m45.*` diff-only test.
 7. **Immutable signed provenance.** `{engineModel, engineTier}` is write-once and HMAC-signed. The merge gate must verify the HMAC. Test: `test/m47.*`, `test/m47-1.*`.
-8. **Merge requires explicit policy and verification.** Default tier mode requires frontier provenance and a matching `mergeAuthority` entry. Opt-in verification/evidence modes have their own stricter gates; no producer verdict, test result or documentation change grants authority by itself. See the [README safety model](README.md#safety-model) and `test/m47.*`, `test/m153.*`, `test/m307.*`.
+8. **Merge requires explicit policy and verification.** Default tier mode requires frontier provenance and a matching `mergeAuthority` entry. Opt-in verification/evidence modes have their own stricter gates; no producer verdict, test result or documentation change grants authority by itself. See the [safety model](docs/HUB-REFERENCE.md#safety-model) and `test/m47.*`, `test/m153.*`, `test/m307.*`.
 9. **Self-improvement cannot self-disarm.** Self-target diffs must pass the suite flag-off and flag-on. Safety-test-weakening diffs refused. Test: `test/m54.*`.
 10. **Preserve the declared dependency boundary.** Manifest, lockfile and packaged dependency inventory must agree; do not bypass the associated tests.
 

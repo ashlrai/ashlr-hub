@@ -27,6 +27,9 @@ import { fileURLToPath } from 'node:url';
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const RELIABILITY = join(REPO_ROOT, 'docs', 'RELIABILITY.md');
 const README = join(REPO_ROOT, 'README.md');
+// The legacy-fleet activation runbook and command reference moved out of the
+// top-level README into docs/HUB-REFERENCE.md (linked from the README).
+const HUB_REFERENCE = join(REPO_ROOT, 'docs', 'HUB-REFERENCE.md');
 
 // Commands the runbook + reliability doc MUST cite.
 const CITED_COMMANDS = [
@@ -42,12 +45,14 @@ beforeEach(() => {
   expect.hasAssertions();
 });
 
-describe('h8 docs — RELIABILITY.md + README activation runbook are accurate', () => {
+describe('h8 docs — RELIABILITY.md + README/HUB-REFERENCE activation runbook are accurate', () => {
   // sanity: the doc files exist (a real assertion so the suite is never
   // vacuously green before BUILD fills the todos).
   it('docs/RELIABILITY.md and README.md exist', () => {
     expect(existsSync(RELIABILITY)).toBe(true);
     expect(existsSync(README)).toBe(true);
+    expect(existsSync(HUB_REFERENCE)).toBe(true);
+    expect(readFileSync(README, 'utf8')).toMatch(/docs\/HUB-REFERENCE\.md/);
     expect(readFileSync(RELIABILITY, 'utf8').length).toBeGreaterThan(0);
     expect(CITED_COMMANDS.length).toBeGreaterThan(0);
   });
@@ -76,7 +81,7 @@ describe('h8 docs — RELIABILITY.md + README activation runbook are accurate', 
 
   // DOCS-ACCURATE (runbook)
   it('README activation runbook documents preflight → enroll one → dry-run → daemon → inbox approve → rollback and marks activation as the human gate', () => {
-    const txt = readFileSync(README, 'utf8');
+    const txt = readFileSync(HUB_REFERENCE, 'utf8');
     const lower = txt.toLowerCase();
     // The runbook's ordered levers all appear.
     expect(txt).toMatch(/preflight/);
@@ -93,7 +98,7 @@ describe('h8 docs — RELIABILITY.md + README activation runbook are accurate', 
 
   // DOCS-ACCURATE (v2.1 surface)
   it('README documents the full v2.1 command surface: verify-safety, sandbox gc, audit, preflight, onboard, demo', () => {
-    const txt = readFileSync(README, 'utf8');
+    const txt = readFileSync(HUB_REFERENCE, 'utf8');
     for (const cmd of ['verify-safety', 'sandbox gc', 'audit', 'preflight', 'onboard', 'demo']) {
       expect(txt.includes(cmd)).toBe(true);
     }
