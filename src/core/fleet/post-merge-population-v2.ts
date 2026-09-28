@@ -73,7 +73,8 @@ export interface PostMergePopulationMemberV2 {
   proposalDigest: string;
   mergeDigest: string;
   classification: 'adverse' | 'inconclusive';
-  reason: 'deterministic-adverse' | 'heuristic-adverse' | 'legacy-isolation-unknown' | 'no-terminal-evidence';
+  reason: 'deterministic-adverse' | 'heuristic-adverse' | 'legacy-isolation-unknown' |
+    'verification-not-detached' | 'denominator-incomplete' | 'no-terminal-evidence';
   evidenceDigest: string;
 }
 
@@ -233,6 +234,10 @@ function stabilityTuple(
     hmac(key, 'ashlr:post-merge-v2:merge', row.mergeCommit), row.schemaVersion, row.recordType,
     row.authority, row.witnessId, row.cohortId, row.observedHead, row.windowStartedAt,
     row.stableAt, row.windowMs, row.verificationDigest, row.witnessDigest, row.attestation,
+    row.schemaVersion === 2 ? row.verifiedAt : null,
+    row.schemaVersion === 2 ? row.verificationIsolation : null,
+    row.schemaVersion === 2 ? row.workspaceClean : null,
+    row.schemaVersion === 2 ? row.requiredCommandCount : null,
   ];
 }
 
@@ -455,12 +460,27 @@ export function buildPostMergePopulationV2(
     const stable = stableCandidate && stableAt !== null &&
       Date.parse(stableAt) >= mergedMs && Date.parse(stableAt) <= cutoffMs
       ? stableCandidate : undefined;
+    const detachedStable = stable?.schemaVersion === 2 &&
+      stable.windowStartedAt === eligibility.mergedAt &&
+      stable.windowMs >= input.windowMs &&
+      stable.verificationIsolation === 'detached-worktree' &&
+      stable.workspaceClean === true &&
+      Number.isSafeInteger(stable.requiredCommandCount) &&
+      (stable.requiredCommandCount ?? 0) > 0 &&
+      canonicalTimestamp(stable.verifiedAt) !== null &&
+      Date.parse(stable.verifiedAt!) >= Date.parse(stable.stableAt) &&
+      Date.parse(stable.verifiedAt!) <= cutoffMs;
     const deterministicAdverse = adverse && adverse.confidence === 'deterministic' &&
       (adverse.outcome === 'regressed' || adverse.outcome === 'reverted');
+    // A signed detached HEAD check can close the isolation ambiguity for this
+    // member, but a member witness cannot prove the cutoff denominator. Keep
+    // positive credit and conclusive population classification unavailable.
     const classification = deterministicAdverse ? 'adverse' : 'inconclusive';
     const reason = deterministicAdverse ? 'deterministic-adverse'
       : adverse ? 'heuristic-adverse'
-        : stable ? 'legacy-isolation-unknown' : 'no-terminal-evidence';
+        : detachedStable ? 'denominator-incomplete'
+          : stable?.schemaVersion === 2 ? 'verification-not-detached'
+            : stable ? 'legacy-isolation-unknown' : 'no-terminal-evidence';
     const evidenceDigest = sha(['ashlr:post-merge-v2:evidence', repoDigest, proposalDigest, mergeDigest,
       adverse ? sha(['adverse', adverseTuple(key, eligibility.repo, adverse)]) : null,
       stable ? sha(['stability', stabilityTuple(key, stable),

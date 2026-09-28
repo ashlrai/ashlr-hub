@@ -49,6 +49,10 @@ const WITNESS_KEYS = new Set([
   'repoDigest', 'proposalId', 'mergeCommit', 'observedHead', 'windowStartedAt',
   'stableAt', 'windowMs', 'verificationDigest', 'witnessDigest', 'attestation',
 ]);
+const WITNESS_V2_KEYS = new Set([
+  ...WITNESS_KEYS, 'verifiedAt', 'verificationIsolation', 'workspaceClean',
+  'requiredCommandCount',
+]);
 const MEMBER_KEYS = new Set(['witnessId', 'witnessDigest']);
 const MANIFEST_KEYS = new Set([
   'schemaVersion', 'recordType', 'authority', 'manifestId', 'cohortId',
@@ -56,7 +60,7 @@ const MANIFEST_KEYS = new Set([
 ]);
 
 export interface PostMergeStabilityWitness {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   recordType: 'stable-after-window';
   authority: 'observation-only';
   witnessId: string;
@@ -69,6 +73,11 @@ export interface PostMergeStabilityWitness {
   stableAt: string;
   windowMs: number;
   verificationDigest: string;
+  /** Present only in v2; v1 cannot establish the verification environment. */
+  verifiedAt?: string;
+  verificationIsolation?: 'clean-workspace' | 'detached-worktree';
+  workspaceClean?: true;
+  requiredCommandCount?: number;
   witnessDigest: string;
   attestation: string;
 }
@@ -85,7 +94,11 @@ export interface PostMergeStabilityWitnessInput {
   stableAt: string;
   windowMs: number;
   verificationDigest: string;
-  schemaVersion?: 1;
+  verifiedAt?: string;
+  verificationIsolation?: 'clean-workspace' | 'detached-worktree';
+  workspaceClean?: true;
+  requiredCommandCount?: number;
+  schemaVersion?: 1 | 2;
   recordType?: 'stable-after-window';
   authority?: 'observation-only';
   witnessId?: string;
@@ -265,25 +278,30 @@ export function postMergeStabilityWitnessId(value: WitnessIdentity): string {
 }
 
 function unsignedWitnessTuple(value: Omit<PostMergeStabilityWitness, 'witnessDigest' | 'attestation'>): unknown[] {
-  return [
+  const base = [
     value.schemaVersion, value.recordType, value.authority, value.witnessId,
     value.cohortId, value.repoDigest, value.proposalId, value.mergeCommit,
     value.observedHead, value.windowStartedAt, value.stableAt, value.windowMs,
     value.verificationDigest,
   ];
+  return value.schemaVersion === 2
+    ? [...base, value.verifiedAt, value.verificationIsolation, value.workspaceClean,
+      value.requiredCommandCount]
+    : base;
 }
 
 function reconstructWitness(value: unknown, persisted: boolean): PostMergeStabilityWitness | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
-  if (persisted && !exactKeys(row, WITNESS_KEYS)) return null;
+  const schemaVersion = row['schemaVersion'] ?? 1;
+  if (persisted && !exactKeys(row, schemaVersion === 2 ? WITNESS_V2_KEYS : WITNESS_KEYS)) return null;
   const key = existingSigningKey();
   if (!key) return null;
   let digest: string | null = null;
   if (typeof row['repo'] === 'string') digest = repoDigest(key, row['repo']);
   else if (typeof row['repoDigest'] === 'string' && SHA256_RE.test(row['repoDigest'])) digest = row['repoDigest'];
   if (
-    (row['schemaVersion'] !== undefined && row['schemaVersion'] !== 1) ||
+    (schemaVersion !== 1 && schemaVersion !== 2) ||
     (row['recordType'] !== undefined && row['recordType'] !== 'stable-after-window') ||
     (row['authority'] !== undefined && row['authority'] !== 'observation-only') ||
     !digest || !safeId(row['cohortId']) || !safeId(row['proposalId']) ||
@@ -295,8 +313,18 @@ function reconstructWitness(value: unknown, persisted: boolean): PostMergeStabil
     Date.parse(row['stableAt']) - Date.parse(row['windowStartedAt']) < Number(row['windowMs']) ||
     typeof row['verificationDigest'] !== 'string' || !SHA256_RE.test(row['verificationDigest'])
   ) return null;
+  if (schemaVersion === 2) {
+    if (!canonicalTimestamp(row['verifiedAt']) ||
+      Date.parse(row['verifiedAt']) < Date.parse(row['stableAt']) ||
+      (row['verificationIsolation'] !== 'clean-workspace' &&
+        row['verificationIsolation'] !== 'detached-worktree') ||
+      row['workspaceClean'] !== true ||
+      !Number.isSafeInteger(row['requiredCommandCount']) ||
+      Number(row['requiredCommandCount']) < 1) return null;
+  } else if (['verifiedAt', 'verificationIsolation', 'workspaceClean', 'requiredCommandCount']
+      .some((field) => row[field] !== undefined)) return null;
   const unsigned: Omit<PostMergeStabilityWitness, 'witnessDigest' | 'attestation'> = {
-    schemaVersion: 1,
+    schemaVersion,
     recordType: 'stable-after-window',
     authority: 'observation-only',
     witnessId: '',
@@ -309,14 +337,23 @@ function reconstructWitness(value: unknown, persisted: boolean): PostMergeStabil
     stableAt: row['stableAt'],
     windowMs: Number(row['windowMs']),
     verificationDigest: row['verificationDigest'],
+    ...(schemaVersion === 2 ? {
+      verifiedAt: row['verifiedAt'] as string,
+      verificationIsolation: row['verificationIsolation'] as 'clean-workspace' | 'detached-worktree',
+      workspaceClean: true as const,
+      requiredCommandCount: Number(row['requiredCommandCount']),
+    } : {}),
   };
   unsigned.witnessId = postMergeStabilityWitnessId(unsigned);
   if (row['witnessId'] !== undefined && !equalDigest(String(row['witnessId']), unsigned.witnessId)) return null;
   const witnessDigest = createHash('sha256').update(JSON.stringify([
-    'ashlr:post-merge-stability-witness:v1', ...unsignedWitnessTuple(unsigned),
+    schemaVersion === 2 ? 'ashlr:post-merge-stability-witness:v2'
+      : 'ashlr:post-merge-stability-witness:v1', ...unsignedWitnessTuple(unsigned),
   ])).digest('hex');
   if (row['witnessDigest'] !== undefined && !equalDigest(String(row['witnessDigest']), witnessDigest)) return null;
-  const attestation = hmac(key, 'ashlr:post-merge-stability-attestation:v1', [witnessDigest]);
+  const attestation = hmac(key, schemaVersion === 2
+    ? 'ashlr:post-merge-stability-attestation:v2'
+    : 'ashlr:post-merge-stability-attestation:v1', [witnessDigest]);
   if (row['attestation'] !== undefined && !equalDigest(String(row['attestation']), attestation)) return null;
   if (persisted && (typeof row['witnessId'] !== 'string' || typeof row['witnessDigest'] !== 'string' ||
       typeof row['attestation'] !== 'string')) return null;
