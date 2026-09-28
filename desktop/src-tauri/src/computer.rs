@@ -101,6 +101,8 @@ pub const GRACE: Duration = Duration::from_millis(350);
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The takeover monitor's polling interval while control is active.
 pub const MONITOR_INTERVAL: Duration = Duration::from_millis(100);
+/// An active control request must see the HUD on the main thread before it may post input.
+pub const HUD_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 /// An Esc shortcut event this soon after WE posted Escape is our own.
 pub const OWN_ESCAPE_WINDOW: Duration = Duration::from_millis(400);
 /// A screenshot / zoom with no image by then answers `timeout`.
@@ -1842,21 +1844,59 @@ fn sync_hud(app: &AppHandle) {
             let Some(state) = app.try_state::<ComputerState>() else {
                 return;
             };
-            let mut applied = lock(&state.hud);
-            let desired = lock(&state.takeover).hud_app().map(str::to_string);
-            if desired != applied.app {
-                show_hud(&app, desired.clone());
-                applied.app = desired.clone();
-            }
-            let want_escape = desired.is_some();
-            if want_escape != applied.escape_registered {
-                set_escape_registered(&app, want_escape);
-                applied.escape_registered = want_escape;
+            if let Err(error) = sync_hud_now(&app, &state) {
+                eprintln!("[ashlr-desktop] computer-use control UI unavailable: {error}");
+                // A failed HUD or stop key must not leave control active. This
+                // also covers a transition that did not originate in `begin`.
+                let transition = {
+                    let mut takeover = lock(&state.takeover);
+                    matches!(takeover.control(), Control::Active { .. })
+                        .then(|| takeover.kill(StateReason::Kill))
+                        .flatten()
+                };
+                apply_transition(&app, transition);
             }
         });
 }
 
-fn set_escape_registered(app: &AppHandle, registered: bool) {
+/// Apply the visible-control invariant synchronously. The HUD lock prevents
+/// an older asynchronous sync from overwriting a newer state.
+fn sync_hud_now(app: &AppHandle, state: &ComputerState) -> Result<(), String> {
+    let mut applied = lock(&state.hud);
+    let desired = lock(&state.takeover).hud_app().map(str::to_string);
+    reconcile_hud(
+        &mut applied,
+        desired,
+        |on| set_escape_registered(app, on),
+        |name| show_hud(app, name),
+    )
+}
+
+fn reconcile_hud(
+    applied: &mut HudApplied,
+    desired: Option<String>,
+    mut set_escape: impl FnMut(bool) -> Result<(), String>,
+    mut display: impl FnMut(Option<String>) -> Result<(), String>,
+) -> Result<(), String> {
+    let want_escape = desired.is_some();
+    // Install the stop key before making control visible. If this fails,
+    // neither the HUD nor a native input event may be enabled.
+    if want_escape && !applied.escape_registered {
+        set_escape(true)?;
+        applied.escape_registered = true;
+    }
+    if desired != applied.app {
+        display(desired.clone())?;
+        applied.app = desired;
+    }
+    if !want_escape && applied.escape_registered {
+        set_escape(false)?;
+        applied.escape_registered = false;
+    }
+    Ok(())
+}
+
+fn set_escape_registered(app: &AppHandle, registered: bool) -> Result<(), String> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
     let manager = app.global_shortcut();
     let shortcut = escape_shortcut();
@@ -1871,12 +1911,12 @@ fn set_escape_registered(app: &AppHandle, registered: bool) {
     } else {
         Ok(())
     };
-    if let Err(e) = result {
-        eprintln!(
-            "[ashlr-desktop] could not {} the computer-use Esc stop key: {e}",
+    result.map_err(|e| {
+        format!(
+            "could not {} the computer-use Esc stop key: {e}",
             if registered { "register" } else { "unregister" }
-        );
-    }
+        )
+    })
 }
 
 /// Temporarily release Esc so an Escape we post reaches the app instead of
@@ -1884,21 +1924,46 @@ fn set_escape_registered(app: &AppHandle, registered: bool) {
 fn release_escape_for_own_key(app: &AppHandle, state: &ComputerState) {
     let mut applied = lock(&state.hud);
     if applied.escape_registered {
-        set_escape_registered(app, false);
-        applied.escape_registered = false;
+        if let Err(error) = set_escape_registered(app, false) {
+            eprintln!("[ashlr-desktop] {error}");
+        } else {
+            applied.escape_registered = false;
+        }
     }
 }
 
 #[cfg(target_os = "macos")]
-fn show_hud(app: &AppHandle, desired: Option<String>) {
-    let _ = app.run_on_main_thread(move || match desired {
-        Some(name) => mac::hud::show(&name),
-        None => mac::hud::hide(),
-    });
+fn show_hud(app: &AppHandle, desired: Option<String>) -> Result<(), String> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let shown = match desired {
+            Some(name) => {
+                // A timed-out callback may run after control was killed.
+                let still_active = handle
+                    .try_state::<ComputerState>()
+                    .is_some_and(|state| lock(&state.takeover).hud_app() == Some(name.as_str()));
+                still_active && mac::hud::show(&name)
+            }
+            None => {
+                mac::hud::hide();
+                true
+            }
+        };
+        let _ = tx.send(shown);
+    })
+    .map_err(|e| format!("could not schedule the computer-use HUD: {e}"))?;
+    match rx.recv_timeout(HUD_ACK_TIMEOUT) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("could not show the computer-use HUD".into()),
+        Err(_) => Err("computer-use HUD did not appear in time".into()),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn show_hud(_app: &AppHandle, _desired: Option<String>) {}
+fn show_hud(_app: &AppHandle, _desired: Option<String>) -> Result<(), String> {
+    Ok(())
+}
 
 /// Seconds since the last hardware input of any kind.
 #[cfg(target_os = "macos")]
@@ -2726,7 +2791,16 @@ mod mac {
             .begin_action(Instant::now(), &app.name)
             .map_err(Failure::from_refusal)?;
         apply_transition(handle, transition);
-        Ok(())
+        if let Err(error) = sync_hud_now(handle, state) {
+            apply_transition(handle, lock(&state.takeover).kill(StateReason::Kill));
+            return Err(Failure::new(
+                ErrorCode::Failed,
+                format!("Computer control stopped because its visible HUD or Esc stop key is unavailable: {error}"),
+            ));
+        }
+        // An asynchronous sync or operator input may have stopped control
+        // while the main thread acknowledged the HUD.
+        check_takeover(state)
     }
 
     fn note_synth(state: &ComputerState) {
@@ -3124,12 +3198,14 @@ mod mac {
             ));
         }
         begin(handle, state, &app)?;
+        // A failure to create the input source must not leave our Esc stop key
+        // temporarily unregistered.
+        let poster = Poster::new()?;
         if combo.is_escape() {
             // Our own Escape must reach the app, not our Esc stop key.
             lock(&state.takeover).note_own_escape(Instant::now());
             release_escape_for_own_key(handle, state);
         }
-        let poster = Poster::new()?;
         poster.key(combo.code, true, combo.flags);
         pause(12);
         poster.key(combo.code, false, combo.flags);
@@ -4061,14 +4137,17 @@ mod mac {
             });
         }
 
-        pub fn show(app_name: &str) {
+        pub fn show(app_name: &str) -> bool {
             let Some(mtm) = MainThreadMarker::new() else {
-                return;
+                return false;
             };
             hide();
             let color = orange();
             let mut windows = Vec::new();
             let screens = NSScreen::screens(mtm);
+            if screens.is_empty() {
+                return false;
+            }
             // AppKit frames are bottom-left based on the primary screen;
             // hit tests use top-left global points.
             let primary_height = screens.iter().next().map_or(0.0, |s| s.frame().size.height);
@@ -4145,6 +4224,7 @@ mod mac {
                 window.orderFrontRegardless();
             }
             WINDOWS.with(|cell| *cell.borrow_mut() = windows);
+            true
         }
     }
 }
@@ -4152,6 +4232,72 @@ mod mac {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_ui_never_reports_ready_without_a_stop_key_and_visible_hud() {
+        use std::{cell::RefCell, rc::Rc};
+
+        let mut applied = HudApplied::default();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let stop_calls = calls.clone();
+        let show_calls = calls.clone();
+        assert!(reconcile_hud(
+            &mut applied,
+            Some("TextEdit".into()),
+            move |_| {
+                stop_calls.borrow_mut().push("register");
+                Err("Esc unavailable".into())
+            },
+            move |_| {
+                show_calls.borrow_mut().push("show");
+                Ok(())
+            },
+        )
+        .is_err());
+        assert_eq!(&*calls.borrow(), &["register"]);
+        assert!(!applied.escape_registered);
+        assert!(applied.app.is_none());
+
+        calls.borrow_mut().clear();
+        let stop_calls = calls.clone();
+        let show_calls = calls.clone();
+        assert!(reconcile_hud(
+            &mut applied,
+            Some("TextEdit".into()),
+            move |_| {
+                stop_calls.borrow_mut().push("register");
+                Ok(())
+            },
+            move |_| {
+                show_calls.borrow_mut().push("show");
+                Err("HUD unavailable".into())
+            },
+        )
+        .is_err());
+        assert_eq!(&*calls.borrow(), &["register", "show"]);
+        assert!(applied.escape_registered);
+        assert!(applied.app.is_none());
+
+        calls.borrow_mut().clear();
+        let stop_calls = calls.clone();
+        let show_calls = calls.clone();
+        reconcile_hud(
+            &mut applied,
+            Some("TextEdit".into()),
+            move |_| {
+                stop_calls.borrow_mut().push("register");
+                Ok(())
+            },
+            move |_| {
+                show_calls.borrow_mut().push("show");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(&*calls.borrow(), &["show"]);
+        assert!(applied.escape_registered);
+        assert_eq!(applied.app.as_deref(), Some("TextEdit"));
+    }
 
     fn parse(json: &str) -> Option<ComputerRequest> {
         parse_request(json).ok()
