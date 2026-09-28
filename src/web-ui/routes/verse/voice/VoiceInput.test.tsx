@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { useRef, useState } from 'react';
-import { VoiceInput } from './VoiceInput.js';
+import { readableVoiceAccelerator, VoiceInput } from './VoiceInput.js';
 import { VoiceHud } from './VoiceHud.js';
 import { resetVoiceStoreForTests, type VoiceSurface } from './voice-store.js';
 import { takePaletteQuery } from './palette-handoff.js';
@@ -68,6 +68,10 @@ afterEach(() => {
 });
 
 describe('VoiceInput — desktop (native engine)', () => {
+  it('shows native shortcut modifiers using subset-safe key names', () => {
+    expect(readableVoiceAccelerator('⌃⌥⇧V')).toBe('Ctrl+Option+Shift+V');
+  });
+
   it('asks native for its state, then starts a dictation for its own input with the chat repo', () => {
     const sent = installBridge();
     render(<Box />);

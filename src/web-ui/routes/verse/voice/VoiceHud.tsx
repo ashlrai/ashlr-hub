@@ -25,7 +25,7 @@ import {
   type VoiceSnapshot,
 } from './voice-store.js';
 import type { FixAction } from './voice-bridge.js';
-import { MicIcon } from './VoiceInput.js';
+import { MicIcon, readableVoiceAccelerator } from './VoiceInput.js';
 import { Waveform } from './Waveform.js';
 import styles from './VoiceInput.module.css';
 
@@ -95,15 +95,6 @@ function tail(text: string, max = 140): string {
   return text.length > max ? `…${text.slice(text.length - max + 1)}` : text;
 }
 
-/** Native shortcut symbols may fall outside the UI font subset. */
-function readableAccelerator(accelerator: string): string {
-  return accelerator
-    .replaceAll('\u2303', 'Ctrl+')
-    .replaceAll('\u2325', 'Option+')
-    .replaceAll('\u21e7', 'Shift+')
-    .replaceAll('\u2318', 'Command+');
-}
-
 export function VoiceHud() {
   const voice = useVoiceSnapshot();
   const [copied, setCopied] = useState(false);
@@ -122,7 +113,7 @@ export function VoiceHud() {
 
   if (session) {
     const listening = session.phase !== 'finalizing';
-    const accel = readableAccelerator(voice.native?.hotkey.accelerator ?? 'Ctrl+Option+V');
+    const accel = readableVoiceAccelerator(voice.native?.hotkey.accelerator ?? 'Ctrl+Option+V');
     const how = session.origin === 'hotkey' && !session.latched
       ? `Release ${accel} to insert`
       : voice.backend === 'native'

@@ -16,6 +16,15 @@ import { Tooltip } from '../../../components/primitives/Tooltip.js';
 import { registerVoiceTarget, toggleVoice, useVoiceSnapshot, type VoiceSurface } from './voice-store.js';
 import styles from './VoiceInput.module.css';
 
+/** Keep native shortcut symbols from pulling in the full UI font face. */
+export function readableVoiceAccelerator(accelerator: string): string {
+  return accelerator
+    .replaceAll('\u2303', 'Ctrl+')
+    .replaceAll('\u2325', 'Option+')
+    .replaceAll('\u21e7', 'Shift+')
+    .replaceAll('\u2318', 'Command+');
+}
+
 export interface VoiceInputProps {
   surface: VoiceSurface;
   /** `verbatim` (terminal): inserted exactly as heard, no cleanup. */
@@ -85,7 +94,7 @@ export function VoiceInput({
   }
 
   const label = live ? 'Stop and insert' : busy ? 'Transcribing…' : 'Dictate';
-  const shortcut = live ? 'Esc cancels' : hotkey?.registered ? hotkey.accelerator : undefined;
+  const shortcut = live ? 'Esc cancels' : hotkey?.registered ? readableVoiceAccelerator(hotkey.accelerator) : undefined;
   return (
     <Tooltip label={label} shortcut={shortcut} placement="top">
       <button
