@@ -324,7 +324,9 @@ export function defaultJudgeSeatLanes(input: {
   excludeFamilies?: readonly ReviewModelFamily[];
 }): JudgeSeatLanes {
   const allowed = allowedJudgeLanes(input.producerFamily, input.waitSinceMs, input.nowMs, input.excludeFamilies ?? [])
-    .filter((lane) => input.policy.engines.includes(lane));
+    // Exact lane ids (3.15: `devin-cli` is never a grant engine, and judge
+    // lanes never include it — Devin never judges).
+    .filter((lane) => (input.policy.engines as readonly string[]).includes(lane));
   return routeJudgeLanes(
     allowed,
     (seatId) => {

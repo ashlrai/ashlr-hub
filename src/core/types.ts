@@ -1735,6 +1735,14 @@ export interface AshlrConfig {
      * another model; this only decides the picker's default.
      */
     defaultModel?: string;
+    /**
+     * 3.15: the model the fleet's local Devin CLI engine (`devin-cli`,
+     * devin/cli-engine.ts) runs. Default `swe-2-high`. Only the free SWE-2
+     * models (swe-2-high / swe-2-medium / swe-2-max) run under autonomy — a
+     * billed model's spend cannot be read back, so the lane holds instead.
+     * A sibling of `fleet` (which is a boolean the launcher checks `=== true`).
+     */
+    fleetModel?: string;
   };
 }
 

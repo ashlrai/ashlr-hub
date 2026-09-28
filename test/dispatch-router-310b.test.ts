@@ -505,7 +505,7 @@ describe('best-of-N lane accounting (review c15)', () => {
       { engine: 'llama-server' as EngineId, model: 'q' },
     ],
   };
-  const zero = { local: 0, 'grok-cli': 0, 'claude-cli': 0, codex: 0 };
+  const zero = { local: 0, 'grok-cli': 0, 'claude-cli': 0, codex: 0, 'devin-cli': 0 };
 
   it('reserves fan-out slots only when a fan-out is plausible, always leaving the pool a local slot', () => {
     expect(planFanoutReserve(lanes({ local: 2 }), false)).toEqual(zero);

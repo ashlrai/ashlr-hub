@@ -205,6 +205,7 @@
     "src/core/devin/chat-contract.ts",
     "src/core/devin/chat-turn-invocation.ts",
     "src/core/devin/chat.ts",
+    "src/core/devin/cli-engine.ts",
     "src/core/devin/cli-probe.ts",
     "src/core/devin/cli-prs.ts",
     "src/core/devin/client.ts",

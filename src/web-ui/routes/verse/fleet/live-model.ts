@@ -27,6 +27,7 @@ export const LANE_ENGINE: Readonly<Record<FleetEngine, ChartEngine>> = {
   'grok-cli': 'grok',
   'claude-cli': 'claude',
   codex: 'codex',
+  'devin-cli': 'devin',
 };
 
 export const LANE_LABEL: Readonly<Record<FleetEngine, string>> = {
@@ -34,6 +35,7 @@ export const LANE_LABEL: Readonly<Record<FleetEngine, string>> = {
   'grok-cli': 'Grok',
   'claude-cli': 'Claude',
   codex: 'Codex',
+  'devin-cli': 'Devin CLI',
 };
 
 /** A lane chip's words: "Local · off", "Grok · 1/2". The why is a separate line (`laneNotes`). */
@@ -121,7 +123,7 @@ function runDetail(run: FleetLiveRun): string {
   return [where, run.title, run.model, run.prNumber ? `PR #${run.prNumber}` : null].filter(Boolean).join(' · ');
 }
 
-const LANE_ORDER: readonly (FleetEngine | 'none')[] = ['local', 'grok-cli', 'claude-cli', 'codex', 'none'];
+const LANE_ORDER: readonly (FleetEngine | 'none')[] = ['local', 'grok-cli', 'claude-cli', 'codex', 'devin-cli', 'none'];
 
 /**
  * Runs within [from, now] packed into lane × slot rows. `parkedAsGantt`

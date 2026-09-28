@@ -38,7 +38,7 @@
 import type { AshlrConfig, EngineId, EngineTier, WorkItem, WorkSource } from '../types.js';
 import type { EffectivePolicy } from '../authority/types.js';
 import { describeExclusions, routeSeat, ROUTER_CONTEXT_FIT_FRACTION, type RouterWeights } from '../routing/router.js';
-import { engineOfSeatId, type BudgetEngine } from '../routing/policy.js';
+import { DEVIN_SEAT_ID, engineOfSeatId, type BudgetEngine } from '../routing/policy.js';
 import { reasonSentences } from '../routing/seat-reasons.js';
 import type { SeatCapacity } from '../routing/headroom.js';
 import type {
@@ -56,7 +56,20 @@ import type { HarnessRoutingWeights } from '../learn/harness-types.js';
 import { registryEngineForFleetEngine, resolveEngineSpec } from '../run/engine-registry.js';
 import { GROK_CLI_FAST_MODEL, pickModel } from '../run/model-catalog.js';
 import { planAutonomousBestOfN, type AutonomousBestOfNPlan } from '../run/best-of-n-policy.js';
-import { FLEET_ENGINES, type FleetEngine, type FleetLaneState, type RouteHold } from './fleet-types.js';
+import {
+  DEVIN_CLI_CONTEXT_TOKENS,
+  DEVIN_CLI_ENGINE_ID,
+  DEVIN_CLI_LANE_DEFAULT_SLOTS,
+  resolveDevinCliFleetModel,
+} from '../devin/cli-engine.js';
+import {
+  DEVIN_CLI_LANE,
+  FLEET_ENGINES,
+  grantEngineOfLane,
+  type FleetEngine,
+  type FleetLaneState,
+  type RouteHold,
+} from './fleet-types.js';
 
 // ---------------------------------------------------------------------------
 // Lanes
@@ -71,6 +84,8 @@ export const LANE_DEFAULT_SLOTS: Readonly<Record<FleetEngine, number>> = Object.
   'grok-cli': LEADER_LIMITS.grokLanes.default,
   'claude-cli': 1,
   codex: 2,
+  // 3.15: the local Devin CLI (devin/cli-engine.ts) — a neutral default.
+  'devin-cli': DEVIN_CLI_LANE_DEFAULT_SLOTS,
 });
 
 /** Local lane width while Mason is present. */
@@ -107,6 +122,8 @@ export function fleetLaneOf(engine: string | null | undefined, cfg?: AshlrConfig
   if (typeof engine !== 'string' || engine.length === 0) return null;
   const id = engine.trim().toLowerCase();
   if (id === 'grok-cli') return 'grok-cli';
+  // 3.15: the local Devin CLI is its own lane (never a Devin cloud session).
+  if (id === DEVIN_CLI_ENGINE_ID) return DEVIN_CLI_LANE;
   if (id === 'claude') return 'claude-cli';
   if (id === 'codex') return 'codex';
   // The per-token xAI API ('grok') is never a lane: the SuperGrok seat runs
@@ -174,11 +191,27 @@ export interface LanePlan {
 }
 
 function grantHasProducerFor(policy: LanePlanInput['policy'], lane: FleetEngine): boolean {
+  // 3.15: the Devin CLI lane produces on the grant's Devin seat — the same
+  // producer-only seat the cloud launcher needs (authority/effective-config.ts
+  // standingAuthorizesDevin). A Devin seat never opens any OTHER lane:
+  // laneOfSeat still answers null for it.
+  if (lane === DEVIN_CLI_LANE) return grantHasDevinProducer(policy);
   for (const [seatId, seat] of Object.entries(policy.spend.seats)) {
     if (!seat.enabled || !seat.roles.includes('producer')) continue;
     if (laneOfSeat({ engine: engineOfSeatId(seatId) }) === lane) return true;
   }
   return false;
+}
+
+/**
+ * Does the grant give its Devin seat an enabled producer role? Mirrors
+ * authority/effective-config.ts standingAuthorizesDevin's seat half (the
+ * engine half is `policy.engines.includes('devin')`, checked per lane via
+ * grantEngineOfLane) without pulling the grant verifier into loop.ts's graph.
+ */
+export function grantHasDevinProducer(policy: Pick<EffectivePolicy, 'spend'>): boolean {
+  const seat = grantSeatFor(policy.spend, DEVIN_SEAT_ID);
+  return seat !== null && seat.enabled && seat.roles.includes('producer');
 }
 
 /**
@@ -211,6 +244,7 @@ export const FLEET_LANE_LABEL: Readonly<Record<FleetEngine, string>> = {
   'grok-cli': 'Grok',
   'claude-cli': 'Claude',
   codex: 'Codex',
+  'devin-cli': 'Devin CLI',
 };
 
 /**
@@ -278,13 +312,19 @@ export function planLanes(input: LanePlanInput): Record<FleetEngine, LanePlan> {
       } else if (presentOrUnknown) {
         narrow(0, 'You are active (or presence is unknown), so the Claude producer slice is held for your own session.');
       }
+    } else if (lane === DEVIN_CLI_LANE) {
+      if (!grantHasProducerFor(input.policy, lane)) narrow(0, 'The grant gives Devin no producer seat.');
     } else if (lane !== 'local' && !grantHasProducerFor(input.policy, lane)) {
       narrow(0, `No ${FLEET_LANE_LABEL[lane]} seat has the producer role in the grant.`);
     }
     const unavailable = input.engineUnavailable[lane];
     if (unavailable) narrow(0, unavailable);
-    if (!input.policy.engines.includes(lane)) {
-      narrow(0, `The grant's current rollout stage does not include ${FLEET_LANE_LABEL[lane]}.`);
+    // 3.15: a lane is authorized by its grant engine — its own id, except the
+    // Devin CLI, which the grant's `devin` entry authorizes.
+    if (!input.policy.engines.includes(grantEngineOfLane(lane))) {
+      narrow(0, lane === DEVIN_CLI_LANE
+        ? "The grant's current rollout stage does not include Devin."
+        : `The grant's current rollout stage does not include ${FLEET_LANE_LABEL[lane]}.`);
     }
     out[lane] = { lane, slots, capReason };
   }
@@ -562,7 +602,7 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
       details.push(detail);
       reasons.push(sentence ?? reasonSentences([detail])[0]!);
     };
-    if (!ctx.policy.engines.includes(lane)) add({ kind: 'grant', text: `The grant's current stage does not include ${FLEET_LANE_LABEL[lane]}.` });
+    if (!ctx.policy.engines.includes(grantEngineOfLane(lane))) add({ kind: 'grant', text: `The grant's current stage does not include ${FLEET_LANE_LABEL[lane]}.` });
     if (!grantSeat || !grantSeat.enabled) add({ kind: 'grant', text: 'The grant does not let autonomy use this seat.' });
     else if (!grantSeat.roles.includes('producer')) {
       add({ kind: 'grant', text: `The grant gives this seat no producer role (${grantSeat.roles.join(', ') || 'none'}).` });
@@ -595,6 +635,37 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
     extra.push({ seatId, reasons, nextEligibleAt: null, details });
   }
 
+  // 3.15: the Devin CLI lane takes what no seat-router seat could — see
+  // devinCliOverflow. It never displaces a seat the router chose.
+  if (chosenSeat === null) {
+    const devin = devinCliOverflow(request, repo, kind, ctx);
+    if ('engine' in devin) {
+      const exclusionsSoFar = [...decision.exclusions, ...extra].sort((a, b) => (a.seatId < b.seatId ? -1 : a.seatId > b.seatId ? 1 : 0));
+      const why = `Routed autonomous ${request.difficulty}-difficulty ${request.task} work to the Devin CLI (${devin.model}, free): `
+        + (decision.seatId === null && decision.candidates.length === 0
+          ? `no seat-router seat can take it right now (${describeExclusions(exclusionsSoFar)}).`
+          : `no seat the grant lets produce can take it right now (${describeExclusions(exclusionsSoFar)}).`);
+      return {
+        backend: devin.engine,
+        tier: ctx.tierOf(devin.engine) ?? 'mid',
+        model: devin.model,
+        reason: `standing router: ${why}`,
+        seatDecision: {
+          seatId: DEVIN_SEAT_ID,
+          candidates: [DEVIN_SEAT_ID],
+          exclusions: exclusionsSoFar,
+          why,
+          summary: `Devin CLI (${devin.model}) — no other seat can take this work right now.`,
+          mode: decision.mode,
+        },
+        hold: null,
+        lane: DEVIN_CLI_LANE,
+        repo,
+      };
+    }
+    if (devin.exclusion) extra.push(devin.exclusion);
+  }
+
   const exclusions = [...decision.exclusions, ...extra].sort((a, b) => (a.seatId < b.seatId ? -1 : a.seatId > b.seatId ? 1 : 0));
   const candidates = chosenSeat === null
     ? []
@@ -614,7 +685,15 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
         : `No seat the grant lets produce can take this ${request.difficulty}-difficulty ${request.task} work right now.`,
       mode: decision.mode,
     };
-    if (!fitsSomeSeat(ctx.capacity, request.contextTokens)) {
+    // 3.15: an item that fits SWE-2's window is not "too big for every seat"
+    // while the Devin CLI lane is in play (in the grant, and its engine ready
+    // this tick) — it waits for that lane. A lane that is off (no opt-in, a
+    // logged-out CLI) does not turn a split into an open-ended park.
+    const devinWindowFits = ctx.policy.engines.includes(grantEngineOfLane(DEVIN_CLI_LANE))
+      && grantHasDevinProducer(ctx.policy)
+      && Boolean(ctx.laneEngines[DEVIN_CLI_LANE])
+      && (request.contextTokens === undefined || request.contextTokens <= DEVIN_CLI_CONTEXT_TOKENS * ROUTER_CONTEXT_FIT_FRACTION);
+    if (!fitsSomeSeat(ctx.capacity, request.contextTokens) && !devinWindowFits) {
       return held(legacy, ctx, repo, seatDecision, {
         kind: 'split',
         reason: `It needs about ${formatTokens(request.contextTokens ?? 0)} tokens of context, more than any seat's window can take — `
@@ -662,6 +741,54 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
 }
 
 /**
+ * 3.15 — the Devin CLI lane as the router's OVERFLOW.
+ *
+ * The Devin CLI has no capacity seat (routing/router.ts never admits a Devin
+ * seat: it has no windows to assess), so it cannot be ranked BY the seat
+ * router. The neutral default is the least disruptive one: it is considered
+ * only when the seat router's candidates are all unusable, so it adds free
+ * capacity without taking work any existing lane would have run. Where it
+ * ranks against the other lanes is router scoring, not this adapter's call;
+ * this is the one seam to move.
+ *
+ * It needs, like any lane: the grant's `devin` engine and producer-only
+ * Devin seat, open slots (planLanes folds the Devin opt-in, the budget mode,
+ * the free-model rule and CLI readiness into `engineUnavailable`), an
+ * engine, room in SWE-2's window, and no active demotion of this route.
+ * Returns the engine to run, or why it cannot (an exclusion for the "why"),
+ * or `{}` when the lane is simply not in play (not in the grant). Pure.
+ */
+export function devinCliOverflow(
+  request: RoutingRequest,
+  repo: string,
+  kind: string,
+  ctx: DispatchRouterContext,
+): { engine: EngineId; model: string } | { exclusion?: SeatExclusion } {
+  if (!ctx.policy.engines.includes(grantEngineOfLane(DEVIN_CLI_LANE)) || !grantHasDevinProducer(ctx.policy)) return {};
+  const details: SeatReason[] = [];
+  const plan = ctx.lanes[DEVIN_CLI_LANE];
+  if (!plan || plan.slots <= 0) {
+    details.push({ kind: 'lane', text: plan?.capReason ?? `The ${FLEET_LANE_LABEL[DEVIN_CLI_LANE]} lane has no slots this tick.` });
+  }
+  const engine = ctx.laneEngines[DEVIN_CLI_LANE];
+  if (engine === null || engine === undefined) {
+    details.push({ kind: 'lane', text: `No ${FLEET_LANE_LABEL[DEVIN_CLI_LANE]} engine is ready in this build.` });
+  }
+  if (request.contextTokens !== undefined && request.contextTokens > DEVIN_CLI_CONTEXT_TOKENS * ROUTER_CONTEXT_FIT_FRACTION) {
+    details.push({ kind: 'context', text: `It needs about ${formatTokens(request.contextTokens)} tokens of context, more than SWE-2's window takes.` });
+  }
+  const reasons = reasonSentences(details);
+  if (details.length === 0 && engine) {
+    const demoted = activeDemotion(ctx.demotions, engine, repo, kind, ctx.nowMs);
+    if (!demoted) return { engine, model: resolveDevinCliFleetModel(ctx.cfg?.devin) };
+    const why = demoted.reason.trim().replace(/[.!?]?$/, '.');
+    details.push({ kind: 'demoted', text: `This route (${engine} on ${repo} for ${kind} work) is demoted: ${why}`, resetsAt: demoted.until });
+    reasons.push(`This route (${engine} on ${repo} for ${kind} work) is demoted until ${demoted.until}: ${demoted.reason}`);
+  }
+  return { exclusion: { seatId: DEVIN_SEAT_ID, reasons, nextEligibleAt: null, details } };
+}
+
+/**
  * The grok-cli model for low-difficulty work: the catalog's `fast` grok-cli
  * entry (ids are `grok-cli:<model>`; the engine takes the bare model), else
  * the compiled GROK_CLI_FAST_MODEL.
@@ -690,6 +817,15 @@ export interface LaneEngineInput {
   installed: (engine: EngineId) => boolean;
   /** The local fleet runtime engine when the local fleet is enabled; null otherwise. */
   localFleetEngine: EngineId | null;
+  /**
+   * 3.15: may the Devin CLI lane run this tick (devin/cli-engine.ts
+   * devinCliLaneVerdict — opt-in, grant, budget mode, free model, CLI
+   * readiness)? Absent = not evaluated, so the lane has no engine (closed).
+   * `foundry.allowedBackends` is NOT consulted for this lane: the Devin
+   * section's own fleet opt-in is its switch, the same one the cloud launcher
+   * reads, so turning Devin on for the fleet is one decision, not two.
+   */
+  devinCli?: { ok: boolean; reason: string };
   cfg?: AshlrConfig;
 }
 
@@ -730,6 +866,16 @@ export function resolveLaneEngines(input: LaneEngineInput): {
     } else {
       engines[lane] = engine;
     }
+  }
+
+  // 3.15: the Devin CLI lane. Its readiness (installed AND logged in) is the
+  // cli-probe answer inside `devinCli`, not a PATH probe.
+  const devinEngine = registryEngineForFleetEngine(DEVIN_CLI_LANE) as EngineId;
+  if (input.devinCli?.ok === true) {
+    engines[DEVIN_CLI_LANE] = devinEngine;
+  } else {
+    engines[DEVIN_CLI_LANE] = null;
+    unavailable[DEVIN_CLI_LANE] = input.devinCli?.reason ?? 'The Devin CLI lane was not evaluated this tick.';
   }
   return { engines, unavailable };
 }

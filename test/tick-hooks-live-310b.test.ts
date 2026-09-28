@@ -303,7 +303,7 @@ describe('lanes, presence and the router seam', () => {
     const hooks = createLiveTickHooks({ deps: h.deps });
     hooks.effectiveConfig(CFG);
     const result = await hooks.beforeTick(hookCtx);
-    expect(result.laneCaps).toEqual({ local: 2, 'grok-cli': 2, 'claude-cli': 0, codex: 0 });
+    expect(result.laneCaps).toEqual({ local: 2, 'grok-cli': 2, 'claude-cli': 0, codex: 0, 'devin-cli': 0 });
     const state = h.ticks.at(-1)!;
     expect(state).toMatchObject({ standing: { grantId: 'g-1', stageId: '2b', switch: 'autonomous' }, ledgerHead: { seq: 41 }, capabilityKind: 'resident-standing' });
     expect(h.audits.at(-1)).toMatch(/standing tick: lanes local=2 grok-cli=2 claude-cli=0 codex=0/);
