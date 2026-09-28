@@ -6,8 +6,8 @@
  */
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
-import { ensureQuery, evictAll } from '../../../data/cache.js';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import { ensureQuery, evictAll, getQuerySnapshot } from '../../../data/cache.js';
 import { stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
 import { CommandSection } from '../sections/CommandSection.js';
 import { GrowthSection } from '../sections/GrowthSection.js';
@@ -29,18 +29,22 @@ afterEach(() => {
 });
 
 /**
- * Reads the shell keeps warm on its own from first paint, so no surface's
- * table needs them: the one activity poll (VerseApp's rail) and the chat's
- * opening reads (bootstrap, sessions, workspaces — chat paints first).
+ * Exclude reads owned by the shell from first paint (the activity rail and
+ * chat bootstrap) and Growth's separate lazy Lessons panel. They are outside
+ * this surface warm-up contract.
  */
-const SHELL_OWNED = ['/api/verse/activity', '/api/verse/bootstrap', '/api/verse/sessions', '/api/verse/workspaces'];
+const OUT_OF_PREFETCH = [
+  '/api/verse/activity', '/api/verse/bootstrap', '/api/verse/sessions', '/api/verse/workspaces',
+  // Growth's separately loaded Lessons panel owns this read and chart.
+  '/api/verse/learning/lessons',
+];
 
 const getPaths = (fetchMock: ReturnType<typeof vi.fn>) =>
   new Set(
     fetchMock.mock.calls
       .filter(([, init]) => ((init as RequestInit | undefined)?.method ?? 'GET') === 'GET')
       .map(([input]) => String(input))
-      .filter((path) => !SHELL_OWNED.some((owned) => path.startsWith(owned))),
+      .filter((path) => !OUT_OF_PREFETCH.some((owned) => path.startsWith(owned))),
   );
 
 type Ensure = NonNullable<Parameters<typeof prefetchSurfaceData>[1]>['ensure'];
@@ -86,11 +90,15 @@ describe('surface prefetch', () => {
   it('a warmed Growth paints its charts on the very first render — no loading state', async () => {
     stubSurfaceFetch({ kind: 'live' });
     await prefetchSurfaceData('growth');
+    for (const query of SURFACE_PREFETCH.growth ?? []) {
+      expect(getQuerySnapshot(query.key).status, `warm-up read ${query.key}`).toBe('success');
+    }
     render(createElement(GrowthSection));
-    // Synchronously after the first render: nothing is loading.
-    expect(screen.getByRole('figure', { name: 'Harness level' })).not.toHaveTextContent('Loading…');
-    expect(screen.getByRole('figure', { name: 'Merges per week' })).not.toHaveTextContent('Loading…');
-    expect(screen.queryAllByText('Loading…')).toHaveLength(0);
+    // Lessons is a separate lazy panel with its own read and chart. Pin only
+    // the Growth charts this prefetch covers, synchronously on first render.
+    for (const name of ['Merges per week', 'Cost per merge', 'Pipeline · 90d', 'Model outcomes · 30d', 'Merges by day', 'Harness level', 'Experiments']) {
+      expect(within(screen.getByRole('figure', { name })).queryByText('Loading…'), name).not.toBeInTheDocument();
+    }
   });
 
   it('goes through the shared cache with the prefetch freshness, and never rejects', async () => {
