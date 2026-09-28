@@ -17,6 +17,7 @@ import {
   EXPERIMENT_LOCAL_SLOTS_IDLE,
   createLiveTickHooks,
   createStandingRun,
+  probeLocalRuntimeDefault,
   probeOperatorPresence,
   type LiveHooksDeps,
 } from '../src/core/fleet/tick-hooks-live.js';
@@ -298,6 +299,56 @@ describe('beforeTick — fail closed', () => {
 });
 
 describe('lanes, presence and the router seam', () => {
+  it('caps the Ollama fallback to one effective local serving slot', async () => {
+    const reading = await probeLocalRuntimeDefault(CFG, {
+      v: 1, publishedAt: NOW_ISO,
+      seats: [{ ...grokSeat(), engine: 'local', contextWindow: 65_536 }],
+    });
+    expect(reading).toMatchObject({ reachable: null, slots: 1, contextPerSlot: 65_536 });
+  });
+
+  it('reserves one local turn and routes the next low-difficulty item to Grok', async () => {
+    presenceNow = { present: true, reason: 'A Verse chat turn is running.', evidenceAt: NOW_ISO };
+    const hooks = createLiveTickHooks({ deps: {
+      ...h.deps,
+      probeLocalRuntime: async () => ({ reachable: null, slots: 1, contextPerSlot: 65_536, detail: 'Ollama serializes Qwen3.8' }),
+      legacyRoute: () => ({ backend: 'llama-server' as EngineId, tier: 'mid', reason: 'local runtime' }),
+    } });
+    hooks.effectiveConfig(CFG);
+    const prepared = await hooks.beforeTick(hookCtx);
+    expect(prepared.laneCaps.local).toBe(1);
+
+    const preview = hooks.route(item({ id: 'local-1', effort: 2 }), CFG);
+    expect(preview.backend).toBe('llama-server');
+    expect(hooks.route(item({ id: 'grok-1', effort: 2 }), CFG).backend).toBe('llama-server');
+    hooks.beginDispatchPlan(['local-1', 'grok-1', 'grok-2', 'parked']);
+    const first = hooks.route(item({ id: 'local-1', effort: 2 }), CFG);
+    const second = hooks.route(item({ id: 'grok-1', effort: 2 }), CFG);
+    expect(first.backend).toBe('llama-server');
+    expect(fleetLaneOf(first.backend, CFG)).toBe('local');
+    expect(second.backend).toBe('grok-cli');
+    expect(fleetLaneOf(second.backend, CFG)).toBe('grok-cli');
+    expect(hooks.route(item({ id: 'local-1', effort: 2 }), CFG)).toEqual(first);
+    expect(hooks.route(item({ id: 'grok-2', effort: 2 }), CFG).backend).toBe('grok-cli');
+    expect(hooks.route(item({ id: 'parked', effort: 2 }), CFG).hold?.kind).toBe('park');
+  });
+
+  it('holds overflow when the grant has no other producer lane', async () => {
+    policy = policyFixture({ engines: ['local'] });
+    const hooks = createLiveTickHooks({ deps: {
+      ...h.deps,
+      probeLocalRuntime: async () => ({ reachable: null, slots: 1, contextPerSlot: 65_536, detail: 'Ollama serializes Qwen3.8' }),
+      legacyRoute: () => ({ backend: 'llama-server' as EngineId, tier: 'mid', reason: 'local runtime' }),
+    } });
+    hooks.effectiveConfig(CFG);
+    await hooks.beforeTick(hookCtx);
+    hooks.beginDispatchPlan(['first', 'second']);
+    expect(hooks.route(item({ id: 'first', effort: 2 }), CFG).backend).toBe('llama-server');
+    const overflow = hooks.route(item({ id: 'second', effort: 2 }), CFG);
+    expect(overflow.hold?.kind).toBe('park');
+    expect(overflow.seatDecision?.exclusions.some((x) => x.seatId === 'local')).toBe(true);
+  });
+
   it('returns lane caps with presence applied and records the tick (ledger head included)', async () => {
     presenceNow = { present: true, reason: 'A Verse chat turn is running.', evidenceAt: NOW_ISO };
     const hooks = createLiveTickHooks({ deps: h.deps });
