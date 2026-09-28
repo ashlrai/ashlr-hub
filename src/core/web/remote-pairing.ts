@@ -1,7 +1,7 @@
 /**
- * Unmounted pairing and WebAuthn ceremony for a future remote phone gateway.
- * Only the `mac` facade may invite/approve/revoke. Stage 3 must expose those
- * methods solely through a Mac-local operator surface, never through Tunnel.
+ * Pairing and WebAuthn ceremony for the opt-in phone gateway.
+ * Only the `mac` facade may invite/approve/revoke, through the private
+ * Mac-local operator socket. Tunnel never exposes those methods.
  */
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {

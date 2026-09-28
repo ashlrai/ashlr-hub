@@ -1,9 +1,9 @@
-/** Cloudflare Access identity check for the unstarted phone gateway. */
+/** Cloudflare Access identity check for the opt-in phone gateway. */
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from 'jose';
 import { isIP } from 'node:net';
 
 export interface RemoteAccessConfig {
-  /** Exact public HTTPS origin; also the future WebAuthn origin. */
+  /** Exact public HTTPS origin, also used for WebAuthn. */
   publicOrigin: string;
   /** Cloudflare One team issuer, e.g. https://team.cloudflareaccess.com. */
   teamDomain: string;
