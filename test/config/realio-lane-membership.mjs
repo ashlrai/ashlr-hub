@@ -43,6 +43,7 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/remote-gateway-http.test.ts', // real loopback Hub and gateway servers, Access assertion and SSE lifecycle
   'test/builtin-activity-pgid-reuse.test.ts', // private activity journals with synthetic identity reuse probes
   'test/builtin-activity-settlement-witness.test.ts', // private journals and one real owned subprocess
   'test/resource-quota-cleanup-diagnostics.test.ts', // private real collector leases with inert failure witnesses
