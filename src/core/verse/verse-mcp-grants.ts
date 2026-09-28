@@ -34,7 +34,7 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 
-import { browserPolicy, browserSidecarOrigin, setBrowserAgentAccess } from './browser-bridge.js';
+import { beginBrowserTurn, browserPolicy, browserSidecarOrigin, cancelBrowserCommands, setBrowserAgentAccess, setBrowserScope } from './browser-bridge.js';
 import {
   VERSE_AGENT_TOOLS_OFF,
   VERSE_MCP_PATH,
@@ -174,11 +174,19 @@ export function setAgentToolsGrant(sessionId: string, patch: Partial<VerseAgentT
   if (patch.computerApps !== undefined) {
     next.computerApps = [...new Set(patch.computerApps.map((a) => a.trim()).filter((a) => a.length > 0 && a.length <= 200))].slice(0, MAX_COMPUTER_APPS);
   }
+  if (next.browser !== state.grant.browser || next.browserScript !== state.grant.browserScript) {
+    cancelBrowserCommands(sessionId);
+  }
   state.grant = next;
   if (patch.browser !== undefined) {
     const paneOn = browserPolicy(sessionId).agentAccess;
     if (next.browser === 'off' && paneOn) setBrowserAgentAccess(sessionId, false, sidecarOrigin);
     else if (next.browser !== 'off' && !paneOn) setBrowserAgentAccess(sessionId, true, sidecarOrigin);
+  }
+  if (next.browser !== 'off' && (patch.browser !== undefined || patch.browserScript !== undefined)) {
+    const acting = next.browser === 'act-localhost' || next.browser === 'act-allowed';
+    setBrowserScope(sessionId, 'browser_act', acting, sidecarOrigin);
+    setBrowserScope(sessionId, 'browser_script', acting && next.browserScript, sidecarOrigin);
   }
   if (next.terminal !== 'shared') state.sharedTabs.clear();
   // A chat with every tool off holds no live token: nothing may call in.
@@ -218,6 +226,7 @@ export function mintVerseMcpTurn(sessionId: string, engine: string): VerseMcpTur
   const origin = sidecarOriginFor(sessionId);
   revokeVerseMcpTurn(sessionId, 'A new turn started.');
   if (scopes.length === 0 || !origin) return null;
+  beginBrowserTurn(sessionId);
   const token = randomBytes(32).toString('base64url');
   const digest = digestOf(token);
   mintSeq += 1;

@@ -168,9 +168,11 @@ function toolsOf(mod: ToolModule | null): VerseMcpTool[] {
  */
 async function loadModules(): Promise<VerseMcpTool[]> {
   const mods: Array<ToolModule | null> = await Promise.all([
+    // The richer screenshot and acting registry is adapted to the bearer
+    // turn first; the legacy Browser endpoint below remains observe-only.
+    (async () => { try { return (await import('./verse-mcp-browser-act-adapter.js' as string)) as ToolModule; } catch { return null; } })(),
     import('./verse-mcp-browser.js').then((m) => m as ToolModule, () => null),
     import('./verse-mcp-terminal.js').then((m) => m as ToolModule, () => null),
-    (async () => { try { return (await import('./verse-mcp-browser-act.js' as string)) as ToolModule; } catch { return null; } })(),
     (async () => { try { return (await import('./verse-mcp-computer.js' as string)) as ToolModule; } catch { return null; } })(),
   ]);
   const seen = new Set<string>();

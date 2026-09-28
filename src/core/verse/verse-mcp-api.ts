@@ -50,6 +50,7 @@ import {
   agentToolsGrant,
   answerAgentConfirmation,
   forgetAgentTab,
+  hasAgentScope,
   noteVerseSidecarOrigin,
   pendingConfirmations,
   recentAgentActions,
@@ -242,6 +243,7 @@ function activityOf(sessionId: string): VerseAgentToolsActivity {
 
 function toolContext(turn: VerseMcpTurn, versePort: number | null): VerseMcpToolContext {
   const { sessionId } = turn;
+  const browser = browserMcpDepsFor(versePort);
   return {
     sessionId,
     engine: turn.engine,
@@ -254,7 +256,16 @@ function toolContext(turn: VerseMcpTurn, versePort: number | null): VerseMcpTool
     untrusted: (label, body) => untrustedBlock(label, body),
     markRemoteRead: turn.markRemoteRead,
     remoteRead: turn.remoteRead,
-    browser: browserMcpDepsFor(versePort),
+    browser: {
+      ...browser,
+      // The observe tools also use the bearer turn. A queued capture or
+      // navigate is refused at the pane fence if that turn/scope ends.
+      run: (sid, op, args, timeouts) => browser.run(sid, op, args, {
+        ...timeouts,
+        signal: turn.signal,
+        authorize: () => sid === sessionId && !turn.signal.aborted && hasAgentScope(sessionId, 'browser') && (timeouts?.authorize?.() ?? true),
+      }),
+    },
   };
 }
 

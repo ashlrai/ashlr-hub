@@ -86,6 +86,7 @@ import type { VerseAdapter, VerseParsedEvent, VerseTurnParser } from './index.js
 import { turnAttachmentDirs } from './turn-extras.js';
 import { claudeVerseMcpArgs } from '../verse-mcp-launch.js';
 
+
 type JsonObject = Record<string, unknown>;
 
 function isObject(value: unknown): value is JsonObject {
@@ -1418,6 +1419,7 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
   const extraRoots = verseSessionRoots(session).slice(1);
   const memory = launchMemory(launch);
   const verseMcp = claudeVerseMcpArgs(session.id, isLocal ? 'local' : 'claude');
+
   // The memory directory is granted only when the snapshot says this seat may
   // WRITE it: `--add-dir` has no read-only form, and a read-only seat already
   // has the file's contents in the appended block.

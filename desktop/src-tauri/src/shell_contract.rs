@@ -29,8 +29,11 @@
 //!    `window.__ASHLR_BROWSER_EVENT__(<json>)`, which this script defines
 //!    non-writable and non-configurable so no page script can intercept or
 //!    replace the channel. `capabilities.screenshot` comes from
-//!    `ShellConfig::browser_screenshot` (macOS only). An older shell has no
-//!    `browser` key at all — that absence is the web UI's feature test.
+//!    `ShellConfig::browser_screenshot` and `capabilities.act` (the pane can
+//!    click and type) from `ShellConfig::browser_act` — both macOS only. The
+//!    protocol stays `version: 1`: the page feature-detects `act`, and a
+//!    shell without it simply lacks the key. An older shell has no `browser`
+//!    key at all — that absence is the web UI's feature test.
 //! 7. Dictation (protocol v1, `voice/`): `window.__ASHLR_DESKTOP__.voice` =
 //!    `{ version: 1, send }` and the `ashlr:voice` event. The page emits
 //!    `shell-voice` (same event permission, no new capability); native
@@ -120,6 +123,12 @@ struct ShellConfig<'a> {
     /// every `shell-computer` op answers `unsupported`).
     #[serde(rename = "computerSupported")]
     computer_supported: bool,
+    /// Whether the browser pane can ACT (`{"act": …}` queries: clicks and key
+    /// presses synthesized as trusted AppKit events — macOS only; elsewhere
+    /// an act answers `unsupported`).
+    #[serde(rename = "browserAct")]
+    browser_act: bool,
+
 }
 
 /// Test convenience: the script without desktop state (`"desktop":null`).
@@ -149,6 +158,8 @@ pub fn init_script_with_state(
         desktop,
         browser_screenshot: cfg!(target_os = "macos"),
         computer_supported: cfg!(target_os = "macos"),
+        browser_act: cfg!(target_os = "macos"),
+
     };
     let json = serde_json::to_string(&config).unwrap_or_else(|_| "null".to_string());
     format!("var __ASHLR_SHELL_CONFIG = {json};\n{SHELL_JS}")
@@ -295,10 +306,12 @@ mod tests {
             "\"browserScreenshot\":{}",
             cfg!(target_os = "macos")
         )));
+        assert!(script.contains(&format!("\"browserAct\":{}", cfg!(target_os = "macos"))));
         for needle in [
             "browser: Object.freeze(",
             "version: 1",
             "screenshot: cfg.browserScreenshot === true",
+            "act: cfg.browserAct === true",
             "picker: true",
             "console: true",
             "text: true",

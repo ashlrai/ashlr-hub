@@ -442,10 +442,14 @@ output, errors and failed requests, and pick an element. In a browser tab or
 an older desktop shell it falls back to an `<iframe>` for loopback pages.
 **Send to chat** drafts the page, its logs, a picked element and a screenshot
 into the message box; it never sends. A per-chat switch, off by default, lets
-the chat's **Claude and local seats** look through the pane with five
-read-mostly tools (status, navigate, screenshot, read text, console), on
-localhost unless you allow another origin for that chat. Agents cannot click,
-type or submit. Details: [VERSE-BROWSER.md](VERSE-BROWSER.md).
+the chat's eligible local seats look through the pane (status,
+navigate, an accessibility snapshot, screenshots, text, console, network,
+tabs) and, in the desktop app, act in it (click, type, select, keys, scroll,
+wait), on localhost unless you allow another origin for that chat. Submitting
+a form, delete / pay / send-style buttons, leaving for another site and any
+action after the turn read an outside page ask you first; secret fields,
+uploads and downloads are never touched; clicking in the page yourself pauses
+the agent. Details: [VERSE-BROWSER.md](VERSE-BROWSER.md).
 
 **Changes and checkpoints.** Before every agent turn, on every seat, Verse
 snapshots each repository the chat can reach into a hidden commit
@@ -1604,8 +1608,10 @@ launches the staged sidecar, so run steps 1–2 first.
   Node the pane says so. A terminal tab holds at most two visible panes.
 - The Browser pane loads any site only in the desktop app with the current
   shell; elsewhere it frames loopback dev servers and opens anything else in
-  your browser. Agents get its tools only on Claude and local seats, and
-  cannot click or type. See [VERSE-BROWSER.md](VERSE-BROWSER.md).
+  your browser. Eligible local seats get its tools through the unified
+  per-turn MCP grant; they
+  act in the page only in the desktop app on macOS. See
+  [VERSE-BROWSER.md](VERSE-BROWSER.md).
 - The Files pane is a simple list of folders and touched files, not a file
   browser yet. Side chats and split sessions are not built yet.
 - Past 40 turns the transcript renders far-away turns as placeholders, but a
