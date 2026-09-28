@@ -38,6 +38,8 @@ describe('remote phone session', () => {
   it('sends only exact low-risk routes directly with CSRF and no passkey ceremony', async () => {
     expect(directCsrfWrite('/api/verse/sessions/vs_1/turns')).toBe(true);
     expect(directCsrfWrite('/api/verse/cloud/tasks/t1/land')).toBe(false);
+    expect(directCsrfWrite('/api/verse/agents/ag_12345678/plan')).toBe(false);
+    expect(directCsrfWrite('/api/verse/queue/vs_1/012345abcdef/send')).toBe(false);
     expect(directCsrfWrite('/api/verse/authority/clear-stop')).toBe(false);
     expect(directCsrfWrite('/api/verse/sessions/vs_1/turns?force=true')).toBe(false);
     const calls: Array<{ path: string; init: RequestInit }> = [];
@@ -71,10 +73,11 @@ describe('remote phone session', () => {
       throw new Error(`unexpected ${path}`);
     }));
     await probeRemoteSession();
-    await expect(remoteMutate('POST', '/api/verse/agents', { repo: 'example' })).resolves.toEqual({ ok: true });
+    await expect(remoteMutate('POST', '/api/verse/agents/ag_12345678/plan', { action: 'approve' })).resolves.toEqual({ ok: true });
     const begin = JSON.parse(String(calls[1]!.init.body));
     const finish = JSON.parse(String(calls[2]!.init.body));
-    expect(begin.body).toBe('{"repo":"example"}');
+    expect(begin.path).toBe('/api/verse/agents/ag_12345678/plan');
+    expect(begin.body).toBe('{"action":"approve"}');
     expect(finish.body).toBe(begin.body);
     expect(finish.challengeId).toBe('challenge-1');
     for (const call of calls.slice(1)) {

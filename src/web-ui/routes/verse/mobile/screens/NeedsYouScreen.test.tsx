@@ -95,12 +95,12 @@ it('labels local authority actions Mac-only on a paired remote phone', () => {
   expect(screen.queryByRole('button', { name: /Clear Stop/ })).not.toBeInTheDocument();
 });
 
-it('shows gateway-denied plan, held-queue and reconnect actions as Mac-only', () => {
+it('shows gateway-denied and malformed actions as Mac-only', () => {
   window.history.replaceState(null, '', '/verse/m/');
   document.head.innerHTML = '<meta name="ashlr-remote-gateway" content="v1">';
   const denied = [
     needsItem({ id: 'chats:agent-plan:a1', kind: 'agent-plan', title: 'Plan ready', actions: [
-      { kind: 'approve', label: 'Approve plan', request: { method: 'POST', path: '/api/verse/agents/a1/plan', body: { action: 'approve' } }, confirm: null, destructive: false },
+      { kind: 'approve', label: 'Approve plan', request: { method: 'POST', path: '/api/verse/agents/ag_12345678/plan', body: { action: 'approve', text: 'unreviewed edit' } }, confirm: null, destructive: false },
       { kind: 'reject', label: 'Discard plan', request: { method: 'POST', path: '/api/verse/agents/a1/plan', body: { action: 'discard' } }, confirm: null, destructive: true },
     ] }),
     needsItem({ id: 'chats:queue-held:s1', kind: 'queue-held', title: 'Queue held', actions: [
@@ -115,6 +115,25 @@ it('shows gateway-denied plan, held-queue and reconnect actions as Mac-only', ()
   for (const label of ['Approve plan', 'Discard plan', 'Send next', 'Reconnect']) {
     expect(screen.queryByRole('button', { name: new RegExp(`^${label}:`) })).not.toBeInTheDocument();
   }
+});
+
+it('offers exact agent-plan and held-queue actions on a paired phone', () => {
+  window.history.replaceState(null, '', '/verse/m/');
+  document.head.innerHTML = '<meta name="ashlr-remote-gateway" content="v1">';
+  const allowed = [
+    needsItem({ id: 'chats:agent-plan:ag_12345678', kind: 'agent-plan', title: 'Plan ready', actions: [
+      { kind: 'approve', label: 'Approve plan', request: { method: 'POST', path: '/api/verse/agents/ag_12345678/plan', body: { action: 'approve' } }, confirm: null, destructive: false },
+      { kind: 'reject', label: 'Discard plan', request: { method: 'POST', path: '/api/verse/agents/ag_12345678/plan', body: { action: 'discard' } }, confirm: null, destructive: true },
+    ] }),
+    needsItem({ id: 'chats:queue-held:s1', kind: 'queue-held', title: 'Queue held', actions: [
+      { kind: 'resume', label: 'Send next', request: { method: 'POST', path: '/api/verse/queue/s1/012345abcdef/send', body: {} }, confirm: null, destructive: false },
+    ] }),
+  ];
+  renderMobile(<NeedsYouScreen />, { activity: withItems(allowed), permissions: permissionsFor('unlocked') });
+  for (const label of ['Approve plan', 'Discard plan', 'Send next']) {
+    expect(screen.getByRole('button', { name: new RegExp(`^${label}:`) })).toBeEnabled();
+  }
+  expect(screen.queryByText('This action is available on your Mac.')).not.toBeInTheDocument();
 });
 
 it('keeps gateway-approved merge, fleet and Leader actions on the paired phone', () => {

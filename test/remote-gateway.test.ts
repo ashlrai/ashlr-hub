@@ -65,6 +65,9 @@ describe('unstarted remote gateway policy', () => {
       ['POST', '/api/verse/sessions', { projectPath: '/repo', seatId: 'claude', model: 'opus' }, false],
       ['POST', '/api/verse/sessions/vs_1/turns', { text: 'Please inspect this.' }, false],
       ['POST', '/api/verse/queue/vs_1', { text: 'And test it.', sendNow: true }, false],
+      ['POST', '/api/verse/queue/vs_1/012345abcdef/send', {}, true],
+      ['POST', '/api/verse/agents/ag_12345678/plan', { action: 'approve' }, true],
+      ['POST', '/api/verse/agents/ag_12345678/plan', { action: 'discard' }, true],
       ['POST', '/api/verse/activity/seen', { sessionId: 'vs_1', turnCount: 3 }, false],
       ['POST', '/api/verse/leader/thread', { text: 'What is running?' }, false],
       ['POST', '/api/verse/leader/questions/memo-1:0/answer', { text: 'Hold.' }, false],
@@ -90,6 +93,8 @@ describe('unstarted remote gateway policy', () => {
       '/api/verse/authority/draft', '/api/verse/terminal', '/api/verse/browser',
       '/api/verse/checkpoints/apply', '/api/verse/sessions/s1/delete',
       '/api/verse/authority?mode=stop', '/api/inbox/../p1/approve',
+      '/api/verse/agents/ag_12345678/settings', '/api/verse/agents/a1/plan',
+      '/api/verse/queue/vs_1/not-a-queue-id/send', '/api/verse/queue/vs_1/012345abcdef/delete',
       '/api/inbox/p1%2Fapprove', '/api/verse/leader/actions/a1/approve/extra',
     ]) expect(classifyRemoteRoute('POST', target)).toEqual({ kind: 'deny' });
     const stop = classifyRemoteRoute('POST', '/api/verse/daemon');
@@ -102,6 +107,11 @@ describe('unstarted remote gateway policy', () => {
     const cloudLand = classifyRemoteRoute('POST', '/api/verse/cloud/tasks/ct_20260927T2305_abcdef/land');
     expect(validateRemoteMutation(cloudLand, { headSha: 'a'.repeat(40), reason: 'smuggled' })).toBe(false);
     expect(validateRemoteMutation(cloudLand, { headSha: 'a'.repeat(39) })).toBe(false);
+    const agentPlan = classifyRemoteRoute('POST', '/api/verse/agents/ag_12345678/plan');
+    for (const body of [{}, { action: 'approve', text: 'unreviewed edit' }, { action: 'merge' },
+      { action: 'discard', extra: true }]) expect(validateRemoteMutation(agentPlan, body)).toBe(false);
+    const heldQueue = classifyRemoteRoute('POST', '/api/verse/queue/vs_1/012345abcdef/send');
+    expect(validateRemoteMutation(heldQueue, { text: 'new prompt' })).toBe(false);
     expect(classifyRemoteRoute('POST', '/api/verse/cloud/tasks/../land')).toEqual({ kind: 'deny' });
     expect(validateRemoteMutation(classifyRemoteRoute('GET', '/api/verse/activity'), {})).toBe(false);
   });

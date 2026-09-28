@@ -43,6 +43,8 @@ const ACTION_ID = /^[A-Za-z0-9_:-]{1,128}$/;
 const PROPOSAL_ID = /^[A-Za-z0-9._-]{1,160}$/;
 const CLOUD_TASK_ID = /^ct_\d{8}T\d{4}_[a-z0-9]{6}$/;
 const DEVIN_TASK_ID = /^dv_\d{8}T\d{4}_[a-z0-9]{6}$/;
+const AGENT_ID = /^ag_[a-z0-9]{8,32}$/;
+const QUEUE_ID = /^[0-9a-f]{12}$/;
 const HEAD_SHA = /^[0-9a-f]{40}$/;
 const REPO = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
 
@@ -88,6 +90,12 @@ export function classifyRemoteRoute(method: string | undefined, rawTarget: strin
     }
     const queue = /^\/api\/verse\/queue\/([^/]+)$/.exec(path);
     if (queue && SESSION_ID.test(queue[1]!)) return { kind: 'write', path, stepUp: false };
+    const heldQueue = /^\/api\/verse\/queue\/([^/]+)\/([^/]+)\/send$/.exec(path);
+    if (heldQueue && SESSION_ID.test(heldQueue[1]!) && QUEUE_ID.test(heldQueue[2]!)) {
+      return { kind: 'write', path, stepUp: true };
+    }
+    const agentPlan = /^\/api\/verse\/agents\/([^/]+)\/plan$/.exec(path);
+    if (agentPlan && AGENT_ID.test(agentPlan[1]!)) return { kind: 'write', path, stepUp: true };
     const leaderQuestion = /^\/api\/verse\/leader\/questions\/([^/]+)\/answer$/.exec(path);
     if (leaderQuestion && ACTION_ID.test(leaderQuestion[1]!)) return { kind: 'write', path, stepUp: false };
     const leaderApproval = /^\/api\/verse\/leader\/actions\/([^/]+)\/approve$/.exec(path);
@@ -182,6 +190,9 @@ export function validateRemoteMutation(decision: RemoteRouteDecision, body: unkn
   }
   if (/^\/api\/verse\/sessions\/[^/]+\/turns$/.test(path)
     || /^\/api\/verse\/leader\/questions\/[^/]+\/answer$/.test(path)) return keys(body, ['text']) && boundedText(body.text, 64_000);
+  if (/^\/api\/verse\/agents\/[^/]+\/plan$/.test(path)) return keys(body, ['action'])
+    && (body.action === 'approve' || body.action === 'discard');
+  if (/^\/api\/verse\/queue\/[^/]+\/[^/]+\/send$/.test(path)) return Object.keys(body).length === 0;
   if (/^\/api\/verse\/queue\/[^/]+$/.test(path)) return keys(body, ['text', 'sendNow'])
     && boundedText(body.text, 64_000) && (body.sendNow === undefined || typeof body.sendNow === 'boolean');
   return false;
