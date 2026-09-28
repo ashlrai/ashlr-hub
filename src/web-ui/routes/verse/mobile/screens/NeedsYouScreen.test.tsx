@@ -91,8 +91,51 @@ it('labels local authority actions Mac-only on a paired remote phone', () => {
   const item = needsItem({ kind: 'kill', actions: [{ kind: 'resume', label: 'Clear Stop', request: { method: 'POST', path: '/api/verse/authority/clear-stop', body: {} }, confirm: null, destructive: false }] });
   expect(macOnlyRemoteAction(item, item.actions[0]!)).toBe(true);
   renderMobile(<NeedsYouScreen />, { activity: withItems([item]), permissions: permissionsFor('unlocked') });
-  expect(screen.getByText('Authority changes for this item are available on your Mac.')).toBeInTheDocument();
+  expect(screen.getByText('This action is available on your Mac.')).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: /Clear Stop/ })).not.toBeInTheDocument();
+});
+
+it('shows gateway-denied plan, held-queue and reconnect actions as Mac-only', () => {
+  window.history.replaceState(null, '', '/verse/m/');
+  document.head.innerHTML = '<meta name="ashlr-remote-gateway" content="v1">';
+  const denied = [
+    needsItem({ id: 'chats:agent-plan:a1', kind: 'agent-plan', title: 'Plan ready', actions: [
+      { kind: 'approve', label: 'Approve plan', request: { method: 'POST', path: '/api/verse/agents/a1/plan', body: { action: 'approve' } }, confirm: null, destructive: false },
+      { kind: 'reject', label: 'Discard plan', request: { method: 'POST', path: '/api/verse/agents/a1/plan', body: { action: 'discard' } }, confirm: null, destructive: true },
+    ] }),
+    needsItem({ id: 'chats:queue-held:s1', kind: 'queue-held', title: 'Queue held', actions: [
+      { kind: 'resume', label: 'Send next', request: { method: 'POST', path: '/api/verse/queue/s1/q1/send', body: {} }, confirm: null, destructive: false },
+    ] }),
+    needsItem({ id: 'accounts:reconnect:seat1', kind: 'reconnect', title: 'Seat signed out', actions: [
+      { kind: 'fix', label: 'Reconnect', request: { method: 'POST', path: '/api/verse/health/reconnect', body: { seatId: 'seat1' } }, confirm: null, destructive: false },
+    ] }),
+  ];
+  renderMobile(<NeedsYouScreen />, { activity: withItems(denied), permissions: permissionsFor('unlocked') });
+  expect(screen.getAllByText('This action is available on your Mac.')).toHaveLength(3);
+  for (const label of ['Approve plan', 'Discard plan', 'Send next', 'Reconnect']) {
+    expect(screen.queryByRole('button', { name: new RegExp(`^${label}:`) })).not.toBeInTheDocument();
+  }
+});
+
+it('keeps gateway-approved merge, fleet and Leader actions on the paired phone', () => {
+  window.history.replaceState(null, '', '/verse/m/');
+  document.head.innerHTML = '<meta name="ashlr-remote-gateway" content="v1">';
+  const allowed = [
+    needsItem({ id: 'approvals:approval:p1', title: 'Merge approval', actions: [
+      { kind: 'approve', label: 'Approve', request: { method: 'POST', path: '/api/inbox/p1/approve', body: {} }, confirm: null, destructive: false },
+    ] }),
+    needsItem({ id: 'fleet:held:r1', kind: 'quarantine', title: 'Fleet hold', actions: [
+      { kind: 'resume', label: 'Resume repo', request: { method: 'POST', path: '/api/verse/fleet/live', body: { action: 'resume-repo', repo: 'ashlrai/ashlr-hub', kind: 'quarantine' } }, confirm: null, destructive: false },
+    ] }),
+    needsItem({ id: 'leader:veto-window:a1', kind: 'veto-window', title: 'Leader veto window', actions: [
+      { kind: 'veto', label: 'Veto', request: { method: 'POST', path: '/api/verse/leader', body: { action: 'veto', actionId: 'a1' } }, confirm: null, destructive: true },
+    ] }),
+  ];
+  renderMobile(<NeedsYouScreen />, { activity: withItems(allowed), permissions: permissionsFor('unlocked') });
+  for (const label of ['Approve', 'Resume repo', 'Veto']) {
+    expect(screen.getByRole('button', { name: new RegExp(`^${label}:`) })).toBeEnabled();
+  }
+  expect(screen.queryByText('This action is available on your Mac.')).not.toBeInTheDocument();
 });
 
 describe('NeedsYouScreen — states', () => {

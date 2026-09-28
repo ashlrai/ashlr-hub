@@ -130,10 +130,34 @@ export function destructiveAction(item: NeedsYouItem): NeedsYouAction | null {
   return firstOf(item, DESTRUCTIVE_ORDER);
 }
 
-/** Authority changes require the Mac's local owner presence. */
+/**
+ * The gateway has a closed route policy. Keep the phone's action affordances
+ * inside that policy so an activity producer cannot offer a button that is
+ * guaranteed to fail remotely. The gateway still validates path, body, scope,
+ * and fresh passkey at dispatch; this list only controls what the UI offers.
+ */
+function remoteNeedsYouRequestSupported(action: NeedsYouAction): boolean {
+  const request = action.request;
+  if (!request) return true; // Opens a target or the Leader answer sheet locally.
+  if (request.method !== 'POST') return false;
+  const { path, body } = request;
+  if (path === '/api/verse/activity/seen') return true;
+  if (path === '/api/verse/fleet/live') return body['action'] === 'resume-repo';
+  if (path === '/api/verse/leader') return body['action'] === 'veto' || body['action'] === 'dismiss';
+  if (/^\/api\/inbox\/[^/?#]+\/(approve|reject)$/.test(path)) return true;
+  if (/^\/api\/verse\/leader\/actions\/[^/?#]+\/approve$/.test(path)) return true;
+  if (/^\/api\/verse\/leader\/questions\/[^/?#]+\/answer$/.test(path)) return true;
+  if (/^\/api\/verse\/(cloud|devin)\/tasks\/[^/?#]+\/(land|close|update-branch|dismiss)$/.test(path)) return true;
+  if (/^\/api\/verse\/sessions\/[^/?#]+\/(turns|cancel|terminate)$/.test(path)) return true;
+  if (/^\/api\/verse\/queue\/[^/?#]+$/.test(path)) return true;
+  return false;
+}
+
+/** Authority changes and gateway-denied routes require the Mac. */
 export function macOnlyRemoteAction(item: NeedsYouItem, action: NeedsYouAction): boolean {
   return isRemoteMobileMode() && (item.kind === 'grant' || item.kind === 'kill'
-    || action.request?.path.startsWith('/api/verse/authority') === true);
+    || action.request?.path.startsWith('/api/verse/authority') === true
+    || !remoteNeedsYouRequestSupported(action));
 }
 
 const KIND_NAME: Readonly<Record<NeedsYouKind, string>> = {
@@ -386,7 +410,7 @@ function NeedsCard({ item, canAct, offline, reduced, onAction, onOpen, onHide }:
           </p>
         ) : null}
         {row.detail ? <p className={styles.detail}>{row.detail}</p> : null}
-        {macOnly ? <p className={styles.consequence}>Authority changes for this item are available on your Mac.</p> : null}
+        {macOnly ? <p className={styles.consequence}>This action is available on your Mac.</p> : null}
         {primary ? <p className={styles.consequence}>{consequenceLine(item, primary)}</p> : null}
         <div className={ui.buttonRow}>
           {canAct
@@ -473,7 +497,7 @@ export function NeedsYouScreen() {
   const onAction = useCallback(
     (item: NeedsYouItem, action: NeedsYouAction) => {
       if (macOnlyRemoteAction(item, action)) {
-        showMobileToast('This authority change must be made on your Mac.', 'neutral');
+        showMobileToast('This action is available on your Mac.', 'neutral');
         return;
       }
       // A Leader question's Answer has no route of its own: the phone collects the words here.

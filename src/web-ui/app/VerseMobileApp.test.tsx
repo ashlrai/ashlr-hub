@@ -4,6 +4,7 @@
  * once a read session exists.
  */
 import { act, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMutationToken, markCheckComplete } from '../data/auth-store.js';
 import { evictAll } from '../data/cache.js';
@@ -74,6 +75,37 @@ describe('VerseMobileApp', () => {
     const headers = new Headers(fetch.mock.calls[0]![1]?.headers);
     expect(headers.has('x-ashlr-token')).toBe(false);
     expect(headers.has('x-ashlr-read-client')).toBe(false);
+  });
+  it('clears an expired pending pairing and offers a new code', async () => {
+    window.history.replaceState(null, '', '/verse/m/');
+    document.head.innerHTML = '<meta name="ashlr-remote-gateway" content="v1">';
+    sessionStorage.setItem('ashlr.remotePairPending.v1', '00000000-0000-4000-8000-000000000001');
+    const fetch = vi.fn(async (path: string) => path === '/remote/session'
+      ? Response.json({ authenticated: false, csrfToken: 'c'.repeat(40), capabilities: { pairing: true, writes: false } })
+      : Response.json({ error: 'Pairing unavailable' }, { status: 404 }));
+    vi.stubGlobal('fetch', fetch);
+    act(() => markCheckComplete(false));
+    render(<VerseMobileApp />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Check approval' }));
+    expect(await screen.findByText('This pairing expired. Start over with a new code from your Mac.')).toBeInTheDocument();
+    expect(sessionStorage.getItem('ashlr.remotePairPending.v1')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Start over' }));
+    expect(await screen.findByRole('heading', { name: 'Pair this phone' })).toBeInTheDocument();
+  });
+  it('keeps a pending pairing retryable through a transient network failure', async () => {
+    window.history.replaceState(null, '', '/verse/m/');
+    document.head.innerHTML = '<meta name="ashlr-remote-gateway" content="v1">';
+    sessionStorage.setItem('ashlr.remotePairPending.v1', '00000000-0000-4000-8000-000000000001');
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/remote/session') return Response.json({ authenticated: false, csrfToken: 'c'.repeat(40), capabilities: { pairing: true, writes: false } });
+      throw new TypeError('Network unreachable');
+    }));
+    act(() => markCheckComplete(false));
+    render(<VerseMobileApp />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Check approval' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not complete this step');
+    expect(screen.getByRole('button', { name: 'Check approval' })).toBeEnabled();
+    expect(sessionStorage.getItem('ashlr.remotePairPending.v1')).not.toBeNull();
   });
   it('without a session shows the same gate as the workbench, and fetches nothing', async () => {
     window.history.replaceState(null, '', '/verse/m');
