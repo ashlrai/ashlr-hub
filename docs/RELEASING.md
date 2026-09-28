@@ -4,7 +4,7 @@
 > and local. GitHub Actions stays disabled, and a maintainer builds, verifies,
 > and publishes from a local checkout with npm's interactive web 2FA, following
 > [Releasing without CI](RELEASING-LOCALLY.md). npm `latest` is `3.14.0`;
-> `candidate` still points at the historical `3.3.2`; source is at `3.14.0`
+> `candidate` still points at the historical `3.3.2`; source is at `3.16.0`
 > while the next release is being integrated. The frozen 3.3.2 `release.yml` and `promote.yml` stay
 > in the repository as fail-closed historical evidence only. They are not a
 > publication path for any later version, and the source version must stay
