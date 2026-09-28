@@ -81,7 +81,12 @@ describe('GrowthSection', () => {
     expect(within(state).getByRole('button', { name: 'Approve in Fleet' })).toBeInTheDocument();
     // The authority state can load before fleet history; wait for the
     // history-dependent chart collapse rather than observing its loading frame.
-    await waitFor(() => expect(screen.queryAllByRole('figure')).toHaveLength(0));
+    // Lessons owns a separate lazy chart and read, so its figure may remain.
+    await waitFor(() => {
+      for (const name of ['Merges per week', 'Cost per merge', 'Pipeline · 90d', 'Model outcomes · 30d', 'Merges by day', 'Harness level', 'Experiments']) {
+        expect(screen.queryByRole('figure', { name })).toBeNull();
+      }
+    });
     expect(screen.queryByText(/No fleet runs or proposals|Nothing produced since/)).toBeNull();
   });
 

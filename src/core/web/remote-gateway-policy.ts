@@ -1,7 +1,7 @@
 /**
- * Policy for a future phone gateway. This module is deliberately not mounted by
- * the Hub server: a remote browser must never reach the local token prompt,
- * desktop assets, or the general /api/* router through an early gateway build.
+ * Policy for the opt-in phone gateway. It is separate from the Hub server:
+ * a remote browser must never reach the local token prompt, desktop assets,
+ * or the general /api/* router.
  */
 import { timingSafeEqual } from 'node:crypto';
 
