@@ -42,7 +42,7 @@ not estimated, and each one is reproducible from the repo:
 | Leader: directive prefixes, action classes, Telegram commands and buttons, seat fallback, retries, check-ins | CHANGELOG 3.14.0; `docs/LEADER.md` |
 | Wiki: verified citations, local-first engines (never Claude), storage only on this Mac | CHANGELOG [Unreleased] "Private repo wiki and Ask"; `docs/VERSE.md` |
 | Lessons: approval before use, 16 KiB cap, byte-identical prompts on no match | PR #535; `docs/VERSE.md` "Lessons" |
-| Devin: Keychain key, chat seats (cloud and CLI), fleet launches only under a grant that names Devin, a merge needs a stage that names Devin and two judges from different families | PRs #536, #540, #545, #556; `docs/DEVIN.md`; `requiresTwoJudges` / `producerMergeWithheld` in `src/core/fleet/reviewer-independence.ts` |
+| Devin: Keychain key, chat seats (cloud and CLI), fleet launches only under a grant that names Devin; cloud merges need two independent judge families, while signed elite-direct scope can let eligible CLI work land at G6 | PRs #536, #540, #545, #556; `docs/DEVIN.md`; `docs/STANDING-AUTHORITY.md`; `src/core/fleet/reviewer-independence.ts` |
 | Leader founder mode: briefs, instant brief on "status", "go build X", one question at a time, new powers with classes and veto windows | PR #550; `docs/LEADER.md` "Founder mode"; `src/core/comms/leader-line.ts`, `src/core/vision/leader-powers.ts` |
 | Panel: terminal blocks and Agent tab, browser agents cannot click in, per-turn checkpoints with Accept/Reject/Undo/Redo | PRs #541, #546, #549, #551, #553; `docs/VERSE.md` "The workbench panel"; `docs/VERSE-BROWSER.md` |
 
@@ -56,9 +56,10 @@ the software does is worse than no landing page.
 
 Autonomy ships dormant. It runs only under a Touch-ID-signed standing grant,
 after the operator starts the resident daemon (`ashlr authority resident
-start`), and only on macOS. A grant starts on the shadow stage, where nothing
-merges. The page says exactly that: active under a standing grant on our own
-fleet, at shadow, with 0 repositories merging. It must not claim merges,
+start`), and only on macOS. The default grant starts on the shadow stage,
+where nothing merges; an explicitly signed elite-direct grant has a different
+single-rung rollout. The page's current fleet status is an observed default
+grant at shadow, with 0 repositories merging. It must not claim merges,
 merge counts or a later stage until `ashlr authority status` shows them. The
 legacy permit-based daemon and conductor trust roots remain compiled empty;
 see `docs/RESIDENT-RUNTIME.md`.
