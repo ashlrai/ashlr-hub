@@ -159,11 +159,8 @@ export async function startServer(
     // (core/verse/preview.ts redeemFrameTicket) — authority is still checked,
     // just by the one route that can check it.
     //
-    // And (3.15) GET /api/verse/browser/mcp/<grant>: a chat seat's MCP client
-    // probes GET for an optional SSE stream. The route answers 405 to every
-    // GET without reading anything; a 401 here instead would send the client
-    // hunting for OAuth. Its POSTs are authenticated by the grant
-    // (core/verse/browser-api.ts). Same for (3.15 agent tools) exactly
+    // The retired Browser grant path answers 410 to old clients without
+    // admitting a command. Same boundary exception for (3.15 agent tools)
     // GET /api/verse/agent-tools/mcp, Verse's one MCP server: 405, never 401;
     // its POSTs carry the turn's bearer token (core/verse/verse-mcp-api.ts).
     if (

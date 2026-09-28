@@ -49,6 +49,7 @@ export interface BrowserClip {
 }
 
 export interface BrowserTabSummary {
+  id: string;
   index: number;
   url: string | null;
   title: string | null;
@@ -436,10 +437,17 @@ export async function executeAgentCommand(
           if (index === null) return fail(command.id, 'Invalid tab index.');
           const tab = exec.tabs()[index];
           if (!tab) return fail(command.id, `There is no tab ${index}.`);
-          if (action === 'close' && tab.url !== null && !seen(tab.url)) {
-            return fail(command.id, 'That tab shows a page this chat may not observe; only the operator can close it.');
+          if (tab.url !== null && !seen(tab.url)) {
+            return fail(command.id, 'That tab shows a page outside this action\'s allowed origins; only the operator can switch to or close it.');
           }
           if (!(await canDispatch(command.id))) return fail(command.id, 'This browser turn ended before the tab could change.');
+          // The dispatch check crosses an async boundary. Re-read the tab
+          // immediately before changing it so a newly remote page, or a tab
+          // that moved into this index, cannot inherit the old approval.
+          const fresh = exec.tabs()[index];
+          if (!fresh || fresh.id !== tab.id || fresh.url !== tab.url || (fresh.url !== null && !seen(fresh.url))) {
+            return fail(command.id, 'That tab changed before the action; list tabs again.');
+          }
           if (!(action === 'select' ? exec.selectTab(index) : exec.closeTab(index))) return fail(command.id, `Tab ${index} could not be ${action === 'select' ? 'selected' : 'closed'}.`);
         } else if (action !== 'list') {
           return fail(command.id, 'Invalid tabs action.');
@@ -449,13 +457,9 @@ export async function executeAgentCommand(
       }
 
       case 'history': {
-        const direction = args['direction'];
-        if ((direction !== 'back' && direction !== 'forward') || !only(args, ['direction'])) return fail(command.id, 'Invalid direction.');
-        if (!here.url) return fail(command.id, 'No page is open in the Browser pane.');
-        if (!(await canDispatch(command.id))) return fail(command.id, 'This browser turn ended before navigation could start.');
-        const landed = await exec.history(direction);
-        if (landed.url && !seen(landed.url)) return { id: command.id, ok: true, data: { hidden: true, loading: landed.loading } };
-        return { id: command.id, ok: true, ...(landed.url ? { url: landed.url } : {}), data: { title: landed.title, loading: landed.loading } };
+        // The native webview cannot reveal its next history URL before taking
+        // the step, so no origin gate could run before navigation.
+        return fail(command.id, 'Agent history is unavailable until the destination can be verified. Open a known URL instead.');
       }
 
       case 'confirm': {

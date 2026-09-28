@@ -10,22 +10,11 @@
  *   GET  /api/verse/browser/commands?sessionId=&wait=  → { commands } (the pane's long-poll, ≤ 20 s)
  *   POST /api/verse/browser/dispatch {sessionId, id}   → { allowed } (live claim fence before an effect)
  *   POST /api/verse/browser/result {sessionId, id, ok, url?, data?, error?} → { ok: true }
- *   POST /api/verse/browser/mcp/<grant>                → MCP JSON-RPC (browser-mcp.ts)
- *   GET|DELETE /api/verse/browser/mcp/<grant>          → 405 (stateless: no SSE stream, no session)
+ *   ANY  /api/verse/browser/mcp/<grant>                → 410 (retired grant endpoint)
  *
- * Everything but `mcp` sits behind the normal Verse posture: GETs behind the
- * read session, POSTs behind dispatch + the constant-time mutation token +
- * JSON gate (dispatchWorkbenchModules), then a body cap and strict keys.
- *
- * `mcp` is a chat SEAT's endpoint, not the page's. It carries no Verse token
- * and is authenticated by the grant in its path alone (browser-bridge.ts),
- * which exists only while the operator has agent access switched on for
- * that chat. verse-api.ts lets a POST on exactly this path shape past the
- * mutation gate and server.ts lets a GET past the read boundary (to answer
- * 405); both are keyed on VERSE_BROWSER_MCP_PATH_RE. A request that carries
- * an `Origin` header is refused outright: seats are CLI processes, and a
- * browser page has no business here (DNS-rebinding / CSRF defence on top of
- * the server's Host allowlist, as the MCP transport spec asks).
+ * All live Browser commands use the unified bearer-per-turn agent-tools MCP.
+ * The old grant URL is accepted only to answer 410; it never parses a request
+ * or queues a command. Other routes retain Verse's normal read/mutation gates.
  *
  * All IO here is async (scripts/check-verse-sync-io.mjs).
  */
@@ -43,10 +32,9 @@ import {
   recordBrowserBlocked,
   revokeBrowserAllowance,
   runBrowserCommand,
-  sessionForBrowserGrant,
   setBrowserOriginAllowed,
 } from './browser-bridge.js';
-import { handleBrowserMcpBody, type BrowserMcpDeps } from './browser-mcp.js';
+import type { BrowserMcpDeps } from './browser-mcp.js';
 import { noteComputerUntrustedRead } from './computer-bridge.js';
 import { agentToolsGrant, setAgentToolsGrant } from './verse-mcp-grants.js';
 import {
@@ -67,11 +55,10 @@ import { getVerseEngine } from './verse-api.js';
 import { VERSE_SESSION_ID_RE } from './verse-stream.js';
 
 const SMALL_BODY_BYTES = 16 * 1024;
-const MCP_BODY_BYTES = 64 * 1024;
 /** A screenshot answer: an 8 MB image as base64 plus the envelope. */
 const RESULT_BODY_BYTES = 12 * 1024 * 1024;
 
-/** Test hook: the MCP deps' dev-server lister (the real one reads the chat's roots). */
+/** Test hook: the Browser tools' dev-server lister (the real one reads the chat's roots). */
 let devServerLister: BrowserMcpDeps['devServers'] | null = null;
 export function setBrowserDevServerListerForTest(next: BrowserMcpDeps['devServers'] | null): void {
   devServerLister = next;
@@ -158,8 +145,8 @@ async function defaultDevServers(sessionId: string, versePort: number | null): P
 
 function writeRaw(res: ServerResponse, status: number, body?: unknown, extra: Record<string, string> = {}): void {
   // Written directly, not through sendJson: its public-JSON scrubber redacts
-  // long base64-looking runs, and a screenshot IS one. Text content was
-  // secret-scrubbed by browser-mcp.ts already.
+  // long base64-looking runs, and a screenshot IS one. Tool handlers scrub
+  // text before it reaches this response writer.
   const headers: Record<string, string> = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...extra };
   if (body === undefined) {
     res.writeHead(status, headers);
@@ -168,44 +155,6 @@ function writeRaw(res: ServerResponse, status: number, body?: unknown, extra: Re
   }
   res.writeHead(status, { ...headers, 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
-}
-
-async function handleMcp(req: IncomingMessage, res: ServerResponse, grant: string, method: string): Promise<void> {
-  if (method !== 'POST') {
-    writeRaw(res, 405, { error: 'this MCP endpoint is stateless: POST only' }, { Allow: 'POST' });
-    return;
-  }
-  if (typeof req.headers.origin === 'string' && req.headers.origin.length > 0) {
-    writeRaw(res, 403, { error: 'browser origins may not call this endpoint' });
-    return;
-  }
-  const sessionId = sessionForBrowserGrant(grant);
-  if (!sessionId) {
-    // Same answer for unknown, revoked and malformed: nothing tells a prober which.
-    writeRaw(res, 404, { error: 'browser access is not enabled for this chat (ask the operator to switch it on in the Browser pane)' });
-    return;
-  }
-  const contentType = String(req.headers['content-type'] ?? '').toLowerCase();
-  if (!contentType.startsWith('application/json')) {
-    writeRaw(res, 415, { error: 'Content-Type must be application/json' });
-    return;
-  }
-  let raw: string;
-  try {
-    raw = await readBody(req, MCP_BODY_BYTES);
-  } catch {
-    writeRaw(res, 413, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'request too large' } });
-    return;
-  }
-  let body: unknown;
-  try {
-    body = JSON.parse(raw);
-  } catch {
-    writeRaw(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } });
-    return;
-  }
-  const answer = await handleBrowserMcpBody(sessionId, body, browserMcpDepsFor(localPort(req)));
-  writeRaw(res, answer.status, answer.body);
 }
 
 /** The Browser pane relay as the MCP tools see it — shared with Verse's one MCP server (verse-mcp-api.ts). */
@@ -245,9 +194,8 @@ function parseResult(body: Record<string, unknown>): VerseBrowserCommandResult |
 }
 
 export const handleBrowserApi: ApiModule = async (_ctx, req, res, path, method) => {
-  const mcp = VERSE_BROWSER_MCP_PATH_RE.exec(path);
-  if (mcp) {
-    await handleMcp(req, res, mcp[1]!, method);
+  if (VERSE_BROWSER_MCP_PATH_RE.test(path)) {
+    writeRaw(res, 410, { error: 'This Browser MCP grant endpoint has retired. Start a new turn to use Verse agent tools.' });
     return true;
   }
 

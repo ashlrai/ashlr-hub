@@ -7,8 +7,8 @@
  *     webview, or an <iframe> for loopback pages in a plain browser tab);
  *   - the sidecar (browser-api.ts + browser-bridge.ts), which gates what an
  *     agent may ask for and relays it to the pane;
- *   - a chat seat, which reaches the sidecar over MCP (browser-mcp.ts) with a
- *     per-chat grant the operator switched on in the pane.
+ *   - a chat seat, which reaches the sidecar through unified agent-tools MCP
+ *     with a bearer token valid for its current turn.
  *
  * The pane is the only executor on purpose: an agent can only ever look at
  * the browser the operator is looking at, in the chat the operator granted.
@@ -32,16 +32,12 @@ export const VERSE_BROWSER_COMMANDS_PATH = `${VERSE_BROWSER_PATH}/commands`;
 export const VERSE_BROWSER_DISPATCH_PATH = `${VERSE_BROWSER_PATH}/dispatch`;
 /** POST VerseBrowserCommandResult → { ok: true } */
 export const VERSE_BROWSER_RESULT_PATH = `${VERSE_BROWSER_PATH}/result`;
-/** POST (MCP streamable HTTP, stateless) — authenticated by the grant in the path, not the mutation token. */
+/** Retired Browser MCP path. Only a 410 response is served here. */
 export const VERSE_BROWSER_MCP_PATH = `${VERSE_BROWSER_PATH}/mcp`;
 
 /**
- * The MCP path's exact shape: a 43-character base64url grant (32 random
- * bytes), the same form as a preview frame ticket. server.ts lets a GET on
- * this shape past the read boundary (so the module can answer 405 — an MCP
- * client probes GET for an SSE stream, and a 401 there would send it looking
- * for OAuth), and verse-api.ts lets a POST past the mutation gate: the module
- * authenticates the grant itself (browser-bridge.ts `sessionForGrant`).
+ * The old MCP path's exact shape. It is exempt from the read and mutation
+ * gates only to return 410; possession of a grant never admits a command.
  */
 export const VERSE_BROWSER_MCP_PATH_RE = /^\/api\/verse\/browser\/mcp\/([A-Za-z0-9_-]{43})$/;
 
@@ -49,7 +45,7 @@ export function isBrowserMcpPath(path: string): boolean {
   return VERSE_BROWSER_MCP_PATH_RE.test(path);
 }
 
-/** The MCP server name a seat sees (`mcp__ashlr-browser__browser_navigate`). */
+/** Retired MCP server name, retained for migration tests. */
 export const BROWSER_MCP_SERVER_NAME = 'ashlr-browser';
 
 /**

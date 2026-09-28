@@ -3,7 +3,7 @@
  * pane (3.15): per-chat agent grants, the per-chat origin allow-list, and the
  * command relay between a chat seat and the pane.
  *
- * WHO EXECUTES. Never the sidecar. A seat's tool call (browser-mcp.ts) becomes
+ * WHO EXECUTES. Never the sidecar. A unified bearer MCP tool call becomes
  * a command queued here; the operator's Browser pane — the one open on that
  * chat — long-polls for it, performs it in the browser the operator is
  * looking at (native webview in the desktop app, <iframe> in a browser tab)
@@ -14,12 +14,9 @@
  * WHAT IS HELD. Memory only, on purpose: a restart revokes every grant and
  * every allowed origin. The operator switches access back on from the pane.
  *
- * GRANTS. Switching agent access on mints a 32-byte random grant for the
- * chat. It is the whole authentication of the MCP endpoint
- * (`/api/verse/browser/mcp/<grant>`) and reaches exactly one place: the
- * `--mcp-config` of that chat's next Claude turn (adapters/claude.ts). It
- * never appears in a response to the page. Switching access off (or a
- * restart) makes it worthless.
+ * GRANTS. Switching pane access on still mints a memory-only grant for the
+ * relay state. Its old MCP URL is retired (410); seats now use a separate
+ * bearer token for each turn. The grant never appears in a page response.
  *
  * ACTING (3.15 P2/P3). Also held here, memory only, per chat: the two extra
  * scopes (`browser_act` comes on with access and can be switched off alone;
@@ -78,6 +75,8 @@ export type BrowserOutcome =
 
 interface PendingCommand {
   command: VerseBrowserAgentCommand;
+  /** Full origin grant when queued; a revocation invalidates even narrowed commands. */
+  originSnapshot: string[];
   settle: (outcome: BrowserOutcome) => void;
   timer: ReturnType<typeof setTimeout> | null;
   /** How long the pane has to answer once it claimed the command. */
@@ -285,7 +284,7 @@ export function revokeBrowserAllowance(sessionId: string, key: string): VerseBro
 
 /**
  * A new turn for this chat is launching: forget what the last one read. The
- * seat adapter calls this next to `browserSeatLaunch`, so the taint is
+ * unified seat adapter calls this when it mints a turn, so the taint is
  * exactly "this turn's".
  */
 export function beginBrowserTurn(sessionId: string): void {
@@ -373,11 +372,8 @@ export function sessionForBrowserGrant(grant: string): string | null {
 }
 
 /**
- * What a Claude turn for this chat adds to its launch, or null when agent
- * access is off (then the launch is byte-identical to one without a browser).
- * `mcpConfig` replaces the empty `{"mcpServers":{}}` behind
- * `--strict-mcp-config`; `allowedTool` pre-approves the server's tools, which
- * `-p` could otherwise not ask about.
+ * Old launch format retained for migration tests only. Production seats use
+ * the unified bearer MCP; the URL returned here answers 410 if called.
  */
 export function browserSeatLaunch(sessionId: string): { mcpConfig: string; allowedTool: string } | null {
   const state = chats.get(sessionId);
@@ -427,7 +423,7 @@ export function runBrowserCommand(
   sessionId: string,
   op: VerseBrowserAgentOp,
   args: { url?: string; limit?: number; args?: Record<string, unknown> } = {},
-  timeouts: { claimMs?: number; resultMs?: number; signal?: AbortSignal; authorize?: () => boolean } = {},
+  timeouts: { claimMs?: number; resultMs?: number; signal?: AbortSignal; authorize?: () => boolean; allowedOrigins?: readonly string[] } = {},
 ): Promise<BrowserOutcome> {
   const state = stateFor(sessionId);
   if (timeouts.signal?.aborted || timeouts.authorize?.() === false) return Promise.resolve({ ok: false, code: 'access-off', message: 'This browser turn ended before the command could run.' });
@@ -447,13 +443,16 @@ export function runBrowserCommand(
     ...(args.url !== undefined ? { url: args.url } : {}),
     ...(args.limit !== undefined ? { limit: args.limit } : {}),
     ...(args.args !== undefined ? { args: args.args } : {}),
-    allowedOrigins: [...state.allowedOrigins],
+    allowedOrigins: timeouts.allowedOrigins === undefined
+      ? [...state.allowedOrigins]
+      : state.allowedOrigins.filter((origin) => timeouts.allowedOrigins!.includes(origin)),
     createdAt: new Date(clock()).toISOString(),
   };
   return new Promise<BrowserOutcome>((resolve) => {
     let settled = false;
     const pending: PendingCommand = {
       command,
+      originSnapshot: [...state.allowedOrigins],
       timer: null,
       resultMs,
       signal: timeouts.signal,
@@ -526,9 +525,9 @@ export function canDispatchBrowserCommand(sessionId: string, id: string): boolea
   const state = chats.get(sessionId);
   const pending = state?.inflight.get(id);
   if (!state?.grant || !pending || pending.signal?.aborted || pending.authorize?.() === false) return false;
-  // The pane received allowedOrigins when it claimed this command. A later
-  // origin revocation must invalidate that snapshot before any page effect.
-  if (JSON.stringify(pending.command.allowedOrigins) !== JSON.stringify(state.allowedOrigins)) return false;
+  // An origin revocation must invalidate the original grant snapshot before
+  // any page effect, even when the command was narrowed to loopback only.
+  if (JSON.stringify(pending.originSnapshot) !== JSON.stringify(state.allowedOrigins)) return false;
   if (pending.command.op === 'act' && !state.actAccess) return false;
   if (pending.command.op === 'evaluate' && !state.scriptAccess) return false;
   return true;

@@ -34,6 +34,10 @@ function scopedDeps(ctx: VerseMcpToolContext, scope: VerseMcpTool['scope']): Bro
         ...timeouts,
         signal: ctx.signal,
         authorize: () => authorized(sid),
+        // The pane must see the action's narrower reach too. In particular,
+        // selecting/closing a remote tab cannot use an origin granted only
+        // for reading in act-localhost mode.
+        ...(scope !== 'browser' && browserActReach(sid) === 'localhost' ? { allowedOrigins: [] } : {}),
       });
       return authorized(sid) ? result : { ok: false, code: 'access-off', message: 'This browser turn or scope has ended.' };
     },

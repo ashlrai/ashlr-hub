@@ -52,9 +52,8 @@
  *   /api/verse/{overnight,fleet/live}*  → overnight-api.ts, fleet-live-api.ts (B-U5)
  *   /api/verse/leader*    → leader-api.ts (B-U8)   /api/verse/learning* → learning-api.ts (B-U9)
  *   /api/verse/wiki*      → wiki-api.ts (3.15)     /api/verse/browser*  → browser-api.ts (3.15)
- *  (`/api/verse/browser/mcp/<grant>` and `/api/verse/agent-tools/mcp` are the
- *  POSTs that skip the token gate: a chat seat calls them, authenticated by
- *  its per-chat grant / per-turn bearer token.)
+ *  (`/api/verse/agent-tools/mcp` is the live seat POST authenticated by its
+ *  per-turn bearer token; the retired browser grant path only answers 410.)
  *   /api/verse/agent-tools* → verse-mcp-api.ts (3.15 agent tools)
  *   /api/verse/multimodel* → multimodel-api.ts (3.16: Auto seat, compare, escalation, meter)
  *  Routed by PREFIX to exactly one family (dispatchWorkbenchModules), after
@@ -542,13 +541,9 @@ async function dispatchWorkbenchModules(
       sendJson(res, 404, { error: `not found: ${method} ${path}` });
       return true;
     }
-    // ONE exception to the token gate (3.15): the Browser pane's per-chat MCP
-    // endpoint, `/api/verse/browser/mcp/<grant>`. Its caller is a chat seat
-    // (a CLI), which never holds the operator's mutation token; the route
-    // authenticates the 32-byte grant in its path itself and refuses any
-    // request that carries a browser Origin (browser-api.ts handleMcp).
-    // Keyed on the exact path shape, so no other browser route is exempt.
-    // And (3.15 agent tools) Verse's one MCP server, exactly
+    // The retired Browser grant path is exempt only so it can answer 410 to
+    // old clients. It never reads a grant, parses a body or queues a command.
+    // Verse's one live MCP server, exactly
     // `/api/verse/agent-tools/mcp`: a seat's endpoint, authenticated by the
     // turn's bearer token (verse-mcp-api.ts handleEndpoint), Origin refused.
     // And ONE more of the same kind (3.15): a terminal agent tab's status

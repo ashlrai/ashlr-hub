@@ -220,7 +220,7 @@ describe('the agent runner re-applies the gate in the pane', () => {
       console: async () => { calls.push('console'); return { url: 'http://localhost:5173/', console: [], network: [] }; },
       query: async (what) => { calls.push(`query ${JSON.stringify(what)}`); return { url: 'http://localhost:5173/', ok: true }; },
       history: async (direction) => { calls.push(`history ${direction}`); return { url: 'http://localhost:5173/', title: 'App', loading: false }; },
-      tabs: () => [{ index: 0, url: 'http://localhost:5173/', title: 'App', active: true }, { index: 1, url: 'https://mail.example/', title: 'Inbox', active: false }],
+      tabs: () => [{ id: 't1', index: 0, url: 'http://localhost:5173/', title: 'App', active: true }, { id: 't2', index: 1, url: 'https://mail.example/', title: 'Inbox', active: false }],
       openTab: async (url) => { calls.push(`open ${url}`); },
       selectTab: (index) => { calls.push(`select ${index}`); return true; },
       closeTab: (index) => { calls.push(`close ${index}`); return true; },
@@ -289,7 +289,7 @@ describe('the agent runner — acting (closed shapes, pause, confirm)', () => {
       console: async () => ({ url: 'http://localhost:5173/', console: [], network: [] }),
       query: async (what) => { calls.push(JSON.stringify(what)); return { url: 'http://localhost:5173/', kind: 'click', native: true }; },
       history: async () => ({ url: 'https://mail.example/inbox', title: 'Inbox', loading: false }),
-      tabs: () => [{ index: 0, url: 'http://localhost:5173/', title: 'App', active: true }, { index: 1, url: 'https://mail.example/', title: 'Inbox', active: false }],
+      tabs: () => [{ id: 't1', index: 0, url: 'http://localhost:5173/', title: 'App', active: true }, { id: 't2', index: 1, url: 'https://mail.example/', title: 'Inbox', active: false }],
       openTab: async (url) => { calls.push(`open ${url}`); },
       selectTab: (index) => { calls.push(`select ${index}`); return true; },
       closeTab: (index) => { calls.push(`close ${index}`); return true; },
@@ -403,17 +403,33 @@ describe('the agent runner — acting (closed shapes, pause, confirm)', () => {
     expect((await executeAgentCommand(cmd('act', { kind: 'key', key: 'a' }), frame, VERSE)).error).toMatch(/desktop app/);
   });
 
-  it('tabs: never names an unobservable tab and never closes one; history hides an unobservable landing', async () => {
+  it('tabs cannot select or close a page outside the command reach; agent history cannot bypass origin preflight', async () => {
     const exec = executor();
     const list = await executeAgentCommand(cmd('tabs', { action: 'list' }), exec, VERSE);
     expect(JSON.stringify(list)).not.toContain('mail.example');
     expect(JSON.stringify(list)).not.toContain('Inbox');
     expect((await executeAgentCommand(cmd('tabs', { action: 'close', index: 1 }), exec, VERSE)).ok).toBe(false);
     expect((await executeAgentCommand(cmd('tabs', { action: 'new', url: 'https://example.com/' }), exec, VERSE)).ok).toBe(false);
-    expect((await executeAgentCommand(cmd('tabs', { action: 'select', index: 1 }), exec, VERSE)).ok).toBe(true);
+    expect((await executeAgentCommand(cmd('tabs', { action: 'select', index: 1 }), exec, VERSE)).ok).toBe(false);
     const back = await executeAgentCommand(cmd('history', { direction: 'back' }), exec, VERSE);
-    expect(back).toMatchObject({ ok: true, data: { hidden: true } });
+    expect(back).toMatchObject({ ok: false });
+    expect(back.error).toMatch(/destination can be verified/);
     expect(JSON.stringify(back)).not.toContain('mail.example');
+    expect(exec.calls).toEqual([]);
+    expect((await executeAgentCommand({ ...cmd('tabs', { action: 'select', index: 1 }), allowedOrigins: ['https://mail.example'] }, exec, VERSE, async () => true)).ok).toBe(true);
+    expect(exec.calls).toEqual(['select 1']);
+  });
+
+  it('rechecks the target tab after the async dispatch fence', async () => {
+    let targetUrl = 'http://localhost:3000/';
+    const exec = executor({ tabs: () => [{ id: 't1', index: 0, url: targetUrl, title: null, active: false }] });
+    const result = await executeAgentCommand(cmd('tabs', { action: 'select', index: 0 }), exec, VERSE, async () => {
+      targetUrl = 'https://mail.example/inbox';
+      return true;
+    });
+    expect(result).toMatchObject({ ok: false });
+    expect(result.error).toMatch(/tab changed/);
+    expect(exec.calls).toEqual([]);
   });
 
   it('screenshot passes a validated clip and keeps the scale', async () => {

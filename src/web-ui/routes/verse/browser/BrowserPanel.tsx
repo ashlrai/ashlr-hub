@@ -287,6 +287,8 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
     }
     return restoreTabs(raw);
   });
+  const tabsStateRef = useRef(tabsState);
+  tabsStateRef.current = tabsState;
   const tab = selectActiveTab(tabsState);
 
   const [device, setDevice] = useState<DevicePreset>('fill');
@@ -826,19 +828,19 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
       await new Promise((resolve) => setTimeout(resolve, 1_000));
       return { url: null, title: null, loading: false };
     },
-    tabs: () => tabsState.tabs.map((t, index) => ({ index, url: t.url, title: t.title, active: t.id === tabsState.activeId })),
+    tabs: () => tabsStateRef.current.tabs.map((t, index) => ({ id: t.id, index, url: t.url, title: t.title, active: t.id === tabsStateRef.current.activeId })),
     openTab: async (url) => {
       dispatch({ type: 'new-tab', url });
       await new Promise((resolve) => setTimeout(resolve, url ? 1_500 : 0));
     },
     selectTab: (index) => {
-      const target = tabsState.tabs[index];
+      const target = tabsStateRef.current.tabs[index];
       if (!target) return false;
       dispatch({ type: 'activate', id: target.id });
       return true;
     },
     closeTab: (index) => {
-      const target = tabsState.tabs[index];
+      const target = tabsStateRef.current.tabs[index];
       if (!target) return false;
       closeTab(target.id);
       return true;

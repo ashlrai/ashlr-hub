@@ -592,25 +592,15 @@ function historyTool(direction: 'back' | 'forward'): VerseMcpTool {
   return {
     name: `browser_${direction}`,
     scope: 'browser_act',
-    description: `Go ${direction} in the Browser pane's active tab history and wait for the page to load.`,
+    description: `History ${direction} is unavailable to agents until the native browser can verify the destination before navigation. Open a known URL with browser_navigate instead.`,
     annotations: { title: direction === 'back' ? 'Back' : 'Forward', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     inputSchema: schema({}),
     async handler(_args, ctx) {
-      const page = await currentPage(ctx);
-      if (isResult(page)) return page;
-      const gate = await decide(ctx, `browser_${direction}`, classify(ctx, { kind: 'history', pageUrl: page.url, loopback: page.loopback }), {
-        action: `Go ${direction}`, target: null, origin: page.origin,
-      });
-      if (gate) return gate;
-      const outcome = await ctx.deps.run(ctx.sessionId, 'history', { args: { direction } });
-      if (!outcome.ok) return failure(outcome);
-      const data = isRecord(outcome.data) ? outcome.data : {};
-      if (data['hidden'] === true) return ok(`Went ${direction}; the tab now shows a page this chat may not observe.`);
-      const seen = outcome.url ? observe(ctx, outcome.url) : null;
-      if (!seen) return ok(`Went ${direction}.`);
-      if (!seen.ok) return ok(`Went ${direction}; the tab now shows a page this chat may not observe.`);
-      noteRead(ctx, seen);
-      return ok(`Went ${direction} to ${shownUrl(seen.url)}.${data['loading'] === true ? ' (still loading)' : ''}`);
+      const denied = needScope(ctx, 'browser_act');
+      if (denied) return denied;
+      // Native WebView history has no trustworthy destination preview. A
+      // post-navigation origin check would be too late to enforce reach.
+      return toolError(`Browser ${direction} is unavailable to agents because the destination cannot be verified before navigation. Open a known URL with browser_navigate instead.`);
     },
   };
 }

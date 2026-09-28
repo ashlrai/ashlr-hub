@@ -1,14 +1,10 @@
 /**
- * core/verse/browser-mcp.ts — the Browser pane's LEGACY MCP endpoint (3.15),
- * `POST /api/verse/browser/mcp/<grant>`, kept for one release after the
- * agent-tools release moved every seat to Verse's one MCP server
- * (verse-mcp.ts at `POST /api/verse/agent-tools/mcp`, bearer per turn).
+ * core/verse/browser-mcp.ts — old Browser MCP protocol adapter retained for
+ * migration tests. The grant path now answers 410 in browser-api.ts; live
+ * seats use Verse's unified bearer-per-turn MCP server.
  *
- * It serves exactly the five observe tools (verse-mcp-browser.ts, scope
- * `browser`) through the same JSON-RPC core, authenticated by the chat's
- * browser grant in the path (browser-bridge.ts), under its old server name
- * and instructions. Nothing new is added here: new tools and scopes are only
- * reachable on the bearer endpoint.
+ * This module still describes the original five observe tools for tests and
+ * compatibility analysis, but no HTTP route calls handleBrowserMcpBody.
  */
 import type { BrowserOutcome } from './browser-bridge.js';
 import type { VerseBrowserAgentOp } from './browser-types.js';
@@ -36,7 +32,7 @@ interface ToolSpec {
 export const BROWSER_MCP_TOOLS: readonly ToolSpec[] = browserTools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
 
 export interface BrowserMcpDeps {
-  run(sessionId: string, op: VerseBrowserAgentOp, args: { url?: string; limit?: number; args?: Record<string, unknown> }, timeouts?: { resultMs?: number; signal?: AbortSignal; authorize?: () => boolean }): Promise<BrowserOutcome>;
+  run(sessionId: string, op: VerseBrowserAgentOp, args: { url?: string; limit?: number; args?: Record<string, unknown> }, timeouts?: { resultMs?: number; signal?: AbortSignal; authorize?: () => boolean; allowedOrigins?: readonly string[] }): Promise<BrowserOutcome>;
   /** The Verse server's own port (never openable), or null when unknown. */
   versePort: number | null;
   allowedOrigins(sessionId: string): string[];

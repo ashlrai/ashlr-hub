@@ -73,6 +73,28 @@ describe('the unified bearer-per-turn browser adapter', () => {
     expect(await claimBrowserCommands(SESSION, { waitMs: 0 })).toEqual([]);
   });
 
+  it('narrows tab-switch authority to loopback in act-localhost, even with a remote read grant', async () => {
+    setAgentToolsGrant(SESSION, { browser: 'act-localhost' }, SIDECAR);
+    setBrowserOriginAllowed(SESSION, 'https://example.com', true);
+    const ctx = turnContext();
+    await claimBrowserCommands(SESSION, { waitMs: 0 });
+    const pending = browserTool('browser_tabs').handler({ action: 'select', index: 1 }, ctx);
+    const [command] = await claimBrowserCommands(SESSION, { waitMs: 0 });
+    expect(command).toMatchObject({ op: 'tabs', args: { action: 'select', index: 1 }, allowedOrigins: [] });
+    expect(canDispatchBrowserCommand(SESSION, command!.id)).toBe(true);
+    expect(completeBrowserCommand(SESSION, { id: command!.id, ok: false, error: 'Target is outside this action\'s allowed origins.' })).toBe(true);
+    expect((await pending).isError).toBe(true);
+  });
+
+  it('does not queue agent history when its destination cannot be preflighted', async () => {
+    setAgentToolsGrant(SESSION, { browser: 'act-allowed' }, SIDECAR);
+    const ctx = turnContext();
+    const result = await browserTool('browser_back').handler({}, ctx);
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toMatch(/known URL/);
+    expect(await claimBrowserCommands(SESSION, { waitMs: 0 })).toEqual([]);
+  });
+
   it('revoking the turn during a confirmation cannot add a chat allowance or dispatch the tab mutation', async () => {
     setAgentToolsGrant(SESSION, { browser: 'act-localhost' }, SIDECAR);
     const ctx = turnContext();
