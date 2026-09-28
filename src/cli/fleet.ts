@@ -459,6 +459,32 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  // A signed stable-window witness is useful feedback, but the current
+  // population has no complete denominator or policy release. Keep unknown
+  // source reads distinct from a verified zero and never call this credit.
+  lines.push('Post-merge feedback (observation only):');
+  const postMerge = s.postMergeSource;
+  const postMergeCohort = s.postMergeCohort;
+  if (!postMerge) {
+    lines.push('  source:    unknown (legacy snapshot)');
+  } else if (postMerge.sourceState !== 'healthy' || !postMerge.complete || !postMergeCohort) {
+    lines.push(`  source:    ${postMerge.sourceState} (incomplete)`);
+    if (postMerge.stopReasons.length > 0) {
+      lines.push(`  stopped:   ${postMerge.stopReasons.join(', ')}`);
+    }
+    lines.push('  outcomes:  unknown');
+  } else {
+    lines.push('  source:    healthy (complete signed ledger read)');
+    lines.push(
+      `  observed:  ${postMergeCohort.stability.releasedWitnesses} stable-window witness(es) ` +
+        `across ${postMergeCohort.stability.distinctRepoDigests} repo(s); ` +
+        `${postMergeCohort.adverseObservations} adverse observation(s)`,
+    );
+    lines.push(`  latest:    ${postMergeCohort.stability.latestCompletedAt ?? 'none'}`);
+  }
+  lines.push('  learning:  accepted-work credit unavailable; denominator and policy release incomplete');
+  lines.push('');
+
   const judgeTraceSource = s.judgeTraceSource;
   lines.push('Judge learning source:');
   if (!judgeTraceSource) {

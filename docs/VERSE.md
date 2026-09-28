@@ -829,6 +829,13 @@ when the last one is over 10 minutes old, and **Sweep now** runs one
 immediately. Everything is stored under `~/.ashlr/learn/` (0700/0600), scrubbed
 of secrets, home paths and emails.
 
+`ashlr fleet status` also shows signed post-merge stable-window witnesses and
+adverse observations when both evidence stores read completely. Missing or
+degraded evidence is shown as unknown, not zero. These are observations of
+merged work, not released accepted-work credit: the cohort denominator and
+independent verification binding needed to let positive outcomes steer routing
+or populate reusable skill cards remain incomplete.
+
 ## Repo wiki and Ask (3.15)
 
 **Gear ▸ Repo wiki**, ⌘K "Open repo wiki…" (⇥ picks a repo) or `ashlr wiki`

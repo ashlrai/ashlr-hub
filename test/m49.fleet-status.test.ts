@@ -8951,6 +8951,43 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     rowsScanned: 1, invalidRows: 0, unreadableFiles: 0,
   };
 
+  it('shows signed stable-window feedback without presenting it as learning credit', () => {
+    const base = {
+      generatedAt: '2026-09-28T00:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 2 },
+      merges: { recent: 0 },
+      killed: false,
+    };
+    const source: NonNullable<FleetStatus['postMergeSource']> = {
+      sourceState: 'healthy', sourcePresent: true, complete: true,
+      stopReasons: [], filesRead: 2, bytesRead: 512, rowsScanned: 3,
+      invalidRows: 0, unreadableFiles: 0,
+    };
+    const cohort: NonNullable<FleetStatus['postMergeCohort']> = {
+      policyEligible: false, denominatorComplete: false, adverseObservations: 1,
+      stability: {
+        completeCohorts: 2, releasedWitnesses: 2, distinctRepoDigests: 1,
+        latestCompletedAt: '2026-09-27T12:00:00.000Z',
+      },
+    };
+    const healthy = formatFleetStatus({ ...base, postMergeSource: source, postMergeCohort: cohort });
+    expect(healthy).toContain('Post-merge feedback (observation only):');
+    expect(healthy).toContain('2 stable-window witness(es) across 1 repo(s); 1 adverse observation(s)');
+    expect(healthy).toContain('accepted-work credit unavailable; denominator and policy release incomplete');
+
+    const degraded = formatFleetStatus({
+      ...base,
+      postMergeSource: { ...source, sourceState: 'degraded', complete: false, stopReasons: ['invalid-row'] },
+      postMergeCohort: cohort,
+    });
+    expect(degraded).toContain('outcomes:  unknown');
+    expect(degraded).toContain('stopped:   invalid-row');
+    expect(degraded).not.toContain('2 stable-window witness(es)');
+  });
+
   it('renders compact build identity and omits it for legacy snapshots', () => {
     const base = {
       generatedAt: '2026-07-11T00:00:00.000Z',
