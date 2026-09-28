@@ -46,15 +46,18 @@ console.log(JSON.stringify({passed:Number.isInteger(value)&&value>0,score:value,
     const manifest: UniverseManifest = { schemaVersion: 1, id: `universe-${id}`, name: `Local delivery ${id}`,
       objective: 'Deliver a strictly improved integer after fixed independent evaluation', seed: { repo, revision },
       metric: { name: 'value', direction: 'maximize', minImprovement: 0 },
-      budget: { maxTrials: 1, maxParallel: 1, maxDurationMs: 15_000, trialTimeoutMs: 5_000 },
-      evaluation: { command: [process.execPath, 'evaluate.mjs'], timeoutMs: 3_000 },
+      // This fixture exercises real Git copies and child processes. Give those
+      // phases room on a loaded release Mac; branch ownership is the contract
+      // under test, not whether a trial finishes in five wall-clock seconds.
+      budget: { maxTrials: 1, maxParallel: 1, maxDurationMs: 45_000, trialTimeoutMs: 15_000 },
+      evaluation: { command: [process.execPath, 'evaluate.mjs'], timeoutMs: 10_000 },
       variants: [{ id: 'increment', niche: 'value', hypothesis: 'Advance the measured integer', command: [process.execPath, 'worker.mjs'] }] };
     initUniverse(manifest, { root });
     initUniverseCampaign({ schemaVersion: 1, id: `campaign-${id}`, universeId: manifest.id, feedback: false,
-      budget: { maxGenerations: id === 'a' ? firstGenerations : 2, maxDurationMs: 60_000,
+      budget: { maxGenerations: id === 'a' ? firstGenerations : 2, maxDurationMs: 90_000,
         maxModelRequests: 0, maxStagnantGenerations: 2, maxReportedTokens: null } }, { root });
   }
-  const definition: UniversePortfolioDefinition = { schemaVersion: 1, id: 'delivery-fixture', maxParallel: 2, maxDurationMs: 60_000,
+  const definition: UniversePortfolioDefinition = { schemaVersion: 1, id: 'delivery-fixture', maxParallel: 2, maxDurationMs: 120_000,
     tasks: [{ campaignId: 'campaign-a', dependsOn: [] }, { campaignId: 'campaign-b', dependsOn: ['campaign-a'] }] };
   const deliveryPlan = { schemaVersion: 1 as const, deliveries: ['a', 'b'].map((id) => ({
     campaignId: `campaign-${id}`, branch: `codex/delivered-${id}`, baseCommit: repositories.get(id)!.revision,
@@ -98,7 +101,7 @@ describe.runIf(process.platform === 'darwin')('portfolio local delivery acceptan
   // Two complete local deliveries and their replay use real Git subprocesses.
   // On a loaded Mac this path completes around 34s; the old 30s deadline
   // expired even though the same case passed when given time to finish.
-  }, 60_000);
+  }, 120_000);
 
   it('delivers an already completed campaign without rerunning it before starting its dependant', async () => {
     const f = fixture(); const before = await runUniverseCampaign('campaign-a', f);
@@ -109,7 +112,7 @@ describe.runIf(process.platform === 'darwin')('portfolio local delivery acceptan
     expect(readUniverseCampaign('campaign-a', f)).toEqual(before);
     expect(readUniverseDeliveries('universe-a', f).deliveries).toMatchObject([{ status: 'delivered' }]);
     expect(readUniverseCampaign('campaign-b', f).state).toBe('completed');
-  }, 30_000);
+  }, 90_000);
 
   it('withholds an admission-only artifact and never starts its dependant', async () => {
     const f = fixture(1);
@@ -128,7 +131,7 @@ describe.runIf(process.platform === 'darwin')('portfolio local delivery acceptan
     });
     expect(readUniverseCampaign('campaign-a', f)).toEqual(before);
     expect(readUniverseCampaign('campaign-b', f).progress.attempts).toBe(0);
-  }, 30_000);
+  }, 90_000);
 
   it('keeps legacy completion-only dependencies and creates no branches when no delivery plan is supplied', async () => {
     const f = fixture(1);
@@ -139,7 +142,7 @@ describe.runIf(process.platform === 'darwin')('portfolio local delivery acceptan
       expect(f.repositories.get(id)!.git('branch', '--list', `codex/delivered-${id}`)).toBe('');
       expect(readUniverseDeliveries(`universe-${id}`, f).deliveries).toEqual([]);
     }
-  }, 30_000);
+  }, 90_000);
 
   it('preserves a conflicting owner branch and keeps descendants blocked when failed delivery is retried', async () => {
     const f = fixture(); const repository = f.repositories.get('a')!;
@@ -161,5 +164,5 @@ describe.runIf(process.platform === 'darwin')('portfolio local delivery acceptan
     expect(readUniverseCampaign('campaign-b', f).progress.attempts).toBe(0);
     expect(repository.git('rev-parse', 'refs/heads/codex/delivered-a')).toBe(repository.revision);
     expect(repository.git('status', '--porcelain')).toBe('');
-  }, 30_000);
+  }, 90_000);
 });
