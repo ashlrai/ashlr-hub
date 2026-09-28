@@ -27,7 +27,7 @@ import { APP_NAME, APP_VERSION } from '../../sections/app-version.js';
 import type { Reachability } from '../connectivity.js';
 import { canShowActions, useMobile } from '../mobile-context.js';
 import { showMobileToast } from '../mobile-toast.js';
-import { enableRemotePush } from '../pwa.js';
+import { enableRemotePush, supportsIphoneHomeScreenPush } from '../pwa.js';
 import { BottomSheet } from '../sheet.js';
 import { Button, Screen } from '../ui.js';
 import { Badge, Row, Section, ui, type Tone } from '../ui-parts.js';
@@ -82,13 +82,14 @@ export function MoreScreen() {
   const [pushMessage, setPushMessage] = useState<string | null>(null);
   const remote = isRemoteMobileMode();
   const pushAvailable = remote && currentRemoteSession()?.capabilities.push === true;
+  const pushEligible = pushAvailable && supportsIphoneHomeScreenPush();
   useEffect(() => {
-    if (!pushAvailable) return;
+    if (!pushEligible) return;
     let live = true;
     void remotePushPublicKey().then((key) => { if (live) setPushKey(key); })
       .catch(() => { if (live) setPushMessage('The gateway notification key is unavailable.'); });
     return () => { live = false; };
-  }, [pushAvailable]);
+  }, [pushEligible]);
   const canAct = canShowActions(permissions);
 
   const actWord = permissions.act === 'unavailable' ? 'Not on this device' : remote ? 'Passkey required' : permissions.act === 'unlocked' ? 'Unlocked' : 'Locked';
@@ -142,7 +143,7 @@ export function MoreScreen() {
   };
 
   const enablePush = async () => {
-    if (!pushAvailable || !pushKey || pushBusy) return;
+    if (!pushEligible || !pushKey || pushBusy) return;
     setPushBusy(true);
     setPushMessage(null);
     try {
@@ -180,7 +181,8 @@ export function MoreScreen() {
 
       {pushAvailable ? <Section title="Notifications" flat>
         <p className={ui.card}>Verse can send a generic alert when something needs you or a run completes. The alert contains no agent or repository details.</p>
-        <Button variant="tinted" block disabled={pushBusy || !pushKey} onClick={() => void enablePush()}>{pushBusy ? 'Enabling…' : pushKey ? 'Enable notifications' : 'Preparing notifications…'}</Button>
+        {pushEligible ? <Button variant="tinted" block disabled={pushBusy || !pushKey} onClick={() => void enablePush()}>{pushBusy ? 'Enabling…' : pushKey ? 'Enable notifications' : 'Preparing notifications…'}</Button>
+          : <p className={ui.card}>Notifications require Verse installed on an iPhone Home Screen with Web Push support. You can still use Verse in this browser.</p>}
         {pushMessage ? <p role="status">{pushMessage}</p> : null}
       </Section> : null}
 

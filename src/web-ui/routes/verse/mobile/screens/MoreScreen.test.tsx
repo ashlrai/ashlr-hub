@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { VERSE_LAYOUT_STORAGE_KEY } from '../../../../app/console-mode.js';
 import { clearMutationToken, getMutationToken, hasMutationHold, setMutationToken } from '../../../../data/auth-store.js';
 import { evictAll } from '../../../../data/cache.js';
+import { clearRemoteSessionForTest, probeRemoteSession } from '../../../../data/remote-session.js';
 import { getTheme, setTheme } from '../../../../data/theme-store.js';
 import { APP_VERSION } from '../../sections/app-version.js';
 import { resetGuard } from '../../shell/guard-store.js';
@@ -45,6 +46,9 @@ afterEach(() => {
   }
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  clearRemoteSessionForTest();
+  document.head.innerHTML = '';
+  Object.defineProperty(window.navigator, 'standalone', { configurable: true, value: undefined });
 });
 
 describe('MoreScreen — this device', () => {
@@ -83,6 +87,18 @@ describe('MoreScreen — this device', () => {
 });
 
 describe('MoreScreen — rows and settings', () => {
+  it('explains iPhone Home Screen push when the gateway enables it in an ordinary browser', async () => {
+    document.head.innerHTML = '<meta name="ashlr-remote-gateway" content="v1">';
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      authenticated: true, deviceId: 'device-1', label: 'My phone', scopes: { read: true, act: true },
+      csrfToken: 'c'.repeat(40), expiresAt: Date.now() + 60_000,
+      capabilities: { pairing: true, writes: true, push: true },
+    })));
+    await probeRemoteSession();
+    mount();
+    expect(screen.getByText(/Notifications require Verse installed on an iPhone Home Screen/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Enable notifications' })).not.toBeInTheDocument();
+  });
   it('goes to Fleet, New agent and Needs you', () => {
     const { context } = mount();
     fireEvent.click(screen.getByRole('button', { name: /^Fleet/ }));

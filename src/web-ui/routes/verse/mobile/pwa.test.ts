@@ -7,7 +7,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { installMobileHead, isStandalone, registerMobileServiceWorker, THEME_COLORS, VERSE_MOBILE_MANIFEST_HREF, VERSE_MOBILE_SW_SCOPE, VERSE_MOBILE_SW_URL } from './pwa.js';
+import { installMobileHead, isStandalone, registerMobileServiceWorker, supportsIphoneHomeScreenPush, THEME_COLORS, VERSE_MOBILE_MANIFEST_HREF, VERSE_MOBILE_SW_SCOPE, VERSE_MOBILE_SW_URL } from './pwa.js';
 
 const PUBLIC = resolve(process.cwd(), 'src/web-ui/public/verse-m');
 
@@ -64,6 +64,14 @@ describe('isStandalone', () => {
     expect(isStandalone({ navigator: {}, matchMedia: () => ({ matches: true }) } as unknown as Window)).toBe(true);
     expect(isStandalone({ navigator: {}, matchMedia: () => ({ matches: false }) } as unknown as Window)).toBe(false);
   });
+});
+
+it('offers gateway push only in an installed iPhone app with browser push support', () => {
+  const browser = { PushManager: class {}, Notification: class {} } as unknown as Window;
+  expect(supportsIphoneHomeScreenPush({ standalone: true, serviceWorker: {} } as unknown as Navigator, browser)).toBe(true);
+  expect(supportsIphoneHomeScreenPush({ standalone: false, serviceWorker: {} } as unknown as Navigator, browser)).toBe(false);
+  expect(supportsIphoneHomeScreenPush({ serviceWorker: {} } as unknown as Navigator, browser)).toBe(false);
+  expect(supportsIphoneHomeScreenPush({ standalone: true, serviceWorker: {} } as unknown as Navigator, {} as Window)).toBe(false);
 });
 
 /** Width and height from a PNG's IHDR chunk. */
