@@ -1128,9 +1128,10 @@ binary is installed.
   well-scoped backlog work, at most 1 at a time and 3 a day by default.
 - **Needs you.** Devin PRs get the same Clean or Held verdict, Land, Close,
   Update branch, Land all clean and Evidence as cloud PRs. Under a grant they
-  go through the standing gates, where a Devin PR merges only if the stage
-  names Devin and judges from two different model families approved it;
-  otherwise the gates record a would-merge and the PR waits for you.
+  go through the standing gates. Cloud Devin PRs need a stage that names
+  Devin and judges from two different model families; eligible local CLI
+  work can follow a signed elite-direct grant. Otherwise the gates record
+  a would-merge and the PR waits for you.
 
 Setup (plan, training opt-out, GitHub integration, service user, `ashlr devin
 connect`, ACU budget, the CLI) and limits: [`docs/DEVIN.md`](DEVIN.md).

@@ -169,8 +169,8 @@ It follows the same rules as Claude's own in-app browser.
   revocation invalidates it; queued browser commands are cancelled. Claimed
   commands must pass a live dispatch fence before a page effect. A native
   action already past that fence may finish. The older
-  `/api/verse/browser/mcp/<grant>` endpoint remains observe/navigate only.
-  Browser `Origin` headers are refused on both MCP routes.
+  `/api/verse/browser/mcp/<grant>` endpoint is retired and returns 410.
+  Browser `Origin` headers are refused on the unified MCP route.
 - **Output hygiene.** Everything that comes from the page — text, titles,
   element names, URLs, console lines, script results — is secret-scrubbed,
   stripped of invisible characters (bidi overrides, zero-width), and wrapped
