@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import type { VerseTerminalAssistMode, VerseTerminalSettings } from './workbench-types.js';
 
 export const TERMINAL_SETTINGS_FILE = 'terminal-settings.json';
-export const TERMINAL_SETTINGS_DEFAULTS: Readonly<VerseTerminalSettings> = Object.freeze({ history: true, assist: 'auto' });
+export const TERMINAL_SETTINGS_DEFAULTS: Readonly<VerseTerminalSettings> = Object.freeze({ history: true, assist: 'local' });
 const ASSIST_MODES: readonly VerseTerminalAssistMode[] = ['auto', 'local', 'off'];
 
 /** ~/.ashlr/verse, resolved at call time so a relocated HOME (tests) is honoured. */

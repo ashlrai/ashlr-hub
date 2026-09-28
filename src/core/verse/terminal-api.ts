@@ -88,7 +88,7 @@ import {
   type TerminalManager,
 } from './terminal.js';
 import { terminalBytesToText } from './terminal-blocks.js';
-import { runTerminalAssist, TerminalAssistError, type AssistBlockContext, type AssistDeps } from './terminal-assist.js';
+import { effectiveAssistMode, runTerminalAssist, TerminalAssistError, type AssistBlockContext, type AssistDeps } from './terminal-assist.js';
 import { getTerminalHistory, type TerminalHistoryStore } from './terminal-history.js';
 import { loadTerminalSettings, parseTerminalSettingsUpdate, updateTerminalSettings } from './terminal-settings.js';
 import type { VerseSession } from './types.js';
@@ -559,11 +559,12 @@ async function handleSettings(req: IncomingMessage, res: ServerResponse, method:
 }
 
 async function handleAssist(ctx: { cfg: AshlrConfig }, req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const body = await readJsonBody(req, ['request', 'tabId', 'cwd', 'blockIds']);
+  const body = await readJsonBody(req, ['request', 'tabId', 'cwd', 'blockIds', 'cloudAllowed']);
   const request = body['request'];
   if (typeof request !== 'string' || request.trim().length === 0) throw new BadRequest(400, 'request is required');
   if (request.length > VERSE_TERMINAL_ASSIST_MAX_REQUEST_CHARS) throw new BadRequest(413, `request is limited to ${VERSE_TERMINAL_ASSIST_MAX_REQUEST_CHARS} characters`, 'VERSE_TOO_LARGE');
   const tabId = optionalString(body, 'tabId');
+  const cloudAllowed = optionalBoolean(body, 'cloudAllowed') === true;
   const rawBlockIds = body['blockIds'];
   if (rawBlockIds !== undefined && (!Array.isArray(rawBlockIds) || rawBlockIds.length > 10 || !rawBlockIds.every((b) => typeof b === 'string' && /^b-\d{1,9}$/.test(b)))) {
     throw new BadRequest(400, 'blockIds must be up to 10 block ids');
@@ -592,7 +593,8 @@ async function handleAssist(ctx: { cfg: AshlrConfig }, req: IncomingMessage, res
   }
   const settings = await loadTerminalSettings();
   const shell = process.env['SHELL'] ? process.env['SHELL'].split('/').pop() ?? null : null;
-  const answer = await runTerminalAssist(ctx.cfg, { request, cwd: cwd ? expandHomePrefix(cwd) : null, shell, blocks }, settings.assist, deps.assist ?? {});
+  const assistMode = effectiveAssistMode(settings.assist, cloudAllowed);
+  const answer = await runTerminalAssist(ctx.cfg, { request, cwd: cwd ? expandHomePrefix(cwd) : null, shell, blocks }, assistMode, deps.assist ?? {});
   sendJson(res, 200, answer);
 }
 

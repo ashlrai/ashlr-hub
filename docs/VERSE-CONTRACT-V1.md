@@ -345,8 +345,10 @@ only mounts them. Each module's header comment lists its own routes and is the a
   the operator's own shell. Needs Bun (the desktop sidecar); under Node, `GET` reports `available: false` with the reason.
   3.15: finished commands (never their output) are kept in `~/.ashlr/verse/terminal-history.jsonl` (0600, every field
   through `scrubSecrets` before it is written, ~50k lines, off and clear from the panel). `assist` is the terminal's only
-  model call (`terminal-assist.ts`): the local model first, Grok only in mode `auto` when an xAI key is configured and the
-  local-only policy permits it; it returns TEXT the page puts in the editor, and never types into or runs a shell.
+  model call (`terminal-assist.ts`): local-only by default. Grok is possible only after the operator selects `auto`
+  and that request explicitly allows cloud fallback, when an xAI key is configured and the local-only policy permits it.
+  The request, folder and recent command/output tails are disclosed before sending. It returns TEXT the page puts in the
+  editor, and never types into or runs a shell.
 - **preview.** `frame/<ticket>` is the **one path `server.ts` lets past its read boundary**: an `<iframe src>` can carry
   neither the read-client header nor the query proof, so it answers only a live ticket presented with the cookie of the
   read session that minted it. Every file is served under CSP `sandbox` (an opaque origin), `nosniff`, framable by Verse

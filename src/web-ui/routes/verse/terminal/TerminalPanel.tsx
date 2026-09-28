@@ -218,7 +218,7 @@ function writeRaw(storage: TerminalPanelDeps['storage'], sessionId: string, raw:
 }
 
 const ASSIST_MODE_LABELS: Readonly<Record<VerseTerminalAssistMode, string>> = {
-  auto: 'Local model, then Grok',
+  auto: 'Local model, then cloud Grok (shares terminal context)',
   local: 'Local model only',
   off: 'Off',
 };
@@ -829,12 +829,12 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
       { id: 'zoom', label: `${group.zoomed ? 'Show every pane' : 'Zoom this pane'} (${panelKeyLabel('zoom-pane', deps.platform)})`, onSelect: () => setLayout((prev) => toggleZoom(prev, group.id)) },
     ] : [];
     const history = settings?.history ?? true;
-    const assistMode = settings?.assist ?? 'auto';
+    const assistMode = settings?.assist ?? 'local';
     const raw = focusedTab ? rawTabs.has(focusedTab.id) : false;
     const items: ActionMenuItem[] = [
       { id: 'find', label: `Find… (${panelKeyLabel('find', deps.platform)})`, onSelect: () => focusedTab && leaves.current.get(focusedTab.id)?.openFind(), disabled: !focusedTab },
       { id: 'history', label: 'Command history… (Ctrl+R)', description: 'Search what you ran; Return puts it at the prompt without running it.', onSelect: () => openHistory(focusedTab?.id ?? null, '') },
-      { id: 'assist', label: `Generate a command… (${panelKeyLabel('assist', deps.platform)})`, description: 'Describe it in words; the local model writes it for you to review.', onSelect: () => openAssist(focusedTab?.id ?? null), disabled: assistMode === 'off', reason: assistMode === 'off' ? 'Plain-English commands are turned off below.' : null },
+      { id: 'assist', label: `Generate a command… (${panelKeyLabel('assist', deps.platform)})`, description: assistMode === 'auto' ? 'Local model first; Grok may receive the request and recent terminal context.' : 'Describe it in words; the configured local model writes it for you to review.', onSelect: () => openAssist(focusedTab?.id ?? null), disabled: assistMode === 'off', reason: assistMode === 'off' ? 'Plain-English commands are turned off below.' : null },
       ...layoutItems,
       {
         id: 'raw',
@@ -1097,6 +1097,7 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
                     focused={group.focused === id}
                     mode={layout.modes[id] ?? 'terminal'}
                     prefs={prefs}
+                    assistMode={settings?.assist ?? 'local'}
                     onFocus={() => setLayout((prev) => focusPane(prev, group.id, id))}
                     onMeta={onMeta}
                     onBlockAction={(tabId, action, block) => void runBlockAction(tabId, action, block)}
@@ -1136,6 +1137,7 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
       {palette ? (
         <HistoryPalette
           mode={palette.mode}
+          assistMode={settings?.assist ?? 'local'}
           api={deps.api}
           tabId={palette.tabId}
           cwd={(palette.tabId ? tabById.get(palette.tabId)?.cwd ?? tabById.get(palette.tabId)?.root : null) ?? null}

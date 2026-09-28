@@ -11,7 +11,7 @@
  * WHAT IT DOES
  *   ↩        runs the text: it is written to the PTY followed by CR, exactly
  *            what typing it would send (several lines go as ONE bracketed paste);
- *   #…  ⌘I   plain words → a command from the local model (terminal-assist),
+ *   #…  ⌘I   plain words → a command from the configured model (terminal-assist),
  *            put back HERE for review. Nothing runs until the next ↩ — and a
  *            command flagged as destructive needs a second one;
  *   ghost    the best history match, dim, after the cursor (→ / ⇥ take it);
@@ -24,7 +24,8 @@
  * The operator's dotfiles are never touched: Raw simply turns this off.
  */
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
-import type { VerseTerminalAssistResponse } from '../../../data/api-types.js';
+import type { VerseTerminalAssistMode, VerseTerminalAssistResponse } from '../../../data/api-types.js';
+import { assistDisclosure, assistLoadingLabel } from './assist-disclosure.js';
 import { ApiError } from '../../../data/client.js';
 import type { KeyPlatform } from '../shell/command-keys.js';
 import type { InputEditor, InputEditorFactory, InputKeyIntent } from './input-editor.js';
@@ -59,6 +60,7 @@ export interface CommandInputProps {
   /** Its pane has the keyboard: take focus when a prompt appears. */
   focusWanted: boolean;
   api: PanelTerminalApi;
+  assistMode: VerseTerminalAssistMode;
   createEditor: InputEditorFactory;
   platform: KeyPlatform;
   /** Does the shell accept bracketed paste right now (it turns it on at its prompt)? */
@@ -155,7 +157,7 @@ export const CommandInput = forwardRef<CommandInputHandle, CommandInputProps>(fu
     setAssistMode(true);
     setAssist({ state: 'loading', result: null, error: null });
     try {
-      const result = await p.api.assist({ request, tabId: p.tabId, ...(p.cwd ? { cwd: p.cwd } : {}) });
+      const result = await p.api.assist({ request, tabId: p.tabId, ...(p.cwd ? { cwd: p.cwd } : {}), ...(p.assistMode === 'auto' ? { cloudAllowed: true } : {}) });
       setAssist({ state: 'done', result, error: null });
       riskyPending.current = result.risky ? result.command : null;
       setRiskyWarn(false);
@@ -331,12 +333,12 @@ export const CommandInput = forwardRef<CommandInputHandle, CommandInputProps>(fu
   }), []);
 
   if (failed) return null;
-  const hint = assist.state === 'loading' ? 'Asking the local model…'
+  const hint = assist.state === 'loading' ? assistLoadingLabel(props.assistMode)
     : assist.state === 'error' ? assist.error
       : riskyWarn ? 'This command changes or deletes things. Press Return again to run it.'
         : assist.state === 'done' && assist.result
           ? [assist.result.explanation, `Review, then Return to run · from ${assist.result.provider}`].filter(Boolean).join(' · ')
-          : assistMode ? 'Describe what you want, then Return — the command comes back here to review. Nothing runs on its own.'
+          : assistMode ? `Describe what you want, then Return. ${assistDisclosure(props.assistMode)} The command comes back to review; nothing runs on its own.`
             : null;
 
   return (

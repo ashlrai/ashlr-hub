@@ -13,7 +13,8 @@
  *
  * WHERE. The LOCAL model first (Ollama / LM Studio / llama-server through
  * provider-client's `getActiveClient(cfg, { allowCloud: false })` — a cloud
- * provider is refused there). Only in mode `auto`, and only when no local
+ * provider is refused there). Only in operator-selected mode `auto`, with an
+ * explicit cloud allowance on the request, and only when no local
  * model answers, Grok — when an xAI key is configured AND the local-only
  * policy permits the `grok` engine. Mode `off` never calls anything.
  *
@@ -71,6 +72,11 @@ export class TerminalAssistError extends Error {
     super(message);
     this.name = 'TerminalAssistError';
   }
+}
+
+/** A saved auto preference alone cannot send terminal context to a cloud model. */
+export function effectiveAssistMode(configured: VerseTerminalAssistMode, cloudAllowed: boolean): VerseTerminalAssistMode {
+  return configured === 'auto' && !cloudAllowed ? 'local' : configured;
 }
 
 export function describeOs(): string {

@@ -38,6 +38,7 @@ import type { PanelTerminalApi } from './panel-client.js';
 import { keyPassesToPage, panelKeyAction, panelKeyLabel, type PanelKeyAction } from './panel-keys.js';
 import { resolvePanelColors, type LineMark, type PanelView, type PanelViewFactory, type ViewDisposable } from './xterm-view.js';
 import { CommandInput, type CommandInputHandle } from './CommandInput.js';
+import type { VerseTerminalAssistMode } from '../../../data/api-types.js';
 import type { InputEditorFactory } from './input-editor.js';
 import { inputVisible, isOperatorKeystroke, nextPromptPhase, type PromptPhase } from './input-model.js';
 import styles from './TerminalPanel.module.css';
@@ -99,6 +100,7 @@ export interface TerminalLeafProps {
   focused: boolean;
   mode: LeafMode;
   prefs: LeafPrefs;
+  assistMode: VerseTerminalAssistMode;
   onFocus: () => void;
   /** Title, exit, cwd, integration: the panel keeps the tab list. */
   onMeta: (tabId: string, frame: Exclude<VerseTerminalStreamFrame, { type: 'output' } | { type: 'block' }>) => void;
@@ -695,6 +697,7 @@ export const TerminalLeaf = forwardRef<LeafHandle, TerminalLeafProps>(function T
           visible={showInput}
           focusWanted={shown && focused}
           api={deps.api}
+          assistMode={props.assistMode}
           createEditor={deps.createInputEditor}
           platform={deps.platform}
           bracketedPaste={() => viewRef.current?.bracketedPaste() ?? false}

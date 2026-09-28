@@ -9,12 +9,13 @@
  *            succeeded → recent). ↩ puts the command in the input editor —
  *            it does NOT run it. Ctrl+R again gives the search to the shell's
  *            own Ctrl+R (fzf, atuin …) with what was typed.
- *   assist   a request in plain words → the local model → ONE command, shown
+ *   assist   a request in plain words → the configured model → ONE command, shown
  *            for review. ↩ inserts it for editing; nothing runs.
  */
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
-import type { VerseTerminalAssistResponse, VerseTerminalHistoryEntry } from '../../../data/api-types.js';
+import type { VerseTerminalAssistMode, VerseTerminalAssistResponse, VerseTerminalHistoryEntry } from '../../../data/api-types.js';
+import { assistDisclosure, assistLoadingLabel } from './assist-disclosure.js';
 import { ApiError } from '../../../data/client.js';
 import { useFocusTrap } from '../../../components/primitives/focus-trap.js';
 import { ReturnKeyIcon } from '../verse-icons.js';
@@ -27,6 +28,7 @@ export type TerminalPaletteMode = 'history' | 'assist';
 
 export interface HistoryPaletteProps {
   mode: TerminalPaletteMode;
+  assistMode: VerseTerminalAssistMode;
   api: PanelTerminalApi;
   tabId: string | null;
   cwd: string | null;
@@ -74,7 +76,7 @@ function assistError(err: unknown): string {
   return 'The command could not be generated.';
 }
 
-export function HistoryPalette({ mode, api, tabId, cwd, initialQuery, onPick, onPassThrough, onClose, onEnableHistory }: HistoryPaletteProps) {
+export function HistoryPalette({ mode, assistMode, api, tabId, cwd, initialQuery, onPick, onPassThrough, onClose, onEnableHistory }: HistoryPaletteProps) {
   const [query, setQuery] = useState(initialQuery);
   const [entries, setEntries] = useState<VerseTerminalHistoryEntry[]>([]);
   const [enabled, setEnabled] = useState(true);
@@ -120,12 +122,12 @@ export function HistoryPalette({ mode, api, tabId, cwd, initialQuery, onPick, on
     if (!api.assist || !request.trim()) return;
     setAssist({ state: 'loading', result: null, error: null });
     try {
-      const result = await api.assist({ request: request.trim(), ...(tabId ? { tabId } : {}), ...(cwd ? { cwd } : {}) });
+      const result = await api.assist({ request: request.trim(), ...(tabId ? { tabId } : {}), ...(cwd ? { cwd } : {}), ...(assistMode === 'auto' ? { cloudAllowed: true } : {}) });
       if (mounted.current) setAssist({ state: 'done', result, error: null });
     } catch (err) {
       if (mounted.current) setAssist({ state: 'error', result: null, error: assistError(err) });
     }
-  }, [api, cwd, tabId]);
+  }, [api, assistMode, cwd, tabId]);
 
   const pick = (command: string) => {
     onClose();
@@ -238,7 +240,7 @@ export function HistoryPalette({ mode, api, tabId, cwd, initialQuery, onPick, on
               </div>
             )
           ) : assist.state === 'loading' ? (
-            <p className={styles.empty} role="status">Asking the local model…</p>
+            <p className={styles.empty} role="status">{assistLoadingLabel(assistMode)}</p>
           ) : assist.state === 'error' ? (
             <p className={styles.empty} role="alert">{assist.error}</p>
           ) : assist.result ? (
@@ -264,7 +266,7 @@ export function HistoryPalette({ mode, api, tabId, cwd, initialQuery, onPick, on
             </div>
           ) : (
             <p className={styles.empty}>
-              {api.assist ? 'Press Return to ask. The command comes back for you to read and edit — nothing runs until you run it.' : 'This server cannot generate commands.'}
+              {api.assist ? `Press Return to ask. ${assistDisclosure(assistMode)} The command comes back for you to review; nothing runs until you run it.` : 'This server cannot generate commands.'}
             </p>
           )}
         </div>

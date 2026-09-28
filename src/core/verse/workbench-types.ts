@@ -983,7 +983,8 @@ export interface VerseTerminalSettings {
   /**
    * Plain language → command (terminal-assist.ts): `local` = the local model
    * only; `auto` = the local model, then Grok when it is configured; `off` =
-   * never. Default `auto`.
+   * never. Default `local`; cloud fallback requires an explicit mode selection
+   * and an explicit `cloudAllowed` flag on each request.
    */
   assist: VerseTerminalAssistMode;
 }
@@ -994,7 +995,7 @@ export type VerseTerminalAssistMode = 'auto' | 'local' | 'off';
 // ---------------------------------------------------------------------------
 
 /**
- * POST /api/verse/terminal/assist { tabId?, sessionId?, request, cwd?, blockIds? }
+ * POST /api/verse/terminal/assist { tabId?, sessionId?, request, cwd?, blockIds?, cloudAllowed? }
  *   → VerseTerminalAssistResponse
  *
  * The operator's request plus the tab's cwd, OS, shell and its last few
@@ -1009,6 +1010,8 @@ export interface VerseTerminalAssistRequest {
   cwd?: string;
   /** Blocks to include as context (default: the tab's last few). */
   blockIds?: string[];
+  /** May use Grok if the operator also selected auto mode. Omitted means local only. */
+  cloudAllowed?: boolean;
 }
 export interface VerseTerminalAssistResponse {
   /** The suggested command line(s), ready to edit. Never run by the server. */

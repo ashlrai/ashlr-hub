@@ -47,6 +47,7 @@ import {
 import {
   ASSIST_BLOCK_OUTPUT_CHARS,
   buildAssistMessages,
+  effectiveAssistMode,
   isRiskyCommand,
   parseAssistReply,
   runTerminalAssist,
@@ -299,8 +300,8 @@ describe('terminal manager — finished commands', () => {
 
 describe('terminal settings', () => {
   it('defaults, a lenient read, a strict update, 0600', async () => {
-    expect(await loadTerminalSettings(dir)).toEqual({ history: true, assist: 'auto' });
-    expect(parseTerminalSettings({ history: 'no', assist: 'weird' })).toEqual({ history: true, assist: 'auto' });
+    expect(await loadTerminalSettings(dir)).toEqual({ history: true, assist: 'local' });
+    expect(parseTerminalSettings({ history: 'no', assist: 'weird' })).toEqual({ history: true, assist: 'local' });
     expect(parseTerminalSettingsUpdate({ history: false })).toEqual({ history: false });
     expect(parseTerminalSettingsUpdate({ assist: 'local' })).toEqual({ assist: 'local' });
     expect(parseTerminalSettingsUpdate({ history: 'false' })).toBeNull();
@@ -378,6 +379,18 @@ describe('terminal assist — what comes back', () => {
 });
 
 describe('terminal assist — which model', () => {
+  it('requires an explicit cloud request as well as an auto preference before sending terminal context to Grok', async () => {
+    const grok = model('{"command":"ls"}', 'grok:remote');
+    const ctx = { request: 'list files', cwd: '/work', shell: 'zsh', blocks: [] };
+    const localUnavailable = async () => null;
+    await expect(runTerminalAssist(CFG, ctx, effectiveAssistMode('auto', false), { local: localUnavailable, grok: async () => grok.call }))
+      .rejects.toMatchObject({ code: 'ASSIST_NO_MODEL' });
+    expect(grok.seen).toHaveLength(0);
+    expect((await runTerminalAssist(CFG, ctx, effectiveAssistMode('auto', true), { local: localUnavailable, grok: async () => grok.call })).provider).toBe('grok:remote');
+    expect(grok.seen).toHaveLength(1);
+    expect(effectiveAssistMode('local', true)).toBe('local');
+    expect(effectiveAssistMode('off', true)).toBe('off');
+  });
   const ctx = { request: 'list big files', cwd: '/w', shell: 'zsh', blocks: [] };
 
   it('asks the local model first and never Grok when it answers', async () => {

@@ -343,10 +343,10 @@ describe('terminal 3.15 routes through the real server', () => {
     expect((await request(port, 'GET', '/api/verse/terminal/history', read)).json).toEqual({ enabled: true, entries: [] });
 
     // Off: nothing is recorded, nothing is read back.
-    expect((await request(port, 'GET', '/api/verse/terminal/settings', read)).json).toEqual({ history: true, assist: 'auto' });
+    expect((await request(port, 'GET', '/api/verse/terminal/settings', read)).json).toEqual({ history: true, assist: 'local' });
     expect((await request(port, 'POST', '/api/verse/terminal/settings', { 'content-type': 'application/json' }, '{"history":false}')).status).toBe(401);
     expect((await request(port, 'POST', '/api/verse/terminal/settings', mutate, '{"history":"no"}')).status).toBe(400);
-    expect((await request(port, 'POST', '/api/verse/terminal/settings', mutate, '{"history":false}')).json).toEqual({ history: false, assist: 'auto' });
+    expect((await request(port, 'POST', '/api/verse/terminal/settings', mutate, '{"history":false}')).json).toEqual({ history: false, assist: 'local' });
     a.pty.emit(`ls\r\n${osc('133;C')}x\r\n${osc('133;D;0')}${PROMPT}`);
     await tick(50);
     expect((await request(port, 'GET', '/api/verse/terminal/history', read)).json).toEqual({ enabled: false, entries: [] });
@@ -381,6 +381,30 @@ describe('terminal 3.15 routes through the real server', () => {
     // Risky answers are flagged by the server's own check too.
     localText = '{"command":"git push --force origin main"}';
     expect((await request(port, 'POST', '/api/verse/terminal/assist', mutate, JSON.stringify({ request: 'force push' }))).json).toMatchObject({ risky: true });
+  });
+
+  it('assist: saved auto mode cannot send terminal context to Grok without this request opting in', async () => {
+    const { port, mutate } = await boot();
+    let grokCalls = 0;
+    setTerminalApiDepsForTest({
+      assist: {
+        local: async () => null,
+        grok: async () => async () => {
+          grokCalls++;
+          return { text: '{"command":"ls"}', model: 'grok:remote' };
+        },
+      },
+    });
+    await request(port, 'POST', '/api/verse/terminal/settings', mutate, '{"assist":"auto"}');
+    const post = (body: unknown) => request(port, 'POST', '/api/verse/terminal/assist', mutate, JSON.stringify(body));
+    expect((await post({ request: 'list files' })).status).toBe(503);
+    expect(grokCalls).toBe(0);
+    expect((await post({ request: 'list files', cloudAllowed: 'yes' })).status).toBe(400);
+    expect((await post({ request: 'list files', cloudAllowed: true })).json).toMatchObject({ provider: 'grok:remote' });
+    expect(grokCalls).toBe(1);
+    await request(port, 'POST', '/api/verse/terminal/settings', mutate, '{"assist":"local"}');
+    expect((await post({ request: 'list files', cloudAllowed: true })).status).toBe(503);
+    expect(grokCalls).toBe(1);
   });
 
   it('assist: off is a 409, no model a 503, bad bodies a 400', async () => {
