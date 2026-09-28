@@ -1408,6 +1408,16 @@ function settleNotApplied(deps: LeaderApplyDeps, claimed: Claimed, next: LeaderA
  */
 async function applyClaimed(deps: LeaderApplyDeps, claimed: Claimed, opts: { approvedVia?: string } = {}): Promise<LeaderAction> {
   const action = claimed.stored.action;
+  // Goal hygiene may be scheduled in a shadow stage. Read the live policy at
+  // the mutation fence so lowering the switch or revoking the grant after the
+  // memo was planned cannot still change the goal list.
+  if (LEADER_GOAL_HYGIENE_KINDS.has(action.kind)) {
+    let live: EffectivePolicy | null = null;
+    try { live = deps.standingPolicy(); } catch { /* unavailable means no authority */ }
+    if (!leaderGoalHygieneApplies(live)) {
+      return settleNotApplied(deps, claimed, { ...action, status: 'refused', statusReason: 'The standing grant or autonomy switch changed before goal hygiene could apply.' } as LeaderAction);
+    }
+  }
   let outcome: ApplyOutcome;
   try {
     outcome = await executeAction(deps, action);

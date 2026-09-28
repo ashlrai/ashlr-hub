@@ -140,6 +140,18 @@ describe('Leader goal hygiene applies whenever autonomy is on', () => {
     expect(rows.filter((r) => r.status === 'applied').map((r) => r.kind)).toEqual(['goal.pause', 'goal.archive']);
   });
 
+  it('refuses a goal mutation when the switch is lowered after planning', async () => {
+    const g = goalsStore.createGoal('Keep this goal active', { now: '2026-08-18T00:00:00.000Z' });
+    const before = goalsStore.loadGoal(g.id)?.status;
+    let reads = 0;
+    const { deps } = makeApplyDeps({ ledger, now: () => NOW, policy: () => (++reads === 1 ? SHADOW : null) });
+    const [action] = await enactLeaderActions(deps, MEMO, [
+      draft('goal.pause', { goalId: g.id, until: null }),
+    ], [], { idFor: (i) => actionIdFor(MEMO, i) });
+    expect(action?.status).toBe('refused');
+    expect(goalsStore.loadGoal(g.id)?.status).toBe(before);
+  });
+
   it('the memo summary says goal hygiene applied instead of "nothing applies"', () => {
     const base = {
       v: 1, id: MEMO, at: new Date(NOW).toISOString(), status: 'ok', statusReason: null, trigger: 'schedule', dryRun: true,
