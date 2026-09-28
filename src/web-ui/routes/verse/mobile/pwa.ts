@@ -96,10 +96,19 @@ export function isStandalone(win: Window = window): boolean {
   return iosStandalone || (typeof win.matchMedia === 'function' && win.matchMedia('(display-mode: standalone)').matches);
 }
 
+/** This gateway's push sender accepts Apple Web Push subscriptions only. */
+export function supportsIphoneHomeScreenPush(
+  nav: Navigator = navigator,
+  win: Window = window,
+): boolean {
+  return (nav as Navigator & { standalone?: boolean }).standalone === true
+    && 'serviceWorker' in nav && 'PushManager' in win && 'Notification' in win;
+}
+
 /** Only called from an explicit tap after the paired gateway advertises push. */
 export async function enableRemotePush(publicKey: string): Promise<PushSubscription> {
-  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
-    throw new Error('Push notifications are unavailable on this browser.');
+  if (!supportsIphoneHomeScreenPush()) {
+    throw new Error('Notifications require Verse installed on an iPhone Home Screen with Web Push support.');
   }
   if (Notification.permission === 'denied') throw new Error('Notifications are blocked in this phone’s settings.');
   const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
