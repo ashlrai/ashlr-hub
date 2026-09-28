@@ -40,7 +40,7 @@ function message(error: unknown): string {
 
 type View =
   | { kind: 'loading' }
-  | { kind: 'error'; reason: string }
+  | { kind: 'error'; reason: string; pairingExpired?: boolean }
   | { kind: 'ready'; session: RemoteSession };
 
 export function RemoteMobileApp({ shell, Button, ui }: { shell: ReactNode; Button: typeof MobileButton; ui: typeof mobileUi }) {
@@ -134,7 +134,17 @@ export function RemoteMobileApp({ shell, Button, ui }: { shell: ReactNode; Butto
         setPendingId('');
         setActionError('Pairing was declined on your Mac. Ask for a new code to try again.');
       }
-    } catch (error) { setActionError(message(error)); }
+    } catch (error) {
+      if (error instanceof RemoteClientError && (error.status === 404 || error.status === 401)) {
+        // A lost/expired preauth cookie or a restarted Mac cannot approve this
+        // registration anymore. Drop only the opaque pending ID; a new code
+        // and preauth session can be obtained through the explicit retry.
+        forgetPending();
+        setPendingId('');
+        setPairing(true);
+        setView({ kind: 'error', reason: 'This pairing expired. Start over with a new code from your Mac.', pairingExpired: true });
+      } else setActionError(message(error)); // Network outage: keep the pending registration retryable.
+    }
     finally { setBusy(false); }
   };
 
@@ -148,7 +158,7 @@ export function RemoteMobileApp({ shell, Button, ui }: { shell: ReactNode; Butto
         {view.kind === 'error' ? (
           <>
             <p role="alert">{view.reason}</p>
-            <Button variant="primary" onClick={() => void refresh()}>Try again</Button>
+            <Button variant="primary" onClick={() => void refresh()}>{view.pairingExpired ? 'Start over' : 'Try again'}</Button>
             <Button variant="plain" onClick={() => window.location.assign('/verse/m/')}>Reload sign-in</Button>
           </>
         ) : null}
@@ -159,6 +169,9 @@ export function RemoteMobileApp({ shell, Button, ui }: { shell: ReactNode; Butto
               <>
                 <p role="status">Your Mac needs to approve this phone. Keep this page open until it does.</p>
                 <Button variant="primary" disabled={busy} onClick={() => void checkApproval()}>Check approval</Button>
+                <Button variant="plain" disabled={busy} onClick={() => {
+                  forgetPending(); setPendingId(''); setPairing(true); setCode(''); void refresh();
+                }}>Start over with a new code</Button>
               </>
             ) : deviceId && !pairing ? (
               <>
