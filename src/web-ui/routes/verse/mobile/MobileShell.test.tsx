@@ -17,6 +17,7 @@ import { refreshActivity, resetActivityForTest } from '../shell/useActivity.js';
 import { mockCompactViewport } from '../shell/viewport.test-support.js';
 import { activityResponse, json, needsItem, runningRow, stubFetch, TOKEN } from './mobile.test-support.js';
 import { resetMobileToastsForTest } from './mobile-toast.js';
+import { ReachStrip } from './MobileRuntime.js';
 import { ChunkBoundary, MobileShell } from './MobileShell.js';
 
 function control(over: { paused?: boolean; running?: boolean; kill?: boolean; todayUsd?: number | null } = {}): VerseControlSnapshot {
@@ -160,6 +161,15 @@ describe('ChunkBoundary', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(/could not load/);
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
     quiet.mockRestore();
+  });
+});
+
+describe('ReachStrip', () => {
+  it('does not promise cached data before the first successful update', () => {
+    const { rerender } = render(<ReachStrip state="offline" updatedAt={null} />);
+    expect(screen.getByRole('status')).toHaveTextContent('This phone is offline. No update yet.');
+    rerender(<ReachStrip state="offline" updatedAt={Date.now()} />);
+    expect(screen.getByRole('status')).toHaveTextContent('This phone is offline — showing the last update.');
   });
 });
 

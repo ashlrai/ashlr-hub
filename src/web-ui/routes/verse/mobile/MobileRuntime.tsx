@@ -33,7 +33,9 @@ const GuardSheet = preloadedLazy<object>(() => import('./MobileGuardSheet.js').t
 export function ReachStrip({ state, updatedAt }: { state: Reachability; updatedAt: number | null }) {
   if (state === 'live' || state === 'connecting') return null;
   const text = state === 'offline'
-    ? 'This phone is offline — showing the last update.'
+    ? updatedAt === null
+      ? 'This phone is offline. No update yet.'
+      : 'This phone is offline — showing the last update.'
     : `Can’t reach your Mac. ${sinceText(updatedAt)}.`;
   return (
     <div className={styles.reach} data-state={state} role="status">

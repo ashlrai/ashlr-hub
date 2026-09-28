@@ -80,7 +80,7 @@ export function GuardHost() {
         destructive={request.destructive}
         busy={phase === 'running'}
         error={error}
-        onConfirm={confirmGuard}
+        onConfirm={() => confirmGuard()}
       />
       <MutationTokenDialog
         open={phase === 'token'}

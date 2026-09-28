@@ -15,7 +15,7 @@ import { APP_VERSION } from '../../sections/app-version.js';
 import { resetGuard } from '../../shell/guard-store.js';
 import { MobileGuardSheet } from '../MobileGuardSheet.js';
 import { MobileToasts, resetMobileToastsForTest } from '../mobile-toast.js';
-import { permissionsFor, renderMobile, stubFetch, TOKEN } from '../mobile.test-support.js';
+import { activityState, permissionsFor, renderMobile, stubFetch, TOKEN } from '../mobile.test-support.js';
 import { MoreScreen } from './MoreScreen.js';
 
 function mount(overrides: Parameters<typeof renderMobile>[1] = {}) {
@@ -156,6 +156,14 @@ describe('MoreScreen — rows and settings', () => {
 });
 
 describe('MoreScreen — connection', () => {
+  it('distinguishes an offline first load from an offline page with a prior update', () => {
+    const view = mount({ reachability: 'offline', activity: activityState(null, 'unavailable') });
+    expect(screen.getByText('This phone has no network. No update yet.')).toBeInTheDocument();
+    view.unmount();
+    mount({ reachability: 'offline' });
+    expect(screen.getByText('This phone has no network. The last update stays on screen.')).toBeInTheDocument();
+  });
+
   it('says when the Mac is out of reach', () => {
     mount({ reachability: 'unreachable' });
     expect(screen.getByText('Can’t reach your Mac')).toBeInTheDocument();

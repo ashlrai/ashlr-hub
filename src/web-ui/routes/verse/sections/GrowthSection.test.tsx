@@ -79,7 +79,9 @@ describe('GrowthSection', () => {
     // THE dark-since day (the live view's), as the viewer's local day.
     expect(state).toHaveTextContent(`Fleet dark since ${darkSinceLabel(DARK_SINCE)}`);
     expect(within(state).getByRole('button', { name: 'Approve in Fleet' })).toBeInTheDocument();
-    expect(screen.queryAllByRole('figure')).toHaveLength(0);
+    // The authority state can load before fleet history; wait for the
+    // history-dependent chart collapse rather than observing its loading frame.
+    await waitFor(() => expect(screen.queryAllByRole('figure')).toHaveLength(0));
     expect(screen.queryByText(/No fleet runs or proposals|Nothing produced since/)).toBeNull();
   });
 

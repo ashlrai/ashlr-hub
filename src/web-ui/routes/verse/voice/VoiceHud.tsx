@@ -25,7 +25,7 @@ import {
   type VoiceSnapshot,
 } from './voice-store.js';
 import type { FixAction } from './voice-bridge.js';
-import { MicIcon } from './VoiceInput.js';
+import { MicIcon, readableVoiceAccelerator } from './VoiceInput.js';
 import { Waveform } from './Waveform.js';
 import styles from './VoiceInput.module.css';
 
@@ -43,7 +43,7 @@ export function fixFor(error: VoiceErrorView): Fix | null {
       return { label: 'Allow microphone', action: 'request-mic' };
     case 'mic-denied':
     case 'mic-restricted':
-      return { label: 'Open Privacy ▸ Microphone', action: 'open-mic-settings' };
+      return { label: 'Open Microphone privacy settings', action: 'open-mic-settings' };
     case 'no-usage-description':
       return { label: 'Copy reinstall command', action: 'copy-reinstall' };
     case 'no-input-device':
@@ -113,7 +113,7 @@ export function VoiceHud() {
 
   if (session) {
     const listening = session.phase !== 'finalizing';
-    const accel = voice.native?.hotkey.accelerator ?? '⌃⌥V';
+    const accel = readableVoiceAccelerator(voice.native?.hotkey.accelerator ?? 'Ctrl+Option+V');
     const how = session.origin === 'hotkey' && !session.latched
       ? `Release ${accel} to insert`
       : voice.backend === 'native'
