@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { createRemoteAccessVerifier, parseRemoteAccessConfig, verifyRemoteAccessHeader } from '../src/core/web/remote-access.js';
-import { checkRemoteEnvelope, classifyRemoteRoute, type RemoteRequest } from '../src/core/web/remote-gateway-policy.js';
+import { checkRemoteEnvelope, classifyRemoteRoute, validateRemoteMutation, type RemoteRequest } from '../src/core/web/remote-gateway-policy.js';
 
 const ORIGIN = 'https://phone.example.com';
 const AUD = 'a'.repeat(64);
@@ -57,6 +57,43 @@ describe('unstarted remote gateway policy', () => {
     expect(checkRemoteEnvelope(request('POST', { origin: ORIGIN, 'x-ashlr-remote-csrf': 'wrong' }), ORIGIN, 'secret')).toEqual({ ok: false, reason: 'csrf' });
     expect(checkRemoteEnvelope(request('POST', { origin: ORIGIN, 'sec-fetch-site': 'cross-site', 'x-ashlr-remote-csrf': 'secret' }), ORIGIN, 'secret')).toEqual({ ok: false, reason: 'origin' });
     expect(checkRemoteEnvelope(request('POST', { origin: ORIGIN, 'sec-fetch-site': 'same-origin', 'x-ashlr-remote-csrf': 'secret' }), ORIGIN, 'secret')).toEqual({ ok: true });
+  });
+
+  it('restricts mutations to reviewed routes and exact bounded bodies', () => {
+    const approved = [
+      ['POST', '/api/verse/sessions', { projectPath: '/repo', seatId: 'claude', model: 'opus' }, false],
+      ['POST', '/api/verse/sessions/vs_1/turns', { text: 'Please inspect this.' }, false],
+      ['POST', '/api/verse/queue/vs_1', { text: 'And test it.', sendNow: true }, false],
+      ['POST', '/api/verse/activity/seen', { sessionId: 'vs_1', turnCount: 3 }, false],
+      ['POST', '/api/verse/leader/thread', { text: 'What is running?' }, false],
+      ['POST', '/api/verse/leader/questions/memo-1:0/answer', { text: 'Hold.' }, false],
+      ['POST', '/api/verse/daemon', { action: 'stop' }, true],
+      ['POST', '/api/verse/budget', { mode: 'reserve' }, true],
+      ['POST', '/api/verse/authority', { action: 'stop' }, true],
+      ['POST', '/api/verse/leader/actions/a1/approve', {}, true],
+      ['POST', '/api/inbox/p1/approve', {}, true],
+      ['POST', '/api/verse/sessions/vs_1/cancel', {}, true],
+      ['DELETE', '/api/verse/leader/directives/d1', undefined, true],
+    ] as const;
+    for (const [method, path, body, stepUp] of approved) {
+      const decision = classifyRemoteRoute(method, path);
+      expect(decision).toEqual({ kind: 'write', path, stepUp });
+      expect(validateRemoteMutation(decision, body)).toBe(true);
+    }
+    for (const target of [
+      '/api/verse/authority/draft', '/api/verse/terminal', '/api/verse/browser',
+      '/api/verse/checkpoints/apply', '/api/verse/sessions/s1/delete',
+      '/api/verse/authority?mode=stop', '/api/inbox/../p1/approve',
+      '/api/inbox/p1%2Fapprove', '/api/verse/leader/actions/a1/approve/extra',
+    ]) expect(classifyRemoteRoute('POST', target)).toEqual({ kind: 'deny' });
+    const stop = classifyRemoteRoute('POST', '/api/verse/daemon');
+    for (const body of [null, [], {}, { action: 'clear-stop' }, { action: 'stop', extra: true },
+      { action: { toString: null } }]) expect(validateRemoteMutation(stop, body)).toBe(false);
+    const authority = classifyRemoteRoute('POST', '/api/verse/authority');
+    for (const body of [{ action: 'grant', draftDigest: 'x' }, { action: 'clear-stop' },
+      { action: 'switch', to: 'autonomous', draftDigest: 'x' }]) expect(validateRemoteMutation(authority, body)).toBe(false);
+    expect(validateRemoteMutation(classifyRemoteRoute('POST', '/api/inbox/p1/approve'), { reason: 'skip' })).toBe(false);
+    expect(validateRemoteMutation(classifyRemoteRoute('GET', '/api/verse/activity'), {})).toBe(false);
   });
 
   it('refuses raw Hub credentials even on an otherwise allowed read', () => {

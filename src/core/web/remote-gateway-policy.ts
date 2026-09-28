@@ -28,12 +28,16 @@ const READ_ROUTES = new Set<RemoteReadRoute>([
   '/api/verse/leader/directives',
 ]);
 
-export type RemoteRouteDecision = { kind: 'read' | 'stream'; path: RemoteReadRoute } | { kind: 'deny' };
+export type RemoteRouteDecision =
+  | { kind: 'read' | 'stream'; path: RemoteReadRoute }
+  | { kind: 'write'; path: string; stepUp: boolean }
+  | { kind: 'deny' };
 
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const CHECKPOINT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const ROOT_ID = /^[0-9a-f]{8,64}$/;
 const THREAD_ID = /^[A-Za-z0-9_:-]{1,128}$/;
+const ACTION_ID = /^[A-Za-z0-9_:-]{1,128}$/;
 
 function exactParams(params: URLSearchParams, shape: Record<string, (value: string) => boolean>): boolean {
   const keys = [...params.keys()];
@@ -49,12 +53,36 @@ function safeFile(path: string): boolean {
 
 /** Every path and query shape here is reviewed separately; no general /api/* proxy. */
 export function classifyRemoteRoute(method: string | undefined, rawTarget: string | undefined): RemoteRouteDecision {
-  if (method !== 'GET' || !rawTarget || !rawTarget.startsWith('/') || rawTarget.length > 2048) return { kind: 'deny' };
+  if (!rawTarget || !rawTarget.startsWith('/') || rawTarget.length > 2048) return { kind: 'deny' };
   // Reject alternate URL spellings before URL normalization can hide them.
   const [path, query, ...rest] = rawTarget.split('?');
   if (!path || rest.length > 0 || /[#%\\]/.test(path) || rawTarget.includes('#') || path.includes('//')
     || [...rawTarget].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) return { kind: 'deny' };
   if (path.split('/').some((segment) => segment === '.' || segment === '..')) return { kind: 'deny' };
+  if (method === 'POST' || method === 'DELETE') {
+    if (query !== undefined) return { kind: 'deny' };
+    if (method === 'DELETE' && /^\/api\/verse\/leader\/directives\/[^/]+$/.test(path)
+      && ACTION_ID.test(path.slice('/api/verse/leader/directives/'.length))) return { kind: 'write', path, stepUp: true };
+    if (method !== 'POST') return { kind: 'deny' };
+    if (path === '/api/verse/activity/seen' || path === '/api/verse/sessions'
+      || path === '/api/verse/leader/thread' || path === '/api/verse/leader/directives') return { kind: 'write', path, stepUp: false };
+    if (path === '/api/verse/daemon' || path === '/api/verse/budget' || path === '/api/verse/authority'
+      || path === '/api/verse/leader') return { kind: 'write', path, stepUp: true };
+    const inbox = /^\/api\/inbox\/([^/]+)\/(approve|reject)$/.exec(path);
+    if (inbox && ACTION_ID.test(inbox[1]!)) return { kind: 'write', path, stepUp: true };
+    const sessionAction = /^\/api\/verse\/sessions\/([^/]+)\/(turns|cancel|terminate)$/.exec(path);
+    if (sessionAction && SESSION_ID.test(sessionAction[1]!)) {
+      return { kind: 'write', path, stepUp: sessionAction[2] !== 'turns' };
+    }
+    const queue = /^\/api\/verse\/queue\/([^/]+)$/.exec(path);
+    if (queue && SESSION_ID.test(queue[1]!)) return { kind: 'write', path, stepUp: false };
+    const leaderQuestion = /^\/api\/verse\/leader\/questions\/([^/]+)\/answer$/.exec(path);
+    if (leaderQuestion && ACTION_ID.test(leaderQuestion[1]!)) return { kind: 'write', path, stepUp: false };
+    const leaderApproval = /^\/api\/verse\/leader\/actions\/([^/]+)\/approve$/.exec(path);
+    if (leaderApproval && ACTION_ID.test(leaderApproval[1]!)) return { kind: 'write', path, stepUp: true };
+    return { kind: 'deny' };
+  }
+  if (method !== 'GET') return { kind: 'deny' };
   if (query === undefined && READ_ROUTES.has(path)) return { kind: 'read', path };
   if (/^\/api\/verse\/sessions\/([^/]+)$/.test(path) && query === undefined) {
     const id = path.slice('/api/verse/sessions/'.length);
@@ -85,6 +113,55 @@ export function classifyRemoteRoute(method: string | undefined, rawTarget: strin
     params.size === 0 || exactParams(params, { after: (v) => /^\d{1,15}$/.test(v) })
   )) return { kind: 'stream', path };
   return { kind: 'deny' };
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function keys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+function boundedText(value: unknown, max: number): boolean {
+  return typeof value === 'string' && value.trim().length > 0 && Buffer.byteLength(value, 'utf8') <= max && !value.includes('\0');
+}
+
+/** Exact body shapes, before the gateway adds its server-side local credential. */
+export function validateRemoteMutation(decision: RemoteRouteDecision, body: unknown): boolean {
+  if (decision.kind !== 'write') return false;
+  const { path } = decision;
+  if (/^\/api\/verse\/leader\/directives\/[^/]+$/.test(path)) return body === undefined || (record(body) && Object.keys(body).length === 0);
+  if (!record(body)) return false;
+  if (path === '/api/verse/activity/seen') return keys(body, ['sessionId', 'turnCount'])
+    && typeof body.sessionId === 'string' && SESSION_ID.test(body.sessionId)
+    && Number.isSafeInteger(body.turnCount) && (body.turnCount as number) >= 0;
+  if (path === '/api/verse/sessions') return keys(body, ['projectPath', 'seatId', 'model'])
+    && boundedText(body.projectPath, 1024) && boundedText(body.seatId, 128)
+    && (body.model === undefined || boundedText(body.model, 128));
+  if (path === '/api/verse/daemon') return keys(body, ['action'])
+    && typeof body.action === 'string' && ['start', 'stop', 'pause', 'resume'].includes(body.action);
+  if (path === '/api/verse/budget') return keys(body, ['mode'])
+    && typeof body.mode === 'string' && ['all-in', 'balanced', 'reserve'].includes(body.mode);
+  if (path === '/api/verse/authority') return (keys(body, ['action']) && body.action === 'stop')
+    || (keys(body, ['action', 'to']) && body.action === 'switch'
+      && typeof body.to === 'string' && ['off', 'propose', 'autonomous'].includes(body.to));
+  if (path === '/api/verse/leader') return (keys(body, ['action', 'actionId'])
+    && body.action === 'veto' && boundedText(body.actionId, 128))
+    || (keys(body, ['action', 'itemId']) && body.action === 'dismiss' && boundedText(body.itemId, 256));
+  if (path === '/api/verse/leader/thread') return keys(body, ['text', 'replyTo'])
+    && boundedText(body.text, 16_384)
+    && (body.replyTo === undefined || (typeof body.replyTo === 'string' && THREAD_ID.test(body.replyTo)));
+  if (path === '/api/verse/leader/directives') return keys(body, ['text']) && boundedText(body.text, 2_048);
+  if (/^\/api\/inbox\/[^/]+\/(approve|reject)$/.test(path)
+    || /^\/api\/verse\/leader\/actions\/[^/]+\/approve$/.test(path)
+    || /^\/api\/verse\/sessions\/[^/]+\/cancel$/.test(path)) return keys(body, []) && Object.keys(body).length === 0;
+  if (/^\/api\/verse\/sessions\/[^/]+\/terminate$/.test(path)) return keys(body, ['confirm']) && body.confirm === true;
+  if (/^\/api\/verse\/sessions\/[^/]+\/turns$/.test(path)
+    || /^\/api\/verse\/leader\/questions\/[^/]+\/answer$/.test(path)) return keys(body, ['text']) && boundedText(body.text, 64_000);
+  if (/^\/api\/verse\/queue\/[^/]+$/.test(path)) return keys(body, ['text', 'sendNow'])
+    && boundedText(body.text, 64_000) && (body.sendNow === undefined || typeof body.sendNow === 'boolean');
+  return false;
 }
 
 function oneHeader(value: string | string[] | undefined): string | null {
