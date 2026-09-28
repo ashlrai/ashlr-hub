@@ -213,10 +213,11 @@ export function browserMcpDepsFor(versePort: number | null): BrowserMcpDeps {
   return {
     run: async (sid, op, args, timeouts) => {
       const outcome = await runBrowserCommand(sid, op, args, timeouts);
-      // Desktop control (computer-bridge.ts): a page's text, console or pixels
-      // are someone else's words, so this turn's desktop actions now need the
-      // operator's confirmation card.
-      if (outcome.ok && (op === 'read-text' || op === 'console' || op === 'screenshot')) noteComputerUntrustedRead(sid);
+      // Every successful page response may carry untrusted words (including
+      // snapshot nodes, network URLs, tab titles and navigation titles).
+      // Computer-use after any of them needs its cross-tool confirmation.
+      // Confirmation cards carry an operator decision, not page content.
+      if (outcome.ok && op !== 'confirm') noteComputerUntrustedRead(sid);
       return outcome;
     },
 

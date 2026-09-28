@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { browserMcpDepsFor } from '../src/core/verse/browser-api.js';
+import { computerTurnReadUntrusted, endComputerTurn } from '../src/core/verse/computer-bridge.js';
 import {
   browserPolicy,
   canDispatchBrowserCommand,
@@ -23,8 +24,8 @@ import type { VerseMcpToolContext } from '../src/core/verse/verse-mcp.js';
 const SIDECAR = 'http://127.0.0.1:7777';
 const SESSION = 's1';
 
-beforeEach(() => { resetBrowserBridgeForTest(); resetVerseMcpGrantsForTest(); });
-afterEach(() => { resetBrowserBridgeForTest(); resetVerseMcpGrantsForTest(); });
+beforeEach(() => { resetBrowserBridgeForTest(); resetVerseMcpGrantsForTest(); endComputerTurn(SESSION); });
+afterEach(() => { resetBrowserBridgeForTest(); resetVerseMcpGrantsForTest(); endComputerTurn(SESSION); });
 
 function turnContext(): VerseMcpToolContext {
   const credential = mintVerseMcpTurn(SESSION, 'claude')!;
@@ -103,5 +104,25 @@ describe('the unified bearer-per-turn browser adapter', () => {
     setAgentToolsGrant(SESSION, { browser: 'act-localhost' }, SIDECAR);
     expect(canDispatchBrowserCommand(SESSION, command!.id)).toBe(false);
     expect(await pending).toMatchObject({ ok: false, code: 'access-off' });
+  });
+
+  it('taints subsequent computer use after snapshot, network, title or tab output', async () => {
+    setAgentToolsGrant(SESSION, { browser: 'look' }, SIDECAR);
+    await claimBrowserCommands(SESSION, { waitMs: 0 });
+    const deps = browserMcpDepsFor(7777);
+    for (const op of ['snapshot', 'network', 'status', 'tabs', 'navigate'] as const) {
+      endComputerTurn(SESSION);
+      const pending = deps.run(SESSION, op, op === 'navigate' ? { url: 'http://localhost:5173/' } : {});
+      const [command] = await claimBrowserCommands(SESSION, { waitMs: 0 });
+      completeBrowserCommand(SESSION, { id: command!.id, ok: true, url: 'http://localhost:5173/', data: { title: 'Page' } });
+      expect(await pending).toMatchObject({ ok: true });
+      expect([op, computerTurnReadUntrusted(SESSION)]).toEqual([op, true]);
+    }
+    endComputerTurn(SESSION);
+    const confirmation = deps.run(SESSION, 'confirm', { args: { action: 'x' } });
+    const [command] = await claimBrowserCommands(SESSION, { waitMs: 0 });
+    completeBrowserCommand(SESSION, { id: command!.id, ok: true, data: { decision: 'once' } });
+    await confirmation;
+    expect(computerTurnReadUntrusted(SESSION)).toBe(false);
   });
 });
