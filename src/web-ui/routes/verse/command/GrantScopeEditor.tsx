@@ -32,13 +32,14 @@ export interface EditableGrantDraft extends AuthorityGrantDraft {
   startStageId?: string;
   diff?: GrantDiffLine[];
   editable?: GrantDraftEditable;
+  eliteDirect?: boolean;
 }
 
 /** A draft with Mason's scope edits applied server-side, within its own draft. */
-export async function postGrantDraft(kind: 'new' | 'reapprove' | 'auto', scope: GrantScopeEdit): Promise<EditableGrantDraft> {
+export async function postGrantDraft(kind: 'new' | 'reapprove' | 'auto', scope: GrantScopeEdit, eliteDirect?: boolean): Promise<EditableGrantDraft> {
   const token = getMutationToken();
   if (!token) throw new VerseControlLockedError();
-  const result = await apiPost<EditableGrantDraft>(AUTHORITY_DRAFT_PATH, { kind, scope }, token);
+  const result = await apiPost<EditableGrantDraft>(AUTHORITY_DRAFT_PATH, { kind, scope, ...(eliteDirect === undefined ? {} : { eliteDirect }) }, token);
   touchMutationHold();
   return result;
 }

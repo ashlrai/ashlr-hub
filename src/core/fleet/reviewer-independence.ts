@@ -61,7 +61,19 @@ const REVIEW_ENGINE_FAMILIES: Readonly<Record<string, ReviewModelFamily>> = {
   // 3.15: the host-signed producer identity of a Devin PR taken in by the
   // cloud intake (`devin:<devin_mode>`, fleet/cloud-intake.ts).
   devin: 'devin',
+  // 3.15: the local Devin CLI lane records `devin-cli:<model>`.
+  'devin-cli': 'devin',
 };
+
+/**
+ * 3.15: a hosted agent runs OTHER vendors' models (Devin serves SWE-2, GPT-6,
+ * Claude …), so a model suffix naming a vendor refines nothing and must not
+ * turn `devin-cli:gpt-6-sol` into `unknown`: the family stays `devin`, whose
+ * judge preference and two-judge rule already assume an undisclosed vendor.
+ */
+function engineKeepsFamily(engineFamily: ReviewModelFamily): boolean {
+  return engineFamily === 'devin';
+}
 
 /** Index of the first `:` or `/` (the engine/model separator), or -1. */
 function separatorIndex(normalized: string): number {
@@ -79,6 +91,7 @@ export function reviewModelFamily(value: unknown): ReviewModelFamily {
 
   const engineFamily = REVIEW_ENGINE_FAMILIES[normalized.slice(0, separator)];
   if (!engineFamily) return 'unknown';
+  if (engineKeepsFamily(engineFamily)) return engineFamily;
   const modelFamily = agentSemanticModelFamily(normalized.slice(separator + 1));
   if (modelFamily !== 'unknown' && modelFamily !== engineFamily) return 'unknown';
   return engineFamily;
@@ -99,6 +112,7 @@ export function producerModelFamily(value: unknown): ReviewModelFamily {
   const engine = normalized.slice(0, separator);
   const engineFamily = REVIEW_ENGINE_FAMILIES[engine];
   if (!engineFamily) return 'unknown';
+  if (engineKeepsFamily(engineFamily)) return engineFamily;
 
   const model = normalized.slice(separator + 1);
   const modelFamily = reviewModelFamily(model);
@@ -166,7 +180,9 @@ const OPENAI_JUDGE_ENGINES: ReadonlySet<string> = new Set(['codex', 'openai']);
 
 function isOpenAiFrontierModel(model: string): boolean {
   // gpt-4* is intentionally excluded (gpt-4-mini etc. are not frontier-tier judges).
-  return model.startsWith('gpt-5') || model.startsWith('codex-') || model === 'codex';
+  // 3.15: gpt-6 (Codex's current Astra / Sol / Luna) is frontier too; it was
+  // refused as a judge only because the rule predates it.
+  return model.startsWith('gpt-5') || model.startsWith('gpt-6') || model.startsWith('codex-') || model === 'codex';
 }
 
 /**
@@ -342,12 +358,22 @@ export function evaluateTwoJudgeRule(
  *    families, neither Devin). G6 itself already refuses to pass a Devin
  *    proposal on one judge (merge-gates.ts evaluateG6); this re-check at
  *    merge time is the second lock. Anything missing ⇒ shadow.
+ *    3.15 elite self-land: (b) is replaced by `eliteDirect` — the caller's
+ *    merge-time re-check that the live stage is still `elite-direct` and the
+ *    signed producer model is still on the elite allowlist (G6 passed on
+ *    that basis, with no judge). (a) still applies: Devin must be signed in.
  */
 export function producerMergeWithheld(
   producerFamily: ReviewModelFamily,
-  evidence: { devinGranted?: boolean; producerModel?: string | null; judgeIds?: readonly unknown[] | null } = {},
+  evidence: {
+    devinGranted?: boolean;
+    producerModel?: string | null;
+    judgeIds?: readonly unknown[] | null;
+    eliteDirect?: boolean;
+  } = {},
 ): 'shadow' | null {
   if (producerFamily !== 'devin') return null;
   if (evidence.devinGranted !== true) return 'shadow';
+  if (evidence.eliteDirect === true) return null;
   return evaluateTwoJudgeRule(evidence.producerModel, evidence.judgeIds).satisfied ? null : 'shadow';
 }

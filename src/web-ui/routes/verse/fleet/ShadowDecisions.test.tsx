@@ -51,7 +51,7 @@ describe('Shadow decisions on Fleet', () => {
     });
     const user = userEvent.setup();
     render(<FleetSection />);
-    const card = await screen.findByRole('region', { name: 'Shadow decisions' }, { timeout: 3_000 });
+    const card = await screen.findByRole('region', { name: 'Merge decisions' }, { timeout: 3_000 });
     expect(card).toHaveTextContent('1 would merge · 0 merged · 1 refused');
 
     const rows = within(within(card).getByRole('list', { name: 'Decisions, newest first' })).getAllByRole('listitem', { name: undefined }).filter((li) => li.hasAttribute('data-outcome'));
@@ -86,7 +86,7 @@ describe('Shadow decisions on Fleet', () => {
     const now = Date.now();
     stubSurfaceFetch({ now, routes: { '/api/verse/authority': shadowStatus(now) } });
     render(<FleetSection />);
-    const card = await screen.findByRole('region', { name: 'Shadow decisions' }, { timeout: 3_000 });
+    const card = await screen.findByRole('region', { name: 'Merge decisions' }, { timeout: 3_000 });
     expect(await within(card).findByText(/No proposal has been through the merge gates under this grant yet/)).toBeInTheDocument();
     expect(screen.queryByRole('list', { name: 'Ladder regressions' })).toBeNull();
   });
@@ -95,14 +95,14 @@ describe('Shadow decisions on Fleet', () => {
     stubSurfaceFetch({ kind: 'dark' });
     render(<FleetSection />);
     await screen.findByRole('region', { name: 'Repositories' }, { timeout: 3_000 });
-    expect(screen.queryByRole('region', { name: 'Shadow decisions' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Merge decisions' })).toBeNull();
   });
 
   it('shows the server’s reason when the decisions view is not in this build', async () => {
     const now = Date.now();
     stubSurfaceFetch({ now, routes: { '/api/verse/authority': shadowStatus(now), '/api/verse/authority/ledger': null } });
     render(<FleetSection />);
-    const card = await screen.findByRole('region', { name: 'Shadow decisions' }, { timeout: 3_000 });
-    expect(await within(card).findByText(/Shadow decisions is not in this build yet/)).toBeInTheDocument();
+    const card = await screen.findByRole('region', { name: 'Merge decisions' }, { timeout: 3_000 });
+    expect(await within(card).findByText(/Merge decisions is not in this build yet/)).toBeInTheDocument();
   });
 });

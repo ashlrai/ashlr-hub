@@ -1435,7 +1435,8 @@ export async function captureSandboxedProposal(
   opts: CaptureSandboxedProposalOptions,
 ): Promise<SandboxedEngineResult> {
   const model = opts.model ?? cfg.foundry?.models?.[engine];
-  const engineModel = `${engine}:${resolveConcreteModel(engine, cfg, model)}`;
+  // 3.15: record the model that ran (see runEngineSandboxed).
+  const engineModel = `${engine}:${model ?? resolveConcreteModel(engine, cfg)}`;
   const tier = engineTierOf(engine, cfg);
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -1848,7 +1849,11 @@ export async function runEngineSandboxed(
     ? resolveDevinCliFleetModel(cfg.devin, opts.model)
     : opts.model ?? cfg.foundry?.models?.[engine] ??
       ((engine as string) === GROK_CLI_ENGINE_ID ? resolveEngineSpec(engine, cfg)?.defaultModel : undefined);
-  const engineModel = isDevinCli ? `${engine}:${model}` : `${engine}:${resolveConcreteModel(engine, cfg, model)}`;
+  // 3.15: when a model is NAMED on the argv, the signed identity records that
+  // model — never a config pin the argv overrode (opts.model wins on argv).
+  // Elite self-land trusts this identity in place of a judge, so it must say
+  // what actually ran. With no model on argv, M127's resolution is unchanged.
+  const engineModel = isDevinCli ? `${engine}:${model}` : `${engine}:${model ?? resolveConcreteModel(engine, cfg)}`;
   const tier = engineTierOf(engine, cfg);
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -3209,7 +3214,8 @@ export async function runApiModelSandboxed(
 
   const modelFromCfg = opts.model ?? cfg.foundry?.models?.[engine] ?? spec.api.defaultModel ?? '';
   const model = modelFromCfg || (spec.api.defaultModel ?? '');
-  const engineModel = `${engine}:${resolveConcreteModel(engine, cfg, model || undefined)}`;
+  // 3.15: the identity names the model this API call uses (see runEngineSandboxed).
+  const engineModel = `${engine}:${model || resolveConcreteModel(engine, cfg)}`;
   const tier = engineTierOf(engine, cfg);
   const id = assertSafeExecutionIdentity(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,

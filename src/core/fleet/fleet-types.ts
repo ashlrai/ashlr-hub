@@ -280,6 +280,12 @@ export interface LandingRecord {
   producer: LandingProducer | null;
   /** null for a revert (reverts skip G6). */
   judgeId: JudgeId | null;
+  /**
+   * 3.15 elite self-land: the elite model's label (authority/elite-models.ts,
+   * e.g. "GPT-6 Sol") when G6 passed on deterministic verification with no
+   * judge; null / absent otherwise (absent on rows written before 3.15).
+   */
+  eliteModel?: string | null;
   /** When the proposal was created — cycle time = landedAt − proposedAt; null = unknown. */
   proposedAt: string | null;
   landedAt: string;

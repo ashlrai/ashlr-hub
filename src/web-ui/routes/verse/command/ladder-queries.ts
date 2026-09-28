@@ -21,4 +21,4 @@ export const DECISIONS_KEY = 'verse-authority-decisions';
 /** Decisions change once per fleet tick at most; half a minute keeps both surfaces current. */
 export const DECISIONS_POLL_MS = 30_000;
 
-export const decisionsQuery = optionalQuery(DECISIONS_KEY, AUTHORITY_DECISIONS_PATH, 'Shadow decisions', narrowDecisions);
+export const decisionsQuery = optionalQuery(DECISIONS_KEY, AUTHORITY_DECISIONS_PATH, 'Merge decisions', narrowDecisions);

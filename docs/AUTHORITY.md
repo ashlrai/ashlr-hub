@@ -23,7 +23,10 @@ only when the stage names `devin` and judges from two different families
 approved it; otherwise it is shadow ([DEVIN.md](DEVIN.md)). Signing a grant
 that names Devin needs custody helper 1.1.0 or later. You can talk to the
 Leader and set directives ([LEADER.md](LEADER.md)), but nothing said in that
-conversation widens the grant.
+conversation widens the grant. **Elite self-land:** under a grant whose stage
+is `elite-direct`, work by an elite model (Opus 5.5/5, Fable 5.1/5, Sonnet 5,
+GPT-6 Astra/Sol/Luna, Grok 4.7/4.6, SWE-2, Qwen 3.8 27B) lands on green tests
+with no judge. Devin CLI can qualify; Devin cloud still needs two judges (§1a).
 
 ## 1. The model
 
@@ -59,6 +62,136 @@ The grant carries a signed **rollout ladder**, which runs shadow → 2a → 2b �
 2c → 3a…3d. The daemon climbs one rung when that rung's criteria are met and
 drops one rung on a breach. It can never go past the last rung you signed, and
 neither the Leader nor config can skip a rung or edit one.
+
+## 1a. Elite self-land (3.15)
+
+**Eligible elite models land directly on green tests without a judge.**
+This is your decision of 2026-09-27: Codex, Claude Code, Grok and Devin CLI can
+self-merge verified PRs when they run an elite model. A repository's deploy
+pipeline determines when that merge reaches production. This path is on only
+while the grant's **current stage is `elite-direct`**, and only you can sign that stage,
+with Touch ID.
+
+**What changes.** When the signed producer identity (`proposal.engineModel`,
+`<engine>:<model>`, host-signed provenance) is on the elite allowlist, gate G6
+passes with the code `elite-direct` and **no judge is asked**. There is no
+judge seat to wait for, no cross-family rule, and no two-judge rule for Devin.
+G5's red team, when you have it on, runs only its deterministic half, which
+still blocks injected secrets and destructive diffs. Every other producer
+keeps the existing judge path (G6 as before, two judges for non-elite Devin
+work).
+
+**What still gates an elite landing.** None of these is a model's opinion:
+
+| Gate | What it checks |
+|---|---|
+| G0 | Stop is off, the grant is live, the repo is enrolled at `merge`, no hold, under the daily cap |
+| G1 | Tier-1 self-protection: a change to authority or guardrail code goes to your owner lane and never self-lands |
+| G1b | No test tampering (removed assertions, `.skip`, `.only`, snapshot edits) |
+| G2 | Risk and size caps (compiled ceiling 10 files / 300 lines, medium risk; local work and local-enforcement repos lower) |
+| G3 | The repo's own verify commands (tests) pass on the exact tree, off the current base |
+| G4 | The producer's report matches its diff |
+| G7 | Every required check is green on the PR head, including the App's host-verified `ashlr/verify`; the merge is SHA-pinned |
+| After | The post-merge watch reruns checks and **automatically reverts** a landing that goes red; repeated failures hold the repo and can soft-kill the fleet |
+
+At merge time the pass re-checks that the stage is still `elite-direct` and
+the model is still allowed. If either has lapsed, the PR is held for you as a
+would-merge and never merges unjudged.
+
+**The allowlist** (`src/core/authority/elite-models.ts`, a Tier-1 file the
+fleet can never change). An identity matches only when both the engine
+prefix and the exact model id are listed. Matching is case-insensitive, and a
+trailing context tag such as `[1m]` is ignored.
+
+| Model | Engines | Model ids matched |
+|---|---|---|
+| Claude Opus 5.5 | `claude`, `claude-cli`, `anthropic`, `devin-cli` | `claude-opus-5-5`, `opus-5-5` |
+| Claude Opus 5 | same | `claude-opus-5`, `opus-5`, `claude-opus-5.5` (the retired alias that ran Opus 5) |
+| Claude Fable 5.1 | same | `claude-fable-5-1`, `fable-5-1` |
+| Claude Fable 5 | same | `claude-fable-5`, `fable-5` |
+| Claude Sonnet 5 | same | `claude-sonnet-5`, `sonnet-5` |
+| GPT-6 Astra / Sol / Luna | `codex`, `openai`, `devin-cli` | `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, each also with `-minimal`, `-low`, `-medium`, `-high`, `-xhigh` or `-max` |
+| Grok 4.7 | `grok-cli` | `grok-4.7`, `grok-4.7-build-fast` |
+| Grok 4.6 | `grok-cli` | `grok-4.6`, `grok-4.6-build` |
+| SWE-2 | `devin-cli` | `swe-2`, `swe-2-high`, `swe-2-medium`, `swe-2-max`, `swe` |
+| Qwen 3.8 27B | `local`, `local-coder`, `ollama` | `qwen3.8:27b`, `qwen3.8:27b-ctx64k`, `qwen3.8:27b-q8_0` |
+
+These are **never** elite, and fail closed:
+
+- A bare id with no engine.
+- Version-less aliases: `claude:opus` and `claude:sonnet` resolve to Claude
+  4.x in the fleet catalog.
+- The per-token Grok API engine (`grok:`).
+- `llama-server:`, which serves whatever weights it loaded whatever tag the
+  record carries.
+- A local runtime serving a vendor-named model.
+- `claude:cloud` and every `devin:` identity: the cloud intakes do not provide
+  host-verifiable model identity.
+- Any id not listed.
+
+**Configuration only narrows it.** `foundry.autoMerge.eliteModels` can list
+entry ids (`["gpt-6-sol", "grok-4.7"]`) to keep only those, or be `false` to
+turn elite self-land off. Unknown ids are ignored; a malformed explicit value
+also turns it off. Adding a model means editing the Tier-1 file in your own PR.
+
+**Turning it on.** Several commands offer it, each with a one-line
+explanation:
+
+- `ashlr authority setup` offers it at the first grant.
+- `ashlr authority grant` and `re-approve` ask about it, or take
+  `--elite-direct` / `--no-elite-direct`.
+- `ashlr authority draft --elite-direct` shows the grant without signing it.
+- Verse's grant sheet has an **Elite direct** checkbox that fetches that draft.
+
+An elite-direct grant has **one rung**, `elite-direct`. Every enrolled repo
+sits at the stage the grant signs for it (a repo without a verify command
+still only proposes), every granted engine is included (so Codex's GPT-6
+produces from day one), the grant's own caps apply, and each repo keeps its
+signed merges-per-day. There is no ramp. A sandbox violation, a reserve
+breach or reverts above 10% restart the rung's evidence window. Choosing it
+never widens the Leader: a new grant gets no Leader classes, and a
+re-approval keeps the classes of the rung you had reached. A re-approval of
+an elite-direct grant continues it. To go back to the judged ladder, sign a
+new grant, which starts at shadow.
+
+The custody helper signs this grant as it is: `elite-direct` is an ordinary
+stage id, so **no helper reinstall is needed**. The Touch ID prompt lists it
+among the stages.
+
+**Parallel throughput.**
+
+- The standing pass now works through repos in parallel:
+  `foundry.autoMerge.repoLanes`, default 4, and `1` restores one at a time.
+- Within a repo, work stays one queue: its open PRs first, then its
+  proposals, oldest first.
+- The per-pass verification budget rose from 2 to 4
+  (`verifyBeforeJudgePerPass`), so both machine verification slots are used.
+- Elite work spends nothing from the per-pass judge budget.
+
+The limits that remain are:
+
+- the daemon's 5-minute tick;
+- two verification slots per machine and one per repo
+  (`sandbox/execution-leases.ts`);
+- each repo's daily merge cap (at most 24; 4 on local-enforcement repos);
+- the size and risk ceilings.
+
+**Decisions left to you** (kept, not removed; tell us to change them):
+
+- **Size and risk ceilings.** 10 files / 300 lines and medium risk are
+  compiled into both the verifier and the custody helper. Larger elite
+  changes are refused at G2, or wait there.
+- **Local work and local-enforcement repos.** Work a local model wrote,
+  including elite Qwen 3.8, and work on private free-plan repos stays at low
+  risk, 4 files / 150 lines. Local-enforcement repos are also held to 4
+  merges a day.
+- **Claude as a producer.** The default grant gives the Claude seat judge and
+  leader roles only, keeping it in reserve for you. Opus and Fable produce
+  autonomously only through a seat you give the `producer` role.
+- **Your config.** `allowSelfMerge: false` keeps ashlr-hub propose-only,
+  whatever the grant says.
+- **Cloud intakes.** `claude:cloud` and `devin:<mode>` record no model. To
+  make cloud sessions elite, they would have to record the model they ran.
 
 ## 2. Custody
 
@@ -158,8 +291,9 @@ step's command to copy.
     key's sha256, so a rerun leaves that key alone. Rotating again would
     invalidate every pending proposal. `ashlr authority rotate-provenance`
     still rotates whenever you run it, and records that rotation too.
-11. **First grant.** You sign the first grant (Touch ID). If you agree, setup
-    then sets the switch to Autonomous; the ladder starts in shadow.
+11. **First grant.** You sign the first grant (Touch ID). Setup first offers
+    elite-direct in one line (§1a); say no and the ladder starts in shadow.
+    If you agree, setup then sets the switch to Autonomous.
 
 12. **Resident daemon.** Press **Start** in the desktop app's Fleet tab (3.15),
     or run `ashlr authority resident start` in your own terminal. Either way
@@ -201,7 +335,8 @@ installed plist has drifted from config.
   tick. It says nothing about correctness, and no gate reads it that way. G3
   still verifies the exact tree in the mirror, G4 checks the session's
   (UNVERIFIED) report against the diff, G6 requires a codex or Grok judge (the
-  producer family is `claude`), and G7 requires the App's green
+  producer family is `claude`; `claude:cloud` names no model, so it is never
+  elite-direct), and G7 requires the App's green
   `ashlr/verify`. G1 (protected paths go to the owner lane) and G1b are
   unchanged. The cloud PR is closed as "superseded" once the App PR exists,
   and the tracker follows the App PR to `merged`. Details:
@@ -294,6 +429,20 @@ installed plist has drifted from config.
     and what lands is the verified tree, not the cloud branch. The gh
     identity that closes the superseded cloud PR is yours (the cloud lane's
     `gh`), not the App's.
+21. **Elite self-land trusts the recorded model.** G6 no longer asks a judge
+    about elite work, so the producer identity has to be what actually ran.
+    The host builds it from its own dispatch, never from what the agent says.
+    Since 3.15 it names the model passed to the CLI whenever one is passed.
+    Two gaps remain:
+    - When no model is passed, claude and codex run their CLI's own default
+      while the record names the registry default (`claude-opus-4-8`,
+      `gpt-5.5`, or `ASHLR_MODEL`). Both defaults are non-elite, so this fails
+      closed unless `ASHLR_MODEL` names an elite model.
+    - `llama-server` is excluded outright.
+
+    What stands in for the judge is your test suite: a repo whose tests are
+    thin gets thin protection. The post-merge watch and its automatic revert
+    are the backstop.
 
 ## 7. Nightly oversight
 
