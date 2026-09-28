@@ -44,6 +44,7 @@ import {
   setBrowserOriginAllowed,
 } from './browser-bridge.js';
 import { handleBrowserMcpBody, type BrowserMcpDeps } from './browser-mcp.js';
+import { noteComputerUntrustedRead } from './computer-bridge.js';
 import {
   VERSE_BROWSER_ACCESS_PATH,
   VERSE_BROWSER_ALLOW_PATH,
@@ -203,7 +204,14 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse, grant: strin
 /** The Browser pane relay as the MCP tools see it — shared with Verse's one MCP server (verse-mcp-api.ts). */
 export function browserMcpDepsFor(versePort: number | null): BrowserMcpDeps {
   return {
-    run: (sid, op, args) => runBrowserCommand(sid, op, args),
+    run: async (sid, op, args) => {
+      const outcome = await runBrowserCommand(sid, op, args);
+      // Desktop control (computer-bridge.ts): a page's text, console or pixels
+      // are someone else's words, so this turn's desktop actions now need the
+      // operator's confirmation card.
+      if (outcome.ok && (op === 'read-text' || op === 'console' || op === 'screenshot')) noteComputerUntrustedRead(sid);
+      return outcome;
+    },
     versePort,
     allowedOrigins: allowedOriginsFor,
     recordBlocked: recordBrowserBlocked,

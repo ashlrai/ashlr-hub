@@ -173,7 +173,11 @@ export function DraftScope({ draft }: { draft: AuthorityGrantDraft }) {
             </li>
           ))}
         </ol>
-        <p className={styles.scopeMeta}>Any sandbox violation or reserve breach drops it back one stage. It can never climb past the last stage.</p>
+        <p className={styles.scopeMeta}>
+          {g.rollout.stages.length === 1 && g.rollout.stages[0]?.id === ELITE_DIRECT_STAGE_ID
+            ? 'A sandbox violation, reserve breach, or reverts above 10% restart this rung’s evidence window. Elite direct remains the signed merge ceiling until you stop, revoke, or replace the grant.'
+            : 'Any sandbox violation or reserve breach drops it back one stage. It can never climb past the last stage.'}
+        </p>
       </section>
 
       <p className={styles.scopeMeta}>

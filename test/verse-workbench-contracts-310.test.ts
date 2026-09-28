@@ -175,6 +175,8 @@ const EXPECTED_HANDLERS: Record<WorkbenchRouteFamilyId, string> = {
   browser: 'handleBrowserApi',
   // 3.15 agent tools: Verse's one MCP server for every seat, and the Agent tools sheet.
   'agent-tools': 'handleVerseMcpApi',
+  // 3.15: desktop control for agents (the Verse window's relay, grants, KILL).
+  computer: 'handleComputerApi',
   // 3.16: every model working together (Auto seat, compare, escalation, meter).
   multimodel: 'handleMultimodelApi',
   // 3.15: per-turn checkpoints, the Changes pane and Undo/Redo.
@@ -287,7 +289,10 @@ describe('the real workbench mount table', () => {
   });
 
   it("imports each family's OWN module by a literal specifier inside a try (what bun --compile needs)", () => {
-    const source = fs.readFileSync(VERSE_API_SOURCE, 'utf8');
+    const fullSource = fs.readFileSync(VERSE_API_SOURCE, 'utf8');
+    // Other code may import the same module for a separate guarded operation.
+    // This contract governs the workbench importer table itself.
+    const source = fullSource.split('const WORKBENCH_IMPORTS:')[1]?.split('/** The importer table,')[0] ?? '';
     for (const family of WORKBENCH_ROUTE_FAMILIES) {
       const file = path.basename(family.module).replace(/\.ts$/, '.js');
       const literal = `import('./${file}' as string)`;
