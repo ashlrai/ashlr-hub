@@ -163,8 +163,8 @@ export async function establishReadSession(rawReadToken: string): Promise<void> 
 
 export async function clearReadSession(): Promise<void> {
   if (isRemoteMobileMode()) {
-    await (await import('./remote-session.js')).logoutRemoteDevice();
-    expireNow();
+    try { await (await import('./remote-session.js')).logoutRemoteDevice(); }
+    finally { expireNow(); }
     return;
   }
   try {

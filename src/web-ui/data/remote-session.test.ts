@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   authenticateRemoteDevice, canRemoteWrite, claimRemotePairing, clearRemoteSessionForTest, directCsrfWrite, probeRemoteSession, remotePairStatus,
-  remoteMutate, remotePushPublicKey, subscribeRemotePush,
+  remoteMutate, remotePushPublicKey, subscribeRemotePush, logoutRemoteDevice,
 } from './remote-session.js';
 
 vi.mock('@simplewebauthn/browser', () => ({
@@ -115,5 +115,49 @@ describe('remote phone session', () => {
       expect(headers.has('x-ashlr-token')).toBe(false);
       expect(headers.has('x-ashlr-read-client')).toBe(false);
     }
+  });
+
+  it('removes this device’s push subscription before signing out', async () => {
+    const calls: Array<{ path: string; init: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init: RequestInit) => {
+      calls.push({ path, init });
+      if (path === '/remote/session') return Response.json({ ...ready, capabilities: { pairing: true, writes: true, push: true } });
+      if (path === '/remote/push/subscribe' || path === '/remote/logout') return new Response(null, { status: 204 });
+      throw new Error(`unexpected ${path}`);
+    }));
+    await probeRemoteSession();
+    expect(canRemoteWrite()).toBe(true);
+    await logoutRemoteDevice();
+    expect(calls.map((call) => [call.init.method, call.path])).toEqual([
+      ['GET', '/remote/session'], ['DELETE', '/remote/push/subscribe'], ['POST', '/remote/logout'],
+    ]);
+    for (const call of calls.slice(1)) {
+      const headers = new Headers(call.init.headers);
+      expect(headers.get('x-ashlr-remote-csrf')).toBe(csrfToken);
+      expect(headers.has('x-ashlr-token')).toBe(false);
+    }
+    expect(canRemoteWrite()).toBe(false);
+  });
+
+  it('continues logout after push removal fails and drops local authority even offline', async () => {
+    const calls: string[] = [];
+    let offline = false;
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      calls.push(path);
+      if (path === '/remote/session') return Response.json({ ...ready, capabilities: { pairing: true, writes: true, push: true } });
+      if (path === '/remote/push/subscribe') throw new Error('network down');
+      if (path === '/remote/logout' && !offline) return new Response(null, { status: 204 });
+      throw new Error('network down');
+    }));
+    await probeRemoteSession();
+    await expect(logoutRemoteDevice()).resolves.toBeUndefined();
+    expect(calls).toEqual(['/remote/session', '/remote/push/subscribe', '/remote/logout']);
+    expect(canRemoteWrite()).toBe(false);
+
+    await probeRemoteSession();
+    offline = true;
+    await expect(logoutRemoteDevice()).rejects.toThrow('network down');
+    expect(calls.slice(3)).toEqual(['/remote/session', '/remote/push/subscribe', '/remote/logout']);
+    expect(canRemoteWrite()).toBe(false);
   });
 });

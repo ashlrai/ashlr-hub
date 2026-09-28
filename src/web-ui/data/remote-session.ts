@@ -115,6 +115,16 @@ async function remotePost(path: string, body: unknown): Promise<unknown> {
   return jsonResponse(res);
 }
 
+async function remoteDelete(path: string): Promise<void> {
+  const csrf = session?.csrfToken;
+  if (!csrf) throw new RemoteClientError('Connect this phone to the gateway before continuing.');
+  const res = await fetch(path, {
+    method: 'DELETE', credentials: 'same-origin', cache: 'no-store', redirect: 'manual',
+    headers: { 'x-ashlr-remote-csrf': csrf },
+  });
+  if (res.status !== 204) throw new RemoteClientError('The Mac could not remove this phone’s push subscription.', res.status);
+}
+
 /** A fresh cookie and CSRF token come from the gateway, never browser storage. */
 export async function probeRemoteSession(): Promise<RemoteSession> {
   session = null;
@@ -178,8 +188,21 @@ export async function authenticateRemoteDevice(deviceId: string): Promise<Remote
 }
 
 export async function logoutRemoteDevice(): Promise<void> {
-  await remotePost('/remote/logout', {});
-  session = null;
+  try {
+    // Stop this device's generic alerts before dropping the cookie. Failure
+    // must not prevent sign-out; Mac-side device revocation is the authority
+    // when a lost or offline phone cannot complete either request.
+    if (session?.authenticated && session.capabilities.push) {
+      try { await remoteDelete('/remote/push/subscribe'); }
+      catch { /* continue with logout even if push is unavailable */ }
+    }
+    await remotePost('/remote/logout', {});
+  } finally {
+    // The server may be offline, but this page must immediately lose its
+    // in-memory session and act capability. The HttpOnly cookie is only
+    // cleared by a successful server response or by Mac-side revocation.
+    session = null;
+  }
 }
 
 /** Push is dormant until the gateway explicitly advertises and mounts it. */
