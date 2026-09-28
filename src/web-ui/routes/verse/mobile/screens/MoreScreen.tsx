@@ -67,7 +67,7 @@ function useStandalone(): boolean | null {
 }
 
 export function MoreScreen() {
-  const { permissions, reachability, navigate } = useMobile();
+  const { permissions, reachability, activity, navigate } = useMobile();
   const hold = useMutationHold();
   const theme = useTheme();
   const standalone = useStandalone();
@@ -121,6 +121,9 @@ export function MoreScreen() {
   };
 
   const reach = REACH[reachability];
+  const reachDetail = reachability === 'offline' && activity.updatedAt === null
+    ? 'This phone has no network. No update yet.'
+    : reach.detail;
 
   return (
     <Screen title="More" large label="More">
@@ -170,7 +173,7 @@ export function MoreScreen() {
       </Section>
 
       <Section title="Connection">
-        <Row title="Your Mac" subtitle={reach.detail} trailing={<Badge tone={reach.tone}>{reach.word}</Badge>} />
+        <Row title="Your Mac" subtitle={reachDetail} trailing={<Badge tone={reach.tone}>{reach.word}</Badge>} />
       </Section>
       <div className={styles.actions}>
         <Button variant="destructiveTinted" block onClick={() => setSignOutOpen(true)}>Sign out of this device</Button>
