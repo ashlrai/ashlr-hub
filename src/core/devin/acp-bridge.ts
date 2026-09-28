@@ -13,9 +13,10 @@
  * conversation turn after turn.
  *
  * PROTOCOL (ACP v1, newline-delimited JSON-RPC 2.0 on stdio):
- *   → initialize {protocolVersion: 1, clientCapabilities: {fs: off, terminal: off}}
- *   → session/load {sessionId, cwd, mcpServers: []}   (resume; history replay is ignored)
- *     or session/new {cwd, mcpServers: []} → {sessionId}   (model: `acp --model`)
+ *   → initialize {protocolVersion: 1, clientCapabilities: {fs: off, terminal: <terminal scope>}}
+ *   → session/load {sessionId, cwd, mcpServers}   (resume; history replay is ignored)
+ *     or session/new {cwd, mcpServers} → {sessionId}   (model: `acp --model`)
+ *     (`mcpServers: []` unless agent tools are on)
  *   → session/set_config_option {sessionId, configId, value}  (resume only: the
  *     chat's model, when it differs from the loaded conversation's — nextDevinModelStep)
  *   → session/prompt {sessionId, prompt: [{type: 'text', text}]} → {stopReason}
@@ -25,8 +26,18 @@
  *     chat's permission mode — Plan allows read-only tool kinds and rejects
  *     the rest; every other mode allows (Accept edits runs with `--sandbox`,
  *     so exec-tool processes can write only inside the workspace).
- *   ← any other agent→client request (fs/*, terminal/*: capabilities we did
- *     not advertise) → JSON-RPC "method not found".
+ *   ← terminal/* (3.15 agent tools, only when the chat's grant holds the
+ *     `terminal` scope — then `clientCapabilities.terminal` is advertised):
+ *     served in a VISIBLE Verse terminal tab through Verse's MCP server
+ *     (acp-terminal.ts), under the same rules as every other seat.
+ *   ← any other agent→client request (fs/*: a capability we do not
+ *     advertise) → JSON-RPC "method not found".
+ *
+ * AGENT TOOLS. With any scope on, session/new|load carry ONE mcpServers
+ * entry, Verse's own (`ashlr-verse`): http with the turn's bearer header
+ * when Devin advertises `mcpCapabilities.http`, else the stdio bridge
+ * (`ashlr verse-mcp-stdio`) reading the turn's 0600 token file. Without
+ * tools on it stays `mcpServers: []`.
  *   → session/cancel (notification) on Stop, then the process is killed.
  *
  * PULL REQUESTS. The local agent opens PRs itself (`gh pr create`), so the
@@ -52,6 +63,7 @@ import { scrubSecrets } from '../util/scrub.js';
 import { findGithubPrUrls, recordDevinCliPrs, type DevinCliPr } from './cli-prs.js';
 import type { DevinTurnLine, DevinTurnPayload } from './turn-protocol.js';
 import { DEVIN_TURN_EXIT, type DevinTurnIo } from './chat-runner.js';
+import { acpMcpServers, createAcpTerminalRouter } from './acp-terminal.js';
 
 export interface DevinAcpDeps {
   spawn?: typeof nodeSpawn;
@@ -63,6 +75,8 @@ export interface DevinAcpDeps {
   cancelGraceMs?: number;
   /** Record PRs the turn printed for this chat; returns the ones new to it (default: cli-prs.ts). */
   recordPrs?: (verseSessionId: string, found: ReadonlyArray<Pick<DevinCliPr, 'url' | 'repo' | 'number'>>) => ReadonlyArray<Pick<DevinCliPr, 'url'>>;
+  /** Reaches Verse's MCP server for terminal/* (default: global fetch). */
+  fetch?: typeof fetch;
 }
 
 const ACP_PROTOCOL_VERSION = 1;
@@ -296,6 +310,10 @@ export async function runDevinCliTurn(payload: DevinTurnPayload, io: DevinTurnIo
   const openTools = new Set<string>();
 
   const emit = (line: DevinTurnLine): void => io.emit(line);
+  const verseMcp = payload.verseMcp ?? null;
+  const terminals = verseMcp && verseMcp.scopes.includes('terminal')
+    ? createAcpTerminalRouter(verseMcp, { ...(deps.fetch ? { fetch: deps.fetch } : {}), signal: io.signal, sleep: io.sleep })
+    : null;
   const recordPrs = deps.recordPrs ?? ((chat, found) => recordDevinCliPrs(chat, found));
   /** URLs the operator typed are theirs, not something this turn opened. */
   const typedUrls = new Set(findGithubPrUrls(payload.text).map((p) => p.url.toLowerCase()));
@@ -402,6 +420,10 @@ export async function runDevinCliTurn(payload: DevinTurnPayload, io: DevinTurnIo
       write({ id, result: { outcome: optionId === null ? { outcome: 'cancelled' } : { outcome: 'selected', optionId } } });
       return;
     }
+    if (terminals?.handles(method)) {
+      void terminals.handle(method, params).then((answer) => write({ id, ...answer }));
+      return;
+    }
     write({ id, error: { code: -32601, message: 'Method not found' } });
   };
 
@@ -500,10 +522,11 @@ export async function runDevinCliTurn(payload: DevinTurnPayload, io: DevinTurnIo
   try {
     const init = await request('initialize', {
       protocolVersion: ACP_PROTOCOL_VERSION,
-      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: terminals !== null },
     });
     const caps = isRecord(init) && isRecord(init['agentCapabilities']) ? init['agentCapabilities'] : {};
     const cwd = payload.projectPath;
+    const mcpServers = acpMcpServers(verseMcp, caps);
 
     if (payload.nativeId) {
       if (caps['loadSession'] !== true) {
@@ -512,7 +535,7 @@ export async function runDevinCliTurn(payload: DevinTurnPayload, io: DevinTurnIo
       replaying = true;
       let loaded: unknown;
       try {
-        loaded = await request('session/load', { sessionId: payload.nativeId, cwd, mcpServers: [] });
+        loaded = await request('session/load', { sessionId: payload.nativeId, cwd, mcpServers });
       } catch (error) {
         replaying = false;
         if (error instanceof AcpError && (error.rpcCode === -32000 || /auth|log ?in/i.test(error.message))) return await failWith(loginHint);
@@ -541,7 +564,7 @@ export async function runDevinCliTurn(payload: DevinTurnPayload, io: DevinTurnIo
         }
       }
     } else {
-      const created = await request('session/new', { cwd, mcpServers: [] });
+      const created = await request('session/new', { cwd, mcpServers });
       const id = isRecord(created) && typeof created['sessionId'] === 'string' ? created['sessionId'] : null;
       if (!id || id.length > 200) return await failWith('The Devin CLI did not start a session.');
       sessionId = id;

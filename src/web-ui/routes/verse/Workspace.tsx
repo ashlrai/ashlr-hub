@@ -103,6 +103,9 @@ import { ProviderLogo } from '../../components/primitives/ProviderLogo.js';
 
 // Opened on request only: kept out of the chat's first-paint chunk.
 const HandoffDialog = lazy(() => import('./context/HandoffDialog.js').then((m) => ({ default: m.HandoffDialog })));
+// 3.15 agent tools: the sheet and the strip above the composer load after first paint.
+const AgentToolsSheet = lazy(() => import('./agent-tools/AgentToolsSheet.js').then((m) => ({ default: m.AgentToolsSheet })));
+const AgentToolsStrip = lazy(() => import('./agent-tools/AgentToolsStrip.js').then((m) => ({ default: m.AgentToolsStrip })));
 const NO_ROOTS: readonly string[] = [];
 
 export interface WorkspaceProps {
@@ -153,6 +156,7 @@ export function Workspace(props: WorkspaceProps) {
   const [handoffCreated, setHandoffCreated] = useState<{ title: string } | null>(null);
   const [menu, setMenu] = useState<{ anchor: { x: number; y: number }; from: HTMLElement } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [agentToolsOpen, setAgentToolsOpen] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
 
   /** Text another pane drafted in (Review "Add to message", Terminal "Send selection to chat"). */
@@ -402,6 +406,12 @@ export function Workspace(props: WorkspaceProps) {
       onSelect: openHandoff,
     });
     menuItems.push({
+      id: 'agent-tools',
+      label: 'Agent tools…',
+      description: 'Let this chat\'s agent use Verse terminals, the Browser pane and apps.',
+      onSelect: () => setAgentToolsOpen(true),
+    });
+    menuItems.push({
       id: 'rename',
       label: 'Rename',
       icon: <RenameGlyph size={14} />,
@@ -560,6 +570,12 @@ export function Workspace(props: WorkspaceProps) {
           An empty host is not laid out (`:empty`). */}
       {session ? <div ref={setQueueHost} className={styles.queueHost} data-testid="queue-slot" /> : null}
 
+      {session ? (
+        <Suspense fallback={null}>
+          <AgentToolsStrip key={`agent-tools:${session.id}`} sessionId={session.id} onOpenSheet={() => setAgentToolsOpen(true)} />
+        </Suspense>
+      ) : null}
+
       {session ? <LiveRow sessionId={session.id} running={running} otherRunning={otherRunning} onStop={onStop} /> : null}
 
       {session ? (
@@ -592,6 +608,11 @@ export function Workspace(props: WorkspaceProps) {
               back to the default rather than preselecting nothing. */}
           <HandoffDialog session={session} seats={seats} open onClose={() => { setHandoffTarget(null); onHandoffOpenChange(false); }}
             onCreated={onHandoffCreated} initialTarget={handoffTarget ?? undefined} />
+        </Suspense>
+      ) : null}
+      {session && agentToolsOpen ? (
+        <Suspense fallback={null}>
+          <AgentToolsSheet sessionId={session.id} open onClose={() => setAgentToolsOpen(false)} />
         </Suspense>
       ) : null}
       <MutationTokenDialog {...gate.dialog} tokenLabel="Mutation token" tokenHelp="the mutation token ashlr verse printed" />

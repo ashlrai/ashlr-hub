@@ -10,11 +10,16 @@
  *   - the MCP handler (browser-mcp.ts): protocol shape, the gate before AND
  *     after capture, untrusted-content framing, secret scrubbing, images;
  *   - the Claude launch: byte-identical when access is off, exactly one
- *     pre-approved server when it is on.
+ *     pre-approved server when it is on — since the agent-tools release that
+ *     server is Verse's own (`ashlr-verse`), from a private config file with
+ *     a per-turn bearer token (verse-mcp-launch.ts).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import * as fs from 'node:fs';
+
 import { claudeAdapter } from '../src/core/verse/adapters/claude.js';
+import { resetVerseMcpGrantsForTest, turnForBearer } from '../src/core/verse/verse-mcp-grants.js';
 import {
   allowedOriginsFor,
   browserPolicy,
@@ -43,8 +48,8 @@ import type { VerseSeat, VerseSession } from '../src/core/verse/types.js';
 
 const SIDECAR = 'http://127.0.0.1:7777';
 
-beforeEach(() => resetBrowserBridgeForTest());
-afterEach(() => resetBrowserBridgeForTest());
+beforeEach(() => { resetBrowserBridgeForTest(); resetVerseMcpGrantsForTest(); });
+afterEach(() => { resetBrowserBridgeForTest(); resetVerseMcpGrantsForTest(); });
 
 // ---------------------------------------------------------------------------
 // The gate
@@ -146,7 +151,7 @@ describe('grants and the per-chat policy', () => {
     setBrowserAgentAccess('s1', true, SIDECAR);
     const grant = JSON.parse(browserSeatLaunch('s1')!.mcpConfig).mcpServers['ashlr-browser'].url.split('/').pop();
     expect(JSON.stringify(browserPolicy('s1'))).not.toContain(grant);
-    expect(browserPolicy('s1')).toMatchObject({ agentAccess: true, allowedOrigins: [], blocked: [], toolEngines: ['claude', 'local'] });
+    expect(browserPolicy('s1')).toMatchObject({ agentAccess: true, allowedOrigins: [], blocked: [], toolEngines: ['claude', 'local', 'codex', 'grok', 'devin'] });
   });
 
   it('allows and forgets origins; allowing clears the matching blocked request', () => {
@@ -397,15 +402,22 @@ describe('Claude seats load the browser tools only when the operator switched th
     expect(argv.some((a) => a.startsWith('--allowedTools'))).toBe(false);
   });
 
-  it('on: one http server on loopback with this chat\'s grant, pre-approved, prompt still last', () => {
+  it('on: one http server on loopback with this turn\'s bearer token in a private file, pre-approved, prompt still last', () => {
     setBrowserAgentAccess('s1', true, SIDECAR);
     const { argv } = claudeAdapter.buildLaunch(session, '--dangerously-skip-permissions', launch);
     expect(argv).toContain('--strict-mcp-config');
-    const config = JSON.parse(argv[argv.indexOf('--mcp-config') + 1]!) as { mcpServers: Record<string, { type: string; url: string }> };
-    expect(Object.keys(config.mcpServers)).toEqual(['ashlr-browser']);
-    expect(config.mcpServers['ashlr-browser']!.type).toBe('http');
-    expect(config.mcpServers['ashlr-browser']!.url).toMatch(/^http:\/\/127\.0\.0\.1:7777\/api\/verse\/browser\/mcp\/[A-Za-z0-9_-]{43}$/);
-    expect(argv).toContain('--allowedTools=mcp__ashlr-browser');
+    const path = argv[argv.indexOf('--mcp-config') + 1]!;
+    // A FILE, never the inline JSON: argv shows in `ps`.
+    expect(path.startsWith('/')).toBe(true);
+    expect(argv.join(' ')).not.toMatch(/Bearer/);
+    expect(fs.statSync(path).mode & 0o777).toBe(0o600);
+    const config = JSON.parse(fs.readFileSync(path, 'utf8')) as { mcpServers: Record<string, { type: string; url: string; headers: Record<string, string> }> };
+    expect(Object.keys(config.mcpServers)).toEqual(['ashlr-verse']);
+    expect(config.mcpServers['ashlr-verse']!.type).toBe('http');
+    expect(config.mcpServers['ashlr-verse']!.url).toBe('http://127.0.0.1:7777/api/verse/agent-tools/mcp');
+    const token = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(config.mcpServers['ashlr-verse']!.headers['Authorization']!)![1]!;
+    expect(turnForBearer(token)?.sessionId).toBe('s1');
+    expect(argv).toContain('--allowedTools=mcp__ashlr-verse');
     expect(argv.slice(-2)).toEqual(['--', '--dangerously-skip-permissions']);
     // Another chat is untouched.
     const other = claudeAdapter.buildLaunch({ ...session, id: 's2' } as VerseSession, 'hi', launch).argv;

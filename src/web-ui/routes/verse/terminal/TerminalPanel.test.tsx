@@ -22,6 +22,7 @@ import type {
 import { resetVerseStore, seedVerseSession } from '../verse-store.js';
 import { session } from '../fixtures.test-support.js';
 import { layoutStorageKey } from './layout-model.js';
+import type { VerseAgentTabInfo } from '../../../../core/verse/verse-mcp-types.js';
 import type { PanelTerminalApi } from './panel-client.js';
 import type { PanelStreamHandlers } from './panel-stream.js';
 import { resetTerminalPanelForTest, TerminalPanel, type TerminalPanelDeps, type TerminalPanelRequest } from './TerminalPanel.js';
@@ -410,5 +411,45 @@ describe('TerminalPanel', () => {
     expect(await screen.findByText('Agent')).toBeInTheDocument();
     expect(screen.getByTestId('agent-terminal')).toBeInTheDocument();
     expect(h.api.create).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3.15 agent tools: sharing a shell, takeover, hand back
+// ---------------------------------------------------------------------------
+
+describe('TerminalPanel — agent tools', () => {
+  function agentToolsFake(tabs: VerseAgentTabInfo[]) {
+    return {
+      state: vi.fn(),
+      setGrant: vi.fn(),
+      activity: vi.fn(),
+      confirm: vi.fn(),
+      share: vi.fn(async () => ({}) as never),
+      resume: vi.fn(async () => {}),
+      tabs: vi.fn(async () => ({ tabs })),
+    };
+  }
+
+  it('a taken-over tab says so and hands back with Resume agent', async () => {
+    const h = harness({ tabs: [tabOf('t-1', { title: 'agent shell', agent: true })] });
+    const agentTools = agentToolsFake([{ tabId: 't-1', sessionId: 's-1', kind: 'agent', takenOverAt: '2026-09-27T10:00:00.000Z' }]);
+    h.deps.agentTools = agentTools;
+    renderPanel(h);
+    expect(await screen.findByTestId('terminal-takeover')).toBeInTheDocument();
+    expect(screen.getByText('you have it')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Resume agent' }));
+    await waitFor(() => expect(agentTools.resume).toHaveBeenCalledWith('t-1'));
+  });
+
+  it('shares one of your own shells from the More menu (never an agent tab)', async () => {
+    const h = harness({ tabs: [tabOf('t-1', { title: 'mine' })] });
+    const agentTools = agentToolsFake([]);
+    h.deps.agentTools = agentTools;
+    renderPanel(h);
+    await waitFor(() => expect(h.liveStream('t-1')).toBeDefined());
+    await userEvent.click(screen.getByRole('button', { name: 'More terminal options' }));
+    await userEvent.click(await screen.findByRole('menuitem', { name: /Share this shell with the agent/ }));
+    await waitFor(() => expect(agentTools.share).toHaveBeenCalledWith('s-1', 't-1', true));
   });
 });

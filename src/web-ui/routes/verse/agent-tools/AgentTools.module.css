@@ -1,0 +1,236 @@
+/* routes/verse/agent-tools — the Agent tools sheet and the strip above the composer. */
+
+.sheetBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.groupTitle {
+  margin: 0;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.quiet {
+  margin: 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+
+.footnote {
+  margin: 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+}
+
+.error,
+.warning {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.error {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+
+.warning {
+  background: var(--status-warning-bg);
+  color: var(--status-warning-fg);
+}
+
+.apps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.appsRow {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.input {
+  flex: 1;
+  min-width: 0;
+  height: var(--control-h-sm, 28px);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-sm-size);
+}
+
+.smallButton {
+  flex: none;
+  height: var(--control-h-xs, 24px);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-raised);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.smallButton:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.smallButton:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus-ring);
+}
+
+.smallButton:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.deny {
+  color: var(--status-danger-fg);
+}
+
+/* ---- the strip ----------------------------------------------------------- */
+
+.strip {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+}
+
+.confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--status-warning-solid);
+  border-radius: var(--radius-sm);
+  background: var(--status-warning-bg);
+  color: var(--status-warning-fg);
+}
+
+.confirmText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.confirmTitle {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  font-weight: 600;
+}
+
+.command {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-primary);
+}
+
+.confirmActions {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.takeover {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--status-info-bg);
+  color: var(--status-info-fg);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.takeover > span {
+  flex: 1;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.toolsChip {
+  flex: none;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  cursor: pointer;
+}
+
+.toolsChip:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus-ring);
+}
+
+.action {
+  display: inline-flex;
+  flex: none;
+  align-items: baseline;
+  gap: var(--space-1);
+  max-width: 280px;
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  color: var(--text-secondary);
+}
+
+.actionTool {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.actionSummary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.actionOutcome {
+  color: var(--text-tertiary);
+}
+
+.action[data-outcome='error'] .actionOutcome,
+.action[data-outcome='denied'] .actionOutcome {
+  color: var(--status-danger-fg);
+}
+
+.action[data-outcome='pending'] .actionOutcome {
+  color: var(--status-running-fg);
+}
