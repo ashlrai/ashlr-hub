@@ -113,7 +113,7 @@ describe('VoiceInput — desktop (native engine)', () => {
     nativeEvent({ event: 'voice://state', state: state({ session: { id: 'hk-7', origin: 'hotkey', mode: 'prose', phase: 'listening', latched: false } }) });
     // The terminal is verbatim and gets no cwd (no lexicon there).
     expect(sent.at(-1)).toEqual({ op: 'context', session: 'hk-7', mode: 'verbatim' });
-    expect(screen.getByText('Release ⌃⌥V to insert')).toBeInTheDocument();
+    expect(screen.getByText('Release Ctrl+Option+V to insert')).toBeInTheDocument();
     nativeEvent({ event: 'voice://final', session: 'hk-7', text: 'git status', mode: 'verbatim', engine: 'parakeet', lexicon: 'none', latencyMs: 90, audioMs: 800 });
     return vi.waitFor(() => {
       expect(screen.getByLabelText('Shell')).toHaveValue('git status');
@@ -158,7 +158,7 @@ describe('VoiceInput — desktop (native engine)', () => {
   });
 
   it.each([
-    ['mic-denied', 'Open Privacy ▸ Microphone', { op: 'fix', action: 'open-mic-settings' }],
+    ['mic-denied', 'Open Microphone privacy settings', { op: 'fix', action: 'open-mic-settings' }],
     ['mic-undetermined', 'Allow microphone', { op: 'fix', action: 'request-mic' }],
     ['no-input-device', 'Open Sound settings', { op: 'fix', action: 'open-sound-settings' }],
     ['model-download-failed', 'Download again', { op: 'fix', action: 'download-model' }],
