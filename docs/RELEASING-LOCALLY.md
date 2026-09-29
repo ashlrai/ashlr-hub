@@ -52,10 +52,10 @@ macOS and the login keychain.
 
 `prepublishOnly` builds the source, checks the first-paint budget and docs,
 typechecks and lints, then runs the complete backend suite as three deterministic shards,
-with at most two shards active, one worker and a private HOME per shard. Four long real-I/O suites then run
+with at most two shards active, one worker and a private HOME per shard. Five long real-I/O suites then run
 one at a time in separate process homes, followed by the two Hub campaign cases
 in their own homes. This prevents competing fixtures from consuming bounded
-CLI startup and graph deadlines; all nine stages
+CLI startup, Git capture, and graph deadlines; all ten stages
 must pass before the complete web suite. A failed test stops its shard early
 and cancels the other shards, saving time on a bad candidate. The web timing assertions are
 load-sensitive, so no backend workers remain when it starts. `npm run gate`

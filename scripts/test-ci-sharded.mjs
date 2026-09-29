@@ -14,6 +14,7 @@ const shards = [1, 2, 3];
 // those deadlines without testing the behavior the cases are meant to prove.
 const isolatedSuites = [
   'test/m342.dispatch-production-ledger.test.ts',
+  'test/m446.external-skill-git-capture.test.ts',
   'test/resource-engineering-setup-acceptance.test.ts',
   'test/resource-engineering-supervisor-acceptance.test.ts',
   'test/universe-firm-engineering-control.test.ts',
