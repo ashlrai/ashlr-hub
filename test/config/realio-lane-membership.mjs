@@ -43,6 +43,7 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/test-ci-sharded.test.ts', // real bounded child-process shards in private temporary homes
   'test/remote-gateway-auth.test.ts', // real loopback gateway and Mac-only Unix socket pairing ceremony
   'test/remote-gateway-http.test.ts', // real loopback Hub and gateway servers, Access assertion and SSE lifecycle
   'test/builtin-activity-pgid-reuse.test.ts', // private activity journals with synthetic identity reuse probes

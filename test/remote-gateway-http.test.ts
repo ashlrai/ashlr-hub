@@ -48,7 +48,8 @@ async function fixture() {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       res.write(`event: tick\ndata: ${'x'.repeat(128)}\n\n`); return;
     }
-    if (req.url === '/api/verse/activity' && req.headers['x-ashlr-token'] === TOKEN) {
+    if ((req.url === '/api/verse/activity' || req.url === '/api/verse/activity?since=v1.aaaaaaaa.t.1')
+      && req.headers['x-ashlr-token'] === TOKEN) {
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true })); return;
     }
     if (req.url === '/api/verse/sessions/long' && req.headers['x-ashlr-token'] === TOKEN) {
@@ -113,6 +114,30 @@ describe('dormant remote read gateway HTTP boundary', () => {
       expect((await f.get('/api/verse/agent-tools/mcp')).status).toBe(404);
       expect((await f.get('/verse/m/')).status).toBe(404);
       expect((await f.get('/api/verse/activity', {}, 'POST')).status).toBe(403);
+    } finally { await f.gateway.close(); }
+  });
+
+  it('forwards a valid activity cursor poll but denies malformed or extra query parameters', async () => {
+    const f = await fixture();
+    try {
+      expect((await f.get('/api/verse/activity')).status).toBe(200);
+      const second = await f.get('/api/verse/activity?since=v1.aaaaaaaa.t.1');
+      expect(second.status).toBe(200);
+      expect(await second.json()).toEqual({ ok: true });
+      expect(f.received.at(-1)?.path).toBe('/api/verse/activity?since=v1.aaaaaaaa.t.1');
+      expect(f.received.at(-1)?.headers['x-ashlr-token']).toBe(TOKEN);
+
+      const forwarded = f.received.length;
+      for (const target of [
+        '/api/verse/activity?since=garbage',
+        '/api/verse/activity?since=v1.aaaaaaaa.t.1&since=v1.aaaaaaaa.t.2',
+        '/api/verse/activity?since=v1.aaaaaaaa.t.1&extra=1',
+      ]) {
+        const response = await f.get(target);
+        expect(response.status).toBe(404);
+        expect(await response.json()).toMatchObject({ code: 'ROUTE_DENIED' });
+      }
+      expect(f.received).toHaveLength(forwarded);
     } finally { await f.gateway.close(); }
   });
 

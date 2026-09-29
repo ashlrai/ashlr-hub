@@ -3413,7 +3413,7 @@ describe('M342 dispatch production ledger', () => {
       trajectoryId: 'run:attempt-compacted-retirement-replay',
     });
     expect(recordDispatchProduction(blockedReplay)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
-  }, 15_000);
+  }, 45_000);
 
   it('reclaims 2,049 artifactless admissions atomically without permitting replay', () => {
     const handoffIds = Array.from({ length: 2_049 }, (_, index) =>

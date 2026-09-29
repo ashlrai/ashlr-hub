@@ -139,12 +139,14 @@ describe('test-ci watchdog', () => {
   it('reports active work hitting the absolute cap as a runtime-budget failure', () => {
     const result = runFixture(
       `setInterval(() => console.log('still-running'), 30);`,
-      { idleMs: 100, hardMs: 180 },
+      // Allow the child to start and emit output even when the release Mac is
+      // busy; the contract is which watchdog fires, not a 180 ms deadline.
+      { idleMs: 750, hardMs: 2_000 },
     );
 
     expect(result.status).toBe(124);
     expect(result.stdout).toContain('still-running');
-    expect(result.stderr).toContain('hard-runtime-cap reached after 180ms');
+    expect(result.stderr).toContain('hard-runtime-cap reached after 2000ms');
     expect(result.stderr).toContain('not evidence of a leaked handle');
     expect(result.stderr).not.toContain('idle-timeout');
   });

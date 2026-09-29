@@ -18,3 +18,13 @@ export function usedPercentText(used: number | null | undefined): string {
   if (clamped > 99 && clamped < 100) return '99%';
   return `${Math.round(clamped)}%`;
 }
+
+/** The same reading rule for values that can exceed their nominal window. */
+export function usedPercentTextWithOverflow(used: number | null | undefined): string {
+  if (typeof used !== 'number' || !Number.isFinite(used)) return '—';
+  if (used > 100) {
+    const rounded = Math.round(used);
+    return rounded > 100 ? `${rounded}%` : '>100%';
+  }
+  return usedPercentText(used);
+}

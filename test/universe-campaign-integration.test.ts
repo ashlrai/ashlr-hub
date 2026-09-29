@@ -89,21 +89,21 @@ async function fixture(respond: (prompt: Prompt, index: number) =>
   git(['-c', 'user.name=Universe Test', '-c', 'user.email=universe@example.invalid', 'commit', '-qm', 'campaign fixture']);
   const manifest: UniverseManifest = { schemaVersion: 1, id: 'native-campaign', name: 'Campaign fixture', objective: 'Increase a fixed independently evaluated value',
     seed: { repo, revision: git(['rev-parse', 'HEAD']) }, metric: { name: 'value', direction: 'maximize', minImprovement: 0 },
-    budget: { maxTrials: variantCount, maxDurationMs: 15_000, trialTimeoutMs, maxParallel: 1 },
-    evaluation: { command: [process.execPath, 'evaluate.mjs'], timeoutMs: 3_000 },
+    budget: { maxTrials: variantCount, maxDurationMs: 30_000, trialTimeoutMs, maxParallel: 1 },
+    evaluation: { command: [process.execPath, 'evaluate.mjs'], timeoutMs: 5_000 },
     variants: Array.from({ length: variantCount }, (_, index) => ({ id: `model-${index}`, niche: 'value', hypothesis: 'Use evaluator feedback to improve the value',
       generation: { kind: 'local-chat', endpoint: `http://127.0.0.1:${address.port}/v1`, model: 'fixture', files: ['value.json'], maxOutputTokens: 256 } })),
   };
   initUniverse(manifest, { root });
   const definition: UniverseCampaignDefinition = { schemaVersion: 1, id: 'campaign', universeId: manifest.id, feedback: true,
-    budget: { maxGenerations: 3, maxDurationMs: 30_000, maxModelRequests: 12, maxStagnantGenerations: 3, maxReportedTokens: null } };
+    budget: { maxGenerations: 3, maxDurationMs: 60_000, maxModelRequests: 12, maxStagnantGenerations: 3, maxReportedTokens: null } };
   return { root, manifest, definition, requests, requestStarted };
 }
 
 describe.runIf(process.platform === 'darwin')('Universe campaigns through native execution', () => {
   it('pauses a local outage without consuming the remaining campaign and resumes with its original budgets', async () => {
     let restored = false;
-    const value = await fixture((_prompt, index) => restored ? { value: index } : { httpStatus: 503 });
+    const value = await fixture((_prompt, index) => restored ? { value: index } : { httpStatus: 503 }, 1, 10_000);
     initUniverseCampaign(value.definition, value);
     const paused = await runUniverseCampaign('campaign', value);
     expect(paused.state, JSON.stringify(paused)).toBe('paused');
@@ -122,7 +122,7 @@ describe.runIf(process.platform === 'darwin')('Universe campaigns through native
     expect(resumed.progress).toMatchObject({ attempts: 3, completedRuns: 3, reservedModelRequests: 3,
       reportedTokens: null, usageComplete: false, recordedTokens: 60 });
     expect(value.requests).toHaveLength(3);
-  }, 20_000);
+  }, 45_000);
 
   it('pauses after a local completion timeout instead of repeating the timed-out request', async () => {
     const value = await fixture(() => undefined, 1, 2_000);

@@ -6169,6 +6169,7 @@ export async function tick(
   // V3.10 (U5): per-lane caps from a standing tick's beforeTick; empty (and
   // no lane computed) on every other tick.
   const laneCapsActive = Object.keys(tickConstraints.laneCaps).length > 0;
+  hooks.beginDispatchPlan?.(workedSet.map((item) => item.id));
   const itemRoutePlans = workedSet.map((item) => {
     // V3.10 (U5) seam: hooks.route (default: routeBackend, same arguments).
     const routed = hooks.route(item, routingCfg);

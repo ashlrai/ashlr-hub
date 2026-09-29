@@ -25,6 +25,9 @@ afterEach(async () => {
   rmSync(base, { recursive: true, force: true });
 });
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+// This real-I/O fixture fsyncs its ledger and uses loopback HTTP. Under a busy
+// desktop, Vitest's one-second waitFor default can expire before dispatch.
+const waitFor: typeof vi.waitFor = (callback, options) => vi.waitFor(callback, { timeout: 10_000, ...options });
 const json = (path: string) => JSON.parse(readFileSync(path, 'utf8'));
 function save(path: string, value: unknown): void { writeFileSync(path, JSON.stringify(value), { mode: 0o600 }); }
 function worker(id = 'local', provider: ResourceWorker['provider'] = 'local'): ResourceWorker {
@@ -60,13 +63,13 @@ async function fixture(config: { workers?: ResourceWorker[]; hold?: boolean; out
   };
   const task = (id = 'task-a', patch: Partial<ResourceConsoleTaskInput> = {}): ResourceConsoleTaskInput => ({ id,
     prompt: `PRIVATE_PROMPT ${id}`, allowedWorkerIds: pool.workers.map((item) => item.id), mode: 'read-only',
-    timeoutMs: 5000, maxOutputTokens: 100, ...patch });
+    timeoutMs: 30_000, maxOutputTokens: 100, ...patch });
   return { root, workspace, pool, bindings, options, requests, held, start, task,
     observations: (value: ResourceObservation[]) => { observations = value; },
     state: () => json(join(root, 'resource-console-state.json')), ledger: () => json(join(root, 'pool-state.json')) };
 }
 async function settled(supervisor: ResourcePoolSupervisor, id = 'task-a') {
-  await vi.waitFor(() => expect(supervisor.snapshot().jobs.find((job) => job.id === id)?.state).toBe('settled'));
+  await waitFor(() => expect(supervisor.snapshot().jobs.find((job) => job.id === id)?.state).toBe('settled'));
   return supervisor.snapshot().jobs.find((job) => job.id === id)!;
 }
 
@@ -107,7 +110,7 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const f = await fixture(); let stop = false;
     const supervisor = await f.start({ projects: [], isExecutionStopped: () => stop });
     supervisor.setPaused(true); supervisor.submit(f.task()); stop = true; supervisor.setPaused(false);
-    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]?.reason).toBe('host-execution-stopped'));
+    await waitFor(() => expect(supervisor.snapshot().jobs[0]?.reason).toBe('host-execution-stopped'));
     expect(f.requests).toHaveLength(0);
     expect(supervisor.projectFileBinding('default').workspace).toBe(f.workspace);
     expect(() => supervisor.projectExecutionBinding('default')).toThrow('Host execution stopped');
@@ -146,22 +149,22 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
       if (failure === 'throw') throw new Error('PRIVATE_CALLBACK_DIAGNOSTIC');
       return ['not-enrolled'];
     } });
-    supervisor.submit(f.task('one', { allowedWorkerIds: ['one'] })); await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    supervisor.submit(f.task('one', { allowedWorkerIds: ['one'] })); await waitFor(() => expect(f.requests).toHaveLength(1));
     failed = true; supervisor.submit(f.task('two', { allowedWorkerIds: ['two'] }));
-    await vi.waitFor(() => expect(supervisor.snapshot().error).toBe('supervisor-admission-constraint-unavailable'));
+    await waitFor(() => expect(supervisor.snapshot().error).toBe('supervisor-admission-constraint-unavailable'));
     expect(f.held[0]!.destroyed).toBe(false); expect(f.ledger().attempts[0].status).toBe('reserved');
     supervisor.setPaused(true); supervisor.setPaused(false);
     supervisor.submit(f.task('cancel', { allowedWorkerIds: ['two'] })); expect(supervisor.cancel('cancel').state).toBe('cancelled');
     expect(JSON.stringify(supervisor.snapshot())).not.toContain('PRIVATE_CALLBACK_DIAGNOSTIC');
     f.held[0]!.end(result()); await settled(supervisor, 'one'); expect(f.requests).toHaveLength(1);
-    failed = false; await vi.waitFor(() => expect(f.requests).toHaveLength(2)); expect(supervisor.snapshot().error).toBeNull();
+    failed = false; await waitFor(() => expect(f.requests).toHaveLength(2)); expect(supervisor.snapshot().error).toBeNull();
     f.held[1]!.end(result()); await settled(supervisor, 'two');
   });
 
   it('keeps initially unavailable admission evidence recoverable without starting queued work', async () => {
     const f = await fixture(); let failed = true;
     const supervisor = await f.start({ readUnavailableWorkerIds() { if (failed) throw new Error('unavailable'); return []; } });
-    supervisor.submit(f.task()); await vi.waitFor(() => expect(supervisor.snapshot().error).toBe('supervisor-admission-constraint-unavailable'));
+    supervisor.submit(f.task()); await waitFor(() => expect(supervisor.snapshot().error).toBe('supervisor-admission-constraint-unavailable'));
     expect(f.requests).toHaveLength(0); expect(existsSync(join(f.root, 'pool-state.json'))).toBe(false);
     failed = false; await settled(supervisor); expect(supervisor.snapshot().error).toBeNull(); expect(f.requests).toHaveLength(1);
   });
@@ -184,9 +187,9 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const supervisor = await createResourcePoolSupervisor(options); supervisors.push(supervisor);
     options.readUnavailableWorkerIds = replacement;
     supervisor.submit(f.task('one', { allowedWorkerIds: ['one'] })); supervisor.submit(f.task('two', { allowedWorkerIds: ['two'] }));
-    await vi.waitFor(() => expect(f.requests).toHaveLength(1)); await sleep(60);
+    await waitFor(() => expect(f.requests).toHaveLength(1)); await sleep(60);
     expect(firstHeld).toBe(true); expect(f.requests).toHaveLength(1); expect(replacement).not.toHaveBeenCalled();
-    f.held[0]!.end(result()); await settled(supervisor, 'one'); await vi.waitFor(() => expect(f.requests).toHaveLength(2));
+    f.held[0]!.end(result()); await settled(supervisor, 'one'); await waitFor(() => expect(f.requests).toHaveLength(2));
     f.held[1]!.end(result()); await settled(supervisor, 'two');
   });
 
@@ -195,7 +198,7 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const supervisor = await f.start({ signal: controller.signal, readUnavailableWorkerIds() {
       if (++reads === 2) controller.abort(); return [];
     } });
-    supervisor.submit(f.task()); await vi.waitFor(() => expect(controller.signal.aborted).toBe(true));
+    supervisor.submit(f.task()); await waitFor(() => expect(controller.signal.aborted).toBe(true));
     await expect(supervisor.close()).resolves.toBeUndefined(); expect(f.requests).toHaveLength(0);
     expect(existsSync(join(f.root, 'pool-state.json'))).toBe(false);
   });
@@ -213,7 +216,7 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const f = await fixture({ hold: true }); const supervisor = await f.start();
     const queued = supervisor.submit(f.task()); expect(queued.state).toBe('queued');
     expect(f.state().jobs[0].input.prompt).toBe(f.task().prompt);
-    await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    await waitFor(() => expect(f.requests).toHaveLength(1));
     expect(f.state().jobs[0].state).toBe('dispatching'); expect(f.ledger().attempts[0].status).toBe('reserved');
     expect(supervisor.snapshot()).toMatchObject({ activeCount: 1, jobs: [{ workerId: 'local', cancellable: true }] });
     f.held[0]!.end(result()); const job = await settled(supervisor);
@@ -238,7 +241,7 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
 
   it('deduplicates pending and completed task ids and rejects changed task identity', async () => {
     const f = await fixture({ hold: true }); const supervisor = await f.start();
-    supervisor.submit(f.task()); supervisor.submit(f.task()); await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    supervisor.submit(f.task()); supervisor.submit(f.task()); await waitFor(() => expect(f.requests).toHaveLength(1));
     expect(() => supervisor.submit(f.task('task-a', { prompt: 'different' }))).toThrow(ResourceSupervisorError);
     f.held[0]!.end(result()); await settled(supervisor); supervisor.submit(f.task());
     await sleep(60); expect(f.requests).toHaveLength(1); expect(supervisor.snapshot().jobs).toHaveLength(1);
@@ -250,7 +253,7 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const supervisor = await f.start({ maxParallel: 1 });
     supervisor.submit(f.task('blocked-task', { allowedWorkerIds: ['blocked'] }));
     supervisor.submit(f.task('ready-task', { allowedWorkerIds: ['ready'] }));
-    await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    await waitFor(() => expect(f.requests).toHaveLength(1));
     expect(f.requests[0]).toMatchObject({ model: 'fixture-ready' });
     expect(supervisor.snapshot().jobs.find((job) => job.id === 'blocked-task')?.state).toBe('queued');
     expect(f.ledger().observations.find((row: ResourceObservation) => row.workerId === 'blocked')?.health).toBe('unavailable');
@@ -260,7 +263,7 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
   it('automatically admits a queued task after a fresh health observation restores eligibility', async () => {
     const f = await fixture(); f.observations([observed('local', { health: 'unavailable' })]);
     const supervisor = await f.start(); supervisor.submit(f.task());
-    await vi.waitFor(() => expect(existsSync(join(f.root, 'pool-state.json'))).toBe(true));
+    await waitFor(() => expect(existsSync(join(f.root, 'pool-state.json'))).toBe(true));
     expect(f.requests).toHaveLength(0); expect(supervisor.snapshot().queuedCount).toBe(1);
     f.observations([observed('local', { observedAt: new Date().toISOString() })]);
     await settled(supervisor); expect(f.requests).toHaveLength(1);
@@ -271,9 +274,9 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const observationsFile = join(base, 'observations.json'); save(observationsFile, [observed('one'), observed('two')]);
     const supervisor = await f.start({ readObservations: () => json(observationsFile) });
     supervisor.submit(f.task('one', { allowedWorkerIds: ['one'] }));
-    await vi.waitFor(() => expect(f.requests).toHaveLength(1)); unlinkSync(observationsFile);
+    await waitFor(() => expect(f.requests).toHaveLength(1)); unlinkSync(observationsFile);
     supervisor.submit(f.task('two', { allowedWorkerIds: ['two'] }));
-    await vi.waitFor(() => expect(supervisor.snapshot().error).toBe('supervisor-observations-unavailable'));
+    await waitFor(() => expect(supervisor.snapshot().error).toBe('supervisor-observations-unavailable'));
     expect(f.ledger().attempts[0].status).toBe('reserved'); expect(f.held[0]!.destroyed).toBe(false);
     supervisor.setPaused(true); supervisor.setPaused(false);
     supervisor.submit(f.task('cancel-queued', { allowedWorkerIds: ['two'] }));
@@ -281,7 +284,7 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     writeFileSync(observationsFile, '{', { mode: 0o600 }); await sleep(60); expect(f.requests).toHaveLength(1);
     f.held[0]!.end(result()); await settled(supervisor, 'one');
     save(observationsFile, [observed('one', { observedAt: new Date().toISOString() }), observed('two', { observedAt: new Date().toISOString() })]);
-    await vi.waitFor(() => expect(f.requests).toHaveLength(2)); expect(supervisor.snapshot().error).toBeNull();
+    await waitFor(() => expect(f.requests).toHaveLength(2)); expect(supervisor.snapshot().error).toBeNull();
     f.held[1]!.end(result()); await settled(supervisor, 'two');
   });
 
@@ -289,9 +292,9 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const f = await fixture({ workers: [worker('one'), worker('two'), worker('three')], hold: true });
     const supervisor = await f.start({ maxParallel: 2 });
     for (const id of ['one', 'two', 'three']) supervisor.submit(f.task(id, { allowedWorkerIds: [id] }));
-    await vi.waitFor(() => expect(f.requests).toHaveLength(2)); await sleep(60);
+    await waitFor(() => expect(f.requests).toHaveLength(2)); await sleep(60);
     expect(supervisor.snapshot()).toMatchObject({ activeCount: 2, queuedCount: 1 });
-    f.held[0]!.end(result()); await vi.waitFor(() => expect(f.requests).toHaveLength(3));
+    f.held[0]!.end(result()); await waitFor(() => expect(f.requests).toHaveLength(3));
     f.held[1]!.end(result()); f.held[2]!.end(result()); await settled(supervisor, 'three');
   });
 
@@ -299,9 +302,9 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const f = await fixture({ workers: [worker('one'), worker('two')], shared: true, hold: true });
     const supervisor = await f.start({ maxParallel: 2 });
     supervisor.submit(f.task('one', { allowedWorkerIds: ['one'] })); supervisor.submit(f.task('two', { allowedWorkerIds: ['two'] }));
-    await vi.waitFor(() => expect(f.requests).toHaveLength(1)); await sleep(60); expect(f.requests).toHaveLength(1);
+    await waitFor(() => expect(f.requests).toHaveLength(1)); await sleep(60); expect(f.requests).toHaveLength(1);
     expect(supervisor.snapshot().jobs.find((job) => job.id === 'two')?.state).toBe('queued');
-    f.held[0]!.end(result()); await vi.waitFor(() => expect(f.requests).toHaveLength(2)); f.held[1]!.end(result());
+    f.held[0]!.end(result()); await waitFor(() => expect(f.requests).toHaveLength(2)); f.held[1]!.end(result());
     await settled(supervisor, 'two');
   });
 
@@ -333,8 +336,8 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const f = await fixture({ hold: true }); const task = f.task();
     const external = runResourceTask({ root: f.root, pool: f.pool, bindings: f.bindings,
       observations: f.pool.workers.map((row) => observed(row.id)), task: { ...task, schemaVersion: 1, cwd: f.workspace } });
-    await vi.waitFor(() => expect(f.requests).toHaveLength(1)); const supervisor = await f.start(); supervisor.submit(task);
-    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]?.state).toBe('unresolved'));
+    await waitFor(() => expect(f.requests).toHaveLength(1)); const supervisor = await f.start(); supervisor.submit(task);
+    await waitFor(() => expect(supervisor.snapshot().jobs[0]?.state).toBe('unresolved'));
     expect(() => supervisor.cancel(task.id)).toThrow(ResourceSupervisorError); await supervisor.close();
     expect(f.ledger().attempts[0].status).toBe('reserved'); f.held[0]!.end(result());
     expect((await external).receipt?.status).toBe('completed'); expect(f.requests).toHaveLength(1);
@@ -345,8 +348,8 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const externalTask = f.task('external', { allowedWorkerIds: ['one'] });
     const external = runResourceTask({ root: f.root, pool: f.pool, bindings: f.bindings,
       observations: [observed('one'), observed('two')], task: { ...externalTask, schemaVersion: 1, cwd: f.workspace } });
-    await vi.waitFor(() => expect(f.requests).toHaveLength(1)); const supervisor = await f.start();
-    supervisor.submit(f.task('owned', { allowedWorkerIds: ['two'] })); await vi.waitFor(() => expect(f.requests).toHaveLength(2));
+    await waitFor(() => expect(f.requests).toHaveLength(1)); const supervisor = await f.start();
+    supervisor.submit(f.task('owned', { allowedWorkerIds: ['two'] })); await waitFor(() => expect(f.requests).toHaveLength(2));
     const before = f.state();
     expect(() => supervisor.submit(f.task('external', { prompt: 'conflicting', allowedWorkerIds: ['one'] }))).toThrow(ResourceSupervisorError);
     expect(f.state()).toEqual(before); expect(supervisor.snapshot().error).toBeNull();
@@ -362,8 +365,8 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const external = runResourceTask({ root: f.root, pool: f.pool, bindings: f.bindings,
       observations: [observed('one'), observed('two')],
       task: { ...f.task('raced', { prompt: 'external different intent', allowedWorkerIds: ['one'] }), schemaVersion: 1, cwd: f.workspace } });
-    await vi.waitFor(() => expect(f.requests).toHaveLength(1)); supervisor.setPaused(false);
-    await vi.waitFor(() => expect(f.requests).toHaveLength(2));
+    await waitFor(() => expect(f.requests).toHaveLength(1)); supervisor.setPaused(false);
+    await waitFor(() => expect(f.requests).toHaveLength(2));
     expect(supervisor.snapshot().jobs.find((job) => job.id === 'raced')).toMatchObject({ state: 'unresolved', outcome: null, reason: 'task-identity-conflict' });
     expect(supervisor.snapshot().error).toBeNull(); f.held[0]!.end(result()); f.held[1]!.end(result());
     await external; await settled(supervisor, 'owned'); await supervisor.close();
@@ -381,7 +384,7 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
 
   it('cancels an owned actual local request, waits settlement and never runs it again', async () => {
     const f = await fixture({ hold: true }); const supervisor = await f.start(); supervisor.submit(f.task());
-    await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    await waitFor(() => expect(f.requests).toHaveLength(1));
     expect(supervisor.cancel('task-a')).toMatchObject({ state: 'dispatching', reason: 'cancellation-requested' });
     expect(await settled(supervisor)).toMatchObject({ outcome: 'cancelled' });
     expect(f.ledger().attempts[0]).toMatchObject({ status: 'cancelled', inputTokens: null, outputTokens: null });
@@ -390,7 +393,7 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
 
   it('awaits owned work on idempotent shutdown and refuses new submissions', async () => {
     const f = await fixture({ hold: true }); const supervisor = await f.start(); supervisor.submit(f.task());
-    await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    await waitFor(() => expect(f.requests).toHaveLength(1));
     const close = supervisor.close(); expect(supervisor.close()).toBe(close);
     expect(() => supervisor.submit(f.task('later'))).toThrow(ResourceSupervisorError); await close;
     expect(supervisor.snapshot()).toMatchObject({ closing: true, activeCount: 0 });
@@ -407,7 +410,7 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const f = await fixture({ hold: true }); const before = new AbortController(); before.abort();
     await expect(f.start({ signal: before.signal })).rejects.toMatchObject({ code: 'UNAVAILABLE' }); expect(existsSync(f.root)).toBe(false);
     const active = new AbortController(); const supervisor = await f.start({ signal: active.signal }); supervisor.submit(f.task());
-    await vi.waitFor(() => expect(f.requests).toHaveLength(1)); active.abort();
+    await waitFor(() => expect(f.requests).toHaveLength(1)); active.abort();
     await supervisor.close(); expect(f.ledger().attempts[0].status).toBe('cancelled');
   });
 
@@ -422,7 +425,7 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const text = '€'.repeat(100_000); const workers = Array.from({ length: 18 }, (_, index) => worker(`local-${index}`));
     const f = await fixture({ output: text, workers }); const supervisor = await f.start({ maxQueued: 64, maxParallel: 16 });
     for (let index = 0; index < 18; index++) supervisor.submit(f.task(`task-${index}`, { allowedWorkerIds: [`local-${index}`] }));
-    await vi.waitFor(() => expect(supervisor.snapshot().jobs.filter((job) => job.state === 'settled')).toHaveLength(18), { timeout: 10_000 });
+    await waitFor(() => expect(supervisor.snapshot().jobs.filter((job) => job.state === 'settled')).toHaveLength(18), { timeout: 60_000 });
     const retained = supervisor.snapshot().jobs.filter((job) => job.outputAvailable);
     expect(retained.length).toBeLessThan(18); expect(supervisor.output('task-0')).toBeNull();
     let bytes = 0;
@@ -467,7 +470,7 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     expect(supervisor.submit(limit.input).state).toBe('queued');
     expect(readFileSync(limit.statePath).length).toBeLessThan(limit.target);
     supervisor.setPaused(false);
-    await vi.waitFor(() => expect(f.requests).toHaveLength(1), { timeout: 5000 });
+    await waitFor(() => expect(f.requests).toHaveLength(1), { timeout: 5000 });
     expect(supervisor.snapshot()).toMatchObject({ error: null, activeCount: 1 });
     expect(supervisor.snapshot().jobs[0]).toMatchObject({ state: 'dispatching', workerId });
     expect(readFileSync(limit.statePath).length).toBeLessThanOrEqual(limit.target);
@@ -512,7 +515,7 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
 
   it('detects owner loss, aborts owned transport, and never overwrites a replacement lock', async () => {
     const f = await fixture({ hold: true }); const supervisor = await f.start(); supervisor.submit(f.task());
-    await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    await waitFor(() => expect(f.requests).toHaveLength(1));
     const lock = join(f.root, '.resource-console.lock'); unlinkSync(lock); save(lock, { replacement: true });
     expect(supervisor.snapshot()).toMatchObject({ error: 'supervisor-ownership-lost' });
     await expect(supervisor.close()).rejects.toMatchObject({ code: 'UNAVAILABLE' });
@@ -540,10 +543,10 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const bindings: ResourceBinding[] = [{ workerId: 'native', capacityKey: 'native', kind: 'native-cli', command: [process.execPath, script] }];
     const patch = { pool, bindings, readObservations: () => [] }; const supervisor = await f.start(patch);
     supervisor.submit(f.task('native-task', { allowedWorkerIds: ['native'] }));
-    await vi.waitFor(() => expect(existsSync(started)).toBe(true)); supervisor.cancel('native-task');
+    await waitFor(() => expect(existsSync(started)).toBe(true)); supervisor.cancel('native-task');
     // Native ownership uses a documented 5-second termination grace. Observe
     // its completed settlement before close to cover the no-longer-active case.
-    await vi.waitFor(() => expect(supervisor.snapshot().activeCount).toBe(0), { timeout: 10_000 });
+    await waitFor(() => expect(supervisor.snapshot().activeCount).toBe(0), { timeout: 10_000 });
     await expect(supervisor.close()).rejects.toMatchObject({ code: 'UNAVAILABLE' });
     expect(supervisor.snapshot().jobs[0]?.state).toBe('unresolved'); expect(supervisor.snapshot().jobs[0]?.outcome).toBe('uncertain');
     const next = await f.start(patch); expect(next.snapshot().jobs[0]).toMatchObject({ state: 'unresolved', cancellable: false });

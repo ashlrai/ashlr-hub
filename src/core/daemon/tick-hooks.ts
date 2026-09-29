@@ -82,6 +82,8 @@ export interface BeforeTickResult {
 
 export interface TickHooks {
   effectiveConfig(cfg: AshlrConfig): AshlrConfig;
+  /** Begin routing the selected dispatch batch; preselection probes must not reserve seats. */
+  beginDispatchPlan?(itemIds: readonly string[]): void;
   route(item: WorkItem, cfg: AshlrConfig): TickRouteDecision;
   seatAllows(engine: EngineId, opts: SeatAllowsOptions): SubscriptionAllowResult;
   beforeTick(ctx: TickHookContext): Promise<BeforeTickResult>;

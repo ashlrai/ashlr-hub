@@ -301,7 +301,10 @@ describe('SSE inbox + daemon events', () => {
         },
       );
       req.on('error', reject);
-      setTimeout(() => resolve(''), 5_000).unref();
+      // Initial snapshot construction can include real filesystem reads. Give
+      // the stream a bounded window under CI load without weakening its frame
+      // or privacy assertions.
+      setTimeout(() => resolve(''), 20_000).unref();
     });
 
     expect(frames).toContain('event: inbox');

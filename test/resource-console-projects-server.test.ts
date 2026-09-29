@@ -206,9 +206,10 @@ describe('project ID HTTP admission over a shared ledger', () => {
   it('preserves shared account concurrency and rejects cross-project continuation while retaining project history', async () => {
     const f = await fixture(); const handle = await f.start();
     expect((await submit(handle, f.task('default-task'))).status).toBe(202);
-    await vi.waitFor(() => expect(f.held).toHaveLength(1));
+    await vi.waitFor(() => expect(f.held).toHaveLength(1), { timeout: 10_000, interval: 50 });
     expect((await submit(handle, f.task('tools-task', { projectId: 'tools', allowedWorkerIds: ['local-b'] }))).status).toBe(202);
-    await vi.waitFor(async () => expect((await snapshot(handle)).supervisor?.jobs.find((job) => job.id === 'tools-task')?.state).toBe('queued'));
+    await vi.waitFor(async () => expect((await snapshot(handle)).supervisor?.jobs.find((job) => job.id === 'tools-task')?.state).toBe('queued'),
+      { timeout: 10_000, interval: 50 });
     expect(f.requests).toHaveLength(1); f.finish(0); await settled(handle, 'default-task');
     await vi.waitFor(() => expect(f.held).toHaveLength(2), { timeout: 10_000, interval: 50 });
     f.finish(1); await settled(handle, 'tools-task');

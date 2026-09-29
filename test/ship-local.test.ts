@@ -9,6 +9,7 @@ import {
   APP_PATH,
   ENTITLEMENTS,
   KEEP_BACKUPS,
+  LOCAL_NETWORK_ATS,
   MIC_USAGE,
   NATIVE_BUILD,
   Refusal,
@@ -125,7 +126,7 @@ describe('planShip step list', () => {
     const steps = planShip(ctx()) as Step[];
     expect(ids(steps)).toEqual(expect.arrayContaining([
       'app-quit', 'app-wait-quit', 'backup-ashlr', 'install-ashlr', 'backup-public', 'install-public',
-      'plist-mic', 'codesign', 'codesign-verify', 'app-launch',
+      'plist-mic', 'plist-local-network', 'codesign', 'codesign-verify', 'app-launch',
     ]));
     expect(step(steps, 'backup-ashlr')?.argv).toEqual([
       'mv', `${APP_PATH}/Contents/MacOS/ashlr`, `${APP_PATH}/Contents/MacOS/ashlr.prev-01234567`,
@@ -140,6 +141,9 @@ describe('planShip step list', () => {
     expect(step(steps, 'plist-mic')?.argv).toEqual([
       'plutil', '-replace', 'NSMicrophoneUsageDescription', '-string', MIC_USAGE, `${APP_PATH}/Contents/Info.plist`,
     ]);
+    expect(step(steps, 'plist-local-network')?.argv).toEqual([
+      'plutil', '-replace', 'NSAppTransportSecurity', '-json', LOCAL_NETWORK_ATS, `${APP_PATH}/Contents/Info.plist`,
+    ]);
     // Quit before touching the bundle; sign after the last copy; relaunch last.
     const order = ids(steps);
     expect(order.indexOf('entitlements-preflight')).toBeLessThan(order.indexOf('clean-dist'));
@@ -147,6 +151,7 @@ describe('planShip step list', () => {
     expect(order.indexOf('install-public')).toBeLessThan(order.indexOf('codesign'));
     // The plist is part of what gets signed.
     expect(order.indexOf('plist-mic')).toBeLessThan(order.indexOf('codesign'));
+    expect(order.indexOf('plist-local-network')).toBeLessThan(order.indexOf('codesign'));
     expect(ids(steps)).not.toContain('signing-identity');
     expect(order.indexOf('codesign-verify')).toBeLessThan(order.indexOf('app-launch'));
   });

@@ -82,7 +82,10 @@ function frame(stream: 1 | 2, value: Uint8Array): Buffer {
 }
 
 async function fixture(): Promise<Fixture> {
-  const root = mkdtempSync(join(tmpdir(), 'ashlr-m567-docker-'));
+  // Darwin Unix socket paths have a 103-byte limit; the CI runner's private
+  // TMPDIR is nested deeply enough to exceed it. Keep this socket in a short
+  // private fixture directory under the system's sticky temp root.
+  const root = mkdtempSync(join(process.platform === 'darwin' ? '/private/tmp' : tmpdir(), 'ashlr-m567-docker-'));
   chmodSync(root, 0o700);
   const socketPath = join(root, 'engine.sock');
   const requests: Fixture['requests'] = [];

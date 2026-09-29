@@ -27,7 +27,6 @@ so run it explicitly before packaging.
 
 ```sh
 npm ci
-npm run gate:full
 npm run prepublishOnly
 # If native desktop code changed: npm run build:binary; node desktop/scripts/prepare-sidecar.mjs; (cd desktop && cargo tauri build)
 npm run ship:local -- --native  # uses a PREBUILT native binary; verify it was copied
@@ -51,14 +50,28 @@ macOS and the login keychain.
   file changed since the merge-base with `origin/master` (`--base <ref>` to change that),
   plus a smoke set that always runs (`scripts/gate-smoke.json`).
 
+`prepublishOnly` builds the source, checks the first-paint budget and docs,
+typechecks and lints, then runs the complete backend suite as three deterministic shards,
+with at most two shards active, one worker and a private HOME per shard. Five long real-I/O suites then run
+one at a time in separate process homes, followed by the two Hub campaign cases
+in their own homes. This prevents competing fixtures from consuming bounded
+CLI startup, Git capture, and graph deadlines; all ten stages
+must pass before the complete web suite. A failed test stops its shard early
+and cancels the other shards, saving time on a bad candidate. The web timing assertions are
+load-sensitive, so no backend workers remain when it starts. `npm run gate`
+remains useful for fast changed-file feedback while coding, and `gate:full`
+for serial full-suite diagnosis. Running either immediately before
+`prepublishOnly` duplicates test work without adding release coverage.
+
 A version bump (in `package.json` and `package-lock.json`) or a script edit does not widen
 the run; a dependency change in either file, or a change to a vitest config or vitest setup
 file, runs that suite in full. Logs, the eslint cache and vitest JSON reports go to `.ashlr-gate/` (gitignored).
 `--json` prints a machine-readable result instead of the table.
 
 The import graph cannot see a test that reads a changed file as text instead of importing it.
-Before a release that touches fixtures, scripts read by tests, or anything you are unsure
-about, run **`npm run gate:full`**: the same static checks plus every backend and web test.
+Use **`npm run gate:full`** to diagnose such changes when you are not running
+`prepublishOnly`; it runs the same static checks plus every backend and web test.
+The release `prepublishOnly` run already covers every test, so running both duplicates work.
 
 **Known failures.** `scripts/gate-known-failures.json` lists the test files that fail on a
 healthy machine (the table under "A full `vitest run` is not the gate" below). A failure in a listed file is shown

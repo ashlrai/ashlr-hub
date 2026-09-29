@@ -23,6 +23,7 @@ import type {
   PortfolioGoalInFlight,
   PortfolioSummary,
 } from '../../data/api-types.js';
+import { usedPercentText } from '../verse/percent-text.js';
 import styles from './PortfolioView.module.css';
 
 function formatRelative(ts: number): string {
@@ -163,7 +164,8 @@ function PortfolioBody({ portfolio }: { portfolio: PortfolioSummary }) {
                 <li key={g.goalId} className={styles.row}>
                   <span className={styles.rowTitle}>
                     {g.objective}
-                    <span className={styles.rowMeta}>{Math.round(g.fractionDone * 100)}%</span>
+                    {/* One percent rule: 99.6% through is "99%", not a finished-looking "100%". */}
+                    <span className={styles.rowMeta}>{usedPercentText(g.fractionDone * 100)}</span>
                   </span>
                   <div className={styles.meterTrack}>
                     <div className={styles.meterFill} style={{ width: `${Math.round(g.fractionDone * 100)}%` }} />

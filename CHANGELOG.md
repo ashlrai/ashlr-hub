@@ -11,6 +11,34 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+## [3.16.1] — 2026-09-28
+
+### Fixed
+
+- Keep the paired phone's Needs You feed live after its first read by allowing
+  the activity route's validated cursor query through the remote gateway.
+  Other query shapes remain denied.
+- Declare local networking for the native macOS WebView and preserve it when
+  updating an installed app, so Verse can load its loopback server.
+- Give each native release a fresh Verse window URL and serve HTML without
+  storing it, so WebKit cannot reopen an old shell with removed script files.
+- Cap an Ollama-backed fleet lane at its effective one serving slot and reserve
+  seats across each selected batch, allowing later items to use other signed
+  engines instead of piling onto the same local model.
+- Show full model category names in Growth chart tooltips and tables, and apply
+  the one-percent display rule consistently across Meters and remaining-budget
+  views, including values just over 100%.
+
+### Security
+
+- Update the bundled `fast-uri` and `ip-address` dependency pins to patched
+  versions 3.1.7 and 10.5.1.
+
+### Release process
+
+- Run the full local prepublish suite in three bounded, isolated backend shards
+  before the web suite, avoiding a duplicate full test run during release.
+
 ## [3.16.0] — 2026-09-28
 
 ### Verse release integration

@@ -18,9 +18,9 @@
  *  - Vite's content-hashed chunks under /next/assets/ (`name-<8 char hash>.ext`)
  *    are served `public, max-age=31536000, immutable`: their bytes can never
  *    change under that name, so a relaunch re-downloads nothing and WebKit's
- *    bytecode cache can keep them. Everything else (index.html, the legacy
- *    app) stays `no-cache` but carries a strong ETag, so revalidation is a
- *    bodyless 304.
+ *    bytecode cache can keep them. HTML is `no-store` and always returns its
+ *    body, so an old shell cannot refer to chunks removed by a new install.
+ *    Other stable paths stay `no-cache` with a strong ETag for bodyless 304s.
  *  - Text assets are sent brotli- or gzip-encoded per Accept-Encoding. The
  *    compression runs on the libuv threadpool (never the request thread): the
  *    first request for a file is served identity-encoded while the encoded
@@ -72,6 +72,7 @@ function contentTypeFor(filePath: string): string {
 export const VERSE_MOBILE_SW_PATH = '/verse/m/sw.js';
 
 export const IMMUTABLE_CACHE_CONTROL = 'public, max-age=31536000, immutable';
+export const HTML_CACHE_CONTROL = 'no-store';
 export const REVALIDATE_CACHE_CONTROL = 'no-cache';
 
 /** Vite's default chunk/asset naming: `<name>-<8 url-safe base64 chars>.<ext>`. */
@@ -288,7 +289,9 @@ export function serveStatic(
         openedAfter.mtimeMs !== namedAfter.mtimeMs ||
         openedAfter.ctimeMs !== namedAfter.ctimeMs) return false;
       const contentType = contentTypeFor(candidate);
-      const cacheControl = isImmutableAssetPath(pathname) ? IMMUTABLE_CACHE_CONTROL : REVALIDATE_CACHE_CONTROL;
+      const isHtml = extname(candidate).toLowerCase() === '.html';
+      const cacheControl = isHtml ? HTML_CACHE_CONTROL
+        : isImmutableAssetPath(pathname) ? IMMUTABLE_CACHE_CONTROL : REVALIDATE_CACHE_CONTROL;
       const etag = etagFor(openedAfter);
       const compressible = COMPRESSIBLE_EXTENSIONS.has(extname(candidate).toLowerCase()) &&
         body.byteLength >= MIN_COMPRESS_BYTES && body.byteLength <= MAX_COMPRESS_INPUT_BYTES;
@@ -301,7 +304,7 @@ export function serveStatic(
       if (compressible) headers['Vary'] = 'Accept-Encoding';
       const reqHeaders = req.headers ?? {};
       res.setHeader('Content-Type', contentType);
-      if (ifNoneMatchHits(reqHeaders['if-none-match'], etag)) {
+      if (!isHtml && ifNoneMatchHits(reqHeaders['if-none-match'], etag)) {
         res.writeHead(304, headers);
         res.end();
         return true;

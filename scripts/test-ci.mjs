@@ -7,8 +7,8 @@
  * only a bounded last-line diagnostic is retained.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, URL } from 'node:url';
@@ -20,10 +20,10 @@ import {
 } from 'node:timers';
 import { setTimeout as delay } from 'node:timers/promises';
 
-// An unsharded local/prepublish run contains 700+ modules and several intentionally
+// A direct unsharded local run contains 700+ modules and several intentionally
 // adversarial durability suites whose measured combined runtime exceeds 15 minutes.
-// Hosted CI still passes --shard=1/3..3/3, so this ceiling is for the complete
-// single-command gate; it does not reduce coverage or change per-test deadlines.
+// Hosted CI and prepublish both use --shard=1/3..3/3. This ceiling remains for
+// direct single-command diagnosis; it does not reduce coverage or per-test deadlines.
 const DEFAULT_HARD_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 60_000;
@@ -52,6 +52,8 @@ const heartbeatIntervalMs = readPositiveDuration(
 );
 
 const home = mkdtempSync(join(tmpdir(), 'ashlr-test-ci-home-'));
+const privateTmp = join(home, 'tmp');
+mkdirSync(privateTmp);
 const vitestBin = join(process.cwd(), 'node_modules', 'vitest', 'vitest.mjs');
 const progressReporter = fileURLToPath(new URL('./vitest-progress-reporter.mjs', import.meta.url));
 const extraArgs = process.argv.slice(2);
@@ -72,6 +74,12 @@ const child = spawn(process.execPath, args, {
     HOME: home,
     USERPROFILE: home,
     ASHLR_HOME: join(home, '.ashlr'),
+    // The nested Vitest worker home lives under this wrapper's private HOME.
+    // Keep the guard anchored to the actual account home, not its temp parent.
+    ASHLR_VITEST_REAL_HOME: process.env.ASHLR_VITEST_REAL_HOME ?? userInfo().homedir,
+    TMPDIR: privateTmp,
+    TMP: privateTmp,
+    TEMP: privateTmp,
     CI: process.env.CI ?? '1',
   },
   detached: process.platform !== 'win32',

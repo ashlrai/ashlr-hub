@@ -12,8 +12,9 @@
  * Phase A (parallel): root build (tsc, then the static-asset copy from `npm run build` — see
  * GATE_BUILD_ASSET_SCRIPTS), web typecheck, eslint (cached), the real-io lane guard, the
  * Verse route sync-I/O guard (scripts/check-verse-sync-io.mjs),
- * the docs check. Then the web build + first-paint budget. Then Phase B: backend and web
- * vitest, in parallel.
+ * the docs check. Then the web build + first-paint budget. Phase B runs the
+ * focused backend and web suites in parallel; a full gate runs them serially
+ * so load-sensitive UI timing assertions measure the UI rather than backend work.
  *
  * Which tests run. The default mode selects tests through vitest's own import graph — the
  * same mechanism as `vitest --changed <ref>` — but hands vitest the changed-file list
@@ -501,11 +502,17 @@ async function main() {
     // Backend projects carry their own worker caps (unit 4, real-io 2; vitest.config.ts).
     // Web gets roughly a third of the machine alongside them.
     const webWorkers = Math.max(1, Math.min(6, Math.floor(availableParallelism() / 3)));
-    say(`phase B: backend + web tests (parallel; web maxWorkers=${webWorkers})`);
-    await Promise.all([
-      runSuite('backend', plan.backend, known, null).then(record),
-      runSuite('web', plan.web, known, webWorkers).then(record),
-    ]);
+    if (args.full) {
+      say(`phase B: backend, then web tests (serial; web maxWorkers=${webWorkers})`);
+      record(await runSuite('backend', plan.backend, known, null));
+      record(await runSuite('web', plan.web, known, webWorkers));
+    } else {
+      say(`phase B: backend + web tests (parallel; web maxWorkers=${webWorkers})`);
+      await Promise.all([
+        runSuite('backend', plan.backend, known, null).then(record),
+        runSuite('web', plan.web, known, webWorkers).then(record),
+      ]);
+    }
   }
 
   const durationMs = performance.now() - started;

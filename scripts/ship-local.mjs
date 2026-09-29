@@ -62,6 +62,8 @@ export const SIGNING_IDENTITY = 'Ashlr Local';
 export const ENTITLEMENTS = 'desktop/src-tauri/Entitlements.plist';
 /** Must match desktop/src-tauri/Info.plist (a Rust test pins that file's copy). */
 export const MIC_USAGE = 'Verse transcribes your voice on this Mac when you hold the dictation key.';
+/** The native WebView loads the loopback Verse server over HTTP. Keep ATS scoped to local traffic. */
+export const LOCAL_NETWORK_ATS = JSON.stringify({ NSAllowsLocalNetworking: true });
 
 /** The app-bundle files ship:local replaces, each backed up as <path>.prev-<short sha>. */
 export const BUNDLE_TARGETS = Object.freeze({
@@ -350,6 +352,7 @@ export function planShip(ctx) {
     // Dictation: macOS kills an app that touches the mic without this key, and ship:local
     // patches an installed bundle rather than rebuilding it, so write it every time.
     steps.push({ id: 'plist-mic', title: 'Info.plist: NSMicrophoneUsageDescription', argv: ['plutil', '-replace', 'NSMicrophoneUsageDescription', '-string', MIC_USAGE, join(APP_PATH, 'Contents', 'Info.plist')] });
+    steps.push({ id: 'plist-local-network', title: 'Info.plist: allow local Verse networking', argv: ['plutil', '-replace', 'NSAppTransportSecurity', '-json', LOCAL_NETWORK_ATS, join(APP_PATH, 'Contents', 'Info.plist')] });
     const valid = ctx.signing?.valid ? ctx.signing.hash : null;
     if (!valid) {
       steps.push({ id: 'signing-identity', title: `create / trust the "${SIGNING_IDENTITY}" code-signing identity (once; keeps the microphone permission across rebuilds)`, identity: SIGNING_IDENTITY });

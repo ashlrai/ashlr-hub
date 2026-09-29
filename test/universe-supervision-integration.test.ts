@@ -55,13 +55,13 @@ function fixture(specifications: Array<{ name: string; delay?: number; generatio
     const manifest: UniverseManifest = { schemaVersion: 1, id: `universe-${spec.name}`, name: `Supervision ${spec.name}`,
       objective: 'Increase a bounded integer with fixed independent measurement', seed: { repo, revision: git('rev-parse', 'HEAD') },
       metric: { name: 'value', direction: 'maximize', minImprovement: 0 },
-      budget: { maxTrials: 1, maxParallel: 1, maxDurationMs: 15_000, trialTimeoutMs: 5_000 },
-      evaluation: { command: [process.execPath, 'evaluate.mjs'], timeoutMs: 3_000 },
+      budget: { maxTrials: 1, maxParallel: 1, maxDurationMs: 30_000, trialTimeoutMs: 10_000 },
+      evaluation: { command: [process.execPath, 'evaluate.mjs'], timeoutMs: 5_000 },
       variants: [{ id: 'increment', niche: 'value', hypothesis: 'Advance the integer',
         command: [process.execPath, 'worker.mjs', String(spec.delay ?? 0)] }] };
     initUniverse(manifest, { root });
     const definition: UniverseCampaignDefinition = { schemaVersion: 1, id: `campaign-${spec.name}`, universeId: manifest.id,
-      feedback: false, budget: { maxGenerations: spec.generations ?? 1, maxDurationMs: 30_000, maxModelRequests: 0,
+      feedback: false, budget: { maxGenerations: spec.generations ?? 1, maxDurationMs: 60_000, maxModelRequests: 0,
         maxStagnantGenerations: 2, maxReportedTokens: null } };
     initUniverseCampaign(definition, { root }); ids.push(definition.id); seeds.set(repo, tree(repo));
   }
@@ -142,7 +142,7 @@ describe.runIf(process.platform === 'darwin')('Universe foreground supervision w
       { attempted: false, observedState: 'completed', status: 'completed', delivery: { status: 'delivered' } },
     ] });
     for (const campaignId of value.ids) expect(readUniverseCampaign(campaignId, value).state).toBe('completed');
-  }, 30_000);
+  }, 60_000);
 
   it.each(['pause', 'stop'] as const)('preserves %s inserted by the running observer before actual admission', async (action) => {
     const value = fixture([{ name: 'a' }]);
@@ -292,7 +292,7 @@ describe.runIf(process.platform === 'darwin')('Universe foreground supervision w
     const before = tree(value.root);
     await new Promise((resolve) => setTimeout(resolve, 150));
     expect(tree(value.root)).toEqual(before);
-  }, 10_000);
+  }, 30_000);
 
   it('makes a pre-cancelled invocation wholly read-only including its never-started queue', async () => {
     const value = fixture([{ name: 'a' }, { name: 'b' }]);

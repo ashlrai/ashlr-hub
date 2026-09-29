@@ -196,7 +196,7 @@ import { DEVIN_CLI_LANE, FLEET_ENGINES, grantEngineOfLane, type DispatchOutcome,
 export interface LocalRuntimeReading {
   /** Can a local agent run at all? null = unknown. */
   reachable: boolean | null;
-  /** Serving slots (llama-server), null when unknown / not a slotted runtime. */
+  /** Effective parallel serving slots; null only when the runtime cannot be bounded. */
   slots: number | null;
   /** Context tokens of ONE slot; null when unknown. */
   contextPerSlot: number | null;
@@ -385,7 +385,7 @@ const LEDGER_KINDS: LedgerReadOptions['kinds'] = [
 // Default (production) dependencies
 // ---------------------------------------------------------------------------
 
-async function probeLocalRuntimeDefault(cfg: AshlrConfig, snapshot: CapacitySnapshot | null): Promise<LocalRuntimeReading> {
+export async function probeLocalRuntimeDefault(cfg: AshlrConfig, snapshot: CapacitySnapshot | null): Promise<LocalRuntimeReading> {
   if (localFleetEnabled(cfg)) {
     try {
       const { probeLlamaRuntime } = await import('../local-runtime/llama/health.js');
@@ -400,16 +400,19 @@ async function probeLocalRuntimeDefault(cfg: AshlrConfig, snapshot: CapacitySnap
       return { reachable: null, slots: null, contextPerSlot: null, detail: 'the local runtime probe failed' };
     }
   }
-  // Ollama (local-coder / builtin): the Verse snapshot's local seats carry the
-  // windows the operator's local models advertise. The smallest one binds.
+  // Ollama serializes Qwen3.8 requests even when OLLAMA_NUM_PARALLEL is raised
+  // (local-fleet.ts records the measured refusal). One is the only honest
+  // serving-slot bound for this non-slotted fallback; a second item should
+  // route to another authorized lane instead of queueing inside Ollama.
+  // The Verse snapshot's local seats carry the advertised context windows.
   const windows = (snapshot?.seats ?? [])
     .filter((s) => s.engine === 'local' && typeof s.contextWindow === 'number')
     .map((s) => s.contextWindow as number);
   return {
     reachable: null,
-    slots: null,
+    slots: 1,
     contextPerSlot: windows.length > 0 ? Math.min(...windows) : null,
-    detail: 'local models via Ollama (no slotted runtime)',
+    detail: 'local models via Ollama (one effective serving slot)',
   };
 }
 
@@ -751,6 +754,11 @@ interface TickContext {
   enrolled: string[];
   pathOfRepo: Map<string, string>;
   routeCache: Map<string, DispatchRoute>;
+  /** Null until the loop identifies the selected batch; probes never reserve. */
+  plannedItemIds: Set<string> | null;
+  /** Primary lane slots after best-of-N reserve, consumed once per newly routed item. */
+  routeLaneCaps: Record<FleetEngine, number>;
+  plannedLaneUse: Partial<Record<FleetEngine, number>>;
   /** Title / source of every item routed this tick (DispatchOutcome carries neither). */
   itemInfo: Map<string, { title: string; source: string }>;
   held: HeldItemRecord[];
@@ -1761,6 +1769,9 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         return finish(heldResult(reason, enrolled), { ...state, holdProduction: reason });
       }
 
+      const routeLaneCaps = Object.fromEntries(FLEET_ENGINES.map((lane) => [
+        lane, Math.max(0, lanes[lane].slots - fanoutReserve[lane]),
+      ])) as Record<FleetEngine, number>;
       ctx = {
         nowMs,
         cfg,
@@ -1798,6 +1809,9 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         enrolled,
         pathOfRepo,
         routeCache: new Map(),
+        plannedItemIds: null,
+        routeLaneCaps,
+        plannedLaneUse: {},
         itemInfo: new Map(),
         held: [],
         fleetItems,
@@ -1821,9 +1835,19 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       return finish({
         pausedRepos: pausedPaths,
         // The pool gets each lane minus the best-of-N reserve (review c15).
-        laneCaps: Object.fromEntries(FLEET_ENGINES.map((lane) => [lane, Math.max(0, lanes[lane].slots - fanoutReserve[lane])])) as Partial<Record<FleetEngine, number>>,
+        laneCaps: routeLaneCaps,
         holdProduction,
       }, state);
+    },
+
+    beginDispatchPlan(itemIds: readonly string[]): void {
+      if (!ctx) return;
+      ctx.plannedItemIds = new Set(itemIds);
+      ctx.plannedLaneUse = {};
+      // Selection/repair preflight may have asked for a route already. Replan
+      // selected items against the batch's remaining seats; keep previews out
+      // of the reservation count.
+      for (const itemId of ctx.plannedItemIds) ctx.routeCache.delete(itemId);
     },
 
     route(item: WorkItem, cfg: AshlrConfig): TickRouteDecision {
@@ -1841,7 +1865,29 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         } catch {
           legacy = { backend: 'builtin' as EngineId, tier: 'local', reason: 'legacy route unavailable' };
         }
-        decision = routeWorkItem(item, legacy, { ...current.router, cfg });
+        // The pool enforces lane caps after routing, but routing a batch with
+        // the same unspent snapshot would choose the first seat for every
+        // item. Reserve each newly planned primary turn now so later items
+        // can use the next grant-authorized seat. A repeated route for the
+        // same item returns the cache above and consumes no extra slot.
+        const planning = current.plannedItemIds?.has(item.id) === true;
+        const lanes = Object.fromEntries(FLEET_ENGINES.map((lane) => {
+          const plan = current.lanes[lane];
+          const remaining = planning
+            ? Math.max(0, current.routeLaneCaps[lane] - (current.plannedLaneUse[lane] ?? 0))
+            : plan.slots;
+          return [lane, {
+            ...plan,
+            slots: remaining,
+            capReason: remaining === 0 && (current.plannedLaneUse[lane] ?? 0) > 0
+              ? `The ${FLEET_LANE_LABEL[lane]} lane's primary slots are already reserved this tick.`
+              : plan.capReason,
+          }];
+        })) as Record<FleetEngine, LanePlan>;
+        decision = routeWorkItem(item, legacy, { ...current.router, lanes, cfg });
+        if (planning && !decision.hold && decision.lane !== null) {
+          current.plannedLaneUse[decision.lane] = (current.plannedLaneUse[decision.lane] ?? 0) + 1;
+        }
         current.routeCache.set(item.id, decision);
         if (decision.seatDecision) {
           try {

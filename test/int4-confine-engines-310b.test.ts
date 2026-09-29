@@ -494,12 +494,18 @@ describe.runIf(DARWIN && SUPPORTS_PROFILES)('runEngineSandboxed: autonomous grok
   it('runs confined, records grok-cli:<model> and NDJSON usage, files the diff, cleans up', async () => {
     await withTmpHome(async (fx) => {
       const previousAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      const previousTmpdir = process.env.TMPDIR;
       process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
       try {
         const seat = makeSeat();
         const repo = fx.makeRepo();
         repo.enroll();
         hoisted.standing = { grantId: 'grant-int4' };
+        // Other shards can create ashlr-run-* under the system temp root while
+        // this test runs. Scope the cleanup assertion to this fixture's runs.
+        const runTmp = join(fx.home, 'run-tmp');
+        mkdirSync(runTmp, { mode: 0o700 });
+        process.env.TMPDIR = runTmp;
         const beforeTmp = readdirSync(realpathSync(tmpdir())).filter((n) => n.startsWith('ashlr-run-'));
         const result = await runEngineSandboxed('grok-cli' as never, 'edit a file', seat.cfg, { sourceRepo: repo.dir, propose: true });
         hoisted.standing = null;
@@ -519,6 +525,8 @@ describe.runIf(DARWIN && SUPPORTS_PROFILES)('runEngineSandboxed: autonomous grok
         expect(listSandboxes()).toEqual([]);
       } finally {
         hoisted.standing = null;
+        if (previousTmpdir === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = previousTmpdir;
         if (previousAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
         else process.env.ASHLR_TEST_ALLOW_ANY_REPO = previousAllowAnyRepo;
       }

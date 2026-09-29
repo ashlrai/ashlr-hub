@@ -494,7 +494,10 @@ describe('M571 local production gate v1', () => {
   });
 
   it.runIf(process.platform === 'darwin')('enforces the private write root and deny-network sandbox', () => {
-    const root = mkdtempSync(join(tmpdir(), 'ashlr-m571-sandbox-'));
+    // Unix socket paths have a 103-byte Darwin limit. Match the production
+    // gate's deliberately short, private scratch root even when CI's TMPDIR
+    // is nested under its isolated HOME.
+    const root = createPrivateLocalGateTempRoot().path;
     const profileRoot = mkdtempSync(join(tmpdir(), 'ashlr-m571-profiles-'));
     const custodyDirectory = createPrivateLocalGateCustodyRoot();
     scratch.push(root, profileRoot, custodyDirectory.path);
