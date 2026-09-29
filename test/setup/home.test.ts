@@ -35,6 +35,16 @@ it('honors the validated local-gate worker-home parent when configured', () => {
 it('rejects a non-absolute or non-private explicit worker-home parent', () => {
   expect(() => resolveWorkerHomeParent('relative-home')).toThrow(/absolute owned private/u);
   const parent = mkdtempSync(join(realpathSync(process.env.HOME!), 'ashlr-vitest-parent-validation-'));
+  if (typeof process.getuid !== 'function') {
+    // Windows has no POSIX owner/mode to validate, so an explicit parent is
+    // refused outright (fail closed) rather than accepted unchecked.
+    try {
+      expect(() => resolveWorkerHomeParent(parent)).toThrow(/absolute owned private/u);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+    return;
+  }
   try {
     expect(resolveWorkerHomeParent(parent)).toBe(realpathSync(parent));
     chmodSync(parent, 0o755);
