@@ -140,6 +140,35 @@ jobs:
           node-version: ${{ matrix.node_version || '22' }}
           cache: "npm"
 
+      # Native-profile preparation refuses a group/other-writable runtime
+      # (src/core/resources/native-profile.ts executable()). The hosted
+      # Linux tool cache ships the Node binary group-writable, which made
+      # every native-profile test fail closed on ubuntu only.
+      - name: Drop group/other write from the hosted Node runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          node_bin="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
+          stat -c '%a %U:%G %n' "$node_bin"
+          chmod go-w -- "$node_bin"
+          stat -c '%a %U:%G %n' "$node_bin"
+
+      # Custody checks (worker-home parent, preparation Git, built-in
+      # evaluator install) refuse group/world-writable ancestors. On hosted
+      # Linux, os.tmpdir() is the sticky world-writable /tmp, so every test
+      # rooted there fails closed; macOS runners already get a per-user
+      # private temp root. Give Linux the same shape.
+      - name: Use a private temp root on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          private_tmp="$RUNNER_TEMP/ashlr-private-tmp"
+          mkdir -m 700 -- "$private_tmp"
+          for dir in "$private_tmp" "$RUNNER_TEMP" "$(dirname "$RUNNER_TEMP")" "$HOME"; do
+            stat -c '%a %U:%G %n' "$dir"
+          done
+          echo "TMPDIR=$private_tmp" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: npm ci
 
