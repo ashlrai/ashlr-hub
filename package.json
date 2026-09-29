@@ -97,7 +97,7 @@
     "node": ">=22.15.0"
   },
   "scripts": {
-    "prepublishOnly": "npm run typecheck && npm run lint && npm run test:ci && npm run test:web",
+    "prepublishOnly": "npm run build && npm run check:first-paint && npm run check:docs && npm run typecheck && npm run lint && npm run test:ci:sharded && npm run test:web",
     "prepack": "npm run build",
     "build": "tsc -p tsconfig.json && node scripts/authority-surface.mjs && node scripts/copy-assets.mjs && node scripts/build-preparation-builtin.mjs && vite build --config vite.config.web.ts && node scripts/build-release-dependency-inventory.mjs && node scripts/build-identity.mjs",
     "build:preparation-builtin": "node scripts/build-preparation-builtin.mjs",
@@ -111,6 +111,7 @@
     "test:serial": "vitest run --no-file-parallelism",
     "test:web": "vitest run --config vitest.config.web.ts",
     "test:ci": "node scripts/test-ci.mjs",
+    "test:ci:sharded": "node scripts/test-ci-sharded.mjs",
     "test:invariants": "vitest run test/h*.test.ts --no-file-parallelism",
     "test:engineering-responsiveness": "vitest run --config vitest.config.engineering-performance.ts",
     "conformance:ecosystem": "tsx scripts/run-ecosystem-conformance.ts",

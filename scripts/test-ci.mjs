@@ -20,10 +20,10 @@ import {
 } from 'node:timers';
 import { setTimeout as delay } from 'node:timers/promises';
 
-// An unsharded local/prepublish run contains 700+ modules and several intentionally
+// A direct unsharded local run contains 700+ modules and several intentionally
 // adversarial durability suites whose measured combined runtime exceeds 15 minutes.
-// Hosted CI still passes --shard=1/3..3/3, so this ceiling is for the complete
-// single-command gate; it does not reduce coverage or change per-test deadlines.
+// Hosted CI and prepublish both use --shard=1/3..3/3. This ceiling remains for
+// direct single-command diagnosis; it does not reduce coverage or per-test deadlines.
 const DEFAULT_HARD_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 60_000;

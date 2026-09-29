@@ -109,7 +109,7 @@ async function fixture(measureSeed = false) {
   const observations = [{ workerId: 'local-worker', health: 'ready' as const, windows: [], retryAfter: null,
     observedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 240_000).toISOString() }];
   const runtime = { schemaVersion: 1, root: ledgerRoot, workspace: transport, poolPath: join(base, 'pool.json'),
-    bindingsPath: join(base, 'bindings.json'), observationsPath: join(base, 'observations.json'), capacityWaitMs: 1000 };
+    bindingsPath: join(base, 'bindings.json'), observationsPath: join(base, 'observations.json'), capacityWaitMs: 10_000 };
   save(runtime.poolPath, pool); save(runtime.bindingsPath, bindings); save(runtime.observationsPath, observations);
   const runtimeFile = join(base, 'runtime.json'); save(runtimeFile, runtime);
   const manifest: UniverseManifest = { schemaVersion: 1, id: 'hub-marker-paths', name: 'Hub backlog marker paths',

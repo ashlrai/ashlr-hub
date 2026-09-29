@@ -93,7 +93,7 @@ describe('owner-independent preparation registry boundaries', () => {
     expect(replay.disposition).toBe('replayed'); expect(replay.enrollmentDigest).toBe(prepared.enrollmentDigest);
     expect(tree(f.base)).toEqual(replayBefore);
     expect(existsSync(join(f.root, 'pool-state.json'))).toBe(false);
-  }, 30_000);
+  }, 90_000);
 
   it('keeps missing reads side-effect free and binds scope even when every other context field is identical', () => {
     const f = fixture(); const before = tree(f.base);

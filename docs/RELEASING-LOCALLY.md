@@ -27,7 +27,6 @@ so run it explicitly before packaging.
 
 ```sh
 npm ci
-npm run gate:full
 npm run prepublishOnly
 # If native desktop code changed: npm run build:binary; node desktop/scripts/prepare-sidecar.mjs; (cd desktop && cargo tauri build)
 npm run ship:local -- --native  # uses a PREBUILT native binary; verify it was copied
@@ -51,9 +50,14 @@ macOS and the login keychain.
   file changed since the merge-base with `origin/master` (`--base <ref>` to change that),
   plus a smoke set that always runs (`scripts/gate-smoke.json`).
 
-`gate:full` runs the complete backend suite before the complete web suite.
-The full-suite web timing assertions are load-sensitive, so they run without
-the backend workers competing for the same Mac.
+`prepublishOnly` builds the source, checks the first-paint budget and docs,
+typechecks and lints, then runs the complete backend suite as three deterministic shards,
+with one worker and a private HOME per shard; it requires all three to pass
+before running the complete web suite. The web timing assertions are
+load-sensitive, so no backend workers remain when it starts. `npm run gate`
+remains useful for fast changed-file feedback while coding, and `gate:full`
+for serial full-suite diagnosis. Running either immediately before
+`prepublishOnly` duplicates test work without adding release coverage.
 
 A version bump (in `package.json` and `package-lock.json`) or a script edit does not widen
 the run; a dependency change in either file, or a change to a vitest config or vitest setup
