@@ -6,7 +6,7 @@
 
 **[verse.ashlr.ai](https://verse.ashlr.ai)**
 
-[Install](#install) · [See the workbench](#what-it-is) · [Read the guide](docs/VERSE.md) · [Explore the ecosystem](#the-ashlr-ecosystem) · [Star Verse on GitHub](https://github.com/ashlrai/ashlr-hub)
+[Install](#install) · [See the workbench](#what-it-is) · [Read the guide](docs/VERSE.md) · [Explore the ecosystem](https://verse.ashlr.ai/ecosystem) · [Star Verse on GitHub](https://github.com/ashlrai/ashlr-hub)
 
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
@@ -331,6 +331,9 @@ repository or changelog state alone is not release evidence.
 
 Verse is the flagship workbench. These related open-source projects solve
 different parts of a developer's workflow and remain useful on their own:
+
+Explore the [interactive ecosystem page](https://verse.ashlr.ai/ecosystem) for a
+dated, GitHub-sourced star history of these six repositories and their sum.
 
 | Project | What it helps with |
 |---------|--------------------|
