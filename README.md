@@ -6,7 +6,7 @@
 
 **[verse.ashlr.ai](https://verse.ashlr.ai)**
 
-
+[Install](#install) · [See the workbench](#what-it-is) · [Read the guide](docs/VERSE.md) · [Explore the ecosystem](https://verse.ashlr.ai/ecosystem) · [Star Verse on GitHub](https://github.com/ashlrai/ashlr-hub)
 
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
@@ -20,10 +20,12 @@ npm install -g @ashlr/hub   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Li
 ashlr verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
-The macOS arm64 desktop DMG is attached to the
-[v3.16.1 GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.1).
-It is locally signed and not notarized. See [The desktop app](#the-desktop-app-macos)
-or follow the [Quickstart](#quickstart).
+On an Apple silicon Mac, download the
+[v3.16.1 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.16.1/Ashlr_3.16.1_aarch64_locally-signed.dmg).
+It is locally signed, not Apple notarized; macOS may require **Open Anyway** on
+first launch. The CLI includes the browser console on macOS, Linux and Windows.
+See [desktop installation](#the-desktop-app-macos) or the
+[first-run guide](docs/QUICKSTART.md#open-verse).
 
 ![Ashlr Verse — the operator console: an expandable section rail, a project sidebar, and every connected account with its live usage windows](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/verse-console.png)
 
@@ -312,11 +314,11 @@ switch, backends, sandboxing, the command reference, the safety model, the
 | **3.5–3.8** | Ashlr Verse — the operator console, local seats on llama.cpp, a native folder picker, bounded run windows, local-only that actually prevents spend | Shipped |
 | **3.9** | Context — windows read from each CLI, visible compaction, standard and expansive modes, continue in a fresh chat, shared project memory | Shipped |
 | **3.10** | Autonomy with custody and the workbench — Touch ID grants, budget modes, the Leader, five surfaces, ⌘K and ⌘J, the dock, live reasoning, charts, burn-down history | Shipped |
-| **3.11** | The cloud lane: Claude Code cloud sessions on Claude credits, with an estimated budget and self-improvement. Also the Resources drawer (⌘.) and the always-on resource bar, provider logos, the Ashlr.AI mark, a 349 KB first paint, and `npm run gate` / `npm run ship:local` | 3.11.5 source; verify npm publication separately |
+| **3.11** | The cloud lane: Claude Code cloud sessions on Claude credits, with an estimated budget and self-improvement. Also the Resources drawer (⌘.) and the always-on resource bar, provider logos, the Ashlr.AI mark, a 349 KB first paint, and `npm run gate` / `npm run ship:local` | Released |
 | **3.12–3.13** | Your key is the trust root; guided `ashlr authority setup`; the host-verified `ashlr/verify` check; cloud PRs into the standing gates; the resident runtime under a standing grant (`ashlr authority resident start`) | Shipped |
 | **3.14** | Talk to the Leader in Verse, Telegram and the CLI; Leader reliability; accounts ready in both chat and fleet; the rollout ladder on Command and shadow decisions on Fleet; local enforcement for free-plan private repos; `file:../` sibling dependencies; a sidecar that cannot freeze; chart polish | Shipped |
-| **3.15** | Founder-mode Leader; Devin as chat seats, a lane and a fleet producer under a two-judge rule; the workbench panel (terminal blocks, browser, checkpoints, sources and reasoning); every seat together; playbooks and automations; the Jev decision layer; retros and approved knowledge (Growth ▸ Lessons); a private repo wiki and Ask | Included in the 3.16 source; verify npm publication separately |
-| **3.16** | Native Agents workbench and guarded computer tools; optional authenticated phone gateway; reviewable learning evidence; Devin CLI SWE-2 High default; local signing and release fixes | Release source; verify npm publication separately |
+| **3.15** | Founder-mode Leader; Devin as chat seats, a lane and a fleet producer under a two-judge rule; the workbench panel (terminal blocks, browser, checkpoints, sources and reasoning); every seat together; playbooks and automations; the Jev decision layer; retros and approved knowledge (Growth ▸ Lessons); a private repo wiki and Ask | Included in the published 3.16 release |
+| **3.16** | Native Agents workbench and guarded computer tools; optional authenticated phone gateway; reviewable learning evidence; Devin CLI SWE-2 High default; local signing and release fixes | [3.16.1 published](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.1) |
 
 Releases are built and published locally (GitHub Actions is off); the procedure
 is in [Releasing without CI](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
@@ -327,9 +329,24 @@ repository or changelog state alone is not release evidence.
 
 ## The Ashlr ecosystem
 
-ashlr-hub is the local kernel in a federated ecosystem. The other repos retain independent products and become **composable capabilities** through explicit interfaces: token-efficiency (`ashlr-plugin`, `@ashlr/core-efficiency`), executors (`ashlrcode`, `ashlr-workbench`), security and trust (`phantom-secrets`, `binshield`), infra and data (`stack`, `webfetch`), and observability and content (`ashlr-pulse`, `ashlr-md`, `morphkit`, `prompt-trackr`). The capability map includes composition targets; it does not mean every integration is live.
+Verse is the flagship workbench. These related open-source projects solve
+different parts of a developer's workflow and remain useful on their own:
 
-See [`docs/ECOSYSTEM-MAP.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ECOSYSTEM-MAP.md) for the full capability map and the composition bets — how the hub uses its own ecosystem as building blocks.
+Explore the [interactive ecosystem page](https://verse.ashlr.ai/ecosystem) for a
+dated, GitHub-sourced star history of these six repositories and their sum.
+
+| Project | What it helps with |
+|---------|--------------------|
+| **[Ashlr Verse](https://github.com/ashlrai/ashlr-hub)** | Coordinate coding agents, accounts, local models and guarded fleet work from one console. |
+| **[Phantom](https://github.com/ashlrai/phantom-secrets)** | Keep real API keys out of agent context with local tokens and a network-edge proxy. |
+| **[Locus](https://github.com/ashlrai/locus)** | Pin the account and workspace identity under which an agent acts. |
+| **[Lexicon](https://github.com/ashlrai/lexicon)** | Correct names and technical terms that speech-to-text gets wrong before they reach an agent. |
+| **[AshlrCode](https://github.com/ashlrai/ashlrcode)** | Run a multi-provider coding agent in the terminal. |
+| **[Morphkit](https://github.com/ashlrai/morphkit)** | Turn a TypeScript/React app into a SwiftUI project. |
+
+The [ecosystem map](docs/ECOSYSTEM-MAP.md) records older composition ideas; it
+is a dated planning snapshot, not a claim that every integration is live. Each
+repository has its own install instructions, release state and star count.
 
 ## Documentation
 

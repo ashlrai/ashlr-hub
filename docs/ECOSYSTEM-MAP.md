@@ -1,17 +1,21 @@
 # Ashlr Ecosystem Map
 
-> THE doc to read first to understand the whole 21-repo Ashlr dev-tools platform fast.
-> ashlr-hub is the orchestrator at the center; every other repo is a **composable capability**.
-> The leverage is in the *compositions* — the fleet using its own tools to fix its own weaknesses and to build incredible things.
-> Feeds the strategist (direction), the invent engine (compositional ideas), and build agents (cross-tool reuse).
-> A machine-readable mirror of this map lives at [`docs/ecosystem-index.json`](./ecosystem-index.json) for the Inference Fabric memory layer + agents to load programmatically.
-> Refreshed 2026-07-02 from the local `dev-tools/` sibling-directory inventory: 21 active repos, excluding `binshield-internal-backup`. Detailed capability profiles below are currently expanded for 12 repos; the index records the full current inventory.
+> **Historical planning snapshot, 2026-07-02.** This 21-repo local inventory and
+> its [machine-readable index](./ecosystem-index.json) are not a current public
+> repository list, a live integration map or a current star-count source. Newer
+> independent projects such as Locus and Lexicon are absent. For the current
+> public focus projects, start with the [Verse README](../README.md#the-ashlr-ecosystem)
+> and each linked repository. The composition ideas below remain design targets
+> until their individual integrations are verified.
 
 ---
 
-## Current 21-repo inventory
+## July 2026 21-repo inventory
 
-This is a read-only inventory mirror of the local `dev-tools/` workspace. It keeps the map honest while the detailed profiles catch up. The machine-readable source for this table is [`docs/ecosystem-index.json`](./ecosystem-index.json).
+This table mirrors the local `dev-tools/` workspace as it was on 2026-07-02.
+The machine-readable source for that dated table is
+[`docs/ecosystem-index.json`](./ecosystem-index.json). It should not drive a live
+repository directory without a fresh inventory and owner review.
 
 ### Strategic focus tiers
 

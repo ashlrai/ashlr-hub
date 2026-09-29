@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Explore six public Ashlr engineering tools, from Ashlr Verse to Phantom, Locus, Lexicon, AshlrCode and Morphkit. See dated, GitHub-sourced star histories for each repository and their sum.">
+<meta name="color-scheme" content="light dark">
+<link rel="canonical" href="https://verse.ashlr.ai/ecosystem">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://verse.ashlr.ai/ecosystem">
+<meta property="og:title" content="The Ashlr engineering ecosystem">
+<meta property="og:description" content="Six independent tools for coding agents, secrets, identity, voice, and native apps. Explore their public GitHub history.">
+<meta property="og:image" content="https://verse.ashlr.ai/assets/verse-console.png">
+<meta property="og:image:alt" content="Ashlr Verse coding-agent console">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://verse.ashlr.ai/assets/verse-console.png">
+<title>Engineering ecosystem · Ashlr Verse</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --bg:#edf0f4; --paper:#fff; --ink:#0f1822; --muted:#58657a; --line:#d3dbe4;
+    --accent:#4e43cb; --chart:#101b29; --chart-ink:#edf5fa; --chart-muted:#a9bfd1;
+    --font-display:'Space Grotesk',ui-sans-serif,system-ui,sans-serif;
+    --font-body:'IBM Plex Sans',ui-sans-serif,system-ui,sans-serif;
+    --font-mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  }
+  @media (prefers-color-scheme:dark) {
+    :root { --bg:#0c121a; --paper:#121a24; --ink:#e7edf4; --muted:#a8b5c7; --line:#273748; --accent:#aca3ff; }
+  }
+  * { box-sizing:border-box; }
+  html { scroll-behavior:smooth; -webkit-text-size-adjust:100%; }
+  @media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } }
+  body { margin:0; color:var(--ink); background:var(--bg); font:16px/1.55 var(--font-body); -webkit-font-smoothing:antialiased; }
+  a { color:inherit; text-underline-offset:3px; }
+  a:focus-visible, button:focus-visible, input:focus-visible { outline:3px solid var(--accent); outline-offset:3px; }
+  .wrap { max-width:1180px; margin:auto; padding-inline:clamp(20px,5vw,64px); }
+  .skip { position:absolute; left:16px; top:-100px; background:var(--ink); color:var(--paper); padding:10px; z-index:10; }
+  .skip:focus { top:12px; }
+  header { border-bottom:1px solid var(--line); }
+  header .wrap { min-height:72px; display:flex; align-items:center; justify-content:space-between; gap:20px; }
+  .brand { display:inline-flex; align-items:center; gap:10px; font:700 19px var(--font-display); text-decoration:none; letter-spacing:-.03em; }
+  .brand svg { flex:none; }
+  .header-links { display:flex; align-items:center; flex-wrap:wrap; gap:clamp(12px,2.4vw,28px); font-size:14px; }
+  .header-links a { text-decoration:none; color:var(--muted); }
+  .header-links a:hover { color:var(--ink); }
+  main { padding-bottom:80px; }
+  .eyebrow { font:500 12px var(--font-mono); letter-spacing:.11em; text-transform:uppercase; color:var(--muted); }
+  .intro { display:grid; grid-template-columns:minmax(0,1fr) 255px; gap:48px; align-items:end; padding-block:clamp(60px,9vw,110px) 62px; }
+  .intro h1 { font:700 clamp(48px,7.5vw,94px)/.97 var(--font-display); letter-spacing:-.065em; max-width:11ch; margin:13px 0 24px; text-wrap:balance; }
+  .intro p { max-width:62ch; margin:0; color:var(--muted); font-size:18px; }
+  .intro strong { color:var(--ink); }
+  .intro .intro-actions { display:flex; flex-wrap:wrap; gap:14px 24px; margin-top:28px; font-size:14px; font-weight:600; }
+  .intro-actions a:first-child { color:var(--accent); }
+  .total { border-top:2px solid var(--ink); padding-top:14px; align-self:end; }
+  .total strong { display:block; font:700 clamp(68px,9vw,124px)/1 var(--font-display); letter-spacing:-.08em; }
+  .total span { display:block; max-width:20ch; font:500 13px/1.4 var(--font-mono); color:var(--muted); }
+  .total small { display:block; margin-top:12px; color:var(--muted); font-size:12px; }
+  .chart-panel { --chart-line:#7dd8de; background:var(--chart); color:var(--chart-ink); border:1px solid #26384a; border-radius:10px; padding:clamp(20px,3.4vw,38px); box-shadow:0 18px 42px rgb(15 24 34 / .12); }
+  .chart-heading { display:flex; align-items:start; justify-content:space-between; gap:22px; flex-wrap:wrap; }
+  .chart-heading h2 { font:700 clamp(25px,3.2vw,37px)/1.12 var(--font-display); letter-spacing:-.035em; margin:7px 0 0; }
+  .chart-heading p { font-size:13px; color:var(--chart-muted); max-width:40ch; margin:0; }
+  .chart-panel .eyebrow { color:#9bb2c5; }
+  .controls { display:flex; flex-wrap:wrap; gap:8px; margin-top:29px; }
+  .controls button, .range-controls button { font:500 12px/1.2 var(--font-mono); cursor:pointer; color:#bdcbd9; background:#1c2b3a; border:1px solid #36495b; border-radius:4px; min-height:39px; padding:8px 11px; }
+  .controls button[aria-pressed="true"], .range-controls button[aria-pressed="true"] { background:var(--chart-ink); border-color:var(--chart-ink); color:var(--chart); }
+  .controls button:hover, .range-controls button:hover { border-color:#d5e4ed; }
+  .chart-plot { margin-top:25px; border-top:1px solid #344657; padding-top:20px; }
+  .plot-meta { display:flex; align-items:baseline; justify-content:space-between; gap:15px; flex-wrap:wrap; }
+  .plot-meta h3 { font:700 18px var(--font-display); margin:0; }
+  .range-controls { display:flex; gap:6px; }
+  svg.chart { display:block; width:100%; height:auto; overflow:visible; margin-top:8px; }
+  .chart .grid { stroke:#314557; stroke-width:1; }
+  .chart .axis { fill:#9bb2c5; font:12px var(--font-mono); }
+  .chart .line { fill:none; stroke:var(--chart-line); stroke-width:3.5; stroke-linecap:round; stroke-linejoin:round; }
+  .chart .cursor-line { stroke:#eef6fb; stroke-opacity:.55; stroke-dasharray:4 5; }
+  .chart .cursor-dot { fill:var(--chart-line); stroke:var(--chart); stroke-width:3; }
+  .scrub { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px 22px; align-items:center; margin-top:2px; }
+  .scrub label { display:block; font:500 12px var(--font-mono); color:var(--chart-muted); }
+  .scrub input { width:100%; accent-color:#a99eff; cursor:pointer; }
+  .scrub output { font:500 13px var(--font-mono); color:var(--chart-ink); text-align:right; }
+  .method { color:var(--muted); font-size:13px; margin:14px 0 0; }
+  .method a { color:var(--accent); }
+  .projects { padding-top:clamp(74px,10vw,120px); }
+  .section-top { display:flex; align-items:end; justify-content:space-between; gap:20px; flex-wrap:wrap; padding-bottom:20px; }
+  .section-top h2 { font:700 clamp(34px,5vw,58px)/1.05 var(--font-display); letter-spacing:-.05em; margin:10px 0 0; }
+  .section-top p { max-width:39ch; margin:0; color:var(--muted); }
+  .project { --project:#7dd8de; display:grid; grid-template-columns:50px minmax(120px,230px) minmax(0,1fr) 90px; align-items:center; gap:20px; border-top:1px solid var(--line); padding:24px 0; }
+  .project:last-child { border-bottom:1px solid var(--line); }
+  .project .number { color:var(--muted); font:500 12px var(--font-mono); }
+  .project h3 { font:700 clamp(22px,2.6vw,29px)/1.12 var(--font-display); letter-spacing:-.035em; margin:0; }
+  .project h3 a { text-decoration:none; }
+  .project h3 a:hover { color:var(--accent); text-decoration:underline; }
+  .project .role { display:block; margin-top:6px; color:var(--muted); font:500 11px var(--font-mono); text-transform:uppercase; letter-spacing:.06em; }
+  .project p { margin:0; color:var(--muted); max-width:53ch; }
+  .project .stars { font:700 25px var(--font-display); text-align:right; white-space:nowrap; }
+  .project .stars small { display:block; color:var(--muted); font:500 11px var(--font-mono); }
+  .project[data-repo="ashlr-hub"] { border-top:3px solid var(--accent); padding-top:29px; }
+  .next { padding-top:74px; display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+  .next > div { padding:27px; border:1px solid var(--line); background:var(--paper); }
+  .next h2 { font:700 24px var(--font-display); margin:0 0 8px; }
+  .next p { margin:0 0 16px; color:var(--muted); }
+  .next a { color:var(--accent); font-weight:600; }
+  footer { border-top:1px solid var(--line); color:var(--muted); font-size:13px; }
+  footer .wrap { padding-block:24px 36px; display:flex; justify-content:space-between; flex-wrap:wrap; gap:12px; }
+  footer a { color:var(--muted); }
+  @media (max-width:780px) {
+    .intro { grid-template-columns:1fr; gap:40px; }
+    .intro h1 { max-width:14ch; }
+    .total { max-width:300px; }
+    .project { grid-template-columns:34px minmax(0,1fr) 58px; gap:8px 14px; }
+    .project p { grid-column:2 / 4; }
+    .next { grid-template-columns:1fr; }
+  }
+  @media (max-width:560px) {
+    .header-links a:nth-child(2) { display:none; }
+    .intro { padding-top:60px; }
+    .intro h1 { font-size:clamp(44px,13vw,66px); }
+    .intro p { font-size:16px; }
+    .chart-panel { margin-inline:-8px; border-radius:6px; }
+    .controls { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .controls button { text-align:left; }
+    .scrub { grid-template-columns:1fr; }
+    .scrub output { text-align:left; }
+    .project { padding-block:20px; }
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header><div class="wrap">
+  <a class="brand" href="/" aria-label="Ashlr Verse home">
+    <svg viewBox="54 67 146 124" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z"/><path fill="#2563eb" d="M110 121H143L133 152H120Z"/></svg>
+    Ashlr Verse
+  </a>
+  <nav class="header-links" aria-label="Site"><a href="/">Product</a><a href="#projects">Projects</a><a href="https://github.com/ashlrai">GitHub organization</a></nav>
+</div></header>
+<main id="main">
+  <section class="wrap intro" aria-labelledby="page-title">
+    <div>
+      <div class="eyebrow">Ashlr / open engineering</div>
+      <h1 id="page-title">Tools that make agents useful.</h1>
+      <p><strong>Verse is the command center.</strong> The other repositories solve specific parts of the work: keeping secrets out of model context, binding the right account, turning voice into usable instructions, coding across providers, and moving a web app to native SwiftUI. Each is its own public project.</p>
+      <div class="intro-actions"><a href="/">Explore Verse</a><a href="https://github.com/ashlrai/ashlr-hub">Star Verse on GitHub</a></div>
+    </div>
+    <div class="total" aria-label="Star snapshot"><strong id="total-stars">—</strong><span>sum of repository stars across the six projects below</span><small>GitHub snapshot: <span id="snapshot-date">loading</span></small></div>
+  </section>
+
+  <section class="wrap" aria-labelledby="history-title">
+    <div id="star-chart" class="chart-panel">
+      <div class="chart-heading">
+        <div><div class="eyebrow">Public GitHub history</div><h2 id="history-title">Follow the work.</h2></div>
+        <p>Choose the whole set or a single repository. The line steps only when a public star was recorded.</p>
+      </div>
+      <div class="controls" role="group" aria-label="Repository star history">
+        <button type="button" data-series="all" aria-pressed="true">All six</button>
+        <button type="button" data-series="ashlr-hub" aria-pressed="false">Verse</button>
+        <button type="button" data-series="phantom-secrets" aria-pressed="false">Phantom</button>
+        <button type="button" data-series="locus" aria-pressed="false">Locus</button>
+        <button type="button" data-series="lexicon" aria-pressed="false">Lexicon</button>
+        <button type="button" data-series="ashlrcode" aria-pressed="false">AshlrCode</button>
+        <button type="button" data-series="morphkit" aria-pressed="false">Morphkit</button>
+      </div>
+      <div class="chart-plot">
+        <div class="plot-meta"><h3 id="series-title">Six repositories, one measured timeline</h3><div class="range-controls" role="group" aria-label="Chart time range"><button type="button" data-range="all" aria-pressed="true">All time</button><button type="button" data-range="90d" aria-pressed="false">90 days</button></div></div>
+        <svg class="chart" id="history-svg" viewBox="0 0 1000 294" role="img" aria-labelledby="svg-title chart-description">
+          <title id="svg-title">Cumulative GitHub repository stars</title><desc id="chart-description">Use the controls and slider below to explore dated repository star totals.</desc>
+          <line class="grid" x1="58" x2="930" y1="50" y2="50"/><line class="grid" x1="58" x2="930" y1="147" y2="147"/><line class="grid" x1="58" x2="930" y1="244" y2="244"/>
+          <text class="axis" x="45" y="54" text-anchor="end" id="tick-top">—</text><text class="axis" x="45" y="151" text-anchor="end" id="tick-mid">—</text><text class="axis" x="45" y="248" text-anchor="end" id="tick-zero">0</text>
+          <path class="line" id="history-path"/>
+          <line class="cursor-line" id="cursor-line" y1="50" y2="244"/><circle class="cursor-dot" id="cursor-dot" r="6"/>
+          <text class="axis" x="58" y="282" id="tick-start">—</text><text class="axis" x="930" y="282" text-anchor="end" id="tick-end">—</text>
+        </svg>
+        <div class="scrub"><label for="history-cursor">Explore a date<input id="history-cursor" type="range" min="0" max="0" value="0"></label><output id="history-reading" for="history-cursor" aria-live="polite">Loading history…</output></div>
+      </div>
+    </div>
+    <p class="method" id="data-notice" role="status">Loading GitHub history…</p>
+    <p class="method">The chart is a dated snapshot of public GitHub star events. The aggregate adds six repo totals; it does not count unique people or measure product adoption. Open a repository for its current count.</p>
+  </section>
+
+  <section class="wrap projects" id="projects" aria-labelledby="projects-title">
+    <div class="section-top"><div><div class="eyebrow">The six selected repositories</div><h2 id="projects-title">Pick the right tool.</h2></div><p>Independent projects with different jobs. Start with the one that solves your immediate problem.</p></div>
+    <article class="project" data-repo="ashlr-hub"><span class="number">01</span><div><h3><a href="https://github.com/ashlrai/ashlr-hub">Ashlr Verse</a></h3><span class="role">Command center</span></div><p>One workbench for coding-agent seats, local models, a Leader, and a fleet bounded by signed authority.</p><span class="stars"><span data-repo-stars="ashlr-hub">—</span><small>stars</small></span></article>
+    <article class="project" data-repo="phantom-secrets"><span class="number">02</span><div><h3><a href="https://github.com/ashlrai/phantom-secrets">Phantom</a></h3><span class="role">Secret boundary</span></div><p>Keep real secrets out of agent prompts by giving tools local, replaceable handles instead.</p><span class="stars"><span data-repo-stars="phantom-secrets">—</span><small>stars</small></span></article>
+    <article class="project" data-repo="locus"><span class="number">03</span><div><h3><a href="https://github.com/ashlrai/locus">Locus</a></h3><span class="role">Account identity</span></div><p>Bind agent tools to the intended account and tenant before a command can act.</p><span class="stars"><span data-repo-stars="locus">—</span><small>stars</small></span></article>
+    <article class="project" data-repo="lexicon"><span class="number">04</span><div><h3><a href="https://github.com/ashlrai/lexicon">Lexicon</a></h3><span class="role">Voice vocabulary</span></div><p>Correct the names and technical words speech recognition gets wrong before they reach an agent.</p><span class="stars"><span data-repo-stars="lexicon">—</span><small>stars</small></span></article>
+    <article class="project" data-repo="ashlrcode"><span class="number">05</span><div><h3><a href="https://github.com/ashlrai/ashlrcode">AshlrCode</a></h3><span class="role">Coding agent CLI</span></div><p>Work in the terminal with a coding agent that can use tools, skills, and multiple model providers.</p><span class="stars"><span data-repo-stars="ashlrcode">—</span><small>stars</small></span></article>
+    <article class="project" data-repo="morphkit"><span class="number">06</span><div><h3><a href="https://github.com/ashlrai/morphkit">Morphkit</a></h3><span class="role">Web to SwiftUI</span></div><p>Translate a TypeScript or React app into a native SwiftUI starting point for iOS.</p><span class="stars"><span data-repo-stars="morphkit">—</span><small>stars</small></span></article>
+  </section>
+
+  <section class="wrap next" aria-label="Get involved">
+    <div><h2>Start building in Verse.</h2><p>Install the CLI, open the console, and follow the guide for your first seat.</p><a href="/#start">Install and get started</a></div>
+    <div><h2>Make a project better.</h2><p>Each repository has its own source, issues, and contribution path. Pick one that matters to you.</p><a href="https://github.com/orgs/ashlrai/repositories">Browse all public repositories</a></div>
+  </section>
+</main>
+<footer><div class="wrap"><span>Ashlr engineering ecosystem · six selected public repositories</span><span><a href="/">Verse</a> · <a href="https://github.com/ashlrai">GitHub</a></span></div></footer>
+<script src="assets/star-history.js"></script>
+<script src="assets/ecosystem.js"></script>
+</body>
+</html>
