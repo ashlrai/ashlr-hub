@@ -52,8 +52,9 @@ macOS and the login keychain.
 
 `prepublishOnly` builds the source, checks the first-paint budget and docs,
 typechecks and lints, then runs the complete backend suite as three deterministic shards,
-with one worker and a private HOME per shard; it requires all three to pass
-before running the complete web suite. A failed test stops its shard early
+with one worker and a private HOME per shard. The long Hub campaign acceptance runs
+in isolation after the shards so concurrent real I/O cannot consume its bounded
+delivery window; all four stages must pass before the complete web suite. A failed test stops its shard early
 and cancels the other shards, saving time on a bad candidate. The web timing assertions are
 load-sensitive, so no backend workers remain when it starts. `npm run gate`
 remains useful for fast changed-file feedback while coding, and `gate:full`
