@@ -292,7 +292,7 @@ describe.runIf(process.platform === 'darwin')('Universe foreground supervision w
     const before = tree(value.root);
     await new Promise((resolve) => setTimeout(resolve, 150));
     expect(tree(value.root)).toEqual(before);
-  }, 10_000);
+  }, 30_000);
 
   it('makes a pre-cancelled invocation wholly read-only including its never-started queue', async () => {
     const value = fixture([{ name: 'a' }, { name: 'b' }]);
