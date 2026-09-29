@@ -8,7 +8,7 @@
  */
 
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, URL } from 'node:url';
@@ -74,6 +74,9 @@ const child = spawn(process.execPath, args, {
     HOME: home,
     USERPROFILE: home,
     ASHLR_HOME: join(home, '.ashlr'),
+    // The nested Vitest worker home lives under this wrapper's private HOME.
+    // Keep the guard anchored to the actual account home, not its temp parent.
+    ASHLR_VITEST_REAL_HOME: process.env.ASHLR_VITEST_REAL_HOME ?? userInfo().homedir,
     TMPDIR: privateTmp,
     TMP: privateTmp,
     TEMP: privateTmp,
