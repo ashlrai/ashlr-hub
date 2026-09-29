@@ -66,8 +66,9 @@ file, runs that suite in full. Logs, the eslint cache and vitest JSON reports go
 `--json` prints a machine-readable result instead of the table.
 
 The import graph cannot see a test that reads a changed file as text instead of importing it.
-Before a release that touches fixtures, scripts read by tests, or anything you are unsure
-about, run **`npm run gate:full`**: the same static checks plus every backend and web test.
+Use **`npm run gate:full`** to diagnose such changes when you are not running
+`prepublishOnly`; it runs the same static checks plus every backend and web test.
+The release `prepublishOnly` run already covers every test, so running both duplicates work.
 
 **Known failures.** `scripts/gate-known-failures.json` lists the test files that fail on a
 healthy machine (the table under "A full `vitest run` is not the gate" below). A failure in a listed file is shown
