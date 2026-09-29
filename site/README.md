@@ -7,6 +7,7 @@ runtime dependencies, or framework; Vercel's root configuration skips package
 installation and serves this directory as static files. The ecosystem chart uses
 the checked-in `assets/star-history.js` snapshot
 and works when opened from disk. It never embeds a GitHub credential.
+`robots.txt` and `sitemap.xml` list the two public canonical pages for crawlers.
 
 ```sh
 open site/index.html
