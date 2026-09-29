@@ -29,6 +29,16 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   the one-percent display rule consistently across Meters and remaining-budget
   views, including values just over 100%.
 
+### Security
+
+- Update the bundled `fast-uri` and `ip-address` dependency pins to patched
+  versions 3.1.7 and 10.5.1.
+
+### Release process
+
+- Run the full local prepublish suite in three bounded, isolated backend shards
+  before the web suite, avoiding a duplicate full test run during release.
+
 ## [3.16.0] — 2026-09-28
 
 ### Verse release integration
