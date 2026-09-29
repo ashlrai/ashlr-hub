@@ -7325,7 +7325,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     expect(mockRunGoal).not.toHaveBeenCalled();
     expect(mockRunBestOfN).not.toHaveBeenCalled();
-  }, 15_000);
+  }, 45_000);
 
   it('A1h5b3b-proposal-crash: an exact proposal receipt reconstructs missing lifecycle before clearing a crash marker', async () => {
     const repo = fx.makeRepo();

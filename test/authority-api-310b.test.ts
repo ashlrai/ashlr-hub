@@ -67,6 +67,9 @@ import {
 } from '../src/core/verse/authority-api.js';
 import { invalidateStandingPolicyCache } from '../src/core/authority/effective-config.js';
 import { resetLedgerCachesForTest } from '../src/core/authority/ledger.js';
+import { registerExecutionLease, type ExecutionLease } from '../src/core/sandbox/execution-leases.js';
+import { acquireOutwardMutationFence, ownsOutwardMutationFence, releaseOutwardMutationFence } from '../src/core/sandbox/mutation-fence.js';
+import { killSwitchOn } from '../src/core/sandbox/policy.js';
 import { isNeedsYouItem } from '../src/core/verse/workbench-types.js';
 import type { AuthorityStatusV1 } from '../src/core/authority/types.js';
 import type { VerseApiContext } from '../src/core/verse/verse-api.js';
@@ -76,6 +79,20 @@ import { TEST_ROOT, withTempHome } from './helpers/authority-310b.js';
 const TOKEN = 'authority-test-token';
 let restore: () => void;
 let ctx: VerseApiContext;
+const leases: ExecutionLease[] = [];
+
+function heldAgent(runId: string): ExecutionLease {
+  const fence = acquireOutwardMutationFence(2_000);
+  expect(ownsOutwardMutationFence(fence)).toBe(true);
+  try {
+    const registration = registerExecutionLease(fence, { runId, repoKey: '/repo/a', engine: 'local' });
+    if (!registration.ok) throw new Error(registration.reason);
+    leases.push(registration.lease);
+    return registration.lease;
+  } finally {
+    releaseOutwardMutationFence(fence);
+  }
+}
 
 beforeEach(() => {
   restore = withTempHome('bu1-api-').restore;
@@ -89,6 +106,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const lease of leases.splice(0)) lease.release();
   resetLedgerCachesForTest();
   invalidateStandingPolicyCache();
   resetAuthorityApiCachesForTest();
@@ -178,21 +196,30 @@ describe('actions', () => {
   it('Stop and Revoke await the armed-merge revocation but not the drain (R3b)', async () => {
     // mergesRevoked is a NUMBER only on the draining variants: the instant
     // stopAutonomy reports null (revocation started, not awaited).
-    const started = Date.now();
+    // A held lease proves the API returns without waiting for the running
+    // agent to drain, independent of host load or filesystem latency.
+    const stopLease = heldAgent('api-stop');
     const stopped = await call('POST', '/api/verse/authority', { action: 'stop' });
     expect(stopped?.status).toBe(200);
     const stop = (stopped!.body['result'] as Record<string, Record<string, unknown>>)['stop']!;
-    expect(stop).toMatchObject({ armed: true, mergesRevoked: 0, mergeRevokeFailures: [] });
-    expect(stop['drainWaitedMs']).toBeLessThan(1_000);
+    expect(stop).toMatchObject({ armed: true, quiesced: false, liveExecutionLeases: 1,
+      mergesRevoked: 0, mergeRevokeFailures: [] });
+    expect(killSwitchOn()).toBe(true);
+    expect(stopLease.signal.aborted).toBe(true);
+    expect(stopLease.isHeld()).toBe(true);
+    stopLease.release();
     expect((await call('POST', '/api/verse/authority', { action: 'clear-stop' }))?.status).toBe(200);
 
+    const revokeLease = heldAgent('api-revoke');
     const revoked = await call('POST', '/api/verse/authority', { action: 'revoke', reason: 'test revoke' });
     expect(revoked?.status).toBe(200);
     const revoke = (revoked!.body['result'] as Record<string, Record<string, unknown>>)['revoke']!;
-    expect(revoke).toMatchObject({ stopped: true, mergesRevoked: 0, mergeRevokeFailures: [] });
+    expect(revoke).toMatchObject({ stopped: true, liveExecutionLeases: 1,
+      mergesRevoked: 0, mergeRevokeFailures: [] });
     expect(revoked?.body['kill']).toBe(true);
-    // No drain wait: the whole exchange stays well inside the 2 s fence bound.
-    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(killSwitchOn()).toBe(true);
+    expect(revokeLease.signal.aborted).toBe(true);
+    expect(revokeLease.isHeld()).toBe(true);
   });
 
   it('drafting needs a compiled custody key', async () => {

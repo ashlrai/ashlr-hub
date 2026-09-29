@@ -18,7 +18,7 @@ function runFixture(failMiddle: boolean) {
   }
   writeFileSync(join(root, 'node_modules', 'vitest', 'vitest.mjs'), `
 const shard = process.argv.find((arg) => arg.startsWith('--shard='));
-console.log(JSON.stringify({ shard, workers: process.argv.find((arg) => arg.startsWith('--maxWorkers=')), home: process.env.HOME }));
+console.log(JSON.stringify({ shard, workers: process.argv.find((arg) => arg.startsWith('--maxWorkers=')), bail: process.argv.find((arg) => arg.startsWith('--bail=')), home: process.env.HOME, tmp: process.env.TMPDIR }));
 if (process.env.ASHLR_FAKE_FAIL_MIDDLE === '1' && shard === '--shard=2/3') {
   setTimeout(() => { process.exitCode = 7; }, 100);
 } else if (process.env.ASHLR_FAKE_FAIL_MIDDLE === '1') {
@@ -38,11 +38,13 @@ describe('local exhaustive prepublish shards', () => {
     const result = runFixture(false);
     expect(result.error).toBeUndefined(); expect(result.status).toBe(0);
     const rows = result.stdout.trim().split('\n').map((line) => JSON.parse(line) as {
-      shard: string; workers: string; home: string;
+      shard: string; workers: string; bail: string; home: string; tmp: string;
     });
     expect(rows.map((row) => row.shard).sort()).toEqual(['--shard=1/3', '--shard=2/3', '--shard=3/3']);
     expect(rows.every((row) => row.workers === '--maxWorkers=1')).toBe(true);
+    expect(rows.every((row) => row.bail === '--bail=1')).toBe(true);
     expect(new Set(rows.map((row) => row.home)).size).toBe(3);
+    expect(rows.every((row) => row.tmp === join(row.home, 'tmp'))).toBe(true);
     expect(result.stderr).toContain('[test-ci:sharded] PASS');
   });
 

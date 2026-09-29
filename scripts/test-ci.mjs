@@ -7,7 +7,7 @@
  * only a bounded last-line diagnostic is retained.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -52,6 +52,8 @@ const heartbeatIntervalMs = readPositiveDuration(
 );
 
 const home = mkdtempSync(join(tmpdir(), 'ashlr-test-ci-home-'));
+const privateTmp = join(home, 'tmp');
+mkdirSync(privateTmp);
 const vitestBin = join(process.cwd(), 'node_modules', 'vitest', 'vitest.mjs');
 const progressReporter = fileURLToPath(new URL('./vitest-progress-reporter.mjs', import.meta.url));
 const extraArgs = process.argv.slice(2);
@@ -72,6 +74,9 @@ const child = spawn(process.execPath, args, {
     HOME: home,
     USERPROFILE: home,
     ASHLR_HOME: join(home, '.ashlr'),
+    TMPDIR: privateTmp,
+    TMP: privateTmp,
+    TEMP: privateTmp,
     CI: process.env.CI ?? '1',
   },
   detached: process.platform !== 'win32',

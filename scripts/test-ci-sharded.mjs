@@ -28,7 +28,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 }
 
 const results = shards.map((shard) => new Promise((resolve) => {
-  const child = spawn(process.execPath, [runner, `--shard=${shard}/3`, '--maxWorkers=1'], {
+  const child = spawn(process.execPath, [runner, `--shard=${shard}/3`, '--maxWorkers=1', '--bail=1'], {
     cwd: process.cwd(),
     env: process.env,
     stdio: 'inherit',
