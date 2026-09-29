@@ -94,7 +94,9 @@ async function setup(mobileAssets = false, withPush = false) {
 
 describe('remote pairing and one-use WebAuthn HTTP writes', () => {
   it('recovers a private admin socket left by SIGKILL but refuses a live listener or file', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'ashlr-remote-admin-restart-'));
+    // Keep the Unix socket below Darwin's path limit even when the test
+    // runner supplies a deeply nested private TMPDIR.
+    const root = mkdtempSync(join(process.platform === 'darwin' ? '/private/tmp' : tmpdir(), 'ashlr-remote-admin-restart-'));
     roots.push(root);
     const path = remoteAdminSocketPath(root);
     const devices = createRemoteDeviceStore(root);
