@@ -26,6 +26,8 @@ const CRED_ID = randomBytes(32).toString('base64url');
 const CONFIG = { publicOrigin: ORIGIN, teamDomain: 'https://team.cloudflareaccess.com', audience: 'b'.repeat(64), allowedSubjects: [SUBJECT] };
 const roots: string[] = [];
 const servers = new Set<Server>();
+// The private CI TMPDIR may be nested beyond Darwin's Unix socket path limit.
+const socketFixtureRoot = process.platform === 'darwin' ? '/private/tmp' : tmpdir();
 afterEach(async () => {
   for (const server of servers) { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); }
   servers.clear();
@@ -34,7 +36,7 @@ afterEach(async () => {
 });
 
 async function setup(mobileAssets = false, withPush = false) {
-  const root = mkdtempSync(join(tmpdir(), 'ashlr-remote-auth-'));
+  const root = mkdtempSync(join(socketFixtureRoot, 'ashlr-remote-auth-'));
   roots.push(root);
   const devices = createRemoteDeviceStore(root);
   const push = withPush ? createRemotePush(loadOrCreateRemoteVapid(ORIGIN, root), devices, { root }) : undefined;
@@ -94,9 +96,7 @@ async function setup(mobileAssets = false, withPush = false) {
 
 describe('remote pairing and one-use WebAuthn HTTP writes', () => {
   it('recovers a private admin socket left by SIGKILL but refuses a live listener or file', async () => {
-    // Keep the Unix socket below Darwin's path limit even when the test
-    // runner supplies a deeply nested private TMPDIR.
-    const root = mkdtempSync(join(process.platform === 'darwin' ? '/private/tmp' : tmpdir(), 'ashlr-remote-admin-restart-'));
+    const root = mkdtempSync(join(socketFixtureRoot, 'ashlr-remote-admin-restart-'));
     roots.push(root);
     const path = remoteAdminSocketPath(root);
     const devices = createRemoteDeviceStore(root);
