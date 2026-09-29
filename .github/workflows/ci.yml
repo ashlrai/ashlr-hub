@@ -247,6 +247,17 @@ jobs:
           echo "ASHLR_TEST_SIDECAR=$SIDECAR" >> "$GITHUB_ENV"
           echo "ASHLR_TEST_SIDECAR_CREATED=1" >> "$GITHUB_ENV"
           trap - ERR INT TERM
+          # tauri.conf.json bundles resources/public (staged by
+          # desktop/scripts/prepare-sidecar.mjs in real builds). The Tauri
+          # build script refuses to run when that path is missing, so give
+          # the library-only checks an empty, disposable placeholder.
+          RESOURCES="desktop/src-tauri/resources/public"
+          if [[ -e "desktop/src-tauri/resources" || -L "desktop/src-tauri/resources" ]]; then
+            echo "refusing unexpected resources fixture target: desktop/src-tauri/resources" >&2
+            exit 1
+          fi
+          mkdir -p -- "$RESOURCES"
+          echo "ASHLR_TEST_RESOURCES_CREATED=1" >> "$GITHUB_ENV"
 
       - name: Check native broker formatting
         run: >-
@@ -276,6 +287,10 @@ jobs:
           if [[ "${ASHLR_TEST_SIDECAR_CREATED:-}" == "1" ]]; then
             rm -f -- "$ASHLR_TEST_SIDECAR"
             test ! -e "$ASHLR_TEST_SIDECAR"
+          fi
+          if [[ "${ASHLR_TEST_RESOURCES_CREATED:-}" == "1" ]]; then
+            rmdir -- desktop/src-tauri/resources/public desktop/src-tauri/resources
+            test ! -e desktop/src-tauri/resources
           fi
 
   windows-service-authority:

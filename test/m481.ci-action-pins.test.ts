@@ -84,6 +84,10 @@ describe('M481 CI workflow action trust chain', () => {
     expect(workflowText).toContain("trap 'rm -f -- \"$SIDECAR\"' ERR INT TERM");
     expect(serialized).toContain('ASHLR_TEST_SIDECAR_CREATED=1');
     expect(workflowText).toContain('if [[ "${ASHLR_TEST_SIDECAR_CREATED:-}" == "1" ]]');
+    // tauri.conf.json bundles resources/public; the library gate needs a
+    // disposable empty placeholder that is refused if anything already exists.
+    expect(serialized).toContain('refusing unexpected resources fixture target');
+    expect(workflowText).toContain('if [[ "${ASHLR_TEST_RESOURCES_CREATED:-}" == "1" ]]');
     expect(serialized).toContain('rustfmt --edition 2021 --check desktop/src-tauri/src/lib.rs desktop/src-tauri/src/native_launchd_broker.rs');
     expect(serialized).toContain('cargo check --manifest-path desktop/src-tauri/Cargo.toml --lib --locked');
     expect(serialized).toContain('cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --lib --locked -- -D warnings');
