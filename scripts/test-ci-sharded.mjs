@@ -57,23 +57,29 @@ if (failure || !codes.every((code) => code === 0)) {
   console.error(`[test-ci:sharded] FAIL (${codes.join(', ')})`);
 } else {
   // This real-I/O campaign performs a full deterministic three-generation
-  // delivery. Run it after the shards so host load cannot exhaust its bounded
-  // delivery window; it remains a required part of the exhaustive gate.
-  const child = spawn(process.execPath, [runner, isolatedAcceptance, '--maxWorkers=1', '--bail=1'], {
-    cwd: process.cwd(), env: process.env, stdio: 'inherit',
-  });
-  children.set('isolated', child);
-  console.error(`[test-ci:sharded] started isolated acceptance (pid ${child.pid ?? 'unavailable'})`);
-  const isolatedCode = await new Promise((resolve) => {
-    child.once('error', (error) => {
-      console.error(`[test-ci:sharded] isolated failed to start: ${error.message}`);
-      resolve(1);
+  // delivery. Run its two cases after the shards in separate process homes so
+  // host load and one case's process state cannot exhaust the next delivery.
+  const isolatedCodes = [];
+  for (const measureSeed of ['false', 'true']) {
+    if (failure) break;
+    const child = spawn(process.execPath, [runner, isolatedAcceptance, '-t', `automatic seed measurement: ${measureSeed}`, '--maxWorkers=1', '--bail=1'], {
+      cwd: process.cwd(), env: process.env, stdio: 'inherit',
     });
-    child.once('exit', (code, signal) => {
-      console.error(`[test-ci:sharded] isolated ${signal ? `exited via ${signal}` : `exited ${code}`}`);
-      resolve(code ?? 1);
+    children.set(`isolated-${measureSeed}`, child);
+    console.error(`[test-ci:sharded] started isolated acceptance ${measureSeed} (pid ${child.pid ?? 'unavailable'})`);
+    const isolatedCode = await new Promise((resolve) => {
+      child.once('error', (error) => {
+        console.error(`[test-ci:sharded] isolated ${measureSeed} failed to start: ${error.message}`);
+        resolve(1);
+      });
+      child.once('exit', (code, signal) => {
+        console.error(`[test-ci:sharded] isolated ${measureSeed} ${signal ? `exited via ${signal}` : `exited ${code}`}`);
+        resolve(code ?? 1);
+      });
     });
-  });
-  process.exitCode = failure || isolatedCode;
-  console.error(`[test-ci:sharded] ${process.exitCode === 0 ? 'PASS' : 'FAIL'} (${codes.join(', ')}, isolated ${isolatedCode})`);
+    isolatedCodes.push(isolatedCode);
+    if (isolatedCode !== 0) failure = isolatedCode;
+  }
+  process.exitCode = failure || (isolatedCodes.length === 2 ? 0 : 1);
+  console.error(`[test-ci:sharded] ${process.exitCode === 0 ? 'PASS' : 'FAIL'} (${codes.join(', ')}, isolated ${isolatedCodes.join(', ')})`);
 }
