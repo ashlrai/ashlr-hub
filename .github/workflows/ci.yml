@@ -157,14 +157,16 @@ jobs:
       # evaluator install) refuse group/world-writable ancestors. On hosted
       # Linux, os.tmpdir() is the sticky world-writable /tmp, so every test
       # rooted there fails closed; macOS runners already get a per-user
-      # private temp root. Give Linux the same shape.
+      # private temp root. Give Linux the same shape, outside the real
+      # $HOME (RUNNER_TEMP lives under /home/runner, which the HOME-isolation
+      # guards correctly treat as the real developer home).
       - name: Use a private temp root on Linux
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          private_tmp="$RUNNER_TEMP/ashlr-private-tmp"
-          mkdir -m 700 -- "$private_tmp"
-          for dir in "$private_tmp" "$RUNNER_TEMP" "$(dirname "$RUNNER_TEMP")" "$HOME"; do
+          private_tmp="/opt/ashlr-private-tmp"
+          sudo install -d -m 0700 -o "$(id -un)" -g "$(id -gn)" -- "$private_tmp"
+          for dir in "$private_tmp" /opt /; do
             stat -c '%a %U:%G %n' "$dir"
           done
           echo "TMPDIR=$private_tmp" >> "$GITHUB_ENV"
