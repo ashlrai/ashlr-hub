@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /** Run the same exhaustive three-way partition as hosted CI on one Mac.
  * Each test-ci wrapper owns a private HOME and its Vitest process tree. Keep
- * one worker per shard so concurrent real-I/O fixtures do not flood the host.
+ * at most two shards active, each with one worker, so real-I/O fixtures do not
+ * contend with two other local shards for their bounded startup windows.
  */
 import { spawn } from 'node:child_process';
 import { fileURLToPath, URL } from 'node:url';
@@ -38,7 +39,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   });
 }
 
-const results = shards.map((shard) => new Promise((resolve) => {
+function runShard(shard) { return new Promise((resolve) => {
   const child = spawn(process.execPath, [runner, `--shard=${shard}/3`, '--maxWorkers=1', '--bail=1', ...exclusions], {
     cwd: process.cwd(),
     env: process.env,
@@ -59,10 +60,18 @@ const results = shards.map((shard) => new Promise((resolve) => {
   };
   child.once('error', (error) => finish(1, `failed to start: ${error.message}`));
   child.once('exit', (code, signal) => finish(code ?? 1, signal ? `exited via ${signal}` : `exited ${code}`));
-}));
+}); }
 
-const codes = await Promise.all(results);
-if (failure || !codes.every((code) => code === 0)) {
+const pending = [...shards];
+const codes = [];
+async function runQueue() {
+  while (pending.length && !failure) {
+    const shard = pending.shift();
+    codes[shard - 1] = await runShard(shard);
+  }
+}
+await Promise.all([runQueue(), runQueue()]);
+if (failure || codes.length !== shards.length || !codes.every((code) => code === 0)) {
   process.exitCode = failure || 1;
   console.error(`[test-ci:sharded] FAIL (${codes.join(', ')})`);
 } else {

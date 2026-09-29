@@ -52,7 +52,7 @@ macOS and the login keychain.
 
 `prepublishOnly` builds the source, checks the first-paint budget and docs,
 typechecks and lints, then runs the complete backend suite as three deterministic shards,
-with one worker and a private HOME per shard. Four long real-I/O suites then run
+with at most two shards active, one worker and a private HOME per shard. Four long real-I/O suites then run
 one at a time in separate process homes, followed by the two Hub campaign cases
 in their own homes. This prevents competing fixtures from consuming bounded
 CLI startup and graph deadlines; all nine stages

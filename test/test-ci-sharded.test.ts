@@ -72,7 +72,7 @@ describe('local exhaustive prepublish shards', () => {
     const result = runFixture('middle');
     expect(result.error).toBeUndefined(); expect(result.status).toBe(7);
     expect(result.stderr).toContain('[test-ci:sharded] FAIL');
-    expect(result.stderr.match(/received SIGTERM/g)).toHaveLength(2);
+    expect(result.stderr.match(/received SIGTERM/g)).toHaveLength(1);
     expect(result.stdout).not.toContain('"file":"test/universe-hub-marker-campaign.test.ts"');
   });
 
