@@ -2,9 +2,10 @@
 
 The landing page and ecosystem page for **verse.ashlr.ai**.
 
-Two standalone HTML pages (`index.html` and `ecosystem.html`). No build step,
-runtime dependencies, or framework; Vercel serves this directory as static
-files. The ecosystem chart uses the checked-in `assets/star-history.js` snapshot
+Two standalone HTML pages (`index.html` and `ecosystem.html`). No source build,
+runtime dependencies, or framework; Vercel's root configuration skips package
+installation and serves this directory as static files. The ecosystem chart uses
+the checked-in `assets/star-history.js` snapshot
 and works when opened from disk. It never embeds a GitHub credential.
 
 ```sh
