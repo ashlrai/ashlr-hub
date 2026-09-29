@@ -1,9 +1,62 @@
-# Quickstart — run and inspect Ashlr Universe
+# Quickstart — Ashlr Verse
 
-Start with a bounded local experiment, then commission real workers separately.
-The source implementation and the package currently published to npm can differ;
-check the [release record](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING.md)
-before assuming a globally installed `ashlr` includes these commands.
+Verse is the everyday coding-agent workbench. The Universe experiment kernel is a
+separate, bounded source-checkout path below. Installing Verse, enrolling a repo,
+starting a resident fleet and publishing its work are distinct steps.
+
+## Open Verse
+
+### CLI on macOS, Linux or Windows
+
+Install Node.js 22.15+ and Git, then run:
+
+```sh
+npm install -g @ashlr/hub
+ashlr --version
+ashlr verse
+```
+
+Verse opens at `http://127.0.0.1:7777/verse/` and binds to loopback. The CLI
+prints a read token for the browser and asks for a separate mutation token
+before your first chat or other change. Keep both tokens private. Check the
+[public npm version](https://www.npmjs.com/package/@ashlr/hub) if your installed
+command behaves differently from this guide.
+
+### Desktop app on Apple silicon Mac
+
+Download the [v3.16.1 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.16.1/Ashlr_3.16.1_aarch64_locally-signed.dmg)
+from the [published release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.1).
+It includes the CLI and the same console. This DMG is locally signed, not
+Apple Developer ID notarized; macOS may require **Open Anyway** on first launch.
+For a source build and local signing, follow [Releasing locally](RELEASING-LOCALLY.md).
+There is no Linux or Windows desktop package in this release; use the CLI above.
+
+### Make your first useful turn
+
+1. Open **New chat** and choose a project folder. Saving a folder as a project
+   does not enroll it for unattended fleet work.
+2. Use a provider CLI you are already signed in to, or start Ollama and choose
+   a tool-capable local model. For separate Claude Code, Codex and Grok accounts,
+   follow [seat commissioning](RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity).
+   Each vendor signs in through its own CLI; Verse does not take its password.
+3. Ask for a small, checkable change. Review its diff and results in the
+   workbench before accepting it. Use **⌘K** to find actions and **⌘J** for
+   **Needs you**. The full interface is in the [Verse guide](VERSE.md).
+
+The optional phone gateway is a separate, Access-protected and Mac-approved
+surface; [set it up](REMOTE-PHONE.md) rather than exposing the main loopback
+console. Resident autonomy is macOS-only and starts dormant. Inspect the
+**installed** release with `ashlr authority status` and
+`ashlr authority setup --dry-run --json`, then use the
+[autonomy setup guide](AUTONOMY-SETUP.md) if you want to sign a standing grant.
+A source checkout or a static guide cannot establish the current service state
+on your Mac.
+
+## Run a bounded Universe experiment
+
+This path is for evaluating the local experiment kernel from a trusted source
+checkout. Source commands may differ from the published npm package; confirm
+with the [release record](RELEASING.md) and your selected binary's help.
 
 | What you want to do | Supported path |
 |--------------------|----------------|
@@ -12,7 +65,6 @@ before assuming a globally installed `ashlr` includes these commands.
 | Run explicitly configured Codex, Claude Code or local workers | [Resource Pool commissioning](RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity) |
 | View worker assignments, capacity and a controllable foreground queue | [Resource operations console](RESOURCE-POOLS.md#operate-the-resource-console) |
 | Run independently of a mutable source checkout | [Pinned local runtime](ASHLR-UNIVERSE.md#install-a-pinned-local-runtime) |
-| Inspect existing general Hub configuration and proposals | [General Hub setup](#general-hub-and-legacy-fleet-setup) |
 
 ## Run the current Universe kernel
 
@@ -71,254 +123,22 @@ commissioning guide above before authorizing generation.
 
 ## General Hub and legacy fleet setup
 
-The remaining steps configure the general dashboard and legacy enrolled-repo
-workflows. They are not prerequisites for a scoped Universe or resource console,
-and do not activate resident autonomous work. The package runtime requires Node
-22.15+; platform support depends on the command being used.
+`ashlr init`, `ashlr serve`, `ashlr enroll` and `ashlr daemon` remain compatibility
+surfaces beneath Verse. For their command and safety contracts, use the
+[Hub reference](HUB-REFERENCE.md). The current first-run console is
+`ashlr verse` at `/verse/`; older `/` and `/next/` dashboard guidance should not
+be used as a Verse onboarding path.
 
----
-
-## Step 1 — Install
-
-```sh
-npm install -g @ashlr/hub
-```
-
-Verify:
+To inspect resident authority, use the **installed** binary, not an unbuilt
+source checkout:
 
 ```sh
-ashlr --version
+ashlr authority status
+ashlr authority setup --dry-run --json
+ashlr authority resident status --json
 ```
 
-> **Desktop distribution — checked 2026-09-07 UTC:** No public desktop release or installer is currently available
-> from this repository. Existing macOS and Windows installer assets are draft-only;
-> their presence is not a published or accepted desktop release. Recheck the
-> [GitHub releases](https://github.com/ashlrai/ashlr-hub/releases) before installation.
-> Use the [release record](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING.md)
-> to distinguish published npm/desktop artifacts from current source. Installing
-> one artifact does not commission the other; the CLI includes a web dashboard.
-> Linux remains supported through npm/CLI and the web dashboard.
-> Linux desktop artifacts are quarantined for `GHSA-wrw7-89jp-8q8g` /
-> `RUSTSEC-2024-0429`.
-> Enforcement covers fresh source builds, the default Tauri configuration, and
-> the official release workflow. Repository workflow 301689703 must remain
-> externally `disabled_manually`; its configured output is draft-only. Ruleset
-> 20660876 protects `refs/tags/desktop-v*` with a Mason-only bypass, but tag
-> protection is necessary, not sufficient: a tag can select a historical commit
-> whose workflow predates this quarantine.
-> A hostile `--config` combined with an
-> already-built/staged executable is outside source-build enforcement and must
-> never be treated as admitted release output.
-
----
-
-## Step 2 — Initialize local configuration
-
-```sh
-ashlr init
-```
-
-`ashlr init` creates local configuration and reports readiness without creating
-a resident OS service. In the current release, compiled daemon and conductor
-trust roots are empty, so live non-dry execution is dormant. `ashlr setup`
-refuses before reading or changing setup state because resident
-install/reinstall/repair/restart authority is withheld. Use
-`ashlr daemon start --once --dry-run`, status, and the local console for
-admitted observation.
-
-Initialization reports these steps:
-
-| Step | What it does |
-|------|-------------|
-| `config` | Writes `~/.ashlr/config.json` with defaults |
-| `models` | Detects locally running model servers (Ollama, LM Studio) |
-| `editors` | Detects Claude Code, Cursor, Windsurf |
-| `symlink` | Ensures `ashlr` is on PATH |
-| `genome` | Creates `~/.ashlr/genome/` for memory storage |
-| `phantom` | Checks Phantom Secrets status (optional) |
-| `doctor` | Runs final readiness checks |
-
-Steps marked `!` need manual follow-up (shown in the summary). Steps marked `✓`
-are complete. Initialization is idempotent and safe to re-run.
-
-**Non-interactive mode** (CI, scripts, desktop app first-launch):
-
-```sh
-ashlr init --yes
-```
-
----
-
-## Step 3 — Enroll repos
-
-The daemon only works repos you have explicitly enrolled. Default enrollment is empty — nothing is scanned until you add a repo.
-
-```sh
-ashlr enroll add ~/path/to/my-project
-ashlr enroll list                        # confirm what is enrolled
-```
-
-To remove a repo:
-
-```sh
-ashlr enroll remove ~/path/to/my-project
-```
-
----
-
-## Step 4 — Authenticate engines
-
-`ashlr setup` does not reach backend detection or auth guidance in this release;
-it refuses before config or wizard work while resident service authority is
-dormant. Authenticate an owner-invoked engine directly, then use the read-only
-doctor command below. Common engine guidance:
-
-| Engine path | Authentication boundary |
-|-------------|-------------------------|
-| Native Codex or Claude Code subscription | Use the owner's authenticated native CLI and an explicit binding; see [account commissioning](RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity) for account separation and verification |
-| Usage-billed API backend | Separate provider credentials and billing authority; an API key is not evidence of subscription capacity |
-| Local Ollama or LM Studio | An explicitly selected loopback model server with measured health and capability; no provider key is implied |
-
-Do not add API keys as a fallback for unavailable subscription quota. Do not copy
-credential files to manufacture another worker identity. Native login, resource
-enrollment, observed capacity and completed work are distinct checks.
-
-Check engine readiness at any time:
-
-```sh
-ashlr fleet doctor
-```
-
-This prints a table of every configured backend — installed, authenticated, ready — with a fix hint for anything that needs attention.
-
----
-
-## Step 5 — Open Mission Control
-
-```sh
-ashlr serve
-```
-
-Serves the web dashboard at **http://127.0.0.1:7777**, bound to loopback. Do not
-expose it through a tunnel or reverse proxy; that is not a supported remote
-authentication deployment.
-
-```sh
-ashlr serve --open    # also opens the browser automatically
-```
-
-The new console is at `/next/`; `/` remains the separately labelled legacy
-dashboard. Copy the read token printed at startup into `/next/`'s **Read token**
-control. All proprietary JSON reads and the live event stream are authenticated
-even on loopback. The new console discards the raw read token immediately after
-the exchange; the server mints a 15-minute, read-only, HttpOnly,
-SameSite=Strict cookie for EventSource.
-Since cookies are host-scoped rather than port-scoped, the ticket is also bound
-to a browser-generated 256-bit client proof kept in origin-scoped
-`sessionStorage`. The cookie plus proof survives a `/next/` reload until the
-ticket expires. After expiry, re-enter the raw read token; `/next/` cannot renew
-silently because it does not retain that token. EventSource places only that proof—not the read or mutation
-token—in its same-origin query. The proof has no authority without the matching
-signed HttpOnly ticket, and responses set `Referrer-Policy: no-referrer`.
-Neither the cookie nor its proof can authorize a mutation. Restarting the
-server rotates the read token and invalidates every prior read session.
-The per-process raw read token remains valid until server restart, but `/next/`
-does not store it. The legacy dashboard at `/` separately retains its raw read
-token in tab `sessionStorage` to renew its cookie.
-
-For a headless read, supply the startup token directly:
-
-```sh
-curl -H "X-Ashlr-Token: $ASHLR_DASHBOARD_READ_TOKEN" \
-  http://127.0.0.1:7777/api/fleet
-```
-
-Only static assets and `GET /api/health` with the bounded `{ "ok": true }`
-projection are public. Because the server intentionally uses plain HTTP on
-loopback, the cookie is not marked `Secure`; Ashlr does not trust
-`X-Forwarded-Proto` and has no reverse-proxy/TLS mode.
-
-`--allow-dispatch` prints a separate mutation token. The read token and read
-cookie are never accepted by mutation routes. `/next/` holds the mutation token
-only in module memory for a 20-minute idle window; it never writes it to
-`sessionStorage`, local storage, a cookie, or a URL, and **Lock** clears it
-immediately. The legacy dashboard at `/` prompts independently per mutation
-action. Ordinary dashboard reading never grants mutation authority.
-
-The dashboard shows:
-
-- **Fleet status** — daemon running/idle, today's spend, queue depth, pending proposals
-- **Runs & Swarms** — history of all agent runs with per-task detail
-- **Inbox** — pending proposals waiting for approval
-- **Pulse** — rolling activity analytics (1d/7d/30d)
-- **Genome** — memory entries built from completed runs
-
----
-
-## Starting the fleet
-
-Once repos are enrolled and at least one engine is ready, the current production
-build still admits only observation because its compiled runtime trust roots
-are empty:
-
-```sh
-# Dry run — preview what would be worked, no proposals created, $0 spent
-ashlr daemon start --once --dry-run
-
-# Live one-shot — currently refuses before dispatch or proposal creation
-ashlr daemon start --once
-
-# Foreground continuous loop — currently refuses before effects
-ashlr daemon start
-
-# Check status
-ashlr daemon status
-
-```
-
-Review proposals before anything touches a branch:
-
-```sh
-ashlr inbox           # list pending proposals
-ashlr inbox show <id> # inspect a proposal
-```
-
-Automatic merge is disabled by default. When explicitly enabled, only proposals
-that satisfy the configured evidence, scope, provenance, and remote-PR gates may
-merge; all others remain pending for inbox review.
-
-Dry-run, `ashlr daemon status`, and the local console are the verified current
-runtime paths. Test-only injected roots do not activate the shipped daemon,
-conductor, or resident service.
-
----
-
-## Kill switch
-
-If you need to halt all autonomous activity immediately:
-
-```sh
-ashlr enroll kill on    # sets ~/.ashlr/KILL — all mutating ops refuse immediately
-ashlr enroll kill off   # clears the kill switch
-```
-
-Or via the fleet control plane:
-
-```sh
-ashlr fleet pause    # same effect
-ashlr fleet resume
-```
-
----
-
-## What next?
-
-| Task | Command |
-|------|---------|
-| Interactive TUI | `ashlr tui` |
-| Doctor / health check | `ashlr doctor` |
-| Fleet status | `ashlr fleet status` |
-| Dry-run one daemon tick | `ashlr daemon start --once --dry-run` |
-| Local console | `ashlr serve` |
-
-Full command reference: `ashlr help` or the main [README](../README.md).
+A grant, service installation and live resident process each require their own
+verification. The [autonomy setup guide](AUTONOMY-SETUP.md) covers signing,
+starting, stopping and scope. The [phone guide](REMOTE-PHONE.md) covers the
+separate protected gateway. Neither path makes the main loopback server public.

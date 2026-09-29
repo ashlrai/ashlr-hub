@@ -1,14 +1,31 @@
 # site/
 
-The landing page for **verse.ashlr.ai**.
+The landing page and ecosystem page for **verse.ashlr.ai**.
 
-One standalone `index.html`. No build step, no dependencies, no framework — so it
-can be served by any static host pointed at this directory, and opened straight
-from disk to check a change.
+Two standalone HTML pages (`index.html` and `ecosystem.html`). No build step,
+runtime dependencies, or framework; Vercel serves this directory as static
+files. The ecosystem chart uses the checked-in `assets/star-history.js` snapshot
+and works when opened from disk. It never embeds a GitHub credential.
 
 ```sh
 open site/index.html
+open site/ecosystem.html
 ```
+
+Refresh the chart snapshot before publishing changes to the ecosystem page:
+
+```sh
+gh auth status                         # authenticated GitHub CLI
+node scripts/update-site-stars.mjs     # from the repository root
+```
+
+The generator reads each named public repository and its dated stargazer events
+from GitHub. It writes only dates and counts; no stargazer identity. A mismatch
+between the current count and dated events fails without replacing the previous
+snapshot. The chart sums six selected repository totals, **not** unique people,
+and prints its UTC snapshot date. A static snapshot may age: each project links
+to GitHub for its current count. Adding another repository requires a deliberate
+edit to the generator, page controls, and project copy.
 
 ## Deploying
 
@@ -16,11 +33,15 @@ Vercel deploys `site/` to `verse.ashlr.ai` from `master`. Any static host
 pointed at this directory works; nothing needs to run and there is no server
 side.
 
-Before merging a change, check it at a phone width: the page must not scroll
-sideways at 390 px (tables and code blocks scroll inside their own boxes).
+Before merging a change, check both pages at a phone width: neither page may
+scroll sideways at 390 px (tables and code blocks scroll inside their own boxes).
 The hero tabs are explanatory, not a live dispatch surface; check click and
 arrow-key switching, visible panel focus, and the copy-command feedback in a
 secure context. The first tab remains readable if JavaScript is unavailable.
+On `/ecosystem`, check aggregate and each repository, both date ranges, the
+keyboard-operated date slider, and the repository links. If JavaScript is
+unavailable, the project descriptions and links remain readable; if the data
+is missing or invalid, the page must show an error instead of a false zero.
 
 ## What the numbers on it mean
 
