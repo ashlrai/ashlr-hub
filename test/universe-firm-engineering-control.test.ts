@@ -326,7 +326,9 @@ describe.runIf(process.platform === 'darwin')('firm engineering adapter integrat
   });
 
   it('reconciles authentic completed evidence after a child crash before graph settlement without replaying any effect', async () => {
-    const { f, child, checked, graph } = await crashedEngineering();
+    // This case verifies crash recovery, not the graph's expiry threshold. Real
+    // sandbox and CLI work can consume the default 50s under parallel CI load.
+    const { f, child, checked, graph } = await crashedEngineering({ graphDurationMs: 120_000 });
     expect(graph.traces.every((trace) => verifyDecisionTraceV1(trace))).toBe(true);
     expect(readUniversePortfolioController(f.host.definition.id, { root: f.root })).toMatchObject({ sourceState: 'healthy', status: 'completed' });
     expect(f.status().attempts).toHaveLength(3); expect(git(f.repo, 'show', `${f.branch}:value.json`)).toBe('3');
