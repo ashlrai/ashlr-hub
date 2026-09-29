@@ -18,7 +18,7 @@ function runFixture(failure: 'none' | 'middle' | 'isolated') {
   }
   writeFileSync(join(root, 'node_modules', 'vitest', 'vitest.mjs'), `
 const shard = process.argv.find((arg) => arg.startsWith('--shard='));
-console.log(JSON.stringify({ shard, file: process.argv.find((arg) => arg.endsWith('universe-hub-marker-campaign.test.ts') && !arg.startsWith('--exclude=')), filter: process.argv[process.argv.indexOf('-t') + 1], exclude: process.argv.find((arg) => arg.startsWith('--exclude=')), workers: process.argv.find((arg) => arg.startsWith('--maxWorkers=')), bail: process.argv.find((arg) => arg.startsWith('--bail=')), home: process.env.HOME, tmp: process.env.TMPDIR }));
+console.log(JSON.stringify({ shard, file: process.argv.find((arg) => arg.endsWith('.test.ts') && !arg.startsWith('--exclude=')), filter: process.argv.includes('-t') ? process.argv[process.argv.indexOf('-t') + 1] : undefined, excludes: process.argv.filter((arg) => arg.startsWith('--exclude=')), workers: process.argv.find((arg) => arg.startsWith('--maxWorkers=')), bail: process.argv.find((arg) => arg.startsWith('--bail=')), home: process.env.HOME, tmp: process.env.TMPDIR }));
 if (process.env.ASHLR_FAKE_FAILURE === 'middle' && shard === '--shard=2/3') {
   setTimeout(() => { process.exitCode = 7; }, 100);
 } else if (process.env.ASHLR_FAKE_FAILURE === 'middle') {
@@ -40,20 +40,30 @@ describe('local exhaustive prepublish shards', () => {
     const result = runFixture('none');
     expect(result.error).toBeUndefined(); expect(result.status).toBe(0);
     const rows = result.stdout.trim().split('\n').map((line) => JSON.parse(line) as {
-      shard?: string; file?: string; filter?: string; exclude?: string; workers: string; bail: string; home: string; tmp: string;
+      shard?: string; file?: string; filter?: string; excludes: string[]; workers: string; bail: string; home: string; tmp: string;
     });
     expect(rows.filter((row) => row.shard).map((row) => row.shard).sort()).toEqual(['--shard=1/3', '--shard=2/3', '--shard=3/3']);
-    expect(rows).toHaveLength(5);
-    expect(rows.filter((row) => row.shard).every((row) => row.exclude === '--exclude=test/universe-hub-marker-campaign.test.ts')).toBe(true);
+    expect(rows).toHaveLength(9);
+    const isolatedFiles = [
+      'test/m342.dispatch-production-ledger.test.ts',
+      'test/resource-engineering-setup-acceptance.test.ts',
+      'test/resource-engineering-supervisor-acceptance.test.ts',
+      'test/universe-firm-engineering-control.test.ts',
+    ];
+    expect(rows.filter((row) => row.shard).every((row) => row.excludes.length === 5 &&
+      [...isolatedFiles, 'test/universe-hub-marker-campaign.test.ts'].every((file) =>
+        row.excludes.includes(`--exclude=${file}`)))).toBe(true);
     expect(rows.filter((row) => !row.shard).map((row) => row.file)).toEqual([
+      ...isolatedFiles,
       'test/universe-hub-marker-campaign.test.ts', 'test/universe-hub-marker-campaign.test.ts',
     ]);
     expect(rows.filter((row) => !row.shard).map((row) => row.filter)).toEqual([
+      undefined, undefined, undefined, undefined,
       'automatic seed measurement: false', 'automatic seed measurement: true',
     ]);
     expect(rows.every((row) => row.workers === '--maxWorkers=1')).toBe(true);
     expect(rows.every((row) => row.bail === '--bail=1')).toBe(true);
-    expect(new Set(rows.map((row) => row.home)).size).toBe(5);
+    expect(new Set(rows.map((row) => row.home)).size).toBe(9);
     expect(rows.every((row) => row.tmp === join(row.home, 'tmp'))).toBe(true);
     expect(result.stderr).toContain('[test-ci:sharded] PASS');
   });
@@ -69,6 +79,6 @@ describe('local exhaustive prepublish shards', () => {
   it('fails closed when the isolated campaign acceptance fails', () => {
     const result = runFixture('isolated');
     expect(result.error).toBeUndefined(); expect(result.status).toBe(9);
-    expect(result.stderr).toContain('[test-ci:sharded] FAIL (0, 0, 0, isolated 0, 9)');
+    expect(result.stderr).toContain('[test-ci:sharded] FAIL (0, 0, 0, isolated 0, 0, 0, 0, 0, 9)');
   });
 });
