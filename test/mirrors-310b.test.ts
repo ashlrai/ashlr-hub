@@ -8,7 +8,7 @@
  * custody helper, isolated tmp HOME. REAL-IO: real git (see
  * test/helpers/throughput-310b.ts).
  */
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -617,9 +617,12 @@ describe('mirror dependencies (review c0)', () => {
     expect(installer.calls).toHaveLength(2);
     expect(existsSync(join(path, 'node_modules', 'planted.js'))).toBe(false);
 
-    // Replace the directory wholesale (a different inode) ⇒ reinstall.
-    rmSync(join(path, 'node_modules'), { recursive: true, force: true });
+    // Replace the directory wholesale (a different inode) ⇒ reinstall. Keep
+    // the old directory alive until the new one exists: on ext4/overlayfs an
+    // rm+mkdir can reuse the same inode, which dev+ino identity cannot see.
+    renameSync(join(path, 'node_modules'), join(path, 'node_modules.replaced'));
     mkdirSync(join(path, 'node_modules'));
+    rmSync(join(path, 'node_modules.replaced'), { recursive: true, force: true });
     writeFileSync(join(path, 'node_modules', 'planted.js'), 'evil');
     await ensureMirror({ nameWithOwner: 'acme/node' }, deps({ installDependencies: installer.install }));
     expect(installer.calls).toHaveLength(3);

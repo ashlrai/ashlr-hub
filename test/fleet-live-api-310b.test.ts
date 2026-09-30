@@ -617,8 +617,12 @@ describe('in-flight dispatches: incremental async ledger tail (review c11)', () 
     append(name, [dispatchRow('daemon:dispatch-start', 'a', '2026-09-19T10:00:00.000Z')]);
     expect(await tail.read(T0)).toBeNull();
     // Group-writable partition / directory: refused.
-    fs.rmSync(file(name));
+    // Recreate the partition as a genuinely NEW file: keep the old one alive
+    // until the new one exists, so ext4/overlayfs cannot hand the freed inode
+    // straight back (identity is dev+ino; a reused inode looks like truncation).
+    fs.renameSync(file(name), `${file(name)}.replaced`);
     append(name, [dispatchRow('daemon:dispatch-start', 'a', at(1))]);
+    fs.rmSync(`${file(name)}.replaced`);
     expect(await tail.read(T0)).toHaveLength(1);
     fs.chmodSync(file(name), 0o620);
     expect(await tail.read(T0)).toBeNull();

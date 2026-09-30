@@ -278,18 +278,16 @@ describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'funct
       expect(tree(profile.directory)).toEqual(before);
     });
 
-    it('a profile that is not prepare\'s unmodified output: native-state recreated (launcher would refuse to run)', (ctx) => {
+    it('a profile that is not prepare\'s unmodified output: native-state recreated (launcher would refuse to run)', () => {
       const profile = prepared(); const original = lstatSync(profile.nativeStatePath, { bigint: true });
-      rmSync(profile.nativeStatePath, { recursive: true }); mkdirSync(profile.nativeStatePath, { mode: 0o700 });
-      const recreated = lstatSync(profile.nativeStatePath, { bigint: true });
-      // KNOWN GAP (reported, not fixed here): native-state identity is pinned by
-      // dev+ino only. Filesystems that hand a freed inode straight back (ext4,
-      // overlayfs on Linux CI) give the recreated directory the SAME dev+ino, so
-      // neither repin nor the launcher can tell it was recreated. Skip visibly
-      // only when that actually happened; APFS never reuses the inode here.
-      if (recreated.dev === original.dev && recreated.ino === original.ino) {
-        ctx.skip('filesystem reused the native-state inode; dev+ino identity cannot detect recreation (known gap)');
-      }
+      // Recreate the directory as a genuinely NEW one: keep the old directory
+      // alive until the new one exists. KNOWN GAP (reported, not fixed here):
+      // native-state identity is dev+ino only, and ext4/overlayfs can hand a
+      // freed inode straight back to an rm+mkdir, which neither repin nor the
+      // launcher can then detect. APFS does not reuse it this way.
+      const aside = `${profile.nativeStatePath}.replaced`;
+      renameSync(profile.nativeStatePath, aside); mkdirSync(profile.nativeStatePath, { mode: 0o700 }); rmSync(aside, { recursive: true });
+      expect(lstatSync(profile.nativeStatePath, { bigint: true }).ino).not.toBe(original.ino);
       const before = tree(profile.directory);
       expectRefusal(() => repin(profile, newBinary), 'inconsistent');
       expectRefusal(() => repin(profile, newBinary, { dryRun: true }), 'inconsistent');
