@@ -154,11 +154,13 @@ function jsonObject(canonical: string): Record<string, unknown> {
   return JSON.parse(canonical) as Record<string, unknown>;
 }
 
+// Boundary fixtures create 2,000 real files. Cleanup gets the same bounded
+// I/O window as their assertions; runtime manifest limits remain unchanged.
 afterEach(() => {
   for (const directory of tempDirs.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
-});
+}, 30_000);
 
 describe('unsigned runtime release manifest', () => {
   it('covers exact optional preparation helpers while preserving packages without them', () => {
