@@ -21,7 +21,7 @@ ashlr verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 On an Apple silicon Mac, download the
-[v3.17.0 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.0/Ashlr_3.17.0_aarch64_locally-signed.dmg).
+[v3.17.1 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.1/Ashlr_3.17.1_aarch64_locally-signed.dmg).
 It is locally signed, not Apple notarized; macOS may require **Open Anyway** on
 first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
@@ -96,7 +96,7 @@ separate Node.js install to run.
 
 ### Install
 
-The [v3.17.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.0)
+The [v3.17.1 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.1)
 includes an arm64 DMG. It is locally signed, not Apple Developer ID notarized,
 so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
@@ -325,7 +325,7 @@ switch, backends, sandboxing, the command reference, the safety model, the
 | **3.12–3.13** | Your key is the trust root; guided `ashlr authority setup`; the host-verified `ashlr/verify` check; cloud PRs into the standing gates; the resident runtime under a standing grant (`ashlr authority resident start`) | Shipped |
 | **3.14** | Talk to the Leader in Verse, Telegram and the CLI; Leader reliability; accounts ready in both chat and fleet; the rollout ladder on Command and shadow decisions on Fleet; local enforcement for free-plan private repos; `file:../` sibling dependencies; a sidecar that cannot freeze; chart polish | Shipped |
 | **3.15** | Founder-mode Leader; Devin as chat seats, a lane and a fleet producer under a two-judge rule; the workbench panel (terminal blocks, browser, checkpoints, sources and reasoning); every seat together; playbooks and automations; the Jev decision layer; retros and approved knowledge (Growth ▸ Lessons); a private repo wiki and Ask | Included in the published 3.16 release |
-| **3.17** | Local module map, scalable account/model rosters, portable efficiency-plugin connection and phone reliability | [3.17.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.0) |
+| **3.17** | Local module map, scalable account/model rosters, portable efficiency-plugin connection and phone reliability | [3.17.1 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.1) |
 | **3.16** | Native Agents workbench and guarded computer tools; optional authenticated phone gateway; reviewable learning evidence; Devin CLI SWE-2 High default; local signing and release fixes | [3.16.1 published](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.1) |
 
 Releases are built and published locally (GitHub Actions is off); the procedure

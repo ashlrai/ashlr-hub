@@ -9,6 +9,20 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.17.1] — 2026-09-30
+
+### Security
+
+- Preserve existing GitHub ruleset review options, complete nested rule/check
+  parameters and App pins when adding admitted required checks. Unknown root
+  fields, incompatible policy and ambiguous identities require operator review.
+- Hold setup's whole protection batch when any repository needs policy or CI
+  provenance review, even when another repository is ready for an update.
+- Re-read all selected existing rulesets before the first write and immediately
+  before each update; changed or unreadable policies stop the batch. GitHub's
+  read/write operations remain non-atomic, so concurrent edits can still require
+  a new review.
+
 ## [3.17.0] — 2026-09-29
 
 ### Added
