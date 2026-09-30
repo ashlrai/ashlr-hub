@@ -21,7 +21,7 @@ ashlr verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 On an Apple silicon Mac, download the
-[v3.16.1 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.16.1/Ashlr_3.16.1_aarch64_locally-signed.dmg).
+[v3.17.0 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.0/Ashlr_3.17.0_aarch64_locally-signed.dmg).
 It is locally signed, not Apple notarized; macOS may require **Open Anyway** on
 first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
@@ -57,11 +57,13 @@ manifests, schemas and stores need no naming migration.
 
 The user guide is [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
 
-### What's in Verse 3.16
+### What's in Verse 3.17
 
-Verse 3.16 adds the native Agents workbench, guarded computer and browser tools,
-an optional phone gateway, and learning with reviewable evidence. The 3.15
-capabilities below remain part of this release.
+Verse 3.17 adds a searchable local module map, searchable account/model choices,
+portable efficiency-plugin connections, and more reliable phone session checks
+and prompt retries. Account and worker rosters have no fixed count cap; runtime
+capacity, quotas and signed authority still govern execution. Existing Agents,
+computer tools, phone gateway and learning remain available.
 
 | | What you get | Guide |
 |---|---|---|
@@ -70,7 +72,7 @@ capabilities below remain part of this release.
 | **A multi-seat workbench** | Claude Code, several Codex accounts, Grok, local models and Devin side by side, each pinned to its own profile. Auto seat, Compare, cheap-first and one-click handoff across seats. A panel of Terminal (command blocks, an Agent tab), Browser (observation by default; guarded actions under a separate grant), Changes (a checkpoint before every turn, Accept/Reject, Undo/Redo), Sources and Reasoning, plus focus mode. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) |
 | **Resources, ready or not** | ⌘. shows every account, local runtime, cloud credits and Devin, each with a "Chat: ready" and a "Fleet: ready · reserve kept" line and the command that fixes it. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#resources-the-drawer-and-the-bar-311) |
 | **Cloud and Devin** | Hand a scoped task to a Claude Code cloud or Devin lane for a reported PR, or chat in a separate Devin cloud or CLI seat. The signed-in Devin CLI defaults to Cognition SWE-2 High; cloud sessions use ACUs and do not report an underlying model. Lane PRs reach Needs you and the standing gates. Cloud Devin needs two judge families; eligible local CLI work can use a signed elite-direct grant. | [CLOUD.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md), [DEVIN.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md) |
-| **A private repo wiki** | An architecture wiki per repo with verified `file:line` citations and Ask the codebase. Pages are stored on your Mac; generation prefers local models, but may send repository context to Grok when the grant and repository policy allow it. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#repo-wiki-and-ask-315) |
+| **A private repo wiki** | A searchable local module map with dependencies and cited files, an architecture wiki per repo with verified `file:line` citations, and Ask the codebase. Pages are stored on your Mac; generation prefers local models, but may send repository context to Grok when the grant and repository policy allow it. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#repo-wiki-and-ask-315) |
 | **Lessons** | Every task end becomes a retro with a root cause, swept hourly. Knowledge it suggests is used only after you approve it, and only where its scope matches. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#lessons-retros-and-approved-knowledge-315) |
 | **Playbooks and automations** | Versioned task templates, run with a `!macro` in any chat or lane; issues, red builds, schedules and webhooks that become work, through each lane's own gates. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#playbooks-315) |
 | **Jev decisions** | One fast, typed decision layer with a rules fallback at every call site, advisory or escalate-only where safety is near. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#the-jev-decision-layer-315) |
@@ -94,7 +96,7 @@ separate Node.js install to run.
 
 ### Install
 
-The [v3.16.1 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.1)
+The [v3.17.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.0)
 includes an arm64 DMG. It is locally signed, not Apple Developer ID notarized,
 so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
@@ -318,6 +320,7 @@ switch, backends, sandboxing, the command reference, the safety model, the
 | **3.12–3.13** | Your key is the trust root; guided `ashlr authority setup`; the host-verified `ashlr/verify` check; cloud PRs into the standing gates; the resident runtime under a standing grant (`ashlr authority resident start`) | Shipped |
 | **3.14** | Talk to the Leader in Verse, Telegram and the CLI; Leader reliability; accounts ready in both chat and fleet; the rollout ladder on Command and shadow decisions on Fleet; local enforcement for free-plan private repos; `file:../` sibling dependencies; a sidecar that cannot freeze; chart polish | Shipped |
 | **3.15** | Founder-mode Leader; Devin as chat seats, a lane and a fleet producer under a two-judge rule; the workbench panel (terminal blocks, browser, checkpoints, sources and reasoning); every seat together; playbooks and automations; the Jev decision layer; retros and approved knowledge (Growth ▸ Lessons); a private repo wiki and Ask | Included in the published 3.16 release |
+| **3.17** | Local module map, scalable account/model rosters, portable efficiency-plugin connection and phone reliability | [3.17.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.0) |
 | **3.16** | Native Agents workbench and guarded computer tools; optional authenticated phone gateway; reviewable learning evidence; Devin CLI SWE-2 High default; local signing and release fixes | [3.16.1 published](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.1) |
 
 Releases are built and published locally (GitHub Actions is off); the procedure

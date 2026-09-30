@@ -73,6 +73,7 @@ import {
   summarizeDelegationScope,
 } from './delegation-scope.js';
 import { buildEngineCommand, spawnEngine, describeRunEventForStream, resolveBinAbsolute } from './engines.js';
+import { resolveLoginPath } from '../verse/login-path.js';
 import {
   DEVIN_CLI_ENGINE_ID,
   DEVIN_CLI_FREE_MODELS,
@@ -999,14 +1000,16 @@ export function buildContainedEnv(cfg: AshlrConfig, hooksDir: string): NodeJS.Pr
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the ashlr binary path (used as the MCP server command).
+ * Resolve the dedicated efficiency server. Hub and plugin share `ashlr`,
+ * so that ambiguous command must never be treated as the plugin.
  * Returns the absolute path when found on PATH, or null when absent.
  * Pure, best-effort — never throws.
  */
-function resolveAshlrBin(): string | null {
+function resolveAshlrEfficiencyMcpBin(searchPath = process.env.PATH): string | null {
   try {
     const probe = process.platform === 'win32' ? 'where' : 'which';
-    const out = execFileSync(probe, ['ashlr'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    const out = execFileSync(probe, ['ashlr-mcp'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      env: { PATH: searchPath, ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}) }, timeout: 5_000 })
       .trim()
       .split('\n')[0]
       ?.trim();
@@ -1022,7 +1025,7 @@ export const FLEET_MCP_CONFIG_FILENAME = '.ashlr-fleet.mcp.json';
  * Write a minimal sidecar MCP config into the worktree so the fleet's claude instance
  * always has ashlr__ MCP tools regardless of the user's global settings.
  *
- * GUARD: only writes when `ashlr` is on PATH — CI/CD environments without the
+ * GUARD: only writes when `ashlr-mcp` is on PATH — CI/CD environments without the
  * plugin are completely unaffected (returns null → caller skips --mcp-config).
  *
  * M283 PRE-EXISTING GUARD: this writes a fleet-owned sidecar instead of `.mcp.json`,
@@ -1038,9 +1041,9 @@ export const FLEET_MCP_CONFIG_FILENAME = '.ashlr-fleet.mcp.json';
  * Returns the path to the written file, or null when the plugin is absent.
  * Never throws — any failure is silently suppressed so it never breaks dispatch.
  */
-export function writeMcpConfigIfAvailable(worktreePath: string): string | null {
+function prepareFleetMcpConfig(worktreePath: string, searchPath?: string): { path: string; command: string } | null {
   try {
-    const ashlrBin = resolveAshlrBin();
+    const ashlrBin = resolveAshlrEfficiencyMcpBin(searchPath);
     if (!ashlrBin) return null;
 
     const mcpConfigPath = join(worktreePath, FLEET_MCP_CONFIG_FILENAME);
@@ -1051,10 +1054,10 @@ export function writeMcpConfigIfAvailable(worktreePath: string): string | null {
       mcpServers: {
         ashlr: {
           command: ashlrBin,
-          args: ['mcp'],
+          args: [],
           env: {
             ASHLR_MCP_HOST: 'ashlr-fleet-engine',
-            ASHLR_HOOK_MODE: 'redirect',
+            ASHLR_HOOK_MODE: 'nudge',
             ASHLR_SESSION_LOG: '0',
           },
         },
@@ -1098,11 +1101,31 @@ export function writeMcpConfigIfAvailable(worktreePath: string): string | null {
       // Exclude registration is best-effort — never fails the run.
     }
 
-    return mcpConfigPath;
+    return { path: mcpConfigPath, command: ashlrBin };
   } catch {
     // Best-effort: never fail the run if MCP config can't be written.
     return null;
   }
+}
+
+/** Compatibility path-only entry point for callers that consume the Claude sidecar. */
+export function writeMcpConfigIfAvailable(worktreePath: string, searchPath?: string): string | null {
+  return prepareFleetMcpConfig(worktreePath, searchPath)?.path ?? null;
+}
+
+/** Per-invocation configuration only; existing MCP servers and approval policy remain native. */
+export function fleetEfficiencyMcpArgs(engine: string, config: { path: string; command: string } | null): string[] {
+  if (!config) return [];
+  if (engine === 'claude') return ['--mcp-config', config.path, '--strict-mcp-config'];
+  if (engine !== 'codex') return [];
+  const key = 'mcp_servers.ashlr-efficiency';
+  return [
+    '-c', `${key}.command=${JSON.stringify(config.command)}`,
+    '-c', `${key}.args=[]`,
+    '-c', `${key}.env.ASHLR_MCP_HOST="ashlr-fleet-engine"`,
+    '-c', `${key}.env.ASHLR_HOOK_MODE="nudge"`,
+    '-c', `${key}.env.ASHLR_SESSION_LOG="0"`,
+  ];
 }
 
 /**
@@ -2161,16 +2184,21 @@ export async function runEngineSandboxed(
   let autonomousSpawn: AutonomousSpawn | null = null;
   let autonomousFinished = false;
 
-  // M248: write a fleet-owned MCP sidecar to the worktree (guarded: only when ashlr is on PATH).
+  // M248: write a fleet-owned MCP sidecar to the worktree (guarded: only when the dedicated ashlr-mcp is on PATH).
   // fleetMcp defaults to true (on) — set cfg.foundry.fleetMcp = false to opt out.
   // V3.10 (INT4, B-U2 request): NEVER for an autonomous run — the sidecar is
   // an unconfined ashlr MCP server the agent could drive (its tools run as
   // Mason, outside the sandbox profile).
   const fleetMcpEnabled = !autonomousRun && (cfg.foundry as Record<string, unknown> | undefined)?.['fleetMcp'] !== false;
-  let mcpConfigPath: string | null = null;
+  // Reuse Apps' bounded, cached login PATH so a desktop launched by launchd
+  // discovers the same dedicated plugin as the operator's terminal. Only PATH
+  // enters the lookup child; provider credentials and seat pins do not.
+  let fleetMcpPath = process.env.PATH;
   if (fleetMcpEnabled) {
-    mcpConfigPath = writeMcpConfigIfAvailable(sb.worktreePath);
+    try { fleetMcpPath = (await resolveLoginPath()).path; }
+    catch { /* Optional plugin discovery falls back to the existing process PATH. */ }
   }
+  const fleetMcpConfig = fleetMcpEnabled ? prepareFleetMcpConfig(sb.worktreePath, fleetMcpPath) : null;
 
   // M154: prepend repo-map + localization context to goal when flags are ON.
   // Flag-OFF → contextPrefix is '' → goalWithContext === goal (byte-identical).
@@ -2199,12 +2227,11 @@ export async function runEngineSandboxed(
       if (line) emitSinkEvent(streamSink, { kind: 'log', taskId: 't1', text: line });
     }
 
-    // M248/MCP safety: inject the worktree MCP config strictly for Claude so
-    // daemon runs get only the sandbox-local ashlr MCP server, not global MCPs.
-    // Codex does not support --mcp-config (no equivalent flag) — skip silently.
-    // Any other cli-agent: skip (safe no-op fallback).
-    if (cmd && mcpConfigPath && engine === 'claude') {
-      cmd = { ...cmd, args: [...cmd.args, '--mcp-config', mcpConfigPath, '--strict-mcp-config'] };
+    // The same dedicated plugin is carried through each native CLI's supported
+    // per-invocation format. Autonomous runs never receive this unconfined MCP.
+    // Codex keeps its native approval policy and existing server configuration.
+    if (cmd && fleetMcpConfig) {
+      cmd = { ...cmd, args: [...cmd.args, ...fleetEfficiencyMcpArgs(engine, fleetMcpConfig)] };
     }
     if (!cmd) {
       proposalOutcomeResult = proposalOutcome('engine-command-missing', `no command for engine "${engine}"`);

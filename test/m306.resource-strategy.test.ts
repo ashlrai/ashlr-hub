@@ -313,6 +313,16 @@ describe('buildResourceStrategyReport', () => {
     expect(report.resources.depleted).toBe(3);
   });
 
+  it('treats an exhausted Meta API backend as constrained cloud capacity', async () => {
+    const report = await buildResourceStrategyReport(cfg(), {
+      deps: deps({ getResourceSnapshot: async () => resources([
+        backend('meta-muse', 'exhausted'), backend('builtin', 'open'),
+      ]) }),
+    });
+    expect(report.mode).toBe('local-only');
+    expect(report.resources.depleted).toBe(1);
+  });
+
   it('recommends auto-merge-ready only as an advisory mode from existing evidence', async () => {
     const report = await buildResourceStrategyReport(
       cfg({ foundry: { autoMerge: { enabled: true } } as NonNullable<AshlrConfig['foundry']> }),

@@ -165,7 +165,7 @@ export function validateResourcePerformanceReport(value: unknown, poolValue: Res
   object(value, ['schemaVersion', 'scope', 'comparability', 'quality', 'poolId', 'attempts', 'workers']);
   if (value.schemaVersion !== 1 || value.scope !== 'recorded-worker-execution' || value.comparability !== 'unmatched-tasks' ||
     value.quality !== 'unmeasured' || value.poolId !== pool.id || !count(value.attempts, MAX_ATTEMPTS)) invalid();
-  array(value.workers, 32);
+  array(value.workers, pool.workers.length);
   if (value.workers.length !== pool.workers.length) invalid();
   let total = 0;
   for (const [index, row] of value.workers.entries()) {

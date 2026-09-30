@@ -68,7 +68,6 @@ describe('quota reservation response and mutation boundary', () => {
     { exclusions: [{ ...general, capacityKey: '../secret' }], revision: 0 },
     { exclusions: [{ ...general, quotaScope: 'inferred' }], revision: 0 },
     { exclusions: [{ ...general, extra: true }], revision: 0 },
-    { exclusions: Array.from({ length: 65 }, (_, i) => ({ ...general, capacityKey: `account-${i}` })), revision: 0 },
     { exclusions: [], revision: -1 }, { exclusions: [], revision: 0.5 }, { exclusions: [], revision: Number.MAX_SAFE_INTEGER }])(
     'rejects invalid requests before contact %#', async ({ exclusions, revision }) => {
       setMutationToken('a'.repeat(64));
@@ -265,7 +264,7 @@ describe('saved worker access response and mutation boundaries', () => {
     expect(requested).toEqual(['local-a', 'codex-a']);
   });
   it.each([{ ids: ['codex-a', 'codex-a'], revision: 0 }, { ids: ['../secret'], revision: 0 },
-    { ids: [''], revision: 0 }, { ids: Array.from({ length: 33 }, (_, i) => `worker-${i}`), revision: 0 },
+    { ids: [''], revision: 0 }, { ids: new Array(1_000_000_000), revision: 0 },
     { ids: [], revision: -1 }, { ids: [], revision: 0.5 }, { ids: [], revision: NaN },
     { ids: [], revision: Infinity }, { ids: [], revision: Number.MAX_SAFE_INTEGER }])(
     'rejects invalid access before contact %#', async ({ ids, revision }) => {
@@ -516,5 +515,33 @@ describe('optional native quota response boundary', () => {
   it.each(['true', 1, null, {}])('rejects malformed scope flags %#', async (flag) => {
     const { scope } = resourceFixture(); read.mockResolvedValue({ ...scope, quotaRefreshEnabled: flag });
     await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+});
+
+
+describe('enrolled account and worker scale', () => {
+  it('renders accounts, quota refresh and access for a fleet larger than the former tiers', async () => {
+    const { snapshot } = resourceFixture(); const base = snapshot.pool.workers[0]!;
+    snapshot.pool.workers = Array.from({ length: 96 }, (_, index) => ({ ...base, id: `codex-${index}`,
+      provider: 'codex' as const, capacityKey: `account-${index}`, quotaScope: 'codex-general-v1' as const }));
+    const workers = snapshot.pool.workers.map(worker => ({ ...row(refresh()), workerId: worker.id }));
+    const connections = { sampledAt: NOW, refreshing: false, accounts: snapshot.pool.workers.slice(0, 24).map(worker => ({
+      id: worker.id, label: worker.id, provider: 'codex', state: 'observed', authentication: 'signed-in', health: 'reachable',
+      planType: 'pro', observedAt: NOW, expiresAt: NEXT, windows: [], reason: 'probe-observed', onDemandEnabled: null, executionSupported: true,
+    })) };
+    const pausedWorkerIds = snapshot.pool.workers.slice(0, 48).map(worker => worker.id);
+    const exclusions = snapshot.pool.workers.map(worker => ({ capacityKey: worker.capacityKey, quotaScope: 'codex-general-v1' as const }));
+    const quotaRefresh = { ...refresh(), workers };
+    read.mockResolvedValue({ ...snapshot, connections, quotaRefresh,
+      workerAccess: { pausedWorkerIds, revision: 1, updatedAt: NOW }, quotaScopeAccess: { exclusions, revision: 1, updatedAt: NOW } });
+    await expect(resourceConsoleSnapshotQuery(snapshot.pool.id).fetch()).resolves.toMatchObject({ connections, quotaRefresh });
+    setMutationToken('a'.repeat(64));
+    write.mockResolvedValueOnce({ workerAccess: { pausedWorkerIds, revision: 2, updatedAt: NOW } });
+    await expect(setResourceWorkerAccessControl(pausedWorkerIds, 1)).resolves.toHaveProperty('workerAccess.pausedWorkerIds', pausedWorkerIds);
+    write.mockResolvedValueOnce({ quotaScopeAccess: { exclusions, revision: 2, updatedAt: NOW } });
+    await expect(setResourceQuotaScopeAccess(exclusions, 1)).resolves.toHaveProperty('quotaScopeAccess.exclusions', exclusions);
+    connections.accounts.push(connections.accounts[0]!);
+    read.mockResolvedValue({ ...snapshot, connections });
+    await expect(resourceConsoleSnapshotQuery(snapshot.pool.id).fetch()).rejects.toThrow('did not match');
   });
 });

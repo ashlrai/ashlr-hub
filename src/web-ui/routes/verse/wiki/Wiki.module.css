@@ -130,7 +130,8 @@
   font-size: var(--text-xs-size);
   transition: background var(--duration-fast) var(--ease-standard);
 }
-.segmented button[aria-checked='true'] {
+.segmented button[aria-checked='true'],
+.segmented button[aria-pressed='true'] {
   background: var(--bg-selected);
   color: var(--text-primary);
 }

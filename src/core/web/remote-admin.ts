@@ -47,7 +47,9 @@ async function clearStaleSocket(root: string, path: string): Promise<void> {
     probe.setTimeout(1_000, () => probe.destroy(new Error('Remote admin socket probe timed out')));
     probe.once('connect', () => { probe.destroy(); resolve(false); });
     probe.once('error', (error: NodeJS.ErrnoException) => {
-      if (error.code === 'ECONNREFUSED') resolve(true);
+      // A retiring sidecar can unlink its socket between lstat and connect.
+      // Recheck below before removing anything; bind still rejects a new listener.
+      if (error.code === 'ECONNREFUSED' || error.code === 'ENOENT') resolve(true);
       else reject(error);
     });
   });

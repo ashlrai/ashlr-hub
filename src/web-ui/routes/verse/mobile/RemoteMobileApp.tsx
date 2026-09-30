@@ -1,5 +1,5 @@
 /** Phone gateway entry: Access identity, a Mac-approved passkey, then Verse. */
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { markCheckComplete, setRemoteActGranted } from '../../../data/auth-store.js';
 import { useAuthPhase } from '../../../data/hooks.js';
 import {
@@ -53,6 +53,8 @@ export function RemoteMobileApp({ shell, Button, ui }: { shell: ReactNode; Butto
   const [label, setLabel] = useState('My phone');
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const generation = useRef(0);
+  const checkedDeadline = useRef<number | null>(null);
 
   const accept = useCallback((next: RemoteSession) => {
     const canAct = next.authenticated && next.scopes?.act === true && next.capabilities.writes;
@@ -64,11 +66,19 @@ export function RemoteMobileApp({ shell, Button, ui }: { shell: ReactNode; Butto
     setView({ kind: 'ready', session: next });
   }, []);
 
-  const refresh = useCallback(async () => {
-    setView({ kind: 'loading' });
+  const refresh = useCallback(async (background = false) => {
+    const request = ++generation.current;
+    setBusy(false);
+    // A check of a still-valid cookie must not unmount screens and erase drafts.
+    setView((current) => background && current.kind === 'ready' && current.session.authenticated
+      ? current : { kind: 'loading' });
     setActionError(null);
-    try { accept(await probeRemoteSession()); }
+    try {
+      const next = await probeRemoteSession();
+      if (request === generation.current) accept(next);
+    }
     catch (error) {
+      if (request !== generation.current) return;
       setRemoteActGranted(false);
       registerDeviceScopes(null);
       markCheckComplete(false);
@@ -78,7 +88,7 @@ export function RemoteMobileApp({ shell, Button, ui }: { shell: ReactNode; Butto
 
   useEffect(() => {
     void refresh();
-    return () => { registerDeviceScopes(null); setRemoteActGranted(false); };
+    return () => { generation.current += 1; registerDeviceScopes(null); setRemoteActGranted(false); };
   }, [refresh]);
 
   // More's Sign out clears the remote cookie through auth-store. Fetch a new
@@ -89,9 +99,29 @@ export function RemoteMobileApp({ shell, Button, ui }: { shell: ReactNode; Butto
 
   useEffect(() => {
     if (view.kind !== 'ready' || !view.session.authenticated || !view.session.expiresAt) return;
-    // A gateway that returns a near-expiry cookie must not trigger a zero-delay refresh loop.
-    const delay = Math.max(1_000, view.session.expiresAt - Date.now() - 5_000);
-    const timer = setTimeout(() => { void refresh(); }, delay);
+    const deadline = view.session.expiresAt;
+    // /remote/session verifies but does not renew a cookie. Check once near
+    // expiry, then lock at the deadline instead of probing every second.
+    if (checkedDeadline.current === deadline) return;
+    const delay = Math.max(0, deadline - Date.now() - 5_000);
+    const timer = setTimeout(() => {
+      if (Date.now() < deadline) {
+        checkedDeadline.current = deadline;
+        void refresh(true);
+      }
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [view, refresh]);
+
+  useEffect(() => {
+    if (view.kind !== 'ready' || !view.session.authenticated || !view.session.expiresAt) return;
+    // Independent of the probe: an offline Mac cannot keep an expired shell open.
+    const timer = setTimeout(() => {
+      setRemoteActGranted(false);
+      registerDeviceScopes(null);
+      markCheckComplete(false);
+      void refresh();
+    }, Math.max(0, view.session.expiresAt - Date.now()));
     return () => clearTimeout(timer);
   }, [view, refresh]);
 
@@ -99,9 +129,13 @@ export function RemoteMobileApp({ shell, Button, ui }: { shell: ReactNode; Butto
     if (!deviceId || busy) return;
     setBusy(true);
     setActionError(null);
-    try { accept(await authenticateRemoteDevice(deviceId)); }
-    catch (error) { setActionError(message(error)); }
-    finally { setBusy(false); }
+    const request = ++generation.current;
+    try {
+      const next = await authenticateRemoteDevice(deviceId);
+      if (request === generation.current) accept(next);
+    }
+    catch (error) { if (request === generation.current) setActionError(message(error)); }
+    finally { if (request === generation.current) setBusy(false); }
   };
 
   const pair = async () => {

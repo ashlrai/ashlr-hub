@@ -6,6 +6,17 @@ import { clearMutationToken, getMutationToken, touchMutationHold } from './auth-
 import { ApiError, apiGet, apiPost } from './client.js';
 import type { QueryDef } from './queries.js';
 
+// These are existing wire byte budgets, not product account or worker tiers.
+const RESOURCE_SNAPSHOT_BYTES = 4 * 1024 * 1024;
+const RESOURCE_CONTROL_BYTES = 128 * 1024;
+function denseWireArray(value: unknown, maxBytes = RESOURCE_SNAPSHOT_BYTES): value is unknown[] {
+  if (!Array.isArray(value) || value.length > Math.floor(maxBytes / 2)) return false;
+  const keys = Reflect.ownKeys(value);
+  return keys.length === value.length + 1 && keys.every(key => key === 'length' ||
+    typeof key === 'string' && /^(?:0|[1-9][0-9]*)$/.test(key) && Number(key) < value.length &&
+    'value' in Object.getOwnPropertyDescriptor(value, key)!);
+}
+
 function absolutePath(value: unknown): value is string {
   return typeof value === 'string' && /^(?:\/|[a-zA-Z]:[\\/]|\\\\)/.test(value) &&
     ![...value].some((character) => character.charCodeAt(0) < 32 ||
@@ -43,7 +54,7 @@ function validMetadataCollector(value: unknown): boolean {
 }
 function validWorkerAccess(value: unknown): value is NonNullable<ResourceConsoleSnapshot['workerAccess']> {
   if (!record(value) || !exact(value, ['pausedWorkerIds', 'revision', 'updatedAt']) ||
-    !Array.isArray(value.pausedWorkerIds) || value.pausedWorkerIds.length > 32 ||
+    !denseWireArray(value.pausedWorkerIds) ||
     value.pausedWorkerIds.some((id) => typeof id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) ||
     new Set(value.pausedWorkerIds).size !== value.pausedWorkerIds.length || !Number.isSafeInteger(value.revision) || Number(value.revision) < 0) return false;
   return value.revision === 0 ? value.updatedAt === null && value.pausedWorkerIds.length === 0 : timestamp(value.updatedAt);
@@ -51,7 +62,7 @@ function validWorkerAccess(value: unknown): value is NonNullable<ResourceConsole
 type ScopeExclusion = NonNullable<ResourceConsoleSnapshot['quotaScopeAccess']>['exclusions'][number];
 const scopeKey = (row: ScopeExclusion) => `${row.capacityKey}/${row.quotaScope}`;
 function validScopeExclusions(value: unknown): value is ScopeExclusion[] {
-  return Array.isArray(value) && value.length <= 64 && Object.keys(value).length === value.length &&
+  return denseWireArray(value, RESOURCE_CONTROL_BYTES) && Object.keys(value).length === value.length &&
     Array.from(value).every((row) => record(row) && exact(row, ['capacityKey', 'quotaScope']) &&
       typeof row.capacityKey === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(row.capacityKey) &&
       (row.quotaScope === 'codex-general-v1' || row.quotaScope === 'codex-spark-v1')) &&
@@ -96,7 +107,7 @@ function boundedText(value: unknown, maxBytes: number): value is string {
 function validConnections(value: unknown): boolean {
   if (value === undefined || value === null) return true;
   if (!record(value) || !exact(value, ['sampledAt', 'refreshing', 'accounts']) || !timestamp(value.sampledAt) ||
-    typeof value.refreshing !== 'boolean' || !Array.isArray(value.accounts) || value.accounts.length > 8) return false;
+    typeof value.refreshing !== 'boolean' || !denseWireArray(value.accounts)) return false;
   const ids = new Set<string>();
   for (const account of value.accounts) {
     if (!record(account) || !exact(account, ['id', 'label', 'provider', 'state', 'authentication', 'health', 'planType',
@@ -151,7 +162,7 @@ function validQuotaRefresh(value: unknown, workers: ResourceConsoleSnapshot['poo
   if (value === undefined || value === null) return true; // Older servers have no collector.
   if (!record(value) || !exact(value, ['schemaVersion', 'scope', 'state', 'sampledAt', 'workers']) || value.schemaVersion !== 1 ||
     value.scope !== 'codex-native-metadata' || value.state !== 'running' && value.state !== 'closed' || !timestamp(value.sampledAt) ||
-    !Array.isArray(value.workers) || value.workers.length < 1 || value.workers.length > 32 || !Array.isArray(workers)) return false;
+    !denseWireArray(value.workers) || value.workers.length < 1 || !Array.isArray(workers) || value.workers.length > workers.length) return false;
   const known = new Set(workers.filter((worker) => worker?.provider === 'codex').map((worker) => worker.id));
   const seen = new Set<string>();
   for (const row of value.workers) {
@@ -283,7 +294,7 @@ export async function setResourceAllocation(ceilingPercent: number, expectedRevi
 export async function setResourceWorkerAccessControl(pausedWorkerIds: string[], expectedRevision: number): Promise<{
   workerAccess: NonNullable<ResourceConsoleSnapshot['workerAccess']>;
 }> {
-  if (!Array.isArray(pausedWorkerIds) || pausedWorkerIds.length > 32 ||
+  if (!denseWireArray(pausedWorkerIds, RESOURCE_CONTROL_BYTES) ||
     pausedWorkerIds.some((id) => typeof id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) ||
     new Set(pausedWorkerIds).size !== pausedWorkerIds.length || !Number.isSafeInteger(expectedRevision) ||
     expectedRevision < 0 || expectedRevision >= Number.MAX_SAFE_INTEGER) throw new Error('Invalid fleet access change.');

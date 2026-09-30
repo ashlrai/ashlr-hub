@@ -129,7 +129,7 @@ function path(value: unknown): value is string {
 
 /** Invocation-only admission vetoes; never part of durable quota or task identity. */
 export function validateUnavailableResourceWorkerIds(value: unknown, pool: ResourcePool): string[] {
-  if (!Array.isArray(value) || value.length > 32 || Reflect.ownKeys(value).length !== value.length + 1 ||
+  if (!Array.isArray(value) || value.length > pool.workers.length || Reflect.ownKeys(value).length !== value.length + 1 ||
     !Array.from({ length: value.length }, (_, index) => Object.hasOwn(value, index) &&
       'value' in Object.getOwnPropertyDescriptor(value, index)!).every(Boolean)) {
     throw new Error('Invalid unavailable resource workers');
@@ -142,11 +142,19 @@ export function validateUnavailableResourceWorkerIds(value: unknown, pool: Resou
   return Object.freeze(ids) as string[];
 }
 
+function denseTaskWorkerIds(value: unknown): value is unknown[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > Math.floor(MAX_STATE_BYTES / 2)) return false;
+  const keys = Reflect.ownKeys(value);
+  return keys.length === value.length + 1 && keys.every(key => key === 'length' ||
+    typeof key === 'string' && /^(?:0|[1-9][0-9]*)$/.test(key) && Number(key) < value.length &&
+    'value' in Object.getOwnPropertyDescriptor(value, key)!);
+}
+
 /** Owner-controlled task text; never accepted from a provider response or stored in the ledger. */
 export function validateResourceTask(value: unknown): ResourceTask {
   if (!object(value) || !exact(value, ['schemaVersion', 'id', 'allowedWorkerIds', 'prompt', 'cwd',
     'timeoutMs', 'maxOutputTokens', 'mode']) || value.schemaVersion !== 1 || typeof value.id !== 'string' || !ID.test(value.id) ||
-    !Array.isArray(value.allowedWorkerIds) || !value.allowedWorkerIds.length || value.allowedWorkerIds.length > 32 ||
+    !denseTaskWorkerIds(value.allowedWorkerIds) ||
     !value.allowedWorkerIds.every((id) => typeof id === 'string' && ID.test(id)) ||
     new Set(value.allowedWorkerIds).size !== value.allowedWorkerIds.length ||
     typeof value.prompt !== 'string' || !value.prompt.trim() || value.prompt.includes('\0') ||

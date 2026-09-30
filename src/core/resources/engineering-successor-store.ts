@@ -43,7 +43,7 @@ export function validateResourceEngineeringSuccessorCoordinatorConfig(value: unk
   const config = data<Config>(value);
   if (!exact(config, ['schemaVersion', 'supervisionId', 'profileId', 'allowedWorkerIds', 'maxOutputTokens', 'proposalTimeoutMs', 'maxSuccessors', 'pollIntervalMs']) ||
     config.schemaVersion !== 1 || ![config.supervisionId, config.profileId].every(value => typeof value === 'string' && ID.test(value)) ||
-    !Array.isArray(config.allowedWorkerIds) || config.allowedWorkerIds.length < 1 || config.allowedWorkerIds.length > 32 ||
+    !Array.isArray(config.allowedWorkerIds) || config.allowedWorkerIds.length < 1 ||
     config.allowedWorkerIds.some(value => typeof value !== 'string' || !ID.test(value)) || new Set(config.allowedWorkerIds).size !== config.allowedWorkerIds.length ||
     !integer(config.maxOutputTokens, 1, 8192) || !integer(config.proposalTimeoutMs, 1, 900_000) ||
     !integer(config.maxSuccessors, 1, 32) || !integer(config.pollIntervalMs, 100, 60_000)) fail('Invalid successor configuration');

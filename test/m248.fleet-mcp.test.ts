@@ -3,9 +3,9 @@
  *
  * Tests:
  *   1. writeMcpConfigIfAvailable writes fleet sidecar config with correct server entry
- *      when the plugin binary is present (real PATH includes ashlr on this machine).
+ *      when the dedicated plugin binary is present (hermetic fixture).
  *   2. --mcp-config injected into claude autonomous argv when sidecar config is written.
- *   3. which-guard: when ashlr absent (PATH manipulated) → returns null, argv unchanged.
+ *   3. which-guard: when ashlr-mcp is absent (PATH manipulated) → returns null, argv unchanged.
  *   4. CLAUDE_SESSION_ID set to ashlr-fleet-<runId> in the contained env.
  *   5. fleetMcp: false disables injection; absent/true enables it.
  *
@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -22,6 +22,7 @@ import {
   FLEET_MCP_CONFIG_FILENAME,
   writeMcpConfigIfAvailable,
   buildContainedEnv,
+  fleetEfficiencyMcpArgs,
 } from '../src/core/run/sandboxed-engine.js';
 import { buildEngineCommand } from '../src/core/run/engines.js';
 
@@ -53,6 +54,7 @@ function makeConfig(foundryOver: Record<string, unknown> = {}): AshlrConfig {
 }
 
 const tmpDirs: string[] = [];
+const originalPath = process.env.PATH;
 function mkTmp(prefix: string): string {
   const d = mkdtempSync(join(tmpdir(), prefix));
   tmpDirs.push(d);
@@ -60,6 +62,7 @@ function mkTmp(prefix: string): string {
 }
 
 afterEach(() => {
+  process.env.PATH = originalPath;
   for (const d of tmpDirs.splice(0)) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* ok */ }
   }
@@ -70,9 +73,23 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('M248 writeMcpConfigIfAvailable — plugin present', () => {
-  it('writes fleet sidecar config with ashlr server entry when ashlr is on PATH', () => {
-    // ashlr is installed at /Users/masonwyatt/.local/bin/ashlr on this machine.
-    // If it's not present, the function returns null and the test is skipped.
+  it('uses the supplied desktop login PATH without changing process PATH', () => {
+    const bin = mkTmp('ashlr-plugin-login-bin-');
+    const executable = join(bin, 'ashlr-mcp');
+    writeFileSync(executable, '#!/bin/sh\nexit 0\n'); chmodSync(executable, 0o755);
+    process.env.PATH = '/usr/bin:/bin';
+    const worktree = mkTmp('ashlr-plugin-login-worktree-');
+    const result = writeMcpConfigIfAvailable(worktree, `${bin}:/usr/bin:/bin`);
+    expect(result).not.toBeNull();
+    expect(JSON.parse(readFileSync(result!, 'utf8')).mcpServers.ashlr.command).toBe(executable);
+    expect(process.env.PATH).toBe('/usr/bin:/bin');
+  });
+
+  it('writes the dedicated plugin sidecar with an isolated declared host', () => {
+    const bin = mkTmp('ashlr-plugin-bin-');
+    const executable = join(bin, 'ashlr-mcp');
+    writeFileSync(executable, '#!/bin/sh\nexit 0\n'); chmodSync(executable, 0o755);
+    process.env.PATH = `${bin}:${originalPath}`;
     const worktree = mkTmp('ashlr-m248-present-');
 
     const result = writeMcpConfigIfAvailable(worktree);
@@ -88,16 +105,16 @@ describe('M248 writeMcpConfigIfAvailable — plugin present', () => {
     expect(existsSync(result)).toBe(true);
 
     const parsed = JSON.parse(readFileSync(result, 'utf8'));
-    // Command must be the resolved ashlr binary path
+    // Command must be the dedicated plugin binary, never the shared Hub CLI.
     expect(typeof parsed.mcpServers?.ashlr?.command).toBe('string');
     expect((parsed.mcpServers.ashlr.command as string).length).toBeGreaterThan(0);
     expect(parsed).toMatchObject({
       mcpServers: {
         ashlr: {
-          args: ['mcp'],
+          args: [],
           env: {
             ASHLR_MCP_HOST: 'ashlr-fleet-engine',
-            ASHLR_HOOK_MODE: 'redirect',
+            ASHLR_HOOK_MODE: 'nudge',
             ASHLR_SESSION_LOG: '0',
           },
         },
@@ -125,10 +142,21 @@ describe('M248 writeMcpConfigIfAvailable — plugin present', () => {
 // ---------------------------------------------------------------------------
 
 describe('M248 writeMcpConfigIfAvailable — plugin absent (which-guard)', () => {
-  it('returns null and writes no file when ashlr is not on PATH', () => {
+  it('does not misidentify the shared Hub ashlr command as the efficiency plugin', () => {
+    const bin = mkTmp('ashlr-hub-only-bin-');
+    const executable = join(bin, 'ashlr');
+    writeFileSync(executable, '#!/bin/sh\nexit 0\n'); chmodSync(executable, 0o755);
+    // Keep the system which utility available without either user install.
+    process.env.PATH = `${bin}:/usr/bin:/bin`;
+    const worktree = mkTmp('ashlr-hub-only-worktree-');
+    expect(writeMcpConfigIfAvailable(worktree)).toBeNull();
+    expect(existsSync(join(worktree, FLEET_MCP_CONFIG_FILENAME))).toBe(false);
+  });
+
+  it('returns null and writes no file when ashlr-mcp is not on PATH', () => {
     const worktree = mkTmp('ashlr-m248-absent-');
 
-    // Temporarily set PATH to empty dir so `which ashlr` fails
+    // Temporarily set PATH to empty dir so the dedicated binary cannot resolve.
     const emptyBinDir = mkTmp('ashlr-m248-emptybin-');
     const prevPath = process.env.PATH;
     process.env.PATH = emptyBinDir;
@@ -207,25 +235,16 @@ describe('M248 strict --mcp-config injection logic', () => {
     expect(finalCmd!.args).not.toContain('--strict-mcp-config');
   });
 
-  it('--mcp-config is NOT injected for codex (unsupported — engine !== claude)', () => {
-    const cfg = makeConfig();
-    const cmd = buildEngineCommand('codex', 'do work', cfg, {
-      cwd: CWD,
-      model: 'gpt-5',
-      autonomous: true,
-    });
-    expect(cmd).not.toBeNull();
-
-    // M248 guard: engine !== 'claude' → skip injection
-    const mcpConfigPath: string | null = join(CWD, '.mcp.json');
-    const finalCmd =
-      cmd && mcpConfigPath && 'codex' === 'claude'
-        ? { ...cmd, args: [...cmd.args, '--mcp-config', mcpConfigPath, '--strict-mcp-config'] }
-        : cmd;
-
-    expect(finalCmd!.args).not.toContain('--mcp-config');
-    expect(finalCmd!.args).not.toContain('--strict-mcp-config');
-    expect(finalCmd!.args).toEqual(cmd!.args);
+  it('adds only per-turn Codex efficiency settings without changing native approvals or other servers', () => {
+    const original = ['exec', '-c', 'mcp_servers.existing.command="/existing/server"', '--json', 'do work'];
+    const overrides = fleetEfficiencyMcpArgs('codex', { path: '/work/.ashlr-fleet.mcp.json', command: '/plugin path/ashlr-mcp' });
+    expect(overrides).toContain('mcp_servers.ashlr-efficiency.command="/plugin path/ashlr-mcp"');
+    expect(overrides).toContain('mcp_servers.ashlr-efficiency.env.ASHLR_MCP_HOST="ashlr-fleet-engine"');
+    expect(overrides).toContain('mcp_servers.ashlr-efficiency.env.ASHLR_SESSION_LOG="0"');
+    expect(overrides.join(' ')).not.toMatch(/approval|token|credential|--mcp-config/);
+    expect([...original, ...overrides].slice(0, original.length)).toEqual(original);
+    expect(fleetEfficiencyMcpArgs('codex', null)).toEqual([]);
+    expect(fleetEfficiencyMcpArgs('grok-cli', { path: '/work/mcp', command: '/plugin/ashlr-mcp' })).toEqual([]);
   });
 });
 

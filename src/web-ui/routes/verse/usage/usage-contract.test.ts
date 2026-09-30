@@ -307,6 +307,13 @@ describe('projectUsageSeries against the real {window, byDay, …} wrapper', () 
 // ---------------------------------------------------------------------------
 
 describe('projectLocalModels against the real two-runtime snapshot', () => {
+  it('projects optional detail coverage only when counts match the installed roster', () => {
+    const raw = localSnapshot({ ollama: { reachable: true, baseUrl: 'http://127.0.0.1:11434', reason: null, models: [localModel({ id: 'one' }), localModel({ id: 'two' })], detailInspection: { attempted: 1, pending: 1 } } });
+    expect(projectLocalModels(raw)?.runtimes[0]?.detailInspection).toEqual({ attempted: 1, pending: 1 });
+    raw.ollama.detailInspection = { attempted: 3, pending: 1 };
+    expect(projectLocalModels(raw)?.runtimes[0]?.detailInspection).toBeUndefined();
+  });
+
   it('flattens ollama + lmStudio into one list against the machine budget', () => {
     // The projector previously looked for a flat `models` array, which this
     // payload does not have, so it returned null and the whole local panel

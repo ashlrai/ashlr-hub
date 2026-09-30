@@ -601,7 +601,7 @@ function trajectoryRef(record: TrajectoryRecord): string {
 }
 
 const TRACE_ENGINE_IDS = new Set<EngineId>([
-  'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'kimi', 'nim', 'opencode', 'grok',
+  'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'kimi', 'nim', 'opencode', 'meta-muse', 'grok',
 ]);
 const TRACE_TIERS = new Set<EngineTier>(['local', 'mid', 'frontier']);
 const TRACE_COMMAND_KINDS = new Set<TraceCommandKind>([

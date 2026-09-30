@@ -31,6 +31,8 @@ import {
   VERSE_DEFAULT_OLLAMA_BASE,
   VERSE_LOCAL_REACHABILITY_TIMEOUT_MS,
   VERSE_LOCAL_PROBE_TIMEOUT_MS,
+  VERSE_LOCAL_MAX_SHOW_PROBES,
+  VERSE_LOCAL_METADATA_MAX_BYTES,
   resetVerseLocalModelCache,
   VERSE_LOCAL_LAST_GOOD_TTL_MS,
 } from '../src/core/verse/local-models.js';
@@ -149,8 +151,8 @@ interface Routes {
 function fakeFetch(routes: Routes, log?: string[]): typeof fetch {
   return (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
-    const reply = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
-    const missing = { ok: false, status: 404, json: async () => ({}) };
+    const reply = (body: unknown) => new Response(JSON.stringify(body));
+    const missing = new Response('{}', { status: 404 });
     if (url.endsWith('/api/tags')) {
       log?.push('tags');
       return routes.tags === undefined ? missing : reply(routes.tags);
@@ -260,6 +262,39 @@ describe('verse local models — /api/show', () => {
 // ---------------------------------------------------------------------------
 
 describe('verse local models — collectVerseLocalModels', () => {
+  it('retains installed Ollama and LM Studio models beyond 64 while sampling expensive details explicitly', async () => {
+    const tags = Array.from({ length: 80 }, (_, i) => `qwen-many-${i}:ctx64k`);
+    const calls: string[] = [];
+    const snapshot = await collectVerseLocalModels({ fetchImpl: fakeFetch({
+      tags: { models: tags.map((name) => ({ name })) },
+      ps: { models: tags.map((name) => ({ name, size: 100, size_vram: 100, context_length: 65536 })) },
+      show: () => SHOW_WITH_TOOLS,
+      lmstudio: { data: tags.map((id) => ({ id, state: 'not-loaded' })) },
+    }, calls) });
+    expect(snapshot.ollama.models).toHaveLength(80);
+    expect(snapshot.lmStudio.models).toHaveLength(80);
+    expect(snapshot.ollama.models.find((m) => m.id === tags[79])?.state).toBe('loaded');
+    expect(snapshot.ollama.detailInspection).toEqual({ attempted: VERSE_LOCAL_MAX_SHOW_PROBES, pending: 80 - VERSE_LOCAL_MAX_SHOW_PROBES });
+    expect(calls.filter((c) => c.startsWith('show:'))).toHaveLength(VERSE_LOCAL_MAX_SHOW_PROBES);
+    expect(snapshot.ollama.models.find((m) => m.id === tags[79])?.supportsTools).toBeNull();
+  });
+
+  it('refuses oversized installed-model metadata rather than claiming a truncated roster', async () => {
+    const snapshot = await collectVerseLocalModels({ fetchImpl: fakeFetch({ tags: { models: [], padding: 'x'.repeat(VERSE_LOCAL_METADATA_MAX_BYTES) } }) });
+    expect(snapshot.ollama.reachable).toBe(false);
+    expect(snapshot.ollama.models).toEqual([]);
+  });
+
+  it('cancels a declared oversized metadata body before reading it', async () => {
+    let cancelled = false;
+    const fetchImpl: typeof fetch = async (input) => String(input).endsWith('/api/tags')
+      ? new Response(new ReadableStream({ cancel: () => { cancelled = true; } }), { headers: { 'content-length': String(VERSE_LOCAL_METADATA_MAX_BYTES + 1) } })
+      : new Response('{}', { status: 404 });
+    const snapshot = await collectVerseLocalModels({ fetchImpl });
+    expect(cancelled).toBe(true);
+    expect(snapshot.ollama.reachable).toBe(false);
+  });
+
   it('joins /api/ps residency to /api/show shape, with memory fit against the machine', async () => {
     const snapshot = await collectVerseLocalModels({
       fetchImpl: fakeFetch({
@@ -675,10 +710,10 @@ describe('llama-server per-slot context', () => {
     return (async (input: string | URL | Request) => {
       const url = String(input);
       seen.push(url);
-      const reply = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+      const reply = (body: unknown) => new Response(JSON.stringify(body));
       if (url.endsWith('/props') && routes.props !== undefined) return reply(routes.props);
       if (url.endsWith('/slots') && routes.slots !== undefined) return reply(routes.slots);
-      return { ok: false, status: 404, json: async () => ({}) };
+      return new Response('{}', { status: 404 });
     }) as unknown as typeof fetch;
   }
 

@@ -232,6 +232,23 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
     capabilities: ['agent', 'edit', 'architecture'],
   },
 
+  // Meta Model API, opt-in through allowedBackends. This is metered inference,
+  // independent of Muse Code browser sign-in or any consumer subscription.
+  // Official contract: dev.meta.ai/docs/cookbook/quickstart-chat-completions.
+  'meta-muse': {
+    id: 'meta-muse',
+    kind: 'api-model',
+    tier: 'mid',
+    api: {
+      envKey: 'MODEL_API_KEY',
+      baseUrlEnv: 'META_MODEL_BASE_URL',
+      defaultBaseUrl: 'https://api.meta.ai/v1',
+      defaultModel: 'muse-spark-1.3',
+      protocol: 'openai' as const,
+    },
+    capabilities: ['agent', 'edit', 'tools'],
+  },
+
   // Generic OpenAI-compatible endpoint — bring-your-own base URL and key.
   // Covers any provider that speaks /v1/chat/completions (vLLM, Together AI,
   // Fireworks, Anyscale, local OpenAI-compat servers, etc.).

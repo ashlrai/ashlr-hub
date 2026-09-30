@@ -127,7 +127,15 @@ export const VERSE_LOCAL_TAG_RE = /coder|code|qwen|deepseek|devstral|llama/i;
 
 export const VERSE_DEFAULT_OLLAMA_BASE_URL = 'http://127.0.0.1:11434';
 const OLLAMA_TIMEOUT_MS = 2_000;
-const MAX_LOCAL_TAGS = 64;
+/** Bound metadata bytes and simultaneous probes, never the installed roster. */
+export const VERSE_LOCAL_TAGS_MAX_BYTES = 1024 * 1024;
+export const VERSE_LOCAL_DETAIL_CONCURRENCY = 8;
+/** One refresh's metadata work is bounded regardless of installed model count. */
+export const VERSE_LOCAL_DETAIL_BUDGET_MS = 2_000;
+const LOCAL_DETAIL_CACHE_MS = 30_000;
+type LocalDetailEntry = { at: number; detail: VerseOllamaModelDetail | null };
+// Test fetches and separate runtimes cannot contaminate each other's evidence.
+const localDetailCaches = new WeakMap<typeof fetch, Map<string, Map<string, LocalDetailEntry>>>();
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -671,7 +679,30 @@ async function fetchJson(fetchImpl: typeof fetch, url: string, init?: RequestIni
   try {
     const res = await fetchImpl(url, { ...init, signal: AbortSignal.timeout(OLLAMA_TIMEOUT_MS) });
     if (!res.ok) return null;
-    return (await res.json()) as unknown;
+    const declaredLength = Number(res.headers.get('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > VERSE_LOCAL_TAGS_MAX_BYTES) {
+      await res.body?.cancel();
+      return null;
+    }
+    if (!res.body) return null;
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let bytes = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > VERSE_LOCAL_TAGS_MAX_BYTES) {
+          await reader.cancel();
+          return null;
+        }
+        chunks.push(value);
+      }
+      return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+    } finally {
+      reader.releaseLock();
+    }
   } catch {
     return null;
   }
@@ -681,13 +712,52 @@ async function probeOllamaTags(fetchImpl: typeof fetch, baseUrl: string): Promis
   const body = await fetchJson(fetchImpl, `${baseUrl}/api/tags`);
   if (!isRecord(body) || !Array.isArray(body['models'])) return { reachable: false, tags: [] };
   const tags: string[] = [];
+  const seen = new Set<string>();
   for (const m of body['models']) {
     if (!isRecord(m)) continue;
     const name = typeof m['name'] === 'string' ? m['name'] : typeof m['model'] === 'string' ? m['model'] : null;
-    if (name && !tags.includes(name)) tags.push(name);
-    if (tags.length >= MAX_LOCAL_TAGS) break;
+    if (name && !seen.has(name)) {
+      seen.add(name);
+      tags.push(name);
+    }
   }
   return { reachable: true, tags };
+}
+
+/**
+ * Inspect all names progressively, without holding bootstrap for N × timeout.
+ * A refresh retains every name and reports unsampled/stale rows as pending.
+ * Missing rows lead, then the oldest evidence; slow early models cannot starve
+ * later tags. No probes continue in the background after this request returns.
+ */
+async function probeLocalDetails(fetchImpl: typeof fetch, baseUrl: string, tags: readonly string[], preferred: readonly string[]): Promise<{ details: Array<VerseOllamaModelDetail | null>; inspected: boolean[] }> {
+  let runtimes = localDetailCaches.get(fetchImpl);
+  if (!runtimes) { runtimes = new Map(); localDetailCaches.set(fetchImpl, runtimes); }
+  let cache = runtimes.get(baseUrl);
+  if (!cache) {
+    if (runtimes.size >= 8) runtimes.delete(runtimes.keys().next().value!);
+    cache = new Map(); runtimes.set(baseUrl, cache);
+  }
+  const installed = new Set(tags);
+  for (const name of cache.keys()) if (!installed.has(name)) cache.delete(name);
+  const now = Date.now();
+  const deadline = now + VERSE_LOCAL_DETAIL_BUDGET_MS;
+  const queue = tags.filter((tag) => now - (cache.get(tag)?.at ?? 0) >= LOCAL_DETAIL_CACHE_MS)
+    .sort((a, b) => {
+      const ea = cache.get(a), eb = cache.get(b);
+      if (!ea && !eb) return localSeatPreferenceRank(a, preferred) - localSeatPreferenceRank(b, preferred);
+      return (ea?.at ?? 0) - (eb?.at ?? 0);
+    });
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(VERSE_LOCAL_DETAIL_CONCURRENCY, queue.length) }, async () => {
+    while (next < queue.length && Date.now() < deadline) {
+      const tag = queue[next++]!;
+      const detail = await probeOllamaModelDetail(fetchImpl, baseUrl, tag, Math.max(1, deadline - Date.now()));
+      cache.set(tag, { at: Date.now(), detail });
+    }
+  }));
+  const inspected = tags.map((tag) => Date.now() - (cache.get(tag)?.at ?? 0) < LOCAL_DETAIL_CACHE_MS);
+  return { inspected, details: tags.map((tag, i) => inspected[i] ? cache.get(tag)!.detail : null) };
 }
 
 /**
@@ -911,14 +981,17 @@ async function discoverLocalSeats(
   // One /api/show per installed tag: it carries BOTH the context facts and the
   // tool capability that decides whether this can be a seat. The llama-server
   // slot probe (if any) runs concurrently.
-  const [details, slotWindow] = await Promise.all([
-    Promise.all(probe.tags.map((tag) => probeOllamaModelDetail(fetchImpl, baseUrl, tag, OLLAMA_TIMEOUT_MS))),
+  const [inspection, slotWindow] = await Promise.all([
+    probeLocalDetails(fetchImpl, baseUrl, probe.tags, preferred),
     windows.llamaSlot ?? Promise.resolve(null),
   ]);
-  const selectable: Array<{ tag: string; detail: VerseOllamaModelDetail | null }> = [];
+  const { details, inspected } = inspection;
+  const pending = inspected.filter((done) => !done).length;
+  if (pending > 0) localRuntime.ollama.discovery = { inspected: probe.tags.length - pending, pending };
+  const selectable: Array<{ tag: string; detail: VerseOllamaModelDetail | null; pending: boolean }> = [];
   probe.tags.forEach((tag, i) => {
     const detail = details[i] ?? null;
-    if (localSeatIsSelectable(detail, tag)) selectable.push({ tag, detail });
+    if (!inspected[i] || localSeatIsSelectable(detail, tag)) selectable.push({ tag, detail, pending: !inspected[i] });
   });
 
   // Unpinned tags need what Ollama would ACTUALLY allocate an unpinned request:
@@ -941,7 +1014,7 @@ async function discoverLocalSeats(
 
   const observedAt = new Date().toISOString();
   const needDetail = tagsNeedingDetail(selectable.map(({ tag }) => tag));
-  const built = selectable.map(({ tag, detail }) => {
+  const built = selectable.map(({ tag, detail, pending: inspectionPending }) => {
     const resolved = resolveLocalContextWindow({
       tag,
       lane: dispatch.lane,
@@ -953,7 +1026,10 @@ async function discoverLocalSeats(
     const notes = localWindowNotes(resolved, dispatch.lane, slotWindow !== null);
     const withDetail = needDetail.has(tag);
     const label = localSeatLabel(tag, withDetail);
-    const unavailableReason = localWindowUnusableReason(resolved.window);
+    const unavailableReason = inspectionPending
+      ? 'Capability inspection pending; refresh to continue local model discovery.'
+      : localWindowUnusableReason(resolved.window);
+    if (inspectionPending) notes.push('Installed model; tool capability has not been inspected in this discovery budget.');
     const option = localModelOption(tag, localModelName(tag, withDetail), resolved.window, resolved.source);
     const seat: VerseSeat = {
       id: `local:${tag}`,

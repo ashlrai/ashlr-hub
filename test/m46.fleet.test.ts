@@ -414,6 +414,22 @@ describe('fleet quota ledger', () => {
     }
   });
 
+  it('retains Meta metered-use telemetry and enforces its explicit reservation limit', () => {
+    const cfg = withFoundry({
+      allowedBackends: ['meta-muse'],
+      limits: { 'meta-muse': { window: '1h', max: 2 } },
+    });
+    recordUse('meta-muse');
+    expect(loadFleetQuota().events).toEqual([expect.objectContaining({ backend: 'meta-muse' })]);
+    expect(reserveFleetQuotaUse('meta-muse', cfg, 'meta-first')).toMatchObject({
+      kind: 'reserved', launchAuthorized: true,
+      reservations: [{ backend: 'meta-muse', used: 2, limit: 2 }],
+    });
+    expect(reserveFleetQuotaUse('meta-muse', cfg, 'meta-second')).toMatchObject({
+      kind: 'exhausted', launchAuthorized: false,
+    });
+  });
+
   it('loadFleetQuota returns a fresh empty ledger when missing', () => {
     const q = loadFleetQuota();
     expect(q).toEqual({ events: [] });

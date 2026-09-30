@@ -22,6 +22,39 @@ import { WINDOW_SOURCE_TEXT } from './verse-model.js';
 
 const SEATS = [LOCAL_SEAT, CODEX_SEAT, CLAUDE_SEAT];
 
+describe('SeatSelector — large account and model rosters', () => {
+  const models = Array.from({ length: 40 }, (_, index) => ({
+    ...CLAUDE_SEAT.models[0]!, id: `model-${index}`, label: `Model ${index}`,
+  }));
+  const seats = [{ ...CLAUDE_SEAT, models }, CODEX_SEAT];
+  it('finds models beyond a short roster while preserving the selected account', async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const choice = { seatId: CLAUDE_SEAT.id, model: 'model-0' };
+    render(<SeatSelector seats={seats} value={choice} onChange={onChange} />);
+    await user.type(screen.getByRole('searchbox'), 'claude model-39');
+    expect(screen.getByRole('status')).toHaveTextContent('1 matching choice');
+    expect(screen.getByRole('option', { name: /Model 39/ })).toBeEnabled();
+    expect(screen.queryByRole('option', { name: /Model 20/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('combobox')).toHaveValue(encodeSeatChoice(choice));
+    expect(onChange).not.toHaveBeenCalled();
+    await user.selectOptions(screen.getByRole('combobox'), encodeSeatChoice({ ...choice, model: 'model-39' }));
+    expect(onChange).toHaveBeenCalledWith({ ...choice, model: 'model-39' });
+  });
+
+  it('explains an empty search and restores the full roster when cleared', async () => {
+    const user = userEvent.setup();
+    render(<SeatSelector seats={seats} value={null} onChange={() => {}} />);
+    const search = screen.getByRole('searchbox');
+    await user.type(search, 'missing provider');
+    expect(screen.getByRole('status')).toHaveTextContent('No matching accounts or models');
+    expect(screen.getAllByRole('option')).toHaveLength(1);
+    await user.clear(search);
+    expect(screen.getByRole('option', { name: /Model 39/ })).toBeEnabled();
+    expect(screen.getByRole('option', { name: /Personal Codex/ })).toBeDisabled();
+  });
+});
+
 describe('SeatSelector', () => {
   it('groups seats Claude · Codex · Grok · Local and disables unavailable seats with the reason', () => {
     render(<SeatSelector seats={SEATS} value={{ seatId: 'claude-main', model: 'claude-opus-5' }} onChange={() => {}} />);

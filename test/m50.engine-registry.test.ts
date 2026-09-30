@@ -17,6 +17,8 @@ import {
   resolveEngineRegistry,
   resolveEngineSpec,
 } from '../src/core/run/engine-registry.js';
+import { engineMeteredness, enginePermitted } from '../src/core/policy/local-only.js';
+import { estCostUsd } from '../src/core/run/budget.js';
 
 const GOAL = 'harden the inbox apply path';
 const CWD = '/tmp/ashlr-wt-xyz';
@@ -38,9 +40,30 @@ function makeConfig(over: Partial<AshlrConfig> = {}): AshlrConfig {
   } as AshlrConfig;
 }
 
-const KNOWN_ENGINES: EngineId[] = ['builtin', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'opencode', 'nim', 'kimi', 'openai-compat', 'local-coder', 'grok', 'llama-server' as EngineId, 'grok-cli' as EngineId, 'devin-cli' as EngineId];
+const KNOWN_ENGINES: EngineId[] = ['builtin', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'opencode', 'nim', 'kimi', 'openai-compat', 'local-coder', 'meta-muse', 'grok', 'llama-server' as EngineId, 'grok-cli' as EngineId, 'devin-cli' as EngineId];
 
 describe('M50 registry — coverage', () => {
+  it('offers Meta Muse through the existing API loop without granting implicit frontier authority', () => {
+    const cfg = makeConfig();
+    const spec = resolveEngineSpec('meta-muse' as EngineId, cfg);
+    expect(spec?.kind).toBe('api-model');
+    expect(spec?.tier).toBe('mid');
+    expect(spec?.api).toEqual({
+      envKey: 'MODEL_API_KEY', baseUrlEnv: 'META_MODEL_BASE_URL',
+      defaultBaseUrl: 'https://api.meta.ai/v1', defaultModel: 'muse-spark-1.3', protocol: 'openai',
+    });
+    expect(buildEngineCommand('meta-muse' as EngineId, GOAL, cfg, { cwd: CWD })).toBeNull();
+    expect(engineMeteredness('meta-muse', cfg, {})).toBe('metered');
+    // Unpriced metered engines retain a conservative estimate; never report
+    // zero merely because their exact provider tariff is not in the table.
+    expect(estCostUsd('meta-muse', 1000, 500, 0, 0, 0, cfg)).toBeGreaterThan(0);
+    expect(enginePermitted('meta-muse', cfg, { ASHLR_LOCAL_ONLY: '1' }).permitted).toBe(false);
+    const override = makeConfig({ foundry: {
+      engines: { 'meta-muse': { ...spec!, api: { ...spec!.api!, defaultModel: 'operator-selected-model' } } },
+    } } as Partial<AshlrConfig>);
+    expect(resolveEngineSpec('meta-muse' as EngineId, override)?.api?.defaultModel).toBe('operator-selected-model');
+  });
+
   it('every known EngineId has a builtin registry entry', () => {
     for (const e of KNOWN_ENGINES) {
       expect(BUILTIN_ENGINE_REGISTRY[e], `missing spec for ${e}`).toBeDefined();

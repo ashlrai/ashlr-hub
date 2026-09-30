@@ -29,6 +29,9 @@ import {
   VERSE_CATALOG_PENDING_NOTE,
   VERSE_NATIVE_MODELS,
   VERSE_REPIN_COMMAND,
+  VERSE_LOCAL_DETAIL_CONCURRENCY,
+  VERSE_LOCAL_DETAIL_BUDGET_MS,
+  VERSE_LOCAL_TAGS_MAX_BYTES,
 } from '../src/core/verse/seats.js';
 import { DEFAULT_LOCAL_MODEL_TAG } from '../src/core/run/model-catalog.js';
 import { resetModelWindowCaches } from '../src/core/verse/model-windows.js';
@@ -250,7 +253,7 @@ describe('verse seats — native accounts', () => {
     // newest model the catalog offers, not whichever one was newest when this
     // test was written. Pinning a specific id here is how the Codex list went
     // stale at gpt-5.5 while the catalog had moved on to the GPT-6 family.
-    expect(codex.models[0]?.id).toBe('gpt-6-astra');
+    expect(codex.models[0]?.id).toBe('gpt-6.1-sol');
     expect(codex.models.map((m) => m.id)).not.toContain('gpt-5.5-mini');
     // Hidden catalog slugs are never offered, even from the built-in list.
     expect(codex.models.map((m) => m.id)).not.toContain('gpt-reserve');
@@ -408,6 +411,76 @@ describe('verse seats — local Ollama', () => {
     expect(discovery.localRuntime.ollama.reachable).toBe(false);
     expect(discovery.localRuntime.ollama.models).toEqual([]);
     expect(discovery.seats.filter((s) => s.engine === 'local')).toEqual([]);
+  });
+
+  it('discovers the whole local roster after tag 64 with bounded concurrent probes and deduplication', async () => {
+    const tags = Array.from({ length: 80 }, (_, i) => `qwen-test-${i}:ctx64k`);
+    let active = 0;
+    let peak = 0;
+    const seen: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api/tags')) return new Response(JSON.stringify({ models: [...tags, tags[0]].map((name) => ({ name })) }));
+      if (url.endsWith('/api/show')) {
+        const tag = (JSON.parse(String(init?.body)) as { name: string }).name;
+        seen.push(tag);
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        active--;
+        return new Response(JSON.stringify({ capabilities: ['completion', 'tools'], parameters: 'num_ctx 65536', model_info: {} }));
+      }
+      return new Response('{}', { status: 404 });
+    };
+    const discovery = await discoverSeats(makeConfig(), {
+      accountsRoot: tmpRoot, ollamaBaseUrl: 'http://127.0.0.1:11434', fetchImpl, claudeUsage: zeroUsage,
+    });
+    expect(discovery.localRuntime.ollama.models).toEqual(tags);
+    expect(discovery.seats.map((seat) => seat.id)).toEqual(tags.map((tag) => `local:${tag}`));
+    expect(seen).toHaveLength(tags.length);
+    expect(new Set(seen).size).toBe(tags.length);
+    expect(peak).toBeLessThanOrEqual(VERSE_LOCAL_DETAIL_CONCURRENCY);
+    expect(peak).toBeGreaterThan(1);
+  });
+
+  it('bounds slow detail discovery, keeps pending tags unavailable, and advances on refresh', async () => {
+    const tags = Array.from({ length: 40 }, (_, i) => `qwen-slow-${i}:ctx64k`);
+    const seen: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if (String(input).endsWith('/api/tags')) return new Response(JSON.stringify({ models: tags.map((name) => ({ name })) }));
+      if (String(input).endsWith('/api/show')) {
+        seen.push((JSON.parse(String(init?.body)) as { name: string }).name);
+        await new Promise<void>((_, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('timed out', 'TimeoutError')), { once: true }));
+      }
+      return new Response('{}', { status: 404 });
+    };
+    const options = { accountsRoot: tmpRoot, ollamaBaseUrl: 'http://127.0.0.1:11434', fetchImpl, claudeUsage: zeroUsage };
+    const started = Date.now();
+    const first = await discoverSeats(makeConfig(), options);
+    expect(Date.now() - started).toBeLessThan(VERSE_LOCAL_DETAIL_BUDGET_MS + 1000);
+    expect(first.localRuntime.ollama.models).toEqual(tags);
+    expect(first.localRuntime.ollama.discovery).toEqual({ inspected: 8, pending: 32 });
+    expect(first.seats).toHaveLength(tags.length);
+    expect(first.seats.find((s) => s.id === `local:${tags[39]}`)?.models[0]?.unavailableReason).toMatch(/inspection pending/);
+    const second = await discoverSeats(makeConfig(), options);
+    expect(second.localRuntime.ollama.discovery).toEqual({ inspected: 16, pending: 24 });
+    expect(seen).toEqual(tags.slice(0, 16));
+  }, 10_000);
+
+  it('refuses oversized tag metadata instead of presenting a truncated installed roster', async () => {
+    let shows = 0;
+    const fetchImpl: typeof fetch = async (input) => {
+      if (String(input).endsWith('/api/tags')) return new Response(JSON.stringify({ models: [], padding: 'x'.repeat(VERSE_LOCAL_TAGS_MAX_BYTES) }));
+      shows++;
+      return new Response('{}');
+    };
+    const discovery = await discoverSeats(makeConfig(), {
+      accountsRoot: tmpRoot, ollamaBaseUrl: 'http://127.0.0.1:11434', fetchImpl, claudeUsage: zeroUsage,
+    });
+    expect(discovery.localRuntime.ollama.reachable).toBe(false);
+    expect(discovery.localRuntime.ollama.models).toEqual([]);
+    expect(discovery.seats).toEqual([]);
+    expect(shows).toBe(0);
   });
 
   it('surfaces the preferred local model first, whatever order /api/tags reports', async () => {
@@ -743,7 +816,7 @@ function ollamaFetch(
 ): typeof fetch {
   return (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
-    const reply = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+    const reply = (body: unknown) => new Response(JSON.stringify(body));
     if (url.endsWith('/api/tags')) {
       calls.push('tags');
       return reply({ models: Object.keys(models).map((name) => ({ name })) });

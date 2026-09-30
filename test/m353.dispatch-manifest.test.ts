@@ -101,6 +101,15 @@ function writeRows(file: string, rows: unknown[]): void {
 }
 
 describe('dispatch manifest ledger', () => {
+  it('preserves Meta API assignments and backend counts through durable readback', () => {
+    const snapshot = makeSnapshot([{ backend: 'meta-muse', availability: 'open' }]);
+    const plan = planConcurrentDispatch([makeItem({ id: 'meta-item' })], snapshot, { maxSlotsPerBackend: 1 }, () => 'meta-muse');
+    const event = buildDispatchManifestEvent({ ts: '2026-07-10T00:01:00.000Z', plan, resourceSnapshotAt: snapshot.generatedAt });
+    expect(recordDispatchManifest(event)).toMatchObject({ recorded: true, backends: { 'meta-muse': 1 } });
+    expect(readDispatchManifestEvents({ limit: 10 })[0]).toMatchObject({
+      backendCounts: { 'meta-muse': 1 }, assignments: [expect.objectContaining({ backend: 'meta-muse' })],
+    });
+  });
   it('records a bounded, scrubbed concurrent dispatch plan', () => {
     const secret = 'sk-1234567890abcdef';
     const items = [

@@ -26,7 +26,7 @@ const LEASE_DURATION_MS = 24 * 60 * 60_000;
 const LEASE_TOKEN_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ENGINE_IDS = new Set<EngineId>([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex',
-  'hermes', 'kimi', 'nim', 'opencode', 'grok',
+  'hermes', 'kimi', 'nim', 'opencode', 'meta-muse', 'grok',
 ]);
 
 export interface SimpleConductorDispatchLease {

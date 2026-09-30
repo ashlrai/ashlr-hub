@@ -215,6 +215,58 @@ describe('NewAgentScreen start', () => {
     expect(screen.getByRole('textbox', { name: 'What should the agent do?' })).toHaveValue('Do the thing');
   });
 
+  it('keeps a failed first prompt and retries the already-created chat', async () => {
+    let sends = 0;
+    const stub = routes(bootstrap(), {
+      'POST /api/verse/sessions/s-claude-1/turns': () => ++sends === 1
+        ? json({ error: 'The provider is temporarily unavailable.' }, 503) : { ok: true },
+    });
+    const { context } = mount();
+    await typePrompt('Keep this task until it starts');
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
+    expect(await screen.findByText(/Try again to send it in the same chat/)).toBeInTheDocument();
+    expect(context.navigate).not.toHaveBeenCalled();
+    expect(screen.getByRole('textbox', { name: 'What should the agent do?' })).toHaveValue('Keep this task until it starts');
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
+    await waitFor(() => expect(context.navigate).toHaveBeenCalledWith({ screen: 'agent', id: 's-claude-1', pane: 'transcript' }));
+    expect(stub.posts().filter((p) => p.url === '/api/verse/sessions')).toHaveLength(1);
+    expect(stub.posts().filter((p) => p.url.endsWith('/turns'))).toHaveLength(2);
+  });
+
+  it('retries only the failed first turn after a multi-seat start, reusing its chat', async () => {
+    let sends = 0;
+    const stub = routes(bootstrap(), {
+      'POST /api/verse/sessions/s-grok-2/turns': () => ++sends === 1
+        ? json({ error: 'Grok did not answer.' }, 503) : { ok: true },
+    });
+    const { context } = mount();
+    await typePrompt('Audit the router');
+    fireEvent.click(screen.getByRole('switch', { name: /Spawn on several seats/ }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Seats' })).getByRole('button', { name: 'Grok' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start 2 agents' }));
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Start 2 agents' }));
+    expect(await screen.findByText(/Started 1 of 2 agents/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
+    await waitFor(() => expect(context.navigate).toHaveBeenCalledWith({ screen: 'agent', id: 's-grok-2', pane: 'transcript' }));
+    expect(stub.posts().filter((p) => p.url === '/api/verse/sessions')).toHaveLength(2);
+    expect(stub.posts().filter((p) => p.url === '/api/verse/sessions/s-claude-1/turns')).toHaveLength(1);
+    expect(stub.posts().filter((p) => p.url === '/api/verse/sessions/s-grok-2/turns')).toHaveLength(2);
+  });
+
+  it('opens a different chat when the retry changes model', async () => {
+    const stub = routes(bootstrap(), {
+      'POST /api/verse/sessions/s-claude-1/turns': () => json({ error: 'Try another model.' }, 503),
+    });
+    const { context } = mount();
+    await typePrompt('Audit the router');
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
+    await screen.findByText(/Try again to send it in the same chat/);
+    fireEvent.change(screen.getByRole('combobox', { name: 'Model' }), { target: { value: 'claude-m2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
+    await waitFor(() => expect(context.navigate).toHaveBeenCalledWith({ screen: 'agent', id: 's-claude-2', pane: 'transcript' }));
+    expect(stub.posts().filter((p) => p.url === '/api/verse/sessions').map((p) => p.body?.['model'])).toEqual(['claude-m1', 'claude-m2']);
+  });
+
   it('asks for the token first when actions are locked', async () => {
     clearMutationToken();
     const stub = routes();

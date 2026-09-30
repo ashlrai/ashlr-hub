@@ -156,6 +156,27 @@ export interface WikiRepoView {
   githubUrl: string | null;
 }
 
+/** Local dependency map; listings are extracted, import resolution is inferred. */
+export interface WikiGraphNode {
+  id: string;
+  sourceFiles: number;
+  testFiles: number;
+  bytes: number;
+  files: Array<WikiCitation & { lines: number }>;
+  exports: Array<{ name: string; kind: string; cite: WikiCitation }>;
+}
+
+export interface WikiGraphView {
+  repoKey: string;
+  repoName: string;
+  /** Listed git tree; source contents are read from current working files. */
+  commit: string | null;
+  generatedAt: string;
+  nodes: WikiGraphNode[];
+  edges: Array<{ from: string; to: string; imports: number; confidence: 'inferred' }>;
+  coverage: { listedFiles: number; readFiles: number; unreadFiles: number; omittedModuleFiles: number; listingTruncated: boolean; listingIncomplete?: boolean };
+}
+
 /** GET /api/verse/wiki/repo/<key>/page/<id> */
 export interface WikiPageView {
   meta: Pick<WikiPageMeta, 'id' | 'title' | 'kind' | 'purpose' | 'parent' | 'commit' | 'generatedAt' | 'model' | 'citations' | 'droppedCitations'>;

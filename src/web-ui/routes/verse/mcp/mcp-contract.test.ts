@@ -86,6 +86,15 @@ describe('projectMcpSnapshot', () => {
     });
   });
 
+  it('keeps closed setup issues while refusing unknown strings from the wire', () => {
+    const snapshot = projectMcpSnapshot({ ...body, scope: { ...body.scope,
+      reason: 'mcp-scope-not-ready',
+      setupIssues: ['phantom_unavailable', 'authority_anchor_unavailable', 'SECRET-CANARY', '__proto__'],
+    } });
+    expect(snapshot?.scope?.setupIssues).toEqual(['phantom_unavailable', 'authority_anchor_unavailable']);
+    expect(JSON.stringify(snapshot)).not.toContain('SECRET-CANARY');
+  });
+
   it('degrades to null on a body of the wrong shape', () => {
     expect(projectMcpSnapshot(null)).toBeNull();
     expect(projectMcpSnapshot({ seats: 'nope' })).toBeNull();

@@ -20,6 +20,19 @@ function input(patch: Partial<ResourceAssignmentInput> = {}): ResourceAssignment
 const reason = (value: ResourceAssignmentInput) => planResourceAssignment(value).exclusions[0]?.reasons ?? [];
 
 describe('strict independent resource pool policy schema', () => {
+  it('admits every enrolled worker beyond the former roster cap while retaining identity and execution limits', () => {
+    const workers = Array.from({ length: 96 }, (_, index) => worker(`worker-${index}`));
+    const observations = workers.map(row => observation(row.id));
+    const definition = pool(workers);
+    const request = input({ pool: definition, observations, allowedWorkerIds: workers.map(row => row.id) });
+    expect(planResourceAssignment(request).candidates).toHaveLength(96);
+    expect(planResourceAssignment({ ...request, quotaScopeExcludedWorkerIds: workers.map(row => row.id) }).exclusions).toHaveLength(96);
+    expect(() => validateResourcePool(pool([...workers, workers[0]!]))).toThrow();
+    expect(() => validateResourceObservations([...observations, observations[0]!], definition)).toThrow();
+    expect(() => planResourceAssignment({ ...request, allowedWorkerIds: [...request.allowedWorkerIds, workers[0]!.id] })).toThrow();
+    expect(() => validateResourcePool(pool([worker('invalid', { maxConcurrent: 17 })]))).toThrow();
+  });
+
   it('returns detached deeply immutable configuration and observations', () => {
     const definition = pool(); const source = [observation()];
     const result = validateResourcePool(definition); const observed = validateResourceObservations(source, result);
@@ -29,7 +42,7 @@ describe('strict independent resource pool policy schema', () => {
     expect(Object.isFrozen(result.workers[0])).toBe(true); expect(Object.isFrozen(observed[0]!.windows)).toBe(true);
   });
 
-  it('accepts all supported provider types, fractional percentages and maximum configured bounds', () => {
+  it('accepts all supported provider types, fractional percentages and explicit execution bounds', () => {
     const definition = pool(Array.from({ length: 32 }, (_, index) => worker(`w-${index}`, {
       provider: (['codex', 'claude', 'local'] as const)[index % 3]!, maxConcurrent: 16, reservePercent: 98.5,
       maxTasksPerWindow: 10_000, taskWindowMs: 604_800_000, priority: 100, allowUnknownQuota: false,
@@ -39,7 +52,7 @@ describe('strict independent resource pool policy schema', () => {
 
   it.each([
     { schemaVersion: 2 }, { id: '' }, { id: '../outside' }, { id: 'UPPER' }, { id: 'x'.repeat(65) },
-    { workers: [] }, { workers: new Array(1) }, { workers: Array.from({ length: 33 }, (_, index) => worker(`w-${index}`)) },
+    { workers: [] }, { workers: new Array(1) }, { workers: new Array(1_000_000_000) },
     { workers: [worker(), worker()] }, { credential: 'not-part-of-policy' },
   ])('rejects malformed pool fields %#', (patch) => {
     expect(() => validateResourcePool({ ...pool(), ...patch })).toThrow('Invalid resource pool');

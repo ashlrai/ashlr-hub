@@ -1069,7 +1069,7 @@ ashlr wiki ask "where are standing grants verified?"</pre>
             <li class="yes"><span class="m">&check;</span><span>Custody support: Secure Enclave key, Touch ID</span></li>
             <li class="yes"><span class="m">&check;</span><span>Local models via llama.cpp</span></li>
             <li class="yes"><span class="m">&check;</span><span>Sandboxing with <code>sandbox-exec</code></span></li>
-            <li class="yes"><span class="m">&check;</span><span>Desktop app can be built and locally signed from source; no notarized public installer</span></li>
+            <li class="yes"><span class="m">&check;</span><span>Apple silicon desktop DMG, locally signed; no Apple notarization</span></li>
             <li class="yes"><span class="m">&check;</span><span>Resident autonomy under a Touch ID grant you start yourself</span></li>
             <li class="yes"><span class="m">&check;</span><span>Devin key in the Keychain</span></li>
           </ul>
@@ -1115,14 +1115,15 @@ ashlr wiki ask "where are standing grants verified?"</pre>
         <div class="steps">
           <div class="step"><span class="n"></span><div>
             <h3>Install and open the console</h3>
-            <p>Same CLI command on all three platforms. On an Apple silicon Mac, you can also download the <a href="https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.1">Verse 3.16.1 desktop DMG</a>. It is locally signed, not Apple Developer ID notarized, so macOS may require Open Anyway on first launch.</p>
+            <p>Same CLI command on all three platforms. On an Apple silicon Mac, you can also download the <a href="https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.0">Verse 3.17.0 desktop DMG</a>. It is locally signed, not Apple Developer ID notarized, so macOS may require Open Anyway on first launch.</p>
+            <p>New in 3.17: a local codebase module map with cited files, portable efficiency-plugin connections, and phone session and retry fixes.</p>
             <pre id="install-command">npm i -g @ashlr/hub
 ashlr verse</pre>
             <button class="copy-command" type="button" data-copy="install-command">Copy commands</button><span class="copy-status" role="status" aria-live="polite"></span>
           </div></div>
           <div class="step"><span class="n"></span><div>
-            <h3>Sign in your seats</h3>
-            <p>Prepare a private profile per account, then sign in with the vendor's own login. Verse never sees the credential.</p>
+            <h3>Connect your accounts and local models</h3>
+            <p>Prepare a private profile per account, then sign in with the vendor's own login. Search your account and model choices in the workbench. There is no fixed roster count cap; quotas and available hardware govern how much runs at once.</p>
             <pre>ashlr resources profile prepare --provider claude \
   --directory ~/.ashlr/native-profiles/claude-a \
   --executable /path/to/claude</pre>

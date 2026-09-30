@@ -1,13 +1,14 @@
 # Ashlr Desktop
 
-A source-only Tauri v2 desktop app that wraps **Ashlr Verse** (the operator
-console at `/verse/`, see `../docs/VERSE.md`) in a native macOS window. It is
-not a public or commissioned desktop product, and it does not activate the
-dormant daemon.
+A Tauri v2 desktop app that wraps **Ashlr Verse** (the operator console at
+`/verse/`, see `../docs/VERSE.md`) in a native macOS window. Opening it starts
+the console; resident autonomy requires its separate local setup and grant.
 
-Public desktop releases and installers: none. The desktop release workflow is
-externally disabled during the Linux quarantine, and any future workflow output
-is draft-only. The Linux CLI and web dashboard remain supported.
+The public [v3.16.1 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.16.1/Ashlr_3.16.1_aarch64_locally-signed.dmg)
+is locally signed, not Apple Developer ID notarized. macOS may require **Open
+Anyway** on first launch. The desktop CI workflow remains disabled during the
+Linux quarantine; its retained draft-only policy is separate from this local
+macOS release. The Linux CLI and web dashboard remain supported.
 Installed size: ~110 MB (Rust WebView runtime + the bundled Bun `ashlr` sidecar
 ~90 MB + web assets).
 
@@ -15,14 +16,13 @@ Installed size: ~110 MB (Rust WebView runtime + the bundled Bun `ashlr` sidecar
 
 ## Install
 
-There is no public desktop installer today. Use the supported
-[npm/CLI quickstart](../docs/QUICKSTART.md). The formats below describe only
-future draft artifacts after the quarantine exit review; they are not downloads
-or an installation channel.
+Download the [macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.16.1/Ashlr_3.16.1_aarch64_locally-signed.dmg)
+or use the [npm/CLI quickstart](../docs/QUICKSTART.md) on macOS, Linux and Windows.
+Other desktop formats remain subject to the draft artifact policy below.
 
-| Platform | Draft artifact policy |
+| Platform | Availability |
 |----------|-----------------------|
-| macOS | `.dmg` draft only |
+| macOS arm64 | Locally signed v3.16.1 `.dmg` linked above |
 | Windows | `.msi` / `.exe` draft only |
 | Linux | Not produced while quarantined |
 

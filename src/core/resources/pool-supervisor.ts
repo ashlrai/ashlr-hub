@@ -271,7 +271,7 @@ export function decodeResourceConsoleState(value: unknown, options: {
         typeof row.id !== 'string' || !ID.test(row.id) || ids.has(row.id) ||
         typeof row.state !== 'string' || !STATES.includes(row.state) || !iso(row.enqueuedAt) || !iso(row.updatedAt) ||
         row.updatedAt < row.enqueuedAt || !Array.isArray(row.allowedWorkerIds) || row.allowedWorkerIds.length < 1 ||
-        row.allowedWorkerIds.length > 32 || row.allowedWorkerIds.some((id) => typeof id !== 'string' || !workerIds.has(id)) ||
+        row.allowedWorkerIds.length > workerIds.size || row.allowedWorkerIds.some((id) => typeof id !== 'string' || !workerIds.has(id)) ||
         new Set(row.allowedWorkerIds).size !== row.allowedWorkerIds.length ||
         !['read-only', 'workspace-write'].includes(String(row.mode)) ||
         !(row.workerId === null || typeof row.workerId === 'string' && row.allowedWorkerIds.includes(row.workerId)) ||

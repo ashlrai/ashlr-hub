@@ -46,7 +46,7 @@
  * chosen seat in visible text, because WebKit's native menus never show an
  * option's title.
  */
-import { useId } from 'react';
+import { useId, useState } from 'react';
 import type { VerseModelOption, VerseSeat } from '../../data/api-types.js';
 import type { VerseContextMode } from '../../../core/verse/types.js';
 import type { SeatHealthReport } from '../../../core/verse/health-types.js';
@@ -246,12 +246,30 @@ export function SeatSelector({
 }: SeatSelectorProps) {
   const generated = useId();
   const selectId = id ?? generated;
+  const [search, setSearch] = useState('');
+  const searchable = !compact && seats.reduce((count, seat) => count + seat.models.length, 0) > 12;
+  const terms = searchable ? search.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean) : [];
+  const matches = (seat: VerseSeat, model: VerseModelOption) => {
+    const text = `${seat.label} ${seat.id} ${ENGINE_LABEL[seat.engine]} ${model.label} ${model.id} ${model.group ?? ''}`.toLocaleLowerCase();
+    return terms.every((term) => text.includes(term));
+  };
+  const matchCount = seats.reduce((count, seat) => count + seat.models.filter((model) => matches(seat, model)).length, 0);
   const groups = groupSeats(seats);
   const current = value ? encodeSeatChoice(value) : '';
   const known = value && seats.some((s) => s.id === value.seatId && s.models.some((m) => m.id === value.model));
   return (
-    <label className={`${styles.seatField} ${compact ? styles.seatFieldCompact : ''}`} htmlFor={selectId}>
-      <span className={compact ? 'visually-hidden' : styles.fieldLabel}>{label}</span>
+    <div className={`${styles.seatField} ${compact ? styles.seatFieldCompact : ''}`}>
+      <label className={compact ? 'visually-hidden' : styles.fieldLabel} htmlFor={selectId}>{label}</label>
+      {searchable ? (
+        <>
+          <input type="search" className={styles.seatSelect} aria-label={`Search ${label.toLocaleLowerCase()}`}
+            placeholder="Find an account or model…" value={search} disabled={disabled}
+            onChange={(event) => setSearch(event.target.value)} />
+          {terms.length > 0 ? <span className={styles.seatSearchStatus} role="status">
+            {matchCount === 0 ? 'No matching accounts or models. Try another search.' : `${matchCount} matching ${matchCount === 1 ? 'choice' : 'choices'}.`}
+          </span> : null}
+        </>
+      ) : null}
       <select id={selectId} className={styles.seatSelect} value={known ? current : ''} disabled={disabled || groups.length === 0}
         aria-label={compact ? label : undefined}
         onChange={(event) => {
@@ -276,7 +294,13 @@ export function SeatSelector({
                 : `${capacity.plan === null ? '' : `${capacity.plan} · `}${capacity.word} · ${capacity.summary}`;
             seatNotes.set(seat.id, { seatReason, capacityNote });
           }
-          return seatOptionGroups(ENGINE_LABEL[group.engine], group.seats).map((optgroup) => (
+          return seatOptionGroups(ENGINE_LABEL[group.engine], group.seats).map((optgroup) => ({
+            ...optgroup,
+            // Keep the current selection even when the filter does not match;
+            // searching must never silently switch the account that will run.
+            rows: optgroup.rows.filter(({ seat, model }) => matches(seat, model) ||
+              (value?.seatId === seat.id && value.model === model.id)),
+          })).filter((optgroup) => optgroup.rows.length > 0).map((optgroup) => (
             <optgroup key={`${group.engine}:${optgroup.key}`} label={optgroup.label}>
               {optgroup.rows.map(({ seat, model }) => {
                 const { seatReason, capacityNote } = seatNotes.get(seat.id)!;
@@ -299,6 +323,6 @@ export function SeatSelector({
           ));
         })}
       </select>
-    </label>
+    </div>
   );
 }

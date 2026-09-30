@@ -7,6 +7,7 @@ import { probeClaudeAccountUsage } from './claude-account-usage.js';
 import { probeGrokAccount } from './grok-account-probe.js';
 import type { ResourceAccountConnection, ResourceConnectionsSnapshot } from './connection-types.js';
 import type { NativeMetadataCoordinator } from './metadata-coordinator.js';
+import { RESOURCE_POOL_MANIFEST_MAX_BYTES } from './pool-policy.js';
 
 export interface ResourceConnectionConfig {
   schemaVersion: 1;
@@ -29,12 +30,17 @@ function text(value: unknown, bytes: number): value is string {
     [...value].every((character) => { const code = character.charCodeAt(0); return code >= 32 && (code < 127 || code > 159); });
 }
 function array(value: unknown, max: number): value is unknown[] {
-  return Array.isArray(value) && value.length > 0 && value.length <= max && Reflect.ownKeys(value).length === value.length + 1 &&
-    Array.from({ length: value.length }, (_, index) => Object.getOwnPropertyDescriptor(value, index)).every((item) => item && 'value' in item);
+  if (!Array.isArray(value) || value.length < 1 || value.length > max) return false;
+  const keys = Reflect.ownKeys(value);
+  return keys.length === value.length + 1 && keys.every(key => key === 'length' ||
+    typeof key === 'string' && /^(?:0|[1-9][0-9]*)$/.test(key) && Number(key) < value.length &&
+    'value' in Object.getOwnPropertyDescriptor(value, key)!);
 }
+
+/** Account count follows explicit enrollment; collection keeps its two-client bound and reader byte limits. */
 export function validateResourceConnectionConfig(value: unknown): ResourceConnectionConfig {
   if (!record(value) || !exact(value, ['schemaVersion', 'intervalMs', 'accounts']) || value.schemaVersion !== 1 ||
-    !Number.isSafeInteger(value.intervalMs) || Number(value.intervalMs) < 30_000 || Number(value.intervalMs) > 3_600_000 || !array(value.accounts, 8)) {
+    !Number.isSafeInteger(value.intervalMs) || Number(value.intervalMs) < 30_000 || Number(value.intervalMs) > 3_600_000 || !array(value.accounts, Math.floor(RESOURCE_POOL_MANIFEST_MAX_BYTES / 2))) {
     throw new Error('Invalid native connection configuration');
   }
   const ids = new Set<string>();

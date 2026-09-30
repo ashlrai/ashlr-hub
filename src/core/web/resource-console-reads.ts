@@ -27,13 +27,18 @@ function exact(value: Record<string, unknown>, required: string[], optional: str
     [...required, ...optional].includes(key) && 'value' in Object.getOwnPropertyDescriptor(value, key)!);
 }
 function denseArray(value: unknown, maximum: number): value is unknown[] {
-  return Array.isArray(value) && !types.isProxy(value) && Object.getPrototypeOf(value) === Array.prototype &&
-    value.length <= maximum && Reflect.ownKeys(value).length === value.length + 1 &&
-    Array.from({ length: value.length }, (_, index) => index).every((index) => Object.hasOwn(value, index) &&
-      'value' in Object.getOwnPropertyDescriptor(value, index)!);
+  if (!Array.isArray(value) || types.isProxy(value) || Object.getPrototypeOf(value) !== Array.prototype ||
+    value.length > maximum) return false;
+  const keys = Reflect.ownKeys(value);
+  // Check named descriptors instead of allocating indices from untrusted
+  // length. Two bytes is the smallest JSON entry plus its separator.
+  return keys.length === value.length + 1 && keys.every(key => key === 'length' ||
+    typeof key === 'string' && /^(?:0|[1-9][0-9]*)$/.test(key) && Number(key) < value.length &&
+    'value' in Object.getOwnPropertyDescriptor(value, key)!);
 }
+
 function workerIds(value: unknown, known: string[]): value is string[] {
-  return denseArray(value, 32) && value.every((id) => typeof id === 'string' && ID.test(id) && known.includes(id)) &&
+  return denseArray(value, known.length) && value.every((id) => typeof id === 'string' && ID.test(id) && known.includes(id)) &&
     new Set(value).size === value.length;
 }
 
@@ -41,7 +46,7 @@ function workerIds(value: unknown, known: string[]): value is string[] {
 function boundedPlainData(value: unknown): boolean {
   let nodes = 0; let bytes = 0;
   function visit(item: unknown, depth: number): boolean {
-    if (++nodes > 2_048 || depth > 5 || bytes > MAX_MANAGED_BYTES) return false;
+    if (++nodes > MAX_MANAGED_BYTES || depth > 5 || bytes > MAX_MANAGED_BYTES) return false;
     if (item === null || typeof item === 'boolean') { bytes += 5; return true; }
     if (typeof item === 'number') { bytes += 32; return Number.isFinite(item); }
     if (typeof item === 'string') {
@@ -49,7 +54,7 @@ function boundedPlainData(value: unknown): boolean {
       bytes += Buffer.byteLength(item) + 2; return bytes <= MAX_MANAGED_BYTES;
     }
     if (Array.isArray(item)) {
-      if (!denseArray(item, 32)) return false;
+      if (!denseArray(item, Math.floor(MAX_MANAGED_BYTES / 2))) return false;
       bytes += item.length + 2; return item.every((entry) => visit(entry, depth + 1));
     }
     if (!plain(item)) return false;

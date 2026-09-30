@@ -298,7 +298,7 @@ describe('codex catalog', () => {
     expect(readCodexCatalog(path.join(tmp, 'codex-a', 'native-state'))).toBeNull();
     const options = codexModelOptions(null);
     expect(options.map((m) => m.id)).toEqual([
-      'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5',
+      'gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5',
     ]);
     expect(options.map((m) => m.id)).not.toContain('gpt-reserve');
     for (const m of options) {
@@ -343,6 +343,27 @@ describe('codex catalog', () => {
     fs.symlinkSync(path.join(real, 'models_cache.json'), path.join(linked, 'models_cache.json'));
     expect(readCodexCatalog(linked)).toBeNull();
     expect(readCodexCatalog('')).toBeNull();
+  });
+
+  it('retains models after row 256, including GPT-6.1 Sol, and keeps account catalogs authoritative', () => {
+    const state = path.join(tmp, 'large-codex');
+    const rows = Array.from({ length: 300 }, (_, i) => codexRow(`gpt-test-${i}`));
+    writeCodexCatalog(state, [
+      ...rows,
+      codexRow('gpt-6.1-sol', { display_name: 'GPT-6.1-Sol', priority: 1 }),
+      codexRow('gpt-6.1-sol', { display_name: 'Duplicate' }),
+      codexRow('--unsafe'),
+    ]);
+    const options = codexModelOptions(readCodexCatalog(state));
+    expect(options).toHaveLength(301);
+    expect(options[0]).toMatchObject({
+      id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol', contextWindow: 258_400,
+      autoCompactAt: 244_800, windowSource: 'provider-catalog',
+      expansive: { contextWindow: 828_400, autoCompactAt: 784_800, providerWindow: 872_000 },
+    });
+    const other = path.join(tmp, 'other-account');
+    writeCodexCatalog(other, [codexRow('gpt-6-sol')]);
+    expect(codexModelOptions(readCodexCatalog(other)).map((m) => m.id)).toEqual(['gpt-6-sol']);
   });
 
   it('caches by path + mtime + size and re-reads when the CLI refreshes the file', () => {
@@ -397,6 +418,21 @@ function writeGrokCatalog(dir: string, models: Record<string, unknown>): void {
 }
 
 describe('grok catalog', () => {
+  it('retains valid models after entry 256 without exposing credential slots', () => {
+    const state = path.join(tmp, 'large-grok');
+    const models = Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`grok-test-${i}`, grokEntry(`grok-test-${i}`, {})]));
+    writeGrokCatalog(state, {
+      ...models,
+      'grok-late': grokEntry('grok-late', { name: 'Late model' }),
+      'duplicate-late': grokEntry('grok-late', {}),
+      'unsafe': grokEntry('--unsafe', {}),
+    });
+    const options = grokModelOptions(readGrokCatalog(state));
+    expect(options).toHaveLength(301);
+    expect(options.at(-1)).toMatchObject({ id: 'grok-late', label: 'Late model', windowSource: 'provider-catalog' });
+    expect(JSON.stringify(options)).not.toContain(GROK_SECRET);
+    expect(JSON.stringify(options)).not.toContain('XAI_API_KEY');
+  });
   it('reads ONLY .info: windows, labels and compaction percent, never the credential slots', () => {
     const state = path.join(tmp, 'grok-a', 'native-state');
     writeGrokCatalog(state, {

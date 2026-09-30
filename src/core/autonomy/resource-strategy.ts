@@ -161,7 +161,7 @@ export interface ResourceStrategyDaemonPlan {
 
 const DEFAULT_MAX_OUTCOMES = 8;
 const DEFAULT_MAX_CHECKS = 8;
-const CLOUD_BACKENDS = new Set<string>(['claude', 'codex', 'nim', 'kimi', 'ashlrcode', 'opencode', 'hermes']);
+const CLOUD_BACKENDS = new Set<string>(['claude', 'codex', 'nim', 'kimi', 'ashlrcode', 'opencode', 'hermes', 'meta-muse']);
 const LOCAL_BACKENDS = new Set<string>(['builtin', 'local-coder', 'ollama']);
 const HARD_STOP_AVAILABILITY = new Set<BackendAvailability>(['exhausted', 'throttled', 'unreachable']);
 const RISK_ORDER: Record<'low' | 'medium' | 'high', number> = { low: 0, medium: 1, high: 2 };

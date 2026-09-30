@@ -101,6 +101,7 @@ const WIRE_SCOPE_KEYS = {
   tenantRef: 'tenantRef',
   principalRef: 'principalRef',
   reason: 'reason',
+  setupIssues: 'setupIssues',
 } as const satisfies Record<string, keyof VerseMcpScope>;
 
 // ---------------------------------------------------------------------------
@@ -135,6 +136,7 @@ export interface McpScope {
   tenantRef: string | null;
   principalRef: string | null;
   reason: string;
+  setupIssues?: string[];
 }
 
 export interface McpSnapshot {
@@ -253,6 +255,9 @@ function narrowScope(raw: unknown): McpScope | null {
     tenantRef: text(row[WIRE_SCOPE_KEYS.tenantRef]),
     principalRef: text(row[WIRE_SCOPE_KEYS.principalRef]),
     reason: text(row[WIRE_SCOPE_KEYS.reason]) ?? 'unknown',
+    ...(Array.isArray(row[WIRE_SCOPE_KEYS.setupIssues]) ? {
+      setupIssues: strings(row[WIRE_SCOPE_KEYS.setupIssues]).filter((code) => Object.hasOwn(SCOPE_SETUP_COPY, code)),
+    } : {}),
   };
 }
 
@@ -359,7 +364,16 @@ export const SCOPE_REASON_COPY: Record<string, string> = {
   'mcp-scope-seal-unverified':
     'Locus reports a pin whose seal did not verify. Fix the pin before writing anything.',
   'mcp-scope-expired': 'The Locus pin has expired.',
-  'mcp-scope-pinned': 'Writes are attributed to the pinned Locus tenant shown here.',
+  'mcp-scope-frozen': 'The Locus pin is frozen. Scope attribution is unavailable until it is restored.',
+  'mcp-scope-not-ready': 'Locus reports this identity is not ready. Scope attribution could not be verified.',
+  'mcp-scope-readiness-unverified': 'Locus did not verify the pin’s seal and expiry. Scope attribution is unverified.',
+  'mcp-scope-pinned': 'Locus verified the current pin for the tenant shown here.',
+};
+
+export const SCOPE_SETUP_COPY: Record<string, string> = {
+  phantom_unavailable: 'Phantom is not available to Locus. Install Phantom or restore its executable on PATH, then run locus doctor.',
+  authority_anchor_unavailable: 'The Locus authority anchor is unavailable. Run locus doctor on your Mac and restore the intended pin manually.',
+  credential_migration_incomplete: 'Credential migration is incomplete. Run locus doctor on your Mac to review reconciliation.',
 };
 
 /** Prose for a code, or the caller's own sentence. NEVER the raw code alone. */

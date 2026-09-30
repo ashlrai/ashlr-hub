@@ -41,7 +41,7 @@ const IDENTITY_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 const SECRET_NAME_RE = /^[A-Z][A-Z0-9_]{1,79}$/;
 const ENGINE_IDS: ReadonlySet<string> = new Set([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
-  'kimi', 'nim', 'opencode', 'grok',
+  'kimi', 'nim', 'opencode', 'meta-muse', 'grok',
 ]);
 
 const REGISTRY_DIGEST_DOMAIN = 'ashlr.execution-identity.registry.v1';

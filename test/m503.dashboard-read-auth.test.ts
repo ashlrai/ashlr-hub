@@ -186,7 +186,7 @@ describe('loopback dashboard read authority', () => {
 
   it('default-denies proprietary and unknown API GETs for missing or wrong authority', async () => {
     const handle = await server();
-    for (const path of ['/api/config/effective', '/api/snapshot', '/api/new-content']) {
+    for (const path of ['/api/config/effective', '/api/snapshot', '/api/new-content', '/api/verse/wiki/repo/test-0123456789ab/graph']) {
       const missing = await request(handle, 'GET', path);
       const wrong = await request(handle, 'GET', path, { 'x-ashlr-token': 'wrong' });
       for (const response of [missing, wrong]) {

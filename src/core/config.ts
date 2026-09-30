@@ -505,7 +505,7 @@ const EXECUTION_IDENTITY_REF_RE = /^eid_[0-9a-f]{32}$/;
 const EXECUTION_LOCATOR_REF_RE = /^erl_[0-9a-f]{32}$/;
 const EXECUTION_IDENTITY_ENGINES = new Set([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
-  'kimi', 'nim', 'opencode', 'grok',
+  'kimi', 'nim', 'opencode', 'meta-muse', 'grok',
 ]);
 
 /**

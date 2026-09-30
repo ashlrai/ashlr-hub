@@ -14,7 +14,7 @@
  * prompt, leaves only the failed seats selected (so Start again retries just
  * those) and says which failed and why.
  */
-import { useId, useMemo, useState } from 'react';
+import { useId, useMemo, useRef, useState } from 'react';
 import type { VerseSeat } from '../../../../data/api-types.js';
 import { readFailureReason } from '../../../../data/client.js';
 import { useQuery, useRefetch } from '../../../../data/hooks.js';
@@ -51,12 +51,16 @@ function projectLabel(path: string, projects: readonly { path: string; name: str
   return projects.find((p) => p.path === path)?.name ?? path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 }
 
-async function startOne(projectPath: string, target: SpawnTarget, prompt: string): Promise<SpawnResult> {
-  let sessionId: string | null = null;
+async function startOne(projectPath: string, target: SpawnTarget, prompt: string, existingId: string | null, remember: (id: string) => void): Promise<SpawnResult> {
+  let sessionId = existingId;
   try {
-    const session = await createVerseSession({ projectPath, seatId: target.seatId, model: target.model });
-    sessionId = session.id;
-    await sendVerseTurn(session.id, prompt);
+    if (!sessionId) {
+      const session = await createVerseSession({ projectPath, seatId: target.seatId, model: target.model });
+      sessionId = session.id;
+      // Keep an opened chat even if sending fails, so Retry cannot create a duplicate.
+      remember(sessionId);
+    }
+    await sendVerseTurn(sessionId, prompt);
     return { target, sessionId, error: null };
   } catch (err) {
     return { target, sessionId, error: describeActionError(err) };
@@ -86,6 +90,7 @@ export function NewAgentScreen() {
   const [modelChoice, setModelChoice] = useState<string | null>(null);
   const [prompt, setPrompt] = useState('');
   const [interim, setInterim] = useState('');
+  const openedChats = useRef(new Map<string, string>());
 
   const repoFilterId = useId();
   const modelId = useId();
@@ -137,7 +142,13 @@ export function NewAgentScreen() {
       confirmLabel: many ? `Start ${targets.length} agents` : 'Start agent',
       confirm: many,
       run: async () => {
-        results = await Promise.all(targets.map((t) => startOne(projectPath, t, text)));
+        results = await Promise.all(targets.map(async (t) => {
+          const key = JSON.stringify([projectPath, t.seatId, t.model]);
+          const result = await startOne(projectPath, t, text, openedChats.current.get(key) ?? null,
+            (id) => openedChats.current.set(key, id));
+          if (!result.error) openedChats.current.delete(key);
+          return result;
+        }));
         const failed = results.filter((r) => r.error !== null);
         // Nothing started at all: a failure, so the sheet (or toast) says why and nothing moves.
         if (failed.length === results.length && results.every((r) => r.sessionId === null)) {
@@ -148,8 +159,11 @@ export function NewAgentScreen() {
         const failed = results.filter((r) => r.error !== null);
         if (results.length === 1) {
           const only = results[0]!;
-          // The chat exists; its first turn did not send. Open it so the prompt can be sent from there.
-          if (only.error) showMobileToast(`The chat opened but the prompt did not send: ${only.error}`, 'danger');
+          // Stay with the words; the next Start retries this chat rather than opening another.
+          if (only.error) {
+            showMobileToast(`The chat opened but the prompt did not send: ${only.error} Try again to send it in the same chat.`, 'danger');
+            return;
+          }
           if (only.sessionId) navigate({ screen: 'agent', id: only.sessionId, pane: 'transcript' });
           return;
         }

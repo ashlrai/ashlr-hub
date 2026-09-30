@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { mergeResourceObservations, readResourceJson, resourcePoolStatus, runResourceTask, validateUnavailableResourceWorkerIds,
-  type ResourceTask } from '../src/core/resources/pool-runtime.js';
+  setResourceWorkerAccess, type ResourceTask } from '../src/core/resources/pool-runtime.js';
+import { projectResourceConsoleEvidence, serializeResourceConsoleEvidence, validateResourceConsoleResponse } from '../src/core/web/resource-console-public.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
 import { validateResourceObservations, type ResourceObservation, type ResourcePool, type ResourceWorker } from '../src/core/resources/pool-policy.js';
 import { mergeClaudeResourceObservation } from '../src/core/resources/provider-observations.js';
@@ -91,6 +92,22 @@ async function quotaFixture(provider: 'codex' | 'claude' = 'codex', allowUnknown
 }
 
 describe.skipIf(process.platform === 'win32')('durable resource task runtime acceptance', () => {
+  it('executes and round-trips a large enrolled fleet with worker access intact', async () => {
+    const f = await fixture({ workers: Array.from({ length: 65 }, (_, index) => worker(`local-${index}`)) });
+    const result = await f.run('large-fleet');
+    expect(result.receipt?.status).toBe('completed'); expect(f.requests).toHaveLength(1);
+    const paused = f.pool.workers.slice(0, 48).map(row => row.id);
+    expect(setResourceWorkerAccess(f.root, f.pool, f.bindings, paused, 0).pausedWorkerIds).toEqual([...paused].sort());
+    const status = f.status();
+    expect(status.workerAccess.pausedWorkerIds).toHaveLength(48);
+    expect(status.plan.candidates).toHaveLength(17); expect(status.plan.exclusions).toHaveLength(48);
+    const evidence = projectResourceConsoleEvidence(f.pool, f.bindings, status);
+    const decoded = validateResourceConsoleResponse(serializeResourceConsoleEvidence(evidence, f.pool, f.bindings), f.pool, f.bindings);
+    expect(decoded.pool.workers).toHaveLength(65); expect(decoded.groups).toHaveLength(65);
+    expect(decoded.performance.workers).toHaveLength(65);
+    expect(() => validateUnavailableResourceWorkerIds([...paused, paused[0]!], f.pool)).toThrow();
+  });
+
   it.each([null, 'local-a', ['missing'], ['local-a', 'local-a'], Array(1), Array(33).fill('local-a')])(
     'rejects malformed admission constraints before store initialization or worker contact: %#', async (value) => {
       const f = await fixture();

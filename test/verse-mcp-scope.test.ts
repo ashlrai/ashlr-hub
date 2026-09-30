@@ -103,7 +103,36 @@ describe('projectVerseMcpScope', () => {
     const scope = projectVerseMcpScope(probe({ pinned: true, tenant: 't' }));
     expect(scope.sealOk).toBeNull();
     expect(scope.frozen).toBeNull();
-    expect(scope.reason).toBe('mcp-scope-pinned');
+    expect(scope.reason).toBe('mcp-scope-readiness-unverified');
+  });
+
+  it('does not describe frozen or unsafe identity as a verified current pin', () => {
+    const frozen = probe({ pinned: true, seal_ok: true, expired: false, frozen: true });
+    expect(projectVerseMcpScope(frozen).reason).toBe('mcp-scope-frozen');
+    const unsafe = probe({ pinned: true, seal_ok: true, expired: false, frozen: false });
+    unsafe.report!.status = 'unsafe';
+    unsafe.report!.ready = false;
+    unsafe.gateOk = false;
+    expect(projectVerseMcpScope(unsafe).reason).toBe('mcp-scope-not-ready');
+  });
+
+  it('publishes only closed setup codes from the doctor, never raw findings or locators', () => {
+    const source = probe({ pinned: true, seal_ok: true, expired: true });
+    source.report!.doctor = {
+      phantom_on_path: false,
+      runtime: { authority_anchor_ok: false, issues: ['authority_anchor_unavailable', 'SECRET-CANARY'] },
+      findings: [
+        { code: 'credential_migration_incomplete', detail: '/private/home SECRET-CANARY phm:SECRET' },
+        { code: 'SECRET-CANARY' },
+      ],
+      issues: ['SECRET-CANARY'],
+    };
+    const scope = projectVerseMcpScope(source);
+    expect(scope.reason).toBe('mcp-scope-expired');
+    expect(scope.setupIssues).toEqual(['phantom_unavailable', 'authority_anchor_unavailable', 'credential_migration_incomplete']);
+    expect(JSON.stringify(scope)).not.toContain('SECRET-CANARY');
+    expect(JSON.stringify(scope)).not.toContain('/private/home');
+    expect(JSON.stringify(scope)).not.toContain('phm:SECRET');
   });
 
   it('survives a throwing probe', () => {

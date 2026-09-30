@@ -51,6 +51,21 @@ function managedScope(): ResourceConsoleReadScope {
     scope.bindings[0]!,
   ], managedWorkerIds: ['codex-a', 'codex-b'] };
 }
+it('accepts a complete managed roster beyond old row and traversal caps, and refuses sparse huge arrays', () => {
+  const selected = managedScope(); const template = selected.pool.workers[0]!;
+  selected.pool.workers = Array.from({ length: 160 }, (_, index) => ({ ...template, id: `codex-${index}` }));
+  selected.bindings = selected.pool.workers.map(worker => ({ workerId: worker.id, capacityKey: worker.id,
+    kind: 'native-cli', command: ['/fixture/native'] }));
+  selected.managedWorkerIds = selected.pool.workers.map(worker => worker.id);
+  const validated = validateResourceConsoleReadScope(selected);
+  const observations = selected.pool.workers.map(worker => reading(worker.id));
+  const payload = { observations, unavailableWorkerIds: selected.managedWorkerIds };
+  expect(normalizeResourceConsoleRead('snapshot', payload, validated)?.observations).toHaveLength(160);
+  expect(() => normalizeResourceConsoleRead('snapshot', { ...payload, observations: new Array(1_000_000_000) }, validated)).toThrow();
+  expect(() => normalizeResourceConsoleRead('snapshot', { ...payload, unavailableWorkerIds: new Array(1_000_000_000) }, validated)).toThrow();
+  expect(() => normalizeResourceConsoleRead('snapshot', { ...payload, observations: [...observations, observations[0]!] }, validated)).toThrow();
+});
+
 function reading(workerId = 'codex-a', patch: Partial<ResourceObservation> = {}): ResourceObservation {
   return { workerId, observedAt: new Date(NOW).toISOString(), updatedAt: new Date(NOW).toISOString(),
     expiresAt: new Date(NOW + 60_000).toISOString(), health: 'ready', retryAfter: null,

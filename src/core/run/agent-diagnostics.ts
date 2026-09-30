@@ -90,6 +90,7 @@ const ENGINE_IDS = new Set<EngineId>([
   'kimi',
   'nim',
   'opencode',
+  'meta-muse',
   'grok',
 ]);
 

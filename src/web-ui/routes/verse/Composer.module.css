@@ -71,6 +71,7 @@
 .seatSelect:hover:not(:disabled) { border-color: var(--border-strong); }
 .seatSelect:disabled { opacity: 0.6; cursor: not-allowed; }
 .seatFieldCompact .seatSelect { min-height: var(--control-h-sm); font-size: var(--text-xs-size); border-color: transparent; background: transparent; }
+.seatSearchStatus { font-size: var(--text-xs-size); color: var(--text-secondary); }
 
 /* ---- seat chip, pickers, queue, attachments ---------------------------- */
 /* 3.10: the read-only seat pill and its menu became composer/SeatChip.tsx;
