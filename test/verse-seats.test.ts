@@ -9,7 +9,7 @@
  * The launcher `command` is the account's identity: every assertion here
  * that JSON-serializes seats also proves the command never appears.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -446,25 +446,39 @@ describe('verse seats — local Ollama', () => {
   it('bounds slow detail discovery, keeps pending tags unavailable, and advances on refresh', async () => {
     const tags = Array.from({ length: 40 }, (_, i) => `qwen-slow-${i}:ctx64k`);
     const seen: string[] = [];
+    const wallNow = Date.now.bind(Date);
+    let discoveryNow = wallNow();
+    const discoveryClock = vi.spyOn(Date, 'now').mockImplementation(() => discoveryNow);
     const fetchImpl: typeof fetch = async (input, init) => {
       if (String(input).endsWith('/api/tags')) return new Response(JSON.stringify({ models: tags.map((name) => ({ name })) }));
       if (String(input).endsWith('/api/show')) {
         seen.push((JSON.parse(String(init?.body)) as { name: string }).name);
-        await new Promise<void>((_, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('timed out', 'TimeoutError')), { once: true }));
+        const deadline = discoveryNow + VERSE_LOCAL_DETAIL_BUDGET_MS;
+        await new Promise<void>((_, reject) => init?.signal?.addEventListener('abort', () => {
+          // Native timers can fire just before Date.now reaches the deadline.
+          // Keep the real two-second wait, but make deadline observation exact
+          // so this fixture inspects one concurrent wave per refresh.
+          discoveryNow = Math.max(discoveryNow, deadline);
+          reject(new DOMException('timed out', 'TimeoutError'));
+        }, { once: true }));
       }
       return new Response('{}', { status: 404 });
     };
     const options = { accountsRoot: tmpRoot, ollamaBaseUrl: 'http://127.0.0.1:11434', fetchImpl, claudeUsage: zeroUsage };
-    const started = Date.now();
-    const first = await discoverSeats(makeConfig(), options);
-    expect(Date.now() - started).toBeLessThan(VERSE_LOCAL_DETAIL_BUDGET_MS + 1000);
-    expect(first.localRuntime.ollama.models).toEqual(tags);
-    expect(first.localRuntime.ollama.discovery).toEqual({ inspected: 8, pending: 32 });
-    expect(first.seats).toHaveLength(tags.length);
-    expect(first.seats.find((s) => s.id === `local:${tags[39]}`)?.models[0]?.unavailableReason).toMatch(/inspection pending/);
-    const second = await discoverSeats(makeConfig(), options);
-    expect(second.localRuntime.ollama.discovery).toEqual({ inspected: 16, pending: 24 });
-    expect(seen).toEqual(tags.slice(0, 16));
+    const started = wallNow();
+    try {
+      const first = await discoverSeats(makeConfig(), options);
+      expect(wallNow() - started).toBeLessThan(VERSE_LOCAL_DETAIL_BUDGET_MS + 1000);
+      expect(first.localRuntime.ollama.models).toEqual(tags);
+      expect(first.localRuntime.ollama.discovery).toEqual({ inspected: 8, pending: 32 });
+      expect(first.seats).toHaveLength(tags.length);
+      expect(first.seats.find((s) => s.id === `local:${tags[39]}`)?.models[0]?.unavailableReason).toMatch(/inspection pending/);
+      const second = await discoverSeats(makeConfig(), options);
+      expect(second.localRuntime.ollama.discovery).toEqual({ inspected: 16, pending: 24 });
+      expect(seen).toEqual(tags.slice(0, 16));
+    } finally {
+      discoveryClock.mockRestore();
+    }
   }, 10_000);
 
   it('refuses oversized tag metadata instead of presenting a truncated installed roster', async () => {

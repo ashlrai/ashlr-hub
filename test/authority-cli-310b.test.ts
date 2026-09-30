@@ -34,6 +34,7 @@ vi.mock('../src/core/fleet/host-merge.js', () => ({
 
 import {
   buildFleetRuleset,
+  buildFleetRulesetUpdate,
   buildGithubAppManifest,
   manifestFormPage,
   renderTrustRootsWithKey,
@@ -249,7 +250,7 @@ describe('protect — rulesets', () => {
       const path = args[1]!;
       if (path.startsWith('repos/ashlrai/binshield/commits/main/check-runs')) return { status: 0, stdout: JSON.stringify({ total_count: checks.length, check_runs: checks }), stderr: '' };
       if (path === 'repos/ashlrai/binshield/rulesets') return { status: 0, stdout: JSON.stringify(existing ? [{ id: 9, name: 'ashlr-fleet: default branch' }] : []), stderr: '' };
-      if (path === 'repos/ashlrai/binshield/rulesets/9') return { status: 0, stdout: JSON.stringify(existing), stderr: '' };
+      if (path === 'repos/ashlrai/binshield/rulesets/9') return { status: 0, stdout: JSON.stringify({ id: 9, ...existing }), stderr: '' };
       if (Object.hasOwn(extra, path)) return { status: 0, stdout: JSON.stringify(extra[path]), stderr: '' };
       if (path.startsWith('repos/ashlrai/binshield/contents/.github/workflows/ci.yml?ref=')) return { status: 0, stdout: JSON.stringify(workflowContent()), stderr: '' };
       const match = /^repos\/ashlrai\/binshield\/actions\/runs\/(\d+)$/.exec(path);
@@ -279,6 +280,123 @@ describe('protect — rulesets', () => {
     expect(await runAuthorityCli(['protect', '--print', '--repo', 'ashlrai/binshield'], h.deps)).toBe(0);
     expect(requiredContexts(h)).toEqual([{ context: 'Dependabot', integration_id: 42 }, { context: 'missing-today', integration_id: 77 }, { context: 'test', integration_id: 15368 }]);
     expect(h.calls.some(call => call.args[1] === 'repos/ashlrai/binshield/actions/runs/102')).toBe(false);
+  });
+
+  it('preserves complete existing options, stronger PR gates, future rules/check fields and exact App pins when adding a requirement', async () => {
+    const existing = buildFleetRuleset([{ context: 'kept', integrationId: 77 }]) as { rules: Array<{ type: string; parameters?: Record<string, unknown> }> } & Record<string, unknown>;
+    const pr = existing.rules.find(rule => rule.type === 'pull_request')!.parameters!;
+    Object.assign(pr, { required_approving_review_count: 2, require_last_push_approval: true, required_review_thread_resolution: true,
+      allowed_merge_methods: ['merge', 'squash', 'rebase'], dismissal_restriction: { enabled: false, allowed_actors: [] },
+      require_extra_approval_for_unattributed_changes: true, required_reviewers: [], future_policy: { nested: ['retain', { enabled: true }] } });
+    const status = existing.rules.find(rule => rule.type === 'required_status_checks')!.parameters!;
+    Object.assign(status, { do_not_enforce_on_create: false, future_status_policy: { enforce: true } });
+    status.required_status_checks = [{ context: 'kept', integration_id: 77, future_check_option: 'retain' },
+      { context: 'unpinned' }, { context: 'null-pin', integration_id: null }];
+    existing.rules.push({ type: 'future_protection', parameters: { enabled: true } });
+    const before = JSON.parse(JSON.stringify(existing));
+    const h = harness({ gh: provenanceGh([checkRun('new-ci')], { 101: workflowRun() }, existing) });
+    expect(await runAuthorityCli(['protect', '--apply', '--yes', '--repo', 'ashlrai/binshield'], h.deps)).toBe(0);
+    const writes = h.calls.filter(call => call.args.includes('--method'));
+    expect(writes).toHaveLength(1);
+    const payload = JSON.parse(writes[0]!.input!);
+    const expected = JSON.parse(JSON.stringify(before));
+    expected.rules.find((rule: { type: string }) => rule.type === 'required_status_checks').parameters.required_status_checks.push({ context: 'new-ci', integration_id: 15368 });
+    expect(payload).toEqual(expected);
+    expect(existing).toEqual(before);
+    expect(payload.rules.find((rule: { type: string }) => rule.type === 'required_status_checks').parameters.required_status_checks).toEqual([
+      { context: 'kept', integration_id: 77, future_check_option: 'retain' }, { context: 'unpinned' },
+      { context: 'null-pin', integration_id: null }, { context: 'new-ci', integration_id: 15368 },
+    ]);
+  });
+
+  it('keeps new rulesets canonical and appends a first status rule without resetting existing policy', () => {
+    const checks = [{ context: 'ashlr/verify', integrationId: 123 }];
+    expect(buildFleetRulesetUpdate(checks)).toEqual(buildFleetRuleset(checks));
+    const existing = buildFleetRuleset([]);
+    const result = buildFleetRulesetUpdate(checks, { ...existing, id: 9, source: 'ashlrai/binshield', _links: {} });
+    expect(result).toEqual(buildFleetRuleset(checks));
+    expect(existing).toEqual(buildFleetRuleset([]));
+  });
+
+  it.each(['enforcement', 'bypass', 'conditions', 'code-owner', 'stale-review', 'strict-checks', 'create-bypass', 'duplicate-rules', 'conflicting-pins', 'unknown-root-option'])(
+    'holds incompatible %s policy for review instead of rewriting it', async mismatch => {
+      const existing = buildFleetRuleset([{ context: 'kept', integrationId: 77 }]) as { rules: Array<{ type: string; parameters?: Record<string, unknown> }> } & Record<string, unknown>;
+      if (mismatch === 'unknown-root-option') existing.future_top_level_option = { enabled: true };
+      if (mismatch === 'enforcement') existing.enforcement = 'evaluate';
+      if (mismatch === 'bypass') existing.bypass_actors = [{ actor_id: 99, actor_type: 'Integration', bypass_mode: 'always' }];
+      if (mismatch === 'conditions') existing.conditions = { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: ['refs/heads/main'] } };
+      const pr = existing.rules.find(rule => rule.type === 'pull_request')!.parameters!;
+      const status = existing.rules.find(rule => rule.type === 'required_status_checks')!.parameters!;
+      if (mismatch === 'code-owner') pr.require_code_owner_review = false;
+      if (mismatch === 'stale-review') pr.dismiss_stale_reviews_on_push = false;
+      if (mismatch === 'strict-checks') status.strict_required_status_checks_policy = false;
+      if (mismatch === 'create-bypass') status.do_not_enforce_on_create = true;
+      if (mismatch === 'duplicate-rules') existing.rules.push(existing.rules[0]!);
+      if (mismatch === 'conflicting-pins') status.required_status_checks = [{ context: 'kept', integration_id: 77 }, { context: 'kept', integration_id: 88 }];
+      const h = harness({ gh: provenanceGh([checkRun('new-ci')], { 101: workflowRun() }, existing) });
+      expect(await runAuthorityCli(['protect', '--apply', '--yes', '--repo', 'ashlrai/binshield'], h.deps)).toBe(1);
+      expect(h.out.join('\n')).toContain('RECHECK_REQUIRED');
+      expect(h.calls.every(call => !call.args.includes('--method'))).toBe(true);
+    },
+  );
+
+  it('refuses any requested change to an existing App pin', () => {
+    const existing = buildFleetRuleset([{ context: 'ashlr/verify', integrationId: 77 }]);
+    expect(() => buildFleetRulesetUpdate([{ context: 'ashlr/verify', integrationId: 88 }], existing)).toThrow(/App pin would change/);
+  });
+
+  it.each(['changed', 'unreadable', 'unknown-root-option'] as const)(
+    'holds all actionable plans when a later existing policy is %s on the batch freshness read', async state => {
+      const old = buildFleetRuleset([{ context: 'kept', integrationId: 77 }]);
+      const OTHER = 'ashlrai/locus';
+      const base = provenanceGh([checkRun('new-ci')], { 101: workflowRun() }, old);
+      let laterReads = 0;
+      const h = harness({ gh: args => {
+        const path = args[1]!;
+        if (!path.startsWith(`repos/${OTHER}`)) return base(args);
+        if (path === `repos/${OTHER}/rulesets`) return { status: 0, stdout: JSON.stringify([{ id: 10, name: 'ashlr-fleet: default branch' }]), stderr: '' };
+        if (path === `repos/${OTHER}/rulesets/10`) {
+          laterReads += 1;
+          if (laterReads > 1 && state === 'unreadable') return { status: 1, stdout: '', stderr: 'offline' };
+          const value = { id: 10, ...old };
+          if (laterReads > 1) {
+            if (state === 'changed') Object.assign((value.rules as { type: string; parameters?: Record<string, unknown> }[]).find(rule => rule.type === 'pull_request')!.parameters!, { required_approving_review_count: 2 });
+            else if (state === 'unknown-root-option') Object.assign(value, { future_root_policy: true });
+          }
+          return { status: 0, stdout: JSON.stringify(value), stderr: '' };
+        }
+        if (path.includes('/commits/main/check-runs')) return { status: 0, stdout: JSON.stringify({ total_count: 0, check_runs: [] }), stderr: '' };
+        return { status: 0, stdout: JSON.stringify({ default_branch: 'main', private: false }), stderr: '' };
+      } });
+      expect(await runAuthorityCli(['protect', '--apply', '--yes', '--repo', 'ashlrai/binshield', '--repo', OTHER], h.deps)).toBe(1);
+      expect(laterReads).toBe(2);
+      expect(h.err.join('\n')).toContain('RECHECK_REQUIRED');
+      expect(h.calls.every(call => !call.args.includes('--method'))).toBe(true);
+    },
+  );
+
+  it('checks an existing policy again immediately before PUT and refuses a changed identity', async () => {
+    const old = buildFleetRuleset([{ context: 'kept', integrationId: 77 }]);
+    const base = provenanceGh([checkRun('new-ci')], { 101: workflowRun() }, old);
+    let reads = 0;
+    const h = harness({ gh: args => {
+      if (args[1] === 'repos/ashlrai/binshield/rulesets/9' && ++reads === 3) return { status: 0, stdout: JSON.stringify({ id: 99, ...old }), stderr: '' };
+      return base(args);
+    } });
+    expect(await runAuthorityCli(['protect', '--apply', '--yes', '--repo', 'ashlrai/binshield'], h.deps)).toBe(1);
+    expect(reads).toBe(3);
+    expect(h.err.join('\n')).toContain('RECHECK_REQUIRED');
+    expect(h.calls.every(call => !call.args.includes('--method'))).toBe(true);
+  });
+
+  it('holds a duplicate fleet ruleset identity instead of selecting and overwriting one', async () => {
+    const base = provenanceGh([], {});
+    const h = harness({ gh: args => args[1] === 'repos/ashlrai/binshield/rulesets'
+      ? { status: 0, stdout: JSON.stringify([{ id: 9, name: 'ashlr-fleet: default branch' }, { id: 10, name: 'ashlr-fleet: default branch' }]), stderr: '' }
+      : base(args) });
+    expect(await runAuthorityCli(['protect', '--apply', '--yes', '--repo', 'ashlrai/binshield'], h.deps)).toBe(1);
+    expect(h.out.join('\n')).toContain('RECHECK_REQUIRED');
+    expect(h.calls.every(call => !call.args.includes('--method'))).toBe(true);
   });
 
   it.each(['missing', 'foreign-repo', 'foreign-host', 'wrong-sha', 'metadata-repo', 'unreadable', 'unknown-app'] as const)(
@@ -354,7 +472,7 @@ describe('protect — rulesets', () => {
     const broken = harness({ gh: provenanceGh([checkRun('test')], { 101: workflowRun() },
       { rules: [{ type: 'required_status_checks', parameters: {} }] }) });
     await runAuthorityCli(['protect', '--apply', '--yes', '--repo', 'ashlrai/binshield'], broken.deps);
-    expect(broken.out.join('\n')).toContain('unreadable existing required checks');
+    expect(broken.out.join('\n')).toContain('RECHECK_REQUIRED');
     expect(broken.calls.every(call => !call.args.includes('--method'))).toBe(true);
   });
 

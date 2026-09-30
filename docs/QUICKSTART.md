@@ -8,24 +8,26 @@ starting a resident fleet and publishing its work are distinct steps.
 
 ### CLI on macOS, Linux or Windows
 
-Install Node.js 22.15+ and Git, then run:
+Install Node.js 22.15+ and Git, then install Verse 3.17.1 from its versioned
+GitHub release:
 
 ```sh
-npm install -g @ashlr/hub
-ashlr --version
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.1/ashlr-hub-3.17.1.tgz
+ashlr --version   # should print 3.17.1
 ashlr verse
 ```
 
 Verse opens at `http://127.0.0.1:7777/verse/` and binds to loopback. The CLI
 prints a read token for the browser and asks for a separate mutation token
-before your first chat or other change. Keep both tokens private. Check the
-[public npm version](https://www.npmjs.com/package/@ashlr/hub) if your installed
-command behaves differently from this guide.
+before your first chat or other change. Keep both tokens private. Confirm
+`ashlr --version` reports `3.17.1`; the
+[GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.1) provides
+the exact installer used here. The unversioned npm package may be an older release.
 
 ### Desktop app on Apple silicon Mac
 
-Download the [v3.16.1 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.16.1/Ashlr_3.16.1_aarch64_locally-signed.dmg)
-from the [published release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.1).
+Download the [v3.17.1 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.1/Ashlr_3.17.1_aarch64_locally-signed.dmg)
+from the [published release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.1).
 It includes the CLI and the same console. This DMG is locally signed, not
 Apple Developer ID notarized; macOS may require **Open Anyway** on first launch.
 For a source build and local signing, follow [Releasing locally](RELEASING-LOCALLY.md).

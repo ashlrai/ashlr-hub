@@ -513,20 +513,63 @@ describe('setup is rerun-safe: rulesets', () => {
     expect(h.out.join('\n')).toMatch(/… rulesets: RECHECK_REQUIRED/);
   });
 
-  it('a drifted ruleset (an extra bypass actor) is re-applied — to that repo only, with a PUT', async () => {
+  it('holds an incompatible existing bypass policy instead of overwriting it, even with --yes', async () => {
     const drifted = asGitHubReturns(buildFleetRuleset(CANARY_CHECKS));
     drifted['bypass_actors'] = [...(drifted['bypass_actors'] as unknown[]), { actor_id: 99, actor_type: 'Integration', bypass_mode: 'always' }];
-    const h = readyHarness({ confirm: (q) => /ruleset/.test(q), run: fakeGitHub({ ruleset: drifted }) });
+    const h = readyHarness({ confirm: true, run: fakeGitHub({ ruleset: drifted }) });
     const plan = await dryRunReport(h);
-    expect(plan.steps.find((s) => s.id === 'rulesets')).toMatchObject({ status: 'skipped', detail: expect.stringMatching(/^1 repo\(s\) need the fleet ruleset \(ashlrai\/fleet-canary\)/) });
+    expect(plan.steps.find(s => s.id === 'rulesets')).toMatchObject({ status: 'waiting-on-you', detail: expect.stringContaining('RECHECK_REQUIRED') });
     expect(writes(h.calls)).toEqual([]);
     h.out.length = 0;
-    expect(await runAuthorityCli(['setup'], h.deps)).toBe(0);
-    const put = writes(h.calls);
-    expect(put).toHaveLength(1);
-    expect(put[0]!.args).toEqual(['api', '--method', 'PUT', `repos/${CANARY}/rulesets/7`, '--input', '-']);
-    expect(h.out.join('\n')).toMatch(/^✓ rulesets: applied to ashlrai\/fleet-canary$/m);
+    expect(await runAuthorityCli(['setup', '--yes'], h.deps)).toBe(0);
+    expect(writes(h.calls)).toEqual([]);
+    expect(h.out.join('\n')).toMatch(/… rulesets: RECHECK_REQUIRED/);
   });
+
+  it.each(['incompatible-policy', 'unconfirmed-check', 'remote-drift', 'remote-unreadable'] as const)(
+    'holds the whole setup when an actionable stale repo precedes a %s repo, even with --yes', async held => {
+      const { canonicalJson } = await import('../src/core/authority/canonical-json.js');
+      const { ensureAuthorityDir } = await import('../src/core/authority/ledger.js');
+      const { installedGrantPath } = await import('../src/core/authority/standing-grant.js');
+      const { editGrant, makeGrant, signGrant } = await import('./helpers/authority-310b.js');
+      const OTHER = 'ashlrai/binshield';
+      const grant = editGrant(makeGrant(), g => {
+        g.repos = [
+          { nameWithOwner: CANARY, stage: 'merge', enforcement: 'server', maxRisk: 'medium', maxMergesPerDay: 6 },
+          { nameWithOwner: OTHER, stage: 'merge', enforcement: 'server', maxRisk: 'medium', maxMergesPerDay: 6 },
+        ];
+        g.rollout.stages = g.rollout.stages.map(stage => ({ ...stage, repos: stage.repos.filter(r => r.nameWithOwner === CANARY || r.nameWithOwner === OTHER) }));
+      });
+      ensureAuthorityDir();
+      writeFileSync(installedGrantPath(), `${canonicalJson(signGrant(grant))}\n`, { mode: 0o600 });
+      const stale = fakeGitHub({ ruleset: asGitHubReturns(buildFleetRuleset([])) });
+      const incompatible = asGitHubReturns(buildFleetRuleset(CANARY_CHECKS));
+      incompatible.bypass_actors = [{ actor_id: 99, actor_type: 'Integration', bypass_mode: 'always' }];
+      const heldRepo = fakeGitHub({ ruleset: held === 'incompatible-policy' ? incompatible : asGitHubReturns(buildFleetRuleset(CANARY_CHECKS)), unknownCheck: held === 'unconfirmed-check' });
+      let laterReads = 0;
+      const run = (bin: string, args: readonly string[]): GhResult => {
+        if (args[1] === `repos/${OTHER}/rulesets/7` && ++laterReads > 2) {
+          if (held === 'remote-unreadable') return no('offline');
+          if (held === 'remote-drift') {
+            const changed = asGitHubReturns(buildFleetRuleset(CANARY_CHECKS));
+            (changed.rules as { type: string; parameters?: Record<string, unknown> }[]).find(rule => rule.type === 'pull_request')!.parameters!.require_last_push_approval = true;
+            return ok(JSON.stringify(changed));
+          }
+        }
+        if (args[1]?.startsWith(`repos/${OTHER}`)) return heldRepo(bin, [args[0]!, args[1]!.replace(`repos/${OTHER}`, `repos/${CANARY}`), ...args.slice(2)]);
+        return stale(bin, args);
+      };
+      const h = readyHarness({ confirm: true, run });
+      const step = (await dryRunReport(h)).steps.find(step => step.id === 'rulesets');
+      if (held.startsWith('remote-')) expect(step?.status).toBe('skipped');
+      else expect(step).toMatchObject({ status: 'waiting-on-you', detail: expect.stringContaining('RECHECK_REQUIRED') });
+      expect(await runAuthorityCli(['setup', '--yes'], h.deps)).toBe(held.startsWith('remote-') ? 1 : 0);
+      expect(h.calls.some(call => call.args[1] === `repos/${CANARY}/commits/main/check-runs?per_page=100`)).toBe(true);
+      expect(h.calls.some(call => call.args[1] === `repos/${OTHER}/rulesets/7`)).toBe(true);
+      expect(writes(h.calls)).toEqual([]);
+      if (held.startsWith('remote-')) expect(h.err.join('\n')).toContain('RECHECK_REQUIRED');
+    },
+  );
 
   it('a private repo on GitHub Free is a plan limit, not "could not read"; a grant that says server for it waits on a re-approval (3.14)', async () => {
     const { canonicalJson } = await import('../src/core/authority/canonical-json.js');
