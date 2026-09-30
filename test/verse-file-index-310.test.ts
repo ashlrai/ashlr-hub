@@ -42,7 +42,7 @@ beforeAll(() => {
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
   rmSync(big, { recursive: true, force: true });
-});
+}, 60_000); // Removing the same 12k fixture files needs the construction hook's loaded-machine budget.
 
 describe('walkFiles (non-git roots)', () => {
   it('lists files breadth-first, skipping dot-dirs, node_modules and symlinks', async () => {
