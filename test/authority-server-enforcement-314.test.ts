@@ -94,7 +94,9 @@ function fakeGithub(repos: Record<string, 'enforced' | 'bare' | 'plan' | 'denied
           : { enabled: false, required_status_checks: { enforcement_level: 'off', contexts: ['ignored'], checks: [] } } });
       }
       if (path === `repos/${name}/rulesets`) return kind === 'plan' ? no(PLAN_403) : ok([]);
-      if (path.startsWith(`repos/${name}/commits/main/check-runs`)) return ok({ check_runs: [{ name: 'ci', app: { id: 15368 } }] });
+      if (path.startsWith(`repos/${name}/commits/main/check-runs`)) return ok({ total_count: 1, check_runs: [{ name: 'ci', app: { id: 15368 }, head_sha: 'a'.repeat(40), details_url: `https://github.com/${name}/actions/runs/101/job/1` }] });
+      if (path.startsWith(`repos/${name}/contents/.github/workflows/ci.yml?ref=`)) return ok({ type: 'file', path: '.github/workflows/ci.yml', encoding: 'base64', content: Buffer.from('on: [pull_request, push]\n').toString('base64'), size: Buffer.byteLength('on: [pull_request, push]\n'), sha: 'c'.repeat(40) });
+      if (path === `repos/${name}/actions/runs/101`) return ok({ id: 101, event: 'pull_request', path: '.github/workflows/ci.yml', head_sha: 'a'.repeat(40), repository: { full_name: name } });
     }
     return no(`gh: Not Found (HTTP 404) ${path}`);
   };

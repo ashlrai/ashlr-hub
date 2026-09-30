@@ -68,7 +68,8 @@
     "marked",
     "reflect-metadata",
     "tar",
-    "web-push"
+    "web-push",
+    "yaml"
   ],
   "exports": {
     ".": {
@@ -159,8 +160,7 @@
     "typescript": "^5.5.0",
     "typescript-eslint": "^8.61.0",
     "vite": "8.2.2",
-    "vitest": "4.1.11",
-    "yaml": "^2.8.1"
+    "vitest": "4.1.11"
   },
   "overrides": {
     "fast-uri": "3.1.8",
@@ -179,7 +179,8 @@
     "marked": "18.0.10",
     "reflect-metadata": "0.2.2",
     "tar": "7.5.22",
-    "web-push": "3.6.7"
+    "web-push": "3.6.7",
+    "yaml": "^2.8.1"
   },
   "bundleDependencies": [
     "@modelcontextprotocol/sdk",
@@ -188,6 +189,7 @@
     "jose",
     "marked",
     "tar",
-    "web-push"
+    "web-push",
+    "yaml"
   ]
 }
