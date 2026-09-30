@@ -1748,3 +1748,17 @@ efficiency plugin through temporary per-run configuration. Discovery uses the
 same bounded desktop login PATH as Apps. Missing tooling is skipped; Hub does
 not invoke its own `ashlr mcp` server as a substitute. The plugin remains
 restricted from autonomous runs under the existing authority policy.
+
+For an explicitly enabled Meta API engine, supply `MODEL_API_KEY` through your
+credential manager, add `meta-muse` to `foundry.allowedBackends`, then use a
+bounded sandbox run:
+
+```sh
+ashlr run "Describe the scoped change" --engine meta-muse --sandbox-engine --allow-cloud --budget 10000 --max-steps 8
+```
+
+Model readiness uses the normalized `/v1/models` endpoint. A configured key or
+registry entry alone does not prove entitlement or successful inference.
+Phone retries distinguish a confirmed server refusal from a missing or failed
+response: uncertain delivery pauses Start and offers chat inspection, keeping
+the prompt instead of blindly dispatching it again.

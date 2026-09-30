@@ -37,6 +37,8 @@ export const LLAMA_SERVER_PROVIDER_ID = 'llama-server';
 function ensurePath(base: string, suffix: string): string {
   const stripped = base.replace(/\/+$/, '');
   if (stripped.endsWith(suffix)) return stripped;
+  // OpenAI-compatible callers may already supply the versioned API base.
+  if (suffix === '/v1/models' && stripped.endsWith('/v1')) return stripped + '/models';
   return stripped + suffix;
 }
 
@@ -355,7 +357,7 @@ export async function probeApiModelEngine(
     return { engineId, keyPresent: true, reachable: true, models: [] };
   }
 
-  const probeUrl = baseUrl.endsWith('/v1/models') ? baseUrl : `${baseUrl}/v1/models`;
+  const probeUrl = ensurePath(baseUrl, '/v1/models');
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 2000);

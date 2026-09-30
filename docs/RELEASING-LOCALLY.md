@@ -1,9 +1,10 @@
-# Releasing without CI
+# Releasing locally
 
-GitHub Actions is disabled on this repository, deliberately, because the minutes
-cost more than they are worth here. Everything CI would have checked is checked
-locally instead. This is the procedure, and the traps that make it look like it
-failed when it did not.
+The complete local prepublish suite is required before publishing a tarball.
+Hosted pull-request CI and dependency checks also run; inspect their exact-SHA
+results before merging. The separate automated desktop-release workflow remains
+disabled during the Linux quarantine. This procedure builds, installs and
+publishes a locally signed macOS release without relying on that workflow.
 
 ## The one-time change that made this possible
 
@@ -16,8 +17,8 @@ off, every publish failed:
 That setting is now removed. It is a real tradeoff, stated plainly: published
 packages no longer carry a signed attestation tying them to a commit. Consumers
 cannot cryptographically verify the tarball was built from this source. Nothing
-else replaces that. The alternative was paying for Actions, which was the call
-this project made against.
+else replaces that. This is a limitation of the current manual publication path even when hosted
+pull-request checks pass.
 
 ## The fast path
 

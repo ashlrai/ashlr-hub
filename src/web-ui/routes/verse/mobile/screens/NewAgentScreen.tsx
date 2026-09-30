@@ -21,7 +21,7 @@ import { useQuery, useRefetch } from '../../../../data/hooks.js';
 import { refetchQuery } from '../../../../data/cache.js';
 import { describeActionError, useGuardState } from '../../shell/guard-store.js';
 import { verseBootstrapQuery } from '../../verse-bootstrap-query.js';
-import { createVerseSession, sendVerseTurn } from '../../verse-queries.js';
+import { createVerseSession, fetchVerseSessionDetail, sendVerseTurn } from '../../verse-queries.js';
 import { MicButton } from '../MicButton.js';
 import { runMobileAction } from '../mobile-actions.js';
 import { canShowActions, useMobile } from '../mobile-context.js';
@@ -63,7 +63,8 @@ async function startOne(projectPath: string, target: SpawnTarget, prompt: string
     await sendVerseTurn(sessionId, prompt);
     return { target, sessionId, error: null };
   } catch (err) {
-    return { target, sessionId, error: describeActionError(err) };
+    const status = typeof err === 'object' && err !== null && 'status' in err ? err.status : null;
+    return { target, sessionId, error: describeActionError(err), ...(typeof status !== 'number' || status < 100 || status >= 500 ? { unknownOutcome: true } : {}) };
   }
 }
 
@@ -91,6 +92,21 @@ export function NewAgentScreen() {
   const [prompt, setPrompt] = useState('');
   const [interim, setInterim] = useState('');
   const openedChats = useRef(new Map<string, string>());
+  const [uncertain, setUncertain] = useState<SpawnResult[]>([]);
+  const [inspection, setInspection] = useState<Record<string, string>>({});
+  const [checkingChat, setCheckingChat] = useState<string | null>(null);
+  const checkChat = async (id: string) => {
+    setCheckingChat(id);
+    try {
+      const detail = await fetchVerseSessionDetail(id);
+      const messages = detail.events.filter((e) => e.type === 'user-message');
+      setInspection((prev) => ({ ...prev, [id]: messages.length > 0
+        ? `This chat has ${messages.length} recorded prompt${messages.length === 1 ? '' : 's'}; status: ${detail.session.status}. Open it to inspect the transcript before sending again.`
+        : `No prompt is visible yet; status: ${detail.session.status}. The original request may still arrive. Open this chat before sending again.` }));
+    } catch (err) {
+      setInspection((prev) => ({ ...prev, [id]: `Could not inspect the chat: ${describeActionError(err)}. No prompt was resent.` }));
+    } finally { setCheckingChat(null); }
+  };
 
   const repoFilterId = useId();
   const modelId = useId();
@@ -130,7 +146,7 @@ export function NewAgentScreen() {
   };
 
   const start = () => {
-    if (blocker || !projectPath || busy) return;
+    if (blocker || !projectPath || busy || uncertain.length > 0) return;
     const text = prompt.trim();
     const targets = plan;
     const repoName = projectLabel(projectPath, projects);
@@ -150,9 +166,11 @@ export function NewAgentScreen() {
           return result;
         }));
         const failed = results.filter((r) => r.error !== null);
+        const unknown = failed.filter((r) => r.unknownOutcome);
+        setUncertain(unknown);
         // Nothing started at all: a failure, so the sheet (or toast) says why and nothing moves.
         if (failed.length === results.length && results.every((r) => r.sessionId === null)) {
-          throw new Error(failed.length === 1 ? failed[0]!.error! : `No agent started. ${failed.map((r) => `${r.target.seatLabel}: ${r.error}`).join(' ')}`);
+          throw new Error(unknown.length > 0 ? 'Agent creation was not confirmed. A chat may have opened; check Agents before starting again. Your draft is kept here.' : failed.length === 1 ? failed[0]!.error! : `No agent started. ${failed.map((r) => `${r.target.seatLabel}: ${r.error}`).join(' ')}`);
         }
       },
       onDone: () => {
@@ -161,7 +179,9 @@ export function NewAgentScreen() {
           const only = results[0]!;
           // Stay with the words; the next Start retries this chat rather than opening another.
           if (only.error) {
-            showMobileToast(`The chat opened but the prompt did not send: ${only.error} Try again to send it in the same chat.`, 'danger');
+            showMobileToast(only.unknownOutcome
+              ? `The chat opened, but prompt delivery was not confirmed: ${only.error} Inspect this chat before sending again. Your draft is kept here.`
+              : `The chat opened, but the server refused this prompt: ${only.error} Try again to send it in the same chat.`, 'danger');
             return;
           }
           if (only.sessionId) navigate({ screen: 'agent', id: only.sessionId, pane: 'transcript' });
@@ -173,7 +193,7 @@ export function NewAgentScreen() {
           return;
         }
         // Partial: keep the words and leave only the seats that did not start selected.
-        showMobileToast(partialFailureText(results), 'danger');
+        showMobileToast(results.some((r) => r.unknownOutcome) ? `${partialFailureText(results)} Some responses were not confirmed; inspect those chats before sending again.` : partialFailureText(results), 'danger');
         setSeatChoice(failed.map((r) => r.target.seatId));
       },
     });
@@ -360,9 +380,18 @@ export function NewAgentScreen() {
       ) : null}
       {ready ? (
         <div className={styles.startBar}>
+          {uncertain.length > 0 ? <Banner tone="warning">
+            <p>Delivery was not confirmed. Your draft is kept here; Start is paused to avoid duplicating work.</p>
+            {uncertain.map((result) => result.sessionId ? <div key={result.sessionId}>
+              <p>{result.target.seatLabel}: {inspection[result.sessionId] ?? 'The chat opened. Check its transcript before sending again.'}</p>
+              <Button disabled={checkingChat !== null} onClick={() => void checkChat(result.sessionId!)}>Check opened chat</Button>
+              <Button onClick={() => navigate({ screen: 'agent', id: result.sessionId!, pane: 'transcript' })}>Open chat</Button>
+            </div> : <p key={result.target.seatId}>{result.target.seatLabel}: chat creation was not confirmed. Check Agents before starting again.</p>)}
+            {uncertain.some((r) => !r.sessionId) ? <Button onClick={() => navigate({ screen: 'agents' })}>View chats</Button> : null}
+          </Banner> : null}
           {offline && canAct ? <Banner tone="warning">Offline — starting waits until your Mac answers.</Banner> : null}
           {canAct ? (
-            <Button variant="primary" block disabled={Boolean(blocker) || offline || busy} onClick={start} aria-busy={busy || undefined}>
+            <Button variant="primary" block disabled={Boolean(blocker) || offline || busy || uncertain.length > 0} onClick={start} aria-busy={busy || undefined}>
               {running ? 'Starting…' : startLabel}
             </Button>
           ) : null}

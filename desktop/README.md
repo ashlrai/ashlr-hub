@@ -4,7 +4,7 @@ A Tauri v2 desktop app that wraps **Ashlr Verse** (the operator console at
 `/verse/`, see `../docs/VERSE.md`) in a native macOS window. Opening it starts
 the console; resident autonomy requires its separate local setup and grant.
 
-The public [v3.16.1 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.16.1/Ashlr_3.16.1_aarch64_locally-signed.dmg)
+The public [v3.17.0 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.0/Ashlr_3.17.0_aarch64_locally-signed.dmg)
 is locally signed, not Apple Developer ID notarized. macOS may require **Open
 Anyway** on first launch. The desktop CI workflow remains disabled during the
 Linux quarantine; its retained draft-only policy is separate from this local
@@ -16,13 +16,13 @@ Installed size: ~110 MB (Rust WebView runtime + the bundled Bun `ashlr` sidecar
 
 ## Install
 
-Download the [macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.16.1/Ashlr_3.16.1_aarch64_locally-signed.dmg)
+Download the [macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.0/Ashlr_3.17.0_aarch64_locally-signed.dmg)
 or use the [npm/CLI quickstart](../docs/QUICKSTART.md) on macOS, Linux and Windows.
 Other desktop formats remain subject to the draft artifact policy below.
 
 | Platform | Availability |
 |----------|-----------------------|
-| macOS arm64 | Locally signed v3.16.1 `.dmg` linked above |
+| macOS arm64 | Locally signed v3.17.0 `.dmg` linked above |
 | Windows | `.msi` / `.exe` draft only |
 | Linux | Not produced while quarantined |
 

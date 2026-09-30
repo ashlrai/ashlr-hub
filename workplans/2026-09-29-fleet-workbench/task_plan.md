@@ -28,6 +28,9 @@ Make the existing Ashlr Verse engineering fleet more usable across every connect
 - New moderate dependency advisories appeared: patch overrides and lock to fast-uri3.1.8/ip-address10.7.2; lock audit reports zero vulnerabilities.
 - npm registry authentication expired (E401); finish release artifact before requesting interactive renewal.
 - First Meta registry test needed roster fixture extended to include the new opt-in engine; corrected.
+- Full gate caught outdated desktop source-only contract tests; corrected availability assertions while preserving authority and Linux quarantine guards.
+- Consumer CLI review found stale engine selection and duplicate /v1 model-probe paths; fixes and regressions required before release.
+- Hosted CI is active despite stale local-release documentation. Raycast dependency audit found a new brace-expansion advisory; patch and verify the independent lockfile.
 
 ## Status
 3.17.0 candidate implemented; independent review and final release verification in progress. Added user scope: study Ponytail, OmniRoute, Graphify and Agent Skills; implement local Wiki module graph and portable plugin context guidance. Adjacent dirty checkouts are preserved.

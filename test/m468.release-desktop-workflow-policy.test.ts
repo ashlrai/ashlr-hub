@@ -346,7 +346,9 @@ describe('M468 desktop release workflow supply-chain policy', () => {
     expect(desktopReadme).toContain('independent security review');
     expect(desktopReadme).toContain('hostile `--config`');
     expect(desktopReadme).toContain('official workflow, default Tauri configuration, and fresh builds');
-    expect(desktopReadme).toContain('Public desktop releases and installers: none');
+    expect(desktopReadme).toContain('macOS arm64 DMG');
+    expect(desktopReadme).toMatch(/locally signed, not Apple Developer ID notarized/);
+    expect(desktopReadme).not.toContain('Public desktop releases and installers: none');
     expect(desktopReadme).toContain('workflow 301689703 must remain externally `disabled_manually`');
     expect(desktopReadme).toContain('workflow output is draft-only');
     expect(desktopReadme).toContain('Tag protection is necessary but not sufficient');
@@ -365,7 +367,8 @@ describe('M468 desktop release workflow supply-chain policy', () => {
     expect(desktopPointer).toContain('glib >=0.20');
     expect(desktopPointer).toContain('hostile `--config`');
     expect(desktopPointer).toContain('fresh source builds');
-    expect(desktopPointer).toContain('No public desktop release or installer is currently available');
+    expect(desktopPointer).toContain('public macOS arm64 DMG is locally signed, not Apple Developer ID notarized');
+    expect(desktopPointer).not.toContain('No public desktop release or installer is currently available');
     expect(desktopPointer).toContain('workflow 301689703 must remain\nexternally `disabled_manually`');
     expect(desktopPointer).toContain('configured output is draft-only');
     expect(desktopPointer).toContain('protection is necessary but not sufficient');

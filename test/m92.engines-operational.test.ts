@@ -396,6 +396,23 @@ describe('M92 probing — probeApiModelEngine readiness', () => {
     vi.unstubAllGlobals();
   });
 
+  it.each([
+    ['https://api.meta.ai', 'https://api.meta.ai/v1/models'],
+    ['https://api.meta.ai/v1', 'https://api.meta.ai/v1/models'],
+    ['https://api.meta.ai/v1/', 'https://api.meta.ai/v1/models'],
+    ['https://api.meta.ai/v1/models', 'https://api.meta.ai/v1/models'],
+  ])('normalizes the Meta API readiness endpoint once from %s', async (base, expected) => {
+    const fetchMock = vi.fn().mockResolvedValue(mockJson(modelsListResponse(['muse-spark-1.3'])));
+    vi.stubGlobal('fetch', fetchMock);
+    // Use the existing isolated key slot: this test covers URL construction,
+    // never credentials or an external provider call.
+    process.env['NVIDIA_NIM_API_KEY'] = 'fixture';
+    const result = await probeApiModelEngine('meta-muse', { envKey: 'NVIDIA_NIM_API_KEY', defaultBaseUrl: base });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(expected);
+    expect(result.reachable).toBe(true);
+    expect(result.models).toEqual(['muse-spark-1.3']);
+  });
+
   it('returns keyPresent=false when env var is absent', async () => {
     const result = await probeApiModelEngine('nim', NIM_API);
     expect(result.keyPresent).toBe(false);
