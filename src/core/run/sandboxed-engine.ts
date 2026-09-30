@@ -39,10 +39,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, appendFileSync, readFileSync, realpathSync } from 'node:fs';
+import { accessSync, constants, statSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, appendFileSync, readFileSync, realpathSync } from 'node:fs';
 import { execFileSync, execSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
-import { join, resolve as resolvePath } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { delimiter, isAbsolute, join, resolve as resolvePath } from 'node:path';
 
 // M154: repo-map + localization pre-pass (flag-gated, zero-dep)
 import { buildRepoMap, renderRepoMap } from './repo-map.js';
@@ -73,7 +73,6 @@ import {
   summarizeDelegationScope,
 } from './delegation-scope.js';
 import { buildEngineCommand, spawnEngine, describeRunEventForStream, resolveBinAbsolute } from './engines.js';
-import { resolveLoginPath } from '../verse/login-path.js';
 import {
   DEVIN_CLI_ENGINE_ID,
   DEVIN_CLI_FREE_MODELS,
@@ -1002,18 +1001,30 @@ export function buildContainedEnv(cfg: AshlrConfig, hooksDir: string): NodeJS.Pr
 /**
  * Resolve the dedicated efficiency server. Hub and plugin share `ashlr`,
  * so that ambiguous command must never be treated as the plugin.
- * Returns the absolute path when found on PATH, or null when absent.
- * Pure, best-effort — never throws.
+ * Returns an executable from PATH or the managed ~/.local/bin install, or null.
+ * Read-only, best-effort — never throws.
  */
 function resolveAshlrEfficiencyMcpBin(searchPath = process.env.PATH): string | null {
+  const executable = (file: string): boolean => {
+    try {
+      if (!isAbsolute(file) || file.includes('\0') || !statSync(file).isFile()) return false;
+      accessSync(file, constants.X_OK);
+      return true;
+    } catch { return false; }
+  };
   try {
-    const probe = process.platform === 'win32' ? 'where' : 'which';
-    const out = execFileSync(probe, ['ashlr-mcp'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-      env: { PATH: searchPath, ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}) }, timeout: 5_000 })
-      .trim()
-      .split('\n')[0]
-      ?.trim();
-    return out && out.length > 0 ? out : null;
+    // Preserve Windows command-shim discovery; POSIX needs no lookup subprocess.
+    if (process.platform === 'win32') {
+      const out = execFileSync('where', ['ashlr-mcp'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+        env: { PATH: searchPath, ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}) }, timeout: 5_000 });
+      return out.split(/\r?\n/).map(file => file.trim()).find(executable) ?? null;
+    }
+    const entries = (searchPath ?? '').split(delimiter).filter(entry => isAbsolute(entry) && !entry.includes('\0'));
+    // The published MCP-only install exposes this dedicated bin. launchd omits
+    // ~/.local/bin from PATH; checking that known location avoids executing login
+    // startup files from the authority runtime just to discover an optional tool.
+    const candidates = [...entries.map(entry => join(entry, 'ashlr-mcp')), join(homedir(), '.local', 'bin', 'ashlr-mcp')];
+    return candidates.find(executable) ?? null;
   } catch {
     return null;
   }
@@ -2190,15 +2201,7 @@ export async function runEngineSandboxed(
   // an unconfined ashlr MCP server the agent could drive (its tools run as
   // Mason, outside the sandbox profile).
   const fleetMcpEnabled = !autonomousRun && (cfg.foundry as Record<string, unknown> | undefined)?.['fleetMcp'] !== false;
-  // Reuse Apps' bounded, cached login PATH so a desktop launched by launchd
-  // discovers the same dedicated plugin as the operator's terminal. Only PATH
-  // enters the lookup child; provider credentials and seat pins do not.
-  let fleetMcpPath = process.env.PATH;
-  if (fleetMcpEnabled) {
-    try { fleetMcpPath = (await resolveLoginPath()).path; }
-    catch { /* Optional plugin discovery falls back to the existing process PATH. */ }
-  }
-  const fleetMcpConfig = fleetMcpEnabled ? prepareFleetMcpConfig(sb.worktreePath, fleetMcpPath) : null;
+  const fleetMcpConfig = fleetMcpEnabled ? prepareFleetMcpConfig(sb.worktreePath) : null;
 
   // M154: prepend repo-map + localization context to goal when flags are ON.
   // Flag-OFF → contextPrefix is '' → goalWithContext === goal (byte-identical).

@@ -5,17 +5,18 @@
  *   1. writeMcpConfigIfAvailable writes fleet sidecar config with correct server entry
  *      when the dedicated plugin binary is present (hermetic fixture).
  *   2. --mcp-config injected into claude autonomous argv when sidecar config is written.
- *   3. which-guard: when ashlr-mcp is absent (PATH manipulated) → returns null, argv unchanged.
+ *   3. executable-guard: when ashlr-mcp is absent from PATH and the managed install → returns null, argv unchanged.
  *   4. CLAUDE_SESSION_ID set to ashlr-fleet-<runId> in the contained env.
  *   5. fleetMcp: false disables injection; absent/true enables it.
  *
- * Hermetic: NO real engine spawning. PATH manipulation used for which-guard tests.
+ * Hermetic: NO real engine spawning. PATH manipulation used for executable-guard tests.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, chmodSync } from 'node:fs';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, chmodSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import * as os from 'node:os';
+import { join, relative } from 'node:path';
 
 import type { AshlrConfig } from '../src/core/types.js';
 import {
@@ -63,6 +64,7 @@ function mkTmp(prefix: string): string {
 
 afterEach(() => {
   process.env.PATH = originalPath;
+  vi.restoreAllMocks();
   for (const d of tmpDirs.splice(0)) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* ok */ }
   }
@@ -73,7 +75,40 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('M248 writeMcpConfigIfAvailable — plugin present', () => {
-  it('uses the supplied desktop login PATH without changing process PATH', () => {
+  it('discovers the managed dedicated bin when a desktop process has only system PATH', () => {
+    const home = mkTmp('ashlr-mcp-managed-home-');
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    const bin = join(home, '.local', 'bin');
+    mkdirSync(bin, { recursive: true });
+    const executable = join(bin, 'ashlr-mcp');
+    const target = join(home, 'released-mcp');
+    writeFileSync(target, '#!/bin/sh\nexit 0\n'); chmodSync(target, 0o755);
+    symlinkSync(target, executable);
+    process.env.PATH = '/usr/bin:/bin';
+    const worktree = mkTmp('ashlr-mcp-managed-worktree-');
+    const path = writeMcpConfigIfAvailable(worktree);
+    expect(path).not.toBeNull();
+    expect(JSON.parse(readFileSync(path!, 'utf8')).mcpServers.ashlr.command).toBe(executable);
+    expect(process.env.PATH).toBe('/usr/bin:/bin');
+  });
+
+  it('rejects non-executable files, directories and relative PATH entries', () => {
+    const home = mkTmp('ashlr-mcp-invalid-home-');
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    const bin = mkTmp('ashlr-mcp-invalid-bin-');
+    const candidate = join(bin, 'ashlr-mcp');
+    writeFileSync(candidate, '#!/bin/sh\nexit 0\n'); chmodSync(candidate, 0o644);
+    const worktree = mkTmp('ashlr-mcp-invalid-worktree-');
+    expect(writeMcpConfigIfAvailable(worktree, bin)).toBeNull();
+    rmSync(candidate); mkdirSync(candidate);
+    expect(writeMcpConfigIfAvailable(worktree, bin)).toBeNull();
+    rmSync(candidate, { recursive: true });
+    writeFileSync(candidate, '#!/bin/sh\nexit 0\n'); chmodSync(candidate, 0o755);
+    expect(writeMcpConfigIfAvailable(worktree, `.:${relative(process.cwd(), bin)}:`)).toBeNull();
+    expect(existsSync(join(worktree, FLEET_MCP_CONFIG_FILENAME))).toBe(false);
+  });
+
+  it('uses an explicit search PATH without changing process PATH', () => {
     const bin = mkTmp('ashlr-plugin-login-bin-');
     const executable = join(bin, 'ashlr-mcp');
     writeFileSync(executable, '#!/bin/sh\nexit 0\n'); chmodSync(executable, 0o755);
@@ -94,20 +129,15 @@ describe('M248 writeMcpConfigIfAvailable — plugin present', () => {
 
     const result = writeMcpConfigIfAvailable(worktree);
 
-    if (result === null) {
-      // ashlr not installed on this machine — skip structural assertions
-      // but confirm no sidecar was created (silent skip, not a failure).
-      expect(existsSync(join(worktree, FLEET_MCP_CONFIG_FILENAME))).toBe(false);
-      return;
-    }
+    expect(result).not.toBeNull();
 
     expect(result).toBe(join(worktree, FLEET_MCP_CONFIG_FILENAME));
-    expect(existsSync(result)).toBe(true);
+    expect(existsSync(result!)).toBe(true);
 
-    const parsed = JSON.parse(readFileSync(result, 'utf8'));
+    const parsed = JSON.parse(readFileSync(result!, 'utf8'));
     // Command must be the dedicated plugin binary, never the shared Hub CLI.
     expect(typeof parsed.mcpServers?.ashlr?.command).toBe('string');
-    expect((parsed.mcpServers.ashlr.command as string).length).toBeGreaterThan(0);
+    expect(parsed.mcpServers.ashlr.command).toBe(executable);
     expect(parsed).toMatchObject({
       mcpServers: {
         ashlr: {
@@ -133,15 +163,15 @@ describe('M248 writeMcpConfigIfAvailable — plugin present', () => {
     expect(readFileSync(join(worktree, '.mcp.json'), 'utf8')).toBe(
       '{"mcpServers":{"repo":{"command":"repo-mcp"}}}',
     );
-    expect(existsSync(result)).toBe(true);
+    expect(existsSync(result!)).toBe(true);
   });
 });
 
 // ---------------------------------------------------------------------------
-// 2. which-guard: absent binary (empty PATH) → returns null, no file written
+// 2. executable-guard: absent binary (empty PATH) → returns null, no file written
 // ---------------------------------------------------------------------------
 
-describe('M248 writeMcpConfigIfAvailable — plugin absent (which-guard)', () => {
+describe('M248 writeMcpConfigIfAvailable — plugin absent (executable-guard)', () => {
   it('does not misidentify the shared Hub ashlr command as the efficiency plugin', () => {
     const bin = mkTmp('ashlr-hub-only-bin-');
     const executable = join(bin, 'ashlr');
@@ -153,7 +183,7 @@ describe('M248 writeMcpConfigIfAvailable — plugin absent (which-guard)', () =>
     expect(existsSync(join(worktree, FLEET_MCP_CONFIG_FILENAME))).toBe(false);
   });
 
-  it('returns null and writes no file when ashlr-mcp is not on PATH', () => {
+  it('returns null and writes no file when ashlr-mcp is not available', () => {
     const worktree = mkTmp('ashlr-m248-absent-');
 
     // Temporarily set PATH to empty dir so the dedicated binary cannot resolve.

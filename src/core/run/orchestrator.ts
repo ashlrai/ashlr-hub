@@ -2377,7 +2377,8 @@ async function runGoalInternal(
     // Determine if this is a known typed engine id or an arbitrary binary name.
     // The registry already defines installed/configured providers. A second
     // fixed roster misclassified new API engines as executable binary names.
-    const isKnownEngineId = resolveEngineSpec(engine as EngineId, cfg) !== undefined;
+    const requestedSpec = resolveEngineSpec(engine as EngineId, cfg);
+    const isKnownEngineId = requestedSpec !== undefined;
     const engineId = isKnownEngineId ? (engine as EngineId) : 'ashlrcode'; // arbitrary → treat as external
 
     // Check installation: for known ids use engineInstalled(); for arbitrary names use isBinaryInstalled().
@@ -2386,6 +2387,17 @@ async function runGoalInternal(
       : isBinaryInstalled(engine);
 
     if (!installed) {
+      // An explicit API route identifies the intended provider. Substituting
+      // builtin on a missing key or unreachable local endpoint could execute
+      // the goal against a different provider without the caller's consent.
+      // Keep the legacy CLI-binary fallback contract below unchanged.
+      if (opts.engine !== undefined && requestedSpec?.kind === 'api-model') {
+        const key = requestedSpec.api?.envKey;
+        const reason = key && !process.env[key]?.trim()
+          ? `required API key environment variable ${key} is missing`
+          : 'API endpoint is unavailable';
+        throw new Error(`Requested API engine "${engine}" is unavailable: ${reason}; builtin fallback refused`);
+      }
       if (opts.requireSandbox === true) {
         const unavailable = newSandboxUnavailableRunState(goal, opts, engine);
         saveRun(unavailable);

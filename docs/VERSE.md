@@ -1744,10 +1744,13 @@ dependency links as inferred and shows listed, read and omitted-file coverage;
 it is an overview of the sampled working files, not a complete runtime call graph.
 
 Fleet Claude and Codex runs can use the separately installed `ashlr-mcp`
-efficiency plugin through temporary per-run configuration. Discovery uses the
-same bounded desktop login PATH as Apps. Missing tooling is skipped; Hub does
-not invoke its own `ashlr mcp` server as a substitute. The plugin remains
-restricted from autonomous runs under the existing authority policy.
+efficiency plugin through temporary per-run configuration. Discovery checks
+executable files on the process PATH, then the managed `~/.local/bin/ashlr-mcp`
+location used by the MCP-only release installation. This handles desktop launches
+without running login-shell startup files. Missing or non-executable files skip
+the optional connection. Hub does not invoke its own `ashlr mcp` server as a
+substitute. The plugin remains restricted from autonomous runs under the existing
+authority policy.
 
 For an explicitly enabled Meta API engine, supply `MODEL_API_KEY` through your
 credential manager, add `meta-muse` to `foundry.allowedBackends`, then use a

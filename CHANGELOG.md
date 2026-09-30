@@ -16,7 +16,7 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Add a searchable local Wiki module map with dependency links, cited files
   and explicit scan coverage, using the existing scanner without model calls.
 - Connect fleet Claude and Codex runs to the dedicated `ashlr-mcp` efficiency
-  plugin when installed, using the desktop login PATH and per-run configuration.
+  plugin when installed, using its managed launcher and per-run configuration.
 
 - Search large account/model rosters when starting a chat; filtering preserves
   the selected execution identity and unavailable-model explanations.
@@ -31,7 +31,9 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Show expired, frozen and incomplete Locus/Phantom setup honestly in Apps,
   with recovery guidance that preserves the intended human-selected identity.
 - Route all registered API-model engines through the existing sandboxed API
-  runner, including configured providers and Meta Muse.
+  runner, including configured providers and Meta Muse. Explicit API requests
+  refuse missing keys or unavailable endpoints before dispatch rather than
+  substituting another provider.
 - Bound local capability inspection time, reuse recent evidence and keep
   uninspected models visible as pending instead of blocking large catalogs.
 
@@ -40,13 +42,17 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   per-worker execution limits and signed authority remain enforced.
 - Preserve phone drafts during successful session checks; expired, revoked or
   signed-out sessions still revoke remote action access.
-- Retry a failed first phone turn in its existing chat instead of creating
-  duplicate chats or discarding the prompt.
+- Preserve the existing phone chat and draft after a confirmed first-turn
+  refusal. Pause resends after ambiguous delivery and offer read-only chat
+  inspection, preventing duplicate prompts after a lost response.
 - Handle a retiring phone gateway removing its admin socket between inspection
   and connection without refusing startup or deleting another owner's socket.
 
 ### Security
 
+- Confine Wiki file reads to the enrolled repository across symlink races,
+  bound growing-file reads and refuse blocking FIFO reads.
+- Patch the Raycast `brace-expansion` dependency to 5.0.12.
 - Update `fast-uri` to 3.1.8 and `ip-address` to 10.7.2 for newly published URI
   normalization, address-family and parser denial-of-service advisories.
 
