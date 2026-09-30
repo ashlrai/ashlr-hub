@@ -73,6 +73,10 @@ import { runFixedUniverseEvaluator } from '../src/core/universe/fixed-evaluator.
 import { runVerifySubprocessAsync } from '../src/core/run/verify-commands.js';
 import { readBuiltinTrialCustody } from '../src/core/universe/builtin-trial-custody.js';
 
+
+// macOS-only: the Universe trial runner requires macOS sandbox-exec. Other hosts skip
+// these cleanly instead of failing (src/core/cloud/improvement-backlog.ts).
+const NOT_MACOS = process.platform !== 'darwin';
 const ROOT = '/inert-trial-custody';
 const evaluator = vi.mocked(runFixedUniverseEvaluator);
 const worker = vi.mocked(runVerifySubprocessAsync);
@@ -105,7 +109,7 @@ beforeEach(() => {
 });
 
 describe('built-in trial runner custody (inert runtime)', () => {
-  it.each(['unconfirmed', 'throw'] as const)('retains %s dispatch, rejects another same-Universe run, and leaves a different Universe available', async mode => {
+  it.skipIf(NOT_MACOS).each(['unconfirmed', 'throw'] as const)('retains %s dispatch, rejects another same-Universe run, and leaves a different Universe available', async mode => {
     const f = fixture();
     evaluator.mockImplementationOnce(async (...args) => {
       args[9]?.(); memory.dispatches++;
@@ -125,7 +129,7 @@ describe('built-in trial runner custody (inert runtime)', () => {
     expect(memory.dispatches).toBe(2);
   });
 
-  it('does not dispatch or delete uncertain publication scratch when intent publication fails', async () => {
+  it.skipIf(NOT_MACOS)('does not dispatch or delete uncertain publication scratch when intent publication fails', async () => {
     const f = fixture(); memory.failWrite = 'intent';
     const result = await f.execute();
     expect(memory.dispatches).toBe(0);
@@ -134,7 +138,7 @@ describe('built-in trial runner custody (inert runtime)', () => {
     expect(memory.removed).toEqual([]); expect(f.rows()).toEqual([]);
   });
 
-  it('fences another generation under the same still-owned execution lease', async () => {
+  it.skipIf(NOT_MACOS)('fences another generation under the same still-owned execution lease', async () => {
     fixture();
     evaluator.mockImplementationOnce(async (...args) => {
       args[9]?.(); memory.dispatches++; return response({ processGroupSettlement: 'unconfirmed' });
@@ -147,7 +151,7 @@ describe('built-in trial runner custody (inert runtime)', () => {
     });
   });
 
-  it.each([undefined, []])('refuses missing or malformed process settlement (%j)', async settlement => {
+  it.skipIf(NOT_MACOS).each([undefined, []])('refuses missing or malformed process settlement (%j)', async settlement => {
     const f = fixture();
     evaluator.mockImplementationOnce(async (...args) => {
       args[9]?.(); memory.dispatches++;
@@ -159,7 +163,7 @@ describe('built-in trial runner custody (inert runtime)', () => {
     await expect(f.execute()).rejects.toThrow('unresolved built-in trial evaluator');
   });
 
-  it('retains the intent and scratch when confirmed settlement cannot be published', async () => {
+  it.skipIf(NOT_MACOS)('retains the intent and scratch when confirmed settlement cannot be published', async () => {
     const f = fixture(); memory.failWrite = 'settlement';
     const result = await f.execute();
     expect(memory.dispatches).toBe(1); expect(f.rows().map(row => row.kind)).toEqual(['intent']);
@@ -170,7 +174,7 @@ describe('built-in trial runner custody (inert runtime)', () => {
     expect(memory.dispatches).toBe(1);
   });
 
-  it('holds a published intent whose acknowledgment failed without dispatching the evaluator', async () => {
+  it.skipIf(NOT_MACOS)('holds a published intent whose acknowledgment failed without dispatching the evaluator', async () => {
     const f = fixture(); memory.failAfterIntent = true;
     const result = await f.execute();
     expect(memory.dispatches).toBe(0); expect(result.status).toBe('failed');
@@ -180,7 +184,7 @@ describe('built-in trial runner custody (inert runtime)', () => {
     expect(memory.dispatches).toBe(0);
   });
 
-  it('refuses a stop that arrives at the final dispatch hook before publishing or launching', async () => {
+  it.skipIf(NOT_MACOS)('refuses a stop that arrives at the final dispatch hook before publishing or launching', async () => {
     const f = fixture(); let stopped = false;
     evaluator.mockImplementationOnce(async (...args) => {
       stopped = true; args[9]?.(); memory.dispatches++; return response();
@@ -191,7 +195,7 @@ describe('built-in trial runner custody (inert runtime)', () => {
     expect(result.trials[0]?.error).toContain('stopped before dispatch');
   });
 
-  it('retains published intent and refuses dispatch when stop arrives during publication', async () => {
+  it.skipIf(NOT_MACOS)('retains published intent and refuses dispatch when stop arrives during publication', async () => {
     const f = fixture(); let stopped = false;
     memory.afterIntent = () => { stopped = true; };
     const result = await f.execute({ isExecutionStopped: () => stopped });
@@ -201,7 +205,7 @@ describe('built-in trial runner custody (inert runtime)', () => {
     await expect(f.execute()).rejects.toThrow('unresolved built-in trial evaluator');
   });
 
-  it.each([
+  it.skipIf(NOT_MACOS).each([
     ['known not-started', { processGroupSettlement: 'not-started', exitCode: -1, error: 'Not launched' }],
     ['not-started with forged successful output', { processGroupSettlement: 'not-started' }],
     ['confirmed failure', { exitCode: 1 }], ['malformed output', { stdout: 'not-json' }],
@@ -214,7 +218,7 @@ describe('built-in trial runner custody (inert runtime)', () => {
     expect((await f.execute()).status).toBe('completed'); expect(memory.dispatches).toBe(2);
   });
 
-  it('accepts a never-started preflight refusal without requiring an intent', async () => {
+  it.skipIf(NOT_MACOS)('accepts a never-started preflight refusal without requiring an intent', async () => {
     const f = fixture(); evaluator.mockResolvedValueOnce(response({ processGroupSettlement: 'not-started', exitCode: -1, error: 'Preflight refused' }));
     const result = await f.execute();
     expect(result.trials[0]).toMatchObject({ score: null, selected: false });
@@ -222,7 +226,7 @@ describe('built-in trial runner custody (inert runtime)', () => {
     expect((await f.execute()).status).toBe('completed');
   });
 
-  it('aborts siblings but awaits their drain before returning and never starts the next batch', async () => {
+  it.skipIf(NOT_MACOS)('aborts siblings but awaits their drain before returning and never starts the next batch', async () => {
     const f = fixture('fixture', true, 3, 2);
     let releaseFirst!: () => void;
     const first = new Promise<void>(resolve => { releaseFirst = resolve; });
@@ -252,7 +256,7 @@ describe('built-in trial runner custody (inert runtime)', () => {
     await expect(f.execute()).rejects.toThrow('unresolved built-in trial evaluator');
   });
 
-  it('does not change legacy command evaluator settlement requirements or create builtin custody', async () => {
+  it.skipIf(NOT_MACOS)('does not change legacy command evaluator settlement requirements or create builtin custody', async () => {
     const f = fixture('legacy', false);
     evaluator.mockResolvedValue(response({ processGroupSettlement: 'unconfirmed' }));
     const result = await f.execute();

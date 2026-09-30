@@ -329,7 +329,7 @@ describe('M468 desktop release workflow supply-chain policy', () => {
   });
 
   it('documents the exact quarantine and deliberate re-enable criteria', () => {
-    for (const doc of [desktopReadme, quickstart, desktopPointer]) {
+    for (const doc of [desktopReadme, desktopPointer]) {
       expect(doc).toContain('GHSA-wrw7-89jp-8q8g');
       expect(doc).toContain('RUSTSEC-2024-0429');
       expect(doc).toMatch(/Linux/i);
@@ -353,13 +353,13 @@ describe('M468 desktop release workflow supply-chain policy', () => {
     expect(desktopReadme).toContain('historical commit whose workflow predates');
     expect(desktopReadme).not.toContain('Download the latest installer');
 
-    expect(quickstart).toContain('Linux remains supported through npm/CLI and the web dashboard');
-    expect(quickstart).toContain('hostile `--config`');
-    expect(quickstart).toContain('fresh source builds');
-    expect(quickstart).toContain('No public desktop release or installer is currently available');
-    expect(quickstart).toContain('workflow 301689703 must remain\n> externally `disabled_manually`');
-    expect(quickstart).toContain('configured output is draft-only');
-    expect(quickstart).toContain('protection is necessary, not sufficient');
+    // #580 rewrote the quickstart around the published, locally signed
+    // v3.16.1 macOS DMG. It must stay honest that it is macOS-only and not
+    // notarized, and point Linux and Windows users to the CLI.
+    expect(quickstart).toContain('### CLI on macOS, Linux or Windows');
+    expect(quickstart).toContain('This DMG is locally signed, not\nApple Developer ID notarized');
+    expect(quickstart).toContain('There is no Linux or Windows desktop package in this release; use the CLI above.');
+    expect(quickstart).not.toMatch(/\.AppImage|\.deb\b|\.msi\b/);
     expect(desktopPointer).toContain('The root Linux CLI, Bun sidecar,\nand web dashboard remain supported');
     expect(desktopPointer).toContain('Tauri v3/GTK4');
     expect(desktopPointer).toContain('glib >=0.20');

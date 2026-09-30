@@ -542,7 +542,11 @@ describe('Universe local branch delivery', () => {
     const git = deliveryGit(f.repo);
     expect(git.ref('codex/raced')).toBeNull();
     f.git(['symbolic-ref', 'refs/heads/codex/raced', 'refs/heads/unrelated-dangling']);
-    await expect(git.createRef('codex/raced', f.manifest.seed.revision)).rejects.toThrow(/symbolic/);
+    // Older Git prepares the create and the in-lock recheck refuses the symbolic
+    // ref; newer Git (as on the Ubuntu CI runner) already fails `prepare` on the dangling
+    // symref, so the transaction never commits. Either way nothing is replaced,
+    // which the assertions below still prove.
+    await expect(git.createRef('codex/raced', f.manifest.seed.revision)).rejects.toThrow(/symbolic|ref transaction did not commit/);
     expect(f.git(['symbolic-ref', 'refs/heads/codex/raced'])).toBe('refs/heads/unrelated-dangling');
     expect(existsSync(join(f.repo, '.git', 'refs', 'heads', 'codex', 'raced.lock'))).toBe(false);
   });

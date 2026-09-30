@@ -18,6 +18,10 @@ import * as runtimeCheck from '../src/core/universe/resource-runtime-check.js';
 import * as engineering from '../src/core/resources/console-engineering.js';
 import * as handoff from '../src/core/universe/campaign-handoff.js';
 
+
+// macOS-only: the campaign's real Universe run requires macOS sandbox-exec. Other hosts skip
+// these cleanly instead of failing (src/core/cloud/improvement-backlog.ts).
+const NOT_MACOS = process.platform !== 'darwin';
 const roots: string[] = [];
 afterEach(() => {
   vi.restoreAllMocks();
@@ -107,7 +111,7 @@ describe('verified preparation metadata inspection', () => {
     expect(() => readPreparedResourceEngineeringMetadata({ ...input, get recipe() { return getter(); } })).toThrow();
     expect(() => readPreparedResourceEngineeringMetadata(Object.create(input))).toThrow(); expect(getter).not.toHaveBeenCalled();
   });
-  it('retains fresh successor source checks including the final return guard without commissioning', async () => {
+  it.skipIf(NOT_MACOS)('retains fresh successor source checks including the final return guard without commissioning', async () => {
     const f = fixture(); const root = join(f.base, 'source'); mkdirSync(root, { mode: 0o700 });
     initUniverse({ schemaVersion: 1, id: 'upstream', name: 'Upstream', objective: 'Improve fixed value',
       seed: { repo: f.options.workspace, revision: f.options.recipe.seedRevision }, metric: f.options.recipe.metric,

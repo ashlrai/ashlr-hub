@@ -615,5 +615,5 @@ describe('M454 pinned upstream routing challenge', () => {
     } finally {
       rmSync(packRoot, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, 60_000); // Scans the whole tree; ~14 s locally, slower on 2-vCPU CI runners.
 });

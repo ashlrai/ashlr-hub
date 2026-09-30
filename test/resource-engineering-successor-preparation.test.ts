@@ -17,6 +17,10 @@ import * as privateFiles from '../src/core/util/private-file-write.js';
 import * as evaluator from '../src/core/universe/fixed-evaluator.js';
 import * as handoff from '../src/core/universe/campaign-handoff.js';
 
+
+// macOS-only: the campaign's real Universe run requires macOS sandbox-exec. Other hosts skip
+// these cleanly instead of failing (src/core/cloud/improvement-backlog.ts).
+const NOT_MACOS = process.platform !== 'darwin';
 const roots: string[] = [];
 afterEach(() => {
   vi.restoreAllMocks();
@@ -82,7 +86,7 @@ async function fixture() {
 }
 
 describe('campaign-delivery successor preparation', () => {
-  it('pins a distinct successor to the delivered commit, records honest origin, and replays without effects', async () => {
+  it.skipIf(NOT_MACOS)('pins a distinct successor to the delivered commit, records honest origin, and replays without effects', async () => {
     const f = await fixture(); const before = tree(f.base); const evaluations = vi.spyOn(evaluator, 'runFixedUniverseEvaluator');
     const plan = checkResourceEngineeringSuccessorPreparation(f.options); expect(tree(f.base)).toEqual(before);
     expect(plan.seedRevision).toBe(f.receipt.commit); expect(plan.campaignDeliveryOrigin).toMatchObject({ campaignId: 'upstream-campaign',
@@ -105,7 +109,7 @@ describe('campaign-delivery successor preparation', () => {
     expect(tree(f.base)).toEqual(incomplete);
   });
 
-  it('rejects changed source pins and recipe-supplied seed identity without destination writes', async () => {
+  it.skipIf(NOT_MACOS)('rejects changed source pins and recipe-supplied seed identity without destination writes', async () => {
     const f = await fixture(); const before = tree(f.base);
     for (const key of ['expectedDefinitionDigest', 'expectedManifestDigest', 'expectedComparatorDigest', 'expectedDeliveryDigest'] as const) {
       expect(() => checkResourceEngineeringSuccessorPreparation({ ...f.options, source: { ...f.options.source, [key]: '0'.repeat(64) } })).toThrow();
@@ -117,7 +121,7 @@ describe('campaign-delivery successor preparation', () => {
     expect(getter).not.toHaveBeenCalled(); expect(tree(f.base)).toEqual(before);
   });
 
-  it('rechecks source after destination manifest staging and retains incomplete output on refusal', async () => {
+  it.skipIf(NOT_MACOS)('rechecks source after destination manifest staging and retains incomplete output on refusal', async () => {
     const f = await fixture(); const plan = checkResourceEngineeringSuccessorPreparation(f.options);
     const original = privateFiles.writePrivateFileAtomically; let changed = false;
     vi.spyOn(privateFiles, 'writePrivateFileAtomically').mockImplementation((temporary, target, bytes, options) => {
@@ -132,7 +136,7 @@ describe('campaign-delivery successor preparation', () => {
     expect(existsSync(f.options.output)).toBe(true); expect(existsSync(f.ledger)).toBe(false);
   });
 
-  it('refuses replay after the source branch is replaced instead of trusting retained origin alone', async () => {
+  it.skipIf(NOT_MACOS)('refuses replay after the source branch is replaced instead of trusting retained origin alone', async () => {
     const f = await fixture(); const plan = checkResourceEngineeringSuccessorPreparation(f.options);
     await prepareResourceEngineeringSuccessorBundle({ ...f.options, expectedPlanDigest: plan.planDigest });
     f.git('update-ref', 'refs/heads/codex/upstream', f.revision); const changed = tree(f.base);
@@ -141,7 +145,7 @@ describe('campaign-delivery successor preparation', () => {
     expect(tree(f.base)).toEqual(changed);
   });
 
-  it.each(['source', 'stage'] as const)('refuses %s replacement during the final receipt source check', async kind => {
+  it.skipIf(NOT_MACOS).each(['source', 'stage'] as const)('refuses %s replacement during the final receipt source check', async kind => {
     const f = await fixture(); const plan = checkResourceEngineeringSuccessorPreparation(f.options);
     const original = handoff.readUniverseCampaignDeliverySource; let changed = false; const stage = join(f.options.output, '.receipt.stage');
     vi.spyOn(handoff, 'readUniverseCampaignDeliverySource').mockImplementation((source, requestDigest) => {

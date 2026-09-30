@@ -105,7 +105,13 @@ describe('emergency authority release truth', () => {
     // legacy console contract now lives.
     expect(readme).toContain('docs/HUB-REFERENCE.md');
     expect(readme).toMatch(/Autonomy ships \*\*dormant\*\*/i);
-    for (const doc of [hubReference, quickstart]) {
+    // #580 rewrote the quickstart for Verse: the legacy `/next/` console and
+    // its token lifecycle now live only in the Hub reference, and the
+    // quickstart must steer new users away from that path.
+    expect(quickstart).toContain('[Hub reference](HUB-REFERENCE.md)');
+    expect(quickstart).toMatch(/Resident autonomy is macOS-only and starts dormant/);
+    expect(quickstart).toMatch(/older `\/` and `\/next\/` dashboard guidance should not\s+be used as a Verse onboarding path/);
+    for (const doc of [hubReference]) {
       expect(doc).toMatch(/compiled\s+(?:daemon and conductor\s+)?trust roots\s+are empty/i);
       expect(doc).toMatch(/live non-dry[^.\n]*(?:dormant|refuse)/i);
       expect(doc).toContain('/next/');
@@ -260,6 +266,15 @@ describe('emergency authority release truth', () => {
   it('documents exactly the seven steps returned by ashlr init', () => {
     const quickstart = read('docs/QUICKSTART.md');
     const start = quickstart.indexOf('Initialization reports these steps:');
+    // #580 removed the step table from the Verse quickstart and defers
+    // `ashlr init` to the Hub reference. If a step table comes back, it must
+    // list exactly the seven steps again.
+    if (start === -1) {
+      expect(quickstart).toMatch(/`ashlr init`[^.]*remain compatibility\s+surfaces[\s\S]{0,200}\[Hub reference\]\(HUB-REFERENCE\.md\)/);
+      expect(quickstart).not.toContain('| `engines` |');
+      expect(quickstart).not.toContain('| `enroll` |');
+      return;
+    }
     const end = quickstart.indexOf('Steps marked `!`', start);
     const initSteps = quickstart.slice(start, end);
 

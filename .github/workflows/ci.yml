@@ -133,12 +133,48 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: some real-io tests read pinned historical seed commits
+          # (the backlog-marker evaluator's baseline), absent from a shallow clone.
+          fetch-depth: 0
 
       - name: Set up Node.js 22
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node_version || '22' }}
           cache: "npm"
+
+      # Native-profile preparation refuses a group/other-writable runtime
+      # (src/core/resources/native-profile.ts executable()). The hosted
+      # Linux tool cache ships the Node binary group-writable, which made
+      # every native-profile test fail closed on ubuntu only.
+      - name: Drop group/other write from the hosted Node runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          node_bin="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
+          stat -c '%a %U:%G %n' "$node_bin"
+          chmod go-w -- "$node_bin"
+          stat -c '%a %U:%G %n' "$node_bin"
+
+      # Custody checks (worker-home parent, preparation Git, built-in
+      # evaluator install) refuse group/world-writable ancestors. On hosted
+      # Linux, os.tmpdir() is the sticky world-writable /tmp, so every test
+      # rooted there fails closed; macOS runners already get a per-user
+      # private temp root. Give Linux the same shape, outside the real
+      # $HOME (RUNNER_TEMP lives under /home/runner, which the HOME-isolation
+      # guards correctly treat as the real developer home) and away from the
+      # hosted /opt, which is mode 0777 on GitHub runners.
+      - name: Use a private temp root on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          private_tmp="/ashlr-private-tmp"
+          sudo install -d -m 0700 -o "$(id -un)" -g "$(id -gn)" -- "$private_tmp"
+          for dir in "$private_tmp" /; do
+            stat -c '%a %U:%G %n' "$dir"
+          done
+          echo "TMPDIR=$private_tmp" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: npm ci
@@ -247,6 +283,17 @@ jobs:
           echo "ASHLR_TEST_SIDECAR=$SIDECAR" >> "$GITHUB_ENV"
           echo "ASHLR_TEST_SIDECAR_CREATED=1" >> "$GITHUB_ENV"
           trap - ERR INT TERM
+          # tauri.conf.json bundles resources/public (staged by
+          # desktop/scripts/prepare-sidecar.mjs in real builds). The Tauri
+          # build script refuses to run when that path is missing, so give
+          # the library-only checks an empty, disposable placeholder.
+          RESOURCES="desktop/src-tauri/resources/public"
+          if [[ -e "desktop/src-tauri/resources" || -L "desktop/src-tauri/resources" ]]; then
+            echo "refusing unexpected resources fixture target: desktop/src-tauri/resources" >&2
+            exit 1
+          fi
+          mkdir -p -- "$RESOURCES"
+          echo "ASHLR_TEST_RESOURCES_CREATED=1" >> "$GITHUB_ENV"
 
       - name: Check native broker formatting
         run: >-
@@ -276,6 +323,10 @@ jobs:
           if [[ "${ASHLR_TEST_SIDECAR_CREATED:-}" == "1" ]]; then
             rm -f -- "$ASHLR_TEST_SIDECAR"
             test ! -e "$ASHLR_TEST_SIDECAR"
+          fi
+          if [[ "${ASHLR_TEST_RESOURCES_CREATED:-}" == "1" ]]; then
+            rmdir -- desktop/src-tauri/resources/public desktop/src-tauri/resources
+            test ! -e desktop/src-tauri/resources
           fi
 
   windows-service-authority:

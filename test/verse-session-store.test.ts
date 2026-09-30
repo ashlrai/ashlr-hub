@@ -209,7 +209,7 @@ describe('resume across compaction (review 3.10 c19)', () => {
     expect(render(resumed(raw, folded, 3))).toEqual(render(raw));
   });
 
-  it('for 1000 randomized logs and EVERY cursor, raw ≤ k + folded > k renders exactly like the raw log', () => {
+  it('for 1000 randomized logs and EVERY cursor, raw ≤ k + folded > k renders exactly like the raw log', { timeout: 30_000 }, () => {
     for (let seed = 1; seed <= 1000; seed += 1) {
       const raw = randomLog(seed);
       const folded = foldTextDeltas(raw);

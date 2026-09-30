@@ -13,6 +13,10 @@ import { readResourceQuotaScopeAccess, setResourcePoolAllocation, setResourceQuo
 import type { ResourcePool } from '../src/core/resources/pool-policy.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
 
+
+// macOS-only: the durable native-activity fence (schema-v4 marker) needs readNativeBootIdentity(), which is darwin-only. Other hosts skip
+// these cleanly instead of failing (src/core/cloud/improvement-backlog.ts).
+const NOT_MACOS = process.platform !== 'darwin';
 let root: string;
 beforeEach(() => { root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-native-lifecycle-'))); });
 afterEach(async () => {
@@ -72,7 +76,7 @@ reader.on('close',()=>{child.send('release');child.disconnect();child.unref();})
 }
 
 describe.skipIf(process.platform === 'win32')('native quota lifecycle integration', () => {
-  it('settles both scoped aliases through the real lease after short-lived native descendants exit', async () => {
+  it.skipIf(NOT_MACOS)('settles both scoped aliases through the real lease after short-lived native descendants exit', async () => {
     const { log, ...options } = fixture();
     setResourcePoolAllocation(options.cwd, options.pool, options.bindings, 75, 0);
     setResourceQuotaScopeAccess(options.cwd, options.pool, options.bindings,
@@ -95,7 +99,7 @@ describe.skipIf(process.platform === 'win32')('native quota lifecycle integratio
     expect(JSON.stringify(result)).not.toMatch(/fixture@example|inert-home|ownerToken|requests.jsonl/);
   });
 
-  it('retains real lease custody and diagnostics without starting another alias when the group exceeds the cleanup bound', async () => {
+  it.skipIf(NOT_MACOS)('retains real lease custody and diagnostics without starting another alias when the group exceeds the cleanup bound', async () => {
     const { log, ...options } = fixture(2_000);
     const error = await refreshResourceQuotaOnce(options).catch(error => error);
     expect(error).toBeInstanceOf(ResourceQuotaRefreshError);

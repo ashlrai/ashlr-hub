@@ -118,6 +118,10 @@ import { daemonServiceInstallOptions } from '../src/core/daemon/service-config.j
 import type { StandingGrantV1 } from '../src/core/authority/types.js';
 import { STRANGER_PRIVATE_KEY, makeGrant, signGrant, withTempHome } from './helpers/authority-310b.js';
 
+
+// macOS-only: resident-service minting and admission are launchd-only (src/core/authority/resident.ts refuses non-darwin hosts). Other hosts skip
+// these cleanly instead of failing (src/core/cloud/improvement-backlog.ts).
+const NOT_MACOS = process.platform !== 'darwin';
 let home: string;
 let restoreHome: () => void;
 const savedEnv: Record<string, string | undefined> = {};
@@ -237,7 +241,7 @@ describe('agents cannot start the resident service', () => {
     expect(operatorContextRefusal(ctx({}, false))).toMatch(/not an interactive terminal/);
   });
 
-  it('an agent shell cannot mint even while a grant is live', () => {
+  it.skipIf(NOT_MACOS)('an agent shell cannot mint even while a grant is live', () => {
     liveGrant();
     expect(observeResidentAdmission().admission.ok).toBe(true);
     process.env['CLAUDECODE'] = '1';
@@ -252,7 +256,7 @@ describe('agents cannot start the resident service', () => {
     expect(mintResidentServiceCapability().ok).toBe(false);
   });
 
-  it('nothing an agent can reach extends authority: minting never writes a grant or raises the switch', () => {
+  it.skipIf(NOT_MACOS)('nothing an agent can reach extends authority: minting never writes a grant or raises the switch', () => {
     liveGrant();
     const before = readdirSync(join(home, '.ashlr', 'authority')).sort();
     const minted = mintResidentServiceCapability();
@@ -262,7 +266,7 @@ describe('agents cannot start the resident service', () => {
 });
 
 describe('the grant decides (real verification)', () => {
-  it('no grant, an unsigned grant, an expired grant and a revoked grant all refuse', () => {
+  it.skipIf(NOT_MACOS)('no grant, an unsigned grant, an expired grant and a revoked grant all refuse', () => {
     expect(mintResidentServiceCapability()).toMatchObject({ ok: false, admission: { code: 'grant-inactive' } });
 
     // Signed by a key that is not a compiled root.
@@ -272,26 +276,26 @@ describe('the grant decides (real verification)', () => {
     expect(mintResidentServiceCapability()).toMatchObject({ ok: false, admission: { code: 'grant-inactive' } });
   });
 
-  it('an expired grant refuses', () => {
+  it.skipIf(NOT_MACOS)('an expired grant refuses', () => {
     liveGrant();
     const expiresAt = Date.parse(makeGrant().expiresAt);
     expect(mintResidentServiceCapability({ nowMs: expiresAt + 1_000 })).toMatchObject({ ok: false, admission: { code: 'grant-inactive' } });
   });
 
-  it('a revoked grant refuses', () => {
+  it.skipIf(NOT_MACOS)('a revoked grant refuses', () => {
     liveGrant();
     revokeStanding({ actor: 'mason', reason: 'test' });
     invalidateStandingPolicyCache();
     expect(mintResidentServiceCapability()).toMatchObject({ ok: false, admission: { code: 'grant-inactive' } });
   });
 
-  it('a dirty build refuses even under a live grant', () => {
+  it.skipIf(NOT_MACOS)('a dirty build refuses even under a live grant', () => {
     liveGrant();
     probe.build = { ...probe.build, dirty: true };
     expect(mintResidentServiceCapability()).toMatchObject({ ok: false, admission: { code: 'build-identity-untrusted' } });
   });
 
-  it('Stop refuses the mint', () => {
+  it.skipIf(NOT_MACOS)('Stop refuses the mint', () => {
     liveGrant();
     stopAutonomy({ actor: 'mason', reason: 'test' });
     expect(mintResidentServiceCapability()).toMatchObject({ ok: false, admission: { code: 'stopped', status: 'waiting-on-you' } });
@@ -299,7 +303,7 @@ describe('the grant decides (real verification)', () => {
 });
 
 describe('the capability', () => {
-  it('is single-use and cannot be forged', () => {
+  it.skipIf(NOT_MACOS)('is single-use and cannot be forged', () => {
     liveGrant();
     const minted = mintResidentServiceCapability();
     expect(minted.ok).toBe(true);
@@ -311,7 +315,7 @@ describe('the capability', () => {
     expect(claimResidentServiceCapability(minted.capability)).toBe(false);
   });
 
-  it('Stop (KILL) between mint and claim wins', () => {
+  it.skipIf(NOT_MACOS)('Stop (KILL) between mint and claim wins', () => {
     liveGrant();
     const minted = mintResidentServiceCapability();
     expect(minted.ok).toBe(true);
@@ -320,7 +324,7 @@ describe('the capability', () => {
     expect(claimResidentServiceCapability(minted.capability)).toBe(false);
   });
 
-  it('goes stale after its short TTL', () => {
+  it.skipIf(NOT_MACOS)('goes stale after its short TTL', () => {
     liveGrant();
     const minted = mintResidentServiceCapability({ nowMs: Date.now() - 120_000 });
     expect(minted.ok).toBe(true);
@@ -346,7 +350,7 @@ describe('the service install path', () => {
     expect(launchd.installs).toEqual([]);
   });
 
-  it('with a minted capability runs the launchd transaction once, with the budget from config', async () => {
+  it.skipIf(NOT_MACOS)('with a minted capability runs the launchd transaction once, with the budget from config', async () => {
     liveGrant();
     const minted = mintResidentServiceCapability();
     expect(minted.ok).toBe(true);
@@ -362,7 +366,7 @@ describe('the service install path', () => {
     expect(launchd.installs).toHaveLength(1);
   });
 
-  it('refuses a non-mac platform even with a capability', async () => {
+  it.skipIf(NOT_MACOS)('refuses a non-mac platform even with a capability', async () => {
     liveGrant();
     const minted = mintResidentServiceCapability();
     if (!minted.ok) throw new Error(minted.reason);

@@ -19,6 +19,10 @@ import { buildUniverseSearchContext, searchContextReceipt } from '../src/core/un
 import type { UniverseCampaignDefinition, UniverseCampaignSeedIntent, UniverseCampaignSeedResult,
   UniverseRun, UniverseSeedContext, UniverseTrial } from '../src/core/universe/types.js';
 
+
+// macOS-only: the Universe trial runner requires macOS sandbox-exec. Other hosts skip
+// these cleanly instead of failing (src/core/cloud/improvement-backlog.ts).
+const NOT_MACOS = process.platform !== 'darwin';
 const roots: string[] = [];
 const at = '2026-09-10T12:00:00.000Z';
 const measuredAt = '2026-09-10T12:00:00.010Z';
@@ -266,7 +270,7 @@ describe('seed context run pins and generation receipts in Universe projection',
 });
 
 describe('runner rechecks parent stop state after synchronous seed verification', () => {
-  it.each(['stopped', 'unavailable'] as const)('refuses transport when parent state becomes %s during contextCurrent', async (state) => {
+  it.skipIf(NOT_MACOS).each(['stopped', 'unavailable'] as const)('refuses transport when parent state becomes %s during contextCurrent', async (state) => {
     const f = fixture();
     // The callback represents the parent's KILL/deadline/ownership verdict;
     // no host KILL file, real clock or provider is changed by this regression.
