@@ -51,7 +51,7 @@ activity by owner so both teammates see whose fleet produced what.
 ### 1. Install ashlr
 
 ```bash
-npm i -g @ashlr/hub
+npm i -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.1/ashlr-hub-3.17.1.tgz
 ```
 
 ### 2. Run setup

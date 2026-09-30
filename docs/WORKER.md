@@ -14,7 +14,7 @@ daemon execution is dormant; owner-invoked proposal commands remain available.
 
 ```sh
 # 1. Install
-npm i -g @ashlr/hub
+npm i -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.1/ashlr-hub-3.17.1.tgz
 
 # 2. Inspect an existing service (read-only)
 ashlr daemon service-status
@@ -235,7 +235,7 @@ The flow below is currently blocked at its shared authority boundary before any
 listed mutation runs. It documents intended internals, not an available command.
 
 ```
-npm i -g @ashlr/hub            # install ashlr globally
+npm i -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.1/ashlr-hub-3.17.1.tgz            # install ashlr globally
 ashlr worker setup             # runs:
   → stepUser                   #   M110: set cfg.user.name
   → stepEngines                #         detect / auth engines

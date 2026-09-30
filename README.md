@@ -15,8 +15,10 @@
 
 ## Install
 
+Install Verse 3.17.1 from its versioned GitHub release:
+
 ```sh
-npm install -g @ashlr/hub   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.1/ashlr-hub-3.17.1.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
 ashlr verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
@@ -184,7 +186,7 @@ The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
 ```sh
-npm install -g @ashlr/hub
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.1/ashlr-hub-3.17.1.tgz
 ashlr --version
 ashlr verse                 # start the server and open http://127.0.0.1:7777/verse/
 ```
