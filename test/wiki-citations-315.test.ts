@@ -4,7 +4,7 @@
  * (Ashlr + Devin formats), module grouping and git-tree parsing.
  */
 
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -15,7 +15,7 @@ import { scrubWikiText } from '../src/core/knowledge/wiki/scrub.js';
 import { parseModelMarkdown, numberedExcerpt } from '../src/core/knowledge/wiki/render.js';
 import { readWikiSteering } from '../src/core/knowledge/wiki/steering.js';
 import { groupModules, resolveSpecifier } from '../src/core/knowledge/wiki/facts.js';
-import { isWikiReadable, parseGithubRemote, parseLsTree } from '../src/core/knowledge/wiki/scan.js';
+import { isWikiReadable, readRepoText, scanRepo, parseGithubRemote, parseLsTree } from '../src/core/knowledge/wiki/scan.js';
 import { answerable, pageSections, rankPassages, tokenizeQuery, type Passage } from '../src/core/knowledge/wiki/ask.js';
 
 const LINES: Record<string, number> = {
@@ -175,6 +175,24 @@ describe('scan + facts helpers', () => {
       '100644 blob eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee       7\tlegacy/old.ts',
     ].join('\0') + '\0';
     expect(parseLsTree(raw, ['legacy/']).files.map((f) => f.rel)).toEqual(['src/a.ts']);
+  });
+
+  it('refuses parent directory symlinks and marks unavailable listings incomplete', async () => {
+    const base = mkdtempSync(path.join(tmpdir(), 'wiki-containment-'));
+    const repo = path.join(base, 'repo');
+    const outside = path.join(base, 'outside');
+    mkdirSync(repo); mkdirSync(outside);
+    writeFileSync(path.join(outside, 'private.ts'), 'export const PRIVATE_OUTSIDE = true;');
+    symlinkSync(outside, path.join(repo, 'src'), 'dir');
+    try {
+      expect(await readRepoText(repo, 'src/private.ts')).toBeNull();
+      writeFileSync(path.join(repo, 'safe.ts'), 'export const safe = true;');
+      expect(await readRepoText(repo, 'safe.ts')).toBe('export const safe = true;');
+      expect(await readRepoText(repo, 'safe.ts', 5)).toBeNull();
+      const unavailable = await scanRepo(path.join(base, 'missing'));
+      expect(unavailable.files).toEqual([]);
+      expect(unavailable.listingIncomplete).toBe(true);
+    } finally { rmSync(base, { recursive: true, force: true }); }
   });
 
   it('groups modules adaptively and resolves NodeNext .js specifiers to .ts', () => {

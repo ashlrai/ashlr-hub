@@ -6,11 +6,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import type { WikiAskResult, WikiPageView, WikiRepoView, WikiReposView, WikiStatus } from '../../../../core/knowledge/wiki/types.js';
+import type { WikiAskResult, WikiGraphView, WikiPageView, WikiRepoView, WikiReposView, WikiStatus } from '../../../../core/knowledge/wiki/types.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { evictAll } from '../../../data/cache.js';
 import { installFetch, json, TEST_TOKEN, type RecordedCall } from '../context/context-fixtures.test-support.js';
 import { resetVerseUi, getVerseUiState } from '../verse-ui-store.js';
+import { WikiGraphCanvas } from './WikiGraph.js';
 import { WikiView } from './WikiView.js';
 import { requestWikiFocus, resetWikiFocus } from './wiki-focus.js';
 import { freshness, githubCitationUrl, jobLine, modelLabel, pageTree, repoForProject } from './wiki-model.js';
@@ -59,12 +60,23 @@ function pageView(id: string, markdown: string): WikiPageView {
 
 const OVERVIEW_MD = '# Overview\n\n> p\n\nNotes are saved by [src/store/notes.ts:5-6](#cite:src/store/notes.ts:5-6). See [Module map](#page:modules).\n';
 
+const GRAPH: WikiGraphView = {
+  repoKey: KEY, repoName: 'notes', commit: SHA, generatedAt: '2026-09-29T12:00:00Z',
+  nodes: [
+    { id: 'src/api', sourceFiles: 2, testFiles: 1, bytes: 100, files: [{ file: 'src/api/server.ts', line: 1, lines: 10 }], exports: [{ name: 'handle', kind: 'function', cite: { file: 'src/api/server.ts', line: 3 } }] },
+    { id: 'src/store', sourceFiles: 1, testFiles: 0, bytes: 80, files: [{ file: 'src/store/notes.ts', line: 1, lines: 6 }], exports: [] },
+  ],
+  edges: [{ from: 'src/api', to: 'src/store', imports: 2, confidence: 'inferred' }],
+  coverage: { listedFiles: 7, readFiles: 5, unreadFiles: 2, omittedModuleFiles: 1, listingTruncated: false },
+};
+
 function server(over: { repo?: () => WikiRepoView; ask?: WikiAskResult; onPost?: (c: RecordedCall) => void } = {}) {
   return installFetch((call) => {
     if (call.method === 'POST') over.onPost?.(call);
     if (call.path === '/api/verse/wiki') return json(reposView);
     if (call.path === `/api/verse/wiki/repo/${KEY}`) return json(over.repo ? over.repo() : repoView());
     if (call.path === `/api/verse/wiki/repo/${OTHER}`) return json(repoView({ status: status({ key: OTHER, exists: false, pages: [], stalePages: 0, generatedCommit: null }), githubUrl: null }));
+    if (call.path === `/api/verse/wiki/repo/${KEY}/graph` || call.path === `/api/verse/wiki/repo/${OTHER}/graph`) return json(GRAPH);
     if (call.path === `/api/verse/wiki/repo/${KEY}/page/overview`) return json(pageView('overview', OVERVIEW_MD));
     if (call.path === `/api/verse/wiki/repo/${KEY}/page/modules`) return json(pageView('modules', '# Module map\n\n| Module |\n|---|\n| `src/store` |\n'));
     if (call.path === `/api/verse/wiki/repo/${KEY}/build`) return json({ job: { state: 'running', startedAt: '', finishedAt: null, progress: { index: 0, total: 0, page: null }, summary: null, error: null, trigger: 'operator' } }, 202);
@@ -107,6 +119,21 @@ describe('wiki-model', () => {
 });
 
 describe('WikiView', () => {
+  it('opens a local module map before a wiki is built and sends verified citations through the token gate', async () => {
+    const { calls } = server();
+    render(<WikiView />);
+    fireEvent.change(await screen.findByRole('combobox', { name: 'Repo' }), { target: { value: OTHER } });
+    fireEvent.click(within(screen.getByRole('group', { name: 'Wiki view' })).getByRole('button', { name: 'Module map' }));
+    const map = await screen.findByRole('region', { name: 'Codebase module map' });
+    expect(within(map).getByText('Partial coverage: 5 of 7 listed files read')).toBeInTheDocument();
+    expect(calls.some((c) => c.path === `/api/verse/wiki/repo/${OTHER}/graph`)).toBe(true);
+    fireEvent.click(within(map).getByRole('button', { name: 'handle' }));
+    await waitFor(() => expect(calls.some((c) => c.path === '/api/verse/wiki/open')).toBe(true));
+    const open = calls.find((c) => c.path === '/api/verse/wiki/open')!;
+    expect(open.body).toEqual({ repoKey: OTHER, file: 'src/api/server.ts', line: 3 });
+    expect(open.headers['x-ashlr-token']).toBe(TEST_TOKEN);
+  });
+
   it('shows the freshness badge, the tree with stale marks, and the rendered page', async () => {
     server();
     render(<WikiView />);
@@ -224,5 +251,39 @@ describe('WikiView', () => {
     installFetch((call) => (call.path === '/api/verse/wiki' ? json({ repos: [] }) : json({ error: 'nf' }, 404)));
     render(<WikiView />);
     expect(await screen.findByText('No enrolled repos')).toBeInTheDocument();
+  });
+});
+
+
+describe('WikiGraphCanvas', () => {
+  it('searches modules by exported symbols, follows dependency buttons, and preserves exact citations', () => {
+    const cite = vi.fn();
+    render(<WikiGraphCanvas graph={GRAPH} onCite={cite} />);
+    const detail = screen.getByRole('complementary', { name: 'Selected module' });
+    expect(within(detail).getByRole('heading', { name: 'src/api' })).toBeInTheDocument();
+    fireEvent.click(within(detail).getByRole('button', { name: 'src/store' }));
+    expect(within(detail).getByRole('heading', { name: 'src/store' })).toBeInTheDocument();
+    fireEvent.click(within(detail).getByRole('button', { name: 'src/store/notes.ts:1' }));
+    expect(cite).toHaveBeenCalledWith({ file: 'src/store/notes.ts', line: 1 }, SHA);
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Find a module' }), { target: { value: 'handle' } });
+    expect(screen.getByText('1 of 2 modules')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'handle' }));
+    expect(cite).toHaveBeenLastCalledWith({ file: 'src/api/server.ts', line: 3 }, SHA);
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Find a module' }), { target: { value: 'nothing matches' } });
+    expect(screen.getByRole('status')).toHaveTextContent('No matching modules');
+  });
+
+  it('explains an empty scan and offers an explicit refresh', () => {
+    const refresh = vi.fn();
+    render(<WikiGraphCanvas graph={{ ...GRAPH, nodes: [], edges: [] }} onCite={vi.fn()} onRefresh={refresh} />);
+    expect(screen.getByRole('status')).toHaveTextContent('No readable modules');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh map' }));
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+
+  it('distinguishes a failed listing from an empty readable repo', () => {
+    render(<WikiGraphCanvas graph={{ ...GRAPH, nodes: [], edges: [], coverage: { ...GRAPH.coverage, listedFiles: 0, readFiles: 0, listingIncomplete: true } }} onCite={vi.fn()} />);
+    expect(screen.getByRole('status')).toHaveTextContent('listing could not be completed');
+    expect(screen.getByText('Partial coverage: 0 of 0 listed files read')).toBeInTheDocument();
   });
 });

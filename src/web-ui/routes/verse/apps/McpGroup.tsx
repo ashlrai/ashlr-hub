@@ -18,7 +18,7 @@ import { Input } from '../../../components/primitives/Input.js';
 import { Select } from '../../../components/primitives/Select.js';
 import { Sheet } from '../../../components/primitives/Sheet.js';
 import { ApiError } from '../../../data/client.js';
-import { SCOPE_REASON_COPY, narrowServer, reasonSentence, type CliHealthSnapshot, type McpServer, type McpSnapshot } from '../mcp/mcp-contract.js';
+import { SCOPE_REASON_COPY, SCOPE_SETUP_COPY, narrowServer, reasonSentence, type CliHealthSnapshot, type McpServer, type McpSnapshot } from '../mcp/mcp-contract.js';
 import { McpServerDisclosure } from '../mcp/McpServerDisclosure.js';
 import { applyMcpServer, proposeMcpServer, type McpServerInput } from '../mcp/mcp-queries.js';
 import { mcpSeatRows, mcpTargets, parseEnvLines, splitArgs, type McpSeatRow } from './apps-model.js';
@@ -263,8 +263,7 @@ export function McpGroup({
       }
       caveat={
         <>
-          Claude and local seats load no MCP servers: Verse starts them with{' '}
-          <code>--strict-mcp-config</code> and an empty <code>--mcp-config</code>. Codex and Grok seats load their own
+          Claude and local seats do not load account-configured MCP servers. Verse’s own agent tools are controlled separately per chat. Codex and Grok seats load their own
           account’s config — and an <code>ashlr__</code> write through one is refused on a folder that is not enrolled.
         </>
       }
@@ -290,10 +289,14 @@ export function McpGroup({
         </ul>
       )}
       {snapshot?.scope ? (
-        <p className={styles.scopeLine}>
-          Scope: {reasonSentence(SCOPE_REASON_COPY, snapshot.scope.reason, 'Locus did not report a usable scope.')}
-          {snapshot.scope.tenantRef ? ` (${snapshot.scope.tenantRef})` : ''}
-        </p>
+        <div className={styles.scopeLine}>
+          <p>Scope: {reasonSentence(SCOPE_REASON_COPY, snapshot.scope.reason, 'Locus did not report a usable scope.')}
+            {snapshot.scope.tenantRef ? ` (${snapshot.scope.tenantRef})` : ''}
+            {snapshot.scope.reason !== 'mcp-scope-pinned' ? ' Run locus doctor on your Mac; a human must select and restore the intended pin.' : ''}
+          </p>
+          {snapshot.scope.setupIssues?.map((code) => Object.hasOwn(SCOPE_SETUP_COPY, code)
+            ? <p key={code}>{SCOPE_SETUP_COPY[code]}</p> : null)}
+        </div>
       ) : null}
       <AddServerSheet open={adding} snapshot={snapshot} run={run} onClose={() => setAdding(false)} onAdded={onAdded} />
     </AppGroup>

@@ -15,9 +15,10 @@ import type { AshlrConfig } from '../src/core/types.js';
 import type { VerseApiContext } from '../src/core/verse/verse-api.js';
 import { createWikiApi, DEFAULT_WIKI_API_DEPS, type WikiApiDeps } from '../src/core/verse/wiki-api.js';
 import { askWiki, buildWiki, wikiKey } from '../src/core/knowledge/wiki/index.js';
+import { classifyRemoteRoute } from '../src/core/web/remote-gateway-policy.js';
 import { startWikiJob } from '../src/core/knowledge/wiki/jobs.js';
 import type { WikiJob } from '../src/core/knowledge/wiki/jobs.js';
-import type { WikiAskResult, WikiPageView, WikiRepoView, WikiReposView } from '../src/core/knowledge/wiki/types.js';
+import type { WikiAskResult, WikiGraphView, WikiPageView, WikiRepoView, WikiReposView } from '../src/core/knowledge/wiki/types.js';
 
 const TOKEN = 'wiki-test-token';
 // Assembled at runtime so no secret-shaped literal is committed (push protection).
@@ -124,6 +125,31 @@ describe('/api/verse/wiki', () => {
     expect((await get(`/api/verse/wiki/repo/${key}/page/overview`)).status).toBe(404);
     expect((await get('/api/verse/wiki/repo/..%2F..%2Fetc')).status).toBe(404);
   }, 30_000);
+
+  it('maps an enrolled repo without a wiki, exposes only cited metadata, and honors changed scan policy', async () => {
+    const key = wikiKey(repo.dir);
+    const route = `/api/verse/wiki/repo/${key}/graph`;
+    expect((await get(route)).status).toBe(200);
+    const graph = await (await get(route)).json() as WikiGraphView;
+    expect(graph.nodes.length).toBeGreaterThan(0);
+    expect(graph.nodes.flatMap((n) => n.files).map((f) => f.file)).toContain('src/server.ts');
+    expect(JSON.stringify(graph)).not.toContain(SECRET);
+    expect(JSON.stringify(graph)).not.toContain('insert');
+    expect(JSON.stringify(graph)).not.toContain(repo.dir);
+    expect((await get(`${route}?path=/etc/passwd`)).status).toBe(400);
+    expect((await post(route, {})).status).toBe(404);
+    expect((await post('/api/verse/wiki/open', { repoKey: key, file: 'src/server.ts' }, null)).status).toBe(401);
+    expect((await post('/api/verse/wiki/open', { repoKey: key, file: 'src/server.ts', line: 999 })).status).toBe(200);
+    expect(opened[0]?.line).toBe(2);
+    repo.writeFile('.ashlr/wiki.json', JSON.stringify({ ignorePaths: ['src/'] }));
+    const restricted = await (await get(route)).json() as WikiGraphView;
+    expect(restricted.nodes.flatMap((n) => n.files).some((f) => f.file.startsWith('src/'))).toBe(false);
+    // The phone gateway has a separate explicit allowlist; source maps remain local.
+    expect(classifyRemoteRoute('GET', route)).toEqual({ kind: 'deny' });
+    repo.unenroll();
+    expect((await get(route)).status).toBe(404);
+    expect((await post('/api/verse/wiki/open', { repoKey: key, file: 'src/server.ts' })).status).toBe(409);
+  });
 
   it('serves page markdown with cited links and no secrets', async () => {
     await buildWiki({ repo: repo.dir, noModel: true });

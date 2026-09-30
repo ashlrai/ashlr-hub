@@ -179,7 +179,7 @@ describe('emergency authority release truth', () => {
     }
   });
 
-  it('keeps examples, team enrollment, and desktop draft guidance within current authority', () => {
+  it('keeps examples, team enrollment, and desktop release guidance within current authority', () => {
     const example = read('examples/quickstart.md');
     const team = read('docs/TEAM.md');
     const desktop = read('desktop/README.md');
@@ -203,17 +203,15 @@ describe('emergency authority release truth', () => {
     expect(team).toMatch(/refusal occurs before either value is applied or persisted/i);
     expect(team).not.toMatch(/setup` does not accept a `--user` flag/i);
 
-    // 1caef471 (Verse desktop) rewrote the README: the "desktop draft" that
-    // wrapped Mission Control became a source-only app that wraps Verse, and
-    // the tray lost its Start/Stop Daemon and Kill Switch rows. The authority
-    // facts this block guards are unchanged — still source-only, still not a
-    // public/commissioned product, still no installer, still never starts or
-    // activates the daemon — so they stay pinned against the current wording.
-    expect(desktop).toMatch(/source-only Tauri v2 desktop app/i);
-    expect(desktop).not.toMatch(/source-only Tauri v2 desktop draft/i);
-    expect(normalizedDesktop).toMatch(/not a public or commissioned desktop product/i);
-    expect(normalizedDesktop).toMatch(/does not activate the dormant daemon/i);
-    expect(normalizedDesktop).toMatch(/Public desktop releases and installers: none/);
+    // The arm64 installer is now public and locally signed. Availability of a
+    // desktop download does not grant or start resident authority.
+    expect(desktop).toMatch(/A Tauri v2 desktop app/i);
+    expect(normalizedDesktop).toMatch(/resident autonomy requires its separate local setup and grant/i);
+    expect(desktop).toMatch(/releases\/download\/v3\.17\.0\/Ashlr_3\.17\.0_aarch64_locally-signed\.dmg/);
+    expect(normalizedDesktop).toMatch(/locally signed, not Apple Developer ID notarized/i);
+    expect(normalizedDesktop).toMatch(/Windows[^\n]*draft only/i);
+    expect(normalizedDesktop).toMatch(/Linux[^\n]*Not produced while quarantined/i);
+    expect(normalizedDesktop).not.toMatch(/Public desktop releases and installers: none/);
     expect(normalizedDesktop).toMatch(/setup --yes`[\s\S]{0,180}refuses before config/i);
     expect(normalizedDesktop).toMatch(/No resident daemon is started/);
     expect(normalizedDesktop).toMatch(/Daemon start\/stop and the kill switch are deliberately \*\*not\*\* here/);

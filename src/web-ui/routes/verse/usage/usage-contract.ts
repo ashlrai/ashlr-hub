@@ -136,6 +136,7 @@ const WIRE_LOCAL_RUNTIME_KEYS = {
   reachable: 'reachable',
   models: 'models',
   reason: 'reason',
+  detailInspection: 'detailInspection',
   // V2.1: a RETAINED known-good reading rather than a fresh probe. Both must
   // be projected — a stale reading presented as fresh is the exact failure
   // this seam exists to prevent.
@@ -423,6 +424,7 @@ export interface LocalRuntimeStatus {
   /** Age of that retained reading in ms. Null when `stale` is false. */
   staleForMs: number | null;
   modelCount: number;
+  detailInspection?: { attempted: number; pending: number };
 }
 
 export interface LocalModelsSnapshot {
@@ -734,6 +736,10 @@ function projectRuntimeReport(
     .map((m) => projectLocalModel(m, runtime))
     .filter((m): m is LocalModel => m !== null);
   const stale = bool(r, 'stale');
+  const inspection = record(r['detailInspection']);
+  const attempted = inspection ? num(inspection, 'attempted') : null;
+  const pending = inspection ? num(inspection, 'pending') : null;
+  const detailInspection = attempted !== null && pending !== null && Number.isInteger(attempted) && Number.isInteger(pending) && attempted >= 0 && pending > 0 && attempted + pending === models.length ? { attempted, pending } : undefined;
   return {
     models,
     status: {
@@ -745,6 +751,7 @@ function projectRuntimeReport(
       // a contradiction, and printing it would age a current reading.
       staleForMs: stale ? num(r, 'staleForMs') : null,
       modelCount: models.length,
+      ...(detailInspection ? { detailInspection } : {}),
     },
   };
 }

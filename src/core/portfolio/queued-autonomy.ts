@@ -32,7 +32,7 @@ const WORK_SOURCES = new Set<WorkSource>([
   'issue', 'todo', 'test', 'dep', 'doc', 'security', 'plugin', 'self', 'lint', 'goal', 'hygiene', 'invent',
 ]);
 const ENGINE_IDS = new Set<EngineId>([
-  'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'kimi', 'nim', 'opencode', 'grok',
+  'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'kimi', 'nim', 'opencode', 'meta-muse', 'grok',
 ]);
 const ENGINE_TIERS = new Set<EngineTier>(['local', 'mid', 'frontier']);
 const REPAIR_TREATMENTS = new Set<RepairTreatment>(['baseline-reslice', 'target-localization']);

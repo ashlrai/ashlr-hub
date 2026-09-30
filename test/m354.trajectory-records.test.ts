@@ -520,7 +520,7 @@ describe('Trajectory records', () => {
     expect(json).not.toContain('npm test');
   });
 
-  it('projects capped, chronological, opaque trajectory traces with source quality', () => {
+  it.each(['codex', 'meta-muse'] as const)('projects capped, chronological, opaque %s trajectory traces with source quality', (backend) => {
     const hostile = 'RAW_TRACE_SECRET_SHOULD_NOT_LEAK';
     const records: TrajectoryRecord[] = Array.from({ length: 6 }, (_, index) => ({
       version: 1,
@@ -561,7 +561,7 @@ describe('Trajectory records', () => {
         model: `private-model-${hostile}`,
         reason: hostile,
         routeSnapshot: {
-          backend: 'codex', tier: 'frontier', model: `private-model-${hostile}`,
+          backend, tier: backend === 'codex' ? 'frontier' : 'mid', model: `private-model-${hostile}`,
           routerPolicyVersion: 'fleet-router-v1', reason: hostile,
         },
         learningSource: `private-source-${hostile}`,
@@ -595,7 +595,7 @@ describe('Trajectory records', () => {
       '2026-07-09T12:06:00.000Z', '2026-07-09T12:07:00.000Z', '2026-07-09T12:08:00.000Z',
     ]);
     expect(trace.events[0]).toMatchObject({
-      kind: 'evidence', outcome: 'passed', route: { backend: 'codex', tier: 'frontier', modelFamily: 'other', policyVersion: 'fleet-router-v1', learningEpoch: '2026-07-09' },
+      kind: 'evidence', outcome: 'passed', route: { backend, tier: backend === 'codex' ? 'frontier' : 'mid', modelFamily: 'other', policyVersion: 'fleet-router-v1', learningEpoch: '2026-07-09' },
       evidence: { state: 'passed', trust: 'deterministic', commandKinds: ['test'] },
       labelBasis: 'unknown', learningSource: 'unknown',
     });

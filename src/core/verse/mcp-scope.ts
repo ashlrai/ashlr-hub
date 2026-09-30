@@ -52,6 +52,9 @@ export type VerseMcpScopeReason =
   | 'mcp-scope-seal-unverified'
   /** Pinned, but the pin has expired. */
   | 'mcp-scope-expired'
+  | 'mcp-scope-frozen'
+  | 'mcp-scope-not-ready'
+  | 'mcp-scope-readiness-unverified'
   /** Pinned and sealed. */
   | 'mcp-scope-pinned';
 
@@ -79,6 +82,8 @@ export interface VerseMcpScope {
   status: string | null;
   statusOneline: string | null;
   reason: VerseMcpScopeReason;
+  /** Closed setup issue codes only; raw doctor findings and locators stay private. */
+  setupIssues?: string[];
 }
 
 /** The scope a mutation would be written under, plus whether it may proceed. */
@@ -125,6 +130,33 @@ function flag(value: unknown): boolean | null {
   return typeof value === 'boolean' ? value : null;
 }
 
+function setupIssues(report: NonNullable<LocusProbeResult['report']>): string[] {
+  const doctor = report.doctor;
+  if (!doctor || typeof doctor !== 'object' || Array.isArray(doctor)) return [];
+  const value = doctor as Record<string, unknown>;
+  const out = new Set<string>();
+  if (value.phantom_on_path === false) out.add('phantom_unavailable');
+  const runtime = value.runtime;
+  if (runtime && typeof runtime === 'object' && !Array.isArray(runtime)
+    && (runtime as Record<string, unknown>).authority_anchor_ok === false) out.add('authority_anchor_unavailable');
+  const allowed = new Set(['authority_anchor_unavailable', 'credential_migration_incomplete']);
+  const runtimeIssues = runtime && typeof runtime === 'object' && !Array.isArray(runtime)
+    ? (runtime as Record<string, unknown>).issues : null;
+  for (const codes of [value.issues, runtimeIssues]) {
+    if (Array.isArray(codes)) for (const code of codes) {
+      if (typeof code === 'string' && allowed.has(code)) out.add(code);
+    }
+  }
+  const findings = Array.isArray(value.findings) ? value.findings : [];
+  for (const finding of findings) {
+    if (finding && typeof finding === 'object' && !Array.isArray(finding)) {
+      const code = (finding as Record<string, unknown>).code;
+      if (typeof code === 'string' && allowed.has(code)) out.add(code);
+    }
+  }
+  return [...out];
+}
+
 /**
  * Project one `locus agent report --json` probe onto {@link VerseMcpScope}.
  *
@@ -141,6 +173,7 @@ export function projectVerseMcpScope(probe: LocusProbeResult): VerseMcpScope {
     available: true,
     status: ref(report.status),
     statusOneline: ref(report.status_oneline),
+    setupIssues: setupIssues(report),
   };
 
   if (pin === null || pin.pinned !== true) {
@@ -154,6 +187,7 @@ export function projectVerseMcpScope(probe: LocusProbeResult): VerseMcpScope {
 
   const sealOk = flag(pin.seal_ok);
   const expired = flag(pin.expired);
+  const frozen = flag(pin.frozen);
 
   // Order matters: an expired pin whose seal never verified is reported as
   // seal-unverified, because that is the more fundamental failure and the one
@@ -161,7 +195,10 @@ export function projectVerseMcpScope(probe: LocusProbeResult): VerseMcpScope {
   const reason: VerseMcpScopeReason =
     sealOk === false ? 'mcp-scope-seal-unverified'
       : expired === true ? 'mcp-scope-expired'
-        : 'mcp-scope-pinned';
+        : frozen === true || report.status_oneline === 'frozen' ? 'mcp-scope-frozen'
+          : report.ready !== true || report.status !== 'ready' || !probe.gateOk ? 'mcp-scope-not-ready'
+            : sealOk !== true || expired !== false ? 'mcp-scope-readiness-unverified'
+              : 'mcp-scope-pinned';
 
   return {
     ...base,
@@ -172,7 +209,7 @@ export function projectVerseMcpScope(probe: LocusProbeResult): VerseMcpScope {
     bindingRef: ref(pin.binding_id),
     sealOk,
     expired,
-    frozen: flag(pin.frozen),
+    frozen,
     expiresAt: ref(pin.expires_at),
     reason,
   };

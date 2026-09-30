@@ -26,6 +26,7 @@ import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { describeContextError, useTokenGate, type TokenGate } from '../context/use-token-gate.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { WikiMarkdown } from './WikiMarkdown.js';
+import { WikiGraph } from './WikiGraph.js';
 import { getWikiFocus, isWikiFocusLive, subscribeWikiFocus, takeWikiFocus } from './wiki-focus.js';
 import { freshness, githubCitationUrl, initialRepo, jobLine, modelLabel, pageTree, repoForProject, shortSha, type WikiRepoRow, type WikiTreePage } from './wiki-model.js';
 import { askWikiQuestion, invalidateWikiRepo, openWikiCitation, startWikiBuild, wikiPageQuery, wikiRepoQuery, wikiReposQuery } from './wiki-queries.js';
@@ -287,6 +288,7 @@ function WikiRepoPanel({ repo, rows, gate, target, onChoose, onNotice, onView, o
   const [building, setBuilding] = useState(false);
   const [pageId, setPageId] = useState('overview');
   const [pageEpoch, setPageEpoch] = useState(0);
+  const [surface, setSurface] = useState<'pages' | 'map'>('pages');
 
   useEffect(() => {
     onView(view ?? null);
@@ -349,9 +351,16 @@ function WikiRepoPanel({ repo, rows, gate, target, onChoose, onNotice, onView, o
         Local models first; Grok only where your grant and this repo allow it; never Claude. Pages live in <code>~/.ashlr/knowledge/wiki</code>, never in the repo.
       </p>
 
+      <div className={styles.segmented} role="group" aria-label="Wiki view">
+        <button type="button" aria-pressed={surface === 'pages'} onClick={() => setSurface('pages')}>Pages</button>
+        <button type="button" aria-pressed={surface === 'map'} onClick={() => setSurface('map')}>Module map</button>
+      </div>
+
       {job ? <p className={styles.job} data-state={job.state} role="status" aria-live="polite">{jobLine(job)}</p> : null}
 
-      {view === undefined && !q.error ? (
+      {surface === 'map' ? (
+        <WikiGraph repoKey={repo.key} onCite={(c, commit) => void openCite(c, repo.key, view?.githubUrl ?? null, commit)} />
+      ) : view === undefined && !q.error ? (
         <div aria-busy="true" aria-label="Loading wiki">
           <SkeletonLine width="30%" />
           <SkeletonLine width="85%" />

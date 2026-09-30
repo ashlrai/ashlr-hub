@@ -71,6 +71,20 @@ describe('explicit connection configuration', () => {
 });
 
 describe('native metadata monitoring', () => {
+  it('collects all explicitly enrolled accounts beyond eight with the existing probe concurrency bound', async () => {
+    let active = 0; let peak = 0;
+    probes.codex.mockImplementation(async () => {
+      active++; peak = Math.max(peak, active); await Promise.resolve(); active--; return codex();
+    });
+    const large = config(Array.from({ length: 24 }, () => 'codex'));
+    const handle = start({ config: large }); await settle();
+    expect(handle.snapshot().accounts).toHaveLength(24);
+    expect(handle.snapshot().accounts.every(row => row.authentication === 'signed-in')).toBe(true);
+    expect(probes.codex).toHaveBeenCalledTimes(24); expect(peak).toBe(2);
+    const duplicate = { ...large, accounts: [...large.accounts, large.accounts[0]!] };
+    expect(() => validateResourceConnectionConfig(duplicate)).toThrow();
+  });
+
   it('keeps a verified Codex window for display across transient failures, without renewing its expiry or auth', async () => {
     const handle = start({ config: config(['codex']) }); await settle();
     const observed = handle.snapshot().accounts[0]!;

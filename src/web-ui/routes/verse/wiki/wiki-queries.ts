@@ -14,6 +14,7 @@
  */
 import type {
   WikiAskResult,
+  WikiGraphView,
   WikiJobView,
   WikiPageView,
   WikiRepoView,
@@ -47,6 +48,10 @@ export function wikiPageQuery(key: string, id: string): QueryDef<WikiPageView> {
   };
 }
 
+export function wikiGraphQuery(key: string): QueryDef<WikiGraphView> {
+  return { key: `verse-wiki-graph:${key}`, fetch: (signal) => apiGet<WikiGraphView>(`${WIKI_PATH}/repo/${encodeURIComponent(key)}/graph`, signal) };
+}
+
 function token(): string {
   const t = getMutationToken();
   if (!t) throw new VerseMutationLockedError();
@@ -64,6 +69,7 @@ export async function startWikiBuild(key: string, opts: { force?: boolean } = {}
 
 /** A finished build changes pages: drop every cached read for the repo. */
 export function invalidateWikiRepo(key: string, pageIds: readonly string[]): void {
+  invalidate(`verse-wiki-graph:${key}`);
   invalidate(repoKeyOf(key));
   invalidate(WIKI_REPOS_KEY);
   for (const id of pageIds) invalidate(pageKeyOf(key, id));

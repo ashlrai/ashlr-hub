@@ -9,7 +9,52 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [Unreleased]
+## [3.17.0] — 2026-09-29
+
+### Added
+
+- Add a searchable local Wiki module map with dependency links, cited files
+  and explicit scan coverage, using the existing scanner without model calls.
+- Connect fleet Claude and Codex runs to the dedicated `ashlr-mcp` efficiency
+  plugin when installed, using its managed launcher and per-run configuration.
+
+- Search large account/model rosters when starting a chat; filtering preserves
+  the selected execution identity and unavailable-model explanations.
+- Include GPT-6.1 Sol in the documented Codex fallback catalog; each connected
+  account's own model catalog remains authoritative.
+- Add an opt-in `meta-muse` fleet API engine for Meta's documented
+  `muse-spark-1.3` Chat Completions endpoint. It requires `MODEL_API_KEY`, is
+  metered, and gains no implicit merge authority or consumer subscription access.
+
+### Fixed
+
+- Show expired, frozen and incomplete Locus/Phantom setup honestly in Apps,
+  with recovery guidance that preserves the intended human-selected identity.
+- Route all registered API-model engines through the existing sandboxed API
+  runner, including configured providers and Meta Muse. Explicit API requests
+  refuse missing keys or unavailable endpoints before dispatch rather than
+  substituting another provider.
+- Bound local capability inspection time, reuse recent evidence and keep
+  uninspected models visible as pending instead of blocking large catalogs.
+
+- Remove fixed eight-account, 32-worker and 64/256-model discovery limits.
+  Serialized byte limits, probe concurrency, serving slots, quota reserves,
+  per-worker execution limits and signed authority remain enforced.
+- Preserve phone drafts during successful session checks; expired, revoked or
+  signed-out sessions still revoke remote action access.
+- Preserve the existing phone chat and draft after a confirmed first-turn
+  refusal. Pause resends after ambiguous delivery and offer read-only chat
+  inspection, preventing duplicate prompts after a lost response.
+- Handle a retiring phone gateway removing its admin socket between inspection
+  and connection without refusing startup or deleting another owner's socket.
+
+### Security
+
+- Confine Wiki file reads to the enrolled repository across symlink races,
+  bound growing-file reads and refuse blocking FIFO reads.
+- Patch the Raycast `brace-expansion` dependency to 5.0.12.
+- Update `fast-uri` to 3.1.8 and `ip-address` to 10.7.2 for newly published URI
+  normalization, address-family and parser denial-of-service advisories.
 
 ## [3.16.1] — 2026-09-28
 

@@ -8,6 +8,37 @@ account and local model is costing you.
 It is served by the normal `ashlr serve` server at `/verse/`, opened by
 `ashlr verse`, and wrapped by the macOS desktop app in `desktop/`.
 
+Large new-chat rosters include a **Find an account or model** search. Search
+matches the provider, account label and model name while keeping your selected
+account intact. Native model catalogs remain specific to the account; a model
+listed on one Codex account is not evidence it is available on another.
+GPT-6.1 Sol is also included in the fallback catalog for accounts that have not
+yet fetched their own list.
+
+Phone session checks preserve drafts while the session is valid. Expiry or
+revocation returns the phone to sign-in. If the first turn of a new phone chat
+fails, retry sends the retained prompt to the existing chat instead of starting
+another one. Changing the account, model or project starts a distinct chat.
+
+### Additional model providers
+
+The fleet's declarative engine registry supports model providers independently
+of the native chat seats. Meta Muse is available as the opt-in `meta-muse` API
+engine using `https://api.meta.ai/v1`, model `muse-spark-1.3`, and the private
+`MODEL_API_KEY` credential. Add `meta-muse` deliberately to
+`foundry.allowedBackends`; model/endpoint overrides use the existing
+`foundry.engines` contract. The engine is metered and subject to local-only,
+spend and signed-authority policy. It does not create a native Muse Code seat,
+grant new authority or reuse a consumer subscription. See the
+[Meta API contract](https://dev.meta.ai/docs/cookbook/quickstart-chat-completions).
+
+[OpenAI Dots](https://help.openai.com/en/articles/20001530-getting-started-with-your-dot)
+are managed agents in ChatGPT. A public fleet-dispatch contract has not been
+verified, so Verse does not treat a Dot as an executable seat. Likewise,
+[Grok Bot](https://docs.x.ai/grok-bot/overview) is distinct from the Grok CLI
+seat and the xAI API engine; a connected CLI account does not establish a Bot
+integration.
+
 - Build contracts: `docs/VERSE-CONTRACT-V1.md` (sessions) and
   `docs/VERSE-CONTRACT-V2.md` (redesign + control plane).
 - Context windows, compaction, modes, handoff and shared memory:
@@ -1703,3 +1734,34 @@ launches the staged sidecar, so run steps 1–2 first.
   upstream Tauri limitation of the overlay title bar): first click focuses,
   second click drags.
 - Auto-update is inert until a signing key is configured.
+
+## Local module map
+
+Open **Wiki → Module map** for an enrolled repository to follow imports between
+modules, find files or exported symbols, and open cited source lines. The map
+uses the existing local scanner and makes no model calls. It labels pattern-based
+dependency links as inferred and shows listed, read and omitted-file coverage;
+it is an overview of the sampled working files, not a complete runtime call graph.
+
+Fleet Claude and Codex runs can use the separately installed `ashlr-mcp`
+efficiency plugin through temporary per-run configuration. Discovery checks
+executable files on the process PATH, then the managed `~/.local/bin/ashlr-mcp`
+location used by the MCP-only release installation. This handles desktop launches
+without running login-shell startup files. Missing or non-executable files skip
+the optional connection. Hub does not invoke its own `ashlr mcp` server as a
+substitute. The plugin remains restricted from autonomous runs under the existing
+authority policy.
+
+For an explicitly enabled Meta API engine, supply `MODEL_API_KEY` through your
+credential manager, add `meta-muse` to `foundry.allowedBackends`, then use a
+bounded sandbox run:
+
+```sh
+ashlr run "Describe the scoped change" --engine meta-muse --sandbox-engine --allow-cloud --budget 10000 --max-steps 8
+```
+
+Model readiness uses the normalized `/v1/models` endpoint. A configured key or
+registry entry alone does not prove entitlement or successful inference.
+Phone retries distinguish a confirmed server refusal from a missing or failed
+response: uncertain delivery pauses Start and offers chat inspection, keeping
+the prompt instead of blindly dispatching it again.

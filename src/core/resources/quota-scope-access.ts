@@ -17,7 +17,7 @@ export function validateResourceQuotaScopeExclusions(value: unknown, pool: Resou
   if (json === null || Buffer.byteLength(json) > 16 * 1024) throw new Error('Invalid resource quota scope exclusions');
   const rows: unknown = JSON.parse(json);
   const checkedPool = validateResourcePool(pool); const checkedBindings = validateResourceBindings(bindings, checkedPool);
-  if (!Array.isArray(rows) || rows.length > 64) throw new Error('Invalid resource quota scope exclusions');
+  if (!Array.isArray(rows)) throw new Error('Invalid resource quota scope exclusions');
   const seen = new Set<string>();
   const result = rows.map((row: unknown) => {
     if (!row || typeof row !== 'object' || Array.isArray(row) || Object.keys(row).sort().join(',') !== 'capacityKey,quotaScope') {

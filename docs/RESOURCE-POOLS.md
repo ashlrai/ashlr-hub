@@ -23,6 +23,16 @@ prove that no provider work occurred. Native Windows workers report
 `worker-kill-cancellation-unsupported` before launch because owned cancellation
 is not implemented there; the local HTTP worker remains supported.
 
+## Account and worker capacity
+
+Pool membership has no fixed account or worker count ceiling. All enrolled
+identities remain available to validation, assignment, pause controls and the
+console; a large roster is not silently shortened. Configuration and transport
+byte limits still apply. Native account collection starts at most two probes
+at a time, and worker concurrency, quota reserves, time-window limits and
+owned-process cancellation remain independent execution controls. Adding an
+account does not increase a signed grant or manufacture provider quota.
+
 ## Engineering workspace
 
 The scoped console offers **Workspace** alongside **Resources**, also reachable

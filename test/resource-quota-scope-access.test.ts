@@ -15,6 +15,20 @@ import * as locks from '../src/core/fleet/local-store-lock.js';
 const roots: string[] = [];
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const GENERAL = { capacityKey: 'personal', quotaScope: 'codex-general-v1' as const };
+it('keeps enrolled quota scopes beyond 64 identities within the existing serialized byte budget', () => {
+  const pool = validateResourcePool({ schemaVersion: 1, id: 'large-scope-pool', workers: Array.from({ length: 96 }, (_, index) => ({
+    id: `codex-${index}`, provider: 'codex', model: 'gpt-6-astra', quotaScope: 'codex-general-v1', maxConcurrent: 1,
+    reservePercent: 25, maxTasksPerWindow: 10, taskWindowMs: 60_000, priority: 1,
+  })) });
+  const bindings = workers.validateResourceBindings(pool.workers.map(worker => ({ workerId: worker.id, capacityKey: worker.id,
+    kind: 'native-cli', command: ['/fixture/inert'] })), pool);
+  const exclusions = bindings.map(binding => ({ capacityKey: binding.capacityKey, quotaScope: 'codex-general-v1' as const }));
+  expect(validateResourceQuotaScopeExclusions(exclusions, pool, bindings)).toHaveLength(96);
+  expect(excludedResourceQuotaScopeWorkerIds(pool, bindings, exclusions)).toHaveLength(96);
+  expect(() => validateResourceQuotaScopeExclusions([...exclusions, exclusions[0]!], pool, bindings)).toThrow();
+  expect(() => validateResourceQuotaScopeExclusions(new Array(1_000_000_000), pool, bindings)).toThrow();
+});
+
 function fixture(maxTasks = 10) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'scope-access-'))); roots.push(base);
   const root = join(base, 'ledger'); const workspace = join(base, 'workspace'); mkdirSync(workspace, { mode: 0o700 });

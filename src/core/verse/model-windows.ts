@@ -399,7 +399,9 @@ function parseCodexCatalog(raw: unknown): CodexCatalogEntry[] | null {
   if (!isRecord(raw) || !Array.isArray(raw['models'])) return null;
   const out: CodexCatalogEntry[] = [];
   const seen = new Set<string>();
-  for (const row of raw['models'].slice(0, 256)) {
+  // The file byte cap bounds parsing work; a row-count cap would silently
+  // hide valid models as the provider's catalog grows.
+  for (const row of raw['models']) {
     if (!isRecord(row)) continue;
     const slug = row['slug'];
     if (typeof slug !== 'string' || !MODEL_ID_RE.test(slug) || seen.has(slug)) continue;
@@ -439,6 +441,9 @@ export function readCodexCatalog(nativeStatePath: string): CodexCatalogEntry[] |
  * here — they are not offered even when a catalog lists them.
  */
 const CODEX_DOCUMENTED_MODELS: readonly CodexCatalogEntry[] = [
+  // Codex's installed catalog (2026-09-29) reports the same raw/effective
+  // budgets as GPT-6 Sol. A seat's own catalog always takes precedence.
+  ['gpt-6.1-sol', 'GPT-6.1 Sol', 872_000],
   ['gpt-6-astra', 'GPT-6 Astra', 872_000],
   ['gpt-6-sol', 'GPT-6 Sol', 872_000],
   ['gpt-6-luna', 'GPT-6 Luna', 872_000],
@@ -523,7 +528,7 @@ function parseGrokCatalog(raw: unknown): GrokCatalogEntry[] | null {
   if (!isRecord(raw) || !isRecord(raw['models'])) return null;
   const out: GrokCatalogEntry[] = [];
   const seen = new Set<string>();
-  for (const [key, entry] of Object.entries(raw['models']).slice(0, 256)) {
+  for (const [key, entry] of Object.entries(raw['models'])) {
     if (!isRecord(entry)) continue;
     // `.info` ONLY. The sibling `api_key` / `env_key` slots are credential
     // material and are never read, copied or compared — not even for null.

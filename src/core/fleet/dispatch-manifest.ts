@@ -46,7 +46,7 @@ const MAX_WRITE_PARTITIONS_PER_CALL = 32;
 const MAX_ITEMS = 24;
 const MAX_MAP_KEYS = 128;
 const ENGINE_IDS = new Set<EngineId>([
-  'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'kimi', 'nim', 'opencode', 'grok',
+  'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'kimi', 'nim', 'opencode', 'meta-muse', 'grok',
 ]);
 const PERSISTED_WORK_SOURCES = new Set<string>([
   'issue', 'todo', 'test', 'dep', 'doc', 'security', 'plugin', 'self', 'lint', 'goal', 'hygiene', 'invent',

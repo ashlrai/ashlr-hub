@@ -144,7 +144,7 @@ const ATTEMPT_RECEIPT_STAGE_FILE_RE = /^(?:[a-f0-9]{64}-[12](?:-[a-f0-9]{64}\.fa
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const ENGINE_IDS = new Set<EngineId>([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
-  'kimi', 'nim', 'opencode', 'grok',
+  'kimi', 'nim', 'opencode', 'meta-muse', 'grok',
 ]);
 const ENGINE_TIERS = new Set<EngineTier>(['local', 'mid', 'frontier']);
 const WORK_SOURCES = new Set<WorkItem['source']>([

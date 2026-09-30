@@ -220,7 +220,7 @@ const EFFECT_KEYS = new Set([
 ]);
 const ENGINES = new Set([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'kimi',
-  'nim', 'opencode', 'grok',
+  'nim', 'opencode', 'meta-muse', 'grok',
 ]);
 const IDENTITY_STATES = new Set(['open', 'near', 'exhausted', 'unreachable', 'unknown']);
 const RESOURCE_REASONS = new Set([

@@ -66,7 +66,7 @@ const SHA256_RE = /^[a-f0-9]{64}$/;
 const O_NOFOLLOW = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
 const ENGINE_IDS = new Set<EngineId>([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
-  'kimi', 'nim', 'opencode', 'grok',
+  'kimi', 'nim', 'opencode', 'meta-muse', 'grok',
 ]);
 const MAX_AUTHORITY_EVENTS = MAX_EVENTS * ENGINE_IDS.size;
 

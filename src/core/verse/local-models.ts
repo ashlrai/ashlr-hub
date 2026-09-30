@@ -113,8 +113,8 @@ function withLastGood(
   return { ...cached.report, stale: true, staleForMs: ageMs, reason: report.reason };
 }
 
-/** Upper bound on tags inspected by one sweep. */
-export const VERSE_LOCAL_MAX_MODELS = 64;
+/** Bound metadata payloads rather than silently truncating installed rosters. */
+export const VERSE_LOCAL_METADATA_MAX_BYTES = 1024 * 1024;
 
 /** Upper bound on `/api/show` round-trips per sweep (they are one-per-model). */
 export const VERSE_LOCAL_MAX_SHOW_PROBES = 48;
@@ -177,6 +177,8 @@ export interface VerseLocalRuntimeReport {
   reachable: boolean;
   baseUrl: string;
   models: VerseLocalModel[];
+  /** Expensive detail probes are sampled; every installed model remains listed. */
+  detailInspection?: { attempted: number; pending: number };
   /** Machine-readable degradation reason; null when reachable. */
   reason: string | null;
 }
@@ -296,6 +298,23 @@ async function fetchJsonDetailed(
   try {
     const res = await fetchImpl(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) return { body: null, failure: 'http' };
+    if (/\/api\/(?:tags|ps|v0\/models)$/.test(url)) {
+      if (Number(res.headers.get('content-length')) > VERSE_LOCAL_METADATA_MAX_BYTES) { await res.body?.cancel(); return { body: null, failure: 'http' }; }
+      if (!res.body) return { body: null, failure: 'http' };
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let bytes = 0;
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          bytes += value.byteLength;
+          if (bytes > VERSE_LOCAL_METADATA_MAX_BYTES) { await reader.cancel(); return { body: null, failure: 'http' }; }
+          chunks.push(value);
+        }
+        return { body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown, failure: null };
+      } finally { reader.releaseLock(); }
+    }
     return { body: (await res.json()) as unknown, failure: null };
   } catch (err) {
     const name = err instanceof Error ? err.name : '';
@@ -401,7 +420,6 @@ function parseOllamaTags(body: unknown): OllamaTag[] | null {
     if (!tag || seen.has(tag)) continue;
     seen.add(tag);
     out.push({ tag, sizeBytes: num(entry['size']), ...detailsOf(entry) });
-    if (out.length >= VERSE_LOCAL_MAX_MODELS) break;
   }
   return out;
 }
@@ -418,10 +436,12 @@ export async function probeOllamaResident(
   const body = await fetchJson(fetchImpl, `${baseUrl}/api/ps`, timeoutMs);
   if (!isRecord(body) || !Array.isArray(body['models'])) return null;
   const out: OllamaResident[] = [];
+  const seen = new Set<string>();
   for (const entry of body['models']) {
     if (!isRecord(entry)) continue;
     const tag = tagNameOf(entry);
-    if (!tag) continue;
+    if (!tag || seen.has(tag)) continue;
+    seen.add(tag);
     out.push({
       tag,
       sizeBytes: num(entry['size']),
@@ -429,7 +449,6 @@ export async function probeOllamaResident(
       expiresAt: isoOrNull(entry['expires_at']),
       contextLength: num(entry['context_length']),
     });
-    if (out.length >= VERSE_LOCAL_MAX_MODELS) break;
   }
   return out;
 }
@@ -831,7 +850,7 @@ async function collectOllama(
     if (a.state !== b.state) return a.state === 'loaded' ? -1 : 1;
     return (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0);
   });
-  return { reachable: true, baseUrl, models, reason: null };
+  return { reachable: true, baseUrl, models, reason: null, ...(tags.length > probeTargets.length ? { detailInspection: { attempted: probeTargets.length, pending: tags.length - probeTargets.length } } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -889,7 +908,6 @@ export async function probeLmStudioModels(
       supportsTools: null,
       memoryPercent: percentOf(sizeBytes, total),
     });
-    if (models.length >= VERSE_LOCAL_MAX_MODELS) break;
   }
   models.sort((a, b) => {
     if (a.state !== b.state) return a.state === 'loaded' ? -1 : 1;

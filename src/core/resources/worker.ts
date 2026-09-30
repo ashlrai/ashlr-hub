@@ -85,7 +85,7 @@ function empty(reason: string, status: ResourceWorkerResult['status'] = 'failed'
  */
 export function validateResourceBindings(value: unknown, pool: ResourcePool): ResourceBinding[] {
   const definition = validateResourcePool(pool);
-  if (!array(value, 1, 32) || value.length !== definition.workers.length) throw new Error('Invalid resource bindings');
+  if (!array(value, 1, definition.workers.length) || value.length !== definition.workers.length) throw new Error('Invalid resource bindings');
   const workers = new Map(definition.workers.map((worker) => [worker.id, worker]));
   const seen = new Set<string>(); const capacities = new Map<string, ResourceWorker>();
   const result: ResourceBinding[] = [];

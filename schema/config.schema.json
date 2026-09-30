@@ -273,7 +273,7 @@
                     "pattern": "^eid_[0-9a-f]{32}$"
                   },
                   "engine": {
-                    "enum": ["builtin", "local-coder", "ashlrcode", "aw", "claude", "codex", "hermes", "kimi", "nim", "opencode", "grok"]
+                    "enum": ["builtin", "local-coder", "ashlrcode", "aw", "claude", "codex", "hermes", "kimi", "nim", "opencode", "meta-muse", "grok"]
                   },
                   "privateRuntimeLocatorRef": {
                     "type": "string",

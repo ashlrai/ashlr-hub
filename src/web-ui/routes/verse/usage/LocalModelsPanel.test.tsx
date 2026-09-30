@@ -76,6 +76,11 @@ describe('LocalModelsPanel — staleness', () => {
     expect(screen.getByText(/didn.t answer in time/)).toBeInTheDocument();
   });
 
+  it('names bounded detail sampling without hiding installed models', () => {
+    render(<LocalModelsPanel view={view({ runtimes: [{ runtime: 'ollama', reachable: true, reason: null, stale: false, staleForMs: null, modelCount: 80, detailInspection: { attempted: 48, pending: 32 } }] })} />);
+    expect(screen.getByText(/80 models reported.*details sampled for 48 models; 32 not inspected in this report/)).toBeInTheDocument();
+  });
+
   it('says nothing about staleness when every runtime answered fresh', () => {
     render(<LocalModelsPanel view={view()} />);
     expect(screen.queryByText('last known-good')).not.toBeInTheDocument();

@@ -16,7 +16,7 @@
  * Uses vi.fn where needed; all values are fixed/deterministic.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import {
   mkdtempSync,
   writeFileSync,
@@ -24,6 +24,7 @@ import {
   existsSync,
   readFileSync,
   mkdirSync,
+  chmodSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -38,6 +39,7 @@ import type { Sandbox } from '../src/core/types.js';
 // ---------------------------------------------------------------------------
 
 const tmpDirs: string[] = [];
+const originalPath = process.env.PATH;
 
 function mkTmp(prefix: string): string {
   const d = mkdtempSync(join(tmpdir(), prefix));
@@ -45,7 +47,15 @@ function mkTmp(prefix: string): string {
   return d;
 }
 
+beforeEach(() => {
+  const bin = mkTmp('m283-efficiency-bin-');
+  const executable = join(bin, 'ashlr-mcp');
+  writeFileSync(executable, '#!/bin/sh\nexit 0\n'); chmodSync(executable, 0o755);
+  process.env.PATH = `${bin}:${originalPath}`;
+});
+
 afterEach(() => {
+  process.env.PATH = originalPath;
   for (const d of tmpDirs.splice(0)) {
     try {
       rmSync(d, { recursive: true, force: true });
@@ -110,10 +120,8 @@ describe('M283 layer-1: writeMcpConfigIfAvailable registers git exclude', () => 
 
     const result = writeMcpConfigIfAvailable(worktreePath);
 
-    if (result === null) {
-      // ashlr not on PATH — skip (binary-absent is tested in m248)
-      return;
-    }
+    expect(result).not.toBeNull();
+    if (result === null) throw new Error('Hermetic MCP fixture was not resolved');
 
     expect(result).toBe(join(worktreePath, FLEET_MCP_CONFIG_FILENAME));
     expect(existsSync(result)).toBe(true);
@@ -144,7 +152,7 @@ describe('M283 layer-1: writeMcpConfigIfAvailable registers git exclude', () => 
 
     const result = writeMcpConfigIfAvailable(worktreePath);
 
-    if (result === null) return;
+    if (result === null) throw new Error('Hermetic MCP fixture was not resolved');
     expect(result).toBe(join(worktreePath, FLEET_MCP_CONFIG_FILENAME));
 
     // The file content must be unchanged (fleet did not clobber it)
@@ -158,8 +166,7 @@ describe('M283 layer-1: writeMcpConfigIfAvailable registers git exclude', () => 
     addWorktree(sourceRepo, 'ashlr/sandbox/m283-l1-idem', worktreePath);
 
     const result1 = writeMcpConfigIfAvailable(worktreePath);
-    // Skip if ashlr not on PATH
-    if (result1 === null) return;
+    if (result1 === null) throw new Error('Hermetic MCP fixture was not resolved');
 
     const result2 = writeMcpConfigIfAvailable(worktreePath);
     expect(result2).toBe(result1);

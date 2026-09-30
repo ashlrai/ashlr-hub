@@ -103,7 +103,8 @@ export interface ResourceAssignmentPlan {
   nextEligibleAt: string | null;
 }
 
-export const MAX_RESOURCE_POOL_WORKERS = 32;
+/** The existing manifest reader budget; identity counts follow data size rather than a seat tier. */
+export const RESOURCE_POOL_MANIFEST_MAX_BYTES = 2 * 1024 * 1024;
 export const MAX_RESOURCE_OBSERVATION_WINDOWS = 8;
 export const MAX_RESOURCE_OBSERVATION_AGE_MS = 5 * 60_000;
 /** Sticky bounded-inventory denial, not a provider usage measurement. */
@@ -121,11 +122,13 @@ function exact(value: Record<string, unknown>, required: string[], optional: str
     [...required, ...optional].includes(key) && 'value' in Object.getOwnPropertyDescriptor(value, key)!);
 }
 function array(value: unknown, low: number, high: number): value is unknown[] {
-  return Array.isArray(value) && value.length >= low && value.length <= high &&
-    Reflect.ownKeys(value).length === value.length + 1 && Array.from({ length: value.length }, (_, index) => index)
-      .every((index) => Object.prototype.hasOwnProperty.call(value, index) &&
-        'value' in Object.getOwnPropertyDescriptor(value, index)!);
+  if (!Array.isArray(value) || value.length < low || value.length > high) return false;
+  const keys = Reflect.ownKeys(value);
+  return keys.length === value.length + 1 && keys.every(key => key === 'length' ||
+    typeof key === 'string' && /^(?:0|[1-9][0-9]*)$/.test(key) && Number(key) < value.length &&
+    'value' in Object.getOwnPropertyDescriptor(value, key)!);
 }
+
 function identifier(value: unknown): value is string { return typeof value === 'string' && ID.test(value); }
 function integer(value: unknown, low: number, high: number): value is number {
   return Number.isSafeInteger(value) && Number(value) >= low && Number(value) <= high;
@@ -149,11 +152,13 @@ function immutable<T>(value: T): T {
   return value;
 }
 
-/** Validate and detach the exact policy manifest. No runtime or credential locators are accepted. */
+/** Validate and detach the exact policy manifest. Roster size follows enrollment, not a seat tier.
+ * File/transport byte bounds and each worker's execution limits still apply.
+ * No runtime or credential locators are accepted. */
 export function validateResourcePool(value: unknown): ResourcePool {
   if (!object(value) || !exact(value, ['schemaVersion', 'id', 'workers']) || value.schemaVersion !== 1 ||
-      !identifier(value.id) || !array(value.workers, 1, MAX_RESOURCE_POOL_WORKERS)) {
-    throw new Error('Invalid resource pool: explicit identity and bounded worker roster required');
+      !identifier(value.id) || !array(value.workers, 1, Math.floor(RESOURCE_POOL_MANIFEST_MAX_BYTES / 2))) {
+    throw new Error('Invalid resource pool: explicit identity and dense worker roster required');
   }
   const known = new Set<string>(); const workers: ResourceWorker[] = [];
   for (const worker of value.workers) {
@@ -178,7 +183,7 @@ export function validateResourcePool(value: unknown): ResourcePool {
 /** Missing observations are allowed as input, never implicitly interpreted as known capacity. */
 export function validateResourceObservations(value: unknown, pool: ResourcePool): ResourceObservation[] {
   const definition = validateResourcePool(pool);
-  if (!array(value, 0, MAX_RESOURCE_POOL_WORKERS)) throw new Error('Invalid resource observations: bounded array required');
+  if (!array(value, 0, definition.workers.length)) throw new Error('Invalid resource observations: bounded array required');
   const known = new Set(definition.workers.map((worker) => worker.id)); const seen = new Set<string>();
   const observations: ResourceObservation[] = [];
   for (const observation of value) {
@@ -255,14 +260,14 @@ export function planResourceAssignment(input: ResourceAssignmentInput): Resource
   }
   const pool = validateResourcePool(input.pool); const observations = validateResourceObservations(input.observations, pool);
   const known = new Set(pool.workers.map((worker) => worker.id));
-  if (!array(input.allowedWorkerIds, 0, MAX_RESOURCE_POOL_WORKERS) ||
+  if (!array(input.allowedWorkerIds, 0, pool.workers.length) ||
       input.allowedWorkerIds.some((id) => typeof id !== 'string' || !known.has(id)) ||
       new Set(input.allowedWorkerIds).size !== input.allowedWorkerIds.length) {
     throw new Error('Invalid resource assignment: unique enrolled allowed worker identities required');
   }
   const active = validateCounts(input.activeCounts, known, false);
   const scopeExcluded = input.quotaScopeExcludedWorkerIds === undefined ? [] : input.quotaScopeExcludedWorkerIds;
-  if (!array(scopeExcluded, 0, MAX_RESOURCE_POOL_WORKERS) || scopeExcluded.some(id => typeof id !== 'string' || !known.has(id)) ||
+  if (!array(scopeExcluded, 0, pool.workers.length) || scopeExcluded.some(id => typeof id !== 'string' || !known.has(id)) ||
     new Set(scopeExcluded).size !== scopeExcluded.length) throw new Error('Invalid resource quota scope excluded workers');
   const reservations = validateCounts(input.taskReservationCounts, known, true);
   const allowed = new Set(input.allowedWorkerIds); const byId = new Map(observations.map((row) => [row.workerId, row]));

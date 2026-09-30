@@ -215,6 +215,100 @@ describe('NewAgentScreen start', () => {
     expect(screen.getByRole('textbox', { name: 'What should the agent do?' })).toHaveValue('Do the thing');
   });
 
+  it('keeps a failed first prompt and retries the already-created chat', async () => {
+    let sends = 0;
+    const stub = routes(bootstrap(), {
+      'POST /api/verse/sessions/s-claude-1/turns': () => ++sends === 1
+        ? json({ error: 'The model is unavailable.' }, 409) : { ok: true },
+    });
+    const { context } = mount();
+    await typePrompt('Keep this task until it starts');
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
+    expect(await screen.findByText(/Try again to send it in the same chat/)).toBeInTheDocument();
+    expect(context.navigate).not.toHaveBeenCalled();
+    expect(screen.getByRole('textbox', { name: 'What should the agent do?' })).toHaveValue('Keep this task until it starts');
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
+    await waitFor(() => expect(context.navigate).toHaveBeenCalledWith({ screen: 'agent', id: 's-claude-1', pane: 'transcript' }));
+    expect(stub.posts().filter((p) => p.url === '/api/verse/sessions')).toHaveLength(1);
+    expect(stub.posts().filter((p) => p.url.endsWith('/turns'))).toHaveLength(2);
+  });
+
+  it('keeps the draft and checks an unknown first-turn outcome without repeating it', async () => {
+    const stub = routes(bootstrap(), {
+      'POST /api/verse/sessions/s-claude-1/turns': () => { throw new TypeError('response lost'); },
+      'GET /api/verse/sessions/s-claude-1': { session: { id: 's-claude-1', status: 'idle' }, events: [{ type: 'user-message', text: 'Inspect before repeating' }] },
+    });
+    const { context } = mount();
+    await typePrompt('Inspect before repeating');
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
+    expect(await screen.findByText(/prompt delivery was not confirmed/)).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'What should the agent do?' })).toHaveValue('Inspect before repeating');
+    expect(screen.getByRole('button', { name: 'Start agent' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Check opened chat' }));
+    expect(await screen.findByText(/1 recorded prompt.*status: idle/)).toBeInTheDocument();
+    expect(stub.posts().filter((p) => p.url.endsWith('/turns'))).toHaveLength(1);
+    expect(stub.posts().filter((p) => p.url === '/api/verse/sessions')).toHaveLength(1);
+    expect(context.navigate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Open chat' }));
+    expect(context.navigate).toHaveBeenCalledWith({ screen: 'agent', id: 's-claude-1', pane: 'transcript' });
+  });
+
+  it('pauses after a proxy error that might follow upstream acceptance', async () => {
+    const stub = routes(bootstrap(), { 'POST /api/verse/sessions/s-claude-1/turns': () => json({ error: 'Gateway response lost.' }, 502) });
+    mount();
+    await typePrompt('Avoid repeating an accepted task');
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
+    expect(await screen.findByText(/prompt delivery was not confirmed/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start agent' })).toBeDisabled();
+    expect(stub.posts().filter((p) => p.url.endsWith('/turns'))).toHaveLength(1);
+  });
+
+  it('does not claim failed creation when its response was lost', async () => {
+    const stub = routes(bootstrap(), { 'POST /api/verse/sessions': () => { throw new TypeError('response lost'); } });
+    mount();
+    await typePrompt('Keep uncertain creation');
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
+    expect(await screen.findByText(/Agent creation was not confirmed/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start agent' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'View chats' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'What should the agent do?' })).toHaveValue('Keep uncertain creation');
+    expect(stub.posts()).toHaveLength(1);
+  });
+
+  it('retries only the failed first turn after a multi-seat start, reusing its chat', async () => {
+    let sends = 0;
+    const stub = routes(bootstrap(), {
+      'POST /api/verse/sessions/s-grok-2/turns': () => ++sends === 1
+        ? json({ error: 'The Grok model is unavailable.' }, 409) : { ok: true },
+    });
+    const { context } = mount();
+    await typePrompt('Audit the router');
+    fireEvent.click(screen.getByRole('switch', { name: /Spawn on several seats/ }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Seats' })).getByRole('button', { name: 'Grok' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start 2 agents' }));
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Start 2 agents' }));
+    expect(await screen.findByText(/Started 1 of 2 agents/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
+    await waitFor(() => expect(context.navigate).toHaveBeenCalledWith({ screen: 'agent', id: 's-grok-2', pane: 'transcript' }));
+    expect(stub.posts().filter((p) => p.url === '/api/verse/sessions')).toHaveLength(2);
+    expect(stub.posts().filter((p) => p.url === '/api/verse/sessions/s-claude-1/turns')).toHaveLength(1);
+    expect(stub.posts().filter((p) => p.url === '/api/verse/sessions/s-grok-2/turns')).toHaveLength(2);
+  });
+
+  it('opens a different chat when the retry changes model', async () => {
+    const stub = routes(bootstrap(), {
+      'POST /api/verse/sessions/s-claude-1/turns': () => json({ error: 'Try another model.' }, 409),
+    });
+    const { context } = mount();
+    await typePrompt('Audit the router');
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
+    await screen.findByText(/Try again to send it in the same chat/);
+    fireEvent.change(screen.getByRole('combobox', { name: 'Model' }), { target: { value: 'claude-m2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
+    await waitFor(() => expect(context.navigate).toHaveBeenCalledWith({ screen: 'agent', id: 's-claude-2', pane: 'transcript' }));
+    expect(stub.posts().filter((p) => p.url === '/api/verse/sessions').map((p) => p.body?.['model'])).toEqual(['claude-m1', 'claude-m2']);
+  });
+
   it('asks for the token first when actions are locked', async () => {
     clearMutationToken();
     const stub = routes();

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   authenticateRemoteDevice, canRemoteWrite, claimRemotePairing, clearRemoteSessionForTest, directCsrfWrite, probeRemoteSession, remotePairStatus,
-  remoteMutate, remotePushPublicKey, subscribeRemotePush, logoutRemoteDevice,
+  remoteMutate, remotePushPublicKey, subscribeRemotePush, logoutRemoteDevice, remoteApiGet,
 } from './remote-session.js';
 
 vi.mock('@simplewebauthn/browser', () => ({
@@ -17,6 +17,71 @@ const ready = { authenticated: true, deviceId: 'device-1', label: 'My phone',
   capabilities: { pairing: true, writes: false, push: false } };
 
 describe('remote phone session', () => {
+  it('keeps the valid session while checking, and a late check cannot restore it after logout', async () => {
+    let answer!: (response: Response) => void;
+    let probes = 0;
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path !== '/remote/session') return new Response(null, { status: 204 });
+      if (++probes === 1) return Response.json({ ...ready, capabilities: { ...ready.capabilities, writes: true } });
+      return new Promise<Response>((resolve) => { answer = resolve; });
+    }));
+    await probeRemoteSession();
+    const checking = probeRemoteSession();
+    expect(canRemoteWrite()).toBe(true);
+    await logoutRemoteDevice();
+    expect(canRemoteWrite()).toBe(false);
+    answer(Response.json({ ...ready, capabilities: { ...ready.capabilities, writes: true } }));
+    await expect(checking).rejects.toThrow('session changed');
+    expect(canRemoteWrite()).toBe(false);
+  });
+
+  it('does not let a slower earlier check overwrite a newer read-only session', async () => {
+    let answer!: (response: Response) => void;
+    let probes = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => ++probes === 1
+      ? new Promise<Response>((resolve) => { answer = resolve; }) : Response.json(ready)));
+    const older = probeRemoteSession();
+    await probeRemoteSession();
+    answer(Response.json({ ...ready, capabilities: { ...ready.capabilities, writes: true } }));
+    await expect(older).rejects.toThrow('session changed');
+    expect(canRemoteWrite()).toBe(false);
+  });
+
+  it('ignores an older read refusal after a newer authenticated session check', async () => {
+    let answer!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => path === '/remote/session'
+      ? Response.json({ ...ready, capabilities: { ...ready.capabilities, writes: true } })
+      : new Promise<Response>((resolve) => { answer = resolve; })));
+    await probeRemoteSession();
+    const reading = remoteApiGet('/api/verse/bootstrap');
+    await probeRemoteSession();
+    answer(Response.json({ error: 'Old cookie expired' }, { status: 401 }));
+    await expect(reading).rejects.toThrow('expired');
+    expect(canRemoteWrite()).toBe(true);
+  });
+
+  it('does not restore authority when a passkey response completes after logout', async () => {
+    let answer!: (response: Response) => void;
+    let finishing!: () => void;
+    const pendingFinish = new Promise<void>((resolve) => { finishing = resolve; });
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/remote/session') return Response.json({ ...ready, authenticated: false });
+      if (path === '/remote/auth/begin') return Response.json({ challengeId: 'auth', options: { challenge: 'YQ' } });
+      if (path === '/remote/auth/finish') {
+        finishing();
+        return new Promise<Response>((resolve) => { answer = resolve; });
+      }
+      return new Response(null, { status: 204 });
+    }));
+    await probeRemoteSession();
+    const signingIn = authenticateRemoteDevice('device-1');
+    await pendingFinish;
+    await logoutRemoteDevice();
+    answer(Response.json({ ...ready, capabilities: { ...ready.capabilities, writes: true } }));
+    await expect(signingIn).rejects.toThrow('session changed');
+    expect(canRemoteWrite()).toBe(false);
+  });
+
   it('requires a complete gateway answer and keeps writes closed when advertised read-only', async () => {
     const fetch = vi.fn(async (_path: string, _init?: RequestInit) => Response.json(ready));
     vi.stubGlobal('fetch', fetch);

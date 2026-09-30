@@ -762,7 +762,7 @@ interface RuntimeCandidateSpec extends BestOfNCandidateSpec {
 
 const ENGINE_IDS = new Set<EngineId>([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
-  'kimi', 'nim', 'opencode', 'grok',
+  'kimi', 'nim', 'opencode', 'meta-muse', 'grok',
 ]);
 
 function materializeCandidateSpecs(

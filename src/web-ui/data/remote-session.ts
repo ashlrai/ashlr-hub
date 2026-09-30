@@ -23,6 +23,14 @@ export class RemoteClientError extends Error {
 }
 
 let session: RemoteSession | null = null;
+// Superseded checks and passkey requests cannot restore a signed-out session.
+let sessionRevision = 0;
+
+function assertCurrent(revision: number | undefined): void {
+  if (revision !== undefined && revision !== sessionRevision) {
+    throw new RemoteClientError('The phone session changed. Try again.');
+  }
+}
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -51,20 +59,24 @@ function parseSession(value: unknown): RemoteSession {
   };
 }
 
-async function jsonResponse(res: Response): Promise<unknown> {
+async function jsonResponse(res: Response, revision?: number): Promise<unknown> {
+  assertCurrent(revision);
   if (res.type === 'opaqueredirect' || res.status >= 300 && res.status < 400
     || res.headers.get('content-type')?.includes('text/html')) {
     session = null;
+    sessionRevision += 1;
     (await import('./auth-store.js')).reportSessionExpired();
     throw new RemoteClientError('Cloudflare Access sign-in expired. Reload this page to sign in again.', 401);
   }
   if (res.status === 401) {
     session = null;
+    sessionRevision += 1;
     (await import('./auth-store.js')).reportSessionExpired();
     throw new RemoteClientError('Phone sign-in expired. Reload to sign in again.', 401);
   }
   let value: unknown;
   try { value = await res.json(); } catch { throw new RemoteClientError('The phone gateway did not return JSON.', res.status); }
+  assertCurrent(revision);
   if (!res.ok) {
     const message = record(value) && typeof value.error === 'string' ? value.error.slice(0, 240) : 'The phone gateway refused the request.';
     throw new RemoteClientError(message, res.status);
@@ -72,22 +84,30 @@ async function jsonResponse(res: Response): Promise<unknown> {
   return value;
 }
 
-async function remoteGet(path: string): Promise<unknown> {
+async function remoteGet(path: string, revision?: number): Promise<unknown> {
   const res = await fetch(path, { method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'manual' });
-  return jsonResponse(res);
+  return jsonResponse(res, revision);
 }
 
 /** Remote API reads use only the paired cookie; Access HTML/redirect locks UI. */
 export async function remoteApiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const revision = sessionRevision;
   const res = await fetch(path, { method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'manual', signal });
   if (res.type === 'opaqueredirect' || res.status >= 300 && res.status < 400
     || res.headers.get('content-type')?.includes('text/html')) {
-    session = null;
-    (await import('./auth-store.js')).reportSessionExpired();
+    if (revision === sessionRevision) {
+      session = null;
+      sessionRevision += 1;
+      (await import('./auth-store.js')).reportSessionExpired();
+    }
     throw new ApiError('Cloudflare Access sign-in expired. Reload to sign in again.', 401, path);
   }
   if (res.status === 401) {
-    (await import('./auth-store.js')).reportSessionExpired();
+    if (revision === sessionRevision) {
+      session = null;
+      sessionRevision += 1;
+      (await import('./auth-store.js')).reportSessionExpired();
+    }
     throw new ApiError('Phone session expired.', 401, path);
   }
   if (!res.ok) {
@@ -103,20 +123,22 @@ export async function remoteApiGet<T>(path: string, signal?: AbortSignal): Promi
   return await res.json() as T;
 }
 
-async function remotePost(path: string, body: unknown): Promise<unknown> {
-  const csrf = session?.csrfToken;
+async function remotePost(path: string, body: unknown, revision?: number, csrfOverride?: string): Promise<unknown> {
+  const expected = revision ?? sessionRevision;
+  assertCurrent(expected);
+  const csrf = csrfOverride ?? session?.csrfToken;
   if (!csrf) throw new RemoteClientError('Connect this phone to the gateway before continuing.');
   const res = await fetch(path, {
     method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'manual',
     headers: { 'Content-Type': 'application/json', 'x-ashlr-remote-csrf': csrf },
     body: JSON.stringify(body ?? {}),
   });
-  if (res.status === 204) return null;
-  return jsonResponse(res);
+  if (res.status === 204) { assertCurrent(expected); return null; }
+  return jsonResponse(res, expected);
 }
 
-async function remoteDelete(path: string): Promise<void> {
-  const csrf = session?.csrfToken;
+async function remoteDelete(path: string, csrfOverride?: string): Promise<void> {
+  const csrf = csrfOverride ?? session?.csrfToken;
   if (!csrf) throw new RemoteClientError('Connect this phone to the gateway before continuing.');
   const res = await fetch(path, {
     method: 'DELETE', credentials: 'same-origin', cache: 'no-store', redirect: 'manual',
@@ -127,10 +149,16 @@ async function remoteDelete(path: string): Promise<void> {
 
 /** A fresh cookie and CSRF token come from the gateway, never browser storage. */
 export async function probeRemoteSession(): Promise<RemoteSession> {
-  session = null;
-  const next = parseSession(await remoteGet('/remote/session'));
-  session = next;
-  return next;
+  const revision = ++sessionRevision;
+  try {
+    const next = parseSession(await remoteGet('/remote/session', revision));
+    assertCurrent(revision);
+    session = next;
+    return next;
+  } catch (error) {
+    if (revision === sessionRevision) session = null;
+    throw error;
+  }
 }
 
 export function canRemoteWrite(): boolean {
@@ -140,7 +168,7 @@ export function canRemoteWrite(): boolean {
 
 export function currentRemoteSession(): RemoteSession | null { return session; }
 
-export function clearRemoteSessionForTest(): void { session = null; }
+export function clearRemoteSessionForTest(): void { session = null; sessionRevision += 1; }
 
 function challenge(value: unknown): { challengeId: string; options: PublicKeyCredentialRequestOptionsJSON } {
   if (!record(value) || typeof value.challengeId !== 'string' || !value.challengeId || !record(value.options)
@@ -178,30 +206,35 @@ export async function remotePairStatus(pendingId: string): Promise<{ state: 'pen
 }
 
 export async function authenticateRemoteDevice(deviceId: string): Promise<RemoteSession> {
-  const started = challenge(await remotePost('/remote/auth/begin', { deviceId }));
+  const revision = ++sessionRevision;
+  const started = challenge(await remotePost('/remote/auth/begin', { deviceId }, revision));
   const { startAuthentication } = await import('@simplewebauthn/browser');
   const response = await startAuthentication({ optionsJSON: started.options });
-  const next = parseSession(await remotePost('/remote/auth/finish', { challengeId: started.challengeId, response }));
+  const next = parseSession(await remotePost('/remote/auth/finish', { challengeId: started.challengeId, response }, revision));
+  assertCurrent(revision);
   if (!next.authenticated || next.deviceId !== deviceId) throw new RemoteClientError('The passkey sign-in did not complete.');
   session = next;
   return next;
 }
 
 export async function logoutRemoteDevice(): Promise<void> {
+  const previous = session;
+  const revision = ++sessionRevision;
+  session = null;
   try {
     // Stop this device's generic alerts before dropping the cookie. Failure
     // must not prevent sign-out; Mac-side device revocation is the authority
     // when a lost or offline phone cannot complete either request.
-    if (session?.authenticated && session.capabilities.push) {
-      try { await remoteDelete('/remote/push/subscribe'); }
+    if (previous?.authenticated && previous.capabilities.push) {
+      try { await remoteDelete('/remote/push/subscribe', previous.csrfToken); }
       catch { /* continue with logout even if push is unavailable */ }
     }
-    await remotePost('/remote/logout', {});
+    await remotePost('/remote/logout', {}, undefined, previous?.csrfToken);
   } finally {
     // The server may be offline, but this page must immediately lose its
     // in-memory session and act capability. The HttpOnly cookie is only
     // cleared by a successful server response or by Mac-side revocation.
-    session = null;
+    if (revision === sessionRevision) session = null;
   }
 }
 

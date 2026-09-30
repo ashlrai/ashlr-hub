@@ -181,12 +181,12 @@ const FRONTIER_PREFERENCE: readonly EngineId[] = ['claude', 'codex', 'nim'];
  * allowedSet/availableFrom accept EngineId via string coercion — all valid at
  * runtime; the tier is determined by engineTierOf which reads the registry.
  */
-const MID_PREFERENCE: readonly string[] = ['local-coder', 'nim', 'kimi', 'grok', 'hermes'];
+const MID_PREFERENCE: readonly string[] = ['local-coder', 'nim', 'kimi', 'grok', 'hermes', 'meta-muse'];
 
 /** All editing engines eligible for exact-tier diagnostic repair retries. */
 const REPAIR_PREFERENCE: readonly EngineId[] = [
   'claude', 'codex', 'nim', 'kimi', 'grok', 'local-coder', 'hermes',
-  'opencode', 'ashlrcode', 'aw',
+  'opencode', 'ashlrcode', 'aw', 'meta-muse',
 ];
 
 export type GeneratedRepairRouteReason =

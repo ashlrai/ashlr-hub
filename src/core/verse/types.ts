@@ -917,7 +917,11 @@ export type VerseLocalDispatch = 'ollama' | 'llama-server';
 /** What a client is told about this machine's local serving situation. */
 export interface VerseLocalRuntimeSummary {
   /** Ollama reachable? Drives the local seats and an inline hint when false. */
-  ollama: { reachable: boolean; baseUrl: string; models: string[] };
+  ollama: {
+    reachable: boolean; baseUrl: string; models: string[];
+    /** Present when bounded inspection is incomplete; every installed name remains in models. */
+    discovery?: { inspected: number; pending: number };
+  };
   /**
    * Where local seats DISPATCH turns, reported only when that is NOT the
    * default Ollama lane.

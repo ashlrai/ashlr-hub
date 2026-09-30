@@ -34,6 +34,7 @@ import type { VerseApiContext } from './verse-api.js';
 import type { AshlrConfig } from '../types.js';
 import { passesMutationGate, readBody, sendJson } from '../web/api.js';
 import { askWiki, type AskWikiOptions } from '../knowledge/wiki/ask.js';
+import { buildWikiGraph } from '../knowledge/wiki/graph.js';
 import { startWikiJob, wikiJob, type WikiJob } from '../knowledge/wiki/jobs.js';
 import { githubNameWithOwner, isWikiReadable } from '../knowledge/wiki/scan.js';
 import { scrubWikiText } from '../knowledge/wiki/scrub.js';
@@ -237,9 +238,14 @@ export function createWikiApi(deps: WikiApiDeps = DEFAULT_WIKI_API_DEPS): ApiMod
           return true;
         }
         const file = body['file'];
-        // Only files the wiki itself listed (and could cite) may be opened.
+        // Only files the wiki or its local map actually read may be opened.
         const index = await readFileIndex(body['repoKey']);
-        if (!isWikiReadable(file) || index[file] === undefined) {
+        let lines: number | undefined = index[file];
+        if (lines === undefined && isWikiReadable(file)) {
+          const graph = await buildWikiGraph(repo);
+          lines = graph.nodes.flatMap((node) => node.files).find((f) => f.file === file)?.lines;
+        }
+        if (!isWikiReadable(file) || lines === undefined) {
           sendRefused(res, 'That file is not part of this repo’s wiki.');
           return true;
         }
@@ -256,7 +262,7 @@ export function createWikiApi(deps: WikiApiDeps = DEFAULT_WIKI_API_DEPS): ApiMod
           sendRefused(res, 'That file resolves outside the repo.');
           return true;
         }
-        deps.openInEditor(real, Math.min(line, index[file]!), ctx.cfg);
+        deps.openInEditor(real, Math.min(line, lines), ctx.cfg);
         sendJson(res, 200, { ok: true });
         return true;
       }
@@ -267,6 +273,13 @@ export function createWikiApi(deps: WikiApiDeps = DEFAULT_WIKI_API_DEPS): ApiMod
       const repo = repoForKey(deps, parsed.key);
       if (!repo) {
         sendNotFound(res, 'wiki repo');
+        return true;
+      }
+
+      if (parsed.rest.length === 1 && parsed.rest[0] === 'graph') {
+        if (method !== 'GET') return (sendNotFound(res, `${method} ${p}`), true);
+        if (!hasNoQuery(req, res)) return true;
+        sendJson(res, 200, await buildWikiGraph(repo));
         return true;
       }
 

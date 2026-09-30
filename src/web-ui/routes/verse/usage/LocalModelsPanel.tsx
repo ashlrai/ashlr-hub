@@ -553,6 +553,7 @@ export function LocalModelsPanel({
                   {r.reachable
                     ? `${r.modelCount} model${r.modelCount === 1 ? '' : 's'} reported`
                     : 'did not answer'}
+                  {r.detailInspection ? ` · details sampled for ${r.detailInspection.attempted} models; ${r.detailInspection.pending} not inspected in this report` : ''}
                   {r.stale ? ` · retained reading, ${formatAge(r.staleForMs)} old` : ''}
                   {r.reason ? ' · ' : ''}
                   {r.reason ? <code className={styles.commandInline}>{r.reason}</code> : null}

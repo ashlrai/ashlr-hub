@@ -16,7 +16,7 @@
  *   3  local-first cloud refusal
  */
 
-import type { RunOptions, RunState, RunTask, RunStep } from '../core/types.js';
+import type { AshlrConfig, EngineId, RunOptions, RunState, RunTask, RunStep } from '../core/types.js';
 import {
   DEFAULT_MAX_TOKENS,
   DEFAULT_MAX_STEPS,
@@ -67,6 +67,7 @@ async function importStreaming(): Promise<StreamingMod> {
 
 import { pad, makeColors, isTty, isStderrTty } from './ui.js';
 import { parsePositiveInt } from './args.js';
+import { resolveEngineSpec } from '../core/run/engine-registry.js';
 
 const { bold, dim, red, green, yellow, cyan, gray } = makeColors(isTty());
 
@@ -114,7 +115,7 @@ interface ParsedRunArgs {
   usageError?: string;
 }
 
-function parseRunArgs(args: string[]): ParsedRunArgs {
+export function parseRunArgs(args: string[], cfg?: AshlrConfig): ParsedRunArgs {
   // Handle `run show <id>` subcommand
   if (args[0] === 'show') {
     const showId = args[1];
@@ -202,8 +203,16 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       i++;
     } else if (arg === '--engine') {
       const val = args[++i];
-      if (!val || !['builtin', 'ashlrcode', 'aw', 'claude', 'codex'].includes(val)) {
-        result.usageError = `--engine requires one of: builtin, ashlrcode, aw, claude, codex; got: ${val ?? '(missing)'}`;
+      const spec = val ? resolveEngineSpec(val as EngineId, cfg) : undefined;
+      if (!val || !spec) {
+        result.usageError = '--engine requires a registered engine id.';
+        return result;
+      }
+      // The original five explicit CLI choices retain their contract. Additional
+      // providers/custom launchers require deliberate configuration as well as a
+      // valid registry spec; arbitrary command names never reach runGoal here.
+      if (!['builtin', 'ashlrcode', 'aw', 'claude', 'codex'].includes(val) && !cfg?.foundry?.allowedBackends?.includes(val as EngineId)) {
+        result.usageError = `Enable ${val} in foundry.allowedBackends before selecting it.`;
         return result;
       }
       result.engine = val;
@@ -246,11 +255,18 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
     }
   }
 
+  // API models have no CLI command. When automatic sandboxing was disabled,
+  // refusing avoids silently falling back to builtin after an explicit choice.
+  if (result.engine && resolveEngineSpec(result.engine as EngineId, cfg)?.kind === 'api-model' && cfg?.foundry?.sandboxExternal === false && !result.sandboxEngine && !result.estimate) {
+    result.usageError = `${result.engine} requires --sandbox-engine when foundry.sandboxExternal is false.`;
+    return result;
+  }
+
   // goal is required unless --resume is set (resume re-uses stored goal)
   if (!result.goal && !result.resumeId) {
     result.usageError =
       'Usage: ashlr run "<goal>" [--budget N] [--max-steps N] [--parallel N]\n' +
-      '              [--engine builtin|ashlrcode|aw|claude|codex] [--allow-cloud] [--no-tools]\n' +
+      '              [--engine <registered-id>] [--allow-cloud] [--no-tools]\n' +
       '              [--resume <id>] [--json] [--no-memory] [--stream|--no-stream] [--verify-model] [--no-capture]\n' +
       '       ashlr run show <id>';
   }
@@ -475,7 +491,12 @@ export async function cmdRun(args: string[]): Promise<number> {
     return 0;
   }
 
-  const parsed = parseRunArgs(args);
+  let engineConfig: AshlrConfig | undefined;
+  if (args.includes('--engine')) {
+    try { engineConfig = (await importConfig()).loadConfig(); }
+    catch { process.stderr.write(red('error: ') + 'Failed to load engine configuration.\n'); return 1; }
+  }
+  const parsed = parseRunArgs(args, engineConfig);
 
   if (parsed.usageError) {
     process.stderr.write(red('error: ') + parsed.usageError + '\n');
@@ -570,7 +591,7 @@ export async function cmdRun(args: string[]): Promise<number> {
   let cfg: import('../core/types.js').AshlrConfig;
   try {
     const { loadConfig } = await importConfig();
-    cfg = loadConfig();
+    cfg = engineConfig ?? loadConfig();
   } catch (err) {
     process.stderr.write(
       red('error: ') + 'Failed to load config: ' +
@@ -785,8 +806,8 @@ function printRunHelp(): void {
     ['--budget N',              `Max total tokens (in+out) before aborting (default: ${DEFAULT_MAX_TOKENS}).`],
     ['--max-steps N',           `Max agent steps before aborting (default: ${DEFAULT_MAX_STEPS}).`],
     ['--parallel N',            `Max independent tasks to run concurrently (default: ${DEFAULT_PARALLEL}).`],
-    ['--engine <e>',            `Execution engine: builtin (default), ashlrcode, aw, claude, or codex.`],
-    ['--sandbox-engine',        `Run an external --engine (claude|codex) in a sandbox; its diff → inbox, never the live tree.`],
+    ['--engine <e>',            `Registered engine id (default: builtin); additional providers must be enabled in foundry.allowedBackends.`],
+    ['--sandbox-engine',        `Run a registered CLI or API engine in a sandbox; its diff → inbox, never the live tree.`],
     ['--model <name>',          `Local model to use (default: smallest/fastest; or set ASHLR_MODEL).`],
     ['--allow-cloud',           `Allow cloud provider if no local is available (requires API key).`],
     ['--no-tools',              `Disable MCP tool loading (faster; for simple goals).`],

@@ -172,6 +172,8 @@ export interface SpawnResult {
   sessionId: string | null;
   /** Why this seat did not start, in the server's words; null on success. */
   error: string | null;
+  /** No HTTP refusal/acceptance was received; repeating may duplicate work. */
+  unknownOutcome?: boolean;
 }
 
 /** The toast after a start where some seats failed: which, and why. */

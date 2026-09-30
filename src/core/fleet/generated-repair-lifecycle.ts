@@ -85,7 +85,7 @@ const MAX_ATTEMPT_MEMBERSHIP_FALSE_POSITIVE_RATE = 1e-7;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const ENGINE_IDS = new Set<EngineId>([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
-  'kimi', 'nim', 'opencode', 'grok',
+  'kimi', 'nim', 'opencode', 'meta-muse', 'grok',
 ]);
 
 export type GeneratedRepairDisposition = 'active' | 'retired' | 'exhausted' | 'quarantined';

@@ -161,7 +161,7 @@ function validateReceipt(value: unknown, pool: ResourceConsoleEvidence['pool']):
 function validatePlan(value: unknown, pool: ResourceConsoleEvidence['pool'], sampledAt: string): asserts value is ResourceAssignmentPlan {
   object(value, ['schemaVersion', 'poolId', 'sampledAt', 'selectedWorkerId', 'candidates', 'exclusions', 'nextEligibleAt']);
   if (value.schemaVersion !== 1 || value.poolId !== pool.id || value.sampledAt !== sampledAt || !nullableTime(value.nextEligibleAt)) invalid();
-  array(value.candidates, 32); array(value.exclusions, 32);
+  array(value.candidates, pool.workers.length); array(value.exclusions, pool.workers.length);
   const seen = new Set<string>();
   for (const candidate of value.candidates) {
     object(candidate, ['workerId', 'provider', 'model', 'priority', 'reason', 'usedPercent', 'activeCount', 'taskReservationCount', 'pressure']);
@@ -205,7 +205,7 @@ export function validateResourceConsoleResponse(value: unknown, pool: ResourcePo
   if (!equal(parsed.pool, expected.pool)) invalid();
   array(parsed.reasons, 1);
   if (!equal(parsed.reasons, parsed.sourceState === 'degraded' ? ['resource-evidence-unavailable'] : [])) invalid();
-  array(parsed.groups, 32);
+  array(parsed.groups, pool.workers.length);
   if (parsed.groups.length !== expected.groups.length) invalid();
   const groupCounts = ['occupiedSlots', 'reservedCount', 'uncertainCount', 'recentTaskCount'];
   for (const [index, group] of parsed.groups.entries()) {

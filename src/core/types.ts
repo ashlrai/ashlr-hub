@@ -2741,6 +2741,7 @@ export type EngineId =
   | 'kimi'
   | 'nim'
   | 'opencode'
+  | 'meta-muse'
   | 'grok'; // M298: xAI Grok — OpenAI-compatible, tier mid (promotable to frontier via cfg.foundry.grok)
 
 /** Minted private execution identity reference. Runtime validation is stricter. */

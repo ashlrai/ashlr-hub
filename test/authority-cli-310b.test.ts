@@ -164,12 +164,20 @@ describe('basic commands', () => {
 });
 
 describe('protect — rulesets', () => {
+  const checkSha = 'a'.repeat(40);
+  const workflowContent = (source = 'on: [pull_request, push]\njobs: {}\n', sha = 'c'.repeat(40)) => ({ type: 'file', path: '.github/workflows/ci.yml', encoding: 'base64', content: Buffer.from(source).toString('base64'), size: Buffer.byteLength(source), sha });
+  const checkRun = (name: string, runId = 101) => ({ name, app: { id: 15368 }, head_sha: checkSha,
+    details_url: `https://github.com/ashlrai/binshield/actions/runs/${runId}/job/1` });
+  const workflowRun = (runId = 101, over: Record<string, unknown> = {}) => ({ id: runId, workflow_id: 7,
+    head_sha: checkSha, repository: { full_name: 'ashlrai/binshield' }, event: 'pull_request', path: '.github/workflows/ci.yml', ...over });
   const gh = (args: readonly string[]): GhResult => {
     const path = args[args.length - 1] === '-' ? args[3] : args[1];
     if (path === 'repos/ashlrai/binshield') return { status: 0, stdout: JSON.stringify({ default_branch: 'main', private: false }), stderr: '' };
     if (path?.startsWith('repos/ashlrai/binshield/commits/main/check-runs')) {
-      return { status: 0, stdout: JSON.stringify({ check_runs: [{ name: 'test' }, { name: 'lint' }, { name: 'test' }] }), stderr: '' };
+      return { status: 0, stdout: JSON.stringify({ total_count: 3, check_runs: [checkRun('test'), checkRun('lint'), checkRun('test')] }), stderr: '' };
     }
+    if (path?.startsWith('repos/ashlrai/binshield/contents/.github/workflows/ci.yml?ref=')) return { status: 0, stdout: JSON.stringify(workflowContent()), stderr: '' };
+    if (path === 'repos/ashlrai/binshield/actions/runs/101') return { status: 0, stdout: JSON.stringify(workflowRun()), stderr: '' };
     if (path === 'repos/ashlrai/binshield/rulesets') return { status: 0, stdout: '[]', stderr: '' };
     return { status: 0, stdout: '{}', stderr: '' };
   };
@@ -191,7 +199,7 @@ describe('protect — rulesets', () => {
     expect(await runAuthorityCli(['protect', '--apply', '--yes', '--repo', 'ashlrai/binshield'], applied.deps)).toBe(0);
     const post = applied.calls.find((c) => c.args.includes('POST'))!;
     expect(post.args).toContain('repos/ashlrai/binshield/rulesets');
-    expect(JSON.parse(post.input!)).toEqual(buildFleetRuleset(['lint', 'test']));
+    expect(JSON.parse(post.input!)).toEqual(buildFleetRuleset([{ context: 'lint', integrationId: 15368 }, { context: 'test', integrationId: 15368 }]));
   });
 
   it('the ruleset: required checks, no force-push, no deletion, code-owner review — only the admin role bypasses', () => {
@@ -222,8 +230,10 @@ describe('protect — rulesets', () => {
       const path = args[1];
       if (path === 'repos/ashlrai/binshield') return { status: 0, stdout: JSON.stringify({ default_branch: 'main', private: false }), stderr: '' };
       if (path?.startsWith('repos/ashlrai/binshield/commits/main/check-runs')) {
-        return { status: 0, stdout: JSON.stringify({ check_runs: [{ name: 'test', app: { id: 15368 } }, { name: 'lint', app: { id: 'x' } }] }), stderr: '' };
+        return { status: 0, stdout: JSON.stringify({ total_count: 2, check_runs: [checkRun('test'), checkRun('lint')] }), stderr: '' };
       }
+      if (path?.startsWith('repos/ashlrai/binshield/contents/.github/workflows/ci.yml?ref=')) return { status: 0, stdout: JSON.stringify(workflowContent()), stderr: '' };
+      if (path === 'repos/ashlrai/binshield/actions/runs/101') return { status: 0, stdout: JSON.stringify(workflowRun()), stderr: '' };
       if (path === 'repos/ashlrai/binshield/rulesets') return { status: 0, stdout: '[]', stderr: '' };
       return { status: 0, stdout: '{}', stderr: '' };
     };
@@ -234,6 +244,138 @@ describe('protect — rulesets', () => {
     expect(text).toMatch(/"strict_required_status_checks_policy": true/);
     expect(h.calls.every((c) => !c.args.includes('--method'))).toBe(true);
   });
+  function provenanceGh(checks: unknown[], runs: Record<number, unknown>, existing?: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+    return (args: readonly string[]): GhResult => {
+      const path = args[1]!;
+      if (path.startsWith('repos/ashlrai/binshield/commits/main/check-runs')) return { status: 0, stdout: JSON.stringify({ total_count: checks.length, check_runs: checks }), stderr: '' };
+      if (path === 'repos/ashlrai/binshield/rulesets') return { status: 0, stdout: JSON.stringify(existing ? [{ id: 9, name: 'ashlr-fleet: default branch' }] : []), stderr: '' };
+      if (path === 'repos/ashlrai/binshield/rulesets/9') return { status: 0, stdout: JSON.stringify(existing), stderr: '' };
+      if (Object.hasOwn(extra, path)) return { status: 0, stdout: JSON.stringify(extra[path]), stderr: '' };
+      if (path.startsWith('repos/ashlrai/binshield/contents/.github/workflows/ci.yml?ref=')) return { status: 0, stdout: JSON.stringify(workflowContent()), stderr: '' };
+      const match = /^repos\/ashlrai\/binshield\/actions\/runs\/(\d+)$/.exec(path);
+      if (match) return Object.hasOwn(runs, Number(match[1]))
+        ? { status: 0, stdout: JSON.stringify(runs[Number(match[1])]), stderr: '' }
+        : { status: 1, stdout: '', stderr: 'metadata unavailable' };
+      return gh(args);
+    };
+  }
+  const printedRuleset = (h: Harness) => JSON.parse(h.out.find(line => line.startsWith('{'))!);
+  const requiredContexts = (h: Harness) => printedRuleset(h).rules.find((rule: { type: string }) => rule.type === 'required_status_checks').parameters.required_status_checks;
+
+  it('excludes proven Dependabot maintenance while retaining literal/skipped PR jobs and caching run metadata', async () => {
+    const literal = 'Ignored Tests (${{ matrix.os }})';
+    const h = harness({ gh: provenanceGh([checkRun('Dependabot', 102), { ...checkRun(literal), conclusion: 'skipped' }, checkRun('test')],
+      { 101: workflowRun(), 102: workflowRun(102, { event: 'dynamic', path: 'dynamic/dependabot/dependabot-updates' }) }) });
+    expect(await runAuthorityCli(['protect', '--print', '--repo', 'ashlrai/binshield'], h.deps)).toBe(0);
+    expect(requiredContexts(h)).toEqual([{ context: literal, integration_id: 15368 }, { context: 'test', integration_id: 15368 }]);
+    expect(h.out.join('\n')).toContain('excluded maintenance-only check Dependabot');
+    expect(h.calls.filter(call => call.args[1] === 'repos/ashlrai/binshield/actions/runs/101')).toHaveLength(1);
+    expect(h.calls.every(call => !call.args.includes('--method'))).toBe(true);
+  });
+
+  it('preserves already required contexts and App pins even if absent, renamed or maintenance-only today', async () => {
+    const existing = buildFleetRuleset([{ context: 'missing-today', integrationId: 77 }, { context: 'Dependabot', integrationId: 42 }]);
+    const h = harness({ gh: provenanceGh([checkRun('Dependabot', 102), checkRun('test')], { 101: workflowRun() }, existing) });
+    expect(await runAuthorityCli(['protect', '--print', '--repo', 'ashlrai/binshield'], h.deps)).toBe(0);
+    expect(requiredContexts(h)).toEqual([{ context: 'Dependabot', integration_id: 42 }, { context: 'missing-today', integration_id: 77 }, { context: 'test', integration_id: 15368 }]);
+    expect(h.calls.some(call => call.args[1] === 'repos/ashlrai/binshield/actions/runs/102')).toBe(false);
+  });
+
+  it.each(['missing', 'foreign-repo', 'foreign-host', 'wrong-sha', 'metadata-repo', 'unreadable', 'unknown-app'] as const)(
+    'holds the entire automatic apply plan on %s provenance without dropping existing requirements', async reason => {
+      const existing = buildFleetRuleset([{ context: 'kept', integrationId: 77 }]);
+      const check = checkRun('new-ci');
+      if (reason === 'missing') check.details_url = '';
+      if (reason === 'foreign-repo') check.details_url = 'https://github.com/other/repo/actions/runs/101/job/1';
+      if (reason === 'foreign-host') check.details_url = 'https://evil.example/ashlrai/binshield/actions/runs/101/job/1';
+      if (reason === 'unknown-app') check.app.id = 999;
+      const h = harness({ gh: provenanceGh([check], reason === 'unreadable' ? {} : { 101: workflowRun(101, reason === 'wrong-sha' ? { head_sha: 'b'.repeat(40) } : reason === 'metadata-repo' ? { repository: { full_name: 'other/repo' } } : {}) }, existing) });
+      expect(await runAuthorityCli(['protect', '--apply', '--yes', '--repo', 'ashlrai/binshield'], h.deps)).toBe(1);
+      expect(h.out.join('\n')).toContain('RECHECK_REQUIRED');
+      expect(h.out.join('\n')).toContain('held new check new-ci');
+      expect(h.calls.every(call => !call.args.includes('--method'))).toBe(true);
+    },
+  );
+
+  it('admits push-discovered matrix jobs only when the same workflow reports exact names on a PR', async () => {
+    const historyPath = 'repos/ashlrai/binshield/actions/workflows/7/runs?event=pull_request&per_page=1';
+    const h = harness({ gh: provenanceGh([checkRun('test'), checkRun('lint')], { 101: workflowRun(101, { event: 'push' }) }, undefined,
+      { [historyPath]: { total_count: 1, workflow_runs: [workflowRun(202)] }, 'repos/ashlrai/binshield/actions/runs/202/jobs?per_page=100': { total_count: 2, jobs: [{ name: 'test' }, { name: 'lint' }] } }) });
+    expect(await runAuthorityCli(['protect', '--print', '--repo', 'ashlrai/binshield'], h.deps)).toBe(0);
+    expect(requiredContexts(h)).toEqual([{ context: 'lint', integration_id: 15368 }, { context: 'test', integration_id: 15368 }]);
+    expect(h.calls.filter(call => call.args[1] === historyPath)).toHaveLength(1);
+  });
+
+  it.each([
+    ['closed-only', 'on:\n  pull_request:\n    types: [closed]\n'],
+    ['path-filtered', 'on:\n  pull_request:\n    paths: [src/**]\n'],
+    ['branch-filtered', 'on:\n  pull_request:\n    branches: [main]\n'],
+    ['missing synchronize', 'on:\n  pull_request:\n    types: [opened, reopened]\n'],
+    ['unsupported trigger', 'on:\n  pull_request: false\n'],
+    ['malformed YAML', 'on: [pull_request\n'],
+  ])('holds %s current workflow despite historical PR metadata', async (_label, source) => {
+    const h = harness({ gh: provenanceGh([checkRun('test')], { 101: workflowRun() }, undefined,
+      { 'repos/ashlrai/binshield/contents/.github/workflows/ci.yml?ref=main': workflowContent(source) }) });
+    expect(await runAuthorityCli(['protect', '--apply', '--yes', '--repo', 'ashlrai/binshield'], h.deps)).toBe(1);
+    expect(h.out.join('\n')).toContain('RECHECK_REQUIRED');
+    expect(h.calls.every(call => !call.args.includes('--method'))).toBe(true);
+  });
+
+  it.each(['on: pull_request\n', 'on:\n  pull_request:\n', 'on:\n  pull_request: {}\n',
+    'on:\n  pull_request:\n    types: [opened, synchronize, reopened]\n'])(
+    'admits ordinary unfiltered PR trigger %s', async source => {
+      const h = harness({ gh: provenanceGh([checkRun('test')], { 101: workflowRun() }, undefined,
+        { 'repos/ashlrai/binshield/contents/.github/workflows/ci.yml?ref=main': workflowContent(source) }) });
+      expect(await runAuthorityCli(['protect', '--print', '--repo', 'ashlrai/binshield'], h.deps)).toBe(0);
+      expect(requiredContexts(h)).toEqual([{ context: 'test', integration_id: 15368 }]);
+    });
+
+  it.each(['pull_request_target', 'merge_group'])( 'holds %s-only jobs that lack ordinary PR-head provenance', async event => {
+    const h = harness({ gh: provenanceGh([checkRun('test')], { 101: workflowRun(101, { event }) }) });
+    expect(await runAuthorityCli(['protect', '--apply', '--yes', '--repo', 'ashlrai/binshield'], h.deps)).toBe(1);
+    expect(h.out.join('\n')).toContain('RECHECK_REQUIRED');
+    expect(h.calls.every(call => !call.args.includes('--method'))).toBe(true);
+  });
+
+  it('holds changed workflows even if an old PR reported the same job', async () => {
+    const base = provenanceGh([checkRun('test')], { 101: workflowRun(101, { event: 'push' }) }, undefined,
+      { 'repos/ashlrai/binshield/actions/workflows/7/runs?event=pull_request&per_page=1': { total_count: 1, workflow_runs: [workflowRun(202, { head_sha: 'b'.repeat(40) })] } });
+    const h = harness({ gh: args => args[1]?.includes('/contents/.github/workflows/ci.yml?ref=')
+      ? { status: 0, stdout: JSON.stringify(workflowContent(undefined, (args[1].endsWith('b'.repeat(40)) ? 'd' : 'c').repeat(40))), stderr: '' } : base(args) });
+    expect(await runAuthorityCli(['protect', '--apply', '--yes', '--repo', 'ashlrai/binshield'], h.deps)).toBe(1);
+    expect(h.calls.every(call => !call.args.includes('--method'))).toBe(true);
+  });
+
+  it('holds malformed check-run names and malformed existing check rules without writing', async () => {
+    const malformed = harness({ gh: provenanceGh([null], {}) });
+    expect(await runAuthorityCli(['protect', '--apply', '--yes', '--repo', 'ashlrai/binshield'], malformed.deps)).toBe(1);
+    expect(malformed.out.join('\n')).toContain('RECHECK_REQUIRED');
+    expect(malformed.calls.every(call => !call.args.includes('--method'))).toBe(true);
+    const broken = harness({ gh: provenanceGh([checkRun('test')], { 101: workflowRun() },
+      { rules: [{ type: 'required_status_checks', parameters: {} }] }) });
+    await runAuthorityCli(['protect', '--apply', '--yes', '--repo', 'ashlrai/binshield'], broken.deps);
+    expect(broken.out.join('\n')).toContain('unreadable existing required checks');
+    expect(broken.calls.every(call => !call.args.includes('--method'))).toBe(true);
+  });
+
+  it('refuses truncated discovery before doing any writes', async () => {
+    const base = provenanceGh([checkRun('test')], { 101: workflowRun() });
+    const h = harness({ gh: args => args[1]?.includes('/check-runs?')
+      ? { status: 0, stdout: JSON.stringify({ total_count: 101, check_runs: [checkRun('test')] }), stderr: '' } : base(args) });
+    await runAuthorityCli(['protect', '--apply', '--yes', '--repo', 'ashlrai/binshield'], h.deps);
+    expect(h.out.join('\n')).toContain('incomplete check-run discovery');
+    expect(h.calls.every(call => !call.args.includes('--method'))).toBe(true);
+  });
+
+  it('holds a push-only or truncated PR-job discovery instead of applying guessed requirements', async () => {
+    const h = harness({ gh: provenanceGh([checkRun('test')], { 101: workflowRun(101, { event: 'push' }) }, undefined,
+      { 'repos/ashlrai/binshield/actions/workflows/7/runs?event=pull_request&per_page=1': { total_count: 1, workflow_runs: [workflowRun(202)] },
+        'repos/ashlrai/binshield/actions/runs/202/jobs?per_page=100': { total_count: 2, jobs: [{ name: 'test' }] } }) });
+    expect(await runAuthorityCli(['protect', '--apply', '--yes', '--repo', 'ashlrai/binshield'], h.deps)).toBe(1);
+    expect(h.out.join('\n')).toContain('RECHECK_REQUIRED');
+    expect(h.calls.every(call => !call.args.includes('--method'))).toBe(true);
+  });
+
 });
 
 describe('github-app — the manifest flow', () => {

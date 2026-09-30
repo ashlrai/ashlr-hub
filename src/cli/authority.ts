@@ -818,6 +818,8 @@ interface RepoProtectPlan {
   repo: string;
   skipped: string | null;
   checks: string[];
+  /** Discovery decisions for new contexts; existing requirements are never discarded. */
+  checkNotes?: string[];
   ruleset: Record<string, unknown> | null;
   existingId: number | null;
   /** GitHub already holds exactly this ruleset: applying it again would change nothing. */
@@ -841,25 +843,163 @@ async function ghJson(deps: AuthorityCliDeps, args: readonly string[]): Promise<
   return JSON.parse(result.stdout || 'null') as unknown;
 }
 
-/** Check-run names on the default branch head: what CI actually reports today. */
+interface DiscoveredCheckRun {
+  name?: string; head_sha?: string; details_url?: string; app?: { id?: unknown };
+}
+interface CheckWorkflowRun {
+  id?: number; workflow_id?: number; event?: string; path?: string; head_sha?: string;
+  repository?: { full_name?: string };
+}
+
+/** Preserve the fleet ruleset's contexts and App pins even when a run is absent today. */
+function existingRequiredChecks(ruleset: unknown): RequiredCheck[] {
+  if (ruleset === null) return [];
+  if (!ruleset || typeof ruleset !== 'object') throw new Error('unreadable existing ruleset');
+  const found: RequiredCheck[] = [];
+  const rules = (ruleset as { rules?: { type?: string; parameters?: { required_status_checks?: { context?: string; integration_id?: unknown }[] } }[] }).rules;
+  if (!Array.isArray(rules)) throw new Error('unreadable existing ruleset rules');
+  for (const rule of rules) {
+    if (!rule || typeof rule !== 'object') throw new Error('unreadable existing ruleset rule');
+    if (rule.type !== 'required_status_checks') continue;
+    const checks = rule.parameters?.required_status_checks;
+    if (!Array.isArray(checks)) throw new Error('unreadable existing required checks');
+    for (const check of checks) {
+      if (!check || typeof check.context !== 'string' || !check.context) throw new Error('unreadable existing required check');
+      const id = check.integration_id;
+      if (id !== undefined && id !== null && (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0)) {
+        throw new Error('unreadable existing required check App pin');
+      }
+      found.push({ context: check.context, integrationId: typeof id === 'number' ? id : null });
+    }
+  }
+  const pins = new Map<string, number | null>();
+  for (const check of found) {
+    if (pins.has(check.context) && pins.get(check.context) !== check.integrationId) throw new Error('conflicting existing required check App pins');
+    pins.set(check.context, check.integrationId);
+  }
+  return normalizeRequiredChecks(found);
+}
+
 /**
  * 3.13: with `verifyAppId` (the repo is in the grant, the fleet can verify it
  * and the ashlr-fleet App's id is known) the host-verified `ashlr/verify` is
  * always required, pinned to the App — even when the default branch has no
  * runs at all (Actions off), which is exactly the repo it exists for. A
- * same-named run from another App never replaces the pin.
+ * same-named run from another App never replaces the pin. An existing
+ * required context keeps its existing pin until the operator reviews it.
  */
-async function discoverChecks(deps: AuthorityCliDeps, repo: string, branch: string, verifyAppId: number | null = null): Promise<RequiredCheck[]> {
-  const runs = await ghJson(deps, ['api', `repos/${repo}/commits/${encodeURIComponent(branch)}/check-runs?per_page=100`]) as { check_runs?: { name?: string; app?: { id?: unknown } }[] };
-  const found: RequiredCheck[] = [];
-  for (const run of runs.check_runs ?? []) {
-    if (typeof run.name !== 'string' || run.name.length === 0) continue;
-    if (verifyAppId !== null && run.name === ASHLR_VERIFY_CHECK) continue;
-    const appId = run.app?.id;
-    found.push({ context: run.name, integrationId: typeof appId === 'number' && Number.isSafeInteger(appId) && appId > 0 ? appId : null });
+async function discoverChecks(deps: AuthorityCliDeps, repo: string, branch: string, verifyAppId: number | null = null,
+  existing: readonly RequiredCheck[] = []): Promise<{ checks: RequiredCheck[]; notes: string[]; held: boolean }> {
+  const runs = await ghJson(deps, ['api', `repos/${repo}/commits/${encodeURIComponent(branch)}/check-runs?per_page=100`]) as { total_count?: number; check_runs?: DiscoveredCheckRun[] };
+  // The API page and per-plan caches are bounded. Partial discovery cannot
+  // authorize a weaker replacement ruleset; require a complete page or review.
+  if (!runs || !Array.isArray(runs.check_runs) || runs.check_runs.length > 100 ||
+    !Number.isSafeInteger(runs.total_count) || runs.total_count !== runs.check_runs.length) {
+    return { checks: normalizeRequiredChecks(existing), notes: ['held new check discovery: incomplete check-run discovery; review GitHub checks before applying'], held: true };
   }
-  if (verifyAppId !== null) found.push({ context: ASHLR_VERIFY_CHECK, integrationId: verifyAppId });
-  return normalizeRequiredChecks(found);
+  const found: RequiredCheck[] = [...existing]; const notes = new Set<string>(); let held = false;
+  const existingContexts = new Set(existing.map(check => check.context));
+  const metadata = new Map<number, Promise<CheckWorkflowRun | null>>();
+  const prJobs = new Map<number, Promise<readonly string[] | null>>();
+  const files = new Map<string, Promise<{ sha: string; ordinaryPr: boolean } | null>>();
+  const workflowFile = (path: string, ref: string): Promise<{ sha: string; ordinaryPr: boolean } | null> => {
+    const key = `${path}@${ref}`;
+    if (!files.has(key)) files.set(key, (async () => {
+      try {
+        const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+        const file = await ghJson(deps, ['api', `repos/${repo}/contents/${encodedPath}?ref=${encodeURIComponent(ref)}`]) as { type?: string; encoding?: string; content?: string; size?: number; sha?: string; path?: string };
+        if (file?.type !== 'file' || file.path !== path || file.encoding !== 'base64' || typeof file.content !== 'string' ||
+          !Number.isSafeInteger(file.size) || file.size! < 0 || file.size! > 65_536 || typeof file.sha !== 'string' || !/^[a-f0-9]{40,64}$/.test(file.sha)) return null;
+        const content = file.content.replace(/\s/g, '');
+        if (content.length > 87_384 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(content)) return null;
+        const bytes = Buffer.from(content, 'base64');
+        if (bytes.length !== file.size) return null;
+        const { parseDocument } = await import('yaml');
+        const doc = parseDocument(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+        if (doc.errors.length || doc.warnings.length) return null;
+        const value = doc.toJS({ maxAliasCount: 0 }) as { on?: unknown } | null;
+        const on = value?.on;
+        let ordinaryPr = on === 'pull_request' || (Array.isArray(on) && on.every(event => typeof event === 'string') && on.includes('pull_request'));
+        if (on && typeof on === 'object' && !Array.isArray(on) && Object.hasOwn(on, 'pull_request')) {
+          const trigger = (on as Record<string, unknown>)['pull_request'];
+          ordinaryPr = trigger === null || (!!trigger && typeof trigger === 'object' && !Array.isArray(trigger) &&
+            Object.keys(trigger).every(key => key === 'types') && (!Object.hasOwn(trigger, 'types') ||
+              (Array.isArray((trigger as { types?: unknown }).types) && (trigger as { types: unknown[] }).types.every(type => typeof type === 'string') &&
+                (trigger as { types: unknown[] }).types.includes('opened') && (trigger as { types: unknown[] }).types.includes('synchronize'))));
+        }
+        return { sha: file.sha, ordinaryPr };
+      } catch { return null; }
+    })());
+    return files.get(key)!;
+  };
+  const sameRepo = (run: CheckWorkflowRun): boolean => typeof run.repository?.full_name === 'string' && run.repository.full_name.toLowerCase() === repo.toLowerCase();
+  const knownWorkflow = (run: CheckWorkflowRun): boolean => typeof run.path === 'string' && /^\.github\/workflows\/[^/]+\.ya?ml$/.test(run.path);
+  for (const check of runs.check_runs) {
+    if (!check || typeof check.name !== 'string' || !check.name) {
+      held = true; notes.add('held new check discovery: malformed check-run name'); continue;
+    }
+    if (existingContexts.has(check.name)) continue;
+    if (verifyAppId !== null && check.name === ASHLR_VERIFY_CHECK) continue;
+    // App15368 is GitHub Actions. Other new reporters have no Actions provenance
+    // to inspect here; keep them for explicit operator review rather than guess.
+    let runId: number | null = null;
+    try {
+      const url = new URL(check.details_url ?? '');
+      const prefix = `/${repo}/actions/runs/`;
+      const suffix = url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : '';
+      const match = /^(\d+)(?:\/job\/\d+)?\/?$/.exec(suffix);
+      if (check.app?.id === 15368 && url.protocol === 'https:' && url.host === 'github.com' && !url.username && !url.password && match &&
+        Number.isSafeInteger(Number(match[1])) && Number(match[1]) > 0) runId = Number(match[1]);
+    } catch { /* Unknown provenance stays held. */ }
+    let run: CheckWorkflowRun | null = null;
+    if (runId !== null) {
+      if (!metadata.has(runId)) metadata.set(runId, ghJson(deps, ['api', `repos/${repo}/actions/runs/${runId}`])
+        .then(value => value as CheckWorkflowRun).catch(() => null));
+      run = await metadata.get(runId)!;
+      if (!run || run.id !== runId || !sameRepo(run) || typeof check.head_sha !== 'string' || !/^[a-f0-9]{40,64}$/.test(check.head_sha) || run.head_sha !== check.head_sha) run = null;
+    }
+    if (run?.event === 'dynamic' && run.path === 'dynamic/dependabot/dependabot-updates') {
+      notes.add(`excluded maintenance-only check ${check.name} (Dependabot update workflow)`);
+      continue;
+    }
+    // Trigger filters can leave ordinary PR heads without this check. Only
+    // unfiltered opened/synchronize coverage is admitted automatically.
+    const currentFile = run && knownWorkflow(run) ? await workflowFile(run.path!, branch) : null;
+    const reportedFile = currentFile?.ordinaryPr && run ? await workflowFile(run.path!, run.head_sha!) : null;
+    const ordinaryPr = currentFile?.ordinaryPr === true && reportedFile?.sha === currentFile.sha;
+    let eligible = ordinaryPr && run?.event === 'pull_request';
+    // A push run proves the name exists, not that a PR will report it. Require
+    // unchanged workflow's latest PR run to have that exact job name. This is
+    // observed PR evidence, not a guarantee against future filters/changes. Cache these
+    // bounded reads across matrix jobs; skipped/literal names remain legitimate.
+    if (!eligible && ordinaryPr && run && run.event === 'push' && Number.isSafeInteger(run.workflow_id) && run.workflow_id! > 0) {
+      const workflowId = run.workflow_id!;
+      if (!prJobs.has(workflowId)) prJobs.set(workflowId, (async () => {
+        try {
+          const history = await ghJson(deps, ['api', `repos/${repo}/actions/workflows/${workflowId}/runs?event=pull_request&per_page=1`]) as { total_count?: number; workflow_runs?: CheckWorkflowRun[] };
+          if (!Array.isArray(history.workflow_runs) || history.workflow_runs.length > 1 || !Number.isSafeInteger(history.total_count) ||
+            history.total_count! < history.workflow_runs.length) return null;
+          const prior = history.workflow_runs?.[0];
+          if (!prior || !sameRepo(prior) || prior.workflow_id !== workflowId || prior.path !== run!.path || prior.event !== 'pull_request' ||
+            !Number.isSafeInteger(prior.id) || prior.id! <= 0 || typeof prior.head_sha !== 'string' || !/^[a-f0-9]{40,64}$/.test(prior.head_sha)) return null;
+          const priorFile = await workflowFile(run!.path!, prior.head_sha);
+          if (!priorFile || priorFile.sha !== currentFile!.sha) return null;
+          const jobs = await ghJson(deps, ['api', `repos/${repo}/actions/runs/${prior.id}/jobs?per_page=100`]) as { total_count?: number; jobs?: { name?: string }[] };
+          if (!Array.isArray(jobs.jobs) || jobs.jobs.length > 100 || typeof jobs.total_count !== 'number' || jobs.total_count !== jobs.jobs.length || jobs.jobs.some(job => !job || typeof job.name !== 'string' || !job.name)) return null;
+          return jobs.jobs.flatMap(job => typeof job.name === 'string' ? [job.name] : []);
+        } catch { return null; }
+      })());
+      eligible = (await prJobs.get(workflowId)!)?.includes(check.name) === true;
+    }
+    if (!eligible) {
+      held = true;
+      notes.add(`held new check ${check.name}: PR workflow provenance was not confirmed; review before requiring it`);
+      continue;
+    }
+    found.push({ context: check.name, integrationId: 15368 });
+  }
+  if (verifyAppId !== null && !existingContexts.has(ASHLR_VERIFY_CHECK)) found.push({ context: ASHLR_VERIFY_CHECK, integrationId: verifyAppId });
+  return { checks: normalizeRequiredChecks(found), notes: [...notes].sort(), held };
 }
 
 /** The check the ashlr-fleet App posts on fleet PR heads (core/fleet/verify-check-run.ts ASHLR_VERIFY_CHECK_NAME). */
@@ -1050,19 +1190,23 @@ async function protectPlans(parsed: Parsed, deps: AuthorityCliDeps, given?: read
           else verifyNote = `${ASHLR_VERIFY_CHECK} not required: the ${FLEET_APP_NAME} App could not be read (\`gh api apps/${FLEET_APP_NAME}\`)`;
         }
       }
-      const required = await discoverChecks(deps, repo, info?.default_branch ?? 'main', verifyAppId);
-      const checks = required.map((check) => check.context);
       const existing = JSON.parse(listed.stdout || 'null') as { id?: number; name?: string }[] | null;
       const match = Array.isArray(existing) ? existing.find((r) => r.name === FLEET_RULESET_NAME) : undefined;
       const existingId = typeof match?.id === 'number' && Number.isSafeInteger(match.id) ? match.id : null;
-      const ruleset = buildFleetRuleset(required);
+      const actual = existingId === null ? null : await ghJson(deps, ['api', `repos/${repo}/rulesets/${existingId}`]);
+      if (existingId !== null && (!actual || typeof actual !== 'object')) throw new Error('unreadable existing ruleset');
+      const discovery = await discoverChecks(deps, repo, info?.default_branch ?? 'main', verifyAppId, existingRequiredChecks(actual));
+      const checks = discovery.checks.map((check) => check.context);
+      const ruleset = buildFleetRuleset(discovery.checks);
       // Rerun-safe: a ruleset already on GitHub with this exact content is
       // reported as in place instead of being PUT again.
-      const upToDate = existingId !== null && rulesetMatches(ruleset, await ghJson(deps, ['api', `repos/${repo}/rulesets/${existingId}`]));
+      const upToDate = existingId !== null && rulesetMatches(ruleset, actual);
       plans.push({
         repo,
-        skipped: info?.private === true && checks.length === 0 ? 'private repo with no CI checks — protect it by hand or keep it propose-only' : null,
+        skipped: discovery.held ? 'RECHECK_REQUIRED: new check PR workflow provenance is unconfirmed; inspect protect --print notes before applying'
+          : info?.private === true && checks.length === 0 ? 'private repo with no CI checks — protect it by hand or keep it propose-only' : null,
         checks,
+        ...(discovery.notes.length > 0 ? { checkNotes: discovery.notes } : {}),
         ruleset,
         existingId,
         upToDate,
@@ -1101,6 +1245,7 @@ async function cmdProtect(parsed: Parsed, deps: AuthorityCliDeps): Promise<numbe
   }
   const plans = await protectPlans(parsed, deps);
   for (const plan of plans) {
+    for (const note of plan.checkNotes ?? []) deps.out(`${plan.repo}: note: ${note}`);
     if (plan.skipped) {
       deps.out(`${plan.repo}: skipped — ${plan.skipped}`);
       continue;
@@ -1122,6 +1267,8 @@ async function cmdProtect(parsed: Parsed, deps: AuthorityCliDeps): Promise<numbe
     }
   }
   if (!apply) return 0;
+  // An explicit apply must signal that a new requirement remains unreviewed.
+  if (plans.some(plan => plan.skipped?.startsWith('RECHECK_REQUIRED'))) return 1;
   const actionable = plans.filter((plan) => !plan.skipped && !plan.upToDate);
   if (actionable.length === 0) return 0;
   if (!parsed.flags.has('--yes') && !(await deps.confirm(`Apply the ruleset to ${actionable.length} repo(s)?`))) {
@@ -1968,7 +2115,9 @@ async function runSetup(parsed: Parsed, deps: AuthorityCliDeps, opts: SetupRunOp
       const noRulesets = unavailable.length > 0
         ? `; rulesets unavailable on this plan for private ${shortList(unavailable.map((plan) => plan.repo))} — ${mismatches.length > 0 ? mismatches.join('; ') : `using local enforcement with ${ASHLR_VERIFY_CHECK}`}`
         : '';
-      const left = `${byHand > 0 ? `; ${byHand} left to you (local enforcement or no CI)` : ''}${noRulesets}`;
+      const discoveryHeld = plans.filter(plan => plan.skipped?.startsWith('RECHECK_REQUIRED')).map(plan => plan.repo);
+      const discoveryNote = discoveryHeld.length > 0 ? `; new check discovery needs review for ${shortList(discoveryHeld)} (protect --print shows why)` : '';
+      const left = `${byHand > 0 ? `; ${byHand} left to you (local enforcement or no CI)` : ''}${noRulesets}${discoveryNote}`;
       const inPlaceText = inPlace > 0 ? `the fleet ruleset is in place on ${inPlace === 1 ? '1 repo' : `${inPlace} repos`}` : 'no repo has the fleet ruleset';
       if (plans.length === 0) {
         // Nothing to look at yet — never "in place on 0 repos".
@@ -1978,7 +2127,7 @@ async function runSetup(parsed: Parsed, deps: AuthorityCliDeps, opts: SetupRunOp
         const where = shortList(stale.map((plan) => plan.repo));
         if (await ask(`Apply the fleet ruleset to ${stale.length} repo(s) where it is missing or different (${where})?`)) {
           const failures = await applyProtectPlans(stale, deps);
-          note('rulesets', failures > 0 ? 'failed' : unreadable.length > 0 || mismatches.length > 0 ? 'waiting-on-you' : 'done', failures === 0
+          note('rulesets', failures > 0 ? 'failed' : unreadable.length > 0 || mismatches.length > 0 || discoveryHeld.length > 0 ? 'waiting-on-you' : 'done', failures === 0
             ? `applied to ${where}${inPlace > 0 ? `; ${inPlace} already in place` : ''}${unread}${left}`
             : `${failures} of ${stale.length} failed (see above)${unread}${noRulesets}`);
         } else {
@@ -1989,6 +2138,8 @@ async function runSetup(parsed: Parsed, deps: AuthorityCliDeps, opts: SetupRunOp
       } else if (mismatches.length > 0) {
         // The signed grant is never rewritten here: only a re-approval (Touch ID) switches the repo.
         note('rulesets', 'waiting-on-you', `${inPlaceText}${left}`, { command: 'ashlr authority re-approve' });
+      } else if (discoveryHeld.length > 0) {
+        note('rulesets', 'waiting-on-you', `RECHECK_REQUIRED: new check discovery needs review for ${shortList(discoveryHeld)}; inspect protect --print before applying`, { command: 'ashlr authority protect --print' });
       } else {
         note('rulesets', 'already', `${inPlaceText}${left}`);
       }

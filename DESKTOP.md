@@ -62,9 +62,9 @@ macOS build (from the repo root): `npm run build:binary` →
 (once) → `npm run build:debug` or `npm run build`. The `.app` lands in
 `desktop/src-tauri/target/{debug,release}/bundle/macos/Ashlr.app`.
 
-No public desktop release or installer is currently available. The supported
-installation path is the npm/CLI quickstart; the web dashboard remains
-available through that runtime.
+The public macOS arm64 DMG is locally signed, not Apple Developer ID notarized.
+See [desktop installation](desktop/README.md#install) for the release download.
+The npm/CLI quickstart also serves the web dashboard on macOS, Linux and Windows.
 Fresh Linux Tauri source builds are quarantined and fail closed in
 `desktop/src-tauri/build.rs` because the Tauri v2 / GTK3 dependency chain
 resolves vulnerable `glib 0.18.5`

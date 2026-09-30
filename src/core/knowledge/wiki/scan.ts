@@ -17,7 +17,8 @@
  */
 
 import { execFile } from 'node:child_process';
-import { lstat, readdir, readFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, readdir, realpath, open } from 'node:fs/promises';
 import path from 'node:path';
 
 /** Hard cap on files listed per repo. */
@@ -71,6 +72,8 @@ export interface RepoScan {
   files: ScannedFile[];
   /** True when MAX_LISTED_FILES cut the listing short. */
   truncated: boolean;
+  /** Listing failed or skipped unreadable/deep directories. Not an empty-repo proof. */
+  listingIncomplete?: boolean;
 }
 
 /** True when a repo-relative path may be listed/read at all. */
@@ -151,9 +154,10 @@ export function parseLsTree(raw: string, ignorePaths: readonly string[] = []): {
   return { files, truncated };
 }
 
-async function walkFiles(repo: string, ignorePaths: readonly string[]): Promise<{ files: ScannedFile[]; truncated: boolean }> {
+async function walkFiles(repo: string, ignorePaths: readonly string[]): Promise<{ files: ScannedFile[]; truncated: boolean; listingIncomplete?: boolean }> {
   const files: ScannedFile[] = [];
   let truncated = false;
+  let listingIncomplete = false;
   const queue: Array<{ dir: string; depth: number }> = [{ dir: repo, depth: 0 }];
   while (queue.length > 0 && !truncated) {
     const { dir, depth } = queue.shift()!;
@@ -161,6 +165,7 @@ async function walkFiles(repo: string, ignorePaths: readonly string[]): Promise<
     try {
       entries = await readdir(dir, { withFileTypes: true });
     } catch {
+      listingIncomplete = true;
       continue;
     }
     entries.sort((a, b) => a.name.localeCompare(b.name));
@@ -169,7 +174,10 @@ async function walkFiles(repo: string, ignorePaths: readonly string[]): Promise<
       const abs = path.join(dir, ent.name);
       const rel = path.relative(repo, abs).split(path.sep).join('/');
       if (ent.isDirectory()) {
-        if (depth < WALK_MAX_DEPTH && !SKIP_DIRS.has(ent.name) && !ent.name.startsWith('.')) queue.push({ dir: abs, depth: depth + 1 });
+        if (!SKIP_DIRS.has(ent.name) && !ent.name.startsWith('.')) {
+          if (depth < WALK_MAX_DEPTH) queue.push({ dir: abs, depth: depth + 1 });
+          else listingIncomplete = true;
+        }
         continue;
       }
       if (!ent.isFile() || !isWikiReadable(rel, ignorePaths)) continue;
@@ -181,15 +189,15 @@ async function walkFiles(repo: string, ignorePaths: readonly string[]): Promise<
         const st = await lstat(abs);
         files.push({ rel, size: st.size, blob: `${st.size}:${Math.floor(st.mtimeMs)}` });
       } catch {
-        // vanished mid-walk
+        listingIncomplete = true; // vanished mid-walk
       }
     }
   }
   files.sort((a, b) => a.rel.localeCompare(b.rel));
-  return { files, truncated };
+  return { files, truncated, ...(listingIncomplete ? { listingIncomplete } : {}) };
 }
 
-/** List the repo. Never throws; an unreadable repo is an empty scan. */
+/** List the repo. Never throws; listing failure is explicitly marked incomplete. */
 export async function scanRepo(repo: string, ignorePaths: readonly string[] = []): Promise<RepoScan> {
   const abs = path.resolve(repo);
   const name = path.basename(abs);
@@ -201,8 +209,8 @@ export async function scanRepo(repo: string, ignorePaths: readonly string[] = []
       return { repo: abs, name, head, git: true, files, truncated };
     }
   }
-  const { files, truncated } = await walkFiles(abs, ignorePaths);
-  return { repo: abs, name, head: null, git: false, files, truncated };
+  const { files, truncated, listingIncomplete } = await walkFiles(abs, ignorePaths);
+  return { repo: abs, name, head: null, git: false, files, truncated, ...(listingIncomplete ? { listingIncomplete } : {}) };
 }
 
 /**
@@ -237,11 +245,34 @@ export async function readRepoText(repo: string, rel: string, maxBytes = MAX_REA
   const root = path.resolve(repo);
   if (abs !== root && !abs.startsWith(root + path.sep)) return null;
   try {
-    const st = await lstat(abs);
-    if (!st.isFile() || st.size > maxBytes) return null;
-    const buf = await readFile(abs);
-    if (buf.subarray(0, 8000).includes(0)) return null;
-    return buf.toString('utf8');
+    const realRoot = await realpath(root);
+    // Reject symlinks in every relative path component, not just the final file.
+    // A tracked src/file.ts can otherwise escape after src is replaced locally.
+    let component = root;
+    for (const part of path.relative(root, abs).split(path.sep)) {
+      component = path.join(component, part);
+      if ((await lstat(component)).isSymbolicLink()) return null;
+    }
+    const realFile = await realpath(abs);
+    if (!realFile.startsWith(realRoot + path.sep)) return null;
+    const file = await open(realFile, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    try {
+      const st = await file.stat();
+      const limit = Math.min(MAX_READ_BYTES, Math.max(0, Math.floor(maxBytes)));
+      if (!st.isFile() || !Number.isFinite(limit) || st.size > limit) return null;
+      // Fixed allocation also bounds a file that grows after the stat.
+      const buf = Buffer.alloc(limit + 1);
+      let bytes = 0;
+      while (bytes < buf.length) {
+        const read = await file.read(buf, bytes, buf.length - bytes, null);
+        if (read.bytesRead === 0) break;
+        bytes += read.bytesRead;
+      }
+      if (bytes > limit || buf.subarray(0, Math.min(bytes, 8000)).includes(0)) return null;
+      const after = await lstat(realFile);
+      if (!after.isFile() || after.ino !== st.ino || after.dev !== st.dev || await realpath(abs) !== realFile) return null;
+      return buf.subarray(0, bytes).toString('utf8');
+    } finally { await file.close(); }
   } catch {
     return null;
   }

@@ -2,7 +2,7 @@
 import { performance } from 'node:perf_hooks';
 import { normalizeNumericLoopbackOllamaBaseUrl, verifyOllamaModelIdentity } from '../run/ollama-identity.js';
 import { canonical, digest } from '../universe/artifacts.js';
-import { MAX_RESOURCE_OBSERVATION_AGE_MS, MAX_RESOURCE_POOL_WORKERS, validateResourceObservations,
+import { MAX_RESOURCE_OBSERVATION_AGE_MS, validateResourceObservations,
   validateResourcePool, type ResourceObservation, type ResourcePool } from './pool-policy.js';
 import { validateResourceBindings, type ResourceBinding } from './worker.js';
 
@@ -32,8 +32,8 @@ function exact(value: Record<string, unknown>, keys: string[]): boolean {
   return actual.length === keys.length && actual.every((key) => typeof key === 'string' && keys.includes(key) &&
     'value' in Object.getOwnPropertyDescriptor(value, key)!);
 }
-function roster(value: unknown): value is unknown[] {
-  return Array.isArray(value) && value.length >= 1 && value.length <= MAX_RESOURCE_POOL_WORKERS &&
+function roster(value: unknown, maximum: number): value is unknown[] {
+  return Array.isArray(value) && value.length >= 1 && value.length <= maximum &&
     Reflect.ownKeys(value).length === value.length + 1 &&
     Array.from({ length: value.length }, (_, index) => index).every((index) => Object.hasOwn(value, index) &&
       'value' in Object.getOwnPropertyDescriptor(value, index)!);
@@ -46,7 +46,7 @@ export function validateResourceLocalModelConfig(value: unknown, poolValue: Reso
   const invalid = (): never => { throw new Error('Invalid resource local model configuration'); };
   if (!object(value) || !exact(value, ['schemaVersion', 'poolDigest', 'workers']) || value.schemaVersion !== 1 ||
     typeof value.poolDigest !== 'string' || !/^[a-f0-9]{64}$/.test(value.poolDigest) ||
-    value.poolDigest !== digest(canonical({ pool, bindings })) || !roster(value.workers)) return invalid();
+    value.poolDigest !== digest(canonical({ pool, bindings })) || !roster(value.workers, pool.workers.length)) return invalid();
   const seen = new Set<string>(); const workers: ResourceLocalModelWorker[] = [];
   for (const row of value.workers) {
     if (!object(row) || !exact(row, ['workerId', 'modelDigest']) || typeof row.workerId !== 'string' ||

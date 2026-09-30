@@ -915,12 +915,12 @@ describe('M117 — orchestrator dispatch for api-model engine (mocked)', () => {
     vi.resetModules();
   });
 
-  it('runGoal with engine=local-coder routes to runApiModelSandboxed, not builtin', async () => {
+  it.each(['local-coder', 'meta-muse', 'custom-api'] as const)('runGoal routes registered %s to runApiModelSandboxed', async (engine) => {
     let apiModelSandboxedCalled = false;
     const fakeRunState = {
       id: 'run-test',
       goal: 'test',
-      engine: 'local-coder',
+      engine,
       provider: 'openai-compat',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -943,12 +943,12 @@ describe('M117 — orchestrator dispatch for api-model engine (mocked)', () => {
       };
     });
 
-    // Mock engineInstalled to return true for local-coder
+    // Mock installation only; dispatch must resolve built-in and configured API engines.
     vi.doMock('../src/core/run/engines.js', async () => {
       const actual = await vi.importActual('../src/core/run/engines.js');
       return {
         ...(actual as object),
-        engineInstalled: (engine: string) => engine === 'local-coder' ? true : false,
+        engineInstalled: (candidate: string) => candidate === engine,
       };
     });
 
@@ -978,20 +978,26 @@ describe('M117 — orchestrator dispatch for api-model engine (mocked)', () => {
 
     const cfg = {
       foundry: {
-        allowedBackends: ['local-coder'],
-        models: { 'local-coder': 'qwen2.5:72b-instruct-q4_K_M' },
-        sandboxEngines: ['local-coder'],
+        allowedBackends: [engine],
+        models: { [engine]: 'fixture-model' },
+        sandboxEngines: [engine],
+        engines: {
+          'custom-api': {
+            id: 'custom-api', kind: 'api-model', tier: 'mid',
+            api: { protocol: 'openai', envKey: 'FIXTURE_API_KEY', defaultBaseUrl: 'http://127.0.0.1:9999/v1', defaultModel: 'fixture-model' },
+          },
+        },
       },
     } as never;
 
     const result = await runGoal('increment x', cfg, {
-      engine: 'local-coder',
+      engine,
       sandboxEngine: true,
     });
 
     expect(apiModelSandboxedCalled).toBe(true);
     expect(result.status).toBe('done');
-    expect(result.engine).toBe('local-coder');
+    expect(result.engine).toBe(engine);
 
     vi.resetModules();
   });

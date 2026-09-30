@@ -402,6 +402,7 @@ function fakeGitHub(state: {
   installations?: { app_slug: string; repository_selection: 'all' | 'selected' }[] | null;
   /** The App's checks permission as GitHub reports it (3.13 needs 'write'). */
   appChecks?: 'write' | 'read';
+  unknownCheck?: boolean;
 } = {}) {
   return (bin: string, args: readonly string[]): GhResult => {
     if (bin !== 'gh' || args[0] !== 'api') return no('unexpected command');
@@ -412,7 +413,10 @@ function fakeGitHub(state: {
       return ok(JSON.stringify({ id: 4242, slug: 'ashlr-fleet', owner: { login: 'ashlrai', type: 'Organization' }, permissions: { checks: state.appChecks ?? 'write' } }));
     }
     if (path === `repos/${CANARY}`) return state.canary === false ? no('HTTP 404: Not Found') : ok(JSON.stringify({ default_branch: 'main', private: false }));
-    if (path.startsWith(`repos/${CANARY}/commits/main/check-runs`)) return ok(JSON.stringify({ check_runs: [{ name: 'test', app: { id: 15368 } }] }));
+    if (path.startsWith(`repos/${CANARY}/commits/main/check-runs`)) return ok(JSON.stringify({ total_count: 1, check_runs: [{ name: state.unknownCheck ? 'unconfirmed-new-ci' : 'test', app: { id: 15368 }, head_sha: 'a'.repeat(40), details_url: `https://github.com/${CANARY}/actions/runs/101/job/1` }] }));
+    if (path === `repos/${CANARY}/actions/runs/101` && state.unknownCheck) return no('metadata unavailable');
+    if (path.startsWith(`repos/${CANARY}/contents/.github/workflows/ci.yml?ref=`)) return ok(JSON.stringify({ type: 'file', path: '.github/workflows/ci.yml', encoding: 'base64', content: Buffer.from('on: [pull_request, push]\n').toString('base64'), size: Buffer.byteLength('on: [pull_request, push]\n'), sha: 'c'.repeat(40) }));
+    if (path === `repos/${CANARY}/actions/runs/101`) return ok(JSON.stringify({ id: 101, event: 'pull_request', path: '.github/workflows/ci.yml', head_sha: 'a'.repeat(40), repository: { full_name: CANARY } }));
     if (path === `repos/${CANARY}/rulesets`) return ok(JSON.stringify(state.ruleset ? [{ id: 7, name: FLEET_RULESET_NAME }] : []));
     if (path === `repos/${CANARY}/rulesets/7`) return state.ruleset ? ok(JSON.stringify(state.ruleset)) : no('HTTP 404');
     if (path.startsWith('orgs/ashlrai/installations')) {
@@ -497,6 +501,16 @@ describe('setup is rerun-safe: rulesets', () => {
     expect(await runAuthorityCli(['protect', '--apply', '--yes'], h.deps)).toBe(0);
     expect(h.out.join('\n')).toMatch(/ruleset 7 already up to date/);
     expect(writes(h.calls)).toEqual([]);
+  });
+
+  it('holds unknown new CI discovery for review even with --yes and leaves the existing ruleset intact', async () => {
+    const h = readyHarness({ confirm: true, run: fakeGitHub({ unknownCheck: true, ruleset: asGitHubReturns(buildFleetRuleset(CANARY_CHECKS)) }) });
+    const step = (await dryRunReport(h)).steps.find(s => s.id === 'rulesets');
+    expect(step).toMatchObject({ status: 'waiting-on-you', command: 'ashlr authority protect --print' });
+    expect(step?.detail).toContain('RECHECK_REQUIRED');
+    expect(await runAuthorityCli(['setup', '--yes'], h.deps)).toBe(0);
+    expect(writes(h.calls)).toEqual([]);
+    expect(h.out.join('\n')).toMatch(/… rulesets: RECHECK_REQUIRED/);
   });
 
   it('a drifted ruleset (an extra bypass actor) is re-applied — to that repo only, with a PUT', async () => {
