@@ -119,6 +119,11 @@ const posixOnly = process.platform === 'win32' ? it.skip : it;
 // A. The process-group runner
 // ---------------------------------------------------------------------------
 
+// Cold executable shell startup can exceed 400ms before printing or installing
+// its SIGTERM trap. Keep these fixture deadlines bounded while allowing the
+// child effects needed to prove whole-group cleanup; production limits are unchanged.
+const HUNG_MANAGER_FIXTURE_TIMEOUT_MS = 2_000;
+
 describe('A · runDependencyInstall', () => {
   posixOnly('a hung install hits its hard timeout and its WHOLE process group is killed', async () => {
     const dir = join(fx.home, 'hung');
@@ -127,7 +132,7 @@ describe('A · runDependencyInstall', () => {
     // stalled bun/pnpm): the worker must die with it.
     const bin = script(dir, 'fake-pm', `echo "resolving…"\nsleep 300 &\necho $! > "${pids}"\necho $$ >> "${pids}"\nwait`);
     const started = Date.now();
-    const run = await runDependencyInstall(bin, ['install'], { cwd: dir, env: { PATH: process.env['PATH'] ?? '' }, timeoutMs: 400, killGraceMs: 300 });
+    const run = await runDependencyInstall(bin, ['install'], { cwd: dir, env: { PATH: process.env['PATH'] ?? '' }, timeoutMs: HUNG_MANAGER_FIXTURE_TIMEOUT_MS, killGraceMs: 300 });
     expect(run.ok).toBe(false);
     expect(run.timedOut).toBe(true);
     expect(run.cancelled).toBe(false);
@@ -141,7 +146,7 @@ describe('A · runDependencyInstall', () => {
     const dir = join(fx.home, 'stubborn');
     const pids = join(dir, 'pids');
     const bin = script(dir, 'fake-pm', `trap '' TERM\necho $$ > "${pids}"\nwhile :; do sleep 1; done`);
-    const run = await runDependencyInstall(bin, [], { cwd: dir, env: { PATH: process.env['PATH'] ?? '' }, timeoutMs: 300, killGraceMs: 300 });
+    const run = await runDependencyInstall(bin, [], { cwd: dir, env: { PATH: process.env['PATH'] ?? '' }, timeoutMs: HUNG_MANAGER_FIXTURE_TIMEOUT_MS, killGraceMs: 300 });
     expect(run.timedOut).toBe(true);
     expect(run.signal === 'SIGKILL' || run.abandoned).toBe(true);
     const leader = Number(readFileSync(pids, 'utf8').trim());
