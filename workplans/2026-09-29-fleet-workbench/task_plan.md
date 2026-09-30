@@ -29,6 +29,8 @@ Make the existing Ashlr Verse engineering fleet more usable across every connect
 - npm registry authentication expired (E401); finish release artifact before requesting interactive renewal.
 - First Meta registry test needed roster fixture extended to include the new opt-in engine; corrected.
 - Full gate caught outdated desktop source-only contract tests; corrected availability assertions while preserving authority and Linux quarantine guards.
+- Large-manifest fixture assertions passed53/53 in isolation; bounded cleanup now uses30seconds to match the real-file boundary assertions.
+- New explicit-API regression imports Tier1 code; add its owner rule while preserving all existing CODEOWNERS protections.
 - Second full gate caught a new login-shell dependency in the protected authority closure; resolve fleet MCP through the existing PATH and managed launcher without expanding that closure.
 - Consumer CLI review found stale engine selection and duplicate /v1 model-probe paths; fixes and regressions required before release.
 - Hosted CI is active despite stale local-release documentation. Raycast dependency audit found a new brace-expansion advisory; patch and verify the independent lockfile.

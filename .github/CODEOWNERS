@@ -713,6 +713,7 @@
 /test/routing-router-weights.test.ts @masonwyatt23
 /test/routing-seat-router.test.ts @masonwyatt23
 /test/routing-subscription-failclosed.test.ts @masonwyatt23
+/test/run-api-unavailable.test.ts @masonwyatt23
 /test/runtime-probe-event-loop.test.ts @masonwyatt23
 /test/safe-git-310b.test.ts @masonwyatt23
 /test/sandbox-kernel-evidence-310.test.ts @masonwyatt23

@@ -1,4 +1,4 @@
-# Fleet workbench release candidate3.17.0
+# Fleet workbench release candidate 3.17.0
 
 This source candidate implements the scope in task_plan.md. A source build and focused tests have passed; full release and live verification are still pending at the candidate commit. Publication must use the exact clean candidate and successful full gate.
 
