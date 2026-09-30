@@ -281,12 +281,12 @@ describe('ashlr authority protect / github-app — ashlr/verify pinned to the Ap
     return { deps, out, calls };
   }
 
-  /** ashlr-hub today: Actions off, so master has zero check runs. */
+  /** A repo with Actions off: the complete default-head response has zero check runs. */
   const noCi = (args: readonly string[]): GhResult => {
     if (args.includes('--method')) return { status: 0, stdout: '{}', stderr: '' };
     const path = args[1];
     if (path === `repos/${REPO}`) return { status: 0, stdout: JSON.stringify({ default_branch: 'master', private: false }), stderr: '' };
-    if (path?.startsWith(`repos/${REPO}/commits/master/check-runs`)) return { status: 0, stdout: JSON.stringify({ check_runs: [] }), stderr: '' };
+    if (path?.startsWith(`repos/${REPO}/commits/master/check-runs`)) return { status: 0, stdout: JSON.stringify({ total_count: 0, check_runs: [] }), stderr: '' };
     if (path === `repos/${REPO}/rulesets`) return { status: 0, stdout: '[]', stderr: '' };
     if (path === 'apps/ashlr-fleet') return { status: 0, stdout: appJson('write'), stderr: '' };
     return { status: 1, stdout: '', stderr: 'no route' };
@@ -308,7 +308,7 @@ describe('ashlr authority protect / github-app — ashlr/verify pinned to the Ap
     grant.repos = [{ nameWithOwner: REPO, enforcement: 'server' }];
     mkdirSync(mirrorPathFor(REPO), { recursive: true });
     const h = harness((args) => (args[1]?.startsWith(`repos/${REPO}/commits/master/check-runs`)
-      ? { status: 0, stdout: JSON.stringify({ check_runs: [{ name: 'ashlr/verify', app: { id: VERCEL_APP } }] }), stderr: '' }
+      ? { status: 0, stdout: JSON.stringify({ total_count: 1, check_runs: [{ name: 'ashlr/verify', app: { id: VERCEL_APP } }] }), stderr: '' }
       : noCi(args)));
     expect(await runAuthorityCli(['protect', '--apply', '--yes', '--repo', REPO], h.deps)).toBe(0);
     const post = h.calls.find((c) => c.args.includes('POST'))!;
