@@ -159,14 +159,15 @@ jobs:
       # rooted there fails closed; macOS runners already get a per-user
       # private temp root. Give Linux the same shape, outside the real
       # $HOME (RUNNER_TEMP lives under /home/runner, which the HOME-isolation
-      # guards correctly treat as the real developer home).
+      # guards correctly treat as the real developer home) and away from the
+      # hosted /opt, which is mode 0777 on GitHub runners.
       - name: Use a private temp root on Linux
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          private_tmp="/opt/ashlr-private-tmp"
+          private_tmp="/ashlr-private-tmp"
           sudo install -d -m 0700 -o "$(id -un)" -g "$(id -gn)" -- "$private_tmp"
-          for dir in "$private_tmp" /opt /; do
+          for dir in "$private_tmp" /; do
             stat -c '%a %U:%G %n' "$dir"
           done
           echo "TMPDIR=$private_tmp" >> "$GITHUB_ENV"
