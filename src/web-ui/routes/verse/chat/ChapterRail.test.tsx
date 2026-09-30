@@ -10,11 +10,12 @@ import { emptyTurnStats } from '../../../../core/verse/trace.js';
 import type { TurnBlock } from './turn-model.js';
 import { buildChapters, chaptersSignature } from './chapter-model.js';
 import { ChapterRail } from './ChapterRail.js';
+import { emptyResourceEvidence } from './turn-resource-evidence.js';
 
 function turn(key: string, status: TurnBlock['status'], prompt: string | null, extra: TurnBlock['items'] = []): TurnBlock {
   return {
     key, turnId: key, prompt, at: '2026-09-24T10:00:00.000Z', files: [], toolCount: 0, commandCount: 0, errorCount: 0,
-    firstErrorAnchor: null, status, durationMs: null,
+    firstErrorAnchor: null, status, durationMs: null, resources: emptyResourceEvidence(),
     citations: [], stats: emptyTurnStats(), work: '', reasoning: { shown: 0, hidden: 0, durationMs: null, tokens: null },
     items: [
       ...(prompt === null ? [] : [{ kind: 'user' as const, key: `${key}-u`, turnId: key, at: '2026-09-24T10:00:00.000Z', text: prompt }]),

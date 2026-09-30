@@ -166,6 +166,17 @@ export interface WikiGraphNode {
   exports: Array<{ name: string; kind: string; cite: WikiCitation }>;
 }
 
+export interface WikiGraphEdge {
+  from: string;
+  to: string;
+  imports: number;
+  confidence: 'inferred';
+  /** Checked against read files/lines; absent on older responses. No source text. */
+  citations?: WikiCitation[];
+  omittedCitations?: number;
+  droppedCitations?: number;
+}
+
 export interface WikiGraphView {
   repoKey: string;
   repoName: string;
@@ -173,8 +184,19 @@ export interface WikiGraphView {
   commit: string | null;
   generatedAt: string;
   nodes: WikiGraphNode[];
-  edges: Array<{ from: string; to: string; imports: number; confidence: 'inferred' }>;
-  coverage: { listedFiles: number; readFiles: number; unreadFiles: number; omittedModuleFiles: number; listingTruncated: boolean; listingIncomplete?: boolean };
+  edges: WikiGraphEdge[];
+  coverage: {
+    listedFiles: number; readFiles: number; unreadFiles: number; omittedModuleFiles: number; listingTruncated: boolean; listingIncomplete?: boolean;
+    /** Absent means unknown, never zero. Counts describe the read sources only. */
+    importEvidence?: {
+      unresolvedLocalImports: number;
+      unsupportedSourceFiles: number;
+      checkedCitations: number;
+      droppedCitations: number;
+      omittedCitations: number;
+      omittedModuleImports: number;
+    };
+  };
 }
 
 /** GET /api/verse/wiki/repo/<key>/page/<id> */

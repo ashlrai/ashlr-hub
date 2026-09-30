@@ -223,20 +223,26 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
   // SAME object, so only the live turn's segment misses this cache while a
   // reply streams; the tool-facts cache below additionally keeps a rebuilt
   // segment from re-deriving tool calls whose results already landed.
-  const turnCache = useRef(createTurnCache());
-  const segmentModels = useRef(new WeakMap<TranscriptSegment, SegmentModel>());
+  // A mounted transcript can switch chats/accounts whose native ids overlap.
+  // Reset before deriving the new chat, not in an effect after its first paint.
+  const cacheScope = sessionId ?? getVerseUiState().activeSessionId;
+  const scopedCaches = useMemo(() => ({
+    scope: cacheScope,
+    tools: createTurnCache(),
+    segments: new WeakMap<TranscriptSegment, SegmentModel>(),
+  }), [cacheScope]);
   const segments = useMemo<TranscriptSegment[]>(
     () => transcript.segments ?? [{ key: 'all', items: transcript.items }],
     [transcript],
   );
   const perSegment = useMemo(() => segments.map((segment) => {
-    let model = segmentModels.current.get(segment);
+    let model = scopedCaches.segments.get(segment);
     if (!model) {
-      model = deriveSegment(segment, turnCache.current);
-      segmentModels.current.set(segment, model);
+      model = deriveSegment(segment, scopedCaches.tools);
+      scopedCaches.segments.set(segment, model);
     }
     return model;
-  }), [segments]);
+  }), [segments, scopedCaches]);
   const turns = useMemo(() => perSegment.flatMap((m) => m.turns), [perSegment]);
   // V3.15: a long chat renders only the turns near the viewport (chat/turn-window.ts).
   const win = useTurnWindow(scroller, turns.length);
@@ -264,8 +270,8 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
     [railSignature],
   );
   const matches = useMemo(
-    () => searchTurns(turns, query, turnCache.current),
-    [turns, query],
+    () => searchTurns(turns, query, scopedCaches.tools),
+    [turns, query, scopedCaches],
   );
   const matchKeys = useMemo(() => new Set(matches.map((m) => m.turnKey)), [matches]);
 
@@ -696,6 +702,25 @@ const TurnView = memo(function TurnView({ turn, index, facts, explained, engine,
       </ol>
       {turn.citations.length > 0 ? <SourceList citations={turn.citations} openFile={openFile} jumpToTool={onJumpTool} /> : null}
       {turn.files.length > 0 ? <FileActivity files={turn.files} onJump={onJumpTool} /> : null}
+      <details className={styles.resourceEvidence}>
+        <summary className={styles.resourceSummary}>Tools and context</summary>
+        <div className={styles.resourceBody}>
+          <p>{turn.resources.calls === 0 ? 'No observed tool calls in this turn.' : `${turn.resources.calls} reported tool call${turn.resources.calls === 1 ? '' : 's'}; ${turn.resources.mcpCalls} with an MCP name.`}</p>
+          {turn.resources.groups.length > 0 ? (
+            <ul className={styles.resourceGroups} aria-label="Reported tools this turn">
+              {turn.resources.groups.map((group) => (
+                <li key={group.label}>
+                  <span>{group.label}</span>
+                  <span>{group.calls} call{group.calls === 1 ? '' : 's'}{group.pending ? `, ${group.pending} pending` : ''}{group.failed ? `, ${group.failed} failed` : ''}{group.unknown ? `, ${group.unknown} unknown result` : ''}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <p>{turn.resources.sources} cited source{turn.resources.sources === 1 ? '' : 's'}; {turn.resources.playbooks} recorded playbook reference{turn.resources.playbooks === 1 ? '' : 's'}.</p>
+          {turn.resources.partial ? <p>Partial summary: call, source or tool-group limits reached.</p> : null}
+          <p>Reported by the chat. Server identity and skill loading are unknown.</p>
+        </div>
+      </details>
       {tookMs !== null || errorJump || work || quiet ? (
         <footer className={styles.turnFoot} data-kind="turn-meta">
           {work ? <span className={styles.turnWork} data-kind="turn-work">{work}</span> : null}

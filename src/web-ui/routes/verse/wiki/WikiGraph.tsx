@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
-import type { WikiCitation, WikiGraphView } from '../../../../core/knowledge/wiki/types.js';
+import type { WikiCitation, WikiGraphEdge, WikiGraphView } from '../../../../core/knowledge/wiki/types.js';
+import { citationLabel } from '../../../../core/knowledge/wiki/citations.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { describeContextError } from '../context/use-token-gate.js';
 import { wikiGraphQuery } from './wiki-queries.js';
@@ -30,7 +31,17 @@ export function WikiGraphCanvas({ graph, onCite, onRefresh }: {
   const incoming = graph.edges.filter((e) => e.to === selected?.id);
   const related = new Set([...outgoing.map((e) => e.to), ...incoming.map((e) => e.from)]);
   const selectRelated = (id: string) => { setSearch(''); setChosen(id); };
-  const incomplete = graph.coverage.listingIncomplete || graph.coverage.listingTruncated || graph.coverage.unreadFiles > 0 || graph.coverage.omittedModuleFiles > 0;
+  const evidence = graph.coverage.importEvidence;
+  const incomplete = graph.coverage.listingIncomplete || graph.coverage.listingTruncated || graph.coverage.unreadFiles > 0 || graph.coverage.omittedModuleFiles > 0
+    || (evidence ? evidence.unresolvedLocalImports > 0 || evidence.unsupportedSourceFiles > 0 || evidence.droppedCitations > 0 || evidence.omittedCitations > 0 || evidence.omittedModuleImports > 0 : graph.edges.length > 0);
+  const dependency = (edge: WikiGraphEdge, id: string) => <li key={id} className={styles.edge}>
+    <div className={styles.edgeHeading}><button type="button" onClick={() => selectRelated(id)}>{id}</button><span>{edge.imports} imports · inferred</span></div>
+    <div className={styles.evidence}>
+      {edge.citations?.length ? edge.citations.map((cite) => <button type="button" key={`${cite.file}:${cite.line}`} aria-label={`Open import ${citationLabel(cite)}`} onClick={() => onCite(cite, graph.commit)}>{citationLabel(cite)}</button>) : <span>{edge.citations === undefined ? 'Import line evidence unavailable; refresh the map.' : 'No checked import lines in this sample.'}</span>}
+      {edge.omittedCitations ? <span>{edge.omittedCitations} additional import references are outside the citation sample.</span> : null}
+      {edge.droppedCitations ? <span>{edge.droppedCitations} import citations failed the file or line check.</span> : null}
+    </div>
+  </li>;
   return (
     <section className={styles.root} aria-label="Codebase module map">
       <div className={styles.toolbar}>
@@ -39,6 +50,7 @@ export function WikiGraphCanvas({ graph, onCite, onRefresh }: {
         {onRefresh ? <button type="button" onClick={onRefresh}>Refresh map</button> : null}
       </div>
       <p className={styles.caption}>Select a module to trace what it uses and what depends on it. This map is built locally without a model.</p>
+      {evidence?.unresolvedLocalImports ? <p className={styles.caption} role="status">{evidence.unresolvedLocalImports} detected local import references could not be resolved in the listed files. Some dependencies may be missing.</p> : null}
       {nodes.length === 0 ? <p role="status">{graph.nodes.length ? 'No matching modules. Try a file name or clear the search.' : graph.coverage.listingIncomplete ? 'The repo listing could not be completed. Check local access and refresh the map.' : 'No readable modules were found in this repo.'}</p> : (
         <div className={styles.layout}>
           <div className={styles.viewport} tabIndex={0} aria-label="Scrollable dependency map">
@@ -61,9 +73,9 @@ export function WikiGraphCanvas({ graph, onCite, onRefresh }: {
             <h3>{selected.id}</h3>
             <p>{selected.sourceFiles} source files and {selected.testFiles} tests</p>
             <h4>Uses</h4>
-            {outgoing.length ? <ul>{outgoing.map((e) => <li key={e.to}><button type="button" onClick={() => selectRelated(e.to)}>{e.to}</button><span>{e.imports} imports</span></li>)}</ul> : <p>No cross-module imports found in the files read.</p>}
+            {outgoing.length ? <ul>{outgoing.map((e) => dependency(e, e.to))}</ul> : <p>No cross-module imports found in the files read.</p>}
             <h4>Used by</h4>
-            {incoming.length ? <ul>{incoming.map((e) => <li key={e.from}><button type="button" onClick={() => selectRelated(e.from)}>{e.from}</button><span>{e.imports} imports</span></li>)}</ul> : <p>No incoming imports found in the files read.</p>}
+            {incoming.length ? <ul>{incoming.map((e) => dependency(e, e.from))}</ul> : <p>No incoming imports found in the files read.</p>}
             <h4>Start reading</h4>
             {selected.files.length ? <ul>{selected.files.map((f) => <li key={f.file}><button type="button" onClick={() => onCite({ file: f.file, line: 1 }, graph.commit)}>{f.file}:1</button></li>)}</ul> : <p>No source files from this module were read.</p>}
             {selected.exports.length ? <><h4>Exports</h4><ul>{selected.exports.map((e) => <li key={`${e.cite.file}:${e.cite.line}:${e.name}`}><button type="button" onClick={() => onCite(e.cite, graph.commit)}>{e.name}</button><span>{e.kind}</span></li>)}</ul></> : null}
@@ -74,6 +86,7 @@ export function WikiGraphCanvas({ graph, onCite, onRefresh }: {
         <summary>{incomplete ? 'Partial coverage' : 'Coverage and evidence'}: {graph.coverage.readFiles} of {graph.coverage.listedFiles} listed files read</summary>
         <p>File names are extracted from the repo listing. Module groups and dependency links are inferred from directory structure and resolved import statements using pattern matching; they are not a complete runtime call graph.</p>
         <p>{graph.coverage.unreadFiles} listed files were not read; {graph.coverage.omittedModuleFiles} listed files are outside the displayed modules.{graph.coverage.listingTruncated ? ' The file listing reached its scan limit.' : ''}{graph.coverage.listingIncomplete ? ' Some directories could not be listed or reached the depth limit; this is not complete coverage.' : ''} Secrets, ignored paths, symlinks, binaries and generated dependencies are excluded.</p>
+        {evidence ? <p>Detected local imports in read sources: {evidence.unresolvedLocalImports} unresolved. {evidence.unsupportedSourceFiles} read source files use languages without supported local import resolution. {evidence.checkedCitations} source-line citations passed the file and line checks; {evidence.droppedCitations} failed and were removed; {evidence.omittedCitations} additional references are outside the citation sample; {evidence.omittedModuleImports} resolved imports point outside the displayed modules. Citation samples retain at most four lines per dependency and 512 lines in total. Pattern matches can include comments or strings and do not prove runtime dependency behavior.</p> : <p>Import-resolution and source-line evidence is unavailable in this sample. Missing evidence does not mean zero unresolved imports. Refresh the map to check the read sources.</p>}
         <p>Sampled {new Date(graph.generatedAt).toLocaleString()}. Current working files, listed against {graph.commit ? graph.commit.slice(0, 8) : 'a local directory scan'}. Refreshes may reuse a sample for up to 15 seconds.</p>
       </details>
     </section>

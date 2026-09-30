@@ -23,6 +23,8 @@ const MAX_MODULES = 48;
 const MODULE_SPLIT_AT = 36;
 const MODULE_MAX_DEPTH = 4;
 const MAX_EXPORTS_PER_MODULE = 14;
+export const MAX_IMPORT_CITATIONS_PER_EDGE = 4;
+export const MAX_IMPORT_CITATIONS = 512;
 const MAX_HITS_PER_STORE = 4;
 const MAX_ROUTES = 40;
 const MAX_ENV = 40;
@@ -54,6 +56,8 @@ export interface ModuleInfo {
   exports: ModuleExport[];
   /** module key -> number of import statements pointing there. */
   importsFrom: Record<string, number>;
+  /** Bounded statement locations; links remain regex-inferred, never semantic proof. */
+  importCitations?: Record<string, WikiCitation[]>;
   importedBy: Record<string, number>;
   /** External packages imported (bounded). */
   packages: string[];
@@ -94,6 +98,8 @@ export interface RepoFacts {
   tests: { files: number; dirs: string[]; runner: string | null };
   /** Line counts of every file read — the citation verifier's ground truth. */
   lineIndex: WikiFileIndex;
+  /** Only recognized local specifiers in read sources; other resolution remains unknown. */
+  importEvidence?: { unresolvedLocalImports: number; unsupportedSourceFiles: number };
   /** Text of every file read (in-memory only; never persisted). */
   texts: Map<string, string>;
 }
@@ -251,23 +257,37 @@ const JS_IMPORT_RES = [
   /\bimport\s*\(\s*['"]([^'"\n]+)['"]\s*\)/g,
 ];
 
-export function extractSpecifiers(source: string, rel: string): string[] {
-  const out = new Set<string>();
+export function extractImportReferences(source: string, rel: string): Array<{ specifier: string; line: number }> {
+  const out = new Map<string, number>();
+  const add = (m: RegExpMatchArray, specifier: string): void => {
+    if (!out.has(specifier)) out.set(specifier, (m.index ?? 0) + Math.max(0, m[0].search(/\S/)));
+  };
   const ext = path.extname(rel).toLowerCase();
   if (/^\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(ext)) {
     for (const re of JS_IMPORT_RES) {
       re.lastIndex = 0;
-      for (const m of source.matchAll(re)) if (m[1]) out.add(m[1]);
+      for (const m of source.matchAll(re)) if (m[1]) add(m, m[1]);
     }
   } else if (ext === '.py') {
-    for (const m of source.matchAll(/^from\s+([\w.]+)\s+import\b/gm)) if (m[1]) out.add(m[1]);
-    for (const m of source.matchAll(/^import\s+([\w.]+)/gm)) if (m[1]) out.add(m[1]);
+    for (const m of source.matchAll(/^from\s+([\w.]+)\s+import\b/gm)) if (m[1]) add(m, m[1]);
+    for (const m of source.matchAll(/^import\s+([\w.]+)/gm)) if (m[1]) add(m, m[1]);
   } else if (ext === '.go') {
-    for (const m of source.matchAll(/^\s*(?:import\s+)?(?:\w+\s+)?"([\w./-]+)"\s*$/gm)) if (m[1]) out.add(m[1]);
+    for (const m of source.matchAll(/^\s*(?:import\s+)?(?:\w+\s+)?"([\w./-]+)"\s*$/gm)) if (m[1]) add(m, m[1]);
   } else if (ext === '.rs') {
-    for (const m of source.matchAll(/^\s*use\s+(crate|super)::([\w:]+)/gm)) if (m[2]) out.add(`${m[1]}::${m[2]}`);
+    for (const m of source.matchAll(/^\s*use\s+(crate|super)::([\w:]+)/gm)) if (m[2]) add(m, `${m[1]}::${m[2]}`);
   }
-  return [...out];
+  // Sorted offsets let one pass count lines, even for many imports in a bounded file.
+  let cursor = 0; let line = 1;
+  const lines = new Map<number, number>();
+  for (const offset of [...new Set(out.values())].sort((a, b) => a - b)) {
+    for (; cursor < offset; cursor++) if (source.charCodeAt(cursor) === 10) line++;
+    lines.set(offset, line);
+  }
+  return [...out].map(([specifier, offset]) => ({ specifier, line: lines.get(offset)! }));
+}
+
+export function extractSpecifiers(source: string, rel: string): string[] {
+  return extractImportReferences(source, rel).map((ref) => ref.specifier);
 }
 
 const RESOLVE_EXTS = ['', '.ts', '.tsx', '.mts', '.js', '.jsx', '.mjs', '.cjs', '/index.ts', '/index.tsx', '/index.js', '/index.jsx'];
@@ -581,12 +601,17 @@ export async function extractFacts(scan: RepoScan): Promise<RepoFacts> {
   // should read first is what the rest of the code leans on).
   const inbound = new Map<string, number>();
   const edges = new Map<string, Record<string, number>>();
+  const importCitations = new Map<string, Record<string, WikiCitation[]>>();
+  let citationCount = 0;
+  let unresolvedLocalImports = 0;
+  let unsupportedSourceFiles = 0;
   const pkgs = new Map<string, Set<string>>();
   for (const [rel, text] of texts) {
     if (!isSourceFile(rel)) continue;
     const from = moduleOf.get(rel);
     if (!from) continue;
-    for (const spec of extractSpecifiers(text, rel)) {
+    if (!/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i.test(rel)) unsupportedSourceFiles++;
+    for (const { specifier: spec, line } of extractImportReferences(text, rel)) {
       const target = resolveSpecifier(rel, spec, known);
       if (target) {
         const to = moduleOf.get(target);
@@ -594,8 +619,17 @@ export async function extractFacts(scan: RepoScan): Promise<RepoFacts> {
         const e = edges.get(from) ?? {};
         e[to] = (e[to] ?? 0) + 1;
         edges.set(from, e);
+        const cites = importCitations.get(from) ?? {};
+        const samples = cites[to] ?? [];
+        if (samples.length < MAX_IMPORT_CITATIONS_PER_EDGE && citationCount < MAX_IMPORT_CITATIONS) {
+          samples.push({ file: rel, line });
+          citationCount++;
+          cites[to] = samples;
+          importCitations.set(from, cites);
+        }
         if (!isTestFile(rel)) inbound.set(target, (inbound.get(target) ?? 0) + 1);
       } else {
+        if (spec.startsWith('.') || spec.startsWith('@/') || spec.startsWith('~/') || /^(crate|super)::/.test(spec)) unresolvedLocalImports++;
         const pkg = packageNameOf(spec);
         const set = pkgs.get(from) ?? new Set<string>();
         if (pkg && set.size < 30) set.add(pkg);
@@ -630,6 +664,7 @@ export async function extractFacts(scan: RepoScan): Promise<RepoFacts> {
       topFiles: topFiles.slice(0, 12),
       exports: exports.slice(0, MAX_EXPORTS_PER_MODULE),
       importsFrom: edges.get(key) ?? {},
+      importCitations: importCitations.get(key) ?? {},
       importedBy: {},
       packages: [...(pkgs.get(key) ?? [])].sort(),
       entry,
@@ -753,6 +788,7 @@ export async function extractFacts(scan: RepoScan): Promise<RepoFacts> {
     envVars,
     tests: { files: testFiles.length, dirs: testDirs, runner },
     lineIndex,
+    importEvidence: { unresolvedLocalImports, unsupportedSourceFiles },
     texts,
   };
 }

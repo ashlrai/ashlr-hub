@@ -16,6 +16,33 @@ function turnsFor(events: Parameters<typeof buildTranscript>[0]): TurnBlock[] {
 }
 
 describe('buildTurns', () => {
+  it('keeps reported calls and playbook/source evidence within the owning turn', () => {
+    const cache = createTurnCache();
+    const turns = buildTurns(groupTranscriptItems(buildTranscript([
+      ev(1, 'user-message', { turnId: 't1', text: 'first', playbook: { id: 'review', name: 'Review', macro: '!review', version: 1 } }),
+      ev(2, 'tool-use', { turnId: 't1', toolUseId: 'same-id', name: 'mcp__ashlr__read', input: { file_path: 'a.ts' } }),
+      ev(3, 'tool-result', { turnId: 't1', toolUseId: 'same-id', output: 'one line', isError: false }),
+      ev(4, 'user-message', { turnId: 't2', text: 'second' }),
+      ev(5, 'tool-use', { turnId: 't2', toolUseId: 'same-id', name: 'Bash', input: { command: 'false' } }),
+      ev(6, 'tool-result', { turnId: 't2', toolUseId: 'same-id', output: 'Exit code: 1', isError: true }),
+    ]).items), cache).turns;
+    expect(turns[0]!.resources).toMatchObject({ calls: 1, mcpCalls: 1, sources: 1, playbooks: 1, failed: 0 });
+    expect(turns[1]!.resources).toMatchObject({ calls: 1, mcpCalls: 0, sources: 0, playbooks: 0, failed: 1 });
+    expect(turns[1]!.resources.groups[0]!.label).toBe('Command');
+  });
+
+  it('reports pending calls and updates their evidence when results arrive', () => {
+    const cache = createTurnCache();
+    const events = [ev(1, 'user-message', { turnId: 't1', text: 'read' }),
+      ev(2, 'tool-use', { turnId: 't1', toolUseId: 'r', name: 'Read', input: { file_path: '/private/account/file.ts' } })];
+    const build = () => buildTurns(groupTranscriptItems(buildTranscript(events).items), cache).turns[0]!.resources;
+    expect(build()).toMatchObject({ pending: 1, sources: 0 });
+    events.push(ev(3, 'tool-result', { turnId: 't1', toolUseId: 'r', output: 'not allowed', isError: true }));
+    const evidence = build();
+    expect(evidence).toMatchObject({ pending: 0, failed: 1, sources: 0 });
+    expect(JSON.stringify(evidence)).not.toContain('/private/account');
+  });
+
   it('starts a new turn at each user message', () => {
     const turns = turnsFor([
       ev(1, 'user-message', { turnId: 't1', text: 'first ask' }),
