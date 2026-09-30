@@ -21,6 +21,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   with explicit counts for omitted citations, unresolved recognized local
   imports and source files whose language resolver is unsupported.
 
+### Security
+
+- Update DOMPurify to 3.4.16, the patched release for GHSA-p98j-92pf-mc4p.
+
 ### Fixed
 
 - Scope transcript tool caches to the chat and turn so reused provider tool IDs
