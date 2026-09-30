@@ -207,7 +207,10 @@ describe('emergency authority release truth', () => {
     // desktop download does not grant or start resident authority.
     expect(desktop).toMatch(/A Tauri v2 desktop app/i);
     expect(normalizedDesktop).toMatch(/resident autonomy requires its separate local setup and grant/i);
-    expect(desktop).toMatch(/releases\/download\/v3\.17\.0\/Ashlr_3\.17\.0_aarch64_locally-signed\.dmg/);
+    const currentVersion = (JSON.parse(read('package.json')) as { version: string }).version;
+    expect(desktop).toContain(
+      `https://github.com/ashlrai/ashlr-hub/releases/download/v${currentVersion}/Ashlr_${currentVersion}_aarch64_locally-signed.dmg`,
+    );
     expect(normalizedDesktop).toMatch(/locally signed, not Apple Developer ID notarized/i);
     expect(normalizedDesktop).toMatch(/Windows[^\n]*draft only/i);
     expect(normalizedDesktop).toMatch(/Linux[^\n]*Not produced while quarantined/i);
