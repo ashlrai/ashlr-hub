@@ -21,12 +21,13 @@ function fixture(used = 85) {
   const poolDigest = digest(canonical({ pool, bindings })); const accountHint = 'a'.repeat(64);
   const config = { schemaVersion: 1 as const, poolDigest, workers: [{ workerId: 'codex', accountHint, bucketIds: ['codex'] }] };
   const probe = vi.fn(async (input: CodexResourceProbeOptions): Promise<CodexResourceProbeResult> => {
-    const startedAt = new Date().toISOString();
+    // The collector enforces an exact TTL ceiling; derive receipt times from one instant.
+    const nowMs = Date.now(); const startedAt = new Date(nowMs).toISOString();
     return { schemaVersion: 1, scope: 'codex-native-metadata', workerId: input.workerId, poolDigest, status: 'observed',
       reason: 'probe-observed', startedAt, finishedAt: startedAt, accountHint, planType: 'pro', observation: {
-        workerId: input.workerId, observedAt: startedAt, expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        workerId: input.workerId, observedAt: startedAt, expiresAt: new Date(nowMs + 60_000).toISOString(),
         health: 'ready', retryAfter: null, windows: [{ id: 'five_hour', usedPercent: used,
-          resetsAt: new Date(Date.now() + 3600_000).toISOString() }] } };
+          resetsAt: new Date(nowMs + 3600_000).toISOString() }] } };
   });
   const options = { pool, bindings, config, cwd: root, _probe: probe };
   const set = (ceiling: number, revision = 0) => setResourcePoolAllocation(root, pool, bindings, ceiling, revision);

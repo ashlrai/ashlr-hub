@@ -151,6 +151,22 @@ describe('/api/verse/wiki', () => {
     expect((await post('/api/verse/wiki/open', { repoKey: key, file: 'src/server.ts' })).status).toBe(409);
   });
 
+  it('opens checked import evidence through the existing enrolled, mutation-gated route', async () => {
+    repo.writeFile('src/server.ts', 'import "../package.json";\nimport "../missing";\nexport const handle = true;\n');
+    const key = wikiKey(repo.dir);
+    const graph = await (await get(`/api/verse/wiki/repo/${key}/graph`)).json() as WikiGraphView;
+    const edge = graph.edges.find((e) => e.from === 'src' && e.to === '(root)');
+    expect(edge?.confidence).toBe('inferred');
+    expect(edge?.citations).toEqual([{ file: 'src/server.ts', line: 1 }]);
+    expect(graph.coverage.importEvidence?.unresolvedLocalImports).toBe(1);
+    expect((await post('/api/verse/wiki/open', { repoKey: key, ...edge!.citations![0] }, null)).status).toBe(401);
+    expect((await post('/api/verse/wiki/open', { repoKey: key, ...edge!.citations![0] })).status).toBe(200);
+    expect(opened[0]).toEqual({ path: realpathSync(`${repo.dir}/src/server.ts`), line: 1 });
+    repo.unenroll();
+    expect((await get(`/api/verse/wiki/repo/${key}/graph`)).status).toBe(404);
+    expect((await post('/api/verse/wiki/open', { repoKey: key, ...edge!.citations![0] })).status).toBe(409);
+  });
+
   it('serves page markdown with cited links and no secrets', async () => {
     await buildWiki({ repo: repo.dir, noModel: true });
     const res = await get(`/api/verse/wiki/repo/${wikiKey(repo.dir)}/page/data`);

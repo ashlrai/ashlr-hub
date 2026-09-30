@@ -20,6 +20,13 @@ revocation returns the phone to sign-in. If the first turn of a new phone chat
 fails, retry sends the retained prompt to the existing chat instead of starting
 another one. Changing the account, model or project starts a distinct chat.
 
+Each chat turn includes **Tools and context**, a compact read-only summary of
+reported tool calls, MCP names, result states, cited sources and recorded playbook
+references. Arbitrary tool/server metadata is grouped under fixed labels. Counts
+are bounded and marked partial when a limit is reached. Reported calls do not
+verify the executable server identity or establish that a skill was loaded.
+The panel uses existing chat events without additional model calls.
+
 ### Additional model providers
 
 The fleet's declarative engine registry supports model providers independently
@@ -1742,6 +1749,14 @@ modules, find files or exported symbols, and open cited source lines. The map
 uses the existing local scanner and makes no model calls. It labels pattern-based
 dependency links as inferred and shows listed, read and omitted-file coverage;
 it is an overview of the sampled working files, not a complete runtime call graph.
+Select a dependency's file-and-line reference to inspect the matched import in
+the editor. Each inferred edge retains up to four checked citations, with 512
+citations retained across the scan. The map discloses unresolved detected local
+imports, unsupported language resolution, removed invalid citations, and
+references outside its citation or module sample. Missing evidence on an older
+response is unavailable, rather than proof of zero unresolved dependencies.
+Line checks establish a location in a read file; pattern matching may include
+comments or strings and does not establish semantic or runtime dependencies.
 
 Fleet Claude and Codex runs can use the separately installed `ashlr-mcp`
 efficiency plugin through temporary per-run configuration. Discovery checks

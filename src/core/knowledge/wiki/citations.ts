@@ -105,6 +105,18 @@ export interface CitationResolver {
   lines: LineCounter;
 }
 
+/** Exact read-index check shared by prose citations and local graph evidence. */
+export function checkedCitation(c: WikiCitation, count: number | null): WikiCitation | null {
+  if (typeof c.file !== 'string' || !c.file || c.file.startsWith('/') || /^[A-Za-z]:/.test(c.file)
+    || c.file.includes('\\') || Array.from(c.file).some((character) => character.charCodeAt(0) < 32)
+    || c.file.split('/').some((part) => part === '..' || part === '.')
+    || count === null || !Number.isInteger(count) || count < 1
+    || !Number.isInteger(c.line) || c.line < 1 || c.line > count
+    || (c.endLine !== undefined && (!Number.isInteger(c.endLine) || c.endLine < c.line))) return null;
+  const endLine = c.endLine === undefined ? undefined : Math.min(c.endLine, count);
+  return { file: c.file, line: c.line, ...(endLine !== undefined && endLine > c.line ? { endLine } : {}) };
+}
+
 async function verifyOne(p: Parsed, resolver: CitationResolver, byBase: Map<string, string[]>): Promise<WikiCitation | null> {
   let file = p.file;
   let count = await resolver.lines(file);
@@ -115,9 +127,7 @@ async function verifyOne(p: Parsed, resolver: CitationResolver, byBase: Map<stri
       count = await resolver.lines(file);
     }
   }
-  if (count === null || p.line < 1 || p.line > count) return null;
-  const endLine = p.endLine !== undefined ? Math.min(p.endLine, count) : undefined;
-  return { file, line: p.line, ...(endLine !== undefined && endLine > p.line ? { endLine } : {}) };
+  return checkedCitation({ ...p, file }, count);
 }
 
 async function replaceAsync(text: string, re: RegExp, fn: (m: RegExpMatchArray) => Promise<string>): Promise<string> {

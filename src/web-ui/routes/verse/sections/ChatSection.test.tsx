@@ -222,9 +222,14 @@ describe('ChatSection sessions', () => {
     expect(within(log).getByText((_, node) => node?.tagName === 'P' && node.textContent === 'Sure — adding one test.')).toBeInTheDocument();
     expect(log.querySelector('[data-streaming]')).toBeNull();
     // Tool call collapsed to one dense line: name + truncated argument.
-    const card = within(log).getByText('Write').closest('details')!;
+    const card = within(log).getByText('Write', { selector: 'summary span' }).closest('details')!;
     expect(card.open).toBe(false);
     expect(card).toHaveTextContent('/x/a.test.ts');
+    // The read-only summary reports the same completed call without replacing
+    // the original tool card or making provider-controlled names unique.
+    const resources = within(log).getByText('Tools and context').closest('details')!;
+    expect(resources).toHaveTextContent('1 reported tool call; 0 with an MCP name.');
+    expect(within(resources).getByText('Write')).toBeInTheDocument();
     // Context meter moved with the usage frame and crossed the 70% threshold.
     const meter = screen.getByRole('meter', { name: 'Context window' });
     expect(meter).toHaveAttribute('aria-valuenow', '75');

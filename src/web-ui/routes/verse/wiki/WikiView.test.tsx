@@ -256,6 +256,30 @@ describe('WikiView', () => {
 
 
 describe('WikiGraphCanvas', () => {
+  it('opens checked import lines in both dependency directions and discloses evidence sampling', () => {
+    const cite = vi.fn();
+    const graph: WikiGraphView = { ...GRAPH, edges: [{ ...GRAPH.edges[0]!, citations: [{ file: 'src/api/server.ts', line: 2 }], omittedCitations: 3, droppedCitations: 1 }], coverage: { ...GRAPH.coverage, importEvidence: { unresolvedLocalImports: 2, unsupportedSourceFiles: 1, checkedCitations: 1, omittedCitations: 3, droppedCitations: 1, omittedModuleImports: 2 } } };
+    render(<WikiGraphCanvas graph={graph} onCite={cite} />);
+    const detail = screen.getByRole('complementary', { name: 'Selected module' });
+    fireEvent.click(within(detail).getByRole('button', { name: 'Open import src/api/server.ts:2' }));
+    expect(cite).toHaveBeenCalledWith({ file: 'src/api/server.ts', line: 2 }, SHA);
+    expect(within(detail).getByText(/additional import references are outside/)).toBeInTheDocument();
+    expect(within(detail).getByText(/failed the file or line check/)).toBeInTheDocument();
+    fireEvent.click(within(detail).getByRole('button', { name: 'src/store' }));
+    fireEvent.click(within(detail).getByRole('button', { name: 'Open import src/api/server.ts:2' }));
+    expect(cite).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('status')).toHaveTextContent('2 detected local import references could not be resolved');
+    expect(screen.getByText(/1 read source files use languages without supported/)).toBeInTheDocument();
+    expect(screen.getByText(/Pattern matches can include comments or strings/)).toBeInTheDocument();
+  });
+
+  it('treats old import evidence as unavailable rather than zero unresolved dependencies', () => {
+    render(<WikiGraphCanvas graph={GRAPH} onCite={vi.fn()} />);
+    expect(screen.getByText(/Missing evidence does not mean zero unresolved imports/)).toBeInTheDocument();
+    expect(screen.getByText('Import line evidence unavailable; refresh the map.')).toBeInTheDocument();
+    expect(screen.queryByText(/Detected local imports in read sources: 0 unresolved/)).not.toBeInTheDocument();
+  });
+
   it('searches modules by exported symbols, follows dependency buttons, and preserves exact citations', () => {
     const cite = vi.fn();
     render(<WikiGraphCanvas graph={GRAPH} onCite={cite} />);

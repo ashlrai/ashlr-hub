@@ -22,6 +22,9 @@
 .detail ul { list-style: none; padding: 0; margin: 0; }
 .detail li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1); font-size: var(--text-xs-size); line-height: var(--text-xs-line-relaxed); }
 .detail li span { color: var(--text-tertiary); }
+.detail li.edge { display: block; margin-bottom: var(--space-2); }
+.edgeHeading { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1); }
+.evidence { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); margin-left: var(--space-1); padding-left: var(--space-2); border-left: 1px solid var(--border-default); overflow-wrap: anywhere; }
 .detail button:hover { text-decoration: underline; }
 .coverage summary { cursor: pointer; }
 .coverage p { margin: var(--space-2) 0 0; }

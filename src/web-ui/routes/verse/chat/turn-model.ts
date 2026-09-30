@@ -17,6 +17,7 @@ import { collateSources, describeTurnWork, emptyTurnStats, type VerseCitation, t
 import { parseUnifiedDiff } from '../../inbox/diff-parser.js';
 import type { ToolGroupItem, TranscriptItem, TranscriptRenderItem } from '../verse-store.js';
 import { readToolFacts, type ToolAction, type ToolFacts } from './tool-semantics.js';
+import { addReportedTool, cachedReportedTool, emptyResourceEvidence, setResourceContext, type ResourceEvidenceCacheEntry, type TurnResourceEvidence } from './turn-resource-evidence.js';
 
 export type TurnStatus = 'running' | 'ok' | 'error' | 'stopped';
 
@@ -44,10 +45,16 @@ export interface TurnCache {
   counts: Map<string, { additions: number; deletions: number }>;
   /** Flattened searchable text per tool call — the expensive half of the index. */
   toolText: Map<string, string>;
+  resources: Map<string, ResourceEvidenceCacheEntry>;
 }
 
 export function createTurnCache(): TurnCache {
-  return { facts: new Map(), counts: new Map(), toolText: new Map() };
+  return { facts: new Map(), counts: new Map(), toolText: new Map(), resources: new Map() };
+}
+
+/** Native tool ids can repeat in another turn; caches must not reuse its facts. */
+function toolCacheKey(tool: { toolUseId: string; turnId?: string }): string {
+  return JSON.stringify([tool.turnId ?? null, tool.toolUseId]);
 }
 
 /**
@@ -55,18 +62,19 @@ export function createTurnCache(): TurnCache {
  * valid. Exported so a test can assert the second build recomputes nothing.
  */
 export function cachedToolFacts(
-  tool: { toolUseId: string; name: string; input: unknown; result: { output: string; isError: boolean } | null },
+  tool: { toolUseId: string; turnId?: string; name: string; input: unknown; result: { output: string; isError: boolean } | null },
   cache: TurnCache | null,
 ): ToolFacts {
-  const hit = cache?.facts.get(tool.toolUseId);
+  const key = toolCacheKey(tool);
+  const hit = cache?.facts.get(key);
   // A pending entry must be recomputed once the result lands; anything else is
   // derived from data that can no longer change.
   if (hit && !(hit.pending && tool.result !== null)) return hit;
   const fact = readToolFacts({ name: tool.name, input: tool.input, result: tool.result });
   if (cache) {
-    cache.facts.set(tool.toolUseId, fact);
-    cache.counts.delete(tool.toolUseId);
-    cache.toolText.delete(tool.toolUseId);
+    cache.facts.set(key, fact);
+    cache.counts.delete(key);
+    cache.toolText.delete(key);
   }
   return fact;
 }
@@ -117,6 +125,8 @@ export interface TurnBlock {
   work: string;
   /** V3.15: the turn's reasoning, totalled. Unknown figures are null, never 0. */
   reasoning: TurnReasoning;
+  /** Counts/allowlisted labels only; reported calls do not prove server or skill loading. */
+  resources: TurnResourceEvidence;
 }
 
 export interface TurnReasoning {
@@ -262,6 +272,8 @@ function makeTurn(
   const sources: VerseSource[] = [];
   const stats = emptyTurnStats();
   const reasoning: TurnReasoning = { shown: 0, hidden: 0, durationMs: null, tokens: null };
+  const resources = emptyResourceEvidence();
+  let playbooks = 0;
 
   const noteError = (anchor: string) => {
     errorCount++;
@@ -271,6 +283,7 @@ function makeTurn(
 
   for (const item of items) {
     if (item.kind === 'user' && prompt === null) prompt = item.text;
+    if (item.kind === 'user' && item.playbook) playbooks++;
 
     for (const thought of thinkingMembers(item)) {
       const hidden = thought.redacted || thought.text.trim().length === 0;
@@ -285,6 +298,7 @@ function makeTurn(
     for (const tool of toolMembers(item)) {
       toolCount++;
       const fact = cachedToolFacts(tool, cache);
+      addReportedTool(resources, cachedReportedTool(toolCacheKey(tool), tool.name, fact, cache?.resources ?? null));
       facts.set(tool.toolUseId, fact);
       if (fact.action === 'command') commandCount++;
       if (fact.failed) noteError(`verse-tool-${tool.toolUseId.replace(/[^A-Za-z0-9_-]/g, '')}`);
@@ -293,7 +307,7 @@ function makeTurn(
 
       const action = fact.action;
       if (action !== 'read' && action !== 'edit' && action !== 'create' && action !== 'delete') continue;
-      const counts = fact.diff ? cachedDiffCounts(tool.toolUseId, fact.diff.text, cache) : { additions: 0, deletions: 0 };
+      const counts = fact.diff ? cachedDiffCounts(toolCacheKey(tool), fact.diff.text, cache) : { additions: 0, deletions: 0 };
       for (const path of fact.paths) {
         const entry = byPath.get(path) ?? {
           path,
@@ -360,6 +374,7 @@ function makeTurn(
     stats.deletions = deletions;
   }
   const citations = collateSources(sources);
+  setResourceContext(resources, citations.length, playbooks);
   stats.sources = citations.length;
   stats.thoughts = reasoning.shown;
   stats.hiddenThoughts = reasoning.hidden;
@@ -374,6 +389,7 @@ function makeTurn(
     stats,
     work: describeTurnWork(stats),
     reasoning,
+    resources,
     // Strongest action first. The map is in first-touch order, and an agentic
     // turn reads widely before editing narrowly — so in read order the three
     // edits in a 40-file turn sit behind "Show 35 more files", hiding exactly
@@ -459,7 +475,8 @@ function toolSearchText(
   item: Extract<TranscriptItem, { kind: 'tool' }>,
   cache: TurnCache | null,
 ): string {
-  const hit = cache?.toolText.get(item.toolUseId);
+  const key = toolCacheKey(item);
+  const hit = cache?.toolText.get(key);
   if (hit !== undefined) return hit;
   const parts: string[] = [item.name];
   if (typeof item.input === 'string') parts.push(item.input.slice(0, TOOL_TEXT_LIMIT));
@@ -473,7 +490,7 @@ function toolSearchText(
   if (item.result) parts.push(item.result.output.slice(0, TOOL_TEXT_LIMIT));
   const text = parts.join('\n');
   // Only cache a finished call: a pending one's output is still to come.
-  if (cache && item.result) cache.toolText.set(item.toolUseId, text);
+  if (cache && item.result) cache.toolText.set(key, text);
   return text;
 }
 

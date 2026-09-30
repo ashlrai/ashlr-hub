@@ -25,6 +25,68 @@ function transient(seq: number, e: Record<string, unknown>): VerseEvent {
 }
 
 describe('Transcript', () => {
+  it('offers a compact tools/context disclosure with reported pending/failure and context counts', async () => {
+    const user = userEvent.setup();
+    render(<Transcript sessionId="account-a-chat" transcript={buildTranscript([
+      ev(1, 'user-message', { turnId: 't1', text: 'check', playbook: { id: 'review', name: 'Review', macro: '!review', version: 1 } }),
+      ev(2, 'tool-use', { turnId: 't1', toolUseId: 'a', name: 'mcp:ashlr.read', input: { file_path: 'a.ts' } }),
+      ev(3, 'tool-result', { turnId: 't1', toolUseId: 'a', output: 'one line', isError: false }),
+      ev(4, 'tool-use', { turnId: 't1', toolUseId: 'b', name: 'mcp__ashlr-verse__exec_command', input: { command: 'false' } }),
+      ev(5, 'tool-result', { turnId: 't1', toolUseId: 'b', output: 'denied', isError: true }),
+      ev(6, 'tool-use', { turnId: 't1', toolUseId: 'c', name: 'Read', input: { file_path: 'b.ts' } }),
+    ])} loaded loadError={null} />);
+    const summary = screen.getByText('Tools and context');
+    expect(summary.tagName).toBe('SUMMARY');
+    const details = summary.closest('details')!;
+    expect(details.open).toBe(false);
+    await user.click(summary);
+    expect(details.open).toBe(true);
+    const disclosure = within(details);
+    expect(disclosure.getByText('3 reported tool calls; 2 with an MCP name.')).toBeInTheDocument();
+    expect(disclosure.getByText('Ashlr MCP: Read')).toBeInTheDocument();
+    expect(disclosure.getByText('1 call, 1 failed')).toBeInTheDocument();
+    expect(disclosure.getByText('1 call, 1 pending')).toBeInTheDocument();
+    expect(disclosure.getByText('1 cited source; 1 recorded playbook reference.')).toBeInTheDocument();
+    expect(disclosure.getByText('Reported by the chat. Server identity and skill loading are unknown.')).toBeInTheDocument();
+  });
+
+  it('shows no observed calls and unknown loading for a historical text-only turn', () => {
+    render(<Transcript transcript={buildTranscript([
+      ev(1, 'user-message', { turnId: 't1', text: 'hello' }),
+      ev(2, 'assistant-message', { turnId: 't1', text: 'hello back' }),
+    ])} loaded loadError={null} />);
+    const details = screen.getByText('Tools and context').closest('details')!;
+    expect(within(details).getByText('No observed tool calls in this turn.')).toBeInTheDocument();
+    expect(within(details).getByText(/skill loading are unknown/)).toBeInTheDocument();
+  });
+
+  it('never republishes raw tool/server names, inputs, paths or outputs in the evidence disclosure', () => {
+    const marker = '/Users/private/native-state/sk-secret-value';
+    render(<Transcript transcript={buildTranscript([
+      ev(1, 'user-message', { turnId: 't1', text: 'check' }),
+      ev(2, 'tool-use', { turnId: 't1', toolUseId: 'a', name: `mcp__${marker}__read`, input: { token: marker, file_path: marker } }),
+      ev(3, 'tool-result', { turnId: 't1', toolUseId: 'a', output: marker, isError: false }),
+    ])} loaded loadError={null} />);
+    const details = screen.getByText('Tools and context').closest('details')!;
+    expect(details.textContent).not.toContain(marker);
+    expect(within(details).getByText('Other MCP: Read')).toBeInTheDocument();
+  });
+
+  it('resets per-turn evidence and tool-fact caches when switching chats/accounts with reused ids', () => {
+    const build = (name: string, failed: boolean) => buildTranscript([
+      ev(1, 'user-message', { turnId: 'same-turn', text: 'check' }),
+      ev(2, 'tool-use', { turnId: 'same-turn', toolUseId: 'same-call', name, input: {} }),
+      ev(3, 'tool-result', { turnId: 'same-turn', toolUseId: 'same-call', output: '', isError: failed }),
+    ]);
+    const { rerender } = render(<Transcript sessionId="account-a-chat" transcript={build('mcp:ashlr.read', false)} loaded loadError={null} />);
+    expect(within(screen.getByText('Tools and context').closest('details')!).getByText('Ashlr MCP: Read')).toBeInTheDocument();
+    rerender(<Transcript sessionId="account-b-chat" transcript={build('Bash', true)} loaded loadError={null} />);
+    const details = screen.getByText('Tools and context').closest('details')!;
+    expect(within(details).queryByText('Ashlr MCP: Read')).not.toBeInTheDocument();
+    expect(within(details).getByText('Command')).toBeInTheDocument();
+    expect(within(details).getByText('1 call, 1 failed')).toBeInTheDocument();
+  });
+
   it('renders exactly one quiet note after Stop, not a red failure line', () => {
     const transcript = buildTranscript([
       ev(1, 'user-message', { turnId: 't1', text: 'do the thing' }),

@@ -9,6 +9,27 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.17.2] — 2026-09-30
+
+### Added
+
+- Show a compact Tools and context panel for each chat turn, with reported
+  tool and MCP call counts, pending/failed results, cited sources and recorded
+  playbook references. Labels are bounded and sanitized; observed calls do not
+  establish server identity or prove that a skill was loaded.
+- Add clickable, checked source-line evidence to inferred module dependencies,
+  with explicit counts for omitted citations, unresolved recognized local
+  imports and source files whose language resolver is unsupported.
+
+### Security
+
+- Update DOMPurify to 3.4.16, the patched release for GHSA-p98j-92pf-mc4p.
+
+### Fixed
+
+- Scope transcript tool caches to the chat and turn so reused provider tool IDs
+  cannot carry facts or search text into another chat or turn.
+
 ## [3.17.1] — 2026-09-30
 
 ### Security
