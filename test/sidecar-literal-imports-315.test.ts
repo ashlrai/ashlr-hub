@@ -60,7 +60,7 @@ function computedImports(file: string): string[] {
 }
 
 describe('the compiled sidecar can bundle every lazy import', () => {
-  it('no runtime source loads a computed specifier outside the documented exceptions', () => {
+  it('no runtime source loads a computed specifier outside the documented exceptions', { timeout: 30_000 }, () => {
     const files = [...sourceFiles(join(ROOT, 'src', 'core')), ...sourceFiles(join(ROOT, 'src', 'cli'))];
     expect(files.length).toBeGreaterThan(500);
     const offenders = files

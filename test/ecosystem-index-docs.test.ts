@@ -92,7 +92,11 @@ describe('ecosystem docs inventory', () => {
     const index = readIndex();
     const map = readMap();
 
-    expect(map).toContain('## Current 21-repo inventory');
+    // #580 relabelled the map as a dated, historical snapshot rather than a
+    // current inventory; the table and JSON coverage must still agree.
+    expect(map).toContain('## July 2026 21-repo inventory');
+    expect(map).toMatch(/Historical planning snapshot, 2026-07-02/);
+    expect(map).not.toContain('## Current 21-repo inventory');
     expect(map).toContain('[`docs/ecosystem-index.json`](./ecosystem-index.json)');
 
     for (const repo of index.repositories) {

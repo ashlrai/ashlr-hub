@@ -10,6 +10,10 @@ import { readCompletedCampaignDelivery } from '../src/core/universe/campaign-del
 import { projectUniverse } from '../src/core/universe/store.js';
 import * as deliveryGitModule from '../src/core/universe/delivery-git.js';
 
+
+// macOS-only: the campaign's real Universe run requires macOS sandbox-exec. Other hosts skip
+// these cleanly instead of failing (src/core/cloud/improvement-backlog.ts).
+const NOT_MACOS = process.platform !== 'darwin';
 const roots: string[] = [];
 afterEach(() => {
   vi.restoreAllMocks();
@@ -81,7 +85,7 @@ describe('initial repair delivery policy is an explicit closed opt-in', () => {
 });
 
 describe('measured failed seed to first passing repair local delivery', () => {
-  it.each(['maximize', 'minimize'] as const)('requires opt-in for %s and preserves honest null lineage on replay/recovery', async (direction) => {
+  it.skipIf(NOT_MACOS).each(['maximize', 'minimize'] as const)('requires opt-in for %s and preserves honest null lineage on replay/recovery', async (direction) => {
     const f = await fixture({ direction });
     const before = readUniverseCampaign('campaign', { root: f.root });
     const index = readFileSync(join(f.repo, '.git', 'index'));
@@ -103,21 +107,21 @@ describe('measured failed seed to first passing repair local delivery', () => {
     expect(f.git('show', `${f.delivery.branch}:value.json`)).toBe('1');
   });
 
-  it.each(['unmeasured', 'changed'] as const)('does not promote an %s failing trial as the measured seed', async (baseline) => {
+  it.skipIf(NOT_MACOS).each(['unmeasured', 'changed'] as const)('does not promote an %s failing trial as the measured seed', async (baseline) => {
     const f = await fixture({ baseline });
     expect(await deliverCompletedUniverseCampaign('campaign', { root: f.root,
       delivery: { ...f.delivery, allowInitialRepair: true } })).toMatchObject({ delivery: { status: 'withheld', reason: 'no-strict-improvement' } });
     expect(f.git('branch', '--list', f.delivery.branch)).toBe('');
   });
 
-  it('honors the fixed minimum improvement instead of only testing pass/fail labels', async () => {
+  it.skipIf(NOT_MACOS)('honors the fixed minimum improvement instead of only testing pass/fail labels', async () => {
     const f = await fixture({ minImprovement: 2 });
     expect(await deliverCompletedUniverseCampaign('campaign', { root: f.root,
       delivery: { ...f.delivery, allowInitialRepair: true } })).toMatchObject({ delivery: { status: 'withheld', reason: 'no-strict-improvement' } });
     expect(f.git('branch', '--list', f.delivery.branch)).toBe('');
   });
 
-  it('rejects changed baseline bytes before publication and in read-only receipt recovery', async () => {
+  it.skipIf(NOT_MACOS)('rejects changed baseline bytes before publication and in read-only receipt recovery', async () => {
     const f = await fixture(); const delivery = { ...f.delivery, allowInitialRepair: true as const };
     const first = await deliverCompletedUniverseCampaign('campaign', { root: f.root, delivery });
     expect(first.delivery.status).toBe('delivered'); if (first.delivery.status !== 'delivered') throw new Error('Expected initial delivery');
@@ -133,7 +137,7 @@ describe('measured failed seed to first passing repair local delivery', () => {
     expect(readUniverseDeliveries(f.manifest.id, { root: f.root }).deliveries).toHaveLength(1);
   });
 
-  it('rechecks baseline bytes under the final prepared Git ref lock', async () => {
+  it.skipIf(NOT_MACOS)('rechecks baseline bytes under the final prepared Git ref lock', async () => {
     const f = await fixture(); const delivery = { ...f.delivery, allowInitialRepair: true as const };
     const original = deliveryGitModule.deliveryGit; let finalChecks = 0;
     vi.spyOn(deliveryGitModule, 'deliveryGit').mockImplementation((repo, deadline) => {

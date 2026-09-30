@@ -264,7 +264,10 @@ describe('wiring: a swallowed violation still fails the test run', () => {
         [join(REPO_ROOT, 'node_modules', 'vitest', 'vitest.mjs'), 'run', '--config', config, '--root', dir],
         { cwd: REPO_ROOT, encoding: 'utf8', env: { ...process.env, CI: '1', FORCE_COLOR: '0' }, timeout: 90_000 },
       );
-      const output = `${result.stdout}\n${result.stderr}`;
+      // FORCE_COLOR=0 is not honoured everywhere (GitHub Actions still gets
+      // ANSI summaries), so match the plain text.
+      // eslint-disable-next-line no-control-regex
+      const output = `${result.stdout}\n${result.stderr}`.replace(/\u001b\[[0-9;]*m/g, '');
       expect(result.status, output).toBe(1);
       expect(output).toMatch(/HOME isolation guard: 2 write\(s\) targeted the REAL ~\/\.ashlr/);
       expect(output).toMatch(/module load \/ hook outside a test/);

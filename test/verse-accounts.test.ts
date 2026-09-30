@@ -61,6 +61,10 @@ import {
 } from '../src/core/verse/accounts.js';
 import { buildSeatTelemetry, discoverSeats, refreshSeatTelemetry, seatUsability } from '../src/core/verse/seats.js';
 
+
+// macOS-only: the durable native-activity fence (schema-v4 marker) needs readNativeBootIdentity(), which is darwin-only. Other hosts skip
+// these cleanly instead of failing (src/core/cloud/improvement-backlog.ts).
+const NOT_MACOS = process.platform !== 'darwin';
 // ---------------------------------------------------------------------------
 // Fixture root
 // ---------------------------------------------------------------------------
@@ -829,7 +833,7 @@ function lingeringChildAlive(pidFile: string): boolean {
 }
 
 describe('verse accounts — stranded native cleanup recovery', () => {
-  it('holds the fence while the stranded group lives, then releases it on kernel-confirmed absence', async () => {
+  it.skipIf(NOT_MACOS)('holds the fence while the stranded group lives, then releases it on kernel-confirmed absence', async () => {
     const ledger = accountsLedgerRoot(root);
     held = await acquireResourceQuotaRefreshLease(ledger, { trackNativeActivity: true });
     held.markPending();
@@ -860,7 +864,7 @@ describe('verse accounts — stranded native cleanup recovery', () => {
     held = null;
   }, 40_000);
 
-  it('never releases a reservation that published no process group', async () => {
+  it.skipIf(NOT_MACOS)('never releases a reservation that published no process group', async () => {
     const ledger = accountsLedgerRoot(root);
     held = await acquireResourceQuotaRefreshLease(ledger, { trackNativeActivity: true });
     held.markPending();
@@ -912,7 +916,7 @@ describe('verse accounts — stranded native cleanup recovery', () => {
     expect(VERSE_COLLECTOR_RECOVERY_EXHAUSTED_NOTE).toMatch(/ashlr verse/);
   });
 
-  it('starts a NEW collection generation by itself after a probe leaves a lingering process group', async () => {
+  it.skipIf(NOT_MACOS)('starts a NEW collection generation by itself after a probe leaves a lingering process group', async () => {
     // A launcher that, on its FIRST run only, leaves a grandchild alive in its
     // own POSIX group and exits — the same shape as the background git clone.
     const base = fs.realpathSync(fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'ashlr-verse-linger-')));

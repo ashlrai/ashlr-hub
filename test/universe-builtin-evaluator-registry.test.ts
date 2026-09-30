@@ -8,6 +8,10 @@ import { comparatorDigest, validateUniverseManifest, type ManifestRecord } from 
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { resolvePreparationGit } from '../scripts/evaluators/preparation-verification-native.mjs';
 
+
+// macOS-only: the installed built-in evaluator bundle pins Apple Git (CommandLineTools/Xcode) and /usr/bin/sandbox-exec. Other hosts skip
+// these cleanly instead of failing (src/core/cloud/improvement-backlog.ts).
+const NOT_MACOS = process.platform !== 'darwin';
 vi.mock('node:fs', async importOriginal => ({ ...await importOriginal<typeof import('node:fs')>() }));
 
 const files = ['preparation-bridge.mjs', 'preparation-verification-activity.mjs', 'preparation-verification-child.mjs',
@@ -83,7 +87,7 @@ describe('closed installed built-in evaluator registry', () => {
       evaluationCommand: record.evaluationCommand, evaluationExecutableDigest: record.evaluationExecutableDigest })));
     expect(comparatorDigest({ ...record, evaluationBuiltinDigest: '4'.repeat(64) })).not.toBe(comparatorDigest(record));
   });
-  it('pins all installed files and the actual executable, returning detached metadata', () => {
+  it.skipIf(NOT_MACOS)('pins all installed files and the actual executable, returning detached metadata', () => {
     const f = fixture(), first = inspectBuiltinEvaluatorBundle(f.directory);
     expect(first.command).toEqual([process.execPath, '--experimental-vm-modules', '--no-warnings',
       join(f.directory, 'preparation-verification.mjs'), join(f.directory, 'preparation-bridge.mjs')]);
@@ -92,7 +96,7 @@ describe('closed installed built-in evaluator registry', () => {
     const original = first.digest; first.files[0]!.digest = 'f'.repeat(64); first.command[0] = '/unexpected';
     expect(inspectBuiltinEvaluatorBundle(f.directory).digest).toBe(original);
   });
-  it('pins the actual selected Git bytes and returns independently detached native metadata', () => {
+  it.skipIf(NOT_MACOS)('pins the actual selected Git bytes and returns independently detached native metadata', () => {
     const f = fixture(), selected = resolvePreparationGit(), first = inspectBuiltinEvaluatorBundle(f.directory);
     expect(first.git).toEqual(selected);
     expect(first.git.digest).toBe(hash(fs.readFileSync(selected.path)));
@@ -106,7 +110,7 @@ describe('closed installed built-in evaluator registry', () => {
     expect(next.git).toEqual(selected); expect(next.tools[0]).toEqual(selected);
     expect(next.digest).toBe(identity);
   });
-  it('includes changed native Git content in the installed identity without changing a real executable', () => {
+  it.skipIf(NOT_MACOS)('includes changed native Git content in the installed identity without changing a real executable', () => {
     const f = fixture(), before = inspectBuiltinEvaluatorBundle(f.directory), original = fs.readSync;
     const selected = fs.lstatSync(before.git.path, { bigint: true });
     let changedReads = 0;
@@ -123,7 +127,7 @@ describe('closed installed built-in evaluator registry', () => {
     expect(after.git.path).toBe(before.git.path); expect(after.git.digest).not.toBe(before.git.digest);
     expect(after.tools[0]).toEqual(after.git); expect(after.digest).not.toBe(before.digest);
   });
-  it('refuses native Git content changing between initial capture and final verification', () => {
+  it.skipIf(NOT_MACOS)('refuses native Git content changing between initial capture and final verification', () => {
     const f = fixture(), pin = resolvePreparationGit(), original = fs.readSync;
     const selected = fs.lstatSync(pin.path, { bigint: true }); let reads = 0;
     vi.spyOn(fs, 'readSync').mockImplementation(((...args: [number, NodeJS.ArrayBufferView, number, number, number | null]) => {
@@ -137,7 +141,7 @@ describe('closed installed built-in evaluator registry', () => {
     expect(() => inspectBuiltinEvaluatorBundle(f.directory)).toThrow('Installed built-in evaluator unavailable or changed');
     expect(reads).toBeGreaterThanOrEqual(2);
   });
-  it('ignores hostile PATH and DEVELOPER_DIR when selecting and pinning Git', () => {
+  it.skipIf(NOT_MACOS)('ignores hostile PATH and DEVELOPER_DIR when selecting and pinning Git', () => {
     const f = fixture(), before = inspectBuiltinEvaluatorBundle(f.directory);
     const prior = { PATH: process.env.PATH, DEVELOPER_DIR: process.env.DEVELOPER_DIR };
     try {
@@ -168,7 +172,7 @@ describe('closed installed built-in evaluator registry', () => {
     const f = fixture(), link = join(f.root, 'alias'); fs.symlinkSync(f.directory, link);
     expect(() => inspectBuiltinEvaluatorBundle(link)).toThrow();
   });
-  it('detects an earlier file changing during a later file read', () => {
+  it.skipIf(NOT_MACOS)('detects an earlier file changing during a later file read', () => {
     const f = fixture(), original = fs.readSync;
     const later = fs.lstatSync(join(f.directory, files[1]!), { bigint: true });
     let mutated = false;
@@ -182,7 +186,7 @@ describe('closed installed built-in evaluator registry', () => {
     expect(() => inspectBuiltinEvaluatorBundle(f.directory)).toThrow();
     expect(mutated).toBe(true);
   });
-  it('bounds descriptor reads to captured size plus one and refuses growth without consuming it', () => {
+  it.skipIf(NOT_MACOS)('bounds descriptor reads to captured size plus one and refuses growth without consuming it', () => {
     const f = fixture(), original = fs.readSync;
     const selected = fs.lstatSync(join(f.directory, 'manifest.json'), { bigint: true });
     const bound = Number(selected.size) + 1;

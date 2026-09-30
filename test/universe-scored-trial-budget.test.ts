@@ -78,6 +78,10 @@ import { confinedUniverseArgv, runFixedUniverseEvaluator } from '../src/core/uni
 import { runVerifySubprocessAsync } from '../src/core/run/verify-commands.js';
 import { readBuiltinTrialCustody } from '../src/core/universe/builtin-trial-custody.js';
 
+
+// macOS-only: the Universe trial runner and fixed evaluator require macOS sandbox-exec. Other hosts skip
+// these cleanly instead of failing (src/core/cloud/improvement-backlog.ts).
+const NOT_MACOS = process.platform !== 'darwin';
 const ROOT = '/inert-scored-trial-budget';
 const evaluator = vi.mocked(runFixedUniverseEvaluator);
 const worker = vi.mocked(runVerifySubprocessAsync);
@@ -159,7 +163,7 @@ describe('explicit scored trial budgets (inert runtime)', () => {
     expect(validateUniverseManifest(manifest)).toEqual(manifest);
     expect(() => validateUniverseManifest({ ...manifest, evaluation: { ...manifest.evaluation, timeoutMs: 1_800_001 } })).toThrow();
   });
-  it('gives only the worker cap to generation and evaluates beyond minute fifteen', async () => {
+  it.skipIf(NOT_MACOS)('gives only the worker cap to generation and evaluates beyond minute fifteen', async () => {
     const f = fixture();
     worker.mockImplementationOnce(async (_argv, options) => {
       expect(options.timeoutMs).toBe(300_000); memory.elapsed = 200_000; return response();
@@ -173,7 +177,7 @@ describe('explicit scored trial budgets (inert runtime)', () => {
     expect(f.rows().map(row => row.kind)).toEqual(['intent', 'settlement']);
     expect(f.rows()[0]!.intent.evaluatorId).toBe('preparation-process-score-v1');
   });
-  it('passes only the worker cap to model generation without contacting a model', async () => {
+  it.skipIf(NOT_MACOS)('passes only the worker cap to model generation without contacting a model', async () => {
     const f = fixture();
     const config = { kind: 'local-chat' as const, endpoint: 'http://127.0.0.1:11434', model: 'inert',
       files: ['index.ts'], maxOutputTokens: 10 };
@@ -187,20 +191,20 @@ describe('explicit scored trial budgets (inert runtime)', () => {
     expect(result.trials[0]).toMatchObject({ status: 'timed-out', score: null, selected: false });
     expect(worker).not.toHaveBeenCalled(); expect(evaluator).not.toHaveBeenCalled();
   });
-  it('refuses an apparently successful worker at its deadline before any evaluator custody', async () => {
+  it.skipIf(NOT_MACOS)('refuses an apparently successful worker at its deadline before any evaluator custody', async () => {
     const f = fixture();
     worker.mockImplementationOnce(async () => { memory.elapsed = 300_000; return response(); });
     const result = await f.execute();
     expect(result.trials[0]).toMatchObject({ status: 'timed-out', score: null, selected: false });
     expect(evaluator).not.toHaveBeenCalled(); expect(f.rows()).toEqual([]);
   });
-  it('refuses worker dispatch when confinement construction exhausts its original cap', async () => {
+  it.skipIf(NOT_MACOS)('refuses worker dispatch when confinement construction exhausts its original cap', async () => {
     const f = fixture();
     vi.mocked(confinedUniverseArgv).mockImplementationOnce(argv => { memory.elapsed = 300_000; return argv; });
     expect((await f.execute()).trials[0]).toMatchObject({ status: 'timed-out', score: null, selected: false });
     expect(worker).not.toHaveBeenCalled(); expect(evaluator).not.toHaveBeenCalled();
   });
-  it('propagates the original worker deadline into the model dispatch guard after slow parent proof', async () => {
+  it.skipIf(NOT_MACOS)('propagates the original worker deadline into the model dispatch guard after slow parent proof', async () => {
     const f = fixture(); let slow = false;
     const config = { kind: 'local-chat' as const, endpoint: 'http://127.0.0.1:11434', model: 'inert',
       files: ['index.ts'], maxOutputTokens: 10 };
@@ -215,7 +219,7 @@ describe('explicit scored trial budgets (inert runtime)', () => {
     expect(result.trials[0]).toMatchObject({ selected: false, score: null, generation: { requestStarted: false } });
     expect(evaluator).not.toHaveBeenCalled();
   });
-  it('retains omitted shared-budget arithmetic for legacy execution', async () => {
+  it.skipIf(NOT_MACOS)('retains omitted shared-budget arithmetic for legacy execution', async () => {
     const f = fixture('legacy', false);
     delete f.record.manifest.budget.workerTimeoutMs; f.record.manifest.budget.trialTimeoutMs = 900_000;
     f.record.manifest.evaluation = { command: ['inert-evaluator'], timeoutMs: 900_000 };
@@ -228,7 +232,7 @@ describe('explicit scored trial budgets (inert runtime)', () => {
     expect((await f.execute()).trials[0]).toMatchObject({ status: 'passed', selected: true });
     expect(f.rows()).toEqual([]);
   });
-  it.each(['trial', 'evaluator', 'parent-stop'] as const)('withholds a settled valid score after %s expiry', async cause => {
+  it.skipIf(NOT_MACOS).each(['trial', 'evaluator', 'parent-stop'] as const)('withholds a settled valid score after %s expiry', async cause => {
     const f = fixture(); let stopped = false;
     if (cause === 'trial') f.record.manifest.budget.trialTimeoutMs = 1_800_000;
     evaluator.mockImplementationOnce(async (...args) => {
@@ -242,7 +246,7 @@ describe('explicit scored trial budgets (inert runtime)', () => {
       status: cause === 'parent-stop' ? 'cancelled' : 'timed-out' });
     expect(f.rows().map(row => row.kind)).toEqual(['intent', 'settlement']);
   });
-  it('clips evaluation to the original run deadline without renewal', async () => {
+  it.skipIf(NOT_MACOS)('clips evaluation to the original run deadline without renewal', async () => {
     const f = fixture(); f.record.manifest.budget.maxDurationMs = 1_000_000;
     worker.mockImplementationOnce(async () => { memory.elapsed = 200_000; return response(); });
     evaluator.mockImplementationOnce(async (...args) => {
@@ -250,7 +254,7 @@ describe('explicit scored trial budgets (inert runtime)', () => {
     });
     expect((await f.execute()).trials[0]).toMatchObject({ status: 'timed-out', selected: false, score: null });
   });
-  it('clips to an original campaign deadline and never redispatches a resumed reserved run', async () => {
+  it.skipIf(NOT_MACOS)('clips to an original campaign deadline and never redispatches a resumed reserved run', async () => {
     fixture();
     const options = { root: ROOT, runId: '12345678-1234-4234-8234-123456789abc', deadlineMs: Date.now() + 500_000 };
     worker.mockImplementationOnce(async () => { memory.elapsed = 200_000; return response(); });
@@ -264,7 +268,7 @@ describe('explicit scored trial budgets (inert runtime)', () => {
     });
     expect(evaluator).toHaveBeenCalledOnce(); expect(worker).toHaveBeenCalledOnce();
   });
-  it('does not dispatch after expensive preflight crosses the evaluator deadline', async () => {
+  it.skipIf(NOT_MACOS)('does not dispatch after expensive preflight crosses the evaluator deadline', async () => {
     const f = fixture();
     evaluator.mockImplementationOnce(async (...args) => {
       memory.elapsed = 1_800_000; args[9]?.(); memory.dispatches++; return response();
@@ -272,7 +276,7 @@ describe('explicit scored trial budgets (inert runtime)', () => {
     expect((await f.execute()).trials[0]).toMatchObject({ score: null, selected: false });
     expect(memory.dispatches).toBe(0); expect(f.rows()).toEqual([]);
   });
-  it('does not select a winner when final comparator proof crosses the original run deadline', async () => {
+  it.skipIf(NOT_MACOS)('does not select a winner when final comparator proof crosses the original run deadline', async () => {
     const f = fixture(); f.record.manifest.budget.maxDurationMs = 1_000_000;
     vi.mocked(assertComparatorUnchanged).mockImplementation(() => {
       if (memory.dispatches > 0) memory.elapsed = 1_000_000;
@@ -283,7 +287,7 @@ describe('explicit scored trial budgets (inert runtime)', () => {
     expect(result.error).toBe(RUN_DEADLINE_BEFORE_SELECTION);
     expect(f.rows().map(row => row.kind)).toEqual(['intent', 'settlement']);
   });
-  it('holds scored custody after a lost response and never renews by replay', async () => {
+  it.skipIf(NOT_MACOS)('holds scored custody after a lost response and never renews by replay', async () => {
     const f = fixture();
     evaluator.mockImplementationOnce(async (...args) => { args[9]?.(); throw new Error('Unconfirmed scored dispatch'); });
     expect((await f.execute()).trials[0]).toMatchObject({ score: null, selected: false });

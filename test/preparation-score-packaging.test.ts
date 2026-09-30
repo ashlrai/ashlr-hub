@@ -16,6 +16,10 @@ import { parsePreparationMeasurementReport } from '../src/core/universe/preparat
 import { buildPreparationScoreBundle, buildPreparationScoringBuiltin } from '../scripts/build-preparation-score.mjs';
 import { PREPARATION_TYPECHECK_OPTIONS, type PreparationTypecheckProject } from '../src/core/universe/preparation-typecheck-project.js';
 
+
+// macOS-only: the preparation evaluator pins Apple Git (CommandLineTools/Xcode) and /usr/bin/sandbox-exec. Other hosts skip
+// these cleanly instead of failing (src/core/cloud/improvement-backlog.ts).
+const NOT_MACOS = process.platform !== 'darwin';
 const fake = vi.hoisted(() => ({ build: vi.fn(), calibrate: vi.fn(), author: vi.fn(), git: { path: '/fixed/developer/git', digest: 'e'.repeat(64) } }));
 vi.mock('../scripts/evaluators/preparation-verification-native.mjs', () => ({
   resolvePreparationGit: () => ({ ...fake.git }), assertPreparationGit: (value: unknown) => {
@@ -153,7 +157,7 @@ afterEach(() => {
 });
 
 describe('explicit nested preparation scoring packaging', () => {
-  it.each(['baseline', 'bom', 'ill-typed'] as const)('the real bundled compiler checks a synthetic %s target without emitting files', async kind => {
+  it.skipIf(NOT_MACOS).each(['baseline', 'bom', 'ill-typed'] as const)('the real bundled compiler checks a synthetic %s target without emitting files', async kind => {
     const f = await realEntry();
     const source = kind === 'ill-typed' ? 'export const fixture: string = 1;\n' : `${kind === 'bom' ? '\uFEFF' : ''}export const fixture = 1;\n`;
     const project = join(f.output, 'preparation-typecheck-project.json');
@@ -171,7 +175,7 @@ describe('explicit nested preparation scoring packaging', () => {
     expect(fs.readdirSync(f.output, { recursive: true })).toEqual(before);
   });
 
-  it('builds the actual fixed entry and reconstructs the host identity on import without starting a workload', async () => {
+  it.skipIf(NOT_MACOS)('builds the actual fixed entry and reconstructs the host identity on import without starting a workload', async () => {
     // Real native identity reads only: no Git command, evaluator or candidate is invoked.
     const native = await vi.importActual<typeof import('../scripts/evaluators/preparation-verification-native.mjs')>('../scripts/evaluators/preparation-verification-native.mjs');
     Object.assign(fake.git, native.resolvePreparationGit());
@@ -199,7 +203,7 @@ describe('explicit nested preparation scoring packaging', () => {
     expect(fs.readdirSync(f.root).sort()).toEqual(['calibration.json', 'original', 'score']);
   });
 
-  it.each(['missing-activity', 'wrong-argv', 'expired', 'completion-failure'] as const)('the compiled entry refuses %s without workload dispatch or leaked listeners/output', async kind => {
+  it.skipIf(NOT_MACOS).each(['missing-activity', 'wrong-argv', 'expired', 'completion-failure'] as const)('the compiled entry refuses %s without workload dispatch or leaked listeners/output', async kind => {
     const f = await realEntry(), activityRoot = join(f.root, 'activity'); fs.mkdirSync(activityRoot, { mode: 0o700 });
     write(join(activityRoot, 'owner.json'), JSON.stringify({ schemaVersion: 1, invocationId: 'a'.repeat(64),
       implementationDigest: '0'.repeat(64), deadlineAt: new Date(Date.now() + (kind === 'expired' ? -1000 : 60000)).toISOString() }));
@@ -231,7 +235,7 @@ describe('explicit nested preparation scoring packaging', () => {
     } finally { process.argv = priorArgv; }
   });
 
-  it.each(['settled', 'bom', 'unsettled', 'scope-violation', 'type-error'] as const)('the compiled owner handles a synthetic %s workload without claiming native qualification', async kind => {
+  it.skipIf(NOT_MACOS).each(['settled', 'bom', 'unsettled', 'scope-violation', 'type-error'] as const)('the compiled owner handles a synthetic %s workload without claiming native qualification', async kind => {
     const f = await realEntry(kind === 'unsettled' ? 'unsettled' : 'settled');
     const candidate = join(f.root, 'candidate'), target = join(candidate, f.calibration.baseline.source.path);
     fs.mkdirSync(dirname(target), { recursive: true, mode: 0o700 }); write(target, 'export const fixture = 1;\n');
@@ -278,7 +282,7 @@ describe('explicit nested preparation scoring packaging', () => {
     } finally { process.argv = priorArgv; }
   });
 
-  it('preserves all nine measured files and original manifest while pinning the separate score entry', async () => {
+  it.skipIf(NOT_MACOS)('preserves all nine measured files and original manifest while pinning the separate score entry', async () => {
     const f = await packaged(), selected = inspectPreparationScoreBundle(f.output);
     expect(selected.id).toBe('preparation-process-score-v1');
     expect(selected.files.map(row => row.name)).toEqual(PREPARATION_SCORE_FILES);
@@ -296,14 +300,14 @@ describe('explicit nested preparation scoring packaging', () => {
     expect(JSON.parse(fs.readFileSync(join(f.output, 'preparation-typecheck-project.json'), 'utf8'))).toEqual(f.typecheckProject);
   });
 
-  it('pins exact calibration bytes in the outer identity, never in the original measurement identity', async () => {
+  it.skipIf(NOT_MACOS)('pins exact calibration bytes in the outer identity, never in the original measurement identity', async () => {
     const f = await packaged(), before = inspectPreparationScoreBundle(f.output);
     fs.appendFileSync(join(f.output, 'calibration.json'), ' '); rewriteOuter(f.output);
     expect(inspectPreparationScoreBundle(f.output).digest).not.toBe(before.digest);
     expect(inspectBuiltinEvaluatorBundle(join(f.output, 'measurement')).digest).toBe(f.observed.digest);
   });
 
-  it.each(['missing', 'source-hash', 'source-text', 'compiler-policy'] as const)('refuses invalid type project %s before compilation or publication', async kind => {
+  it.skipIf(NOT_MACOS).each(['missing', 'source-hash', 'source-text', 'compiler-policy'] as const)('refuses invalid type project %s before compilation or publication', async kind => {
     const f = fixture();
     if (kind === 'source-hash') f.typecheckProject.baselineSourceSha256 = 'f'.repeat(64);
     if (kind === 'source-text') f.typecheckProject.files.find(file => file.path === f.calibration.baseline.source.path)!.text = 'export const changed = 1;';
@@ -313,7 +317,7 @@ describe('explicit nested preparation scoring packaging', () => {
     expect(fake.build).not.toHaveBeenCalled(); expect(fs.readdirSync(f.output)).toEqual([]);
   });
 
-  it.each(['missing-child', 'missing-project', 'corrupt-project', 'foreign-source', 'child-bytes', 'project-bytes'] as const)(
+  it.skipIf(NOT_MACOS).each(['missing-child', 'missing-project', 'corrupt-project', 'foreign-source', 'child-bytes', 'project-bytes'] as const)(
     'refuses installed compiler custody %s before dispatch', async kind => {
       const f = await packaged(), child = join(f.output, 'preparation-typecheck.mjs'), project = join(f.output, 'preparation-typecheck-project.json');
       if (kind === 'missing-child') fs.unlinkSync(child);
@@ -330,7 +334,7 @@ describe('explicit nested preparation scoring packaging', () => {
       expect(() => inspectPreparationScoreBundle(f.output)).toThrow('Installed built-in evaluator unavailable or changed');
     });
 
-  it('pins compiler entry and project bytes only in the outer identity', async () => {
+  it.skipIf(NOT_MACOS)('pins compiler entry and project bytes only in the outer identity', async () => {
     const f = await packaged(), before = inspectPreparationScoreBundle(f.output);
     fs.appendFileSync(join(f.output, 'preparation-typecheck.mjs'), '// trusted replacement'); rewriteOuter(f.output);
     const compilerChanged = inspectPreparationScoreBundle(f.output);
@@ -340,7 +344,7 @@ describe('explicit nested preparation scoring packaging', () => {
     expect(inspectBuiltinEvaluatorBundle(join(f.output, 'measurement')).digest).toBe(f.observed.digest);
   });
 
-  it.each(['external-package', 'missing-compiler', 'candidate-source'] as const)('refuses a compiler graph with %s before publication', async kind => {
+  it.skipIf(NOT_MACOS).each(['external-package', 'missing-compiler', 'candidate-source'] as const)('refuses a compiler graph with %s before publication', async kind => {
     const f = fixture(), original = fake.build.getMockImplementation()!;
     fake.build.mockImplementation(async (options: { entryPoints: string[] }) => {
       const result = await original(options);
@@ -355,7 +359,7 @@ describe('explicit nested preparation scoring packaging', () => {
     expect(fs.readdirSync(f.output)).toEqual([]);
   });
 
-  it.each(['workload-version', 'aggregate', 'node', 'git', 'file'] as const)('refuses mismatched %s calibration before building or copying', async kind => {
+  it.skipIf(NOT_MACOS).each(['workload-version', 'aggregate', 'node', 'git', 'file'] as const)('refuses mismatched %s calibration before building or copying', async kind => {
     const f = fixture();
     if (kind === 'workload-version') f.calibration.workload.id = 'preparation-workflows-v1';
     if (kind === 'aggregate') f.calibration.workload.digest = 'a'.repeat(64);
@@ -367,7 +371,7 @@ describe('explicit nested preparation scoring packaging', () => {
     expect(fake.build).not.toHaveBeenCalled(); expect(fs.readdirSync(f.output)).toEqual([]);
   });
 
-  it.each(['file', 'manifest', 'extra', 'symlink', 'hardlink', 'writable', 'calibration', 'row-order'] as const)('refuses changed installed score custody: %s', async kind => {
+  it.skipIf(NOT_MACOS).each(['file', 'manifest', 'extra', 'symlink', 'hardlink', 'writable', 'calibration', 'row-order'] as const)('refuses changed installed score custody: %s', async kind => {
     const f = await packaged(), target = join(f.output, 'preparation-score.mjs');
     if (kind === 'file') fs.appendFileSync(target, '// changed');
     if (kind === 'manifest') fs.appendFileSync(join(f.output, 'measurement/manifest.json'), ' ');
@@ -380,20 +384,20 @@ describe('explicit nested preparation scoring packaging', () => {
     expect(() => inspectPreparationScoreBundle(f.output)).toThrow('Installed built-in evaluator unavailable or changed');
   });
 
-  it('refuses a nonempty output without overwriting an existing file', async () => {
+  it.skipIf(NOT_MACOS)('refuses a nonempty output without overwriting an existing file', async () => {
     const f = fixture(); write(join(f.output, 'keep'), 'untouched');
     await expect(buildPreparationScoreBundle({ repository, ...f })).rejects.toThrow();
     expect(fs.readFileSync(join(f.output, 'keep'), 'utf8')).toBe('untouched'); expect(fake.build).not.toHaveBeenCalled();
   });
 
-  it('refuses source drift during the build before publishing a score manifest', async () => {
+  it.skipIf(NOT_MACOS)('refuses source drift during the build before publishing a score manifest', async () => {
     const f = fixture(), build = fake.build.getMockImplementation()!;
     fake.build.mockImplementation(async (...args: unknown[]) => { const result = await build(...args); fs.appendFileSync(join(f.measurementDirectory, files[0]!), '// drift'); return result; });
     await expect(buildPreparationScoreBundle({ repository, ...f })).rejects.toThrow();
     expect(fs.readdirSync(f.output)).toEqual([]);
   });
 
-  it('does not authorize an entry substituted after compilation by hashing the changed output', async () => {
+  it.skipIf(NOT_MACOS)('does not authorize an entry substituted after compilation by hashing the changed output', async () => {
     const f = fixture(), original = fs.writeFileSync; let injected = false;
     vi.spyOn(fs, 'writeFileSync').mockImplementation(((...args: Parameters<typeof fs.writeFileSync>) => {
       const result = Reflect.apply(original, fs, args);
@@ -406,7 +410,7 @@ describe('explicit nested preparation scoring packaging', () => {
     expect(injected).toBe(true); expect(fs.existsSync(join(f.output, 'manifest.json'))).toBe(false);
   });
 
-  it.each(['after-mkdir', 'between-files'] as const)('refuses a nested-directory symlink replacement %s before writing outside', async moment => {
+  it.skipIf(NOT_MACOS).each(['after-mkdir', 'between-files'] as const)('refuses a nested-directory symlink replacement %s before writing outside', async moment => {
     const f = fixture(), target = join(f.output, 'measurement'), outside = join(f.root, 'outside');
     fs.mkdirSync(outside, { mode: 0o700 }); let injected = false;
     const swap = () => { injected = true; fs.renameSync(target, join(f.root, 'original-output-directory')); fs.symlinkSync(outside, target); };
@@ -430,7 +434,7 @@ describe('explicit nested preparation scoring packaging', () => {
     expect(fs.existsSync(join(f.output, 'manifest.json'))).toBe(false);
   });
 
-  it('rechecks outer directory identity before the next outer publication', async () => {
+  it.skipIf(NOT_MACOS)('rechecks outer directory identity before the next outer publication', async () => {
     const f = fixture(), outside = join(f.root, 'outside'); fs.mkdirSync(outside, { mode: 0o700 });
     const original = fs.writeFileSync; let injected = false;
     vi.spyOn(fs, 'writeFileSync').mockImplementation(((...args: Parameters<typeof fs.writeFileSync>) => {
@@ -452,7 +456,7 @@ describe('explicit nested preparation scoring packaging', () => {
     expect(fake.author).not.toHaveBeenCalled();
   });
 
-  it('requires a clean real-project authoring result after calibration and before any installation', async () => {
+  it.skipIf(NOT_MACOS)('requires a clean real-project authoring result after calibration and before any installation', async () => {
     const f = fixture(); fake.calibrate.mockReturnValue(f.calibration);
     fake.author.mockRejectedValue(new Error('Real project does not compile'));
     const mkdir = vi.spyOn(fs, 'mkdirSync'), capture = { root: '/explicit/private', universeId: 'baseline',
@@ -464,7 +468,7 @@ describe('explicit nested preparation scoring packaging', () => {
     expect(fake.build).not.toHaveBeenCalled(); expect(mkdir).not.toHaveBeenCalled();
   });
 
-  it('refuses compiler source drift after asynchronous compilation without publishing', async () => {
+  it.skipIf(NOT_MACOS)('refuses compiler source drift after asynchronous compilation without publishing', async () => {
     const f = fixture(), original = fake.build.getMockImplementation()!; let changed = false;
     changedCompilerReadWhen(() => changed);
     fake.build.mockImplementation(async (options: { entryPoints: string[] }) => {
@@ -474,7 +478,7 @@ describe('explicit nested preparation scoring packaging', () => {
     expect(changed).toBe(true); expect(fs.readdirSync(f.output)).toEqual([]);
   });
 
-  it('refuses compiler source drift across real-project authoring before creating installation output', async () => {
+  it.skipIf(NOT_MACOS)('refuses compiler source drift across real-project authoring before creating installation output', async () => {
     const f = fixture(); fake.calibrate.mockReturnValue(f.calibration); let changed = false;
     changedCompilerReadWhen(() => changed);
     fake.author.mockImplementation(async () => { changed = true; return f.typecheckProject; });

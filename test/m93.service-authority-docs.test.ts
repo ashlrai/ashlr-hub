@@ -47,9 +47,12 @@ describe('resident service release-truth documentation', () => {
     expect(team).toContain('`ashlr setup`\nrefuses before reading or changing setup state');
     expect(team).toContain('`ashlr daemon start --once --dry-run`');
     expect(team).not.toContain('installed during `ashlr setup`');
-    expect(quickstart).toContain('Automatic merge is disabled by default');
-    expect(quickstart).toContain('evidence, scope, provenance, and remote-PR gates');
-    expect(quickstart).toMatch(/`ashlr setup`[\s\S]{0,180}refuses before/i);
+    // #580 moved setup and the legacy fleet contract out of the Verse
+    // quickstart into the Hub reference; the quickstart only points there.
+    const hubReference = read('docs/HUB-REFERENCE.md');
+    expect(quickstart).toMatch(/`ashlr init`, `ashlr serve`, `ashlr enroll` and `ashlr daemon` remain compatibility\s+surfaces/);
+    expect(quickstart).toContain('[Hub reference](HUB-REFERENCE.md)');
+    expect(hubReference).toMatch(/`ashlr setup`[\s\S]{0,180}refuses before/i);
     expect(quickstart).not.toContain('Installs the daemon as an OS service');
     expect(quickstart).not.toContain('Proposals are never applied automatically');
   });

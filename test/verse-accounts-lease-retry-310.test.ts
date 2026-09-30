@@ -103,7 +103,11 @@ afterEach(async () => {
 });
 
 describe('verse account collector — read-only lease retry on touch()', () => {
-  it('takes the lease over once its holder released it, instead of staying read-only all session', async () => {
+  // close() may land while the owned collector's first probe helper is still
+  // starting; the helper deliberately holds on SIGINT until its owner escalates
+  // (ASYNC_TERMINATION_GRACE_MS, 5 s, plus a 1 s drain), so this test needs
+  // more than the 5 s default on slower hosts.
+  it('takes the lease over once its holder released it, instead of staying read-only all session', { timeout: 20_000 }, async () => {
     // Stand in for the daemon publisher holding the lease mid-sample.
     held = await acquireResourceQuotaRefreshLease(accountsLedgerRoot(root), { trackNativeActivity: true });
     const logs: string[] = [];
