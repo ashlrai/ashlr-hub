@@ -228,17 +228,21 @@ describe('AppsSection — launch', () => {
 
 describe('AppsSection — MCP servers (folded in)', () => {
   it('states the caveat, what each seat loads, and never an env value', async () => {
-    stubAppsFetch();
+    const calls = stubAppsFetch();
     const user = userEvent.setup();
     await renderPage();
     const mcp = screen.getByRole('region', { name: 'MCP servers' });
-    expect(within(mcp).getByText(/Claude and local seats load no MCP servers/)).toBeInTheDocument();
-    expect(within(mcp).getByText('--strict-mcp-config')).toBeInTheDocument();
+    expect(within(mcp).getByText(/Claude and local seats do not load account-configured MCP servers/)).toBeInTheDocument();
+    expect(within(mcp).getByText(/Verse’s own agent tools are controlled separately per chat/)).toBeInTheDocument();
+    expect(within(mcp).getByText(/Codex and Grok seats load their own account’s config/)).toBeInTheDocument();
+    expect(within(mcp).getByText(/refused on a folder that is not enrolled/)).toBeInTheDocument();
     expect(await within(mcp).findByText('loads 1 server')).toBeInTheDocument();
     expect(within(mcp).getAllByText('loads none — isolated by Verse')).toHaveLength(2);
     expect(within(mcp).getByRole('note')).toHaveTextContent('Configured, but unused.');
     await user.click(within(mcp).getByRole('button', { name: 'Show servers' }));
     expect(within(mcp).getByText('ASHLR_TOKEN=<set>')).toBeInTheDocument();
+    // Reading account configs does not enable agent tools or grant MCP access.
+    expect(posts(calls)).toEqual([]);
   });
 
   it('Add goes propose → read the disclosure → apply with the digest', async () => {
