@@ -814,6 +814,74 @@ export function buildFleetRuleset(requiredChecks: readonly (string | RequiredChe
   };
 }
 
+/** A readable existing policy needs explicit review before any automatic replacement. */
+class RulesetPolicyReviewError extends Error {}
+
+/**
+ * Existing policies are operator-owned. Validate the canonical protection floor,
+ * then retain their complete mutable body; GitHub's extra rule defaults and
+ * future parameters are policy, not response decorations. Add only new checks.
+ */
+export function buildFleetRulesetUpdate(requiredChecks: readonly RequiredCheck[], actual: unknown = null): Record<string, unknown> {
+  if (actual === null) return buildFleetRuleset(requiredChecks);
+  const review = (reason: string): never => { throw new RulesetPolicyReviewError(reason); };
+  const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
+  if (!record(actual) || actual.name !== FLEET_RULESET_NAME || actual.target !== 'branch' || actual.enforcement !== 'active') {
+    return review('existing ruleset identity, target or enforcement differs from the fleet policy');
+  }
+  const responseKeys = new Set(['id', 'node_id', 'source_type', 'source', 'created_at', 'updated_at', 'current_user_can_bypass', '_links']);
+  const mutableKeys = new Set(['name', 'target', 'enforcement', 'conditions', 'bypass_actors', 'rules']);
+  if (Object.keys(actual).some(key => !responseKeys.has(key) && !mutableKeys.has(key))) {
+    return review('unknown existing top-level ruleset options need review');
+  }
+  const canonical = buildFleetRuleset([]);
+  // Unknown scope/bypass semantics cannot establish the canonical floor. Keep
+  // them for the operator rather than replacing them with a narrower template.
+  if (!rulesetMatches(canonical.conditions, actual.conditions) || !rulesetMatches(actual.conditions, canonical.conditions) ||
+      !rulesetMatches(canonical.bypass_actors, actual.bypass_actors) || !rulesetMatches(actual.bypass_actors, canonical.bypass_actors)) {
+    return review('existing conditions or bypass actors need review');
+  }
+  if (!Array.isArray(actual.rules)) return review('existing rules are unreadable');
+  const byType = new Map<string, Record<string, unknown>>();
+  for (const rule of actual.rules) {
+    if (!record(rule) || typeof rule.type !== 'string' || !rule.type || byType.has(rule.type)) return review('existing rule types are unreadable or duplicated');
+    byType.set(rule.type, rule);
+  }
+  if (!byType.has('deletion') || !byType.has('non_fast_forward')) return review('existing rules omit the canonical deletion or force-push protection');
+  const pr = byType.get('pull_request')?.parameters;
+  if (!record(pr) || !Number.isSafeInteger(pr.required_approving_review_count) || Number(pr.required_approving_review_count) < 0 ||
+      pr.dismiss_stale_reviews_on_push !== true || pr.require_code_owner_review !== true ||
+      typeof pr.require_last_push_approval !== 'boolean' || typeof pr.required_review_thread_resolution !== 'boolean') {
+    return review('existing pull-request rules do not establish the canonical protection floor');
+  }
+  const status = byType.get('required_status_checks');
+  if (status && (!record(status.parameters) || status.parameters.strict_required_status_checks_policy !== true ||
+      status.parameters.do_not_enforce_on_create !== undefined && status.parameters.do_not_enforce_on_create !== false)) {
+    return review('existing required-check options weaken or obscure the canonical protection floor');
+  }
+  let existing: RequiredCheck[];
+  try { existing = existingRequiredChecks(actual); } catch { return review('existing required checks or App pins are unreadable or conflicting'); }
+  const pins = new Map(existing.map(check => [check.context, check.integrationId]));
+  const additions: RequiredCheck[] = [];
+  for (const check of normalizeRequiredChecks(requiredChecks)) {
+    if (pins.has(check.context)) {
+      if (pins.get(check.context) !== check.integrationId) return review('an existing required-check App pin would change');
+    } else additions.push(check);
+  }
+  // Exclude only known response-level decorations. The entire rule objects,
+  // including existing check objects (null/absent pins and future fields), survive.
+  const mutable = JSON.parse(JSON.stringify(Object.fromEntries(
+    Object.entries(actual).filter(([key]) => !responseKeys.has(key)),
+  ))) as Record<string, unknown> & { rules: Array<{ type: string; parameters?: Record<string, unknown> }> };
+  if (additions.length > 0) {
+    const newChecks = additions.map(({ context, integrationId }) => integrationId === null ? { context } : { context, integration_id: integrationId });
+    const current = mutable.rules.find(rule => rule.type === 'required_status_checks');
+    if (current) (current.parameters!.required_status_checks as unknown[]).push(...newChecks);
+    else mutable.rules.push({ type: 'required_status_checks', parameters: { strict_required_status_checks_policy: true, required_status_checks: newChecks } });
+  }
+  return mutable;
+}
+
 interface RepoProtectPlan {
   repo: string;
   skipped: string | null;
@@ -822,6 +890,8 @@ interface RepoProtectPlan {
   checkNotes?: string[];
   ruleset: Record<string, unknown> | null;
   existingId: number | null;
+  /** Complete mutable policy read during planning, for pre-write drift checks. */
+  existingRuleset?: Record<string, unknown> | null;
   /** GitHub already holds exactly this ruleset: applying it again would change nothing. */
   upToDate: boolean;
   /** 3.13: why `ashlr/verify` is not required for a grant repo (null when it is, or the repo is not in the grant). */
@@ -1178,7 +1248,7 @@ async function protectPlans(parsed: Parsed, deps: AuthorityCliDeps, given?: read
       continue;
     }
     try {
-      if (listed.status !== 0) throw new Error(`gh api repos/${repo}/rulesets failed: ${listed.stderr.trim().slice(0, 200)}`);
+      if (listed.status !== 0) throw new RulesetPolicyReviewError('existing ruleset listing could not be read completely');
       let verifyAppId: number | null = null;
       let verifyNote: string | null = null;
       if (grantMembers.has(repo.toLowerCase())) {
@@ -1190,14 +1260,24 @@ async function protectPlans(parsed: Parsed, deps: AuthorityCliDeps, given?: read
           else verifyNote = `${ASHLR_VERIFY_CHECK} not required: the ${FLEET_APP_NAME} App could not be read (\`gh api apps/${FLEET_APP_NAME}\`)`;
         }
       }
-      const existing = JSON.parse(listed.stdout || 'null') as { id?: number; name?: string }[] | null;
-      const match = Array.isArray(existing) ? existing.find((r) => r.name === FLEET_RULESET_NAME) : undefined;
-      const existingId = typeof match?.id === 'number' && Number.isSafeInteger(match.id) ? match.id : null;
-      const actual = existingId === null ? null : await ghJson(deps, ['api', `repos/${repo}/rulesets/${existingId}`]);
-      if (existingId !== null && (!actual || typeof actual !== 'object')) throw new Error('unreadable existing ruleset');
+      let existing: { id?: number; name?: string }[] | null;
+      try { existing = JSON.parse(listed.stdout || 'null') as typeof existing; }
+      catch { throw new RulesetPolicyReviewError('existing ruleset listing is unreadable'); }
+      if (!Array.isArray(existing) || existing.some(rule => !rule || typeof rule !== 'object' || Array.isArray(rule) ||
+          typeof rule.name !== 'string' || !rule.name || !Number.isSafeInteger(rule.id) || Number(rule.id) <= 0)) throw new RulesetPolicyReviewError('existing ruleset listing is unreadable');
+      const matches = existing.filter(rule => rule.name === FLEET_RULESET_NAME);
+      if (matches.length > 1 || matches.some(rule => !Number.isSafeInteger(rule.id) || Number(rule.id) <= 0)) throw new RulesetPolicyReviewError('existing fleet ruleset identity is ambiguous');
+      const existingId = matches[0]?.id ?? null;
+      let actual: unknown = null;
+      if (existingId !== null) {
+        try { actual = await ghJson(deps, ['api', `repos/${repo}/rulesets/${existingId}`]); }
+        catch { throw new RulesetPolicyReviewError('existing fleet ruleset could not be read completely'); }
+      }
+      if (existingId !== null && (!actual || typeof actual !== 'object' || Array.isArray(actual) || (actual as { id?: unknown }).id !== existingId)) throw new RulesetPolicyReviewError('existing ruleset identity is unreadable or mismatched');
+      const existingRuleset = actual === null ? null : buildFleetRulesetUpdate([], actual);
       const discovery = await discoverChecks(deps, repo, info?.default_branch ?? 'main', verifyAppId, existingRequiredChecks(actual));
       const checks = discovery.checks.map((check) => check.context);
-      const ruleset = buildFleetRuleset(discovery.checks);
+      const ruleset = buildFleetRulesetUpdate(discovery.checks, actual);
       // Rerun-safe: a ruleset already on GitHub with this exact content is
       // reported as in place instead of being PUT again.
       const upToDate = existingId !== null && rulesetMatches(ruleset, actual);
@@ -1209,11 +1289,14 @@ async function protectPlans(parsed: Parsed, deps: AuthorityCliDeps, given?: read
         ...(discovery.notes.length > 0 ? { checkNotes: discovery.notes } : {}),
         ruleset,
         existingId,
+        existingRuleset,
         upToDate,
         verifyNote,
       });
     } catch (error) {
-      plans.push(unreadable(repo, error));
+      plans.push(error instanceof RulesetPolicyReviewError
+        ? { repo, skipped: `RECHECK_REQUIRED: ${error.message}; inspect protect --print before applying`, checks: [], ruleset: null, existingId: null, upToDate: false }
+        : unreadable(repo, error));
     }
   }
   return plans;
@@ -1221,8 +1304,30 @@ async function protectPlans(parsed: Parsed, deps: AuthorityCliDeps, given?: read
 
 /** Create or update each plan's ruleset; the number that failed. */
 async function applyProtectPlans(plans: readonly RepoProtectPlan[], deps: AuthorityCliDeps): Promise<number> {
+  const { canonicalJson } = await import('../core/authority/canonical-json.js');
+  const actionable = plans.filter(plan => !plan.skipped && !plan.upToDate);
+  const unchanged = async (plan: RepoProtectPlan): Promise<boolean> => {
+    if (plan.existingId === null) return true;
+    try {
+      const fresh = await ghJson(deps, ['api', `repos/${plan.repo}/rulesets/${plan.existingId}`]);
+      if (!fresh || typeof fresh !== 'object' || (fresh as { id?: unknown }).id !== plan.existingId ||
+          !plan.existingRuleset || canonicalJson(buildFleetRulesetUpdate([], fresh)) !== canonicalJson(plan.existingRuleset)) throw new Error('changed policy');
+      return true;
+    } catch {
+      deps.err(`${plan.repo}: RECHECK_REQUIRED: existing ruleset changed or could not be re-read; nothing further applied`);
+      return false;
+    }
+  };
+  // Check every selected existing policy before the first write, including
+  // already-current plans. A changed later repo cannot authorize an earlier PUT.
+  for (const plan of plans.filter(plan => !plan.skipped && plan.existingId !== null)) {
+    if (!(await unchanged(plan))) return actionable.length;
+  }
   let failures = 0;
-  for (const plan of plans) {
+  for (const plan of actionable) {
+    // Narrow the confirmation/read/write window again per PUT. GitHub offers
+    // no atomic policy compare-and-set here; a concurrent edit can still race.
+    if (!(await unchanged(plan))) return failures + 1;
     const result = await deps.run('gh', [
       'api', '--method', plan.existingId === null ? 'POST' : 'PUT',
       `repos/${plan.repo}/rulesets${plan.existingId === null ? '' : `/${plan.existingId}`}`,
@@ -1275,7 +1380,7 @@ async function cmdProtect(parsed: Parsed, deps: AuthorityCliDeps): Promise<numbe
     deps.out('Nothing applied.');
     return 1;
   }
-  return (await applyProtectPlans(actionable, deps)) === 0 ? 0 : 1;
+  return (await applyProtectPlans(plans, deps)) === 0 ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -2123,10 +2228,12 @@ async function runSetup(parsed: Parsed, deps: AuthorityCliDeps, opts: SetupRunOp
         // Nothing to look at yet — never "in place on 0 repos".
         if (canaryExists) note('rulesets', 'already', 'no server-enforced repo needs one');
         else note('rulesets', dryRun ? 'skipped' : 'waiting-on-you', `${canaryRepo} gets the fleet ruleset once it exists`);
+      } else if (discoveryHeld.length > 0) {
+        note('rulesets', 'waiting-on-you', `RECHECK_REQUIRED: existing policy or new check discovery needs review for ${shortList(discoveryHeld)}; inspect protect --print before applying`, { command: 'ashlr authority protect --print' });
       } else if (stale.length > 0) {
         const where = shortList(stale.map((plan) => plan.repo));
         if (await ask(`Apply the fleet ruleset to ${stale.length} repo(s) where it is missing or different (${where})?`)) {
-          const failures = await applyProtectPlans(stale, deps);
+          const failures = await applyProtectPlans(plans, deps);
           note('rulesets', failures > 0 ? 'failed' : unreadable.length > 0 || mismatches.length > 0 || discoveryHeld.length > 0 ? 'waiting-on-you' : 'done', failures === 0
             ? `applied to ${where}${inPlace > 0 ? `; ${inPlace} already in place` : ''}${unread}${left}`
             : `${failures} of ${stale.length} failed (see above)${unread}${noRulesets}`);
@@ -2138,8 +2245,6 @@ async function runSetup(parsed: Parsed, deps: AuthorityCliDeps, opts: SetupRunOp
       } else if (mismatches.length > 0) {
         // The signed grant is never rewritten here: only a re-approval (Touch ID) switches the repo.
         note('rulesets', 'waiting-on-you', `${inPlaceText}${left}`, { command: 'ashlr authority re-approve' });
-      } else if (discoveryHeld.length > 0) {
-        note('rulesets', 'waiting-on-you', `RECHECK_REQUIRED: new check discovery needs review for ${shortList(discoveryHeld)}; inspect protect --print before applying`, { command: 'ashlr authority protect --print' });
       } else {
         note('rulesets', 'already', `${inPlaceText}${left}`);
       }

@@ -229,6 +229,11 @@ ID).
    and `ashlr authority status`. Guided setup can prepare prerequisites after
    your explicit actions; once your standing grant is active,
    `ashlr authority resident start` runs the resident fleet under it.
+   `ashlr authority protect --print` reviews GitHub changes. Updates preserve
+   existing rules, rule options and check App pins; incompatible or unfamiliar
+   top-level policies need review. Before writing, the updater rechecks all
+   selected existing policies and checks each again before its update. These
+   checks reduce the race window; they are not an atomic GitHub transaction.
 
 ---
 
