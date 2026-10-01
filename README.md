@@ -30,9 +30,9 @@ first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
 [first-run guide](docs/QUICKSTART.md#open-verse).
 
-![Work with me: the Ashlr Verse 3.19 chat workbench and compact Review menu, using labeled sample accounts](docs/images/work-with-me-3.19-demo.jpg)
+![Work with me: the Ashlr Verse 3.19 chat workbench and compact Review menu, using labeled sample accounts](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/work-with-me-3.19-demo.jpg)
 
-![Work for me: the Ashlr Verse 3.19 Command overview, with a sample Leader memo and resource readings](docs/images/work-for-me-3.19-demo.jpg)
+![Work for me: the Ashlr Verse 3.19 Command overview, with a sample Leader memo and resource readings](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/work-for-me-3.19-demo.jpg)
 
 *Current web workbench with demo accounts, sample usage and a demo conversation.
 The fleet is shown without an active standing grant; no provider ran for these screenshots.*
