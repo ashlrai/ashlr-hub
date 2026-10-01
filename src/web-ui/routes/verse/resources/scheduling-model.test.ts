@@ -18,6 +18,14 @@ function forecast(over: Record<string, unknown> = {}) {
 }
 
 describe('read-only scheduling evidence', () => {
+  it.each([
+    ['stop-active', 'Stop is active'],
+    ['preparation-cancelled', 'Scheduling preparation was cancelled'],
+  ])('explains the recorded %s skip without treating it as an empty candidate set', (reason, label) => {
+    const value = { scheduling: { advisory: { observedAt: new Date(NOW - 5000).toISOString(), state: 'skipped', reason } } };
+    expect(lastSchedulingAdvice(value, NOW)).toContain(label);
+    expect(lastSchedulingAdvice(value, NOW)).not.toContain('No comparable eligible pairs');
+  });
   it('shows only real last-batch advice metadata and never infers calls, connections or raw reasons', () => {
     expect(lastSchedulingAdvice(budget(), NOW)).toBeNull();
     const value = { scheduling: { advisory: { observedAt: new Date(NOW - 5000).toISOString(), state: 'choice-returned', reason: 'eligible-choice-returned' } } };

@@ -1,5 +1,6 @@
 /** Advisory assembly from the existing capacity and bounded metadata ledger. */
 import { assessResetOpportunity } from './reset-pressure.js';
+import { isOuterAttemptIdentity, isSafeExecutionIdentity } from '../fleet/attempt-identity.js';
 import { effectiveSeatPolicy } from './policy.js';
 import type { SeatCapacity } from './headroom.js';
 import type { BudgetPolicy } from './types.js';
@@ -12,9 +13,11 @@ import type { DispatchProductionEvent } from '../fleet/dispatch-production-ledge
 export function historySamples(events: readonly DispatchProductionEvent[]): WorkHistorySample[] {
   return events.flatMap((event) => {
     const summary = event.runEventSummary;
-    if (!event.backend || summary?.status !== 'done' || !event.attemptId && !event.runId) return [];
+    const id = isOuterAttemptIdentity(event.attemptId) ? event.attemptId
+      : isSafeExecutionIdentity(event.runId) ? event.runId : null;
+    if (!event.backend || summary?.status !== 'done' || id === null) return [];
     const input = summary.tokensIn; const output = summary.tokensOut;
-    return [{ id: event.attemptId ?? event.runId!, engine: event.backend, model: event.model ?? null,
+    return [{ id, engine: event.backend, model: event.model ?? null,
       seatId: null, taskKind: event.source, completed: true,
       durationMs: typeof summary.durationMs === 'number' && summary.durationMs > 0 ? summary.durationMs : null,
       tokens: typeof input === 'number' && typeof output === 'number' && Number.isSafeInteger(input) && Number.isSafeInteger(output) && input >= 0 && output >= 0 && Number.isSafeInteger(input + output) && input + output > 0

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assessResetOpportunity, opportunityPriority, validResetProvenance } from '../src/core/routing/reset-pressure.js';
+import { assessResetOpportunity, forecastFit, opportunityPriority, validResetProvenance } from '../src/core/routing/reset-pressure.js';
 import { forecastWork, observedPercentiles } from '../src/core/routing/work-estimates.js';
 import { buildSchedulingView, historySamples } from '../src/core/routing/scheduling.js';
 import { routeSeat } from '../src/core/routing/router.js';
@@ -147,6 +147,26 @@ describe('observed task estimates',()=>{
     expect(assessResetOpportunity(s,enabled,now,short).forecast?.fit).toBe('likely-before-reset');
     expect(assessResetOpportunity(s,enabled,now,long)).toMatchObject({forecast:{fit:'unlikely-before-reset'},opportunity:{kind:'ordinary'}});
   });
+  it('uses p75 equality as likely fit and preserves uncertain, unlikely and expired boundaries',()=>{
+    const estimate={durationMs:{p25:500,p75:1000}};
+    expect(forecastFit(estimate,at(1000),now)).toBe('likely-before-reset');
+    expect(forecastFit(estimate,at(750),now)).toBe('uncertain');
+    expect(forecastFit(estimate,at(499),now)).toBe('unlikely-before-reset');
+    expect(forecastFit(estimate,at(0),now)).toBe('unknown');
+    expect(forecastFit(null,at(1000),now)).toBe('unknown');
+  });
+  it('uses distinct canonical run IDs when attempt IDs are empty, retaining observed quartiles',()=>{
+    const events=[1000,2000,3000,4000].map((durationMs,i)=>({backend:'grok-cli',model:'model-a',source:'todo',attemptId:'',runId:`run-${i}`,
+      runEventSummary:{status:'done',durationMs,tokensIn:(i+1)*10,tokensOut:0}} as DispatchProductionEvent));
+    const samples=historySamples([...events,events[0]!]);
+    expect(samples.map(v=>v.id)).toEqual(['run-0','run-1','run-2','run-3','run-0']);
+    const forecast=forecastWork('task',cohort,samples);
+    expect(forecast.durationMs).toEqual({p25:1000,p50:2000,p75:3000,samples:4});
+    expect(forecast.tokens).toEqual({p25:10,p50:20,p75:30,samples:4});
+    expect(historySamples(events.map(event=>({...event,runId:'../invalid'})))).toEqual([]);
+    const canonical={...events[0]!,attemptId:'attempt-00000000-0000-4000-8000-000000000001'};
+    expect(historySamples([canonical])[0]!.id).toBe(canonical.attemptId);
+  });
   it('uses conservative nearest-rank upper quartiles for sparse observations',()=>{
     expect(observedPercentiles([1000,100000])).toEqual({p25:1000,p50:1000,p75:100000,samples:2});
   });
@@ -157,7 +177,7 @@ describe('observed task estimates',()=>{
     expect(buildSchedulingView([seat()],policy,now,{a:wrongAccount}).accounts[0]!.forecast).toBeNull();
   });
   it('uses only completed reported metadata, with initialized zeros unknown',()=>{
-    const event={backend:'grok-cli',model:'model-a',source:'todo',attemptId:'attempt',runEventSummary:{status:'done',durationMs:30000,tokensIn:400,tokensOut:10}} as DispatchProductionEvent;
+    const event={backend:'grok-cli',model:'model-a',source:'todo',attemptId:'attempt-00000000-0000-4000-8000-000000000001',runEventSummary:{status:'done',durationMs:30000,tokensIn:400,tokensOut:10}} as DispatchProductionEvent;
     expect(historySamples([event])).toMatchObject([{durationMs:30000,tokens:410,seatId:null}]);
     expect(historySamples([{...event,runEventSummary:{status:'running',durationMs:30000}}])).toEqual([]);
     expect(forecastWork('task',cohort,historySamples([{...event,runEventSummary:{status:'done',durationMs:0,tokensIn:0,tokensOut:0}}])).durationMs).toBeNull();

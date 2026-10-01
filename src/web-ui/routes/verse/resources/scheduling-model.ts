@@ -17,6 +17,8 @@ const ADVICE_REASONS: Readonly<Record<string, string>> = {
   'signed-metered-unavailable': 'Current permissions do not allow a metered advice call.',
   'metered-allowance-exhausted': 'Metered allowance used up; no advice requested.',
   'no-comparable-pairs': 'No comparable eligible pairs; no advice requested.',
+  'stop-active': 'Stop is active; no advice requested.',
+  'preparation-cancelled': 'Scheduling preparation was cancelled; no advice requested.',
   'no-eligible-choice': 'No usable advice choice; deterministic routing kept.',
   'eligible-choice-returned': 'An eligible advice choice was returned; it may be cached.',
 };

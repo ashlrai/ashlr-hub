@@ -2,6 +2,7 @@
  * Provider sees ordinals and bounded task/timing metadata, not task/account IDs or text.
  * API/request bounds fall back for the whole set; eligible inventory is never truncated. */
 import { createHash } from 'node:crypto';
+import { forecastFit } from '../routing/reset-pressure.js';
 import type { AshlrConfig } from '../types.js';
 import type { ResourceChoiceCandidate } from '../routing/scheduling-types.js';
 import { decide, effectiveThreshold, jevReady } from './decide.js';
@@ -35,6 +36,8 @@ function normalize(candidates: readonly ResourceChoiceCandidate[], now: number) 
     ids.add(c.id);
     if (c.headroomPercent !== null && !(typeof c.headroomPercent === 'number' && Number.isFinite(c.headroomPercent) && c.headroomPercent >= 0 && c.headroomPercent <= 100)) return null;
     if (c.durationP75Ms !== null && !(typeof c.durationP75Ms === 'number' && Number.isFinite(c.durationP75Ms) && c.durationP75Ms > 0 && c.durationP75Ms <= Number.MAX_SAFE_INTEGER)) return null;
+    const p25 = c.durationP25Ms ?? null;
+    if (p25 !== null && !(typeof p25 === 'number' && Number.isFinite(p25) && p25 > 0 && p25 <= Number.MAX_SAFE_INTEGER && c.durationP75Ms !== null && p25 <= c.durationP75Ms)) return null;
     const reset = c.resetAt === null ? null : typeof c.resetAt === 'string' && c.resetAt.length <= 64 ? Date.parse(c.resetAt) : NaN;
     if (reset !== null && !Number.isFinite(reset)) return null;
     if (reset !== null && reset > now) expiresAt = Math.min(expiresAt, reset);
@@ -45,13 +48,13 @@ function normalize(candidates: readonly ResourceChoiceCandidate[], now: number) 
       headroomPercent: c.headroomPercent,
       resetAt: reset === null ? null : new Date(reset).toISOString(),
       resetPending: reset === null ? null : reset > now,
-      durationP75Ms: duration,
-      fit: reset === null || duration === null ? 'unknown' : reset > now && duration < reset - now ? 'likely-before-reset' : 'uncertain',
+      durationP25Ms: p25, durationP75Ms: duration,
+      fit: forecastFit(p25 === null || duration === null ? null : {durationMs:{p25,p75:duration}}, reset === null ? null : new Date(reset).toISOString(), now),
     });
   }
   const state = JSON.stringify(rows);
   if (state.length > MAX_STATE_CHARS) return null;
-  return { ids: [...ids], state, expiresAt };
+  return { ids: [...ids], state, expiresAt, fits:rows.map(row=>row.fit) };
 }
 
 export async function adviseResourceChoice(candidates: readonly ResourceChoiceCandidate[], options: AdviceOptions): Promise<string | null> {
@@ -85,7 +88,7 @@ export async function adviseResourceChoice(candidates: readonly ResourceChoiceCa
           ...(options.signal ? { signal: options.signal } : {}),
         });
         const index = result.path === 'jev' && typeof result.value === 'string' && /^c\d+$/.test(result.value) ? Number(result.value.slice(1)) : -1;
-        const choice = Number.isSafeInteger(index) && index >= 0 && index < input.ids.length ? input.ids[index] : null;
+        const choice = Number.isSafeInteger(index) && index >= 0 && index < input.ids.length && input.fits[index] !== 'unlikely-before-reset' ? input.ids[index] : null;
         // Remember attempted failures too, so a timed-out selected batch doesn't become a per-poll paid call.
         // No-key/disabled/budget/cancellation remain immediately recoverable on a new operator choice.
         if (!options.signal?.aborted && !NON_ATTEMPTS.has(result.reason ?? '')) {

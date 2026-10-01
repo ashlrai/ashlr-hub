@@ -24,7 +24,7 @@ export function hasResetDeadline(reset: ResetProvenance): boolean {
   return reset.kind === 'fixed-period' || reset.kind === 'weekly-deadline';
 }
 
-export function forecastFit(forecast: TaskWorkForecast | null, resetAt: string | null, nowMs: number): TaskWorkForecast['fit'] {
+export function forecastFit(forecast: { durationMs: Pick<NonNullable<TaskWorkForecast['durationMs']>, 'p25' | 'p75'> | null } | null, resetAt: string | null, nowMs: number): TaskWorkForecast['fit'] {
   const duration = forecast?.durationMs;
   const slack = resetAt === null ? NaN : Date.parse(resetAt) - nowMs;
   if (!duration || !Number.isFinite(slack) || slack <= 0) return 'unknown';

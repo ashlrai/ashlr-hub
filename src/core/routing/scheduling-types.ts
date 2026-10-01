@@ -32,7 +32,7 @@ export interface AccountSchedulingView {
 export interface SchedulingAdviceView {
   observedAt: string;
   state: 'choice-returned' | 'fallback' | 'skipped';
-  reason: 'signed-metered-unavailable' | 'metered-allowance-exhausted' | 'no-comparable-pairs' | 'no-eligible-choice' | 'eligible-choice-returned';
+  reason: 'stop-active' | 'preparation-cancelled' | 'signed-metered-unavailable' | 'metered-allowance-exhausted' | 'no-comparable-pairs' | 'no-eligible-choice' | 'eligible-choice-returned';
 }
 export interface SchedulingView {
   sourceState: 'ready' | 'unavailable';
@@ -45,5 +45,7 @@ export interface SchedulingView {
 export interface ResourceChoiceCandidate {
   id: string; taskId: string; seatId: string; engine: string; model: string | null;
   taskKind: string; headroomPercent: number | null; resetAt: string | null;
+  /** Absent legacy quartile means unknown fit, never inferred from p75. */
+  durationP25Ms?: number | null;
   durationP75Ms: number | null; reason: string;
 }

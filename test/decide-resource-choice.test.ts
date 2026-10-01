@@ -44,6 +44,34 @@ describe('eligible resource advice', () => {
     expect(await advise([candidate(0), { ...candidate(1), taskKind: 'goal', durationP75Ms: 10.5 }])).toBe('private-candidate-1');
     expect(JSON.parse(fake.calls[0].state)[1]).toMatchObject({ taskKind: 'goal', durationP75Ms: 10.5 });
   });
+  it('sends actual quartile fit bands, p75 equality and unknown expired/legacy evidence', async () => {
+    vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(new Date('2026-10-01T10:00:00Z'));
+    const deadline='2026-10-01T10:00:01Z';
+    const cs=[
+      {...candidate(0),resetAt:deadline,durationP25Ms:250,durationP75Ms:1000},
+      {...candidate(1),resetAt:deadline,durationP25Ms:500,durationP75Ms:2000},
+      {...candidate(2),resetAt:deadline,durationP25Ms:2000,durationP75Ms:3000},
+      {...candidate(3),resetAt:'2026-10-01T09:59:59Z',durationP25Ms:100,durationP75Ms:200},
+      {...candidate(4),resetAt:deadline},
+    ];
+    fake.respond(()=>({resource_choice:choice('c0',0.99)}));
+    expect(await advise(cs)).toBe(cs[0]!.id);
+    expect(JSON.parse(fake.calls[0].state).map((v:{fit:string})=>v.fit)).toEqual([
+      'likely-before-reset','uncertain','unlikely-before-reset','unknown','unknown',
+    ]);
+  });
+  it('refuses a returned unlikely-before-reset preference instead of promoting it', async () => {
+    vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(new Date('2026-10-01T10:00:00Z'));
+    const cs=[{...candidate(0),resetAt:'2026-10-01T10:00:01Z',durationP25Ms:100,durationP75Ms:200},
+      {...candidate(1),resetAt:'2026-10-01T10:00:01Z',durationP25Ms:2000,durationP75Ms:3000}];
+    expect(await advise(cs)).toBeNull();
+    expect(JSON.parse(fake.calls[0].state)[1].fit).toBe('unlikely-before-reset');
+    expect(fake.calls).toHaveLength(1);
+  });
+  it('rejects invalid or inverted quartiles before requesting advice', async () => {
+    for(const p25 of [0,NaN,Infinity,1001])expect(await advise([candidate(0),{...candidate(1),durationP25Ms:p25}])).toBeNull();
+    expect(fake.fetch).not.toHaveBeenCalled();
+  });
   it('singleflight/cache makes one selected batch one request, and changed digest invalidates', async () => {
     expect(await Promise.all([advise(), advise(), advise()])).toEqual(Array(3).fill('private-candidate-1'));
     expect(await advise()).toBe('private-candidate-1');

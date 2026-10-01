@@ -1069,13 +1069,11 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
    * stopped fleet keeps ticking for days — a clean pass is not repeated until
    * KILL clears and is armed again; a pass with failures is retried next tick.
    */
+  const killActiveFailClosed = (): boolean => {
+    try { return deps.killActive(); } catch { return true; }
+  };
   const revokeMergesOnKill = async (): Promise<void> => {
-    let killOn: boolean;
-    try {
-      killOn = deps.killActive();
-    } catch {
-      killOn = true;
-    }
+    const killOn = killActiveFailClosed();
     if (!killOn) {
       killMergesRevoked = false;
       return;
@@ -1343,7 +1341,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       // pending proposal the pass judges through G0–G7 like any other, and a
       // cloud PR the pass already superseded with its App PR is closed. Bounded
       // in time; a failure is audited and never holds the tick.
-      if (!hookCtx.dryRun && mirrorProblem === null && readyMirrors.length > 0 && !deps.killActive()) {
+      if (!hookCtx.dryRun && mirrorProblem === null && readyMirrors.length > 0 && !killActiveFailClosed()) {
         const intakeRun = deps.ingestCloudPrs(cfg, policy, readyMirrors);
         intakeRun.catch(() => undefined);
         try {
@@ -1379,7 +1377,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       // ACU reservations/accounting do not debit the daemon USD allowance; USD
       // exhaustion never labels this lane free or removes its ACU gates.
       // Bounded; a failure is audited and never holds the tick.
-      if (!hookCtx.dryRun && devinInFlight === null && cfg.devin?.enabled === true && cfg.devin?.fleet === true && !deps.killActive()) {
+      if (!hookCtx.dryRun && devinInFlight === null && cfg.devin?.enabled === true && cfg.devin?.fleet === true && !killActiveFailClosed()) {
         const refresh = nowMs - lastDevinRefreshMs >= DEVIN_FLEET_REFRESH_INTERVAL_MS;
         if (refresh) lastDevinRefreshMs = nowMs;
         const devinRun = deps.launchDevinFleet({ refresh });
@@ -1889,11 +1887,31 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
 
     async prepareDispatchPlan(items: readonly WorkItem[], cfg: AshlrConfig, signal?: AbortSignal): Promise<readonly string[] | void> {
       const current = ctx;
-      if (!current || !current.dispatchSources || signal?.aborted || deps.killActive()) return;
+      if (!current || !current.dispatchSources) return;
+      let stoppedReason: 'stop-active' | 'preparation-cancelled' | null = null;
+      const readStopReason = (): typeof stoppedReason => signal?.aborted ? 'preparation-cancelled'
+        : killActiveFailClosed() ? 'stop-active' : null;
+      const recordStopped = async (): Promise<void> => {
+        if (!stoppedReason) return;
+        // This is a skipped preparation receipt, never an admitted dispatch.
+        // Invalidate BEFORE metadata I/O too; an unreadable Stop cannot leave
+        // old route()/seatAllows() authority available if that write fails.
+        ctx = null;
+        try { await deps.recordScheduling?.({...buildSchedulingView(current.capacity,current.budget,current.nowMs),
+          advisory:{observedAt:new Date(current.nowMs).toISOString(),state:'skipped',reason:stoppedReason}}); }
+        catch { /* Optional display evidence never restores dispatch authority. */ }
+      };
+      stoppedReason = readStopReason();
+      if (stoppedReason) { ctx = null; await recordStopped(); return; }
       const refreshCurrent = (): boolean => {
+        if (ctx !== current) return false;
+        // Every dependency read below may fail. Restore only after a fully
+        // current validated plan; never retain the previous tick on error.
+        ctx = null;
+        stoppedReason = readStopReason();
         let standing: EffectivePolicy | null = null;
         try { standing = deps.standingPolicy(); } catch { /* Hold through no context. */ }
-        if (ctx !== current || signal?.aborted || deps.killActive() || !standing ||
+        if (stoppedReason || !standing ||
           standing.grantId !== current.policy.grantId || standing.grantSeq !== current.policy.grantSeq ||
           JSON.stringify(standing.spend) !== JSON.stringify(current.policy.spend) || JSON.stringify(standing.repos) !== JSON.stringify(current.policy.repos) ||
           JSON.stringify(standing.engines) !== JSON.stringify(current.policy.engines) || JSON.stringify(standing.rollout) !== JSON.stringify(current.policy.rollout)) {
@@ -1917,12 +1935,13 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         } else current.capacity = current.capacity.filter((s) => s.engine === 'local');
         current.router = {...current.router,nowMs:current.nowMs,capacity:current.capacity};
         current.routeCache.clear();
+        ctx = current;
         return true;
       };
       let history: WorkHistorySample[] = [];
       try { history = await deps.workHistory?.() ?? []; } catch { /* Unknown estimates never block useful work. */ }
       // Metadata I/O is an await boundary too: revalidate before any paid advice.
-      if (!refreshCurrent()) return;
+      if (!refreshCurrent()) { await recordStopped(); return; }
       const candidates: ResourceChoiceCandidate[] = [];
       const candidateCapacity = new Map<string,string>();
       const capacityIdentity = (seat:SeatCapacity) => JSON.stringify({engine:seat.engine,contextWindow:seat.contextWindow,tier:seat.tier,costBasis:seat.costBasis,windowless:seat.windowless,free:seat.free});
@@ -1944,6 +1963,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
           candidateCapacity.set(id,capacityIdentity(seat));
           candidates.push({id,taskId:item.id,seatId:seat.seatId,engine:route.backend,model:route.model ?? null,taskKind:item.source,
             headroomPercent:view.headroomPercent,resetAt:hasResetDeadline(view.reset) ? view.reset.at : null,
+            durationP25Ms:view.forecast?.durationMs?.p25 ?? null,
             durationP75Ms:view.forecast?.durationMs?.p75 ?? null,reason:view.opportunity.reason});
         }
         current.itemScheduling.set(item.id,projections);
@@ -1954,12 +1974,14 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       const signedMetered = Number.isFinite(current.policy.spend.meteredUsdPerDay) && current.policy.spend.meteredUsdPerDay > 0;
       const advisory: import('../routing/scheduling-types.js').SchedulingAdviceView = {observedAt:new Date(current.nowMs).toISOString(),state:'skipped',
         reason:!signedMetered ? 'signed-metered-unavailable' : current.meteredUsdExhausted ? 'metered-allowance-exhausted' : 'no-comparable-pairs'};
-      if (signedMetered && candidates.length > 1 && !current.meteredUsdExhausted && !signal?.aborted && !deps.killActive()) {
+      stoppedReason = readStopReason();
+      if (stoppedReason) { ctx = null; await recordStopped(); return; }
+      if (signedMetered && candidates.length > 1 && !current.meteredUsdExhausted) {
         try { advised = await deps.resourceAdvice?.(candidates,{digest,...(signal ? {signal} : {})}) ?? null; }
         catch { /* Existing decide timeout/refusal/error => deterministic fallback. */ }
         advisory.state='fallback';advisory.reason='no-eligible-choice';
       }
-      if (!refreshCurrent()) return;
+      if (!refreshCurrent()) { await recordStopped(); return; }
       // Only the exact eligible pair receives advice. Recompute opportunity
       // from fresh windows; stale reset/usage changes discard the old advice.
       const pair = candidates.find((candidate) => candidate.id === advised) ?? null;
@@ -1989,7 +2011,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
             // The same account ID and quota reading are insufficient: the
             // actual executor/model/context/lane must still admit this pair.
             if (pair?.taskId===item.id && pair.seatId===seat.seatId && taskEligible && sameCapacity && actual.backend===pair.engine &&
-              (actual.model ?? null)===pair.model && view.admission==='eligible' && prior &&
+              (actual.model ?? null)===pair.model && view.admission==='eligible' && view.forecast?.fit!=='unlikely-before-reset' && prior &&
               view.headroomPercent===prior.headroomPercent && JSON.stringify(view.reset)===JSON.stringify(prior.reset)) current.advisedPair=pair;
           }
           current.itemScheduling.set(item.id,next);
@@ -2000,7 +2022,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       const validatedForecasts = Object.fromEntries([...current.itemScheduling.values()].flatMap(views=>Object.entries(views).flatMap(([id,v])=>v.forecast ? [[id,v.forecast]] : [])));
       try { await deps.recordScheduling?.({...buildSchedulingView(current.capacity,current.budget,current.nowMs,validatedForecasts),advisory}); }
       catch { /* Display cache is neither dispatch authority nor a work prerequisite. */ }
-      if (!refreshCurrent()) return;
+      if (!refreshCurrent()) { await recordStopped(); return; }
       refreshViews();
       return [...items].sort((a,b) => {
         if (current.advisedPair) {
