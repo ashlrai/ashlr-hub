@@ -19,6 +19,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { buildFleetControlState, fleetControlVerdict, type FleetControlInputs } from '../src/core/fleet/fleet-control-model.js';
 import type { FleetControlDeps } from '../src/core/fleet/fleet-control.js';
+import { projectFleetControlTickProgress } from '../src/core/fleet/fleet-control.js';
+import type { DaemonLivenessV1 } from '../src/core/daemon/liveness.js';
+import type { DaemonTickProgressRead } from '../src/core/daemon/tick-progress.js';
 import { requestRunCancel, runCancelRequested, RUN_CANCEL_TTL_MS, sweepRunCancelRequests } from '../src/core/fleet/run-cancel.js';
 import { editTaskAsOperator, enqueueTask, readTaskQueue } from '../src/core/fleet/task-source.js';
 import { handleFleetControlApi, setFleetControlDepsForTest } from '../src/core/verse/fleet-control-api.js';
@@ -74,6 +77,9 @@ function inputs(over: Partial<FleetControlInputs> = {}, grant: Partial<FleetCont
 }
 
 describe('fleetControlVerdict', () => {
+  const tickProgress = { phase: 'selection and dispatch', detail: null,
+    tickStartedAt: '2026-09-27T11:59:00.000Z', phaseStartedAt: '2026-09-27T11:59:30.000Z',
+    summary: 'tick in progress: selection and dispatch for 30s' };
   it('says what the fleet is doing in one sentence', () => {
     expect(fleetControlVerdict(inputs())).toMatchObject({ state: 'running', headline: 'Running · 3 agents working · stage shadow', blocker: null });
     expect(fleetControlVerdict(inputs({ working: 0 }))).toMatchObject({ state: 'idle' });
@@ -92,6 +98,29 @@ describe('fleetControlVerdict', () => {
     expect(fleetControlVerdict(inputs({}, { state: 'expired' })).blocker?.action.kind).toBe('re-approve');
     expect(fleetControlVerdict(inputs({ service: 'absent', liveness: { state: 'stopped', pid: null, lastTickAt: null, reason: 'x' } })).blocker?.action).toMatchObject({ kind: 'resident-start', native: true });
     expect(fleetControlVerdict(inputs({ spend: { todayUsd: 20, capUsd: 20 } })).blocker?.action.kind).toBe('wait');
+  });
+
+  it('reports a current tick preparing work without inventing working agents', () => {
+    const state = buildFleetControlState(inputs({ working: 0,
+      liveness: { state: 'alive', pid: 42, lastTickAt: '2026-09-25T12:00:00.000Z', reason: 'alive', tickProgress } }));
+    expect(state).toMatchObject({ state: 'running', headline: 'Running · preparing work: selection and dispatch · stage shadow',
+      agents: { working: 0 }, daemon: { tickProgress } });
+  });
+
+  it.each(['stale', 'stopped', 'unknown'] as const)('ignores %s tick observations despite a service label', (state) => {
+    const result = buildFleetControlState(inputs({ working: 0,
+      liveness: { state, pid: 42, lastTickAt: null, reason: 'unconfirmed', tickProgress } }));
+    expect(result.state).toBe('idle');
+    expect(result.daemon.tickProgress).toBeUndefined();
+  });
+
+  it('keeps Stop, pause, grant, switch and budget precedence over tick preparation', () => {
+    const preparing = inputs({ working: 0, liveness: { state: 'alive', pid: 42, lastTickAt: null, reason: 'alive', tickProgress } });
+    expect(fleetControlVerdict({ ...preparing, kill: true }).state).toBe('stopped');
+    expect(fleetControlVerdict({ ...preparing, paused: true }).state).toBe('paused');
+    expect(fleetControlVerdict({ ...preparing, grant: { ...preparing.grant, state: 'paused' } }).state).toBe('blocked');
+    expect(fleetControlVerdict({ ...preparing, grant: { ...preparing.grant, effectiveSwitch: 'off' } }).state).toBe('off');
+    expect(fleetControlVerdict({ ...preparing, spend: { todayUsd: 20, capUsd: 20 } }).state).toBe('blocked');
   });
 
   it('flags a daemon running an older plist without calling the fleet blocked', () => {
@@ -114,6 +143,47 @@ describe('fleetControlVerdict', () => {
     expect(noCustody.controls.start.enabled).toBe(false);
     const noGrant = buildFleetControlState(inputs({}, { state: 'none' }));
     expect(noGrant.controls.start).toMatchObject({ enabled: true, hint: expect.stringMatching(/Touch ID/) });
+  });
+});
+
+describe('current daemon tick projection', () => {
+  const now = Date.parse('2026-09-27T12:00:00.000Z');
+  const live: DaemonLivenessV1 = { v: 1, checkedAt: new Date(now).toISOString(), state: 'alive', alive: true, pid: 42,
+    recorded: { running: true, pid: 42, startedAt: '2026-09-27T11:00:00.000Z', lastTickAt: '2026-09-25T12:00:00.000Z' },
+    lock: null, activity: null, staleRecord: false, reason: 'alive' };
+  const tick: DaemonTickProgressRead = { progress: { v: 1, authority: 'none', pid: 42,
+    tickStartedAt: '2026-09-27T11:59:00.000Z', phaseStartedAt: '2026-09-27T11:59:30.000Z',
+    phase: 'selection and dispatch', detail: null }, tickAgeMs: 60_000, phaseAgeMs: 30_000 };
+
+  it('projects a validated current generation without changing working counts', () => {
+    expect(projectFleetControlTickProgress(live, tick, now)).toMatchObject({ phase: 'selection and dispatch',
+      summary: 'tick in progress: selection and dispatch for 30s' });
+    expect(projectFleetControlTickProgress(live, null, now)).toBeNull();
+  });
+
+  it.each(['stale', 'stopped', 'unknown'] as const)('rejects a %s daemon observation', (state) => {
+    expect(projectFleetControlTickProgress({ ...live, state }, tick, now)).toBeNull();
+  });
+
+  it('rejects mismatched, dead or unproven writers', () => {
+    expect(projectFleetControlTickProgress(live, { ...tick, progress: { ...tick.progress, pid: 43 } }, now)).toBeNull();
+    expect(projectFleetControlTickProgress({ ...live, alive: false }, tick, now)).toBeNull();
+    expect(projectFleetControlTickProgress({ ...live, pid: null }, tick, now)).toBeNull();
+    expect(projectFleetControlTickProgress({ ...live, recorded: { ...live.recorded, running: false } }, tick, now)).toBeNull();
+    expect(projectFleetControlTickProgress({ ...live, recorded: { ...live.recorded, pid: 43 } }, tick, now)).toBeNull();
+    expect(projectFleetControlTickProgress(live, tick, Number.NaN)).toBeNull();
+    expect(projectFleetControlTickProgress({ ...live, recorded: { ...live.recorded, startedAt: null } }, tick, now)).toBeNull();
+  });
+
+  it('rejects completed ticks and records from before this daemon generation', () => {
+    expect(projectFleetControlTickProgress({ ...live, recorded: { ...live.recorded, lastTickAt: tick.progress.tickStartedAt } }, tick, now)).toBeNull();
+    expect(projectFleetControlTickProgress({ ...live, recorded: { ...live.recorded, startedAt: '2026-09-27T11:59:01.000Z' } }, tick, now)).toBeNull();
+  });
+
+  it('rejects invalid, future and reversed phase timestamps', () => {
+    for (const patch of [{ tickStartedAt: 'bad' }, { phaseStartedAt: '2026-09-27T12:00:01.000Z' }, { phaseStartedAt: '2026-09-27T11:58:59.000Z' }]) {
+      expect(projectFleetControlTickProgress(live, { ...tick, progress: { ...tick.progress, ...patch } }, now)).toBeNull();
+    }
   });
 });
 

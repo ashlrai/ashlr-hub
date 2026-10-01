@@ -13,6 +13,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Fixed
 
+- Distinguish a live preparing Fleet tick from idle without inflating working
+  agent counts, and label the last completed tick separately from current progress.
 - Stop repeated Jev requests for unchanged attention items after completed
   low-confidence answers. Refresh on meaningful facts and urgency changes;
   retry transient failures sooner, with bounded caching and single-flight.

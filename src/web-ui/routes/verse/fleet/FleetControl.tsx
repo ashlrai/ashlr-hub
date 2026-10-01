@@ -210,8 +210,9 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
   const busy = actions.busy || (progress !== null && progress.event !== null ? !['done', 'failed', 'cancelled'].includes(progress.event.phase) : progress !== null);
   const g = state.grant;
   const stage = g.stageId ? `${g.stageId}${g.stageIndex !== null && g.stageCount ? ` (${g.stageIndex + 1}/${g.stageCount})` : ''}` : null;
+  const tickProgress = state.daemon.liveness === 'alive' && state.daemon.pid !== null ? state.daemon.tickProgress : null;
   const daemonLine = state.daemon.service === 'running' || state.daemon.liveness === 'alive'
-    ? `Running${state.daemon.pid ? ` · pid ${state.daemon.pid}` : ''}${state.daemon.lastTickAt ? ` · ticked ${formatRelative(state.daemon.lastTickAt)}` : ''}`
+    ? `Running${state.daemon.pid ? ` · pid ${state.daemon.pid}` : ''}${tickProgress ? ` · ${tickProgress.summary}` : ''}${state.daemon.lastTickAt ? ` · ${tickProgress ? 'last completed' : 'ticked'} ${formatRelative(state.daemon.lastTickAt)}` : ''}`
     : state.daemon.service === 'absent' ? 'Not installed' : 'Not running';
 
   return (

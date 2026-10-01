@@ -49,6 +49,8 @@ import type { CancelTaskResult, EnqueueTaskResult, FleetTask } from './fleet-typ
 import { isRunId, requestRunCancel, runCancelRequested, type RequestRunCancelResult } from './run-cancel.js';
 import type { TaskOperatorEdit, TaskQueueRead } from './task-source.js';
 import { FLEET_ACTIONS, daemonRunning } from './fleet-control-model.js';
+import { readTickProgress, describeTickProgress, type DaemonTickProgressRead } from '../daemon/tick-progress.js';
+import type { DaemonLivenessV1 } from '../daemon/liveness.js';
 
 // ---------------------------------------------------------------------------
 // Dependencies (every one replaceable in tests; defaults load lazily)
@@ -317,9 +319,29 @@ function pauseWrite(paused: boolean): { ok: boolean; changed: boolean; reason: s
   return { ok: result.ok, changed: result.changed, reason: result.reason };
 }
 
+/** A reused PID or completed tick record must never make an idle fleet look busy. */
+export function projectFleetControlTickProgress(live: DaemonLivenessV1, tick: DaemonTickProgressRead | null, nowMs: number): FleetControlStateV1['daemon']['tickProgress'] {
+  if (live.state !== 'alive' || live.alive !== true || live.pid === null || !tick || tick.progress.pid !== live.pid
+    || live.recorded.running !== true || live.recorded.pid !== live.pid || !Number.isFinite(nowMs)) return null;
+  const started = Date.parse(live.recorded.startedAt ?? '');
+  const completed = Date.parse(live.recorded.lastTickAt ?? '');
+  const tickAt = Date.parse(tick.progress.tickStartedAt);
+  const phaseAt = Date.parse(tick.progress.phaseStartedAt);
+  if (!Number.isFinite(started) || !Number.isFinite(tickAt) || !Number.isFinite(phaseAt)
+    || tickAt < started || phaseAt < tickAt || phaseAt > nowMs
+    || (Number.isFinite(completed) && tickAt <= completed)) return null;
+  return { phase: tick.progress.phase, detail: tick.progress.detail,
+    tickStartedAt: tick.progress.tickStartedAt, phaseStartedAt: tick.progress.phaseStartedAt,
+    summary: describeTickProgress(tick) };
+}
+
 function livenessRead(): FleetControlInputs['liveness'] {
   const live = loaded().liveness.probeDaemonLiveness();
-  return { state: live.state, pid: live.pid, lastTickAt: live.recorded.lastTickAt, reason: live.reason };
+  const nowMs = Date.now();
+  const tickProgress = live.state === 'alive' && live.pid !== null
+    ? projectFleetControlTickProgress(live, readTickProgress({ expectPid: live.pid, nowMs }), nowMs) : null;
+  return { state: live.state, pid: live.pid, lastTickAt: live.recorded.lastTickAt, reason: live.reason,
+    ...(tickProgress ? { tickProgress } : {}) };
 }
 
 function workingRead(): number | null {
