@@ -43,8 +43,11 @@ export interface BarRow {
   /** 0–100 left in the binding window; null when there is no reading. */
   leftPercent: number | null;
   level: Level;
-  /** Short value beside the battery in the labelled rail: "72%", "spent", "ready". */
+  /** Subscription usage beside the battery; never a credit balance. */
   value: string;
+  /** Independent Codex credit reading, including unknown/unconfirmed states. */
+  creditLabel?: string;
+  creditHeld?: boolean;
   /** Spoken + hover summary. */
   summary: string;
   detail: string[];
@@ -80,21 +83,51 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
       continue;
     }
     const status = accountStatus(row, { healthRead: opts.healthRead, now: opts.now });
+    // Quota history does not determine freshness of the independent credit read.
+    const currentCredits = !row.lastReading && !row.signedOut;
+    const creditValue = currentCredits && (row.creditState === 'none' || row.credits !== null) ? estimatedCreditValue(row.creditBalance, row.plan) : null;
+    const creditLabel = row.engine !== 'codex' ? undefined : !currentCredits ? 'Credits unconfirmed'
+      : row.credits !== null ? creditValue === null ? row.credits : `Credits ≈${creditValue}`
+      : row.creditState === 'none' ? 'No credits reported' : 'Credits not reported';
+    const creditHeld = row.engine === 'codex' && currentCredits && row.creditSpendControlReached === true;
+    const creditSummary = creditLabel ? ` · ${creditLabel}${creditHeld ? ' · credit spending held' : ''}` : '';
+    const creditDetail: string[] = [];
+    if (row.credits !== null && currentCredits) creditDetail.push(row.credits, 'Credit units are independent of subscription usage; autonomous credit spending is not admitted.');
+    if (row.engine === 'codex' && currentCredits && row.creditState === 'none') creditDetail.push('Native provider reports no available credits.');
+    if (creditValue !== null) creditDetail.push(`Estimated credit value ${creditValue} · personal-plan $0.04/credit reference; not attributed spend.`);
     const history = row.windows.length === 0 && !row.signedOut ? row.historicalUsage : null;
     if (history) {
       const recordedLeft = historicalLeftPercent(history);
+      const historicalUsed = history.windows.reduce<number | null>((most, window) => window.usedPercent === null
+        ? most : Math.max(most ?? 0, window.usedPercent), null);
+      // Cached limit flags may carry a sentinel 100, which is not a measured percent.
+      const historicalValue = history.windows.some(window => window.limitReached) ? 'limit was reached · last'
+        : historicalUsed === null ? 'last reading' : `${usedPercentText(historicalUsed)} used · last`;
       out.push({ key: row.seatId, engine: row.engine, name: row.label, leftPercent: recordedLeft, level: 'unknown',
-        value: recordedLeft === null ? 'last reading' : `${usedPercentText(recordedLeft)} last`,
-        summary: `${row.label}: last known usage · current usage unconfirmed`,
+        value: row.engine === 'codex' ? historicalValue : recordedLeft === null ? 'last reading' : `${usedPercentText(recordedLeft)} last`,
+        ...(creditLabel === undefined ? {} : { creditLabel, creditHeld }),
+        summary: `${row.label}: last known usage · current usage unconfirmed${creditSummary}`,
         detail: [`Recorded ${new Date(history.observedAt).toLocaleString()}`, 'Historical reading; current availability and resets are unconfirmed.',
-          ...history.windows.map(window => `${window.id}: ${window.limitReached ? 'limit was flagged' : window.usedPercent === null ? 'usage unknown' : `${usedPercentText(window.usedPercent)} used`}${window.resetsAt ? ` · recorded reset ${new Date(window.resetsAt).toLocaleString()}` : ''}`)],
+          ...history.windows.map(window => `${window.id}: ${window.limitReached ? 'limit was flagged' : window.usedPercent === null ? 'usage unknown' : `${usedPercentText(window.usedPercent)} used`}${window.resetsAt ? ` · recorded reset ${new Date(window.resetsAt).toLocaleString()}` : ''}`), ...creditDetail],
       });
       continue;
     }
-    const level = LEVEL_OF_STATUS[status.kind] ?? 'unknown';
     const left = bindingLeftPercent(row);
-    const creditValue = row.creditState === 'none' || row.credits !== null ? estimatedCreditValue(row.creditBalance, row.plan) : null;
-    const value = row.engine === 'codex' && row.credits !== null && !row.lastReading && !row.signedOut ? (row.creditSpendControlReached === true ? 'credits held' : creditValue === null ? 'credits' : `≈${creditValue}`) : level === 'out' ? (status.kind === 'spent' ? 'spent' : status.label.toLowerCase())
+    // Match binding-left's selected window, but a limit flag is not a measured
+    // percentage: keep its reported percent (if any) separate from blocked access.
+    const measured = row.windows.filter(window => window.usedPercent !== null || window.limitReached);
+    const binding = measured.find(window => window.binding) ?? (measured.length === 0 ? null
+      : measured.reduce((a, b) => (b.usedPercent ?? 100) > (a.usedPercent ?? 100) ? b : a));
+    const subscriptionUsed = binding?.usedPercent;
+    const subscriptionValue = subscriptionUsed !== null && subscriptionUsed !== undefined
+      ? `${usedPercentText(subscriptionUsed)} used${binding?.limitReached && subscriptionUsed < 100 ? ' · limit reached' : ''}`
+      : binding?.limitReached ? 'limit reached' : null;
+    // Credit availability/holds do not change the subscription battery's state.
+    const level = row.engine === 'codex' && !row.lastReading && !row.signedOut
+      ? left === null ? 'unknown' : left === 0 ? 'out' : left < 20 ? 'low' : 'ok' : LEVEL_OF_STATUS[status.kind] ?? 'unknown';
+    const value = row.engine === 'codex' && subscriptionValue !== null && !row.signedOut
+      ? `${subscriptionValue}${row.lastReading ? ' · last' : ''}`
+      : level === 'out' ? (status.kind === 'spent' ? 'spent' : status.label.toLowerCase())
       : left === null ? (opts.pendingSeatIds?.includes(row.seatId) ? 'reading…' : status.kind === 'unavailable' ? 'unavailable' : 'no usage') : `${usedPercentText(left)} left${row.lastReading ? ' · last' : ''}`;
     const detail = row.windows.map((w) => {
       const used = w.limitReached ? 'limit reached' : w.usedPercent === null ? 'no reading' : `${usedPercentText(w.usedPercent)} used`;
@@ -102,9 +135,7 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
       const reset = w.resetText ? w.resetText.replace(/^resets\s+/i, '') : '';
       return `${w.label.charAt(0).toUpperCase()}${w.label.slice(1)}: ${used}${reset ? ` · resets ${reset}` : ''}`;
     });
-    if (row.credits !== null && !row.lastReading && !row.signedOut) detail.push(row.credits, 'Credit units are independent of subscription usage; autonomous credit spending is not admitted.');
-    if (row.engine === 'codex' && row.creditState === 'none') detail.push('Native provider reports no available credits.');
-    if (creditValue !== null) detail.push(`Estimated credit value ${creditValue} · personal-plan $0.04/credit reference; not attributed spend.`);
+    detail.push(...creditDetail);
     if (row.windows.length === 0) detail.push('Usage is not reported by this resource.');
     if (row.lastReading) detail.push('Last known usage · latest check failed.');
     if (row.reserve) detail.push(row.reserve.label);
@@ -114,10 +145,11 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
       key: row.seatId,
       engine: row.engine,
       name: row.label,
-      leftPercent: row.windows.some((w) => w.binding && w.limitReached) || status.kind === 'spent' ? 0 : left,
+      leftPercent: row.signedOut ? null : row.engine === 'codex' ? left : row.windows.some((w) => w.binding && w.limitReached) || status.kind === 'spent' ? 0 : left,
       level: left === null && level === 'ok' ? 'unknown' : level,
       value,
-      summary: `${row.label}: ${status.label}${status.detail ? ` · ${status.detail}` : ''}${value.startsWith('≈') ? ` · estimated credit value ${creditValue}` : ''}`,
+      ...(creditLabel === undefined ? {} : { creditLabel, creditHeld }),
+      summary: `${row.label}: ${status.label}${status.detail ? ` · ${status.detail}` : ''}${row.engine === 'codex' ? ` · subscription ${value}` : ''}${creditSummary}${creditValue !== null ? ` · estimated credit value ${creditValue}` : ''}`,
       detail,
     });
   }
@@ -195,6 +227,10 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
                   <Battery left={row.leftPercent} level={row.level} vertical={false} />
                   <span className={styles.value}>{row.value}</span>
                 </span>
+                {row.creditLabel ? <span className={styles.credits}>
+                  <span>{row.creditLabel}</span>
+                  {row.creditHeld ? <span className={styles.creditHold}>Held</span> : null}
+                </span> : null}
               </>
             ) : (
               <>

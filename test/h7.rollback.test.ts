@@ -274,6 +274,9 @@ describe('h7 rollback — one-command inward-only undo', () => {
   });
 
   it('resolves a lexical repo alias to the physical enrollment and sandbox authority', async () => {
+    // Both alias cases create real worktrees. Inherit the centralized real-IO
+    // deadline: Windows Git can exceed the old 15s override before rollback
+    // reaches successful cleanup. Keep the full authority/scope assertions.
     expect.hasAssertions();
     const r = repo!;
     const other = fx!.makeRepo();
@@ -306,7 +309,7 @@ describe('h7 rollback — one-command inward-only undo', () => {
     expect(listSandboxes().map((sandbox) => sandbox.id)).not.toContain(orphan.id);
     expect(sandboxHomeExists(otherOrphan.id)).toBe(true);
     expect(listSandboxes().map((sandbox) => sandbox.id)).toContain(otherOrphan.id);
-  }, 15_000);
+  });
 
   it('narrows and sweeps both physical and exact legacy alias-spelled authority', async () => {
     expect.hasAssertions();
@@ -340,7 +343,7 @@ describe('h7 rollback — one-command inward-only undo', () => {
     expect(sandboxHomeExists(lexicalOrphan.id)).toBe(false);
     expect(listSandboxes().map((sandbox) => sandbox.id)).not.toContain(physicalOrphan.id);
     expect(listSandboxes().map((sandbox) => sandbox.id)).not.toContain(lexicalOrphan.id);
-  }, 15_000);
+  });
 
   it('is SCOPED — rollback of repo A leaves a DIFFERENT repo B fresh orphan untouched', async () => {
     expect.hasAssertions();

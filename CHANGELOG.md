@@ -23,9 +23,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Bundle the native structural diagnostic's five source texts with the exact
   build identity and verified hashes so it can inspect its own artifact.
   Missing or invalid snapshots fail the diagnostic without disk fallback.
-- Show qualified personal-plan Codex credit dollar estimates directly in the
-  resource bar. Preserve independent quota meters, provider holds, stale
-  readings and plans whose dollar equivalence is unknown.
+- Show Codex subscription usage percentages and credit balances on separate
+  resource-bar lines for each account. Qualify personal-plan dollar estimates;
+  preserve provider holds, stale readings and unknown percentages without
+  treating available credits as unused subscription quota.
 
 ### Changed
 

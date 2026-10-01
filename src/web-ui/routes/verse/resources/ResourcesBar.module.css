@@ -67,13 +67,29 @@
 .value {
   flex: none;
   text-align: right;
-  white-space: nowrap;
+  max-width: calc(100% - 50px);
+  white-space: normal;
   font-size: var(--text-2xs-size, 11px);
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
 }
 .row[data-level='out'] .value { color: var(--status-danger-fg); }
 .row[data-level='low'] .value { color: var(--status-warning-fg); }
+
+/* Credits have their own label and state; quota color belongs to the battery. */
+.credits {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  text-align: left;
+  overflow-wrap: anywhere;
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+.creditHold { flex: none; color: var(--status-warning-fg); }
 
 /* Battery: a rounded cell with a nub; the fill is what is LEFT. */
 .battery {

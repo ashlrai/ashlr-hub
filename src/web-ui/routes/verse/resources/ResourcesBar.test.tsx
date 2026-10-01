@@ -6,15 +6,25 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { render } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useCapacityData } from '../usage/CapacityStrip.js';
 import { buildCapacityRows, type CapacityRow, type CapacityWindowRow } from '../usage/capacity-strip-model.js';
 import { capacity, nativeSeat, seatWindow } from '../seat-fixtures.test-support.js';
-import { barRows } from './ResourcesBar.js';
+import { barRows, ResourcesBar } from './ResourcesBar.js';
 import { getResourcesUi, reloadResourcesUiForTest, RESOURCES_STORAGE_KEY, setResourcesBar } from './resources-store.js';
 
 const NOW = Date.parse('2026-09-25T02:00:00Z');
+
+vi.mock('../usage/CapacityStrip.js', async (original) => ({
+  ...await original<typeof import('../usage/CapacityStrip.js')>(),
+  useCapacityData: vi.fn(),
+}));
+// Only the shared reads are substituted; rendering exercises the real projection,
+// battery and keyboard tooltip without a provider request or extra polling.
+vi.mock('../../../data/hooks.js', () => ({ useQuery: () => ({ data: undefined }) }));
+vi.mock('../shell/section-visibility.js', () => ({ usePollWhileVisible: () => {} }));
 
 function win(over: Partial<CapacityWindowRow>): CapacityWindowRow {
   return { id: 'seven_day', label: 'weekly window', usedPercent: null, limitReached: false, resetText: 'Sat 8:43 AM', resetsAt: null, binding: true, ...over };
@@ -140,7 +150,8 @@ describe('Codex credits are independent of the quota battery', () => {
       creditBalance: '2048.4196250000', connection: { connection: 'exhausted' } as CapacityRow['connection'],
       windows: [win({ usedPercent: 100, limitReached: true })] });
     const result = barRows([account], { healthRead: true, now: NOW })[0]!;
-    expect(result.value).toBe('≈$81.94'); expect(result.leftPercent).toBe(0);
+    expect(result.value).toBe('100% used'); expect(result.leftPercent).toBe(0);
+    expect(result.creditLabel).toBe('Credits ≈$81.94'); expect(result.level).toBe('out');
     expect(result.summary).toContain('Credits available');
     expect(result.summary).toContain('estimated credit value $81.94');
     expect(result.detail).toContain('2048.4196250000 credits available');
@@ -150,20 +161,131 @@ describe('Codex credits are independent of the quota battery', () => {
   it('reports a vendor spend-control hold separately from its remaining balance', () => {
     const result = barRows([row({ engine: 'codex', credits: '12 credits available', creditSpendControlReached: true,
       windows: [win({ usedPercent: 100 })] })], { healthRead: true, now: NOW })[0]!;
-    expect(result.value).toBe('credits held'); expect(result.summary).toContain('Credits held');
+    expect(result.value).toBe('100% used'); expect(result.creditHeld).toBe(true);
+    expect(result.creditLabel).toBe('12 credits available'); expect(result.summary).toContain('Credits held');
     expect(result.detail).toContain('12 credits available'); expect(result.leftPercent).toBe(0);
   });
   it('never publishes stale or signed-out credits as currently available', () => {
     for (const patch of [{ signedOut: true }, { lastReading: true }]) {
       const result = barRows([row({ engine: 'codex', plan: 'pro', creditBalance: '12', credits: '12 credits available', ...patch })], { healthRead: true, now: NOW })[0]!;
-      expect(result.value).not.toBe('credits');
-      expect(result.value).not.toMatch(/^≈/);
+      expect(result.creditLabel).toBe('Credits unconfirmed');
+      expect(result.summary).not.toContain('estimated credit value');
+      expect(result.detail.join(' ')).not.toContain('Estimated credit value');
     }
   });
   it('keeps unsupported plan balances in provider units without inventing a dollar rate', () => {
     const result = barRows([row({ engine: 'codex', plan: 'enterprise', creditBalance: '12', credits: '12 credits available' })], { healthRead: true, now: NOW })[0]!;
-    expect(result.value).toBe('credits');
+    expect(result.value).toBe('28% used');
+    expect(result.creditLabel).toBe('12 credits available');
     expect(result.summary).not.toContain('estimated credit value');
     expect(result.detail.join(' ')).not.toContain('Estimated credit value');
+  });
+
+  it('retains unknown quota independently of known credits and unknown credits independently of known quota', () => {
+    const projected = barRows([
+      row({ seatId: 'codex-a', engine: 'codex', windows: [], credits: '12 credits available', plan: 'pro', creditBalance: '12' }),
+      row({ seatId: 'codex-b', engine: 'codex', windows: [win({ usedPercent: 0 })], credits: null, creditState: 'unknown' }),
+    ], { healthRead: true, now: NOW });
+    expect(projected[0]).toMatchObject({ value: 'no usage', leftPercent: null, level: 'unknown', creditLabel: 'Credits ≈$0.48' });
+    expect(projected[1]).toMatchObject({ value: '0% used', leftPercent: 100, creditLabel: 'Credits not reported' });
+  });
+
+  it('never invents measured percentages from limit flags or an exhausted connection', () => {
+    const projected = barRows([
+      row({ engine: 'codex', windows: [win({ usedPercent: null, limitReached: true })] }),
+      row({ engine: 'codex', windows: [win({ usedPercent: 33, limitReached: true })] }),
+      row({ engine: 'codex', windows: [], connection: { connection: 'exhausted' } as CapacityRow['connection'] }),
+    ], { healthRead: true, now: NOW });
+    expect(projected[0]).toMatchObject({ value: 'limit reached', leftPercent: 0, level: 'out' });
+    expect(projected[1]).toMatchObject({ value: '33% used · limit reached', leftPercent: 0, level: 'out' });
+    expect(projected[2]).toMatchObject({ value: 'no usage', leftPercent: null, level: 'unknown' });
+  });
+
+  it('labels historical measured usage as used and never treats historical limit flags as measured 100%', () => {
+    const projected = barRows([28, null, 100].map((usedPercent, index) => row({ engine: 'codex', windows: [],
+      historicalUsage: { source: 'native-account-checked-history', identitySource: 'native-account-checked',
+        observedAt: new Date(NOW - 120_000).toISOString(), expiresAt: new Date(NOW - 60_000).toISOString(),
+        windows: [{ id: 'primary', usedPercent, resetsAt: null, ...(index === 0 ? {} : { limitReached: true }) }] },
+    })), { healthRead: true, now: NOW });
+    expect(projected[0]).toMatchObject({ value: '28% used · last', leftPercent: 72, level: 'unknown' });
+    for (const flagged of projected.slice(1)) {
+      expect(flagged).toMatchObject({ value: 'limit was reached · last', leftPercent: 0, level: 'unknown' });
+      expect(flagged!.summary).not.toContain('100%');
+      expect(flagged!.detail.join(' ')).not.toContain('100%');
+    }
+  });
+
+  it('keeps historical quota explicit and current credits independent of quota history', () => {
+    const projected = barRows([row({ engine: 'codex', windows: [], credits: '12 credits available', creditBalance: '12',
+      historicalUsage: { source: 'native-account-checked-history', identitySource: 'native-account-checked',
+        observedAt: new Date(NOW - 120_000).toISOString(), expiresAt: new Date(NOW - 60_000).toISOString(),
+        windows: [{ id: 'primary', usedPercent: 78, resetsAt: null }] },
+    })], { healthRead: true, now: NOW })[0]!;
+    expect(projected).toMatchObject({ value: '78% used · last', level: 'unknown', leftPercent: 22 });
+    expect(projected.creditLabel).toBe('12 credits available');
+    expect(projected.detail).toContain('12 credits available');
+    expect(projected.summary).toContain('current usage unconfirmed');
+    const stale = barRows([row({ engine: 'codex', windows: [], lastReading: true,
+      credits: '12 credits available', historicalUsage: { source: 'native-account-checked-history', identitySource: 'native-account-checked',
+        observedAt: new Date(NOW - 120_000).toISOString(), expiresAt: new Date(NOW - 60_000).toISOString(),
+        windows: [{ id: 'primary', usedPercent: 78, resetsAt: null }] },
+    })], { healthRead: true, now: NOW })[0]!;
+    expect(stale).toMatchObject({ value: '78% used · last', creditLabel: 'Credits unconfirmed' });
+    expect(stale.detail).not.toContain('12 credits available');
+  });
+});
+
+describe('visible Codex subscription and credit balances', () => {
+  beforeEach(() => { vi.spyOn(Date, 'now').mockReturnValue(NOW); });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  function showAccounts(expanded: boolean, held = false) {
+    const personalWindow = seatWindow({ id: 'codex_primary', usedPercent: 100, limitReached: false, resetsAt: '2026-10-03T12:00:00.000Z' });
+    const cmpWeekly = seatWindow({ id: 'codex_weekly', usedPercent: 27, resetsAt: '2026-10-03T12:00:00.000Z' });
+    const cmpSession = seatWindow({ id: 'codex_session', usedPercent: 63, resetsAt: '2026-09-25T06:00:00.000Z' });
+    vi.mocked(useCapacityData).mockReturnValue({ seats: [
+      nativeSeat(capacity({ planType: 'pro', windows: [personalWindow], binding: personalWindow, usability: 'tight',
+        observedAt: new Date(NOW - 30_000).toISOString(),
+        credits: { hasCredits: true, unlimited: false, balance: '2048.4196250000', spendControlReached: held },
+      }), { id: 'codex-personal', engine: 'codex', label: 'Personal Codex', accountId: 'codex-personal' }),
+      nativeSeat(capacity({ planType: 'pro', windows: [cmpWeekly, cmpSession], binding: cmpSession, usability: 'ready',
+        observedAt: new Date(NOW - 30_000).toISOString(), credits: { hasCredits: true, unlimited: false, balance: '250' },
+      }), { id: 'codex-cmp', engine: 'codex', label: 'Cash Margin Partners', accountId: 'codex-cmp' }),
+    ], health: null, budget: null, loading: false, refreshing: false, readFailed: false, rosterUnavailable: false, pendingSeatIds: [] });
+    return render(<ResourcesBar expanded={expanded} />);
+  }
+
+  it('renders both percentages and both account balances without filling a spent subscription battery', () => {
+    showAccounts(true);
+    const personal = screen.getByRole('button', { name: /^Personal Codex:/ });
+    const cmp = screen.getByRole('button', { name: /^Cash Margin Partners:/ });
+    expect(within(personal).getByText('100% used')).toBeInTheDocument();
+    expect(within(personal).getByText('Credits ≈$81.94')).toBeInTheDocument();
+    expect(within(cmp).getByText('63% used')).toBeInTheDocument();
+    expect(within(cmp).getByText('Credits ≈$10.00')).toBeInTheDocument();
+    expect(personal.querySelector('[aria-hidden="true"][data-level] > [style]')).toHaveStyle({ '--fill': '0%' });
+    expect(cmp.querySelector('[aria-hidden="true"][data-level] > [style]')).toHaveStyle({ '--fill': '37%' });
+  });
+
+  it('shows a spending hold beside the balance while keeping quota independent', () => {
+    showAccounts(true, true);
+    const personal = screen.getByRole('button', { name: /^Personal Codex:/ });
+    expect(within(personal).getByText('100% used')).toBeInTheDocument();
+    expect(within(personal).getByText('Credits ≈$81.94')).toBeInTheDocument();
+    expect(within(personal).getByText('Held')).toBeInTheDocument();
+    expect(personal).toHaveAccessibleName(/credit spending held/);
+    expect(within(screen.getByRole('button', { name: /^Cash Margin Partners:/ })).queryByText('Held')).toBeNull();
+  });
+
+  it('keeps the independent quota, credits and every window in collapsed keyboard tooltips', () => {
+    showAccounts(false);
+    const cmp = screen.getByRole('button', { name: /^Cash Margin Partners:/ });
+    expect(cmp).toHaveAccessibleName(/subscription 63% used.*Credits ≈\$10\.00/);
+    fireEvent.focus(cmp);
+    const tooltip = screen.getByRole('tooltip');
+    expect(tooltip.textContent).toContain('63% used');
+    expect(tooltip.textContent).toContain('27% used');
+    expect(tooltip.textContent).toContain('250 credits available');
+    expect(tooltip.textContent).toContain('Estimated credit value $10.00');
   });
 });
