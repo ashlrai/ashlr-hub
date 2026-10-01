@@ -154,13 +154,17 @@ snippets; metadata does not prove indexing or ranking. Primary guidance:
 
 ## Current workbench images
 
-The two `work-*-3.20-demo.jpg` assets capture the actual compiled 3.20 browser UI:
-Work with me is 1280 × 720; Work for me is 1280 × 900. The private
-`screenshot-fixture-preparation/server-capture-320-cards.json` receipt records
-the dirty draft build at `f99d919f13302e0cf18adb8fec361618ec0b25c9` and its source
-and compiled-file hashes. They are draft UI captures, not final release validation.
-A local read-only adapter supplied labeled demo accounts, usage, conversation,
-deadline samples and historical task estimates; all mutations were refused.
-No provider ran and no fleet was active. They show web UI, not native app chrome.
-The same image bytes appear in `docs/images/` for the repository README.
-Versioned 3.19 captures remain available as historical images.
+The two `work-*-3.22-demo.jpg` assets capture the actual compiled 3.22 browser UI.
+Both Work with me and Work for me are 1280 × 720. The private 3.22
+`screenshot-fixture-preparation/candidate-capture-acceptance.json` receipt binds
+the captures to the candidate source manifest and compiled assets. The build
+uses the dirty draft at `26b389dfa7797e16cdad5b284d2bc4d1f1ae46b5`; these images
+are browser demonstrations, not final release validation or native app chrome.
+
+A read-only local adapter supplied labeled demo accounts, usage, a conversation,
+and synthetic verification, GitHub PR, merge and post-merge stages. The timeline
+retains unknown CI and unrecorded release/deployment. No provider or GitHub
+service ran, no fleet was active, and all mutations were refused. Separate
+390-pixel browser checks verified the timeline and historical credit views
+without horizontal overflow. The same image bytes appear in `docs/images/`
+for the repository README. Earlier versioned captures remain historical images.

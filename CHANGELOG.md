@@ -95,7 +95,7 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   dense-array and total-byte checks; oversized snapshots never publish a partial
   roster or overwrite the previous snapshot.
 
-## 3.19 workbench changes — included in 3.20.0
+## 3.19 workbench changes — included in 3.22.0
 
 ### Added
 
