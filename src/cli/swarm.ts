@@ -327,9 +327,14 @@ function parseSwarmArgs(args: string[]): ParsedSwarmArgs {
       result.budget = parsed.n;
       i++;
     } else if (arg === '--parallel') {
-      const parsed = parsePositiveInt('parallel', args[++i]);
-      if ('error' in parsed) { result.usageError = parsed.error; return result; }
-      result.parallel = parsed.n;
+      const raw = args[++i];
+      const parallel = raw !== undefined && /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
+      // parseInt accepts fractional/trailing text and unsafe counts; do not truncate this preference.
+      if (!Number.isSafeInteger(parallel) || parallel < 1) {
+        result.usageError = `--parallel requires a positive safe integer, got: ${raw ?? '(missing)'}`;
+        return result;
+      }
+      result.parallel = parallel;
       i++;
     } else if (arg === '--resume') {
       const val = args[++i];
@@ -1571,7 +1576,7 @@ function printSwarmHelp(): void {
 
   const opts: [string, string][] = [
     ['--budget N',       'Hard total token ceiling across ALL tasks (aborts cleanly when exceeded).'],
-    ['--parallel N',     'Max tasks to execute concurrently in the BUILD phase (default: 3, max: 8).'],
+    ['--parallel N',     'Max tasks to execute concurrently in the BUILD phase (positive safe integer; default: 3).'],
     ['--background',     'Launch a detached worker; return the swarm ID immediately.'],
     ['--resume <id>',    'Resume a previously paused/aborted swarm.'],
     ['--dry-run',        'Plan only — print the phases/tasks without executing any agent.'],
@@ -1632,7 +1637,7 @@ function printSwarmHelp(): void {
   console.log('');
   console.log(`    ${dim('• LOCAL-FIRST: only Ollama / LM Studio by default.')}`);
   console.log(`    ${dim('• HARD total budget across the whole swarm — never runaway.')}`);
-  console.log(`    ${dim('• Bounded parallelism: default 3, max 8 concurrent tasks.')}`);
+  console.log(`    ${dim('• BUILD parallelism: default 3; explicit positive safe-integer preference.')}`);
   console.log(`    ${dim('• Nested swarms refused (ASHLR_IN_SWARM guard).')}`);
   console.log(`    ${dim('• No outward/destructive actions (push/deploy) by default.')}`);
   console.log(`    ${dim('• All state persists to ~/.ashlr/swarms/<id>.json (resumable).')}`);

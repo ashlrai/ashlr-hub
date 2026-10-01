@@ -67,6 +67,7 @@ import {
   AUTONOMY_SWITCH_RANK,
   BUDGET_MODE_RANK,
   STANDING_GRANT_CEILINGS,
+  STANDING_GRANT_DEFAULT_VOLUME_LIMITS,
   type AutonomySwitch,
   type EffectivePolicy,
   type EffectiveRepoPolicy,
@@ -201,12 +202,13 @@ export function computeEffectivePolicy(input: EffectivePolicyInput): EffectivePo
   if (!stage || stage.id !== position.stageId) throw new Error('rollout position does not match the grant');
   const cfg = configConstraints(input.config);
   const ceilings = STANDING_GRANT_CEILINGS;
+  const operatorVolumes = grant.merge.volumePolicy === 'operator-signed';
   const switchStage: RepoStage = input.switch === 'autonomous' ? 'merge' : 'propose';
   const configStage: RepoStage = cfg.mergeDisabled ? 'propose' : 'merge';
   const grantRepos = new Map(grant.repos.map((repo) => [repo.nameWithOwner, repo]));
 
-  const mergeMaxFiles = minDefined(grant.merge.maxFiles, stage.maxFiles, ceilings.maxFiles, cfg.maxFiles);
-  const mergeMaxLines = minDefined(grant.merge.maxLines, stage.maxLines, ceilings.maxLines, cfg.maxLines);
+  const mergeMaxFiles = minDefined(grant.merge.maxFiles, stage.maxFiles, operatorVolumes ? ceilings.maxFiles : STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxFiles, cfg.maxFiles);
+  const mergeMaxLines = minDefined(grant.merge.maxLines, stage.maxLines, operatorVolumes ? ceilings.maxLines : STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxLines, cfg.maxLines);
 
   const repos: EffectiveRepoPolicy[] = stage.repos.flatMap((stageRepo) => {
     const granted = grantRepos.get(stageRepo.nameWithOwner);
@@ -217,16 +219,17 @@ export function computeEffectivePolicy(input: EffectivePolicyInput): EffectivePo
     if (self && (grant.merge.selfRepo === 'propose-only' || cfg.selfMergeDisabled)) repoStage = 'propose';
     return [{
       nameWithOwner: granted.nameWithOwner,
+      ...(operatorVolumes ? { volumePolicy: 'operator-signed' as const } : {}),
       stage: repoStage,
       enforcement: granted.enforcement,
       maxRisk: minRisk(granted.maxRisk, stage.maxRisk, ceilings.maxRisk, local ? ceilings.localEnforcement.maxRisk : undefined, cfg.maxRisk),
-      maxFiles: minDefined(mergeMaxFiles, local ? ceilings.localEnforcement.maxFiles : undefined),
-      maxLines: minDefined(mergeMaxLines, local ? ceilings.localEnforcement.maxLines : undefined),
+      maxFiles: minDefined(mergeMaxFiles, local && !operatorVolumes ? ceilings.localEnforcement.maxFiles : undefined),
+      maxLines: minDefined(mergeMaxLines, local && !operatorVolumes ? ceilings.localEnforcement.maxLines : undefined),
       maxMergesPerDay: minDefined(
         granted.maxMergesPerDay,
         stage.maxMergesPerRepoPerDay,
-        ceilings.maxMergesPerRepoPerDay,
-        local ? ceilings.localEnforcement.maxMergesPerDay : undefined,
+        operatorVolumes ? ceilings.maxMergesPerRepoPerDay : STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxMergesPerRepoPerDay,
+        local && !operatorVolumes ? ceilings.localEnforcement.maxMergesPerDay : undefined,
       ),
       selfRepo: self ? grant.merge.selfRepo : null,
     }];
@@ -268,13 +271,14 @@ export function computeEffectivePolicy(input: EffectivePolicyInput): EffectivePo
     },
     repos,
     merge: {
+      ...(operatorVolumes ? { volumePolicy: 'operator-signed' as const } : {}),
       maxFiles: mergeMaxFiles,
       maxLines: mergeMaxLines,
       selfRepo: grant.merge.selfRepo,
       localAuthored: {
         maxRisk: 'low',
-        maxFiles: Math.min(ceilings.localAuthored.maxFiles, mergeMaxFiles),
-        maxLines: Math.min(ceilings.localAuthored.maxLines, mergeMaxLines),
+        maxFiles: operatorVolumes ? mergeMaxFiles : Math.min(ceilings.localAuthored.maxFiles, mergeMaxFiles),
+        maxLines: operatorVolumes ? mergeMaxLines : Math.min(ceilings.localAuthored.maxLines, mergeMaxLines),
       },
     },
     spend: {

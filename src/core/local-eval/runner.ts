@@ -22,7 +22,7 @@ import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { classifyTrial } from './classify.js';
 import { diagnoseTimeout, startTrace, type TraceHandle } from './trace.js';
-import type { TaskSpec, TimeoutDiagnosis, TrialResult, TrialTokens, TrialTrace } from './types.js';
+import type { TaskSpec, TimeoutDiagnosis, TrialResult, TrialTokens, TrialTrace, TrialTokenCoverage } from './types.js';
 
 /** Directories that are never part of a fixture's observable state. */
 const SNAPSHOT_IGNORE: ReadonlySet<string> = new Set(['.git', 'node_modules', '.claude']);
@@ -234,33 +234,50 @@ export function countChanges(before: Map<string, string>, after: Map<string, str
 export function parseAgentResult(stdout: string): {
   finalMessage: string;
   tokens: TrialTokens;
+  tokenSource: 'cli-result-v1';
+  tokenCoverage: TrialTokenCoverage;
+  tokenTotalStatus: 'not-reported' | 'unverified';
   turns: number | null;
   stopReason: string | null;
   terminalReason: string | null;
   isError: boolean;
 } {
-  const empty: TrialTokens = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+  const empty: TrialTokens = { input: null, output: null, cacheRead: null, cacheCreation: null };
   let parsed: Record<string, unknown>;
   try {
-    parsed = JSON.parse(stdout) as Record<string, unknown>;
+    const value: unknown = JSON.parse(stdout);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid result');
+    parsed = value as Record<string, unknown>;
   } catch {
     return {
-      finalMessage: '', tokens: empty, turns: null,
+      finalMessage: '', tokens: empty, tokenSource: 'cli-result-v1',
+      tokenCoverage: { input: 'missing', output: 'missing', cacheRead: 'missing', cacheCreation: 'missing' },
+      tokenTotalStatus: 'not-reported', turns: null,
       stopReason: null, terminalReason: null, isError: true,
     };
   }
-  const usage = (parsed['usage'] ?? {}) as Record<string, unknown>;
-  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const rawUsage = parsed['usage'];
+  const usage = rawUsage && typeof rawUsage === 'object' && !Array.isArray(rawUsage)
+    ? rawUsage as Record<string, unknown> : {};
+  const num = (v: unknown): number | null =>
+    typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null;
   const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+  const keys = { input: 'input_tokens', output: 'output_tokens', cacheRead: 'cache_read_input_tokens',
+    cacheCreation: 'cache_creation_input_tokens' } as const;
+  const tokens = Object.fromEntries(Object.entries(keys).map(([key, field]) => [key, num(usage[field])])) as unknown as TrialTokens;
+  const tokenCoverage = Object.fromEntries(Object.entries(keys).map(([key, field]) =>
+    [key, !Object.hasOwn(usage, field) ? 'missing' : num(usage[field]) === null ? 'invalid' : 'reported'])) as TrialTokenCoverage;
+  // No documented producer contract here defines total_tokens or which cache
+  // counters it includes. Ignore it rather than invalidating measured fields
+  // with an assumed cross-provider sum. Never synthesize an aggregate total.
+  const suppliedTotal = Object.hasOwn(usage, 'total_tokens');
   return {
     finalMessage: typeof parsed['result'] === 'string' ? parsed['result'] : '',
-    tokens: {
-      input: num(usage['input_tokens']),
-      output: num(usage['output_tokens']),
-      cacheRead: num(usage['cache_read_input_tokens']),
-      cacheCreation: num(usage['cache_creation_input_tokens']),
-    },
-    turns: typeof parsed['num_turns'] === 'number' ? parsed['num_turns'] : null,
+    tokens,
+    tokenCoverage,
+    tokenTotalStatus: suppliedTotal ? 'unverified' : 'not-reported',
+    tokenSource: 'cli-result-v1',
+    turns: num(parsed['num_turns']),
     stopReason: str(parsed['stop_reason']),
     terminalReason: str(parsed['terminal_reason']),
     isError: parsed['is_error'] === true,
@@ -295,7 +312,7 @@ export async function runTrial(opts: RunTrialOptions): Promise<TrialResult> {
   // The agent talks to the tracer, and the tracer talks to whatever the run was
   // pointed at. A trial that produces no result JSON is otherwise a black box:
   // the CLI emits its usage and turn count once, at the end, so a kill at the
-  // budget records zero tokens and zero turns no matter how much work happened.
+  // budget leaves usage unknown, even when work happened.
   //
   // The tracer is an OBSERVER, so failing to start one must not fail the trial
   // it was only watching. A benchmark that dies because its instrument could
@@ -390,6 +407,9 @@ export async function runTrial(opts: RunTrialOptions): Promise<TrialResult> {
     passed: verdict.passed,
     wallMs,
     tokens: parsed.tokens,
+    tokenSource: parsed.tokenSource,
+    tokenCoverage: parsed.tokenCoverage,
+    tokenTotalStatus: parsed.tokenTotalStatus,
     agentExit: agent.status,
     verifyExit,
     changedFiles,

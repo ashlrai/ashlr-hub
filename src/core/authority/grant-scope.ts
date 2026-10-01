@@ -5,22 +5,25 @@
  * WHAT THIS IS. The server drafts a StandingGrantV1 (verse/authority-api.ts
  * `buildStandingGrantDraft`); the Touch ID sheet now lets Mason change its
  * scope — which repos, which engines, the Leader's classes, the spend caps,
- * how many days — and shows a diff against the grant in force before he signs.
+ * how many days, and explicit signed volume limits — and shows a diff against the grant in force before he signs.
  * This module is the PURE edit and the PURE diff.
  *
  * WHY IT CANNOT RAISE ANYTHING BY ITSELF. An edited draft is still only a
  * draft: it is signed by the custody helper under Touch ID (which shows the
  * scope again in its own prompt), and both the helper and the verifier
  * re-check it against the compiled ceilings (STANDING_GRANT_CEILINGS). The
- * edit can only CHOOSE within what the server drafted:
+ * edit chooses the available scope and can explicitly replace volume policy:
  *   - repos: a subset of the draft's repos (the enrolled repos + the canary);
  *   - engines: a subset of the draft's engines plus the four fleet lanes —
  *     never `devin` unless the draft already named it (the helper may not
  *     sign it; authority-api decides that);
  *   - leader classes: a subset of A, B;
  *   - spend: mode and metered dollars inside the ceilings;
- *   - days: 1..30.
- * Every rung of the ladder is narrowed to match (a stage may never name what
+ *   - days: 1..30;
+ *   - volume: positive safe-integer size and nonnegative per-repo daily limits,
+ *     with MAX_SAFE_INTEGER explicitly representing No volume cap.
+ * Repos/engines are narrowed on every rung; explicit volume edits are reviewed
+ * on each changed rung (a stage may never name what
  * the grant does not), and the result is re-parsed by the same strict parser
  * the verifier uses — an invalid edit is refused, never "fixed up".
  */
@@ -28,13 +31,13 @@ import { BUDGET_MODES, type BudgetMode } from '../routing/types.js';
 import { engineOfSeatId } from '../routing/policy.js';
 import { GRANT_LANE_ENGINES, DEVIN_GRANT_ENGINE, type GrantEngine } from '../fleet/fleet-types.js';
 import { parseStandingGrantPayload } from './standing-grant.js';
-import { STANDING_GRANT_CEILINGS, type LeaderGrantClass, type StandingGrantV1 } from './types.js';
-import type { GrantDiffLine, GrantScopeEdit } from './grant-scope-types.js';
+import { STANDING_GRANT_CEILINGS, volumeLimitLabel, type LeaderGrantClass, type StandingGrantV1, type StandingGrantSeat, type SeatRole, STANDING_GRANT_PATTERNS } from './types.js';
+import type { GrantDiffLine, GrantScopeEdit, GrantSeatPolicyEdit } from './grant-scope-types.js';
 
 export type { GrantDiffDirection, GrantDiffLine, GrantScopeEdit } from './grant-scope-types.js';
 
 export const GRANT_SCOPE_EDIT_KEYS: readonly (keyof GrantScopeEdit)[] = Object.freeze([
-  'repos', 'engines', 'leaderClasses', 'maxMode', 'meteredUsdPerDay', 'days', 'conductorGoals',
+  'repos', 'engines', 'leaderClasses', 'maxMode', 'meteredUsdPerDay', 'days', 'conductorGoals', 'maxFiles', 'maxLines', 'repoMaxMergesPerDay', 'seatPolicies',
 ]);
 
 const LEADER_CLASSES: readonly LeaderGrantClass[] = ['A', 'B'];
@@ -98,6 +101,58 @@ export function parseGrantScopeEdit(value: unknown): { ok: true; edit: GrantScop
     if (typeof raw['conductorGoals'] !== 'boolean') return { ok: false, reason: 'conductorGoals must be true or false' };
     edit.conductorGoals = raw['conductorGoals'];
   }
+  for (const key of ['maxFiles', 'maxLines'] as const) {
+    const value = raw[key];
+    if (value === undefined) continue;
+    if (!Number.isSafeInteger(value) || (value as number) < 1) return { ok: false, reason: `${key} must be a positive safe integer` };
+    edit[key] = value as number;
+  }
+  if (raw['repoMaxMergesPerDay'] !== undefined) {
+    const values = raw['repoMaxMergesPerDay'];
+    if (!values || typeof values !== 'object' || Array.isArray(values)) return { ok: false, reason: 'repoMaxMergesPerDay must be an object' };
+    const entries = Object.entries(values);
+    if (entries.length < 1 || entries.length > STANDING_GRANT_CEILINGS.maxRepos) return { ok: false, reason: 'repoMaxMergesPerDay must name enrolled repos' };
+    const seen = new Set<string>();
+    for (const [repo, value] of entries) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/u.test(repo) || seen.has(repo.toLowerCase()) || !Number.isSafeInteger(value) || value < 0) return { ok: false, reason: 'repo merge limits must be unique repo names and nonnegative safe integers' };
+      seen.add(repo.toLowerCase());
+    }
+    edit.repoMaxMergesPerDay = Object.fromEntries(entries) as Record<string, number>;
+  }
+  if (raw['seatPolicies'] !== undefined) {
+    const policies = raw['seatPolicies'];
+    if (!policies || typeof policies !== 'object' || Array.isArray(policies)) return { ok: false, reason: 'seatPolicies must be an object' };
+    const entries = Object.entries(policies);
+    if (entries.length > STANDING_GRANT_CEILINGS.maxSeats) return { ok: false, reason: 'too many seat policies' };
+    const parsed: Record<string, GrantSeatPolicyEdit> = {};
+    for (const [id, value] of entries) {
+      if (!STANDING_GRANT_PATTERNS.seatId.test(id) || !value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, reason: 'seat policies must name valid accounts and objects' };
+      const seat = value as Record<string, unknown>;
+      if (Object.keys(seat).some((key) => !['enabled', 'roles', 'reserveFloorPercent', 'maxSessionWindowPercent'].includes(key))) return { ok: false, reason: 'unknown seat policy field' };
+      const out: GrantSeatPolicyEdit = {};
+      if (seat['enabled'] !== undefined) {
+        if (typeof seat['enabled'] !== 'boolean') return { ok: false, reason: 'seat enabled must be true or false' };
+        out.enabled = seat['enabled'];
+      }
+      if (seat['roles'] !== undefined) {
+        const roles = seat['roles'];
+        if (!Array.isArray(roles) || roles.length < 1 || roles.length > 3 || roles.some((role) => !['producer', 'judge', 'leader'].includes(role)) || new Set(roles).size !== roles.length) return { ok: false, reason: 'seat roles must be a unique nonempty list of producer, judge or leader' };
+        out.roles = [...roles];
+      }
+      if (seat['reserveFloorPercent'] !== undefined) {
+        const n = seat['reserveFloorPercent'];
+        if (!Number.isInteger(n) || (n as number) < 0 || (n as number) > 100) return { ok: false, reason: 'seat reserve must be a whole percent from 0 to 100' };
+        out.reserveFloorPercent = n as number;
+      }
+      if (seat['maxSessionWindowPercent'] !== undefined) {
+        const n = seat['maxSessionWindowPercent'];
+        if (n !== null && (!Number.isInteger(n) || (n as number) < 1 || (n as number) > 100)) return { ok: false, reason: 'seat session ceiling must be null or a whole percent from 1 to 100' };
+        out.maxSessionWindowPercent = n as number | null;
+      }
+      parsed[id] = out;
+    }
+    edit.seatPolicies = parsed;
+  }
   return { ok: true, edit };
 }
 
@@ -110,8 +165,16 @@ export function editableEngines(draft: Pick<StandingGrantV1, 'engines'>): GrantE
   return out;
 }
 
+/** Roles the strict grant contract permits for this already listed account. */
+export function editableSeatPolicies(draft: Pick<StandingGrantV1, 'spend'>): Record<string, { roles: SeatRole[] }> {
+  return Object.fromEntries(Object.keys(draft.spend.seats).map((id) => [id, { roles: engineOfSeatId(id) === 'devin' ? ['producer'] : ['producer', 'judge', 'leader'] }]));
+}
+
 /** PURE: apply `edit` to the server's draft. Refuses (never repairs) an invalid result. */
-export function applyGrantScopeEdit(draft: StandingGrantV1, edit: GrantScopeEdit): GrantScopeEditResult {
+export function applyGrantScopeEdit(draft: StandingGrantV1, requestedEdit: GrantScopeEdit): GrantScopeEditResult {
+  const checkedEdit = parseGrantScopeEdit(requestedEdit);
+  if (!checkedEdit.ok) return checkedEdit;
+  const edit = checkedEdit.edit;
   const next: StandingGrantV1 = structuredClone(draft);
 
   if (edit.repos !== undefined) {
@@ -148,6 +211,19 @@ export function applyGrantScopeEdit(draft: StandingGrantV1, edit: GrantScopeEdit
     next.rollout.stages = next.rollout.stages.map((stage) => ({ ...stage, leaderClasses: stage.leaderClasses.filter((c) => next.leader.classes.includes(c)) }));
   }
 
+  if (edit.seatPolicies !== undefined) {
+    for (const [id, policy] of Object.entries(edit.seatPolicies)) {
+      // Exact identities from this server draft only; no new account authority.
+      if (!Object.hasOwn(draft.spend.seats, id) || !Object.hasOwn(next.spend.seats, id)) return { ok: false, reason: 'seat policies may name only accounts in the selected draft' };
+      const seat = next.spend.seats[id]!;
+      if (policy.enabled !== undefined) seat.enabled = policy.enabled;
+      if (policy.roles !== undefined) seat.roles = [...policy.roles];
+      if (policy.reserveFloorPercent !== undefined) seat.reserveFloorPercent = policy.reserveFloorPercent;
+      if (policy.maxSessionWindowPercent === null) delete seat.maxSessionWindowPercent;
+      else if (policy.maxSessionWindowPercent !== undefined) seat.maxSessionWindowPercent = policy.maxSessionWindowPercent;
+    }
+  }
+
   if (edit.maxMode !== undefined) next.spend = { ...next.spend, maxMode: edit.maxMode };
   if (edit.meteredUsdPerDay !== undefined) next.spend = { ...next.spend, meteredUsdPerDay: edit.meteredUsdPerDay };
   if (edit.conductorGoals !== undefined) next.conductorGoals = edit.conductorGoals;
@@ -157,6 +233,28 @@ export function applyGrantScopeEdit(draft: StandingGrantV1, edit: GrantScopeEdit
     next.expiresAt = new Date(issued + Math.min(edit.days * DAY_MS, STANDING_GRANT_CEILINGS.maxTtlMs)).toISOString();
   }
 
+  const volumeChoice = edit.maxFiles !== undefined || edit.maxLines !== undefined || edit.repoMaxMergesPerDay !== undefined;
+  if (volumeChoice) {
+    // Only an explicit volume edit opts in. Plain renewal and unrelated scope
+    // edits retain the marker's absence and legacy local restrictions.
+    next.merge = { ...next.merge, volumePolicy: 'operator-signed',
+      ...(edit.maxFiles === undefined ? {} : { maxFiles: edit.maxFiles }),
+      ...(edit.maxLines === undefined ? {} : { maxLines: edit.maxLines }) };
+    if (edit.repoMaxMergesPerDay) {
+      const requested = new Map(Object.entries(edit.repoMaxMergesPerDay).map(([name, value]) => [name.toLowerCase(), value]));
+      if ([...requested.keys()].some((name) => !next.repos.some((repo) => repo.nameWithOwner.toLowerCase() === name))) return { ok: false, reason: 'merge limits may name only the selected enrolled repos' };
+      next.repos = next.repos.map((repo) => ({ ...repo, maxMergesPerDay: requested.get(repo.nameWithOwner.toLowerCase()) ?? repo.maxMergesPerDay }));
+    }
+    next.rollout.stages = next.rollout.stages.map((stage) => ({ ...stage,
+      maxFiles: edit.maxFiles ?? stage.maxFiles,
+      maxLines: edit.maxLines ?? stage.maxLines,
+      // A propose-only/shadow rung stays non-merging. Every repo's signed
+      // limit remains binding beneath this stage aggregate limit.
+      maxMergesPerRepoPerDay: edit.repoMaxMergesPerDay && stage.repos.some((repo) => repo.stage === 'merge')
+        ? Math.max(...stage.repos.map((entry) => next.repos.find((repo) => repo.nameWithOwner === entry.nameWithOwner)!.maxMergesPerDay))
+        : stage.maxMergesPerRepoPerDay,
+    }));
+  }
   const checked = parseStandingGrantPayload(next);
   if (!checked.ok) return { ok: false, reason: `that scope is not a valid grant: ${checked.reason}` };
   return { ok: true, payload: checked.value };
@@ -182,19 +280,38 @@ function days(g: Pick<StandingGrantV1, 'issuedAt' | 'expiresAt'>): number {
   return Math.round((Date.parse(g.expiresAt) - Date.parse(g.issuedAt)) / DAY_MS);
 }
 
+function seatPolicyDiff(current: StandingGrantV1 | null, next: StandingGrantV1): GrantDiffLine[] {
+  const lines: GrantDiffLine[] = [];
+  const beforeSeats = current?.spend.seats ?? {};
+  for (const id of new Set([...Object.keys(beforeSeats), ...Object.keys(next.spend.seats)])) {
+    const before = beforeSeats[id];
+    const after = next.spend.seats[id];
+    const enabled = (seat: StandingGrantSeat | undefined): string => seat ? seat.enabled ? 'Enabled' : 'Disabled' : 'Not granted';
+    const reserve = (seat: StandingGrantSeat | undefined): string => seat ? `${seat.reserveFloorPercent}%` : 'Not granted';
+    const session = (seat: StandingGrantSeat | undefined): string => seat ? seat.maxSessionWindowPercent === undefined ? 'No session ceiling' : `${seat.maxSessionWindowPercent}%` : 'Not granted';
+    if (!before || !after || before.enabled !== after.enabled) lines.push({ field: 'seat-enabled', label: `${id}: autonomy`, before: enabled(before), after: enabled(after), direction: after?.enabled ? 'wider' : 'narrower' });
+    if (!before || !after || setDiff(before.roles, after.roles).added.length > 0 || setDiff(before.roles, after.roles).removed.length > 0) lines.push({ field: 'seat-roles', label: `${id}: roles`, before: before ? list(before.roles) : 'Not granted', after: after ? list(after.roles) : 'Not granted', direction: after && (!before || after.roles.some((role) => !before.roles.includes(role))) ? 'wider' : 'narrower' });
+    if (!before || !after || before.reserveFloorPercent !== after.reserveFloorPercent) lines.push({ field: 'seat-reserve', label: `${id}: reserve`, before: reserve(before), after: reserve(after), direction: after && (!before || after.reserveFloorPercent < before.reserveFloorPercent) ? 'wider' : 'narrower' });
+    if (!before || !after || before.maxSessionWindowPercent !== after.maxSessionWindowPercent) lines.push({ field: 'seat-session', label: `${id}: session ceiling`, before: session(before), after: session(after), direction: after && (!before || (after.maxSessionWindowPercent ?? Infinity) > (before.maxSessionWindowPercent ?? Infinity)) ? 'wider' : 'narrower' });
+  }
+  return lines;
+}
+
 /**
  * PURE: what signing `next` changes compared with `current` (null = no grant
  * in force: everything is new, so every line is `wider`). Empty = the same
  * scope (a plain renewal still moves the expiry, which is reported).
  */
 export function grantScopeDiff(current: StandingGrantV1 | null, next: StandingGrantV1): GrantDiffLine[] {
-  const out: GrantDiffLine[] = [];
+  const out: GrantDiffLine[] = seatPolicyDiff(current, next);
   if (!current) {
     out.push({ field: 'repos', label: 'Repositories', before: 'no grant', after: list(next.repos.map((r) => r.nameWithOwner)), direction: 'wider' });
     out.push({ field: 'engines', label: 'Engines', before: 'no grant', after: list(next.engines), direction: 'wider' });
     out.push({ field: 'leader', label: 'Leader classes', before: 'no grant', after: list(next.leader.classes), direction: 'wider' });
     out.push({ field: 'spend-mode', label: 'Budget up to', before: 'no grant', after: next.spend.maxMode, direction: 'wider' });
     out.push({ field: 'metered', label: 'Metered APIs', before: 'no grant', after: `$${next.spend.meteredUsdPerDay}/day`, direction: next.spend.meteredUsdPerDay > 0 ? 'wider' : 'changed' });
+    out.push({ field: 'merge-caps', label: 'Merge volume', before: 'no grant', after: `${volumeLimitLabel(next.merge.maxFiles)} files / ${volumeLimitLabel(next.merge.maxLines)} lines`, direction: 'wider' });
+    out.push({ field: 'volume-policy', label: 'Local volume limits', before: 'no grant', after: next.merge.volumePolicy === 'operator-signed' ? 'Use signed repo/size limits for all models and enforcement modes' : 'Legacy 4 files / 150 lines; local enforcement 4 merges/day', direction: 'wider' });
     out.push({ field: 'expiry', label: 'Valid for', before: 'no grant', after: `${days(next)} days`, direction: 'changed' });
     return out;
   }
@@ -222,10 +339,25 @@ export function grantScopeDiff(current: StandingGrantV1 | null, next: StandingGr
   }
   if (current.merge.maxFiles !== next.merge.maxFiles || current.merge.maxLines !== next.merge.maxLines) {
     const wider = next.merge.maxFiles > current.merge.maxFiles || next.merge.maxLines > current.merge.maxLines;
-    out.push({ field: 'merge-caps', label: 'Merge size', before: `${current.merge.maxFiles} files / ${current.merge.maxLines} lines`, after: `${next.merge.maxFiles} files / ${next.merge.maxLines} lines`, direction: wider ? 'wider' : 'narrower' });
+    out.push({ field: 'merge-caps', label: 'Merge size', before: `${volumeLimitLabel(current.merge.maxFiles)} files / ${volumeLimitLabel(current.merge.maxLines)} lines`, after: `${volumeLimitLabel(next.merge.maxFiles)} files / ${volumeLimitLabel(next.merge.maxLines)} lines`, direction: wider ? 'wider' : 'narrower' });
+  }
+  if (current.merge.volumePolicy !== next.merge.volumePolicy) {
+    out.push({ field: 'volume-policy', label: 'Local volume limits', before: current.merge.volumePolicy === 'operator-signed' ? 'Use signed repo/size limits' : 'Legacy 4 files / 150 lines; local enforcement 4 merges/day', after: next.merge.volumePolicy === 'operator-signed' ? 'Use signed repo/size limits for all models and enforcement modes; risk/CI unchanged' : 'Legacy local limits', direction: next.merge.volumePolicy ? 'wider' : 'narrower' });
+  }
+  for (const repo of next.repos) {
+    const before = current.repos.find((r) => r.nameWithOwner.toLowerCase() === repo.nameWithOwner.toLowerCase());
+    if (before && before.maxMergesPerDay !== repo.maxMergesPerDay) out.push({ field: 'merge-frequency', label: `${repo.nameWithOwner} merges/day`, before: volumeLimitLabel(before.maxMergesPerDay), after: volumeLimitLabel(repo.maxMergesPerDay), direction: repo.maxMergesPerDay > before.maxMergesPerDay ? 'wider' : 'narrower' });
   }
   if (current.conductorGoals !== next.conductorGoals) {
     out.push({ field: 'conductor', label: 'Goal conductor', before: current.conductorGoals ? 'live' : 'dry run', after: next.conductorGoals ? 'live' : 'dry run', direction: next.conductorGoals ? 'wider' : 'narrower' });
+  }
+  for (const stage of next.rollout.stages) {
+    const before = current.rollout.stages.find((s) => s.id === stage.id);
+    if (before && (before.maxFiles !== stage.maxFiles || before.maxLines !== stage.maxLines || before.maxMergesPerRepoPerDay !== stage.maxMergesPerRepoPerDay)) {
+      const label = (s: typeof stage): string => `${volumeLimitLabel(s.maxFiles)} files / ${volumeLimitLabel(s.maxLines)} lines / ${volumeLimitLabel(s.maxMergesPerRepoPerDay)} merges/repo/day`;
+      const wider = stage.maxFiles > before.maxFiles || stage.maxLines > before.maxLines || stage.maxMergesPerRepoPerDay > before.maxMergesPerRepoPerDay;
+      out.push({ field: 'stage-volume', label: `${stage.id} volume`, before: label(before), after: label(stage), direction: wider ? 'wider' : 'narrower' });
+    }
   }
   const beforeLadder = current.rollout.stages.map((s) => s.id);
   const afterLadder = next.rollout.stages.map((s) => s.id);

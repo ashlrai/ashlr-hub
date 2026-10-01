@@ -312,3 +312,34 @@
   height: 2px;
   transform: translateX(-50%);
 }
+
+/* The two jobs are readable even with icon-only secondary navigation.
+   These buttons only navigate; selected intent never claims fleet admission. */
+.workModes {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  padding-top: calc(var(--space-2) + var(--app-titlebar-height, 0px));
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-canvas);
+}
+.workMode {
+  min-width: 0;
+  min-height: var(--control-h);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+.workMode:hover { background: var(--bg-hover); }
+.workMode[aria-pressed='true'] {
+  color: var(--text-primary);
+  background: var(--bg-selected);
+  font-weight: var(--font-weight-medium);
+}
+.workMode:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 2px; }
+.shell[data-focus='on'] .workModes { display: none; }
+.shell[data-compact] .workModes { padding-top: var(--space-2); }

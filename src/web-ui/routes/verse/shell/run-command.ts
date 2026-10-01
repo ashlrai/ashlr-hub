@@ -197,6 +197,8 @@ function agentsFocus(kind: 'new' | 'new-multi'): void {
 
 export function registerShellCommandHandlers(): () => void {
   const surfaces: Array<[string, VerseSectionId]> = [
+    ['mode.with-me', 'chat'],
+    ['mode.for-me', 'fleet'],
     ['surface.command', 'command'],
     ['surface.fleet', 'fleet'],
     ['surface.growth', 'growth'],

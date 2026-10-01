@@ -14,7 +14,8 @@
  *
  * All copy is plain text; the draft is server data but rendered as text only.
  */
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
+import { volumeLimitLabel } from '../../../../core/authority/types.js';
 import type { AuthorityGrantDraft, RolloutStage, StandingGrantV1 } from '../../../../core/authority/types.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { Sheet } from '../../../components/primitives/Sheet.js';
@@ -26,6 +27,7 @@ import { CardNote, MicroLabel } from './Surface.js';
 import type { AutonomySwitch } from '../../../../core/authority/types.js';
 import type { SurfaceActions } from './actions.js';
 import { GrantDiff, GrantScopeEditor, postGrantDraft, type EditableGrantDraft } from './GrantScopeEditor.js';
+import { setVerseResourcesOpen, setVerseSection } from '../verse-ui-store.js';
 import styles from './command.module.css';
 
 export type GrantIntent = 'grant' | 're-approve';
@@ -74,13 +76,13 @@ export const ELITE_DIRECT_SHEET_LINE =
 function stageLine(s: RolloutStage): string {
   const c = s.criteria;
   if (s.id === ELITE_DIRECT_STAGE_ID) {
-    return `${s.repos.filter((r) => r.stage === 'merge').length} of ${s.repos.length} repos merge · ${s.maxRisk} risk · ≤ ${s.maxFiles} files / ${s.maxLines} lines — one rung, no ramp; elite models land on green tests, no judge`;
+    return `${s.repos.filter((r) => r.stage === 'merge').length} of ${s.repos.length} repos merge · ${s.maxRisk} risk · ≤ ${volumeLimitLabel(s.maxFiles)} files / ${volumeLimitLabel(s.maxLines)} lines — one rung, no ramp; elite models land on green tests, no judge`;
   }
   const parts = [
     `${s.repos.length} repo${s.repos.length === 1 ? '' : 's'}`,
     `${s.maxRisk} risk`,
-    `≤ ${s.maxFiles} files / ${s.maxLines} lines`,
-    `≤ ${s.maxMergesPerRepoPerDay} merges/repo/day`,
+    `≤ ${volumeLimitLabel(s.maxFiles)} files / ${volumeLimitLabel(s.maxLines)} lines`,
+    `≤ ${volumeLimitLabel(s.maxMergesPerRepoPerDay)} merges/repo/day`,
   ];
   const exit = [`${c.minMerges} merges`, `${c.minHours} h`, c.minPostMergeGreenPct ? `≥ ${c.minPostMergeGreenPct}% green` : null, `≤ ${c.maxRevertRatePct}% reverts`].filter(Boolean);
   return `${parts.join(' · ')} — advances after ${exit.join(', ')}`;
@@ -120,15 +122,17 @@ export function DraftScope({ draft }: { draft: AuthorityGrantDraft }) {
                 <td>{r.stage === 'merge' ? 'Merge' : 'Propose'}</td>
                 <td>{r.enforcement === 'server' ? 'GitHub' : 'Local only'}</td>
                 <td>{r.maxRisk}</td>
-                <td className={styles.num}>{r.maxMergesPerDay}</td>
+                <td className={styles.num}>{volumeLimitLabel(r.maxMergesPerDay)}</td>
               </tr>
             ))}
           </tbody>
         </table>
         <p className={styles.scopeMeta}>
-          Every merge ≤ {g.merge.maxFiles} files / {g.merge.maxLines} lines · ashlr-hub itself: {g.merge.selfRepo === 'propose-only' ? 'propose only' : 'merge outside authority code'}
+          Every merge ≤ {volumeLimitLabel(g.merge.maxFiles)} files / {volumeLimitLabel(g.merge.maxLines)} lines · ashlr-hub itself: {g.merge.selfRepo === 'propose-only' ? 'propose only' : 'merge outside authority code'}
         </p>
       </section>
+
+      <p className={styles.scopeMeta}>{g.merge.volumePolicy === 'operator-signed' ? 'Signed volume limits apply to all models and enforcement modes. Risk, CI, spend, Stop and revocation remain binding.' : 'Legacy local limits remain: 4 files / 150 lines, and 4 merges/day for locally enforced repos.'}</p>
 
       <section className={styles.scopeBlock} aria-label="Spend">
         <MicroLabel>Spend</MicroLabel>
@@ -141,10 +145,12 @@ export function DraftScope({ draft }: { draft: AuthorityGrantDraft }) {
               <span className={styles.mono}>{seatId}</span>
               {seat.enabled ? `: keeps ${seat.reserveFloorPercent}% for you` : ': not used by autonomy'}
               {seat.enabled && seat.maxSessionWindowPercent !== undefined ? `, never above ${seat.maxSessionWindowPercent}% of its 5-hour window` : ''}
-              {seat.enabled ? ` · ${seat.roles.join(', ')}` : ''}
+              {` · permitted roles: ${seat.roles.join(', ')}`}
+              {seat.enabled && seat.maxSessionWindowPercent === undefined ? ', no session ceiling' : ''}
             </li>
           ))}
         </ul>
+        <p className={styles.scopeMeta}>Signed account permissions are ceilings. Current Budget settings, usage and Resources readiness still govern dispatch; a listed role does not establish provider support.</p>
       </section>
 
       <section className={styles.scopeBlock} aria-label="Engines and Leader">
@@ -204,17 +210,51 @@ function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose, 
   // the served one; approving signs exactly the draft on screen (its digest).
   const [edited, setEdited] = useState<EditableGrantDraft | null>(null);
   const [editing, setEditing] = useState(startEditing === true);
+  const [editorRevision, setEditorRevision] = useState(0);
+  const revision = useRef(0);
+  const previewRequest = useRef(0);
+  const [editorReset, setEditorReset] = useState(0);
+  const [acknowledged, setAcknowledged] = useState<{ revision: number; sourceDigest: string } | null>(null);
+  const [editedSourceDigest, setEditedSourceDigest] = useState<string | null>(null);
+  const sourceDigest = useRef<string | null>(null);
+  sourceDigest.current = served?.digest ?? null;
   const [editError, setEditError] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
   // A late preview from the previous ladder must never replace the new one.
-  const draft: EditableGrantDraft | null = edited && edited.eliteDirect === served?.eliteDirect ? edited : served;
+  const draft: EditableGrantDraft | null = edited && editedSourceDigest === served?.digest && edited.eliteDirect === served?.eliteDirect ? edited : served;
   const reason = read.data?.reason ?? null;
   const canEdit = act !== undefined && served?.editable !== undefined;
   const fixedElite = served?.kind === 'reapprove' && served.eliteDirect === true;
+  const scopeDirty = editorRevision > 0 && (acknowledged?.revision !== editorRevision || acknowledged.sourceDigest !== served?.digest);
+  const draftMatchesChoice = draft !== null && (draft.eliteDirect === true) === (elite || fixedElite);
+
+  function markDirty(): void {
+    revision.current++;
+    setEditorRevision(revision.current);
+    setEditError(null);
+  }
+
+  function resetEditor(): void {
+    // Explicit reset acknowledges the current fetched source, restores its
+    // controls, and invalidates every earlier in-flight preview.
+    revision.current++;
+    previewRequest.current++;
+    setEditorRevision(0);
+    setAcknowledged(null);
+    setEdited(null);
+    setEditedSourceDigest(null);
+    setEditError(null);
+    setPreviewing(false);
+    setEditorReset((value) => value + 1);
+  }
+
 
   function preview(scope: Parameters<typeof postGrantDraft>[1]): void {
     if (!act || !served) return;
     const kind = served.kind ?? 'auto';
+    const request = ++previewRequest.current;
+    const choiceRevision = revision.current;
+    const baseDigest = served.digest;
     setEditError(null);
     setPreviewing(true);
     act(
@@ -222,16 +262,23 @@ function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose, 
         try {
           return await postGrantDraft(kind, scope, served.eliteDirect === true);
         } catch (error) {
-          setEditError(error instanceof Error ? error.message : String(error));
+          if (request === previewRequest.current && baseDigest === sourceDigest.current) setEditError(error instanceof Error ? error.message : String(error));
           return null;
         } finally {
-          setPreviewing(false);
+          if (request === previewRequest.current) setPreviewing(false);
         }
       },
       'Preview the edited grant',
       {
         onDone: (next) => {
-          if (next && typeof next === 'object' && typeof next.digest === 'string' && next.eliteDirect === served.eliteDirect) setEdited(next);
+          // Never acknowledge a newer choice, a different fetched draft, or
+          // a response invalidated by Reset. The exact accepted digest is signed.
+          if (request !== previewRequest.current || choiceRevision !== revision.current || baseDigest !== sourceDigest.current) return;
+          if (next && typeof next === 'object' && typeof next.digest === 'string' && next.eliteDirect === served.eliteDirect) {
+            setEdited(next);
+            setEditedSourceDigest(baseDigest);
+            setAcknowledged({ revision: choiceRevision, sourceDigest: baseDigest });
+          }
         },
       },
     );
@@ -254,7 +301,7 @@ function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose, 
             <Button variant="ghost" onClick={onClose}>
               Cancel
             </Button>
-            <Button variant="primary" icon={<IconLock />} disabled={!draft} busy={busy} onClick={() => draft && onApprove(draft)}>
+            <Button variant="primary" icon={<IconLock />} disabled={!draft || !draftMatchesChoice || scopeDirty || previewing} busy={busy} onClick={() => draft && onApprove(draft)}>
               Approve with Touch ID
             </Button>
           </span>
@@ -262,7 +309,7 @@ function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose, 
       }
     >
       <label className={styles.eliteToggle}>
-        <input type="checkbox" checked={elite || fixedElite} disabled={previewing || busy || fixedElite} onChange={(e) => { setElite(e.target.checked); setEdited(null); setEditError(null); }} aria-describedby={eliteHintId} />
+        <input type="checkbox" checked={elite || fixedElite} disabled={previewing || busy || fixedElite} onChange={(e) => { setElite(e.target.checked); resetEditor(); }} aria-describedby={eliteHintId} />
         Elite direct
       </label>
       <p id={eliteHintId} className={styles.scopeMeta}>
@@ -282,16 +329,18 @@ function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose, 
           ) : null}
           {canEdit && editing && served ? (
             <GrantScopeEditor
+              key={editorReset}
               draft={served as EditableGrantDraft}
               busy={previewing}
-              edited={edited !== null}
+              edited={editedSourceDigest === served.digest || scopeDirty}
+              onDirty={markDirty}
+              onAccountSettings={() => { onClose(); setVerseSection('apps'); }}
+              onResources={() => { onClose(); setVerseResourcesOpen(true); }}
               onPreview={preview}
-              onReset={() => {
-                setEdited(null);
-                setEditError(null);
-              }}
+              onReset={resetEditor}
             />
           ) : null}
+          {scopeDirty ? <CardNote tone="muted">Preview your choices before approving. Only the reviewed draft below can be signed.</CardNote> : null}
           {editError ? <CardNote tone="danger">{editError}</CardNote> : null}
           <GrantDiff lines={draft.diff} />
           <DraftScope draft={draft} />

@@ -286,6 +286,8 @@ describe('drafts', () => {
     expect(next).toMatchObject({ grantId: 'e'.repeat(32), grantSeq: 8, authoritySurfaceDigest: OTHER_SURFACE });
     expect(next.repos).toEqual(current.repos);
     expect(next.spend).toEqual(current.spend);
+    expect(next.merge).toEqual(current.merge);
+    expect(next.merge).not.toHaveProperty('volumePolicy');
   });
 
   it('describes the scope in plain lines (the Touch ID sheet)', () => {
@@ -293,5 +295,38 @@ describe('drafts', () => {
     expect(lines[0]).toMatch(/^Grant #7 /);
     expect(lines.some((l) => l.includes('seat claude: on, keep 40% for Mason, idle while 5 h > 70%'))).toBe(true);
     expect(lines.some((l) => l.includes('stage 1 shadow') && l.includes('propose only'))).toBe(true);
+  });
+});
+
+
+describe('signed operator volume policy compatibility', () => {
+  it('keeps old grant canonical bytes and rejects larger unmarked grants', () => {
+    const legacy = grant();
+    const parsed = parseStandingGrantPayload(legacy);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(canonicalJson(parsed.value)).toBe(canonicalJson(legacy));
+    for (const [field, value] of [['maxFiles', 11], ['maxLines', 301]] as const) {
+      expect(parseStandingGrantPayload(editGrant(legacy, (g) => { g.merge[field] = value; })).ok).toBe(false);
+    }
+  });
+  it('allows explicitly signed larger or no-cap volume and retains risk, spend and host verification', () => {
+    for (const n of [1000, Number.MAX_SAFE_INTEGER]) {
+      const g = editGrant(grant(), (p) => {
+        p.merge = { ...p.merge, volumePolicy: 'operator-signed', maxFiles: n, maxLines: n };
+        p.repos.forEach((r) => { r.maxMergesPerDay = n; });
+        p.rollout.stages.forEach((r) => { r.maxFiles = n; r.maxLines = n; r.maxMergesPerRepoPerDay = n; });
+      });
+      expect(parseStandingGrantPayload(g).ok).toBe(true);
+      expect(rejectCode(signGrant(g))).toBe('ok');
+      expect(rejectCode(signGrant(g), ctx({ hostBinding: 'f'.repeat(64) }))).not.toBe('ok');
+      expect(parseStandingGrantPayload(editGrant(g, (p) => { p.repos.find((r) => r.enforcement === 'local')!.maxRisk = 'medium'; })).ok).toBe(false);
+      expect(parseStandingGrantPayload(editGrant(g, (p) => { p.spend.meteredUsdPerDay = 10001; })).ok).toBe(false);
+    }
+  });
+  it('rejects invalid marker and every unsafe size representation', () => {
+    for (const marker of [undefined, null, false, 'none']) expect(parseStandingGrantPayload({ ...grant(), merge: { ...grant().merge, volumePolicy: marker } }).ok).toBe(false);
+    for (const bad of [0, -1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '9007199254740991', null]) {
+      expect(parseStandingGrantPayload({ ...grant(), merge: { ...grant().merge, volumePolicy: 'operator-signed', maxFiles: bad } }).ok).toBe(false);
+    }
   });
 });

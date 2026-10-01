@@ -198,3 +198,46 @@ describe('Workspace — queued turns sit above the live row', () => {
     expect(row).toHaveTextContent('Held — the last turn was stopped.');
   });
 });
+
+
+describe('interactive guide drafts', () => {
+  it('appends an editable starter to this chat without sending or changing its controls', async () => {
+    seedVerseSession('vs_1', session({ id: 'vs_1', status: 'idle', turnCount: 0 }), []);
+    const user = userEvent.setup();
+    const onSend = vi.fn(async () => true);
+    render(<Harness sessionId="vs_1" {...props({ onSend })} />);
+    const box = screen.getByRole('textbox', { name: 'Message' });
+    await user.type(box, 'My existing note');
+    await user.click(screen.getByRole('button', { name: 'Explain this project' }));
+    await waitFor(() => expect(box).toHaveValue('My existing note\n\nRead this project and explain its structure and main entry points. Do not edit files.'));
+    await user.type(box, ' Please focus on tests.');
+    expect((box as HTMLTextAreaElement).value).toContain('Please focus on tests.');
+    expect(onSend).not.toHaveBeenCalled();
+    const requests = vi.mocked(fetch).mock.calls;
+    expect(requests.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true);
+  });
+
+  it('retains drafts across chats without leaking a starter into another chat', async () => {
+    for (const id of ['vs_1', 'vs_2']) seedVerseSession(id, session({ id, status: 'idle', turnCount: 0 }), []);
+    const user = userEvent.setup();
+    const options = props();
+    const rendered = render(<Harness sessionId="vs_1" {...options} />);
+    await user.click(screen.getByRole('button', { name: 'Explain this project' }));
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message' })).toHaveValue('Read this project and explain its structure and main entry points. Do not edit files.'));
+    rendered.rerender(<Harness sessionId="vs_2" {...options} />);
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message' })).toHaveValue(''));
+    await user.click(screen.getByRole('button', { name: 'Plan a change' }));
+    await waitFor(() => expect((screen.getByRole('textbox', { name: 'Message' }) as HTMLTextAreaElement).value).toContain('Help me plan a change'));
+    rendered.rerender(<Harness sessionId="vs_1" {...options} />);
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message' })).toHaveValue('Read this project and explain its structure and main entry points. Do not edit files.'));
+    expect(options.onSend).not.toHaveBeenCalled();
+  });
+
+  it.each([{ status: 'running' as const, count: 0, dispatch: true }, { status: 'error' as const, count: 0, dispatch: true }, { status: 'idle' as const, count: 1, dispatch: true }, { status: 'idle' as const, count: 0, dispatch: false }])(
+    'does not offer starters on active, failed, established or read-only chats ($status/$count/$dispatch)', ({ status, count, dispatch }) => {
+      seedVerseSession('vs_1', session({ id: 'vs_1', status, turnCount: count }), []);
+      render(<Harness sessionId="vs_1" {...props({ dispatchEnabled: dispatch })} />);
+      expect(screen.queryByRole('group', { name: 'Start working together' })).not.toBeInTheDocument();
+    },
+  );
+});

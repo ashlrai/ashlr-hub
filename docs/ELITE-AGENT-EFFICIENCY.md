@@ -244,3 +244,16 @@ Graduation gates:
 
 This order measures and economically bounds autonomy before increasing its
 concurrency or authority.
+
+
+## Compare recorded local usage
+
+Use the read-only comparison before claiming a token reduction:
+
+```sh
+node --import tsx src/core/local-eval/main.ts --compare-reports /absolute/baseline.json /absolute/candidate.json
+```
+
+The command reads bounded report files and does not start models or probe runtimes. Reports must match the task set, model, runtime configuration, concurrency, trials, prompt and timeout settings, and an explicitly recorded cold or warm cache protocol. Uncontrolled caches, incompatible coverage, legacy receipts without usage provenance and mismatched task/trial identities are refused. Pass counts may differ and are reported separately. Incomplete counters stay unknown; independently complete fields can report descriptive differences. Input, output, cache-read and cache-creation counters remain separate; missing or malformed counters are unknown, while a reported zero remains zero. Unqualified `total_tokens` is not used to infer their inclusion semantics.
+
+Comparison describes the recorded pair. It does not establish universal savings, optimization causality or model-quality parity. This first comparison requires identical recorded context settings; a changed-context optimization needs a separately designed evaluation.

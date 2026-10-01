@@ -163,11 +163,14 @@ export interface TimeoutDiagnosis {
 
 /** Token counts for one trial, as reported by the agent CLI. */
 export interface TrialTokens {
-  readonly input: number;
-  readonly output: number;
-  readonly cacheRead: number;
-  readonly cacheCreation: number;
+  readonly input: number | null;
+  readonly output: number | null;
+  readonly cacheRead: number | null;
+  readonly cacheCreation: number | null;
 }
+
+export type TokenCoverageStatus = 'reported' | 'missing' | 'invalid';
+export type TrialTokenCoverage = Readonly<Record<keyof TrialTokens, TokenCoverageStatus>>;
 
 /** One attempt at one task. */
 export interface TrialResult {
@@ -178,6 +181,11 @@ export interface TrialResult {
   /** Wall clock for the agent turn, milliseconds. */
   readonly wallMs: number;
   readonly tokens: TrialTokens;
+  /** Absent in legacy receipts: their fallback zeros are not measured usage. */
+  readonly tokenSource?: 'cli-result-v1';
+  readonly tokenCoverage?: TrialTokenCoverage;
+  /** Cache inclusion differs by CLI/provider; no total is synthesized. */
+  readonly tokenTotalStatus?: 'not-reported' | 'unverified';
   /** Exit status of the agent CLI. */
   readonly agentExit: number | null;
   /** Exit status of the `verify` command; null when it was never reached. */
@@ -258,9 +266,22 @@ export interface HarnessConfiguration {
   readonly capturedAt: string;
 }
 
+/** Operator-recorded cache control is evidence to match, not independent verification. */
+export interface EvalComparisonEvidence {
+  readonly version: 1;
+  readonly taskDigest: string;
+  readonly cacheState: 'cold' | 'warm' | 'uncontrolled';
+  readonly cacheProtocol: string;
+  readonly agentModel: string;
+  readonly timeoutMs: number;
+  readonly appendSystemPrompt: string;
+  readonly effort: string;
+}
+
 /** A complete harness run: the configuration, and what it scored. */
 export interface EvalReport {
   readonly configuration: HarnessConfiguration;
+  readonly comparisonEvidence?: EvalComparisonEvidence;
   readonly trialsPerTask: number;
   readonly concurrency: number;
   readonly outcomes: readonly TaskOutcome[];

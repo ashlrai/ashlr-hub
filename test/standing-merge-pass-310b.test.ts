@@ -169,6 +169,51 @@ function prOf(w: World) {
   return pulls[0]!;
 }
 
+describe('exhausted positive USD allowance narrows mandatory model checks', () => {
+  it('holds the positive-grant classifier without calling it or substituting a heuristic', async () => {
+    const w = world();
+    w.policy.current!.spend.meteredUsdPerDay = 5;
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    const classifier = vi.fn(w.deps.claimIntegrity!);
+    w.deps.claimIntegrity = classifier;
+    const out = emptyOut();
+    const summary = await runStandingMergePass({ cfg: {} as AshlrConfig, policy: w.policy.current!, pending: [p], out, deps: w.deps, meteredUsdExhausted: true });
+    expect(classifier).not.toHaveBeenCalled();
+    expect(w.judgeCalls).toEqual([]);
+    expect(w.fake.pulls.size).toBe(0);
+    expect(p.status).toBe('pending');
+    expect(summary.waiting).toBe(1);
+    expect(w.ledger.gateRows().at(-1)).toMatchObject({ gate: 'G4', verdict: 'wait', code: 'metered-usd-exhausted' });
+    expect(out.skipped.at(-1)?.reason).toContain('mandatory model claim classification');
+  });
+
+  it('retains an already-required heuristic but holds an unclassified new judge', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    const classifier = vi.fn(w.deps.claimIntegrity!);
+    w.deps.claimIntegrity = classifier;
+    const out = emptyOut();
+    await runStandingMergePass({ cfg: {} as AshlrConfig, policy: w.policy.current!, pending: [p], out, deps: w.deps, meteredUsdExhausted: true });
+    expect(classifier).toHaveBeenCalledOnce();
+    expect(w.judgeCalls).toEqual([]);
+    expect(p.status).toBe('pending');
+    expect(w.ledger.gateRows().at(-1)).toMatchObject({ gate: 'G6', verdict: 'wait', code: 'metered-usd-exhausted' });
+  });
+
+  it('holds configured model red-team validation instead of removing it', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    const redTeam = vi.fn(async () => ({ check: { name: 'red-team', outcome: 'ok' as const, detail: 'survived' }, frontier: 'answered' as const }));
+    w.deps.redTeam = redTeam;
+    const out = emptyOut();
+    await runStandingMergePass({ cfg: { foundry: { redTeam: true } } as AshlrConfig, policy: w.policy.current!, pending: [p], out, deps: w.deps, meteredUsdExhausted: true });
+    expect(redTeam).not.toHaveBeenCalled();
+    expect(w.judgeCalls).toEqual([]);
+    expect(p.status).toBe('pending');
+    expect(w.ledger.gateRows().at(-1)).toMatchObject({ gate: 'G5', verdict: 'wait', code: 'metered-usd-exhausted' });
+  });
+});
+
 describe('standing merge pass — the happy path and GATE ORDER', () => {
   it('runs G0 → G1 → G1b → G2 → G3 → G4 → G5 → G6, opens the App PR, then merges SHA-pinned once checks are green', async () => {
     const w = world();
@@ -538,6 +583,21 @@ describe('standing merge pass — G5 red team is routed, budgeted and cached (c2
     expect(modelCalls).toHaveLength(1);
     // The cached verdict still feeds G5 every tick (no model call behind it).
     expect(redTeamCalls).toHaveLength(1);
+  });
+
+  it('reuses the exact-diff answered red-team memo after USD exhaustion without new inference', async () => {
+    const { w, redTeamCalls } = redTeamWorld('answered');
+    w.judgeOverride = 'qwen2.5:72b-instruct-q4_K_M';
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    await redTeamPass(w);
+    expect(redTeamCalls).toHaveLength(1);
+    w.clock.now += 20 * 60_000;
+    const out = emptyOut();
+    await runStandingMergePass({ cfg: { foundry: { redTeam: true } } as AshlrConfig, policy: w.policy.current!, pending: [p], out, deps: w.deps, meteredUsdExhausted: true });
+    expect(redTeamCalls).toHaveLength(1);
+    expect(w.judgeCalls).toHaveLength(1);
+    expect(w.ledger.gateRows().at(-1)).toMatchObject({ gate: 'G6', verdict: 'wait', code: 'metered-usd-exhausted' });
+    expect(out.skipped.some((skip) => skip.check === 'standing-G5')).toBe(false);
   });
 
   it('a FAILED model red team is not re-asked within the judge retry window', async () => {

@@ -313,7 +313,9 @@ describe('M407 auto-merge verification mutation fence', () => {
     await expect(transaction).resolves.toMatchObject({ persisted: true, authorityLive: true });
     expect(loadProposal(proposal.id)?.verifyResult).toMatchObject({ passed: true });
     // The slot is released afterwards.
-    await expect(withVerificationSlot(mirrorLeaseKey(repo), () => 'second', { waitMs: 50, pollMs: 10 })).resolves.toBe('second');
+    // Successful acquisition includes private-file and scheduler setup; allow
+    // bounded Windows setup time without changing the occupied-slot deadline.
+    await expect(withVerificationSlot(mirrorLeaseKey(repo), () => 'second', { waitMs: 2_000, pollMs: 10 })).resolves.toBe('second');
   });
 
   it('re-verifies a passing cache entry that belongs to a different diff', async () => {

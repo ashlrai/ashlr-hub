@@ -85,6 +85,8 @@ export interface VerseCaps {
   dailyBudgetUsd: number;
   /** Backlog items processed per tick. */
   perTickItems: number;
+  /** Actual per-tick durable-journal admission; absent on older servers. */
+  journalItemCapacity?: number;
   /** Concurrent sandboxed swarms per tick (batch mode). */
   parallel: number;
   /** Tick interval in loop mode (ms). */
@@ -386,11 +388,16 @@ export type VerseSafetyReport = SafetyReport;
 // ---------------------------------------------------------------------------
 
 export const VERSE_CAPS_BOUNDS = {
-  dailyBudgetUsd: { min: 0, max: 1_000 },
-  perTickItems: { min: 1, max: 50 },
-  parallel: { min: 1, max: 16 },
+  // Explicit USD preference; zero remains Stop. This never raises a signed
+  // spend allowance, and fractional dollar amounts remain supported.
+  dailyBudgetUsd: { min: 0, max: Number.MAX_SAFE_INTEGER },
+  // These are operator preferences, not provider or hardware capacity. The
+  // only numeric ceiling is exact integer representation; launch admission
+  // still applies queue, resource, journal, account, and signed-scope limits.
+  perTickItems: { min: 1, max: Number.MAX_SAFE_INTEGER },
+  parallel: { min: 1, max: Number.MAX_SAFE_INTEGER },
   intervalMs: { min: 30_000, max: 86_400_000 },
-  maxConcurrent: { min: 1, max: 32 },
+  maxConcurrent: { min: 1, max: Number.MAX_SAFE_INTEGER },
   /**
    * DELIBERATE DEVIATION from VERSE-CONTRACT-V2's "concurrency 0-32 each".
    *
@@ -405,7 +412,7 @@ export const VERSE_CAPS_BOUNDS = {
    * stop dispatch entirely, the honest lever is `dailyBudgetUsd: 0`, which the
    * daemon now really does obey.
    */
-  concurrency: { min: 1, max: 32 },
+  concurrency: { min: 1, max: Number.MAX_SAFE_INTEGER },
   subscriptionMaxPercent: { min: 1, max: 100 },
   foundryLimitMax: { min: 0, max: 1_000_000 },
 } as const;

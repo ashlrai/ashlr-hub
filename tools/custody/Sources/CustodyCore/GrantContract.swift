@@ -17,9 +17,12 @@ public enum GrantContract {
   // --- STANDING_GRANT_CEILINGS -------------------------------------------
   public static let maxTtlMs: Int64 = 2_592_000_000
   public static let maxRisk = "medium"
-  public static let maxFiles: Int64 = 10
-  public static let maxLines: Int64 = 300
-  public static let maxMergesPerRepoPerDay: Int64 = 24
+  public static let maxFiles: Int64 = 9_007_199_254_740_991
+  public static let maxLines: Int64 = 9_007_199_254_740_991
+  public static let maxMergesPerRepoPerDay: Int64 = 9_007_199_254_740_991
+  public static let legacyMaxFiles: Int64 = 10
+  public static let legacyMaxLines: Int64 = 300
+  public static let legacyMaxMergesPerRepoPerDay: Int64 = 24
   public static let localAuthoredMaxRisk = "low"
   public static let localAuthoredMaxFiles: Int64 = 4
   public static let localAuthoredMaxLines: Int64 = 150
@@ -50,7 +53,7 @@ public enum GrantContract {
   public static let keysEnvelope = ["payload", "signature"]
   public static let keysGrant = ["v", "grantId", "grantSeq", "keyId", "issuedAt", "expiresAt", "hostBinding", "authoritySurfaceDigest", "repos", "merge", "spend", "engines", "leader", "conductorGoals", "rollout"]
   public static let keysRepo = ["nameWithOwner", "stage", "enforcement", "maxRisk", "maxMergesPerDay"]
-  public static let keysMerge = ["maxFiles", "maxLines", "selfRepo"]
+  public static let keysMerge = ["maxFiles", "maxLines", "selfRepo", "volumePolicy"]
   public static let keysSpend = ["maxMode", "meteredUsdPerDay", "seats"]
   public static let keysSeat = ["enabled", "reserveFloorPercent", "maxSessionWindowPercent", "roles"]
   public static let keysLeader = ["classes", "vetoMinutes"]
@@ -59,6 +62,7 @@ public enum GrantContract {
   public static let keysStageRepo = ["nameWithOwner", "stage"]
   public static let keysCriteria = ["minMerges", "minPostMergeGreenPct", "maxRevertRatePct", "minHours", "maxSandboxViolations", "reserveBreaches"]
   // STANDING_GRANT_OPTIONAL_KEYS
+  public static let optionalKeysMerge = ["volumePolicy"]
   public static let optionalKeysSeat = ["maxSessionWindowPercent"]
 
   // --- Enum vocab (fleet-types.ts / routing/types.ts / leader-types.ts) ---

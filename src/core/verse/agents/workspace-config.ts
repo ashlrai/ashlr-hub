@@ -199,20 +199,41 @@ export function workspaceEnv(input: { path: string; name: string; rootPath: stri
 }
 
 /**
+ * A physical resource refusal, rather than a limit on the number of agents.
+ * The API's existing public-error handler exposes only this fixed message.
+ */
+export class WorkspacePortsExhaustedError extends Error {
+  readonly status = 409;
+  readonly code = 'AGENT_PORTS_EXHAUSTED';
+
+  constructor() {
+    super('No free workspace port range is available. Archive an unused workspace or configure this repository with ports: 0 if it needs no dedicated ports.');
+    this.name = 'WorkspacePortsExhaustedError';
+  }
+}
+
+/** Zero-port workspaces have no reservation, even though ASHLR_PORT is set. */
+export function portBlockAvailable(base: number, count: number, taken: ReadonlyArray<{ base: number; count: number }>): boolean {
+  if (count === 0) return true;
+  if (!Number.isSafeInteger(base) || !Number.isSafeInteger(count) || count < 1 || count > MAX_WORKSPACE_PORTS
+    || base < WORKSPACE_PORT_BASE || base + count > WORKSPACE_PORT_CEILING) return false;
+  return !taken.some((t) => t.count > 0 && base < t.base + t.count && t.base < base + count);
+}
+
+/**
  * The first free block of `count` ports at or above WORKSPACE_PORT_BASE that
  * overlaps no block in `taken`. Blocks are aligned to `max(count, 10)` so a
  * workspace keeps a recognisable range (41000, 41010, …). `count` 0 still
  * gets a base (ASHLR_PORT is always set) but reserves nothing.
  */
 export function allocatePortBlock(count: number, taken: ReadonlyArray<{ base: number; count: number }>): number {
-  const size = Math.max(1, count);
-  const stride = Math.max(DEFAULT_WORKSPACE_PORTS, size);
-  for (let base = WORKSPACE_PORT_BASE; base + size <= WORKSPACE_PORT_CEILING; base += stride) {
-    const clash = taken.some((t) => base < t.base + Math.max(1, t.count) && t.base < base + size);
-    if (!clash) return base;
+  if (count === 0) return WORKSPACE_PORT_BASE;
+  if (!Number.isSafeInteger(count) || count < 1 || count > MAX_WORKSPACE_PORTS) throw new WorkspacePortsExhaustedError();
+  const stride = Math.max(DEFAULT_WORKSPACE_PORTS, count);
+  for (let base = WORKSPACE_PORT_BASE; base + count <= WORKSPACE_PORT_CEILING; base += stride) {
+    if (portBlockAvailable(base, count, taken)) return base;
   }
-  // Every block taken (hundreds of live workspaces): share the first one rather than refuse.
-  return WORKSPACE_PORT_BASE;
+  throw new WorkspacePortsExhaustedError();
 }
 
 /** A workspace slug from a title: `fix-login-redirect`, ≤ 40 chars, never empty. */

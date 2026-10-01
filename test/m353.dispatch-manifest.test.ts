@@ -101,6 +101,17 @@ function writeRows(file: string, rows: unknown[]): void {
 }
 
 describe('dispatch manifest ledger', () => {
+  it.each(['grok-cli', 'devin-cli'] as const)('preserves shipped %s assignments in complete durable history', (backend) => {
+    const snapshot = makeSnapshot([{ backend, availability: 'open' }]);
+    const plan = planConcurrentDispatch([makeItem()], snapshot, { maxSlotsPerBackend: 1 }, () => backend);
+    const event = buildDispatchManifestEvent({ ts: new Date().toISOString(), plan });
+    expect(recordDispatchManifest(event)).toMatchObject({ recorded: true, backends: { [backend]: 1 } });
+    const read = readDispatchManifestEventsDetailed({ limit: 10, requireComplete: true });
+    expect(read).toMatchObject({ sourceState: 'healthy', complete: true, invalidRows: 0 });
+    expect(read.events).toHaveLength(1);
+    expect(read.events[0]).toMatchObject({ backendCounts: { [backend]: 1 }, assignments: [expect.objectContaining({ backend })] });
+  });
+
   it('preserves Meta API assignments and backend counts through durable readback', () => {
     const snapshot = makeSnapshot([{ backend: 'meta-muse', availability: 'open' }]);
     const plan = planConcurrentDispatch([makeItem({ id: 'meta-item' })], snapshot, { maxSlotsPerBackend: 1 }, () => 'meta-muse');

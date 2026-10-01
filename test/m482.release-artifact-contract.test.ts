@@ -857,6 +857,30 @@ describe('release artifact contract v1', () => {
     },
   );
 
+  it('admits the three explicit Agents guides from the actual npm file report, while refusing an unapproved sibling', () => {
+    const release = fixture();
+    const packagePath = join(release.packageRoot, 'package.json');
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+    const guides = ['docs/OPENAI-AGENTS-INTEGRATION.md', 'docs/DOTS-COMPANION.md', 'docs/AGENT-HARNESS-EVOLUTION.md'];
+    const sibling = 'docs/OPENAI-AGENTS-PRIVATE.md';
+    for (const file of [...guides, sibling]) write(join(release.packageRoot, file), '# Guide fixture\n');
+    writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, files: [...packageJson.files as string[], ...guides] })}\n`);
+    const packReport = (): RuntimeReleasePackFileRecord[] => {
+      const packed = runNpm(['pack', '--dry-run', '--ignore-scripts', '--json'], release.packageRoot);
+      expect(packed.status, packed.stderr).toBe(0);
+      return (JSON.parse(packed.stdout) as Array<{ files: RuntimeReleasePackFileRecord[] }>)[0]!.files;
+    };
+    const approved = packReport();
+    expect(approved.map(file => file.path).filter(path => path.startsWith('docs/')).sort()).toEqual([...guides].sort());
+    expect(buildRuntimeReleaseDependencyInventory(release.packageRoot, { packagedFiles: approved })).toMatchObject({ ok: true });
+    writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, files: [...packageJson.files as string[], ...guides, sibling] })}\n`);
+    const unapproved = packReport();
+    expect(unapproved.some(file => file.path === sibling)).toBe(true);
+    expect(buildRuntimeReleaseDependencyInventory(release.packageRoot, { packagedFiles: unapproved })).toEqual({
+      ok: false, reason: 'release package files declaration is not portable',
+    });
+  });
+
   it.each(['docs', 'docs/**', 'docs/../docs/README.md'])(
     'keeps the curated documentation allowance closed against %s',
     (declaration) => {

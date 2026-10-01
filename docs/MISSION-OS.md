@@ -40,7 +40,7 @@ actions are shown, not applied. New direction arrives as
 Leader memos (`ashlr leader show`), and every memo action can be undone with
 `ashlr leader veto`. Preview, shadow, approve and reconcile below still read the
 latest briefing already on disk; nothing in 3.10 writes a new one. See
-[Authority](AUTHORITY.md) for the Leader's action classes and the nightly job.
+[Authority](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTHORITY.md) for the Leader's action classes and the nightly job.
 
 The mission graph is a planning DAG. A work node names one exact enrolled
 repository and its upstream dependencies. A human-gate node says that a human

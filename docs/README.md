@@ -16,7 +16,7 @@ that every integration, provider or autonomous effect is active.
 | Separate tested firm machinery from remaining activation and integration work | [Autonomy gap map](AUTONOMY-GAP.md) |
 | Exercise signed graph execution and a deliberately lying candidate | [Firm graph fixture](FIRM-DEMO.md) |
 | Connect autonomy research to engineering acceptance | [Autonomy engineering brief](UNIVERSE-AUTONOMY-RESEARCH.md) |
-| Compare Ashlrverse with current agent platforms using measurable acceptance gates | [Competitive acceptance](VERSE-COMPETITIVE-ACCEPTANCE.md) |
+| Compare Ashlrverse with current agent platforms using measurable acceptance gates | [Competitive acceptance](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-COMPETITIVE-ACCEPTANCE.md) |
 | Run a first bounded experiment and inspect its results | [Quickstart](QUICKSTART.md) |
 | Understand the current components and their boundaries | [Architecture](ARCHITECTURE.md#current-runtime-map) |
 | Configure experiments, campaigns, portfolios and artifact delivery | [Ashlrverse operator guide](ASHLR-UNIVERSE.md) |
@@ -24,10 +24,13 @@ that every integration, provider or autonomous effect is active.
 | Install or roll back an exact trusted local package | [Pinned runtime](ASHLR-UNIVERSE.md#install-a-pinned-local-runtime) |
 | Change code and verify it locally | [Contributing — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/CONTRIBUTING.md) |
 | Build release evidence and distinguish distribution from activation | [Releasing — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING.md) |
-| Run agents in Ashlr Verse against your accounts and a local model | [Local fleet](LOCAL-FLEET.md) |
-| Decide whether to give one agent the whole context window or four a quarter each | [Plan deep, execute wide](LOCAL-CONTEXT-STRATEGY.md) |
-| Cut a release and publish without CI | [Releasing locally](RELEASING-LOCALLY.md) |
-| See what multi-folder workspaces, GitHub and MCP management still need | [Workspaces build contract](VERSE-WORKSPACES.md) |
+| Run agents in Ashlr Verse against your accounts and a local model | [Local fleet](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LOCAL-FLEET.md) |
+| Inspect managed OpenAI Agents sessions through the read-only CLI | [OpenAI Agents integration](OPENAI-AGENTS-INTEGRATION.md) |
+| Understand supported Dots companion workflows and the plugin-event integration path | [Dots companion](DOTS-COMPANION.md) |
+| Apply durable sessions, steering, tool discovery and context ideas to the existing harness | [Agent harness evolution](AGENT-HARNESS-EVOLUTION.md) |
+| Decide whether to give one agent the whole context window or four a quarter each | [Plan deep, execute wide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LOCAL-CONTEXT-STRATEGY.md) |
+| Cut a release and publish without CI | [Releasing locally](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md) |
+| See what multi-folder workspaces, GitHub and MCP management still need | [Workspaces build contract](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-WORKSPACES.md) |
 | Read a Verse chat's context meter, choose standard or expansive context, and continue a long session in a fresh chat | [Verse context windows — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-CONTEXT.md) |
 | Use the Verse workbench: Command, Fleet, Growth and Lessons, Mind, Chat and its panel (terminal, browser, changes, sources, reasoning), the Needs-you and Resources drawers, the repo wiki, playbooks, automations, ⌘K, budget modes and account health | [Ashlr Verse — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) |
 | Talk to the Leader from Verse, Telegram or the CLI: directives, answers, approvals, briefs, founder mode | [The Leader — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md) |

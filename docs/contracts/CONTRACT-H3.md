@@ -8,7 +8,8 @@ stress helper (`test/helpers/h3-stress.ts`).
 **Primary goal is PROOF.** H3 is a STRESS-TEST milestone. It drives MANY
 concurrent tasks/items through the REAL bounding / selection / accounting code
 and asserts the in-process caps hold under load: the daily USD budget cap, the
-per-tick item cap, the concurrency cap (`parallel <= 8`), the per-task budget
+per-tick journal cap, the configured daemon concurrency limit (and separate
+swarm BUILD cap of 8), the per-task budget
 reservation (`sum(authorized) <= pool`), the exact daily reset (no double-count,
 no lost spend), and id uniqueness under same-millisecond bursts.
 
@@ -52,7 +53,7 @@ scheduling luck. We drive load through the REAL cap logic and make the work
 instant + observable:
 
 1. **Mock the work, keep the controls real.** `runSwarm` (for `tick`-level
-   stress) and `runGoal` (for `runSwarm`-internal `sliceBudget` / `MAX_PARALLEL`
+   stress) and `runGoal` (for `runSwarm`-internal `sliceBudget` / BUILD concurrency
    stress) are mocked exactly as M24 / M12 already mock them. The mock records its
    call, optionally yields a microtask (`await Promise.resolve()` / a tiny timer)
    to force interleaving, returns a stub with a KNOWN `usage.estCostUsd` (so the
@@ -62,8 +63,9 @@ instant + observable:
    the budget gate + in-tick short-circuit (loop.ts:176-193, 297-300, 330-332),
    `perTickItems` top-K select (loop.ts:257-260), `tickSpent` accounting
    (loop.ts:297, 371, 418), `resetDayIfNeeded` (state.ts:157-165), the
-   `parallel` clamp (loop.ts:64-66), and `buildBudget`/`sliceBudget`/`MAX_PARALLEL`
-   (runner.ts:179, 206-265, 1085-1088).
+   configured daemon `parallel` limit and durable journal capacity of 64,
+   and `buildBudget`/`sliceBudget` and validated BUILD concurrency
+   (swarm/runner.ts).
 
 2. **Observe concurrency, don't race it.** Each mocked unit records its
    start/finish and an in-flight counter is sampled; the test asserts the OBSERVED
@@ -120,7 +122,7 @@ through the real stores under the isolated HOME):
 - `makeCountingGoalStub({ probe?, usagePerTask? })` — a `runGoal` mock factory
   (M12 shape) that registers with a concurrency probe and returns a `RunState`
   stub with a known `RunUsage`, so `runSwarm`'s internal BUILD-phase concurrency
-  (`MAX_PARALLEL`) and `sliceBudget` reservation run for real under load.
+  (operator preference) and `sliceBudget` reservation run for real under load.
 - `collectIds(n, mint)` — call `mint()` `n` times AS FAST AS POSSIBLE (tight loop,
   same millisecond where possible) and return the array of produced ids. The
   primitive behind IDS-COLLISION-SAFE — assert `new Set(ids).size === n`.
@@ -168,13 +170,16 @@ MOCKED to a KNOWN per-dispatch cost:
 
 ### BUILD 2 — `test/h3.concurrency-cap.test.ts` (CONCURRENCY-CAP-HOLDS)
 Drives the REAL `bounded()` (loop.ts) AND the REAL `runSwarm` internal
-`MAX_PARALLEL` clamp (runner.ts) under flood, via `makeConcurrencyProbe`:
+validated BUILD concurrency preference (runner.ts) under flood, via `makeConcurrencyProbe`:
 - `bounded(tasks, limit)` with MANY tasks never runs more than `limit`
   simultaneously — observed `peak() <= limit` for limits 1..N;
-- the daemon `parallel` cap is clamped to `<= 8` (loop.ts:64-66): a cfg requesting
-  `parallel: 100` results in an OBSERVED peak `<= 8` over a flooded tick;
-- `runSwarm`'s BUILD phase honors `MAX_PARALLEL = 8` (runner.ts:179, 1085-1088)
-  with `runGoal` MOCKED + probed: observed peak `<= 8` regardless of plan size;
+- the daemon honors a positive safe-integer `parallel` preference: requesting
+  `parallel: 17` produces an OBSERVED peak of 17, with no units left in flight;
+  a requested 70-item flood dispatches exactly the durable journal capacity of
+  64 items in that tick, leaving the rest for subsequent ticks;
+- `runSwarm`'s BUILD phase honors a positive safe-integer preference (default 3),
+  with `runGoal` MOCKED + probed; pending inventory and token/step reservations
+  still bound actual launches;
 - the per-task budget RESERVATION (`sliceBudget`, runner.ts:206-265) keeps
   `sum(authorized) <= pool`: a dedicated test drives the REAL BUILD phase under a
   CONSTRAINED total budget (so the pool binds) with a non-trivial per-task usage
@@ -182,8 +187,17 @@ Drives the REAL `bounded()` (loop.ts) AND the REAL `runSwarm` internal
   to each `runGoal` call, and asserts the sum across every concurrent batch stays
   `<= total` and each slice `<= 25%` of total (the old 8×25%=200% overshoot is
   impossible);
+
 - `bounded` preserves input-order results and never throws on a unit rejection
   (a rejected unit is a `rejected` settled result, siblings still settle).
+
+The 3.18 follow-up separately observes exact BUILD peaks of 9 and 17 for those
+requested preferences. A `Number.MAX_SAFE_INTEGER` preference launches the 30
+actual BUILD tasks in the fixture, not a preference-sized worker allocation;
+all units drain. Invalid programmatic preferences retain default 3, while
+malformed CLI preferences are refused before config loading or dispatch. These
+are mocked-work runtime regressions, not live provider capacity claims.
+
 
 ### BUILD 3 — `test/h3.daily-reset.test.ts` (DAILY-RESET-EXACT)
 Drives the REAL `resetDayIfNeeded` + `tick` accounting at the day boundary, using
@@ -261,11 +275,15 @@ Drives the REAL atomic stores under concurrent writers, via `spawnConcurrent`:
    of authorized per-task budgets in each concurrent batch stays `<= total` (the
    `sum(authorized) <= pool` bound the old 8×25%=200% overshoot violated).
 
-2. **CONCURRENCY-CAP-HOLDS** — No more than `limit` units run simultaneously, and
-   the daemon/swarm parallelism is clamped to `<= 8`. *Proven:* `makeConcurrencyProbe`
-   samples in-flight count inside MOCKED units flooded through the REAL `bounded()`
-   (loop.ts:82-105) and the REAL `runSwarm` BUILD phase (`MAX_PARALLEL`, runner.ts:179);
-   assert observed `peak() <= limit` and `peak() <= 8` for a cfg requesting more.
+2. **CONCURRENCY-CAP-HOLDS** — No more than the requested daemon `limit` units
+   run simultaneously; swarm BUILD concurrency follows its validated operator
+   preference. *Proven:*
+   `makeConcurrencyProbe` samples in-flight count inside MOCKED units flooded
+   through the REAL `bounded()` pool and the REAL `runSwarm` BUILD phase:
+   daemon `parallel: 17` reaches a peak of 17 and drains fully, while selection
+   admits 64 of 70 requested items to the durable journal. The swarm BUILD phase
+   launches at most the requested preference and actual pending inventory,
+   while retaining its token/step reservation bound.
 
 3. **DAILY-RESET-EXACT** — The daily spend reset zeroes exactly once at the day
    boundary and never double-counts or loses spend. *Proven:* `resetDayIfNeeded`

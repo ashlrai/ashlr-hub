@@ -142,6 +142,11 @@ describe('agents-model', () => {
     expect(checkSpawnForm({ ...form, prompt: ' ' }).ok).toBe(false);
     expect(checkSpawnForm({ ...form, isolate: false, seats: [...form.seats, { seatId: 'codex', model: 'g' }] }).ok).toBe(false);
     expect(checkSpawnForm({ ...form, isolate: false, autoMerge: true }).ok).toBe(false);
+    // Available seats, workspace admission and provider capacity govern fan-out;
+    // a fixed UI count must not reject an otherwise valid isolated task.
+    const manySeats = Array.from({ length: 32 }, (_, i) => ({ seatId: `seat-${i}`, model: 'm' }));
+    expect(checkSpawnForm({ ...form, seats: manySeats })).toEqual({ ok: true, cap: null });
+    expect(checkSpawnForm({ ...form, seats: manySeats, isolate: false }).ok).toBe(false);
     expect(titleFromPrompt('## Fix the **login** redirect\nmore')).toBe('Fix the login redirect');
   });
 });

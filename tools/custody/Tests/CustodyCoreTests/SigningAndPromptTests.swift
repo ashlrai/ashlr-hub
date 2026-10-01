@@ -3,6 +3,23 @@ import XCTest
 @testable import CustodyCore
 
 final class SigningAndPromptTests: XCTestCase {
+  func testNoVolumeCapPromptAndSigningBytesAreExplicit() throws {
+    let fx = try GrantFixture.load()
+    let p = fx.payload
+      .replacing([.key("merge"), .key("volumePolicy")], with: .string("operator-signed"))
+      .replacing([.key("merge"), .key("maxFiles")], with: .integer(GrantContract.maxSafeInteger))
+      .replacing([.key("merge"), .key("maxLines")], with: .integer(GrantContract.maxSafeInteger))
+      .replacing([.key("repos"), .index(1), .key("maxMergesPerDay")], with: .integer(GrantContract.maxSafeInteger))
+    let g = try StandingGrantValidator.validate(p, context: fixtureContext)
+    let prompt = GrantPromptRenderer.render(g)
+    XCTAssertTrue(prompt.reason.contains("No volume cap"))
+    XCTAssertTrue(prompt.reason.contains("all models/enforcement modes"))
+    XCTAssertTrue(prompt.fullScope.contains("maxFiles=No volume cap maxLines=No volume cap"))
+    XCTAssertTrue(prompt.fullScope.contains("maxMergesPerDay=No volume cap"))
+    XCTAssertEqual(GrantSigning.message(for: g), Data((GrantContract.signingDomain + g.canonical).utf8))
+    XCTAssertNotEqual(g.canonical, fx.canonical)
+  }
+
   var fx: GrantFixture!
   var grant: ValidatedGrant!
 

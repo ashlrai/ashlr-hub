@@ -53,6 +53,8 @@ import { currentHostBinding, verifyAuthoritySurface, type SurfaceTarget } from '
 import { BURNED_KEY_IDS, STANDING_GRANT_TRUST_ROOTS } from './trust-roots.js';
 import {
   STANDING_GRANT_CEILINGS,
+  STANDING_GRANT_DEFAULT_VOLUME_LIMITS,
+  volumeLimitLabel,
   STANDING_GRANT_KEYS,
   STANDING_GRANT_OPTIONAL_KEYS,
   STANDING_GRANT_PATTERNS,
@@ -142,7 +144,7 @@ function isoInstant(value: unknown, where: string): string {
   return text;
 }
 
-function parseRepo(value: unknown, i: number): StandingGrantRepo {
+function parseRepo(value: unknown, i: number, operatorVolumes = false): StandingGrantRepo {
   const where = `repos[${i}]`;
   const repo = record(value, where);
   exactKeys(repo, STANDING_GRANT_KEYS.repo, [], where);
@@ -151,12 +153,12 @@ function parseRepo(value: unknown, i: number): StandingGrantRepo {
     stage: oneOf(repo['stage'], REPO_STAGES, `${where}.stage`),
     enforcement: oneOf(repo['enforcement'], ENFORCEMENTS, `${where}.enforcement`),
     maxRisk: oneOf(repo['maxRisk'], MERGE_RISKS, `${where}.maxRisk`),
-    maxMergesPerDay: intIn(repo['maxMergesPerDay'], 0, STANDING_GRANT_CEILINGS.maxMergesPerRepoPerDay, `${where}.maxMergesPerDay`),
+    maxMergesPerDay: intIn(repo['maxMergesPerDay'], 0, operatorVolumes ? STANDING_GRANT_CEILINGS.maxMergesPerRepoPerDay : STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxMergesPerRepoPerDay, `${where}.maxMergesPerDay`),
   };
   if (parsed.enforcement === 'local') {
     const ceiling = STANDING_GRANT_CEILINGS.localEnforcement;
     if (MERGE_RISK_RANK[parsed.maxRisk] > MERGE_RISK_RANK[ceiling.maxRisk]) fail(`${where}: a locally enforced repo may only merge ${ceiling.maxRisk}-risk work`);
-    if (parsed.maxMergesPerDay > ceiling.maxMergesPerDay) fail(`${where}: a locally enforced repo may merge at most ${ceiling.maxMergesPerDay} times a day`);
+    if (!operatorVolumes && parsed.maxMergesPerDay > ceiling.maxMergesPerDay) fail(`${where}: a locally enforced repo may merge at most ${ceiling.maxMergesPerDay} times a day`);
   }
   return parsed;
 }
@@ -241,7 +243,7 @@ function parseStage(
     maxRisk,
     maxFiles: intIn(stage['maxFiles'], 1, grant.merge.maxFiles, `${where}.maxFiles`),
     maxLines: intIn(stage['maxLines'], 1, grant.merge.maxLines, `${where}.maxLines`),
-    maxMergesPerRepoPerDay: intIn(stage['maxMergesPerRepoPerDay'], 0, STANDING_GRANT_CEILINGS.maxMergesPerRepoPerDay, `${where}.maxMergesPerRepoPerDay`),
+    maxMergesPerRepoPerDay: intIn(stage['maxMergesPerRepoPerDay'], 0, grant.merge.volumePolicy === 'operator-signed' ? STANDING_GRANT_CEILINGS.maxMergesPerRepoPerDay : STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxMergesPerRepoPerDay, `${where}.maxMergesPerRepoPerDay`),
     leaderClasses,
     criteria: parseCriteria(stage['criteria'], `${where}.criteria`),
   };
@@ -260,15 +262,18 @@ function parsePayload(value: unknown): StandingGrantV1 {
   if (!Array.isArray(grant['repos']) || grant['repos'].length < 1 || grant['repos'].length > STANDING_GRANT_CEILINGS.maxRepos) {
     fail(`repos must list 1–${STANDING_GRANT_CEILINGS.maxRepos} repos`);
   }
-  const repos = (grant['repos'] as unknown[]).map(parseRepo);
+  const merge = record(grant['merge'], 'merge');
+  exactKeys(merge, STANDING_GRANT_KEYS.merge, STANDING_GRANT_OPTIONAL_KEYS.merge, 'merge');
+  const operatorVolumes = merge['volumePolicy'] === 'operator-signed';
+  if (Object.prototype.hasOwnProperty.call(merge, 'volumePolicy') && !operatorVolumes) fail('merge.volumePolicy must be operator-signed');
+  const repos = (grant['repos'] as unknown[]).map((entry, i) => parseRepo(entry, i, operatorVolumes));
   const lowered = repos.map((repo) => repo.nameWithOwner.toLowerCase());
   if (new Set(lowered).size !== lowered.length) fail('repos lists a repo twice');
 
-  const merge = record(grant['merge'], 'merge');
-  exactKeys(merge, STANDING_GRANT_KEYS.merge, [], 'merge');
   const parsedMerge = {
-    maxFiles: intIn(merge['maxFiles'], 1, STANDING_GRANT_CEILINGS.maxFiles, 'merge.maxFiles'),
-    maxLines: intIn(merge['maxLines'], 1, STANDING_GRANT_CEILINGS.maxLines, 'merge.maxLines'),
+    maxFiles: intIn(merge['maxFiles'], 1, operatorVolumes ? STANDING_GRANT_CEILINGS.maxFiles : STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxFiles, 'merge.maxFiles'),
+    maxLines: intIn(merge['maxLines'], 1, operatorVolumes ? STANDING_GRANT_CEILINGS.maxLines : STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxLines, 'merge.maxLines'),
+    ...(operatorVolumes ? { volumePolicy: 'operator-signed' as const } : {}),
     selfRepo: oneOf(merge['selfRepo'], SELF_REPO_MODES, 'merge.selfRepo'),
   };
 
@@ -594,7 +599,7 @@ export function eliteDirectStage(
     maxRisk: STANDING_GRANT_CEILINGS.maxRisk,
     maxFiles: scope.merge.maxFiles,
     maxLines: scope.merge.maxLines,
-    maxMergesPerRepoPerDay: STANDING_GRANT_CEILINGS.maxMergesPerRepoPerDay,
+    maxMergesPerRepoPerDay: scope.merge.volumePolicy === 'operator-signed' ? Math.max(...scope.repos.map((repo) => repo.maxMergesPerDay)) : STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxMergesPerRepoPerDay,
     leaderClasses: [...leaderClasses],
     criteria: criteria(10, 90, 10, 24),
   };
@@ -750,7 +755,7 @@ export function buildDefaultGrantPayload(input: GrantDraftInput): StandingGrantV
         stage: canMerge ? 'merge' : 'propose',
         enforcement: local ? 'local' : 'server',
         maxRisk: risk,
-        maxMergesPerDay: Math.min(plan?.perDay ?? 4, local ? STANDING_GRANT_CEILINGS.localEnforcement.maxMergesPerDay : STANDING_GRANT_CEILINGS.maxMergesPerRepoPerDay),
+        maxMergesPerDay: Math.min(plan?.perDay ?? 4, local ? STANDING_GRANT_CEILINGS.localEnforcement.maxMergesPerDay : STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxMergesPerRepoPerDay),
       },
       // Unknown repos join at the last rung, propose-only.
       enter: plan ? STAGE_ORDER.indexOf(plan.enter) : STAGE_ORDER.length - 1,
@@ -801,7 +806,7 @@ export function buildDefaultGrantPayload(input: GrantDraftInput): StandingGrantV
     // One rung: the grant's own scope, no ramp (see eliteDirectStage).
     const engines = devin ? withDevin(PHASE3_ENGINES) : [...PHASE3_ENGINES];
     const repos = planned.map((p) => p.repo);
-    const merge = { maxFiles: STANDING_GRANT_CEILINGS.maxFiles, maxLines: STANDING_GRANT_CEILINGS.maxLines, selfRepo: 'merge-non-authority' as const };
+    const merge = { maxFiles: STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxFiles, maxLines: STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxLines, selfRepo: 'merge-non-authority' as const };
     stages.splice(0, stages.length, eliteDirectStage({ repos, engines, merge }, []));
   }
 
@@ -815,7 +820,7 @@ export function buildDefaultGrantPayload(input: GrantDraftInput): StandingGrantV
     hostBinding: input.hostBinding,
     authoritySurfaceDigest: input.authoritySurfaceDigest,
     repos: planned.map((p) => p.repo),
-    merge: { maxFiles: STANDING_GRANT_CEILINGS.maxFiles, maxLines: STANDING_GRANT_CEILINGS.maxLines, selfRepo: 'merge-non-authority' },
+    merge: { maxFiles: STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxFiles, maxLines: STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxLines, selfRepo: 'merge-non-authority' },
     spend: { maxMode: 'balanced', meteredUsdPerDay: 0, seats },
     engines: devin ? withDevin(PHASE3_ENGINES) : [...PHASE3_ENGINES],
     leader: { classes: ['A', 'B'], vetoMinutes: 30 },
@@ -872,7 +877,7 @@ export function buildReapprovalGrantPayload(
       ...repo,
       enforcement: 'local' as const,
       maxRisk: MERGE_RISK_RANK[repo.maxRisk] > MERGE_RISK_RANK[ceiling.maxRisk] ? ceiling.maxRisk : repo.maxRisk,
-      maxMergesPerDay: Math.min(repo.maxMergesPerDay, ceiling.maxMergesPerDay),
+      maxMergesPerDay: current.merge.volumePolicy === 'operator-signed' ? repo.maxMergesPerDay : Math.min(repo.maxMergesPerDay, ceiling.maxMergesPerDay),
     };
   });
   const payload: StandingGrantV1 = {
@@ -913,12 +918,13 @@ export function describeGrantScope(grant: StandingGrantV1): string[] {
   const lines = [
     `Grant #${grant.grantSeq} (${grant.grantId.slice(0, 8)}), key ${grant.keyId}, valid ${grant.issuedAt} → ${grant.expiresAt}`,
     `Engines: ${grant.engines.join(', ')} · budget up to ${grant.spend.maxMode} · metered spend $${grant.spend.meteredUsdPerDay}/day`,
-    `Merge caps: ${grant.merge.maxFiles} files / ${grant.merge.maxLines} lines · ashlr-hub: ${grant.merge.selfRepo}`,
+    `Merge caps: ${volumeLimitLabel(grant.merge.maxFiles)} files / ${volumeLimitLabel(grant.merge.maxLines)} lines · ashlr-hub: ${grant.merge.selfRepo}`,
     `Leader: class ${grant.leader.classes.length > 0 ? grant.leader.classes.join('+') : 'none'} · veto window ${grant.leader.vetoMinutes} min · conductors ${grant.conductorGoals ? 'live' : 'dry-run'}`,
+    `Volume policy: ${grant.merge.volumePolicy === 'operator-signed' ? 'operator-signed limits apply to all producer models and enforcement modes; risk and verification remain binding' : 'legacy local 4 files / 150 lines and local-enforcement 4 merges/day remain'}`,
     ...(grantHasEliteDirect(grant) ? [ELITE_DIRECT_ONE_LINE] : []),
   ];
   for (const repo of grant.repos) {
-    lines.push(`  ${repo.nameWithOwner}: up to ${repo.stage}, ${repo.maxRisk} risk, ${repo.maxMergesPerDay}/day, ${repo.enforcement} enforcement`);
+    lines.push(`  ${repo.nameWithOwner}: up to ${repo.stage}, ${repo.maxRisk} risk, ${volumeLimitLabel(repo.maxMergesPerDay)}/day, ${repo.enforcement} enforcement`);
   }
   for (const [seatId, seat] of Object.entries(grant.spend.seats)) {
     if (engineOfSeatId(seatId) === 'devin') {
@@ -931,10 +937,10 @@ export function describeGrantScope(grant: StandingGrantV1): string[] {
   grant.rollout.stages.forEach((stage, i) => {
     const merging = stage.repos.filter((r) => r.stage === 'merge').map((r) => r.nameWithOwner.split('/')[1]);
     if (stage.id === ELITE_DIRECT_STAGE_ID) {
-      lines.push(`  stage ${i + 1} ${stage.id}: ${stage.repos.length} repos (${merging.length > 0 ? `merging ${merging.join(', ')}` : 'propose only'}), ${stage.maxRisk} risk ${stage.maxFiles}/${stage.maxLines} — elite models land on green tests, no judge; no ramp`);
+      lines.push(`  stage ${i + 1} ${stage.id}: ${stage.repos.length} repos (${merging.length > 0 ? `merging ${merging.join(', ')}` : 'propose only'}), ${stage.maxRisk} risk ${volumeLimitLabel(stage.maxFiles)}/${volumeLimitLabel(stage.maxLines)} — elite models land on green tests, no judge; no ramp`);
       return;
     }
-    lines.push(`  stage ${i + 1} ${stage.id}: ${stage.repos.length} repos (${merging.length > 0 ? `merging ${merging.join(', ')}` : 'propose only'}), ${stage.maxRisk} risk ${stage.maxFiles}/${stage.maxLines}, ≥${stage.criteria.minHours} h to advance`);
+    lines.push(`  stage ${i + 1} ${stage.id}: ${stage.repos.length} repos (${merging.length > 0 ? `merging ${merging.join(', ')}` : 'propose only'}), ${stage.maxRisk} risk ${volumeLimitLabel(stage.maxFiles)}/${volumeLimitLabel(stage.maxLines)}, ≥${stage.criteria.minHours} h to advance`);
   });
   return lines;
 }

@@ -6,7 +6,7 @@
 
 **[verse.ashlr.ai](https://verse.ashlr.ai)**
 
-[Install](#install) · [See the workbench](#what-it-is) · [Read the guide](docs/VERSE.md) · [Explore the ecosystem](https://verse.ashlr.ai/ecosystem) · [Star Verse on GitHub](https://github.com/ashlrai/ashlr-hub)
+[Install](#install) · [See the workbench](#what-it-is) · [Read the guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) · [Explore the ecosystem](https://verse.ashlr.ai/ecosystem) · [Star Verse on GitHub](https://github.com/ashlrai/ashlr-hub)
 
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
@@ -15,15 +15,15 @@
 
 ## Install
 
-Install Verse 3.17.2 from its versioned GitHub release:
+Install Verse 3.18.0 from its versioned GitHub release:
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.2/ashlr-hub-3.17.2.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.18.0/ashlr-hub-3.18.0.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
 ashlr verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 On an Apple silicon Mac, download the
-[v3.17.2 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.2/Ashlr_3.17.2_aarch64_locally-signed.dmg).
+[v3.18.0 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.18.0/Ashlr_3.18.0_aarch64_locally-signed.dmg).
 It is locally signed, not Apple notarized; macOS may require **Open Anyway** on
 first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
@@ -59,18 +59,46 @@ manifests, schemas and stores need no naming migration.
 
 The user guide is [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
 
-### What's in Verse 3.17
+### What's in Verse 3.18
 
-Verse 3.17 adds a searchable local module map, searchable account/model choices,
-portable efficiency-plugin connections, and more reliable phone session checks
-and prompt retries. Account and worker rosters have no fixed count cap; runtime
-capacity, quotas and signed authority still govern execution. Existing Agents,
-computer tools, phone gateway and learning remain available.
+**Work with me** opens your interactive chats: guide the agent, inspect its
+tools and context, review changes and continue on another account or local model.
+**Work for me** opens the fleet: delegate tasks, review work, guide the Leader
+and manage autonomous execution within the authority you sign. Both workspaces
+share accounts and projects, and switching between them does not start work or
+change permission mode. The app restores the workspace you last used.
+
+Task fan-out has no fixed six-seat ceiling. Workspace retention defaults to 25;
+`ASHLR_VERSE_AGENT_CAP=none` disables retention-driven automatic archiving, or
+set a positive safe-integer capacity appropriate to your machine. Provider
+quotas, local hardware, available ports and workspace isolation still apply.
+Scheduling and cash-budget preferences no longer have the former preset UI
+ceilings. The panel reports the current 64-item journal capacity per tick;
+remaining work can continue on subsequent ticks.
+The local module map, searchable model roster, efficiency plugin and phone
+gateway remain available in both workflows.
+
+The grant editor lets you review each listed account's enabled state, roles,
+reserve and session ceiling. Set 0% reserve or No session ceiling explicitly
+when appropriate; current usage, budget preferences and provider readiness still
+determine eligibility. Editing a draft does not change the live grant.
+
+An exhausted positive cash allowance keeps eligible resident subscription and
+local work available without inventing dollar headroom. Actual metered or
+unknown-cost work waits; explicit $0 remains the loop's Stop setting.
+
+The read-only `ashlr openai-agents` CLI inspects managed OpenAI Agents session
+metadata with a host-held API key. API access is separate from subscriptions,
+and inventory does not qualify an execution seat. See the
+[Agents integration guide](docs/OPENAI-AGENTS-INTEGRATION.md),
+[Dots companion guide](docs/DOTS-COMPANION.md) and
+[harness evolution plan](docs/AGENT-HARNESS-EVOLUTION.md) for the supported
+commands and next integration steps.
 
 | | What you get | Guide |
 |---|---|---|
 | **Talk to the Leader** | One conversation across Mind (⌘4), Telegram and `ashlr leader say`. Standing directives (`focus:`, `stop:`, `priority:`), answers to its questions, early approval or veto of its actions and Telegram buttons. In 3.15 it runs in founder mode: morning and evening briefs, an instant brief on "status", "go build X" turned into work under the grant, one question at a time, and a daily self-improvement pick. | [LEADER.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md) |
-| **Autonomy with custody** | A Touch ID standing grant names repos, engines, caps and spend. Every change passes gates G0–G7 and a judge from another model family; merges are SHA-pinned, watched for two hours and reverted if red. Command shows the rollout ladder (stage x of 8); Fleet shows every shadow decision and why. | [STANDING-AUTHORITY.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md) |
+| **Autonomy with custody** | A Touch ID standing grant names repos, engines, change-volume limits and spend. Verified changes follow gates G0–G7; eligible agents under a signed elite-direct policy land without a separate judge. Merges are SHA-pinned, watched and reverted if red. Work for me shows the current grant and rollout state. | [AUTHORITY.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTHORITY.md) |
 | **A multi-seat workbench** | Claude Code, several Codex accounts, Grok, local models and Devin side by side, each pinned to its own profile. Auto seat, Compare, cheap-first and one-click handoff across seats. A panel of Terminal (command blocks, an Agent tab), Browser (observation by default; guarded actions under a separate grant), Changes (a checkpoint before every turn, Accept/Reject, Undo/Redo), Sources and Reasoning, plus focus mode. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) |
 | **Resources, ready or not** | ⌘. shows every account, local runtime, cloud credits and Devin, each with a "Chat: ready" and a "Fleet: ready · reserve kept" line and the command that fixes it. | [VERSE.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md#resources-the-drawer-and-the-bar-311) |
 | **Cloud and Devin** | Hand a scoped task to a Claude Code cloud or Devin lane for a reported PR, or chat in a separate Devin cloud or CLI seat. The signed-in Devin CLI defaults to Cognition SWE-2 High; cloud sessions use ACUs and do not report an underlying model. Lane PRs reach Needs you and the standing gates. Cloud Devin needs two judge families; eligible local CLI work can use a signed elite-direct grant. | [CLOUD.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md), [DEVIN.md](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md) |
@@ -104,7 +132,7 @@ separate Node.js install to run.
 
 ### Install
 
-The [v3.17.2 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.2)
+The [v3.18.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.18.0)
 includes an arm64 DMG. It is locally signed, not Apple Developer ID notarized,
 so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
@@ -192,7 +220,7 @@ The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.2/ashlr-hub-3.17.2.tgz
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.18.0/ashlr-hub-3.18.0.tgz
 ashlr --version
 ashlr verse                 # start the server and open http://127.0.0.1:7777/verse/
 ```
@@ -333,11 +361,12 @@ switch, backends, sandboxing, the command reference, the safety model, the
 | **3.12–3.13** | Your key is the trust root; guided `ashlr authority setup`; the host-verified `ashlr/verify` check; cloud PRs into the standing gates; the resident runtime under a standing grant (`ashlr authority resident start`) | Shipped |
 | **3.14** | Talk to the Leader in Verse, Telegram and the CLI; Leader reliability; accounts ready in both chat and fleet; the rollout ladder on Command and shadow decisions on Fleet; local enforcement for free-plan private repos; `file:../` sibling dependencies; a sidecar that cannot freeze; chart polish | Shipped |
 | **3.15** | Founder-mode Leader; Devin as chat seats, a lane and a fleet producer under a two-judge rule; the workbench panel (terminal blocks, browser, checkpoints, sources and reasoning); every seat together; playbooks and automations; the Jev decision layer; retros and approved knowledge (Growth ▸ Lessons); a private repo wiki and Ask | Included in the published 3.16 release |
+| **3.18** | Work with me and Work for me, configurable fleet volume, scalable workspace retention and comparable usage reports | [3.18.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.18.0) |
 | **3.17** | Local module map, scalable account/model rosters, portable efficiency-plugin connection and phone reliability | [3.17.2 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.2) |
 | **3.16** | Native Agents workbench and guarded computer tools; optional authenticated phone gateway; reviewable learning evidence; Devin CLI SWE-2 High default; local signing and release fixes | [3.16.1 published](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.1) |
 
-Releases are built and published locally (GitHub Actions is off); the procedure
-is in [Releasing without CI](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
+Release artifacts are built and published locally; the source also runs GitHub
+CI and dependency audit checks. The local build procedure is in [Releasing without CI](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
 A version is published only once `npm view @ashlr/hub version` confirms it;
 repository or changelog state alone is not release evidence.
 
@@ -360,7 +389,7 @@ dated, GitHub-sourced star history of these six repositories and their sum.
 | **[AshlrCode](https://github.com/ashlrai/ashlrcode)** | Run a multi-provider coding agent in the terminal. |
 | **[Morphkit](https://github.com/ashlrai/morphkit)** | Turn a TypeScript/React app into a SwiftUI project. |
 
-The [ecosystem map](docs/ECOSYSTEM-MAP.md) records older composition ideas; it
+The [ecosystem map](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ECOSYSTEM-MAP.md) records older composition ideas; it
 is a dated planning snapshot, not a claim that every integration is live. Each
 repository has its own install instructions, release state and star count.
 

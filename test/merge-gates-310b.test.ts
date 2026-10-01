@@ -437,3 +437,18 @@ describe('rows, digests and dedup', () => {
     expect(appended).toHaveLength(2);
   });
 });
+
+
+describe('operator signed volume gates', () => {
+  it('allows larger local low-risk scope only with consistent effective signed policy', () => {
+    const rp = repoPolicy(REPO, { volumePolicy: 'operator-signed', enforcement: 'local', maxFiles: 80, maxLines: 5000, maxMergesPerDay: 100 });
+    const mp = { ...standingPolicy([]).merge, volumePolicy: 'operator-signed' as const, maxFiles: 80, maxLines: 5000, localAuthored: { maxRisk: 'low' as const, maxFiles: 80, maxLines: 5000 } };
+    const input = { repoPolicy: rp, mergePolicy: mp, producerLocal: true, risk: 'low' as const, scope: { files: 40, changedLines: 2000 } };
+    expect(g2(input)).toMatchObject({ verdict: 'pass', caps: { maxRisk: 'low', maxFiles: 80, maxLines: 5000 } });
+    expect(g2({ ...input, config: { maxFiles: 20 } })).toMatchObject({ verdict: 'refuse', code: 'files-over-cap' });
+    expect(g2({ ...input, risk: 'medium' })).toMatchObject({ verdict: 'refuse' });
+    expect(dailyMergeCap(rp)).toBe(100);
+    expect(dailyMergeCap({ ...rp, volumePolicy: undefined })).toBe(4);
+    expect(g2({ ...input, mergePolicy: { ...mp, volumePolicy: undefined } })).toMatchObject({ verdict: 'refuse' });
+  });
+});

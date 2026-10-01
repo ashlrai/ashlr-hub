@@ -63,6 +63,7 @@ vi.mock('../src/core/swarm/runner.js', () => ({
 
 const mockRunGoal = vi.fn();
 vi.mock('../src/core/run/orchestrator.js', () => ({
+  DEFAULT_MAX_TOKENS: 50_000,
   runGoal: (...args: unknown[]) => mockRunGoal(...args),
 }));
 
@@ -278,6 +279,56 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('M116 — default config (batch mode)', () => {
+  it('runs requested batch concurrency above eight while bounding workers by actual inventory', async () => {
+    enroll(tmpRepo);
+    backlogItems = Array.from({ length: 17 }, (_, i) => makeItem(`wide-${i}`, tmpRepo));
+    const cfg = makeCfg({ perTickItems: 17, parallel: 17 });
+    mockLoadConfig.mockReturnValue(cfg);
+    let concurrent = 0;
+    let peak = 0;
+    const run = swarmStub(tmpRepo, 25);
+    mockRunSwarm.mockImplementation(async () => {
+      concurrent++;
+      peak = Math.max(peak, concurrent);
+      try { return await run(); } finally { concurrent--; }
+    });
+    const result = await tick(cfg, { dryRun: false });
+    expect(result.reason).toBe('ok');
+    expect(mockRunSwarm).toHaveBeenCalledTimes(17);
+    expect(peak).toBe(17);
+  });
+
+  it('admits more than fifty items but retains the sixty-four-item journal boundary', async () => {
+    enroll(tmpRepo);
+    backlogItems = Array.from({ length: 70 }, (_, i) => makeItem(`journal-${i}`, tmpRepo));
+    const cfg = makeCfg({ perTickItems: 129, parallel: Number.MAX_SAFE_INTEGER });
+    mockLoadConfig.mockReturnValue(cfg);
+    const result = await tick(cfg, { dryRun: false });
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(64);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(64);
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('uses existing defaults for invalid capacity %s without widening dispatch', async (value) => {
+    enroll(tmpRepo);
+    backlogItems = Array.from({ length: 5 }, (_, i) => makeItem(`invalid-${i}`, tmpRepo));
+    const cfg = makeCfg({ perTickItems: value, parallel: value, maxConcurrent: value,
+      concurrency: { local: value, cloud: value, total: value } });
+    mockLoadConfig.mockReturnValue(cfg);
+    let concurrent = 0;
+    let peak = 0;
+    const run = swarmStub(tmpRepo, 15);
+    mockRunSwarm.mockImplementation(async () => {
+      concurrent++;
+      peak = Math.max(peak, concurrent);
+      try { return await run(); } finally { concurrent--; }
+    });
+    const result = await tick(cfg, { dryRun: false });
+    expect(result.reason).toBe('ok');
+    expect(mockRunSwarm).toHaveBeenCalledTimes(3);
+    expect(peak).toBe(2);
+  });
+
   it('processes items up to parallel cap; no continuous looping', async () => {
     enroll(tmpRepo);
     backlogItems = [

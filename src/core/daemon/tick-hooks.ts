@@ -69,6 +69,8 @@ export interface TickHookContext {
    * publish state for dispatch — the loop has already held production.
    */
   signal?: AbortSignal;
+  /** Positive metered-USD allowance exhausted; narrows inference only, never raises authority. */
+  meteredUsdExhausted?: true;
 }
 
 export interface BeforeTickResult {

@@ -58,6 +58,7 @@ vi.mock('../src/core/util/durability.js', () => ({
 }));
 
 import {
+  accountDaemonSpendGuard,
   armDaemonSpendGuard,
   clearDaemonSpendGuard,
   daemonSpendGuardPath,
@@ -110,6 +111,34 @@ afterEach(() => {
 });
 
 describe('daemon accounting power-loss barriers', () => {
+  it('preserves over-cap realized spend only for an explicit exact-zero journal', () => {
+    const input = { itemIds: ['free-item'], daemonStartedAt: null, budgetDay: '2026-08-05',
+      dailyBudgetUsd: 1, spentUsdAtArm: 2, reservedUsd: 0, now: new Date('2026-08-05T12:00:00.000Z') };
+    expect(armDaemonSpendGuard(input).ok).toBe(false);
+    const armed = armDaemonSpendGuard({ ...input, zeroCostOnly: true });
+    expect(armed.ok).toBe(true);
+    if (!armed.ok) return;
+    expect(readDaemonSpendGuard().guard).toEqual(armed.guard);
+    expect(accountDaemonSpendGuard(state(2), armed.guard, 0)).toMatchObject({ ok: true, state: { todaySpentUsd: 2 } });
+    expect(accountDaemonSpendGuard(state(2), armed.guard, 0.01).ok).toBe(false);
+    expect(readDaemonSpendGuard().guard?.token).toBe(armed.guard.token);
+    expect(accountDaemonSpendGuard({ ...state(2), spendGuardAccounting: {
+      budgetDay: '2026-08-05', accountingId: armed.guard.accountingId, budgetExhausted: true,
+    } }, armed.guard, 0).ok).toBe(false);
+  });
+
+  it.each([{ zeroCostOnly: false }, { reservedUsd: 1 }, { exhaustBudgetDay: true }, { dailyBudgetUsd: 0 }])(
+    'refuses malformed zero-cost journal authority %j', (change) => {
+      const armed = armDaemonSpendGuard({ itemIds: ['free-item'], daemonStartedAt: null,
+        budgetDay: '2026-08-05', dailyBudgetUsd: 1, spentUsdAtArm: 2, reservedUsd: 0,
+        zeroCostOnly: true, now: new Date('2026-08-05T12:00:00.000Z') });
+      expect(armed.ok).toBe(true);
+      if (!armed.ok) return;
+      fs.writeFileSync(daemonSpendGuardPath(), JSON.stringify({ ...armed.guard, ...change }), { mode: 0o600 });
+      expect(readDaemonSpendGuard()).toMatchObject({ exists: true, malformed: true, guard: null });
+    },
+  );
+
   it('orders state temp write and file fsync before rename and parent fsync', () => {
     expect(saveDaemonStateResult(state()).ok).toBe(true);
     expect(durability.events).toEqual([
@@ -122,6 +151,7 @@ describe('daemon accounting power-loss barriers', () => {
 
   it('orders exclusive guard write and file fsync before parent fsync', () => {
     expect(arm().ok).toBe(true);
+    expect(JSON.parse(fs.readFileSync(daemonSpendGuardPath(), 'utf8'))).not.toHaveProperty('zeroCostOnly');
     expect(durability.events).toEqual([
       'write-guard-file',
       'fsync-guard-file',

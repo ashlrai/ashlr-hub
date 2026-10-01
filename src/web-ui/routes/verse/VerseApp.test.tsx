@@ -100,6 +100,36 @@ afterEach(() => {
   reloadResourcesUiForTest();
 });
 
+describe('work intents', () => {
+  it('navigates between chat and fleet without changing authority or dispatch', async () => {
+    const user = userEvent.setup();
+    mount();
+    const modes = screen.getByRole('navigation', { name: 'How you work' });
+    const withMe = within(modes).getByRole('button', { name: 'Work with me' });
+    const forMe = within(modes).getByRole('button', { name: 'Work for me' });
+    expect(withMe).toHaveAttribute('aria-pressed', 'true');
+    expect(forMe).toHaveAttribute('aria-pressed', 'false');
+    await user.click(forMe);
+    expect(getVerseUiState().section).toBe('fleet');
+    expect(forMe).toHaveAttribute('aria-pressed', 'true');
+    await user.click(withMe);
+    expect(getVerseUiState().section).toBe('chat');
+    expect(surface('fleet')).toHaveAttribute('hidden');
+    expect(surface('chat')).not.toHaveAttribute('hidden');
+    expect(net.fetch.mock.calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true);
+  });
+
+  it('keeps both intents reachable in the compact shell and leaves shared tools neutral', async () => {
+    viewport = mockCompactViewport();
+    mount();
+    const modes = screen.getByRole('navigation', { name: 'How you work' });
+    expect(within(modes).getAllByRole('button')).toHaveLength(2);
+    act(() => setVerseSection('settings'));
+    expect(within(modes).getAllByRole('button').every((b) => b.getAttribute('aria-pressed') === 'false')).toBe(true);
+    expect(within(rail()).getByRole('button', { name: 'Settings and more (Settings open)' })).toHaveAttribute('aria-current', 'page');
+  });
+});
+
 describe('the rail', () => {
   it('shows the five surfaces in ⌘1–⌘5 order and mounts Chat first', async () => {
     mount();

@@ -68,7 +68,7 @@ import {
   type DraftRepoInput,
   type DraftSeatInput,
 } from '../authority/standing-grant.js';
-import { applyGrantScopeEdit, editableEngines, grantScopeDiff, parseGrantScopeEdit, type GrantDiffLine, type GrantScopeEdit } from '../authority/grant-scope.js';
+import { applyGrantScopeEdit, editableEngines, editableSeatPolicies, grantScopeDiff, parseGrantScopeEdit, type GrantDiffLine, type GrantScopeEdit } from '../authority/grant-scope.js';
 import type { GrantDraftEditable } from '../authority/grant-scope-types.js';
 import { probeServerEnforcementAll, type GithubGet } from '../authority/server-enforcement.js';
 import { currentHostBinding, verifyAuthoritySurface } from '../authority/surface.js';
@@ -765,8 +765,10 @@ export async function buildStandingGrantDraft(
     });
   }
   // 3.15: the grant editor's choices, applied to the server's own draft —
-  // only a choice WITHIN it (authority/grant-scope.ts); invalid is refused.
+  // available scope and explicit signed volume choices (grant-scope.ts); invalid is refused.
   const editable = {
+    volumeLimits: true,
+    seatPolicies: editableSeatPolicies(payload),
     repos: payload.repos.map((repo) => repo.nameWithOwner),
     engines: editableEngines(payload),
     leaderClasses: ['A', 'B'],

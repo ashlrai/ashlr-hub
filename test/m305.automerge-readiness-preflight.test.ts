@@ -151,7 +151,7 @@ describe('M305 evaluateAutoMergeReadinessPreflight', () => {
       trustBasis: 'evidence',
       pushToRemote: true,
       allowWithoutVerification: false,
-      maxAutomergeFiles: Number.MAX_SAFE_INTEGER,
+      maxAutomergeFiles: Number.MAX_SAFE_INTEGER + 1,
       protectedRemote: {
         branchProtection: true,
         requiredChecks: [{ context: 'ci/test', appId: '15368' }],
@@ -160,7 +160,7 @@ describe('M305 evaluateAutoMergeReadinessPreflight', () => {
 
     expect(r).toMatchObject({ ready: false, permanent: true });
     expect(r.reason).toMatch(/evidence preflight: scope cap policy invalid/);
-    expect(r.reason).toMatch(/max-files-exceeds-policy/);
+    expect(r.reason).toMatch(/max-files-invalid/);
   });
 
   it('reuses authority, provenance, and risk basics as blockers', () => {

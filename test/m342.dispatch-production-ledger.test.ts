@@ -949,6 +949,15 @@ afterEach(() => {
 });
 
 describe('M342 dispatch production ledger', () => {
+  it.each(['grok-cli', 'devin-cli'] as const)('preserves shipped %s identity without degrading durable duplicate-suppression history', (backend) => {
+    const event = makeEvent({ backend, ts: new Date().toISOString(), itemId: `shipped-${backend}`, model: null, routeSnapshot: undefined });
+    expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const read = readDispatchProductionEventsDetailed({ limit: 10 });
+    expect(read).toMatchObject({ sourceState: 'healthy', complete: true, invalidRows: 0 });
+    expect(read.events).toHaveLength(1);
+    expect(read.events[0]?.backend).toBe(backend);
+  });
+
   it('appends and reads dispatch-production events newest first', () => {
     const written = recordDispatchProduction([
       makeEvent({ itemId: 'old', ts: '2026-07-07T23:59:00.000Z' }),

@@ -137,6 +137,7 @@ vi.mock('../src/core/portfolio/queued-autonomy.js', () => ({
 
 const mockRunGoal = vi.fn();
 vi.mock('../src/core/run/orchestrator.js', () => ({
+  DEFAULT_MAX_TOKENS: 50_000,
   runGoal: (...args: unknown[]) => mockRunGoal(...args),
 }));
 
@@ -437,6 +438,7 @@ vi.mock('../src/core/daemon/cutoff-checkpoint-scheduler.js', () => ({
 // ---------------------------------------------------------------------------
 
 import {
+  zeroDollarProducer,
   tick,
   runDaemon,
   recordContextRollupAfterTick,
@@ -2759,7 +2761,22 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     mockCanonicalEmptyDiffRunGoal('budget drain fixture', 0.02);
 
-    const result = await tick(cfgBuiltin({ dailyBudgetUsd: 0.02, perTickItems: 2, parallel: 1 }), { dryRun: false });
+    const cfg = cfgBuiltin({ dailyBudgetUsd: 0.02, perTickItems: 2, parallel: 1 });
+    // This cash-exhaustion fixture needs a metered endpoint: loopback local
+    // model estimates are not cash charges. runGoal remains mocked throughout.
+    cfg.foundry = {
+      ...cfg.foundry,
+      engines: {
+        ...cfg.foundry?.engines,
+        'local-coder': {
+          kind: 'api-model',
+          tier: 'mid',
+          api: { defaultBaseUrl: 'https://example.com/v1', defaultModel: 'budget-fixture' },
+        },
+      },
+    };
+    expect(zeroDollarProducer('local-coder', cfg)).toBe(false);
+    const result = await tick(cfg, { dryRun: false });
     const actions = readAgentActions();
     const skipped = actions.find((event) =>
       event.action === 'daemon:dispatch-skip' && event.itemId === resliceB.id,

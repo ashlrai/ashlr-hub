@@ -57,6 +57,7 @@ vi.mock('../src/core/swarm/runner.js', () => ({
 
 const mockRunGoal = vi.fn();
 vi.mock('../src/core/run/orchestrator.js', () => ({
+  DEFAULT_MAX_TOKENS: 50_000,
   runGoal: (...args: unknown[]) => mockRunGoal(...args),
 }));
 

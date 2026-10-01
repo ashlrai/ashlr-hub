@@ -3,8 +3,8 @@ import { createHash } from 'node:crypto';
 export const AUTOMERGE_SCOPE_POLICY_SCHEMA_VERSION = 1 as const;
 export const DEFAULT_AUTOMERGE_MAX_FILES = 4;
 export const DEFAULT_AUTOMERGE_MAX_LINES = 150;
-export const MAX_AUTOMERGE_POLICY_FILES = 10;
-export const MAX_AUTOMERGE_POLICY_LINES = 300;
+export const MAX_AUTOMERGE_POLICY_FILES = Number.MAX_SAFE_INTEGER;
+export const MAX_AUTOMERGE_POLICY_LINES = Number.MAX_SAFE_INTEGER;
 
 const SCOPE_POLICY_DOMAIN = 'ashlr:automerge-scope-policy:v1';
 

@@ -229,3 +229,25 @@ describe('Autonomy status (3.14)', () => {
     }
   });
 });
+
+
+describe('intent aliases', () => {
+  it('only navigates and retains history without a token, dispatch or composer event', () => {
+    const unregister = registerShellCommandHandlers();
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      setVerseSection('mind');
+      expect(executeCatalogCommand('mode.with-me')).toBe(true);
+      expect(getVerseUiState().section).toBe('chat');
+      expect(executeCatalogCommand('mode.for-me')).toBe(true);
+      expect(getVerseUiState().section).toBe('fleet');
+      expect(getVerseUiState().history.entries.map((entry) => entry.section)).toEqual(['chat', 'mind', 'chat', 'fleet']);
+      expect(received).toEqual([]);
+      expect(fetcher).not.toHaveBeenCalled();
+    } finally {
+      unregister();
+      vi.unstubAllGlobals();
+    }
+  });
+});

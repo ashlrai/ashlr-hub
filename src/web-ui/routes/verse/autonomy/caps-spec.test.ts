@@ -19,16 +19,16 @@ const CAPS: VerseCaps = {
 describe('caps-spec', () => {
   it('mirrors every server range from the V2 contract', () => {
     const ranges = Object.fromEntries(CAP_FIELDS.map((f) => [f.key, [f.min, f.max]]));
-    expect(ranges['dailyBudgetUsd']).toEqual([0, 1000]);
-    expect(ranges['perTickItems']).toEqual([1, 50]);
-    expect(ranges['parallel']).toEqual([1, 16]);
-    expect(ranges['maxConcurrent']).toEqual([1, 32]);
+    expect(ranges['dailyBudgetUsd']).toEqual([0, Number.MAX_SAFE_INTEGER]);
+    expect(ranges['perTickItems']).toEqual([1, Number.MAX_SAFE_INTEGER]);
+    expect(ranges['parallel']).toEqual([1, Number.MAX_SAFE_INTEGER]);
+    expect(ranges['maxConcurrent']).toEqual([1, Number.MAX_SAFE_INTEGER]);
     // 1, not the contract's 0: the daemon cannot honour a zero tier (see the
     // comment on VERSE_CAPS_BOUNDS.concurrency). The drift block below pins
     // this against the server constant, so the two can never disagree.
-    expect(ranges['concurrency.local']).toEqual([1, 32]);
-    expect(ranges['concurrency.cloud']).toEqual([1, 32]);
-    expect(ranges['concurrency.total']).toEqual([1, 32]);
+    expect(ranges['concurrency.local']).toEqual([1, Number.MAX_SAFE_INTEGER]);
+    expect(ranges['concurrency.cloud']).toEqual([1, Number.MAX_SAFE_INTEGER]);
+    expect(ranges['concurrency.total']).toEqual([1, Number.MAX_SAFE_INTEGER]);
     expect(ranges['subscriptionMaxPercent']).toEqual([1, 100]);
   });
 
@@ -49,7 +49,7 @@ describe('caps-spec', () => {
 
   it('rejects out-of-range, blank, and fractional values before the round trip', () => {
     const items = capFieldByKey('perTickItems');
-    expect(validateCap(items, '51')).toEqual({ ok: false, error: 'Items per tick must be between 1 and 50 items.' });
+    expect(validateCap(items, '51')).toEqual({ ok: true, stored: 51, display: 51 });
     expect(validateCap(items, '0')).toMatchObject({ ok: false });
     expect(validateCap(items, '')).toMatchObject({ ok: false });
     expect(validateCap(items, 'four')).toMatchObject({ ok: false });
@@ -59,6 +59,21 @@ describe('caps-spec', () => {
     expect(validateCap(ceiling, '101')).toEqual({ ok: false, error: 'Subscription ceiling must be between 1 and 100% of window.' });
     expect(validateCap(ceiling, '50.5')).toEqual({ ok: false, error: 'Subscription ceiling must be a whole percentage.' });
     expect(validateCap(items, '7')).toEqual({ ok: true, stored: 7, display: 7 });
+  });
+
+  it.each(['perTickItems', 'parallel', 'maxConcurrent', 'concurrency.local', 'concurrency.cloud', 'concurrency.total'] as CapKey[])('accepts large operator preferences and refuses unsafe integers for %s', (key) => {
+    const spec = capFieldByKey(key);
+    expect(validateCap(spec, '129')).toEqual({ ok: true, stored: 129, display: 129 });
+    expect(validateCap(spec, String(Number.MAX_SAFE_INTEGER)).ok).toBe(true);
+    for (const value of ['0', '-1', '1.5', 'Infinity', 'NaN', String(Number.MAX_SAFE_INTEGER + 1)]) {
+      expect(validateCap(spec, value).ok, value).toBe(false);
+    }
+  });
+
+  it('accepts an explicit fractional budget above 1000 and rejects nonfinite or unsafe amounts', () => {
+    const spec = capFieldByKey('dailyBudgetUsd');
+    expect(validateCap(spec, '1001.25')).toEqual({ ok: true, stored: 1001.25, display: 1001.25 });
+    for (const value of ['-1', 'NaN', 'Infinity', String(Number.MAX_SAFE_INTEGER + 1)]) expect(validateCap(spec, value).ok).toBe(false);
   });
 
   it('accepts a daily budget of exactly 0 — "stopped" is a legal configuration', () => {

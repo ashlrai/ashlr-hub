@@ -113,6 +113,21 @@ vi.mock('../src/core/daemon/tick-deadline.js', async (importOriginal) => {
 
 const mockRunSwarm = vi.hoisted(() => vi.fn());
 vi.mock('../src/core/swarm/runner.js', () => ({ runSwarm: (...args: unknown[]) => mockRunSwarm(...args) }));
+const mockAutoMergePass = vi.hoisted(() => vi.fn());
+vi.mock('../src/core/fleet/automerge-pass.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/fleet/automerge-pass.js')>();
+  return { ...actual, runAutoMergePass: (...args: unknown[]) => mockAutoMergePass(...args) };
+});
+const mockRunGoal = vi.hoisted(() => vi.fn());
+vi.mock('../src/core/run/orchestrator.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/run/orchestrator.js')>();
+  return { ...actual, runGoal: (...args: unknown[]) => mockRunGoal(...args) };
+});
+const mockRunBestOfN = vi.hoisted(() => vi.fn());
+vi.mock('../src/core/run/best-of-n.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/run/best-of-n.js')>();
+  return { ...actual, runBestOfN: (...args: unknown[]) => mockRunBestOfN(...args) };
+});
 
 const mockBuildBacklog = vi.hoisted(() => vi.fn());
 vi.mock('../src/core/portfolio/backlog.js', async (importOriginal) => {
@@ -120,7 +135,9 @@ vi.mock('../src/core/portfolio/backlog.js', async (importOriginal) => {
   return { ...actual, buildBacklog: (...args: unknown[]) => mockBuildBacklog(...args) };
 });
 
-import { poolTierForBackend, runDaemon, tick } from '../src/core/daemon/loop.js';
+import { canContinueBudgetIndependentStanding, canContinueZeroDollarStanding, poolTierForBackend, recoverDaemonSpendGuardOnStartup, runDaemon, tick, zeroDollarProducer } from '../src/core/daemon/loop.js';
+import { armDaemonSpendGuard, loadDaemonState, readDaemonSpendGuard, saveDaemonState } from '../src/core/daemon/state.js';
+import { seedMidTickSpend } from './helpers/h2-faults.js';
 import { LOCAL_FLEET_ENGINE } from '../src/core/daemon/local-fleet.js';
 import { DEFAULT_TICK_HOOKS, type TickHooks, type TickRouteDecision } from '../src/core/daemon/tick-hooks.js';
 import { readDaemonPause } from '../src/core/daemon/pause.js';
@@ -162,6 +179,18 @@ function cfgFor(over: Partial<AshlrConfig['daemon']> = {}): AshlrConfig {
 beforeEach(() => {
   fx = makeFixture();
   mockRunSwarm.mockReset();
+  mockAutoMergePass.mockReset();
+  mockAutoMergePass.mockResolvedValue({ merged: 0, attempted: 0, judged: 0, judgePerPass: 0 });
+  mockRunGoal.mockReset();
+  mockRunBestOfN.mockReset();
+  mockRunBestOfN.mockRejectedValue(new Error('unexpected best-of-N inference'));
+  mockRunGoal.mockImplementation(async (goal, _cfg, opts) => ({
+    id: opts.runId, goal, engine: opts.engine, status: 'done', tasks: [], steps: [],
+    ...(opts.model ? { engineModel: `${opts.engine}:${opts.model}` } : {}),
+    usage: { tokensIn: 10, tokensOut: 20, steps: 1, estCostUsd: 7 },
+    budget: opts.budget, provider: 'test', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    proposalOutcome: { kind: 'no-diff' },
+  }));
   mockBuildBacklog.mockReset();
   quotaHarness.within = true;
   fleetHarness.on = false;
@@ -180,6 +209,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   fx.cleanup();
 });
 
@@ -258,6 +288,280 @@ function standingHooks(over: Partial<TickHooks> & { standingBacklog?: (items: Wo
   };
   return { hooks, seat, outcomes };
 }
+
+describe('positive USD exhaustion preserves only proven zero-dollar standing production', () => {
+  function prepare(engine: EngineId = 'codex', overrides: Partial<NonNullable<AshlrConfig['daemon']>> = {}) {
+    const repo = fx.makeRepo(); repo.enroll();
+    const cfg = cfgFor(overrides);
+    // Exercise producer/journal admission independently of live credential and
+    // resource-discovery planning; the existing hooks provide the test seat.
+    cfg.foundry = { ...cfg.foundry, autonomyControlLoop: false, allowedBackends: [engine] };
+    const beforeTick = vi.fn(async () => ({ pausedRepos: [], laneCaps: { local: 3, codex: 3 }, holdProduction: null }));
+    const { hooks, seat } = standingHooks({ beforeTick,
+      route: (item, routingCfg) => ({ ...DEFAULT_TICK_HOOKS.route(item, routingCfg),
+        backend: engine, tier: engine === 'local-coder' ? 'local' : 'frontier', model: null, hold: null, seatDecision: null }),
+    });
+    return { cfg, hooks, seat, beforeTick, repo };
+  }
+
+  it.each([1, 2])('keeps the real baseline %s and normal token ceiling, without USD queue clipping or fan-out', async (spend) => {
+    const { cfg, hooks, seat, beforeTick } = prepare();
+    Object.assign(hooks, { bestOfNPlan: () => ({ run: true, candidates: [{ engine: 'codex' }, { engine: 'meta-muse' }] }) });
+    seedMidTickSpend({ spentUsd: spend, running: false });
+    const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(result.reason).toBe('ok');
+    expect(mockRunGoal).toHaveBeenCalledTimes(3);
+    expect(mockRunGoal.mock.calls.map((call) => call[2].budget.maxTokens)).toEqual([50_000, 50_000, 50_000]);
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(mockRunBestOfN).not.toHaveBeenCalled();
+    expect(seat).toContain('codex');
+    expect(beforeTick.mock.calls[0]?.[0]).toMatchObject({ meteredUsdExhausted: true });
+    expect(result.spentUsd).toBe(0);
+    expect(loadDaemonState().todaySpentUsd).toBe(spend);
+    expect(readDaemonSpendGuard().exists).toBe(false);
+  });
+
+  it.each([undefined, 70_000, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN])(
+    'honours only a positive safe configured free token ceiling %s', async (limit) => {
+      const { cfg, hooks } = prepare('codex', { perTickItems: 1, perItemMaxTokens: limit });
+      seedMidTickSpend({ spentUsd: 1, running: false });
+      await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+      expect(mockRunGoal).toHaveBeenCalledTimes(1);
+      expect(mockRunGoal.mock.calls[0]?.[2].budget.maxTokens).toBe(limit === 70_000 ? limit : 50_000);
+    },
+  );
+
+  it('counts a positive local cost estimate as zero cash only for its exact free engine', async () => {
+    const { cfg, hooks } = prepare('local-coder', { perTickItems: 1 });
+    seedMidTickSpend({ spentUsd: 1, running: false });
+    expect(zeroDollarProducer('local-coder', cfg)).toBe(true);
+    const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(result.spentUsd).toBe(0);
+    expect(loadDaemonState().todaySpentUsd).toBe(1);
+  });
+
+  it.each(['stop', 'pessimistic', 'legacy', 'unresolved'] as const)('fails closed for %s', async (scenario) => {
+    const { cfg, hooks } = prepare('codex', scenario === 'stop' ? { dailyBudgetUsd: 0 } : {});
+    const state = seedMidTickSpend({ spentUsd: 1, running: false });
+    if (scenario === 'pessimistic') saveDaemonState({ ...state, spendGuardAccounting: {
+      budgetDay: state.todayDate!, accountingId: '11111111-1111-4111-8111-111111111111', budgetExhausted: true,
+    } });
+    if (scenario === 'unresolved') expect(armDaemonSpendGuard({ itemIds: ['prior-item'], daemonStartedAt: null,
+      budgetDay: state.todayDate!, dailyBudgetUsd: 1, spentUsdAtArm: 1, reservedUsd: 0, zeroCostOnly: true }).ok).toBe(true);
+    await tick(cfg, { dryRun: false, ...(scenario === 'legacy' ? {} : { activationCapability: STANDING }), hooks });
+    expect(mockRunGoal).not.toHaveBeenCalled(); expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('refuses a metered override and a quota fallback after final routing', async () => {
+    const { cfg, hooks } = prepare();
+    cfg.foundry!.allowedBackends = ['codex', 'local-coder'];
+    cfg.foundry!.engines = { codex: { kind: 'api-model', tier: 'frontier', api: {
+      defaultBaseUrl: 'https://example.com/v1', defaultModel: 'paid',
+    } } };
+    seedMidTickSpend({ spentUsd: 1, running: false });
+    const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(result.dispatches?.some((d) => d.skipReason === 'budget-cap')).toBe(true);
+    expect(mockRunGoal).not.toHaveBeenCalled(); expect(mockRunSwarm).not.toHaveBeenCalled();
+    delete cfg.foundry!.engines;
+    quotaHarness.within = false;
+    await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(mockRunGoal).not.toHaveBeenCalled(); expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('leaves the exact-zero journal armed when execution identity is unknown', async () => {
+    const { cfg, hooks } = prepare('codex', { perTickItems: 3 });
+    seedMidTickSpend({ spentUsd: 1, running: false });
+    mockRunGoal.mockResolvedValue({ id: 'unknown-run', engine: 'unknown-executor', status: 'done', tasks: [], steps: [],
+      usage: { tokensIn: 10, tokensOut: 20, steps: 1, estCostUsd: 0 }, proposalOutcome: { kind: 'empty-diff' } });
+    const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(result.reason).toBe('state-persistence-failed');
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(loadDaemonState().todaySpentUsd).toBe(1);
+    expect(readDaemonSpendGuard().guard).toMatchObject({ zeroCostOnly: true, reservedUsd: 0 });
+    expect(recoverDaemonSpendGuardOnStartup({} as Parameters<typeof recoverDaemonSpendGuardOnStartup>[0], loadDaemonState())).toEqual({
+      ok: false, reason: 'zero-cost-spend-guard-requires-reconciliation',
+    });
+  });
+
+  it('refuses a late paid executor rewrite and still applies the native seat gate', async () => {
+    const { cfg, hooks } = prepare('local-coder', { perTickItems: 1 });
+    cfg.foundry!.ashlrcodeExecutor = true;
+    cfg.foundry!.allowedBackends = ['local-coder', 'ashlrcode'];
+    cfg.foundry!.engines = { 'local-coder': { kind: 'api-model', tier: 'local', api: {
+      defaultBaseUrl: 'http://127.0.0.1:8080/v1', defaultModel: 'qwen',
+    } } };
+    seedMidTickSpend({ spentUsd: 1, running: false });
+    const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(result.dispatches?.some((d) => d.skipReason === 'budget-cap')).toBe(true);
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    cfg.foundry!.ashlrcodeExecutor = false;
+    hooks.seatAllows = () => ({ allowed: false, reason: 'operator reserve is held' });
+    const seatRefusal = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(seatRefusal.reason).toBe('ok');
+    expect(readDaemonSpendGuard().exists).toBe(false);
+  });
+
+  it('never derives a free lane from builtin, an arbitrary tier, or an exhausted accounting marker', () => {
+    const { cfg } = prepare();
+    expect(zeroDollarProducer('builtin', cfg)).toBe(false);
+    expect(zeroDollarProducer('meta-muse', cfg)).toBe(false);
+    expect(zeroDollarProducer('devin-cli', cfg, 'gpt-5')).toBe(false);
+    expect(zeroDollarProducer('unknown', cfg)).toBe(false);
+    const state = seedMidTickSpend({ spentUsd: 1, running: false });
+    expect(canContinueZeroDollarStanding(true, cfg, state, { dailyBudgetUsd: 1 })).toBe(true);
+    expect(canContinueZeroDollarStanding(false, cfg, state, { dailyBudgetUsd: 1 })).toBe(false);
+  });
+
+  it.each(['swe-2-high', 'swe-2-medium', 'swe-2-max'])('does not treat historical Devin model %s as current zero-dollar eligibility', async (model) => {
+    const { cfg, hooks, seat } = prepare('devin-cli' as EngineId, { perTickItems: 1 });
+    cfg.devin = { enabled: true, fleet: true, fleetModel: model };
+    // A proven free lane keeps the standing tick open, so the real final
+    // dispatch guard must reject Devin even after its test seat admits it.
+    cfg.foundry!.allowedBackends!.push('codex');
+    seedMidTickSpend({ spentUsd: 1, running: false });
+    vi.stubEnv('ASHLR_MODEL', model);
+    expect(zeroDollarProducer('devin-cli', cfg, model)).toBe(false);
+    const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(result.reason).toBe('ok');
+    expect(result.dispatches).toContainEqual(expect.objectContaining({ backend: 'devin-cli', model,
+      dispatched: false, skipReason: 'budget-cap' }));
+    expect(seat).toContain('devin-cli');
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(loadDaemonState().todaySpentUsd).toBe(1);
+    expect(readDaemonSpendGuard().exists).toBe(false);
+  });
+
+  it('does not give a configured Devin replacement the unqualified zero-dollar exception', () => {
+    const { cfg } = prepare('devin-cli' as EngineId);
+    cfg.foundry!.engines = { 'devin-cli': { kind: 'api-model', tier: 'local', api: {
+      defaultBaseUrl: 'http://127.0.0.1:8080/v1', defaultModel: 'swe-2-high',
+    } } };
+    expect(zeroDollarProducer('devin-cli', cfg, 'swe-2-high')).toBe(false);
+  });
+
+  it('continues verified free producers while holding unqualified Devin in the same exhausted tick', async () => {
+    const { cfg, hooks } = prepare('devin-cli' as EngineId, { perTickItems: 3 });
+    cfg.devin = { enabled: true, fleet: true, fleetModel: 'swe-2-high' };
+    cfg.foundry!.allowedBackends = ['devin-cli', 'codex', 'claude'];
+    hooks.route = (item, routingCfg) => ({ ...DEFAULT_TICK_HOOKS.route(item, routingCfg), hold: null, seatDecision: null,
+      backend: item.id.endsWith(':u5-0') ? 'devin-cli' : item.id.endsWith(':u5-1') ? 'codex' : 'claude',
+      tier: 'frontier', model: item.id.endsWith(':u5-0') ? 'swe-2-high' : null });
+    seedMidTickSpend({ spentUsd: 1, running: false });
+    const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(result.reason).toBe('ok');
+    expect(mockRunGoal.mock.calls.map((call) => call[2].engine)).toEqual(['codex', 'claude']);
+    expect(result.dispatches).toContainEqual(expect.objectContaining({ backend: 'devin-cli',
+      dispatched: false, skipReason: 'budget-cap' }));
+    expect(result.spentUsd).toBe(0);
+    expect(loadDaemonState().todaySpentUsd).toBe(1);
+    expect(readDaemonSpendGuard().exists).toBe(false);
+  });
+
+  it('preserves positive-headroom Devin admission and its ordinary cash-derived token budget', async () => {
+    const { cfg, hooks } = prepare('devin-cli' as EngineId, { perTickItems: 1 });
+    cfg.devin = { enabled: true, fleet: true, fleetModel: 'swe-2-medium' };
+    vi.stubEnv('ASHLR_MODEL', 'swe-2-medium');
+    seedMidTickSpend({ spentUsd: 0, running: false });
+    // Retain the suite's shared no-diff outcome and the legacy wrapper's zero-
+    // initialized usage; neither is fresh account-price qualification.
+    mockRunGoal.mockImplementation(async (goal, _cfg, opts) => ({ id: opts.runId, goal, engine: opts.engine,
+      engineModel: `${opts.engine}:${opts.model}`, status: 'done', tasks: [], steps: [],
+      usage: { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
+      budget: opts.budget, provider: 'test', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      proposalOutcome: { kind: 'no-diff' } }));
+    const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(result.reason).toBe('ok');
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ engine: 'devin-cli', model: 'swe-2-medium',
+      budget: { maxTokens: 66_666 } });
+    expect(result.dispatches).toContainEqual(expect.objectContaining({ backend: 'devin-cli', dispatched: true }));
+    expect(loadDaemonState().todaySpentUsd).toBe(0);
+    expect(readDaemonSpendGuard().exists).toBe(false);
+  });
+
+  it('holds later Devin after paid headroom is consumed while allowing a verified free producer', async () => {
+    const { cfg, hooks } = prepare('codex', { perTickItems: 3, concurrency: { local: 1, cloud: 1, total: 1 } });
+    cfg.devin = { enabled: true, fleet: true, fleetModel: 'swe-2-high' };
+    cfg.foundry!.allowedBackends = ['codex', 'devin-cli', 'claude'];
+    cfg.foundry!.engines = { codex: { kind: 'api-model', tier: 'frontier', api: {
+      defaultBaseUrl: 'https://example.com/v1', defaultModel: 'gpt-5',
+    } } };
+    hooks.route = (item, routingCfg) => ({ ...DEFAULT_TICK_HOOKS.route(item, routingCfg), hold: null, seatDecision: null,
+      backend: item.id.endsWith(':u5-0') ? 'codex' : item.id.endsWith(':u5-1') ? 'devin-cli' : 'claude',
+      tier: 'frontier', model: item.id.endsWith(':u5-0') ? 'gpt-5' : item.id.endsWith(':u5-1') ? 'swe-2-high' : null });
+    mockRunGoal.mockImplementation(async (goal, _cfg, opts) => ({ id: opts.runId, goal, engine: opts.engine,
+      engineModel: `${opts.engine}:${opts.model}`, status: 'done', tasks: [], steps: [],
+      usage: { tokensIn: 10, tokensOut: 20, steps: 1, estCostUsd: opts.engine === 'codex' ? 1 : 7 },
+      budget: opts.budget, provider: 'test', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      proposalOutcome: { kind: 'empty-diff' } }));
+    const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(result.reason).toBe('ok');
+    expect(mockRunGoal.mock.calls.map((call) => call[2].engine)).toEqual(['codex', 'claude']);
+    expect(result.dispatches).toContainEqual(expect.objectContaining({ backend: 'devin-cli',
+      dispatched: false, skipReason: 'budget-cap' }));
+    expect(result.spentUsd).toBe(1);
+    expect(loadDaemonState().todaySpentUsd).toBe(1);
+    expect(readDaemonSpendGuard().exists).toBe(false);
+    expect(mockAutoMergePass.mock.calls.at(-1)?.[1]).toMatchObject({ meteredUsdExhausted: true });
+  });
+
+  it('keeps independently authorized hosted ACU maintenance cadence without declaring a free token lane', () => {
+    const cfg = cfgFor(); cfg.foundry = { allowedBackends: ['builtin'] }; cfg.devin = { enabled: true, fleet: true };
+    const state = seedMidTickSpend({ spentUsd: 1, running: false });
+    expect(canContinueZeroDollarStanding(true, cfg, state, { dailyBudgetUsd: 1 })).toBe(false);
+    expect(canContinueBudgetIndependentStanding(true, cfg, state, { dailyBudgetUsd: 1 })).toBe(true);
+    expect(canContinueBudgetIndependentStanding(false, cfg, state, { dailyBudgetUsd: 1 })).toBe(false);
+    expect(canContinueBudgetIndependentStanding(true, cfg, state, { dailyBudgetUsd: 0 })).toBe(false);
+    cfg.devin.fleet = false;
+    expect(canContinueBudgetIndependentStanding(true, cfg, state, { dailyBudgetUsd: 1 })).toBe(false);
+  });
+
+  it('narrows maintenance after paid headroom is consumed without changing the paid journal contract', async () => {
+    const { cfg, hooks } = prepare('codex', { perTickItems: 3, concurrency: { local: 1, cloud: 1, total: 1 } });
+    cfg.foundry!.allowedBackends = ['codex', 'claude'];
+    cfg.foundry!.engines = { codex: { kind: 'api-model', tier: 'frontier', api: { defaultBaseUrl: 'https://example.com/v1', defaultModel: 'gpt-5' } } };
+    hooks.route = (item, routingCfg) => ({ ...DEFAULT_TICK_HOOKS.route(item, routingCfg), hold: null, seatDecision: null,
+      backend: item.id.endsWith(':u5-0') ? 'codex' : 'claude', tier: 'frontier',
+      model: item.id.endsWith(':u5-0') ? 'gpt-5' : null });
+    mockRunGoal.mockImplementation(async (goal, _cfg, opts) => ({ id: opts.runId, goal, engine: opts.engine,
+      ...(opts.model ? { engineModel: `${opts.engine}:${opts.model}` } : {}), status: 'done', tasks: [], steps: [],
+      usage: { tokensIn: 10, tokensOut: 20, steps: 1, estCostUsd: opts.engine === 'codex' ? 1 : 7 },
+      budget: opts.budget, provider: 'test', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      proposalOutcome: { kind: 'empty-diff' },
+    }));
+    const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(result.reason).toBe('ok');
+    expect(mockRunGoal).toHaveBeenCalledTimes(3);
+    expect(result.spentUsd).toBe(1);
+    expect(loadDaemonState().todaySpentUsd).toBe(1);
+    expect(readDaemonSpendGuard().exists).toBe(false);
+    expect(mockAutoMergePass.mock.calls.at(-1)?.[1]).toMatchObject({ meteredUsdExhausted: true });
+  });
+
+  it.each([NaN, -1])('refuses later producers and retains the journal for invalid realized cost %s', async (cost) => {
+    const { cfg, hooks } = prepare('codex', { perTickItems: 3, concurrency: { local: 1, cloud: 1, total: 1 } });
+    cfg.foundry!.allowedBackends = ['codex', 'claude'];
+    cfg.foundry!.engines = { codex: { kind: 'api-model', tier: 'frontier', api: { defaultBaseUrl: 'https://example.com/v1', defaultModel: 'gpt-5' } } };
+    hooks.route = (item, routingCfg) => ({ ...DEFAULT_TICK_HOOKS.route(item, routingCfg), hold: null, seatDecision: null,
+      backend: item.id.endsWith(':u5-0') ? 'codex' : 'claude', tier: 'frontier',
+      model: item.id.endsWith(':u5-0') ? 'gpt-5' : null });
+    mockRunGoal.mockImplementation(async (goal, _cfg, opts) => ({ id: opts.runId, goal, engine: opts.engine,
+      engineModel: `${opts.engine}:${opts.model}`, status: 'done', tasks: [], steps: [],
+      usage: { tokensIn: 10, tokensOut: 20, steps: 1, estCostUsd: cost }, budget: opts.budget, provider: 'test',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), proposalOutcome: { kind: 'empty-diff' },
+    }));
+    const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(result.reason).toBe('state-persistence-failed');
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(loadDaemonState().todaySpentUsd).toBe(0);
+    expect(readDaemonSpendGuard().exists).toBe(true);
+    expect(mockAutoMergePass.mock.calls.every((call) => call[1]?.meteredUsdExhausted === true)).toBe(true);
+  });
+});
 
 describe('B · a standing tick runs through the hooks', () => {
   it('honours route holds, asks the seat gate about every engine, and journals every outcome', async () => {

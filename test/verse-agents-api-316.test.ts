@@ -10,7 +10,7 @@
  * (loop and turn route), "mark read never clears Needs you", Auto-fix once
  * per head, Auto-merge only on an allowed verdict, and archive / restore.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -28,7 +28,7 @@ import {
 } from '../src/core/verse/agents-api.js';
 import type { AgentChecksRead } from '../src/core/verse/agents/checks.js';
 import type { ScriptLauncher, ScriptStatus } from '../src/core/verse/agents/scripts.js';
-import { createAgentStore, type AgentStore } from '../src/core/verse/agents/store.js';
+import { blankAgent, createAgentStore, type AgentStore } from '../src/core/verse/agents/store.js';
 import { resetSupervisorCachesForTest, superviseAgent, type SupervisorDeps } from '../src/core/verse/agents/supervisor.js';
 import type { AgentChecksDetail, AgentRecord } from '../src/core/verse/agents/types.js';
 import { invalidateGitCaches } from '../src/core/verse/git-ops.js';
@@ -213,10 +213,137 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   setAgentsApiDepsForTest(null);
   invalidateGitCaches();
   process.env['HOME'] = savedHome;
   rmSync(home, { recursive: true, force: true });
+});
+
+function fullPortReservations(): AgentRecord[] {
+  return Array.from({ length: 380 }, (_, i) => ({
+    ...blankAgent({ id: `ag_${i.toString(16).padStart(16, '0')}`, title: 'Occupied', at: '2026-09-27T10:00:00Z' }),
+    workspace: { rootPath: repo, path: join(home, 'occupied', String(i)), branch: `verse/occupied-${i}`, name: `occupied-${i}`, baseSha: null, portBase: 41_000 + i * 50, portCount: 50 },
+  }));
+}
+
+describe('workspace port admission', () => {
+  it('refuses exhaustion before workspace creation, cap archival or record writes, and releases the guard', async () => {
+    const full = fullPortReservations();
+    const list = vi.spyOn(store, 'list').mockResolvedValue(full);
+    const put = vi.spyOn(store, 'put');
+    const update = vi.spyOn(store, 'update');
+    const before = git(repo, 'worktree', 'list', '--porcelain');
+    const refused = await call('POST', '/api/verse/agents/workspaces', { root: repo, title: 'No ports' });
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ code: 'AGENT_PORTS_EXHAUSTED' });
+    expect(JSON.stringify(refused.body)).not.toContain(home);
+    expect(put).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(launcher.runs.size).toBe(0);
+    expect(git(repo, 'worktree', 'list', '--porcelain')).toBe(before);
+    expect(existsSync(join(home, '.ashlr-worktrees'))).toBe(false);
+    list.mockRestore();
+    expect((await call('POST', '/api/verse/agents/workspaces', { root: repo, title: 'Retry' })).status).toBe(201);
+  });
+
+  it('creates a zero-port workspace in a saturated range without archiving existing workspaces', async () => {
+    writeFileSync(join(repo, '.ashlr', 'verse', 'workspace.json'), JSON.stringify({ ports: 0, copy: [] }));
+    setAgentsApiDepsForTest({ store: () => store, engine: () => engine, launcher: () => launcher, meta: async () => meta,
+      knownRoots: async () => [repo], priceOf: () => PRICE, cap: () => Number.MAX_SAFE_INTEGER });
+    vi.spyOn(store, 'list').mockResolvedValue(fullPortReservations());
+    const update = vi.spyOn(store, 'update');
+    const made = await call('POST', '/api/verse/agents/workspaces', { root: repo, title: 'No dedicated ports' });
+    expect(made.status).toBe(201);
+    const agent = (await store.get((made.body['agent'] as AgentRecord).id))!;
+    expect(agent.workspace).toMatchObject({ portBase: 41_000, portCount: 0 });
+    expect(existsSync(agent.workspace!.path)).toBe(true);
+    expect(made.body['archivedForCap']).toEqual([]);
+    expect(update).not.toHaveBeenCalled();
+    expect(launcher.runs.size).toBe(0);
+  });
+
+  it('refuses overlapping creates across repositories, then reserves a distinct range when retried', async () => {
+    const otherRepo = join(home, 'code', 'another-repo');
+    mkdirSync(otherRepo, { recursive: true });
+    writeFileSync(join(otherRepo, 'a.txt'), 'one\n');
+    git(otherRepo, 'init', '-q', '-b', 'main');
+    git(otherRepo, 'add', '-A');
+    git(otherRepo, 'commit', '-q', '-m', 'init');
+    setAgentsApiDepsForTest({ store: () => store, engine: () => engine, launcher: () => launcher, meta: async () => meta,
+      knownRoots: async () => [repo, otherRepo], priceOf: () => PRICE });
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    const originalList = store.list.bind(store);
+    vi.spyOn(store, 'list').mockImplementationOnce(async () => {
+      enter();
+      await waiting;
+      return originalList();
+    });
+    const first = call('POST', '/api/verse/agents/workspaces', { root: repo, title: 'First' });
+    await entered;
+    const overlapping = await call('POST', '/api/verse/agents/workspaces', { root: otherRepo, title: 'Second' });
+    expect(overlapping.status).toBe(409);
+    expect(overlapping.body).toMatchObject({ code: 'AGENT_WORKSPACE_BUSY' });
+    release();
+    const made = await first;
+    expect(made.status).toBe(201);
+    expect((made.body['agent'] as AgentRecord).workspace!.portBase).toBe(41_000);
+    const retry = await call('POST', '/api/verse/agents/workspaces', { root: otherRepo, title: 'Second' });
+    expect(retry.status).toBe(201);
+    expect((retry.body['agent'] as AgentRecord).workspace!.portBase).toBe(41_010);
+    expect((await store.list()).length).toBe(2);
+    expect(launcher.runs.size).toBe(0);
+  });
+
+  it('refuses restore onto a reused range without restoring files, and allows it after the range is freed', async () => {
+    const made = await call('POST', '/api/verse/agents/workspaces', { root: repo, title: 'Original' });
+    expect(made.status).toBe(201);
+    const original = (await store.get((made.body['agent'] as AgentRecord).id))!;
+    const archived = await call('POST', `/api/verse/agents/${original.id}/archive`, {});
+    expect(archived.status).toBe(200);
+    const snapshot = (await store.get(original.id))!.archived;
+    const replacement = await call('POST', '/api/verse/agents/workspaces', { root: repo, title: 'Replacement' });
+    expect(replacement.status).toBe(201);
+    const newer = replacement.body['agent'] as AgentRecord;
+    expect(newer.workspace!.portBase).toBe(original.workspace!.portBase);
+    const before = git(repo, 'worktree', 'list', '--porcelain');
+    const refused = await call('POST', `/api/verse/agents/${original.id}/restore`, {});
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ code: 'AGENT_PORTS_OCCUPIED' });
+    expect(existsSync(original.workspace!.path)).toBe(false);
+    expect((await store.get(original.id))!.archived).toEqual(snapshot);
+    expect(git(repo, 'worktree', 'list', '--porcelain')).toBe(before);
+    expect((await call('POST', `/api/verse/agents/${newer.id}/archive`, {})).status).toBe(200);
+    expect((await call('POST', `/api/verse/agents/${original.id}/restore`, {})).status).toBe(200);
+    expect(existsSync(original.workspace!.path)).toBe(true);
+    expect((await store.get(original.id))!.workspace!.portBase).toBe(original.workspace!.portBase);
+  });
+
+  it('guards a restore reservation against concurrent creation until its record is live', async () => {
+    const made = await call('POST', '/api/verse/agents/workspaces', { root: repo, title: 'Original' });
+    expect(made.status).toBe(201);
+    const id = (made.body['agent'] as AgentRecord).id;
+    expect((await call('POST', `/api/verse/agents/${id}/archive`, {})).status).toBe(200);
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    const originalList = store.list.bind(store);
+    vi.spyOn(store, 'list').mockImplementationOnce(async () => { enter(); await waiting; return originalList(); });
+    const restoring = call('POST', `/api/verse/agents/${id}/restore`, {});
+    await entered;
+    const overlapping = await call('POST', '/api/verse/agents/workspaces', { root: repo, title: 'New' });
+    expect(overlapping.status).toBe(409);
+    expect(overlapping.body).toMatchObject({ code: 'AGENT_WORKSPACE_BUSY' });
+    release();
+    expect((await restoring).status).toBe(200);
+    const retry = await call('POST', '/api/verse/agents/workspaces', { root: repo, title: 'New' });
+    expect(retry.status).toBe(201);
+    expect((retry.body['agent'] as AgentRecord).workspace!.portBase).toBe(41_010);
+  });
 });
 
 function supervisorDeps(extra: Partial<SupervisorDeps> = {}): SupervisorDeps {

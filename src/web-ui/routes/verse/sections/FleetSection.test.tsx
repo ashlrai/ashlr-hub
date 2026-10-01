@@ -11,6 +11,9 @@ import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import type { SeatDecision } from '../../../../core/routing/types.js';
 import { mockCompactViewport, mockWideViewport, type ViewportMock } from '../shell/viewport.test-support.js';
 import { showTable } from '../../../components/charts/chart-test-support.js';
+import { registerShellCommandHandlers } from '../shell/run-command.js';
+import { getVerseUiState, resetVerseUi, setVerseSection } from '../verse-ui-store.js';
+import { getAgentsFocus, takeAgentsFocus } from '../agents/agents-focus.js';
 
 const TOKEN = 'b'.repeat(64);
 let vp: ViewportMock | null = null;
@@ -27,6 +30,30 @@ afterEach(() => {
 });
 
 describe('FleetSection — live', () => {
+  it('delegates and guides through existing destinations without dispatching a task or changing authority', async () => {
+    const { posted } = stubSurfaceFetch({ kind: 'live' });
+    const user = userEvent.setup();
+    resetVerseUi();
+    setVerseSection('fleet');
+    const unregister = registerShellCommandHandlers();
+    try {
+      render(<FleetSection />);
+      await user.click(screen.getByRole('button', { name: 'Delegate a task' }));
+      await waitFor(() => expect(getAgentsFocus()?.kind).toBe('new'));
+      expect(getVerseUiState().section).toBe('agents');
+      await user.click(screen.getByRole('button', { name: 'Standing instructions' }));
+      expect(getVerseUiState().section).toBe('mind');
+      await user.click(screen.getByRole('button', { name: 'Review agents' }));
+      expect(getVerseUiState().section).toBe('agents');
+      expect(posted).toEqual([]);
+    } finally {
+      unregister();
+      const focus = getAgentsFocus();
+      if (focus) takeAgentsFocus(focus.seq);
+      resetVerseUi();
+    }
+  });
+
   it('shows lanes, the live swimlane, gates, why-this-seat, parked, overnight and repos', async () => {
     stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/budget/preview': SEAT_DECISION_FIXTURE } });
     const { container } = render(<FleetSection />);

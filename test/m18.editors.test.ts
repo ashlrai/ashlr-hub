@@ -71,9 +71,13 @@ type AdversarialCodexMode = 'timeout' | 'stdout' | 'stderr';
 function installTermIgnoringCodex(root: string, mode: AdversarialCodexMode): {
   scriptPath: string;
   mutationPath: string;
+  reportedFailurePath: string;
+  readyPath: string;
 } {
   const scriptPath = path.join(root, 'term-ignoring-codex.cjs');
   const mutationPath = path.join(root, 'late-mutation');
+  const reportedFailurePath = path.join(root, 'reported-failure');
+  const readyPath = path.join(root, 'probe-ready');
   fs.writeFileSync(path.join(root, 'mode'), mode, 'utf8');
   const source = `
 const fs = require('node:fs');
@@ -87,11 +91,17 @@ if (process.argv.includes('get')) {
 
 process.on('SIGTERM', () => {});
 const mutationPath = path.join(process.env.CODEX_HOME, 'late-mutation');
-const mutate = () => fs.writeFileSync(mutationPath, 'mutation after reported failure\\n');
+const reportedFailurePath = path.join(process.env.CODEX_HOME, 'reported-failure');
+const readyPath = path.join(process.env.CODEX_HOME, 'probe-ready');
+const mutate = () => {
+  if (fs.existsSync(reportedFailurePath)) {
+    fs.writeFileSync(mutationPath, 'mutation after reported failure\\n');
+  }
+};
 const helperSource = [
   "const fs = require('node:fs');",
   "process.on('SIGTERM', () => {});",
-  "setTimeout(() => fs.writeFileSync(" + JSON.stringify(mutationPath) + ", 'helper mutation after reported failure\\\\n'), 400);",
+  "setInterval(() => { if (fs.existsSync(" + JSON.stringify(reportedFailurePath) + ")) fs.writeFileSync(" + JSON.stringify(mutationPath) + ", 'helper mutation after reported failure\\\\n'); }, 20);",
   "if (process.send) process.send('ready');",
   "setInterval(() => {}, 1000);",
 ].join('\\n');
@@ -99,7 +109,8 @@ const helper = spawn(process.execPath, ['-e', helperSource], {
   stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
 });
 helper.once('message', () => {
-  setTimeout(mutate, 400);
+  setInterval(mutate, 20);
+  fs.writeFileSync(readyPath, JSON.stringify({ parentPid: process.pid, helperPid: helper.pid }));
   const mode = fs.readFileSync(path.join(process.env.CODEX_HOME, 'mode'), 'utf8');
   if (mode === 'stdout' || mode === 'stderr') {
     process[mode].write(Buffer.alloc(300 * 1024, 'x'));
@@ -108,7 +119,7 @@ helper.once('message', () => {
 setInterval(() => {}, 1000);
 `;
   fs.writeFileSync(scriptPath, source, { encoding: 'utf8', mode: 0o700 });
-  return { scriptPath, mutationPath };
+  return { scriptPath, mutationPath, reportedFailurePath, readyPath };
 }
 
 async function exerciseTermIgnoringCodex(mode: AdversarialCodexMode): Promise<{
@@ -118,18 +129,47 @@ async function exerciseTermIgnoringCodex(mode: AdversarialCodexMode): Promise<{
 }> {
   const root = tempRoot();
   const configPath = path.join(root, 'config.toml');
-  const { scriptPath, mutationPath } = installTermIgnoringCodex(root, mode);
+  const { scriptPath, mutationPath, reportedFailurePath, readyPath } = installTermIgnoringCodex(root, mode);
+  let observedReady: { parentPid: number; helperPid: number } | undefined;
+  const readinessWait = new Int32Array(new SharedArrayBuffer(4));
   setEditorConfigTestHooksForTests({
     commandExecutable: process.execPath,
     commandArgumentPrefix: [scriptPath],
     // Keep the preliminary read on the production deadline. Only the mutating
     // add command is forced into the short timeout exercised by this test.
-    commandTimeoutMs: args => args[1] === 'add' && mode === 'timeout' ? 150 : 15_000,
+    commandTimeoutMs: args => {
+      if (args[1] === 'add') {
+        // defaultCommandRunner invokes this after spawn and before arming its
+        // timer. Both external processes install their marker polls before the
+        // parent publishes readiness; slow startup cannot silently skip the probe.
+        const readyDeadline = performance.now() + 2_000;
+        while (performance.now() < readyDeadline && observedReady === undefined) {
+          try {
+            const ready = JSON.parse(fs.readFileSync(readyPath, 'utf8')) as Record<string, unknown>;
+            if (Number.isSafeInteger(ready.parentPid) && (ready.parentPid as number) > 0
+              && Number.isSafeInteger(ready.helperPid) && (ready.helperPid as number) > 0
+              && ready.parentPid !== ready.helperPid) {
+              observedReady = { parentPid: ready.parentPid as number, helperPid: ready.helperPid as number };
+            }
+          } catch { /* absent or not yet completely published */ }
+          if (observedReady === undefined) Atomics.wait(readinessWait, 0, 0, 10);
+        }
+        // Never throw before the runner has installed its cleanup timer. A
+        // missing handshake fails below, after the normal termination attempt.
+      }
+      return args[1] === 'add' && mode === 'timeout' ? 150 : 15_000;
+    },
     commandTerminationGraceMs: 50,
   });
   const started = performance.now();
   const wired = await wireEditor('codex', { configPath });
-  return { detail: wired.detail, elapsedMs: performance.now() - started, mutationPath };
+  const elapsedMs = performance.now() - started;
+  expect(observedReady, 'both adversarial processes armed their post-return probes').toBeDefined();
+  expect(wired.detail).not.toContain('Windows process-tree teardown unconfirmed');
+  // Writes before taskkill completes do not prove mutation after the reported
+  // failure. Only a process surviving the response can observe this marker.
+  fs.writeFileSync(reportedFailurePath, 'reported', 'utf8');
+  return { detail: wired.detail, elapsedMs, mutationPath };
 }
 
 function fakeChildProcess(): ChildProcess {

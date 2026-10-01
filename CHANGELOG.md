@@ -9,6 +9,72 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.18.0] — 2026-09-30
+
+### Added
+
+- Add the read-only `ashlr openai-agents sessions|inspect|turns` CLI for managed
+  API metadata, using host-held authentication, bounded pages and secret-safe
+  output. It does not launch or control agents or qualify a fleet seat.
+- Package cited OpenAI Agents, Dots companion and harness evolution guides,
+  distinguishing current commands from the remaining execution and event adapters.
+- Make Work with me and Work for me the two primary workspaces, using the
+  existing chats, fleet, accounts, projects and shortcuts. Workspace switches
+  navigate without dispatching tasks or changing agent permissions.
+- Add editable guide starters for idle empty chats and direct fleet links for
+  delegating a task, reviewing agents and guiding the Leader's fleet planning.
+- Add explicitly reviewed, signed change-volume limits, including a no-volume-cap
+  option. Existing grants keep their prior effective scope; changing limits
+  requires a compatible custody helper and a new Touch ID signature.
+- Add reported/unknown token coverage to local evaluation receipts and bounded
+  offline comparison for compatible tasks, models, runtime configuration and
+  recorded cache conditions. Comparisons do not invoke models.
+
+- Add explicit account enablement, role, reserve and session-ceiling edits for
+  server-listed grant accounts, with before/after preview and new-signature
+  approval. Untouched fields and plain renewals preserve scope.
+- Keep grant approval disabled while edited choices lack a successful current
+  preview; a stale preview response cannot approve newer unsaved choices.
+
+### Changed
+
+- Let existing scheduling and cash-budget preferences exceed the former UI
+  ceilings, and honour batch parallelism above the hidden eight-worker clamp.
+  Keep defaults, safe numeric validation and actual admission; report the
+  current 64-item durable-journal batch capacity in the budget panel.
+- Keep eligible resident zero-dollar production and deterministic maintenance
+  available after ordinary positive cash-budget exhaustion. Explicit zero-stop,
+  signed scope, account reserves, unknown-cost refusals and accounting holds
+  remain binding; hosted Devin retains separate ACU gates.
+- Use the normal run token allowance (or `daemon.perItemMaxTokens`) for proven
+  zero-dollar producers instead of deriving it from cash headroom. Unproven
+  inference and mandatory fresh model checks wait; no eval is a dispatch gate.
+- Account single-producer runs using concrete admitted engine economics instead
+  of treating a custom subscription-like tier as proof of zero cost.
+- Remove the six-seat task fan-out ceiling and the 200-workspace configuration
+  ceiling. Runtime admission, provider capacity, isolation and configured
+  retention still apply. `ASHLR_VERSE_AGENT_CAP=none` disables retention-driven
+  automatic archiving; malformed overrides keep the established default of 25.
+- Allow the standalone inbox automerge path to use its explicitly configured
+  file/line limits above the former 10/300 ceiling. Previously refused larger
+  configurations can now become valid there; defaults remain disabled and
+  conservative. Resident fleet work still requires its signed effective scope.
+- Collapse optional new-agent controls while retaining their current defaults.
+- Restore the saved workspace on launch instead of forcing Command each day.
+
+### Fixed
+
+- Update bundled Hono to 4.13.7 for the JSX-renderer escaping advisory
+  [GHSA-hxh3-vqpv-xpqv](https://github.com/honojs/hono/security/advisories/GHSA-hxh3-vqpv-xpqv).
+- Admit the three packaged Agents guides through exact release-portability
+  entries, preserving rejection of unapproved sibling files and wildcards.
+- Refuse exhausted or occupied workspace port ranges before creation or restore,
+  and serialize those admissions across repositories in the owning Hub process.
+- Preserve shipped Grok and Devin CLI identities in dispatch ledgers so a
+  successful run does not degrade later duplicate-suppression admission.
+- Scope guide insertion requests to the current chat so a previous chat cannot
+  suppress the first insertion or carry draft text into another conversation.
+
 ## [3.17.2] — 2026-09-30
 
 ### Added

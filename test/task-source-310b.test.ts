@@ -4,7 +4,15 @@
  * tasks, U8 dispatches and cancels on a veto). Store: 0600, locked, bounded;
  * a corrupt queue is never read as empty.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+const livePolicy = vi.hoisted(() => ({ value: null as import('../src/core/authority/types.js').EffectivePolicy | null }));
+vi.mock('../src/core/authority/effective-config.js', async (original) => ({
+  ...(await original<typeof import('../src/core/authority/effective-config.js')>()),
+  currentStandingPolicy: () => livePolicy.value,
+}));
+import { computeEffectivePolicy } from '../src/core/authority/effective-config.js';
+import { makeGrant } from './helpers/authority-310b.js';
+
 import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -34,6 +42,7 @@ let dir: string;
 let file: string;
 
 beforeEach(() => {
+  livePolicy.value = null;
   dir = mkdtempSync(join(tmpdir(), 'u5-tasks-'));
   file = join(dir, 'fleet', 'tasks.json');
 });
@@ -219,5 +228,41 @@ describe('A7 insights → add-tests tasks', () => {
     expect(queue.tasks).toHaveLength(1);
     expect(queue.tasks[0]).toMatchObject({ source: 'insight', insightId: 'ins-1', dedupeKey: 'insight:ins-1', difficulty: 'low' });
     expect(queue.tasks[0]!.title).toMatch(/^Add tests: /);
+  });
+});
+
+
+describe('signed task volume budgets', () => {
+  it('retains large and no-cap budgets rather than reslicing to old universal ceilings', () => {
+    for (const n of [1000, Number.MAX_SAFE_INTEGER]) {
+      const result = enqueueTask(input(), { file, nowMs: NOW, sizeBudget: { files: n, lines: n } });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.task.sizeBudget).toEqual({ files: n, lines: n });
+    }
+    const read = readTaskQueue(file);
+    expect(read.ok).toBe(true);
+    if (read.ok) expect(read.tasks.map((t) => t.sizeBudget.files)).toEqual([1000, Number.MAX_SAFE_INTEGER]);
+  });
+  it('refuses unsafe budgets without storing a repaired value', () => {
+    for (const bad of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) expect(enqueueTask(input(), { file, sizeBudget: { files: bad, lines: 100 } }).ok).toBe(false);
+  });
+});
+
+
+describe('task slicing from effective signed policy', () => {
+  it('uses expanded signed local scope and preserves legacy local slicing without the marker', () => {
+    const g = makeGrant();
+    g.merge = { ...g.merge, volumePolicy: 'operator-signed', maxFiles: 80, maxLines: 5000 };
+    g.rollout.stages[2]!.maxFiles = 80;
+    g.rollout.stages[2]!.maxLines = 5000;
+    const effective = () => computeEffectivePolicy({ grant: g, position: { stageIndex: 2, stageId: g.rollout.stages[2]!.id, enteredAt: new Date(NOW).toISOString() }, switch: 'autonomous', config: null, nowMs: NOW });
+    livePolicy.value = effective();
+    expect(sizeBudgetFor('ashlrai/measurably')).toEqual({ files: 80, lines: 5000 });
+    const queued = enqueueTask(input({ repo: 'ashlrai/measurably' }), { file });
+    expect(queued.ok).toBe(true);
+    if (queued.ok) expect(queued.task.sizeBudget).toEqual({ files: 80, lines: 5000 });
+    delete g.merge.volumePolicy;
+    livePolicy.value = effective();
+    expect(sizeBudgetFor('ashlrai/measurably')).toEqual({ files: 4, lines: 150 });
   });
 });

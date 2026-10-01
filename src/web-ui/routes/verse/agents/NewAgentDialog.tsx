@@ -21,7 +21,7 @@ import { Select } from '../../../components/primitives/Select.js';
 import { Switch } from '../../../components/primitives/Switch.js';
 import { defaultSeatChoice, SeatSelector, type SeatChoice } from '../SeatSelector.js';
 import { ENGINE_LABEL } from '../verse-model.js';
-import { checkSpawnForm, MAX_FAN_OUT, seatRows, titleFromPrompt, type SpawnForm } from './agents-model.js';
+import { checkSpawnForm, seatRows, titleFromPrompt, type SpawnForm } from './agents-model.js';
 import { fetchWorkspaceConfig, type SpawnInput } from './agents-queries.js';
 import styles from './Agents.module.css';
 
@@ -154,7 +154,7 @@ export function NewAgentDialog({ open, multi, projects, seats, initialRoot, busy
 
         {multi ? (
           <fieldset className={styles.seatList} disabled={busy}>
-            <legend>Seats ({count} of at most {MAX_FAN_OUT})</legend>
+            <legend>Seats ({count} selected)</legend>
             {rows.map((r) => (
               <label key={r.seatId} className={styles.seatRow} data-disabled={r.disabled ? true : undefined}>
                 <input
@@ -194,7 +194,9 @@ export function NewAgentDialog({ open, multi, projects, seats, initialRoot, busy
         </div>
         <Input label="Title (optional)" value={title} onChange={(e) => setTitle(e.target.value)} placeholder={prompt ? titleFromPrompt(prompt) : 'From the prompt'} disabled={busy} />
 
-        <div className={styles.options}>
+        <details className={styles.advancedOptions}>
+          <summary>Options</summary>
+          <div className={styles.options}>
           {multi ? null : <Switch checked={isolate} onChange={setIsolate} label="Own workspace (worktree + branch)" disabled={busy} />}
           <Switch checked={planFirst} onChange={setPlanFirst} label="Plan first — approve before it edits" disabled={busy} />
           <Switch checked={autoFix} onChange={setAutoFix} label="Auto-fix CI" disabled={busy} />
@@ -209,7 +211,8 @@ export function NewAgentDialog({ open, multi, projects, seats, initialRoot, busy
             hint="Warns at 80%, stops the agent at 100%."
             disabled={busy}
           />
-        </div>
+          </div>
+        </details>
         {autoMerge ? (
           <p className={styles.hint}>
             Auto-merge squash-merges only a green, mergeable PR that touches no protected path (CI, manifests, lockfiles); ashlr-hub itself only when the grant’s self-land policy allows. GitHub’s branch rules still apply.

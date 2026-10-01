@@ -34,7 +34,8 @@ import {
 import { buildReport, renderReport, summariseTask } from './report.js';
 import { runTrial } from './runner.js';
 import { TASKS } from './tasks.js';
-import { HELD_OUT_TASKS } from './tasks-heldout.js';
+import { HELD_OUT_TASKS, taskSetDigest } from './tasks-heldout.js';
+import { compareReportsCli } from './compare.js';
 import type { TaskOutcome, TaskSpec, TrialResult } from './types.js';
 
 interface Args {
@@ -55,6 +56,9 @@ interface Args {
   experiments: boolean;
   /** With --experiments: use one local slot, as the daemon does while fleet work waits. */
   fleetBusy: boolean;
+  /** Operator-recorded control, not an assertion that this runner flushed caches. */
+  cacheState: 'cold' | 'warm' | 'uncontrolled';
+  cacheProtocol: string;
 }
 
 export function parseArgs(argv: readonly string[]): Args {
@@ -86,6 +90,8 @@ export function parseArgs(argv: readonly string[]): Args {
     set: 'core',
     experiments: false,
     fleetBusy: false,
+    cacheState: 'uncontrolled',
+    cacheProtocol: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
@@ -105,6 +111,12 @@ export function parseArgs(argv: readonly string[]): Args {
       case '--set': args.set = value === 'heldout' ? 'heldout' : 'core'; i += 1; break;
       case '--experiments': args.experiments = true; break;
       case '--fleet-busy': args.fleetBusy = true; break;
+      case '--cache-state':
+        if (value !== 'cold' && value !== 'warm' && value !== 'uncontrolled') throw new Error('invalid --cache-state');
+        args.cacheState = value; i += 1; break;
+      case '--cache-protocol':
+        if (!value || value.startsWith('--') || value.length > 8192) throw new Error('invalid --cache-protocol');
+        args.cacheProtocol = value; i += 1; break;
       default: break;
     }
   }
@@ -158,7 +170,15 @@ async function runExperimentQueue(args: Args): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  // Before configuration capture, queue imports, or any agent/runtime interaction.
+  if (argv.some((arg) => arg.startsWith('--compare'))) {
+    const result = compareReportsCli(argv);
+    console.log(result.output);
+    process.exitCode = result.exitCode;
+    return;
+  }
+  const args = parseArgs(argv);
   if (args.experiments) {
     await runExperimentQueue(args);
     return;
@@ -213,6 +233,9 @@ async function main(): Promise<void> {
 
   const report = buildReport({
     configuration, outcomes,
+    comparisonEvidence: { version: 1, taskDigest: taskSetDigest(tasks), cacheState: args.cacheState,
+      cacheProtocol: args.cacheProtocol, agentModel: args.model, timeoutMs: args.timeoutMs,
+      appendSystemPrompt: '', effort: 'default' },
     trialsPerTask: args.trials,
     concurrency: args.concurrency,
     startedAt, finishedAt,

@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
   roots: [] as unknown[],
   surface: 'b'.repeat(64) as string | null,
   signMode: 'sign' as 'sign' | 'swap' | 'cancel',
+  signCalls: 0,
 }));
 
 vi.mock('../src/core/authority/trust-roots.js', () => ({
@@ -49,6 +50,7 @@ vi.mock('../src/core/authority/custody-client.js', async (importOriginal) => {
       reasons: [],
     }),
     signGrant: async (payload: import('../src/core/authority/types.js').StandingGrantV1) => {
+      state.signCalls++;
       if (state.signMode === 'cancel') throw new Error('Touch ID was cancelled');
       if (state.signMode === 'swap') return helpers.signGrant({ ...payload, conductorGoals: !payload.conductorGoals });
       return helpers.signGrant(payload);
@@ -71,7 +73,8 @@ import { registerExecutionLease, type ExecutionLease } from '../src/core/sandbox
 import { acquireOutwardMutationFence, ownsOutwardMutationFence, releaseOutwardMutationFence } from '../src/core/sandbox/mutation-fence.js';
 import { killSwitchOn } from '../src/core/sandbox/policy.js';
 import { isNeedsYouItem } from '../src/core/verse/workbench-types.js';
-import type { AuthorityStatusV1 } from '../src/core/authority/types.js';
+import { runAuthorityCli } from '../src/cli/authority.js';
+import type { AuthorityStatusV1, StandingGrantV1 } from '../src/core/authority/types.js';
 import type { VerseApiContext } from '../src/core/verse/verse-api.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import { TEST_ROOT, withTempHome } from './helpers/authority-310b.js';
@@ -99,6 +102,7 @@ beforeEach(() => {
   state.roots.length = 0;
   state.surface = 'b'.repeat(64);
   state.signMode = 'sign';
+  state.signCalls = 0;
   ctx = { cfg: {} as AshlrConfig, token: TOKEN, allowDispatch: true };
   resetLedgerCachesForTest();
   invalidateStandingPolicyCache();
@@ -268,9 +272,10 @@ describe('actions', () => {
     state.roots.push(TEST_ROOT);
     const plain = await call('GET', '/api/verse/authority/draft');
     expect(plain?.status).toBe(200);
-    const editable = plain!.body['editable'] as { repos: string[]; engines: string[]; leaderClasses: string[]; maxDays: number };
+    const editable = plain!.body['editable'] as { repos: string[]; engines: string[]; leaderClasses: string[]; maxDays: number; volumeLimits?: boolean };
     expect(editable.leaderClasses).toEqual(['A', 'B']);
     expect(editable.maxDays).toBe(30);
+    expect(editable.volumeLimits).toBe(true);
     expect(editable.repos).toContain('ashlrai/fleet-canary');
     // No grant in force: every diff line is new.
     expect((plain!.body['diff'] as { direction: string }[]).some((line) => line.direction === 'wider')).toBe(true);
@@ -430,5 +435,76 @@ describe('drafts name server enforcement only where GitHub enforces checks (3.14
     expect(unavailable.summary.some((line) => line.includes(`${CANARY}: up to merge, low risk, 4/day, local enforcement`))).toBe(true);
     const reapproved = await call('POST', '/api/verse/authority', { action: 're-approve', draftDigest: unavailable.digest });
     expect(reapproved?.status).toBe(200);
+  });
+});
+
+
+describe('reviewed operator signed volume draft', () => {
+  it('binds explicit no-cap choices to the reviewed digest and preserves them on renewal', async () => {
+    state.roots.push(TEST_ROOT);
+    const baseline = await call('GET', '/api/verse/authority/draft');
+    expect(baseline?.status).toBe(200);
+    const initial = baseline!.body['payload'] as StandingGrantV1;
+    const n = Number.MAX_SAFE_INTEGER;
+    const scoped = await call('POST', '/api/verse/authority/draft', { kind: 'new', scope: { maxFiles: n, maxLines: n, repoMaxMergesPerDay: { [initial.repos[0]!.nameWithOwner]: n } } });
+    expect(scoped?.status).toBe(200);
+    const payload = scoped!.body['payload'] as StandingGrantV1;
+    expect(payload.merge).toMatchObject({ volumePolicy: 'operator-signed', maxFiles: n, maxLines: n });
+    const sign = await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: scoped!.body['digest'] });
+    expect(sign?.status).toBe(200);
+    const renewed = await call('POST', '/api/verse/authority/draft', { kind: 'reapprove', scope: { days: 7 } });
+    expect(renewed?.status).toBe(200);
+    expect((renewed!.body['payload'] as StandingGrantV1).merge).toEqual(payload.merge);
+  });
+});
+
+
+describe('CLI explicit volume draft end to end', () => {
+  it('accepts none and a per-repo rate into the server draft without signing', async () => {
+    state.roots.push(TEST_ROOT);
+    const output: string[] = [];
+    const errors: string[] = [];
+    const code = await runAuthorityCli(['draft', '--new', '--json', '--max-files', 'none', '--max-lines', '5000', '--repo-max-merges-per-day', 'ashlrai/fleet-canary=100'], {
+      out: (line) => output.push(line), err: (line) => errors.push(line),
+      run: () => ({ status: 1, stdout: '', stderr: 'fake GitHub offline' }),
+    });
+    expect(errors).toEqual([]);
+    expect(code).toBe(0);
+    const payload = JSON.parse(output.join('\n')).payload as StandingGrantV1;
+    expect(payload.merge).toMatchObject({ volumePolicy: 'operator-signed', maxFiles: Number.MAX_SAFE_INTEGER, maxLines: 5000 });
+    expect(payload.repos.find((r) => r.nameWithOwner === 'ashlrai/fleet-canary')?.maxMergesPerDay).toBe(100);
+    expect((await call('GET', '/api/verse/authority'))?.body).toMatchObject({ grant: { state: 'none' } });
+  });
+});
+
+
+describe('reviewed signed account policies', () => {
+  it('advertises server-listed identities and binds explicit edits to the digest without signing on preview', async () => {
+    state.roots.push(TEST_ROOT);
+    const baseline = await call('GET', '/api/verse/authority/draft');
+    expect(baseline?.status).toBe(200);
+    const initial = baseline!.body['payload'] as StandingGrantV1;
+    const editable = baseline!.body['editable'] as { seatPolicies: Record<string, { roles: string[] }> };
+    expect(Object.keys(editable.seatPolicies)).toEqual(Object.keys(initial.spend.seats));
+    const id = Object.keys(initial.spend.seats)[0]!;
+    const scoped = await call('POST', '/api/verse/authority/draft', { kind: 'new', scope: { seatPolicies: { [id]: { enabled: true, reserveFloorPercent: 0, maxSessionWindowPercent: null, roles: ['producer'] } } } });
+    expect(scoped?.status).toBe(200);
+    const payload = scoped!.body['payload'] as StandingGrantV1;
+    expect(payload.spend.seats[id]).toEqual({ enabled: true, reserveFloorPercent: 0, roles: ['producer'] });
+    expect(payload.merge).toEqual(initial.merge);
+    expect(state.signCalls).toBe(0);
+    const signed = await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: scoped!.body['digest'] });
+    expect(signed?.status).toBe(200);
+    expect(state.signCalls).toBe(1);
+    const renewed = await call('POST', '/api/verse/authority/draft', { kind: 'reapprove', scope: { days: 7 } });
+    expect(renewed?.status).toBe(200);
+    expect((renewed!.body['payload'] as StandingGrantV1).spend.seats).toEqual(payload.spend.seats);
+  });
+  it('refuses unknown accounts and malformed policy before signing', async () => {
+    state.roots.push(TEST_ROOT);
+    for (const seatPolicies of [{ 'unknown:new': { enabled: true } }, { claude: { reserveFloorPercent: 101 } }, { claude: { maxSessionWindowPercent: 0 } }, { claude: { roles: [] } }]) {
+      const res = await call('POST', '/api/verse/authority/draft', { kind: 'new', scope: { seatPolicies } });
+      expect(res?.status).toBe(400);
+    }
   });
 });

@@ -290,7 +290,9 @@ minutes. The Leader's `devin.launch` action and automations with the `devin`
 lane use the same fleet entry point and gates.
 
 **The Devin CLI as a fleet producer (`devin-cli`).** The fleet can also run
-the local Devin CLI on SWE-2, which is free on the Devin plan. It works like
+the local Devin CLI on the compiled SWE-2 allowlist, originally listed as free
+on a Devin Max account with CLI 3000.11.3. That historical listing does not
+establish fresh account-specific pricing or perpetual free use. It works like
 the Codex and Claude Code CLI engines: each run gets a sandbox worktree, and
 its edit is captured as a pending proposal. The command is
 `devin -p --model <m> --permission-mode smart --respect-workspace-trust false -- <goal>`.
@@ -305,17 +307,30 @@ its edit is captured as a pending proposal. The command is
   naming `devin` with a producer Devin seat. The budget mode must also allow
   the Devin seat.
 - **Model.** Set it with `devin.fleetModel`; the default is `swe-2-high`.
-  Only the free models (`swe-2-high`, `swe-2-medium`, `swe-2-max`) run under
-  autonomy, because a billed model's spend cannot be read back.
-- **Readiness.** The CLI must be installed and logged in (the same probe the
-  CLI chat seat uses). If it is not, the lane is closed with the fixing
-  command.
+  Only the compiled models (`swe-2-high`, `swe-2-medium`, `swe-2-max`) run under
+  autonomy; other models hold because their billed spend cannot be read back.
+- **Readiness.** The probe checks executable access and credentials-file
+  presence, as it does for the CLI chat seat. A missing file closes the lane
+  with the fixing command. Presence does not validate the provider login,
+  account identity or pricing; qualify the current account, model and price
+  before autonomous activation.
 - **Routing.** The lane has one slot. It takes work that no other seat can
   take right now.
 - **Recording and cost.** Runs are recorded as `devin-cli:<model>` and cost
-  $0.
+  accounting retains the historical zero-charge classification. That is not
+  a current provider billing observation.
 - **Login.** An autonomous run gets a private copy of the CLI's login.
   Nothing is written back to your real login.
+
+**Cash exhaustion and pricing qualification (3.18).** The Devin CLI does not
+qualify for the new exhausted-USD exception. Its existing positive-budget
+admission and the hosted lane's separate ACU policy remain unchanged. Before
+activating the CLI lane, qualify the actual account, exact model and current
+price; missing or historical evidence must not be presented as fresh zero-price
+proof. A future account-pricing admission contract must expire and recheck that
+evidence. The [official pricing page](https://devin.ai/pricing), reviewed on
+October 1, 2026, advertises eligible-plan free SWE-2 in Desktop and CLI through
+October 16, 2026; it does not promise indefinite free access.
 
 **Intake into the standing gates.** When a standing grant is in force and the
 lane is on, each standing tick runs the same intake as cloud PRs

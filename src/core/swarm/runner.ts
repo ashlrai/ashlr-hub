@@ -7,7 +7,7 @@
  * Guardrails:
  *  - RECURSION GUARD: refuses if ASHLR_IN_SWARM is set in the environment.
  *  - HARD TOTAL BUDGET across all tasks; aborts cleanly with partial state.
- *  - Bounded concurrency (opts.parallel, default 3, max 8).
+ *  - Operator-selected BUILD concurrency (positive safe integer; default 3).
  *  - LOCAL-FIRST: cloud only when opts.allowCloud + key present.
  *  - NO OUTWARD/DESTRUCTIVE ACTION by default (code/build/test only).
  *  - Resumable via opts.resumeId; persists after every step.
@@ -306,7 +306,12 @@ async function loadM21(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_PARALLEL = 3;
-const MAX_PARALLEL = 8;
+/** Invalid programmatic preferences retain the conservative default, never unbounded work. */
+function resolveParallel(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+    ? value
+    : DEFAULT_PARALLEL;
+}
 const BACKGROUND_HANDOFF_WAIT_MS = 5 * 60 * 1_000;
 const BACKGROUND_HANDOFF_ACK_MS = 15_000;
 const BACKGROUND_HANDOFF_PROTOCOL = 'ashlr-background-handoff-v1';
@@ -1533,10 +1538,7 @@ async function runSwarmInternal(
       updatedAt: now,
       budget: buildBudget(opts),
       usage: newUsage(),
-      parallel: Math.min(
-        Math.max(1, opts.parallel ?? DEFAULT_PARALLEL),
-        MAX_PARALLEL,
-      ),
+      parallel: resolveParallel(opts.parallel),
       status: 'failed',
       plan: { specId: input.specId ?? null, goal: input.goal, tasks: [] },
       tasks: [],
@@ -1569,7 +1571,7 @@ async function runSwarmInternal(
       updatedAt: now,
       budget: buildBudget(opts),
       usage: newUsage(),
-      parallel: Math.min(Math.max(1, opts.parallel ?? DEFAULT_PARALLEL), MAX_PARALLEL),
+      parallel: resolveParallel(opts.parallel),
       status: 'aborted',
       plan: { specId: input.specId ?? null, goal: input.goal, tasks: [] },
       tasks: [],
@@ -1588,7 +1590,7 @@ async function runSwarmInternal(
       updatedAt: now,
       budget: buildBudget(opts),
       usage: newUsage(),
-      parallel: Math.min(Math.max(1, opts.parallel ?? DEFAULT_PARALLEL), MAX_PARALLEL),
+      parallel: resolveParallel(opts.parallel),
       status: 'failed',
       plan: { specId: input.specId ?? null, goal: input.goal, tasks: [] },
       tasks: [],
@@ -1661,11 +1663,8 @@ async function runSwarmInternal(
   // -------------------------------------------------------------------------
   await loadM21();
 
-  // Clamp parallel concurrency.
-  const parallel = Math.min(
-    Math.max(1, opts.parallel ?? DEFAULT_PARALLEL),
-    MAX_PARALLEL,
-  );
+  // Only actual pending tasks are launched; token/step reservations still bind each batch.
+  const parallel = resolveParallel(opts.parallel);
   const budget = buildBudget(opts);
   const project = opts.project ?? null;
   const causal = {
@@ -2316,7 +2315,7 @@ export async function runSwarm(
       updatedAt: now,
       budget: buildBudget(opts),
       usage: newUsage(),
-      parallel: Math.min(Math.max(1, opts.parallel ?? DEFAULT_PARALLEL), MAX_PARALLEL),
+      parallel: resolveParallel(opts.parallel),
       status: 'failed',
       plan: { specId: input.specId ?? null, goal: input.goal, tasks: [] },
       tasks: [],

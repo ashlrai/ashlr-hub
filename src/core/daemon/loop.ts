@@ -187,7 +187,7 @@ import {
 } from './local-fleet.js';
 import { createOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 import { runSwarm } from '../swarm/runner.js';
-import { runGoal } from '../run/orchestrator.js';
+import { DEFAULT_MAX_TOKENS, runGoal } from '../run/orchestrator.js';
 import { scopeFromWorkItem } from '../run/delegation-scope.js';
 import {
   generatedRepairCandidateAllowed,
@@ -206,7 +206,8 @@ import {
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import { resolveEngineSpec } from '../run/engine-registry.js';
 // The one authority for "does this engine run on this machine" (pool tiering).
-import { engineLocality } from '../policy/local-only.js';
+import { engineLocality, engineMeteredness } from '../policy/local-only.js';
+import { resolveDevinCliFleetModel } from '../devin/cli-engine.js';
 // M80. The window check itself is reached through hooks.seatAllows
 // (DEFAULT_TICK_HOOKS delegates to subscriptionAllows with the same arguments).
 import { isSubscriptionEngine } from '../fleet/subscription-usage.js';
@@ -1757,6 +1758,9 @@ export function recoverDaemonSpendGuardOnStartup(
   if (!guard || (read.malformed && !read.legacyGuard)) {
     return { ok: false, reason: 'legacy-or-malformed-spend-guard' };
   }
+  if (guard.zeroCostOnly && state.spendGuardAccounting?.accountingId !== guard.accountingId) {
+    return { ok: false, reason: 'zero-cost-spend-guard-requires-reconciliation' };
+  }
   if (guard.hostname !== osHostname()) {
     return { ok: false, reason: 'spend-guard-host-identity-mismatch' };
   }
@@ -2000,12 +2004,13 @@ async function buildDaemonStrategyPlan(
   cfg: AshlrConfig,
   state: DaemonState,
   backlogItems: number,
-  direction: { standingTick: boolean },
+  direction: { standingTick: boolean; zeroDollarOnly: boolean },
 ): Promise<ResourceStrategyDaemonPlan> {
   const { diagnoseGuardHealth } = await import('./guard-health.js');
   const guardHealth = diagnoseGuardHealth();
   const productionVelocity = resolveProductionVelocityProfile(cfg);
   const report = await buildResourceStrategyReport(cfg, {
+    ...(direction.zeroDollarOnly ? { zeroDollarOnly: true as const } : {}),
 	    maxOutcomes: 6,
 	    maxChecks: 1,
 	    deps: {
@@ -3577,19 +3582,15 @@ function proposalProductionSummary(
  */
 function resolveCfg(cfg: AshlrConfig): DaemonConfig {
   const o = cfg.daemon ?? {};
+  const capacity = (value: number | undefined, fallback: number): number =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : fallback;
   // M116: tiered concurrency caps — defaults chosen for M5 Max (18 cores, 137GB RAM):
   // local=2 (GPU/RAM bound), cloud=6 (I/O bound), total=8. Configurable upward.
-  const concLocal = typeof o.concurrency?.local === 'number' && o.concurrency.local > 0
-    ? Math.floor(o.concurrency.local) : 2;
-  const concCloud = typeof o.concurrency?.cloud === 'number' && o.concurrency.cloud > 0
-    ? Math.floor(o.concurrency.cloud) : 6;
-  const concTotal = typeof o.concurrency?.total === 'number' && o.concurrency.total > 0
-    ? Math.floor(o.concurrency.total) : 8;
+  const concLocal = capacity(o.concurrency?.local, 2);
+  const concCloud = capacity(o.concurrency?.cloud, 6);
+  const concTotal = capacity(o.concurrency?.total, 8);
   // maxConcurrent: explicit override > concurrency.total > 8
-  const maxConcurrent = typeof o.maxConcurrent === 'number' && o.maxConcurrent > 0
-    ? Math.floor(o.maxConcurrent)
-    : (typeof o.concurrency?.total === 'number' && o.concurrency.total > 0
-        ? Math.floor(o.concurrency.total) : 8);
+  const maxConcurrent = capacity(o.maxConcurrent, concTotal);
   return {
     // ZERO IS A CHOICE, NOT AN ABSENCE. The Verse control plane offers 0 as
     // "stop the loop" (VERSE-CONTRACT-V2: "a budget of 0 means 'stopped', say
@@ -3600,15 +3601,13 @@ function resolveCfg(cfg: AshlrConfig): DaemonConfig {
     // every tick as budget-exhausted — exactly what the UI promises. Negative
     // and non-finite values are still nonsense and still fall back.
     dailyBudgetUsd:
-      typeof o.dailyBudgetUsd === 'number' && Number.isFinite(o.dailyBudgetUsd) && o.dailyBudgetUsd >= 0
+      typeof o.dailyBudgetUsd === 'number' && Number.isFinite(o.dailyBudgetUsd) && o.dailyBudgetUsd >= 0 && o.dailyBudgetUsd <= Number.MAX_SAFE_INTEGER
         ? o.dailyBudgetUsd
         : DEFAULTS.dailyBudgetUsd,
-    perTickItems: typeof o.perTickItems === 'number' && o.perTickItems > 0
-      ? Math.floor(o.perTickItems)
-      : DEFAULTS.perTickItems,
-    parallel: typeof o.parallel === 'number' && o.parallel > 0
-      ? Math.min(Math.floor(o.parallel), 8) // hard upper bound at 8 (batch mode)
-      : DEFAULTS.parallel,
+    perItemMaxTokens: Number.isSafeInteger(o.perItemMaxTokens) && (o.perItemMaxTokens ?? 0) > 0
+      ? o.perItemMaxTokens : DEFAULT_MAX_TOKENS,
+    perTickItems: capacity(o.perTickItems, DEFAULTS.perTickItems),
+    parallel: capacity(o.parallel, DEFAULTS.parallel),
     intervalMs: typeof o.intervalMs === 'number' && o.intervalMs > 0
       ? o.intervalMs
       : DEFAULTS.intervalMs,
@@ -4123,6 +4122,7 @@ export async function tick(
       // back to the legacy path (fail closed when the policy is unreadable).
       const result = await runAutoMergePass(liveCfg, {
         capabilityKind: capabilityKind as DaemonCapabilityKind | null,
+        ...(meteredUsdExhaustedForMaintenance ? { meteredUsdExhausted: true as const } : {}),
       });
       return stillOwnsTick() ? result : null;
     } catch (err) {
@@ -4164,6 +4164,8 @@ export async function tick(
       return null;
     }
   };
+  let zeroDollarOnlyTick = false;
+  let meteredUsdExhaustedForMaintenance = false;
   let selfHealMaintenanceRan = false;
   let inventMaintenanceRan = false;
   let ancillaryMaintenanceRan = false;
@@ -4442,7 +4444,7 @@ export async function tick(
     return false;
   };
   const runSelfHealMaintenance = async (targetRepos?: string[]): Promise<void> => {
-    if (proposalOnlyActivation || opts.dryRun || stopRequested() || selfHealMaintenanceRan) return;
+    if (meteredUsdExhaustedForMaintenance || proposalOnlyActivation || opts.dryRun || stopRequested() || selfHealMaintenanceRan) return;
     selfHealMaintenanceRan = true;
     try {
       if (targetRepos && targetRepos.length > 0) {
@@ -4501,6 +4503,7 @@ export async function tick(
   };
   const runInventMaintenance = async (): Promise<boolean> => {
     if (
+      meteredUsdExhaustedForMaintenance ||
       proposalOnlyActivation ||
       opts.dryRun ||
       stopRequested() ||
@@ -4519,7 +4522,7 @@ export async function tick(
     }
   };
   const runAncillaryMaintenance = async (): Promise<void> => {
-    if (proposalOnlyActivation || opts.dryRun || stopRequested() || ancillaryMaintenanceRan) return;
+    if (meteredUsdExhaustedForMaintenance || proposalOnlyActivation || opts.dryRun || stopRequested() || ancillaryMaintenanceRan) return;
     ancillaryMaintenanceRan = true;
 
     // M187: Counterfactual replay — low-cadence judge calibration.
@@ -4867,6 +4870,9 @@ export async function tick(
         cfg: liveCfg,
         dryRun: opts.dryRun,
         capabilityKind: capabilityKind as DaemonCapabilityKind | null,
+        ...(standingTick && dcfg.dailyBudgetUsd > 0 && state.todaySpentUsd >= dcfg.dailyBudgetUsd
+          && !(state.spendGuardAccounting?.budgetDay === state.todayDate
+            && state.spendGuardAccounting.budgetExhausted === true) ? { meteredUsdExhausted: true as const } : {}),
         signal,
       }),
       opts.signal ? { parentSignal: opts.signal } : {},
@@ -4889,8 +4895,10 @@ export async function tick(
     state.spendGuardAccounting.budgetExhausted === true;
   const remainingBudget = budgetDayPessimisticallyExhausted
     ? 0
-    : dcfg.dailyBudgetUsd - state.todaySpentUsd;
-  if (remainingBudget <= 0) {
+    : Math.max(0, dcfg.dailyBudgetUsd - state.todaySpentUsd);
+  zeroDollarOnlyTick = remainingBudget <= 0 && canContinueBudgetIndependentStanding(standingTick, liveCfg, state, dcfg);
+  meteredUsdExhaustedForMaintenance = zeroDollarOnlyTick;
+  if (remainingBudget <= 0 && !zeroDollarOnlyTick) {
     if (!stillOwnsTick()) {
       return ownershipLostTick({ ts: now, itemsConsidered: 0, proposalsCreated: 0, spentUsd: 0, reason: 'shutdown-requested' });
     }
@@ -4955,7 +4963,7 @@ export async function tick(
   // -------------------------------------------------------------------------
   if (autonomyControlEnabled(liveCfg)) {
     try {
-      directionPlan = await buildDaemonStrategyPlan(liveCfg, state, cachedBacklogCountForEnrolledRepos(enrolled), { standingTick });
+      directionPlan = await buildDaemonStrategyPlan(liveCfg, state, cachedBacklogCountForEnrolledRepos(enrolled), { standingTick, zeroDollarOnly: zeroDollarOnlyTick });
       directionMode = directionPlan.mode;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -5512,7 +5520,10 @@ export async function tick(
     : drainMode
       ? backlogItems.filter((item) => isDrainCandidate(item, drainMode))
       : backlogItems;
-  const configuredSelectCount = daemonQueueSelectionLimit({
+  const configuredSelectCount = zeroDollarOnlyTick
+    ? Math.min(selectionItems.length, Math.max(1, Math.floor(dcfg.perTickItems),
+      productionVelocity.fillQueueToSlots ? (availableSlotsForSelection ?? 0) : 0))
+    : daemonQueueSelectionLimit({
     perTickItems: dcfg.perTickItems,
     remainingBudgetUsd: remainingBudget,
     backlogItems: selectionItems.length,
@@ -5985,6 +5996,7 @@ export async function tick(
     dailyBudgetUsd: dcfg.dailyBudgetUsd,
     spentUsdAtArm: state.todaySpentUsd,
     reservedUsd: workedSetIds.length > 0 ? remainingBudget : 0,
+    ...(zeroDollarOnlyTick ? { zeroCostOnly: true as const } : {}),
   });
   if (!spendGuard.ok) {
     stopLeaseRenewer();
@@ -6022,6 +6034,7 @@ export async function tick(
   // reaches the remaining daily headroom (the USD daily cap is otherwise only
   // enforced BETWEEN ticks — this keeps a single tick from overshooting it).
   let tickSpent = 0;
+  let zeroCostProducerViolation = false;
   // M48: per-backend dispatch tally for this tick (observability only).
   const backendDispatch: Record<string, number> = {};
 
@@ -6497,23 +6510,6 @@ export async function tick(
         return fleetWatchdogOutcome(item, attemptId, localFleet.taskTimeoutMs);
       }
       if (leaseController.signal.aborted) return queueLeaseLostOutcome(item, attemptId);
-      // In-tick budget short-circuit: if cumulative realized spend has already
-      // reached the remaining daily headroom, do NOT dispatch further items.
-      if (tickSpent >= remainingBudget) {
-        return {
-          item,
-          spentUsd: 0,
-          dispatched: false,
-          dispatch: dispatchTrace(item, {
-            assignedBy: 'preflight',
-            reason: `in-tick budget cap reached ($${tickSpent.toFixed(4)} >= $${remainingBudget.toFixed(4)})`,
-            dispatched: false,
-            runId: attemptId,
-            trajectoryId: `run:${attemptId}`,
-            skipReason: 'budget-cap',
-          }),
-        };
-      }
       if (!isRejectedCaptureRecoveryAuthorized(item)) {
         return {
           item,
@@ -6840,7 +6836,8 @@ export async function tick(
         // M85: use liveCfg for intelligence config.
         {
           const intelRaw = routingCfg.foundry?.intelligence;
-          if (intelRaw !== undefined && intelRaw !== null) {
+          if (!(standingTick && dcfg.dailyBudgetUsd > 0 && tickSpent >= remainingBudget)
+            && intelRaw !== undefined && intelRaw !== null) {
             learnedRoutingActive = true;
             const forecast = buildForecast('7d', routingCfg);
             const goal = buildItemGoal(item);
@@ -7039,6 +7036,21 @@ export async function tick(
           };
         }
       }
+      const dollarAdmissionRefusal = (): ItemOutcome | null => {
+        if ((backend as string | undefined) === 'devin-cli') selectedModel = resolveDevinCliFleetModel(routingCfg.devin,
+          selectedModel?.trim() || (process.env['ASHLR_MODEL'] ?? process.env['AC_MODEL']));
+        const accountingKnown = Number.isFinite(tickSpent) && tickSpent >= 0;
+        if (accountingKnown && !zeroCostProducerViolation && tickSpent < remainingBudget) return null;
+        if (accountingKnown && !zeroCostProducerViolation && standingTick && !budgetDayPessimisticallyExhausted
+          && dcfg.dailyBudgetUsd > 0 && zeroDollarProducer(backend, routingCfg, selectedModel)) return null;
+        return { item, spentUsd: 0, dispatched: false, dispatch: dispatchTrace(item, {
+          backend, tier: backendTier, model: selectedModel, assignedBy: 'preflight',
+          reason: 'The daily USD allowance is exhausted; this producer is metered or its cost is unknown.',
+          dispatched: false, runId: attemptId, trajectoryId: `run:${attemptId}`, skipReason: 'budget-cap',
+        }) };
+      };
+      const dollarRefusal = dollarAdmissionRefusal();
+      if (dollarRefusal) return dollarRefusal;
       if (isTrustedGeneratedRepairItem(item) &&
         !reserveGeneratedRepairExecution(item, attemptId, backend, backendTier)) {
         return {
@@ -7099,7 +7111,8 @@ export async function tick(
       // …and its effort / sampling ride on the engine invocation itself.
       const dispatchHarness = standingTick ? standingDispatchHarness(hooks) : null;
       const dispatchCfg = dispatchConfigForItem(item, routingCfg);
-      const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
+      const itemBudget = { maxTokens: zeroDollarProducer(backend, routingCfg, selectedModel)
+        ? dcfg.perItemMaxTokens ?? DEFAULT_MAX_TOKENS : perItemMaxTokens, maxSteps: 100, allowCloud: false };
       const workItemGenerationId = generatedRepairGenerationId(item) ?? undefined;
       const delegationScope = scopeFromWorkItem(item, {
         runId: attemptId,
@@ -7287,6 +7300,10 @@ export async function tick(
           assignedBy = 'ashlrcode-executor';
           assignmentReason = `${assignmentReason}; ashlrcodeExecutor sandboxed ${previousBackend} via ashlrcode`;
         }
+        const lateDollarRefusal = dollarAdmissionRefusal();
+        if (lateDollarRefusal) return lateDollarRefusal;
+        itemBudget.maxTokens = zeroDollarProducer(backend, routingCfg, selectedModel)
+          ? dcfg.perItemMaxTokens ?? DEFAULT_MAX_TOKENS : perItemMaxTokens;
         // M334: shadow the about-to-dispatch legacy decision (observe-only).
         await shadowGateway({
           backend: String(backend ?? 'builtin'),
@@ -7308,7 +7325,9 @@ export async function tick(
         const standingBonPlan = standingTick && !isTrustedGeneratedRepairItem(item)
           ? standingBestOfNPlan(hooks, item, resolveSubscriptionMaxPercent(routingCfg))
           : null;
-        const bestOfN = proposalOnlyActivation
+        // Critic/candidate paths are not uniformly provable zero-dollar here.
+        // Retain the admitted single producer when USD headroom is exhausted.
+        const bestOfN = tickSpent >= remainingBudget || proposalOnlyActivation
           ? 1
           : standingTick
             ? (standingBonPlan?.run ? resolveBestOfNCount(standingBonPlan.candidates.length) : 1)
@@ -7593,8 +7612,14 @@ export async function tick(
           dispatched = true;
           backendDispatch[backend!] = (backendDispatch[backend!] ?? 0) + 1;
           runState = await launch.value.run;
+          // The journal's zero-dollar promise covers this exact admitted engine,
+          // never a reported fallback whose economics or seat were not checked.
+          const exactZeroProducer = runState.engine === backend
+            && ((backend as string | undefined) !== 'devin-cli' || runState.engineModel === `${backend}:${selectedModel}`)
+            && zeroDollarProducer(backend, routingCfg, selectedModel);
+          if (zeroDollarOnlyTick && !exactZeroProducer) zeroCostProducerViolation = true;
           if (!stillOwnsTick()) {
-            swarmSpent = isSubscriptionEngine(backend ?? 'builtin') ? 0 : (runState.usage?.estCostUsd ?? 0);
+            swarmSpent = exactZeroProducer ? 0 : (runState.usage?.estCostUsd ?? 0);
             tickSpent += swarmSpent;
             return {
               item,
@@ -7732,16 +7757,14 @@ export async function tick(
         }
         dispatchSkipReason = noProposalProductionReason(dispatchProduction);
 
-        // M80: subscription-tier runs are not dollar-billed — count $0 toward
-        // dailyBudgetUsd so they don't exhaust the daily cap. The subscription-
-        // window guard (subscriptionAllows above) governs their pacing instead.
-        // API-model / builtin paths are unaffected (their isSubscriptionEngine is false).
-        // M333: a fan-out counts EVERY candidate's billable spend (subscription
-        // rule applied per-candidate inside runBestOfN); single dispatch keeps
-        // the M80 winner-path accounting byte-identically.
+        // Concrete subscription/free producers count zero cash, while their
+        // usage and list-price estimate remain run evidence. Tier alone cannot
+        // zero a custom API's billable estimate. Fan-out retains its separately
+        // accounted total; exhausted cash uses only the admitted single path.
         swarmSpent = bonBillable !== null
           ? bonBillable
-          : isSubscriptionEngine(backend ?? 'builtin')
+          : runState.engine === backend && ((backend as string | undefined) !== 'devin-cli' || runState.engineModel === `${backend}:${selectedModel}`)
+            && zeroDollarProducer(backend, routingCfg, selectedModel)
             ? 0
             : (runState.usage?.estCostUsd ?? 0);
         tickSpent += swarmSpent;
@@ -8137,6 +8160,12 @@ export async function tick(
       fleetMonitor.publish();
     }
     throw err;
+  }
+  // Paid producers already admitted keep the batch's original journal contract.
+  // Only later maintenance narrows when realized cash consumes the headroom.
+  if (standingTick && dcfg.dailyBudgetUsd > 0 && !budgetDayPessimisticallyExhausted
+    && (!Number.isFinite(tickSpent) || tickSpent < 0 || tickSpent >= remainingBudget)) {
+    meteredUsdExhaustedForMaintenance = true;
   }
   if (localFleet.enabled) {
     fleetMonitor.clearInFlight('tick ended');
@@ -8774,7 +8803,9 @@ export async function tick(
   state.automaticDrainOrdinaryTurnDue = automaticDrainOrdinaryTurnDue;
   // The guard is bound to the day on which dispatch began. Account and persist
   // that old-day receipt before any UTC rollover can erase its exact baseline.
-  const spendAccounting = accountDaemonSpendGuard(state, spendGuard.guard, tickSpent);
+  const spendAccounting = zeroCostProducerViolation
+    ? { ok: false as const, error: 'zero-cost producer execution identity changed or is unavailable' }
+    : accountDaemonSpendGuard(state, spendGuard.guard, tickSpent);
   if (!spendAccounting.ok) {
     const failedTick: DaemonTick = {
       ts: now,
@@ -10032,7 +10063,8 @@ async function runDaemonInEnrollmentScope(
         recordContextRollupAfterTick(tickResult, opts, afterTickCfg);
         const afterLoopCfg = resolveCfg(afterTickCfg);
         const afterTick = afterTickLoaded.state;
-        if (budgetExhaustedForCurrentUtcDay(afterTick, afterLoopCfg)) {
+        if (budgetExhaustedForCurrentUtcDay(afterTick, afterLoopCfg)
+          && !canContinueBudgetIndependentStanding(standing !== null, afterTickCfg, afterTick, afterLoopCfg)) {
           audit({
             action: 'daemon:tick',
             repo: null,
@@ -10327,6 +10359,46 @@ function nextUtcBudgetDayStartMs(now = new Date()): number {
 
 function msUntilUtcTimestamp(targetMs: number, nowMs = Date.now()): number {
   return Math.max(0, targetMs - nowMs);
+}
+
+/** A concrete producer with no per-call USD charge; seat/grant gates still apply.
+ * builtin runs a model swarm, so its generic policy classification is insufficient.
+ * Trust tier alone never makes a custom API or CLI a subscription seat.
+ */
+export function zeroDollarProducer(engine: string | undefined, cfg: AshlrConfig, _model?: string | null): boolean {
+  if (!engine || engine === 'builtin') return false;
+  // Historical SWE-2 ids do not prove current account pricing: the free offer
+  // is plan-dependent and expires. Without fresh account-bound price evidence,
+  // Devin CLI cannot bypass exhausted USD; its positive-headroom lane is unchanged.
+  if (engine === 'devin-cli') return false;
+  const spec = resolveEngineSpec(engine, cfg);
+  if (!spec) return false;
+  if (spec.kind === 'api-model') return engineMeteredness(engine, cfg) === 'free';
+  if (spec.kind !== 'cli-agent' || !['codex', 'claude', 'grok-cli'].includes(engine)) return false;
+  // Config-authored overrides cannot inherit the shipped subscription contract.
+  if (engine !== 'grok-cli' && Object.prototype.hasOwnProperty.call(cfg.foundry?.engines ?? {}, engine)) return false;
+  return isSubscriptionEngine(engine as EngineId);
+}
+
+/** Hosted Devin retains its separate ACU policy and signed engine/seat gates; only cadence changes. */
+export function canContinueBudgetIndependentStanding(standing: boolean, cfg: AshlrConfig, state: DaemonState, dcfg: DaemonConfig): boolean {
+  if (canContinueZeroDollarStanding(standing, cfg, state, dcfg)) return true;
+  return standing && Number.isFinite(dcfg.dailyBudgetUsd) && dcfg.dailyBudgetUsd > 0
+    && Number.isFinite(state.todaySpentUsd) && state.todaySpentUsd >= 0
+    && state.todayDate === currentUtcBudgetDay()
+    && !(state.spendGuardAccounting?.budgetDay === state.todayDate && state.spendGuardAccounting.budgetExhausted === true)
+    && cfg.devin?.enabled === true && cfg.devin?.fleet === true;
+}
+
+/** Potential capacity only: final routing, native seat, reserves and grant gates decide admission. */
+export function canContinueZeroDollarStanding(standing: boolean, cfg: AshlrConfig, state: DaemonState, dcfg: DaemonConfig): boolean {
+  if (!standing || !Number.isFinite(dcfg.dailyBudgetUsd) || dcfg.dailyBudgetUsd <= 0
+    || !Number.isFinite(state.todaySpentUsd) || state.todaySpentUsd < 0
+    || state.todayDate !== currentUtcBudgetDay()
+    || (state.spendGuardAccounting?.budgetDay === state.todayDate && state.spendGuardAccounting.budgetExhausted === true)) return false;
+  const engines = [...(cfg.foundry?.allowedBackends ?? [])];
+  if (localFleetEnabled(cfg)) engines.push(LOCAL_FLEET_ENGINE);
+  return engines.some((engine) => zeroDollarProducer(engine, cfg));
 }
 
 function budgetExhaustedForCurrentUtcDay(state: DaemonState, dcfg: DaemonConfig): boolean {

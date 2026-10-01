@@ -1,8 +1,9 @@
 /**
  * Tests for src/core/doctor.ts (M2)
  *
- * Stubs providers.ts, phantom.ts, and integrations/locus.ts so no real
- * network or binary calls happen. Asserts summary counts and failure conditions.
+ * Stubs provider, Phantom, Locus, tool-registry and identity integrations.
+ * Local Git/shim discovery and fixture filesystem checks remain real.
+ * Asserts report composition, summary counts and failure conditions.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
@@ -125,6 +126,23 @@ let _providerRegistry: ProviderRegistry = {
 const privateStorageHarness = vi.hoisted(() => ({
   adapterHome: null as string | null,
   adapterAshlrHome: null as string | null,
+}));
+
+const externalReportProbes = vi.hoisted(() => ({
+  tools: vi.fn(() => ({ tools: [], installedCount: 0 })),
+  identity: vi.fn(() => ({ loggedIn: false, user: null, tier: null, team: null })),
+}));
+
+// These report-composition tests must not discover arbitrary host executables
+// or query a real Phantom account. The Phantom-status mock below does not
+// intercept identity.ts's independent CLI probes. Their lookup/parser contracts
+// are covered by m3.tools-registry and m18.identity respectively.
+vi.mock('../src/core/tools-registry.js', () => ({
+  getToolsRegistry: externalReportProbes.tools,
+}));
+
+vi.mock('../src/core/integrations/identity.js', () => ({
+  getIdentity: externalReportProbes.identity,
 }));
 
 // Keep Windows report tests focused on doctor semantics after one real ACL
@@ -305,6 +323,8 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  externalReportProbes.tools.mockClear();
+  externalReportProbes.identity.mockClear();
   tmpHome = makeTmpHome();
   setFixtureHome(tmpHome);
   privateStorageHarness.adapterHome = tmpHome;
@@ -344,6 +364,12 @@ describe('runDoctor — report structure', () => {
     const report = await runDoctor(cfg);
     expect(() => new Date(report.generatedAt)).not.toThrow();
     expect(new Date(report.generatedAt).toISOString()).toBe(report.generatedAt);
+    expect(externalReportProbes.tools).toHaveBeenCalledOnce();
+    expect(externalReportProbes.identity).toHaveBeenCalledOnce();
+    expect(report.checks.find((check) => check.id === 'ashlr-tools-installed'))
+      .toMatchObject({ status: 'warn', detail: 'No ecosystem tools installed; 0/0 installed' });
+    expect(report.checks.find((check) => check.id === 'identity'))
+      .toMatchObject({ status: 'warn', detail: 'Not logged in to Phantom cloud — identity unavailable' });
   }, 15_000);
 
   it('returns a checks array with at least one check', async () => {

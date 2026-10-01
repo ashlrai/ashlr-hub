@@ -238,7 +238,7 @@ describe('/api/verse/caps', () => {
 
     const caps = res.json as VerseCaps;
     expect(Object.keys(caps).sort()).toEqual([
-      'concurrency', 'dailyBudgetUsd', 'defaulted', 'foundryLimits', 'intervalMs',
+      'concurrency', 'dailyBudgetUsd', 'defaulted', 'foundryLimits', 'intervalMs', 'journalItemCapacity',
       'maxConcurrent', 'mode', 'parallel', 'perTickItems', 'subscriptionMaxPercent',
     ]);
     expect(caps.dailyBudgetUsd).toBe(1);
@@ -272,6 +272,20 @@ describe('/api/verse/caps', () => {
     expect(fs.existsSync(path.join(tmpHome, '.ashlr', 'config.json'))).toBe(true);
   });
 
+  it('saves large capacity preferences without changing signed scope or provider reserves and reports journal admission', async () => {
+    const { port, read, mutate } = await boot();
+    const body = { dailyBudgetUsd: 1001.25, perTickItems: 129, parallel: 65, maxConcurrent: 129,
+      concurrency: { local: 33, cloud: 65, total: 129 } };
+    const res = await request(port, 'POST', '/api/verse/caps', mutate, JSON.stringify(body));
+    expect(res.status).toBe(200);
+    const caps = (await request(port, 'GET', '/api/verse/caps', read)).json as VerseCaps;
+    expect(caps).toMatchObject({ ...body, journalItemCapacity: 64 });
+    const saved = JSON.parse(fs.readFileSync(path.join(tmpHome, '.ashlr', 'config.json'), 'utf8'));
+    expect(saved.daemon).toMatchObject(body);
+    expect(saved.authority).toBeUndefined();
+    expect(saved.foundry?.subscriptionMaxPercent).toBeUndefined();
+  });
+
   it('rejects unknown keys and out-of-range values without writing anything', async () => {
     const { port, read, mutate } = await boot();
 
@@ -281,12 +295,12 @@ describe('/api/verse/caps', () => {
     expect((unknown.json as { error: string }).error).toContain('unknown key: budget');
 
     for (const body of [
-      { dailyBudgetUsd: 1001 },
+      { dailyBudgetUsd: Number.MAX_SAFE_INTEGER + 1 },
       { perTickItems: 0 },
-      { parallel: 17 },
+      { parallel: 1.5 },
       { intervalMs: 1000 },
-      { maxConcurrent: 33 },
-      { concurrency: { local: 33 } },
+      { maxConcurrent: Number.MAX_SAFE_INTEGER + 1 },
+      { concurrency: { local: 0 } },
       { subscriptionMaxPercent: 0 },
       { foundryLimits: [{ engine: 'claude', window: '5h', max: -1 }] },
       { mode: 'turbo' },

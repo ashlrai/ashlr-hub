@@ -461,7 +461,7 @@ describe('M86 REFUSE — scope cap', () => {
       trustBasis: 'evidence',
       pushToRemote: true,
       allowWithoutVerification: false,
-      maxAutomergeFiles: Number.MAX_SAFE_INTEGER,
+      maxAutomergeFiles: Number.MAX_SAFE_INTEGER + 1,
       protectedRemote: {
         branchProtection: true,
         requiredChecks: [{ context: 'ci/test', appId: '15368' }],
@@ -469,7 +469,7 @@ describe('M86 REFUSE — scope cap', () => {
     }));
 
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/scope cap policy invalid.*max-files-exceeds-policy/i);
+    expect(r.reason).toMatch(/scope cap policy invalid.*max-files-invalid/i);
     expect(loadProposal(p.id)!.verifyResult).toBeUndefined();
     expect(loadProposal(p.id)!.status).toBe('approved');
   });
@@ -778,7 +778,7 @@ describe('M86 PERMIT — fires when all gates pass', () => {
     expect(r.merged).toBe(true);
   });
 
-  it('[16b] MAX_SAFE_INTEGER caps are rejected before any merge mutation', async () => {
+  it('[16b] unsafe integer caps are rejected before any merge mutation', async () => {
     initRepo(tmpRepo, 'main');
     attachOrigin(tmpRepo, 'main');
     git(tmpRepo, ['checkout', '-b', 'work']);
@@ -787,12 +787,12 @@ describe('M86 PERMIT — fires when all gates pass', () => {
     const p = frontierPatch(addFileDiff('docs/unbounded.md', 'bounded policy'));
     const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
     const r = await autoMergeProposal(p.id, frontierCfg({
-      maxAutomergeFiles: Number.MAX_SAFE_INTEGER,
+      maxAutomergeFiles: Number.MAX_SAFE_INTEGER + 1,
       maxAutomergeLines: Number.MAX_SAFE_INTEGER,
     }));
 
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/scope cap policy invalid.*exceeds-policy/i);
+    expect(r.reason).toMatch(/scope cap policy invalid.*max-files-invalid/i);
     expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
     expect(loadProposal(p.id)!.status).toBe('approved');
   });

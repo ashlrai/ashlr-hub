@@ -80,7 +80,7 @@ import {
   type KillSwitchReadResult,
   type PolicyMutationResult,
 } from '../sandbox/policy.js';
-import { loadDaemonState, readDaemonLockOwner } from '../daemon/state.js';
+import { DAEMON_SPEND_GUARD_ITEM_CAPACITY, loadDaemonState, readDaemonLockOwner } from '../daemon/state.js';
 import {
   pauseDaemon,
   readDaemonPause,
@@ -341,6 +341,10 @@ function finitePositive(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function positiveCapacity(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
 /**
  * Project the CONFIGURED autonomy limits out of a config object.
  *
@@ -353,8 +357,9 @@ export function readVerseCaps(cfg: AshlrConfig): VerseCaps {
   const defaulted: VerseCapKey[] = [];
 
   const scalar = (key: 'dailyBudgetUsd' | 'perTickItems' | 'parallel' | 'intervalMs'): number => {
-    const configured = finitePositive(daemon[key]);
-    if (configured === null) {
+    const configured = key === 'perTickItems' || key === 'parallel'
+      ? positiveCapacity(daemon[key]) : finitePositive(daemon[key]);
+    if (configured === null || key === 'dailyBudgetUsd' && (configured < 0 || configured > Number.MAX_SAFE_INTEGER)) {
       defaulted.push(key);
       return VERSE_CAPS_DEFAULTS[key];
     }
@@ -369,13 +374,13 @@ export function readVerseCaps(cfg: AshlrConfig): VerseCaps {
   const mode: 'batch' | 'continuous' = daemon.mode === 'continuous' ? 'continuous' : 'batch';
   if (daemon.mode !== 'batch' && daemon.mode !== 'continuous') defaulted.push('mode');
 
-  const maxConcurrent = finitePositive(daemon.maxConcurrent);
+  const maxConcurrent = positiveCapacity(daemon.maxConcurrent);
   if (maxConcurrent === null) defaulted.push('maxConcurrent');
 
   const concurrency = {
-    local: finitePositive(daemon.concurrency?.local),
-    cloud: finitePositive(daemon.concurrency?.cloud),
-    total: finitePositive(daemon.concurrency?.total),
+    local: positiveCapacity(daemon.concurrency?.local),
+    cloud: positiveCapacity(daemon.concurrency?.cloud),
+    total: positiveCapacity(daemon.concurrency?.total),
   };
   if (concurrency.local === null && concurrency.cloud === null && concurrency.total === null) {
     defaulted.push('concurrency');
@@ -394,6 +399,7 @@ export function readVerseCaps(cfg: AshlrConfig): VerseCaps {
   return {
     dailyBudgetUsd,
     perTickItems,
+    journalItemCapacity: DAEMON_SPEND_GUARD_ITEM_CAPACITY,
     parallel,
     intervalMs,
     mode,
@@ -468,8 +474,8 @@ function bounded(
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return `${key} must be a finite number`;
   }
-  if (integer && !Number.isInteger(value)) {
-    return `${key} must be an integer`;
+  if (integer && !Number.isSafeInteger(value)) {
+    return `${key} must be a safe integer`;
   }
   if (value < bounds.min || value > bounds.max) {
     return `${key} must be between ${bounds.min} and ${bounds.max}`;

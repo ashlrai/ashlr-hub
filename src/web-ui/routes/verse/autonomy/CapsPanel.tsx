@@ -103,7 +103,12 @@ export function CapsPanel({ caps, snapshot, guard, dispatchEnabled }: CapsPanelP
         {CAP_FIELDS.map((spec) => (
           <CapField
             key={spec.key}
-            spec={spec}
+            spec={spec.key === 'perTickItems' ? {
+              ...spec,
+              help: Number.isSafeInteger(caps.journalItemCapacity) && (caps.journalItemCapacity ?? 0) > 0
+                ? `${spec.help} At most ${caps.journalItemCapacity} items are journaled per tick; remaining work continues on later ticks.`
+                : `${spec.help} Journal capacity is unavailable from this server.`,
+            } : spec}
             stored={readCap(caps, spec.key)}
             usage={usageFor(spec.key, caps, snapshot)}
             disabled={locked || (busyKey !== null && busyKey !== spec.key)}

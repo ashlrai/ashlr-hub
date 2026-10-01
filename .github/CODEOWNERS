@@ -327,6 +327,7 @@
 /test/legacy-red-team-routing-310.test.ts @masonwyatt23
 /test/live-fleet-display-policy-315.test.ts @masonwyatt23
 /test/live-fleet-leader-315.test.ts @masonwyatt23
+/test/local-eval-comparison.test.ts @masonwyatt23
 /test/local-eval-heldout.test.ts @masonwyatt23
 /test/local-only-consumer-parity.test.ts @masonwyatt23
 /test/local-only-dispatch-paths.test.ts @masonwyatt23
@@ -724,6 +725,7 @@
 /test/standing-wiring-loop-310b.test.ts @masonwyatt23
 /test/store-unreadable-refusal-310.test.ts @masonwyatt23
 /test/subscription-budget-override-310.test.ts @masonwyatt23
+/test/task-source-310b.test.ts @masonwyatt23
 /test/throughput-310b.test.ts @masonwyatt23
 /test/tick-hooks-defaults-310b.test.ts @masonwyatt23
 /test/tick-hooks-live-310b.test.ts @masonwyatt23

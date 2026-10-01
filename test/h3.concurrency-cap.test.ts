@@ -1,19 +1,19 @@
 /**
  * H3 BUILD 2 — CONCURRENCY-CAP-HOLDS.
  *
- * Drives the REAL bounded worker pool (loop.ts:82-105) AND the REAL `runSwarm`
- * internal `MAX_PARALLEL = 8` clamp (runner.ts:179, 1085-1088) under FLOOD, via
+ * Drives the REAL bounded daemon worker pool AND the REAL `runSwarm`
+ * operator-selected BUILD concurrency under FLOOD, via
  * `makeConcurrencyProbe`: a mocked unit calls `enter()` on start and `leave()`
  * on finish, and the suite asserts the OBSERVED peak in-flight count is
- * `<= limit`. Concurrency is asserted by BOUND (true under every interleaving),
- * never by order — so the test is deterministic.
+ * within the configured limit, including a requested peak above the former
+ * daemon clamp. No assertion depends on dispatch completion order.
  *
  * WHAT IS REAL vs. MOCKED:
  *   - REAL: the daemon `tick()` selection + `bounded(tasks, parallel)` worker
- *     pool, the `resolveCfg` parallel clamp `Math.min(max(1,parallel), 8)`
- *     (loop.ts:64-66), AND (test 3) the `runSwarm` BUILD-phase batch loop with
- *     its `MAX_PARALLEL = 8` slice (runner.ts:179, executePhase build batch).
- *   - MOCKED (M24/M12 convention): `runSwarm` for the tick-level probe;
+ *     pool and durable journal selection bound, AND (test 3) the `runSwarm`
+ *     BUILD-phase batch loop using the validated operator preference.
+ *   - MOCKED (M24/M12 convention): backlog discovery and `runSwarm` for the
+ *     tick-level probe;
  *     `runGoal` + `planSwarm` for the runSwarm-internal BUILD-phase probe. The
  *     mocks are INSTANT, KNOWN-cost, model-free and bracket each unit with the
  *     concurrency probe.
@@ -25,12 +25,9 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Tests 1 and 2 drive a REAL `scanTodos` flood with real rg/grep across real
-// temp repos, so their runtime is bound by actual filesystem I/O and exceeds the
-// 5s default under any concurrent load. Raised rather than skip-guarded on
-// purpose: the flood is the whole point of the proof, and skipping it would be a
-// vacuous green. Covered by the real-io lane's 60s default now — see
-// scripts/realio-lane-membership.mjs — so no per-file vi.setConfig is needed.
+// Tests 1 and 2 drive real daemon selection, journaling and filesystem work
+// with a deterministic mocked backlog. The real-io lane provides its existing
+// 60s timeout; no per-file vi.setConfig is needed.
 
 vi.mock('../src/core/daemon/activation-permit.js', () => ({
   consumeDaemonActivationPermit: () => ({
@@ -51,10 +48,11 @@ vi.mock('../src/core/swarm/runner.js', () => ({
 
 // runGoal MOCKED for the runSwarm-internal BUILD-phase probe (M12 convention).
 // Test 3 drives the REAL runSwarm (via vi.importActual) whose BUILD phase calls
-// runGoal per task; mocking runGoal lets the REAL MAX_PARALLEL batch loop run
+// runGoal per task; mocking runGoal lets the REAL operator-bounded batch loop run
 // while each task is instant + probed.
 const mockRunGoal = vi.fn();
 vi.mock('../src/core/run/orchestrator.js', () => ({
+  DEFAULT_MAX_TOKENS: 50_000,
   runGoal: (...args: unknown[]) => mockRunGoal(...args),
   saveRun: vi.fn(),
   loadRun: vi.fn().mockReturnValue(null),
@@ -80,6 +78,7 @@ vi.mock('../src/core/portfolio/backlog.js', () => ({
 }));
 
 import { tick } from '../src/core/daemon/loop.js';
+import { DAEMON_SPEND_GUARD_ITEM_CAPACITY } from '../src/core/daemon/state.js';
 import { makeFixture, makeCfg, todoSeedFiles, todoScannerAvailable } from './helpers/h1-fixture.js';
 import {
   makeConcurrencyProbe,
@@ -150,7 +149,7 @@ const nullSink: StreamSink = () => {};
 /**
  * Build a plan with one scaffold task + `buildCount` independent BUILD tasks (no
  * other phases) so the ONLY concurrent batch is the BUILD phase — its observed
- * peak is exactly the MAX_PARALLEL slice size, uncontaminated by the
+ * peak is exactly the selected batch size, uncontaminated by the
  * sequentially-run scaffold/integrate/verify/review phases.
  */
 function buildHeavyPlan(buildCount: number): SwarmPlan {
@@ -170,16 +169,10 @@ function buildHeavyPlan(buildCount: number): SwarmPlan {
 }
 
 describe('H3 CONCURRENCY-CAP-HOLDS — never more than `limit` units in flight under flood', () => {
-  // Skip ONLY when no TODO scanner (rg/grep) is on PATH — this flood proof drives
-  // the daemon's REAL scanTodos over the enrolled repo, which needs one. Windows
-  // dev boxes ship neither; macOS/Linux CI always have grep, so the proof (and its
-  // hard `expect(todoScannerAvailable()).toBe(true)` false-green guard) still runs there.
+  // Retain the fixture's scanner availability guard on bare Windows. The
+  // deterministic backlog floods the real daemon pool without scanner variance.
   it.skipIf(!todoScannerAvailable())('the daemon `parallel` cap bounds the observed peak in-flight swarm dispatches', async () => {
-    // The daemon discovers backlog by running the REAL scanTodos over the
-    // enrolled repo, which needs `rg` or `grep` on PATH. The whole point is to
-    // prove the bound under a real FLOOD, so REQUIRE the scanner (fail loudly if
-    // absent) rather than silently skipping into a vacuous green — both macOS and
-    // Linux CI always ship grep.
+    // Preserve the existing platform fixture guard and exercise a real flood.
     expect(todoScannerAvailable()).toBe(true);
 
     const probe = makeConcurrencyProbe();
@@ -208,36 +201,45 @@ describe('H3 CONCURRENCY-CAP-HOLDS — never more than `limit` units in flight u
     expect(probe.current()).toBe(0);
   });
 
-  // Skip ONLY when no TODO scanner (rg/grep) is on PATH (see note on the prior test):
-  // the clamp proof must drive a real scanTodos flood, absent on bare Windows.
-  it.skipIf(!todoScannerAvailable())('clamps a cfg requesting parallel:100 down to an observed peak <= 8', async () => {
-    // REQUIRE the scanner (see test 1): the clamp proof must run a real flood, not
-    // silently skip into a vacuous green when grep/rg is absent.
+  // Retain the fixture's existing scanner availability guard; discovery itself
+  // is mocked so this test isolates admitted worker and durable journal bounds.
+  it.skipIf(!todoScannerAvailable())('honors parallel:17 while limiting the flood to journal capacity', async () => {
     expect(todoScannerAvailable()).toBe(true);
 
     const probe = makeConcurrencyProbe();
     mockRunSwarm.mockImplementation(makeSpendingSwarmStub({ costUsd: 0, probe }));
 
-    // parallel:100 is out of range; resolveCfg clamps it to the hard upper bound
-    // of 8 (loop.ts:64-66). With SEEDED_ITEMS (>> 8) dispatched, an UNCLAMPED
-    // pool would peak well above 8; the clamp must hold the observed peak <= 8.
+    const backlog = await mockBuildBacklog();
+    mockBuildBacklog.mockResolvedValue({
+      ...backlog,
+      items: Array.from({ length: DAEMON_SPEND_GUARD_ITEM_CAPACITY + 6 }, (_, i) => ({
+        ...backlog.items[i % backlog.items.length],
+        id: `${repo.dir}:todo:h3-dynamic-${i}`,
+        title: `Dynamic capacity task ${i}`,
+      })),
+    });
+    const PARALLEL = 17;
     const cfg = makeCfg({
-      daemon: { dailyBudgetUsd: 100, perTickItems: SEEDED_ITEMS, parallel: 100, intervalMs: 100 },
+      daemon: {
+        dailyBudgetUsd: 100,
+        perTickItems: DAEMON_SPEND_GUARD_ITEM_CAPACITY + 6,
+        parallel: PARALLEL,
+        intervalMs: 100,
+      },
     });
 
     const result = await tick(cfg, { dryRun: false });
 
     expect(result.reason).toBe('ok');
-    // More than 8 dispatches occurred, so a peak <= 8 is a real bound, not vacuous.
-    expect(mockRunSwarm.mock.calls.length).toBeGreaterThan(8);
-    expect(probe.peak()).toBeLessThanOrEqual(8);
+    expect(mockRunSwarm.mock.calls.length).toBe(DAEMON_SPEND_GUARD_ITEM_CAPACITY);
+    expect(probe.peak()).toBe(PARALLEL);
     expect(probe.current()).toBe(0);
   });
 
-  it('runSwarm BUILD phase honors MAX_PARALLEL=8 with runGoal MOCKED + probed', async () => {
+  it.each([9, 17, Number.MAX_SAFE_INTEGER])('runSwarm BUILD retains parallel:%s and launches only actual tasks', async (parallel) => {
     // Drive the REAL runSwarm (the file-level mock above replaces it for `tick`,
     // so pull the ACTUAL implementation here). Its BUILD phase batches tasks in
-    // slices of parallelCap = min(parallel, MAX_PARALLEL=8); runGoal is mocked +
+    // slices of the requested parallel preference; runGoal is mocked +
     // probed so the REAL batch loop runs while each task is instant.
     const actual = await vi.importActual<typeof import('../src/core/swarm/runner.js')>(
       '../src/core/swarm/runner.js',
@@ -251,15 +253,14 @@ describe('H3 CONCURRENCY-CAP-HOLDS — never more than `limit` units in flight u
       makeCountingGoalStub({ probe, usagePerTask: { tokensIn: 1, tokensOut: 1, steps: 1, estCostUsd: 0 } }),
     );
 
-    // A BUILD phase far larger than 8 so the cap is the binding constraint.
+    // Enough independent tasks to prove preferences above the former ceiling.
     const BUILD_TASKS = 30;
     mockPlanSwarm.mockResolvedValueOnce(buildHeavyPlan(BUILD_TASKS));
 
-    // parallel:100 is clamped to MAX_PARALLEL=8 inside runSwarm; no sandbox / no
-    // project so no worktree is created (deterministic, model-free). Huge budget
-    // so no task is skipped for budget.
+    // No sandbox/project or model calls; actual pending inventory bounds allocation.
+    // A huge budget keeps reservation exhaustion from hiding the concurrency proof.
     const opts: SwarmOptions & { noCapture?: boolean } = {
-      parallel: 100,
+      parallel,
       budget: { maxTokens: 100_000_000, maxSteps: 1_000_000, allowCloud: false },
       dryRun: false,
       noCapture: true,
@@ -278,15 +279,15 @@ describe('H3 CONCURRENCY-CAP-HOLDS — never more than `limit` units in flight u
     expect(buildTaskRuns.length).toBe(BUILD_TASKS);
     // runGoal was invoked for every build task (plus the single scaffold task).
     expect(mockRunGoal.mock.calls.length).toBeGreaterThan(8);
-    // The REAL MAX_PARALLEL batch loop never ran more than 8 tasks at once,
-    // regardless of the requested parallel:100 or the 30-task plan size.
-    expect(probe.peak()).toBeLessThanOrEqual(8);
-    expect(probe.peak()).toBeGreaterThan(0);
+    // Exact observed overlap proves 9+/17 are honored; MAX_SAFE never allocates
+    // phantom tasks beyond the 30-item inventory.
+    expect(run.parallel).toBe(parallel);
+    expect(probe.peak()).toBe(Math.min(parallel, BUILD_TASKS));
     expect(probe.current()).toBe(0);
   });
 
   it('runSwarm BUILD phase keeps sum(authorized per-task budgets) within the hard total under a CONSTRAINED pool (sliceBudget reservation binds)', async () => {
-    // The companion to the MAX_PARALLEL test: that one proves the CONCURRENCY cap
+    // The companion to the concurrency preference test: that one proves the CONCURRENCY cap
     // with a huge budget that never binds; THIS one proves the per-task budget
     // RESERVATION (sliceBudget, runner.ts:206-265) — the `sum(authorized) <= pool`
     // invariant CONTRACT-H3 invariant #1 claims — by making the total budget
@@ -337,7 +338,7 @@ describe('H3 CONCURRENCY-CAP-HOLDS — never more than `limit` units in flight u
     mockPlanSwarm.mockResolvedValueOnce(buildHeavyPlan(BUILD_TASKS));
 
     const opts: SwarmOptions & { noCapture?: boolean } = {
-      parallel: 100, // clamped to MAX_PARALLEL=8 inside runSwarm
+      parallel: 8, // explicitly chosen batch size keeps this reservation fixture unchanged
       budget: { maxTokens: TOTAL_MAX_TOKENS, maxSteps: 1_000_000, allowCloud: false },
       dryRun: false,
       noCapture: true,

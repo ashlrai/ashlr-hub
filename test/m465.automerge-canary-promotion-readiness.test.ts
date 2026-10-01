@@ -109,7 +109,7 @@ function readyInput(): AutoMergeCanaryPromotionReadinessInput {
 
 describe('M465 auto-merge canary promotion readiness', () => {
   it('reports complete evidence without ever granting activation authority', () => {
-    expect([MAX_AUTOMERGE_POLICY_FILES, MAX_AUTOMERGE_POLICY_LINES]).toEqual([10, 300]);
+    expect([MAX_AUTOMERGE_POLICY_FILES, MAX_AUTOMERGE_POLICY_LINES]).toEqual([Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]);
     const result = evaluateAutoMergeCanaryPromotionReadiness(readyInput());
 
     expect(result).toEqual({
@@ -232,28 +232,16 @@ describe('M465 auto-merge canary promotion readiness', () => {
     expect(malformedResult.blockers.map((entry) => entry.code)).toContain('scope-caps-unavailable');
   });
 
-  it('rejects effectively unbounded safe-integer caps', () => {
+  it('represents no volume cap but does not reuse evidence from smaller scope or grant activation', () => {
     const input = readyInput();
     input.policy.maxAutomergeFiles = Number.MAX_SAFE_INTEGER;
     input.policy.maxAutomergeLines = Number.MAX_SAFE_INTEGER;
-
     const result = evaluateAutoMergeCanaryPromotionReadiness(input);
-
-    expect(result).toMatchObject({
-      evidenceReady: false,
-      activationPermitted: false,
-      scopeCaps: {
-        maxFiles: null,
-        maxLines: null,
-        policyMaxFiles: MAX_AUTOMERGE_POLICY_FILES,
-        policyMaxLines: MAX_AUTOMERGE_POLICY_LINES,
-        source: 'invalid',
-      },
-    });
-    expect(result.blockers.map((entry) => entry.code)).toEqual(expect.arrayContaining([
-      'scope-caps-unavailable',
-      'scope-caps-exceed-policy',
-    ]));
+    expect(result.activationPermitted).toBe(false);
+    expect(result.scopeCaps).toMatchObject({ maxFiles: Number.MAX_SAFE_INTEGER, maxLines: Number.MAX_SAFE_INTEGER, policyMaxFiles: MAX_AUTOMERGE_POLICY_FILES, policyMaxLines: MAX_AUTOMERGE_POLICY_LINES, source: 'explicit' });
+    expect(result.evidenceReady).toBe(false);
+    expect(result.blockers.length).toBeGreaterThan(0);
+    expect(result.blockers.map((entry) => entry.code)).not.toContain('scope-caps-exceed-policy');
   });
 
   it('rejects mutable config widening that is not the canary evidence identity', () => {

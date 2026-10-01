@@ -2737,6 +2737,8 @@ export type EngineId =
   | 'aw'
   | 'claude'
   | 'codex'
+  | 'grok-cli'
+  | 'devin-cli'
   | 'hermes'
   | 'kimi'
   | 'nim'
@@ -3117,7 +3119,7 @@ export interface SwarmOptions {
   signal?: AbortSignal;
   /** Partial budget overrides (merged over defaults) — the HARD total ceiling. */
   budget?: Partial<RunBudget>;
-  /** Bounded concurrency for the BUILD phase (default 3, max 8). */
+  /** Positive safe-integer BUILD concurrency preference (default 3); actual tasks/budget still bind. */
   parallel?: number;
   /** Launch a detached background worker and return the swarm id immediately. */
   background?: boolean;
@@ -4554,6 +4556,8 @@ export interface DaemonConfig {
   /** HARD daily spend ceiling (USD). When today's spend reaches it, the daemon
    *  idles/stops. Resets per calendar day. Default modest. */
   dailyBudgetUsd: number;
+  /** Positive safe integer token allowance for proven zero-dollar producers; defaults to the normal run allowance. */
+  perItemMaxTokens?: number;
   /** Max number of backlog items processed per tick (per-tick item cap). */
   perTickItems: number;
   /** Bounded concurrency: max sandboxed swarms run simultaneously in a tick. */

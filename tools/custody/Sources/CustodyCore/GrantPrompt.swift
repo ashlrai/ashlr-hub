@@ -22,6 +22,10 @@ public enum GrantPromptRenderer {
   /// repo list is abbreviated and the terminal copy carries the rest.
   public static let maxReasonLength = 900
 
+  static func volume(_ value: Int64) -> String {
+    value == GrantContract.maxSafeInteger ? "No volume cap" : String(value)
+  }
+
   public static func render(_ g: ValidatedGrant) -> GrantPrompt {
     let days = Int((g.expiresAtDate.timeIntervalSince(g.issuedAtDate) / 86_400).rounded())
     let until = humanInstant(g.expiresAtDate)
@@ -29,7 +33,7 @@ public enum GrantPromptRenderer {
     let merging = g.repos.filter { $0.stage == "merge" }.count
 
     let repoPhrases = g.repos.map { r in
-      "\(r.nameWithOwner) (\(r.stage), \(r.enforcement), \(r.maxRisk) risk, \(r.maxMergesPerDay)/day)"
+      "\(r.nameWithOwner) (\(r.stage), \(r.enforcement), \(r.maxRisk) risk, \(volume(r.maxMergesPerDay))/day)"
     }
     let seatPhrases = g.seats.map { s -> String in
       if !s.enabled { return "\(s.id) off" }
@@ -49,7 +53,8 @@ public enum GrantPromptRenderer {
       parts.append("approve Ashlr standing grant #\(g.grantSeq) for \(days) days, until \(until).")
       parts.append("\(g.repos.count) repos, \(merging) may merge: \(repos).")
       parts.append("Rollout: \(ladder).")
-      parts.append("Caps: \(g.maxFiles) files / \(g.maxLines) lines; ashlr-hub \(g.selfRepo).")
+      parts.append("Caps: \(volume(g.maxFiles)) files / \(volume(g.maxLines)) lines; ashlr-hub \(g.selfRepo).")
+      parts.append(g.volumePolicy == "operator-signed" ? "Volume limits apply to all models/enforcement modes; risk and CI still apply." : "Legacy local limits 4 files/150 lines; local enforcement 4 merges/day.")
       parts.append("Engines: \(g.engines.joined(separator: ", ")). Budget up to \(g.maxMode), $\(g.meteredUsdPerDay)/day metered.")
       if !seatPhrases.isEmpty { parts.append("Seats: \(seatPhrases.joined(separator: "; ")).") }
       parts.append("\(leader)\(g.conductorGoals ? "; goals run live" : "").")
@@ -76,9 +81,10 @@ public enum GrantPromptRenderer {
     lines.append("  surface     \(g.authoritySurfaceDigest)")
     lines.append("  repos (\(g.repos.count)):")
     for r in g.repos {
-      lines.append("    \(r.nameWithOwner)  stage=\(r.stage) enforcement=\(r.enforcement) maxRisk=\(r.maxRisk) maxMergesPerDay=\(r.maxMergesPerDay)")
+      lines.append("    \(r.nameWithOwner)  stage=\(r.stage) enforcement=\(r.enforcement) maxRisk=\(r.maxRisk) maxMergesPerDay=\(volume(r.maxMergesPerDay))")
     }
-    lines.append("  merge       maxFiles=\(g.maxFiles) maxLines=\(g.maxLines) selfRepo=\(g.selfRepo)")
+    lines.append("  merge       maxFiles=\(volume(g.maxFiles)) maxLines=\(volume(g.maxLines)) selfRepo=\(g.selfRepo)")
+    lines.append("  volume      \(g.volumePolicy ?? "legacy")")
     lines.append("  spend       maxMode=\(g.maxMode) meteredUsdPerDay=\(g.meteredUsdPerDay)")
     for s in g.seats {
       let ceiling = s.maxSessionWindowPercent.map { " maxSessionWindowPercent=\($0)" } ?? ""
@@ -90,7 +96,7 @@ public enum GrantPromptRenderer {
     lines.append("  rollout (auto-advance, never past the last stage):")
     for (i, st) in g.stages.enumerated() {
       let repos = st.repos.map { "\($0.nameWithOwner)=\($0.stage)" }.joined(separator: ", ")
-      lines.append("    \(i + 1). \(st.id)  repos=[\(repos)] engines=[\(st.engines.joined(separator: ","))] maxRisk=\(st.maxRisk) \(st.maxFiles) files/\(st.maxLines) lines \(st.maxMergesPerRepoPerDay)/repo/day leader=[\(st.leaderClasses.joined(separator: ","))]")
+      lines.append("    \(i + 1). \(st.id)  repos=[\(repos)] engines=[\(st.engines.joined(separator: ","))] maxRisk=\(st.maxRisk) \(volume(st.maxFiles)) files/\(volume(st.maxLines)) lines \(volume(st.maxMergesPerRepoPerDay))/repo/day leader=[\(st.leaderClasses.joined(separator: ","))]")
       let c = st.criteria
       lines.append("       advance after ≥\(c.minHours) h, ≥\(c.minMerges) merges, green ≥\(c.minPostMergeGreenPct)%, reverts ≤\(c.maxRevertRatePct)%, 0 sandbox violations, 0 reserve breaches")
     }

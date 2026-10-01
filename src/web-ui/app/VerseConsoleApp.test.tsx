@@ -5,6 +5,7 @@ import { evictAll } from '../data/cache.js';
 import { MockEventSource, verseFetch } from '../routes/verse/fixtures.test-support.js';
 import * as verseQueries from '../routes/verse/verse-queries.js';
 import { resetVerseStore } from '../routes/verse/verse-store.js';
+import { reloadVerseUiForTest, resetVerseUi, VERSE_UI_STORAGE_KEY } from '../routes/verse/verse-ui-store.js';
 import { isScopedConsolePath, isVerseConsolePath } from './console-mode.js';
 import { listenForSidecarRestart, preloadVerseFirstPaint, preloadVerseFonts, SIDECAR_RESTARTED_EVENT, VerseConsoleApp } from './VerseConsoleApp.js';
 
@@ -12,20 +13,17 @@ const READ = 'c'.repeat(64);
 const MUT = 'd'.repeat(64);
 
 /**
- * "The app is in, not the gate": wait for the rail, then check which surface
- * the launch rule picked.
- *
- * WHY NOT the Chats sidebar (the pre-3.10 landmark): verse-ui-store's launch
- * rule opens COMMAND on the first launch of each local day, and every page
- * load here is a first launch (localStorage is cleared, and the store reads it
- * once at import). So Chat — and its "Chats" navigation — is not mounted.
- * The rail is present on every surface, which is what "adopted, no gate"
- * actually means; Command being current pins the launch rule itself, so a
- * regression that silently dropped it would fail here rather than pass.
+ * Authentication reaches the shell's fresh Chat workspace, not the gate.
+ * This fixture explicitly resets the module-level UI store as well as storage.
+ * Fresh installs use Work with me; adopting tokens does not force Command.
  */
-async function expectShellOnCommand(): Promise<void> {
+async function expectShellOnChat(): Promise<void> {
   const rail = await screen.findByRole('navigation', { name: 'Verse sections' });
-  expect(within(rail).getByRole('button', { name: /^Command/ })).toHaveAttribute('aria-current', 'page');
+  expect(within(rail).getByRole('button', { name: /^Chat/ })).toHaveAttribute('aria-current', 'page');
+  expect(within(rail).getByRole('button', { name: /^Command/ })).not.toHaveAttribute('aria-current');
+  const modes = screen.getByRole('navigation', { name: 'How you work' });
+  expect(within(modes).getByRole('button', { name: 'Work with me' })).toHaveAttribute('aria-pressed', 'true');
+  expect(within(modes).getByRole('button', { name: 'Work for me' })).toHaveAttribute('aria-pressed', 'false');
 }
 
 beforeEach(() => {
@@ -33,6 +31,7 @@ beforeEach(() => {
   localStorage.clear();
   evictAll();
   resetVerseStore();
+  resetVerseUi();
   clearMutationToken();
   MockEventSource.reset();
   vi.stubGlobal('EventSource', MockEventSource);
@@ -72,7 +71,7 @@ describe('VerseConsoleApp', () => {
     vi.stubGlobal('fetch', fetch);
     window.__ASHLR_TOKENS__ = { readToken: READ, token: MUT };
     render(<VerseConsoleApp />);
-    await expectShellOnCommand();
+    await expectShellOnChat();
     expect(screen.queryByRole('heading', { name: 'Connect to Ashlr Verse' })).not.toBeInTheDocument();
     const sessionCall = state.calls.find((c) => c.path === '/api/session')!;
     expect(sessionCall.method).toBe('POST');
@@ -84,6 +83,28 @@ describe('VerseConsoleApp', () => {
     expect(Object.values(sessionStorage)).not.toContain(MUT);
     // No unlock prompt shown once the hold exists.
     expect(screen.queryByText(/Actions locked/)).not.toBeInTheDocument();
+  });
+
+  it('adopts host tokens without changing the last saved Fleet workspace', async () => {
+    const { fetch, state } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({
+      version: 3, section: 'fleet', lastLaunchDay: '2026-09-01',
+    }));
+    reloadVerseUiForTest();
+    window.__ASHLR_TOKENS__ = { readToken: READ, token: MUT };
+    render(<VerseConsoleApp />);
+
+    const rail = await screen.findByRole('navigation', { name: 'Verse sections' });
+    expect(within(rail).getByRole('button', { name: /^Fleet/ })).toHaveAttribute('aria-current', 'page');
+    expect(within(rail).getByRole('button', { name: /^Command/ })).not.toHaveAttribute('aria-current');
+    const modes = screen.getByRole('navigation', { name: 'How you work' });
+    expect(within(modes).getByRole('button', { name: 'Work for me' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(modes).getByRole('button', { name: 'Work with me' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByRole('heading', { name: 'Connect to Ashlr Verse' })).not.toBeInTheDocument();
+    expect(state.calls.find((c) => c.path === '/api/session')).toMatchObject({
+      method: 'POST', headers: { 'x-ashlr-token': READ },
+    });
   });
 });
 
@@ -123,7 +144,7 @@ describe('font preloads (no "preloaded but not used" on the connect screen)', ()
     vi.stubGlobal('fetch', fetch);
     window.__ASHLR_TOKENS__ = { readToken: READ, token: MUT };
     render(<VerseConsoleApp />);
-    await expectShellOnCommand();
+    await expectShellOnChat();
     const hrefs = [...document.head.querySelectorAll('link[rel="preload"]')].map((l) => l.getAttribute('href') ?? '');
     expect(hrefs.some((h) => /SpaceGrotesk-latin/.test(h))).toBe(true);
   });
@@ -210,7 +231,7 @@ describe('listenForSidecarRestart (desktop sidecar restart → immediate re-adop
     expect(await screen.findByRole('heading', { name: 'Connect to Ashlr Verse' })).toBeInTheDocument();
     window.__ASHLR_TOKENS__ = { readToken: READ2, token: MUT2 };
     act(() => { window.dispatchEvent(new CustomEvent(SIDECAR_RESTARTED_EVENT)); });
-    await expectShellOnCommand();
+    await expectShellOnChat();
     expect(screen.queryByRole('heading', { name: 'Connect to Ashlr Verse' })).not.toBeInTheDocument();
   });
 });

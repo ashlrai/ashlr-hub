@@ -642,6 +642,7 @@ interface PassContext {
   out: AutoMergePassResult;
   summary: StandingPassSummary;
   budget: { verify: number; judge: number };
+  meteredUsdExhausted: boolean;
   /**
    * Required checks per (repo, base) for THIS pass: every open PR on a repo
    * shares them, and the installation token's rate limit is per App install
@@ -690,6 +691,8 @@ export async function runStandingMergePass(input: {
   pending: readonly Proposal[];
   out: AutoMergePassResult;
   deps?: Partial<StandingPassDeps>;
+  /** A narrowing signal from an exhausted positive daemon USD allowance. */
+  meteredUsdExhausted?: true;
 }): Promise<StandingPassSummary> {
   const summary: StandingPassSummary = {
     mode: 'standing',
@@ -714,6 +717,7 @@ export async function runStandingMergePass(input: {
     deps: { ...defaultStandingPassDeps(), ...input.deps },
     out: input.out,
     summary,
+    meteredUsdExhausted: input.meteredUsdExhausted === true,
     budget: {
       verify: positiveIntConfig(autoMerge?.['verifyBeforeJudgePerPass'], DEFAULT_VERIFY_PER_PASS),
       judge: positiveIntConfig(foundry?.['judgePerPass'], DEFAULT_JUDGE_PER_PASS),
@@ -1107,6 +1111,16 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
     }
 
     // ── G4 — claims ──────────────────────────────────────────────────────
+    // A positive signed budget selects the model classifier. Exhaustion is
+    // not permission to replace that mandatory check with a heuristic.
+    if (ctx.meteredUsdExhausted && livePolicy.spend.meteredUsdPerDay > 0) {
+      const reason = 'The metered-USD allowance is exhausted; mandatory model claim classification has no zero-USD admission proof.';
+      recordGate(ctx, state, 'G4', { verdict: 'wait', code: 'metered-usd-exhausted', reason, inputs: { meteredUsdExhausted: true }, nextEligibleAt: null }, null);
+      persist(ctx, state);
+      ctx.summary.waiting++;
+      skip(ctx, proposal.id, 'standing-G4', reason);
+      return;
+    }
     const g4 = evaluateG4(await deps.claimIntegrity(proposal, ctx.cfg, livePolicy));
     if (!recordGate(ctx, state, 'G4', g4, null)) {
       persist(ctx, state);
@@ -1117,6 +1131,15 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
     // ── G5 — blast radius ────────────────────────────────────────────────
     const g5Checks = await deps.blastChecks(proposal, ctx.cfg);
     if ((ctx.cfg.foundry as Record<string, unknown> | undefined)?.['redTeam'] === true) {
+      if (ctx.meteredUsdExhausted && !eliteSelfLand
+        && validRedTeamMemo((state as StandingMergeState).redTeam, hashDiff(diff))?.frontier !== 'answered') {
+        const reason = 'The metered-USD allowance is exhausted; the required red-team model has no zero-USD admission proof.';
+        recordGate(ctx, state, 'G5', { verdict: 'wait', code: 'metered-usd-exhausted', reason, inputs: { meteredUsdExhausted: true }, nextEligibleAt: null }, null);
+        persist(ctx, state);
+        ctx.summary.waiting++;
+        skip(ctx, proposal.id, 'standing-G5', reason);
+        return;
+      }
       g5Checks.push(await runRedTeam(ctx, state, proposal, diff, () => eliteSelfLand
         ? []
         : (seat ?? deps.judgeSeatLanes({ producerFamily, policy: livePolicy, waitSinceMs, nowMs })).lanes));
@@ -1143,7 +1166,9 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
     const judgeRecentlyCalled = Number.isFinite(judgeCalledMs) && deps.host.nowMs() - judgeCalledMs < JUDGE_RETRY_MS;
     if (g6.verdict !== 'pass' && g6.needsJudge && !judgeRecentlyCalled) {
       const lanes = (seat ?? deps.judgeSeatLanes({ producerFamily, policy: livePolicy, waitSinceMs, nowMs, excludeFamilies: g6.judgedFamilies ?? [] })).lanes;
-      if (lanes.length > 0 && ctx.budget.judge > 0) {
+      if (ctx.meteredUsdExhausted) {
+        g6 = { ...g6, verdict: 'wait', code: 'metered-usd-exhausted', reason: 'The metered-USD allowance is exhausted; the required judge has no zero-USD admission proof.' };
+      } else if (lanes.length > 0 && ctx.budget.judge > 0) {
         ctx.budget.judge--;
         state.judgeCalledAt = iso(deps.host.nowMs());
         const judged = await deps.runJudge(proposal, ctx.cfg, lanes);
