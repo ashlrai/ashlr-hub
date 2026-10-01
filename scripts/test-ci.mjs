@@ -12,6 +12,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, URL } from 'node:url';
+import { stripVTControlCharacters } from 'node:util';
 import {
   clearInterval,
   clearTimeout,
@@ -121,7 +122,9 @@ function observeOutput(chunk, streamName) {
   for (const line of lines) {
     const bounded = line.trim().slice(-MAX_LINE_TAIL);
     if (bounded) lastProgressLine = bounded;
-    if (/\b(Test Files|Tests)\b.*\b(passed|failed|skipped)\b/i.test(line)) {
+    // Per-file '(N tests | N skipped)' output is not the final aggregate.
+    const plain = stripVTControlCharacters(line);
+    if (/^\s*(?:Test Files|Tests)\s+\d+\s+(?:passed|failed|skipped)\b/.test(plain)) {
       sawVitestSummary = true;
     }
   }

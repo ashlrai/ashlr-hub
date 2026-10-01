@@ -122,9 +122,23 @@ describe('test-ci watchdog', () => {
     expect(result.stderr).not.toContain('hard-runtime-cap reached');
   });
 
+  it('does not mistake a colored skipped-file report for an aggregate summary', () => {
+    const result = runFixture(
+      `console.log('\\x1b[33m↓ |real-io| test/skipped.test.ts (15 tests | 15 skipped)\\x1b[0m');
+       console.log('[test-ci-progress] start test/mission.test.ts');
+       setTimeout(() => {}, 2_000);`,
+      { idleMs: IDLE_TIMEOUT_FIXTURE_MS, hardMs: HARD_TIMEOUT_FIXTURE_MS },
+    );
+
+    expect(result.status).toBe(124);
+    expect(result.stderr).toContain('not proven leaked handles');
+    expect(result.stderr).toContain('start test/mission.test.ts');
+    expect(result.stderr).not.toContain('final summary; a leaked handle is plausible');
+  });
+
   it('only identifies possible leaked handles after a final Vitest summary', () => {
     const result = runFixture(
-      `console.log('Test Files  1 passed (1)');
+      `console.log('\\x1b[32m Test Files  1 passed (1)\\x1b[0m');
        setTimeout(() => {}, 2_000);`,
       { idleMs: IDLE_TIMEOUT_FIXTURE_MS, hardMs: HARD_TIMEOUT_FIXTURE_MS },
     );

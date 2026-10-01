@@ -110,15 +110,24 @@ async function fixture() {
 describe.runIf(process.platform === 'darwin')('actual standing engineering mission', () => {
   it('reconciles scope one after owner restart, proposes and executes scope two on the same ledger, then honors stop', async () => {
     const f = await fixture(); const stop = new AbortController(); const phases: string[] = [];
+    // This real two-scope mission can exceed the wrapper's five-minute silence
+    // window. Report actual transitions, rather than a timer that hides stalls.
+    let lastProgress = '';
+    const reportPhase = (value: { scope: number; phase: string }): void => {
+      const next = `${value.scope}:${value.phase}`;
+      if (next === lastProgress) return;
+      lastProgress = next;
+      console.error(`[mission-fixture] scope ${value.scope} phase ${value.phase}`);
+    };
     const first = await runResourceEngineeringMission(f.config, { signal: stop.signal, onProgress(value) {
-      phases.push(`${value.scope}:${value.phase}`); if (value.scope === 1 && value.phase === 'verifying') stop.abort();
+      phases.push(`${value.scope}:${value.phase}`); if (value.scope === 1 && value.phase === 'verifying') stop.abort(); reportPhase(value);
     } });
     expect(first, JSON.stringify({ first, phases, calls: f.calls, errors: f.errors })).toMatchObject({ state: 'stopped', scopesReserved: 1, deadlineAt: f.config.deadlineAt });
     expect(f.calls).toEqual({ generation: 2, successor: 1, mission: 0 });
     expect(readEngineeringMissionInvocations(f.config)).toMatchObject({ count: 1, unfinishedCount: 0,
       latest: { outcome: { state: 'stopped', reason: first.reason } } });
     const firstRows = readEngineeringMissionRecords(f.config); expect(firstRows.some(row => row.kind === 'settled')).toBe(true);
-    const second = await runResourceEngineeringMission(f.config, { onProgress(value) { phases.push(`${value.scope}:${value.phase}`); } });
+    const second = await runResourceEngineeringMission(f.config, { onProgress(value) { phases.push(`${value.scope}:${value.phase}`); reportPhase(value); } });
     expect(second, JSON.stringify({ second, phases, calls: f.calls, errors: f.errors })).toMatchObject({ state: 'completed', reason: 'stop-requested', scopesReserved: 2, deadlineAt: f.config.deadlineAt });
     expect(second.tip).not.toBeNull(); expect(git(f.project, 'show', `${second.tip!.commit}:value.json`)).toBe('3');
     expect(git(f.project, 'rev-parse', 'HEAD')).toBe(f.revision); expect(git(f.project, 'status', '--porcelain=v1')).toBe('');
@@ -140,7 +149,7 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     // neither restart a console nor propose a replacement task on any scope.
     const stopped = new AbortController(); stopped.abort(); const replayPhases: string[] = []; const replayUrls: Array<string | null> = [];
     const replay = await runResourceEngineeringMission(f.config, { signal: stopped.signal,
-      onProgress(value) { replayPhases.push(`${value.scope}:${value.phase}`); replayUrls.push(value.consoleUrl); } });
+      onProgress(value) { replayPhases.push(`${value.scope}:${value.phase}`); reportPhase(value); replayUrls.push(value.consoleUrl); } });
     expect(replay).toEqual(second); expect(replayPhases).toContain('2:reconciling');
     // Observer exceptions are intentionally isolated by the runner, so assertions
     // belong outside that callback where a regression can actually fail the test.
