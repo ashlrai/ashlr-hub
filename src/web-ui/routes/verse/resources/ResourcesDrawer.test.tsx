@@ -17,7 +17,7 @@ import { clearMutationToken, setMutationToken } from '../../../data/auth-store.j
 import { evictAll, runQuery } from '../../../data/cache.js';
 import { capacity, CLAUDE_TIGHT_SEAT, GROK_SEAT, LOCAL_SEAT_V2, nativeSeat, seatWindow } from '../seat-fixtures.test-support.js';
 import { resetGuard } from '../shell/guarded-action.js';
-import { getVerseUiState, resetVerseUi } from '../verse-ui-store.js';
+import { getVerseUiState, resetVerseUi, setVerseActiveSession } from '../verse-ui-store.js';
 import { verseBootstrapQuery } from '../verse-queries.js';
 import { budgetQuery } from '../budget/budget-queries.js';
 import { ResourcesBar } from './ResourcesBar.js';
@@ -150,6 +150,7 @@ let readiness: unknown;
 let localModels: unknown;
 let devin: unknown;
 let roster: unknown[];
+let budget: unknown;
 
 function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
@@ -177,7 +178,7 @@ function stubFetch() {
       case '/api/verse/health':
         return json({ checkedAt: CHECKED, seats: HEALTH });
       case '/api/verse/budget':
-        return json(BUDGET);
+        return json(budget);
       case '/api/verse/local-models':
         return json(localModels);
       case '/api/verse/budget/readiness':
@@ -205,6 +206,7 @@ beforeEach(() => {
   localModels = LOCAL_MODELS;
   devin = 404;
   roster = ROSTER;
+  budget = BUDGET;
   stubFetch();
 });
 
@@ -216,6 +218,32 @@ afterEach(() => {
 const cardOf = (label: string) => screen.getByRole('heading', { name: new RegExp(`^${label}`) }).closest('li')!;
 
 describe('ResourcesDrawer — accounts', () => {
+  it('opens focusable scheduling details without extra reads, actions or changing the active chat', async () => {
+    budget = { ...BUDGET, scheduling: { sourceState: 'ready', observedAt: new Date(NOW).toISOString(), accounts: [{
+      seatId: 'codex-cmp', observedAt: CHECKED, admission: 'held', headroomPercent: 0,
+      reset: { kind: 'unknown', at: RESET, description: null, source: null },
+      opportunity: { kind: 'held', reason: 'account policy holds' }, forecast: null,
+    }] } };
+    setVerseActiveSession('existing-chat');
+    const user = userEvent.setup();
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    await screen.findByRole('heading', { name: /^Cash Margin Partners/ });
+    const card = within(cardOf('Cash Margin Partners'));
+    await waitFor(() => expect(card.getByText('Held back by current account or reserve limits.')).toBeInTheDocument());
+    const summary = card.getByText('Usage details');
+    summary.focus();
+    const reads = calls.length;
+    expect(summary).toHaveFocus();
+    // Native summary keyboard activation belongs to browser acceptance; jsdom
+    // does not implement its Enter default action. Exercise native click here.
+    await user.click(summary);
+    expect(summary.closest('details')!.open).toBe(true);
+    expect(card.getByText('Reset behavior not reported.')).toBeVisible();
+    expect(card.queryByText(/Opportunity to use/)).toBeNull();
+    expect(getVerseUiState().activeSessionId).toBe('existing-chat');
+    expect(calls.length).toBe(reads);
+    expect(calls.every((c) => c.method === 'GET')).toBe(true);
+  });
   it('keeps tier cards in roster order while leading with shared status wording', async () => {
     render(<ResourcesDrawer mode="docked" now={NOW} />);
     await screen.findByRole('heading', { name: /^Cash Margin Partners/ });

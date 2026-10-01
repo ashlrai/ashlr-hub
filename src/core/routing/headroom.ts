@@ -16,8 +16,8 @@
  *  - A spent PER-MODEL window is not a spent account. Claude's
  *    `seven_day_fable` can read 100% while `five_hour` reads 15%; only the
  *    account-wide windows bind (seats.ts `seatUsability` has the same rule).
- *  - Claude publishes no machine-readable reset. Its reset is quoted in the
- *    provider's own words and never turned into a timestamp or a countdown.
+ *  - Legacy Claude reset prose stays words. Only qualified current native
+ *    structured usage can supply a machine deadline; prose is never parsed.
  *  - Codex credits are paid overage. Autonomy never spends them, so a spent
  *    Codex window blocks autonomy even when a balance exists.
  *
@@ -38,6 +38,7 @@ import type { BudgetEngine } from './policy.js';
 import { costBasisOf, isWindowlessEngine, seatTier, type CostBasis, type ResourceTier } from './tiers.js';
 import { reasonSentences } from './seat-reasons.js';
 import type { SeatBudgetPolicy, SeatHeadroom, SeatReason } from './types.js';
+import type { ResetProvenance } from './scheduling-types.js';
 
 /** A reading older than this is too stale to spend against (the collector polls every 30 s when active). */
 export const HEADROOM_READING_MAX_AGE_MS = 15 * 60_000;
@@ -53,10 +54,12 @@ export const SESSION_WINDOW_MAX_MS = 5 * 60 * 60_000 + 15 * 60_000;
 export type SeatWindowClass = 'session' | 'weekly' | 'model';
 
 export interface CapacityWindow {
+  /** Advisory semantics, never included in signed ResourceObservation. */
+  resetProvenance?: ResetProvenance;
   id: string;
   /** Provider percent; null = NO SIGNAL (not zero). */
   usedPercent: number | null;
-  /** Machine reset; always null for Claude. */
+  /** Provider machine reset; legacy Claude prose remains null. */
   resetsAt: string | null;
   /** The provider's own reset wording (Claude), verbatim. */
   resetDescription: string | null;
@@ -155,6 +158,7 @@ export function capacityFromSeat(seat: VerseSeat, liveCapacity?: VerseSeatCapaci
     resetsAt: w.resetsAt,
     resetDescription: w.resetDescription,
     limitReached: w.limitReached === true,
+    ...(w.resetProvenance ? { resetProvenance: w.resetProvenance } : {}),
   }));
   const signedOut = !free && capacity?.usability === 'signed-out';
   return {

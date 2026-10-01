@@ -30,6 +30,20 @@ afterEach(() => {
 });
 
 describe('FleetSection — live', () => {
+  it('keeps capacity timing a compact navigation-free read and reports missing old-server evidence', async () => {
+    const { posted } = stubSurfaceFetch({ kind: 'live' });
+    const user = userEvent.setup();
+    render(<FleetSection />);
+    await screen.findByRole('region', { name: 'Why this seat' });
+    const summary = screen.getByText('Capacity for work');
+    expect(summary.closest('details')!.open).toBe(false);
+    summary.focus();
+    expect(summary).toHaveFocus();
+    await user.click(summary);
+    expect(summary.closest('details')!.open).toBe(true);
+    expect(screen.getAllByText('Work capacity unavailable.').length).toBeGreaterThan(0);
+    expect(posted).toEqual([]);
+  });
   it('delegates and guides through existing destinations without dispatching a task or changing authority', async () => {
     const { posted } = stubSurfaceFetch({ kind: 'live' });
     const user = userEvent.setup();

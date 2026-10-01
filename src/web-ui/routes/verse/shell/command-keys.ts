@@ -234,18 +234,18 @@ const BINDINGS: readonly KeyBinding[] = (Object.entries(KEYS) as Array<[CommandS
 );
 
 /** Every command's keys, by id (the catalog's bind() reads it). */
-export const COMMAND_KEYS = Object.fromEntries(BINDINGS.map((b) => [b.id, b])) as unknown as Readonly<Record<KeyedCommandId, KeySpec>>;
-
-const BINDING_BY_ID: ReadonlyMap<string, KeyBinding> = new Map(BINDINGS.map((b) => [b.id, b]));
+export const COMMAND_KEYS = Object.fromEntries(BINDINGS.map((b) => [b.id, b])) as Readonly<Record<KeyedCommandId, KeyBinding>>;
 
 /** The keys of command `id`; null for a command with none (or no such command). */
 export function keyBinding(id: string): KeyBinding | null {
-  return BINDING_BY_ID.get(id) ?? null;
+  // Reuse the catalog's index instead of allocating a second startup map.
+  // Own-property lookup keeps names such as "constructor" unbound.
+  return Object.hasOwn(COMMAND_KEYS, id) ? COMMAND_KEYS[id as KeyedCommandId] : null;
 }
 
 /** The chord a hint prints for `id` (its first); undefined when it has no key. */
 export function commandChord(id: string): KeyChord | undefined {
-  return BINDING_BY_ID.get(id)?.keys[0];
+  return keyBinding(id)?.keys[0];
 }
 
 // ===========================================================================
@@ -469,17 +469,12 @@ export function chordId(chord: KeyChord): string {
 
 const MAC_KEY_GLYPHS: Readonly<Record<string, string>> = {
   enter: '↩',
-  escape: 'Esc',
   tab: '⇥',
-  space: 'Space',
-  arrowup: '↑',
-  arrowdown: '↓',
-  arrowleft: '←',
-  arrowright: '→',
   backspace: '⌫',
 };
 
-const OTHER_KEY_NAMES: Readonly<Record<string, string>> = {
+/** Shared names; macOS overrides only the keys that have native glyphs. */
+const KEY_NAMES: Readonly<Record<string, string>> = {
   enter: 'Enter',
   escape: 'Esc',
   tab: 'Tab',
@@ -496,7 +491,8 @@ const OTHER_KEY_NAMES: Readonly<Record<string, string>> = {
  * no separators ("⇧⌘B", "⌃`", "⌥↑"); elsewhere "Ctrl+Shift+B".
  */
 export function formatChord(chord: KeyChord, platform: KeyPlatform = detectKeyPlatform()): string {
-  const key = chord.key.length === 1 ? chord.key.toUpperCase() : (platform === 'mac' ? MAC_KEY_GLYPHS : OTHER_KEY_NAMES)[chord.key] ?? chord.key;
+  const key = chord.key.length === 1 ? chord.key.toUpperCase() :
+    (platform === 'mac' ? MAC_KEY_GLYPHS[chord.key] : undefined) ?? KEY_NAMES[chord.key] ?? chord.key;
   if (platform === 'mac') {
     return `${chord.ctrl ? '⌃' : ''}${chord.alt ? '⌥' : ''}${chord.shift ? '⇧' : ''}${chord.mod ? '⌘' : ''}${key}`;
   }

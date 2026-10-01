@@ -462,6 +462,7 @@ function seatWindow(window: VerseAccountWindow): VerseSeatWindow {
     resetDescription: window.nativeReport?.resetDescription ?? null,
     limitReached: window.limitReached,
     measured: window.measured,
+    ...(window.resetProvenance ? { resetProvenance: window.resetProvenance } : {}),
   };
 }
 

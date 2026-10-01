@@ -129,6 +129,21 @@ describe('native metadata monitoring', () => {
     }
   });
 
+  it('qualifies only current structured Claude quota, and expires it without retaining native identity', async () => {
+    const windows = [
+      { id: 'five_hour', usedPercent: 0, resetsAt: '2026-09-08T15:00:00.000Z', nativeReport: { source: 'claude-usage-structured', resetDescription: null } },
+      { id: 'seven_day', usedPercent: 28.5, resetsAt: '2026-09-10T12:00:00.000Z', nativeReport: { source: 'claude-usage-structured', resetDescription: null },
+        resetProvenance: { kind: 'weekly-deadline', at: '2026-09-10T12:00:00.000Z', source: 'claude-native-usage-report', plan: 'max', description: null } },
+    ];
+    probes.claude.mockResolvedValue({ ...claude(), accountHint: HINT, quotaFresh: true, windows });
+    const handle = start({ config: config(['claude']) }); await settle();
+    expect(handle.snapshot().accounts[0]).toMatchObject({ health: 'reachable', windows, observedAt: NOW, expiresAt: EXPIRES });
+    expect(JSON.stringify(handle.snapshot())).not.toContain(HINT);
+    probes.claude.mockResolvedValue({ status: 'timed-out', reason: 'probe-timed-out' });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(handle.snapshot().accounts[0]).toMatchObject({ health: 'unavailable', windows: [], observedAt: null });
+  });
+
   it('keeps a verified Codex window for display across transient failures, without renewing its expiry or auth', async () => {
     const handle = start({ config: config(['codex']) }); await settle();
     const observed = handle.snapshot().accounts[0]!;

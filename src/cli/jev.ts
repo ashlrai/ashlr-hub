@@ -62,7 +62,8 @@ function conf(v: number | null | undefined): string {
   return v === null || v === undefined ? '—' : v.toFixed(2);
 }
 
-function usd(v: number): string {
+function usd(v: number | null): string {
+  if (v === null) return 'unknown';
   return v <= 0 ? '$0' : v < 0.01 ? '<$0.01' : `$${v.toFixed(2)}`;
 }
 
@@ -71,10 +72,10 @@ function ms(v: number | null): string {
 }
 
 export function renderJevStatus(s: JevStatus): string[] {
-  const state = !s.enabled ? `OFF (${s.disabledBy ?? 'kill switch'})` : s.keyed ? 'ON' : 'NOT SET UP (no TypeSafe key — every decision uses its deterministic rule)';
+  const state = !s.enabled ? `OFF (${s.disabledBy ?? 'kill switch'})` : s.keyed ? 'CONFIGURED' : 'NOT SET UP (no TypeSafe key — every decision uses its deterministic rule)';
   const lines = [
     `Jev: ${state}`,
-    `Today (${s.day}): ${s.decisionsToday} decisions · ${s.callsToday}/${s.dailyCallBudget} paid calls · ${pct(s.fallbackRateToday)} fell back · avg confidence ${conf(s.avgConfidenceToday)} · avg latency ${ms(s.avgLatencyMsToday)} · est. ${usd(s.estCostUsdToday)} (${s.inputTokensToday} in / ${s.outputTokensToday} out tokens)`,
+    `Today (${s.day}): ${s.decisionsToday} decisions · ${s.callsToday}/${s.dailyCallBudget === null ? 'no limit' : s.dailyCallBudget} paid calls · ${pct(s.fallbackRateToday)} fell back · avg confidence ${conf(s.avgConfidenceToday)} · avg latency ${ms(s.avgLatencyMsToday)} · est. ${usd(s.estCostUsdToday)} (${s.inputTokensToday ?? 'unknown'} in / ${s.outputTokensToday ?? 'unknown'} out tokens)`,
   ];
   if (s.disabledKinds.length > 0) lines.push(`Disabled kinds: ${s.disabledKinds.join(', ')}`);
   if (s.byKind.length > 0) {
@@ -92,7 +93,7 @@ export function renderJevStatus(s: JevStatus): string[] {
       ].join(' '));
     }
   }
-  lines.push('', 'Cost is an estimate at placeholder per-token rates; set real ones in ~/.ashlr/jev/config.json.');
+  lines.push('', 'Recorded cost estimates retain historical rates, which may be unverified. New calls use published concrete-model or operator rates; missing pricing/usage is unknown. API billing is separate from agent subscriptions.');
   return lines;
 }
 

@@ -1,0 +1,53 @@
+{
+  "schema": "ashlr.public-local-qualification.v1",
+  "date": "2026-10-01",
+  "sourceCommit": "d436ba6496fe03b067d1ef214e5d80dcda1ff6f9",
+  "packageVersion": "3.19.0",
+  "packageArchiveSha256": "8d4bbeb902697d9ba52b9d0aab272e295066813455fbfad058747c3a7d145dcd",
+  "privateReportSha256": "587ec70fc1c95930e15e2aa8d93400c15091746cbd98360e83c310a98e05e5b0",
+  "task": "multi-file-rename",
+  "taskDigest": "697433ce95af401a5eb1e32393c61ea333a535a9f5b4a9f5be38b954590b01d7",
+  "trials": 1,
+  "passes": 1,
+  "concurrency": 1,
+  "wallMs": 392453,
+  "changedFileCount": 3,
+  "agentExit": 0,
+  "checkerExit": 0,
+  "turns": 12,
+  "reportedTokens": {
+    "input": 2979,
+    "output": 1638,
+    "cacheRead": 12872,
+    "cacheCreation": 0
+  },
+  "tokenSource": "cli-result-v1",
+  "tokenCoverage": {
+    "input": "reported",
+    "output": "reported",
+    "cacheRead": "reported",
+    "cacheCreation": "reported"
+  },
+  "requestedModel": "qwen3.8:27b-q8_0",
+  "runtimeReportedModel": "unknown",
+  "quantization": "Q8_0",
+  "slots": 4,
+  "contextPerSlot": 65536,
+  "contextTotal": 262144,
+  "cacheState": "uncontrolled",
+  "concurrentVerificationWork": true,
+  "comparison": "No matched baseline/head comparison performed",
+  "limitations": [
+    "One local fixture verifies the recorded end-to-end path; it does not establish broad model quality, latency or fleet activation.",
+    "The requested model label and runtime-reported model are distinct; captured runtime model name remained unknown.",
+    "CLI-reported tokens and cache buckets are usage observations, not provider billing or remaining account allowance.",
+    "Default effort and uncontrolled caches with concurrent verification prevent a performance superiority or token-saving claim."
+  ],
+  "omitted": [
+    "private paths",
+    "prompt/tool content",
+    "trace payloads",
+    "account identifiers",
+    "credentials"
+  ]
+}

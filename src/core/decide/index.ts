@@ -111,3 +111,5 @@ export type { RetroCauseCategory, RetroCauseLabel, RetroForLabel } from './retro
 
 export { extractJudgeRubric, extractRedTeamSeverity, extractTasteScore } from './verdict.js';
 export type { ExtractedJudgeRubric, ExtractedTasteScore } from './verdict.js';
+
+export { adviseResourceChoice } from './resource-choice.js';

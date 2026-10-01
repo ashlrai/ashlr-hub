@@ -89,6 +89,13 @@ export const COMPLETION_CLAIMS = ['claims-change', 'reports-blocked', 'answers-o
 const spec = (s: DecisionKindSpec): DecisionKindSpec => s;
 
 export const DECISION_KINDS: Readonly<Record<DecisionKind, DecisionKindSpec>> = {
+  'resource-choice': spec({
+    kind: 'resource-choice',
+    description: 'Already eligible task/account pairs → advisory tie choice; never admission or authority.',
+    primary: 'resource_choice', labels: [], threshold: 0.8, timeoutMs: 8_000,
+    safetyAdjacent: false,
+    callSites: ['src/core/decide/resource-choice.ts adviseResourceChoice'],
+  }),
   'engine-error': spec({
     kind: 'engine-error',
     description: 'Engine stderr → one error kind + a retryability Noul (agent-diagnostics + self-heal, unified).',

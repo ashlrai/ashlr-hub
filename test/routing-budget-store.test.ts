@@ -4,7 +4,7 @@
  * HOME-isolated: every test relocates HOME to a fresh temp dir, so the real
  * ~/.ashlr is never read or written.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -23,7 +23,9 @@ import {
   writeCapacitySnapshot,
   writeCapacitySnapshotAsync,
 } from '../src/core/routing/budget-store.js';
-import { BudgetPolicyError, defaultBudgetPolicy } from '../src/core/routing/policy.js';
+import { routeSeat } from '../src/core/routing/router.js';
+import { applyBudgetUpdate, BudgetPolicyError, defaultBudgetPolicy } from '../src/core/routing/policy.js';
+import * as preferences from '../src/core/verse/preferences.js';
 import type { SeatCapacity } from '../src/core/routing/headroom.js';
 import type { SeatDecision } from '../src/core/routing/types.js';
 
@@ -90,6 +92,53 @@ describe('budget policy file', () => {
     expect(fs.existsSync(budgetPolicyPath())).toBe(false);
   });
 
+  it.each([64, 149])('adds a partial policy beyond%i existing seats and round-trips every stored choice', (count) => {
+    const now = new Date('2026-10-01T12:00:00.000Z');
+    const seats = Object.fromEntries(Array.from({ length: count }, (_, i) => [`claude-${i}`, {
+      seatId: `claude-${i}`, enabled: i % 2 === 0, reservePercent: 55, dailyUsdCap: 4.5, maxSessionWindowPercent: 60,
+    }]));
+    fs.mkdirSync(path.dirname(budgetPolicyPath()), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(budgetPolicyPath(), JSON.stringify({ mode: 'balanced', seats, updatedAt: now.toISOString() }), { mode: 0o600 });
+    expect(Object.keys(loadBudgetPolicy().seats)).toHaveLength(count);
+    const next = updateBudgetPolicy({ seatId: `codex-${count}`, policy: { reservePercent: 25 } }, { now });
+    expect(Object.keys(next.seats)).toHaveLength(count + 1);
+    expect(next.seats[`codex-${count}`]).toEqual({ seatId: `codex-${count}`, enabled: false, reservePercent: 25, maxSessionWindowPercent: 70 });
+    expect(next.seats['claude-0']).toEqual(seats['claude-0']);
+    expect(next.seats[`claude-${count - 1}`]).toEqual(seats[`claude-${count - 1}`]);
+    expect(loadBudgetPolicy()).toEqual(next);
+    expect(mode(budgetPolicyPath())).toBe(0o600);
+  });
+
+  it('refuses an update crossing the64KiB serialized bound before any ensure/write and keeps the old file exact', () => {
+    const now = new Date('2026-10-01T12:00:00.000Z');
+    let stored = defaultBudgetPolicy();
+    let rejectedSeat = '';
+    for (let i = 0; ; i += 1) {
+      const seatId = `claude-${i}-${'x'.repeat(170)}`;
+      const next = applyBudgetUpdate(stored, { seatId, policy: { reservePercent: 55 } }, now.toISOString());
+      if (Buffer.byteLength(`${JSON.stringify(next, null, 2)}\n`) > 64 * 1024) { rejectedSeat = seatId; break; }
+      stored = next;
+    }
+    const original = `${JSON.stringify(stored, null, 2)}\n`;
+    fs.mkdirSync(path.dirname(budgetPolicyPath()), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(budgetPolicyPath(), original, { mode: 0o600 });
+    const before = fs.statSync(budgetPolicyPath());
+    const ensure = vi.spyOn(preferences, 'ensurePrivateDirectory');
+    const write = vi.spyOn(preferences, 'writePrivateFileAtomic');
+    try {
+      let refused: unknown;
+      try { updateBudgetPolicy({ seatId: rejectedSeat, policy: { reservePercent: 55 } }, { now }); } catch (error) { refused = error; }
+      expect(refused).toBeInstanceOf(BudgetPolicyError);
+      expect(refused).toMatchObject({ code: 'VERSE_TOO_LARGE', status: 413 });
+      expect(ensure).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
+      expect(fs.readFileSync(budgetPolicyPath(), 'utf8')).toBe(original);
+      expect(fs.statSync(budgetPolicyPath()).ino).toBe(before.ino);
+      expect(fs.readdirSync(path.dirname(budgetPolicyPath()))).toEqual(['budget.json']);
+      expect(loadBudgetPolicy()).toEqual(stored);
+    } finally { ensure.mockRestore(); write.mockRestore(); }
+  });
+
   it('a mangled, oversized or symlinked file loads the defaults', () => {
     fs.mkdirSync(path.join(home, '.ashlr'), { recursive: true, mode: 0o700 });
     fs.writeFileSync(budgetPolicyPath(), '{not json');
@@ -111,6 +160,52 @@ describe('capacity snapshot', () => {
     expect(mode(path.join(home, '.ashlr', 'routing'))).toBe(0o700);
     expect(readCapacitySnapshot()).toEqual(snap);
     expect(snap.seats[0]).toEqual(claudeSeat());
+  });
+
+  it('round-trips every enrolled account beyond64 on both sync and async publication', async () => {
+    const roster=Array.from({length:160},(_,i)=>claudeSeat({seatId:`claude-${i}`,label:`Account ${i}`,signedOut:i<159}));
+    const sync=writeCapacitySnapshot(roster,new Date('2026-10-01T12:00:00.000Z'));
+    expect(sync.seats.map(s=>s.seatId)).toEqual(roster.map(s=>s.seatId));
+    expect(readCapacitySnapshot()).toEqual(sync);
+    const async=await writeCapacitySnapshotAsync(roster,new Date('2026-10-01T12:01:00.000Z'));
+    expect(readCapacitySnapshot()).toEqual(async);
+    expect(readCapacitySnapshot()!.seats[159]).toEqual(roster[159]);
+    const decision=routeSeat({task:'code',difficulty:'high',autonomous:true},readCapacitySnapshot()!.seats,defaultBudgetPolicy(),
+      {nowMs:Date.parse('2026-09-24T12:00:00.000Z')});
+    expect(decision.seatId).toBe('claude-159');
+    expect(mode(capacitySnapshotPath())).toBe(0o600);
+  });
+
+  it('reads the full bounded persisted roster without its former separate64-row truncation', () => {
+    const roster=Array.from({length:160},(_,i)=>claudeSeat({seatId:`claude-${i}`}));
+    writeCapacitySnapshot([]);
+    fs.writeFileSync(capacitySnapshotPath(),JSON.stringify({v:1,publishedAt:'2026-10-01T12:00:00.000Z',seats:roster}));
+    expect(readCapacitySnapshot()!.seats).toEqual(roster);
+  });
+
+  it('refuses oversized snapshots before either writer replaces the prior full roster', async () => {
+    writeCapacitySnapshot([claudeSeat()]);
+    const prior=fs.readFileSync(capacitySnapshotPath());
+    const roster=Array.from({length:2000},(_,i)=>claudeSeat({seatId:`claude-${i}`}));
+    expect(()=>writeCapacitySnapshot(roster)).toThrow('byte limit');
+    expect(fs.readFileSync(capacitySnapshotPath())).toEqual(prior);
+    await expect(writeCapacitySnapshotAsync(roster)).rejects.toThrow('byte limit');
+    expect(fs.readFileSync(capacitySnapshotPath())).toEqual(prior);
+    expect(fs.readdirSync(path.dirname(capacitySnapshotPath())).filter(f=>f.endsWith('.tmp'))).toEqual([]);
+    fs.writeFileSync(capacitySnapshotPath(),' '.repeat(256*1024+1));
+    expect(readCapacitySnapshot()).toBeNull();
+  });
+
+  it('refuses sparse or accessor rosters without allocating from a huge declared length', () => {
+    writeCapacitySnapshot([claudeSeat()]);
+    const prior=fs.readFileSync(capacitySnapshotPath());
+    expect(()=>writeCapacitySnapshot(new Array(1_000_000_000))).toThrow('byte limit');
+    expect(()=>writeCapacitySnapshot(new Array(4))).toThrow('dense');
+    let read=false;const accessor:SeatCapacity[]=[];
+    Object.defineProperty(accessor,'0',{get(){read=true;return claudeSeat();},enumerable:true});
+    expect(()=>writeCapacitySnapshot(accessor)).toThrow('dense data');
+    expect(read).toBe(false);
+    expect(fs.readFileSync(capacitySnapshotPath())).toEqual(prior);
   });
 
   it('the async (request-path) write is equally private and replaces a planted symlink rather than writing through it', async () => {

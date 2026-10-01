@@ -4,7 +4,11 @@
  * echoed the thrown error's message (which can carry a ~/.ashlr path) where every other
  * Verse module answers with a fixed message.
  */
-import type { ServerResponse } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { Readable } from 'node:stream';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const failure = vi.hoisted(() => ({ next: null as Error | null }));
@@ -62,3 +66,18 @@ describe('GET /api/verse/jev', () => {
     expect(failed.body).toEqual({ error: 'jev status unavailable' });
   });
 });
+
+ it('a saved preference with failed status read is not reported as an unchanged setting', async () => {
+   const home = mkdtempSync(join(tmpdir(), 'jev-saved-status-'));
+   vi.stubEnv('ASHLR_HOME', home);
+   try {
+     failure.next = new Error('private status failure');
+     const req = Readable.from([JSON.stringify({ dailyCallBudget: 9 })]) as unknown as IncomingMessage;
+     req.headers = { 'x-ashlr-token': 'test-token', 'content-type': 'application/json' };
+     const { res, out } = fakeRes();
+     await handleJevApi({ cfg: {}, token: 'test-token', allowDispatch: true } as never, req, res, '/api/verse/jev/config', 'POST');
+     expect(out.status).toBe(503);
+     expect(out.body).toEqual({ error: 'Jev preferences saved, but status is unavailable; refresh to confirm' });
+     expect(JSON.parse(readFileSync(join(home, 'jev', 'config.json'), 'utf8')).dailyCallBudget).toBe(9);
+   } finally { vi.unstubAllEnvs(); rmSync(home, { recursive: true, force: true }); }
+ });

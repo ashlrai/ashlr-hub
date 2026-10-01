@@ -273,3 +273,25 @@ implementing it. Ship the current bounded preference slice with source tests,
 then verify the installed product and public
 release separately; broader provider activation follows its actual human and
 account requirements.
+
+## Recorded local qualification — 2026-10-01
+
+The exact Verse 3.19 npm candidate ran one `multi-file-rename` trial through the
+installed local Anthropic bridge and Claude CLI. The captured original checker
+passed after all three source files changed. The run took 392.453 seconds and 12
+turns; CLI-reported usage was 2,979 input, 1,638 output and 12,872 cache-read tokens.
+
+The request label was `qwen3.8:27b-q8_0`; captured runtime metadata identified
+Q8_0, four serving slots and 65,536 context tokens per slot, but returned an
+unknown model name. This was one trial with uncontrolled caches during other
+verification work. It establishes the observed end-to-end path and checker
+result. It is not a broad model benchmark, a matched speed comparison, a
+billing measurement or proof of autonomous fleet activation.
+
+The [sanitized qualification receipt](https://github.com/ashlrai/ashlr-hub/blob/master/benchmarks/local-qualification-2026-10-01.json) records the source and archive
+digests without publishing content-bearing traces. Reproduce the task with:
+
+```sh
+ashlr benchmark run --task multi-file-rename --trials 1 --concurrency 1 \
+  --model qwen3.8:27b-q8_0 --cache-state uncontrolled --out report.json
+```

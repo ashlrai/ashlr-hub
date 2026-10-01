@@ -18,10 +18,13 @@ import {
   formatUsd,
   JEV_ESTIMATE_NOTE,
   jevHeadline,
+  jevEvidenceLines,
+  jevSnapshotLine,
   jevTodayLine,
 } from './jev-model.js';
 import { JEV_POLL_MS, jevQuery } from './jev-queries.js';
 import styles from './jev.module.css';
+import { JevCallPreference } from './JevCallPreference.js';
 
 export function JevPanel() {
   const read = useQuery(jevQuery);
@@ -43,8 +46,10 @@ export function JevPanel() {
       ) : (
         <>
           <p className={styles.muted}>
-            <strong>{head.word}</strong> — {jevTodayLine(body.status)} · about {formatUsd(body.status.estCostUsdToday)} (estimate)
+            <strong>{head.word}</strong> — {jevTodayLine(body.status)}
           </p>
+          {jevEvidenceLines(body.status).map((line) => <p key={line} className={styles.muted}>{line}</p>)}
+          <p className={styles.muted}>{read.status === 'error' ? 'Refresh unavailable · showing the last snapshot.' : jevSnapshotLine(body.generatedAt)}</p>
           {body.status.byKind.length > 0 ? (
             <div className={styles.scroll}>
               <table className={styles.kinds} aria-label="Jev decisions today by kind">
@@ -76,6 +81,7 @@ export function JevPanel() {
             </div>
           ) : null}
           <p className={styles.muted}>{JEV_ESTIMATE_NOTE}</p>
+          <JevCallPreference response={body} />
         </>
       )}
     </section>

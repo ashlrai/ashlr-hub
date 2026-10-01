@@ -9,7 +9,55 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.19.0] — 2026-10-01
+## [3.20.0] — 2026-10-01
+
+### Added
+
+- Add reset-aware choices for actual selected tasks and eligible accounts.
+  Compare observed duration quartiles against qualified provider deadlines;
+  retain ordinary routing when deadlines or compatible history are unknown.
+- Read supported Claude native structured usage with matched account, session,
+  plan and zero-inference evidence. Pro/Max weekly-all deadlines retain the
+  provider timestamp; legacy prose stays display-only and no start is guessed.
+- Estimate duration and reported tokens from completed observations matched by
+  engine, model and task kind. Label pooled account history, sample coverage
+  and recording time; never derive a token allowance from a quota percentage.
+- Add optional Jev advice among eligible task/account pairs. Send closed-set
+  metadata, keep task text and account identifiers private, and recheck account,
+  model, authority, Stop and metered availability after asynchronous advice.
+- Show scheduling evidence in existing resource details and Fleet capacity.
+  Add strict optional Jev daily-call preferences with confirmed saved readback.
+- Include a sanitized online local-runtime qualification receipt: one explicit
+  coding fixture passed its independent checker. Keep actual runtime identity,
+  token coverage and uncontrolled cache conditions distinct from requested labels.
+
+### Changed
+
+- Keep startup resource reads lightweight: scheduling details use the recorded
+  selected-batch cache without launching Jev or scanning dispatch history on GET.
+- Price recorded Jev usage only when a concrete response model has known rates
+  or the operator supplies both rates. Unknown cost stays unknown; historical
+  records are not repriced using today's model aliases.
+- Patch three transitive dependencies in the separate example site's lockfile.
+
+### Fixed
+
+- Let a later selected task use an available cloud or lane slot while an earlier
+  selected task waits for a busy local lane. Preserve result order, Stop and
+  actual local, cloud and lane concurrency limits.
+- Preserve saved control defaults beyond 64 seats. Validate and atomically write
+  the whole private file within a 1 MiB byte bound; unsafe, malformed or oversized
+  files refuse changes instead of dropping other seats' settings.
+- Preserve per-account budget policies beyond 64 seats. Reject writes that
+  exceed the existing readable byte bound before touching the saved policy.
+- Batch completed capacity-fixture history without changing its real receipts,
+  persisted history, assertions or deadline.
+- Preserve the complete enrolled account roster in metadata and capacity
+  snapshots, removing eight-account and 64-seat truncation. Retain private-file,
+  dense-array and total-byte checks; oversized snapshots never publish a partial
+  roster or overwrite the previous snapshot.
+
+## 3.19 workbench changes — included in 3.20.0
 
 ### Added
 

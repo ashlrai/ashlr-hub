@@ -209,13 +209,15 @@ export interface VerseSeatHealth {
 
 /** One provider-reported quota window, as carried on a seat. */
 export interface VerseSeatWindow {
+  /** Advisory provider period, outside canonical resource observations. */
+  resetProvenance?: import('../routing/scheduling-types.js').ResetProvenance;
   id: string;
   /** Provider-reported percent, or null for NO SIGNAL — which is not zero. */
   usedPercent: number | null;
   /**
-   * Machine-readable reset instant. STRUCTURALLY ALWAYS NULL for Claude: that
-   * provider publishes only a sentence, which lives in `resetDescription` and
-   * is rendered verbatim. The server never synthesizes an instant from it.
+   * Machine-readable provider reset. Legacy Claude prose stays null; a
+   * qualified current native structured usage reply may supply its actual
+   * deadline. The server never synthesizes an instant from prose.
    * (3.10.1: the Command burn-down chart may place the reset on its time axis
    * via `resetInstantFromWords` in web-ui command-model, but only for the
    * collector's exact "Mon D at H:MMam (Area/Zone)" form and only when the

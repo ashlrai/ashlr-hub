@@ -28,6 +28,8 @@ import type { ResourceReadinessRow } from '../../../../core/routing/readiness-ty
 import { ReadinessLines } from './ReadinessLines.js';
 import { ResourceFacts } from './ResourceFacts.js';
 import type { ResourceFactsView } from './resources-model.js';
+import { SchedulingEvidence } from './SchedulingEvidence.js';
+import type { SchedulingEvidenceView } from './scheduling-model.js';
 import styles from './ResourcesDrawer.module.css';
 
 /** Above this share of a window the meter turns amber (the capacity strip's own line). */
@@ -109,9 +111,10 @@ export interface ResourceCardProps {
   readiness?: ResourceReadinessRow | null;
   /** 3.15: tier · cost basis · models — the facts row every card carries. */
   facts?: ResourceFactsView | null;
+  scheduling?: SchedulingEvidenceView;
 }
 
-export function ResourceCard({ row, status, settled, mode, busy, onAction, readiness = null, facts = null }: ResourceCardProps) {
+export function ResourceCard({ row, status, settled, mode, busy, onAction, readiness = null, facts = null, scheduling }: ResourceCardProps) {
   // Budget editing lives in Apps & Accounts; the drawer offers what the seat needs now.
   const actions = accountActions(row, settled).filter((a) => a.kind !== 'edit-budget');
   const reserve = row.reserve;
@@ -141,6 +144,7 @@ export function ResourceCard({ row, status, settled, mode, busy, onAction, readi
         <summary tabIndex={0} aria-label={`Usage details: ${row.label}`}>Usage details</summary>
         <div className={styles.usageDetailBody}>
           {facts !== null ? <ResourceFacts facts={facts} /> : null}
+          {scheduling ? <SchedulingEvidence view={scheduling} /> : null}
           {otherWindows.length > 0 ? <div className={styles.meters}>{otherWindows.map((w) => <WindowMeter key={w.id} row={row} w={w} reservePercent={reserve?.percent ?? null} />)}</div> : null}
           {row.windows.length === 0 ? <p className={styles.subtle}>Connection status and usage are separate. No percentage has been supplied.</p> : null}
           {row.notes.map((note) => <p key={note} className={styles.subtle}>{note}</p>)}

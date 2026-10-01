@@ -154,9 +154,13 @@ snippets; metadata does not prove indexing or ranking. Primary guidance:
 
 ## Current workbench images
 
-The two `work-*-3.19-demo.jpg` assets are unedited browser captures of the actual
-compiled 3.19 web UI. Their private capture receipt binds the build and source
-files. A separate local read-only adapter supplied labeled sample accounts, usage,
-conversation and Leader plan; all mutations were refused and no provider ran.
-They show web UI, not native app chrome or an activated resident fleet. The same
-image bytes appear in `docs/images/` for the repository README.
+The two `work-*-3.20-demo.jpg` assets capture the actual compiled 3.20 browser UI:
+Work with me is 1280 × 720; Work for me is 1280 × 900. The private
+`screenshot-fixture-preparation/server-capture-320-cards.json` receipt records
+the dirty draft build at `f99d919f13302e0cf18adb8fec361618ec0b25c9` and its source
+and compiled-file hashes. They are draft UI captures, not final release validation.
+A local read-only adapter supplied labeled demo accounts, usage, conversation,
+deadline samples and historical task estimates; all mutations were refused.
+No provider ran and no fleet was active. They show web UI, not native app chrome.
+The same image bytes appear in `docs/images/` for the repository README.
+Versioned 3.19 captures remain available as historical images.

@@ -4,7 +4,7 @@ Jev is a "System One" decision model: you send state plus typed questions and ge
 probability distribution over the options, and a **separate confidence value**. Their framing is the
 one that matters for this codebase: *the answer tells you what, confidence tells you whether to act.*
 
-## Verified wire format (tested live against the real API)
+## Wire format and recorded response example
 
 ```
 POST https://api.typesafe.ai/v1/systemone
@@ -39,10 +39,11 @@ Models: `jev-latest`, `jev-preview`. Several questions may be asked in ONE call 
 N calls. Credential lives at `~/.ashlr/secrets/typesafe.env` (mode 0600) as `TYPESAFE_API_KEY`;
 resolve it through `resolveProviderKey` so Phantom wins when installed.
 
-Measured behavior worth relying on: a bug-fix titled "Stop the dashboard from double-counting merges"
+In an earlier live observation, a bug-fix titled "Stop the dashboard from double-counting merges"
 — zero bug-fix keywords — classified correctly at confidence 1.0, where the existing keyword table
 fails. A deliberately ambiguous title returned confidence 0.57 with probability spread across
-bug-fix/refactor. The calibration is real, so confidence is usable as a gate rather than decoration.
+bug-fix/refactor. These examples are observations, not a calibration benchmark; the recorded
+confidence supports the optional advisory threshold.
 
 ## Non-negotiable rules
 
@@ -97,13 +98,21 @@ synonym tables over third-party agent output where every unrecognized value coll
 Every call site goes through `decide(kind, state, questions, { fallback, threshold?, interpret?, escalateOnly? })`
 or `decideEach(kind, items, question, …)` (N items, one call per 10). The layer supplies, for every site: a required
 deterministic fallback, a per-kind threshold (registry → `~/.ashlr/jev/config.json` `thresholds` → call override), an
-input-hash cache (6 h, in memory, successful answers only), a daily paid-call budget (`dailyCallBudget`, default 1500),
+input-hash cache (6 h, in memory, successful answers only), an operator daily-call preference (`dailyCallBudget`, default 1500; `null` means No limit),
 kill switches (`ASHLR_JEV_DISABLE=1`, `ASHLR_CLASSIFY_DISABLE=1`, or `enabled: false` / `disabledKinds` in the config
 file — all checked before the cache), and a ledger at `~/.ashlr/jev/decisions/YYYY-MM-DD.jsonl` (path, reason,
 confidence, tokens, est. cost, latency — never the classified text or the key). Safety-adjacent kinds are advisory or
 escalate-only. Observability: `ashlr jev status`, `ashlr jev test "<text>"`, GET `/api/verse/jev`, the Resources (⌘.)
-Jev card and the Usage "Jev decisions" panel. Cost is an estimate at placeholder per-token rates until real ones are set
-(`inputUsdPerMTok` / `outputUsdPerMTok`).
+Jev card and the Usage "Jev decisions" panel. No limit removes that call-count comparison, while
+explicit disable controls and credential readiness still apply. The guarded settings endpoint
+merges only the edited preference and requires saved readback.
+
+Cost is an estimate from reported usage and an identified tariff. The documented concrete
+`jev-1.13.0` rate is $0.042 per million input tokens with free output ([model documentation](https://docs.typesafe.ai/models), checked 2026-10-01). Moving aliases are not that concrete identity.
+Unknown model or usage keeps cost unknown unless the operator configured both rate fields
+(`inputUsdPerMTok` / `outputUsdPerMTok`); those are operator estimates. Historical rows retain
+their recorded values. Status reports usage and cost coverage rather than treating missing
+readings as zero or claiming invoice completeness.
 
 | Kind | Where | Threshold | Fallback | Bound |
 |---|---|---|---|---|
@@ -116,7 +125,24 @@ Jev card and the Usage "Jev decisions" panel. Cost is an estimate at placeholder
 | retro-root-cause | `learn/retro/sweep.ts` | 0.75 | fixed code → category table | adds `category`; codes/labels untouched |
 | needs-you-priority | `verse/activity.ts` (background, never awaited) | 0.75 | severity → expiry → age | re-ranks within a severity band only |
 | interrupt-worthiness | exported `worthInterrupting` | 0.8 | severity/expiry/quiet-hours rule | never suppresses high/blocking |
+| resource-choice | selected autonomous batch preparation | 0.8 | existing deterministic feasible-seat order | metadata-only ordinal candidates; cached advice never establishes eligibility |
 | lane-choice | exported `chooseLane`; Devin fleet `laneAdvisor` | 0.8 | size/keyword heuristic over available lanes | advisor returns null on fallback; launcher only narrows |
 | trigger-triage | exported `triageTrigger` | 0.8 | label/keyword triage | every part must clear the gate |
 | action-class | `suggestActionClass`, called by `vision/leader-advice.ts` after `enactLeaderActions` (≤ 8 actions per memo) | 0.85 | the deterministic class | advisory, escalate-only: a `memo.actionAdvice` label and a line in the memo message; asked after every class and window is decided, read by no gate, can never lower a class or approve |
 | operator-intent | exported `classifyOperatorIntent` | 0.8 | regex ladder | routing only; Jev can never introduce `approval` |
+
+## Resource choice in autonomous work
+
+Batch preparation obtains the actual selected work item, admitted candidate metadata and
+compatible duration observations before asking Jev. A changed batch can await one decision
+within the existing eight-second deadline; cached decisions and deterministic fallback keep
+ordinary dispatch available. Jev receives ordinal labels and scheduling metadata, excluding
+task prompts, account identifiers, credentials and provider error text. The provider's
+[255-option request limit](https://docs.typesafe.ai/api) is a wire-format capacity: an oversized
+choice falls back without silently dropping candidates or imposing a fleet-size limit.
+
+The router applies advice within the feasible resource group. It checks current account,
+model, authority, availability and reservations again after the asynchronous decision. Stop
+and changed configuration cannot be bypassed by a prior answer. Recorded decision path,
+confidence, latency, reported usage and qualified cost distinguish an actual call, cache use
+and fallback. Opening resource details does not invoke Jev.

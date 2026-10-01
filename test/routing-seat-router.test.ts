@@ -107,6 +107,11 @@ describe('budget policy defaults (Mason, 2026-09-24)', () => {
     expect(Object.isFrozen(MODE_DEFAULTS)).toBe(true);
     expect(Object.isFrozen(MODE_DEFAULTS.balanced.claude)).toBe(true);
   });
+
+  it.each(['constructor', 'toString'])('uses a real default for an unstored prototype-like seat ID %s', (seatId) => {
+    expect(effectiveSeatPolicy(balanced(), seatId)).toEqual({ seatId, enabled: true, reservePercent: 40, maxSessionWindowPercent: 70 });
+    expect(effectiveSeatPolicy(balanced(), seatId, 'codex')).toEqual({ seatId, enabled: false, reservePercent: 40, maxSessionWindowPercent: 70 });
+  });
 });
 
 describe('parseBudgetUpdate — exactly one form, strict', () => {
@@ -139,6 +144,19 @@ describe('parseBudgetUpdate — exactly one form, strict', () => {
 describe('applying updates', () => {
   const now = '2026-09-24T12:00:00.000Z';
 
+  it.each(['constructor', 'toString'])('preserves explicit own policy for valid seat ID %s through sanitize and patch', (seatId) => {
+    const stored = sanitizeBudgetPolicy({ mode: 'balanced', updatedAt: now,
+      seats: { [seatId]: { enabled: false, reservePercent: 55, dailyUsdCap: 3 } } });
+    expect(Object.hasOwn(stored.seats, seatId)).toBe(true);
+    expect(effectiveSeatPolicy(stored, seatId)).toEqual({ seatId, enabled: false, reservePercent: 55, dailyUsdCap: 3 });
+    const next = applyBudgetUpdate(stored, { seatId, policy: { reservePercent: 25 } }, now);
+    expect(next.seats[seatId]).toEqual({ seatId, enabled: false, reservePercent: 25, dailyUsdCap: 3 });
+    expect(sanitizeBudgetPolicy(JSON.parse(JSON.stringify(next)))).toEqual(next);
+    expect(Object.getPrototypeOf(next.seats)).toBe(Object.prototype);
+    expect(Object.prototype.constructor).toBe(Object);
+    expect(Object.hasOwn(Object.prototype, 'reservePercent')).toBe(false);
+  });
+
   it('a seat patch stores the full effective policy and stamps updatedAt', () => {
     const next = applyBudgetUpdate(balanced(), { seatId: 'codex-personal', policy: { enabled: true } }, now);
     expect(next.seats['codex-personal']).toEqual({ seatId: 'codex-personal', enabled: true, reservePercent: 40, maxSessionWindowPercent: 70 });
@@ -161,12 +179,28 @@ describe('applying updates', () => {
     expect(allIn.seats['codex-cmp']).toEqual({ seatId: 'codex-cmp', enabled: true, reservePercent: 0 });
   });
 
-  it('refuses a new seat past the registry bound', () => {
+  it('adds and updates policies beyond64 without changing other seats or mode defaults', () => {
     let p = balanced();
-    for (let i = 0; i < 64; i += 1) p = applyBudgetUpdate(p, { seatId: `local:m${i}`, policy: { enabled: true } }, now);
-    expect(() => applyBudgetUpdate(p, { seatId: 'local:one-more', policy: { enabled: true } }, now)).toThrow('at most 64');
-    // Updating an existing seat is still fine.
-    expect(() => applyBudgetUpdate(p, { seatId: 'local:m1', policy: { enabled: false } }, now)).not.toThrow();
+    for (let i = 0; i < 150; i += 1) p = applyBudgetUpdate(p, { seatId: `local:m${i}`, policy: { enabled: i % 2 === 0, dailyUsdCap: 2.5 } }, now);
+    expect(Object.keys(p.seats)).toHaveLength(150);
+    const next = applyBudgetUpdate(p, { seatId: 'local:m149', policy: { reservePercent: 30 } }, now);
+    expect(next.seats['local:m149']).toEqual({ seatId: 'local:m149', enabled: false, reservePercent: 30, dailyUsdCap: 2.5 });
+    expect(next.seats['local:m0']).toEqual(p.seats['local:m0']);
+    expect(next.seats['local:m64']).toEqual(p.seats['local:m64']);
+    expect(effectiveSeatPolicy(next, 'codex-untouched').enabled).toBe(false);
+    expect(next.mode).toBe('balanced');
+  });
+
+  it('sanitizes all130 valid stored policies, preserving sorted order and optional limits', () => {
+    const seats = Object.fromEntries(Array.from({ length: 130 }, (_, i) => [`claude-${i}`, {
+      enabled: i % 2 === 0, reservePercent: 55, dailyUsdCap: 4.5, maxSessionWindowPercent: 60,
+    }]));
+    const stored = sanitizeBudgetPolicy({ mode: 'balanced', updatedAt: now, seats });
+    expect(Object.keys(stored.seats)).toEqual(Object.keys(seats).sort());
+    expect(stored.seats['claude-129']).toEqual({ seatId: 'claude-129', ...seats['claude-129'] });
+    const switched = applyModeSwitch(stored, 'reserve', now);
+    expect(Object.keys(switched.seats)).toHaveLength(130);
+    expect(switched.seats['claude-129']).toEqual({ seatId: 'claude-129', enabled: false, reservePercent: 85, maxSessionWindowPercent: 50, dailyUsdCap: 4.5 });
   });
 
   it('sanitizeBudgetPolicy salvages field by field and never throws', () => {

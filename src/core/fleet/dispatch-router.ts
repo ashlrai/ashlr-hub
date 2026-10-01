@@ -478,6 +478,8 @@ export interface LegacyRoute {
 }
 
 export interface DispatchRouterContext {
+  scheduling?: Readonly<Record<string,import('../routing/scheduling-types.js').AccountSchedulingView>>;
+  advisorySeatId?: string | null;
   nowMs: number;
   /** The standing policy in force this tick. */
   policy: Pick<EffectivePolicy, 'engines' | 'spend' | 'repos'>;
@@ -602,6 +604,8 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
   const decision = routeSeat(request, ctx.capacity, ctx.budget, {
     nowMs: ctx.nowMs,
     ...(ctx.weights ? { weights: ctx.weights } : {}),
+    ...(ctx.scheduling ? { scheduling: ctx.scheduling } : {}),
+    ...(ctx.advisorySeatId ? { advisorySeatId: ctx.advisorySeatId } : {}),
   });
   const extra: SeatExclusion[] = [];
   const kind = item.source;

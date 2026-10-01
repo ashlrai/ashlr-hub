@@ -59,6 +59,7 @@ import { DevinResource } from './DevinResource.js';
 import { JevResource } from './JevResource.js';
 import { LocalResources } from './LocalResources.js';
 import { ResourceCard } from './ResourceCard.js';
+import { schedulingEvidence } from './scheduling-model.js';
 import { cloudCreditsQuery, resourceReadinessQuery, RESOURCES_POLL_MS } from './resources-queries.js';
 import { costBases, groupByTier, mergedFacts, readinessStatusRank, seatFacts, type ResourceFactsView, type TierEntry } from './resources-model.js';
 import { closeResources, setResourcesBar, setResourcesPinned, useResourcesUi } from './resources-store.js';
@@ -332,6 +333,7 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
                         onAction={onAction}
                         readiness={readinessById.get(row.seatId) ?? null}
                         facts={entry.facts}
+                        scheduling={schedulingEvidence(data.budget, row, now)}
                       />
                     );
                   }

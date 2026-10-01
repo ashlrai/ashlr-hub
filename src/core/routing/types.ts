@@ -150,6 +150,8 @@ export interface SeatHeadroom {
 
 /** GET /api/verse/budget (and the POST response): the policy plus live headroom per seat. */
 export interface BudgetResponse extends BudgetPolicy {
+  /** Advisory only; absent on older servers. Never changes headroom admission. */
+  scheduling?: import('./scheduling-types.js').SchedulingView;
   headroom: SeatHeadroom[];
 }
 

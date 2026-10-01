@@ -63,6 +63,12 @@
  */
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { buildSchedulingView, readWorkHistory, taskForecast } from '../routing/scheduling.js';
+import { writeRecordedScheduling } from '../routing/scheduling-cache.js';
+import { hasResetDeadline, opportunityPriority } from '../routing/reset-pressure.js';
+import type { ResourceChoiceCandidate, AccountSchedulingView } from '../routing/scheduling-types.js';
+import type { WorkHistorySample } from '../routing/work-estimates.js';
 import { join, resolve } from 'node:path';
 
 import type { AshlrConfig, EngineId, EngineTier, WorkItem } from '../types.js';
@@ -225,6 +231,10 @@ export interface TickHarness {
 
 export interface LiveHooksDeps {
   now(): number;
+  /** Bounded metadata history and optional existing-admitted advisory, injectable offline. */
+  workHistory?(): Promise<WorkHistorySample[]>;
+  resourceAdvice?(candidates: readonly ResourceChoiceCandidate[], options: {digest:string;signal?:AbortSignal}): Promise<string|null>;
+  recordScheduling?: typeof writeRecordedScheduling;
   standingPolicy(): EffectivePolicy | null;
   applyOverlay(cfg: AshlrConfig, policy: EffectivePolicy): AshlrConfig;
   /**
@@ -654,6 +664,9 @@ export function defaultLiveHooksDeps(): LiveHooksDeps {
     clampBudget: (policy, standing, knownSeatIds) => clampBudgetPolicy(policy, standing, knownSeatIds),
     loadBudget: () => loadBudgetPolicy(),
     capacitySnapshot: () => readCapacitySnapshot(),
+    workHistory: readWorkHistory,
+    resourceAdvice: async (candidates,options) => (await import('../decide/resource-choice.js')).adviseResourceChoice(candidates,options),
+    recordScheduling: writeRecordedScheduling,
     probeLocalRuntime: probeLocalRuntimeDefault,
     probeDevinCli: () => probeDevinCli(),
     presence: (nowMs) => probeOperatorPresence(nowMs),
@@ -750,6 +763,10 @@ export function defaultLiveHooksDeps(): LiveHooksDeps {
 // ---------------------------------------------------------------------------
 
 interface TickContext {
+  meteredUsdExhausted: boolean;
+  dispatchSources: string | null;
+  itemScheduling: Map<string,Record<string,AccountSchedulingView>>;
+  advisedPair: ResourceChoiceCandidate | null;
   nowMs: number;
   cfg: AshlrConfig;
   policy: EffectivePolicy;
@@ -1609,9 +1626,11 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       let budget: BudgetPolicy | null = null;
       let budgetProblem: string | null = null;
       let directiveSeats = new Set<string>();
+      let dispatchBudgetSource: BudgetPolicy | null = null;
+      let dispatchConfigSource: AshlrConfig | null = null;
       try {
         const applied = applyCodexDirective(
-          deps.clampBudget(deps.loadBudget(), policy, capacity.map((s) => s.seatId)),
+          deps.clampBudget(dispatchBudgetSource = deps.loadBudget(), policy, capacity.map((s) => s.seatId)),
           capacity,
           policy,
           directives,
@@ -1636,7 +1655,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       let leaderPreferences: ResolvedLeaderPreferences;
       let freshBatchCapacity = 0;
       try {
-        const leaderCfg = deps.liveLeaderConfig(cfg);
+        const leaderCfg = dispatchConfigSource = deps.liveLeaderConfig(cfg);
         leaderPreferences = resolveLeaderPreferences(leaderCfg);
         freshBatchCapacity = grokDispatchBatchCapacity(leaderCfg);
       } catch { leaderPreferences = unavailableLeaderPreferences(); }
@@ -1798,6 +1817,9 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         lane, Math.max(0, lanes[lane].slots - fanoutReserve[lane]),
       ])) as Record<FleetEngine, number>;
       ctx = {
+        meteredUsdExhausted: hookCtx.meteredUsdExhausted === true,
+        dispatchSources: dispatchBudgetSource && dispatchConfigSource ? createHash('sha256').update(JSON.stringify({budget:dispatchBudgetSource,directives,config:dispatchConfigSource})).digest('hex') : null,
+        itemScheduling: new Map(), advisedPair: null,
         nowMs,
         cfg,
         policy,
@@ -1865,6 +1887,131 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       }, state);
     },
 
+    async prepareDispatchPlan(items: readonly WorkItem[], cfg: AshlrConfig, signal?: AbortSignal): Promise<readonly string[] | void> {
+      const current = ctx;
+      if (!current || !current.dispatchSources || signal?.aborted || deps.killActive()) return;
+      const refreshCurrent = (): boolean => {
+        let standing: EffectivePolicy | null = null;
+        try { standing = deps.standingPolicy(); } catch { /* Hold through no context. */ }
+        if (ctx !== current || signal?.aborted || deps.killActive() || !standing ||
+          standing.grantId !== current.policy.grantId || standing.grantSeq !== current.policy.grantSeq ||
+          JSON.stringify(standing.spend) !== JSON.stringify(current.policy.spend) || JSON.stringify(standing.repos) !== JSON.stringify(current.policy.repos) ||
+          JSON.stringify(standing.engines) !== JSON.stringify(current.policy.engines) || JSON.stringify(standing.rollout) !== JSON.stringify(current.policy.rollout)) {
+          ctx = null; return false;
+        }
+        // Operator config/budget and Leader lane choices may have changed while
+        // optional advice awaited. Never reuse the old lane plan after such a
+        // change; next tick rebuilds it from the current sources. Only an opaque
+        // local digest is retained, never sent to the advisor or logged.
+        try {
+          const sources = createHash('sha256').update(JSON.stringify({budget:deps.loadBudget(),
+            directives:clampLeaderDirectives(deps.directives(),standing),config:deps.liveLeaderConfig(cfg)})).digest('hex');
+          if (sources !== current.dispatchSources) { ctx = null; return false; }
+        } catch { ctx = null; return false; }
+        let fresh: CapacitySnapshot | null = null;
+        try { fresh = deps.capacitySnapshot(); } catch { /* Missing account capacity remains unknown. */ }
+        current.nowMs = deps.now();
+        if (fresh) {
+          const local = current.capacity.filter((s) => s.engine === 'local');
+          current.capacity = [...fresh.seats.filter((s) => s.engine !== 'local'),...local];
+        } else current.capacity = current.capacity.filter((s) => s.engine === 'local');
+        current.router = {...current.router,nowMs:current.nowMs,capacity:current.capacity};
+        current.routeCache.clear();
+        return true;
+      };
+      let history: WorkHistorySample[] = [];
+      try { history = await deps.workHistory?.() ?? []; } catch { /* Unknown estimates never block useful work. */ }
+      // Metadata I/O is an await boundary too: revalidate before any paid advice.
+      if (!refreshCurrent()) return;
+      const candidates: ResourceChoiceCandidate[] = [];
+      const candidateCapacity = new Map<string,string>();
+      const capacityIdentity = (seat:SeatCapacity) => JSON.stringify({engine:seat.engine,contextWindow:seat.contextWindow,tier:seat.tier,costBasis:seat.costBasis,windowless:seat.windowless,free:seat.free});
+      for (const item of items) {
+        const projections: Record<string,AccountSchedulingView> = Object.create(null) as Record<string,AccountSchedulingView>;
+        let legacy: RouteDecision;
+        try { legacy = deps.legacyRoute(item,cfg); } catch { continue; }
+        for (const seat of current.capacity) {
+          // Restrict to this candidate to exercise ALL actual route/grant/
+          // model/context/demotion checks before asking for optional advice.
+          const candidateLanes = Object.fromEntries(FLEET_ENGINES.map(lane=>[lane,{...current.lanes[lane],slots:current.routeLaneCaps[lane]}])) as Record<FleetEngine,LanePlan>;
+          const route = routeWorkItem(item,legacy,{...current.router,lanes:candidateLanes,capacity:[seat],cfg});
+          if (route.hold || route.seatDecision?.seatId !== seat.seatId) continue;
+          const forecast = taskForecast(item,route.backend,route.model ?? null,history,current.nowMs);
+          const view = buildSchedulingView([seat],current.budget,current.nowMs,{[seat.seatId]:forecast}).accounts[0]!;
+          projections[seat.seatId] = view;
+          if (view.admission !== 'eligible') continue;
+          const id = createHash('sha256').update(JSON.stringify([item.id,seat.seatId])).digest('hex');
+          candidateCapacity.set(id,capacityIdentity(seat));
+          candidates.push({id,taskId:item.id,seatId:seat.seatId,engine:route.backend,model:route.model ?? null,taskKind:item.source,
+            headroomPercent:view.headroomPercent,resetAt:hasResetDeadline(view.reset) ? view.reset.at : null,
+            durationP75Ms:view.forecast?.durationMs?.p75 ?? null,reason:view.opportunity.reason});
+        }
+        current.itemScheduling.set(item.id,projections);
+      }
+      const digest = createHash('sha256').update(JSON.stringify({candidates,grant:current.policy.grantId,seq:current.policy.grantSeq,
+        stage:current.policy.rollout,spend:current.policy.spend,slots:current.routeLaneCaps})).digest('hex');
+      let advised: string | null = null;
+      const signedMetered = Number.isFinite(current.policy.spend.meteredUsdPerDay) && current.policy.spend.meteredUsdPerDay > 0;
+      const advisory: import('../routing/scheduling-types.js').SchedulingAdviceView = {observedAt:new Date(current.nowMs).toISOString(),state:'skipped',
+        reason:!signedMetered ? 'signed-metered-unavailable' : current.meteredUsdExhausted ? 'metered-allowance-exhausted' : 'no-comparable-pairs'};
+      if (signedMetered && candidates.length > 1 && !current.meteredUsdExhausted && !signal?.aborted && !deps.killActive()) {
+        try { advised = await deps.resourceAdvice?.(candidates,{digest,...(signal ? {signal} : {})}) ?? null; }
+        catch { /* Existing decide timeout/refusal/error => deterministic fallback. */ }
+        advisory.state='fallback';advisory.reason='no-eligible-choice';
+      }
+      if (!refreshCurrent()) return;
+      // Only the exact eligible pair receives advice. Recompute opportunity
+      // from fresh windows; stale reset/usage changes discard the old advice.
+      const pair = candidates.find((candidate) => candidate.id === advised) ?? null;
+      const initialViews = new Map(current.itemScheduling);
+      const refreshViews = (): void => {
+        current.advisedPair = null;
+        for (const item of items) {
+          const projections = initialViews.get(item.id) ?? {};
+          const next: Record<string,AccountSchedulingView> = Object.create(null) as Record<string,AccountSchedulingView>;
+          let legacy: RouteDecision | null = null;
+          try { legacy = deps.legacyRoute(item,cfg); } catch { /* The final route retains its ordinary fallback. */ }
+          for (const seat of current.capacity) {
+            const candidateLanes = Object.fromEntries(FLEET_ENGINES.map(lane=>[lane,{...current.lanes[lane],slots:current.routeLaneCaps[lane]}])) as Record<FleetEngine,LanePlan>;
+            const actual = legacy ? routeWorkItem(item,legacy,{...current.router,lanes:candidateLanes,capacity:[seat],cfg}) : null;
+            const taskEligible = actual && !actual.hold && actual.seatDecision?.seatId===seat.seatId;
+            const prior = projections[seat.seatId];
+            const recorded = prior?.forecast;
+            const original = candidates.find(v=>v.taskId===item.id && v.seatId===seat.seatId);
+            const sameCapacity = original && candidateCapacity.get(original.id)===capacityIdentity(seat);
+            const forecast = taskEligible && sameCapacity && recorded && actual.backend===recorded.cohort.engine &&
+              (actual.model ?? null)===recorded.cohort.model ? recorded : null;
+            const view = buildSchedulingView([seat],current.budget,current.nowMs,forecast ? {[seat.seatId]:forecast} : {}).accounts[0]!;
+            if (!taskEligible) {
+              view.admission='held';view.opportunity={kind:'held',reason:'This selected task has no admitted route on this account.'};
+            }
+            next[seat.seatId]=view;
+            // The same account ID and quota reading are insufficient: the
+            // actual executor/model/context/lane must still admit this pair.
+            if (pair?.taskId===item.id && pair.seatId===seat.seatId && taskEligible && sameCapacity && actual.backend===pair.engine &&
+              (actual.model ?? null)===pair.model && view.admission==='eligible' && prior &&
+              view.headroomPercent===prior.headroomPercent && JSON.stringify(view.reset)===JSON.stringify(prior.reset)) current.advisedPair=pair;
+          }
+          current.itemScheduling.set(item.id,next);
+        }
+      };
+      refreshViews();
+      if (current.advisedPair) { advisory.state='choice-returned';advisory.reason='eligible-choice-returned'; }
+      const validatedForecasts = Object.fromEntries([...current.itemScheduling.values()].flatMap(views=>Object.entries(views).flatMap(([id,v])=>v.forecast ? [[id,v.forecast]] : [])));
+      try { await deps.recordScheduling?.({...buildSchedulingView(current.capacity,current.budget,current.nowMs,validatedForecasts),advisory}); }
+      catch { /* Display cache is neither dispatch authority nor a work prerequisite. */ }
+      if (!refreshCurrent()) return;
+      refreshViews();
+      return [...items].sort((a,b) => {
+        if (current.advisedPair) {
+          const advice = Number(b.id === current.advisedPair.taskId)-Number(a.id === current.advisedPair.taskId);
+          if (advice) return advice;
+        }
+        const priority = (id:string) => Object.values(current.itemScheduling.get(id) ?? {}).reduce((best,view)=>Math.max(best,opportunityPriority(view,current.nowMs)),0);
+        return priority(b.id)-priority(a.id);
+      }).map((item) => item.id);
+    },
+
     beginDispatchPlan(itemIds: readonly string[]): void {
       if (!ctx) return;
       ctx.plannedItemIds = new Set(itemIds);
@@ -1909,7 +2056,9 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
               : plan.capReason,
           }];
         })) as Record<FleetEngine, LanePlan>;
-        decision = routeWorkItem(item, legacy, { ...current.router, lanes, cfg });
+        decision = routeWorkItem(item, legacy, { ...current.router, lanes, cfg,
+          scheduling: current.itemScheduling.get(item.id),
+          advisorySeatId: current.advisedPair?.taskId === item.id ? current.advisedPair.seatId : null });
         if (planning && !decision.hold && decision.lane !== null) {
           current.plannedLaneUse[decision.lane] = (current.plannedLaneUse[decision.lane] ?? 0) + 1;
         }

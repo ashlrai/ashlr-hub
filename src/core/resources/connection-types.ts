@@ -2,8 +2,10 @@
 import type { ResourceQuotaWindow } from './pool-policy.js';
 
 export interface ResourceConnectionQuotaWindow extends ResourceQuotaWindow {
-  /** Display only: native /usage floors percentages and hides cached fallback provenance. */
-  nativeReport?: { source: 'claude-usage'; resetDescription: string | null };
+  /** Advisory provider period, outside canonical resource observations. */
+  resetProvenance?: import('../routing/scheduling-types.js').ResetProvenance;
+  /** Legacy prose is display only; structured current rows use a distinct exact-version source. */
+  nativeReport?: { source: 'claude-usage' | 'claude-usage-structured'; resetDescription: string | null };
 }
 
 export interface ResourceAccountConnection {

@@ -32,6 +32,8 @@
  * only through devin/fleet-launcher.ts under its grant and ACU reserve, and
  * the capacity snapshot refuses a Devin row — see `devinFleetVerdict`.
  */
+import { opportunityPriority } from './reset-pressure.js';
+import type { AccountSchedulingView } from './scheduling-types.js';
 import { assessSeat, HEADROOM_READING_MAX_AGE_MS, type SeatCapacity } from './headroom.js';
 import { effectiveSeatPolicy } from './policy.js';
 import { listSeatIds, reasonSentences } from './seat-reasons.js';
@@ -61,6 +63,9 @@ export interface RouteOptions {
    * no latency evidence, so latency cannot move anything.
    */
   latencyMs?: Readonly<Record<string, number>>;
+  /** Actual selected-task opportunity; eligibility/quality remain mandatory. */
+  scheduling?: Readonly<Record<string,AccountSchedulingView>>;
+  advisorySeatId?: string | null;
 }
 
 /**
@@ -358,7 +363,7 @@ function marginalCost(capacity: SeatCapacity): number {
  * is a lexicographic order — tier, then headroom / marginal cost / latency —
  * because those terms together stay under one tier step.
  */
-function rank(verdicts: Verdict[], rankOrder: RankOrder, w: RouterWeights, latencyMs: RouteOptions['latencyMs']): Verdict[] {
+function rank(verdicts: Verdict[], rankOrder: RankOrder, w: RouterWeights, latencyMs: RouteOptions['latencyMs'], options?: RouteOptions): Verdict[] {
   const position = (capacity: SeatCapacity): number => {
     const rung = rankOrder.by === 'cost' ? costRung(capacity) : capacityTier(capacity);
     const index = rankOrder.order.indexOf(rung);
@@ -368,12 +373,37 @@ function rank(verdicts: Verdict[], rankOrder: RankOrder, w: RouterWeights, laten
   const score = new Map(verdicts.map((v) => [
     v, seatScore(v, position(v.capacity), w, latency.get(v.capacity.seatId) ?? 0),
   ]));
-  return [...verdicts].sort((a, b) => {
+  const ranked = [...verdicts].sort((a, b) => {
     const diff = score.get(a)! - score.get(b)!;
     if (Math.abs(diff) > SCORE_EPSILON) return diff;
     if (a.index !== b.index) return a.index - b.index;
     return compareIds(a.capacity.seatId, b.capacity.seatId);
   });
+  if (!options?.scheduling) return ranked;
+  // Preserve the weighted placement of different tiers. Permute only the
+  // already occupied slots of each tier, rather than mixing two comparators
+  // (which can form cycles when non-default weights interleave tiers).
+  const baselineIndex = new Map(ranked.map((v,i)=>[v,i]));
+  const groups = new Map<number, number[]>();
+  ranked.forEach((v,i) => { const key = position(v.capacity); const indexes = groups.get(key) ?? []; indexes.push(i); groups.set(key,indexes); });
+  for (const indexes of groups.values()) {
+    const ordered = indexes.map((i) => ranked[i]!).sort((a,b) => {
+      const av = options.scheduling![a.capacity.seatId]; const bv = options.scheduling![b.capacity.seatId];
+      const ap = av ? opportunityPriority(av, options.nowMs) : 0; const bp = bv ? opportunityPriority(bv, options.nowMs) : 0;
+      if (ap !== bp) return bp-ap;
+      if (options.advisorySeatId) {
+        const advice = Number(b.capacity.seatId === options.advisorySeatId)-Number(a.capacity.seatId === options.advisorySeatId);
+        if (advice) return advice;
+      }
+      if (ap > 0 && av?.reset.at && bv?.reset.at) {
+        const earlier = Date.parse(av.reset.at)-Date.parse(bv.reset.at);
+        if (earlier) return earlier;
+      }
+      return baselineIndex.get(a)!-baselineIndex.get(b)!;
+    });
+    indexes.forEach((index,i) => { ranked[index] = ordered[i]!; });
+  }
+  return ranked;
 }
 
 function formatWeight(n: number): string {
@@ -442,9 +472,18 @@ export function routeSeat(
     index,
   }));
 
+  if (req.autonomous && opts.scheduling) {
+    for (const v of verdicts) {
+      const advisory = opts.scheduling[v.capacity.seatId];
+      if (v.eligible && advisory?.admission === 'unknown') {
+        v.eligible = false;
+        v.details.push({kind:'unknown-usage',text:'Current account-window evidence is incomplete or has passed its reported period.'});
+      }
+    }
+  }
   const order = tierPreference(policy.mode, req);
   const weights = resolveWeights(opts.weights);
-  const eligible = rank(verdicts.filter((v) => v.eligible), order, weights, opts.latencyMs);
+  const eligible = rank(verdicts.filter((v) => v.eligible), order, weights, opts.latencyMs, opts);
   const exclusions: SeatExclusion[] = verdicts
     .filter((v) => !v.eligible)
     .map((v) => ({

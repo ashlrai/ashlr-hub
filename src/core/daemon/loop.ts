@@ -3801,19 +3801,21 @@ async function tieredBounded<T>(
   if (tasks.length === 0) return [];
 
   const results: PromiseSettledResult<T>[] = new Array(tasks.length);
-  let nextIdx = 0;      // index of next task not yet started
+  const pending = new Set(tasks.map((_task, index) => index));
   let completed = 0;    // count of tasks that have fully settled
 
   return new Promise<PromiseSettledResult<T>[]>((resolve) => {
     // Attempt to start as many tasks as the pool currently allows.
     function drain(): void {
-      while (nextIdx < tasks.length) {
-        const idx = nextIdx;
-        const task = tasks[idx];
-        if (task === undefined) break;
+      // A busy lane must not strand admitted work in another free lane.
+      // Iterate the original selected indices in order, skipping only those
+      // which cannot start yet; completion retries them without adding work.
+      // Results remain indexed by the original selection, not completion order.
+      for (const idx of pending) {
+        const task = tasks[idx]!;
         const lane = task.lane ?? null;
-        if (!pool.canStart(task.tier, lane)) break; // pool full for this tier, lane or total
-        nextIdx++;
+        if (!pool.canStart(task.tier, lane)) continue;
+        pending.delete(idx);
         pool.start(task.tier, lane);
         const tier = task.tier;
         task.run().then(
@@ -6182,6 +6184,18 @@ export async function tick(
   // V3.10 (U5): per-lane caps from a standing tick's beforeTick; empty (and
   // no lane computed) on every other tick.
   const laneCapsActive = Object.keys(tickConstraints.laneCaps).length > 0;
+  if (hooks.prepareDispatchPlan && !stopRequested()) {
+    try {
+      const order = await hooks.prepareDispatchPlan(workedSet,routingCfg,opts.signal);
+      // Advice may reorder only the exact already-claimed batch. Never add,
+      // remove, duplicate or manufacture work to consume an allowance.
+      if (order && order.length === workedSet.length && new Set(order).size === order.length &&
+        order.every((id) => workedSet.some((item) => item.id === id))) {
+        const positions = new Map(order.map((id,index) => [id,index]));
+        workedSet.sort((a,b) => positions.get(a.id)!-positions.get(b.id)!);
+      }
+    } catch { /* Failed advisory remains deterministic ordinary routing. */ }
+  }
   hooks.beginDispatchPlan?.(workedSet.map((item) => item.id));
   const itemRoutePlans = workedSet.map((item) => {
     // V3.10 (U5) seam: hooks.route (default: routeBackend, same arguments).

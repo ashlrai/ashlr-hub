@@ -1066,3 +1066,153 @@ describe('fresh Grok preference and actual admitted dispatch capacity', () => {
     expect(unavailable.laneCaps['grok-cli']).toBe(0);
   });
 });
+
+describe('reset-aware selected batch — real routing seam with injected advice', () => {
+  function batchHarness(advice: NonNullable<LiveHooksDeps['resourceAdvice']>, extra: Partial<LiveHooksDeps> = {}) {
+    policy = {...policy!,spend:{...policy!.spend,meteredUsdPerDay:1}};
+    const views = [grokSeat(), { ...claudeSeat(), tier: 'fast' as const }];
+    const recordScheduling = vi.fn<NonNullable<LiveHooksDeps['recordScheduling']>>(async () => undefined);
+    const hooks = createLiveTickHooks({ deps: { ...h.deps,
+      killActive: () => false,
+      workHistory: async () => [], resourceAdvice: advice, recordScheduling,
+      capacitySnapshot: () => ({v:1,publishedAt:NOW_ISO,seats:views}),
+      ...extra,
+    } });
+    return { hooks,recordScheduling,views };
+  }
+  it('awaits one advice for an actual selected batch and changes the producer lane while preserving reservations', async () => {
+    let finish!: (id:string|null) => void;
+    const advice = vi.fn(async (candidates: Parameters<NonNullable<LiveHooksDeps['resourceAdvice']>>[0]) =>
+      await new Promise<string|null>((resolve) => { finish = () => resolve(candidates.find((v) => v.seatId === 'claude')!.id); }));
+    const {hooks,recordScheduling} = batchHarness(advice);
+    hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);
+    const selected=[item({id:'one'}),item({id:'two'})];
+    expect(hooks.route(selected[0]!,CFG).backend).toBe('grok-cli');
+    let completed=false;
+    const preparation=hooks.prepareDispatchPlan!(selected,CFG).then((order)=>{completed=true;return order;});
+    await vi.waitFor(()=>expect(advice).toHaveBeenCalledTimes(1));expect(completed).toBe(false);
+    finish(null);const order=await preparation;
+    expect(order).toEqual(['one','two']);expect(recordScheduling).toHaveBeenCalledTimes(1);
+    hooks.beginDispatchPlan(selected.map(v=>v.id));
+    const first=hooks.route(selected[0]!,CFG);const second=hooks.route(selected[1]!,CFG);
+    expect(first.backend).toBe('claude');expect(first.seatDecision?.seatId).toBe('claude');
+    expect(second.backend).toBe('grok-cli');expect(hooks.route(selected[0]!,CFG)).toEqual(first);
+    expect(hooks.seatAllows('claude',{maxPercent:90}).allowed).toBe(true);
+    expect(hooks.seatAllows('grok-cli',{maxPercent:90}).allowed).toBe(true);
+  });
+  it('reorders the real selected batch by duration-relative deadline proximity without advice or new tasks',async()=>{
+    const claude={...claudeSeat(),tier:'fast' as const};claude.windows[1] = {...claude.windows[1]!,resetsAt:new Date(NOW+660000).toISOString(),
+      resetProvenance:{kind:'weekly-deadline',at:new Date(NOW+660000).toISOString(),description:null,source:'claude-native-usage-report',plan:'max'}};
+    const advice=vi.fn(async()=>null);
+    const {hooks,recordScheduling}=batchHarness(advice,{
+      capacitySnapshot:()=>({v:1,publishedAt:NOW_ISO,seats:[claude]}),
+      legacyRoute:()=>({backend:'claude',tier:'frontier',model:'model-a',reason:'fixture model'}),
+      workHistory:async()=>[
+        {id:'short',engine:'claude',model:'model-a',seatId:null,taskKind:'todo',completed:true,durationMs:10000,tokens:1000},
+        {id:'near',engine:'claude',model:'model-a',seatId:null,taskKind:'issue',completed:true,durationMs:600000,tokens:1000},
+      ],
+    });
+    hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);
+    const selected=[item({id:'short',source:'todo'}),item({id:'near',source:'issue'})];
+    const order=await hooks.prepareDispatchPlan!(selected,CFG);
+    expect(order).toEqual(['near','short']);
+    expect(advice).toHaveBeenCalledTimes(1);
+    expect(recordScheduling).toHaveBeenCalledTimes(1);
+    hooks.beginDispatchPlan(['near','short']);
+    expect(hooks.route(selected[1]!,CFG)).toMatchObject({backend:'claude',hold:null,seatDecision:{seatId:'claude'}});
+  });
+  it.each(['throws','outside-set','null'] as const)('keeps deterministic useful work on advisory %s',async(kind)=>{
+    const advice=vi.fn(async()=>{if(kind==='throws')throw new Error('offline');return kind==='outside-set'?'not-a-candidate':null;});
+    const {hooks}=batchHarness(advice);hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);
+    await hooks.prepareDispatchPlan!([item()],CFG);hooks.beginDispatchPlan(['item-1']);
+    expect(hooks.route(item(),CFG).backend).toBe('grok-cli');expect(advice).toHaveBeenCalledTimes(1);
+  });
+  it('re-reads capacity after advice and cannot use a now-spent recommended account',async()=>{
+    const {hooks,views}=batchHarness(async(candidates)=>{
+      for(const window of views[1]!.windows)window.usedPercent=100;
+      return candidates.find(v=>v.seatId==='claude')!.id;
+    });
+    hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);
+    await hooks.prepareDispatchPlan!([item()],CFG);hooks.beginDispatchPlan(['item-1']);
+    expect(hooks.route(item(),CFG).backend).toBe('grok-cli');expect(hooks.seatAllows('claude',{maxPercent:90}).allowed).toBe(false);
+  });
+  it('holds a revoked grant after the optional wait, without recording display evidence as authority',async()=>{
+    const {hooks}=batchHarness(async()=>{policy=null;return null;});
+    hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);await hooks.prepareDispatchPlan!([item()],CFG);
+    hooks.beginDispatchPlan(['item-1']);expect(hooks.route(item(),CFG).hold).not.toBeNull();
+  });
+  it.each(['grant','budget','config','capacity','stop'] as const)('revalidates %s after history I/O before any paid advisory',async(kind)=>{
+    let changed=false;
+    const advice=vi.fn(async()=>null);
+    const {hooks,views}=batchHarness(advice,{
+      workHistory:async()=>{changed=true;if(kind==='grant')policy=null;if(kind==='capacity')for(const s of views)for(const w of s.windows)w.usedPercent=100;return [];},
+      loadBudget:()=>({...defaultBudgetPolicy(),...(changed && kind==='budget' ? {mode:'dormant' as const}: {})}),
+      liveLeaderConfig:cfg=>changed && kind==='config' ? {...cfg,foundry:{...cfg.foundry,allowedBackends:['builtin']}} : cfg,
+      killActive:()=>changed && kind==='stop',
+    });
+    hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);await hooks.prepareDispatchPlan!([item()],CFG);
+    expect(advice).not.toHaveBeenCalled();
+    if(kind==='capacity'){
+      // Paid provider rows became spent; an admitted local producer remains
+      // useful and must not be globally parked by advisory freshness checks.
+      expect(hooks.route(item(),CFG)).toMatchObject({backend:'builtin',hold:null,seatDecision:{seatId:'local'}});
+      expect(hooks.seatAllows('claude',{maxPercent:90}).allowed).toBe(false);
+      expect(hooks.seatAllows('grok-cli',{maxPercent:90}).allowed).toBe(false);
+    }else expect(hooks.route(item(),CFG).hold).not.toBeNull();
+  });
+  it.each([0,NaN] as const)('signed metered allowance %s skips paid advice but keeps admitted producers',async(allowance)=>{
+    const advice=vi.fn(async()=>null);const {hooks,recordScheduling}=batchHarness(advice);
+    policy={...policy!,spend:{...policy!.spend,meteredUsdPerDay:allowance}};
+    hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);await hooks.prepareDispatchPlan!([item()],CFG);
+    expect(advice).not.toHaveBeenCalled();expect(hooks.route(item(),CFG).hold).toBeNull();
+    expect(recordScheduling.mock.calls[0]?.[0]).toMatchObject({advisory:{state:'skipped',reason:'signed-metered-unavailable'}});
+  });
+  it.each(['budget','config','directives','stop'] as const)('does not dispatch an old plan after %s changes during advice',async(kind)=>{
+    let changed=false;
+    const {hooks,recordScheduling}=batchHarness(async()=>{changed=true;return null;},{
+      loadBudget:()=>({...defaultBudgetPolicy(),...(changed && kind==='budget' ? {mode:'dormant' as const}: {})}),
+      liveLeaderConfig:cfg=>changed && kind==='config' ? {...cfg,foundry:{...cfg.foundry,allowedBackends:['builtin']}} : cfg,
+      directives:()=>changed && kind==='directives' ? ({grokLanes:1} as ReturnType<LiveHooksDeps['directives']>) : null,
+      killActive:()=>changed && kind==='stop',
+    });
+    hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);await hooks.prepareDispatchPlan!([item()],CFG);
+    expect(hooks.route(item(),CFG).hold).not.toBeNull();expect(recordScheduling).not.toHaveBeenCalled();
+  });
+  it.each(['engine','context','tier'] as const)('drops a same-ID recommendation after capacity %s changes',async(kind)=>{
+    const {hooks,views,recordScheduling}=batchHarness(async(candidates)=>{
+      const choice=candidates.find(v=>v.seatId==='claude')!.id;
+      if(kind==='engine')views[1]!.engine='grok';
+      if(kind==='context')views[1]!.contextWindow=10;
+      if(kind==='tier')views[1]!.tier='frontier';
+      return choice;
+    });
+    hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);await hooks.prepareDispatchPlan!([item()],CFG);
+    expect(hooks.route(item(),CFG).backend).toBe('grok-cli');
+    expect(recordScheduling.mock.calls[0]?.[0].accounts.find(v=>v.seatId==='claude')?.forecast).toBeNull();
+  });
+  it.each(['advice','cache'] as const)('rechecks actual same-seat selected model after %s await',async(when)=>{
+    let model='model-a';
+    const {hooks,recordScheduling}=batchHarness(async(candidates)=>{
+      const id=candidates.find(v=>v.seatId==='claude')!.id;if(when==='advice')model='model-b';return id;
+    },{
+      legacyRoute:()=>({backend:'claude',tier:'frontier',model,reason:'fixture model'}),
+      workHistory:async()=>[{id:'completed',engine:'claude',model:'model-a',seatId:null,taskKind:item().source,completed:true,durationMs:10000,tokens:1000}],
+      ...(when==='cache' ? {recordScheduling:async()=>{model='model-b';}} : {}),
+    });
+    hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);await hooks.prepareDispatchPlan!([item()],CFG);
+    expect(hooks.route(item(),CFG).backend).toBe('grok-cli');
+    if(when==='advice')expect(recordScheduling.mock.calls[0]?.[0].accounts.find(v=>v.seatId==='claude')?.forecast).toBeNull();
+  });
+  it('checks current Stop/authority again after asynchronous display-cache publication',async()=>{
+    let stopped=false;
+    const {hooks}=batchHarness(async()=>null,{killActive:()=>stopped,recordScheduling:async()=>{stopped=true;}});
+    hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);await hooks.prepareDispatchPlan!([item()],CFG);
+    expect(hooks.route(item(),CFG).hold).not.toBeNull();
+  });
+  it('does not call the paid advisory after exhausted USD; verified producer work still routes',async()=>{
+    const advice=vi.fn(async()=>null);const {hooks}=batchHarness(advice);
+    hooks.effectiveConfig(CFG);await hooks.beforeTick({...hookCtx,meteredUsdExhausted:true});
+    await hooks.prepareDispatchPlan!([item()],CFG);hooks.beginDispatchPlan(['item-1']);
+    expect(advice).not.toHaveBeenCalled();expect(hooks.route(item(),CFG).hold).toBeNull();
+  });
+});

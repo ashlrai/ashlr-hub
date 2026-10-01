@@ -172,7 +172,8 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
         } else if (result.status === 'observed') {
           if (result.loggedIn && result.accountHint) hints.set(account.id, result.accountHint);
           row = { ...row, state: result.loggedIn ? 'observed' : 'signed-out',
-          authentication: result.loggedIn ? 'signed-in' : 'signed-out', health: 'unknown', planType: result.subscriptionType,
+          authentication: result.loggedIn ? 'signed-in' : 'signed-out',
+          health: result.quotaFresh === true && result.windows.length > 0 ? 'reachable' : 'unknown', planType: result.subscriptionType,
           observedAt: result.startedAt, expiresAt: new Date(Date.parse(result.startedAt) + 60_000).toISOString(), windows: result.windows };
         }
       } else {

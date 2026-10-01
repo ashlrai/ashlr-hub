@@ -9,8 +9,8 @@
  * the up-to-2 MiB history file at all.
  *
  * The history rides a 5-minute poll — never the 30 s budget poll — and is
- * fetched on mount. The seat roster (for Claude's reset WORDS; the budget
- * route carries only machine instants, which Claude never publishes) is read
+ * fetched on mount. The seat roster (including legacy Claude reset words;
+ * qualified structured reports also carry machine instants) is read
  * from the cache WITHOUT fetching: a bootstrap read costs the server ~384 ms
  * (useSeatsRefresh.ts), and the shell keeps it live anyway.
  */

@@ -51,6 +51,7 @@
 import { dirname, join } from 'node:path';
 import { existsSync, openSync, readSync, closeSync, readdirSync, readFileSync, statSync } from 'node:fs';
 
+import { validResetProvenance } from '../routing/reset-pressure.js';
 import { inspectPrivateDirectory } from '../universe/artifacts.js';
 import { readResourceJson } from '../resources/pool-runtime.js';
 import {
@@ -195,17 +196,18 @@ const VERSE_PROVIDER_NAME: Readonly<Record<VerseAccountProvider, string>> = {
 };
 
 export interface VerseAccountWindow {
+  /** Advisory provider period, outside canonical resource observations. */
+  resetProvenance?: import('../routing/scheduling-types.js').ResetProvenance;
   id: string;
   /** Provider-reported percent, or null for NO SIGNAL (which is not zero). */
   usedPercent: number | null;
   /**
-   * Machine-readable reset instant. For CLAUDE this is STRUCTURALLY ALWAYS
-   * NULL — the provider gives a human string only, in `nativeReport`. Never
-   * synthesize a countdown from it.
+   * Machine-readable provider reset. Legacy Claude prose remains null; only
+   * qualified current structured native usage may supply a deadline.
    */
   resetsAt: string | null;
   /** Claude's verbatim human reset text ("resets Sep 25 at 7pm (America/New_York)"). */
-  nativeReport: { source: 'claude-usage'; resetDescription: string | null } | null;
+  nativeReport: { source: 'claude-usage' | 'claude-usage-structured'; resetDescription: string | null } | null;
   /**
    * TRUE only when the provider explicitly FLAGGED the limit (Codex's
    * classified `rateLimitReachedType`) and that flag survived to this module.
@@ -305,7 +307,7 @@ export interface VerseAccountObservation {
     id: string;
     usedPercent: number | null;
     resetsAt: string | null;
-    nativeReport?: { source: 'claude-usage'; resetDescription: string | null };
+    nativeReport?: { source: 'claude-usage' | 'claude-usage-structured'; resetDescription: string | null };
     /** Only ever the literal `true`, and only when the provider flagged it (see `windowLimitReached`). */
     limitReached?: true;
   }>;
@@ -406,21 +408,25 @@ function isProvider(value: unknown): value is VerseAccountProvider {
  * `command` key is deliberately not read here: this result is serialized.
  */
 export function readVerseAccountIdentities(accountsRoot: string): VerseAccountIdentity[] {
-  const parsed = readJsonLenient(join(accountsRoot, 'connections.json'), MAX_BASELINE_BYTES);
+  let parsed: unknown;
+  try {
+    // Same bounded private descriptor read as the actual collector. JSON
+    // arrays are dense, and the byte budget bounds the full roster allocation.
+    parsed = readResourceJson(join(accountsRoot, 'connections.json'), MAX_BASELINE_BYTES);
+  } catch { return []; }
   if (!isRecord(parsed) || !Array.isArray(parsed['accounts'])) return [];
   const out: VerseAccountIdentity[] = [];
   const seen = new Set<string>();
   for (const entry of parsed['accounts']) {
-    if (!isRecord(entry)) continue;
+    if (!isRecord(entry)) return [];
     const id = entry['id'];
     const provider = entry['provider'];
-    if (typeof id !== 'string' || id.length === 0 || id.length > 64 || seen.has(id)) continue;
-    if (!isProvider(provider)) continue;
+    if (typeof id !== 'string' || id.length === 0 || id.length > 64 || seen.has(id)) return [];
+    if (!isProvider(provider)) return [];
     const rawLabel = entry['label'];
     const label = typeof rawLabel === 'string' && rawLabel.length > 0 && rawLabel.length <= 80 ? rawLabel : id;
     seen.add(id);
     out.push({ id, label, provider });
-    if (out.length >= 8) break;
   }
   return out;
 }
@@ -772,15 +778,28 @@ function windowLimitReached(window: { limitReached?: boolean }): boolean {
 function mapWindow(
   provider: VerseAccountProvider,
   window: { id: string; usedPercent: number | null; resetsAt: string | null; limitReached?: boolean;
-    nativeReport?: { source: 'claude-usage'; resetDescription: string | null } },
+    nativeReport?: { source: 'claude-usage' | 'claude-usage-structured'; resetDescription: string | null };
+    resetProvenance?: import('../routing/scheduling-types.js').ResetProvenance },
+  qualifiedPlan?: string | null,
 ): VerseAccountWindow {
   const limitReached = windowLimitReached(window);
+  const reset = window.resetProvenance;
+  const nativePlan = provider === 'claude' && window.nativeReport?.source === 'claude-usage-structured' &&
+    (qualifiedPlan === 'pro' || qualifiedPlan === 'max');
+  const qualifiedReset = nativePlan && reset && validResetProvenance(reset) && reset.source === 'claude-native-usage-report' && reset.at === window.resetsAt &&
+    (window.id === 'seven_day' && reset.kind === 'weekly-deadline' && reset.plan === qualifiedPlan || window.id === 'five_hour' && reset.kind === 'rolling-release');
+  // Model-scoped meters retain their real deadline but never claim the
+  // all-model weekly policy. Unsupported scope names remain unknown upstream.
+  const modelReset = nativePlan && ['seven_day_fable', 'seven_day_opus', 'seven_day_sonnet'].includes(window.id) &&
+    typeof window.resetsAt === 'string' && Number.isFinite(Date.parse(window.resetsAt)) && new Date(window.resetsAt).toISOString() === window.resetsAt;
+  const structuredClaude = qualifiedReset || modelReset;
   return {
     id: window.id,
     usedPercent: window.usedPercent,
-    // Claude never supplies a machine-readable reset; only the human string.
-    resetsAt: provider === 'claude' ? null : window.resetsAt,
+    // Cached/prose reports never acquire a machine countdown.
+    resetsAt: provider === 'claude' && !structuredClaude ? null : window.resetsAt,
     nativeReport: window.nativeReport ?? null,
+    ...((provider === 'grok' || qualifiedReset) && reset ? { resetProvenance: reset } : {}),
     limitReached,
     measured: !limitReached,
   };
@@ -835,9 +854,11 @@ function providerNotes(
 ): string[] {
   const notes: string[] = [];
   if (provider === 'claude') {
-    notes.push('Claude reports no machine-readable reset time; the window text is the provider\'s own wording.');
+    if (record.windows.some((w) => w.nativeReport?.source === 'claude-usage-structured' && w.resetsAt !== null)) {
+      notes.push('Current structured native Claude usage supplies a qualified reset deadline; no period start or allowance carryover is inferred.');
+    } else notes.push('Claude reports no machine-readable reset time; the window text is the provider\'s own wording.');
     if (record.health === 'unknown') {
-      notes.push('Claude health is always "unknown" by construction — that is not a fault.');
+      notes.push('Current native quota freshness is unavailable; legacy usage text is display only.');
     }
     if (record.reason === VERSE_CLAUDE_VERSION_REASON) {
       notes.push(
@@ -896,7 +917,7 @@ export function deriveVerseAccountRecord(
   extra: { credits?: VerseCodexCredits | null } = {},
 ): VerseAccountRecord {
   const provider = connection.provider;
-  const windows = connection.windows.map((w) => mapWindow(provider, w));
+  const windows = connection.windows.map((w) => mapWindow(provider, w, connection.authentication === 'signed-in' ? connection.planType : null));
   const credits = provider === 'codex' ? extra.credits ?? null : null;
   // See VERSE_GROK_SIGNED_OUT_REASONS: the monitor structurally cannot set
   // this state for Grok, so it is derived here from the verbatim probe reason

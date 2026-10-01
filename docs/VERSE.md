@@ -24,6 +24,14 @@ Expand a resource to inspect reported windows, resets, reserves and freshness.
 Unknown, loading and unavailable readings have distinct states. A displayed
 estimate is not a vendor-reported balance.
 
+Resources and Fleet capacity details show qualified reset deadlines and recorded work estimates.
+The fleet uses compatible completed observations to estimate duration and tokens;
+missing coverage stays unknown. Optional Jev advice selects among eligible
+task/account pairs before normal admission is checked again. The details label
+when an estimate was recorded and whether observations are pooled across accounts.
+See [reset-aware scheduling](RESET-AWARE-SCHEDULING.md) for the evidence and
+decision-call preferences.
+
 Advanced capacity settings offer **Goal preferences** and **Leader preferences**.
 Use a positive safe integer or **No preference limit** for open goals, new goals
 per day, memo proposals, conductor cycles, full/total Leader runs and Grok lanes.
@@ -112,7 +120,7 @@ integration.
 - The Jev decision layer, its call sites and its bounds:
   [`docs/JEV-INTEGRATION.md`](JEV-INTEGRATION.md).
 
-This page is the user guide for Verse 3.19. Sections marked 3.15 describe
+This page is the user guide for Verse 3.20. Sections marked 3.15 describe
 features introduced in that release and retained here.
 
 **At a glance.**
