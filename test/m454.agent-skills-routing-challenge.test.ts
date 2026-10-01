@@ -581,6 +581,7 @@ describe('M454 pinned upstream routing challenge', () => {
       'docs/OPENAI-AGENTS-INTEGRATION.md',
       'docs/DOTS-COMPANION.md',
       'docs/AGENT-HARNESS-EVOLUTION.md',
+      'docs/RESET-AWARE-SCHEDULING.md',
       'docs/RUNTIME_ACTIVATION_AUTHORITY.md',
       'docs/REMOTE-PHONE.md',
       'docs/contracts/CONTRACT-M515.md',

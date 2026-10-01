@@ -423,8 +423,9 @@ switch, backends, sandboxing, the command reference, the safety model, the
 
 Release artifacts are built and published locally; the source also runs GitHub
 CI and dependency audit checks. The local build procedure is in [Releasing without CI](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
-A version is published only once `npm view @ashlr/hub version` confirms it;
-repository or changelog state alone is not release evidence.
+npm publication is confirmed separately with `npm view @ashlr/hub version`.
+GitHub release assets require their own public download and checksum verification;
+repository or changelog state alone is not publication evidence.
 
 ---
 

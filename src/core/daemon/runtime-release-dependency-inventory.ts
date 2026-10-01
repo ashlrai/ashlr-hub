@@ -498,6 +498,7 @@ function rootPackageIsPortable(
     'docs/OPENAI-AGENTS-INTEGRATION.md',
     'docs/DOTS-COMPANION.md',
     'docs/AGENT-HARNESS-EVOLUTION.md',
+    'docs/RESET-AWARE-SCHEDULING.md',
     'docs/MISSION-OS.md',
     'docs/ASHLR-UNIVERSE.md',
     'docs/AUTONOMY-GAP.md',
