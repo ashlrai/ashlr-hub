@@ -1,4 +1,3 @@
-import { GOAL_PREFERENCE_DEFAULTS } from '../goals/preferences.js';
 /**
  * Leader ("Visionary" persona) — V3.10 Track B contract (unit B-U1, frozen day 0).
  *
@@ -37,11 +36,13 @@ export const VERSE_LEADER_PATH = '/api/verse/leader';
 /**
  * Legacy goal defaults plus unrelated compiled Leader limits. Goal business
  * preferences now resolve through goals/preferences.ts; grants remain separate.
+ * Keep these compatibility constants local so browser contracts have no runtime
+ * dependencies. The preference tests verify their defaults remain consistent.
  */
 export const LEADER_LIMITS = Object.freeze({
-  maxGoalsPerMemo: GOAL_PREFERENCE_DEFAULTS.maxGoalProposalsPerMemo,
-  maxNewGoalsPerDay: GOAL_PREFERENCE_DEFAULTS.maxNewGoalsPerDay,
-  maxActiveGoals: GOAL_PREFERENCE_DEFAULTS.maxOpenGoals,
+  maxGoalsPerMemo: 3,
+  maxNewGoalsPerDay: 3,
+  maxActiveGoals: 4,
   maxHypothesesPerMemo: 3,
   maxRunsPerDay: 3,
   defaultVetoMinutes: 30,

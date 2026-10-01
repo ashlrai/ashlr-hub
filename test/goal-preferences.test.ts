@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { parseGoalPreferences, resolveGoalPreferences } from '../src/core/goals/preferences.js';
+import { LEADER_LIMITS } from '../src/core/vision/leader-types.js';
 
 describe('operator goal preferences', () => {
+  it('keeps data-only browser compatibility constants consistent with preference defaults', () => {
+    const defaults = resolveGoalPreferences();
+    expect(defaults.maxOpenGoals).toBe(LEADER_LIMITS.maxActiveGoals);
+    expect(defaults.maxNewGoalsPerDay).toBe(LEADER_LIMITS.maxNewGoalsPerDay);
+    expect(defaults.maxGoalProposalsPerMemo).toBe(LEADER_LIMITS.maxGoalsPerMemo);
+  });
   it('keeps all legacy defaults only for absent fields, and distinguishes explicit null', () => {
     expect(resolveGoalPreferences()).toMatchObject({ maxOpenGoals: 4, maxNewGoalsPerDay: 3,
       maxGoalProposalsPerMemo: 3, maxGoalsPerConductorCycle: 3, sourceState: 'ready',
