@@ -17,6 +17,7 @@ import {
   chordAccelerator,
   chordId,
   chordMatches,
+  commandChord,
   COMMAND_KEYS,
   COMMAND_SCOPES,
   DESKTOP_COMMAND_NAMES,
@@ -333,6 +334,22 @@ describe('command catalog — keys', () => {
 });
 
 describe('command catalog — the keys half (command-keys.ts, on the chat first-paint path)', () => {
+  it('resolves only own command entries, including for shortcut hints', () => {
+    for (const id of ['constructor', 'toString', '__proto__', 'missing.command']) {
+      expect(keyBinding(id), id).toBeNull();
+      expect(commandChord(id), id).toBeUndefined();
+    }
+    expect(keyBinding('chat.new')).toBe(COMMAND_KEYS['chat.new']);
+    expect(commandChord('chat.new')).toBe(COMMAND_KEYS['chat.new'].keys[0]);
+  });
+
+  it('preserves shared named keys and platform-specific native glyphs', () => {
+    const names = ['enter', 'escape', 'tab', 'space', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'backspace'];
+    expect(names.map((key) => formatChord({ key }, 'mac'))).toEqual(['↩', 'Esc', '⇥', 'Space', '↑', '↓', '←', '→', '⌫']);
+    expect(names.map((key) => formatChord({ key }, 'other'))).toEqual(['Enter', 'Esc', 'Tab', 'Space', '↑', '↓', '←', '→', 'Backspace']);
+    expect(formatChord({ key: 'future-key' }, 'mac')).toBe('future-key');
+  });
+
   it('gives every key-table entry exactly one catalog row, with the same scope, keys and native binding', () => {
     const ids = Object.keys(COMMAND_KEYS);
     expect(ids.length).toBeGreaterThan(0);

@@ -35,6 +35,8 @@
  * Honesty: `null` = unknown. Every exclusion carries a specific sentence, and
  * a hold always says why and (when a date is known) until when.
  */
+import { leaderPreferencesReady, resolveLeaderPreferences, type ResolvedLeaderPreferences } from '../vision/leader-preferences.js';
+import { DAEMON_SPEND_GUARD_ITEM_CAPACITY } from '../daemon/state.js';
 import type { AshlrConfig, EngineId, EngineTier, WorkItem, WorkSource } from '../types.js';
 import type { EffectivePolicy } from '../authority/types.js';
 import { describeExclusions, routeSeat, ROUTER_CONTEXT_FIT_FRACTION, type RouterWeights } from '../routing/router.js';
@@ -181,6 +183,10 @@ export interface LanePlanInput {
   localServingSlots: number | null;
   /** Per lane: why its engine cannot run (not installed, not allowed); absent = available. */
   engineUnavailable: Readonly<Partial<Record<FleetEngine, string>>>;
+  /** Production supplies strictly read live preferences; absent preserves pure legacy fixtures. */
+  leaderPreferences?: ResolvedLeaderPreferences;
+  /** Finite selected-batch/journal/pool bound, never a business preference or account-count clamp. */
+  admittedBatchCapacity?: number;
 }
 
 export interface LanePlan {
@@ -256,14 +262,25 @@ export function countOf(n: number, noun: string): string {
   return `${n} ${noun}${n === 1 ? '' : 's'}`;
 }
 
-function clampGrokLanes(value: number | null | undefined): number | null {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-  return Math.max(LEADER_LIMITS.grokLanes.min, Math.min(LEADER_LIMITS.grokLanes.max, Math.floor(value)));
+function concreteGrokLanes(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+/** Mirrors the daemon's configured batch/pool defaults, bounded by its durable journal. */
+export function grokDispatchBatchCapacity(cfg: AshlrConfig): number {
+  const daemon = cfg.daemon;
+  const capacity = (value: unknown, fallback: number): number => value === undefined ? fallback
+    : typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : 0;
+  const batch = capacity(daemon?.perTickItems, 3);
+  const pool = daemon?.mode === 'continuous'
+    ? Math.min(capacity(daemon.concurrency?.cloud, 6), capacity(daemon.maxConcurrent ?? daemon.concurrency?.total, 8))
+    : capacity(daemon?.parallel, 2);
+  return Math.min(batch, pool, DAEMON_SPEND_GUARD_ITEM_CAPACITY);
 }
 
 /**
  * The slots each lane may use THIS tick. Only ever narrows the defaults,
- * except where a class-B Leader action (grok 3–4 lanes, Codex on) has already
+ * except where a class-B Leader action (more than 2 Grok lanes, Codex on) has already
  * passed its veto window — those are decisions the grant allows.
  */
 export function planLanes(input: LanePlanInput): Record<FleetEngine, LanePlan> {
@@ -280,10 +297,21 @@ export function planLanes(input: LanePlanInput): Record<FleetEngine, LanePlan> {
     };
 
     if (lane === 'grok-cli') {
-      const leader = clampGrokLanes(input.directives?.grokLanes);
+      const leader = concreteGrokLanes(input.directives?.grokLanes);
       if (leader !== null && leader !== slots) {
         slots = leader;
         capReason = `The Leader set ${countOf(leader, `${FLEET_LANE_LABEL['grok-cli']} lane`)}.`;
+      }
+      const preferences = input.leaderPreferences ?? resolveLeaderPreferences();
+      if (!leaderPreferencesReady(preferences)) {
+        narrow(0, 'The live Grok lane preference could not be checked.');
+      } else if (preferences.maxGrokLanes !== null) {
+        narrow(preferences.maxGrokLanes, `The operator prefers at most ${countOf(preferences.maxGrokLanes, 'Grok lane')}.`);
+      }
+      if (input.admittedBatchCapacity !== undefined) {
+        const available = Number.isSafeInteger(input.admittedBatchCapacity) && input.admittedBatchCapacity >= 0
+          ? input.admittedBatchCapacity : 0;
+        narrow(available, `This tick admits at most ${countOf(available, 'Grok task')} within its batch, journal and dispatch pool.`);
       }
     }
     if (lane === 'codex') {
@@ -450,6 +478,8 @@ export interface LegacyRoute {
 }
 
 export interface DispatchRouterContext {
+  scheduling?: Readonly<Record<string,import('../routing/scheduling-types.js').AccountSchedulingView>>;
+  advisorySeatId?: string | null;
   nowMs: number;
   /** The standing policy in force this tick. */
   policy: Pick<EffectivePolicy, 'engines' | 'spend' | 'repos'>;
@@ -574,6 +604,8 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
   const decision = routeSeat(request, ctx.capacity, ctx.budget, {
     nowMs: ctx.nowMs,
     ...(ctx.weights ? { weights: ctx.weights } : {}),
+    ...(ctx.scheduling ? { scheduling: ctx.scheduling } : {}),
+    ...(ctx.advisorySeatId ? { advisorySeatId: ctx.advisorySeatId } : {}),
   });
   const extra: SeatExclusion[] = [];
   const kind = item.source;

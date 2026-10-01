@@ -7,7 +7,7 @@
 
 import type { AshlrConfig } from '../types.js';
 import { typeSafeAvailable, TYPESAFE_DISABLE_ENV } from '../classify/typesafe-client.js';
-import { JEV_DISABLE_ENV, jevKilledByEnv, localDay, readJevConfig, readLedger, summarizeByKind } from './ledger.js';
+import { JEV_DISABLE_ENV, jevKilledByEnv, localDay, readJevConfig, readLedger, summarizeByKind, calledSum, validTokenCount } from './ledger.js';
 import type { DecisionRecord, JevStatus } from './types.js';
 
 function mean(values: readonly number[]): number | null {
@@ -21,7 +21,7 @@ function classifierKilled(): boolean {
 
 export function jevStatusFromRecords(
   records: readonly DecisionRecord[],
-  meta: { enabled: boolean; keyed: boolean; disabledBy?: string; day: string; dailyCallBudget: number; disabledKinds: JevStatus['disabledKinds'] },
+  meta: { enabled: boolean; keyed: boolean; disabledBy?: string; day: string; dailyCallBudget: number | null; disabledKinds: JevStatus['disabledKinds'] },
 ): JevStatus {
   const called = records.filter((r) => r.called);
   const answered = records.filter((r) => typeof r.jevConfidence === 'number');
@@ -34,9 +34,20 @@ export function jevStatusFromRecords(
     decisionsToday: records.length,
     callsToday: called.length,
     dailyCallBudget: meta.dailyCallBudget,
-    inputTokensToday: called.reduce((s, r) => s + (r.inputTokens ?? 0), 0),
-    outputTokensToday: called.reduce((s, r) => s + (r.outputTokens ?? 0), 0),
-    estCostUsdToday: records.reduce((s, r) => s + (r.estCostUsd ?? 0), 0),
+    inputTokensToday: calledSum(records, 'inputTokens'),
+    outputTokensToday: calledSum(records, 'outputTokens'),
+    estCostUsdToday: calledSum(records, 'estCostUsd'),
+    usageCoverage: {
+      reportedCalls: called.filter((r) => validTokenCount(r.inputTokens) && validTokenCount(r.outputTokens)).length,
+      unknownCalls: called.filter((r) => !validTokenCount(r.inputTokens) || !validTokenCount(r.outputTokens)).length,
+    },
+    costCoverage: {
+      pricedCalls: called.filter((r) => typeof r.estCostUsd === 'number' && Number.isFinite(r.estCostUsd) && r.estCostUsd >= 0).length,
+      unknownCalls: called.filter((r) => typeof r.estCostUsd !== 'number' || !Number.isFinite(r.estCostUsd) || r.estCostUsd < 0).length,
+      source: 'recorded-estimates',
+    },
+    lastSuccessfulCallAt: called.filter((r) => typeof r.jevConfidence === 'number' && Number.isFinite(Date.parse(r.ts)))
+      .map((r) => r.ts).sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null,
     fallbackRateToday: records.length ? (records.length - jev) / records.length : 0,
     avgConfidenceToday: mean(answered.map((r) => r.jevConfidence!)),
     avgLatencyMsToday: mean(called.map((r) => r.durationMs)),

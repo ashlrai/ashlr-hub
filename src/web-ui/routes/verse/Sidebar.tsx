@@ -50,6 +50,7 @@ import { SkeletonLine } from '../../components/primitives/Skeleton.js';
 import { Tooltip } from '../../components/primitives/Tooltip.js';
 import { ActionMenu, type ActionMenuItem, type MenuAnchor } from './chat/ActionMenu.js';
 import { LiveTimer } from './chat/LiveTimer.js';
+import { setSidebarGroupCollapsed, useSidebarCollapse } from './chat/sidebar-collapse-pref.js';
 import {
   buildSidebar,
   SIDEBAR_FILTERS,
@@ -122,6 +123,7 @@ export function Sidebar(props: SidebarProps) {
   const sidebarHint = sidebarShortcut ? formatChord(sidebarShortcut) : null;
   const [filter, setFilter] = useState<SidebarFilter>('all');
   const [archivedOpen, setArchivedOpen] = useState(false);
+  const collapsedGroups = useSidebarCollapse();
   const [renaming, setRenaming] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ row: SidebarRow; anchor: MenuAnchor; from: HTMLElement } | null>(null);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
@@ -192,8 +194,10 @@ export function Sidebar(props: SidebarProps) {
             onClearFilter={() => setFilter('all')} onNew={onNew} />
         ) : model.groups.map((group) => (
           <GroupView key={group.id} group={group} seats={seats} selectedId={selectedId} renaming={renaming}
-            open={group.kind !== 'archived' || archivedOpen || searching || filter !== 'all'}
-            onToggle={group.kind === 'archived' ? () => setArchivedOpen((v) => !v) : undefined}
+            open={searching || filter !== 'all' || (group.kind === 'archived' ? archivedOpen : !collapsedGroups.has(group.id))}
+            toggleDisabled={group.kind === 'project' && (searching || filter !== 'all')}
+            onToggle={group.kind === 'archived' ? () => setArchivedOpen((v) => !v)
+              : group.kind === 'project' ? () => setSidebarGroupCollapsed(group.id, !collapsedGroups.has(group.id)) : undefined}
             onSelect={onSelect} onMenu={actions ? openMenu : undefined}
             onRenameDone={async (row, title) => {
               setRenaming(null);
@@ -406,27 +410,33 @@ function EmptyList({ query, filter, hasSessions, newChatHint, onClearQuery, onCl
   );
 }
 
-function GroupView({ group, seats, selectedId, renaming, open, onToggle, onSelect, onMenu, onRenameDone }: {
+function GroupView({ group, seats, selectedId, renaming, open, onToggle, toggleDisabled, onSelect, onMenu, onRenameDone }: {
   group: SidebarGroup;
   seats: readonly VerseSeat[];
   selectedId: string | null;
   renaming: string | null;
   open: boolean;
   onToggle?: () => void;
+  toggleDisabled?: boolean;
   onSelect: (id: string) => void;
   onMenu?: (row: SidebarRow, anchor: MenuAnchor, from: HTMLElement) => void;
   onRenameDone: (row: SidebarRow, title: string) => Promise<void>;
 }) {
   const listId = useId();
+  const countId = useId();
+  const active = !open && group.rows.some((row) => row.session.id === selectedId);
   return (
     <section className={styles.group} aria-label={group.label} data-group={group.kind}>
       <h2 className={styles.groupTitle} title={group.projectPath ?? undefined}>
         {onToggle ? (
-          <button type="button" className={styles.groupToggle} aria-expanded={open} aria-controls={listId} onClick={onToggle}>
+          <button type="button" className={styles.groupToggle} aria-expanded={open} aria-controls={listId} aria-describedby={countId} disabled={toggleDisabled}
+            title={toggleDisabled ? 'Clear the search or filter to collapse this group' : undefined} onClick={onToggle}>
             <span className={styles.twist} data-open={open || undefined} aria-hidden="true" />
             <span className={styles.groupName}>{group.label}</span>
           </button>
         ) : <span className={styles.groupName}>{group.label}</span>}
+        {active ? <span className={styles.activeGroup}>Active</span> : null}
+        <span id={countId} className="visually-hidden">{group.rows.length} {group.rows.length === 1 ? 'chat' : 'chats'}{active ? ', including the active chat' : ''}</span>
         {group.enrolled ? <span className={styles.enrolled}>enrolled</span> : null}
         <span className={styles.groupCount} aria-hidden="true">{group.rows.length}</span>
       </h2>

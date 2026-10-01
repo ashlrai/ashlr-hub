@@ -130,7 +130,7 @@ describe('NewChatDialog — capacity at the point of choice', () => {
   it('names the credits that outlive a spent window', () => {
     render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={[CODEX_CREDITS_SEAT]} onCreate={() => {}} />);
     expect(screen.getByText('limit reached')).toBeInTheDocument();
-    expect(screen.getByText(/2048\.42 credits left/)).toBeInTheDocument();
+    expect(screen.getByText('2048.4196250000 credits available')).toBeInTheDocument();
   });
 
   it('draws no meter for a seat nothing was read from', () => {

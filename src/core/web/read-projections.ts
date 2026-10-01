@@ -1,3 +1,6 @@
+import { normalizeCreditIdentitySnapshots, normalizeInvalidatedAccountIds } from '../resources/credit-pool-snapshot.js';
+import type { ResourceAccountIdentitySnapshot } from '../resources/account-identity-witness.js';
+import type { CreditPoolReadView } from '../resources/credit-pool-types.js';
 import type { WorkerOptions } from 'node:worker_threads';
 import { createBoundedReadWorker, ReadProjectionError, type ReadProjectionWorkerHandle } from './bounded-read-worker.js';
 export { ReadProjectionError, type ReadProjectionWorkerHandle } from './bounded-read-worker.js';
@@ -11,9 +14,14 @@ import type { CachedFleetStatus } from './fleet-status-cache.js';
 import type { listRuns } from '../run/orchestrator.js';
 import type { listSwarms } from '../swarm/store.js';
 import type { UniverseCampaignReadinessView } from './universe-console-types.js';
+import type { ExecutionFeedbackCaseDetail } from '../fleet/execution-feedback-case-types.js';
+import type { ExecutionFeedbackView } from '../fleet/execution-feedback-types.js';
 
 /** Fixed read operations only: there is no caller-selected module, code, or argv. */
 export interface ReadProjectionResults {
+  'credit-pools': CreditPoolReadView;
+  'execution-feedback': ExecutionFeedbackView;
+  'execution-feedback-case': ExecutionFeedbackCaseDetail | null;
   snapshot: DashboardSnapshotWithSourceQuality;
   control: ControlSnapshot;
   fleet: CachedFleetStatus;
@@ -29,6 +37,9 @@ export interface ReadProjectionResults {
 }
 
 export interface ReadProjectionPayloads {
+  'credit-pools': { identitySnapshots: ResourceAccountIdentitySnapshot[]; invalidatedAccountIds: string[] };
+  'execution-feedback': undefined;
+  'execution-feedback-case': { caseId: string };
   snapshot: undefined;
   control: undefined;
   fleet: undefined;
@@ -67,13 +78,31 @@ export interface ReadProjectionRequest {
 }
 
 const KINDS: ReadonlySet<string> = new Set<ReadProjectionKind>([
-  'snapshot', 'control', 'fleet', 'pulse', 'fleet-activity', 'proposals', 'pending-count', 'runs', 'swarms',
-  'daemon-observation', 'universe-campaign-readiness',
+  'credit-pools', 'snapshot', 'control', 'fleet', 'pulse', 'fleet-activity', 'proposals', 'pending-count', 'runs', 'swarms',
+  'daemon-observation', 'universe-campaign-readiness', 'execution-feedback', 'execution-feedback-case',
 ]);
 
 /** Shared validation keeps even malformed internal messages inside the read allowlist. */
 export function normalizeReadProjectionPayload(kind: unknown, payload: unknown): ReadProjectionPayloads[ReadProjectionKind] {
   if (typeof kind !== 'string' || !KINDS.has(kind)) throw new ReadProjectionError('Unsupported read projection', 'READ_PROJECTION_INVALID_REQUEST');
+  if (kind === 'credit-pools') {
+    try {
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error();
+      const descriptors = Object.getOwnPropertyDescriptors(payload);
+      if (Reflect.ownKeys(descriptors).length !== 2 || !descriptors.identitySnapshots || !('value' in descriptors.identitySnapshots) ||
+        !descriptors.invalidatedAccountIds || !('value' in descriptors.invalidatedAccountIds)) throw new Error();
+      return { identitySnapshots: normalizeCreditIdentitySnapshots(descriptors.identitySnapshots.value), invalidatedAccountIds: normalizeInvalidatedAccountIds(descriptors.invalidatedAccountIds.value) };
+    } catch { throw new ReadProjectionError('Invalid credit pool options', 'READ_PROJECTION_INVALID_REQUEST'); }
+  }
+  if (kind === 'execution-feedback-case') {
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      const descriptors = Object.getOwnPropertyDescriptors(payload);
+      const keys = Reflect.ownKeys(descriptors);
+      const id = descriptors.caseId;
+      if (keys.length === 1 && id && 'value' in id && typeof id.value === 'string' && /^[a-f0-9]{64}$/u.test(id.value)) return { caseId: id.value };
+    }
+    throw new ReadProjectionError('Invalid execution case options', 'READ_PROJECTION_INVALID_REQUEST');
+  }
   if (kind === 'universe-campaign-readiness') {
     if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
       const value = payload as Record<string, unknown>;

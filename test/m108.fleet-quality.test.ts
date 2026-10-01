@@ -86,6 +86,7 @@ const mockLoadGoal = vi.fn();
 
 vi.mock('../src/core/goals/store.js', () => ({
   listGoals: (...args: unknown[]) => mockListGoals(...args),
+  listGoalsDetailed: (...args: unknown[]) => ({ goals: mockListGoals(...args), complete: true, sourceState: 'healthy', unreadableFiles: 0 }),
   loadGoal: (...args: unknown[]) => mockLoadGoal(...args),
   resumeMilestone: vi.fn(),
   updateMilestoneStatus: vi.fn(() => null),

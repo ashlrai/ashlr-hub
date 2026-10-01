@@ -29,6 +29,7 @@ import type {
   TaskKind,
 } from './types.js';
 import { classifyTaskKind } from './inject.js';
+import type { ExecutionFeedbackCase } from '../../fleet/execution-feedback-types.js';
 
 // ---------------------------------------------------------------------------
 // Inputs
@@ -378,6 +379,23 @@ function baseRetro(parts: {
 // ---------------------------------------------------------------------------
 // Fleet
 // ---------------------------------------------------------------------------
+
+/** Recorded producer/setup failure, not a diagnosed code defect or a sharper prompt. */
+export function retroFromExecutionFailure(input: ExecutionFeedbackCase, createdAt: string): RetroV1 | null {
+  if (input.outcome !== 'failed' || input.proposalRecorded || !input.failureKind) return null;
+  const labels = { engine: 'Producer failed', sandbox: 'Sandbox failed', capture: 'Proposal capture failed' } as const;
+  const label = labels[input.failureKind];
+  return baseRetro({
+    sourceKey: `fleet:execution:${input.caseId}:failed`, source: 'fleet', taskId: input.caseId,
+    repo: null, endKind: 'failed', endedAt: input.endedAt, taskKind: 'other',
+    asked: 'Complete a fleet production attempt.', happened: `${label} before a proposal was recorded. The underlying cause is unknown.`,
+    rootCause: { code: `execution:${input.failureKind}-failed`, label,
+      detail: 'Recorded terminal producer outcome; no code, account, or authentication diagnosis is available.',
+      evidence: 'Canonical dispatch terminal outcome' },
+    doDifferently: ['Inspect the authorized execution evidence before retrying.'],
+    betterPrompt: null, candidates: [], paths: [], createdAt,
+  });
+}
 
 /** Generic close reasons that say nothing about the work (no lesson in them). */
 const GENERIC_CLOSE = /^(closed (in verse|on github)( without landing)?\.?|closed from ashlr verse.*|dismissed in verse\.?|superseded.*)$/i;

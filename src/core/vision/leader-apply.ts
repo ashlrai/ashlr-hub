@@ -45,11 +45,13 @@
  * reads it); its imports are fs/crypto only — every heavy dependency (GitHub,
  * experiments, the task queue) is imported lazily inside the default deps.
  */
+import { leaderPreferencesReady, resolveLeaderPreferences, unavailableLeaderPreferences, type ResolvedLeaderPreferences } from './leader-preferences.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-import { goalsDir } from '../config.js';
+import { goalsDir, loadConfigReadOnlyStrict } from '../config.js';
+import { goalPreferencesReady, knownGoalCount, resolveGoalPreferences, unavailableGoalPreferences, type ResolvedGoalPreferences } from '../goals/preferences.js';
 import type { Goal, GoalStatus } from '../types.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
@@ -84,6 +86,7 @@ import type {
   StartExperimentResult,
 } from '../learn/harness-types.js';
 import {
+  LEADER_ACTION_KINDS,
   LEADER_GOAL_HYGIENE_KINDS,
   LEADER_LIMITS,
   type LeaderAction,
@@ -160,9 +163,9 @@ function sanitizeDirectives(raw: unknown): LeaderDirectivesV1 | null {
     v: 1,
     updatedAt: r['updatedAt'],
     routerTuning,
-    // Clamped on READ as well as on write: this file lives under ~/.ashlr, and
-    // the dispatch router must never see a lane count the Leader could not set.
-    grokLanes: Number.isInteger(lanes) && (lanes as number) >= LEADER_LIMITS.grokLanes.min && (lanes as number) <= LEADER_LIMITS.grokLanes.max
+    // Concrete directives remain positive safe counts. Live operator maxima
+    // narrow admission separately; null here always means the default2.
+    grokLanes: Number.isSafeInteger(lanes) && (lanes as number) >= LEADER_LIMITS.grokLanes.min
       ? (lanes as number)
       : null,
     codexEnabled: typeof codex === 'boolean' ? codex : null,
@@ -303,6 +306,8 @@ interface LeaderActionStoreV1 {
   actions: StoredLeaderAction[];
   /** Needs-you items Mason dismissed (class-C asks, questions). */
   dismissed: { id: string; at: string }[];
+  /** Earliest time from which retained goal-create history is complete; null = unknown. */
+  goalCreateHistoryCompleteFrom?: number | null;
 }
 
 /** Read cap: a file longer than this is never parsed on the hot path. */
@@ -324,19 +329,29 @@ const DISMISSED_KEEP = 500;
 const CLAIM_STALE_MS = 10 * 60_000;
 
 function emptyStore(nowIso: string): LeaderActionStoreV1 {
-  return { v: 1, updatedAt: nowIso, actions: [], dismissed: [] };
+  return { v: 1, updatedAt: nowIso, actions: [], dismissed: [], goalCreateHistoryCompleteFrom: 0 };
 }
 
 function parseStore(raw: string): LeaderActionStoreV1 | null {
   try {
     const parsed = JSON.parse(raw) as Partial<LeaderActionStoreV1>;
     if (typeof parsed !== 'object' || parsed === null || parsed.v !== 1 || !Array.isArray(parsed.actions)) return null;
+    const actions = parsed.actions.filter((a): a is StoredLeaderAction =>
+      typeof a === 'object' && a !== null && typeof a.action === 'object' && a.action !== null
+      && typeof a.action.id === 'string' && Array.isArray(a.restore));
+    const malformed = actions.length !== parsed.actions.length || actions.some((s) =>
+      !(LEADER_ACTION_KINDS as readonly string[]).includes(s.action.kind) || !['scheduled', 'applied', 'vetoed', 'refused', 'failed', 'escalated'].includes(s.action.status)
+      || s.action.kind === 'goal.create' && (s.action.status === 'scheduled' || s.action.status === 'applied') && !knownGoalCount(goalCreateCountTime(s.action)));
     return {
       v: 1,
+      // Legacy stores may already have pruned rows. They cannot establish history
+      // before their last write; never substitute a quota number for that unknown.
+      goalCreateHistoryCompleteFrom: malformed ? null
+        : Object.hasOwn(parsed, 'goalCreateHistoryCompleteFrom')
+          ? knownGoalCount(parsed.goalCreateHistoryCompleteFrom) ? parsed.goalCreateHistoryCompleteFrom : null
+          : knownGoalCount(Date.parse(parsed.updatedAt ?? '')) ? Date.parse(parsed.updatedAt!) : null,
       updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date(0).toISOString(),
-      actions: parsed.actions.filter((a): a is StoredLeaderAction =>
-        typeof a === 'object' && a !== null && typeof a.action === 'object' && a.action !== null
-        && typeof a.action.id === 'string' && Array.isArray(a.restore)),
+      actions,
       dismissed: Array.isArray(parsed.dismissed)
         ? parsed.dismissed.filter((d): d is { id: string; at: string } => typeof d?.id === 'string' && typeof d?.at === 'string')
         : [],
@@ -425,11 +440,17 @@ function projectInverse(inverse: LeaderInverse | null): LeaderInverse | null {
 function compactStore(store: LeaderActionStoreV1): LeaderActionStoreV1 {
   const live = (s: StoredLeaderAction): boolean => s.action.status === 'scheduled' || (s.claim !== undefined && s.claim !== null);
   // Count trim keeps every live row; the oldest settled rows go first.
+  let historyFrom = store.goalCreateHistoryCompleteFrom ?? null;
+  const dropped = (row: StoredLeaderAction): void => {
+    if (row.action.kind !== 'goal.create' || row.action.status !== 'applied') return;
+    const at = goalCreateCountTime(row.action);
+    historyFrom = historyFrom !== null && knownGoalCount(at) ? Math.max(historyFrom, at + 1) : null;
+  };
   let actions = store.actions;
   if (actions.length > ACTIONS_KEEP) {
     let excess = actions.length - ACTIONS_KEEP;
     actions = actions.filter((s) => {
-      if (excess > 0 && !live(s)) { excess -= 1; return false; }
+      if (excess > 0 && !live(s)) { dropped(s); excess -= 1; return false; }
       return true;
     });
   }
@@ -439,7 +460,7 @@ function compactStore(store: LeaderActionStoreV1): LeaderActionStoreV1 {
   const projected = actions.map((s) => (s.action.inverse?.op === 'restore-goals' && s.action.inverse.before.some((b) => b.record !== null)
     ? { ...s, action: { ...s.action, inverse: projectInverse(s.action.inverse) } as LeaderAction }
     : s));
-  const out: LeaderActionStoreV1 = { ...store, actions: projected, dismissed: store.dismissed.slice(-DISMISSED_KEEP) };
+  const out: LeaderActionStoreV1 = { ...store, goalCreateHistoryCompleteFrom: historyFrom, actions: projected, dismissed: store.dismissed.slice(-DISMISSED_KEEP) };
   let total = storeBytes(out);
   if (total <= STORE_WRITE_BUDGET) return out;
   for (let i = 0; i < out.actions.length && total > STORE_WRITE_BUDGET; i += 1) {
@@ -453,6 +474,8 @@ function compactStore(store: LeaderActionStoreV1): LeaderActionStoreV1 {
   while (total > STORE_WRITE_BUDGET) {
     const index = out.actions.findIndex((s) => !live(s));
     if (index === -1) break;
+    dropped(out.actions[index]!);
+    out.goalCreateHistoryCompleteFrom = historyFrom;
     total -= storeBytes(out.actions[index]) + 1;
     out.actions.splice(index, 1);
   }
@@ -508,7 +531,7 @@ function loadStoreForWrite(): LeaderActionStoreV1 {
       throw new Error(`the Leader action store could not be read (${read.reason}); nothing was written`);
     case 'invalid':
       renameSync(leaderActionsPath(), join(leaderRoot(), `actions.unreadable-${archiveSuffix()}.json`));
-      return emptyStore(new Date(0).toISOString());
+      return { ...emptyStore(new Date(0).toISOString()), goalCreateHistoryCompleteFrom: Date.now() };
   }
 }
 
@@ -524,6 +547,9 @@ function withActionStore<T>(mutate: (store: LeaderActionStoreV1) => T): T {
     const store = loadStoreForWrite();
     const out = mutate(store);
     store.updatedAt = new Date().toISOString();
+    // A successfully persisted new snapshot starts a known future observation
+    // window after malformed metric history, never reconstructs lost past counts.
+    if (store.goalCreateHistoryCompleteFrom === null) store.goalCreateHistoryCompleteFrom = Date.now();
     writeActionStore(store);
     return out;
   } finally {
@@ -721,6 +747,9 @@ export interface LeaderApplyDeps {
   /** Codex lanes may be enabled only after the Codex windows reset. null = unknown (fails closed). */
   codexReadiness(): { ready: boolean | null; resetsAt: string | null };
   goals: LeaderGoalsPort;
+  /** Reloaded at planning and mutation fences; throws must never fall back to a wider cached policy. */
+  goalPreferences?(): ResolvedGoalPreferences;
+  leaderPreferences?(): ResolvedLeaderPreferences;
   budget: LeaderBudgetPort;
   addPlaybookDelta(text: string): void;
   /** Tell Mason a class-B action is waiting (Telegram / iMessage via comms). Best-effort. */
@@ -764,6 +793,8 @@ export async function loadDefaultLeaderDeps(): Promise<LeaderApplyDeps> {
   }
   return {
     now: () => Date.now(),
+    goalPreferences: () => resolveGoalPreferences(loadConfigReadOnlyStrict()),
+    leaderPreferences: () => resolveLeaderPreferences(loadConfigReadOnlyStrict()),
     standingPolicy: () => effective.currentStandingPolicy(),
     appendLedger: (input) => ledger.appendLedger(input),
     readLedger: (opts) => ledger.readLedger(opts),
@@ -868,10 +899,14 @@ export interface LeaderPolicyContext {
   budgetMode: BudgetMode;
   directives: LeaderDirectivesV1 | null;
   codex: { ready: boolean | null; resetsAt: string | null };
-  /** Goals with status active or planning; null = the goal store could not be read completely (fails closed). */
+  /** Goals with status active or planning; null = incomplete inventory; required only for a finite open-goal preference. */
   openGoalCount: number | null;
   /** goal.create actions applied or scheduled in the last 24 h. */
-  goalCreatesLast24h: number;
+  goalCreatesLast24h: number | null;
+  goalPreferences?: ResolvedGoalPreferences;
+  leaderPreferences?: ResolvedLeaderPreferences;
+  /** Exact stored rows included in the observed daily count; used only to discount the current reservation. */
+  scheduledGoalCreateActionIdsLast24h?: readonly string[];
   /** Ids of hypotheses this action's memo carries. */
   hypothesisIds: readonly string[];
   /** 3.15: which founder-mode lanes exist (leader-powers.ts); absent = none. */
@@ -947,12 +982,15 @@ export function classifyLeaderAction(draft: AnyLeaderActionDraft, ctx: LeaderPol
       return ok('A');
     }
     case 'goal.create': {
-      if (ctx.openGoalCount === null) return refuse('B', 'The goal list could not be read completely, so the active-goal limit cannot be checked.');
-      if (ctx.openGoalCount >= LEADER_LIMITS.maxActiveGoals) {
-        return refuse('B', `${ctx.openGoalCount} goals are already open; at most ${LEADER_LIMITS.maxActiveGoals} may be active — finish or prune first.`);
+      const preferences = ctx.goalPreferences ?? resolveGoalPreferences();
+      if (!goalPreferencesReady(preferences)) return refuse('B', 'Goal preferences are invalid or unavailable.');
+      if (preferences.maxOpenGoals !== null) {
+        if (!knownGoalCount(ctx.openGoalCount)) return refuse('B', 'The goal list could not be read completely, so the active-goal limit cannot be checked.');
+        if (ctx.openGoalCount >= preferences.maxOpenGoals) return refuse('B', `${ctx.openGoalCount} goals are already open; at most ${preferences.maxOpenGoals} may be active — finish or prune first.`);
       }
-      if (ctx.goalCreatesLast24h >= LEADER_LIMITS.maxNewGoalsPerDay) {
-        return refuse('B', `The Leader already created ${ctx.goalCreatesLast24h} goals in the last 24 hours (limit ${LEADER_LIMITS.maxNewGoalsPerDay}).`);
+      if (preferences.maxNewGoalsPerDay !== null) {
+        if (!knownGoalCount(ctx.goalCreatesLast24h)) return refuse('B', 'The recent goal-create history is incomplete, so the daily goal preference cannot be checked.');
+        if (ctx.goalCreatesLast24h >= preferences.maxNewGoalsPerDay) return refuse('B', `The Leader already created ${ctx.goalCreatesLast24h} goals in the last 24 hours (limit ${preferences.maxNewGoalsPerDay}).`);
       }
       return ok('B');
     }
@@ -969,8 +1007,12 @@ export function classifyLeaderAction(draft: AnyLeaderActionDraft, ctx: LeaderPol
     case 'lanes.grok': {
       const slots = (draft.params as LeaderActionParamsMap['lanes.grok']).slots;
       const current = currentGrokLanes(ctx.directives);
+      if (!knownGoalCount(slots) || slots < 1) return refuse('B', 'Grok slots must be a positive safe integer.');
       if (slots === current) return refuse('A', `Grok already runs ${current} lanes.`);
       if (slots < current) return ok('A');
+      const preferences = ctx.leaderPreferences ?? resolveLeaderPreferences();
+      if (!leaderPreferencesReady(preferences)) return refuse('B', 'Leader lane preferences are invalid or unavailable.');
+      if (preferences.maxGrokLanes !== null && slots > preferences.maxGrokLanes) return refuse('B', `Grok lane preference permits at most ${preferences.maxGrokLanes} lanes.`);
       if (policy && !policy.engines.includes('grok-cli')) return escalate('The grant does not list grok-cli.', true);
       return slots <= LEADER_LIMITS.grokLanes.maxClassA ? ok('A', true) : ok('B', true);
     }
@@ -1242,11 +1284,13 @@ async function executeAction(deps: LeaderApplyDeps, action: LeaderAction): Promi
       };
     }
     case 'goal.create': {
-      const listed = deps.goals.list();
-      if (!listed.complete) return { status: 'refused', reason: 'The goal list could not be read completely.' };
-      const open = listed.goals.filter(isOpenGoal).length;
-      if (open >= LEADER_LIMITS.maxActiveGoals) {
-        return { status: 'refused', reason: `${open} goals are already open (limit ${LEADER_LIMITS.maxActiveGoals}).` };
+      // No await between this fresh policy/classification and atomic per-goal
+      // install. This is not a cross-process global quota transaction.
+      const ctx = buildPolicyContext(deps, []);
+      discountScheduledGoal(ctx, action);
+      const classification = classifyLeaderAction(action as unknown as AnyLeaderActionDraft, ctx);
+      if (isLeaderDryRun(ctx.policy) || !ctx.policy!.leader.classes.includes('B') || classification.verdict !== 'ok') {
+        return { status: 'refused', reason: classification.reason ?? 'Autonomous class B authority is no longer granted for goal creation.' };
       }
       const target = resolveGoalProject(action.params.goal.targetRepo, deps.goals.enrolledRepos());
       if ('refuse' in target) return { status: 'refused', reason: target.refuse };
@@ -1290,6 +1334,11 @@ async function executeAction(deps: LeaderApplyDeps, action: LeaderAction): Promi
       return applyDirectivesChange(deps, (d) => ({ ...d, routerTuning: { ...(d.routerTuning ?? {}), ...tuning } }));
     }
     case 'lanes.grok': {
+      const ctx = buildPolicyContext(deps, []);
+      const classification = classifyLeaderAction(action as unknown as AnyLeaderActionDraft, ctx);
+      if (isLeaderDryRun(ctx.policy) || classification.verdict !== 'ok' || classification.class === 'C' || !ctx.policy!.leader.classes.includes(classification.class)) {
+        return { status: 'refused', reason: classification.reason ?? 'Signed Leader authority is no longer granted for the lane change.' };
+      }
       const slots = action.params.slots;
       return applyDirectivesChange(deps, (d) => ({ ...d, grokLanes: slots }));
     }
@@ -1468,6 +1517,22 @@ async function applyScheduled(deps: LeaderApplyDeps, stored: StoredLeaderAction)
   return applyClaimed(deps, claimed);
 }
 
+/** A delayed create is counted as a reservation only inside the observation window. */
+function discountScheduledGoal(ctx: LeaderPolicyContext, action: LeaderAction): void {
+  if (ctx.goalCreatesLast24h !== null && action.status === 'scheduled' && ctx.scheduledGoalCreateActionIdsLast24h?.includes(action.id)) {
+    ctx.goalCreatesLast24h = Math.max(0, ctx.goalCreatesLast24h - 1);
+  }
+}
+
+function goalCreateCountTime(action: LeaderAction): number {
+  return Date.parse(action.status === 'applied' ? action.appliedAt ?? '' : action.createdAt);
+}
+
+function readLiveGoalPreferences(deps: LeaderApplyDeps): ResolvedGoalPreferences {
+  try { return deps.goalPreferences?.() ?? resolveGoalPreferences(); }
+  catch { return unavailableGoalPreferences(); }
+}
+
 /** Build the policy context from live state (the only impure part of planning). */
 export function buildPolicyContext(deps: LeaderApplyDeps, hypothesisIds: readonly string[]): LeaderPolicyContext {
   const nowMs = deps.now();
@@ -1480,13 +1545,17 @@ export function buildPolicyContext(deps: LeaderApplyDeps, hypothesisIds: readonl
   }
   const dayAgo = nowMs - 86_400_000;
   const read = readActionStoreDetailed();
-  // An unreadable store is an UNKNOWN tally, not zero: count it as the daily
-  // limit so goal.create fails closed rather than slipping past it.
-  const creates = !('store' in read)
-    ? LEADER_LIMITS.maxNewGoalsPerDay
+  // Unknown history stays unknown. A finite daily preference requires the
+  // whole window; explicit null skips only that business quota, never ledger,
+  // claim, grant or goal-store mutation checks.
+  const creates = !('store' in read) || read.store.goalCreateHistoryCompleteFrom === null
+    || (read.store.goalCreateHistoryCompleteFrom ?? Infinity) > dayAgo
+    || read.store.actions.some((s) => s.action.kind === 'goal.create' && (s.action.status === 'applied' || s.action.status === 'scheduled')
+      && (!knownGoalCount(goalCreateCountTime(s.action)) || goalCreateCountTime(s.action) > nowMs))
+    ? null
     : read.store.actions.filter((s) => s.action.kind === 'goal.create'
       && (s.action.status === 'applied' || s.action.status === 'scheduled')
-      && Date.parse(s.action.createdAt) >= dayAgo).length;
+      && goalCreateCountTime(s.action) >= dayAgo).length;
   let budgetMode: BudgetMode = 'balanced';
   try {
     budgetMode = deps.budget.load().mode;
@@ -1499,6 +1568,11 @@ export function buildPolicyContext(deps: LeaderApplyDeps, hypothesisIds: readonl
     codex: deps.codexReadiness(),
     openGoalCount,
     goalCreatesLast24h: creates,
+    scheduledGoalCreateActionIdsLast24h: creates === null || !('store' in read) ? [] : read.store.actions
+      .filter((s) => s.action.kind === 'goal.create' && s.action.status === 'scheduled' && goalCreateCountTime(s.action) >= dayAgo)
+      .map((s) => s.action.id),
+    goalPreferences: readLiveGoalPreferences(deps),
+    leaderPreferences: (() => { try { return deps.leaderPreferences?.() ?? resolveLeaderPreferences(); } catch { return unavailableLeaderPreferences(); } })(),
     hypothesisIds,
     powers: powersContextOf(deps.powers),
   };
@@ -1525,7 +1599,7 @@ export async function enactLeaderActions(
     const localCtx: LeaderPolicyContext = {
       ...ctx,
       openGoalCount: ctx.openGoalCount === null ? null : ctx.openGoalCount + pendingCreates,
-      goalCreatesLast24h: ctx.goalCreatesLast24h + pendingCreates,
+      goalCreatesLast24h: ctx.goalCreatesLast24h === null ? null : ctx.goalCreatesLast24h + pendingCreates,
     };
     let action = planLeaderAction(drafts[i]!, { id: opts.idFor(i), memoId, createdAtMs: ctx.nowMs }, localCtx);
     if (action.kind === 'goal.create' && action.status === 'scheduled') pendingCreates += 1;
@@ -1612,7 +1686,7 @@ async function scheduledApplyRefusal(deps: LeaderApplyDeps, action: LeaderAction
   const memo = readLeaderMemo(action.memoId);
   const ctx = buildPolicyContext(deps, memo?.hypotheses.map((h) => h.id) ?? []);
   // The action itself is already counted in the 24 h create tally — do not count it twice.
-  if (action.kind === 'goal.create') ctx.goalCreatesLast24h = Math.max(0, ctx.goalCreatesLast24h - 1);
+  if (action.kind === 'goal.create') discountScheduledGoal(ctx, action);
   const again = classifyLeaderAction(action as unknown as AnyLeaderActionDraft, ctx);
   const granted = !isLeaderDryRun(ctx.policy) && again.verdict === 'ok' && again.class === 'B' && ctx.policy!.leader.classes.includes('B');
   if (!granted) {

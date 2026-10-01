@@ -13,9 +13,10 @@
  * not have would be noise, not honesty. The "Save a project" button stays —
  * pressing it surfaces the real refusal from the server, in the dialog.
  */
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import type { VerseWorkspace } from '../../../data/api-types.js';
 import { useQuery } from '../../../data/hooks.js';
+import { SAVED_PROJECTS_GROUP, setSidebarGroupCollapsed, useSidebarCollapse } from '../chat/sidebar-collapse-pref.js';
 import { PlusIcon } from '../verse-icons.js';
 import { verseWorkspacesQuery } from '../verse-queries.js';
 import { workspacePrimary, workspaceSummary } from '../workspace-model.js';
@@ -23,6 +24,9 @@ import { SavedProjectDialog } from './SavedProjectDialog.js';
 import styles from './SavedProjects.module.css';
 
 export function SavedProjects() {
+  const listId = useId();
+  const countId = useId();
+  const collapsed = useSidebarCollapse().has(SAVED_PROJECTS_GROUP);
   const query = useQuery(verseWorkspacesQuery);
   const workspaces = query.data?.workspaces ?? [];
   const [editing, setEditing] = useState<{ open: boolean; workspace: VerseWorkspace | null }>(
@@ -32,7 +36,13 @@ export function SavedProjects() {
   return (
     <section className={styles.projects} aria-label="Saved projects">
       <h2 className={styles.head}>
-        <span className={styles.headText}>Projects</span>
+        <button type="button" className={styles.toggle} aria-expanded={!collapsed} aria-controls={listId}
+          aria-label="Projects" aria-describedby={countId} onClick={() => setSidebarGroupCollapsed(SAVED_PROJECTS_GROUP, !collapsed)}>
+          <span className={styles.twist} data-open={!collapsed || undefined} aria-hidden="true" />
+          <span className={styles.headText}>Projects</span>
+          <span className={styles.count} aria-hidden="true">{workspaces.length}</span>
+          <span id={countId} className="visually-hidden">{workspaces.length} saved {workspaces.length === 1 ? 'project' : 'projects'}</span>
+        </button>
         <button
           type="button"
           className={styles.add}
@@ -44,6 +54,7 @@ export function SavedProjects() {
         </button>
       </h2>
 
+      <div id={listId} hidden={collapsed}>
       {workspaces.length > 0 ? (
         <ul className={styles.list}>
           {workspaces.map((workspace) => {
@@ -69,6 +80,8 @@ export function SavedProjects() {
       ) : query.status === 'error' ? null : (
         <p className={styles.empty}>No saved projects yet. Press + to keep a folder you work in.</p>
       )}
+
+      </div>
 
       <SavedProjectDialog
         open={editing.open}

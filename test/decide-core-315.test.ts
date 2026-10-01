@@ -54,6 +54,8 @@ beforeEach(() => {
   delete process.env[TYPESAFE_DISABLE_ENV];
   delete process.env[JEV_DISABLE_ENV];
   fake = installFakeTypeSafe();
+  // Fake model has no published tariff: accounting fixtures explicitly supply operator rates.
+  writeJevConfig({ inputUsdPerMTok: 0.5, outputUsdPerMTok: 2 });
 });
 
 afterEach(() => {

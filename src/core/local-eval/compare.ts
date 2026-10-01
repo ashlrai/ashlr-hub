@@ -139,6 +139,7 @@ function checkReport(value: unknown): CheckedReport {
 const limitations = [
   'Comparison uses recorded CLI usage and checker exits, not provider billing or independent receipt authentication.',
   'Cold/warm control is operator-recorded. Matching metadata does not prove runtime isolation or a causal optimization.',
+  'Credential-redacted command metadata does not establish complete process or account identity.',
   'These paired trials do not establish universal token savings, model parity, or statistical significance.',
 ];
 const refusal = (reasons: string[]): PairedReceiptComparison => ({ status: 'refused', reasons,

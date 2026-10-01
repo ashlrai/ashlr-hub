@@ -15,7 +15,9 @@
  * Nothing in this module reads secrets. Account identity is pinned by the
  * launcher command recorded in ~/.ashlr/account-connections/connections.json.
  */
+import type { ResetProvenance } from '../routing/scheduling-types.js';
 import type { TRANSIENT_EVENT_TYPE_LIST } from './transient-events.js';
+import type { ResourceLastKnownUsage } from '../resources/reading-cache-types.js';
 
 export type VerseEngine = 'claude' | 'codex' | 'grok' | 'local' | 'devin';
 
@@ -82,6 +84,8 @@ export interface VerseSeat {
    * at all — `health.state` says what it does know.
    */
   capacity?: VerseSeatCapacity;
+  /** Display-only prior usage. Kept outside capacity/health and never admission or credit evidence. */
+  lastKnownUsage?: ResourceLastKnownUsage;
   /**
    * V3.9 ADDITIVE. The version of the CLI binary this seat is PINNED to (its
    * native-profile launcher execs one exact file). Absent when unknown and on
@@ -209,13 +213,15 @@ export interface VerseSeatHealth {
 
 /** One provider-reported quota window, as carried on a seat. */
 export interface VerseSeatWindow {
+  /** Advisory provider period, outside canonical resource observations. */
+  resetProvenance?: ResetProvenance;
   id: string;
   /** Provider-reported percent, or null for NO SIGNAL — which is not zero. */
   usedPercent: number | null;
   /**
-   * Machine-readable reset instant. STRUCTURALLY ALWAYS NULL for Claude: that
-   * provider publishes only a sentence, which lives in `resetDescription` and
-   * is rendered verbatim. The server never synthesizes an instant from it.
+   * Machine-readable provider reset. Legacy Claude prose stays null; a
+   * qualified current native structured usage reply may supply its actual
+   * deadline. The server never synthesizes an instant from prose.
    * (3.10.1: the Command burn-down chart may place the reset on its time axis
    * via `resetInstantFromWords` in web-ui command-model, but only for the
    * collector's exact "Mon D at H:MMam (Area/Zone)" form and only when the
@@ -243,6 +249,8 @@ export interface VerseSeatCredits {
   unlimited: boolean;
   /** Provider-reported decimal string, kept verbatim — never rounded. */
   balance: string | null;
+  /** Native spend-control state; unknown is not permission to spend. */
+  spendControlReached?: boolean | null;
 }
 
 /**
@@ -278,6 +286,8 @@ export interface VerseSeatCapacity {
   windows: VerseSeatWindow[];
   /** Codex only; null for every other provider and when no signal exists. */
   credits: VerseSeatCredits | null;
+  /** Original native credit-reading expiry; never renewed by cached display. */
+  creditsExpiresAt?: string | null;
   usability: VerseSeatUsability;
   observedAt: string | null;
   evidenceSource: VerseSeatEvidenceSource;
@@ -934,7 +944,16 @@ export interface VerseLocalRuntimeSummary {
 }
 
 /** GET /api/verse/bootstrap */
+/** Read-only initial metadata progress; never authentication or dispatch authority. */
+export interface VerseAccountTelemetryProgress {
+  refreshing: boolean;
+  /** Supported native accounts still waiting for their initial metadata result. */
+  pendingAccountIds: string[];
+}
+
 export interface VerseBootstrap {
+  /** Optional progress from a later seats-only read; absent on older servers. */
+  accountTelemetry?: VerseAccountTelemetryProgress;
   seats: VerseSeat[];
   projects: VerseProject[];
   sessions: VerseSession[];
@@ -952,6 +971,8 @@ export interface VerseBootstrap {
  * always reflects the collector's CURRENT state rather than a cached one.
  */
 export interface VerseSeatsResponse {
+  /** Same-root collector progress only; unsupported provider windows are never pending. */
+  accountTelemetry?: VerseAccountTelemetryProgress;
   /** When this body was built. */
   sampledAt: string;
   seats: VerseSeat[];

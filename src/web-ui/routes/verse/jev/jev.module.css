@@ -36,3 +36,9 @@
 .muted {
   color: var(--text-secondary);
 }
+.preference { margin-top: var(--space-3); font-size: var(--text-xs-size); overflow-wrap: anywhere; min-width: 0; }
+.preference > summary { cursor: pointer; width: fit-content; }
+.preference > summary:focus-visible { outline: 2px solid var(--focus-ring, var(--accent-500)); outline-offset: 2px; }
+.preferenceForm { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); }
+.preferenceForm > input { width: min(100%, 12rem); box-sizing: border-box; }
+.preferenceChoice { display: flex; align-items: center; gap: var(--space-2); }

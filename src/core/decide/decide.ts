@@ -32,7 +32,8 @@ import {
 import { cacheGet, cacheKey, cacheSet } from './cache.js';
 import {
   classifierKilledByEnv,
-  estimateCostUsd,
+  costEstimate,
+  validTokenCount,
   jevKilledByEnv,
   paidCallsToday,
   readJevConfig,
@@ -129,7 +130,7 @@ async function askJev(
     if (hit) return { ok: true, result: hit, cached: true, called: false };
   }
 
-  if (paidCallsToday() >= jc.dailyCallBudget) return { ok: false, reason: 'budget-exhausted', called: false };
+  if (jc.dailyCallBudget !== null && paidCallsToday() >= jc.dailyCallBudget) return { ok: false, reason: 'budget-exhausted', called: false };
 
   const cfg = opts.cfg ?? (await defaultCfg());
   const result = await askTypeSafe(
@@ -196,9 +197,10 @@ interface Accounting {
 function record<T>(decision: Decision<T>, acct: Accounting): void {
   if (decision.path === 'fallback' && decision.reason && UNRECORDED_REASONS.has(decision.reason)) return;
   try {
-    const inputTokens = acct.called ? acct.usage?.inputTokens : undefined;
-    const outputTokens = acct.called ? acct.usage?.outputTokens : undefined;
+    const inputTokens = acct.called && validTokenCount(acct.usage?.inputTokens) ? acct.usage?.inputTokens : undefined;
+    const outputTokens = acct.called && validTokenCount(acct.usage?.outputTokens) ? acct.usage?.outputTokens : undefined;
     const label = shortLabel(decision.value);
+    const cost = inputTokens !== undefined && outputTokens !== undefined ? costEstimate(inputTokens, outputTokens, readJevConfig(), decision.model) : null;
     recordDecision({
       ts: new Date().toISOString(),
       kind: decision.kind,
@@ -213,9 +215,7 @@ function record<T>(decision: Decision<T>, acct: Accounting): void {
       ...(decision.model ? { model: decision.model } : {}),
       ...(inputTokens !== undefined ? { inputTokens } : {}),
       ...(outputTokens !== undefined ? { outputTokens } : {}),
-      ...(inputTokens !== undefined && outputTokens !== undefined
-        ? { estCostUsd: estimateCostUsd(inputTokens, outputTokens) }
-        : {}),
+      ...(cost ? { estCostUsd: cost.usd, costSource: cost.source } : {}),
       durationMs: decision.durationMs,
     });
   } catch {

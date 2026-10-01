@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createResourceConnectionMonitor, validateResourceConnectionConfig,
+import { createResourceConnectionMonitor, validateResourceConnectionConfig, expireConnectionRow,
   type ResourceConnectionConfig, type ResourceConnectionMonitor } from '../src/core/resources/connection-monitor.js';
 import { createNativeMetadataCoordinator } from '../src/core/resources/metadata-coordinator.js';
 
@@ -83,6 +83,65 @@ describe('native metadata monitoring', () => {
     expect(probes.codex).toHaveBeenCalledTimes(24); expect(peak).toBe(2);
     const duplicate = { ...large, accounts: [...large.accounts, large.accounts[0]!] };
     expect(() => validateResourceConnectionConfig(duplicate)).toThrow();
+  });
+
+  it.each(['failed', 'timed-out'] as const)('publishes fast later accounts while an earlier 20s %s probe is pending', async (status) => {
+    let active = 0; let peak = 0;
+    const started = Date.now();
+    const completed = new Map<string, number>();
+    const delayed = <T>(id: string, value: T, delay: number): Promise<T> => {
+      active++; peak = Math.max(peak, active);
+      return new Promise((resolve) => setTimeout(() => {
+        active--; completed.set(id, Date.now() - started); resolve(value);
+      }, delay));
+    };
+    const roster = config(['claude', 'codex', 'grok', 'codex']);
+    probes.claude.mockImplementation(() => delayed('slow', { status, reason: 'usage-probe-unavailable' }, 20_000));
+    probes.codex.mockImplementation(({ workerId }: { workerId: string }) => delayed(workerId, codex(), 10));
+    probes.grok.mockImplementation(() => delayed('grok-2', grok(), 10));
+    const handle = start({ config: roster });
+    try {
+      await vi.advanceTimersByTimeAsync(30);
+      const snapshot = handle.snapshot();
+      expect(snapshot.refreshing).toBe(true);
+      expect(snapshot.accounts[0]).toMatchObject({ state: 'checking', authentication: 'unknown', windows: [] });
+      // Each free native slot advances independently: a slow or eventually
+      // failed provider must not hide another provider's completed metadata.
+      for (const row of snapshot.accounts.slice(1)) expect(row).toMatchObject({
+        state: 'observed', authentication: 'signed-in', windows: quota(),
+      });
+      expect([...completed.entries()]).toEqual([['codex-1', 10], ['grok-2', 20], ['codex-3', 30]]);
+      expect(peak).toBe(2); expect(active).toBe(1);
+      expect(probes.claude).toHaveBeenCalledOnce();
+      expect(probes.codex).toHaveBeenCalledTimes(2); expect(probes.grok).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(19_970);
+      expect(handle.snapshot()).toMatchObject({ refreshing: false, accounts: [
+        { state: 'unavailable', authentication: 'unknown', windows: [], reason: 'usage-probe-unavailable' },
+        { state: 'observed' }, { state: 'observed' }, { state: 'observed' },
+      ] });
+      expect(active).toBe(0); expect(peak).toBe(2);
+    } finally {
+      // Complete the inert delayed fixture even if a latency assertion fails.
+      // Monitor close still awaits every owned probe; the test must not leak it.
+      const closing = handle.close();
+      await vi.advanceTimersByTimeAsync(20_000);
+      await closing;
+    }
+  });
+
+  it('qualifies only current structured Claude quota, and expires it without retaining native identity', async () => {
+    const windows = [
+      { id: 'five_hour', usedPercent: 0, resetsAt: '2026-09-08T15:00:00.000Z', nativeReport: { source: 'claude-usage-structured', resetDescription: null } },
+      { id: 'seven_day', usedPercent: 28.5, resetsAt: '2026-09-10T12:00:00.000Z', nativeReport: { source: 'claude-usage-structured', resetDescription: null },
+        resetProvenance: { kind: 'weekly-deadline', at: '2026-09-10T12:00:00.000Z', source: 'claude-native-usage-report', plan: 'max', description: null } },
+    ];
+    probes.claude.mockResolvedValue({ ...claude(), accountHint: HINT, quotaFresh: true, windows });
+    const handle = start({ config: config(['claude']) }); await settle();
+    expect(handle.snapshot().accounts[0]).toMatchObject({ health: 'reachable', windows, observedAt: NOW, expiresAt: EXPIRES });
+    expect(JSON.stringify(handle.snapshot())).not.toContain(HINT);
+    probes.claude.mockResolvedValue({ status: 'timed-out', reason: 'probe-timed-out' });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(handle.snapshot().accounts[0]).toMatchObject({ health: 'unavailable', windows: [], observedAt: null });
   });
 
   it('keeps a verified Codex window for display across transient failures, without renewing its expiry or auth', async () => {
@@ -355,5 +414,27 @@ describe('native metadata monitoring', () => {
     }));
     const handle = start({ config: config(['grok']) }); await settle(); await handle.close();
     expect(cancelled).toBe(true); await vi.advanceTimersByTimeAsync(90_000); expect(probes.grok).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe('current Codex credits publication', () => {
+  it('publishes each native account balance independently and clears it on failure, expiry and stop', async () => {
+    const credits = { hasCredits: true, unlimited: false, balance: '123.456789', spendControlReached: false };
+    probes.codex.mockResolvedValueOnce({ ...codex(), credits });
+    const handle = start({ config: config(['codex']) }); await settle();
+    expect(handle.snapshot().accounts[0]?.codexCredits).toEqual(credits);
+    probes.codex.mockResolvedValue({ status: 'failed', reason: 'probe-provider-error' });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'unavailable', codexCredits: null, windows: quota() });
+    expect(expireConnectionRow({ ...handle.snapshot().accounts[0]!, codexCredits: credits }, Date.parse(EXPIRES))).toMatchObject({ codexCredits: null, windows: [] });
+    await handle.close(); expect(handle.snapshot().accounts[0]?.codexCredits).toBeNull();
+  });
+  it('does not reuse positive credits when the next successful native response omits them', async () => {
+    probes.codex.mockResolvedValueOnce({ ...codex(), credits: { hasCredits: true, unlimited: false, balance: '12' } });
+    const handle = start({ config: config(['codex']) }); await settle();
+    expect(handle.snapshot().accounts[0]?.codexCredits?.balance).toBe('12');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(handle.snapshot().accounts[0]?.codexCredits).toBeNull();
   });
 });

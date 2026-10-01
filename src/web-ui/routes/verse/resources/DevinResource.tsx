@@ -129,7 +129,7 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
   return (
     <li className={styles.card} data-resource="devin" data-devin={status.state}>
       <div className={styles.cardHead}>
-        <MonogramTile monogram="Dv" engine={null} size="sm" />
+        <MonogramTile monogram="Dv" engine="devin" size="sm" />
         <h4 className={styles.cardName}>
           <span>Devin</span>
           <span className={styles.plan}>{status.principalName ?? 'Cognition'}</span>
@@ -150,6 +150,7 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
         <>
           <p className={styles.creditsHead}>
             <span className={styles.creditsAmount}>{formatAcu(budget.acuRemaining)} of {formatAcu(budget.acuBudgetTotal)} left</span>
+            <span className={styles.pill} data-tone="neutral" title="Your configured allowance minus tracked ACU usage; not a provider-reported remaining balance.">tracked budget</span>
             {budget.paused ? <span className={styles.pill} data-tone="warning">paused</span> : null}
           </p>
           <div className={styles.meter} data-level={level} data-single>

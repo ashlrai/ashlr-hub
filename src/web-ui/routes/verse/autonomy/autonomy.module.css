@@ -103,6 +103,21 @@
 
 /* --- caps --------------------------------------------------------------- */
 .capGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-4) var(--space-5); }
+.goalNote { max-width: 68ch; margin-bottom: var(--space-4); color: var(--text-secondary); font-size: var(--text-sm-size); line-height: var(--text-base-line); }
+.goalSummary { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); cursor: pointer; }
+.goalSummaryLabel { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.goalChevron { flex: none; color: var(--text-tertiary); }
+.goalDisclosure[open] .goalChevron { transform: rotate(90deg); }
+.goalSummary:focus-visible { outline: 2px solid var(--border-focus); outline-offset: var(--space-1); }
+.goalDisclosure[open] .goalSummary { margin-bottom: var(--space-4); }
+.goalFields { min-width: 0; padding: 0; margin: 0; border: 0; }
+.goalLabel { font-family: var(--font-display); font-size: var(--text-sm-size); font-weight: var(--font-weight-medium); color: var(--text-primary); }
+.goalChoice { display: flex; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-1); color: var(--text-secondary); font-size: var(--text-xs-size); line-height: var(--text-xs-line); }
+.goalChoice input { flex: none; accent-color: var(--text-primary); }
+.goalChoice input:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; }
+.goalActions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-4); }
+.goalFocus { margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--border-subtle); }
+.goalFocus p { max-width: 68ch; margin-top: var(--space-2); }
 .cap { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
 .capLabel { font-family: var(--font-display); font-size: var(--text-2xs-size, 11px); letter-spacing: var(--tracking-label, 0.06em); text-transform: uppercase; color: var(--text-tertiary); }
 .capRow { display: flex; align-items: center; gap: var(--space-2); }

@@ -9,6 +9,134 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.22.0] — 2026-10-01
+
+### Added
+
+- Load account-bound last-known usage immediately from a private cache, with
+  gray historical meters and original timestamps while fresh readings load.
+  History never supplies account readiness or autonomous spending admission.
+- Add lazy execution-case timelines joining exact attempts to bound verification,
+  canonical GitHub PRs, authenticated merges, and recorded follow-up results.
+  CI and local suite coverage remain separate; deployment remains unrecorded.
+- Separate account-bound captured gift and purchased credit pools in expandable
+  resource details. Preserve exact dollars, original capture time and expiration;
+  distinguish historical captures from native balances and operator estimates.
+
+- Show current account-checked Codex credit units separately from subscription
+  windows, including held or unknown spending status. Known personal plans show
+  an explicitly estimated dollar value using a dated public reference; balances
+  are not invoices or attributed task costs.
+- Add expandable Fleet execution feedback from actual completed dispatch
+  records. Separate producer success, failure, cancellation and refusal from
+  recorded proposals, verified delivery and shipping. Partial coverage stays
+  visible; opening details uses a shared background read without a model call.
+- Feed exact no-proposal failures into stable recorded retros and the Leader's
+  existing planning loop. Replayed attempts do not multiply lessons; conflicting
+  outcomes and incomplete proposal inventories remain qualified observations.
+
+### Fixed
+
+- Bind native Grok fleet execution to the actual selected account, including
+  confined runs, retries and repairs. Recheck current account identity, Stop,
+  grant and headroom immediately before each selected native launch.
+- Keep a failed preparation or cancellation from reusing a previous selected
+  task context. Match deadline-fit boundaries between routing and Jev advice.
+- Preserve current credit expiry and explicit provider spending holds in the
+  resource display instead of calling every exhausted subscription Spent.
+- Synchronize complete private account-roster fixtures, Grok reset provenance
+  and browser-safe type imports with the production contracts.
+
+## 3.20 workbench changes — included in 3.22.0
+
+### Added
+
+- Add reset-aware choices for actual selected tasks and eligible accounts.
+  Compare observed duration quartiles against qualified provider deadlines;
+  retain ordinary routing when deadlines or compatible history are unknown.
+- Read supported Claude native structured usage with matched account, session,
+  plan and zero-inference evidence. Pro/Max weekly-all deadlines retain the
+  provider timestamp; legacy prose stays display-only and no start is guessed.
+- Estimate duration and reported tokens from completed observations matched by
+  engine, model and task kind. Label pooled account history, sample coverage
+  and recording time; never derive a token allowance from a quota percentage.
+- Add optional Jev advice among eligible task/account pairs. Send closed-set
+  metadata, keep task text and account identifiers private, and recheck account,
+  model, authority, Stop and metered availability after asynchronous advice.
+- Show scheduling evidence in existing resource details and Fleet capacity.
+  Add strict optional Jev daily-call preferences with confirmed saved readback.
+- Include a sanitized online local-runtime qualification receipt: one explicit
+  coding fixture passed its independent checker. Keep actual runtime identity,
+  token coverage and uncontrolled cache conditions distinct from requested labels.
+
+### Changed
+
+- Keep startup resource reads lightweight: scheduling details use the recorded
+  selected-batch cache without launching Jev or scanning dispatch history on GET.
+- Price recorded Jev usage only when a concrete response model has known rates
+  or the operator supplies both rates. Unknown cost stays unknown; historical
+  records are not repriced using today's model aliases.
+- Patch three transitive dependencies in the separate example site's lockfile.
+
+### Fixed
+
+- Let a later selected task use an available cloud or lane slot while an earlier
+  selected task waits for a busy local lane. Preserve result order, Stop and
+  actual local, cloud and lane concurrency limits.
+- Preserve saved control defaults beyond 64 seats. Validate and atomically write
+  the whole private file within a 1 MiB byte bound; unsafe, malformed or oversized
+  files refuse changes instead of dropping other seats' settings.
+- Preserve per-account budget policies beyond 64 seats. Reject writes that
+  exceed the existing readable byte bound before touching the saved policy.
+- Batch completed capacity-fixture history without changing its real receipts,
+  persisted history, assertions or deadline.
+- Preserve the complete enrolled account roster in metadata and capacity
+  snapshots, removing eight-account and 64-seat truncation. Retain private-file,
+  dense-array and total-byte checks; oversized snapshots never publish a partial
+  roster or overwrite the previous snapshot.
+
+## 3.19 workbench changes — included in 3.22.0
+
+### Added
+
+- Add compact Review navigation beside Work with me and Work for me: current
+  chat changes and sources, usage, agent review, Needs you, recorded Fleet
+  decisions and the module map. Reuse existing views and preserve chats and
+  drafts; opening Review does not dispatch work.
+- Add advanced goal preferences for open goals, daily creation, memo proposals
+  and ordinary conductor cycles, plus Leader daily-run and Grok-lane
+  preferences. Positive safe integers and explicit No preference limit replace
+  the fixed business ceilings. Missing settings retain existing defaults.
+- Expose the existing local-agent evaluation harness as `ashlr benchmark`:
+  help and receipt comparison are offline; `benchmark run` explicitly invokes
+  the configured runtime. Real checker failures return failure status. Keep
+  content-bearing traces private and report usage coverage honestly.
+
+### Changed
+
+- Load account readings progressively: a slow provider no longer holds up the
+  next account. Share a short startup refresh across views, show cached readings
+  immediately and keep loading, unavailable and unknown usage distinct.
+- Keep the resource roster stable and expose usage windows, reset information
+  and freshness in expandable details. Use Devin's actual vendor mark and label
+  operator-tracked credit and ACU figures explicitly.
+- Refresh the public site with an accessible two-mode demo, a measured account
+  queue visualization, current workbench screenshots and updated search metadata.
+- Apply freshly read operator preferences consistently in planning, delayed
+  execution, routing and status. Preserve actual admitted inventory, account
+  availability, signed authority, Stop, single-flight and retry behavior.
+- Keep incomplete goal-create and daily-run history unknown. Finite preferences
+  require complete counts; explicit unlimited choices skip only the selected
+  business comparison. Recovered daily history regains coverage after the
+  affected day instead of indefinitely holding future work.
+- Merge only edited preference fields and require confirmed saved readback.
+  Preserve the separate preference to finish current work before expanding.
+
+### Fixed
+
+- Execute the benchmark's original checker source instead of the agent-writable
+  checker file. Replacing that file cannot turn a wrong answer into a pass.
+
 ## [3.18.0] — 2026-09-30
 
 ### Added

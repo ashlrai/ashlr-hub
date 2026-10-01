@@ -98,6 +98,7 @@ vi.mock('../src/core/run/engines.js', () => ({
 
 // Mock engine-registry.
 vi.mock('../src/core/run/engine-registry.js', () => ({
+  GROK_CLI_ENGINE_ID: 'grok-cli',
   resolveEngineSpec: vi.fn(() => null),
 }));
 

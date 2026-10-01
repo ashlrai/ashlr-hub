@@ -31,7 +31,8 @@ import type { CloudTaskV1 } from '../../cloud/types.js';
 import type { DevinTaskV1 } from '../../devin/types.js';
 import type { Proposal } from '../../types.js';
 import type { LeaderAction } from '../../vision/leader-types.js';
-import { diffPaths, retroFromCloud, retroFromFleet, retroFromLeader, type FleetEndInput } from './extract.js';
+import { diffPaths, retroFromCloud, retroFromFleet, retroFromLeader, retroFromExecutionFailure, type FleetEndInput } from './extract.js';
+import type { ExecutionFeedbackSnapshot } from '../../fleet/execution-feedback.js';
 import { enqueueCandidates } from './knowledge.js';
 import { RETRO_MODEL_CALLS_PER_DAY, loadRetroModel, refineRetro, type RetroModel } from './model.js';
 import { pruneRetros, readSweepState, retroExists, retroIdFor, saveRetro, writeSweepState } from './store.js';
@@ -43,6 +44,8 @@ export type SweepProposal = Pick<Proposal, 'id' | 'title' | 'summary' | 'status'
 
 export interface RetroSweepDeps {
   now(): number;
+  /** Optional exact terminal attempt source; independent of proposals/authority decisions. */
+  executionFeedback?(opts: { sinceMs: number; nowMs: number }): ExecutionFeedbackSnapshot;
   readLedger(opts: LedgerReadOptions): Promise<LedgerReadResult>;
   /** Rejected + failed inbox proposals (bounded by the reader). */
   decidedProposals(): SweepProposal[];
@@ -318,6 +321,19 @@ async function runSweep(deps: RetroSweepDeps, opts: { windowDays?: number; maxNe
   const devinTasks = deps.devinTasks;
   const devin = devinTasks ? guard('devin', () => devinTasks.call(deps)) : null;
   const leader = guard('leader', () => deps.leaderActions());
+  const feedback = deps.executionFeedback ? guard('execution-feedback', () => deps.executionFeedback!({ sinceMs: Date.parse(sinceIso), nowMs })) : null;
+  if (feedback && !feedback.view.complete) unavailable.push('execution-feedback-partial');
+  const executionRetros = (feedback?.view.cases ?? []).flatMap((item) => {
+    // No negative join when the inbox inventory is unreadable/partial. A late
+    // exact run+trajectory proposal supersedes this no-proposal learning path.
+    if (!feedback?.correlations.get(item.caseId)?.proposalJoinComplete) {
+      if (item.outcome === 'failed') unavailable.push('execution-proposal-join');
+      return [];
+    }
+    const retro = retroFromExecutionFailure(item, nowIso);
+    return retro ? [retro] : [];
+  });
+  const executionIds = new Set(executionRetros.map((r) => r.id));
 
   if (deps.primeTaskKinds) {
     // The same strings extract.ts hands classifyTaskKind (fleet: title +
@@ -328,10 +344,11 @@ async function runSweep(deps: RetroSweepDeps, opts: { windowDays?: number; maxNe
     ].map((e) => `${e.title ?? ''} ${e.summary ?? ''}`)
       .concat([...(cloud ?? []), ...((devin ?? []) as ReadonlyArray<{ title?: string; prompt?: string }>)]
         .map((t) => `${t.title ?? ''} ${t.prompt ?? ''}`));
-    await deps.primeTaskKinds(texts).catch(() => undefined);
+    if (texts.length > 0) await deps.primeTaskKinds(texts).catch(() => undefined);
   }
 
-  const all = collectRetros({ ledger, inbox, cloud, devin, leader, load: (id) => deps.loadProposal(id), sinceIso, nowIso });
+  const all = [...collectRetros({ ledger, inbox, cloud, devin, leader, load: (id) => deps.loadProposal(id), sinceIso, nowIso }), ...executionRetros]
+    .sort((a, b) => b.endedAt.localeCompare(a.endedAt) || a.id.localeCompare(b.id));
   let uses: ReadonlyMap<string, { ref: PlaybookRef }> | null = null;
   const fleetPlaybook = async (proposalId: string): Promise<PlaybookRef | undefined> => {
     if (!deps.playbookUses) return undefined;
@@ -356,16 +373,17 @@ async function runSweep(deps: RetroSweepDeps, opts: { windowDays?: number; maxNe
     fresh.push(draft);
   }
   let categories: ReadonlyMap<string, { category: string; source: 'jev' | 'rule' }> = new Map();
-  if (deps.labelRootCauses && fresh.some((r) => r.rootCause)) {
-    categories = await deps.labelRootCauses(fresh).catch(() => new Map());
+  const refinable = fresh.filter((r) => !executionIds.has(r.id));
+  if (deps.labelRootCauses && refinable.some((r) => r.rootCause)) {
+    categories = await deps.labelRootCauses(refinable).catch(() => new Map());
   }
   for (const draft of fresh) {
     const cat = draft.rootCause ? categories.get(draft.id) : undefined;
     const categorized: RetroV1 = cat && draft.rootCause
       ? { ...draft, rootCause: { ...draft.rootCause, category: cat.category, categorySource: cat.source } }
       : draft;
-    let retro = categorized.source === 'fleet' ? withPlaybookRef(categorized, await fleetPlaybook(categorized.taskId)) : categorized;
-    if (deps.model && calls < RETRO_MODEL_CALLS_PER_DAY && retro.rootCause && retro.source !== 'leader') {
+    let retro = categorized.source === 'fleet' && !executionIds.has(categorized.id) ? withPlaybookRef(categorized, await fleetPlaybook(categorized.taskId)) : categorized;
+    if (deps.model && calls < RETRO_MODEL_CALLS_PER_DAY && retro.rootCause && retro.source !== 'leader' && !executionIds.has(retro.id)) {
       calls += 1;
       const refined = await refineRetro(retro, deps.model, nowIso);
       if (refined !== retro) modelRefined += 1;
@@ -395,7 +413,7 @@ async function runSweep(deps: RetroSweepDeps, opts: { windowDays?: number; maxNe
 
 /** The production sources, loaded lazily so importing this module stays cheap. */
 export async function loadDefaultRetroSweepDeps(cfg: unknown): Promise<RetroSweepDeps> {
-  const [ledger, inbox, cloudStore, devinStore, leaderApply, model, playbookStore] = await Promise.all([
+  const [ledger, inbox, cloudStore, devinStore, leaderApply, model, playbookStore, feedback] = await Promise.all([
     import('../../authority/ledger.js'),
     import('../../inbox/store.js'),
     import('../../cloud/store.js'),
@@ -403,9 +421,11 @@ export async function loadDefaultRetroSweepDeps(cfg: unknown): Promise<RetroSwee
     import('../../vision/leader-apply.js'),
     loadRetroModel(cfg),
     import('../../playbooks/store.js'),
+    import('../../fleet/execution-feedback.js'),
   ]);
   return {
     now: () => Date.now(),
+    executionFeedback: (opts) => feedback.readExecutionFeedbackSnapshot(opts),
     readLedger: (opts) => ledger.readLedger(opts),
     // Bounded reads: the sweep can run inside the Verse sidecar, whose one
     // thread serves every route, so it never reads the whole inbox at once.

@@ -76,6 +76,91 @@ parsing, public projections, queues, and caches remain necessary to handle
 malformed input and backpressure. They should report partial coverage rather
 than pretend an unexamined account or omitted tool does not exist.
 
+## Operator goal and Leader preferences
+
+Version 3.19 source replaces Leader's fixed business quotas with two compact
+advanced sections in the existing capacity settings. The primary workspaces stay
+**Work with me** and **Work for me**. Guiding a session and supervising delegated
+work share evidence and navigation; selecting a workspace does not start a fleet.
+
+| Configuration | Preference | Default when absent |
+| --- | --- | --- |
+| `foundry.goalPreferences.maxOpenGoals` | Open goals | 4 |
+| `foundry.goalPreferences.maxNewGoalsPerDay` | New goals in the last 24 hours | 3 |
+| `foundry.goalPreferences.maxGoalProposalsPerMemo` | Goal proposals per memo | 3 |
+| `foundry.goalPreferences.maxGoalsPerConductorCycle` | Goals considered per ordinary conductor cycle | 3 |
+| `foundry.leaderPreferences.maxFullRunsPerDay` | Full Leader runs per day | 3 |
+| `foundry.leaderPreferences.maxTotalRunsPerDay` | All Leader runs per day | 8 with check-ins enabled; otherwise 3 |
+| `foundry.leaderPreferences.maxGrokLanes` | Requested Grok lanes | 4 |
+
+Every preference accepts a positive safe integer or explicit `null`, displayed
+as **No preference limit**. Missing fields preserve existing defaults. Partial
+updates merge only edited fields into freshly read configuration. Invalid or
+unreadable policy is unavailable, never unlimited. Finite goal and daily-run
+preferences require complete observed counts; an explicit unlimited preference
+skips only that comparison and preserves unknown counts as unknown.
+
+The separate **Prefer finishing current work before expanding** control retains
+goal-focus scheduling. Choosing an unlimited goal preference does not silently
+disable it. Grok directive `null` still means its existing two-lane default; the
+operator's unlimited preference is a different setting. Requested work still
+uses actual admitted seats, provider capacity, signed classes, cancellation,
+claim/replay checks and backoff. The signed one-shot conductor remains one goal,
+one milestone and zero retries. No setting allocates workers from an unbounded
+number or changes a live account, grant or service merely by displaying it.
+
+## Evidence without a new dispatch gate
+
+Treat benchmarks and evals as inspectable evidence for the engineer. Regression
+checks verify the product's behavior; an optimization score does not become an
+extra requirement for an otherwise admitted agent to work.
+
+The existing chat transcript exposes reported tools and context evidence. The
+Changes surface uses actual Git or turn checkpoint bases for base/head review.
+Local evaluation records checker exits, configuration, task identity, token
+coverage and optional private wire traces. The installed CLI exposes this
+harness through `ashlr benchmark`. Help and saved-receipt comparison are offline:
+
+```sh
+ashlr benchmark --help
+ashlr benchmark --compare-reports BASELINE.json CANDIDATE.json
+```
+
+These commands launch no model. Matching tasks, model/runtime configuration, recorded cache
+protocol and token coverage are required to compare receipts. Missing usage
+stays unknown; a successful offline comparison is not an online provider test,
+invoice, authenticated receipt or universal token-savings claim. Online tests
+must record the actual engine/model/account, outcome and observed capacity.
+Historical baselines remain dated evidence until rerun on the current runtime.
+
+To explicitly run one local-agent trial against the configured runtime:
+
+```sh
+ashlr benchmark run --task multi-file-rename --trials 1 --concurrency 1 --out report.json
+```
+
+The command performs model work and writes a private report and trace artifacts.
+Check its exit status and the recorded checker result; a runtime error or failed
+task is not a successful benchmark. Default runs use three trials and concurrency
+two. Select settings deliberately: concurrency and cache conditions affect timing
+and comparisons. Benchmark results never become an extra fleet dispatch gate.
+
+The runner captures each trusted checker source before launching the agent and
+executes it as Node ESM source with the trial root as its working directory.
+Replacing or symlinking the forensic `check.mjs` file cannot change that checker.
+Current checkers resolve fixture paths from the working directory; checker-file
+relative imports and `import.meta.url` are unsupported. This is not an OS
+sandbox: the Node executable, inherited environment (including `NODE_OPTIONS`),
+agent-controlled fixture imports and same-user processes remain part of host
+execution. A checker exit alone is not authenticated adversarial evaluation.
+
+
+Existing OTLP export emits run metadata rather than prompts, tool arguments or
+file contents. Private local wire traces are a separate, content-bearing artifact.
+Neither feature means a Sentry account or external collector is connected.
+Use existing read-only Changes, Sources, Usage and fleet decision surfaces before
+adding a second tracing or review pipeline.
+
 ## Next source slice: richer admission explanations
 
 The current slice reuses existing cap contracts and configuration; it adds no
@@ -188,3 +273,25 @@ implementing it. Ship the current bounded preference slice with source tests,
 then verify the installed product and public
 release separately; broader provider activation follows its actual human and
 account requirements.
+
+## Recorded local qualification — 2026-10-01
+
+The exact Verse 3.19 npm candidate ran one `multi-file-rename` trial through the
+installed local Anthropic bridge and Claude CLI. The captured original checker
+passed after all three source files changed. The run took 392.453 seconds and 12
+turns; CLI-reported usage was 2,979 input, 1,638 output and 12,872 cache-read tokens.
+
+The request label was `qwen3.8:27b-q8_0`; captured runtime metadata identified
+Q8_0, four serving slots and 65,536 context tokens per slot, but returned an
+unknown model name. This was one trial with uncontrolled caches during other
+verification work. It establishes the observed end-to-end path and checker
+result. It is not a broad model benchmark, a matched speed comparison, a
+billing measurement or proof of autonomous fleet activation.
+
+The [sanitized qualification receipt](https://github.com/ashlrai/ashlr-hub/blob/master/benchmarks/local-qualification-2026-10-01.json) records the source and archive
+digests without publishing content-bearing traces. Reproduce the task with:
+
+```sh
+ashlr benchmark run --task multi-file-rename --trials 1 --concurrency 1 \
+  --model qwen3.8:27b-q8_0 --cache-state uncontrolled --out report.json
+```

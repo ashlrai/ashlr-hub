@@ -857,12 +857,15 @@ describe('release artifact contract v1', () => {
     },
   );
 
-  it('admits the three explicit Agents guides from the actual npm file report, while refusing an unapproved sibling', () => {
+  it.each([
+    { name: 'three explicit Agents guides', guides: ['docs/OPENAI-AGENTS-INTEGRATION.md', 'docs/DOTS-COMPANION.md', 'docs/AGENT-HARNESS-EVOLUTION.md'], sibling: 'docs/OPENAI-AGENTS-PRIVATE.md' },
+    { name: 'explicit reset-aware scheduling guide', guides: ['docs/RESET-AWARE-SCHEDULING.md'], sibling: 'docs/RESET-AWARE-PRIVATE.md' },
+    { name: 'explicit execution feedback guide', guides: ['docs/EXECUTION-FEEDBACK.md'], sibling: 'docs/EXECUTION-FEEDBACK-PRIVATE.md' },
+    { name: 'explicit resource evidence guide', guides: ['docs/RESOURCE-EVIDENCE.md'], sibling: 'docs/RESOURCE-EVIDENCE-PRIVATE.md' },
+  ])('admits $name from the actual npm file report, while refusing an unapproved sibling', ({ guides, sibling }) => {
     const release = fixture();
     const packagePath = join(release.packageRoot, 'package.json');
     const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
-    const guides = ['docs/OPENAI-AGENTS-INTEGRATION.md', 'docs/DOTS-COMPANION.md', 'docs/AGENT-HARNESS-EVOLUTION.md'];
-    const sibling = 'docs/OPENAI-AGENTS-PRIVATE.md';
     for (const file of [...guides, sibling]) write(join(release.packageRoot, file), '# Guide fixture\n');
     writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, files: [...packageJson.files as string[], ...guides] })}\n`);
     const packReport = (): RuntimeReleasePackFileRecord[] => {

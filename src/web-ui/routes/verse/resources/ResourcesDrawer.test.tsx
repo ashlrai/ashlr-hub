@@ -1,6 +1,6 @@
 /**
  * ResourcesDrawer.test.tsx — the Resources drawer as the operator reads it
- * (unit 3.11 C6): one card per account in the shared wording, usable first;
+ * (unit 3.11 C6): one card per account in the shared wording, stable roster order;
  * the reserve kept for Mason; Reconnect / Check again through the token gate;
  * local compute with verified context windows and Start / Stop; cloud credits
  * as an ESTIMATE, or "Cloud lane not available yet" while the route 404s;
@@ -14,10 +14,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SeatHealthReport } from '../../../../core/verse/health-types.js';
 import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
-import { evictAll } from '../../../data/cache.js';
+import { evictAll, runQuery } from '../../../data/cache.js';
 import { capacity, CLAUDE_TIGHT_SEAT, GROK_SEAT, LOCAL_SEAT_V2, nativeSeat, seatWindow } from '../seat-fixtures.test-support.js';
 import { resetGuard } from '../shell/guarded-action.js';
-import { getVerseUiState, resetVerseUi } from '../verse-ui-store.js';
+import { getVerseUiState, resetVerseUi, setVerseActiveSession } from '../verse-ui-store.js';
+import { verseBootstrapQuery } from '../verse-queries.js';
+import { budgetQuery } from '../budget/budget-queries.js';
+import { ResourcesBar } from './ResourcesBar.js';
 import { ResourcesDrawer } from './ResourcesDrawer.js';
 import { getResourcesUi, openResources, reloadResourcesUiForTest } from './resources-store.js';
 
@@ -147,6 +150,7 @@ let readiness: unknown;
 let localModels: unknown;
 let devin: unknown;
 let roster: unknown[];
+let budget: unknown;
 
 function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
@@ -174,7 +178,7 @@ function stubFetch() {
       case '/api/verse/health':
         return json({ checkedAt: CHECKED, seats: HEALTH });
       case '/api/verse/budget':
-        return json(BUDGET);
+        return json(budget);
       case '/api/verse/local-models':
         return json(localModels);
       case '/api/verse/budget/readiness':
@@ -202,6 +206,7 @@ beforeEach(() => {
   localModels = LOCAL_MODELS;
   devin = 404;
   roster = ROSTER;
+  budget = BUDGET;
   stubFetch();
 });
 
@@ -213,15 +218,57 @@ afterEach(() => {
 const cardOf = (label: string) => screen.getByRole('heading', { name: new RegExp(`^${label}`) }).closest('li')!;
 
 describe('ResourcesDrawer — accounts', () => {
-  it('leads every account with the shared status wording, usable first', async () => {
+  it('discloses current native credit units and qualified dollar value without admitting Fleet spending', async () => {
+    roster = [{ ...PERSONAL, capacity: { ...PERSONAL.capacity!,
+      credits: { hasCredits: true, unlimited: false, balance: '2500.0000', spendControlReached: false },
+      creditsExpiresAt: new Date(NOW + 30_000).toISOString(),
+    } }];
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    await screen.findByRole('heading', { name: /^Personal Codex/ });
+    const card = within(cardOf('Personal Codex'));
+    expect(card.getByText('Credits available')).toBeInTheDocument();
+    expect(card.getAllByText('2500.0000 credits available').length).toBeGreaterThan(0);
+    fireEvent.click(card.getByText('Usage details'));
+    expect(card.getByText(/Estimated credit value: \$100.00/)).toBeInTheDocument();
+    expect(card.getByText(/not actual purchase price or attributed spend/)).toBeInTheDocument();
+    expect(card.getByRole('link', { name: 'Published reference' })).toHaveAttribute('href', 'https://developers.openai.com/community/students');
+    expect(card.getByText('limit reached')).toBeInTheDocument();
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(0);
+  });
+
+  it('opens focusable scheduling details without extra reads, actions or changing the active chat', async () => {
+    budget = { ...BUDGET, scheduling: { sourceState: 'ready', observedAt: new Date(NOW).toISOString(), accounts: [{
+      seatId: 'codex-cmp', observedAt: CHECKED, admission: 'held', headroomPercent: 0,
+      reset: { kind: 'unknown', at: RESET, description: null, source: null },
+      opportunity: { kind: 'held', reason: 'account policy holds' }, forecast: null,
+    }] } };
+    setVerseActiveSession('existing-chat');
+    const user = userEvent.setup();
     render(<ResourcesDrawer mode="docked" now={NOW} />);
     await screen.findByRole('heading', { name: /^Cash Margin Partners/ });
-    // 3.15: grouped by TIER, never by provider. Elite: usable (CMP) → tight
-    // (Claude) → spent (Personal), with Claude's cloud credits placed by the
-    // same status rule; Fast: Grok (signed out).
+    const card = within(cardOf('Cash Margin Partners'));
+    await waitFor(() => expect(card.getByText('Held back by current account or reserve limits.')).toBeInTheDocument());
+    const summary = card.getByText('Usage details');
+    summary.focus();
+    const reads = calls.length;
+    expect(summary).toHaveFocus();
+    // Native summary keyboard activation belongs to browser acceptance; jsdom
+    // does not implement its Enter default action. Exercise native click here.
+    await user.click(summary);
+    expect(summary.closest('details')!.open).toBe(true);
+    expect(card.getByText('Reset behavior not reported.')).toBeVisible();
+    expect(card.queryByText(/Opportunity to use/)).toBeNull();
+    expect(getVerseUiState().activeSessionId).toBe('existing-chat');
+    expect(calls.length).toBe(reads);
+    expect(calls.every((c) => c.method === 'GET')).toBe(true);
+  });
+  it('keeps tier cards in roster order while leading with shared status wording', async () => {
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    await screen.findByRole('heading', { name: /^Cash Margin Partners/ });
+    // Tiers stay truthful; within each tier roster order stays fixed as readings arrive.
     const elite = within(screen.getByRole('region', { name: 'Elite' }));
     const names = elite.getAllByRole('heading', { level: 4 }).map((h) => h.textContent!.replace(/(max|pro|plus|SuperGrok|claude\.ai)$/, ''));
-    expect(names.filter((n) => n !== 'Claude cloud credits')).toEqual(['Cash Margin Partners', 'Claude Max', 'Personal Codex']);
+    expect(names.filter((n) => n !== 'Claude cloud estimate')).toEqual(['Personal Codex', 'Claude Max', 'Cash Margin Partners']);
     const fast = within(screen.getByRole('region', { name: 'Fast' }));
     expect(fast.getAllByRole('heading', { level: 4 }).map((h) => h.textContent!.replace(/SuperGrok$/, ''))).toEqual(['Grok']);
     // The same facts row on every card: tier · cost basis · models.
@@ -252,12 +299,63 @@ describe('ResourcesDrawer — accounts', () => {
     await screen.findByRole('heading', { name: /^Claude Max/ });
     await waitFor(() => expect(within(cardOf('Claude Max')).getByText('Reserved for you 40% · balanced mode')).toBeInTheDocument());
     const claude = within(cardOf('Claude Max'));
+    fireEvent.click(claude.getByText('Usage details'));
     expect(claude.getByText('92%')).toBeInTheDocument();
     expect(claude.getByText('15%')).toBeInTheDocument();
     expect(claude.getByRole('img', { name: /5-hour window: 15% used/ })).toBeInTheDocument();
     // The binding window carries the reserve in its sentence.
     expect(claude.getAllByRole('img').some((m) => /40% kept for you/.test(m.getAttribute('aria-label') ?? ''))).toBe(true);
     expect(within(cardOf('Personal Codex')).getByText('limit reached')).toBeInTheDocument();
+  });
+
+  it('shows cached account usage immediately while independent reads are still pending', async () => {
+    await runQuery(verseBootstrapQuery.key, async () => ({ seats: ROSTER, projects: [], sessions: [], dispatchEnabled: true, localRuntime: {} }));
+    await runQuery(budgetQuery.key, async () => BUDGET);
+    // No new read has finished: an already-known quota must remain useful.
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)));
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    expect(within(cardOf('Cash Margin Partners')).getByText('31%')).toBeInTheDocument();
+    expect(within(cardOf('Claude Max')).getByText('92%')).toBeInTheDocument();
+    expect(screen.queryByText('Reading accounts…')).toBeNull();
+    expect(screen.getByText('Updating readings…')).toBeInTheDocument();
+  });
+
+  it('refreshes seats, usage and every shared source independently without a status sweep or row reorder', async () => {
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    await screen.findByRole('heading', { name: /^Cash Margin Partners/ });
+    const paths = ['/api/verse/seats', '/api/verse/budget', '/api/verse/health', '/api/verse/local-models', '/api/verse/runtime', '/api/verse/cloud', '/api/verse/devin', '/api/verse/budget/readiness'];
+    await waitFor(() => expect(paths.filter((path) => path !== '/api/verse/seats').every((path) => calls.some((c) => c.url === path))).toBe(true));
+    const counts = new Map(paths.map((path) => [path, calls.filter((c) => c.url === path).length]));
+    const cardOrder = () => [...document.querySelectorAll('[data-seat]')].map((card) => card.getAttribute('data-seat'));
+    const before = cardOrder();
+    roster = [...ROSTER].reverse(); // A refresh must use the returned roster, not status sorting.
+    fireEvent.click(screen.getByRole('button', { name: 'Read everything again' }));
+    await waitFor(() => expect(paths.every((path) => calls.filter((c) => c.url === path).length > counts.get(path)!)).toBe(true));
+    expect(calls.every((c) => c.method === 'GET')).toBe(true);
+    await waitFor(() => expect(cardOrder()).toEqual(['codex-cmp', 'claude-a', 'codex-personal', 'grok']));
+    expect(cardOrder()).not.toEqual(before);
+    // Ordinary status completion on that same roster never moves a card.
+    const refreshed = cardOrder();
+    fireEvent.click(screen.getByRole('button', { name: 'Read everything again' }));
+    await waitFor(() => expect(cardOrder()).toEqual(refreshed));
+  });
+
+  it('explains absent provider usage and expands quiet details without fetching and exposes a focusable summary', async () => {
+    roster = [nativeSeat(capacity({ windows: [], binding: null, usability: 'unknown' }), { id: 'codex-no-quota', engine: 'codex', label: 'Codex without quota', accountId: 'codex-no-quota' })];
+    const user = userEvent.setup();
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    const card = within(await screen.findByRole('heading', { name: /^Codex without quota/ }).then((head) => head.closest('li')!));
+    expect(card.getByText('Usage not reported by this resource.')).toBeInTheDocument();
+    expect(card.queryByText('0%')).toBeNull();
+    const details = card.getByText('Usage details').closest('details')!;
+    expect(details.open).toBe(false);
+    const count = calls.length;
+    card.getByText('Usage details').focus();
+    expect(card.getByText('Usage details')).toHaveFocus();
+    await user.click(card.getByText('Usage details'));
+    expect(details.open).toBe(true);
+    expect(card.getByText('Connection status and usage are separate. No percentage has been supplied.')).toBeVisible();
+    expect(calls.length).toBe(count);
   });
 
   it('Reconnect opens the provider sign-in through the token gate — the seat id only', async () => {
@@ -314,7 +412,7 @@ describe('ResourcesDrawer — local', () => {
 describe('ResourcesDrawer — cloud credits', () => {
   it('says "Cloud lane not available yet" while GET /api/verse/cloud 404s', async () => {
     render(<ResourcesDrawer mode="docked" now={NOW} />);
-    const card = within(cardOf('Claude cloud credits'));
+    const card = within(cardOf('Claude cloud estimate'));
     expect(await card.findByText('Cloud lane not available yet')).toBeInTheDocument();
     expect(card.queryByText(/\$/)).toBeNull();
   });
@@ -322,7 +420,7 @@ describe('ResourcesDrawer — cloud credits', () => {
   it('shows the estimated remaining of the total, running sessions and the real-balance link', async () => {
     cloud = CLOUD;
     render(<ResourcesDrawer mode="docked" now={NOW} />);
-    const card = within(cardOf('Claude cloud credits'));
+    const card = within(cardOf('Claude cloud estimate'));
     expect(await card.findByText('$212 of $250 left')).toBeInTheDocument();
     expect(card.getByText('estimate')).toBeInTheDocument();
     expect(card.getByText('2 running · 5 of 20 today')).toBeInTheDocument();
@@ -339,12 +437,12 @@ describe('ResourcesDrawer — cloud credits', () => {
       budget: { ...CLOUD.budget, estimatedSpentUsd: 0, estimatedRemainingUsd: 250, running: 0, sessionsToday: 0 },
     };
     render(<ResourcesDrawer mode="docked" now={NOW} />);
-    const card = within(cardOf('Claude cloud credits'));
+    const card = within(cardOf('Claude cloud estimate'));
     expect(await card.findByText('Not set up')).toBeInTheDocument();
     expect(card.getByText('· ~$250 credits')).toBeInTheDocument();
     expect(card.getByText('estimate')).toBeInTheDocument();
     expect(card.getByText("The Claude seat isn't set up on this Mac.")).toBeInTheDocument();
-    expect(cardOf('Claude cloud credits').textContent).not.toMatch(/of \$250 left/);
+    expect(cardOf('Claude cloud estimate').textContent).not.toMatch(/of \$250 left/);
     expect(card.getByTitle('Cloud: not set up · ~$250 credits')).toBeInTheDocument();
     expect(card.getByRole('link', { name: /Real balance on claude\.ai/ })).toBeInTheDocument();
   });
@@ -538,14 +636,28 @@ describe('ResourcesDrawer — equal partners (3.15)', () => {
     // Cloud spends ACU credits; the CLI rides the Devin plan.
     expect(card.getByText('credits + subscription')).toBeInTheDocument();
     expect(card.getByText('10 ACUs kept for you')).toBeInTheDocument();
+    expect(card.getByText('tracked budget')).toBeInTheDocument();
+    expect(heading.closest('li')!.querySelector('svg[data-provider="devin"]')).toHaveAttribute('viewBox', '0 0 425 425');
     expect(card.getByTitle('Devin, Devin default, SWE (latest)')).toBeInTheDocument();
     // The Devin chat seats are not ALSO drawn as generic account cards.
     expect(screen.queryByRole('heading', { name: /^Devin \(cloud\)/ })).toBeNull();
     expect(screen.queryByRole('heading', { name: /^Devin \(CLI\)/ })).toBeNull();
     // Every elite card carries the same facts row.
-    for (const name of ['Cash Margin Partners', 'Claude Max', 'Personal Codex']) {
+    for (const name of ['Personal Codex', 'Claude Max', 'Cash Margin Partners']) {
       expect(within(cardOf(name)).getByText('Elite')).toBeInTheDocument();
     }
+  });
+
+  it('the rail labels tracked ACU budget and estimated cloud credits, with the real Devin mark', async () => {
+    devin = DEVIN_OVERVIEW;
+    cloud = CLOUD;
+    render(<ResourcesBar expanded />);
+    const devinButton = await screen.findByRole('button', { name: 'Devin tracked budget: 38 ACUs of 50 ACUs left. Open Resources' });
+    expect(within(devinButton).getByText('38 ACUs budget')).toBeInTheDocument();
+    expect(devinButton.querySelector('svg[data-provider="devin"]')).toHaveAttribute('viewBox', '0 0 425 425');
+    expect(devinButton.textContent).not.toMatch(/^DDevin/);
+    expect(await screen.findByText('$212 est.')).toBeInTheDocument();
+    expect(calls.every((c) => c.method === 'GET')).toBe(true);
   });
 
   it('each tier section says what the tier means, and the sections come in tier order', async () => {

@@ -33,7 +33,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const hoisted = vi.hoisted(() => ({ standing: null as null | { grantId: string } }));
+const hoisted = vi.hoisted(() => ({ standing: null as null | { grantId: string }, repairChecks:null as null | number }));
 
 vi.mock('../src/core/authority/effective-config.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/authority/effective-config.js')>();
@@ -41,6 +41,13 @@ vi.mock('../src/core/authority/effective-config.js', async (importOriginal) => {
     ...actual,
     currentStandingPolicy: () => hoisted.standing as unknown as ReturnType<typeof actual.currentStandingPolicy>,
   };
+});
+
+vi.mock('../src/core/run/completeness-gate.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/core/run/completeness-gate.js')>();
+  return {...actual,runCompletenessGate:async (opts:Parameters<typeof actual.runCompletenessGate>[0]) =>
+    hoisted.repairChecks===null ? actual.runCompletenessGate(opts) :
+      hoisted.repairChecks++===0 ? {pass:false,reason:'fixture requires one confined repair'} : {pass:true}};
 });
 
 import type { AshlrConfig, Sandbox } from '../src/core/types.js';
@@ -60,7 +67,12 @@ import {
   grokCliDirectCommand,
   grokStreamUsage,
   resolveEngineRegistry,
+  resolveGrokCliSeat,
+  configForGrokCliSeat,
 } from '../src/core/run/engine-registry.js';
+import { buildEngineCommand } from '../src/core/run/engines.js';
+import { runGoal } from '../src/core/run/orchestrator.js';
+import { buildAutonomousEnvOverlay, autonomousVendorIdentityCurrent, commitAutonomousVendorState } from '../src/core/sandbox/autonomous-env.js';
 import { engineIdForBin } from '../src/core/policy/local-only.js';
 import { prepareResourceNativeProfile } from '../src/core/resources/native-profile.js';
 import {
@@ -95,12 +107,12 @@ function tempDir(prefix: string): string {
 }
 
 beforeEach(() => {
-  hoisted.standing = null;
+  hoisted.standing = null;hoisted.repairChecks = null;
   __resetGrokCliSeatCacheForTests();
 });
 
 afterEach(() => {
-  hoisted.standing = null;
+  hoisted.standing = null;hoisted.repairChecks = null;
   for (const dir of scratch) rmSync(dir, { recursive: true, force: true });
   scratch = [];
   __resetGrokCliSeatCacheForTests();
@@ -115,10 +127,10 @@ function b64url(value: unknown): string {
 }
 
 /** A grok auth.json for one account (the shape commitAutonomousVendorState validates). */
-function grokAuth(refresh: string): string {
-  const claims = { sub: 'user-1', principal_id: 'p-1', team_id: 't-1' };
+function grokAuth(refresh: string, user = 'user-1'): string {
+  const claims = { sub: user, principal_id: 'p-1', team_id: 't-1' };
   const jwt = `${b64url({ alg: 'none' })}.${b64url(claims)}.sig`;
-  return JSON.stringify({ xai: { user_id: 'user-1', principal_id: 'p-1', team_id: 't-1', key: jwt, refresh_token: refresh } });
+  return JSON.stringify({ xai: { user_id: user, principal_id: 'p-1', team_id: 't-1', key: jwt, refresh_token: refresh } });
 }
 
 /**
@@ -491,15 +503,31 @@ describe('worktree.ts: a run admitted before KILL removes its own worktree (B-U6
 // ---------------------------------------------------------------------------
 
 describe.runIf(DARWIN && SUPPORTS_PROFILES)('runEngineSandboxed: autonomous grok-cli producer (standing policy live)', () => {
-  it('runs confined, records grok-cli:<model> and NDJSON usage, files the diff, cleans up', async () => {
+  it.each([false, true, 'repair'] as const)('runs confined with selected-account binding=%s, records model/usage and cleans up', async (bound) => {
     await withTmpHome(async (fx) => {
       const previousAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
       const previousTmpdir = process.env.TMPDIR;
       process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
       try {
         const seat = makeSeat();
+        let selectedHome = seat.nativeStatePath;
+        if (bound) {
+          const b = prepareResourceNativeProfile({ provider: 'grok', directory: join(seat.base, 'native-profiles', 'grok-b'), executable: seat.executable });
+          writeFileSync(join(b.nativeStatePath, 'auth.json'), grokAuth('b-original', 'user-b'), { mode: 0o600 });
+          writeFileSync(join(seat.accountsRoot, 'connections.json'), JSON.stringify({ schemaVersion: 1, accounts: [
+            { id: 'grok-a', provider: 'grok', command: seat.command },
+            { id: 'grok-b', provider: 'grok', command: b.command },
+          ] }), { mode: 0o600 });
+          seat.cfg.foundry!.grokCli = { accountsRoot: seat.accountsRoot, seat: 'grok-a' };
+          selectedHome = b.nativeStatePath;
+        }
         const repo = fx.makeRepo();
         repo.enroll();
+        if (bound==='repair') {
+          hoisted.repairChecks = 0;
+          seat.cfg.foundry!.completenessGate = true;
+          seat.cfg.foundry!.verifyToGreen = {enabled:true,maxIterations:1,perRunTimeoutMs:10_000};
+        }
         hoisted.standing = { grantId: 'grant-int4' };
         // Other shards can create ashlr-run-* under the system temp root while
         // this test runs. Scope the cleanup assertion to this fixture's runs.
@@ -507,24 +535,31 @@ describe.runIf(DARWIN && SUPPORTS_PROFILES)('runEngineSandboxed: autonomous grok
         mkdirSync(runTmp, { mode: 0o700 });
         process.env.TMPDIR = runTmp;
         const beforeTmp = readdirSync(realpathSync(tmpdir())).filter((n) => n.startsWith('ashlr-run-'));
-        const result = await runEngineSandboxed('grok-cli' as never, 'edit a file', seat.cfg, { sourceRepo: repo.dir, propose: true });
-        hoisted.standing = null;
+        const admission = vi.fn(() => true);
+        const result = await runEngineSandboxed('grok-cli' as never, 'edit a file', seat.cfg, { sourceRepo: repo.dir, propose: true, ...(bound ? { seatId: 'grok-b', selectedGrokAdmission:admission } : {}) });
+        expect(admission).toHaveBeenCalledTimes(bound==='repair' ? 3 : bound ? 1 : 0);
+        hoisted.standing = null;hoisted.repairChecks = null;
         expect(result.state.engineModel).toBe('grok-cli:grok-4.7');
-        expect(result.state.usage).toMatchObject({ tokensIn: 250, tokensOut: 50 });
+        expect(result.state.usage).toMatchObject({ tokensIn:bound==='repair' ? 500 : 250, tokensOut:bound==='repair' ? 100 : 50 });
+        if (bound==='repair') expect(result.state.runEventSummary?.actionCounts?.verifyRepairAttempts).toBe(1);
         expect(result.proposalOutcome, JSON.stringify({ outcome: result.proposalOutcome, result: result.state.result })).toMatchObject({ kind: 'filed' });
         const proposals = listProposals();
         expect(proposals).toHaveLength(1);
         expect(proposals[0]!.diff).toContain('+export const editedBy = "grok";');
         expect(proposals[0]!.engineModel).toBe('grok-cli:grok-4.7');
         // The token refresh reached the seat's real home; its session state did not.
-        expect(JSON.parse(readFileSync(join(seat.nativeStatePath, 'auth.json'), 'utf8')).xai.refresh_token).toBe('refreshed-token');
+        expect(JSON.parse(readFileSync(join(selectedHome, 'auth.json'), 'utf8')).xai.refresh_token).toBe('refreshed-token');
+        if (bound) {
+          expect(JSON.parse(readFileSync(join(selectedHome, 'auth.json'), 'utf8')).xai.user_id).toBe('user-b');
+          expect(JSON.parse(readFileSync(join(seat.nativeStatePath, 'auth.json'), 'utf8')).xai.refresh_token).toBe('original-token');
+        }
         expect(existsSync(join(seat.nativeStatePath, 'sessions'))).toBe(false);
         // Run dir and sandbox are gone.
         const afterTmp = readdirSync(realpathSync(tmpdir())).filter((n) => n.startsWith('ashlr-run-'));
         expect(afterTmp.filter((n) => !beforeTmp.includes(n))).toEqual([]);
         expect(listSandboxes()).toEqual([]);
       } finally {
-        hoisted.standing = null;
+        hoisted.standing = null;hoisted.repairChecks = null;
         if (previousTmpdir === undefined) delete process.env.TMPDIR;
         else process.env.TMPDIR = previousTmpdir;
         if (previousAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
@@ -532,6 +567,62 @@ describe.runIf(DARWIN && SUPPORTS_PROFILES)('runEngineSandboxed: autonomous grok
       }
     });
   });
+
+  it('rechecks the selected account after a genuine transient attempt and refuses its retry', async () => {
+    await withTmpHome(async fx => {
+      const previous = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      const seat = makeSeat();const repo = fx.makeRepo();repo.enroll();
+      writeFileSync(seat.executable,`#!${process.execPath}\nprocess.stdout.write('network error\\n');process.exit(1);\n`,{mode:0o700});
+      seat.cfg.foundry!.dispatchRetries = 1;
+      hoisted.standing = {grantId:'grant-int4'};
+      let attempts = 0;
+      const admission = vi.fn(() => attempts++===0);
+      try {
+        const result = await runEngineSandboxed('grok-cli','refuse the second spawn',seat.cfg,{sourceRepo:repo.dir,seatId:'grok-a',selectedGrokAdmission:admission});
+        expect(admission).toHaveBeenCalledTimes(2);
+        expect(result.state.runEventSummary?.actionCounts).toMatchObject({spawnAttempts:1,transientRetries:1});
+        expect(result.state.result).toContain('selected Grok account authority, profile or identity changed');
+        expect(listProposals()).toHaveLength(0);expect(listSandboxes()).toHaveLength(0);
+      } finally {
+        hoisted.standing = null;
+        if (previous===undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        else process.env.ASHLR_TEST_ALLOW_ANY_REPO = previous;
+      }
+    });
+  });
+
+  it.each(['revoked', 'unreadable', 'profile-replaced', 'identity-replaced', 'grant-ended-before-confinement'] as const)(
+    'refuses selected-account %s at the final post-setup fence without spawning or falling back', async kind => {
+      await withTmpHome(async fx => {
+        const previousAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+        const seat = makeSeat();
+        const repo = fx.makeRepo();repo.enroll();
+        hoisted.standing = kind==='grant-ended-before-confinement' ? null : {grantId:'grant-int4'};
+        const admission = vi.fn(() => {
+          if (kind==='unreadable') throw new Error('fixture unavailable');
+          if (kind==='profile-replaced') writeFileSync(seat.command[1], '#!/bin/sh\nexit 0\n', {mode:0o700});
+          if (kind==='identity-replaced') writeFileSync(join(seat.nativeStatePath,'auth.json'),grokAuth('other-token','other-user'),{mode:0o600});
+          return kind!=='revoked';
+        });
+        try {
+          const result = await runEngineSandboxed('grok-cli','should never edit',seat.cfg,{sourceRepo:repo.dir,seatId:'grok-a',selectedGrokAdmission:admission});
+          expect(admission).toHaveBeenCalledTimes(kind==='grant-ended-before-confinement' ? 0 : 1);
+          expect(result.state.runEventSummary?.actionCounts?.spawnAttempts ?? 0).toBe(0);
+          expect(result.state.result).toContain(kind==='grant-ended-before-confinement' ? 'standing authority no longer supports autonomous confinement' : 'selected Grok account authority, profile or identity changed');
+          expect(result.state.usage.tokensIn).toBe(0);
+          expect(listProposals()).toHaveLength(0);
+          expect(listSandboxes()).toHaveLength(0);
+          expect(existsSync(join(seat.nativeStatePath,'sessions'))).toBe(false);
+        } finally {
+          hoisted.standing = null;hoisted.repairChecks = null;
+          if (previousAllowAnyRepo===undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+          else process.env.ASHLR_TEST_ALLOW_ANY_REPO = previousAllowAnyRepo;
+        }
+      });
+    },
+  );
 
   it('refuses a claude producer under a standing policy (3.11 credential proxy)', async () => {
     await withTmpHome(async (fx) => {
@@ -546,7 +637,7 @@ describe.runIf(DARWIN && SUPPORTS_PROFILES)('runEngineSandboxed: autonomous grok
         expect(result.proposalOutcome?.reason).toMatch(/3\.11 credential proxy/);
         expect(listSandboxes()).toEqual([]);
       } finally {
-        hoisted.standing = null;
+        hoisted.standing = null;hoisted.repairChecks = null;
         if (previousAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
         else process.env.ASHLR_TEST_ALLOW_ANY_REPO = previousAllowAnyRepo;
       }
@@ -581,7 +672,7 @@ describe.runIf(DARWIN && SUPPORTS_PROFILES)('judge calls under a standing policy
       // GROK_HOME; confined, it wrote into the per-run copy, now deleted.
       expect(existsSync(join(seat.nativeStatePath, 'sessions'))).toBe(false);
     } finally {
-      hoisted.standing = null;
+      hoisted.standing = null;hoisted.repairChecks = null;
     }
   });
 });
@@ -614,5 +705,71 @@ describe.runIf(DARWIN)('prepareConfinedVerification (B-U3 → U2: G3 on agent co
       v.dispose();
     }
     expect(existsSync(v.runDir)).toBe(false);
+  });
+});
+
+
+describe.runIf(SUPPORTS_PROFILES)('selected Grok native account binding without provider calls', () => {
+  function twoSeats() {
+    const a = makeSeat();
+    const b = prepareResourceNativeProfile({ provider: 'grok', directory: join(a.base, 'native-profiles', 'grok-b'), executable: a.executable });
+    const auth = JSON.parse(grokAuth('b-original'));
+    auth.xai.user_id = 'user-b';
+    auth.xai.key = `${b64url({ alg: 'none' })}.${b64url({ sub: 'user-b', principal_id: 'p-1', team_id: 't-1' })}.sig`;
+    writeFileSync(join(b.nativeStatePath, 'auth.json'), JSON.stringify(auth), { mode: 0o600 });
+    writeFileSync(join(a.accountsRoot, 'connections.json'), JSON.stringify({ schemaVersion: 1, accounts: [
+      { id: 'grok-a', provider: 'grok', command: a.command },
+      { id: 'grok-b', provider: 'grok', command: b.command },
+    ] }), { mode: 0o600 });
+    a.cfg.foundry!.grokCli = { accountsRoot: a.accountsRoot, seat: 'grok-a' };
+    return { a, b };
+  }
+
+  it('uses B despite configured A and writes refresh only back to B', () => {
+    const { a, b } = twoSeats();
+    const cfg = configForGrokCliSeat(a.cfg, 'grok-b');
+    expect(a.cfg.foundry!.grokCli).toMatchObject({ seat: 'grok-a' });
+    expect(resolveGrokCliSeat(a.cfg).ok).toBe(true);
+    const command = buildEngineCommand('grok-cli', 'fixture goal', cfg, { autonomous: true, seatId: 'grok-b' })!;
+    expect(command.args[0]).toBe(b.launcherPath);
+    expect(grokCliDirectCommand(command, cfg, 'grok-a')).toBeNull();
+    const direct = grokCliDirectCommand(command, cfg, 'grok-b')!;
+    expect(direct).toMatchObject({ seatId: 'grok-b', nativeStatePath: b.nativeStatePath });
+    const root = tempDir('int4-bound-overlay-');const home = join(root, 'home');const run = join(root, 'run');
+    mkdirSync(home, { mode: 0o700 });mkdirSync(run, { mode: 0o700 });
+    const overlay = buildAutonomousEnvOverlay({ engine: 'grok-cli', home, runTmpDir: run, seatId: direct.seatId, nativeStatePath: direct.nativeStatePath });
+    expect(autonomousVendorIdentityCurrent(overlay)).toBe(true);
+    const copied = JSON.parse(readFileSync(join(overlay.set.GROK_HOME!, 'auth.json'), 'utf8'));
+    expect(copied.xai.user_id).toBe('user-b');copied.xai.refresh_token = 'b-refreshed';
+    writeFileSync(join(overlay.set.GROK_HOME!, 'auth.json'), JSON.stringify(copied));
+    expect(autonomousVendorIdentityCurrent(overlay)).toBe(true);
+    expect(commitAutonomousVendorState(overlay).committed).toEqual([join(b.nativeStatePath, 'auth.json')]);
+    expect(JSON.parse(readFileSync(join(a.nativeStatePath, 'auth.json'), 'utf8')).xai.refresh_token).toBe('original-token');
+  });
+
+  it.each(['missing', 'wrong-provider', 'changed-launcher'] as const)('refuses %s selected profile without choosing configured A', (kind) => {
+    const { a, b } = twoSeats();
+    // Warm discovery cache, then change the explicit profile: execution must reread.
+    expect(resolveGrokCliSeat(configForGrokCliSeat(a.cfg, 'grok-b')).ok).toBe(true);
+    const selected = kind === 'missing' ? 'missing-seat' : 'grok-b';
+    if (kind === 'wrong-provider') {
+      const p = join(a.accountsRoot, 'connections.json');const roster = JSON.parse(readFileSync(p, 'utf8'));
+      roster.accounts[1].provider = 'codex';writeFileSync(p, JSON.stringify(roster));
+    }
+    if (kind === 'changed-launcher') writeFileSync(b.launcherPath, readFileSync(b.launcherPath, 'utf8') + '\n// changed');
+    expect(buildEngineCommand('grok-cli', 'fixture', a.cfg, { seatId: selected })).toBeNull();
+    expect(resolveGrokCliSeat(a.cfg, undefined, selected).ok).toBe(false);
+  });
+
+  it('refuses a profile race between command construction and direct execution', () => {
+    const { a, b } = twoSeats();const command = buildEngineCommand('grok-cli', 'fixture', a.cfg, { seatId: 'grok-b' })!;
+    rmSync(b.directory, { recursive: true });
+    expect(grokCliDirectCommand(command, a.cfg, 'grok-b')).toBeNull();
+  });
+
+  it('refuses explicit missing-account run before builtin fallback', async () => {
+    const { a } = twoSeats();
+    await expect(runGoal('fixture never execute', a.cfg, { engine: 'grok-cli', seatId: 'missing-account', requireSandbox: true }))
+      .rejects.toThrow(/default-account and builtin fallback refused/);
   });
 });

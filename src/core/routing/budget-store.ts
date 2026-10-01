@@ -37,6 +37,7 @@ import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
+import { validResetProvenance } from './reset-pressure.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
 import type { CapacityWindow, SeatCapacity } from './headroom.js';
@@ -44,6 +45,7 @@ import {
   applyBudgetUpdate,
   BUDGET_ENGINES,
   BUDGET_SEAT_ID_RE,
+  BudgetPolicyError,
   defaultBudgetPolicy,
   isBudgetMode,
   sanitizeBudgetPolicy,
@@ -66,7 +68,6 @@ const MAX_SNAPSHOT_BYTES = 256 * 1024;
 export const DECISIONS_LOG_MAX_BYTES = 2 * 1024 * 1024;
 /** Longest line a reader will parse; anything larger was not written by us. */
 const MAX_DECISION_LINE_BYTES = 32 * 1024;
-const MAX_SNAPSHOT_SEATS = 64;
 const MAX_SNAPSHOT_WINDOWS = 12;
 
 export function ashlrRoot(): string {
@@ -266,8 +267,14 @@ export function updateBudgetPolicy(
   }
   const current = found.state === 'ok' ? found.policy : defaultBudgetPolicy();
   const next = applyBudgetUpdate(current, update, now.toISOString(), opts.engineOf);
+  // The writer must honor the reader's byte bound before touching storage;
+  // otherwise a successful update would leave an unreadable policy behind.
+  const content = `${JSON.stringify(next, null, 2)}\n`;
+  if (Buffer.byteLength(content) > MAX_POLICY_BYTES) {
+    throw new BudgetPolicyError('VERSE_TOO_LARGE', `budget policy exceeds ${MAX_POLICY_BYTES} bytes`);
+  }
   ensurePrivateDirectory(dirname(file));
-  writePrivateFileAtomic(file, `${JSON.stringify(next, null, 2)}\n`);
+  writePrivateFileAtomic(file, content);
   return next;
 }
 
@@ -310,6 +317,8 @@ function sanitizeWindow(raw: unknown): CapacityWindow | null {
     resetsAt,
     resetDescription: description === null ? null : cleanText(description, 160),
     limitReached: raw['limitReached'],
+    ...(raw['resetProvenance'] !== undefined && validResetProvenance(raw['resetProvenance']) &&
+      raw['resetProvenance'].at === resetsAt ? { resetProvenance: raw['resetProvenance'] } : {}),
   };
 }
 
@@ -370,18 +379,37 @@ export function sanitizeSeatCapacity(raw: unknown): SeatCapacity | null {
 }
 
 function buildSnapshot(seats: readonly SeatCapacity[], now: Date): CapacitySnapshot {
-  return {
-    v: 1,
-    publishedAt: now.toISOString(),
-    seats: seats.slice(0, MAX_SNAPSHOT_SEATS).map((seat) => sanitizeSeatCapacity(seat)).filter((s): s is SeatCapacity => s !== null),
-  };
+  // Even the smallest JSON array element and separator need two bytes. This
+  // derives allocation safety from the transport budget, not an account cap.
+  if (!Array.isArray(seats) || seats.length > Math.floor(MAX_SNAPSHOT_BYTES / 2)) {
+    throw new Error('Capacity snapshot exceeds its byte limit.');
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(seats);
+  if (Object.keys(descriptors).length !== seats.length + 1) throw new Error('Capacity snapshot roster must be a dense array.');
+  const cleanSeats: SeatCapacity[] = [];
+  for (let index = 0; index < seats.length; index++) {
+    const descriptor = descriptors[String(index)];
+    if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new Error('Capacity snapshot roster must be a dense data array.');
+    const clean = sanitizeSeatCapacity(descriptor.value);
+    if (clean) cleanSeats.push(clean);
+  }
+  return { v: 1, publishedAt: now.toISOString(), seats: cleanSeats };
+}
+
+function encodeSnapshot(snapshot: CapacitySnapshot): string {
+  const text = `${JSON.stringify(snapshot)}\n`;
+  // Never publish a partial roster or replace a readable snapshot with bytes
+  // that its bounded reader cannot consume.
+  if (Buffer.byteLength(text) > MAX_SNAPSHOT_BYTES) throw new Error('Capacity snapshot exceeds its byte limit.');
+  return text;
 }
 
 /** Persist the seats the Verse server just observed (sync, fsync'd). Throws on a storage failure. */
 export function writeCapacitySnapshot(seats: readonly SeatCapacity[], now: Date = new Date(), file: string = capacitySnapshotPath()): CapacitySnapshot {
   const snapshot = buildSnapshot(seats, now);
+  const text = encodeSnapshot(snapshot);
   ensurePrivateDirectory(dirname(file));
-  writePrivateFileAtomic(file, `${JSON.stringify(snapshot)}\n`);
+  writePrivateFileAtomic(file, text);
   return snapshot;
 }
 
@@ -400,13 +428,14 @@ export async function writeCapacitySnapshotAsync(
   file: string = capacitySnapshotPath(),
 ): Promise<CapacitySnapshot> {
   const snapshot = buildSnapshot(seats, now);
+  const text = encodeSnapshot(snapshot);
   ensurePrivateDirectory(dirname(file));
   const temp = join(dirname(file), `.${basename(file)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
   const handle = await openAsync(temp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow, 0o600);
   let published = false;
   try {
-    await handle.writeFile(`${JSON.stringify(snapshot)}\n`, 'utf8');
+    await handle.writeFile(text, 'utf8');
     await handle.chmod(0o600);
     await handle.close();
     await renameAsync(temp, file);
@@ -436,7 +465,7 @@ export function readCapacitySnapshot(file: string = capacitySnapshotPath()): Cap
   }
   if (!isObject(raw) || raw['v'] !== 1 || !isIso(raw['publishedAt']) || !Array.isArray(raw['seats'])) return null;
   const seats: SeatCapacity[] = [];
-  for (const entry of raw['seats'].slice(0, MAX_SNAPSHOT_SEATS)) {
+  for (const entry of raw['seats']) {
     const clean = sanitizeSeatCapacity(entry);
     if (clean) seats.push(clean);
   }

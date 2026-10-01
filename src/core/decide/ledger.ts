@@ -11,14 +11,15 @@
  * never the text that was classified (stderr, operator messages and diffs can
  * hold paths and tokens), and never the key.
  *
- * FAILURE: every function here swallows its own I/O errors. Observability must
- * never be the reason a decision fails.
+ * FAILURE: ledger observations swallow their I/O errors; observability must
+ * never fail a decision. Explicit operator updates refuse unreadable settings.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import type { DecisionKind, DecisionRecord, JevKindStats } from './types.js';
+import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -66,14 +67,11 @@ export const JEV_DISABLE_ENV = 'ASHLR_JEV_DISABLE';
  */
 export const DEFAULT_DAILY_CALL_BUDGET = 1500;
 
-/**
- * COST ESTIMATE, not a price list. TypeSafe has not published per-token
- * pricing we can verify, so these are placeholder rates chosen to be in the
- * range of small hosted classifiers. Override both in jev/config.json once the
- * invoice gives real numbers; every surface labels the figure "est.".
- */
-export const DEFAULT_INPUT_USD_PER_MTOK = 0.5;
-export const DEFAULT_OUTPUT_USD_PER_MTOK = 2.0;
+/** Published concrete-model tariff, verified 2026-10-01: https://docs.typesafe.ai/models.
+ * Aliases can move: only the actual response model jev-1.13.0 selects this rate.
+ * Output tokens are free; the request is NOT free. These are estimates, not invoices. */
+export const DEFAULT_INPUT_USD_PER_MTOK = 0.042;
+export const DEFAULT_OUTPUT_USD_PER_MTOK = 0;
 
 export interface JevConfig {
   /** Master switch. Default true (still inert until a key is present). */
@@ -81,9 +79,9 @@ export interface JevConfig {
   readonly disabledKinds: readonly DecisionKind[];
   /** Per-kind threshold overrides, each in (0, 1]. */
   readonly thresholds: Readonly<Partial<Record<DecisionKind, number>>>;
-  readonly dailyCallBudget: number;
-  readonly inputUsdPerMTok: number;
-  readonly outputUsdPerMTok: number;
+  readonly dailyCallBudget: number | null;
+  readonly inputUsdPerMTok: number | null;
+  readonly outputUsdPerMTok: number | null;
 }
 
 const DEFAULT_CONFIG: JevConfig = {
@@ -91,11 +89,11 @@ const DEFAULT_CONFIG: JevConfig = {
   disabledKinds: [],
   thresholds: {},
   dailyCallBudget: DEFAULT_DAILY_CALL_BUDGET,
-  inputUsdPerMTok: DEFAULT_INPUT_USD_PER_MTOK,
-  outputUsdPerMTok: DEFAULT_OUTPUT_USD_PER_MTOK,
+  inputUsdPerMTok: null,
+  outputUsdPerMTok: null,
 };
 
-function positiveNumber(value: unknown, fallback: number): number {
+function positiveNumber(value: unknown, fallback: number | null): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
@@ -105,7 +103,7 @@ export function readJevConfig(): JevConfig {
   if (!existsSync(path)) return DEFAULT_CONFIG;
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
-    if (typeof raw !== 'object' || raw === null) return DEFAULT_CONFIG;
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return DEFAULT_CONFIG;
     const thresholds: Partial<Record<DecisionKind, number>> = {};
     if (typeof raw['thresholds'] === 'object' && raw['thresholds'] !== null) {
       for (const [k, v] of Object.entries(raw['thresholds'] as Record<string, unknown>)) {
@@ -121,9 +119,9 @@ export function readJevConfig(): JevConfig {
         ? (raw['disabledKinds'].filter((k) => typeof k === 'string') as DecisionKind[])
         : [],
       thresholds,
-      dailyCallBudget: positiveNumber(raw['dailyCallBudget'], DEFAULT_DAILY_CALL_BUDGET),
-      inputUsdPerMTok: positiveNumber(raw['inputUsdPerMTok'], DEFAULT_INPUT_USD_PER_MTOK),
-      outputUsdPerMTok: positiveNumber(raw['outputUsdPerMTok'], DEFAULT_OUTPUT_USD_PER_MTOK),
+      dailyCallBudget: raw['dailyCallBudget'] === null ? null : typeof raw['dailyCallBudget'] === 'number' && Number.isSafeInteger(raw['dailyCallBudget']) && raw['dailyCallBudget'] >= 0 ? raw['dailyCallBudget'] : DEFAULT_DAILY_CALL_BUDGET,
+      inputUsdPerMTok: positiveNumber(raw['inputUsdPerMTok'], null),
+      outputUsdPerMTok: positiveNumber(raw['outputUsdPerMTok'], null),
     };
   } catch {
     return DEFAULT_CONFIG;
@@ -145,8 +143,66 @@ export function classifierKilledByEnv(): boolean {
   return truthyEnv('ASHLR_CLASSIFY_DISABLE');
 }
 
-export function estimateCostUsd(inputTokens: number, outputTokens: number, cfg: JevConfig = readJevConfig()): number {
-  return (inputTokens * cfg.inputUsdPerMTok + outputTokens * cfg.outputUsdPerMTok) / 1_000_000;
+/** Only this preference is editable here; preserve every unrelated existing field.
+ * Missing is the legacy default; unreadable/malformed existing files are never overwritten. */
+export function updateJevCallBudget(value: unknown): JevConfig {
+  if (value !== null && !(typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)) {
+    throw new Error('invalid daily call preference');
+  }
+  const path = jevConfigPath();
+  let current: Record<string, unknown> = {};
+  let exists = false;
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('jev config unavailable');
+    exists = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  if (exists) {
+    const file = readPrivateFileCapped(path, 64 * 1024);
+    if (!file || file.truncated) throw new Error('jev config unavailable');
+    const parsed: unknown = JSON.parse(file.text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('jev config unavailable');
+    current = parsed as Record<string, unknown>;
+  }
+  ensurePrivateDirectory(jevDir());
+  writePrivateFileAtomic(path, `${JSON.stringify({ ...current, dailyCallBudget: value }, null, 2)}\n`);
+  return readJevConfig();
+}
+
+export function validTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+export function costEstimate(
+  inputTokens: number, outputTokens: number, cfg: JevConfig = readJevConfig(), model?: string,
+): { usd: number; source: 'published-model' | 'operator-rates' } | null {
+  if (!validTokenCount(inputTokens) || !validTokenCount(outputTokens)) return null;
+  const published = model === 'jev-1.13.0';
+  const input = cfg.inputUsdPerMTok ?? (published ? DEFAULT_INPUT_USD_PER_MTOK : null);
+  const output = cfg.outputUsdPerMTok ?? (published ? DEFAULT_OUTPUT_USD_PER_MTOK : null);
+  if (input === null || output === null) return null;
+  const usd = (inputTokens * input + outputTokens * output) / 1_000_000;
+  if (!Number.isFinite(usd) || usd < 0) return null;
+  return { usd, source: cfg.inputUsdPerMTok !== null || cfg.outputUsdPerMTok !== null ? 'operator-rates' : 'published-model' };
+}
+
+export function estimateCostUsd(inputTokens: number, outputTokens: number, cfg: JevConfig = readJevConfig(), model?: string): number | null {
+  return costEstimate(inputTokens, outputTokens, cfg, model)?.usd ?? null;
+}
+
+/** A sum is unknown if any called record lacks a valid observation. Cache hits don't bill. */
+export function calledSum(records: readonly DecisionRecord[], field: 'inputTokens' | 'outputTokens' | 'estCostUsd'): number | null {
+  let sum = 0;
+  for (const r of records) {
+    if (!r.called) continue;
+    const value = r[field];
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || (field !== 'estCostUsd' && !Number.isSafeInteger(value))) return null;
+    sum += value;
+    if (!Number.isFinite(sum) || (field !== 'estCostUsd' && !Number.isSafeInteger(sum))) return null;
+  }
+  return sum;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +304,7 @@ export function summarizeByKind(records: readonly DecisionRecord[]): JevKindStat
         ? answered.reduce((s, r) => s + (r.jevConfidence ?? 0), 0) / answered.length
         : null,
       fallbackRate: list.length ? (list.length - jev) / list.length : 0,
-      estCostUsd: list.reduce((s, r) => s + (r.estCostUsd ?? 0), 0),
+      estCostUsd: calledSum(list, 'estCostUsd'),
       avgLatencyMs: called.length ? called.reduce((s, r) => s + r.durationMs, 0) / called.length : null,
       topFallbackReasons: [...reasons.entries()]
         .sort((a, b) => b[1] - a[1])

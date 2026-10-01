@@ -32,6 +32,7 @@
  *   mirror <list|add|sync|path|remove|reconcile>  The fleet's own mirror clones (~/.ashlr/fleet/mirrors).
  *   cloud <launch|list|refresh|improve|budget|backlog>  Claude Code cloud sessions that deliver draft PRs (3.11).
  *   openai-agents <sessions|inspect|turns>  Read managed OpenAI Agents API metadata; no execution.
+ *   benchmark run|--compare-reports  Local-agent trials or offline receipt comparison.
  *   devin <connect|status|launch|list|refresh|message|budget>  Devin sessions that deliver PRs through the gates (3.15).
  *   automations <list|templates|add|enable|disable|remove|fire>  Issues, red builds, schedules and webhooks become work (3.15).
  *   jev <status|test>          Jev typed decisions: status by kind, and one live test decision (3.15).
@@ -166,6 +167,12 @@ const loadEvalCmd = lazyCmd(
   () => import('./eval.js' as unknown as string),
   (m) => m.cmdEval as Cmd,
   'eval command requires src/cli/eval.ts (M44 module not yet built).',
+);
+
+const loadBenchmarkCmd = lazyCmd(
+  () => import('./benchmark.js'),
+  (m) => m.runBenchmarkCli as Cmd,
+  'benchmark command requires a current build of src/cli/benchmark.ts.',
 );
 
 const loadSkillsCmd = lazyCmd(
@@ -1855,6 +1862,11 @@ async function main(): Promise<void> {
         // prompts OFF vs ON and reports steps/done/tokens.
         const cmdEval = await loadEvalCmd();
         process.exitCode = await cmdEval(rest);
+        break;
+      }
+
+      case 'benchmark': {
+        process.exitCode = await (await loadBenchmarkCmd())(rest);
         break;
       }
 

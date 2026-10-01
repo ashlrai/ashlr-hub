@@ -1,3 +1,7 @@
+import { parseLeaderPreferences, resolveLeaderPreferences, unavailableLeaderPreferences } from '../vision/leader-preferences.js';
+import { resolveLeaderCadence } from '../vision/leader-cadence.js';
+import { goalFocusModeEnabled, goalFocusActiveThreshold } from '../goals/focus.js';
+import { parseGoalPreferences, resolveGoalPreferences, unavailableGoalPreferences } from '../goals/preferences.js';
 /**
  * core/verse/control-api.ts — /api/verse/{control,caps,scope,audit,daemon,safety}
  * (owner B, V2). The autonomy CONTROL PLANE for the Verse cockpit.
@@ -64,7 +68,7 @@ import { lstatSync, readdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 import type { AshlrConfig, AuditEntry, DaemonConfig } from '../types.js';
-import { loadConfigReadOnly, resolveSubscriptionMaxPercent, saveConfig } from '../config.js';
+import { loadConfigReadOnly, loadConfigReadOnlyStrict, resolveSubscriptionMaxPercent, saveConfig } from '../config.js';
 import { passesMutationGate, readBody, sendJson } from '../web/api.js';
 import { buildControlEssentials, type ControlEssentials } from '../web/control.js';
 import type { CachedFleetStatus } from '../web/fleet-status-cache.js';
@@ -395,6 +399,8 @@ export function readVerseCaps(cfg: AshlrConfig): VerseCaps {
   const foundryLimits = readFoundryLimits(cfg);
   if (foundryLimits.length === 0) defaulted.push('foundryLimits');
 
+  if (typeof cfg.foundry?.goalFocusMode !== 'boolean') defaulted.push('goalFocusMode');
+  if (!Number.isSafeInteger(cfg.foundry?.goalFocusActiveThreshold) || (cfg.foundry?.goalFocusActiveThreshold ?? 0) <= 0) defaulted.push('goalFocusActiveThreshold');
   defaulted.sort();
   return {
     dailyBudgetUsd,
@@ -407,6 +413,10 @@ export function readVerseCaps(cfg: AshlrConfig): VerseCaps {
     concurrency,
     subscriptionMaxPercent,
     foundryLimits,
+    goalPreferences: resolveGoalPreferences(cfg),
+    leaderPreferences: resolveLeaderPreferences(cfg, { checkinsEnabled: resolveLeaderCadence(cfg).checkinHours > 0 }),
+    goalFocusMode: goalFocusModeEnabled(cfg),
+    goalFocusActiveThreshold: goalFocusActiveThreshold(cfg),
     defaulted,
   };
 }
@@ -441,6 +451,9 @@ const CAP_KEYS = new Set<string>([
   'concurrency',
   'subscriptionMaxPercent',
   'foundryLimits',
+  'goalPreferences',
+  'leaderPreferences',
+  'goalFocusMode',
 ]);
 
 const CONCURRENCY_KEYS = new Set<string>(['local', 'cloud', 'total']);
@@ -547,6 +560,21 @@ export function parseVerseCapsUpdate(body: Record<string, unknown>): VerseCapsPa
       concurrency[key] = result;
     }
     update.concurrency = concurrency;
+  }
+
+  if ('goalFocusMode' in body) {
+    if (typeof body['goalFocusMode'] !== 'boolean') return { ok: false, error: 'goalFocusMode must be boolean' };
+    update.goalFocusMode = body['goalFocusMode'];
+  }
+  if ('leaderPreferences' in body) {
+    const parsed = parseLeaderPreferences(body['leaderPreferences']);
+    if (!parsed.ok) return { ok: false, error: parsed.errors.join('; ') };
+    update.leaderPreferences = parsed.preferences;
+  }
+  if ('goalPreferences' in body) {
+    const parsed = parseGoalPreferences(body['goalPreferences']);
+    if (!parsed.ok) return { ok: false, error: parsed.errors.join('; ') };
+    update.goalPreferences = parsed.preferences;
   }
 
   if ('foundryLimits' in body) {
@@ -664,6 +692,31 @@ export function applyVerseCapsUpdate(
     if (changed) applied.push('foundryLimits');
   }
 
+  if (update.leaderPreferences !== undefined) {
+    const existing = foundry?.leaderPreferences;
+    if (existing !== undefined && !parseLeaderPreferences(existing, true).ok) throw new Error('Existing Leader preferences are invalid; partial update was not saved');
+    const merged = { ...(existing ?? {}), ...update.leaderPreferences };
+    const changed = Object.entries(update.leaderPreferences).some(([key, value]) =>
+      existing === undefined || existing[key as keyof typeof existing] !== value);
+    foundry = { ...(foundry ?? {}), leaderPreferences: merged };
+    if (changed) applied.push('leaderPreferences');
+  }
+  if (update.goalFocusMode !== undefined) {
+    foundry = { ...(foundry ?? {}), goalFocusMode: update.goalFocusMode };
+    if (before.goalFocusMode !== update.goalFocusMode || before.defaulted.includes('goalFocusMode')) applied.push('goalFocusMode');
+  }
+  if (update.goalPreferences !== undefined) {
+    const existing = foundry?.goalPreferences;
+    // Refuse to erase unknown/corrupt preferences while applying a partial update.
+    if (existing !== undefined && !parseGoalPreferences(existing, true).ok) {
+      throw new Error('Existing goal preferences are invalid; repair configuration before saving a partial update');
+    }
+    const merged = { ...(existing ?? {}), ...update.goalPreferences };
+    const changed = Object.entries(update.goalPreferences).some(([key, value]) =>
+      existing === undefined || existing[key as keyof typeof existing] !== value);
+    foundry = { ...(foundry ?? {}), goalPreferences: merged };
+    if (changed) applied.push('goalPreferences');
+  }
   const next: AshlrConfig = { ...cfg, daemon };
   if (foundry !== cfg.foundry) next.foundry = foundry;
   return { cfg: next, applied };
@@ -675,6 +728,12 @@ export function applyVerseCapsUpdate(
  * daemon re-reads the file each tick — the FILE is the truth the daemon obeys,
  * not whatever this server loaded at boot.
  */
+function readFreshVerseCaps(fallback: AshlrConfig): VerseCaps {
+  try { return readVerseCaps(loadConfigReadOnlyStrict()); }
+  catch { return { ...readVerseCaps(fallback), goalPreferences: unavailableGoalPreferences(), leaderPreferences: unavailableLeaderPreferences(),
+    goalFocusMode: undefined, goalFocusActiveThreshold: undefined }; }
+}
+
 function freshConfig(fallback: AshlrConfig): AshlrConfig {
   try {
     return loadConfigReadOnly();
@@ -1380,7 +1439,7 @@ export async function buildVerseControlSnapshot(
   // the fleet/daemon slice only (not the whole Mission Control snapshot with
   // its 7-day rollup), and a fingerprinted pending count. Was 3.9–15.5 s.
   const config = stableReadConfig(cfg);
-  const caps = readVerseCaps(config);
+  const caps = readFreshVerseCaps(config);
 
   let control: ControlEssentials | null = null;
   try {
@@ -1512,7 +1571,7 @@ export async function handleVerseControlApi(
     // ── /api/verse/caps ──────────────────────────────────────────────────
     if (path === `${CONTROL_PREFIX}/caps`) {
       if (method === 'GET') {
-        sendJson(res, 200, readVerseCaps(freshConfig(ctx.cfg)));
+        sendJson(res, 200, readFreshVerseCaps(ctx.cfg));
         return true;
       }
       if (method === 'POST') {
@@ -1524,7 +1583,23 @@ export async function handleVerseControlApi(
           sendInvalid(res, parsed.error);
           return true;
         }
-        const current = freshConfig(ctx.cfg);
+        let current: AshlrConfig;
+        try {
+          current = parsed.update.goalPreferences !== undefined || parsed.update.goalFocusMode !== undefined || parsed.update.leaderPreferences !== undefined
+            ? loadConfigReadOnlyStrict() : freshConfig(ctx.cfg);
+        } catch {
+          sendError(res, 'VERSE_UNAVAILABLE', 'Live configuration is invalid or unavailable; goal preferences were not saved.');
+          return true;
+        }
+        if ((parsed.update.goalPreferences !== undefined || parsed.update.goalFocusMode !== undefined)
+          && resolveGoalPreferences(current).sourceState !== 'ready') {
+          sendError(res, 'VERSE_UNAVAILABLE', 'Existing goal preference configuration is invalid; partial update was not saved.');
+          return true;
+        }
+        if (parsed.update.leaderPreferences !== undefined && resolveLeaderPreferences(current).sourceState !== 'ready') {
+          sendError(res, 'VERSE_UNAVAILABLE', 'Existing Leader preference configuration is invalid; partial update was not saved.');
+          return true;
+        }
         const { cfg: next, applied } = applyVerseCapsUpdate(current, parsed.update);
         try {
           saveConfig(next);
@@ -1541,7 +1616,8 @@ export async function handleVerseControlApi(
           applied,
           live: true,
           // Re-read from disk so the client sees exactly what was persisted.
-          caps: readVerseCaps(freshConfig(next)),
+          caps: parsed.update.goalPreferences !== undefined || parsed.update.leaderPreferences !== undefined || parsed.update.goalFocusMode !== undefined
+            ? readFreshVerseCaps(next) : readVerseCaps(freshConfig(next)),
         };
         sendJson(res, 200, result);
         return true;

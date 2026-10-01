@@ -24,6 +24,7 @@ import {
   planStandingBestOfN,
   countOf,
   grantSeatFor,
+  grokDispatchBatchCapacity,
   planLanes,
   resolveLaneEngines,
   routeWorkItem,
@@ -33,6 +34,7 @@ import {
   type LegacyRoute,
   type OperatorPresence,
 } from '../src/core/fleet/dispatch-router.js';
+import { resolveLeaderPreferences, unavailableLeaderPreferences } from '../src/core/vision/leader-preferences.js';
 import { defaultBudgetPolicy } from '../src/core/routing/policy.js';
 import { standingSeatFor } from '../src/core/authority/effective-config.js';
 import type { SeatCapacity } from '../src/core/routing/headroom.js';
@@ -342,7 +344,7 @@ describe('presence caps', () => {
     expect(three.local.slots).toBe(3);
   });
 
-  it('lets the Leader set 1–4 grok lanes, clamped', () => {
+  it('retains the legacy default4 preference when no live preference is supplied', () => {
     const planned = planLanes({
       policy: policy(),
       directives: { v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: 9, codexEnabled: null },
@@ -555,5 +557,37 @@ describe('best-of-N lane accounting (review c15)', () => {
     expect(anyFanoutCandidate([{ id: 'a', effort: 5, source: 'todo', tags: [] }], 'high', () => 0)).toBe(true);
     expect(anyFanoutCandidate([{ id: 'a', effort: 1, source: 'todo', tags: [] }], 'high', () => 1)).toBe(true);
     expect(anyFanoutCandidate([{ id: 'a', effort: 3, source: 'todo', tags: [] }], 'medium', () => 0)).toBe(true);
+  });
+});
+
+
+describe('operator Grok preference and finite dispatch capacity', () => {
+  const plan = (maxGrokLanes: number | null, desired: number | null, admittedBatchCapacity = 64) => planLanes({
+    policy: policy(), presence: ABSENT, localServingSlots: 4, engineUnavailable: {},
+    directives: { v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: desired, codexEnabled: null },
+    leaderPreferences: resolveLeaderPreferences({ foundry: { leaderPreferences: { maxGrokLanes } } } as AshlrConfig),
+    admittedBatchCapacity,
+  });
+  it('admits more than4 without imposing one-session-per-account, and keeps null directive concrete2', () => {
+    expect(plan(20, 17)['grok-cli'].slots).toBe(17);
+    expect(plan(null, 17)['grok-cli'].slots).toBe(17);
+    expect(plan(null, null)['grok-cli'].slots).toBe(2);
+    expect(plan(5, 17)['grok-cli'].slots).toBe(5);
+  });
+  it('bounds huge representable directives by the actual finite batch and holds unavailable policy', () => {
+    expect(plan(null, Number.MAX_SAFE_INTEGER, 12)['grok-cli'].slots).toBe(12);
+    const input = { policy: policy(), directives: null, presence: ABSENT, localServingSlots: 4, engineUnavailable: {},
+      leaderPreferences: unavailableLeaderPreferences(), admittedBatchCapacity: 12 };
+    expect(planLanes(input)['grok-cli']).toMatchObject({ slots: 0, capReason: expect.stringMatching(/could not be checked/) });
+    expect(plan(null, 17, NaN)['grok-cli'].slots).toBe(0);
+    expect(plan(null, 17, 0)['grok-cli'].slots).toBe(0);
+    expect(planLanes({ ...input, leaderPreferences: resolveLeaderPreferences(), policy: policy({ engines: ['local'] }) })['grok-cli'].slots).toBe(0);
+  });
+  it('uses existing configured pool/batch defaults and finite journal capacity without allocating workers', () => {
+    expect(grokDispatchBatchCapacity({} as AshlrConfig)).toBe(2);
+    expect(grokDispatchBatchCapacity({ daemon: { perTickItems: 20, parallel: 17 } } as AshlrConfig)).toBe(17);
+    expect(grokDispatchBatchCapacity({ daemon: { perTickItems: Number.MAX_SAFE_INTEGER, parallel: Number.MAX_SAFE_INTEGER } } as AshlrConfig)).toBe(64);
+    expect(grokDispatchBatchCapacity({ daemon: { mode: 'continuous', perTickItems: 20, concurrency: { cloud: 17, total: 18 } } } as AshlrConfig)).toBe(17);
+    expect(grokDispatchBatchCapacity({ daemon: { perTickItems: 20, parallel: 0 } } as AshlrConfig)).toBe(0);
   });
 });

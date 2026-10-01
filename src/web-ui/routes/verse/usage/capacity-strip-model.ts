@@ -25,6 +25,8 @@ import type { SeatConnection, SeatFixKind, SeatHealthReport } from '../../../../
 import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import { ENGINE_MONOGRAM } from '../../../../core/verse/workbench-types.js';
 import type { VerseEngine, VerseSeat } from '../../../data/api-types.js';
+import type { ResourceLastKnownUsage } from '../../../../core/resources/reading-cache-types.js';
+import { resourceUsageHistory } from '../resources/resource-usage-history.js';
 import { buildBudgetRows, STATUS_WORDS, type BudgetSeatStatus } from '../budget/budget-model.js';
 import { relativePhrase } from '../context/context-model.js';
 import { percentText, tidyProse } from '../autonomy/format.js';
@@ -94,6 +96,9 @@ export interface CapacityRow {
   connection: CapacityConnection | null;
   windows: CapacityWindowRow[];
   credits: string | null;
+  creditSpendControlReached?: boolean | null;
+  creditBalance?: string | null;
+  creditState?: 'available' | 'held' | 'none' | 'unknown';
   reserve: CapacityReserve | null;
   notes: string[];
   /** For the collapsed local row: how many local seats it stands for. */
@@ -106,6 +111,8 @@ export interface CapacityRow {
   signedOut: boolean;
   /** A verified, still-fresh window retained only for display after a failed check. */
   lastReading?: boolean;
+  /** Original account-checked historical display; excluded from windows, status and headroom. */
+  historicalUsage?: ResourceLastKnownUsage | null;
 }
 
 export interface CapacityInputs {
@@ -233,7 +240,11 @@ function seatRow(
     summary: blockedByHealth ? (connection.reasons[0] ?? connection.word) : view.summary,
     connection,
     windows,
+    historicalUsage: windows.length === 0 ? resourceUsageHistory(seat, now) : null,
     credits: view.credits,
+    creditBalance: view.creditBalance ?? null,
+    creditState: view.creditState ?? 'unknown',
+    creditSpendControlReached: view.creditSpendControlReached ?? null,
     reserve: reserveOf(budget.get(seat.id)),
     notes: [...view.notes],
     localCount: 1,
@@ -613,7 +624,13 @@ export function accountStatus(row: CapacityRow, opts: AccountStatusOptions): Acc
   if (row.lastReading) return make('unavailable', 'Last reading', 'latest check failed · access unconfirmed', { coversConnection: true });
 
   const binding = row.windows.find((w) => w.binding) ?? null;
-  const spent = c === 'exhausted' || (row.cls === 'blocked' && binding !== null && isSpentWindow(binding));
+  const spent = c === 'exhausted' || (row.cls === 'blocked' && binding !== null && isSpentWindow(binding)) ||
+    row.engine === 'codex' && row.credits === null && binding?.limitReached === true;
+  // Credit availability is a separate interactive-use signal, never Fleet eligibility.
+  if (row.engine === 'codex' && row.credits !== null) {
+    if (row.creditSpendControlReached === true) return make('unavailable', 'Credits held', 'native spend control reached · balance is separate', { coversConnection: true });
+    return make('low', 'Credits available', binding !== null && isSpentWindow(binding) ? 'subscription window spent · autonomous credit spending is not admitted' : 'native credit balance · separate from subscription usage', { coversConnection: c === 'exhausted' });
+  }
   if (spent) {
     const when = describeResetAt(row.resetAt, now);
     const ahead = row.resetAt !== null && Date.parse(row.resetAt) > now;

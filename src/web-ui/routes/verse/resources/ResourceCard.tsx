@@ -18,6 +18,7 @@
  * disagree about one seat. Text wraps at word boundaries; anything long also
  * carries its full text as a tooltip.
  */
+import { estimatedCreditValue, CODEX_CREDIT_VALUE_SOURCE, CODEX_CREDIT_VALUE_CHECKED } from './codex-credit-value.js';
 import type { BudgetMode } from '../../../../core/routing/types.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { accountActions, type AccountAction } from '../apps/apps-model.js';
@@ -28,6 +29,8 @@ import type { ResourceReadinessRow } from '../../../../core/routing/readiness-ty
 import { ReadinessLines } from './ReadinessLines.js';
 import { ResourceFacts } from './ResourceFacts.js';
 import type { ResourceFactsView } from './resources-model.js';
+import { SchedulingEvidence } from './SchedulingEvidence.js';
+import type { SchedulingEvidenceView } from './scheduling-model.js';
 import styles from './ResourcesDrawer.module.css';
 
 /** Above this share of a window the meter turns amber (the capacity strip's own line). */
@@ -109,12 +112,15 @@ export interface ResourceCardProps {
   readiness?: ResourceReadinessRow | null;
   /** 3.15: tier · cost basis · models — the facts row every card carries. */
   facts?: ResourceFactsView | null;
+  scheduling?: SchedulingEvidenceView;
 }
 
-export function ResourceCard({ row, status, settled, mode, busy, onAction, readiness = null, facts = null }: ResourceCardProps) {
+export function ResourceCard({ row, status, settled, mode, busy, onAction, readiness = null, facts = null, scheduling }: ResourceCardProps) {
   // Budget editing lives in Apps & Accounts; the drawer offers what the seat needs now.
   const actions = accountActions(row, settled).filter((a) => a.kind !== 'edit-budget');
   const reserve = row.reserve;
+  const primaryWindow = row.windows.find((w) => w.binding) ?? row.windows[0] ?? null;
+  const otherWindows = row.windows.filter((w) => w !== primaryWindow);
   const reserveText = reserve === null ? null : reserve.percent !== null && mode !== null ? `${reserve.label} · ${MODE_WORD[mode]}` : reserve.label;
   return (
     <li className={styles.card} data-status={status.kind} data-seat={row.seatId} data-verse-anchor={`resources:${row.seatId}`}>
@@ -125,25 +131,47 @@ export function ResourceCard({ row, status, settled, mode, busy, onAction, readi
           {row.plan !== null ? <span className={styles.plan}>{row.plan}</span> : null}
         </h4>
       </div>
-      {facts !== null ? <ResourceFacts facts={facts} /> : null}
       <StatusLine status={status} />
+      {row.credits !== null ? <p className={styles.subtle}>{row.credits}</p> : null}
       {status.checked !== null ? (
         <p className={styles.stamp} title={status.checkedTitle ?? undefined}>{status.checked}</p>
       ) : null}
       {row.windows.length > 0 ? (
         <div className={styles.meters}>
-          {row.windows.map((w) => (
-            <WindowMeter key={w.id} row={row} w={w} reservePercent={reserve?.percent ?? null} />
-          ))}
+          {primaryWindow !== null ? <WindowMeter row={row} w={primaryWindow} reservePercent={reserve?.percent ?? null} /> : null}
         </div>
-      ) : null}
-      {reserveText !== null || row.credits !== null ? (
-        <p className={styles.reserveLine}>
-          {reserveText !== null ? <span title={reserve?.why}>{reserveText}</span> : null}
-          {reserveText !== null && row.credits !== null ? ' · ' : null}
-          {row.credits !== null ? <span>{row.credits}</span> : null}
-        </p>
-      ) : null}
+      ) : <p className={styles.subtle}>Usage not reported by this resource.</p>}
+      {row.lastReading ? <p className={styles.subtle}>Last known usage · latest check failed.</p> : null}
+      {row.windows.length === 0 && row.historicalUsage && !row.signedOut ? <div className={styles.fine}>
+        <p>Last known usage · current availability unconfirmed.</p>
+        <p>Recorded <time dateTime={row.historicalUsage.observedAt} title={row.historicalUsage.observedAt}>{new Date(row.historicalUsage.observedAt).toLocaleString()}</time></p>
+        {row.historicalUsage.windows.map(window => <p key={window.id}>{window.id}: {window.limitReached ? 'limit was flagged' : window.usedPercent === null ? 'usage unknown' : `${usedPercentText(window.usedPercent)} used`}
+          {window.resetsAt ? <> · recorded reset <time dateTime={window.resetsAt} title={window.resetsAt}>{new Date(window.resetsAt).toLocaleString()}</time></> : null}</p>)}
+      </div> : null}
+      <details className={styles.usageDetails}>
+        <summary tabIndex={0} aria-label={`Usage details: ${row.label}`}>Usage details</summary>
+        <div className={styles.usageDetailBody}>
+          {facts !== null ? <ResourceFacts facts={facts} /> : null}
+          {scheduling ? <SchedulingEvidence view={scheduling} /> : null}
+          {otherWindows.length > 0 ? <div className={styles.meters}>{otherWindows.map((w) => <WindowMeter key={w.id} row={row} w={w} reservePercent={reserve?.percent ?? null} />)}</div> : null}
+          {row.windows.length === 0 ? <p className={styles.subtle}>Connection status and usage are separate. No percentage has been supplied.</p> : null}
+          {row.engine === 'codex' && row.creditState !== undefined && row.creditState !== 'unknown' ? <p className={styles.subtle}>
+            {row.creditState === 'none' ? 'Native provider reports no available credits. ' : ''}
+            {row.creditBalance !== null && row.creditBalance !== undefined ? `Native balance ${row.creditBalance} credit units. ` : ''}
+            Estimated credit value: {estimatedCreditValue(row.creditBalance, row.plan) ?? 'unknown'}.
+            {' '}Personal-plan reference $0.04 per credit; not actual purchase price or attributed spend.
+            {' '}<a href={CODEX_CREDIT_VALUE_SOURCE} target="_blank" rel="noreferrer">Published reference</a> checked {CODEX_CREDIT_VALUE_CHECKED}.
+          </p> : null}
+          {row.notes.map((note) => <p key={note} className={styles.subtle}>{note}</p>)}
+          {reserveText !== null || row.credits !== null ? (
+            <p className={styles.reserveLine}>
+              {reserveText !== null ? <span title={reserve?.why}>{reserveText}</span> : null}
+              {reserveText !== null && row.credits !== null ? ' · ' : null}
+              {row.credits !== null ? <span>{row.credits}</span> : null}
+            </p>
+          ) : null}
+        </div>
+      </details>
       <ReadinessLines row={readiness} />
       {actions.length > 0 ? (
         <div className={styles.cardActions}>

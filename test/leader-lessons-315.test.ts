@@ -11,7 +11,9 @@ import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { leaderLessons } from '../src/core/learn/retro/inject.js';
-import { buildLeaderPrompt, evidenceDigest, gatherLeaderEvidence, type LeaderEvidenceSources, type LeaderRunState } from '../src/core/vision/leader.js';
+import { buildLeaderPrompt, evidenceDigest, gatherLeaderEvidence, gatherTriggerSignals, leaderRunDue, type LeaderEvidenceSources, type LeaderRunState } from '../src/core/vision/leader.js';
+import { buildExecutionFeedback } from '../src/core/fleet/execution-feedback.js';
+import { materializeDispatchProductionAttemptEnvelope, type DispatchProductionEventsReadResult } from '../src/core/fleet/dispatch-production-ledger.js';
 import { addDelta } from '../src/core/vision/playbook.js';
 import { defaultBudgetPolicy } from '../src/core/routing/policy.js';
 
@@ -69,5 +71,58 @@ describe('Leader lessons evidence', () => {
     const src = readFileSync(join(__dirname, '..', 'src', 'core', 'vision', 'leader-apply.ts'), 'utf8');
     expect(src).toContain('deps.addPlaybookDelta(`Mason vetoed the Leader\'s');
     expect(src).toContain("addPlaybookDelta: (text) => playbook.addDelta('strategy', text)");
+  });
+});
+
+describe('recorded execution metadata in existing Leader cadence', () => {
+  const now = Date.parse('2026-10-01T14:00:00.000Z');
+  function feedback(extra: Partial<DispatchProductionEventsReadResult> = {}) {
+    const event = materializeDispatchProductionAttemptEnvelope({ schemaVersion: 1, ts: new Date(now - 1000).toISOString(),
+      attemptId: 'attempt-00000000-0000-4000-8000-000000000001', runId: 'private-run',
+      itemId: 'private-item', source: 'backlog', repo: '/private/repo', title: 'private prompt', backend: 'codex', tier: 'frontier',
+      assignedBy: 'daemon', routeReason: 'private account reason', outcome: 'engine-failed', proposalCreated: false,
+      spentUsd: 0, basis: 'run-proposal-outcome', reason: 'secret error',
+    });
+    return buildExecutionFeedback({ events: [event], sourceState: 'healthy', sourcePresent: true, complete: true, stopReasons: [],
+      filesRead: 1, datedFilesRead: 1, looseFilesRead: 0, bytesRead: 100, rowsScanned: 1, invalidRows: 0, unreadableFiles: 0, ...extra },
+    { nowMs: now, sinceMs: now - 86_400_000, proposals: { proposals: [], sourceState: 'missing', complete: true } });
+  }
+  const state: LeaderRunState = { ...STATE, lastRun: { at: new Date(now - 10_000).toISOString(), outcome: 'skipped-unchanged', reason: null, memoId: null, trigger: 'schedule' } };
+  it('adds safe untrusted aggregate metadata without attempts, run IDs, prompt, account, or errors', async () => {
+    const evidence = await gatherLeaderEvidence(sources({ executionFeedback: () => feedback() }), now, state);
+    expect(evidence.executionFeedback?.counts?.failed).toBe(1);
+    const prompt = buildLeaderPrompt(evidence, { dryRun: true, nowIso: new Date(now).toISOString() });
+    expect(prompt).toContain('RECORDED EXECUTION OUTCOMES');
+    expect(prompt).toContain('producer success is not verification or merge');
+    expect(JSON.stringify(evidence.executionFeedback)).not.toMatch(/private|secret|attempt-|caseId/);
+    const again = await gatherLeaderEvidence(sources({ executionFeedback: () => feedback() }), now + 1000, state);
+    expect(evidenceDigest(again)).toBe(evidenceDigest(evidence));
+  });
+  it('partial and throwing metadata remains unknown without a false zero', async () => {
+    const partial = await gatherLeaderEvidence(sources({ executionFeedback: () => feedback({ complete: false }) }), now, state);
+    expect(partial.executionFeedback?.counts).toBeNull();
+    expect(partial.unknown).toContain('execution-feedback-partial');
+    const unavailable = await gatherLeaderEvidence(sources({ executionFeedback: () => { throw new Error('private error'); } }), now, state);
+    expect(unavailable.executionFeedback).toBeUndefined();
+    expect(unavailable.unknown).toContain('execution-feedback');
+  });
+  it('uses existing insight trigger while preserving daily caps and last-run coalescing', async () => {
+    const signals = await gatherTriggerSignals(sources({ executionFeedback: () => feedback() }), state, now);
+    expect(signals.executionFailuresSinceLastRun).toBe(1);
+    expect(leaderRunDue(now, state, signals)).toMatchObject({ due: true, trigger: 'insight' });
+    const capped = { ...state, runDays: { '2026-10-01': 3 } };
+    expect(leaderRunDue(now, capped, signals).due).toBe(false);
+    const later = { ...state, lastRun: { ...state.lastRun!, at: new Date(now).toISOString() } };
+    expect((await gatherTriggerSignals(sources({ executionFeedback: () => feedback() }), later, now)).executionFailuresSinceLastRun).toBe(0);
+  });
+  it('older callers retain the same evidence and no failure signal', async () => {
+    expect((await gatherTriggerSignals(sources(), state, now)).executionFailuresSinceLastRun).toBeUndefined();
+    expect((await gatherLeaderEvidence(sources(), now, state)).executionFeedback).toBeUndefined();
+  });
+  it('an unreadable proposal join is not a no-proposal trigger or a measured zero', async () => {
+    const snapshot = feedback();
+    snapshot.view.coverage.proposalSource = 'degraded';
+    for (const correlation of snapshot.correlations.values()) correlation.proposalJoinComplete = false;
+    expect((await gatherTriggerSignals(sources({ executionFeedback: () => snapshot }), state, now)).executionFailuresSinceLastRun).toBeNull();
   });
 });

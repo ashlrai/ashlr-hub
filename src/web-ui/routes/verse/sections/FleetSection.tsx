@@ -43,6 +43,8 @@ import { useViewport } from '../shell/viewport.js';
 import { executeCatalogCommand } from '../shell/run-command.js';
 import { GateFunnelCards, LanesStrip, LiveSwimlane, OvernightCard, ParkedCard, WhySeatCard } from '../fleet/FleetCards.js';
 import { RepoTable } from '../fleet/RepoTable.js';
+import { FleetScheduling } from '../resources/SchedulingEvidence.js';
+import { ExecutionFeedback } from '../fleet/ExecutionFeedback.js';
 import { nothingToDraw } from '../fleet/live-model.js';
 import { fleetDarkSince } from '../fleet/dark-since.js';
 import styles from '../fleet/fleet.module.css';
@@ -68,10 +70,12 @@ export function FleetSection() {
   const refetchFleet = useRefetch(fleetLiveQuery);
   const refetchOvernight = useRefetch(overnightQuery);
   const refetchPreview = useRefetch(budgetPreviewQuery);
+  const refetchBudget = useRefetch(budgetQuery);
   usePollWhileVisible(refetchFleet, FLEET_POLL_MS);
   usePollWhileVisible(() => {
     refetchOvernight();
     refetchPreview();
+    refetchBudget();
   }, FLEET_SLOW_POLL_MS);
 
   const now = useNow(15_000);
@@ -138,6 +142,8 @@ export function FleetSection() {
       ) : null}
       <Cell span={12}>
         <SteerPanel live={live} actions={actions} now={now} />
+        <FleetScheduling budget={budget.data ?? null} now={now} />
+        <ExecutionFeedback />
       </Cell>
       {collapse ? null : (
         <Cell span={12}>

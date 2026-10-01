@@ -33,6 +33,7 @@ import type {
 import type { VerseParsedEvent } from '../src/core/verse/adapters/index.js';
 import type { VerseCreateOptions, VerseEngineHandle, VerseSeatLaunch } from '../src/core/verse/session-engine.js';
 import { resetVerseEngine, invalidateVerseSeatCache, expandHomePrefix, setVerseDevinSeatOptionsForTest } from '../src/core/verse/verse-api.js';
+import { setVerseAccountCollector, type VerseAccountCollector } from '../src/core/verse/accounts.js';
 import { resetDevinCliProbeForTest } from '../src/core/devin/cli-probe.js';
 import { readAuthHeaders, readSseAuth, startServer } from './helpers/authenticated-web-server.js';
 
@@ -345,6 +346,7 @@ afterEach(async () => {
   for (const h of handles) { try { await h.close(); } catch { /* ignore */ } }
   handles = [];
   resetVerseEngine(null);
+  setVerseAccountCollector(null);
   if (prevHome === undefined) delete process.env.HOME;
   else process.env.HOME = prevHome;
   fs.rmSync(tmpHome, { recursive: true, force: true });
@@ -416,6 +418,59 @@ describe('GET /api/verse/bootstrap', () => {
     const { port } = await boot();
     const res = await request(port, 'GET', '/api/verse/bootstrap');
     expect(res.status).toBe(401);
+  });
+});
+
+describe('GET /api/verse/seats — initial account metadata progress', () => {
+  it('reads progressive supported metadata without waiting for the slow provider or dispatch permission', async () => {
+    let settled = false;
+    let reads = 0;
+    const sampleAt = new Date().toISOString();
+    const collector: VerseAccountCollector = {
+      accountsRoot: path.join(tmpHome, '.ashlr', 'account-connections'),
+      status: () => ({ mode: 'owned', state: 'running', owner: 'this-server', reasonCode: null,
+        pollIntervalMs: 30_000, idleSuspendMs: 300_000, lastPolledAt: null, lastRequestAt: sampleAt, note: '' }),
+      touch: () => {}, observations: () => [], unavailableWorkerIds: () => [], credits: () => null,
+      connections: () => {
+        reads++;
+        return { sampledAt: sampleAt, refreshing: !settled, accounts: ['claude', 'not-in-this-roster'].map((id) => ({
+          id, label: 'Fixture account', provider: 'claude', state: settled ? 'unavailable' : 'checking',
+          authentication: 'unknown', health: 'unknown', planType: null, observedAt: null, expiresAt: null,
+          windows: [], reason: settled ? 'usage-probe-unavailable' : 'connection-not-checked',
+          onDemandEnabled: null, executionSupported: true,
+        })) };
+      },
+      close: async () => {},
+    };
+    setVerseAccountCollector(collector);
+    const { port, read } = await boot({ allowDispatch: false });
+    const pending = await request(port, 'GET', '/api/verse/seats', read);
+    expect(pending.status).toBe(200);
+    expect((pending.json as { accountTelemetry: unknown }).accountTelemetry).toEqual({
+      refreshing: true, pendingAccountIds: ['claude'],
+    });
+    expect(pending.body).not.toContain('not-in-this-roster');
+    for (const arg of CLAUDE_COMMAND) expect(pending.body).not.toContain(arg);
+    settled = true;
+    const finished = await request(port, 'GET', '/api/verse/seats', read);
+    expect((finished.json as { accountTelemetry: unknown }).accountTelemetry).toEqual({ refreshing: false, pendingAccountIds: [] });
+    expect(reads).toBeGreaterThan(0);
+    expect(await request(port, 'GET', '/api/verse/seats')).toMatchObject({ status: 401 });
+  });
+
+  it.each(['absent', 'other-root', 'stopped', 'read-only'] as const)('does not invent startup work for an %s collector', async (mode) => {
+    if (mode !== 'absent') setVerseAccountCollector({
+      accountsRoot: mode === 'other-root' ? path.join(tmpHome, 'other-root') : path.join(tmpHome, '.ashlr', 'account-connections'),
+      status: () => ({ mode: mode === 'read-only' ? 'read-only' : 'owned', state: mode === 'stopped' ? 'stopped' : 'running',
+        owner: 'none', reasonCode: null, pollIntervalMs: 30_000, idleSuspendMs: 300_000,
+        lastPolledAt: null, lastRequestAt: null, note: '' }),
+      touch: () => {}, observations: () => [], unavailableWorkerIds: () => [], credits: () => null,
+      connections: () => null, close: async () => {},
+    });
+    const { port, read } = await boot();
+    const response = await request(port, 'GET', '/api/verse/seats', read);
+    expect(response.status).toBe(200);
+    expect((response.json as { accountTelemetry: unknown }).accountTelemetry).toEqual({ refreshing: false, pendingAccountIds: [] });
   });
 });
 

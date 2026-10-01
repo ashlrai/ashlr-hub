@@ -35,8 +35,8 @@ export function goalFocusModeEnabled(cfg?: Pick<AshlrConfig, 'foundry'> | null):
 
 export function goalFocusActiveThreshold(cfg?: Pick<AshlrConfig, 'foundry'> | null): number {
   const raw = foundryRecord(cfg)?.['goalFocusActiveThreshold'];
-  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
-    return Math.max(1, Math.floor(raw));
+  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0) {
+    return raw;
   }
   return DEFAULT_GOAL_FOCUS_ACTIVE_THRESHOLD;
 }

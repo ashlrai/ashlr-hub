@@ -1,0 +1,11 @@
+.panel { margin: var(--space-3) 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: var(--space-3); }
+.panel > summary { cursor: pointer; font-size: var(--text-sm-size); color: var(--text-primary); }
+.panel > summary span { display: block; color: var(--text-tertiary); font-size: var(--text-xs-size); }
+.panel > summary:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; }
+.body { display: flex; flex-direction: column; gap: var(--space-3); margin-top: var(--space-3); }
+.rows { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--space-3); }
+.rows li { min-width: 0; padding-bottom: var(--space-3); border-bottom: 1px solid var(--border-subtle); }
+.heading { display: flex; flex-wrap: wrap; gap: var(--space-2); justify-content: space-between; font-size: var(--text-xs-size); color: var(--text-secondary); }
+.heading span { overflow-wrap: anywhere; }
+.amount { margin: var(--space-2) 0; font-size: var(--text-sm-size); color: var(--text-primary); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.note { margin: 0; color: var(--text-tertiary); font-size: var(--text-xs-size); line-height: var(--text-xs-line); overflow-wrap: anywhere; }

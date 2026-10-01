@@ -11,9 +11,9 @@
  *   2. EVERY TRIAL IS ISOLATED. Fixtures are rebuilt from source into a fresh
  *      directory per trial, so trial 3 cannot inherit trial 2's half-finished
  *      edit and the order trials run in cannot change the result.
- *   3. THE AGENT CANNOT REACH ITS OWN GRADER. The checker is written one level
- *      ABOVE the directory the agent is given, which Claude Code confines its
- *      file tools to.
+ *   3. THE CHECKER SOURCE IS CAPTURED BEFORE THE AGENT RUNS. Verification
+ *      executes that string, never the agent-writable forensic check.mjs copy.
+ *      This is grader-file integrity, not an OS sandbox for fixture execution.
  */
 
 import { spawn } from 'node:child_process';
@@ -284,7 +284,21 @@ export function parseAgentResult(stdout: string): {
   };
 }
 
-/** Write a task's fixture into `trialDir`, with the checker out of reach. */
+/**
+ * Capture the supported checker contract before any agent execution. The source
+ * is passed as an argv value, never through a shell or read back from the trial.
+ * Current checkers resolve fixture paths from cwd; eval has no check.mjs URL, so
+ * file-relative imports/import.meta.url are not part of this checker contract.
+ */
+export function buildCheckerArgs(task: Pick<TaskSpec, 'check' | 'verify'>): string[] {
+  if (!Array.isArray(task.verify) || task.verify.length !== 2 ||
+      task.verify[0] !== 'node' || task.verify[1] !== 'check.mjs' || typeof task.check !== 'string') {
+    throw new RangeError('Unsupported local-eval checker: expected node check.mjs with source');
+  }
+  return ['node', '--input-type=module', '--eval', task.check];
+}
+
+/** Write a fixture and an agent-writable forensic checker copy, never executed. */
 async function materialise(task: TaskSpec, trialDir: string): Promise<string> {
   const work = join(trialDir, 'work');
   await rm(trialDir, { recursive: true, force: true });
@@ -304,6 +318,7 @@ async function materialise(task: TaskSpec, trialDir: string): Promise<string> {
 /** Run one task once, end to end, and return a fully classified result. */
 export async function runTrial(opts: RunTrialOptions): Promise<TrialResult> {
   const { task, trialDir } = opts;
+  const [checkBin, ...checkArgs] = buildCheckerArgs(task);
   const work = await materialise(task, trialDir);
   const before = await snapshot(work);
 
@@ -367,17 +382,13 @@ export async function runTrial(opts: RunTrialOptions): Promise<TrialResult> {
   const after = await snapshot(work);
   const changedFiles = countChanges(before, after);
 
-  // The check runs from the trial root so `check.mjs` can read ./work, and its
-  // status is read from the child — never through a pipe.
+  // Trusted captured source runs from the trial root so cwd-relative ./work
+  // paths retain their meaning. No post-agent checker-file read or shell eval.
+  // The node binary/environment and imported fixture code remain host execution;
+  // this does not isolate a malicious same-user process or authenticate results.
   let verifyExit: number | null = null;
   let verifyOutput = '';
   if (!agent.timedOut && !agent.aborted) {
-    // `verify` is a full argv INCLUDING the binary, so the head is the command
-    // and the tail is its arguments. Passing the whole array as arguments ran
-    // `node node check.mjs`, which fails with MODULE_NOT_FOUND — and scored a
-    // flawless answer as `wrong-edit`. A harness bug that only ever moves the
-    // pass rate DOWN is the most expensive kind: it looks like a model result.
-    const [checkBin, ...checkArgs] = task.verify;
     const check = await runChild(checkBin!, checkArgs, { cwd: trialDir, timeoutMs: 60_000 });
     verifyExit = check.status;
     verifyOutput = check.stdout + check.stderr;

@@ -69,7 +69,7 @@ describe.skipIf(process.platform === 'win32')('follow-up durable context admissi
       const changed = structuredClone(valid); mutate(changed); f.save(changed);
       const before = readFileSync(f.statePath);
       await expect(f.start()).rejects.toMatchObject({ code: 'UNAVAILABLE' });
-      expect(readFileSync(f.statePath)).toEqual(before); expect(f.requests()).toBe(1);
+      expect(readFileSync(f.statePath).equals(before)).toBe(true); expect(f.requests()).toBe(1);
     }
     f.save(valid); const recovered = await f.start(); recovered.setPaused(false); await settled(recovered, 'child');
     expect(f.requests()).toBe(2);
@@ -86,7 +86,9 @@ describe.skipIf(process.platform === 'win32')('follow-up durable context admissi
       try { owner.submit(f.task(id, { parent })); admitted.push(id); }
       catch (error) {
         expect(error).toMatchObject({ code: 'CAPACITY' }); rejected = true;
-        expect(readFileSync(f.statePath)).toEqual(before); expect(readFileSync(join(f.root, 'pool-state.json'))).toEqual(ledger);
+        // Preserve exact multi-megabyte state bytes without a per-index matcher walk.
+        expect(readFileSync(f.statePath).equals(before)).toBe(true);
+        expect(readFileSync(join(f.root, 'pool-state.json')).equals(ledger)).toBe(true);
         expect(owner.snapshot().jobs.some((row) => row.id === id)).toBe(false); break;
       }
     }

@@ -354,6 +354,11 @@ export interface CapacityData {
   budget: BudgetView | null;
   /** True until the seat roster has been read once. */
   loading: boolean;
+  /** Cached values remain visible while independent shared reads update. */
+  refreshing: boolean;
+  readFailed: boolean;
+  rosterUnavailable: boolean;
+  pendingSeatIds: readonly string[];
 }
 
 /**
@@ -378,6 +383,10 @@ export function useCapacityData(opts: { withBudget?: boolean; withHealth?: boole
     health: withHealth ? (health.data?.seats ?? null) : null,
     budget: withBudget ? (budget.data ?? null) : null,
     loading: data === undefined && (bootstrap.status === 'loading' || bootstrap.status === 'idle'),
+    refreshing: data?.accountTelemetry?.refreshing === true || bootstrap.status === 'refreshing' || (withHealth && health.status === 'refreshing') || (withBudget && budget.status === 'refreshing'),
+    readFailed: bootstrap.status === 'error' || (withHealth && health.status === 'error') || (withBudget && budget.status === 'error'),
+    rosterUnavailable: data === undefined && bootstrap.status === 'error',
+    pendingSeatIds: Array.isArray(data?.accountTelemetry?.pendingAccountIds) ? data.accountTelemetry.pendingAccountIds : [],
   };
 }
 

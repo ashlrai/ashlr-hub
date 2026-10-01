@@ -761,7 +761,7 @@ function resolveDispatchProductionAttemptProofs(
   return result.resolutions;
 }
 
-function appendCanonicalDispatchEvent(event: DispatchProductionEvent): void {
+function canonicalDispatchEventLine(event: DispatchProductionEvent): { partition: string; line: string } {
   const canonical = sanitizeDispatchProductionEvent({
     ...event,
     runEventSummary: {
@@ -773,12 +773,26 @@ function appendCanonicalDispatchEvent(event: DispatchProductionEvent): void {
       },
     },
   }, { materializeLearningLabel: true });
+  return { partition: `${canonical.ts.slice(0, 10)}.jsonl`, line: `${JSON.stringify(canonical)}\n` };
+}
+
+function appendCanonicalDispatchEvent(event: DispatchProductionEvent): void {
+  const { partition, line } = canonicalDispatchEventLine(event);
   mkdirSync(dispatchProductionDir(), { recursive: true });
-  appendFileSync(
-    join(dispatchProductionDir(), `${canonical.ts.slice(0, 10)}.jsonl`),
-    `${JSON.stringify(canonical)}\n`,
-    'utf8',
-  );
+  appendFileSync(join(dispatchProductionDir(), partition), line, 'utf8');
+}
+
+/** Seed the same complete per-partition history, without opening it per row. */
+function appendCanonicalDispatchEvents(events: readonly DispatchProductionEvent[]): void {
+  const partitions = new Map<string, string[]>();
+  for (const event of events) {
+    const { partition, line } = canonicalDispatchEventLine(event);
+    const lines = partitions.get(partition) ?? [];
+    lines.push(line);
+    partitions.set(partition, lines);
+  }
+  mkdirSync(dispatchProductionDir(), { recursive: true });
+  for (const [partition, lines] of partitions) appendFileSync(join(dispatchProductionDir(), partition), lines.join(''), 'utf8');
 }
 
 function readExactFileSlice(path: string, offset: number, length: number): Buffer {
@@ -2858,6 +2872,20 @@ describe('M342 dispatch production ledger', () => {
     expect(readdirSync(receiptDir).filter((name) => name.endsWith('.stage'))).toHaveLength(17);
   });
 
+  it('bulk fixture history is byte-identical to individual appends across repeated partitions', () => {
+    const events = [
+      makeProofEvent({ ts: '2025-01-01T00:00:00.000Z', runId: 'batch-first' }),
+      makeProofEvent({ ts: '2025-01-02T00:00:00.000Z', runId: 'batch-second' }),
+      makeProofEvent({ ts: '2025-01-01T00:00:01.000Z', runId: 'batch-third' }),
+    ];
+    for (const event of events) appendCanonicalDispatchEvent(event);
+    const paths = ['2025-01-01.jsonl', '2025-01-02.jsonl'].map((name) => join(dispatchProductionDir(), name));
+    const originals = paths.map((path) => readFileSync(path));
+    for (const path of paths) rmSync(path);
+    appendCanonicalDispatchEvents(events);
+    expect(paths.map((path) => readFileSync(path))).toEqual(originals);
+  });
+
   it('retires whole old generations at capacity and never re-promotes dropped proof', () => {
     const receiptDir = join(dispatchProductionDir(), 'repair-attempt-proofs');
     let oldest: DispatchProductionEvent | undefined;
@@ -2887,8 +2915,13 @@ describe('M342 dispatch production ledger', () => {
         validatedAttemptReceiptText(canonical),
         'utf8',
       );
-      appendCanonicalDispatchEvent(canonical);
     }
+    // The assertions observe only the completed fixture. Every real receipt
+    // and the exact same ordered history rows exist before retirement runs.
+    appendCanonicalDispatchEvents(seeded);
+    expect(readFileSync(join(dispatchProductionDir(), '2025-01-01.jsonl'), 'utf8')).toBe(
+      seeded.map((event) => canonicalDispatchEventLine(event).line).join(''),
+    );
     const next = makeProofEvent({
       ts: '2026-07-08T12:01:00.000Z',
       repairHandoffId: oldest!.repairHandoffId,

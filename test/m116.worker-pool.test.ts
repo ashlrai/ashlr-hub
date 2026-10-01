@@ -116,10 +116,17 @@ vi.mock('../src/core/fleet/subscription-usage.js', () => ({
 }));
 
 // Mock quota/limit — default: always within limit.
-vi.mock('../src/core/fleet/quota.js', () => ({
-  withinLimit: () => true,
-  recordUse: vi.fn(),
-}));
+vi.mock('../src/core/fleet/quota.js', async () => {
+  const real = await vi.importActual<typeof import('../src/core/fleet/quota.js')>('../src/core/fleet/quota.js');
+  return {
+    withinLimit: () => true,
+    recordUse: vi.fn(),
+    // The real final admission has no configured quota in these private
+    // fixtures. Keep it present so cloud dispatch actually reaches the runner.
+    reserveFleetQuotaUse: real.reserveFleetQuotaUse,
+    reserveFleetQuotaUses: real.reserveFleetQuotaUses,
+  };
+});
 
 // Mock supporting modules that are imported transitively.
 vi.mock('../src/core/fleet/pulse-export.js', () => ({ exportToPulse: async () => false }));
@@ -484,6 +491,41 @@ describe('M116 — tiered concurrency', () => {
     expect(peakCloud).toBeLessThanOrEqual(4);
     // Total dispatches happened
     expect(mockRunSwarm.mock.calls.length + mockRunGoal.mock.calls.length).toBeGreaterThan(0);
+  });
+
+  it.each([false,true])('starts an admitted cloud task past a blocked local task; Stop=%s preserves selected order and guards',async(stopAfterCloud)=>{
+    enroll(tmpRepo);
+    backlogItems=['l1','l2','l3','c1','c2'].map(id=>makeItem(id,tmpRepo));
+    mockRouteBackend.mockImplementation((item:WorkItem)=>({backend:item.id.startsWith('c')?'claude':'builtin',
+      tier:item.id.startsWith('c')?'frontier':'local',reason:'test'}));
+    engineTierOfImpl=engine=>engine==='claude'?'frontier':'local';
+    let release!:()=>void;
+    const localGate=new Promise<void>(resolve=>{release=resolve;});
+    let localStarted=0;let localActive=0;let cloudActive=0;let peakTotal=0;let peakLocal=0;let peakCloud=0;
+    const localRun=swarmStub(tmpRepo);
+    mockRunSwarm.mockImplementation(async()=>{
+      localStarted++;localActive++;peakLocal=Math.max(peakLocal,localActive);peakTotal=Math.max(peakTotal,localActive+cloudActive);
+      try {await localGate;return await localRun();}finally{localActive--;}
+    });
+    mockRunGoal.mockImplementation(async()=>{
+      cloudActive++;peakCloud=Math.max(peakCloud,cloudActive);peakTotal=Math.max(peakTotal,localActive+cloudActive);
+      if(stopAfterCloud)setKill(true);
+      try {await Promise.resolve();return {id:'cloud',status:'done',usage:{estCostUsd:0}};}finally{cloudActive--;}
+    });
+    const cfg=makeCfg({perTickItems:5,parallel:3,concurrency:{local:2,cloud:1,total:3}});
+    const running=tick(cfg,{dryRun:false});
+    let result!: Awaited<ReturnType<typeof tick>>;
+    try {
+      // No timing race or completed local task can explain the cloud start:
+      // both local workers are held until the assertions finish.
+      await vi.waitFor(()=>expect(mockRunGoal).toHaveBeenCalled());
+      expect(localStarted).toBe(2);expect(localActive).toBe(2);
+      expect(peakTotal).toBe(3);expect(peakLocal).toBe(2);expect(peakCloud).toBe(1);
+    }finally{release();result=await running;}
+    expect(result.dispatches?.map(trace=>trace.itemId)).toEqual(backlogItems.map(item=>item.id));
+    expect(mockRunSwarm).toHaveBeenCalledTimes(stopAfterCloud?2:3);
+    expect(mockRunGoal).toHaveBeenCalledTimes(stopAfterCloud?1:2);
+    expect(result.dispatches?.filter(trace=>trace.dispatched)).toHaveLength(stopAfterCloud?3:5);
   });
 
   it('cloud throttle does not block local items from dispatching', async () => {

@@ -44,6 +44,7 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  */
 export const REAL_IO_TEST_FILES = [
   'test/test-ci-sharded.test.ts', // real bounded child-process shards in private temporary homes
+  'test/web-ui-browser-safe-imports.test.ts', // recursive real source reads and TypeScript runtime-import graph; cases retain explicit original 5s deadlines
   'test/remote-gateway-auth.test.ts', // real loopback gateway and Mac-only Unix socket pairing ceremony
   'test/remote-admin-race.test.ts', // real owned Unix socket child killed to reproduce stale-admin startup races
   'test/remote-gateway-http.test.ts', // real loopback Hub and gateway servers, Access assertion and SSE lifecycle
@@ -422,6 +423,7 @@ export const REAL_IO_TEST_FILES = [
   'test/perf-server-claude-usage.test.ts', // real transcript appends/truncations and the async prime path on disk
   'test/llama-process-async.test.ts', // spawns a real (harmless node timer) process standing in for llama-server
   'test/local-eval-trace.test.ts', // real loopback HTTP server standing in for the local model endpoint
+  'test/local-eval-trace-https.test.ts', // real loopback tracer, injected TLS transport; no external endpoint
   'test/local-eval-heldout.test.ts', // spawns real `node` held-out checkers, like local-eval.test.ts
   'test/verse-accounts-limit-reached.test.ts', // private 0600/0700 ledger evidence files round-tripped in a tmp root (sibling of verse-accounts)
   'test/verse-resources-ready-314.test.ts', // 3.14: real collector lease acquire / idle hand-back / re-acquire under a tmp root (sibling of verse-accounts)

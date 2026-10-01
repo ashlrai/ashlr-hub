@@ -27,6 +27,7 @@
  * yields "unknown" health, which is never rendered as zero.
  */
 
+import { codexCreditsAvailable } from '../resources/codex-credits.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
@@ -447,6 +448,7 @@ export function nativeSeatModels(
 export interface VerseSeatTelemetry {
   health: VerseSeatHealth;
   capacity: VerseSeatCapacity;
+  lastKnownUsage?: VerseSeat['lastKnownUsage'];
 }
 
 /** At or above this percent the binding window is reported as `tight`. */
@@ -462,6 +464,7 @@ function seatWindow(window: VerseAccountWindow): VerseSeatWindow {
     resetDescription: window.nativeReport?.resetDescription ?? null,
     limitReached: window.limitReached,
     measured: window.measured,
+    ...(window.resetProvenance ? { resetProvenance: window.resetProvenance } : {}),
   };
 }
 
@@ -501,7 +504,7 @@ export function seatUsability(
   // nothing about headroom in either direction.
   const read = record.windows.filter((w) => w.usedPercent !== null);
   const spent = read.filter((w) => w.limitReached || (w.usedPercent ?? 0) >= 100);
-  const creditsLeft = record.credits?.hasCredits === true;
+  const creditsLeft = codexCreditsAvailable(record.credits) && record.credits?.spendControlReached !== true;
   if (spent.length === read.length) return creditsLeft ? 'tight' : 'exhausted';
   // V3.10 — KEEP CODEX'S `limitReached`. Codex's flag is the provider's own
   // DENIAL for the account's bucket (`rateLimitReachedType`), not a
@@ -540,6 +543,7 @@ function telemetryOf(record: VerseAccountRecord, evidenceSource: VerseSeatEviden
   const bindingId = record.binding?.id ?? null;
   const binding = bindingId === null ? null : windows.find((w) => w.id === bindingId) ?? null;
   return {
+    ...(record.observedAt === null && record.lastKnownUsage ? { lastKnownUsage: structuredClone(record.lastKnownUsage) } : {}),
     health: {
       state: seatHealthState(record),
       summary: windowsSummary(windows),
@@ -555,6 +559,7 @@ function telemetryOf(record: VerseAccountRecord, evidenceSource: VerseSeatEviden
       // Structurally identical to `VerseCodexCredits`; this assignment is the
       // compile-time drift guard between core and the browser-safe contract.
       credits: record.credits,
+      creditsExpiresAt: record.credits === null ? null : record.expiresAt,
       usability: seatUsability(record),
       observedAt: record.observedAt,
       evidenceSource,
@@ -645,7 +650,7 @@ function nativeSeatFacets(
   provider: NativeEngine,
   telemetry: ReadonlyMap<string, VerseSeatTelemetry>,
   claudeUsage: () => ClaudeUsageResult,
-): { health: VerseSeatHealth; capacity: VerseSeatCapacity | null } {
+): { health: VerseSeatHealth; capacity: VerseSeatCapacity | null; lastKnownUsage?: VerseSeat['lastKnownUsage'] } {
   const found = telemetry.get(accountId) ?? null;
   const health: VerseSeatHealth = found
     ? { ...found.health, windows: found.health.windows.map((w) => ({ ...w })) }
@@ -663,7 +668,7 @@ function nativeSeatFacets(
       // Usage is best-effort colour; never block seat discovery.
     }
   }
-  return { health, capacity: found?.capacity ?? null };
+  return { health, capacity: found?.capacity ?? null, ...(found?.lastKnownUsage ? { lastKnownUsage: structuredClone(found.lastKnownUsage) } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1110,6 +1115,7 @@ export async function discoverSeats(cfg: AshlrConfig, opts: VerseSeatDiscoveryOp
         health: facets.health,
       };
       if (facets.capacity) seat.capacity = facets.capacity;
+      if (facets.lastKnownUsage) seat.lastKnownUsage = facets.lastKnownUsage;
       // Both optional and absent when there is nothing to say, so an ordinary
       // seat's wire shape does not change.
       if (built.cliVersion !== null) seat.cliVersion = built.cliVersion;
@@ -1185,6 +1191,8 @@ export function refreshSeatTelemetry(
     if (seat.engine === 'local' || seat.engine === 'devin') return seat;
     const facets = nativeSeatFacets(seat.accountId, seat.engine, telemetry, claudeUsage);
     const next: VerseSeat = { ...seat, health: facets.health };
+    delete next.lastKnownUsage;
+    if (facets.lastKnownUsage) next.lastKnownUsage = facets.lastKnownUsage;
     if (facets.capacity) next.capacity = facets.capacity;
     else delete next.capacity;
     return next;

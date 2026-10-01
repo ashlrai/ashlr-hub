@@ -52,6 +52,7 @@ import type {
   AshlrConfig,
   DelegationScope,
   EngineId,
+  EngineCommand,
   EngineTier,
   ProposalVerifyResult,
   Proposal,
@@ -99,6 +100,7 @@ import { measureAgentDiagnosticText, recordAgentDiagnostic } from './agent-diagn
 import { classifyEngineError, toAgentDiagnosticErrorClass } from '../classify/engine-errors.js';
 import {
   GROK_CLI_ENGINE_ID,
+  configForGrokCliSeat,
   grokCliDirectCommand,
   grokStreamUsage,
   resolveEngineSpec,
@@ -127,6 +129,7 @@ import {
   recordAutonomousViolations,
   type AutonomousSpawn,
 } from '../sandbox/autonomous-run.js';
+import { autonomousVendorIdentityCurrent, captureAutonomousVendorIdentityCheck } from '../sandbox/autonomous-env.js';
 import { recordSandboxEvidenceUnknown } from '../authority/rollout.js';
 import { audit as auditConfinement } from '../sandbox/audit.js';
 import {
@@ -241,12 +244,12 @@ export interface RunEngineSandboxedOptions {
   /** Cancellation owned by the daemon or direct caller that started this run. */
   signal?: AbortSignal;
   /**
-   * V3.10 (INT4): the seat an AUTONOMOUS codex run uses (its per-run
-   * CODEX_HOME copy comes from that seat's native profile). grok-cli resolves
-   * its seat from cfg.foundry.grokCli. Absent for codex under a standing
-   * policy ⇒ the run is refused as unconfinable, never run on Mason's login.
+   * Exact native account selected by the router. Grok binds its pinned
+   * launcher and per-run state to this ID; absent bindings retain legacy cfg.
    */
   seatId?: string;
+  /** Internal synchronous fence for the explicitly bound Grok account before each native spawn. */
+  selectedGrokAdmission?: () => boolean;
   /** Internal whole-attempt generation for mutating-tool evidence. */
   effectGeneration?: string;
   /**
@@ -1872,6 +1875,7 @@ export async function runEngineSandboxed(
   cfg: AshlrConfig,
   opts: RunEngineSandboxedOptions,
 ): Promise<SandboxedEngineResult> {
+  if (engine === GROK_CLI_ENGINE_ID) cfg = configForGrokCliSeat(cfg, opts.seatId);
   // V3.10 (INT4): a seat CLI gets its model NAMED (grok-cli's default when
   // nothing else says), so the argv and the recorded `grok-cli:<model>` agree.
   // 3.15: the Devin CLI's model has ONE source — the run's own override, else
@@ -2192,15 +2196,22 @@ export async function runEngineSandboxed(
   const autonomousRun = confinementProfile.autonomous === true;
   // EngineId predates the registry-only ids (grok-cli); compare as a string.
   const engineKey: string = engine;
+  const selectedStandingGrok = engineKey === GROK_CLI_ENGINE_ID && opts.seatId !== undefined && opts.selectedGrokAdmission !== undefined;
   let autonomousSpawn: AutonomousSpawn | null = null;
   let autonomousFinished = false;
+  let selectedGrokCommand: { launcher: EngineCommand; direct: NonNullable<ReturnType<typeof grokCliDirectCommand>> } | null = null;
+  let selectedGrokIdentityStillCurrent: (() => boolean) | null = null;
+  const selectedAdmissionCurrent = (): boolean => {
+    try { return opts.selectedGrokAdmission === undefined || opts.selectedGrokAdmission() === true; }
+    catch { return false; }
+  };
 
   // M248: write a fleet-owned MCP sidecar to the worktree (guarded: only when the dedicated ashlr-mcp is on PATH).
   // fleetMcp defaults to true (on) — set cfg.foundry.fleetMcp = false to opt out.
   // V3.10 (INT4, B-U2 request): NEVER for an autonomous run — the sidecar is
   // an unconfined ashlr MCP server the agent could drive (its tools run as
   // Mason, outside the sandbox profile).
-  const fleetMcpEnabled = !autonomousRun && (cfg.foundry as Record<string, unknown> | undefined)?.['fleetMcp'] !== false;
+  const fleetMcpEnabled = !autonomousRun && !selectedStandingGrok && (cfg.foundry as Record<string, unknown> | undefined)?.['fleetMcp'] !== false;
   const fleetMcpConfig = fleetMcpEnabled ? prepareFleetMcpConfig(sb.worktreePath) : null;
 
   // M154: prepend repo-map + localization context to goal when flags are ON.
@@ -2209,10 +2220,17 @@ export async function runEngineSandboxed(
   const goalWithContext = `${renderDelegationScopeForPrompt(delegationScope)}${contextPrefix ? contextPrefix + goal : goal}`;
 
   try {
+    if (selectedStandingGrok && !autonomousRun) {
+      const outcome = proposalOutcome('sandbox-unavailable','selected Grok standing authority no longer supports autonomous confinement');
+      recordSandboxedRunAgentAction({engine,engineModel,tier,runId:id,sourceRepo:opts.sourceRepo,
+        workItemId:opts.workItemId,workSource:opts.workSource,outcome,status:'failed',actionCounts});
+      return {state:withProposalOutcome(mk({status:'failed',result:outcome.reason}),outcome,actionCounts),proposalOutcome:outcome};
+    }
     let cmd = buildEngineCommand(engine, goalWithContext, cfg, {
       cwd: sb.worktreePath,
       model,
       autonomous: true,
+      ...(engineKey === GROK_CLI_ENGINE_ID && opts.seatId !== undefined ? { seatId: opts.seatId } : {}),
     });
     // V3.11: the adopted harness's effort (and, where a CLI has a carrier,
     // sampling) rides on the argv BEFORE any rewrite below — the grok-cli
@@ -2341,8 +2359,9 @@ export async function runEngineSandboxed(
       let seatId: string | null = opts.seatId ?? null;
       let nativeStatePath: string | null = null;
       if (engineKey === GROK_CLI_ENGINE_ID) {
-        const direct = grokCliDirectCommand(cmd, cfg);
+        const direct = grokCliDirectCommand(cmd, cfg, opts.seatId);
         if (!direct) return refuse('engine-command-missing', 'grok-cli seat launcher did not resolve for a direct autonomous exec');
+        if (opts.seatId !== undefined) selectedGrokCommand = { launcher: cmd, direct };
         cmd = direct.cmd;
         seatId = direct.seatId;
         nativeStatePath = direct.nativeStatePath;
@@ -2362,6 +2381,7 @@ export async function runEngineSandboxed(
       } catch (err) {
         return refuse('sandbox-unavailable', `autonomous confinement unavailable: ${err instanceof Error ? err.message : String(err)}`);
       }
+      if (selectedGrokCommand) selectedGrokIdentityStillCurrent = captureAutonomousVendorIdentityCheck(autonomousSpawn.overlay);
       cmd = { ...cmd, bin: autonomousSpawn.bin };
       spawnEnv = autonomousSpawn.env;
       launcher = autonomousSpawn.launcher;
@@ -2374,7 +2394,7 @@ export async function runEngineSandboxed(
       // measured runtime state (confine.ts GROK_SEAT_WRITABLE_*).
       let nativeSeat: NativeSeatConfinement | undefined;
       if (engineKey === GROK_CLI_ENGINE_ID && confinementProfile.mode === 'os') {
-        const seat = resolveGrokCliSeat(cfg);
+        const seat = resolveGrokCliSeat(cfg, undefined, opts.seatId);
         const home = process.env.HOME ?? process.env.USERPROFILE;
         if (seat.ok && home) nativeSeat = nativeSeatConfinement(seat.launch, home);
       }
@@ -2436,6 +2456,17 @@ export async function runEngineSandboxed(
       if (opts.signal?.aborted) {
         res = { ok: false, output: '', error: 'run cancelled', terminationReason: 'cancelled' };
         break;
+      }
+      if (selectedGrokCommand) {
+        const admitted = selectedAdmissionCurrent();
+        const fresh = admitted ? grokCliDirectCommand(selectedGrokCommand.launcher, cfg, opts.seatId) : null;
+        const expected = selectedGrokCommand.direct;
+        if (!admitted || !fresh || fresh.seatId !== expected.seatId || fresh.executable !== expected.executable ||
+          fresh.nativeStatePath !== expected.nativeStatePath || !autonomousSpawn ||
+          !autonomousVendorIdentityCurrent(autonomousSpawn.overlay)) {
+          res = { ok: false, output: '', error: 'selected Grok account authority, profile or identity changed before execution', terminationReason: 'error-exit' };
+          break;
+        }
       }
       incrementRunActionCount(actionCounts, 'spawnAttempts');
       const _spawnStart = Date.now();
@@ -2812,22 +2843,71 @@ export async function runEngineSandboxed(
                     `${goal}\n\n[verify-to-green] A previous attempt failed verification. ` +
                     `Fix ONLY what is needed to make the checks pass — do not start new work.\n` +
                     `Verification failure (tail):\n${failureTail}`;
-                  const builtRepairCmd = buildEngineCommand(engine, repairGoal, cfg, {
+                  let builtRepairCmd = buildEngineCommand(engine, repairGoal, cfg, {
                     cwd: sb.worktreePath,
                     model,
                     autonomous: true,
+                    ...(engineKey === GROK_CLI_ENGINE_ID && opts.seatId !== undefined ? { seatId: opts.seatId } : {}),
                   });
                   if (!builtRepairCmd) return null;
+                  let repairSpawn: AutonomousSpawn | null = null;
+                  if (selectedGrokCommand) {
+                    const admitted = selectedAdmissionCurrent();
+                    const fresh = admitted ? grokCliDirectCommand(builtRepairCmd, cfg, opts.seatId) : null;
+                    if (!admitted || !fresh || fresh.seatId !== selectedGrokCommand.direct.seatId ||
+                      fresh.executable !== selectedGrokCommand.direct.executable ||
+                      fresh.nativeStatePath !== selectedGrokCommand.direct.nativeStatePath ||
+                      !selectedGrokIdentityStillCurrent?.()) return null;
+                    // The first native home was already committed and removed.
+                    // Each selected repair gets a fresh confined copy of the
+                    // same host-held account, never that deleted run directory.
+                    try {
+                      repairSpawn = prepareAutonomousSpawn({engine,worktree:sb.worktreePath,baseEnv:env,bin:fresh.cmd.bin,
+                        seatId:fresh.seatId,nativeStatePath:fresh.nativeStatePath,extraReadOnly:[hooksDir],profile:confinementProfile});
+                    } catch { return null; }
+                    const stillAdmitted = selectedAdmissionCurrent();
+                    const latest = stillAdmitted ? grokCliDirectCommand(builtRepairCmd,cfg,opts.seatId) : null;
+                    if (!stillAdmitted || !selectedGrokIdentityStillCurrent?.() ||
+                      !autonomousVendorIdentityCurrent(repairSpawn.overlay) || !latest ||
+                      latest.seatId !== fresh.seatId || latest.executable !== fresh.executable ||
+                      latest.nativeStatePath !== fresh.nativeStatePath) {
+                      const finished = finishAutonomousSpawn(repairSpawn, { output: '' });
+                      if (finished.violations.length > 0) {
+                        await recordAutonomousViolations({ engine, sourceRepo: opts.sourceRepo, runId: id, operations: finished.violations });
+                      }
+                      if (finished.violationsKnown !== true) {
+                        await recordSandboxEvidenceUnknown({ engine, sourceRepo: opts.sourceRepo, runId: id, evidence: finished.kernelEvidence });
+                      }
+                      return null;
+                    }
+                    builtRepairCmd = {...fresh.cmd,bin:repairSpawn.bin};
+                  }
                   // A repair turn is the same dispatch: same harness settings.
                   const repairCmd = applyHarnessToEngineCommand(engineKey, builtRepairCmd, harnessTuning, harnessCommandContext).cmd;
                   incrementRunActionCount(actionCounts, 'verifyRepairAttempts');
                   incrementRunActionCount(actionCounts, 'spawnAttempts');
-                  const r = await spawnEngine(repairCmd, cfg, {
-                    env,
-                    timeoutMs: _v2g.perRunTimeoutMs ?? 180_000,
-                    launcher: launcher ?? undefined,
-                    ...(opts.signal ? { signal: opts.signal } : {}),
-                  });
+                  let r: SpawnEngineResult | null = null;
+                  try {
+                    r = await spawnEngine(repairCmd, cfg, {
+                      env:repairSpawn?.env ?? env,
+                      timeoutMs:_v2g.perRunTimeoutMs ?? 180_000,
+                      launcher:repairSpawn?.launcher ?? launcher ?? undefined,
+                      ...(opts.signal ? { signal:opts.signal } : {}),
+                    });
+                  } finally {
+                    if (repairSpawn) {
+                      const finished = finishAutonomousSpawn(repairSpawn,{output:r ? `${r.output}\n${r.error ?? ''}` : '',tripwireKill:r ? engineResultTripwireKill(r) : false});
+                      if (finished.violations.length) await recordAutonomousViolations({engine,sourceRepo:opts.sourceRepo,runId:id,operations:finished.violations});
+                      if (finished.violationsKnown !== true) {
+                        await recordSandboxEvidenceUnknown({ engine, sourceRepo: opts.sourceRepo, runId: id, evidence: finished.kernelEvidence });
+                      }
+                    }
+                  }
+                  if (!r) return null;
+                  if (selectedGrokCommand) {
+                    const reported = grokStreamUsage(r.output);
+                    if (reported) r = {...r,usage:reported};
+                  }
                   const invocationCount = 1 + (r.configRecoveryAttempts ?? 0);
                   if (r.configRecoveryAttempts) {
                     incrementRunActionCount(actionCounts, 'spawnAttempts', r.configRecoveryAttempts);

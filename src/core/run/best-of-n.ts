@@ -762,7 +762,7 @@ interface RuntimeCandidateSpec extends BestOfNCandidateSpec {
 
 const ENGINE_IDS = new Set<EngineId>([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
-  'kimi', 'nim', 'opencode', 'meta-muse', 'grok',
+  'kimi', 'nim', 'opencode', 'meta-muse', 'grok', 'grok-cli',
 ]);
 
 function materializeCandidateSpecs(
@@ -858,11 +858,13 @@ async function runBestOfNInternal(
     signal?: AbortSignal;
     /**
      * V3.10: the SeatRouter's seat for the ROUTED engine (`engine`), forwarded
-     * as runEngineSandboxed's `seatId` so an autonomous codex candidate runs on
+     * as runEngineSandboxed's `seatId` so an autonomous native candidate runs on
      * that seat's profile instead of being refused as unconfinable. A seat
      * belongs to one engine, so candidates on any other engine never get it.
      */
     seatId?: string;
+    /** Internal same-seat pre-spawn fence, forwarded only to its routed Grok candidate. */
+    selectedGrokAdmission?: () => boolean;
     /**
      * V3.11: the active harness's per-lane effort / sampling (a standing
      * dispatch's RunOptions.harness). Every non-shadow candidate gets it and
@@ -1042,8 +1044,9 @@ async function runBestOfNInternal(
     }]);
   }
   // The routed seat only ever applies to the routed engine (see opts.seatId).
-  const seatFor = (e: EngineId): { seatId: string } | Record<string, never> =>
-    opts?.seatId && opts.engine !== undefined && e === opts.engine ? { seatId: opts.seatId } : {};
+  const seatFor = (e: EngineId): { seatId?: string; selectedGrokAdmission?: () => boolean } =>
+    opts?.seatId && opts.engine !== undefined && e === opts.engine
+      ? { seatId:opts.seatId,...(String(e) === 'grok-cli' && opts.selectedGrokAdmission ? {selectedGrokAdmission:opts.selectedGrokAdmission} : {}) } : {};
   const runnerFor = (e: EngineId): typeof runEngineSandboxed => {
     const spec = resolveEngineSpec(e, cfg);
     return spec?.kind === 'api-model' ? runApiModelSandboxed : runEngineSandboxed;

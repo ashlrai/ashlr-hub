@@ -32,6 +32,7 @@ export type DecisionKind =
   | 'needs-you-priority'
   | 'interrupt-worthiness'
   | 'lane-choice'
+  | 'resource-choice'
   | 'trigger-triage'
   | 'action-class'
   | 'operator-intent';
@@ -172,6 +173,7 @@ export interface DecisionRecord {
   readonly inputTokens?: number;
   readonly outputTokens?: number;
   readonly estCostUsd?: number;
+  readonly costSource?: 'published-model' | 'operator-rates';
   readonly durationMs: number;
 }
 
@@ -185,7 +187,7 @@ export interface JevKindStats {
   /** Mean Jev confidence over decisions where Jev answered. */
   readonly avgConfidence: number | null;
   readonly fallbackRate: number;
-  readonly estCostUsd: number;
+  readonly estCostUsd: number | null;
   readonly avgLatencyMs: number | null;
   readonly topFallbackReasons: ReadonlyArray<{ reason: string; count: number }>;
 }
@@ -198,10 +200,15 @@ export interface JevStatus {
   readonly day: string;
   readonly decisionsToday: number;
   readonly callsToday: number;
-  readonly dailyCallBudget: number;
-  readonly inputTokensToday: number;
-  readonly outputTokensToday: number;
-  readonly estCostUsdToday: number;
+  readonly dailyCallBudget: number | null;
+  readonly inputTokensToday: number | null;
+  readonly outputTokensToday: number | null;
+  readonly estCostUsdToday: number | null;
+  /** Missing/malformed counts are unknown; an actually reported zero remains zero. */
+  readonly usageCoverage?: { readonly reportedCalls: number; readonly unknownCalls: number };
+  /** Includes historical recorded estimates, never repriced using today's tariff. */
+  readonly costCoverage?: { readonly pricedCalls: number; readonly unknownCalls: number; readonly source: 'recorded-estimates' };
+  readonly lastSuccessfulCallAt?: string | null;
   readonly fallbackRateToday: number;
   readonly avgConfidenceToday: number | null;
   readonly avgLatencyMsToday: number | null;

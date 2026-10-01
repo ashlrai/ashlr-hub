@@ -3,6 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { canonical } from '../universe/artifacts.js';
+import { readCodexNativeCredits } from './codex-credits.js';
 import { normalizeCodexResourceObservation } from './provider-observations.js';
 import type { CodexProbeProcessInput, CodexProbeProcessOutput } from './codex-account-probe.js';
 
@@ -70,7 +71,7 @@ process.stdin.on('end', () => {
 function start(input: CodexProbeProcessInput): void {
   let child: ChildProcessWithoutNullStreams;
   let output: CodexProbeProcessOutput = { schemaVersion: 1, status: 'failed', reason: 'probe-native-unavailable',
-    accountHint: null, planType: null, observation: null };
+    accountHint: null, planType: null, observation: null, credits: null };
   let ending = false; let childClosed = false; let killTimer: ReturnType<typeof setTimeout> | undefined;
   let bytes = 0; let messages = 0; let pending = 1; let line = '';
   const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -79,7 +80,7 @@ function start(input: CodexProbeProcessInput): void {
 
   function fail(reason: string): void {
     if (terminating || ending && output.status === 'failed') return;
-    output = { ...output, status: 'failed', reason, observation: null };
+    output = { ...output, status: 'failed', reason, observation: null, credits: null };
     if (!ending) endNative(true);
   }
   function endNative(kill: boolean): void {
@@ -92,7 +93,7 @@ function start(input: CodexProbeProcessInput): void {
     // inherited pipes/background descendants remain bounded by the outer group.
     killTimer = setTimeout(() => {
       if (!childClosed && !terminating) {
-        output = { ...output, status: 'failed', reason: 'probe-native-exit-failed', observation: null };
+        output = { ...output, status: 'failed', reason: 'probe-native-exit-failed', observation: null, credits: null };
         try { child.kill('SIGKILL'); } catch { /* Outer group deadline remains authoritative. */ }
       }
     }, 500);
@@ -159,7 +160,8 @@ function start(input: CodexProbeProcessInput): void {
       const observation = normalizeCodexResourceObservation(input.workerId, quota,
         { nowMs: Date.parse(input.startedAt), ttlMs: 60_000, bucketIds: input.bucketIds });
       if (!observation) { fail('probe-quota-invalid'); return; }
-      output = { ...output, status: 'observed', reason: 'probe-observed', observation };
+      output = { ...output, status: 'observed', reason: 'probe-observed', observation,
+        credits: input.bucketIds.length === 1 ? readCodexNativeCredits(quota, input.bucketIds[0]!) : null };
       pending = 5;
       endNative(false);
     } else fail('probe-protocol-invalid');
@@ -189,15 +191,15 @@ function start(input: CodexProbeProcessInput): void {
     // Native diagnostics can contain identity, file paths or auth material.
     // Count for boundedness, never echo or retain them in helper output.
   });
-  child.on('error', () => { output = { ...output, status: 'failed', reason: 'probe-native-unavailable', observation: null }; });
+  child.on('error', () => { output = { ...output, status: 'failed', reason: 'probe-native-unavailable', observation: null, credits: null }; });
   child.on('close', (code, signal) => {
     childClosed = true;
     if (killTimer) clearTimeout(killTimer);
     if (terminating) return;
-    try { line += decoder.decode(); } catch { output = { ...output, status: 'failed', reason: 'probe-protocol-invalid', observation: null }; }
-    if (line.trim()) output = { ...output, status: 'failed', reason: 'probe-protocol-invalid', observation: null };
+    try { line += decoder.decode(); } catch { output = { ...output, status: 'failed', reason: 'probe-protocol-invalid', observation: null, credits: null }; }
+    if (line.trim()) output = { ...output, status: 'failed', reason: 'probe-protocol-invalid', observation: null, credits: null };
     if (output.status === 'observed' && (code !== 0 || signal)) {
-      output = { ...output, status: 'failed', reason: 'probe-native-exit-failed', observation: null };
+      output = { ...output, status: 'failed', reason: 'probe-native-exit-failed', observation: null, credits: null };
     }
     process.stdout.write(JSON.stringify(output) + '\n');
   });

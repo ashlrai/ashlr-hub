@@ -234,6 +234,25 @@ describe('cache — refetchQuery', () => {
     await settle();
   });
 
+  it.each(['success', 'error'] as const)('a superseded %s cannot clear the latest pending refresh or alter its cached reading', async (result) => {
+    await runQuery('k', async () => 'previous');
+    const old = deferred<string>();
+    const fresh = deferred<string>();
+    const oldRead = refetchQuery('k', () => old.promise, true);
+    const newRead = refetchQuery('k', () => fresh.promise, true);
+    if (result === 'success') old.resolve('stale');
+    else old.reject(new Error('Old failure'));
+    await oldRead;
+    expect(getQuerySnapshot('k')).toMatchObject({ data: 'previous', status: 'refreshing', error: undefined });
+    // A normal joining read still belongs to the pending latest generation.
+    const another = vi.fn(async () => 'unwanted');
+    const joined = runQuery('k', another);
+    expect(another).not.toHaveBeenCalled();
+    fresh.resolve('fresh');
+    await Promise.all([newRead, joined]);
+    expect(getQuerySnapshot('k')).toMatchObject({ data: 'fresh', status: 'success' });
+  });
+
   it('forced: ignores freshness, unlike the mount path', async () => {
     const fetcher = vi.fn(async () => 'v');
     await ensureQuery('k', fetcher, 60_000);

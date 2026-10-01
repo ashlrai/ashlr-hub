@@ -337,8 +337,8 @@ function execute<T>(key: string, fetcher: () => Promise<T>, options: QueryRunOpt
   const run = schedule(fetcher)
     .then((data) => {
       // A superseded request (a forced refresh was issued after this one, or
-      // the key was evicted) must never overwrite a newer answer.
-      if (seq < e.applied) return;
+      // the key was evicted) must not admit data or clear the latest pending status.
+      if (seq < e.issued) return;
       e.applied = seq;
       const unchanged = e.snapshot.data !== undefined && sameData(e.snapshot.data, data);
       setSnapshot(e, {
@@ -349,7 +349,7 @@ function execute<T>(key: string, fetcher: () => Promise<T>, options: QueryRunOpt
       });
     })
     .catch((err: unknown) => {
-      if (seq < e.applied) return;
+      if (seq < e.issued) return;
       e.applied = seq;
       setSnapshot(e, { error: err instanceof Error ? err : new Error(String(err)), status: 'error' });
     })

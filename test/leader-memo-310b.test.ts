@@ -1,3 +1,4 @@
+import { resolveGoalPreferences } from '../src/core/goals/preferences.js';
 /**
  * V3.10 B-U8 — memo parsing fails closed (SPEC-310B §7 U8 key test).
  *
@@ -77,7 +78,7 @@ describe('parseLeaderMemoOutput fails closed', () => {
         { kind: 'goal.pause', params: { goalId: 'g-1', until: null }, summary: 'Pause g-1', why: 'stale' },
         { kind: 'self.destruct', params: {} },
         { kind: 'budget.mode', params: { to: 'unlimited' } },
-        { kind: 'lanes.grok', params: { slots: 9 } },
+        { kind: 'lanes.grok', params: { slots: 0 } },
         { kind: 'pr.close', params: { repo: 'ashlrai/binshield', number: 3, reason: 'dup', extra: true } },
         { kind: 'experiment.start', params: { hypothesisId: 'hyp-1' } },
         { kind: 'work.dispatch', params: { task: { repo: 'ashlrai/binshield', title: 'Add tests', difficulty: 'low', value: 3, source: 'mason' } } },
@@ -182,4 +183,42 @@ describe('memo persistence', () => {
     expect(readLeaderMemo('../../etc/passwd')).toBeNull();
     expect(() => writeLeaderMemo({ ...base, id: 'evil/../x', hypotheses: [] })).toThrow();
   });
+});
+
+
+describe('per-memo goal preferences apply across explicit and compiled actions', () => {
+  const goal = (i: number) => ({ objective: `Goal ${i}`, rationale: 'r', targetRepo: 'ashlrai/binshield' });
+  it('aggregates deduplicated goal.create actions and preserves the independent action transport', () => {
+    const raw = JSON.stringify(memo({ goals: [goal(1), goal(2), goal(3), goal(4)],
+      actions: [1, 2, 3, 4].map((i) => ({ kind: 'goal.create', params: { goal: goal(i) } })) }));
+    const legacy = parseLeaderMemoOutput(raw, { nowMs: NOW });
+    expect(legacy.ok).toBe(true);
+    if (!legacy.ok) throw new Error(legacy.reason);
+    expect(legacy.draft.actions.filter((a) => a.kind === 'goal.create')).toHaveLength(3);
+    const expanded = parseLeaderMemoOutput(raw, { nowMs: NOW, goalPreferences: resolveGoalPreferences({ foundry: { goalPreferences: { maxGoalProposalsPerMemo: 12 } } }) });
+    expect(expanded.ok).toBe(true);
+    if (!expanded.ok) throw new Error(expanded.reason);
+    expect(expanded.draft.actions.filter((a) => a.kind === 'goal.create')).toHaveLength(4);
+    const unlimited = parseLeaderMemoOutput(JSON.stringify(memo({ goals: Array.from({ length: 30 }, (_, i) => goal(i)) })),
+      { nowMs: NOW, goalPreferences: resolveGoalPreferences({ foundry: { goalPreferences: { maxGoalProposalsPerMemo: null } } }) });
+    expect(unlimited.ok).toBe(true);
+    if (!unlimited.ok) throw new Error(unlimited.reason);
+    expect(unlimited.draft.goals).toHaveLength(30);
+    expect(unlimited.draft.actions).toHaveLength(LEADER_MEMO_CAPS.maxActions);
+    expect(unlimited.draft.notes).toContain('action limit reached; extras were dropped');
+  });
+  it('does not infer unlimited parsing from invalid preference data', () => {
+    const invalid = resolveGoalPreferences({ foundry: { goalPreferences: { unknown: null } } });
+    const result = parseLeaderMemoOutput(JSON.stringify(memo({ goals: [goal(1)], actions: [{ kind: 'goal.create', params: { goal: goal(2) } }] })), { nowMs: NOW, goalPreferences: invalid });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.draft.actions).toHaveLength(0);
+  });
+});
+
+
+it('accepts larger representable Grok directives as transport without manufacturing lanes from null', () => {
+  expect(parseActionParams('lanes.grok', { slots: 17 })).toEqual({ ok: true, params: { slots: 17 } });
+  expect(parseActionParams('lanes.grok', { slots: Number.MAX_SAFE_INTEGER })).toEqual({ ok: true, params: { slots: Number.MAX_SAFE_INTEGER } });
+  for (const slots of [null, 0, -1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1, '17']) expect(parseActionParams('lanes.grok', { slots }).ok).toBe(false);
 });

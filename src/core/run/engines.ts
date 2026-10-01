@@ -29,7 +29,7 @@ import {
   applyLocusPreMutateGate,
   formatPreMutateBlockers,
 } from '../integrations/locus.js';
-import { resolveEngineSpec, compileArgv } from './engine-registry.js';
+import { resolveEngineSpec, compileArgv, applyGrokCliProfile, BUILTIN_ENGINE_REGISTRY, GROK_CLI_ENGINE_ID } from './engine-registry.js';
 // The local serving runtime owns "which llama-server, and what is it serving".
 // Resolving that here too would give dispatch and supervision two independent
 // answers to the same question — the exact failure docs/LOCAL-FLEET.md warns
@@ -320,14 +320,16 @@ export function buildEngineCommand(
   engine: EngineId,
   goal: string,
   cfg: AshlrConfig,
-  opts?: { cwd?: string; model?: string; autonomous?: boolean },
+  opts?: { cwd?: string; model?: string; autonomous?: boolean; seatId?: string },
 ): EngineCommand | null {
   // M50: argv is driven by the declarative engine registry (single source of
   // truth). The builtin engine and api-model engines have no CLI argv -> null
   // (api-models run through the in-process loop + provider client, not a spawn).
   // M144: llama-server is api-model -- always returns null (no CLI argv).
   if (engine === ('llama-server' as EngineId)) return null;
-  const spec = resolveEngineSpec(engine, cfg);
+  const spec = engine === GROK_CLI_ENGINE_ID && opts?.seatId !== undefined
+    ? applyGrokCliProfile(BUILTIN_ENGINE_REGISTRY[GROK_CLI_ENGINE_ID]!, cfg, undefined, opts.seatId)
+    : resolveEngineSpec(engine, cfg);
   if (!spec || spec.kind !== 'cli-agent' || !spec.argv) return null;
 
   const cwd = opts?.cwd ?? process.cwd();

@@ -60,16 +60,18 @@ function makeConfig(overrides: Partial<AshlrConfig> & { verse?: { accountsRoot?:
   } as AshlrConfig;
 }
 
-function writeAccounts(root: string, opts: { observations?: boolean } = {}): void {
-  fs.mkdirSync(root, { recursive: true });
+function writeAccounts(root: string, opts: { observations?: boolean; malformedRows?: boolean } = {}): void {
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(root, 'connections.json'), JSON.stringify({
     accounts: [
       { id: 'claude', label: 'Claude Code', provider: 'claude', command: CLAUDE_COMMAND },
       { id: 'codex-personal', label: 'Personal Codex', provider: 'codex', command: CODEX_COMMAND },
-      { id: 'broken', label: 'No command', provider: 'grok' },
-      { id: 'weird', label: 'Unknown provider', provider: 'gemini', command: ['x'] },
+      ...(opts.malformedRows ? [
+        { id: 'broken', label: 'No command', provider: 'grok' },
+        { id: 'weird', label: 'Unknown provider', provider: 'gemini', command: ['x'] },
+      ] : []),
     ],
-  }));
+  }), { mode: 0o600 });
   if (opts.observations !== false) {
     fs.writeFileSync(path.join(root, 'observations.json'), JSON.stringify([
       {
@@ -199,8 +201,8 @@ let prevOllamaCtx: string | undefined;
 let ollama: FakeOllama | null = null;
 
 beforeEach(() => {
-  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-verse-seats-home-'));
-  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-verse-seats-root-'));
+  tmpHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-verse-seats-home-')));
+  tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-verse-seats-root-')));
   prevHome = process.env.HOME;
   process.env.HOME = tmpHome;
   // The unpinned-window default reads this; a developer's shell must not leak in.
@@ -279,6 +281,18 @@ describe('verse seats — native accounts', () => {
     expect(discovery.launches.get('claude')?.launcher).toEqual(CLAUDE_COMMAND);
     expect(discovery.launches.get('codex-personal')?.launcher).toEqual(CODEX_COMMAND);
     expect(discovery.launches.get('claude')?.seat).toBe(claude);
+  });
+
+  it('keeps malformed roster discovery separate from authoritative account telemetry', async () => {
+    writeAccounts(tmpRoot, { malformedRows: true });
+    const discovery = await discoverSeats(makeConfig(), {
+      accountsRoot: tmpRoot, claudeUsage: zeroUsage, collector: null,
+    });
+    // Launcher discovery still filters unsupported providers / missing commands.
+    // Whole-roster identity rejection must not manufacture partial quota bindings.
+    expect(discovery.seats.map((seat) => seat.id)).toEqual(['claude', 'codex-personal']);
+    expect([...discovery.launches.keys()]).toEqual(['claude', 'codex-personal']);
+    expect(discovery.seats.every((seat) => seat.capacity === undefined)).toBe(true);
   });
 
   it('treats seeded observations as historical rather than current seat health', async () => {

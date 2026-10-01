@@ -15,7 +15,7 @@
  * No subprocess, no network: HOME and every root are tmp dirs.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -37,6 +37,7 @@ import {
   isVerseSessionControls,
   parseControlsUpdate,
   parseDefaultsUpdate,
+  CONTROL_DEFAULTS_MAX_BYTES,
   readControlDefaults,
   writeControlDefaults,
 } from '../src/core/verse/session-controls.js';
@@ -372,8 +373,104 @@ describe('defaults for new chats', () => {
   });
 
   it('never reads bypass back out of a hand-edited file', () => {
-    writeFileSync(join(root, 'control-defaults.json'), JSON.stringify({ global: { permissionMode: 'bypass', effort: 'low' }, seats: { x: { permissionMode: 'bypass' } } }));
+    writeFileSync(join(root, 'control-defaults.json'), JSON.stringify({ global: { permissionMode: 'bypass', effort: 'low' }, seats: { x: { permissionMode: 'bypass' } } }), { mode: 0o600 });
     expect(readControlDefaults(root)).toEqual({ global: { effort: 'low' }, seats: {} });
+  });
+
+  it('preserves every seat beyond 64 during global and seat partial updates', () => {
+    const seats = Object.fromEntries(Array.from({ length: 130 }, (_, i) => [`seat-${i}`, { effort: 'low', permissionMode: 'plan' }]));
+    const file = join(root, 'control-defaults.json');
+    writeFileSync(file, JSON.stringify({ global: {}, seats }), { mode: 0o600 });
+    expect(Object.keys(readControlDefaults(root).seats)).toHaveLength(130);
+    writeControlDefaults(root, { effort: 'high' });
+    writeControlDefaults(root, { seatId: 'seat-129', effort: 'max' });
+    const saved = JSON.parse(readFileSync(file, 'utf8'));
+    expect(saved.global).toEqual({ effort: 'high' });
+    expect(Object.keys(saved.seats)).toHaveLength(130);
+    expect(saved.seats).toEqual({ ...seats, 'seat-129': { effort: 'max', permissionMode: 'plan' } });
+    expect(readControlDefaults(root)).toEqual(saved);
+  });
+
+  it('keeps prototype-like seat IDs as data during partial updates', () => {
+    writeControlDefaults(root, { seatId: '__proto__', effort: 'low' });
+    writeControlDefaults(root, { seatId: 'constructor', effort: 'high' });
+    const saved = readControlDefaults(root);
+    expect(Object.keys(saved.seats)).toEqual(['__proto__', 'constructor']);
+    expect(saved.seats['__proto__']).toEqual({ effort: 'low' });
+    expect(saved.seats['constructor']).toEqual({ effort: 'high' });
+    expect(Object.getPrototypeOf(saved.seats)).toBe(Object.prototype);
+  });
+
+  it.each([
+    '{broken',
+    JSON.stringify({ global: {}, seats: { good: { effort: 'low' }, bad: { effort: 'invalid' } } }),
+    JSON.stringify({ global: {}, seats: { good: { effort: 'low' }, bad: [] } }),
+    JSON.stringify({ global: {}, seats: { good: { effort: 'low' } }, future: true }),
+    JSON.stringify({ global: {}, seats: [] }),
+    JSON.stringify({ global: {}, seats: { '../escape': {} } }),
+    JSON.stringify({ global: { permissionMode: 'bypass' }, seats: {} }),
+    Buffer.from([0x7b, 0xff, 0x7d]),
+    ' '.repeat(CONTROL_DEFAULTS_MAX_BYTES + 1),
+  ])('refuses invalid or oversized stored defaults without rewriting them (%#)', (content) => {
+    const file = join(root, 'control-defaults.json');
+    writeFileSync(file, content, { mode: 0o600 });
+    const before = readFileSync(file);
+    expect(readControlDefaults(root)).toEqual({ global: {}, seats: {} });
+    expect(() => writeControlDefaults(root, { effort: 'high' })).toThrow(/no changes saved/);
+    // Compare every byte without allocating a matcher traversal for the 1 MiB fixture.
+    expect(readFileSync(file).equals(before)).toBe(true);
+  });
+
+  it('refuses a serialization that would exceed the byte bound without losing valid rows', () => {
+    const seats = Object.fromEntries(Array.from({ length: 4_700 }, (_, i) => [`seat-${i}-${'x'.repeat(180)}`, { effort: 'low' }]));
+    const content = JSON.stringify({ global: {}, seats });
+    const file = join(root, 'control-defaults.json');
+    expect(Buffer.byteLength(content)).toBeLessThan(CONTROL_DEFAULTS_MAX_BYTES);
+    expect(Buffer.byteLength(JSON.stringify({ global: { effort: 'high' }, seats }, null, 2))).toBeGreaterThan(CONTROL_DEFAULTS_MAX_BYTES);
+    writeFileSync(file, content, { mode: 0o600 });
+    expect(Object.keys(readControlDefaults(root).seats)).toHaveLength(4_700);
+    expect(() => writeControlDefaults(root, { effort: 'high' })).toThrow(/no changes saved/);
+    expect(readFileSync(file, 'utf8')).toBe(content);
+  });
+
+  it('refuses unsafe existing file and root permissions without rewrites', () => {
+    const file = join(root, 'control-defaults.json');
+    const content = JSON.stringify({ global: { effort: 'low' }, seats: {} });
+    writeFileSync(file, content, { mode: 0o600 });
+    if (process.platform !== 'win32') {
+      chmodSync(file, 0o644);
+      expect(readControlDefaults(root)).toEqual({ global: {}, seats: {} });
+      expect(() => writeControlDefaults(root, { effort: 'high' })).toThrow(/no changes saved/);
+      expect(readFileSync(file, 'utf8')).toBe(content);
+      chmodSync(file, 0o600);
+      chmodSync(root, 0o755);
+      expect(() => writeControlDefaults(root, { effort: 'high' })).toThrow(/no changes saved/);
+      expect(readFileSync(file, 'utf8')).toBe(content);
+      chmodSync(root, 0o700);
+    }
+    const alias = join(root, 'linked.json');
+    linkSync(file, alias);
+    expect(() => writeControlDefaults(root, { effort: 'high' })).toThrow(/no changes saved/);
+    expect(readFileSync(file, 'utf8')).toBe(content);
+  });
+
+  it('refuses linked files and directories without touching their targets', () => {
+    const outside = join(root, 'outside.json');
+    const content = JSON.stringify({ global: { effort: 'low' }, seats: {} });
+    writeFileSync(outside, content, { mode: 0o600 });
+    symlinkSync(outside, join(root, 'control-defaults.json'));
+    expect(() => writeControlDefaults(root, { effort: 'high' })).toThrow(/no changes saved/);
+    expect(readFileSync(outside, 'utf8')).toBe(content);
+    const alias = join(tmp, 'defaults-root-alias');
+    symlinkSync(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    expect(() => writeControlDefaults(alias, { effort: 'high' })).toThrow(/no changes saved/);
+    expect(readFileSync(outside, 'utf8')).toBe(content);
+  });
+
+  it('refuses invalid direct updates before creating any defaults file', () => {
+    expect(() => writeControlDefaults(root, { permissionMode: 'bypass' } as never)).toThrow(/never be a default/);
+    expect(() => writeControlDefaults(root, { effort: 'invalid' } as never)).toThrow(/effort/);
+    expect(existsSync(join(root, 'control-defaults.json'))).toBe(false);
   });
 
   it('a corrupt file means no defaults, never a failed chat', () => {

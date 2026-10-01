@@ -624,6 +624,25 @@
           "type": "boolean",
           "description": "M222: goal to milestones auto-planning. DEFAULT true."
         },
+        "leaderPreferences": {
+          "type": "object", "additionalProperties": false,
+          "description": "Operator daily Leader run preferences. Absent full limit is 3; total is 8 with check-ins or 3 without. Explicit null removes a business ceiling, not spend/seat/authority checks.",
+          "properties": {
+            "maxFullRunsPerDay": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 },
+            "maxTotalRunsPerDay": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 },
+            "maxGrokLanes": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 }
+          }
+        },
+        "goalPreferences": {
+          "type": "object", "additionalProperties": false,
+          "description": "Operator goal preferences. Absent fields retain defaults 4/3/3/3; explicit null removes a preference limit. Signed authority and finite memo transport still apply.",
+          "properties": {
+            "maxOpenGoals": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 },
+            "maxNewGoalsPerDay": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 },
+            "maxGoalProposalsPerMemo": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 },
+            "maxGoalsPerConductorCycle": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 }
+          }
+        },
         "goalFocusMode": {
           "type": "boolean",
           "description": "Defer new planning-goal expansion / generative invention while active goals have pending milestones. DEFAULT true."

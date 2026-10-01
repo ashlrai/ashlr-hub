@@ -3,18 +3,55 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="description" content="Ashlr Verse is an operator console for coding agents: Claude Code, Codex, Grok and local seats in one workbench, Claude cloud and Devin lanes, a Leader you can talk to, and a fleet that merges only inside a scope you sign.">
+<meta name="description" content="Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.">
 <meta name="color-scheme" content="light dark">
 <link rel="canonical" href="https://verse.ashlr.ai/">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='54 55 146 146'%3E%3Cpath fill='%231A2B3C' d='M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z'/%3E%3Cpath fill='%232563EB' d='M110 121H143L133 152H120Z'/%3E%3C/svg%3E">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://verse.ashlr.ai/">
-<meta property="og:title" content="Ashlr Verse">
-<meta property="og:description" content="Every coding agent in one console, a Leader you can talk to in Verse, Telegram or the terminal, and autonomy within a grant you sign.">
-<meta property="og:image" content="https://verse.ashlr.ai/assets/verse-console.png">
-<meta property="og:image:alt" content="Ashlr Verse coding-agent console">
+<meta property="og:title" content="Ashlr Verse — one workbench for coding agents">
+<meta property="og:site_name" content="Ashlr Verse">
+<meta property="og:description" content="Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.">
+<meta property="og:image" content="https://verse.ashlr.ai/assets/work-with-me-3.22-demo.jpg">
+<meta property="og:image:alt" content="Ashlr Verse 3.22 browser chat with collapsed project groups and labeled demo accounts">
+<meta name="twitter:title" content="Ashlr Verse — one workbench for coding agents">
+<meta name="twitter:description" content="Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.">
+<meta name="twitter:image:alt" content="Ashlr Verse 3.22 browser chat with collapsed project groups and labeled demo accounts">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="https://verse.ashlr.ai/assets/verse-console.png">
+<meta name="twitter:image" content="https://verse.ashlr.ai/assets/work-with-me-3.22-demo.jpg">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://verse.ashlr.ai/#website",
+      "name": "Ashlr Verse",
+      "url": "https://verse.ashlr.ai/"
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://verse.ashlr.ai/#application",
+      "name": "Ashlr Verse",
+      "url": "https://verse.ashlr.ai/",
+      "description": "Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "macOS, Linux, Windows",
+      "softwareVersion": "3.22.0",
+      "license": "https://github.com/ashlrai/ashlr-hub/blob/master/LICENSE",
+      "isAccessibleForFree": true,
+      "sameAs": "https://github.com/ashlrai/ashlr-hub",
+      "featureList": [
+        "Coding-agent chats and workspaces",
+        "Signed resident autonomy on macOS",
+        "Local model discovery",
+        "Offline benchmark receipt comparison",
+        "Reset-aware eligible task and account choices"
+      ]
+    }
+  ]
+}
+</script>
 <style>
   html { -webkit-text-size-adjust: 100%; }
   :root { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
@@ -33,7 +70,7 @@
     }
     @media (prefers-color-scheme: dark) { .shot img { border-color: var(--line); } }
 </style>
-<title>Ashlr Verse</title>
+<title>Ashlr Verse — one workbench for coding agents</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
@@ -154,13 +191,19 @@
   .journey-panel:focus-visible { outline: 2px solid #9ed6fc; outline-offset: 5px; }
   .journey-panel p { margin: 0; color: #b9c7d7; font-size: .875rem; line-height: 1.55; }
   .journey-flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: stretch; gap: 8px; margin: 22px 0 18px; }
-  .journey-flow span { display: flex; align-items: center; justify-content: center; min-height: 54px; padding: 7px; border: 1px solid #355069; border-radius: 3px; color: #eaf0f7; text-align: center; font: .69rem/1.35 var(--f-mono); }
+  .journey-flow button { background: transparent; cursor: pointer; }
+  .journey-flow button[aria-pressed="true"] { background: #233e51; border-color: #70d0c0; }
+  .journey-inspect { min-height: 5em; padding: 12px 0; }
+  .evidence-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .evidence-row strong { color: var(--live); font-family: var(--f-mono); }
+  .evidence-note { color: var(--muted); font-size: .875rem; max-width: 72ch; }
+  .journey-flow span, .journey-flow button { display: flex; align-items: center; justify-content: center; min-height: 54px; padding: 7px; border: 1px solid #355069; border-radius: 3px; color: #eaf0f7; text-align: center; font: .69rem/1.35 var(--f-mono); }
   .journey-flow i { align-self: center; color: #70d0c0; font-style: normal; }
   .journey-end { display: flex; align-items: center; gap: 9px; border-top: 1px solid #2b3c4e; padding-top: 16px; color: #a8d9d0 !important; font: .75rem/1.5 var(--f-mono) !important; }
   .journey-end::before { content: ""; width: 7px; height: 7px; flex: none; border-radius: 50%; background: #61d6bc; }
   .journey-foot { margin: 0; padding: 13px 20px; border-top: 1px solid #2b3c4e; color: #8fa3b8; font: .6875rem/1.5 var(--f-mono); }
   @media (max-width: 890px) { .hero-grid { grid-template-columns: 1fr; } .hero .intro h1 { max-width: 16ch; } }
-  @media (max-width: 480px) { .hero .intro h1 { font-size: clamp(2.75rem, 11vw, 3.35rem); } .journey-flow { gap: 4px; } .journey-flow span { font-size: .61rem; } .journey-body { padding: 20px 16px; } }
+  @media (max-width: 480px) { .hero .intro h1 { font-size: clamp(2.75rem, 11vw, 3.35rem); } .journey-flow { gap: 4px; } .journey-flow span, .journey-flow button { font-size: .61rem; } .journey-body { padding: 20px 16px; } }
   .cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; align-items: center; }
   .btn { font-weight: 600; font-size: var(--step-0); padding: 11px 20px; border-radius: 3px; text-decoration: none; border: 1px solid transparent; display: inline-block; }
   .btn-primary { background: var(--accent); color: #fff; }
@@ -360,7 +403,7 @@
   <div class="wrap hero">
     <div class="hero-grid">
       <div class="intro">
-        <p class="eyebrow">Ashlr Verse 3.18 &middot; The coding agent workbench</p>
+        <p class="eyebrow">Ashlr Verse 3.22 &middot; The coding agent workbench</p>
         <h1>Work with me.<br>Work for me.</h1>
         <p class="lede">
           Bring Claude Code, Codex, Grok, local models and Devin into one workbench.
@@ -373,7 +416,7 @@
         </div>
       </div>
       <div class="journey" role="region" aria-labelledby="journey-heading">
-        <div class="journey-top"><span><span class="journey-light" aria-hidden="true"></span><strong>Verse / work in motion</strong></span><span>3.18</span></div>
+        <div class="journey-top"><span><span class="journey-light" aria-hidden="true"></span><strong>Verse / work in motion</strong></span><span>3.22</span></div>
         <div class="journey-body">
           <p class="journey-kicker">Choose a workflow</p>
           <h2 id="journey-heading">See how the work moves.</h2>
@@ -384,17 +427,19 @@
           <div class="journey-panel" id="journey-ask" role="tabpanel" aria-labelledby="journey-tab-ask" tabindex="0">
             <h3>Think, build and steer together.</h3>
             <p>Choose an account and model, guide it in a chat, inspect reported tools and context, and review the changes beside the conversation.</p>
-            <div class="journey-flow" aria-label="Interactive chat to reviewed changes"><span>Your chat</span><i aria-hidden="true">→</i><span>Agent + tools</span><i aria-hidden="true">→</i><span>Your review</span></div>
+            <div class="journey-flow" role="group" aria-label="Inspect stages: Interactive chat to reviewed changes"><button type="button" aria-pressed="true" data-inspect="Choose your account, model and project. Your prompt stays editable until you send it.">Your chat</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="Inspect the tools and context reported for the turn. Steer the conversation while the agent works.">Agent + tools</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="Read the changes, checkpoints and session evidence. You decide the next step.">Your review</button></div>
+            <p class="journey-inspect" aria-live="polite">Choose your account, model and project. Your prompt stays editable until you send it.</p>
             <p class="journey-end">Switch workspaces without losing your drafts or restarting a session.</p>
           </div>
           <div class="journey-panel" id="journey-build" role="tabpanel" aria-labelledby="journey-tab-build" tabindex="0" hidden>
             <h3>Give the fleet an outcome.</h3>
             <p>Delegate tasks, guide the Leader's planning and see what needs you. An admitted resident fleet works within the repository, account and spending scope you sign.</p>
-            <div class="journey-flow" aria-label="Signed scope to verified fleet work"><span>Your scope</span><i aria-hidden="true">→</i><span>Fleet + checks</span><i aria-hidden="true">→</i><span>Verified work</span></div>
+            <div class="journey-flow" role="group" aria-label="Inspect stages: Signed scope to verified fleet work"><button type="button" aria-pressed="true" data-inspect="Choose repositories, accounts and standing permissions. Review the exact scope before Touch ID approval.">Your scope</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="An admitted resident fleet plans and dispatches eligible work. Current account readiness and resources still apply.">Fleet + checks</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="Inspect actual work, checks and authority in Fleet. Eligible signed scope can admit merges; this illustration performs none.">Verified work</button></div>
+            <p class="journey-inspect" aria-live="polite">Choose repositories, accounts and standing permissions. Review the exact scope before Touch ID approval.</p>
             <p class="journey-end">Eligible elite-direct work lands without a separate judge. Stop and revocation remain available.</p>
           </div>
         </div>
-        <p class="journey-foot">Illustrative workflow · these controls explain Verse; they do not launch agents.</p>
+        <p class="journey-foot">Illustration · select a mode, then inspect its stages. No agents are launched.</p>
       </div>
     </div>
 
@@ -432,7 +477,7 @@
     <div class="providers">
         <div class="prov"><span class="phead"><svg class="plogo" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"/></svg><span class="nm">Anthropic</span></span><span class="via">claude &middot; native profile &middot; --cloud</span><span class="mdl">Fable 5.1, Opus 5.5, Opus 5, Opus 4.8, Sonnet 5, Haiku 4.5</span></div>
         <div class="prov"><span class="phead"><svg class="plogo" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/></svg><span class="nm">OpenAI</span></span><span class="via">codex exec &middot; CODEX_HOME</span><span class="mdl">GPT-6.1 Sol &middot; GPT-6 Astra, Sol, Luna &middot; GPT-5.6 Sol, Terra, Luna &middot; GPT-5.5</span></div>
-        <div class="prov"><span class="phead"><svg class="plogo" viewBox="0 0 34 33" width="20" height="20" aria-hidden="true"><path d="M13.2371 21.0407L24.3186 12.8506C24.8619 12.4491 25.6384 12.6057 25.8973 13.2294C27.2597 16.5185 26.651 20.4712 23.9403 23.1851C21.2297 25.8989 17.4581 26.4941 14.0108 25.1386L10.2449 26.8843C15.6463 30.5806 22.2053 29.6665 26.304 25.5601C29.5551 22.3051 30.562 17.8683 29.6205 13.8673L29.629 13.8758C28.2637 7.99809 29.9647 5.64871 33.449 0.844576C33.5314 0.730667 33.6139 0.616757 33.6964 0.5L29.1113 5.09055V5.07631L13.2343 21.0436"/><path d="M10.9503 23.0313C7.07343 19.3235 7.74185 13.5853 11.0498 10.2763C13.4959 7.82722 17.5036 6.82767 21.0021 8.2971L24.7595 6.55998C24.0826 6.07017 23.215 5.54334 22.2195 5.17313C17.7198 3.31926 12.3326 4.24192 8.67479 7.90126C5.15635 11.4239 4.0499 16.8403 5.94992 21.4622C7.36924 24.9165 5.04257 27.3598 2.69884 29.826C1.86829 30.7002 1.0349 31.5745 0.36364 32.5L10.9474 23.0341"/></svg><span class="nm">Grok</span></span><span class="via">grok &middot; GROK_HOME</span><span class="mdl">Grok 4.7, 4.7 Fast, 4.6, 4.5</span></div>
+        <div class="prov"><span class="phead"><svg class="plogo" viewBox="0 0 34 33" width="20" height="20" aria-hidden="true"><path d="M13.2371 21.0407L24.3186 12.8506C24.8619 12.4491 25.6384 12.6057 25.8973 13.2294C27.2597 16.5185 26.651 20.4712 23.9403 23.1851C21.2297 25.8989 17.4581 26.4941 14.0108 25.1386L10.2449 26.8843C15.6463 30.5806 22.2053 29.6665 26.304 25.5601C29.5551 22.3051 30.562 17.8683 29.6205 13.8673L29.629 13.8758C28.2637 7.99809 29.9647 5.64871 33.449 0.844576C33.5314 0.730667 33.6139 0.616757 33.6964 0.5L29.1113 5.09055V5.07631L13.2343 21.0436"/><path d="M10.9503 23.0313C7.07343 19.3235 7.74185 13.5853 11.0498 10.2763C13.4959 7.82722 17.5036 6.82767 21.0021 8.2971L24.7595 6.55998C24.0826 6.07017 23.225 5.54334 22.2195 5.17313C17.7198 3.31926 12.3326 4.24192 8.67479 7.90126C5.15635 11.4239 4.0499 16.8403 5.94992 21.4622C7.36924 24.9165 5.04257 27.3598 2.69884 29.826C1.86829 30.7002 1.0349 31.5745 0.36364 32.5L10.9474 23.0341"/></svg><span class="nm">Grok</span></span><span class="via">grok &middot; GROK_HOME</span><span class="mdl">Grok 4.7, 4.7 Fast, 4.6, 4.5</span></div>
         <div class="prov"><span class="phead"><svg class="plogo" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M16.361 10.26a.894.894 0 0 0-.558.47l-.072.148.001.207c0 .193.004.217.059.353.076.193.152.312.291.448.24.238.51.3.872.205a.86.86 0 0 0 .517-.436.752.752 0 0 0 .08-.498c-.064-.453-.33-.782-.724-.897a1.06 1.06 0 0 0-.466 0zm-9.203.005c-.305.096-.533.32-.65.639a1.187 1.187 0 0 0-.06.52c.057.309.31.59.598.667.362.095.632.033.872-.205.14-.136.215-.255.291-.448.055-.136.059-.16.059-.353l.001-.207-.072-.148a.894.894 0 0 0-.565-.472 1.02 1.02 0 0 0-.474.007Zm4.184 2c-.131.071-.223.25-.195.383.031.143.157.288.353.407.105.063.112.072.117.136.004.038-.01.146-.029.243-.02.094-.036.194-.036.222.002.074.07.195.143.253.064.052.076.054.255.059.164.005.198.001.264-.03.169-.082.212-.234.15-.525-.052-.243-.042-.28.087-.355.137-.08.281-.219.324-.314a.365.365 0 0 0-.175-.48.394.394 0 0 0-.181-.033c-.126 0-.207.03-.355.124l-.085.053-.053-.032c-.219-.13-.259-.145-.391-.143a.396.396 0 0 0-.193.032zm.39-2.195c-.373.036-.475.05-.654.086-.291.06-.68.195-.951.328-.94.46-1.589 1.226-1.787 2.114-.04.176-.045.234-.045.53 0 .294.005.357.043.524.264 1.16 1.332 2.017 2.714 2.173.3.033 1.596.033 1.896 0 1.11-.125 2.064-.727 2.493-1.571.114-.226.169-.372.22-.602.039-.167.044-.23.044-.523 0-.297-.005-.355-.045-.531-.288-1.29-1.539-2.304-3.072-2.497a6.873 6.873 0 0 0-.855-.031zm.645.937a3.283 3.283 0 0 1 1.44.514c.223.148.537.458.671.662.166.251.26.508.303.82.02.143.01.251-.043.482-.08.345-.332.705-.672.957a3.115 3.115 0 0 1-.689.348c-.382.122-.632.144-1.525.138-.582-.006-.686-.01-.853-.042-.57-.107-1.022-.334-1.35-.68-.264-.28-.385-.535-.45-.946-.03-.192.025-.509.137-.776.136-.326.488-.73.836-.963.403-.269.934-.46 1.422-.512.187-.02.586-.02.773-.002zm-5.503-11a1.653 1.653 0 0 0-.683.298C5.617.74 5.173 1.666 4.985 2.819c-.07.436-.119 1.04-.119 1.503 0 .544.064 1.24.155 1.721.02.107.031.202.023.208a8.12 8.12 0 0 1-.187.152 5.324 5.324 0 0 0-.949 1.02 5.49 5.49 0 0 0-.94 2.339 6.625 6.625 0 0 0-.023 1.357c.091.78.325 1.438.727 2.04l.13.195-.037.064c-.269.452-.498 1.105-.605 1.732-.084.496-.095.629-.095 1.294 0 .67.009.803.088 1.266.095.555.288 1.143.503 1.534.071.128.243.393.264.407.007.003-.014.067-.046.141a7.405 7.405 0 0 0-.548 1.873c-.062.417-.071.552-.071.991 0 .56.031.832.148 1.279L3.42 24h1.478l-.05-.091c-.297-.552-.325-1.575-.068-2.597.117-.472.25-.819.498-1.296l.148-.29v-.177c0-.165-.003-.184-.057-.293a.915.915 0 0 0-.194-.25 1.74 1.74 0 0 1-.385-.543c-.424-.92-.506-2.286-.208-3.451.124-.486.329-.918.544-1.154a.787.787 0 0 0 .223-.531c0-.195-.07-.355-.224-.522a3.136 3.136 0 0 1-.817-1.729c-.14-.96.114-2.005.69-2.834.563-.814 1.353-1.336 2.237-1.475.199-.033.57-.028.776.01.226.04.367.028.512-.041.179-.085.268-.19.374-.431.093-.215.165-.333.36-.576.234-.29.46-.489.822-.729.413-.27.884-.467 1.352-.561.17-.035.25-.04.569-.04.319 0 .398.005.569.04a4.07 4.07 0 0 1 1.914.997c.117.109.398.457.488.602.034.057.095.177.132.267.105.241.195.346.374.43.14.068.286.082.503.045.343-.058.607-.053.943.016 1.144.23 2.14 1.173 2.581 2.437.385 1.108.276 2.267-.296 3.153-.097.15-.193.27-.333.419-.301.322-.301.722-.001 1.053.493.539.801 1.866.708 3.036-.062.772-.26 1.463-.533 1.854a2.096 2.096 0 0 1-.224.258.916.916 0 0 0-.194.25c-.054.109-.057.128-.057.293v.178l.148.29c.248.476.38.823.498 1.295.253 1.008.231 2.01-.059 2.581a.845.845 0 0 0-.044.098c0 .006.329.009.732.009h.73l.02-.074.036-.134c.019-.076.057-.3.088-.516.029-.217.029-1.016 0-1.258-.11-.875-.295-1.57-.597-2.226-.032-.074-.053-.138-.046-.141.008-.005.057-.074.108-.152.376-.569.607-1.284.724-2.228.031-.26.031-1.378 0-1.628-.083-.645-.182-1.082-.348-1.525a6.083 6.083 0 0 0-.329-.7l-.038-.064.131-.194c.402-.604.636-1.262.727-2.04a6.625 6.625 0 0 0-.024-1.358 5.512 5.512 0 0 0-.939-2.339 5.325 5.325 0 0 0-.95-1.02 8.097 8.097 0 0 1-.186-.152.692.692 0 0 1 .023-.208c.208-1.087.201-2.443-.017-3.503-.19-.924-.535-1.658-.98-2.082-.354-.338-.716-.482-1.15-.455-.996.059-1.8 1.205-2.116 3.01a6.805 6.805 0 0 0-.097.726c0 .036-.007.066-.015.066a.96.96 0 0 1-.149-.078A4.857 4.857 0 0 0 12 3.03c-.832 0-1.687.243-2.456.698a.958.958 0 0 1-.148.078c-.008 0-.015-.03-.015-.066a6.71 6.71 0 0 0-.097-.725C8.997 1.392 8.337.319 7.46.048a2.096 2.096 0 0 0-.585-.041Zm.293 1.402c.248.197.523.759.682 1.388.03.113.06.244.069.292.007.047.026.152.041.233.067.365.098.76.102 1.24l.002.475-.12.175-.118.178h-.278c-.324 0-.646.041-.954.124l-.238.06c-.033.007-.038-.003-.057-.144a8.438 8.438 0 0 1 .016-2.323c.124-.788.413-1.501.696-1.711.067-.05.079-.049.157.013zm9.825-.012c.17.126.358.46.498.888.28.854.36 2.028.212 3.145-.019.14-.024.151-.057.144l-.238-.06a3.693 3.693 0 0 0-.954-.124h-.278l-.119-.178-.119-.175.002-.474c.004-.669.066-1.19.214-1.772.157-.623.434-1.185.68-1.382.078-.062.09-.063.159-.012z"/></svg><span class="nm">Ollama</span></span><span class="via">/api/tags &middot; /api/show</span><span class="mdl">Local model discovery and tool-capability checks</span></div>
         <div class="prov"><span class="phead"><svg class="plogo" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 7h18M3 12h18M3 17h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span class="nm">llama.cpp</span></span><span class="via">llama-server &middot; slots</span><span class="mdl">Local turn dispatch, Qwen3.8 27B and anything else you load</span></div>
         <div class="prov"><span class="phead"><img class="devin-logo" src="assets/devin-mark.svg" width="23" height="23" alt=""><span class="nm">Devin</span></span><span class="via">CLI: Cognition SWE-2 &middot; Cloud: API v3</span><span class="mdl">Signed-in CLI seat defaults to SWE-2 High. Cloud sessions use ACUs and separate guardrails.</span></div>
@@ -477,7 +522,7 @@
           <div class="guard"><dt>Telegram</dt><dd>A real two-way line: replies thread into the conversation, memos arrive with Approve, Veto and Details buttons, and <code>/leader</code>, <code>/status</code>, <code>/directives</code>, <code>/settings</code>, <code>/help</code>. A morning brief and an evening recap, an instant brief when you text &ldquo;status&rdquo;, quiet hours, and one question at a time.</dd></div>
           <div class="guard"><dt>Founder mode</dt><dd>Text &ldquo;go build X&rdquo; and it becomes work in the cheapest lane that can do it, under your grant and each lane&rsquo;s budget. Its new powers, cloud and Devin launches, playbook and automation edits, carry a class and a veto window like every other action.</dd></div>
           <div class="guard"><dt>Always answers</dt><dd>Grok first, then fast and large local models; Claude only for a weekly deep run or by opt-in, never Codex. Failed runs retry at 15&nbsp;min, 45&nbsp;min and 2&nbsp;h. When it cannot think, it says why.</dd></div>
-          <div class="guard"><dt>Check-ins</dt><dd>Every 2 hours in working hours, but only when the evidence changed. A new directive or answer counts. Capped, advisory, and never retried.</dd></div>
+          <div class="guard"><dt>Check-ins</dt><dd>Every 2 hours in working hours, but only when the evidence changed. A new directive or answer counts. Advisory, with editable daily-run preferences, and never retried.</dd></div>
         </dl>
       </div>
     </div>
@@ -557,35 +602,35 @@
     <div class="wrap">
       <div class="sec-head">
         <p class="eyebrow">The multi-seat workbench</p>
-        <h2>Claude Code, two Codex accounts, Grok and a local model, side by side.</h2>
+        <h2>Your chats, accounts and fleet, in one place.</h2>
         <p>
           A seat is an account and the CLI that drives it, pinned to its own profile so a turn never
           lands on the wrong account. Connect two Codex accounts and you have two Codex seats. When one
-          runs out of window, move to the next without changing tools. Verse never asks for or stores a
-          credential; each vendor CLI signs itself in.
+          runs out of window, move to the next without changing tools. Native CLI seats use
+          each vendor CLI’s sign-in and isolated account profile.
         </p>
       </div>
 
       <figure class="shot">
-        <img src="assets/verse-console.png" width="1900" height="1030" loading="lazy" decoding="async"
-             alt="The Ashlr Verse console: an expandable rail of sections down the left, a project-grouped
-                  chat sidebar, and a resources panel listing every connected account with its live usage
-                  windows — two Codex seats blocked at 100%, Claude and Grok usable, two local models ready." />
-        <figcaption>
-          The 3.17 console as it actually runs. Two Codex seats are out of window; Claude, Grok and both
-          local models are not. Account names are the only thing edited in this image.
-        </figcaption>
+        <img src="assets/work-with-me-3.22-demo.jpg" width="1280" height="720" loading="lazy" decoding="async"
+             alt="Ashlr Verse 3.22 Work with me: collapsed saved projects and chat groups preserve the active conversation. Labeled demo accounts." />
+        <figcaption>Work with me: the actual compiled 3.22 browser workbench with collapsible projects and a demo conversation. No provider ran.</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="assets/work-for-me-3.22-demo.jpg" width="1280" height="720" loading="lazy" decoding="async"
+             alt="Ashlr Verse 3.22 Work for me: inline verification, GitHub PR and merge timeline with unknown CI and unrecorded deployment. Synthetic demo data." />
+        <figcaption>Work for me: actual compiled 3.22 timeline with synthetic verification and GitHub stages. CI stays unknown and release/deployment is unrecorded. No fleet was active, no provider or GitHub service ran. These are browser captures, not native app chrome.</figcaption>
       </figure>
 
       <div class="seats">
         <div class="seat">
           <span class="tag local">Local</span><h3>Qwen3.8 27B</h3>
-          <p class="speed">~151s / turn &middot; 4 concurrent</p>
-          <p>Your own GPU through llama.cpp, four batching slots. No quota, no network, no per-token cost. Slower per turn, and still there at 2am.</p>
+          <p class="speed">Historical four-bit run &middot; ~151s / turn</p>
+          <p>Your own GPU through llama.cpp. Slot count follows your runtime configuration. No provider quota or per-token fee; throughput depends on the loaded model and hardware.</p>
         </div>
         <div class="seat">
           <span class="tag">Grok</span><h3>Grok 4.7</h3>
-          <p class="speed">~16&ndash;21s / turn</p>
+          <p class="speed">Historical runs &middot; ~16&ndash;21s / turn</p>
           <p>The fast lane, and a build-fast variant. Sessions resume by native id, so a long task keeps its context across turns.</p>
         </div>
         <div class="seat">
@@ -594,17 +639,17 @@
           <p>Driven through its own CLI and profile. Remaining quota is visible before you spend it, from metadata probes that cost no tokens.</p>
         </div>
         <div class="seat">
-          <span class="tag">Codex</span><h3>GPT-6 Astra</h3>
+          <span class="tag">Codex</span><h3>Your account’s model catalog</h3>
           <p class="speed">Multiple accounts</p>
-          <p>Several Codex accounts enrolled at once, each pinned to its own home directory so a turn can never land on the wrong one.</p>
+          <p>Enroll several Codex accounts, each pinned to its own home directory. GPT-6.1 Sol appears when the account’s own catalog lists it.</p>
         </div>
       </div>
 
-      <h3 class="sub-h">Five surfaces, two drawers, one palette</h3>
+      <h3 class="sub-h">Six destinations, two work modes, one palette</h3>
       <div class="seats">
         <div class="seat">
-          <span class="tag">&#8984;1 &ndash; &#8984;5</span><h3>Command, Fleet, Growth, Mind, Chat</h3>
-          <p>What needs you and the ladder; what runs where and every shadow decision; whether output compounds, with Lessons; the Leader conversation; and the chat itself.</p>
+          <span class="tag">Workspaces</span><h3>Command, Fleet, Growth, Mind, Chat, Agents</h3>
+          <p>Command for what needs you; Fleet for runs and decisions; Growth for lessons; Mind for the Leader; Chat for sessions; Agents for the running roster. Work with me and Work for me switch the workspace without restarting your chat.</p>
         </div>
         <div class="seat">
           <span class="tag">&#8984;.</span><h3>Resources, ready or not</h3>
@@ -715,8 +760,9 @@ ashlr wiki ask "where are standing grants verified?"</pre>
         <p class="eyebrow">Cloud and Devin lanes</p>
         <h2>Hand a task off. Get a pull request back, through the same gates.</h2>
         <p>
-          Claude Code cloud sessions run on your Claude account's cloud credits, so work continues after
-          the subscription window is spent. Devin cloud sessions run on your Devin ACUs. Both are told to deliver
+          Claude Code cloud sessions keep running remotely on your signed-in Claude account. Eligible
+          promotional credits are used first, then included plan usage where available. Paid-only models
+          and enabled over-limit usage can use purchased credits. Devin cloud sessions run on your Devin ACUs. Both are told to deliver
           exactly one pull request from their own branch, with a report block, and never to merge.
         </p>
       </div>
@@ -811,7 +857,45 @@ ashlr wiki ask "where are standing grants verified?"</pre>
   <section id="measured">
     <div class="wrap">
       <div class="sec-head">
-        <p class="eyebrow">Measured, not estimated</p>
+        <p class="eyebrow">3.19 · controlled startup regression</p>
+        <h2>A slow account should not hold up the others.</h2>
+        <p>Two metadata workers now refill each freed slot independently. The same concurrency and cleanup rules remain.</p>
+      </div>
+      <div aria-label="Controlled metadata startup comparison">
+        <div class="evidence-row"><span>Before · wait for the whole pair</span><strong>Grok still pending at 30 ms</strong></div>
+        <div class="evidence-row"><span>After · refill a freed slot</span><strong>Fast rows at 10 / 20 / 30 ms</strong></div>
+      </div>
+      <p class="evidence-note">Synthetic regression fixture: one mocked account takes 20 seconds; three others take 10 ms each. Both paths allow two clients. These are controlled test-clock observations, not provider latency or a live startup benchmark. <a href="https://github.com/ashlrai/ashlr-hub/blob/master/test/resource-connection-monitor.test.ts">Inspect the test</a>.</p>
+      <p class="evidence-note">Measure your own configuration with <code>ashlr benchmark run</code>; this explicitly starts local model work. <code>ashlr benchmark --compare-reports BASE CANDIDATE</code> is offline and refuses incompatible or uncontrolled receipts. It reports matched observations, not universal savings. <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/AGENT-HARNESS-EVOLUTION.md#evidence-without-a-new-dispatch-gate">Benchmark guide</a>.</p>
+
+      <div class="sec-head">
+        <p class="eyebrow">3.20 · evidence for autonomous choices</p>
+        <h2>Useful work before a qualified reset.</h2>
+        <p>The fleet matches eligible accounts with selected tasks, using reported deadlines and completed work observations. Resource details show the estimate and its limits.</p>
+      </div>
+      <div aria-label="Reset-aware scheduling evidence flow">
+        <div class="evidence-row"><span>1 · Current account windows</span><strong>Reported deadline</strong></div>
+        <div class="evidence-row"><span>2 · Compatible completed work</span><strong>Estimated fit</strong></div>
+        <div class="evidence-row"><span>3 · Eligible task/account choices</span><strong>Advice + admission</strong></div>
+      </div>
+      <p class="evidence-note">Missing deadlines and work history stay unknown. Jev can advise among eligible choices; normal routing checks current account capacity again. A percentage is never treated as a token allowance. <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESET-AWARE-SCHEDULING.md">Read the scheduling guide</a>.</p>
+      <p class="evidence-note">Recorded online qualification · October 1: one multi-file rename fixture passed its checker in 392.5 seconds, changing three files across 12 turns. The requested local model was Qwen3.8 27B Q8_0; the runtime reported its model name as unknown. Cache state was uncontrolled, so this is one observed run, not a baseline/head comparison or a general performance claim. <a href="https://github.com/ashlrai/ashlr-hub/blob/master/benchmarks/local-qualification-2026-10-01.json">Inspect the sanitized receipt</a>.</p>
+
+      <div class="sec-head">
+        <p class="eyebrow">3.22 · learn from recorded outcomes</p>
+        <h2>Follow the work. Improve the next run.</h2>
+        <p>Expandable Fleet feedback connects recorded attempts to verification, GitHub PRs, authenticated merges and follow-up checks. The Leader uses recorded outcomes when planning the next useful task.</p>
+      </div>
+      <div aria-label="Execution feedback flow">
+        <div class="evidence-row"><span>1 · Completed dispatch records</span><strong>Outcome + coverage</strong></div>
+        <div class="evidence-row"><span>2 · Verification and GitHub timeline</span><strong>Recorded evidence</strong></div>
+        <div class="evidence-row"><span>3 · Retros and Leader context</span><strong>Next useful work</strong></div>
+      </div>
+      <p class="evidence-note">Producer success, a recorded proposal and shipped work remain separate. Replayed records do not multiply lessons; incomplete data stays visible. Opening feedback uses a shared background read without calling a model. <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/EXECUTION-FEEDBACK.md">Inspect the feedback contract</a>.</p>
+      <p class="evidence-note">Subscription deadlines guide useful work before reset. Purchased balances remain separate. Gray historical usage keeps its original timestamp while live readings load; captured dollar balances retain their capture time and expiration. <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESOURCE-EVIDENCE.md">Understand resource evidence</a>.</p>
+
+      <div class="sec-head">
+        <p class="eyebrow">Historical local-model measurements</p>
         <h2>One bug was costing 23,500 tokens a turn.</h2>
         <p>
           Claude Code appends a token counter to every request, and it changes each turn. Verse was
@@ -863,7 +947,7 @@ ashlr wiki ask "where are standing grants verified?"</pre>
 
       <div class="tbl-scroll" style="margin-top:32px">
         <table>
-          <caption>Same tasks, same hardware, same model, before and after the fix.</caption>
+          <caption>Historical cache-fix runs · 128 GB machine, Qwen3.8 27B at four-bit; same tasks and configuration.</caption>
           <thead><tr><th scope="col">Workload</th><th scope="col" class="num">Before</th><th scope="col" class="num">After</th><th scope="col" class="num">Change</th></tr></thead>
           <tbody>
             <tr><th scope="row">Prompt tokens reprocessed per turn</th><td class="num">23,500</td><td class="num after">34&ndash;556</td><td class="num">&minus;98%</td></tr>
@@ -887,7 +971,7 @@ ashlr wiki ask "where are standing grants verified?"</pre>
     <section class="run" aria-label="Measured parallel run" style="border-top:1px solid var(--line);padding-block:0;margin-top:32px">
       <div class="run-head">
         <h2>One machine, one GPU, four local slots</h2>
-        <span class="meta">Qwen3.8 27B &middot; one measured configuration, not a ceiling &middot; driven through the console's own dispatch path</span>
+        <span class="meta">Historical Qwen3.8 27B four-bit &middot; one measured configuration, not a ceiling &middot; driven through the console's own dispatch path</span>
       </div>
       <div class="run-body">
         <div class="lane"><span class="name">agent 1</span><span class="track"><span class="fill" style="width:93.1%;animation-delay:.05s"></span></span><span class="val">485s <span class="ok">&check;</span></span></div>
@@ -1108,9 +1192,9 @@ ashlr wiki ask "where are standing grants verified?"</pre>
         <div class="steps">
           <div class="step"><span class="n"></span><div>
             <h3>Install and open the console</h3>
-            <p>Inspect reported tools and context in each chat, and open source-line evidence from the local module map. Install Verse 3.18.0 with the same CLI command on all three platforms. On an Apple silicon Mac, you can also download the <a href="https://github.com/ashlrai/ashlr-hub/releases/tag/v3.18.0">Verse 3.18.0 desktop DMG</a>. It is locally signed, not Apple Developer ID notarized, so macOS may require Open Anyway on first launch.</p>
-            <p>New in 3.18: Work with me and Work for me, editable chat guides, signed change-volume limits and evaluation reports that distinguish measured tokens from unknown usage.</p>
-            <pre id="install-command">npm i -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.18.0/ashlr-hub-3.18.0.tgz
+            <p>Inspect reported tools and context in each chat, and open source-line evidence from the local module map. Install Verse 3.22.0 with the same CLI command on all three platforms. On an Apple silicon Mac, you can also download the <a href="https://github.com/ashlrai/ashlr-hub/releases/tag/v3.22.0">Verse 3.22.0 desktop DMG</a>. It is locally signed, not Apple Developer ID notarized, so macOS may require Open Anyway on first launch.</p>
+            <p>New in 3.22: fast account-bound usage history, separate credit balances, collapsible projects, and execution timelines connecting verification to GitHub. Expand Resources for dated readings and credit details, or Fleet to inspect an outcome.</p>
+            <pre id="install-command">npm i -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.0/ashlr-hub-3.22.0.tgz
 ashlr verse</pre>
             <button class="copy-command" type="button" data-copy="install-command">Copy commands</button><span class="copy-status" role="status" aria-live="polite"></span>
           </div></div>
@@ -1171,7 +1255,7 @@ ashlr devin budget --acu 50</pre>
 
 <footer>
   <div class="wrap">
-    <p>Ashlr Verse 3.18 &middot; verse.ashlr.ai</p>
+    <p>Ashlr Verse 3.22 &middot; verse.ashlr.ai</p>
     <span><a href="/ecosystem">Ecosystem</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md">User guide</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md">Leader</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md">Devin</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/CHANGELOG.md">Changelog</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub">github.com/ashlrai/ashlr-hub</a></span>
   </div>
 </footer>
@@ -1187,6 +1271,13 @@ ashlr devin budget --acu 50</pre>
     });
     if (focus) tab.focus();
   }
+  document.querySelectorAll('.journey-flow button').forEach((button) => {
+    button.addEventListener('click', () => {
+      const group = button.parentElement;
+      group.querySelectorAll('button').forEach((item) => item.setAttribute('aria-pressed', String(item === button)));
+      group.nextElementSibling.textContent = button.dataset.inspect;
+    });
+  });
   workflowTabs.forEach((tab, index) => {
     tab.addEventListener('click', () => selectWorkflow(tab));
     tab.addEventListener('keydown', (event) => {

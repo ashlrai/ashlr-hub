@@ -73,6 +73,8 @@ import {
   type BudgetView,
 } from './policy.js';
 import { routeSeat } from './router.js';
+import { buildSchedulingView } from './scheduling.js';
+import { readRecordedScheduling } from './scheduling-cache.js';
 import { VERSE_RESOURCE_READINESS_PATH, type ResourceReadinessResponse } from './readiness-types.js';
 import {
   VERSE_BUDGET_PATH,
@@ -286,6 +288,7 @@ export function buildBudgetView(policy: BudgetPolicy, reading: CapacityReading, 
     seats: policy.seats,
     updatedAt: policy.updatedAt,
     headroom,
+    scheduling: buildSchedulingView(reading.seats,policy,nowMs),
     seatInfo,
     effective,
     readingMaxAgeMs: HEADROOM_READING_MAX_AGE_MS,
@@ -404,7 +407,11 @@ export const handleBudgetApi: ApiModule = async (ctx, req, res, path, method) =>
         if (!readQuery(req, res, [])) return true;
         const policy = loadPolicyForPanel();
         const reading = await readCapacity(ctx.cfg);
-        sendJson(res, 200, buildBudgetView(policy, reading, Date.now()));
+        const nowMs = Date.now();
+        const view = buildBudgetView(policy,reading,nowMs);
+        const recorded = await readRecordedScheduling();
+        view.scheduling = {...buildSchedulingView(reading.seats,policy,nowMs,recorded.forecasts),...(recorded.advisory ? {advisory:recorded.advisory}: {})};
+        sendJson(res, 200, view);
         return true;
       }
       if (method === 'POST') {
@@ -423,7 +430,11 @@ export const handleBudgetApi: ApiModule = async (ctx, req, res, path, method) =>
         // A seat that is not discovered right now (a local tag while Ollama is
         // down) may still be configured; its engine is then inferred from the id.
         const policy = updateBudgetPolicy(parsed, { engineOf: (seatId) => engines.get(seatId) });
-        sendJson(res, 200, buildBudgetView(policy, reading, Date.now()));
+        const nowMs = Date.now();
+        const view = buildBudgetView(policy,reading,nowMs);
+        const recorded = await readRecordedScheduling();
+        view.scheduling = {...buildSchedulingView(reading.seats,policy,nowMs,recorded.forecasts),...(recorded.advisory ? {advisory:recorded.advisory}: {})};
+        sendJson(res, 200, view);
         return true;
       }
       sendJson(res, 404, { error: `not found: ${method} ${path}` });

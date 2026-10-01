@@ -434,3 +434,32 @@ describe('probe preflight, cancellation and output trust boundary', () => {
     expect(sent.bucketIds).toEqual(['codex']); expect(sent.command).not.toContain('--mutated');
   });
 });
+
+
+describe('native account-bound credit protocol metadata', () => {
+  it('publishes exact native credits only after successful same-account before/after reads', async () => {
+    const snapshot = quota(); Object.assign(snapshot.rateLimitsByLimitId.codex, {
+      credits: { hasCredits: true, unlimited: false, balance: '123.4567890000' }, spendControlReached: false,
+    });
+    const result = await probeCodexResourceAccount(options({ quota: snapshot }, { expectedAccountHint: HINT }));
+    expect(result.status).toBe('observed');
+    expect(result.credits).toEqual({ hasCredits: true, unlimited: false, balance: '123.4567890000', spendControlReached: false });
+    expect(result.observation).not.toHaveProperty('credits');
+    expect(invocation().requests.some((request) => String(request.method).includes('turn'))).toBe(false);
+  });
+  it.each([{ after: { ...ACCOUNT, account: { ...ACCOUNT.account, email: 'other@example.invalid' } } }, { errorAt: 4 }, { exitCode: 1 }])( 'withholds credits when identity or native settlement fails %j', async (patch) => {
+      const snapshot = quota(); Object.assign(snapshot.rateLimitsByLimitId.codex, {
+        credits: { hasCredits: true, unlimited: false, balance: '123.4567890000' },
+      });
+      const result = await probeCodexResourceAccount(options({ quota: snapshot, ...patch }));
+      expect(result.status).not.toBe('observed'); expect(result.credits).toBeNull();
+    });
+  it('keeps quota evidence when credit metadata is absent or invalid', async () => {
+    const snapshot = quota(); Object.assign(snapshot.rateLimitsByLimitId.codex, {
+      credits: { hasCredits: true, unlimited: false, balance: 'PRIVATE_SECRET' },
+    });
+    const result = await probeCodexResourceAccount(options({ quota: snapshot }));
+    expect(result.status).toBe('observed'); expect(result.credits).toBeNull();
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_SECRET');
+  });
+});

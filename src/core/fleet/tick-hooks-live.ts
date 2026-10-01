@@ -63,10 +63,18 @@
  */
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { buildSchedulingView, readWorkHistory, taskForecast } from '../routing/scheduling.js';
+import { writeRecordedScheduling } from '../routing/scheduling-cache.js';
+import { hasResetDeadline, opportunityPriority } from '../routing/reset-pressure.js';
+import type { ResourceChoiceCandidate, AccountSchedulingView } from '../routing/scheduling-types.js';
+import type { WorkHistorySample } from '../routing/work-estimates.js';
 import { join, resolve } from 'node:path';
 
 import type { AshlrConfig, EngineId, EngineTier, WorkItem } from '../types.js';
 import type { DaemonActivationCapability } from '../daemon/activation-permit.js';
+import { loadConfigReadOnlyStrict } from '../config.js';
+import { resolveLeaderPreferences, unavailableLeaderPreferences, type ResolvedLeaderPreferences } from '../vision/leader-preferences.js';
 import type { MintStandingTickResult, StandingSession } from '../authority/capability.js';
 import type {
   BeforeTickResult,
@@ -134,6 +142,7 @@ import {
   laneOfSeat,
   laneStates,
   planLanes,
+  grokDispatchBatchCapacity,
   planFanoutReserve,
   planStandingBestOfN,
   grantHasDevinProducer,
@@ -222,6 +231,10 @@ export interface TickHarness {
 
 export interface LiveHooksDeps {
   now(): number;
+  /** Bounded metadata history and optional existing-admitted advisory, injectable offline. */
+  workHistory?(): Promise<WorkHistorySample[]>;
+  resourceAdvice?(candidates: readonly ResourceChoiceCandidate[], options: {digest:string;signal?:AbortSignal}): Promise<string|null>;
+  recordScheduling?: typeof writeRecordedScheduling;
   standingPolicy(): EffectivePolicy | null;
   applyOverlay(cfg: AshlrConfig, policy: EffectivePolicy): AshlrConfig;
   /**
@@ -243,6 +256,8 @@ export interface LiveHooksDeps {
   probeDevinCli?(): Promise<DevinCliProbe>;
   presence(nowMs: number): Promise<OperatorPresence>;
   directives(): LeaderDirectivesV1 | null;
+  /** Strict live operator policy; failed reads close Grok admission without inventing defaults. */
+  liveLeaderConfig(tickCfg: AshlrConfig): AshlrConfig;
   listHolds(nowMs: number): RepoHold[];
   setHold(req: SetRepoHoldRequest): RepoHoldChange;
   readLedger(opts: LedgerReadOptions): Promise<LedgerReadResult>;
@@ -649,10 +664,14 @@ export function defaultLiveHooksDeps(): LiveHooksDeps {
     clampBudget: (policy, standing, knownSeatIds) => clampBudgetPolicy(policy, standing, knownSeatIds),
     loadBudget: () => loadBudgetPolicy(),
     capacitySnapshot: () => readCapacitySnapshot(),
+    workHistory: readWorkHistory,
+    resourceAdvice: async (candidates,options) => (await import('../decide/resource-choice.js')).adviseResourceChoice(candidates,options),
+    recordScheduling: writeRecordedScheduling,
     probeLocalRuntime: probeLocalRuntimeDefault,
     probeDevinCli: () => probeDevinCli(),
     presence: (nowMs) => probeOperatorPresence(nowMs),
     directives: () => readLeaderDirectives(),
+    liveLeaderConfig: () => loadConfigReadOnlyStrict(),
     listHolds: (nowMs) => listRepoHolds({ nowMs }),
     setHold: (req) => setRepoHold(req),
     readLedger: (opts) => readLedger(opts),
@@ -744,6 +763,10 @@ export function defaultLiveHooksDeps(): LiveHooksDeps {
 // ---------------------------------------------------------------------------
 
 interface TickContext {
+  meteredUsdExhausted: boolean;
+  dispatchSources: string | null;
+  itemScheduling: Map<string,Record<string,AccountSchedulingView>>;
+  advisedPair: ResourceChoiceCandidate | null;
   nowMs: number;
   cfg: AshlrConfig;
   policy: EffectivePolicy;
@@ -1046,13 +1069,11 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
    * stopped fleet keeps ticking for days — a clean pass is not repeated until
    * KILL clears and is armed again; a pass with failures is retried next tick.
    */
+  const killActiveFailClosed = (): boolean => {
+    try { return deps.killActive(); } catch { return true; }
+  };
   const revokeMergesOnKill = async (): Promise<void> => {
-    let killOn: boolean;
-    try {
-      killOn = deps.killActive();
-    } catch {
-      killOn = true;
-    }
+    const killOn = killActiveFailClosed();
     if (!killOn) {
       killMergesRevoked = false;
       return;
@@ -1320,7 +1341,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       // pending proposal the pass judges through G0–G7 like any other, and a
       // cloud PR the pass already superseded with its App PR is closed. Bounded
       // in time; a failure is audited and never holds the tick.
-      if (!hookCtx.dryRun && mirrorProblem === null && readyMirrors.length > 0 && !deps.killActive()) {
+      if (!hookCtx.dryRun && mirrorProblem === null && readyMirrors.length > 0 && !killActiveFailClosed()) {
         const intakeRun = deps.ingestCloudPrs(cfg, policy, readyMirrors);
         intakeRun.catch(() => undefined);
         try {
@@ -1356,7 +1377,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       // ACU reservations/accounting do not debit the daemon USD allowance; USD
       // exhaustion never labels this lane free or removes its ACU gates.
       // Bounded; a failure is audited and never holds the tick.
-      if (!hookCtx.dryRun && devinInFlight === null && cfg.devin?.enabled === true && cfg.devin?.fleet === true && !deps.killActive()) {
+      if (!hookCtx.dryRun && devinInFlight === null && cfg.devin?.enabled === true && cfg.devin?.fleet === true && !killActiveFailClosed()) {
         const refresh = nowMs - lastDevinRefreshMs >= DEVIN_FLEET_REFRESH_INTERVAL_MS;
         if (refresh) lastDevinRefreshMs = nowMs;
         const devinRun = deps.launchDevinFleet({ refresh });
@@ -1603,9 +1624,11 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       let budget: BudgetPolicy | null = null;
       let budgetProblem: string | null = null;
       let directiveSeats = new Set<string>();
+      let dispatchBudgetSource: BudgetPolicy | null = null;
+      let dispatchConfigSource: AshlrConfig | null = null;
       try {
         const applied = applyCodexDirective(
-          deps.clampBudget(deps.loadBudget(), policy, capacity.map((s) => s.seatId)),
+          deps.clampBudget(dispatchBudgetSource = deps.loadBudget(), policy, capacity.map((s) => s.seatId)),
           capacity,
           policy,
           directives,
@@ -1627,12 +1650,23 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         devinCli,
         cfg,
       });
+      let leaderPreferences: ResolvedLeaderPreferences;
+      let freshBatchCapacity = 0;
+      try {
+        const leaderCfg = dispatchConfigSource = deps.liveLeaderConfig(cfg);
+        leaderPreferences = resolveLeaderPreferences(leaderCfg);
+        freshBatchCapacity = grokDispatchBatchCapacity(leaderCfg);
+      } catch { leaderPreferences = unavailableLeaderPreferences(); }
       const lanes = planLanes({
         policy,
         directives,
         presence,
         localServingSlots: local.slots,
         engineUnavailable: laneEngines.unavailable,
+        leaderPreferences,
+        // The loop already resolved this tick's actual dispatch pool. A later
+        // operator edit can narrow it now, but cannot raise that in-flight pool.
+        admittedBatchCapacity: Math.min(grokDispatchBatchCapacity(cfg), freshBatchCapacity),
       });
       if (local.reachable === false && lanes.local.slots > 0) {
         lanes.local = { lane: 'local', slots: 0, capReason: `The local runtime is not reachable (${local.detail}).` };
@@ -1781,6 +1815,9 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         lane, Math.max(0, lanes[lane].slots - fanoutReserve[lane]),
       ])) as Record<FleetEngine, number>;
       ctx = {
+        meteredUsdExhausted: hookCtx.meteredUsdExhausted === true,
+        dispatchSources: dispatchBudgetSource && dispatchConfigSource ? createHash('sha256').update(JSON.stringify({budget:dispatchBudgetSource,directives,config:dispatchConfigSource})).digest('hex') : null,
+        itemScheduling: new Map(), advisedPair: null,
         nowMs,
         cfg,
         policy,
@@ -1848,6 +1885,155 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       }, state);
     },
 
+    async prepareDispatchPlan(items: readonly WorkItem[], cfg: AshlrConfig, signal?: AbortSignal): Promise<readonly string[] | void> {
+      const current = ctx;
+      if (!current || !current.dispatchSources) return;
+      let stoppedReason: 'stop-active' | 'preparation-cancelled' | null = null;
+      const readStopReason = (): typeof stoppedReason => signal?.aborted ? 'preparation-cancelled'
+        : killActiveFailClosed() ? 'stop-active' : null;
+      const recordStopped = async (): Promise<void> => {
+        if (!stoppedReason) return;
+        // This is a skipped preparation receipt, never an admitted dispatch.
+        // Invalidate BEFORE metadata I/O too; an unreadable Stop cannot leave
+        // old route()/seatAllows() authority available if that write fails.
+        ctx = null;
+        try { await deps.recordScheduling?.({...buildSchedulingView(current.capacity,current.budget,current.nowMs),
+          advisory:{observedAt:new Date(current.nowMs).toISOString(),state:'skipped',reason:stoppedReason}}); }
+        catch { /* Optional display evidence never restores dispatch authority. */ }
+      };
+      stoppedReason = readStopReason();
+      if (stoppedReason) { ctx = null; await recordStopped(); return; }
+      const refreshCurrent = (): boolean => {
+        if (ctx !== current) return false;
+        // Every dependency read below may fail. Restore only after a fully
+        // current validated plan; never retain the previous tick on error.
+        ctx = null;
+        stoppedReason = readStopReason();
+        let standing: EffectivePolicy | null = null;
+        try { standing = deps.standingPolicy(); } catch { /* Hold through no context. */ }
+        if (stoppedReason || !standing ||
+          standing.grantId !== current.policy.grantId || standing.grantSeq !== current.policy.grantSeq ||
+          JSON.stringify(standing.spend) !== JSON.stringify(current.policy.spend) || JSON.stringify(standing.repos) !== JSON.stringify(current.policy.repos) ||
+          JSON.stringify(standing.engines) !== JSON.stringify(current.policy.engines) || JSON.stringify(standing.rollout) !== JSON.stringify(current.policy.rollout)) {
+          ctx = null; return false;
+        }
+        // Operator config/budget and Leader lane choices may have changed while
+        // optional advice awaited. Never reuse the old lane plan after such a
+        // change; next tick rebuilds it from the current sources. Only an opaque
+        // local digest is retained, never sent to the advisor or logged.
+        try {
+          const sources = createHash('sha256').update(JSON.stringify({budget:deps.loadBudget(),
+            directives:clampLeaderDirectives(deps.directives(),standing),config:deps.liveLeaderConfig(cfg)})).digest('hex');
+          if (sources !== current.dispatchSources) { ctx = null; return false; }
+        } catch { ctx = null; return false; }
+        let fresh: CapacitySnapshot | null = null;
+        try { fresh = deps.capacitySnapshot(); } catch { /* Missing account capacity remains unknown. */ }
+        current.nowMs = deps.now();
+        if (fresh) {
+          const local = current.capacity.filter((s) => s.engine === 'local');
+          current.capacity = [...fresh.seats.filter((s) => s.engine !== 'local'),...local];
+        } else current.capacity = current.capacity.filter((s) => s.engine === 'local');
+        current.router = {...current.router,nowMs:current.nowMs,capacity:current.capacity};
+        current.routeCache.clear();
+        ctx = current;
+        return true;
+      };
+      let history: WorkHistorySample[] = [];
+      try { history = await deps.workHistory?.() ?? []; } catch { /* Unknown estimates never block useful work. */ }
+      // Metadata I/O is an await boundary too: revalidate before any paid advice.
+      if (!refreshCurrent()) { await recordStopped(); return; }
+      const candidates: ResourceChoiceCandidate[] = [];
+      const candidateCapacity = new Map<string,string>();
+      const capacityIdentity = (seat:SeatCapacity) => JSON.stringify({engine:seat.engine,contextWindow:seat.contextWindow,tier:seat.tier,costBasis:seat.costBasis,windowless:seat.windowless,free:seat.free});
+      for (const item of items) {
+        const projections: Record<string,AccountSchedulingView> = Object.create(null) as Record<string,AccountSchedulingView>;
+        let legacy: RouteDecision;
+        try { legacy = deps.legacyRoute(item,cfg); } catch { continue; }
+        for (const seat of current.capacity) {
+          // Restrict to this candidate to exercise ALL actual route/grant/
+          // model/context/demotion checks before asking for optional advice.
+          const candidateLanes = Object.fromEntries(FLEET_ENGINES.map(lane=>[lane,{...current.lanes[lane],slots:current.routeLaneCaps[lane]}])) as Record<FleetEngine,LanePlan>;
+          const route = routeWorkItem(item,legacy,{...current.router,lanes:candidateLanes,capacity:[seat],cfg});
+          if (route.hold || route.seatDecision?.seatId !== seat.seatId) continue;
+          const forecast = taskForecast(item,route.backend,route.model ?? null,history,current.nowMs);
+          const view = buildSchedulingView([seat],current.budget,current.nowMs,{[seat.seatId]:forecast}).accounts[0]!;
+          projections[seat.seatId] = view;
+          if (view.admission !== 'eligible') continue;
+          const id = createHash('sha256').update(JSON.stringify([item.id,seat.seatId])).digest('hex');
+          candidateCapacity.set(id,capacityIdentity(seat));
+          candidates.push({id,taskId:item.id,seatId:seat.seatId,engine:route.backend,model:route.model ?? null,taskKind:item.source,
+            headroomPercent:view.headroomPercent,resetAt:hasResetDeadline(view.reset) ? view.reset.at : null,
+            durationP25Ms:view.forecast?.durationMs?.p25 ?? null,
+            durationP75Ms:view.forecast?.durationMs?.p75 ?? null,reason:view.opportunity.reason});
+        }
+        current.itemScheduling.set(item.id,projections);
+      }
+      const digest = createHash('sha256').update(JSON.stringify({candidates,grant:current.policy.grantId,seq:current.policy.grantSeq,
+        stage:current.policy.rollout,spend:current.policy.spend,slots:current.routeLaneCaps})).digest('hex');
+      let advised: string | null = null;
+      const signedMetered = Number.isFinite(current.policy.spend.meteredUsdPerDay) && current.policy.spend.meteredUsdPerDay > 0;
+      const advisory: import('../routing/scheduling-types.js').SchedulingAdviceView = {observedAt:new Date(current.nowMs).toISOString(),state:'skipped',
+        reason:!signedMetered ? 'signed-metered-unavailable' : current.meteredUsdExhausted ? 'metered-allowance-exhausted' : 'no-comparable-pairs'};
+      stoppedReason = readStopReason();
+      if (stoppedReason) { ctx = null; await recordStopped(); return; }
+      if (signedMetered && candidates.length > 1 && !current.meteredUsdExhausted) {
+        try { advised = await deps.resourceAdvice?.(candidates,{digest,...(signal ? {signal} : {})}) ?? null; }
+        catch { /* Existing decide timeout/refusal/error => deterministic fallback. */ }
+        advisory.state='fallback';advisory.reason='no-eligible-choice';
+      }
+      if (!refreshCurrent()) { await recordStopped(); return; }
+      // Only the exact eligible pair receives advice. Recompute opportunity
+      // from fresh windows; stale reset/usage changes discard the old advice.
+      const pair = candidates.find((candidate) => candidate.id === advised) ?? null;
+      const initialViews = new Map(current.itemScheduling);
+      const refreshViews = (): void => {
+        current.advisedPair = null;
+        for (const item of items) {
+          const projections = initialViews.get(item.id) ?? {};
+          const next: Record<string,AccountSchedulingView> = Object.create(null) as Record<string,AccountSchedulingView>;
+          let legacy: RouteDecision | null = null;
+          try { legacy = deps.legacyRoute(item,cfg); } catch { /* The final route retains its ordinary fallback. */ }
+          for (const seat of current.capacity) {
+            const candidateLanes = Object.fromEntries(FLEET_ENGINES.map(lane=>[lane,{...current.lanes[lane],slots:current.routeLaneCaps[lane]}])) as Record<FleetEngine,LanePlan>;
+            const actual = legacy ? routeWorkItem(item,legacy,{...current.router,lanes:candidateLanes,capacity:[seat],cfg}) : null;
+            const taskEligible = actual && !actual.hold && actual.seatDecision?.seatId===seat.seatId;
+            const prior = projections[seat.seatId];
+            const recorded = prior?.forecast;
+            const original = candidates.find(v=>v.taskId===item.id && v.seatId===seat.seatId);
+            const sameCapacity = original && candidateCapacity.get(original.id)===capacityIdentity(seat);
+            const forecast = taskEligible && sameCapacity && recorded && actual.backend===recorded.cohort.engine &&
+              (actual.model ?? null)===recorded.cohort.model ? recorded : null;
+            const view = buildSchedulingView([seat],current.budget,current.nowMs,forecast ? {[seat.seatId]:forecast} : {}).accounts[0]!;
+            if (!taskEligible) {
+              view.admission='held';view.opportunity={kind:'held',reason:'This selected task has no admitted route on this account.'};
+            }
+            next[seat.seatId]=view;
+            // The same account ID and quota reading are insufficient: the
+            // actual executor/model/context/lane must still admit this pair.
+            if (pair?.taskId===item.id && pair.seatId===seat.seatId && taskEligible && sameCapacity && actual.backend===pair.engine &&
+              (actual.model ?? null)===pair.model && view.admission==='eligible' && view.forecast?.fit!=='unlikely-before-reset' && prior &&
+              view.headroomPercent===prior.headroomPercent && JSON.stringify(view.reset)===JSON.stringify(prior.reset)) current.advisedPair=pair;
+          }
+          current.itemScheduling.set(item.id,next);
+        }
+      };
+      refreshViews();
+      if (current.advisedPair) { advisory.state='choice-returned';advisory.reason='eligible-choice-returned'; }
+      const validatedForecasts = Object.fromEntries([...current.itemScheduling.values()].flatMap(views=>Object.entries(views).flatMap(([id,v])=>v.forecast ? [[id,v.forecast]] : [])));
+      try { await deps.recordScheduling?.({...buildSchedulingView(current.capacity,current.budget,current.nowMs,validatedForecasts),advisory}); }
+      catch { /* Display cache is neither dispatch authority nor a work prerequisite. */ }
+      if (!refreshCurrent()) { await recordStopped(); return; }
+      refreshViews();
+      return [...items].sort((a,b) => {
+        if (current.advisedPair) {
+          const advice = Number(b.id === current.advisedPair.taskId)-Number(a.id === current.advisedPair.taskId);
+          if (advice) return advice;
+        }
+        const priority = (id:string) => Object.values(current.itemScheduling.get(id) ?? {}).reduce((best,view)=>Math.max(best,opportunityPriority(view,current.nowMs)),0);
+        return priority(b.id)-priority(a.id);
+      }).map((item) => item.id);
+    },
+
     beginDispatchPlan(itemIds: readonly string[]): void {
       if (!ctx) return;
       ctx.plannedItemIds = new Set(itemIds);
@@ -1892,7 +2078,9 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
               : plan.capReason,
           }];
         })) as Record<FleetEngine, LanePlan>;
-        decision = routeWorkItem(item, legacy, { ...current.router, lanes, cfg });
+        decision = routeWorkItem(item, legacy, { ...current.router, lanes, cfg,
+          scheduling: current.itemScheduling.get(item.id),
+          advisorySeatId: current.advisedPair?.taskId === item.id ? current.advisedPair.seatId : null });
         if (planning && !decision.hold && decision.lane !== null) {
           current.plannedLaneUse[decision.lane] = (current.plannedLaneUse[decision.lane] ?? 0) + 1;
         }
@@ -1928,15 +2116,45 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         return { allowed: false, reason: `${engine} is not a fleet lane under the standing grant (per-token APIs and agents whose spend cannot be read never are).` };
       }
       if (lane === DEVIN_CLI_LANE) return devinCliSeatAllows(current);
+      if (lane === 'grok-cli' && opts.seatId !== undefined) {
+        // Selected-account execution may follow awaited planning or sandbox
+        // setup. Re-read its actual authority and telemetry synchronously;
+        // never substitute the configured default or an earlier tick reading.
+        try {
+          const standing = deps.standingPolicy();
+          if (killActiveFailClosed() || !standing || !current.dispatchSources ||
+            standing.grantId !== current.policy.grantId || standing.grantSeq !== current.policy.grantSeq ||
+            JSON.stringify(standing.spend) !== JSON.stringify(current.policy.spend) ||
+            JSON.stringify(standing.repos) !== JSON.stringify(current.policy.repos) ||
+            JSON.stringify(standing.engines) !== JSON.stringify(current.policy.engines) ||
+            JSON.stringify(standing.rollout) !== JSON.stringify(current.policy.rollout) ||
+            createHash('sha256').update(JSON.stringify({budget:deps.loadBudget(),
+              directives:clampLeaderDirectives(deps.directives(),standing),config:deps.liveLeaderConfig(current.cfg)})).digest('hex') !== current.dispatchSources) {
+            ctx = null;
+            return { allowed: false, reason: 'Selected Grok account authority changed or is unavailable; a fresh tick is required.' };
+          }
+          const fresh = deps.capacitySnapshot();
+          if (!fresh || fresh.seats.filter(s => s.seatId === opts.seatId && laneOfSeat(s) === lane).length !== 1) {
+            ctx = null;
+            return { allowed: false, reason: 'Selected Grok account has no unique current capacity reading.' };
+          }
+          current.nowMs = deps.now();
+          current.capacity = [...fresh.seats.filter(s => s.engine !== 'local'),...current.capacity.filter(s => s.engine === 'local')];
+        } catch {
+          ctx = null;
+          return { allowed: false, reason: 'Selected Grok account authority or capacity cannot be read.' };
+        }
+      }
       if (!current.policy.engines.includes(grantEngineOfLane(lane))) {
         return { allowed: false, reason: `The grant's current rollout stage does not include ${FLEET_LANE_LABEL[lane]}.` };
       }
       const plan = current.lanes[lane];
       if (plan.slots <= 0) return { allowed: false, reason: plan.capReason ?? `The ${FLEET_LANE_LABEL[lane]} lane has no slots this tick.` };
 
-      // The seats behind the lane: every one the CLI might hit must have
-      // headroom (the fleet cannot choose which account a CLI signs in with).
-      const seats = current.capacity.filter((s) => laneOfSeat(s) === lane);
+      // Bound Grok execution reaches only the selected roster account. Legacy
+      // unbound producers retain the all-seat check; no identity is guessed.
+      const seats = current.capacity.filter((s) => laneOfSeat(s) === lane &&
+        (lane !== 'grok-cli' || opts.seatId === undefined || s.seatId === opts.seatId));
       if (seats.length === 0) return { allowed: false, reason: `No ${FLEET_LANE_LABEL[lane]} seat is known, so no usage can be checked.` };
       for (const seat of seats) {
         const grant = standingSeatFor(current.policy.spend, seat.seatId);

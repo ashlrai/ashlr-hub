@@ -7,6 +7,7 @@ import { isVerifyProcessGroupLifecycle, runVerifySubprocessAsync, type VerifyPro
 import { canonical, digest } from '../universe/artifacts.js';
 import { validateResourceObservations, validateResourcePool, type ResourceObservation, type ResourcePool } from './pool-policy.js';
 import { validateResourceBindings, workerEnvironment, type ResourceBinding } from './worker.js';
+import { normalizeCodexCredits, type CodexCredits } from './codex-credits.js';
 import { probeHelperArgv } from './probe-helper-invocation.js';
 
 export interface CodexResourceProbeOptions {
@@ -35,6 +36,7 @@ export interface CodexResourceProbeResult {
   accountHint: string | null;
   planType: string | null;
   observation: ResourceObservation | null;
+  credits?: CodexCredits | null;
   /** Sanitized subprocess evidence only; never usable as quota or admission evidence. */
   cleanupDiagnostics?: CodexProbeCleanupDiagnostics;
 }
@@ -79,6 +81,7 @@ export interface CodexProbeProcessOutput {
   accountHint: string | null;
   planType: string | null;
   observation: ResourceObservation | null;
+  credits?: CodexCredits | null;
 }
 
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -142,7 +145,7 @@ function checkedOutput(output: string, pool: ResourcePool, workerId: string, sta
   expectedAccountHint: string | null): CodexProbeProcessOutput | null {
   try {
     const value: unknown = JSON.parse(output);
-    if (!record(value) || !exact(value, ['schemaVersion', 'status', 'reason', 'accountHint', 'planType', 'observation']) ||
+    if (!record(value) || !exact(value, ['schemaVersion', 'status', 'reason', 'accountHint', 'planType', 'observation'], ['credits']) ||
       value.schemaVersion !== 1 || !['observed', 'failed'].includes(String(value.status)) ||
       typeof value.reason !== 'string' || !PROCESS_REASONS.has(value.reason) ||
       (value.accountHint !== null && (typeof value.accountHint !== 'string' || !HASH.test(value.accountHint))) ||
@@ -159,6 +162,7 @@ function checkedOutput(output: string, pool: ResourcePool, workerId: string, sta
         observation.health !== 'ready' || observation.retryAfter !== null) return null;
       value.observation = observation;
     }
+    value.credits = value.status === 'observed' ? normalizeCodexCredits(value.credits) : null;
     return value as unknown as CodexProbeProcessOutput;
   } catch { return null; }
 }
@@ -175,10 +179,11 @@ export async function probeCodexResourceAccount(options: CodexResourceProbeOptio
   const started = performance.now(); const startedAt = new Date().toISOString();
   let cleanupDiagnostics: CodexProbeCleanupDiagnostics | undefined;
   const result = (status: CodexResourceProbeResult['status'], reason: string,
-    metadata?: Pick<CodexProbeProcessOutput, 'accountHint' | 'planType' | 'observation'>): CodexResourceProbeResult => ({
+    metadata?: Pick<CodexProbeProcessOutput, 'accountHint' | 'planType' | 'observation' | 'credits'>): CodexResourceProbeResult => ({
     schemaVersion: 1, scope: 'codex-native-metadata', workerId: pinned.workerId, poolDigest: pinned.poolDigest,
     status, reason, startedAt, finishedAt: new Date().toISOString(),
     accountHint: metadata?.accountHint ?? null, planType: metadata?.planType ?? null, observation: metadata?.observation ?? null,
+    credits: status === 'observed' ? metadata?.credits ?? null : null,
     ...(cleanupDiagnostics ? { cleanupDiagnostics } : {}),
   });
   if (pinned.signal?.aborted) return result('cancelled', 'probe-cancelled');

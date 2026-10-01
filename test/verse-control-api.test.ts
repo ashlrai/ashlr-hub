@@ -238,7 +238,7 @@ describe('/api/verse/caps', () => {
 
     const caps = res.json as VerseCaps;
     expect(Object.keys(caps).sort()).toEqual([
-      'concurrency', 'dailyBudgetUsd', 'defaulted', 'foundryLimits', 'intervalMs', 'journalItemCapacity',
+      'concurrency', 'dailyBudgetUsd', 'defaulted', 'foundryLimits', 'goalFocusActiveThreshold', 'goalFocusMode', 'goalPreferences', 'intervalMs', 'journalItemCapacity', 'leaderPreferences',
       'maxConcurrent', 'mode', 'parallel', 'perTickItems', 'subscriptionMaxPercent',
     ]);
     expect(caps.dailyBudgetUsd).toBe(1);
@@ -700,5 +700,31 @@ describe('V1 verse routes', () => {
     // through to the V1 session handler.
     expect((await request(port, 'GET', '/api/verse/sessions', read)).status).toBe(200);
     expect((await request(port, 'GET', '/api/verse/nonsense', read)).status).toBe(404);
+  });
+});
+
+
+describe('strict goal-preference live config boundary', () => {
+  it('reports unknown policy and refuses both goal/focus writes without overwriting corrupt config bytes', async () => {
+    const { port, read, mutate } = await boot();
+    const configPath = path.join(tmpHome, '.ashlr', 'config.json');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    const corrupt = '{invalid operator config';
+    fs.writeFileSync(configPath, corrupt);
+    const before = fs.statSync(configPath);
+    const caps = await request(port, 'GET', '/api/verse/caps', read);
+    expect(caps.status).toBe(200);
+    expect((caps.json as VerseCaps).goalPreferences?.sourceState).toBe('unavailable');
+    expect((caps.json as VerseCaps).leaderPreferences?.sourceState).toBe('unavailable');
+    expect((caps.json as VerseCaps).goalFocusMode).toBeUndefined();
+    const aggregate = await request(port, 'GET', '/api/verse/control', read);
+    expect((aggregate.json as VerseControlSnapshot).caps.goalPreferences?.sourceState).toBe('unavailable');
+    for (const body of [{ goalPreferences: { maxOpenGoals: null } }, { goalFocusMode: false }, { leaderPreferences: { maxTotalRunsPerDay: null } }]) {
+      const result = await request(port, 'POST', '/api/verse/caps', mutate, JSON.stringify(body));
+      expect(result.status).toBeGreaterThanOrEqual(400);
+      expect(result.body).not.toContain(corrupt);
+      expect(fs.readFileSync(configPath, 'utf8')).toBe(corrupt);
+      expect(fs.statSync(configPath).mtimeMs).toBe(before.mtimeMs);
+    }
   });
 });

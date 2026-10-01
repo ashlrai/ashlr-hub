@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { evictAll } from '../../../data/cache.js';
 import { JevResource } from './JevResource.js';
 import { JevPanel } from '../jev/JevPanel.js';
-import { narrowJevResponse, jevHeadline, formatUsd } from '../jev/jev-model.js';
+import { narrowJevResponse, jevEvidenceLines, jevHeadline, formatUsd } from '../jev/jev-model.js';
 
 let body: unknown;
 
@@ -60,10 +60,24 @@ describe('JevResource', () => {
 
   it('shows today\'s decisions, confidence and the estimate when on', async () => {
     const { container } = render(<ul><JevResource /></ul>);
-    expect(await screen.findByText('On')).toBeTruthy();
+    expect(await screen.findByText('Configured')).toBeTruthy();
     expect(container.querySelector('[data-jev-today]')?.textContent).toBe('7 decisions · 5 calls · 29% fell back');
     expect(container.querySelector('[data-jev-kind="engine-error"]')?.textContent).toContain('3 by Jev');
     expect(screen.getByText('estimate')).toBeTruthy();
+  });
+
+  it('shows unknown cost and actual cached/call provenance without implying a live connection', async () => {
+    body = { generatedAt: '2026-10-01T12:00:00.000Z', status: status({ dailyCallBudget: null, estCostUsdToday: null,
+      lastSuccessfulCallAt: null, costCoverage: { pricedCalls: 3, unknownCalls: 2, source: 'recorded-estimates' },
+      usageCoverage: { reportedCalls: 3, unknownCalls: 2 }, inputTokensToday: null, outputTokensToday: null }), kinds: [] };
+    const { container } = render(<ul><JevResource /></ul>);
+    await screen.findByText('Configured');
+    expect(screen.getByText(/1 cached decisions · 2 deterministic fallbacks/)).toBeInTheDocument();
+    expect(screen.getByText(/No successful Jev call recorded/)).toBeInTheDocument();
+    expect(screen.getByText(/Estimated cost unknown · 3 recorded cost estimates · 2 calls with unknown cost/)).toBeInTheDocument();
+    expect(screen.getByText(/5 API call attempts today · no call-count preference/)).toBeInTheDocument();
+    expect(container.textContent).not.toContain('$0');
+    expect(container.querySelector('button,input,select')).toBeNull();
   });
 });
 
@@ -90,5 +104,15 @@ describe('jev-model', () => {
     expect(formatUsd(0)).toBe('$0');
     expect(formatUsd(0.004)).toBe('<$0.01');
     expect(formatUsd(1.234)).toBe('$1.23');
+    expect(formatUsd(null)).toBe('unknown');
+    expect(formatUsd(NaN)).toBe('unknown');
+    expect(jevHeadline(status({ dailyCallBudget: null, callsToday: 1501 }) as never).word).toBe('Configured');
+  });
+
+  it('qualifies successful history separately from configuration and keeps old-server coverage unknown', () => {
+    expect(jevEvidenceLines(status({ lastSuccessfulCallAt: '2026-10-01T01:00:00.000Z' }) as never).join(' ')).toMatch(/Historical evidence, not a live connection check/);
+    expect(jevEvidenceLines(status() as never).join(' ')).toMatch(/Successful-call history unavailable.*price coverage unavailable/);
+    expect(narrowJevResponse({ generatedAt: 'x', status: status({ dailyCallBudget: null, estCostUsdToday: null,
+      byKind: [{ ...status().byKind[0], estCostUsd: null }] }), kinds: [] })).not.toBeNull();
   });
 });

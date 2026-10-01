@@ -50,6 +50,7 @@
  *
  * Pure: no React, no I/O.
  */
+import { codexCreditsAvailable, normalizeCodexCredits, type CodexCredits } from '../../../core/resources/codex-credits.js';
 import { describeResetAt } from '../../../core/verse/seat-readiness.js';
 import type { VerseEngine, VerseSeat } from '../../data/api-types.js';
 import { percentText } from './autonomy/format.js';
@@ -124,6 +125,9 @@ export interface SeatSubscriptionView {
   credits: string | null;
   /** The provider's raw balance string, kept verbatim for a title attribute. */
   creditsTitle: string | null;
+  creditBalance?: string | null;
+  creditState?: 'available' | 'held' | 'none' | 'unknown';
+  creditSpendControlReached?: boolean | null;
   /**
    * The provider's own plain-language facts. Owner S's contract says these
    * must be SHOWN rather than left to imply a fault, so they travel here and
@@ -222,16 +226,12 @@ function legacyWindowView(w: VerseSeat['health']['windows'][number], now: number
   };
 }
 
-function creditsPhrase(credits: SeatCapacityRecord['credits']): { phrase: string | null; title: string | null } {
-  if (credits === null) return { phrase: null, title: null };
-  if (credits.unlimited) return { phrase: 'credits unlimited', title: null };
-  if (!credits.hasCredits) return { phrase: null, title: null };
-  if (credits.balance === null) return { phrase: 'credits available', title: null };
-  const parsed = Number.parseFloat(credits.balance);
-  if (!Number.isFinite(parsed)) return { phrase: 'credits available', title: credits.balance };
-  // The provider publishes a long decimal ("2048.4196250000"). Two places is a
-  // rendering choice, not a new number — the raw string rides in the title.
-  return { phrase: `${parsed.toFixed(2)} credits left`, title: credits.balance };
+function creditsPhrase(raw: SeatCapacityRecord['credits']): { phrase: string | null; title: string | null; reading: CodexCredits | null } {
+  const credits = normalizeCodexCredits(raw);
+  if (credits === null || !codexCreditsAvailable(credits)) return { phrase: null, title: null, reading: credits };
+  if (credits.unlimited) return { phrase: 'credits unlimited', title: null, reading: credits };
+  if (credits.balance === null) return { phrase: 'credits available', title: null, reading: credits };
+  return { phrase: `${credits.balance} credits available`, title: 'Native credit units; not dollars or subscription percentage.', reading: credits };
 }
 
 function localView(seat: VerseSeat): SeatSubscriptionView {
@@ -305,8 +305,10 @@ export function seatSubscription(seat: VerseSeat, now: number = Date.now()): Sea
   const others = binding === null ? windows : windows.filter((w) => w.id !== binding.id);
   const lastReading = seat.health.state === 'degraded' && capacity.usability === 'unknown';
   // A failed latest check leaves the old meter visible for context only.
-  // Session credits are likewise historical and must not imply spendability.
-  const credits = lastReading ? { phrase: null, title: null } : creditsPhrase(capacity.credits);
+  // Failed checks and expired native credit readings never imply current availability.
+  const credits = seat.engine !== 'codex' || lastReading || capacity.creditsExpiresAt === undefined ||
+    (capacity.creditsExpiresAt === null || !Number.isFinite(Date.parse(capacity.creditsExpiresAt)) || Date.parse(capacity.creditsExpiresAt) <= now)
+    ? { phrase: null, title: null, reading: null } : creditsPhrase(capacity.credits);
 
   const unavailable = seatUnavailableReason(seat);
   const cls: SeatCapacityClass = unavailable !== null ? 'blocked' : USABILITY_CLASS[capacity.usability];
@@ -328,7 +330,7 @@ export function seatSubscription(seat: VerseSeat, now: number = Date.now()): Sea
     // The server already weighed credits against the spent window; `tight`
     // there means "spent, but there is still something to spend".
     summary = capacity.usability === 'tight' && credits.phrase !== null
-      ? `${binding.label} limit reached · credits still spendable`
+      ? `${binding.label} limit reached · credits available`
       : `${binding.label} limit reached`;
   } else if (binding.usedPercent === null) {
     summary = 'no capacity reading';
@@ -350,6 +352,10 @@ export function seatSubscription(seat: VerseSeat, now: number = Date.now()): Sea
     others,
     credits: credits.phrase,
     creditsTitle: credits.title,
+    creditBalance: credits.reading?.balance ?? null,
+    creditSpendControlReached: credits.reading?.spendControlReached ?? null,
+    creditState: credits.reading === null ? 'unknown' : !codexCreditsAvailable(credits.reading) ? 'none' :
+      credits.reading.spendControlReached === true ? 'held' : 'available',
     notes: [...capacity.notes],
     evidenceSource: capacity.evidenceSource,
     observedAt: capacity.observedAt ?? seat.health.observedAt,

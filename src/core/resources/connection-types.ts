@@ -2,8 +2,10 @@
 import type { ResourceQuotaWindow } from './pool-policy.js';
 
 export interface ResourceConnectionQuotaWindow extends ResourceQuotaWindow {
-  /** Display only: native /usage floors percentages and hides cached fallback provenance. */
-  nativeReport?: { source: 'claude-usage'; resetDescription: string | null };
+  /** Advisory provider period, outside canonical resource observations. */
+  resetProvenance?: import('../routing/scheduling-types.js').ResetProvenance;
+  /** Legacy prose is display only; structured current rows use a distinct exact-version source. */
+  nativeReport?: { source: 'claude-usage' | 'claude-usage-structured'; resetDescription: string | null };
 }
 
 export interface ResourceAccountConnection {
@@ -17,10 +19,14 @@ export interface ResourceAccountConnection {
   observedAt: string | null;
   expiresAt: string | null;
   windows: ResourceConnectionQuotaWindow[];
+  /** Current account-checked native metadata only; independent of subscription quota/admission. */
+  codexCredits?: import('./codex-credits.js').CodexCredits | null;
   reason: string;
   onDemandEnabled: boolean | null;
   /** Adapter availability only, never an admission decision or authenticated canary. */
   executionSupported: boolean;
+  /** Historical display only; never current windows, credits or admission evidence. */
+  lastKnownUsage?: import('./reading-cache-types.js').ResourceLastKnownUsage;
 }
 
 export interface ResourceConnectionsSnapshot {

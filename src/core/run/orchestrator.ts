@@ -96,7 +96,7 @@ import {
 } from './model-call-authority.js';
 import { withToolEnv } from '../env-bridge.js';
 import { buildEngineCommand, engineInstalled, spawnEngine, describeRunEventForStream, DEFAULT_ENGINE_BACKSTOP_MS } from './engines.js';
-import { resolveEngineSpec } from './engine-registry.js';
+import { resolveEngineSpec, configForGrokCliSeat, resolveGrokCliSeat, GROK_CLI_ENGINE_ID } from './engine-registry.js';
 import {
   nullSink,
   withOptionalRunOutputPersistence,
@@ -2262,6 +2262,12 @@ async function runGoalInternal(
   opts: RunOptions,
   effectGeneration?: string,
 ): Promise<RunState> {
+  if (opts.engine === GROK_CLI_ENGINE_ID) {
+    cfg = configForGrokCliSeat(cfg, opts.seatId);
+    if (opts.seatId !== undefined && !resolveGrokCliSeat(cfg, undefined, opts.seatId).ok) {
+      throw new Error('Selected Grok account profile is unavailable; default-account and builtin fallback refused');
+    }
+  }
   if (opts.resumeId && opts.runId) opts = { ...opts, runId: undefined };
   if (opts.runId) {
     const runId = assertSafeExecutionIdentity(opts.runId);
@@ -2454,10 +2460,13 @@ async function runGoalInternal(
       // handled above via isBinaryInstalled, so this branch is only reached
       // for known ids).
       const cmd = isKnownEngineId
-        ? buildEngineCommand(engineId, goal, cfg, { cwd, model: modelEnv })
+        ? buildEngineCommand(engineId, goal, cfg, { cwd, model: modelEnv, ...(engineId === GROK_CLI_ENGINE_ID && opts.seatId !== undefined ? { seatId: opts.seatId } : {}) })
         : null;
 
       if (!cmd) {
+        if (engineId === GROK_CLI_ENGINE_ID && opts.seatId !== undefined) {
+          throw new Error('Selected Grok account command changed before execution; default-account and builtin fallback refused');
+        }
         // M117: api-model engines have no CLI argv (buildEngineCommand returns null
         // for kind==='api-model'). Run them IN-PROCESS via the agent-loop +
         // buildOpenAICompatibleClient, confined to a sandbox worktree, capturing
@@ -2870,9 +2879,9 @@ async function runGoalInternal(
               delegationScope,
               ...(opts.signal ? { signal: opts.signal } : {}),
               ...(opts.runId ? { runId: opts.runId } : {}),
-              // The SeatRouter's codex seat (RunOptions.seatId): without it a
-              // standing codex run is refused as unconfinable.
+              // Preserve the router's exact native account through sandbox delegation.
               ...(opts.seatId ? { seatId: opts.seatId } : {}),
+              ...(opts.selectedGrokAdmission ? { selectedGrokAdmission: opts.selectedGrokAdmission } : {}),
               ...(opts.harness ? { harness: opts.harness } : {}),
             });
             const fallbackStateWithRetention = withSandboxRetention(
@@ -2962,6 +2971,7 @@ async function runGoalInternal(
                 ...(opts.signal ? { signal: opts.signal } : {}),
                 ...(opts.runId ? { runId: opts.runId } : {}),
                 ...(opts.seatId ? { seatId: opts.seatId } : {}),
+                ...(opts.selectedGrokAdmission ? { selectedGrokAdmission: opts.selectedGrokAdmission } : {}),
                 ...(opts.harness ? { harness: opts.harness } : {}),
                 deferTerminalAction: true,
               });

@@ -353,7 +353,8 @@ describe('Grok usage right after a weekly reset (creditUsagePercent omitted)', (
 
   it('keeps an omitted percent unknown when the period has already ended or is not bracketed', async () => {
     const ended = await probeGrokAccount(options({ billing: postReset(Date.now() - 8 * 86_400_000, Date.now() - 86_400_000) }));
-    expect(ended.windows).toEqual([{ id: 'grok_unified_weekly', usedPercent: null, resetsAt: expect.any(String) }]);
+    expect(ended.windows).toEqual([{ id: 'grok_unified_weekly', usedPercent: null, resetsAt: expect.any(String),
+      resetProvenance: {kind:'fixed-period', startsAt:expect.any(String), at:expect.any(String), description:expect.any(String), source:'grok-native-billing'} }]);
     const future = await probeGrokAccount(options({ billing: postReset(Date.now() + 86_400_000, Date.now() + 8 * 86_400_000) }));
     expect(future.windows[0]!.usedPercent).toBeNull();
     const openEnded = await probeGrokAccount(options({ billing: { config: { isUnifiedBillingUser: true,

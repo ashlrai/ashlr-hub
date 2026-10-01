@@ -2,7 +2,7 @@
  * V3.10 Track B unit U2 — the autonomous run environment
  * (src/core/sandbox/autonomous-env.ts). Filesystem only, under a temp HOME.
  */
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -13,6 +13,8 @@ import {
   autonomousEngineClass,
   buildAutonomousEnvOverlay,
   commitAutonomousVendorState,
+  autonomousVendorIdentityCurrent,
+  captureAutonomousVendorIdentityCheck,
 } from '../src/core/sandbox/autonomous-env.js';
 import { CUSTODY_HELPER_PATH, custodyDataDir } from '../src/core/authority/custody-client.js';
 
@@ -247,5 +249,33 @@ describe('applyAutonomousEnvOverlay', () => {
     // The sandboxed engine's pre-push blocker (per-invocation core.hooksPath) survives.
     expect(env['GIT_CONFIG_KEY_0']).toBe('core.hooksPath');
     expect(env['OLLAMA_HOST']).toBe('http://127.0.0.1:11434');
+  });
+});
+
+
+describe('selected account pre-spawn identity fence', () => {
+  it('retains only host-memory same-account admission across cleanup and routine token refresh', () => {
+    const {home,run} = scratch();const real = grokSeat(home);
+    const overlay = buildAutonomousEnvOverlay({engine:'grok-cli',runTmpDir:run,home,seatId:'grok-a'});
+    const current = captureAutonomousVendorIdentityCheck(overlay);
+    expect(current()).toBe(true);
+    rmSync(run,{recursive:true,force:true});
+    writeFileSync(join(real,'auth.json'),grokAuth('user-1','refreshed-token'));
+    expect(current()).toBe(true);
+    writeFileSync(join(real,'auth.json'),grokAuth('other-user','other-token'));
+    expect(current()).toBe(false);
+  });
+
+  it.each(['real-account-changed', 'copied-account-changed', 'missing-copy'] as const)('refuses %s without writing the real account', (kind) => {
+    const { home, run } = scratch();const real = grokSeat(home);
+    const overlay = buildAutonomousEnvOverlay({ engine: 'grok-cli', runTmpDir: run, home, seatId: 'grok-a' });
+    expect(autonomousVendorIdentityCurrent(overlay)).toBe(true);
+    const copy = join(overlay.set.GROK_HOME!, 'auth.json');
+    if (kind === 'real-account-changed') writeFileSync(join(real, 'auth.json'), grokAuth('other-account', 'other-refresh'));
+    if (kind === 'copied-account-changed') writeFileSync(copy, grokAuth('other-account', 'other-refresh'));
+    if (kind === 'missing-copy') writeFileSync(copy, '{}');
+    const before = readFileSync(join(real, 'auth.json'));
+    expect(autonomousVendorIdentityCurrent(overlay)).toBe(false);
+    expect(readFileSync(join(real, 'auth.json')).equals(before)).toBe(true);
   });
 });

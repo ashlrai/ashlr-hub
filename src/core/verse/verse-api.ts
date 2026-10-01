@@ -112,7 +112,8 @@ import {
 } from './preferences.js';
 import { prepareProjectMemory, readProjectMemory, writeProjectMemory } from './project-memory.js';
 import { discoverProjectsAsync } from './projects.js';
-import { discoverSeats, getSeatReadiness, refreshSeatTelemetry, type VerseSeatDiscovery } from './seats.js';
+import { discoverSeats, getSeatReadiness, refreshSeatTelemetry, resolveAccountsRoot, type VerseSeatDiscovery } from './seats.js';
+import { getVerseAccountCollector } from './accounts.js';
 import { DEVIN_CLI_SEAT_ID, devinCliTurnReadiness, devinSeatReadiness, discoverDevinSeats, mergeDevinSeats, type DevinSeatDiscoveryOptions } from './devin-seats.js';
 import { buildHandoffPreviewAsync } from './session-handoff.js';
 import { searchSessions } from './session-search.js';
@@ -574,6 +575,8 @@ export interface VerseApiContext {
   token: string;
   allowDispatch: boolean;
   readSession?: { id: string; expiresAt: number };
+  /** Fixed read-only worker shared by this server; never a caller-selected module. */
+  readProjections?: import('../web/read-projections.js').ReadProjectionReader;
 }
 
 // ---------------------------------------------------------------------------
@@ -1953,6 +1956,12 @@ export async function handleVerseApi(
   if (!isVerseApiPath(path)) return false;
 
   try {
+    if (path === `${VERSE_API_PREFIX}/resources/credit-pools` || path.startsWith(`${VERSE_API_PREFIX}/resources/credit-pools/`)) {
+      // Unknown children of this read-only namespace must not evaluate the
+      // legacy mounted modules (including the active cloud scheduler).
+      if (path !== `${VERSE_API_PREFIX}/resources/credit-pools`) { sendJson(res, 404, { error: 'Credit pool route not found.' }); return true; }
+      return (await import('./credit-pools-api.js')).handleCreditPoolsApi(ctx, req, res, path, method);
+    }
     // ── GET /api/verse/bootstrap ─────────────────────────────────────────
     if (path === `${VERSE_API_PREFIX}/bootstrap` && method === 'GET') {
       const engine = await getVerseEngine();
@@ -1982,10 +1991,22 @@ export async function handleVerseApi(
     // says "unknown" forever, with no way to learn otherwise short of a reload.
     if (path === `${VERSE_API_PREFIX}/seats` && method === 'GET') {
       const discovery = await liveSeats(ctx.cfg);
+      const collector = getVerseAccountCollector();
+      const status = collector?.accountsRoot === resolveAccountsRoot(ctx.cfg) ? collector.status() : null;
+      const live = status?.mode === 'owned' && status.state === 'running' ? collector!.connections() : null;
+      const returnedIds = new Set(discovery.seats.map((seat) => seat.id));
       const body: VerseSeatsResponse = {
         sampledAt: new Date().toISOString(),
         seats: discovery.seats,
         localRuntime: discovery.localRuntime,
+        // Only initial supported-account checks justify faster cached reads.
+        // Expired, signed-out, failed and unsupported windows do not keep the
+        // startup poll alive, and no new native process is started by this read.
+        accountTelemetry: {
+          refreshing: live?.refreshing ?? false,
+          pendingAccountIds: (live?.accounts ?? []).filter((row) => row.state === 'checking' && returnedIds.has(row.id))
+            .map((row) => row.id),
+        },
       };
       sendJson(res, 200, body);
       return true;

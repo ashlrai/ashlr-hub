@@ -68,7 +68,7 @@ export const DEVIN_SEAT_ID = 'devin';
 /** Same spelling rule the seat catalog and preferences use for seat ids. */
 export const BUDGET_SEAT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,199}$/;
 
-/** Registry bound — a blast radius for a runaway client, not a UI limit. */
+/** @deprecated Compatibility export only; policy storage is bounded by bytes, not seat count. */
 export const BUDGET_MAX_SEATS = 64;
 
 /** Upper bound on a daily USD cap; anything larger is a typo, not a budget. */
@@ -186,7 +186,7 @@ export function defaultSeatPolicy(mode: BudgetMode, seatId: string, engine: Budg
 
 /** The policy the router applies to one seat: the stored one, or the mode default. */
 export function effectiveSeatPolicy(policy: BudgetPolicy, seatId: string, engine?: BudgetEngine): SeatBudgetPolicy {
-  const stored = policy.seats[seatId];
+  const stored = Object.hasOwn(policy.seats, seatId) ? policy.seats[seatId] : undefined;
   if (stored) return { ...stored, seatId };
   return defaultSeatPolicy(policy.mode, seatId, engine ?? engineOfSeatId(seatId));
 }
@@ -256,13 +256,10 @@ export function sanitizeBudgetPolicy(raw: unknown): BudgetPolicy {
   }
   const seats = raw['seats'];
   if (isObject(seats)) {
-    let kept = 0;
     for (const seatId of Object.keys(seats).sort()) {
-      if (kept >= BUDGET_MAX_SEATS) break;
       const entry = sanitizeSeatPolicy(seatId, seats[seatId]);
       if (!entry) continue;
       out.seats[seatId] = entry;
-      kept += 1;
     }
   }
   return out;
@@ -397,9 +394,6 @@ export function applySeatPatch(
   nowIso: string,
   engine?: BudgetEngine,
 ): BudgetPolicy {
-  if (!(seatId in policy.seats) && Object.keys(policy.seats).length >= BUDGET_MAX_SEATS) {
-    throw new BudgetPolicyError('VERSE_TOO_LARGE', `at most ${BUDGET_MAX_SEATS} seats can carry a budget policy`);
-  }
   const next = effectiveSeatPolicy(policy, seatId, engine);
   if (patch.enabled !== undefined) next.enabled = patch.enabled;
   if (patch.reservePercent !== undefined) next.reservePercent = patch.reservePercent;

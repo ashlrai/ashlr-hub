@@ -691,6 +691,29 @@ describe('M333 — candidate specs', () => {
     }));
   });
 
+  it('forwards the selected Grok seat and live admission callback only to routed Grok candidates', async () => {
+    const cli = makeSandboxMock(0.1,'selected-grok');
+    const h = await harness({cli:cli.fn,api:cli.fn});
+    const cfg = makeConfig();cfg.foundry!.allowedBackends=['grok-cli','claude'];
+    const admission = vi.fn(() => true);
+    const result = await h.runBestOfN(makeItem(),cfg,{n:2,engine:'grok-cli',seatId:'grok-b',selectedGrokAdmission:admission,
+      candidates:[{engine:'grok-cli'},{engine:'claude'}]});
+    expect(result.candidates).toHaveLength(2);
+    expect(cli.calls.map(c=>c.engine).sort()).toEqual(['claude','grok-cli']);
+    for (let i=0;i<cli.calls.length;i++) {
+      if (cli.calls[i]!.engine==='grok-cli') {
+        expect(cli.options[i]).toMatchObject({seatId:'grok-b',selectedGrokAdmission:admission});
+      } else {
+        expect(cli.options[i]).not.toHaveProperty('seatId');
+        expect(cli.options[i]).not.toHaveProperty('selectedGrokAdmission');
+      }
+    }
+    // The fake runner does not spawn: the callback is an internal transport,
+    // not serialized candidate/result data or invoked as an invented call.
+    expect(admission).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain('selectedGrokAdmission');
+  });
+
   it('routes each candidate to its OWN engine + model with the right runner kind', async () => {
     const cli = makeSandboxMock(1.0, 'cli'); // claude → cli-agent runner
     const api = makeSandboxMock(0.0, 'api'); // local-coder → api-model runner

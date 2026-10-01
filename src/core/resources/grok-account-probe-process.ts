@@ -88,7 +88,10 @@ function billing(value: unknown, observedAt: string): { windows: GrokAccountProb
     period.type !== undefined && period.type !== null && !['USAGE_PERIOD_TYPE_WEEKLY', 'USAGE_PERIOD_TYPE_MONTHLY'].includes(String(period.type))) return null;
   const scope = cfg.isUnifiedBillingUser === true ? 'unified' : cfg.isUnifiedBillingUser === false ? 'build' : 'credits';
   const suffix = period.type === 'USAGE_PERIOD_TYPE_WEEKLY' ? '_weekly' : period.type === 'USAGE_PERIOD_TYPE_MONTHLY' ? '_monthly' : '';
-  return { windows: [{ id: `grok_${scope}${suffix}`, usedPercent: usedPercentOf(used, start, end, observedAt), resetsAt: end }],
+  return { windows: [{ id: `grok_${scope}${suffix}`, usedPercent: usedPercentOf(used, start, end, observedAt), resetsAt: end,
+    ...(start && end && suffix ? { resetProvenance: { kind: 'fixed-period' as const, startsAt: start, at: end,
+      description: period.type === 'USAGE_PERIOD_TYPE_WEEKLY' ? 'Provider weekly billing period.' : 'Provider monthly billing period.',
+      source: 'grok-native-billing' } } : {}) }],
     planType: typeof value.subscription_tier === 'string' && PLANS.has(value.subscription_tier) ? value.subscription_tier : null,
     onDemandEnabled: typeof value.on_demand_enabled === 'boolean' ? value.on_demand_enabled : null };
 }

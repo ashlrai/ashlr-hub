@@ -74,6 +74,26 @@ afterEach(async () => {
 });
 
 describe('bounded read-projection transport', () => {
+  it('coalesces only the exact selected case and retains fixed typed messages', async () => {
+    const { reader, workers } = harness();
+    const caseId = 'a'.repeat(64);
+    const first = reader.read('execution-feedback-case', { caseId });
+    expect(reader.read('execution-feedback-case', { caseId })).toBe(first);
+    const other = reader.read('execution-feedback-case', { caseId: 'b'.repeat(64) });
+    expect(workers[0]!.requests[0]).toMatchObject({ kind: 'execution-feedback-case', payload: { caseId } });
+    workers[0]!.result(0, null); await expect(first).resolves.toBeNull();
+    expect(workers[0]!.requests[1]).toMatchObject({ payload: { caseId: 'b'.repeat(64) } });
+    workers[0]!.result(1, null); await other;
+  });
+  it.each([undefined, {}, { caseId: '../secret' }, { caseId: 'a'.repeat(64), root: '/private' },
+    { caseId: 'A'.repeat(64) }, { caseId: ['a'.repeat(64)] }, Object.create({ caseId: 'a'.repeat(64) }),
+    Object.defineProperty({}, 'caseId', { get() { throw new Error('private getter'); }, enumerable: true })])(
+    'rejects malformed case payload before worker creation %#', async (payload) => {
+      const { reader, factory } = harness();
+      await expect(reader.read('execution-feedback-case', payload as never)).rejects.toMatchObject({ code: 'READ_PROJECTION_INVALID_REQUEST' });
+      expect(factory).not.toHaveBeenCalled();
+    });
+
   it('keys readiness by selected campaign, separates other kinds, and does not cache settled observations', async () => {
     const { reader, workers } = harness();
     const first = reader.read('universe-campaign-readiness', { campaignId: 'one' });

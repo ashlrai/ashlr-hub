@@ -24,9 +24,10 @@ list in a guide.
 npm ci          # clean, lockfile-exact install of devDependencies
 ```
 
-Run verification locally; GitHub Actions are repository-disabled and are not a
-prerequisite for contributing. The tracked historical `Dependency Audit` workflow
-is a reference, not a currently running check. Dependency changes must keep the
+Run focused verification locally while developing. Pull requests and default-branch
+pushes run the repository's CI and Dependency Audit workflows. Check the actual
+run for your commit; workflow source alone is not evidence that it passed.
+Dependency changes must keep the
 affected manifest and lockfile consistent, including separately packaged Raycast
 or desktop dependencies when those are in scope.
 
@@ -54,7 +55,7 @@ To install the CLI while developing:
 | `npm run test:web` | Run the separate jsdom/Testing Library console suite |
 | `npm run test:engineering-responsiveness` | Run the explicit macOS real-CLI two-second control-room latency gate; not implied by default test success |
 | `npm run dev:web` | Run the Vite development server; it does not commission providers or enable dispatch |
-| `npm run lint` | ESLint plus the real-I/O lane membership guard |
+| `npm run lint` | ESLint plus real-I/O membership and Verse synchronous-I/O guards |
 | `npm run check:docs` | Validate operator documentation file links and anchors locally, without network requests |
 | `npm run typecheck` | Strict backend and web type checks, without emitting files |
 | `npm run build` | Compile backend, copy assets, build the web console, then generate dependency inventory and Git build identity in `dist/` |
@@ -68,7 +69,7 @@ A source change is locally verified when these checks pass:
 ```sh
 npm run typecheck
 npm run lint
-npm run test:ci
+npm run test:ci:sharded
 npm run test:web
 npm run check:docs
 npm run build
@@ -96,9 +97,10 @@ only inactivity after Vitest's final summary is evidence of a possible leaked
 handle. The runner preserves the separate worker limits of the unit and
 serialized real-I/O lanes defined in [vitest.config.ts](vitest.config.ts).
 
-The tracked hosted workflows retain Ubuntu and Windows portability definitions
-as historical contracts. Their presence is not evidence that those jobs ran.
-Do not enable or dispatch GitHub Actions to complete a local change.
+Hosted CI includes exhaustive Ubuntu shards, named Windows portability contracts,
+macOS queue coverage and native broker checks. Local tests and hosted checks
+prove different environments. Inspect each actual run and report unavailable or
+skipped coverage separately; do not weaken checks to make a release pass.
 
 ---
 
@@ -230,7 +232,7 @@ src/
 │   ├── swarm/     # Multi-agent swarm runner, signing, gates, rollback
 │   ├── fleet/     # Manager judge, router, quota, feedback, learned routing
 │   ├── goals/     # Goal store, milestone planner, conductor, advance
-│   ├── vision/    # Elon strategist, end-state spec, playbook
+│   ├── vision/    # Leader, objectives, end-state spec and playbooks
 │   ├── inbox/     # Proposal lifecycle: merge, apply, store
 │   ├── sandbox/   # OS-level confinement: worktree, confine, audit, policy
 │   ├── genome/    # Shared memory: store, recall, consolidate, playbook

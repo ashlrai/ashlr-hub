@@ -120,6 +120,9 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/run/best-of-n-policy.ts',
   'src/core/vision/leader.ts',
   'src/core/vision/leader-seat.ts',
+  // Explicit operator preferences are inputs to scheduling/admission gates.
+  'src/core/goals/preferences.ts',
+  'src/core/vision/leader-preferences.ts',
   // Sandbox, policy and routing
   'src/core/sandbox/**',
   'src/core/policy/**',

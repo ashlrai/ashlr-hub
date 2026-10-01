@@ -53,6 +53,8 @@ export interface TickRouteDecision extends RouteDecision {
 /** Exactly what loop.ts passes to subscriptionAllows today. */
 export interface SeatAllowsOptions {
   maxPercent: number;
+  /** Exact routed Grok account; absent preserves the legacy all-seat gate. */
+  seatId?: string;
 }
 
 export interface TickHookContext {
@@ -84,6 +86,8 @@ export interface BeforeTickResult {
 
 export interface TickHooks {
   effectiveConfig(cfg: AshlrConfig): AshlrConfig;
+  /** Optional advice once per selected batch; never admits work or changes its membership. */
+  prepareDispatchPlan?(items: readonly WorkItem[], cfg: AshlrConfig, signal?: AbortSignal): Promise<readonly string[] | void>;
   /** Begin routing the selected dispatch batch; preselection probes must not reserve seats. */
   beginDispatchPlan?(itemIds: readonly string[]): void;
   route(item: WorkItem, cfg: AshlrConfig): TickRouteDecision;

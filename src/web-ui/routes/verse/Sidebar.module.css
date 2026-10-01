@@ -398,6 +398,9 @@
 
 /* ---- 3.10: archived disclosure ------------------------------------------ */
 .groupToggle {
+  flex: 1 1 auto;
+  min-height: var(--control-h);
+  text-align: left;
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
@@ -518,3 +521,7 @@
   :root:not([data-motion="full"]) .twist,
   :root:not([data-motion="full"]) .rowMore { transition: none; }
 }
+
+/* A whole heading is a touch/keyboard disclosure; row actions stay separate. */
+.groupToggle:disabled { cursor: default; color: inherit; }
+.activeGroup { flex: none; font-size: var(--text-2xs-size, 11px); color: var(--text-secondary); }

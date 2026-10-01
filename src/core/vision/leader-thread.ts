@@ -731,7 +731,7 @@ export function compactEvidence(e: LeaderEvidence | null): unknown {
   return {
     grant: e.grant ? { stage: e.grant.stageId, switch: e.grant.switch, leaderClasses: e.grant.leaderClasses, maxBudgetMode: e.grant.maxBudgetMode, repos: e.grant.repos.length, expiresOn: e.grant.expiresOn } : null,
     budgetMode: e.budget?.mode ?? null,
-    goals: e.goals ? { open: e.goals.open, total: e.goals.total, focusLimit: e.goals.focusLimit, items: e.goals.items.slice(0, 10).map((g) => ({ id: g.id, objective: g.objective, status: g.status, repo: g.repo, milestones: `${g.milestonesDone}/${g.milestones}` })) } : null,
+    goals: e.goals ? { open: e.goals.open, total: e.goals.total, focusLimit: e.goals.focusLimit, goalPreferences: e.goals.goalPreferences ?? null, items: e.goals.items.slice(0, 10).map((g) => ({ id: g.id, objective: g.objective, status: g.status, repo: g.repo, milestones: `${g.milestonesDone}/${g.milestones}` })) } : null,
     fleet: {
       merges7d: e.fleet.merges7d,
       reverts7d: e.fleet.reverts7d,

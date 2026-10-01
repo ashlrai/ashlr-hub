@@ -21,6 +21,8 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { redactArgs } from '../mcp-argv-safety.js';
+import { scrubSecrets } from '../util/scrub.js';
 import type { HarnessConfiguration } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -41,6 +43,59 @@ const SAMPLING_KEYS: readonly string[] = [
 ];
 
 const UNKNOWN = 'unknown';
+
+/** URL credentials/query values are not benchmark comparison controls. */
+export function projectBenchmarkText(value: string): string {
+  return scrubSecrets(value.replace(/https?:\/\/[^\s"'<>]+/gi, (raw) => {
+    try {
+      const url = new URL(raw);
+      url.username = ''; url.password = ''; url.search = ''; url.hash = '';
+      return url.href;
+    } catch { return '[REDACTED URL]'; }
+  }));
+}
+
+function metadataArgv(argv: readonly string[]): string[] {
+  // ps splits quoted headers into words; discard their whole value through the
+  // next option rather than trying to reconstruct credential-bearing quoting.
+  let headerValue = false;
+  return redactArgs([...argv]).map((arg) => {
+    if (/^--?[A-Za-z]/.test(arg)) headerValue = false;
+    if (/^(?:--?(?:header|headers|auth-header|authorization|auth|cookie)|-H)(?:=|$)/i.test(arg)
+      || /^["']?(?:authorization|proxy-authorization|cookie|set-cookie):/i.test(arg)) {
+      headerValue = true;
+      return arg.split('=')[0]! + '=[REDACTED]';
+    }
+    if (headerValue) return '[REDACTED]';
+    return projectBenchmarkText(arg);
+  });
+}
+
+/** Pure projection, also used to test secrecy without inspecting live processes. */
+export function projectConfigurationMetadata(configuration: HarnessConfiguration): HarnessConfiguration {
+  // A content-addressed model digest is evidence, not a bare hexadecimal key.
+  const digests: string[] = [];
+  const modelPath = configuration.modelPath.replace(/sha256-[0-9a-f]{64}/g, (digest) => {
+    digests.push(digest); return `MODEL_DIGEST_${digests.length - 1}`;
+  });
+  const sampling: Record<string, unknown> = {};
+  for (const key of SAMPLING_KEYS) {
+    const value = configuration.samplingParams[key];
+    if (typeof value === 'number' && Number.isFinite(value)) sampling[key] = value;
+  }
+  return {
+    ...configuration,
+    model: projectBenchmarkText(configuration.model),
+    modelPath: projectBenchmarkText(modelPath).replace(/MODEL_DIGEST_(\d+)/g, (_, index: string) => digests[Number(index)]!),
+    quantization: projectBenchmarkText(configuration.quantization),
+    samplingParams: sampling,
+    baseUrl: projectBenchmarkText(configuration.baseUrl),
+    proxyImplementation: metadataArgv(configuration.proxyImplementation.split(/\s+/)).join(' '),
+    agentCli: projectBenchmarkText(configuration.agentCli),
+    llamaServerArgv: metadataArgv(configuration.llamaServerArgv),
+    metadataProjection: { version: 1, credentials: 'redacted', processIdentity: 'projected-argv', urlQueries: 'omitted' },
+  };
+}
 
 async function fetchJson(url: string, timeoutMs = 5_000): Promise<Record<string, unknown> | null> {
   try {
@@ -144,8 +199,10 @@ export async function captureConfiguration(opts: CaptureOptions): Promise<Harnes
     if (key in params) sampling[key] = params[key];
   }
 
-  const upstreamPort = Number(new URL(opts.upstreamOrigin).port || 80);
-  const baseUrlPort = Number(new URL(opts.baseUrl).port || 80);
+  const upstreamUrl = new URL(opts.upstreamOrigin);
+  const baseUrl = new URL(opts.baseUrl);
+  const upstreamPort = Number(upstreamUrl.port || (upstreamUrl.protocol === 'https:' ? 443 : 80));
+  const baseUrlPort = Number(baseUrl.port || (baseUrl.protocol === 'https:' ? 443 : 80));
   const llamaArgv = await argvOnPort(upstreamPort);
 
   // `-c` is authoritative for the total; fall back to slots x per-slot.
@@ -165,7 +222,7 @@ export async function captureConfiguration(opts: CaptureOptions): Promise<Harnes
     agentCli = opts.agentCli;
   }
 
-  return {
+  return projectConfigurationMetadata({
     model: await resolveModelRef(modelPath),
     modelPath,
     quantization: typeof props?.['model_ftype'] === 'string' ? props['model_ftype'] : UNKNOWN,
@@ -180,5 +237,5 @@ export async function captureConfiguration(opts: CaptureOptions): Promise<Harnes
     agentCli,
     llamaServerArgv: llamaArgv,
     capturedAt: new Date().toISOString(),
-  };
+  });
 }

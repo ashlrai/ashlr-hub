@@ -19,12 +19,15 @@
  * files under a tmp root — hence its membership in the real-io lane. It NEVER
  * touches the real ~/.ashlr: every path is an explicit tmp root.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as childProcess from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import * as connectionMonitor from '../src/core/resources/connection-monitor.js';
+import { capacityFromSeat } from '../src/core/routing/headroom.js';
+import { assessResetOpportunity } from '../src/core/routing/reset-pressure.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import {
@@ -237,6 +240,36 @@ describe('verse accounts — configuration', () => {
     ]);
     expect(JSON.stringify(identities)).not.toContain('launcher');
   });
+  it('lists every enrolled identity beyond8 without projecting commands or inventing quota', () => {
+    const accounts=Array.from({length:160},(_,i)=>({id:`claude-${i}`,label:`Account ${i}`,provider:'claude',command:[FAKE_NODE,launcherFor(`account-${i}`)]}));
+    writePrivate(path.join(root,'connections.json'),{...CONNECTIONS,accounts});
+    const identities=readVerseAccountIdentities(root);
+    expect(identities).toEqual(accounts.map(({id,label,provider})=>({id,label,provider})));
+    const snapshot=buildVerseAccountsSnapshot({accountsRoot:root,collector:null});
+    expect(snapshot.accounts.map(a=>a.id)).toEqual(accounts.map(a=>a.id));
+    expect(snapshot.accounts.every(a=>a.authentication==='unknown' && a.windows.length===0)).toBe(true);
+    expect(JSON.stringify(snapshot)).not.toContain('launcher');
+  });
+
+  it('refuses malformed, duplicate or oversized identity rosters without partial output', () => {
+    const valid={id:'claude-a',label:'Account',provider:'claude',command:[FAKE_NODE,launcherFor('a')]};
+    for(const accounts of [[valid,null],[valid,{...valid,id:33}],[valid,{...valid,id:'claude-b',provider:'unknown'}],[valid,valid]]){
+      writePrivate(path.join(root,'connections.json'),{...CONNECTIONS,accounts});
+      expect(readVerseAccountIdentities(root)).toEqual([]);
+    }
+    writePrivate(path.join(root,'connections.json'),{...CONNECTIONS,accounts:[valid],padding:'x'.repeat(1024*1024)});
+    expect(readVerseAccountIdentities(root)).toEqual([]);
+    writePrivate(path.join(root,'connections.json'),{...CONNECTIONS,accounts:[valid]});
+    const target=path.join(root,'connections-copy.json');
+    fs.renameSync(path.join(root,'connections.json'),target);fs.symlinkSync(target,path.join(root,'connections.json'));
+    expect(readVerseAccountIdentities(root)).toEqual([]);
+    fs.unlinkSync(path.join(root,'connections.json'));fs.renameSync(target,path.join(root,'connections.json'));
+    if(process.platform!=='win32'){
+      fs.chmodSync(path.join(root,'connections.json'),0o644);
+      expect(readVerseAccountIdentities(root)).toEqual([]);
+    }
+  });
+
 });
 
 // ---------------------------------------------------------------------------
@@ -332,6 +365,19 @@ describe('verse accounts — evidence precedence', () => {
     expect(capacity.usability).toBe('unknown');
   });
 
+  it('does not attach historical session credits to a newly observed quota-gap reading', () => {
+    const historic = { hasCredits: true, unlimited: false, balance: '123.00000001' };
+    const legacyRead = vi.fn(() => historic);
+    const owner: VerseAccountCollector = { ...warmCollector(root, [connection({
+      id: 'codex-a', state: 'checking', authentication: 'unknown', health: 'unknown',
+      observedAt: null, expiresAt: null, windows: [], reason: 'connection-not-checked',
+    })]), observations: () => [freshObservation(4)], credits: legacyRead };
+    const record = buildVerseAccountsSnapshot({ accountsRoot: root, collector: owner }).accounts.find((a) => a.id === 'codex-a');
+    expect(record).toMatchObject({ state: 'observed', authentication: 'signed-in', windows: [{ usedPercent: 4 }], credits: null });
+    expect(legacyRead).not.toHaveBeenCalled();
+    expect(buildSeatTelemetry(root, { collector: owner }).get('codex-a')!.capacity.credits).toBeNull();
+  });
+
   it('honors the local collector’s unavailable veto over its retained Codex sample', () => {
     const owner: VerseAccountCollector = { ...warmCollector(root, []), connections: () => null,
       observations: () => [freshObservation(4)], unavailableWorkerIds: () => ['codex-a'] };
@@ -407,6 +453,24 @@ describe('verse accounts — evidence precedence', () => {
 // ---------------------------------------------------------------------------
 
 describe('verse accounts — collector lifecycle', () => {
+  it('reads monitor lifecycle without snapshot/profile-history IO during repeated owned status reads', async () => {
+    fs.rmSync(path.join(root, 'quota-config.json'));
+    const snapshot = vi.fn(() => ({ sampledAt: new Date().toISOString(), refreshing: true, accounts: [] }));
+    const isStopped = vi.fn(() => false);
+    const monitorFactory = vi.spyOn(connectionMonitor, 'createResourceConnectionMonitor').mockReturnValue({
+      snapshot, isStopped, close: async () => {},
+    });
+    try {
+      collector = await startVerseAccountCollector({ accountsRoot: root });
+      expect(monitorFactory).toHaveBeenCalledOnce(); snapshot.mockClear(); isStopped.mockClear();
+      for (let i = 0; i < 10; i++) expect(collector.status().state).toBe('running');
+      expect(isStopped).toHaveBeenCalled(); expect(snapshot).not.toHaveBeenCalled();
+      isStopped.mockReturnValue(true); expect(collector.status().state).toBe('blocked');
+      expect(snapshot).not.toHaveBeenCalled();
+    } finally {
+      await collector?.close(); collector = null; monitorFactory.mockRestore();
+    }
+  });
   it('degrades to read-only when another collector owns the exclusive lease, instead of throwing', async () => {
     // Stand in for `ashlr resource-console` already holding the lock.
     held = await acquireResourceQuotaRefreshLease(accountsLedgerRoot(root), { trackNativeActivity: true });
@@ -542,8 +606,43 @@ describe('verse accounts — per-provider derivation', () => {
     // The per-model weekly window is the one that actually bites.
     expect(record.binding).toEqual({ id: 'seven_day_fable', usedPercent: 100, limitReached: false });
     expect(record.notes.some((n) => n.includes('no machine-readable reset time'))).toBe(true);
-    expect(record.notes.some((n) => n.includes('"unknown" by construction'))).toBe(true);
+    expect(record.notes.some((n) => n.includes('native quota freshness is unavailable'))).toBe(true);
     expect(record.credits).toBeNull();
+  });
+
+  it('threads only authenticated same-plan structured Claude deadlines through account and seat telemetry', async () => {
+    const now=Date.now();const deadline=new Date(now+3600000).toISOString();
+    const weekly={kind:'weekly-deadline' as const,at:deadline,description:null,source:'claude-native-usage-report',plan:'max' as const};
+    const row=connection({id:'claude',provider:'claude',planType:'max',observedAt:new Date(now-1000).toISOString(),
+      expiresAt:new Date(now+60000).toISOString(),health:'reachable',windows:[
+        {id:'five_hour',usedPercent:4.5,resetsAt:deadline,nativeReport:{source:'claude-usage-structured',resetDescription:null},
+          resetProvenance:{kind:'rolling-release',at:deadline,description:null,source:'claude-native-usage-report'}},
+        {id:'seven_day',usedPercent:0,resetsAt:deadline,nativeReport:{source:'claude-usage-structured',resetDescription:null},resetProvenance:weekly},
+        {id:'seven_day_fable',usedPercent:7.5,resetsAt:deadline,nativeReport:{source:'claude-usage-structured',resetDescription:null}},
+      ]});
+    const record=deriveVerseAccountRecord(row);
+    expect(record.windows[1]).toMatchObject({usedPercent:0,resetsAt:deadline,resetProvenance:weekly});
+    expect(record.notes.some(n=>n.includes('qualified reset deadline'))).toBe(true);
+    expect(record.windows[2]).toMatchObject({id:'seven_day_fable',usedPercent:7.5,resetsAt:deadline});
+    expect(record.windows[2]).not.toHaveProperty('resetProvenance');
+    const telemetry=buildSeatTelemetry(root,{collector:warmCollector(root,[row])});
+    expect(telemetry.get('claude')!.capacity.windows[1]).toMatchObject({resetsAt:deadline,resetProvenance:weekly});
+    expect(telemetry.get('claude')!.capacity.windows[1]!.resetProvenance).not.toHaveProperty('startsAt');
+    const discovery=await discoverSeats(makeConfig(root),{accountsRoot:root,claudeUsage:zeroUsage,collector:warmCollector(root,[row])});
+    const nativeSeat=discovery.seats.find(s=>s.id==='claude')!;
+    const capacity=capacityFromSeat(nativeSeat,telemetry.get('claude')!.capacity);
+    expect(capacity.windows[1]).toMatchObject({id:'seven_day',resetsAt:deadline,resetProvenance:weekly});
+    expect(assessResetOpportunity(capacity,{seatId:'claude',enabled:true,reservePercent:0},now)).toMatchObject({
+      admission:'eligible',reset:weekly,opportunity:{kind:'before-reset'},
+    });
+    for(const variant of [
+      {...row,authentication:'unknown' as const}, {...row,planType:'team'}, {...row,planType:'pro'},
+      {...row,windows:row.windows.map(w=>({...w,nativeReport:{source:'claude-usage' as const,resetDescription:'Friday'}}))},
+    ]){
+      const denied=deriveVerseAccountRecord(variant);
+      expect(denied.windows[1]!.resetsAt).toBeNull();
+      expect(denied.windows[1]).not.toHaveProperty('resetProvenance');
+    }
   });
 
   it('CLAUDE: names the version pin verbatim when the probe fails closed', () => {
@@ -578,7 +677,8 @@ describe('verse accounts — per-provider derivation', () => {
         { id: 'codex_primary', usedPercent: 100, resetsAt: '2026-09-26T00:00:00.000Z' },
         { id: 'codex_secondary', usedPercent: 63, resetsAt: '2026-09-21T00:00:00.000Z' },
       ],
-    }), { credits: { hasCredits: true, unlimited: false, balance: '2048.4196250000' } });
+      codexCredits: { hasCredits: true, unlimited: false, balance: '2048.4196250000' },
+    }), { nowMs: Date.parse('2026-09-19T12:00:30.000Z') });
 
     const primary = record.windows[0]!;
     expect(primary.limitReached).toBe(false);
@@ -594,7 +694,7 @@ describe('verse accounts — per-provider derivation', () => {
     expect(record.planType).toBe('pro');
     // The provenance ambiguity is STATED rather than resolved by guessing.
     expect(record.notes.some((n) => n.includes('does not claim which'))).toBe(true);
-    expect(record.notes.some((n) => n.includes('independent of the window'))).toBe(true);
+    expect(record.notes.some((n) => n.includes('independent of the subscription window'))).toBe(true);
   });
 
   it('CODEX: honours a limitReached flag when the upstream actually supplies one', () => {
@@ -1011,13 +1111,13 @@ describe('verse accounts — stranded native cleanup recovery', () => {
 // Both halves were served by the same process from the same monitor. These
 // tests pin the seat half to the live rows.
 
-const LIVE_AT = '2026-09-20T05:31:00.000Z';
+const LIVE_AT = new Date().toISOString();
 
 /** The four accounts exactly as measured on this machine, 2026-09-20. */
 function liveConnections(): ResourceAccountConnection[] {
   const codex = (id: string, label: string, resetsAt: string): ResourceAccountConnection => ({
     id, label, provider: 'codex', state: 'observed', authentication: 'signed-in',
-    health: 'reachable', planType: 'pro', observedAt: LIVE_AT, expiresAt: null,
+    health: 'reachable', planType: 'pro', observedAt: LIVE_AT, expiresAt: new Date(Date.parse(LIVE_AT) + 60_000).toISOString(),
     windows: [{ id: 'codex_codex_primary', usedPercent: 100, resetsAt }],
     reason: 'probe-observed', onDemandEnabled: null, executionSupported: true,
   });
@@ -1066,7 +1166,8 @@ function warmCollector(
       lastPolledAt: LIVE_AT, lastRequestAt: LIVE_AT, note: 'Readings are live.',
     }),
     touch: () => {},
-    connections: () => ({ sampledAt: LIVE_AT, refreshing: false, accounts }),
+    connections: () => ({ sampledAt: LIVE_AT, refreshing: false, accounts: accounts.map((row) =>
+      Object.hasOwn(credits, row.id) ? { ...row, codexCredits: credits[row.id] ?? null } : row) }),
     // Deliberately EMPTY: the Codex-only evidence path must not be what makes
     // these seats work, or the Claude/Grok bug comes straight back.
     observations: () => [],
@@ -1145,7 +1246,7 @@ describe('verse seats — live collector is the source of seat health', () => {
     // Its only window is spent — but credits remain spendable, so it is not
     // "blocked", which is what `exhausted` would have claimed.
     expect(codex.capacity?.usability).toBe('tight');
-    expect(codex.capacity?.notes.some((n) => n.includes('independent of the window'))).toBe(true);
+    expect(codex.capacity?.notes.some((n) => n.includes('independent of the subscription window'))).toBe(true);
   });
 
   it('CLAUDE: the null resetsAt and the verbatim reset sentence both survive onto the seat', async () => {
@@ -1323,5 +1424,21 @@ describe('verse seats — live collector is the source of seat health', () => {
       binding: { id: 'a', usedPercent: 4, limitReached: false },
       windows: [{ id: 'a', usedPercent: 4, resetsAt: null, nativeReport: null, limitReached: false, measured: true }],
     })).toBe('unknown');
+  });
+});
+
+
+describe('fresh native credit projection wins over historical session signals', () => {
+  const nowMs = Date.parse('2026-09-19T12:00:30.000Z');
+  const old = { hasCredits: true, unlimited: false, balance: '123.0000000001' };
+  it.each([null, { hasCredits: false, unlimited: false, balance: '0' }, { hasCredits: true, unlimited: false, balance: '0.0000' }])( 'does not replace a native absent/false/zero reading with a legacy positive balance', (codexCredits) => {
+      const record = deriveVerseAccountRecord(connection({ codexCredits }), { credits: old, nowMs });
+      expect(record.credits).toEqual(codexCredits);
+    });
+  it.each([
+    { state: 'unavailable' as const }, { authentication: 'unknown' as const }, { expiresAt: '2026-09-19T12:00:30.000Z' },
+    { observedAt: '2026-09-19T12:00:31.000Z' }, { expiresAt: null },
+  ])('withholds credit availability without fresh successful native account evidence', (patch) => {
+    expect(deriveVerseAccountRecord(connection({ codexCredits: old, ...patch }), { nowMs }).credits).toBeNull();
   });
 });

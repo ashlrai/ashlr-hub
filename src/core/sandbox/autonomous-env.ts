@@ -581,6 +581,45 @@ function sameVendorAccount(engineClass: 'grok-cli' | 'codex', previous: unknown,
   return null;
 }
 
+/** Host-memory same-account guard for a later fresh overlay after normal token writeback. */
+export function captureAutonomousVendorIdentityCheck(overlay: AutonomousEnvOverlay): () => boolean {
+  try {
+    const states = (overlay.vendorState ?? []).map(state => {
+      const file = join(state.ephemeralHome,'auth.json');
+      if (regularFile(file,MAX_AUTH_FILE_BYTES) === null) throw new Error('identity unavailable');
+      const identity: unknown = JSON.parse(readFileSync(file,'utf8'));
+      if (sameVendorAccount(state.engineClass,identity,identity) !== null) throw new Error('identity invalid');
+      return {state,identity};
+    });
+    if (!states.length) return () => false;
+    return () => {
+      try {
+        return states.every(({state,identity}) => {
+          const file = join(state.realHome,'auth.json');
+          return regularFile(file,MAX_AUTH_FILE_BYTES) !== null &&
+            sameVendorAccount(state.engineClass,identity,JSON.parse(readFileSync(file,'utf8'))) === null;
+        });
+      } catch { return false; }
+    };
+  } catch { return () => false; }
+}
+
+/** Read-only pre-spawn fence. No identity/token contents are returned to callers. */
+export function autonomousVendorIdentityCurrent(overlay: AutonomousEnvOverlay): boolean {
+  const states = overlay.vendorState ?? [];
+  if (states.length === 0) return false;
+  try {
+    return states.every((state) => {
+      const before = state.snapshot['auth.json'];
+      const real = join(state.realHome, 'auth.json');
+      const copy = join(state.ephemeralHome, 'auth.json');
+      if (!before || regularFile(real, MAX_AUTH_FILE_BYTES) === null || regularFile(copy, MAX_AUTH_FILE_BYTES) === null ||
+        sha256File(real) !== before) return false;
+      return sameVendorAccount(state.engineClass, JSON.parse(readFileSync(real, 'utf8')), JSON.parse(readFileSync(copy, 'utf8'))) === null;
+    });
+  } catch { return false; }
+}
+
 /** O_EXCL temp file (0600, no symlink following) + fsync + rename over `target`. */
 function writePrivateAtomic(target: string, data: Buffer): void {
   const tmp = join(dirname(target), `.${Date.now().toString(36)}-${process.pid}.ashlr-writeback`);

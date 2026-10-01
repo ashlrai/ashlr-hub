@@ -28,6 +28,8 @@ import {
   type CapKey,
 } from './caps-spec.js';
 import { updateVerseCaps } from './control-queries.js';
+import { GoalPreferencesPanel } from './GoalPreferencesPanel.js';
+import { LeaderPreferencesPanel } from './LeaderPreferencesPanel.js';
 import { engineQuotaStanding } from './control-types.js';
 import type { VerseCaps, VerseControlSnapshot, VerseFoundryLimit } from './control-types.js';
 import { budgetMeter, formatAge, formatCount, formatUsd } from './format.js';
@@ -74,7 +76,7 @@ export function CapsPanel({ caps, snapshot, guard, dispatchEnabled }: CapsPanelP
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [appliedKey, setAppliedKey] = useState<string | null>(null);
-  const locked = !dispatchEnabled || guard.readOnly;
+  const locked = !dispatchEnabled || guard.readOnly || guard.busy || guard.tokenOpen;
 
   function commit(id: string, reason: string, run: () => Promise<unknown>) {
     setActiveKey(id);
@@ -93,7 +95,7 @@ export function CapsPanel({ caps, snapshot, guard, dispatchEnabled }: CapsPanelP
   const limits = caps.foundryLimits ?? [];
 
   return (
-    <section className={styles.panel} aria-label="Budget and limits">
+    <><section className={styles.panel} aria-label="Budget and limits">
       <div className={styles.panelHead}>
         <h3 className={styles.panelTitle}>Budget and limits</h3>
         <p className={styles.panelNote}>Committed on blur or Enter. The daemon re-reads config each tick, so changes apply live.</p>
@@ -155,6 +157,10 @@ export function CapsPanel({ caps, snapshot, guard, dispatchEnabled }: CapsPanelP
         </div>
       )}
     </section>
+      <GoalPreferencesPanel preferences={caps.goalPreferences} focusMode={caps.goalFocusMode} focusThreshold={caps.goalFocusActiveThreshold}
+        focusDefaulted={caps.defaulted.includes('goalFocusMode')} guard={guard} dispatchEnabled={dispatchEnabled && busyKey === null} />
+      <LeaderPreferencesPanel preferences={caps.leaderPreferences} guard={guard} dispatchEnabled={dispatchEnabled && busyKey === null} />
+    </>
   );
 }
 

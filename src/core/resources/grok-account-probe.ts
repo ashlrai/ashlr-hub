@@ -6,6 +6,7 @@ import { performance } from 'node:perf_hooks';
 import { isVerifyProcessGroupLifecycle, runVerifySubprocessAsync, type VerifyProcessGroupLifecycle } from '../run/verify-commands.js';
 import { workerEnvironment } from './worker.js';
 import { probeHelperArgv } from './probe-helper-invocation.js';
+import { validResetProvenance } from '../routing/reset-pressure.js';
 
 export interface GrokAccountProbeOptions {
   /** Explicit native profile launcher; account/environment isolation belongs to that launcher. */
@@ -18,7 +19,8 @@ export interface GrokAccountProbeOptions {
   /** In-process ownership evidence only; never forwarded to the native protocol. */
   processGroupLifecycle?: VerifyProcessGroupLifecycle;
 }
-export interface GrokAccountProbeWindow { id: string; usedPercent: number | null; resetsAt: string | null }
+export interface GrokAccountProbeWindow { id: string; usedPercent: number | null; resetsAt: string | null;
+  resetProvenance?: import('../routing/scheduling-types.js').ResetProvenance }
 export interface GrokAccountProbeReport {
   schemaVersion: 1;
   scope: 'grok-native-metadata';
@@ -106,10 +108,12 @@ function checkedOutput(raw: string, startedAt: string, expectedAccountHint: stri
         v.onDemandEnabled !== null && typeof v.onDemandEnabled !== 'boolean' || v.observedAt !== startedAt ||
         v.expiresAt !== new Date(Date.parse(startedAt) + 60_000).toISOString()) return null;
       const w: unknown = v.windows[0];
-      if (!record(w) || !exact(w, ['id', 'usedPercent', 'resetsAt']) || typeof w.id !== 'string' || !WINDOW_ID.test(w.id) ||
+      if (!record(w) || !exact(w, ['id', 'usedPercent', 'resetsAt'], ['resetProvenance']) || typeof w.id !== 'string' || !WINDOW_ID.test(w.id) ||
         w.usedPercent !== null && (typeof w.usedPercent !== 'number' || !Number.isFinite(w.usedPercent) || w.usedPercent < 0 || w.usedPercent > 100) ||
         w.resetsAt !== null && (typeof w.resetsAt !== 'string' || !Number.isFinite(Date.parse(w.resetsAt)) ||
-          new Date(w.resetsAt).toISOString() !== w.resetsAt)) return null;
+          new Date(w.resetsAt).toISOString() !== w.resetsAt) ||
+        w.resetProvenance !== undefined && (!validResetProvenance(w.resetProvenance) || w.resetProvenance.at !== w.resetsAt ||
+          w.resetProvenance.source !== 'grok-native-billing')) return null;
     }
     return v as unknown as GrokProbeProcessOutput;
   } catch { return null; }

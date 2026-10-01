@@ -21,11 +21,13 @@
  * and note that timings taken at different concurrencies are not comparable.
  */
 
-import { mkdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
+import { getHeapStatistics } from 'node:v8';
 import { pathToFileURL } from 'node:url';
-import { captureConfiguration } from './configuration.js';
+import { captureConfiguration, projectBenchmarkText } from './configuration.js';
+import { scrubSecrets } from '../util/scrub.js';
 import {
   DEFAULT_ANTHROPIC_PROXY_PORT,
   DEFAULT_LLAMA_HOST,
@@ -38,7 +40,7 @@ import { HELD_OUT_TASKS, taskSetDigest } from './tasks-heldout.js';
 import { compareReportsCli } from './compare.js';
 import type { TaskOutcome, TaskSpec, TrialResult } from './types.js';
 
-interface Args {
+export interface Args {
   trials: number;
   concurrency: number;
   baseUrl: string;
@@ -93,35 +95,58 @@ export function parseArgs(argv: readonly string[]): Args {
     cacheState: 'uncontrolled',
     cacheProtocol: '',
   };
+  const seen = new Set<string>();
+  const number = (value: string | undefined, flag: string): number => {
+    if (!value || !/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) throw new EvalUsageError(`invalid ${flag}: expected a positive safe integer`);
+    return Number(value);
+  };
+  const string = (value: string | undefined, flag: string): string => {
+    if (!value || value.startsWith('-') || value.length > 8192 || value.includes('\0')) throw new EvalUsageError(`invalid ${flag}: expected a value`);
+    return value;
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     const value = argv[i + 1];
+    const key = flag === '--trace' || flag === '--no-trace' ? 'tracing' : flag!;
+    if (seen.has(key)) throw new EvalUsageError('duplicate benchmark option');
+    seen.add(key);
     switch (flag) {
-      case '--trials': args.trials = Number(value); i += 1; break;
-      case '--concurrency': args.concurrency = Number(value); i += 1; break;
-      case '--base-url': args.baseUrl = String(value); i += 1; break;
-      case '--upstream': args.upstream = String(value); i += 1; break;
-      case '--model': args.model = String(value); i += 1; break;
-      case '--agent': args.agentCli = String(value); i += 1; break;
-      case '--timeout-ms': args.timeoutMs = Number(value); i += 1; break;
-      case '--task': args.taskFilter = String(value); i += 1; break;
-      case '--out': args.out = String(value); i += 1; break;
+      case '--trials': args.trials = number(value, flag); i += 1; break;
+      case '--concurrency': args.concurrency = number(value, flag); i += 1; break;
+      case '--base-url': args.baseUrl = string(value, flag); i += 1; break;
+      case '--upstream': args.upstream = string(value, flag); i += 1; break;
+      case '--model': args.model = string(value, flag); i += 1; break;
+      case '--agent': args.agentCli = string(value, flag); i += 1; break;
+      case '--timeout-ms': args.timeoutMs = number(value, flag); i += 1; break;
+      case '--task': args.taskFilter = string(value, flag); i += 1; break;
+      case '--out': args.out = string(value, flag); i += 1; break;
       case '--no-trace': args.trace = false; break;
       case '--trace': args.trace = true; break;
-      case '--set': args.set = value === 'heldout' ? 'heldout' : 'core'; i += 1; break;
+      case '--set':
+        if (value !== 'core' && value !== 'heldout') throw new EvalUsageError('invalid --set: expected core or heldout');
+        args.set = value; i += 1; break;
       case '--experiments': args.experiments = true; break;
       case '--fleet-busy': args.fleetBusy = true; break;
       case '--cache-state':
-        if (value !== 'cold' && value !== 'warm' && value !== 'uncontrolled') throw new Error('invalid --cache-state');
+        if (value !== 'cold' && value !== 'warm' && value !== 'uncontrolled') throw new EvalUsageError('invalid --cache-state');
         args.cacheState = value; i += 1; break;
       case '--cache-protocol':
-        if (!value || value.startsWith('--') || value.length > 8192) throw new Error('invalid --cache-protocol');
-        args.cacheProtocol = value; i += 1; break;
-      default: break;
+        args.cacheProtocol = string(value, flag); i += 1; break;
+      default: throw new EvalUsageError('unknown benchmark option');
+    }
+  }
+  if (args.fleetBusy && !args.experiments) throw new EvalUsageError('--fleet-busy requires --experiments');
+  for (const url of [args.baseUrl, args.upstream]) {
+    let parsed: URL;
+    try { parsed = new URL(url); } catch { throw new EvalUsageError('invalid runtime URL'); }
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw new EvalUsageError('runtime URLs must use HTTP(S) without credentials, query or fragment');
     }
   }
   return args;
 }
+
+export class EvalUsageError extends Error {}
 
 /** Run `jobs` with at most `limit` in flight, preserving result order. */
 export async function pool<T>(
@@ -152,102 +177,169 @@ export function selectTasks(args: Pick<Args, 'set' | 'taskFilter'>): readonly Ta
  * Drain the experiment queue. Imported lazily: learn/experiments.ts imports
  * this module (for `parseArgs`), and a static import back would be a cycle.
  */
-async function runExperimentQueue(args: Args): Promise<void> {
+async function runExperimentQueue(args: Args, out: (text: string) => void, err: (text: string) => void): Promise<number> {
   const { localEvalExecutor, runNextExperiment } = await import('../learn/experiments.js');
   const { renderExperimentResult } = await import('./report.js');
   const executor = await localEvalExecutor({
     baseUrl: args.baseUrl, model: args.model, agentCli: args.agentCli, timeoutMs: args.timeoutMs, trace: args.trace,
   });
+  let exitCode = 0;
   for (;;) {
     const result = await runNextExperiment({ executor, fleetQueueDepth: () => (args.fleetBusy ? 1 : 0) });
     if (result.ran === null) {
-      console.error(`[local-eval] experiments: ${result.reason}`);
-      return;
+      err(result.reason === 'no experiment is queued'
+        ? '[local-eval] experiments: no experiment is queued'
+        : '[local-eval] experiments: execution is held; inspect the private experiment record');
+      return result.reason === 'no experiment is queued' ? exitCode : 1;
     }
-    console.log(renderExperimentResult(result.ran));
-    console.log('');
+    out(result.ran.status === 'failed' || result.ran.status === 'cancelled'
+      ? `[local-eval] experiment ${projectBenchmarkText(result.ran.id)} ${result.ran.status}; inspect the private experiment record`
+      : scrubSecrets(renderExperimentResult(result.ran)));
+    out('');
+    if (result.ran.status === 'failed' || result.ran.status === 'cancelled') exitCode = 1;
   }
 }
 
-async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
+export interface LocalEvalDeps {
+  captureConfiguration: typeof captureConfiguration;
+  runTrial: typeof runTrial;
+  createArtifactRoot(): Promise<string>;
+  writeReport(path: string, data: string, options: { encoding: 'utf8'; mode: number }): Promise<void>;
+  runExperiments(args: Args, out: (text: string) => void, err: (text: string) => void): Promise<number>;
+  out(text: string): void;
+  err(text: string): void;
+}
+
+async function privateArtifactRoot(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'ashlr-local-eval-'));
+  await chmod(root, 0o700);
+  return root;
+}
+
+async function privateReport(path: string, data: string, options: { encoding: 'utf8'; mode: number }): Promise<void> {
+  await writeFile(path, data, options);
+  // writeFile's mode applies only on creation; a selected existing report must
+  // not retain broader permissions after receiving benchmark metadata.
+  await chmod(path, 0o600);
+}
+
+/** Resource estimate only: not a model-capacity measurement or a guarantee of launch memory. */
+function checkWorkerAllocation(workerCount: number, resultCount: number): void {
+  const heap = getHeapStatistics();
+  const estimatedBookkeepingBytes = workerCount * 128 + resultCount * 256;
+  if (workerCount > 0xffff_ffff || resultCount > 0xffff_ffff || !Number.isSafeInteger(estimatedBookkeepingBytes)
+    || estimatedBookkeepingBytes > Math.max(0, heap.heap_size_limit - heap.used_heap_size)) {
+    throw new Error('requested worker bookkeeping exceeds array or estimated available heap capacity');
+  }
+}
+
+/** Lazy requested-trial inventory: retain results only for trials actually completed. */
+async function indexedTrials(tasks: readonly TaskSpec[], args: Args, execute: (task: TaskSpec, trial: number) => Promise<TrialResult>): Promise<TrialResult[]> {
+  const total = tasks.length * args.trials;
+  let next = 0;
+  let failed = false;
+  const results: { index: number; result: TrialResult }[] = [];
+  // Allocate bookkeeping before starting any trial, so allocation failure cannot orphan workers.
+  const workers = new Array<Promise<void>>(Math.min(args.concurrency, total));
+  const work = async (): Promise<void> => {
+    while (!failed && next < total) {
+      const index = next++;
+      try {
+        const result = await execute(tasks[Math.floor(index / args.trials)]!, index % args.trials + 1);
+        results.push({ index, result });
+      } catch {
+        failed = true;
+      }
+    }
+  };
+  for (let worker = 0; worker < workers.length; worker += 1) workers[worker] = work();
+  await Promise.allSettled(workers);
+  if (failed) throw new Error('a benchmark trial could not be recorded');
+  return results.sort((a, b) => a.index - b.index).map((entry) => entry.result);
+}
+
+/** Shared by the installed CLI and legacy source entry; only an explicit caller runs trials. */
+export async function runLocalEval(argv: readonly string[], overrides: Partial<LocalEvalDeps> = {}): Promise<number> {
+  const deps: LocalEvalDeps = { captureConfiguration, runTrial, createArtifactRoot: privateArtifactRoot,
+    writeReport: privateReport, runExperiments: runExperimentQueue, out: console.log, err: console.error, ...overrides };
   // Before configuration capture, queue imports, or any agent/runtime interaction.
   if (argv.some((arg) => arg.startsWith('--compare'))) {
     const result = compareReportsCli(argv);
-    console.log(result.output);
-    process.exitCode = result.exitCode;
-    return;
+    deps.out(result.output);
+    return result.exitCode;
   }
-  const args = parseArgs(argv);
+  let args: Args;
+  try { args = parseArgs(argv); }
+  catch (error) { deps.err(error instanceof EvalUsageError ? error.message : 'invalid benchmark options'); return 2; }
   if (args.experiments) {
-    await runExperimentQueue(args);
-    return;
+    try { return await deps.runExperiments(args, deps.out, deps.err); }
+    catch { deps.err('[local-eval] experiment execution failed; no successful result was inferred'); return 1; }
   }
   const tasks = selectTasks(args);
   if (tasks.length === 0) {
-    console.error(`no task matched ${args.taskFilter}`);
-    process.exitCode = 2;
-    return;
+    deps.err('no benchmark task matched the selected task');
+    return 2;
   }
+  if (!Number.isSafeInteger(tasks.length * args.trials)) { deps.err('requested task/trial cardinality is not a safe integer'); return 2; }
+  try { checkWorkerAllocation(Math.min(args.concurrency, tasks.length * args.trials), tasks.length * args.trials); }
+  catch { deps.err('[local-eval] requested worker bookkeeping exceeds array or estimated available heap capacity; no runtime was probed'); return 1; }
 
-  const configuration = await captureConfiguration({
-    baseUrl: args.baseUrl,
-    upstreamOrigin: args.upstream,
-    agentCli: args.agentCli,
-    tracing: args.trace,
-  });
+  try {
+    const configuration = await deps.captureConfiguration({
+      baseUrl: args.baseUrl,
+      upstreamOrigin: args.upstream,
+      agentCli: args.agentCli,
+      tracing: args.trace,
+    });
 
-  const root = join(tmpdir(), `ashlr-local-eval-${Date.now()}`);
-  await mkdir(root, { recursive: true });
-  console.error(`[local-eval] ${tasks.length} task(s) x ${args.trials} trial(s), `
-    + `concurrency ${args.concurrency}, artifacts in ${root}`);
+    const root = await deps.createArtifactRoot();
+    deps.err(`[local-eval] ${tasks.length} task(s) x ${args.trials} trial(s), `
+      + `concurrency ${args.concurrency}, artifacts in ${root}`);
 
-  const startedAt = Date.now();
-  const jobs: (() => Promise<TrialResult>)[] = [];
-  for (const task of tasks) {
-    for (let trial = 1; trial <= args.trials; trial += 1) {
-      jobs.push(async () => {
-        const result = await runTrial({
-          task,
-          trial,
-          trialDir: join(root, `${task.id}-${trial}`),
-          baseUrl: args.baseUrl,
-          model: args.model,
-          agentCli: args.agentCli,
-          timeoutMs: args.timeoutMs,
-          trace: args.trace,
-        });
-        console.error(`[local-eval] ${task.id}#${trial} ${result.mode} `
-          + `(${(result.wallMs / 1000).toFixed(0)}s)`
-          + (result.timeoutDiagnosis ? ` — ${result.timeoutDiagnosis.kind}` : ''));
-        return result;
+    const startedAt = Date.now();
+    const all = await indexedTrials(tasks, args, async (task, trial) => {
+      const result = await deps.runTrial({
+        task,
+        trial,
+        trialDir: join(root, `${task.id}-${trial}`),
+        baseUrl: args.baseUrl,
+        model: args.model,
+        agentCli: args.agentCli,
+        timeoutMs: args.timeoutMs,
+        trace: args.trace,
       });
-    }
+      deps.err(`[local-eval] ${task.id}#${trial} ${result.mode} `
+        + `(${(result.wallMs / 1000).toFixed(0)}s)`
+        + (result.timeoutDiagnosis ? ` — ${result.timeoutDiagnosis.kind}` : ''));
+      return result;
+    });
+    const finishedAt = Date.now();
+
+    const outcomes: TaskOutcome[] = tasks.map((task) =>
+      summariseTask(task, all.filter((r) => r.taskId === task.id)));
+
+    const report = buildReport({
+      configuration, outcomes,
+      comparisonEvidence: { version: 1, taskDigest: taskSetDigest(tasks), cacheState: args.cacheState,
+        cacheProtocol: projectBenchmarkText(args.cacheProtocol), agentModel: projectBenchmarkText(args.model), timeoutMs: args.timeoutMs,
+        appendSystemPrompt: '', effort: 'default' },
+      trialsPerTask: args.trials,
+      concurrency: args.concurrency,
+      startedAt, finishedAt,
+    });
+
+    const target = args.out ?? join(root, 'report.json');
+    await deps.writeReport(target, JSON.stringify(report, null, 2), { encoding: 'utf8', mode: 0o600 });
+    deps.out(scrubSecrets(renderReport(report)));
+    deps.err(`\n[local-eval] report written to ${target}`);
+    return report.totalTrials > 0 && report.totalPasses === report.totalTrials ? 0 : 1;
+  } catch {
+    deps.err('[local-eval] benchmark execution or artifact writing failed; no successful result was inferred');
+    return 1;
   }
-
-  const all = await pool(jobs, args.concurrency);
-  const finishedAt = Date.now();
-
-  const outcomes: TaskOutcome[] = tasks.map((task) =>
-    summariseTask(task, all.filter((r) => r.taskId === task.id)));
-
-  const report = buildReport({
-    configuration, outcomes,
-    comparisonEvidence: { version: 1, taskDigest: taskSetDigest(tasks), cacheState: args.cacheState,
-      cacheProtocol: args.cacheProtocol, agentModel: args.model, timeoutMs: args.timeoutMs,
-      appendSystemPrompt: '', effort: 'default' },
-    trialsPerTask: args.trials,
-    concurrency: args.concurrency,
-    startedAt, finishedAt,
-  });
-
-  const target = args.out ?? join(root, 'report.json');
-  await writeFile(target, JSON.stringify(report, null, 2), 'utf8');
-  console.log(renderReport(report));
-  console.error(`\n[local-eval] report written to ${target}`);
 }
 
 // Only run when invoked directly, so the module stays importable by tests.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  void main();
+if (process.argv[1] && ['main.ts', 'main.js'].includes(basename(process.argv[1])) && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  void runLocalEval(process.argv.slice(2)).then((code) => { process.exitCode = code; });
 }

@@ -1,0 +1,9 @@
+.panel { width: 100%; min-width: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: var(--space-3); }
+.note { margin: 0; color: var(--text-tertiary); font-size: var(--text-xs-size); line-height: var(--text-xs-line); }
+.timeline { list-style: none; margin: var(--space-3) 0; padding: 0 0 0 var(--space-3); border-left: 2px solid var(--border-subtle); }
+.timeline li { display: block; position: relative; padding: 0 0 var(--space-3) var(--space-2); }
+.timeline li::before { content: ''; position: absolute; width: 7px; height: 7px; background: var(--accent-500); border-radius: 50%; left: calc(-1 * var(--space-3) - 4px); top: 5px; }
+.timeline li[data-result="failed"]::before, .timeline li[data-result="red"]::before, .timeline li[data-result="reverted"]::before { background: var(--status-danger-solid); }
+.heading { display: flex; flex-wrap: wrap; gap: var(--space-2); color: var(--text-secondary); font-size: var(--text-xs-size); }
+.timeline a { color: var(--accent-500); font-size: var(--text-xs-size); overflow-wrap: anywhere; }
+.timeline a:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; }

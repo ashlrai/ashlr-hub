@@ -177,6 +177,7 @@ const CommandPalette = lazy(() => importPalette().then((m) => ({ default: m.Comm
 const NeedsYouDrawer = lazy(() => importDrawer().then((m) => ({ default: m.NeedsYouDrawer })));
 const ShortcutsOverlay = lazy(() => importShortcuts().then((m) => ({ default: m.ShortcutsOverlay })));
 const GearTray = lazy(() => importGearTray().then((m) => ({ default: m.GearTray })));
+const ReviewMenu = lazy(() => import('./shell/ReviewMenu.js'));
 const OnboardingGate = lazy(() => importOnboarding().then((m) => ({ default: m.OnboardingGate })));
 const ResourcesChrome = lazy(() => importResources().then((m) => ({ default: m.ResourcesChrome })));
 const ResourcesRailButton = lazy(() => importResources().then((m) => ({ default: m.ResourcesRailButton })));
@@ -304,6 +305,8 @@ export function VerseApp() {
   const platform = useMemo(() => detectKeyPlatform(), []);
   const gearRef = useRef<HTMLButtonElement>(null);
   const [trayOpen, setTrayOpen] = useState(false);
+  const reviewRef = useRef<HTMLButtonElement>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
   const [voiceHud] = useState(dictationPossible);
   const data = activity.data;
   const rail = useRailStatusModule();
@@ -311,6 +314,8 @@ export function VerseApp() {
   // Focus mode (⇧⌘F) is the chat's: the rail steps aside only on the Chat surface.
   const focus = useFocusMode() && ui.section === 'chat';
   const [computerUse] = useState(shellSupportsComputerUse);
+  useEffect(() => { setReviewOpen(false); }, [ui.section, ui.overlay]);
+  useEffect(() => { if (trayOpen) setReviewOpen(false); }, [trayOpen]);
 
   useEffect(() => prefetchAfterFirstPaint(), []);
   // The gear tray is fetched right after mount (not on idle) and then stays
@@ -565,7 +570,8 @@ export function VerseApp() {
         one is visible.
       */}
       <main className={styles.section} data-section={ui.section} id="main-content" tabIndex={-1}>
-        <nav className={styles.workModes} aria-label="How you work">
+        <div className={styles.workModes}>
+        <nav className={styles.workModeChoices} aria-label="How you work">
           {WORK_MODES.map((mode) => (
             <button key={mode.id} type="button" className={styles.workMode}
               aria-pressed={workModeForSection(ui.section) === mode.id} title={mode.description}
@@ -574,6 +580,13 @@ export function VerseApp() {
             </button>
           ))}
         </nav>
+        <button ref={reviewRef} type="button" className={`${styles.workMode} ${styles.reviewButton}`} aria-haspopup="menu" aria-expanded={reviewOpen}
+          onClick={() => { setTrayOpen(false); setReviewOpen((open) => !open); }}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setTrayOpen(false); setReviewOpen(true); }
+            if (event.key === 'Escape') { event.preventDefault(); setReviewOpen(false); }
+          }}>Review</button>
+        </div>
         {ui.mounted.map((id) => (
           <SurfaceHost key={id} id={id} active={id === ui.section} />
         ))}
@@ -582,6 +595,9 @@ export function VerseApp() {
       {/* Lazy chunks (see "Off the first-paint path"); each mounts only while it can draw. */}
       <Suspense fallback={null}>
         {gearReady || trayOpen ? <GearTray open={trayOpen} anchorRef={gearRef} onClose={() => setTrayOpen(false)} compact={compact} /> : null}
+      </Suspense>
+      <Suspense fallback={null}>
+        {reviewOpen && reviewRef.current ? <ReviewMenu anchor={reviewRef.current} onClose={() => setReviewOpen(false)} /> : null}
       </Suspense>
       <Suspense fallback={null}>
         <ResourcesChrome compact={compact} />

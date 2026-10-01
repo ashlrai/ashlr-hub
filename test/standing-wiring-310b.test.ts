@@ -142,6 +142,7 @@ function deps(): Partial<LiveHooksDeps> {
     applyOverlay: (cfg) => cfg,
     clampBudget: (p) => p,
     loadBudget: () => defaultBudgetPolicy(),
+    liveLeaderConfig: (cfg) => cfg,
     capacitySnapshot: () => ({ v: 1, publishedAt: NOW_ISO, seats: [grokSeat()] }),
     probeLocalRuntime: async () => ({ reachable: true, slots: 4, contextPerSlot: 65_536, detail: 'llama-server up with 4 slot(s)' }),
     presence: async () => ({ present: false, reason: 'Nobody is at the keyboard.', evidenceAt: null }),

@@ -36,7 +36,7 @@
  * "Accept edits" runs as grok's `dontAsk`, because grok's own `acceptEdits`
  * cancels the turn at the first shell command (measured; see adapters/grok.ts).
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { compareCliVersions } from './model-windows.js';
@@ -466,45 +466,92 @@ export function grokEffortArgs(session: Pick<VerseSession, 'controls'>): string[
 // ---------------------------------------------------------------------------
 
 export const CONTROL_DEFAULTS_FILE = 'control-defaults.json';
-const MAX_DEFAULT_SEATS = 64;
+/** Storage allocation bound, not a limit on the number of connected seats. */
+export const CONTROL_DEFAULTS_MAX_BYTES = 1024 * 1024;
+const DEFAULT_SEAT_ID = /^[\w.:@-]{1,200}$/;
+const DEFAULTS_UNAVAILABLE = 'Control defaults unavailable, unsafe, oversized, or malformed; no changes saved';
 
-function cleanControls(value: unknown): VerseSessionControls {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {};
-  const record = value as Record<string, unknown>;
-  const out: VerseSessionControls = {};
-  if (isVerseEffort(record['effort'])) out.effort = record['effort'];
-  // Bypass is never a default, even in a hand-edited file.
-  if (isVersePermissionMode(record['permissionMode']) && record['permissionMode'] !== 'bypass') {
-    out.permissionMode = record['permissionMode'];
+function cleanControls(value: unknown, forWrite: boolean): VerseSessionControls {
+  if (!isVerseSessionControls(value)) throw new Error(DEFAULTS_UNAVAILABLE);
+  const controls = value as VerseSessionControls;
+  // Hand-edited bypass never becomes inherited authority. A partial update
+  // must refuse it rather than silently erase the operator's stored bytes.
+  if (controls.permissionMode === 'bypass') {
+    if (forWrite) throw new Error(DEFAULTS_UNAVAILABLE);
+    return controls.effort === undefined ? {} : { effort: controls.effort };
   }
-  return out;
+  return { ...controls };
+}
+
+/** Whole-file private descriptor read; no row sampling or permissive decoding. */
+function loadControlDefaults(root: string, forWrite: boolean): VerseSessionControlDefaults {
+  let fd: number | undefined;
+  try {
+    let rootStat;
+    try { rootStat = lstatSync(root); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { global: {}, seats: {} };
+      throw error;
+    }
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink() ||
+        (process.platform !== 'win32' && (rootStat.mode & 0o777) !== 0o700) ||
+        (typeof process.getuid === 'function' && rootStat.uid !== process.getuid())) throw new Error();
+    // Use the physical root, including macOS's normal /var -> /private/var alias.
+    const physicalRoot = realpathSync(root);
+    const path = join(physicalRoot, CONTROL_DEFAULTS_FILE);
+    let named;
+    try { named = lstatSync(path); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { global: {}, seats: {} };
+      throw error;
+    }
+    if (!named.isFile() || named.isSymbolicLink() || named.nlink !== 1 ||
+        named.size > CONTROL_DEFAULTS_MAX_BYTES || named.size < 2 ||
+        (process.platform !== 'win32' && (named.mode & 0o777) !== 0o600) ||
+        (typeof process.getuid === 'function' && named.uid !== process.getuid())) throw new Error();
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.dev !== named.dev || opened.ino !== named.ino || opened.size !== named.size) throw new Error();
+    const bytes = Buffer.alloc(named.size + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const read = readSync(fd, bytes, length, bytes.length - length, null);
+      if (read === 0) break;
+      length += read;
+    }
+    const after = fstatSync(fd); const installed = lstatSync(path); const rootAfter = lstatSync(root);
+    if (length !== named.size || after.size !== named.size || after.mtimeMs !== named.mtimeMs || after.ctimeMs !== named.ctimeMs ||
+        installed.dev !== named.dev || installed.ino !== named.ino || rootAfter.dev !== rootStat.dev ||
+        rootAfter.ino !== rootStat.ino || realpathSync(root) !== physicalRoot) throw new Error();
+    const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length)));
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
+    const record = parsed as Record<string, unknown>;
+    if (Object.keys(record).some(key => key !== 'global' && key !== 'seats') ||
+        record.seats === null || typeof record.seats !== 'object' || Array.isArray(record.seats)) throw new Error();
+    const entries = Object.entries(record.seats as Record<string, unknown>).map(([seatId, value]) => {
+      if (!DEFAULT_SEAT_ID.test(seatId)) throw new Error();
+      return [seatId, cleanControls(value, forWrite)] as const;
+    });
+    // Object.fromEntries retains prototype-like IDs as own data properties.
+    const seats = Object.fromEntries(entries.filter(([, controls]) => forWrite || Object.keys(controls).length > 0));
+    return { global: cleanControls(record.global, forWrite), seats };
+  } catch { throw new Error(DEFAULTS_UNAVAILABLE); }
+  finally { if (fd !== undefined) closeSync(fd); }
 }
 
 export function readControlDefaults(root: string): VerseSessionControlDefaults {
-  const path = join(root, CONTROL_DEFAULTS_FILE);
-  if (!existsSync(path)) return { global: {}, seats: {} };
-  try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { global: {}, seats: {} };
-    const record = parsed as Record<string, unknown>;
-    const seats: Record<string, VerseSessionControls> = {};
-    const rawSeats = record['seats'];
-    if (rawSeats && typeof rawSeats === 'object' && !Array.isArray(rawSeats)) {
-      for (const [seatId, value] of Object.entries(rawSeats as Record<string, unknown>).slice(0, MAX_DEFAULT_SEATS)) {
-        const clean = cleanControls(value);
-        if (Object.keys(clean).length > 0) seats[seatId] = clean;
-      }
-    }
-    return { global: cleanControls(record['global']), seats };
-  } catch {
-    // A corrupt defaults file means "no defaults", never a failed chat.
+  try { return loadControlDefaults(root, false); }
+  catch {
+    // Unavailable defaults never prevent opening a chat. Writes use the strict
+    // loader instead, so unreadable state cannot be replaced with empty state.
     return { global: {}, seats: {} };
   }
 }
 
 export function writeControlDefaults(root: string, update: VerseSessionControlDefaultsUpdate): VerseSessionControlDefaults {
-  const current = readControlDefaults(root);
-  const target: VerseSessionControls = update.seatId ? { ...(current.seats[update.seatId] ?? {}) } : { ...current.global };
+  const checked = parseDefaultsUpdate(update as Record<string, unknown>);
+  if (!checked.ok) throw new Error(checked.error);
+  const current = loadControlDefaults(root, true);
+  const seatControls = update.seatId && Object.hasOwn(current.seats, update.seatId) ? current.seats[update.seatId] : {};
+  const target: VerseSessionControls = update.seatId ? { ...seatControls } : { ...current.global };
   if (update.effort !== undefined) {
     if (update.effort === null) delete target.effort;
     else target.effort = update.effort;
@@ -516,11 +563,13 @@ export function writeControlDefaults(root: string, update: VerseSessionControlDe
   const next: VerseSessionControlDefaults = { global: current.global, seats: { ...current.seats } };
   if (update.seatId) {
     if (Object.keys(target).length === 0) delete next.seats[update.seatId];
-    else next.seats[update.seatId] = target;
+    else Object.defineProperty(next.seats, update.seatId, { value: target, enumerable: true, writable: true, configurable: true });
   } else {
     next.global = target;
   }
-  writePrivateFileAtomically(root, join(root, CONTROL_DEFAULTS_FILE), `${JSON.stringify(next, null, 2)}\n`);
+  const content = `${JSON.stringify(next, null, 2)}\n`;
+  if (Buffer.byteLength(content) > CONTROL_DEFAULTS_MAX_BYTES) throw new Error(DEFAULTS_UNAVAILABLE);
+  writePrivateFileAtomically(root, join(root, CONTROL_DEFAULTS_FILE), content);
   return next;
 }
 

@@ -48,11 +48,17 @@
  *    connections.json row.
  */
 
+import { canonical } from '../universe/artifacts.js';
+import { normalizeCodexCredits } from '../resources/codex-credits.js';
 import { dirname, join } from 'node:path';
 import { existsSync, openSync, readSync, closeSync, readdirSync, readFileSync, statSync } from 'node:fs';
 
+import { validResetProvenance } from '../routing/reset-pressure.js';
 import { inspectPrivateDirectory } from '../universe/artifacts.js';
 import { readResourceJson } from '../resources/pool-runtime.js';
+import { createResourceReadingCache, normalizeResourceLastKnownUsage, type ResourceReadingCache } from '../resources/reading-cache.js';
+import type { ResourceLastKnownUsage } from '../resources/reading-cache-types.js';
+import type { ResourceAccountIdentityWitness, ResourceAccountIdentitySnapshot } from '../resources/account-identity-witness.js';
 import {
   validateResourcePool,
   type ResourceObservation,
@@ -195,17 +201,18 @@ const VERSE_PROVIDER_NAME: Readonly<Record<VerseAccountProvider, string>> = {
 };
 
 export interface VerseAccountWindow {
+  /** Advisory provider period, outside canonical resource observations. */
+  resetProvenance?: import('../routing/scheduling-types.js').ResetProvenance;
   id: string;
   /** Provider-reported percent, or null for NO SIGNAL (which is not zero). */
   usedPercent: number | null;
   /**
-   * Machine-readable reset instant. For CLAUDE this is STRUCTURALLY ALWAYS
-   * NULL — the provider gives a human string only, in `nativeReport`. Never
-   * synthesize a countdown from it.
+   * Machine-readable provider reset. Legacy Claude prose remains null; only
+   * qualified current structured native usage may supply a deadline.
    */
   resetsAt: string | null;
   /** Claude's verbatim human reset text ("resets Sep 25 at 7pm (America/New_York)"). */
-  nativeReport: { source: 'claude-usage'; resetDescription: string | null } | null;
+  nativeReport: { source: 'claude-usage' | 'claude-usage-structured'; resetDescription: string | null } | null;
   /**
    * TRUE only when the provider explicitly FLAGGED the limit (Codex's
    * classified `rateLimitReachedType`) and that flag survived to this module.
@@ -229,6 +236,7 @@ export interface VerseCodexCredits {
   unlimited: boolean;
   /** Provider-reported decimal string, kept verbatim — never rounded to a float. */
   balance: string | null;
+  spendControlReached?: boolean | null;
 }
 
 export interface VerseAccountRecord {
@@ -263,6 +271,8 @@ export interface VerseAccountRecord {
    * no window, percentage or usability is derived from it.
    */
   lastReadingAt?: string;
+  /** Original last-known usage, explicitly separate from current windows/binding/credits. */
+  lastKnownUsage?: ResourceLastKnownUsage;
 }
 
 export type VerseAccountsCollectorMode = 'owned' | 'read-only' | 'unconfigured';
@@ -305,7 +315,7 @@ export interface VerseAccountObservation {
     id: string;
     usedPercent: number | null;
     resetsAt: string | null;
-    nativeReport?: { source: 'claude-usage'; resetDescription: string | null };
+    nativeReport?: { source: 'claude-usage' | 'claude-usage-structured'; resetDescription: string | null };
     /** Only ever the literal `true`, and only when the provider flagged it (see `windowLimitReached`). */
     limitReached?: true;
   }>;
@@ -406,21 +416,25 @@ function isProvider(value: unknown): value is VerseAccountProvider {
  * `command` key is deliberately not read here: this result is serialized.
  */
 export function readVerseAccountIdentities(accountsRoot: string): VerseAccountIdentity[] {
-  const parsed = readJsonLenient(join(accountsRoot, 'connections.json'), MAX_BASELINE_BYTES);
+  let parsed: unknown;
+  try {
+    // Same bounded private descriptor read as the actual collector. JSON
+    // arrays are dense, and the byte budget bounds the full roster allocation.
+    parsed = readResourceJson(join(accountsRoot, 'connections.json'), MAX_BASELINE_BYTES);
+  } catch { return []; }
   if (!isRecord(parsed) || !Array.isArray(parsed['accounts'])) return [];
   const out: VerseAccountIdentity[] = [];
   const seen = new Set<string>();
   for (const entry of parsed['accounts']) {
-    if (!isRecord(entry)) continue;
+    if (!isRecord(entry)) return [];
     const id = entry['id'];
     const provider = entry['provider'];
-    if (typeof id !== 'string' || id.length === 0 || id.length > 64 || seen.has(id)) continue;
-    if (!isProvider(provider)) continue;
+    if (typeof id !== 'string' || id.length === 0 || id.length > 64 || seen.has(id)) return [];
+    if (!isProvider(provider)) return [];
     const rawLabel = entry['label'];
     const label = typeof rawLabel === 'string' && rawLabel.length > 0 && rawLabel.length <= 80 ? rawLabel : id;
     seen.add(id);
     out.push({ id, label, provider });
-    if (out.length >= 8) break;
   }
   return out;
 }
@@ -772,15 +786,28 @@ function windowLimitReached(window: { limitReached?: boolean }): boolean {
 function mapWindow(
   provider: VerseAccountProvider,
   window: { id: string; usedPercent: number | null; resetsAt: string | null; limitReached?: boolean;
-    nativeReport?: { source: 'claude-usage'; resetDescription: string | null } },
+    nativeReport?: { source: 'claude-usage' | 'claude-usage-structured'; resetDescription: string | null };
+    resetProvenance?: import('../routing/scheduling-types.js').ResetProvenance },
+  qualifiedPlan?: string | null,
 ): VerseAccountWindow {
   const limitReached = windowLimitReached(window);
+  const reset = window.resetProvenance;
+  const nativePlan = provider === 'claude' && window.nativeReport?.source === 'claude-usage-structured' &&
+    (qualifiedPlan === 'pro' || qualifiedPlan === 'max');
+  const qualifiedReset = nativePlan && reset && validResetProvenance(reset) && reset.source === 'claude-native-usage-report' && reset.at === window.resetsAt &&
+    (window.id === 'seven_day' && reset.kind === 'weekly-deadline' && reset.plan === qualifiedPlan || window.id === 'five_hour' && reset.kind === 'rolling-release');
+  // Model-scoped meters retain their real deadline but never claim the
+  // all-model weekly policy. Unsupported scope names remain unknown upstream.
+  const modelReset = nativePlan && ['seven_day_fable', 'seven_day_opus', 'seven_day_sonnet'].includes(window.id) &&
+    typeof window.resetsAt === 'string' && Number.isFinite(Date.parse(window.resetsAt)) && new Date(window.resetsAt).toISOString() === window.resetsAt;
+  const structuredClaude = qualifiedReset || modelReset;
   return {
     id: window.id,
     usedPercent: window.usedPercent,
-    // Claude never supplies a machine-readable reset; only the human string.
-    resetsAt: provider === 'claude' ? null : window.resetsAt,
+    // Cached/prose reports never acquire a machine countdown.
+    resetsAt: provider === 'claude' && !structuredClaude ? null : window.resetsAt,
     nativeReport: window.nativeReport ?? null,
+    ...((provider === 'grok' || qualifiedReset) && reset ? { resetProvenance: reset } : {}),
     limitReached,
     measured: !limitReached,
   };
@@ -835,9 +862,11 @@ function providerNotes(
 ): string[] {
   const notes: string[] = [];
   if (provider === 'claude') {
-    notes.push('Claude reports no machine-readable reset time; the window text is the provider\'s own wording.');
+    if (record.windows.some((w) => w.nativeReport?.source === 'claude-usage-structured' && w.resetsAt !== null)) {
+      notes.push('Current structured native Claude usage supplies a qualified reset deadline; no period start or allowance carryover is inferred.');
+    } else notes.push('Claude reports no machine-readable reset time; the window text is the provider\'s own wording.');
     if (record.health === 'unknown') {
-      notes.push('Claude health is always "unknown" by construction — that is not a fault.');
+      notes.push('Current native quota freshness is unavailable; legacy usage text is display only.');
     }
     if (record.reason === VERSE_CLAUDE_VERSION_REASON) {
       notes.push(
@@ -864,9 +893,9 @@ function providerNotes(
       );
     }
     if (record.credits?.hasCredits) {
-      notes.push('Codex credits are independent of the window: a fully used window with a balance is not blocked.');
+      notes.push('Native Codex credits are independent of the subscription window. Credit availability does not authorize autonomous spending.');
     } else if (record.credits === null) {
-      notes.push('No Codex credit signal for this account (its pinned session history is empty) — unknown, not zero.');
+      notes.push('Current native Codex credit availability is not reported — unknown, not zero.');
     }
   }
   if (provider === 'grok') {
@@ -893,16 +922,23 @@ function providerNotes(
  */
 export function deriveVerseAccountRecord(
   connection: ResourceAccountConnection,
-  extra: { credits?: VerseCodexCredits | null } = {},
+  extra: { credits?: VerseCodexCredits | null; nowMs?: number } = {},
 ): VerseAccountRecord {
   const provider = connection.provider;
-  const windows = connection.windows.map((w) => mapWindow(provider, w));
-  const credits = provider === 'codex' ? extra.credits ?? null : null;
+  const windows = connection.windows.map((w) => mapWindow(provider, w, connection.authentication === 'signed-in' ? connection.planType : null));
+  const creditNow = extra.nowMs ?? Date.now();
+  const observedMs = connection.observedAt === null ? NaN : Date.parse(connection.observedAt);
+  const expiresMs = connection.expiresAt === null ? NaN : Date.parse(connection.expiresAt);
+  const credits = provider === 'codex' && connection.state === 'observed' && connection.authentication === 'signed-in' &&
+    Number.isFinite(observedMs) && observedMs <= creditNow && Number.isFinite(expiresMs) && expiresMs > creditNow &&
+    expiresMs - observedMs === 60_000
+    ? normalizeCodexCredits(connection.codexCredits) : null;
   // See VERSE_GROK_SIGNED_OUT_REASONS: the monitor structurally cannot set
   // this state for Grok, so it is derived here from the verbatim probe reason
   // — and only from the reason that actually means "not authenticated".
   const signedOut = grokSignedOut(connection);
   const state = signedOut ? 'signed-out' : connection.state;
+  const historical = state !== 'signed-out' && connection.observedAt === null ? normalizeResourceLastKnownUsage(connection.lastKnownUsage) : null;
   const base = {
     state,
     health: connection.health,
@@ -927,6 +963,7 @@ export function deriveVerseAccountRecord(
     credits,
     binding: bindingWindow(windows),
     notes: providerNotes(provider, base),
+    ...(historical ? { lastKnownUsage: historical } : {}),
   };
 }
 
@@ -1023,6 +1060,13 @@ export interface VerseAccountCollector {
   credits(accountId: string): VerseCodexCredits | null;
   /** When this server last held a verified reading for `accountId` (history, never evidence). */
   lastReadingAt?(accountId: string): string | null;
+  lastKnownUsage?(accountId: string): ResourceLastKnownUsage | null;
+  /** Internal host-only witness; never copied into a browser account record. */
+  identityWitness?(accountId: string): ResourceAccountIdentityWitness | null;
+  /** Cheap host-only capture. Recheck profile/file epochs in the read worker, not HTTP. */
+  identityWitnessesSnapshot?(): ResourceAccountIdentitySnapshot[];
+  invalidatedIdentityAccountIdsSnapshot?(): string[];
+  identitySnapshotRevision?(): number;
   close(): Promise<void>;
 }
 
@@ -1099,6 +1143,13 @@ export async function startVerseAccountCollector(
   const idleCheckMs = Math.max(10, options.idleCheckMs ?? IDLE_CHECK_MS);
   /** Latest verified observation instant per account this server saw (display history only). */
   const lastReadings = new Map<string, string>();
+  let readingCache: ResourceReadingCache | null = null;
+  if (config?.connections) {
+    try { readingCache = createResourceReadingCache({ root: config.ledgerRoot, accountsRoot,
+      accounts: config.connections.accounts, assertOwnership: () => { if (!lease) throw new Error(); lease.assertOwnership(); },
+      ownershipIdentity: () => { if (!lease) throw new Error(); return canonical(lease.identity()); } }); }
+    catch { /* Optional history cannot change native collection readiness. */ }
+  }
   /**
    * The lease was handed back because nobody was looking (see
    * `releaseIdleLease`). Distinct from a refused acquisition: the status says
@@ -1183,6 +1234,7 @@ export async function startVerseAccountCollector(
           ...(options.signal ? { signal: options.signal } : {}),
           assertOwnership: lease.assertOwnership,
           coordinator,
+          ...(readingCache ? { readingCache } : {}),
         });
       }
       state = 'running';
@@ -1563,7 +1615,9 @@ export async function startVerseAccountCollector(
     if (recoveryHold !== null || cleanupUncertain) return true;
     try {
       if (refresher && refresher.snapshot().state === 'closed') return true;
-      if (monitor && monitor.snapshot().accounts.some((row) => row.reason === 'connection-monitor-stopped')) {
+      // Real monitors expose a pure lifecycle bit. Keep old injected mocks compatible.
+      if (monitor && (monitor.isStopped ? monitor.isStopped() :
+        monitor.snapshot().accounts.some((row) => row.reason === 'connection-monitor-stopped'))) {
         return true;
       }
     } catch {
@@ -1671,6 +1725,22 @@ export async function startVerseAccountCollector(
       return found;
     },
     lastReadingAt: (accountId: string) => lastReadings.get(accountId) ?? null,
+    lastKnownUsage: (accountId: string) => {
+      try {
+        // Current roster/profile must still match; old config cannot name a replacement account.
+        const current = validateResourceConnectionConfig(readResourceJson(join(accountsRoot, 'connections.json'))).accounts.find(a => a.id === accountId);
+        return current && readingCache ? readingCache.lastKnown(current) : null;
+      } catch { return null; }
+    },
+    identityWitness: (accountId: string) => {
+      try {
+        const current = validateResourceConnectionConfig(readResourceJson(join(accountsRoot, 'connections.json'))).accounts.find(a => a.id === accountId);
+        return current && readingCache ? readingCache.witness(current) : null;
+      } catch { return null; }
+    },
+    identityWitnessesSnapshot: () => readingCache?.identityWitnessesSnapshot() ?? [],
+    invalidatedIdentityAccountIdsSnapshot: () => readingCache?.invalidatedIdentityAccountIdsSnapshot() ?? [],
+    identitySnapshotRevision: () => readingCache?.identitySnapshotRevision() ?? 0,
     close: async () => {
       if (closed) return;
       closing = true;
@@ -1825,16 +1895,19 @@ export function buildVerseAccountsSnapshot(options: {
 
   const accounts: VerseAccountRecord[] = [];
   const withHistory = (record: VerseAccountRecord): VerseAccountRecord => {
-    if (record.observedAt !== null) return record;
-    const last = collector?.lastReadingAt?.(record.id) ?? null;
-    return last === null ? record : { ...record, lastReadingAt: last };
+    if (record.observedAt !== null || record.state === 'signed-out') return record;
+    const historical = collector?.lastKnownUsage ? collector.lastKnownUsage(record.id) : record.lastKnownUsage ?? null;
+    const last = historical?.observedAt ?? (collector?.identityWitness ? null : collector?.lastReadingAt?.(record.id) ?? null);
+    const fresh = { ...record }; delete fresh.lastKnownUsage;
+    return { ...fresh, ...(last === null ? {} : { lastReadingAt: last }), ...(historical ? { lastKnownUsage: historical } : {}) };
   };
   for (const id of ids) {
     const connection = liveById.get(id);
     const identity = identityById.get(id);
     if (connection) {
-      const credits = connection.provider === 'codex' ? collector?.credits(id) ?? null : null;
-      const bridged = identity ? codexGapReading(identity, connection, evidence, credits) : null;
+      // Legacy session credits are historical, not a current account-checked balance.
+      const credits = connection.provider === 'codex' ? connection.codexCredits ?? null : null;
+      const bridged = identity ? codexGapReading(identity, connection, evidence, null) : null;
       accounts.push(withHistory(bridged ?? deriveVerseAccountRecord(connection, { credits })));
       continue;
     }

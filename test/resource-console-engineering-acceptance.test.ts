@@ -45,7 +45,10 @@ function http(handle: ResourceConsoleServerHandle, path: string, body?: unknown,
       res.on('error', reject); res.on('end', () => resolve({ status: res.statusCode!, text: Buffer.concat(chunks).toString('utf8'),
         noStore: res.headers['cache-control'] === 'no-store' }));
     });
-    req.on('error', reject); req.setTimeout(10_000, () => req.destroy(new Error('Fixture HTTP timeout'))); req.end(bytes);
+    req.on('error', reject);
+    // Include only the fixture route and method; bodies and authorization stay private.
+    req.setTimeout(10_000, () => req.destroy(new Error(`Fixture HTTP timeout: ${bytes === undefined ? 'GET' : 'POST'} ${path}`)));
+    req.end(bytes);
   });
 }
 const engineeringPath = '/api/resources/engineering';

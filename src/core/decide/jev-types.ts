@@ -8,6 +8,7 @@
 import type { DecisionKind, JevStatus } from './types.js';
 
 export const VERSE_JEV_PATH = '/api/verse/jev';
+export const VERSE_JEV_CONFIG_PATH = `${VERSE_JEV_PATH}/config`;
 
 export interface JevKindInfo {
   readonly kind: DecisionKind;
@@ -21,4 +22,6 @@ export interface JevResponse {
   readonly generatedAt: string;
   readonly status: JevStatus;
   readonly kinds: readonly JevKindInfo[];
+  /** Capability-gated operator preference; null means no call-count preference. */
+  readonly config?: { readonly dailyCallBudget: number | null };
 }

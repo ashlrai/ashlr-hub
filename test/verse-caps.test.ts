@@ -97,6 +97,8 @@ describe('readVerseCaps', () => {
       'concurrency',
       'dailyBudgetUsd',
       'foundryLimits',
+      'goalFocusActiveThreshold',
+      'goalFocusMode',
       'intervalMs',
       'maxConcurrent',
       'mode',
@@ -119,6 +121,8 @@ describe('readVerseCaps', () => {
       },
       foundry: {
         subscriptionMaxPercent: 75,
+        goalFocusMode: true,
+        goalFocusActiveThreshold: 4,
         limits: { codex: { window: '1d', max: 400 }, claude: { window: '5h', max: 50 } },
       },
     } as Partial<AshlrConfig>));
@@ -653,5 +657,59 @@ describe('checkVerseScopePath', () => {
     const result = checkVerseScopePath('~/tilde-repo', { requireDirectory: true });
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.path).toBe(fs.realpathSync.native(repo));
+  });
+});
+
+
+describe('operator goal preference controls', () => {
+  it('projects legacy defaults and explicit no-limit choices without changing existing caps', () => {
+    expect(readVerseCaps(baseConfig()).goalPreferences).toMatchObject({ maxOpenGoals: 4, maxNewGoalsPerDay: 3, sourceState: 'ready' });
+    const cfg = baseConfig({ foundry: { goalPreferences: { maxOpenGoals: null } } });
+    expect(readVerseCaps(cfg).goalPreferences).toMatchObject({ maxOpenGoals: null, defaulted: ['maxNewGoalsPerDay', 'maxGoalProposalsPerMemo', 'maxGoalsPerConductorCycle'] });
+    expect(readVerseCaps(cfg)).toMatchObject({ goalFocusMode: true, goalFocusActiveThreshold: 4 });
+  });
+  it('partial updates preserve unrelated settings and untouched preferences; focus expansion is separately explicit', () => {
+    const cfg = baseConfig({ foundry: { subscriptionMaxPercent: 91, goalPreferences: { maxNewGoalsPerDay: 11 } } });
+    const parsed = parseVerseCapsUpdate({ goalPreferences: { maxOpenGoals: null }, goalFocusMode: false });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error(parsed.error);
+    const result = applyVerseCapsUpdate(cfg, parsed.update);
+    expect(result.cfg.foundry).toMatchObject({ subscriptionMaxPercent: 91, goalPreferences: { maxOpenGoals: null, maxNewGoalsPerDay: 11 }, goalFocusMode: false });
+    expect(result.applied).toEqual(['goalFocusMode', 'goalPreferences']);
+    expect(cfg.foundry?.goalFocusMode).toBeUndefined();
+    expect(readVerseCaps(result.cfg).goalPreferences?.defaulted).toEqual(['maxGoalProposalsPerMemo', 'maxGoalsPerConductorCycle']);
+  });
+  it.each([{}, { maxOpenGoals: 0 }, { maxOpenGoals: 1.5 }, { maxOpenGoals: Number.MAX_SAFE_INTEGER + 1 }, { maxOpenGoals: '5' }, { unknown: null }])('rejects malformed goal update %j', (goalPreferences) => {
+    expect(parseVerseCapsUpdate({ goalPreferences }).ok).toBe(false);
+  });
+  it('refuses partial merge over corrupt preferences rather than silently dropping unknown settings', () => {
+    const cfg = baseConfig({ foundry: { goalPreferences: { wrong: null } } } as unknown as Partial<AshlrConfig>);
+    expect(readVerseCaps(cfg).goalPreferences?.sourceState).toBe('invalid');
+    expect(() => applyVerseCapsUpdate(cfg, { goalPreferences: { maxOpenGoals: null } })).toThrow(/invalid/);
+    expect(parseVerseCapsUpdate({ goalFocusMode: 'false' }).ok).toBe(false);
+  });
+});
+
+
+describe('operator Leader preference controls', () => {
+  it('projects legacy3/8/4 and disabled-checkin3 total, with explicit null distinguished', () => {
+    expect(readVerseCaps(baseConfig()).leaderPreferences).toMatchObject({ maxFullRunsPerDay: 3, maxTotalRunsPerDay: 8, maxGrokLanes: 4, sourceState: 'ready' });
+    expect(readVerseCaps(baseConfig({ foundry: { leader: { checkinHours: 0 } } })).leaderPreferences).toMatchObject({ maxTotalRunsPerDay: 3 });
+    const cfg = baseConfig({ foundry: { leaderPreferences: { maxGrokLanes: null } } });
+    expect(readVerseCaps(cfg).leaderPreferences).toMatchObject({ maxGrokLanes: null, defaulted: ['maxFullRunsPerDay', 'maxTotalRunsPerDay'] });
+  });
+  it('partial updates preserve current untouched fields, focus and unrelated operator configuration', () => {
+    const cfg = baseConfig({ foundry: { goalFocusMode: true, subscriptionMaxPercent: 90,
+      leaderPreferences: { maxFullRunsPerDay: 15, maxTotalRunsPerDay: 20, maxGrokLanes: 17 } } });
+    const parsed = parseVerseCapsUpdate({ leaderPreferences: { maxTotalRunsPerDay: null } });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error(parsed.error);
+    const next = applyVerseCapsUpdate(cfg, parsed.update);
+    expect(next.cfg.foundry).toMatchObject({ goalFocusMode: true, subscriptionMaxPercent: 90,
+      leaderPreferences: { maxFullRunsPerDay: 15, maxTotalRunsPerDay: null, maxGrokLanes: 17 } });
+    expect(next.applied).toContain('leaderPreferences');
+  });
+  it.each([{}, { unknown: null }, { maxGrokLanes: 0 }, { maxFullRunsPerDay: '5' }, { maxTotalRunsPerDay: Number.MAX_SAFE_INTEGER + 1 }])('strictly refuses malformed Leader update %j', (leaderPreferences) => {
+    expect(parseVerseCapsUpdate({ leaderPreferences }).ok).toBe(false);
   });
 });

@@ -6,7 +6,7 @@
  * HOME, with the capacity source injected — no Ollama, no account collector,
  * no seat is ever prompted.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as os from 'node:os';
@@ -22,6 +22,10 @@ import {
   startBudgetCapacityPublisher,
   type CapacityReading,
 } from '../src/core/routing/budget-api.js';
+import { readRecordedForecasts, writeRecordedScheduling } from '../src/core/routing/scheduling-cache.js';
+import { forecastWork } from '../src/core/routing/work-estimates.js';
+import { buildSchedulingView } from '../src/core/routing/scheduling.js';
+import { defaultBudgetPolicy } from '../src/core/routing/policy.js';
 import { capacitySnapshotPath, readCapacitySnapshot, readShadowDecisions } from '../src/core/routing/budget-store.js';
 import type { SeatCapacity } from '../src/core/routing/headroom.js';
 import type { BudgetView } from '../src/core/routing/policy.js';
@@ -137,6 +141,17 @@ describe('GET /api/verse/budget', () => {
     expect(byId['grok']).toMatchObject({ eligibleForAutonomy: true, autonomyHeadroomPercent: 88 });
     expect(byId['local:qwen3.8:27b-ctx64k']).toMatchObject({ eligibleForAutonomy: true, autonomyHeadroomPercent: 100 });
     expect(body.readingMaxAgeMs).toBe(15 * 60_000);
+  });
+
+  it('preserves qualified weekly deadline and plan in private capacity and cheap GET projection', async () => {
+    const deadline=new Date(Date.now()+3600000).toISOString();
+    const weekly={kind:'weekly-deadline' as const,at:deadline,description:null,source:'claude-native-usage-report',plan:'max' as const};
+    reading.seats[0]!.windows[1]={id:'seven_day',usedPercent:20,resetsAt:deadline,resetDescription:null,limitReached:false,resetProvenance:weekly};
+    const {body}=await get<{scheduling:{accounts:Array<{seatId:string;reset:unknown}>}}>('/api/verse/budget');
+    expect(readCapacitySnapshot()!.seats[0]!.windows[1]!.resetProvenance).toEqual(weekly);
+    expect(body.scheduling.accounts.find(a=>a.seatId==='claude')!.reset).toEqual(weekly);
+    expect(sourceCalls).toBe(1);
+    expect(weekly).not.toHaveProperty('startsAt');
   });
 
   it('refreshes the capacity snapshot for collector-less readers (0600)', async () => {
@@ -278,8 +293,11 @@ describe('shadow decisions', () => {
 describe('capacity publisher', () => {
   it('publishes immediately and stops cleanly', async () => {
     const stop = startBudgetCapacityPublisher({} as AshlrConfig, { intervalMs: 1 });
-    await new Promise((r) => setTimeout(r, 20));
-    stop();
+    try {
+      // Wait for the async private-file publication, not an assumed 20ms disk
+      // schedule. The publisher's >=30s cadence and stopped-call count remain exact.
+      await vi.waitFor(()=>expect(readCapacitySnapshot()?.seats).toHaveLength(4));
+    }finally{stop();}
     expect(sourceCalls).toBe(1); // the interval is clamped to ≥ 30 s; only the immediate tick ran
     expect(readCapacitySnapshot()!.seats).toHaveLength(4);
   });
@@ -404,5 +422,34 @@ describe('read failures are forwarded, not swallowed', () => {
     const { status, body } = await get<{ code: string; error: string }>('/api/verse/budget/decisions');
     expect(status).toBe(503);
     expect(body.error).toBe('The routing decision log is a symlink.');
+  });
+});
+
+
+describe('recorded scheduling advisory cache — real private files and cheap HTTP projection',()=>{
+  it('reuses a recorded compatible task without history/probe reads and reapplies current reserves',async()=>{
+    const forecast=forecastWork('real-selected-task',{engine:'grok-cli',model:'reported-model',seatId:null,taskKind:'todo'},[
+      {id:'reported-run',engine:'grok-cli',model:'reported-model',seatId:null,taskKind:'todo',completed:true,durationMs:30000,tokens:900}]);
+    await writeRecordedScheduling({...buildSchedulingView(reading.seats,defaultBudgetPolicy(),Date.now(),{grok:forecast}),
+      advisory:{observedAt:new Date().toISOString(),state:'skipped',reason:'signed-metered-unavailable'}});
+    const response=await get<BudgetView>('/api/verse/budget');
+    expect(sourceCalls).toBe(1);expect(response.status).toBe(200);
+    expect(response.body.scheduling?.advisory).toMatchObject({state:'skipped',reason:'signed-metered-unavailable'});
+    expect(response.body.scheduling?.accounts.find(v=>v.seatId==='grok')?.forecast).toMatchObject({taskId:'real-selected-task',durationMs:{samples:1,p75:30000},cohort:{seatId:null}});
+    await post({seatId:'grok',policy:{enabled:false,reservePercent:0}});
+    const held=await get<BudgetView>('/api/verse/budget');
+    expect(held.body.scheduling?.accounts.find(v=>v.seatId==='grok')?.admission).toBe('held');
+  });
+  it('malformed, oversized, symlink and unsafe-permission cache never becomes an estimate or breaks budget GET',async()=>{
+    const dir=path.join(home,'.ashlr','routing');fs.mkdirSync(dir,{recursive:true,mode:0o700});
+    const cache=path.join(dir,'scheduling.json');
+    for(const content of ['invalid json',JSON.stringify({accounts:[{seatId:'grok',forecast:{durationMs:{p75:0}}}]}),'x'.repeat(1024*1024+1)]){
+      fs.writeFileSync(cache,content,{mode:0o600});expect(await readRecordedForecasts()).toEqual({});
+      const response=await get<BudgetView>('/api/verse/budget');expect(response.status).toBe(200);
+      expect(response.body.scheduling?.accounts.every(v=>v.forecast===null)).toBe(true);
+    }
+    fs.unlinkSync(cache);const elsewhere=path.join(home,'elsewhere.json');fs.writeFileSync(elsewhere,'{}');fs.symlinkSync(elsewhere,cache);
+    expect(await readRecordedForecasts()).toEqual({});fs.unlinkSync(cache);
+    if(process.platform!=='win32'){fs.writeFileSync(cache,'{}',{mode:0o644});expect(await readRecordedForecasts()).toEqual({});}
   });
 });

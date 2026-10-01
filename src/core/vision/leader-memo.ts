@@ -24,6 +24,7 @@
  * (0700), newest MEMO_KEEP kept. Paths re-resolve homedir() per call so a
  * relocated HOME (tests) is always honoured.
  */
+import { GOAL_MEMO_PROTOCOL, goalPreferencesReady, resolveGoalPreferences, type ResolvedGoalPreferences } from '../goals/preferences.js';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -82,8 +83,8 @@ export function isLeaderMetric(value: unknown): value is LeaderMetric {
 
 /** Structural caps on one memo (blast radius of a malformed or hostile output). */
 export const LEADER_MEMO_CAPS = Object.freeze({
-  maxRawChars: 256 * 1024,
-  maxActions: 24,
+  maxRawChars: GOAL_MEMO_PROTOCOL.maxMemoRawChars,
+  maxActions: GOAL_MEMO_PROTOCOL.maxMemoActions,
   maxKillList: 10,
   maxPriorityChanges: 24,
   maxStandards: 5,
@@ -496,8 +497,8 @@ export function parseActionParams<K extends LeaderActionKind>(kind: K, raw: unkn
     case 'lanes.grok': {
       if (!hasExactKeys(raw, ['slots'])) return fail('expected {slots}');
       const slots = raw['slots'];
-      if (!Number.isInteger(slots) || (slots as number) < LEADER_LIMITS.grokLanes.min || (slots as number) > LEADER_LIMITS.grokLanes.max) {
-        return fail(`slots must be ${LEADER_LIMITS.grokLanes.min}–${LEADER_LIMITS.grokLanes.max}`);
+      if (!Number.isSafeInteger(slots) || (slots as number) < LEADER_LIMITS.grokLanes.min) {
+        return fail('slots must be a positive safe integer');
       }
       return done({ slots: slots as number });
     }
@@ -615,6 +616,7 @@ export type LeaderMemoParseResult = { ok: true; draft: LeaderMemoDraft } | { ok:
 
 export interface LeaderMemoParseOptions {
   nowMs: number;
+  goalPreferences?: ResolvedGoalPreferences;
 }
 
 function parseExpectedDelta(value: unknown, nowMs: number, notes: string[]): LeaderExpectedDelta | null {
@@ -736,6 +738,8 @@ export function parseLeaderMemoOutput(raw: string, opts: LeaderMemoParseOptions)
   const obj = extractMemoJson(raw);
   if (!obj) return { ok: false, reason: 'the model reply was not one JSON object' };
   const notes: string[] = [];
+  const preferences = opts.goalPreferences ?? resolveGoalPreferences();
+  const goalLimit = preferences.maxGoalProposalsPerMemo;
 
   const bottleneckRaw = obj['bottleneck'];
   const moveRaw = obj['move'];
@@ -783,8 +787,8 @@ export function parseLeaderMemoOutput(raw: string, opts: LeaderMemoParseOptions)
       notes.push('a malformed goal proposal was dropped');
       continue;
     }
-    if (goals.length >= LEADER_LIMITS.maxGoalsPerMemo) {
-      notes.push(`only ${LEADER_LIMITS.maxGoalsPerMemo} goals are allowed per memo; extras were dropped`);
+    if (!goalPreferencesReady(preferences) || goalLimit !== null && goals.length >= goalLimit) {
+      notes.push(!goalPreferencesReady(preferences) ? 'goal preferences are invalid or unavailable; goal proposals were dropped' : `only ${goalLimit} goals are allowed per memo; extras were dropped`);
       break;
     }
     goals.push(goal);
@@ -854,15 +858,22 @@ export function parseLeaderMemoOutput(raw: string, opts: LeaderMemoParseOptions)
   // ---- actions: explicit, then compiled from the sections ----------------
   const actions: AnyLeaderActionDraft[] = [];
   const seen = new Set<string>();
+  let goalCreates = 0;
   const push = (draft: AnyLeaderActionDraft): void => {
     const key = actionKey(draft);
     if (seen.has(key)) return;
+    if (draft.kind === 'goal.create' && (!goalPreferencesReady(preferences) || goalLimit !== null && goalCreates >= goalLimit)) {
+      const note = !goalPreferencesReady(preferences) ? 'goal preferences are invalid or unavailable; goal proposals were dropped' : `only ${goalLimit} goals are allowed per memo; extras were dropped`;
+      if (!notes.includes(note)) notes.push(note);
+      return;
+    }
     if (actions.length >= LEADER_MEMO_CAPS.maxActions) {
       if (!notes.includes('action limit reached; extras were dropped')) notes.push('action limit reached; extras were dropped');
       return;
     }
     seen.add(key);
     actions.push(draft);
+    if (draft.kind === 'goal.create') goalCreates += 1;
   };
 
   let droppedActions = 0;

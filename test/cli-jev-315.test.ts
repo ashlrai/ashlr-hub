@@ -40,7 +40,7 @@ describe('ashlr jev', () => {
     const { d, out } = deps();
     expect(await runJevCli(['status'], d)).toBe(0);
     const text = out.join('\n');
-    expect(text).toContain('Jev: ON');
+    expect(text).toContain('Jev: CONFIGURED');
     expect(text).toContain('4 decisions · 3/1500 paid calls · 25% fell back · avg confidence 0.91');
     expect(text).toMatch(/operator-intent\s+4\s+3\s+25%\s+0\.91/);
     expect(text).toContain('below-threshold×1');
