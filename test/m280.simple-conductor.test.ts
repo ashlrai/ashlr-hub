@@ -63,6 +63,7 @@ vi.mock('../src/core/run/sandboxed-engine.js', () => ({
 // M300: engine-registry (resolveEngineSpec) — default: cli-agent kind so
 // all existing m280 tasks still go through runEngineSandboxed.
 vi.mock('../src/core/run/engine-registry.js', () => ({
+  GROK_CLI_ENGINE_ID: 'grok-cli',
   resolveEngineSpec: vi.fn(() => ({ id: 'claude', kind: 'cli-agent', tier: 'frontier' })),
   resolveEngineRegistry: vi.fn(() => ({})),
 }));

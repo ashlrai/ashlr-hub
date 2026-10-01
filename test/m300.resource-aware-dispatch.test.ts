@@ -67,6 +67,7 @@ vi.mock('../src/core/fabric/resource-monitor.js', () => ({
 // resolveEngineSpec
 const mockResolveEngineSpec = vi.fn();
 vi.mock('../src/core/run/engine-registry.js', () => ({
+  GROK_CLI_ENGINE_ID: 'grok-cli',
   resolveEngineSpec: (...args: unknown[]) => mockResolveEngineSpec(...args),
   resolveEngineRegistry: vi.fn(() => ({})),
 }));
