@@ -1,8 +1,13 @@
 /**
  * ResourcesBar — the always-on resource bar (3.11.1): batteries show what is
- * LEFT of each account's binding window, usable accounts lead, spent ones read
+ * LEFT of each account's binding window, roster order stays fixed, spent ones read
  * as empty red batteries, and the bar's on/off choice persists.
  */
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { render } from '@testing-library/react';
+import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildCapacityRows, type CapacityRow, type CapacityWindowRow } from '../usage/capacity-strip-model.js';
 import { capacity, nativeSeat, seatWindow } from '../seat-fixtures.test-support.js';
@@ -40,13 +45,36 @@ describe('barRows', () => {
     expect(grok!.detail[0]).toBe('Weekly window: 28% used · resets Sat 8:43 AM');
   });
 
-  it('shows a limit-reached account as an empty battery and sorts it after usable ones', () => {
+  it('shows a limit-reached account as empty without moving it after usable ones', () => {
     const spent = row({ seatId: 'codex-a', label: 'Personal Codex', engine: 'codex', cls: 'blocked', word: 'blocked',
       windows: [win({ id: 'primary', label: 'primary window', limitReached: true, resetText: 'Fri 2:25 PM' })] });
     const rows = barRows([spent, row({})], { healthRead: true, now: NOW });
-    expect(rows.map((r) => r.key)).toEqual(['grok-a', 'codex-a']);
-    expect(rows[1]!.leftPercent).toBe(0);
-    expect(rows[1]!.level).toBe('out');
+    expect(rows.map((r) => r.key)).toEqual(['codex-a', 'grok-a']);
+    expect(rows[0]!.leftPercent).toBe(0);
+    expect(rows[0]!.level).toBe('out');
+  });
+
+  it('does not turn signed-out or unavailable accounts into zero usage', () => {
+    const signedOut = row({ signedOut: true, windows: [] });
+    const unavailable = row({ seatId: 'claude', cls: 'blocked', windows: [], summary: 'Probe failed.' });
+    const projected = barRows([signedOut, unavailable], { healthRead: true, now: NOW });
+    expect(projected.map((r) => r.leftPercent)).toEqual([null, null]);
+    expect(projected.map((r) => r.value)).toEqual(['signed out', 'unavailable']);
+    expect(projected[1]!.detail).toContain('Usage is not reported by this resource.');
+  });
+
+  it('keeps order as unknown accounts finish checking', () => {
+    const local = row({ seatId: 'local', kind: 'local', engine: 'local', cls: 'unread', windows: [] });
+    const initial = [local, row({ cls: 'unread', windows: [] })];
+    const completed = [{ ...local, cls: 'ready' as const }, row({})];
+    expect(barRows(initial, { healthRead: false, now: NOW }).map((r) => r.key))
+      .toEqual(barRows(completed, { healthRead: true, now: NOW }).map((r) => r.key));
+  });
+
+  it('shows reading only for real initial collector work, never a connected provider without quota', () => {
+    const noQuota = row({ windows: [], cls: 'unread' });
+    expect(barRows([noQuota], { healthRead: false, now: NOW })[0]!.value).toBe('no usage');
+    expect(barRows([noQuota], { healthRead: false, now: NOW, pendingSeatIds: ['grok-a'] })[0]!.value).toBe('reading…');
   });
 
   it('gives local models a full idle battery and no percentage', () => {
@@ -73,10 +101,10 @@ describe('Grok right after its weekly reset', () => {
     expect(grok!.detail[0]).toMatch(/weekly window: 0% used · resets \S/);
   });
 
-  it('still says "—" only when the provider truly gave no percent', () => {
+  it('names missing usage when the provider truly gave no percent', () => {
     const [grok] = barRows(buildCapacityRows([grokSeat(null)], { now: NOW }), { healthRead: false, now: NOW });
     expect(grok!.leftPercent).toBeNull();
-    expect(grok!.value).toBe('—');
+    expect(grok!.value).toBe('no usage');
   });
 });
 
@@ -90,5 +118,17 @@ describe('the bar switch', () => {
     setResourcesBar(false);
     reloadResourcesUiForTest();
     expect(getResourcesUi().bar).toBe(false);
+  });
+});
+
+
+describe('Devin provider identity', () => {
+  it('bundles the exact verified vendor geometry with a theme-aware fill and accessible name', () => {
+    const asset = readFileSync(resolve(process.cwd(), 'site/assets/devin-mark.svg'), 'utf8');
+    expect(createHash('sha256').update(asset).digest('hex')).toBe('fe0753d2e3823bc1eb8a37943234fac63733b8c9e8abff0ca0402a6c7ddcd682');
+    const { getByRole, container } = render(<ProviderLogo engine="devin" title="Devin" />);
+    expect(getByRole('img', { name: 'Devin' })).toHaveAttribute('viewBox', '0 0 425 425');
+    expect(container.querySelector('path')!.getAttribute('d')).toBe(asset.match(/<path d="([^"]+)"/)![1]);
+    expect(container.querySelector('path')).toHaveAttribute('fill', 'currentColor');
   });
 });

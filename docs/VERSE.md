@@ -14,6 +14,24 @@ destinations and keyboard shortcuts remain available. The saved workspace is
 restored on launch. Selecting either workspace does not start or stop agents,
 change permission mode, sign a grant or activate the resident daemon.
 
+**Review** opens the relevant existing surfaces: changes and sources for the
+current chat, usage, agent review, Needs you, fleet decisions and the module map.
+It preserves the current chat and draft, and does not launch work.
+
+Resource rows keep their order as readings arrive. Cached readings show first
+when available; one shared startup refresh follows accounts still being checked.
+Expand a resource to inspect reported windows, resets, reserves and freshness.
+Unknown, loading and unavailable readings have distinct states. A displayed
+estimate is not a vendor-reported balance.
+
+Advanced capacity settings offer **Goal preferences** and **Leader preferences**.
+Use a positive safe integer or **No preference limit** for open goals, new goals
+per day, memo proposals, conductor cycles, full/total Leader runs and Grok lanes.
+Missing preferences retain existing defaults. **Prefer finishing current work
+before expanding** is a separate toggle. Saved changes merge only edited fields
+and require a confirmed readback; a failed save preserves your draft.
+See [the complete preference table](AGENT-HARNESS-EVOLUTION.md#operator-goal-and-leader-preferences).
+
 An idle empty chat offers guide starters that append editable text to its
 draft. Nothing is sent until you send it. Draft insertion is scoped to the
 current chat. New-agent creation keeps repository, seat and task visible;
@@ -94,7 +112,7 @@ integration.
 - The Jev decision layer, its call sites and its bounds:
   [`docs/JEV-INTEGRATION.md`](JEV-INTEGRATION.md).
 
-This page is the user guide for Verse 3.18. Sections marked 3.15 describe
+This page is the user guide for Verse 3.19. Sections marked 3.15 describe
 features introduced in that release and retained here.
 
 **At a glance.**
@@ -798,7 +816,8 @@ It reads deterministic digests (fleet history, the ledger, seat headroom, model
 outcomes, reasoning insights, approved lessons and its own hit-rate), never raw
 reasoning, and writes a memo: the bottleneck, one move with an expected result
 and a date, goals, standards, and questions for you. It runs daily and after
-notable events, at most three full runs a day, plus check-ins every 2 hours in
+notable events, with three full runs a day by default and optional unlimited
+Leader preferences, plus check-ins every 2 hours in
 working hours when the evidence changed. Seats fall back Grok → fast local →
 large local, with Claude only for a weekly deep run that fits inside your
 reserve (or by opt-in), and never Codex. Failed runs retry at 15 minutes, 45

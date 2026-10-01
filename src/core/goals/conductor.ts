@@ -18,6 +18,7 @@
  *  - Kill-switch is checked before each goal advance so a running conductor loop
  *    can be stopped between milestones without waiting for a swarm to finish.
  */
+import { resolveGoalPreferences } from './preferences.js';
 
 import type { AshlrConfig, AdvanceOptions } from '../types.js';
 
@@ -105,7 +106,7 @@ export async function runConductor(
   opts: {
     once: boolean;
     dryRun: boolean;
-    maxGoalsPerCycle?: number;
+    maxGoalsPerCycle?: number | null;
   } & Pick<AdvanceOptions, 'budget' | 'allowCloud' | 'allowAnyRepo'>,
 ): Promise<ConductorCycleSummary> {
   const summary = emptyConductorSummary();
@@ -120,7 +121,7 @@ export async function runConductor(
 
   // All dependencies loaded lazily so vi.mock() intercepts them in tests.
   const { killSwitchOn, listEnrolled } = await import('../sandbox/policy.js');
-  const { listGoals } = await import('./store.js');
+  const { listGoalsDetailed } = await import('./store.js');
   const { nextActionableMilestone, advanceGoalCycle, progressOf } = await import('./advance.js');
 
   // ── Kill-switch check ──────────────────────────────────────────────────────
@@ -130,10 +131,23 @@ export async function runConductor(
   }
 
   // ── Load active goals (most-recently-updated first, bounded) ───────────────
-  const maxGoals = Math.max(1, Math.min(opts.maxGoalsPerCycle ?? 3, 10));
-  const activeGoals = listGoals({ status: 'active' })
-    .sort((a, b) => (b.updatedAt > a.updatedAt ? 1 : b.updatedAt < a.updatedAt ? -1 : 0))
-    .slice(0, maxGoals);
+  const preferences = resolveGoalPreferences(cfg);
+  const maxGoals = opts.maxGoalsPerCycle === undefined ? preferences.maxGoalsPerConductorCycle : opts.maxGoalsPerCycle;
+  if (preferences.sourceState !== 'ready' || maxGoals !== null && !(Number.isSafeInteger(maxGoals) && maxGoals > 0)) {
+    summary.activationRefused = true;
+    summary.activationRefusalReason = 'Goal conductor preferences are invalid or unavailable.';
+    return summary;
+  }
+  const read = listGoalsDetailed({ status: 'active' });
+  const knownActive = read.goals.sort((a, b) => (b.updatedAt > a.updatedAt ? 1 : b.updatedAt < a.updatedAt ? -1 : 0));
+  const activeGoals = maxGoals === null ? knownActive : knownActive.slice(0, maxGoals);
+  // A partial empty read proves neither that no goals exist nor that backlog
+  // fallback is appropriate. Known valid goals remain usable in a partial read.
+  if (!read.complete && activeGoals.length === 0) {
+    summary.activationRefused = true;
+    summary.activationRefusalReason = 'The active-goal inventory could not be read.';
+    return summary;
+  }
 
   // ── No active goals → backlog daemon fallback ──────────────────────────────
   if (activeGoals.length === 0) {

@@ -27,6 +27,7 @@
 import { createWriteStream, type WriteStream } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { join } from 'node:path';
 import type { StreamRecord, TimeoutDiagnosis, TrialTrace } from './types.js';
 
@@ -107,6 +108,8 @@ class EventCounter {
  */
 export async function startTrace(opts: StartTraceOptions): Promise<TraceHandle> {
   const upstream = new URL(opts.upstream);
+  if (upstream.protocol !== 'http:' && upstream.protocol !== 'https:') throw new Error('trace upstream must use HTTP(S)');
+  const requestUpstream = upstream.protocol === 'https:' ? httpsRequest : httpRequest;
   const stallMs = opts.stallMs ?? DEFAULT_STALL_MS;
   await mkdir(opts.captureDir, { recursive: true });
   const journal = join(opts.captureDir, 'wire.jsonl');
@@ -179,7 +182,7 @@ export async function startTrace(opts: StartTraceOptions): Promise<TraceHandle> 
       if (typeof req.headers.accept === 'string') headers['accept'] = req.headers.accept;
       if (body.length > 0) headers['content-length'] = body.length;
 
-      const forwarded = httpRequest({
+      const forwarded = requestUpstream({
         protocol: upstream.protocol,
         hostname: upstream.hostname,
         port: upstream.port,

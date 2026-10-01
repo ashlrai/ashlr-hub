@@ -12,12 +12,16 @@
  *
  * Hermetic: tmp HOME, fake ledger, real goal + budget stores. No seat is prompted.
  */
+import { resolveGoalPreferences, unavailableGoalPreferences } from '../src/core/goals/preferences.js';
+import { resolveLeaderPreferences, unavailableLeaderPreferences } from '../src/core/vision/leader-preferences.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   applyDueLeaderActions,
+  buildPolicyContext,
+  leaderActionsPath,
   classBApplyAfter,
   classifyLeaderAction,
   codexReadinessFromSnapshot,
@@ -516,7 +520,7 @@ describe('directives and codex readiness readers', () => {
     ensurePrivateDirectory(join(home.home(), '.ashlr'));
     ensurePrivateDirectory(join(home.home(), '.ashlr', 'vision'));
     ensurePrivateDirectory(join(home.home(), '.ashlr', 'vision', 'leader'));
-    writePrivateFileAtomic(leaderDirectivesPath(), JSON.stringify({ v: 1, updatedAt: '2026-09-24T00:00:00.000Z', routerTuning: null, grokLanes: 9, codexEnabled: 'yes' }));
+    writePrivateFileAtomic(leaderDirectivesPath(), JSON.stringify({ v: 1, updatedAt: '2026-09-24T00:00:00.000Z', routerTuning: null, grokLanes: Number.MAX_SAFE_INTEGER + 1, codexEnabled: 'yes' }));
     expect(readLeaderDirectives()).toEqual({ v: 1, updatedAt: '2026-09-24T00:00:00.000Z', routerTuning: null, grokLanes: null, codexEnabled: null });
     writePrivateFileAtomic(leaderDirectivesPath(), JSON.stringify({ v: 1, updatedAt: '2026-09-24T00:00:00.000Z', routerTuning: { lambdaCost: 99 }, grokLanes: 2, codexEnabled: true }));
     expect(readLeaderDirectives()).toBeNull();
@@ -537,4 +541,248 @@ describe('directives and codex readiness readers', () => {
     expect(codexReadinessFromSnapshot([{ engine: 'codex', observedAt: stale, windows: [{ usedPercent: 12, resetsAt: null, limitReached: false }] }], t).ready).toBe(false);
     expect(codexReadinessFromSnapshot([{ engine: 'codex', observedAt: null, windows: [{ usedPercent: 12, resetsAt: null, limitReached: false }] }], t).ready).toBe(false);
   });
+});
+
+
+describe('operator goal preferences preserve authority and observation quality', () => {
+  const create = (objective = 'New bounded goal') => draft('goal.create', { goal: { objective, rationale: '', targetRepo: null, deliverable: null, acceptanceEvidence: [] } });
+  const preferences = (values: Record<string, number | null>) => resolveGoalPreferences({ foundry: { goalPreferences: values } });
+  it('supports higher finite limits, and skips only the matching business comparison under explicit null', () => {
+    expect(classifyLeaderAction(create(), ctx({ openGoalCount: 21, goalCreatesLast24h: 8,
+      goalPreferences: preferences({ maxOpenGoals: 30, maxNewGoalsPerDay: 12 }) })).verdict).toBe('ok');
+    expect(classifyLeaderAction(create(), ctx({ openGoalCount: null, goalCreatesLast24h: null,
+      goalPreferences: preferences({ maxOpenGoals: null, maxNewGoalsPerDay: null }) })).verdict).toBe('ok');
+    for (const limits of [{ maxOpenGoals: 30, maxNewGoalsPerDay: null }, { maxOpenGoals: null, maxNewGoalsPerDay: 12 }]) {
+      expect(classifyLeaderAction(create(), ctx({ openGoalCount: null, goalCreatesLast24h: null,
+        goalPreferences: preferences(limits) })).verdict).toBe('refused');
+    }
+    expect(classifyLeaderAction(create(), ctx({ goalPreferences: unavailableGoalPreferences() })).verdict).toBe('refused');
+  });
+  it('counts scheduled siblings against a finite daily preference beyond legacy3', async () => {
+    const { deps } = makeApplyDeps({ ledger, now: () => NOW });
+    deps.goalPreferences = () => preferences({ maxOpenGoals: null, maxNewGoalsPerDay: 5 });
+    const actions = await enactLeaderActions(deps, MEMO, Array.from({ length: 6 }, (_, i) => create(`Sibling ${i}`)), [], { idFor: (i) => actionIdFor(MEMO, i) });
+    expect(actions.map((a) => a.status)).toEqual(['scheduled', 'scheduled', 'scheduled', 'scheduled', 'scheduled', 'refused']);
+  });
+  it('unknown/pruned history is never synthesized into a quota count; null skips only that metric', async () => {
+    const { deps } = makeApplyDeps({ ledger, now: () => NOW });
+    ensurePrivateDirectory(join(home.home(), '.ashlr', 'vision', 'leader'));
+    for (const raw of [
+      { v: 1, updatedAt: new Date(NOW).toISOString(), actions: [], dismissed: [] },
+      { v: 1, updatedAt: new Date(0).toISOString(), goalCreateHistoryCompleteFrom: 'bad', actions: [], dismissed: [] },
+      { v: 1, updatedAt: new Date(0).toISOString(), goalCreateHistoryCompleteFrom: 0, actions: [null], dismissed: [] },
+    ]) {
+      writePrivateFileAtomic(leaderActionsPath(), JSON.stringify(raw));
+      const context = buildPolicyContext(deps, []);
+      expect(context.goalCreatesLast24h).toBeNull();
+      expect(classifyLeaderAction(create(), context).verdict).toBe('refused');
+      expect(classifyLeaderAction(create(), { ...context, goalPreferences: preferences({ maxNewGoalsPerDay: null }) }).verdict).toBe('ok');
+    }
+  });
+  it('reloads at delayed apply and at the synchronous mutation fence, including daily tightening', async () => {
+    let now = NOW;
+    const { deps } = makeApplyDeps({ ledger, now: () => now });
+    const unlimited = preferences({ maxOpenGoals: null, maxNewGoalsPerDay: null });
+    deps.goalPreferences = () => unlimited;
+    memoFile();
+    const actions = await enactLeaderActions(deps, MEMO, [create('First proposal'), create('Second proposal')], [], { idFor: (i) => actionIdFor(MEMO, i) });
+    expect(actions.map((a) => a.status)).toEqual(['scheduled', 'scheduled']);
+    now += 31 * 60_000;
+    // First classification sees null; the mutation fence sees a newly finite daily quota.
+    let reads = 0;
+    deps.goalPreferences = () => ++reads === 1 ? unlimited : preferences({ maxOpenGoals: null, maxNewGoalsPerDay: 1 });
+    const result = await applyDueLeaderActions(deps);
+    expect(result.map((a) => a.status)).toEqual(['refused', 'applied']);
+    expect(goalsStore.listGoals()).toHaveLength(1);
+  });
+  it('explicit null does not bypass a missing classB grant or veto', async () => {
+    let now = NOW;
+    const { deps } = makeApplyDeps({ ledger, now: () => now });
+    deps.goalPreferences = () => preferences({ maxOpenGoals: null, maxNewGoalsPerDay: null });
+    memoFile();
+    const [action] = await enactLeaderActions(deps, MEMO, [create('Keep veto effective')], [], { idFor: (i) => actionIdFor(MEMO, i) });
+    now += 31 * 60_000;
+    const [applied] = await applyDueLeaderActions(deps);
+    expect(applied?.status).toBe('applied');
+    expect(goalsStore.listGoals()).toHaveLength(1);
+    await vetoLeaderAction(deps, action!.id, 'Stop this goal');
+    expect(goalsStore.listGoals()[0]?.status).toBe('archived');
+    const denied = makeApplyDeps({ ledger, now: () => now, policy: () => makePolicy({ leader: { classes: ['A'], vetoMinutes: 30 } }) });
+    denied.deps.goalPreferences = deps.goalPreferences;
+    const [outside] = await enactLeaderActions(denied.deps, MEMO, [create('No B authority')], [], { idFor: () => actionIdFor(MEMO, 9) });
+    expect(outside?.status).toBe('escalated');
+  });
+});
+
+
+describe('goal daily quota observation window', () => {
+  const proposal = (objective: string) => draft('goal.create', { goal: { objective, rationale: '', targetRepo: null, deliverable: null, acceptanceEvidence: [] } });
+  it('does not discount an old scheduled action absent from the current24h tally', async () => {
+    let now = NOW - 2 * 86_400_000;
+    const { deps } = makeApplyDeps({ ledger, now: () => now });
+    deps.goalPreferences = () => resolveGoalPreferences({ foundry: { goalPreferences: { maxOpenGoals: null, maxNewGoalsPerDay: 1 } } });
+    memoFile();
+    const [old] = await enactLeaderActions(deps, MEMO, [proposal('Old scheduled goal')], [], { idFor: () => actionIdFor(MEMO, 0) });
+    expect(old?.status).toBe('scheduled');
+    now = NOW;
+    const [fresh] = await enactLeaderActions(deps, MEMO, [proposal('Current reservation')], [], { idFor: () => actionIdFor(MEMO, 1) });
+    expect(fresh?.status).toBe('scheduled');
+    const [oldResult] = await applyDueLeaderActions(deps);
+    expect(oldResult?.status).toBe('refused');
+    expect(goalsStore.listGoals()).toHaveLength(0);
+    now += 31 * 60_000;
+    const [freshResult] = await applyDueLeaderActions(deps);
+    expect(freshResult?.status).toBe('applied');
+    expect(buildPolicyContext(deps, []).goalCreatesLast24h).toBe(1);
+  });
+  it('count-trim records missing recent history rather than allowing a finite quota to undercount', async () => {
+    const { deps } = makeApplyDeps({ ledger, now: () => NOW });
+    const action = planLeaderAction(proposal('Retained history'), { id: 'past', memoId: MEMO, createdAtMs: NOW }, ctx());
+    const actions = Array.from({ length: 400 }, (_, i) => ({ action: { ...action, id: `past-${i}`, status: 'applied', appliedAt: new Date(NOW).toISOString() }, restore: [] }));
+    ensurePrivateDirectory(join(home.home(), '.ashlr', 'vision', 'leader'));
+    writePrivateFileAtomic(leaderActionsPath(), JSON.stringify({ v: 1, updatedAt: new Date(NOW).toISOString(), goalCreateHistoryCompleteFrom: 0, actions, dismissed: [] }));
+    await enactLeaderActions(deps, MEMO, [draft('standard.add', { rule: 'Keep measured evidence', appliesTo: '*', evidence: null })], [], { idFor: () => actionIdFor(MEMO, 9) });
+    const context = buildPolicyContext(deps, []);
+    expect(context.goalCreatesLast24h).toBeNull();
+    expect(classifyLeaderAction(proposal('Finite quota'), context).verdict).toBe('refused');
+    expect(classifyLeaderAction(proposal('No quota'), { ...context, goalPreferences: resolveGoalPreferences({ foundry: { goalPreferences: { maxNewGoalsPerDay: null } } }) }).verdict).toBe('ok');
+  });
+});
+
+
+describe('no-limit goal preferences retain mutation refusal boundaries', () => {
+  const proposal = (objective: string) => draft('goal.create', { goal: { objective, rationale: '', targetRepo: null, deliverable: null, acceptanceEvidence: [] } });
+  const unlimited = () => resolveGoalPreferences({ foundry: { goalPreferences: { maxOpenGoals: null, maxNewGoalsPerDay: null } } });
+  it('rechecks class B at the final synchronous fence', async () => {
+    let now = NOW;
+    const { deps } = makeApplyDeps({ ledger, now: () => now });
+    deps.goalPreferences = unlimited;
+    memoFile();
+    await enactLeaderActions(deps, MEMO, [proposal('Fresh authority fence')], [], { idFor: () => actionIdFor(MEMO, 0) });
+    now += 31 * 60_000;
+    let policyReads = 0;
+    deps.standingPolicy = () => ++policyReads === 1 ? makePolicy() : makePolicy({ leader: { classes: ['A'], vetoMinutes: 30 } });
+    expect((await applyDueLeaderActions(deps))[0]?.status).toBe('refused');
+    expect(policyReads).toBeGreaterThanOrEqual(2);
+    expect(goalsStore.listGoals()).toHaveLength(0);
+  });
+  it('ledger refusal and deterministic goal duplication still prevent creation', async () => {
+    let now = NOW;
+    const { deps } = makeApplyDeps({ ledger, now: () => now });
+    deps.goalPreferences = unlimited;
+    ledger.failAppends = true;
+    const [failed] = await enactLeaderActions(deps, MEMO, [proposal('Ledger must accept')], [], { idFor: () => actionIdFor(MEMO, 0) });
+    expect(failed?.status).toBe('refused');
+    expect(goalsStore.listGoals()).toHaveLength(0);
+    ledger.failAppends = false;
+    goalsStore.createGoal('Already exists');
+    memoFile();
+    await enactLeaderActions(deps, MEMO, [proposal('Already exists')], [], { idFor: () => actionIdFor(MEMO, 1) });
+    now += 31 * 60_000;
+    const [duplicate] = await applyDueLeaderActions(deps);
+    expect(duplicate?.status).toBe('refused');
+    expect(duplicate?.statusReason).toMatch(/already exists/);
+    expect(goalsStore.listGoals()).toHaveLength(1);
+  });
+  it('does not infer applied-time history from an old proposal timestamp', () => {
+    const { deps } = makeApplyDeps({ ledger, now: () => NOW });
+    const action = planLeaderAction(proposal('Unknown apply time'), { id: 'past', memoId: MEMO, createdAtMs: NOW - 2 * 86_400_000 }, ctx());
+    ensurePrivateDirectory(join(home.home(), '.ashlr', 'vision', 'leader'));
+    writePrivateFileAtomic(leaderActionsPath(), JSON.stringify({ v: 1, updatedAt: new Date(NOW).toISOString(), goalCreateHistoryCompleteFrom: 0,
+      actions: [{ action: { ...action, status: 'applied', appliedAt: null }, restore: [] }], dismissed: [] }));
+    expect(buildPolicyContext(deps, []).goalCreatesLast24h).toBeNull();
+  });
+});
+
+
+describe('goal-history retention does not invent finite-quota capacity', () => {
+  const create = draft('goal.create', { goal: { objective: 'Observe history', rationale: '', targetRepo: null, deliverable: null, acceptanceEvidence: [] } });
+  it('pruning refused goal proposals does not erase valid creation-count coverage', async () => {
+    const { deps } = makeApplyDeps({ ledger, now: () => NOW });
+    const action = planLeaderAction(create, { id: 'past', memoId: MEMO, createdAtMs: NOW }, ctx());
+    ensurePrivateDirectory(join(home.home(), '.ashlr', 'vision', 'leader'));
+    writePrivateFileAtomic(leaderActionsPath(), JSON.stringify({ v: 1, updatedAt: new Date(NOW).toISOString(), goalCreateHistoryCompleteFrom: 0,
+      actions: Array.from({ length: 400 }, (_, i) => ({ action: { ...action, id: `refused-${i}`, status: 'refused' }, restore: [] })), dismissed: [] }));
+    await enactLeaderActions(deps, MEMO, [draft('standard.add', { rule: 'Measure outcomes', appliesTo: '*', evidence: null })], [], { idFor: () => actionIdFor(MEMO, 10) });
+    expect(buildPolicyContext(deps, []).goalCreatesLast24h).toBe(0);
+  });
+  it('repairing garbled storage never resets retained-history coverage to epoch zero', async () => {
+    const { deps } = makeApplyDeps({ ledger, now: () => NOW });
+    ensurePrivateDirectory(join(home.home(), '.ashlr', 'vision', 'leader'));
+    writePrivateFileAtomic(leaderActionsPath(), '{garbled');
+    await enactLeaderActions(deps, MEMO, [draft('standard.add', { rule: 'Do not fabricate quota state', appliesTo: '*', evidence: null })], [], { idFor: () => actionIdFor(MEMO, 11) });
+    const context = buildPolicyContext(deps, []);
+    expect(context.goalCreatesLast24h).toBeNull();
+    expect(classifyLeaderAction(create, context).verdict).toBe('refused');
+    expect(classifyLeaderAction(create, { ...context, goalPreferences: resolveGoalPreferences({ foundry: { goalPreferences: { maxNewGoalsPerDay: null } } }) }).verdict).toBe('ok');
+  });
+});
+
+
+describe('live operator Grok maximum preference', () => {
+  it('keeps default4, accepts larger explicit/null preferences as B, and preserves authority', () => {
+    const change = draft('lanes.grok', { slots: 17 });
+    expect(classifyLeaderAction(change, ctx()).verdict).toBe('refused');
+    for (const maxGrokLanes of [20, null]) {
+      const leaderPreferences = resolveLeaderPreferences({ foundry: { leaderPreferences: { maxGrokLanes } } });
+      expect(classifyLeaderAction(change, ctx({ leaderPreferences }))).toMatchObject({ class: 'B', verdict: 'ok' });
+      const excluded = ctx({ leaderPreferences, policy: makePolicy({ engines: ['local'] }) });
+      expect(classifyLeaderAction(change, excluded)).toMatchObject({ class: 'C' });
+      expect(planLeaderAction(change, { id: 'excluded-lane', memoId: MEMO, createdAtMs: NOW }, excluded).status).toBe('escalated');
+    }
+    expect(classifyLeaderAction(change, ctx({ leaderPreferences: unavailableLeaderPreferences() })).verdict).toBe('refused');
+    expect(classifyLeaderAction(draft('lanes.grok', { slots: 1 }), ctx({ leaderPreferences: unavailableLeaderPreferences() }))).toMatchObject({ class: 'A', verdict: 'ok' });
+  });
+  it('never installs a delayed Grok directive reclassified outside the grant at its final fence', async () => {
+    let now = NOW;
+    const { deps } = makeApplyDeps({ ledger, now: () => now });
+    deps.leaderPreferences = () => resolveLeaderPreferences({ foundry: { leaderPreferences: { maxGrokLanes: null } } });
+    const [scheduled] = await enactLeaderActions(deps, MEMO, [draft('lanes.grok', { slots: 17 })], [], { idFor: (i) => actionIdFor(MEMO, i) });
+    expect(scheduled).toMatchObject({ class: 'B', status: 'scheduled' });
+    now = Date.parse(scheduled!.applyAfter!) + 1;
+    let policyReads = 0;
+    // Delayed classification admits B; the immediately subsequent mutation
+    // fence sees Grok removed and classifies C, which is never granted.
+    deps.standingPolicy = () => ++policyReads === 1 ? makePolicy() : makePolicy({ engines: ['local'] });
+    expect((await applyDueLeaderActions(deps))[0]?.status).toBe('refused');
+    // Two admission snapshots, then the refusal's audit-ledger policy read.
+    expect(policyReads).toBe(3);
+    expect(readLeaderDirectives()?.grokLanes ?? null).toBeNull();
+  });
+
+  it('rechecks a tightened maximum before a delayed B directive is installed', async () => {
+    let now = NOW;
+    let maxGrokLanes: number | null = null;
+    const { deps } = makeApplyDeps({ ledger, now: () => now, policy: () => makePolicy() });
+    deps.leaderPreferences = () => resolveLeaderPreferences({ foundry: { leaderPreferences: { maxGrokLanes } } });
+    const [scheduled] = await enactLeaderActions(deps, MEMO, [draft('lanes.grok', { slots: 17 })], [], { idFor: (i) => actionIdFor(MEMO, i) });
+    expect(scheduled?.status).toBe('scheduled');
+    now = Date.parse(scheduled!.applyAfter!) + 1;
+    maxGrokLanes = 4;
+    const applied = await applyDueLeaderActions(deps);
+    expect(applied[0]?.status).toBe('refused');
+    expect(readLeaderDirectives()?.grokLanes ?? null).toBeNull();
+  });
+});
+
+
+it('recovers finite rolling quota evidence only after a clean persisted24h observation window', async () => {
+  let now = Date.now();
+  const { deps } = makeApplyDeps({ ledger, now: () => now });
+  ensurePrivateDirectory(join(home.home(), '.ashlr', 'vision', 'leader'));
+  writePrivateFileAtomic(leaderActionsPath(), JSON.stringify({ v: 1, updatedAt: new Date(now).toISOString(), goalCreateHistoryCompleteFrom: 'bad', actions: [], dismissed: [] }));
+  expect(buildPolicyContext(deps, []).goalCreatesLast24h).toBeNull();
+  await enactLeaderActions(deps, MEMO, [draft('standard.add', { rule: 'Use tests', appliesTo: 'all', evidence: 'observed' })], [], { idFor: (i) => actionIdFor(MEMO, i) });
+  const persisted = JSON.parse(readFileSync(leaderActionsPath(), 'utf8'));
+  expect(persisted.goalCreateHistoryCompleteFrom).toBeGreaterThanOrEqual(now);
+  now = persisted.goalCreateHistoryCompleteFrom;
+  expect(buildPolicyContext(deps, []).goalCreatesLast24h).toBeNull();
+  now += 86_400_001;
+  expect(buildPolicyContext(deps, []).goalCreatesLast24h).toBe(0);
+  const nextMemo = 'lm-20260925120000-abcdef';
+  const [reserved] = await enactLeaderActions(deps, nextMemo, [draft('goal.create', { goal: { objective: 'After known recovery', rationale: 'r', targetRepo: 'ashlrai/binshield', deliverable: null, acceptanceEvidence: [] } })], [], { idFor: (i) => actionIdFor(nextMemo, i) });
+  expect(reserved?.status).toBe('scheduled');
+  now = Date.parse(reserved!.applyAfter!) + 1;
+  expect((await applyDueLeaderActions(deps))[0]?.status).toBe('applied');
+  expect(buildPolicyContext(deps, []).goalCreatesLast24h).toBe(1);
 });

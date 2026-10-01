@@ -30,7 +30,8 @@
  *   runs per local day. 3.14 (leader-cadence.ts): a failed full run retries
  *   (bounded, backed off), and a cheap advisory check-in may run every
  *   `foundry.leader.checkinHours` (default 2) in working hours when the
- *   evidence changed materially — at most 8 model runs a day in total.
+ *   evidence changed materially — by default at most 8 model runs a day in total.
+ *   Operator preferences can replace or explicitly remove those daily ceilings.
  *
  *   ACCOUNTABILITY: each move's expectedDelta is graded against the measured
  *   metric once 7 days have passed and its own deadline has come; the grades
@@ -39,7 +40,11 @@
  * State lives in ~/.ashlr/vision/leader/ (0700; files 0600). Nothing here
  * activates anything: with no standing grant every memo is a dry run.
  */
+import { goalPreferencesReady, knownGoalCount, resolveGoalPreferences, unavailableGoalPreferences, type ResolvedGoalPreferences } from '../goals/preferences.js';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { loadConfigReadOnlyStrict } from '../config.js';
+import { leaderPreferencesReady, resolveLeaderPreferences, unavailableLeaderPreferences, type ResolvedLeaderPreferences } from './leader-preferences.js';
 import { join } from 'node:path';
 
 import type { AshlrConfig, Goal } from '../types.js';
@@ -106,6 +111,7 @@ import {
   checkinWindowOpen,
   materialEvidenceDigest,
   resolveLeaderCadence,
+  leaderCadenceReady,
   retryDelayMs,
   type LeaderCadence,
 } from './leader-cadence.js';
@@ -131,7 +137,14 @@ import { isOpenGoal } from '../goals/open-goals.js';
  * (cloud / Devin launches, backlog, playbooks, automations, its own notes)
  * is classified by leader-powers.ts under the same grant.
  */
-export const LEADER_SYSTEM_PROMPT = `You are the Leader of an autonomous AI software company — the Visionary. A fleet of coding agents works for you across a portfolio of repositories; the product that matters most is Ashlr Verse (repo ashlrai/ashlr-hub). You set direction, and you act through a small set of typed actions inside a standing grant signed by the owner, Mason.
+export function buildLeaderSystemPrompt(preferences: ResolvedGoalPreferences = resolveGoalPreferences(), leaderPreferences = resolveLeaderPreferences()): string {
+  const limit = (value: number | null): string => value === null ? 'no preference limit' : String(value);
+  const focus = !goalPreferencesReady(preferences)
+    ? 'Goal preferences are unavailable or invalid: do not create goals; do not infer an unlimited policy.'
+    : preferences.maxOpenGoals === null
+      ? 'There is no open-goal preference limit. Prioritize by value and evidence; do not pause or archive goals solely to meet a numeric focus quota.'
+      : `Focus preference: at most ${preferences.maxOpenGoals} open goals. Prioritize closure; propose hygiene when useful, subject to the standing grant.`;
+  return `You are the Leader of an autonomous AI software company — the Visionary. A fleet of coding agents works for you across a portfolio of repositories; the product that matters most is Ashlr Verse (repo ashlrai/ashlr-hub). You set direction, and you act through a small set of typed actions inside a standing grant signed by the owner, Mason.
 
 ${LEADER_FOUNDER_VOICE}
 
@@ -141,22 +154,22 @@ OPERATING PRINCIPLES
 - Delete before you optimize: the best part is no part.
 - ONE bottleneck: name the single constraint that matters now. Not three.
 - ONE move: the highest-leverage action against that bottleneck, specific enough for an engineering agent.
-- Focus: at most ${LEADER_LIMITS.maxActiveGoals} active goals. When more are open, pause or archive the rest before proposing anything new.
+- ${focus}
 - Fast correction: you are graded on every move after ${LEADER_LIMITS.outcomeGradeDays} days against the metric you name. Your hit-rate is in the data. Mason's vetoes are lessons — do not repeat a vetoed move.
 - Standards: critique fleet work against written standards; add a standard when the evidence shows a repeated failure.
-- Honesty: merge counts and activity are diagnostics, not success. Do not invent numbers; cite the data blocks. null means unknown.
+- Honesty: merge counts and activity are diagnostics, not success. Do not invent numbers; cite the data blocks. null means unknown except a validated goal-preference limit with sourceState ready, where null explicitly means no preference limit.
 
 HOW YOU ACT
 You propose; the system classifies and applies. Class A applies at once (Mason can veto any time). Class B waits out a veto window. Anything outside the grant goes to Mason as an "escalate" action with your argument. You cannot raise the grant, spend Mason's reserve, or touch authority. Action kinds and their exact params:
 - goal.focus {goalId} · goal.pause {goalId, until: ISO|null} · goal.archive {goalId} · goal.reorder {goalIds: [2-10 ids, highest priority first]}
-- goal.create {goal: {objective, rationale, targetRepo: "owner/name"|null, deliverable, acceptanceEvidence: [..]}} (class B; at most ${LEADER_LIMITS.maxNewGoalsPerDay}/day and only while fewer than ${LEADER_LIMITS.maxActiveGoals} goals are open)
+- goal.create {goal: {objective, rationale, targetRepo: "owner/name"|null, deliverable, acceptanceEvidence: [..]}} (class B; daily creation preference: ${limit(preferences.maxNewGoalsPerDay)}; open-goal preference: ${limit(preferences.maxOpenGoals)}; per-memo creation preference: ${limit(preferences.maxGoalProposalsPerMemo)}. The memo transport still permits at most ${preferences.protocol.maxMemoActions} total actions)
 - work.dispatch {task: {repo: "owner/name", title, detail, difficulty: low|medium|high, value: 1-5, goalId?, playbook?: an id from PLAYBOOKS when one fits the task}}
 - standard.add {rule, appliesTo, evidence}
 - router.tune {tuning: {lambdaCost?, lambdaPressure?, lambdaLatency? (0-10), bonThreshold?: low|medium|high}}
 - repo.pause {repo, reason, until: ISO|null} · repo.resume {repo}
 - pr.close {repo, number, reason} (fleet-authored PRs only)
 - budget.mode {to: reserve|balanced|all-in} (toward reserve = A; toward all-in = B, capped by the grant)
-- lanes.grok {slots: ${LEADER_LIMITS.grokLanes.min}-${LEADER_LIMITS.grokLanes.max}} · lanes.codex {enabled: true|false} (only after Codex usage resets)
+- lanes.grok {slots: positive safe integer, maximum preference: ${leaderPreferencesReady(leaderPreferences) ? limit(leaderPreferences.maxGrokLanes) : 'unavailable (do not raise lanes)'}, actual admitted capacity still applies} · lanes.codex {enabled: true|false} (only after Codex usage resets)
 - harness.adopt {versionId, experimentId} (only a harness whose experiment passed its gate)
 - cloud.launch {repo, title, prompt (≥ 20 chars, a complete brief), purpose: task|self-improve} (class B: a paid Claude cloud session that delivers a draft PR; the cloud budget gates it)
 - devin.launch {repo, title, prompt} (class B: a paid Devin session; its PRs stay shadow-only; the Devin budget gates it)
@@ -176,6 +189,10 @@ ${LEADER_MEMO_SCHEMA_TEXT}
 
 Known action kinds: ${LEADER_ACTION_KINDS.join(', ')}.
 Measurable metrics for move.expectedDelta: ${LEADER_METRICS.join(', ')}.`;
+}
+
+/** Legacy prompt for callers without operator configuration. */
+export const LEADER_SYSTEM_PROMPT = buildLeaderSystemPrompt();
 
 // ---------------------------------------------------------------------------
 // Evidence
@@ -203,6 +220,8 @@ export interface LeaderModelRow {
 
 /** Where evidence comes from. Every source may throw; a thrower is reported as unknown, never as zero. */
 export interface LeaderEvidenceSources {
+  /** Live preference observation; unavailable is not an uncapped policy. */
+  goalPreferences?(): ResolvedGoalPreferences;
   standingPolicy(): EffectivePolicy | null;
   budgetPolicy(): BudgetPolicy;
   capacity(): { publishedAt: string; seats: SeatCapacity[] } | null;
@@ -323,8 +342,13 @@ export async function ledgerFacts(
   }
 }
 
-export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs: number, state: LeaderRunState): Promise<LeaderEvidence> {
+export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs: number, state: LeaderRunState, preferenceSnapshot?: ResolvedGoalPreferences): Promise<LeaderEvidence> {
+  const preferences = preferenceSnapshot ?? (() => {
+    try { return sources.goalPreferences?.() ?? resolveGoalPreferences(); }
+    catch { return unavailableGoalPreferences(); }
+  })();
   const unknown: string[] = [];
+  if (!goalPreferencesReady(preferences)) unknown.push('goal-preferences');
   const attempt = <T>(label: string, fn: () => T): T | null => {
     try {
       return fn();
@@ -369,7 +393,7 @@ export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs
   const goalRead = attempt('goals', () => sources.goals());
   // An incomplete read is a LOWER BOUND with its caveat, never null: null read
   // as "zero goals" to the model while 21 were open (leader-goal-evidence.ts).
-  const goals: LeaderEvidence['goals'] = goalRead ? buildLeaderGoalEvidence(goalRead) : null;
+  const goals: LeaderEvidence['goals'] = goalRead ? buildLeaderGoalEvidence(goalRead, preferences) : null;
   if (goalRead && !goalRead.complete) unknown.push('goals-partial');
 
   const facts = await ledgerFacts((o) => sources.readLedger(o), nowMs);
@@ -477,6 +501,7 @@ export function buildLeaderPrompt(
     nowIso: string;
     /** Goal changes apply only with autonomous class A authority. */
     goalHygiene?: boolean;
+    goalPreferences?: ResolvedGoalPreferences;
   },
 ): string {
   const blocks = [
@@ -505,9 +530,10 @@ export function buildLeaderPrompt(
     blocks.unshift(operatorBlock(evidence.operator));
     blocks.push(untrustedBlock('YOUR EARLIER WORDING THAT MASON ANSWERED OR APPROVED', evidence.operator.untrusted));
   }
+  const preferences = opts.goalPreferences ?? evidence.goals?.goalPreferences ?? resolveGoalPreferences();
   const openGoals = evidence.goals?.open ?? null;
-  const focus = openGoals !== null && openGoals > LEADER_LIMITS.maxActiveGoals
-    ? `\nFOCUS FIRST: ${openGoals} goals are open; at most ${LEADER_LIMITS.maxActiveGoals} may be. Pause or archive the rest (priorityChanges or goal.pause / goal.archive actions) before anything else.`
+  const focus = goalPreferencesReady(preferences) && preferences.maxOpenGoals !== null && openGoals !== null && openGoals > preferences.maxOpenGoals
+    ? `\nFOCUS FIRST: ${openGoals} goals are open; at most ${preferences.maxOpenGoals} may be. Pause or archive the rest (priorityChanges or goal.pause / goal.archive actions) before anything else.`
     : '';
   const runLine = !opts.dryRun
     ? 'Your actions will be classified against the grant and applied.'
@@ -519,7 +545,7 @@ export function buildLeaderPrompt(
 ${blocks.join('\n\n')}
 
 === YOUR TASK ===
-Name THE BOTTLENECK and THE MOVE (with an expectedDelta on a measurable metric). Build the kill list. Propose at most ${LEADER_LIMITS.maxGoalsPerMemo} goals and at most ${LEADER_LIMITS.maxHypothesesPerMemo} hypotheses. Ask Mason only genuine strategic forks.${focus}`;
+Name THE BOTTLENECK and THE MOVE (with an expectedDelta on a measurable metric). Build the kill list. ${!goalPreferencesReady(preferences) ? 'Do not propose new goals while goal preferences are invalid or unavailable.' : preferences.maxGoalProposalsPerMemo === null ? 'There is no per-memo goal preference limit (the total action transport remains bounded).' : `Propose at most ${preferences.maxGoalProposalsPerMemo} goals.`} Propose at most ${LEADER_LIMITS.maxHypothesesPerMemo} hypotheses. Ask Mason only genuine strategic forks.${focus}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +557,10 @@ export interface LeaderRunState {
   lastRun: { at: string; outcome: LeaderRunOutcome; reason: string | null; memoId: string | null; trigger: LeaderTrigger } | null;
   /** Model runs per LOCAL day (YYYY-MM-DD), last 14 days kept. */
   runDays: Record<string, number>;
+  /** False after unreadable/corrupt state recovery; finite daily quotas require complete observations. */
+  dailyCountsComplete?: boolean;
+  /** Lost history is unknown through this local day; later days can be tracked normally. */
+  dailyCountsUnknownThroughDay?: string;
   lastEvidenceDigest: string | null;
   lastDeepRunAt: string | null;
   lastMemoAt: string | null;
@@ -556,7 +586,7 @@ export interface LeaderRunState {
   lastAttemptsAt?: string | null;
   lastServed?: { seatId: string; model: string | null; at: string } | null;
   /** The cadence the last tick ran under (for the config-less health read). */
-  cadence?: { checkinHours: number; workingHours: { start: number; end: number } } | null;
+  cadence?: { checkinHours: number; workingHours: { start: number; end: number }; preferences?: ResolvedLeaderPreferences } | null;
 }
 
 export interface LeaderRetryState {
@@ -578,16 +608,22 @@ function emptyState(): LeaderRunState {
   return { v: 1, lastRun: null, runDays: {}, lastEvidenceDigest: null, lastDeepRunAt: null, lastMemoAt: null, baselines: {}, outcomes: [] };
 }
 
-export function readLeaderRunState(): LeaderRunState {
+export function readLeaderRunState(nowMs = Date.now()): LeaderRunState {
+  const recovered = (): LeaderRunState => ({ ...emptyState(), dailyCountsComplete: false, dailyCountsUnknownThroughDay: localDay(nowMs) });
   const read = readPrivateFileCapped(leaderStatePath(), MAX_STATE_BYTES);
-  if (!read || read.truncated) return emptyState();
+  if (!read || read.truncated) return existsSync(leaderStatePath()) ? recovered() : emptyState();
   try {
     const parsed = JSON.parse(read.text) as Partial<LeaderRunState>;
-    if (parsed.v !== 1) return emptyState();
+    if (parsed.v !== 1) return recovered();
     const obj = (v: unknown): boolean => typeof v === 'object' && v !== null && !Array.isArray(v);
+    const complete = parsed.dailyCountsComplete !== false && obj(parsed.runDays) && (parsed.checkinDays === undefined || obj(parsed.checkinDays));
+    const unknownThrough = typeof parsed.dailyCountsUnknownThroughDay === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.dailyCountsUnknownThroughDay)
+      ? parsed.dailyCountsUnknownThroughDay : localDay(nowMs);
     return {
       ...emptyState(),
       ...parsed,
+      dailyCountsComplete: complete,
+      dailyCountsUnknownThroughDay: complete ? undefined : unknownThrough,
       runDays: typeof parsed.runDays === 'object' && parsed.runDays !== null ? parsed.runDays : {},
       baselines: typeof parsed.baselines === 'object' && parsed.baselines !== null ? parsed.baselines : {},
       outcomes: Array.isArray(parsed.outcomes) ? parsed.outcomes : [],
@@ -600,7 +636,7 @@ export function readLeaderRunState(): LeaderRunState {
       lastServed: obj(parsed.lastServed) ? parsed.lastServed! : null,
     };
   } catch {
-    return emptyState();
+    return recovered();
   }
 }
 
@@ -631,6 +667,15 @@ export function fullRunsOnDay(state: LeaderRunState, ms: number): number {
 export function localDay(ms: number): string {
   const d = new Date(ms);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function observedDailyRuns(state: LeaderRunState, ms: number): { total: number | null; full: number | null } {
+  const day = localDay(ms);
+  if (state.dailyCountsComplete === false && (!state.dailyCountsUnknownThroughDay || day <= state.dailyCountsUnknownThroughDay)) return { total: null, full: null };
+  const total = state.runDays[day] ?? 0;
+  const checkins = state.checkinDays?.[day] ?? 0;
+  return { total: knownGoalCount(total) ? total : null,
+    full: knownGoalCount(total) && knownGoalCount(checkins) && checkins <= total ? total - checkins : null };
 }
 
 export function runsOnDay(state: LeaderRunState, ms: number): number {
@@ -681,11 +726,16 @@ export interface LeaderDue {
 export function leaderRunDue(nowMs: number, state: LeaderRunState, signals: LeaderTriggerSignals, cadence: LeaderCadence = LEGACY_LEADER_CADENCE): LeaderDue {
   const slots = scheduleSlots(nowMs);
   const nextRunAt = new Date(slots.next).toISOString();
+  const observed = observedDailyRuns(state, nowMs);
+  if (!leaderCadenceReady(cadence) || cadence.maxRunsPerDayTotal !== null && observed.total === null
+    || cadence.maxRunsPerDay !== null && observed.full === null) {
+    return { due: false, trigger: null, reason: 'Leader daily preferences or required run counts are invalid or unavailable.', nextRunAt };
+  }
   const capped = `The Leader already ran ${cadence.maxRunsPerDay} times today.`;
-  if (runsOnDay(state, nowMs) >= cadence.maxRunsPerDayTotal) {
+  if (cadence.maxRunsPerDayTotal !== null && (observed.total ?? Infinity) >= cadence.maxRunsPerDayTotal) {
     return { due: false, trigger: null, reason: `The Leader already ran ${cadence.maxRunsPerDayTotal} times today.`, nextRunAt };
   }
-  if (fullRunsOnDay(state, nowMs) >= cadence.maxRunsPerDay) {
+  if (cadence.maxRunsPerDay !== null && (observed.full ?? Infinity) >= cadence.maxRunsPerDay) {
     // Full runs are spent for today; only a check-in may still run.
     if (checkinWindowOpen(nowMs, state, cadence)) return { due: true, trigger: 'checkin', reason: 'A working-hours check-in is due.', nextRunAt };
     return { due: false, trigger: null, reason: capped, nextRunAt };
@@ -716,8 +766,11 @@ export function leaderRunDue(nowMs: number, state: LeaderRunState, signals: Lead
  * Event triggers (merges, reverts, …) are left to the daily ticks.
  */
 export function leaderWakeDue(nowMs: number, state: LeaderRunState, cadence: LeaderCadence): { due: boolean; why: string } {
-  if (runsOnDay(state, nowMs) >= cadence.maxRunsPerDayTotal) return { due: false, why: 'daily cap reached' };
-  const fullRoom = fullRunsOnDay(state, nowMs) < cadence.maxRunsPerDay;
+  const observed = observedDailyRuns(state, nowMs);
+  if (!leaderCadenceReady(cadence) || cadence.maxRunsPerDayTotal !== null && observed.total === null
+    || cadence.maxRunsPerDay !== null && observed.full === null) return { due: false, why: 'daily preferences or required run counts unavailable' };
+  if (cadence.maxRunsPerDayTotal !== null && (observed.total ?? Infinity) >= cadence.maxRunsPerDayTotal) return { due: false, why: 'daily cap reached' };
+  const fullRoom = cadence.maxRunsPerDay === null || (observed.full ?? Infinity) < cadence.maxRunsPerDay;
   const lastMs = state.lastRun ? Date.parse(state.lastRun.at) : -Infinity;
   if (fullRoom && lastMs < scheduleSlots(nowMs).previous) return { due: true, why: 'the daily run has not happened' };
   if (fullRoom && state.retry && Date.parse(state.retry.at) <= nowMs) return { due: true, why: `retry ${state.retry.attempt} is due` };
@@ -816,6 +869,8 @@ export function gradeDueAt(memo: Pick<LeaderMemo, 'at' | 'move'>): number | null
 
 export interface LeaderRunDeps {
   cfg: AshlrConfig;
+  /** Strict live config for production; injected tests may use cfg. */
+  liveConfig?(): AshlrConfig;
   now(): number;
   sources: LeaderEvidenceSources;
   seat: LeaderSeatDeps;
@@ -851,12 +906,14 @@ export async function loadDefaultLeaderRunDeps(cfg: AshlrConfig): Promise<Leader
   ]);
   return {
     cfg,
+    liveConfig: () => loadConfigReadOnlyStrict(),
     now: () => Date.now(),
     apply,
     seat,
     cloudBacklog: { append: (items) => cloudBacklog.appendUserBacklogItems(items) },
     adviseActionClass: defaultLeaderActionAdvisor(cfg),
     sources: {
+      goalPreferences: () => apply.goalPreferences?.() ?? resolveGoalPreferences(cfg),
       standingPolicy: () => effective.currentStandingPolicy(),
       budgetPolicy: () => budgetStore.loadBudgetPolicy(),
       capacity: () => budgetStore.readCapacitySnapshot(),
@@ -959,19 +1016,31 @@ function emptyMemo(id: string, atIso: string, trigger: LeaderTrigger, digest: st
 async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: { force: boolean }): Promise<LeaderRunResult> {
   const nowMs = deps.now();
   const nowIso = new Date(nowMs).toISOString();
-  const state = readLeaderRunState();
-  const cadence = resolveLeaderCadence(deps.cfg);
+  const state = readLeaderRunState(nowMs);
+  let liveConfig: AshlrConfig;
+  try { liveConfig = deps.liveConfig?.() ?? deps.cfg; }
+  catch { return { outcome: 'skipped-unchanged', reason: 'Live Leader configuration is invalid or unavailable.', memo: null }; }
+  const cadence = resolveLeaderCadence(liveConfig);
+  const observed = observedDailyRuns(state, nowMs);
   const mode: LeaderRunMode = trigger === 'checkin' ? 'checkin' : 'full';
+  if (!leaderCadenceReady(cadence) || cadence.maxRunsPerDayTotal !== null && observed.total === null
+    || mode === 'full' && cadence.maxRunsPerDay !== null && observed.full === null) {
+    return { outcome: 'skipped-unchanged', reason: 'Leader daily preferences or required run counts are invalid or unavailable.', memo: null };
+  }
 
-  // Full runs keep the 3-a-day cap; check-ins have their own room under the total cap.
-  if (mode === 'full' && fullRunsOnDay(state, nowMs) >= cadence.maxRunsPerDay) {
+  // Full runs and check-ins use the current explicit finite/null preferences.
+  if (mode === 'full' && cadence.maxRunsPerDay !== null && (observed.full ?? Infinity) >= cadence.maxRunsPerDay) {
     return { outcome: 'skipped-unchanged', reason: `The Leader already ran ${cadence.maxRunsPerDay} times today.`, memo: null };
   }
-  if (runsOnDay(state, nowMs) >= cadence.maxRunsPerDayTotal) {
+  if (cadence.maxRunsPerDayTotal !== null && (observed.total ?? Infinity) >= cadence.maxRunsPerDayTotal) {
     return { outcome: 'skipped-unchanged', reason: `The Leader already ran ${cadence.maxRunsPerDayTotal} times today.`, memo: null };
   }
 
-  const evidence = await gatherLeaderEvidence(deps.sources, nowMs, state);
+  const goalPreferences = (() => {
+    try { return deps.liveConfig ? resolveGoalPreferences(liveConfig) : deps.apply.goalPreferences?.() ?? resolveGoalPreferences(liveConfig); }
+    catch { return unavailableGoalPreferences(); }
+  })();
+  const evidence = await gatherLeaderEvidence(deps.sources, nowMs, state, goalPreferences);
   const digest = evidenceDigest(evidence);
   const material = materialEvidenceDigest(evidence);
   if (mode === 'checkin' && !opts.force && (state.lastMaterialDigest ?? null) === material) {
@@ -994,7 +1063,8 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
     try { return deps.sources.standingPolicy(); } catch { return null; }
   })();
   const dryRun = isLeaderDryRun(policy);
-  const basePrompt = buildLeaderPrompt(evidence, { dryRun, goalHygiene: leaderGoalHygieneApplies(policy), nowIso });
+  const basePrompt = buildLeaderPrompt(evidence, { dryRun, goalHygiene: leaderGoalHygieneApplies(policy), nowIso, goalPreferences });
+  const systemPrompt = buildLeaderSystemPrompt(goalPreferences, cadence.preferences ?? resolveLeaderPreferences(liveConfig));
   const prompt = mode === 'checkin' ? `${basePrompt}\n\n${LEADER_CHECKIN_SUFFIX}` : basePrompt;
   // A retry of the 06:30 run is still that run (deep-eligible).
   const scheduled = trigger === 'schedule' || (trigger === 'retry' && state.retry?.of === 'schedule');
@@ -1010,7 +1080,7 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
   })();
   const plan = await planLeaderSeats(deps.seat, {
     deep,
-    promptChars: LEADER_SYSTEM_PROMPT.length + prompt.length,
+    promptChars: systemPrompt.length + prompt.length,
     mode,
     localOnly: mode === 'checkin' && budgetMode === 'reserve',
   });
@@ -1022,12 +1092,13 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
     memo.attempts = attempts.map((a) => ({ ...a, reason: a.reason === null ? null : scrubPrivateText(a.reason).slice(0, 300) }));
     writeLeaderMemo(memo);
     recordMemoOnLedger(deps, memo);
-    const fresh = readLeaderRunState();
+    const fresh = readLeaderRunState(nowMs);
     fresh.lastRun = { at: nowIso, outcome, reason: memo.statusReason, memoId, trigger };
     fresh.lastMemoAt = nowIso;
     const today = localDay(nowMs);
-    if (countsAsRun) fresh.runDays[today] = (fresh.runDays[today] ?? 0) + 1;
-    if (countsAsRun && mode === 'checkin') fresh.checkinDays = { ...(fresh.checkinDays ?? {}), [today]: (fresh.checkinDays?.[today] ?? 0) + 1 };
+    if (countsAsRun && knownGoalCount(fresh.runDays[today] ?? 0) && (fresh.runDays[today] ?? 0) < Number.MAX_SAFE_INTEGER) fresh.runDays[today] = (fresh.runDays[today] ?? 0) + 1;
+    const checkins = fresh.checkinDays?.[today] ?? 0;
+    if (countsAsRun && mode === 'checkin' && knownGoalCount(checkins) && checkins < Number.MAX_SAFE_INTEGER) fresh.checkinDays = { ...(fresh.checkinDays ?? {}), [today]: checkins + 1 };
     fresh.lastAttempts = memo.attempts;
     fresh.lastAttemptsAt = nowIso;
     if (outcome === 'ok') {
@@ -1065,9 +1136,9 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
     return finish('no-seat', plan.reason, false);
   }
   const chain = await runLeaderSeatChain(plan.steps, {
-    system: LEADER_SYSTEM_PROMPT,
+    system: systemPrompt,
     user: prompt,
-    parse: (raw) => parseLeaderMemoOutput(raw, { nowMs }),
+    parse: (raw) => parseLeaderMemoOutput(raw, { nowMs, goalPreferences }),
     reask: (why) => `${prompt}\n\nYour previous reply could not be parsed (${why}). Reply with ONLY the JSON object.`,
   }, () => deps.now());
   attempts = [...chain.attempts, ...plan.skipped];
@@ -1170,7 +1241,7 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
   const metric = memo.move?.expectedDelta?.metric;
   if (metric) {
     const value = isLeaderMetric(metric) ? await measureLeaderMetric(metric, deps.sources, nowMs) : null;
-    const fresh = readLeaderRunState();
+    const fresh = readLeaderRunState(nowMs);
     fresh.baselines[memoId] = { metric, value, at: nowIso };
     writeLeaderRunState(fresh);
   }
@@ -1225,7 +1296,7 @@ export async function runLeader(
 /** Grade every move whose time has come. Returns the new outcome records. */
 export async function gradeLeaderOutcomes(deps: LeaderRunDeps): Promise<LeaderOutcomeRecord[]> {
   const nowMs = deps.now();
-  const state = readLeaderRunState();
+  const state = readLeaderRunState(nowMs);
   const graded = new Set(state.outcomes.map((o) => o.memoId));
   const fresh: LeaderOutcomeRecord[] = [];
   for (const memo of readRecentMemos(60)) {
@@ -1252,7 +1323,7 @@ export async function gradeLeaderOutcomes(deps: LeaderRunDeps): Promise<LeaderOu
     } catch { /* the state file still carries it */ }
   }
   if (fresh.length > 0) {
-    const latest = readLeaderRunState();
+    const latest = readLeaderRunState(nowMs);
     latest.outcomes.push(...fresh);
     writeLeaderRunState(latest);
   }
@@ -1291,9 +1362,11 @@ export async function leaderTick(deps: LeaderRunDeps, opts: { awaitRun?: boolean
   try {
     graded = await gradeLeaderOutcomes(deps);
   } catch { /* retried next tick */ }
-  const state = readLeaderRunState();
-  const cadence = resolveLeaderCadence(deps.cfg);
-  rememberCadence(state, cadence);
+  const state = readLeaderRunState(nowMs);
+  let cadence: LeaderCadence;
+  try { cadence = resolveLeaderCadence(deps.liveConfig?.() ?? deps.cfg); }
+  catch { return { applied, graded, due: { due: false, trigger: null, reason: 'Live Leader configuration is invalid or unavailable.', nextRunAt: new Date(scheduleSlots(nowMs).next).toISOString() }, started: false, run: null }; }
+  rememberCadence(state, cadence, nowMs);
   const signals = await gatherTriggerSignals(deps.sources, state, nowMs);
   const due = leaderRunDue(nowMs, state, signals, cadence);
   if (!due.due || !due.trigger || runInFlight) return { applied, graded, due, started: false, run: null };
@@ -1311,34 +1384,40 @@ export async function leaderTick(deps: LeaderRunDeps, opts: { awaitRun?: boolean
 
 /**
  * The cadence the last tick ran under, kept in the state file so the read
- * path (GET /api/verse/leader, which has no config in hand) reports the same
- * check-in interval the runs use. Written only when it changed.
+ * path can preserve historical clocks if current strict config becomes unavailable.
+ * Ready policy is always read live; this snapshot is written only when changed.
  */
-function rememberCadence(state: LeaderRunState, cadence: LeaderCadence): void {
+function rememberCadence(state: LeaderRunState, cadence: LeaderCadence, nowMs: number): void {
   const stored = state.cadence;
   if (stored && stored.checkinHours === cadence.checkinHours
-    && stored.workingHours.start === cadence.workingHours.start && stored.workingHours.end === cadence.workingHours.end) return;
+    && stored.workingHours.start === cadence.workingHours.start && stored.workingHours.end === cadence.workingHours.end
+    && JSON.stringify(stored.preferences) === JSON.stringify(cadence.preferences)) return;
   try {
-    const fresh = readLeaderRunState();
-    fresh.cadence = { checkinHours: cadence.checkinHours, workingHours: { ...cadence.workingHours } };
+    const fresh = readLeaderRunState(nowMs);
+    fresh.cadence = { checkinHours: cadence.checkinHours, workingHours: { ...cadence.workingHours }, preferences: cadence.preferences };
     writeLeaderRunState(fresh);
-  } catch { /* the health read falls back to the defaults */ }
+  } catch { /* health still reads strict live policy; no run authority comes from this cache */ }
 }
 
 function cadenceFor(state: LeaderRunState, cfg: AshlrConfig | undefined): LeaderCadence {
   if (cfg) return resolveLeaderCadence(cfg);
-  const stored = state.cadence;
-  if (!stored) return resolveLeaderCadence(undefined);
-  return resolveLeaderCadence({ foundry: { leader: { checkinHours: stored.checkinHours, workingHours: stored.workingHours } } } as unknown as AshlrConfig);
+  // Read-only health must not claim a historical ready policy is still current.
+  try { return resolveLeaderCadence(loadConfigReadOnlyStrict()); }
+  catch {
+    const stored = state.cadence;
+    return resolveLeaderCadence(stored ? { foundry: { leader: { checkinHours: stored.checkinHours, workingHours: stored.workingHours } } } as unknown as AshlrConfig : undefined,
+      unavailableLeaderPreferences(stored ? stored.checkinHours > 0 : true));
+  }
 }
 
 export function buildLeaderState(nowMs: number, cfg?: AshlrConfig): LeaderStateV1 {
-  const state = readLeaderRunState();
+  const state = readLeaderRunState(nowMs);
   const memos = readRecentMemos(30);
   const outcomeByMemo = new Map(state.outcomes.map((o) => [o.memoId, o]));
   const timeline: LeaderMemoSummary[] = memos.map((m) => summarizeMemo(m, outcomeByMemo.get(m.id) ?? null));
   const latest = memos.find((m) => m.status === 'ok') ?? memos[0] ?? null;
   const lastOk = memos.find((m) => m.status === 'ok') ?? null;
+  const counts = observedDailyRuns(state, nowMs);
   const health = buildLeaderHealth(
     {
       ...state,
@@ -1360,6 +1439,7 @@ export function buildLeaderState(nowMs: number, cfg?: AshlrConfig): LeaderStateV
     lastRun: state.lastRun ? { at: state.lastRun.at, outcome: state.lastRun.outcome, reason: state.lastRun.reason } : null,
     nextRunAt: new Date(scheduleSlots(nowMs).next).toISOString(),
     runsToday: runsOnDay(state, nowMs),
+    dailyRunCounts: { ...counts, sourceState: counts.total === null || counts.full === null ? 'unavailable' : 'ready' },
     latest,
     timeline,
     actions: listLeaderActions(100),

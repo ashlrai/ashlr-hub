@@ -1,3 +1,4 @@
+import { GOAL_PREFERENCE_DEFAULTS } from '../goals/preferences.js';
 /**
  * Leader ("Visionary" persona) — V3.10 Track B contract (unit B-U1, frozen day 0).
  *
@@ -34,13 +35,13 @@ import type { HarnessHypothesis, HarnessRoutingWeights } from '../learn/harness-
 export const VERSE_LEADER_PATH = '/api/verse/leader';
 
 /**
- * Frozen Leader limits (SPEC-310B §4 + addendum §6). Grants and config can
- * only tighten these.
+ * Legacy goal defaults plus unrelated compiled Leader limits. Goal business
+ * preferences now resolve through goals/preferences.ts; grants remain separate.
  */
 export const LEADER_LIMITS = Object.freeze({
-  maxGoalsPerMemo: 3,
-  maxNewGoalsPerDay: 3,
-  maxActiveGoals: 4,
+  maxGoalsPerMemo: GOAL_PREFERENCE_DEFAULTS.maxGoalProposalsPerMemo,
+  maxNewGoalsPerDay: GOAL_PREFERENCE_DEFAULTS.maxNewGoalsPerDay,
+  maxActiveGoals: GOAL_PREFERENCE_DEFAULTS.maxOpenGoals,
   maxHypothesesPerMemo: 3,
   maxRunsPerDay: 3,
   defaultVetoMinutes: 30,
@@ -66,7 +67,7 @@ export type LeaderActionClass = 'A' | 'B' | 'C';
  *      standard.add, router.tune (within bounds), experiment.start, repo.pause,
  *      repo.resume (leader-pause only), pr.close (fleet-authored only),
  *      budget.mode toward reserve, lanes.grok at or below grokLanes.maxClassA.
- *   B: goal.create (≤ 3/day, ≤ 4 active), budget.mode toward all-in (≤ grant maxMode),
+ *   B: goal.create (operator preferences; defaults ≤ 3/day, ≤ 4 active), budget.mode toward all-in (≤ grant maxMode),
  *      lanes.grok above maxClassA, lanes.codex (after resetsAt, only if the grant
  *      lists codex), harness.adopt (gate passed).
  *   C: escalate — anything outside the grant.
@@ -462,7 +463,7 @@ export interface LeaderMemo {
   bottleneck: { statement: string; metric: string | null; evidence: string[] } | null;
   move: { statement: string; why: string; expectedDelta: LeaderExpectedDelta | null } | null;
   killList: { target: { kind: 'goal' | 'pr' | 'lane' | 'experiment'; id: string }; why: string }[];
-  /** ≤ LEADER_LIMITS.maxGoalsPerMemo. */
+  /** Goal proposals after the selected operator preference; actions have a separate transport bound. */
   goals: LeaderGoalProposal[];
   priorityChanges: { goalId: string; action: 'focus' | 'pause' | 'archive' | 'reorder'; why: string }[];
   standards: { rule: string; appliesTo: string; evidence: string | null }[];
@@ -551,6 +552,8 @@ export interface LeaderStateV1 {
   lastRun: { at: string; outcome: LeaderRunOutcome; reason: string | null } | null;
   nextRunAt: string | null;
   runsToday: number;
+  /** Additive observation truth; legacy runsToday stays numeric for old clients. */
+  dailyRunCounts?: { total: number | null; full: number | null; sourceState: 'ready' | 'unavailable' };
   latest: LeaderMemo | null;
   /** Newest first. */
   timeline: LeaderMemoSummary[];

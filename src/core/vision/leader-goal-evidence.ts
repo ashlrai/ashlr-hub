@@ -10,7 +10,7 @@
  */
 import type { Goal } from '../types.js';
 import { summarizeOpenGoals, type GoalReadLike } from '../goals/open-goals.js';
-import { LEADER_LIMITS } from './leader-types.js';
+import { resolveGoalPreferences, type ResolvedGoalPreferences } from '../goals/preferences.js';
 import { cleanModelText } from './leader-memo.js';
 
 export interface LeaderGoalItem {
@@ -27,7 +27,9 @@ export interface LeaderGoalEvidence {
   /** Open (active + planning) goals — a lower bound when `complete` is false. */
   open: number;
   total: number;
-  focusLimit: number;
+  focusLimit: number | null;
+  /** Distinguishes an explicit unlimited preference from a failed preference read. */
+  goalPreferences?: ResolvedGoalPreferences;
   /** False when some goal files could not be read: `open` / `total` are then lower bounds. */
   complete: boolean;
   /** Goal files that could not be read (null = the source did not say). */
@@ -46,7 +48,7 @@ function day(iso: string | null | undefined): string {
 }
 
 /** PURE: the Leader's goals block from one goal-store read. */
-export function buildLeaderGoalEvidence(read: GoalReadLike): LeaderGoalEvidence {
+export function buildLeaderGoalEvidence(read: GoalReadLike, preferences = resolveGoalPreferences()): LeaderGoalEvidence {
   const summary = summarizeOpenGoals(read);
   const shown: Goal[] = [...summary.openGoals, ...read.goals.filter((g) => g.status === 'paused')].slice(0, MAX_ITEMS);
   const note = summary.complete
@@ -55,7 +57,8 @@ export function buildLeaderGoalEvidence(read: GoalReadLike): LeaderGoalEvidence 
   return {
     open: summary.open,
     total: summary.total,
-    focusLimit: LEADER_LIMITS.maxActiveGoals,
+    focusLimit: preferences.maxOpenGoals,
+    goalPreferences: preferences,
     complete: summary.complete,
     unreadableGoalFiles: summary.unreadable,
     note,

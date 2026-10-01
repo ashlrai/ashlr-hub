@@ -934,7 +934,16 @@ export interface VerseLocalRuntimeSummary {
 }
 
 /** GET /api/verse/bootstrap */
+/** Read-only initial metadata progress; never authentication or dispatch authority. */
+export interface VerseAccountTelemetryProgress {
+  refreshing: boolean;
+  /** Supported native accounts still waiting for their initial metadata result. */
+  pendingAccountIds: string[];
+}
+
 export interface VerseBootstrap {
+  /** Optional progress from a later seats-only read; absent on older servers. */
+  accountTelemetry?: VerseAccountTelemetryProgress;
   seats: VerseSeat[];
   projects: VerseProject[];
   sessions: VerseSession[];
@@ -952,6 +961,8 @@ export interface VerseBootstrap {
  * always reflects the collector's CURRENT state rather than a cached one.
  */
 export interface VerseSeatsResponse {
+  /** Same-root collector progress only; unsupported provider windows are never pending. */
+  accountTelemetry?: VerseAccountTelemetryProgress;
   /** When this body was built. */
   sampledAt: string;
   seats: VerseSeat[];

@@ -313,7 +313,7 @@ const KNOWN_FOUNDRY_KEYS: ReadonlySet<string> = new Set([
   'counterfactual', 'counterfactualSampleCap', 'diffSafety', 'dispatchRetries',
   'edvUnverifiedWeight', 'edvVerify', 'engineFallbackOrder', 'engines', 'executionIdentityV1',
   'eventBus', 'fabric', 'feedbackEnabled', 'fleetMcp', 'generative',
-  'goalFocusActiveThreshold', 'goalFocusMode', 'goalPlanning', 'grok', 'intelligence', 'inventPerCycle',
+  'goalFocusActiveThreshold', 'goalFocusMode', 'goalPreferences', 'leaderPreferences', 'goalPlanning', 'grok', 'intelligence', 'inventPerCycle',
   'judgeAllowedBackends', 'judgePerPass', 'killSwitch', 'kimi',
   // OWNER-L: 'localOnly' is read via a loose cast in src/core/policy/local-only.ts
   // (the enforced local-only mode). Listed here so setting it in a real operator

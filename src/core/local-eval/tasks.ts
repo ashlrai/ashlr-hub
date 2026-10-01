@@ -11,8 +11,8 @@
  *
  * EVERY CHECK IS A COMMAND. No task is graded by asking a model whether the
  * answer looks right. Each `check` is a Node script whose exit code is the
- * verdict, and it lives above the agent's working directory so the agent cannot
- * edit its own grader.
+ * verdict. The runner captures source before the agent runs and executes that
+ * source rather than the agent-writable forensic checker file.
  *
  * FIXTURES ARE PURE ESM WITH NO DEPENDENCIES. A trial must not depend on
  * `npm install` completing, because a network hiccup would then read as a model

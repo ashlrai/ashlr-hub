@@ -24,11 +24,14 @@ import type {
 import {
   LEADER_MAX_RETRY_ATTEMPTS,
   isWorkingHour,
+  leaderCadenceReady,
   nextCheckinAt,
   type LeaderCadence,
 } from './leader-cadence.js';
 
 export interface LeaderHealthInput {
+  dailyCountsComplete?: boolean;
+  dailyCountsUnknownThroughDay?: string;
   lastRun: { at: string; outcome: LeaderRunOutcome; reason: string | null; trigger: LeaderTrigger } | null;
   lastMemoAt: string | null;
   lastCheckinEvalAt?: string | null;
@@ -78,12 +81,20 @@ export function buildLeaderHealth(
   const options: { at: number; why: string }[] = [{ at: ctx.nextScheduledAt, why: 'the daily 06:30 memo' }];
   if (retry) options.push({ at: Date.parse(retry.at), why: `retry ${retry.attempt} of ${retry.maxAttempts}` });
   const checkin = nextCheckinAt({ lastMemoAt: state.lastMemoAt, lastCheckinEvalAt: state.lastCheckinEvalAt ?? null }, ctx.cadence);
-  if (checkin !== null && ctx.runsToday < ctx.cadence.maxRunsPerDayTotal) {
+  const d = new Date(nowMs);
+  const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const historyComplete = state.dailyCountsComplete !== false || typeof state.dailyCountsUnknownThroughDay === 'string' && day > state.dailyCountsUnknownThroughDay;
+  const knownTotal = Number.isSafeInteger(ctx.runsToday) && ctx.runsToday >= 0;
+  const knownFull = knownTotal && Number.isSafeInteger(ctx.checkinsToday) && ctx.checkinsToday >= 0 && ctx.checkinsToday <= ctx.runsToday;
+  const policyReady = leaderCadenceReady(ctx.cadence)
+    && (ctx.cadence.maxRunsPerDayTotal === null || historyComplete && knownTotal)
+    && (ctx.cadence.maxRunsPerDay === null || historyComplete && knownFull);
+  if (policyReady && checkin !== null && (ctx.cadence.maxRunsPerDayTotal === null || ctx.runsToday < ctx.cadence.maxRunsPerDayTotal)) {
     const earliest = Math.max(checkin, nowMs);
     const at = isWorkingHour(earliest, ctx.cadence.workingHours) ? earliest : nextWorkingStart(earliest, ctx.cadence.workingHours);
     options.push({ at, why: 'a check-in, if the evidence changed' });
   }
-  const valid = options.filter((o) => Number.isFinite(o.at)).sort((a, b) => a.at - b.at);
+  const valid = options.filter((o) => policyReady && Number.isFinite(o.at)).sort((a, b) => a.at - b.at);
   const next = valid[0] ?? null;
 
   const lastRunOutcome = state.lastRun?.outcome ?? null;
@@ -91,7 +102,10 @@ export function buildLeaderHealth(
   let summary: string;
   const failedSeats = seats.filter((a) => a.outcome === 'failed' || a.outcome === 'timeout' || a.outcome === 'parse-failed');
   const lastSuccessMs = state.lastSuccessAt ? Date.parse(state.lastSuccessAt) : NaN;
-  if (!state.lastRun) {
+  if (!policyReady) {
+    status = 'degraded';
+    summary = 'Leader daily preferences or required run history could not be checked.';
+  } else if (!state.lastRun) {
     status = 'unknown';
     summary = 'The Leader has not run yet.';
   } else if (consecutiveFailures > 0) {

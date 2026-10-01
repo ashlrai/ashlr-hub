@@ -68,12 +68,14 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
 }));
 
 const mockListGoals = vi.fn();
+let mockGoalReadComplete = true;
 const mockLoadGoal = vi.fn();
 const mockResumeM = vi.fn();
 const mockUpdateMilestoneStatus = vi.fn();
 
 vi.mock('../src/core/goals/store.js', () => ({
   listGoals: (...args: unknown[]) => mockListGoals(...args),
+  listGoalsDetailed: (...args: unknown[]) => ({ goals: mockListGoals(...args), complete: mockGoalReadComplete, sourceState: mockGoalReadComplete ? 'healthy' : 'degraded', unreadableFiles: mockGoalReadComplete ? 0 : 1 }),
   loadGoal: (...args: unknown[]) => mockLoadGoal(...args),
   resumeMilestone: (...args: unknown[]) => mockResumeM(...args),
   updateMilestoneStatus: (...args: unknown[]) => mockUpdateMilestoneStatus(...args),
@@ -186,6 +188,7 @@ beforeEach(() => {
   mockAssertMayMutate.mockReset().mockImplementation(() => { /* allow */ });
   mockKillSwitchOn.mockReturnValue(false);
   mockListGoals.mockReset().mockReturnValue([]);
+  mockGoalReadComplete = true;
   mockLoadGoal.mockReset().mockReturnValue(null);
   mockResumeM.mockReset();
   mockUpdateMilestoneStatus.mockReset().mockReturnValue(null);
@@ -717,5 +720,38 @@ describe('M102 — source-level safety: conductor + loop carry no outward-mutati
     expect(LOOP_SRC).toMatch(/runConductor/);
     const directRunDaemon = /await\s+runDaemon\s*\(/.test(LOOP_SRC);
     expect(directRunDaemon).toBe(false);
+  });
+});
+
+
+describe('operator conductor batch preferences', () => {
+  it('preserves default3, accepts higher configured batches, and explicit null processes the known inventory', async () => {
+    mockListGoals.mockReturnValue(Array.from({ length: 13 }, (_, i) => makeGoal(`g-expanded-${i}`)));
+    const legacy = await runConductor(makeCfg(), { once: true, dryRun: true });
+    expect(legacy.milestonesAdvanced).toBe(3);
+    const cfg = makeCfg();
+    cfg.foundry = { ...(cfg.foundry ?? {}), goalPreferences: { maxGoalsPerConductorCycle: 12 } };
+    const expanded = await runConductor(cfg, { once: true, dryRun: true });
+    expect(expanded.milestonesAdvanced).toBe(12);
+    cfg.foundry.goalPreferences = { maxGoalsPerConductorCycle: null };
+    const unlimited = await runConductor(cfg, { once: true, dryRun: true });
+    expect(unlimited.milestonesAdvanced).toBe(13);
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+  it('partial empty inventory cannot trigger backlog fallback; known valid goals remain usable under null', async () => {
+    const cfg = makeCfg();
+    cfg.foundry = { ...(cfg.foundry ?? {}), goalPreferences: { maxGoalsPerConductorCycle: null } };
+    mockGoalReadComplete = false;
+    const unknown = await runConductor(cfg, { once: true, dryRun: true });
+    expect(unknown.activationRefused).toBe(true);
+    expect(unknown.daemonFallback).toBe(false);
+    expect(mockRunDaemon).not.toHaveBeenCalled();
+    mockListGoals.mockReturnValue([makeGoal('g-known')]);
+    expect((await runConductor(cfg, { once: true, dryRun: true })).milestonesAdvanced).toBe(1);
+  });
+  it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('refuses invalid explicit batch %s without executing', async (maxGoalsPerCycle) => {
+    mockListGoals.mockReturnValue([makeGoal('g-invalid')]);
+    expect((await runConductor(makeCfg(), { once: true, dryRun: true, maxGoalsPerCycle })).activationRefused).toBe(true);
+    expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 });

@@ -13,17 +13,25 @@
  *
  * Hermetic: tmp HOME, fake ledger / sources / seat; no model is called.
  */
+import { resolveGoalPreferences } from '../src/core/goals/preferences.js';
+import { readFileSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { ensurePrivateDirectory, writePrivateFileAtomic } from '../src/core/verse/preferences.js';
+import { resolveLeaderPreferences } from '../src/core/vision/leader-preferences.js';
+import { resolveLeaderCadence } from '../src/core/vision/leader-cadence.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   LEADER_SYSTEM_PROMPT,
   buildLeaderPrompt,
+  buildLeaderSystemPrompt,
   buildLeaderState,
   computeHitRate,
   gatherLeaderEvidence,
   gradeLeaderOutcomes,
   gradeMove,
   leaderRunDue,
+  leaderStatePath,
   leaderTick,
   readLeaderRunState,
   runLeader,
@@ -111,7 +119,8 @@ function world(opts: { now: () => number; policy?: () => EffectivePolicy | null;
     transports: {
       local: () => async (system, user) => {
         calls.push(user);
-        expect(system).toBe(LEADER_SYSTEM_PROMPT);
+        const current = deps.liveConfig?.() ?? deps.cfg;
+        expect(system).toBe(buildLeaderSystemPrompt(deps.liveConfig ? resolveGoalPreferences(current) : deps.apply.goalPreferences?.() ?? resolveGoalPreferences(current), resolveLeaderPreferences(current, { checkinsEnabled: resolveLeaderCadence(current).checkinHours > 0 })));
         return replies.shift() ?? 'nope';
       },
       grok: () => async () => { throw new Error('grok must not be called'); },
@@ -347,4 +356,103 @@ describe('accountability', () => {
     expect(state.timeline[0]!.outcome?.hit).toBe(true);
     expect(state.latest?.id).toBe(r.memo!.id);
   });
+});
+
+
+describe('Leader preference evidence and prompt agree', () => {
+  it('does not demand archiving21 goals solely to meet a removed open-goal preference', async () => {
+    for (let i = 0; i < 21; i += 1) goalsStore.createGoal(`Uncapped goal ${i}`);
+    const { deps, calls } = world({ now: () => T0 });
+    deps.cfg.foundry = { ...(deps.cfg.foundry ?? {}), goalPreferences: { maxOpenGoals: null } };
+    const preferences = resolveGoalPreferences(deps.cfg);
+    await runLeader(deps, 'schedule');
+    expect(calls[0]).not.toContain('FOCUS FIRST');
+    expect(calls[0]).toMatch(/"focusLimit":\s*null/);
+    expect(buildLeaderSystemPrompt(preferences)).toContain('do not pause or archive goals solely');
+    expect(buildLeaderSystemPrompt(preferences)).not.toContain('at most 4 active goals');
+  });
+});
+
+
+describe('fresh manual Leader planning preferences', () => {
+  it('uses a current injected preference snapshot rather than a stale serve-start config', async () => {
+    const { deps, calls } = world({ now: () => T0, replies: [reply({ goals: Array.from({ length: 5 }, (_, i) => ({ objective: `Fresh preference goal ${i}`, rationale: 'r', targetRepo: 'ashlrai/binshield' })) })] });
+    expect(resolveGoalPreferences(deps.cfg).maxGoalProposalsPerMemo).toBe(3);
+    deps.apply.goalPreferences = () => resolveGoalPreferences({ foundry: { goalPreferences: { maxGoalProposalsPerMemo: 5, maxOpenGoals: null, maxNewGoalsPerDay: null } } });
+    const result = await runLeader(deps, 'manual');
+    expect(calls[0]).toContain('Propose at most 5 goals');
+    expect(result.memo?.goals).toHaveLength(5);
+  });
+});
+
+
+describe('operator daily Leader preferences use current observations and live policy', () => {
+  it('allows5 explicit full runs, retains the default3 ceiling, and strict config failure calls no model', async () => {
+    const { deps, calls } = world({ now: () => T0, replies: Array.from({ length: 6 }, () => reply()) });
+    deps.liveConfig = () => ({ foundry: { leaderPreferences: { maxFullRunsPerDay: 5, maxTotalRunsPerDay: 5 } } } as AshlrConfig);
+    for (let i = 0; i < 5; i += 1) expect((await runLeader(deps, 'manual', { force: true })).outcome).toBe('ok');
+    expect((await runLeader(deps, 'manual', { force: true })).reason).toMatch(/5 times today/);
+    expect(calls).toHaveLength(5);
+    deps.liveConfig = () => { throw new Error('private config error'); };
+    const failed = await runLeader(deps, 'manual', { force: true });
+    expect(failed.reason).toBe('Live Leader configuration is invalid or unavailable.');
+    expect(calls).toHaveLength(5);
+    expect(buildLeaderState(T0).dailyRunCounts).toMatchObject({ total: 5, full: 5, sourceState: 'ready' });
+  });
+  it('keeps corrupt current-day history unknown, permits explicitnull metrics, and recovers next local day', async () => {
+    let now = T0;
+    ensurePrivateDirectory(dirname(leaderStatePath()));
+    writePrivateFileAtomic(leaderStatePath(), '{broken');
+    const { deps, calls } = world({ now: () => now, replies: [reply(), reply()] });
+    expect((await runLeader(deps, 'manual', { force: true })).reason).toMatch(/required run counts/);
+    expect(calls).toHaveLength(0);
+    deps.cfg.foundry = { leaderPreferences: { maxFullRunsPerDay: null, maxTotalRunsPerDay: null } };
+    expect((await runLeader(deps, 'manual', { force: true })).outcome).toBe('ok');
+    const recovered = readLeaderRunState(now);
+    expect(recovered.dailyCountsComplete).toBe(false);
+    expect(recovered.dailyCountsUnknownThroughDay).toBe('2026-09-24');
+    expect(buildLeaderState(now).dailyRunCounts).toMatchObject({ total: null, full: null, sourceState: 'unavailable' });
+    deps.cfg.foundry = {};
+    expect((await runLeader(deps, 'manual', { force: true })).reason).toMatch(/required run counts/);
+    now += 86_400_000;
+    expect((await runLeader(deps, 'manual', { force: true })).outcome).toBe('ok');
+    expect(buildLeaderState(now).dailyRunCounts).toMatchObject({ total: 1, full: 1, sourceState: 'ready' });
+  });
+  it('does not reinterpret malformed current-day numeric counts as zero', async () => {
+    ensurePrivateDirectory(dirname(leaderStatePath()));
+    writePrivateFileAtomic(leaderStatePath(), JSON.stringify({ v: 1, runDays: { '2026-09-24': 'bad' }, checkinDays: {} }));
+    const { deps, calls } = world({ now: () => T0 });
+    expect((await runLeader(deps, 'manual', { force: true })).reason).toMatch(/required run counts/);
+    expect(calls).toHaveLength(0);
+    expect(buildLeaderState(T0).dailyRunCounts).toMatchObject({ total: null, full: null, sourceState: 'unavailable' });
+    expect(buildLeaderState(T0).health.status).toBe('degraded');
+  });
+});
+
+
+it('does not present a historical ready Leader policy as current when live config is corrupt', async () => {
+  const { deps } = world({ now: () => T0 });
+  expect((await runLeader(deps, 'manual')).outcome).toBe('ok');
+  const config = join(home.home(), '.ashlr', 'config.json');
+  ensurePrivateDirectory(dirname(config));
+  writePrivateFileAtomic(config, '{broken private configuration');
+  const original = readFileSync(config);
+  const mtime = statSync(config).mtimeMs;
+  const state = buildLeaderState(T0);
+  expect(state.health).toMatchObject({ status: 'degraded', nextDueAt: null });
+  expect(state.health?.summary).toMatch(/preferences.*could not be checked/);
+  expect(readFileSync(config)).toEqual(original);
+  expect(statSync(config).mtimeMs).toBe(mtime);
+});
+
+
+it('requires finite full-run history for full runs, not for an explicit admitted check-in', async () => {
+  ensurePrivateDirectory(dirname(leaderStatePath()));
+  writePrivateFileAtomic(leaderStatePath(), JSON.stringify({ v: 1, runDays: { '2026-09-24': 2 }, checkinDays: { '2026-09-24': 'bad' } }));
+  const { deps, calls } = world({ now: () => T0 });
+  deps.cfg.foundry = { leaderPreferences: { maxFullRunsPerDay: 3, maxTotalRunsPerDay: 10 } };
+  expect((await runLeader(deps, 'manual', { force: true })).reason).toMatch(/required run counts/);
+  expect(calls).toHaveLength(0);
+  expect((await runLeader(deps, 'checkin', { force: true })).outcome).toBe('ok');
+  expect(buildLeaderState(T0).dailyRunCounts).toMatchObject({ total: 3, full: null });
 });

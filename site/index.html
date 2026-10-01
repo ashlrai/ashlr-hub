@@ -3,18 +3,54 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="description" content="Ashlr Verse is an operator console for coding agents: Claude Code, Codex, Grok and local seats in one workbench, Claude cloud and Devin lanes, a Leader you can talk to, and a fleet that merges only inside a scope you sign.">
+<meta name="description" content="Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.">
 <meta name="color-scheme" content="light dark">
 <link rel="canonical" href="https://verse.ashlr.ai/">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='54 55 146 146'%3E%3Cpath fill='%231A2B3C' d='M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z'/%3E%3Cpath fill='%232563EB' d='M110 121H143L133 152H120Z'/%3E%3C/svg%3E">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://verse.ashlr.ai/">
-<meta property="og:title" content="Ashlr Verse">
-<meta property="og:description" content="Every coding agent in one console, a Leader you can talk to in Verse, Telegram or the terminal, and autonomy within a grant you sign.">
-<meta property="og:image" content="https://verse.ashlr.ai/assets/verse-console.png">
-<meta property="og:image:alt" content="Ashlr Verse coding-agent console">
+<meta property="og:title" content="Ashlr Verse — one workbench for coding agents">
+<meta property="og:site_name" content="Ashlr Verse">
+<meta property="og:description" content="Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.">
+<meta property="og:image" content="https://verse.ashlr.ai/assets/work-with-me-3.19-demo.jpg">
+<meta property="og:image:alt" content="Ashlr Verse 3.19 chat and Review menu with labeled demo accounts">
+<meta name="twitter:title" content="Ashlr Verse — one workbench for coding agents">
+<meta name="twitter:description" content="Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.">
+<meta name="twitter:image:alt" content="Ashlr Verse 3.19 chat and Review menu with labeled demo accounts">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="https://verse.ashlr.ai/assets/verse-console.png">
+<meta name="twitter:image" content="https://verse.ashlr.ai/assets/work-with-me-3.19-demo.jpg">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://verse.ashlr.ai/#website",
+      "name": "Ashlr Verse",
+      "url": "https://verse.ashlr.ai/"
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://verse.ashlr.ai/#application",
+      "name": "Ashlr Verse",
+      "url": "https://verse.ashlr.ai/",
+      "description": "Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "macOS, Linux, Windows",
+      "softwareVersion": "3.19.0",
+      "license": "https://github.com/ashlrai/ashlr-hub/blob/master/LICENSE",
+      "isAccessibleForFree": true,
+      "sameAs": "https://github.com/ashlrai/ashlr-hub",
+      "featureList": [
+        "Coding-agent chats and workspaces",
+        "Signed resident autonomy on macOS",
+        "Local model discovery",
+        "Offline benchmark receipt comparison"
+      ]
+    }
+  ]
+}
+</script>
 <style>
   html { -webkit-text-size-adjust: 100%; }
   :root { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
@@ -33,7 +69,7 @@
     }
     @media (prefers-color-scheme: dark) { .shot img { border-color: var(--line); } }
 </style>
-<title>Ashlr Verse</title>
+<title>Ashlr Verse — one workbench for coding agents</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
@@ -154,13 +190,19 @@
   .journey-panel:focus-visible { outline: 2px solid #9ed6fc; outline-offset: 5px; }
   .journey-panel p { margin: 0; color: #b9c7d7; font-size: .875rem; line-height: 1.55; }
   .journey-flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: stretch; gap: 8px; margin: 22px 0 18px; }
-  .journey-flow span { display: flex; align-items: center; justify-content: center; min-height: 54px; padding: 7px; border: 1px solid #355069; border-radius: 3px; color: #eaf0f7; text-align: center; font: .69rem/1.35 var(--f-mono); }
+  .journey-flow button { background: transparent; cursor: pointer; }
+  .journey-flow button[aria-pressed="true"] { background: #233e51; border-color: #70d0c0; }
+  .journey-inspect { min-height: 5em; padding: 12px 0; }
+  .evidence-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .evidence-row strong { color: var(--live); font-family: var(--f-mono); }
+  .evidence-note { color: var(--muted); font-size: .875rem; max-width: 72ch; }
+  .journey-flow span, .journey-flow button { display: flex; align-items: center; justify-content: center; min-height: 54px; padding: 7px; border: 1px solid #355069; border-radius: 3px; color: #eaf0f7; text-align: center; font: .69rem/1.35 var(--f-mono); }
   .journey-flow i { align-self: center; color: #70d0c0; font-style: normal; }
   .journey-end { display: flex; align-items: center; gap: 9px; border-top: 1px solid #2b3c4e; padding-top: 16px; color: #a8d9d0 !important; font: .75rem/1.5 var(--f-mono) !important; }
   .journey-end::before { content: ""; width: 7px; height: 7px; flex: none; border-radius: 50%; background: #61d6bc; }
   .journey-foot { margin: 0; padding: 13px 20px; border-top: 1px solid #2b3c4e; color: #8fa3b8; font: .6875rem/1.5 var(--f-mono); }
   @media (max-width: 890px) { .hero-grid { grid-template-columns: 1fr; } .hero .intro h1 { max-width: 16ch; } }
-  @media (max-width: 480px) { .hero .intro h1 { font-size: clamp(2.75rem, 11vw, 3.35rem); } .journey-flow { gap: 4px; } .journey-flow span { font-size: .61rem; } .journey-body { padding: 20px 16px; } }
+  @media (max-width: 480px) { .hero .intro h1 { font-size: clamp(2.75rem, 11vw, 3.35rem); } .journey-flow { gap: 4px; } .journey-flow span, .journey-flow button { font-size: .61rem; } .journey-body { padding: 20px 16px; } }
   .cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; align-items: center; }
   .btn { font-weight: 600; font-size: var(--step-0); padding: 11px 20px; border-radius: 3px; text-decoration: none; border: 1px solid transparent; display: inline-block; }
   .btn-primary { background: var(--accent); color: #fff; }
@@ -360,7 +402,7 @@
   <div class="wrap hero">
     <div class="hero-grid">
       <div class="intro">
-        <p class="eyebrow">Ashlr Verse 3.18 &middot; The coding agent workbench</p>
+        <p class="eyebrow">Ashlr Verse 3.19 &middot; The coding agent workbench</p>
         <h1>Work with me.<br>Work for me.</h1>
         <p class="lede">
           Bring Claude Code, Codex, Grok, local models and Devin into one workbench.
@@ -373,7 +415,7 @@
         </div>
       </div>
       <div class="journey" role="region" aria-labelledby="journey-heading">
-        <div class="journey-top"><span><span class="journey-light" aria-hidden="true"></span><strong>Verse / work in motion</strong></span><span>3.18</span></div>
+        <div class="journey-top"><span><span class="journey-light" aria-hidden="true"></span><strong>Verse / work in motion</strong></span><span>3.19</span></div>
         <div class="journey-body">
           <p class="journey-kicker">Choose a workflow</p>
           <h2 id="journey-heading">See how the work moves.</h2>
@@ -384,17 +426,19 @@
           <div class="journey-panel" id="journey-ask" role="tabpanel" aria-labelledby="journey-tab-ask" tabindex="0">
             <h3>Think, build and steer together.</h3>
             <p>Choose an account and model, guide it in a chat, inspect reported tools and context, and review the changes beside the conversation.</p>
-            <div class="journey-flow" aria-label="Interactive chat to reviewed changes"><span>Your chat</span><i aria-hidden="true">→</i><span>Agent + tools</span><i aria-hidden="true">→</i><span>Your review</span></div>
+            <div class="journey-flow" role="group" aria-label="Inspect stages: Interactive chat to reviewed changes"><button type="button" aria-pressed="true" data-inspect="Choose your account, model and project. Your prompt stays editable until you send it.">Your chat</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="Inspect the tools and context reported for the turn. Steer the conversation while the agent works.">Agent + tools</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="Read the changes, checkpoints and session evidence. You decide the next step.">Your review</button></div>
+            <p class="journey-inspect" aria-live="polite">Choose your account, model and project. Your prompt stays editable until you send it.</p>
             <p class="journey-end">Switch workspaces without losing your drafts or restarting a session.</p>
           </div>
           <div class="journey-panel" id="journey-build" role="tabpanel" aria-labelledby="journey-tab-build" tabindex="0" hidden>
             <h3>Give the fleet an outcome.</h3>
             <p>Delegate tasks, guide the Leader's planning and see what needs you. An admitted resident fleet works within the repository, account and spending scope you sign.</p>
-            <div class="journey-flow" aria-label="Signed scope to verified fleet work"><span>Your scope</span><i aria-hidden="true">→</i><span>Fleet + checks</span><i aria-hidden="true">→</i><span>Verified work</span></div>
+            <div class="journey-flow" role="group" aria-label="Inspect stages: Signed scope to verified fleet work"><button type="button" aria-pressed="true" data-inspect="Choose repositories, accounts and standing permissions. Review the exact scope before Touch ID approval.">Your scope</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="An admitted resident fleet plans and dispatches eligible work. Current account readiness and resources still apply.">Fleet + checks</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="Inspect actual work, checks and authority in Fleet. Eligible signed scope can admit merges; this illustration performs none.">Verified work</button></div>
+            <p class="journey-inspect" aria-live="polite">Choose repositories, accounts and standing permissions. Review the exact scope before Touch ID approval.</p>
             <p class="journey-end">Eligible elite-direct work lands without a separate judge. Stop and revocation remain available.</p>
           </div>
         </div>
-        <p class="journey-foot">Illustrative workflow · these controls explain Verse; they do not launch agents.</p>
+        <p class="journey-foot">Illustration · select a mode, then inspect its stages. No agents are launched.</p>
       </div>
     </div>
 
@@ -557,35 +601,35 @@
     <div class="wrap">
       <div class="sec-head">
         <p class="eyebrow">The multi-seat workbench</p>
-        <h2>Claude Code, two Codex accounts, Grok and a local model, side by side.</h2>
+        <h2>Your chats, accounts and fleet, in one place.</h2>
         <p>
           A seat is an account and the CLI that drives it, pinned to its own profile so a turn never
           lands on the wrong account. Connect two Codex accounts and you have two Codex seats. When one
-          runs out of window, move to the next without changing tools. Verse never asks for or stores a
-          credential; each vendor CLI signs itself in.
+          runs out of window, move to the next without changing tools. Native CLI seats use
+          each vendor CLI’s sign-in and isolated account profile.
         </p>
       </div>
 
       <figure class="shot">
-        <img src="assets/verse-console.png" width="1900" height="1030" loading="lazy" decoding="async"
-             alt="The Ashlr Verse console: an expandable rail of sections down the left, a project-grouped
-                  chat sidebar, and a resources panel listing every connected account with its live usage
-                  windows — two Codex seats blocked at 100%, Claude and Grok usable, two local models ready." />
-        <figcaption>
-          The 3.17 console as it actually runs. Two Codex seats are out of window; Claude, Grok and both
-          local models are not. Account names are the only thing edited in this image.
-        </figcaption>
+        <img src="assets/work-with-me-3.19-demo.jpg" width="1280" height="720" loading="lazy" decoding="async"
+             alt="Ashlr Verse 3.19 Work with me: a project chat, reported tools and context, account selection and the compact Review menu. Labeled demo workspace." />
+        <figcaption>Work with me: the current 3.19 web workbench with demo accounts, sample usage and a demo conversation.</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="assets/work-for-me-3.19-demo.jpg" width="1280" height="720" loading="lazy" decoding="async"
+             alt="Ashlr Verse 3.19 Work for me: the Command overview, a sample Leader plan and account usage. Autonomy is off without a standing grant." />
+        <figcaption>Work for me: a sample Leader plan and resource overview. No standing grant is active and no agents or providers ran for these screenshots.</figcaption>
       </figure>
 
       <div class="seats">
         <div class="seat">
           <span class="tag local">Local</span><h3>Qwen3.8 27B</h3>
-          <p class="speed">~151s / turn &middot; 4 concurrent</p>
-          <p>Your own GPU through llama.cpp, four batching slots. No quota, no network, no per-token cost. Slower per turn, and still there at 2am.</p>
+          <p class="speed">Historical four-bit run &middot; ~151s / turn</p>
+          <p>Your own GPU through llama.cpp. Slot count follows your runtime configuration. No provider quota or per-token fee; throughput depends on the loaded model and hardware.</p>
         </div>
         <div class="seat">
           <span class="tag">Grok</span><h3>Grok 4.7</h3>
-          <p class="speed">~16&ndash;21s / turn</p>
+          <p class="speed">Historical runs &middot; ~16&ndash;21s / turn</p>
           <p>The fast lane, and a build-fast variant. Sessions resume by native id, so a long task keeps its context across turns.</p>
         </div>
         <div class="seat">
@@ -594,17 +638,17 @@
           <p>Driven through its own CLI and profile. Remaining quota is visible before you spend it, from metadata probes that cost no tokens.</p>
         </div>
         <div class="seat">
-          <span class="tag">Codex</span><h3>GPT-6 Astra</h3>
+          <span class="tag">Codex</span><h3>Your account’s model catalog</h3>
           <p class="speed">Multiple accounts</p>
-          <p>Several Codex accounts enrolled at once, each pinned to its own home directory so a turn can never land on the wrong one.</p>
+          <p>Enroll several Codex accounts, each pinned to its own home directory. GPT-6.1 Sol appears when the account’s own catalog lists it.</p>
         </div>
       </div>
 
-      <h3 class="sub-h">Five surfaces, two drawers, one palette</h3>
+      <h3 class="sub-h">Six destinations, two work modes, one palette</h3>
       <div class="seats">
         <div class="seat">
-          <span class="tag">&#8984;1 &ndash; &#8984;5</span><h3>Command, Fleet, Growth, Mind, Chat</h3>
-          <p>What needs you and the ladder; what runs where and every shadow decision; whether output compounds, with Lessons; the Leader conversation; and the chat itself.</p>
+          <span class="tag">Workspaces</span><h3>Command, Fleet, Growth, Mind, Chat, Agents</h3>
+          <p>Command for what needs you; Fleet for runs and decisions; Growth for lessons; Mind for the Leader; Chat for sessions; Agents for the running roster. Work with me and Work for me switch the workspace without restarting your chat.</p>
         </div>
         <div class="seat">
           <span class="tag">&#8984;.</span><h3>Resources, ready or not</h3>
@@ -811,7 +855,19 @@ ashlr wiki ask "where are standing grants verified?"</pre>
   <section id="measured">
     <div class="wrap">
       <div class="sec-head">
-        <p class="eyebrow">Measured, not estimated</p>
+        <p class="eyebrow">3.19 · controlled startup regression</p>
+        <h2>A slow account should not hold up the others.</h2>
+        <p>Two metadata workers now refill each freed slot independently. The same concurrency and cleanup rules remain.</p>
+      </div>
+      <div aria-label="Controlled metadata startup comparison">
+        <div class="evidence-row"><span>Before · wait for the whole pair</span><strong>Grok still pending at 30 ms</strong></div>
+        <div class="evidence-row"><span>After · refill a freed slot</span><strong>Fast rows at 10 / 20 / 30 ms</strong></div>
+      </div>
+      <p class="evidence-note">Synthetic regression fixture: one mocked account takes 20 seconds; three others take 10 ms each. Both paths allow two clients. These are controlled test-clock observations, not provider latency or a live startup benchmark. <a href="https://github.com/ashlrai/ashlr-hub/blob/master/test/resource-connection-monitor.test.ts">Inspect the test</a>.</p>
+      <p class="evidence-note">Measure your own configuration with <code>ashlr benchmark run</code>; this explicitly starts local model work. <code>ashlr benchmark --compare-reports BASE CANDIDATE</code> is offline and refuses incompatible or uncontrolled receipts. It reports matched observations, not universal savings. <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/AGENT-HARNESS-EVOLUTION.md#evidence-without-a-new-dispatch-gate">Benchmark guide</a>.</p>
+
+      <div class="sec-head">
+        <p class="eyebrow">Historical local-model measurements</p>
         <h2>One bug was costing 23,500 tokens a turn.</h2>
         <p>
           Claude Code appends a token counter to every request, and it changes each turn. Verse was
@@ -863,7 +919,7 @@ ashlr wiki ask "where are standing grants verified?"</pre>
 
       <div class="tbl-scroll" style="margin-top:32px">
         <table>
-          <caption>Same tasks, same hardware, same model, before and after the fix.</caption>
+          <caption>Historical cache-fix runs · 128 GB machine, Qwen3.8 27B at four-bit; same tasks and configuration.</caption>
           <thead><tr><th scope="col">Workload</th><th scope="col" class="num">Before</th><th scope="col" class="num">After</th><th scope="col" class="num">Change</th></tr></thead>
           <tbody>
             <tr><th scope="row">Prompt tokens reprocessed per turn</th><td class="num">23,500</td><td class="num after">34&ndash;556</td><td class="num">&minus;98%</td></tr>
@@ -887,7 +943,7 @@ ashlr wiki ask "where are standing grants verified?"</pre>
     <section class="run" aria-label="Measured parallel run" style="border-top:1px solid var(--line);padding-block:0;margin-top:32px">
       <div class="run-head">
         <h2>One machine, one GPU, four local slots</h2>
-        <span class="meta">Qwen3.8 27B &middot; one measured configuration, not a ceiling &middot; driven through the console's own dispatch path</span>
+        <span class="meta">Historical Qwen3.8 27B four-bit &middot; one measured configuration, not a ceiling &middot; driven through the console's own dispatch path</span>
       </div>
       <div class="run-body">
         <div class="lane"><span class="name">agent 1</span><span class="track"><span class="fill" style="width:93.1%;animation-delay:.05s"></span></span><span class="val">485s <span class="ok">&check;</span></span></div>
@@ -1108,9 +1164,9 @@ ashlr wiki ask "where are standing grants verified?"</pre>
         <div class="steps">
           <div class="step"><span class="n"></span><div>
             <h3>Install and open the console</h3>
-            <p>Inspect reported tools and context in each chat, and open source-line evidence from the local module map. Install Verse 3.18.0 with the same CLI command on all three platforms. On an Apple silicon Mac, you can also download the <a href="https://github.com/ashlrai/ashlr-hub/releases/tag/v3.18.0">Verse 3.18.0 desktop DMG</a>. It is locally signed, not Apple Developer ID notarized, so macOS may require Open Anyway on first launch.</p>
-            <p>New in 3.18: Work with me and Work for me, editable chat guides, signed change-volume limits and evaluation reports that distinguish measured tokens from unknown usage.</p>
-            <pre id="install-command">npm i -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.18.0/ashlr-hub-3.18.0.tgz
+            <p>Inspect reported tools and context in each chat, and open source-line evidence from the local module map. Install Verse 3.19.0 with the same CLI command on all three platforms. On an Apple silicon Mac, you can also download the <a href="https://github.com/ashlrai/ashlr-hub/releases/tag/v3.19.0">Verse 3.19.0 desktop DMG</a>. It is locally signed, not Apple Developer ID notarized, so macOS may require Open Anyway on first launch.</p>
+            <p>New in 3.19: a compact Review menu, editable goal and Leader preferences with No preference limit, and an explicit local benchmark command with offline report comparison.</p>
+            <pre id="install-command">npm i -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.19.0/ashlr-hub-3.19.0.tgz
 ashlr verse</pre>
             <button class="copy-command" type="button" data-copy="install-command">Copy commands</button><span class="copy-status" role="status" aria-live="polite"></span>
           </div></div>
@@ -1171,7 +1227,7 @@ ashlr devin budget --acu 50</pre>
 
 <footer>
   <div class="wrap">
-    <p>Ashlr Verse 3.18 &middot; verse.ashlr.ai</p>
+    <p>Ashlr Verse 3.19 &middot; verse.ashlr.ai</p>
     <span><a href="/ecosystem">Ecosystem</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md">User guide</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md">Leader</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md">Devin</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/CHANGELOG.md">Changelog</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub">github.com/ashlrai/ashlr-hub</a></span>
   </div>
 </footer>
@@ -1187,6 +1243,13 @@ ashlr devin budget --acu 50</pre>
     });
     if (focus) tab.focus();
   }
+  document.querySelectorAll('.journey-flow button').forEach((button) => {
+    button.addEventListener('click', () => {
+      const group = button.parentElement;
+      group.querySelectorAll('button').forEach((item) => item.setAttribute('aria-pressed', String(item === button)));
+      group.nextElementSibling.textContent = button.dataset.inspect;
+    });
+  });
   workflowTabs.forEach((tab, index) => {
     tab.addEventListener('click', () => selectWorkflow(tab));
     tab.addEventListener('keydown', (event) => {

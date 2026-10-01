@@ -334,6 +334,8 @@
   font-size: var(--text-sm-size);
   line-height: var(--text-sm-line);
 }
+.workModeChoices { display: flex; flex-wrap: wrap; gap: var(--space-1); min-width: 0; }
+.reviewButton { margin-left: auto; }
 .workMode:hover { background: var(--bg-hover); }
 .workMode[aria-pressed='true'] {
   color: var(--text-primary);

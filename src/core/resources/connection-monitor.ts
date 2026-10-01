@@ -196,10 +196,17 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
     const startedAt = Date.now();
     refreshing = true;
     try {
-      // At most two simultaneous native clients; no overlapping refresh cycles.
-      for (let i = 0; i < config.accounts.length && !abort.signal.aborted; i += 2) {
-        await Promise.all(config.accounts.slice(i, i + 2).map((account, offset) => sample(account, i + offset)));
-      }
+      // Refill each freed slot independently. A slow provider must not keep
+      // later accounts unchecked while the second native client is idle.
+      // The shared coordinator still bounds BOTH collectors; cycles never overlap.
+      let next = 0;
+      const worker = async (): Promise<void> => {
+        while (!abort.signal.aborted && next < config.accounts.length) {
+          const index = next++;
+          await sample(config.accounts[index]!, index);
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(2, config.accounts.length) }, worker));
     } finally {
       refreshing = false;
       if (abort.signal.aborted) projectStopped();

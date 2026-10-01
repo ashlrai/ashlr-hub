@@ -85,6 +85,50 @@ describe('native metadata monitoring', () => {
     expect(() => validateResourceConnectionConfig(duplicate)).toThrow();
   });
 
+  it.each(['failed', 'timed-out'] as const)('publishes fast later accounts while an earlier 20s %s probe is pending', async (status) => {
+    let active = 0; let peak = 0;
+    const started = Date.now();
+    const completed = new Map<string, number>();
+    const delayed = <T>(id: string, value: T, delay: number): Promise<T> => {
+      active++; peak = Math.max(peak, active);
+      return new Promise((resolve) => setTimeout(() => {
+        active--; completed.set(id, Date.now() - started); resolve(value);
+      }, delay));
+    };
+    const roster = config(['claude', 'codex', 'grok', 'codex']);
+    probes.claude.mockImplementation(() => delayed('slow', { status, reason: 'usage-probe-unavailable' }, 20_000));
+    probes.codex.mockImplementation(({ workerId }: { workerId: string }) => delayed(workerId, codex(), 10));
+    probes.grok.mockImplementation(() => delayed('grok-2', grok(), 10));
+    const handle = start({ config: roster });
+    try {
+      await vi.advanceTimersByTimeAsync(30);
+      const snapshot = handle.snapshot();
+      expect(snapshot.refreshing).toBe(true);
+      expect(snapshot.accounts[0]).toMatchObject({ state: 'checking', authentication: 'unknown', windows: [] });
+      // Each free native slot advances independently: a slow or eventually
+      // failed provider must not hide another provider's completed metadata.
+      for (const row of snapshot.accounts.slice(1)) expect(row).toMatchObject({
+        state: 'observed', authentication: 'signed-in', windows: quota(),
+      });
+      expect([...completed.entries()]).toEqual([['codex-1', 10], ['grok-2', 20], ['codex-3', 30]]);
+      expect(peak).toBe(2); expect(active).toBe(1);
+      expect(probes.claude).toHaveBeenCalledOnce();
+      expect(probes.codex).toHaveBeenCalledTimes(2); expect(probes.grok).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(19_970);
+      expect(handle.snapshot()).toMatchObject({ refreshing: false, accounts: [
+        { state: 'unavailable', authentication: 'unknown', windows: [], reason: 'usage-probe-unavailable' },
+        { state: 'observed' }, { state: 'observed' }, { state: 'observed' },
+      ] });
+      expect(active).toBe(0); expect(peak).toBe(2);
+    } finally {
+      // Complete the inert delayed fixture even if a latency assertion fails.
+      // Monitor close still awaits every owned probe; the test must not leak it.
+      const closing = handle.close();
+      await vi.advanceTimersByTimeAsync(20_000);
+      await closing;
+    }
+  });
+
   it('keeps a verified Codex window for display across transient failures, without renewing its expiry or auth', async () => {
     const handle = start({ config: config(['codex']) }); await settle();
     const observed = handle.snapshot().accounts[0]!;

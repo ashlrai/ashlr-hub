@@ -663,3 +663,9 @@
 :root[data-motion='reduce'] .backdrop,
 :root[data-motion='reduce'] .panel { animation: none; }
 :root[data-motion='reduce'] .meterFill { transition: none; }
+
+/* Usage stays visible; quieter facts and secondary windows expand on touch or keyboard. */
+.usageDetails { min-width: 0; font-size: var(--text-xs-size); color: var(--text-secondary); }
+.usageDetails > summary { width: fit-content; cursor: pointer; padding: var(--space-1) 0; }
+.usageDetails > summary:focus-visible { outline: 2px solid var(--focus-ring, var(--accent-500)); outline-offset: 2px; border-radius: var(--radius-xs); }
+.usageDetailBody { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-2) 0; min-width: 0; overflow-wrap: anywhere; }

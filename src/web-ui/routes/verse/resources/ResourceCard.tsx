@@ -115,6 +115,8 @@ export function ResourceCard({ row, status, settled, mode, busy, onAction, readi
   // Budget editing lives in Apps & Accounts; the drawer offers what the seat needs now.
   const actions = accountActions(row, settled).filter((a) => a.kind !== 'edit-budget');
   const reserve = row.reserve;
+  const primaryWindow = row.windows.find((w) => w.binding) ?? row.windows[0] ?? null;
+  const otherWindows = row.windows.filter((w) => w !== primaryWindow);
   const reserveText = reserve === null ? null : reserve.percent !== null && mode !== null ? `${reserve.label} · ${MODE_WORD[mode]}` : reserve.label;
   return (
     <li className={styles.card} data-status={status.kind} data-seat={row.seatId} data-verse-anchor={`resources:${row.seatId}`}>
@@ -125,25 +127,32 @@ export function ResourceCard({ row, status, settled, mode, busy, onAction, readi
           {row.plan !== null ? <span className={styles.plan}>{row.plan}</span> : null}
         </h4>
       </div>
-      {facts !== null ? <ResourceFacts facts={facts} /> : null}
       <StatusLine status={status} />
       {status.checked !== null ? (
         <p className={styles.stamp} title={status.checkedTitle ?? undefined}>{status.checked}</p>
       ) : null}
       {row.windows.length > 0 ? (
         <div className={styles.meters}>
-          {row.windows.map((w) => (
-            <WindowMeter key={w.id} row={row} w={w} reservePercent={reserve?.percent ?? null} />
-          ))}
+          {primaryWindow !== null ? <WindowMeter row={row} w={primaryWindow} reservePercent={reserve?.percent ?? null} /> : null}
         </div>
-      ) : null}
-      {reserveText !== null || row.credits !== null ? (
-        <p className={styles.reserveLine}>
-          {reserveText !== null ? <span title={reserve?.why}>{reserveText}</span> : null}
-          {reserveText !== null && row.credits !== null ? ' · ' : null}
-          {row.credits !== null ? <span>{row.credits}</span> : null}
-        </p>
-      ) : null}
+      ) : <p className={styles.subtle}>Usage not reported by this resource.</p>}
+      {row.lastReading ? <p className={styles.subtle}>Last known usage · latest check failed.</p> : null}
+      <details className={styles.usageDetails}>
+        <summary tabIndex={0} aria-label={`Usage details: ${row.label}`}>Usage details</summary>
+        <div className={styles.usageDetailBody}>
+          {facts !== null ? <ResourceFacts facts={facts} /> : null}
+          {otherWindows.length > 0 ? <div className={styles.meters}>{otherWindows.map((w) => <WindowMeter key={w.id} row={row} w={w} reservePercent={reserve?.percent ?? null} />)}</div> : null}
+          {row.windows.length === 0 ? <p className={styles.subtle}>Connection status and usage are separate. No percentage has been supplied.</p> : null}
+          {row.notes.map((note) => <p key={note} className={styles.subtle}>{note}</p>)}
+          {reserveText !== null || row.credits !== null ? (
+            <p className={styles.reserveLine}>
+              {reserveText !== null ? <span title={reserve?.why}>{reserveText}</span> : null}
+              {reserveText !== null && row.credits !== null ? ' · ' : null}
+              {row.credits !== null ? <span>{row.credits}</span> : null}
+            </p>
+          ) : null}
+        </div>
+      </details>
       <ReadinessLines row={readiness} />
       {actions.length > 0 ? (
         <div className={styles.cardActions}>

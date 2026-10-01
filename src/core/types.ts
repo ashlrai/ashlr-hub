@@ -1,3 +1,6 @@
+import type { LeaderPreferenceConfig } from './vision/leader-preferences.js';
+import type { GoalPreferenceConfig } from './goals/preferences.js';
+
 /**
  * THE CONTRACT.
  *
@@ -936,6 +939,10 @@ export interface AshlrConfig {
     goalFocusMode?: boolean;
     /** Active actionable-goal threshold for goalFocusMode. Default 4. */
     goalFocusActiveThreshold?: number;
+    /** Operator goal preferences; absent fields preserve legacy defaults, null removes that preference. */
+    goalPreferences?: GoalPreferenceConfig;
+    /** Operator daily Leader run preferences; null removes only the selected business ceiling. */
+    leaderPreferences?: LeaderPreferenceConfig;
     /**
      * M167: headless browser verification of web-app renders after a diff.
      * DEFAULT false (opt-in — doubles verify time for UI repos). When true,

@@ -1,3 +1,10 @@
+import type { LeaderPreferenceConfig, ResolvedLeaderPreferences } from '../vision/leader-preferences.js';
+export type { LeaderPreferenceKey } from '../vision/leader-preferences.js';
+export type VerseLeaderPreferences = ResolvedLeaderPreferences;
+import type { GoalPreferenceConfig, ResolvedGoalPreferences } from '../goals/preferences.js';
+export type { GoalPreferenceKey } from '../goals/preferences.js';
+export type VerseGoalPreferences = ResolvedGoalPreferences;
+
 /**
  * Ashlr Verse — autonomy control-plane contract (V2).
  *
@@ -101,6 +108,12 @@ export interface VerseCaps {
   subscriptionMaxPercent: number;
   /** Per-engine dispatch limits, sorted by engine id. */
   foundryLimits: VerseFoundryLimit[];
+  /** Present only on servers supporting operator goal preferences. */
+  goalPreferences?: VerseGoalPreferences;
+  leaderPreferences?: VerseLeaderPreferences;
+  /** Separate scheduling preference: defer NEW planning/invention while active work is available. */
+  goalFocusMode?: boolean;
+  goalFocusActiveThreshold?: number;
   /**
    * HONEST STATE: the cap keys whose value is a built-in default rather than
    * something configured on disk. The UI renders these as "default", never as
@@ -119,7 +132,11 @@ export type VerseCapKey =
   | 'maxConcurrent'
   | 'concurrency'
   | 'subscriptionMaxPercent'
-  | 'foundryLimits';
+  | 'foundryLimits'
+  | 'leaderPreferences'
+  | 'goalPreferences'
+  | 'goalFocusMode'
+  | 'goalFocusActiveThreshold';
 
 /** POST /api/verse/caps — a partial update. Unknown keys are rejected. */
 export interface VerseCapsUpdate {
@@ -133,6 +150,9 @@ export interface VerseCapsUpdate {
   subscriptionMaxPercent?: number;
   /** Replaces the named engines' limits; engines not listed are left alone. */
   foundryLimits?: VerseFoundryLimit[];
+  goalPreferences?: GoalPreferenceConfig;
+  leaderPreferences?: LeaderPreferenceConfig;
+  goalFocusMode?: boolean;
 }
 
 /**

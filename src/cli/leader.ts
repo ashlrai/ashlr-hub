@@ -104,7 +104,10 @@ function printState(state: LeaderStateV1): void {
   printMemo(state.latest);
   const hr = state.hitRate;
   console.log(`\nHit-rate (${hr.windowDays} d): ${hr.rate === null ? 'not graded yet' : `${Math.round(hr.rate * 100)}% of ${hr.graded}`}`);
-  console.log(`Runs today: ${state.runsToday}; next scheduled run: ${state.nextRunAt ?? 'unknown'}`);
+  const runsToday = state.dailyRunCounts
+    ? state.dailyRunCounts.total === null ? 'unknown (incomplete history)' : state.dailyRunCounts.total
+    : state.runsToday;
+  console.log(`Runs today: ${runsToday}; next scheduled run: ${state.nextRunAt ?? 'unknown'}`);
   if (state.lastRun) console.log(`Last run: ${state.lastRun.at} — ${state.lastRun.outcome}${state.lastRun.reason ? ` (${state.lastRun.reason})` : ''}`);
   const health = state.health;
   if (health) {

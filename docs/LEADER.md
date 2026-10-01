@@ -281,7 +281,11 @@ standing grant it runs on local models only. Local calls stream, so a slow
 local model is not cut off by a fetch timeout.
 
 **Retries.** A failed full run retries at 15 minutes, 45 minutes and 2 hours.
-At most 3 full runs a day.
+Three full runs a day by default. Advanced Leader preferences accept a positive
+safe integer or **No preference limit** for full runs, all runs and Grok lanes.
+Absent settings retain the existing defaults. The separate interval, quiet hours,
+single-flight and retry schedule still apply. See the
+[goal and Leader preference table](AGENT-HARNESS-EVOLUTION.md#operator-goal-and-leader-preferences).
 
 **Check-ins.** Every `foundry.leader.checkinHours` (default 2; 0 turns them
 off) during `foundry.leader.workingHours` (default 08–22), the Leader looks

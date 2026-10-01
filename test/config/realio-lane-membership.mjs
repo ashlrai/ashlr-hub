@@ -422,6 +422,7 @@ export const REAL_IO_TEST_FILES = [
   'test/perf-server-claude-usage.test.ts', // real transcript appends/truncations and the async prime path on disk
   'test/llama-process-async.test.ts', // spawns a real (harmless node timer) process standing in for llama-server
   'test/local-eval-trace.test.ts', // real loopback HTTP server standing in for the local model endpoint
+  'test/local-eval-trace-https.test.ts', // real loopback tracer, injected TLS transport; no external endpoint
   'test/local-eval-heldout.test.ts', // spawns real `node` held-out checkers, like local-eval.test.ts
   'test/verse-accounts-limit-reached.test.ts', // private 0600/0700 ledger evidence files round-tripped in a tmp root (sibling of verse-accounts)
   'test/verse-resources-ready-314.test.ts', // 3.14: real collector lease acquire / idle hand-back / re-acquire under a tmp root (sibling of verse-accounts)

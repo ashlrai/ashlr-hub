@@ -112,7 +112,8 @@ import {
 } from './preferences.js';
 import { prepareProjectMemory, readProjectMemory, writeProjectMemory } from './project-memory.js';
 import { discoverProjectsAsync } from './projects.js';
-import { discoverSeats, getSeatReadiness, refreshSeatTelemetry, type VerseSeatDiscovery } from './seats.js';
+import { discoverSeats, getSeatReadiness, refreshSeatTelemetry, resolveAccountsRoot, type VerseSeatDiscovery } from './seats.js';
+import { getVerseAccountCollector } from './accounts.js';
 import { DEVIN_CLI_SEAT_ID, devinCliTurnReadiness, devinSeatReadiness, discoverDevinSeats, mergeDevinSeats, type DevinSeatDiscoveryOptions } from './devin-seats.js';
 import { buildHandoffPreviewAsync } from './session-handoff.js';
 import { searchSessions } from './session-search.js';
@@ -1982,10 +1983,22 @@ export async function handleVerseApi(
     // says "unknown" forever, with no way to learn otherwise short of a reload.
     if (path === `${VERSE_API_PREFIX}/seats` && method === 'GET') {
       const discovery = await liveSeats(ctx.cfg);
+      const collector = getVerseAccountCollector();
+      const status = collector?.accountsRoot === resolveAccountsRoot(ctx.cfg) ? collector.status() : null;
+      const live = status?.mode === 'owned' && status.state === 'running' ? collector!.connections() : null;
+      const returnedIds = new Set(discovery.seats.map((seat) => seat.id));
       const body: VerseSeatsResponse = {
         sampledAt: new Date().toISOString(),
         seats: discovery.seats,
         localRuntime: discovery.localRuntime,
+        // Only initial supported-account checks justify faster cached reads.
+        // Expired, signed-out, failed and unsupported windows do not keep the
+        // startup poll alive, and no new native process is started by this read.
+        accountTelemetry: {
+          refreshing: live?.refreshing ?? false,
+          pendingAccountIds: (live?.accounts ?? []).filter((row) => row.state === 'checking' && returnedIds.has(row.id))
+            .map((row) => row.id),
+        },
       };
       sendJson(res, 200, body);
       return true;

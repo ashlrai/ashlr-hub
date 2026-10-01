@@ -157,6 +157,8 @@
 /src/core/run/best-of-n-policy.ts @masonwyatt23
 /src/core/vision/leader.ts @masonwyatt23
 /src/core/vision/leader-seat.ts @masonwyatt23
+/src/core/goals/preferences.ts @masonwyatt23
+/src/core/vision/leader-preferences.ts @masonwyatt23
 /src/core/sandbox/** @masonwyatt23
 /src/core/policy/** @masonwyatt23
 /src/core/routing/** @masonwyatt23
@@ -243,6 +245,7 @@
 /test/gate.test.ts @masonwyatt23
 /test/goal-loop.result.test.ts @masonwyatt23
 /test/goal-loop.runner.test.ts @masonwyatt23
+/test/goal-preferences.test.ts @masonwyatt23
 /test/grok-capacity-publish-e2e-315.test.ts @masonwyatt23
 /test/h1.apply-guardrails.test.ts @masonwyatt23
 /test/h1.audit.test.ts @masonwyatt23
@@ -311,6 +314,8 @@
 /test/leader-integration-310b.test.ts @masonwyatt23
 /test/leader-lessons-315.test.ts @masonwyatt23
 /test/leader-local-transport-314.test.ts @masonwyatt23
+/test/leader-memo-310b.test.ts @masonwyatt23
+/test/leader-preferences.test.ts @masonwyatt23
 /test/leader-reliability-314.test.ts @masonwyatt23
 /test/leader-run-310b.test.ts @masonwyatt23
 /test/leader-seat-310b.test.ts @masonwyatt23

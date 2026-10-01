@@ -19,14 +19,16 @@ import { resetGuard } from './shell/guarded-action.js';
 import { resetResolvedForTest } from './shell/needs-you-actions.js';
 import { activity, approvalNeed, shellFetch, vetoNeed, type ShellFetch } from './shell/shell-fixtures.test-support.js';
 import { refreshActivity, resetActivityForTest } from './shell/useActivity.js';
-import { mockCompactViewport, type ViewportMock } from './shell/viewport.test-support.js';
+import { mockCompactViewport, mockViewport, type ViewportMock } from './shell/viewport.test-support.js';
 import { MissingSection, SECTION_MODULES, VerseApp } from './VerseApp.js';
 import { getResourcesUi, reloadResourcesUiForTest, RESOURCES_STORAGE_KEY, setResourcesBar, setResourcesSummary } from './resources/resources-store.js';
 import { resetVerseStore } from './verse-store.js';
 import { getDockSnapshot, resetDockStore } from './dock/dock-store.js';
+import { loadDraft, saveDraft } from './chat/composer-memory.js';
 import {
   getVerseUiState,
   landedModule,
+  openVerseSession,
   RAIL_SECTIONS,
   reloadVerseUiForTest,
   resetVerseUi,
@@ -101,6 +103,73 @@ afterEach(() => {
 });
 
 describe('work intents', () => {
+  it('opens Review lazily, navigates to Usage and preserves the current chat and unsent draft', async () => {
+    const user = userEvent.setup();
+    saveDraft('vs_1', 'Keep this unsent instruction.');
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    // Select through the real chat request; shell state alone does not open a chat.
+    act(() => openVerseSession('vs_1'));
+    await waitFor(() => expect(getVerseUiState().activeSessionId).toBe('vs_1'));
+    const button = screen.getByRole('button', { name: /^Review$/ });
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('menu', { name: 'Review work' })).not.toBeInTheDocument();
+    button.focus(); await user.keyboard('{ArrowDown}');
+    const menu = await screen.findByRole('menu', { name: 'Review work' });
+    await waitFor(() => expect(within(menu).getByRole('menuitem', { name: 'Chat changes' })).toHaveFocus());
+    await user.keyboard('u{Enter}');
+    expect(getVerseUiState().section).toBe('usage');
+    expect(getVerseUiState().activeSessionId).toBe('vs_1');
+    expect(loadDraft('vs_1')).toBe('Keep this unsent instruction.');
+    expect(surface('chat')).toHaveAttribute('hidden');
+    expect(screen.queryByRole('menu', { name: 'Review work' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Work with me' }));
+    expect(surface('chat')).not.toHaveAttribute('hidden');
+    expect(loadDraft('vs_1')).toBe('Keep this unsent instruction.');
+    expect(net.fetch.mock.calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true);
+  });
+
+  it('Review Escape restores focus, and delegated decisions only open the existing Fleet surface', async () => {
+    const user = userEvent.setup(); mount();
+    await user.click(screen.getByRole('button', { name: 'Work for me' }));
+    const button = screen.getByRole('button', { name: /^Review$/ });
+    await user.click(button);
+    let menu = await screen.findByRole('menu', { name: 'Review work' });
+    await waitFor(() => expect(within(menu).getByRole('menuitem', { name: 'Review agents' })).toHaveFocus());
+    await user.keyboard('{Escape}'); await waitFor(() => expect(button).toHaveFocus());
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    await user.click(button); menu = await screen.findByRole('menu', { name: 'Review work' });
+    expect(within(menu).getByRole('menuitem', { name: /Fleet decisions/ })).toHaveTextContent(/otherwise view Fleet status/);
+    await user.click(within(menu).getByRole('menuitem', { name: /Fleet decisions/ }));
+    expect(getVerseUiState().section).toBe('fleet');
+    expect(screen.queryByRole('menu', { name: 'Review work' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: /Confirm|dispatch token|grant/i })).not.toBeInTheDocument();
+    expect(net.fetch.mock.calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true);
+  });
+
+  it.each([390, 760, 761])('Review at %ipx closes only the floating chat list and preserves the chat draft', async (width) => {
+    viewport = mockViewport(width);
+    const user = userEvent.setup();
+    saveDraft('vs_1', 'Keep this mobile review draft.');
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    act(() => openVerseSession('vs_1'));
+    await waitFor(() => expect(getVerseUiState().activeSessionId).toBe('vs_1'));
+    expect(getVerseUiState().sidebarCollapsed).toBe(false);
+    const button = screen.getByRole('button', { name: /^Review$/ });
+    await user.click(button);
+    const menu = await screen.findByRole('menu', { name: 'Review work' });
+    expect(getVerseUiState().sidebarCollapsed).toBe(width <= 760);
+    expect(surface('chat')?.querySelector('[data-sidebar]')).toHaveAttribute('data-sidebar', width <= 760 ? 'collapsed' : 'open');
+    expect(getVerseUiState().activeSessionId).toBe('vs_1');
+    expect(loadDraft('vs_1')).toBe('Keep this mobile review draft.');
+    await waitFor(() => expect(within(menu).getByRole('menuitem', { name: 'Chat changes' })).toHaveFocus());
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(button).toHaveFocus());
+    expect(getVerseUiState().sidebarCollapsed).toBe(width <= 760);
+    expect(net.fetch.mock.calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true);
+  });
+
   it('navigates between chat and fleet without changing authority or dispatch', async () => {
     const user = userEvent.setup();
     mount();

@@ -52,13 +52,13 @@ const LEVEL_OF_STATUS: Readonly<Record<AccountStatus['kind'], Level>> = {
   low: 'low',
   spent: 'out',
   'signed-out': 'out',
-  unavailable: 'out',
+  unavailable: 'unknown',
   checking: 'unknown',
   'not-checked': 'unknown',
 };
 
 /** Pure: capacity rows → bar rows (exported for tests). */
-export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolean; now: number }): BarRow[] {
+export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolean; now: number; pendingSeatIds?: readonly string[] }): BarRow[] {
   const out: BarRow[] = [];
   for (const row of rows) {
     if (row.kind === 'local') {
@@ -72,7 +72,7 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
         level: row.cls === 'blocked' ? 'out' : row.cls === 'unread' ? 'unknown' : 'idle',
         value: row.cls === 'blocked' ? 'offline' : row.cls === 'unread' ? 'not reported' : 'ready',
         summary: `${row.label}: ${row.summary}`,
-        detail: ['No usage limits — runs on this Mac.', ...row.notes],
+        detail: ['No metered usage — runs on this Mac.', ...row.notes],
       });
       continue;
     }
@@ -80,13 +80,15 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
     const level = LEVEL_OF_STATUS[status.kind] ?? 'unknown';
     const left = bindingLeftPercent(row);
     const value = level === 'out' ? (status.kind === 'spent' ? 'spent' : status.label.toLowerCase())
-      : left === null ? '—' : `${usedPercentText(left)} left`;
+      : left === null ? (opts.pendingSeatIds?.includes(row.seatId) ? 'reading…' : status.kind === 'unavailable' ? 'unavailable' : 'no usage') : `${usedPercentText(left)} left${row.lastReading ? ' · last' : ''}`;
     const detail = row.windows.map((w) => {
       const used = w.limitReached ? 'limit reached' : w.usedPercent === null ? 'no reading' : `${usedPercentText(w.usedPercent)} used`;
       // The accounts model already words it "resets Fri 2:25 PM"; don't say it twice.
       const reset = w.resetText ? w.resetText.replace(/^resets\s+/i, '') : '';
       return `${w.label.charAt(0).toUpperCase()}${w.label.slice(1)}: ${used}${reset ? ` · resets ${reset}` : ''}`;
     });
+    if (row.windows.length === 0) detail.push('Usage is not reported by this resource.');
+    if (row.lastReading) detail.push('Last known usage · latest check failed.');
     if (row.reserve) detail.push(row.reserve.label);
     if (status.usableAgain) detail.push(`Usable again ${status.usableAgain}`);
     if (status.checked) detail.push(`Checked ${status.checked}`);
@@ -94,22 +96,21 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
       key: row.seatId,
       engine: row.engine,
       name: row.label,
-      leftPercent: level === 'out' ? 0 : left,
-      level,
+      leftPercent: status.kind === 'spent' ? 0 : left,
+      level: left === null && level === 'ok' ? 'unknown' : level,
       value,
       summary: `${row.label}: ${status.label}${status.detail ? ` · ${status.detail}` : ''}`,
       detail,
     });
   }
-  // Usable first, then running low, then unknown, then spent / signed out; local last among the usable.
-  const rank: Record<Level, number> = { ok: 0, low: 1, idle: 2, unknown: 3, out: 4 };
-  return out.sort((a, b) => rank[a.level] - rank[b.level]);
+  // Keep roster order: a new reading must never move the resource under a pointer.
+  return out;
 }
 
 function Battery({ left, level, vertical }: { left: number | null; level: Level; vertical: boolean }) {
   const fill = left === null ? (level === 'idle' ? 100 : 0) : Math.max(left > 0 ? 6 : 0, left);
   return (
-    <span className={styles.battery} data-level={level} data-vertical={vertical || undefined} aria-hidden="true">
+    <span className={styles.battery} data-level={level} data-unknown={left === null && level !== 'idle' || undefined} data-vertical={vertical || undefined} aria-hidden="true">
       <span className={styles.cell} style={{ '--fill': `${fill}%` } as CSSProperties} />
       <span className={styles.nub} />
     </span>
@@ -139,10 +140,10 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   const cloudRead = useQuery(cloudCreditsQuery);
   const now = Date.now();
   const rows = useMemo(
-    () => (data.loading ? [] : barRows(buildCapacityRows(data.seats, { health: data.health, budget: data.budget, local: 'collapse', now }), { healthRead: data.health !== null, now })),
+    () => (data.loading ? [] : barRows(buildCapacityRows(data.seats, { health: data.health, budget: data.budget, local: 'collapse', now }), { healthRead: data.health !== null, now, pendingSeatIds: data.pendingSeatIds })),
     // `now` moves every render; the rows only need to follow the data.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [data.loading, data.seats, data.health, data.budget],
+    [data.loading, data.seats, data.health, data.budget, data.pendingSeatIds],
   );
   const cloud = cloudRead.data?.credits ?? null;
   const cloudLeft = cloud && cloud.totalUsd > 0 ? (cloud.remainingUsd / cloud.totalUsd) * 100 : null;
@@ -156,7 +157,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
 
   if (rows.length === 0 && !cloud && !devinShown) return null;
   return (
-    <div className={styles.bar} data-expanded={expanded || undefined} role="group" aria-label="Resources at a glance">
+    <div className={styles.bar} data-expanded={expanded || undefined} role="group" aria-label="Resources at a glance" aria-busy={data.refreshing || undefined}>
       {rows.map((row) => (
         <Tooltip key={row.key} content={<RowTip row={row} />} placement="right">
           <button
@@ -213,7 +214,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
                 </span>
                 <span className={styles.line}>
                   <Battery left={cloudLeft} level={cloudLevel} vertical={false} />
-                  <span className={styles.value}>{formatUsd(cloud.remainingUsd)} left</span>
+                  <span className={styles.value}>{formatUsd(cloud.remainingUsd)} est.</span>
                 </span>
               </>
             ) : (
@@ -229,8 +230,8 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
         <Tooltip
           content={
             <div className={styles.tip}>
-              <div className={styles.tipHead}><span className={styles.devinMark} aria-hidden="true">D</span><strong>Devin</strong></div>
-              <div className={styles.tipSummary}>{formatAcu(devin.budget.acuRemaining)} of {formatAcu(devin.budget.acuBudgetTotal)} left{devin.budget.paused ? ' · paused' : ''}</div>
+              <div className={styles.tipHead}><ProviderLogo engine="devin" size={14} className={styles.logo} /><strong>Devin</strong></div>
+              <div className={styles.tipSummary}>{formatAcu(devin.budget.acuRemaining)} of {formatAcu(devin.budget.acuBudgetTotal)} left · tracked budget{devin.budget.paused ? ' · paused' : ''}</div>
               <div className={styles.tipLine}>{devin.budget.running} running · {devin.budget.sessionsToday} today</div>
               <div className={styles.tipHint}>Click for Resources · ⌘.</div>
             </div>
@@ -242,23 +243,23 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
             className={styles.row}
             data-level={devinLevel}
             data-resource="devin"
-            aria-label={`Devin: ${formatAcu(devin.budget.acuRemaining)} of ${formatAcu(devin.budget.acuBudgetTotal)} left. Open Resources`}
+            aria-label={`Devin tracked budget: ${formatAcu(devin.budget.acuRemaining)} of ${formatAcu(devin.budget.acuBudgetTotal)} left. Open Resources`}
             onClick={() => openResources()}
           >
             {expanded ? (
               <>
                 <span className={styles.line}>
-                  <span className={styles.devinMark} aria-hidden="true">D</span>
+                  <ProviderLogo engine="devin" size={14} className={styles.logo} />
                   <span className={styles.name}>Devin</span>
                 </span>
                 <span className={styles.line}>
                   <Battery left={devinLeft} level={devinLevel} vertical={false} />
-                  <span className={styles.value}>{formatAcu(devin.budget.acuRemaining)}</span>
+                  <span className={styles.value}>{formatAcu(devin.budget.acuRemaining)} budget</span>
                 </span>
               </>
             ) : (
               <>
-                <span className={styles.devinMark} aria-hidden="true">D</span>
+                <ProviderLogo engine="devin" size={14} className={styles.logo} />
                 <Battery left={devinLeft} level={devinLevel} vertical />
               </>
             )}

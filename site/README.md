@@ -47,8 +47,13 @@ is missing or invalid, the page must show an error instead of a false zero.
 
 ## What the numbers on it mean
 
-Every figure is measured on a real machine (128 GB, Qwen3.8 27B at four-bit),
-not estimated, and each one is reproducible from the repo:
+The local-model tables are historical runs on a 128 GB machine with Qwen3.8
+27B at four-bit. They do not describe the currently loaded model or establish
+3.19 performance. Settings, controlled test clocks and measured runs are labeled
+separately. The current online benchmark command has not been run as part of
+this site change; offline comparison is not a new token-savings measurement.
+
+Sources for the figures and behaviors:
 
 | Claim on the page | Where it came from |
 |---|---|
@@ -121,4 +126,37 @@ they were equivalent, because they are not:
 - **Linux** — CLI and console, sandboxing via `bwrap`/`firejail`, no desktop package, no custody helper
 - **Windows** — CLI and console, per-account profile isolation, env-only isolation, no desktop package, no custody helper
 
-GitHub Actions is off, so the page no longer says "CI-tested".
+GitHub Actions validates source candidates on Linux and Windows as well as
+macOS. Those checks do not prove an installed desktop package or resident
+autonomy on Linux or Windows.
+
+## Demo and metadata
+
+The two hero modes and stage buttons are illustrations. They make no requests
+and never simulate a connected account or completed task. Buttons support
+keyboard focus; the mode tabs support arrows, Home and End. The first mode and
+its first stage are readable without JavaScript. There is no automatic playback.
+
+The 3.19 startup visual is a controlled regression: one mocked account delays
+20 seconds and three delay 10 ms each; the rolling two-worker implementation
+finishes the fast rows at 10, 20 and 30 ms. It is not provider or native UI latency.
+See `test/resource-connection-monitor.test.ts`.
+
+Titles, descriptions and canonical URLs describe each page. JSON-LD describes
+the app and site without invented ratings or reviews, so it makes no rich-result
+eligibility claim. Sitemap `lastmod` tracks actual page/content updates, not a
+new date for an unchanged page. Google may choose different search titles or
+snippets; metadata does not prove indexing or ranking. Primary guidance:
+[title links](https://developers.google.com/search/docs/appearance/title-link),
+[snippets](https://developers.google.com/search/docs/appearance/snippet),
+[software apps](https://developers.google.com/search/docs/appearance/structured-data/software-app),
+[sitemaps](https://developers.google.com/search/docs/crawling-indexing/sitemaps/build-sitemap).
+
+## Current workbench images
+
+The two `work-*-3.19-demo.jpg` assets are unedited browser captures of the actual
+compiled 3.19 web UI. Their private capture receipt binds the build and source
+files. A separate local read-only adapter supplied labeled sample accounts, usage,
+conversation and Leader plan; all mutations were refused and no provider ran.
+They show web UI, not native app chrome or an activated resident fleet. The same
+image bytes appear in `docs/images/` for the repository README.

@@ -67,6 +67,8 @@ import { join, resolve } from 'node:path';
 
 import type { AshlrConfig, EngineId, EngineTier, WorkItem } from '../types.js';
 import type { DaemonActivationCapability } from '../daemon/activation-permit.js';
+import { loadConfigReadOnlyStrict } from '../config.js';
+import { resolveLeaderPreferences, unavailableLeaderPreferences, type ResolvedLeaderPreferences } from '../vision/leader-preferences.js';
 import type { MintStandingTickResult, StandingSession } from '../authority/capability.js';
 import type {
   BeforeTickResult,
@@ -134,6 +136,7 @@ import {
   laneOfSeat,
   laneStates,
   planLanes,
+  grokDispatchBatchCapacity,
   planFanoutReserve,
   planStandingBestOfN,
   grantHasDevinProducer,
@@ -243,6 +246,8 @@ export interface LiveHooksDeps {
   probeDevinCli?(): Promise<DevinCliProbe>;
   presence(nowMs: number): Promise<OperatorPresence>;
   directives(): LeaderDirectivesV1 | null;
+  /** Strict live operator policy; failed reads close Grok admission without inventing defaults. */
+  liveLeaderConfig(tickCfg: AshlrConfig): AshlrConfig;
   listHolds(nowMs: number): RepoHold[];
   setHold(req: SetRepoHoldRequest): RepoHoldChange;
   readLedger(opts: LedgerReadOptions): Promise<LedgerReadResult>;
@@ -653,6 +658,7 @@ export function defaultLiveHooksDeps(): LiveHooksDeps {
     probeDevinCli: () => probeDevinCli(),
     presence: (nowMs) => probeOperatorPresence(nowMs),
     directives: () => readLeaderDirectives(),
+    liveLeaderConfig: () => loadConfigReadOnlyStrict(),
     listHolds: (nowMs) => listRepoHolds({ nowMs }),
     setHold: (req) => setRepoHold(req),
     readLedger: (opts) => readLedger(opts),
@@ -1627,12 +1633,23 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         devinCli,
         cfg,
       });
+      let leaderPreferences: ResolvedLeaderPreferences;
+      let freshBatchCapacity = 0;
+      try {
+        const leaderCfg = deps.liveLeaderConfig(cfg);
+        leaderPreferences = resolveLeaderPreferences(leaderCfg);
+        freshBatchCapacity = grokDispatchBatchCapacity(leaderCfg);
+      } catch { leaderPreferences = unavailableLeaderPreferences(); }
       const lanes = planLanes({
         policy,
         directives,
         presence,
         localServingSlots: local.slots,
         engineUnavailable: laneEngines.unavailable,
+        leaderPreferences,
+        // The loop already resolved this tick's actual dispatch pool. A later
+        // operator edit can narrow it now, but cannot raise that in-flight pool.
+        admittedBatchCapacity: Math.min(grokDispatchBatchCapacity(cfg), freshBatchCapacity),
       });
       if (local.reachable === false && lanes.local.slots > 0) {
         lanes.local = { lane: 'local', slots: 0, capReason: `The local runtime is not reachable (${local.detail}).` };

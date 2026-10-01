@@ -124,6 +124,7 @@ function harness(): Harness {
     probeLocalRuntime: async () => ({ reachable: true, slots: 4, contextPerSlot: 65_536, detail: 'llama-server up with 4 slot(s)' }),
     presence: async () => presenceNow,
     directives: () => null,
+    liveLeaderConfig: (cfg) => cfg,
     listHolds: () => holds,
     setHold: (req) => {
       out.holdsSet.push(req);
@@ -1042,5 +1043,26 @@ describe('beforeTick — the Devin fleet step (3.15)', () => {
     hooks.effectiveConfig(DEVIN_CFG);
     await hooks.beforeTick(devinCtx);
     expect(h.audits.some((a) => /Devin/.test(a))).toBe(false);
+  });
+});
+
+
+describe('fresh Grok preference and actual admitted dispatch capacity', () => {
+  it('allows17 lanes on one admitted account only within the real configured pool/batch', async () => {
+    h.deps.directives = () => ({ v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: 17, codexEnabled: null });
+    h.deps.liveLeaderConfig = (cfg) => ({ ...cfg, foundry: { ...cfg.foundry, leaderPreferences: { maxGrokLanes: null } } });
+    const hooks = createLiveTickHooks({ deps: h.deps });
+    const cfg = { ...CFG, daemon: { ...CFG.daemon, perTickItems: 20, parallel: 17 } } as AshlrConfig;
+    const before = await hooks.beforeTick({ ...hookCtx, cfg });
+    expect(before.laneCaps['grok-cli']).toBe(17);
+    h.deps.liveLeaderConfig = (cfg) => ({ ...cfg, daemon: { ...cfg.daemon, parallel: 5 }, foundry: { ...cfg.foundry, leaderPreferences: { maxGrokLanes: null } } });
+    const narrowed = await createLiveTickHooks({ deps: h.deps }).beforeTick({ ...hookCtx, cfg });
+    expect(narrowed.laneCaps['grok-cli']).toBe(5);
+    const actualSmallPool = { ...cfg, daemon: { ...cfg.daemon, parallel: 3 } };
+    const cannotRaiseInFlight = await createLiveTickHooks({ deps: h.deps }).beforeTick({ ...hookCtx, cfg: actualSmallPool });
+    expect(cannotRaiseInFlight.laneCaps['grok-cli']).toBe(3);
+    h.deps.liveLeaderConfig = () => { throw new Error('unreadable live configuration'); };
+    const unavailable = await createLiveTickHooks({ deps: h.deps }).beforeTick({ ...hookCtx, cfg });
+    expect(unavailable.laneCaps['grok-cli']).toBe(0);
   });
 });

@@ -50,6 +50,7 @@ const DYNAMIC = [
   './shell/NeedsYouDrawer.js',
   './shell/ShortcutsOverlay.js',
   './shell/GearTray.js',
+  './shell/ReviewMenu.js',
   // The tour's store and the tour: the gate reads the one and loads the other.
   './onboarding/OnboardingGate.js',
   './shell/RailStatus.js',
@@ -199,6 +200,8 @@ const NEVER_FIRST_PAINT: Readonly<Record<string, string>> = {
   'web-ui/routes/verse/shell/guarded-runners.ts': 'run-command imports it when a guarded run is confirmed',
   'web-ui/routes/verse/shell/copy-setup.ts': 'run-command imports it when ⌘K "Copy autonomy setup command" runs',
   'web-ui/routes/verse/shell/CommandPalette.tsx': 'VerseApp overlay',
+  'web-ui/routes/verse/shell/ReviewMenu.tsx': 'loaded only when Review is opened',
+  'web-ui/routes/verse/chat/ActionMenu.tsx': 'chat and Review menus, never shell first paint',
   'web-ui/routes/verse/shell/warmup.ts': 'VerseApp after-first-paint warm-up',
   'web-ui/routes/verse/resources/ResourcesChrome.tsx': 'VerseApp Resources chrome',
   'web-ui/routes/verse/shell/command-catalog.ts': 'the palette loads it; keys and the menu bridge read command-keys.ts',

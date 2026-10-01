@@ -20,8 +20,7 @@
  *   Free · local  the local runtime otherwise
  *   Decision layer  Jev (it routes; it is not a seat)
  *
- * Inside a tier: usable before not, a subscription before a metered balance,
- * then roster order (`groupByTier`). Every card carries the same rows: facts
+ * Inside a tier: stable roster order, so refreshes never move an account. Every card carries the same rows: facts
  * (tier · cost basis · models · reserve), status, usage against its window
  * or budget, and the Chat / Fleet readiness lines with their fixing command.
  *
@@ -39,7 +38,7 @@ import { IconButton } from '../../../components/primitives/Button.js';
 import { useFocusTrap } from '../../../components/primitives/focus-trap.js';
 import { IconRefresh, IconX } from '../../../components/primitives/icons.js';
 import { Tooltip } from '../../../components/primitives/Tooltip.js';
-import { useQuery, useRefetch } from '../../../data/hooks.js';
+import { useQuery, useRefetch, useRefresh } from '../../../data/hooks.js';
 import type { ReadinessFix, ResourceReadinessRow } from '../../../../core/routing/readiness-types.js';
 import type { AccountAction } from '../apps/apps-model.js';
 import { servingRuntimeQuery } from '../autonomy/fleet-queries.js';
@@ -48,8 +47,11 @@ import { findCommand, formatChord } from '../shell/command-catalog.js';
 import { isGuardOpen, requestGuarded } from '../shell/guarded-action.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { ACCOUNT_CLOCK_MS, useCapacityData } from '../usage/CapacityStrip.js';
-import { accountStatus, accountStatusRank, buildCapacityRows, capacityHeadline, orderAccountRows, type CapacityRow } from '../usage/capacity-strip-model.js';
+import { accountStatus, accountStatusRank, buildCapacityRows, capacityHeadline, type CapacityRow } from '../usage/capacity-strip-model.js';
 import { COST_BASIS_RANK, costBasisOf, engineTier, TIER_BLURBS, TIER_LABELS, type ResourceTier } from '../../../../core/routing/tiers.js';
+import { refreshSeats } from '../useSeatsRefresh.js';
+import { budgetQuery } from '../budget/budget-queries.js';
+import { devinQuery } from '../devin/devin-queries.js';
 import { verseLocalModelsQuery } from '../usage/usage-queries.js';
 import { setVerseSection, type VerseSectionId } from '../verse-ui-store.js';
 import { CloudCredits } from './CloudCredits.js';
@@ -104,14 +106,17 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
   const [busy, setBusy] = useState<{ seatId: string; kind: AccountAction['kind'] } | null>(null);
   const [note, setNote] = useState<Note>(null);
 
-  const refetchHealth = useRefetch(verseHealthQuery);
-  const refetchLocal = useRefetch(verseLocalModelsQuery);
-  const refetchRuntime = useRefetch(servingRuntimeQuery);
-  const refetchCloud = useRefetch(cloudCreditsQuery);
+  const refetchHealth = useRefresh(verseHealthQuery);
+  const refetchLocal = useRefresh(verseLocalModelsQuery);
+  const refetchRuntime = useRefresh(servingRuntimeQuery);
+  const refetchCloud = useRefresh(cloudCreditsQuery);
   // 3.14: "ready for chat?" / "ready for the fleet?" per resource. An older
   // server has no route; every card then simply omits the two lines.
   const readinessRead = useQuery(resourceReadinessQuery);
   const refetchReadiness = useRefetch(resourceReadinessQuery);
+  const refreshReadiness = useRefresh(resourceReadinessQuery);
+  const refreshBudget = useRefresh(budgetQuery);
+  const refreshDevin = useRefresh(devinQuery);
   usePollWhileVisible(refetchReadiness, RESOURCES_POLL_MS.readiness);
   const readinessById = useMemo(() => {
     const map = new Map<string, ResourceReadinessRow>();
@@ -125,7 +130,7 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
   );
   // Devin's two chat seats are ONE provider card (DevinResource), not two
   // generic account cards; every other paid seat is a generic card.
-  const paid = useMemo(() => orderAccountRows(rows.filter((r) => r.kind === 'subscription' && r.engine !== 'devin'), { healthRead, now }), [rows, healthRead, now]);
+  const paid = useMemo(() => rows.filter((r) => r.kind === 'subscription' && r.engine !== 'devin'), [rows]);
   const devinRows = useMemo(() => rows.filter((r) => r.engine === 'devin'), [rows]);
   const localRow = rows.find((r) => r.kind === 'local') ?? null;
   const mode_ = data.budget?.mode ?? null;
@@ -157,7 +162,8 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
     const localFacts = { ...(mergedFacts(seats.filter((s) => s.engine === 'local')) ?? { tier: 'free' as ResourceTier, basis: 'free' as const, models: [], reserve: null }), models: [] };
     entries.push({ kind: 'local', key: 'local', facts: localFacts, tier: localFacts.tier, marginal: 0, index: paid.length + 2,
       statusRank: localRow ? accountStatusRank(accountStatus(localRow, { healthRead, now }).kind) : readinessStatusRank(null) });
-    return groupByTier(entries);
+    // Stable within each tier: refreshed readiness never reorders a card.
+    return groupByTier(entries).map((section) => ({ ...section, entries: section.entries.sort((a, b) => a.index - b.index) }));
   }, [data.seats, paid, devinRows, localRow, readinessById, healthRead, now]);
 
   // ── close: Esc (overlay), outside click, the close button, ⌘. ─────────
@@ -239,11 +245,14 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
 
   const refreshAll = () => {
     setNote(null);
+    void refreshSeats();
+    refreshBudget();
+    refreshDevin();
     refetchHealth();
     refetchLocal();
     refetchRuntime();
     refetchCloud();
-    refetchReadiness();
+    refreshReadiness();
     setTick(Date.now());
   };
 
@@ -292,9 +301,11 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
       </header>
 
       <div className={styles.body}>
+        {data.refreshing ? <p className={styles.subtle} role="status">Updating readings…</p> : null}
+        {data.readFailed ? <p className={styles.subtle} role="status">Refresh unavailable{data.rosterUnavailable ? '.' : ' · showing last readings.'}</p> : null}
         {data.loading ? (
           <p className={styles.subtle} aria-busy="true">Reading accounts…</p>
-        ) : paid.length === 0 && devinRows.length === 0 ? (
+        ) : !data.rosterUnavailable && paid.length === 0 && devinRows.length === 0 ? (
           <p className={styles.subtle}>{RESOURCES_EMPTY_TEXT}</p>
         ) : null}
         {sections.map((section) => (

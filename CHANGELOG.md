@@ -9,6 +9,48 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.19.0] — 2026-10-01
+
+### Added
+
+- Add compact Review navigation beside Work with me and Work for me: current
+  chat changes and sources, usage, agent review, Needs you, recorded Fleet
+  decisions and the module map. Reuse existing views and preserve chats and
+  drafts; opening Review does not dispatch work.
+- Add advanced goal preferences for open goals, daily creation, memo proposals
+  and ordinary conductor cycles, plus Leader daily-run and Grok-lane
+  preferences. Positive safe integers and explicit No preference limit replace
+  the fixed business ceilings. Missing settings retain existing defaults.
+- Expose the existing local-agent evaluation harness as `ashlr benchmark`:
+  help and receipt comparison are offline; `benchmark run` explicitly invokes
+  the configured runtime. Real checker failures return failure status. Keep
+  content-bearing traces private and report usage coverage honestly.
+
+### Changed
+
+- Load account readings progressively: a slow provider no longer holds up the
+  next account. Share a short startup refresh across views, show cached readings
+  immediately and keep loading, unavailable and unknown usage distinct.
+- Keep the resource roster stable and expose usage windows, reset information
+  and freshness in expandable details. Use Devin's actual vendor mark and label
+  operator-tracked credit and ACU figures explicitly.
+- Refresh the public site with an accessible two-mode demo, a measured account
+  queue visualization, current workbench screenshots and updated search metadata.
+- Apply freshly read operator preferences consistently in planning, delayed
+  execution, routing and status. Preserve actual admitted inventory, account
+  availability, signed authority, Stop, single-flight and retry behavior.
+- Keep incomplete goal-create and daily-run history unknown. Finite preferences
+  require complete counts; explicit unlimited choices skip only the selected
+  business comparison. Recovered daily history regains coverage after the
+  affected day instead of indefinitely holding future work.
+- Merge only edited preference fields and require confirmed saved readback.
+  Preserve the separate preference to finish current work before expanding.
+
+### Fixed
+
+- Execute the benchmark's original checker source instead of the agent-writable
+  checker file. Replacing that file cannot turn a wrong answer into a pass.
+
 ## [3.18.0] — 2026-09-30
 
 ### Added

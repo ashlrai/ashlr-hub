@@ -13,13 +13,13 @@
  */
 import { afterAll, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { HELD_OUT_FAKE_LIVE_KEY, HELD_OUT_TASKS, HELD_OUT_TASK_SET_ID, taskSetDigest } from '../src/core/local-eval/tasks-heldout.js';
 import { TASKS } from '../src/core/local-eval/tasks.js';
-import { runTrial } from '../src/core/local-eval/runner.js';
+import { buildCheckerArgs, runTrial } from '../src/core/local-eval/runner.js';
 import { HARNESS_ADOPTION_GATE } from '../src/core/learn/harness-types.js';
 import type { TaskSpec } from '../src/core/local-eval/types.js';
 
@@ -47,7 +47,7 @@ function materialise(task: TaskSpec, overrides: Readonly<Record<string, string |
 
 function runCheck(task: TaskSpec, overrides: Readonly<Record<string, string | null>>): { status: number | null; out: string } {
   const dir = materialise(task, overrides);
-  const [bin, ...rest] = task.verify;
+  const [bin, ...rest] = buildCheckerArgs(task);
   // Status read from the child, never through a pipe (runner.ts rule 1).
   const res = spawnSync(bin === 'node' ? process.execPath : bin!, rest, {
     cwd: dir, encoding: 'utf8', timeout: 120_000,
@@ -533,6 +533,38 @@ describe('runTrial with a fake agent', () => {
     chmodSync(path, 0o700);
     return path;
   }
+
+  it.each(['replacement', 'symlink'] as const)('grades trusted task source after a fake agent attempts checker %s', async (attack) => {
+    const agentCli = fakeAgent([
+      'printf "wrong answer" > answer.txt',
+      ...(attack === 'replacement' ? ['printf "process.exit(0);" > ../check.mjs']
+        : ['printf "process.exit(0);" > forged.mjs', 'rm ../check.mjs', 'ln -s work/forged.mjs ../check.mjs']),
+      'echo \'{"result":"I changed the answer and completed the task.","is_error":false,"num_turns":1,"usage":{}}\'',
+    ].join('\n'));
+    const trialDir = join(mkdtempSync(join(tmpdir(), 'eval-trial-')), 't');
+    created.push(dirname(trialDir));
+    const maliciousTask: TaskSpec = { id: 'checker-integrity', why: 'The agent must not replace the grader.', expectation: 'edit',
+      prompt: 'Write the correct answer.', files: { 'answer.txt': 'initial answer' },
+      check: "import { readFileSync } from 'node:fs'; if (readFileSync('./work/answer.txt', 'utf8') !== 'correct answer') { console.error('FAIL: trusted original checker'); process.exit(1); }", verify: ['node', 'check.mjs'] };
+    const result = await runTrial({ task: maliciousTask, trial: 1, trialDir, baseUrl: 'http://127.0.0.1:9',
+      model: 'fake-model', agentCli, timeoutMs: 30_000, trace: false });
+    // The adversarial agent demonstrably reached the copy above its cwd.
+    expect(readFileSync(join(trialDir, 'check.mjs'), 'utf8')).toBe('process.exit(0);');
+    expect(result).toMatchObject({ agentExit: 0, verifyExit: 1, passed: false, mode: 'wrong-edit' });
+    expect(result.note).toBe('FAIL: trusted original checker');
+  });
+
+  it.each([
+    [], ['node'], ['node', 'other.mjs'], ['sh', 'check.mjs'], ['node', 'check.mjs', '--extra'],
+  ].map((verify) => ({ verify })))('refuses unsupported checker argv $verify before fixture creation or agent dispatch', async ({ verify }) => {
+    const agentCli = fakeAgent('touch ../agent-ran');
+    const trialDir = join(mkdtempSync(join(tmpdir(), 'eval-trial-')), 't');
+    created.push(dirname(trialDir));
+    await expect(runTrial({ task: { ...task('ho-refuse-dynamic-export'), verify },
+      trial: 1, trialDir, baseUrl: 'http://127.0.0.1:9', model: 'fake-model',
+      agentCli, timeoutMs: 30_000, trace: false })).rejects.toThrow('Unsupported local-eval checker');
+    expect(existsSync(trialDir)).toBe(false);
+  });
 
   it('passes the harness overlay and effort to the agent', async () => {
     const agentCli = fakeAgent([

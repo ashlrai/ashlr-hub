@@ -41,19 +41,13 @@ export interface TaskSpec {
   /** Fixture contents, written relative to the trial's working directory. */
   readonly files: Readonly<Record<string, string>>;
   /**
-   * Source of the pass check, written OUTSIDE the agent's working directory.
-   *
-   * This placement is load-bearing, not tidiness. A checker sitting next to the
-   * code is itself editable, and "make the failing test pass" has an obvious
-   * cheat if the test is in reach. Claude Code confines its file tools to the
-   * working directory, so a checker one level above it cannot be rewritten by
-   * the agent under evaluation.
+   * Trusted Node ESM checker source, captured before agent execution. A forensic
+   * copy is written outside work but is agent-writable and never executed.
+   * Resolve fixture paths from process.cwd(); file-relative checker imports and
+   * import.meta.url are not supported by the source-eval checker contract.
    */
   readonly check: string;
-  /**
-   * The pass check. Argv, not a shell string: no quoting to get wrong, and
-   * nothing a fixture file name could inject into a shell.
-   */
+  /** Exact supported argv contract: ['node', 'check.mjs']; no shell commands. */
   readonly verify: readonly string[];
 }
 
@@ -264,6 +258,13 @@ export interface HarnessConfiguration {
   readonly agentCli: string;
   readonly llamaServerArgv: readonly string[];
   readonly capturedAt: string;
+  /** Credentials are excluded; matching this projection is not full process/account identity. */
+  readonly metadataProjection?: {
+    readonly version: 1;
+    readonly credentials: 'redacted';
+    readonly processIdentity: 'projected-argv';
+    readonly urlQueries: 'omitted';
+  };
 }
 
 /** Operator-recorded cache control is evidence to match, not independent verification. */

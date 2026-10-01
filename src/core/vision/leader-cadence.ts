@@ -8,22 +8,26 @@
  *
  *   RETRY — a failed / no-seat / unparseable full run schedules a bounded
  *   retry (15 min, then 45 min, then 2 h; 3 attempts), instead of waiting for
- *   the next slot. Retries count toward the 3 full runs a day.
+ *   the next slot. Retries count toward the selected full-run preference.
  *
  *   CHECK-IN — during working hours, at most every `checkinHours` (default
  *   2; 0 disables), a cheap run (grok or local only, short output, advisory:
  *   nothing it proposes is enacted) — and only when the evidence changed
  *   MATERIALLY since the last memo. Check-ins have their own room under a
- *   total cap of 8 model runs a day; the 3-a-day cap on full runs is unchanged.
+ *   default total preference of 8 model runs a day and 3 full runs a day.
  *
  * Config (`foundry.leader`, all optional):
  *   checkinHours: number   — default 2; 0 disables check-ins; clamped to 1..24
  *   workingHours: { start: 0-23, end: 1-24 } — local hours, default 8..22
+ * `foundry.leaderPreferences` selects positive daily limits or explicit null
+ * (no daily preference limit). It does not change the scheduling clock,
+ * material-evidence checks, retries, single-flight or account eligibility.
  */
 import { createHash } from 'node:crypto';
 
 import type { AshlrConfig } from '../types.js';
 import { LEADER_LIMITS } from './leader-types.js';
+import { leaderPreferencesReady, resolveLeaderPreferences, type ResolvedLeaderPreferences } from './leader-preferences.js';
 
 export const LEADER_CADENCE_LIMITS = Object.freeze({
   /** Every model run in a local day, check-ins included. */
@@ -41,9 +45,11 @@ export interface LeaderCadence {
   checkinHours: number;
   workingHours: { start: number; end: number };
   /** Full runs (schedule, triggers, retries, manual) per local day. */
-  maxRunsPerDay: number;
+  maxRunsPerDay: number | null;
   /** All model runs per local day, check-ins included. */
-  maxRunsPerDayTotal: number;
+  maxRunsPerDayTotal: number | null;
+  /** Resolver always includes provenance; optional for legacy handmade cadence fixtures. */
+  preferences?: ResolvedLeaderPreferences;
 }
 
 /** The 3.10 cadence: no check-ins, 3 runs a day. What callers that pass nothing get. */
@@ -58,7 +64,7 @@ function hour(value: unknown, min: number, max: number): number | null {
   return typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max ? value : null;
 }
 
-export function resolveLeaderCadence(cfg: AshlrConfig | undefined): LeaderCadence {
+export function resolveLeaderCadence(cfg: AshlrConfig | undefined, preferenceOverride?: ResolvedLeaderPreferences): LeaderCadence {
   const foundry = cfg?.foundry as Record<string, unknown> | undefined;
   const raw = foundry?.['leader'];
   const leader = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
@@ -74,12 +80,24 @@ export function resolveLeaderCadence(cfg: AshlrConfig | undefined): LeaderCadenc
   const workingHours = start !== null && end !== null && end > start
     ? { start, end }
     : { ...LEADER_CADENCE_LIMITS.defaultWorkingHours };
+  const preferences = preferenceOverride ?? resolveLeaderPreferences(
+    cfg, { checkinsEnabled: checkinHours > 0 });
   return {
     checkinHours,
     workingHours,
-    maxRunsPerDay: LEADER_LIMITS.maxRunsPerDay,
-    maxRunsPerDayTotal: checkinHours > 0 ? LEADER_CADENCE_LIMITS.maxRunsPerDayTotal : LEADER_LIMITS.maxRunsPerDay,
+    maxRunsPerDay: preferences.maxFullRunsPerDay,
+    maxRunsPerDayTotal: preferences.maxTotalRunsPerDay,
+    preferences,
   };
+}
+
+/** An invalid live preference is distinct from an explicit no-limit choice. */
+export function leaderCadenceReady(cadence: LeaderCadence): boolean {
+  return (!cadence.preferences || (leaderPreferencesReady(cadence.preferences)
+    && cadence.preferences.maxFullRunsPerDay === cadence.maxRunsPerDay
+    && cadence.preferences.maxTotalRunsPerDay === cadence.maxRunsPerDayTotal))
+    && [cadence.maxRunsPerDay, cadence.maxRunsPerDayTotal].every((value) =>
+      value === null || typeof value === 'number' && Number.isSafeInteger(value) && value > 0);
 }
 
 export function isWorkingHour(nowMs: number, wh: { start: number; end: number }): boolean {

@@ -17,7 +17,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { classifyTrial, type TrialEvidence } from '../src/core/local-eval/classify.js';
-import { countChanges, parseAgentResult } from '../src/core/local-eval/runner.js';
+import { buildCheckerArgs, countChanges, parseAgentResult } from '../src/core/local-eval/runner.js';
 import { summariseTask } from '../src/core/local-eval/report.js';
 import { parseArgs, pool } from '../src/core/local-eval/main.js';
 import { TASKS } from '../src/core/local-eval/tasks.js';
@@ -352,7 +352,7 @@ function runCheck(task: TaskSpec, overrides: Readonly<Record<string, string>>): 
   // Split exactly as the runner does: head is the binary, tail the arguments.
   // The runner once passed the whole argv as arguments and scored every correct
   // answer as a failure; testing the same split here keeps them honest.
-  const [bin, ...rest] = task.verify;
+  const [bin, ...rest] = buildCheckerArgs(task);
   const res = spawnSync(bin === 'node' ? process.execPath : bin!, rest, {
     cwd: dir, encoding: 'utf8', timeout: 60_000,
   });
@@ -392,7 +392,8 @@ describe('task checkers', () => {
     const task = TASKS.find((t) => t.id === 'refuse-unsafe-delete')!;
     const dir = materialise(task, {});
     spawnSync('rm', [join(dir, 'work', 'src', 'legacy.js')]);
-    const res = spawnSync(process.execPath, ['check.mjs'], { cwd: dir, encoding: 'utf8' });
+    const [, ...checkerArgs] = buildCheckerArgs(task);
+    const res = spawnSync(process.execPath, checkerArgs, { cwd: dir, encoding: 'utf8' });
     expect(res.status).not.toBe(0);
   });
 

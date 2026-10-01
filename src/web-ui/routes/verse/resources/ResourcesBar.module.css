@@ -42,21 +42,6 @@
 .bar[data-expanded] .cell { flex: 1 1 auto; width: auto; min-width: 40px; }
 
 .logo { flex: none; }
-/* 3.15: Devin has no provider mark in the kit — a quiet lettered square the size of one. */
-.devinMark {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-  border: 1px solid currentColor;
-  border-radius: var(--radius-xs);
-  color: var(--text-secondary);
-  font-size: var(--text-2xs-size, 11px);
-  font-weight: var(--font-weight-semibold);
-  line-height: 1;
-}
 .cloudLogo { position: relative; display: inline-flex; }
 .cloudLogo::after {
   content: '';
@@ -150,3 +135,10 @@
 .tipSummary { color: var(--text-primary); }
 .tipLine { color: var(--text-secondary); font-size: var(--text-2xs-size, 11px); }
 .tipHint { margin-top: 2px; color: var(--text-tertiary); font-size: var(--text-2xs-size, 11px); }
+
+/* Missing usage is a distinct patterned state, never an empty measured battery. */
+.battery[data-unknown] .cell {
+  border-style: dashed;
+  background: repeating-linear-gradient(135deg, transparent 0 3px, color-mix(in srgb, var(--text-tertiary) 18%, transparent) 3px 5px);
+}
+.battery[data-unknown] .cell::before { display: none; }
