@@ -91,11 +91,16 @@ describe('private credit pool evidence', () => {
   });
   it('preserves the previous file on byte exhaustion rather than writing an unreadable success', () => {
     const rows: CreditPoolObservation[] = [];
+    // Each row adds only its serialized bytes and a comma; repeatedly serializing
+    // the whole growing array makes this boundary fixture quadratic on CI.
+    let bytes = Buffer.byteLength(JSON.stringify({ v: 1, observations: [] }) + '\n');
     for (let i = 0; ; i++) {
       const next = observation({ poolId: `demo-${i}` });
-      if (Buffer.byteLength(JSON.stringify({ v: 1, observations: [...rows, next] }) + '\n') > CREDIT_POOL_MAX_BYTES) break;
-      rows.push(next);
+      const nextBytes = bytes + Buffer.byteLength(JSON.stringify(next)) + (rows.length === 0 ? 0 : 1);
+      if (nextBytes > CREDIT_POOL_MAX_BYTES) break;
+      rows.push(next); bytes = nextBytes;
     }
+    expect(Buffer.byteLength(JSON.stringify({ v: 1, observations: rows }) + '\n')).toBe(bytes);
     raw(rows); const before = readFileSync(file());
     expect(() => write(observation({ poolId: 'demo-extra' }))).toThrow('byte limit');
     expect(readFileSync(file())).toEqual(before); expect(read().sourceState).toBe('healthy');
