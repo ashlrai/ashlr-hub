@@ -1825,6 +1825,10 @@ local execution labels and unknown endpoints do not establish zero cost. Normal
 subscription reserves, grant scope, provider readiness and hardware limits
 remain binding. Hosted Devin continues through its separate ACU launcher gates;
 ACUs are still chargeable capacity. Setting daily USD to 0 remains Stop.
+The native Devin CLI is excluded from the exhausted-USD exception: static SWE-2
+model IDs are not fresh account-specific zero-price evidence. Its existing
+positive-budget lane admission is unchanged; current account pricing must be
+qualified separately before activation.
 
 Proven zero-dollar producers use `daemon.perItemMaxTokens` when configured as a
 positive safe integer, otherwise the normal 50,000-token run allowance. This

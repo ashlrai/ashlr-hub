@@ -207,7 +207,7 @@ import { engineTierOf } from '../run/sandboxed-engine.js';
 import { resolveEngineSpec } from '../run/engine-registry.js';
 // The one authority for "does this engine run on this machine" (pool tiering).
 import { engineLocality, engineMeteredness } from '../policy/local-only.js';
-import { isDevinCliFreeModel, resolveDevinCliFleetModel } from '../devin/cli-engine.js';
+import { resolveDevinCliFleetModel } from '../devin/cli-engine.js';
 // M80. The window check itself is reached through hooks.seatAllows
 // (DEFAULT_TICK_HOOKS delegates to subscriptionAllows with the same arguments).
 import { isSubscriptionEngine } from '../fleet/subscription-usage.js';
@@ -10365,16 +10365,18 @@ function msUntilUtcTimestamp(targetMs: number, nowMs = Date.now()): number {
  * builtin runs a model swarm, so its generic policy classification is insufficient.
  * Trust tier alone never makes a custom API or CLI a subscription seat.
  */
-export function zeroDollarProducer(engine: string | undefined, cfg: AshlrConfig, model?: string | null): boolean {
+export function zeroDollarProducer(engine: string | undefined, cfg: AshlrConfig, _model?: string | null): boolean {
   if (!engine || engine === 'builtin') return false;
+  // Historical SWE-2 ids do not prove current account pricing: the free offer
+  // is plan-dependent and expires. Without fresh account-bound price evidence,
+  // Devin CLI cannot bypass exhausted USD; its positive-headroom lane is unchanged.
+  if (engine === 'devin-cli') return false;
   const spec = resolveEngineSpec(engine, cfg);
   if (!spec) return false;
   if (spec.kind === 'api-model') return engineMeteredness(engine, cfg) === 'free';
-  if (spec.kind !== 'cli-agent' || !['codex', 'claude', 'grok-cli', 'devin-cli'].includes(engine)) return false;
+  if (spec.kind !== 'cli-agent' || !['codex', 'claude', 'grok-cli'].includes(engine)) return false;
   // Config-authored overrides cannot inherit the shipped subscription contract.
   if (engine !== 'grok-cli' && Object.prototype.hasOwnProperty.call(cfg.foundry?.engines ?? {}, engine)) return false;
-  if (engine === 'devin-cli') return isDevinCliFreeModel(resolveDevinCliFleetModel(cfg.devin,
-    model?.trim() || (process.env['ASHLR_MODEL'] ?? process.env['AC_MODEL'])));
   return isSubscriptionEngine(engine as EngineId);
 }
 

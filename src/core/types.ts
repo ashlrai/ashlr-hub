@@ -3119,7 +3119,7 @@ export interface SwarmOptions {
   signal?: AbortSignal;
   /** Partial budget overrides (merged over defaults) — the HARD total ceiling. */
   budget?: Partial<RunBudget>;
-  /** Bounded concurrency for the BUILD phase (default 3, max 8). */
+  /** Positive safe-integer BUILD concurrency preference (default 3); actual tasks/budget still bind. */
   parallel?: number;
   /** Launch a detached background worker and return the swarm id immediately. */
   background?: boolean;

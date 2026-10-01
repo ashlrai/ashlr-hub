@@ -532,6 +532,41 @@ describe('runSwarm — signed provider quota authority', () => {
 // --dry-run — plan without executing
 // ---------------------------------------------------------------------------
 
+describe('BUILD parallel preference validation and audit records', () => {
+  it.each([undefined, 0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
+    'retains default3 for invalid or absent programmatic preference %s', async (parallel) => {
+      mockPlanSwarm.mockResolvedValueOnce(minimalPlan());
+      const result = await runSwarm({ goal: 'validate parallel preference' }, makeConfig(), {
+        parallel, dryRun: true,
+      }, nullSink);
+      expect(result.parallel).toBe(3);
+      expect(mockRunGoal).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['planned', 'nested', 'cancelled', 'invalid-id', 'quota-refusal'] as const)(
+    'retains valid17 in the %s audit path without executing work', async (scenario) => {
+      const opts: SwarmOptions = { parallel: 17, dryRun: true };
+      if (scenario === 'planned') mockPlanSwarm.mockResolvedValueOnce(minimalPlan());
+      if (scenario === 'nested') process.env.ASHLR_IN_SWARM = '1';
+      if (scenario === 'cancelled') opts.signal = AbortSignal.abort();
+      if (scenario === 'invalid-id') opts.runId = '../invalid-id';
+      if (scenario === 'quota-refusal') {
+        // Invalid one-shot shape exercises the outer authority refusal; no quota is invoked.
+        opts.providerQuota = { attemptId: 'quota-audit' } as NonNullable<SwarmOptions['providerQuota']>;
+      }
+      const result = await runSwarm({ goal: 'parallel audit path' }, makeConfig(), opts, nullSink);
+      expect(result.parallel).toBe(17);
+      expect(mockRunGoal).not.toHaveBeenCalled();
+      if (scenario === 'nested') expect(result.result).toContain('nested swarm');
+      if (scenario === 'cancelled') expect(result.status).toBe('aborted');
+      if (scenario === 'invalid-id') expect(result.result).toContain('run id is invalid');
+      if (scenario === 'quota-refusal') expect(result.result).toContain('signed provider quota');
+      if (scenario === 'planned') expect(result.tasks.length).toBeGreaterThan(0);
+    },
+  );
+});
+
 describe('--dry-run — plans without executing any task', () => {
   it('returns a SwarmRun without calling runGoal', async () => {
     mockPlanSwarm.mockResolvedValueOnce(smallPlan('dry run goal'));

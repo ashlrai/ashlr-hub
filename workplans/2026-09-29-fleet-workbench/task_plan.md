@@ -37,3 +37,14 @@ Make the existing Ashlr Verse engineering fleet more usable across every connect
 
 ## Status
 3.17.0 candidate implemented; independent review and final release verification in progress. Added user scope: study Ponytail, OmniRoute, Graphify and Agent Skills; implement local Wiki module graph and portable plugin context guidance. Adjacent dirty checkouts are preserved.
+
+## 3.18 exhausted-USD Devin correction — October 1, 2026
+
+The new zero-dollar continuation path excludes `devin-cli`. Its exact static
+SWE-2 IDs inherit CLI 3000.11.3 catalog evidence, not a fresh account-specific
+price observation. Existing positive-budget Devin CLI admission and the hosted
+Devin ACU policy remain unchanged. Current account pricing qualification, with
+expiry and rechecks, remains a future activation gate. The
+[official pricing page](https://devin.ai/pricing) currently advertises eligible
+free SWE-2 only through October 16, 2026. No Devin account was activated or
+provider request made for this correction.

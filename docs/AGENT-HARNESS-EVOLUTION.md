@@ -52,7 +52,8 @@ passes its existing scope, identity, cancellation, and replay checks.
 
 The candidate removes the six-seat fanout ceiling, optional agent-retention
 ceiling, arbitrary daemon capacity UI ceilings, the hidden batch concurrency
-clamp of eight, and the daily USD preference ceiling of 1,000. It preserves
+clamp of eight, the separate swarm BUILD preference ceiling of eight, and the
+daily USD preference ceiling of 1,000. It preserves
 existing defaults and final admission. This inventory records behavior; it
 does not change live settings or authorize additional spend.
 
@@ -60,6 +61,7 @@ does not change live settings or authorize additional spend.
 | --- | --- | --- |
 | Budget controls | Items, batch parallelism, and continuous/local/cloud/total concurrency accept positive safe integers; daily USD accepts finite 0 through the exact-safe numeric ceiling, including fractions | Shared existing UI/API bounds in [caps-spec.ts](https://github.com/ashlrai/ashlr-hub/blob/master/src/web-ui/routes/verse/autonomy/caps-spec.ts); numeric representability is not a fleet quota. Explicit USD zero remains Stop; signed spend authority is unchanged |
 | Batch executor | Explicit safe-integer parallelism is retained; default remains 2; worker allocation uses actual selected inventory | Former hidden clamp removed in [loop.ts](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/daemon/loop.ts); queue, account, resources, and journal admission still apply |
+| Swarm BUILD concurrency | `--parallel` accepts a positive safe integer; default remains 3, with no preference ceiling of eight | [runner.ts](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/swarm/runner.ts) launches only actual pending tasks, reserves tokens/steps per batch, and retains provider/authority admission; malformed CLI input is refused and invalid programmatic preferences retain default 3. Planner/task-count and budget semantics are unchanged |
 | Durable per-tick journal | At most 64 selected items; a larger item preference does not journal the whole backlog at once | Existing durability contract retained. API reports `journalItemCapacity`; UI explains subsequent ticks and older-server unknown capacity. Expanding or sharding this journal needs separate review |
 | Item execution | `maxSteps: 100`; proven-free token ceiling defaults to 50,000 or explicit `daemon.perItemMaxTokens` | Steps remain hardcoded; token limit is a configurable default, not a universal model context guarantee |
 | Continuous concurrency | Defaults local 2, cloud 6, total 8; max concurrent defaults to configured total or 8; larger safe-integer preferences survive UI/API/runtime consistently | Requested capacity still passes actual admission; invalid/fractional/nonfinite/unsafe stored values use existing defaults rather than unlimited capacity |

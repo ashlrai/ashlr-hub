@@ -680,7 +680,7 @@ const TOPIC_EXAMPLES: Partial<Record<HelpTopic, string[]>> = {
 /** Flag reference lines printed with `help run` / `help swarm` / `help --all`. */
 const FLAG_LINES: Partial<Record<HelpTopic, string[]>> = {
   run: ['--budget N  --max-steps N  --parallel N  --engine builtin|ashlrcode|aw|claude|codex  --allow-cloud  --no-tools  --no-memory  --resume <id>  --estimate  --json  --over-budget'],
-  swarm: ['--budget N  --parallel N (default 3, max 8)  --background  --resume <id>  --dry-run  --estimate  --allow-cloud  --project <path>  --over-budget'],
+  swarm: ['--budget N  --parallel N (positive safe integer; default 3)  --background  --resume <id>  --dry-run  --estimate  --allow-cloud  --project <path>  --over-budget'],
 };
 
 const TOPICS: HelpTopic[] = [

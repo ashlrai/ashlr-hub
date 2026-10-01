@@ -38,3 +38,7 @@ Add a supported read-only managed OpenAI Agents inventory CLI with fixed officia
 ## Operator capacity consistency
 
 Remove arbitrary upper clamps from existing daemon capacity preferences while preserving defaults, positive safe-integer validation, actual resource admission, signed scope and explicit Stop. UI preferences must match the runtime instead of offering values the daemon silently reduces.
+
+## Swarm BUILD concurrency preference
+
+Retain the default of three simultaneous BUILD tasks and accept an explicit positive safe-integer preference without the former ceiling of eight. Launch only actual pending tasks; preserve total token/step reservations, sequential non-BUILD phases, provider admission and execution authority. Refuse malformed CLI values before dispatch; invalid programmatic values retain default three. This does not expand planner task counts or best-of-N limits, and does not change live settings.

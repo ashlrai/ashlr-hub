@@ -113,3 +113,8 @@ or unknown-cost routes, unproven model checks and unresolved spend journals
 still wait; a daily USD setting of 0 still stops the loop. Hosted Devin uses
 separate ACU admission and accounting, which remain binding. This behavior does
 not bypass subscription usage windows, signed reserves or local serving capacity.
+The Devin CLI is excluded from this exhausted-USD exception: its static SWE-2
+model allowlist does not establish fresh account-specific zero pricing. Its
+existing positive-budget admission remains unchanged. Qualify current account
+pricing before enabling the lane; an installed model or credential file is not
+that evidence. See [Devin](DEVIN.md#how-it-works).
