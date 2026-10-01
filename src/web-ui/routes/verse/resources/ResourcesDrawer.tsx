@@ -55,6 +55,7 @@ import { devinQuery } from '../devin/devin-queries.js';
 import { verseLocalModelsQuery } from '../usage/usage-queries.js';
 import { setVerseSection, type VerseSectionId } from '../verse-ui-store.js';
 import { CloudCredits } from './CloudCredits.js';
+import { CreditPools } from './CreditPools.js';
 import { DevinResource } from './DevinResource.js';
 import { JevResource } from './JevResource.js';
 import { LocalResources } from './LocalResources.js';
@@ -309,6 +310,7 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
         ) : !data.rosterUnavailable && paid.length === 0 && devinRows.length === 0 ? (
           <p className={styles.subtle}>{RESOURCES_EMPTY_TEXT}</p>
         ) : null}
+        <CreditPools accountNames={new Map(data.seats.map(seat => [seat.id, seat.label]))} />
         {sections.map((section) => (
           <section key={section.tier} className={styles.group} aria-labelledby={`${titleId}-${section.tier}`} data-tier-section={section.tier}>
             <h3 id={`${titleId}-${section.tier}`} className={styles.groupTitle}>{TIER_LABELS[section.tier]}</h3>

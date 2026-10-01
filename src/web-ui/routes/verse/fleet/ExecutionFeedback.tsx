@@ -10,6 +10,7 @@ import { EXECUTION_FEEDBACK_PATH } from '../../../../core/verse/execution-feedba
 import { narrowExecutionFeedbackRead, OUTCOME_LABELS } from './execution-feedback-model.js';
 import type { ExecutionFeedbackOutcome } from '../../../../core/fleet/execution-feedback-types.js';
 import styles from './execution-feedback.module.css';
+import { ExecutionCaseDetails } from './ExecutionCaseDetails.js';
 
 const feedbackQuery = optionalQuery('verse-execution-feedback', EXECUTION_FEEDBACK_PATH, 'Recorded execution outcomes', narrowExecutionFeedbackRead);
 
@@ -18,6 +19,7 @@ function FeedbackReading() {
   const refetch = useRefetch(feedbackQuery);
   const [openedAt] = useState(() => Date.now());
   const [inspectOpen, setInspectOpen] = useState(false);
+  const [selectedCase, setSelectedCase] = useState<string | null>(null);
   const now = useNow(2_000);
   const value = reading.data?.value;
   // Catch a completed cold worker promptly, then return to the normal cadence.
@@ -53,10 +55,15 @@ function FeedbackReading() {
         ? <p className={styles.note}>Proposal history is incomplete; an unrecorded proposal is not evidence that none exists.</p> : null}
       {feedback.cases.length ? <details className={styles.cases} open={inspectOpen} onToggle={(event) => setInspectOpen(event.currentTarget.open)}>
         <summary>Inspect {feedback.cases.length} recorded outcomes</summary>
-        {inspectOpen ? <ul>{feedback.cases.map((row) => <li key={row.caseId}>
+        {inspectOpen ? <><ul>{feedback.cases.map((row) => <li key={row.caseId}>
           <span>{OUTCOME_LABELS[row.outcome]}{row.failureKind ? ` · ${row.failureKind}` : ''}</span>
           <span>{formatRelative(row.endedAt)}{row.proposalRecorded ? ' · proposal recorded' : ''}</span>
-        </li>)}</ul> : null}
+          <Button size="sm" variant="ghost" aria-expanded={selectedCase === row.caseId}
+            onClick={() => setSelectedCase(selectedCase === row.caseId ? null : row.caseId)}>
+            {selectedCase === row.caseId ? 'Hide timeline' : 'View timeline'}
+          </Button>
+          {selectedCase === row.caseId ? <ExecutionCaseDetails key={row.caseId} caseId={row.caseId} /> : null}
+        </li>)}</ul></> : null}
       </details> : null}
       <div className={styles.actions}>
         <Button size="sm" variant="ghost" onClick={refetch}>Refresh</Button>

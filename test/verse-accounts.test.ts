@@ -25,6 +25,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import * as connectionMonitor from '../src/core/resources/connection-monitor.js';
 import { capacityFromSeat } from '../src/core/routing/headroom.js';
 import { assessResetOpportunity } from '../src/core/routing/reset-pressure.js';
 import type { AshlrConfig } from '../src/core/types.js';
@@ -452,6 +453,24 @@ describe('verse accounts — evidence precedence', () => {
 // ---------------------------------------------------------------------------
 
 describe('verse accounts — collector lifecycle', () => {
+  it('reads monitor lifecycle without snapshot/profile-history IO during repeated owned status reads', async () => {
+    fs.rmSync(path.join(root, 'quota-config.json'));
+    const snapshot = vi.fn(() => ({ sampledAt: new Date().toISOString(), refreshing: true, accounts: [] }));
+    const isStopped = vi.fn(() => false);
+    const monitorFactory = vi.spyOn(connectionMonitor, 'createResourceConnectionMonitor').mockReturnValue({
+      snapshot, isStopped, close: async () => {},
+    });
+    try {
+      collector = await startVerseAccountCollector({ accountsRoot: root });
+      expect(monitorFactory).toHaveBeenCalledOnce(); snapshot.mockClear(); isStopped.mockClear();
+      for (let i = 0; i < 10; i++) expect(collector.status().state).toBe('running');
+      expect(isStopped).toHaveBeenCalled(); expect(snapshot).not.toHaveBeenCalled();
+      isStopped.mockReturnValue(true); expect(collector.status().state).toBe('blocked');
+      expect(snapshot).not.toHaveBeenCalled();
+    } finally {
+      await collector?.close(); collector = null; monitorFactory.mockRestore();
+    }
+  });
   it('degrades to read-only when another collector owns the exclusive lease, instead of throwing', async () => {
     // Stand in for `ashlr resource-console` already holding the lock.
     held = await acquireResourceQuotaRefreshLease(accountsLedgerRoot(root), { trackNativeActivity: true });

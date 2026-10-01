@@ -22,6 +22,7 @@ import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
 import { Tooltip } from '../../../components/primitives/Tooltip.js';
 import { useQuery } from '../../../data/hooks.js';
 import { usedPercentText } from '../percent-text.js';
+import { historicalLeftPercent } from './resource-usage-history.js';
 import { ACCOUNT_CLOCK_MS, useCapacityData } from '../usage/CapacityStrip.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { bindingLeftPercent } from '../usage/binding-left.js';
@@ -79,6 +80,17 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
       continue;
     }
     const status = accountStatus(row, { healthRead: opts.healthRead, now: opts.now });
+    const history = row.windows.length === 0 && !row.signedOut ? row.historicalUsage : null;
+    if (history) {
+      const recordedLeft = historicalLeftPercent(history);
+      out.push({ key: row.seatId, engine: row.engine, name: row.label, leftPercent: recordedLeft, level: 'unknown',
+        value: recordedLeft === null ? 'last reading' : `${usedPercentText(recordedLeft)} last`,
+        summary: `${row.label}: last known usage · current usage unconfirmed`,
+        detail: [`Recorded ${new Date(history.observedAt).toLocaleString()}`, 'Historical reading; current availability and resets are unconfirmed.',
+          ...history.windows.map(window => `${window.id}: ${window.limitReached ? 'limit was flagged' : window.usedPercent === null ? 'usage unknown' : `${usedPercentText(window.usedPercent)} used`}${window.resetsAt ? ` · recorded reset ${new Date(window.resetsAt).toLocaleString()}` : ''}`)],
+      });
+      continue;
+    }
     const level = LEVEL_OF_STATUS[status.kind] ?? 'unknown';
     const left = bindingLeftPercent(row);
     const value = row.engine === 'codex' && row.credits !== null && !row.lastReading && !row.signedOut ? (row.creditSpendControlReached === true ? 'credits held' : 'credits') : level === 'out' ? (status.kind === 'spent' ? 'spent' : status.label.toLowerCase())
@@ -197,7 +209,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
         <Tooltip
           content={
             <div className={styles.tip}>
-              <div className={styles.tipHead}><ProviderLogo engine="claude" size={14} /><strong>Cloud credits</strong></div>
+              <div className={styles.tipHead}><ProviderLogo engine="claude" size={14} /><strong>Cloud estimate</strong></div>
               <div className={styles.tipSummary}>{formatUsd(cloud.remainingUsd)} of {formatUsd(cloud.totalUsd)} left · estimate</div>
               <div className={styles.tipLine}>{cloud.running} running · {cloud.sessionsToday} today</div>
               <div className={styles.tipHint}>Click for Resources · ⌘.</div>
@@ -209,14 +221,14 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
             type="button"
             className={styles.row}
             data-level={cloudLevel}
-            aria-label={`Cloud credits: about ${formatUsd(cloud.remainingUsd)} of ${formatUsd(cloud.totalUsd)} left. Open Resources`}
+            aria-label={`Cloud estimate: about ${formatUsd(cloud.remainingUsd)} of ${formatUsd(cloud.totalUsd)} left. Open Resources`}
             onClick={() => openResources()}
           >
             {expanded ? (
               <>
                 <span className={styles.line}>
                   <span className={styles.cloudLogo}><ProviderLogo engine="claude" size={14} className={styles.logo} /></span>
-                  <span className={styles.name}>Cloud credits</span>
+                  <span className={styles.name}>Cloud estimate</span>
                 </span>
                 <span className={styles.line}>
                   <Battery left={cloudLeft} level={cloudLevel} vertical={false} />

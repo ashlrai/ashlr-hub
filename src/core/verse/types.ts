@@ -17,6 +17,7 @@
  */
 import type { ResetProvenance } from '../routing/scheduling-types.js';
 import type { TRANSIENT_EVENT_TYPE_LIST } from './transient-events.js';
+import type { ResourceLastKnownUsage } from '../resources/reading-cache-types.js';
 
 export type VerseEngine = 'claude' | 'codex' | 'grok' | 'local' | 'devin';
 
@@ -83,6 +84,8 @@ export interface VerseSeat {
    * at all — `health.state` says what it does know.
    */
   capacity?: VerseSeatCapacity;
+  /** Display-only prior usage. Kept outside capacity/health and never admission or credit evidence. */
+  lastKnownUsage?: ResourceLastKnownUsage;
   /**
    * V3.9 ADDITIVE. The version of the CLI binary this seat is PINNED to (its
    * native-profile launcher execs one exact file). Absent when unknown and on

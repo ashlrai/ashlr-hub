@@ -48,6 +48,7 @@
  *    connections.json row.
  */
 
+import { canonical } from '../universe/artifacts.js';
 import { normalizeCodexCredits } from '../resources/codex-credits.js';
 import { dirname, join } from 'node:path';
 import { existsSync, openSync, readSync, closeSync, readdirSync, readFileSync, statSync } from 'node:fs';
@@ -55,6 +56,9 @@ import { existsSync, openSync, readSync, closeSync, readdirSync, readFileSync, s
 import { validResetProvenance } from '../routing/reset-pressure.js';
 import { inspectPrivateDirectory } from '../universe/artifacts.js';
 import { readResourceJson } from '../resources/pool-runtime.js';
+import { createResourceReadingCache, normalizeResourceLastKnownUsage, type ResourceReadingCache } from '../resources/reading-cache.js';
+import type { ResourceLastKnownUsage } from '../resources/reading-cache-types.js';
+import type { ResourceAccountIdentityWitness, ResourceAccountIdentitySnapshot } from '../resources/account-identity-witness.js';
 import {
   validateResourcePool,
   type ResourceObservation,
@@ -267,6 +271,8 @@ export interface VerseAccountRecord {
    * no window, percentage or usability is derived from it.
    */
   lastReadingAt?: string;
+  /** Original last-known usage, explicitly separate from current windows/binding/credits. */
+  lastKnownUsage?: ResourceLastKnownUsage;
 }
 
 export type VerseAccountsCollectorMode = 'owned' | 'read-only' | 'unconfigured';
@@ -932,6 +938,7 @@ export function deriveVerseAccountRecord(
   // — and only from the reason that actually means "not authenticated".
   const signedOut = grokSignedOut(connection);
   const state = signedOut ? 'signed-out' : connection.state;
+  const historical = state !== 'signed-out' && connection.observedAt === null ? normalizeResourceLastKnownUsage(connection.lastKnownUsage) : null;
   const base = {
     state,
     health: connection.health,
@@ -956,6 +963,7 @@ export function deriveVerseAccountRecord(
     credits,
     binding: bindingWindow(windows),
     notes: providerNotes(provider, base),
+    ...(historical ? { lastKnownUsage: historical } : {}),
   };
 }
 
@@ -1052,6 +1060,13 @@ export interface VerseAccountCollector {
   credits(accountId: string): VerseCodexCredits | null;
   /** When this server last held a verified reading for `accountId` (history, never evidence). */
   lastReadingAt?(accountId: string): string | null;
+  lastKnownUsage?(accountId: string): ResourceLastKnownUsage | null;
+  /** Internal host-only witness; never copied into a browser account record. */
+  identityWitness?(accountId: string): ResourceAccountIdentityWitness | null;
+  /** Cheap host-only capture. Recheck profile/file epochs in the read worker, not HTTP. */
+  identityWitnessesSnapshot?(): ResourceAccountIdentitySnapshot[];
+  invalidatedIdentityAccountIdsSnapshot?(): string[];
+  identitySnapshotRevision?(): number;
   close(): Promise<void>;
 }
 
@@ -1128,6 +1143,13 @@ export async function startVerseAccountCollector(
   const idleCheckMs = Math.max(10, options.idleCheckMs ?? IDLE_CHECK_MS);
   /** Latest verified observation instant per account this server saw (display history only). */
   const lastReadings = new Map<string, string>();
+  let readingCache: ResourceReadingCache | null = null;
+  if (config?.connections) {
+    try { readingCache = createResourceReadingCache({ root: config.ledgerRoot, accountsRoot,
+      accounts: config.connections.accounts, assertOwnership: () => { if (!lease) throw new Error(); lease.assertOwnership(); },
+      ownershipIdentity: () => { if (!lease) throw new Error(); return canonical(lease.identity()); } }); }
+    catch { /* Optional history cannot change native collection readiness. */ }
+  }
   /**
    * The lease was handed back because nobody was looking (see
    * `releaseIdleLease`). Distinct from a refused acquisition: the status says
@@ -1212,6 +1234,7 @@ export async function startVerseAccountCollector(
           ...(options.signal ? { signal: options.signal } : {}),
           assertOwnership: lease.assertOwnership,
           coordinator,
+          ...(readingCache ? { readingCache } : {}),
         });
       }
       state = 'running';
@@ -1592,7 +1615,9 @@ export async function startVerseAccountCollector(
     if (recoveryHold !== null || cleanupUncertain) return true;
     try {
       if (refresher && refresher.snapshot().state === 'closed') return true;
-      if (monitor && monitor.snapshot().accounts.some((row) => row.reason === 'connection-monitor-stopped')) {
+      // Real monitors expose a pure lifecycle bit. Keep old injected mocks compatible.
+      if (monitor && (monitor.isStopped ? monitor.isStopped() :
+        monitor.snapshot().accounts.some((row) => row.reason === 'connection-monitor-stopped'))) {
         return true;
       }
     } catch {
@@ -1700,6 +1725,22 @@ export async function startVerseAccountCollector(
       return found;
     },
     lastReadingAt: (accountId: string) => lastReadings.get(accountId) ?? null,
+    lastKnownUsage: (accountId: string) => {
+      try {
+        // Current roster/profile must still match; old config cannot name a replacement account.
+        const current = validateResourceConnectionConfig(readResourceJson(join(accountsRoot, 'connections.json'))).accounts.find(a => a.id === accountId);
+        return current && readingCache ? readingCache.lastKnown(current) : null;
+      } catch { return null; }
+    },
+    identityWitness: (accountId: string) => {
+      try {
+        const current = validateResourceConnectionConfig(readResourceJson(join(accountsRoot, 'connections.json'))).accounts.find(a => a.id === accountId);
+        return current && readingCache ? readingCache.witness(current) : null;
+      } catch { return null; }
+    },
+    identityWitnessesSnapshot: () => readingCache?.identityWitnessesSnapshot() ?? [],
+    invalidatedIdentityAccountIdsSnapshot: () => readingCache?.invalidatedIdentityAccountIdsSnapshot() ?? [],
+    identitySnapshotRevision: () => readingCache?.identitySnapshotRevision() ?? 0,
     close: async () => {
       if (closed) return;
       closing = true;
@@ -1854,9 +1895,11 @@ export function buildVerseAccountsSnapshot(options: {
 
   const accounts: VerseAccountRecord[] = [];
   const withHistory = (record: VerseAccountRecord): VerseAccountRecord => {
-    if (record.observedAt !== null) return record;
-    const last = collector?.lastReadingAt?.(record.id) ?? null;
-    return last === null ? record : { ...record, lastReadingAt: last };
+    if (record.observedAt !== null || record.state === 'signed-out') return record;
+    const historical = collector?.lastKnownUsage ? collector.lastKnownUsage(record.id) : record.lastKnownUsage ?? null;
+    const last = historical?.observedAt ?? (collector?.identityWitness ? null : collector?.lastReadingAt?.(record.id) ?? null);
+    const fresh = { ...record }; delete fresh.lastKnownUsage;
+    return { ...fresh, ...(last === null ? {} : { lastReadingAt: last }), ...(historical ? { lastKnownUsage: historical } : {}) };
   };
   for (const id of ids) {
     const connection = liveById.get(id);

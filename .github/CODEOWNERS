@@ -236,6 +236,7 @@
 /test/dispatch-router-310b.test.ts @masonwyatt23
 /test/elite-self-land-315.test.ts @masonwyatt23
 /test/engines-judges-310b.test.ts @masonwyatt23
+/test/execution-feedback-case.test.ts @masonwyatt23
 /test/execution-leases-310b.test.ts @masonwyatt23
 /test/fixture-custody.test.ts @masonwyatt23
 /test/fixtures/m454/agent-skills-ff2df4c.provenance.json @masonwyatt23
@@ -683,6 +684,7 @@
 /test/red-team-routing-310.test.ts @masonwyatt23
 /test/repo-holds-310b.test.ts @masonwyatt23
 /test/reset-aware-scheduling.test.ts @masonwyatt23
+/test/resource-account-identity-witness.test.ts @masonwyatt23
 /test/resource-allocation-policy.test.ts @masonwyatt23
 /test/resource-console-engineering-acceptance.test.ts @masonwyatt23
 /test/resource-console-engineering-check.test.ts @masonwyatt23
@@ -690,6 +692,7 @@
 /test/resource-console-engineering-preparation-acceptance.test.ts @masonwyatt23
 /test/resource-console-engineering-registration.test.ts @masonwyatt23
 /test/resource-console-engineering-successors.test.ts @masonwyatt23
+/test/resource-credit-pool-projection.test.ts @masonwyatt23
 /test/resource-engineering-auto-admission-recovery-acceptance.test.ts @masonwyatt23
 /test/resource-engineering-automatic-admission-manager.test.ts @masonwyatt23
 /test/resource-engineering-mission-acceptance.test.ts @masonwyatt23

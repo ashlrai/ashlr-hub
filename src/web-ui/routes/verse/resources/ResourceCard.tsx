@@ -142,6 +142,12 @@ export function ResourceCard({ row, status, settled, mode, busy, onAction, readi
         </div>
       ) : <p className={styles.subtle}>Usage not reported by this resource.</p>}
       {row.lastReading ? <p className={styles.subtle}>Last known usage · latest check failed.</p> : null}
+      {row.windows.length === 0 && row.historicalUsage && !row.signedOut ? <div className={styles.fine}>
+        <p>Last known usage · current availability unconfirmed.</p>
+        <p>Recorded <time dateTime={row.historicalUsage.observedAt} title={row.historicalUsage.observedAt}>{new Date(row.historicalUsage.observedAt).toLocaleString()}</time></p>
+        {row.historicalUsage.windows.map(window => <p key={window.id}>{window.id}: {window.limitReached ? 'limit was flagged' : window.usedPercent === null ? 'usage unknown' : `${usedPercentText(window.usedPercent)} used`}
+          {window.resetsAt ? <> · recorded reset <time dateTime={window.resetsAt} title={window.resetsAt}>{new Date(window.resetsAt).toLocaleString()}</time></> : null}</p>)}
+      </div> : null}
       <details className={styles.usageDetails}>
         <summary tabIndex={0} aria-label={`Usage details: ${row.label}`}>Usage details</summary>
         <div className={styles.usageDetailBody}>

@@ -1615,7 +1615,7 @@ async function applyAction(res: ServerResponse, body: Record<string, unknown>): 
  * else so the next module (or the 404) runs.
  */
 export const handleFleetLiveApi: ApiModule = async (ctx, req, res, path, method) => {
-  if (path === '/api/verse/fleet/live/feedback') {
+  if (path === '/api/verse/fleet/live/feedback' || path.startsWith('/api/verse/fleet/live/feedback/cases/')) {
     return (await import('./execution-feedback-api.js')).handleExecutionFeedbackApi(ctx, req, res, path, method);
   }
   if (path !== VERSE_FLEET_LIVE_PATH) return false;

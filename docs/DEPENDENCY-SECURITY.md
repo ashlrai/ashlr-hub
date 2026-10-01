@@ -1,12 +1,12 @@
 # Dependency security policy
 
-Ashlr Hub's hosted dependency-audit workflow is disabled while GitHub Actions
-capacity is unavailable. Its YAML remains a dormant, read-only reference for
-the root and Raycast npm lockfiles plus `desktop/src-tauri/Cargo.lock`; it does
-not currently run on pull requests, `master`, schedules, or manual dispatch.
-The active release path is local and must reproduce every required lane before
-an exact-source receipt is accepted. The dormant workflow pins every action to
-a full commit and verifies the SHA-256 of its exact RustSec scanner archive.
+Ashlr Hub's hosted Dependency Audit workflow is active, as verified on
+October 1, 2026. It audits the root and Raycast npm lockfiles plus
+`desktop/src-tauri/Cargo.lock` on pull requests, relevant `master` changes,
+its weekly schedule, and manual dispatch. Local releases must still reproduce
+every required lane before an exact-source receipt is accepted. The workflow
+pins every action to a full commit and verifies the SHA-256 of its exact
+RustSec scanner archive.
 The npm lockfiles must first reproduce through strict `npm ci`. The primary
 scanner remains pinned npm, with full and production audits for both graphs.
 Only a recognized transport failure after three bounded attempts may invoke an

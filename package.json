@@ -1,6 +1,6 @@
 {
   "name": "@ashlr/hub",
-  "version": "3.21.0",
+  "version": "3.22.0",
   "description": "Local-first command center for agentic engineers.",
   "publishConfig": {
     "access": "public"
@@ -58,6 +58,7 @@
     "docs/AGENT-HARNESS-EVOLUTION.md",
     "docs/RESET-AWARE-SCHEDULING.md",
     "docs/EXECUTION-FEEDBACK.md",
+    "docs/RESOURCE-EVIDENCE.md",
     "docs/RUNTIME_ACTIVATION_AUTHORITY.md",
     "docs/REMOTE-PHONE.md",
     "docs/contracts/CONTRACT-M515.md",

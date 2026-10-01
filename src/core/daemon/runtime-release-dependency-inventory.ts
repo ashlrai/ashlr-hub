@@ -500,6 +500,7 @@ function rootPackageIsPortable(
     'docs/AGENT-HARNESS-EVOLUTION.md',
     'docs/RESET-AWARE-SCHEDULING.md',
     'docs/EXECUTION-FEEDBACK.md',
+    'docs/RESOURCE-EVIDENCE.md',
     'docs/MISSION-OS.md',
     'docs/ASHLR-UNIVERSE.md',
     'docs/AUTONOMY-GAP.md',

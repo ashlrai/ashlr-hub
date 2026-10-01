@@ -25,6 +25,8 @@ export interface ResourceAccountConnection {
   onDemandEnabled: boolean | null;
   /** Adapter availability only, never an admission decision or authenticated canary. */
   executionSupported: boolean;
+  /** Historical display only; never current windows, credits or admission evidence. */
+  lastKnownUsage?: import('./reading-cache-types.js').ResourceLastKnownUsage;
 }
 
 export interface ResourceConnectionsSnapshot {

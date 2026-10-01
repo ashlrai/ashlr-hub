@@ -21,6 +21,14 @@ let running = false;
 
 async function project(kind: ReadProjectionKind, payload: ReadProjectionPayloads[ReadProjectionKind]): Promise<unknown> {
   switch (kind) {
+    case 'credit-pools': {
+      const options = payload as ReadProjectionPayloads['credit-pools'];
+      return (await import('../resources/credit-pool-projection.js')).readCreditPoolsProjection(cfg!, options.identitySnapshots, options.invalidatedAccountIds);
+    }
+    case 'execution-feedback-case': {
+      const options = payload as ReadProjectionPayloads['execution-feedback-case'];
+      return (await import('../fleet/execution-feedback-case.js')).readExecutionFeedbackCase(options.caseId);
+    }
     case 'execution-feedback': return (await import('../fleet/execution-feedback.js')).readExecutionFeedback();
     case 'snapshot': return await buildSnapshot(cfg!);
     case 'control': return await buildControlSnapshot(cfg!);

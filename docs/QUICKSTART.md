@@ -8,26 +8,26 @@ starting a resident fleet and publishing its work are distinct steps.
 
 ### CLI on macOS, Linux or Windows
 
-Install Node.js 22.15+ and Git, then install Verse 3.21.0 from its versioned
+Install Node.js 22.15+ and Git, then install Verse 3.22.0 from its versioned
 GitHub release after its artifacts are published:
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.21.0/ashlr-hub-3.21.0.tgz
-ashlr --version   # should print 3.21.0
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.0/ashlr-hub-3.22.0.tgz
+ashlr --version   # should print 3.22.0
 ashlr verse
 ```
 
 Verse opens at `http://127.0.0.1:7777/verse/` and binds to loopback. The CLI
 prints a read token for the browser and asks for a separate mutation token
 before your first chat or other change. Keep both tokens private. Confirm
-`ashlr --version` reports `3.21.0`; the
-[versioned GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.21.0) is the
+`ashlr --version` reports `3.22.0`; the
+[versioned GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.22.0) is the
 publication target for this candidate’s installers. The unversioned npm package may be an older release.
 
 ### Desktop app on Apple silicon Mac
 
-Download the [v3.21.0 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.21.0/Ashlr_3.21.0_aarch64_locally-signed.dmg)
-after publication from the [versioned release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.21.0).
+Download the [v3.22.0 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.0/Ashlr_3.22.0_aarch64_locally-signed.dmg)
+after publication from the [versioned release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.22.0).
 It includes the CLI and the same console. This DMG is locally signed, not
 Apple Developer ID notarized; macOS may require **Open Anyway** on first launch.
 For a source build and local signing, follow [Releasing locally](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).

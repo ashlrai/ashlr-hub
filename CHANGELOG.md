@@ -9,9 +9,19 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.21.0] — 2026-10-01
+## [3.22.0] — 2026-10-01
 
 ### Added
+
+- Load account-bound last-known usage immediately from a private cache, with
+  gray historical meters and original timestamps while fresh readings load.
+  History never supplies account readiness or autonomous spending admission.
+- Add lazy execution-case timelines joining exact attempts to bound verification,
+  canonical GitHub PRs, authenticated merges, and recorded follow-up results.
+  CI and local suite coverage remain separate; deployment remains unrecorded.
+- Separate account-bound captured gift and purchased credit pools in expandable
+  resource details. Preserve exact dollars, original capture time and expiration;
+  distinguish historical captures from native balances and operator estimates.
 
 - Show current account-checked Codex credit units separately from subscription
   windows, including held or unknown spending status. Known personal plans show
@@ -37,7 +47,7 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Synchronize complete private account-roster fixtures, Grok reset provenance
   and browser-safe type imports with the production contracts.
 
-## 3.20 workbench changes — included in 3.21.0
+## 3.20 workbench changes — included in 3.22.0
 
 ### Added
 

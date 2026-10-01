@@ -8,6 +8,7 @@ import { probeGrokAccount } from './grok-account-probe.js';
 import type { ResourceAccountConnection, ResourceConnectionsSnapshot } from './connection-types.js';
 import type { NativeMetadataCoordinator } from './metadata-coordinator.js';
 import { RESOURCE_POOL_MANIFEST_MAX_BYTES } from './pool-policy.js';
+import type { ResourceReadingCache } from './reading-cache.js';
 
 export interface ResourceConnectionConfig {
   schemaVersion: 1;
@@ -15,7 +16,12 @@ export interface ResourceConnectionConfig {
   accounts: Array<{ id: string; label: string; provider: ResourceAccountConnection['provider']; command: string[];
     expectedAccountHint?: string }>;
 }
-export interface ResourceConnectionMonitor { snapshot(): ResourceConnectionsSnapshot; close(): Promise<void> }
+export interface ResourceConnectionMonitor {
+  snapshot(): ResourceConnectionsSnapshot;
+  /** Pure lifecycle read; no historical enrichment, metadata IO or provider work. */
+  isStopped?(): boolean;
+  close(): Promise<void>;
+}
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const MIN_OVERDUE_CYCLE_PAUSE_MS = 1_000;
 function record(value: unknown): value is Record<string, unknown> {
@@ -75,7 +81,8 @@ export function expireConnectionRow(row: ResourceAccountConnection, nowMs: numbe
 }
 
 export function createResourceConnectionMonitor(options: { config: ResourceConnectionConfig; cwd: string;
-  signal?: AbortSignal; assertOwnership: () => void; coordinator?: NativeMetadataCoordinator }): ResourceConnectionMonitor {
+  signal?: AbortSignal; assertOwnership: () => void; coordinator?: NativeMetadataCoordinator;
+  readingCache?: ResourceReadingCache }): ResourceConnectionMonitor {
   const config = validateResourceConnectionConfig(options.config); inspectPrivateDirectory(options.cwd);
   const signal = options.coordinator ? AbortSignal.any([options.coordinator.signal, ...(options.signal ? [options.signal] : [])]) : options.signal;
   const abort = new AbortController(); let closing = false; let uncertain = false; let refreshing = false;
@@ -137,6 +144,8 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
   }
   async function sample(account: ResourceConnectionConfig['accounts'][number], index: number): Promise<void> {
     let row = blank(account); row.state = 'unavailable'; row.health = 'unavailable'; row.reason = 'connection-probe-unavailable';
+    const beforeEpoch = options.readingCache?.captureEpoch(account) ?? null;
+    let checkedHint: string | null = null;
     try {
       owns(); if (abort.signal.aborted) return;
       if (account.provider === 'codex') {
@@ -151,6 +160,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
         if (result.status === 'uncertain') uncertain = true;
         row.reason = result.reason;
         if (result.status === 'observed' && result.observation && result.accountHint) {
+          checkedHint = result.accountHint;
           hints.set(account.id, result.accountHint);
           row = { ...row, state: 'observed', authentication: 'signed-in', health: 'reachable', planType: result.planType,
             observedAt: result.observation.observedAt, expiresAt: result.observation.expiresAt, windows: result.observation.windows, codexCredits: result.credits ?? null };
@@ -161,6 +171,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
           // A changed/missing account, unsupported auth, or uncertain cleanup
           // invalidates the identity proof immediately, regardless of TTL.
           lastVerifiedCodex[index] = null;
+          options.readingCache?.invalidate(account);
         }
       } else if (account.provider === 'claude') {
         const result = await native((processGroupLifecycle) => probeClaudeAccountUsage({ command: account.command, cwd: options.cwd,
@@ -169,12 +180,17 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
         row.reason = result.reason;
         if (result.status === 'observed' && result.loggedIn && hints.has(account.id) && result.accountHint !== hints.get(account.id)) {
           row.reason = 'usage-account-changed';
+          options.readingCache?.invalidate(account);
         } else if (result.status === 'observed') {
+          if (result.loggedIn && result.accountHint) checkedHint = result.accountHint;
+          else options.readingCache?.invalidate(account);
           if (result.loggedIn && result.accountHint) hints.set(account.id, result.accountHint);
           row = { ...row, state: result.loggedIn ? 'observed' : 'signed-out',
           authentication: result.loggedIn ? 'signed-in' : 'signed-out',
           health: result.quotaFresh === true && result.windows.length > 0 ? 'reachable' : 'unknown', planType: result.subscriptionType,
           observedAt: result.startedAt, expiresAt: new Date(Date.parse(result.startedAt) + 60_000).toISOString(), windows: result.windows };
+        } else if (['usage-account-changed', 'usage-identity-unavailable', 'status-not-logged-in'].includes(result.reason)) {
+          options.readingCache?.invalidate(account);
         }
       } else {
         const result = await native((processGroupLifecycle) => probeGrokAccount({ command: account.command, cwd: options.cwd, timeoutMs: 15_000, signal: abort.signal,
@@ -183,15 +199,21 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
         if (result.status === 'uncertain') uncertain = true;
         row.reason = result.reason;
         if (result.status === 'observed' && result.loggedIn === true && result.accountHint) {
+          checkedHint = result.accountHint;
           hints.set(account.id, result.accountHint);
           row = { ...row, state: 'observed', authentication: 'signed-in', health: 'reachable', planType: result.planType,
             observedAt: result.observedAt, expiresAt: result.expiresAt, windows: result.windows, onDemandEnabled: result.onDemandEnabled };
+        } else if (['probe-account-changed', 'probe-account-hint-mismatch', 'probe-account-unavailable', 'probe-account-unsupported'].includes(result.reason)) {
+          options.readingCache?.invalidate(account);
         }
       }
       owns();
     } catch { row = { ...blank(account), state: 'unavailable', health: 'unavailable', reason: 'connection-probe-unavailable' }; }
     if (uncertain) abort.abort();
-    if (!closing && !abort.signal.aborted) rows[index] = row;
+    if (!closing && !abort.signal.aborted) {
+      rows[index] = row;
+      if (checkedHint) options.readingCache?.remember(account, row, checkedHint, beforeEpoch);
+    }
   }
   async function cycle(): Promise<void> {
     const startedAt = Date.now();
@@ -224,10 +246,15 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
   if (signal?.aborted) stopped(); else signal?.addEventListener('abort', stopped, { once: true });
   if (!abort.signal.aborted) pending = cycle();
   return {
+    isStopped: () => abort.signal.aborted,
     snapshot: () => {
       const nowMs = Date.now();
       return { sampledAt: new Date(nowMs).toISOString(), refreshing,
-        accounts: structuredClone(rows.map((row) => expireConnectionRow(row, nowMs))) };
+        accounts: structuredClone(rows.map((row, index) => {
+          const current = expireConnectionRow(row, nowMs);
+          const historical = current.observedAt === null ? options.readingCache?.lastKnown(config.accounts[index]!) : null;
+          return historical ? { ...current, lastKnownUsage: historical } : current;
+        })) };
     },
     async close() { closing = true; stopped(); signal?.removeEventListener('abort', stopped); await pending;
       rows = rows.map((row) => ({ ...row, health: 'unknown' }));

@@ -861,6 +861,7 @@ describe('release artifact contract v1', () => {
     { name: 'three explicit Agents guides', guides: ['docs/OPENAI-AGENTS-INTEGRATION.md', 'docs/DOTS-COMPANION.md', 'docs/AGENT-HARNESS-EVOLUTION.md'], sibling: 'docs/OPENAI-AGENTS-PRIVATE.md' },
     { name: 'explicit reset-aware scheduling guide', guides: ['docs/RESET-AWARE-SCHEDULING.md'], sibling: 'docs/RESET-AWARE-PRIVATE.md' },
     { name: 'explicit execution feedback guide', guides: ['docs/EXECUTION-FEEDBACK.md'], sibling: 'docs/EXECUTION-FEEDBACK-PRIVATE.md' },
+    { name: 'explicit resource evidence guide', guides: ['docs/RESOURCE-EVIDENCE.md'], sibling: 'docs/RESOURCE-EVIDENCE-PRIVATE.md' },
   ])('admits $name from the actual npm file report, while refusing an unapproved sibling', ({ guides, sibling }) => {
     const release = fixture();
     const packagePath = join(release.packageRoot, 'package.json');

@@ -1,5 +1,5 @@
 /**
- * routes/verse/resources/CloudCredits.tsx — Claude cloud credits in the
+ * routes/verse/resources/CloudCredits.tsx — Claude cloud estimate in the
  * Resources drawer (unit 3.11 C6): estimated remaining of the total, the
  * sessions running now and launched today, and the link to the real balance
  * on claude.ai. The balance is not readable programmatically (core/cloud
@@ -123,7 +123,7 @@ export function CloudCredits({ readiness = null, onReadinessAction, readinessBus
       <div className={styles.cardHead}>
         <MonogramTile monogram="C" engine="claude" size="sm" />
         <h4 className={styles.cardName}>
-          <span>Claude cloud credits</span>
+          <span>Claude cloud estimate</span>
           <span className={styles.plan}>claude.ai</span>
         </h4>
       </div>

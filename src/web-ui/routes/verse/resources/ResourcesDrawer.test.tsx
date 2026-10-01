@@ -268,7 +268,7 @@ describe('ResourcesDrawer — accounts', () => {
     // Tiers stay truthful; within each tier roster order stays fixed as readings arrive.
     const elite = within(screen.getByRole('region', { name: 'Elite' }));
     const names = elite.getAllByRole('heading', { level: 4 }).map((h) => h.textContent!.replace(/(max|pro|plus|SuperGrok|claude\.ai)$/, ''));
-    expect(names.filter((n) => n !== 'Claude cloud credits')).toEqual(['Personal Codex', 'Claude Max', 'Cash Margin Partners']);
+    expect(names.filter((n) => n !== 'Claude cloud estimate')).toEqual(['Personal Codex', 'Claude Max', 'Cash Margin Partners']);
     const fast = within(screen.getByRole('region', { name: 'Fast' }));
     expect(fast.getAllByRole('heading', { level: 4 }).map((h) => h.textContent!.replace(/SuperGrok$/, ''))).toEqual(['Grok']);
     // The same facts row on every card: tier · cost basis · models.
@@ -412,7 +412,7 @@ describe('ResourcesDrawer — local', () => {
 describe('ResourcesDrawer — cloud credits', () => {
   it('says "Cloud lane not available yet" while GET /api/verse/cloud 404s', async () => {
     render(<ResourcesDrawer mode="docked" now={NOW} />);
-    const card = within(cardOf('Claude cloud credits'));
+    const card = within(cardOf('Claude cloud estimate'));
     expect(await card.findByText('Cloud lane not available yet')).toBeInTheDocument();
     expect(card.queryByText(/\$/)).toBeNull();
   });
@@ -420,7 +420,7 @@ describe('ResourcesDrawer — cloud credits', () => {
   it('shows the estimated remaining of the total, running sessions and the real-balance link', async () => {
     cloud = CLOUD;
     render(<ResourcesDrawer mode="docked" now={NOW} />);
-    const card = within(cardOf('Claude cloud credits'));
+    const card = within(cardOf('Claude cloud estimate'));
     expect(await card.findByText('$212 of $250 left')).toBeInTheDocument();
     expect(card.getByText('estimate')).toBeInTheDocument();
     expect(card.getByText('2 running · 5 of 20 today')).toBeInTheDocument();
@@ -437,12 +437,12 @@ describe('ResourcesDrawer — cloud credits', () => {
       budget: { ...CLOUD.budget, estimatedSpentUsd: 0, estimatedRemainingUsd: 250, running: 0, sessionsToday: 0 },
     };
     render(<ResourcesDrawer mode="docked" now={NOW} />);
-    const card = within(cardOf('Claude cloud credits'));
+    const card = within(cardOf('Claude cloud estimate'));
     expect(await card.findByText('Not set up')).toBeInTheDocument();
     expect(card.getByText('· ~$250 credits')).toBeInTheDocument();
     expect(card.getByText('estimate')).toBeInTheDocument();
     expect(card.getByText("The Claude seat isn't set up on this Mac.")).toBeInTheDocument();
-    expect(cardOf('Claude cloud credits').textContent).not.toMatch(/of \$250 left/);
+    expect(cardOf('Claude cloud estimate').textContent).not.toMatch(/of \$250 left/);
     expect(card.getByTitle('Cloud: not set up · ~$250 credits')).toBeInTheDocument();
     expect(card.getByRole('link', { name: /Real balance on claude\.ai/ })).toBeInTheDocument();
   });
