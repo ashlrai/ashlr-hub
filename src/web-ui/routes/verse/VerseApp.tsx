@@ -87,6 +87,7 @@ import {
 } from './verse-ui-store.js';
 import styles from './VerseApp.module.css';
 import { usedPercentText } from './percent-text.js';
+import { WORK_MODES, workModeForSection } from './shell/work-mode.js';
 
 export { SECTION_MODULES };
 
@@ -564,6 +565,15 @@ export function VerseApp() {
         one is visible.
       */}
       <main className={styles.section} data-section={ui.section} id="main-content" tabIndex={-1}>
+        <nav className={styles.workModes} aria-label="How you work">
+          {WORK_MODES.map((mode) => (
+            <button key={mode.id} type="button" className={styles.workMode}
+              aria-pressed={workModeForSection(ui.section) === mode.id} title={mode.description}
+              onClick={() => setVerseSection(mode.section)}>
+              {mode.label}
+            </button>
+          ))}
+        </nav>
         {ui.mounted.map((id) => (
           <SurfaceHost key={id} id={id} active={id === ui.section} />
         ))}

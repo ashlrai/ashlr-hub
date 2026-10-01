@@ -830,3 +830,24 @@
      runs them by name). */
   .paneToggle { display: none; }
 }
+
+.guideDrafts {
+  display: flex;
+  flex: none;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+}
+.guideDrafts button {
+  min-height: var(--control-h);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  text-align: left;
+}
+.guideDrafts button:hover { background: var(--bg-hover); }
+.guideDrafts button:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 2px; }

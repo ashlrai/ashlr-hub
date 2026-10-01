@@ -243,6 +243,22 @@ function deps(overrides: Partial<ResourceStrategyReadDeps> = {}): ResourceStrate
 }
 
 describe('buildResourceStrategyReport', () => {
+  it('preserves real exhausted cash evidence while allowing runtime-only zero-dollar direction', async () => {
+    const config = cfg({ daemon: { dailyBudgetUsd: 1 } });
+    const ordinary = await buildResourceStrategyReport(config, { deps: deps() });
+    expect(ordinary.mode).toBe('pause');
+    const free = await buildResourceStrategyReport(config, { zeroDollarOnly: true, deps: deps() });
+    expect(free.mode).not.toBe('pause');
+    expect(free.budgets).toMatchObject({ daemonDailyBudgetUsd: 1, daemonSpentTodayUsd: 1, daemonBudgetLevel: 'over' });
+    const blocked = await buildResourceStrategyReport(config, { zeroDollarOnly: true, deps: deps({ diagnoseGuardHealth: () => guard(true) }) });
+    expect(blocked.mode).toBe('pause');
+    expect(blocked.reasons.some((reason) => reason.includes('guard health'))).toBe(true);
+    const depleted = await buildResourceStrategyReport(config, { zeroDollarOnly: true,
+      deps: deps({ getResourceSnapshot: async () => resources([backend('claude', 'exhausted'), backend('builtin', 'exhausted')]) }) });
+    expect(depleted.mode).toBe('pause');
+    expect(depleted.reasons).toContain('all sensed resource backends are depleted');
+  });
+
   it('recommends pause when guard health is blocked', async () => {
     const report = await buildResourceStrategyReport(cfg(), {
       deps: deps({ diagnoseGuardHealth: () => guard(true) }),

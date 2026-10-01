@@ -17,6 +17,7 @@ const h = vi.hoisted(() => ({
   fleetPrIds: new Set<string>(),
   proposals: [] as unknown[],
   standingCalls: [] as unknown[],
+  exhaustedHints: [] as unknown[],
   autoMerge: vi.fn(),
 }));
 
@@ -29,8 +30,9 @@ vi.mock('../src/core/fleet/fleet-merge-state.js', () => ({
 }));
 
 vi.mock('../src/core/fleet/standing-merge-pass.js', () => ({
-  runStandingMergePass: async (input: { out: { merged: number; landings?: unknown[] }; pending: Proposal[] }) => {
+  runStandingMergePass: async (input: { out: { merged: number; landings?: unknown[] }; pending: Proposal[]; meteredUsdExhausted?: true }) => {
     h.standingCalls.push(input.pending.map((p) => p.id));
+    h.exhaustedHints.push(input.meteredUsdExhausted);
     input.out.merged = 1;
     input.out.landings = [{ id: 'ashlrai/canary#1@abc' }];
     return { mode: 'standing' };
@@ -92,11 +94,20 @@ beforeEach(() => {
   h.fleetPrIds.clear();
   h.proposals = [proposal('p1'), proposal('p2')];
   h.standingCalls.length = 0;
+  h.exhaustedHints.length = 0;
   h.autoMerge.mockReset();
   h.autoMerge.mockResolvedValue({ ok: false, merged: false, reason: 'test' });
 });
 
 describe('runAutoMergePass dispatch (V3.10)', () => {
+  it('forwards the narrowing USD hint only when supplied', async () => {
+    h.policy.current = { grantId: 'test' } as EffectivePolicy;
+    await runAutoMergePass(legacyCfg, { capabilityKind: 'resident-standing', meteredUsdExhausted: true });
+    await runAutoMergePass(legacyCfg, { capabilityKind: 'resident-standing' });
+    expect(h.exhaustedHints).toEqual([true, undefined]);
+    expect(h.autoMerge).not.toHaveBeenCalled();
+  });
+
   it('a live standing grant runs ONLY the standing pass — the legacy gate never runs', async () => {
     h.policy.current = { grantId: 'g' } as unknown as EffectivePolicy;
     const out = await runAutoMergePass(legacyCfg);

@@ -56,7 +56,7 @@ export const CAP_FIELDS: readonly CapFieldSpec[] = [
     label: 'Daily budget',
     unit: 'USD / day',
     min: 0,
-    max: 1000,
+    max: VERSE_CAPS_BOUNDS.dailyBudgetUsd.max,
     integer: false,
     step: 1,
     help: 'Hard ceiling on what the loop may spend in a calendar day. 0 stops the loop.',
@@ -68,10 +68,10 @@ export const CAP_FIELDS: readonly CapFieldSpec[] = [
     label: 'Items per tick',
     unit: 'items',
     min: 1,
-    max: 50,
+    max: VERSE_CAPS_BOUNDS.perTickItems.max,
     integer: true,
     step: 1,
-    help: 'How many backlog items one tick may pick up.',
+    help: 'Requested items per tick. Queue, journal, account, and resource admission still apply.',
     toDisplay: identity,
     fromDisplay: identity,
   },
@@ -80,10 +80,10 @@ export const CAP_FIELDS: readonly CapFieldSpec[] = [
     label: 'Parallel swarms',
     unit: 'swarms',
     min: 1,
-    max: 16,
+    max: VERSE_CAPS_BOUNDS.parallel.max,
     integer: true,
     step: 1,
-    help: 'Sandboxed swarms run simultaneously inside one tick (batch mode).',
+    help: 'Requested simultaneous swarms in batch mode. Available work and resource admission still apply.',
     toDisplay: identity,
     fromDisplay: identity,
   },
@@ -104,7 +104,7 @@ export const CAP_FIELDS: readonly CapFieldSpec[] = [
     label: 'Max concurrent',
     unit: 'dispatches',
     min: 1,
-    max: 32,
+    max: VERSE_CAPS_BOUNDS.maxConcurrent.max,
     integer: true,
     step: 1,
     help: 'Absolute ceiling on in-flight dispatches in continuous mode. Takes precedence over the per-tier totals.',
@@ -116,7 +116,7 @@ export const CAP_FIELDS: readonly CapFieldSpec[] = [
     label: 'Local tier',
     unit: 'slots',
     min: 1,
-    max: 32,
+    max: VERSE_CAPS_BOUNDS.concurrency.max,
     integer: true,
     step: 1,
     help: 'On-device engines. GPU/RAM bound — keep this low.',
@@ -128,7 +128,7 @@ export const CAP_FIELDS: readonly CapFieldSpec[] = [
     label: 'Cloud tier',
     unit: 'slots',
     min: 1,
-    max: 32,
+    max: VERSE_CAPS_BOUNDS.concurrency.max,
     integer: true,
     step: 1,
     help: 'Subscription cloud agents. I/O bound — many can run at once.',
@@ -140,7 +140,7 @@ export const CAP_FIELDS: readonly CapFieldSpec[] = [
     label: 'All tiers',
     unit: 'slots',
     min: 1,
-    max: 32,
+    max: VERSE_CAPS_BOUNDS.concurrency.max,
     integer: true,
     step: 1,
     help: 'Hard cap across every tier combined.',
@@ -208,6 +208,9 @@ export function validateCap(spec: CapFieldSpec, raw: string): CapValidation {
     // "a whole number of % of window" is not a phrase; a percentage cap says so plainly.
     const whole = spec.unit.startsWith('%') ? 'a whole percentage' : `a whole number of ${spec.unit}`;
     return { ok: false, error: `${spec.label} must be ${whole}.` };
+  }
+  if (spec.integer && !Number.isSafeInteger(parsed)) {
+    return { ok: false, error: `${spec.label} must be a safe whole number.` };
   }
   if (parsed < spec.min || parsed > spec.max) {
     return { ok: false, error: `${spec.label} must be between ${spec.min} and ${withUnit(spec.max, spec.unit)}.` };

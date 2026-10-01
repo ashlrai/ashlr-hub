@@ -32,6 +32,48 @@ final class StandingGrantTests: XCTestCase {
     XCTAssertEqual(g.canonical, fx.canonical)
   }
 
+  func testExplicitOperatorVolumePolicySupportsLargerAndNoCapLocalWork() throws {
+    for n: Int64 in [1000, GrantContract.maxSafeInteger] {
+      let p = fx.payload
+        .replacing([.key("merge"), .key("volumePolicy")], with: .string("operator-signed"))
+        .replacing([.key("merge"), .key("maxFiles")], with: .integer(n))
+        .replacing([.key("merge"), .key("maxLines")], with: .integer(n))
+        .replacing([.key("repos"), .index(1), .key("maxMergesPerDay")], with: .integer(n))
+      let g = try StandingGrantValidator.validate(p, context: fixtureContext)
+      XCTAssertEqual(g.volumePolicy, "operator-signed")
+      XCTAssertEqual(g.maxFiles, n)
+      XCTAssertEqual(g.maxLines, n)
+      XCTAssertEqual(g.repos[1].maxMergesPerDay, n)
+      XCTAssertEqual(g.repos[1].maxRisk, "low")
+      XCTAssertNotEqual(g.canonical, fx.canonical)
+    }
+  }
+
+  func testOperatorVolumePolicyStillRefusesUnsafeValuesAndRisk() {
+    let p = fx.payload.replacing([.key("merge"), .key("volumePolicy")], with: .string("operator-signed"))
+    for n: Int64 in [0, -1, GrantContract.maxSafeInteger + 1] {
+      assertRefused(p.replacing([.key("merge"), .key("maxFiles")], with: .integer(n)), path: "merge.maxFiles")
+      assertRefused(p.replacing([.key("merge"), .key("maxLines")], with: .integer(n)), path: "merge.maxLines")
+    }
+    for bad: JSONValue in [.string("none"), .number(1.5), .null] {
+      assertRefused(p.replacing([.key("merge"), .key("maxFiles")], with: bad), path: "merge.maxFiles")
+    }
+    assertRefused(p.replacing([.key("merge"), .key("volumePolicy")], with: .string("none")), path: "merge.volumePolicy")
+    assertRefused(p.replacing([.key("repos"), .index(1), .key("maxRisk")], with: .string("medium")), path: "repos[1].maxRisk")
+  }
+
+  func testOperatorVolumeFixtureMatchesTypeScriptCanonicalBytes() throws {
+    let url = try XCTUnwrap(Bundle.module.url(forResource: "operator-volume-grant-fixture", withExtension: "json", subdirectory: "Fixtures"))
+    let data = try Data(contentsOf: url)
+    let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    let canonical = try XCTUnwrap(object["canonical"] as? String)
+    let g = try StandingGrantValidator.validate(json: Data(canonical.utf8), context: fixtureContext)
+    XCTAssertEqual(g.canonical, canonical)
+    XCTAssertEqual(g.digestHex, object["digest"] as? String)
+    XCTAssertEqual(g.volumePolicy, "operator-signed")
+    XCTAssertEqual(g.stages[1].maxMergesPerRepoPerDay, GrantContract.maxSafeInteger)
+  }
+
   // MARK: refused — not a grant
 
   func testRefusesAnEnvelopeAndArbitraryPayloads() throws {

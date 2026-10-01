@@ -22,6 +22,7 @@ import { CUSTODY_DATA_DIR_RELATIVE, CUSTODY_HELPER_PATH, keyIdForPublicKeyPem } 
 import {
   BUDGET_MODE_RANK,
   STANDING_GRANT_CEILINGS,
+  STANDING_GRANT_DEFAULT_VOLUME_LIMITS,
   STANDING_GRANT_KEYS,
   STANDING_GRANT_OPTIONAL_KEYS,
   STANDING_GRANT_PATTERNS,
@@ -68,6 +69,9 @@ describe('GrantContract.swift mirrors authority/types.ts', () => {
 
   it('ceilings', () => {
     const c = STANDING_GRANT_CEILINGS;
+    expect(swiftInt('legacyMaxFiles')).toBe(STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxFiles);
+    expect(swiftInt('legacyMaxLines')).toBe(STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxLines);
+    expect(swiftInt('legacyMaxMergesPerRepoPerDay')).toBe(STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxMergesPerRepoPerDay);
     expect(swiftInt('maxTtlMs')).toBe(c.maxTtlMs);
     expect(swiftString('maxRisk')).toBe(c.maxRisk);
     expect(swiftInt('maxFiles')).toBe(c.maxFiles);
@@ -110,6 +114,7 @@ describe('GrantContract.swift mirrors authority/types.ts', () => {
       ['keysSpend', k.spend], ['keysSeat', k.seat], ['keysLeader', k.leader], ['keysRollout', k.rollout],
       ['keysStage', k.stage], ['keysStageRepo', k.stageRepo], ['keysCriteria', k.criteria],
       ['optionalKeysSeat', STANDING_GRANT_OPTIONAL_KEYS.seat],
+      ['optionalKeysMerge', STANDING_GRANT_OPTIONAL_KEYS.merge],
     ];
     for (const [name, ts] of pairs) expect([...swiftList(name)].sort(), name).toEqual([...ts].sort());
   });
@@ -244,5 +249,15 @@ describe.runIf(process.platform === 'darwin' && existsSync(helper))('the built h
     expect(run(['sign-bytes', '-']).status).toBe(2);
     expect(run(['gh-token', '--repo', 'not a repo']).error.code).toBe('refused');
     expect(run(['init', '--force']).status).toBe(2);
+  });
+});
+
+
+describe('operator volume cross-language signing fixture', () => {
+  it('pins the new marker/no-cap canonical bytes independently of the legacy signed fixture', () => {
+    const fixture = JSON.parse(readFileSync(fileURLToPath(new URL('../tools/custody/Tests/CustodyCoreTests/Fixtures/operator-volume-grant-fixture.json', import.meta.url)), 'utf8')) as { payload: StandingGrantV1; canonical: string; digest: string };
+    expect(fixture.payload.merge).toMatchObject({ volumePolicy: 'operator-signed', maxFiles: Number.MAX_SAFE_INTEGER, maxLines: Number.MAX_SAFE_INTEGER });
+    expect(canonicalJson(fixture.payload)).toBe(fixture.canonical);
+    expect(createHash('sha256').update(fixture.canonical).digest('hex')).toBe(fixture.digest);
   });
 });

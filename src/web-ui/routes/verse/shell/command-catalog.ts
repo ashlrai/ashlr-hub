@@ -173,6 +173,9 @@ const surface = <I extends KeyedCommandId>(id: I, name: string) => ({
 } as const);
 
 export const WORKBENCH_COMMANDS = [
+  // Intent aliases navigate only. They do not change permissions or start dispatch.
+  { id: 'mode.with-me', title: 'Work with me', scope: 'global', keys: [], group: 'go-to', section: 'Surfaces', keywords: ['interactive', 'guide', 'ask', 'chat'] },
+  { id: 'mode.for-me', title: 'Work for me', scope: 'global', keys: [], group: 'go-to', section: 'Surfaces', keywords: ['autonomous', 'fleet', 'delegate', 'background'] },
   // ── Surfaces (⌘1 Command … ⌘5 Chat) and the gear tray ────────────────────
   surface('surface.command', 'Command'),
   surface('surface.fleet', 'Fleet'),

@@ -644,3 +644,22 @@ describe('setup and the trust-root PR', () => {
     expect(h.out.join('\n')).toMatch(/old key was moved/);
   });
 });
+
+
+describe('explicit CLI volume choices', () => {
+  it('refuses malformed volume before custody signing', async () => {
+    for (const args of [['--max-files', '0'], ['--max-lines', '1.5'], ['--max-files', '9007199254740992'], ['--max-files', 'Infinity'], ['--repo-max-merges-per-day', 'a/b=-1']]) {
+      const h = harness();
+      expect(await runAuthorityCli(['grant', ...args, '--yes'], h.deps)).not.toBe(0);
+      expect(h.deps.custody!.signGrant).not.toHaveBeenCalled();
+    }
+  });
+  it('will not mix reviewed payload files with new CLI volume choices', async () => {
+    const h = harness();
+    const file = join(home, 'payload.json');
+    writeFileSync(file, JSON.stringify(makeGrant()));
+    expect(await runAuthorityCli(['grant', '--payload', file, '--max-files', 'none', '--yes'], h.deps)).not.toBe(0);
+    expect(h.deps.custody!.signGrant).not.toHaveBeenCalled();
+    expect(h.err.join(' ')).toMatch(/payload|volume/i);
+  });
+});

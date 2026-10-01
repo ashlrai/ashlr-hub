@@ -17,9 +17,11 @@ import {
   allocatePortBlock,
   isSafeCopyPath,
   parseWorkspaceConfig,
+  portBlockAvailable,
   slugifyAgentName,
   uniqueSlug,
   workspaceEnv,
+  WorkspacePortsExhaustedError,
 } from '../src/core/verse/agents/workspace-config.js';
 import type { VerseEvent, VerseSession } from '../src/core/verse/types.js';
 import { isNeedsYouItem } from '../src/core/verse/workbench-types.js';
@@ -239,6 +241,24 @@ describe('workspace.json', () => {
     expect(line.endsWith('; exit')).toBe(true);
     expect(line).toContain("'ASHLR_WORKSPACE_PATH=/w x'");
     expect(terminalCommand({ kind: 'run', command: 'npm run dev', env: workspaceEnv({ path: '/w', name: 'n', rootPath: '/r', portBase: 1, portCount: 0 }) })).not.toContain('; exit');
+  });
+
+  it('refuses a saturated physical range, allocates the last free block and respects partial overlaps', () => {
+    const full = Array.from({ length: 380 }, (_, i) => ({ base: 41_000 + i * 50, count: 50 }));
+    expect(() => allocatePortBlock(50, full)).toThrow(WorkspacePortsExhaustedError);
+    expect(allocatePortBlock(50, full.slice(0, -1))).toBe(59_950);
+    expect(portBlockAvailable(59_950, 50, full.slice(0, -1))).toBe(true);
+    expect(portBlockAvailable(59_951, 50, [])).toBe(false);
+    expect(portBlockAvailable(41_010, 10, [{ base: 41_019, count: 10 }])).toBe(false);
+    expect(portBlockAvailable(41_010, 10, [{ base: 41_000, count: 10 }, { base: 41_020, count: 10 }])).toBe(true);
+    for (const count of [NaN, Infinity, -1, 1.5, 51]) expect(() => allocatePortBlock(count, [])).toThrow(WorkspacePortsExhaustedError);
+  });
+
+  it('keeps zero-port workspaces unreserved even when every physical range is taken', () => {
+    const full = Array.from({ length: 380 }, (_, i) => ({ base: 41_000 + i * 50, count: 50 }));
+    expect(allocatePortBlock(0, full)).toBe(41_000);
+    expect(portBlockAvailable(41_000, 0, full)).toBe(true);
+    expect(allocatePortBlock(10, [{ base: 41_000, count: 0 }])).toBe(41_000);
   });
 });
 

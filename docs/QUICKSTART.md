@@ -8,26 +8,26 @@ starting a resident fleet and publishing its work are distinct steps.
 
 ### CLI on macOS, Linux or Windows
 
-Install Node.js 22.15+ and Git, then install Verse 3.17.2 from its versioned
+Install Node.js 22.15+ and Git, then install Verse 3.18.0 from its versioned
 GitHub release:
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.2/ashlr-hub-3.17.2.tgz
-ashlr --version   # should print 3.17.2
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.18.0/ashlr-hub-3.18.0.tgz
+ashlr --version   # should print 3.18.0
 ashlr verse
 ```
 
 Verse opens at `http://127.0.0.1:7777/verse/` and binds to loopback. The CLI
 prints a read token for the browser and asks for a separate mutation token
 before your first chat or other change. Keep both tokens private. Confirm
-`ashlr --version` reports `3.17.2`; the
-[GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.2) provides
+`ashlr --version` reports `3.18.0`; the
+[GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.18.0) provides
 the exact installer used here. The unversioned npm package may be an older release.
 
 ### Desktop app on Apple silicon Mac
 
-Download the [v3.17.2 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.17.2/Ashlr_3.17.2_aarch64_locally-signed.dmg)
-from the [published release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.2).
+Download the [v3.18.0 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.18.0/Ashlr_3.18.0_aarch64_locally-signed.dmg)
+from the [published release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.18.0).
 It includes the CLI and the same console. This DMG is locally signed, not
 Apple Developer ID notarized; macOS may require **Open Anyway** on first launch.
 For a source build and local signing, follow [Releasing locally](RELEASING-LOCALLY.md).
@@ -35,7 +35,7 @@ There is no Linux or Windows desktop package in this release; use the CLI above.
 
 ### Make your first useful turn
 
-1. Open **New chat** and choose a project folder. Saving a folder as a project
+1. Choose **Work with me**, open **New chat** and choose a project folder. Saving a folder as a project
    does not enroll it for unattended fleet work.
 2. Use a provider CLI you are already signed in to, or start Ollama and choose
    a tool-capable local model. For separate Claude Code, Codex and Grok accounts,
@@ -44,6 +44,19 @@ There is no Linux or Windows desktop package in this release; use the CLI above.
 3. Ask for a small, checkable change. Review its diff and results in the
    workbench before accepting it. Use **⌘K** to find actions and **⌘J** for
    **Needs you**. The full interface is in the [Verse guide](VERSE.md).
+
+Choose **Work for me** to delegate a task in its own workspace, review agents,
+or manage the resident fleet. Standing instructions guide the Leader's fleet
+planning. Changing workspaces only navigates; it does not start the fleet or
+change your permission mode. Optional planning, CI and spend settings are under
+**Options** when creating an agent.
+
+Several available seats can receive the same task, each in its own workspace.
+There is no preset six-seat fan-out ceiling. Workspace retention defaults to
+25; `ASHLR_VERSE_AGENT_CAP=none` disables retention-driven automatic archiving,
+or use a positive safe-integer count. Capacity and provider quotas still govern
+execution. This environment setting applies when the Hub process starts and
+does not widen fleet authority.
 
 The optional phone gateway is a separate, Access-protected and Mac-approved
 surface; [set it up](REMOTE-PHONE.md) rather than exposing the main loopback
@@ -144,3 +157,5 @@ A grant, service installation and live resident process each require their own
 verification. The [autonomy setup guide](AUTONOMY-SETUP.md) covers signing,
 starting, stopping and scope. The [phone guide](REMOTE-PHONE.md) covers the
 separate protected gateway. Neither path makes the main loopback server public.
+
+Workspace retention does not reserve infinite hardware. Creation refuses an exhausted dedicated-port range before archiving or creating a workspace; restore refuses an occupied original range. Create and restore admissions serialize across repositories in the owning Hub process. Separate Hub processes do not share that reservation lock. A repository needing no dedicated ports may configure `ports: 0` in `.ashlr/verse/workspace.json`.

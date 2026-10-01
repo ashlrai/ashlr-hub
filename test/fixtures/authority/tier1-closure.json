@@ -405,6 +405,7 @@
     "src/core/learning/policy-assignment-receipts.ts",
     "src/core/learning/routing-assignment-receipt.ts",
     "src/core/local-eval/classify.ts",
+    "src/core/local-eval/compare.ts",
     "src/core/local-eval/configuration.ts",
     "src/core/local-eval/main.ts",
     "src/core/local-eval/report.ts",

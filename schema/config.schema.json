@@ -839,14 +839,14 @@
             "maxAutomergeFiles": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 10,
-              "description": "Default 4, hard maximum 10 (MAX_AUTOMERGE_POLICY_FILES in src/core/foundry/automerge-scope-policy.ts — keep in sync)."
+              "maximum": 9007199254740991,
+              "description": "Default 4. Positive safe integer; standing-grant execution is capped by the explicitly signed policy. Configuration only tightens that policy."
             },
             "maxAutomergeLines": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 300,
-              "description": "Default 150, hard maximum 300 (MAX_AUTOMERGE_POLICY_LINES in src/core/foundry/automerge-scope-policy.ts — keep in sync)."
+              "maximum": 9007199254740991,
+              "description": "Default 150. Positive safe integer; standing-grant execution is capped by the explicitly signed policy. Configuration only tightens that policy."
             },
             "pushToRemote": {
               "type": "boolean",
@@ -1138,6 +1138,37 @@
       "description": "Daemon loop tuning (M22+): budget caps, tick interval, parallelism, cooldowns.",
       "additionalProperties": true,
       "properties": {
+        "dailyBudgetUsd": {
+          "type": "number", "minimum": 0, "maximum": 9007199254740991,
+          "description": "Explicit daily USD preference. Default 1; 0 stops the loop. Fractional amounts are supported. Does not expand signed spend authority."
+        },
+        "perItemMaxTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991,
+          "description": "Token allowance for proven zero-dollar producers. Default 50000; model and runtime context limits still apply. Metered producers retain the USD-derived allowance."
+        },
+        "perTickItems": {
+          "type": "integer", "minimum": 1, "maximum": 9007199254740991,
+          "description": "Requested backlog items per tick. Default 3; queue, durable journal, account, and resource admission still apply."
+        },
+        "parallel": {
+          "type": "integer", "minimum": 1, "maximum": 9007199254740991,
+          "description": "Requested batch concurrency. Default 2; available work and actual resource admission still apply."
+        },
+        "maxConcurrent": {
+          "type": "integer", "minimum": 1, "maximum": 9007199254740991,
+          "description": "Requested continuous concurrency. Defaults to concurrency.total or 8; actual admission still applies."
+        },
+        "concurrency": {
+          "type": "object", "additionalProperties": false,
+          "description": "Requested per-tier concurrency. Defaults local 2, cloud 6, total 8; does not expand signed scope or provider capacity.",
+          "properties": {
+            "local": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "cloud": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "total": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+          }
+        },
         "agentOsObserver": {
           "type": "object",
           "additionalProperties": false,

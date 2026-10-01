@@ -5,7 +5,8 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { applyGrantScopeEdit, editableEngines, grantScopeDiff, parseGrantScopeEdit } from '../src/core/authority/grant-scope.js';
+import { applyGrantScopeEdit, editableEngines, editableSeatPolicies, grantScopeDiff, parseGrantScopeEdit } from '../src/core/authority/grant-scope.js';
+import { canonicalJson } from '../src/core/authority/canonical-json.js';
 import { editGrant, makeGrant } from './helpers/authority-310b.js';
 
 describe('parseGrantScopeEdit', () => {
@@ -73,7 +74,7 @@ describe('applyGrantScopeEdit', () => {
 describe('grantScopeDiff', () => {
   it('without a grant in force every scope line is new', () => {
     const lines = grantScopeDiff(null, makeGrant());
-    expect(lines.map((l) => l.field)).toEqual(['repos', 'engines', 'leader', 'spend-mode', 'metered', 'expiry']);
+    expect(lines.filter((l) => !l.field.startsWith('seat-')).map((l) => l.field)).toEqual(['repos', 'engines', 'leader', 'spend-mode', 'metered', 'merge-caps', 'volume-policy', 'expiry']);
     expect(lines.filter((l) => l.direction === 'wider').length).toBeGreaterThanOrEqual(4);
   });
 
@@ -100,5 +101,102 @@ describe('grantScopeDiff', () => {
   it('an identical scope differs only by nothing', () => {
     const g = makeGrant();
     expect(grantScopeDiff(g, structuredClone(g))).toEqual([]);
+  });
+});
+
+
+describe('explicit signed volume choices', () => {
+  it('preserves legacy bytes and volume policy on unrelated edits', () => {
+    const g = makeGrant();
+    const unchanged = applyGrantScopeEdit(g, {});
+    expect(unchanged).toEqual({ ok: true, payload: g });
+    const renewed = applyGrantScopeEdit(g, { days: 7, maxMode: 'reserve' });
+    expect(renewed.ok).toBe(true);
+    if (renewed.ok) {
+      expect(renewed.payload.merge).toEqual(g.merge);
+      expect(renewed.payload.rollout.stages).toEqual(g.rollout.stages);
+      expect(renewed.payload.merge).not.toHaveProperty('volumePolicy');
+    }
+  });
+  it('requires explicit choice, reviews every changed rung, and retains other authority', () => {
+    const g = makeGrant();
+    const n = Number.MAX_SAFE_INTEGER;
+    const changed = applyGrantScopeEdit(g, { maxFiles: n, maxLines: n, repoMaxMergesPerDay: { 'ashlrai/measurably': n } });
+    expect(changed.ok).toBe(true);
+    if (!changed.ok) return;
+    expect(changed.payload.merge).toMatchObject({ volumePolicy: 'operator-signed', maxFiles: n, maxLines: n });
+    expect(changed.payload.repos.find((r) => r.nameWithOwner === 'ashlrai/measurably')).toMatchObject({ maxMergesPerDay: n, maxRisk: 'low', enforcement: 'local' });
+    expect(changed.payload.spend).toEqual(g.spend);
+    expect(changed.payload.leader).toEqual(g.leader);
+    expect(changed.payload.engines).toEqual(g.engines);
+    expect(changed.payload.rollout.stages.every((r) => r.maxFiles === n && r.maxLines === n)).toBe(true);
+    const diff = grantScopeDiff(g, changed.payload);
+    expect(diff.filter((r) => r.field === 'stage-volume')).toHaveLength(g.rollout.stages.length);
+    expect(diff.find((r) => r.field === 'volume-policy')).toMatchObject({ direction: 'wider' });
+    expect(diff.find((r) => r.field === 'merge-frequency')?.after).toBe('No volume cap');
+  });
+  it('rejects malformed/unsafe choices and unknown or unselected repo rates', () => {
+    for (const bad of [0, -1, 1.5, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, 'none', null]) {
+      expect(parseGrantScopeEdit({ maxFiles: bad }).ok).toBe(false);
+      expect(parseGrantScopeEdit({ maxLines: bad }).ok).toBe(false);
+    }
+    for (const bad of [-1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1, 'none', null]) expect(parseGrantScopeEdit({ repoMaxMergesPerDay: { 'a/b': bad } }).ok).toBe(false);
+    expect(parseGrantScopeEdit({ repoMaxMergesPerDay: { 'A/B': 1, 'a/b': 2 } }).ok).toBe(false);
+    expect(applyGrantScopeEdit(makeGrant(), { repoMaxMergesPerDay: { 'a/b': 0 } }).ok).toBe(false);
+    expect(applyGrantScopeEdit(makeGrant(), { repos: ['ashlrai/measurably'], repoMaxMergesPerDay: { 'ashlrai/ashlrcode': 5 } }).ok).toBe(false);
+  });
+});
+
+
+describe('explicit account policy edits', () => {
+  it('preserves exact seats and volume semantics for absent and unrelated edits', () => {
+    const draft = makeGrant();
+    for (const edit of [{}, { maxMode: 'all-in' as const }, { days: 7 }, { seatPolicies: {} }]) {
+      const result = applyGrantScopeEdit(draft, edit);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(canonicalJson(result.payload.spend.seats)).toBe(canonicalJson(draft.spend.seats));
+        expect(result.payload.merge).toEqual(draft.merge);
+      }
+    }
+  });
+  it('applies only explicit fields including zero reserve and null ceiling removal', () => {
+    const draft = makeGrant();
+    const result = applyGrantScopeEdit(draft, { seatPolicies: { claude: { reserveFloorPercent: 0, maxSessionWindowPercent: null, roles: ['producer', 'judge', 'leader'] }, local: { enabled: false } } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.payload.spend.seats['claude']).toEqual({ enabled: true, reserveFloorPercent: 0, roles: ['producer', 'judge', 'leader'] });
+    expect(result.payload.spend.seats['local']).toEqual({ ...draft.spend.seats['local'], enabled: false });
+    expect(result.payload.spend.seats['grok']).toEqual(draft.spend.seats['grok']);
+    expect(draft.spend.seats['claude']!.maxSessionWindowPercent).toBe(70);
+    expect(result.payload.merge).toEqual(draft.merge);
+  });
+  it('refuses unknown identities, prototype names and invalid nested values', () => {
+    const draft = makeGrant();
+    expect(applyGrantScopeEdit(draft, { seatPolicies: { 'claude:new': { enabled: true } } }).ok).toBe(false);
+    for (const seat of [{ reserveFloorPercent: -1 }, { reserveFloorPercent: 100.1 }, { maxSessionWindowPercent: 0 }, { maxSessionWindowPercent: 101 }, { roles: [] }, { roles: ['judge', 'judge'] }, { roles: ['root'] }, { enabled: 1 }, { unknown: 1 }]) expect(parseGrantScopeEdit({ seatPolicies: { claude: seat } }).ok).toBe(false);
+    expect(applyGrantScopeEdit(draft, JSON.parse('{"seatPolicies":{"__proto__":{"enabled":true}}}')).ok).toBe(false);
+  });
+  it('retains strict Devin producer-only restrictions and selected-engine identity boundary', () => {
+    const draft = editGrant(makeGrant(), (g) => { g.engines.push('devin'); g.spend.seats['devin'] = { enabled: true, reserveFloorPercent: 40, roles: ['producer'] }; });
+    expect(editableSeatPolicies(draft)['devin']).toEqual({ roles: ['producer'] });
+    expect(applyGrantScopeEdit(draft, { seatPolicies: { devin: { roles: ['judge'] } } }).ok).toBe(false);
+    expect(applyGrantScopeEdit(draft, { engines: ['local', 'grok-cli', 'claude-cli', 'codex'], seatPolicies: { devin: { enabled: true } } }).ok).toBe(false);
+  });
+  it('shows every permission, role, reserve and session change before signing', () => {
+    const current = makeGrant();
+    const result = applyGrantScopeEdit(current, { seatPolicies: { claude: { enabled: false, roles: ['producer'], reserveFloorPercent: 0, maxSessionWindowPercent: null } } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(grantScopeDiff(current, result.payload)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: 'seat-enabled', before: 'Enabled', after: 'Disabled', direction: 'narrower' }),
+      expect.objectContaining({ field: 'seat-roles', before: 'judge, leader', after: 'producer', direction: 'wider' }),
+      expect.objectContaining({ field: 'seat-reserve', before: '40%', after: '0%', direction: 'wider' }),
+      expect.objectContaining({ field: 'seat-session', before: '70%', after: 'No session ceiling', direction: 'wider' }),
+    ]));
+    const narrower = applyGrantScopeEdit(result.payload, { seatPolicies: { claude: { enabled: true, reserveFloorPercent: 100, maxSessionWindowPercent: 1 } } });
+    if (!narrower.ok) throw new Error(narrower.reason);
+    expect(grantScopeDiff(result.payload, narrower.payload)).toEqual(expect.arrayContaining([expect.objectContaining({ field: 'seat-reserve', direction: 'narrower' }), expect.objectContaining({ field: 'seat-session', direction: 'narrower' })]));
+    expect(grantScopeDiff(null, current).filter((line) => line.field.startsWith('seat-'))).toHaveLength(Object.keys(current.spend.seats).length * 4);
   });
 });

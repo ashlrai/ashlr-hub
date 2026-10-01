@@ -24,6 +24,7 @@
  */
 import { Suspense, lazy, useId, useState } from 'react';
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
+import { Button } from '../../../components/primitives/Button.js';
 import { IconChevronRight } from '../../../components/primitives/icons.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { AutonomyOffState, useAutonomyOff } from '../autonomy/AutonomyOffState.js';
@@ -39,6 +40,7 @@ import { Cell, Surface } from '../command/Surface.js';
 import { authorityQuery, fleetLiveQuery } from '../command/surface-data.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { useViewport } from '../shell/viewport.js';
+import { executeCatalogCommand } from '../shell/run-command.js';
 import { GateFunnelCards, LanesStrip, LiveSwimlane, OvernightCard, ParkedCard, WhySeatCard } from '../fleet/FleetCards.js';
 import { RepoTable } from '../fleet/RepoTable.js';
 import { nothingToDraw } from '../fleet/live-model.js';
@@ -101,6 +103,12 @@ export function FleetSection() {
       actions={fleet.status === 'refreshing' ? <RefreshIndicator /> : null}
       lead={
         <>
+          <div className={styles.taskActions} role="group" aria-label="Delegate and guide work">
+            <Button size="sm" variant="primary" onClick={() => executeCatalogCommand('agents.new', { via: 'button' })}>Delegate a task</Button>
+            <Button size="sm" variant="ghost" onClick={() => executeCatalogCommand('surface.agents', { via: 'button' })}>Review agents</Button>
+            <Button size="sm" variant="ghost" onClick={() => executeCatalogCommand('surface.mind', { via: 'button' })}>Standing instructions</Button>
+          </div>
+          <p className={styles.muted}>Delegate a task in its own workspace, or give the Leader standing instructions for fleet planning.</p>
           <ActionStatus actions={actions} />
           <div id={anchorId('fleet-control')}>
             <span id={anchorId('authority-grant')} />

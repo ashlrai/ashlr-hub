@@ -31,6 +31,7 @@
  *                              actions, veto; print (never install) the nightly oversight plist.
  *   mirror <list|add|sync|path|remove|reconcile>  The fleet's own mirror clones (~/.ashlr/fleet/mirrors).
  *   cloud <launch|list|refresh|improve|budget|backlog>  Claude Code cloud sessions that deliver draft PRs (3.11).
+ *   openai-agents <sessions|inspect|turns>  Read managed OpenAI Agents API metadata; no execution.
  *   devin <connect|status|launch|list|refresh|message|budget>  Devin sessions that deliver PRs through the gates (3.15).
  *   automations <list|templates|add|enable|disable|remove|fire>  Issues, red builds, schedules and webhooks become work (3.15).
  *   jev <status|test>          Jev typed decisions: status by kind, and one live test decision (3.15).
@@ -712,6 +713,12 @@ const loadDevinCmd = lazyCmd(
   () => import('./devin.js'),
   (m) => m.runDevinCli as Cmd,
   'devin command requires a current build of src/cli/devin.ts (3.15 Devin lane).',
+);
+
+const loadOpenaiAgentsCmd = lazyCmd(
+  () => import('./openai-agents.js'),
+  (m) => m.runOpenaiAgentsCli as Cmd,
+  'openai-agents command requires a current build of src/cli/openai-agents.ts.',
 );
 
 // ─── 3.15 Automations ───────────────────────────────────────────────
@@ -2322,6 +2329,12 @@ async function main(): Promise<void> {
         // nothing merges from here.
         const cmdDevin = await loadDevinCmd();
         process.exitCode = await cmdDevin(rest);
+        break;
+      }
+
+      case 'openai-agents': {
+        const cmdOpenaiAgents = await loadOpenaiAgentsCmd();
+        process.exitCode = await cmdOpenaiAgents(rest);
         break;
       }
 

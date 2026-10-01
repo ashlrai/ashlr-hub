@@ -33,6 +33,7 @@ import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { CUSTODY_HELPER_PATH } from '../core/authority/custody-client.js';
+import { STANDING_GRANT_PATTERNS } from '../core/authority/types.js';
 import type { ResidentAdmission, ResidentPlistState } from '../core/authority/resident.js';
 import type { RepoEnforcement } from '../core/fleet/fleet-types.js';
 import type {
@@ -337,7 +338,7 @@ interface Parsed {
   values: Map<string, string[]>;
 }
 
-const VALUE_FLAGS = new Set(['--reason', '--payload', '--switch', '--limit', '--kind', '--repo', '--org', '--source']);
+const VALUE_FLAGS = new Set(['--reason', '--payload', '--switch', '--limit', '--kind', '--repo', '--org', '--source', '--max-files', '--max-lines', '--repo-max-merges-per-day']);
 
 function parseArgs(args: readonly string[]): Parsed | string {
   const out: Parsed = { positional: [], flags: new Set(), values: new Map() };
@@ -376,6 +377,9 @@ const USAGE = `Usage: ashlr authority <command>
                                          Sign a new grant with Touch ID and install it
   re-approve [--yes] [--switch <mode>] [--elite-direct]
                                          Sign a continuation (after an authority deploy, expiry, …)
+  Volume choices on draft/grant/re-approve:
+    --max-files N|none --max-lines N|none --repo-max-merges-per-day owner/name=N|none
+    (explicitly signed; none means No volume cap; old grants/renewals keep their limits)
   (--elite-direct: elite models land on green tests with no judge; see docs/AUTHORITY.md §1a)
   ledger verify [--json]                 Verify the whole authority ledger chain
   ledger tail [--limit N] [--kind K] [--json]
@@ -605,12 +609,42 @@ async function eliteDirectChoice(parsed: Parsed, deps: AuthorityCliDeps, interac
   return deps.confirm('Make this grant elite-direct (one rung, no ramp; you can always Stop, switch down or revoke)?');
 }
 
+/** Explicit volume flags only; omission must not opt a renewal into a wider policy. */
+function volumeScopeFromArgs(parsed: Parsed): import('../core/authority/grant-scope-types.js').GrantScopeEdit {
+  const edit: import('../core/authority/grant-scope-types.js').GrantScopeEdit = {};
+  const limit = (text: string, allowZero: boolean): number => {
+    if (text === 'none') return Number.MAX_SAFE_INTEGER;
+    if (!/^(0|[1-9][0-9]*)$/u.test(text)) throw new Error('Volume limits must be whole numbers or none');
+    const value = Number(text);
+    if (!Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) throw new Error('Volume limits must be safe integers; file/line limits must be positive');
+    return value;
+  };
+  const files = one(parsed, '--max-files'); const lines = one(parsed, '--max-lines');
+  if (files !== null) edit.maxFiles = limit(files, false);
+  if (lines !== null) edit.maxLines = limit(lines, false);
+  const repos = parsed.values.get('--repo-max-merges-per-day');
+  if (repos) {
+    edit.repoMaxMergesPerDay = {};
+    const seen = new Set<string>();
+    for (const arg of repos) {
+      const split = arg.lastIndexOf('=');
+      if (split < 1) throw new Error('Repo volume choice must be owner/name=N|none');
+      const repo = arg.slice(0, split); const value = arg.slice(split + 1);
+      if (!STANDING_GRANT_PATTERNS.nameWithOwner.test(repo)) throw new Error('Repository merge limits require owner/name');
+      if (seen.has(repo.toLowerCase())) throw new Error('A repository merge limit was supplied twice');
+      seen.add(repo.toLowerCase()); edit.repoMaxMergesPerDay[repo] = limit(value, true);
+    }
+  }
+  return edit;
+}
+
 async function cmdDraft(parsed: Parsed, deps: AuthorityCliDeps): Promise<number> {
   const { buildStandingGrantDraft } = await import('../core/verse/authority-api.js');
   const kind = parsed.flags.has('--new') ? 'new' : parsed.flags.has('--reapprove') ? 'reapprove' : 'auto';
   const eliteDirect = await eliteDirectChoice(parsed, deps, false);
   const draft = await buildStandingGrantDraft(kind, Date.now(), {
     githubGet: ghGet(deps),
+    scope: volumeScopeFromArgs(parsed),
     ...(eliteDirect !== undefined ? { eliteDirect } : {}),
   });
   if (parsed.flags.has('--json')) {
@@ -649,6 +683,7 @@ async function cmdGrant(parsed: Parsed, deps: AuthorityCliDeps, kind: 'new' | 'r
   let payload: StandingGrantV1;
   const file = one(parsed, '--payload');
   if (file) {
+    if (Object.keys(volumeScopeFromArgs(parsed)).length > 0) { deps.err('--payload cannot be combined with volume edits; edit the reviewed payload first.'); return 2; }
     if (kind !== 'new') {
       deps.err('--payload only applies to `grant`.');
       return 2;
@@ -664,6 +699,7 @@ async function cmdGrant(parsed: Parsed, deps: AuthorityCliDeps, kind: 'new' | 'r
     const eliteDirect = await eliteDirectChoice(parsed, deps, !parsed.flags.has('--yes'));
     payload = (await buildStandingGrantDraft(kind, Date.now(), {
       githubGet: ghGet(deps),
+      scope: volumeScopeFromArgs(parsed),
       ...(eliteDirect !== undefined ? { eliteDirect } : {}),
     })).payload;
   }

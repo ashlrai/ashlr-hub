@@ -27,6 +27,7 @@ import {
   LEDGER_GENESIS_PREV_HASH,
   LEDGER_HASH_DOMAIN,
   STANDING_GRANT_CEILINGS,
+  STANDING_GRANT_DEFAULT_VOLUME_LIMITS,
   STANDING_GRANT_KEYS,
   STANDING_GRANT_OPTIONAL_KEYS,
   STANDING_GRANT_PATTERNS,
@@ -126,7 +127,8 @@ describe('standing grant — shared verifier / custody-helper contract', () => {
     const grant = sampleGrant();
     expect(sorted(Object.keys(grant))).toEqual(sorted(STANDING_GRANT_KEYS.grant));
     for (const repo of grant.repos) expect(sorted(Object.keys(repo))).toEqual(sorted(STANDING_GRANT_KEYS.repo));
-    expect(sorted(Object.keys(grant.merge))).toEqual(sorted(STANDING_GRANT_KEYS.merge));
+    expect(sorted(Object.keys(grant.merge))).toEqual(sorted(STANDING_GRANT_KEYS.merge.filter((key) => !(STANDING_GRANT_OPTIONAL_KEYS.merge as readonly string[]).includes(key))));
+    expect(STANDING_GRANT_OPTIONAL_KEYS.merge).toEqual(['volumePolicy']);
     expect(sorted(Object.keys(grant.spend))).toEqual(sorted(STANDING_GRANT_KEYS.spend));
     expect(sorted(Object.keys(grant.leader))).toEqual(sorted(STANDING_GRANT_KEYS.leader));
     expect(sorted(Object.keys(grant.rollout))).toEqual(sorted(STANDING_GRANT_KEYS.rollout));
@@ -187,8 +189,9 @@ describe('standing grant — shared verifier / custody-helper contract', () => {
     expect(LEDGER_GENESIS_PREV_HASH).toMatch(/^0{64}$/);
     expect(STANDING_GRANT_CEILINGS.maxTtlMs).toBe(30 * 24 * 60 * 60 * 1000);
     expect(STANDING_GRANT_CEILINGS.maxRisk).toBe('medium');
-    expect([STANDING_GRANT_CEILINGS.maxFiles, STANDING_GRANT_CEILINGS.maxLines]).toEqual([10, 300]);
-    expect(STANDING_GRANT_CEILINGS.maxMergesPerRepoPerDay).toBe(24);
+    expect([STANDING_GRANT_CEILINGS.maxFiles, STANDING_GRANT_CEILINGS.maxLines]).toEqual([Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]);
+    expect(STANDING_GRANT_CEILINGS.maxMergesPerRepoPerDay).toBe(Number.MAX_SAFE_INTEGER);
+    expect(STANDING_GRANT_DEFAULT_VOLUME_LIMITS).toEqual({ maxFiles: 10, maxLines: 300, maxMergesPerRepoPerDay: 24 });
     expect(STANDING_GRANT_CEILINGS.localAuthored).toEqual({ maxRisk: 'low', maxFiles: 4, maxLines: 150 });
     expect(STANDING_GRANT_CEILINGS.localEnforcement).toEqual({ maxRisk: 'low', maxFiles: 4, maxLines: 150, maxMergesPerDay: 4 });
     expect(STANDING_GRANT_CEILINGS.minVetoMinutes).toBe(30);

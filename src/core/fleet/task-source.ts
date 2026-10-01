@@ -125,7 +125,7 @@ function cleanRef(value: unknown): string | null {
  * The size a task is sliced to: the repo's effective merge caps under the
  * standing policy, or — with no policy in force — the most conservative
  * compiled caps (local-authored: 4 files / 150 lines). Never larger than the
- * compiled ceilings.
+ * signed policy and transport-safe integer bounds.
  */
 export function sizeBudgetFor(repo: string): { files: number; lines: number } {
   const ceilings = STANDING_GRANT_CEILINGS;
@@ -153,6 +153,10 @@ function isIso(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 40 && Number.isFinite(Date.parse(value));
 }
 
+function validSizeBudget(budget: { files: unknown; lines: unknown }): boolean {
+  return Number.isSafeInteger(budget.files) && Number(budget.files) > 0 && Number.isSafeInteger(budget.lines) && Number(budget.lines) > 0;
+}
+
 function sanitizeTask(raw: unknown): FleetTask | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
   const r = raw as Record<string, unknown>;
@@ -166,7 +170,7 @@ function sanitizeTask(raw: unknown): FleetTask | null {
   const value = r['value'];
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   const budget = r['sizeBudget'] as Record<string, unknown> | undefined;
-  if (!budget || typeof budget['files'] !== 'number' || typeof budget['lines'] !== 'number') return null;
+  if (!budget || !validSizeBudget({ files: budget['files'], lines: budget['lines'] })) return null;
   const attempts = r['attempts'];
   if (typeof attempts !== 'number' || !Number.isInteger(attempts) || attempts < 0) return null;
   if (!isIso(r['createdAt']) || !isIso(r['updatedAt'])) return null;
@@ -188,8 +192,8 @@ function sanitizeTask(raw: unknown): FleetTask | null {
     dedupeKey: cleanRef(r['dedupeKey']),
     status: r['status'] as FleetTaskStatus,
     sizeBudget: {
-      files: Math.max(1, Math.min(STANDING_GRANT_CEILINGS.maxFiles, Math.floor(budget['files']))),
-      lines: Math.max(1, Math.min(STANDING_GRANT_CEILINGS.maxLines, Math.floor(budget['lines']))),
+      files: Math.max(1, Math.min(STANDING_GRANT_CEILINGS.maxFiles, Number(budget['files']))),
+      lines: Math.max(1, Math.min(STANDING_GRANT_CEILINGS.maxLines, Number(budget['lines']))),
     },
     attempts,
     parkedUntil: parkedUntil as string | null,
@@ -320,6 +324,7 @@ function validateInput(input: FleetTaskInput): { ok: true } | { ok: false; reaso
 export function enqueueTask(input: FleetTaskInput, opts: TaskStoreOptions = {}): EnqueueTaskResult {
   const valid = validateInput(input);
   if (!valid.ok) return valid;
+  if (opts.sizeBudget && !validSizeBudget(opts.sizeBudget)) return { ok: false, reason: 'sizeBudget must contain positive safe integers.' };
   const nowMs = opts.nowMs ?? Date.now();
   const nowIso = new Date(nowMs).toISOString();
   const file = opts.file ?? taskQueuePath();
@@ -435,6 +440,7 @@ export interface TaskOperatorEdit {
 const NAME_WITH_OWNER_RE = STANDING_GRANT_PATTERNS.nameWithOwner;
 
 export function editTaskAsOperator(edit: TaskOperatorEdit, opts: TaskStoreOptions = {}): CancelTaskResult {
+  if (opts.sizeBudget && !validSizeBudget(opts.sizeBudget)) return { ok: false, reason: 'sizeBudget must contain positive safe integers.' };
   if (typeof edit !== 'object' || edit === null || typeof edit.taskId !== 'string' || !/^[a-f0-9-]{36}$/.test(edit.taskId)) {
     return { ok: false, reason: 'taskId must be a task id.' };
   }

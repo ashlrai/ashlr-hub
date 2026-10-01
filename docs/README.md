@@ -25,6 +25,9 @@ that every integration, provider or autonomous effect is active.
 | Change code and verify it locally | [Contributing — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/CONTRIBUTING.md) |
 | Build release evidence and distinguish distribution from activation | [Releasing — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING.md) |
 | Run agents in Ashlr Verse against your accounts and a local model | [Local fleet](LOCAL-FLEET.md) |
+| Inspect managed OpenAI Agents sessions through the read-only CLI | [OpenAI Agents integration](OPENAI-AGENTS-INTEGRATION.md) |
+| Understand supported Dots companion workflows and the plugin-event integration path | [Dots companion](DOTS-COMPANION.md) |
+| Apply durable sessions, steering, tool discovery and context ideas to the existing harness | [Agent harness evolution](AGENT-HARNESS-EVOLUTION.md) |
 | Decide whether to give one agent the whole context window or four a quarter each | [Plan deep, execute wide](LOCAL-CONTEXT-STRATEGY.md) |
 | Cut a release and publish without CI | [Releasing locally](RELEASING-LOCALLY.md) |
 | See what multi-folder workspaces, GitHub and MCP management still need | [Workspaces build contract](VERSE-WORKSPACES.md) |

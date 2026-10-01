@@ -73,6 +73,7 @@ public struct ValidatedGrant: Equatable, Sendable {
   public let maxFiles: Int64
   public let maxLines: Int64
   public let selfRepo: String
+  public let volumePolicy: String?
   public let maxMode: String
   public let meteredUsdPerDay: Int64
   /// Sorted by seat id.
@@ -142,6 +143,17 @@ public enum StandingGrantValidator {
     let hostBinding = try string(top["hostBinding"], path: "hostBinding", pattern: GrantContract.patternSha256Hex)
     let surface = try string(top["authoritySurfaceDigest"], path: "authoritySurfaceDigest", pattern: GrantContract.patternSha256Hex)
 
+    // --- merge
+    let merge = try exactObject(top["merge"], path: "merge", keys: GrantContract.keysMerge, optional: GrantContract.optionalKeysMerge)
+    let volumePolicy: String?
+    if merge["volumePolicy"] != nil {
+      volumePolicy = try oneOf(merge["volumePolicy"], path: "merge.volumePolicy", allowed: ["operator-signed"])
+    } else { volumePolicy = nil }
+    let operatorVolumes = volumePolicy == "operator-signed"
+    let maxFiles = try integer(merge["maxFiles"], path: "merge.maxFiles", range: 1...(operatorVolumes ? GrantContract.maxFiles : GrantContract.legacyMaxFiles))
+    let maxLines = try integer(merge["maxLines"], path: "merge.maxLines", range: 1...(operatorVolumes ? GrantContract.maxLines : GrantContract.legacyMaxLines))
+    let selfRepo = try oneOf(merge["selfRepo"], path: "merge.selfRepo", allowed: GrantContract.selfRepoModes)
+
     // --- repos
     let repoValues = try array(top["repos"], path: "repos", count: 1...Int(GrantContract.maxRepos))
     var repos: [GrantRepo] = []
@@ -156,23 +168,17 @@ public enum StandingGrantValidator {
       let stage = try oneOf(obj["stage"], path: "\(p).stage", allowed: GrantContract.repoStages)
       let enforcement = try oneOf(obj["enforcement"], path: "\(p).enforcement", allowed: GrantContract.repoEnforcements)
       let maxRisk = try oneOf(obj["maxRisk"], path: "\(p).maxRisk", allowed: GrantContract.mergeRisks)
-      let maxMerges = try integer(obj["maxMergesPerDay"], path: "\(p).maxMergesPerDay", range: 0...GrantContract.maxMergesPerRepoPerDay)
+      let maxMerges = try integer(obj["maxMergesPerDay"], path: "\(p).maxMergesPerDay", range: 0...(operatorVolumes ? GrantContract.maxMergesPerRepoPerDay : GrantContract.legacyMaxMergesPerRepoPerDay))
       if enforcement == "local" {
         if maxRisk != GrantContract.localEnforcementMaxRisk {
           throw GrantRefusal(path: "\(p).maxRisk", reason: "a repo without server-side enforcement merges \(GrantContract.localEnforcementMaxRisk) risk only")
         }
-        if maxMerges > GrantContract.localEnforcementMaxMergesPerDay {
+        if !operatorVolumes && maxMerges > GrantContract.localEnforcementMaxMergesPerDay {
           throw GrantRefusal(path: "\(p).maxMergesPerDay", reason: "a repo without server-side enforcement merges at most \(GrantContract.localEnforcementMaxMergesPerDay) a day")
         }
       }
       repos.append(GrantRepo(nameWithOwner: name, stage: stage, enforcement: enforcement, maxRisk: maxRisk, maxMergesPerDay: maxMerges))
     }
-
-    // --- merge
-    let merge = try exactObject(top["merge"], path: "merge", keys: GrantContract.keysMerge, optional: [])
-    let maxFiles = try integer(merge["maxFiles"], path: "merge.maxFiles", range: 1...GrantContract.maxFiles)
-    let maxLines = try integer(merge["maxLines"], path: "merge.maxLines", range: 1...GrantContract.maxLines)
-    let selfRepo = try oneOf(merge["selfRepo"], path: "merge.selfRepo", allowed: GrantContract.selfRepoModes)
 
     // --- spend
     let spend = try exactObject(top["spend"], path: "spend", keys: GrantContract.keysSpend, optional: [])
@@ -260,7 +266,7 @@ public enum StandingGrantValidator {
       let stageRisk = try oneOf(obj["maxRisk"], path: "\(p).maxRisk", allowed: GrantContract.mergeRisks)
       let stageFiles = try integer(obj["maxFiles"], path: "\(p).maxFiles", range: 0...maxFiles)
       let stageLines = try integer(obj["maxLines"], path: "\(p).maxLines", range: 0...maxLines)
-      let stageMerges = try integer(obj["maxMergesPerRepoPerDay"], path: "\(p).maxMergesPerRepoPerDay", range: 0...GrantContract.maxMergesPerRepoPerDay)
+      let stageMerges = try integer(obj["maxMergesPerRepoPerDay"], path: "\(p).maxMergesPerRepoPerDay", range: 0...(operatorVolumes ? GrantContract.maxMergesPerRepoPerDay : GrantContract.legacyMaxMergesPerRepoPerDay))
       let stageClasses = try uniqueEnumList(obj["leaderClasses"], path: "\(p).leaderClasses", allowed: GrantContract.leaderGrantClasses, count: 0...GrantContract.leaderGrantClasses.count)
       for (j, cls) in stageClasses.enumerated() where !leaderClasses.contains(cls) {
         throw GrantRefusal(path: "\(p).leaderClasses[\(j)]", reason: "class \(cls) is not granted to the Leader")
@@ -289,7 +295,7 @@ public enum StandingGrantValidator {
     return ValidatedGrant(
       grantId: grantId, grantSeq: grantSeq, keyId: keyId, issuedAt: issuedAt, expiresAt: expiresAt,
       issuedAtDate: issuedAtDate, expiresAtDate: expiresAtDate, hostBinding: hostBinding,
-      authoritySurfaceDigest: surface, repos: repos, maxFiles: maxFiles, maxLines: maxLines, selfRepo: selfRepo,
+      authoritySurfaceDigest: surface, repos: repos, maxFiles: maxFiles, maxLines: maxLines, selfRepo: selfRepo, volumePolicy: volumePolicy,
       maxMode: maxMode, meteredUsdPerDay: metered, seats: seats, engines: engines, leaderClasses: leaderClasses,
       vetoMinutes: vetoMinutes, conductorGoals: conductorGoals, stages: stages, canonical: canonical, digestHex: digest
     )

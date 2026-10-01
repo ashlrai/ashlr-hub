@@ -135,6 +135,28 @@ describe('readVerseCaps', () => {
     expect(caps.defaulted).toEqual([]);
   });
 
+  it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('reports invalid stored capacity %s as defaulted instead of a configured allowance', (value) => {
+    const caps = readVerseCaps(baseConfig({ daemon: { perTickItems: value, parallel: value,
+      maxConcurrent: value, concurrency: { local: value, cloud: value, total: value } } }));
+    expect(caps.perTickItems).toBe(3);
+    expect(caps.parallel).toBe(2);
+    expect(caps.maxConcurrent).toBeNull();
+    expect(caps.concurrency).toEqual({ local: null, cloud: null, total: null });
+    expect(caps.defaulted).toEqual(expect.arrayContaining(['perTickItems', 'parallel', 'maxConcurrent', 'concurrency']));
+  });
+
+  it.each([-1, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('defaults an invalid stored budget %s without converting it to unlimited', (value) => {
+    const caps = readVerseCaps(baseConfig({ daemon: { dailyBudgetUsd: value } }));
+    expect(caps.dailyBudgetUsd).toBe(1);
+    expect(caps.defaulted).toContain('dailyBudgetUsd');
+  });
+
+  it('preserves explicit fractional budgets above the former thousand-dollar UI ceiling', () => {
+    const parsed = parseVerseCapsUpdate({ dailyBudgetUsd: 1001.25 });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(readVerseCaps(applyVerseCapsUpdate(baseConfig(), parsed.update).cfg).dailyBudgetUsd).toBe(1001.25);
+  });
+
   it('drops malformed foundry limit entries rather than inventing a window or max', () => {
     const caps = readVerseCaps(baseConfig({
       foundry: {
@@ -255,16 +277,16 @@ describe('parseVerseCapsUpdate', () => {
 
   it.each([
     ['dailyBudgetUsd', -1],
-    ['dailyBudgetUsd', 1001],
+    ['dailyBudgetUsd', Number.MAX_SAFE_INTEGER + 1],
     ['perTickItems', 0],
-    ['perTickItems', 51],
+    ['perTickItems', Number.MAX_SAFE_INTEGER + 1],
     ['perTickItems', 2.5],
     ['parallel', 0],
-    ['parallel', 17],
+    ['parallel', Infinity],
     ['intervalMs', 29_999],
     ['intervalMs', 86_400_001],
     ['maxConcurrent', 0],
-    ['maxConcurrent', 33],
+    ['maxConcurrent', 1.5],
     ['subscriptionMaxPercent', 0],
     ['subscriptionMaxPercent', 101],
   ])('rejects %s = %s (out of contract bounds)', (key, value) => {
@@ -290,6 +312,14 @@ describe('parseVerseCapsUpdate', () => {
     expect(parsed.ok, `${key}=${value} should be accepted`).toBe(true);
   });
 
+  it.each(['perTickItems', 'parallel', 'maxConcurrent'])('preserves large safe %s operator preferences', (key) => {
+    for (const value of [129, Number.MAX_SAFE_INTEGER]) {
+      const parsed = parseVerseCapsUpdate({ [key]: value });
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) expect(readVerseCaps(applyVerseCapsUpdate(baseConfig(), parsed.update).cfg)[key as 'perTickItems']).toBe(value);
+    }
+  });
+
   it.each([NaN, Infinity, '5', null, true])('rejects a non-finite budget: %s', (value) => {
     expect(parseVerseCapsUpdate({ dailyBudgetUsd: value }).ok).toBe(false);
   });
@@ -305,11 +335,12 @@ describe('parseVerseCapsUpdate', () => {
   // cap at Math.max(1, …) on top of that, so a stored 0 came back as the
   // built-in 2/6/8 while the cockpit displayed 0. See the comment on
   // VERSE_CAPS_BOUNDS.concurrency.
-  it('validates concurrency tiers 1–32 and rejects unknown tiers', () => {
+  it('validates positive safe concurrency tiers and rejects unknown tiers', () => {
     expect(parseVerseCapsUpdate({ concurrency: { local: 1, cloud: 32 } }).ok).toBe(true);
     expect(parseVerseCapsUpdate({ concurrency: { local: 0 } }).ok).toBe(false);
     expect(parseVerseCapsUpdate({ concurrency: { local: -1 } }).ok).toBe(false);
-    expect(parseVerseCapsUpdate({ concurrency: { total: 33 } }).ok).toBe(false);
+    expect(parseVerseCapsUpdate({ concurrency: { total: 129 } }).ok).toBe(true);
+    expect(parseVerseCapsUpdate({ concurrency: { total: Number.MAX_SAFE_INTEGER + 1 } }).ok).toBe(false);
     expect(parseVerseCapsUpdate({ concurrency: { gpu: 2 } }).ok).toBe(false);
     expect(parseVerseCapsUpdate({ concurrency: {} }).ok).toBe(false);
     expect(parseVerseCapsUpdate({ concurrency: [] }).ok).toBe(false);

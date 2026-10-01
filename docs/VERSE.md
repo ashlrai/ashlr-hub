@@ -1,9 +1,31 @@
 # Ashlr Verse
 
 Verse is the operator console for the whole Ashlr hub. One window: chat with an
-agent that can edit your repos, run the autonomous fleet and keep it on a leash,
-approve or reject what it produced while you were away, and see what every
+agent that can edit your repos, delegate work to the autonomous fleet,
+review what it produced while you were away, and see what every
 account and local model is costing you.
+
+The two primary workspaces are **Work with me** and **Work for me**.
+Work with me opens Chat for interactive engineering: guide a model, inspect
+its tools and context, and review changes beside the conversation. Work for me
+opens Fleet for delegated work: give agents tasks, review their progress and
+guide the Leader's fleet planning. Existing Command, Agents, Mind and Growth
+destinations and keyboard shortcuts remain available. The saved workspace is
+restored on launch. Selecting either workspace does not start or stop agents,
+change permission mode, sign a grant or activate the resident daemon.
+
+An idle empty chat offers guide starters that append editable text to its
+draft. Nothing is sent until you send it. Draft insertion is scoped to the
+current chat. New-agent creation keeps repository, seat and task visible;
+planning, automatic CI repair, merge behavior and spend settings are under
+**Options**, with their existing defaults.
+
+The same task can be sent to all selected available seats, with a separate
+workspace for each; there is no preset six-seat UI ceiling. Agent workspace
+retention defaults to 25. At process startup, `ASHLR_VERSE_AGENT_CAP=none`
+disables retention-driven automatic archiving; a positive safe integer sets a
+finite capacity. Invalid values retain the default. Provider quotas, local
+hardware, available ports and each agent's normal admission still apply.
 
 It is served by the normal `ashlr serve` server at `/verse/`, opened by
 `ashlr verse`, and wrapped by the macOS desktop app in `desktop/`.
@@ -72,7 +94,7 @@ integration.
 - The Jev decision layer, its call sites and its bounds:
   [`docs/JEV-INTEGRATION.md`](JEV-INTEGRATION.md).
 
-This page is the user guide for Verse 3.16. Sections marked 3.15 describe
+This page is the user guide for Verse 3.18. Sections marked 3.15 describe
 features introduced in that release and retained here.
 
 **At a glance.**
@@ -746,8 +768,8 @@ open the same control, clamped to the grant's ceiling.
 
 | Mode | Autonomy may use |
 |---|---|
-| **all-in** | Everything available. No reserves. |
-| **balanced** (default) | Up to each seat's reserve. Claude keeps 40 % of its weekly window for you and is never used while its five-hour window is above 70 %. Grok keeps no reserve. Local models are free and unlimited. |
+| **all-in** | Uses the available budget preference capacity; signed account floors and session ceilings still apply. |
+| **balanced** (default) | Up to each seat's reserve. Claude keeps 40 % of its weekly window for you and is never used while its five-hour window is above 70 %. Grok keeps no reserve. Local models incur no provider token charge; hardware and serving capacity still apply. |
 | **reserve** | Free local models first, and only a small paid slice (85 % of every paid window is kept for you). |
 
 Codex is off for autonomy in every mode until you switch it on. An unknown
@@ -1210,6 +1232,16 @@ spend against the daily cap as a single line meter.
 - **Emergency stop** — see below. Separated, confirm-guarded, and labelled for
   what it is.
 
+### Account permissions
+
+The standing grant editor exposes enabled state, roles, reserve floors and
+session ceilings for server-listed accounts. Account edits are partial: fields
+you leave untouched retain their prior values. All-in does not erase a signed
+reserve or session ceiling; choose 0% or No session ceiling explicitly and
+review the before/after preview. New edits disable Approve until their preview
+succeeds. Signing records exactly that reviewed payload. These permissions
+still require supported providers, known usage and eligible budget preferences.
+
 ### How spend is bounded
 
 Every limit is editable in the Budget & limits panel and takes effect live (the
@@ -1218,18 +1250,18 @@ confirmation on commit:
 
 | Limit | Range | What it does |
 |---|---|---|
-| Daily USD budget | 0–1000 | Hard ceiling on spend per day. **0 means stopped** — the panel says so rather than letting you set it silently. |
-| Items per tick | 1–50 | How much work one pass may pick up. |
-| Parallelism | 1–16 | How many dispatches run at once. |
+| Daily USD budget | Nonnegative supported amount | Ceiling on metered daily spend. Eligible resident zero-dollar work can continue after positive cash exhaustion. **0 means stopped** — the panel says so rather than letting you set it silently. |
+| Items per tick | Positive safe integer | Requested work per pass; the durable journal admits at most 64 items per tick and remaining work can continue on later ticks. |
+| Parallelism | Positive safe integer | Requested simultaneous batch dispatches; available work, provider capacity, hardware and signed scope decide admission. |
 | Tick interval | 30 s – 24 h | How often the loop wakes. |
-| Max concurrent | 1–32 | Ceiling across everything. |
-| Concurrency: local / cloud / total | 0–32 each | Splits the ceiling between free local work and paid cloud work. |
+| Max concurrent | Positive safe integer | Requested continuous-mode concurrency, subject to actual admission. |
+| Concurrency: local / cloud / total | Positive safe integers | Requested capacity for each lane and across lanes; local/cloud labels alone do not establish dollar cost. |
 | Subscription max percent | 1–100 | How much of a subscription's window the fleet may consume before it backs off. |
 | Per-engine dispatch limits | max ≥ 0 per engine/window | Rate limits per engine, checked against the dispatch ledger. |
 
-Each control shows its current value **and the live usage against it**, so a
-limit is never an abstract number. Usage also breaks down local vs cloud for the
-period, so you can see how much of the day ran for free.
+Controls show their configured values and observed usage where it is available.
+Unobserved per-tier concurrency remains unknown. Local/cloud usage describes
+execution lanes; actual engine and model accounting determines dollar cost.
 
 ### How scope is bounded
 
@@ -1780,3 +1812,32 @@ registry entry alone does not prove entitlement or successful inference.
 Phone retries distinguish a confirmed server refusal from a missing or failed
 response: uncertain delivery pauses Start and offers chat inspection, keeping
 the prompt instead of blindly dispatching it again.
+
+Port allocation is a physical resource constraint. Workspace creation and restore serialize across repositories in the owning Hub process; exhaustion or an occupied restore range produces an explicit refusal instead of overlapping another workspace. Separate Hub processes do not share a reservation lock. Repositories needing no dedicated ports can set `ports: 0`.
+
+
+### Cash exhaustion and resident capacity (3.18)
+
+A positive daily USD allowance bounds metered work. Once exhausted, a valid
+resident standing grant can still admit proven zero-dollar producers after the
+final route and any executor rewrite are checked. Custom CLI/API trust labels,
+local execution labels and unknown endpoints do not establish zero cost. Normal
+subscription reserves, grant scope, provider readiness and hardware limits
+remain binding. Hosted Devin continues through its separate ACU launcher gates;
+ACUs are still chargeable capacity. Setting daily USD to 0 remains Stop.
+
+Proven zero-dollar producers use `daemon.perItemMaxTokens` when configured as a
+positive safe integer, otherwise the normal 50,000-token run allowance. This
+avoids deriving their capacity from exhausted cash. Model/runtime context limits
+still apply; metered work retains its USD-derived allowance. At cash exhaustion,
+uncertain Best-of-N candidate/critic paths fall back to the admitted single
+producer. Unknown-cost Leader/experiment and ancillary inference waits; ordinary
+watch, intake and deterministic maintenance continue. Required model claim,
+red-team and judge checks wait when fresh inference lacks zero-USD proof rather
+than being weakened. Exact cached answers remain subject to their existing
+validity checks. Offline evaluation reports are optional evidence and do not
+gate ordinary dispatch.
+
+Single-producer spend accounting uses the admitted concrete engine, rather than trusting a
+subscription-like tier on a custom engine. An unaccounted interrupted zero-dollar batch or unexpected execution identity
+keeps its journal armed for reconciliation.

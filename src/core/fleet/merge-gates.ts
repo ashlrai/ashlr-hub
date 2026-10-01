@@ -41,6 +41,7 @@ import { createHash } from 'node:crypto';
 import { canonicalizeDaemonActivationValue } from '../daemon/activation-permit.js';
 import {
   STANDING_GRANT_CEILINGS,
+  STANDING_GRANT_DEFAULT_VOLUME_LIMITS,
   type EffectiveMergePolicy,
   type EffectivePolicy,
   type EffectiveRepoPolicy,
@@ -286,8 +287,8 @@ function minPositive(...values: (number | null | undefined)[]): number {
 export function dailyMergeCap(repoPolicy: EffectiveRepoPolicy): number {
   return minPositive(
     repoPolicy.maxMergesPerDay,
-    STANDING_GRANT_CEILINGS.maxMergesPerRepoPerDay,
-    repoPolicy.enforcement === 'local' ? STANDING_GRANT_CEILINGS.localEnforcement.maxMergesPerDay : null,
+    repoPolicy.volumePolicy === 'operator-signed' ? STANDING_GRANT_CEILINGS.maxMergesPerRepoPerDay : STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxMergesPerRepoPerDay,
+    repoPolicy.enforcement === 'local' && repoPolicy.volumePolicy !== 'operator-signed' ? STANDING_GRANT_CEILINGS.localEnforcement.maxMergesPerDay : null,
   );
 }
 
@@ -510,6 +511,7 @@ export interface G2Caps {
 
 /** min(grant stage, config, compiled ceilings, local-authored, local-enforcement). */
 export function effectiveScopeCaps(input: Omit<G2Input, 'partial' | 'provenance' | 'risk' | 'scope'>): G2Caps {
+  const operatorVolumes = input.mergePolicy.volumePolicy === 'operator-signed' && input.repoPolicy.volumePolicy === 'operator-signed';
   const localAuthor = input.producerLocal ? STANDING_GRANT_CEILINGS.localAuthored : null;
   const localEnforcement = input.repoPolicy.enforcement === 'local' ? STANDING_GRANT_CEILINGS.localEnforcement : null;
   return {
@@ -524,20 +526,20 @@ export function effectiveScopeCaps(input: Omit<G2Input, 'partial' | 'provenance'
     maxFiles: minPositive(
       input.repoPolicy.maxFiles,
       input.mergePolicy.maxFiles,
-      STANDING_GRANT_CEILINGS.maxFiles,
+      operatorVolumes ? STANDING_GRANT_CEILINGS.maxFiles : STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxFiles,
       input.config.maxFiles,
       localAuthor ? input.mergePolicy.localAuthored.maxFiles : null,
-      localAuthor?.maxFiles,
-      localEnforcement?.maxFiles,
+      !operatorVolumes ? localAuthor?.maxFiles : null,
+      !operatorVolumes ? localEnforcement?.maxFiles : null,
     ),
     maxLines: minPositive(
       input.repoPolicy.maxLines,
       input.mergePolicy.maxLines,
-      STANDING_GRANT_CEILINGS.maxLines,
+      operatorVolumes ? STANDING_GRANT_CEILINGS.maxLines : STANDING_GRANT_DEFAULT_VOLUME_LIMITS.maxLines,
       input.config.maxLines,
       localAuthor ? input.mergePolicy.localAuthored.maxLines : null,
-      localAuthor?.maxLines,
-      localEnforcement?.maxLines,
+      !operatorVolumes ? localAuthor?.maxLines : null,
+      !operatorVolumes ? localEnforcement?.maxLines : null,
     ),
   };
 }
@@ -568,8 +570,8 @@ export function evaluateG2(input: G2Input): GateEvaluation & { caps: G2Caps } {
     return out(evaluation('refuse', 'diff-unmeasurable', 'the diff could not be measured', inputs));
   }
   // Which bound bites decides the code. The local-author / local-enforcement
-  // ceilings are compiled in and never rise, so their codes mean "never
-  // mergeable"; the grant / stage / config caps can rise as the rollout
+  // risk bounds remain compiled; legacy size bounds apply until an explicit
+  // signed volume choice replaces them. Grant / stage / config caps can rise as the rollout
   // advances, so their codes mean "not yet" — and callers treat them so.
   const growable = effectiveScopeCaps({ ...input, producerLocal: false, repoPolicy: { ...input.repoPolicy, enforcement: 'server' } });
   const permanentCode = input.producerLocal ? 'local-author-cap' : 'local-enforcement-cap';

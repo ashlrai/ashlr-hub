@@ -135,6 +135,8 @@ export interface StandingGrantRepo {
 }
 
 export interface StandingGrantMerge {
+  /** Explicit signed opt-in; absent retains legacy volume limits, including local 4/150/4. */
+  volumePolicy?: 'operator-signed';
   maxFiles: number;
   maxLines: number;
   selfRepo: SelfRepoMode;
@@ -268,13 +270,13 @@ export const STANDING_GRANT_SIGNING_DOMAIN = 'ashlr:standing-grant:v1\0';
 export const STANDING_GRANT_CEILINGS = Object.freeze({
   maxTtlMs: 30 * 24 * 60 * 60 * 1000,
   maxRisk: 'medium',
-  /** merge.ts's policy maximum — the latent 40 / 3000 config can never take effect. */
-  maxFiles: 10,
-  maxLines: 300,
-  maxMergesPerRepoPerDay: 24,
-  /** Work a local model authored merges only at low risk and small size. */
+  /** Transport-safe integer bounds, not product throughput policies. */
+  maxFiles: Number.MAX_SAFE_INTEGER,
+  maxLines: Number.MAX_SAFE_INTEGER,
+  maxMergesPerRepoPerDay: Number.MAX_SAFE_INTEGER,
+  /** Local-authored risk bound and legacy size defaults (marker-absent grants). */
   localAuthored: Object.freeze({ maxRisk: 'low', maxFiles: 4, maxLines: 150 } as const),
-  /** Repos with `enforcement: 'local'` (no server-side protection). */
+  /** Local-enforcement risk bound and legacy volume defaults (marker-absent grants). */
   localEnforcement: Object.freeze({ maxRisk: 'low', maxFiles: 4, maxLines: 150, maxMergesPerDay: 4 } as const),
   minVetoMinutes: 30,
   maxVetoMinutes: 24 * 60,
@@ -286,6 +288,14 @@ export const STANDING_GRANT_CEILINGS = Object.freeze({
   maxSeats: 64,
   maxRolesPerSeat: 3,
 } as const);
+
+/** Conservative defaults and legacy V1 limits; larger values require explicit signed opt-in. */
+export const STANDING_GRANT_DEFAULT_VOLUME_LIMITS = Object.freeze({ maxFiles: 10, maxLines: 300, maxMergesPerRepoPerDay: 24 });
+
+/** MAX_SAFE_INTEGER represents an explicitly signed absence of a product volume cap. */
+export function volumeLimitLabel(value: number): string {
+  return value === Number.MAX_SAFE_INTEGER ? 'No volume cap' : String(value);
+}
 
 /** Every string in a grant matches one of these (see CANONICAL BYTES above). */
 export const STANDING_GRANT_PATTERNS = Object.freeze({
@@ -344,7 +354,7 @@ export const STANDING_GRANT_KEYS = Object.freeze({
     maxRisk: true,
     maxMergesPerDay: true,
   }),
-  merge: keyList<StandingGrantMerge>({ maxFiles: true, maxLines: true, selfRepo: true }),
+  merge: keyList<StandingGrantMerge>({ maxFiles: true, maxLines: true, selfRepo: true, volumePolicy: true }),
   spend: keyList<StandingGrantSpend>({ maxMode: true, meteredUsdPerDay: true, seats: true }),
   seat: keyList<StandingGrantSeat>({
     enabled: true,
@@ -378,6 +388,7 @@ export const STANDING_GRANT_KEYS = Object.freeze({
 
 /** The only optional keys in a signed grant. */
 export const STANDING_GRANT_OPTIONAL_KEYS = Object.freeze({
+  merge: Object.freeze(['volumePolicy'] as const),
   seat: Object.freeze(['maxSessionWindowPercent'] as const),
 });
 
@@ -386,6 +397,7 @@ export const STANDING_GRANT_OPTIONAL_KEYS = Object.freeze({
 // ---------------------------------------------------------------------------
 
 export interface EffectiveRepoPolicy {
+  volumePolicy?: 'operator-signed';
   nameWithOwner: string;
   /** min(grant repo stage, current rollout stage, switch, selfRepo rule). */
   stage: RepoStage;
@@ -399,6 +411,7 @@ export interface EffectiveRepoPolicy {
 }
 
 export interface EffectiveMergePolicy {
+  volumePolicy?: 'operator-signed';
   /** The grant-wide cap after min(grant, stage, config, ceilings); a repo's own cap may be lower. */
   maxFiles: number;
   maxLines: number;

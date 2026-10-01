@@ -17,10 +17,8 @@
  * is left in place (a downgrade still finds its own state) and is never read
  * again once v3 exists.
  *
- * LAUNCH RULE. The first launch each local day opens Command — the overnight
- * digest is the point of opening the app in the morning. Later launches
- * return to the last surface. A surface whose module has not landed yet is
- * never forced (the rule falls through to the saved section).
+ * LAUNCH RULE. Return to the saved surface on every launch; a fresh install
+ * starts in Chat. Opening a new day must not take someone out of their chat.
  *
  * NOT PERSISTED, on purpose: the overlays, `command` (a one-shot hand-off to
  * the chat), history, the keep-alive list and `activeSessionId` — all
@@ -265,7 +263,6 @@ export interface LoadOptions {
  */
 export function loadVerseUi(options: LoadOptions = {}): VerseUiState {
   const now = options.now ?? Date.now();
-  const landed = options.landed ?? ((m: string) => sectionImporter(m) !== undefined);
   const v3 = readJson(V3_KEY);
   const v2 = v3 ? null : readJson(V2_KEY);
   const src = v3 ?? v2 ?? {};
@@ -282,8 +279,8 @@ export function loadVerseUi(options: LoadOptions = {}): VerseUiState {
   chatMovedAnnounced = v3 ? v3['chatMovedAnnounced'] === true : false;
 
   const today = localDay(now);
-  // First launch of the day → Command, when Command exists in this build.
-  if (lastLaunchDay !== today && landedModule('command', landed) !== null) section = 'command';
+  // Retain the old bookkeeping field for downgrade compatibility, without
+  // interpreting a new day as permission to change the operator's view.
   lastLaunchDay = today;
 
   const state: VerseUiState = {

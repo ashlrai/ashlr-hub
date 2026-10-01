@@ -168,6 +168,8 @@ export interface DaemonSpendGuard {
   spentUsdAtArm: number;
   reservedUsd: number;
   exhaustBudgetDay: boolean;
+  /** This batch admitted only zero-dollar producers. Interrupted execution still requires reconciliation. */
+  zeroCostOnly?: true;
   itemIds: string[];
 }
 
@@ -187,6 +189,7 @@ export interface ArmDaemonSpendGuardInput {
   dailyBudgetUsd: number;
   spentUsdAtArm: number;
   reservedUsd: number;
+  zeroCostOnly?: true;
   now?: Date;
 }
 
@@ -702,6 +705,12 @@ function parseSpendGuard(raw: string): DaemonSpendGuard | null {
       'accountingId', 'armedAt', 'budgetDay', 'daemonStartedAt', 'dailyBudgetUsd', 'exhaustBudgetDay',
       'hostname', 'itemIds', 'pid', 'reservedUsd', 'schemaVersion', 'spentUsdAtArm', 'token',
     ].sort();
+    const zeroCostOnly = obj['zeroCostOnly'] === true;
+    if (Object.prototype.hasOwnProperty.call(obj, 'zeroCostOnly')) {
+      if (!zeroCostOnly) return null;
+      expectedKeys.push('zeroCostOnly');
+      expectedKeys.sort();
+    }
     const itemIds = obj['itemIds'];
     if (
       keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index]) ||
@@ -718,9 +727,9 @@ function parseSpendGuard(raw: string): DaemonSpendGuard | null {
       typeof obj['dailyBudgetUsd'] !== 'number' || !Number.isFinite(obj['dailyBudgetUsd']) ||
       obj['dailyBudgetUsd'] <= 0 ||
       typeof obj['spentUsdAtArm'] !== 'number' || !Number.isFinite(obj['spentUsdAtArm']) ||
-      obj['spentUsdAtArm'] < 0 || obj['spentUsdAtArm'] > obj['dailyBudgetUsd'] ||
+      obj['spentUsdAtArm'] < 0 || (!zeroCostOnly && obj['spentUsdAtArm'] > obj['dailyBudgetUsd']) ||
       typeof obj['reservedUsd'] !== 'number' || !Number.isFinite(obj['reservedUsd']) || obj['reservedUsd'] < 0 ||
-      obj['reservedUsd'] > obj['dailyBudgetUsd'] - obj['spentUsdAtArm'] ||
+      (zeroCostOnly ? obj['reservedUsd'] !== 0 || obj['exhaustBudgetDay'] !== false : obj['reservedUsd'] > obj['dailyBudgetUsd'] - obj['spentUsdAtArm']) ||
       typeof obj['exhaustBudgetDay'] !== 'boolean' ||
       !Array.isArray(itemIds) || itemIds.length > DAEMON_SPEND_GUARD_ITEM_CAPACITY ||
       !itemIds.every((id) => typeof id === 'string' && id.length > 0 &&
@@ -743,6 +752,7 @@ function parseSpendGuard(raw: string): DaemonSpendGuard | null {
       spentUsdAtArm: obj['spentUsdAtArm'],
       reservedUsd: obj['reservedUsd'],
       exhaustBudgetDay: obj['exhaustBudgetDay'],
+      ...(zeroCostOnly ? { zeroCostOnly: true as const } : {}),
       itemIds: [...itemIds],
     };
   } catch {
@@ -813,6 +823,7 @@ export function armDaemonSpendGuard(input: ArmDaemonSpendGuardInput): ArmDaemonS
       spentUsdAtArm: input.spentUsdAtArm,
       reservedUsd: input.reservedUsd,
       exhaustBudgetDay: false,
+      ...(input.zeroCostOnly === true ? { zeroCostOnly: true as const } : {}),
       itemIds: [...input.itemIds],
     };
     if (!parseSpendGuard(`${JSON.stringify(guard)}\n`)) {
@@ -884,6 +895,9 @@ export function accountDaemonSpendGuard(
     return { ok: false, error: 'spend guard daemon identity does not match daemon state' };
   }
   const accounting = state.spendGuardAccounting;
+  if (guard.zeroCostOnly && (spentUsd !== 0 || accounting?.budgetExhausted === true)) {
+    return { ok: false, error: 'zero-cost spend guard requires exact zero charge and known accounting' };
+  }
   if (accounting && accounting.budgetDay !== guard.budgetDay) {
     return { ok: false, error: 'spend guard accounting day conflicts with daemon state' };
   }

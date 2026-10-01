@@ -48,17 +48,21 @@ confinement that passes its self-test (`probeAutonomousConfinement()`: the
 real autonomous profile, applied to a throwaway home, must be enforced).
 If confinement fails, nothing ticks.
 
-## Compiled ceilings
+## Signed limits and compatibility
 
 | Limit | Value |
 |---|---|
 | Lifetime | 30 days |
 | Risk | medium at most (`high` is never mergeable) |
-| Size | 10 files / 300 lines (merge.ts's policy maximum) |
-| Local-authored work | low risk, 4 files / 150 lines |
-| Locally enforced repos (private, free plan) | low risk, 4 / 150, 4 merges a day |
-| Merges | 24 per repo per day |
+| Legacy/default size | 10 files / 300 lines |
+| Local-authored work | low risk; legacy/default volume 4 files / 150 lines |
+| Locally enforced repos (private, free plan) | low risk; legacy/default volume 4 / 150, 4 merges a day |
+| Legacy/default merges | 24 per repo per day |
 | Class-B veto window | 30 minutes to 24 hours |
+
+Explicit volume edits add the signed `merge.volumePolicy: "operator-signed"` marker. Such a grant can name larger positive safe-integer file and line limits and nonnegative per-repository daily merge limits, including **No volume cap** (`Number.MAX_SAFE_INTEGER` in the wire protocol). This changes volume only: risk, spend, repository scope, verification, Stop and revocation still apply. Current config may tighten the selected limits.
+
+Grants without that marker keep the legacy limits above, including the smaller local limits. Their canonical signed bytes remain unchanged. Renewing or reapproving without a volume edit does not add the marker or widen the grant. A root-owned custody helper upgrade is required before signing the new marker; an older helper refuses it.
 
 ## The effective policy
 

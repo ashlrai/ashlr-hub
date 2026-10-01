@@ -14,11 +14,13 @@
 import type { ExperimentResultV1 } from '../learn/harness-types.js';
 import type {
   EvalReport,
+  EvalComparisonEvidence,
   FailureMode,
   HarnessConfiguration,
   TaskOutcome,
   TaskSpec,
   TrialResult,
+  TrialTokens,
 } from './types.js';
 
 function median(values: readonly number[]): number {
@@ -60,6 +62,7 @@ export function summariseTask(task: TaskSpec, trials: readonly TrialResult[]): T
 
 export function buildReport(args: {
   readonly configuration: HarnessConfiguration;
+  readonly comparisonEvidence?: EvalComparisonEvidence;
   readonly outcomes: readonly TaskOutcome[];
   readonly trialsPerTask: number;
   readonly concurrency: number;
@@ -70,6 +73,7 @@ export function buildReport(args: {
   const totalPasses = args.outcomes.reduce((n, o) => n + o.passes, 0);
   return {
     configuration: args.configuration,
+    ...(args.comparisonEvidence ? { comparisonEvidence: args.comparisonEvidence } : {}),
     trialsPerTask: args.trialsPerTask,
     concurrency: args.concurrency,
     outcomes: args.outcomes,
@@ -134,7 +138,7 @@ export function renderReport(report: EvalReport): string {
   lines.push('');
 
   // A timeout used to be the end of the story: the CLI emits its result JSON
-  // once, at the end, so a killed trial recorded zero tokens, zero turns and no
+  // once, at the end, so a killed trial has unknown token usage, turns and no
   // transcript. An outcome nobody can act on is the same failure as a false
   // success, which is what this harness exists to catch — so every timeout now
   // reports what the wire was doing when the clock ran out.
@@ -171,12 +175,18 @@ export function renderReport(report: EvalReport): string {
     lines.push('');
   }
 
-  lines.push('TOKENS PER TRIAL (input / output / cache-read)');
+  lines.push('TOKENS PER TRIAL (input / output / cache-read / cache-creation)');
+  lines.push('  CLI-reported counts; unknown means missing, invalid, or legacy coverage. Not a billing measurement.');
+  const count = (t: TrialResult, field: keyof TrialTokens): string => {
+    const n = t.tokens[field];
+    return t.tokenSource === 'cli-result-v1' && t.tokenCoverage?.[field] === 'reported'
+      && typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 ? String(n) : 'unknown';
+  };
   for (const o of report.outcomes) {
     for (const t of o.trials) {
       lines.push(`  ${pad(`${o.taskId}#${t.trial}`, 26)} `
-        + `${pad(String(t.tokens.input), 8)} ${pad(String(t.tokens.output), 8)} `
-        + `${pad(String(t.tokens.cacheRead), 10)} ${pad(t.mode, 26)} `
+        + `${pad(count(t, 'input'), 8)} ${pad(count(t, 'output'), 8)} `
+        + `${pad(count(t, 'cacheRead'), 10)} ${pad(count(t, 'cacheCreation'), 10)} ${pad(t.mode, 26)} `
         + `${t.changedFiles ?? '?'} file(s), ${t.turns ?? '?'} turns${t.note ? ` — ${t.note}` : ''}`);
     }
   }

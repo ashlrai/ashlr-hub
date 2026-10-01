@@ -4,7 +4,7 @@
 
 ## Autonomy commissioning path
 
-**Current release status (3.16):** `ashlr authority setup` is a resumable preparation
+**Current release status (3.18):** `ashlr authority setup` is a resumable preparation
 workflow. Its dry run is read-only; a live run can create custody, GitHub and
 grant state after your explicit actions. Setup itself never installs or restarts
 the daemon. The legacy service paths (`ashlr daemon install`, `ashlr setup`,
@@ -79,11 +79,10 @@ enforcement with the App's host-verified `ashlr/verify` check. Dated details:
 **What a grant allows.** A standing grant names the repositories, engines, risk
 and size caps, spend ceiling and Leader classes, and is valid for at most 30
 days. Effective policy is the minimum of the grant, the config and compiled
-ceilings (medium risk, 10 files / 300 lines, 24 merges per repo per day).
+risk ceilings. Legacy grants keep 10 files / 300 lines / 24 merges per repo per day and smaller local limits. Explicit volume edits can sign larger limits or No volume cap using `merge.volumePolicy: "operator-signed"`; plain renewal does not widen an existing grant. Signing the new marker requires an upgraded root-owned custody helper.
 Lowering never asks: the switch (Off, Propose, Autonomous) goes down instantly,
 **Stop** writes `~/.ashlr/KILL`, and **Revoke** needs a new grant to resume.
-Every merge happens on GitHub, pinned to the head SHA, after the gates and a
-judge from a different model family. CI and a fresh re-run watch it for two
+Every merge happens on GitHub, pinned to the head SHA, after the gates. Ordinary lanes require a judge from a different model family; an explicitly eligible `elite-direct` lane skips that separate judge. CI and a fresh re-run watch it for two
 hours, and a red merge is reverted automatically. The full model is in
 [`docs/STANDING-AUTHORITY.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md).
 
@@ -91,7 +90,26 @@ hours, and a red merge is reverted automatically. The full model is in
 `~/.ashlr/budget.json` and from the budget pill on Command. Under **balanced**
 (the default), Claude keeps 40 % of its weekly window for you, and autonomy
 never uses it while its five-hour window is above 70 %. Grok keeps no reserve.
-Local models are free and unlimited. **all-in** drops the reserves, and
+Local models incur no provider token charges; available hardware determines their capacity. **all-in** drops the budget preference reserves, while signed account floors and session ceilings still apply.
 **reserve** keeps 85 % of every paid window for you. Codex is off for autonomy
 until you switch it on. A seat whose usage cannot be read is never eligible.
 Your own chats ignore reserves.
+
+
+**Account scope in 3.18.** The grant editor shows only the accounts listed by
+this server. Choose whether each can work autonomously, its permitted roles,
+its reserve floor (0–100%) and an optional session ceiling (1–100%). No session
+ceiling removes that signed ceiling. All-in alone does not erase these fields.
+Review the complete preview before Touch ID approval; new edits disable approval
+until their preview succeeds. Untouched account fields and ordinary renewals
+preserve the existing scope. Devin permits the producer role only. Role
+permission does not establish provider support; Apps & Accounts and Resources
+show the separate budget preferences and actual readiness.
+
+**Cash exhaustion.** When a positive daily daemon USD allowance is exhausted,
+resident work with a proven zero-dollar final execution path can continue on the
+normal cadence. The recorded spend and original ceiling remain intact. Metered
+or unknown-cost routes, unproven model checks and unresolved spend journals
+still wait; a daily USD setting of 0 still stops the loop. Hosted Devin uses
+separate ACU admission and accounting, which remain binding. This behavior does
+not bypass subscription usage windows, signed reserves or local serving capacity.

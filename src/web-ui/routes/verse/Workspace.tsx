@@ -54,7 +54,7 @@ import { engineSupportsModes, hasExpansiveMode } from '../../../core/verse/conte
 import { MutationTokenDialog } from '../../components/auth/MutationTokenDialog.js';
 import { Tooltip } from '../../components/primitives/Tooltip.js';
 import { ActionMenu, anchorBelow, type ActionMenuItem } from './chat/ActionMenu.js';
-import { appendParagraph, registerComposerInserter } from './chat/composer-bridge.js';
+import { appendParagraph, insertIntoComposer, registerComposerInserter } from './chat/composer-bridge.js';
 import { derivePhaseFromTranscript, LiveStatus } from './chat/LiveStatus.js';
 import { NoticeSlot, type NoticeCandidate } from './chat/NoticeSlot.js';
 import { PathRootsContext } from './chat/path-display.js';
@@ -160,7 +160,7 @@ export function Workspace(props: WorkspaceProps) {
   const [linkCopied, setLinkCopied] = useState(false);
 
   /** Text another pane drafted in (Review "Add to message", Terminal "Send selection to chat"). */
-  const [insertRequest, setInsertRequest] = useState<{ nonce: number; text: string } | null>(null);
+  const [insertRequest, setInsertRequest] = useState<{ sessionId: string; nonce: number; text: string } | null>(null);
   /** "Continue on ‹seat›": the seat the handoff should open on. */
   const [handoffTarget, setHandoffTarget] = useState<SeatChoice | null>(null);
   /** Where the composer's "Queued turns" row renders — between the notice slot and the live row. */
@@ -204,8 +204,8 @@ export function Workspace(props: WorkspaceProps) {
         const nonce = (prev?.nonce ?? 0) + 1;
         // Two inserts inside one render (batched) would otherwise show the
         // composer only the second: an undelivered one is merged, not lost.
-        const undelivered = prev !== null && prev.nonce > deliveredInsert.current;
-        return { nonce, text: undelivered ? appendParagraph(prev.text, text) : text };
+        const undelivered = prev !== null && prev.sessionId === composerSessionId && prev.nonce > deliveredInsert.current;
+        return { sessionId: composerSessionId, nonce, text: undelivered ? appendParagraph(prev.text, text) : text };
       });
     });
   }, [composerSessionId, dispatchEnabled]);
@@ -282,7 +282,7 @@ export function Workspace(props: WorkspaceProps) {
           <span className={styles.emptyMark} aria-hidden="true"><VerseMark size={36} /></span>
           <h1 className={styles.emptyTitle}>{hasAnySessions ? 'Pick a chat, or start a new one' : `No chats yet${newChatShortcut ? ` — ${newChatShortcut}` : ''}`}</h1>
           <p className={styles.emptyBody}>
-            Open a project, choose a seat — a Claude or Codex account, Grok, or a local Ollama model — and talk to an agent that can edit that project.
+            Choose a project and model, then ask questions, plan a change, or work through code together.
           </p>
           <button type="button" className={styles.emptyButton} onClick={onNew}>New chat {newChatShortcut ? <kbd>{newChatShortcut}</kbd> : null}</button>
           <WorkbenchKeys />
@@ -582,6 +582,19 @@ export function Workspace(props: WorkspaceProps) {
         <BranchBarSlot sessionId={session.id} roots={roots.roots} onOpenDiff={requestDiff} />
       ) : null}
 
+      {session && view.loaded && session.turnCount === 0 && session.status === 'idle' && dispatchEnabled ? (
+        <div className={styles.guideDrafts} role="group" aria-label="Start working together">
+          <span>Start with a question</span>
+          {[
+            { label: 'Explain this project', text: 'Read this project and explain its structure and main entry points. Do not edit files.' },
+            { label: 'Plan a change', text: 'Help me plan a change to this project. Ask me what I want to achieve, then suggest an approach. Do not edit files.' },
+          ].map((draft) => (
+            <button key={draft.label} type="button" onClick={() => insertIntoComposer(session.id, draft.text)}
+              title="Add an editable draft. Send when you are ready.">{draft.label}</button>
+          ))}
+        </div>
+      ) : null}
+
       {session ? (
         <Composer key={`composer:${session.id}`} sessionId={session.id} seats={seats} seat={{ seatId: session.seatId, model: session.model }}
           engine={session.engine} running={running} disabled={!dispatchEnabled} disabledReason={disabledReason} locked={locked}
@@ -590,7 +603,8 @@ export function Workspace(props: WorkspaceProps) {
           handoffDraft={session.handoffFrom !== undefined && session.turnCount === 0}
           onSend={onSend} onStop={onStop} onSeatChange={onSeatChange}
           onHandoff={openHandoff} handoffDisabledReason={handoffReason} onContinueOn={continueOn}
-          insertRequest={insertRequest} queueSlot={queueHost} autoFocus />
+          // A newly mounted composer must not consume the previous chat's nonce.
+          insertRequest={insertRequest?.sessionId === session.id ? insertRequest : null} queueSlot={queueHost} autoFocus />
       ) : null}
 
       {menu && session ? (

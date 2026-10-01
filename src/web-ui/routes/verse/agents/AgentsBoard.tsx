@@ -16,7 +16,7 @@
  * the operator asks for (a new agent's prompt, an approved plan, Send).
  */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react';
-import { AGENT_COLUMN_LABEL, AGENT_COLUMNS, type AgentCard, type AgentColumn } from '../../../../core/verse/agents/types.js';
+import { AGENT_COLUMN_LABEL, AGENT_COLUMNS, MAX_WORKSPACE_CAP, type AgentCard, type AgentColumn } from '../../../../core/verse/agents/types.js';
 import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { EmptyState } from '../../../components/primitives/EmptyState.js';
@@ -271,7 +271,9 @@ export function AgentsBoard() {
             {counts
               ? `${counts.working} working · ${counts['needs-you']} need you · ${counts.review} ready for review`
               : 'Every chat and agent, by what it needs.'}
-            {read.data ? ` · ${read.data.liveWorkspaces} of ${read.data.cap} workspaces` : ''}
+            {read.data ? read.data.cap === MAX_WORKSPACE_CAP
+              ? ` · ${read.data.liveWorkspaces} workspaces · no retention cap`
+              : ` · ${read.data.liveWorkspaces} of ${read.data.cap} workspaces` : ''}
           </p>
         </div>
         <div className={styles.headerActions}>

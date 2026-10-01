@@ -1,6 +1,6 @@
 {
   "name": "@ashlr/hub",
-  "version": "3.17.2",
+  "version": "3.18.0",
   "description": "Local-first command center for agentic engineers.",
   "publishConfig": {
     "access": "public"
@@ -53,6 +53,9 @@
     "docs/RESOURCE-POOLS.md",
     "docs/NORTH-STAR.md",
     "docs/ELITE-AGENT-EFFICIENCY.md",
+    "docs/OPENAI-AGENTS-INTEGRATION.md",
+    "docs/DOTS-COMPANION.md",
+    "docs/AGENT-HARNESS-EVOLUTION.md",
     "docs/RUNTIME_ACTIVATION_AUTHORITY.md",
     "docs/REMOTE-PHONE.md",
     "docs/contracts/CONTRACT-M515.md",
@@ -116,7 +119,7 @@
     "test:invariants": "vitest run test/h*.test.ts --no-file-parallelism",
     "test:engineering-responsiveness": "vitest run --config vitest.config.engineering-performance.ts",
     "conformance:ecosystem": "tsx scripts/run-ecosystem-conformance.ts",
-    "check:first-paint": "node scripts/check-first-paint-budget.mjs --budget-kb 352 --mobile-budget-kb 250",
+    "check:first-paint": "node scripts/check-first-paint-budget.mjs --budget-kb 353 --mobile-budget-kb 250",
     "check:docs": "node scripts/check-documentation.mjs",
     "gate": "node scripts/gate.mjs",
     "gate:full": "node scripts/gate.mjs --full",

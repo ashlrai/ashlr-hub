@@ -144,6 +144,8 @@ export interface ResourceStrategyReadDeps {
 }
 
 export interface ResourceStrategyOptions {
+  /** Runtime-only narrowing: daemon already admits only zero-dollar token producers. */
+  zeroDollarOnly?: true;
   maxOutcomes?: number;
   maxChecks?: number;
   ecosystemRoot?: string;
@@ -493,6 +495,7 @@ function recommendMode(
   budgets: ResourceStrategyBudgetSummary,
   productionVelocity: EffectiveProductionVelocityProfile,
   proposalSource: ResourceStrategyReport['fleet']['proposalSource'],
+  zeroDollarOnly = false,
 ): { mode: AutonomousDirectionMode; confidence: ReportConfidence; reasons: string[]; recommendedActions: string[] } {
   const reasons: string[] = [];
   const actions: string[] = [];
@@ -506,7 +509,7 @@ function recommendMode(
     reasons.push('guard health source is degraded');
   }
   if (guard.blocked) reasons.push(`guard health has ${guard.blocks.length} blocking issue(s)`);
-  if (budgets.daemonBudgetLevel === 'over') reasons.push('daemon daily budget is exhausted');
+  if (budgets.daemonBudgetLevel === 'over' && !zeroDollarOnly) reasons.push('daemon daily budget is exhausted');
   if (resources.posture === 'depleted') reasons.push('all sensed resource backends are depleted');
 
   if (reasons.length > 0) {
@@ -677,6 +680,7 @@ export async function buildResourceStrategyReport(
     budgetSummary,
     productionVelocity,
     proposalSource,
+    opts.zeroDollarOnly === true,
   );
 
   return {

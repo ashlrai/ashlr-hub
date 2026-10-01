@@ -942,6 +942,46 @@ describe('reserve breaches are checked once per standing tick, after dispatch', 
   });
 });
 
+describe('exhausted positive USD allowance maintenance', () => {
+  it('keeps watch and intake available while holding unclassified Leader and experiment inference', async () => {
+    const leader = vi.fn(async () => undefined);
+    const experiment = vi.fn(async () => null);
+    const watch = vi.fn(h.deps.advanceWatch!);
+    const hooks = createLiveTickHooks({ deps: { ...h.deps, leaderTick: leader, runExperiment: experiment, advanceWatch: watch } });
+    hooks.effectiveConfig(CFG);
+    hooks.standingBacklog([]);
+    const result = await hooks.beforeTick({ ...hookCtx, meteredUsdExhausted: true });
+    expect(result.holdProduction).toBeNull();
+    expect(watch).toHaveBeenCalledOnce();
+    expect(h.insightCalls).toBe(1);
+    expect(leader).not.toHaveBeenCalled();
+    expect(experiment).not.toHaveBeenCalled();
+    expect(h.ticks).toHaveLength(1);
+    // Without the narrowing hint the established runners remain available.
+    await hooks.beforeTick({ ...hookCtx, nowMs: NOW + 10 * 60_000 });
+    expect(leader).toHaveBeenCalledOnce();
+    expect(experiment).toHaveBeenCalledOnce();
+    hooks.stopBackground('test finished');
+  });
+
+  it('aborts a running unclassified experiment without starting another one', async () => {
+    let signal: AbortSignal | null = null;
+    const experiment = vi.fn((opts: { signal: AbortSignal }) => {
+      signal = opts.signal;
+      return new Promise<string | null>((resolve) => opts.signal.addEventListener('abort', () => resolve(null), { once: true }));
+    });
+    const hooks = createLiveTickHooks({ deps: { ...h.deps, runExperiment: experiment } });
+    hooks.effectiveConfig(CFG);
+    hooks.standingBacklog([]);
+    await hooks.beforeTick(hookCtx);
+    expect(signal).not.toBeNull();
+    await hooks.beforeTick({ ...hookCtx, nowMs: NOW + 1, meteredUsdExhausted: true });
+    expect((signal as unknown as AbortSignal).aborted).toBe(true);
+    expect(experiment).toHaveBeenCalledOnce();
+    expect(h.audits.some((a) => a.includes('experiment inference cost is unproven'))).toBe(true);
+  });
+});
+
 describe('beforeTick — the Devin fleet step (3.15)', () => {
   const DEVIN_CFG = { ...CFG, devin: { enabled: true, fleet: true } } as AshlrConfig;
   const devinCtx = { ...hookCtx, cfg: DEVIN_CFG };
@@ -970,6 +1010,14 @@ describe('beforeTick — the Devin fleet step (3.15)', () => {
     await hooks.beforeTick(devinCtx);
     expect(calls).toEqual([{ refresh: true }, { refresh: false }]);
     expect(h.audits.some((a) => /Devin launched dv_20260927T0400_aaaaaa for backlog item fix-1/.test(a))).toBe(true);
+  });
+
+  it('preserves the independently authorized ACU launcher under exhausted daemon USD', async () => {
+    const calls = withDevin();
+    const hooks = createLiveTickHooks({ deps: h.deps });
+    hooks.effectiveConfig(DEVIN_CFG);
+    await hooks.beforeTick({ ...devinCtx, meteredUsdExhausted: true });
+    expect(calls).toEqual([{ refresh: true }]);
   });
 
   it('never runs on a dry run, under KILL, without a grant, or without the opt-in', async () => {

@@ -222,3 +222,23 @@ describe('clampBudgetPolicy — only tightens', () => {
     expect(standingSeatCapacity(capacity, standing).map((s) => s.seatId)).toEqual(['claude', 'local:llama', 'grok']);
   });
 });
+
+
+describe('operator signed volume effective limits', () => {
+  it('uses signed limits for local work while config and stage can only tighten', () => {
+    const g = editGrant(grant, (p) => {
+      p.merge = { ...p.merge, volumePolicy: 'operator-signed', maxFiles: Number.MAX_SAFE_INTEGER, maxLines: Number.MAX_SAFE_INTEGER };
+      p.repos.forEach((r) => { r.maxMergesPerDay = 100; });
+      p.rollout.stages.forEach((r) => { r.maxFiles = 80; r.maxLines = 5000; r.maxMergesPerRepoPerDay = 70; });
+    });
+    const p = policy({ g });
+    expect(repo(p, 'ashlrai/measurably')).toMatchObject({ volumePolicy: 'operator-signed', maxFiles: 80, maxLines: 5000, maxMergesPerDay: 70, maxRisk: 'low' });
+    expect(p.merge.localAuthored).toEqual({ maxFiles: 80, maxLines: 5000, maxRisk: 'low' });
+    const narrowed = policy({ g, config: { foundry: { autoMerge: { maxAutomergeFiles: 20, maxAutomergeLines: 500 } } } });
+    expect(narrowed.merge).toMatchObject({ maxFiles: 20, maxLines: 500 });
+    expect(repo(narrowed, 'ashlrai/measurably')).toMatchObject({ maxFiles: 20, maxLines: 500, maxRisk: 'low' });
+    delete g.merge.volumePolicy;
+    expect(policy({ g }).merge).toMatchObject({ maxFiles: 10, maxLines: 300 });
+    expect(repo(policy({ g }), 'ashlrai/measurably')).toMatchObject({ maxFiles: 4, maxLines: 150, maxMergesPerDay: 4 });
+  });
+});

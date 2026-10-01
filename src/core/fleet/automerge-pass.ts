@@ -466,6 +466,8 @@ export interface AutoMergePassOptions {
    * cannot be read this instant — it does nothing instead (fail closed).
    */
   capabilityKind?: DaemonCapabilityKind | null;
+  /** Hold model checks lacking zero-USD proof; existing mandatory checks remain mandatory. */
+  meteredUsdExhausted?: true;
 }
 
 // ---------------------------------------------------------------------------
@@ -906,7 +908,7 @@ export async function runAutoMergePass(
   }
   if (standing) {
     const { runStandingMergePass } = await import('./standing-merge-pass.js');
-    await runStandingMergePass({ cfg, policy: standing, pending, out });
+    await runStandingMergePass({ cfg, policy: standing, pending, out, ...(opts.meteredUsdExhausted ? { meteredUsdExhausted: true } : {}) });
     return out;
   }
   if (opts.capabilityKind === 'resident-standing') {

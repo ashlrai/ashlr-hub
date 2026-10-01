@@ -199,8 +199,6 @@ export function seatRows(seats: readonly VerseSeat[]): SeatRow[] {
   return rows;
 }
 
-export const MAX_FAN_OUT = 6;
-
 export interface SpawnForm {
   root: string;
   title: string;
@@ -218,7 +216,6 @@ export type SpawnCheck = { ok: true; cap: number | null } | { ok: false; error: 
 export function checkSpawnForm(form: SpawnForm): SpawnCheck {
   if (!form.root) return { ok: false, error: 'Pick a repository.' };
   if (form.seats.length === 0) return { ok: false, error: 'Pick at least one seat.' };
-  if (form.seats.length > MAX_FAN_OUT) return { ok: false, error: `At most ${MAX_FAN_OUT} seats at once.` };
   if (form.seats.length > 1 && !form.isolate) return { ok: false, error: 'Several seats on one task each need their own workspace.' };
   if (!form.prompt.trim()) return { ok: false, error: 'Say what the agent should do.' };
   if (form.autoMerge && !form.isolate) return { ok: false, error: 'Auto-merge needs the agent in its own workspace (its own branch).' };

@@ -247,7 +247,7 @@ describe('command catalog — table integrity', () => {
     expect(PALETTE_PREFIXES).toEqual({ '>': 'actions', '#': 'chats' });
     expect(PALETTE_RECENT_LIMIT).toBe(5);
     expect(paletteCommands('go-to').map((c) => c.id)).toEqual([
-      'surface.command', 'surface.fleet', 'surface.growth', 'surface.mind', 'surface.chat', 'surface.agents', 'section.settings', 'section.apps', 'section.usage', 'section.wiki',
+      'mode.with-me', 'mode.for-me', 'surface.command', 'surface.fleet', 'surface.growth', 'surface.mind', 'surface.chat', 'surface.agents', 'section.settings', 'section.apps', 'section.usage', 'section.wiki',
       'section.playbooks', 'section.automations',
     ]);
     // ⌘K never lists itself.
@@ -433,6 +433,18 @@ describe('desktop commands (C8 → page)', () => {
     expect(parseDesktopCommand('open-session:vs_01J9-abc.def')).toEqual({ kind: 'open-session', sessionId: 'vs_01J9-abc.def' });
     for (const junk of ['', 'open-session:', 'open-session:../etc', 'open-session:a b', '__proto__', 'toString', 'OPEN-SETTINGS', 42, null]) {
       expect(parseDesktopCommand(junk), String(junk)).toBeNull();
+    }
+  });
+});
+
+
+describe('work intent catalog aliases', () => {
+  it('advertises navigation without grant, mutation, shortcut or permission side effects', () => {
+    for (const [id, title] of [['mode.with-me', 'Work with me'], ['mode.for-me', 'Work for me']]) {
+      const command = findCommand(id!);
+      expect(command).toMatchObject({ title, scope: 'global', group: 'go-to', keys: [] });
+      expect(command?.guard).toBeUndefined();
+      expect(command?.surface).toBeUndefined();
     }
   });
 });

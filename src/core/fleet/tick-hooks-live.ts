@@ -1244,6 +1244,12 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       }
       if (overlayError) return finish(heldResult(overlayError, enrolled), emptyState(overlayError, unknownPresence));
       const cfg = hookCtx.cfg;
+      // These aggregate runners have no per-call zero-USD admission contract.
+      // Local labels alone cannot establish cost: experiment endpoints/agents
+      // are environment-selected and Leader may dispatch paid drive actions.
+      if (hookCtx.meteredUsdExhausted) stopExperiment(
+        'the positive metered-USD allowance is exhausted; experiment inference cost is unproven',
+      );
 
       // ── Expired holds (U4) ───────────────────────────────────────────────
       // Reads already ignore an expired hold; the sweep ledgers its clearing
@@ -1346,8 +1352,10 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       // KILL, never on a dry run, one step in flight at a time. The step
       // re-checks KILL, the live grant (its `devin` engine + producer seat),
       // the budget mode and the ACU budget / fleet caps itself, launches at
-      // most ONE session, and ledgers every decision. Bounded; a failure is
-      // audited and never holds the tick.
+      // most ONE session, and ledgers every decision. Its separately authorized
+      // ACU reservations/accounting do not debit the daemon USD allowance; USD
+      // exhaustion never labels this lane free or removes its ACU gates.
+      // Bounded; a failure is audited and never holds the tick.
       if (!hookCtx.dryRun && devinInFlight === null && cfg.devin?.enabled === true && cfg.devin?.fleet === true && !deps.killActive()) {
         const refresh = nowMs - lastDevinRefreshMs >= DEVIN_FLEET_REFRESH_INTERVAL_MS;
         if (refresh) lastDevinRefreshMs = nowMs;
@@ -1378,7 +1386,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       // Before the directives are read: this is what applies class-B actions
       // whose veto window elapsed and grades moves. A due memo starts in the
       // background inside leaderTick; the tick itself is bounded here.
-      if (!hookCtx.dryRun && leaderInFlight === null) {
+      if (!hookCtx.dryRun && !hookCtx.meteredUsdExhausted && leaderInFlight === null) {
         const leaderRun = (async () => deps.leaderTick(cfg))();
         leaderInFlight = leaderRun.finally(() => {
           leaderInFlight = null;
@@ -1704,7 +1712,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       // loop dispatches too (last seen via standingBacklog), not only the
       // fleet task queue — and unknown backlog is not idle.
       lastFleetQueueDepth = Math.max(fleetItems.length, lastBacklogDepth ?? 0) + (waitingVerify ?? 0);
-      if (!hookCtx.dryRun && holdProduction === null && lanes.local.slots > 0) {
+      if (!hookCtx.dryRun && !hookCtx.meteredUsdExhausted && holdProduction === null && lanes.local.slots > 0) {
         let overnight = false;
         try {
           overnight = deps.overnightActive();

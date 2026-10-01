@@ -79,8 +79,7 @@ import {
   type SupervisorDeps,
 } from './agents/supervisor.js';
 import {
-  DEFAULT_WORKSPACE_CAP,
-  MAX_WORKSPACE_CAP,
+  parseAgentWorkspaceCap,
   VERSE_AGENTS_PATH,
   type AgentBoardResponse,
   type AgentCard,
@@ -88,7 +87,7 @@ import {
   type AgentRecord,
   type AgentScriptLog,
 } from './agents/types.js';
-import { allocatePortBlock, readWorkspaceConfig, slugifyAgentName } from './agents/workspace-config.js';
+import { allocatePortBlock, portBlockAvailable, readWorkspaceConfig, slugifyAgentName } from './agents/workspace-config.js';
 import { createAgentWorkspace, type WorkspaceOpsOptions } from './agents/workspace-ops.js';
 import type { ListPrice } from './multimodel/escalation.js';
 
@@ -177,8 +176,7 @@ async function loadPriceOf(): Promise<void> {
 }
 
 function envCap(): number {
-  const raw = Number(process.env['ASHLR_VERSE_AGENT_CAP']);
-  return Number.isInteger(raw) && raw >= 1 && raw <= MAX_WORKSPACE_CAP ? raw : DEFAULT_WORKSPACE_CAP;
+  return parseAgentWorkspaceCap(process.env['ASHLR_VERSE_AGENT_CAP']);
 }
 
 const DEFAULT_DEPS: AgentsApiDeps = {
@@ -482,37 +480,69 @@ async function boardResponse(): Promise<AgentBoardResponse> {
   };
 }
 
-async function createWorkspace(body: Record<string, unknown>): Promise<{ status: number; payload: unknown }> {
-  const root = await checkedRoot(body['root']);
-  const title = optTitle(body, true)!;
-  const rawName = body['name'];
-  if (rawName !== undefined && (typeof rawName !== 'string' || rawName.length > 63)) invalid('name must be a short slug');
-  const desired = typeof rawName === 'string' && rawName.trim() ? slugifyAgentName(rawName) : slugifyAgentName(title, new Date(deps.now()));
-  const planFirst = optBool(body, 'planFirst') ?? false;
-  const cap = optCap(body);
-  const autoFix = optBool(body, 'autoFix') ?? false;
-  const autoMerge = optBool(body, 'autoMerge') ?? false;
+// Port reservations span repositories. Like withRepoLock, refuse concurrent
+// mutations rather than queueing requests; hold through the durable store update.
+// This guards the owning Hub process, not independent Hub processes.
+let workspacePortsBusy = false;
+async function withWorkspacePorts<T>(fn: () => Promise<T>): Promise<T> {
+  if (workspacePortsBusy) throw new AgentActionError(409, 'AGENT_WORKSPACE_BUSY', 'Another workspace is being created or restored. Try again when it finishes.');
+  workspacePortsBusy = true;
+  try {
+    return await fn();
+  } finally {
+    workspacePortsBusy = false;
+  }
+}
 
-  const store = deps.store();
-  const ad = actionDeps();
-  const id = newAgentId();
-  // Room for the new one first (the oldest idle, unpinned workspaces are archived — with a snapshot).
-  const archivedForCap = await enforceWorkspaceCap(ad, deps.cap(), id);
-  const config = await readWorkspaceConfig(root);
-  const created = await createAgentWorkspace(root, desired, config.config.copy, deps.ops);
-  const taken = (await store.list()).filter((a) => a.workspace && !a.archived).map((a) => ({ base: a.workspace!.portBase, count: a.workspace!.portCount }));
-  const portBase = allocatePortBlock(config.config.ports, taken);
-  const at = new Date(deps.now()).toISOString();
-  const agent = await store.put({
-    ...blankAgent({ id, title, at }),
-    workspace: { ...created.workspace, portBase, portCount: config.config.ports },
-    plan: { enabled: planFirst, state: 'none', text: null, turn: null },
-    spendCapUsd: cap ?? null,
-    autoFix,
-    autoMerge,
-    loopNote: created.copied.length > 0 ? `Copied ${created.copied.join(', ')} from the main checkout.` : null,
+async function createWorkspace(body: Record<string, unknown>): Promise<{ status: number; payload: unknown }> {
+  return withWorkspacePorts(async () => {
+    const root = await checkedRoot(body['root']);
+    const title = optTitle(body, true)!;
+    const rawName = body['name'];
+    if (rawName !== undefined && (typeof rawName !== 'string' || rawName.length > 63)) invalid('name must be a short slug');
+    const desired = typeof rawName === 'string' && rawName.trim() ? slugifyAgentName(rawName) : slugifyAgentName(title, new Date(deps.now()));
+    const planFirst = optBool(body, 'planFirst') ?? false;
+    const cap = optCap(body);
+    const autoFix = optBool(body, 'autoFix') ?? false;
+    const autoMerge = optBool(body, 'autoMerge') ?? false;
+
+    const store = deps.store();
+    const ad = actionDeps();
+    const id = newAgentId();
+    const config = await readWorkspaceConfig(root);
+    const taken = (await store.list()).filter((a) => a.workspace && !a.archived).map((a) => ({ base: a.workspace!.portBase, count: a.workspace!.portCount }));
+    // Refuse exhaustion before automatic archival or any workspace side effects.
+    const portBase = allocatePortBlock(config.config.ports, taken);
+    const archivedForCap = await enforceWorkspaceCap(ad, deps.cap(), id);
+    const created = await createAgentWorkspace(root, desired, config.config.copy, deps.ops);
+    const at = new Date(deps.now()).toISOString();
+    const agent = await store.put({
+      ...blankAgent({ id, title, at }),
+      workspace: { ...created.workspace, portBase, portCount: config.config.ports },
+      plan: { enabled: planFirst, state: 'none', text: null, turn: null },
+      spendCapUsd: cap ?? null,
+      autoFix,
+      autoMerge,
+      loopNote: created.copied.length > 0 ? `Copied ${created.copied.join(', ')} from the main checkout.` : null,
+    });
+    return { status: 201, payload: { agent, config, archivedForCap } };
   });
-  return { status: 201, payload: { agent, config, archivedForCap } };
+}
+
+async function restoreWorkspaceAgent(id: string): Promise<AgentRecord> {
+  return withWorkspacePorts(async () => {
+    // The route's earlier read may precede another mutation; check current state.
+    const agent = await agentOr404(id);
+    if (!agent.archived) throw new AgentActionError(409, 'AGENT_NOT_ARCHIVED', 'This agent is not archived.');
+    if (agent.workspace) {
+      const taken = (await deps.store().list()).filter((a) => a.id !== id && a.workspace && !a.archived)
+        .map((a) => ({ base: a.workspace!.portBase, count: a.workspace!.portCount }));
+      if (!portBlockAvailable(agent.workspace.portBase, agent.workspace.portCount, taken)) {
+        throw new AgentActionError(409, 'AGENT_PORTS_OCCUPIED', 'This archived workspace’s port range is in use or unavailable. Archive the conflicting workspace before restoring.');
+      }
+    }
+    return restoreAgent(actionDeps(), agent);
+  });
 }
 
 async function adoptChat(body: Record<string, unknown>): Promise<{ status: number; payload: unknown }> {
@@ -850,7 +880,7 @@ export const handleAgentsApi: ApiModule = async (ctx: VerseApiContext, req, res,
         }
         case 'restore':
           await readJsonBody(req, []);
-          payload = { agent: await restoreAgent(ad, agent) };
+          payload = { agent: await restoreWorkspaceAgent(agent.id) };
           break;
         case 'resolve': {
           await readJsonBody(req, []);

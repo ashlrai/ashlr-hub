@@ -35,7 +35,7 @@ import {
   type CloudIntakeMirror,
 } from '../src/core/fleet/cloud-intake.js';
 import type { FleetMergeStateRead, FleetMergeStateV1 } from '../src/core/fleet/fleet-merge-state.js';
-import { allowedJudgeLanes, evaluateG6 } from '../src/core/fleet/merge-gates.js';
+import { allowedJudgeLanes, evaluateG2, evaluateG6 } from '../src/core/fleet/merge-gates.js';
 import { mirrorPathFor } from '../src/core/fleet/mirrors.js';
 import { producerModelFamily } from '../src/core/fleet/reviewer-independence.js';
 import { runStandingMergePass, type StandingPassDeps } from '../src/core/fleet/standing-merge-pass.js';
@@ -411,7 +411,7 @@ describe('cloud intake — provenance, claims and the judge family', () => {
 });
 
 describe('cloud intake — caps and KILL', () => {
-  it('refuses an oversized diff once per head (remembered, not re-downloaded)', async () => {
+  it('files larger pinned diffs for review while signed G2 and byte limits remain binding', async () => {
     const h = harness();
     const t = seedTask();
     h.prs.set(REPO, prFor(t));
@@ -420,18 +420,23 @@ describe('cloud intake — caps and KILL', () => {
     ].join('\n'));
     h.diffs.set(HEAD_A, `${files.join('\n')}\n`);
     const result = await ingestCloudPrs(cfg, policy(), { mirrors: mirrors(), deps: h.deps });
-    expect(result.outcomes).toMatchObject([{ action: 'refused', code: 'diff-over-caps', headSha: HEAD_A }]);
-    expect(readCloudTask(t.id)!.intake).toMatchObject({ headSha: HEAD_A, proposalId: null, refused: 'diff-over-caps' });
-    const apiCalls = h.calls.filter((c) => c[0] === 'api').length;
+    expect(result.outcomes).toMatchObject([{ action: 'ingested', headSha: HEAD_A }]);
+    expect(readCloudTask(t.id)!.intake).toMatchObject({ headSha: HEAD_A, refused: null });
+    const signedPolicy = policy();
+    const rp = signedPolicy.repos.find((r) => r.nameWithOwner === REPO)!;
+    expect(evaluateG2({ partial: false, provenance: { ok: true }, risk: 'low', scope: { files: 11, changedLines: 11 }, repoPolicy: rp, mergePolicy: signedPolicy.merge, config: {}, producerLocal: false })).toMatchObject({ verdict: 'refuse', code: 'files-over-cap' });
     const again = await ingestCloudPrs(cfg, policy(), { mirrors: mirrors(), deps: h.deps });
-    expect(again.outcomes).toMatchObject([{ action: 'unchanged', code: 'already-refused:diff-over-caps' }]);
-    expect(h.calls.filter((c) => c[0] === 'api')).toHaveLength(apiCalls);
+    expect(again.outcomes).toMatchObject([{ action: 'unchanged' }]);
 
     h.diffs.set(HEAD_B, `${DIFF}${'+x\n'.repeat(1)}${'#'.repeat(300 * 1024)}\n`);
     h.prs.get(REPO)!.headRefOid = HEAD_B;
     const big = await ingestCloudPrs(cfg, policy(), { mirrors: mirrors(), deps: h.deps });
     expect(big.outcomes).toMatchObject([{ action: 'refused', code: 'diff-over-caps', headSha: HEAD_B }]);
-    expect(h.proposals.size).toBe(0);
+    expect(h.proposals.size).toBe(1);
+    const byteCalls = h.calls.filter((c) => c[0] === 'api').length;
+    const repeated = await ingestCloudPrs(cfg, policy(), { mirrors: mirrors(), deps: h.deps });
+    expect(repeated.outcomes).toMatchObject([{ action: 'unchanged', code: 'already-refused:diff-over-caps' }]);
+    expect(h.calls.filter((c) => c[0] === 'api')).toHaveLength(byteCalls);
   });
 
   it('refuses a diff the proposal store would rewrite (secret-like content), and an empty head', async () => {

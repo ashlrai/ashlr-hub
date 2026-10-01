@@ -5,8 +5,7 @@
  *   - the v2 → v3 storage migration (autonomy → Fleet, approvals → Command
  *     with the drawer open, mcp → Apps), and the "Chat moved" announcement
  *     only for someone who actually had v2;
- *   - the launch rule: the first launch of a local day opens Command (when
- *     Command exists in the build), later launches keep the last surface;
+ *   - the launch rule: every launch keeps the last surface, fresh installs use Chat;
  *   - keep-alive: three recent surfaces plus Chat once visited;
  *   - back / forward through surfaces AND chats, ⌃Tab through recent chats;
  *   - the one v3 blob: its own fields, plus C2's dock folded in;
@@ -135,13 +134,18 @@ describe('v2 → v3 migration', () => {
 });
 
 describe('launch rule', () => {
-  it('opens Command on the first launch of the day, then the last surface', () => {
+  it('starts a fresh install in Chat without changing dispatch or permission state', () => {
+    reloadVerseUiForTest({ now: NOON, landed: EVERYTHING_LANDED });
+    expect(getVerseUiState().section).toBe('chat');
+    expect(stored()).toMatchObject({ version: 3, section: 'chat' });
+  });
+  it('preserves the last surface across daily launches', () => {
     localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ version: 3, section: 'chat', lastLaunchDay: '2026-09-23' }));
     reloadVerseUiForTest({ now: NOON, landed: EVERYTHING_LANDED });
-    expect(getVerseUiState().section).toBe('command');
+    expect(getVerseUiState().section).toBe('chat');
     setVerseSection('fleet');
-    // Same day, next launch: back where the operator left it.
-    reloadVerseUiForTest({ now: NOON + 3_600_000, landed: EVERYTHING_LANDED });
+    // A different day still returns to where the operator left it.
+    reloadVerseUiForTest({ now: NOON + 86_400_000, landed: EVERYTHING_LANDED });
     expect(getVerseUiState().section).toBe('fleet');
   });
 

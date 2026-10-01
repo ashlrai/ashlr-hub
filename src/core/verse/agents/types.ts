@@ -36,7 +36,16 @@ export const WORKSPACE_PORT_CEILING = 60_000;
 
 /** Live agent workspaces kept before the oldest unpinned, idle one is archived. */
 export const DEFAULT_WORKSPACE_CAP = 25;
-export const MAX_WORKSPACE_CAP = 200;
+/** Protocol bound, not a product roster ceiling. A signed-in operator can choose no retention cap. */
+export const MAX_WORKSPACE_CAP = Number.MAX_SAFE_INTEGER;
+
+/** Invalid overrides retain the established default rather than widening capacity. */
+export function parseAgentWorkspaceCap(value: string | undefined): number {
+  if (value?.trim().toLowerCase() === 'none') return MAX_WORKSPACE_CAP;
+  if (!value?.trim()) return DEFAULT_WORKSPACE_CAP;
+  const raw = Number(value);
+  return Number.isSafeInteger(raw) && raw >= 1 ? raw : DEFAULT_WORKSPACE_CAP;
+}
 
 export const MAX_RUN_SCRIPTS = 8;
 export const MAX_COPY_ENTRIES = 32;

@@ -88,7 +88,7 @@ work).
 | G0 | Stop is off, the grant is live, the repo is enrolled at `merge`, no hold, under the daily cap |
 | G1 | Tier-1 self-protection: a change to authority or guardrail code goes to your owner lane and never self-lands |
 | G1b | No test tampering (removed assertions, `.skip`, `.only`, snapshot edits) |
-| G2 | Risk and size caps (compiled ceiling 10 files / 300 lines, medium risk; local work and local-enforcement repos lower) |
+| G2 | Effective signed/configured volume limits and risk caps; legacy grants retain 10 files / 300 lines and smaller local limits |
 | G3 | The repo's own verify commands (tests) pass on the exact tree, off the current base |
 | G4 | The producer's report matches its diff |
 | G7 | Every required check is green on the PR head, including the App's host-verified `ashlr/verify`; the merge is SHA-pinned |
@@ -173,18 +173,15 @@ The limits that remain are:
 - the daemon's 5-minute tick;
 - two verification slots per machine and one per repo
   (`sandbox/execution-leases.ts`);
-- each repo's daily merge cap (at most 24; 4 on local-enforcement repos);
+- each repo's effective signed daily merge cap (legacy grants: at most 24; 4 on local-enforcement repos);
 - the size and risk ceilings.
 
 **Decisions left to you** (kept, not removed; tell us to change them):
 
-- **Size and risk ceilings.** 10 files / 300 lines and medium risk are
-  compiled into both the verifier and the custody helper. Larger elite
-  changes are refused at G2, or wait there.
-- **Local work and local-enforcement repos.** Work a local model wrote,
-  including elite Qwen 3.8, and work on private free-plan repos stays at low
-  risk, 4 files / 150 lines. Local-enforcement repos are also held to 4
-  merges a day.
+- **Change volume.** Explicit edits can sign larger file, line and daily merge limits, or **No volume cap**, using `merge.volumePolicy: "operator-signed"`. The protocol accepts positive safe integers for files and lines, and nonnegative safe integers for daily merges; No volume cap is represented by `Number.MAX_SAFE_INTEGER`. Config may still tighten the signed limits. Existing grants without the marker retain 10 files / 300 lines / 24 merges per repo per day, and the legacy local 4 / 150 / 4 limits. Plain renewal or reapproval keeps their effective scope.
+- **Risk.** Medium is the highest mergeable risk. Local-authored work and local-enforcement repositories stay at low risk. Larger volume does not bypass CI, account isolation, spending limits, protected paths, Stop or revocation.
+- **Signing an edit.** The scope editor shows the selected change before Touch ID. CLI edits use `ashlr authority re-approve --max-files N|none --max-lines N|none --repo-max-merges-per-day owner/name=N|none`; use only flags for the limits you intend to change. The new marker requires an upgraded root-owned custody helper. Review and install that helper before signing; an older helper refuses the new contract.
+- **Standalone inbox automerge.** Its explicitly configured file/line limits can now exceed the former 10/300 preset. This path uses its existing manager and verification contract; it does not acquire resident fleet authority. Previously refused larger standalone configurations can become valid after this release. Defaults remain disabled and conservative. Resident work always applies the signed effective policy described above.
 - **Claude as a producer.** The default grant gives the Claude seat judge and
   leader roles only, keeping it in reserve for you. Opus and Fable produce
   autonomously only through a seat you give the `producer` role.
@@ -278,8 +275,8 @@ step's command to copy.
    **The repository admin role (you) may bypass the ruleset; the App may
    not.** A private repository on GitHub's free plan cannot have rulesets or
    branch protection. New grants use **local enforcement** there, with the
-   App's `ashlr/verify` and lower compiled caps (low risk, 4 files / 150
-   lines, 4 merges a day); `status` and `setup` explain the mismatch for an
+   App's `ashlr/verify`, low risk and legacy/default volume limits (4 files / 150
+   lines, 4 merges a day unless explicitly edited and signed); `status` and `setup` explain the mismatch for an
    older grant, and re-approving switches it.
 8. **Canary repo.** Setup creates `ashlrai/fleet-canary` and its CI workflow
    using your own `gh` auth, because the App cannot write workflows.

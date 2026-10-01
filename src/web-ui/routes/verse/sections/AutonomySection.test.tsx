@@ -105,10 +105,10 @@ describe('AutonomySection', () => {
     render(<AutonomySection />);
 
     const input = await screen.findByLabelText('Items per tick');
-    fireEvent.change(input, { target: { value: '51' } });
+    fireEvent.change(input, { target: { value: '1.5' } });
     fireEvent.blur(input);
 
-    expect(await screen.findByText('Items per tick must be between 1 and 50 items.')).toBeInTheDocument();
+    expect(await screen.findByText('Items per tick must be a whole number of items.')).toBeInTheDocument();
     expect(posted.filter((p) => p.url === '/api/verse/caps')).toHaveLength(0);
   });
 
@@ -118,11 +118,34 @@ describe('AutonomySection', () => {
     render(<AutonomySection />);
 
     const input = await screen.findByLabelText('Parallel swarms');
-    fireEvent.change(input, { target: { value: '5' } });
+    fireEvent.change(input, { target: { value: '65' } });
     fireEvent.blur(input);
 
-    await waitFor(() => expect(posted).toContainEqual({ url: '/api/verse/caps', body: { parallel: 5 } }));
+    await waitFor(() => expect(posted).toContainEqual({ url: '/api/verse/caps', body: { parallel: 65 } }));
     expect(await screen.findByText('applied live')).toBeInTheDocument();
+  });
+
+  it('shows actual journal admission beside a larger requested item preference', async () => {
+    stubFetch({ caps: { ...CAPS, perTickItems: 129, journalItemCapacity: 64 } });
+    render(<AutonomySection />);
+    expect(await screen.findByLabelText('Items per tick')).toHaveValue(129);
+    expect(screen.getByText(/At most 64 items are journaled per tick; remaining work continues on later ticks/)).toBeInTheDocument();
+  });
+
+  it('does not invent journal capacity for an older server', async () => {
+    stubFetch();
+    render(<AutonomySection />);
+    expect(await screen.findByText(/Journal capacity is unavailable from this server/)).toBeInTheDocument();
+  });
+
+  it('saves an explicit fractional budget above 1000 through the existing mutation action', async () => {
+    const { posted } = stubFetch();
+    setMutationToken(TOKEN);
+    render(<AutonomySection />);
+    const input = await screen.findByLabelText('Daily budget');
+    fireEvent.change(input, { target: { value: '1001.25' } });
+    fireEvent.blur(input);
+    await waitFor(() => expect(posted).toContainEqual({ url: '/api/verse/caps', body: { dailyBudgetUsd: 1001.25 } }));
   });
 
   it('states that a daily budget of 0 is a stop, not "unlimited"', async () => {
