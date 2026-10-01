@@ -108,7 +108,7 @@ describe('emergency authority release truth', () => {
     // #580 rewrote the quickstart for Verse: the legacy `/next/` console and
     // its token lifecycle now live only in the Hub reference, and the
     // quickstart must steer new users away from that path.
-    expect(quickstart).toContain('[Hub reference](HUB-REFERENCE.md)');
+    expect(quickstart).toContain('[Hub reference](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md)');
     expect(quickstart).toMatch(/Resident autonomy is macOS-only and starts dormant/);
     expect(quickstart).toMatch(/older `\/` and `\/next\/` dashboard guidance should not\s+be used as a Verse onboarding path/);
     for (const doc of [hubReference]) {
@@ -271,7 +271,7 @@ describe('emergency authority release truth', () => {
     // `ashlr init` to the Hub reference. If a step table comes back, it must
     // list exactly the seven steps again.
     if (start === -1) {
-      expect(quickstart).toMatch(/`ashlr init`[^.]*remain compatibility\s+surfaces[\s\S]{0,200}\[Hub reference\]\(HUB-REFERENCE\.md\)/);
+      expect(quickstart).toMatch(/`ashlr init`[^.]*remain compatibility\s+surfaces[\s\S]{0,200}\[Hub reference\]\(https:\/\/github\.com\/ashlrai\/ashlr-hub\/blob\/master\/docs\/HUB-REFERENCE\.md\)/);
       expect(quickstart).not.toContain('| `engines` |');
       expect(quickstart).not.toContain('| `enroll` |');
       return;

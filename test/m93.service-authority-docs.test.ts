@@ -51,7 +51,7 @@ describe('resident service release-truth documentation', () => {
     // quickstart into the Hub reference; the quickstart only points there.
     const hubReference = read('docs/HUB-REFERENCE.md');
     expect(quickstart).toMatch(/`ashlr init`, `ashlr serve`, `ashlr enroll` and `ashlr daemon` remain compatibility\s+surfaces/);
-    expect(quickstart).toContain('[Hub reference](HUB-REFERENCE.md)');
+    expect(quickstart).toContain('[Hub reference](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md)');
     expect(hubReference).toMatch(/`ashlr setup`[\s\S]{0,180}refuses before/i);
     expect(quickstart).not.toContain('Installs the daemon as an OS service');
     expect(quickstart).not.toContain('Proposals are never applied automatically');
