@@ -103,7 +103,7 @@ describe('private credit pool evidence', () => {
     expect(Buffer.byteLength(JSON.stringify({ v: 1, observations: rows }) + '\n')).toBe(bytes);
     raw(rows); const before = readFileSync(file());
     expect(() => write(observation({ poolId: 'demo-extra' }))).toThrow('byte limit');
-    expect(readFileSync(file())).toEqual(before); expect(read().sourceState).toBe('healthy');
+    expect(readFileSync(file()).equals(before)).toBe(true); expect(read().sourceState).toBe('healthy');
   });
   it('deduplicates exact replay, refuses older/conflicting capture and preserves prior bytes', () => {
     const row = observation(); write(row); const before = readFileSync(file()); write(row); expect(read().rows).toHaveLength(1);

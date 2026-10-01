@@ -43,15 +43,16 @@ describe('local exhaustive prepublish shards', () => {
       shard?: string; file?: string; filter?: string; excludes: string[]; workers: string; bail: string; home: string; tmp: string;
     });
     expect(rows.filter((row) => row.shard).map((row) => row.shard).sort()).toEqual(['--shard=1/3', '--shard=2/3', '--shard=3/3']);
-    expect(rows).toHaveLength(10);
+    expect(rows).toHaveLength(11);
     const isolatedFiles = [
       'test/m342.dispatch-production-ledger.test.ts',
+      'test/m395.effect-terminal-retention.test.ts',
       'test/m446.external-skill-git-capture.test.ts',
       'test/resource-engineering-setup-acceptance.test.ts',
       'test/resource-engineering-supervisor-acceptance.test.ts',
       'test/universe-firm-engineering-control.test.ts',
     ];
-    expect(rows.filter((row) => row.shard).every((row) => row.excludes.length === 6 &&
+    expect(rows.filter((row) => row.shard).every((row) => row.excludes.length === 7 &&
       [...isolatedFiles, 'test/universe-hub-marker-campaign.test.ts'].every((file) =>
         row.excludes.includes(`--exclude=${file}`)))).toBe(true);
     expect(rows.filter((row) => !row.shard).map((row) => row.file)).toEqual([
@@ -59,12 +60,12 @@ describe('local exhaustive prepublish shards', () => {
       'test/universe-hub-marker-campaign.test.ts', 'test/universe-hub-marker-campaign.test.ts',
     ]);
     expect(rows.filter((row) => !row.shard).map((row) => row.filter)).toEqual([
-      undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined,
       'automatic seed measurement: false', 'automatic seed measurement: true',
     ]);
     expect(rows.every((row) => row.workers === '--maxWorkers=1')).toBe(true);
     expect(rows.every((row) => row.bail === '--bail=1')).toBe(true);
-    expect(new Set(rows.map((row) => row.home)).size).toBe(10);
+    expect(new Set(rows.map((row) => row.home)).size).toBe(11);
     expect(rows.every((row) => row.tmp === join(row.home, 'tmp'))).toBe(true);
     expect(result.stderr).toContain('[test-ci:sharded] PASS');
   });
@@ -80,6 +81,6 @@ describe('local exhaustive prepublish shards', () => {
   it('fails closed when the isolated campaign acceptance fails', () => {
     const result = runFixture('isolated');
     expect(result.error).toBeUndefined(); expect(result.status).toBe(9);
-    expect(result.stderr).toContain('[test-ci:sharded] FAIL (0, 0, 0, isolated 0, 0, 0, 0, 0, 0, 9)');
+    expect(result.stderr).toContain('[test-ci:sharded] FAIL (0, 0, 0, isolated 0, 0, 0, 0, 0, 0, 0, 9)');
   });
 });
