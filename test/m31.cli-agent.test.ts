@@ -167,7 +167,7 @@ describe('agent docs surfaces', () => {
 
 describe('completions', () => {
   it('TOP_LEVEL_COMMANDS includes the M31 additions', () => {
-    for (const cmd of ['orient', 'docs', 'completions', 'fleet']) {
+    for (const cmd of ['orient', 'docs', 'completions', 'fleet', 'benchmark']) {
       expect(TOP_LEVEL_COMMANDS).toContain(cmd);
     }
   });
@@ -185,6 +185,7 @@ describe('completions', () => {
     const script = chunks.join('');
     expect(script).toContain('#compdef ashlr');
     for (const cmd of TOP_LEVEL_COMMANDS) expect(script).toContain(`'${cmd}'`);
+    expect(script).toContain("benchmark) _values 'subcommand' 'run' '--compare-reports' 'help' ;;");
     expect(script).toContain("fleet) _values 'subcommand'");
     expect(script).toContain("'evidence'");
     expect(script).toContain("runtime) _values 'subcommand' 'install' 'status' 'rollback' 'run' ;;");
@@ -201,6 +202,7 @@ describe('completions', () => {
       process.stdout.write = orig;
     }
     expect(chunks.join('')).toContain('complete -F _ashlr_completions ashlr');
+    expect(chunks.join('')).toContain('benchmark) COMPREPLY=( $(compgen -W "run --compare-reports help" -- "$cur") ) ;;');
     expect(chunks.join('')).toContain('runtime) COMPREPLY=( $(compgen -W "install status rollback run" -- "$cur") ) ;;');
   });
 
@@ -228,6 +230,7 @@ describe('didYouMean', () => {
     expect(didYouMean('orint')).toBe('orient');
     expect(didYouMean('inbx')).toBe('inbox');
     expect(didYouMean('runtim')).toBe('runtime');
+    expect(didYouMean('benchmak')).toBe('benchmark');
   });
 
   it('returns null for nothing-like-a-command input', () => {

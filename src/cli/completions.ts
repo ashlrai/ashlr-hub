@@ -40,6 +40,7 @@ export const TOP_LEVEL_COMMANDS: string[] = [
   // 3.15 Devin lane.
   'devin',
   'openai-agents',
+  'benchmark',
   // 3.15 automations.
   'automations',
   // 3.15 Jev decision layer.
@@ -53,6 +54,7 @@ export const TOP_LEVEL_COMMANDS: string[] = [
 /** Subcommands per top-level command (first-position completion only). */
 const SUBCOMMANDS: Record<string, string[]> = {
   'openai-agents': ['sessions', 'inspect', 'turns', 'help'],
+  benchmark: ['run', '--compare-reports', 'help'],
   config: ['get', 'set', 'path'],
   mcp: ['list', 'doctor', 'install'],
   run: ['show'],
