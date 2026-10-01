@@ -227,6 +227,7 @@
 /test/daemon-resident-capacity-publisher-310.test.ts @masonwyatt23
 /test/decide-critics-315.test.ts @masonwyatt23
 /test/decide-judge-manager-315.test.ts @masonwyatt23
+/test/decide-resource-choice.test.ts @masonwyatt23
 /test/devin-cli-engine-315.test.ts @masonwyatt23
 /test/devin-cli-engine-realio-315.test.ts @masonwyatt23
 /test/devin-engine-identity-315.test.ts @masonwyatt23
@@ -681,6 +682,7 @@
 /test/protected-paths-310b.test.ts @masonwyatt23
 /test/red-team-routing-310.test.ts @masonwyatt23
 /test/repo-holds-310b.test.ts @masonwyatt23
+/test/reset-aware-scheduling.test.ts @masonwyatt23
 /test/resource-allocation-policy.test.ts @masonwyatt23
 /test/resource-console-engineering-acceptance.test.ts @masonwyatt23
 /test/resource-console-engineering-check.test.ts @masonwyatt23
@@ -764,6 +766,7 @@
 /test/verify-commands-confine-310b.test.ts @masonwyatt23
 /test/verify-confinement-310b.test.ts @masonwyatt23
 /test/verify-mirror-bins-310.test.ts @masonwyatt23
+/test/verse-accounts.test.ts @masonwyatt23
 /test/verse-api-mount-310.test.ts @masonwyatt23
 /test/verse-async-folder-access-314.test.ts @masonwyatt23
 /test/verse-autonomy-ladder.test.ts @masonwyatt23
