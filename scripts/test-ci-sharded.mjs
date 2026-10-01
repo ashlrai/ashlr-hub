@@ -9,6 +9,9 @@ import { fileURLToPath, URL } from 'node:url';
 
 const runner = fileURLToPath(new URL('./test-ci.mjs', import.meta.url));
 const shards = [1, 2, 3];
+// Vitest 4 inline project caps override the root --maxWorkers value. Its
+// forwarded fileParallelism override forces each project's workers to one,
+// preserving this local runner's intended concurrency in both test lanes.
 // These suites exercise real Git, sandbox, ledger, and foreground CLI work with
 // bounded deadlines. Running them beside two other real-I/O shards can consume
 // those deadlines without testing the behavior the cases are meant to prove.
@@ -44,7 +47,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 }
 
 function runShard(shard) { return new Promise((resolve) => {
-  const child = spawn(process.execPath, [runner, `--shard=${shard}/3`, '--maxWorkers=1', '--bail=1', ...exclusions], {
+  const child = spawn(process.execPath, [runner, `--shard=${shard}/3`, '--maxWorkers=1', '--fileParallelism=false', '--bail=1', ...exclusions], {
     cwd: process.cwd(),
     env: process.env,
     stdio: 'inherit',
@@ -90,7 +93,7 @@ if (failure || codes.length !== shards.length || !codes.every((code) => code ===
   const isolatedCodes = [];
   for (const { file, filter, label } of isolatedCases) {
     if (failure) break;
-    const child = spawn(process.execPath, [runner, file, ...(filter ? ['-t', filter] : []), '--maxWorkers=1', '--bail=1'], {
+    const child = spawn(process.execPath, [runner, file, ...(filter ? ['-t', filter] : []), '--maxWorkers=1', '--fileParallelism=false', '--bail=1'], {
       cwd: process.cwd(), env: process.env, stdio: 'inherit',
     });
     children.set(`isolated-${label}`, child);

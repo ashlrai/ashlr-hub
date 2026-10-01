@@ -399,7 +399,7 @@
 /* ---- 3.10: archived disclosure ------------------------------------------ */
 .groupToggle {
   flex: 1 1 auto;
-  min-height: 32px;
+  min-height: var(--control-h);
   text-align: left;
   display: inline-flex;
   align-items: center;
