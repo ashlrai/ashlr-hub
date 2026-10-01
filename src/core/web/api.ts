@@ -2268,7 +2268,8 @@ export async function handleApi(
     // apply ctx.allowDispatch + passesMutationGate inside handleVerseApi.
     if (isVerseApiPath(path)) {
       const handled = await handleVerseApi(
-        { cfg, token: ctx.token, allowDispatch: ctx.allowDispatch, readSession: ctx.readSession },
+        { cfg, token: ctx.token, allowDispatch: ctx.allowDispatch, readSession: ctx.readSession,
+          ...(ctx.readProjections ? { readProjections: ctx.readProjections } : {}) },
         req,
         res,
         path,

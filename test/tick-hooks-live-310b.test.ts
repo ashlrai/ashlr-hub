@@ -394,6 +394,50 @@ describe('seatAllows', () => {
     expect(h.subscriptionCalls).toEqual([]);
   });
 
+  it('checks only the explicitly bound Grok account while retaining legacy all-account refusal', async () => {
+    const p = policyFixture();
+    p.spend.seats.grok.enabled = false;
+    p.spend.seats['grok-b'] = { seatId: 'grok-b', enabled: true, reserveFloorPercent: 0, maxSessionWindowPercent: null, roles: ['producer'] };
+    const b = { ...grokSeat(), seatId: 'grok-b' };
+    const hooks = createLiveTickHooks({ deps: { ...h.deps, standingPolicy: () => p,
+      capacitySnapshot: () => ({ v: 1, publishedAt: NOW_ISO, seats: [grokSeat(), b] }) } });
+    hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);
+    expect(hooks.seatAllows('grok-cli', { maxPercent: 90 }).allowed).toBe(false);
+    expect(hooks.seatAllows('grok-cli', { maxPercent: 90, seatId: 'grok-b' }).allowed).toBe(true);
+    expect(hooks.seatAllows('grok-cli', { maxPercent: 90, seatId: 'missing-account' }).allowed).toBe(false);
+    expect(hooks.seatAllows('grok-cli', { maxPercent: 90, seatId: 'claude' }).allowed).toBe(false);
+  });
+
+  it.each(['grant', 'capacity', 'missing-capacity', 'duplicate-capacity', 'budget', 'config', 'stop-unreadable'] as const)(
+    'refuses a bound Grok account when %s changes after the tick snapshot', async kind => {
+      let changed = false;
+      const b = { ...grokSeat(), seatId: 'grok-b' };
+      const hooks = createLiveTickHooks({ deps: { ...h.deps,
+        standingPolicy: () => {
+          const p = policyFixture();
+          p.spend.seats['grok-b'] = { seatId:'grok-b', enabled:!(changed && kind==='grant'), reserveFloorPercent:0, maxSessionWindowPercent:null, roles:['producer'] };
+          return p;
+        },
+        capacitySnapshot: () => changed && kind==='missing-capacity' ? null : ({v:1,publishedAt:NOW_ISO,
+          seats:[grokSeat(),{...b,...(changed && kind==='capacity' ? {windows:grokSeat(100).windows} : {})},
+            ...(changed && kind==='duplicate-capacity' ? [b] : [])]}),
+        loadBudget: () => ({...defaultBudgetPolicy(),...(changed && kind==='budget' ? {mode:'dormant' as const} : {})}),
+        liveLeaderConfig: cfg => {
+          if (changed && kind==='config') throw new Error('fixture unavailable');
+          return cfg;
+        },
+        killActive: () => {
+          if (changed && kind==='stop-unreadable') throw new Error('fixture unreadable');
+          return false;
+        },
+      } });
+      hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);
+      expect(hooks.seatAllows('grok-cli',{maxPercent:90,seatId:'grok-b'}).allowed).toBe(true);
+      changed = true;
+      expect(hooks.seatAllows('grok-cli',{maxPercent:90,seatId:'grok-b'}).allowed).toBe(false);
+    },
+  );
+
   it('still applies master\'s subscription gate to claude (it only tightens)', async () => {
     subscriptionAllowed = false;
     const hooks = createLiveTickHooks({ deps: h.deps });

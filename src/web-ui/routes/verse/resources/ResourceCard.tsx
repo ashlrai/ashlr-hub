@@ -18,6 +18,7 @@
  * disagree about one seat. Text wraps at word boundaries; anything long also
  * carries its full text as a tooltip.
  */
+import { estimatedCreditValue, CODEX_CREDIT_VALUE_SOURCE, CODEX_CREDIT_VALUE_CHECKED } from './codex-credit-value.js';
 import type { BudgetMode } from '../../../../core/routing/types.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { accountActions, type AccountAction } from '../apps/apps-model.js';
@@ -131,6 +132,7 @@ export function ResourceCard({ row, status, settled, mode, busy, onAction, readi
         </h4>
       </div>
       <StatusLine status={status} />
+      {row.credits !== null ? <p className={styles.subtle}>{row.credits}</p> : null}
       {status.checked !== null ? (
         <p className={styles.stamp} title={status.checkedTitle ?? undefined}>{status.checked}</p>
       ) : null}
@@ -147,6 +149,13 @@ export function ResourceCard({ row, status, settled, mode, busy, onAction, readi
           {scheduling ? <SchedulingEvidence view={scheduling} /> : null}
           {otherWindows.length > 0 ? <div className={styles.meters}>{otherWindows.map((w) => <WindowMeter key={w.id} row={row} w={w} reservePercent={reserve?.percent ?? null} />)}</div> : null}
           {row.windows.length === 0 ? <p className={styles.subtle}>Connection status and usage are separate. No percentage has been supplied.</p> : null}
+          {row.engine === 'codex' && row.creditState !== undefined && row.creditState !== 'unknown' ? <p className={styles.subtle}>
+            {row.creditState === 'none' ? 'Native provider reports no available credits. ' : ''}
+            {row.creditBalance !== null && row.creditBalance !== undefined ? `Native balance ${row.creditBalance} credit units. ` : ''}
+            Estimated credit value: {estimatedCreditValue(row.creditBalance, row.plan) ?? 'unknown'}.
+            {' '}Personal-plan reference $0.04 per credit; not actual purchase price or attributed spend.
+            {' '}<a href={CODEX_CREDIT_VALUE_SOURCE} target="_blank" rel="noreferrer">Published reference</a> checked {CODEX_CREDIT_VALUE_CHECKED}.
+          </p> : null}
           {row.notes.map((note) => <p key={note} className={styles.subtle}>{note}</p>)}
           {reserveText !== null || row.credits !== null ? (
             <p className={styles.reserveLine}>

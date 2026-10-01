@@ -240,7 +240,7 @@
   line-height: var(--text-xs-line);
 }
 .stamp { padding-left: calc(7px + var(--space-2)); }
-.subtle { color: var(--text-secondary); }
+.subtle { color: var(--text-secondary); min-width: 0; overflow-wrap: anywhere; }
 .reserveLine { margin-top: var(--space-1); color: var(--text-secondary); }
 
 /* ── Window meters ──────────────────────────────────────────────────── */

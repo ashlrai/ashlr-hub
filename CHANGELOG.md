@@ -9,7 +9,35 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.20.0] — 2026-10-01
+## [3.21.0] — 2026-10-01
+
+### Added
+
+- Show current account-checked Codex credit units separately from subscription
+  windows, including held or unknown spending status. Known personal plans show
+  an explicitly estimated dollar value using a dated public reference; balances
+  are not invoices or attributed task costs.
+- Add expandable Fleet execution feedback from actual completed dispatch
+  records. Separate producer success, failure, cancellation and refusal from
+  recorded proposals, verified delivery and shipping. Partial coverage stays
+  visible; opening details uses a shared background read without a model call.
+- Feed exact no-proposal failures into stable recorded retros and the Leader's
+  existing planning loop. Replayed attempts do not multiply lessons; conflicting
+  outcomes and incomplete proposal inventories remain qualified observations.
+
+### Fixed
+
+- Bind native Grok fleet execution to the actual selected account, including
+  confined runs, retries and repairs. Recheck current account identity, Stop,
+  grant and headroom immediately before each selected native launch.
+- Keep a failed preparation or cancellation from reusing a previous selected
+  task context. Match deadline-fit boundaries between routing and Jev advice.
+- Preserve current credit expiry and explicit provider spending holds in the
+  resource display instead of calling every exhausted subscription Spent.
+- Synchronize complete private account-roster fixtures, Grok reset provenance
+  and browser-safe type imports with the production contracts.
+
+## 3.20 workbench changes — included in 3.21.0
 
 ### Added
 

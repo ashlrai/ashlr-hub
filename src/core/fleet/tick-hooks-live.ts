@@ -2116,15 +2116,45 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         return { allowed: false, reason: `${engine} is not a fleet lane under the standing grant (per-token APIs and agents whose spend cannot be read never are).` };
       }
       if (lane === DEVIN_CLI_LANE) return devinCliSeatAllows(current);
+      if (lane === 'grok-cli' && opts.seatId !== undefined) {
+        // Selected-account execution may follow awaited planning or sandbox
+        // setup. Re-read its actual authority and telemetry synchronously;
+        // never substitute the configured default or an earlier tick reading.
+        try {
+          const standing = deps.standingPolicy();
+          if (killActiveFailClosed() || !standing || !current.dispatchSources ||
+            standing.grantId !== current.policy.grantId || standing.grantSeq !== current.policy.grantSeq ||
+            JSON.stringify(standing.spend) !== JSON.stringify(current.policy.spend) ||
+            JSON.stringify(standing.repos) !== JSON.stringify(current.policy.repos) ||
+            JSON.stringify(standing.engines) !== JSON.stringify(current.policy.engines) ||
+            JSON.stringify(standing.rollout) !== JSON.stringify(current.policy.rollout) ||
+            createHash('sha256').update(JSON.stringify({budget:deps.loadBudget(),
+              directives:clampLeaderDirectives(deps.directives(),standing),config:deps.liveLeaderConfig(current.cfg)})).digest('hex') !== current.dispatchSources) {
+            ctx = null;
+            return { allowed: false, reason: 'Selected Grok account authority changed or is unavailable; a fresh tick is required.' };
+          }
+          const fresh = deps.capacitySnapshot();
+          if (!fresh || fresh.seats.filter(s => s.seatId === opts.seatId && laneOfSeat(s) === lane).length !== 1) {
+            ctx = null;
+            return { allowed: false, reason: 'Selected Grok account has no unique current capacity reading.' };
+          }
+          current.nowMs = deps.now();
+          current.capacity = [...fresh.seats.filter(s => s.engine !== 'local'),...current.capacity.filter(s => s.engine === 'local')];
+        } catch {
+          ctx = null;
+          return { allowed: false, reason: 'Selected Grok account authority or capacity cannot be read.' };
+        }
+      }
       if (!current.policy.engines.includes(grantEngineOfLane(lane))) {
         return { allowed: false, reason: `The grant's current rollout stage does not include ${FLEET_LANE_LABEL[lane]}.` };
       }
       const plan = current.lanes[lane];
       if (plan.slots <= 0) return { allowed: false, reason: plan.capReason ?? `The ${FLEET_LANE_LABEL[lane]} lane has no slots this tick.` };
 
-      // The seats behind the lane: every one the CLI might hit must have
-      // headroom (the fleet cannot choose which account a CLI signs in with).
-      const seats = current.capacity.filter((s) => laneOfSeat(s) === lane);
+      // Bound Grok execution reaches only the selected roster account. Legacy
+      // unbound producers retain the all-seat check; no identity is guessed.
+      const seats = current.capacity.filter((s) => laneOfSeat(s) === lane &&
+        (lane !== 'grok-cli' || opts.seatId === undefined || s.seatId === opts.seatId));
       if (seats.length === 0) return { allowed: false, reason: `No ${FLEET_LANE_LABEL[lane]} seat is known, so no usage can be checked.` };
       for (const seat of seats) {
         const grant = standingSeatFor(current.policy.spend, seat.seatId);

@@ -2187,16 +2187,13 @@ export interface RunOptions {
   /** Optional caller-owned cancellation signal for this run. */
   signal?: AbortSignal;
   /**
-   * V3.10: the seat an AUTONOMOUS codex run executes on — the SeatRouter's
-   * choice (TickRouteDecision.seatDecision.seatId), forwarded unchanged to
-   * runEngineSandboxed's `seatId`. WHY IT IS THREADED: under a standing policy
-   * the sandboxed producer builds codex's per-run CODEX_HOME from that seat's
-   * native profile and refuses a codex run with no seat (never Mason's own
-   * login). Without this field the daemon's choice was dropped at runGoal and
-   * every standing codex dispatch was refused. Ignored by every other engine
-   * (grok-cli resolves its seat from cfg.foundry.grokCli).
+   * Exact routed native account for Codex or Grok. Grok resolves this profile
+   * freshly and uses its private native-state copy; it never substitutes the
+   * configured default account when an explicit binding cannot be resolved.
    */
   seatId?: string;
+  /** Internal synchronous same-seat authority fence; never serialized or passed to a model. */
+  selectedGrokAdmission?: () => boolean;
   /** Partial budget overrides (merged over defaults). */
   budget?: Partial<RunBudget>;
   /** Max independent tasks to execute in parallel. */

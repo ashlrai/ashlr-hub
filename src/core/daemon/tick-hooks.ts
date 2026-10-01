@@ -53,6 +53,8 @@ export interface TickRouteDecision extends RouteDecision {
 /** Exactly what loop.ts passes to subscriptionAllows today. */
 export interface SeatAllowsOptions {
   maxPercent: number;
+  /** Exact routed Grok account; absent preserves the legacy all-seat gate. */
+  seatId?: string;
 }
 
 export interface TickHookContext {

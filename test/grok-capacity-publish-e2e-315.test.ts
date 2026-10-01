@@ -235,7 +235,10 @@ describe('(b) the Verse publisher (lease holder) writes Grok into the fleet\'s c
 
     const published = publishedGrok(readCapacitySnapshot())!;
     expect(published.windows).toEqual([
-      { id: 'grok_unified_weekly', usedPercent: 0, resetsAt: RESETS_AT, resetDescription: null, limitReached: false },
+      { id: 'grok_unified_weekly', usedPercent: 0, resetsAt: RESETS_AT, resetDescription: null, limitReached: false,
+        resetProvenance: { kind: 'fixed-period', source: 'grok-native-billing',
+          startsAt: new Date(Date.parse(wire(PERIOD_START))).toISOString(), at: RESETS_AT,
+          description: 'Provider weekly billing period.' } },
     ]);
     expect(published.observedAt).toBe(grokRow(collector)!.observedAt);
     const assessed = assessSeat(published, AUTONOMY_POLICY, { nowMs: Date.now() });
@@ -287,7 +290,10 @@ describe('(c) the daemon\'s publisher samples Grok itself once an idle Verse han
     expect(snapshot?.publishedAt).toBe(status.lastPublishedAt);
     const published = publishedGrok(snapshot)!;
     expect(published.windows).toEqual([
-      { id: 'grok_unified_weekly', usedPercent: 0, resetsAt: RESETS_AT, resetDescription: null, limitReached: false },
+      { id: 'grok_unified_weekly', usedPercent: 0, resetsAt: RESETS_AT, resetDescription: null, limitReached: false,
+        resetProvenance: { kind: 'fixed-period', source: 'grok-native-billing',
+          startsAt: new Date(Date.parse(wire(PERIOD_START))).toISOString(), at: RESETS_AT,
+          description: 'Provider weekly billing period.' } },
     ]);
     expect(published.observedAt).not.toBeNull();
     expect(assessSeat(published, AUTONOMY_POLICY, { nowMs: Date.now() }).headroom.eligibleForAutonomy).toBe(true);

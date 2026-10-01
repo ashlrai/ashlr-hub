@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { assessResetOpportunity, forecastFit, opportunityPriority, validResetProvenance } from '../src/core/routing/reset-pressure.js';
+import { assessResetOpportunity, forecastFit, hasResetDeadline, opportunityPriority, validResetProvenance } from '../src/core/routing/reset-pressure.js';
 import { forecastWork, observedPercentiles } from '../src/core/routing/work-estimates.js';
 import { buildSchedulingView, historySamples } from '../src/core/routing/scheduling.js';
 import { routeSeat } from '../src/core/routing/router.js';
-import type { SeatCapacity } from '../src/core/routing/headroom.js';
+import { capacityFromSeat, type SeatCapacity } from '../src/core/routing/headroom.js';
+import type { VerseSeat } from '../src/core/verse/types.js';
 import type { BudgetPolicy } from '../src/core/routing/types.js';
 import type { WorkHistorySample } from '../src/core/routing/work-estimates.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
@@ -25,6 +26,52 @@ describe('reset provenance and opportunity',()=>{
     const reported=seat();expect(assessResetOpportunity(reported,enabled,now).opportunity.kind).toBe('before-reset');
     const dateOnly=seat('b',{windows:reported.windows.map(({resetProvenance:_,...window})=>window)});
     expect(assessResetOpportunity(dateOnly,enabled,now)).toMatchObject({admission:'eligible',reset:{kind:'unknown',at:at(3600000)},opportunity:{kind:'ordinary'}});
+  });
+  it.each(['credits', 'per-token', 'free'] as const)('does not turn %s billing dates into subscription urgency', costBasis => {
+    const funded=seat('funded',{costBasis});
+    const known=forecastWork('task',cohort,[sample('short')]);
+    const view=buildSchedulingView([funded],policy,now,{funded:known}).accounts[0]!;
+    // Even an otherwise eligible fabricated fixed period cannot enter the
+    // planner's hasResetDeadline -> Jev resetAt wire seam as expiring allowance.
+    expect(view.admission).toBe('eligible');
+    expect(view.opportunity.kind).toBe('ordinary');
+    expect(hasResetDeadline(view.reset)).toBe(false);
+    expect(opportunityPriority(view,now)).toBe(0);
+    expect(routeSeat(request,[funded],policy,{nowMs:now,scheduling:{funded:view}}).seatId).toBe('funded');
+  });
+  it('keeps same-provider accounts and their actual resets/forecast cohorts independent',()=>{
+    const included=seat('included',{costBasis:'subscription'});
+    const paid=seat('paid',{costBasis:'credits'});
+    paid.windows[0]!.resetsAt=at(12000);paid.windows[0]!.resetProvenance!.at=at(12000);
+    const known=forecastWork('task',cohort,[sample('short')]);
+    const anotherAccount={...known,cohort:{...known.cohort,seatId:'paid'}};
+    const views=buildSchedulingView([paid,included],policy,now,{paid:known,included:anotherAccount});
+    expect(views.accounts.map(v=>v.seatId)).toEqual(['paid','included']);
+    expect(views.accounts[0]).toMatchObject({reset:{kind:'unknown',at:at(12000)},opportunity:{kind:'ordinary'}});
+    expect(views.accounts[1]).toMatchObject({reset:{kind:'fixed-period',at:at(3600000)},forecast:null});
+    // A different account's duration cannot create priority for this one.
+    expect(opportunityPriority(views.accounts[1]!,now)).toBe(0);
+    const matched=buildSchedulingView([paid,included],policy,now,{paid:known,included:known});
+    const scheduling=Object.fromEntries(matched.accounts.map(v=>[v.seatId,v]));
+    expect(routeSeat(request,[paid,included],policy,{nowMs:now,scheduling}).seatId).toBe('included');
+  });
+  it('does not spend a positive native credit balance when that Codex account subscription is exhausted',()=>{
+    const personal:VerseSeat={id:'codex-personal',engine:'codex',accountId:'codex-personal',label:'Personal',models:[],contextWindow:256000,
+      health:{state:'ready',summary:null,windows:[],observedAt:at(0)},
+      capacity:{planType:'pro',binding:null,windows:[{id:'codex_primary',usedPercent:100,resetsAt:at(3600000),
+        resetDescription:null,limitReached:false,measured:true}],
+      credits:{hasCredits:true,unlimited:false,balance:'123.45'},usability:'tight',observedAt:at(0),evidenceSource:'collector',notes:[]}};
+    const cmp:VerseSeat={...personal,id:'codex-cmp',accountId:'codex-cmp',label:'CMP',capacity:{...personal.capacity!,
+      credits:null,usability:'ready',windows:personal.capacity!.windows.map(w=>({...w,usedPercent:20}))}};
+    const capacities=[capacityFromSeat(personal),capacityFromSeat(cmp)];
+    // Native Codex accounts default off; both are explicitly enabled here.
+    const nativePolicy={...policy,seats:Object.fromEntries(capacities.map(s=>[s.seatId,{...enabled,seatId:s.seatId}]))};
+    const views=buildSchedulingView(capacities,nativePolicy,now);
+    expect(personal.capacity?.credits?.balance).toBe('123.45');
+    expect(views.accounts[0]).toMatchObject({seatId:'codex-personal',admission:'held',headroomPercent:0,opportunity:{kind:'held'}});
+    expect(views.accounts[1]).toMatchObject({seatId:'codex-cmp',admission:'eligible',opportunity:{kind:'ordinary'}});
+    const scheduling=Object.fromEntries(views.accounts.map(v=>[v.seatId,v]));
+    expect(routeSeat(request,capacities,nativePolicy,{nowMs:now,scheduling}).seatId).toBe('codex-cmp');
   });
   it.each(['pro','max'] as const)('uses qualified native %s weekly deadline without inventing a period start', plan => {
     const weekly = {kind:'weekly-deadline' as const,at:at(60000),description:null,source:'claude-native-usage-report',plan};

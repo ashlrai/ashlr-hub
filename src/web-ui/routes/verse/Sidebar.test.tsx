@@ -14,6 +14,8 @@ import type { VerseSearchResponse } from '../../../core/verse/types.js';
 import { CLAUDE_SEAT, bootstrap, session } from './fixtures.test-support.js';
 import { CLAUDE_MAX_SEAT } from './seat-fixtures.test-support.js';
 import { Sidebar } from './Sidebar.js';
+import { resetSidebarCollapse, SIDEBAR_COLLAPSE_KEY } from './chat/sidebar-collapse-pref.js';
+import { loadDraft, saveDraft } from './chat/composer-memory.js';
 import { findCommand, formatChord } from './shell/command-catalog.js';
 
 // Message search is the one network read the sidebar itself triggers; its
@@ -26,6 +28,8 @@ vi.mock('./context/context-queries.js', async (importOriginal) => {
 });
 
 beforeEach(() => {
+  localStorage.removeItem(SIDEBAR_COLLAPSE_KEY);
+  resetSidebarCollapse();
   search.searchSessions.mockImplementation(async (q: string): Promise<VerseSearchResponse> => ({
     query: q,
     hits: [],
@@ -610,5 +614,57 @@ describe('Sidebar — Disconnect from hub asks first', () => {
     await user.click(trigger);
     expect(screen.getByRole('dialog', { name: 'Disconnect from this hub?' })).toBeInTheDocument();
     expect(onDisconnect).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('Sidebar — remembered project disclosures', () => {
+  it('collapses from the keyboard, keeps the active chat discoverable and preserves drafts and selection', async () => {
+    const user = userEvent.setup();
+    const selected = session({ id: 'kept-active', title: 'Keep this work', status: 'running' });
+    const onSelect = vi.fn();
+    saveDraft(selected.id, 'Unsent work stays here');
+    const props = { sessions: [selected], sessionsStatus: 'success' as const, sessionsError: null,
+      projects: bootstrap().projects, seats: [CLAUDE_SEAT], selectedId: selected.id, query: '',
+      onQuery: vi.fn(), onSelect, onNew: vi.fn(), onRetry: vi.fn(), onCollapse: vi.fn(), onDisconnect: vi.fn() };
+    const first = render(<Sidebar {...props} />);
+    const heading = screen.getByRole('button', { name: 'hub' });
+    expect(heading).toHaveAttribute('aria-expanded', 'true');
+    heading.focus();
+    await user.keyboard('{Enter}');
+    expect(heading).toHaveAttribute('aria-expanded', 'false');
+    expect(heading).toHaveAccessibleDescription('1 chat, including the active chat');
+    expect(screen.getByText('Active')).toBeVisible();
+    expect(screen.queryByRole('button', { name: /Keep this work/ })).toBeNull();
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(loadDraft(selected.id)).toBe('Unsent work stays here');
+    first.unmount();
+    resetSidebarCollapse();
+    render(<Sidebar {...props} />);
+    const restored = screen.getByRole('button', { name: 'hub' });
+    expect(restored).toHaveAttribute('aria-expanded', 'false');
+    restored.focus();
+    await user.keyboard(' ');
+    expect(screen.getByRole('button', { name: /Keep this work/ })).toHaveAttribute('aria-current', 'true');
+    expect(loadDraft(selected.id)).toBe('Unsent work stays here');
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('reveals matching chats during search without changing the remembered collapsed state or other groups', async () => {
+    const user = userEvent.setup();
+    const props = { sessions: bootstrap().sessions, sessionsStatus: 'success' as const, sessionsError: null,
+      projects: bootstrap().projects, seats: [CLAUDE_SEAT], selectedId: null, query: '',
+      onQuery: vi.fn(), onSelect: vi.fn(), onNew: vi.fn(), onRetry: vi.fn(), onCollapse: vi.fn(), onDisconnect: vi.fn() };
+    const view = render(<Sidebar {...props} />);
+    await user.click(screen.getByRole('button', { name: 'hub' }));
+    expect(screen.queryByRole('button', { name: /Fix the login bug/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /Write the docs/ })).toBeVisible();
+    const saved = localStorage.getItem(SIDEBAR_COLLAPSE_KEY);
+    view.rerender(<Sidebar {...props} query="login" />);
+    expect(screen.getByRole('button', { name: /Fix the login bug/ })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'hub' })).toBeDisabled();
+    expect(localStorage.getItem(SIDEBAR_COLLAPSE_KEY)).toBe(saved);
+    view.rerender(<Sidebar {...props} />);
+    expect(screen.queryByRole('button', { name: /Fix the login bug/ })).toBeNull();
   });
 });

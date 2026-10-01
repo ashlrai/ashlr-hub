@@ -220,6 +220,8 @@ export interface LeaderModelRow {
 
 /** Where evidence comes from. Every source may throw; a thrower is reported as unknown, never as zero. */
 export interface LeaderEvidenceSources {
+  /** Recorded metadata only; source failure remains unknown. */
+  executionFeedback?(nowMs: number): import('../fleet/execution-feedback.js').ExecutionFeedbackSnapshot;
   /** Live preference observation; unavailable is not an uncapped policy. */
   goalPreferences?(): ResolvedGoalPreferences;
   standingPolicy(): EffectivePolicy | null;
@@ -243,6 +245,7 @@ export interface LeaderEvidenceSources {
 }
 
 export interface LeaderEvidence {
+  executionFeedback?: import('../fleet/execution-feedback-types.js').LeaderExecutionFeedback;
   grant: {
     stageId: string;
     switch: string;
@@ -428,6 +431,15 @@ export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs
   const operator = attempt('operator', () => readLeaderOperatorContext(nowMs));
   const lessons = sources.lessons ? attempt('lessons', () => sources.lessons!()) : null;
   const playbooks = sources.playbooks ? attempt('playbooks', () => sources.playbooks!()) : null;
+  let executionFeedback: LeaderEvidence['executionFeedback'];
+  if (sources.executionFeedback) {
+    const snapshot = attempt('execution-feedback', () => sources.executionFeedback!(nowMs));
+    if (snapshot) {
+      const { sourceState, complete, observedThrough, counts, observedCounts, coverage, digest } = snapshot.view;
+      executionFeedback = { sourceState, complete, observedThrough, counts, observedCounts, coverage: { ...coverage, duplicateRows: 0 }, digest };
+      if (!complete) unknown.push('execution-feedback-partial');
+    }
+  }
   // 3.15: the Leader's own standing notes (directive.self) — its words, so untrusted data.
   const selfNotes = attempt('self-directives', () => listSelfDirectives().map((d) => ({ id: d.id, text: d.text, since: d.createdAt.slice(0, 10) })));
   return {
@@ -452,6 +464,7 @@ export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs
     ...(operator ? { operator } : {}),
     ...(lessons ? { lessons } : {}),
     ...(playbooks && playbooks.length > 0 ? { playbooks } : {}),
+    ...(executionFeedback ? { executionFeedback } : {}),
     ...(selfNotes && selfNotes.length > 0 ? { selfDirectives: selfNotes } : {}),
     unknown: [...new Set(unknown)].sort(),
   };
@@ -508,6 +521,7 @@ export function buildLeaderPrompt(
     untrustedBlock('STANDING GRANT (null = none: every action is a dry run)', evidence.grant),
     untrustedBlock('BUDGET POLICY', evidence.budget),
     untrustedBlock('SEAT HEADROOM (used % bucketed to 10)', evidence.seats),
+    ...(evidence.executionFeedback ? [untrustedBlock('RECORDED EXECUTION OUTCOMES (producer success is not verification or merge; incomplete totals are unknown)', evidence.executionFeedback)] : []),
     untrustedBlock('GOALS AND FOCUS', evidence.goals),
     untrustedBlock('FLEET OUTCOMES (7 days; null = unknown)', evidence.fleet),
     untrustedBlock('MODEL ROI (30 days)', evidence.models),
@@ -705,6 +719,7 @@ export function scheduleSlots(nowMs: number): { previous: number; next: number }
 }
 
 export interface LeaderTriggerSignals {
+  executionFailuresSinceLastRun?: number | null;
   mergesSinceLastRun: number | null;
   revertsSinceLastRun: number | null;
   seatResetSinceLastRun: boolean;
@@ -753,6 +768,9 @@ export function leaderRunDue(nowMs: number, state: LeaderRunState, signals: Lead
   }
   if (signals.seatResetSinceLastRun) return { due: true, trigger: 'seat-reset', reason: 'A seat window reset.', nextRunAt };
   if (signals.highInsightSinceLastRun) return { due: true, trigger: 'insight', reason: 'A high-severity reasoning insight appeared.', nextRunAt };
+  if (signals.executionFailuresSinceLastRun !== undefined && signals.executionFailuresSinceLastRun !== null && signals.executionFailuresSinceLastRun > 0) {
+    return { due: true, trigger: 'insight', reason: 'A recorded fleet producer failed before a proposal was recorded.', nextRunAt };
+  }
   if (checkinWindowOpen(nowMs, state, cadence)) return { due: true, trigger: 'checkin', reason: 'A working-hours check-in is due.', nextRunAt };
   return { due: false, trigger: null, reason: 'Nothing new since the last memo.', nextRunAt };
 }
@@ -799,11 +817,22 @@ export async function gatherTriggerSignals(sources: LeaderEvidenceSources, state
     const digest = await sources.reasoning();
     insight = digest.insights.some((i) => i.severity === 'high' && Date.parse(i.lastAt) > lastMs);
   } catch { /* unknown ⇒ no trigger */ }
+  let executionFailures: number | null = null;
+  if (sources.executionFeedback) {
+    try {
+      const snapshot = sources.executionFeedback(nowMs);
+      executionFailures = snapshot.view.cases.filter((item) => item.outcome === 'failed' && !item.proposalRecorded
+        && snapshot.correlations.get(item.caseId)?.proposalJoinComplete && Date.parse(item.endedAt) > lastMs).length;
+      if (executionFailures === 0 && (!snapshot.view.complete || snapshot.view.coverage.proposalSource === 'degraded'
+        || snapshot.view.coverage.proposalSource === 'unavailable')) executionFailures = null;
+    } catch { /* unknown ⇒ no trigger */ }
+  }
   return {
     mergesSinceLastRun: facts?.merges ?? null,
     revertsSinceLastRun: facts?.reverts ?? null,
     seatResetSinceLastRun: seatReset,
     highInsightSinceLastRun: insight,
+    ...(sources.executionFeedback ? { executionFailuresSinceLastRun: executionFailures } : {}),
   };
 }
 
@@ -889,6 +918,10 @@ export interface LeaderRunDeps {
 }
 
 export async function loadDefaultLeaderRunDeps(cfg: AshlrConfig): Promise<LeaderRunDeps> {
+  const feedback = await import('../fleet/execution-feedback.js');
+  // Trigger and prompt gathering in one tick share the same bounded inspection.
+  // This cache belongs to this dependency instance, never another home/account.
+  let feedbackRead: { at: number; root: string | undefined; snapshot: import('../fleet/execution-feedback.js').ExecutionFeedbackSnapshot } | null = null;
   const [apply, seat, budgetStore, quarantine, quality, modelStats, reasoningApi, goalsStore, ledger, effective, cloudBacklog, lessons, playbookLanes] = await Promise.all([
     loadDefaultLeaderDeps(),
     loadDefaultLeaderSeatDeps(cfg),
@@ -913,6 +946,13 @@ export async function loadDefaultLeaderRunDeps(cfg: AshlrConfig): Promise<Leader
     cloudBacklog: { append: (items) => cloudBacklog.appendUserBacklogItems(items) },
     adviseActionClass: defaultLeaderActionAdvisor(cfg),
     sources: {
+      executionFeedback: (nowMs) => {
+        const root = process.env.ASHLR_HOME;
+        if (!feedbackRead || feedbackRead.at !== nowMs || feedbackRead.root !== root) {
+          feedbackRead = { at: nowMs, root, snapshot: feedback.readExecutionFeedbackSnapshot({ nowMs, sinceMs: nowMs - 7 * 86_400_000 }) };
+        }
+        return feedbackRead.snapshot;
+      },
       goalPreferences: () => apply.goalPreferences?.() ?? resolveGoalPreferences(cfg),
       standingPolicy: () => effective.currentStandingPolicy(),
       budgetPolicy: () => budgetStore.loadBudgetPolicy(),

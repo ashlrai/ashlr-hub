@@ -251,6 +251,8 @@ export interface CanonicalDispatchProductionAttempts {
 }
 
 export interface ReadDispatchProductionEventsOptions {
+  /** Recorded feedback requires exact writer ISO timestamps, before window filtering. */
+  canonicalTimestamps?: boolean;
   sinceMs?: number;
   limit?: number;
   /** Maximum dated partitions. Loose legacy partitions retain their separate fixed cap. */
@@ -7332,7 +7334,7 @@ export function readDispatchProductionEventsDetailed(
         continue;
       }
       const eventMs = Date.parse(parsed.ts);
-      if (!Number.isFinite(eventMs)) {
+      if (!Number.isFinite(eventMs) || opts.canonicalTimestamps === true && new Date(eventMs).toISOString() !== parsed.ts) {
         recordDispatchProductionInvalidReason(result, 'timestamp-invalid');
         continue;
       }

@@ -18,7 +18,7 @@
  * no socket bind and no subprocess — so this belongs in the fast unit lane.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, realpathSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,13 +38,13 @@ let home: string;
 let accountsRoot: string;
 
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), 'ashlr-mcp-api-'));
+  home = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-mcp-api-')));
   accountsRoot = join(home, 'account-connections');
-  mkdirSync(accountsRoot, { recursive: true });
+  mkdirSync(accountsRoot, { recursive: true, mode: 0o700 });
   writeFileSync(join(accountsRoot, 'connections.json'), JSON.stringify({
     schemaVersion: 1,
     accounts: [{ id: 'claude', label: 'Claude Code', provider: 'claude', command: ['/usr/bin/node', '/p/launcher.mjs'] }],
-  }));
+  }), { mode: 0o600 });
 });
 
 afterEach(() => {

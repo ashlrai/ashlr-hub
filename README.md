@@ -16,25 +16,25 @@
 
 ## Install
 
-Install Verse 3.20.0 from its versioned GitHub release:
+Install Verse 3.21.0 from its versioned GitHub release:
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.20.0/ashlr-hub-3.20.0.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.21.0/ashlr-hub-3.21.0.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
 ashlr verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 On an Apple silicon Mac, download the
-[v3.20.0 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.20.0/Ashlr_3.20.0_aarch64_locally-signed.dmg).
+[v3.21.0 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.21.0/Ashlr_3.21.0_aarch64_locally-signed.dmg).
 It is locally signed, not Apple notarized; macOS may require **Open Anyway** on
 first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
 [first-run guide](docs/QUICKSTART.md#open-verse).
 
-![Work with me: the Ashlr Verse 3.20 chat workbench and resource details, using labeled sample accounts and historical task estimates](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/work-with-me-3.20-demo.jpg)
+![Work with me: the Ashlr Verse 3.21 chat workbench with collapsed projects and the active chat preserved, using labeled sample accounts](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/verse-work-with-me-3.21-demo.jpg)
 
-![Work for me: the Ashlr Verse 3.20 Fleet view, with compact account capacity cards and sample recorded task estimates](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/work-for-me-3.20-demo.jpg)
+![Work for me: the Ashlr Verse 3.21 Fleet view with expandable execution outcomes and qualified count visualizations](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/verse-work-for-me-3.21-demo.jpg)
 
-*Actual 3.20 browser workbench with labeled demo accounts, sample usage and recorded task estimates.
+*Actual compiled 3.21 browser workbench with labeled demo accounts, sample usage and synthetic outcome counts.
 No provider ran and no fleet was active for these screenshots. They show the web UI, not native app chrome.*
 
 ---
@@ -46,8 +46,10 @@ Codex, Devin and Grok account you own becomes a *seat*, and so does every
 tool-capable local model. Claude Code, Codex and Devin are equal partners:
 routing picks among them by fit, headroom, cost and latency, never by brand. You
 chat with any of them in one workbench. You hand work to Claude Code cloud
-sessions, which keep running on your Claude credits after the subscription
-window is spent, and to Devin sessions. A **Leader** plans the fleet's work
+sessions, which keep running remotely on your signed-in Claude account, and to
+Devin sessions. Eligible promotional credits are used first, then included plan
+usage where available; paid-only models and enabled over-limit usage can use
+purchased credits. A **Leader** plans the fleet's work
 and talks with you in Verse, on Telegram or in the terminal. And the fleet works
 your enrolled repositories only inside a standing grant you sign with Touch ID:
 it starts in shadow, recording what it would merge, and climbs a rollout ladder
@@ -65,7 +67,7 @@ manifests, schemas and stores need no naming migration.
 
 The user guide is [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
 
-### What's in Verse 3.20
+### What's in Verse 3.21
 
 **Work with me** opens your interactive chats: guide the agent, inspect its
 tools and context, review changes and continue on another account or local model.
@@ -96,6 +98,20 @@ task/account pairs. Expand Resources or Fleet capacity details to see the deadli
 estimated fit and last recorded advice. Missing history remains unknown;
 quota percentages are never converted into invented token allowances.
 See [reset-aware scheduling](docs/RESET-AWARE-SCHEDULING.md).
+
+Subscription windows and usage credits are separate. An exhausted Codex
+subscription can still have credits: the sidebar shows current native units,
+spending holds and an estimated dollar value for known personal plans.
+Purchased credit balances do not become reset spend-down targets. Cloud-credit
+estimates and tracked Devin ACUs have no verified expiration in this release;
+they do not acquire a deadline from a subscription reset.
+
+Expand **Execution feedback** in Fleet for recorded producer outcomes, proposal
+coverage and failure categories. A completed agent run is separate from verified
+or shipped work. Exact failures without proposals become stable retros and
+context for the Leader's existing planning loop. The panel reads shared local
+records in the background; it opens without waiting for a scan or calling a
+model. See [execution feedback](docs/EXECUTION-FEEDBACK.md).
 
 Task fan-out has no fixed six-seat ceiling. Workspace retention defaults to 25;
 `ASHLR_VERSE_AGENT_CAP=none` disables retention-driven automatic archiving, or
@@ -161,7 +177,7 @@ separate Node.js install to run.
 
 ### Install
 
-The [v3.20.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.20.0)
+The [v3.21.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.21.0)
 includes an arm64 DMG. It is locally signed, not Apple Developer ID notarized,
 so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
@@ -249,7 +265,7 @@ The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.20.0/ashlr-hub-3.20.0.tgz
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.21.0/ashlr-hub-3.21.0.tgz
 ashlr --version
 ashlr verse                 # start the server and open http://127.0.0.1:7777/verse/
 ```
@@ -415,8 +431,8 @@ switch, backends, sandboxing, the command reference, the safety model, the
 | **3.12–3.13** | Your key is the trust root; guided `ashlr authority setup`; the host-verified `ashlr/verify` check; cloud PRs into the standing gates; the resident runtime under a standing grant (`ashlr authority resident start`) | Shipped |
 | **3.14** | Talk to the Leader in Verse, Telegram and the CLI; Leader reliability; accounts ready in both chat and fleet; the rollout ladder on Command and shadow decisions on Fleet; local enforcement for free-plan private repos; `file:../` sibling dependencies; a sidecar that cannot freeze; chart polish | Shipped |
 | **3.15** | Founder-mode Leader; Devin as chat seats, a lane and a fleet producer under a two-judge rule; the workbench panel (terminal blocks, browser, checkpoints, sources and reasoning); every seat together; playbooks and automations; the Jev decision layer; retros and approved knowledge (Growth ▸ Lessons); a private repo wiki and Ask | Included in the published 3.16 release |
-| **3.20** | Reset-aware task/account choices, recorded work estimates, Jev advice and optional decision-call preferences | [3.20.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.20.0) |
-| **3.19 workbench changes** | Faster progressive resource readings, expandable usage details, optional goal and Leader preferences, Review navigation and explicit benchmark commands | Included in [3.20.0](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.20.0) |
+| **3.20** | Reset-aware task/account choices, recorded work estimates, Jev advice and optional decision-call preferences | [3.21.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.21.0) |
+| **3.19 workbench changes** | Faster progressive resource readings, expandable usage details, optional goal and Leader preferences, Review navigation and explicit benchmark commands | Included in [3.21.0](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.21.0) |
 | **3.18** | Work with me and Work for me, configurable fleet volume, scalable workspace retention and comparable usage reports | [3.18.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.18.0) |
 | **3.17** | Local module map, scalable account/model rosters, portable efficiency-plugin connection and phone reliability | [3.17.2 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.2) |
 | **3.16** | Native Agents workbench and guarded computer tools; optional authenticated phone gateway; reviewable learning evidence; Devin CLI SWE-2 High default; local signing and release fixes | [3.16.1 published](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.1) |

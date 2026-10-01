@@ -575,6 +575,8 @@ export interface VerseApiContext {
   token: string;
   allowDispatch: boolean;
   readSession?: { id: string; expiresAt: number };
+  /** Fixed read-only worker shared by this server; never a caller-selected module. */
+  readProjections?: import('../web/read-projections.js').ReadProjectionReader;
 }
 
 // ---------------------------------------------------------------------------

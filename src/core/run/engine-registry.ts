@@ -715,8 +715,19 @@ const GROK_CLI_RESOLUTION_TTL_MS = 5_000;
 const grokCliResolutionCache = new Map<string, { at: number; result: NativeSeatLaunchResult }>();
 
 /** Resolve the grok-cli seat's launcher (cached briefly). PRIVATE locators inside — never log `launch`. */
-export function resolveGrokCliSeat(cfg?: AshlrConfig, nowMs: number = Date.now()): NativeSeatLaunchResult {
+export function configForGrokCliSeat(cfg: AshlrConfig, seatId: string | undefined): AshlrConfig {
+  if (seatId === undefined) return cfg;
+  const { accountsRoot } = grokCliSeatConfig(cfg);
+  return { ...cfg, foundry: { ...cfg.foundry, grokCli: { accountsRoot, seat: seatId } } as NonNullable<AshlrConfig['foundry']> };
+}
+
+export function resolveGrokCliSeat(cfg?: AshlrConfig, nowMs: number = Date.now(), selectedSeatId?: string): NativeSeatLaunchResult {
   const { seat, accountsRoot } = grokCliSeatConfig(cfg);
+  // Explicit execution bindings never use the discovery cache or the default seat.
+  if (selectedSeatId !== undefined) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(selectedSeatId)) return { ok: false, reason: 'no-seat', detail: 'Selected Grok seat is invalid.' };
+    return resolveNativeSeatLaunch({ accountsRoot, provider: 'grok', seatId: selectedSeatId });
+  }
   const key = `${accountsRoot}\0${seat ?? ''}`;
   const hit = grokCliResolutionCache.get(key);
   if (hit && nowMs - hit.at >= 0 && nowMs - hit.at < GROK_CLI_RESOLUTION_TTL_MS) return hit.result;
@@ -745,8 +756,8 @@ export function __resetGrokCliSeatCacheForTests(): void {
  * (engineInstalled → false). There is deliberately no fallback to a bare
  * `grok` on PATH: that is Mason's own login, not the seat.
  */
-export function applyGrokCliProfile(spec: EngineSpec, cfg?: AshlrConfig, nowMs?: number): EngineSpec {
-  const resolved = resolveGrokCliSeat(cfg, nowMs);
+export function applyGrokCliProfile(spec: EngineSpec, cfg?: AshlrConfig, nowMs?: number, selectedSeatId?: string): EngineSpec {
+  const resolved = resolveGrokCliSeat(cfg, nowMs, selectedSeatId);
   const { argv: templateArgv, ...rest } = spec;
   if (!resolved.ok || !templateArgv) return { ...rest, bins: [] };
   const [node, launcher] = resolved.launch.command;
@@ -778,8 +789,9 @@ export function applyGrokCliProfile(spec: EngineSpec, cfg?: AshlrConfig, nowMs?:
 export function grokCliDirectCommand(
   cmd: EngineCommand,
   cfg?: AshlrConfig,
+  selectedSeatId?: string,
 ): { cmd: EngineCommand; seatId: string; nativeStatePath: string; executable: string } | null {
-  const resolved = resolveGrokCliSeat(cfg);
+  const resolved = resolveGrokCliSeat(cfg, undefined, selectedSeatId);
   if (!resolved.ok) return null;
   const [node, launcher] = resolved.launch.command;
   if (cmd.bin !== node || cmd.args[0] !== launcher) return null;

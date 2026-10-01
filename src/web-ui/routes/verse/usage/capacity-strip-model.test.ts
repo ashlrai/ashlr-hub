@@ -354,7 +354,7 @@ describe('account status', () => {
   it('tight seats read as running low, or usable on credits when the window is spent but credits are not', () => {
     expect(status('claude-a')).toMatchObject({ kind: 'low', label: 'Connected', detail: 'running low', tone: 'warning' });
     const credits = buildCapacityRows([CODEX_CREDITS_SEAT], { health: [report('codex-personal', { engine: 'codex' })] })[0]!;
-    expect(accountStatus(credits, { healthRead: true, now: NOW })).toMatchObject({ kind: 'low', detail: 'usable on credits' });
+    expect(accountStatus(credits, { healthRead: true, now: NOW })).toMatchObject({ kind: 'low', label: 'Credits available', detail: 'subscription window spent · autonomous credit spending is not admitted' });
   });
 
   it('local models read as Ready and free', () => {
@@ -456,5 +456,19 @@ describe('percentText', () => {
     expect(percentText(100)).toBe('100%');
     expect(percentText(140)).toBe('100%');
     expect(percentText(Number.NaN)).toBe('—');
+  });
+});
+
+
+describe('credit expiry never renews interactive availability', () => {
+  const NOW = Date.parse('2026-09-25T02:00:00.000Z');
+  it('returns a spent quota state when cached native credit availability expires', () => {
+    const expiresAt = new Date(NOW + 1000).toISOString();
+    const seat = { ...CODEX_CREDITS_SEAT, capacity: { ...CODEX_CREDITS_SEAT.capacity!, creditsExpiresAt: expiresAt } };
+    const current = buildCapacityRows([seat], { now: NOW })[0]!;
+    expect(accountStatus(current, { healthRead: true, now: NOW }).label).toBe('Credits available');
+    const expired = buildCapacityRows([seat], { now: NOW + 1000 })[0]!;
+    expect(expired.credits).toBeNull();
+    expect(accountStatus(expired, { healthRead: true, now: NOW + 1000 }).label).toBe('Spent');
   });
 });

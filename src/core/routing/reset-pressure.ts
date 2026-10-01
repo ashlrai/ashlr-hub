@@ -1,5 +1,6 @@
 /** Pure provenance-aware reset opportunity, independent of dispatch authority. */
 import { assessSeat, classifyWindow, HEADROOM_READING_MAX_AGE_MS, type SeatCapacity } from './headroom.js';
+import { costBasisOf } from './tiers.js';
 import type { SeatBudgetPolicy } from './types.js';
 import type { AccountSchedulingView, ResetProvenance, TaskWorkForecast } from './scheduling-types.js';
 
@@ -42,7 +43,12 @@ export function assessResetOpportunity(seat: SeatCapacity, policy: SeatBudgetPol
   const outsidePeriod = accountWindows.some((w) => w.resetProvenance?.kind === 'fixed-period' &&
     validResetProvenance(w.resetProvenance) && (Date.parse(w.resetProvenance.startsAt!) > nowMs || Date.parse(w.resetProvenance.at!) <= nowMs));
   const expired = accountWindows.some((w) => w.resetsAt !== null && Date.parse(w.resetsAt) <= nowMs);
-  const finitePeriods = accountWindows.filter((w) => w.resetProvenance && validResetProvenance(w.resetProvenance) &&
+  // A billing date is not proof that paid credits expire. Only the actual
+  // effective subscription lane qualifies for allowance-deadline preference.
+  // Other lanes retain ordinary admission; verified gift expiry is a separate
+  // provider/account evidence contract that this projection does not invent.
+  const subscription = (seat.costBasis ?? costBasisOf(seat.engine)) === 'subscription';
+  const finitePeriods = accountWindows.filter((w) => subscription && w.resetProvenance && validResetProvenance(w.resetProvenance) &&
     w.resetsAt === w.resetProvenance.at && Date.parse(w.resetProvenance.at!) > nowMs &&
     (w.resetProvenance.kind === 'fixed-period' && Date.parse(w.resetProvenance.startsAt!) <= nowMs ||
       w.resetProvenance.kind === 'weekly-deadline' && seat.engine === 'claude' && w.id === 'seven_day'));

@@ -160,7 +160,7 @@ describe('SeatSelector — plan and binding window from the capacity record', ()
   it('reads plan, binding window and credits off the capacity record', () => {
     render(<SeatSelector seats={[CODEX_CREDITS_SEAT]} value={null} onChange={() => {}} />);
     const option = screen.getByRole('option', { name: /Personal Codex/ }) as HTMLOptionElement;
-    expect(option.textContent).toContain('pro · tight · primary window limit reached · credits still spendable');
+    expect(option.textContent).toContain('pro · tight · primary window limit reached · credits available');
     // Spent window, spendable balance: marked, never refused.
     expect(option).not.toBeDisabled();
   });

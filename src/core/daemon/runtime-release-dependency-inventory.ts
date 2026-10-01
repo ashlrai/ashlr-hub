@@ -499,6 +499,7 @@ function rootPackageIsPortable(
     'docs/DOTS-COMPANION.md',
     'docs/AGENT-HARNESS-EVOLUTION.md',
     'docs/RESET-AWARE-SCHEDULING.md',
+    'docs/EXECUTION-FEEDBACK.md',
     'docs/MISSION-OS.md',
     'docs/ASHLR-UNIVERSE.md',
     'docs/AUTONOMY-GAP.md',

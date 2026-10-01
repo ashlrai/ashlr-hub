@@ -122,10 +122,10 @@ describe('seatSubscription — credits are not the window', () => {
   it('does not report a spent Codex week with a spendable balance as blocked', () => {
     const view = seatSubscription(CODEX_CREDITS_SEAT);
     expect(view.cls).toBe('tight');
-    expect(view.summary).toBe('primary window limit reached · credits still spendable');
-    // Rounded for the line, raw kept for the tooltip — no precision invented.
-    expect(view.credits).toBe('2048.42 credits left');
-    expect(view.creditsTitle).toBe('2048.4196250000');
+    expect(view.summary).toBe('primary window limit reached · credits available');
+    // Preserve native decimal units without rounding or currency inference.
+    expect(view.credits).toBe('2048.4196250000 credits available');
+    expect(view.creditsTitle).toBe('Native credit units; not dollars or subscription percentage.');
   });
 
   it('reports the same window as blocked when the server says exhausted', () => {
@@ -287,4 +287,19 @@ describe('seatSubscriptionSentence / worthFlagging', () => {
     // An unread seat is not a warning: nobody observed anything about it.
     expect(worthFlagging('unread')).toBe(false);
   });
+});
+
+
+describe('native Codex credit freshness and balance', () => {
+  it('does not infer current credits from an old server or an expired native reading', () => {
+    const now = Date.parse('2026-09-20T18:32:30.000Z');
+    const seat = CODEX_CREDITS_SEAT;
+    expect(seatSubscription({ ...seat, capacity: { ...seat.capacity!, creditsExpiresAt: undefined } }, now).credits).toBeNull();
+    expect(seatSubscription({ ...seat, capacity: { ...seat.capacity!, creditsExpiresAt: new Date(now).toISOString() } }, now).credits).toBeNull();
+    expect(seatSubscription({ ...seat, capacity: { ...seat.capacity!, creditsExpiresAt: new Date(now + 1).toISOString() } }, now).credits)
+      .toBe('2048.4196250000 credits available');
+  });
+  it.each([{ hasCredits: false, unlimited: false, balance: '12' }, { hasCredits: true, unlimited: false, balance: '0.0000' }])( 'does not label a false or zero balance available', (credits) => {
+      expect(seatSubscription({ ...CODEX_CREDITS_SEAT, capacity: { ...CODEX_CREDITS_SEAT.capacity!, credits } }).credits).toBeNull();
+    });
 });

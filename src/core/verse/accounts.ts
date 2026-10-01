@@ -48,6 +48,7 @@
  *    connections.json row.
  */
 
+import { normalizeCodexCredits } from '../resources/codex-credits.js';
 import { dirname, join } from 'node:path';
 import { existsSync, openSync, readSync, closeSync, readdirSync, readFileSync, statSync } from 'node:fs';
 
@@ -231,6 +232,7 @@ export interface VerseCodexCredits {
   unlimited: boolean;
   /** Provider-reported decimal string, kept verbatim — never rounded to a float. */
   balance: string | null;
+  spendControlReached?: boolean | null;
 }
 
 export interface VerseAccountRecord {
@@ -885,9 +887,9 @@ function providerNotes(
       );
     }
     if (record.credits?.hasCredits) {
-      notes.push('Codex credits are independent of the window: a fully used window with a balance is not blocked.');
+      notes.push('Native Codex credits are independent of the subscription window. Credit availability does not authorize autonomous spending.');
     } else if (record.credits === null) {
-      notes.push('No Codex credit signal for this account (its pinned session history is empty) — unknown, not zero.');
+      notes.push('Current native Codex credit availability is not reported — unknown, not zero.');
     }
   }
   if (provider === 'grok') {
@@ -914,11 +916,17 @@ function providerNotes(
  */
 export function deriveVerseAccountRecord(
   connection: ResourceAccountConnection,
-  extra: { credits?: VerseCodexCredits | null } = {},
+  extra: { credits?: VerseCodexCredits | null; nowMs?: number } = {},
 ): VerseAccountRecord {
   const provider = connection.provider;
   const windows = connection.windows.map((w) => mapWindow(provider, w, connection.authentication === 'signed-in' ? connection.planType : null));
-  const credits = provider === 'codex' ? extra.credits ?? null : null;
+  const creditNow = extra.nowMs ?? Date.now();
+  const observedMs = connection.observedAt === null ? NaN : Date.parse(connection.observedAt);
+  const expiresMs = connection.expiresAt === null ? NaN : Date.parse(connection.expiresAt);
+  const credits = provider === 'codex' && connection.state === 'observed' && connection.authentication === 'signed-in' &&
+    Number.isFinite(observedMs) && observedMs <= creditNow && Number.isFinite(expiresMs) && expiresMs > creditNow &&
+    expiresMs - observedMs === 60_000
+    ? normalizeCodexCredits(connection.codexCredits) : null;
   // See VERSE_GROK_SIGNED_OUT_REASONS: the monitor structurally cannot set
   // this state for Grok, so it is derived here from the verbatim probe reason
   // — and only from the reason that actually means "not authenticated".
@@ -1854,8 +1862,9 @@ export function buildVerseAccountsSnapshot(options: {
     const connection = liveById.get(id);
     const identity = identityById.get(id);
     if (connection) {
-      const credits = connection.provider === 'codex' ? collector?.credits(id) ?? null : null;
-      const bridged = identity ? codexGapReading(identity, connection, evidence, credits) : null;
+      // Legacy session credits are historical, not a current account-checked balance.
+      const credits = connection.provider === 'codex' ? connection.codexCredits ?? null : null;
+      const bridged = identity ? codexGapReading(identity, connection, evidence, null) : null;
       accounts.push(withHistory(bridged ?? deriveVerseAccountRecord(connection, { credits })));
       continue;
     }

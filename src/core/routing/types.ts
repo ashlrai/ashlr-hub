@@ -15,6 +15,8 @@
  * BROWSER-SAFE: the budget UI imports this — type-only imports, plain consts.
  */
 
+import type { SchedulingView } from './scheduling-types.js';
+
 export type BudgetMode = 'all-in' | 'balanced' | 'reserve';
 
 export const BUDGET_MODES: readonly BudgetMode[] = ['all-in', 'balanced', 'reserve'];
@@ -151,7 +153,7 @@ export interface SeatHeadroom {
 /** GET /api/verse/budget (and the POST response): the policy plus live headroom per seat. */
 export interface BudgetResponse extends BudgetPolicy {
   /** Advisory only; absent on older servers. Never changes headroom admission. */
-  scheduling?: import('./scheduling-types.js').SchedulingView;
+  scheduling?: SchedulingView;
   headroom: SeatHeadroom[];
 }
 

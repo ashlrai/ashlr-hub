@@ -71,7 +71,7 @@ export function validateResourceConnectionConfig(value: unknown): ResourceConnec
 export function expireConnectionRow(row: ResourceAccountConnection, nowMs: number = Date.now()): ResourceAccountConnection {
   if (row.state === 'signed-out' || row.expiresAt === null || Date.parse(row.expiresAt) > nowMs) return row;
   return { ...row, state: 'unavailable', authentication: 'unknown', health: 'unknown', planType: null,
-    observedAt: null, expiresAt: null, windows: [], reason: 'connection-reading-expired' };
+    observedAt: null, expiresAt: null, windows: [], codexCredits: null, reason: 'connection-reading-expired' };
 }
 
 export function createResourceConnectionMonitor(options: { config: ResourceConnectionConfig; cwd: string;
@@ -83,14 +83,14 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
   const hints = new Map(config.accounts.filter((row) => row.expectedAccountHint).map((row) => [row.id, row.expectedAccountHint!]));
   const blank = (row: ResourceConnectionConfig['accounts'][number]): ResourceAccountConnection => ({ id: row.id, label: row.label,
     provider: row.provider, state: 'checking', authentication: 'unknown', health: 'unknown', planType: null,
-    observedAt: null, expiresAt: null, windows: [], reason: 'connection-not-checked', onDemandEnabled: null, executionSupported: row.provider !== 'grok' });
+    observedAt: null, expiresAt: null, windows: [], codexCredits: null, reason: 'connection-not-checked', onDemandEnabled: null, executionSupported: row.provider !== 'grok' });
   let rows = config.accounts.map(blank);
   // Only a successful, account-checked Codex probe may supply a retained
   // window. A failed check can display that prior reading until its original
   // expiry, but it cannot renew the reading or attest current authentication.
   const lastVerifiedCodex: Array<ResourceAccountConnection | null> = config.accounts.map(() => null);
   const projectStopped = () => { lastVerifiedCodex.fill(null); rows = rows.map((row) => ({ ...row, state: 'unavailable', authentication: 'unknown',
-    health: 'unknown', planType: null, observedAt: null, expiresAt: null, windows: [], reason: 'connection-monitor-stopped' })); };
+    health: 'unknown', planType: null, observedAt: null, expiresAt: null, windows: [], codexCredits: null, reason: 'connection-monitor-stopped' })); };
   abort.signal.addEventListener('abort', projectStopped, { once: true });
   const transientCodexReasons = new Set(['probe-native-unavailable', 'probe-native-exit-failed', 'probe-provider-error',
     'probe-server-request-refused', 'probe-protocol-invalid', 'probe-output-limit', 'probe-quota-invalid',
@@ -103,7 +103,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
     const previous = lastVerifiedCodex[index] ?? null;
     if (!fresh(previous)) return null;
     return { ...previous, state: 'unavailable', authentication: 'unknown', health: 'unavailable',
-      planType: null, onDemandEnabled: null, reason };
+      planType: null, onDemandEnabled: null, codexCredits: null, reason };
   }
   function owns(): void {
     try { options.assertOwnership(); }
@@ -153,7 +153,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
         if (result.status === 'observed' && result.observation && result.accountHint) {
           hints.set(account.id, result.accountHint);
           row = { ...row, state: 'observed', authentication: 'signed-in', health: 'reachable', planType: result.planType,
-            observedAt: result.observation.observedAt, expiresAt: result.observation.expiresAt, windows: result.observation.windows };
+            observedAt: result.observation.observedAt, expiresAt: result.observation.expiresAt, windows: result.observation.windows, codexCredits: result.credits ?? null };
           lastVerifiedCodex[index] = row;
         } else if ((result.status === 'failed' || result.status === 'timed-out') && transientCodexReasons.has(result.reason)) {
           row = retained(index, result.reason) ?? row;

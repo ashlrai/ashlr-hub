@@ -87,6 +87,8 @@ export function seatWindow(over: Partial<CapacityWindow> & Pick<CapacityWindow, 
 
 export function capacity(over: Partial<Capacity> = {}): Capacity {
   return {
+    // Fixture metadata is explicitly unexpired; expiry behavior has separate clocked tests.
+    creditsExpiresAt: '2033-01-01T00:00:00.000Z',
     planType: null,
     binding: null,
     windows: [],

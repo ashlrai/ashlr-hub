@@ -15,6 +15,7 @@
  * Nothing in this module reads secrets. Account identity is pinned by the
  * launcher command recorded in ~/.ashlr/account-connections/connections.json.
  */
+import type { ResetProvenance } from '../routing/scheduling-types.js';
 import type { TRANSIENT_EVENT_TYPE_LIST } from './transient-events.js';
 
 export type VerseEngine = 'claude' | 'codex' | 'grok' | 'local' | 'devin';
@@ -210,7 +211,7 @@ export interface VerseSeatHealth {
 /** One provider-reported quota window, as carried on a seat. */
 export interface VerseSeatWindow {
   /** Advisory provider period, outside canonical resource observations. */
-  resetProvenance?: import('../routing/scheduling-types.js').ResetProvenance;
+  resetProvenance?: ResetProvenance;
   id: string;
   /** Provider-reported percent, or null for NO SIGNAL — which is not zero. */
   usedPercent: number | null;
@@ -245,6 +246,8 @@ export interface VerseSeatCredits {
   unlimited: boolean;
   /** Provider-reported decimal string, kept verbatim — never rounded. */
   balance: string | null;
+  /** Native spend-control state; unknown is not permission to spend. */
+  spendControlReached?: boolean | null;
 }
 
 /**
@@ -280,6 +283,8 @@ export interface VerseSeatCapacity {
   windows: VerseSeatWindow[];
   /** Codex only; null for every other provider and when no signal exists. */
   credits: VerseSeatCredits | null;
+  /** Original native credit-reading expiry; never renewed by cached display. */
+  creditsExpiresAt?: string | null;
   usability: VerseSeatUsability;
   observedAt: string | null;
   evidenceSource: VerseSeatEvidenceSource;

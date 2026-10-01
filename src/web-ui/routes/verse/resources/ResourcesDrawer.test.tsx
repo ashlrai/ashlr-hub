@@ -218,6 +218,24 @@ afterEach(() => {
 const cardOf = (label: string) => screen.getByRole('heading', { name: new RegExp(`^${label}`) }).closest('li')!;
 
 describe('ResourcesDrawer — accounts', () => {
+  it('discloses current native credit units and qualified dollar value without admitting Fleet spending', async () => {
+    roster = [{ ...PERSONAL, capacity: { ...PERSONAL.capacity!,
+      credits: { hasCredits: true, unlimited: false, balance: '2500.0000', spendControlReached: false },
+      creditsExpiresAt: new Date(NOW + 30_000).toISOString(),
+    } }];
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    await screen.findByRole('heading', { name: /^Personal Codex/ });
+    const card = within(cardOf('Personal Codex'));
+    expect(card.getByText('Credits available')).toBeInTheDocument();
+    expect(card.getAllByText('2500.0000 credits available').length).toBeGreaterThan(0);
+    fireEvent.click(card.getByText('Usage details'));
+    expect(card.getByText(/Estimated credit value: \$100.00/)).toBeInTheDocument();
+    expect(card.getByText(/not actual purchase price or attributed spend/)).toBeInTheDocument();
+    expect(card.getByRole('link', { name: 'Published reference' })).toHaveAttribute('href', 'https://developers.openai.com/community/students');
+    expect(card.getByText('limit reached')).toBeInTheDocument();
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(0);
+  });
+
   it('opens focusable scheduling details without extra reads, actions or changing the active chat', async () => {
     budget = { ...BUDGET, scheduling: { sourceState: 'ready', observedAt: new Date(NOW).toISOString(), accounts: [{
       seatId: 'codex-cmp', observedAt: CHECKED, admission: 'held', headroomPercent: 0,

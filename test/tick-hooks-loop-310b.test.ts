@@ -289,6 +289,28 @@ function standingHooks(over: Partial<TickHooks> & { standingBacklog?: (items: Wo
   return { hooks, seat, outcomes };
 }
 
+describe('standing Grok selected-account forwarding', () => {
+  it('forwards the routed account to admission and runGoal instead of the configured default', async () => {
+    const repo = fx.makeRepo();repo.enroll();const cfg = cfgFor({ perTickItems: 1 });
+    cfg.foundry = { ...cfg.foundry, autonomyControlLoop: false, allowedBackends: ['grok-cli'], grokCli: { seat: 'grok-a' } };
+    const admissions: unknown[] = [];
+    const { hooks } = standingHooks({
+      beforeTick: async () => ({ pausedRepos: [], laneCaps: { 'grok-cli': 1 }, holdProduction: null }),
+      route: (item, routingCfg) => ({ ...DEFAULT_TICK_HOOKS.route(item, routingCfg), backend: 'grok-cli', tier: 'frontier', model: 'grok-4.7', hold: null,
+        seatDecision: { seatId: 'grok-b', candidates: ['grok-b'], exclusions: [], why: 'fixture selected account', mode: 'balanced' } }),
+      seatAllows: (_engine, opts) => { admissions.push(opts);return { allowed: true, reason: 'fixture bound account' }; },
+    });
+    const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(result.reason).toBe('ok');expect(mockRunGoal).toHaveBeenCalled();
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ engine: 'grok-cli', seatId: 'grok-b' });
+    const admission = mockRunGoal.mock.calls[0]?.[2]?.selectedGrokAdmission;
+    expect(typeof admission).toBe('function');
+    expect(admission?.()).toBe(true);
+    expect(admissions.some(v => (v as { seatId?: string }).seatId === 'grok-b')).toBe(true);
+    expect(cfg.foundry.grokCli).toMatchObject({ seat: 'grok-a' });
+  });
+});
+
 describe('positive USD exhaustion preserves only proven zero-dollar standing production', () => {
   function prepare(engine: EngineId = 'codex', overrides: Partial<NonNullable<AshlrConfig['daemon']>> = {}) {
     const repo = fx.makeRepo(); repo.enroll();

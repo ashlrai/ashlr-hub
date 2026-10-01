@@ -1,6 +1,6 @@
 # Reset-aware fleet scheduling
 
-Verse 3.20 helps the fleet select useful work that can finish before a qualified
+Verse 3.21 helps the fleet select useful work that can finish before a qualified
 account deadline. Work for me keeps the selected tasks, eligible accounts and
 current routing policies together. Opening resource details only reads recorded evidence;
 it does not start work or call a decision model.
@@ -23,6 +23,33 @@ rolling recovery windows do not qualify as fixed weekly deadlines. Codex reset
 timestamps alone do not establish whether its window is fixed or rolling.
 Cloud-credit estimates, tracked Devin ACUs and local-model readiness are not
 expiring subscription balances.
+
+## Subscription allowance versus credits
+
+Track each native account independently. A reset time belongs to the observed
+account and window; another account at the same provider does not inherit it.
+Quota percentages are subscription capacity, not dollars or a token balance.
+Current Codex credit units remain separate, even when the subscription window
+is exhausted. Reset-aware autonomy does not spend those credits.
+
+Deadline preference requires the effective subscription cost basis. A billing
+date attached to a paid-credit, per-token or free lane does not establish an
+expiring subscription allowance or enter the reset-timing advice. Ordinary
+admitted routing remains available. Purchased credits are excluded from reset
+spend-down. Gifted credits would need
+both account-specific gift provenance and a verified future expiration before
+they could receive expiry priority. This release does not have that native gift
+expiry evidence: Claude cloud balances are operator-tracked estimates, and
+Devin ACUs are tracked usage rather than self-serve subscription quota. Neither
+gets an invented reset deadline. Devin's existing authorized native and hosted
+work paths remain available; this release has no account-qualified self-serve
+included-quota adapter, so Pro/Max subscription deadlines remain unknown here.
+
+Vendor billing mechanics checked October 1, 2026:
+[OpenAI uses included usage before credits](https://help.openai.com/en/articles/12642688-using-credits-for-flexible-usage-in-chatgpt-personal-plans).
+[Devin separates resetting subscription quota from purchased credits, which roll over and never expire](https://docs.devin.ai/admin/billing/self-serve).
+These general rules do not establish a particular account's current balance,
+reset or gift expiration.
 
 The estimate compares observed work duration with the remaining time. It reports
 likely, uncertain, unlikely or unknown fit. The dispatch ledger currently pools

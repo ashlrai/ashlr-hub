@@ -16,12 +16,14 @@
  * plus the budget view (useCapacityData, as the drawer does) and the
  * drawer's cloud read, so it adds no poll of its own for accounts.
  */
-import { useMemo, type CSSProperties } from 'react';
+import { estimatedCreditValue } from './codex-credit-value.js';
+import { useMemo, useState, type CSSProperties } from 'react';
 import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
 import { Tooltip } from '../../../components/primitives/Tooltip.js';
 import { useQuery } from '../../../data/hooks.js';
 import { usedPercentText } from '../percent-text.js';
-import { useCapacityData } from '../usage/CapacityStrip.js';
+import { ACCOUNT_CLOCK_MS, useCapacityData } from '../usage/CapacityStrip.js';
+import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { bindingLeftPercent } from '../usage/binding-left.js';
 import { accountStatus, buildCapacityRows, type AccountStatus, type CapacityRow } from '../usage/capacity-strip-model.js';
 import { formatUsd } from './resources-model.js';
@@ -79,7 +81,7 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
     const status = accountStatus(row, { healthRead: opts.healthRead, now: opts.now });
     const level = LEVEL_OF_STATUS[status.kind] ?? 'unknown';
     const left = bindingLeftPercent(row);
-    const value = level === 'out' ? (status.kind === 'spent' ? 'spent' : status.label.toLowerCase())
+    const value = row.engine === 'codex' && row.credits !== null && !row.lastReading && !row.signedOut ? (row.creditSpendControlReached === true ? 'credits held' : 'credits') : level === 'out' ? (status.kind === 'spent' ? 'spent' : status.label.toLowerCase())
       : left === null ? (opts.pendingSeatIds?.includes(row.seatId) ? 'reading…' : status.kind === 'unavailable' ? 'unavailable' : 'no usage') : `${usedPercentText(left)} left${row.lastReading ? ' · last' : ''}`;
     const detail = row.windows.map((w) => {
       const used = w.limitReached ? 'limit reached' : w.usedPercent === null ? 'no reading' : `${usedPercentText(w.usedPercent)} used`;
@@ -87,6 +89,10 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
       const reset = w.resetText ? w.resetText.replace(/^resets\s+/i, '') : '';
       return `${w.label.charAt(0).toUpperCase()}${w.label.slice(1)}: ${used}${reset ? ` · resets ${reset}` : ''}`;
     });
+    if (row.credits !== null && !row.lastReading && !row.signedOut) detail.push(row.credits, 'Credit units are independent of subscription usage; autonomous credit spending is not admitted.');
+    if (row.engine === 'codex' && row.creditState === 'none') detail.push('Native provider reports no available credits.');
+    const creditValue = row.creditState === 'none' || row.credits !== null ? estimatedCreditValue(row.creditBalance, row.plan) : null;
+    if (creditValue !== null) detail.push(`Estimated credit value ${creditValue} · personal-plan $0.04/credit reference; not attributed spend.`);
     if (row.windows.length === 0) detail.push('Usage is not reported by this resource.');
     if (row.lastReading) detail.push('Last known usage · latest check failed.');
     if (row.reserve) detail.push(row.reserve.label);
@@ -96,7 +102,7 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
       key: row.seatId,
       engine: row.engine,
       name: row.label,
-      leftPercent: status.kind === 'spent' ? 0 : left,
+      leftPercent: row.windows.some((w) => w.binding && w.limitReached) || status.kind === 'spent' ? 0 : left,
       level: left === null && level === 'ok' ? 'unknown' : level,
       value,
       summary: `${row.label}: ${status.label}${status.detail ? ` · ${status.detail}` : ''}`,
@@ -138,12 +144,12 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   // window readings arrive through it, so without it the batteries read empty.
   const data = useCapacityData();
   const cloudRead = useQuery(cloudCreditsQuery);
-  const now = Date.now();
+  const [now, setNow] = useState(() => Date.now());
+  // One shared local clock expires display metadata; it makes no provider request.
+  usePollWhileVisible(() => setNow(Date.now()), ACCOUNT_CLOCK_MS);
   const rows = useMemo(
     () => (data.loading ? [] : barRows(buildCapacityRows(data.seats, { health: data.health, budget: data.budget, local: 'collapse', now }), { healthRead: data.health !== null, now, pendingSeatIds: data.pendingSeatIds })),
-    // `now` moves every render; the rows only need to follow the data.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [data.loading, data.seats, data.health, data.budget, data.pendingSeatIds],
+    [data.loading, data.seats, data.health, data.budget, data.pendingSeatIds, now],
   );
   const cloud = cloudRead.data?.credits ?? null;
   const cloudLeft = cloud && cloud.totalUsd > 0 ? (cloud.remainingUsd / cloud.totalUsd) * 100 : null;

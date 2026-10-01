@@ -11,9 +11,11 @@ import type { CachedFleetStatus } from './fleet-status-cache.js';
 import type { listRuns } from '../run/orchestrator.js';
 import type { listSwarms } from '../swarm/store.js';
 import type { UniverseCampaignReadinessView } from './universe-console-types.js';
+import type { ExecutionFeedbackView } from '../fleet/execution-feedback-types.js';
 
 /** Fixed read operations only: there is no caller-selected module, code, or argv. */
 export interface ReadProjectionResults {
+  'execution-feedback': ExecutionFeedbackView;
   snapshot: DashboardSnapshotWithSourceQuality;
   control: ControlSnapshot;
   fleet: CachedFleetStatus;
@@ -29,6 +31,7 @@ export interface ReadProjectionResults {
 }
 
 export interface ReadProjectionPayloads {
+  'execution-feedback': undefined;
   snapshot: undefined;
   control: undefined;
   fleet: undefined;
@@ -68,7 +71,7 @@ export interface ReadProjectionRequest {
 
 const KINDS: ReadonlySet<string> = new Set<ReadProjectionKind>([
   'snapshot', 'control', 'fleet', 'pulse', 'fleet-activity', 'proposals', 'pending-count', 'runs', 'swarms',
-  'daemon-observation', 'universe-campaign-readiness',
+  'daemon-observation', 'universe-campaign-readiness', 'execution-feedback',
 ]);
 
 /** Shared validation keeps even malformed internal messages inside the read allowlist. */

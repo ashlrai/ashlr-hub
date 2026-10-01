@@ -19,6 +19,8 @@ export interface ResourceAccountConnection {
   observedAt: string | null;
   expiresAt: string | null;
   windows: ResourceConnectionQuotaWindow[];
+  /** Current account-checked native metadata only; independent of subscription quota/admission. */
+  codexCredits?: import('./codex-credits.js').CodexCredits | null;
   reason: string;
   onDemandEnabled: boolean | null;
   /** Adapter availability only, never an admission decision or authenticated canary. */

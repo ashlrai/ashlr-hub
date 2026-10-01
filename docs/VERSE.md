@@ -120,7 +120,7 @@ integration.
 - The Jev decision layer, its call sites and its bounds:
   [`docs/JEV-INTEGRATION.md`](JEV-INTEGRATION.md).
 
-This page is the user guide for Verse 3.20. Sections marked 3.15 describe
+This page is the user guide for the Verse 3.21 release candidate. Sections marked 3.15 describe
 features introduced in that release and retained here.
 
 **At a glance.**

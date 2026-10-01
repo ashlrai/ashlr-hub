@@ -13,6 +13,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { VerseWorkspacesResponse } from '../../../data/api-types.js';
 import { evictAll } from '../../../data/cache.js';
+import { resetSidebarCollapse, SIDEBAR_COLLAPSE_KEY } from '../chat/sidebar-collapse-pref.js';
 
 const RESPONSE: VerseWorkspacesResponse = {
   workspaces: [
@@ -53,6 +54,8 @@ const { SavedProjects } = await import('./SavedProjects.js');
 
 describe('SavedProjects', () => {
   beforeEach(() => {
+    localStorage.removeItem(SIDEBAR_COLLAPSE_KEY);
+    resetSidebarCollapse();
     evictAll();
     current = RESPONSE;
   });
@@ -83,6 +86,25 @@ describe('SavedProjects', () => {
     expect(screen.getByRole('dialog', { name: 'Edit project' })).toBeInTheDocument();
     expect(screen.getByLabelText('Primary folder')).toHaveValue('/repo/service');
     expect(screen.getByLabelText('Folder 2')).toHaveValue('/repo/lib');
+  });
+
+  it('remembers a keyboard collapse while keeping Save a project available', async () => {
+    const user = userEvent.setup();
+    const first = render(<SavedProjects />);
+    await screen.findByRole('button', { name: 'Edit project Service + lib' });
+    const toggle = screen.getByRole('button', { name: 'Projects' });
+    expect(toggle).toHaveTextContent('1');
+    expect(toggle).toHaveAccessibleDescription('1 saved project');
+    toggle.focus();
+    await user.keyboard('{Enter}');
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('button', { name: 'Edit project Service + lib' })).toBeNull();
+    first.unmount();
+    resetSidebarCollapse();
+    render(<SavedProjects />);
+    expect(screen.getByRole('button', { name: 'Projects' })).toHaveAttribute('aria-expanded', 'false');
+    await user.click(screen.getByRole('button', { name: 'Save a project' }));
+    expect(screen.getByRole('dialog', { name: 'Save a project' })).toBeInTheDocument();
   });
 
   it('offers the create form from the same section', async () => {

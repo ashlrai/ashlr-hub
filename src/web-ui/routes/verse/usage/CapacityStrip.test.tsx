@@ -75,7 +75,7 @@ describe('CapacityStrip', () => {
 
   it('shows credits as a separate fact, never folded into the window', () => {
     render(<CapacityStrip seats={[CODEX_CREDITS_SEAT]} />);
-    expect(screen.getByText('2048.42 credits left')).toBeInTheDocument();
+    expect(screen.getByText('2048.4196250000 credits available')).toBeInTheDocument();
     expect(screen.getByText('limit reached')).toBeInTheDocument();
   });
 

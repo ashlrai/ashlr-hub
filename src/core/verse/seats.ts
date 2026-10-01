@@ -27,6 +27,7 @@
  * yields "unknown" health, which is never rendered as zero.
  */
 
+import { codexCreditsAvailable } from '../resources/codex-credits.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
@@ -502,7 +503,7 @@ export function seatUsability(
   // nothing about headroom in either direction.
   const read = record.windows.filter((w) => w.usedPercent !== null);
   const spent = read.filter((w) => w.limitReached || (w.usedPercent ?? 0) >= 100);
-  const creditsLeft = record.credits?.hasCredits === true;
+  const creditsLeft = codexCreditsAvailable(record.credits) && record.credits?.spendControlReached !== true;
   if (spent.length === read.length) return creditsLeft ? 'tight' : 'exhausted';
   // V3.10 — KEEP CODEX'S `limitReached`. Codex's flag is the provider's own
   // DENIAL for the account's bucket (`rateLimitReachedType`), not a
@@ -556,6 +557,7 @@ function telemetryOf(record: VerseAccountRecord, evidenceSource: VerseSeatEviden
       // Structurally identical to `VerseCodexCredits`; this assignment is the
       // compile-time drift guard between core and the browser-safe contract.
       credits: record.credits,
+      creditsExpiresAt: record.credits === null ? null : record.expiresAt,
       usability: seatUsability(record),
       observedAt: record.observedAt,
       evidenceSource,

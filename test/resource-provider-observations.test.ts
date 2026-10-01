@@ -1,3 +1,4 @@
+import { normalizeCodexCredits, readCodexNativeCredits, codexCreditsAvailable } from '../src/core/resources/codex-credits.js';
 import { describe, expect, it } from 'vitest';
 import { mergeClaudeResourceObservation, normalizeCodexResourceObservation } from '../src/core/resources/provider-observations.js';
 import { RESOURCE_OBSERVATION_OVERFLOW, planResourceAssignment, validateResourceObservations,
@@ -451,5 +452,40 @@ describe('Codex rateLimitReachedType provenance (limitReached)', () => {
     const record = deriveVerseAccountRecord(connection);
     expect(record.windows[0]).toMatchObject({ id: 'codex_codex_primary', usedPercent: 100, limitReached: true, measured: false });
     expect(record.windows[1]).toMatchObject({ limitReached: false, measured: true });
+  });
+});
+
+
+describe('native Codex credit metadata stays independent of quota admission', () => {
+  const credits = { hasCredits: true, unlimited: false, balance: '2048.4196250000' };
+  it('preserves exact vendor decimals only in the selected bucket, without changing quota', () => {
+    const payload = codex();
+    Object.assign(payload.rateLimitsByLimitId.codex, { credits, spendControlReached: false });
+    expect(readCodexNativeCredits(payload, 'codex')).toEqual({ ...credits, spendControlReached: false });
+    expect(normalize(payload)).not.toHaveProperty('credits');
+    expect(readCodexNativeCredits({ ...payload, rateLimitsByLimitId: {} }, 'codex')).toBeNull();
+    expect(readCodexNativeCredits({ rateLimits: { limitId: 'other', credits } }, 'codex')).toBeNull();
+  });
+  it.each([null, [], { ...credits, hasCredits: 1 }, { ...credits, unlimited: 'true' },
+    { ...credits, balance: '-1' }, { ...credits, balance: 'Infinity' }, { ...credits, balance: '1e6' },
+    { ...credits, balance: '1'.repeat(65) }, { ...credits, balance: '/private/secret' },
+    { ...credits, privateField: 'secret' }, Object.create(credits)])('rejects malformed or inherited credit metadata %j', (value) => {
+    expect(normalizeCodexCredits(value)).toBeNull();
+  });
+  it('never evaluates accessors and honors zero or explicit false independently of old positive credits', () => {
+    const getter = { ...credits }; Object.defineProperty(getter, 'balance', { get: () => { throw new Error('private'); } });
+    expect(normalizeCodexCredits(getter)).toBeNull();
+    expect(codexCreditsAvailable({ ...credits, balance: '0.0000' })).toBe(false);
+    expect(codexCreditsAvailable({ ...credits, hasCredits: false })).toBe(false);
+    expect(codexCreditsAvailable({ ...credits, balance: null })).toBe(true);
+    expect(codexCreditsAvailable({ ...credits, unlimited: true, balance: '0' })).toBe(true);
+  });
+  it('keeps available balance while disclosing vendor spend-control holds and unknown state', () => {
+    expect(readCodexNativeCredits({ rateLimitsByLimitId: { codex: { credits, spendControlReached: true } } }, 'codex'))
+      .toEqual({ ...credits, spendControlReached: true });
+    expect(readCodexNativeCredits({ rateLimitsByLimitId: { codex: { credits, rateLimitReachedType: 'workspace_member_credits_depleted' } } }, 'codex'))
+      .toEqual({ ...credits, spendControlReached: true });
+    expect(readCodexNativeCredits({ rateLimitsByLimitId: { codex: { credits } } }, 'codex'))
+      .toEqual({ ...credits, spendControlReached: null });
   });
 });

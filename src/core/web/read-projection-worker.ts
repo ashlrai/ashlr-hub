@@ -21,6 +21,7 @@ let running = false;
 
 async function project(kind: ReadProjectionKind, payload: ReadProjectionPayloads[ReadProjectionKind]): Promise<unknown> {
   switch (kind) {
+    case 'execution-feedback': return (await import('../fleet/execution-feedback.js')).readExecutionFeedback();
     case 'snapshot': return await buildSnapshot(cfg!);
     case 'control': return await buildControlSnapshot(cfg!);
     case 'fleet': return await getCachedFleetStatus(cfg!);

@@ -132,3 +132,29 @@ describe('Devin provider identity', () => {
     expect(container.querySelector('path')).toHaveAttribute('fill', 'currentColor');
   });
 });
+
+
+describe('Codex credits are independent of the quota battery', () => {
+  it('shows native credits and estimated value when the window is spent without filling the battery', () => {
+    const account = row({ engine: 'codex', plan: 'pro', cls: 'tight', credits: '2048.4196250000 credits available',
+      creditBalance: '2048.4196250000', connection: { connection: 'exhausted' } as CapacityRow['connection'],
+      windows: [win({ usedPercent: 100, limitReached: true })] });
+    const result = barRows([account], { healthRead: true, now: NOW })[0]!;
+    expect(result.value).toBe('credits'); expect(result.leftPercent).toBe(0);
+    expect(result.summary).toContain('Credits available');
+    expect(result.detail).toContain('2048.4196250000 credits available');
+    expect(result.detail.some((line) => line.includes('Estimated credit value $81.94'))).toBe(true);
+    expect(result.detail.some((line) => line.includes('autonomous credit spending is not admitted'))).toBe(true);
+  });
+  it('reports a vendor spend-control hold separately from its remaining balance', () => {
+    const result = barRows([row({ engine: 'codex', credits: '12 credits available', creditSpendControlReached: true,
+      windows: [win({ usedPercent: 100 })] })], { healthRead: true, now: NOW })[0]!;
+    expect(result.value).toBe('credits held'); expect(result.summary).toContain('Credits held');
+    expect(result.detail).toContain('12 credits available'); expect(result.leftPercent).toBe(0);
+  });
+  it('never publishes stale or signed-out credits as currently available', () => {
+    for (const patch of [{ signedOut: true }, { lastReading: true }]) {
+      expect(barRows([row({ engine: 'codex', credits: '12 credits available', ...patch })], { healthRead: true, now: NOW })[0]!.value).not.toBe('credits');
+    }
+  });
+});

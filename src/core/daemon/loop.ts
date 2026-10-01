@@ -6807,7 +6807,7 @@ export async function tick(
           // router, and the fabric gateway cannot drift apart.
           const maxPct = resolveSubscriptionMaxPercent(liveCfg);
           // V3.10 (U5) seam: hooks.seatAllows (default: subscriptionAllows, same arguments).
-          const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct });
+          const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct, ...(standingTick && fleetLaneOf(backend, routingCfg) === 'grok-cli' && routed.seatDecision?.seatId ? { seatId: routed.seatDecision.seatId } : {}) });
           if (!subCheck.allowed) {
             // M334: shadow the BLOCKED legacy decision — a gateway that would
             // have dispatched here is the safety-relevant divergence class.
@@ -7005,17 +7005,16 @@ export async function tick(
           };
         }
       }
-      // V3.10 (L1): the SeatRouter's codex seat, forwarded to the producer.
-      // Under a standing policy runEngineSandboxed builds codex's per-run
-      // CODEX_HOME from that seat's native profile and refuses a codex run with
-      // no seat (never Mason's own login), so dropping the router's choice made
-      // every standing codex dispatch fail. ONLY codex lanes: grok-cli resolves
-      // its seat from cfg.foundry.grokCli, and a seat of another engine must
-      // never reach a codex run (engineOfSeatId re-checks the pairing).
-      const standingCodexSeatId: string | undefined = (() => {
-        if (!standingTick || fleetLaneOf(backend, routingCfg) !== 'codex') return undefined;
+      // The routed account is forwarded to the producer. Grok command/profile
+      // resolution binds this exact roster ID; Codex retains its engine-ID guard.
+      // Absent bindings retain the legacy engine-specific admission behavior.
+      const standingSeatId: string | undefined = (() => {
+        if (!standingTick) return undefined;
+        const lane = fleetLaneOf(backend, routingCfg);
         const seatId = standingRoute?.seatDecision?.seatId;
-        return typeof seatId === 'string' && seatId.length > 0 && engineOfSeatId(seatId) === 'codex' ? seatId : undefined;
+        if (typeof seatId !== 'string' || seatId.length === 0) return undefined;
+        if (lane === 'grok-cli') return seatId;
+        return lane === 'codex' && engineOfSeatId(seatId) === 'codex' ? seatId : undefined;
       })();
       // A standing tick asks the seat gate about EVERY engine (the live hook
       // checks lane, grant role and seat headroom); master asks only for
@@ -7023,7 +7022,7 @@ export async function tick(
       if (standingTick || isSubscriptionEngine(backend)) {
         const maxPct = resolveSubscriptionMaxPercent(routingCfg);
         // V3.10 (U5) seam: hooks.seatAllows (default: subscriptionAllows, same arguments).
-        const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct });
+        const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct, ...(fleetLaneOf(backend, routingCfg) === 'grok-cli' && standingSeatId ? { seatId: standingSeatId } : {}) });
         if (!subCheck.allowed) {
           audit({
             action: 'daemon:tick',
@@ -7451,6 +7450,14 @@ export async function tick(
         let bonLaunchMarked = false;
         let bonDispatchStarted = false;
 
+        const selectedGrokAdmission = standingSeatId && fleetLaneOf(backend, routingCfg) === 'grok-cli'
+          ? () => {
+            if (!stillOwnsTick() || stopRequested() || dispatchSignal.aborted) return false;
+            try {
+              return hooks.seatAllows(backend!, { maxPercent:resolveSubscriptionMaxPercent(routingCfg), seatId:standingSeatId }).allowed === true;
+            } catch { return false; }
+          }
+          : undefined;
         let runState: Awaited<ReturnType<typeof runGoal>>;
         if (fanOut) {
           // Route through runBestOfN; use its winner's underlying runState.
@@ -7462,7 +7469,8 @@ export async function tick(
             beginQueueExecution();
             return runBestOfN(item, routingCfg, {
               n: bestOfN, engine: backend, model: selectedModel,
-              ...(standingCodexSeatId ? { seatId: standingCodexSeatId } : {}),
+              ...(standingSeatId ? { seatId: standingSeatId } : {}),
+              ...(selectedGrokAdmission ? { selectedGrokAdmission } : {}),
               ...(dispatchHarness ? { harness: dispatchHarness } : {}),
               budget: itemBudget,
               ...(_bonCandidates ? { candidates: _bonCandidates as never } : {}),
@@ -7611,7 +7619,8 @@ export async function tick(
               engine: backend, sandboxEngine: true, requireSandbox: true, cwd: item.repo,
               budget: itemBudget, tools: true, noMemory: false, runId: attemptId,
               ...(selectedModel ? { model: selectedModel } : {}),
-              ...(standingCodexSeatId ? { seatId: standingCodexSeatId } : {}),
+              ...(standingSeatId ? { seatId: standingSeatId } : {}),
+              ...(selectedGrokAdmission ? { selectedGrokAdmission } : {}),
               ...(dispatchHarness ? { harness: dispatchHarness } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,
               signal: dispatchSignal,

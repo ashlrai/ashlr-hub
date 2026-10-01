@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "ashlr-desktop"
-version = "3.20.0"
+version = "3.21.0"
 dependencies = [
  "base64 0.22.1",
  "block2",

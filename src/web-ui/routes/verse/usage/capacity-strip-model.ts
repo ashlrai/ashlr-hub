@@ -94,6 +94,9 @@ export interface CapacityRow {
   connection: CapacityConnection | null;
   windows: CapacityWindowRow[];
   credits: string | null;
+  creditSpendControlReached?: boolean | null;
+  creditBalance?: string | null;
+  creditState?: 'available' | 'held' | 'none' | 'unknown';
   reserve: CapacityReserve | null;
   notes: string[];
   /** For the collapsed local row: how many local seats it stands for. */
@@ -234,6 +237,9 @@ function seatRow(
     connection,
     windows,
     credits: view.credits,
+    creditBalance: view.creditBalance ?? null,
+    creditState: view.creditState ?? 'unknown',
+    creditSpendControlReached: view.creditSpendControlReached ?? null,
     reserve: reserveOf(budget.get(seat.id)),
     notes: [...view.notes],
     localCount: 1,
@@ -613,7 +619,13 @@ export function accountStatus(row: CapacityRow, opts: AccountStatusOptions): Acc
   if (row.lastReading) return make('unavailable', 'Last reading', 'latest check failed · access unconfirmed', { coversConnection: true });
 
   const binding = row.windows.find((w) => w.binding) ?? null;
-  const spent = c === 'exhausted' || (row.cls === 'blocked' && binding !== null && isSpentWindow(binding));
+  const spent = c === 'exhausted' || (row.cls === 'blocked' && binding !== null && isSpentWindow(binding)) ||
+    row.engine === 'codex' && row.credits === null && binding?.limitReached === true;
+  // Credit availability is a separate interactive-use signal, never Fleet eligibility.
+  if (row.engine === 'codex' && row.credits !== null) {
+    if (row.creditSpendControlReached === true) return make('unavailable', 'Credits held', 'native spend control reached · balance is separate', { coversConnection: true });
+    return make('low', 'Credits available', binding !== null && isSpentWindow(binding) ? 'subscription window spent · autonomous credit spending is not admitted' : 'native credit balance · separate from subscription usage', { coversConnection: c === 'exhausted' });
+  }
   if (spent) {
     const when = describeResetAt(row.resetAt, now);
     const ahead = row.resetAt !== null && Date.parse(row.resetAt) > now;

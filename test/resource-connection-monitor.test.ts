@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createResourceConnectionMonitor, validateResourceConnectionConfig,
+import { createResourceConnectionMonitor, validateResourceConnectionConfig, expireConnectionRow,
   type ResourceConnectionConfig, type ResourceConnectionMonitor } from '../src/core/resources/connection-monitor.js';
 import { createNativeMetadataCoordinator } from '../src/core/resources/metadata-coordinator.js';
 
@@ -414,5 +414,27 @@ describe('native metadata monitoring', () => {
     }));
     const handle = start({ config: config(['grok']) }); await settle(); await handle.close();
     expect(cancelled).toBe(true); await vi.advanceTimersByTimeAsync(90_000); expect(probes.grok).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe('current Codex credits publication', () => {
+  it('publishes each native account balance independently and clears it on failure, expiry and stop', async () => {
+    const credits = { hasCredits: true, unlimited: false, balance: '123.456789', spendControlReached: false };
+    probes.codex.mockResolvedValueOnce({ ...codex(), credits });
+    const handle = start({ config: config(['codex']) }); await settle();
+    expect(handle.snapshot().accounts[0]?.codexCredits).toEqual(credits);
+    probes.codex.mockResolvedValue({ status: 'failed', reason: 'probe-provider-error' });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'unavailable', codexCredits: null, windows: quota() });
+    expect(expireConnectionRow({ ...handle.snapshot().accounts[0]!, codexCredits: credits }, Date.parse(EXPIRES))).toMatchObject({ codexCredits: null, windows: [] });
+    await handle.close(); expect(handle.snapshot().accounts[0]?.codexCredits).toBeNull();
+  });
+  it('does not reuse positive credits when the next successful native response omits them', async () => {
+    probes.codex.mockResolvedValueOnce({ ...codex(), credits: { hasCredits: true, unlimited: false, balance: '12' } });
+    const handle = start({ config: config(['codex']) }); await settle();
+    expect(handle.snapshot().accounts[0]?.codexCredits?.balance).toBe('12');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(handle.snapshot().accounts[0]?.codexCredits).toBeNull();
   });
 });
