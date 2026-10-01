@@ -128,6 +128,13 @@
   margin-top: auto;
 }
 
+/* Desktop resource rows may outgrow the window. Let the resource group
+   shrink inside its footer while navigation and Settings retain their height. */
+.shell:not([data-compact]) .mark,
+.shell:not([data-compact]) .railList,
+.shell:not([data-compact]) .railFoot .railButton { flex-shrink: 0; }
+.shell:not([data-compact]) .railFoot { min-height: 0; align-self: stretch; }
+
 .rail[data-rail="expanded"] .railList,
 .rail[data-rail="expanded"] .railFoot {
   align-self: stretch;

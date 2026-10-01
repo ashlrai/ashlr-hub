@@ -27,6 +27,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   resource-bar lines for each account. Qualify personal-plan dollar estimates;
   preserve provider holds, stale readings and unknown percentages without
   treating available credits as unused subscription quota.
+- Scroll long resource lists within the desktop sidebar so navigation and
+  Settings stay accessible in short windows; preserve phone navigation.
 
 ### Changed
 
