@@ -221,7 +221,7 @@ describe('release workflow', () => {
       jobs?: {
         ci?: {
           strategy?: { matrix?: { include?: Array<Record<string, unknown>> } };
-          steps?: Array<{ name?: string; run?: string }>;
+          steps?: Array<{ name?: string; run?: string; if?: string }>;
         };
       };
     };
@@ -230,9 +230,9 @@ describe('release workflow', () => {
       .filter((entry) => entry['os'] === 'ubuntu-latest')
       .map((entry) => ({ label: entry['label'], test_args: entry['test_args'] }));
     expect(exhaustiveUbuntu).toEqual([
-      { label: 'ubuntu, authority 1/3', test_args: '--shard=1/3' },
-      { label: 'ubuntu, authority 2/3', test_args: '--shard=2/3' },
-      { label: 'ubuntu, authority 3/3', test_args: '--shard=3/3' },
+      { label: 'ubuntu, authority 1/3', test_args: '--shard=1/3 --exclude=test/m342.dispatch-production-ledger.test.ts' },
+      { label: 'ubuntu, authority 2/3', test_args: '--shard=2/3 --exclude=test/m342.dispatch-production-ledger.test.ts' },
+      { label: 'ubuntu, authority 3/3', test_args: '--shard=3/3 --exclude=test/m342.dispatch-production-ledger.test.ts' },
     ]);
     const ciSteps = ciJob?.steps ?? [];
     expect(ciSteps.find((step) => step.name === 'Typecheck')?.run).toBe('npm run typecheck');
@@ -240,6 +240,11 @@ describe('release workflow', () => {
     expect(ciSteps.find((step) => step.name === 'Build')?.run).toBe('npm run build');
     expect(ciSteps.find((step) => step.name === 'Test (hermetic)')?.run)
       .toBe('npm run test:ci -- ${{ matrix.test_args }}');
+    const ledgerSteps = ciSteps.filter((step) => step.name === 'Test complete dispatch production ledger (hermetic)');
+    expect(ledgerSteps).toHaveLength(1);
+    expect(ledgerSteps[0]?.if).toBe("matrix.label == 'ubuntu, authority 3/3'");
+    expect(ledgerSteps[0]?.run?.trim()).toBe('npm run test:ci -- --maxWorkers=1 --fileParallelism=false test/m342.dispatch-production-ledger.test.ts');
+    expect(ciSteps.indexOf(ledgerSteps[0]!)).toBeGreaterThan(ciSteps.findIndex((step) => step.name === 'Test (hermetic)'));
     expect(verifyJob['runs-on']).toBeUndefined();
     expect(verifyJob.steps).toBeUndefined();
     expect(verifyJob.environment).toBeUndefined();

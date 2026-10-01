@@ -23,6 +23,9 @@ const isolatedSuites = [
   'test/m446.external-skill-git-capture.test.ts',
   'test/resource-engineering-setup-acceptance.test.ts',
   'test/resource-engineering-supervisor-acceptance.test.ts',
+  // Preserve bounded HTTP admission checks without a competing local shard's
+  // Git and private-store filesystem work consuming the request deadlines.
+  'test/resource-console-engineering-acceptance.test.ts',
   'test/universe-firm-engineering-control.test.ts',
 ];
 const isolatedAcceptance = 'test/universe-hub-marker-campaign.test.ts';

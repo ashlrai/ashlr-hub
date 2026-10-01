@@ -44,6 +44,7 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  */
 export const REAL_IO_TEST_FILES = [
   'test/test-ci-sharded.test.ts', // real bounded child-process shards in private temporary homes
+  'test/web-ui-browser-safe-imports.test.ts', // recursive real source reads and TypeScript runtime-import graph; cases retain explicit original 5s deadlines
   'test/remote-gateway-auth.test.ts', // real loopback gateway and Mac-only Unix socket pairing ceremony
   'test/remote-admin-race.test.ts', // real owned Unix socket child killed to reproduce stale-admin startup races
   'test/remote-gateway-http.test.ts', // real loopback Hub and gateway servers, Access assertion and SSE lifecycle

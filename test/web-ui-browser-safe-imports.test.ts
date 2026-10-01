@@ -121,7 +121,7 @@ describe('web UI runtime modules are browser-safe', () => {
     // Sanity: the walk really leaves src/web-ui (it must reach the shared core modules).
     expect([...seen].some((f) => f.includes(`${join('src', 'core')}`))).toBe(true);
     expect(violations).toEqual([]);
-  });
+  }, 5_000);
 
   it('the detector flags load-time reads and ignores deferred or guarded ones', () => {
     const scan = (code: string) => loadTimeNodeGlobals(ts.createSourceFile('x.ts', code, ts.ScriptTarget.Latest, true));
@@ -137,5 +137,5 @@ describe('web UI runtime modules are browser-safe', () => {
       "const ok = typeof process !== 'undefined';",
       'const o = { process: 1 }; o.process;',
     ].join('\n'))).toEqual([]);
-  });
+  }, 5_000);
 });
