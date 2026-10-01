@@ -64,6 +64,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Fixed
 
+- Update bundled Hono to 4.13.7 for the JSX-renderer escaping advisory
+  [GHSA-hxh3-vqpv-xpqv](https://github.com/honojs/hono/security/advisories/GHSA-hxh3-vqpv-xpqv).
+- Admit the three packaged Agents guides through exact release-portability
+  entries, preserving rejection of unapproved sibling files and wildcards.
 - Refuse exhausted or occupied workspace port ranges before creation or restore,
   and serialize those admissions across repositories in the owning Hub process.
 - Preserve shipped Grok and Devin CLI identities in dispatch ledgers so a
